@@ -1044,8 +1044,8 @@ fn corpus(file: &str) -> Vec<String> {
 /// The PostgreSQL corpus entries that read-only consoles refuse by an earlier ruling: none
 /// may join them silently.
 const PG_RULED_DENIALS: [&str; 5] = [
-    // Fix round 1, C2 (controller ruling): `U&''` does not lex with
-    // `standard_conforming_strings` off, and the session's setting is not known to `classify`.
+    // Fix round 1, C2; round 2, ruling 4: `U&''` lexes differently with
+    // `standard_conforming_strings` off, which is unknown here, so the read is `Unknown`.
     "SELECT E'tab\\there', U&'d\\0061t\\+000061'",
     // T3 ruling (5): `version()` stays unknown (PO list).
     "SELECT version()",
@@ -1175,13 +1175,38 @@ fn infix_operators(d: DialectId) -> Vec<(&'static str, &'static str)> {
     shared.iter().chain(own).copied().collect()
 }
 
-/// Whether `op` counts as an operator `sqlparser` parses by cloning its left operand
-/// (`MAX_CLONING_WORK`): MySQL/MariaDB `DIV`, SQLite `REGEXP`/`GLOB`/`MATCH`, counted on every
-/// interim dialect (fail closed).
-fn cloning(_d: DialectId, op: &str) -> bool {
-    ["DIV", "REGEXP", "GLOB", "MATCH"]
-        .iter()
-        .any(|w| op.ends_with(w))
+/// Whether `op` is an operator `sqlparser` parses by cloning its left operand in `d`
+/// (`MAX_CLONING_WORK`): MySQL/MariaDB `DIV`, SQLite `REGEXP`/`GLOB`/`MATCH`.
+fn cloning(d: DialectId, op: &str) -> bool {
+    let words: &[&str] = if d == DialectId::Sqlite {
+        &["REGEXP", "GLOB", "MATCH"]
+    } else {
+        &["DIV"]
+    };
+    words.iter().any(|w| op.ends_with(w))
+}
+
+/// Significant tokens of `text` in `d`.
+fn significant_tokens(text: &str, d: DialectId) -> usize {
+    let dctx = DialectCtx::new(d, None);
+    let profile = sql_dialect::lex_profile(&dctx).unwrap();
+    let lexed = sql_lexer::lex(text, profile, dctx.modes, &sql_lexer::LexState::Initial);
+    (0..lexed.len()).filter(|&i| !lexed.is_trivia(i)).count()
+}
+
+/// The most links of `SELECT a <op> <rhs> …` the cloning cap allows: the work is the sum, over
+/// the cloning operators, of the significant tokens before each (`SELECT a` is 2, a link
+/// `link_tokens`, of which `lead` come before the cloning word: `NOT` in `NOT REGEXP`).
+fn cloning_links(link_tokens: usize, lead: usize) -> usize {
+    let (mut n, mut work) = (0usize, 0u64);
+    loop {
+        let before = (2 + n * link_tokens + lead) as u64;
+        if work + before > MAX_CLONING_WORK {
+            return n;
+        }
+        work += before;
+        n += 1;
+    }
 }
 
 /// C1: every infix operator of every interim dialect, chained as long as the caps allow,
@@ -1208,10 +1233,15 @@ fn every_infix_operator_chain_is_capped_and_classifies_in_bounded_time() {
                 })
                 .count()
                 .max(1);
+            let by_chain = MAX_OPERATOR_CHAIN as usize / per_link;
             let links = if cloning(d, op) {
-                ((MAX_CLONING_WORK as f64) / per_link as f64).sqrt() as usize
+                // The cloning operator is the link's last counted operator.
+                by_chain.min(cloning_links(
+                    significant_tokens(&format!(" {op} {rhs}"), d),
+                    significant_tokens(op, d) - 1,
+                ))
             } else {
-                MAX_OPERATOR_CHAIN as usize / per_link
+                by_chain
             };
             let chain = |n: usize| format!("SELECT a{}", format!(" {op} {rhs}").repeat(n));
             let at = chain(links);
@@ -1323,6 +1353,63 @@ fn the_reviewers_quadratic_chains_are_too_complex_at_once() {
             "{d:?}"
         );
     }
+    // Fix round 2, R1-C1: the same chains inside executable comments, where L0 sees one
+    // comment token; every reading is capped before `sqlparser`. R1-M1: a long left operand
+    // counts by its size. (Run in debug by default and in release with `--release`.)
+    let ones = vec!["1"; 90_000].join(",");
+    for (d, s) in [
+        (
+            DialectId::MySql,
+            format!("SELECT a{}", " /*!DIV a*/".repeat(5_000)),
+        ),
+        (
+            DialectId::MySql,
+            format!("SELECT a{}", " /*!50000 DIV a*/".repeat(5_000)),
+        ),
+        (
+            DialectId::MariaDb,
+            format!("SELECT a{}", " /*M!DIV a*/".repeat(5_000)),
+        ),
+        (
+            DialectId::MariaDb,
+            format!("SELECT a{}", " /*!DIV a*/".repeat(5_000)),
+        ),
+        (
+            DialectId::MySql,
+            format!("SELECT a /*!{} */", " DIV a".repeat(5_000)),
+        ),
+        (
+            DialectId::MySql,
+            format!("SELECT a /*!{} */", " DIV a".repeat(20_000)),
+        ),
+        (
+            DialectId::MariaDb,
+            format!("SELECT a /*M!{} */", " DIV a".repeat(20_000)),
+        ),
+        (
+            DialectId::MySql,
+            format!("SELECT a /*!{} */", " + a".repeat(99_000)),
+        ),
+        (
+            DialectId::MySql,
+            format!("SELECT f({ones}){}", " DIV a".repeat(250)),
+        ),
+        (
+            DialectId::Sqlite,
+            format!("SELECT ({ones}){}", " REGEXP a".repeat(250)),
+        ),
+    ] {
+        let start = Instant::now();
+        let r = classify(&s, &single(d));
+        let took = start.elapsed().as_secs_f64();
+        assert!(took < 2.0, "{d:?} {:.60}: {took:.2} s", s);
+        assert!(
+            has_reason(&r, ReasonCode::TooComplex),
+            "{d:?} {s:.60}: {:?}",
+            codes(&r)
+        );
+        assert!(!read_only_allows(&r), "{d:?} {s:.60}");
+    }
     // A chain split by commas or statements is many short chains.
     let items = vec!["a REGEXP a"; 2_000].join(", ");
     let r = classify(&format!("SELECT {items}"), &single(DialectId::Sqlite));
@@ -1356,7 +1443,8 @@ fn every_entry_is_safe_on_a_two_mib_thread() {
     let (a, b, c, _) = h.join().expect("no stack overflow");
     assert_eq!(a, CoarseClass::Read);
     assert_eq!(b, 2);
-    assert_eq!(c, CoarseClass::Read);
+    // Since fix round 2 the interim harness caps the chain in each reading too.
+    assert_eq!(c, CoarseClass::Unknown);
 }
 
 /// C2 (controller ruling): the session's lexing modes are not known to `classify`, so every
@@ -1379,6 +1467,10 @@ fn every_lexing_mode_reading_must_allow() {
             DialectId::Postgres,
             "SELECT 'a\\' || ' , pg_terminate_backend(1) --'",
         ),
+        // Round 2: the NBE reading ends unterminated, but after a `;`: over a multi-statement
+        // `COM_QUERY` the `DELETE` would run first, so that reading is kept.
+        (DialectId::MySql, "SELECT 'a\\'; DELETE FROM t; --'"),
+        (DialectId::MySql, "SET @a = 'x\\'; DELETE FROM t; --'"),
     ] {
         let r = classify(s, &single(d));
         assert!(!read_only_allows(&r), "{d:?} {s}: {r:?}");
@@ -1403,6 +1495,114 @@ fn every_lexing_mode_reading_must_allow() {
         }
         assert!(r.matches_text(s));
     }
+}
+
+#[derive(serde::Deserialize)]
+struct EscapedRows {
+    row: Vec<EscapedRow>,
+}
+
+#[derive(serde::Deserialize)]
+struct EscapedRow {
+    dialect: String,
+    kind: String,
+    sql: String,
+}
+
+/// Fix round 2, R1-I1 ruling 5: honest statements with escaped literals are never denied for
+/// their escapes. On the unknown-modes path every read is allowed on read-only and nothing is
+/// denied under `Admin`; with the dialect's default modes known, the same.
+#[test]
+fn escaped_literals_are_no_false_denials_with_unknown_or_known_modes() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sql-testkit/corpus/read/escaped_literals.toml");
+    let rows: EscapedRows = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert!(rows.row.len() >= 20);
+    let mut failures = Vec::new();
+    for row in &rows.row {
+        let d = match row.dialect.as_str() {
+            "pg" => DialectId::Postgres,
+            "my" => DialectId::MySql,
+            "ma" => DialectId::MariaDb,
+            "sl" => DialectId::Sqlite,
+            x => panic!("{x}"),
+        };
+        let unknown = single(d);
+        let known = single(d).with_known_modes(LexModes::default_for(d));
+        for (path, ctx) in [("unknown", &unknown), ("known", &known)] {
+            let r = classify(&row.sql, ctx);
+            let admin = decide(&r, Profile::Admin, Actor::Human).verdict;
+            if matches!(admin, Verdict::Deny(_)) {
+                failures.push(format!(
+                    "{path} {d:?} Admin denies {}: {:?}",
+                    row.sql,
+                    codes(&r)
+                ));
+            }
+            if row.kind == "read" && !read_only_allows(&r) {
+                failures.push(format!(
+                    "{path} {d:?} read denied {}: {:?}",
+                    row.sql,
+                    codes(&r)
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Fix round 2, R1-I1 rulings 1 and 4: known modes are read once, exactly; PostgreSQL with
+/// `standard_conforming_strings` off is never parsed so, and a different cut is `Unknown`.
+#[test]
+fn known_modes_read_once_and_pg_scs_off_is_unknown_not_denied_always() {
+    let mysql_trick = "SELECT 'a\\' INTO OUTFILE '/tmp/x' -- '";
+    let default_known =
+        single(DialectId::MySql).with_known_modes(LexModes::default_for(DialectId::MySql));
+    // The server's modes are known to be the defaults: the text is a string and a comment.
+    assert!(read_only_allows(&classify(mysql_trick, &default_known)));
+    // Known NO_BACKSLASH_ESCAPES: the file write is code.
+    let nbe = single(DialectId::MySql)
+        .with_known_modes(LexModes::from_mysql_sql_mode("NO_BACKSLASH_ESCAPES"));
+    assert!(!read_only_allows(&classify(mysql_trick, &nbe)));
+    // Unknown: every reading.
+    assert!(!read_only_allows(&classify(
+        mysql_trick,
+        &single(DialectId::MySql)
+    )));
+
+    let pg_trick = "SELECT 'a\\' || ' , dblink_exec($q$h$q$, $q$DELETE FROM t$q$) --'";
+    let on = pg_single().with_known_modes(LexModes::default_for(DialectId::Postgres));
+    assert!(read_only_allows(&classify(pg_trick, &on)));
+    let off = pg_single().with_known_modes(LexModes {
+        standard_conforming_strings: false,
+        ..LexModes::default_for(DialectId::Postgres)
+    });
+    for ctx in [&off, &pg_single()] {
+        let r = classify(pg_trick, ctx);
+        assert_eq!(r.request_class, CoarseClass::Unknown, "{r:?}");
+        assert!(
+            !has_reason(&r, ReasonCode::ParserDisagreement),
+            "{:?}",
+            codes(&r)
+        );
+        assert!(
+            r.items[0]
+                .reasons
+                .iter()
+                .any(|x| x.arg.as_deref() == Some("standard_conforming_strings"))
+        );
+        assert!(!read_only_allows(&r));
+        // Unknown, not deny-always: the Admin profile confirms rather than denies.
+        assert!(!matches!(
+            decide(&r, Profile::Admin, Actor::Human).verdict,
+            Verdict::Deny(_)
+        ));
+    }
+    // scs off and the same cut: the reading adds nothing.
+    assert!(read_only_allows(&classify(
+        "SELECT a FROM t WHERE b ~ '\\d+'",
+        &off
+    )));
 }
 
 /// Minors M2–M4 of the review.
@@ -1476,6 +1676,15 @@ fn classify_10kb_unit_under_1ms() {
     if std::env::var("HACIVAT_PERF").as_deref() != Ok("1") {
         return;
     }
+    // Measured on a classifier thread, as the pool runs it (round 2): elsewhere each call
+    // first moves to a scoped thread of its own, which this budget is not about.
+    sql_safety::spawn_classifier_thread("classify-budget".to_string(), budget)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn budget() {
     const RUNS: usize = 200;
     let unit = ten_kb_unit();
     for d in [
@@ -1513,25 +1722,36 @@ fn classify_10kb_unit_under_1ms() {
     // per reading (PostgreSQL 2, MySQL/MariaDB up to 4). Printed for the report; bounded by
     // the readings × the interim 2 ms.
     let marked = unit.replacen("'İstanbul'", "'İst\\anbul' AND c.note = \"x\"", 1);
+    // Round 2: known modes read once; unknown modes lex the other readings and classify only
+    // those that cut other tokens (here MySQL's `ANSI_QUOTES`: `"x"` becomes an identifier).
     for (d, readings) in [
         (DialectId::Postgres, 2.0),
         (DialectId::MySql, 4.0),
+        (DialectId::MariaDb, 4.0),
         (DialectId::Sqlite, 1.0),
     ] {
-        let ctx = single(d);
-        let mut times: Vec<f64> = (0..RUNS / 4)
-            .map(|_| {
-                let start = Instant::now();
-                std::hint::black_box(classify(&marked, &ctx));
-                start.elapsed().as_secs_f64()
-            })
-            .collect();
-        times.sort_by(f64::total_cmp);
-        let per = |t: f64| t / (marked.len() as f64 / 10_240.0) * 1e3;
-        let (best, p50) = (per(times[0]), per(times[times.len() / 2]));
-        eprintln!(
-            "{d:?} with a backslash and a double quote: classify best {best:.3}, p50 {p50:.3} ms per 10 KB ({readings} readings)"
-        );
-        assert!(best < 2.0 * readings, "{d:?}: {best:.3} ms per 10 KB");
+        for (path, ctx, bound) in [
+            (
+                "known modes",
+                single(d).with_known_modes(LexModes::default_for(d)),
+                2.0,
+            ),
+            ("unknown modes", single(d), 2.0 * readings),
+        ] {
+            let mut times: Vec<f64> = (0..RUNS / 4)
+                .map(|_| {
+                    let start = Instant::now();
+                    std::hint::black_box(classify(&marked, &ctx));
+                    start.elapsed().as_secs_f64()
+                })
+                .collect();
+            times.sort_by(f64::total_cmp);
+            let per = |t: f64| t / (marked.len() as f64 / 10_240.0) * 1e3;
+            let (best, p50) = (per(times[0]), per(times[times.len() / 2]));
+            eprintln!(
+                "{d:?} with a backslash and a double quote, {path}: classify best {best:.3}, p50 {p50:.3} ms per 10 KB"
+            );
+            assert!(best < bound, "{d:?} {path}: {best:.3} ms per 10 KB");
+        }
     }
 }

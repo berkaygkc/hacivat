@@ -200,12 +200,7 @@ fn read_corpus_classifies_within_budget() {
     // ## m3b-t14-orchestrator (named exception, fix round 1, I2): measured on a classifier
     // thread (16 MiB, marked), as the pool runs it; elsewhere each call first moves to a
     // scoped thread of its own, which this budget is not about.
-    std::thread::Builder::new()
-        .stack_size(sql_safety::CLASSIFIER_STACK_BYTES)
-        .spawn(|| {
-            sql_safety::mark_classifier_thread();
-            within_budget();
-        })
+    sql_safety::spawn_classifier_thread("read-corpus-budget".to_string(), within_budget)
         .unwrap()
         .join()
         .unwrap();

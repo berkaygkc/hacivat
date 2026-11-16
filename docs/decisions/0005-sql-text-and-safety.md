@@ -1747,3 +1747,42 @@ unit tests (panic, deadline, shutdown).
   unclassified (M1). An oversized text is fingerprinted by its bytes, never lexed
   (`unknown_report`, M2). On PostgreSQL `ROLLBACK`/`ABORT` (any form), on MySQL/MariaDB `USE`,
   change the context (M3, M4). Denial reasons are sorted and unique (M7).
+
+**Fix round 2 (round 1 re-check).**
+- **R1-C1, executable comments.** A `/*!…*/` or `/*M!…*/` body is one comment token to L0, so
+  the caps also run in the interim backend on every threshold reading (where the body is
+  code), before `sqlparser` (`classify::chains_exceed`, called from `analyse_view`). The
+  reviewer's `/*!DIV a*/`×5,000, `/*!50000 DIV a*/`, `/*M!DIV a*/` and `/*! DIV a … */`×20,000
+  shapes are `TooComplex` in milliseconds, in debug and release (sweep test).
+- **R1-M1, cloning work by size.** The cloning work is now the sum, over the cloning
+  operators, of the significant tokens before each in its statement (the left operand is at
+  most that), and the cloning words are the dialect's own (MySQL/MariaDB `DIV`; SQLite
+  `REGEXP`, `GLOB`, `MATCH`). `MAX_CLONING_WORK` = 131,072 (a plain chain of ~360; measured
+  13–15 ms debug at the cap). `f(1, … ×90,000) DIV a`×250 is `TooComplex`.
+- **R1-I1, readings (controller rulings 1–5).**
+  1. `ClassifyCtx.modes_known` (default `false`; `with_known_modes`): with known modes the
+     text is read once, exactly so. Only the unknown-modes path (today the read-only guard,
+     whose seam has no modes) varies them. Tasks 18 and 24 pass the session's modes.
+  2. An alternative reading is lexed first; one that cuts the same tokens (ranges and kinds)
+     as the base adds nothing and is dropped.
+  3. An alternative reading in which the whole text fails to lex is dropped, when the text is
+     one statement in the base reading: a string, quoted identifier or dollar body runs
+     unterminated to the end, with no `;` before it. No statement is complete in that
+     reading, so a server in that mode rejects the text as a syntax error before running any
+     of it. The `;` condition matters: a read-write MySQL connection sends a `SET` text over a
+     multi-statement `COM_QUERY`, which runs each statement before it parses the next, so in
+     `SELECT 'a\'; DELETE FROM t; --'` the `NO_BACKSLASH_ESCAPES` reading (a `DELETE` before
+     the unterminated tail) is kept and classified. Unterminated comments do not count.
+  4. PostgreSQL: libpg_query parses only with `standard_conforming_strings` on, so the text is
+     always classified in that reading; the `off` reading (modes unknown, or known `off`) is
+     only lexed: the same cut is dropped, a whole-text failure as in 3, any other difference
+     makes every item `Unknown` (`EffectsUnknown`, `standard_conforming_strings`), never
+     `ParserDisagreement`: off production it follows the `Unknown` row, `Admin` confirms.
+  5. `sql-testkit/corpus/read/escaped_literals.toml` (new file): PG `'\d+'`, `LIKE 'a\_b%'`,
+     `'C:\Users\x'`, jsonb with `\"`; MySQL/MariaDB `'O\'Brien'`, `"a\"b"`, `"O'Brien"`,
+     `'C:\\Users'`, escaped writes. On both paths every read is allowed on read-only and no
+     row is denied under `Admin`; the C2 repros still deny.
+- **R1-M2.** `mark_classifier_thread` is gone. `spawn_classifier_thread(name, f)` starts a
+  16 MiB thread already marked, the only way to get one, so a small stack cannot be marked.
+  An `unsafe fn` would need `unsafe` blocks in `hacivat-exec`, which `unsafe_code = "deny"`
+  and the global constraint (unsafe only in `hacivat-ui-core/src/platform`) forbid.

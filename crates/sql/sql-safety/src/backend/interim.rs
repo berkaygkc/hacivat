@@ -566,6 +566,13 @@ fn analyse_view(view: &str, ctx: &ClassifyCtx, depth: u8, pre: Option<&Lexed>) -
         acc.doubt(ReasonCode::TooComplex, whole);
         return acc;
     }
+    // ## m3b-t14-orchestrator (named exception, fix round 2, R1-C1): an executable comment's
+    // body is one token to the orchestrator's L0; in a reading it is code, so the operator-chain
+    // caps run here, on every reading, before `sqlparser` sees it.
+    if crate::classify::chains_exceed(view, lexed, d) {
+        acc.doubt(ReasonCode::TooComplex, whole);
+        return acc;
+    }
     prescan::lexical(&t, d, &mut acc);
     let dialect = sql_dialect_for(d);
     // One tokenization serves the agreement check and the parse.

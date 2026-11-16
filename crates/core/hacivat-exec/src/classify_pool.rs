@@ -10,7 +10,7 @@
 //!   16 MiB stack, that take jobs from one queue. Every libpg_query call a job makes (parse
 //!   tree, scanner tokens, fingerprint) runs on `sql-oracle-pg`'s own serial parser thread,
 //!   never on a pool thread (T9 ruling), so two pool threads never parse at once. Each pool
-//!   thread marks itself (`sql_safety::mark_classifier_thread`), so `classify` runs on it
+//!   thread is started by `sql_safety::spawn_classifier_thread`, so `classify` runs on it
 //!   directly; called anywhere else, `classify` makes its own 16 MiB stack (fix round 1, I2).
 //! - **Fail closed.** Every entry resolves to a report, never an error the caller must map
 //!   (`Result<_, Infallible>`, fix round 1). A job that panics answers an `Unknown` report
@@ -42,7 +42,6 @@ use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
@@ -86,12 +85,9 @@ impl ClassifyPool {
         let mut started = 0;
         for i in 0..threads.max(1) {
             let rx = Arc::clone(&rx);
-            let spawned = thread::Builder::new()
-                .name(format!("hacivat-classify-{i}"))
-                .stack_size(CLASSIFY_STACK_BYTES)
-                .spawn(move || {
-                    // This thread's stack is the classifier's: it runs on it directly.
-                    sql_safety::mark_classifier_thread();
+            // A classifier thread (16 MiB): `classify` runs on it directly.
+            let spawned =
+                sql_safety::spawn_classifier_thread(format!("hacivat-classify-{i}"), move || {
                     worker(&rx);
                 });
             if spawned.is_ok() {

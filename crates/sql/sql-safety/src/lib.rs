@@ -32,7 +32,7 @@ mod visit;
 
 pub use classify::{
     CLASSIFIER_STACK_BYTES, ClassifyCtx, Expect, MAX_CLONING_WORK, MAX_OPERATOR_CHAIN,
-    changes_context, classify, classify_units, mark_classifier_thread, unknown_report,
+    changes_context, classify, classify_units, spawn_classifier_thread, unknown_report,
 };
 pub use destructive::{DestructiveKind, DestructiveReason};
 pub use effects::{CoarseClass, EffectSet, RiskFlags};
