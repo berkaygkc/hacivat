@@ -484,10 +484,19 @@ const DISCLOSURE_UNQUALIFIED: [&str; 8] = [
     "x$session",
 ];
 
+// ## m3b-t20-differential (named exception, T10 RR-I2 gap from the T14 re-check)
+/// The [`DISCLOSURE_TABLES`] names that match unqualified only when the session's current
+/// database is their schema (`ClassifyCtx.search_path[0]` on MySQL/MariaDB, `DATABASE()`), as
+/// `(schema, name)`: they are common user-table names, so with another current database, or
+/// none known, they stay user tables.
+const DISCLOSURE_IN_CURRENT_DB: [(&str, &str); 2] =
+    [("performance_schema", "threads"), ("sys", "session")];
+
 /// The first reference in the reading to a [`DISCLOSURE_TABLES`] table: `schema.name` in any
 /// quoting and case, or one of [`DISCLOSURE_UNQUALIFIED`] standing alone (not a qualifier, a
-/// column of another table, or a call).
-fn disclosure_table(t: &Toks<'_>) -> Option<(TextRange, String)> {
+/// column of another table, or a call), or one of [`DISCLOSURE_IN_CURRENT_DB`] standing alone
+/// when `current_db` is its schema.
+fn disclosure_table(t: &Toks<'_>, current_db: Option<&str>) -> Option<(TextRange, String)> {
     let lower = |j: usize| t.name(j).0.to_ascii_lowercase();
     for j in 0..t.len() {
         if !t.is_name(j) {
@@ -509,6 +518,14 @@ fn disclosure_table(t: &Toks<'_>) -> Option<(TextRange, String)> {
             let name = lower(j);
             if DISCLOSURE_UNQUALIFIED.contains(&name.as_str()) {
                 return Some((t.range(j), name));
+            }
+            // ## m3b-t20-differential
+            if let Some(db) = current_db
+                && let Some((schema, _)) = DISCLOSURE_IN_CURRENT_DB
+                    .iter()
+                    .find(|(s, n)| *n == name && db.eq_ignore_ascii_case(s))
+            {
+                return Some((t.range(j), format!("{schema}.{name}")));
             }
         }
     }
@@ -535,7 +552,9 @@ pub(crate) fn inventory(t: &Toks<'_>, ctx: &ClassifyCtx, acc: &mut Acc) {
             }
         }
         // The same data through tables (fix round 2, RR-I2).
-        if let Some((range, name)) = disclosure_table(t) {
+        // ## m3b-t20-differential: the current database names the unqualified ones.
+        let current_db = ctx.search_path.first().map(|s| &**s);
+        if let Some((range, name)) = disclosure_table(t, current_db) {
             acc.doubt(ReasonCode::EffectsUnknown, Some(range));
             if let Some(r) = acc.reasons.last_mut() {
                 r.arg = Some(arc(&name));

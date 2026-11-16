@@ -3,6 +3,8 @@
 #include "pg_query.h"
 #include "pg_query_internal.h"
 #include "pg_query_fingerprint.h"
+// HACIVAT PATCH §3: `pg_query_nodes_to_protobuf` for the combined parse.
+#include "pg_query_outfuncs.h"
 
 #include "postgres.h"
 #include "xxhash/xxhash.h"
@@ -540,5 +542,99 @@ void pg_query_free_fingerprint_result(PgQueryFingerprintResult result)
 	}
 
 	free(result.fingerprint_str);
+	free(result.stderr_buffer);
+}
+
+/*
+ * HACIVAT PATCH §3: `pg_query_parse_protobuf_opts` and `pg_query_fingerprint_opts` in one
+ * raw parse. The tree is serialised to protobuf first, exactly as
+ * `pg_query_parse_protobuf_opts` does (same error handling), then fingerprinted exactly as
+ * `pg_query_fingerprint_with_opts` does; the fingerprint walk only reads the tree. A
+ * fingerprint walk that throws leaves `fingerprint_ok` 0 (the original call has no handler
+ * there); the tree is still returned.
+ */
+PgQueryProtobufParseFingerprintResult pg_query_parse_protobuf_fingerprint_opts(const char* input, int parser_options, int fingerprint_options)
+{
+	MemoryContext ctx = NULL;
+	PgQueryInternalParsetreeAndError parsetree_and_error;
+	PgQueryProtobufParseFingerprintResult result = {0};
+	volatile uint64_t fingerprint = 0;
+	volatile int fingerprint_ok = 0;
+
+	ctx = pg_query_enter_memory_context();
+
+	parsetree_and_error = pg_query_raw_parse(input, parser_options);
+
+	result.stderr_buffer = parsetree_and_error.stderr_buffer;
+	result.error = parsetree_and_error.error;
+
+	if (result.error != NULL)
+	{
+		pg_query_exit_memory_context(ctx);
+		return result;
+	}
+
+	PG_TRY();
+	{
+		result.parse_tree = pg_query_nodes_to_protobuf(parsetree_and_error.tree);
+	}
+	PG_CATCH();
+	{
+		ErrorData* error_data;
+		PgQueryError* error;
+
+		MemoryContextSwitchTo(ctx);
+		error_data = CopyErrorData();
+
+		error = malloc(sizeof(PgQueryError));
+		error->message   = strdup(error_data->message);
+		error->filename  = strdup(error_data->filename);
+		error->funcname  = strdup(error_data->funcname);
+		error->context   = NULL;
+		error->lineno    = error_data->lineno;
+		error->cursorpos = error_data->cursorpos;
+
+		result.error = error;
+		FlushErrorState();
+	}
+	PG_END_TRY();
+
+	if (result.error == NULL)
+	{
+		PG_TRY();
+		{
+			FingerprintContext fctx;
+
+			_fingerprintInitContext(&fctx, NULL, fingerprint_options, false);
+			if (parsetree_and_error.tree != NULL)
+				_fingerprintNode(&fctx, parsetree_and_error.tree, NULL, NULL, 0);
+			fingerprint = XXH3_64bits_digest(fctx.xxh_state);
+			_fingerprintFreeContext(&fctx);
+			fingerprint_ok = 1;
+		}
+		PG_CATCH();
+		{
+			MemoryContextSwitchTo(ctx);
+			FlushErrorState();
+			fingerprint_ok = 0;
+		}
+		PG_END_TRY();
+	}
+
+	result.fingerprint = fingerprint;
+	result.fingerprint_ok = fingerprint_ok;
+
+	pg_query_exit_memory_context(ctx);
+
+	return result;
+}
+
+void pg_query_free_protobuf_parse_fingerprint_result(PgQueryProtobufParseFingerprintResult result)
+{
+	if (result.error) {
+		pg_query_free_error(result.error);
+	}
+
+	free(result.parse_tree.data);
 	free(result.stderr_buffer);
 }

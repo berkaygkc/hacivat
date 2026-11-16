@@ -742,3 +742,86 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Vault fallback without a Secret Service
         run: cargo test --locked -p hacivat-secrets --test fallback -- --include-ignored linux_without_secret_service_uses_vault
+
+  # ## m3b-t20-fuzz
+  # The SQL fuzz targets (R-M3-80; ADR 0005 `m3b-t20`): `fuzz/` is its own workspace (excluded
+  # from the root, never shipped; `libfuzzer-sys`'s NCSA licence is accepted for it only), built
+  # with the nightly toolchain and `--locked` against `fuzz/Cargo.lock` (generated from the root
+  # lock, P-M3b-15), 10 minutes per target. The build must leave `third_party/` untouched (the
+  # copied `[patch.crates-io]` entries point there). Locally the same properties run as seeded
+  # tests in their crates.
+  fuzz-sql:
+    name: fuzz-sql (nightly, 10 min per target)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --locked
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
+      - name: Build the fuzz targets (locked)
+        working-directory: fuzz
+        run: |
+          cargo +nightly metadata --locked --format-version 1 > /dev/null
+          cargo +nightly fuzz build --release
+      - name: The build left third_party and the lockfile untouched
+        run: |
+          test -z "$(git status --porcelain third_party)"
+          git diff --exit-code -- fuzz/Cargo.lock
+      - name: Seed corpora (the SQL corpora of sql-testkit)
+        run: |
+          for t in lex_lossless relex_equivalence split_items params_rewrite classify_no_panic; do
+            mkdir -p fuzz/corpus/$t
+            cp crates/sql/sql-testkit/corpus/read/*.sql crates/sql/sql-testkit/corpus/fixtures/*.sql fuzz/corpus/$t/
+          done
+      - name: Run each target for 10 minutes
+        working-directory: fuzz
+        run: |
+          for t in lex_lossless relex_equivalence split_items params_rewrite classify_no_panic; do
+            cargo +nightly fuzz run --release $t corpus/$t -- -max_total_time=600 -max_len=4096 -rss_limit_mb=4096
+          done
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-sql-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+  # ## m3b-t20-differential
+  # The PostgreSQL regression differential (the P0 exit: our PG split equals libpg_query's on
+  # ≥ 99.9 % of the REL_17_2 corpus's statements; the corpus is fetched at a pinned tag and
+  # digest, never vendored), the classifier's mutation properties at the nightly case count, and
+  # `bench-sql` (relative signal only, L2: no figure is asserted).
+  sql-differential:
+    name: sql-differential (nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch the PostgreSQL regression corpus (REL_17_2, pinned digest)
+        run: cargo xtask fetch-pg-regress --tag REL_17_2
+      - name: PG regression differential
+        run: cargo test --locked -p sql-testkit --features differential --test pg_regress_differential -- --ignored --nocapture
+      - name: Classifier mutation properties (nightly cases)
+        run: cargo test --locked --release -p sql-safety --test mutation_props
+        env:
+          PROPTEST_CASES: "100000"
+      - name: bench-sql
+        run: cargo xtask bench-sql --out target/bench/bench-sql.json
+      - name: Upload bench-sql JSON (regression signal only, not authoritative)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-sql-regression-signal-only-not-authoritative
+          path: target/bench/bench-sql.json
+          if-no-files-found: error

@@ -63,8 +63,8 @@ use sql_split::item::StmtHead;
 use sql_split::{Fingerprint, FingerprintAlgo, ParamSettings, SplitMode, scan_params};
 use sql_text::{TextRange, TextSize};
 
-use crate::backend::Backend;
 use crate::backend::plan::{Plan, plan_for};
+use crate::backend::{Backend, ParsedFingerprint};
 use crate::effects::{CoarseClass, EffectSet, RiskFlags, class_of};
 use crate::fingerprint::request_fingerprint;
 use crate::functions::{FnCatalog, set_allowed};
@@ -98,6 +98,10 @@ pub struct ClassifyCtx {
     /// server searches it first unless it is listed). An element that cannot be such a name
     /// (a raw `SHOW` string, quotes, a comma, edge spaces, `pg_catalog` in another case) is
     /// read fail-closed: unqualified builtins are then unknown (PG backend, P-M3b-T3-1).
+    // ## m3b-t20-differential (named exception): the MySQL/MariaDB contract.
+    /// On MySQL and MariaDB: the session's current database (`DATABASE()`) as the one element,
+    /// empty when none is known; with `performance_schema` or `sys` current, the unqualified
+    /// `threads` / `session` are those schemas' information-disclosure tables (T10 RR-I2).
     pub search_path: Arc<[Arc<str>]>,
     pub limits: Limits,
     // ## m3b-t14-orchestrator (fix round 2, R1-I1 ruling 1)
@@ -598,7 +602,9 @@ fn classify_with(
     // The lexing is lent only when it is exactly `sql_lexer::lex`'s (no client flavor): a
     // backend that lexes the same text again does not (T10 C1 carry).
     let plain = (ctx.flavor == ClientFlavor::None).then_some(&lexed);
-    let mut items = backend.analyse(sql, &ranges, ctx, plain);
+    // ## m3b-t20-differential (named exception, T14 perf carry): the PG backend's one parse
+    // also gives the fingerprint.
+    let (mut items, parsed_fp) = backend.analyse_fingerprinted(sql, &ranges, ctx, plain);
     if items.len() != ranges.len() || items.iter().zip(&ranges).any(|(i, r)| i.range != *r) {
         // A backend that does not answer one report per statement proves nothing.
         return decided(vec![Reason::new(ReasonCode::EffectsUnknown)]);
@@ -616,10 +622,14 @@ fn classify_with(
     let refused = items
         .iter()
         .any(|i| i.reasons.iter().any(|r| r.code == ReasonCode::ParseError));
-    let fingerprint = if refused {
-        sql_split::hv_norm1(sql, &ctx.dialect)
-    } else {
-        request_fingerprint(sql, &ctx.dialect)
+    let fingerprint = match parsed_fp {
+        _ if refused => sql_split::hv_norm1(sql, &ctx.dialect),
+        ParsedFingerprint::Parsed(hash)
+            if matches!(ctx.dialect.id, DialectId::Postgres | DialectId::PgWire(_)) =>
+        {
+            crate::fingerprint::with_libpg_fingerprint(sql, &ctx.dialect, hash)
+        }
+        _ => request_fingerprint(sql, &ctx.dialect),
     };
     SafetyReport {
         items,

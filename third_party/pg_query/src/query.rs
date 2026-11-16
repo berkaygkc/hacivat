@@ -250,6 +250,42 @@ pub fn fingerprint(
     fingerprint
 }
 
+// HACIVAT PATCH §3: one raw parse for the protobuf tree and the fingerprint, without
+// `ParseResult::new`'s summary walk.
+
+/// What [`parse_protobuf_with_fingerprint`] answers for a text the parser accepted.
+pub struct ProtobufWithFingerprint {
+    /// The tree, exactly as [`parse`] decodes it (`ParseResult::protobuf`), or the decode error.
+    pub protobuf: Result<protobuf::ParseResult>,
+    /// The fingerprint [`fingerprint`] computes with the same options; `None` when the C walk
+    /// could not take it.
+    pub fingerprint: Option<u64>,
+}
+
+/// [`parse`]'s protobuf tree and [`fingerprint`]'s value from one raw parse. Unlike [`parse`],
+/// no summary (tables, functions, filter columns) is built and stderr is not kept. A syntax
+/// error is the same `Err` as [`parse`]'s.
+pub fn parse_protobuf_with_fingerprint(
+    statement: &str, parser_options: impl Into<ParserOptions>, fingerprint_options: impl Into<FingerprintOptions>,
+) -> Result<ProtobufWithFingerprint> {
+    let input = CString::new(statement)?;
+    let result = unsafe {
+        pg_query_parse_protobuf_fingerprint_opts(input.as_ptr(), parser_options.into().bits(), fingerprint_options.into().bits())
+    };
+    let answer = if !result.error.is_null() {
+        let message = unsafe { CStr::from_ptr((*result.error).message) }.to_string_lossy().to_string();
+        Err(Error::Parse(message))
+    } else {
+        let data = unsafe { std::slice::from_raw_parts(result.parse_tree.data as *const u8, result.parse_tree.len as usize) };
+        Ok(ProtobufWithFingerprint {
+            protobuf: protobuf::ParseResult::decode(data).map_err(Error::Decode),
+            fingerprint: (result.fingerprint_ok != 0).then_some(result.fingerprint),
+        })
+    };
+    unsafe { pg_query_free_protobuf_parse_fingerprint_result(result) };
+    answer
+}
+
 /// An experimental API which parses a PLPGSQL function. This currently returns the raw JSON structure.
 ///
 /// # Example

@@ -28,4 +28,33 @@ pub(crate) trait Backend {
         ctx: &ClassifyCtx,
         lexed: Option<&Lexed>,
     ) -> Vec<StmtReport>;
+
+    // ## m3b-t20-differential (named exception, T14 perf carry: no second parse for the
+    // fingerprint)
+    /// [`Backend::analyse`], and what the backend's own parse of `sql` already says about the
+    /// request's fingerprint ([`ParsedFingerprint`]). The default parses nothing for it.
+    fn analyse_fingerprinted(
+        &self,
+        sql: &str,
+        items: &[TextRange],
+        ctx: &ClassifyCtx,
+        lexed: Option<&Lexed>,
+    ) -> (Vec<StmtReport>, ParsedFingerprint) {
+        (
+            self.analyse(sql, items, ctx, lexed),
+            ParsedFingerprint::NotParsed,
+        )
+    }
+}
+
+// ## m3b-t20-differential
+/// libpg_query's fingerprint of a request, as the PG backend's one parse of it left it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParsedFingerprint {
+    /// The backend did not send `sql` itself to libpg_query: the orchestrator asks for the
+    /// fingerprint on its own.
+    NotParsed,
+    /// libpg_query parsed exactly `sql`: its fingerprint, or `None` where
+    /// `sql_oracle_pg::tree::fingerprint(sql)` is an `Err`.
+    Parsed(Option<u64>),
 }

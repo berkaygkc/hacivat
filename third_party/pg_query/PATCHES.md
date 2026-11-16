@@ -43,10 +43,11 @@ The copy is byte-identical to the registry source (`build.rs` and `src/**` apart
   there with the reason.
 
 `diff -r ~/.cargo/registry/src/*/pg_query-18.1.0 third_party/pg_query` shows exactly these
-lines: `Cargo.toml` and `build.rs` differ; `Cargo.lock`, `Cargo.toml.orig` and `.cargo-ok` exist
+lines: `Cargo.toml` and `build.rs` differ (and, from §3, `libpg_query/pg_query.h`,
+`libpg_query/src/pg_query_fingerprint.c` and `src/query.rs`); `Cargo.lock`, `Cargo.toml.orig` and `.cargo-ok` exist
 only in the registry; this file and the five licence files exist only here.
 
-Every source change is fenced by a `HACIVAT PATCH §N` comment.
+Every source change is fenced by a `HACIVAT PATCH §N` comment (§1 `build.rs`, `Cargo.toml`; §3 `libpg_query/pg_query.h`, `libpg_query/src/pg_query_fingerprint.c`, `src/query.rs`).
 
 ## §1 `build.rs`: no protobuf regeneration (Task 1a; R-M3-1, P1)
 
@@ -65,3 +66,38 @@ Every source change is fenced by a `HACIVAT PATCH §N` comment.
 - Test: `crates/sql/sql-oracle-pg/tests/build_proof.rs` (statements are counted through the
   protobuf decode); CI runs `git diff --exit-code -- third_party/pg_query` after the build.
 - Upstream: not proposed. Regenerating on a developer machine is upstream's intended behaviour.
+
+## §2 (reserved, unused)
+
+Reserved by the M3b plan for Task 9's stderr ruling, which needed no patch (libpg_query 18.1.0
+compiles the per-call redirect out; ledger, T9 D4).
+
+## §3 One raw parse for the tree and the fingerprint, without the summary walk (M3b Task 20; T14 perf carry)
+
+The PostgreSQL classifier backend needed three libpg_query calls per request: `pg_query::parse`
+(raw parse, protobuf encode, prost decode, then `ParseResult::new`'s summary walk over every
+node, whose tables/functions/filter columns Hacivat drops unread), `pg_query::scan_tokens`, and
+`pg_query::fingerprint` (a second raw parse). Task 20 adds one entry point that parses once:
+
+- `libpg_query/pg_query.h`: the result type `PgQueryProtobufParseFingerprintResult` (the
+  protobuf, stderr, error, `fingerprint`, `fingerprint_ok`) and the declarations of
+  `pg_query_parse_protobuf_fingerprint_opts` and
+  `pg_query_free_protobuf_parse_fingerprint_result`, each fenced `HACIVAT PATCH §3`.
+- `libpg_query/src/pg_query_fingerprint.c`: `#include "pg_query_outfuncs.h"`, and the two
+  functions after `pg_query_free_fingerprint_result`. The new function is
+  `pg_query_parse_protobuf_opts` followed by `pg_query_fingerprint_with_opts`'s walk on the same
+  raw tree: the tree is serialised first (the same `PG_TRY` and error copy), then fingerprinted
+  (the walk only reads the tree; its list-sort cache sorts copies of hashes). Unlike the
+  original fingerprint call, the walk runs inside `PG_TRY`: an error there leaves
+  `fingerprint_ok = 0` and the tree is still returned. No existing function changed.
+- `src/query.rs`: `ProtobufWithFingerprint` and `parse_protobuf_with_fingerprint(statement,
+  parser_options, fingerprint_options)`: the decoded protobuf (`Result`, as `parse` decodes it)
+  and the fingerprint, without `ParseResult::new` (no summary walk, stderr not kept). A syntax
+  error is the same `Error::Parse` as `parse`'s. Fenced `HACIVAT PATCH §3`.
+- Caller: `crates/sql/sql-oracle-pg/src/tree.rs` `analyse` (one trip to the parser thread: the
+  guard's scan, this call). Test: `sql-oracle-pg` `tree::tests::analyse_answers_what_the_three_calls_answer`
+  (tree, tokens and fingerprint equal the three separate calls, errors and limits included) and
+  `sql-safety` `fingerprint::tests::classify_fingerprints_from_its_one_parse_as_a_second_parse_would`.
+- Effect (release, 10 KB unit, `cargo xtask bench-sql`): the oracle's work 1.42 → 1.17 ms;
+  `classify` on PostgreSQL 1.81 → 1.55–1.65 ms best per 10 KB.
+- Upstream: not proposed yet (a candidate: libpg_query has no combined entry point).

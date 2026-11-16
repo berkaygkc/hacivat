@@ -94,6 +94,15 @@ typedef struct {
   PgQueryError* error;
 } PgQueryFingerprintResult;
 
+// HACIVAT PATCH §3: one raw parse gives both the protobuf tree and the fingerprint.
+typedef struct {
+  PgQueryProtobuf parse_tree;
+  char* stderr_buffer;
+  PgQueryError* error;
+  uint64_t fingerprint;
+  int fingerprint_ok; // 1 when `fingerprint` holds the fingerprint, 0 when it could not be taken
+} PgQueryProtobufParseFingerprintResult;
+
 typedef struct {
   char* normalized_query;
   PgQueryError* error;
@@ -174,6 +183,8 @@ PgQueryPlpgsqlParseResult pg_query_parse_plpgsql(const char* input);
 
 PgQueryFingerprintResult pg_query_fingerprint(const char* input);
 PgQueryFingerprintResult pg_query_fingerprint_opts(const char* input, int parser_options, int fingerprint_options);
+// HACIVAT PATCH §3
+PgQueryProtobufParseFingerprintResult pg_query_parse_protobuf_fingerprint_opts(const char* input, int parser_options, int fingerprint_options);
 
 // Use pg_query_split_with_scanner when you need to split statements that may
 // contain parse errors, otherwise pg_query_split_with_parser is recommended
@@ -203,6 +214,8 @@ void pg_query_free_deparse_comments_result(PgQueryDeparseCommentsResult result);
 void pg_query_free_protobuf_parse_result(PgQueryProtobufParseResult result);
 void pg_query_free_plpgsql_parse_result(PgQueryPlpgsqlParseResult result);
 void pg_query_free_fingerprint_result(PgQueryFingerprintResult result);
+// HACIVAT PATCH §3
+void pg_query_free_protobuf_parse_fingerprint_result(PgQueryProtobufParseFingerprintResult result);
 void pg_query_free_is_utility_result(PgQueryIsUtilityResult result);
 void pg_query_free_summary_parse_result(PgQuerySummaryParseResult result);
 

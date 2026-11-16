@@ -98,9 +98,11 @@ impl Backend for InterimBackend {
     ) -> Vec<StmtReport> {
         let whole =
             |r: &TextRange| usize::from(r.start()) == 0 && usize::from(r.end()) == sql.len();
+        // ## m3b-t20-differential (named exception): one reading budget for the request.
+        let budget = std::cell::Cell::new(MAX_READING_BYTES);
         items
             .iter()
-            .map(|r| analyse_stmt(sql, *r, ctx, lexed.filter(|_| whole(r))))
+            .map(|r| analyse_stmt(sql, *r, ctx, lexed.filter(|_| whole(r)), &budget))
             .collect()
     }
 }
@@ -226,12 +228,18 @@ const NEVER_ON_MYSQL: u32 = u32::MAX;
 
 // ## m3b-t14-orchestrator (named exception, T10 C1 carry): `pre`, when given, is `text`'s
 // lexing (the statement is the whole text the orchestrator lexed).
-fn analyse_stmt(sql: &str, range: TextRange, ctx: &ClassifyCtx, pre: Option<&Lexed>) -> StmtReport {
+fn analyse_stmt(
+    sql: &str,
+    range: TextRange,
+    ctx: &ClassifyCtx,
+    pre: Option<&Lexed>,
+    budget: &std::cell::Cell<usize>,
+) -> StmtReport {
     let start = usize::from(range.start());
     let end = usize::from(range.end()).min(sql.len());
     let text = sql.get(start..end).unwrap_or("");
     let mut base = Acc::default();
-    let views = statement_views(text, ctx, &mut base, pre);
+    let views = statement_views(text, ctx, &mut base, pre, budget);
     let outs: Vec<Acc> = match views {
         Some((views, lexed)) => {
             if views.len() > 1 {
@@ -279,6 +287,7 @@ fn statement_views<'a>(
     ctx: &ClassifyCtx,
     base: &mut Acc,
     pre: Option<&'a Lexed>,
+    budget: &std::cell::Cell<usize>,
 ) -> Option<(Vec<String>, Held<'a>)> {
     let d = ctx.dialect.id;
     let whole = Some(range_of(0, text.len()));
@@ -327,7 +336,7 @@ fn statement_views<'a>(
             base.effects |= EffectSet::UNKNOWN;
         }
     }
-    build_views(text, &comments, ctx, base).map(|v| (v, lexed))
+    build_views(text, &comments, ctx, base, budget).map(|v| (v, lexed))
 }
 
 fn exec_comments(
@@ -437,13 +446,24 @@ fn reading_count(thresholds: usize, comments: &[ExecComment], limit: usize) -> O
     Some(n)
 }
 
+// ## m3b-t20-differential (named exception, T10 review: the readings × length perf cap)
+/// The bytes a request's statements with more than one threshold reading may hand `sqlparser`
+/// together: the sum, over those statements, of their readings × their length. Past it the
+/// statement is `TooComplex` before any reading is built, so the extra work executable
+/// comments cause is bounded by the work of one 256 KiB statement (≈ 40 ms in release), not
+/// by 16 readings × 1 MiB. 16 readings of a 16 KiB statement fit; a statement of more than
+/// 128 KiB with any executable comment does not.
+pub(crate) const MAX_READING_BYTES: usize = 256 << 10;
+
 /// Every threshold reading of `text` (deduplicated), or `None` past the limit
-/// (`Limits.max_exec_comment_views`, checked before any reading is built).
+/// (`Limits.max_exec_comment_views`, checked before any reading is built) or past what is left
+/// of the request's [`MAX_READING_BYTES`] (`budget`).
 fn build_views(
     text: &str,
     comments: &[ExecComment],
     ctx: &ClassifyCtx,
     base: &mut Acc,
+    budget: &std::cell::Cell<usize>,
 ) -> Option<Vec<String>> {
     let limit = usize::from(ctx.limits.max_exec_comment_views);
     let whole = Some(range_of(0, text.len()));
@@ -463,9 +483,22 @@ fn build_views(
         }
     }
     thresholds.sort_unstable();
-    if reading_count(thresholds.len(), comments, limit).is_none() {
+    let Some(count) = reading_count(thresholds.len(), comments, limit) else {
         base.doubt(ReasonCode::TooComplex, whole);
         return None;
+    };
+    // ## m3b-t20-differential: readings × length within the request's budget.
+    if count > 1 {
+        match count
+            .checked_mul(text.len())
+            .and_then(|cost| budget.get().checked_sub(cost))
+        {
+            Some(left) => budget.set(left),
+            None => {
+                base.doubt(ReasonCode::TooComplex, whole);
+                return None;
+            }
+        }
     }
     // The comments with a choice of readings, as a mixed-radix counter.
     let choosers: Vec<usize> = comments
