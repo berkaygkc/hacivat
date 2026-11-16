@@ -54,6 +54,24 @@ impl Layers {
         self.stack.pop().map(|e| e.layer)
     }
 
+    // ## m3b-t21-confirm (named exception): stack-aware focus.
+    /// Removes the layer whose view is `view` and says whether it was the top one. A layer
+    /// removed from under another hands its focus-restore target to the layer that was right
+    /// above it: that layer was opened while the removed one had the focus, so the target it
+    /// recorded is gone with it.
+    pub fn remove_view_in_stack(&mut self, view: EntityId) -> Option<(Layer, bool)> {
+        let at = self
+            .stack
+            .iter()
+            .position(|e| e.layer.view.entity_id() == view)?;
+        let was_top = at + 1 == self.stack.len();
+        let layer = self.stack.remove(at).layer;
+        if !was_top && let Some(above) = self.stack.get_mut(at) {
+            above.layer.restore_focus = layer.restore_focus.clone();
+        }
+        Some((layer, was_top))
+    }
+
     /// Removes the layer whose view is `view`.
     pub fn remove_view(&mut self, view: EntityId) -> Option<Layer> {
         let at = self

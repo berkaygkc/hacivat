@@ -621,8 +621,20 @@ impl Workspace {
     /// Removes the layer showing `view` (wherever it is in the stack) and gives the focus back
     /// (`pub` since m2a-t17: a custom modal layer closes itself by its view).
     pub fn remove_layer(&mut self, view: EntityId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(layer) = self.layers.remove_view(view) {
-            self.closed(layer, window, cx);
+        // ## m3b-t21-confirm (named exception): a layer removed from under another (a prompt
+        // that closed on its own timer or session event under another modal) leaves the focus
+        // on the top layer; only the top layer gives the focus back.
+        match self.layers.remove_view_in_stack(view) {
+            Some((layer, true)) => {
+                self.closed(layer, window, cx);
+            }
+            Some((layer, false)) => {
+                if layer.modal && !self.layers.has_modal() {
+                    rebuild_menus_later(cx);
+                }
+                cx.notify();
+            }
+            None => {}
         }
     }
 

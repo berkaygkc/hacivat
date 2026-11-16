@@ -132,6 +132,10 @@ pub fn tab_close_guard(tab: TabId, window: &mut Window, cx: &mut App) -> CloseDe
 /// The `quit_guard` hook: asked for a quit, a window close and a restart
 /// (`crate::commands::request_restart`, which says so through `take_restart_intent`).
 pub fn quit_guard(cx: &mut App) -> CloseDecision {
+    // ## m3b-t21-confirm (named exception): a quit or a window close answers every open
+    // confirmation with Cancel and every confirm-in-transaction prompt with Roll back (Undo)
+    // first; nothing is run or kept by a close (R-M3-55, D-014).
+    crate::exec_ui::confirm::answer_open_prompts_safely(cx);
     let restart = crate::commands::take_restart_intent(cx);
     if prompt_open(cx) {
         // Any close while the prompt is open answers Cancel (NOTES surface 13).

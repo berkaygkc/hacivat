@@ -2164,3 +2164,120 @@ hv-conn-single-session-reconnect = The session setting of { $name } applies afte
 # Variables:
 #   $zone (String) - the time zone name (an IANA name, untranslated), e.g. "Europe/Istanbul".
 hv-conn-zone-refused = The server refused time zone { $zone }
+
+## m3b-t21-confirm
+
+# The gate's confirmation dialog (R-M3-55, R-M3-84; design/m3b-safe surface 1): asked before a
+# statement is sent. Nothing is sent until the user chooses.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-confirm-title = Run this statement on { $name }?
+# The title for a statement that only locks rows (SELECT … FOR UPDATE).
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-confirm-title-warn = This statement locks rows on { $name }
+# The subtitle's position of the statement in a run of several.
+# Variables:
+#   $i (Number) - the statement's position, from 1.
+#   $n (Number) - the statements in the run.
+hv-confirm-sub-unit = statement { $i } of { $n }
+# The caption above the statement's text.
+hv-confirm-sql = Statement
+# The label of the row that says what the statement does.
+hv-confirm-effect = Effect
+# The dialog's last line on production.
+hv-confirm-prod-line = Nothing is sent until you choose.
+# The dialog's last line off production (the no-WHERE guard, which a setting turns off).
+hv-confirm-calm-line = Off production, Hacivat asks only before statements like this one. Settings › Execution can turn it off.
+# What the statement does (the Effect row), one per kind.
+hv-confirm-class-lock = Reads rows and locks them
+hv-confirm-class-dml = Changes data
+hv-confirm-class-dml-unsafe = Changes data with no usable filter
+hv-confirm-class-ddl-destructive = Removes schema objects or their data
+hv-confirm-class-ddl-other = Changes the schema
+hv-confirm-class-routine = Runs a procedure
+hv-confirm-class-admin = Administers the server or reaches outside the database
+hv-confirm-class-tx = Controls the transaction
+hv-confirm-class-unknown = Unknown: Hacivat can't tell what it does
+# MySQL and MariaDB commit a schema change at once.
+hv-confirm-mysql-ddl = MySQL commits DDL at once, so this can't be rolled back.
+# Above the field the name is typed into.
+# Variables:
+#   $name (String) - the table or schema name exactly as written in the statement, e.g. "müşteriler".
+hv-confirm-type-label = Type { $name } to run it
+# Under the field after a typed name that doesn't match.
+hv-confirm-type-hint = Type it exactly as shown, letter case included.
+# The small button that copies the name to type (for a name the keyboard can't reproduce).
+hv-confirm-copy-name = Copy the name
+hv-confirm-execute = Execute
+hv-confirm-execute-all = Execute all
+hv-confirm-execute-suppress = Execute and don't ask again
+# On production the label names where "don't ask again" applies.
+hv-confirm-execute-suppress-prod = Execute; don't ask again in this console
+# Variables:
+#   $console (String) - the console's title (the connection's name), e.g. "orders-prod".
+hv-confirm-suppress-scope = Not asked again for statements of the same shape in { $console } until it closes.
+hv-confirm-skip = Skip
+hv-confirm-skip-all = Skip all
+hv-confirm-cancel = Cancel
+# What Execute all also answers (RC-1).
+# Variables:
+#   $n (Number) - the later statements Execute all runs without asking.
+hv-confirm-execute-all-scope = { $n ->
+        [one] Execute all also runs the remaining { $n } statement that would ask, without asking. A statement that needs its name typed still asks, and a production change still waits for your answer after it runs.
+       *[other] Execute all also runs the remaining { $n } statements that would ask, without asking. A statement that needs its name typed still asks, and a production change still waits for your answer after it runs.
+    }
+
+# The confirm-in-transaction prompt (R-M3-55, D-014; design/m3b-safe surface 2): a production
+# change ran inside a transaction and waits for an answer.
+# Hacivat's own transaction (Auto-commit, nothing open before).
+# Variables:
+#   $rows (Number) - the rows the statement changed.
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-commit-title = { $rows ->
+        [one] { $rows } row changed on { $name }
+       *[other] { $rows } rows changed on { $name }
+    }
+# As hv-commit-title when the server reported no row count.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-commit-title-unknown = The statement changed data on { $name }
+hv-commit-body-own = Hacivat ran this statement in a transaction of its own. Other sessions don't see the change until you commit.
+hv-commit-locks = Its rows stay locked while this waits. With no answer, Hacivat rolls back after 5 minutes.
+hv-commit-commit = Commit
+hv-commit-rollback = Roll back
+# The countdown; the time is minutes and seconds, e.g. 4:32.
+# Variables:
+#   $time (String) - the time left, e.g. "4:32".
+hv-commit-countdown = Rolls back in { $time }
+# Inside the user's open transaction (a savepoint).
+# Variables:
+#   $rows (Number) - the rows the statement changed.
+hv-commit-sp-title = { $rows ->
+        [one] { $rows } row changed inside your transaction
+       *[other] { $rows } rows changed inside your transaction
+    }
+# As hv-commit-sp-title when the server reported no row count.
+hv-commit-sp-title-unknown = The statement changed data inside your transaction
+hv-commit-sp-keep-line = Keep: the change joins your open transaction. Nothing is committed yet.
+hv-commit-sp-undo-line = Undo: removes this statement's change; your transaction stays open.
+hv-commit-sp-locks = With no answer, Hacivat undoes the statement after 5 minutes and leaves your transaction open.
+hv-commit-keep = Keep
+hv-commit-undo = Undo
+# Variables:
+#   $time (String) - the time left, e.g. "4:51".
+hv-commit-sp-countdown = Undoes this statement in { $time }
+# The connection was lost while the prompt waited.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-commit-dropped-title = The connection to { $name } was lost
+hv-commit-dropped-body = The server rolled back these changes. Nothing was committed.
+# Variables:
+#   $n (Number) - the statements of the user's transaction before this one.
+hv-commit-dropped-sp-body = The server rolled back your open transaction: this statement and the { $n } before it. Nothing was committed.
+# As hv-commit-dropped-sp-body when the count is not known.
+hv-commit-dropped-sp-body-unknown = The server rolled back your open transaction, this statement included. Nothing was committed.
+hv-commit-close = Close
+# Fix round 1 (m8): the name to type holds a control character (a tab or a line break in a
+# quoted name), which the field can't take: the statement can't be confirmed here.
+hv-confirm-type-untypeable = This name contains a character that can't be typed or pasted, so it can't be confirmed here. Run this statement from another client.

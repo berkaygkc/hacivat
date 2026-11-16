@@ -842,3 +842,62 @@ wired into Run before Task 24 (R-M3-52).
     `@@global.`.
   - *Listed schemas (R1-M3).* `DROP SCHEMA a, b` read from the words names no single name, so it
     is denied on production (`exec-unsafe-no-target`).
+
+## m3b-t21 — confirmation dialogs and the app's ConfirmPort
+
+- **Closes answer the safe value, by construction.** The confirmation (`exec_ui::confirm`) and
+  the confirm-in-transaction prompt (`exec_ui::commit_prompt`) own their `oneshot` reply and
+  send it once. Escape, the close button and ⌘W (Ctrl+W) answer Cancel / Roll back; a dialog
+  dropped without an answer (its window closed, the app quit) answers it from `Drop`; the quit
+  guard answers every open one first (one named line in `close_prompt::quit_guard`, so a quit or
+  a window close never leaves a question pending). Enter acts on key down on the focused button
+  only, never in the type field; the initial focus is the safe answer.
+- **The typed name is compared as bytes.** `name_matches` is `typed.as_bytes() == name.as_bytes()`
+  with the name exactly as `GateItem` carries it: no case or Turkish İ/i folding, no trimming,
+  no Unicode normalisation (an NFD spelling fails closed; the Copy button copies the exact bytes
+  for a name the keyboard can't reproduce). Names, reason arguments and the SQL are drawn made
+  visible (bidi and invisible characters as `\u{…}`), so a name cannot reorder the sentence it
+  sits in.
+- **"Don't ask again" is checked twice.** The gate's flag (which already refuses typed names,
+  implicit commits and multi-statement units with a write) and the dialog's own rule
+  (`offers_suppress`: never with a typed name, never for `exec-gate-not-analysed` or an implicit
+  commit, and on production never for `DdlDestructive`, `Admin`, `Unknown`, `Routine` or an
+  unknown class). `answer_plan` returns the item's class-mixed `fingerprint` only when the dialog
+  offered it.
+- **Answers change decisions only.** `answer_plan` goes through `apply_answer`, so an item's
+  verdict (`ExplainAnalyzeRollback`, `ImplicitCommit`), effects, class and fingerprint reach the
+  run unchanged. Execute all (RC-1) answers only later units that would ask without a typed name
+  and never a `RunInTxThenConfirm` unit; Skip all skips every later unit that would ask.
+- **The port reads the console at question time.** `AppConfirmPort::for_console` sends each
+  question over an `mpsc` to one foreground task (the `AppUiPort` pattern); the task fills the
+  connection name and the production flag from the console's live profile (T16 m13: the run
+  service sends `production: true` and an empty name), or answers the safe value when the console
+  is gone. `follow(choices, sql)` makes an open commit prompt close once its question is no longer
+  the one the run waits on (`CommitDecided`, T1c M7); the outcome is the session's event.
+- **The countdown runs on the executor's clock**: the time left is read once from the session's
+  `Instant` deadline, then counted on `background_executor().now()` and repainted when its `m:ss`
+  text changes (once a second). At 0:00 the prompt answers Roll back; the session's own deadline
+  is what undoes the statement (D-014).
+- **Fix round 1.**
+  - *Arming (I1).* Every button that runs or keeps a change (Execute, Execute all, "don't ask
+    again", Commit, Keep) answers only `ARM_DELAY` (400 ms, executor clock) after its dialog was
+    shown, by click or by Enter, and never on a click whose `click_count > 1`. The safe answers
+    are live at once. Chained dialogs of the same shape put Execute at the same pixel, so the
+    second click of a double-click must never reach the next dialog.
+  - *Runs, not slots (I2).* The port's book keys follows and losses by `RunId`
+    (`follow(run, choices, status, sql)`, `connection_lost(run, n)`); a commit question attaches
+    its own run's follow whenever it arrives and never another run's. Once its question stops
+    waiting, the run's own `RunStatus` decides: a unit failed with a lost connection shows the
+    lost form, an ended unit or run closes the prompt. An explicit loss shows the lost form in
+    any order and supplies the statement count when it comes later.
+  - *Stack-aware focus (I3).* `Workspace::remove_layer` gives the focus back only when the top
+    layer closes; a layer removed from under another hands its restore target to the layer above
+    (named exception in `shell/{workspace,layers}.rs`).
+  - *Production is never downgraded (m2):* the port's production flag is
+    `question.production || profile is production`.
+  - *Untypeable names (m8):* a name with a control character (a tab or a line break in a quoted
+    identifier) cannot be typed or pasted (the field turns controls into spaces), so it can never
+    be confirmed. That stays fail-closed, and the dialog says why
+    (`hv-confirm-type-untypeable`). PO list: whether such statements need another way to run.
+  - *IME (m7):* Escape during a composition in the type field ends the composition (its text
+    stays) and keeps the dialog; the next Escape cancels.

@@ -1996,3 +1996,107 @@ hv-tx-idle-waits = Konsol, çalıştırmasıyla ilgili bir yanıt bekliyor. Yan�
 hv-conn-single-session-reconnect = { $name } için oturum ayarı yeniden bağlandıktan sonra geçerli olur.
 # Review: PO
 hv-conn-zone-refused = Sunucu { $zone } saat dilimini reddetti
+
+## m3b-t21-confirm
+
+# Review: PO
+hv-confirm-title = Bu ifade { $name } üzerinde çalıştırılsın mı?
+# Review: PO
+hv-confirm-title-warn = Bu ifade { $name } üzerinde satırları kilitler
+# Review: PO
+hv-confirm-sub-unit = ifade { $i }/{ $n }
+# Review: PO
+hv-confirm-sql = İfade
+# Review: PO
+hv-confirm-effect = Etkisi
+# Review: PO
+hv-confirm-prod-line = Siz seçene kadar hiçbir şey gönderilmez.
+# Review: PO
+hv-confirm-calm-line = Üretim dışında Hacivat yalnızca bunun gibi ifadelerden önce sorar. Ayarlar › Çalıştırma bölümünden kapatılabilir.
+# Review: PO
+hv-confirm-class-lock = Satırları okur ve kilitler
+# Review: PO
+hv-confirm-class-dml = Veriyi değiştirir
+# Review: PO
+hv-confirm-class-dml-unsafe = Veriyi kullanılabilir bir filtre olmadan değiştirir
+# Review: PO
+hv-confirm-class-ddl-destructive = Şema nesnelerini ya da verilerini kaldırır
+# Review: PO
+hv-confirm-class-ddl-other = Şemayı değiştirir
+# Review: PO
+hv-confirm-class-routine = Bir yordam çalıştırır
+# Review: PO
+hv-confirm-class-admin = Sunucuyu yönetir ya da veritabanının dışına erişir
+# Review: PO
+hv-confirm-class-tx = İşlemi denetler
+# Review: PO
+hv-confirm-class-unknown = Bilinmiyor: Hacivat ne yaptığını anlayamıyor
+# Review: PO
+hv-confirm-mysql-ddl = MySQL DDL'i hemen commit eder; bu yüzden bu işlem geri alınamaz.
+# Review: PO
+hv-confirm-type-label = Çalıştırmak için { $name } yazın
+# Review: PO
+hv-confirm-type-hint = Büyük-küçük harf dahil, tam gösterildiği gibi yazın.
+# Review: PO
+hv-confirm-copy-name = Adı kopyala
+# Review: PO
+hv-confirm-execute = Çalıştır
+# Review: PO
+hv-confirm-execute-all = Tümünü çalıştır
+# Review: PO
+hv-confirm-execute-suppress = Çalıştır, bir daha sorma
+# Review: PO
+hv-confirm-execute-suppress-prod = Çalıştır; bu konsolda bir daha sorma
+# Review: PO
+hv-confirm-suppress-scope = Aynı biçimdeki ifadeler { $console } kapanana kadar yeniden sorulmaz.
+# Review: PO
+hv-confirm-skip = Atla
+# Review: PO
+hv-confirm-skip-all = Tümünü atla
+# Review: PO
+hv-confirm-cancel = Vazgeç
+# Review: PO
+hv-confirm-execute-all-scope = Tümünü çalıştır, sorulacak kalan { $n } ifadeyi de sormadan çalıştırır. Adının yazılması gereken bir ifade yine sorar; üretimdeki bir değişiklik de çalıştıktan sonra yine yanıtınızı bekler.
+
+# Review: PO
+hv-commit-title = { $name } üzerinde { $rows } satır değişti
+# Review: PO
+hv-commit-title-unknown = İfade { $name } üzerinde veriyi değiştirdi
+# Review: PO
+hv-commit-body-own = Hacivat bu ifadeyi kendi açtığı bir işlemde çalıştırdı. Commit edene kadar diğer oturumlar değişikliği görmez.
+# Review: PO
+hv-commit-locks = Yanıt beklenirken satırlar kilitli kalır. Yanıt gelmezse Hacivat 5 dakika sonra geri alır.
+# Review: PO
+hv-commit-commit = Commit et
+# Review: PO
+hv-commit-rollback = Geri al
+# Review: PO
+hv-commit-countdown = { $time } sonra geri alınır
+# Review: PO
+hv-commit-sp-title = İşleminizin içinde { $rows } satır değişti
+# Review: PO
+hv-commit-sp-title-unknown = İfade, işleminizin içinde veriyi değiştirdi
+# Review: PO
+hv-commit-sp-keep-line = Koru: değişiklik açık işleminize katılır. Henüz hiçbir şey commit edilmez.
+# Review: PO
+hv-commit-sp-undo-line = İfadeyi geri al: yalnızca bu ifadenin değişikliği kaldırılır; işleminiz açık kalır.
+# Review: PO
+hv-commit-sp-locks = Yanıt gelmezse Hacivat 5 dakika sonra ifadeyi geri alır ve işleminizi açık bırakır.
+# Review: PO
+hv-commit-keep = Koru
+# Review: PO
+hv-commit-undo = İfadeyi geri al
+# Review: PO
+hv-commit-sp-countdown = İfade { $time } sonra geri alınır
+# Review: PO
+hv-commit-dropped-title = { $name } bağlantısı koptu
+# Review: PO
+hv-commit-dropped-body = Sunucu bu değişiklikleri geri aldı. Hiçbir şey commit edilmedi.
+# Review: PO
+hv-commit-dropped-sp-body = Sunucu açık işleminizi geri aldı: bu ifade ve ondan önceki { $n } ifade. Hiçbir şey commit edilmedi.
+# Review: PO
+hv-commit-dropped-sp-body-unknown = Sunucu, bu ifade de içinde olmak üzere açık işleminizi geri aldı. Hiçbir şey commit edilmedi.
+# Review: PO
+hv-commit-close = Kapat
+# Review: PO
+hv-confirm-type-untypeable = Bu ad yazılamayan ya da yapıştırılamayan bir karakter içeriyor; bu yüzden burada doğrulanamaz. Bu ifadeyi başka bir istemciden çalıştırın.
