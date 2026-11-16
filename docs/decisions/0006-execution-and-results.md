@@ -941,13 +941,15 @@ case.
   `CommitDecided { RollBack, by_deadline: true }`.
 - **Read-only, layer by layer.** The cases below run on a read-only console whose guard asks
   the real pool:
-  - The gate denies `INSERT`, and the run service refuses a denied plan.
+  - The gate denies `INSERT`, and the run service refuses a denied plan: nothing executed or
+    failed, every unit `Skipped`, the log's "not started" (fix round 1, I2).
   - With the gate bypassed, the session's first-keyword input layer refuses it (DEMO-7, outcome
     `input`).
   - A write that starts like a read is denied by the gate. With the gate bypassed, step 0b
     denies it (`exec-deny-classifier`):
     - PG: a writable CTE;
-    - MySQL family: `FOR UPDATE`;
+    - MySQL: `WITH … DELETE` (fix round 1, M2: a real write, not a locking read);
+    - MariaDB: `SET STATEMENT … FOR DELETE` (MariaDB has no `WITH … DELETE`);
     - SQLite: `WITH … INSERT`.
   - With a classifier that allows everything (`AllowAll`), the server's own layers stop the
     same statement:
@@ -956,7 +958,9 @@ case.
     - SQLite answers `23`, the read-only connection's authorizer.
   - On PostgreSQL, a read that the real classifier allows still writes through a view over a
     `VOLATILE` function. The server stops it with `25006`.
-  - The side channel's row count is unchanged after every step.
+  - The side channel's row count is unchanged after every step. Every statement of these
+    legs would change that count if the server ran it, so the count is evidence on every
+    engine.
 - **Mutation check (plan Step 2).** Undo's `ROLLBACK TO SAVEPOINT` was replaced by `RELEASE`
   only in `session/confirm.rs`. `confirm_in_tx_both_forms_per_engine` then went red on pg17
   ("Undo keeps the user's transaction": `Failed`, not `InTx`). The mutation was reverted.
@@ -970,17 +974,81 @@ case.
   name (R-M3-55 types only unsafe-DML targets and `DROP DATABASE`/`SCHEMA`, which the rows
   include).
 
+**Fix round 1 (review I1, I2, M1–M5, M7).**
+
+- **pg17-tr (I1).** `turkish_cases_on_pg17_tr` runs on the `pg17-tr` twin
+  (`lc_messages = tr_TR.UTF-8`) through `require_target`, and fails under `full` when the target
+  is missing (M3a's pattern). It covers:
+  - Turkish text binds stored byte for byte (side channel) and found by a Turkish bind;
+  - a notice in Turkish (`tablo "…" mevcut değil, atlanıyor`) that still names the table;
+  - Ask decided by the SQLSTATE `42P01` under a Turkish message;
+  - production's typed name for `DELETE FROM hv_t31_m3b_müşteri_…`, which equals the table's
+    exact bytes;
+  - a Turkish-identifier `UPDATE … WHERE` through confirm-in-transaction, visible only after
+    Commit.
+- **A denied plan sends nothing (I2).** `denied_plan_sends_nothing_on_production`: a production
+  console in Auto runs as one `DELETE FROM a; DELETE FROM b`.
+  - The gate denies it (`exec-unsafe-several-targets`). Nothing later would stop it: the session
+    is writable and the server would run it.
+  - The test asserts the refused shape (executed 0, failed 0, every unit `Skipped`, "not
+    started"), and the side channel still sees both tables' rows.
+  - Mutation: the run service sending a `Deny` unit (`service.rs`, `Planned`) turned this test
+    and case 7 red on pg17, mysql84 and SQLite. The side channel went from (2, 2) to (0, 0). The
+    mutation was reverted.
+- **D-062 (M1).**
+  - PG and MySQL run the savepoint form inside the user's transaction: the explained `DELETE` is
+    undone, and the user's own `INSERT` and transaction stay (4 rows after the user's COMMIT).
+  - MariaDB and SQLite have no `EXPLAIN ANALYZE`: the server answers a syntax error, so their
+    "rows kept" cell proves nothing about the wrap ("n/a" below).
+  - **MariaDB `ANALYZE <dml>`** really executes its statement. By the controller ruling, the
+    interim backend (`sql-safety` `backend/interim.rs`, named exception) classifies
+    `ANALYZE INSERT|UPDATE|DELETE|REPLACE` as the bare statement. `ANALYZE SELECT` and
+    `ANALYZE FORMAT=…` stay `Unknown`. The gate then treats it exactly like the bare DML:
+    `run` on development (`WHERE`), `tx-confirm` on production.
+  - On Docker, production's `ANALYZE DELETE` asks. Roll back leaves 3 rows; Commit leaves 0,
+    showing that it executes.
+  - The T20 seed for `ANALYZE DELETE FROM t` (MariaDB) moved from admin `deny` to `allow`, a
+    named exception in `classifier_seeds.toml`. Read-only stays `deny`. PO list: MariaDB
+    `ANALYZE <dml>` and D-062.
+- **A multi-table `DELETE` names every target (found in this round).**
+  - Before: MySQL and MariaDB `DELETE a, b FROM a JOIN b …` and `DELETE FROM a, b USING …`
+    reported a no-`WHERE` pattern on `a` only, so typing `a` approved deleting from `b` too.
+  - Now the interim backend reports every listed table (named exception, unit test). The gate
+    then denies the several targets on production.
+- **Side channel in case 1 (M3).** Each hint's bound row equals its literal row as the server's
+  own text, and the NULL bind is stored as NULL.
+- **Typed names (M4).** Case 11 asserts the exact bytes of production's typed name: `müşteri`,
+  `s` (`DROP SCHEMA`) and `d` (`DROP DATABASE`).
+- **Artifacts (M5).** Every `t28-<test>.tsv` row now holds measured values: outcomes, codes,
+  counts, end states. No row is a constant description.
+- **E-row mapping for T30 (M7).**
+  - E5's 100-result-set cap is not on Docker; T11 and T16 cover it offline.
+  - E2's "DmlUnsafe, DDL and Admin send nothing before an answer" is not on Docker here, since
+    every `Planned::answer` is Execute. T30 cites T26's Docker test for that clause.
+  - E4, E5 (multi-result, Run as one, error policy) and E2's confirm-in-transaction clauses are
+    this file.
+- **Carried to T24's merge (M6, controller):** the classify context is still rebuilt by the
+  helper. It should switch to T24's session-held source.
+
 | Case (test) | pg14–18 | mysql80, mysql84 | mariadb106, 1011, 114 | SQLite |
 |---|---|---|---|---|
-| 1 `binds_round_trip_every_type_hint` | 14 hints + NULL | 11 hints + NULL | 11 hints + NULL | 9 hints + NULL |
-| 1 `value_with_quote_is_bound_not_spliced` | bound | bound | bound | bound |
+| 1 `binds_round_trip_every_type_hint` | 14/14 hints stored equal + NULL | 11/11 + NULL | 11/11 + NULL | 9/9 + NULL |
+| 1 `value_with_quote_is_bound_not_spliced` | stored as written | same | same | same |
 | 2 `multi_result_call_and_run_as_one` | CALL 1 tab (INOUT); as one 3 text tabs | CALL 3 tabs; as one 2 | CALL 3 tabs; as one 2 | as one 2 |
 | 3 `error_policy_ask_ignore_stop_and_rollback_and_continue` | Ignore, Stop, Roll back and continue (Auto, Manual) | Ignore, Stop, Ignore in tx (Auto, Manual) | same as MySQL | same as MySQL |
 | 4 `confirm_in_tx_both_forms_per_engine` | own ×3, savepoint ×4, Manual keep+undo, Smart | same | same | same |
 | 5 `smart_mode_opens_only_before_writes` | read: none; write: opened | same | same | same |
-| 6 `explain_analyze_dml_is_rolled_back` | wrap, ran, rows kept | wrap, ran, rows kept | wrap, 42000 (syntax), rows kept | wrap, 1 (syntax), rows kept |
-| 7 `read_only_classifier_denies_and_server_layers_hold` | gate, input, 0b, server 25006, view 25006 | gate, input, 0b, server 25006 | gate, input, 0b, server 25006 | gate, input, 0b, authorizer 23 |
+| 6 `explain_analyze_dml_is_rolled_back` | wrap, ran, rows kept; savepoint form in a user tx | same | n/a (no `EXPLAIN ANALYZE`: 42000); `ANALYZE DELETE` gated as bare DML, rollback 3 / commit 0 | n/a (no `EXPLAIN ANALYZE`: 1) |
+| 7 `read_only_classifier_denies_and_server_layers_hold` | gate (refused shape), input, 0b, server 25006, view 25006 | gate, input, 0b, server 25006 (`WITH … DELETE`) | gate, input, 0b, server 25006 (`SET STATEMENT … FOR DELETE`) | gate, input, 0b, authorizer 23 |
 | 8 `notices_and_warnings_reach_the_log` | 2 notices | 1 warning | 1 warning | none |
 | 9 `count_rows_matches_count_star` | 20, 15 | 20, 15 | 20, 15 | 20, 15 |
 | 10 `type_goldens_match` | 72 values (T7 file) | 31 values (T7 file) | 31 values (T7 file) | 8 values |
-| 11 `gate_end_to_end_over_real_classify` | 9 × 3 consoles | 9 × 3 | 9 × 3 | 5 × 3 |
+| 11 `gate_end_to_end_over_real_classify` | 9 × 3 consoles, typed `müşteri`, `s` | 9 × 3, typed `müşteri`, `d` | 9 × 3, typed `müşteri`, `d` | 5 × 3, typed `müşteri` |
+| (I2) `denied_plan_sends_nothing_on_production` | refused shape, rows (2, 2) | same | same | same |
+
+| pg17-tr | `turkish_cases_on_pg17_tr` |
+|---|---|
+| binds | 5 Turkish words stored byte for byte; found by `İstanbul` |
+| notice | `tablo "hv_t31_m3b_yok_ğ_…" mevcut değil, atlanıyor` |
+| Ask | unit 1, `42P01` |
+| production | typed name = the table's bytes; `UPDATE … WHERE` own form, `İstanbul` → `Ömer` after Commit |

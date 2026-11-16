@@ -19,6 +19,8 @@
 //!   list), and SQLite (a file per test) in every set. Each test asserts at its end that every
 //!   line ran (`Table::finish`) and writes its engine × version × case rows to the Docker
 //!   artifact `t28-<test>.tsv`. Per-engine differences are explicit expectations, never a skip.
+//!   The Turkish cases run on `pg17-tr` (`turkish_cases_on_pg17_tr`, fix round 1, I1): a
+//!   `require_target` that must exist under `full`.
 //! - **The deadline.** The run service sends D-014's 5 minutes; the 2 s deadline legs send the
 //!   same prepared units with the gate's verdicts straight to the session
 //!   (`Con::run_with_deadline`, the T31 precedent).
@@ -36,7 +38,10 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::matrix::{Line, Side, admin, cell, docker_enabled, ended, lines, same, secs, unique};
+use common::matrix::{
+    Line, Side, admin, cell, code_of, docker_enabled, ended, line_of, lines, must_exist, same,
+    secs, unique,
+};
 use common::t28::{AllowAll, Con, Planned, Port, Spec, Table, shape};
 use hacivat_driver::TxStatus;
 use hacivat_exec::classify_pool::ClassifyPool;
@@ -365,11 +370,42 @@ async fn binds_round_trip_every_type_hint() {
                 &format!("{id}: a NULL bind"),
             );
         }
+        // Fix round 1 (M3): what the server stored, read through the side channel as its own
+        // text: the bound row equals the literal row column by column, the NULL bind is NULL.
+        let mut stored_equal = 0;
+        for col in &cols {
+            let n = col.name;
+            let bound = a.value(&format!("SELECT {n} FROM {t} WHERE id = 1")).await;
+            let literal = a.value(&format!("SELECT {n} FROM {t} WHERE id = 2")).await;
+            if bound.is_some() && bound == literal {
+                stored_equal += 1;
+            } else {
+                bad.0.push(format!(
+                    "{id}: stored {n}: bound {bound:?}, literal {literal:?}"
+                ));
+            }
+        }
+        bad.eq(
+            a.count(&format!("SELECT COUNT(*) FROM {t}")).await,
+            3,
+            &format!("{id}: rows stored"),
+        );
+        bad.eq(
+            a.value(&format!("SELECT tx FROM {t} WHERE id = 1")).await,
+            Some("O'Reilly ş İ".to_string()),
+            &format!("{id}: stored text"),
+        );
+        let stored_null = a.value(&format!("SELECT tx FROM {t} WHERE id = 3")).await;
+        bad.eq(stored_null.clone(), None, &format!("{id}: stored NULL"));
         table.add(
             line,
             c.version.as_ref(),
             "binds",
-            &format!("{} hints + NULL", cols.len()),
+            &format!(
+                "{stored_equal}/{} hints stored equal to their literals; NULL stored: {}",
+                cols.len(),
+                stored_null.is_none()
+            ),
         );
         c.shutdown().await;
         a.batch(&format!("DROP TABLE {t}")).await;
@@ -421,12 +457,26 @@ async fn value_with_quote_is_bound_not_spliced() {
                 &format!("{id}: found by the bound value"),
             );
         }
+        let stored = a.scalar(&format!("SELECT v FROM {t}")).await;
         bad.eq(
-            a.scalar(&format!("SELECT v FROM {t}")).await,
+            stored.clone(),
             hostile.clone(),
             &format!("{id}: the side channel"),
         );
-        table.add(line, c.version.as_ref(), "quote", "bound, table kept");
+        let found_rows = if found.outcome() == "ran" {
+            rows_of(found.tab(0)).len()
+        } else {
+            0
+        };
+        table.add(
+            line,
+            c.version.as_ref(),
+            "quote",
+            &format!(
+                "stored as written: {}; found by the bound value: {found_rows} row",
+                stored == hostile
+            ),
+        );
         c.shutdown().await;
         a.batch(&format!("DROP TABLE {t}")).await;
         a.close().await;
@@ -543,8 +593,9 @@ async fn multi_result_call_and_run_as_one() {
 // ---------------------------------------------------------------------------------------------
 // 3. The error policy
 
-/// The run's question: `(run seq, question id, unit ordinal, rollback_and_continue)`.
-async fn choice(id: &str, t: &RunTicket) -> (u64, u64, u32, bool) {
+/// The run's question: `(run seq, question id, unit ordinal, rollback_and_continue, the
+/// failure's SQLSTATE or vendor code)`.
+async fn choice(id: &str, t: &RunTicket) -> (u64, u64, u32, bool, Option<String>) {
     let mut choices = t.choices.clone();
     let pending = tokio::time::timeout(secs(30), choices.wait_for(Option::is_some))
         .await
@@ -556,8 +607,14 @@ async fn choice(id: &str, t: &RunTicket) -> (u64, u64, u32, bool) {
             unit,
             question,
             rollback_and_continue,
-            ..
-        } => (seq, question, unit.ordinal, rollback_and_continue),
+            error,
+        } => (
+            seq,
+            question,
+            unit.ordinal,
+            rollback_and_continue,
+            code_of(error.server.as_ref()),
+        ),
         other => panic!("{id}: expected NeedsChoice, got {other:?}"),
     }
 }
@@ -568,24 +625,25 @@ async fn count_of(a: &mut Side, t: &str, v: i64) -> i64 {
         .await
 }
 
-/// Runs `script` under `Ask`, answers its question `answer`; the run's question and end.
+/// Runs `script` under `Ask`, answers its question `answer`; the run's question (unit,
+/// `rollback_and_continue`, the failure's code) and end.
 async fn asked_run(
     c: &Con,
     script: &str,
     answer: impl Fn(bool) -> RunChoice,
-) -> ((u32, bool), common::matrix::Ran) {
+) -> ((u32, bool, Option<String>), common::matrix::Ran) {
     let id = &c.line.id;
     let mut p = c.plan(script, &[]).await;
     p.answer(ConfirmAnswer::Execute);
     let t = c.send(&p, ErrorPolicy::Ask, None);
-    let (seq, question, unit, rac) = choice(id, &t).await;
+    let (seq, question, unit, rac, code) = choice(id, &t).await;
     assert!(
         c.s.choose(seq, question, answer(rac))
             .await
             .expect("the actor replies"),
         "{id}: the answer was taken"
     );
-    ((unit, rac), ended(t).await)
+    ((unit, rac, code), ended(t).await)
 }
 
 /// Ask: Ignore runs the rest, Stop skips it; in a failed PostgreSQL transaction the question
@@ -612,33 +670,36 @@ async fn error_policy_ask_ignore_stop_and_rollback_and_continue() {
             )
         };
 
+        let mut measured: Vec<String> = Vec::new();
         // Ignore.
-        let ((unit, rac), ran) = asked_run(&c, &script(1, 2), |_| RunChoice::Ignore).await;
+        let ((unit, rac, code), ran) = asked_run(&c, &script(1, 2), |_| RunChoice::Ignore).await;
         bad.eq((unit, rac), (1, false), &format!("{id}: Ignore's question"));
         bad.eq(
             (ran.summary.executed, ran.summary.failed),
             (2, 1),
             &format!("{id}: Ignore ran the rest"),
         );
-        bad.eq(
-            (count_of(&mut a, &t, 1).await, count_of(&mut a, &t, 2).await),
-            (1, 1),
-            &format!("{id}: Ignore's rows"),
-        );
+        let rows = (count_of(&mut a, &t, 1).await, count_of(&mut a, &t, 2).await);
+        bad.eq(rows, (1, 1), &format!("{id}: Ignore's rows"));
+        measured.push(format!(
+            "ignore: unit {unit} {code:?} executed {} rows {rows:?}",
+            ran.summary.executed
+        ));
 
         // Stop.
-        let ((unit, _), ran) = asked_run(&c, &script(3, 4), |_| RunChoice::Stop).await;
+        let ((unit, _, _), ran) = asked_run(&c, &script(3, 4), |_| RunChoice::Stop).await;
         bad.eq(unit, 1, &format!("{id}: Stop's question"));
         bad.eq(
             ran.summary.skipped,
             1,
             &format!("{id}: Stop skipped the rest"),
         );
-        bad.eq(
-            (count_of(&mut a, &t, 3).await, count_of(&mut a, &t, 4).await),
-            (1, 0),
-            &format!("{id}: Stop's rows"),
-        );
+        let rows = (count_of(&mut a, &t, 3).await, count_of(&mut a, &t, 4).await);
+        bad.eq(rows, (1, 0), &format!("{id}: Stop's rows"));
+        measured.push(format!(
+            "stop: skipped {} rows {rows:?}",
+            ran.summary.skipped
+        ));
 
         // A failure inside the user's transaction.
         let in_tx = format!("BEGIN;\n{}", script(5, 6));
@@ -649,7 +710,7 @@ async fn error_policy_ask_ignore_stop_and_rollback_and_continue() {
                 RunChoice::Ignore
             }
         };
-        let ((unit, rac), _) = asked_run(&c, &in_tx, pick).await;
+        let ((unit, rac, _), _) = asked_run(&c, &in_tx, pick).await;
         bad.eq(
             (unit, rac),
             (2, line.is_pg()),
@@ -663,11 +724,12 @@ async fn error_policy_ask_ignore_stop_and_rollback_and_continue() {
                 TxStatus::Idle,
                 &format!("{id}: rolled back"),
             );
-            bad.eq(
-                (count_of(&mut a, &t, 5).await, count_of(&mut a, &t, 6).await),
-                (0, 1),
-                &format!("{id}: Roll back and continue"),
-            );
+            let rows = (count_of(&mut a, &t, 5).await, count_of(&mut a, &t, 6).await);
+            bad.eq(rows, (0, 1), &format!("{id}: Roll back and continue"));
+            measured.push(format!(
+                "in tx: rac {rac}, {:?}, rows {rows:?}",
+                snap.tx.status
+            ));
         } else {
             bad.eq(
                 (snap.tx.status, snap.tx.owner),
@@ -675,16 +737,17 @@ async fn error_policy_ask_ignore_stop_and_rollback_and_continue() {
                 &format!("{id}: the user's transaction stays"),
             );
             c.ok("COMMIT").await;
-            bad.eq(
-                (count_of(&mut a, &t, 5).await, count_of(&mut a, &t, 6).await),
-                (1, 1),
-                &format!("{id}: the user's COMMIT"),
-            );
+            let rows = (count_of(&mut a, &t, 5).await, count_of(&mut a, &t, 6).await);
+            bad.eq(rows, (1, 1), &format!("{id}: the user's COMMIT"));
+            measured.push(format!(
+                "in tx: rac {rac}, {:?}, rows {rows:?}",
+                snap.tx.status
+            ));
         }
 
         // Manual mode (P-M3b-19: Roll back and continue keeps it).
         c.set_mode(TxMode::Manual).await;
-        let ((unit, rac), _) = asked_run(&c, &script(7, 8), pick).await;
+        let ((unit, rac, _), _) = asked_run(&c, &script(7, 8), pick).await;
         bad.eq((unit, rac), (1, line.is_pg()), &format!("{id}: Manual"));
         let snap = c.settled().await;
         bad.eq(snap.tx.mode, TxMode::Manual, &format!("{id}: Manual kept"));
@@ -695,22 +758,19 @@ async fn error_policy_ask_ignore_stop_and_rollback_and_continue() {
         );
         c.ok("COMMIT").await;
         let want = if line.is_pg() { (0, 1) } else { (1, 1) };
-        bad.eq(
-            (count_of(&mut a, &t, 7).await, count_of(&mut a, &t, 8).await),
-            want,
-            &format!("{id}: Manual's rows"),
-        );
+        let rows = (count_of(&mut a, &t, 7).await, count_of(&mut a, &t, 8).await);
+        bad.eq(rows, want, &format!("{id}: Manual's rows"));
+        measured.push(format!(
+            "manual: rac {rac}, {:?}, rows {rows:?}",
+            snap.tx.mode
+        ));
         c.set_mode(TxMode::Auto).await;
 
         table.add(
             line,
             c.version.as_ref(),
             "error-policy",
-            if line.is_pg() {
-                "ignore, stop, rollback-and-continue (auto, manual)"
-            } else {
-                "ignore, stop, ignore in tx (auto, manual)"
-            },
+            &measured.join("; "),
         );
         c.shutdown().await;
         a.batch(&format!("DROP TABLE {t}")).await;
@@ -1002,12 +1062,24 @@ async fn confirm_in_tx_both_forms_per_engine() {
         );
         c.set_mode(TxMode::Auto).await;
 
+        // Fix round 1 (M5): the measured end state, one count per value inserted (1 own
+        // Commit, 2 own Roll back, 3 own deadline, 4 BEGIN in the run + Keep, 5 the user's
+        // statement kept, 6 Undo, 7 kept, 8 savepoint deadline, 9 kept despite the failed
+        // duplicate, 10 Manual Keep, 11 Manual Undo, 12 Smart Keep).
+        let mut finals = Vec::new();
+        for v in 1..=12 {
+            finals.push(a.count(&seen(v)).await);
+        }
+        bad.eq(
+            finals.clone(),
+            vec![1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1],
+            &format!("{id}: the committed rows"),
+        );
         table.add(
             line,
             c.version.as_ref(),
             "confirm-in-tx",
-            "own: commit, rollback, deadline; savepoint: begin-in-run, undo, deadline, \
-             failure; manual keep+undo; smart",
+            &format!("committed per value 1..=12: {finals:?}"),
         );
         c.shutdown().await;
         a.batch(&format!("DROP TABLE {t}")).await;
@@ -1050,6 +1122,7 @@ async fn smart_mode_opens_only_before_writes() {
         );
         c.ok(&read).await;
         let s = c.settled().await;
+        let after_read = s.tx.status;
         bad.eq(
             s.tx.status,
             TxStatus::Idle,
@@ -1057,6 +1130,7 @@ async fn smart_mode_opens_only_before_writes() {
         );
         c.ok(&write).await;
         let s = c.settled().await;
+        let after_write = (s.tx.status, s.tx.owner);
         bad.eq(
             (s.tx.status, s.tx.owner, s.tx.mode),
             (TxStatus::InTx, TxOwner::User, TxMode::Smart),
@@ -1074,17 +1148,17 @@ async fn smart_mode_opens_only_before_writes() {
             (TxStatus::Idle, TxMode::Smart),
             &format!("{id}: after COMMIT"),
         );
-        bad.eq(
-            a.count(&format!("SELECT COUNT(*) FROM {t}")).await,
-            1,
-            &format!("{id}: committed"),
-        );
+        let committed = a.count(&format!("SELECT COUNT(*) FROM {t}")).await;
+        bad.eq(committed, 1, &format!("{id}: committed"));
         c.set_mode(TxMode::Auto).await;
         table.add(
             line,
             c.version.as_ref(),
             "smart",
-            "read: none; write: opened",
+            &format!(
+                "after the read {after_read:?}; after the write {after_write:?}; \
+                 rows after COMMIT {committed}"
+            ),
         );
         c.shutdown().await;
         a.batch(&format!("DROP TABLE {t}")).await;
@@ -1155,12 +1229,84 @@ async fn explain_analyze_dml_is_rolled_back() {
             TxStatus::Idle,
             &format!("{id}: nothing left open"),
         );
-        table.add(
-            line,
-            c.version.as_ref(),
-            "explain-analyze",
-            &format!("{got_shape}, {}, 3 rows kept", ran.outcome()),
+        let mut measured = format!(
+            "{got_shape}, {}, rows {}",
+            ran.outcome(),
+            a.count(&format!("SELECT COUNT(*) FROM {t}")).await
         );
+
+        // Fix round 1 (M1): the D-062 savepoint form. Inside the user's transaction the wrap
+        // is `SAVEPOINT hv_explain … ROLLBACK TO`: the explained DELETE is undone, the user's
+        // own earlier INSERT and transaction stay, and the user's COMMIT commits only it.
+        if line.is_pg() || line.engine == DbmsKind::MySql {
+            c.ok("BEGIN").await;
+            c.ok(&format!("INSERT INTO {t} VALUES (10)")).await;
+            let ran = c.run(&sql).await;
+            bad.eq(
+                ran.outcome(),
+                "ran".to_string(),
+                &format!("{id}: wrapped in a tx"),
+            );
+            let s = c.settled().await;
+            bad.eq(
+                (s.tx.status, s.tx.owner),
+                (TxStatus::InTx, TxOwner::User),
+                &format!("{id}: the user's transaction stays"),
+            );
+            c.ok("COMMIT").await;
+            let rows = a.count(&format!("SELECT COUNT(*) FROM {t}")).await;
+            bad.eq(
+                rows,
+                4,
+                &format!("{id}: savepoint form: the DELETE undone, the INSERT kept"),
+            );
+            measured.push_str(&format!(
+                "; in a user tx: {}, rows after COMMIT {rows}",
+                ran.outcome()
+            ));
+        }
+
+        // Fix round 1 (M1, controller ruling): MariaDB's `ANALYZE <dml>` runs its statement;
+        // it is gated exactly like the bare DML, and it really executes inside the confirm.
+        if line.engine == DbmsKind::MariaDb {
+            let analyze = format!("ANALYZE DELETE FROM {t} WHERE a > 0");
+            let bare = format!("DELETE FROM {t} WHERE a > 0");
+            let prod = Con::open(line, Spec::production(), &pool).await;
+            prod.set_mode(TxMode::Auto).await;
+            for (kind, con) in [("development", &c), ("production", &prod)] {
+                let (x, y) = (
+                    con.plan(&analyze, &[]).await.shapes(),
+                    con.plan(&bare, &[]).await.shapes(),
+                );
+                bad.eq(x.clone(), y, &format!("{id}: ANALYZE DELETE on {kind}"));
+                measured.push_str(&format!("; ANALYZE DELETE on {kind}: {x:?}"));
+            }
+            let before = a.count(&format!("SELECT COUNT(*) FROM {t}")).await;
+            // Roll back: nothing changes.
+            let (run, port, _) = confirmed(&prod, &analyze).await;
+            port.answer(CommitAnswer::RollBack);
+            ended(run).await;
+            prod.settled().await;
+            let after_rollback = a.count(&format!("SELECT COUNT(*) FROM {t}")).await;
+            bad.eq(
+                after_rollback,
+                before,
+                &format!("{id}: ANALYZE DELETE rolled back"),
+            );
+            // Commit: the DELETE ran.
+            let (run, port, _) = confirmed(&prod, &analyze).await;
+            port.answer(CommitAnswer::Commit);
+            ended(run).await;
+            prod.settled().await;
+            let after_commit = a.count(&format!("SELECT COUNT(*) FROM {t}")).await;
+            bad.eq(after_commit, 0, &format!("{id}: ANALYZE DELETE executes"));
+            measured.push_str(&format!(
+                "; production ANALYZE DELETE rows: {before} → rollback {after_rollback} → \
+                 commit {after_commit}"
+            ));
+            prod.shutdown().await;
+        }
+        table.add(line, c.version.as_ref(), "explain-analyze", &measured);
         c.shutdown().await;
         a.batch(&format!("DROP TABLE {t}")).await;
         a.close().await;
@@ -1173,13 +1319,41 @@ async fn explain_analyze_dml_is_rolled_back() {
 // 7. Read-only
 
 /// A write whose first keyword is not a write, so the read-only input layer (DEMO-7, first
-/// keyword only) lets it through to step 0b (the bypass catalogue's P1 / M5 shapes).
+/// keyword only) lets it through to step 0b and, with a classifier that allows it, to the
+/// server. Every one really writes the fixture row (fix round 1, M2: no locking read): the
+/// side channel's row count is the evidence that the server stopped it.
 fn sneaky(line: &Line, t: &str) -> String {
     match line.engine {
         DbmsKind::Postgres => format!("WITH d AS (DELETE FROM {t} RETURNING *) SELECT * FROM d"),
         DbmsKind::Sqlite => format!("WITH x(v) AS (SELECT 2) INSERT INTO {t} SELECT v FROM x"),
-        _ => format!("SELECT * FROM {t} FOR UPDATE"),
+        DbmsKind::MariaDb => {
+            format!("SET STATEMENT max_statement_time = 60 FOR DELETE FROM {t} WHERE a = 1")
+        }
+        _ => format!("WITH c AS (SELECT 1) DELETE FROM {t} WHERE a = 1"),
     }
+}
+
+/// Fix round 1 (I2): how a run the service refused before sending looks. Nothing executed or
+/// failed, every unit is `Skipped`, and the log says the run never started.
+fn refused_shape(ran: &common::matrix::Ran, log: &hacivat_exec::SessionLog) -> String {
+    let s = ran.summary;
+    let all_skipped = ran
+        .status
+        .units
+        .iter()
+        .all(|u| matches!(u.status, hacivat_exec::UnitStatus::Skipped));
+    let not_started = log
+        .lines()
+        .iter()
+        .any(|l| matches!(l.msg, LogMsg::NotStarted(_)));
+    format!(
+        "executed {} failed {} skipped {}/{} all-skipped {all_skipped} not-started {not_started}",
+        s.executed, s.failed, s.skipped, s.total
+    )
+}
+
+fn refused_want(units: u32) -> String {
+    format!("executed 0 failed 0 skipped {units}/{units} all-skipped true not-started true")
 }
 
 /// What the server's layers answer [`sneaky`] on a read-only session whose classifier allowed
@@ -1243,10 +1417,14 @@ async fn read_only_classifier_denies_and_server_layers_hold() {
             &format!("{id}: the gate"),
         );
         let ran = ended(real.send(&p, ErrorPolicy::StopOnError, None)).await;
-        bad.check(ran.outcome() != "ran", || {
-            format!("{id}: a denied plan ran")
-        });
+        let refused = refused_shape(&ran, &real.log);
+        bad.eq(
+            refused.clone(),
+            refused_want(1),
+            &format!("{id}: a denied plan is refused before sending"),
+        );
         bad.eq(a.count(&rows).await, 1, &format!("{id}: after the gate"));
+        let mut measured = vec![format!("gate {denied:?}, {refused}")];
         // The gate bypassed: the session's input layer refuses a write keyword (DEMO-7).
         let ran = ended(real.send(&p.forced(0), ErrorPolicy::StopOnError, None)).await;
         bad.eq(
@@ -1254,6 +1432,7 @@ async fn read_only_classifier_denies_and_server_layers_hold() {
             "input".to_string(),
             &format!("{id}: the input layer"),
         );
+        measured.push(format!("forced INSERT: {}", ran.outcome()));
         // A write that starts like a read: the gate denies it, and with the gate bypassed
         // step 0b's classifier does.
         let p = real.plan(&sneaky(line, &t), &[]).await;
@@ -1264,9 +1443,10 @@ async fn read_only_classifier_denies_and_server_layers_hold() {
             "exec-deny-classifier".to_string(),
             &format!("{id}: step 0b"),
         );
-        bad.eq(a.count(&rows).await, 1, &format!("{id}: after step 0b"));
+        let n = a.count(&rows).await;
+        bad.eq(n, 1, &format!("{id}: after step 0b"));
+        measured.push(format!("forced write-as-read: {}, rows {n}", ran.outcome()));
         // PostgreSQL: a read the classifier allows writes through a view; the server stops it.
-        let mut view = String::new();
         if line.is_pg() {
             let sql = format!("SELECT * FROM {t}_v");
             let p = real.plan(&sql, &[]).await;
@@ -1281,8 +1461,9 @@ async fn read_only_classifier_denies_and_server_layers_hold() {
                 "25006".to_string(),
                 &format!("{id}: the view's write"),
             );
-            bad.eq(a.count(&rows).await, 1, &format!("{id}: after the view"));
-            view = format!("; view read: {}", ran.outcome());
+            let n = a.count(&rows).await;
+            bad.eq(n, 1, &format!("{id}: after the view"));
+            measured.push(format!("view read: {}, rows {n}", ran.outcome()));
         }
         let version = real.version.clone();
         real.shutdown().await;
@@ -1301,16 +1482,12 @@ async fn read_only_classifier_denies_and_server_layers_hold() {
             server_stop(line).to_string(),
             &format!("{id}: the server's layers"),
         );
-        bad.eq(a.count(&rows).await, 1, &format!("{id}: after the server"));
-        let stopped = ran.outcome();
+        let n = a.count(&rows).await;
+        bad.eq(n, 1, &format!("{id}: after the server"));
+        measured.push(format!("allow-all write: {}, rows {n}", ran.outcome()));
         open.shutdown().await;
 
-        table.add(
-            line,
-            version.as_ref(),
-            "read-only",
-            &format!("gate deny; input layer; step 0b deny; allow-all: {stopped}{view}"),
-        );
+        table.add(line, version.as_ref(), "read-only", &measured.join("; "));
         if line.is_pg() {
             a.batch(&format!("DROP VIEW {t}_v")).await;
             a.batch(&format!("DROP FUNCTION {t}_w()")).await;
@@ -1718,6 +1895,27 @@ fn gate_rows(line: &Line) -> Vec<(&'static str, &'static str, &'static str)> {
     rows
 }
 
+/// The name a production confirmation of `p`'s first unit asks to type, if any.
+fn typed_name(p: &Planned) -> Option<String> {
+    match &p.plan.items[0].decision {
+        hacivat_exec::GateDecision::Confirm {
+            type_to_confirm: Some(t),
+            ..
+        } => Some(t.to_string()),
+        _ => None,
+    }
+}
+
+/// The typed name each `gate_rows` statement asks for on production (fix round 1, M4).
+fn expected_typed_name(sql: &str) -> Option<&'static str> {
+    match sql {
+        "DELETE FROM müşteri" => Some("müşteri"),
+        "DROP SCHEMA s CASCADE" => Some("s"),
+        "DROP DATABASE d" => Some("d"),
+        _ => None,
+    }
+}
+
 /// The gate end to end over the real `classify` (Task 15's `#[ignore]` test, turned on here on
 /// the matrix; P-M3b-16): the shapes per engine on a live production console, a live
 /// development console and a live read-only console (where every write is denied).
@@ -1740,6 +1938,7 @@ async fn gate_end_to_end_over_real_classify() {
         )
         .await;
         let rows = gate_rows(line);
+        let mut measured = Vec::new();
         for (sql, on_prod, on_dev) in &rows {
             let p = prod.plan(sql, &[]).await;
             let d = dev.plan(sql, &[]).await;
@@ -1751,17 +1950,251 @@ async fn gate_end_to_end_over_real_classify() {
             );
             let want_ro = if *sql == "SELECT 1" { "run" } else { "deny" };
             bad.eq(r.shapes()[0], want_ro, &format!("{id}: `{sql}` read-only"));
+            // Fix round 1 (M4): the name production asks to type, as exact bytes (R-M3-55: no
+            // case folding, no normalisation).
+            let typed = typed_name(&p);
+            bad.eq(
+                typed.as_deref().map(str::as_bytes),
+                expected_typed_name(sql).map(str::as_bytes),
+                &format!("{id}: `{sql}` typed name"),
+            );
+            measured.push(format!(
+                "{}/{}/{}{}",
+                p.shapes()[0],
+                d.shapes()[0],
+                r.shapes()[0],
+                typed.map(|t| format!(" type `{t}`")).unwrap_or_default()
+            ));
         }
-        table.add(
-            line,
-            prod.version.as_ref(),
-            "gate",
-            &format!("{} statements x 3 consoles", rows.len()),
-        );
+        table.add(line, prod.version.as_ref(), "gate", &measured.join("; "));
         prod.shutdown().await;
         dev.shutdown().await;
         ro.shutdown().await;
     }
     bad.assert_none("gate");
     table.finish("gate", &lines);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 1 (I2): a denied plan sends nothing, where no later layer would stop it
+
+/// A production console's Run as one of two unbounded `DELETE`s is denied by the gate (two
+/// typed names: `exec-unsafe-several-targets`). No later layer would stop it: the session is
+/// writable and the server would run both. The run service must refuse the plan before
+/// sending: nothing executed, every unit skipped, the log's "not started", and the side
+/// channel still sees both tables' rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn denied_plan_sends_nothing_on_production() {
+    if !docker_enabled() {
+        return;
+    }
+    let (pool, table, lines) = (pool(), Table::new(), lines());
+    let mut bad = Bad::default();
+    for line in &lines {
+        let id = &line.id;
+        let (t1, t2) = (unique("hv_t31_m3b_deny"), unique("hv_t31_m3b_deny"));
+        let mut a = admin(line).await;
+        for t in [&t1, &t2] {
+            a.batch(&create(line, t, "a INT")).await;
+            a.batch(&format!("INSERT INTO {t} VALUES (1), (2)")).await;
+        }
+        let c = Con::open(line, Spec::production(), &pool).await;
+        // Auto: a unit sent by mistake would commit at once, so the side channel sees it
+        // (production starts in Manual, where it would stay in an open transaction).
+        c.set_mode(TxMode::Auto).await;
+        let script = format!("DELETE FROM {t1}; DELETE FROM {t2}");
+        let p = c.plan_units(c.as_one(&script), &[], true).await;
+        let reason = p.plan.first_denied().map(|i| match &i.decision {
+            hacivat_exec::GateDecision::Deny(r) => r.fluent_id,
+            _ => "",
+        });
+        bad.eq(
+            reason,
+            Some("exec-unsafe-several-targets"),
+            &format!("{id}: the gate"),
+        );
+        let ran = ended(c.send(&p, ErrorPolicy::StopOnError, None)).await;
+        let shape = refused_shape(&ran, &c.log);
+        bad.eq(shape.clone(), refused_want(1), &format!("{id}: refused"));
+        let rows = (
+            a.count(&format!("SELECT COUNT(*) FROM {t1}")).await,
+            a.count(&format!("SELECT COUNT(*) FROM {t2}")).await,
+        );
+        bad.eq(rows, (2, 2), &format!("{id}: the side channel"));
+        table.add(
+            line,
+            c.version.as_ref(),
+            "denied-plan",
+            &format!("{reason:?}; {shape}; rows {rows:?}"),
+        );
+        c.shutdown().await;
+        for t in [&t1, &t2] {
+            a.batch(&format!("DROP TABLE {t}")).await;
+        }
+        a.close().await;
+    }
+    bad.assert_none("denied-plan");
+    table.finish("denied-plan", &lines);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 1 (I1): the Turkish cases on pg17-tr
+
+/// The Turkish cases on `pg17-tr` (`lc_messages = tr_TR.UTF-8`; the plan's "pg17-tr for the
+/// Turkish cases"; M3a's `require_target` + `must_exist()` pattern): Turkish text binds round
+/// trip byte for byte; a notice under Turkish server messages still names the table; Ask is
+/// decided by the SQLSTATE, not the (Turkish) message; production's typed name for a
+/// `DELETE` of a Turkish table is its exact bytes; and a Turkish-identifier `UPDATE … WHERE`
+/// goes through confirm-in-transaction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn turkish_cases_on_pg17_tr() {
+    if !docker_enabled() {
+        return;
+    }
+    let Some(target) = hacivat_testkit::require_target("pg17-tr") else {
+        assert!(!must_exist(), "pg17-tr is missing from the full set");
+        return;
+    };
+    let line = line_of(target);
+    let id = line.id.clone();
+    let (pool, table) = (pool(), Table::new());
+    let mut bad = Bad::default();
+    let mut measured = Vec::new();
+    // A table whose name holds Turkish letters (unquoted: PostgreSQL folds ASCII only).
+    let t = unique("hv_t31_m3b_müşteri");
+    let mut a = admin(&line).await;
+    a.batch(&format!("CREATE TABLE {t} (id int PRIMARY KEY, ad text)"))
+        .await;
+    let c = Con::open(&line, Spec::dev(), &pool).await;
+    let version = c.version.clone();
+    let text = |s: &str| {
+        typed(
+            LogicalType::Text {
+                max_chars: None,
+                fixed: false,
+            },
+            s,
+        )
+    };
+
+    // Binds: Turkish text round trips byte for byte, and finds itself.
+    let words = ["İstanbul", "ılık", "şeker", "Iğdır", "ÇÖĞÜŞİ"];
+    for (i, w) in words.iter().enumerate() {
+        let ran = c
+            .run_with(
+                &format!("INSERT INTO {t} (id, ad) VALUES ({}, :ad)", i + 1),
+                &[("ad", text(w))],
+            )
+            .await;
+        bad.eq(
+            ran.outcome(),
+            "ran".to_string(),
+            &format!("{id}: insert {w}"),
+        );
+    }
+    let stored = a.column(&format!("SELECT ad FROM {t} ORDER BY id")).await;
+    bad.eq(
+        stored.iter().map(String::as_bytes).collect::<Vec<_>>(),
+        words.iter().map(|w| w.as_bytes()).collect::<Vec<_>>(),
+        &format!("{id}: stored bytes"),
+    );
+    let found = c
+        .run_with(
+            &format!("SELECT id FROM {t} WHERE ad = :ad"),
+            &[("ad", text("İstanbul"))],
+        )
+        .await;
+    let found_rows = if found.outcome() == "ran" {
+        rows_of(found.tab(0))
+    } else {
+        Vec::new()
+    };
+    bad.eq(
+        found_rows.clone(),
+        vec![vec![Value::Int(1)]],
+        &format!("{id}: found by a Turkish bind"),
+    );
+    measured.push(format!(
+        "binds: {} stored exactly, found {}",
+        stored.len(),
+        found_rows.len()
+    ));
+
+    // A notice under Turkish messages still names the (Turkish) table.
+    let absent = unique("hv_t31_m3b_yok_ğ");
+    c.ok(&format!("DROP TABLE IF EXISTS {absent}")).await;
+    let got = notices(&c);
+    bad.check(got.iter().any(|n| n.contains(&absent)), || {
+        format!("{id}: no notice names {absent}: {got:?}")
+    });
+    measured.push(format!(
+        "notice: {:?}",
+        got.last().cloned().unwrap_or_default()
+    ));
+
+    // Ask is decided by the SQLSTATE: 42P01 under a Turkish message.
+    let script = format!(
+        "INSERT INTO {t} (id, ad) VALUES (10, 'a');\nINSERT INTO {t}_yok VALUES (0);\n\
+         INSERT INTO {t} (id, ad) VALUES (11, 'b')"
+    );
+    let ((unit, rac, code), ran) = asked_run(&c, &script, |_| RunChoice::Ignore).await;
+    bad.eq(
+        (unit, rac, code.clone()),
+        (1, false, Some("42P01".to_string())),
+        &format!("{id}: the question"),
+    );
+    bad.eq(
+        (ran.summary.executed, ran.summary.failed),
+        (2, 1),
+        &format!("{id}: Ignore ran the rest"),
+    );
+    measured.push(format!("ask: unit {unit} {code:?}"));
+    c.shutdown().await;
+
+    // Production: the typed name is the table's exact bytes; a Turkish-identifier UPDATE …
+    // WHERE goes through confirm-in-transaction.
+    let prod = Con::open(&line, Spec::production(), &pool).await;
+    prod.set_mode(TxMode::Auto).await;
+    let p = prod.plan(&format!("DELETE FROM {t}"), &[]).await;
+    let typed = typed_name(&p);
+    bad.eq(
+        typed.as_deref().map(str::as_bytes),
+        Some(t.as_bytes()),
+        &format!("{id}: typed name"),
+    );
+    let update = format!("UPDATE {t} SET ad = :ad WHERE id = 1");
+    let mut p = prod.plan(&update, &[("ad", text("Ömer"))]).await;
+    bad.eq(p.shapes(), vec!["tx-confirm"], &format!("{id}: the UPDATE"));
+    p.answer(ConfirmAnswer::Execute);
+    let port = Port::new();
+    let run = prod.send(
+        &p,
+        ErrorPolicy::StopOnError,
+        Some(port.clone() as Arc<dyn ConfirmPort>),
+    );
+    let q = port.question(&id, 1).await;
+    let before = a.scalar(&format!("SELECT ad FROM {t} WHERE id = 1")).await;
+    port.answer(CommitAnswer::Commit);
+    ended(run).await;
+    prod.settled().await;
+    let after = a.scalar(&format!("SELECT ad FROM {t} WHERE id = 1")).await;
+    bad.eq(
+        (before.clone(), after.clone()),
+        ("İstanbul".to_string(), "Ömer".to_string()),
+        &format!("{id}: visible only after Commit"),
+    );
+    measured.push(format!(
+        "production: typed `{}`; UPDATE savepoint={} {before} → {after}",
+        typed.unwrap_or_default(),
+        q.savepoint
+    ));
+    prod.shutdown().await;
+
+    table.add(&line, version.as_ref(), "turkish", &measured.join("; "));
+    a.batch(&format!("DROP TABLE {t}")).await;
+    a.close().await;
+    bad.assert_none("turkish");
+    table.finish("turkish", std::slice::from_ref(&line));
 }

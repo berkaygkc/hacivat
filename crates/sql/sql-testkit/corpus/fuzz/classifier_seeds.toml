@@ -4121,11 +4121,15 @@ ro = "deny"
 admin = "allow"
 sql = "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d"
 
+# ## m3b-t28-matrix (named exception, T28 review M1 controller ruling): MariaDB's
+# `ANALYZE DELETE` runs the DELETE, so it is classified as the bare DELETE and gated like it
+# (admin: deny → allow; the gate still asks with the typed name on production and asks on
+# development). Read-only stays deny.
 [[row]]
 set = "t10all"
 tag = "ma"
 ro = "deny"
-admin = "deny"
+admin = "allow"
 sql = "ANALYZE DELETE FROM t"
 
 [[row]]
