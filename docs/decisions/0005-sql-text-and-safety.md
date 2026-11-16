@@ -1177,8 +1177,8 @@ field never carries an Unknown outcome on its own (the T4 producer contract).
   non-read is not a read), but no destructive pattern.
 - **`SELECT @v := 1` is `Session`.** `alg/13` S-13 allows it on read-only with a flag. M3b has
   no `USER_VAR_ASSIGN` flag, so read-only denies it (known gap).
-- **No `INFO_DISCLOSURE` bit.** `SHOW PROCESSLIST` and `SHOW GRANTS` are reads, and the server's
-  privileges decide what they show (known gap, kind `permissive`).
+- **Information disclosure is Unknown** (fix round 1, I3, which replaces the first version's
+  `permissive` gap). See the fix-round-1 notes below.
 - **`sql_mode=ORACLE` on MariaDB is `UnsupportedDialect`.** No interim parser reads that
   grammar.
 - **A lone CR in a reading is `ParserDisagreement`.** `sqlparser` counts only LF as a line
@@ -1218,3 +1218,45 @@ checked to be one statement that libpg_query parses.
 `#[ignore = "perf"]` budget test on the perf line); the unit tests of `backend/{interim,
 prescan}.rs` and `pragmas.rs`. `tests/data/safe06_interim.toml` holds the offline run A rows
 M1–M19 and L1–L9; Task 18 replaces it with the bypass TOML.
+
+**Fix round 1 (review of Task 10).** These rulings override the text above where they differ.
+
+- **Skipped readings (C1).** Every executable comment a server may skip is also read with the
+  comment removed. A MariaDB `/*M!` without version digits on a MySQL profile used to be read
+  only as code. Its one running reading now has the version `NEVER_ON_MYSQL` (`u32::MAX`), so
+  the threshold views always include the skipped reading as well. Each comment now carries a
+  list of readings, each with its own opener, end and version:
+  - MySQL's six-digit gate is read both as five digits plus a body digit and as six digits
+    (M7);
+  - an ambiguous end adds the running end;
+  - a version gate adds the skipped reading.
+
+  The union of readings is the classification. The views cover an unknown server version, a
+  version below each gate and a version above it, whatever version is known.
+- **The reading cap (C2).** The number of readings is
+  `(distinct versions + 1) × Π readings per comment`, counted with checked arithmetic, and
+  counting stops as soon as it passes `max_exec_comment_views`. Past 16, the statement is
+  `TooComplex` before any reading is built, with no loop over readings. Readings are then
+  enumerated with a mixed-radix counter that the bound limits. 62, 63, 64 and 200 ambiguous
+  comments are `TooComplex` within the test's time bound, in debug and in release.
+- **`SET` (I1).**
+  - `@@global.`, `@@persist.` and `@@persist_only.` take dotted component names (`@@global.validate_password.length`).
+  - A `SET` the grammar cannot read keeps the targets it read and is `Unknown`, with `ParseError` and `UNKNOWN`.
+  - It is also `ADMIN` when any `GLOBAL`, `PERSIST` or `PERSIST_ONLY` word, or any `@@global`/`@@persist` scope, appears anywhere in it.
+- **Constant predicates (I2).** SAFE-07's `AlwaysTrue` uses a shared, parser-free rule in
+  `destructive.rs` (`Predicate`, `always_true`), a named exception in Task 4's file.
+  - **How it decides.** It evaluates three-valued logic over literals: `NULL IS NULL`, `NOT FALSE`, `TRUE`, `1 = 1`, `'a' = 'a'` and `… OR TRUE` are `AlwaysTrue`. An expression that reads nothing of the row but whose value the rule does not model (`1 + 1 = 2`, a user variable, a bound parameter) counts as always true too, the safe direction. FALSE or NULL for every row, or anything that reads the row, is not.
+  - **Strings** compare as equal only when their bytes are equal; any other pair is left to the server's collation, which also counts as constant.
+  - **Backends.** The interim backend maps `sqlparser` expressions to `Predicate`. Under ANSI_QUOTES, `"a"` is a column. Task 9 maps PostgreSQL's tree the same way (routed carry).
+- **Information disclosure (I3, controller ruling; PO list).** These are `Unknown` (an
+  `EffectsUnknown` doubt naming the form) and are denied on read-only. M3b has no
+  `INFO_DISCLOSURE` bit, and this matches Task 3's line for `version()` and `current_setting`.
+  - The forms: `SHOW [FULL] PROCESSLIST`, `SHOW ENGINE …`, `SHOW {REPLICA|SLAVE|MASTER} STATUS`, `SHOW ALL {REPLICAS|SLAVES} STATUS`, `SHOW BINARY LOG STATUS`, `SHOW REPLICAS`, `SHOW SLAVE HOSTS`, `SHOW {BINLOG|RELAYLOG} EVENTS`, MariaDB's `SHOW {EXPLAIN|ANALYZE} FOR <connection>`, and `SHOW GRANTS FOR` another account.
+  - Still reads: `SHOW GRANTS`, `SHOW GRANTS FOR CURRENT_USER[()]` and `SHOW ENGINES`.
+  - The corpus drops these forms, and the `permissive` gap is gone.
+- **Minors.**
+  - `CALL` is always `FnUnknown` with `UNKNOWN`: a procedure is never a builtin function. Its deny-list effects are kept.
+  - A query whose body is a data change (`WITH … DELETE`) has that change's kind.
+  - MariaDB's quoted pseudo-column ``seq.`nextval` `` is `SEQUENCE`.
+  - A golden test pins `sqlparser` at `=0.64.0` and checks the `Debug` text the walk reads: variant names, `Join(None)`, `CrossJoin(None)` and `SetDataType`.
+  - The read corpus now also runs at MySQL 8.0.12 and 8.4.0 and at MariaDB 10.6.0, with zero false denials. It gained 8 MariaDB-specific reads: `seq_1_to_n`, `OFFSET … FETCH`, `INTERSECT ALL`/`EXCEPT ALL`, `JSON_TABLE`. Its sizes are now 325, 335, 312 and 304.

@@ -53,3 +53,5 @@ pub use pragmas::sqlite_read_pragmas;
 // gives this crate's types only (R-M3-54).
 #[doc(hidden)]
 pub use backend::interim::classify_interim;
+// Fix round 1 (I2): the SAFE-07 constant-predicate rule every backend shares.
+pub use destructive::{CmpOp, Predicate, always_true};

@@ -383,6 +383,60 @@ fn line_start(text: &str, at: usize) -> bool {
 // ---------------------------------------------------------------------------------------------
 // The inventory
 
+/// A MySQL/MariaDB `SHOW` that discloses other sessions' activity or the server's replication
+/// and engine state (controller ruling, fix round 1, I3): `SHOW [FULL] PROCESSLIST`,
+/// `SHOW ENGINE … {STATUS|MUTEX|LOGS}`, `SHOW {REPLICA|SLAVE|MASTER} STATUS`,
+/// `SHOW ALL {REPLICAS|SLAVES} STATUS`, `SHOW BINARY LOG STATUS`, `SHOW REPLICAS`,
+/// `SHOW SLAVE HOSTS`, `SHOW {BINLOG|RELAYLOG} EVENTS`, and `SHOW GRANTS FOR` another account
+/// (`CURRENT_USER` and `CURRENT_USER()` are one's own). Returns the form's name.
+fn info_disclosure(t: &Toks<'_>) -> Option<&'static str> {
+    if !t.is(0, "SHOW") {
+        return None;
+    }
+    let mut j = 1;
+    if t.is(j, "FULL") {
+        j += 1;
+    }
+    if t.is(j, "PROCESSLIST") {
+        return Some("SHOW PROCESSLIST");
+    }
+    // `SHOW ENGINES` (the list of engines) is a plain read; `SHOW ENGINE x …` is not.
+    if t.is(1, "ENGINE") {
+        return Some("SHOW ENGINE");
+    }
+    let replication = ["REPLICA", "SLAVE", "MASTER"];
+    if t.is_any(1, &replication) && t.is(2, "STATUS") {
+        return Some("SHOW REPLICA STATUS");
+    }
+    if t.is(1, "ALL") && t.is_any(2, &["REPLICAS", "SLAVES"]) && t.is(3, "STATUS") {
+        return Some("SHOW ALL REPLICAS STATUS");
+    }
+    if t.is(1, "BINARY") && t.is(2, "LOG") && t.is(3, "STATUS") {
+        return Some("SHOW BINARY LOG STATUS");
+    }
+    if (t.is(1, "REPLICAS") && t.len() == 2) || (t.is(1, "SLAVE") && t.is(2, "HOSTS")) {
+        return Some("SHOW REPLICAS");
+    }
+    // MariaDB's `SHOW EXPLAIN|ANALYZE FOR <connection>` shows another session's statement.
+    if t.is_any(1, &["EXPLAIN", "ANALYZE"]) && t.is(2, "FOR") {
+        return Some("SHOW EXPLAIN FOR");
+    }
+    if t.is_any(1, &["BINLOG", "RELAYLOG"]) && t.is(2, "EVENTS") {
+        return Some("SHOW BINLOG EVENTS");
+    }
+    if t.is(1, "GRANTS") && t.is(2, "FOR") {
+        let own = t.is(3, "CURRENT_USER")
+            && (t.len() == 4
+                || (t.len() == 6
+                    && t.kind(4) == Some(TokenKind::LParen)
+                    && t.kind(5) == Some(TokenKind::RParen)));
+        if !own {
+            return Some("SHOW GRANTS FOR");
+        }
+    }
+    None
+}
+
 /// The pre-scan inventory of one reading (see the module docs).
 pub(crate) fn inventory(t: &Toks<'_>, ctx: &ClassifyCtx, acc: &mut Acc) {
     let d = ctx.dialect.id;
@@ -393,6 +447,15 @@ pub(crate) fn inventory(t: &Toks<'_>, ctx: &ClassifyCtx, acc: &mut Acc) {
     let is_set = t.is(0, "SET");
     // Heads.
     if is_mysql_family(d) {
+        if let Some(what) = info_disclosure(t) {
+            // Controller ruling (fix round 1, I3): other sessions' activity and the server's
+            // replication and engine state are information disclosure, Unknown in M3b (no
+            // INFO_DISCLOSURE bit), so read-only denies them.
+            acc.doubt(ReasonCode::EffectsUnknown, t.whole());
+            if let Some(r) = acc.reasons.last_mut() {
+                r.arg = Some(arc(what));
+            }
+        }
         if t.is(0, "HANDLER") {
             acc.kind_hint = Some(StmtKind::Other);
             acc.add(
@@ -490,8 +553,12 @@ pub(crate) fn inventory(t: &Toks<'_>, ctx: &ClassifyCtx, acc: &mut Acc) {
             && t.kind(j + 1) == Some(TokenKind::LParen)
         {
             acc.add(EffectSet::SEQUENCE, ReasonCode::SequenceAdvance, r);
-        } else if t.is(j, "NEXTVAL") && j > 0 && t.kind(j - 1) == Some(TokenKind::Dot) {
-            // `seq.nextval` (MariaDB's Oracle-style pseudo-column).
+        } else if t.is_name(j)
+            && t.name(j).0.eq_ignore_ascii_case("NEXTVAL")
+            && j > 0
+            && t.kind(j - 1) == Some(TokenKind::Dot)
+        {
+            // `seq.nextval` and ``seq.`nextval` `` (MariaDB's Oracle-style pseudo-column).
             acc.add(EffectSet::SEQUENCE, ReasonCode::SequenceAdvance, r);
         } else if t.is(j, "BEGIN") && t.is(j + 1, "NOT") && t.is(j + 2, "ATOMIC") {
             acc.doubt(ReasonCode::ProceduralCode, Some(t.span(j, j + 2)));
@@ -584,8 +651,10 @@ const SCOPES: [&str; 5] = ["GLOBAL", "SESSION", "LOCAL", "PERSIST", "PERSIST_ONL
 /// The MySQL/MariaDB `SET` grammar over a reading that starts with `SET`. Each assignment is
 /// one [`SetTarget`] with one `SessionState` reason naming it (the producer contract: the two
 /// lists match exactly); `GLOBAL`/`PERSIST` scopes are `ADMIN`; a lexing variable is
-/// `LEX_MODE_CHANGE`. The special forms carry no target. A `SET` the grammar cannot read is
-/// `SESSION_STATE` with an argument-less `SessionState` (never harmless).
+/// `LEX_MODE_CHANGE`. The special forms carry no target. A `SET` the grammar cannot read
+/// keeps the targets it read, is `Unknown` (`ParseError` and `UNKNOWN`), and is `ADMIN` when
+/// any `GLOBAL`/`PERSIST`/`PERSIST_ONLY` word or `@@global.`/`@@persist.` scope appears (fix
+/// round 1, I1).
 pub(crate) fn set_statement(t: &Toks<'_>, acc: &mut Acc) {
     acc.kind = Some(StmtKind::Set);
     let whole = t.whole();
@@ -625,40 +694,54 @@ pub(crate) fn set_statement(t: &Toks<'_>, acc: &mut Acc) {
         return;
     }
     let mut targets = Vec::new();
-    match set_targets(t, &mut targets) {
-        Some(()) if !targets.is_empty() => {
-            for (name, value, name_range, global) in targets {
-                if global {
-                    acc.add(EffectSet::ADMIN, ReasonCode::AdminControl, Some(name_range));
-                } else {
-                    acc.effects |= EffectSet::SESSION_STATE;
-                }
-                if LEX_MODE_VARS.iter().any(|v| name.eq_ignore_ascii_case(v)) {
-                    acc.flags |= RiskFlags::LEX_MODE_CHANGE;
-                    acc.reason(
-                        ReasonCode::LexModeChange,
-                        Some(name_range),
-                        Some(name.clone()),
-                    );
-                }
-                acc.reason(
-                    ReasonCode::SessionState,
-                    Some(name_range),
-                    Some(name.clone()),
-                );
-                acc.set_targets.push((
-                    SetTarget {
-                        name,
-                        value: Some(value),
-                    },
-                    name_range,
-                ));
-            }
-        }
-        _ => {
+    let read = set_targets(t, &mut targets).is_some() && !targets.is_empty();
+    // Every target read so far is named, also when the rest of the statement does not read
+    // (fix round 1, I1: never a silent fall back to plain session state).
+    for (name, value, name_range, global) in targets {
+        if global {
+            acc.add(EffectSet::ADMIN, ReasonCode::AdminControl, Some(name_range));
+        } else {
             acc.effects |= EffectSet::SESSION_STATE;
-            acc.reason(ReasonCode::SessionState, whole, None);
         }
+        if LEX_MODE_VARS.iter().any(|v| name.eq_ignore_ascii_case(v)) {
+            acc.flags |= RiskFlags::LEX_MODE_CHANGE;
+            acc.reason(
+                ReasonCode::LexModeChange,
+                Some(name_range),
+                Some(name.clone()),
+            );
+        }
+        acc.reason(
+            ReasonCode::SessionState,
+            Some(name_range),
+            Some(name.clone()),
+        );
+        acc.set_targets.push((
+            SetTarget {
+                name,
+                value: Some(value),
+            },
+            name_range,
+        ));
+    }
+    if read {
+        return;
+    }
+    // A `SET` the grammar cannot read is Unknown (a doubt reason and `UNKNOWN`), still a
+    // session change, and `ADMIN` when any global or persisted scope appears in it.
+    acc.effects |= EffectSet::SESSION_STATE;
+    acc.doubt(ReasonCode::ParseError, whole);
+    let global_scope = (1..t.len()).any(|j| {
+        t.is_any(j, &["GLOBAL", "PERSIST", "PERSIST_ONLY"])
+            || (t.kind(j) == Some(TokenKind::SystemVar) && {
+                let var = &t.text(j)[2..];
+                ["GLOBAL", "PERSIST", "PERSIST_ONLY"]
+                    .iter()
+                    .any(|s| var.eq_ignore_ascii_case(s))
+            })
+    });
+    if global_scope {
+        acc.add(EffectSet::ADMIN, ReasonCode::AdminControl, whole);
     }
 }
 
@@ -683,10 +766,16 @@ fn set_targets(t: &Toks<'_>, out: &mut Vec<Assignment>) -> Option<()> {
                     global |= ["GLOBAL", "PERSIST", "PERSIST_ONLY"]
                         .iter()
                         .any(|s| var.eq_ignore_ascii_case(s));
-                    let (name, _) = t.name(j + 2);
-                    let r = t.range(j + 2);
+                    // Component variables are dotted (`@@global.validate_password.length`).
+                    let first = j + 2;
+                    let mut parts = vec![t.name(first).0];
                     j += 3;
-                    (name, r)
+                    while t.kind(j) == Some(TokenKind::Dot) && t.is_name(j + 1) {
+                        parts.push(t.name(j + 1).0);
+                        j += 2;
+                    }
+                    let joined: Vec<&str> = parts.iter().map(|p| &**p).collect();
+                    (arc(&joined.join(".")), t.span(first, j - 1))
                 } else {
                     let r = t.range(j);
                     j += 1;

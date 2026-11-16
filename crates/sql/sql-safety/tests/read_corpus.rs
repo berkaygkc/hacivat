@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use sql_dialect::{ClientFlavor, DialectCtx, DialectId};
+use sql_dialect::{ClientFlavor, DialectCtx, DialectId, ServerVersion};
 use sql_safety::{
     Actor, ClassifyCtx, CoarseClass, Expect, GateClass, Profile, classify_interim, decide,
     gate_class,
@@ -135,6 +135,42 @@ fn read_corpus_is_allowed_on_read_only_and_read_at_the_gate() {
             assert_eq!(gate_class(item), GateClass::Read, "{engine:?}: {q}");
         }
     }
+}
+
+/// Fix round 1 (M6): the corpus again with explicit server versions, where the probe floors
+/// and version gates matter: MySQL 8.0.12 and 8.4.0, MariaDB 10.6.0.
+#[test]
+fn read_corpus_has_no_false_denial_on_explicit_server_versions() {
+    let mut failures = Vec::new();
+    for (engine, version) in [
+        (Engine::MySql, ServerVersion::new(8, 0, 12)),
+        (Engine::MySql, ServerVersion::new(8, 4, 0)),
+        (Engine::MariaDb, ServerVersion::new(10, 6, 0)),
+    ] {
+        let ctx = ClassifyCtx::new(
+            DialectCtx::new(engine.dialect(), Some(version)),
+            ClientFlavor::None,
+            Expect::SingleStatement,
+        );
+        for q in entries(engine) {
+            let r = classify_interim(&q, &ctx);
+            if r.request_class != CoarseClass::Read {
+                failures.push(format!(
+                    "{engine:?} {version:?}: {q}\n    {:?}",
+                    r.items
+                        .iter()
+                        .flat_map(|i| i.reasons.iter().map(|x| (x.code, x.arg.clone())))
+                        .collect::<Vec<_>>()
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} false denials:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 /// Every PostgreSQL entry is one statement libpg_query accepts (Task 9 classifies it).

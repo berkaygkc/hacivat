@@ -13,8 +13,9 @@
 #   as MySQL; the pre-scan, not a parse failure, keeps it from being `Read` (P-M3b-8).
 # - `rejected-by-sqlparser`: MariaDB-only syntax `sqlparser` rejects; the pre-scan still names
 #   its effect, so the report says why.
-# - `permissive`: a form the backend calls `Read` that `alg/13` would flag with a bit M3b does
-#   not have (`INFO_DISCLOSURE`); the server's privileges decide.
+#
+# No gap is permissive (fix round 1, I3): the information-disclosure `SHOW`s are Unknown, and
+# `tests/interim.rs` (`information_disclosure_is_unknown`) asserts their denial.
 #
 # `dialects` take `mysql`, `mariadb`, `sqlite`. `expect` is a `CoarseClass` name.
 version = 1
@@ -273,13 +274,3 @@ sql = "SELECT 1"
 sql_mode = "ORACLE"
 expect = "Unknown"
 note = "sql_mode=ORACLE changes MariaDB's grammar; no interim parser reads it (UnsupportedDialect)."
-
-# --- permissive ------------------------------------------------------------------------------
-
-[[gap]]
-id = "mysql-show-processlist"
-kind = "permissive"
-dialects = ["mysql", "mariadb"]
-sql = "SHOW FULL PROCESSLIST"
-expect = "Read"
-note = "alg/13 marks others' activity INFO_DISCLOSURE; M3b has no such bit (ADR 0005 m3b-t04). The PROCESS privilege decides what the server shows."

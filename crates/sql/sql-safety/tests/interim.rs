@@ -586,7 +586,6 @@ fn known_gaps_each_have_a_test() {
                     assert_ne!(gate(&r), GateClass::Read, "{} on {d}", g.id);
                     assert!(read_only_denies(&r), "{} on {d}", g.id);
                 }
-                "permissive" => assert_eq!(r.request_class, CoarseClass::Read, "{}", g.id),
                 other => panic!("{}: kind {other}", g.id),
             }
         }
@@ -1130,4 +1129,285 @@ fn deep_nesting_is_too_complex_not_a_panic() {
     let r = classify_mysql(&deep);
     assert_eq!(r.request_class, CoarseClass::Unknown);
     assert!(has(&r, ReasonCode::TooComplex) || has(&r, ReasonCode::ParseError));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 1
+
+fn rw_dml_allows(r: &SafetyReport) -> bool {
+    decide(r, Profile::ReadWriteDml, Actor::Human).allows()
+}
+
+/// C1: every executable comment the server may skip is also read skipped. A MariaDB `/*M!`
+/// without digits on a MySQL profile is skipped by MySQL, so the reading where it is a comment
+/// (and the quote inside it pairs nothing) is classified.
+#[test]
+fn skipped_readings_of_executable_comments_are_classified() {
+    // The reviewer's repro: MySQL runs `SELECT 1 INTO OUTFILE "/tmp/x" FROM DUAL`.
+    let r = classify_mysql("SELECT 1 /*M! ' */ INTO OUTFILE \"/tmp/x\" -- '\n FROM DUAL");
+    assert_ne!(r.request_class, CoarseClass::Read, "{r:?}");
+    assert!(r.request_effects.contains(EffectSet::EXTERNAL_IO), "{r:?}");
+    assert!(!rw_dml_allows(&r));
+    assert!(read_only_denies(&r));
+    // The UDF variant: MySQL calls an unknown routine.
+    let r = classify_mysql("SELECT /*M! ' */ my_write_udf() -- '\n AS x");
+    assert_eq!(r.request_class, CoarseClass::Unknown, "{r:?}");
+    assert!(has(&r, ReasonCode::FnUnknown));
+    assert!(!rw_dml_allows(&r));
+    // A versioned `/*!` with an unknown version, below it, and above it: the skipped reading
+    // is classified in every case.
+    for version in [
+        None,
+        Some(ServerVersion::new(5, 7, 0)),
+        Some(ServerVersion::new(8, 4, 0)),
+    ] {
+        let sql = "SELECT 1 /*!80000 ' */ INTO OUTFILE '/tmp/x' -- '\n FROM DUAL";
+        let r = classify_interim(sql, &ctx_with(DialectId::MySql, version, None));
+        assert_contract(&r, sql);
+        assert!(
+            r.request_effects.contains(EffectSet::EXTERNAL_IO),
+            "{version:?}: {r:?}"
+        );
+        assert!(!rw_dml_allows(&r), "{version:?}");
+    }
+    // An unversioned `/*!` always runs: no skipped reading is needed.
+    let r = classify_mysql("SELECT 1 /*! , GET_LOCK('a', 1) */ FROM DUAL");
+    assert_eq!(r.request_class, CoarseClass::Write);
+}
+
+/// C2: past `max_exec_comment_views` readings the statement is `TooComplex` at once, for any
+/// count (no overflow, no loop over readings), in debug and in release.
+#[test]
+fn too_many_comment_readings_fail_closed_fast() {
+    for n in [62usize, 63, 64, 200] {
+        let sql = format!("SELECT 1{}", " /*!50000 # */\n */".repeat(n));
+        let start = std::time::Instant::now();
+        let r = classify_mysql(&sql);
+        let took = start.elapsed();
+        assert_eq!(r.request_class, CoarseClass::Unknown, "{n}");
+        assert!(has(&r, ReasonCode::TooComplex), "{n}: {r:?}");
+        assert!(took < std::time::Duration::from_secs(2), "{n}: {took:?}");
+    }
+    // Many distinct gates, and six-digit gates (two readings each).
+    let gates: String = (0..200)
+        .map(|k| format!(" /*!{} , {k} */", 50000 + k))
+        .collect();
+    assert!(has(
+        &classify_mysql(&format!("SELECT 1{gates}")),
+        ReasonCode::TooComplex
+    ));
+    let six: String = (0..8)
+        .map(|k| format!(" /*!{} , {k} */", 800000 + k))
+        .collect();
+    assert!(has(
+        &classify_mysql(&format!("SELECT 1{six}")),
+        ReasonCode::TooComplex
+    ));
+}
+
+/// M7: a six-digit gate on MySQL is read as five digits plus a body digit and as six digits.
+#[test]
+fn six_digit_mysql_gates_read_every_threshold() {
+    // As five digits (8.0.0) the body is `0 , GET_LOCK(…)`, which does not parse; as six
+    // digits (80.0.0) it is `, GET_LOCK(…)`: the union holds the lock.
+    let r = classify_mysql("SELECT 1 /*!800000 , GET_LOCK('a', 1) */ FROM DUAL");
+    assert!(
+        r.request_effects.contains(EffectSet::ADVISORY_LOCK),
+        "{r:?}"
+    );
+    assert_eq!(r.request_class, CoarseClass::Unknown);
+}
+
+/// I1: a `SET` the grammar cannot read is Unknown with a doubt reason; global and persisted
+/// scopes are Admin with each target named.
+#[test]
+fn set_scopes_are_admin_and_unreadable_sets_are_unknown() {
+    let cases: [(&str, &[&str]); 5] = [
+        (
+            "SET @@global.validate_password.length = 4",
+            &["validate_password.length"],
+        ),
+        (
+            "SET @@persist.validate_password.length = 4",
+            &["validate_password.length"],
+        ),
+        (
+            "SET @@persist_only.max_connections = 4",
+            &["max_connections"],
+        ),
+        ("SET @@global.x = 1, @@global.y.z = 2", &["x", "y.z"]),
+        (
+            "SET GLOBAL validate_password.length = 4",
+            &["validate_password.length"],
+        ),
+    ];
+    for (s, names) in cases {
+        let r = classify_mysql(s);
+        assert!(r.request_effects.contains(EffectSet::ADMIN), "{s}: {r:?}");
+        assert!(r.request_class >= CoarseClass::Admin, "{s}");
+        let got: Vec<&str> = r.items[0].set_targets.iter().map(|t| &*t.name).collect();
+        assert_eq!(got, names, "{s}");
+        assert!(read_only_denies(&r) && !rw_dml_allows(&r), "{s}");
+    }
+    // Unreadable: Unknown, a doubt reason, the targets read so far kept, ADMIN when a global
+    // scope appears anywhere.
+    for (s, admin) in [
+        ("SET STATEMENT max_statement_time = 1 FOR SELECT 1", false),
+        ("SET time_zone = '+00:00', GLOBAL", true),
+        ("SET time_zone = '+00:00', @@global.", true),
+        ("SET @@persist.", true),
+        ("SET = 1", false),
+    ] {
+        let r = classify_mysql(s);
+        assert_eq!(r.request_class, CoarseClass::Unknown, "{s}: {r:?}");
+        assert!(has(&r, ReasonCode::ParseError), "{s}");
+        assert!(r.request_effects.contains(EffectSet::UNKNOWN), "{s}");
+        assert_eq!(r.request_effects.contains(EffectSet::ADMIN), admin, "{s}");
+        assert!(read_only_denies(&r), "{s}");
+    }
+    let r = classify_mysql("SET time_zone = '+00:00', GLOBAL");
+    assert_eq!(r.items[0].set_targets.len(), 1);
+}
+
+/// I2: SAFE-07 `AlwaysTrue` over constant predicates (`alg/13` :529, UNSAFE-01..07, 09).
+#[test]
+fn always_true_where_is_destructive() {
+    for d in [DialectId::MySql, DialectId::Sqlite] {
+        for w in [
+            "NULL IS NULL",
+            "NOT FALSE",
+            "TRUE",
+            "1 = 1",
+            "'a' = 'a'",
+            "1 + 1 = 2",
+            "id = 7 OR TRUE",
+            "id = 7 OR 1 = 1",
+            "NOT (1 = 0)",
+            "'x' IS NOT NULL",
+            "(TRUE)",
+            "1",
+            "2 > 1",
+        ] {
+            for s in [
+                format!("DELETE FROM audit_log WHERE {w}"),
+                format!("UPDATE customers SET city = 'x' WHERE {w}"),
+            ] {
+                let r = run(d, &s);
+                assert_eq!(destructive(&r), [DestructiveKind::AlwaysTrue], "{d:?}: {s}");
+                assert_eq!(gate(&r), GateClass::DmlUnsafe, "{s}");
+                assert!(!rw_dml_allows(&r), "{s}: unbounded writes confirm");
+            }
+        }
+        for w in [
+            "id = 1",
+            "1 = 0",
+            "NULL",
+            "NULL = NULL",
+            "id = 1 AND TRUE",
+            "id IS NULL",
+            "FALSE OR id = 2",
+            "city = 'a'",
+            "id IN (SELECT 1)",
+        ] {
+            let s = format!("DELETE FROM audit_log WHERE {w}");
+            assert!(destructive(&run(d, &s)).is_empty(), "{d:?}: {s}");
+        }
+    }
+    // UNSAFE-01, -04, -05, -07, -09.
+    assert_eq!(
+        destructive(&classify_mysql("DELETE FROM audit_log")),
+        [DestructiveKind::NoWhere]
+    );
+    let r = classify_mysql("DELETE o FROM orders o JOIN customers c");
+    assert!(
+        destructive(&r).contains(&DestructiveKind::JoinWithoutOn),
+        "{r:?}"
+    );
+    let r = classify_mysql("UPDATE orders o JOIN customers c SET o.note = 'x' WHERE o.id = 1");
+    assert!(
+        destructive(&r).contains(&DestructiveKind::JoinWithoutOn),
+        "{r:?}"
+    );
+    let r = classify_mysql("WITH x AS (SELECT 1) DELETE FROM audit_log");
+    assert_eq!(destructive(&r), [DestructiveKind::NoWhere]);
+    assert_eq!(
+        r.items[0].kind,
+        StmtKind::Delete,
+        "M5: the kind is the body's"
+    );
+    assert_eq!(
+        destructive(&classify_mysql("TRUNCATE audit_log")),
+        [DestructiveKind::Truncate]
+    );
+    assert!(
+        destructive(&classify_mysql(
+            "UPDATE customers SET city = NULL WHERE id = 1"
+        ))
+        .is_empty()
+    );
+    // Under ANSI_QUOTES `"a" = "a"` compares a column with itself: not a constant.
+    let r = classify_with_modes(mysql_ansi(), r#"DELETE FROM t WHERE "a" = "a""#);
+    assert!(destructive(&r).is_empty(), "{r:?}");
+}
+
+/// I3 (controller ruling): information disclosure is Unknown and denied on read-only.
+#[test]
+fn information_disclosure_is_unknown() {
+    for s in [
+        "SHOW PROCESSLIST",
+        "SHOW FULL PROCESSLIST",
+        "SHOW ENGINE INNODB STATUS",
+        "SHOW ENGINE INNODB MUTEX",
+        "SHOW REPLICA STATUS",
+        "SHOW SLAVE STATUS",
+        "SHOW MASTER STATUS",
+        "SHOW BINARY LOG STATUS",
+        "SHOW ALL SLAVES STATUS",
+        "SHOW REPLICAS",
+        "SHOW SLAVE HOSTS",
+        "SHOW BINLOG EVENTS",
+        "SHOW RELAYLOG EVENTS",
+        "SHOW GRANTS FOR 'root'@'%'",
+        "SHOW GRANTS FOR other",
+        "SHOW EXPLAIN FOR 1",
+        "SHOW ANALYZE FOR 1",
+    ] {
+        for d in [DialectId::MySql, DialectId::MariaDb] {
+            let r = run(d, s);
+            assert_eq!(r.request_class, CoarseClass::Unknown, "{d:?}: {s}");
+            assert!(has(&r, ReasonCode::EffectsUnknown), "{s}");
+            assert!(read_only_denies(&r), "{s}");
+        }
+    }
+    for s in [
+        "SHOW GRANTS",
+        "SHOW GRANTS FOR CURRENT_USER",
+        "SHOW GRANTS FOR CURRENT_USER()",
+        "SHOW ENGINES",
+        "SHOW STATUS",
+    ] {
+        assert_eq!(classify_mysql(s).request_class, CoarseClass::Read, "{s}");
+    }
+}
+
+/// M1: `CALL` of a builtin's name is a procedure, never the builtin: Unknown with evidence.
+#[test]
+fn call_is_unknown_with_evidence() {
+    for s in ["CALL abs(1)", "CALL now()", "CALL p()", "CALL sleep(1)"] {
+        let r = classify_mysql(s);
+        assert_eq!(r.request_class, CoarseClass::Unknown, "{s}");
+        assert!(r.request_effects.contains(EffectSet::UNKNOWN), "{s}");
+        assert!(has(&r, ReasonCode::FnUnknown), "{s}");
+    }
+    assert!(has(
+        &classify_mysql("CALL sleep(1)"),
+        ReasonCode::FnDenylisted
+    ));
+}
+
+/// M3: MariaDB's quoted pseudo-column.
+#[test]
+fn quoted_nextval_pseudo_column_is_a_sequence() {
+    let r = classify_mariadb("SELECT s.`nextval`");
+    assert!(r.request_effects.contains(EffectSet::SEQUENCE), "{r:?}");
 }

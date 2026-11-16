@@ -45,8 +45,8 @@ use sql_lexer::{LexErrorCode, LexState, Lexed, TokenKind, exec_comment, lex};
 use sql_split::SplitMode;
 use sql_text::{LineCol, LineIndex, TextRange};
 use sqlparser::ast::{
-    Expr, FunctionArguments, ObjectName, ObjectNamePart, Query, Select, Statement, TableFactor,
-    TableObject, TableWithJoins, Value, Visit, Visitor,
+    Expr, FunctionArguments, ObjectName, ObjectNamePart, Query, Select, SetExpr, Statement,
+    TableFactor, TableObject, TableWithJoins, Value, Visit, Visitor,
 };
 use sqlparser::dialect::{Dialect, MySqlDialect, SQLiteDialect};
 use sqlparser::parser::{Parser, ParserError, ParserOptions};
@@ -55,7 +55,7 @@ use sqlparser::tokenizer::{Location, Token, TokenWithSpan, Tokenizer};
 use super::Backend;
 use super::prescan::{self, Acc, Describe, Toks, range_of};
 use crate::classify::{ClassifyCtx, Expect};
-use crate::destructive::{DestructiveKind, DestructiveReason};
+use crate::destructive::{CmpOp, DestructiveKind, DestructiveReason, Predicate};
 use crate::effects::{CoarseClass, EffectSet, RiskFlags, class_of};
 use crate::gate_class::gate_class;
 use crate::policy::{Group, ReasonRule, reason_rule};
@@ -172,21 +172,35 @@ fn supported(d: DialectId) -> bool {
 // ---------------------------------------------------------------------------------------------
 // One statement
 
-/// One executable comment of a statement, as the dialect's server reads it.
+/// One executable comment of a statement and every way a server may read it.
+///
+/// Each [`Reading`] is how a server that *runs* the comment reads it; a reading with a version
+/// is skipped (the whole token is a comment) by a server older than that version, and the
+/// threshold views include that skipped reading too (fix round 1, C1: the union of readings
+/// covers every way the server may read the text).
 struct ExecComment {
-    /// The whole token.
+    /// The whole token (the skipping reading's extent).
     token: (usize, usize),
-    /// The opener with the version digits the server reads (`/*!50000`; MySQL reads five of
-    /// six digits, the sixth is body text).
-    opener: (usize, usize),
-    /// The closing `*/` the skipping reading ends at.
-    close: Option<(usize, usize)>,
-    /// The server version from which the body runs; `None`: always.
-    version: Option<u32>,
-    /// The two readings of the comment's end differ: the running reading's `*/` (or `None`
-    /// when it does not close inside the statement).
-    running: Option<Option<(usize, usize)>>,
+    /// The ways a server that runs it reads it (at least one).
+    readings: Vec<Reading>,
+    /// The comment's end depends on how its body reads (`AmbiguousCommentEnd`).
+    ambiguous: bool,
 }
+
+/// One running reading of an executable comment.
+#[derive(Clone, Copy)]
+struct Reading {
+    /// The opener with the version digits this reading takes (`/*!50000`).
+    opener: (usize, usize),
+    /// The `*/` this reading ends at (`None`: it runs to the end of the statement).
+    close: Option<(usize, usize)>,
+    /// The server version from which the body runs; `None`: every server runs it.
+    version: Option<u32>,
+}
+
+/// The version a MySQL server never reaches: a MariaDB `/*M!` comment without digits, which
+/// MySQL skips and a MariaDB server behind a MySQL profile runs.
+const NEVER_ON_MYSQL: u32 = u32::MAX;
 
 fn analyse_stmt(sql: &str, range: TextRange, ctx: &ClassifyCtx) -> StmtReport {
     let start = usize::from(range.start());
@@ -250,7 +264,7 @@ fn statement_views(text: &str, ctx: &ClassifyCtx, base: &mut Acc) -> Option<(Vec
             Some(range_of(c.token.0, c.token.1)),
             None,
         );
-        if c.running.is_some() {
+        if c.ambiguous {
             base.reason(
                 ReasonCode::AmbiguousBoundary,
                 Some(range_of(c.token.0, c.token.1)),
@@ -281,35 +295,50 @@ fn exec_comments(
         };
         let token = lexed.range(i);
         let (t0, t1) = (usize::from(token.start()), usize::from(token.end()));
-        let mut opener = (usize::from(c.opener.start()), usize::from(c.opener.end()));
-        let mut version = c.version;
-        // MySQL reads five version digits; a sixth is body text (`exec_comment_gate`).
-        if ctx.id == DialectId::MySql && opener.1 - opener.0 == 3 + 6 {
-            opener.1 -= 1;
-            version = version.map(|v| v / 10);
-        }
+        let opener = (usize::from(c.opener.start()), usize::from(c.opener.end()));
         let body_end = usize::from(c.body.end());
         let close = (body_end < t1).then_some((body_end, t1));
-        let running = ambiguous.contains(&token).then(|| {
-            let mariadb = ctx.id == DialectId::MariaDb;
-            prescan::running_close(text, opener.1, text.len(), ctx.modes, mariadb)
-                .map(|e| (e - 2, e))
-        });
+        // The version readings: the opener as written; on MySQL a six-digit gate is also read
+        // as five digits and a body digit (`exec_comment_gate`), and both are kept (fix round
+        // 1, M7: every distinct threshold is read).
+        let mut openers = vec![(opener, c.version)];
+        if ctx.id == DialectId::MySql && opener.1 - opener.0 == 3 + 6 {
+            openers.push(((opener.0, opener.1 - 1), c.version.map(|v| v / 10)));
+        }
+        let is_ambiguous = ambiguous.contains(&token);
+        let mut readings = Vec::new();
+        for (opener, version) in openers {
+            readings.push(Reading {
+                opener,
+                close,
+                version,
+            });
+            if is_ambiguous {
+                let mariadb = ctx.id == DialectId::MariaDb;
+                let running =
+                    prescan::running_close(text, opener.1, text.len(), ctx.modes, mariadb)
+                        .map(|e| (e - 2, e));
+                readings.push(Reading {
+                    opener,
+                    close: running,
+                    version,
+                });
+            }
+        }
         out.push(ExecComment {
             token: (t0, t1),
-            opener,
-            close,
-            version,
-            running,
+            readings,
+            ambiguous: is_ambiguous,
         });
     }
     out
 }
 
-/// A MariaDB `/*M!…*/` comment on a MySQL connection. MySQL skips it, but a MariaDB server
-/// behind a MySQL profile runs it, so its body is read as a threshold view too (the most
-/// dangerous reading wins; P-M3b-8). Our MySQL lexer reads it as an ordinary block comment,
-/// which ends at the first `*/`.
+/// A MariaDB `/*M!…*/` comment on a MySQL connection. MySQL skips it (the whole token is a
+/// comment); a MariaDB server behind a MySQL profile runs it. Both are read (fix round 1, C1):
+/// without version digits its one running reading has the version [`NEVER_ON_MYSQL`], so the
+/// threshold views hold the skipped reading too. Our MySQL lexer reads it as an ordinary block
+/// comment, which ends at the first `*/`.
 fn mariadb_comment_on_mysql(text: &str, lexed: &Lexed, i: usize) -> Option<ExecComment> {
     if lexed.kind(i) != TokenKind::BlockComment {
         return None;
@@ -321,86 +350,121 @@ fn mariadb_comment_on_mysql(text: &str, lexed: &Lexed, i: usize) -> Option<ExecC
     let digits = rest.bytes().take(6).take_while(u8::is_ascii_digit).count();
     let (version, opener_len) = if digits >= 5 {
         let v = rest[..digits].parse::<u32>().ok()?;
-        (Some(v), 4 + digits)
+        (v, 4 + digits)
     } else {
-        (None, 4)
+        (NEVER_ON_MYSQL, 4)
     };
     let closed = token.len() >= opener_len + 2 && token.ends_with("*/");
     Some(ExecComment {
         token: (t0, t1),
-        opener: (t0, t0 + opener_len),
-        close: closed.then_some((t1 - 2, t1)),
-        version,
-        running: None,
+        readings: vec![Reading {
+            opener: (t0, t0 + opener_len),
+            close: closed.then_some((t1 - 2, t1)),
+            version: Some(version),
+        }],
+        ambiguous: false,
     })
 }
 
-/// Every threshold reading of `text` (deduplicated), or `None` past the limit.
+/// How many readings `comments` make: `(distinct versions + 1) × Π readings per comment`,
+/// counted with checked arithmetic and stopped as soon as it passes `limit` (`None`: too
+/// many). No allocation per reading and no loop over readings (fix round 1, C2).
+fn reading_count(thresholds: usize, comments: &[ExecComment], limit: usize) -> Option<usize> {
+    let mut n = thresholds.checked_add(1)?;
+    if n > limit {
+        return None;
+    }
+    for c in comments {
+        n = n.checked_mul(c.readings.len().max(1))?;
+        if n > limit {
+            return None;
+        }
+    }
+    Some(n)
+}
+
+/// Every threshold reading of `text` (deduplicated), or `None` past the limit
+/// (`Limits.max_exec_comment_views`, checked before any reading is built).
 fn build_views(
     text: &str,
     comments: &[ExecComment],
     ctx: &ClassifyCtx,
     base: &mut Acc,
 ) -> Option<Vec<String>> {
-    let mut thresholds: Vec<u32> = comments.iter().filter_map(|c| c.version).collect();
-    thresholds.sort_unstable();
-    thresholds.dedup();
-    let ambiguous: Vec<usize> = comments
-        .iter()
-        .enumerate()
-        .filter_map(|(k, c)| c.running.is_some().then_some(k))
-        .collect();
     let limit = usize::from(ctx.limits.max_exec_comment_views);
-    let raw = (thresholds.len() + 1).checked_shl(u32::try_from(ambiguous.len()).ok()?);
-    if raw.is_none_or(|n| n > limit.saturating_mul(4)) {
-        base.doubt(ReasonCode::TooComplex, Some(range_of(0, text.len())));
+    let whole = Some(range_of(0, text.len()));
+    // A cheap bound first: more distinct versions than the limit can never fit.
+    let mut thresholds: Vec<u32> = Vec::new();
+    for c in comments {
+        for r in &c.readings {
+            if let Some(v) = r.version
+                && !thresholds.contains(&v)
+            {
+                if thresholds.len() >= limit {
+                    base.doubt(ReasonCode::TooComplex, whole);
+                    return None;
+                }
+                thresholds.push(v);
+            }
+        }
+    }
+    thresholds.sort_unstable();
+    if reading_count(thresholds.len(), comments, limit).is_none() {
+        base.doubt(ReasonCode::TooComplex, whole);
         return None;
     }
+    // The comments with a choice of readings, as a mixed-radix counter.
+    let choosers: Vec<usize> = comments
+        .iter()
+        .enumerate()
+        .filter_map(|(k, c)| (c.readings.len() > 1).then_some(k))
+        .collect();
     let mut seen = HashSet::new();
     let mut views = Vec::new();
     for t in 0..=thresholds.len() {
-        for mask in 0u32..(1 << ambiguous.len()) {
+        let mut choice = vec![0usize; comments.len()];
+        loop {
             let mut bytes = text.as_bytes().to_vec();
             for (k, c) in comments.iter().enumerate() {
-                let active = c.version.is_none_or(|v| {
+                let r = c.readings[choice[k]];
+                let active = r.version.is_none_or(|v| {
                     thresholds
                         .iter()
                         .position(|x| *x == v)
                         .is_some_and(|p| p < t)
                 });
-                let running = ambiguous
-                    .iter()
-                    .position(|a| *a == k)
-                    .is_some_and(|bit| mask & (1 << bit) != 0);
                 if !active {
                     blank(&mut bytes, c.token.0, c.token.1);
                     continue;
                 }
-                blank(&mut bytes, c.opener.0, c.opener.1);
-                match (running, c.running) {
-                    (true, Some(Some((a, b)))) => blank(&mut bytes, a, b),
-                    (true, _) => {}
-                    (false, _) => {
-                        if let Some((a, b)) = c.close {
-                            blank(&mut bytes, a, b);
-                        }
-                    }
+                blank(&mut bytes, r.opener.0, r.opener.1);
+                if let Some((a, b)) = r.close {
+                    blank(&mut bytes, a, b);
                 }
             }
             // Blanking whole ASCII bytes inside comment markers keeps the text UTF-8; a
             // multi-byte character inside a blanked inactive body becomes spaces as a whole.
             let Ok(view) = String::from_utf8(bytes) else {
-                base.doubt(ReasonCode::LexError, Some(range_of(0, text.len())));
+                base.doubt(ReasonCode::LexError, whole);
                 return None;
             };
             if seen.insert(view.clone()) {
                 views.push(view);
             }
+            // The next combination of readings.
+            let mut carried = true;
+            for &k in &choosers {
+                choice[k] += 1;
+                if choice[k] < comments[k].readings.len() {
+                    carried = false;
+                    break;
+                }
+                choice[k] = 0;
+            }
+            if carried {
+                break;
+            }
         }
-    }
-    if views.len() > limit {
-        base.doubt(ReasonCode::TooComplex, Some(range_of(0, text.len())));
-        return None;
     }
     Some(views)
 }
@@ -1086,7 +1150,37 @@ impl<'c, 'a> Walk<'c, 'a> {
                     self.plain_explain += 1;
                 }
             }
-            Statement::Call(f) => self.call(&f.name, None),
+            Statement::Call(f) => {
+                // A procedure is never a builtin function (fix round 1, M1): its denial is
+                // read from the deny list, and its body is always unknown.
+                match qualified(&f.name) {
+                    Some(q) => {
+                        prescan::assess_call(&q, self.range, None, self.ctx, true, self.acc);
+                        self.acc.doubt(ReasonCode::FnUnknown, self.range);
+                        if let Some(r) = self.acc.reasons.last_mut() {
+                            r.arg = Some(prescan::shown(&q));
+                        }
+                        self.acc.touched.calls.push(ObjectRef {
+                            name: q,
+                            kind: ObjectKind::Function,
+                        });
+                    }
+                    None => self.acc.doubt(ReasonCode::FnUnknown, self.range),
+                }
+            }
+            // `WITH … DELETE` is a DELETE (fix round 1, M5): the kind of a query whose body is
+            // a data change is that change's.
+            Statement::Query(q) => {
+                if let SetExpr::Insert(inner)
+                | SetExpr::Update(inner)
+                | SetExpr::Delete(inner)
+                | SetExpr::Merge(inner) = &*q.body
+                    && let Ok(t) = table_for(self.ctx.dialect.id)
+                    && let Some((_, r)) = t.iter().find(|(v, _)| *v == variant_name(inner))
+                {
+                    kind = r.kind;
+                }
+            }
             _ => {}
         }
         if nested
@@ -1126,7 +1220,9 @@ impl<'c, 'a> Walk<'c, 'a> {
     ) {
         match selection {
             None => self.destructive(DestructiveKind::NoWhere, target),
-            Some(e) if always_true(e) => self.destructive(DestructiveKind::AlwaysTrue, target),
+            Some(e) if always_true(e, self.ctx.dialect.modes.ansi_quotes) => {
+                self.destructive(DestructiveKind::AlwaysTrue, target)
+            }
             Some(_) => {}
         }
         if limit.is_some() && no_order {
@@ -1251,23 +1347,94 @@ fn qualified(n: &ObjectName) -> Option<QualifiedName> {
     (!parts.is_empty()).then_some(QualifiedName { parts })
 }
 
-/// A `WHERE` that holds for every row: `TRUE`, a non-zero number, `x = x` for one literal, or
-/// an `OR` with such a side.
-fn always_true(e: &Expr) -> bool {
-    use sqlparser::ast::BinaryOperator as B;
+/// A `WHERE` that keeps every row (SAFE-07 `AlwaysTrue`, UNSAFE-06), by the shared rule
+/// [`crate::destructive::always_true`] over this tree's [`Predicate`] (fix round 1, I2).
+fn always_true(e: &Expr, ansi_quotes: bool) -> bool {
+    crate::destructive::always_true(&predicate(e, ansi_quotes))
+}
+
+/// `e` as a SAFE-07 [`Predicate`]: literals and the logic between them; a constant-only
+/// expression the rule does not model is `Const`; anything that reads the row is `Row`.
+fn predicate(e: &Expr, ansi: bool) -> Predicate {
+    use sqlparser::ast::{BinaryOperator as B, UnaryOperator as U};
+    let b = |x: &Expr| Box::new(predicate(x, ansi));
     match e {
-        Expr::Nested(inner) => always_true(inner),
+        Expr::Nested(inner) => predicate(inner, ansi),
         Expr::Value(v) => match &v.value {
-            Value::Boolean(b) => *b,
-            Value::Number(n, _) => n.parse::<f64>().is_ok_and(|x| x != 0.0),
-            _ => false,
+            Value::Boolean(x) => Predicate::Bool(*x),
+            Value::Null => Predicate::Null,
+            Value::Number(n, _) => n.parse::<f64>().map_or(Predicate::Const, Predicate::Number),
+            Value::SingleQuotedString(s) => Predicate::Text(s.clone()),
+            // Under ANSI_QUOTES `"a"` is a column.
+            Value::DoubleQuotedString(_) if ansi => Predicate::Row,
+            Value::DoubleQuotedString(s) => Predicate::Text(s.clone()),
+            _ => Predicate::Const,
         },
-        Expr::BinaryOp { left, op, right } => match op {
-            B::Or => always_true(left) || always_true(right),
-            B::Eq => matches!(**left, Expr::Value(_)) && left == right,
-            _ => false,
+        Expr::UnaryOp { op: U::Not, expr } => Predicate::Not(b(expr)),
+        Expr::BinaryOp { left, op, right } => {
+            let cmp = |c| Predicate::Cmp(c, b(left), b(right));
+            match op {
+                B::And => Predicate::And(b(left), b(right)),
+                B::Or => Predicate::Or(b(left), b(right)),
+                B::Eq => cmp(CmpOp::Eq),
+                B::NotEq => cmp(CmpOp::NotEq),
+                B::Lt => cmp(CmpOp::Lt),
+                B::LtEq => cmp(CmpOp::LtEq),
+                B::Gt => cmp(CmpOp::Gt),
+                B::GtEq => cmp(CmpOp::GtEq),
+                B::Spaceship => cmp(CmpOp::NullSafeEq),
+                _ => constness(e, ansi),
+            }
+        }
+        Expr::IsNull(x) => Predicate::IsNull {
+            expr: b(x),
+            negated: false,
         },
-        _ => false,
+        Expr::IsNotNull(x) => Predicate::IsNull {
+            expr: b(x),
+            negated: true,
+        },
+        _ => constness(e, ansi),
+    }
+}
+
+/// `Const` when `e` reads nothing of the row (no column, call or subquery; a user variable
+/// or a bound parameter is constant for the statement), else `Row`.
+fn constness(e: &Expr, ansi: bool) -> Predicate {
+    struct RowRef {
+        ansi: bool,
+    }
+    impl Visitor for RowRef {
+        type Break = ();
+        fn pre_visit_expr(&mut self, e: &Expr) -> ControlFlow<()> {
+            match e {
+                Expr::Identifier(i) if i.quote_style.is_none() && i.value.starts_with('@') => {
+                    ControlFlow::Continue(())
+                }
+                Expr::Identifier(_)
+                | Expr::CompoundIdentifier(_)
+                | Expr::Function(_)
+                | Expr::Subquery(_)
+                | Expr::Exists { .. }
+                | Expr::Wildcard(_)
+                | Expr::QualifiedWildcard(..) => ControlFlow::Break(()),
+                _ => ControlFlow::Continue(()),
+            }
+        }
+        fn pre_visit_value(&mut self, v: &sqlparser::ast::ValueWithSpan) -> ControlFlow<()> {
+            if self.ansi && matches!(v.value, Value::DoubleQuotedString(_)) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        }
+        fn pre_visit_query(&mut self, _q: &Query) -> ControlFlow<()> {
+            ControlFlow::Break(())
+        }
+    }
+    match e.visit(&mut RowRef { ansi }) {
+        ControlFlow::Continue(()) => Predicate::Const,
+        ControlFlow::Break(()) => Predicate::Row,
     }
 }
 
@@ -1402,6 +1569,60 @@ mod tests {
         assert_eq!(variant_name(&s[0]), "ShowTables");
         let s = Parser::parse_sql(&MySqlDialect {}, "SELECT 1").unwrap();
         assert_eq!(variant_name(&s[0]), "Query");
+    }
+
+    /// Fix round 1 (M8): the walk reads `Debug` text in three places (variant names, join
+    /// operators, `ALTER COLUMN … TYPE`). The pin is `=0.64.0`; this golden fails when a bump
+    /// changes any of that text, so the matches are revisited instead of silently dropping
+    /// `JoinWithoutOn` or `AlterType`.
+    #[test]
+    fn sqlparser_is_pinned_and_its_debug_text_is_the_walks() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Cargo.toml");
+        let manifest = std::fs::read_to_string(root).unwrap();
+        assert!(
+            manifest.contains("sqlparser = { version = \"=0.64.0\""),
+            "the workspace pins sqlparser =0.64.0"
+        );
+        assert_eq!(SQLPARSER.version, "0.64.0");
+        let one = |sql: &str| Parser::parse_sql(&MySqlDialect {}, sql).unwrap().remove(0);
+        let joins = |sql: &str| -> Vec<String> {
+            let Statement::Query(q) = one(sql) else {
+                panic!("{sql}")
+            };
+            let sqlparser::ast::SetExpr::Select(s) = &*q.body else {
+                panic!("{sql}")
+            };
+            s.from[0]
+                .joins
+                .iter()
+                .map(|j| format!("{:?}", j.join_operator))
+                .collect()
+        };
+        assert_eq!(joins("SELECT * FROM a JOIN b"), ["Join(None)"]);
+        assert_eq!(joins("SELECT * FROM a CROSS JOIN b"), ["CrossJoin(None)"]);
+        assert!(joins("SELECT * FROM a JOIN b ON a.x = b.x")[0].starts_with("Join(On("));
+        let Statement::AlterTable(a) = one("ALTER TABLE t ALTER COLUMN c SET DATA TYPE BIGINT")
+        else {
+            panic!("alter")
+        };
+        assert_eq!(variant_name(&a.operations[0]), "AlterColumn");
+        assert!(format!("{:?}", a.operations[0]).contains("SetDataType"));
+        for (sql, name) in [
+            ("DELETE FROM t", "Delete"),
+            ("UPDATE t SET a = 1", "Update"),
+            ("SET time_zone = '+00:00'", "Set"),
+            ("CALL p()", "Call"),
+            ("EXPLAIN SELECT 1", "Explain"),
+            ("DESCRIBE t", "ExplainTable"),
+            ("ALTER TABLE t DROP COLUMN c", "AlterTable"),
+        ] {
+            assert_eq!(variant_name(&one(sql)), name, "{sql}");
+        }
+        let Statement::AlterTable(a) = one("ALTER TABLE t DROP COLUMN c, MODIFY d INT") else {
+            panic!("alter")
+        };
+        let ops: Vec<String> = a.operations.iter().map(variant_name).collect();
+        assert_eq!(ops, ["DropColumn", "ModifyColumn"]);
     }
 
     #[test]
