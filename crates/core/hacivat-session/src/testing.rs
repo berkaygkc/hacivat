@@ -117,8 +117,25 @@ pub async fn fake_session(
     fake: FakeDriver,
     profile: Profile,
 ) -> (SessionHandle, Arc<FakeDriver>) {
-    let kind = fake.descriptor().kind;
+    let side = FakeDriver::new(fake.descriptor().kind);
+    let (handle, fake, _) = fake_session_with_side(rt, fake, side, profile).await;
+    (handle, fake)
+}
+
+// ## m3a-f3-ci (fix round 1)
+/// [`fake_session`] whose side connections (cancel, kill, terminate) go to `side`, returned
+/// too: a `side.gated()` holds a terminate in flight until `side.release()`.
+///
+/// # Panics
+/// As [`fake_session`].
+pub async fn fake_session_with_side(
+    rt: Handle,
+    fake: FakeDriver,
+    side: FakeDriver,
+    profile: Profile,
+) -> (SessionHandle, Arc<FakeDriver>, Arc<FakeDriver>) {
     let fake = Arc::new(fake);
+    let side = Arc::new(side);
     let read_only = profile.read_only;
     let deps = deps_over(fake.clone());
     let req = request(profile.clone(), Department::Console);
@@ -145,7 +162,7 @@ pub async fn fake_session(
         });
     let hooks = SessionHooks {
         side: Arc::new(FakeSide {
-            fake: Arc::new(FakeDriver::new(kind)),
+            fake: side.clone(),
             profile: profile.clone(),
         }),
         reconnect: None,
@@ -158,5 +175,6 @@ pub async fn fake_session(
     (
         spawn_session(&rt, spec, Arc::new(profile), live, hooks),
         fake,
+        side,
     )
 }

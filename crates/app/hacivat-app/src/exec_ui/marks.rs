@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use hacivat_driver::TxStatus;
 use hacivat_exec::{ResultTab, RunStatus, TabKey, UnitStatus, duration_message};
 use hacivat_l10n::ArgValue;
-use hacivat_session::session::{RowsOutcome as SessionRows, RunId, TxOwner};
+use hacivat_session::session::{RowsOutcome as SessionRows, RunId, SessionState, TxOwner};
 use hacivat_ui::text::TextFn;
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{App, SharedString, Task};
@@ -259,29 +259,51 @@ fn apply(t: &mut Tracker, st: &RunStatus, cx: &mut App) {
 /// The run's summary arrived: Run is free again; the SQL context is probed when the run may
 /// have changed it; a cancel that failed the user's transaction says so (R-M3-16 amended).
 fn run_ended(console: ConsoleId, run: Option<RunId>, cancel_asked: bool, cx: &mut App) {
-    let session = update_console_exec(cx, console, |e| {
+    let active = update_console_exec(cx, console, |e| {
         e.run.as_mut().filter(|r| Some(r.run) == run).map(|r| {
             r.ended = true;
-            r.session.clone()
+            (r.seq, r.session.clone())
         })
     })
     .flatten();
     orchestrator::on_run_ended(console, cx);
-    let Some(session) = session.filter(|_| cancel_asked) else {
+    let Some((seq, session)) = active.filter(|_| cancel_asked) else {
         return;
     };
-    let tx = session.state().borrow().tx.clone();
-    if tx.owner == TxOwner::User && tx.status == TxStatus::Failed {
-        let name = orchestrator::console_name(cx, console);
-        let text: TextFn = Rc::new(move |cx: &App| {
-            message(
-                cx,
-                "hv-tx-failed-by-stop",
-                vec![("name", ArgValue::Text(name.clone()))],
-            )
-        });
-        ToastQueue::push(cx, Toast::new(ToastKind::Error, text));
-    }
+    // ## m3a-f3-ci (fix round 1, review I1): the summary comes at `RunEnded`, while the session
+    // is still in the run's request; it publishes the transaction the stop left only when it
+    // leaves it (after a terminate still in flight, up to `CANCEL_WAIT`). So the transaction is
+    // read once the session has left request `seq`; a session that goes away says nothing.
+    let mut state = session.state();
+    cx.spawn(async move |cx| {
+        let left = state
+            .wait_for(|s| {
+                !matches!(
+                    s.state,
+                    SessionState::Busy { req, .. } | SessionState::Cancelling { req, .. }
+                        if req == seq
+                )
+            })
+            .await
+            .map(|s| s.tx.clone());
+        let Ok(tx) = left else {
+            return;
+        };
+        if tx.owner == TxOwner::User && tx.status == TxStatus::Failed {
+            cx.update(|cx| {
+                let name = orchestrator::console_name(cx, console);
+                let text: TextFn = Rc::new(move |cx: &App| {
+                    message(
+                        cx,
+                        "hv-tx-failed-by-stop",
+                        vec![("name", ArgValue::Text(name.clone()))],
+                    )
+                });
+                ToastQueue::push(cx, Toast::new(ToastKind::Error, text));
+            });
+        }
+    })
+    .detach();
 }
 
 /// The short form of a unit's status on a long line (NOTES surface 5): a success's duration

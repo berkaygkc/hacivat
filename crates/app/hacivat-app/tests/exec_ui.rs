@@ -55,10 +55,28 @@ fn console_with(
     p: hacivat_session::profile::Profile,
     fake: FakeDriver,
 ) -> Console {
+    let side = FakeDriver::new(p.engine);
+    console_with_side(cx, p, fake, side).0
+}
+
+/// [`console_with`] whose session's side connections (cancel, kill, terminate) go to `side`.
+fn console_with_side(
+    cx: &mut TestAppContext,
+    p: hacivat_session::profile::Profile,
+    fake: FakeDriver,
+    side: FakeDriver,
+) -> (Console, Arc<FakeDriver>) {
     let vcx = shell_with_connections(cx, "en");
     in_window(vcx, |window, _| window.activate_window());
     let profile = add_profile(vcx, p.clone());
-    let (session, fake) = session_over(vcx, p, fake);
+    let rt = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::connections::ConnectionsModel>()
+            .core_runtime()
+            .handle()
+    });
+    let (session, fake, side) = futures::executor::block_on(
+        hacivat_session::testing::fake_session_with_side(rt, fake, side, p),
+    );
     let id = register_test_console(vcx, profile, session.clone());
     wait_until(vcx, "the console's SQL context", |vcx| {
         vcx.cx
@@ -69,14 +87,15 @@ fn console_with(
             .and_then(|s| s.editor.clone())
             .expect("the console has an editor")
     });
-    Console {
+    let console = Console {
         vcx,
         id,
         fake,
         profile,
         session,
         editor,
-    }
+    };
+    (console, side)
 }
 
 /// A PostgreSQL fake whose connections track transactions (Hacivat's `BEGIN` around a read
@@ -709,6 +728,21 @@ fn dialog_buttons(vcx: &VisualTestContext) -> Vec<String> {
     button_labels(vcx)
 }
 
+/// Shows the open prompt's access keys, as Linux and Windows do (macOS hides them), so a check
+/// of its buttons runs against the split drawing on every platform.
+fn force_access_keys(vcx: &VisualTestContext) {
+    let dialog = vcx
+        .cx
+        .read(hacivat_app::exec_ui::close_prompt::open_prompt_dialog)
+        .expect("a prompt is open");
+    vcx.cx.update(|cx| {
+        dialog.update(cx, |d, cx| {
+            d.set_access_keys(true);
+            cx.notify();
+        })
+    });
+}
+
 #[gpui::test]
 fn closing_a_console_with_an_open_transaction_asks(cx: &mut TestAppContext) {
     let mut c = console_in_transaction(cx, false);
@@ -795,17 +829,7 @@ fn prompt_buttons_read_whole_where_access_keys_show(cx: &mut TestAppContext) {
     let mut c = console_in_transaction(cx, false);
     enable_registry(c.vcx);
     close_console_tab(&c);
-    let dialog = c
-        .vcx
-        .cx
-        .read(hacivat_app::exec_ui::close_prompt::open_prompt_dialog)
-        .expect("the close prompt is open");
-    c.vcx.cx.update(|cx| {
-        dialog.update(cx, |d, cx| {
-            d.set_access_keys(true);
-            cx.notify();
-        })
-    });
+    force_access_keys(c.vcx);
     let buttons = dialog_buttons(c.vcx);
     for want in ["Commit and close", "Roll back and close", "Cancel"] {
         assert!(buttons.iter().any(|b| b == want), "{want}: {buttons:?}");
@@ -821,6 +845,8 @@ fn close_prompt_on_a_failed_transaction_offers_roll_back_only(cx: &mut TestAppCo
     close_console_tab(&c);
     assert!(layer_ids(c.vcx).contains(&"dialog"));
     assert_eq!(dialog_title(c.vcx), "The transaction on orders-dev failed");
+    // Review F3 M3: the absence check runs against the split drawing on every platform.
+    force_access_keys(c.vcx);
     let buttons = dialog_buttons(c.vcx);
     assert!(
         !buttons.iter().any(|b| b.starts_with("Commit")),
@@ -954,6 +980,79 @@ fn a_stop_that_fails_the_users_transaction_says_so(cx: &mut TestAppContext) {
     });
     // Commit is not offered on a failed transaction.
     assert!(!run(c.vcx, "tx.commit"));
+    assert!(run(c.vcx, "tx.rollback"));
+    wait_until(c.vcx, "the rollback", |_| c.tx().status == TxStatus::Idle);
+    stop_core_runtime_test(cx);
+}
+
+/// Review F3 I1: the run's summary reaches the UI at `RunEnded`, while the session is still in
+/// the run's request; it publishes the failed transaction only when it settles. Here a
+/// terminate on a side connection (gated) is still in flight when the stopped statement ends,
+/// so the session waits for it (`CANCEL_WAIT`) between the two: the toast still comes, once
+/// the session has settled.
+#[gpui::test]
+fn a_stop_that_fails_the_transaction_says_so_after_the_session_settles(cx: &mut TestAppContext) {
+    use hacivat_session::session::{Escalation, SessionState};
+    let begin = FakeQuery {
+        prefix: "BEGIN",
+        tx_after: Some(TxStatus::InTx),
+        ..Default::default()
+    };
+    let slow = FakeQuery {
+        prefix: "UPDATE",
+        sets: vec![rows(100_000)],
+        chunk_delay: std::time::Duration::from_millis(1_500),
+        ..Default::default()
+    };
+    let main = pg().backend(4242).queries(vec![begin, slow]);
+    let (c, side) = console_with_side(
+        cx,
+        profile("orders-dev", DbmsKind::Postgres),
+        main,
+        FakeDriver::new(DbmsKind::Postgres).gated(),
+    );
+    enable_registry(c.vcx);
+    c.set_text("BEGIN");
+    c.run_at(0);
+    wait_until(c.vcx, "the user's transaction", |_| {
+        c.tx().owner == TxOwner::User && c.tx().status == TxStatus::InTx
+    });
+    c.set_text("UPDATE t SET a = a + 1 RETURNING a");
+    c.run_at(0);
+    c.wait_marks("the update to run", |m| {
+        matches!(m, [ExecMarkState::Running { .. }])
+    });
+    // Stop (its server cancel goes out once the call is overdue), then terminate at once: the
+    // terminate's side connection waits at the gate.
+    assert!(run(c.vcx, "exec.cancel"));
+    let seq = match c.session.state().borrow().state {
+        SessionState::Busy { req, .. } | SessionState::Cancelling { req, .. } => req,
+        ref other => panic!("the update runs: {other:?}"),
+    };
+    drop(c.session.escalate(seq, Escalation::Terminate));
+    wait_until(c.vcx, "the run's summary in the UI", |vcx| {
+        vcx.cx
+            .read(|cx| hacivat_app::exec_ui::last_run_ended(c.id, cx))
+    });
+    // The gap: the session has not left the run's request, so its snapshot still shows the
+    // transaction as it was before the stop.
+    let snap = c.session.state().borrow().clone();
+    assert!(
+        matches!(snap.state, SessionState::Cancelling { req, .. } if req == seq),
+        "the terminate holds the session: {:?}",
+        snap.state
+    );
+    assert_eq!(snap.tx.status, TxStatus::InTx, "not published yet");
+    side.release();
+    wait_until(c.vcx, "the transaction to fail", |_| {
+        c.tx().status == TxStatus::Failed
+    });
+    wait_until(c.vcx, "the toast", |vcx| {
+        in_window(vcx, |window, _| window.refresh());
+        toast_texts(vcx).iter().any(|t| {
+            t == "Stopping the statement failed the transaction on orders-dev. Only a rollback can end it now."
+        })
+    });
     assert!(run(c.vcx, "tx.rollback"));
     wait_until(c.vcx, "the rollback", |_| c.tx().status == TxStatus::Idle);
     stop_core_runtime_test(cx);
