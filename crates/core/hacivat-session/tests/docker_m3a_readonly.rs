@@ -49,6 +49,9 @@ const PG_PINNED: &str = "25001";
 const PG_PRIV: &str = "42501";
 const GAP: &str = "gap";
 const PROTOCOL: &str = "protocol";
+// ## m3a-f5-demo (DEMO-7): refused before anything is sent (a first keyword that changes data
+// or schema).
+const INPUT: &str = "input";
 
 /// The fixture large object.
 const LO: u32 = 220_022;
@@ -75,11 +78,11 @@ const PG_SERVER_BLOCKED: &[Row] = &[
     ("P7", "COMMIT AND CHAIN", &["1a"]),
     ("P7", "/* x */ END", &["1a"]),
     ("P7", "ROLLBACK", &["1a"]),
-    ("P8", "CALL hv_t22_commit()", &["2D000"]),
+    ("P8", "CALL hv_t22_commit()", &[INPUT]),
     (
         "P9",
         "DO $$ BEGIN INSERT INTO hv_t22 VALUES (9); END $$",
-        &[PG_RO],
+        &[INPUT],
     ),
     // Pinned difference from run B (`[PG_RO, PG_PRIV]` there): the typed PostgreSQL driver
     // refuses `COPY` before anything is sent (Task 12), so `Run` never reaches the server.
@@ -87,7 +90,7 @@ const PG_SERVER_BLOCKED: &[Row] = &[
     (
         "P26",
         "CREATE TEMP TABLE hv_t22_tmp (a int)",
-        &[PG_RO, PG_PRIV],
+        &[INPUT],
     ),
     ("P37", "SELECT nextval('hv_t22_seq')", &[PG_RO, PG_PRIV]),
     ("P37", "SELECT setval('hv_t22_seq', 100)", &[PG_RO, PG_PRIV]),
@@ -121,19 +124,18 @@ const PG_SERVER_BLOCKED: &[Row] = &[
 
 const MY_RO: &str = "1792";
 const MY_TABLE_PRIV: &str = "1142";
-const MY_DB_PRIV: &str = "1044";
 
 /// Run B's MySQL server-blocked rows on this task's fixture table.
 const MYSQL_SERVER_BLOCKED: &[Row] = &[
     (
         "M1",
         "/*!50000 DROP TABLE hv_t22_bypass */",
-        &[MY_RO, MY_TABLE_PRIV],
+        &[INPUT],
     ),
     (
         "M1",
         "/*!50000 INSERT INTO hv_t22_bypass VALUES (50) */",
-        &[MY_RO, MY_TABLE_PRIV],
+        &[INPUT],
     ),
     ("M2", "SELECT 1; DROP TABLE hv_t22_bypass", &["1064"]),
     (
@@ -150,20 +152,25 @@ const MYSQL_SERVER_BLOCKED: &[Row] = &[
     (
         "M8",
         "CREATE TABLE hv_t22_m8 (a int)",
-        &[MY_RO, MY_TABLE_PRIV],
+        &[INPUT],
     ),
     (
         "M8",
         "TRUNCATE TABLE hv_t22_bypass",
+        &[INPUT],
+    ),
+    ("M8", "DELETE FROM hv_t22_bypass", &[INPUT]),
+    (
+        "M8",
+        "WITH x AS (SELECT 1 AS a) DELETE FROM hv_t22_bypass WHERE a = 1",
         &[MY_RO, MY_TABLE_PRIV],
     ),
-    ("M8", "DELETE FROM hv_t22_bypass", &[MY_RO, MY_TABLE_PRIV]),
     ("M12", "HANDLER hv_t22_bypass OPEN", &[PROTOCOL]),
     ("M13", "XA START 'hv_t22'", &[PROTOCOL]),
     (
         "M17",
         "CREATE TEMPORARY TABLE hv_t22_tmp (a int)",
-        &[MY_RO, MY_DB_PRIV],
+        &[INPUT],
     ),
     ("M7", "/*!50000 COMMIT */", &["1a"]),
 ];
@@ -179,6 +186,7 @@ fn outcome(reply: &Reply) -> String {
         Err(e) => match &e.kind {
             ExecErrorKind::Db => code_of(e.server.as_ref()).unwrap_or_else(|| "db".into()),
             ExecErrorKind::ReadOnlyDenied(DenyLayer::Transaction) => "1a".into(),
+            ExecErrorKind::ReadOnlyDenied(DenyLayer::Input) => INPUT.into(),
             ExecErrorKind::ReadOnlyDenied(DenyLayer::Protocol) => PROTOCOL.into(),
             ExecErrorKind::ReadOnlyDenied(DenyLayer::Function) => "function".into(),
             ExecErrorKind::EnforcementGap(_) => GAP.into(),
@@ -649,6 +657,9 @@ const PG_NEUTRALISED: &[(&str, &str)] = &[
 /// Run B's PostgreSQL rows that only `hv_ro`'s missing privileges stop (L5), as `hv_ro` only.
 /// Pinned differences from run B (`42501` there): the typed driver refuses `COPY` before
 /// anything is sent, so the two `COPY` rows end `protocol`.
+// ## m3a-f5-demo (DEMO-7): `DO` blocks are refused before anything is sent on a read-only
+// console (`INPUT`); the run-time-built calls inside them keep their privilege-layer rows on
+// the M2b path (`docker_m2b_bypass.rs`, `Request::Exec`).
 const PG_PRIVILEGE_ONLY: &[Row] = &[
     ("P11", "SELECT pg_terminate_backend({victim})", &[PG_PRIV]),
     ("P13", "COPY (SELECT 1) TO PROGRAM 'true'", &[PROTOCOL]),
@@ -664,13 +675,13 @@ const PG_PRIVILEGE_ONLY: &[Row] = &[
     (
         "P31",
         "DO $$ BEGIN EXECUTE 'SELECT pg_create_physical_' || 'replication_slot(''hv_t22_slot'')'; END $$",
-        &[PG_PRIV],
+        &[INPUT],
     ),
     ("P32", "SELECT pg_switch_wal()", &["function"]),
     (
         "P32",
         "DO $$ BEGIN EXECUTE 'SELECT pg_switch' || '_wal()'; END $$",
-        &[PG_PRIV],
+        &[INPUT],
     ),
     (
         "P32",
@@ -680,12 +691,12 @@ const PG_PRIVILEGE_ONLY: &[Row] = &[
     (
         "P32",
         "DO $$ BEGIN EXECUTE 'SELECT pg_logical_' || 'emit_message(true, ''hv_t22'', ''x'')'; END $$",
-        &[PG_PRIV],
+        &[INPUT],
     ),
     (
         "P32",
         "DO $$ BEGIN EXECUTE 'SELECT pg_logical_' || 'emit_message(false, ''hv_t22'', ''x'')'; END $$",
-        &[PG_PRIV],
+        &[INPUT],
     ),
     (
         "P33",
@@ -736,9 +747,9 @@ const MYSQL_PRIVILEGE_ONLY: &[Row] = &[
     (
         "M11",
         "CREATE FUNCTION hv_t22_udf RETURNS STRING SONAME 'hv_t22.so'",
-        &[PROTOCOL],
+        &[INPUT],
     ),
-    ("M7", "CALL hv_t22_escape()", &["1370"]),
+    ("M7", "CALL hv_t22_escape()", &[INPUT]),
 ];
 
 /// MySQL's transaction read-only variable: `transaction_read_only` on MySQL 8.
@@ -872,9 +883,13 @@ async fn pg_neutralised_rows(t: &DockerTarget, failures: &mut Vec<String>, recor
     for (id, sql) in PG_NEUTRALISED {
         let got = outcome(&ro.try_row(sql).await);
         let mut lingering = ro.lingering(&checks).await;
-        // A write is still refused by the read-only transaction.
+        // A write is still refused by the read-only transaction (one the first keyword
+        // does not show: a plain INSERT never leaves the client, m3a-f5-demo).
         let write = outcome(
-            &ro.try_row_with("INSERT INTO hv_t22 VALUES (7)", false)
+            &ro.try_row_with(
+                "WITH w AS (INSERT INTO hv_t22 VALUES (7) RETURNING a) SELECT * FROM w",
+                false,
+            )
                 .await
                 .0,
         );
@@ -921,14 +936,26 @@ async fn mysql_neutralised_rows(t: &DockerTarget, failures: &mut Vec<String>, re
         let run_sql = sql.replace("{tro}", MY_TRO);
         let got = outcome(&ro.try_row(&run_sql).await);
         let mut lingering = ro.lingering(&checks).await;
-        // DDL is still refused by the read-only setting.
+        // DDL is still refused (since m3a-f5-demo by the client, before anything is sent),
+        // and a write the first keyword does not show by the read-only transaction.
         let ddl = outcome(
             &ro.try_row_with("CREATE TABLE hv_t22_m9 (a int)", false)
                 .await
                 .0,
         );
-        if ![MY_RO, MY_TABLE_PRIV].contains(&ddl.as_str()) {
+        if ddl != INPUT {
             lingering.push(format!("DDL after it → {ddl}"));
+        }
+        let write = outcome(
+            &ro.try_row_with(
+                "WITH x AS (SELECT 1 AS a) DELETE FROM hv_t22_bypass WHERE a = 1",
+                false,
+            )
+            .await
+            .0,
+        );
+        if ![MY_RO, MY_TABLE_PRIV].contains(&write.as_str()) {
+            lingering.push(format!("a write after it → {write}"));
         }
         let after = mysql_snapshot(&mut a, t).await;
         record.push_str(&format!("{}\thv_ro\t{id}\t{got}\t{sql}\n", t.id));

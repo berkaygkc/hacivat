@@ -500,6 +500,29 @@ const IMPLICIT_COMMIT_KEYWORDS: [&str; 18] = [
     "STOP",
 ];
 
+// ## m3a-f5-demo (DEMO-7)
+/// First keywords of statements that change data or schema (or run a routine that may), on
+/// any engine. A read-only console refuses them before anything is sent
+/// (`DenyLayer::Input`, "Not sent: this console is read-only, and the statement can change
+/// data or schema."). A deny list on the first keyword, not a classifier (that is M3b's):
+/// what it misses (`WITH … DELETE`, `SELECT f()` of a writing function) still meets the
+/// guard's read-only transaction and its post checks.
+const WRITE_KEYWORDS: [&str; 29] = [
+    "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "UPSERT", "TRUNCATE", "CREATE", "ALTER",
+    "DROP", "RENAME", "GRANT", "REVOKE", "COMMENT", "REINDEX", "CLUSTER", "VACUUM", "REFRESH",
+    "IMPORT", "LOAD", "SECURITY", "ATTACH", "DETACH", "OPTIMIZE", "REPAIR", "INSTALL",
+    "UNINSTALL", "CALL", "DO",
+];
+
+/// Whether some reading of `sql`'s first keyword, as `kind`'s server reads it (executable
+/// comments included, [`guard_keywords`]), is in [`WRITE_KEYWORDS`]. Case and the identifiers
+/// that follow (Turkish ones included) do not matter: only the first word is read.
+pub(crate) fn may_write(kind: DbmsKind, sql: &str) -> bool {
+    guard_keywords(kind, sql)
+        .words()
+        .any(|k| WRITE_KEYWORDS.contains(&k))
+}
+
 /// The lexer rules of one engine that decide where a statement's first keyword is.
 #[derive(Debug, Clone, Copy)]
 struct Lexer {

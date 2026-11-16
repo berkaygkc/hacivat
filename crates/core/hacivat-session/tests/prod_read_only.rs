@@ -127,9 +127,11 @@ async fn assert_read_only(h: &SessionHandle, f: &FakeDriver, what: &str) {
 // ## m3a-t22-typed-readonly (fix round 1, review M4)
 #[tokio::test(start_paused = true)]
 async fn a_production_write_runs_inside_the_guards_read_only_transaction() {
-    // A production console's `DELETE` through `Run`: the guard's `BEGIN … READ ONLY` comes
-    // first, the statement runs inside it (the server refuses the write there; the fake has no
-    // server, so the routing is what this proves), and a `ROLLBACK` ends it. Never a `COMMIT`.
+    // A production console's write through `Run`. A plain `DELETE` is refused before anything
+    // is sent (m3a-f5-demo, DEMO-7: the client layer). One the first keyword does not show
+    // (a writable CTE) meets the guard: its `BEGIN … READ ONLY` comes first, the statement
+    // runs inside it (the server refuses the write there; the fake has no server, so the
+    // routing is what this proves), and a `ROLLBACK` ends it. Never a `COMMIT`.
     let canary = hacivat_driver::fake::FakeExec {
         prefix: "SELECT pg_catalog.txid_current_if_assigned()",
         result: Ok(hacivat_driver::ExecSummary {
@@ -153,13 +155,25 @@ async fn a_production_write_runs_inside_the_guards_read_only_transaction() {
     let h = default_of(&m, profile.id);
     assert!(snap(&h).read_only);
     let sent = f.call_log().len();
-    let o = Recorder::new();
-    run_spec(
+    let refused = Recorder::new();
+    let e = run_spec(
         &h,
-        spec_with(&o, &[("DELETE FROM t", false)], FetchPolicy::default()),
+        spec_with(&refused, &[("DELETE FROM t", false)], FetchPolicy::default()),
     )
     .await
-    .expect("the guarded unit runs (the fake accepts it)");
+    .expect_err("a plain write is refused");
+    assert_eq!(
+        e.kind,
+        hacivat_session::session::ExecErrorKind::ReadOnlyDenied(
+            hacivat_session::session::DenyLayer::Input
+        )
+    );
+    assert_eq!(f.call_log().len(), sent, "{:?}", &f.call_log()[sent..]);
+    let cte = "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d";
+    let o = Recorder::new();
+    run_spec(&h, spec_with(&o, &[(cte, false)], FetchPolicy::default()))
+        .await
+        .expect("the guarded unit runs (the fake accepts it)");
     let log = &f.call_log()[sent..];
     let at = |call: &hacivat_driver::fake::FakeCall| log.iter().position(|c| c == call);
     let statement = |s: &str| hacivat_driver::fake::FakeCall::Statement(s.into());
@@ -167,7 +181,7 @@ async fn a_production_write_runs_inside_the_guards_read_only_transaction() {
         "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
     ));
     let query = at(&hacivat_driver::fake::FakeCall::Typed(
-        hacivat_driver::fake::FakeTypedCall::Query("DELETE FROM t".into()),
+        hacivat_driver::fake::FakeTypedCall::Query(cte.into()),
     ));
     let rollback = at(&statement("ROLLBACK"));
     assert_eq!(begin, Some(0), "{log:?}");

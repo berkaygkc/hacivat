@@ -27,7 +27,7 @@ use hacivat_driver::{RawError, RawErrorKind, ServerMessage, TxStatus};
 use hacivat_exec::LogMsg;
 use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_session::LiveState;
-use hacivat_session::session::TxOwner;
+use hacivat_session::session::{DenyLayer, TxOwner};
 use hacivat_ui_editor::{EditorView, ExecMarkState, preview};
 use hacivat_ui_grid::GridView;
 use hacivat_values::{LogicalType, Value};
@@ -232,9 +232,14 @@ fn run_rows_then_copy_puts_raw_tsv_on_the_clipboard(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppContext) {
-    // What PostgreSQL answers a write inside `BEGIN … READ ONLY`.
+    // ## m3a-f5-demo (DEMO-7): a plain INSERT is refused before anything is sent (the client
+    // layer); a write its first keyword does not show (a writable CTE) still meets the
+    // guard's read-only transaction, where the server refuses it (what PostgreSQL answers a
+    // write inside `BEGIN … READ ONLY`).
+    let cte =
+        "WITH a AS (INSERT INTO audit (note) VALUES ('İzmir') RETURNING note) SELECT * FROM a";
     let refused = FakeQuery {
-        prefix: "INSERT INTO audit",
+        prefix: "WITH a AS (INSERT INTO audit",
         // The error comes with the first event (a set whose rows never arrive).
         sets: vec![FakeResultSet {
             columns: vec![("note", text())],
@@ -268,12 +273,65 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
         "a production console's session is read-only (R-M3-6)"
     );
     let editor = editor_of(vcx, id);
+    // The PO's demo statement (Turkish identifiers).
+    let sent_before = fake(vcx).call_log().len();
     type_script(
         vcx,
         &editor,
-        "INSERT INTO audit (note) VALUES ('İzmir');\n",
+        "INSERT INTO müşteri VALUES (9, 'x', 1);\n",
         3,
     );
+    editor_command(vcx, &editor, "editor.run");
+    wait_until(vcx, "the denied mark", |vcx| {
+        matches!(
+            marks(vcx, id).as_slice(),
+            [ExecMarkState::Failed { sqlstate: None }]
+        )
+    });
+    let lines = log(vcx, id);
+    assert!(
+        lines
+            .iter()
+            .any(|m| matches!(m, LogMsg::ReadOnlyDenied(DenyLayer::Input))),
+        "{lines:?}"
+    );
+    // Nothing was sent for it: not the INSERT, not even the guard's transaction.
+    let calls = fake(vcx).call_log();
+    assert_eq!(calls.len(), sent_before, "{:?}", &calls[sent_before..]);
+    enable_registry(vcx);
+    refresh(vcx);
+    let drawn: Vec<String> = registry_frame(vcx)
+        .into_iter()
+        .map(|r| r.text.to_string())
+        .collect();
+    assert!(
+        drawn.iter().any(|t| t == "not sent: read-only"),
+        "{drawn:?}"
+    );
+    vcx.cx.update(|cx| {
+        let results = Consoles::get(cx, id)
+            .and_then(|s| s.results.clone())
+            .expect("the console's results");
+        results.update(cx, |r, cx| r.set_active(ActiveResult::Output, cx));
+    });
+    refresh(vcx);
+    let output = |vcx: &VisualTestContext| -> Vec<String> {
+        registry_frame(vcx)
+            .into_iter()
+            .filter(|r| r.path.contains("hacivat-app/src/results/output_view.rs"))
+            .map(|r| r.text.to_string())
+            .collect()
+    };
+    let out = output(vcx);
+    assert!(
+        out.iter().any(|t| t.contains(
+            "Not sent: this console is read-only, and the statement can change data or schema."
+        )),
+        "{out:?}"
+    );
+
+    // The server layer behind it.
+    type_script(vcx, &editor, &format!("{cte};\n"), 3);
     editor_command(vcx, &editor, "editor.run");
     wait_until(vcx, "the Failed mark", |vcx| {
         matches!(
@@ -293,17 +351,17 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
         "{lines:?}"
     );
     // Fix round 1 (M8): the session's read-only wrapper reached the server before the
-    // INSERT did (the 25006 is the fake's script; what the product sent is not).
+    // statement did (the 25006 is the fake's script; what the product sent is not).
     let calls = fake(vcx).call_log();
-    let insert = calls
+    let write = calls
         .iter()
         .position(|c| {
             matches!(c, hacivat_driver::fake::FakeCall::Typed(FakeTypedCall::Query(q))
-                if q.starts_with("INSERT INTO audit"))
+                if q.starts_with("WITH a AS (INSERT INTO audit"))
         })
-        .expect("the INSERT reached the fake");
+        .expect("the CTE reached the fake");
     assert!(
-        calls[..insert].iter().any(|c| matches!(
+        calls[..write].iter().any(|c| matches!(
             c,
             hacivat_driver::fake::FakeCall::Statement(sql)
                 if sql.contains("READ ONLY") || sql.contains("default_transaction_read_only = on")
@@ -313,14 +371,6 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
     // Nothing is left open or committed: the guard's read-only transaction ended.
     let tx = session.state().borrow().tx.clone();
     assert_eq!(tx.status, TxStatus::Idle, "{tx:?}");
-    // The Output tab says it: the server's text verbatim, on its own row.
-    vcx.cx.update(|cx| {
-        let results = Consoles::get(cx, id)
-            .and_then(|s| s.results.clone())
-            .expect("the console's results");
-        results.update(cx, |r, cx| r.set_active(ActiveResult::Output, cx));
-    });
-    enable_registry(vcx);
     refresh(vcx);
     // Fix round 1 (M8): the status bar says production and read-only.
     let env = text_of(vcx, "status-env-label").unwrap_or_default();
@@ -328,11 +378,15 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
         env.contains("production") && env.contains("read-only"),
         "{env:?}"
     );
-    let out: Vec<String> = registry_frame(vcx)
-        .into_iter()
-        .filter(|r| r.path.contains("hacivat-app/src/results/output_view.rs"))
-        .map(|r| r.text.to_string())
-        .collect();
+    // The Output tab says it: the server's text verbatim, on its own row.
+    vcx.cx.update(|cx| {
+        let results = Consoles::get(cx, id)
+            .and_then(|s| s.results.clone())
+            .expect("the console's results");
+        results.update(cx, |r, cx| r.set_active(ActiveResult::Output, cx));
+    });
+    refresh(vcx);
+    let out = output(vcx);
     assert!(
         out.iter()
             .any(|t| t.contains("cannot execute INSERT in a read-only transaction")),
