@@ -873,20 +873,24 @@ async fn copy_is_refused_before_sending() {
     nothing_was_sent(&mut conn, &mut srv).await;
 }
 
+// ## m3b-t13-drivers (named exception): M3a refused the simple protocol and every bind; M3b
+// runs both (`typed_m3b.rs`). What stays refused before anything is sent: binds with the simple
+// protocol, and a COPY either way.
 #[tokio::test]
 async fn simple_protocol_and_binds_are_refused() {
     let (mut conn, mut srv) = session().await;
-    let mut simple = spec("SELECT 1", false, 501);
+    let binds = [BindValue::Null];
+    let mut simple = spec("SELECT $1", false, 501);
     simple.protocol = Protocol::Simple;
+    simple.binds = &binds;
     assert_eq!(
         conn.query(simple).await.unwrap_err().kind,
         RawErrorKind::Unsupported
     );
-    let binds = [BindValue::Null];
-    let mut bound = spec("SELECT $1", false, 501);
-    bound.binds = &binds;
+    let mut copy = spec("COPY t TO STDOUT; SELECT 1", false, 501);
+    copy.protocol = Protocol::Simple;
     assert_eq!(
-        conn.query(bound).await.unwrap_err().kind,
+        conn.query(copy).await.unwrap_err().kind,
         RawErrorKind::Unsupported
     );
     nothing_was_sent(&mut conn, &mut srv).await;

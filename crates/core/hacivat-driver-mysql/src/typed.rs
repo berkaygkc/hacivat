@@ -5,8 +5,8 @@
 //! **One query.** `query` keeps M2b's routing (`exec::extended_route`): a `SET` runs over
 //! `COM_QUERY` (text protocol); a text the read-only connection must not run either way is
 //! `Unsupported` before anything is sent; everything else is prepared (`prep`, so a statement
-//! with a `?` placeholder is refused, `Unsupported`, before it runs: binds are M3b) and executed
-//! (`COM_STMT_EXECUTE`, binary protocol). A statement the server cannot prepare
+//! whose `?` placeholders are not one per bind is refused, `Unsupported`, before it runs) and
+//! executed (`COM_STMT_EXECUTE`, binary protocol). A statement the server cannot prepare
 //! (`ER_UNSUPPORTED_PS`, 1295, from the prepare only) is `Unsupported` on a read-only connection
 //! (the guard layer's refusal is never bypassed) and on a read-write one runs once more over
 //! `COM_QUERY`, decoded as text. `query` returns once the first result's header (or its OK
@@ -65,6 +65,28 @@
 //! [`TypedState::poisoned`] for as long as they run (`connect.rs`): a future dropped before it
 //! completed (mid-prepare, say) leaves a reply in the socket that the next command would take
 //! for its own, so the next call abandons the connection and answers `Io(NotConnected)`.
+//!
+//! ## m3b-t13-drivers (HV-EXEC-03 driver half; R-M3-60, -66, -77, -79)
+//!
+//! **Binds.** `spec.binds` go out as the binary protocol's parameters of `COM_STMT_EXECUTE`
+//! ([`bind_value`]: `Int`/`UInt` when the hint is a signed/unsigned integer and the text is
+//! one, else `Bytes` of the text; NULL as NULL), never into the SQL text. Only the prepared
+//! route carries them: a text the route sends over `COM_QUERY` (a `SET`), a statement the
+//! server cannot prepare (1295) and the text-protocol test seam answer `Unsupported` when binds
+//! are given, and the prepared statement's placeholder count must equal `binds.len()` (else
+//! `Unsupported`: prepared, never executed).
+//!
+//! **Run as one** (`Protocol::Simple`, R-M3-60): one `COM_QUERY` of the whole text, its result
+//! sets under the rules above (the first `max_result_sets` kept, the rest drained and counted;
+//! it never suspends). Only a read-write connection has the multi-statement capability
+//! (`connect.rs`, `.multi_statements(!req.read_only)`); on a read-only one it is `Unsupported`
+//! before anything is sent, as are binds. A result after the first carries no command tag (the
+//! text's first keyword names only the first statement).
+//!
+//! **Warnings** (R-M3-77): [`warnings`] runs `SHOW WARNINGS` after a `Done` whose count is
+//! positive, keeping at most [`MAX_WARNINGS`] rows as `Notice`s (`Notice::new`: text cut at
+//! 16 KiB), never on a read-only connection (the guard's `ROLLBACK` follows at once: the count
+//! only) and never while a query is open.
 
 use std::future::Future;
 use std::io;
@@ -73,12 +95,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hacivat_driver::{
-    CloseHow, Closed, Protocol, QueryDone, QueryEvent, QuerySpec, RawError, RawErrorKind,
-    ResultEnd, TxStatus, TypedCaps,
+    CloseHow, Closed, Notice, NoticeSeverity, Protocol, QueryDone, QueryEvent, QuerySpec, RawError,
+    RawErrorKind, ResultEnd, TxStatus, TypedCaps,
 };
-use hacivat_values::{Chunk, ChunkBuilder};
+use hacivat_values::{BindValue, Chunk, ChunkBuilder, LogicalType};
 use mysql_async::prelude::{Protocol as WireProtocol, Queryable};
-use mysql_async::{BinaryProtocol, Column, Conn, QueryResult, Row, TextProtocol};
+use mysql_async::{BinaryProtocol, Column, Conn, Params, QueryResult, Row, TextProtocol};
 
 use crate::connect::raw_error;
 use crate::decode::{Plan, Wire, binary_decodable};
@@ -155,9 +177,96 @@ pub(crate) fn caps_for(net_write_timeout: Option<Duration>) -> TypedCaps {
         .filter(|b| !b.is_zero());
     TypedCaps {
         suspend: bound.is_some(),
-        binds: false,
+        // ## m3b-t13-drivers: binary-protocol parameters.
+        binds: true,
         close_needs_kill: true,
         idle_bound: bound,
+    }
+}
+
+// ## m3b-t13-drivers
+/// The most `SHOW WARNINGS` rows kept (the rest are read and dropped).
+pub const MAX_WARNINGS: usize = 100;
+
+/// One bind as a binary-protocol parameter (R-M3-79): `Int`/`UInt` when the hint says a
+/// signed/unsigned integer and the text is one (machine format, no sign for `UInt`), else the
+/// text's bytes; NULL as NULL. The server converts `Bytes` to the parameter's type.
+pub fn bind_value(b: &BindValue) -> mysql_async::Value {
+    let BindValue::Typed { hint, text } = b else {
+        return mysql_async::Value::NULL;
+    };
+    let int = match hint {
+        LogicalType::Int { signed: true, .. } => text.parse().ok().map(mysql_async::Value::Int),
+        LogicalType::Int { signed: false, .. } => text.parse().ok().map(mysql_async::Value::UInt),
+        _ => None,
+    };
+    int.unwrap_or_else(|| mysql_async::Value::Bytes(text.as_bytes().to_vec()))
+}
+
+/// The parameters of a statement with `binds` (none: `Params::Empty`, as before M3b).
+fn params_of(binds: &[BindValue]) -> Params {
+    if binds.is_empty() {
+        Params::Empty
+    } else {
+        Params::Positional(binds.iter().map(bind_value).collect())
+    }
+}
+
+/// A `SHOW WARNINGS` row (`Level`, `Code`, `Message`) as a notice: the server's text, cut by
+/// `Notice::new`; a missing or odd cell is empty.
+fn warning_of(row: &Row) -> Notice {
+    let text = |i: usize| match row.as_ref(i) {
+        Some(mysql_async::Value::Bytes(b)) => String::from_utf8_lossy(b).into_owned(),
+        Some(mysql_async::Value::Int(n)) => n.to_string(),
+        Some(mysql_async::Value::UInt(n)) => n.to_string(),
+        _ => String::new(),
+    };
+    let severity = if text(0).eq_ignore_ascii_case("note") {
+        NoticeSeverity::Notice
+    } else {
+        NoticeSeverity::Warning
+    };
+    let code = text(1);
+    Notice::new(
+        severity,
+        (!code.is_empty()).then_some(code.as_str()),
+        &text(2),
+    )
+}
+
+/// `RawConn::warnings`: `SHOW WARNINGS` after the last statement, when it had any.
+pub(crate) async fn warnings(cx: Ctx<'_>) -> Result<Vec<Notice>, RawError> {
+    // A read-only session's guard rolls back at once: the count is all it reports.
+    if cx.read_only {
+        return Ok(Vec::new());
+    }
+    if cx.state.busy() {
+        return Err(unsupported());
+    }
+    let Some(conn) = cx.conn.as_mut() else {
+        return Err(not_connected());
+    };
+    if conn.get_warnings() == 0 {
+        return Ok(Vec::new());
+    }
+    let read = async {
+        let mut result = conn.query_iter("SHOW WARNINGS").await?;
+        let mut out = Vec::new();
+        while let Some(row) = result.next().await? {
+            if out.len() < MAX_WARNINGS {
+                out.push(warning_of(&row));
+            }
+        }
+        Ok::<_, mysql_async::Error>(out)
+    };
+    match read.await {
+        Ok(out) => {
+            if let Some(status) = cx.conn.as_ref().and_then(last_status) {
+                *cx.tx = status;
+            }
+            Ok(out)
+        }
+        Err(e) => Err(fail(cx, Fail::My(e)).await),
     }
 }
 
@@ -275,6 +384,9 @@ pub(crate) struct Open {
     command_tag: Option<String>,
     /// A later statement's error, after the current result's end.
     error: Option<RawError>,
+    // ## m3b-t13-drivers
+    /// Run as one (`Protocol::Simple`): results after the first carry no command tag.
+    simple: bool,
 }
 
 impl Open {
@@ -297,11 +409,16 @@ impl Open {
             skipped: 0,
             command_tag: tag,
             error: None,
+            simple: false,
         }
     }
 
     /// The next kept result (never suspended: only a single-result unit suspends).
     fn start_next(&mut self, plan: Plan) {
+        // ## m3b-t13-drivers: the text's first keyword names only the first statement.
+        if self.simple {
+            self.command_tag = None;
+        }
         self.plan = plan;
         self.stage = Stage::Start;
         self.builder = None;
@@ -619,20 +736,25 @@ async fn start(
     conn: &mut Conn,
     sql: &str,
     route: ExtendedRoute,
+    binds: &[BindValue],
 ) -> Result<(Wire, std::sync::Arc<[Column]>), StartFail> {
     match route {
         ExtendedRoute::Refused => Err(StartFail::Refused),
+        // ## m3b-t13-drivers: `COM_QUERY` carries no parameter; binds are never spliced.
+        ExtendedRoute::Text if !binds.is_empty() => Err(StartFail::Refused),
         ExtendedRoute::Text => {
             let result = conn.query_iter(sql).await.map_err(StartFail::My)?;
             Ok((Wire::Text, result.columns().unwrap_or_else(|| [].into())))
         }
         ExtendedRoute::Prepared => {
             let statement = conn.prep(sql).await.map_err(StartFail::Prepare)?;
-            if statement.num_params() > 0 {
+            // ## m3b-t13-drivers: one bind per placeholder, else nothing runs (a missing bind
+            // never becomes NULL; an extra one is never ignored).
+            if usize::from(statement.num_params()) != binds.len() {
                 return Err(StartFail::Binds);
             }
             let result = conn
-                .exec_iter(&statement, ())
+                .exec_iter(&statement, params_of(binds))
                 .await
                 .map_err(StartFail::My)?;
             Ok((Wire::Binary, result.columns().unwrap_or_else(|| [].into())))
@@ -641,9 +763,9 @@ async fn start(
 }
 
 enum StartFail {
-    /// Nothing was sent (`extended_route` refused the text).
+    /// Nothing was sent (`extended_route` refused the text, or binds for a text route).
     Refused,
-    /// The statement has placeholders (binds are M3b); prepared, not executed.
+    /// The placeholder count is not the bind count; prepared, not executed.
     Binds,
     /// The prepare failed: nothing ran (the only failure a 1295 retry follows).
     Prepare(mysql_async::Error),
@@ -657,7 +779,13 @@ fn is_unsupported_ps(e: &mysql_async::Error) -> bool {
 
 /// `RawConn::query`.
 pub(crate) async fn query(cx: Ctx<'_>, spec: QuerySpec<'_>) -> Result<(), RawError> {
-    if cx.state.busy() || spec.protocol == Protocol::Simple || !spec.binds.is_empty() {
+    if cx.state.busy() {
+        return Err(unsupported());
+    }
+    // ## m3b-t13-drivers: Run as one is one `COM_QUERY`: never on a read-only connection (it
+    // has no multi-statement capability), never with binds.
+    let simple = spec.protocol == Protocol::Simple;
+    if simple && (cx.read_only || !spec.binds.is_empty()) {
         return Err(unsupported());
     }
     let Some(conn) = cx.conn.as_mut() else {
@@ -665,19 +793,20 @@ pub(crate) async fn query(cx: Ctx<'_>, spec: QuerySpec<'_>) -> Result<(), RawErr
     };
     let limits = Limits::of(&spec);
     let tag = command_tag(spec.sql);
-    let route = if cx.state.force_text {
+    let route = if simple || cx.state.force_text {
         ExtendedRoute::Text
     } else {
         extended_route(spec.sql, cx.read_only)
     };
-    let started = match start(conn, spec.sql, route).await {
+    let started = match start(conn, spec.sql, route, spec.binds).await {
         // Only a refused prepare is retried: nothing ran.
         Err(StartFail::Prepare(e)) if is_unsupported_ps(&e) => {
-            if cx.read_only {
-                // The refused prepare changed nothing; it is never re-sent as text.
+            if cx.read_only || !spec.binds.is_empty() {
+                // The refused prepare changed nothing; it is never re-sent as text (binds would
+                // have to be spliced into it).
                 return Err(unsupported());
             }
-            start(conn, spec.sql, ExtendedRoute::Text).await
+            start(conn, spec.sql, ExtendedRoute::Text, &[]).await
         }
         other => other,
     };
@@ -697,13 +826,15 @@ pub(crate) async fn query(cx: Ctx<'_>, spec: QuerySpec<'_>) -> Result<(), RawErr
         && wire == Wire::Binary
         && tag.as_deref() != Some("CALL")
         && !columns.is_empty();
-    cx.state.open = Some(Open::new(
+    let mut open = Open::new(
         wire,
         Plan::for_columns_in(&columns, cx.state.time_zone.as_ref()),
         limits,
-        suspendable,
+        suspendable && !simple,
         tag,
-    ));
+    );
+    open.simple = simple;
+    cx.state.open = Some(open);
     Ok(())
 }
 
@@ -1002,7 +1133,8 @@ mod tests {
             caps,
             TypedCaps {
                 suspend: true,
-                binds: false,
+                // ## m3b-t13-drivers
+                binds: true,
                 close_needs_kill: true,
                 idle_bound: Some(Duration::from_secs(45)),
             }

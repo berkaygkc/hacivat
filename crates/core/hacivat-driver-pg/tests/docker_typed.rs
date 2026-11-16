@@ -1146,12 +1146,27 @@ async fn a_statement_beside_a_portal_keeps_the_querys_warnings() {
         ))
         .await
         .unwrap();
+        // ## m3b-t13-drivers (named exception): the query's notices now come out as
+        // `QueryEvent::Notice` (R-M3-77) wherever they fall; the rest of the grammar is as
+        // before, and the canary's statement lends the query none.
+        let mut texts = Vec::new();
+        async fn next(c: &mut PgConn, texts: &mut Vec<String>) -> QueryEvent {
+            loop {
+                match c.next_event().await.unwrap() {
+                    QueryEvent::Notice(n) => texts.push(n.text.to_string()),
+                    other => return other,
+                }
+            }
+        }
         assert!(matches!(
-            c.next_event().await.unwrap(),
+            next(&mut c, &mut texts).await,
             QueryEvent::ResultStart(_)
         ));
-        assert!(matches!(c.next_event().await.unwrap(), QueryEvent::Rows(_)));
-        assert_eq!(c.next_event().await.unwrap(), QueryEvent::Suspended);
+        assert!(matches!(
+            next(&mut c, &mut texts).await,
+            QueryEvent::Rows(_)
+        ));
+        assert_eq!(next(&mut c, &mut texts).await, QueryEvent::Suspended);
         let canary = c
             .execute(
                 "SELECT pg_catalog.txid_current_if_assigned()",
@@ -1165,13 +1180,15 @@ async fn a_statement_beside_a_portal_keeps_the_querys_warnings() {
         assert!(canary.notice_codes.is_empty(), "{}: {canary:?}", t.id);
         c.fetch_more(100).await.unwrap();
         let done = loop {
-            match c.next_event().await.unwrap() {
+            match next(&mut c, &mut texts).await {
                 QueryEvent::Done(done) => break done,
                 QueryEvent::Rows(_) | QueryEvent::ResultEnd(_) => {}
                 other => panic!("{}: {other:?}", t.id),
             }
         };
         assert_eq!(done.warnings, 10, "{}", t.id);
+        let want: Vec<String> = (1..=10).map(|n| format!("hv_t22 {n}")).collect();
+        assert_eq!(texts, want, "{}", t.id);
         c.batch("ROLLBACK").await.unwrap();
         assert_synced(&mut c).await;
         Box::new(c).close().await;

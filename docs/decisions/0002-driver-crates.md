@@ -1394,3 +1394,62 @@ get their own logical type, and the ones with a stable binary format decode in b
     m-10); T18 (fold the `sql_mode` read into the same setup query) and the settings model
     (`EnvStep::TimeZone` must refresh `TypedState.time_zone`); session-state tracking for
     `time_zone` needs a vendored mysql_async patch (`CLIENT_SESSION_TRACK`) first.
+
+## m3b-t13 — binds and result sets
+
+HV-EXEC-03 driver half; R-M3-60 (Run as one), R-M3-66 (result sets), R-M3-77 (notices and
+warnings), R-M3-79 (bind values). `TypedCaps.binds` is `true` on all three drivers.
+
+- **Binds are data, never text.** No driver puts a bind value into SQL text, and none re-sends a
+  bound statement another way. The statement's own placeholder count must equal `binds.len()`
+  (PostgreSQL `statement.params()`, MySQL `num_params()`, SQLite
+  `sqlite3_bind_parameter_count`), else `Unsupported` before anything runs: a missing bind never
+  becomes NULL (closes the SQLite "would run as NULL" note of `m3a-t15`), an extra one is never
+  ignored.
+  - **PostgreSQL:** text-format parameters (format code 0, the value's text, or NULL) in the
+    Bind of patch §1's `query_with_formats`/`bind_with_formats`; the server parses each with its
+    parameter type's input function. Patch §1's entry points already take any `ToSql`, whose
+    `encode_format` picks the format, so **no change to the vendored copy** (the Task 13 named
+    exception in `PATCHES.md` §2 is not taken). The parameter's `Debug` never shows the value.
+  - **MySQL:** binary-protocol parameters of `COM_STMT_EXECUTE`: `Int`/`UInt` when the hint is a
+    signed/unsigned integer and the text is one, else `Bytes` of the text, NULL as NULL. Only the
+    prepared route carries binds; a `SET` (routed over `COM_QUERY`), a statement the server cannot
+    prepare (1295) and the text-protocol test seam are `Unsupported` with binds.
+  - **SQLite:** bound by position by hint: `INTEGER` (integer hint and text), `REAL` (float hint,
+    finite), `INTEGER` 1/0 (bool hint, `true`/`false`/`1`/`0`), `BLOB` (bytes hint, `\x` + hex
+    pairs, the raw text Hacivat shows for bytes), `NULL`, else `TEXT` (a decimal stays exact;
+    the column's affinity may convert it).
+- **Run as one** (`Protocol::Simple`; never with binds: `Unsupported`; never suspends).
+  - **PostgreSQL:** one simple `Query`. Each statement is one result; every column
+    `LogicalType::Text` with `NativeType::Unknown`, decoded from the server's text only (T7
+    review m-10: binary decoders never see simple-protocol bytes); a cell that is not UTF-8 is an
+    error cell (`pg-text`), the row kept. Limits: a set's `command_tag` is `None` (only the last
+    tag is observed, and a later statement's may already have been read), and `rows_affected` is
+    the `CommandComplete` count of a column-less statement when positive, else `None`.
+    `close_query` reads the rest to its end, as for the unnamed portal. A `COPY` inside the text
+    (past the first-keyword check) is answered by the wire observer (`FROM STDIN`) or breaks the
+    connection (`TO STDOUT`): fail-closed.
+  - **MySQL:** one `COM_QUERY`, only on a read-write connection (a read-only one has no
+    multi-statement capability: `Unsupported` before sending); results after the first carry no
+    command tag.
+  - **SQLite:** `rusqlite::Batch`: each statement prepared and judged by the read-only checks only
+    when the one before it ended, each its own result; a statement with a parameter is
+    `Unsupported`; `close_query` ends it and the statements not reached never run.
+- **Result sets (R-M3-66).** The first `max_result_sets` results are kept; every later one is
+  read (or stepped) to its end and counted in `QueryDone::skipped_result_sets`, never dropped
+  silently. MySQL keeps its M3a rule (a column-less OK between results is not a set).
+- **Notices (R-M3-77, PostgreSQL).** The connection task keeps, besides the M2b codes, the text
+  of the open typed query's notices: the first 100 of the query, each `Notice::new` (severity,
+  SQLSTATE, the server's message verbatim, cut at 16 KiB on a character boundary). They leave
+  the driver only as `QueryEvent::Notice`, before the next event (so all of a statement's before
+  `Done`); notices raised before a server error come out before that error (it is held for the
+  next call). A statement run beside a suspended query (the guard's canary) never lends the
+  query its notices; text is never logged and never kept between queries. Only the message is
+  kept (`DETAIL`/`HINT` are not).
+- **Warnings (R-M3-77, MySQL).** `RawConn::warnings` runs `SHOW WARNINGS` when the last
+  statement's count is positive, keeping at most 100 rows as `Notice`s (`Note` → `Notice`,
+  `Warning`/`Error` → `Warning`, the code, the message cut at 16 KiB); never on a read-only
+  connection (the count only: the guard's `ROLLBACK` follows at once), never while a query is
+  open (`Unsupported`); like the other calls it poisons the connection if dropped mid-read.
+- **`Notice` is `#[non_exhaustive]`** (T1c review M4): outside `hacivat-driver` it is built only
+  through `Notice::new`, so no driver can skip the 16 KiB cap; its fields stay readable.

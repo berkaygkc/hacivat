@@ -540,7 +540,8 @@ async fn the_idle_bound_is_15_s_below_net_write_timeout() {
             c.typed_caps(),
             TypedCaps {
                 suspend: true,
-                binds: false,
+                // ## m3b-t13-drivers (named exception): binds since M3b.
+                binds: true,
                 close_needs_kill: true,
                 idle_bound: Some(bound),
             },
