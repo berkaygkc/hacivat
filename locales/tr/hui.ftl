@@ -57,7 +57,7 @@ hui-editor-t1-body = Kısıtlı mod yazmayı hızlı tutar. Belge { $size } boyu
 # Review: PO
 hui-editor-t1-long-title = Bu belgede çok uzun bir satır var; düzenleyici kısıtlı modda.
 # Review: PO
-hui-editor-t1-long-body = Kısıtlı mod yazmayı hızlı tutar.
+hui-editor-t1-long-body = Kısıtlı mod yazmayı hızlı tutar. Her satır { $size } boyutundan kısa olunca sona erer.
 # Review: PO
 hui-editor-exec-running = { $n }. ifade çalışıyor
 # Review: PO
@@ -76,3 +76,9 @@ hui-editor-exec-failed-code = { $n }. ifade başarısız oldu: { $sqlstate }
 hui-editor-exec-cancelled = { $n }. ifade iptal edildi
 # Review: PO
 hui-editor-exec-skipped = { $n }. ifade atlandı: önceki bir ifade başarısız oldu
+
+## m3a-f4-ime
+# Review: PO
+hui-editor-t1-line-size = { $n } KB
+# Review: PO
+hui-editor-t1-both-body = Kısıtlı mod yazmayı hızlı tutar. Belge { $size } boyutunun altına inip her satır { $line } boyutundan kısa olunca sona erer.

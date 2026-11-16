@@ -1820,3 +1820,7 @@ hv-tx-failed-by-stop = İfadeyi durdurmak { $name } üzerindeki işlemi başarı
 hv-exec-pending-read-only = Hiçbir şey gönderilmedi: bu konsol, açık işlemi sona erdiğinde salt okunur olur. Önce commit edin ya da geri alın.
 # Review: PO
 hv-exec-rerun-edited = İfade çalıştırıldıktan sonra düzenlendi. Düzenleyiciden çalıştırın.
+
+## m3a-f4-ime
+# Review: PO
+hv-cmd-app-character-palette = Emoji ve Semboller

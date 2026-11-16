@@ -856,3 +856,160 @@ fn two_app_edits_in_one_frame_notify_once(cx: &mut TestAppContext) {
     draw(o.vcx);
     assert_eq!(notifications(&o) - base, 1);
 }
+
+// ---------------------------------------------------------------------------------------------
+// ## m3a-f4-ime (PO finding IME-1, rows 5a and 5b): a composition the editor ends itself is
+// discarded on the platform too.
+
+/// How many times the editor told the platform to discard its composition.
+fn discards(o: &Opened<'_>) -> u64 {
+    o.vcx.read(|cx| o.editor.read(cx).marked_text_discards())
+}
+
+/// How many discards reached the test platform window (the GPUI fork's counter).
+fn platform_discards(o: &Opened<'_>) -> usize {
+    let window = gpui::VisualContext::window_handle(&*o.vcx);
+    o.vcx.cx.marked_text_discards(window)
+}
+
+/// The window point over byte `at` of the painted text (half a row down, half a pixel in).
+fn point_at(o: &Opened<'_>, at: usize) -> gpui::Point<gpui::Pixels> {
+    o.vcx.read(|cx| {
+        let l = o.editor.read(cx).last_layout().unwrap().clone();
+        let b = l.bounds_for_range(at..at).unwrap();
+        point(
+            b.origin.x + px(0.5),
+            b.origin.y + l.rows().line_height / 2.0,
+        )
+    })
+}
+
+/// Composes `かんじ` at the end of line 1 of two lines and draws it.
+fn composing_two_lines(cx: &mut TestAppContext) -> Opened<'_> {
+    let mut o = open(cx, "SELECT 1;\nSELECT 2;", 9);
+    mark(&mut o, "かんじ");
+    draw(o.vcx);
+    assert!(composing(&o));
+    assert_eq!(discards(&o), 0);
+    o
+}
+
+/// Row 5b: a click outside the marked text commits it once, moves the caret to the click and
+/// tells the platform, in the click itself, to drop its copy (AppKit's `discardMarkedText`), so
+/// the input method closes its candidate window instead of inserting the composition again at
+/// the new caret. The composition stays one undo group.
+#[gpui::test]
+fn a_click_outside_the_marked_text_commits_once_and_discards_it(cx: &mut TestAppContext) {
+    let mut o = composing_two_lines(cx);
+    let line2 = "SELECT 1;かんじ\n".len() + 3;
+    let p = point_at(&o, line2);
+    o.vcx.simulate_click(p, gpui::Modifiers::none());
+    assert!(!composing(&o));
+    assert_eq!(text(&o), "SELECT 1;かんじ\nSELECT 2;");
+    assert_eq!(selection(&o), line2..line2);
+    assert_eq!(discards(&o), 1, "the click discards the platform's copy");
+    assert_eq!(platform_discards(&o), 1, "and the platform window heard it");
+    assert_eq!(composition_events(&o), [true, false]);
+    draw(o.vcx);
+    assert_eq!(discards(&o), 1, "once");
+    assert_eq!(platform_discards(&o), 1);
+    assert_eq!(undo_all(&mut o), 1);
+    assert_eq!(text(&o), "SELECT 1;\nSELECT 2;");
+}
+
+/// Row 5a: a click inside the marked text commits it once too, the caret at the click.
+#[gpui::test]
+fn a_click_inside_the_marked_text_commits_once_and_discards_it(cx: &mut TestAppContext) {
+    let mut o = composing_two_lines(cx);
+    let inside = "SELECT 1;か".len();
+    let p = point_at(&o, inside);
+    o.vcx.simulate_click(p, gpui::Modifiers::none());
+    assert!(!composing(&o));
+    assert_eq!(text(&o), "SELECT 1;かんじ\nSELECT 2;");
+    assert_eq!(selection(&o), inside..inside);
+    assert_eq!(discards(&o), 1);
+    // ## m3a-f4-ime (review M4): the platform heard it, and the composition is one undo group.
+    assert_eq!(platform_discards(&o), 1);
+    assert_eq!(undo_all(&mut o), 1);
+    assert_eq!(text(&o), "SELECT 1;\nSELECT 2;");
+}
+
+// ## m3a-f4-ime (review M4): the other two click paths of `mouse::down`.
+
+/// A Shift-click while composing commits once, extends the selection from its anchor (the
+/// caret after the composition) to the click, and discards the platform's copy.
+#[gpui::test]
+fn a_shift_click_while_composing_commits_once_and_discards_it(cx: &mut TestAppContext) {
+    let o = composing_two_lines(cx);
+    let line2 = "SELECT 1;かんじ\n".len() + 3;
+    let p = point_at(&o, line2);
+    o.vcx.simulate_click(p, gpui::Modifiers::shift());
+    assert!(!composing(&o));
+    assert_eq!(text(&o), "SELECT 1;かんじ\nSELECT 2;");
+    assert_eq!(selection(&o), "SELECT 1;かんじ".len()..line2);
+    assert_eq!((discards(&o), platform_discards(&o)), (1, 1));
+}
+
+/// A right click while composing commits once, places the caret at the pointer (the context
+/// menu opens there) and discards the platform's copy.
+#[gpui::test]
+fn a_right_click_while_composing_commits_once_and_discards_it(cx: &mut TestAppContext) {
+    let o = composing_two_lines(cx);
+    let line2 = "SELECT 1;かんじ\n".len() + 3;
+    let p = point_at(&o, line2);
+    o.vcx
+        .simulate_mouse_down(p, gpui::MouseButton::Right, gpui::Modifiers::none());
+    o.vcx
+        .simulate_mouse_up(p, gpui::MouseButton::Right, gpui::Modifiers::none());
+    assert!(!composing(&o));
+    assert_eq!(text(&o), "SELECT 1;かんじ\nSELECT 2;");
+    assert_eq!(selection(&o), line2..line2);
+    assert_eq!((discards(&o), platform_discards(&o)), (1, 1));
+}
+
+/// A click with no composition, and a focus move (the platform discards on the focus loss
+/// itself, the GPUI fork's `FocusLost`), discard nothing.
+#[gpui::test]
+fn clicks_without_a_composition_and_focus_moves_discard_nothing(cx: &mut TestAppContext) {
+    let mut o = open(cx, "SELECT 1;\nSELECT 2;", 0);
+    let p = point_at(&o, 12);
+    o.vcx.simulate_click(p, gpui::Modifiers::none());
+    assert_eq!(selection(&o), 12..12);
+    mark(&mut o, "ş");
+    let other = o.other.clone();
+    o.vcx.update(|window, cx| window.focus(&other, cx));
+    draw(o.vcx);
+    assert!(!composing(&o));
+    assert_eq!(discards(&o), 0);
+    assert_eq!(platform_discards(&o), 0);
+}
+
+/// An app path that ends a composition (here a redo run while composing) discards the
+/// platform's copy by the next frame; `end_composition` (the host's toolbar Run) does it at
+/// once, and does nothing without a composition.
+#[gpui::test]
+fn app_paths_that_end_a_composition_discard_it(cx: &mut TestAppContext) {
+    let mut o = open(cx, "", 0);
+    mark(&mut o, "ş");
+    draw(o.vcx);
+    run(&mut o, "editor.redo");
+    draw(o.vcx);
+    assert!(!composing(&o));
+    assert_eq!(discards(&o), 1);
+    // ## m3a-f4-ime (review M3): the editor's count is what reached the platform.
+    assert_eq!(platform_discards(&o), 1);
+    mark(&mut o, "感じ");
+    draw(o.vcx);
+    o.editor
+        .update_in(o.vcx, |v, window, cx| v.end_composition(window, cx));
+    assert!(!composing(&o));
+    assert_eq!(text(&o), "ş感じ");
+    assert_eq!(discards(&o), 2, "at once, before any frame");
+    assert_eq!(platform_discards(&o), 2);
+    draw(o.vcx);
+    o.editor
+        .update_in(o.vcx, |v, window, cx| v.end_composition(window, cx));
+    draw(o.vcx);
+    assert_eq!(discards(&o), 2, "nothing to end");
+    assert_eq!(platform_discards(&o), 2);
+}

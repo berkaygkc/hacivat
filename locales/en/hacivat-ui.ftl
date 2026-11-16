@@ -2014,3 +2014,7 @@ hv-tx-failed-by-stop = Stopping the statement failed the transaction on { $name 
 hv-exec-pending-read-only = Nothing was sent: this console becomes read-only once its open transaction ends. Commit or roll back first.
 # Toast when Re-run is refused because the statement was edited since it ran.
 hv-exec-rerun-edited = The statement was edited since it ran. Run it from the editor.
+
+## m3a-f4-ime
+# The Edit menu item (macOS) that opens the system's Emoji & Symbols palette; AppKit's own name for it.
+hv-cmd-app-character-palette = Emoji & Symbols
