@@ -290,7 +290,7 @@ fn golden(engine: DbmsKind) -> Vec<Vec<Value>> {
         partial("2024-05-00 10:00:00.000000"),
         ts(1, 0),
         interval(-(H + 30 * 60_000_000 + 500_000)),
-        opaque("bit", "11111"),
+        text("11111"),
         Value::Null,
     ]);
     let mut row5 = ones(5);
@@ -299,7 +299,7 @@ fn golden(engine: DbmsKind) -> Vec<Vec<Value>> {
         opaque("datetime", "2024-02-30 01:02:03.000000"),
         Value::Null,
         Value::Time(TimeVal::END_OF_DAY),
-        opaque("bit", "00001"),
+        text("00001"),
         Value::Null,
     ]);
     vec![
@@ -333,8 +333,8 @@ fn golden(engine: DbmsKind) -> Vec<Vec<Value>> {
             ts(LEAP_DAY + 13 * 3_600 + 14 * 60 + 15, 123_456_000),
             ts(LEAP_DAY + 13 * 3_600 + 14 * 60 + 15, 123_000_000),
             Value::Time(TimeVal::from_micros(13 * H + 14 * 60_000_000 + 15_250_000)),
-            opaque("bit", "10110"),
-            opaque("geometry", point),
+            text("10110"),
+            text(point),
         ],
         std::iter::once(Value::Int(2))
             .chain((0..30).map(|_| Value::Null))
@@ -369,7 +369,7 @@ fn golden(engine: DbmsKind) -> Vec<Vec<Value>> {
             Value::Special(SpecialVal::ZeroDate),
             Value::Special(SpecialVal::ZeroDate),
             interval(838 * H + 59 * 60_000_000 + 59_000_000),
-            opaque("bit", "00000"),
+            text("00000"),
             Value::Null,
         ],
         row4,
@@ -466,18 +466,9 @@ fn check_schema(t: &DockerTarget, schema: &ResultSchema) {
                 tz: false,
             },
         ),
-        (
-            "bt",
-            LogicalType::Opaque {
-                type_name: "bit".into(),
-            },
-        ),
-        (
-            "g",
-            LogicalType::Opaque {
-                type_name: "geometry".into(),
-            },
-        ),
+        // m3b-t07 (R-M3-67): typed text.
+        ("bt", LogicalType::BitString { len: Some(5) }),
+        ("g", LogicalType::Geometry { srid: None }),
     ] {
         assert_eq!(logical(schema, name), want, "{}: column {name}", t.id);
     }

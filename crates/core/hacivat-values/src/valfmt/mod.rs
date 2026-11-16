@@ -32,8 +32,10 @@ mod raw;
 mod tooltip;
 
 pub use display::format_cell;
+// ## m3b-t07-types (ledger 246)
 #[doc(hidden)]
 pub use display::formatter_builds;
+pub use display::type_label;
 pub use idlike::id_like;
 pub use raw::{RawText, raw_text, raw_text_in};
 

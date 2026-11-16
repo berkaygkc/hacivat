@@ -69,6 +69,7 @@
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use hacivat_driver::{
@@ -104,6 +105,9 @@ pub(crate) struct TypedState {
     pub poisoned: bool,
     /// Test seam: every query over `COM_QUERY` (text protocol).
     pub force_text: bool,
+    // ## m3b-t07-types (ledger 194)
+    /// The session `time_zone` read at connect, which `TIMESTAMP` columns carry.
+    pub time_zone: Option<Arc<str>>,
 }
 
 impl TypedState {
@@ -117,6 +121,7 @@ impl TypedState {
             draining: None,
             poisoned: false,
             force_text: false,
+            time_zone: None,
         }
     }
 
@@ -160,20 +165,41 @@ pub(crate) fn caps_for(net_write_timeout: Option<Duration>) -> TypedCaps {
 /// unknown variable) or a value that is not a positive number gives `None` (nothing suspends);
 /// an I/O or protocol failure fails the connect: a connection that cannot answer one query is
 /// not handed out as usable.
-pub(crate) async fn read_net_write_timeout(conn: &mut Conn) -> Result<Option<Duration>, RawError> {
+///
+/// ## m3b-t07-types (ledger 194): the same round trip reads the session `time_zone`
+/// (`SYSTEM`, `+03:00`, a named zone), verbatim; `None` when not text. A server that refuses
+/// the pair is asked for `net_write_timeout` alone, as before (its zone is then `None`).
+pub(crate) async fn read_net_write_timeout(
+    conn: &mut Conn,
+) -> Result<(Option<Duration>, Option<Arc<str>>), RawError> {
     let row = match conn
-        .query_first::<Row, _>("SELECT @@net_write_timeout")
+        .query_first::<Row, _>("SELECT @@net_write_timeout, @@session.time_zone")
         .await
     {
         Ok(row) => row,
-        Err(mysql_async::Error::Server(_)) => return Ok(None),
+        Err(mysql_async::Error::Server(_)) => {
+            match conn
+                .query_first::<Row, _>("SELECT @@net_write_timeout")
+                .await
+            {
+                Ok(row) => row,
+                Err(mysql_async::Error::Server(_)) => return Ok((None, None)),
+                Err(e) => return Err(raw_error(&e)),
+            }
+        }
         Err(e) => return Err(raw_error(&e)),
     };
-    Ok(row
+    let timeout = row
+        .as_ref()
         .and_then(|r| crate::probe::int(r.as_ref(0)))
         .and_then(|secs| u64::try_from(secs).ok())
         .filter(|s| *s > 0)
-        .map(Duration::from_secs))
+        .map(Duration::from_secs);
+    let zone = row.as_ref().and_then(|r| match r.as_ref(1) {
+        Some(mysql_async::Value::Bytes(b)) => std::str::from_utf8(b).ok().map(Arc::from),
+        _ => None,
+    });
+    Ok((timeout, zone))
 }
 
 /// What the typed path uses of a connection.
@@ -571,7 +597,8 @@ async fn finish<P: WireProtocol>(conn: &mut Conn, q: &mut Open) -> Result<Result
             return Err(Fail::Protocol);
         }
         let done = end(q, conn);
-        q.start_next(Plan::for_columns(&columns));
+        let zone = q.plan.time_zone.clone();
+        q.start_next(Plan::for_columns_in(&columns, zone.as_ref()));
         return Ok(done);
     }
     let drained = drain_rest::<P>(conn, q.wire, &mut q.skipped).await;
@@ -672,7 +699,7 @@ pub(crate) async fn query(cx: Ctx<'_>, spec: QuerySpec<'_>) -> Result<(), RawErr
         && !columns.is_empty();
     cx.state.open = Some(Open::new(
         wire,
-        Plan::for_columns(&columns),
+        Plan::for_columns_in(&columns, cx.state.time_zone.as_ref()),
         limits,
         suspendable,
         tag,

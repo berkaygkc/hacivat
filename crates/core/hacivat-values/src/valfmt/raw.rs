@@ -7,7 +7,9 @@
 //! (SQLite spells the infinities `Inf`, `-Inf`); ISO dates with years of at least four digits and
 //! a ` BC` suffix after the offset; fractions without trailing zeros (MySQL pads them to the
 //! column's precision); offsets `+03`, `+05:30`, `+01:56:56`; intervals in the `postgres`
-//! `IntervalStyle` (`1 year 2 mons -1 days +01:00:00`); bytes as `\x` and lower-case hex. No
+//! `IntervalStyle` (`1 year 2 mons -1 days +01:00:00`); bytes as `\x` and lower-case hex. Floats
+//! of MySQL, MariaDB, TiDB and SQLite columns use the shortest round-trip form instead
+//! ([`float_shortest`]: `1000000000000000`, `1e+21`, `1.5e-7`; m3b-t07, ledger 177). No
 //! function here reads the process locale or the OS region; only [`raw_text_in`] takes a zone,
 //! and only as its argument.
 
@@ -292,25 +294,7 @@ pub(super) fn float_canonical(x: f64, single: bool) -> Buf<48> {
         out.push(b'-');
     }
     if (-4..limit).contains(&exp) {
-        if exp >= 0 {
-            let int_len = exp as usize + 1;
-            if digits.len() <= int_len {
-                out.extend(digits);
-                for _ in digits.len()..int_len {
-                    out.push(b'0');
-                }
-            } else {
-                out.extend(&digits[..int_len]);
-                out.push(b'.');
-                out.extend(&digits[int_len..]);
-            }
-        } else {
-            out.extend(b"0.");
-            for _ in 0..(-exp - 1) {
-                out.push(b'0');
-            }
-            out.extend(digits);
-        }
+        push_fixed(&mut out, digits, exp);
     } else {
         out.extend(&digits[..1]);
         if digits.len() > 1 {
@@ -342,9 +326,99 @@ fn parse_exp(s: &[u8]) -> i32 {
 
 fn push_float(out: &mut String, x: f64, single: bool, col: &ColumnFacts<'_>) {
     if x.is_finite() {
-        out.push_str(float_canonical(x, single).as_str());
+        out.push_str(float_text(x, single, col.engine).as_str());
     } else {
         out.push_str(float_special(x, col));
+    }
+}
+
+// ## m3b-t07-types (R-M3-67, ledger 177): each engine's float spelling.
+
+/// Whether `engine` prints floats in the shortest round-trip form ([`float_shortest`]) rather
+/// than PostgreSQL's spelling ([`float_canonical`]): MySQL, MariaDB, TiDB and SQLite. Their own
+/// servers spell floats in ways a client cannot reproduce exactly (MySQL's text protocol rounds a
+/// `FLOAT` to six digits, SQLite writes `1.0e+15`), so these columns show the value itself.
+pub(super) fn shortest_engine(engine: DbmsKind) -> bool {
+    matches!(
+        engine,
+        DbmsKind::MySql | DbmsKind::MariaDb | DbmsKind::TiDb | DbmsKind::Sqlite
+    )
+}
+
+/// A finite float's text for `engine`: [`float_shortest`] or [`float_canonical`].
+pub(super) fn float_text(x: f64, single: bool, engine: DbmsKind) -> Buf<48> {
+    if shortest_engine(engine) {
+        float_shortest(x, single)
+    } else {
+        float_canonical(x, single)
+    }
+}
+
+/// The shortest round-trip digits of `x` (of `x as f32` when `single`: an `f32` is never
+/// widened, so `0.1f32` is `0.1`) in fixed notation when the decimal exponent lies in
+/// `-6 ..= 20`, else as `d.ddde±N` (`1e+21`, `1.5e-7`): the form JavaScript and most clients
+/// print. Parsing the text at the same width gives back the same value.
+pub(super) fn float_shortest(x: f64, single: bool) -> Buf<48> {
+    let mut sci = Buf::<40>::new();
+    let _ = if single {
+        write!(sci, "{:e}", x as f32)
+    } else {
+        write!(sci, "{x:e}")
+    };
+    let s = sci.as_bytes();
+    let (neg, s) = match s.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        _ => (false, s),
+    };
+    let e = s.iter().position(|&c| c == b'e').unwrap_or(s.len());
+    let mut digits = Buf::<24>::new();
+    for &c in &s[..e] {
+        if c != b'.' {
+            digits.push(c);
+        }
+    }
+    let exp = parse_exp(s.get(e + 1..).unwrap_or_default());
+    let digits = digits.as_bytes();
+    let mut out = Buf::<48>::new();
+    if neg {
+        out.push(b'-');
+    }
+    if (-6..=20).contains(&exp) {
+        push_fixed(&mut out, digits, exp);
+    } else {
+        out.extend(&digits[..1]);
+        if digits.len() > 1 {
+            out.push(b'.');
+            out.extend(&digits[1..]);
+        }
+        out.push(b'e');
+        out.push(if exp < 0 { b'-' } else { b'+' });
+        let (buf, i) = digits_u64(u64::from(exp.unsigned_abs()));
+        out.extend(&buf[i..]);
+    }
+    out
+}
+
+/// `digits` (significant, no point) at decimal exponent `exp` in fixed notation.
+fn push_fixed<const N: usize>(out: &mut Buf<N>, digits: &[u8], exp: i32) {
+    if exp >= 0 {
+        let int_len = exp as usize + 1;
+        if digits.len() <= int_len {
+            out.extend(digits);
+            for _ in digits.len()..int_len {
+                out.push(b'0');
+            }
+        } else {
+            out.extend(&digits[..int_len]);
+            out.push(b'.');
+            out.extend(&digits[int_len..]);
+        }
+    } else {
+        out.extend(b"0.");
+        for _ in 0..(-exp - 1) {
+            out.push(b'0');
+        }
+        out.extend(digits);
     }
 }
 

@@ -593,20 +593,26 @@ fn columns_carry_the_native_type_kind_alignment_and_default_width() {
     assert_eq!(widths, [96.0, 120.0, 200.0, 200.0, 64.0, 96.0]);
 }
 
+// ## m3b-t07-types (ledger 246): MySQL labels come from the column definition (named exception;
+// was `a_column_without_a_native_name_is_labelled_by_its_logical_type`, same labels).
 #[test]
-fn a_column_without_a_native_name_is_labelled_by_its_logical_type() {
-    let mysql = |name: &str, logical: LogicalType| ColumnMeta {
-        name: name.into(),
-        logical,
-        native: NativeType::MySql {
-            column_type: 0,
-            flags: 0,
-            charset: 0,
-            length: 0,
-            decimals: 0,
-        },
-        origin: None,
-    };
+fn a_mysql_column_is_labelled_from_its_native_definition() {
+    let mysql =
+        |name: &str, logical: LogicalType, column_type, flags, charset, length| ColumnMeta {
+            name: name.into(),
+            logical,
+            native: NativeType::MySql {
+                column_type,
+                flags,
+                charset,
+                length,
+                decimals: 0,
+                time_zone: None,
+            },
+            origin: None,
+        };
+    // `INT UNSIGNED` (type 3, flag 32) and `VARCHAR(40)` in utf8mb4 (type 253, collation 255,
+    // 160 bytes): the logical text type carries no length on MySQL.
     let adapter = adapter_over(
         schema(vec![
             mysql(
@@ -615,13 +621,21 @@ fn a_column_without_a_native_name_is_labelled_by_its_logical_type() {
                     bits: 32,
                     signed: false,
                 },
+                3,
+                32,
+                63,
+                10,
             ),
             mysql(
                 "s",
                 LogicalType::Text {
-                    max_chars: Some(40),
+                    max_chars: None,
                     fixed: false,
                 },
+                253,
+                0,
+                255,
+                160,
             ),
         ]),
         vec![],

@@ -17,7 +17,9 @@
 //!   `BLOB`: character set 63): `Var(Bytes)`. **`JSON`**: `Var(Json)`, the server's text.
 //! - **`DATE`**: `Temporal { Days }`; **`DATETIME(n)`** and **`TIMESTAMP(n)`**:
 //!   `Temporal { Micros }`, naive (a `TIMESTAMP` is the server's text in the session
-//!   `time_zone`; its native column type says which it is); **`TIME(n)`**: a time of day when it
+//!   `time_zone`; its native column type says which it is, and since M3b Task 7 its
+//!   `NativeType::MySql.time_zone` names that zone as the server reported it at connect, ledger
+//!   194; a later `SET time_zone` in the session is not followed); **`TIME(n)`**: a time of day when it
 //!   lies within `0 ..= 24:00:00`, else (negative, or a duration past a day: MySQL's `TIME` runs
 //!   to ±838:59:59) an exact `Interval` exception.
 //! - **Zero dates** (`0000-00-00`, and a zero `DATETIME`) are `Special(ZeroDate)`; a date with a
@@ -25,9 +27,13 @@
 //!   the text protocol sends (rebuilt the same way from the binary protocol's parts). Never NULL.
 //!   A date that is not in the calendar but that the server stores (`ALLOW_INVALID_DATES`:
 //!   `2024-02-30`) is `Opaque` with that text.
-//! - **`BIT(n)`** (its `n` binary digits), **`GEOMETRY`** (the internal value, SRID then WKB, as
-//!   `HEX()` prints it), **`VECTOR`** and every other type: `Value::Opaque` text in a `Values`
-//!   buffer, the type name shared by the column (Task 12's choice).
+//! - **`BIT(n)`**: its `n` binary digits (`0101`, as PostgreSQL's `bit`; P-M3b-26) as `Text`
+//!   in a `Var(Text)` buffer under `LogicalType::BitString { len: Some(n) }`. **`GEOMETRY`**:
+//!   the internal value (the SRID as 4 bytes little-endian, then the WKB) as upper-case hex, as
+//!   `HEX()` prints it, under `LogicalType::Geometry`; the SRID is kept, never stripped (M3b
+//!   Task 7, R-M3-67).
+//! - **`VECTOR`** and every other type: `Value::Opaque` text in a `Values` buffer, the type name
+//!   shared by the column (Task 12's choice).
 //!
 //! **Server bytes never panic and are never altered.** A cell whose bytes no MySQL or MariaDB
 //! server sends (digits that do not parse, a month of 13, an hour of 24, a fraction of seven
@@ -82,15 +88,13 @@ pub enum Col {
     /// `DATETIME` and `TIMESTAMP`.
     DateTime,
     Time,
-    /// `BIT(n)`: `n` binary digits.
+    /// `BIT(n)`: `n` binary digits, as text (m3b-t07: `LogicalType::BitString`).
     Bit {
         bits: u32,
-        type_name: Arc<str>,
     },
-    /// The internal value as upper-case hex.
-    Geometry {
-        type_name: Arc<str>,
-    },
+    /// The internal value (the SRID, 4 bytes little-endian, then the WKB) as upper-case hex
+    /// text, as `HEX()` prints it (m3b-t07: `LogicalType::Geometry`).
+    Geometry,
     /// The server's bytes as text.
     Opaque {
         type_name: Arc<str>,
@@ -139,11 +143,8 @@ impl Col {
             MYSQL_TYPE_JSON => Col::Json,
             MYSQL_TYPE_BIT => Col::Bit {
                 bits: c.column_length(),
-                type_name: type_name(t),
             },
-            MYSQL_TYPE_GEOMETRY => Col::Geometry {
-                type_name: type_name(t),
-            },
+            MYSQL_TYPE_GEOMETRY => Col::Geometry,
             MYSQL_TYPE_ENUM | MYSQL_TYPE_SET | MYSQL_TYPE_NULL => Col::Text { fixed: false },
             MYSQL_TYPE_STRING
             | MYSQL_TYPE_VAR_STRING
@@ -203,9 +204,10 @@ impl Col {
                 precision: fraction,
                 tz: false,
             },
-            Col::Bit { type_name, .. }
-            | Col::Geometry { type_name }
-            | Col::Opaque { type_name } => LogicalType::Opaque {
+            // ## m3b-t07-types (R-M3-67, P-M3b-26): typed, their text as before.
+            Col::Bit { bits, .. } => LogicalType::BitString { len: Some(*bits) },
+            Col::Geometry => LogicalType::Geometry { srid: None },
+            Col::Opaque { type_name } => LogicalType::Opaque {
                 type_name: type_name.clone(),
             },
         }
@@ -233,7 +235,8 @@ impl Col {
             Col::DateTime | Col::Time => BufKind::Temporal {
                 unit: TempUnit::Micros,
             },
-            Col::Bit { .. } | Col::Geometry { .. } | Col::Opaque { .. } => BufKind::Values,
+            Col::Bit { .. } | Col::Geometry => BufKind::Var(VarKind::Text),
+            Col::Opaque { .. } => BufKind::Values,
         }
     }
 
@@ -257,11 +260,11 @@ impl Col {
             Col::Date => decode_date_text(raw),
             Col::DateTime => decode_datetime_text(raw),
             Col::Time => decode_time_text(raw),
-            Col::Bit { bits, type_name } => match bit_text(raw, *bits) {
-                Some(text) => Decoded::Exception(opaque(type_name, text)),
+            Col::Bit { bits, .. } => match bit_text(raw, *bits) {
+                Some(text) => Decoded::Exception(Value::Text(text.into())),
                 None => error("mysql-bit", "a BIT value longer than 8 bytes", raw),
             },
-            Col::Geometry { type_name } => Decoded::Exception(hex_opaque(type_name, raw, cap)),
+            Col::Geometry => Decoded::Exception(hex_text(raw, cap)),
             Col::Opaque { type_name } => Decoded::Exception(capped_opaque(type_name, raw, cap)),
         }
     }
@@ -277,7 +280,7 @@ impl Col {
                 | Col::Bytes
                 | Col::Json
                 | Col::Bit { .. }
-                | Col::Geometry { .. }
+                | Col::Geometry
                 | Col::Opaque { .. },
                 My::Bytes(raw),
             ) => self.decode_text(raw, cap),
@@ -420,9 +423,9 @@ fn capped_opaque(type_name: &Arc<str>, raw: &[u8], cap: u32) -> Value {
     }
 }
 
-/// `raw` as upper-case hex (`HEX()`'s form); past the cap, the hex of the bytes that fit, with
-/// the full text's length.
-fn hex_opaque(type_name: &Arc<str>, raw: &[u8], cap: u32) -> Value {
+/// `raw` as upper-case hex (`HEX()`'s form) text; past the cap, the hex of the bytes that fit,
+/// with the full text's length.
+fn hex_text(raw: &[u8], cap: u32) -> Value {
     let total = raw.len().saturating_mul(2);
     let keep = raw.len().min(cap as usize / 2);
     let mut text = String::with_capacity(keep * 2);
@@ -430,7 +433,7 @@ fn hex_opaque(type_name: &Arc<str>, raw: &[u8], cap: u32) -> Value {
         let _ = write!(text, "{b:02X}");
     }
     if keep == raw.len() {
-        return opaque(type_name, text);
+        return Value::Text(text.into());
     }
     Value::Truncated(Box::new(TruncatedVal {
         prefix: Value::Text(text.into()),
@@ -730,11 +733,20 @@ pub struct Plan {
     pub kinds: Vec<BufKind>,
     /// Each column's fractional digits (`DATETIME(n)`, `TIME(n)`).
     pub fractions: Vec<u8>,
+    /// The session `time_zone` this plan's `TIMESTAMP` columns carry (M3b Task 7).
+    pub time_zone: Option<Arc<str>>,
 }
 
 impl Plan {
-    /// The plan of a result set's columns, in server order.
+    /// The plan of a result set's columns, in server order, without a session time zone.
     pub fn for_columns(columns: &[Column]) -> Plan {
+        Plan::for_columns_in(columns, None)
+    }
+
+    /// [`Plan::for_columns`] on a session whose `time_zone` is `time_zone` (as the server
+    /// reported it at connect): every `TIMESTAMP` column's `NativeType::MySql.time_zone` names
+    /// it (ledger 194); other columns carry none.
+    pub fn for_columns_in(columns: &[Column], time_zone: Option<&Arc<str>>) -> Plan {
         let mut cols = Vec::with_capacity(columns.len());
         let mut kinds = Vec::with_capacity(columns.len());
         let mut fractions = Vec::with_capacity(columns.len());
@@ -754,6 +766,9 @@ impl Plan {
                     charset: c.character_set(),
                     length: c.column_length(),
                     decimals: c.decimals(),
+                    time_zone: time_zone
+                        .filter(|_| c.column_type() == ColumnType::MYSQL_TYPE_TIMESTAMP)
+                        .cloned(),
                 },
                 origin: (!org_table.is_empty() && !org_name.is_empty()).then(|| {
                     OriginHint::MySql {
@@ -772,6 +787,7 @@ impl Plan {
             cols,
             kinds,
             fractions,
+            time_zone: time_zone.cloned(),
         }
     }
 

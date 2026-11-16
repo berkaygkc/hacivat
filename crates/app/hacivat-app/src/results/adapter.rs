@@ -629,6 +629,11 @@ fn type_label(meta: &ColumnMeta, native_name: &str) -> String {
     if matches!(meta.native, NativeType::Sqlite { decl: Some(_), .. }) {
         return native_name.to_string();
     }
+    // ## m3b-t07-types (ledger 246): a MySQL/MariaDB column is labelled from its definition
+    // (`decimal(14,2)`, `bigint unsigned`, `varchar(40)`), not from the generic logical type.
+    if matches!(meta.native, NativeType::MySql { .. }) {
+        return hacivat_values::valfmt::type_label(&meta.native);
+    }
     match &meta.logical {
         LogicalType::Decimal {
             precision: Some(p),

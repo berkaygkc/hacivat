@@ -19,11 +19,13 @@ use icu_locale::extensions::unicode::{key, value};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::raw::{
-    Buf, ascii, bool_text, float_canonical, float_special, is_numeric, push_escaped, push_hex,
+    Buf, ascii, bool_text, float_special, float_text, is_numeric, push_escaped, push_hex,
     push_uuid, single_column, special_text, write_scalar, zone_offset,
 };
 use crate::columnar::CellFlags;
 use crate::decimal::DecimalRef;
+use crate::logical::LogicalType;
+use crate::native::NativeType;
 use crate::temporal::TsVal;
 use crate::valfmt::{
     BinaryDisplay, ChipKind, ColumnFacts, Display, DisplayKind, DisplayMode, DisplaySettings,
@@ -121,6 +123,12 @@ pub(super) fn cell(v: ValueRef<'_>, col: &ColumnFacts<'_>, s: &DisplaySettings) 
                 d.kind = DisplayKind::Empty;
             } else {
                 push_capped(&mut d.text, t, cap);
+                // ## m3b-t07-types: `money` is the server's text in its `lc_monetary` form
+                // (R-M3-67): a number, aligned as one, but never parsed or regrouped here.
+                if matches!(col.logical, LogicalType::Money) {
+                    d.kind = DisplayKind::Number;
+                    d.align_end = true;
+                }
             }
         }
         ValueRef::Json(t) | ValueRef::Xml(t) => {
@@ -190,6 +198,188 @@ fn flags_of(v: ValueRef<'_>) -> CellFlags {
     }
 }
 
+// ## m3b-t07-types (ledger 246): type labels from the native type.
+
+/// MySQL's column type codes (`enum_field_types`) and column flags, as `NativeType::MySql`
+/// carries them (this crate does not depend on a MySQL client).
+mod my {
+    pub const DECIMAL: u8 = 0;
+    pub const TINY: u8 = 1;
+    pub const SHORT: u8 = 2;
+    pub const LONG: u8 = 3;
+    pub const FLOAT: u8 = 4;
+    pub const DOUBLE: u8 = 5;
+    pub const NULL: u8 = 6;
+    pub const TIMESTAMP: u8 = 7;
+    pub const LONGLONG: u8 = 8;
+    pub const INT24: u8 = 9;
+    pub const DATE: u8 = 10;
+    pub const TIME: u8 = 11;
+    pub const DATETIME: u8 = 12;
+    pub const YEAR: u8 = 13;
+    pub const NEWDATE: u8 = 14;
+    pub const VARCHAR: u8 = 15;
+    pub const BIT: u8 = 16;
+    pub const VECTOR: u8 = 242;
+    pub const JSON: u8 = 245;
+    pub const NEWDECIMAL: u8 = 246;
+    pub const ENUM: u8 = 247;
+    pub const SET: u8 = 248;
+    pub const TINY_BLOB: u8 = 249;
+    pub const MEDIUM_BLOB: u8 = 250;
+    pub const LONG_BLOB: u8 = 251;
+    pub const BLOB: u8 = 252;
+    pub const VAR_STRING: u8 = 253;
+    pub const STRING: u8 = 254;
+    pub const GEOMETRY: u8 = 255;
+
+    pub const UNSIGNED_FLAG: u16 = 32;
+    pub const ENUM_FLAG: u16 = 256;
+    pub const SET_FLAG: u16 = 2048;
+
+    /// The `binary` character set: bytes, never text.
+    pub const BINARY_CHARSET: u16 = 63;
+}
+
+/// The header's type label of a column from its native type (data, never translated).
+///
+/// - **MySQL and MariaDB**: the column type as `SHOW COLUMNS` would name it, rebuilt from the
+///   column definition: `decimal(14,2)`, `bigint unsigned`, `tinyint(1)`, `varchar(40)`,
+///   `char(5)`, `binary(3)`, `varbinary(8)`, `text`, `mediumblob`, `datetime(6)`,
+///   `timestamp(3)`, `bit(5)`, `enum`, `set`, `json`, `geometry`. A text column's length in
+///   characters needs its character set's widest character: it is shown only for the character
+///   sets this table knows (`latin1`, `ascii`, `utf8mb3`, `utf8mb4` and `binary`), so an unknown
+///   collation gives a bare `varchar`, never a wrong length.
+/// - **PostgreSQL**: the bare type name (`numeric`), which the app decorates with the logical
+///   type's length or precision. **SQLite**: the declared type, else the affinity's name.
+pub fn type_label(native: &NativeType) -> String {
+    match native {
+        NativeType::MySql {
+            column_type,
+            flags,
+            charset,
+            length,
+            decimals,
+            ..
+        } => mysql_label(*column_type, *flags, *charset, *length, *decimals),
+        NativeType::Pg { name, .. } => name.to_string(),
+        NativeType::Sqlite {
+            decl: Some(decl), ..
+        } => decl.to_string(),
+        NativeType::Sqlite {
+            decl: None,
+            affinity,
+        } => match affinity {
+            crate::native::SqliteAffinity::Integer => "integer",
+            crate::native::SqliteAffinity::Text => "text",
+            crate::native::SqliteAffinity::Blob => "blob",
+            crate::native::SqliteAffinity::Real => "real",
+            crate::native::SqliteAffinity::Numeric => "numeric",
+        }
+        .to_string(),
+        NativeType::Unknown => String::new(),
+    }
+}
+
+/// The widest character, in bytes, of a MySQL/MariaDB collation's character set; `None` for a
+/// collation this table does not know.
+fn mysql_mbmaxlen(collation: u16) -> Option<u32> {
+    match collation {
+        my::BINARY_CHARSET => Some(1),
+        // latin1 (5, 8, 15, 31, 47, 48, 49, 94) and ascii (11, 65).
+        5 | 8 | 15 | 31 | 47 | 48 | 49 | 94 | 11 | 65 => Some(1),
+        // utf8mb3 (`utf8`): general_ci, bin, the unicode and language collations.
+        33 | 83 | 192..=215 | 223 => Some(3),
+        // utf8mb4: general_ci, bin, the unicode collations and MySQL 8's `_0900` family.
+        45 | 46 | 224..=247 | 255..=323 => Some(4),
+        _ => None,
+    }
+}
+
+fn mysql_label(t: u8, flags: u16, charset: u16, length: u32, decimals: u8) -> String {
+    let unsigned = flags & my::UNSIGNED_FLAG != 0;
+    let numeric = |base: &str| {
+        if unsigned {
+            format!("{base} unsigned")
+        } else {
+            base.to_string()
+        }
+    };
+    let fsp = |base: &str| match decimals {
+        1..=6 => format!("{base}({decimals})"),
+        _ => base.to_string(),
+    };
+    let bytes = charset == my::BINARY_CHARSET;
+    // Characters of a text column (its length is in bytes of the result's character set).
+    let chars = || {
+        mysql_mbmaxlen(charset)
+            .filter(|mb| length.is_multiple_of(*mb))
+            .map(|mb| length / mb)
+    };
+    let sized = |base: &str, n: Option<u32>| match n {
+        Some(n) => format!("{base}({n})"),
+        None => base.to_string(),
+    };
+    if flags & my::ENUM_FLAG != 0 || t == my::ENUM {
+        return "enum".into();
+    }
+    if flags & my::SET_FLAG != 0 || t == my::SET {
+        return "set".into();
+    }
+    match t {
+        my::TINY if length == 1 && !unsigned => "tinyint(1)".into(),
+        my::TINY => numeric("tinyint"),
+        my::SHORT => numeric("smallint"),
+        my::INT24 => numeric("mediumint"),
+        my::LONG => numeric("int"),
+        my::LONGLONG => numeric("bigint"),
+        my::YEAR => "year".into(),
+        my::FLOAT => numeric("float"),
+        my::DOUBLE => numeric("double"),
+        my::DECIMAL | my::NEWDECIMAL => {
+            // The display length counts a sign unless unsigned, and a point when scaled.
+            let point = u32::from(decimals > 0);
+            let sign = u32::from(!unsigned);
+            match length
+                .checked_sub(point + sign)
+                .filter(|p| (1..=65).contains(p))
+            {
+                Some(p) => numeric(&format!("decimal({p},{decimals})")),
+                None => numeric("decimal"),
+            }
+        }
+        my::DATE | my::NEWDATE => "date".into(),
+        my::TIME => fsp("time"),
+        my::DATETIME => fsp("datetime"),
+        my::TIMESTAMP => fsp("timestamp"),
+        my::NULL => "null".into(),
+        my::JSON => "json".into(),
+        my::BIT => format!("bit({length})"),
+        my::GEOMETRY => "geometry".into(),
+        my::VECTOR => "vector".into(),
+        my::STRING if bytes => format!("binary({length})"),
+        my::STRING => sized("char", chars()),
+        my::VAR_STRING | my::VARCHAR if bytes => format!("varbinary({length})"),
+        my::VAR_STRING | my::VARCHAR => sized("varchar", chars()),
+        my::TINY_BLOB | my::MEDIUM_BLOB | my::LONG_BLOB | my::BLOB => {
+            let (unit, base) = if bytes {
+                (Some(1), "blob")
+            } else {
+                (mysql_mbmaxlen(charset), "text")
+            };
+            let prefix = match unit.map(|mb| length / mb) {
+                Some(0..=255) => "tiny",
+                Some(256..=65_535) => "",
+                Some(65_536..=16_777_215) => "medium",
+                Some(_) => "long",
+                None => "",
+            };
+            format!("{prefix}{base}")
+        }
+        other => format!("mysql type {other}"),
+    }
+}
+
 // ---- numbers -----------------------------------------------------------------------------
 
 /// A number, grouped by the format locale unless the column is ID-like or the mode is Raw.
@@ -249,7 +439,8 @@ fn push_float(
         out.push_str(float_special(x, col));
         return true;
     }
-    let canonical = float_canonical(x, single);
+    // ## m3b-t07-types: each engine's spelling (R-M3-67, ledger 177).
+    let canonical = float_text(x, single, col.engine);
     let text = canonical.as_bytes();
     let e = text.iter().position(|&c| c == b'e').unwrap_or(text.len());
     let Ok(mantissa) = Decimal::try_from_utf8(&text[..e]) else {
