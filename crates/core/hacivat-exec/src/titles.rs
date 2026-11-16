@@ -9,6 +9,12 @@
 //!   around them; its first line when it spans several. User text, kept as written: never
 //!   translated, case-mapped or normalized. A unit without one is `Result N` (N counts the
 //!   run's units that opened a tab).
+//! - Fix round 1 (review I-1): the title never carries what could re-order or restyle the
+//!   chrome: C0/C1 controls (a lone `\r`, ESC, NUL, tab), U+2028/2029, the bidi marks,
+//!   embeddings, overrides and isolates (U+200E/200F, U+061C, U+202A–202E, U+2066–2069) and
+//!   U+FEFF become white space, runs of white space one space, and the stored title is cut
+//!   after [`TITLE_MAX_GRAPHEMES`] graphemes with `…`. An optimizer hint or executable comment
+//!   (`/*+ … */`, `/*! … */`, `/*M! … */`) is code, never a title.
 //! - Further result sets of the same unit add ` (k)` (k from 2): `müşteriler (2)`.
 //! - A title over [`TITLE_GRAPHEMES`] graphemes is shown cut with `…`
 //!   ([`short_title`]); the full title stays on the tab for its tooltip.
@@ -25,18 +31,56 @@ pub(crate) fn result_title(n: usize) -> Arc<str> {
 /// The most graphemes a tab shows of its title.
 pub const TITLE_GRAPHEMES: usize = 40;
 
+/// The most graphemes of a title kept at all (the tooltip's text; review I-1).
+pub const TITLE_MAX_GRAPHEMES: usize = 256;
+
 /// The title a comment gives its statement (the module docs), or `None` when it holds no
 /// text. `comment` is the source text of the unit's leading comments.
 pub fn comment_title(comment: &str) -> Option<Arc<str>> {
     let last = last_comment(comment.trim());
-    let body = strip_markers(last);
-    let line = body
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())?
-        .trim_start_matches('*')
-        .trim();
-    (!line.is_empty()).then(|| Arc::from(line))
+    let body = strip_markers(last)?;
+    let line = body.lines().map(sanitized).find(|l| !l.is_empty())?;
+    Some(match grapheme_cut(&line, TITLE_MAX_GRAPHEMES) {
+        Some(at) => format!("{}…", line[..at].trim_end()).into(),
+        None => line.into(),
+    })
+}
+
+/// Whether `c` could re-order or restyle the text around it: a control character, a line or
+/// paragraph separator, a bidi mark, embedding, override or isolate, or a byte-order mark.
+fn is_hostile(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{2028}'
+                | '\u{2029}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{061C}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
+}
+
+/// One line of a comment as a title: every hostile character and every run of white space
+/// one space, a block comment's leading `*` gone, trimmed.
+fn sanitized(line: &str) -> String {
+    let mut out = String::with_capacity(line.len().min(4 << 10));
+    let mut space = true;
+    for c in line.chars() {
+        if is_hostile(c) || c.is_whitespace() {
+            if !space {
+                out.push(' ');
+                space = true;
+            }
+        } else {
+            out.push(c);
+            space = false;
+        }
+    }
+    let t = out.trim().trim_start_matches('*').trim();
+    t.to_string()
 }
 
 /// The last comment of `text` (a run of comments and white space).
@@ -93,24 +137,26 @@ fn last_comment(text: &str) -> &str {
 }
 
 /// `comment` without its comment markers.
-fn strip_markers(comment: &str) -> &str {
+/// `comment` without its comment markers; `None` for an optimizer hint or an executable
+/// comment (`/*+`, `/*!`, `/*M!`): code, never a title.
+fn strip_markers(comment: &str) -> Option<&str> {
     let c = comment.trim();
     if let Some(inner) = c.strip_prefix("/*") {
-        let inner = inner.strip_suffix("*/").unwrap_or(inner);
-        // `/*!…*/` and `/*+…*/` are code and hints, never titles (the splitter does not make
-        // them title comments; this keeps a stray one out).
-        return inner;
+        if inner.starts_with(['+', '!']) || inner.starts_with("M!") {
+            return None;
+        }
+        return Some(inner.strip_suffix("*/").unwrap_or(inner));
     }
     if let Some(rest) = c.strip_prefix("--") {
-        return rest.trim_start_matches('-');
+        return Some(rest.trim_start_matches('-'));
     }
     if let Some(rest) = c.strip_prefix('#') {
-        return rest;
+        return Some(rest);
     }
     if let Some(rest) = c.strip_prefix("//") {
-        return rest;
+        return Some(rest);
     }
-    c
+    Some(c)
 }
 
 /// The title of a unit's `set`-th result set (from 0): the unit's own title, else

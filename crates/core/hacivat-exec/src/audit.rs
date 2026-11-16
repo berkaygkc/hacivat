@@ -185,6 +185,10 @@ pub(crate) struct HistorySink {
     pub session: SessionHandle,
     /// When each unit's last attempt started.
     pub started: HashMap<u32, SystemTime>,
+    // Fix round 1 (review m5)
+    /// When the run was sent: a unit that ends without starting (a queued run cancelled, a
+    /// full queue) is recorded at it.
+    pub run_started: SystemTime,
 }
 
 /// The most bytes of an error message a record keeps.
@@ -208,8 +212,14 @@ impl HistorySink {
         }
     }
 
+    /// The record of `unit`'s end. A unit that ended without starting (review m5) is recorded
+    /// as not run: at the run's start, with no duration and no rows (`HistoryRecord` has no
+    /// flag of its own for it), its masked text as always.
     fn record(&mut self, unit: UnitId, end: &UnitEnd, ms: u64) -> Option<Arc<HistoryRecord>> {
-        let started = self.started.remove(&unit.ordinal)?;
+        let (started, ms) = match self.started.remove(&unit.ordinal) {
+            Some(at) => (at, ms),
+            None => (self.run_started, 0),
+        };
         let u = self.units.iter().find(|u| u.id == unit)?;
         let (outcome, rows_affected, rows_fetched, error) = match end {
             UnitEnd::Succeeded { rows } => match rows {
@@ -370,5 +380,82 @@ mod tests {
             "a short value stays inside a number: {got}"
         );
         assert!(got.contains("key (?)"), "{got}");
+    }
+
+    /// Fix round 1 (review m5): a unit that ends without starting (a queued run cancelled) is
+    /// recorded as not run, with its masked text.
+    #[tokio::test]
+    async fn a_unit_that_never_started_is_recorded_as_not_run() {
+        use hacivat_driver::fake::FakeDriver;
+        use hacivat_proto::{DbmsKind, ProfileId};
+        use hacivat_secrets::{AuthProviderId, Retention};
+        use hacivat_session::profile::{Profile, ProfileEndpoint};
+        use hacivat_session::testing::fake_session;
+
+        use crate::history::HistoryOrigin;
+
+        let profile = Profile {
+            name: "orders".into(),
+            user: Some("deploy".into()),
+            engine: DbmsKind::Postgres,
+            endpoint: ProfileEndpoint::Server {
+                host: "127.0.0.1".into(),
+                port: None,
+            },
+            auth: AuthProviderId::None,
+            retention: Retention::Never,
+            ..Profile::default()
+        };
+        let (session, _f) = fake_session(
+            tokio::runtime::Handle::current(),
+            FakeDriver::new(DbmsKind::Postgres),
+            profile,
+        )
+        .await;
+        let unit = UnitId {
+            run: RunId(3),
+            ordinal: 0,
+        };
+        let run_started = UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        let mut sink = HistorySink {
+            meta: HistoryMeta {
+                profile: ProfileId::new(),
+                console: 1,
+                private: false,
+                origin: HistoryOrigin::Console,
+            },
+            run: RunId(3),
+            units: Arc::from(vec![HistoryUnit {
+                id: unit,
+                masked: "UPDATE t SET pw = ?".into(),
+                binds: Arc::from(vec![bind("s3cret")]),
+            }]),
+            session,
+            started: HashMap::new(),
+            run_started,
+        };
+        let record = sink
+            .map(&RunEvent::UnitEnded {
+                unit,
+                outcome: UnitEnd::Cancelled,
+                exec_ms: 0,
+                fetch_ms: 0,
+            })
+            .expect("a record");
+        assert_eq!(record.ts_start_ms, 1_000_000);
+        assert_eq!(record.duration_ms, 0);
+        assert_eq!(record.outcome, Outcome::Cancelled);
+        assert_eq!(&*record.statement_masked, "UPDATE t SET pw = ?");
+        assert_eq!((record.rows_affected, record.rows_fetched), (None, None));
+        // A skipped unit records nothing.
+        assert!(
+            sink.map(&RunEvent::UnitEnded {
+                unit,
+                outcome: UnitEnd::Skipped,
+                exec_ms: 0,
+                fetch_ms: 0,
+            })
+            .is_none()
+        );
     }
 }

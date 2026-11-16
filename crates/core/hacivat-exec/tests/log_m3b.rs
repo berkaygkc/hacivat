@@ -72,6 +72,7 @@ fn t16_messages() -> Vec<LogMsg> {
             rest_not_run: true,
         },
         LogMsg::RunAsOneRolledBack,
+        LogMsg::RunAsOneTxFailed,
         LogMsg::Dropped { n: 3 },
     ]);
     all
@@ -273,6 +274,60 @@ async fn a_failed_pg_run_as_one_says_the_statements_before_were_rolled_back() {
     assert_eq!(b.log_ids(), ["exec-error"]);
 }
 
+/// Fix round 1 (review m9): a cancel aborts the implicit transaction too; inside the user's
+/// own transaction nothing was rolled back yet, the transaction failed.
+#[tokio::test]
+async fn a_pg_run_as_one_cancelled_or_inside_a_tx_says_what_happened() {
+    use hacivat_session::session::{Request, TxCommand};
+    let run_as_one = |b: &common::Bench, text: &str| RunRequest {
+        run_as_one: true,
+        ..request(b, units(&[text]), run_all(1))
+    };
+    // Cancelled outside a transaction: the statements before were rolled back.
+    let slow = FakeQuery {
+        prefix: "INSERT INTO a",
+        sets: vec![generated(1)],
+        first_delay: std::time::Duration::from_secs(30),
+        ..Default::default()
+    };
+    let (b, s, _f) = service_over(fake_pg().queries(vec![slow])).await;
+    let mut t = b.svc.run(
+        &s,
+        run_as_one(&b, "INSERT INTO a VALUES (1); SELECT pg_sleep(9)"),
+    );
+    common::eventually("the unit runs", || {
+        t.status.borrow().units[0].status.name() == "Running"
+    })
+    .await;
+    drop(s.cancel(t.seq));
+    (&mut t.done).await.unwrap();
+    let ids = b.log_ids();
+    assert!(ids.contains(&"exec-cancelled"), "{ids:?}");
+    assert!(ids.contains(&"exec-run-as-one-rolled-back"), "{ids:?}");
+    // Failed inside the user's transaction: the transaction failed, nothing was rolled back.
+    let failing = FakeQuery {
+        prefix: "INSERT INTO a",
+        sets: vec![generated(1)],
+        fail_after: Some((0, pg_error("23505", "duplicate key value"))),
+        ..Default::default()
+    };
+    let (b, s, _f) = service_over(fake_pg().queries(vec![failing])).await;
+    s.submit(Request::Tx(TxCommand::Begin))
+        .reply
+        .await
+        .unwrap()
+        .expect("BEGIN");
+    common::settled(&s).await;
+    let mut t = b.svc.run(
+        &s,
+        run_as_one(&b, "INSERT INTO a VALUES (1); INSERT INTO a VALUES (1)"),
+    );
+    (&mut t.done).await.unwrap();
+    let ids = b.log_ids();
+    assert!(ids.contains(&"exec-run-as-one-tx-failed"), "{ids:?}");
+    assert!(!ids.contains(&"exec-run-as-one-rolled-back"), "{ids:?}");
+}
+
 #[tokio::test]
 async fn a_retried_statement_is_logged() {
     let fake = fake_pg().queries(vec![FakeQuery {
@@ -363,7 +418,10 @@ fn an_idle_bound_reads_as_its_setting() {
         span(90_500),
         ("exec-dur-min-s", vec![("min", 1), ("s", 30)])
     );
-    assert_eq!(span(2_500).0, "exec-dur-seconds");
+    // Fix round 1 (review m2): whole seconds under a minute ("20 s", never "20.00 s").
+    assert_eq!(span(20_000), ("exec-dur-s", vec![("s", 20)]));
+    assert_eq!(span(2_500), ("exec-dur-s", vec![("s", 2)]));
+    assert_eq!(span(400), ("exec-dur-ms", vec![("ms", 400)]));
     assert_eq!(duration_message(600_000).id, "exec-dur-seconds");
 }
 

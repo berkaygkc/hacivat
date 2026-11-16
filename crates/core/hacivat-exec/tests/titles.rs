@@ -7,7 +7,7 @@ mod common;
 use common::m3b::{request, run_all};
 use common::{fake_pg, generated, pg_doc, resolve_doc, service_over, units};
 use hacivat_driver::fake::FakeQuery;
-use hacivat_exec::{RunAction, TITLE_GRAPHEMES, comment_title, short_title};
+use hacivat_exec::{RunAction, TITLE_GRAPHEMES, TITLE_MAX_GRAPHEMES, comment_title, short_title};
 
 /// The tab titles of running `script` whole (Execute 3) as an M3b run, where each `CALL`
 /// returns two result sets and each `SELECT` one.
@@ -93,4 +93,48 @@ fn a_comment_title_is_user_text() {
         );
     }
     assert_eq!(comment_title("--   "), None);
+}
+
+// ## m3b-t16-run-service (fix round 1, review I-1)
+
+/// Hostile comments never reach the tab strip, the tooltip or a copy as written: no control,
+/// no line separator, no bidi mark, embedding, override or isolate, one space between words.
+#[test]
+fn hostile_comment_titles_are_sanitised() {
+    for (comment, title) in [
+        ("-- \u{202E}gnirts", Some("gnirts")),
+        ("-- a\u{2066}b\u{2069}c", Some("a b c")),
+        ("/* a\u{0007}\u{001B}[31m b */", Some("a [31m b")),
+        ("-- satır\rbir\0iki", Some("satır bir iki")),
+        ("-- tab\tand   spaces", Some("tab and spaces")),
+        ("/* bir\u{2028}iki\u{2029}üç */", Some("bir iki üç")),
+        ("-- \u{200F}\u{061C}\u{200E}\u{FEFF}", None),
+        ("-- \u{0085}\u{009B}x", Some("x")),
+        ("/*+ INDEX(t) */", None),
+        ("/*!40101 SET x */", None),
+        ("/*M!100000 SET x */", None),
+    ] {
+        assert_eq!(comment_title(comment).as_deref(), title, "{comment:?}");
+    }
+    // ZWJ emoji and combining marks are text, kept.
+    assert_eq!(
+        comment_title("-- 👨\u{200D}👩 i\u{307}").as_deref(),
+        Some("👨\u{200D}👩 i\u{307}")
+    );
+}
+
+/// A 1 MiB comment is stored cut after 256 graphemes (and shown cut after 40).
+#[test]
+fn a_huge_comment_title_is_capped() {
+    let huge = format!("-- {}", "ş".repeat(1 << 19));
+    let title = comment_title(&huge).expect("a title");
+    assert_eq!(title.chars().count(), TITLE_MAX_GRAPHEMES + 1);
+    assert!(title.ends_with('…'));
+    assert_eq!(short_title(&title).chars().count(), TITLE_GRAPHEMES + 1);
+    // Exactly 256 stay whole.
+    let exact = "a".repeat(TITLE_MAX_GRAPHEMES);
+    assert_eq!(
+        comment_title(&format!("-- {exact}")).as_deref(),
+        Some(exact.as_str())
+    );
 }

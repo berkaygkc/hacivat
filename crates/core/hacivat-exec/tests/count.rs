@@ -12,7 +12,7 @@ use common::{fake_pg, profile_of};
 use futures::future::BoxFuture;
 use hacivat_driver::fake::{FakeDriver, FakeQuery, FakeResultSet, FakeRows, FakeTypedCall};
 use hacivat_driver::{DriverRegistry, EngineCatalog};
-use hacivat_exec::{CountError, CountRequest, ExecService, ExecUnit, count_sql};
+use hacivat_exec::{CountError, CountRequest, ExecService, ExecUnit, count_prepared, count_sql};
 use hacivat_net::ssh::{KnownHosts, TunnelManager};
 use hacivat_net::{BoxedStream, StreamFactory};
 use hacivat_proto::DbmsKind;
@@ -217,6 +217,7 @@ async fn connected(
         sessions: Some(sessions),
         engine: DbmsKind::Postgres,
         sql: "SELECT COUNT(*) FROM (\nSELECT * FROM t\n) hv_c".into(),
+        binds: Arc::from(Vec::new()),
     };
     (m, console, fake, req)
 }
@@ -284,4 +285,109 @@ async fn a_count_can_be_cancelled() {
         .unwrap()
         .unwrap_err();
     assert_eq!(e, CountError::Cancelled);
+    // The server was told (review m8).
+    common::eventually("the statement is cancelled", || f.cancel_calls() > 0).await;
+}
+
+// ## m3b-t16-run-service (fix round 1, reviews m6, m7, m8)
+
+/// A check that never answers (a classifier stuck on a pathological statement).
+#[derive(Debug)]
+struct Stuck;
+
+impl StatementClassifier for Stuck {
+    fn check_read_only(
+        &self,
+        _kind: DbmsKind,
+        _sql: Arc<str>,
+        _allow: Arc<[Arc<str>]>,
+    ) -> BoxFuture<'static, RoCheck> {
+        Box::pin(std::future::pending())
+    }
+    fn effects(&self, _: DbmsKind, _: Arc<str>) -> BoxFuture<'static, Option<SessionEffects>> {
+        Box::pin(async { None })
+    }
+}
+
+fn console_request(console: &SessionHandle) -> CountRequest {
+    CountRequest {
+        console: console.clone(),
+        sessions: None,
+        engine: DbmsKind::Postgres,
+        sql: "SELECT COUNT(*) FROM (\nSELECT * FROM t\n) hv_c".into(),
+        binds: Arc::from(Vec::new()),
+    }
+}
+
+/// The cancel and the timeout cover the check (and the pool's connect), not only the
+/// statement.
+#[tokio::test(start_paused = true)]
+async fn cancel_and_timeout_cover_the_check() {
+    let (_b, s, f) = common::service_over(fake_pg()).await;
+    let svc =
+        ExecService::new(MemoryBudget::new(1 << 30, 256 << 20)).with_count_check(Arc::new(Stuck));
+    let ticket = svc.count(console_request(&s));
+    tokio::task::yield_now().await;
+    ticket.cancel();
+    assert_eq!(ticket.done.await.unwrap(), Err(CountError::Cancelled));
+    let e = svc.count(console_request(&s)).done.await.unwrap();
+    assert_eq!(e, Err(CountError::TimedOut), "30 s of the paused clock");
+    assert_eq!(counted(&f), 0, "nothing was sent");
+}
+
+/// Keeping only `done` (the ticket dropped) never cancels the count.
+#[tokio::test]
+async fn dropping_the_ticket_does_not_cancel() {
+    let (_b, s, _f) =
+        common::service_over(fake_pg().queries(vec![count_query(Duration::from_millis(50))])).await;
+    let svc =
+        ExecService::new(MemoryBudget::new(1 << 30, 256 << 20)).with_count_check(Arc::new(Allow));
+    let done = svc.count(console_request(&s)).done;
+    assert_eq!(done.await.unwrap(), Ok(42));
+}
+
+/// A parameterised unit's count carries its binds in slot order; an `ORDER BY` holding a
+/// placeholder stays.
+#[tokio::test]
+async fn a_parameterised_count_carries_its_binds() {
+    let doc = common::pg_doc("SELECT * FROM t WHERE a = :a ORDER BY b");
+    let unit = ExecUnit {
+        text: "SELECT * FROM t WHERE a = :a ORDER BY b".into(),
+        doc_range: 0..39,
+        kind: UnitKind::Statement,
+        suspendable: false,
+        title: None,
+    };
+    assert_eq!(count_sql(&doc, &unit), None, "no values to bind");
+    let mut p = common::m3b::prepared(&unit);
+    p.final_text = "SELECT * FROM t WHERE a = $1 ORDER BY b".into();
+    p.binds = Arc::from(vec![common::m3b::text_bind("7")]);
+    let (sql, binds) = count_prepared(&doc, &p).expect("countable");
+    assert_eq!(
+        sql,
+        "SELECT COUNT(*) FROM (\nSELECT * FROM t WHERE a = $1\n) hv_c"
+    );
+    assert_eq!(&*binds, &[common::m3b::text_bind("7")]);
+    p.final_text = "SELECT * FROM t ORDER BY a = $1".into();
+    let (sql, _) = count_prepared(&doc, &p).expect("countable");
+    assert_eq!(
+        sql,
+        "SELECT COUNT(*) FROM (\nSELECT * FROM t ORDER BY a = $1\n) hv_c"
+    );
+    // The binds reach the server with the count.
+    let (_b, s, f) =
+        common::service_over(fake_pg().queries(vec![count_query(Duration::ZERO)])).await;
+    let svc =
+        ExecService::new(MemoryBudget::new(1 << 30, 256 << 20)).with_count_check(Arc::new(Allow));
+    let req = CountRequest {
+        sql,
+        binds,
+        ..console_request(&s)
+    };
+    assert_eq!(svc.count(req).done.await.unwrap(), Ok(42));
+    assert!(
+        f.binds_seen()
+            .iter()
+            .any(|b| b == &[common::m3b::text_bind("7")])
+    );
 }

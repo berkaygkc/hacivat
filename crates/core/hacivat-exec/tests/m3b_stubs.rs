@@ -1,8 +1,8 @@
 //! M3b Task 1c: the run service's M3b seams fail closed (F31) until their tasks: the gate
 //! denies, parameter preparation refuses placeholders, the history is disabled, the
 //! classifier pool answers `sql-safety`'s stub and denies on the read-only path, Count rows
-//! answers `Internal`, and a request with M3b-only fields sends nothing. M3a's run shape
-//! still builds and runs.
+//! without a check is refused, and a request with only one M3b field sends nothing. M3a's
+//! run shape still builds and runs.
 
 mod common;
 
@@ -286,7 +286,8 @@ async fn run_request_m3a_shape_still_builds() {
 }
 
 #[tokio::test]
-async fn a_request_with_m3b_fields_sends_nothing_until_task_16() {
+// ## m3b-t16-run-service (fix round 1, review m14: renamed; each M3b field alone is refused)
+async fn a_request_with_only_one_m3b_field_sends_nothing() {
     let (b, s, f) = service_over(fake_pg()).await;
     let before = f.call_log().len();
     let plan_ok = GatePlan::default();
@@ -325,6 +326,7 @@ async fn count_without_a_check_is_refused_and_sends_nothing() {
             sessions: None,
             engine: DbmsKind::Postgres,
             sql: "SELECT COUNT(*) FROM t".into(),
+            binds: std::sync::Arc::from(Vec::new()),
         })
         .done
         .await

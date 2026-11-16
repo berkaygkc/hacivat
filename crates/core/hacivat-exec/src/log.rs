@@ -153,6 +153,10 @@ pub enum LogMsg {
     /// statements before the failing one were rolled back too (unless the text committed them
     /// itself; ADR 0002 `m3b-t13` M-2).
     RunAsOneRolledBack,
+    /// A unit run as one failed or was cancelled on PostgreSQL inside the user's transaction:
+    /// nothing was rolled back yet, but the transaction failed and waits for their rollback
+    /// (fix round 1, review m9).
+    RunAsOneTxFailed,
 }
 
 /// A message argument. Counts are numbers the app formats in the format locale; a statement
@@ -222,6 +226,7 @@ impl LogMsg {
                 rest_not_run: true, ..
             } => "exec-run-as-one-closed-early-rest",
             LogMsg::RunAsOneRolledBack => "exec-run-as-one-rolled-back",
+            LogMsg::RunAsOneTxFailed => "exec-run-as-one-tx-failed",
         }
     }
 
@@ -300,7 +305,7 @@ impl LogMsg {
             // ## m3b-t16-run-service
             LogMsg::NoticesDropped { n } => vec![("n", LogArg::U64(u64::from(*n)))],
             LogMsg::ClosedEarly { ran, .. } => vec![("n", LogArg::U64(u64::from(*ran)))],
-            LogMsg::RunAsOneRolledBack => Vec::new(),
+            LogMsg::RunAsOneRolledBack | LogMsg::RunAsOneTxFailed => Vec::new(),
         }
     }
 
@@ -330,7 +335,7 @@ impl LogMsg {
             LogMsg::ConfirmCommitted { .. } | LogMsg::Retried { .. } => Severity::Info,
             // ## m3b-t16-run-service
             LogMsg::NoticesDropped { .. } | LogMsg::ClosedEarly { .. } => Severity::Notice,
-            LogMsg::RunAsOneRolledBack => Severity::Warning,
+            LogMsg::RunAsOneRolledBack | LogMsg::RunAsOneTxFailed => Severity::Warning,
             LogMsg::RowsRetrieved { .. }
             | LogMsg::RowsAffected { .. }
             | LogMsg::Completed { .. }
@@ -447,12 +452,20 @@ pub fn duration_message(ms: u64) -> UnitMsg {
 }
 
 // ## m3b-t16-run-service
-/// The `exec-dur-*` message of a configured span of `ms` milliseconds (an idle bound: "10 min",
-/// "1 min 30 s"), which reads as the setting reads: whole minutes and seconds from a minute
-/// on (the seconds' fraction dropped), else as [`duration_message`].
+/// The `exec-dur-*` message of a configured span of `ms` milliseconds (an idle bound: "20 s",
+/// "10 min", "1 min 30 s"), which reads as the setting reads: whole seconds under a minute,
+/// whole minutes and seconds from a minute on (fractions dropped); under a second as
+/// [`duration_message`]. One of the two named exceptions to the one duration rule (with the
+/// running clock; ADR 0006 `m3b-t16`).
 pub fn span_message(ms: u64) -> UnitMsg {
-    if ms < 60_000 {
+    if ms < 1_000 {
         return duration_message(ms);
+    }
+    if ms < 60_000 {
+        return UnitMsg {
+            id: "exec-dur-s",
+            args: vec![("s", ms / 1_000)],
+        };
     }
     let (min, s) = (ms / 60_000, (ms / 1_000) % 60);
     let (id, args) = if s == 0 {

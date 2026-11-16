@@ -514,3 +514,5 @@ exec-run-as-one-closed-early = Durduruldu. { $n } deyim daha çalıştı; sonuç
 exec-run-as-one-closed-early-rest = Durduruldu. { $n } deyim daha çalıştı (sonuçları gösterilmiyor); geri kalanı çalışmadı.
 # Review: PO
 exec-run-as-one-rolled-back = PostgreSQL metni tek bir işlem olarak çalıştırdı; metin kendisi commit etmediyse, hatalı deyimden önceki deyimler de geri alındı.
+# Review: PO
+exec-run-as-one-tx-failed = İşlem başarısız oldu: geri alana kadar içinde başka bir şey çalışmaz.

@@ -19,21 +19,51 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use hacivat_results::{MemoryBudget, ResultStore, ResultWriter};
 use hacivat_session::session::{RunEvent, RunObserver, UnitId};
-use hacivat_values::{ResultSchema, ValueRef};
+use hacivat_values::{BindValue, ResultSchema, ValueRef};
 use sql_lexer::TokenKind;
 use sql_split::DocSnapshot;
 use sql_text::{TextRange, TextSize};
 
+use crate::params::PreparedUnit;
 use crate::units::ExecUnit;
+use sql_split::SqlDocument;
 
 /// The count statement of `unit` in `doc`, or `None` when it cannot be counted (the module
-/// docs).
+/// docs). A unit with a placeholder is refused here (it has no values): count its prepared
+/// form with [`count_prepared`].
 pub fn count_sql(doc: &DocSnapshot, unit: &ExecUnit) -> Option<String> {
+    wrap(doc, unit.doc_range.clone(), false)
+}
+
+// ## m3b-t16-run-service (fix round 1, review m6)
+/// The count statement of the prepared unit `p` (its `final_text`, placeholders already in the
+/// engine's form, lexed in `doc`'s dialect) and the binds it carries, in the same slot order:
+/// the wrap adds no placeholder before them, and a top-level `ORDER BY` that holds one is kept
+/// (its value is still bound). `None` as [`count_sql`].
+pub fn count_prepared(doc: &DocSnapshot, p: &PreparedUnit) -> Option<(String, Arc<[BindValue]>)> {
+    let text = p.final_text.to_string();
+    let len = text.len();
+    let own = SqlDocument::new(text, *doc.ctx(), doc.flavor()).snapshot();
+    let sql = wrap(&own, 0..len, true)?;
+    Some((sql, p.binds.clone()))
+}
+
+/// Whether `kind` is a parameter placeholder.
+fn is_param(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::PositionalParam | TokenKind::QuestionParam | TokenKind::NamedParam
+    )
+}
+
+/// The count wrap of `range` in `doc`; `params`: placeholders are allowed (their values go
+/// with the statement).
+fn wrap(doc: &DocSnapshot, range: std::ops::Range<usize>, params: bool) -> Option<String> {
     let text = doc.text();
     let lexed = doc.lexed();
-    let start = TextSize::try_from(unit.doc_range.start).ok()?;
-    let end = TextSize::try_from(unit.doc_range.end).ok()?;
-    if start >= end || unit.doc_range.end > text.len() {
+    let start = TextSize::try_from(range.start).ok()?;
+    let end = TextSize::try_from(range.end).ok()?;
+    if start >= end || range.end > text.len() {
         return None;
     }
     let range = TextRange::new(start, end);
@@ -57,6 +87,9 @@ pub fn count_sql(doc: &DocSnapshot, unit: &ExecUnit) -> Option<String> {
             continue;
         }
         let kind = lexed.kind(i);
+        if is_param(kind) && !params {
+            return None;
+        }
         let span = usize::from(r.start())..usize::from(r.end());
         match kind {
             TokenKind::ExecutableComment | TokenKind::ClientCommand | TokenKind::Unknown => {
@@ -119,6 +152,8 @@ pub fn count_sql(doc: &DocSnapshot, unit: &ExecUnit) -> Option<String> {
     }) && !toks[order..]
         .iter()
         .any(|t| t.2 == 0 && ["LIMIT", "FETCH", "OFFSET"].iter().any(|w| word(t, w)))
+        // A placeholder in it keeps it: its value is bound in slot order.
+        && !toks[order..].iter().any(|t| is_param(t.0))
     {
         cut = order;
     }

@@ -382,7 +382,7 @@ exec-tx-rolled-back = Transaction rolled back
 #   $executed (Number) - the statements that ran, e.g. 2.
 #   $total (Number) - the statements in the run, e.g. 3.
 #   $failed (Number) - the statements that failed, e.g. 1.
-#   $duration (String) - how long the run took (an exec-dur-* message), e.g. "1 s 200 ms".
+#   $duration (String) - how long the run took (an exec-dur-* message), e.g. "1.20 s".
 exec-summary = { $total ->
         [one] { $executed } of { $total } statement executed, { $failed } failed, in { $duration }
        *[other] { $executed } of { $total } statements executed, { $failed } failed, in { $duration }
@@ -393,7 +393,7 @@ exec-summary = { $total ->
 exec-error = Statement { $n } failed
 # The statement in flight was cancelled.
 # Variables:
-#   $duration (String) - how long it ran (an exec-dur-* message), e.g. "2 s".
+#   $duration (String) - how long it ran (an exec-dur-* message), e.g. "2.00 s".
 exec-cancelled = Cancelled after { $duration }
 # A statement returned more than one result set (R-M3-25).
 # Variables:
@@ -839,3 +839,6 @@ exec-run-as-one-closed-early-rest = { $n ->
 # PostgreSQL ran a text sent as one in a single transaction, so a failure rolled back the
 # statements before it too.
 exec-run-as-one-rolled-back = PostgreSQL ran the text as one transaction, so the statements before the failing one were rolled back too, unless the text committed them itself.
+# A text run as one failed or was stopped inside the user's open transaction on PostgreSQL:
+# nothing was rolled back yet, but the transaction failed (fix round 1, review m9).
+exec-run-as-one-tx-failed = The transaction failed: nothing more runs in it until you roll it back.

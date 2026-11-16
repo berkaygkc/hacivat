@@ -612,3 +612,29 @@ wired into Run before Task 24 (R-M3-52).
   `hv-status-duration-*` cuts them. The app formats the hundredths through
   `UnitMsg::decimal`. The running clock keeps whole seconds and minutes.
   `exec-dur-lt-ms` and `exec-dur-s-ms` are deleted: no code names them any more.
+- **Fix round 1 (review of e1bc91c).**
+  - *Titles (I-1).* A comment title never carries what could re-order or restyle the chrome.
+    - C0/C1 controls (a lone `\r`, ESC, NUL, tab), U+2028/2029, bidi marks, embeddings, overrides and isolates, and U+FEFF become white space.
+    - Runs of white space become one space.
+    - The stored title is cut after 256 graphemes with `…`; the tab shows 40.
+    - An optimizer hint or executable comment (`/*+`, `/*!`, `/*M!`) is never a title.
+  - *Two named exceptions to the one duration rule (m2; on the PO list).*
+    - Configured spans (`LogArg::SpanMs`, the idle bound) read the way the setting reads: whole seconds under a minute ("20 s"), then minutes and seconds ("10 min").
+    - The running clock shows whole seconds, then minutes and seconds. It repaints once a second.
+  - *Server text in the log (m3, ruling).* Server error and notice text stays verbatim in the console's output log, even when it echoes a bind value.
+    - The log is session-only and in memory, and nothing persists or traces it.
+    - The value was typed by the same user in the same session, so the exposure equals that of a literal in the editor.
+    - Scrubbing it would hide which value failed.
+    - History, the only store that outlives the session, is scrubbed.
+    - Anything that ever writes the log to disk (an export, a crash report) must apply the same scrub.
+  - *Not-run units (m5).* A unit that ends without starting (a queued run cancelled, a full queue) still gets a history record: at the run's start, with duration 0 and no rows, masked text as always. `HistoryRecord` has no flag of its own for this.
+  - *Count rows (m6–m8).*
+    - `count_prepared` wraps a prepared unit's `final_text` and carries its binds (`CountRequest::binds`) in slot order. A top-level `ORDER BY` holding a placeholder is kept. `count_sql` refuses placeholders, since it has no values.
+    - The cancel and the 30 s timeout cover the whole count: the read-only check and the pooled session's connect too.
+    - Dropping the ticket, or keeping only `done`, never cancels the count.
+  - *PostgreSQL Run as one (m9).* The line is chosen from the user's transaction status when the unit started (the session's at the run's start, then each `TxChanged`).
+    - Outside a transaction, a failure or a cancel logs `exec-run-as-one-rolled-back`.
+    - Inside one, nothing was rolled back yet, so it logs `exec-run-as-one-tx-failed`.
+  - *Stopped early (m10).* `ClosedEarly` is logged only when more statements ran; the stop's own line covers the rest.
+  - *Read-only sessions (m11).* MySQL warnings on a read-only session are not read, and their count is not logged either; the guard's `ROLLBACK` follows at once.
+  - *The output log is not a chain sink (m12, ruling).* The observer writes the output log directly, keeping M3a's order and timing, instead of through an async chain sink. The M8 chain sinks (`hacivat-audit`) will consume the same `RunEvent`s through `AuditorChain::push_sink`.

@@ -251,6 +251,12 @@ struct State {
     pending_choice: Option<RunEvent>,
     /// The form of each unit's confirm-in-transaction question (`NeedsCommit::savepoint`).
     commit_savepoint: HashMap<u32, bool>,
+    // Fix round 1 (review m9)
+    /// The user's transaction status now: the session's at the run's start, then each
+    /// `TxChanged`.
+    tx_now: TxStatus,
+    /// The user's transaction status when each unit started.
+    tx_at_start: HashMap<u32, TxStatus>,
 }
 
 /// The parts a run shares with its observer.
@@ -378,6 +384,17 @@ impl ExecObserver {
         let (results, results_rx) = watch::channel::<Arc<[ResultTab]>>(Arc::from(Vec::new()));
         let (done_tx, done) = oneshot::channel();
         let (choices, choices_rx) = watch::channel(None);
+        // Fix round 1 (review m9): the user's transaction as the run starts (Hacivat's own
+        // around a cursor or the guard's is not the user's).
+        let tx_now = {
+            let snap = p.session.state();
+            let tx = &snap.borrow().tx;
+            if tx.owner.is_hacivats() {
+                TxStatus::Idle
+            } else {
+                tx.status
+            }
+        };
         let observer = Arc::new(ExecObserver {
             console: p.console,
             engine: p.engine,
@@ -391,6 +408,7 @@ impl ExecObserver {
             results,
             state: Mutex::new(State {
                 done: Some(done_tx),
+                tx_now,
                 ..State::default()
             }),
             run: p.run,
@@ -670,17 +688,15 @@ impl ExecObserver {
                 let view = u.error_view(self.engine, e);
                 self.set_unit(unit.ordinal, true, UnitStatus::Failed(view));
                 self.line(self.failure(e, &u), Some(&u));
-                // ## m3b-t16-run-service (T13 review M-2): PostgreSQL runs a text sent as one
-                // as one implicit transaction: the statements before the failure were rolled
-                // back with it.
-                if u.run_as_one && pg_wire(self.engine) && e.kind == ExecErrorKind::Db {
-                    self.line(LogMsg::RunAsOneRolledBack, Some(&u));
+                if matches!(e.kind, ExecErrorKind::Db | ExecErrorKind::Cancelled) {
+                    self.run_as_one_aborted(unit, &u);
                 }
             }
             UnitEnd::Cancelled => {
                 self.set_unit(unit.ordinal, true, UnitStatus::Cancelled);
                 if was_in_flight {
                     self.line(LogMsg::Cancelled { ms }, Some(&u));
+                    self.run_as_one_aborted(unit, &u);
                 }
             }
             UnitEnd::Skipped => self.set_unit(unit.ordinal, true, UnitStatus::Skipped),
@@ -814,9 +830,32 @@ impl ExecObserver {
         );
     }
 
+    // ## m3b-t16-run-service (T13 review M-2; fix round 1, review m9)
+    /// A PostgreSQL Run as one that failed or was cancelled: started outside a transaction of
+    /// the user's, it ran as one implicit transaction, so the statements before the failure
+    /// were rolled back with it; started inside one, nothing was rolled back yet, but the
+    /// user's transaction failed and waits for their rollback.
+    fn run_as_one_aborted(&self, unit: UnitId, u: &UnitInfo) {
+        if !u.run_as_one || !pg_wire(self.engine) {
+            return;
+        }
+        let at_start = lock(&self.state)
+            .tx_at_start
+            .get(&unit.ordinal)
+            .copied()
+            .unwrap_or(TxStatus::Idle);
+        let msg = if at_start == TxStatus::Idle {
+            LogMsg::RunAsOneRolledBack
+        } else {
+            LogMsg::RunAsOneTxFailed
+        };
+        self.line(msg, Some(u));
+    }
+
     /// The user's transaction moved: its end is announced when the unit in flight ends, by
     /// [`tx_line`] (a COMMIT can fail at commit time and still leave the session idle).
     fn on_tx_changed(&self, from: TxStatus, to: TxStatus) {
+        lock(&self.state).tx_now = to;
         if to != TxStatus::Idle || from == TxStatus::Idle {
             return;
         }
@@ -957,7 +996,12 @@ impl RunObserver for ExecObserver {
                         u.as_ref(),
                     );
                 }
-                lock(&self.state).current = Some(unit.ordinal);
+                {
+                    let mut st = lock(&self.state);
+                    st.current = Some(unit.ordinal);
+                    let now = st.tx_now;
+                    st.tx_at_start.insert(unit.ordinal, now);
+                }
                 let (ordinal, since) = (unit.ordinal, *at);
                 self.update(true, |s| {
                     s.started.get_or_insert(since);
@@ -1077,7 +1121,9 @@ impl RunObserver for ExecObserver {
             }
             RunEvent::ClosedEarly { unit, report } => {
                 let u = self.unit(unit.ordinal).cloned();
-                if report.statements_ran > 0 || report.rest_not_run {
+                // Fix round 1 (review m10): nothing to say when nothing more ran (the stop's
+                // own line says the rest did not run).
+                if report.statements_ran > 0 {
                     self.line(
                         LogMsg::ClosedEarly {
                             ran: report.statements_ran,
@@ -1548,7 +1594,7 @@ mod tests {
     #[tokio::test]
     async fn a_closed_early_report_is_logged() {
         let (o, log) = observer_of(&["SELECT 1; DELETE FROM t"]).await;
-        for (ran, rest) in [(2, false), (1, true), (0, false)] {
+        for (ran, rest) in [(2, false), (1, true), (0, false), (0, true)] {
             o.event(&RunEvent::ClosedEarly {
                 unit: unit(0),
                 report: hacivat_driver::CloseReport {

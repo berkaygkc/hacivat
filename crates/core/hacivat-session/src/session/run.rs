@@ -748,9 +748,10 @@ impl Core {
     // ## m3b-t16-run-service (named exception; T13 review M-8, R-M3-77)
     /// MySQL's warnings of the statement that just ended: read (`SHOW WARNINGS`, the driver's
     /// `RawConn::warnings`) only when its `Done` counted some, and never on a read-only
-    /// session (the guard's `ROLLBACK` follows at once: the count only). Each one is a
-    /// `RunEvent::Notice` of the unit under the same cap as a notice; a failure to read them
-    /// is logged without any text and changes nothing else.
+    /// session: the guard's `ROLLBACK` follows at once, and nothing of them reaches the run
+    /// (fix round 1, review m11: not even their count). Each one is a `RunEvent::Notice` of
+    /// the unit under the same cap as a notice; a failure to read them is traced without any
+    /// text and changes nothing else.
     async fn read_warnings(&mut self, s: &mut Stream, w: &mut Watch) {
         let counted = s.done.map_or(0, |d| d.warnings);
         if self.read_only || counted == 0 {

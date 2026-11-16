@@ -120,7 +120,7 @@ fn glyph(msg: &LogMsg) -> (IconName, bool) {
         // ## m3b-t16-run-service (named exception): Task 25 owns their look.
         LogMsg::NoticesDropped { .. } => (IconName::Ellipsis, false),
         LogMsg::ClosedEarly { .. } => (IconName::Ban, false),
-        LogMsg::RunAsOneRolledBack => (IconName::Info, false),
+        LogMsg::RunAsOneRolledBack | LogMsg::RunAsOneTxFailed => (IconName::Info, false),
     }
 }
 

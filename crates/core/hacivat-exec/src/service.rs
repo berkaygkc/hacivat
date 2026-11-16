@@ -65,6 +65,7 @@ use hacivat_session::session::{
     PooledSession, RoCheck, SafetyDenial, SessionEffects, SessionKind, SessionManager,
     StatementClassifier, UnitVerdict,
 };
+use hacivat_values::BindValue;
 
 /// Which result tab a result belongs to: a re-run of the same unit reuses its tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -150,6 +151,10 @@ pub const SKIPPED_BY_USER: &str = "exec-skipped-by-user";
 /// `SkipAll` mark it skipped (never sent). Any other item (a `Deny` above all) is left as it
 /// is, whatever the answer: an answer never turns a denial into a run. Returns `false` for
 /// `Cancel`: the caller then sends nothing at all.
+///
+/// One unit per call (review m14): `ExecuteAll` and `SkipAll` answer only `unit`; the caller
+/// applies them to every later `Confirm`/`Warn` itself. A `unit` the plan does not hold
+/// changes nothing (and returns `true`); the run then still refuses any item left unanswered.
 pub fn apply_answer(plan: &mut GatePlan, unit: u32, answer: ConfirmAnswer) -> bool {
     if answer == ConfirmAnswer::Cancel {
         return false;
@@ -350,7 +355,30 @@ impl ExecService {
         let budget = self.budget.clone();
         let run = RunId(self.next_run.fetch_add(1, Ordering::SeqCst));
         rt.spawn(async move {
-            let answer = count_on(req, check, budget, run, cancelled).await;
+            // Fix round 1 (reviews m7, m8): the cancel and the 30 s cover the whole count (the
+            // check and the pooled session's connect too); a ticket dropped after its `done`
+            // was taken cancels nothing.
+            let sent: SentCount = Arc::default();
+            let mut cancelled = cancelled;
+            let cancel = async move {
+                if cancelled.wait_for(|c| *c).await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            };
+            let answer = tokio::select! {
+                biased;
+                () = cancel => Err(CountError::Cancelled),
+                r = tokio::time::timeout(COUNT_TIMEOUT, count_on(req, check, budget, run, sent.clone())) => {
+                    r.unwrap_or(Err(CountError::TimedOut))
+                }
+            };
+            if matches!(answer, Err(CountError::Cancelled | CountError::TimedOut)) {
+                let held = lock_sent(&sent).take();
+                if let Some((session, pooled, seq)) = held {
+                    drop(session.cancel(seq));
+                    drop(pooled);
+                }
+            }
             let _ = tx.send(answer);
         });
         ticket
@@ -531,6 +559,7 @@ impl ExecService {
             units,
             session: console.clone(),
             started: HashMap::new(),
+            run_started: std::time::SystemTime::now(),
         };
         chain.push_sink(tx.clone(), move |ev| sink.map(ev));
         chain
@@ -551,8 +580,12 @@ pub struct CountRequest {
     /// borrows a pooled `Service` session there; `None` counts on the console.
     pub sessions: Option<Arc<SessionManager>>,
     pub engine: DbmsKind,
-    /// The count statement (`count::count_sql`).
+    /// The count statement (`count::count_sql`, or `count::count_prepared`'s).
     pub sql: String,
+    // Fix round 1 (review m6)
+    /// The bind values of a prepared unit's count (`count::count_prepared`), in slot order;
+    /// empty for a unit without placeholders.
+    pub binds: Arc<[BindValue]>,
 }
 
 /// Why a count gave no number.
@@ -576,7 +609,8 @@ pub struct CountTicket {
 }
 
 impl CountTicket {
-    /// Cancels the count (its statement, when it is running).
+    /// Cancels the count: its check, its pooled session's connect or its statement, whichever
+    /// it is at. Dropping the ticket (or keeping only `done`) never cancels it.
     pub fn cancel(&self) {
         self.cancel.send_replace(true);
     }
@@ -585,12 +619,23 @@ impl CountTicket {
 /// The class Fluent ID of a count refused because nothing can check it.
 const NO_CHECK_CLASS_ID: &str = "safety-class-unknown";
 
+/// A count's statement once sent: its session (a pooled one is held here until the end), the
+/// pooled session itself, and the request number to cancel.
+type SentCount = Arc<Mutex<Option<(SessionHandle, Option<PooledSession>, u64)>>>;
+
+fn lock_sent(
+    s: &SentCount,
+) -> std::sync::MutexGuard<'_, Option<(SessionHandle, Option<PooledSession>, u64)>> {
+    s.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The count (the caller bounds it with the cancel and the timeout; the module docs).
 async fn count_on(
     req: CountRequest,
     check: Option<Arc<dyn StatementClassifier>>,
     budget: Arc<MemoryBudget>,
     run: RunId,
-    mut cancelled: watch::Receiver<bool>,
+    sent: SentCount,
 ) -> Result<u64, CountError> {
     let sql: Arc<str> = Arc::from(req.sql);
     let Some(check) = check else {
@@ -605,9 +650,6 @@ async fn count_on(
     {
         RoCheck::Allow => {}
         RoCheck::Deny(d) => return Err(CountError::Refused(d)),
-    }
-    if *cancelled.borrow() {
-        return Err(CountError::Cancelled);
     }
     // The console's own transaction sees what the count must see; otherwise a pooled session
     // keeps the console free.
@@ -627,10 +669,11 @@ async fn count_on(
         },
         _ => None,
     };
-    let session: &SessionHandle = pooled.as_deref().unwrap_or(&req.console);
+    let session: SessionHandle = pooled.as_deref().unwrap_or(&req.console).clone();
     let observer = Arc::new(crate::count::CountObserver::new(budget));
     let unit = RunUnit {
         verdict: UnitVerdict::Read,
+        binds: req.binds.clone(),
         ..RunUnit::plain(UnitId { run, ordinal: 0 }, sql, Protocol::Extended, false)
     };
     let ticket = session.run(RunSpec {
@@ -641,17 +684,10 @@ async fn count_on(
         observer: ObserverRef(observer.clone()),
         confirm_deadline: RunSpec::CONFIRM_DEADLINE,
     });
-    let seq = ticket.seq;
-    let stop = |e: CountError| {
-        drop(session.cancel(seq));
-        Err(e)
-    };
-    let reply = tokio::select! {
-        biased;
-        r = ticket.reply => r,
-        _ = cancelled.wait_for(|c| *c) => return stop(CountError::Cancelled),
-        () = tokio::time::sleep(COUNT_TIMEOUT) => return stop(CountError::TimedOut),
-    };
+    *lock_sent(&sent) = Some((session, pooled, ticket.seq));
+    let reply = ticket.reply.await;
+    // Done: the pooled session goes back to its pool here.
+    drop(lock_sent(&sent).take());
     match reply {
         Ok(Ok(_)) => observer
             .count()
