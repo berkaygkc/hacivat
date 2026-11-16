@@ -1196,7 +1196,58 @@ exemption is configured in M3b (step 4 "when configured"). Targets are the tree'
 
 **Not assessed (residual, covered by L4/L5 and the catalog in M4):** implicit casts and
 operators on user types, user-defined subscripting, column defaults, triggers and RLS policies
-that a statement fires, view bodies, and function overloads in later `search_path` schemas.
+that a statement fires, view bodies, function overloads in later `search_path` schemas,
+**attribute notation** (`t.f` and `(t).f` call `f(t)` when `t` has no column `f`; a raw tree
+cannot tell a column from a call, so the M4 catalog must treat a last field that is no known
+column as a call), and **foreign tables** (a read or write of one reaches a remote server).
+
+**Fix round 1 (review `task-m3b-09-review.md`).**
+- **Every named target type is a coercion (I1).** Besides `::`, `CAST` and `type 'literal'`,
+  the SQL/JSON `RETURNING` types (`JsonOutput`: `JSON_VALUE`, `JSON_QUERY`, `JSON_OBJECT`,
+  `JSON_ARRAY`, `JSON_SERIALIZE`, the aggregates), `JSON_TABLE` and `XMLTABLE` column types,
+  `XMLSERIALIZE … AS` and a function's column definition list (`f() AS x(a t)`) go through the
+  same check: a builtin written unquoted (`cast_known`, `pg_catalog` first), else `UNKNOWN` with
+  `CastUnknown`, because a domain's CHECK or a user cast may run code. Type names in DDL
+  (column definitions, parameters, `CREATE CAST`) are not coercions at run time and stay as
+  they were (the statement is DDL); `PREPARE`'s parameter types coerce only at `EXECUTE`, which
+  is `Unknown`. The quoted single-byte `"char"` is the one quoted builtin (M9).
+- **Statements that change how later statements read taint them (I2a).** Inside one `analyse`
+  call, after an item that may change the search path (a `SET`/`RESET search_path` the
+  harmless list refuses, any `set_config`), the lexing modes or the role (a `LEX_MODE_CHANGE`
+  or `PrivilegeChange` item), `RESET ALL`, `DISCARD ALL`, or any item with `UNKNOWN` effects
+  (code the classifier cannot see may do any of these), every later item gets `UNKNOWN` and
+  `EffectsUnknown`. Re-analysing with an updated context was rejected: the effect of an
+  `UNKNOWN` item on the context cannot be computed. **Carry (T14/T18):** when units are
+  classified one at a time, the session refreshes `ctx.search_path` and `ctx.dialect.modes`
+  after any such unit, or treats both as unknown.
+- **`ClassifyCtx.search_path` contract (I2b):** one schema per element, named as the server
+  stores it (folded: `current_schemas(true)`), `$user` literal; empty is unknown (`pg_catalog`
+  first, as the server searches it). An element that cannot be such a name (a raw `SHOW`
+  string, quotes, a comma, edge whitespace, or `pg_catalog` in another case) makes
+  unqualified builtins, operators and casts unknown; otherwise `pg_catalog` must be absent or
+  first. T18's connect-time read is the producer.
+- **Implicit `=` (M2):** `CASE x WHEN`, `JOIN … USING` and `NATURAL JOIN` look `=` up by name, so
+  they need `pg_catalog` first like any unqualified operator.
+- **Exact items (M3):** each item must be its raw statement's first-to-last significant token
+  (comments and edge `;` aside), not a part of it.
+- **Limits are `TooComplex` (M4):** the guard's size and nesting refusals and prost's decode
+  failure (`over_a_limit`). prost's limit of 100 nested messages is fixed (`DecodeContext`
+  "cannot be customized"; only the `no-recursion-limit` feature lifts it, which is a manifest
+  change and would let decoding recurse on the parser thread's stack), so it stays 100: 47
+  nested `ARRAY[`, 100 `UNION`s, a `||` chain of about 45 terms, about 24 nested `CASE`. T18's
+  run A should measure the false denials this causes.
+- **Session resets (M5):** `RESET ALL` and `DISCARD ALL` carry `LEX_MODE_CHANGE` and
+  `PrivilegeChange` (denied in every profile).
+- **M6:** `ALTER TABLE … OWNER TO` adds `PRIVILEGE`; `ALTER DOMAIN … DROP CONSTRAINT` is
+  `DropConstraint`. The statement table has 116 rows.
+- **Destructive ranges (M7):** a destructive reason's range is where its target's name is
+  written (the `RangeVar`'s location, or the first name tokens inside the statement that read
+  as the target), so T15's type-to-confirm can use the user's own bytes.
+- **Coverage (M8):** the coverage test also requires the generated walk to visit as many
+  messages as the tree's JSON has objects (`oneof` wrappers aside), so a skipped typed field
+  with no `Node` below it fails too.
+- **Leading BOM (M9):** parsed as three spaces (same offsets); our lexer reads it as whitespace,
+  and a server that does not strip it rejects the text.
 
 **Tests.** `sql-oracle-pg/tests/tree.rs`; `sql-safety/tests/pg_backend.rs` (the `alg/13`
 cases 1–21, 33, 34 with their read-only decisions, CVE T12 shapes, UNSAFE-01..10, combine rule,

@@ -49,6 +49,20 @@ pub fn parse_tree(sql: &str) -> Result<pb::ParseResult, PgError> {
     })
 }
 
+/// The prefix of a protobuf decode failure's message (`pg_query::Error::Decode`): the tree
+/// nests deeper than prost's fixed limit of 100 messages, which no API raises.
+const DECODE_FAILURE: &str = "Error decoding result:";
+
+/// Whether `e` is a limit rather than a syntax error: the text is over the 8 MiB cap, its
+/// brackets nest deeper than [`crate::MAX_ORACLE_NESTING`], or its tree nests deeper than
+/// prost decodes (100 messages: 47 nested `ARRAY[`, 100 `UNION`s, a `||` chain of about 45
+/// terms, about 24 nested `CASE`). The classifier reports these as `TooComplex`.
+pub fn over_a_limit(e: &PgError) -> bool {
+    e.message == crate::split::TOO_LONG
+        || e.message == crate::split::TOO_DEEP
+        || e.message.starts_with(DECODE_FAILURE)
+}
+
 /// libpg_query's scanner tokens of `sql`, comments included, in text order (byte ranges into
 /// `sql`). A lexical error is an `Err` (the tokens before it are not returned).
 pub fn scan_tokens(sql: &str) -> Result<Vec<(TextRange, ScanKind)>, PgError> {

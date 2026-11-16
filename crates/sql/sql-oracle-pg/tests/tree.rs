@@ -86,6 +86,19 @@ fn a_decode_depth_failure_is_an_err_not_a_panic() {
     assert!(parse_tree(&nested(10)).is_ok());
     let e = parse_tree(&nested(47)).unwrap_err();
     assert!(!e.message.is_empty());
+    // A limit, told apart from a syntax error (fix round 1, M4).
+    assert!(sql_oracle_pg::tree::over_a_limit(&e));
+    assert!(!sql_oracle_pg::tree::over_a_limit(
+        &parse_tree("SELEC 1").unwrap_err()
+    ));
+    let deep = format!("SELECT {}1{}", "(".repeat(300), ")".repeat(300));
+    assert!(sql_oracle_pg::tree::over_a_limit(
+        &parse_tree(&deep).unwrap_err()
+    ));
+    let long = format!("SELECT 1{}", " ".repeat(9 << 20));
+    assert!(sql_oracle_pg::tree::over_a_limit(
+        &parse_tree(&long).unwrap_err()
+    ));
     let unions: Vec<String> = (0..100).map(|i| format!("SELECT {i}")).collect();
     assert!(parse_tree(&unions.join(" UNION ALL ")).is_err());
     // The thread is still there.

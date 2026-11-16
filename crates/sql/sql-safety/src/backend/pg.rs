@@ -5,8 +5,9 @@
 //! **Combine rule** ([`analyse`]): libpg_query is the authority.
 //! 1. The whole text is parsed once. A parse error (or the guard's refusal, or a protobuf
 //!    decode-depth failure) makes every item `Unknown` with `ParseError`.
-//! 2. libpg_query's statements must be our items: the same count, and each item inside its
-//!    raw statement's span, in order. Otherwise every item is `Unknown` with
+//! 2. libpg_query's statements must be our items: the same count, in order, and each item
+//!    exactly its raw statement's first-to-last significant token. Otherwise every item is
+//!    `Unknown` with
 //!    `ParserDisagreement` (and `MultiStatement` when one unit was expected and the parser
 //!    found several).
 //! 3. Token-boundary agreement: our lexer's significant tokens (with the session's
@@ -16,6 +17,14 @@
 //!    string is a disagreement too (libpg_query parses with it on). Disagreement adds
 //!    `ParserDisagreement` to every item.
 //! 4. A server newer than the grammar (PostgreSQL 18) adds `SyntaxNewerThanAgent`.
+//! 5. A statement that may change how later statements read (a search path that may not keep
+//!    `pg_catalog` first, `set_config`, a lexing-mode or role change, `RESET ALL`, `DISCARD
+//!    ALL`, or anything `UNKNOWN`, which may run code that does any of these) makes every
+//!    later item `Unknown` (`EffectsUnknown`): they were read against the context before it.
+//!
+//! A limit (the guard's size and nesting caps, prost's decode depth of 100 messages) is
+//! `TooComplex`, a syntax error `ParseError`. A leading byte-order mark is parsed as spaces
+//! (our lexer reads it as whitespace; a server that does not strip it rejects the text).
 //!
 //! **Per statement** ([`Classifier`]): the statement row's kind and base effects, then a walk of
 //! every message under it: nested statements add their rows' effects; `INTO` is DDL and a
@@ -371,7 +380,16 @@ pub(crate) fn role(k: MsgKind) -> Role {
         | M::SubLink
         | M::SortBy
         | M::CommonTableExpr
-        | M::AlterTableCmd => Role::Rule,
+        | M::AlterTableCmd
+        // Fix round 1: coercions to a named type (I1) and implicit `=` lookups (M2).
+        | M::JsonOutput
+        | M::JsonTableColumn
+        | M::RangeTableFuncCol
+        | M::XmlSerialize
+        | M::RangeFunction
+        | M::ColumnDef
+        | M::CaseExpr
+        | M::JoinExpr => Role::Rule,
 
         // Raw-tree structure and builtin expressions.
         M::ParseResult
@@ -391,7 +409,6 @@ pub(crate) fn role(k: MsgKind) -> Role {
         | M::MergeSupportFunc
         | M::NamedArgExpr
         | M::BoolExpr
-        | M::CaseExpr
         | M::CaseWhen
         | M::RowExpr
         | M::CoalesceExpr
@@ -407,7 +424,6 @@ pub(crate) fn role(k: MsgKind) -> Role {
         | M::BooleanTest
         | M::SetToDefault
         | M::CurrentOfExpr
-        | M::JoinExpr
         | M::TypeName
         | M::ColumnRef
         | M::ParamRef
@@ -421,14 +437,10 @@ pub(crate) fn role(k: MsgKind) -> Role {
         | M::MultiAssignRef
         | M::WindowDef
         | M::RangeSubselect
-        | M::RangeFunction
         | M::RangeTableFunc
-        | M::RangeTableFuncCol
-        | M::ColumnDef
         | M::TableLikeClause
         | M::IndexElem
         | M::DefElem
-        | M::XmlSerialize
         | M::PartitionElem
         | M::PartitionSpec
         | M::PartitionBoundSpec
@@ -444,12 +456,10 @@ pub(crate) fn role(k: MsgKind) -> Role {
         | M::ReturningOption
         | M::ReturningClause
         | M::TriggerTransition
-        | M::JsonOutput
         | M::JsonArgument
         | M::JsonFuncExpr
         | M::JsonTablePathSpec
         | M::JsonTable
-        | M::JsonTableColumn
         | M::JsonKeyValue
         | M::JsonParseExpr
         | M::JsonScalarExpr
@@ -541,11 +551,27 @@ pub(crate) fn analyse(sql: &str, items: &[TextRange], ctx: &ClassifyCtx) -> Vec<
     let failed = |codes: &[ReasonCode]| -> Vec<StmtReport> {
         items.iter().map(|r| unknown_report(*r, codes)).collect()
     };
-    let parsed = match tree::parse_tree(sql) {
+    // A leading UTF-8 byte-order mark is whitespace to our lexer but a syntax error to
+    // libpg_query: parse the text with the mark as three spaces (same offsets). A server that
+    // does not strip it rejects the text, so nothing runs that the parse did not see.
+    let blanked;
+    let text = match sql.strip_prefix('\u{feff}') {
+        Some(rest) => {
+            blanked = format!("   {rest}");
+            blanked.as_str()
+        }
+        None => sql,
+    };
+    let parsed = match tree::parse_tree(text) {
         Ok(t) => t,
+        Err(e) if tree::over_a_limit(&e) => return failed(&[ReasonCode::TooComplex]),
         Err(_) => return failed(&[ReasonCode::ParseError]),
     };
-    if !statements_agree(&parsed, items, sql.len()) {
+    let toks = tree::scan_tokens(text).ok();
+    let agree = toks
+        .as_deref()
+        .is_some_and(|t| statements_agree(&parsed, items, text, t));
+    if !agree {
         let mut codes = vec![ReasonCode::ParserDisagreement];
         if ctx.expect == Expect::SingleStatement && parsed.stmts.len() > 1 {
             codes.push(ReasonCode::MultiStatement);
@@ -555,7 +581,6 @@ pub(crate) fn analyse(sql: &str, items: &[TextRange], ctx: &ClassifyCtx) -> Vec<
     let Some(table) = table() else {
         return failed(&[ReasonCode::EffectsUnknown]);
     };
-    let toks = tree::scan_tokens(sql).ok();
     let mut doubts = Vec::new();
     if !toks.as_deref().is_some_and(|t| tokens_agree(sql, ctx, t)) {
         doubts.push(ReasonCode::ParserDisagreement);
@@ -564,14 +589,22 @@ pub(crate) fn analyse(sql: &str, items: &[TextRange], ctx: &ClassifyCtx) -> Vec<
         doubts.push(ReasonCode::SyntaxNewerThanAgent);
     }
     let toks = toks.unwrap_or_default();
+    // An item that may change what later items mean (the search_path, the lexing modes, the
+    // role, or code the classifier cannot see into) makes every later item `Unknown`: they
+    // were classified against the context as it was before it (fix round 1, I2a).
+    let mut stale = false;
     items
         .iter()
         .zip(&parsed.stmts)
         .map(|(range, raw)| {
-            let mut r = statement(sql, *range, raw, ctx, table, &toks);
+            let (mut r, changes_context) = statement(text, *range, raw, ctx, table, &toks);
             for code in &doubts {
                 doubt(&mut r, *code);
             }
+            if stale {
+                doubt(&mut r, ReasonCode::EffectsUnknown);
+            }
+            stale |= changes_context || r.effects.contains(EffectSet::UNKNOWN);
             r
         })
         .collect()
@@ -611,12 +644,21 @@ fn doubt(r: &mut StmtReport, code: ReasonCode) {
     r.class = class_of(r.effects);
 }
 
-/// Whether libpg_query's raw statements are `items`: as many, and each item inside its raw
-/// statement's span (`stmt_location`, `stmt_len`; 0 runs to the end), in order.
-fn statements_agree(parsed: &pb::ParseResult, items: &[TextRange], len: usize) -> bool {
+/// Whether libpg_query's raw statements are `items`: as many, in order, and each item exactly
+/// its raw statement's significant tokens (from the first to the last token inside the span
+/// `stmt_location`..+`stmt_len`, 0 running to the end, comments and edge `;` aside).
+fn statements_agree(
+    parsed: &pb::ParseResult,
+    items: &[TextRange],
+    text: &str,
+    toks: &[(TextRange, ScanKind)],
+) -> bool {
     if parsed.stmts.len() != items.len() {
         return false;
     }
+    let len = text.len();
+    let semicolon =
+        |r: &TextRange| text.get(usize::from(r.start())..usize::from(r.end())) == Some(";");
     let mut floor = 0usize;
     for (raw, item) in parsed.stmts.iter().zip(items) {
         let (Ok(start), Ok(n)) = (
@@ -626,9 +668,23 @@ fn statements_agree(parsed: &pb::ParseResult, items: &[TextRange], len: usize) -
             return false;
         };
         let end = if n == 0 { len } else { start.saturating_add(n) };
-        let (s, e) = (usize::from(item.start()), usize::from(item.end()));
-        if start < floor || s < start || e > end || end > len || s >= e {
+        if start < floor || end > len {
             return false;
+        }
+        let inside: Vec<TextRange> = toks
+            .iter()
+            .filter(|(r, k)| {
+                *k != ScanKind::Comment
+                    && usize::from(r.start()) >= start
+                    && usize::from(r.end()) <= end
+            })
+            .map(|(r, _)| *r)
+            .collect();
+        let first = inside.iter().find(|r| !semicolon(r));
+        let last = inside.iter().rev().find(|r| !semicolon(r));
+        match (first, last) {
+            (Some(f), Some(l)) if f.start() == item.start() && l.end() == item.end() => {}
+            _ => return false,
         }
         floor = end;
     }
@@ -684,7 +740,8 @@ pub(crate) fn tokens_agree(sql: &str, ctx: &ClassifyCtx, pg: &[(TextRange, ScanK
 // ---------------------------------------------------------------------------------------------
 // One statement
 
-/// The report of one raw statement, `range` being our item.
+/// The report of one raw statement, `range` being our item, and whether running it may change
+/// how later statements must be classified (search_path, lexing modes, role).
 fn statement(
     sql: &str,
     range: TextRange,
@@ -692,13 +749,14 @@ fn statement(
     ctx: &ClassifyCtx,
     table: &Table,
     toks: &[(TextRange, ScanKind)],
-) -> StmtReport {
+) -> (StmtReport, bool) {
     let Some(root) = raw.stmt.as_deref().and_then(g::node_inner) else {
-        return unknown_report(range, &[ReasonCode::EffectsUnknown]);
+        return (unknown_report(range, &[ReasonCode::EffectsUnknown]), true);
     };
     let mut c = Classifier::new(sql, range, ctx, table, toks);
     g::walk(root, &mut c);
-    c.finish()
+    let changes_context = c.changes_context;
+    (c.finish(), changes_context)
 }
 
 /// Context flags of an entered message, undone on `leave`.
@@ -706,6 +764,8 @@ const F_STMT: u8 = 1;
 const F_DEFERRED: u8 = 2;
 const F_CTE: u8 = 4;
 const F_ALTER: u8 = 8;
+/// Inside a `RangeFunction`, whose column definitions coerce the function's result.
+const F_COLDEF: u8 = 16;
 
 /// The visitor that classifies one statement.
 struct Classifier<'a, 's> {
@@ -733,12 +793,18 @@ struct Classifier<'a, 's> {
     deferred: u32,
     /// Enclosing CTEs.
     cte: u32,
+    /// Enclosing `RangeFunction`s.
+    coldef: u32,
+    /// Running this statement may change how later statements must be classified.
+    changes_context: bool,
     /// The relation of each enclosing `ALTER TABLE`.
     alter: Vec<Option<ObjectRef>>,
     /// The frames of entered messages (`F_*`), popped on `leave`.
     frames: Vec<u8>,
     /// Relations a statement writes (identity), so the walk does not count them as reads.
     write_targets: Vec<*const pb::RangeVar>,
+    /// Where each written relation's name is written.
+    target_spans: Vec<(ObjectRef, TextRange)>,
     _tree: std::marker::PhantomData<&'a ()>,
 }
 
@@ -757,11 +823,7 @@ impl<'a, 's> Classifier<'a, 's> {
             table,
             toks,
             dialect: ctx.dialect.id,
-            catalog_first: ctx
-                .search_path
-                .iter()
-                .position(|s| s.trim_matches('"') == "pg_catalog")
-                .is_none_or(|i| i == 0),
+            catalog_first: catalog_first(&ctx.search_path),
             kind: None,
             effects: EffectSet::empty(),
             flags: RiskFlags::empty(),
@@ -773,9 +835,12 @@ impl<'a, 's> Classifier<'a, 's> {
             depth: 0,
             deferred: 0,
             cte: 0,
+            coldef: 0,
+            changes_context: false,
             alter: Vec::new(),
             frames: Vec::new(),
             write_targets: Vec::new(),
+            target_spans: Vec::new(),
             _tree: std::marker::PhantomData,
         }
     }
@@ -888,23 +953,121 @@ impl<'a, 's> Classifier<'a, 's> {
         self.depth == 0
     }
 
-    /// Records `rv` as written, and returns its object.
+    /// Records `rv` as written (and where its name is written), and returns its object.
     fn write_target(&mut self, rv: &pb::RangeVar, kind: ObjectKind) -> ObjectRef {
         self.write_targets.push(rv as *const pb::RangeVar);
         let o = object(range_var_name(rv), kind);
         self.touched.writes.push(o.clone());
+        if let Some(span) = self.span_at(rv.location) {
+            self.target_spans.push((o.clone(), span));
+        }
         o
     }
 
+    /// A destructive pattern; its range is where the target's name is written (fix round 1,
+    /// M7: the type-to-confirm text is those bytes), else the statement's.
     fn destroy(&mut self, kind: DestructiveKind, target: Option<ObjectRef>) {
         if self.deferred > 0 {
             return;
         }
+        let range = target
+            .as_ref()
+            .and_then(|t| {
+                self.target_spans
+                    .iter()
+                    .find(|(o, _)| o == t)
+                    .map(|(_, r)| *r)
+                    .or_else(|| self.find_name(&t.name))
+            })
+            .unwrap_or(self.range);
         self.destructive.push(DestructiveReason {
             kind,
-            range: self.range,
+            range,
             target,
         });
+    }
+
+    /// Token `i`: its text, kind and range.
+    fn tok(&self, i: usize) -> Option<(&'s str, ScanKind, TextRange)> {
+        let (r, k) = *self.toks.get(i)?;
+        let t = self.sql.get(usize::from(r.start())..usize::from(r.end()))?;
+        Some((t, k, r))
+    }
+
+    /// The first token at or after `i` that is not a comment.
+    fn skip_comments(&self, mut i: usize) -> usize {
+        while matches!(self.tok(i), Some((_, ScanKind::Comment, _))) {
+            i += 1;
+        }
+        i
+    }
+
+    /// The span of the name `part ( . part )*` that starts at token `i`.
+    fn name_span_from(&self, i: usize) -> Option<TextRange> {
+        let (_, k, first) = self.tok(i)?;
+        if !matches!(k, ScanKind::Ident | ScanKind::Keyword) {
+            return None;
+        }
+        let (mut end, mut j) = (first.end(), i);
+        loop {
+            let dot = self.skip_comments(j + 1);
+            if !matches!(self.tok(dot), Some((".", ScanKind::Other, _))) {
+                break;
+            }
+            let next = self.skip_comments(dot + 1);
+            match self.tok(next) {
+                Some((_, ScanKind::Ident | ScanKind::Keyword, r)) => {
+                    end = r.end();
+                    j = next;
+                }
+                _ => break,
+            }
+        }
+        Some(TextRange::new(first.start(), end))
+    }
+
+    /// The span of the name written at byte `location`.
+    fn span_at(&self, location: i32) -> Option<TextRange> {
+        let at = usize::try_from(location).ok()?;
+        self.name_span_from(self.token_index(at)?)
+    }
+
+    /// Where `name` is first written inside the statement: name tokens whose server reading
+    /// (unquoted folded to ASCII lower case, quoted taken exactly) are its parts.
+    fn find_name(&self, name: &QualifiedName) -> Option<TextRange> {
+        let read = |t: &str, k: ScanKind| -> Option<String> {
+            match k {
+                ScanKind::Ident if t.starts_with('"') => t
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .map(|s| s.replace("\"\"", "\"")),
+                ScanKind::Ident if t.starts_with("U&") || t.starts_with("u&") => None,
+                ScanKind::Ident | ScanKind::Keyword => Some(t.to_ascii_lowercase()),
+                _ => None,
+            }
+        };
+        let in_range = |r: TextRange| self.range.contains_range(r);
+        'start: for i in 0..self.toks.len() {
+            let mut j = i;
+            for (n, part) in name.parts.iter().enumerate() {
+                if n > 0 {
+                    let dot = self.skip_comments(j + 1);
+                    if !matches!(self.tok(dot), Some((".", ScanKind::Other, _))) {
+                        continue 'start;
+                    }
+                    j = self.skip_comments(dot + 1);
+                }
+                match self.tok(j) {
+                    Some((t, k, r))
+                        if in_range(r) && read(t, k).as_deref() == Some(&*part.text) => {}
+                    _ => continue 'start,
+                }
+            }
+            let start = self.toks[i].0.start();
+            let end = self.toks[j].0.end();
+            return Some(TextRange::new(start, end));
+        }
+        None
     }
 
     // -- statements -------------------------------------------------------------------------
@@ -1049,6 +1212,17 @@ impl<'a, 's> Classifier<'a, 's> {
             PgRef::DeclareCursorStmt(s) if s.options & CURSOR_OPT_HOLD != 0 => {
                 self.effects |= EffectSet::SESSION_STATE;
             }
+            PgRef::DiscardStmt(s) if s.target == pb::DiscardMode::DiscardAll as i32 => {
+                // `DISCARD ALL` includes `SET SESSION AUTHORIZATION DEFAULT` and `RESET ALL`
+                // (fix round 1, M5).
+                self.session_reset();
+            }
+            PgRef::AlterDomainStmt(s) if s.subtype == "X" => {
+                // `ALTER DOMAIN … DROP CONSTRAINT` (fix round 1, M6).
+                let target =
+                    strings(&s.type_name).map(|p| object(qualified(&p), ObjectKind::Other));
+                self.destroy(DestructiveKind::DropConstraint, target);
+            }
             _ => {}
         }
         frame
@@ -1122,10 +1296,12 @@ impl<'a, 's> Classifier<'a, 's> {
         let kind = V::try_from(s.kind).unwrap_or(V::Undefined);
         if kind == V::VarResetAll {
             self.reason(ReasonCode::SessionState, None, None);
+            self.session_reset();
             return;
         }
         if s.name.is_empty() || kind == V::Undefined {
             self.unknown(ReasonCode::EffectsUnknown, None, None);
+            self.changes_context = true;
             return;
         }
         let value = match kind {
@@ -1139,20 +1315,41 @@ impl<'a, 's> Classifier<'a, 's> {
         };
         let name: Arc<str> = Arc::from(s.name.as_str());
         self.variable(&name);
+        // A search path that may not reach `pg_catalog` first changes how later names resolve
+        // (I2a); the harmless list's own test decides which values keep it first.
+        if name.eq_ignore_ascii_case("search_path")
+            && !crate::functions::set_allowed(DialectId::Postgres, &name, value.as_deref())
+        {
+            self.changes_context = true;
+        }
         self.reason(ReasonCode::SessionState, None, Some(&name));
         self.set_targets.push(SetTarget { name, value });
     }
 
-    /// What setting `name` implies beyond session state (also for `set_config`).
+    /// What setting `name` implies beyond session state (also for `set_config`): a role switch
+    /// and a lexing change are flagged, and both change how later statements read.
     fn variable(&mut self, name: &str) {
         if ROLE_VARIABLES.iter().any(|v| v.eq_ignore_ascii_case(name)) {
             self.effects |= EffectSet::PRIVILEGE;
             self.reason(ReasonCode::PrivilegeChange, None, Some(name));
+            self.changes_context = true;
         }
         if LEX_VARIABLES.iter().any(|v| v.eq_ignore_ascii_case(name)) {
             self.flags |= RiskFlags::LEX_MODE_CHANGE;
             self.reason(ReasonCode::LexModeChange, None, Some(name));
+            self.changes_context = true;
         }
+    }
+
+    /// `RESET ALL`, `DISCARD ALL`: every setting returns to its default, the lexing ones and
+    /// (for `DISCARD ALL`) the session authorization included, so both a lexing change and a
+    /// role switch (fix round 1, M5); later statements read differently (I2a).
+    fn session_reset(&mut self) {
+        self.effects |= EffectSet::PRIVILEGE;
+        self.reason(ReasonCode::PrivilegeChange, None, None);
+        self.flags |= RiskFlags::LEX_MODE_CHANGE;
+        self.reason(ReasonCode::LexModeChange, None, None);
+        self.changes_context = true;
     }
 
     fn transaction(&mut self, s: &'a pb::TransactionStmt, top: bool) {
@@ -1288,7 +1485,10 @@ impl<'a, 's> Classifier<'a, 's> {
             DenyGroup::XidConsume => (EffectSet::XID_CONSUME, Some(ReasonCode::XidConsume)),
             DenyGroup::SetConfig => {
                 // `set_config(name, value, is_local)`: a session change that the RO pin does
-                // not stop (case 8: Admin); the name decides role and lexing changes.
+                // not stop (case 8: Admin); the name decides role and lexing changes. It may set
+                // any setting (the search path among them), so later statements read
+                // differently (I2a).
+                self.changes_context = true;
                 match args.first().and_then(string_const) {
                     Some(name) => self.variable(name),
                     None => self.unknown(ReasonCode::EffectsUnknown, range, Some("set_config")),
@@ -1340,10 +1540,14 @@ impl<'a, 's> Classifier<'a, 's> {
         }
     }
 
-    /// An explicit cast: its target must be a builtin type written unquoted.
-    fn cast(&mut self, tc: &pb::TypeCast) {
-        let Some(tn) = &tc.type_name else {
-            self.unknown(ReasonCode::CastUnknown, Some(self.at(tc.location)), None);
+    /// A coercion to a named type: an explicit cast (`::`, `CAST`, `type 'literal'`) and every
+    /// other place that names a target type (fix round 1, I1: SQL/JSON `RETURNING`,
+    /// `JSON_TABLE`/`XMLTABLE` column types, `XMLSERIALIZE … AS`, a function's column
+    /// definition list). The type must be a builtin written unquoted (`cast_known`); anything
+    /// else, a domain or user type whose input, cast or CHECK may run code, is `Unknown`.
+    fn coerce(&mut self, tn: Option<&pb::TypeName>, location: i32) {
+        let Some(tn) = tn else {
+            self.unknown(ReasonCode::CastUnknown, Some(self.at(location)), None);
             return;
         };
         let parts = strings(&tn.names);
@@ -1353,13 +1557,24 @@ impl<'a, 's> Classifier<'a, 's> {
             if !tn.array_bounds.is_empty() {
                 text.push_str("[]");
             }
+            // The single-byte `"char"` is spelled quoted (M9); any other quoted name is not a
+            // builtin.
+            let quoted_char = *parts == ["char"]
+                && usize::try_from(tn.location)
+                    .ok()
+                    .and_then(|l| self.token_index(l))
+                    .and_then(|i| self.tok(i))
+                    .is_some_and(|(t, _, _)| t == "\"char\"");
+            if quoted_char {
+                text = "\"char\"".to_string();
+            }
             !tn.pct_type
                 && !tn.setof
                 && parts
                     .iter()
                     .all(|p| !p.bytes().any(|b| b.is_ascii_uppercase()))
                 && (by_catalog || self.catalog_first)
-                && !self.quoted_at(tn.location, by_catalog)
+                && (quoted_char || !self.quoted_at(tn.location, by_catalog))
                 && cast_known(self.dialect, &text)
         });
         if !ok {
@@ -1368,6 +1583,18 @@ impl<'a, 's> Classifier<'a, 's> {
                 ReasonCode::CastUnknown,
                 Some(self.at(tn.location)),
                 text.as_deref(),
+            );
+        }
+    }
+
+    /// An `=` the server looks up by name through the search path (`CASE x WHEN`, `JOIN …
+    /// USING`, `NATURAL JOIN`; fix round 1, M2).
+    fn implicit_equals(&mut self, location: i32) {
+        if !(self.catalog_first && operator_known(self.dialect, "=")) {
+            self.unknown(
+                ReasonCode::OperatorUnknown,
+                Some(self.at(location)),
+                Some("="),
             );
         }
     }
@@ -1384,6 +1611,11 @@ impl<'a, 's> Classifier<'a, 's> {
     fn alter_cmd(&mut self, cmd: &pb::AlterTableCmd) {
         use pb::AlterTableType as T;
         let kind = match T::try_from(cmd.subtype) {
+            Ok(T::AtChangeOwner) => {
+                // `ALTER TABLE … OWNER TO` changes privileges (fix round 1, M6).
+                self.effects |= EffectSet::PRIVILEGE;
+                return;
+            }
             Ok(T::AtDropColumn) => DestructiveKind::DropColumn,
             Ok(T::AtDropConstraint) => DestructiveKind::DropConstraint,
             Ok(T::AtAlterColumnType) => DestructiveKind::AlterType,
@@ -1410,7 +1642,34 @@ impl<'a> Visitor<'a> for Classifier<'a, '_> {
                 }
                 PgRef::RangeTableSample(t) => self.call(&t.method, t.args.len(), &[], t.location),
                 PgRef::AExpr(e) => self.a_expr(e),
-                PgRef::TypeCast(tc) => self.cast(tc),
+                PgRef::TypeCast(tc) => self.coerce(tc.type_name.as_ref(), tc.location),
+                PgRef::JsonOutput(o) => {
+                    if let Some(tn) = &o.type_name {
+                        self.coerce(Some(tn), tn.location);
+                    }
+                }
+                PgRef::JsonTableColumn(c) => {
+                    if let Some(tn) = &c.type_name {
+                        self.coerce(Some(tn), c.location);
+                    }
+                }
+                PgRef::RangeTableFuncCol(c) => {
+                    if let Some(tn) = &c.type_name {
+                        self.coerce(Some(tn), c.location);
+                    }
+                }
+                PgRef::XmlSerialize(x) => self.coerce(x.type_name.as_ref(), x.location),
+                PgRef::RangeFunction(_) => {
+                    frame |= F_COLDEF;
+                    self.coldef += 1;
+                }
+                PgRef::ColumnDef(c) if self.coldef > 0 => {
+                    self.coerce(c.type_name.as_ref(), c.location);
+                }
+                PgRef::CaseExpr(c) if c.arg.is_some() => self.implicit_equals(c.location),
+                PgRef::JoinExpr(j) if j.is_natural || !j.using_clause.is_empty() => {
+                    self.implicit_equals(-1);
+                }
                 PgRef::SubLink(s) if !s.oper_name.is_empty() => {
                     self.operator(&s.oper_name, s.location);
                 }
@@ -1460,11 +1719,43 @@ impl<'a> Visitor<'a> for Classifier<'a, '_> {
         if frame & F_ALTER != 0 {
             self.alter.pop();
         }
+        if frame & F_COLDEF != 0 {
+            self.coldef -= 1;
+        }
     }
 }
 
 // ---------------------------------------------------------------------------------------------
 // Helpers over the tree
+
+/// Whether an unqualified name reaches `pg_catalog` before any other schema on a session
+/// whose search path is `path` (P-M3b-T3-1).
+///
+/// **The contract of `ClassifyCtx.search_path`** (fix round 1, I2b): one element per schema,
+/// each the schema's name exactly as the server stores it, i.e. folded (what
+/// `current_schemas(true)` returns, or `SHOW search_path` split and folded); `$user` is kept
+/// literally as `$user`. Empty means unknown: the server searches `pg_catalog` first when the
+/// path does not name it, so an unknown path assumes it.
+///
+/// Fail closed: an element that cannot be such a name (empty, with a comma, a double quote or
+/// edge whitespace, as a raw `SHOW` string has), or that is `pg_catalog` in another case (an
+/// unfolded spelling), makes the answer `false`. Otherwise `pg_catalog` must be absent or first.
+fn catalog_first(path: &[Arc<str>]) -> bool {
+    let mut first_named: Option<usize> = None;
+    for (i, s) in path.iter().enumerate() {
+        let parseable = !s.is_empty()
+            && !s.contains([',', '"'])
+            && s.trim() == &**s
+            && (**s == *"pg_catalog" || !s.eq_ignore_ascii_case("pg_catalog"));
+        if !parseable {
+            return false;
+        }
+        if **s == *"pg_catalog" && first_named.is_none() {
+            first_named = Some(i);
+        }
+    }
+    first_named.is_none_or(|i| i == 0)
+}
 
 /// The texts of a list of `String` nodes; `None` if any element is something else.
 fn strings(list: &[pb::Node]) -> Option<Vec<&str>> {
@@ -1877,6 +2168,22 @@ pub mod hooks {
         }
         let tree = sql_oracle_pg::tree::parse_tree(sql).map_err(|e| e.message)?;
         let mut c = Count(BTreeMap::new());
+        g::walk(PgRef::ParseResult(&tree), &mut c);
+        Ok(c.0)
+    }
+
+    /// How many messages of every kind the generated walk visits in the parse tree of `sql`,
+    /// the root included (fix round 1, M8).
+    pub fn visit_total(sql: &str) -> Result<usize, String> {
+        struct Count(usize);
+        impl<'a> Visitor<'a> for Count {
+            fn enter(&mut self, _r: PgRef<'a>) -> Walk {
+                self.0 += 1;
+                Walk::Children
+            }
+        }
+        let tree = sql_oracle_pg::tree::parse_tree(sql).map_err(|e| e.message)?;
+        let mut c = Count(0);
         g::walk(PgRef::ParseResult(&tree), &mut c);
         Ok(c.0)
     }

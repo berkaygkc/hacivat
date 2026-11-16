@@ -255,6 +255,23 @@ const NOT_NODE_WRAPPED_IN_A_RAW_TREE: [&str; 24] = [
 /// The `Node` oneof variants of a JSON parse tree: every object holding a `"node"` key whose
 /// value is an object with one key in UpperCamelCase (prost's variant name). `SortBy.node`
 /// is itself a `Node` (`{"node": {"node": …}}`), so a lower-case key is not a variant.
+/// The messages of a JSON parse tree: every object but the `oneof` wrappers (prost serializes
+/// a oneof as `{"Variant": {…}}`; struct field names are snake_case).
+fn json_messages(v: &Value) -> usize {
+    match v {
+        Value::Object(map) => {
+            let wrapper = map.len() == 1
+                && map
+                    .keys()
+                    .next()
+                    .is_some_and(|k| k.starts_with(|c: char| c.is_ascii_uppercase()));
+            usize::from(!wrapper) + map.values().map(json_messages).sum::<usize>()
+        }
+        Value::Array(items) => items.iter().map(json_messages).sum(),
+        _ => 0,
+    }
+}
+
 fn json_counts(v: &Value, out: &mut BTreeMap<String, usize>) {
     match v {
         Value::Object(map) => {
@@ -300,7 +317,15 @@ fn pg_visitor_reaches_every_node_kind_in_the_corpus() {
     for sql in &texts {
         let tree = parse_tree(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
         let mut independent = BTreeMap::new();
-        json_counts(&serde_json::to_value(&tree).unwrap(), &mut independent);
+        let json = serde_json::to_value(&tree).unwrap();
+        json_counts(&json, &mut independent);
+        // Every message, typed fields included (round 1, M8): each JSON object is a message,
+        // except a `oneof` wrapper (one key in UpperCamelCase, the variant's name).
+        assert_eq!(
+            hooks::visit_total(sql).unwrap(),
+            json_messages(&json),
+            "{sql}"
+        );
         let visited: BTreeMap<String, usize> = hooks::visit_counts(sql)
             .unwrap()
             .into_iter()
