@@ -547,6 +547,105 @@ fn a_menu_can_tint_its_active_row_and_list_its_keys(cx: &mut TestAppContext) {
     }
 }
 
+// ## m3a-f5-demo (follow-up): a menu taller than the room under its anchor scrolls its rows,
+// shows whole rows only and never reaches the status bar; a short one near the bottom flips
+// above its anchor.
+fn layout_of(vcx: &mut VisualTestContext) -> hacivat_ui::menu::MenuLayout {
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    vcx.read(|cx| cx.global::<hacivat_ui::menu::MenuLayout>().clone())
+}
+
+/// The rows of `layout` its column shows (some of them inside the column).
+fn shown_rows(layout: &hacivat_ui::menu::MenuLayout) -> Vec<usize> {
+    let v = layout.viewport.expect("the rows' column");
+    layout
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.bottom() > v.top() && r.top() < v.bottom())
+        .map(|(i, _)| i)
+        .collect()
+}
+
+#[gpui::test]
+fn a_long_menu_scrolls_whole_rows_above_the_status_bar(cx: &mut TestAppContext) {
+    use hacivat_ui::menu::{MenuItemSpec, MenuLayout, PopupMenu};
+    use hacivat_ui_core::theme::{Theme, ThemeMode};
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    let items: Vec<MenuItemSpec> = (0..60)
+        .map(|i| {
+            if i % 6 == 5 {
+                MenuItemSpec::separator()
+            } else {
+                let text: hacivat_ui::text::TextFn = Rc::new(move |_| format!("Item {i}").into());
+                MenuItemSpec::new(text, "menu.item")
+            }
+        })
+        .collect();
+    let (_host, vcx) = cx.add_window_view(move |window, cx| {
+        MenuHost(PopupMenu::new(point(px(900.), px(40.)), items, window, cx))
+    });
+    vcx.simulate_resize(gpui::size(px(1280.), px(800.)));
+    let layout = layout_of(vcx);
+    assert_eq!(layout.window_height, 800.0);
+    let violations = vcx.read(MenuLayout::violations);
+    assert!(violations.is_empty(), "{violations:?}");
+    assert_eq!(layout.rows.len(), 60, "every row is recorded: {layout:?}");
+    let shown = shown_rows(&layout);
+    assert!(
+        shown.first() == Some(&0) && shown.len() > 20 && shown.len() < 60,
+        "the menu scrolls: rows {shown:?} shown"
+    );
+    let column = layout.viewport.expect("the column");
+    assert!(f32::from(column.bottom()) <= 800.0 - layout.statusbar_height);
+    // End highlights the last row (58; item 59 is a separator) and brings it into view, whole.
+    vcx.simulate_keystrokes("end");
+    let layout = layout_of(vcx);
+    let shown = shown_rows(&layout);
+    assert!(shown.contains(&58) && !shown.contains(&0), "{shown:?}");
+    let violations = vcx.read(MenuLayout::violations);
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+#[gpui::test]
+fn a_short_menu_near_the_bottom_opens_above_its_anchor(cx: &mut TestAppContext) {
+    use hacivat_ui::menu::{MenuItemSpec, MenuLayout, PopupMenu};
+    use hacivat_ui_core::theme::{Theme, ThemeMode};
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    let label = |s: &'static str| -> hacivat_ui::text::TextFn { Rc::new(move |_| s.into()) };
+    let (_host, vcx) = cx.add_window_view(move |window, cx| {
+        let items = vec![
+            MenuItemSpec::new(label("Cut"), "edit.cut"),
+            MenuItemSpec::new(label("Copy"), "edit.copy"),
+            MenuItemSpec::new(label("Paste"), "edit.paste"),
+        ];
+        MenuHost(PopupMenu::new(point(px(300.), px(770.)), items, window, cx))
+    });
+    vcx.simulate_resize(gpui::size(px(1280.), px(800.)));
+    let layout = layout_of(vcx);
+    assert_eq!(shown_rows(&layout), vec![0, 1, 2]);
+    assert!(
+        f32::from(layout.rows[2].bottom()) <= 770.0,
+        "{:?}",
+        layout.rows
+    );
+    let violations = vcx.read(MenuLayout::violations);
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
 struct MenuHost(gpui::Entity<hacivat_ui::menu::PopupMenu>);
 
 impl gpui::Render for MenuHost {

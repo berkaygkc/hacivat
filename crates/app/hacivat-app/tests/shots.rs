@@ -69,6 +69,11 @@
 //!   grid run wider than its cell or header is clipped; a grid state must show a header;
 //! - (b) applies to visible labels: a label its container cut away whole draws no cut text.
 //!
+//! (m) (F5 follow-up) Every frame with an open menu: each row the menu shows is whole inside
+//! its rows' column (a menu taller than its room scrolls whole rows), and none lies over the
+//! status bar or past the window's bottom (`hacivat_ui::menu::MenuLayout`, recorded as the
+//! menu prepaints). (b) cannot see a row drawn over the status bar: nothing clips it there.
+//!
 //! `--shard k/n` renders the k-th of n interleaved slices (run n processes side by side);
 //! each shot prints its time, and the run its total. `SHOTS_DUMP=1` prints every label of
 //! every frame.
@@ -1302,6 +1307,13 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         failures.push(format!("{name}: the frame drew no label"));
     }
     failures.extend(shot.surface.missing_from(&name, &frame));
+    // ## m3a-f5-demo (follow-up): (m) an open menu shows whole rows only, none over the status
+    // bar or past the window's bottom.
+    failures.extend(
+        cx.update(|cx| hacivat_ui::menu::MenuLayout::violations(cx))
+            .into_iter()
+            .map(|v| format!("{name}: (m) {v}")),
+    );
     // ## m3a-t35-shots: the state check (the app's models agree with what the shot claims),
     // and the grid's own checks (headers are data; no grid text clipped).
     if let Some(state) = m3a_state {
