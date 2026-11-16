@@ -802,8 +802,15 @@ exec-gate-read-only = { $class ->
     }
 # The safety policy never runs this statement on a production connection.
 exec-gate-policy-denied = Not sent: Hacivat doesn't run this statement on a production connection.
-# MySQL/MariaDB DDL while a transaction is open: the server commits that transaction first.
-exec-gate-implicit-commit = MySQL commits your open transaction before it runs this statement, so your earlier changes are committed too.
+# MySQL, MariaDB or TiDB, a transaction is open, and the statement makes the server commit it
+# first (DDL, GRANT, BEGIN, LOCK TABLES and the like).
+exec-gate-implicit-commit = The server commits your open transaction before it runs this statement, so your earlier changes are committed too.
+# Fix round 1 (I1): off production, a statement Hacivat couldn't analyse whose words may change data.
+exec-gate-not-analysed = Hacivat couldn't analyse this statement, and it may change data. Check it before you run it.
+# Fix round 1 (I2, M7): on production, what the rollback around EXPLAIN ANALYZE doesn't undo.
+exec-explain-analyze-not-undone = EXPLAIN ANALYZE runs the statement and then rolls it back, but a rollback doesn't undo sequence advances, advisory locks, changes made through dblink or other files and network, or writes to non-transactional (MyISAM) tables.
+# (Named exception, Task 15: exec-run-as-one-unsupported was removed from the m3a-t23 block; it
+# was unused once a selection runs as one.)
 # EXPLAIN ANALYZE runs its statement; Hacivat rolls it back, which can't undo a routine call, an
 # administrative statement or a MySQL schema change.
 exec-explain-analyze-refused = Not sent: EXPLAIN ANALYZE would run a statement that a rollback can't undo.

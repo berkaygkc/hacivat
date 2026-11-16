@@ -564,8 +564,8 @@ wired into Run before Task 24 (R-M3-52).
   (`exec-unsafe-no-target`, `exec-unsafe-several-targets`): typing one name never approves
   another table.
 - **Implicit commit.** `SessionEffects::DDL` is set for every DDL statement (temporary ones
-  included: MySQL commits before most DDL on temporary tables too) and, on MySQL/MariaDB/TiDB,
-  for privilege statements. With a transaction open as the gate sees it (any status but idle,
+  included on PostgreSQL; on MySQL/MariaDB/TiDB see fix round 1: temporary `CREATE`/`DROP`
+  excluded) and, on MySQL/MariaDB/TiDB, for privilege statements. With a transaction open as the gate sees it (any status but idle,
   or a Manual session) the unit is `Confirm` with verdict `ImplicitCommit`, never suppressible;
   `irreversible` is set for every such DDL on those engines.
 - **Verdicts.** `Read` only when the report reads only (`reads_only`: every statement's class
@@ -587,3 +587,49 @@ wired into Run before Task 24 (R-M3-52).
   rest of the text after an unclean token; bind values never appear in the text.
 - **Run as one.** `RefuseReason::RunAsOne` is gone: a `Verbatim` unit resolves like any other
   and runs as one (`protocol_for` → `Protocol::Simple`, `expect_for` → `Expect::Script`).
+- **Fix round 1 (controller rulings on the review).**
+  - *Not analysed (I1).* A pre-decided report, or one with no statement, is denied on
+    production and read-only connections. Off production it never runs silently: when the
+    unit's words hold a write or DDL keyword (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `REPLACE`,
+    `DROP`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, `CALL`, `DO`, `LOAD`, `COPY`,
+    `INTO`, `EXEC`, … including the words inside MySQL executable comments, and the rest of the
+    text after a token the lexer could not read), it asks one calm confirmation
+    (`exec-gate-not-analysed`, never suppressible); otherwise it runs, so dumps such as
+    `/*!40101 SET NAMES utf8 */` keep working. A `Verbatim` unit whose only reason is
+    `AmbiguousBoundary` follows the same rule (R-M3-60 on production is denied: PO list).
+  - *D-062 on production (I2, M7).* An `Unknown` inner, a unit the AND-check made `Unknown`,
+    and on MySQL/MariaDB/TiDB every wrapped inner ask before the wrap: `Confirm` with verdict
+    `ExplainAnalyzeRollback`, never suppressible, naming what a rollback does not undo
+    (sequence advances, session advisory locks, dblink and other file or network I/O, writes to
+    non-transactional MyISAM tables; `exec-explain-analyze-not-undone`). The wrap itself is
+    unchanged off production.
+  - *DROP DATABASE/SCHEMA (I3).* The gate also reads `DROP DATABASE|SCHEMA [IF EXISTS] <name>`
+    from the statement's words and asks for the typed name whatever kind the backend gave the
+    target; no readable name denies (`exec-unsafe-no-target`). The interim backend (named
+    exception in T10's `interim.rs`) now gives a `DROP` target its object kind (`Database`,
+    `Schema`, `Table`, `View`, `Role`, `Sequence`, `Other`).
+  - *Parameters (I4, M2, M5, D8 ruling).* Remembered values only pre-fill the prompt: a
+    statement with parameters always returns `NeedsValues` first, and only this run's
+    `ParamAnswers` (`prepare_units_with`) make it `Ready`. Ordinal and anonymous parameters
+    (`?`, `?NNN`, `$n`) are never remembered (`ParamPrompt::rememberable`) and belong to their
+    unit (`ParamPrompt.unit`): two units never share one prompt. A bind plan with a slot no
+    placeholder fills (`$2` alone) is refused before any prompt.
+  - *Implicit commits on MySQL/MariaDB/TiDB (I5, M3).* One list in
+    `hacivat_exec::implicit_commit`, from MySQL 8.4 Reference Manual §15.3.3 "Statements That
+    Cause an Implicit Commit" (8.0: §13.3.3) and the MariaDB Knowledge Base page "SQL statements
+    That Cause an Implicit Commit": DDL except `CREATE`/`DROP TEMPORARY TABLE` (which do not
+    commit), `GRANT`/`REVOKE`, `CREATE`/`ALTER`/`DROP`/`RENAME USER`, roles, `SET PASSWORD`,
+    `BEGIN`/`START TRANSACTION`, `LOCK`/`UNLOCK TABLES`, `SET autocommit = 1`,
+    `ANALYZE`/`CHECK`/`OPTIMIZE`/`REPAIR TABLE`, `FLUSH`, `RESET`, `CACHE INDEX`,
+    `LOAD INDEX`, `LOAD DATA`/`XML`, `INSTALL`/`UNINSTALL`, replication start/stop/change.
+    The gate sets `SessionEffects::DDL` for exactly these statements on those engines, which is
+    how the session's T19 backstop (`TxError::ImplicitCommitUnconfirmed`) reuses the list.
+    `irreversible` covers their DDL (temporary `CREATE`/`DROP` excluded) and privilege
+    statements.
+  - *One SessionEffects mapping (M8).* `gate::session_effects_of(report, text, engine)` is the
+    single mapping; the classifier pool's `StatementClassifier::effects` (Task 14) delegates to
+    it at the merge.
+  - *Suppression (controller ruling, M4, M9).* On production "don't ask again" never covers
+    `DdlDestructive`, `Admin`, `Routine` or `Unknown` units (`Routine` added because R-M3-55
+    treats it as `Unknown`); a unit of several statements with a write is never suppressible;
+    the key (`GateItem.fingerprint`) mixes the fingerprint with the class.

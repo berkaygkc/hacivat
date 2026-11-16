@@ -506,7 +506,11 @@ exec-gate-read-only = { $class ->
 # Review: PO
 exec-gate-policy-denied = Gönderilmedi: Hacivat bu ifadeyi üretim bağlantısında çalıştırmaz.
 # Review: PO
-exec-gate-implicit-commit = MySQL bu ifadeyi çalıştırmadan önce açık işleminizi commit eder; önceki değişiklikleriniz de commit edilir.
+exec-gate-implicit-commit = Sunucu bu ifadeyi çalıştırmadan önce açık işleminizi commit eder; önceki değişiklikleriniz de commit edilir.
+# Review: PO
+exec-gate-not-analysed = Hacivat bu ifadeyi çözümleyemedi ve ifade veriyi değiştirebilir. Çalıştırmadan önce denetleyin.
+# Review: PO
+exec-explain-analyze-not-undone = EXPLAIN ANALYZE ifadeyi çalıştırıp geri alır; ancak geri alma, dizi (sequence) ilerlemelerini, danışma kilitlerini, dblink ya da dosya ve ağ üzerinden yapılan değişiklikleri ve işlem desteklemeyen (MyISAM) tablolara yazılanları geri almaz.
 # Review: PO
 exec-explain-analyze-refused = Gönderilmedi: EXPLAIN ANALYZE, geri almanın düzeltemeyeceği bir ifadeyi çalıştırır.
 # Review: PO

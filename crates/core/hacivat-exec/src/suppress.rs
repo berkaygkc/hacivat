@@ -8,9 +8,11 @@
 //! for a type-to-confirm unit (the production `DmlUnsafe` and `DROP DATABASE/SCHEMA` cases) nor
 //! for a MySQL/MariaDB implicit commit, so a pair recorded off production never lowers a
 //! production confirmation that asks for a typed name. On production the dialog names the
-//! scope ("don't ask again in this console", `design/m3b-safe/NOTES.md` ruling 4). The
-//! fingerprint is the classified text's (`SafetyReport.fingerprint.hash`): a statement of the
-//! same shape.
+//! scope ("don't ask again in this console", `design/m3b-safe/NOTES.md` ruling 4). The key is
+//! `GateItem.fingerprint`: the classified text's fingerprint mixed with the unit's class (fix
+//! round 1, M4), so a statement of the same shape and a higher class asks again. Never
+//! suppressible (fix round 1): a unit of several statements with a write (M9), and on
+//! production `DdlDestructive`, `Admin`, `Routine` and `Unknown` units (controller ruling).
 
 use std::collections::HashSet;
 

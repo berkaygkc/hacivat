@@ -99,15 +99,48 @@ pub struct PreparedUnit {
 pub struct ParamPrompt {
     pub name: Arc<str>,
     pub occurrences: u32,
-    /// The value remembered for this profile in this app session.
+    /// The value remembered for this profile in this app session: it pre-fills the prompt and
+    /// never answers it (Task 15 fix round 1, D8 ruling). Always `None` for an ordinal or
+    /// anonymous parameter (I4).
     pub remembered: Option<BindValue>,
+    // ## m3b-t15-gate (fix round 1, I4, M2)
+    /// `None` for a named parameter (`:name`, SQLite `@name`/`$name`), one value for every unit
+    /// of the run that names it; `Some(i)` for an ordinal or anonymous one (`?`, `?NNN`, `$n`),
+    /// which belongs to unit `i` only: two units never share it.
+    pub unit: Option<u32>,
+}
+
+impl ParamPrompt {
+    /// Whether the answer may be remembered (`ParamValueStore::put`): named parameters only. An
+    /// ordinal name (`?1`, `$2`) means a different thing in every statement (I4).
+    pub fn rememberable(&self) -> bool {
+        self.unit.is_none()
+    }
+}
+
+/// The values the user gave for this run's prompts (keyed like the prompts: name and, for an
+/// ordinal or anonymous parameter, its unit).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParamAnswers {
+    values: HashMap<(Option<u32>, Arc<str>), BindValue>,
+}
+
+impl ParamAnswers {
+    /// The answer to `prompt`.
+    pub fn insert(&mut self, prompt: &ParamPrompt, v: BindValue) {
+        self.values.insert((prompt.unit, prompt.name.clone()), v);
+    }
+
+    fn get(&self, unit: Option<u32>, name: &str) -> Option<&BindValue> {
+        self.values.get(&(unit, Arc::from(name)))
+    }
 }
 
 /// What preparing a run's units gave.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Prepared {
     Ready(Vec<PreparedUnit>),
-    /// Ask for these, then prepare again.
+    /// Ask for these, then prepare again with the answers ([`prepare_units_with`]).
     NeedsValues(Vec<ParamPrompt>),
     /// Unit `unit` (its index) cannot be sent: `at` in the document, `diag` why.
     Refused {
@@ -118,7 +151,7 @@ pub enum Prepared {
 }
 
 /// The values remembered per `(profile, name)` for the app session only (never persisted,
-/// R-M3-79).
+/// R-M3-79). Named parameters only ([`ParamPrompt::rememberable`]).
 pub trait ParamValueStore {
     fn get(&self, profile: &ProfileId, name: &str) -> Option<BindValue>;
     fn put(&self, profile: &ProfileId, name: &str, v: BindValue);
@@ -139,28 +172,42 @@ pub fn param_diag_message_id(d: ParamDiag) -> &'static str {
     }
 }
 
-/// Prepares `units` of a run on `profile` (HV-EXEC-03):
-///
-/// 1. Each unit is scanned (`scan_params` with the unit's own head, `s`, `ctx`). The first unit
-///    with a diagnostic other than `QuestionMarkOff` (a template variable, a placeholder in DDL
-///    without `s.in_ddl`, mixed styles, more than 65,535 binds, any unbindable marker), or with
-///    a placeholder that does not bind, is `Refused` at the diagnostic's document range.
-/// 2. Every distinct parameter name of the run (a name shared by several units is one
-///    parameter) must have a value in `values` for `profile`; when one has none, the answer is
-///    `NeedsValues` with one prompt per distinct name in first-use order, each with its
-///    occurrence count and `values`' answer as `remembered`. The caller asks, stores the answers
-///    (`ParamValueStore::put`) and prepares again.
-/// 3. Otherwise `Ready`: each unit's `final_text` is the rewrite (exactly what is classified
-///    and sent, P-M3b-2), `binds` hold one value per driver slot in slot order (a slot no
-///    name binds refuses the unit), `offsets` map the rewrite back to the document, and
-///    `masked` is `final_text` with every secret literal masked ([`mask_secrets`]). A unit
-///    without placeholders is sent as written.
+/// [`prepare_units_with`] with no answers yet: `Ready` only when no unit has a parameter.
 pub fn prepare_units(
     units: Vec<ExecUnit>,
     ctx: &DialectCtx,
     s: &ParamSettings,
     values: &dyn ParamValueStore,
     profile: &ProfileId,
+) -> Prepared {
+    prepare_units_with(units, ctx, s, values, profile, &ParamAnswers::default())
+}
+
+/// Prepares `units` of a run on `profile` with the user's `answers` (HV-EXEC-03):
+///
+/// 1. Each unit is scanned (`scan_params` with the unit's own head, `s`, `ctx`). The first unit
+///    with a diagnostic other than `QuestionMarkOff` (a template variable, a placeholder in DDL
+///    without `s.in_ddl`, mixed styles, more than 65,535 binds, any unbindable marker), with a
+///    placeholder that does not bind, or with a driver slot no placeholder fills (`$2` alone)
+///    is `Refused` at the diagnostic's document range, before any prompt (M5).
+/// 2. Every parameter of the run must have an answer: a named one once for the whole run, an
+///    ordinal or anonymous one (`?`, `?NNN`, `$n`) once per unit (M2). When one has none, the
+///    answer is `NeedsValues` with one prompt per parameter in first-use order, each with its
+///    occurrence count and, for a named one, `values`' remembered value to pre-fill it.
+///    Remembered values never skip the prompt (D8 ruling): a statement with parameters always
+///    asks. The caller asks, puts the answers of rememberable prompts into `values`, and
+///    prepares again with `answers`.
+/// 3. Otherwise `Ready`: each unit's `final_text` is the rewrite (exactly what is classified
+///    and sent, P-M3b-2), `binds` hold one value per driver slot in slot order, `offsets` map
+///    the rewrite back to the document, and `masked` is `final_text` with every secret literal
+///    masked ([`mask_secrets`]). A unit without placeholders is sent as written.
+pub fn prepare_units_with(
+    units: Vec<ExecUnit>,
+    ctx: &DialectCtx,
+    s: &ParamSettings,
+    values: &dyn ParamValueStore,
+    profile: &ProfileId,
+    answers: &ParamAnswers,
 ) -> Prepared {
     let mut scans = Vec::with_capacity(units.len());
     for (i, unit) in units.iter().enumerate() {
@@ -171,33 +218,36 @@ pub fn prepare_units(
         scans.push(scan);
     }
 
-    // The run's distinct names, in first-use order, with their occurrences.
+    // The run's parameters, in first-use order, with their occurrences.
     let mut prompts: Vec<ParamPrompt> = Vec::new();
-    let mut at: HashMap<Arc<str>, usize> = HashMap::new();
-    for (unit, scan) in units.iter().zip(&scans) {
+    let mut at: HashMap<(Option<u32>, Arc<str>), usize> = HashMap::new();
+    for (i, (unit, scan)) in units.iter().zip(&scans).enumerate() {
         for p in &scan.placeholders {
             let name = plan_name(&unit.text, &p.kind, p.range);
-            match at.get(&name) {
-                Some(&i) => prompts[i].occurrences = prompts[i].occurrences.saturating_add(1),
+            let scope = prompt_unit(&p.kind, i);
+            match at.get(&(scope, name.clone())) {
+                Some(&k) => prompts[k].occurrences = prompts[k].occurrences.saturating_add(1),
                 None => {
-                    at.insert(name.clone(), prompts.len());
+                    at.insert((scope, name.clone()), prompts.len());
                     prompts.push(ParamPrompt {
                         name,
                         occurrences: 1,
                         remembered: None,
+                        unit: scope,
                     });
                 }
             }
         }
     }
-    let mut known: HashMap<Arc<str>, BindValue> = HashMap::new();
-    for q in &mut prompts {
-        q.remembered = values.get(profile, &q.name);
-        if let Some(v) = &q.remembered {
-            known.insert(q.name.clone(), v.clone());
+    let answered = prompts
+        .iter()
+        .all(|q| answers.get(q.unit, &q.name).is_some());
+    if !answered {
+        for q in &mut prompts {
+            if q.rememberable() {
+                q.remembered = values.get(profile, &q.name);
+            }
         }
-    }
-    if known.len() < prompts.len() {
         return Prepared::NeedsValues(prompts);
     }
 
@@ -215,6 +265,14 @@ pub fn prepare_units(
             });
             continue;
         };
+        // Each plan name's answer, scoped like its prompt.
+        let mut known: HashMap<Arc<str>, BindValue> = HashMap::new();
+        for p in &scan.placeholders {
+            let name = plan_name(&unit.text, &p.kind, p.range);
+            if let Some(v) = answers.get(prompt_unit(&p.kind, i), &name) {
+                known.insert(name, v.clone());
+            }
+        }
         let Some(binds) = binds_of(&rw.plan, &known) else {
             let at = scan
                 .placeholders
@@ -234,6 +292,17 @@ pub fn prepare_units(
     Prepared::Ready(ready)
 }
 
+/// The prompt scope of a placeholder of unit `i`: shared for a named one, the unit's own for an
+/// ordinal or anonymous one.
+fn prompt_unit(kind: &PlaceholderKind, i: usize) -> Option<u32> {
+    match kind {
+        PlaceholderKind::Named(_) => None,
+        PlaceholderKind::Question(_) | PlaceholderKind::Positional(_) => {
+            Some(u32::try_from(i).unwrap_or(u32::MAX))
+        }
+    }
+}
+
 fn refused(i: usize, unit: &ExecUnit, at: TextRange, diag: ParamDiag) -> Prepared {
     let start = unit.doc_range.start;
     Prepared::Refused {
@@ -244,7 +313,8 @@ fn refused(i: usize, unit: &ExecUnit, at: TextRange, diag: ParamDiag) -> Prepare
 }
 
 /// Why a scanned unit cannot be sent, if it cannot: its first diagnostic but the informational
-/// `QuestionMarkOff`, a placeholder without a rewrite, or a template variable.
+/// `QuestionMarkOff`, a placeholder without a rewrite, a bind plan with a driver slot no
+/// placeholder fills, or a template variable.
 fn refusal(scan: &ParamScan) -> Option<(TextRange, ParamDiag)> {
     if let Some((at, d)) = scan
         .diags
@@ -253,14 +323,39 @@ fn refusal(scan: &ParamScan) -> Option<(TextRange, ParamDiag)> {
     {
         return Some((*at, *d));
     }
-    if scan.rewritten.is_none()
-        && let Some(p) = scan.placeholders.first()
-    {
-        return Some((p.range, ParamDiag::Unbindable));
+    let first = scan.placeholders.first().map(|p| p.range);
+    match &scan.rewritten {
+        None => {
+            if let Some(at) = first {
+                return Some((at, ParamDiag::Unbindable));
+            }
+        }
+        Some(rw) if !dense(&rw.plan) => {
+            return Some((first.unwrap_or_default(), ParamDiag::Unbindable));
+        }
+        Some(_) => {}
     }
     scan.templates
         .first()
         .map(|t| (t.range, ParamDiag::TemplateVariable))
+}
+
+/// Whether the plan's driver slots are `0..n` with none missing.
+fn dense(plan: &BindPlan) -> bool {
+    let mut seen: Vec<bool> = Vec::new();
+    for &k in plan.slots.iter().flat_map(|s| s.iter()) {
+        let Ok(k) = usize::try_from(k) else {
+            return false;
+        };
+        if k > usize::from(u16::MAX) {
+            return false;
+        }
+        if seen.len() <= k {
+            seen.resize(k + 1, false);
+        }
+        seen[k] = true;
+    }
+    seen.iter().all(|s| *s)
 }
 
 /// The bind plan's name of a placeholder (`RewrittenSql.plan.names`): a `:name`'s name, `?k`

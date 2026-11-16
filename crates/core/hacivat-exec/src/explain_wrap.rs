@@ -11,6 +11,11 @@
 //! or reach outside the transaction, an administrative statement is not undone by a rollback),
 //! and so is a DDL inner on MySQL, MariaDB and TiDB, whose implicit commit would end the
 //! wrapping transaction before the rollback.
+//!
+//! Fix round 1 (I2, M7): a rollback does not undo everything. Sequence advances, session-level
+//! advisory locks, `dblink` and other file or network I/O survive it, and on MySQL/MariaDB/TiDB
+//! so do writes to non-transactional (MyISAM) tables. On production the gate therefore asks
+//! before wrapping an `Unknown` inner, and before wrapping any inner on those engines.
 
 use hacivat_proto::DbmsKind;
 use sql_safety::{GateClass, ReasonCode, RiskFlags, StmtKind, StmtReport, gate_class};

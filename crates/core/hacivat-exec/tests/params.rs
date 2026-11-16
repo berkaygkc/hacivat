@@ -5,26 +5,49 @@
 
 mod common;
 
-use common::gate_fx::{Values, ctx_of, exec_units, prepared_on, text_value};
+use common::gate_fx::{Values, ctx_of, exec_units, prepare_answered, prepared_on, text_value};
 use hacivat_exec::{
-    OffsetMap, Prepared, PreparedUnit, mask_secrets, param_diag_message_id, prepare_units,
+    OffsetMap, ParamAnswers, Prepared, PreparedUnit, mask_secrets, param_diag_message_id,
+    prepare_units, prepare_units_with,
 };
 use hacivat_proto::{DbmsKind, ProfileId};
 use hacivat_values::BindValue;
 use sql_split::{ParamDiag, ParamSettings};
 
+/// `texts` on `engine`, every prompt answered from `values` (by name).
 fn prepare(
     engine: DbmsKind,
     texts: &[&str],
     values: &[(&str, &str)],
     s: ParamSettings,
 ) -> Prepared {
+    prepare_answered(engine, texts, values, s)
+}
+
+/// `texts` on `engine` with `store` remembering values and no answer yet.
+fn first_pass_on(engine: DbmsKind, texts: &[&str], store: &Values) -> Prepared {
     prepare_units(
         exec_units(texts),
         &ctx_of(engine),
-        &s,
-        &Values::of(values),
+        &ParamSettings::default(),
+        store,
         &ProfileId::new(),
+    )
+}
+
+fn first_pass(texts: &[&str], store: &Values) -> Prepared {
+    first_pass_on(DbmsKind::Postgres, texts, store)
+}
+
+/// `texts` on `engine` with `answers`.
+fn with_answers(engine: DbmsKind, texts: &[&str], answers: &ParamAnswers) -> Prepared {
+    prepare_units_with(
+        exec_units(texts),
+        &ctx_of(engine),
+        &ParamSettings::default(),
+        &Values(Vec::new()),
+        &ProfileId::new(),
+        answers,
     )
 }
 
@@ -233,10 +256,8 @@ fn offset_map_round_trips() {
 
 #[test]
 fn needs_values_names_each_parameter_once_with_its_remembered_value() {
-    match pg(
-        &["SELECT :a, :b", "SELECT :b, :a, :c"],
-        &[("b", "remembered")],
-    ) {
+    let store = Values::of(&[("b", "remembered")]);
+    match first_pass(&["SELECT :a, :b", "SELECT :b, :a, :c"], &store) {
         Prepared::NeedsValues(p) => {
             let names: Vec<(&str, u32)> = p.iter().map(|q| (&*q.name, q.occurrences)).collect();
             assert_eq!(names, [("a", 2), ("b", 2), ("c", 1)]);
@@ -245,10 +266,11 @@ fn needs_values_names_each_parameter_once_with_its_remembered_value() {
                 (p[0].remembered.clone(), p[2].remembered.clone()),
                 (None, None)
             );
+            assert!(p.iter().all(|q| q.unit.is_none() && q.rememberable()));
         }
         other => panic!("{other:?}"),
     }
-    // Every value known: ready, each unit rewritten for itself (one name shared across units
+    // Every value given: ready, each unit rewritten for itself (one name shared across units
     // is one value).
     let u = ready(pg(
         &["SELECT :a, :b", "SELECT :b, :a, :c"],
@@ -259,7 +281,7 @@ fn needs_values_names_each_parameter_once_with_its_remembered_value() {
     assert_eq!(&*u[1].final_text, "SELECT $1, $2, $3");
     assert_eq!(texts(&u[1].binds), ["2", "1", "3"]);
     // Names compare exactly (`:Id` is not `:id`), Turkish letters included.
-    match pg(&["SELECT :Id, :id, :İl, :il"], &[("id", "1")]) {
+    match first_pass(&["SELECT :Id, :id, :İl, :il"], &Values::of(&[("id", "1")])) {
         Prepared::NeedsValues(p) => {
             assert_eq!(
                 p.iter().map(|q| &*q.name).collect::<Vec<_>>(),
@@ -267,6 +289,76 @@ fn needs_values_names_each_parameter_once_with_its_remembered_value() {
             );
         }
         other => panic!("{other:?}"),
+    }
+}
+
+/// Fix round 1, D8 ruling: remembered values only pre-fill the prompt; a statement with
+/// parameters always asks, and only this run's answers make it ready.
+#[test]
+fn remembered_values_prefill_but_never_skip_the_prompt() {
+    let store = Values::of(&[("a", "1"), ("b", "2")]);
+    let prompts = match first_pass(&["SELECT :a, :b"], &store) {
+        Prepared::NeedsValues(p) => p,
+        other => panic!("the prompt was skipped: {other:?}"),
+    };
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[0].remembered, Some(text_value("1")));
+    assert_eq!(prompts[1].remembered, Some(text_value("2")));
+    // The answers, not the store, make it ready (here the user changed `a`).
+    let mut answers = ParamAnswers::default();
+    answers.insert(&prompts[0], text_value("9"));
+    assert!(matches!(
+        with_answers(DbmsKind::Postgres, &["SELECT :a, :b"], &answers),
+        Prepared::NeedsValues(_)
+    ));
+    answers.insert(&prompts[1], text_value("2"));
+    let u = ready(with_answers(
+        DbmsKind::Postgres,
+        &["SELECT :a, :b"],
+        &answers,
+    ));
+    assert_eq!(texts(&u[0].binds), ["9", "2"]);
+}
+
+/// Fix round 1, I4 and M2: ordinal and anonymous parameters (`?`, `?NNN`, `$n`) are never
+/// remembered, and two units never share one prompt for them.
+#[test]
+fn ordinal_parameters_are_never_remembered_nor_shared() {
+    // A store that holds ordinal names (it never should): they pre-fill nothing.
+    let store = Values::of(&[("?1", "5"), ("$1", "5"), ("?2", "5")]);
+    let cases: [(DbmsKind, [&str; 2]); 3] = [
+        (
+            DbmsKind::MySql,
+            ["DELETE FROM a WHERE id = ?", "DELETE FROM b WHERE id = ?"],
+        ),
+        (
+            DbmsKind::Postgres,
+            ["DELETE FROM a WHERE id = $1", "DELETE FROM b WHERE id = $1"],
+        ),
+        (
+            DbmsKind::Sqlite,
+            ["DELETE FROM a WHERE id = ?1", "DELETE FROM b WHERE id = ?1"],
+        ),
+    ];
+    for (engine, units) in cases {
+        let p = match first_pass_on(engine, &units, &store) {
+            Prepared::NeedsValues(p) => p,
+            other => panic!("{engine:?}: {other:?}"),
+        };
+        assert_eq!(p.len(), 2, "{engine:?}: one prompt per unit");
+        assert_eq!(p[0].name, p[1].name);
+        assert_eq!((p[0].unit, p[1].unit), (Some(0), Some(1)));
+        assert!(
+            p.iter()
+                .all(|q| q.remembered.is_none() && !q.rememberable())
+        );
+        // Each unit binds its own answer.
+        let mut answers = ParamAnswers::default();
+        answers.insert(&p[0], text_value("1"));
+        answers.insert(&p[1], text_value("2"));
+        let u = ready(with_answers(engine, &units, &answers));
+        assert_eq!(texts(&u[0].binds), ["1"], "{engine:?}");
+        assert_eq!(texts(&u[1].binds), ["2"], "{engine:?}");
     }
 }
 
@@ -297,21 +389,19 @@ fn binds_follow_the_driver_slots() {
         &[("?1", "one"), ("?2", "two")],
     );
     assert_eq!(texts(&u.binds), ["one", "two"]);
-    // A slot no parameter binds (`$2` alone: the server expects `$1` too) refuses the unit.
-    let (unit, at, diag) = refused(pg(&["SELECT $2"], &[("$2", "x")]));
+    // A slot no parameter binds (`$2` alone: the server expects `$1` too) refuses the unit,
+    // before any prompt (M5).
+    let (unit, at, diag) = refused(first_pass(&["SELECT $2"], &Values(Vec::new())));
     assert_eq!((unit, at, diag), (0, 7..9, ParamDiag::Unbindable));
     // NULL is a value.
-    let store = Values(vec![("a".into(), BindValue::Null)]);
-    match prepare_units(
-        exec_units(&["SELECT :a"]),
-        &ctx_of(DbmsKind::Postgres),
-        &ParamSettings::default(),
-        &store,
-        &ProfileId::new(),
-    ) {
-        Prepared::Ready(u) => assert_eq!(&*u[0].binds, [BindValue::Null]),
+    let p = match first_pass(&["SELECT :a"], &Values(Vec::new())) {
+        Prepared::NeedsValues(p) => p,
         other => panic!("{other:?}"),
-    }
+    };
+    let mut answers = ParamAnswers::default();
+    answers.insert(&p[0], BindValue::Null);
+    let u = ready(with_answers(DbmsKind::Postgres, &["SELECT :a"], &answers));
+    assert_eq!(&*u[0].binds, [BindValue::Null]);
 }
 
 #[test]

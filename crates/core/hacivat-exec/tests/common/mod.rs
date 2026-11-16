@@ -1476,8 +1476,8 @@ pub mod gate_fx {
 
     use hacivat_driver::TxStatus;
     use hacivat_exec::{
-        ConnSafety, ExecUnit, GateDecision, GateItem, ParamValueStore, Prepared, PreparedUnit,
-        SafetyReport, SuppressSet, gate, prepare_units,
+        ConnSafety, ExecUnit, GateDecision, GateItem, ParamAnswers, ParamValueStore, Prepared,
+        PreparedUnit, SafetyReport, SuppressSet, gate, prepare_units, prepare_units_with,
     };
     use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
     use hacivat_session::session::{TxMode, TxOwner};
@@ -1841,19 +1841,37 @@ pub mod gate_fx {
             .collect()
     }
 
+    /// `texts` prepared on `engine`, every prompt answered from `values` by its name
+    /// (placeholders inside DDL bind): the prompt, then the run with the answers.
+    pub fn prepare_answered(
+        engine: DbmsKind,
+        texts: &[&str],
+        values: &[(&str, &str)],
+        s: ParamSettings,
+    ) -> Prepared {
+        let (ctx, profile) = (ctx_of(engine), ProfileId::new());
+        let store = Values(Vec::new());
+        match prepare_units(exec_units(texts), &ctx, &s, &store, &profile) {
+            Prepared::NeedsValues(prompts) => {
+                let mut answers = ParamAnswers::default();
+                for p in &prompts {
+                    if let Some((_, v)) = values.iter().find(|(n, _)| **n == *p.name) {
+                        answers.insert(p, text_value(v));
+                    }
+                }
+                prepare_units_with(exec_units(texts), &ctx, &s, &store, &profile, &answers)
+            }
+            other => other,
+        }
+    }
+
     /// `text` prepared on `engine` with `values` (placeholders inside DDL bind).
     pub fn prepared_on(engine: DbmsKind, text: &str, values: &[(&str, &str)]) -> PreparedUnit {
         let s = ParamSettings {
             in_ddl: true,
             ..ParamSettings::default()
         };
-        match prepare_units(
-            exec_units(&[text]),
-            &ctx_of(engine),
-            &s,
-            &Values::of(values),
-            &ProfileId::new(),
-        ) {
+        match prepare_answered(engine, &[text], values, s) {
             Prepared::Ready(mut u) => u.remove(0),
             other => panic!("{text}: {other:?}"),
         }

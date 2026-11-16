@@ -267,6 +267,56 @@ fn type_to_confirm_is_the_name_as_written() {
 
 /// From the destructive kinds, not the class: a `DROP` in the same unit raises the class to
 /// `DdlDestructive`, which must not hide the unsafe `DELETE`'s typed name.
+/// Fix round 1, I3: the statement's own words say `DROP DATABASE`/`DROP SCHEMA`, so a backend
+/// that names the target's kind wrongly (or names no destructive pattern) cannot drop the
+/// typed name on production.
+#[test]
+fn drop_database_asks_for_the_name_from_the_words() {
+    for engine in [DbmsKind::MySql, DbmsKind::Postgres] {
+        let prod = conn(engine, Some(EnvTag::Production));
+        // A target the backend called a table.
+        let mut s = stmt(StmtKind::Drop, EffectSet::DDL);
+        s.destructive.push(DestructiveReason {
+            kind: DestructiveKind::Drop { cascade: false },
+            range: TextRange::default(),
+            target: Some(object("shop", ObjectKind::Table)),
+        });
+        for text in ["DROP DATABASE shop", "drop schema if exists shop"] {
+            let item = gated(text, vec![s.clone()], &prod);
+            assert!(
+                matches!(&item.decision, GateDecision::Confirm { type_to_confirm: Some(t), suppressible: false, .. } if &**t == "shop"),
+                "{engine:?} {text}: {:?}",
+                item.decision
+            );
+        }
+        // No destructive pattern at all: the name comes from the words, as written.
+        let bare = stmt(StmtKind::Drop, EffectSet::DDL);
+        let item = gated("DROP DATABASE `Shop`", vec![bare.clone()], &prod);
+        if engine == DbmsKind::MySql {
+            assert!(
+                matches!(&item.decision, GateDecision::Confirm { type_to_confirm: Some(t), .. } if &**t == "Shop"),
+                "{:?}",
+                item.decision
+            );
+        }
+        let item = gated("DROP SCHEMA Sales", vec![bare.clone()], &prod);
+        assert!(
+            matches!(&item.decision, GateDecision::Confirm { type_to_confirm: Some(t), .. } if &**t == "Sales"),
+            "{engine:?}: {:?}",
+            item.decision
+        );
+        // Words that name nothing: nothing to type, denied.
+        let item = gated("DROP DATABASE", vec![bare], &prod);
+        assert_eq!(deny_id(&item.decision), "exec-unsafe-no-target");
+        // Off production nobody types.
+        let dev = conn(engine, Some(EnvTag::Dev));
+        assert_eq!(
+            gated("DROP DATABASE shop", vec![s.clone()], &dev).decision,
+            GateDecision::Run
+        );
+    }
+}
+
 #[test]
 fn ddl_does_not_hide_an_unsafe_dml_name() {
     let text = "DELETE FROM orders; DROP TABLE logs";
@@ -654,7 +704,9 @@ fn production_and_check_reads_the_request_level_fields() {
     assert_eq!(shape(&item.decision), "confirm");
     assert_eq!(item.class, GateClass::Unknown);
     assert_eq!(item.verdict, UnitVerdict::Unknown);
-    // A pre-decided report (other than the stub's) is denied on production, runs elsewhere.
+    // A pre-decided report (other than the stub's) is denied on production; off production a
+    // quiet one runs and one that may write asks (fix round 1, I1; the full table is
+    // `pre_decided_reports_are_denied_on_production_and_ask_before_writes_elsewhere`).
     let unit = prepared_on(DbmsKind::Postgres, "SELECT 1", &[]);
     let mut r = base;
     r.pre_decision = Some(vec![reason(ReasonCode::TooComplex, None)]);
@@ -663,9 +715,20 @@ fn production_and_check_reads_the_request_level_fields() {
         deny_id(&one(unit.clone(), r.clone(), &conn_prod()).decision),
         "safety-reason-too-complex"
     );
-    let dev = one(unit, r, &conn_dev());
+    let dev = one(unit, r.clone(), &conn_dev());
     assert_eq!(dev.decision, GateDecision::Run);
     assert_eq!(dev.verdict, UnitVerdict::Unknown);
+    let unit = prepared_on(DbmsKind::Postgres, "DELETE FROM orders", &[]);
+    let mut r = report_over("DELETE FROM orders");
+    r.items.clear();
+    r.pre_decision = Some(vec![reason(ReasonCode::TooComplex, None)]);
+    assert!(matches!(
+        one(unit, r, &conn_dev()).decision,
+        GateDecision::Confirm {
+            suppressible: false,
+            ..
+        }
+    ));
 }
 
 /// The classifier stub's report (`NotImplemented`) never runs, on any connection (F31).
@@ -695,14 +758,30 @@ fn the_classifier_stub_is_denied_everywhere() {
 }
 
 /// Generated reports × connections (R-M3-55, R-M3-56): no path turns a policy `Deny` into a
-/// `Run`, `Warn` or `Confirm`.
+/// `Run`, `Warn` or `Confirm`; on production a routine, administrative or unknown unit always
+/// asks or is denied (EXPLAIN ANALYZE included, fix round 1 I2); off production an unsafe-DML
+/// pattern never runs silently while the guard is on; a report that analysed nothing (I1) is
+/// denied on production and read-only, and asks off production when its words may write.
 #[test]
 fn no_path_turns_deny_into_run() {
     let cfg = ProptestConfig {
-        cases: 4_000,
+        cases: 6_000,
         ..ProptestConfig::default()
     };
-    proptest!(cfg, |(items in prop::collection::vec(arb_stmt(), 1..4), ci in 0usize..6)| {
+    let texts = [
+        "SELECT 1",
+        "DELETE FROM t",
+        "UPDATE t SET a = 1",
+        "/*!40101 SET NAMES utf8 */",
+        "CALL p()",
+        "BEGIN",
+    ];
+    proptest!(cfg, |(
+        items in prop::collection::vec(arb_stmt(), 1..4),
+        ci in 0usize..9,
+        ti in 0usize..6,
+        predecided in prop::option::of(prop::sample::select(ReasonCode::ALL.to_vec())),
+    )| {
         let conns = [
             conn_ro(),
             ConnSafety { read_only: true, ..conn_prod() },
@@ -710,23 +789,51 @@ fn no_path_turns_deny_into_run() {
             conn_prod_user_tx(),
             ConnSafety { read_only: true, ..mysql(EnvTag::Staging) },
             ConnSafety { tx_mode: TxMode::Manual, ..mysql(EnvTag::Production) },
+            conn_dev(),
+            ConnSafety { tx_mode: TxMode::Manual, ..mysql(EnvTag::Dev) },
+            conn(DbmsKind::Sqlite, None),
         ];
         let c = conns[ci];
-        let text = "SELECT 1";
+        let text = texts[ti];
         let unit = prepared_on(c.engine, text, &[]);
-        let report = over(text, dialect_of(c.engine), items);
+        let mut report = over(text, dialect_of(c.engine), items);
+        if let Some(code) = predecided.filter(|c| *c != ReasonCode::NotImplemented) {
+            report.items.clear();
+            report.pre_decision = Some(vec![reason(code, None)]);
+        }
         let item = one(unit, report.clone(), &c);
+        let production = c.env == Some(EnvTag::Production);
+        let denied = matches!(item.decision, GateDecision::Deny(_));
+        let confirms = matches!(item.decision, GateDecision::Confirm { .. });
+        if report.items.is_empty() {
+            if c.read_only || production {
+                prop_assert!(denied, "{:?}", item);
+            } else {
+                let writes = matches!(ti, 1 | 2 | 4);
+                let commits = ti == 5
+                    && matches!(c.engine, DbmsKind::MySql)
+                    && c.tx_mode == TxMode::Manual;
+                if writes || commits {
+                    let unsuppressible = matches!(
+                        item.decision,
+                        GateDecision::Confirm { suppressible: false, .. }
+                    );
+                    prop_assert!(unsuppressible, "{:?}", item);
+                } else {
+                    prop_assert_eq!(&item.decision, &GateDecision::Run);
+                }
+            }
+            return Ok(());
+        }
         let max = report.items.iter().map(gate_class).max().unwrap();
         if c.read_only {
             let rope = decide(&report, Profile::ReadOnlyPlusExplain, Actor::Human);
             if !rope.allows() {
-                prop_assert!(matches!(item.decision, GateDecision::Deny(_)), "{:?}", item);
+                prop_assert!(denied, "{:?}", item);
             }
             // The stricter `ReadOnly` profile differs only for EXPLAIN ANALYZE of a read,
             // which the human read-only profile allows (R-M3-56).
-            if !decide(&report, Profile::ReadOnly, Actor::Human).allows()
-                && !matches!(item.decision, GateDecision::Deny(_))
-            {
+            if !decide(&report, Profile::ReadOnly, Actor::Human).allows() && !denied {
                 prop_assert!(rope.allows());
                 let explains = report.flags.contains(RiskFlags::EXPLAIN_ANALYZE)
                     || report.items.iter().any(|s| s.reasons.iter().any(|r| r.code == ReasonCode::ExplainAnalyze))
@@ -736,18 +843,35 @@ fn no_path_turns_deny_into_run() {
             if item.decision == GateDecision::Run {
                 prop_assert!(max <= GateClass::Session);
             }
-            let asks = matches!(item.decision, GateDecision::Warn(_) | GateDecision::Confirm { .. } | GateDecision::RunInTxThenConfirm { .. } | GateDecision::ExplainAnalyzeRollback);
-            prop_assert!(!asks, "a read-only connection never asks: {:?}", item);
-        } else {
+            prop_assert!(denied || item.decision == GateDecision::Run, "a read-only connection never asks: {:?}", item);
+        } else if production {
             let admin = decide(&report, Profile::Admin, Actor::Human);
             if matches!(admin.verdict, sql_safety::Verdict::Deny(_)) {
-                prop_assert!(matches!(item.decision, GateDecision::Deny(_)), "{:?}", item);
+                prop_assert!(denied, "{:?}", item);
             }
             if item.decision == GateDecision::Run {
                 prop_assert!(max <= GateClass::Session, "{:?}", item);
                 prop_assert!(!matches!(admin.verdict, sql_safety::Verdict::Deny(_)));
             }
-            if max == GateClass::Unknown {
+            if matches!(max, GateClass::Routine | GateClass::Admin | GateClass::Unknown) {
+                prop_assert!(confirms || denied, "production never runs these unasked: {:?}", item);
+            }
+            // "Don't ask again" never covers these on production (controller ruling).
+            if let GateDecision::Confirm { suppressible: true, .. } = item.decision {
+                prop_assert!(!matches!(
+                    item.class,
+                    GateClass::DdlDestructive | GateClass::Admin | GateClass::Routine | GateClass::Unknown
+                ));
+                prop_assert!(report.items.len() == 1 || !report.items.iter().any(sql_safety::opens_write));
+            }
+        } else {
+            // Off production the unsafe-WHERE guard (on in these connections) is never skipped.
+            let unsafe_dml = report
+                .items
+                .iter()
+                .flat_map(|s| &s.destructive)
+                .any(|d| d.kind.is_unsafe_dml());
+            if unsafe_dml {
                 prop_assert_ne!(&item.decision, &GateDecision::Run);
             }
         }
@@ -791,17 +915,18 @@ fn arb_stmt() -> impl Strategy<Value = StmtReport> {
     )
         .prop_map(
             |(kind, bits, flags, class, codes, destructive, set, unnamed)| {
-                // Mostly named bits, sometimes an unnamed one.
-                let mask = if unnamed {
-                    u32::MAX
-                } else {
-                    EffectSet::all().bits()
-                };
-                let mut s = stmt(kind, EffectSet::from_bits_retain(bits & mask & 0x8007_ffff));
+                // Mostly named bits and flags, sometimes an unnamed one too.
+                let (extra_bit, extra_flag) = if unnamed { (1 << 20, 1 << 9) } else { (0, 0) };
+                let effects = bits & (EffectSet::all().bits() | extra_bit);
+                let mut s = stmt(kind, EffectSet::from_bits_retain(effects));
                 s.flags =
-                    RiskFlags::from_bits_retain(flags & if unnamed { u16::MAX } else { 0x1f });
+                    RiskFlags::from_bits_retain(flags & (RiskFlags::all().bits() | extra_flag));
                 s.class = class;
-                s.reasons = codes.into_iter().map(|c| reason(c, Some("f"))).collect();
+                s.reasons = codes
+                    .into_iter()
+                    .filter(|c| *c != ReasonCode::NotImplemented)
+                    .map(|c| reason(c, Some("f")))
+                    .collect();
                 s.destructive = destructive
                     .into_iter()
                     .map(|k| DestructiveReason {
@@ -819,6 +944,119 @@ fn arb_stmt() -> impl Strategy<Value = StmtReport> {
                 s
             },
         )
+}
+
+/// Fix round 1, I1: a report that analysed nothing (every pre-decided reason) is denied on
+/// production and read-only connections; off production it asks once (never suppressible)
+/// when its words may write, else it runs; the classifier stub is denied everywhere.
+#[test]
+fn pre_decided_reports_are_denied_on_production_and_ask_before_writes_elsewhere() {
+    let writes = [
+        "DELETE FROM orders",
+        "UPDATE orders SET a = 1",
+        "INSERT INTO t VALUES (1)",
+        "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x",
+        "CALL p()",
+        "DROP TABLE t",
+        "TRUNCATE t",
+        "COPY t FROM '/tmp/x'",
+        "SELECT * INTO new_t FROM t",
+    ];
+    let quiet = [
+        "SELECT 1",
+        "/*!40101 SET NAMES utf8 */",
+        "SET search_path = public",
+    ];
+    for code in ReasonCode::ALL {
+        let pre = |text: &str| {
+            let unit = prepared_on(DbmsKind::Postgres, text, &[]);
+            let mut r = report_over(text);
+            r.items.clear();
+            r.pre_decision = Some(vec![reason(code, None)]);
+            (unit, r)
+        };
+        for text in writes.iter().chain(&quiet) {
+            let (unit, r) = pre(text);
+            for c in [conn_prod(), conn_prod_user_tx(), conn_ro()] {
+                let item = one(unit.clone(), r.clone(), &c);
+                assert!(
+                    matches!(item.decision, GateDecision::Deny(_)),
+                    "{code:?} {text}"
+                );
+            }
+            let dev = one(unit.clone(), r.clone(), &conn_dev());
+            if code == ReasonCode::NotImplemented {
+                assert_eq!(deny_id(&dev.decision), "exec-gate-not-classified");
+                continue;
+            }
+            assert_eq!(dev.verdict, UnitVerdict::Unknown);
+            if writes.contains(text) {
+                match &dev.decision {
+                    GateDecision::Confirm {
+                        reasons,
+                        suppressible: false,
+                        type_to_confirm: None,
+                        ..
+                    } => {
+                        assert_eq!(reasons[0].fluent_id, "exec-gate-not-analysed");
+                        assert!(reasons.iter().any(|x| x.fluent_id == code.fluent_id()));
+                    }
+                    other => panic!("{code:?} {text}: {other:?}"),
+                }
+            } else {
+                assert_eq!(dev.decision, GateDecision::Run, "{code:?} {text}");
+            }
+        }
+        // On production the denial names the classifier's reason.
+        let (unit, r) = pre("SELECT 1");
+        if code != ReasonCode::NotImplemented {
+            assert_eq!(
+                deny_id(&one(unit, r, &conn_prod()).decision),
+                code.fluent_id()
+            );
+        }
+    }
+    // A run-as-one unit the splitter could not settle (only `AmbiguousBoundary`) follows the
+    // same rule off production (R-M3-60 is denied on production: PO list).
+    let text = "DELETE FROM t; SELECT 1";
+    let mut unit = prepared_on(DbmsKind::Postgres, text, &[]);
+    unit.unit.kind = sql_split::exec_range::UnitKind::Verbatim;
+    let mut r = report_over(text);
+    r.items.clear();
+    r.pre_decision = Some(vec![reason(ReasonCode::AmbiguousBoundary, None)]);
+    assert_eq!(
+        shape(&one(unit.clone(), r.clone(), &conn_dev()).decision),
+        "confirm"
+    );
+    assert_eq!(
+        deny_id(&one(unit, r, &conn_prod()).decision),
+        "safety-reason-ambiguous-boundary"
+    );
+    // MySQL runs executable comments: a write hidden in one asks; a dump's `SET NAMES` runs.
+    for (text, asks) in [
+        ("SELECT 1 /*!50000 , (DELETE FROM t) */", true),
+        ("/*!40101 SET NAMES utf8 */", false),
+        ("/*!40000 ALTER TABLE t DISABLE KEYS */", true),
+    ] {
+        let unit = prepared_on(DbmsKind::MySql, text, &[]);
+        let mut r = fake_classify(text, DialectId::MySql);
+        r.items.clear();
+        r.pre_decision = Some(vec![reason(ReasonCode::ExecutableComment, None)]);
+        let item = one(unit, r, &mysql(EnvTag::Dev));
+        assert_eq!(shape(&item.decision) == "confirm", asks, "{text}");
+    }
+    // MySQL: a pre-decided `BEGIN` in an open transaction commits it; it asks.
+    let manual = ConnSafety {
+        tx_mode: TxMode::Manual,
+        ..mysql(EnvTag::Dev)
+    };
+    let unit = prepared_on(DbmsKind::MySql, "BEGIN", &[]);
+    let mut r = fake_classify("BEGIN", DialectId::MySql);
+    r.items.clear();
+    r.pre_decision = Some(vec![reason(ReasonCode::ParseError, None)]);
+    let item = one(unit, r, &manual);
+    assert_eq!(item.verdict, UnitVerdict::ImplicitCommit);
+    assert!(reason_ids(&item.decision).contains(&"exec-gate-implicit-commit"));
 }
 
 #[test]
@@ -867,7 +1105,11 @@ fn suppression_keyed_by_console_and_fingerprint() {
         }
     ));
     // A suppressible production confirmation and warning ("don't ask again in this console").
-    for text in ["DROP TABLE orders", "SELECT * FROM t FOR UPDATE"] {
+    for text in [
+        "CREATE TABLE x (a int)",
+        "SELECT * FROM t FOR UPDATE",
+        "BEGIN",
+    ] {
         let asked = run(text, &conn_prod(), &SuppressSet::default(), 7);
         assert!(matches!(
             asked.decision,
@@ -884,6 +1126,63 @@ fn suppression_keyed_by_console_and_fingerprint() {
             "{text}"
         );
     }
+    // Fix round 1 (controller ruling): on production "don't ask again" never covers a
+    // destructive, administrative, routine or unknown statement, even with its pair recorded.
+    for text in [
+        "DROP TABLE orders",
+        "TRUNCATE orders",
+        "GRANT SELECT ON t TO bob",
+        "CALL p()",
+        "SELECT f_write()",
+    ] {
+        let asked = run(text, &conn_prod(), &SuppressSet::default(), 7);
+        let mut s = SuppressSet::default();
+        s.insert(7, asked.fingerprint);
+        assert!(
+            matches!(
+                run(text, &conn_prod(), &s, 7).decision,
+                GateDecision::Confirm {
+                    suppressible: false,
+                    ..
+                }
+            ),
+            "{text}"
+        );
+    }
+    // M4: the key includes the class: a pair recorded at a lower class never silences the
+    // same shape at a higher one.
+    let unit = prepared_on(DbmsKind::Postgres, "SELECT f(1)", &[]);
+    let lock = over(
+        &unit.final_text,
+        DialectId::Postgres,
+        vec![fake_stmt("SELECT * FROM t FOR UPDATE")],
+    );
+    let unknown = over(
+        &unit.final_text,
+        DialectId::Postgres,
+        vec![fake_stmt("SELECT f_write()")],
+    );
+    let low = one(unit.clone(), lock, &conn_prod());
+    let mut s = SuppressSet::default();
+    s.insert(7, low.fingerprint);
+    let high = gate(&[unit], &[unknown], &conn_dev(), &s, 7)
+        .items
+        .remove(0);
+    assert_ne!(low.fingerprint, high.fingerprint);
+    // M9: a unit of several statements with a write is never suppressible.
+    let text = "SELECT 1; DELETE FROM orders";
+    let item = gated(
+        text,
+        vec![fake_stmt("SELECT 1"), fake_stmt("DELETE FROM orders")],
+        &conn_dev(),
+    );
+    assert!(matches!(
+        item.decision,
+        GateDecision::Confirm {
+            suppressible: false,
+            ..
+        }
+    ));
     // A MySQL implicit commit is never suppressible.
     let manual = ConnSafety {
         tx_mode: TxMode::Manual,
@@ -1093,29 +1392,44 @@ fn effects_map_to_session_effects() {
 // ---------------------------------------------------------------------------------------------
 // The verdict table (R-M3-55) for every combination, against an independent oracle
 
-/// One representative statement per gate class.
-fn base(class: GateClass) -> StmtReport {
+/// One representative statement per gate class, with the text it classifies.
+fn base(class: GateClass) -> (&'static str, StmtReport) {
     match class {
-        GateClass::Read => stmt(StmtKind::Select, EffectSet::READ),
-        GateClass::Session => fake_stmt("SET hv_custom = 1"),
-        GateClass::Tx => stmt(StmtKind::Begin, EffectSet::TXN_CONTROL),
-        GateClass::Lock => fake_stmt("SELECT * FROM t FOR UPDATE"),
-        GateClass::Routine => fake_stmt("CALL p()"),
-        GateClass::Dml => stmt(StmtKind::Update, EffectSet::WRITE_DATA),
-        GateClass::DmlUnsafe => report(
-            StmtKind::Delete,
-            EffectSet::WRITE_DATA,
-            &[DestructiveKind::NoWhere],
-            "orders",
+        GateClass::Read => ("SELECT 1", stmt(StmtKind::Select, EffectSet::READ)),
+        GateClass::Session => ("SET hv_custom = 1", fake_stmt("SET hv_custom = 1")),
+        GateClass::Tx => ("BEGIN", stmt(StmtKind::Begin, EffectSet::TXN_CONTROL)),
+        GateClass::Lock => (
+            "SELECT * FROM t FOR UPDATE",
+            fake_stmt("SELECT * FROM t FOR UPDATE"),
         ),
-        GateClass::DdlOther => stmt(StmtKind::CreateTable, EffectSet::DDL),
-        GateClass::DdlDestructive => fake_stmt("DROP TABLE orders"),
-        GateClass::Admin => stmt(StmtKind::Grant, EffectSet::PRIVILEGE),
-        GateClass::Unknown => {
+        GateClass::Routine => ("CALL p()", fake_stmt("CALL p()")),
+        GateClass::Dml => (
+            "UPDATE orders SET a = 1 WHERE id = 1",
+            stmt(StmtKind::Update, EffectSet::WRITE_DATA),
+        ),
+        GateClass::DmlUnsafe => (
+            "DELETE FROM orders",
+            report(
+                StmtKind::Delete,
+                EffectSet::WRITE_DATA,
+                &[DestructiveKind::NoWhere],
+                "orders",
+            ),
+        ),
+        GateClass::DdlOther => (
+            "CREATE TABLE x (a int)",
+            stmt(StmtKind::CreateTable, EffectSet::DDL),
+        ),
+        GateClass::DdlDestructive => ("DROP TABLE orders", fake_stmt("DROP TABLE orders")),
+        GateClass::Admin => (
+            "GRANT SELECT ON t TO bob",
+            stmt(StmtKind::Grant, EffectSet::PRIVILEGE),
+        ),
+        GateClass::Unknown => ("SELECT f(1)", {
             let mut s = stmt(StmtKind::Select, EffectSet::READ);
             s.reasons.push(reason(ReasonCode::FnUnknown, Some("f")));
             s
-        }
+        }),
     }
 }
 
@@ -1123,10 +1437,58 @@ fn base(class: GateClass) -> StmtReport {
 enum Level {
     Dev,
     Staging,
+    Local,
+    Test,
+    Untagged,
     Production,
     ReadOnly,
     ProductionReadOnly,
 }
+
+impl Level {
+    const ALL: [Level; 8] = [
+        Level::Dev,
+        Level::Staging,
+        Level::Local,
+        Level::Test,
+        Level::Untagged,
+        Level::Production,
+        Level::ReadOnly,
+        Level::ProductionReadOnly,
+    ];
+
+    fn env(self) -> Option<EnvTag> {
+        match self {
+            Level::Dev | Level::ReadOnly => Some(EnvTag::Dev),
+            Level::Staging => Some(EnvTag::Staging),
+            Level::Local => Some(EnvTag::Local),
+            Level::Test => Some(EnvTag::Test),
+            Level::Untagged => None,
+            Level::Production | Level::ProductionReadOnly => Some(EnvTag::Production),
+        }
+    }
+
+    fn read_only(self) -> bool {
+        matches!(self, Level::ReadOnly | Level::ProductionReadOnly)
+    }
+}
+
+const ENGINES: [DbmsKind; 5] = [
+    DbmsKind::Postgres,
+    DbmsKind::MySql,
+    DbmsKind::MariaDb,
+    DbmsKind::TiDb,
+    DbmsKind::Sqlite,
+];
+
+const TXS: [(TxStatus, TxOwner, TxMode); 6] = [
+    (TxStatus::Idle, TxOwner::None, TxMode::Auto),
+    (TxStatus::Idle, TxOwner::None, TxMode::Manual),
+    (TxStatus::Idle, TxOwner::None, TxMode::Smart),
+    (TxStatus::InTx, TxOwner::User, TxMode::Manual),
+    (TxStatus::InTx, TxOwner::User, TxMode::Auto),
+    (TxStatus::Failed, TxOwner::User, TxMode::Manual),
+];
 
 #[derive(Debug, PartialEq, Eq)]
 struct Want {
@@ -1137,10 +1499,14 @@ struct Want {
     verdict: UnitVerdict,
 }
 
-/// R-M3-55 written out on its own (it reads none of the gate's code): the class column, the
-/// connection rows, the AND-check with `decide(Admin)` (the `admin` column of
-/// `data/profiles.toml`), type-to-confirm from the destructive kinds, the MySQL implicit
-/// commit, suppressibility and the verdict.
+fn is_mysql(engine: DbmsKind) -> bool {
+    matches!(engine, DbmsKind::MySql | DbmsKind::MariaDb | DbmsKind::TiDb)
+}
+
+/// R-M3-55 written out on its own (it reads none of the gate's code), with the fix-round-1
+/// rulings: the class column, the connection rows, the AND-check with `decide(Admin)` (the
+/// `admin` column of `data/profiles.toml`), type-to-confirm from the destructive kinds, the
+/// MySQL implicit commit (DDL, privileges, `BEGIN`), the suppression rules and the verdict.
 fn oracle(
     class: GateClass,
     extra: Option<(DestructiveKind, ObjectKind)>,
@@ -1159,10 +1525,11 @@ fn oracle(
     });
     let eff = extra_class.map_or(class, |e| class.max(e));
     let unsafe_dml = class == G::DmlUnsafe || extra.is_some_and(|(k, _)| k.is_unsafe_dml());
-    let mysql = matches!(engine, DbmsKind::MySql | DbmsKind::MariaDb);
+    let mysql = is_mysql(engine);
     let ddl = matches!(class, G::DdlOther | G::DdlDestructive)
-        || extra.is_some_and(|(k, _)| !k.is_unsafe_dml())
-        || (mysql && class == G::Admin);
+        || extra.is_some_and(|(k, _)| !k.is_unsafe_dml());
+    // MySQL commits an open transaction before DDL, GRANT and BEGIN.
+    let commits = mysql && (ddl || class == G::Admin || class == G::Tx);
     let deny = Want {
         shape: "deny",
         typed: None,
@@ -1175,7 +1542,7 @@ fn oracle(
         G::Routine | G::Unknown => UnitVerdict::Unknown,
         _ => UnitVerdict::Write,
     };
-    if matches!(level, Level::ReadOnly | Level::ProductionReadOnly) {
+    if level.read_only() {
         // Only `Read` runs (the `Session` representative is not on the harmless list).
         return if eff == G::Read {
             Want {
@@ -1211,7 +1578,7 @@ fn oracle(
                 matches!(k, DestructiveKind::Drop { .. })
                     && matches!(o, ObjectKind::Schema | ObjectKind::Database)
             }));
-    let implicit = mysql && ddl && tx_open;
+    let implicit = commits && tx_open;
     let mut shape = if production {
         match eff {
             G::Read | G::Session => "run",
@@ -1227,6 +1594,8 @@ fn oracle(
     if typed || implicit {
         shape = "confirm";
     }
+    let never_suppressed =
+        production && matches!(eff, G::DdlDestructive | G::Admin | G::Routine | G::Unknown);
     let verdict = if shape == "tx-confirm" {
         UnitVerdict::TxThenConfirm
     } else if implicit {
@@ -1237,8 +1606,8 @@ fn oracle(
     Want {
         shape: if typed { "confirm+type" } else { shape },
         typed: typed.then_some("orders"),
-        suppressible: (shape == "confirm").then_some(!typed && !implicit),
-        irreversible: (shape == "confirm").then_some(mysql && ddl),
+        suppressible: (shape == "confirm").then_some(!typed && !implicit && !never_suppressed),
+        irreversible: (shape == "confirm").then_some(mysql && (ddl || class == G::Admin)),
         verdict,
     }
 }
@@ -1269,6 +1638,23 @@ fn observed(item: &GateItem) -> Want {
     }
 }
 
+fn conn_at(
+    level: Level,
+    engine: DbmsKind,
+    tx: (TxStatus, TxOwner, TxMode),
+    guard: bool,
+) -> ConnSafety {
+    ConnSafety {
+        engine,
+        env: level.env(),
+        read_only: level.read_only(),
+        tx_status: tx.0,
+        tx_owner: tx.1,
+        tx_mode: tx.2,
+        confirm_unsafe_where: guard,
+    }
+}
+
 #[test]
 fn verdict_table_matches_r_m3_55_for_every_combination() {
     let mut extras: Vec<Option<(DestructiveKind, ObjectKind)>> = vec![None];
@@ -1285,30 +1671,12 @@ fn verdict_table_matches_r_m3_55_for_every_combination() {
         DestructiveKind::Drop { cascade: true },
         ObjectKind::Database,
     )));
-    let levels = [
-        Level::Dev,
-        Level::Staging,
-        Level::Production,
-        Level::ReadOnly,
-        Level::ProductionReadOnly,
-    ];
-    let txs = [
-        (TxStatus::Idle, TxOwner::None, TxMode::Auto),
-        (TxStatus::Idle, TxOwner::None, TxMode::Manual),
-        (TxStatus::Idle, TxOwner::None, TxMode::Smart),
-        (TxStatus::InTx, TxOwner::User, TxMode::Manual),
-        (TxStatus::InTx, TxOwner::User, TxMode::Auto),
-        (TxStatus::Failed, TxOwner::User, TxMode::Manual),
-    ];
     let mut cases = 0u32;
     for class in GateClass::ALL {
-        assert_eq!(
-            gate_class(&base(class)),
-            class,
-            "the representative of {class:?}"
-        );
+        let (text, rep) = base(class);
+        assert_eq!(gate_class(&rep), class, "the representative of {class:?}");
         for extra in &extras {
-            let mut s = base(class);
+            let mut s = rep.clone();
             if let Some((kind, object_kind)) = extra {
                 s.destructive.push(DestructiveReason {
                     kind: *kind,
@@ -1316,37 +1684,19 @@ fn verdict_table_matches_r_m3_55_for_every_combination() {
                     target: Some(object("orders", *object_kind)),
                 });
             }
-            for level in levels {
-                for engine in [DbmsKind::Postgres, DbmsKind::MySql, DbmsKind::MariaDb] {
-                    for (tx_status, tx_owner, tx_mode) in txs {
-                        for confirm_unsafe_where in [true, false] {
-                            let env = match level {
-                                Level::Dev | Level::ReadOnly => EnvTag::Dev,
-                                Level::Staging => EnvTag::Staging,
-                                Level::Production | Level::ProductionReadOnly => EnvTag::Production,
-                            };
-                            let c = ConnSafety {
-                                engine,
-                                env: Some(env),
-                                read_only: matches!(
-                                    level,
-                                    Level::ReadOnly | Level::ProductionReadOnly
-                                ),
-                                tx_status,
-                                tx_owner,
-                                tx_mode,
-                                confirm_unsafe_where,
-                            };
-                            let tx_open = tx_status != TxStatus::Idle || tx_mode == TxMode::Manual;
-                            let item = gated("DELETE FROM orders", vec![s.clone()], &c);
-                            let want =
-                                oracle(class, *extra, level, engine, tx_open, confirm_unsafe_where);
+            for level in Level::ALL {
+                for engine in ENGINES {
+                    for tx in TXS {
+                        for guard in [true, false] {
+                            let c = conn_at(level, engine, tx, guard);
+                            let tx_open = tx.0 != TxStatus::Idle || tx.2 == TxMode::Manual;
+                            let item = gated(text, vec![s.clone()], &c);
+                            let want = oracle(class, *extra, level, engine, tx_open, guard);
                             assert_eq!(
                                 observed(&item),
                                 want,
-                                "{class:?} + {extra:?} on {level:?} {engine:?} \
-                                 {tx_status:?}/{tx_mode:?} unsafe-where={confirm_unsafe_where}: \
-                                 {:?}",
+                                "{class:?} `{text}` + {extra:?} on {level:?} {engine:?} \
+                                 {tx:?} unsafe-where={guard}: {:?}",
                                 item.decision
                             );
                             cases += 1;
@@ -1356,7 +1706,179 @@ fn verdict_table_matches_r_m3_55_for_every_combination() {
             }
         }
     }
-    assert_eq!(cases, 11 * 14 * 5 * 3 * 6 * 2);
+    assert_eq!(cases, 11 * 14 * 8 * 5 * 6 * 2);
+}
+
+/// Fix round 1 (M1): `EXPLAIN ANALYZE` of every class, at every level and engine, against the
+/// D-062 rows: a read runs; `Routine`/`Admin` inners (and MySQL-family DDL inners) are refused;
+/// every other inner is wrapped, and on production asks first when the inner is `Unknown` or
+/// the engine is MySQL-family (I2, M7); read-only denies every non-read.
+#[test]
+fn explain_analyze_table_for_every_inner_class() {
+    use GateClass as G;
+    let mut cases = 0u32;
+    for inner in GateClass::ALL {
+        let (text, mut s) = base(inner);
+        s.kind = StmtKind::Explain { analyze: true };
+        s.flags |= RiskFlags::EXPLAIN_ANALYZE;
+        let text = format!("EXPLAIN ANALYZE {text}");
+        for level in Level::ALL {
+            for engine in ENGINES {
+                let c = conn_at(level, engine, TXS[0], true);
+                let item = gated(&text, vec![s.clone()], &c);
+                let mysql = is_mysql(engine);
+                let production = level == Level::Production;
+                let want = if inner == G::Read {
+                    "run"
+                } else if level.read_only()
+                    || matches!(inner, G::Routine | G::Admin)
+                    || (mysql && matches!(inner, G::DdlOther | G::DdlDestructive))
+                {
+                    "deny"
+                } else if production && (inner == G::Unknown || mysql) {
+                    "confirm"
+                } else {
+                    "explain-wrap"
+                };
+                assert_eq!(
+                    shape(&item.decision),
+                    want,
+                    "{inner:?} on {level:?} {engine:?}"
+                );
+                if matches!(want, "confirm" | "explain-wrap") {
+                    assert_eq!(item.verdict, UnitVerdict::ExplainAnalyzeRollback);
+                }
+                if want == "confirm" {
+                    assert!(matches!(
+                        item.decision,
+                        GateDecision::Confirm {
+                            suppressible: false,
+                            type_to_confirm: None,
+                            ..
+                        }
+                    ));
+                }
+                cases += 1;
+            }
+        }
+    }
+    assert_eq!(cases, 11 * 8 * 5);
+}
+
+/// Fix round 1 (I3, I5, M1, M3): MySQL and MariaDB rows over the real interim backend's reports
+/// (not a builder): `DROP DATABASE`/`DROP SCHEMA` ask for the typed name on production, the
+/// implicit-commit list asks in an open transaction, temporary-table DDL does not.
+#[test]
+fn mysql_rows_over_the_real_backend() {
+    for engine in [DbmsKind::MySql, DbmsKind::MariaDb] {
+        let real = |text: &str| {
+            let ctx = sql_safety::ClassifyCtx::new(
+                common::gate_fx::ctx_of(engine),
+                sql_dialect::ClientFlavor::None,
+                sql_safety::Expect::SingleStatement,
+            );
+            sql_safety::classify_interim(text, &ctx)
+        };
+        let run = |text: &str, c: &ConnSafety| {
+            let unit = prepared_on(engine, text, &[]);
+            let report = real(&unit.final_text);
+            one(unit, report, c)
+        };
+        let prod = conn(engine, Some(EnvTag::Production));
+        for (text, name) in [
+            ("DROP DATABASE shop", "shop"),
+            ("DROP SCHEMA IF EXISTS Shop", "Shop"),
+            ("DROP DATABASE `my shop`", "my shop"),
+            ("DELETE FROM orders", "orders"),
+            ("UPDATE Orders SET a = 1", "Orders"),
+        ] {
+            let item = run(text, &prod);
+            match &item.decision {
+                GateDecision::Confirm {
+                    type_to_confirm: Some(t),
+                    suppressible: false,
+                    ..
+                } => assert_eq!(&**t, name, "{engine:?} {text}"),
+                other => panic!("{engine:?} {text}: {other:?}"),
+            }
+        }
+        // DROP TABLE: a confirmation that says it cannot be undone; never suppressible on
+        // production (DdlDestructive), no typed name.
+        let item = run("DROP TABLE orders", &prod);
+        assert!(
+            matches!(
+                item.decision,
+                GateDecision::Confirm {
+                    type_to_confirm: None,
+                    irreversible: true,
+                    suppressible: false,
+                    ..
+                }
+            ),
+            "{engine:?}: {:?}",
+            item.decision
+        );
+        // The implicit-commit list on a Manual session (a transaction always counts as open).
+        let manual = ConnSafety {
+            tx_mode: TxMode::Manual,
+            ..conn(engine, Some(EnvTag::Dev))
+        };
+        for text in [
+            "CREATE TABLE x (a int)",
+            "ALTER TABLE t ADD b int",
+            "CREATE INDEX i ON t (a)",
+            "GRANT SELECT ON t TO bob",
+            "LOCK TABLES t WRITE",
+            "BEGIN",
+            "START TRANSACTION",
+            "SET autocommit = 1",
+            "ANALYZE TABLE t",
+            "OPTIMIZE TABLE t",
+            "FLUSH TABLES",
+            "TRUNCATE t",
+            "RENAME TABLE a TO b",
+            "CREATE USER bob",
+            "SET PASSWORD FOR bob = 'x'",
+        ] {
+            let item = run(text, &manual);
+            assert_eq!(
+                item.verdict,
+                UnitVerdict::ImplicitCommit,
+                "{engine:?} {text}: {:?}",
+                item.decision
+            );
+            assert!(
+                item.effects.contains(SessionEffects::DDL),
+                "{engine:?} {text}"
+            );
+            assert!(
+                reason_ids(&item.decision).contains(&"exec-gate-implicit-commit"),
+                "{engine:?} {text}"
+            );
+        }
+        // These do not commit: temporary tables (M3), autocommit off, plain reads and writes.
+        for text in [
+            "CREATE TEMPORARY TABLE x (a int)",
+            "DROP TEMPORARY TABLE x",
+            "SET autocommit = 0",
+            "SELECT 1",
+            "UPDATE t SET a = 1 WHERE id = 1",
+        ] {
+            let item = run(text, &manual);
+            assert_ne!(
+                item.verdict,
+                UnitVerdict::ImplicitCommit,
+                "{engine:?} {text}"
+            );
+            assert!(
+                !item.effects.contains(SessionEffects::DDL),
+                "{engine:?} {text}"
+            );
+        }
+        // An idle Auto session has nothing to commit.
+        let idle = conn(engine, Some(EnvTag::Dev));
+        assert_ne!(run("BEGIN", &idle).verdict, UnitVerdict::ImplicitCommit);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

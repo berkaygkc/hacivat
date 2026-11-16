@@ -48,10 +48,16 @@ fn admin_inners_are_refused_and_unknown_inners_wrapped() {
             refused_id(&decision("EXPLAIN ANALYZE COPY t TO PROGRAM 'x'", c)),
             "exec-explain-analyze-refused"
         );
-        // A function Hacivat cannot classify: the rollback is the point.
+        // A function Hacivat cannot classify: wrapped; on production it asks first (fix round
+        // 1, I2), because the rollback does not undo everything it may do.
         let item = item_of("EXPLAIN ANALYZE SELECT f_write()", &c);
-        assert_eq!(item.decision, GateDecision::ExplainAnalyzeRollback);
+        assert_eq!(item.verdict, UnitVerdict::ExplainAnalyzeRollback);
         assert_eq!(item.class, GateClass::Unknown);
+        if c.env == Some(EnvTag::Production) {
+            assert_confirms_not_undone(&item.decision);
+        } else {
+            assert_eq!(item.decision, GateDecision::ExplainAnalyzeRollback);
+        }
         // PostgreSQL rolls DDL back: `CREATE TABLE … AS` is wrapped.
         assert_eq!(
             decision("EXPLAIN ANALYZE CREATE TABLE x AS SELECT 1", c),
@@ -69,6 +75,31 @@ fn admin_inners_are_refused_and_unknown_inners_wrapped() {
             decision("EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1", c),
             GateDecision::ExplainAnalyzeRollback
         );
+        // On production MySQL/MariaDB every wrapped write asks first (M7: a rollback does not
+        // undo writes to non-transactional tables).
+        let prod = conn(engine, Some(EnvTag::Production));
+        let item = item_of("EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1", &prod);
+        assert_confirms_not_undone(&item.decision);
+        assert_eq!(item.verdict, UnitVerdict::ExplainAnalyzeRollback);
+    }
+}
+
+/// A production confirmation before the D-062 wrap: names what the rollback does not undo,
+/// never suppressible, no typed name.
+fn assert_confirms_not_undone(d: &GateDecision) {
+    match d {
+        GateDecision::Confirm {
+            reasons,
+            type_to_confirm: None,
+            suppressible: false,
+            irreversible: false,
+        } => assert!(
+            reasons
+                .iter()
+                .any(|r| r.fluent_id == "exec-explain-analyze-not-undone"),
+            "{reasons:?}"
+        ),
+        other => panic!("not the wrap's confirmation: {other:?}"),
     }
 }
 

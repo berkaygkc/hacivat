@@ -31,7 +31,11 @@ use sql_text::TextRange;
 use tokio::sync::oneshot;
 
 use crate::explain_wrap::{explain_analyze_inner, wrap_allowed};
+use crate::implicit_commit::{
+    atoms, commits, engine_commits_implicitly, mentions_write, temporary_table,
+};
 use crate::params::PreparedUnit;
+use crate::sqlctx::dialect_id;
 use crate::suppress::SuppressSet;
 
 /// What the gate knows of the connection a run goes to.
@@ -98,7 +102,9 @@ pub struct GateItem {
     pub verdict: UnitVerdict,
     pub effects: SessionEffects,
     pub class: GateClass,
-    /// The classified text's fingerprint (`SuppressSet` keys on it).
+    /// The "don't ask again" key (`SuppressSet` keys on it): since Task 15 fix round 1 (M4) the
+    /// classified text's fingerprint mixed with `class`, so the same shape at a higher class
+    /// is asked again. The answer `ExecuteAndSuppress` records this value.
     pub fingerprint: u64,
 }
 
@@ -138,6 +144,11 @@ const IMPLICIT_COMMIT: &str = "exec-gate-implicit-commit";
 const EXPLAIN_REFUSED: &str = "exec-explain-analyze-refused";
 const NO_TARGET: &str = "exec-unsafe-no-target";
 const SEVERAL_TARGETS: &str = "exec-unsafe-several-targets";
+// ## m3b-t15-gate (fix round 1)
+/// I1: a statement Hacivat could not analyse that may change data (off production).
+const NOT_ANALYSED: &str = "exec-gate-not-analysed";
+/// I2: what the D-062 rollback does not undo.
+const EXPLAIN_NOT_UNDONE: &str = "exec-explain-analyze-not-undone";
 /// A destructive pattern whose target the classifier did not name (Task 4's id).
 const DESTRUCTIVE: &str = "safety-reason-destructive";
 
@@ -165,6 +176,11 @@ impl GatePlan {
 ///    executor sends exactly the bytes classified.
 /// 2. **Not classified**: a report pre-decided as `NotImplemented` (the classifier stub) →
 ///    `Deny(exec-gate-not-classified)` on every connection (F31).
+///    **Not analysed** (fix round 1, I1): any other pre-decided report, or one with no
+///    statement, is denied on production and read-only connections (the classifier's first
+///    reason, or `exec-gate-read-only`); off production it asks one calm, never suppressible
+///    `Confirm` (`exec-gate-not-analysed`) when its words hold a write or DDL keyword (or it
+///    commits an open MySQL transaction), and runs otherwise (a dump's `/*!40101 SET NAMES */`).
 /// 3. **Read-only** connections: `Run` only when the unit's class is `Read` (or `Session` on
 ///    the harmless-`SET` list, P-M3b-6) **and** `decide(.., ReadOnlyPlusExplain, Human)` allows
 ///    it (R-M3-56); else `Deny(exec-gate-read-only)`, naming the class. `CALL`, `Unknown` and
@@ -176,16 +192,24 @@ impl GatePlan {
 /// 5. **D-062**: a lone `EXPLAIN ANALYZE` of a non-read runs wrapped in a rollback
 ///    (`ExplainAnalyzeRollback`), refused for `Routine`/`Admin` inner classes and, on
 ///    MySQL/MariaDB/TiDB, for DDL inners (their implicit commit escapes the rollback); one
-///    inside a unit of several statements is refused.
+///    inside a unit of several statements is refused. On production an `Unknown` inner (or a
+///    unit the AND-check made `Unknown`), and every wrapped inner on MySQL/MariaDB/TiDB, asks
+///    first: `Confirm` with verdict `ExplainAnalyzeRollback`, naming what a rollback does not
+///    undo (`exec-explain-analyze-not-undone`; fix round 1, I2, M7).
 /// 6. **The table**: production `Read`/`Session` → `Run`, `Lock` → `Warn`, `Dml` →
 ///    `RunInTxThenConfirm` (the session picks the form, P-M3b-1), every other class →
 ///    `Confirm`; off production `Run`, except a unit holding an unsafe-DML pattern, which asks
 ///    the calm `Confirm` while `confirm_unsafe_where` is on.
 /// 7. **Stricter on top**: type-to-confirm on production (from the destructive kinds, not the
-///    class: a DDL in the same unit hides `DmlUnsafe`), the MySQL/MariaDB implicit commit
-///    (`Confirm`, verdict `ImplicitCommit`, never suppressible), `irreversible` for their DDL.
-/// 8. **Suppression**: a suppressible `Confirm`/`Warn` whose `(console, fingerprint)` the user
-///    turned off runs (`Run`); type-to-confirm and implicit commits are never suppressible.
+///    class: a DDL in the same unit hides `DmlUnsafe`; `DROP DATABASE/SCHEMA` also read from
+///    the statement's words, I3), the MySQL/MariaDB/TiDB implicit commit of
+///    [`crate::implicit_commit`]'s list while a transaction is open (`Confirm`, verdict
+///    `ImplicitCommit`, never suppressible; I5), `irreversible` for their DDL and privilege
+///    statements.
+/// 8. **Suppression**: a suppressible `Confirm`/`Warn` whose `(console, key)` the user turned
+///    off runs (`Run`); the key mixes the fingerprint with the class (M4). Never suppressible:
+///    type-to-confirm, implicit commits, a unit of several statements with a write (M9), and on
+///    production `DdlDestructive`, `Admin`, `Routine` and `Unknown` (controller ruling).
 ///
 /// The verdict is `Read` only for a unit whose report reads only ([`reads_only`], R-M3-23);
 /// `Routine` and `Unknown` are `Unknown` with unknown session effects, never `Write`.
@@ -250,9 +274,20 @@ fn request_floor(report: &SafetyReport) -> GateClass {
     gate_class(&synthetic)
 }
 
-/// MySQL, MariaDB and TiDB commit an open transaction before a DDL statement.
+/// MySQL, MariaDB and TiDB commit an open transaction before a DDL statement (and the rest of
+/// [`crate::implicit_commit`]'s list).
 fn commits_on_ddl(engine: DbmsKind) -> bool {
-    matches!(engine, DbmsKind::MySql | DbmsKind::MariaDb | DbmsKind::TiDb)
+    engine_commits_implicitly(engine)
+}
+
+/// The dialect `report` was classified in, else `engine`'s.
+fn dialect_for(report: &SafetyReport, engine: DbmsKind) -> DialectId {
+    report.dialect.unwrap_or_else(|| dialect_id(engine))
+}
+
+/// The words of statement `s` (its range of `text`; the whole text when the range is not in it).
+fn stmt_atoms(s: &StmtReport, text: &str, d: DialectId) -> Vec<String> {
+    atoms(slice(text, s.range).unwrap_or(text), d)
 }
 
 /// A transaction is open as the gate sees it: any status but idle, or a Manual session (a
@@ -306,17 +341,37 @@ fn is_ddl(s: &StmtReport) -> bool {
         || s.destructive.iter().any(|d| d.kind.is_destructive_ddl())
 }
 
-/// The session-level effects of `report` on `engine` (R-M3-83: the session schedules with
-/// them; the read-only guard never trusts them). `DDL` is set for every DDL statement and, on
-/// MySQL/MariaDB/TiDB, for privilege statements too (they commit an open transaction).
-fn session_effects(report: &SafetyReport, engine: DbmsKind) -> SessionEffects {
-    if report.items.is_empty() {
-        return unknown_effects();
-    }
+/// The session-level effects of `report` over `text` (the bytes it classified) on `engine`
+/// (R-M3-83: the session schedules with them; the read-only guard never trusts them). The one
+/// mapping from a report to `SessionEffects` (fix round 1, M8): the classifier pool's
+/// `StatementClassifier::effects` (Task 14) delegates here.
+///
+/// `DDL` means "commits an open transaction first" on MySQL/MariaDB/TiDB: every statement of
+/// [`crate::implicit_commit`]'s list (DDL but `CREATE`/`DROP TEMPORARY TABLE`, privileges,
+/// `BEGIN`, `LOCK TABLES`, `SET autocommit = 1`, `FLUSH`, …; I5, M3), so the session's T19
+/// backstop reuses that list through this bit. On every other engine it is set for every DDL
+/// statement. A report with no statements has every bit but `DDL`, plus `DDL` when its words
+/// are on the list.
+pub fn session_effects_of(report: &SafetyReport, text: &str, engine: DbmsKind) -> SessionEffects {
     let mysql = commits_on_ddl(engine);
+    let d = dialect_for(report, engine);
+    if report.items.is_empty() {
+        let commits_first = mysql && commits(&atoms(text, d));
+        return unknown_effects()
+            | if commits_first {
+                SessionEffects::DDL
+            } else {
+                SessionEffects::empty()
+            };
+    }
     let mut out = SessionEffects::empty();
     for s in &report.items {
         let e = s.effects;
+        let words = if mysql {
+            stmt_atoms(s, text, d)
+        } else {
+            Vec::new()
+        };
         if e.contains(EffectSet::SESSION_STATE) || matches!(s.kind, StmtKind::Set | StmtKind::Use) {
             out |= SessionEffects::SESSION_STATE;
         }
@@ -326,7 +381,11 @@ fn session_effects(report: &SafetyReport, engine: DbmsKind) -> SessionEffects {
         if e.contains(EffectSet::ADVISORY_LOCK) {
             out |= SessionEffects::ADVISORY_LOCK;
         }
-        if mysql && (e.contains(EffectSet::LOCK_TABLE) || s.kind == StmtKind::Lock) {
+        let lock_tables = e.contains(EffectSet::LOCK_TABLE)
+            || s.kind == StmtKind::Lock
+            || (words.first().is_some_and(|w| w == "LOCK")
+                && words.get(1).is_some_and(|w| w == "TABLE" || w == "TABLES"));
+        if mysql && lock_tables {
             out |= SessionEffects::LOCK_TABLES;
         }
         if e.contains(EffectSet::PREPARE) || s.kind == StmtKind::Prepare {
@@ -337,11 +396,28 @@ fn session_effects(report: &SafetyReport, engine: DbmsKind) -> SessionEffects {
         }
         let privilege = e.contains(EffectSet::PRIVILEGE)
             || matches!(s.kind, StmtKind::Grant | StmtKind::Revoke);
-        if is_ddl(s) || (mysql && privilege) {
+        let ddl = if mysql {
+            commits(&words) || privilege || (is_ddl(s) && !temporary_table(&words))
+        } else {
+            is_ddl(s)
+        };
+        if ddl {
             out |= SessionEffects::DDL;
         }
     }
     out
+}
+
+/// Whether a MySQL-family statement of `report` cannot be rolled back ("MySQL commits DDL at
+/// once"): any DDL statement but `CREATE`/`DROP TEMPORARY TABLE`, and privilege statements.
+fn irreversible_ddl(report: &SafetyReport, text: &str, engine: DbmsKind) -> bool {
+    let d = dialect_for(report, engine);
+    commits_on_ddl(engine)
+        && report.items.iter().any(|s| {
+            let privilege = s.effects.contains(EffectSet::PRIVILEGE)
+                || matches!(s.kind, StmtKind::Grant | StmtKind::Revoke);
+            privilege || (is_ddl(s) && !temporary_table(&stmt_atoms(s, text, d)))
+        })
 }
 
 /// What the gate reads of one classified unit.
@@ -358,10 +434,17 @@ struct Facts {
     read: bool,
     /// Pre-decided by the classifier stub (`NotImplemented`).
     not_classified: bool,
+    // ## m3b-t15-gate (fix round 1)
+    /// Not analysed: pre-decided, or no statement (I1).
+    unanalysed: bool,
+    /// A MySQL-family DDL statement that cannot be rolled back.
+    irreversible: bool,
+    /// Several statements, one of them a write (M9: never suppressible).
+    mixed_write: bool,
 }
 
 impl Facts {
-    fn of(report: &SafetyReport, engine: DbmsKind) -> Facts {
+    fn of(report: &SafetyReport, text: &str, engine: DbmsKind) -> Facts {
         let class = if report.pre_decision.is_some() || report.items.is_empty() {
             GateClass::Unknown
         } else {
@@ -387,7 +470,7 @@ impl Facts {
                 .iter()
                 .flat_map(|s| &s.destructive)
                 .any(|d| d.kind.is_unsafe_dml()),
-            effects: session_effects(report, engine),
+            effects: session_effects_of(report, text, engine),
             explain: if lone { inners.first().copied() } else { None },
             explain_in_script: !lone && !inners.is_empty(),
             read: reads_only(report),
@@ -396,6 +479,9 @@ impl Facts {
                 .iter()
                 .flatten()
                 .any(|r| r.code == ReasonCode::NotImplemented),
+            unanalysed: report.pre_decision.is_some() || report.items.is_empty(),
+            irreversible: irreversible_ddl(report, text, engine),
+            mixed_write: report.items.len() > 1 && report.items.iter().any(opens_write),
         }
     }
 }
@@ -527,24 +613,45 @@ fn written_name(
 /// pattern and of a `DROP DATABASE`/`DROP SCHEMA`, as written. From the destructive kinds, not
 /// the class. `Err` when one has no target (nothing to type) or two name different objects
 /// (typing one name must not approve another).
-fn typed_name(report: &SafetyReport, text: &str) -> Result<Option<Arc<str>>, GateReason> {
+fn typed_name(
+    report: &SafetyReport,
+    text: &str,
+    engine: DbmsKind,
+) -> Result<Option<Arc<str>>, GateReason> {
     let mut names: Vec<Arc<str>> = Vec::new();
+    let d = dialect_for(report, engine);
     for s in &report.items {
-        for d in &s.destructive {
-            let schema_or_db = matches!(d.kind, DestructiveKind::Drop { .. })
-                && d.target
-                    .as_ref()
-                    .is_some_and(|t| matches!(t.kind, ObjectKind::Schema | ObjectKind::Database));
-            if !d.kind.is_unsafe_dml() && !schema_or_db {
+        // Fix round 1 (I3): the statement's own words say `DROP DATABASE`/`DROP SCHEMA`, so a
+        // backend that names the target's kind wrongly cannot drop the typed name.
+        let dropped_db = drop_database_name(slice(text, s.range).unwrap_or(text), d);
+        let mut named = false;
+        for dr in &s.destructive {
+            let schema_or_db = matches!(dr.kind, DestructiveKind::Drop { .. })
+                && (dropped_db.is_some()
+                    || dr.target.as_ref().is_some_and(|t| {
+                        matches!(t.kind, ObjectKind::Schema | ObjectKind::Database)
+                    }));
+            if !dr.kind.is_unsafe_dml() && !schema_or_db {
                 continue;
             }
-            let Some(target) = d.target.as_ref().or_else(|| s.touched.writes.first()) else {
+            let Some(target) = dr.target.as_ref().or_else(|| s.touched.writes.first()) else {
+                if schema_or_db && let Some(Some(n)) = &dropped_db {
+                    push_name(&mut names, n.clone());
+                    named = true;
+                    continue;
+                }
                 return Err(GateReason::of(NO_TARGET));
             };
-            let name = written_name(target, d.range, s.range, text, report.dialect);
-            if !names.contains(&name) {
-                names.push(name);
-            }
+            push_name(
+                &mut names,
+                written_name(target, dr.range, s.range, text, report.dialect),
+            );
+            named |= schema_or_db;
+        }
+        match dropped_db {
+            Some(Some(n)) if !named => push_name(&mut names, n),
+            Some(None) if !named => return Err(GateReason::of(NO_TARGET)),
+            _ => {}
         }
     }
     match names.len() {
@@ -552,6 +659,63 @@ fn typed_name(report: &SafetyReport, text: &str) -> Result<Option<Arc<str>>, Gat
         1 => Ok(names.pop()),
         _ => Err(GateReason::of(SEVERAL_TARGETS)),
     }
+}
+
+fn push_name(names: &mut Vec<Arc<str>>, n: Arc<str>) {
+    if !names.contains(&n) {
+        names.push(n);
+    }
+}
+
+/// When `stmt` (in dialect `d`) reads `DROP DATABASE|SCHEMA [IF EXISTS] <name>`: the name as
+/// written (`Some(None)` when none can be read); `None` for any other statement.
+fn drop_database_name(stmt: &str, d: DialectId) -> Option<Option<Arc<str>>> {
+    let ctx = DialectCtx::new(d, None);
+    let profile = lex_profile(&ctx).ok()?;
+    let lexed = lex(stmt, profile, ctx.modes, &LexState::Initial);
+    let code: Vec<usize> = (0..lexed.len())
+        .filter(|&i| {
+            !lexed.is_trivia(i)
+                && !matches!(
+                    lexed.kind(i),
+                    TokenKind::LineComment | TokenKind::BlockComment | TokenKind::HintComment
+                )
+        })
+        .collect();
+    let word = |k: usize, w: &str| {
+        code.get(k).is_some_and(|&i| {
+            lexed.kind(i) == TokenKind::Word
+                && slice(stmt, lexed.range(i)).is_some_and(|t| t.eq_ignore_ascii_case(w))
+        })
+    };
+    if !word(0, "DROP") || !(word(1, "DATABASE") || word(1, "SCHEMA")) {
+        return None;
+    }
+    let mut k = 2;
+    if word(k, "IF") && word(k + 1, "EXISTS") {
+        k += 2;
+    }
+    let Some(&first) = code.get(k) else {
+        return Some(None);
+    };
+    // The name runs to the next token that is no part of a dotted name.
+    let mut end = first;
+    for &i in &code[k..] {
+        if !matches!(
+            lexed.kind(i),
+            TokenKind::Word | TokenKind::QuotedIdent | TokenKind::Dot
+        ) || (i != first && lexed.kind(i) != TokenKind::Dot && lexed.kind(end) != TokenKind::Dot)
+        {
+            break;
+        }
+        end = i;
+    }
+    let range = TextRange::new(lexed.range(first).start(), lexed.range(end).end());
+    Some(
+        slice(stmt, range)
+            .and_then(|s| parse_qualified(d, s))
+            .map(|q| dotted(q.parts.iter().map(|p| &*p.text))),
+    )
 }
 
 /// The reasons a dialog lists: one per destructive pattern (its target as written), then the
@@ -593,6 +757,14 @@ enum Row {
     Confirm,
 }
 
+/// The "don't ask again" key of a unit (fix round 1, M4): the classified text's fingerprint
+/// mixed with the unit's class, so a pair recorded for a statement of one class never silences
+/// a statement of the same shape and a higher class.
+fn suppression_key(fingerprint: u64, class: GateClass) -> u64 {
+    // The 64-bit golden-ratio multiplier spreads the class over every bit.
+    fingerprint ^ (class as u64 + 1).wrapping_mul(11_400_714_819_323_198_485)
+}
+
 fn gate_unit(
     unit: u32,
     prepared: &PreparedUnit,
@@ -606,14 +778,69 @@ fn gate_unit(
         let reason = GateReason::of(STALE);
         return denied(unit, GateClass::Unknown, SessionEffects::empty(), 0, reason);
     };
-    let fingerprint = report.fingerprint.hash;
-    let facts = Facts::of(report, conn.engine);
+    let text = &*prepared.final_text;
+    let key = |c: GateClass| suppression_key(report.fingerprint.hash, c);
+    let facts = Facts::of(report, text, conn.engine);
     let effects = facts.effects;
-    let deny = |class, reason| denied(unit, class, effects, fingerprint, reason);
+    let deny = |class, reason| denied(unit, class, effects, key(class), reason);
     // 2. The classifier stub never lets anything through (F31).
     if facts.not_classified {
         return deny(GateClass::Unknown, GateReason::of(NOT_CLASSIFIED));
     }
+    let production = conn.env == Some(EnvTag::Production);
+    let mysql = commits_on_ddl(conn.engine);
+    let commits_first = mysql && effects.contains(SessionEffects::DDL);
+    let implicit_commit = commits_first && tx_open(conn);
+
+    // 2b. Fix round 1 (I1): a report that analysed nothing (pre-decided, or no statement).
+    // Denied on production and read-only connections; off production it never runs silently
+    // when its words may write (one calm confirmation, never suppressible), else it runs.
+    if facts.unanalysed {
+        if conn.read_only {
+            return deny(GateClass::Unknown, read_only_reason(GateClass::Unknown));
+        }
+        if production {
+            let reason = report
+                .pre_decision
+                .iter()
+                .flatten()
+                .next()
+                .map(reason_of)
+                .unwrap_or_else(|| GateReason::of(NOT_ANALYSED));
+            return deny(GateClass::Unknown, reason);
+        }
+        let writes = mentions_write(&atoms(text, dialect_for(report, conn.engine)));
+        let decision = if writes || implicit_commit {
+            let mut reasons = vec![GateReason::of(NOT_ANALYSED)];
+            if implicit_commit {
+                push_unique(&mut reasons, GateReason::of(IMPLICIT_COMMIT));
+            }
+            for r in report.pre_decision.iter().flatten() {
+                push_unique(&mut reasons, reason_of(r));
+            }
+            GateDecision::Confirm {
+                reasons,
+                type_to_confirm: None,
+                irreversible: false,
+                suppressible: false,
+            }
+        } else {
+            GateDecision::Run
+        };
+        return GateItem {
+            unit,
+            decision,
+            verdict: if implicit_commit {
+                UnitVerdict::ImplicitCommit
+            } else {
+                UnitVerdict::Unknown
+            },
+            effects: effects | unknown_effects(),
+            class: GateClass::Unknown,
+            fingerprint: key(GateClass::Unknown),
+        };
+    }
+
     let mut class = facts.class;
     let explaining = facts.explain.is_some() || facts.explain_in_script;
 
@@ -636,11 +863,10 @@ fn gate_unit(
             verdict,
             effects,
             class,
-            fingerprint,
+            fingerprint: key(class),
         };
     }
 
-    let production = conn.env == Some(EnvTag::Production);
     let mut extra = Vec::new();
     // 4. Production: `decide(Admin)` must not deny, and its confirmations count.
     if production {
@@ -670,13 +896,34 @@ fn gate_unit(
         if !wrap_allowed(inner, conn.engine) {
             return deny(class, GateReason::of(EXPLAIN_REFUSED));
         }
+        // Fix round 1 (I2, M7): on production the rollback is not enough for an inner statement
+        // Hacivat cannot classify (sequences, session advisory locks, dblink, file and network
+        // I/O survive it), nor on MySQL/MariaDB/TiDB at all (non-transactional tables keep their
+        // writes): it asks first, then runs wrapped. Never suppressible.
+        let asks =
+            production && (inner == GateClass::Unknown || class == GateClass::Unknown || mysql);
+        let decision = if asks {
+            let mut reasons = reasons_of(report, text);
+            push_unique(&mut reasons, GateReason::of(EXPLAIN_NOT_UNDONE));
+            for r in extra {
+                push_unique(&mut reasons, r);
+            }
+            GateDecision::Confirm {
+                reasons,
+                type_to_confirm: None,
+                irreversible: false,
+                suppressible: false,
+            }
+        } else {
+            GateDecision::ExplainAnalyzeRollback
+        };
         return GateItem {
             unit,
-            decision: GateDecision::ExplainAnalyzeRollback,
+            decision,
             verdict: UnitVerdict::ExplainAnalyzeRollback,
             effects,
             class,
-            fingerprint,
+            fingerprint: key(class),
         };
     }
 
@@ -701,21 +948,27 @@ fn gate_unit(
     };
 
     // 7. Stricter rules on top.
-    let text = &*prepared.final_text;
     let type_to_confirm = if production {
-        match typed_name(report, text) {
+        match typed_name(report, text, conn.engine) {
             Ok(name) => name,
             Err(reason) => return deny(class, reason),
         }
     } else {
         None
     };
-    let mysql_ddl = commits_on_ddl(conn.engine) && effects.contains(SessionEffects::DDL);
-    let implicit_commit = mysql_ddl && tx_open(conn);
     if type_to_confirm.is_some() || implicit_commit {
         row = Row::Confirm;
     }
-    let suppressible = type_to_confirm.is_none() && !implicit_commit;
+    // Fix round 1 (controller ruling, M9): on production "don't ask again" never covers a
+    // destructive, administrative, routine or unknown statement, and nowhere a unit of several
+    // statements with a write in it.
+    let never_suppressed = production
+        && matches!(
+            class,
+            GateClass::DdlDestructive | GateClass::Admin | GateClass::Routine | GateClass::Unknown
+        );
+    let suppressible =
+        type_to_confirm.is_none() && !implicit_commit && !never_suppressed && !facts.mixed_write;
 
     let mut reasons = reasons_of(report, text);
     if implicit_commit {
@@ -726,6 +979,7 @@ fn gate_unit(
     }
 
     // 8. "Don't ask again".
+    let fingerprint = key(class);
     let asks = matches!(row, Row::Confirm | Row::Warn);
     if asks && suppressible && suppressed.contains(console, fingerprint) {
         row = Row::Run;
@@ -738,7 +992,7 @@ fn gate_unit(
         Row::Confirm => GateDecision::Confirm {
             reasons,
             type_to_confirm,
-            irreversible: mysql_ddl,
+            irreversible: facts.irreversible,
             suppressible,
         },
     };

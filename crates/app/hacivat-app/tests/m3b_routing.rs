@@ -359,6 +359,8 @@ fn error_bar_and_params_stubs_answer_stop_and_cancel(cx: &mut TestAppContext) {
         name: "id".into(),
         occurrences: 1,
         remembered: None,
+        // ## m3b-t15-gate (named exception, fix round 1): a named parameter's prompt.
+        unit: None,
     }];
     let mut rx = cx.update(|cx| params_prompt::open(prompts, cx));
     assert!(matches!(rx.try_recv(), Ok(None)));
