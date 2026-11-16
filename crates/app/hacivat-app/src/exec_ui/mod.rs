@@ -20,6 +20,9 @@ pub mod chooser;
 pub mod close_prompt;
 // ## m3a-t33-exec-ui (fix round 1): the SQL context, known or unknown.
 pub mod context;
+// ## m3a-t35-shots (named exception): the gutter marks' shots fixtures.
+#[cfg(feature = "shots")]
+pub mod fixtures;
 pub mod marks;
 pub mod orchestrator;
 pub mod tx;

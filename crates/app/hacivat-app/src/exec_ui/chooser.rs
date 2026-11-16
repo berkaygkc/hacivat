@@ -129,6 +129,9 @@ pub(crate) fn open(
         menu.update(cx, |m, _| {
             m.set_access_keys(false);
             m.set_min_width(px(CHOOSER_WIDTH_PX));
+            // ## m3a-t35-shots (named exception): 460 px (NOTES surface 4); the SQL label
+            // ellipsizes inside it, never past the window.
+            m.set_max_width(px(CHOOSER_WIDTH_PX));
             m.title(crate::l10n_global::text_fn_id("hv-chooser-title"));
             m.select(preselect);
         });

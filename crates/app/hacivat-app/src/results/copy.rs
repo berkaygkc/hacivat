@@ -300,22 +300,7 @@ pub fn copy_region(
         let text = build_tsv(&view, &region, headers, MAX_COPY_BYTES);
         return Task::ready(finish(text, rows, cols, cells, cx));
     }
-    let count = saturating_u64(cells);
-    let working = ToastQueue::push_id(
-        cx,
-        Toast::new(
-            ToastKind::Info,
-            Rc::new(move |cx: &App| {
-                tr(
-                    cx,
-                    ids::hv::COPY_WORKING,
-                    ids::hv::HvCopyWorking {
-                        cells: Count(count),
-                    },
-                )
-            }),
-        ),
-    );
+    let working = ToastQueue::push_id(cx, working_toast(saturating_u64(cells)));
     let job =
         cx.background_spawn(async move { build_tsv(&view, &region, headers, MAX_COPY_BYTES) });
     cx.spawn(async move |cx| {
@@ -353,6 +338,35 @@ fn finish(
         return CopyOutcome::TooLarge { cells };
     };
     cx.write_to_clipboard(ClipboardItem::new_string(text));
+    ToastQueue::push(cx, copied_toast(rows, cols, incomplete));
+    CopyOutcome::Copied {
+        rows,
+        cols,
+        incomplete,
+    }
+}
+
+// ## m3a-t35-shots (named exception): the copy toasts, built apart from the clipboard write so
+// the shots render them without touching the machine's clipboard (`fixtures` below).
+
+/// "Copying 48,000 cells…" (a background copy).
+fn working_toast(count: u64) -> Toast {
+    Toast::new(
+        ToastKind::Info,
+        Rc::new(move |cx: &App| {
+            tr(
+                cx,
+                ids::hv::COPY_WORKING,
+                ids::hv::HvCopyWorking {
+                    cells: Count(count),
+                },
+            )
+        }),
+    )
+}
+
+/// "Copied 3 × 8 cells" (or the incomplete-values warning).
+fn copied_toast(rows: u64, cols: u64, incomplete: u64) -> Toast {
     let mut toast = if incomplete == 0 {
         let mut toast = Toast::new(ToastKind::Info, text_fn(ids::hv::COPY_DONE_LINE));
         toast.icon = Some(IconName::CopyCheck);
@@ -385,12 +399,7 @@ fn finish(
             },
         )
     }));
-    ToastQueue::push(cx, toast);
-    CopyOutcome::Copied {
-        rows,
-        cols,
-        incomplete,
-    }
+    toast
 }
 
 /// The "Too much to copy" toast (NOTES surface 14): the selection's cells and both limits.
@@ -419,4 +428,22 @@ fn refuse_too_much(cells: u128, cx: &mut App) {
 
 fn saturating_u64(n: u128) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
+}
+
+// ## m3a-t35-shots: the copy feedback's shots fixtures (NOTES surface 14).
+/// The toasts of NOTES surface 14 without a clipboard write (feature `shots`): the shots'
+/// headless platform may share the machine's clipboard, which a shot must never overwrite.
+#[cfg(feature = "shots")]
+pub mod fixtures {
+    use super::*;
+
+    /// "Copied `rows` × `cols` cells", as a copy of that block says it.
+    pub fn show_copied(rows: u64, cols: u64, cx: &mut App) {
+        ToastQueue::push(cx, copied_toast(rows, cols, 0));
+    }
+
+    /// "Copying `cells` cells…", as a background copy says it while it runs.
+    pub fn show_copying(cells: u64, cx: &mut App) {
+        ToastQueue::push(cx, working_toast(cells));
+    }
 }

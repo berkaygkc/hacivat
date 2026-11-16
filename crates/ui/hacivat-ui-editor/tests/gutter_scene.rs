@@ -595,13 +595,18 @@ fn scrollbar_markers_keep_the_grace_and_merge(cx: &mut TestAppContext) {
             .collect()
     };
     let qs = scene(vcx);
-    assert!(
-        in_track(&qs, c.green.to_hsla()).is_empty(),
-        "the success under the failure"
-    );
+    // ## m3a-t35-shots (T28 review N1): the rows both marks cover show the failure; the
+    // success keeps only the row the failure does not cover (bucketed by pixel row).
     let ink = in_track(&qs, c.text.to_hsla());
-    assert_eq!(ink.len(), 1, "one merged marker: {ink:?}");
+    assert_eq!(ink.len(), 1, "one ink marker: {ink:?}");
     assert!((ink[0].y - 300.0).abs() < 3.0, "{ink:?}");
+    let green = in_track(&qs, c.green.to_hsla());
+    assert!(
+        green
+            .iter()
+            .all(|q| q.y + q.h <= ink[0].y + 0.01 && q.h <= 1.01),
+        "the success shows only above the failure: {green:?}"
+    );
     assert!(
         in_track(&qs, c.amber.to_hsla()).is_empty(),
         "running for under 50 ms"
@@ -610,4 +615,65 @@ fn scrollbar_markers_keep_the_grace_and_merge(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     draw(vcx);
     assert_eq!(in_track(&scene(vcx), c.amber.to_hsla()).len(), 1);
+}
+
+// ## m3a-t35-shots (T28 review N1): markers are bucketed by track pixel row.
+
+/// One failure inside a long successful run: the failure keeps its own pixel rows in ink, and
+/// the run stays green on both sides of it (merging by overlap used to chain the whole run
+/// into one marker in the failure's hue, hiding where the failure is).
+#[cfg(feature = "scene-check")]
+#[gpui::test]
+fn one_failure_in_a_long_successful_run_keeps_green_on_both_sides(cx: &mut TestAppContext) {
+    let text: String = (0..400).map(|i| format!("SELECT {i};\n")).collect();
+    let (e, _svc, vcx) = open(cx, &text, ThemeMode::Dark);
+    let c = &DARK.colors;
+    let v0 = vcx.read(|cx| e.read(cx).snapshot().version);
+    let at = |n: usize| {
+        let s = text.find(&format!("SELECT {n};")).unwrap();
+        s..s + format!("SELECT {n};").len()
+    };
+    // Statements 50..=350 ran; 200 failed.
+    e.update(vcx, |v, cx| {
+        v.add_exec_marks(
+            v0,
+            (50..=350).map(|n| (MarkKey(n as u64), at(n))).collect(),
+            cx,
+        );
+        for n in 50..=350u64 {
+            let state = if n == 200 {
+                ExecMarkState::Failed { sqlstate: None }
+            } else {
+                ExecMarkState::Succeeded {
+                    took: Duration::from_millis(1),
+                    rows: None,
+                }
+            };
+            v.set_exec_state(MarkKey(n), state, None, None, cx);
+        }
+    });
+    draw(vcx);
+    let qs = scene(vcx);
+    let in_track = |color: Hsla| -> Vec<Q> {
+        filled(&qs, color)
+            .into_iter()
+            .filter(|q| q.x >= 792.0)
+            .collect()
+    };
+    let ink = in_track(c.text.to_hsla());
+    assert_eq!(ink.len(), 1, "the failure is one marker: {ink:?}");
+    let (top, bottom) = (ink[0].y, ink[0].y + ink[0].h);
+    assert!((top - 300.0).abs() < 3.0 && ink[0].h <= 3.0, "{ink:?}");
+    let green = in_track(c.green.to_hsla());
+    // Runs of equal hue: one green run above the failure, one below.
+    assert_eq!(green.len(), 2, "{green:?}");
+    assert!(
+        green.iter().any(|q| close(q.y + q.h, top)),
+        "green above: {green:?}"
+    );
+    assert!(
+        green.iter().any(|q| close(q.y, bottom)),
+        "green below: {green:?}"
+    );
+    assert!(green.iter().any(|q| q.y < 80.0) && green.iter().any(|q| q.y + q.h > 520.0));
 }

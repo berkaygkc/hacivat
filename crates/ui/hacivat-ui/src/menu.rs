@@ -171,6 +171,9 @@ pub struct PopupMenu {
     /// (`deferred(anchored())`).
     anchor: Option<Point<Pixels>>,
     min_width: Pixels,
+    // ## m3a-t35-shots (named exception): at most this wide (the chooser's 460 px, NOTES
+    // surface 4); a row's data hint ellipsizes to fit.
+    max_width: Option<Pixels>,
     items: Vec<MenuItemSpec>,
     selected: Option<usize>,
     focus: FocusHandle,
@@ -226,6 +229,7 @@ impl PopupMenu {
             PopupMenu {
                 anchor,
                 min_width: px(MENU_MIN_WIDTH_PX),
+                max_width: None,
                 selected,
                 items,
                 focus,
@@ -239,6 +243,14 @@ impl PopupMenu {
     /// Widens the menu to at least `width` (never under [`MENU_MIN_WIDTH_PX`]).
     pub fn set_min_width(&mut self, width: Pixels) {
         self.min_width = width.max(px(MENU_MIN_WIDTH_PX));
+    }
+
+    // ## m3a-t35-shots (named exception)
+    /// Keeps the menu at most `width` wide (never under its minimum width, whichever is set
+    /// last: the two are resolved when the menu draws); a row's hint ellipsizes to fit, its
+    /// label never. Fix round 1 (M7).
+    pub fn set_max_width(&mut self, width: Pixels) {
+        self.max_width = Some(width);
     }
 
     /// Names the menu for assistive technology.
@@ -435,7 +447,13 @@ impl Render for PopupMenu {
                 let text = (item.label)(cx);
                 // The check column (12 px, `blue` check) sits before the label on every row of a
                 // menu that has one.
-                let mut lead = div().flex().flex_row().items_center().gap(px(t.spacing.xl));
+                // ## m3a-t35-shots (named exception): the label never gives way to the hint.
+                let mut lead = div()
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(t.spacing.xl));
                 if check_column {
                     let mut column = div().flex().flex_none().w(px(IconSize::Chrome.px()));
                     if item.checked {
@@ -484,15 +502,23 @@ impl Render for PopupMenu {
                         .flex_row()
                         .items_center()
                         .gap(px(t.spacing.xl))
-                        .pl(px(t.spacing.xs));
+                        .pl(px(t.spacing.xs))
+                        // ## m3a-t35-shots (named exception): the hint gives way to the label.
+                        .min_w(px(0.0));
                     if let Some(hint) = &item.hint {
                         // Raised Ink Rule: the hint on the raised menu uses text-2.
-                        trail = trail.child(Label::new(
-                            hint(cx),
-                            item.hint_source,
-                            t.type_ramp.caption,
-                            c.text_2.to_hsla(),
-                        ));
+                        // ## m3a-t35-shots (named exception): a hint wider than the menu leaves
+                        // it ellipsizes (the chooser's SQL label, data, NOTES surface 4), the
+                        // whole text in its tooltip; one that fits draws as before.
+                        trail = trail.child(
+                            Label::new(
+                                hint(cx),
+                                item.hint_source,
+                                t.type_ramp.caption,
+                                c.text_2.to_hsla(),
+                            )
+                            .truncate(true),
+                        );
                     }
                     if let Some(shortcut) = &item.keys {
                         trail = trail.child(Label::new(
@@ -558,8 +584,12 @@ impl Render for PopupMenu {
         if let Some((left, top)) = position {
             menu = menu.absolute().left(left).top(top);
         }
+        let mut menu = menu.min_w(self.min_width);
+        // ## m3a-t35-shots (named exception)
+        if let Some(max) = self.max_width {
+            menu = menu.max_w(max.max(self.min_width));
+        }
         let menu = menu
-            .min_w(self.min_width)
             .py(px(t.spacing.xs))
             .px(px(t.spacing.xs))
             .flex()

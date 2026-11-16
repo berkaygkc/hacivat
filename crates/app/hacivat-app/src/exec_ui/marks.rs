@@ -287,7 +287,8 @@ fn run_ended(console: ConsoleId, run: Option<RunId>, cancel_asked: bool, cx: &mu
 /// The short form of a unit's status on a long line (NOTES surface 5): a success's duration
 /// (after the green check), a running statement's clock; none for the others (queued, skipped
 /// and cancelled drop their words; a failure keeps its SQLSTATE chip).
-fn short_of(
+// ## m3a-t35-shots (named exception): crate-visible for the shots fixtures (`exec_ui::fixtures`).
+pub(crate) fn short_of(
     status: &UnitStatus,
     started: Instant,
     elapsed: Duration,
@@ -327,7 +328,8 @@ fn short_of(
 }
 
 /// The mark of a unit in `status`: its state, its tooltip and its end-of-line words.
-fn mark_of(
+// ## m3a-t35-shots (named exception): crate-visible for the shots fixtures (`exec_ui::fixtures`).
+pub(crate) fn mark_of(
     status: &UnitStatus,
     n: u32,
     started: Instant,

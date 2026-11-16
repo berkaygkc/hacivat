@@ -587,6 +587,9 @@ fn paint_body(
                                 size_px,
                                 s.width,
                                 s.truncated,
+                                // ## m3a-t35-shots: wider than the room inside the
+                                // cell's padding (never true of a run that fits).
+                                s.width > width - 2.0 * CELL_PAD_PX + 0.5,
                                 layers::paths::CELL,
                             );
                         }
@@ -607,6 +610,7 @@ fn paint_body(
                     TextSource::Fluent,
                     roles.chip.nominal,
                     0.0,
+                    false,
                     false,
                     layers::paths::CELL,
                 );
@@ -841,6 +845,8 @@ fn paint_header(
                                 role.nominal,
                                 s.width,
                                 s.truncated,
+                                // ## m3a-t35-shots: wider than the header's room.
+                                s.width > avail + 0.5,
                                 path,
                             );
                         }
@@ -928,6 +934,7 @@ fn paint_gutter(
                     TextSource::Data,
                     roles.row_number.nominal,
                     layers::digit_count(r + 1) as f32 * roles.digit_advance,
+                    false,
                     false,
                     layers::paths::ROW_NUMBER,
                 );

@@ -14,7 +14,7 @@
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext, Context, Div, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render,
-    Role, StatefulInteractiveElement, Styled, Window, div, px,
+    Role, StatefulInteractiveElement, Styled, TextRun, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
@@ -69,6 +69,11 @@ impl DialogSize {
         }
     }
 }
+
+// ## m3a-t35-shots (fix round 1, M5)
+/// The card's border width (`popover_surface`'s `border_1`): part of the card's width, not of
+/// its content's.
+const CARD_BORDER_PX: f32 = 1.0;
 
 /// The card of a dialog of `size` (NOTES "NEW primitives": dialog sizes): the popover surface
 /// (raised, 1 px `seam-strong`, radius 6, popover shadow), 16 px padding and a 12 px gap between
@@ -343,11 +348,52 @@ fn has_modifier(stroke: &hacivat_ui_core::gpui_surface::Keystroke) -> bool {
 }
 
 impl Render for Dialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let c = &t.colors;
         let title = (self.spec.title)(cx);
+        // ## m3a-t35-shots (named exception): a title wider than the card's room wraps (a
+        // long locale never clips: the open-transaction prompt names a connection and a
+        // count); one that fits is the single-line label it always was.
+        let style = t.type_ramp.body_strong;
+        let room = self.spec.size.width_px()
+            // ## m3a-t35-shots (fix round 1, M5): the card's 1 px border on each side.
+            - 2.0 * CARD_BORDER_PX
+            - 2.0 * t.spacing.s_3xl
+            - t.spacing.xl
+            - (IconSize::Chrome.px() + 2.0 * t.spacing.xs);
+        let natural = window
+            .text_system()
+            .shape_line(
+                title.clone(),
+                px(style.size_px),
+                &[TextRun {
+                    len: title.len(),
+                    font: hacivat_ui_core::fonts::font_for(&style),
+                    color: c.text.to_hsla(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                None,
+            )
+            .width;
+        let title_element = if f32::from(natural) <= room {
+            Label::new(title.clone(), TextSource::Fluent, style, c.text.to_hsla())
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(crate::text::paragraph(
+                    title.clone(),
+                    TextSource::Fluent,
+                    style,
+                    c.text.to_hsla(),
+                ))
+                .into_any_element()
+        };
         let body = (self.spec.body)(cx);
         let body_text = body.clone();
         let keys = if self.access_keys {
@@ -414,12 +460,7 @@ impl Render for Dialog {
                         .items_start()
                         .justify_between()
                         .gap(px(t.spacing.xl))
-                        .child(Label::new(
-                            title.clone(),
-                            TextSource::Fluent,
-                            t.type_ramp.body_strong,
-                            c.text.to_hsla(),
-                        ))
+                        .child(title_element)
                         .child(close),
                 )
                 // ## m2a-t21-shots: the body wraps to the card (a long locale never clips).
@@ -434,6 +475,9 @@ impl Render for Dialog {
                     div()
                         .flex()
                         .flex_row()
+                        // ## m3a-t35-shots (named exception): buttons that do not fit the card
+                        // in one row wrap to the next (right-aligned), never past its edge.
+                        .flex_wrap()
                         .justify_end()
                         .gap(px(t.spacing.md))
                         .children(buttons),

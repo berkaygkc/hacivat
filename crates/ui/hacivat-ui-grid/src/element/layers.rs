@@ -520,7 +520,9 @@ pub fn paint_skeleton(
     ));
 }
 
-/// Records a painted run in the text registry (only while it is enabled).
+/// Records a painted run in the text registry (only while it is enabled). `clipped`: the run
+/// is wider than the room its cell or header leaves it, so the column's mask cuts it (the
+/// shots harness fails such a frame; Task 35).
 #[allow(clippy::too_many_arguments)]
 pub fn record_text(
     cx: &mut App,
@@ -529,6 +531,8 @@ pub fn record_text(
     size_px: f32,
     painted_px: f32,
     truncated: bool,
+    // ## m3a-t35-shots (named exception)
+    clipped: bool,
     path: &'static str,
 ) {
     TextRegistry::record(cx, || RenderedText {
@@ -536,7 +540,7 @@ pub fn record_text(
         source,
         size_px,
         painted_px,
-        clipped: false,
+        clipped,
         truncated,
         path: SharedString::new_static(path),
         visible: true,

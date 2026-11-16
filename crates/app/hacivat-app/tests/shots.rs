@@ -59,11 +59,28 @@
 //! The import menu opens once the core runtime has read the config: the harness waits for it
 //! (a condition, never a fixed sleep).
 //!
+//! The M3a surfaces (Task 35, `shots/m3a.rs`): NOTES surfaces 1–14 of `design/m3a-query/`,
+//! 68 states at 1280x800 and 960x600, after the 1,012 M1/M2 shots (which stay unchanged). A
+//! state is reached by steps, each followed by a bounded wait on a condition: the UI's timers
+//! run on the headless app's simulated clock, which moves only while a step waits; core work
+//! runs on real threads. Each state also has a state check read from the app's models (the
+//! band, the chooser, the marks, the prompt), and:
+//! - (g) the grid's own text: a header is data (never pseudo-localised, never Fluent), and a
+//!   grid run wider than its cell or header is clipped; a grid state must show a header;
+//! - (b) applies to visible labels: a label its container cut away whole draws no cut text.
+//!
+//! `--shard k/n` renders the k-th of n interleaved slices (run n processes side by side);
+//! each shot prints its time, and the run its total. `SHOTS_DUMP=1` prints every label of
+//! every frame.
+//!
 //! Windows has no headless renderer at the pin: the test prints `shots: no headless renderer
 //! (R8)` and passes.
 // ## m3a-t01b-seams: the shared app test helpers (`stop_core_runtime`, P20).
 #[path = "support/mod.rs"]
 mod support;
+// ## m3a-t35-shots: the M3a surfaces live in their own file (NOTES surfaces 1–14).
+#[path = "shots/m3a.rs"]
+mod m3a;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -187,6 +204,8 @@ enum Surface {
     ConnTestOkPinned,
     ErrTlsNotOffered,
     LiveVaultSecret,
+    // ## m3a-t35-shots: every M3a state (`m3a::M3A`), at 1280x800 and 960x600.
+    M3a(m3a::M3a),
 }
 
 const SURFACES: [Surface; 78] = [
@@ -362,6 +381,8 @@ impl Surface {
             Surface::ConnTestOkPinned => "conn-test-ok-pinned",
             Surface::ErrTlsNotOffered => "conn-error-tls-not-offered",
             Surface::LiveVaultSecret => "live-vault-secret",
+            // ## m3a-t35-shots
+            Surface::M3a(s) => s.name(),
         }
     }
 
@@ -388,7 +409,8 @@ impl Surface {
     /// `shell-minimum` only at the 960x600 minimum window (DESIGN.md).
     fn sizes(self) -> &'static [(f32, f32)] {
         // ## m2b-t24-shots: every M2b surface, at the default window and the minimum one.
-        if self.is_live() || self.is_m2b() {
+        // ## m3a-t35-shots: and every M3a state.
+        if self.is_live() || self.is_m2b() || matches!(self, Surface::M3a(_)) {
             // ## m2b-t22-live: the default window and the minimum one (ruling I1).
             return &[(1280.0, 800.0), (960.0, 600.0)];
         }
@@ -420,6 +442,10 @@ impl Surface {
     /// the capsule fixtures of a production connection (connected, or failed with PRODUCTION
     /// first, NOTES §7).
     fn shows_production(self) -> bool {
+        // ## m3a-t35-shots
+        if let Surface::M3a(s) = self {
+            return s.shows_production();
+        }
         matches!(
             self,
             Surface::ShellDemoProduction
@@ -554,6 +580,8 @@ impl Surface {
             Surface::ConnTestOkPinned => ("#diag-tls-value", None),
             Surface::ErrTlsNotOffered => ("#button-label-fix-ssh", None),
             Surface::LiveVaultSecret => ("#sheet-secret-vault", None),
+            // ## m3a-t35-shots
+            Surface::M3a(s) => s.marker(),
         }
     }
 
@@ -570,6 +598,9 @@ impl Surface {
             // ## m2b-t24-shots (follow-up): the status bar says it too; the fix's neighbour.
             Surface::LiveTlsPinned => &["#status-enc-pinned"],
             Surface::ErrTlsNotOffered => &["#button-label-fix-edit"],
+            // ## m3a-t35-shots: a grid state shows its grid (a header it drew), whatever its
+            // own marker (the strip, the copy toast).
+            Surface::M3a(s) if s.is_grid() => &["#header"],
             _ => &[],
         }
     }
@@ -593,9 +624,10 @@ impl Surface {
     /// show one of [`Surface::also_shown`].
     fn missing_from(self, name: &str, frame: &[RenderedText]) -> Option<String> {
         let (file, text) = self.marker();
-        let shown = frame.iter().any(|r| {
-            r.visible && r.path.contains(file) && text.is_none_or(|t| strip(&r.text) == t)
-        });
+        // ## m3a-t35-shots (fix round 1, I2): a label counts only when it drew something.
+        let shown = frame
+            .iter()
+            .any(|r| drawn(r) && r.path.contains(file) && text.is_none_or(|t| strip(&r.text) == t));
         if !shown {
             return Some(format!(
                 "{name}: the surface is missing: no visible label from {file} {text:?}"
@@ -604,11 +636,31 @@ impl Surface {
         let hidden: Vec<&str> = self
             .also_shown()
             .iter()
-            .filter(|id| !frame.iter().any(|r| r.visible && r.path.ends_with(**id)))
+            .filter(|id| !frame.iter().any(|r| drawn(r) && r.path.ends_with(**id)))
             .copied()
             .collect();
         (!hidden.is_empty())
             .then(|| format!("{name}: the surface is missing: {hidden:?} not visible"))
+    }
+
+    // ## m3a-t35-shots (fix round 1, I2)
+    /// A violation for each trust-signal group ([`m3a::M3a::required`]) of which no label is
+    /// visible and painted: production, read-only, the transaction and the cursor never
+    /// collapse (NOTES cross-cutting #7).
+    fn trust_missing(self, name: &str, frame: &[RenderedText]) -> Vec<String> {
+        let Surface::M3a(state) = self else {
+            return Vec::new();
+        };
+        state
+            .required()
+            .iter()
+            .filter(|group| {
+                !frame
+                    .iter()
+                    .any(|r| drawn(r) && group.iter().any(|id| r.path.ends_with(*id)))
+            })
+            .map(|group| format!("{name}: (t) a trust signal is not shown: {group:?}"))
+            .collect()
     }
 
     // ## m2b-t24-shots (follow-up)
@@ -629,6 +681,10 @@ impl Surface {
 
     /// Brings the surface on screen in a freshly started shell.
     fn open(self, window: &mut Window, cx: &mut App) {
+        // ## m3a-t35-shots: an M3a state is reached by its steps (`m3a::M3a::steps`).
+        if let Surface::M3a(_) = self {
+            return;
+        }
         if self.needs_connections() {
             open_m2a(self, window, cx);
             return;
@@ -896,6 +952,22 @@ fn shots() -> Vec<Shot> {
             });
         }
     }
+    // ## m3a-t35-shots: the M3a states, after every M1/M2 shot.
+    for state in m3a::M3A {
+        let surface = Surface::M3a(state);
+        for &size in surface.sizes() {
+            for theme in THEMES {
+                for locale in LOCALES {
+                    out.push(Shot {
+                        surface,
+                        theme,
+                        locale,
+                        size,
+                    });
+                }
+            }
+        }
+    }
     out
 }
 
@@ -910,6 +982,15 @@ fn out_dir() -> PathBuf {
                     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/shots")
                 })
         })
+}
+
+// ## m3a-t35-shots (fix round 1, I2)
+/// A label that is visible and drew something: what a marker or a trust check may count. A
+/// truncating label that painted nothing drew nothing (it is also recorded not visible, M3);
+/// a label recorded before layout (the notice, `hacivat-ui/src/notice.rs`) carries no painted
+/// width, so painted 0 alone does not mean nothing was drawn.
+fn drawn(r: &RenderedText) -> bool {
+    r.visible && (r.painted_px > 0.0 || !r.truncated)
 }
 
 /// Without isolation marks (U+2068/U+2069), which wrap placeables.
@@ -936,7 +1017,8 @@ fn check_labels(name: &str, locale: &str, frame: &[RenderedText]) -> Vec<String>
                 text, r.path
             ));
         }
-        if r.clipped {
+        // ## m3a-t35-shots: a label cut away whole (not visible) shows no cut text.
+        if r.clipped && r.visible {
             out.push(format!(
                 "{name}: (b) clipped: {:?} ({:.1} px painted) at {}",
                 text, r.painted_px, r.path
@@ -953,6 +1035,38 @@ fn check_labels(name: &str, locale: &str, frame: &[RenderedText]) -> Vec<String>
             out.push(format!(
                 "{name}: (f) runs past its dialog card: {:?} at {}",
                 text, r.path
+            ));
+        }
+    }
+    out
+}
+
+// ## m3a-t35-shots
+/// (g) The grid's own text (the grid records its runs, `hacivat-ui-grid` `layers::record_text`):
+/// a header is data (a column name and its type, `TextSource::Catalog`), so in the pseudo
+/// locales a bracketed header, or a header recorded as Fluent anywhere, is a pseudo-localised
+/// data label; a grid run that is clipped (wider than its cell's or header's room, cut by the
+/// column instead of ellipsized) fails.
+fn check_grid(name: &str, locale: &str, frame: &[RenderedText]) -> Vec<String> {
+    let mut out = Vec::new();
+    for r in frame
+        .iter()
+        .filter(|r| r.path.contains("hacivat-ui-grid/src/"))
+    {
+        let text = strip(&r.text);
+        let header = r.path.ends_with("#header");
+        if header
+            && (r.source == TextSource::Fluent || PSEUDO.contains(&locale) && bracketed(&text))
+        {
+            out.push(format!(
+                "{name}: (g) a grid header is data, never pseudo-localised: {text:?} at {}",
+                r.path
+            ));
+        }
+        if r.clipped {
+            out.push(format!(
+                "{name}: (g) clipped grid text: {text:?} ({:.1} px painted) at {}",
+                r.painted_px, r.path
             ));
         }
     }
@@ -1083,10 +1197,15 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     let mut outcome = hacivat_settings::load(&paths.settings_toml());
     outcome.settings.ui.language = LanguagePref::Tag(shot.locale.to_string());
     outcome.settings.ui.theme = shot.theme;
-    let mut connections = shot
-        .surface
-        .needs_connections()
-        .then(|| fake_connections(&paths));
+    // ## m3a-t35-shots: an M3a shot connects for real, to a fake that dials itself.
+    let m3a_state = match shot.surface {
+        Surface::M3a(s) => Some(s),
+        _ => None,
+    };
+    let mut connections = shot.surface.needs_connections().then(|| match m3a_state {
+        Some(_) => m3a::connections(&paths),
+        None => fake_connections(&paths),
+    });
     // ## m2b-t24-shots (follow-up): the vault shot runs on a machine without a keyring.
     if shot.surface == Surface::LiveVaultSecret
         && let Some(boot) = connections.as_mut()
@@ -1112,7 +1231,7 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     cx.update_window(handle, |_, window, cx| shot.surface.open(window, cx))
         .expect("the window is open");
     cx.run_until_parked();
-    if shot.surface.needs_connections() {
+    if shot.surface.needs_connections() && m3a_state.is_none() {
         // Profile writes and the keyring probe run on the core runtime (P22); let them land.
         std::thread::sleep(std::time::Duration::from_millis(30));
         cx.run_until_parked();
@@ -1130,6 +1249,38 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
         cx.run_until_parked();
+    }
+    // ## m3a-t35-shots: each step, then its condition (bounded, polled; never a fixed sleep).
+    for (at, step) in m3a_state
+        .map(m3a::M3a::steps)
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+    {
+        cx.update_window(handle, |_, window, cx| (step.act)(window, cx))
+            .expect("the window is open");
+        cx.run_until_parked();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.update(|cx| cx.refresh_windows());
+            cx.run_until_parked();
+            if cx
+                .update_window(handle, |_, window, cx| (step.ready)(window, cx))
+                .expect("the window is open")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{}: timed out waiting for step {at}",
+                shot.surface.name()
+            );
+            // The UI's timers run on the simulated clock (the preview's 50 ms, the toolbar's
+            // and the marks' 1 Hz clocks): it moves only while a step waits. Core work runs on
+            // real threads: the poll yields to it.
+            cx.advance_clock(std::time::Duration::from_millis(25));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
     }
     cx.update(|cx| cx.refresh_windows());
     cx.run_until_parked();
@@ -1151,6 +1302,28 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         failures.push(format!("{name}: the frame drew no label"));
     }
     failures.extend(shot.surface.missing_from(&name, &frame));
+    // ## m3a-t35-shots: the state check (the app's models agree with what the shot claims),
+    // and the grid's own checks (headers are data; no grid text clipped).
+    if let Some(state) = m3a_state {
+        failures.extend(
+            cx.update_window(handle, |_, window, cx| state.check(window, cx, &frame))
+                .expect("the window is open")
+                .map(|v| format!("{name}: {v}")),
+        );
+    }
+    failures.extend(check_grid(&name, shot.locale, &frame));
+    failures.extend(shot.surface.trust_missing(&name, &frame));
+    if std::env::var_os("SHOTS_DUMP").is_some() {
+        for r in &frame {
+            println!(
+                "  {:?} {:?} {} {:.1}px",
+                r.path,
+                strip(&r.text),
+                r.visible,
+                r.size_px
+            );
+        }
+    }
     // ## m2b-t24-shots (follow-up)
     failures.extend(shot.surface.cut_short(&name, shot.locale, &frame));
     let badge = cx
@@ -1231,14 +1404,28 @@ fn render_all_surfaces(names: &[String], all: bool) {
     }
     let mut failures = Vec::new();
     let mut rendered = 0;
+    let run_started = std::time::Instant::now();
+    let mut slowest = std::time::Duration::ZERO;
     for shot in shots() {
         if !names.contains(&shot.file_name(2.0)) {
             continue;
         }
+        // ## m3a-t35-shots: the per-shot and total harness time (the plan's Step 4 record).
+        let started = std::time::Instant::now();
         failures.extend(render(shot, &dir));
+        let took = started.elapsed();
+        slowest = slowest.max(took);
+        println!("shot time {}: {} ms", shot.file_name(2.0), took.as_millis());
         rendered += 1;
     }
-    println!("shots: {rendered} rendered into {}", dir.display());
+    let total = run_started.elapsed();
+    println!(
+        "shots: {rendered} rendered into {} in {:.1} s (mean {} ms, slowest {} ms per shot)",
+        dir.display(),
+        total.as_secs_f64(),
+        total.as_millis() / rendered.max(1) as u128,
+        slowest.as_millis()
+    );
     assert!(rendered > 0, "no shot selected");
     assert!(
         failures.is_empty(),
@@ -1254,9 +1441,23 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     // M2b T22: 10 surfaces x 8 at 1280x800 and again at 960x600; M2b T24: 34 surfaces likewise.
     assert_eq!(
         all.len(),
-        8 * 4 * 2 + 4 + 26 * 8 + 4 * 8 + 10 * 8 * 2 + 34 * 8 * 2
+        8 * 4 * 2 + 4 + 26 * 8 + 4 * 8 + 10 * 8 * 2 + 34 * 8 * 2 + m3a::M3A.len() * 8 * 2
     );
-    assert_eq!(all.len(), 1012);
+    // ## m3a-t35-shots: the 1,012 M1/M2 shots first, unchanged; then 68 M3a states x 16.
+    assert_eq!(all.len(), 1012 + 68 * 16);
+    assert!(
+        all[..1012]
+            .iter()
+            .all(|s| !matches!(s.surface, Surface::M3a(_)))
+    );
+    for state in m3a::M3A {
+        let surface = Surface::M3a(state);
+        assert_eq!(
+            all.iter().filter(|s| s.surface == surface).count(),
+            16,
+            "{state:?}"
+        );
+    }
     let names: Vec<String> = all.iter().map(|s| s.file_name(2.0)).collect();
     // ## m2b-t24-shots: every T24 surface at both sizes, in every locale and theme.
     for surface in &SURFACES[FIRST_T24..] {
@@ -1278,6 +1479,9 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     assert!(names.contains(&"conn-dialog-new-light-tr-XT-1024x700@2x.png".to_string()));
     assert!(names.contains(&"capsule-production-ro-dark-tr-1280x800@2x.png".to_string()));
     assert!(names.contains(&"shell-minimum-dark-en-960x600@2x.png".to_string()));
+    // ## m3a-t35-shots
+    assert!(names.contains(&"strip-closed-tx-ended-light-tr-XT-960x600@2x.png".to_string()));
+    assert!(names.contains(&"marks-run-dark-en-1280x800@2x.png".to_string()));
     assert!(!names.contains(&"conn-error-auth-dark-en-1024x700@2x.png".to_string()));
     let unique: std::collections::BTreeSet<&String> = names.iter().collect();
     assert_eq!(unique.len(), names.len());
@@ -1366,6 +1570,15 @@ fn pseudo_labels_must_be_bracketed_and_unclipped_and_at_least_11_px() {
     };
     let found = check_labels("s", "en", &[past]);
     assert!(found.len() == 1 && found[0].contains("(f)"), "{found:?}");
+    // ## m3a-t35-shots: a label its container cut away whole (a status cell that gave way to
+    // nothing, the Overflow Rule) draws nothing: not a clipped label. A visible one is.
+    let hidden = RenderedText {
+        visible: false,
+        ..label("PostgreSQL", TextSource::Fluent, 12.0, true)
+    };
+    assert!(check_labels("s", "en", &[hidden]).is_empty());
+    let shown = label("Ln 2, Col 38", TextSource::Fluent, 12.0, true);
+    assert_eq!(check_labels("s", "en", &[shown]).len(), 1);
 }
 
 /// The ignored test: it renders, so it runs only on request.
@@ -1385,6 +1598,13 @@ struct Cli {
     /// Ignored tests too (`--include-ignored`).
     include_ignored: bool,
     terse: bool,
+    // ## m3a-t35-shots
+    /// `--shard k/n`: the k-th of n interleaved slices of the selected shots (1-based), so n
+    /// processes render the matrix side by side.
+    shard: Option<(usize, usize)>,
+    /// Fix round 1 (M6): a `--shard` value that is not `k/n` (`1 <= k <= n`): the binary
+    /// exits 2 instead of rendering everything.
+    bad_shard: Option<String>,
 }
 
 impl Cli {
@@ -1394,6 +1614,9 @@ impl Cli {
         while let Some(a) = it.next() {
             match a.as_str() {
                 "--exact" => cli.exact = true,
+                // ## m3a-t35-shots
+                "--shard" => cli.set_shard(it.next().unwrap_or_default()),
+                s if s.starts_with("--shard=") => cli.set_shard(s["--shard=".len()..].to_string()),
                 "--list" => cli.list = true,
                 "--ignored" => cli.ignored_only = true,
                 "--include-ignored" => cli.include_ignored = true,
@@ -1436,20 +1659,46 @@ impl Cli {
         if self.skipped(RENDER_TEST) {
             return None;
         }
-        if self.selects_test(RENDER_TEST) {
-            return Some(all.to_vec());
-        }
-        let picked: Vec<String> = all
-            .iter()
-            .filter(|s| self.filters.iter().any(|f| self.matches(f, s)))
-            .cloned()
-            .collect();
+        let picked: Vec<String> = if self.selects_test(RENDER_TEST) {
+            all.to_vec()
+        } else {
+            all.iter()
+                .filter(|s| self.filters.iter().any(|f| self.matches(f, s)))
+                .cloned()
+                .collect()
+        };
+        // ## m3a-t35-shots: one shard of what is selected.
+        let picked: Vec<String> = match self.shard {
+            Some((k, n)) => picked
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| i % n == k - 1)
+                .map(|(_, s)| s)
+                .collect(),
+            None => picked,
+        };
         (!picked.is_empty()).then_some(picked)
+    }
+
+    // ## m3a-t35-shots (fix round 1, M6)
+    fn set_shard(&mut self, value: String) {
+        match parse_shard(&value) {
+            Some(shard) => self.shard = Some(shard),
+            None => self.bad_shard = Some(value),
+        }
     }
 
     fn runs_ignored(&self) -> bool {
         self.ignored_only || self.include_ignored
     }
+}
+
+// ## m3a-t35-shots
+/// `k/n` with `1 <= k <= n`.
+fn parse_shard(v: &str) -> Option<(usize, usize)> {
+    let (k, n) = v.split_once('/')?;
+    let (k, n) = (k.parse().ok()?, n.parse().ok()?);
+    (1..=n).contains(&k).then_some((k, n))
 }
 
 /// libtest's contract without its threads. `--list` lists every test (`--ignored`: only the
@@ -1459,7 +1708,23 @@ impl Cli {
 /// one test), the binary fails instead of passing without rendering.
 fn main() {
     let cli = Cli::parse(std::env::args().skip(1));
-    let checks: [(&str, fn()); 5] = [
+    // ## m3a-t35-shots (fix round 1, M6)
+    if let Some(bad) = &cli.bad_shard {
+        eprintln!("--shard {bad:?}: expected k/n with 1 <= k <= n");
+        std::process::exit(2);
+    }
+    let checks: [(&str, fn()); 8] = [
+        // ## m3a-t35-shots (fix round 1, I2)
+        ("trust_signals_must_be_drawn", trust_signals_must_be_drawn),
+        // ## m3a-t35-shots
+        (
+            "grid_text_is_data_and_never_clipped",
+            grid_text_is_data_and_never_clipped,
+        ),
+        (
+            "an_m3a_grid_state_without_its_grid_fails",
+            an_m3a_grid_state_without_its_grid_fails,
+        ),
         (
             "a_missing_surface_fails_its_frame",
             a_missing_surface_fails_its_frame,
@@ -1567,6 +1832,236 @@ fn a_pushed_title_bar_fails_its_frame() {
     );
     // No title bar drawn at all.
     assert!(!check_title_bar(960.0, TitleBarProbe::default(), None).is_empty());
+}
+
+// ## m3a-t35-shots
+/// (g) A grid's header is data: bracketed in a pseudo-locale (or recorded as Fluent) it fails;
+/// a clipped grid run fails in any locale; a fitting, ellipsized cell passes.
+fn grid_text_is_data_and_never_clipped() {
+    let grid = |path: &str, text: &str, source, clipped| RenderedText {
+        text: text.to_string().into(),
+        source,
+        size_px: 13.0,
+        painted_px: 40.0,
+        clipped,
+        truncated: false,
+        path: path.to_string().into(),
+        visible: true,
+        outside_card: false,
+    };
+    let header = "crates/ui/hacivat-ui-grid/src/element/layers.rs#header";
+    let cell = "crates/ui/hacivat-ui-grid/src/element/layers.rs#cell";
+    let fine = [
+        grid(header, "customer", TextSource::Catalog, false),
+        grid(cell, "[İzmir]", TextSource::Data, false),
+        RenderedText {
+            truncated: true,
+            ..grid(cell, "teslimat cuma günü", TextSource::Data, false)
+        },
+    ];
+    for locale in LOCALES {
+        assert!(check_grid("s", locale, &fine).is_empty(), "{locale}");
+    }
+    let pseudo = [grid(header, "[ćüšŧöḿéř]", TextSource::Catalog, false)];
+    assert_eq!(check_grid("s", "en-XA", &pseudo).len(), 1);
+    assert!(
+        check_grid("s", "en", &pseudo).is_empty(),
+        "data may be bracketed"
+    );
+    let fluent = [grid(header, "customer", TextSource::Fluent, false)];
+    assert_eq!(check_grid("s", "tr", &fluent).len(), 1);
+    let clipped = [grid(cell, "İzmir", TextSource::Data, true)];
+    let found = check_grid("s", "en", &clipped);
+    assert!(
+        found.len() == 1 && found[0].contains("(g) clipped"),
+        "{found:?}"
+    );
+    // Only the grid's own records are judged here.
+    let label = [grid(
+        "crates/ui/hacivat-ui/src/menu.rs:1:1",
+        "[x]",
+        TextSource::Catalog,
+        true,
+    )];
+    assert!(check_grid("s", "en-XA", &label).is_empty());
+}
+
+// ## m3a-t35-shots
+/// Every M3a grid state needs a header its grid drew, besides its own marker: a frame with the
+/// strip or the toast but no grid fails; every grid state's marker is specific (the header's
+/// data text, or its own file's label).
+fn an_m3a_grid_state_without_its_grid_fails() {
+    let at = |path: &str, text: &str| RenderedText {
+        text: text.to_string().into(),
+        source: TextSource::Fluent,
+        size_px: 13.0,
+        painted_px: 10.0,
+        clipped: false,
+        truncated: false,
+        path: path.to_string().into(),
+        visible: true,
+        outside_card: false,
+    };
+    let strip = at(
+        "crates/app/hacivat-app/src/results/strip.rs:329:21#strip-sentence",
+        "Cursor open",
+    );
+    let header = |text: &str| {
+        at(
+            "crates/ui/hacivat-ui-grid/src/element/layers.rs#header",
+            text,
+        )
+    };
+    let toast = at(
+        "crates/ui/hacivat-ui/src/toast.rs:300:9",
+        "Copied 3 × 2 cells",
+    );
+    let mut grids = 0;
+    for state in m3a::M3A {
+        let surface = Surface::M3a(state);
+        if !state.is_grid() {
+            continue;
+        }
+        grids += 1;
+        let (file, _) = surface.marker();
+        assert!(
+            file == m3a::GRID_HEADER || file.ends_with(".rs:"),
+            "{state:?}: a specific marker"
+        );
+        let without = [strip.clone(), toast.clone()];
+        assert!(surface.missing_from("s", &without).is_some(), "{state:?}");
+        let with = [
+            strip.clone(),
+            toast.clone(),
+            header("customer"),
+            header("token"),
+            header("c0"),
+        ];
+        assert!(surface.missing_from("s", &with).is_none(), "{state:?}");
+    }
+    assert!(grids >= 12, "{grids}");
+    // A results surface's header marker is the column's data name, not any header.
+    let rows = Surface::M3a(m3a::M3a::GridRange);
+    assert!(rows.missing_from("s", &[header("id")]).is_some());
+    // The toolbar states name their connection: another console's toolbar does not count.
+    let toolbar = |name: &str| {
+        [at(
+            "crates/app/hacivat-app/src/console/toolbar.rs:284:9#console-connection-name",
+            name,
+        )]
+    };
+    // Fix round 1 (I1): a toolbar state needs its own state label; the connection name alone
+    // (what a frame shows when the fixture did nothing) fails.
+    let running = Surface::M3a(m3a::M3a::ToolbarRunning);
+    assert!(running.missing_from("s", &toolbar("orders-dev")).is_some());
+    let state_label = |id: &str| {
+        at(
+            &format!("crates/app/hacivat-app/src/console/toolbar.rs:250:17#{id}"),
+            "x",
+        )
+    };
+    for (state, id) in [
+        (m3a::M3a::ToolbarRunning, "console-running"),
+        (m3a::M3a::ToolbarCancelling, "console-cancelling"),
+        (m3a::M3a::ToolbarReadOnly, "console-lock-label"),
+        (m3a::M3a::ToolbarWaiting, "console-waiting-text"),
+    ] {
+        let surface = Surface::M3a(state);
+        assert!(
+            surface.missing_from("s", &toolbar("orders-dev")).is_some(),
+            "{state:?}"
+        );
+        assert!(
+            surface.missing_from("s", &[state_label(id)]).is_none(),
+            "{state:?}"
+        );
+    }
+    // Describe and "Nothing to run" need the status message, not the editor segment.
+    let segment = [at(
+        "crates/app/hacivat-app/src/console/status.rs:116:13#editor-segment-lncol",
+        "Ln 2, Col 38",
+    )];
+    let describe = Surface::M3a(m3a::M3a::ContextDescribe);
+    assert!(describe.missing_from("s", &segment).is_some());
+}
+
+// ## m3a-t35-shots (fix round 1, I2)
+/// A marker or a trust signal counts only when visible and painted; each production,
+/// transaction and cursor state fails without its trust label.
+fn trust_signals_must_be_drawn() {
+    // Painted 0 models an ellipsized label that had no room for its ellipsis.
+    let at = |id: &str, painted: f32, visible: bool| RenderedText {
+        text: "x".into(),
+        source: TextSource::Fluent,
+        size_px: 12.0,
+        painted_px: painted,
+        clipped: false,
+        truncated: painted == 0.0,
+        path: format!("crates/x.rs:1:1#{id}").into(),
+        visible,
+        outside_card: false,
+    };
+    // A marker that drew nothing, or is hidden, does not count.
+    let cursor = Surface::M3a(m3a::M3a::StatusCursorOpen);
+    assert!(
+        cursor
+            .missing_from("s", &[at("button-label-status-cursor", 40.0, true)])
+            .is_none()
+    );
+    assert!(
+        cursor
+            .missing_from("s", &[at("button-label-status-cursor", 0.0, true)])
+            .is_some()
+    );
+    assert!(
+        cursor
+            .missing_from("s", &[at("button-label-status-cursor", 40.0, false)])
+            .is_some()
+    );
+    // Production: the notice (either form) and the status bar's environment.
+    let prod = Surface::M3a(m3a::M3a::ConsoleProduction);
+    let full = [
+        at("button-label-console-prod-notice", 90.0, true),
+        at("status-env-label", 90.0, true),
+    ];
+    assert!(prod.trust_missing("s", &full).is_empty());
+    let short = [
+        at("button-label-console-prod-short", 50.0, true),
+        at("status-env-label", 90.0, true),
+    ];
+    assert!(prod.trust_missing("s", &short).is_empty());
+    let found = prod.trust_missing("s", &[at("status-env-label", 90.0, true)]);
+    assert!(found.len() == 1 && found[0].contains("(t)"), "{found:?}");
+    let squeezed = [
+        at("button-label-console-prod-notice", 0.0, true),
+        at("status-env-label", 90.0, false),
+    ];
+    assert_eq!(prod.trust_missing("s", &squeezed).len(), 2);
+    // Transaction and cursor.
+    let everything = Surface::M3a(m3a::M3a::StatusEverything);
+    let all = [
+        at("status-tx-open", 90.0, true),
+        at("button-label-status-cursor", 60.0, true),
+        at("status-rows", 60.0, true),
+    ];
+    assert!(everything.trust_missing("s", &all).is_empty());
+    assert_eq!(everything.trust_missing("s", &all[..1]).len(), 2);
+    let failed = Surface::M3a(m3a::M3a::PromptFailed);
+    assert_eq!(failed.trust_missing("s", &all).len(), 1);
+    // Every production state requires the production signals.
+    for state in m3a::M3A {
+        if state.shows_production() {
+            assert_eq!(state.required().len(), 2, "{state:?}");
+        }
+    }
+    // An M1/M2 surface has none.
+    assert!(Surface::Shell.trust_missing("s", &[]).is_empty());
+    // A label recorded before layout (painted 0, not truncating) counts: the M2a notice.
+    let notice = RenderedText {
+        truncated: false,
+        ..at("notice", 0.0, true)
+    };
+    assert!(drawn(&notice));
 }
 
 fn a_missing_surface_fails_its_frame() {
@@ -1796,7 +2291,7 @@ fn the_command_line_reads_like_libtest() {
     let all: Vec<String> = shots().iter().map(|s| s.file_name(2.0)).collect();
     // No filter: everything; the render is ignored unless asked for.
     let cli = parse("--nocapture --test-threads 1");
-    assert_eq!(cli.shots(&all).map(|s| s.len()), Some(1012));
+    assert_eq!(cli.shots(&all).map(|s| s.len()), Some(all.len()));
     assert!(!cli.runs_ignored());
     // nextest: `--list --format terse --ignored` lists only the render.
     let cli = parse("--list --format terse --ignored");
@@ -1810,8 +2305,33 @@ fn the_command_line_reads_like_libtest() {
     );
     assert_eq!(
         parse("--ignored render_all").shots(&all).map(|s| s.len()),
-        Some(1012)
+        Some(all.len())
     );
+    // ## m3a-t35-shots: `--shard k/n` interleaves; the shards cover the selection once.
+    let mut covered: Vec<String> = (1..=3)
+        .flat_map(|k| {
+            parse(&format!("--ignored --shard {k}/3"))
+                .shots(&all)
+                .expect("a shard")
+        })
+        .collect();
+    covered.sort();
+    let mut every = all.clone();
+    every.sort();
+    assert_eq!(covered, every);
+    assert_eq!(
+        parse("--ignored --shard=2/2 marks-run")
+            .shots(&all)
+            .map(|s| s.len()),
+        Some(8)
+    );
+    assert_eq!(parse("--shard 0/2").shard, None);
+    assert_eq!(parse("--shard 3/2").shard, None);
+    // Fix round 1 (M6): an invalid value is kept, and `main` exits 2 on it.
+    assert_eq!(parse("--shard 3/2").bad_shard.as_deref(), Some("3/2"));
+    assert_eq!(parse("--shard=x").bad_shard.as_deref(), Some("x"));
+    assert_eq!(parse("--shard").bad_shard.as_deref(), Some(""));
+    assert_eq!(parse("--shard 2/3").bad_shard, None);
     // A dialog surface renders at both sizes.
     assert_eq!(
         parse("--ignored conn-dialog-new-dark")

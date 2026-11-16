@@ -338,6 +338,54 @@ fn popup_menu_navigates_skips_disabled_and_chooses(cx: &mut TestAppContext) {
     assert_eq!(events.take(), vec![PopupMenuEvent::Dismissed]);
 }
 
+// ## m3a-t35-shots: a menu held to a maximum width ellipsizes a row's data hint, never its
+// label (the chooser's SQL label, NOTES surface 4).
+#[gpui::test]
+fn a_menu_at_its_max_width_ellipsizes_the_hint_not_the_label(cx: &mut TestAppContext) {
+    use hacivat_ui::menu::{MenuItemSpec, PopupMenu};
+    use hacivat_ui_core::theme::{Theme, ThemeMode};
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    let label = |s: &'static str| -> hacivat_ui::text::TextFn { Rc::new(move |_| s.into()) };
+    let long =
+        "SELECT o.id, o.total, o.status FROM orders o JOIN customers c ON c.id = o.customer_id";
+    let (_host, vcx) = cx.add_window_view(|window, cx| {
+        let menu = PopupMenu::new(
+            point(px(10.), px(10.)),
+            vec![
+                MenuItemSpec::new(label("Whole script · 2 statements"), "run.whole")
+                    .hint(label(long))
+                    .hint_source(TextSource::Data),
+            ],
+            window,
+            cx,
+        );
+        menu.update(cx, |m, _| {
+            m.set_min_width(px(300.0));
+            m.set_max_width(px(300.0));
+        });
+        MenuHost(menu)
+    });
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let hint = frame
+        .iter()
+        .find(|r| r.text.as_ref() == long)
+        .expect("the hint");
+    assert!(hint.truncated && !hint.clipped, "{hint:?}");
+    let row = frame
+        .iter()
+        .find(|r| r.text.as_ref() == "Whole script · 2 statements")
+        .expect("the label");
+    assert!(!row.truncated && !row.clipped, "{row:?}");
+}
+
 struct MenuHost(gpui::Entity<hacivat_ui::menu::PopupMenu>);
 
 impl gpui::Render for MenuHost {
