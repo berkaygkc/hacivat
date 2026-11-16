@@ -69,6 +69,11 @@ bölüm 2'dedir (yerel kapı) ve bölüm 3'tedir (CI).
 - Bağlanınca konsol bağlanır: sekme başlığı profil adıdır (`pg17`; aynı bağlantının ikinci konsolu
   `pg17 (2)`), başlık **eş aralıklı (mono)** yazıyla çizilir; editör görünür ve odaklanır.
 
+- F5 (PO bulgusu 1): odaktaki konsol başka bir bağlantıya bağlıyken Gezgin'den (çift tıklama ya da
+  **Connect** / **Bağlan**) bağlanılan profil için açık konsol yoksa, ona bağlı yeni bir konsol açılır
+  ve odaklanır; o profilin konsolu zaten varsa o konsol öne gelir ve odaklanır. Bağlı olmayan odaktaki
+  konsol yine önce bağlanır (R-M3-37).
+
 **Geçti:** ana sayfa → bağlı editör geçişi, başlık mono.
 
 **Ön doğrulama:** `unbound_console_shows_the_m2_home_and_binds_on_first_connect` (console.rs; başlık
@@ -114,17 +119,19 @@ Enter yalnızca ortadaki ifadeyi çalıştırıyor (ilk çalıştırmada tablo y
 (`caret_sel_choose_goldens`, `preview_equals_execution_for_exact_items`). Görüntüler `preview-*`,
 `chooser-candidates`, `chooser-hover`, `chooser-uncertain`.
 
-## 3. İki ifadeyi seçip çalıştırma: iki sonuç sekmesi, oluk işaretleri
+## 3. İki ifadeyi seçip çalıştırma: güncelleme sayısı Çıktı'da, satırlar sonuç sekmesinde
 
 **Yap:** INSERT ile SELECT'i birlikte seçin, ⌘↵.
 
 **İyi görünüm:**
-- Sonuç alanında iki sekme: **Result 1** / **Sonuç 1**, **Result 2** / **Sonuç 2** (Output /
-  **Çıktı** önde).
-- Her ifadenin satırında oluk işareti: **executed · … ms · … rows** / **çalıştı · … ms · … satır**
-  (satır döndürmeyen ifade için **executed · … ms** / **çalıştı · …**).
+- Yalnızca satır döndüren ifade bir sonuç sekmesi açar. INSERT'in sonucu bir güncelleme
+  sayısıdır: **Output** / **Çıktı** sekmesinde bir satır olarak görünür (**3 rows affected** /
+  **3 satır etkilendi**, süresiyle). SELECT **Result 1** / **Sonuç 1** sekmesini açar (Output önde).
+  (F5 düzeltmesi: önceki metin "Result 1 + Result 2" bekliyordu; INSERT sonuç sekmesi açmaz.)
+- Her ifadenin satırında oluk işareti: INSERT için **3 rows affected · … ms** / **3 satır
+  etkilendi · … ms**, SELECT için **executed · … ms · … rows** / **çalıştı · … ms · … satır**.
 
-**Geçti:** iki sekme, iki işaret, süre ve satır sayısı doğru.
+**Geçti:** Çıktı'da güncelleme sayısı, bir sonuç sekmesi, iki işaret; süre ve satır sayısı doğru.
 
 **Ön doğrulama:** `selection_of_two_statements_runs_two_units` (exec_ui.rs),
 `two_units_two_tabs_titled_result_n` (hacivat-exec service.rs), `titles_are_result_n`,
@@ -148,9 +155,13 @@ kez daha aynı SELECT'i çalıştırın ve bu kez kapatmadan `SELECT 1;` çalı�
   veritabanı anlık görüntüsü tutuluyor**; durum çubuğunda **Cursor open** / **İmleç açık**.
 - Kaydırma daha fazla satır getirir (**Fetching… N rows** / **Getiriliyor… N satır**).
 - Close cursor sonrası: **Cursor closed after N rows.** / **N satırdan sonra imleç kapatıldı.**
-- `SELECT 1` önce imleci bırakır: **Cursor closed after N rows: another statement needed the
-  session.** / **N satırdan sonra imleç kapandı: oturum başka bir ifade için gerekiyordu.** Sonra
-  `SELECT 1` çalışır. Çıktı günlüğü Hacivat'ın kendi işleminin geri alındığını yazar (P26).
+- `SELECT 1` önce imleci bırakır, sonra çalışır. Yeni çalıştırmanın ilk sonucu aynı **Result 1** /
+  **Sonuç 1** sekmesini alır (sekmeler ifade sırasına göre anahtarlanır), bu yüzden eski sonucun
+  şeridi artık görünmez. Bırakma notu **Output** / **Çıktı** sekmesindedir (okunmamış noktası
+  yanar); tek satırdır: **Cursor closed after N rows: another statement needed the session.
+  Hacivat's transaction was rolled back.** / **N satırdan sonra imleç kapandı: oturum başka bir
+  ifade için gerekiyordu. Hacivat'ın işlemi geri alındı.** (P26). (F5 düzeltmesi: önceki metin
+  bunu şeritte bekliyordu; Çıktı sekmesine bakın.)
 
 **Geçti:** satırlar korunuyor, metinler doğru, `SELECT 1` takılmadan çalışıyor.
 
@@ -222,9 +233,12 @@ uygulamaya yapıştırma.
 - Editör bölmesinin üstünde tek bir kırmızı ince çizgi (hairline); araç çubuğunda ortam renk örneği
   (swatch) ve **Production is read-only in this version** / **Üretim bu sürümde salt okunur**
   (dar bölmede **read-only** / **salt okunur**). Kapsül ve durum çubuğu üretimi gösterir.
-- INSERT gönderilmez: oluk **not sent: read-only** / **gönderilmedi: salt okunur**; günlükte **Not
-  sent: this console is read-only, and the statement can change data or schema.** / **Gönderilmedi:
-  bu konsol salt okunur ve ifade veriyi ya da şemayı değiştirebilir.**
+- INSERT gönderilmez (istemci katmanı, F5): oluk **not sent: read-only** / **gönderilmedi: salt
+  okunur**; günlükte **Not sent: this console is read-only, and the statement can change data or
+  schema.** / **Gönderilmedi: bu konsol salt okunur ve ifade veriyi ya da şemayı
+  değiştirebilir.** Çıktı'da `25006` (sunucunun reddi) görünmemelidir: görünürse istemci katmanı
+  çalışmamıştır. İlk anahtar sözcüğü yazmayı göstermeyen bir ifade (örneğin `WITH … INSERT`)
+  sunucunun salt okunur işlemine takılır; bu ikinci katmandır.
 - `SELECT` aynı konsolda çalışır.
 
 **Geçti:** üç işaret de görünüyor, INSERT reddedilip günlüğe yazılıyor, tablo değişmiyor.
@@ -278,9 +292,16 @@ kapatıp **Roll back and close** / **Geri al ve kapat**'a basın.
 CALL hv_test.hv_t14_three();
 ```
 
-(Bu yordam Docker testlerinin kurduğu fikstürdür ve `mysql84`'te vardır. Yoksa önce
+`CALL`'u **tek başına** çalıştırın: editörde yalnızca bu satır olsun ya da imleci `CALL` satırına
+koyup seçicide **Statement** / **İfade**'yi seçin. (Bu yordam Docker testlerinin kurduğu fikstürdür
+ve `mysql84`'te vardır. Yoksa önce, ayrı bir çalıştırmada yalnızca
 `CREATE PROCEDURE hv_test.hv_t14_three() BEGIN SELECT 1 AS n; SELECT 2 AS n; SELECT 3 AS n; END`
-çalıştırın.) Ardından SQLite bağlantısında adım 2'nin üç ifadesini çalıştırın.
+çalıştırın; bölücü `BEGIN … END` gövdesini tek ifade tutar.) F5 notu: `CREATE PROCEDURE` ile `CALL`
+birlikte (tüm betik) çalıştırılırsa ve yordam zaten varsa, `CREATE` 42000 "already exists" ile
+başarısız olur ve çalıştırma ilk hatada durur (R-M3-26): `CALL` hiç gönderilmez, oluğu **skipped: an
+earlier statement failed** / **atlandı** der ve sonuç görünmez. PO demosundaki "CALL sonuç
+vermedi" gözlemi büyük olasılıkla budur. Ardından SQLite bağlantısında adım 2'nin üç ifadesini
+çalıştırın.
 
 **İyi görünüm:**
 - Seçici, şerit, oluk ve ızgara PostgreSQL'deki gibi.
@@ -401,7 +422,7 @@ order). Türkçe metinleri bu görüntülerde de gözden geçirin. Onaydan sonra
 |---|---|---|
 | 1 Ana sayfa → bağlı konsol, mono başlık | | |
 | 2 Vurgu, şerit, seçici, üzerine gelme, Enter | | |
-| 3 İki ifade, iki sekme, oluk işaretleri | | |
+| 3 İki ifade: Çıktı'da güncelleme sayısı, bir sonuç sekmesi, oluk işaretleri | | |
 | 4 1M satır, imleç açık, getirme, kapatma, `SELECT 1` | | |
 | 5 ⌘. ≤ 1 s, satırlar kalıyor | | |
 | 6 3 × 5 ham TSV, NULL boş | | |
