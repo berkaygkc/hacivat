@@ -412,6 +412,9 @@ fn every_action_title_exists_in_en() {
 /// `connections::install` registration). The M2a pending list was emptied at the gate (T22);
 /// the M3a pending list (the editor, grid and console rows Task 1b bound before their
 /// commands existed) was emptied by Tasks 30, 32 and 33 and deleted at the M3a gate (Task 37).
+/// Commands the app registers on macOS only (`console::commands`, F4 row 6b).
+const MACOS_ONLY_COMMANDS: &[&str] = &["app.character_palette"];
+
 #[gpui::test]
 fn keymap_commands_are_registered(cx: &mut TestAppContext) {
     let reg = cx.update(|cx| {
@@ -421,6 +424,11 @@ fn keymap_commands_are_registered(cx: &mut TestAppContext) {
     for p in ALL_PLATFORMS {
         for preset in PRESETS {
             for b in load(p, preset, None).0.bindings() {
+                // ## m3a-f4-ime: `app.character_palette` is registered on macOS only (its row
+                // lives in the macOS keymap); off macOS the registry has no such command.
+                if !cfg!(target_os = "macos") && MACOS_ONLY_COMMANDS.contains(&b.command.as_str()) {
+                    continue;
+                }
                 assert!(reg.get(&b.command).is_some(), "{}", b.command);
             }
         }
