@@ -520,9 +520,13 @@ async fn a_schema_write_behind_a_version_gated_comment_is_a_gap() {
     // tripwire behind it, never that the write is stopped.)
     let f = fake_mysql_ro_clean();
     assert_eq!(
-        guarded_on(&f, DbmsKind::MySql, "/*!99999 SELECT 1 */ CREATE TABLE x (a int)")
-            .await
-            .unwrap_err(),
+        guarded_on(
+            &f,
+            DbmsKind::MySql,
+            "/*!99999 SELECT 1 */ CREATE TABLE x (a int)"
+        )
+        .await
+        .unwrap_err(),
         ExecErrorKind::EnforcementGap(GapReason::WriteSucceeded)
     );
 }

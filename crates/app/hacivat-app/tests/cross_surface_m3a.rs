@@ -275,12 +275,7 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
     let editor = editor_of(vcx, id);
     // The PO's demo statement (Turkish identifiers).
     let sent_before = fake(vcx).call_log().len();
-    type_script(
-        vcx,
-        &editor,
-        "INSERT INTO müşteri VALUES (9, 'x', 1);\n",
-        3,
-    );
+    type_script(vcx, &editor, "INSERT INTO müşteri VALUES (9, 'x', 1);\n", 3);
     editor_command(vcx, &editor, "editor.run");
     wait_until(vcx, "the denied mark", |vcx| {
         matches!(
@@ -596,9 +591,7 @@ fn first_grid(vcx: &VisualTestContext, id: ConsoleId) -> Option<Entity<GridView>
 }
 
 /// A console with a 3 × 3 result in its grid; the editor keeps the focus, as after ⌘↵.
-fn three_by_three(
-    cx: &mut TestAppContext,
-) -> (&'static mut VisualTestContext, Entity<GridView>) {
+fn three_by_three(cx: &mut TestAppContext) -> (&'static mut VisualTestContext, Entity<GridView>) {
     let rows = FakeQuery {
         prefix: "SELECT id, city, total FROM shops",
         sets: vec![FakeResultSet {
@@ -710,7 +703,9 @@ fn edit_copy_and_select_all_from_the_menu_reach_the_focused_grid(cx: &mut TestAp
     vcx.run_until_parked();
     // What the macOS Edit menu items deliver (F1).
     let menu = |vcx: &mut VisualTestContext, id: &str| {
-        vcx.dispatch_action(hacivat_ui_core::gpui_surface::RunCommand { id: id.to_string().into() });
+        vcx.dispatch_action(hacivat_ui_core::gpui_surface::RunCommand {
+            id: id.to_string().into(),
+        });
         vcx.run_until_parked();
     };
     menu(vcx, "editor.copy");

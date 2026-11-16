@@ -1834,7 +1834,9 @@ fn a_call_with_three_result_sets_shows_the_first_and_notes_the_rest(cx: &mut Tes
         .map(|r| r.text.to_string())
         .collect();
     assert!(
-        drawn.iter().any(|t| t.contains("2 more result sets not shown")),
+        drawn
+            .iter()
+            .any(|t| t.contains("2 more result sets not shown")),
         "{drawn:?}"
     );
     assert!(drawn.iter().any(|t| t == "Result 1"), "{drawn:?}");

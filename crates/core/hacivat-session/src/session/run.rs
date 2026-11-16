@@ -32,8 +32,8 @@ use crate::session::readonly::{GuardFailure, guarded_query, may_write};
 use crate::session::recovery::{autocommit_set, track_statement};
 use crate::session::schema::{Family, family, first_keyword};
 use crate::session::{
-    DenyLayer, ExecError, ExecErrorKind, ObserverRef, Reply, RowsOutcome, RunEvent, RunSpec, RunSummary,
-    RunUnit, TxError, TxMode, TxOwner, UnitEnd, UnitId, needs_schema_reprobe,
+    DenyLayer, ExecError, ExecErrorKind, ObserverRef, Reply, RowsOutcome, RunEvent, RunSpec,
+    RunSummary, RunUnit, TxError, TxMode, TxOwner, UnitEnd, UnitId, needs_schema_reprobe,
 };
 
 /// How one unit ended.

@@ -1621,10 +1621,7 @@ async fn production_console_rejects_insert_on_every_engine() {
         }
         // ## m3a-f5-demo (DEMO-7): refused by the console, nothing sent (`input`), on
         // every engine; not merely rejected by the server.
-        assert!(
-            outcomes.iter().all(|o| o == INPUT),
-            "{id}: {outcomes:?}"
-        );
+        assert!(outcomes.iter().all(|o| o == INPUT), "{id}: {outcomes:?}");
         // Reads still run on production.
         let ran = prod.ok(&count).await;
         assert_eq!(int(&cell(ran.tab(0), 0, 0)), 1, "{id}");
@@ -2168,7 +2165,9 @@ async fn call_with_three_result_sets_shows_the_first_through_run() {
             "{id}: {:?}",
             c.log_ids()
         );
-        let script = c.run(&format!("{create};\nCALL hv_test.hv_t14_three();")).await;
+        let script = c
+            .run(&format!("{create};\nCALL hv_test.hv_t14_three();"))
+            .await;
         assert_eq!(script.names(), ["Failed", "Skipped"], "{id}");
         record.add(
             line,

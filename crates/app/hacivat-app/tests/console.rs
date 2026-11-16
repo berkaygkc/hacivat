@@ -1590,8 +1590,7 @@ fn toolbar_fixtures_show_running_waiting_and_the_lock(cx: &mut TestAppContext) {
 /// Connect) runs.
 fn explorer_connect(vcx: &VisualTestContext, name: &str) {
     let id = profile_id(vcx, name);
-    vcx.cx
-        .update(|cx| ConnectionsModel::select(cx, Some(id)));
+    vcx.cx.update(|cx| ConnectionsModel::select(cx, Some(id)));
     vcx.run_until_parked();
     assert!(run(vcx, "connection.toggle_connect"), "toggle_connect ran");
 }
@@ -1611,7 +1610,10 @@ fn console_tabs(vcx: &VisualTestContext) -> usize {
 #[gpui::test]
 fn an_explorer_connect_opens_and_focuses_a_console_for_that_profile(cx: &mut TestAppContext) {
     let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
-    add_profile(vcx, test_profile("orders-stg", Some(EnvTag::Staging), "10.0.0.8"));
+    add_profile(
+        vcx,
+        test_profile("orders-stg", Some(EnvTag::Staging), "10.0.0.8"),
+    );
     activate(vcx);
     let (dev, stg) = (profile_id(vcx, "orders-dev"), profile_id(vcx, "orders-stg"));
 
@@ -1660,7 +1662,10 @@ fn an_explorer_connect_opens_and_focuses_a_console_for_that_profile(cx: &mut Tes
 #[gpui::test]
 fn another_connect_opens_no_console(cx: &mut TestAppContext) {
     let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
-    add_profile(vcx, test_profile("orders-stg", Some(EnvTag::Staging), "10.0.0.8"));
+    add_profile(
+        vcx,
+        test_profile("orders-stg", Some(EnvTag::Staging), "10.0.0.8"),
+    );
     activate(vcx);
     connect_and_wait(vcx, "orders-dev");
     wait_active_console(vcx);

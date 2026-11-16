@@ -87,11 +87,7 @@ const PG_SERVER_BLOCKED: &[Row] = &[
     // Pinned difference from run B (`[PG_RO, PG_PRIV]` there): the typed PostgreSQL driver
     // refuses `COPY` before anything is sent (Task 12), so `Run` never reaches the server.
     ("P14", "COPY hv_t22 FROM '/etc/hostname'", &[PROTOCOL]),
-    (
-        "P26",
-        "CREATE TEMP TABLE hv_t22_tmp (a int)",
-        &[INPUT],
-    ),
+    ("P26", "CREATE TEMP TABLE hv_t22_tmp (a int)", &[INPUT]),
     ("P37", "SELECT nextval('hv_t22_seq')", &[PG_RO, PG_PRIV]),
     ("P37", "SELECT setval('hv_t22_seq', 100)", &[PG_RO, PG_PRIV]),
     ("P38", "SELECT hv_t22_sd_write()", &[PG_RO]),
@@ -127,11 +123,7 @@ const MY_TABLE_PRIV: &str = "1142";
 
 /// Run B's MySQL server-blocked rows on this task's fixture table.
 const MYSQL_SERVER_BLOCKED: &[Row] = &[
-    (
-        "M1",
-        "/*!50000 DROP TABLE hv_t22_bypass */",
-        &[INPUT],
-    ),
+    ("M1", "/*!50000 DROP TABLE hv_t22_bypass */", &[INPUT]),
     (
         "M1",
         "/*!50000 INSERT INTO hv_t22_bypass VALUES (50) */",
@@ -149,16 +141,8 @@ const MYSQL_SERVER_BLOCKED: &[Row] = &[
         "PREPARE hv_t22_s FROM 'DELETE FROM hv_t22_bypass'",
         &[PROTOCOL],
     ),
-    (
-        "M8",
-        "CREATE TABLE hv_t22_m8 (a int)",
-        &[INPUT],
-    ),
-    (
-        "M8",
-        "TRUNCATE TABLE hv_t22_bypass",
-        &[INPUT],
-    ),
+    ("M8", "CREATE TABLE hv_t22_m8 (a int)", &[INPUT]),
+    ("M8", "TRUNCATE TABLE hv_t22_bypass", &[INPUT]),
     ("M8", "DELETE FROM hv_t22_bypass", &[INPUT]),
     (
         "M8",
@@ -167,11 +151,7 @@ const MYSQL_SERVER_BLOCKED: &[Row] = &[
     ),
     ("M12", "HANDLER hv_t22_bypass OPEN", &[PROTOCOL]),
     ("M13", "XA START 'hv_t22'", &[PROTOCOL]),
-    (
-        "M17",
-        "CREATE TEMPORARY TABLE hv_t22_tmp (a int)",
-        &[INPUT],
-    ),
+    ("M17", "CREATE TEMPORARY TABLE hv_t22_tmp (a int)", &[INPUT]),
     ("M7", "/*!50000 COMMIT */", &["1a"]),
 ];
 
@@ -890,8 +870,8 @@ async fn pg_neutralised_rows(t: &DockerTarget, failures: &mut Vec<String>, recor
                 "WITH w AS (INSERT INTO hv_t22 VALUES (7) RETURNING a) SELECT * FROM w",
                 false,
             )
-                .await
-                .0,
+            .await
+            .0,
         );
         if write != PG_RO {
             lingering.push(format!("a write after it → {write}"));

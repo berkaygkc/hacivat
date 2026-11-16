@@ -185,8 +185,7 @@ fn follow_explorer_connects(cx: &mut App) {
     let Some(m) = cx.try_global::<ConnectionsModel>() else {
         return;
     };
-    let states: Vec<(ProfileId, LiveState)> =
-        wanted.into_iter().map(|p| (p, m.live(p))).collect();
+    let states: Vec<(ProfileId, LiveState)> = wanted.into_iter().map(|p| (p, m.live(p))).collect();
     for (profile, state) in states {
         match state {
             LiveState::Connected(_) => {
@@ -194,9 +193,8 @@ fn follow_explorer_connects(cx: &mut App) {
                 cx.defer(move |cx| console_for_connect(profile, cx));
             }
             LiveState::Failed(_) | LiveState::Lost { .. } => forget_explorer_connect(cx, profile),
-            LiveState::Connecting(_)
-            | LiveState::Reconnecting { .. }
-            | LiveState::Disconnected => {}
+            LiveState::Connecting(_) | LiveState::Reconnecting { .. } | LiveState::Disconnected => {
+            }
         }
     }
 }
@@ -237,7 +235,10 @@ fn console_for_connect(profile: ProfileId, cx: &mut App) {
         // An unbound focused console that did not bind on its own (it never saw the profile
         // disconnected) binds now: R-M3-37's rule comes first.
         if let Some(tab) = active
-            && matches!(ws.tab_kind(tab), Some(TabKind::Console { profile: None, .. }))
+            && matches!(
+                ws.tab_kind(tab),
+                Some(TabKind::Console { profile: None, .. })
+            )
             && let Some(host) = host_of(cx, tab)
         {
             // After this update: the binding updates the workspace.

@@ -119,7 +119,11 @@ fn run_in_workspace_window(id: &str, cx: &mut App) {
 /// focused, Copy and Select All are the grid's.
 const EDIT_MENU_ROUTES: [(&str, &str, &str); 2] = [
     ("editor.copy", hacivat_ui_grid::GRID_CONTEXT, "grid.copy"),
-    ("editor.select_all", hacivat_ui_grid::GRID_CONTEXT, "grid.select_all"),
+    (
+        "editor.select_all",
+        hacivat_ui_grid::GRID_CONTEXT,
+        "grid.select_all",
+    ),
 ];
 
 /// The command a menu item `id` runs in `window`: its own, or the focused grid's for Copy and

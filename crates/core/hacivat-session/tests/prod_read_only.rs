@@ -158,7 +158,11 @@ async fn a_production_write_runs_inside_the_guards_read_only_transaction() {
     let refused = Recorder::new();
     let e = run_spec(
         &h,
-        spec_with(&refused, &[("DELETE FROM t", false)], FetchPolicy::default()),
+        spec_with(
+            &refused,
+            &[("DELETE FROM t", false)],
+            FetchPolicy::default(),
+        ),
     )
     .await
     .expect_err("a plain write is refused");
