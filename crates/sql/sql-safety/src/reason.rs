@@ -47,11 +47,31 @@ pub enum ReasonCode {
     HintSetVar,
     RoutineCall,
     SetNotAllowlisted,
+    // ## m3b-t04-safety: the policy's own reasons, one per effect group it refuses or
+    // confirms that had no code (`decide` names every refusal; Task 4).
+    /// The statement changes table data (`WRITE_DATA`).
+    WriteData,
+    /// The statement changes the schema (`DDL`, `DDL_TEMP`).
+    SchemaChange,
+    /// The statement locks whole tables (`LOCK_TABLE`).
+    TableLock,
+    /// The statement takes an advisory lock (`ADVISORY_LOCK`).
+    AdvisoryLock,
+    /// The statement reaches files or the network outside the database (`EXTERNAL_IO`).
+    ExternalIo,
+    /// The statement prepares a statement for later (`PREPARE`).
+    PreparedStatement,
+    /// The statement sends a notification (`NOTIFY`).
+    Notify,
+    /// The statement's effects could not be determined (`UNKNOWN`, an empty or unnamed set).
+    EffectsUnknown,
+    /// The statement holds a destructive pattern (`DestructiveKind`; the report lists which).
+    Destructive,
 }
 
 impl ReasonCode {
     /// Every code, in declaration order.
-    pub const ALL: [ReasonCode; 37] = [
+    pub const ALL: [ReasonCode; 46] = [
         ReasonCode::NotImplemented,
         ReasonCode::LexError,
         ReasonCode::ClientCommand,
@@ -89,6 +109,15 @@ impl ReasonCode {
         ReasonCode::HintSetVar,
         ReasonCode::RoutineCall,
         ReasonCode::SetNotAllowlisted,
+        ReasonCode::WriteData,
+        ReasonCode::SchemaChange,
+        ReasonCode::TableLock,
+        ReasonCode::AdvisoryLock,
+        ReasonCode::ExternalIo,
+        ReasonCode::PreparedStatement,
+        ReasonCode::Notify,
+        ReasonCode::EffectsUnknown,
+        ReasonCode::Destructive,
     ];
 
     /// The Fluent message id, a literal per arm (P24).
@@ -131,6 +160,15 @@ impl ReasonCode {
             ReasonCode::HintSetVar => "safety-reason-hint-set-var",
             ReasonCode::RoutineCall => "safety-reason-routine-call",
             ReasonCode::SetNotAllowlisted => "safety-reason-set-not-allowlisted",
+            ReasonCode::WriteData => "safety-reason-write-data",
+            ReasonCode::SchemaChange => "safety-reason-schema-change",
+            ReasonCode::TableLock => "safety-reason-table-lock",
+            ReasonCode::AdvisoryLock => "safety-reason-advisory-lock",
+            ReasonCode::ExternalIo => "safety-reason-external-io",
+            ReasonCode::PreparedStatement => "safety-reason-prepared-statement",
+            ReasonCode::Notify => "safety-reason-notify",
+            ReasonCode::EffectsUnknown => "safety-reason-effects-unknown",
+            ReasonCode::Destructive => "safety-reason-destructive",
         }
     }
 }
@@ -198,6 +236,15 @@ mod tests {
             ReasonCode::HintSetVar => 34,
             ReasonCode::RoutineCall => 35,
             ReasonCode::SetNotAllowlisted => 36,
+            ReasonCode::WriteData => 37,
+            ReasonCode::SchemaChange => 38,
+            ReasonCode::TableLock => 39,
+            ReasonCode::AdvisoryLock => 40,
+            ReasonCode::ExternalIo => 41,
+            ReasonCode::PreparedStatement => 42,
+            ReasonCode::Notify => 43,
+            ReasonCode::EffectsUnknown => 44,
+            ReasonCode::Destructive => 45,
         }
     }
 

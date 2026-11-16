@@ -6,9 +6,9 @@
 //! runs it on `hacivat-exec::classify_pool` (16 MiB stacks, R-M3-53). [`decide`] maps a report
 //! to a verdict under a [`Profile`]; [`gate_class`] is the exec gate's view of one statement.
 //!
-//! Fail closed: until the filling tasks merge, `classify` answers `Unknown` with the
-//! pre-decision `[NotImplemented]`, `decide` answers `Deny` and `gate_class` answers
-//! `Unknown` (F31).
+//! Fail closed: until Task 14 merges, `classify` answers `Unknown` with the pre-decision
+//! `[NotImplemented]`, which `decide` denies in every profile (F31). `decide`, `gate_class`
+//! and `opens_write` are Task 4's: an empty or unnamed effect set is `Unknown`, never a read.
 //!
 //! Backends: libpg_query through `sql-oracle-pg` for PostgreSQL (Task 9) and the interim
 //! `sqlparser` path with a lexer pre-scan for MySQL, MariaDB and SQLite (Task 10). No

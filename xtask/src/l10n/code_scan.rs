@@ -8,10 +8,12 @@ use super::rules::finding;
 use super::{Finding, Severity};
 
 /// ID prefixes that double as `hacivat_l10n::ids` module names.
-const ID_MODULES: [&str; 12] = [
+const ID_MODULES: [&str; 13] = [
     "cm", "hui", "hv", "hc", "kg", "ps", "pw", "pe", "db", "error",
     // ## m3a-t01b-seams: the output log's messages (`hacivat-core.ftl`, Task 23; P24).
     "exec", "cursor",
+    // ## m3b-t04-safety: the classifier's messages (`hacivat-core.ftl`, Task 4; P-M3b-T4-1).
+    "safety",
 ];
 
 #[derive(Debug, Clone, PartialEq)]

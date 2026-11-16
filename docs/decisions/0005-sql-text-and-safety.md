@@ -588,3 +588,89 @@ the catalog read is a `hacivat-exec` Docker test, P-M3b-13), `bench-sql` and `fe
 - **`sql-testkit`** no longer depends on `sql-safety`. It reaches `sql-oracle-pg` only through
   its `differential` feature, so the lexer's plain test loop builds neither libpg_query nor
   `sqlparser`.
+
+## m3b-t04 — the policy table
+
+Task 4 fills `sql-safety`'s report model: `class_of`, `merge`, `gate_class`, `opens_write`,
+`decide` and the Fluent ids of every class, reason and destructive pattern.
+
+**Every effect bit maps on purpose.** Three tables name each of the 20 effect bits once:
+`COARSE_OF_BIT` (the `CoarseClass`), `GATE_OF_BIT` (the `GateClass`) and the policy's
+`GROUP_OF_BIT` (a group in `data/profiles.toml`). A unit test checks each table against
+`EffectSet::all()`, so a new bit without a row fails the build's tests. At run time these sets
+are `Unknown`, never `Read`:
+
+- the empty set;
+- a set with a bit no table names;
+- a `RiskFlags` value with a bit that has no name.
+
+`GateClass` is declared in its total order (P-M3b-4) and derives `Ord`. Destructive reasons
+raise the gate class whatever the effects say: an unsafe-DML kind raises it to at least
+`DmlUnsafe`, a destructive-DDL kind to at least `DdlDestructive`. `DYNAMIC_SQL` is `Unknown`.
+`ROUTINE_CALL` is `Routine` for the gate but `Unknown` for the coarse class, because a routine
+body is opaque (`alg/13` test 13).
+
+**`decide`.** The rule for each (effect group, profile) pair lives in `data/profiles.toml`,
+compiled in. The loader rejects unknown and missing keys. If the table doesn't load, `decide`
+denies everything. The strictest rule wins: Deny, then Confirm, then Allow. Fail-closed
+choices:
+
+- `decide` judges request-level fields as well as statements. A statement's `class` field, the
+  request's class, request-level effect bits the statements don't show, and request-level flags
+  each count, so a producer that leaves a field behind can't lower the decision.
+- A reason is evidence of its effect group. `ExternalFile` on a bare `READ` still denies on
+  read-only.
+- Doubt codes deny in every profile, `Admin` included. These are the lexing, splitting,
+  parsing and limit codes, `LexModeChange` and `PrivilegeChange`.
+- `FnUnknown`, `OperatorUnknown`, `CastUnknown`, `DynamicSql` and `ProceduralCode` count as
+  `unknown`.
+- An executable comment (D-058) or a denylisted function denies on the read-only profiles and
+  for an AI agent.
+- A `SET_VAR` hint denies unless its variable is harmless.
+- `MAX_EXECUTION_TIME` denies when its limit is 0 or can't be read.
+
+**Harmless `SET` (P-M3b-6).** `decide` has no dialect argument, so `SafetyReport` gains
+`dialect: Option<DialectId>`. Task 14's `classify` sets it, and `pre_decided` leaves it `None`.
+A `SET` statement counts as a read in every profile only when all of these hold:
+
+- its effects are exactly `SESSION_STATE`;
+- it has no flag, no destructive pattern and a class no higher than `Session`;
+- it has at least one reason, and every reason is `SessionState` with the variable name as its
+  argument;
+- `set_allowed(dialect, name)` accepts every one of those names.
+
+Backends (Tasks 9 and 10) must emit one `SessionState` reason per `SET` target. Any other `SET`
+names `SetNotAllowlisted` for each refused target. A `SET` with no dialect or no named target
+is never harmless.
+
+**Differences from `alg/13` SQL-SAFE-04's table.**
+
+- Unbounded `UPDATE`/`DELETE` also confirms under `ddl`. That profile is a superset of
+  `read_write_dml`, so it must not ask less.
+- `CALL` has its own `routine` row with the `unknown` rules.
+- An AI agent is refused `EXPLAIN ANALYZE` on both read-only profiles. Per the plan's test
+  name, a human alone may run it there.
+- A harmless `SET` is a read in every profile, not only the read-only ones, so the allowlist
+  never makes a read-only profile more permissive than a writable one.
+- `LEX_MODE_CHANGE` denies in every profile, as `alg/13` asks of Karagöz, because `decide` is
+  shared.
+- The spec's info-disclosure and resource-heavy rows have no bits in M3b. Task 3's function
+  data denies the functions behind them.
+
+**New reason codes.** The policy names every refusal, so `ReasonCode` gains nine codes for
+groups that had none: `WriteData`, `SchemaChange`, `TableLock`, `AdvisoryLock`, `ExternalIo`,
+`PreparedStatement`, `Notify`, `EffectsUnknown` and `Destructive`.
+
+**Fluent.** The `safety-*` ids live in `hacivat-core.ftl` under the block `## m3b-t04-safety`.
+The `safety` prefix is added to three lists, a named exception (P-M3b-T4-1):
+
+- xtask's domain prefixes;
+- its id-module list;
+- `hacivat-l10n-schema::is_valid_id`.
+
+Function, operator and cast names reach the messages as `$name`, and table names as `$table`.
+Fluent isolates both with FSI/PDI. The Turkish messages carry `# Review: PO`.
+
+**Visibility.** `effects::class_of` and `report::merge` are `pub`, not `pub(crate)` as the plan
+says. The plan's integration tests call them, and P-M3b-16's report builders must merge the
+way `classify` does.

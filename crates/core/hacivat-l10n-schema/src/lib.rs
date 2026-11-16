@@ -188,8 +188,10 @@ pub fn extract_partial(ftl: &str, file: &str) -> (Vec<Signature>, Vec<SchemaErro
 pub fn is_valid_id(id: &str) -> bool {
     // `exec` and `cursor` (M3a): execution log and cursor messages in `hacivat-core.ftl`, which
     // xtask's scan list already names (Task 1b); the grammar now agrees with it.
-    const PREFIXES: [&str; 12] = [
-        "cm", "hui", "hv", "hc", "kg", "ps", "pw", "pe", "db", "error", "exec", "cursor",
+    // ## m3b-t04-safety: `safety` (M3b), the classifier's classes, reasons and destructive
+    // patterns in `hacivat-core.ftl` (Task 4, P-M3b-T4-1).
+    const PREFIXES: [&str; 13] = [
+        "cm", "hui", "hv", "hc", "kg", "ps", "pw", "pe", "db", "error", "exec", "cursor", "safety",
     ];
     let Some((prefix, rest)) = id.split_once('-') else {
         return false;
