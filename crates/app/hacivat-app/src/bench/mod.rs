@@ -963,6 +963,35 @@ mod tests {
         h.stop();
     }
 
+    /// B3's replay types through the window's dispatcher as `b3::script` does: the console's
+    /// editor focused, each key sent by `b3::send_key` (CI run 43779216264 panicked there with
+    /// "cannot update Workspace while it is already being updated").
+    #[gpui::test]
+    fn b3_replay_types_into_the_console(cx: &mut TestAppContext) {
+        let mut h = boot(cx, b3::profile(), fake_registry(fake_pg(Vec::new())));
+        let text = "SELECT 1;\n";
+        let (_, editor) = h.console(text, None);
+        h.ws.update(h.vcx, |_, window, cx| {
+            let handle = editor.focus_handle(cx);
+            window.focus(&handle, cx);
+            editor.update(cx, |e, cx| e.select_range(text.len()..text.len(), cx));
+        })
+        .unwrap();
+        h.vcx.update(|window, _| window.refresh());
+        h.vcx.run_until_parked();
+        for key in b3::typing_script(4) {
+            b3::send_key(h.vcx, h.ws, key).unwrap();
+            h.vcx.update(|window, _| window.refresh());
+            h.vcx.run_until_parked();
+        }
+        let typed = h
+            .vcx
+            .cx
+            .read(|cx| editor.read(cx).snapshot().buffer.to_string());
+        assert_eq!(typed, format!("{text} AND"));
+        h.stop();
+    }
+
     /// Review I4 through the real console path: a ≈ 2 MB file of short lines opens in the full
     /// tier (what `typing`, `typing-with-results` and `open` measure), and a line over 64 KB
     /// opens the file in Reduced mode, which those modes refuse.
