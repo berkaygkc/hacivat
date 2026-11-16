@@ -1061,6 +1061,285 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
 .dlg.form .cb .cbl { display:flex; flex-direction:column; gap:1px; }
 .dlg.form .cb .cbl .sub { font-size:12.5px; line-height:1.35; }
 .in.short2 { flex:0 0 84px; }
+
+/* ═══════════════════════════════════════════════════════════════
+   M3c additions (Task 2b, surfaces 14–25). Everything above this line
+   is the M3b mock's CSS, unchanged. Everything below reuses the harman
+   tokens only; NOTES.md "M3c surfaces" lists each primitive. No new
+   hue, no new filled block, no transforms, filters, blur or masks.
+   ═══════════════════════════════════════════════════════════════ */
+/* Multi-cursor: every caret is the same 2 px blue bar and they blink in phase; secondary selections use the same tint */
+.lines .selr.sec { background:var(--blue-a2); }
+.code.blur .lines .selr.sec { background:var(--seam-2); }
+/* Find highlights: other matches are a 1 px text-3 outline (no fill, no hue); the current match is the selection */
+.lines .hit { position:absolute; top:0; height:18px; z-index:1; outline:1px solid var(--text-3-base); outline-offset:-1px; }
+/* Folding: the fold column is the gutter's last 14 px; chevrons show on gutter hover or focus, a folded row always shows its chevron */
+.gut .fd { position:absolute; right:1px; width:12px; height:18px; display:flex; align-items:center; justify-content:center; color:var(--text-2); cursor:pointer; border-radius:3px; }
+.gut .fd:hover { color:var(--text); }
+.gut .fd.kf { outline:1px solid var(--blue); outline-offset:0; color:var(--text); }
+.gut .play { position:absolute; left:6px; width:16px; height:18px; display:flex; align-items:center; justify-content:center; color:var(--text-2); cursor:pointer; border-radius:3px; }
+.gut .play.hov { color:var(--text); background:var(--hover); }
+.gut .play.kf { outline:1px solid var(--blue); outline-offset:-1px; color:var(--text); }
+.gut .play svg { width:10px; height:10px; }
+.fph { display:inline-flex; align-items:center; gap:3px; height:14px; margin-left:8px; padding:0 5px; border-radius:3px; background:var(--seam-soft); color:var(--text-2);
+  font:500 11px/14px "Source Sans 3", system-ui, sans-serif; vertical-align:1px; cursor:pointer; white-space:nowrap; }
+:root[data-theme="light"] .fph { background:var(--seam); }
+.fph:hover { color:var(--text); }
+.lines .l.foldh::after { content:""; position:absolute; left:0; right:0; bottom:0; height:1px; background:var(--seam-soft); }
+/* Editor vertical scrollbar with find-hit markers (2 px ticks, text-2; the current hit blue) */
+.vsb { position:absolute; right:0; top:0; bottom:8px; width:9px; border-left:1px solid var(--seam-soft); z-index:4; }
+.vsb .th { position:absolute; left:2px; right:2px; border-radius:3px; background:var(--seam-2); }
+.vsb .hm { position:absolute; left:1px; right:1px; height:2px; background:var(--text-2); }
+.vsb .hm.cur { background:var(--blue); }
+
+/* The find field (shared by the editor find bar and the grid find bar): a 24 px field well with the query in mono and
+   20 px toggles inside it; outside it the count, previous / next, Select all occurrences and close */
+.fbar { height:32px; flex:none; display:flex; align-items:center; gap:6px; padding:0 10px 0 12px; border-bottom:1px solid var(--seam); background:var(--raised); --text-3:var(--text-2); white-space:nowrap; overflow:hidden; }
+.ffield { height:24px; display:flex; align-items:center; gap:2px; padding:0 2px 0 7px; border:1px solid var(--seam-2); border-radius:4px; background:var(--panel); --text-3:var(--text-3-base);
+  flex:1 1 300px; min-width:150px; max-width:380px; }
+:root[data-theme="light"] .ffield { background:var(--ground); }
+.ffield:focus-within { outline:1px solid var(--blue); outline-offset:1px; }
+.ffield.bad { border-color:var(--text-2); }
+.ffield > svg { color:var(--text-3); flex:none; margin-right:4px; }
+.ffield input { flex:1; min-width:40px; border:0; background:transparent; outline:0; font:400 12px "Fragment Mono", monospace; color:var(--text); padding:0; height:22px; font-variant-ligatures:none; }
+.ffield input::placeholder { color:var(--text-3); font:400 12.5px "Source Sans 3", system-ui, sans-serif; }
+.ftog { width:20px; height:18px; flex:none; display:flex; align-items:center; justify-content:center; border:1px solid transparent; border-radius:3px; background:transparent; color:var(--text-2); cursor:pointer; padding:0; }
+.ftog:hover { background:var(--hover); color:var(--text); }
+.ftog[aria-pressed="true"] { background:var(--blue-a2); border-color:var(--blue); color:var(--text); }
+.ftog:focus-visible { outline:1px solid var(--blue); outline-offset:0; }
+.ftog svg { width:13px; height:13px; }
+.fcount { flex:none; min-width:58px; display:flex; align-items:center; gap:6px; color:var(--text-2); font-size:12px; }
+.fcount .mono { font-size:11.5px; color:var(--text-2); }
+.fcount.ink { color:var(--text); }
+.fcount.ink svg { color:var(--text); }
+.fcount .run { width:7px; height:7px; }
+.fcount .inc { color:var(--text-2); text-decoration:underline dotted; text-underline-offset:3px; cursor:help; }
+.fbar .btn, .rtool .fgrp2 .btn { height:22px; padding:0 7px; font-size:12px; gap:5px; }
+.fbar .btn.icon, .rtool .fgrp2 .btn.icon { padding:0 4px; }
+.fbar .grow { flex:1 1 0; min-width:0; }
+
+/* Result toolbar (M3c): the view Segmented (22 px inside the 34 px bar) and the record toggle; the grid find bar replaces the left group */
+.rtool .seg { height:22px; }
+.rtool .seg button { padding:0 8px; font-size:12px; gap:5px; }
+.rtool .seg button[disabled] { color:var(--text-3-base); cursor:not-allowed; }
+.rtool .seg button[disabled]:hover { color:var(--text-3-base); }
+.rtool .seg.ico button .bl { display:none; }
+.rtool .seg.ico button { padding:0 6px; }
+.rtool .tgl[aria-pressed="true"] { background:var(--blue-a2); border-color:var(--blue); color:var(--text); }
+.rtool .tgl.word { color:var(--text); }
+.rtool .fgrp2 { display:flex; align-items:center; gap:6px; flex:1 1 auto; min-width:0; }
+.rtool .fgrp2 .ffield { flex:1 1 320px; max-width:400px; min-width:164px; }
+.rtool [data-prio][hidden] { display:none !important; }
+.rhint .btn { height:20px; padding:0 7px; font-size:12px; margin:-2px 0 -2px 4px; }
+.rhint .run { width:7px; height:7px; margin-top:4px; flex:none; }
+.rhint .t { flex:1; min-width:0; }
+.rhint .acts { display:flex; gap:4px; flex:none; }
+
+/* Grid (M3c): sort levels, frozen layer, multi-rect, the unsorted-tail boundary, substring hits, the resize handle */
+.gh .gc .sort .lv { font:400 11px "Fragment Mono", monospace; color:var(--blue); }
+.gh .gc.sorted .hn { color:var(--text); }
+.gc.frz2 { border-right:1px solid var(--seam-2) !important; }
+.gscroll { display:flex; overflow:hidden; flex:1; min-width:0; }
+.gscroll > .gin { display:flex; flex:none; }
+.gr.tail0 .gc { border-top:1px dashed var(--text-3-base); }
+.gc .hit { outline:1px solid var(--text-3-base); outline-offset:0; }
+.gc .hit.cur { background:var(--blue-a2); outline-color:var(--blue); }
+.gh .gc .rsz { position:absolute; right:0; top:0; bottom:0; width:3px; z-index:2; }
+.gh .gc .rsz.on { background:var(--text-2); width:1px; right:0; }
+.rguide { position:absolute; top:36px; bottom:0; width:0; border-left:1px dashed var(--text-2); z-index:4; pointer-events:none; }
+.gtip { position:absolute; z-index:46; padding:4px 8px; background:var(--raised); border:1px solid var(--seam-2); border-radius:6px; box-shadow:var(--shadow-pop); font-size:12px; color:var(--text-2); white-space:nowrap; --text-3:var(--text-2); }
+.gtip .mono { font-size:11.5px; color:var(--text); }
+.ghscroll { position:absolute; left:0; right:9px; bottom:0; height:8px; }
+.ghscroll i { position:absolute; bottom:2px; height:4px; border-radius:3px; background:var(--seam-2); }
+.gr.filt .gc.rn { color:var(--text-3); }
+/* Transposed: the first column holds the column names on the header tone */
+.gc.tname { background:var(--head); flex-direction:column; align-items:stretch; justify-content:center; gap:0; border-right:1px solid var(--seam-2); }
+.gc.tname .hn2 { font-weight:600; color:var(--text); font-size:12.5px; line-height:13px; overflow:hidden; text-overflow:ellipsis; }
+.gc.tname .ht2 { font:400 11px/12px "Fragment Mono", monospace; color:var(--text-3); overflow:hidden; text-overflow:ellipsis; }
+.gr.t2 { height:34px; }
+/* Text view: a Pretty ASCII table in mono on the panel; selected lines take the selection tint */
+.tview { position:absolute; inset:0; overflow:hidden; padding:6px 0; background:var(--panel); font:400 11.5px/17px "Fragment Mono", monospace; color:var(--text); font-variant-ligatures:none; }
+.tview .tl { height:17px; padding:0 12px; white-space:pre; }
+.tview .tl.on { background:var(--blue-a2); }
+.tview .tl.rule { color:var(--text-2); }
+.tbig { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; padding:0 24px; }
+.tbig .notice { max-width:440px; }
+.tbig .notice .t1 { font-weight:600; }
+/* Record inspector: 252 px on the gutter tone, a seam on its left */
+.rsplit { flex:1; min-height:0; display:flex; position:relative; }
+.rsplit > .gridwrap { flex:1; min-width:0; }
+.insp { width:252px; flex:none; display:flex; flex-direction:column; background:var(--gutter); border-left:1px solid var(--seam); min-height:0; }
+.insp .ih { height:30px; flex:none; display:flex; align-items:center; gap:6px; padding:0 6px 0 12px; border-bottom:1px solid var(--seam); background:var(--head); white-space:nowrap; }
+.insp .ih .t { color:var(--text-2); font-size:13.5px; }
+.insp .ih .pos { color:var(--text-2); font-size:12px; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+.insp .ih .pos .mono { font-size:11.5px; color:var(--text); }
+.insp .ih .btn { height:20px; padding:0 3px; }
+.insp .ib { overflow:hidden; flex:1; min-height:0; padding:2px 0 8px; }
+.insp .fld { padding:5px 12px 6px; border-bottom:1px solid var(--seam-soft); }
+.insp .fk { display:flex; align-items:baseline; gap:6px; font:400 11px/14px "Fragment Mono", monospace; color:var(--text-2); }
+.insp .fk .ty { margin-left:auto; color:var(--text-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.insp .fk .nm { white-space:nowrap; flex:none; color:var(--text); }
+.insp .fk .dup { color:var(--text-2); }
+.insp .fv { margin-top:2px; font-size:13px; line-height:17px; color:var(--text); overflow-wrap:anywhere; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+.insp .fv.mono { font-size:11.5px; line-height:16px; }
+.insp .fv.num { text-align:right; }
+.insp .more { margin-top:2px; border:0; background:transparent; padding:0; color:var(--text-2); font-size:12px; cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
+.insp .more:hover { color:var(--text); }
+
+/* Value viewer: a 480 px popover on the dialog anatomy (header, body, footer), no scrim; anchored to its cell */
+.vv { position:absolute; z-index:47; width:480px; max-width:calc(100% - 16px); background:var(--raised); border:1px solid var(--seam-2); border-radius:6px; box-shadow:var(--shadow-pop);
+  display:flex; flex-direction:column; --text-3:var(--text-2); }
+.vv .dhead { display:flex; align-items:flex-start; gap:12px; padding:12px 12px 0 16px; }
+.vv .dhead .tt { flex:1; min-width:0; }
+.vv .dhead .title { font:600 12.5px "Fragment Mono", monospace; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.vv .dhead .sub { color:var(--text-2); font-size:12.5px; margin-top:2px; display:flex; flex-wrap:wrap; gap:0 6px; align-items:center; }
+.vv .dhead .sub .mono { font-size:11.5px; }
+.vv .x { border:0; background:transparent; padding:4px; border-radius:4px; color:var(--text-2); cursor:pointer; }
+.vv .x:hover { background:var(--hover); color:var(--text); }
+.vv .vctl { display:flex; align-items:center; gap:8px; padding:10px 16px 0; }
+.vv .vctl .seg { height:22px; }
+.vv .vctl .seg button { font-size:12px; padding:0 8px; }
+.vv .vctl .meta { color:var(--text-2); font-size:12px; }
+.vv .vbody { padding:8px 16px 0; min-height:0; overflow:auto; }
+.vbox { padding:7px 10px; border:1px solid var(--seam-2); border-radius:4px; background:var(--panel); --text-3:var(--text-3-base); max-height:240px; overflow:auto;
+  font:400 11.5px/17px "Fragment Mono", monospace; color:var(--text); white-space:pre-wrap; overflow-wrap:anywhere; font-variant-ligatures:none; }
+:root[data-theme="light"] .vbox { background:var(--ground); }
+.vbox:focus-visible { outline:1px solid var(--blue); outline-offset:1px; }
+.vbox::-webkit-scrollbar { width:4px; } .vbox::-webkit-scrollbar-thumb { background:var(--seam-2); border-radius:3px; } .vbox::-webkit-scrollbar-track { background:transparent; }
+.vbox .jk { color:var(--syn-id); } .vbox .js { color:var(--syn-str); } .vbox .jn { color:var(--syn-num); } .vbox .jp { color:var(--syn-op); } .vbox .jl { color:var(--syn-kw); }
+.vbox.hex { white-space:pre; }
+.vbox .ho { color:var(--text-3); } .vbox .ha { color:var(--text-2); }
+.vv .notice { margin:8px 0 0; }
+.vv .dfoot { display:flex; align-items:center; gap:8px; padding:12px 16px 14px; }
+.vv .dfoot .meta { color:var(--text-2); font-size:12px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.vv .dfoot .meta .mono { font-size:11.5px; }
+.vv .dfoot .grow { flex:1; }
+
+/* Go to row: the explanation-popover anatomy, 300 px, under the result toolbar */
+.goto { position:absolute; z-index:47; width:300px; padding:10px 12px; background:var(--raised); border:1px solid var(--seam-2); border-radius:6px; box-shadow:var(--shadow-pop); font-size:12.5px; color:var(--text-2); --text-3:var(--text-2); }
+.goto b { color:var(--text); font-weight:600; display:flex; gap:7px; align-items:center; margin-bottom:8px; font-size:13px; }
+.goto .in { width:100%; }
+.goto .gl { display:grid; grid-template-columns:12px minmax(0,1fr); column-gap:7px; margin-top:6px; font-size:12px; line-height:1.4; color:var(--text-2); }
+.goto .gl.ink { color:var(--text); }
+.goto .gl > svg { margin-top:2px; color:var(--text-2); }
+.goto .gl.ink > svg { color:var(--text); }
+.goto .gl .mono { font-size:11.5px; color:var(--text); }
+.goto .gacts { display:flex; justify-content:flex-end; gap:6px; margin-top:8px; flex-wrap:wrap; }
+.goto .gacts .btn { height:22px; font-size:12px; }
+.goto .keys { display:flex; gap:10px; margin-top:8px; color:var(--text-2); font-size:11.5px; }
+.goto .keys span { display:flex; gap:4px; align-items:center; }
+.goto .keys kbd { color:var(--text-2); }
+
+/* Menus (M3c): a disabled item keeps its reason as the hint; a checkbox item shows the blue check (the active row: see the round-1 block) */
+.menu .mi .ico2 { width:12px; display:flex; flex:none; color:var(--text-2); }
+.menu .mi.dis .ico2 { color:var(--text-3-base); }
+.menu .mi .h2.why { color:var(--text-2); }
+
+/* Gutter tooltip: the last three runs of a statement */
+.tip .runs { margin-top:6px; display:flex; flex-direction:column; gap:3px; }
+.tip .rr { display:grid; grid-template-columns:12px 38px minmax(0,1fr); column-gap:7px; align-items:center; color:var(--text); font-size:12px; }
+.tip .rr .tm { font:400 11px "Fragment Mono", monospace; color:var(--text-2); }
+.tip .rr .g { color:var(--green); display:flex; }
+.tip .rr .i { color:var(--text); display:flex; }
+.tip .rr .d { color:var(--text-2); display:flex; }
+.tip .rr .chip { font:400 11px/14px "Fragment Mono", monospace; border:1px solid var(--seam-2); border-radius:3px; padding:0 4px; color:var(--text); margin-left:4px; }
+.tip .cap4 { margin-top:6px; color:var(--text-2); font-size:12px; }
+.tip .th kbd { margin-left:auto; color:var(--text-2); }
+
+/* Narrow panes (Task 41): the editor tile split into console panes of 120–219 px; their toolbars wrap into two rows */
+.panes { flex:1; min-height:0; display:flex; gap:1px; background:var(--seam); }
+.pane { background:var(--panel); display:flex; flex-direction:column; min-width:0; position:relative; overflow:hidden; flex:none; }
+.pane.fill { flex:1; }
+.pane.prod::before { content:""; position:absolute; left:0; right:0; top:0; height:1px; background:var(--red); z-index:6; }
+.pane .etabs .tab { max-width:100%; min-width:0; }
+.pane .etabs .tab .tt3 { overflow:hidden; text-overflow:ellipsis; min-width:0; }
+.pane .etabs .tabs { flex:1; min-width:0; }
+.pane .pw { position:absolute; right:4px; bottom:4px; font:400 10.5px "Fragment Mono", monospace; color:var(--text-2); border:1px dashed var(--seam-2); border-radius:3px; padding:0 4px; background:var(--gutter); z-index:5; }
+.qbar.narrow { height:auto; min-height:32px; flex-wrap:wrap; row-gap:4px; column-gap:6px; padding:4px 8px; align-content:center; }
+.qbar.narrow .crumb { margin-left:0; padding-left:8px; min-width:0; flex:0 1 auto; }
+.qbar.narrow .crumb .mono { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.qbar.narrow > * { max-width:100%; }
+.qbar.narrow .qchip, .qbar.narrow .runstate, .qbar.narrow .txbadge { flex:0 1 auto; min-width:0; }
+.qbar.narrow .qchip > span { min-width:0; }
+.qbar.narrow .qchip.tx { flex:none; }
+.qbar.narrow .txbadge .lab { white-space:normal; line-height:15px; }
+
+.pane .strip.wrap { flex-wrap:wrap; row-gap:4px; }
+.qbar.narrow .btn.icon1 { padding:0 6px; min-width:0; }
+.qbar.narrow .qchip { height:auto; min-height:22px; white-space:normal; padding:2px 7px; line-height:15px; text-align:left; }
+.qbar.narrow .qchip svg { flex:none; }
+.qbar.narrow .runstate { white-space:normal; line-height:15px; align-items:flex-start; }
+.qbar.narrow .runstate .two { display:flex; flex-direction:column; }
+.qbar.narrow .runstate .two .l2 { color:var(--text-2); }
+.qbar.narrow .runstate i { margin-top:4px; }
+.pane .code { font-size:12.5px; }
+.pane .strip { padding:0 8px; }
+.pane .strip.wrap .btn { height:20px; }
+
+/* Settings page (Task 42): the shipped page's anatomy: a 176 px navigation, a search bar, a section title, form rows (200 px title column) */
+.col.center.pagemode #edpanel { grid-row:1 / span 2; }
+.col.center.pagemode #respanel { display:none; }
+.spage { flex:1; min-height:0; display:flex; }
+.snav { width:176px; flex:none; padding-top:6px; border-right:1px solid var(--seam); background:var(--side); }
+.snav .ni { height:23px; display:flex; align-items:center; padding:0 10px 0 12px; color:var(--text-2); font-size:13px; position:relative; cursor:default; }
+.snav .ni.on { color:var(--text); background:var(--blue-a); }
+.snav .ni.on::before { content:""; position:absolute; left:0; top:0; bottom:0; width:1px; background:var(--blue); }
+.snav .ni.new::after { content:"M3c"; margin-left:auto; font:400 10.5px "Fragment Mono", monospace; color:var(--text-2); border:1px dashed var(--seam-2); border-radius:3px; padding:0 3px; }
+.smain { flex:1; min-width:0; display:flex; flex-direction:column; }
+.ssearch { flex:none; padding:8px 12px; border-bottom:1px solid var(--seam); }
+.ssearch .in { max-width:320px; }
+.ssearch .in > svg { color:var(--text-3); }
+.srows { flex:1; min-height:0; overflow:hidden; }
+.shead { height:30px; display:flex; align-items:center; padding-left:12px; color:var(--text-2); font-size:13.5px; }
+.srow { display:flex; align-items:flex-start; gap:12px; padding:6px 12px; }
+.srow .stl { width:200px; flex:none; min-height:26px; display:flex; align-items:center; color:var(--text-2); font-size:13px; line-height:1.3; }
+.srow .sct { display:flex; flex-direction:column; gap:4px; min-width:0; flex:1; }
+.srow .sct .ctl2 { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.srow .snote { color:var(--text-2); font-size:12px; line-height:1.35; display:flex; gap:6px; align-items:flex-start; }
+.srow .snote svg { flex:none; margin-top:1px; color:var(--text-2); }
+.srow .sec2 { color:var(--text-2); font-size:12px; }
+.srow .in.num { flex:0 0 88px; }
+.srow .in.num input { text-align:right; font:400 12px "Fragment Mono", monospace; }
+.srow .select { width:76px; }
+.sempty { padding:10px 12px; color:var(--text-3); font-size:13px; }
+.srow mark { background:var(--blue-a2); color:inherit; }
+
+/* ── Fix round 1 (system-wide, owned by Task 41; DESIGN.md rows in Task 43) ──
+   Disabled ink: one token for disabled buttons, segments, chips and menu rows, never remapped by the Raised Ink Rule.
+   dark #636A76: 2.68:1 on raised, 1.77:1 from text-2 · light #A0A0A8: 2.60:1 on white, 2.84:1 from text-2. */
+:root, :root[data-theme="dark"] { --text-disabled:#636A76; }
+:root[data-theme="light"] { --text-disabled:#A0A0A8; }
+.btn[disabled], .btn[disabled]:hover, .btn.danger[disabled], .btn.danger[disabled]:hover { color:var(--text-disabled); }
+.btn[disabled] .k, .btn[disabled] svg { color:var(--text-disabled); }
+.seg button[disabled], .seg button[disabled]:hover, .rtool .seg button[disabled], .rtool .seg button[disabled]:hover { color:var(--text-disabled); }
+.ftog[disabled] { color:var(--text-disabled); }
+.menu .mi.dis, .menu .mi.dis .lab2, .menu .mi.dis .k, .menu .mi.dis .ico2, .menu .mi.dis .kind, .menu .mi.dis .lab, .menu .mi.dis .cnt { color:var(--text-disabled); }
+.qchip[aria-disabled="true"], .qchip[aria-disabled="true"]:hover, .qchip[aria-disabled="true"] svg { color:var(--text-disabled); }
+/* The keyboard-active menu row, every PopupMenu: the selection tint, a 1 px blue left edge (the settings-navigation cue) and text ink */
+.menu .mi.on { background:var(--blue-a2); color:var(--text); position:relative; }
+.menu .mi.on::before { content:""; position:absolute; left:0; top:0; bottom:0; width:1px; background:var(--blue); }
+.menu .mi.on .h, .menu .mi.on .k, .menu .mi.on .h2, .menu .mi.on .lab, .menu .mi.on .lab2, .menu .mi.on .cnt, .menu .mi.on .kind, .menu .mi.on .hint3, .menu .mi.on .ico2 { color:var(--text); }
+/* Narrow panes span the centre column (each console tile holds its editor over its results); the mode chip keeps its word */
+.col.center.panemode #edpanel { grid-row:1 / span 2; }
+.col.center.panemode #respanel { display:none; }
+.qbar.narrow .qchip.tx .w { white-space:nowrap; }
+.qbar.narrow .txbadge .btn { height:20px; padding:0 4px; }
+.qbar.narrow .txbadge { flex-wrap:wrap; row-gap:2px; }
+.qbar.narrow .txbadge .bl1 { display:flex; align-items:flex-start; gap:7px; min-width:0; flex:0 1 auto; }
+.qbar.narrow .txbadge .bl1 .run { flex:none; margin-top:4px; }
+.pane .lines .l.phl { white-space:normal; height:auto; line-height:17px; padding-right:8px; }
+.pane .pbody { flex:1; min-height:0; display:flex; flex-direction:column; }
+.pane .pbody .code { flex:1; }
+/* The value well's scroll thumb is drawn (GPUI draws its own), so a long value shows it scrolls */
+.vwrap { position:relative; }
+.vthumb { position:absolute; right:2px; width:4px; border-radius:3px; background:var(--seam-2); pointer-events:none; }
+.vnote { display:flex; gap:6px; align-items:flex-start; color:var(--text-2); font-size:12px; line-height:1.35; }
+.vnote svg { flex:none; margin-top:1px; }
+.vbox .xt { color:var(--syn-kw); } .vbox .xa { color:var(--syn-id); } .vbox .xs { color:var(--syn-str); }
+.tview .thsb { position:absolute; left:12px; right:12px; bottom:2px; height:4px; }
+.tview .thsb i { position:absolute; top:0; height:4px; border-radius:3px; background:var(--seam-2); }
+.goto .gl .run { width:7px; height:7px; margin-top:4px; }
+.tbig .notice .acts { justify-content:flex-end; }
 </style>
 </head>
 <body>
@@ -1171,6 +1450,13 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
 <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 17v5" /> <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></symbol>
 <symbol id="i-timer" viewBox="0 0 24 24"><line x1="10" x2="14" y1="2" y2="2" /> <line x1="12" x2="15" y1="14" y2="11" /> <circle cx="12" cy="14" r="8" /></symbol>
 <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /> <circle cx="9" cy="7" r="4" /> <path d="M22 21v-2a4 4 0 0 0-3-3.87" /> <path d="M16 3.13a4 4 0 0 1 0 7.75" /></symbol>
+<!-- M3c (Task 2b): Lucide 0.460 (ISC); arrow-up, case-sensitive, regex, whole-word are new to the app's set; arrow-up-down and snowflake ship already -->
+<symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7" /> <path d="M12 19V5" /></symbol>
+<symbol id="i-arrow-up-down" viewBox="0 0 24 24"><path d="m21 16-4 4-4-4" /> <path d="M17 20V4" /> <path d="m3 8 4-4 4 4" /> <path d="M7 4v16" /></symbol>
+<symbol id="i-case-sensitive" viewBox="0 0 24 24"><path d="m3 15 4-8 4 8" /> <path d="M4 13h6" /> <circle cx="18" cy="12" r="3" /> <path d="M21 9v6" /></symbol>
+<symbol id="i-regex" viewBox="0 0 24 24"><path d="M17 3v10" /> <path d="m12.67 5.5 8.66 5" /> <path d="m12.67 10.5 8.66-5" /> <path d="M9 17a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v2a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-2z" /></symbol>
+<symbol id="i-snowflake" viewBox="0 0 24 24"><line x1="2" x2="22" y1="12" y2="12" /> <line x1="12" x2="12" y1="2" y2="22" /> <path d="m20 16-4-4 4-4" /> <path d="m4 8 4 4-4 4" /> <path d="m16 4-4 4-4-4" /> <path d="m8 20 4-4 4 4" /></symbol>
+<symbol id="i-whole-word" viewBox="0 0 24 24"><circle cx="7" cy="12" r="3" /> <path d="M10 9v6" /> <circle cx="17" cy="12" r="3" /> <path d="M14 7v8" /> <path d="M22 17v1c0 .5-.5 1-1 1H3c-.5 0-1-.5-1-1v-1" /></symbol>
 </defs></svg>
 <!--ICON-SPRITE-END-->
 <!-- ═════════════ Mock bar (not product) ═════════════ -->
@@ -2137,6 +2423,379 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
 }
 </script>
 
+<!-- Strings the app already ships (Task 1b command titles, M3a/M3b console and settings strings), reused verbatim; M3c never redefines them -->
+<script type="application/json" id="i18n-app">
+{
+ "en": {
+  "hv-cmd-editor-select-all-occurrences": "Select all occurrences",
+  "hv-cmd-editor-undo-selection": "Undo the selection change",
+  "hv-cmd-editor-find-close": "Close find",
+  "hv-cmd-editor-toggle-comment": "Comment or uncomment",
+  "hv-cmd-editor-duplicate-line": "Duplicate line",
+  "hv-cmd-editor-delete-line": "Delete line",
+  "hv-cmd-editor-move-line-up": "Move line up",
+  "hv-cmd-editor-move-line-down": "Move line down",
+  "hv-console-ro-pending": "{name} turns read-only once its open transaction is committed or rolled back.",
+  "hv-console-ro-pending-short": "Read-only after this transaction",
+  "hv-settings-title": "Settings",
+  "hv-settings-search": "Search settings",
+  "hv-settings-no-results": "No settings match",
+  "hv-settings-nav-general": "General",
+  "hv-settings-nav-appearance": "Appearance",
+  "hv-settings-nav-keyboard": "Keyboard",
+  "hui-dialog-close": "Close"
+ },
+ "tr": {
+  "hv-cmd-editor-select-all-occurrences": "Tüm eşleşmeleri seç",
+  "hv-cmd-editor-undo-selection": "Seçim değişikliğini geri al",
+  "hv-cmd-editor-find-close": "Bulmayı kapat",
+  "hv-cmd-editor-toggle-comment": "Yorum satırı yap veya kaldır",
+  "hv-cmd-editor-duplicate-line": "Satırı çoğalt",
+  "hv-cmd-editor-delete-line": "Satırı sil",
+  "hv-cmd-editor-move-line-up": "Satırı yukarı taşı",
+  "hv-cmd-editor-move-line-down": "Satırı aşağı taşı",
+  "hv-console-ro-pending": "{name}, açık işlemi commit edildiğinde ya da geri alındığında salt okunur olur.",
+  "hv-console-ro-pending-short": "Bu işlemden sonra salt okunur",
+  "hv-settings-title": "Ayarlar",
+  "hv-settings-search": "Ayarlarda ara",
+  "hv-settings-no-results": "Eşleşen ayar yok",
+  "hv-settings-nav-general": "Genel",
+  "hv-settings-nav-appearance": "Görünüm",
+  "hv-settings-nav-keyboard": "Klavye",
+  "hui-dialog-close": "Kapat"
+ }
+}
+</script>
+
+<!-- The M3c copy table (Task 2b). Keys are the Fluent ids; NOTES.md "M3c surfaces" lists them with their owning task -->
+<script type="application/json" id="i18n-m3c">
+{
+ "en": {
+  "hv-tx-chip-auto-short": "Auto",
+  "hv-editor-carets": "{n} carets",
+  "hv-editor-ime-primary-only": "Input method: typing at the main caret only, because another caret was inside a string or comment",
+  "hv-editor-fold-lines": "{n} lines",
+  "hv-editor-fold-lines#one": "{n} line",
+  "hv-editor-fold-tip": "Lines {from}–{to} are folded. Click to unfold.",
+  "hv-editor-fold-name": "Fold lines {from}–{to}",
+  "hv-editor-unfold-name": "Unfold lines {from}–{to}",
+  "hv-editor-fold-failed": "failed inside the fold · line {line}",
+  "hv-find-placeholder": "Find",
+  "hv-find-match-case": "Match case",
+  "hv-find-words": "Whole words",
+  "hv-find-regex": "Regular expression",
+  "hv-find-tolerant": "Turkish-tolerant",
+  "hv-find-tolerant-tip": "Turkish-tolerant: İ, I, ı and i find each other, and accents are ignored.",
+  "hv-find-count": "{i} of {n}",
+  "hv-find-count-more": "{i} of {n}+",
+  "hv-find-counting-tip": "Still counting; the number grows as the rest of the document is searched.",
+  "hv-find-none": "No matches",
+  "hv-find-invalid": "Invalid pattern",
+  "hv-find-invalid-tip": "The regular expression can't be read, so nothing is searched: {error}",
+  "hv-find-prev": "Previous match",
+  "hv-find-next": "Next match",
+  "hv-find-capped": "Selected the first {max} of {n} matches",
+  "hv-gutter-run": "Run this statement",
+  "hv-gutter-last-runs": "Last runs",
+  "hv-gutter-never-run": "Not run yet.",
+  "hv-gutter-same-path": "Runs through the same checks as Run.",
+  "hv-eol-mixed": "Mixed line endings",
+  "hv-eol-mixed-tip": "Lines end in both LF and CRLF. Click to normalize them.",
+  "hv-eol-counts": "Line endings: LF {lf}, CRLF {crlf}",
+  "hv-eol-to": "Normalize to {ending}",
+  "hv-eol-most": "most lines",
+  "hv-history-recall": "From history: statement {i} of {n} · {older} older · {newer} newer",
+  "hv-grid-sorted-locally": "Sorted locally: the database might order differently.",
+  "hv-grid-sorted-locally-more": "Only the {rows} fetched rows are sorted.",
+  "hv-grid-clear-sort": "Clear sort",
+  "hv-grid-unsorted-tail": "{rows} new rows at the end (not sorted)",
+  "hv-grid-unsorted-tail#one": "{rows} new row at the end (not sorted)",
+  "hv-grid-resort": "Re-sort",
+  "hv-grid-sorting": "Sorting {rows} rows…",
+  "hv-grid-sorting#one": "Sorting {rows} row…",
+  "hv-grid-sorted-tail": "Only the {sorted} fetched rows are sorted; {rows} new rows at the end are not.",
+  "hv-grid-sorted-tail#one": "Only the {sorted} fetched rows are sorted; {rows} new row at the end is not.",
+  "hv-grid-sort-cancel": "Cancel",
+  "hv-grid-sort-tip": "Sort level {lvl}, {dir}. Text compares by the column's collation, {collation}.",
+  "hv-grid-sort-tip-cp": "Sort level {lvl}, {dir}. The column's collation {collation} has no equivalent here, so text compares by code point.",
+  "hv-grid-dir-asc": "ascending",
+  "hv-grid-dir-desc": "descending",
+  "hv-grid-frozen-tip": "Frozen: stays in place when you scroll sideways",
+  "hv-grid-resize-tip": "Drag to resize · double-click to fit",
+  "hv-grid-width": "{px} px",
+  "hv-strip-ranges": "{n} ranges · {cells} cells",
+  "hv-gfind-placeholder": "Find in the shown values",
+  "hv-gfind-filter": "Filter rows",
+  "hv-gfind-filter-tip": "Filter rows: show only the rows with a match",
+  "hv-gfind-incomplete": "may be incomplete",
+  "hv-gfind-incomplete-tip": "{n} values were cut at {size}; text past the cut isn't searched.",
+  "hv-gfind-incomplete-tip#one": "{n} value was cut at {size}; text past the cut isn't searched.",
+  "hv-gfind-filter-note": "Showing the {shown} rows that match, of the {rows} fetched. Rows not fetched yet aren't filtered.",
+  "hv-gfind-show-all": "Show all rows",
+  "hv-gfind-null-tip": "Searches what the grid shows, row by row from the focused cell. NULL never matches.",
+  "hv-gfind-close": "Close find",
+  "hv-goto-title": "Go to row",
+  "hv-goto-placeholder": "row or row:column",
+  "hv-goto-hint": "A row number, then an optional column by name or position: 1500:city or 1500:3",
+  "hv-goto-target": "Row {row}, column {col}",
+  "hv-goto-target-row": "Row {row}",
+  "hv-goto-past-end": "There's no row {row}: the result has {total} rows.",
+  "hv-goto-unknown-col": "No column is named {name}.",
+  "hv-goto-hidden-col": "Column {name} is hidden.",
+  "hv-goto-show-col": "Show it and go",
+  "hv-goto-fetch": "Row {row} isn't fetched yet. Fetching {more} more rows takes a while, and the result's memory limit still applies.",
+  "hv-goto-fetching": "Fetching to row {row}: {done} of {more} rows",
+  "hv-goto-fetching-note": "Escape hides this; fetching goes on in the strip.",
+  "hv-goto-stop": "Stop fetching",
+  "hv-goto-fetch-ok": "Fetch and go",
+  "hv-goto-cancel": "Cancel",
+  "hv-goto-key-go": "Go",
+  "hv-view-table": "Table",
+  "hv-view-transposed": "Transposed",
+  "hv-view-text": "Text",
+  "hv-view-label": "View",
+  "hv-view-transposed-off": "Transposed shows up to {max} rows; this result has {rows}.",
+  "hv-transposed-col": "Column",
+  "hv-record": "Record",
+  "hv-record-tip": "Show the focused row as a record",
+  "hv-record-pos": "Row {i} of {n}",
+  "hv-record-prev": "Previous row",
+  "hv-record-next": "Next row",
+  "hv-record-show-more": "Show more",
+  "hv-record-dup-tip": "The result has {n} columns named {name}; this is number {i}.",
+  "hv-text-big-title": "Show {rows} rows as text?",
+  "hv-text-big-body": "Building the text view for this many rows takes a while and uses about {size} of memory.",
+  "hv-text-building": "Building the text view: {done} of {rows} rows",
+  "hv-text-cancel": "Cancel",
+  "hv-text-big-ok": "Show as text",
+  "hv-text-big-back": "Back to the table",
+  "hv-vv-sub": "{type} · row {row}",
+  "hv-vv-raw": "Raw",
+  "hv-vv-pretty": "Pretty",
+  "hv-vv-hex": "Hex",
+  "hv-vv-pretty-tip": "Display only: Copy raw value copies the server's text unchanged.",
+  "hv-vv-chars": "{size} · {n} characters",
+  "hv-vv-chars#one": "{size} · {n} character",
+  "hv-vv-bytes": "{n} bytes",
+  "hv-vv-bytes#one": "{n} byte",
+  "hv-vv-truncated": "Showing the first {shown} of {size}.",
+  "hv-vv-rerun": "Re-run with a {limit} value limit",
+  "hv-vv-rerun-tip": "Runs this statement again with a larger limit for every value. It goes through the same checks as Run.",
+  "hv-vv-copy": "Copy raw value",
+  "hv-vv-not-json": "Not valid JSON, so Pretty is off and the value shows as the server sent it.",
+  "hv-gmenu-copy": "Copy",
+  "hv-gmenu-copy-headers": "Copy with headers",
+  "hv-gmenu-copy-rows": "Copy rows",
+  "hv-gmenu-copy-name": "Copy column name",
+  "hv-gmenu-open-value": "Open value viewer",
+  "hv-gmenu-sort-asc": "Sort ascending",
+  "hv-gmenu-sort-desc": "Sort descending",
+  "hv-gmenu-add-sort": "Add as sort level {lvl}",
+  "hv-gmenu-freeze": "Freeze up to here",
+  "hv-gmenu-unfreeze": "Unfreeze columns",
+  "hv-gmenu-hide": "Hide column",
+  "hv-gmenu-show-all": "Show all columns",
+  "hv-gmenu-autofit": "Fit width",
+  "hv-gmenu-raw": "Raw display",
+  "hv-gmenu-raw-hint": "this column",
+  "hv-gmenu-goto": "Go to row…",
+  "hv-gmenu-record": "Show as record",
+  "hv-gmenu-why-one-cell": "Select one cell",
+  "hv-gmenu-why-not-sorted": "Not sorted",
+  "hv-gmenu-why-no-hidden": "None hidden",
+  "hv-gmenu-why-ranges": "Ranges don't line up",
+  "hv-gmenu-why-last": "Last shown column",
+  "hv-console-waiting-l1": "Waiting for a connection",
+  "hv-console-waiting-l2": "{inUse} of {max} in use",
+  "hv-settings-nav-editor": "Editor",
+  "hv-settings-nav-execution": "Execution",
+  "hv-settings-nav-results": "Results",
+  "hv-settings-nav-history": "History",
+  "hv-settings-section-editor": "EDITOR",
+  "hv-settings-section-execution": "EXECUTION",
+  "hv-settings-section-results": "RESULTS",
+  "hv-settings-section-history": "HISTORY",
+  "hv-settings-on": "On",
+  "hv-settings-off": "Off",
+  "hv-settings-tab-size": "Tab size",
+  "hv-settings-insert-spaces": "Indent with spaces",
+  "hv-settings-copy-line": "Copy the line when nothing is selected",
+  "hv-settings-caret-blink": "Blinking caret",
+  "hv-settings-confirm-unsafe-where": "Confirm UPDATE or DELETE without WHERE off production",
+  "hv-settings-confirm-unsafe-where-note": "Production always asks, with the table's name typed.",
+  "hv-settings-error-policy": "Ask what to do when a statement fails",
+  "hv-settings-error-policy-note": "Off: a run of several statements stops at the first failure.",
+  "hv-settings-max-value": "Largest value kept per cell",
+  "hv-settings-max-value-note": "From 64 KB to 64 MB. Larger values are cut; the value viewer can re-run with the largest limit.",
+  "hv-settings-max-value-clamped": "{typed} is above the largest allowed, so it was set to {max}.",
+  "hv-settings-unit-kb": "KB",
+  "hv-settings-unit-mb": "MB",
+  "hv-settings-raw-display": "Show grid values raw",
+  "hv-settings-raw-display-note": "Numbers and dates as the server sent them, without regional formatting. Copy is always raw.",
+  "hv-settings-history": "Record query history",
+  "hv-settings-history-note": "Up to 10,000 statements per connection are kept for 90 days; recognised passwords and secrets are masked."
+ },
+ "tr": {
+  "hv-tx-chip-auto-short": "Otomatik",
+  "hv-editor-carets": "{n} imleç",
+  "hv-editor-ime-primary-only": "Giriş yöntemi: başka bir imleç bir dizenin ya da yorumun içinde olduğu için yalnızca ana imleçte yazılıyor",
+  "hv-editor-fold-lines": "{n} satır",
+  "hv-editor-fold-tip": "{from}–{to}. satırlar katlandı. Açmak için tıklayın.",
+  "hv-editor-fold-name": "{from}–{to}. satırları katla",
+  "hv-editor-unfold-name": "{from}–{to}. satırların katlamasını aç",
+  "hv-editor-fold-failed": "katlanmış bölümde başarısız · satır {line}",
+  "hv-find-placeholder": "Bul",
+  "hv-find-match-case": "Büyük/küçük harf eşleşsin",
+  "hv-find-words": "Tam sözcük",
+  "hv-find-regex": "Düzenli ifade",
+  "hv-find-tolerant": "Türkçe esnek",
+  "hv-find-tolerant-tip": "Türkçe esnek: İ, I, ı ve i birbirini bulur, aksanlar yok sayılır.",
+  "hv-find-count": "{i}/{n}",
+  "hv-find-count-more": "{i}/{n}+",
+  "hv-find-counting-tip": "Sayım sürüyor; belgenin geri kalanı arandıkça sayı artar.",
+  "hv-find-none": "Eşleşme yok",
+  "hv-find-invalid": "Geçersiz desen",
+  "hv-find-invalid-tip": "Düzenli ifade okunamadığı için hiçbir şey aranmıyor: {error}",
+  "hv-find-prev": "Önceki eşleşme",
+  "hv-find-next": "Sonraki eşleşme",
+  "hv-find-capped": "{n} eşleşmenin ilk {max} tanesi seçildi",
+  "hv-gutter-run": "Bu ifadeyi çalıştır",
+  "hv-gutter-last-runs": "Son çalıştırmalar",
+  "hv-gutter-never-run": "Henüz çalıştırılmadı.",
+  "hv-gutter-same-path": "Çalıştır ile aynı denetimlerden geçer.",
+  "hv-eol-mixed": "Karışık satır sonları",
+  "hv-eol-mixed-tip": "Satırlar hem LF hem CRLF ile bitiyor. Eşitlemek için tıklayın.",
+  "hv-eol-counts": "Satır sonları: LF {lf}, CRLF {crlf}",
+  "hv-eol-to": "Hepsini {ending} yap",
+  "hv-eol-most": "çoğu satır",
+  "hv-history-recall": "Geçmişten: ifade {i}/{n} · {older} daha eski · {newer} daha yeni",
+  "hv-grid-sorted-locally": "Yerel olarak sıralandı: veritabanı farklı sıralayabilir.",
+  "hv-grid-sorted-locally-more": "Yalnızca getirilen {rows} satır sıralandı.",
+  "hv-grid-clear-sort": "Sıralamayı kaldır",
+  "hv-grid-unsorted-tail": "Sonda {rows} yeni satır (sıralanmadı)",
+  "hv-grid-resort": "Yeniden sırala",
+  "hv-grid-sorting": "{rows} satır sıralanıyor…",
+  "hv-grid-sorted-tail": "Yalnızca getirilen {sorted} satır sıralandı; sondaki {rows} yeni satır sıralanmadı.",
+  "hv-grid-sort-cancel": "Vazgeç",
+  "hv-grid-sort-tip": "Sıralama düzeyi {lvl}, {dir}. Metin, sütunun harmanlamasına ({collation}) göre karşılaştırılır.",
+  "hv-grid-sort-tip-cp": "Sıralama düzeyi {lvl}, {dir}. Sütunun {collation} harmanlamasının burada karşılığı yok; metin kod noktasına göre karşılaştırılır.",
+  "hv-grid-dir-asc": "artan",
+  "hv-grid-dir-desc": "azalan",
+  "hv-grid-frozen-tip": "Donduruldu: yana kaydırınca yerinde kalır",
+  "hv-grid-resize-tip": "Boyutlandırmak için sürükleyin · sığdırmak için çift tıklayın",
+  "hv-grid-width": "{px} px",
+  "hv-strip-ranges": "{n} aralık · {cells} hücre",
+  "hv-gfind-placeholder": "Görünen değerlerde bul",
+  "hv-gfind-filter": "Satırları süz",
+  "hv-gfind-filter-tip": "Satırları süz: yalnızca eşleşen satırları göster",
+  "hv-gfind-incomplete": "eksik olabilir",
+  "hv-gfind-incomplete-tip": "{n} değer {size} sınırında kesildi; kesilen kısım aranmaz.",
+  "hv-gfind-filter-note": "Getirilen {rows} satırdan eşleşen {shown} satır gösteriliyor. Henüz getirilmeyen satırlar süzülmez.",
+  "hv-gfind-show-all": "Tüm satırları göster",
+  "hv-gfind-null-tip": "Tablonun gösterdiği değerlerde, odaktaki hücreden başlayarak arar. NULL hiçbir zaman eşleşmez.",
+  "hv-gfind-close": "Bulmayı kapat",
+  "hv-goto-title": "Satıra git",
+  "hv-goto-placeholder": "satır ya da satır:sütun",
+  "hv-goto-hint": "Satır numarası, ardından isteğe bağlı sütun adı ya da sırası: 1500:city ya da 1500:3",
+  "hv-goto-target": "{row}. satır, {col} sütunu",
+  "hv-goto-target-row": "{row}. satır",
+  "hv-goto-past-end": "{row}. satır yok: sonuçta {total} satır var.",
+  "hv-goto-unknown-col": "{name} adında bir sütun yok.",
+  "hv-goto-hidden-col": "{name} sütunu gizli.",
+  "hv-goto-show-col": "Gösterip git",
+  "hv-goto-fetch": "{row}. satır henüz getirilmedi. {more} satır daha getirmek zaman alır; sonucun bellek sınırı yine geçerlidir.",
+  "hv-goto-fetching": "{row}. satıra kadar getiriliyor: {more} satırın {done} tanesi",
+  "hv-goto-fetching-note": "Esc bunu gizler; getirme şeritte sürer.",
+  "hv-goto-stop": "Getirmeyi durdur",
+  "hv-goto-fetch-ok": "Getir ve git",
+  "hv-goto-cancel": "Vazgeç",
+  "hv-goto-key-go": "Git",
+  "hv-view-table": "Tablo",
+  "hv-view-transposed": "Devrik",
+  "hv-view-text": "Metin",
+  "hv-view-label": "Görünüm",
+  "hv-view-transposed-off": "Devrik görünüm en çok {max} satır gösterir; bu sonuçta {rows} satır var.",
+  "hv-transposed-col": "Sütun",
+  "hv-record": "Kayıt",
+  "hv-record-tip": "Odaktaki satırı kayıt olarak göster",
+  "hv-record-pos": "Satır {i}/{n}",
+  "hv-record-prev": "Önceki satır",
+  "hv-record-next": "Sonraki satır",
+  "hv-record-show-more": "Devamını göster",
+  "hv-record-dup-tip": "Sonuçta {name} adında {n} sütun var; bu {i}. sütun.",
+  "hv-text-big-title": "{rows} satır metin olarak gösterilsin mi?",
+  "hv-text-big-body": "Bu kadar satır için metin görünümünü oluşturmak zaman alır ve yaklaşık {size} bellek kullanır.",
+  "hv-text-building": "Metin görünümü oluşturuluyor: {rows} satırın {done} tanesi",
+  "hv-text-cancel": "Vazgeç",
+  "hv-text-big-ok": "Metin olarak göster",
+  "hv-text-big-back": "Tabloya dön",
+  "hv-vv-sub": "{type} · {row}. satır",
+  "hv-vv-raw": "Ham",
+  "hv-vv-pretty": "Biçimli",
+  "hv-vv-hex": "Onaltılık",
+  "hv-vv-pretty-tip": "Yalnızca görünüm: Ham değeri kopyala, sunucunun metnini değiştirmeden kopyalar.",
+  "hv-vv-chars": "{size} · {n} karakter",
+  "hv-vv-bytes": "{n} bayt",
+  "hv-vv-truncated": "Değerin ilk {shown} kısmı gösteriliyor (toplam {size}).",
+  "hv-vv-rerun": "{limit} değer sınırıyla yeniden çalıştır",
+  "hv-vv-rerun-tip": "Bu ifadeyi her değer için daha büyük bir sınırla yeniden çalıştırır. Çalıştır ile aynı denetimlerden geçer.",
+  "hv-vv-copy": "Ham değeri kopyala",
+  "hv-vv-not-json": "Geçerli JSON değil; Biçimli kapalı, değer sunucunun gönderdiği gibi gösteriliyor.",
+  "hv-gmenu-copy": "Kopyala",
+  "hv-gmenu-copy-headers": "Başlıklarla kopyala",
+  "hv-gmenu-copy-rows": "Satırları kopyala",
+  "hv-gmenu-copy-name": "Sütun adını kopyala",
+  "hv-gmenu-open-value": "Değer görüntüleyiciyi aç",
+  "hv-gmenu-sort-asc": "Artan sırala",
+  "hv-gmenu-sort-desc": "Azalan sırala",
+  "hv-gmenu-add-sort": "{lvl}. sıralama düzeyi olarak ekle",
+  "hv-gmenu-freeze": "Buraya kadar dondur",
+  "hv-gmenu-unfreeze": "Dondurmayı kaldır",
+  "hv-gmenu-hide": "Sütunu gizle",
+  "hv-gmenu-show-all": "Tüm sütunları göster",
+  "hv-gmenu-autofit": "Genişliği sığdır",
+  "hv-gmenu-raw": "Ham görünüm",
+  "hv-gmenu-raw-hint": "bu sütun",
+  "hv-gmenu-goto": "Satıra git…",
+  "hv-gmenu-record": "Kayıt olarak göster",
+  "hv-gmenu-why-one-cell": "Tek hücre seçin",
+  "hv-gmenu-why-not-sorted": "Sıralı değil",
+  "hv-gmenu-why-no-hidden": "Gizli sütun yok",
+  "hv-gmenu-why-ranges": "Aralıklar hizalı değil",
+  "hv-gmenu-why-last": "Görünen son sütun",
+  "hv-console-waiting-l1": "Bağlantı bekleniyor",
+  "hv-console-waiting-l2": "kullanımda: {inUse}/{max}",
+  "hv-settings-nav-editor": "Düzenleyici",
+  "hv-settings-nav-execution": "Çalıştırma",
+  "hv-settings-nav-results": "Sonuçlar",
+  "hv-settings-nav-history": "Geçmiş",
+  "hv-settings-section-editor": "DÜZENLEYİCİ",
+  "hv-settings-section-execution": "ÇALIŞTIRMA",
+  "hv-settings-section-results": "SONUÇLAR",
+  "hv-settings-section-history": "GEÇMİŞ",
+  "hv-settings-on": "Açık",
+  "hv-settings-off": "Kapalı",
+  "hv-settings-tab-size": "Sekme genişliği",
+  "hv-settings-insert-spaces": "Boşlukla girintile",
+  "hv-settings-copy-line": "Seçim yokken satırı kopyala",
+  "hv-settings-caret-blink": "Yanıp sönen imleç",
+  "hv-settings-confirm-unsafe-where": "Üretim dışında WHERE içermeyen UPDATE ya da DELETE için onay iste",
+  "hv-settings-confirm-unsafe-where-note": "Üretim her zaman sorar ve tablonun adını yazdırır.",
+  "hv-settings-error-policy": "Bir ifade başarısız olunca ne yapılacağını sor",
+  "hv-settings-error-policy-note": "Kapalı: birden çok ifadelik çalıştırma ilk hatada durur.",
+  "hv-settings-max-value": "Hücre başına saklanan en büyük değer",
+  "hv-settings-max-value-note": "64 KB ile 64 MB arası. Daha büyük değerler kesilir; değer görüntüleyici en büyük sınırla yeniden çalıştırabilir.",
+  "hv-settings-max-value-clamped": "{typed} izin verilen en büyük değerin üstünde; {max} yapıldı.",
+  "hv-settings-unit-kb": "KB",
+  "hv-settings-unit-mb": "MB",
+  "hv-settings-raw-display": "Tablo değerlerini ham göster",
+  "hv-settings-raw-display-note": "Sayılar ve tarihler bölgesel biçim olmadan, sunucunun gönderdiği gibi. Kopyalama her zaman hamdır.",
+  "hv-settings-history": "Sorgu geçmişini kaydet",
+  "hv-settings-history-note": "Bağlantı başına en çok 10.000 ifade 90 gün saklanır; tanınan parolalar ve gizli bilgiler maskelenir."
+ }
+}
+</script>
+
 <script>
 "use strict";
 /* ═════════════ Strings ═════════════
@@ -2146,9 +2805,11 @@ const $ = id => document.getElementById(id);
 const PRIOR = JSON.parse($("i18n-prior").textContent);
 const M3A = JSON.parse($("i18n-m3a").textContent);
 const NEW = JSON.parse($("i18n").textContent);
+const APPS = JSON.parse($("i18n-app").textContent), M3C = JSON.parse($("i18n-m3c").textContent);
 /* M3b never redefines an M3a or earlier id (the harness checks dupIds is empty) */
-const I18N = { en: { ...PRIOR.en, ...M3A.en, ...NEW.en }, tr: { ...PRIOR.tr, ...M3A.tr, ...NEW.tr } };
-const dupIds = Object.keys(NEW.en).filter(k => k in PRIOR.en || k in M3A.en);
+const I18N = { en: { ...PRIOR.en, ...M3A.en, ...NEW.en, ...APPS.en, ...M3C.en }, tr: { ...PRIOR.tr, ...M3A.tr, ...NEW.tr, ...APPS.tr, ...M3C.tr } };
+/* M3c never redefines an earlier id either, nor one the app ships (i18n-app) */
+const dupIds = [...Object.keys(NEW.en).filter(k => k in PRIOR.en || k in M3A.en), ...Object.keys(M3C.en).filter(k => k in PRIOR.en || k in M3A.en || k in NEW.en || k in APPS.en), ...Object.keys(APPS.en).filter(k => k in PRIOR.en || k in M3A.en || k in NEW.en)];
 let LANG = "en";
 /* EN counts take a Fluent plural selector; the mock picks the "#one" form when the count is 1 (Turkish has no plural after numerals) */
 const ONE_VARS = ["rows", "n", "cells", "skipped"];
@@ -2543,7 +3204,7 @@ function eolShortHTML(e) {
   switch (e.k) {
     case "rows": case "affected": case "done": return `<span class="g">${ic("check","i12")}</span><span class="mono">${esc(dur(e.ms))}</span>`;
     case "running": return `<span class="amb mono">${esc(t("exec-dur-s", { s:nf(e.s) }))}</span>`;
-    case "failed": return chip(e.code);
+    case "failed": case "foldfail": return chip(e.code);
     case "cancelled": return `<span class="mono">${esc(dur(e.ms))}</span>`;
     case "two": return `${eolShortHTML(e.a)}<span class="sep">|</span>${eolShortHTML(e.b)}`;
     case "denied": return `<span class="ink">${te("hv-editor-mark-denied")}</span>`;
@@ -2570,6 +3231,8 @@ function eolHTML(e) {
     case "stale": return `<span>${te("hv-editor-mark-stale")}</span>`;
     case "two": return `${eolHTML(e.a)}<span class="sep">|</span>${eolHTML(e.b)}`;
     case "hint": return e.html;
+    /* M3c (Task 32): a failure inside a fold paints on the header row and says where */
+    case "foldfail": return `<span class="ink">${te("hv-editor-fold-failed", { line:nf(e.line) })}</span>${chip(e.code)}`;
     case "awaiting": return `<span class="amb">${te(e.sp ? "hv-editor-mark-awaiting-sp" : "hv-editor-mark-awaiting")}</span>`;
     case "escalated": return `<span class="amb">${msg("hv-editor-mark-escalated", { duration:dur(e.s * 1000) })}</span>`;
     case "rolledback": return `<span>${te("hv-editor-mark-rolled-back")}</span>`;
@@ -2581,27 +3244,52 @@ function codeHTML(k) {
   const lastNo = E.first + Math.max(E.lines.length, 14) - 1, gx = Math.max(0, String(lastNo).length - 3);
   const PL = previewLayers(E), SR = selRanges(E);
   const curL = E.caret ? E.caret.l : -1;
+  /* M3c (Task 32): a folded range hides its lines; every hidden line maps to its header's visual row */
+  const hidden = new Set(), foldAt = {};
+  (E.folds || []).forEach(f => { foldAt[f.l] = f; for (let l = f.l + 1; l <= f.to; l++) hidden.add(l); });
+  const vrow = []; let vn = 0; E.lines.forEach((_, i) => { if (!hidden.has(i)) vn++; vrow[i] = vn - 1; });
+  const Y = l => (vrow[l] ?? l) * 18;
+  const carets2 = E.carets2 || [], sels2 = E.sels2 || [], hits = E.hits || [];
   let gut = "", bands = "", inner = "", eols = "";
   E.lines.forEach((src, i) => {
+    const toks = lexLine(src, lex);                       /* the lexer state runs through hidden lines too */
+    if (hidden.has(i)) return;
     gut += `<div class="ln${i === curL ? " cur" : ""}">${E.first + i}</div>`;
-    if (PL.bands[i]) bands += `<i class="b ${PL.bands[i]}" style="top:${i * 18}px"></i>`;
+    if (PL.bands[i]) bands += `<i class="b ${PL.bands[i]}" style="top:${Y(i)}px"></i>`;
     let over = "";
     (PL.tints[i] || []).forEach(x => over += `<i class="tint ${x.cls}" style="left:calc(8px + ${x.c0}ch);width:${Math.max(0, x.c1 - x.c0)}ch"></i>`);
+    hits.filter(h => h.l === i).forEach(h => over += `<i class="hit" style="left:calc(8px + ${h.c0}ch);width:${h.c1 - h.c0}ch"></i>`);
     if (SR[i]) over += `<i class="selr" style="left:calc(8px + ${SR[i].c0}ch);width:${Math.max(0.5, SR[i].c1 - SR[i].c0)}ch"></i>`;
-    const decos = E.ime && E.ime.l === i ? [{ from:E.ime.c, to:E.ime.c + E.ime.text.length, cls:"ime" }, { from:E.ime.c + E.ime.clause[0], to:E.ime.c + E.ime.clause[1], cls:"ime cl" }].filter(d => d.to > d.from) : [];
-    const toks = lexLine(src, lex);
-    let txt = lineHTML(toks, decos.length > 1 ? [decos[1], ...splitAround(decos[0], decos[1])] : decos);
+    sels2.filter(s => s.l === i).forEach(s => over += `<i class="selr sec" style="left:calc(8px + ${s.c0}ch);width:${Math.max(0.5, s.c1 - s.c0)}ch"></i>`);
+    const imeAt = [...(E.ime && E.ime.l === i ? [E.ime] : []), ...(E.imeAll || []).filter(x => x.l === i).map(x => ({ ...E.ime, l:x.l, c:x.c }))];
+    const decos = imeAt.flatMap(m => { const o = { from:m.c, to:m.c + m.text.length, cls:"ime" }, cl = { from:m.c + m.clause[0], to:m.c + m.clause[1], cls:"ime cl" }; return cl.to > cl.from ? [cl, ...splitAround(o, cl)] : [o]; });
+    let txt = lineHTML(toks, decos);
     if (E.placeholder && i === 0 && !src) txt = `<span class="phold">${te("hv-editor-placeholder", { key:KEY_RUN })}</span>`;
-    const caret = focused && E.caret && E.caret.l === i ? `<i class="caret${S.blink ? " blink" : ""}" style="left:calc(8px + ${E.caret.c}ch - 1px)"></i>` : "";
-    inner += `<div class="l">${over}<span class="tx">${txt || " "}</span>${caret}</div>`;
+    const F = foldAt[i];
+    if (F) txt += `<span class="fph" data-act="unfold" data-l="${i}" title="${te("hv-editor-fold-tip", { from:E.first + F.l + 1, to:E.first + F.to })}">⋯ ${te("hv-editor-fold-lines", { n:nf(F.to - F.l) })}</span>`;
+    let caret = focused && E.caret && E.caret.l === i ? `<i class="caret${S.blink ? " blink" : ""}" style="left:calc(8px + ${E.caret.c}ch - 1px)"></i>` : "";
+    if (focused) carets2.filter(c => c.l === i).forEach(c => caret += `<i class="caret${S.blink ? " blink" : ""}" style="left:calc(8px + ${c.c}ch - 1px)"></i>`);
+    inner += `<div class="l${F ? " foldh" : ""}" data-l="${i}">${over}<span class="tx">${txt || " "}</span>${caret}</div>`;
   });
+  /* M3c (Task 34): ▶ only while Run would be enabled, and never over a mark that needs the user or is still running */
+  const runOff = ["running", "awaiting", "cancelling", "waiting"].includes(k.tb && k.tb.state);
+  const showRun = E.gutRun && !runOff && !E.marks.some(m => m.l === E.gutRun.l && ["awaiting", "escalated", "run", "cancelling", "queued"].includes(m.st));
+  const runRow = showRun ? E.gutRun.l : -1;
   E.marks.forEach(m => {
-    gut += (MARK_GLYPH[m.st] || "").replace('class="mk', `style="top:${6 + m.l * 18}px" data-l="${m.l}" class="mk`).replace("</span>", m.more ? `<i class="more"></i></span>` : "</span>");
-    if (m.range) gut += `<i class="rng${m.st === "stale" ? " stale" : ""}" style="top:${6 + m.range[0] * 18 + 1}px;height:${(m.range[1] - m.range[0] + 1) * 18 - 2}px"></i>`;
-    if (m.eol) eols += `<div class="eol" data-l="${m.l}" data-short="${esc(eolShortHTML(m.eol))}" style="top:${m.l * 18}px">${eolHTML(m.eol)}</div>`;
+    if (m.l !== runRow) gut += (MARK_GLYPH[m.st] || "").replace('class="mk', `style="top:${6 + Y(m.l)}px" data-l="${m.l}" class="mk`).replace("</span>", m.more ? `<i class="more"></i></span>` : "</span>");
+    if (m.range) gut += `<i class="rng${m.st === "stale" ? " stale" : ""}" style="top:${6 + Y(m.range[0]) + 1}px;height:${Y(m.range[1]) - Y(m.range[0]) + 16}px"></i>`;
+    if (m.eol) eols += `<div class="eol" data-l="${m.l}" data-short="${esc(eolShortHTML(m.eol))}" style="top:${Y(m.l)}px">${eolHTML(m.eol)}</div>`;
   });
-  PL.bars.forEach(b => { if (!E.marks.some(m => m.range && m.range[0] === b.from && m.st !== "stale")) gut += `<i class="rng ${b.cls}" style="top:${6 + b.from * 18 + (b.gap ? 1 : 0)}px;height:${(b.to - b.from + 1) * 18 - (b.gap ? 3 : 0)}px"></i>`;
-    else gut += `<i class="rng ${b.cls}" style="top:${6 + b.from * 18}px;height:${(b.to - b.from + 1) * 18}px;left:2px"></i>`; });
+  PL.bars.forEach(b => { if (!E.marks.some(m => m.range && m.range[0] === b.from && m.st !== "stale")) gut += `<i class="rng ${b.cls}" style="top:${6 + Y(b.from) + (b.gap ? 1 : 0)}px;height:${Y(b.to) - Y(b.from) + 18 - (b.gap ? 3 : 0)}px"></i>`;
+    else gut += `<i class="rng ${b.cls}" style="top:${6 + Y(b.from)}px;height:${Y(b.to) - Y(b.from) + 18}px;left:2px"></i>`; });
+  /* M3c (Task 34): ▶ takes the mark column of the hovered (or focused) statement row; its tooltip holds the last runs */
+  if (showRun) gut += `<span class="play${E.gutRun.kf ? " kf" : " hov"}" role="button" tabindex="-1" style="top:${6 + Y(runRow)}px" data-act="gutRun" data-l="${runRow}" aria-label="${te("hv-gutter-run")}">${ic("play","i12")}</span>`;
+  /* M3c (Task 32): the fold column; a folded header always shows its chevron, an open range only on gutter hover or focus */
+  (E.foldable || []).forEach(f => {
+    const folded = !!foldAt[f.l]; if (!folded && !E.foldShow) return;
+    const name = te(folded ? "hv-editor-unfold-name" : "hv-editor-fold-name", { from:E.first + f.l, to:E.first + f.to });
+    gut += `<span class="fd${E.foldFocus === f.l ? " kf" : ""}" role="button" tabindex="-1" aria-expanded="${!folded}" aria-label="${name}" title="${name}" data-act="${folded ? "unfold" : "fold"}" data-l="${f.l}" style="top:${6 + Y(f.l)}px">${ic(folded ? "chevron-right" : "chevron-down","i12")}</span>`;
+  });
   Object.entries(PL.hints).forEach(([l, x]) => {
     if (E.marks.some(m => m.l === +l && m.eol)) return;
     let html = "";
@@ -2610,13 +3298,15 @@ function codeHTML(k) {
     if (x.hint === "offline") html = `${ic("unplug","i12")}<span>${te("hv-editor-preview-offline")}</span>`;
     if (x.hint === "asone") html = `${ic("layers","i12")}<span>${te("hv-editor-preview-as-one", { n:nf(x.P.count || x.n) })}</span>`;
     if (x.hint === "uncertain") html = `<span class="ink" style="display:flex">${ic("circle-alert","i12")}</span><span>${te("hv-editor-preview-uncertain")}</span>`;
-    eols += `<div class="eol" style="top:${l * 18}px">${html}</div>`;
+    eols += `<div class="eol" style="top:${Y(+l)}px">${html}</div>`;
   });
   const longest = Math.max(...E.lines.map(s => s.length));
   const hsb = E.hs || longest > 92 ? `<div class="hscroll"><i style="left:${Math.round((E.hs || 0) / (longest * 7.5) * 100)}%;width:${Math.max(10, Math.round(70 / longest * 100))}%"></i></div>` : "";
+  /* M3c (Task 33): the vertical scrollbar carries a 2 px tick per find hit (text-2) and the current one in blue */
+  const V = E.vsb, vsb = V ? `<div class="vsb" aria-hidden="true"><i class="th" style="top:${V.top}%;height:${V.h}%"></i>${(V.marks || []).map(m => `<i class="hm${m.cur ? " cur" : ""}" style="top:${m.at}%"></i>`).join("")}</div>` : "";
   return `<div class="code${focused ? "" : " blur"}" id="code" style="--gx:${gx}">
     <div class="gut" id="gut">${gut}</div>
-    <div class="lines"><div class="bands">${bands}</div><div class="inner" style="left:${-(E.hs || 0)}px">${inner}</div><div class="eols">${eols}</div></div>${hsb}</div>`;
+    <div class="lines"><div class="bands">${bands}</div><div class="inner" style="left:${-(E.hs || 0)}px">${inner}</div><div class="eols">${eols}</div></div>${hsb}${vsb}</div>`;
 }
 /* the selected IME clause sits inside the composition: split the outer underline around it */
 function splitAround(outer, cl) { return [{ ...outer, to:cl.from }, { ...outer, from:cl.to }].filter(d => d.to > d.from); }
@@ -2629,17 +3319,23 @@ function bannerHTML(E) {
 function renderEditor() {
   const k = K(), el = $("edpanel");
   const c = k && k.conn && conn(k.conn);
-  el.classList.toggle("prod", !!(c && c.env === "production"));
+  el.classList.toggle("prod", !!(c && c.env === "production") && !W.page && !W.panes);
+  document.querySelector(".col.center").classList.toggle("pagemode", !!W.page);
+  document.querySelector(".col.center").classList.toggle("panemode", !!W.panes);
+  /* M3c (Task 42): the Settings page is a workspace tab in the centre column */
+  if (W.page) { el.innerHTML = `<div class="etabs"><div class="tabs">${tabsHTML().replace(/ class="tab on"/g, ' class="tab"')}<div class="tab on">${ic("settings","i12")}<span>${te("hv-settings-title")}</span><button class="x" tabindex="-1" title="${te("hui-tab-close")}">${ic("x","i12")}</button></div></div><span class="grow"></span></div>` + settingsHTML(); return; }
+  /* M3c (Task 41): console panes split down to 120 px */
+  if (W.panes) { el.innerHTML = panesHTML(); return; }
   let h = `<div class="etabs"><div class="tabs">${tabsHTML()}</div><span class="grow"></span><span class="meta"><kbd>⌘2</kbd></span></div>`;
   if (!k || !k.conn) h += `<div class="edempty">${te("hv-editor-empty")}</div>`;
-  else h += qbarHTML(k) + bannerHTML(k.ed) + codeHTML(k) + errbarHTML(k);
+  else h += qbarHTML(k) + findbarHTML(k) + bannerHTML(k.ed) + codeHTML(k) + errbarHTML(k);
   el.innerHTML = h;
   fitToolbar(); fitEols(); fitErrbar();
 }
 /* An end-of-line status that would touch its line's text moves onto a panel pad and shows its short form */
 function fitEols() {
   document.querySelectorAll(".eols .eol[data-l]").forEach(el => {
-    const tx = document.querySelectorAll(".lines .inner .l")[+el.dataset.l]?.querySelector(".tx"); if (!tx) return;
+    const tx = document.querySelector(`.lines .inner .l[data-l="${el.dataset.l}"]`)?.querySelector(".tx"); if (!tx) return;
     if (tx.getBoundingClientRect().right + 12 > el.getBoundingClientRect().left) {
       el.classList.add("pad"); el.innerHTML = el.dataset.short;
       if (!el.innerHTML.trim()) el.hidden = true;
@@ -2813,14 +3509,16 @@ function renderResults() {
   }).join("");
   let body = "";
   if (k.res.active === "out") body = k.res.log.length ? `<div class="log">${k.res.log.map(logLineHTML).join("")}</div>` : `<div class="logempty">${te("hv-results-log-empty")}</div>`;
+  else if (KR().m3c) body = `<div class="rsplit"><div class="gridwrap" id="gridwrap">${gridM3cHTML(KR())}</div>${inspectorHTML(KR())}</div>`;
   else body = `<div class="gridwrap" id="gridwrap">${gridHTML(KR())}</div>`;
-  el.innerHTML = `<div class="ph rph" id="rph"><div class="rtabs">${tabs}</div><span class="grow"></span><kbd>⌘3</kbd></div>${rtoolHTML(k)}<div class="rbody">${body}</div>${k.res.active === "out" ? "" : stripHTML(KR())}`;
-  fitStrip(); fitTabs();
+  const m3 = k.res.active !== "out" && KR().m3c;
+  el.innerHTML = `<div class="ph rph" id="rph"><div class="rtabs">${tabs}</div><span class="grow"></span><kbd>⌘3</kbd></div>${m3 ? rtoolM3cHTML(k, KR()) : rtoolHTML(k)}<div class="rbody">${body}</div>${k.res.active === "out" ? "" : m3 ? stripM3cHTML(KR()) : stripHTML(KR())}`;
+  fitStrip(); fitTabs(); if (m3) { fitRtool(); placeSelboxes(); }
 }
 
 /* ═════════════ Status bar (follows the active console and its active result tab) ═════════════ */
 /* Collapse order at narrow widths (first hidden first); env, transaction, cursor, message, reduced and language never collapse */
-const COLLAPSE = ["ver", "enc", "selcount", "path", "lncol", "rows"];
+const COLLAPSE = ["ver", "enc", "selcount", "carets", "eol", "path", "lncol", "rows"];     /* M3c: carets with the selected count; mixed line endings before the path */
 function renderStatus() {
   const k = K(), c = k && k.conn && conn(k.conn), live = c && W.live[c.id];
   const seg = (id, html, cls = "", extra = "") => `<span class="s ${cls}" data-seg="${id}" ${extra}>${html}</span>`;
@@ -2848,6 +3546,9 @@ function renderStatus() {
   if (k && k.conn && live) {
     const E = k.ed;
     if (E.reduced) h += seg("reduced", `<span>${te("hv-editor-reduced")}</span>`, "r cur");
+    /* M3c (Task 34): mixed line endings, a button that opens Normalize…; (Task 31): the caret count */
+    if (E.eolMixed) h += `<button class="s r" data-seg="eol" data-act="eolMenu" aria-haspopup="menu" title="${te("hv-eol-mixed-tip")}" style="color:var(--text)">${te("hv-eol-mixed")}</button>`;
+    if (E.caretsN) h += seg("carets", `<span>${te("hv-editor-carets", { n:nf(E.caretsN) })}</span>`, "r");
     const sel = selCount(E);
     if (sel) h += seg("selcount", `<span>${te("hv-editor-selected", { n:nf(sel) })}</span>`, "r");
     if (E.caret) h += seg("lncol", `<span>${te("hv-editor-lncol", { line:String(E.first + E.caret.l), col:String(E.caret.c + 1) })}</span>`, "r");
@@ -2858,7 +3559,7 @@ function renderStatus() {
   const st = $("status");
   for (const id of COLLAPSE) { if (st.scrollWidth <= st.clientWidth + 0.5) break; st.querySelector(`[data-seg="${id}"]`)?.classList.add("hide"); }
 }
-function selCount(E) { if (!E.sel) return 0; const R = selRanges(E); return Object.values(R).reduce((n, r) => n + r.c1 - r.c0, 0); }
+function selCount(E) { if (E.selN !== undefined) return E.selN; if (!E.sel) return 0; const R = selRanges(E); return Object.values(R).reduce((n, r) => n + r.c1 - r.c0, 0); }
 
 /* ═════════════ Layers: menus, popovers, tooltips, dialogs, toasts ═════════════ */
 function winRect() { return $("win").getBoundingClientRect(); }
@@ -2894,7 +3595,8 @@ function menuHTML() {
   /* M3b (surface 3): the transaction-mode menu. The blue check marks the current mode; while a transaction is open, the modes and Isolation
      stay listed, disabled, with the reason as their hint; Commit and Roll back lead the menu */
   if (M.type === "tx") rows += txMenuRows(M);
-  const main = `<div class="menu${M.type === "chooser" || M.type === "uncertain" ? " chooser" : ""}" id="menu" role="menu" tabindex="-1" style="left:${M.x}px;top:${M.y}px${M.w ? `;width:${M.w}px` : ""}">${rows}</div>`;
+  if (M.type === "m3") rows += m3MenuRows(M);
+  const main = `<div class="menu${M.type === "chooser" || M.type === "uncertain" ? " chooser" : M.type === "m3" ? " m3" : ""}" id="menu" role="menu" tabindex="-1" style="left:${M.x}px;top:${M.y}px${M.w ? `;width:${M.w}px` : ""}">${rows}</div>`;
   return main + (M.type === "tx" && M.sub ? isoMenuHTML(M) : "");
 }
 function txMenuRows(M) {
@@ -2933,6 +3635,7 @@ function popHTML() {
 }
 function tipHTML() {
   const T = W.tip; if (!T) return "";
+  if (T.kind === "runs") return runsTipHTML(T);
   if (T.kind === "fail") return `<div class="tip" id="tip" role="tooltip" style="left:${T.x}px;top:${T.y}px"><div class="th">${ic("triangle-alert","i12")}<span>${te("exec-error", { n:T.n })}</span><span class="chip">${esc(T.code)}</span></div><div class="srvbox"><div class="cap2">${te("err-server")}</div><code lang="en">${esc(T.srv)}</code></div><div class="hint">${te("hv-editor-tip-show")}</div></div>`;
   if (T.kind === "two") return `<div class="tip" id="tip" role="tooltip" style="left:${T.x}px;top:${T.y}px"><div class="th">${te("hv-editor-tip-two")}</div><div style="margin-top:6px"><div class="row2"><span class="g">${ic("check","i12")}</span><span class="mono">SELECT count(*) FROM payments</span></div><div style="padding-left:19px;font-size:12px">${esc(t("hv-editor-mark-rows", { duration:dur(3), rows:nf(1) }))}</div><div class="row2" style="margin-top:6px">${ic("triangle-alert","i12")}<span class="mono">SELECT * FROM refundz</span></div><div class="srvbox"><div class="cap2">${te("err-server")} · SQLSTATE 42P01</div><code lang="en">relation "refundz" does not exist</code></div></div><div class="hint">${te("hv-editor-tip-show")}</div></div>`;
   if (T.kind === "stale") return `<div class="tip" id="tip" role="tooltip" style="left:${T.x}px;top:${T.y}px;width:260px">${te("hv-editor-tip-stale")}</div>`;
@@ -2956,9 +3659,10 @@ function placeMenu() {
   if (b.bottom > W0.bottom - 30) { W.menu.y = Math.max(44, W.menu.y - b.height - 26); m.style.top = W.menu.y + "px"; }
 }
 function renderMenus() {
-  $("menus").innerHTML = menuHTML() + popHTML() + tipHTML() + annotHTML();
+  $("menus").innerHTML = menuHTML() + popHTML() + tipHTML() + annotHTML() + vvHTML() + gotoHTML() + gtipHTML();
   if (W.pop) placePop();
   if (W.menu) placeMenu();
+  placeM3c();
 }
 function annotHTML() { const A = W.annot; return A ? `<div class="mocknote" style="left:${A.x}px;top:${A.y}px;${A.w ? `width:${A.w}px` : ""}">${A.html}</div>` : ""; }
 function dlgShell(w, title, sub, body, foot, alert) {
@@ -3178,7 +3882,7 @@ const SURF = [
 ];
 function renderMockbar() {
   const s = SURF[S.surface], cur = S.sc[s.id] || s.sc[0][0];
-  $("mockbar").innerHTML = `<div class="mrow"><span class="tag">MOCK · M3b</span>
+  $("mockbar").innerHTML = `<div class="mrow"><span class="tag">MOCK · M3b + M3c</span>
     <div class="mseg" role="group" aria-label="Surface">${SURF.map((x, i) => `<button aria-pressed="${i === S.surface}" data-act="surf" data-i="${i}" tabindex="-1"><span class="n">${i + 1}</span>${x.label}</button>`).join("")}</div></div>
     <div class="mrow"><span class="lbl">[ ]</span><div class="mseg" role="group" aria-label="Scenario">${s.sc.map(([k, l]) => `<button aria-pressed="${k === cur}" data-act="scen" data-k="${k}" tabindex="-1">${esc(l)}</button>`).join("")}</div>
     <span class="grow"></span>
@@ -3226,11 +3930,12 @@ const KEY_PREFIX = {
 function renderNotes() {
   const el = $("notes"); el.classList.toggle("on", S.notes); if (!S.notes) return;
   const s = SURF[S.surface], N = NOTES[s.id];
-  const keys = Object.keys(NEW.en).filter(k => !k.includes("#") && KEY_PREFIX[s.id].some(p => k.startsWith(p)));
+  const SRC = s.m3c ? M3C : NEW;
+  const keys = Object.keys(SRC.en).filter(k => !k.includes("#") && KEY_PREFIX[s.id].some(p => k.startsWith(p)));
   el.innerHTML = `<div class="nh"><span class="tag">MOCK NOTES</span><span style="color:var(--text-2)">${S.surface + 1} · ${esc(s.label)}</span><span class="grow"></span><button class="btn ghost icon" data-act="notes" title="N">${ic("x","i12")}</button></div>
   <div class="nbody"><h3>Intent</h3><p style="color:var(--text)">${esc(N.intent)}</p><h3>Decisions</h3><ul>${N.points.map(p => `<li>${esc(p)}</li>`).join("")}</ul>
   <h3>Strings on this surface</h3><p>Fluent ids. Turkish strings carry a <span class="por">Review: PO</span> marker until the PO signs them off.${keys.length ? "" : " This surface adds no strings: it removes M3a's notice."}</p>
-  <table>${keys.map(k => `<tr><td class="k">${esc(k)}</td><td class="en">${esc(NEW.en[k])}</td><td>${esc(NEW.tr[k] ?? "")}<span class="por">Review: PO</span></td></tr>`).join("")}</table>
+  <table>${keys.map(k => `<tr><td class="k">${esc(k)}</td><td class="en">${esc(SRC.en[k])}</td><td>${esc(SRC.tr[k] ?? "")}<span class="por">Review: PO</span></td></tr>`).join("")}</table>
   <h3>Mock keys</h3><p><code>1</code>–<code>9</code>, <code>0</code>, <code>-</code>, <code>=</code> surface · <code>[</code> <code>]</code> scenario · <code>T</code> theme · <code>L</code> language · <code>N</code> notes · <code>W</code> window size. Deep links: <code>?s=1&amp;sc=type&amp;theme=light&amp;lang=tr&amp;size=960&amp;bar=0</code>.</p></div>`;
 }
 
@@ -3238,7 +3943,8 @@ function renderNotes() {
 const RB = (key, v) => th(key, Object.fromEntries(Object.entries(v).map(([n, x]) => [n, `<bdi class="mono">${esc(x)}</bdi>`])));   /* identifiers bidi-isolated (FSI/PDI) */
 const okL = (l, rows = 1, ms = 6) => ({ l, st:"ok", range:[l, l], eol:{ k:"affected", rows:nf(rows), ms } });
 function setup(id, sc) {
-  clearTimers(); W = world(); W.pre = false; conn("orders-prod").ro = undefined; conn("api-dev").ro = undefined;
+  clearTimers(); W = world(); W.pre = false; conn("orders-prod").ro = undefined; conn("api-dev").ro = undefined; conn("api-prod").ro = undefined;
+  { const i = CONNS.findIndex(c => c.id === "reporting-replica-eu-west"); if (i >= 0) CONNS.splice(i, 1); }     /* M3c: the long-name fixture lives in one scenario only */
   const dev = W.consoles[0], prod = W.consoles[1], stg = W.consoles[2];
   const focus = cid => { W.active = cid; };
   const tr960 = () => { LANG = "tr"; S.size = "960"; };
@@ -3421,6 +4127,7 @@ function setup(id, sc) {
     if (v === "before") { W.pre = true; conn("orders-prod").ro = "guarded"; prod.res.results.r1.title = undefined; W.annot = { html:"M3a, for comparison: the read-only notice and the guarded capsule. M3b deletes both (Task 26).", at:"code", dx:40, dy:170, w:330 }; }
     if (v === "status") W.focus = "results";
   }
+  if (SURF.find(s => s.id === id)?.m3c) setupM3c(id, sc, { dev, prod, stg, focus, tr960 });
 }
 function runLog(withErr) {
   const L = [{ g:"ok", k:"exec-rows-retrieved", v:{ rows:1, duration:4 } }, { g:"ok", k:"exec-rows-affected", v:{ rows:12, duration:38 } }];
@@ -3477,6 +4184,7 @@ function slowToast(k, s) {
 
 /* deferred openers that need layout */
 function afterRender() {
+  afterRenderM3c();
   if (W.pendingMenu) { const p = W.pendingMenu; W.pendingMenu = null;
     if (p === "context") openContext(); else if (p === "uncertain") openChooser(true);
     else if (p === "uncertainAsOne" || p === "uncertainAsOneHi") openChooser(true, false, false, p === "uncertainAsOneHi");
@@ -3492,6 +4200,7 @@ function afterRender() {
   if (W.ovfOpen) { W.ovfOpen = false; openOvf(); }
   if (W.pop) placePop();
   if (W.layers.length) focusInitial();
+  placeM3c();
   if (W.pendingFocus) { const f = W.pendingFocus; W.pendingFocus = null; document.querySelector(`[data-fk="${f}"]`)?.focus({ preventScroll:true }); }
   startM3bClocks();
 }
@@ -3500,7 +4209,7 @@ function placeAnnot() {
   const W0 = winRect(), r = ref.getBoundingClientRect(); A.x = Math.min(r.left - W0.left + A.dx, W0.width - (A.w || 300) - 12); A.y = Math.max(44, r.top - W0.top + A.dy); renderMenus();
 }
 function placeIme() {
-  const sp = document.querySelector(".lines .ime"); if (!sp) return;
+  const E = K().ed, sp = (E.ime && document.querySelector(`.lines .l[data-l="${E.ime.l}"] .ime`)) || document.querySelector(".lines .ime"); if (!sp) return;
   const W0 = winRect(), r = sp.getBoundingClientRect(), A = W.annot;
   const cand = `<div class="candwin" style="left:${r.left - W0.left}px;top:${r.bottom - W0.top + 4}px"><div class="cap3">OS candidate window (mock marker)</div><div class="on">1  北京</div><div>2  背景</div><div>3  被禁</div></div>`;
   $("menus").insertAdjacentHTML("beforeend", cand);
@@ -3609,6 +4318,7 @@ function pickMenu(i) {
   if (M.type === "chooser" && it.customize) { closeMenu(); W.pop = "policy"; renderMenus(); $("pop")?.focus({ preventScroll:true }); return; }
   if (M.type === "chooser") { W.menu = null; renderMenus(); return runNow(K(), it.units); }
   if (M.type === "uncertain") { W.menu = null; renderMenus(); const k = K(); return runNow(k, [U(0, 0, 0, k.ed.lines[0].length - 1)], { untyped:true }); }
+  if (M.type === "m3") { closeMenu(); if (it.act) ACT[it.act]?.(); return; }
   if (M.type === "tx") { if (it.act === "isoSub") return openIso(); closeMenu(); if (it.act === "setMode") { K().mode = it.v; renderWork(); } else ACT[it.act]?.(); return; }
   if (M.type === "tab") { const k = K(), id = M.tab; closeMenu();
     if (it.act === "tabPin") k.res.results[id].pinned = !k.res.results[id].pinned;
@@ -3740,6 +4450,9 @@ document.addEventListener("click", e => {
   const mi = e.target.closest("[data-mi]"); if (mi) { pickMenu(+mi.dataset.mi); return; }
   if (W.menu && !e.target.closest("#menu") && !e.target.closest("#submenu")) { closeMenu(); if (!e.target.closest("[data-act]")) return; }
   if (W.tip && !e.target.closest(".tip")) { W.tip = null; renderMenus(); }
+  if (W.gtip) { W.gtip = null; renderMenus(); }
+  if (W.vv && !e.target.closest("#vv") && !e.target.closest("[data-act]")) { W.vv = null; renderMenus(); }
+  if (W.goto && !e.target.closest("#goto") && !e.target.closest("[data-act]")) { W.goto = null; renderMenus(); }
   if (W.pop && !e.target.closest(".pop") && !e.target.closest("[data-act=prodPop]")) { W.pop = null; renderEditor(); renderMenus(); }
   const a = e.target.closest("[data-act]");
   if (a && ACT[a.dataset.act] && !a.disabled) { e.preventDefault(); ACT[a.dataset.act](a, e); return; }
@@ -3802,6 +4515,14 @@ document.addEventListener("keydown", e => {
     const bar = document.querySelector('[data-fk="ebRetry"], [data-fk="ebRollbackContinue"]'), tst = document.querySelector("#toasts .toast .btn");
     if (bar && !ae?.closest("#errbar") && !ae?.closest("#toasts")) bar.focus(); else if (tst && !ae?.closest("#toasts")) tst.focus(); else { ae?.blur(); W.focus = "editor"; renderEditor(); } return; }
   if (e.key === "Escape" && document.activeElement?.closest("#errbar")) { e.preventDefault(); ACT.ebStop(); return; }
+  /* M11: an open find bar joins the F6 cycle first (then T2a's error bar, toasts, editor) */
+  if (e.key === "F6" && document.getElementById("fbar") && !document.activeElement?.closest("#fbar")) { e.preventDefault(); document.querySelector('#fbar [data-fk="fq"]')?.focus(); return; }
+  if (e.key === "Escape" && (W.vv || W.goto)) { e.preventDefault(); W.vv = null; W.goto = null; renderMenus(); return; }
+  if (e.key === "Escape" && document.activeElement?.closest("#fbar")) { e.preventDefault(); ACT.fclose(); return; }
+  if (e.key === "Escape" && document.activeElement?.closest(".fgrp2")) { e.preventDefault(); ACT.gfclose(); return; }
+  if (e.key === "Enter" && !e.repeat && document.activeElement?.dataset.fk === "fq") { e.preventDefault(); e.shiftKey ? ACT.fprev() : ACT.fnext(); return; }
+  if (e.key === "Enter" && !e.repeat && document.activeElement?.dataset.fk === "gotoQ") { e.preventDefault(); W.goto = null; renderMenus(); return; }
+  if (meta && (e.key === "l" || e.key === "L") && W.m3c) { e.preventDefault(); ACT.gotoOpen(); return; }
   if (e.key === "Escape") { if (W.pop) { const was = W.pop; W.pop = null; renderEditor(); renderMenus(); if (was === "prod") $("prodNote")?.focus(); return; } if (W.tip) { W.tip = null; renderMenus(); return; } }
   if (meta && e.key === "Enter") { e.preventDefault(); doRun(); return; }
   if (meta && e.key === ".") { e.preventDefault(); doStop(); return; }
@@ -3816,6 +4537,636 @@ document.addEventListener("keydown", e => {
   if (k === "w" || k === "W") { S.size = { fit:"1280", "1280":"960", "960":"fit" }[S.size]; return rerender(); }
 });
 window.addEventListener("resize", () => { if (!W) return; renderAll(); afterRender(); });
+/* ═══════════════════════════════════════════════════════════════
+   M3c "Complete" (Task 2b): surfaces 14–25. The M3b surfaces above keep their approved state; the M3c toolbar,
+   grid and editor additions appear in the M3c surfaces only (W.m3c).
+   ═══════════════════════════════════════════════════════════════ */
+SURF.push(
+  { id:"multi", m3c:true, label:"Multi-cursor", sc:[["occ","Next occurrence × 3"],["column","Column selection (⌥-drag)"],["ime","IME mirrored"],["imefallback","IME · main caret only"],["mainrun","Run follows the main caret"],["tr960","960 · TR"]] },
+  { id:"fold", m3c:true, label:"Folding", sc:[["hover","Chevrons on hover"],["folded","Folded statements"],["marks","Folds + execution marks"],["failed","Failure inside a fold"],["caret","Run at a caret in a fold"],["pending","Cancel unanswered in a fold"],["focus","Keyboard: focused chevron"],["tr960","960 · TR"]] },
+  { id:"find", m3c:true, label:"Editor find", sc:[["bar","3 of 41"],["tolerant","Turkish-tolerant (TR default)"],["regex","Regex"],["invalid","Invalid regex"],["none","No matches"],["counting","Counting"],["capped","Select all · capped"],["tr960","960 · TR"]] },
+  { id:"gutter", m3c:true, label:"Gutter + lines", sc:[["hover","▶ on hover"],["runs","Last three runs"],["focus","Keyboard: focused ▶"],["noplay","No ▶ while Run is off"],["eol","Mixed line endings"],["eolmenu","Normalize…"],["menu","Line commands (menu)"],["undo","Undo selection (⌘U)"],["recall","History recall"],["tr960","960 · TR"]] },
+  { id:"gridm", m3c:true, label:"Grid states", sc:[["sort1","Sort · one level"],["sort2","Sort · levels 1 and 2"],["partial","Sorted locally (partial)"],["codepoint","Code-point collation"],["sorting","Sorting a million rows"],["tail","Partial + unsorted tail"],["tailc","Complete + unsorted tail"],["frozen","Frozen columns, scrolled"],["multirect","Multi-rect selection"],["resize","Column resize handle"],["tr960","960 · TR"]] },
+  { id:"gfind", m3c:true, label:"Grid find", sc:[["bar","k of N"],["filter","Filter rows"],["incomplete","May be incomplete"],["scanning","Scanning"],["invalid","Invalid regex"],["selall","Select all occurrences"],["selcap","Select all · over 10,000"],["tr960","960 · TR"]] },
+  { id:"goto", m3c:true, label:"Go to row", sc:[["empty","Popover"],["turkish","Turkish 1.000"],["range","Out of range"],["unknown","Unknown column"],["hidden","Hidden column"],["fetch","Fetch to row (> 1M)"],["fetching","Fetching to the row"],["tr960","960 · TR"]] },
+  { id:"views", m3c:true, label:"Views", sc:[["seg","Transposed disabled"],["transposed","Transposed"],["record","Record inspector"],["dups","Duplicate names · Show more"],["onerow","One-row result"],["text","Text view"],["textbig","Text view > 100k asks"],["textbuild","Building the text view"],["tr960","960 · TR"]] },
+  { id:"vv", m3c:true, label:"Value viewer", sc:[["text","Wrapped text"],["json","JSON · Pretty"],["jsonraw","JSON · Raw"],["hex","Binary (hex)"],["xml","XML · Pretty"],["badjson","Invalid JSON"],["trunc","Truncated · Re-run"],["tr960","960 · TR"]] },
+  { id:"gmenu", m3c:true, label:"Grid menu", sc:[["cell","Cell"],["header","Header"],["rownum","Row number"],["unfreeze","Header · frozen (Unfreeze)"],["disabled","Disabled with reasons"],["kbd","Keyboard (⇧F10)"],["tr960","960 · TR"]] },
+  { id:"narrow", m3c:true, label:"Narrow panes", sc:[["idle","Idle · read-only production"],["running","Running / cancelling"],["waiting","Waiting (two lines)"],["pending","Pending read-only + badge"],["strip","Strip · Cursor open"],["reduced","Status · Reduced never gives way"],["longname","Long name ellipsized, mark kept"],["carries","Empty console · Nothing to run"],["pseudo","Pseudo en-XA · 219 px"],["tr960","960 · TR"]] },
+  { id:"settings", m3c:true, label:"Settings rows", sc:[["editor","Editor"],["execution","Execution"],["results","Results"],["clamped","Value limit clamped"],["kb","Value limit in KB"],["search","Search (TR)"],["tr960","960 · TR"]] },
+);
+Object.assign(NOTES, {
+  multi:{ intent:"Several carets edit as one: every M3a editing command applies per range in one undo group (Task 31).",
+    points:["Every caret is the same 2 px blue bar and they blink in phase; secondary selections use the selection tint. Only the IME and the OS see a 'primary' caret.", "Select the next occurrence (⌃G) is case- and Turkish-exact: 'İzmir' never selects 'izmir'.", "Column selection (⌥-drag) works in display columns (tabs and wide characters count by width); a line shorter than the box gets a caret at its end, never virtual space.", "IME: with every caret in plain text the composition is mirrored to all of them (each underlined); the OS candidate window follows the main caret only.", "When a caret sits inside a string or comment the composition goes to the main caret only and the other carets collapse first (R-M3-64); the status bar says so once.", "The status bar counts carets ('3 carets') beside the selected characters; the count collapses with the selected count at narrow widths.", "Run follows the main caret (controller ruling 2): the band and the gutter bar show only its statement, and Run runs only that one."] },
+  fold:{ intent:"Statements of three or more lines, blocks, block comments and -- region markers fold from the gutter (Task 32).",
+    points:["The fold column is the gutter's last 14 px (right of the line numbers). Open ranges show a chevron only while the pointer is over the gutter or a gutter button has the keyboard focus; a folded header always shows its chevron.", "A folded range draws its header line, then a '⋯ 12 lines' inlay (Source Sans 500 11 px on seam-soft, radius 3); the line numbers skip the hidden lines and the header gets a seam-soft underline.", "Execution marks inside a fold paint on the header row; the one that most needs the user wins: awaiting answer > cancel not answered > failed > running > cancelling > queued > cancelled > rolled back > skipped > done; its end-of-line status says what and where ('failed inside the fold · line 9').", "Every fold range is at least three lines.", "Run at a caret inside a folded statement runs the whole statement; the preview band covers the header row and the gutter bar the same row.", "No default chord: Fold / Unfold / Fold all / Unfold all are palette commands (Task 1b table); the gutter chevrons are buttons (Space or Enter) for the keyboard and AccessKit.", "Folded lines leave the AccessKit text runs; the chevron's name says which lines it folds."] },
+  find:{ intent:"Find in the editor without leaving the toolbar or covering a trust signal: a 32 px bar under the editor toolbar (Task 33).",
+    points:["One field anatomy for the editor and the grid: a 24 px field well with the query in mono and 20 px toggles inside it (Match case, Whole words, Regular expression, Turkish-tolerant); pressed toggles take the selection tint with a blue border.", "Outside the field: the count ('3 of 41', mono, fixed width so nothing jumps), previous / next, Select all occurrences (⌃⌘G), close; with no match they are disabled in the disabled ink. Enter / ⇧Enter step; ⌘G / ⇧⌘G work from the editor too.", "Other matches are a 1 px text-3 outline; the current match is the selection (blue tint and the caret). The scrollbar carries a 2 px tick per match, the current one blue. No amber, red or green.", "Turkish-tolerant (İ, I, ı and i find each other; accents ignored) is on by default when the UI language or the region is Turkish, and is remembered.", "An invalid regex keeps the field border text-2 and says 'Invalid pattern' with the ink glyph; nothing is searched; the parser's message is in the tooltip. The plan's 'turns red' is replaced (Hue Is Meaning; the type-to-confirm precedent).", "Counting runs off the UI thread; while it runs the count reads '3 of 1,240+' beside the static amber marker.", "Select all occurrences is capped at 10,000 carets; past the cap the status bar says how many of how many were selected.", "An open find bar comes first in the F6 cycle (then the error bar, toasts, editor).", "Escape closes the bar and returns the caret to where find started."] },
+  gutter:{ intent:"Run a statement from its gutter, see how it went the last three times, and edit lines with one key (Task 34).",
+    points:["▶ appears in the mark column of a statement's first row while the pointer is on that row (or a gutter button has the keyboard focus), only while Run would be enabled; it takes a done or failed mark's place, never an awaiting, escalated, running, cancelling or queued one. It runs through the same resolve, preview and gate path as ⌘↵.", "Its tooltip: 'Run this statement ⌘↵', then the last three runs with the outcome glyph, the time (mono), the duration and rows, a failure's SQLSTATE chip.", "Mixed line endings: a status-bar button 'Mixed line endings' (the editor's group, it gives way after Ln/Col's neighbours) opens a menu ('Line endings: LF 214, CRLF 12') that offers 'Normalize to LF (most lines)' / 'Normalize to CRLF'; one undo group.", "Line commands live in the editor's context menu and the palette: Comment or uncomment ⌘/, Duplicate line ⌘D, Delete line ⇧⌘K, Move line up / down ⌥⇧↑ / ⌥⇧↓, Select all occurrences ⌃⌘G, Undo the selection change ⌘U. Moving a line moves a fold with it.", "History recall (⌃⌥↑ / ⌃⌥↓) at the last line of an empty or recalled console puts the statement in the editor and says 'From history: statement 2 of 48' in the status bar."] },
+  gridm:{ intent:"Sort, freeze and select the grid locally without pretending to be the database (Tasks 35, 36).",
+    points:["Sort indicator: a blue arrow in the header (up ascending, down descending); with two or more levels each sorted header adds its level number in mono. The header tooltip names the level, the direction and the collation (the column's DB collation mapped to ICU, else code point; never the UI locale).", "A partial result sorted locally says so under the toolbar: 'Sorted locally: the database might order differently. Only the 10,000 fetched rows are sorted.' with Clear sort.", "Rows that arrive after a sort go to an unsorted tail behind a dashed text-3 line. On a partial result the note says both: sorted locally, only the 10,000 fetched rows sorted, 1,500 new rows at the end not; Re-sort and Clear sort. On a complete result: '1,500 new rows at the end (not sorted)' with Re-sort.", "Sorting a million rows runs off the UI thread; after 200 ms the note shows the static amber marker, 'Sorting 1,048,576 rows…' and Cancel. The grid keeps the old order until the new one is ready.", "Frozen columns sit in their own layer with a seam-strong right edge and never scroll sideways; no glyph, the header tooltip says 'Frozen'.", "Multi-rect selection (⌘-click, ⌘-drag): one blue box per range, the strip says '2 ranges · 10 cells'; copy of a union that doesn't stack is refused as in M3a.", "Column resize: the header edge shows a 1 px text-2 handle on hover; dragging draws a dashed text-2 guide and the width in px; a double-click fits the column."] },
+  gfind:{ intent:"Find over what the grid shows, with the result toolbar's left group as the find bar (Task 37).",
+    points:["The find bar replaces the toolbar's left group (Copy, Count rows) and uses the editor's field anatomy plus a fifth toggle, Filter rows. The right group (rows · timing, the view switch, Record) stays.", "The scan is over display strings of the shown columns, in batches of 1,000 from the focus cell, off the UI thread; NULL never matches (placeholder tooltip says so).", "Matches are a 1 px text-3 outline around the matching text; the current one is the focused cell with the blue box.", "Truncated cells make the count say 'may be incomplete' (dotted underline, tooltip with the count and the cut).", "Filter rows shows only the matching rows (view rows 1…n) with a note row under the toolbar and Show all rows; the cursor strip stays (Cursor open, Close cursor, Fetch more, Fetch all).", "Select all occurrences (⌃⌘G) selects every match as a range, at most 10,000; the strip counts ranges and cells, past the cap the status bar says so.", "Scanning: '3 of 214+' beside the static amber marker; an invalid regex behaves as in the editor."] },
+  goto:{ intent:"Jump to a row (and a column) by number, in the format locale (Task 37).",
+    points:["⌘L opens a 300 px popover under the result toolbar: a mono field 'row or row:column', a hint line, ↵ Go / esc Close.", "Rows are 1-based view rows; the locale's digits and grouping are read ('1.000' in Turkish is row 1000); the live line confirms the target: 'Row 1,000, column city'.", "The column matches by position, exact name, ASCII case-insensitive name, then the Turkish-tolerant key.", "Errors are ink lines under the field (border text-2): past the last row names the total; an unknown column names the text; a hidden column offers 'Show it and go'.", "A row past the fetched rows on an open cursor fetches to it; above 1,000,000 rows the popover asks first, with Cancel and Fetch and go (primary, last, focused: bounded by the memory limit).", "While it fetches: the amber marker, 'Fetching to row 1,500,000: 214,000 of 1,490,000 rows' and Stop fetching (focused); Escape hides the popover and the strip keeps fetching."] },
+  views:{ intent:"Look at a result as a table, transposed, as text, or one record at a time (Task 38).",
+    points:["The view switch is a 22 px Segmented in the result toolbar's right group: Table / Transposed / Text. Transposed is disabled above 100,000 rows, with the reason in its tooltip; nothing is ever transposed automatically.", "Narrow: the rows · timing note gives way first (the status bar and the strip repeat it), then the Segmented keeps its icons only (table, table-properties, align-left), names in the tooltip and the accessible name.", "Record: a toggle after the switch opens the 252 px inspector on the gutter tone: 'Row 4 of 10,000+', ▲ ▼ (Alt+↑ / Alt+↓), then one field per column (mono name, type at text-3, the value up to three lines, 'Show more' opens the value viewer). Duplicate names get ' (2)'. Virtualized above 200 columns.", "A one-row result shows the toggle with its word ('Record') instead of the icon alone; no hue.", "Text: a Pretty ASCII table in mono on the panel, widths capped at 255 characters; whole lines select and copy; a thumb shows it scrolls sideways. Above 100,000 rows it asks first, in place: Back to the table / Show as text (primary, last); then the build runs in place with Cancel."] },
+  vv:{ intent:"Read one value whole, without changing what Copy copies (Task 38, R-M3-82).",
+    points:["A 480 px popover on the dialog anatomy, anchored to its cell, no scrim: the column name (mono 600) and '{type} · row 4' with the size, then the value in a mono well (wrapped, scrolls past 240 px), then Copy raw value.", "JSON and XML get a Raw / Pretty switch; Pretty is display only (tooltip): Copy raw value copies the server's text unchanged. Invalid JSON stays raw with one line saying so.", "Binary shows a hex dump: offset (text-3), 8 bytes per row below a 560 px popover (16 from 560 px), the ASCII column (text-2) never clipped; a long value shows its scroll thumb.", "XML Pretty indents and colours tags, attributes and values; invalid JSON keeps Raw, disables Pretty and says why.", "A truncated value says 'Showing the first 1 MB of 5.2 MB.' and offers 'Re-run with a 64 MB value limit', which re-runs the unit with cell_cap raised through the same gate and preview (on production the gate asks).", "Esc closes and returns the focus to the cell; ⇧↵ opens it from the focused cell."] },
+  gmenu:{ intent:"Every grid command in reach of the pointer and the keyboard, with disabled items saying why (Task 39).",
+    points:["Cell: Copy ⌘C, Copy with headers, Open value viewer ⇧↵, Raw display (this column) ✓, Sort ascending / descending, Clear sort, Go to row… ⌘L.", "Header: Sort ascending / descending, Clear sort, Add as sort level 2 (when another column is sorted), Freeze up to here / Unfreeze columns, Hide column, Show all columns, Fit width, Raw display, Copy column name.", "Row number: Copy rows, Copy with headers, Show as record, Go to row….", "A disabled item stays in place, text-3, with its reason as the right-hand hint: 'Select one cell', 'Not sorted', 'None hidden', 'Ranges don't line up', 'Last shown column'.", "The keyboard-active row (every menu): the selection tint, a 1 px blue left edge and text ink.", "⇧F10 (or the context-menu key) opens it at the focus cell with the first item active; a double-click on a header edge fits the column; raw display is per column here and global in Settings."] },
+  narrow:{ intent:"A console split down to 120 px keeps every trust signal whole in every locale (Task 41, R-M3-75).",
+    points:["A pane is a console tile: its editor over its own results (the strip at its foot). The status bar follows the focused pane.", "The toolbar wraps into two rows. Named exceptions to T2a: N1 Run / Stop icon-only (words in tooltip and name); N2 the connection name ellipsizes, its mark never; N3 the badge drops its age, keeps Commit and Roll back as icons; N4 the mode chip drops its glyph and keeps its word (Auto / Manual / Smart).", "Production panes keep 'Manual'; a read-only pane keeps T2a's disabled 'Auto-commit' chip.", "The read-only chip keeps its whole label, 'read-only (guarded)', wrapping inside the chip.", "The waiting item is two lines: 'Waiting for a connection' / '4 of 4 in use', then Cancel.", "Status bar: the editor segment in the right group before the version; Reduced mode never gives way; 'Nothing to run here' is a status sentence; an empty console draws its placeholder."] },
+  settings:{ intent:"The M3b settings get rows on the existing Settings page (Task 42): four new sections in its navigation.",
+    points:["The shipped anatomy: a 176 px navigation, a search field (max 320 px), a small-caps section title, form rows with a 200 px title column; every choice is a Segmented that applies at once.", "Editor: Tab size 2 / 4 / 8, Indent with spaces, Copy the line when nothing is selected, Blinking caret.", "Execution: Confirm UPDATE or DELETE without WHERE off production (on by default, PO Q1) and Ask what to do when a statement fails; each with a one-line note.", "Results: Largest value kept per cell, a mono number field with a KB / MB select, clamped to 64 KB–64 MB with a note naming the clamp; Show grid values raw.", "History: up to 10,000 statements per connection for 90 days; recognised passwords and secrets masked.", "History: Record query history.", "Search finds rows in English and Turkish across sections; the section title hides while searching (shipped behaviour)."] },
+});
+Object.assign(KEY_PREFIX, {
+  multi:["hv-editor-carets","hv-editor-ime-"], fold:["hv-editor-fold","hv-editor-unfold"], find:["hv-find-"], gutter:["hv-gutter-","hv-eol-","hv-history-recall"],
+  gridm:["hv-grid-","hv-strip-ranges"], gfind:["hv-gfind-"], goto:["hv-goto-"], views:["hv-view-","hv-transposed","hv-record","hv-text-"], vv:["hv-vv-"], gmenu:["hv-gmenu-"],
+  narrow:["hv-console-"], settings:["hv-settings-"],
+});
+
+/* ═════════════ M3c fixtures ═════════════ */
+const at = (s, w, from = 0) => s.indexOf(w, from);
+const SQL_OCC = ["-- Bekleyen siparişleri kargoya ver", "UPDATE orders SET status = 'kargoda' WHERE status = 'beklemede' AND city = 'İzmir';", "UPDATE orders SET status = 'kargoda' WHERE status = 'beklemede' AND city = 'Bursa';", "SELECT count(*) FROM orders WHERE status = 'beklemede';"];
+const SQL_COL = ["SELECT id,", "       full_name,", "       city,", "       total,", "       placed_at,", "       meta", "FROM orders;"];
+const SQL_IME = ["-- Çince rapor sütunları", "SELECT city       AS sehir_shuju", "     , count(*)   AS adet_shuju", "     , sum(total) AS ciro_shuju", "FROM orders GROUP BY city;"];
+const SQL_IMEF = ["-- Çince rapor sütunları", "SELECT city       AS sehir,", "       'adet: ' || count(*) AS adet,", "       sum(total) AS ciro_shuju", "FROM orders GROUP BY city;"];
+const SQL_FOLD = ["-- region Gece raporları", "SELECT c.city, count(*) AS adet, sum(o.total) AS ciro", "FROM orders o", "JOIN customers c ON c.id = o.customer_id", "WHERE o.placed_at >= date_trunc('day', now())", "GROUP BY c.city", "ORDER BY ciro DESC;", "",
+  "SELECT o.id, c.full_name, o.total, o.placed_at", "FROM orders o", "JOIN customers c ON c.id = o.customer_id", "WHERE o.status = 'beklemede'", "ORDER BY o.placed_at", "LIMIT 100;", "-- endregion", "",
+  "/* Haftalık bakım:", "   eski oturumları temizle */", "DELETE FROM sessions", "WHERE last_seen < now() - interval '30 days';", "", "UPDATE orders SET status = 'arşiv'", "WHERE placed_at < '2024-01-01';"];
+const FOLDABLE = [{ l:0, to:14 }, { l:1, to:6 }, { l:8, to:13 }];   /* every fold range is at least three lines: the 2-line block comment isn't one */
+const SQL_FIND = ["-- Şehre göre ciro ve sipariş", "SELECT c.city, count(o.id) AS siparis, sum(o.total) AS ciro", "FROM customers c", "JOIN orders o ON o.customer_id = c.id", "WHERE c.city IN ('İstanbul', 'İzmir', 'Iğdır')", "GROUP BY c.city", "ORDER BY ciro DESC;", "",
+  "SELECT city, segment, count(*) AS musteri", "FROM customers", "WHERE city <> 'ISTANBUL' AND segment = 'altın'", "GROUP BY city, segment;", "", "-- city sütunu boş olanlar", "SELECT id, full_name FROM customers WHERE city IS NULL;"];
+const hitsOf = (lines, re) => lines.flatMap((s, l) => { const out = []; let m; const r = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g"); while ((m = r.exec(s))) { out.push({ l, c0:m.index, c1:m.index + m[0].length }); if (!m[0].length) r.lastIndex++; } return out; });
+const SQL_GUTX = ["-- Gece raporu", "SELECT city, count(*) AS adet FROM customers GROUP BY 1;", "UPDATE orders SET status = 'arşiv' WHERE placed_at < '2024-01-01';", "SELECT * FROM order_items WHERE order_id = 1048213;", "", "SELECT city, sum(total) AS ciro", "FROM orders", "GROUP BY city;"];
+const COLLATE_TR = new Intl.Collator("tr");
+const ROWS60 = Array.from({ length:60 }, (_, r) => rowOrders(r));
+const sortRows = (rows, keys) => [...rows].sort((a, b) => { for (const k of keys) { const x = a[k.c], y = b[k.c]; const d = typeof x === "number" ? x - y : COLLATE_TR.compare(String(x), String(y)); if (d) return k.dir === "asc" ? d : -d; } return 0; });
+const R_M3C = o => result({ cols:COLS_ORDERS, row:rowOrders, loaded:10000, total:null, state:"suspended", ms:131, m3c:true, view:"table", ...o });
+const COLS_DUP = [{ name:"id", type:"bigint", kind:"num", id:true, w:86 }, { name:"id", type:"bigint", kind:"num", id:true, w:86 }, { name:"full_name", type:"text", kind:"text", w:150 }, { name:"note", type:"text", kind:"text", w:260 }, { name:"total", type:"numeric(14,2)", kind:"num", dp:2, w:116 }];
+const ROW_DUP = r => { const o = rowOrders(r); return [o[0], 48213 + r, o[1], r === 3 ? "Müşteri 12 Kasım'da aradı: kargo şirketi paketi yanlış şubeye bırakmış. Yeni teslim adresi Moda Caddesi No: 12, Kadıköy. İade istemiyor, yeniden gönderim bekliyor; ikinci kez aranacak." : "—", o[3]]; };
+
+/* ═════════════ Editor: find bar (Task 33) ═════════════ */
+/* One field anatomy for the editor and the grid (NOTES "M3c surfaces · Find field") */
+function findFieldHTML(F, grid) {
+  const tog = (key, icon, label, tip) => `<button class="ftog" data-act="ftog" data-k="${key}" aria-pressed="${!!F[key]}" title="${esc(tip || label)}" aria-label="${esc(label)}">${ic(icon,"i12")}</button>`;
+  return `<label class="ffield${F.state === "invalid" ? " bad" : ""}">${ic("search","i12")}<input data-fk="fq" value="${esc(F.q || "")}" spellcheck="false" autocomplete="off" placeholder="${te(grid ? "hv-gfind-placeholder" : "hv-find-placeholder")}" aria-label="${te(grid ? "hv-gfind-placeholder" : "hv-find-placeholder")}" ${grid ? `title="${te("hv-gfind-null-tip")}"` : ""}>`
+    + tog("mc", "case-sensitive", t("hv-find-match-case")) + tog("ww", "whole-word", t("hv-find-words")) + tog("re", "regex", t("hv-find-regex"))
+    + (grid ? tog("filter", "filter", t("hv-gfind-filter"), t("hv-gfind-filter-tip")) : "") + tog("tol", "languages", t("hv-find-tolerant"), t("hv-find-tolerant-tip")) + `</label>`;
+}
+function findCountHTML(F) {
+  if (F.state === "invalid") return `<span class="fcount ink" role="status" title="${te("hv-find-invalid-tip", { error:F.err })}">${ic("circle-alert","i12")}<span>${te("hv-find-invalid")}</span></span>`;
+  if (F.state === "none") return `<span class="fcount" role="status">${te("hv-find-none")}</span>`;
+  const n = F.more ? t("hv-find-count-more", { i:nf(F.i), n:nf(F.n) }) : t("hv-find-count", { i:nf(F.i), n:nf(F.n) });
+  return `<span class="fcount" role="status" ${F.more ? `title="${te("hv-find-counting-tip")}"` : ""}>${F.more ? `<i class="run"></i>` : ""}<span class="mono">${esc(n)}</span>${F.incomplete ? `<span>·</span><span class="inc" title="${te("hv-gfind-incomplete-tip", { n:nf(F.incomplete), size:mbs(1) })}">${te("hv-gfind-incomplete")}</span>` : ""}</span>`;
+}
+function findStepHTML(F, withAll) {
+  const off = F.state === "invalid" || F.state === "none" ? "disabled" : "";
+  return `<button class="btn ghost icon" data-act="fprev" ${off} title="${te("hv-find-prev")} · ⇧↵" aria-label="${te("hv-find-prev")}">${ic("arrow-up","i12")}</button><button class="btn ghost icon" data-act="fnext" ${off} title="${te("hv-find-next")} · ↵" aria-label="${te("hv-find-next")}">${ic("arrow-down","i12")}</button>`
+    + (withAll ? `<button class="btn ghost" data-act="fall" ${off} title="${te("hv-cmd-editor-select-all-occurrences")} · ⌃⌘G">${te("hv-cmd-editor-select-all-occurrences")}</button>` : "");
+}
+function findbarHTML(k) {
+  const F = k.find; if (!F) return "";
+  return `<div class="fbar" id="fbar" role="search" aria-label="${te("hv-find-placeholder")}">${findFieldHTML(F, false)}${findCountHTML(F)}${findStepHTML(F, true)}<span class="grow"></span><button class="btn ghost icon" data-act="fclose" title="${te("hv-cmd-editor-find-close")} · esc" aria-label="${te("hv-cmd-editor-find-close")}">${ic("x","i12")}</button></div>`;
+}
+
+/* ═════════════ Results (M3c): toolbar with the view switch and Record; grid find; sort notes ═════════════ */
+function rtoolM3cHTML(k, R) {
+  const rows = ["suspended", "streaming", "skeleton", "memory"].includes(R.state) ? t("hv-results-rows-more", { rows:nf(R.loaded) }) : t("hv-strip-complete", { rows:nf(R.loaded) });
+  let left;
+  if (R.gfind) { const F = R.gfind;
+    left = `<div class="fgrp2" role="search" aria-label="${te("hv-gfind-placeholder")}">${findFieldHTML(F, true)}${findCountHTML(F)}${findStepHTML(F, true)}<button class="btn ghost icon" data-act="gfclose" title="${te("hv-gfind-close")} · esc" aria-label="${te("hv-gfind-close")}">${ic("x","i12")}</button></div>`; }
+  else left = `<button class="btn ghost" data-act="copy">${ic("copy","i12")}<span>${te("hv-results-copy")}</span><span class="k">⌘C</span></button><button class="btn ghost" data-act="countRows" title="${te("hv-results-count-tip")}">${ic("sigma","i12")}<span>${te("hv-results-count")}</span></button><span class="grow"></span>`;
+  const big = (R.total ?? R.loaded) > 100000 || (R.state !== "complete" && R.loaded >= 100000);
+  const segBtn = (v, icon, key, dis) => `<button aria-pressed="${R.view === v || (v === "text" && /^text/.test(R.view))}" data-act="view" data-v="${v}" ${dis ? `disabled data-why="1" title="${te("hv-view-transposed-off", { max:nf(100000), rows:nf(R.total ?? R.loaded) })}"` : `title="${te(key)}"`} aria-label="${te(key)}">${ic(icon,"i12")}<span class="bl">${te(key)}</span></button>`;
+  const seg = `<div class="seg" id="viewSeg" role="group" aria-label="${te("hv-view-label")}" data-prio="2">${segBtn("table", "table-2", "hv-view-table")}${segBtn("transposed", "table-properties", "hv-view-transposed", big)}${segBtn("text", "align-left", "hv-view-text")}</div>`;
+  const rec = `<button class="btn ghost icon tgl${R.oneRow ? " word" : ""}" data-act="record" aria-pressed="${!!R.record}" title="${te("hv-record-tip")}" aria-label="${te("hv-record")}">${ic("panel-right","i12")}${R.oneRow ? `<span>${te("hv-record")}</span>` : ""}</button>`;
+  let hint = "";
+  if (R.sortNote === "partial") hint = `<div class="rhint" id="sortNote">${ic("arrow-up-down","i12")}<span class="t">${te("hv-grid-sorted-locally")} ${te("hv-grid-sorted-locally-more", { rows:nf(R.loaded) })}</span><span class="acts"><button class="btn" data-act="clearSort">${te("hv-grid-clear-sort")}</button></span></div>`;
+  if (R.sortNote === "sorting") hint = `<div class="rhint" id="sortNote" role="status"><i class="run"></i><span class="t">${te("hv-grid-sorting", { rows:nf(R.sorting) })}</span><span class="acts"><button class="btn" data-act="sortCancel">${te("hv-grid-sort-cancel")}</button></span></div>`;
+  if (R.sortNote === "tail") hint = `<div class="rhint" id="sortNote">${ic("arrow-up-down","i12")}<span class="t">${te("hv-grid-unsorted-tail", { rows:nf(R.loaded - R.tailFrom) })}</span><span class="acts"><button class="btn" data-act="resort">${te("hv-grid-resort")}</button></span></div>`;
+  /* a partial result with new rows at the end: both facts in one row, Re-sort then Clear sort */
+  if (R.sortNote === "partialtail") hint = `<div class="rhint" id="sortNote">${ic("arrow-up-down","i12")}<span class="t">${te("hv-grid-sorted-locally")} ${te("hv-grid-sorted-tail", { sorted:nf(R.tailFrom), rows:nf(R.loaded - R.tailFrom) })}</span><span class="acts"><button class="btn" data-act="resort">${te("hv-grid-resort")}</button><button class="btn" data-act="clearSort">${te("hv-grid-clear-sort")}</button></span></div>`;
+  /* Filter rows is a note under the toolbar; the cursor strip keeps its place */
+  if (R.gfind && R.gfind.filter && R.viewRows) hint += `<div class="rhint" id="filterNote">${ic("filter","i12")}<span class="t">${te("hv-gfind-filter-note", { shown:nf(R.viewRows.length), rows:nf(R.loaded) })}</span><span class="acts"><button class="btn" data-act="filterOff">${te("hv-gfind-show-all")}</button></span></div>`;
+  return `<div class="rtool" id="rtool">${left}<span class="meta" data-prio="1" style="margin-left:auto"><span class="mono">${esc(rows + " · " + dur(R.ms))}</span></span>${seg}${rec}</div>${hint}`;
+}
+/* Overflow Rule for the M3c result toolbar: rows · timing goes first (the strip and the status bar repeat it), then the view switch keeps its icons */
+function fitRtool() {
+  const bar = $("rtool"); if (!bar) return;
+  const meta = bar.querySelector('.meta[data-prio="1"]'), seg = $("viewSeg"), fg = bar.querySelector(".fgrp2");
+  const tight = () => bar.scrollWidth > bar.clientWidth + 0.5 || (fg && fg.scrollWidth > fg.clientWidth + 0.5);
+  if (tight() && meta) meta.hidden = true;
+  if (tight() && seg) seg.classList.add("ico");
+}
+/* the M3c grid: the M3a anatomy plus sort levels, a frozen layer, several rects, an unsorted tail, substring hits, the resize handle */
+function hitCellHTML(col, v, hs) {
+  const s = col.kind === "num" ? (col.id ? String(v) : nf(v, col.dp || 0)) : String(v);
+  let h = "", p = 0; hs.forEach(([a, b, cur]) => { h += esc(s.slice(p, a)) + `<span class="hit${cur ? " cur" : ""}">${esc(s.slice(a, b))}</span>`; p = b; }); h += esc(s.slice(p));
+  return `<span class="v${col.kind === "ts" ? " ts" : col.kind === "mono" ? " gm" : ""}">${h}</span>`;
+}
+function gridM3cHTML(R) {
+  if (/^text/.test(R.view)) return textViewHTML(R);
+  if (R.view === "transposed") return transposedHTML(R);
+  const cols = R.cols.map((c, ci) => ({ ...c, ci })).filter(c => !(R.hiddenCols || []).includes(c.ci)), top = R.top || 0, nvis = 30;
+  const viewRows = R.viewRows || null, nrows = viewRows ? viewRows.length : R.loaded;
+  const rows = Math.max(0, Math.min(nvis, nrows - top));
+  const digits = String(Math.max(1, top + Math.max(rows, 1))).length, rnw = rnWidth(digits);
+  const frz = R.frz || 0, fcols = cols.slice(0, frz), scols = cols.slice(frz);
+  const sortOf = ci => (R.sort2 || []).find(s => s.c === ci), multi = (R.sort2 || []).length > 1;
+  const head = c => { const s = sortOf(c.ci), dir = s ? t(s.dir === "asc" ? "hv-grid-dir-asc" : "hv-grid-dir-desc") : "";
+    const tip = s ? (s.cp ? t("hv-grid-sort-tip-cp", { lvl:nf(s.lvl), dir, collation:s.coll }) : t("hv-grid-sort-tip", { lvl:nf(s.lvl), dir, collation:s.coll })) : `${c.name} · ${c.type}`;
+    const sort = s ? `<span class="sort" aria-label="${esc(tip)}">${ic(s.dir === "asc" ? "arrow-up" : "arrow-down","i12")}${multi ? `<span class="lv">${s.lvl}</span>` : ""}</span>` : "";
+    const rsz = R.rsz && R.rsz.c === c.ci ? `<i class="rsz on"></i>` : `<i class="rsz"></i>`;
+    return `<div class="gc${c.kind === "num" ? " num" : ""}${s ? " sorted" : ""}${frz && c.ci === fcols[fcols.length - 1]?.ci ? " frz2" : ""}" style="width:${R.rsz && R.rsz.c === c.ci ? R.rsz.px : c.w}px" data-act="colHead" data-c="${c.ci}" data-h="${c.ci}" title="${esc(frz && fcols.some(f => f.ci === c.ci) ? t("hv-grid-frozen-tip") : tip)}"><span class="hn"><span>${esc(c.name)}</span>${sort}</span><span class="ht">${esc(c.type)}</span>${rsz}</div>`; };
+  const wrapScroll = html => frz ? `<div class="gscroll"><div class="gin" style="margin-left:-${R.sx || 0}px">${html}</div></div>` : html;
+  let h = `<div class="grid" style="--rnw:${rnw}px"><div class="gh"><div class="gc rn all" data-act="selAll" title="${te("hui-editor-select-all")}"></div>${fcols.map(head).join("")}${wrapScroll(scols.map(head).join(""))}</div>`;
+  const rowVals = r => R.rowsFixed ? R.rowsFixed[r] : R.row(r);
+  for (let i = 0; i < rows; i++) {
+    const vr = top + i, r = viewRows ? viewRows[vr] : vr, vals = rowVals(r);
+    const inRect = (ci) => (R.rects || []).some(x => vr >= x.r0 && vr <= x.r1 && ci >= x.c0 && ci <= x.c1);
+    const rsel = (R.rects || []).some(x => vr >= x.r0 && vr <= x.r1);
+    const cell = c => { const k2 = R.act && R.act.r === vr && R.act.c === c.ci ? 2 : inRect(c.ci) ? 1 : 0;
+      const al = c.kind === "num" ? " num" : c.kind === "bool" ? " ctr" : "";
+      const hs = R.hitsAt && R.hitsAt[`${r}:${c.ci}`];
+      return `<div class="gc${al}${k2 === 2 ? " act" : k2 === 1 ? " insel" : ""}${frz && c.ci === fcols[fcols.length - 1]?.ci ? " frz2" : ""}" style="width:${R.rsz && R.rsz.c === c.ci ? R.rsz.px : c.w}px" data-act="cell" data-r="${vr}" data-c="${c.ci}">${hs ? hitCellHTML(c, vals[c.ci], hs) : cellHTML(c, vals[c.ci])}</div>`; };
+    h += `<div class="gr${R.tailFrom && r === R.tailFrom ? " tail0" : ""}${viewRows ? " filt" : ""}"><div class="gc rn${rsel ? " selrn" : ""}" data-act="rowHead" data-r="${vr}">${vr + 1}</div>${fcols.map(cell).join("")}${wrapScroll(scols.map(cell).join(""))}</div>`;
+  }
+  h += `</div>`;
+  const extent = (viewRows ? viewRows.length : (R.total ?? (R.loaded + (R.state === "suspended" || R.state === "streaming" ? 3000 : 0)))) || 1;
+  const th0 = top / extent * 100, thh = Math.max(4, nvis / extent * 100), loadedPct = Math.min(100, R.loaded / extent * 100);
+  h += `<div class="vscroll"><span class="pref" style="top:calc(${th0 + thh}% + 2px);height:max(0px, calc(${loadedPct - th0 - thh}% - 4px))"></span><span class="thumb" style="top:calc(${th0}% + 2px);height:max(18px, ${thh}%)"></span></div>`;
+  if (frz) h += `<div class="ghscroll"><i style="left:calc(${rnw + fcols.reduce((a, c) => a + c.w, 0)}px + ${Math.round((R.sx || 0) / 14)}%);width:38%"></i></div>`;
+  return h;
+}
+/* the selection boxes are measured from the drawn cells, so frozen layers and hidden columns need no arithmetic */
+function placeSelboxes() {
+  const R = KR(); if (!R || !R.m3c || R.view !== "table" || !(R.rects || R.rsz)) return;
+  const wrap = $("gridwrap"), g = wrap && wrap.querySelector(".grid"); if (!g) return; const G = g.getBoundingClientRect();
+  (R.rects || []).forEach(x => {
+    const a = g.querySelector(`.gc[data-r="${x.r0}"][data-c="${x.c0}"]`), b = g.querySelector(`.gc[data-r="${x.r1}"][data-c="${x.c1}"]`); if (!a || !b) return;
+    const A = a.getBoundingClientRect(), B = b.getBoundingClientRect();
+    g.insertAdjacentHTML("beforeend", `<div class="selbox" style="left:${A.left - G.left}px;top:${A.top - G.top}px;width:${B.right - A.left}px;height:${B.bottom - A.top}px"></div>`);
+  });
+  if (R.rsz && R.rsz.drag) { const hc = g.querySelector(`.gh .gc[data-h="${R.rsz.c}"]`); if (hc) { const H = hc.getBoundingClientRect(); g.insertAdjacentHTML("beforeend", `<i class="rguide" style="left:${H.right - G.left}px"></i>`); } }
+}
+function transposedHTML(R) {
+  const n = Math.min(R.loaded, 6), rows = Array.from({ length:n }, (_, r) => R.rowsFixed ? R.rowsFixed[r] : R.row(r));
+  let h = `<div class="grid"><div class="gh"><div class="gc tname" style="width:150px"><span class="hn2">${te("hv-transposed-col")}</span></div>${rows.map((_, r) => `<div class="gc num" style="width:200px"><span class="hn"><span class="mono" style="font-weight:400;font-size:11.5px">${r + 1}</span></span></div>`).join("")}</div>`;
+  R.cols.forEach((c, ci) => { h += `<div class="gr t2"><div class="gc tname" style="width:150px"><span class="hn2">${esc(c.name)}</span><span class="ht2">${esc(c.type)}</span></div>${rows.map((v, r) => `<div class="gc${c.kind === "num" ? " num" : c.kind === "bool" ? " ctr" : ""}${R.act && R.act.r === r && R.act.c === ci ? " act" : ""}" style="width:200px" data-act="cell" data-r="${r}" data-c="${ci}">${cellHTML(c, v[ci])}</div>`).join("")}</div>`; });
+  return h + `</div><div class="vscroll" style="top:37px"><span class="thumb" style="top:2px;height:60%"></span></div>`;
+}
+function textViewHTML(R) {
+  if (R.view === "textbig") return `<div class="tbig"><div class="notice" role="alertdialog" aria-label="${te("hv-text-big-title", { rows:nf(R.total || R.loaded) })}">${ic("info","i12")}<div class="nb"><div class="t1">${te("hv-text-big-title", { rows:nf(R.total || R.loaded) })}</div><div class="l2">${te("hv-text-big-body", { size:mbs(180) })}</div><div class="acts"><button class="btn" data-act="view" data-v="table">${te("hv-text-big-back")}</button><button class="btn primary" data-act="textOk" data-fk="textOk">${te("hv-text-big-ok")}</button></div></div></div></div>`;
+  if (R.view === "textbuild") return `<div class="tbig"><div class="notice" role="status">${ic("info","i12")}<div class="nb"><div class="t1" style="display:flex;gap:7px;align-items:center"><i class="run"></i><span>${te("hv-text-building", { done:nf(412000), rows:nf(R.total || R.loaded) })}</span></div><div class="acts"><button class="btn" data-act="textCancel" data-fk="textCancel">${te("hv-text-cancel")}</button></div></div></div></div>`;
+  const cols = [0, 1, 2, 3, 4].map(i => R.cols[i]), rows = Array.from({ length:24 }, (_, r) => R.row(r));
+  const cellS = (c, v) => v === null ? "NULL" : c.kind === "num" ? (c.id ? String(v) : nf(v, c.dp || 0)) : String(v);
+  const w = cols.map((c, i) => Math.min(255, Math.max(c.name.length, ...rows.map(r => cellS(c, r[i]).length))));
+  const pad = (s, n, right) => right ? s.padStart(n) : s.padEnd(n);
+  const rule = "+" + w.map(n => "-".repeat(n + 2)).join("+") + "+";
+  const line = vals => "| " + vals.map((v, i) => pad(v, w[i], cols[i].kind === "num")).join(" | ") + " |";
+  const L = [rule, line(cols.map(c => c.name)), rule, ...rows.map(r => line(cols.map((c, i) => cellS(c, r[i])))), rule];
+  return `<div class="tview" role="textbox" aria-readonly="true" aria-multiline="true">${L.map((s, i) => `<div class="tl${s.startsWith("+") ? " rule" : ""}${R.tsel && i >= R.tsel[0] && i <= R.tsel[1] ? " on" : ""}">${esc(s)}</div>`).join("")}<div class="thsb" aria-hidden="true"><i style="left:0;width:72%"></i></div></div>`;
+}
+function inspectorHTML(R) {
+  if (!R.record) return "";
+  const r = R.record.r, vals = R.rowsFixed ? R.rowsFixed[r] : R.row(r), seen = {};
+  const fields = R.cols.map((c, ci) => { seen[c.name] = (seen[c.name] || 0) + 1; const n = seen[c.name], dupCount = R.cols.filter(x => x.name === c.name).length;
+    const v = vals[ci], s = v === null ? null : c.kind === "num" ? (c.id ? String(v) : nf(v, c.dp || 0)) : c.kind === "bool" ? String(v) : String(v), long = s && s.length > 90;
+    return `<div class="fld"><div class="fk"><span class="nm">${esc(c.name)}</span>${n > 1 ? `<span class="dup" title="${te("hv-record-dup-tip", { n:nf(dupCount), name:c.name, i:nf(n) })}">(${n})</span>` : ""}<span class="ty">${esc(c.type)}</span></div><div class="fv${c.kind === "mono" || c.kind === "ts" ? " mono" : ""}${c.kind === "num" ? " num" : ""}">${s === null ? `<span class="null">NULL</span>` : esc(s)}</div>${long ? `<button class="more" data-act="showMore">${te("hv-record-show-more")}</button>` : ""}</div>`; }).join("");
+  const total = R.state === "complete" ? nf(R.total ?? R.loaded) : t("hv-results-rows-more", { rows:nf(R.loaded) }).replace(/\s.*$/, "");
+  return `<aside class="insp" role="region" aria-label="${te("hv-record")}"><div class="ih"><span class="t sc">${te("hv-record")}</span><span class="pos">${th("hv-record-pos", { i:`<span class="mono">${esc(nf(r + 1))}</span>`, n:`<span class="mono">${esc(total)}</span>` })}</span><span class="grow"></span><button class="btn ghost icon" data-act="recPrev" title="${te("hv-record-prev")} · ⌥↑" aria-label="${te("hv-record-prev")}">${ic("arrow-up","i12")}</button><button class="btn ghost icon" data-act="recNext" title="${te("hv-record-next")} · ⌥↓" aria-label="${te("hv-record-next")}">${ic("arrow-down","i12")}</button></div><div class="ib">${fields}</div></aside>`;
+}
+function stripM3cHTML(R) {
+  /* several ranges (⌘-click, or Select all occurrences in grid find, capped at 10,000) */
+  const many = R.selSummary || (R.rects && R.rects.length > 1 ? { n:R.rects.length, cells:R.rects.reduce((a, x) => a + (x.r1 - x.r0 + 1) * (x.c1 - x.c0 + 1), 0) } : null);
+  if (many) return stripHTML({ ...R, sel:null }).replace(`<span class="grow"></span>`, `<span class="grow"></span><span class="lbl" id="selLbl">${te("hv-strip-selection")}</span><span class="mono">${esc(t("hv-strip-ranges", { n:nf(many.n), cells:nf(many.cells) }))}</span>`);
+  return stripHTML(R.rects && R.rects.length === 1 ? { ...R, sel:{ kind:"range", ...R.rects[0] } } : R);
+}
+
+/* ═════════════ Value viewer (Task 38), go to row and grid tooltips (Task 37), placed after layout ═════════════ */
+const jsonPretty = s => { let o; try { o = JSON.parse(s); } catch { return null; } return JSON.stringify(o, null, 2); };
+const jsonHL = s => esc(s).replace(/(&quot;(?:[^&]|&(?!quot;))*?&quot;)(\s*:)?|\b(true|false|null)\b|(-?\d+(?:\.\d+)?)/g, (m, str, colon, lit, num) => str ? `<span class="${colon ? "jk" : "js"}">${str}</span>${colon || ""}` : lit ? `<span class="jl">${lit}</span>` : `<span class="jn">${num}</span>`);
+/* 8 bytes per row below a 560 px popover (16 from 560 px), in 2-byte groups, then the ASCII column */
+const hexDump = (bytes, per = 8) => { const out = []; for (let o = 0; o < bytes.length; o += per) { const b = bytes.slice(o, o + per); const hx = b.map(x => x.toString(16).padStart(2, "0")); const pairs = []; for (let i = 0; i < per; i += 2) pairs.push((hx[i] || "  ") + (hx[i + 1] || "  "));
+  out.push(`<span class="ho">${o.toString(16).padStart(8, "0")}</span>  ${pairs.join(" ")}  <span class="ha">${esc(b.map(x => x >= 32 && x < 127 ? String.fromCharCode(x) : ".").join(""))}</span>`); } return out.join("\n"); };
+const PNG_BYTES = [0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0x00,0x00,0x00,0x0d,0x49,0x48,0x44,0x52,0x00,0x00,0x01,0x40,0x00,0x00,0x00,0xf0,0x08,0x06,0x00,0x00,0x00,0x6e,0xa8,0x1c,0x6b,0x00,0x00,0x00,0x09,0x70,0x48,0x59,0x73,0x00,0x00,0x0b,0x13,0x00,0x00,0x0b,0x13,0x01,0x00,0x9a,0x9c,0x18,0x00,0x00,0x20,0x00,0x49,0x44,0x41,0x54,0x78,0x9c,0xec,0xbd,0x79,0x94,0x5c,0xd7,0x75,0xe7,0xf9,0x3d,0xef];
+const HEX_BYTES = [...PNG_BYTES, ...Array.from({ length:181 }, (_, i) => hsh(i * 17) & 255)];
+const VV_BADJSON = "{\"kanal\":\"web\",\"kupon\":\"YAZ25\",\"adet\":";
+const VV_XML = "<siparis id=\"1048213\"><musteri>Ayşe Yılmaz</musteri><tutar para=\"TRY\">1240.00</tutar><teslimat il=\"İstanbul\" ilce=\"Kadıköy\"/></siparis>";
+const xmlPretty = s => { let d = 0; return s.replace(/></g, ">\n<").split("\n").map(l => { if (/^<\//.test(l)) d--; const out = "  ".repeat(Math.max(0, d)) + l; if (/^<[^/!?][^>]*[^/]>$/.test(l) && !/<\/[^>]+>$/.test(l)) d++; return out; }).join("\n"); };
+const xmlHL = s => esc(s).replace(/(&lt;\/?)([\wçğıöşüÇĞİÖŞÜ]+)/g, `$1<span class="xt">$2</span>`).replace(/([\w]+)=(&quot;[^&]*&quot;)/g, `<span class="xa">$1</span>=<span class="xs">$2</span>`);
+const VV_TEXT = "Adres değişikliği\nKadıköy, Moda Cd. No: 12\nKapı kodu 4471; zile basmayın, arayın. Paket kapıcıya bırakılabilir.";
+const VV_JSON = "{\"kanal\":\"mobil\",\"kupon\":null,\"adet\":3,\"etiket\":[\"acil\",\"vip\"],\"teslimat\":{\"il\":\"İstanbul\",\"ilce\":\"Kadıköy\",\"kapida_odeme\":false}}";
+const IME_NOTE = () => S.sc.multi === "imefallback" ? "Mock note: one caret was inside the string 'adet: ', so the composition goes to the main caret only; the other carets collapsed first (R-M3-64)." : "Mock note: the pinyin composition is mirrored to all three carets (each in plain text); the OS candidate window follows the main caret.";
+const LONG_BODY = "Merhaba,\n\n12 Kasım tarihli 1048213 numaralı siparişim hâlâ elime ulaşmadı. Kargo takip sayfası paketin 13 Kasım'da Kadıköy şubesine bırakıldığını söylüyor, ancak şube paketi bulamıyor. Yeni teslim adresim Moda Caddesi No: 12, Kadıköy / İstanbul.\n\nİade istemiyorum; ürünün yeniden gönderilmesini rica ederim. Şükrü Saracoğlu Stadyumu karşısındaki şubeden de teslim alabilirim.\n\nTeşekkürler,\nAyşe Yılmaz";
+function vvHTML() {
+  const V = W.vv; if (!V) return "";
+  let ctl = "", body = "", notice = "", meta = "";
+  if (V.kind === "badjson") {
+    ctl = `<div class="seg" role="group" aria-label="${te("hv-vv-pretty")}"><button aria-pressed="true">${te("hv-vv-raw")}</button><button aria-pressed="false" disabled title="${te("hv-vv-not-json")}">${te("hv-vv-pretty")}</button></div><span class="vnote">${ic("info","i12")}<span>${te("hv-vv-not-json")}</span></span>`;
+    body = esc(VV_BADJSON); meta = t("hv-vv-chars", { size:t("hv-vv-bytes", { n:nf(VV_BADJSON.length) }), n:nf(VV_BADJSON.length) });
+  } else if (V.kind === "xml") {
+    ctl = `<div class="seg" role="group" aria-label="${te("hv-vv-pretty")}"><button aria-pressed="false" data-act="vvRaw">${te("hv-vv-raw")}</button><button aria-pressed="true" data-act="vvPretty" title="${te("hv-vv-pretty-tip")}">${te("hv-vv-pretty")}</button></div>`;
+    body = xmlHL(xmlPretty(VV_XML)); meta = t("hv-vv-chars", { size:t("hv-vv-bytes", { n:nf(new TextEncoder().encode(VV_XML).length) }), n:nf([...VV_XML].length) });
+  } else if (V.kind === "json") {
+    const raw = VV_JSON;
+    ctl = `<div class="seg" role="group" aria-label="${te("hv-vv-pretty")}"><button aria-pressed="${!V.pretty}" data-act="vvRaw">${te("hv-vv-raw")}</button><button aria-pressed="${!!V.pretty}" data-act="vvPretty" title="${te("hv-vv-pretty-tip")}">${te("hv-vv-pretty")}</button></div>`;
+    body = V.pretty ? jsonHL(jsonPretty(raw)) : jsonHL(raw); meta = t("hv-vv-chars", { size:t("hv-vv-bytes", { n:nf(new TextEncoder().encode(raw).length) }), n:nf([...raw].length) });
+  } else if (V.kind === "hex") {
+    ctl = `<div class="seg" role="group"><button aria-pressed="true">${te("hv-vv-hex")}</button></div>`;
+    body = hexDump(HEX_BYTES, 8); meta = t("hv-vv-bytes", { n:nf(48213) });
+  } else if (V.kind === "trunc") {
+    body = esc(LONG_BODY + "\n\n…"); meta = t("hv-vv-chars", { size:mbs(1), n:nf(1048576) });
+    notice = `<div class="notice">${ic("info","i12")}<div class="nb">${te("hv-vv-truncated", { shown:mbs(1), size:mbs(5.2, 1) })}<div class="acts"><button class="btn" data-act="vvRerun" title="${te("hv-vv-rerun-tip")}">${ic("rotate-cw","i12")}<span>${te("hv-vv-rerun", { limit:mbs(64) })}</span></button></div></div></div>`;
+  } else { body = esc(VV_TEXT); meta = t("hv-vv-chars", { size:t("hv-vv-bytes", { n:nf(new TextEncoder().encode(VV_TEXT).length) }), n:nf([...VV_TEXT].length) }); }
+  const cls = V.kind === "hex" ? "vbox hex" : "vbox";
+  return `<div class="vv" id="vv" role="dialog" aria-label="${esc(V.col)}" style="left:0;top:0;visibility:hidden"><div class="dhead"><div class="tt"><div class="title">${esc(V.col)}</div><div class="sub"><span>${th("hv-vv-sub", { type:`<span class="mono">${esc(V.type)}</span>`, row:`<span class="mono">${esc(nf(V.row))}</span>` })}</span></div></div><button class="x" data-act="vvClose" tabindex="-1" title="esc" aria-label="${te("hui-dialog-close")}">${ic("x","i12")}</button></div>
+    ${ctl ? `<div class="vctl">${ctl}</div>` : ""}<div class="vbody"><div class="vwrap"><div class="${cls}" tabindex="0" data-fk="vvBody" lang="${V.kind === "hex" ? "en" : "tr"}">${body}</div></div>${notice}</div>
+    <div class="dfoot"><span class="meta"><span class="mono">${esc(meta)}</span></span><span class="grow"></span><button class="btn" data-act="vvCopy" data-fk="vvCopy">${ic("copy","i12")}<span>${te("hv-vv-copy")}</span></button></div></div>`;
+}
+function placeVV() {
+  const p = $("vv"); if (!p) return; const V = W.vv, a = document.querySelector(`#gridwrap .gc[data-r="${V.r}"][data-c="${V.c}"]`); const W0 = winRect();
+  const r = a ? a.getBoundingClientRect() : { left:W0.left + 400, bottom:W0.top + 300, top:W0.top + 280 };
+  const st = $("strip"), maxBottom = st ? st.getBoundingClientRect().top - W0.top - 4 : W0.height - 30; let left = r.left - W0.left, top = r.bottom - W0.top + 4;
+  left = Math.max(8, Math.min(left, W0.width - p.offsetWidth - 8));
+  const box = p.querySelector(".vbox"), wrap = p.querySelector(".vwrap"), minTop = belowToolbar(W0);
+  if (box && p.offsetHeight > maxBottom - minTop) box.style.maxHeight = Math.max(120, box.clientHeight - (p.offsetHeight - (maxBottom - minTop))) + "px";
+  if (box && wrap && box.scrollHeight > box.clientHeight + 1 && !wrap.querySelector(".vthumb")) { const h = Math.max(18, box.clientHeight * box.clientHeight / box.scrollHeight); wrap.insertAdjacentHTML("beforeend", `<i class="vthumb" style="top:3px;height:${h}px"></i>`); }
+  if (top + p.offsetHeight > maxBottom) top = r.top - W0.top - p.offsetHeight - 4;
+  top = Math.max(minTop, Math.min(top, maxBottom - p.offsetHeight));
+  p.style.left = left + "px"; p.style.top = top + "px"; p.style.visibility = "visible";
+}
+function gotoHTML() {
+  const G = W.goto; if (!G) return "";
+  const bad = ["past", "unknown", "hidden"].includes(G.state);
+  let lines = "";
+  if (G.state === "hint") lines = `<div class="gl">${ic("info","i12")}<span>${te("hv-goto-hint")}</span></div>`;
+  if (G.state === "target") lines = `<div class="gl">${ic("corner-down-left","i12")}<span>${G.col ? th("hv-goto-target", { row:mono(nf(G.row)), col:mono(G.col) }) : th("hv-goto-target-row", { row:mono(nf(G.row)) })}</span></div>`;
+  if (G.state === "past") lines = `<div class="gl ink" role="alert">${ic("circle-alert","i12")}<span>${th("hv-goto-past-end", { row:mono(nf(G.row)), total:mono(nf(G.total)) })}</span></div>`;
+  if (G.state === "unknown") lines = `<div class="gl ink" role="alert">${ic("circle-alert","i12")}<span>${th("hv-goto-unknown-col", { name:`<bdi class="mono">${esc(G.col)}</bdi>` })}</span></div>`;
+  if (G.state === "hidden") lines = `<div class="gl ink" role="alert">${ic("circle-alert","i12")}<span>${th("hv-goto-hidden-col", { name:`<bdi class="mono">${esc(G.col)}</bdi>` })}</span></div><div class="gacts"><button class="btn" data-act="gotoShow">${ic("eye","i12")}<span>${te("hv-goto-show-col")}</span></button></div>`;
+  if (G.state === "fetch") lines = `<div class="gl">${ic("arrow-down","i12")}<span>${te("hv-goto-fetch", { row:nf(G.row), more:nf(G.row - G.loaded) })}</span></div><div class="gacts"><button class="btn" data-act="gotoClose" data-fk="gotoCancel">${te("hv-goto-cancel")}</button><button class="btn primary" data-act="gotoFetch" data-fk="gotoFetch">${te("hv-goto-fetch-ok")}</button></div>`;
+  if (G.state === "fetching") lines = `<div class="gl" role="status"><i class="run"></i><span>${te("hv-goto-fetching", { row:nf(G.row), done:nf(G.done), more:nf(G.row - G.loaded) })}</span></div><div class="gl"><span></span><span>${te("hv-goto-fetching-note")}</span></div><div class="gacts"><button class="btn" data-act="gotoStop" data-fk="gotoStop">${te("hv-goto-stop")}</button></div>`;
+  const keys = G.state === "fetch" || G.state === "fetching" ? "" : `<div class="keys"><span><kbd>↵</kbd>${te("hv-goto-key-go")}</span><span><kbd>esc</kbd>${te("hui-palette-hint-close")}</span></div>`;
+  return `<div class="goto" id="goto" role="dialog" aria-labelledby="gotoTitle" style="left:0;top:0;visibility:hidden"><b id="gotoTitle">${ic("list-ordered","i12")}<span>${te("hv-goto-title")}</span><kbd style="margin-left:auto">⌘L</kbd></b><label class="in mono${bad ? " err" : ""}"><input data-fk="gotoQ" value="${esc(G.q)}" spellcheck="false" autocomplete="off" placeholder="${te("hv-goto-placeholder")}" aria-label="${te("hv-goto-title")}"></label>${lines}${keys}</div>`;
+}
+/* popovers never rise over the focused console's toolbar (cross-cutting 3): their top stops 4 px below it */
+function belowToolbar(W0) { const q = $("qbar"); return q ? q.getBoundingClientRect().bottom - W0.top + 4 : 46; }
+function placeGoto() {
+  const p = $("goto"), a = $("rtool"); if (!p || !a) return; const W0 = winRect(), r = a.getBoundingClientRect();
+  const st = $("strip"), maxBottom = st ? st.getBoundingClientRect().top - W0.top - 4 : W0.height - 30; let top = r.bottom - W0.top + 4; top = Math.max(belowToolbar(W0), Math.min(top, maxBottom - p.offsetHeight));
+  p.style.left = Math.max(8, Math.min(r.left - W0.left + 8, W0.width - 312)) + "px"; p.style.top = top + "px"; p.style.visibility = "visible";
+}
+function gtipHTML() { const T = W.gtip; return T ? `<div class="gtip" id="gtip" role="tooltip" style="left:0;top:0;visibility:hidden">${T.html}</div>` : ""; }
+function placeGtip() {
+  const p = $("gtip"), T = W.gtip; if (!p || !T) return; const a = document.querySelector(T.at); if (!a) { p.remove(); return; }
+  const W0 = winRect(), r = a.getBoundingClientRect(); let left = (T.right ? r.right : r.left) - W0.left + (T.dx || 0), top = (T.above ? r.top - p.offsetHeight - 6 : r.bottom + 6) - W0.top;
+  left = Math.max(8, Math.min(left, W0.width - p.offsetWidth - 8)); p.style.left = left + "px"; p.style.top = top + "px"; p.style.visibility = "visible";
+}
+
+/* ═════════════ Menus (M3c): one generic anatomy with an icon / check column and the disabled reason as the hint ═════════════ */
+function m3MenuRows(M) {
+  return M.items.map((it, i) => it.sep ? `<div class="sep"></div>` : it.head ? `<div class="mh">${esc(it.head)}</div>`
+    : `<div class="mi${i === M.active ? " on" : ""}${it.dis ? " dis" : ""}" data-mi="${i}" role="${it.check !== undefined ? "menuitemcheckbox" : "menuitem"}"${it.check !== undefined ? ` aria-checked="${!!it.check}"` : ""}${it.dis ? ` aria-disabled="true"` : ""}><span class="ico2">${it.check ? `<span class="ck2">${ic("check","i12")}</span>` : it.icon ? ic(it.icon,"i12") : ""}</span><span class="lab2">${esc(it.label)}</span>${it.dis && it.why ? `<span class="h2 why">${esc(it.why)}</span>` : it.hint ? `<span class="h2">${esc(it.hint)}</span>` : it.k ? `<span class="k">${esc(it.k)}</span>` : ""}</div>`).join("");
+}
+function openM3Menu(items, x, y, o = {}) { W.menu = { type:"m3", x, y, items, active:o.active ?? -1, w:o.w, above:o.above }; renderMenus();
+  if (!o.above) { const m = $("menu"), W0 = winRect(); if (m && W.menu.y + m.offsetHeight > W0.height - 30) { W.menu.y = Math.max(44, W0.height - 30 - m.offsetHeight); m.style.top = W.menu.y + "px"; } }
+  if (o.above) { const m = $("menu"), W0 = winRect(); if (m) { W.menu.y = o.anchorTop - m.offsetHeight - 4; m.style.top = W.menu.y + "px"; if (W.menu.x + m.offsetWidth > W0.width - 8) { W.menu.x = W0.width - m.offsetWidth - 8; m.style.left = W.menu.x + "px"; } } } }
+function edMenuItems(o = {}) {
+  const ii = (key, k, extra = {}) => ({ label:t(key), k, ...extra });
+  return [ii("hui-editor-cut", "⌘X"), ii("hui-editor-copy", "⌘C"), ii("hui-editor-paste", "⌘V"), { sep:true },
+    ii("hv-console-run", KEY_RUN, { act:"run" }), { sep:true },
+    ii("hv-cmd-editor-toggle-comment", "⌘/"), ii("hv-cmd-editor-duplicate-line", "⌘D"), ii("hv-cmd-editor-delete-line", "⇧⌘K"), ii("hv-cmd-editor-move-line-up", "⌥⇧↑"), ii("hv-cmd-editor-move-line-down", "⌥⇧↓"), { sep:true },
+    ii("hv-cmd-editor-select-all-occurrences", "⌃⌘G"), ii("hv-cmd-editor-undo-selection", "⌘U", { act:"undoSel" })];
+}
+function gridMenuItems(kind, o = {}) {
+  const R = KR(), sorted = (R.sort2 || []).length > 0, frozen = !!R.frz, hiddenN = (R.hiddenCols || []).length;
+  if (kind === "cell") return [
+    { label:t("hv-gmenu-copy"), icon:"copy", k:"⌘C", dis:!!o.ranges, why:t("hv-gmenu-why-ranges") }, { label:t("hv-gmenu-copy-headers"), dis:!!o.ranges, why:t("hv-gmenu-why-ranges") }, { sep:true },
+    { label:t("hv-gmenu-open-value"), icon:"panel-right", k:"⇧↵", dis:!!o.ranges, why:t("hv-gmenu-why-one-cell"), act:"openVV" }, { label:t("hv-gmenu-raw"), check:!!o.raw, hint:t("hv-gmenu-raw-hint") }, { sep:true },
+    { label:t("hv-gmenu-sort-asc"), icon:"arrow-up" }, { label:t("hv-gmenu-sort-desc"), icon:"arrow-down" }, { label:t("hv-grid-clear-sort"), dis:!sorted, why:t("hv-gmenu-why-not-sorted") }, { sep:true },
+    { label:t("hv-gmenu-goto"), icon:"list-ordered", k:"⌘L", act:"gotoOpen" }];
+  if (kind === "header") return [
+    { label:t("hv-gmenu-sort-asc"), icon:"arrow-up", check:o.asc }, { label:t("hv-gmenu-sort-desc"), icon:"arrow-down" }, { label:t("hv-grid-clear-sort"), dis:!sorted, why:t("hv-gmenu-why-not-sorted") }, ...(o.addLevel ? [{ label:t("hv-gmenu-add-sort", { lvl:nf(2) }), icon:"arrow-up-down" }] : []), { sep:true },
+    frozen ? { label:t("hv-gmenu-unfreeze"), icon:"snowflake" } : { label:t("hv-gmenu-freeze"), icon:"snowflake" }, { label:t("hv-gmenu-hide"), icon:"eye-off", dis:!!o.last, why:t("hv-gmenu-why-last") }, { label:t("hv-gmenu-show-all"), icon:"eye", dis:!hiddenN, why:t("hv-gmenu-why-no-hidden") }, { label:t("hv-gmenu-autofit"), icon:"arrow-left-right" }, { sep:true },
+    { label:t("hv-gmenu-raw"), check:!!o.raw, hint:t("hv-gmenu-raw-hint") }, { label:t("hv-gmenu-copy-name"), icon:"copy" }];
+  return [{ label:t("hv-gmenu-copy-rows"), icon:"copy", k:"⌘C" }, { label:t("hv-gmenu-copy-headers") }, { sep:true }, { label:t("hv-gmenu-record"), icon:"panel-right" }, { label:t("hv-gmenu-goto"), icon:"list-ordered", k:"⌘L", act:"gotoOpen" }];
+}
+
+/* ═════════════ Narrow panes (Task 41) ═════════════ */
+const PSEUDO_MAP = { a:"å", b:"ƀ", c:"ç", d:"ð", e:"é", g:"ĝ", h:"ĥ", i:"î", j:"ĵ", k:"ķ", l:"ļ", n:"ñ", o:"ö", r:"ŕ", s:"š", t:"ţ", u:"û", w:"ŵ", y:"ý", z:"ž", A:"Å", C:"Ç", E:"É", I:"Î", O:"Ö", R:"Ŕ", S:"Š", T:"Ţ", U:"Û", W:"Ŵ" };
+const pseudo = s => { const body = s.replace(/\{[^}]*\}|[A-Za-z]/g, m => m.length > 1 ? m : PSEUDO_MAP[m] || m); return `[${body}${"~".repeat(Math.ceil(s.length * 0.35))}]`; };
+function narrowQbarHTML(p) {
+  /* Named exceptions to T2a cross-cutting 7 / surface 4 below the per-locale minimum (NOTES "M3c surfaces · 24", N1–N4) */
+  const c = conn(p.conn), T = (k, v) => esc(p.pseudo ? pseudo(t(k, v)) : t(k, v)), h = [];
+  /* N1: Run and Stop icon-only; their words and keys stay in the tooltip and the accessible name */
+  if (p.state === "running" || p.state === "cancelling") h.push(`<button class="btn stopb icon1" title="${T("hv-console-stop")} · ${KEY_STOP}" aria-label="${T("hv-console-stop")}">${ic("square","i12")}</button>`);
+  else h.push(`<button class="btn primary icon1" ${p.state === "waiting" ? "disabled" : ""} title="${T("hv-console-run")} · ${KEY_RUN}" aria-label="${T("hv-console-run")}">${ic("play","i12")}</button>`);
+  if (p.state === "running") h.push(`<span class="runstate"><i class="run"></i><span class="mono">${esc(t("exec-dur-s", { s:nf(12) }))}</span></span>`);
+  if (p.state === "cancelling") h.push(`<span class="runstate"><i class="hollow"></i><span>${T("hv-console-cancelling")}</span><span class="mono">${esc(t("exec-dur-s", { s:nf(14) }))}</span></span>`);
+  /* N2: the connection name (data) may ellipsize; the environment mark never does */
+  h.push(`<div class="crumb" title="${esc(c.id)}">${mark(c.env)}<span class="mono">${esc(c.id)}</span></div>`);
+  if (p.state === "waiting") h.push(`<span class="runstate" title="${T("hv-console-waiting", { name:c.id, inUse:nf(4), max:nf(4) })}"><i class="hollow" style="border-color:var(--seam-2)"></i><span class="two"><span>${T("hv-console-waiting-l1")}</span><span class="l2">${T("hv-console-waiting-l2", { inUse:nf(4), max:nf(4) })}</span></span></span><button class="btn ghost">${T("hv-console-waiting-cancel")}</button>`);
+  /* the mode chip keeps its word at every width (Auto / Manual / Smart); only the commit glyph goes. A read-only pane keeps T2a's disabled Auto-commit chip */
+  if (c.ro) h.push(`<button class="qchip tx" data-mode="auto" aria-disabled="true" title="${T("hv-tx-chip-ro-reason")}"><span class="w">${T("hv-tx-chip-auto")}</span></button>`);
+  else h.push(`<button class="qchip tx" data-mode="${p.mode}" aria-haspopup="menu" title="${T("hv-tx-chip-tip", { mode:t("hv-tx-chip-" + p.mode) })}" aria-label="${T("hv-tx-chip-" + p.mode)}"><span class="w">${T(p.mode === "auto" ? "hv-tx-chip-auto-short" : "hv-tx-chip-" + p.mode)}</span><span class="chev">${ic("chevron-down","i12")}</span></button>`);
+  /* N4: the badge drops its age and keeps Commit and Roll back as icon buttons (words in tooltips and names) */
+  if (p.tx) { const b = (key, icon) => `<button class="btn" title="${T(key)}" aria-label="${T(key)}">${ic(icon,"i12")}</button>`;
+    h.push(`<span class="qchip txbadge" role="status" title="${T("hv-tx-badge-tip")}" style="border:0;padding:0"><span class="bl1"><i class="run" aria-hidden="true"></i><span class="lab">${p.pseudo ? T("hv-tx-badge-short", { n:nf(p.tx) }) : th("hv-tx-badge-short", { n:`<span class="mono">${esc(nf(p.tx))}</span>` })}</span></span>${b("hv-tx-badge-commit", "check")}${b("hv-tx-badge-rollback", "undo-2")}</span>`); }
+  /* N3: the read-only chip keeps its whole label ("read-only (guarded)"), wrapping inside the chip */
+  if (p.pending) h.push(`<span class="qchip" title="${T("hv-console-ro-pending", { name:c.id })}">${ic("lock","i12")}<span>${T("hv-console-ro-pending-short")}</span></span>`);
+  else if (c.ro) h.push(`<span class="qchip${c.env === "production" ? " prod" : ""}" title="${esc(roLabel(c))}">${ic("lock","i12")}<span>${p.pseudo ? esc(pseudo(roLabel(c))) : esc(roLabel(c))}</span></span>`);
+  return `<div class="qbar narrow">${h.join("")}</div>`;
+}
+function panesHTML() {
+  /* each pane is a console tile: its editor over its results (the results body collapsed to the strip); at 960 the widest pane fills */
+  const roomy = winRect().width > 1100, panes = roomy ? W.panes : W.panes.filter(p => !p.fill).map((p, i, a) => i === a.length - 1 ? { ...p, fill:true, label:true } : p);
+  const onI = Math.max(0, panes.findIndex(p => p.conn === K().conn));
+  return `<div class="panes">${panes.map((p, i) => { const c = conn(p.conn);
+    const sw = c.env === "production" ? mark("production") : c.env === "staging" ? mark("staging") : "";
+    const strip = p.strip ? `<div class="strip wrap" style="border-top:1px solid var(--seam)"><span class="t" title="${te("hv-strip-cursor-open")}">${te("hv-results-status-cursor")}</span><button class="btn">${te("hv-strip-close-cursor")}</button><button class="btn icon" title="${te("hv-strip-fetch-more")}" aria-label="${te("hv-strip-fetch-more")}">${ic("arrow-down","i12")}</button></div>` : "";
+    const lines = p.empty ? `<div class="l phl"><span class="tx"><span class="phold">${te("hv-editor-placeholder", { key:KEY_RUN })}</span></span></div>` : (p.lines || SQL_STG).map(s => `<div class="l"><span class="tx">${lineHTML(lexLine(s, { com:false, xc:false }))}</span></div>`).join("");
+    return `<section class="pane${p.fill ? " fill" : ""}${c.env === "production" ? " prod" : ""}" style="${p.fill ? (p.label ? `min-width:${p.w}px` : "") : `width:${p.w}px`}"><div class="etabs"><div class="tabs"><div class="tab${i === onI ? " on" : ""}" title="${esc(c.id)}">${ic("file-code-2","i12")}<span class="mono tt3">${esc(c.id)}</span>${sw}</div></div></div>${narrowQbarHTML(p)}<div class="pbody"><div class="code" style="--gx:0"><div class="gut" style="width:${p.first ? "calc(58px + 4ch)" : "30px"}">${p.first ? (p.lines || []).map((_, j) => `<div class="ln${j === 6 ? " cur" : ""}">${p.first + j}</div>`).join("") : ""}</div><div class="lines"><div class="inner">${lines}</div></div>${p.fill && !p.label ? "" : `<span class="pw">${p.w} px</span>`}</div>${strip}</div></section>`; }).join("")}</div>`;
+}
+
+/* ═════════════ Settings page (Task 42) ═════════════ */
+const SET_ROWS = [
+  { sec:"editor", key:"hv-settings-tab-size", seg:["2", "4", "8"], v:"4", mono:true },
+  { sec:"editor", key:"hv-settings-insert-spaces", onoff:true, v:"on" },
+  { sec:"editor", key:"hv-settings-copy-line", onoff:true, v:"on" },
+  { sec:"editor", key:"hv-settings-caret-blink", onoff:true, v:"on" },
+  { sec:"execution", key:"hv-settings-confirm-unsafe-where", onoff:true, v:"on", note:"hv-settings-confirm-unsafe-where-note" },
+  { sec:"execution", key:"hv-settings-error-policy", onoff:true, v:"on", note:"hv-settings-error-policy-note" },
+  { sec:"results", key:"hv-settings-max-value", size:true, note:"hv-settings-max-value-note" },
+  { sec:"results", key:"hv-settings-raw-display", onoff:true, v:"off", note:"hv-settings-raw-display-note" },
+  { sec:"history", key:"hv-settings-history", onoff:true, v:"on", note:"hv-settings-history-note" },
+];
+function settingsHTML() {
+  const P = W.page, secs = [["general", "hv-settings-nav-general"], ["appearance", "hv-settings-nav-appearance"], ["keyboard", "hv-settings-nav-keyboard"], ["editor", "hv-settings-nav-editor"], ["execution", "hv-settings-nav-execution"], ["results", "hv-settings-nav-results"], ["history", "hv-settings-nav-history"]];
+  const nav = secs.map(([id, key]) => `<div class="ni${P.sec === id && !P.q ? " on" : ""}${["editor", "execution", "results", "history"].includes(id) ? " new" : ""}" role="option" aria-selected="${P.sec === id}">${te(key)}</div>`).join("");
+  const q = (P.q || "").trim(), match = r => fold(t(r.key)).includes(fold(q));
+  const rows = (q ? SET_ROWS.filter(match) : SET_ROWS.filter(r => r.sec === P.sec)).map(r => {
+    let ctl;
+    if (r.size) ctl = `<label class="in num${P.clamped ? "" : ""}"><input value="${esc(P.clamped ? nf(64) : P.kb ? nf(512) : nf(1))}" aria-label="${te(r.key)}"></label><button class="select"><span class="v">${te(P.kb ? "hv-settings-unit-kb" : "hv-settings-unit-mb")}</span>${ic("chevrons-up-down","i12")}</button>`;
+    else { const opts = r.onoff ? [["on", "hv-settings-on"], ["off", "hv-settings-off"]] : r.seg.map(x => [x, null]);
+      ctl = `<div class="seg" role="radiogroup" aria-label="${te(r.key)}">${opts.map(([v, k]) => `<button role="radio" aria-pressed="${r.v === v}" aria-checked="${r.v === v}"${r.mono ? ` class="mono" style="font-size:12px"` : ""}>${k ? te(k) : esc(v)}</button>`).join("")}</div>`; }
+    const clampNote = r.size && P.clamped ? `<div class="snote">${ic("info","i12")}<span>${te("hv-settings-max-value-clamped", { typed:mbs(128), max:mbs(64) })}</span></div>` : "";
+    const secLbl = q ? `<span class="sec2">${te("hv-settings-nav-" + r.sec)}</span>` : "";
+    return `<div class="srow"><div class="stl">${te(r.key)}</div><div class="sct"><div class="ctl2">${ctl}${secLbl}</div>${clampNote}${r.note ? `<div class="snote"><span>${te(r.note)}</span></div>` : ""}</div></div>`;
+  }).join("");
+  return `<div class="spage"><nav class="snav" role="listbox" aria-label="${te("hv-settings-title")}">${nav}</nav><div class="smain"><div class="ssearch"><label class="in">${ic("search","i12")}<input value="${esc(P.q || "")}" placeholder="${te("hv-settings-search")}" aria-label="${te("hv-settings-search")}"></label></div><div class="srows">${q ? "" : `<div class="shead sc">${te("hv-settings-section-" + P.sec)}</div>`}${rows || `<div class="sempty">${te("hv-settings-no-results")}</div>`}</div></div></div>`;
+}
+
+/* ═════════════ Scenarios (M3c) ═════════════ */
+function setupM3c(id, sc, ctx) {
+  const { dev, prod, focus, tr960 } = ctx;
+  W.m3c = true;
+  const v = sc === "tr960" ? ({ multi:"occ", fold:"folded", find:"bar", gutter:"runs", gridm:"partial", gfind:"bar", goto:"fetch", views:"record", vv:"trunc", gmenu:"header", narrow:"idle", settings:"execution" })[id] : sc;
+  if (sc === "tr960") tr960();
+  focus("k-dev"); dev.res = resNone(); dev.ed.marks = [];
+  if (id === "multi") {
+    if (v === "occ") { const L = SQL_OCC, w = "beklemede", pos = [1, 2, 3].map(l => ({ l, c:at(L[l], w) }));
+      dev.ed = edState(L, { caret:{ l:3, c:pos[2].c + w.length }, sel:{ a:{ l:3, c:pos[2].c }, b:{ l:3, c:pos[2].c + w.length } }, sels2:pos.slice(0, 2).map(p => ({ l:p.l, c0:p.c, c1:p.c + w.length })), carets2:pos.slice(0, 2).map(p => ({ l:p.l, c:p.c + w.length })), preview:{ kind:"band", units:[U(3, 0, 3, L[3].length - 1)] } }); dev.ed.selN = 27; dev.ed.caretsN = 3; }
+    if (v === "column") { const L = SQL_COL, ls = [1, 2, 3, 4, 5], c0 = 7, c1 = 17;
+      const S2 = ls.map(l => ({ l, c0, c1:Math.min(c1, L[l].length) }));
+      dev.ed = edState(L, { caret:{ l:5, c:S2[4].c1 }, sel:{ a:{ l:5, c:c0 }, b:{ l:5, c:S2[4].c1 } }, sels2:S2.slice(0, 4), carets2:S2.slice(0, 4).map(s => ({ l:s.l, c:s.c1 })) }); dev.ed.selN = S2.reduce((a, s) => a + s.c1 - s.c0, 0); dev.ed.caretsN = 5;
+      W.annot = { html:"⌥-drag from line 2, col 8 to line 6, col 18: display columns; a shorter line gets its caret at its end (no virtual space).", at:"code", dx:260, dy:150, w:320 }; }
+    if (v === "ime") { const L = SQL_IME, cs = [1, 2, 3].map(l => ({ l, c:at(L[l], "shuju") }));
+      dev.ed = edState(L, { caret:{ l:3, c:cs[2].c + 5 }, ime:{ l:3, c:cs[2].c, text:"shuju", clause:[0, 5] }, imeAll:cs.slice(0, 2), carets2:cs.slice(0, 2).map(x => ({ l:x.l, c:x.c + 5 })) }); dev.ed.caretsN = 3;
+      W.imeCand = true; W.annot = { html:IME_NOTE(), at:"code", dx:470, dy:96, w:300 }; }
+    if (v === "imefallback") { const L = SQL_IMEF, c = at(L[3], "shuju");
+      dev.ed = edState(L, { caret:{ l:3, c:c + 5 }, ime:{ l:3, c, text:"shuju", clause:[0, 5] } }); W.sbmsg = t("hv-editor-ime-primary-only"); W.imeCand = true; W.annot = { html:IME_NOTE(), at:"code", dx:40, dy:186, w:330 }; }
+    if (v === "mainrun") { const L = SQL_OCC, w = "beklemede", pos = [1, 2, 3].map(l => ({ l, c:at(L[l], w) }));
+      dev.ed = edState(L, { caret:{ l:2, c:pos[1].c + w.length }, sel:{ a:{ l:2, c:pos[1].c }, b:{ l:2, c:pos[1].c + w.length } }, sels2:[pos[0], pos[2]].map(p => ({ l:p.l, c0:p.c, c1:p.c + w.length })), carets2:[pos[0], pos[2]].map(p => ({ l:p.l, c:p.c + w.length })), preview:{ kind:"band", units:[U(2, 0, 2, L[2].length - 1)] } }); dev.ed.selN = 27; dev.ed.caretsN = 3;
+      W.annot = { html:"Mock note: the main caret is on line 3 (the last one added). Run runs that statement only; the band and the gutter bar show it. Carets in other statements don't add statements to the run.", at:"code", dx:40, dy:120, w:360 }; }
+  }
+  if (id === "fold") {
+    const base = { caret:{ l:19, c:20 }, foldable:FOLDABLE, preview:{ kind:"band", units:[U(18, 0, 19, 46)] } };
+    if (v === "hover") dev.ed = edState(SQL_FOLD, { ...base, foldShow:"hover" });
+    if (v === "folded") dev.ed = edState(SQL_FOLD, { ...base, folds:[{ l:1, to:6 }, { l:8, to:13 }] });
+    if (v === "marks") { dev.ed = edState(SQL_FOLD, { ...base, folds:[{ l:1, to:6 }, { l:8, to:13 }], marks:[{ l:1, st:"ok", range:[1, 6], eol:{ k:"rows", rows:nf(12), ms:61 } }, { l:8, st:"ok", range:[8, 13], eol:{ k:"rows", rows:nf(100), ms:42 } }, { l:18, st:"ok", range:[18, 19], eol:{ k:"affected", rows:nf(4128), ms:213 } }] });
+      dev.res = resWith({ r1:R_M3C({ n:1, title:"Gece raporları", cols:COLS_CITY, row:rowCity, loaded:12, total:12, state:"complete", ms:61 }) }, "r1", [{ g:"ok", k:"exec-rows-retrieved", v:{ rows:12, duration:61 } }]); }
+    if (v === "failed") { dev.ed = edState(SQL_FOLD, { ...base, caret:{ l:22, c:10 }, preview:null, folds:[{ l:0, to:14 }], marks:[{ l:0, st:"fail", range:[0, 14], eol:{ k:"foldfail", line:9, code:"SQLSTATE 42703" } }, { l:18, st:"skipped", eol:{ k:"skipped" } }, { l:21, st:"skipped", eol:{ k:"skipped" } }] });
+      dev.res = resWith({}, "out", [{ g:"ok", k:"exec-rows-retrieved", v:{ rows:12, duration:61 } }, { g:"err", k:"exec-error", v:{ n:2 }, chip:"SQLSTATE 42703", srv:"ERROR:  column o.status does not exist  LINE 4: WHERE o.status = 'beklemede'", unit:11 }, { g:"sum", k:"exec-summary", v:{ executed:1, total:4, failed:1, duration:88 } }]); }
+    if (v === "caret") { dev.ed = edState(SQL_FOLD, { ...base, folds:[{ l:8, to:13 }], caret:{ l:8, c:22 }, preview:{ kind:"band", units:[U(8, 0, 13, 9)] } }); W.sbmsg = t("hv-editor-describe-one", { from:nf(9), to:nf(14), label:"SELECT o.id, c.full_name, o.total, o.placed_at FROM orders o …" }); }
+    if (v === "focus") { dev.ed = edState(SQL_FOLD, { ...base, folds:[{ l:8, to:13 }], foldShow:"focus", foldFocus:1 }); W.focus = "editor"; }
+    /* a cancel not answered inside the folded region: the hourglass paints on the header (it outranks done and failed) */
+    if (v === "pending") { dev.ed = edState(SQL_FOLD, { ...base, preview:null, caret:{ l:18, c:4 }, folds:[{ l:0, to:14 }], marks:[{ l:0, st:"escalated", eol:{ k:"escalated", s:14 } }, { l:18, st:"queued", eol:{ k:"queued" } }, { l:21, st:"queued", eol:{ k:"queued" } }] }); dev.tb = { state:"cancelling", elapsed:14 }; }
+  }
+  if (id === "find") {
+    const re = v === "regex" ? /ciro|siparis/ : v === "tolerant" || v === "bar" && LANG === "tr" ? /[İIıi]stanbul|İSTANBUL|ISTANBUL/ : /city/;
+    const L = SQL_FIND, hits = v === "invalid" || v === "none" ? [] : hitsOf(L, v === "tolerant" ? /[İIıi][sS][tT][aA][nN][bB][uU][lL]/ : re);
+    const curI = v === "regex" ? 1 : v === "tolerant" ? 0 : 2, cur = hits[curI];
+    const F = { q:{ bar:"city", tolerant:"istanbul", regex:"ciro|siparis", invalid:"sum(o.total", none:"kargo_firmasi", counting:"city", capped:"city" }[v], mc:false, ww:false, re:v === "regex" || v === "invalid", tol:v === "tolerant" || LANG === "tr",
+      i:curI + 1, n:{ bar:41, tolerant:7, regex:12, counting:1240, capped:41208 }[v] || 0, more:v === "counting", state:v === "invalid" ? "invalid" : v === "none" ? "none" : "ok", err:"unclosed group at offset 3" };
+    dev.find = F; dev.ed = edState(L, { caret:cur ? { l:cur.l, c:cur.c1 } : { l:5, c:13 }, sel:cur ? { a:{ l:cur.l, c:cur.c0 }, b:{ l:cur.l, c:cur.c1 } } : null, hits:hits.filter(h => h !== cur),
+      vsb:{ top:0, h:46, marks:hits.length ? Array.from({ length:Math.min(F.n || hits.length, 28) }, (_, i) => ({ at:4 + i * 3.3, cur:i === curI })) : [] } });
+    if (v === "capped") { dev.ed.hits = []; dev.ed.sels2 = hits.filter(h => h !== cur).map(h => ({ l:h.l, c0:h.c0, c1:h.c1 })); dev.ed.carets2 = hits.filter(h => h !== cur).map(h => ({ l:h.l, c:h.c1 })); dev.ed.caretsN = 10000; dev.ed.selN = 40000; W.sbmsg = t("hv-find-capped", { max:nf(10000), n:nf(41208) }); }
+    W.focus = "editor"; W.pendingFocus = "fq";
+  }
+  if (id === "gutter") {
+    const marks = [{ l:1, st:"ok", range:[1, 1], eol:{ k:"rows", rows:nf(12), ms:61 } }, { l:2, st:"ok", range:[2, 2], eol:{ k:"affected", rows:nf(4128), ms:213 } }];
+    dev.ed = edState(SQL_GUTX, { caret:{ l:5, c:14 }, marks, preview:{ kind:"band", units:[U(5, 0, 7, 13)] }, foldable:[{ l:5, to:7 }] });
+    if (v === "hover") { dev.ed.gutRun = { l:3 }; dev.ed.foldShow = "hover"; }
+    if (v === "runs") { dev.ed.gutRun = { l:1 }; dev.ed.foldShow = "hover"; W.pendingTip = { kind:"runs", l:1 }; }
+    if (v === "focus") { dev.ed.gutRun = { l:5, kf:true }; dev.ed.foldShow = "focus"; W.pendingTip = { kind:"runs0", l:5 }; }
+    if (v === "noplay") { dev.ed.marks = [...marks, { l:3, st:"escalated", eol:{ k:"escalated", s:14 } }]; dev.ed.gutRun = { l:3 }; dev.ed.preview = null; dev.ed.caret = { l:3, c:20 }; dev.tb = { state:"cancelling", elapsed:14 };
+      W.annot = { html:"Mock note: the pointer is on line 4's gutter. Run is off while the cancel waits for an answer, so ▶ stays hidden and the hourglass keeps its place.", at:"code", dx:40, dy:120, w:340 }; }
+    if (v === "eol" || v === "eolmenu") { dev.ed.eolMixed = { lf:214, crlf:12 }; if (v === "eolmenu") W.pendingMenu = "eol"; }
+    if (v === "menu") { dev.ed.sel = { a:{ l:5, c:0 }, b:{ l:7, c:13 } }; dev.ed.caret = { l:7, c:13 }; W.pendingMenu = "edctx"; }
+    if (v === "undo") { const w = "city", n = w.length, ps = [1, 5, 7].map(l => ({ l, c:at(SQL_GUTX[l], w) }));
+      dev.ed.sel = { a:{ l:7, c:ps[2].c }, b:{ l:7, c:ps[2].c + n } }; dev.ed.caret = { l:7, c:ps[2].c + n }; dev.ed.sels2 = ps.slice(0, 2).map(p => ({ l:p.l, c0:p.c, c1:p.c + n })); dev.ed.carets2 = ps.slice(0, 2).map(p => ({ l:p.l, c:p.c + n })); dev.ed.caretsN = 3; dev.ed.selN = 12; dev.ed.preview = null; W.pendingMenu = "edctxUndo"; }
+    if (v === "recall") { const s = "SELECT c.city, count(*) AS adet FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY 1;";
+      dev.ed = edState([s], { caret:{ l:0, c:s.length }, preview:{ kind:"band", units:[U(0, 0, 0, s.length - 1)] } }); W.sbmsg = t("hv-history-recall", { i:nf(2), n:nf(48), older:"⌃⌥↑", newer:"⌃⌥↓" }); }
+    W.focus = "editor";
+  }
+  const gridWorld = (R, o = {}) => { dev.ed = edState(SQL_MAIN, { caret:{ l:12, c:20 }, marks:[{ l:11, st:"ok", range:[11, 13], eol:{ k:"rows", rows:nf(10000) + "+", ms:131 } }] });
+    dev.res = resWith({ r1:R }, "r1", [{ g:"ok", k:"exec-rows-retrieved-more", v:{ rows:10000, duration:131 } }]); W.focus = "results"; };
+  if (id === "gridm") {
+    const lvl1 = [{ c:3, dir:"desc", lvl:1, coll:"" }], lvl2 = [{ c:2, dir:"asc", lvl:1, coll:"tr-x-icu" }, { c:3, dir:"desc", lvl:2, coll:"" }];
+    if (v === "sort1") gridWorld(R_M3C({ cols:COLS_ORDERS, rowsFixed:sortRows(ROWS60, lvl1), loaded:60, total:60, state:"complete", sort2:lvl1, act:{ r:0, c:3 }, rects:[{ r0:0, r1:0, c0:3, c1:3 }] }));
+    if (v === "sort2") { gridWorld(R_M3C({ cols:COLS_ORDERS, rowsFixed:sortRows(ROWS60, lvl2), loaded:60, total:60, state:"complete", sort2:lvl2 })); W.gtip = { at:'.gh .gc[data-h="2"]', html:esc(t("hv-grid-sort-tip", { lvl:nf(1), dir:t("hv-grid-dir-asc"), collation:"tr-x-icu" })) }; }
+    if (v === "codepoint") { const cp = [{ c:1, dir:"asc", lvl:1, coll:"C", cp:true }]; gridWorld(R_M3C({ cols:COLS_ORDERS, rowsFixed:[...ROWS60].sort((a, b) => a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0), loaded:60, total:60, state:"complete", sort2:cp }));
+      W.gtip = { at:'.gh .gc[data-h="1"]', html:esc(t("hv-grid-sort-tip-cp", { lvl:nf(1), dir:t("hv-grid-dir-asc"), collation:"C" })) }; }
+    if (v === "partial") gridWorld(R_M3C({ rowsFixed:sortRows(ROWS60, lvl2), sort2:lvl2, sortNote:"partial" }));
+    if (v === "sorting") gridWorld(R_M3C({ loaded:1048576, total:1048576, state:"complete", sortNote:"sorting", sorting:1048576, ms:48210 }));
+    if (v === "tail") { const sorted = sortRows(ROWS60, lvl1); gridWorld(R_M3C({ rowsFixed:Array.from({ length:11500 }, (_, r) => r < 10000 ? sorted[r % 60] : rowOrders(r)), loaded:11500, top:9997, sort2:lvl1, sortNote:"partialtail", tailFrom:10000 })); }
+    if (v === "tailc") { const sorted = sortRows(ROWS60, lvl1); gridWorld(R_M3C({ rowsFixed:Array.from({ length:12000 }, (_, r) => r < 10000 ? sorted[r % 60] : rowOrders(r)), loaded:12000, total:12000, state:"complete", top:9997, sort2:lvl1, sortNote:"tail", tailFrom:10000 })); }
+    if (v === "frozen") { gridWorld(R_M3C({ frz:2, sx:330, act:{ r:4, c:5 }, rects:[{ r0:4, r1:4, c0:5, c1:5 }] })); W.gtip = { at:'.gh .gc[data-h="1"]', html:esc(t("hv-grid-frozen-tip")) }; }
+    if (v === "multirect") gridWorld(R_M3C({ rects:[{ r0:2, r1:5, c0:1, c1:2 }, { r0:8, r1:9, c0:3, c1:3 }], act:{ r:9, c:3 } }));
+    if (v === "resize") { gridWorld(R_M3C({ rsz:{ c:2, px:136, drag:true } })); W.gtip = { at:'.gh .gc[data-h="2"]', right:true, dx:6, html:`<span class="mono">${esc(t("hv-grid-width", { px:nf(136) }))}</span> · ${te("hv-grid-resize-tip")}` }; }
+  }
+  if (id === "gfind") {
+    /* İzmir on fixed rows, so the matches sit where the fixture says */
+    const izmir = [1, 4, 9, 13, 20, 27], RF = ROWS60.map((r, i) => izmir.includes(i) ? [r[0], r[1], "İzmir", ...r.slice(3)] : r[2] === "İzmir" ? [r[0], r[1], "Bursa", ...r.slice(3)] : r);
+    const hitsAt = (rs, cur) => Object.fromEntries(rs.map(r => [`${r}:2`, [[0, 5, r === cur]]]));
+    const F = o => ({ q:LANG === "tr" ? "izmir" : "İzmir", tol:LANG === "tr", mc:false, ww:false, re:false, filter:false, i:3, n:41, state:"ok", ...o });
+    if (v === "bar") gridWorld(R_M3C({ rowsFixed:RF, loaded:10000, gfind:F({}), hitsAt:hitsAt(izmir, 4), act:{ r:4, c:2 }, rects:[{ r0:4, r1:4, c0:2, c1:2 }] }));
+    if (v === "filter") { const vr = Array.from({ length:41 }, (_, i) => i * 7), RF2 = Array.from({ length:290 }, (_, r) => { const o = rowOrders(r); return r % 7 === 0 ? [o[0], o[1], "İzmir", ...o.slice(3)] : o; });
+      gridWorld(R_M3C({ rowsFixed:RF2, gfind:F({ filter:true }), viewRows:vr, hitsAt:hitsAt(vr, 14), act:{ r:2, c:2 }, rects:[{ r0:2, r1:2, c0:2, c1:2 }] })); }
+    if (v === "incomplete") { const tv = TYPE_VIEW([0, 1, 2, 3, 8, 4]), s = tv.rows[6][1], a = s.indexOf("Stadyum");
+      gridWorld(R_M3C({ cols:tv.cols, rowsFixed:tv.rows, loaded:8, total:8, state:"complete", gfind:F({ q:"Stadyum", tol:false, i:1, n:1, incomplete:1 }), hitsAt:{ "6:1":[[a, a + 7, true]] }, act:{ r:6, c:1 }, rects:[{ r0:6, r1:6, c0:1, c1:1 }] })); }
+    if (v === "scanning") gridWorld(R_M3C({ rowsFixed:RF, loaded:1048576, total:1048576, state:"complete", gfind:F({ n:214, more:true }), hitsAt:hitsAt(izmir, 4), act:{ r:4, c:2 }, rects:[{ r0:4, r1:4, c0:2, c1:2 }] }));
+    if (v === "invalid") gridWorld(R_M3C({ rowsFixed:RF, gfind:F({ q:"[İi]zmir(", re:true, state:"invalid", err:"unclosed group at offset 8" }) }));
+    if (v === "selall") gridWorld(R_M3C({ rowsFixed:RF, gfind:F({}), hitsAt:hitsAt(izmir, 4), act:{ r:4, c:2 }, rects:izmir.map(r => ({ r0:r, r1:r, c0:2, c1:2 })), selSummary:{ n:41, cells:41 } }));
+    if (v === "selcap") { gridWorld(R_M3C({ rowsFixed:RF, loaded:1048576, total:1048576, state:"complete", gfind:F({ n:41208 }), hitsAt:hitsAt(izmir, 4), act:{ r:4, c:2 }, rects:izmir.map(r => ({ r0:r, r1:r, c0:2, c1:2 })), selSummary:{ n:10000, cells:10000 } })); W.sbmsg = t("hv-find-capped", { max:nf(10000), n:nf(41208) }); }
+    W.pendingFocus = "fq";
+  }
+  if (id === "goto") {
+    const G = o => { W.goto = { q:"", state:"hint", ...o }; W.pendingFocus = "gotoQ"; };
+    if (v === "range") gridWorld(R_M3C({ cols:COLS_CITY, row:rowCity, loaded:12, total:12, state:"complete", ms:61 }));
+    else gridWorld(R_M3C({ hiddenCols:v === "hidden" ? [6] : [] }));
+    if (v === "empty") G({});
+    if (v === "turkish") { if (!/[?&]lang=/.test(location.search)) LANG = "tr"; G({ q:LANG === "tr" ? "1.000:city" : "1,000:city", state:"target", row:1000, col:"city" }); }
+    if (v === "range") G({ q:"40", state:"past", row:40, total:12 });
+    if (v === "unknown") G({ q:"200:ilce", state:"unknown", col:"ilce" });
+    if (v === "hidden") G({ q:"200:meta", state:"hidden", col:"meta" });
+    if (v === "fetch") { G({ q:LANG === "tr" ? "1.500.000" : "1,500,000", state:"fetch", row:1500000, loaded:10000 }); W.pendingFocus = "gotoFetch"; }
+    if (v === "fetching") { G({ q:LANG === "tr" ? "1.500.000" : "1,500,000", state:"fetching", row:1500000, loaded:10000, done:214000 }); W.pendingFocus = "gotoStop"; const R = KR(); R.state = "streaming"; R.loaded = 224000; }
+  }
+  if (id === "views") {
+    if (v === "seg") { gridWorld(R_M3C({ loaded:1048576, total:1048576, state:"complete", ms:48210 })); W.gtip = { at:'#viewSeg [data-why]', html:te("hv-view-transposed-off", { max:nf(100000), rows:nf(1048576) }), right:true, dx:-280 }; }
+    if (v === "transposed") gridWorld(R_M3C({ rowsFixed:ROWS60, loaded:6, total:6, state:"complete", view:"transposed", act:{ r:1, c:2 } }));
+    if (v === "record") gridWorld(R_M3C({ rowsFixed:ROWS60, record:{ r:3 }, act:{ r:3, c:1 }, rects:[{ r0:3, r1:3, c0:1, c1:1 }] }));
+    if (v === "dups") gridWorld(R_M3C({ cols:COLS_DUP, row:ROW_DUP, loaded:184, total:184, state:"complete", record:{ r:3 }, act:{ r:3, c:3 }, rects:[{ r0:3, r1:3, c0:3, c1:3 }] }));
+    if (v === "onerow") gridWorld(R_M3C({ rowsFixed:ROWS60, loaded:1, total:1, state:"complete", oneRow:true, ms:4 }));
+    if (v === "text") gridWorld(R_M3C({ loaded:184, total:184, state:"complete", view:"text", tsel:[6, 8] }));
+    if (v === "textbuild") { gridWorld(R_M3C({ loaded:1048576, total:1048576, state:"complete", view:"textbuild", ms:48210 })); W.pendingFocus = "textCancel"; }
+    if (v === "textbig") gridWorld(R_M3C({ loaded:1048576, total:1048576, state:"complete", view:"textbig", ms:48210 }));
+  }
+  if (id === "vv") {
+    const tv = TYPE_VIEW([0, 1, 2, 3, 7, 6]);
+    const rows = tv.rows.map(r => [...r]); rows[3][2] = { trunc:"Merhaba, 12 Kasım tarihli 1048213 numaralı siparişim hâlâ", size:5.2 };
+    rows[3][1] = VV_TEXT; rows[2][4] = VV_JSON; rows[5][4] = VV_BADJSON;
+    if (v === "xml") { tv.cols = tv.cols.map((c, i) => i === 4 ? { ...c, name:"belge", type:"xml" } : c); rows[2][4] = VV_XML; } rows[0][5] = "\\x" + PNG_BYTES.map(b => b.toString(16).padStart(2, "0")).join("");
+    gridWorld(R_M3C({ cols:tv.cols, rowsFixed:rows, loaded:8, total:8, state:"complete", ms:18 }));
+    const spec = { text:{ c:1, r:3, col:"subject", type:"text" }, json:{ c:4, r:2, col:"meta", type:"jsonb", pretty:true }, jsonraw:{ c:4, r:2, col:"meta", type:"jsonb", pretty:false }, hex:{ c:5, r:0, col:"attachment", type:"bytea" }, xml:{ c:4, r:2, col:"belge", type:"xml" }, badjson:{ c:4, r:5, col:"meta", type:"jsonb" }, trunc:{ c:2, r:3, col:"body", type:"text" } }[v];
+    const kind = v === "jsonraw" ? "json" : v;
+    KR().act = { r:spec.r, c:spec.c }; KR().rects = [{ r0:spec.r, r1:spec.r, c0:spec.c, c1:spec.c }];
+    W.vv = { kind, ...spec, row:spec.r + 1 }; W.pendingFocus = "vvBody";
+  }
+  if (id === "gmenu") {
+    if (v === "disabled") gridWorld(R_M3C({ rects:[{ r0:2, r1:4, c0:1, c1:2 }, { r0:7, r1:7, c0:4, c1:4 }], act:{ r:7, c:4 } }));
+    else if (v === "unfreeze") gridWorld(R_M3C({ frz:2, sx:0 }));
+    else if (v === "header") { const lvl = [{ c:2, dir:"asc", lvl:1, coll:"tr-x-icu" }]; gridWorld(R_M3C({ rowsFixed:sortRows(ROWS60, lvl), sort2:lvl })); }
+    else gridWorld(R_M3C({ act:{ r:4, c:2 }, rects:[{ r0:4, r1:4, c0:2, c1:2 }] }));
+    W.pendingMenu = { cell:"gcell", header:"ghead", unfreeze:"gheadFrz", rownum:"grow", disabled:"gcellDis", kbd:"gkbd" }[v];
+  }
+  if (id === "narrow") {
+    const P = (w, connId, o = {}) => ({ w, conn:connId, mode:conn(connId).env === "production" ? "manual" : "auto", state:"idle", ...o });
+    conn("api-prod").ro = "guarded"; W.live["api-prod"] = "connected"; W.live["reports-test"] = "connected";
+    const four = (o1 = {}, o2 = {}, o3 = {}, o4 = {}) => [P(120, "api-prod", o1), P(141, "orders-prod", o2), P(180, "reports-test", o3), P(219, "orders-dev", o4), P(0, "orders-dev", { fill:true, lines:SQL_MAIN.slice(0, 10) })];
+    if (v === "idle" || v === "reduced" || v === "carries") W.panes = four();
+    if (v === "running") W.panes = four({ state:"running" }, { state:"cancelling" }, { state:"running" }, { state:"cancelling" });
+    if (v === "waiting") W.panes = four({ state:"waiting" }, { state:"waiting" }, { state:"waiting" }, { state:"waiting" });
+    /* pending read-only: sessions still read-write that turn read-only once their transaction ends (so no read-only chip yet) */
+    if (v === "pending") { conn("api-prod").ro = undefined; W.live["orders-staging"] = "connected"; W.panes = four({ pending:true, tx:3 }, { tx:1 }, { pending:true, tx:2 }, { tx:12 }); W.panes[2] = { ...W.panes[2], conn:"orders-staging" }; }
+    if (v === "strip") W.panes = four({ strip:true }, { strip:true }, { strip:true }, { strip:true });
+    if (v === "longname") { CONNS.push({ id:"reporting-replica-eu-west", env:"dev", engine:"pg", ver:"16.4", host:"replica-eu-west.acme.internal", port:5432, db:"reports", user:"dev", lat:7 }); W.live["reporting-replica-eu-west"] = "connected";
+      W.panes = [P(120, "reporting-replica-eu-west"), P(141, "orders-prod"), P(180, "reporting-replica-eu-west", { state:"running" }), P(219, "api-prod"), P(0, "orders-dev", { fill:true, lines:SQL_MAIN.slice(0, 10) })]; }
+    if (v === "pseudo") W.panes = [P(219, "api-prod", { pseudo:true }), P(219, "orders-prod", { pseudo:true, state:"waiting" }), P(219, "reports-test", { pseudo:true, state:"cancelling" }), P(0, "orders-dev", { fill:true, pseudo:true, lines:SQL_MAIN.slice(0, 10) })];
+    if (v === "reduced") { tr960(); W.panes[1] = { ...W.panes[1], tx:2, lines:dumpLines(1048566, 12), first:1048566 }; }
+    if (v === "carries") { W.panes[1] = { ...W.panes[1], empty:true }; }
+    focus("k-prod"); prod.res = resNone();
+    /* the status bar follows the focused pane (orders-prod): its transaction, its cursor, its editor */
+    const fp = W.panes.find(p => p.conn === "orders-prod");
+    prod.tx = fp && fp.tx ? { n:fp.tx, age:3 } : null;
+    if (fp && fp.strip) prod.res = resWith({ r1:R_ORDERS({ n:1 }) }, "r1");
+    if (fp && fp.state === "cancelling") prod.tb = { state:"cancelling", elapsed:14 };
+    prod.ed = edState(SQL_STG, { caret:{ l:3, c:19 } });
+    if (v === "reduced") { prod.ed = edState(dumpLines(1048566, 14), { first:1048566, caret:{ l:6, c:41 }, sel:{ a:{ l:6, c:20 }, b:{ l:6, c:41 } }, reduced:true }); prod.ed.eolMixed = { lf:1048420, crlf:160 }; }
+    if (v === "carries") { prod.ed = edState([""], { caret:{ l:0, c:0 }, placeholder:true }); W.sbmsg = t("hv-editor-nothing-to-run"); }
+  }
+  if (id === "settings") {
+    W.page = { sec:v === "search" ? "editor" : v === "clamped" || v === "kb" ? "results" : v, q:v === "search" ? (LANG === "tr" ? "sor" : "ask") : "", clamped:v === "clamped", kb:v === "kb" };
+    if (v === "search" && !/[?&]lang=/.test(location.search)) { LANG = "tr"; W.page.q = "sor"; }
+  }
+}
+
+/* ═════════════ M3c wiring: deferred openers, tooltips, actions ═════════════ */
+function runsTipHTML(T) {
+  const row = (g, cls, tm, html) => `<div class="rr"><span class="${cls}">${ic(g,"i12")}</span><span class="tm">${tm}</span><span>${html}</span></div>`;
+  const runs = T.zero ? `<div class="hint" style="margin-top:4px">${te("hv-gutter-never-run")}</div>`
+    : `<div class="runs">${row("check", "g", "14:32", esc(t("hv-editor-mark-rows", { duration:dur(61), rows:nf(12) })))}${row("triangle-alert", "i", "14:20", `${te("hv-editor-mark-failed")}<span class="chip">SQLSTATE 40P01</span>`)}${row("ban", "d", "14:02", esc(t("hv-editor-mark-cancelled", { duration:dur(12000) })))}</div>`;
+  return `<div class="tip" id="tip" role="tooltip" style="left:${T.x}px;top:${T.y}px;width:300px"><div class="th">${ic("play","i12")}<span>${te("hv-gutter-run")}</span><kbd>${KEY_RUN}</kbd></div><div class="cap4">${te("hv-gutter-last-runs")}</div>${runs}<div class="hint" style="margin-top:6px">${te("hv-gutter-same-path")}</div></div>`;
+}
+function openRunsTip(l, zero) { const g = document.querySelector(`.gut .play[data-l="${l}"]`); if (!g) return; const p = anchorBelow(g, -4, 4); W.tip = { kind:"runs", x:p.x, y:p.y, zero }; renderMenus(); }
+function openEolMenu() {
+  const s = document.querySelector('[data-seg="eol"]'), E = K().ed; if (!s) return; const W0 = winRect(), r = s.getBoundingClientRect();
+  openM3Menu([{ head:t("hv-eol-counts", { lf:nf(E.eolMixed.lf), crlf:nf(E.eolMixed.crlf) }) }, { label:t("hv-eol-to", { ending:"LF" }), hint:t("hv-eol-most"), act:"eolTo" }, { label:t("hv-eol-to", { ending:"CRLF" }), act:"eolTo" }],
+    r.left - W0.left, 0, { above:true, anchorTop:r.top - W0.top, active:1 });
+}
+function openGridMenu(kind, o = {}) {
+  const W0 = winRect(); let a;
+  if (kind === "header") a = document.querySelector(`#gridwrap .gh .gc[data-h="${o.c ?? 2}"]`);
+  else if (kind === "rownum") a = document.querySelector(`#gridwrap .gc.rn[data-r="${o.r ?? 4}"]`);
+  else a = document.querySelector(`#gridwrap .gc[data-r="${o.r}"][data-c="${o.c}"]`);
+  if (!a) return; const r = a.getBoundingClientRect();
+  const x = o.kbd ? r.left - W0.left : r.left - W0.left + Math.min(40, r.width / 2), y = o.kbd ? r.bottom - W0.top + 2 : r.top - W0.top + 12;
+  openM3Menu(gridMenuItems(kind, o), x, y, { active:o.kbd ? 0 : -1, w:o.w });
+}
+function afterRenderM3c() {
+  const p = W.pendingMenu;
+  if (p === "edctx" || p === "edctxUndo") { W.pendingMenu = null; const a = caretAnchor(); const q = a ? anchorBelow(a, 0, 3) : { x:300, y:200 }; const items = edMenuItems(); openM3Menu(items, q.x, q.y, { w:300, active:p === "edctxUndo" ? items.length - 1 : -1 }); }
+  if (p === "eol") { W.pendingMenu = null; openEolMenu(); }
+  if (["gcell", "ghead", "gheadFrz", "grow", "gcellDis", "gkbd"].includes(p)) { W.pendingMenu = null;
+    if (p === "gcell") openGridMenu("cell", { r:4, c:2, raw:false });
+    if (p === "gkbd") openGridMenu("cell", { r:4, c:2, kbd:true });
+    if (p === "ghead") openGridMenu("header", { c:2, asc:true, addLevel:false, raw:false });
+    if (p === "gheadFrz") openGridMenu("header", { c:1, raw:false });
+    if (p === "grow") openGridMenu("rownum", { r:4 });
+    if (p === "gcellDis") openGridMenu("cell", { r:7, c:4, ranges:true }); }
+  if (W.pendingTip && (W.pendingTip.kind === "runs" || W.pendingTip.kind === "runs0")) { const q = W.pendingTip; W.pendingTip = null; openRunsTip(q.l, q.kind === "runs0"); }
+}
+function placeM3c() {
+  document.querySelectorAll(".pane .pw").forEach(e => e.textContent = Math.round(e.parentElement.getBoundingClientRect().width) + " px");   /* the mock's width label (dashed): the pane's real width */
+  /* a popover that holds the focus keeps it across re-renders (language or size switches) */
+  const ae = document.activeElement;
+  if (W.vv && !(ae && ae.closest("#vv"))) setTimeout(() => document.querySelector('[data-fk="vvBody"]')?.focus({ preventScroll:true }));
+  if (W.goto && !(ae && ae.closest("#goto"))) setTimeout(() => document.querySelector(W.goto.state === "fetch" ? '[data-fk="gotoFetch"]' : '[data-fk="gotoQ"]')?.focus({ preventScroll:true })); if (W.imeCand && !document.querySelector(".candwin")) placeIme(); if (W.vv) placeVV(); if (W.goto) placeGoto(); if (W.gtip) placeGtip(); }
+Object.assign(ACT, {
+  /* find (editor and grid share the toggles) */
+  ftog: a => { const k = K(), R = KR(), F = a.closest(".fgrp2") ? R.gfind : k.find; if (!F) return; F[a.dataset.k] = !F[a.dataset.k]; if (a.closest(".fgrp2")) renderResults(); else renderEditor(); },
+  fprev: () => { const F = K().find || KR()?.gfind; if (!F || !F.n) return; F.i = F.i > 1 ? F.i - 1 : F.n; renderEditor(); renderResults(); },
+  fnext: () => { const F = K().find || KR()?.gfind; if (!F || !F.n) return; F.i = F.i < F.n ? F.i + 1 : 1; renderEditor(); renderResults(); },
+  fall: a => { const R = KR(); if (a && a.closest && a.closest(".fgrp2") && R) { R.selSummary = { n:Math.min(10000, R.gfind.n), cells:Math.min(10000, R.gfind.n) }; if (R.gfind.n > 10000) W.sbmsg = t("hv-find-capped", { max:nf(10000), n:nf(R.gfind.n) }); renderResults(); renderStatus(); return; }
+    W.sbmsg = t("hv-find-capped", { max:nf(10000), n:nf(K().find.n) }); renderStatus(); },
+  filterOff: () => { const R = KR(); R.gfind.filter = false; R.viewRows = null; renderResults(); },
+  textCancel: () => { const R = KR(); R.view = "table"; renderResults(); },
+  gotoStop: () => { W.goto = null; const R = KR(); R.state = "suspended"; renderMenus(); renderResults(); renderStatus(); },
+  fclose: () => { const k = K(); k.find = null; k.ed.hits = []; k.ed.vsb = null; W.focus = "editor"; renderEditor(); renderStatus(); },
+  gfclose: () => { const R = KR(); R.gfind = null; R.hitsAt = null; R.viewRows = null; renderResults(); renderStatus(); },
+  /* views and the record inspector */
+  view: a => { const R = KR(); if (a.disabled) return; R.view = a.dataset.v === "text" && (R.total ?? R.loaded) > 100000 ? "textbig" : a.dataset.v; renderResults(); },
+  textOk: () => { const R = KR(); R.view = "textbuild"; renderResults(); document.querySelector('[data-fk="textCancel"]')?.focus(); },
+  record: () => { const R = KR(); R.record = R.record ? null : { r:R.act ? R.act.r : 0 }; renderResults(); },
+  recPrev: () => { const R = KR(); R.record.r = Math.max(0, R.record.r - 1); R.act = { r:R.record.r, c:R.act ? R.act.c : 0 }; R.rects = [{ r0:R.act.r, r1:R.act.r, c0:R.act.c, c1:R.act.c }]; renderResults(); },
+  recNext: () => { const R = KR(); R.record.r = R.record.r + 1; R.act = { r:R.record.r, c:R.act ? R.act.c : 0 }; R.rects = [{ r0:R.act.r, r1:R.act.r, c0:R.act.c, c1:R.act.c }]; renderResults(); },
+  showMore: () => { const R = KR(); W.vv = { kind:"trunc", r:R.record.r, c:3, col:"note", type:"text", row:R.record.r + 1 }; renderMenus(); },
+  openVV: () => { const R = KR(), A = R.act || { r:0, c:0 }; const c = R.cols[A.c]; W.vv = { kind:c.type === "jsonb" ? "json" : c.type === "bytea" ? "hex" : "text", r:A.r, c:A.c, col:c.name, type:c.type, row:A.r + 1, pretty:true }; renderMenus(); },
+  /* sort notes */
+  clearSort: () => { const R = KR(); R.sort2 = null; R.sortNote = null; R.rowsFixed = null; renderResults(); },
+  sortCancel: () => { const R = KR(); R.sortNote = null; renderResults(); },
+  resort: () => { const R = KR(); R.sortNote = null; R.tailFrom = null; renderResults(); },
+  /* value viewer */
+  vvRaw: () => { W.vv.pretty = false; renderMenus(); }, vvPretty: () => { W.vv.pretty = true; renderMenus(); },
+  vvClose: () => { W.vv = null; renderMenus(); }, vvCopy: () => toast(`<div>${te("hv-vv-copy")} ✓</div>`, { icon:"copy" }),
+  vvRerun: () => { W.vv = null; renderMenus(); runNow(K(), [MAIN_S2]); },
+  /* go to row */
+  gotoOpen: () => { W.goto = { q:"", state:"hint" }; renderMenus(); placeGoto(); document.querySelector('[data-fk="gotoQ"]')?.focus(); },
+  gotoClose: () => { W.goto = null; renderMenus(); }, gotoShow: () => { const R = KR(); R.hiddenCols = []; W.goto = null; renderResults(); renderMenus(); },
+  gotoFetch: () => { const G = W.goto, R = KR(); G.state = "fetching"; G.done = 0; R.state = "streaming"; renderMenus(); renderResults(); document.querySelector('[data-fk="gotoStop"]')?.focus(); },
+  /* editor */
+  undoSel: () => { const E = K().ed; E.sels2 = []; E.carets2 = []; E.caretsN = 0; E.selN = undefined; renderEditor(); renderStatus(); },
+  unfold: a => { const E = K().ed, l = +a.dataset.l; E.folds = (E.folds || []).filter(f => f.l !== l); renderEditor(); },
+  fold: a => { const E = K().ed, l = +a.dataset.l, f = (E.foldable || []).find(x => x.l === l); if (f) E.folds = [...(E.folds || []), f]; renderEditor(); },
+  gutRun: () => doRun(),
+  eolMenu: (a, e) => { e?.stopPropagation(); if (W.menu) return closeMenu(); openEolMenu(); },
+  eolTo: () => { const E = K().ed; E.eolMixed = null; renderStatus(); },
+});
 /* ═════════════ Navigation, deep links, boot ═════════════ */
 function go(surface, sc) {
   S.surface = surface; const s = SURF[surface]; S.sc[s.id] = sc || S.sc[s.id] || s.sc[0][0];
