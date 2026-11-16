@@ -339,3 +339,24 @@ pub fn set_pending_read_only(console: ConsoleId, pending: bool, cx: &mut App) {
         set.remove(&console);
     }
 }
+
+// ## m3b-t27-history (named exception): the history dialog's Insert.
+/// Replaces console `console`'s editor selection with `text` (the caret after it) as one undo
+/// group, through the editor's own edit path (`ImeCore::dispatch` + `apply_committed`,
+/// `EditorView::replace_selection`). `false`, with nothing changed, while an IME composition is
+/// open (never queued: the M3a T27 rule), without an editor, on a read-only editor or past the
+/// document size limit.
+pub fn insert_at_caret(console: ConsoleId, text: &str, cx: &mut App) -> bool {
+    inserted_at_caret(console, text, cx).is_some()
+}
+
+// ## m3b-t27-history (named exception)
+/// [`insert_at_caret`], answering the bytes the text now covers (Insert and run selects them).
+pub(crate) fn inserted_at_caret(
+    console: ConsoleId,
+    text: &str,
+    cx: &mut App,
+) -> Option<std::ops::Range<usize>> {
+    let editor = crate::console::Consoles::get(cx, console)?.editor.clone()?;
+    editor.update(cx, |v, cx| v.replace_selection(text, cx))
+}

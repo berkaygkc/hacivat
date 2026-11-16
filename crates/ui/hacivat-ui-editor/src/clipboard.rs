@@ -335,6 +335,46 @@ pub(crate) fn apply(v: &mut EditorView, p: Pasted, cx: &mut Context<EditorView>)
     }
 }
 
+// ## m3b-t27-history (named exception): the app's programmatic insert (the history dialog's
+// Insert, `exec_ui::insert_at_caret`), beside the paste whose rules it shares.
+impl EditorView {
+    /// Replaces the main selection with `text`, its line endings made the document's dominant
+    /// one, as one undo group of its own (a command transaction, `Origin::Program`) through
+    /// [`EditorView::commit`] (`ImeCore::dispatch`, then `apply_committed`): the caret lands
+    /// after it. Returns the bytes it now covers; `None`, with nothing changed, while an IME
+    /// composition is open or held edits wait for it (the caller tries again later, never
+    /// queued: the M3a T27 rule), on a read-only editor, or past the document size limit
+    /// (R-M3-49).
+    pub fn replace_selection(
+        &mut self,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        if self.config.read_only || ime::must_hold(self) {
+            return None;
+        }
+        let p = normalize(text, self.model.buffer().dominant_line_ending(), false);
+        let len = self.model.buffer().len_bytes();
+        let main = self.model.selection().main().range();
+        let after = (len - main.len() + p.text.len()) as u64;
+        if after > self.config.tiers.reduced_max_bytes {
+            return None;
+        }
+        let end = main.start + p.text.len();
+        let changes = ChangeSet::from_edits(len, [(main.clone(), p.text)]).ok()?;
+        let ann = self.annotations(UserEvent::Command("insert_text"), Origin::Program, cx);
+        self.commit(
+            Transaction {
+                changes,
+                selection: Some(SelectionSet::cursor(end)),
+                ann,
+            },
+            cx,
+        )?;
+        Some(main.start..end)
+    }
+}
+
 /// Whole megabytes, rounded up (a size shown as "{ $n } MB").
 fn megabytes(bytes: u64) -> u64 {
     bytes.div_ceil(1 << 20).max(1)

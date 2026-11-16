@@ -2563,3 +2563,87 @@ hv-editor-mark-awaiting-sp = waiting for Keep or Undo
 hv-editor-mark-not-sent = not sent
 # Once, when the query history file was damaged and set aside at startup.
 hv-exec-history-recovered = The query history file was damaged, so Hacivat set it aside and started a new one.
+
+## m3b-t27-history
+
+# The query history dialog (design/m3b-safe surface 11).
+hv-history-title = Query history
+# The search field's placeholder.
+hv-history-search = Search history
+hv-history-search-tip = Search ignores letter case and accents: musteri finds müşteri.
+# The scope: this console's connection, or every connection.
+hv-history-filter-this = This connection
+hv-history-filter-all = All connections
+# The outcome filter.
+hv-history-outcome-any = Any outcome
+hv-history-outcome-ok = Succeeded
+hv-history-outcome-failed = Failed
+hv-history-outcome-cancelled = Cancelled
+# An entry the safety gate refused (nothing was sent).
+hv-history-outcome-denied = Not run
+# Day groups of the list.
+hv-history-today = Today
+hv-history-yesterday = Yesterday
+# The header's subtitle.
+# Variables:
+#   $n (Number) - the entries the list shows, e.g. 5.
+hv-history-count = { $n ->
+        [one] { $n } entry
+       *[other] { $n } entries
+    }
+# A row's and the preview's row count.
+# Variables:
+#   $rows (Number) - rows fetched or affected, e.g. 12.
+hv-history-rows = { $rows ->
+        [one] { $rows } row
+       *[other] { $rows } rows
+    }
+# The chip on an entry from which a secret was removed before it was saved.
+hv-history-redacted = redacted
+hv-history-redacted-line = A password or secret was removed before this was saved.
+hv-history-pin = Pin
+hv-history-unpin = Unpin
+# The pin glyph's tooltip on a pinned row.
+hv-history-pinned = Pinned: never removed by retention
+hv-history-insert = Insert
+hv-history-insert-run = Insert and run
+hv-history-copy = Copy SQL
+hv-history-open-new = Open in new console
+hv-history-empty = No history yet. Statements you run are kept here for 90 days.
+# Variables:
+#   $q (String) - what the user searched for, e.g. "faturalar".
+hv-history-nomatch = Nothing matches “{ $q }”.
+# Variables:
+#   $n (Number) - how many times the same statement ran, e.g. 4.
+hv-history-ran = { $n ->
+        [one] Ran once
+       *[other] Ran { $n } times
+    }
+# Which console Insert and Insert and run go into (always shown; fix round 1).
+# Variables:
+#   $name (String) - that console's title, e.g. "orders-dev" or "orders-dev (2)".
+hv-history-target = Goes into the console { $name }; Run checks it there.
+# A row's time, in the regional format.
+# Variables:
+#   $t (DateTime) - when the statement last started, e.g. 2026-11-16T14:32:08.
+hv-history-time = { DATETIME($t, timeStyle: "medium") }
+# A day group's date, in the regional format (days before yesterday).
+# Variables:
+#   $t (DateTime) - a moment of that day, e.g. 2026-11-14.
+hv-history-day = { DATETIME($t, dateStyle: "medium") }
+# The entry's connection was deleted since.
+hv-history-conn-gone = Deleted connection
+# The history store could not answer (closed or damaged).
+hv-history-failed = The history can't be read right now.
+# Fix round 1: an entry with masked values (or one cut at the size limit) never runs as stored.
+hv-history-masked-line = Masked values: fill them in before running.
+hv-history-truncated-line = This statement was cut at 64 KiB when it was saved; it can't run as it is.
+# The header's subtitle when the search shows its most entries (there may be more).
+# Variables:
+#   $n (Number) - the entries the list shows, e.g. 200.
+hv-history-count-capped = { $n }+ entries
+# Toasts when an action did nothing.
+hv-history-console-gone = The console to insert into is closed.
+hv-history-insert-refused = The statement couldn't be inserted: the editor is read-only, composing text, or would get too large.
+hv-history-pin-failed = The pin couldn't be changed.
+hv-history-open-failed = The new console didn't open in time; nothing was inserted.
