@@ -588,3 +588,120 @@ the catalog read is a `hacivat-exec` Docker test, P-M3b-13), `bench-sql` and `fe
 - **`sql-testkit`** no longer depends on `sql-safety`. It reaches `sql-oracle-pg` only through
   its `differential` feature, so the lexer's plain test loop builds neither libpg_query nor
   `sqlparser`.
+
+## m3b-t03 — identifiers and function data
+
+**Names resolve as the server resolves them, ASCII only.** `sql_ident::fold` lowers unquoted
+ASCII letters on PostgreSQL (and the PG-wire dialects) and truncates every identifier to 63
+bytes at a character boundary, as `downcase_truncate_identifier` does; MySQL, MariaDB and SQLite
+keep the text and `ident_eq` compares it ASCII-case-insensitively. No locale casing anywhere:
+`PG_READ_FİLE` folds to `pg_read_fİle`, never to `pg_read_file`. `parse_qualified` splits on
+dots outside quotes (`"…"` on PostgreSQL, backticks on MySQL/MariaDB, `"…"`/backticks/`[…]` on
+SQLite; doubled quotes undone; whitespace around a dot allowed). Anything else (an empty part,
+an unterminated quote, an operator character, PostgreSQL's `U&"…"`) is `None`, which callers
+treat as unknown. Rejected: Unicode case folding (the Turkish-i lookalike would match a denied or
+allowed builtin).
+
+**`lookup_fn`: deny by bare name first, allow only exact builtins.**
+- A call whose last name part, ASCII-lowercased, is on the dialect's `deny.toml` is
+  `Denied(group)` in any schema, quoting or server version (`alg/13` SAFE-03 step 2: a user
+  function named like a denied builtin is denied too). Dialects without data (Generic, SQL
+  Server, ClickHouse, Oracle) read every engine's deny list; PG-wire servers read PostgreSQL's.
+- A call is `Allowed` only when it names a builtin the way the server would resolve it:
+  unqualified, or `pg_catalog.`-qualified on PostgreSQL, folded; on MySQL, MariaDB and SQLite
+  unqualified and unquoted, ASCII-case-insensitively. The row must be `reviewed = true` and its
+  version gate (`since` inclusive, `until` exclusive) must hold. **An unknown server version
+  allows only ungated rows**: a builtin missing from that server could be a user function of the
+  same name. Everything else is `Unknown`, including every call on a dialect without reviewed
+  data. Arity is not read (every overload of a name shares its row).
+- `operator_known` and `cast_known` count only reviewed rows with no version gate. Casts drop
+  type modifiers and (PostgreSQL) array brackets, collapse whitespace, lower ASCII letters and
+  strip a `pg_catalog.` qualifier; another qualifier is unknown.
+- `set_allowed` is P-M3b-6's list exactly (`data/<engine>/set_allow.toml`), whole names ASCII
+  case-insensitive; SQLite and every other dialect allow no `SET`. MariaDB has no
+  `max_execution_time` (it calls it `max_statement_time`); the PO list keeps the MySQL name, so
+  that `SET` is simply refused there (the safe side).
+
+**Where the rows come from (P-M3b-13).** `hacivat-exec/tests/gen_fn_catalog.rs`
+(`#[ignore = "docker"]`, `HACIVAT_GEN_FN_CATALOG=1`, through the wrapper on `--set full`) reads
+`pg_proc`, `pg_operator` and `pg_type` of `pg_catalog` (OID < 16384) on PostgreSQL 14–18 with
+read-only queries, `pragma_function_list` of the bundled SQLite, and prepares `SELECT <name>()`
+for each name of the hand-curated `data/mysql/manual-index.txt` on MySQL 8.0/8.4 and MariaDB
+10.6/10.11/11.4 (prepare only, nothing runs; 1305/1630 mean "no such function"; never
+`mysql.help_*`, GPL content). It writes candidates, all `reviewed = false`, and the reasons for
+every name it leaves out, to the Docker artifacts; it never edits `data/`. A PostgreSQL function
+is a candidate when every overload is a function, aggregate or window function, `IMMUTABLE` or
+`STABLE`, in `internal` or `sql`, not `SECURITY DEFINER`, not denied and not one whose text is
+SQL or a server path; an operator when no implementation is volatile or denied; a type when it
+is a base, domain, enum, range or multirange type outside the array category with a non-volatile
+input function. A name on a non-contiguous run of lines, or a candidate on one line and not on
+another, is left out.
+
+**The review.** Every candidate row was read by name and flipped by hand. Counts at this
+commit: PostgreSQL 2,462 function candidates (2,423 reviewed, 39 left unreviewed) plus 21 hand
+rows, 74 operators, 80 types plus 20 SQL-standard spellings; MySQL 367 names (361 reviewed);
+MariaDB 387 (382 reviewed); SQLite 110 (107 reviewed). Operators and cast targets of MySQL,
+MariaDB and SQLite are hand rows. Left unreviewed (so `Unknown`, which the read-only profiles
+deny):
+- information disclosure (`alg/13` INFO_DISCLOSURE has no deny group): `current_setting`,
+  `version`, `inet_server_addr`/`_port`, `pg_show_all_settings`, `pg_config`,
+  `pg_tablespace_location`, `pg_tablespace_databases`, `pg_stat_get_activity`,
+  `pg_stat_get_backend_*`, `pg_stat_get_progress_info`, `pg_stat_get_wal_senders`,
+  `pg_stat_get_wal_receiver`, `pg_stat_get_subscription`; MySQL/MariaDB `VERSION`,
+  `ROLES_GRAPHML`;
+- hidden reads of a relation named by a value: `table_to_xml`, `table_to_xmlschema`,
+  `table_to_xml_and_xmlschema`;
+- a type's input run for a type named by value (a domain's CHECK can call a user function):
+  `pg_input_is_valid`, `pg_input_error_info`, `domain_in`, `record_in`, `array_in`, `range_in`,
+  `multirange_in`;
+- the language validators (`fmgr_c_validator` loads a shared library) and their two siblings;
+- session state or server files: MySQL/MariaDB `LAST_INSERT_ID` (with an argument it sets the
+  session value), MariaDB `BINLOG_GTID_POS`, `DES_ENCRYPT`, `DES_DECRYPT`;
+- resource and host callbacks on SQLite: `randomblob`, `zeroblob`, `sqlite_log`;
+- MySQL keywords the probe answered with a syntax error but that are no functions in 8.x:
+  `CONTAINS`, `PASSWORD`, `SRID`.
+
+**Hand rows, `source = "manual"` (P-M3b-18).** Volatile or stable in `pg_proc`, so the generator
+never proposes them, but pure for a read: `random`, `clock_timestamp`, `gen_random_uuid`, `now`,
+`timeofday`, `random_normal` (16+), `array_shuffle` and `array_sample` (16+), `uuidv4` and
+`uuidv7` (18+); `timezone` (`AT TIME ZONE` parses to it; volatile only because `timetz` reads
+today's date); the size reads `pg_relation_size`, `pg_table_size`, `pg_indexes_size`,
+`pg_total_relation_size`, `pg_database_size`, `pg_tablespace_size`; `pg_partition_tree` and
+`pg_partition_ancestors`; the `TABLESAMPLE` methods `system` and `bernoulli` (their handlers take
+`internal`, so SQL cannot call them). The deny lists and the harmless-`SET` lists are hand rows
+too: PostgreSQL's covers the `alg/13` catalogue and all 27 names of
+`hacivat_guard::PG_NON_TRANSACTIONAL_FUNCTIONS` (Task 18 tests the equality); MySQL/MariaDB
+`SLEEP`, `BENCHMARK`, `LOAD_FILE`, the lock functions, the source-position waits, `sys_exec`/
+`sys_eval`, and MariaDB's `NEXTVAL`/`SETVAL`/`LASTVAL` (one rule with Task 10's pre-scan,
+P-M3b-8); SQLite `load_extension`, `readfile`, `writefile`, `edit`, `fts3_tokenizer` (the
+guard's authorizer list).
+
+**Residual risks, covered by the server (L3–L6) and the catalog (M4).**
+- An unqualified PostgreSQL call is assumed to reach `pg_catalog` first. A `search_path` that
+  names a writable schema before `pg_catalog` can shadow an allowed builtin with a user function
+  of the same signature; `search_path` is on P-M3b-6's harmless list. Task 9/14 should pin
+  `pg_catalog` first or treat such a `SET` as changing resolution.
+- A builtin operator symbol is known for all its overloads: a user operator of the same symbol
+  over user types is not seen without the catalog.
+- Implicit calls (domain CHECKs, column defaults, views) are not assessed without the catalog
+  (`alg/13` SAFE-03 step 6).
+- MariaDB answered "no such function" for the zero-argument probe of `POINT`, `LINESTRING`,
+  `POLYGON` and the `MULTI…` constructors, so those calls are `Unknown` there (too strict, not
+  too lax).
+
+**Fail closed.** A data file that does not parse loads as empty (every lookup `Unknown`/`false`;
+`compiled_tables_parse` keeps that from shipping); a deny row denies whatever its review state;
+a denied name is removed from the allow map whatever `allow.toml` says.
+
+**Freshness (R1-M3).** `data/functions.digest` holds `xxh3-64:<16 hex>`: XXH3-64, seed 0, over
+the 21 files of `DIGEST_FILES` in order (`pg`, `mysql` with `manual-index.txt`, `mariadb`,
+`sqlite`; each `allow`, `deny`, `operators`, `types`, `set_allow`), each as its path, `\n`, its
+byte length, `\n` and its bytes with CRLF read as LF. `sql-safety` and `xtask gen-fn-catalog`
+each implement it (xtask takes no SQL crate); xtask's test compares its list with the one
+between the `digest-files` markers of `functions/data.rs`, and both crates pin the same known
+answer. `cargo xtask gen-fn-catalog --check` exits 1 on a stale digest and `--write` refreshes
+it; `cargo test --workspace` runs both freshness tests.
+
+**Tests.** `sql-ident/tests/fold.rs`; `sql-safety/tests/functions.rs` and
+`tests/set_allow.rs`; the unit tests of `functions/{mod,data}.rs`; `xtask` `gen_fn_catalog`
+tests; the candidate rules of `hacivat-exec/tests/gen_fn_catalog.rs` run without Docker.

@@ -1,1 +1,10 @@
-# owner: Task 3 (SAFE-03 data; sqlite). Empty until Task 3 fills it.
+# SAFE-03 deny list (sqlite; `alg/13` SAFE-03 deny catalogue). Hand rows, reviewed.
+# A call whose last name part, ASCII-lowercased, is listed here is denied in any schema,
+# quoting or server version. Owner: M3b Task 3.
+rows = [
+  { name = "load_extension", source = "manual", reviewed = true, group = "FileIo" },
+  { name = "readfile", source = "manual", reviewed = true, group = "FileIo" },
+  { name = "writefile", source = "manual", reviewed = true, group = "FileIo" },
+  { name = "edit", source = "manual", reviewed = true, group = "ProcessExec" },
+  { name = "fts3_tokenizer", source = "manual", reviewed = true, group = "ProcessExec" },
+]

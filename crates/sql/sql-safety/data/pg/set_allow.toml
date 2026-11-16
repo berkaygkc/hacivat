@@ -1,1 +1,13 @@
-# owner: Task 3 (SAFE-03 data; pg). Empty until Task 3 fills it.
+# Harmless `SET` variables a read-only session may run (pg; P-M3b-6, the PO list).
+# Exact names, ASCII-case-insensitive. Owner: M3b Task 3.
+rows = [
+  { name = "search_path", source = "manual", reviewed = true },
+  { name = "statement_timeout", source = "manual", reviewed = true },
+  { name = "lock_timeout", source = "manual", reviewed = true },
+  { name = "work_mem", source = "manual", reviewed = true },
+  { name = "DateStyle", source = "manual", reviewed = true },
+  { name = "IntervalStyle", source = "manual", reviewed = true },
+  { name = "TimeZone", source = "manual", reviewed = true },
+  { name = "extra_float_digits", source = "manual", reviewed = true },
+  { name = "application_name", source = "manual", reviewed = true },
+]
