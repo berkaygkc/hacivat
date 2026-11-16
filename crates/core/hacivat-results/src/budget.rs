@@ -1,15 +1,17 @@
 //! `MemoryBudget` (Task 7): the global budget shared by every result and the per-result cap
-//! (R-M3-19, R-M3-33). No eviction in M3a.
+//! (R-M3-19, R-M3-33). Eviction of background results since M3b Task 8 (`evict.rs`).
 //!
 //! Accounting is exact: a chunk charges its bytes when the writer appends it and gives them
-//! back when its last holder drops it (the writer, the store and every snapshot that still
-//! shows it), so `used` is always the bytes of the chunks some reader can still reach.
+//! back when its last holder drops it (the store's tail and every snapshot that still shows
+//! it), so `used` is always the bytes of the chunks some reader can still reach.
 //! Admission (`ResultWriter::admit`) reads `used` without reserving: two results admitted at
 //! the same moment may each append one chunk past the budget, never more.
 
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::evict::EvictionRegistry;
 
 /// The per-result cap: 256 MiB (R-M3-19).
 pub const PER_RESULT_CAP: u64 = 256 << 20;
@@ -19,6 +21,10 @@ pub struct MemoryBudget {
     global: u64,
     per_result: u64,
     used: AtomicU64,
+    // ## m3b-t08-store
+    /// Every result on this budget, held weakly with its visibility (`ResultStore::new`
+    /// registers it).
+    registry: Arc<EvictionRegistry>,
 }
 
 impl fmt::Debug for MemoryBudget {
@@ -38,6 +44,7 @@ impl MemoryBudget {
             global,
             per_result,
             used: AtomicU64::new(0),
+            registry: EvictionRegistry::new(),
         })
     }
 
@@ -68,10 +75,18 @@ impl MemoryBudget {
     /// through the `EvictionRegistry`). Answers the bytes released from the budget once the
     /// evicted chunks drop (a snapshot still holding them delays it).
     ///
-    /// STUB until Task 8: evicts nothing, `0`.
+    // ## m3b-t08-store
+    /// The answer counts the bytes that left [`used`](Self::used) during the call: a chunk a
+    /// held snapshot still shows leaves it when that snapshot drops, and is not counted, so
+    /// eviction goes on to the next result. Only results whose run has ended are taken (the
+    /// rules are on `EvictionRegistry`). `need == 0` evicts nothing.
     pub fn evict_for(&self, need: u64) -> u64 {
-        let _ = need;
-        0
+        self.registry.evict_for(need)
+    }
+
+    /// The registry the budget's results join.
+    pub(crate) fn registry(&self) -> &Arc<EvictionRegistry> {
+        &self.registry
     }
 
     /// A chunk of `bytes` joined a result.

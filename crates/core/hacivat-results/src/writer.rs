@@ -4,17 +4,24 @@
 //! Each publish clones the chunk list and the chunk starts into new `Arc` slices (O(chunks):
 //! about 250 `Arc` clones for 1M rows), so a published snapshot never changes and a held one
 //! keeps exactly the chunks it showed. Consumers coalesce changes through the store's `watch`.
+//!
+//! ## m3b-t08-store
+//! The rows the writer builds from live in the store's tail (`store.rs`), shared with
+//! eviction: `admit` evicts background results before it answers `Pause(GlobalBudget)`
+//! (R-M3-68, P-M3b-29), and once eviction has cut this writer's result, its later appends and
+//! states are dropped (an evicted result never reads as anything else). Eviction takes only
+//! results whose run has ended, so a live run never meets this.
 
 use std::fmt;
 use std::iter;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use hacivat_values::{Chunk, ResultSchema};
+use hacivat_values::Chunk;
 
 use crate::budget::MemoryBudget;
 use crate::cursor::{CloseReason, Completeness};
-use crate::snapshot::{StoreSnapshot, StoredChunk};
+use crate::snapshot::StoredChunk;
 use crate::store::{ResultId, ResultStore};
 
 /// Why a writer must pause before its next chunk (R-M3-33).
@@ -56,14 +63,6 @@ pub struct ResultWriter {
     id: ResultId,
     store: Arc<ResultStore>,
     budget: Arc<MemoryBudget>,
-    schema: Arc<ResultSchema>,
-    generation: u64,
-    version: u64,
-    chunks: Arc<[Arc<StoredChunk>]>,
-    starts: Arc<[u64]>,
-    rows: u64,
-    bytes: u64,
-    completeness: Completeness,
     /// The last `admit`'s answer ([`Admission::encode`]); an atomic so `admit` takes `&self`
     /// and the writer stays `Sync`.
     last_admission: AtomicU8,
@@ -73,36 +72,25 @@ pub struct ResultWriter {
 
 impl fmt::Debug for ResultWriter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let tail = self.store.tail();
         f.debug_struct("ResultWriter")
             .field("id", &self.id)
-            .field("generation", &self.generation)
-            .field("version", &self.version)
-            .field("rows", &self.rows)
-            .field("bytes", &self.bytes)
-            .field("completeness", &self.completeness)
+            .field("generation", &tail.generation)
+            .field("version", &tail.version)
+            .field("rows", &tail.rows)
+            .field("bytes", &tail.bytes)
+            .field("completeness", &tail.completeness)
             .finish_non_exhaustive()
     }
 }
 
 impl ResultWriter {
-    /// The writer of `store`, which has just published `first`.
-    pub(crate) fn new(
-        store: Arc<ResultStore>,
-        budget: Arc<MemoryBudget>,
-        first: &StoreSnapshot,
-    ) -> ResultWriter {
+    /// The writer of `store`, which has just published its first snapshot.
+    pub(crate) fn new(store: Arc<ResultStore>, budget: Arc<MemoryBudget>) -> ResultWriter {
         ResultWriter {
             id: store.id(),
             store,
             budget,
-            schema: first.schema().clone(),
-            generation: first.generation(),
-            version: first.version(),
-            chunks: first.chunks.clone(),
-            starts: first.starts.clone(),
-            rows: first.row_count(),
-            bytes: first.bytes(),
-            completeness: *first.completeness(),
             last_admission: AtomicU8::new(Admission::Ok.encode()),
             armed: true,
         }
@@ -123,71 +111,91 @@ impl ResultWriter {
     /// result's cap (256 MiB, or the global budget once raised) it answers
     /// `Pause(ResultCap)`, past the global budget `Pause(GlobalBudget)`. A chunk that lands
     /// exactly on a limit fits. The answer is kept for the next publish (`paused`).
+    ///
+    /// Past the global budget it first asks the budget to evict background results for the
+    /// shortfall (R-M3-68), and pauses only when that did not make room.
     pub fn admit(&self, next_chunk_estimate: u64) -> Admission {
         let raised = self.store.cap_raised();
-        let answer = if !raised
-            && self.bytes.saturating_add(next_chunk_estimate) > self.budget.per_result()
-        {
-            Admission::Pause(PauseReason::ResultCap)
-        } else if self.budget.used().saturating_add(next_chunk_estimate) > self.budget.global() {
-            Admission::Pause(PauseReason::GlobalBudget)
-        } else {
-            Admission::Ok
-        };
+        let bytes = self.store.tail().bytes;
+        let answer =
+            if !raised && bytes.saturating_add(next_chunk_estimate) > self.budget.per_result() {
+                Admission::Pause(PauseReason::ResultCap)
+            } else if self.over_global(next_chunk_estimate) {
+                // ## m3b-t08-store
+                let need = self
+                    .budget
+                    .used()
+                    .saturating_add(next_chunk_estimate)
+                    .saturating_sub(self.budget.global());
+                self.budget.evict_for(need);
+                if self.over_global(next_chunk_estimate) {
+                    Admission::Pause(PauseReason::GlobalBudget)
+                } else {
+                    Admission::Ok
+                }
+            } else {
+                Admission::Ok
+            };
         self.last_admission
             .store(answer.encode(), Ordering::Relaxed);
         answer
     }
 
+    /// Whether a chunk of `bytes` would pass the global budget now.
+    fn over_global(&self, bytes: u64) -> bool {
+        self.budget.used().saturating_add(bytes) > self.budget.global()
+    }
+
     /// Appends `chunk` (charging its bytes to the budget) and publishes. A chunk of no rows
-    /// adds nothing, but the call still publishes.
+    /// adds nothing, but the call still publishes. After an eviction the chunk is dropped
+    /// uncharged and nothing is published.
     pub fn append(&mut self, chunk: Chunk) {
+        let mut tail = self.store.tail();
+        if tail.evicted {
+            return;
+        }
         let rows = u64::from(chunk.rows());
         if rows > 0 {
             let stored = Arc::new(StoredChunk::charge(chunk, &self.budget));
-            self.bytes += stored.chunk.bytes();
-            self.chunks = self
+            tail.bytes += stored.chunk.bytes();
+            tail.chunks = tail
                 .chunks
                 .iter()
                 .cloned()
                 .chain(iter::once(stored))
                 .collect();
-            self.starts = self
+            let start = tail.rows;
+            tail.starts = tail
                 .starts
                 .iter()
                 .copied()
-                .chain(iter::once(self.rows))
+                .chain(iter::once(start))
                 .collect();
-            self.rows += rows;
+            tail.rows += rows;
         }
-        self.publish();
+        let paused = self.paused(&tail.completeness);
+        self.store.publish(&mut tail, paused);
     }
 
-    /// Sets the completeness and publishes.
+    /// Sets the completeness and publishes (nothing after an eviction).
     pub fn set_state(&mut self, c: Completeness) {
-        self.completeness = c;
-        self.publish();
+        let mut tail = self.store.tail();
+        if tail.evicted {
+            return;
+        }
+        tail.completeness = c;
+        let paused = self.paused(&c);
+        self.store.publish(&mut tail, paused);
     }
 
-    fn publish(&mut self) {
-        self.version += 1;
-        let paused = match self.completeness {
+    /// The pause a snapshot in state `c` reports: the last `admit`'s, while `Suspended`.
+    fn paused(&self, c: &Completeness) -> Option<PauseReason> {
+        match c {
             Completeness::Suspended(_) => {
                 Admission::pause_of(self.last_admission.load(Ordering::Relaxed))
             }
             _ => None,
-        };
-        self.store.publish(StoreSnapshot {
-            generation: self.generation,
-            version: self.version,
-            schema: self.schema.clone(),
-            chunks: self.chunks.clone(),
-            starts: self.starts.clone(),
-            row_count: self.rows,
-            bytes: self.bytes,
-            completeness: self.completeness,
-            paused,
-        });
+        }
     }
 }
 
@@ -200,16 +208,20 @@ impl ResultWriter {
 /// unwind cannot turn into an abort.
 impl Drop for ResultWriter {
     fn drop(&mut self) {
-        if self.armed
+        if !self.armed {
+            return;
+        }
+        let mut tail = self.store.tail();
+        if !tail.evicted
             && matches!(
-                self.completeness,
+                tail.completeness,
                 Completeness::Streaming | Completeness::Suspended(_)
             )
         {
-            self.completeness = Completeness::Closed {
+            tail.completeness = Completeness::Closed {
                 reason: CloseReason::Cancelled,
             };
-            self.publish();
+            self.store.publish(&mut tail, None);
         }
     }
 }

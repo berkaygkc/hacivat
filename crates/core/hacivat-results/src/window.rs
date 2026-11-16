@@ -75,3 +75,26 @@ impl FetchPolicy {
         })
     }
 }
+
+// ## m3b-t08-store
+/// The smallest cell cap a console takes: 64 KiB, the low end of `results.max_value_bytes`
+/// (`ValueLimit::MIN`, R-M3-82).
+pub const MIN_CELL_CAP: u32 = 64 << 10;
+
+/// The largest cell cap a console takes: 64 MiB, the high end of `results.max_value_bytes`
+/// (`ValueLimit::MAX`) and the cap of the value viewer's "Re-run with a 64 MiB value limit"
+/// (R-M3-82).
+pub const MAX_CELL_CAP: u32 = 64 << 20;
+
+impl FetchPolicy {
+    /// This policy with `bytes` as the most kept of one cell (`results.max_value_bytes`, which
+    /// the app passes in Task 25; or [`MAX_CELL_CAP`] for the value viewer's one re-run),
+    /// clamped to [`MIN_CELL_CAP`]`..=`[`MAX_CELL_CAP`]. Longer values keep that prefix and
+    /// their total length (HV-RES-08); the drivers apply it (M3b Task 7).
+    pub fn with_cell_cap(self, bytes: u32) -> Self {
+        FetchPolicy {
+            cell_cap: bytes.clamp(MIN_CELL_CAP, MAX_CELL_CAP),
+            ..self
+        }
+    }
+}
