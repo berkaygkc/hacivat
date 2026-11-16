@@ -27,7 +27,22 @@
 //! - **Commands** ([`register_commands`]): `results.copy`, `results.fetch_more`,
 //!   `results.fetch_all`, `results.close_cursor`, `results.rerun`, and every `grid.*` id of
 //!   `hacivat_ui_grid::GRID_COMMANDS`, dispatched to the focused grid (else the shown one).
+//!
+//! ## m3b-t25-results (design/m3b-safe surface 10)
+//! - **The tab strip** shows each tab's title (`ConsoleResults::title_with_source`), its pin
+//!   and its untyped note; a right press opens the tab menu (`pin.rs`). The strip is measured
+//!   each frame: when its tabs would not fit, it takes its short form (NOTES ruling 30).
+//! - **The log is read incrementally** (`LogRows::take_new`): a change costs its new lines; the
+//!   strip facts of each tab merge what the new lines say. ↑/↓ and Enter work on the log while
+//!   it has the focus (`output_view.rs`).
+//! - **Fetch all** (the strip's, `results.fetch_all`) asks first when the count says the rows
+//!   would pass the result's memory limit ([`fetch_all_or_ask`]).
+//! - **A copy past the rows a result kept** (after `Closed { Evicted }`) is refused with a
+//!   notice, never clamped.
+//! - **The toolbar's `+`** follows the strip (ledger 342): a result whose further sets were
+//!   drained (`Truncated(FollowingResultSets)`) has all its rows, so no `+`.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
@@ -35,7 +50,7 @@ use std::sync::Arc;
 
 use hacivat_exec::{LogLine, LogMsg, SessionLog, TabKey, copy_invariant};
 use hacivat_l10n::{Count, ExactDecimal, Text, ids};
-use hacivat_results::{Completeness, PauseReason, StoreSnapshot};
+use hacivat_results::{Completeness, PauseReason, StoreSnapshot, TruncReason};
 use hacivat_session::session::UnitId;
 use hacivat_ui::actions::{ActionDef, ActionRegistry};
 use hacivat_ui::popover::Declare as _;
@@ -59,8 +74,12 @@ use crate::results::adapter::GridAdapter;
 use crate::results::copy;
 use crate::results::output_view::{LOG_ROW_PX, LogRows};
 use crate::results::strip::{self, StripActions, StripFacts, StripModel};
-use crate::results::tabs::{ActiveResult, ConsoleResults, MemoryBanner, ResultEntry, result_title};
-use crate::results::toolbar::{self, OnActivate, TabsModel, WIDE_RESULT_COLUMNS};
+use crate::results::tabs::{
+    ActiveResult, ConsoleResults, CountState, MemoryBanner, ResultEntry, result_title,
+};
+use crate::results::toolbar::{
+    self, OnActivate, OnTabMenu, SHORT_TITLE_PX, TITLE_PX, TabFacts, TabsModel, WIDE_RESULT_COLUMNS,
+};
 use crate::shell::Workspace;
 // ## m3a-f5-demo
 use crate::shell::register_focus_context;
@@ -101,9 +120,15 @@ struct ConsoleTile {
     grids: Vec<GridSlot>,
     // ## m3a-t30 fix round 1 (I2): the strip's facts per tab, kept when the log is cleared or
     // its ring drops the lines they came from; reset when the tab shows another unit.
-    facts: HashMap<TabKey, (UnitId, StripFacts)>,
-    /// The newest log line seen (I5: a line of a run without a tab shows Output).
-    seen_seq: Option<u64>,
+    // ## m3b-t25-results: keyed by the tab's key and unit (a pinned tab shares its key).
+    facts: HashMap<(TabKey, UnitId), StripFacts>,
+    // ## m3b-t25-results
+    /// The log list's focus (↑/↓ and Enter select and follow its lines).
+    log_focus: FocusHandle,
+    /// The tab strip's width in the last frame (its short form follows it).
+    strip_width: Rc<Cell<Option<f32>>>,
+    /// Where each result tab was painted (its menu opens under it).
+    tab_bounds: TabBounds,
     _observe: Subscription,
     _events: Subscription,
     _log: Task<()>,
@@ -153,7 +178,7 @@ pub fn hosts(cx: &App) -> Vec<Entity<ResultsHost>> {
 
 /// The console the focused pane shows, with its results: the workspace's active tab when it is
 /// a registered console that has results.
-fn console_in(window: &Window, cx: &App) -> Option<(ConsoleId, Entity<ConsoleResults>)> {
+pub(crate) fn console_in(window: &Window, cx: &App) -> Option<(ConsoleId, Entity<ConsoleResults>)> {
     let ws = window.root::<Workspace>().flatten()?;
     let tab = ws.read(cx).active_tab()?;
     let id = Consoles::by_tab(cx, tab)?;
@@ -194,9 +219,13 @@ fn grid_config(number: u32, adapter: &Rc<GridAdapter>) -> GridConfig {
 /// decimals (`hv-status-duration-*`). The snapshot is the frame's one load of the tab (M10).
 fn rows_timing(entry: &ResultEntry, snapshot: &StoreSnapshot, cx: &App) -> SharedString {
     let rows = Count(snapshot.row_count());
+    // ## m3b-t25-results (ledger 342): the strip's count is the one source: a result whose
+    // further sets were drained has every row of its own, so no `+`.
     let more = matches!(
         snapshot.completeness(),
-        Completeness::Streaming | Completeness::Suspended(_) | Completeness::Truncated(_)
+        Completeness::Streaming
+            | Completeness::Suspended(_)
+            | Completeness::Truncated(TruncReason::ResultCap)
     );
     let duration = match entry.timing() {
         (None, None) => None,
@@ -290,6 +319,21 @@ impl ResultsHost {
         tile.grid(tile.results.read(cx), ix)
     }
 
+    // ## m3b-t25-results
+    /// Where `console`'s result tab `ix` was last painted.
+    pub fn tab_bounds(
+        &self,
+        console: ConsoleId,
+        ix: usize,
+    ) -> Option<hacivat_ui_core::gpui_surface::Bounds<hacivat_ui_core::gpui_surface::Pixels>> {
+        self.tiles
+            .get(&console)?
+            .tab_bounds
+            .borrow()
+            .get(&ix)
+            .copied()
+    }
+
     /// `console`'s output list, once the tile has shown the console.
     pub fn log_list(&self, console: ConsoleId) -> Option<Entity<VirtualList<LogRows>>> {
         self.tiles.get(&console).map(|t| t.list.clone())
@@ -314,6 +358,11 @@ impl ResultsHost {
         let mut rows = LogRows::new(console, results.downgrade());
         rows.set_lines(log.lines());
         let list = cx.new(|_| VirtualList::new(rows, LOG_ROW_PX));
+        // ## m3b-t25-results: a click on a row selects it and focuses the log.
+        let log_focus = cx.focus_handle();
+        let weak_list = list.downgrade();
+        let focus = log_focus.clone();
+        list.update(cx, |l, cx| l.rows_mut(cx).attach(weak_list, focus));
         // The newest line, then following new ones.
         list.update(cx, |l, cx| l.scroll_to_end(cx));
         let mut changes = log.changes();
@@ -323,7 +372,6 @@ impl ResultsHost {
         let events = cx.subscribe_in(results, window, |_, _, event: &ResultsEvent, window, cx| {
             crate::exec_ui::handle_results_event(event, window, cx);
         });
-        let seen_seq = log.lines().last().map(|l| l.seq);
         let task = cx.spawn(async move |this, cx| {
             while changes.changed().await.is_ok() {
                 if this
@@ -343,7 +391,9 @@ impl ResultsHost {
                 ran,
                 grids: Vec::new(),
                 facts: HashMap::new(),
-                seen_seq,
+                log_focus,
+                strip_width: Rc::new(Cell::new(None)),
+                tab_bounds: TabBounds::default(),
                 _observe: observe,
                 _events: events,
                 _log: task,
@@ -351,30 +401,30 @@ impl ResultsHost {
         );
     }
 
-    /// `console`'s log changed: the list takes its lines; the tabs' strip facts take what the
-    /// new lines say; a line while another tab is active marks Output unread; a line of a run
-    /// that opened no tab shows Output (I5).
+    /// `console`'s log changed: the list takes its new lines (## m3b-t25-results: only those,
+    /// `LogRows::take_new`); the tabs' strip facts take what the new lines say; a line while
+    /// another tab is active marks Output unread; a line of a run that opened no tab shows
+    /// Output (I5).
     fn on_log(&mut self, console: ConsoleId, cx: &mut Context<Self>) {
         let Some(tile) = self.tiles.get_mut(&console) else {
             return;
         };
         tile.ran = true;
-        let lines = tile.log.lines();
-        let fresh: Vec<&LogLine> = lines
+        let log = tile.log.clone();
+        let new = tile.list.update(cx, |l, cx| l.rows_mut(cx).take_new(&log));
+        let fresh: Vec<&LogLine> = new
             .iter()
-            .filter(|l| tile.seen_seq.is_none_or(|seen| l.seq > seen))
             .filter(|l| !matches!(l.msg, LogMsg::Dropped { .. }))
             .collect();
-        if let Some(last) = lines.last() {
-            tile.seen_seq = Some(tile.seen_seq.map_or(last.seq, |s| s.max(last.seq)));
-        }
         let results = tile.results.read(cx);
+        let rows = tile.list.read(cx).rows();
         for entry in results.tabs() {
-            let found = StripFacts::from_log(&lines, entry.unit());
-            match tile.facts.get_mut(&entry.key()) {
-                Some((unit, facts)) if *unit == entry.unit() => facts.merge(found),
-                _ => {
-                    tile.facts.insert(entry.key(), (entry.unit(), found));
+            let key = (entry.key(), entry.unit());
+            match tile.facts.get_mut(&key) {
+                Some(facts) => facts.merge(StripFacts::from_lines(new.iter(), entry.unit())),
+                None => {
+                    let facts = StripFacts::from_lines(rows.iter_lines(), entry.unit());
+                    tile.facts.insert(key, facts);
                 }
             }
         }
@@ -403,8 +453,6 @@ impl ResultsHost {
             })
         });
         let added = !fresh.is_empty();
-        tile.list
-            .update(cx, |l, cx| l.rows_mut(cx).set_lines(lines));
         if show_output {
             tile.results
                 .update(cx, |r, cx| r.set_active(ActiveResult::Output, cx));
@@ -425,11 +473,12 @@ impl ResultsHost {
         let Some(tile) = self.tiles.get_mut(&console) else {
             return StripFacts::default();
         };
-        match tile.facts.get(&entry_key) {
-            Some((u, facts)) if *u == unit => *facts,
-            _ => {
-                let facts = StripFacts::from_log(tile.list.read(cx).rows().lines(), unit);
-                tile.facts.insert(entry_key, (unit, facts));
+        // ## m3b-t25-results: keyed by key and unit.
+        match tile.facts.get(&(entry_key, unit)) {
+            Some(facts) => *facts,
+            None => {
+                let facts = StripFacts::from_lines(tile.list.read(cx).rows().iter_lines(), unit);
+                tile.facts.insert((entry_key, unit), facts);
                 facts
             }
         }
@@ -475,6 +524,13 @@ impl ResultsHost {
                     .tabs()
                     .iter()
                     .any(|t| Rc::ptr_eq(t.adapter(), &slot.adapter))
+            });
+            // ## m3b-t25-results: the facts of tabs that are gone go with them.
+            tile.facts.retain(|(key, unit), _| {
+                results
+                    .tabs()
+                    .iter()
+                    .any(|t| t.key() == *key && t.unit() == *unit)
             });
         }
     }
@@ -527,6 +583,13 @@ impl ResultsHost {
                 headers,
                 generation,
             } => {
+                // ## m3b-t25-results: a selection past the rows the result keeps (it was
+                // closed to free memory) copies nothing, and says so; never a clamped copy.
+                let kept = copied.snapshot().row_count();
+                if region.rows.iter().any(|r| r.end > kept) {
+                    copy_past_kept_rows(cx);
+                    return;
+                }
                 copy::copy_region(&copied, region.clone(), *headers, *generation, cx).detach();
             }
             GridEvent::CopyRefused(refusal) => copy::copy_refused(*refusal, cx),
@@ -575,12 +638,23 @@ impl ResultsHost {
         let c = theme.tokens.colors;
         let tile = self.tiles.get(&console)?;
         let results = tile.results.clone();
-        let (active, unread, titles) = {
+        // ## m3b-t25-results: each tab's title, its source, pin and untyped note.
+        let (active, unread, titles, facts) = {
             let r = results.read(cx);
-            let titles = (0..r.tabs().len())
-                .filter_map(|ix| r.title(ix, cx))
-                .collect::<Vec<_>>();
-            (r.active(), r.unread_output(), titles)
+            let mut titles = Vec::with_capacity(r.tabs().len());
+            let mut facts = Vec::with_capacity(r.tabs().len());
+            for (ix, entry) in r.tabs().iter().enumerate() {
+                let Some((title, source)) = r.title_with_source(ix, cx) else {
+                    continue;
+                };
+                titles.push(title);
+                facts.push(TabFacts {
+                    data_title: source == hacivat_ui::text::TextSource::Data,
+                    pinned: entry.pinned(),
+                    untyped: entry.untyped(),
+                });
+            }
+            (r.active(), r.unread_output(), titles, facts)
         };
         let env = Consoles::get(cx, console)
             .and_then(|s| s.profile)
@@ -590,16 +664,53 @@ impl ResultsHost {
         let on_activate: OnActivate = Rc::new(move |a, _, cx| {
             let _ = weak.update(cx, |r, cx| r.set_active(a, cx));
         });
+        // ## m3b-t25-results: the short form when last frame's strip could not hold the tabs.
+        let strip_width = tile.strip_width.clone();
+        let short = strip_width
+            .get()
+            .is_some_and(|w| strip_need(&titles, &facts, env.is_some(), window, cx) > w);
+        let on_menu: OnTabMenu = Rc::new(move |ix, at, window, cx| {
+            super::pin::open_tab_menu(console, ix, at, window, cx);
+        });
+        let bounds = tile.tab_bounds.clone();
+        bounds.borrow_mut().clear();
+        let on_bounds: toolbar::OnTabBounds = Rc::new(move |ix, b| {
+            bounds.borrow_mut().insert(ix, b);
+        });
         let strip_tabs = toolbar::tab_strip(
             &TabsModel {
                 active,
                 unread,
                 results: titles,
                 env,
+                facts,
+                short,
             },
             on_activate,
+            Some(on_menu),
+            Some(on_bounds),
             cx,
         );
+        let measured = strip_width.clone();
+        let strip_tabs = div()
+            .relative()
+            .w_full()
+            .flex_none()
+            .child(strip_tabs)
+            .child(
+                hacivat_ui_core::gpui_surface::canvas(
+                    move |b, window, _| {
+                        let w = f32::from(b.size.width);
+                        if measured.get() != Some(w) {
+                            measured.set(Some(w));
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
         let mut column = div()
             .id("results-tile")
             // ## m3b-t01b-seams (P-M3b-21): the `Results` key context's root.
@@ -615,14 +726,18 @@ impl ResultsHost {
                 let tile = self.tiles.get(&console)?;
                 let list = tile.list.clone();
                 let log = tile.log.clone();
-                let lines_empty = list.read(cx).rows().lines().is_empty();
+                let lines_empty = list.read(cx).rows().is_empty();
+                // ## m3b-t25-results: ↑/↓ and Enter on the focused log.
+                let log_focus = tile.log_focus.clone();
+                let keys = list.downgrade();
+                let emit = results.downgrade();
                 let shown = list.clone();
                 let ends = list.clone();
                 column = column
                     .child(toolbar::output_toolbar(
                         Rc::new(move |_, _| log.clear()),
                         Rc::new(move |_, cx| {
-                            let text = copy_invariant(shown.read(cx).rows().lines());
+                            let text = copy_invariant(&shown.read(cx).rows().lines());
                             cx.write_to_clipboard(ClipboardItem::new_string(text));
                         }),
                         Rc::new(move |_, cx| ends.update(cx, |l, cx| l.scroll_to_end(cx))),
@@ -631,6 +746,12 @@ impl ResultsHost {
                     .child(
                         div()
                             .id("results-log")
+                            .debug_selector(|| "results-log".to_string())
+                            // ## m3b-t25-results: element-level keys (no keymap rows).
+                            .track_focus(&log_focus)
+                            .on_key_down(move |event, window, cx| {
+                                on_log_key(&keys, &emit, event, window, cx);
+                            })
                             .declare(
                                 Role::List,
                                 tr(cx, ids::hv::RESULTS_LOG_LABEL, hacivat_l10n::NoArgs),
@@ -665,6 +786,8 @@ impl ResultsHost {
                 let rows = rows_timing(entry, &snapshot, cx);
                 let unit_ordinal = entry.key().unit_ordinal;
                 let copy_grid = grid.downgrade();
+                // ## m3b-t25-results: Σ Count rows after Copy.
+                let count = super::count::toolbar_items(console, ix, entry.count(), cx);
                 column = column.child(toolbar::result_toolbar(
                     rows,
                     Rc::new(move |window, cx| {
@@ -672,10 +795,15 @@ impl ResultsHost {
                             g.dispatch(GridCommand::Copy { headers: false }, window, cx)
                         });
                     }),
+                    count,
                     cx,
                 ));
                 if columns > WIDE_RESULT_COLUMNS {
                     column = column.child(toolbar::columns_hint(columns, cx));
+                }
+                // ## m3b-t25-results: the result-set limit (R-M3-66).
+                if let Some((total, limit)) = facts.set_limit {
+                    column = column.child(toolbar::set_limit_row(limit, total - limit, cx));
                 }
                 let mut style = StyleRefinement::default();
                 style.size.width = Some(hacivat_ui_core::gpui_surface::relative(1.0).into());
@@ -707,9 +835,10 @@ fn strip_actions(
     unit_ordinal: u32,
     adapter: Rc<GridAdapter>,
 ) -> StripActions {
-    let (a, b, d) = (adapter.clone(), adapter.clone(), adapter);
+    let (a, b) = (adapter.clone(), adapter);
     let raise = results.downgrade();
     let emit = results.downgrade();
+    let ask = results.downgrade();
     StripActions {
         // The reason follows the state (`StoreSource::close_cursor`): `MemoryLimit` on the
         // banner, `UserClosed` otherwise.
@@ -718,7 +847,12 @@ fn strip_actions(
             let source = b.source();
             source.ensure_rows(source.snapshot().row_count());
         }),
-        fetch_all: Rc::new(move |_, _| d.source().fetch_all()),
+        // ## m3b-t25-results: asks first when the rows would pass the memory limit.
+        fetch_all: Rc::new(move |window, cx| {
+            if let Some(results) = ask.upgrade() {
+                fetch_all_or_ask(&results, ix, window, cx);
+            }
+        }),
         // Only through `ConsoleResults::raise_cap` (ledger T26 note).
         fetch_anyway: Rc::new(move |_, cx| {
             let _ = raise.update(cx, |r, cx| r.raise_cap(ix, cx));
@@ -732,6 +866,231 @@ fn strip_actions(
             });
         }),
     }
+}
+
+// ## m3b-t25-results
+
+/// Where each result tab of a console was painted, by index.
+type TabBounds = Rc<
+    std::cell::RefCell<
+        HashMap<
+            usize,
+            hacivat_ui_core::gpui_surface::Bounds<hacivat_ui_core::gpui_surface::Pixels>,
+        >,
+    >,
+>;
+
+/// About the tab menu's width: its anchor stays this far from the window's right edge.
+const TAB_MENU_PX: f32 = 280.0;
+
+/// Opens the menu of console `console`'s result tab `ix` under the tab (where the tile last
+/// painted it; at the pointer before it was ever painted).
+pub fn open_tab_menu_for(console: ConsoleId, ix: usize, window: &mut Window, cx: &mut App) {
+    let at = hosts(cx)
+        .into_iter()
+        .find_map(|h| h.read(cx).tab_bounds(console, ix))
+        .map_or_else(
+            || window.mouse_position(),
+            |b| {
+                let at = b.bottom_left();
+                // Kept inside the window (a tab near its right edge).
+                let room =
+                    window.viewport_size().width - hacivat_ui_core::gpui_surface::px(TAB_MENU_PX);
+                hacivat_ui_core::gpui_surface::point(
+                    at.x.min(room),
+                    at.y + hacivat_ui_core::gpui_surface::px(4.0),
+                )
+            },
+        );
+    super::pin::open_tab_menu(console, ix, at, window, cx);
+}
+
+/// A copy whose selection reaches past the rows the result keeps: nothing is copied and a
+/// notice says why (the Task 8 carry: never a clamped copy).
+fn copy_past_kept_rows(cx: &mut App) {
+    let mut toast = hacivat_ui::toast::Toast::new(
+        hacivat_ui::toast::ToastKind::Info,
+        crate::l10n_global::text_fn(ids::hv::RESULTS_COPY_EVICTED),
+    );
+    toast.wide = true;
+    toast.icon = Some(hacivat_ui::icon::IconName::CircleAlert);
+    hacivat_ui::toast::ToastQueue::push(cx, toast);
+}
+
+/// ↑/↓ move the log's selected line, Enter goes to its statement (element-level keys while the
+/// log has the focus; nothing with a modifier).
+fn on_log_key(
+    list: &WeakEntity<VirtualList<LogRows>>,
+    results: &WeakEntity<ConsoleResults>,
+    event: &hacivat_ui_core::gpui_surface::KeyDownEvent,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let _ = window;
+    let ks = &event.keystroke;
+    if ks.modifiers.modified() {
+        return;
+    }
+    let Some(list) = list.upgrade() else {
+        return;
+    };
+    match ks.key.as_str() {
+        "up" | "down" => {
+            let down = ks.key == "down";
+            list.update(cx, |l, cx| {
+                if let Some(row) = l.rows_mut(cx).step(down) {
+                    l.scroll_into_view(row, cx);
+                }
+            });
+            cx.stop_propagation();
+        }
+        "enter" => {
+            let event = list.read(cx).rows().go_to_selected();
+            if let Some(event) = event {
+                let _ = results.update(cx, |_, cx| cx.emit(event));
+            }
+            cx.stop_propagation();
+        }
+        _ => {}
+    }
+}
+
+/// The laid-out width of `text` in `style`.
+fn text_px(window: &Window, text: &SharedString, style: hacivat_ui_core::theme::TypeStyle) -> f32 {
+    let run = hacivat_ui_core::gpui_surface::TextRun {
+        len: text.len(),
+        font: hacivat_ui_core::fonts::font_for(&style),
+        color: hacivat_ui_core::gpui_surface::Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    f32::from(
+        window
+            .text_system()
+            .shape_line(
+                text.clone(),
+                hacivat_ui_core::gpui_surface::px(style.size_px),
+                &[run],
+                None,
+            )
+            .width,
+    )
+}
+
+/// The width the tab strip needs for `titles` in their full form (Output first; each tab's
+/// padding, glyph and gaps; its title up to [`TITLE_PX`]; its pin, untyped note and swatch).
+fn strip_need(
+    titles: &[SharedString],
+    facts: &[TabFacts],
+    env: bool,
+    window: &Window,
+    cx: &App,
+) -> f32 {
+    const TAB_CHROME_PX: f32 = 24.0 + 12.0 + 7.0 + 1.0;
+    let style = Theme::get(cx).tokens.type_ramp.body;
+    let output = tr(cx, ids::hv::RESULTS_OUTPUT, hacivat_l10n::NoArgs);
+    let untyped = tr(cx, ids::hv::RESULTS_UNTYPED, hacivat_l10n::NoArgs);
+    let mut need = TAB_CHROME_PX + text_px(window, &output, style) + 13.0;
+    for (ix, title) in titles.iter().enumerate() {
+        let f = facts.get(ix).copied().unwrap_or_default();
+        need += TAB_CHROME_PX + text_px(window, title, style).min(TITLE_PX);
+        if f.pinned {
+            need += 7.0 + 12.0;
+        }
+        if f.untyped {
+            need += 7.0 + text_px(window, &untyped, style);
+        }
+        if env {
+            need += 14.0 + SHORT_TITLE_PX / 2.0;
+        }
+    }
+    need
+}
+
+/// Fetch all on tab `ix` of `results`: at once, unless its exact count says the rows would
+/// pass the result's memory limit (R-M3-68); then the question first, whose "Fetch up to the
+/// memory limit" fetches until the limit pauses the result and keeps its cursor open.
+pub fn fetch_all_or_ask(
+    results: &Entity<ConsoleResults>,
+    ix: usize,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(entry) = results.read(cx).tab(ix) else {
+        return;
+    };
+    let source = entry.source();
+    if !fetch_all_passes_cap(entry) {
+        source.fetch_all();
+        return;
+    }
+    let Some(ws) = window.root::<Workspace>().flatten() else {
+        return;
+    };
+    let size = crate::results::adapter::Texts::of(cx).size(hacivat_results::budget::PER_RESULT_CAP);
+    let button = |label, kind| hacivat_ui::dialog::DialogButton {
+        label,
+        kind,
+        accesskey: None,
+        english_accesskey: None,
+    };
+    let spec = hacivat_ui::dialog::DialogSpec {
+        title: crate::l10n_global::text_fn(ids::hv::FETCHALL_TITLE),
+        body: Rc::new(move |cx: &App| {
+            tr(
+                cx,
+                ids::hv::FETCHALL_BODY,
+                ids::hv::HvFetchallBody {
+                    size: Text(size.clone()),
+                },
+            )
+        }),
+        buttons: vec![
+            button(
+                crate::l10n_global::text_fn(ids::hv::FETCHALL_CANCEL),
+                hacivat_ui::button::ButtonKind::Default,
+            ),
+            button(
+                crate::l10n_global::text_fn(ids::hv::FETCHALL_OK),
+                hacivat_ui::button::ButtonKind::Primary,
+            ),
+        ],
+        cancel: 0,
+        // The bounded fetch is the safe choice: it has the focus (NOTES surface 10).
+        primary: 1,
+        size: hacivat_ui::dialog::DialogSize::Wide,
+    };
+    let dialog = ws.update(cx, |ws, cx| ws.open_dialog(spec, window, cx));
+    cx.subscribe(
+        &dialog,
+        move |_, event: &hacivat_ui::dialog::DialogEvent, _| {
+            if *event == hacivat_ui::dialog::DialogEvent::Pressed(1) {
+                source.fetch_all();
+            }
+        },
+    )
+    .detach();
+}
+
+/// Whether fetching all of `entry`'s rows would pass its result's memory limit: its exact
+/// count, at the bytes per row it holds so far, is over the per-result cap (never once "Fetch
+/// more anyway" raised the cap, nor while nothing is known of the total).
+pub fn fetch_all_passes_cap(entry: &ResultEntry) -> bool {
+    let CountState::Exact(total) = entry.count() else {
+        return false;
+    };
+    let source = entry.source();
+    if source.cap_raised() {
+        return false;
+    }
+    let snapshot = source.snapshot();
+    let (rows, bytes) = (snapshot.row_count(), snapshot.bytes());
+    if rows == 0 || total <= rows {
+        return false;
+    }
+    let projected = u128::from(bytes) * u128::from(total) / u128::from(rows);
+    projected > u128::from(hacivat_results::budget::PER_RESULT_CAP)
 }
 
 // ## m3b-t01b-seams
@@ -828,7 +1187,7 @@ pub fn grid_title(id: &str) -> Option<&'static str> {
 
 /// The console the shown tile follows, with its results (the first window's tile: the
 /// `enabled` checks get no window).
-fn shown_results(cx: &App) -> Option<(ConsoleId, Entity<ConsoleResults>)> {
+pub(crate) fn shown_results(cx: &App) -> Option<(ConsoleId, Entity<ConsoleResults>)> {
     hosts(cx).into_iter().find_map(|h| {
         let console = h.read(cx).shown?;
         Some((console, Consoles::get(cx, console)?.results.clone()?))
@@ -958,7 +1317,12 @@ pub fn register_commands(cx: &mut App) {
         id: "results.fetch_all",
         title_id: ids::hv::CMD_RESULTS_FETCH_ALL.id,
         context: "Workspace",
-        run: Rc::new(|window, cx| with_active_source(window, cx, |s| s.fetch_all())),
+        // ## m3b-t25-results: asks first when the rows would pass the memory limit.
+        run: Rc::new(|window, cx| {
+            if let Some((_, results, ix)) = active_entry_in(window, cx) {
+                fetch_all_or_ask(&results, ix, window, cx);
+            }
+        }),
         enabled: active_can_fetch,
     });
     let _ = reg.register(ActionDef {
@@ -1009,6 +1373,9 @@ mod fixtures {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use std::rc::Rc;
+
+    use hacivat_driver::NoticeSeverity;
     use hacivat_exec::{ErrorView, LogMsg, ResultTab, SessionLog, TabKey};
     use hacivat_proto::ProfileId;
     use hacivat_results::{
@@ -1020,7 +1387,7 @@ mod fixtures {
     use hacivat_values::{ColumnMeta, LogicalType, NativeType, ResultSchema, Value};
 
     use crate::console::{ConsoleId, ConsoleState, Consoles};
-    use crate::results::tabs::{ActiveResult, ConsoleResults};
+    use crate::results::tabs::{ActiveResult, ConsoleResults, CountState};
     use crate::shell::Workspace;
 
     /// A results-tile state for the shots (NOTES surfaces 9, 11, 12; surface 10 is the grid
@@ -1057,7 +1424,42 @@ mod fixtures {
         RunLog,
         /// "n events not shown" at the top of the log.
         EventsDropped,
+        // ## m3b-t25-results: design/m3b-safe surface 10.
+        /// Comment titles, a `(2)` repeat, `Result N`, and a long pinned title.
+        TitledTabs,
+        /// A result run as one: "untyped (run as one)".
+        Untyped,
+        /// "The first 100 result sets are shown; 37 more were read and not kept."
+        SetLimit,
+        /// Count rows while it counts: the amber marker, "Counting…", Cancel.
+        Counting,
+        /// Count rows done: "1,048,213 rows (exact)".
+        CountExact,
+        /// "Closed to free memory; the first 4,096 rows are kept." and Re-run.
+        Evicted,
+        /// The fetch-all question over a result whose count passes its memory limit.
+        FetchAll,
+        /// PostgreSQL notices and a warning, the dropped-notices line.
+        Notices,
+        /// MySQL warnings and an error whose chip shows `1792 · 25006`.
+        MysqlWarnings,
     }
+
+    /// The Task 25 states (design/m3b-safe surface 10).
+    pub const T25_SHOTS: [ResultsShot; 9] = [
+        ResultsShot::TitledTabs,
+        ResultsShot::Untyped,
+        ResultsShot::SetLimit,
+        ResultsShot::Counting,
+        ResultsShot::CountExact,
+        ResultsShot::Evicted,
+        ResultsShot::FetchAll,
+        ResultsShot::Notices,
+        ResultsShot::MysqlWarnings,
+    ];
+
+    /// A long comment title: the tab ellipsizes it, the tooltip keeps it whole.
+    const LONG_TITLE: &str = "Aylık satış raporu: bölge ve kanal kırılımıyla, iadeler hariç";
 
     /// Nobody listens: the fixtures' cursors are never fetched.
     struct Inert;
@@ -1173,7 +1575,63 @@ mod fixtures {
             server_text: Some("relation \"order_lines\" does not exist".into()),
             hint_id: None,
             doc_offset: None,
+            // ## m3b-t25-results (named exception)
+            vendor_code: None,
         }
+    }
+
+    // ## m3b-t25-results
+
+    /// Result set `set` of unit `ordinal`, titled `title` by the run service.
+    fn titled(ordinal: u32, set: u32, title: &str, store: Arc<ResultStore>) -> ResultTab {
+        ResultTab {
+            key: TabKey {
+                console: 0,
+                unit_ordinal: ordinal,
+                result_ordinal: set,
+            },
+            title: title.into(),
+            unit: unit(ordinal),
+            source: StoreSource::new(store, Arc::new(Inert), FetchPolicy::default()),
+        }
+    }
+
+    /// The orders columns as a result run as one sends them: text of no known native type.
+    fn untyped() -> Arc<ResultSchema> {
+        let (schema, _) = orders(0);
+        Arc::new(ResultSchema {
+            columns: schema
+                .columns
+                .iter()
+                .map(|c| ColumnMeta {
+                    name: c.name.clone(),
+                    logical: text(),
+                    native: NativeType::Unknown,
+                    origin: None,
+                })
+                .collect(),
+        })
+    }
+
+    /// `rows` as the server's text.
+    fn as_text(rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+        rows.into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|v| match v {
+                        Value::Int(n) => Value::Text(n.to_string().into()),
+                        Value::Bool(b) => Value::Text(if b { "t" } else { "f" }.into()),
+                        Value::Uuid(u) => Value::Text(
+                            u.iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<String>()
+                                .into(),
+                        ),
+                        other => other,
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     /// Opens a console tab bound to `profile` in the focused pane, active, and fills its
@@ -1298,11 +1756,145 @@ mod fixtures {
                     line(LogMsg::Completed { ms }, None);
                 }
             }
+            // ## m3b-t25-results: design/m3b-safe surface 10.
+            ResultsShot::TitledTabs => {
+                tabs.push(titled(
+                    1,
+                    0,
+                    "Şehre göre ciro",
+                    store(40, Completeness::Complete),
+                ));
+                tabs.push(titled(
+                    1,
+                    1,
+                    "Şehre göre ciro (2)",
+                    store(6, Completeness::Complete),
+                ));
+                tabs.push(titled(2, 0, "Result 2", store(3, Completeness::Complete)));
+                tabs.push(titled(3, 0, LONG_TITLE, store(12, Completeness::Complete)));
+            }
+            ResultsShot::Untyped => {
+                let (_, rows) = orders(40);
+                tabs.push(tab(
+                    1,
+                    ResultStore::from_rows(untyped(), as_text(rows), Completeness::Complete),
+                ));
+            }
+            ResultsShot::SetLimit => {
+                line(
+                    LogMsg::ResultSetLimit {
+                        total: 137,
+                        limit: 100,
+                    },
+                    Some(1),
+                );
+                tabs.push(tab(1, store(40, Completeness::Complete)));
+            }
+            ResultsShot::Counting | ResultsShot::CountExact => {
+                tabs.push(tab(1, store(500, Completeness::Suspended(cursor()))));
+            }
+            ResultsShot::Evicted => {
+                tabs.push(tab(
+                    1,
+                    store(
+                        4_096,
+                        Completeness::Closed {
+                            reason: CloseReason::Evicted,
+                        },
+                    ),
+                ));
+            }
+            ResultsShot::FetchAll => {
+                tabs.push(tab(1, store(500, Completeness::Suspended(cursor()))));
+            }
+            ResultsShot::Notices => {
+                let notice = |severity, code: Option<&str>, text: &str| LogMsg::Notice {
+                    severity,
+                    code: code.map(Arc::from),
+                    text: Arc::from(text),
+                };
+                line(
+                    notice(
+                        NoticeSeverity::Notice,
+                        Some("00000"),
+                        "relation \"siparişler_arşiv\" already exists, skipping",
+                    ),
+                    Some(1),
+                );
+                line(
+                    notice(
+                        NoticeSeverity::Warning,
+                        Some("01000"),
+                        "there is no transaction in progress",
+                    ),
+                    Some(1),
+                );
+                line(
+                    notice(NoticeSeverity::Info, None, "vacuuming \"public.orders\""),
+                    Some(1),
+                );
+                line(LogMsg::NoticesDropped { n: 97 }, Some(1));
+                line(LogMsg::Completed { ms: 41 }, Some(1));
+            }
+            ResultsShot::MysqlWarnings => {
+                line(
+                    LogMsg::Notice {
+                        severity: NoticeSeverity::Warning,
+                        code: Some(Arc::from("1292")),
+                        text: Arc::from("Truncated incorrect DOUBLE value: 'İzmir'"),
+                    },
+                    Some(1),
+                );
+                line(
+                    LogMsg::Notice {
+                        severity: NoticeSeverity::Notice,
+                        code: Some(Arc::from("1051")),
+                        text: Arc::from("Unknown table 'shop.siparis_tmp'"),
+                    },
+                    Some(1),
+                );
+                log.append(
+                    LogMsg::Error {
+                        n: 2,
+                        view: ErrorView {
+                            title_id: "exec-error-server",
+                            code: Some("25006".into()),
+                            server_text: Some(
+                                "Cannot execute statement in a READ ONLY transaction.".into(),
+                            ),
+                            hint_id: None,
+                            doc_offset: None,
+                            vendor_code: Some("1792".into()),
+                        },
+                    },
+                    Some(0..10),
+                    Some(unit(2)),
+                );
+            }
         }
         if !tabs.is_empty() {
             results.update(cx, |r, cx| {
                 r.apply(&tabs, cx);
             });
+        }
+        // ## m3b-t25-results
+        match shot {
+            ResultsShot::TitledTabs => {
+                results.update(cx, |r, cx| r.set_pinned(3, true, cx));
+            }
+            ResultsShot::Counting => {
+                results.update(cx, |r, cx| r.start_count(0, Rc::new(|| {}), cx));
+            }
+            ResultsShot::CountExact => {
+                results.update(cx, |r, cx| r.set_count(0, CountState::Exact(1_048_213), cx));
+            }
+            ResultsShot::FetchAll => {
+                results.update(cx, |r, cx| {
+                    r.set_count(0, CountState::Exact(40_000_000), cx)
+                });
+                super::fetch_all_or_ask(&results, 0, window, cx);
+            }
+            _ => {}
         }
         if shot == ResultsShot::TwoResults {
             line(LogMsg::Completed { ms: 4 }, None);

@@ -12,6 +12,15 @@
 //!   info row of prose (it wraps), outside the toolbar so the Overflow Rule never hides it.
 //!
 //! No M3b or M6 affordance (sort, find, Export, Edit) is offered here.
+//!
+//! ## m3b-t25-results (design/m3b-safe surface 10)
+//! - **Tab titles** are data when they are a statement's comment: at most 190 px, ellipsized
+//!   with the whole title in the tooltip (120 px in a short strip, NOTES ruling 30). A pinned
+//!   tab adds the 12 px pin glyph (`text-2`, tooltip `hv-results-tab-pinned`); an untyped
+//!   result (run as one) adds "untyped (run as one)" in `text-2` (its short form "untyped" in a
+//!   short strip), the tooltip saying why. A right press on a result tab opens its menu.
+//! - **The result toolbar** adds Σ Count rows after Copy (`count.rs`).
+//! - **The result-set limit** (R-M3-66) is an info row under the toolbar, as the column hint.
 
 use std::rc::Rc;
 
@@ -20,12 +29,13 @@ use hacivat_proto::EnvTag;
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::capsule::env_swatch;
 use hacivat_ui::icon::{Icon, IconName, IconSize};
-use hacivat_ui::popover::Declare as _;
+use hacivat_ui::popover::{Declare as _, Tip};
 use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui::toolbar::{Toolbar, ToolbarItem};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, ElementId, InteractiveElement, IntoElement, MouseButton, ParentElement, Role,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, App, Bounds, ElementId, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, Pixels, Point, Role, SharedString, StatefulInteractiveElement, Styled, Window,
+    canvas, div, px,
 };
 use hacivat_ui_core::theme::Theme;
 
@@ -45,13 +55,48 @@ pub struct TabsModel {
     pub results: Vec<SharedString>,
     /// The environment of the console's connection.
     pub env: Option<EnvTag>,
+    // ## m3b-t25-results
+    /// Each result tab's M3b facts, in the order of `results` (missing: none of them).
+    pub facts: Vec<TabFacts>,
+    /// The strip is short: the untyped note takes its short form and titles ellipsize at
+    /// [`SHORT_TITLE_PX`] (NOTES ruling 30).
+    pub short: bool,
 }
+
+// ## m3b-t25-results
+
+/// The widest a result tab's title is drawn (data; the whole title is its tooltip).
+pub const TITLE_PX: f32 = 190.0;
+/// [`TITLE_PX`] in a short strip.
+pub const SHORT_TITLE_PX: f32 = 120.0;
+
+/// What a result tab shows beside its title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TabFacts {
+    /// The title is data (a statement's comment), not a Fluent message.
+    pub data_title: bool,
+    pub pinned: bool,
+    /// The result came untyped (run as one).
+    pub untyped: bool,
+}
+
+/// What a right press on result tab `ix` does (at the pointer).
+pub type OnTabMenu = Rc<dyn Fn(usize, Point<Pixels>, &mut Window, &mut App)>;
+
+/// Told where result tab `ix` is painted (its menu opens under it from the keyboard and the shots).
+pub type OnTabBounds = Rc<dyn Fn(usize, Bounds<Pixels>)>;
 
 /// What a click on a tab does.
 pub type OnActivate = Rc<dyn Fn(ActiveResult, &mut Window, &mut App)>;
 
 /// The result tab strip.
-pub fn tab_strip(model: &TabsModel, on_activate: OnActivate, cx: &App) -> AnyElement {
+pub fn tab_strip(
+    model: &TabsModel,
+    on_activate: OnActivate,
+    on_menu: Option<OnTabMenu>,
+    on_bounds: Option<OnTabBounds>,
+    cx: &App,
+) -> AnyElement {
     let theme = Theme::get(cx);
     let t = theme.tokens;
     let c = t.colors;
@@ -81,6 +126,10 @@ pub fn tab_strip(model: &TabsModel, on_activate: OnActivate, cx: &App) -> AnyEle
             env: None,
             env_id: None,
             target: ActiveResult::Output,
+            facts: None,
+            short: model.short,
+            on_menu: None,
+            on_bounds: None,
         },
         on_activate.clone(),
         cx,
@@ -111,6 +160,13 @@ pub fn tab_strip(model: &TabsModel, on_activate: OnActivate, cx: &App) -> AnyEle
                 env,
                 env_id: Some(format!("results-tab-env-{ix}").into()),
                 target: ActiveResult::Tab(ix),
+                // ## m3b-t25-results
+                facts: Some(model.facts.get(ix).copied().unwrap_or_default()),
+                short: model.short,
+                on_menu: on_menu.clone(),
+                on_bounds: on_bounds
+                    .clone()
+                    .map(|f| -> Rc<dyn Fn(Bounds<Pixels>)> { Rc::new(move |b| f(ix, b)) }),
             },
             on_activate.clone(),
             cx,
@@ -130,6 +186,12 @@ struct TabSpec {
     env: Option<(EnvTag, Option<SharedString>)>,
     env_id: Option<SharedString>,
     target: ActiveResult,
+    // ## m3b-t25-results
+    /// A result tab's facts (`None`: the Output tab).
+    facts: Option<TabFacts>,
+    short: bool,
+    on_menu: Option<OnTabMenu>,
+    on_bounds: Option<Rc<dyn Fn(Bounds<Pixels>)>>,
 }
 
 fn tab(spec: TabSpec, on_activate: OnActivate, cx: &App) -> AnyElement {
@@ -153,11 +215,77 @@ fn tab(spec: TabSpec, on_activate: OnActivate, cx: &App) -> AnyElement {
         .border_r_1()
         .border_color(c.seam.to_hsla())
         .cursor_pointer()
-        .child(Icon::new(spec.icon).size(IconSize::Chrome).color(ink))
-        .child(
+        .child(Icon::new(spec.icon).size(IconSize::Chrome).color(ink));
+    // ## m3b-t25-results: a result tab gives way before the strip clips it: its title
+    // ellipsizes further (the whole stays in the tooltip).
+    if spec.facts.is_some() {
+        el = el.flex_shrink(1.0).min_w(px(0.0));
+    }
+    // ## m3b-t25-results: a result tab's title is capped and ellipsized (the whole in its
+    // tooltip); its pin glyph and untyped note follow it.
+    el = match spec.facts {
+        None => el.child(
             Label::new(spec.title, TextSource::Fluent, t.type_ramp.body, ink)
                 .id(ElementId::Name(spec.label_id)),
-        );
+        ),
+        Some(facts) => {
+            let source = if facts.data_title {
+                TextSource::Data
+            } else {
+                TextSource::Fluent
+            };
+            let cap = if spec.short { SHORT_TITLE_PX } else { TITLE_PX };
+            el.child(
+                div().min_w(px(0.0)).max_w(px(cap)).child(
+                    Label::new(spec.title, source, t.type_ramp.body, ink)
+                        .truncate(true)
+                        .id(ElementId::Name(spec.label_id)),
+                ),
+            )
+        }
+    };
+    if let Some(facts) = spec.facts {
+        if facts.pinned {
+            let tip = tr(cx, ids::hv::RESULTS_TAB_PINNED, NoArgs);
+            let pin = format!("{}-pin", spec.selector);
+            el = el.child(
+                div()
+                    .id(ElementId::Name(pin.clone().into()))
+                    .debug_selector(move || pin)
+                    .flex_none()
+                    .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+                    .child(
+                        Icon::new(IconName::Pin)
+                            .size(IconSize::Chrome)
+                            .color(c.text_2.to_hsla()),
+                    ),
+            );
+        }
+        if facts.untyped {
+            let text = if spec.short {
+                tr(cx, ids::hv::RESULTS_UNTYPED_SHORT, NoArgs)
+            } else {
+                tr(cx, ids::hv::RESULTS_UNTYPED, NoArgs)
+            };
+            let id = format!("{}-untyped", spec.selector);
+            let tip = tr(cx, ids::hv::RESULTS_UNTYPED_TIP, NoArgs);
+            el = el.child(
+                div()
+                    .id(ElementId::Name(format!("{id}-tip").into()))
+                    .flex_none()
+                    .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+                    .child(
+                        Label::new(
+                            text,
+                            TextSource::Fluent,
+                            t.type_ramp.body,
+                            c.text_2.to_hsla(),
+                        )
+                        .id(ElementId::Name(id.into())),
+                    ),
+            );
+        }
+    }
     if spec.active {
         el = el.bg(c.raised.to_hsla());
     } else {
@@ -191,6 +319,23 @@ fn tab(spec: TabSpec, on_activate: OnActivate, cx: &App) -> AnyElement {
                 .rounded_full()
                 .bg(c.text_2.to_hsla()),
         );
+    }
+    // ## m3b-t25-results: where the tab is painted.
+    if let Some(record) = spec.on_bounds {
+        el = el.relative().child(
+            canvas(move |b, _, _| record(b), |_, _, _, _| {})
+                .absolute()
+                .size_full(),
+        );
+    }
+    // ## m3b-t25-results: a right press opens a result tab's menu.
+    if let (Some(on_menu), ActiveResult::Tab(ix)) = (spec.on_menu, target) {
+        el = el.on_mouse_down(MouseButton::Right, move |event, window, cx| {
+            cx.stop_propagation();
+            let at = event.position;
+            let on_menu = on_menu.clone();
+            window.defer(cx, move |window, cx| on_menu(ix, at, window, cx));
+        });
     }
     el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, cx| on_activate(target, window, cx))
@@ -232,35 +377,43 @@ fn tool_button(
 }
 
 /// The toolbar of a result tab: Copy, and `rows` (the rows and their time) on the right.
-pub fn result_toolbar(rows: SharedString, copy: Action, cx: &App) -> AnyElement {
+/// ## m3b-t25-results: `extra` (Count rows) follows Copy.
+pub fn result_toolbar(
+    rows: SharedString,
+    copy: Action,
+    extra: Vec<ToolbarItem>,
+    cx: &App,
+) -> AnyElement {
     let label: TextFn = {
         let rows = rows.clone();
         Rc::new(move |_| rows.clone())
     };
-    Toolbar::new("results-toolbar")
-        .item(tool_button(
-            "results-copy",
-            IconName::Copy,
-            ids::hv::RESULTS_COPY,
-            2,
-            copy,
-            cx,
-        ))
-        .trailing(ToolbarItem::pinned(
-            Rc::new(move |_, cx| {
-                let t = Theme::get(cx).tokens;
-                Label::new(
-                    rows.clone(),
-                    TextSource::Fluent,
-                    t.type_ramp.mono_kbd,
-                    t.colors.text_2.to_hsla(),
-                )
-                .id("results-rows-timing")
-                .into_any_element()
-            }),
-            label,
-        ))
-        .into_any_element()
+    let mut bar = Toolbar::new("results-toolbar").item(tool_button(
+        "results-copy",
+        IconName::Copy,
+        ids::hv::RESULTS_COPY,
+        2,
+        copy,
+        cx,
+    ));
+    for item in extra {
+        bar = bar.item(item);
+    }
+    bar.trailing(ToolbarItem::pinned(
+        Rc::new(move |_, cx| {
+            let t = Theme::get(cx).tokens;
+            Label::new(
+                rows.clone(),
+                TextSource::Fluent,
+                t.type_ramp.mono_kbd,
+                t.colors.text_2.to_hsla(),
+            )
+            .id("results-rows-timing")
+            .into_any_element()
+        }),
+        label,
+    ))
+    .into_any_element()
 }
 
 /// The Output tab's toolbar: Clear, Copy, Scroll to end.
@@ -333,6 +486,54 @@ pub fn columns_hint(columns: usize, cx: &App) -> AnyElement {
                     c.text_2.to_hsla(),
                 )
                 .id("results-columns-hint"),
+            ),
+        )
+        .into_any_element()
+}
+
+// ## m3b-t25-results
+/// The info row of a statement that returned more result sets than a run keeps (R-M3-66):
+/// `kept` shown, `skipped` read and not kept.
+pub fn set_limit_row(kept: u32, skipped: u32, cx: &App) -> AnyElement {
+    let t = Theme::get(cx).tokens;
+    let c = t.colors;
+    let text = tr(
+        cx,
+        ids::hv::RESULTS_SET_LIMIT,
+        ids::hv::HvResultsSetLimit {
+            kept: Count(u64::from(kept)),
+            skipped: Count(u64::from(skipped)),
+        },
+    );
+    div()
+        .debug_selector(|| "results-set-limit".to_string())
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(8.0))
+        .w_full()
+        .flex_none()
+        .px(px(12.0))
+        .py(px(5.0))
+        .bg(c.raised.to_hsla())
+        .border_t_1()
+        .border_color(c.seam.to_hsla())
+        .child(
+            div().pt(px(2.0)).child(
+                Icon::new(IconName::Layers)
+                    .size(IconSize::Chrome)
+                    .color(c.text_2.to_hsla()),
+            ),
+        )
+        .child(
+            div().flex_1().min_w(px(0.0)).child(
+                paragraph(
+                    text,
+                    TextSource::Fluent,
+                    t.type_ramp.caption,
+                    c.text_2.to_hsla(),
+                )
+                .id("results-set-limit"),
             ),
         )
         .into_any_element()

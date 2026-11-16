@@ -2281,3 +2281,77 @@ hv-commit-close = Close
 # Fix round 1 (m8): the name to type holds a control character (a tab or a line break in a
 # quoted name), which the field can't take: the statement can't be confirmed here.
 hv-confirm-type-untypeable = This name contains a character that can't be typed or pasted, so it can't be confirmed here. Run this statement from another client.
+
+## m3b-t25-results
+
+# A result tab whose title repeats an earlier tab's (a statement's further result set, or two
+# statements under the same comment). The title is the statement's comment, as written, or
+# hv-results-result-n.
+# Variables:
+#   $title (String) - the tab's title, e.g. "orders by city".
+#   $n (Number) - which repeat this is, from 2.
+hv-results-tab-dup = { $title } ({ $n })
+# The tooltip of a pinned result tab's pin glyph.
+hv-results-tab-pinned = Pinned: the next run opens a new tab
+# The result tab menu (right-click on a result tab).
+hv-results-tab-pin = Pin tab
+hv-results-tab-unpin = Unpin tab
+hv-results-tab-close-others = Close other tabs
+# After a result tab's title: the statements ran as one, so the server sent every column as
+# text (R-M3-60).
+hv-results-untyped = untyped (run as one)
+# The short form of hv-results-untyped when the tab strip is short.
+hv-results-untyped-short = untyped
+# The tooltip of hv-results-untyped.
+hv-results-untyped-tip = Run as one sends the statements together, so the server returns every column as text. Numbers sort as text.
+# The info row under the result toolbar when a statement returned more result sets than a run
+# keeps (R-M3-66).
+# Variables:
+#   $kept (Number) - the result sets shown, e.g. 100.
+#   $skipped (Number) - the result sets read and not kept, e.g. 37.
+hv-results-set-limit = The first { $kept } result sets are shown; { $skipped } more were read and not kept.
+# The result toolbar's Count rows button (R-M3-76).
+hv-results-count = Count rows
+# The tooltip of hv-results-count.
+hv-results-count-tip = Runs SELECT COUNT(*) over this query on a separate session.
+# Beside Count rows: the count the server answered.
+# Variables:
+#   $rows (Number) - the rows the query returns, e.g. 1048213.
+hv-results-count-exact = { $rows ->
+        [one] { $rows } row (exact)
+       *[other] { $rows } rows (exact)
+    }
+# Beside Count rows while the count runs.
+hv-results-counting = Counting…
+# Stops a count that is running.
+hv-results-count-cancel = Cancel
+# Beside Count rows: why this result's query can't be counted (only one SELECT, WITH, VALUES or
+# TABLE statement without parameters or locking clauses is counted).
+hv-results-count-unavailable = This query can't be counted.
+# Beside Count rows: the read-only check refused the count statement; nothing was sent.
+hv-results-count-refused = Not counted: Hacivat could not confirm the count only reads.
+# Beside Count rows: the count ran for 30 seconds and was stopped.
+hv-results-count-timeout = Stopped after 30 seconds.
+# Beside Count rows: the server or the session failed the count.
+hv-results-count-failed = The count failed.
+# Beside Count rows: the console has no connection to count on.
+hv-results-count-offline = Not counted: the console isn't connected.
+# The cursor strip of a background result closed to free memory (R-M3-68); Re-run brings the
+# rest back.
+# Variables:
+#   $rows (Number) - the rows the result kept, e.g. 4096.
+hv-strip-evicted = { $rows ->
+        [one] Closed to free memory; the first row is kept.
+       *[other] Closed to free memory; the first { $rows } rows are kept.
+    }
+# A copy whose selection reaches past the rows a result kept after it was closed to free
+# memory: nothing was copied.
+hv-results-copy-evicted = Nothing was copied: this result was closed to free memory and keeps fewer rows than you selected. Select again, or re-run it.
+# The fetch-all question (R-M3-68): asked when fetching every row would pass the result's
+# memory limit.
+hv-fetchall-title = Fetching every row would pass this result's memory limit
+# Variables:
+#   $size (String) - the result's memory limit, e.g. "256.0 MB".
+hv-fetchall-body = The query has more rows than fit in { $size }. Hacivat can fetch up to the limit and keep the cursor open for the rest.
+hv-fetchall-ok = Fetch up to the memory limit
+hv-fetchall-cancel = Cancel

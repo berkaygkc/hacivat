@@ -270,6 +270,8 @@ fn all_log_msgs() -> Vec<LogMsg> {
         server_text: None,
         hint_id: None,
         doc_offset: None,
+        // ## m3b-t25-results (named exception)
+        vendor_code: None,
     };
     let mut all = vec![
         LogMsg::RowsRetrieved {
@@ -300,6 +302,8 @@ fn all_log_msgs() -> Vec<LogMsg> {
             server_text: None,
             hint_id: None,
             doc_offset: None,
+            // ## m3b-t25-results (named exception)
+            vendor_code: None,
         }),
     ];
     for reason in every_close_reason() {
