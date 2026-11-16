@@ -706,7 +706,7 @@ fn console_tab_open(c: &Console) -> bool {
 }
 
 fn dialog_buttons(vcx: &VisualTestContext) -> Vec<String> {
-    texts_drawn_by(vcx, "hacivat-ui/src/button.rs")
+    button_labels(vcx)
 }
 
 #[gpui::test]
@@ -784,6 +784,33 @@ fn quit_with_an_open_transaction_asks_and_cancel_keeps_the_app(cx: &mut TestAppC
         "{:?}",
         c.fake.executed()
     );
+    stop_core_runtime_test(cx);
+}
+
+/// Where access keys show (Linux, Windows) a button's label is drawn as runs around its key
+/// letter; the prompts' buttons still read whole (CI run 43779216264: macOS hides the keys, so
+/// this turns them on to check the same drawing on every platform).
+#[gpui::test]
+fn prompt_buttons_read_whole_where_access_keys_show(cx: &mut TestAppContext) {
+    let mut c = console_in_transaction(cx, false);
+    enable_registry(c.vcx);
+    close_console_tab(&c);
+    let dialog = c
+        .vcx
+        .cx
+        .read(hacivat_app::exec_ui::close_prompt::open_prompt_dialog)
+        .expect("the close prompt is open");
+    c.vcx.cx.update(|cx| {
+        dialog.update(cx, |d, cx| {
+            d.set_access_keys(true);
+            cx.notify();
+        })
+    });
+    let buttons = dialog_buttons(c.vcx);
+    for want in ["Commit and close", "Roll back and close", "Cancel"] {
+        assert!(buttons.iter().any(|b| b == want), "{want}: {buttons:?}");
+    }
+    c.keys("escape");
     stop_core_runtime_test(cx);
 }
 

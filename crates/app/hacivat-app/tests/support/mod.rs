@@ -213,6 +213,27 @@ fn texts_from(vcx: &VisualTestContext, file: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every drawn button's label, whole, in paint order. Where access keys show (Linux, Windows)
+/// a label is drawn as runs around its key letter (`""`, `"R"`, `"oll back"`); the runs share
+/// the label's ID (`#button-label-<id>`), so consecutive runs with one ID are joined. A run
+/// without an ID (a shortcut hint, a `(K)` access-key suffix) stays its own entry.
+pub fn button_labels(vcx: &VisualTestContext) -> Vec<String> {
+    let mut labels: Vec<(Option<String>, String)> = Vec::new();
+    for r in registry_frame(vcx)
+        .into_iter()
+        .filter(|r| r.path.contains("hacivat-ui/src/button.rs:"))
+    {
+        let id = r.path.split_once('#').map(|(_, id)| id.to_string());
+        match labels.last_mut() {
+            Some((Some(last), text)) if id.as_deref() == Some(last.as_str()) => {
+                text.push_str(&r.text);
+            }
+            _ => labels.push((id, r.text.to_string())),
+        }
+    }
+    labels.into_iter().map(|(_, text)| text).collect()
+}
+
 /// The text of the label with element ID `id`.
 fn text_with_id(vcx: &VisualTestContext, id: &str) -> String {
     let needle = format!("#{id}");
