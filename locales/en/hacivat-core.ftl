@@ -431,8 +431,6 @@ exec-copy-unsupported = Not sent: COPY … FROM STDIN and TO STDOUT need the cli
 # A run that never started: its session was closed or lost before anything ran. The reason
 # (an exec-error-* sentence) follows on its own row.
 exec-not-started = Nothing ran.
-# Run refused to send a selection as one statement.
-exec-run-as-one-unsupported = Not sent: Hacivat runs a selection statement by statement, and can't send it as one.
 
 # A released console cursor (R-M3-23): the reason, and, when Hacivat's own transaction around
 # it ended in a rollback, the sentence that says so (cursor-closed-rolled-back).
@@ -779,3 +777,52 @@ safety-destructive-merge-delete = The MERGE deletes rows of { $table }.
 # Variables:
 #   $table (String) - the table's name as written in the statement.
 safety-destructive-update-limit-no-order = UPDATE … LIMIT on { $table } without ORDER BY changes rows in no fixed order.
+
+## m3b-t15-gate
+
+# The exec gate (Task 15, R-M3-55): why Run sends nothing for a statement, and the extra
+# reasons a confirmation lists. Shown in the Output log and in the confirmation dialog.
+
+# The check no longer matches the text that would be sent (it changed after the check).
+exec-gate-stale-classification = Not sent: the statement changed after Hacivat checked it. Run it again.
+# The statement checker isn't available in this build.
+exec-gate-not-classified = Not sent: Hacivat couldn't check this statement.
+# A read-only connection runs reads only.
+# Variables:
+#   $class (String) - what the statement does: session, tx, lock, routine, dml, ddl, admin or unknown.
+exec-gate-read-only = { $class ->
+        [session] Not sent: this connection is read-only, and the statement changes the session's settings.
+        [tx] Not sent: this connection is read-only, and the statement controls the transaction.
+        [lock] Not sent: this connection is read-only, and the statement locks data.
+        [routine] Not sent: this connection is read-only, and the routine it calls may change data.
+        [dml] Not sent: this connection is read-only, and the statement changes data.
+        [ddl] Not sent: this connection is read-only, and the statement changes the schema.
+        [admin] Not sent: this connection is read-only, and the statement administers the server or reaches outside the database.
+       *[other] Not sent: this connection is read-only, and Hacivat can't tell what the statement does.
+    }
+# The safety policy never runs this statement on a production connection.
+exec-gate-policy-denied = Not sent: Hacivat doesn't run this statement on a production connection.
+# MySQL/MariaDB DDL while a transaction is open: the server commits that transaction first.
+exec-gate-implicit-commit = MySQL commits your open transaction before it runs this statement, so your earlier changes are committed too.
+# EXPLAIN ANALYZE runs its statement; Hacivat rolls it back, which can't undo a routine call, an
+# administrative statement or a MySQL schema change.
+exec-explain-analyze-refused = Not sent: EXPLAIN ANALYZE would run a statement that a rollback can't undo.
+# On production, a statement that may change every row of a table Hacivat couldn't name.
+exec-unsafe-no-target = Not sent: the statement may change every row, and Hacivat can't tell which table to ask you to confirm.
+# On production, one statement that may change every row of more than one table.
+exec-unsafe-several-targets = Not sent: the statement may change every row of more than one table. Run each part on its own.
+
+# Why a statement's parameters keep it from being sent (HV-EXEC-03).
+
+# A template variable such as ${name} next to the statement's parameters.
+exec-param-template-variable = Not sent: the statement holds a template variable, which can't be sent as a parameter.
+# PostgreSQL: ? is an operator unless the setting makes it a parameter.
+exec-param-question-mark-off = On PostgreSQL, ? is an operator here, not a parameter. Settings › Execution can make it a parameter.
+# A parameter inside CREATE, ALTER or DROP while the setting is off.
+exec-param-in-ddl = Not sent: parameters inside a schema change are off. Settings › Execution can turn them on.
+# :name and ? (or $1) in one statement.
+exec-param-mixed-styles = Not sent: the statement mixes parameter styles. Use one style per statement.
+# More parameters than the protocol carries.
+exec-param-too-many-binds = Not sent: the statement has more than 65,535 parameters.
+# A marker the server would read as a parameter, but Hacivat can't give it a value.
+exec-param-unbindable = Not sent: the statement holds a parameter marker Hacivat can't fill, so the server would get no value for it.

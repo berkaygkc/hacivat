@@ -534,3 +534,56 @@ wired into Run before Task 24 (R-M3-52).
     eviction with `evict::Eviction { result, kept_rows, previous }`. The call comes after the
     lock is released and the chunks are freed, on the evicting thread. Listeners must not
     block. The run service turns it into `LogMsg::Evicted` (Task 16).
+
+## m3b-t15 — gate
+
+- **Order (R-M3-55).** Per unit, the first rule that decides wins: a stale report (no report,
+  a report count that differs from the unit count, or `matches_text(final_text)` false;
+  P-M3b-2) is denied; the classifier stub's `NotImplemented` pre-decision is denied on every
+  connection (F31); a read-only connection runs only `Read`, or `Session` on the harmless-`SET`
+  list, and only when `decide(.., ReadOnlyPlusExplain, Human)` allows (R-M3-56); on
+  production `decide(.., Admin, Human)` must not deny; then the D-062 wrap; then the class row;
+  then type-to-confirm, the MySQL/MariaDB implicit commit and suppression. Production stays
+  read-only until Task 26 because its consoles are read-only connections: the gate is gated as
+  read-only first, so it unlocks nothing (R-M3-52).
+- **The production AND-check.** `decide(Admin)` is the profile whose rules R-M3-55 does not
+  contradict (`ReadWriteDml`/`Ddl` would deny what R-M3-55 runs or confirms). Its `Deny`
+  denies (its first reason is the gate's reason: a parse error, a lexical-mode change, a role
+  switch, an ambiguous boundary). Its `Confirm` on a class whose own `admin` row allows (`Read`,
+  `Lock`, `Dml`, `DmlUnsafe`, `DdlOther`, `DdlDestructive`) means it saw evidence the gate
+  class did not, so the unit becomes `Unknown` (Confirm). The request-level class, effects and
+  flags also floor the class through `gate_class` of a synthetic statement, so they never lower
+  it. Off production the AND-check does not run: R-M3-55's "everything else runs" and the
+  server decides.
+- **Type-to-confirm** comes from the destructive kinds, not the class (a `DROP` in the same
+  unit hides `DmlUnsafe`): every unsafe-DML target and every `DROP DATABASE/SCHEMA` target.
+  The name is the user's spelling (each part's bytes as written, quotes removed, never folded):
+  the pattern's range when it reads as the target, else the first dotted name in the
+  statement whose parts `ident_eq` the target's, else the classifier's spelling (PG targets
+  are server-resolved, T9 carry). A pattern without a target, or two different targets, deny
+  (`exec-unsafe-no-target`, `exec-unsafe-several-targets`): typing one name never approves
+  another table.
+- **Implicit commit.** `SessionEffects::DDL` is set for every DDL statement (temporary ones
+  included: MySQL commits before most DDL on temporary tables too) and, on MySQL/MariaDB/TiDB,
+  for privilege statements. With a transaction open as the gate sees it (any status but idle,
+  or a Manual session) the unit is `Confirm` with verdict `ImplicitCommit`, never suppressible;
+  `irreversible` is set for every such DDL on those engines.
+- **Verdicts.** `Read` only when the report reads only (`reads_only`: every statement's class
+  field, effects and gate class `Read`, none opening a write, the request-level fields agreeing);
+  `Routine` and `Unknown` are `Unknown` with every session effect but `DDL`, never `Write`.
+  R-M3-23 is ANDed through `units::suspendable_for` (`apply_read_verdicts`), the same condition
+  as the `Read` verdict: `RunUnit.suspendable = prepared.unit.suspendable && verdict == Read`.
+- **D-062.** A lone `EXPLAIN ANALYZE` whose inner class is not `Read` is wrapped; an `Unknown`
+  inner gets the wrap; `Routine`/`Admin` inners are refused, and so are DDL inners on
+  MySQL/MariaDB/TiDB (their implicit commit would end the wrapping transaction). One inside a
+  unit of several statements is refused (the rollback would undo the other statements).
+- **Suppression.** `(console, fingerprint)` for a suppressible `Confirm` or `Warn`, production
+  included (NOTES ruling 4); never with type-to-confirm or an implicit commit.
+- **Parameters.** `prepare_units` refuses the first unit with any diagnostic but the
+  informational `QuestionMarkOff`, or a placeholder without a rewrite (any unbindable
+  placeholder: nothing is sent), and a bind plan with a slot no name fills (`$2` alone). Values
+  come from the store; one prompt per distinct name of the run. `masked` masks every literal and
+  comment of a text that mentions a password (`password`, `identified`, `passwd`, `pwd=`), the
+  rest of the text after an unclean token; bind values never appear in the text.
+- **Run as one.** `RefuseReason::RunAsOne` is gone: a `Verbatim` unit resolves like any other
+  and runs as one (`protocol_for` → `Protocol::Simple`, `expect_for` → `Expect::Script`).

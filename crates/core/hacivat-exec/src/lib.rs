@@ -53,12 +53,16 @@ pub use gate::{
     CommitQuestion, ConfirmAnswer, ConfirmPort, ConfirmQuestion, ConnSafety, GateDecision,
     GateItem, GatePlan, GateReason, gate,
 };
+// ## m3b-t15-gate
+pub use gate::reads_only;
 pub use history::{
     HistoryConfig, HistoryError, HistoryHit, HistoryMeta, HistoryOrigin, HistoryQuery,
     HistoryRecord, HistoryStore, Outcome,
 };
 pub use params::{OffsetMap, ParamPrompt, ParamValueStore, Prepared, PreparedUnit, prepare_units};
+pub use params::{mask_secrets, param_diag_message_id};
 pub use suppress::SuppressSet;
+pub use units::{apply_read_verdicts, expect_for, protocol_for, suspendable_for};
 // Ruling I2 (m3b-t01c): the app takes no `sql-safety` dependency; the classifier's types it
 // builds or passes on (Task 24's `ClassifyCtx`/`Expect` for the pool, the reports it hands to
 // `gate`, the class a `GateItem` carries, the reasons a view names) come through here.

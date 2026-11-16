@@ -273,8 +273,6 @@ exec-copy-unsupported = Gönderilmedi: COPY … FROM STDIN ve TO STDOUT, istemci
 # Review: PO
 exec-not-started = Hiçbir şey çalışmadı.
 # Review: PO
-exec-run-as-one-unsupported = Gönderilmedi: Hacivat bir seçimi ifade ifade çalıştırır; tek bir ifade olarak gönderemez.
-# Review: PO
 cursor-closed-session-needed = { $rows } satırdan sonra imleç kapandı: oturum başka bir ifade için gerekiyordu.
 # Review: PO
 cursor-closed-idle-timeout = { $rows } satırdan sonra imleç kapandı: { $duration } boyunca boşta kaldı.
@@ -487,3 +485,44 @@ safety-destructive-alter-type = { $table } içindeki bir sütunun türü değiş
 safety-destructive-merge-delete = MERGE, { $table } içinden satır siler.
 # Review: PO
 safety-destructive-update-limit-no-order = { $table } üzerinde ORDER BY olmadan UPDATE … LIMIT, satırları belirsiz bir sırayla değiştirir.
+
+## m3b-t15-gate
+
+# Review: PO
+exec-gate-stale-classification = Gönderilmedi: ifade, Hacivat denetledikten sonra değişti. Yeniden çalıştırın.
+# Review: PO
+exec-gate-not-classified = Gönderilmedi: Hacivat bu ifadeyi denetleyemedi.
+# Review: PO
+exec-gate-read-only = { $class ->
+        [session] Gönderilmedi: bu bağlantı salt okunur ve ifade oturumun ayarlarını değiştiriyor.
+        [tx] Gönderilmedi: bu bağlantı salt okunur ve ifade işlemi yönetiyor.
+        [lock] Gönderilmedi: bu bağlantı salt okunur ve ifade veriyi kilitliyor.
+        [routine] Gönderilmedi: bu bağlantı salt okunur ve çağrılan yordam veriyi değiştirebilir.
+        [dml] Gönderilmedi: bu bağlantı salt okunur ve ifade veriyi değiştiriyor.
+        [ddl] Gönderilmedi: bu bağlantı salt okunur ve ifade şemayı değiştiriyor.
+        [admin] Gönderilmedi: bu bağlantı salt okunur ve ifade sunucuyu yönetiyor ya da veritabanının dışına erişiyor.
+       *[other] Gönderilmedi: bu bağlantı salt okunur ve Hacivat ifadenin ne yaptığını anlayamıyor.
+    }
+# Review: PO
+exec-gate-policy-denied = Gönderilmedi: Hacivat bu ifadeyi üretim bağlantısında çalıştırmaz.
+# Review: PO
+exec-gate-implicit-commit = MySQL bu ifadeyi çalıştırmadan önce açık işleminizi commit eder; önceki değişiklikleriniz de commit edilir.
+# Review: PO
+exec-explain-analyze-refused = Gönderilmedi: EXPLAIN ANALYZE, geri almanın düzeltemeyeceği bir ifadeyi çalıştırır.
+# Review: PO
+exec-unsafe-no-target = Gönderilmedi: ifade her satırı değiştirebilir ve Hacivat onaylamanızı isteyeceği tabloyu belirleyemiyor.
+# Review: PO
+exec-unsafe-several-targets = Gönderilmedi: ifade birden fazla tablonun her satırını değiştirebilir. Her bölümü ayrı çalıştırın.
+
+# Review: PO
+exec-param-template-variable = Gönderilmedi: ifadede parametre olarak gönderilemeyen bir şablon değişkeni var.
+# Review: PO
+exec-param-question-mark-off = PostgreSQL'de ? burada bir işleçtir, parametre değildir. Ayarlar › Çalıştırma bölümünden parametre yapılabilir.
+# Review: PO
+exec-param-in-ddl = Gönderilmedi: şema değişikliklerinde parametreler kapalı. Ayarlar › Çalıştırma bölümünden açılabilir.
+# Review: PO
+exec-param-mixed-styles = Gönderilmedi: ifade farklı parametre biçimlerini karıştırıyor. Her ifadede tek bir biçim kullanın.
+# Review: PO
+exec-param-too-many-binds = Gönderilmedi: ifadede 65.535'ten fazla parametre var.
+# Review: PO
+exec-param-unbindable = Gönderilmedi: ifadede Hacivat'ın dolduramadığı bir parametre işareti var; sunucu ona bir değer alamaz.

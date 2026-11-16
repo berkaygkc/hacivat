@@ -1,7 +1,16 @@
 // ## m3b-t01c-core-seams
 //! "Execute and don't ask again" (R-M3-55; Task 15): the `(console, fingerprint)` pairs whose
-//! calm non-production confirmation the user turned off for the app session. Never offered
-//! with type-to-confirm, never on production. Working since Task 1c (a plain set).
+//! confirmation the user turned off for the app session (never persisted). Working since Task
+//! 1c (a plain set).
+//!
+//! ## m3b-t15-gate
+//! The gate ([`crate::gate`]) consults it for a suppressible `Confirm` or `Warn` only: never
+//! for a type-to-confirm unit (the production `DmlUnsafe` and `DROP DATABASE/SCHEMA` cases) nor
+//! for a MySQL/MariaDB implicit commit, so a pair recorded off production never lowers a
+//! production confirmation that asks for a typed name. On production the dialog names the
+//! scope ("don't ask again in this console", `design/m3b-safe/NOTES.md` ruling 4). The
+//! fingerprint is the classified text's (`SafetyReport.fingerprint.hash`): a statement of the
+//! same shape.
 
 use std::collections::HashSet;
 
