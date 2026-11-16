@@ -56,7 +56,7 @@ use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::text::RenderedText;
 use hacivat_ui::toast::ToastQueue;
 use hacivat_ui_core::gpui_surface::{
-    App, Entity, EntityInputHandler as _, Focusable as _, Keystroke, SharedString, Window,
+    App, Entity, EntityInputHandler as _, Focusable as _, Keystroke, Window,
 };
 use hacivat_ui_editor::preview::{self, BandStyle};
 use hacivat_ui_editor::{EditorView, ExecMarkState, Tier};
@@ -370,12 +370,7 @@ impl M3a {
             M3a::ToolbarRunning => ("#console-running", None),
             M3a::ToolbarCancelling => ("#console-cancelling", None),
             M3a::ToolbarReadOnly => ("#console-lock-label", None),
-            // ## m3a-f2-visual: the wait's Cancel, which only the waiting state draws and which
-            // never hides; the sentence, which may move into the ⋯ menu (the Overflow Rule: a
-            // trust signal never gives way to it), is checked by `check`.
-            M3a::ToolbarWaiting | M3a::ToolbarProductionWaiting => {
-                ("#button-label-console-waiting-cancel", None)
-            }
+            M3a::ToolbarWaiting | M3a::ToolbarProductionWaiting => ("#console-waiting-text", None),
             // The status bar's transient sentence: "Nothing to run here", Describe.
             M3a::PreviewNothing | M3a::ContextDescribe => ("#status-message", None),
             // The band's hint at the end of the unit's line ("1 of 3", "2 choices", "boundary
@@ -986,11 +981,7 @@ impl M3a {
             }
             ToolbarReadOnly => toolbar().is_some_and(|t| t.read_only.is_some()),
             ToolbarWaiting | ToolbarProductionWaiting => {
-                // ## m3a-f2-visual: the sentence is drawn, or it is a row of the console
-                // toolbar's ⋯ menu, word for word (never dropped).
-                let name = if self == ToolbarWaiting { DEV } else { PROD };
                 toolbar().is_some_and(|t| t.waiting == Some((4, 4)))
-                    && waiting_readable(cx, frame, name)
             }
             PreviewSelection => {
                 band().is_some_and(|b| b.style == BandStyle::Run && b.units.len() == 3)
@@ -1029,6 +1020,13 @@ impl M3a {
                                 hacivat_app::results::CompletenessView::Suspended
                             )
                         })
+                    // ## m3a-f2-visual (fix round 1, M2): at 1280 the bar has room for its own
+                    // rows · timing cell; only at 960 (in the pseudo-locales) may the tile's
+                    // count stand in for it (`required`).
+                    && (f32::from(viewport.width) < 1280.0
+                        || frame.iter().any(|r| {
+                            r.visible && r.painted_px > 0.0 && r.path.ends_with("#status-rows")
+                        }))
             }
             StatusProductionResult | Results(_) | GridRange | NoticeReducedMode => true,
             NoticePasteRefused => toast("hui-editor-paste-refused-title"),
@@ -1061,40 +1059,6 @@ impl M3a {
         };
         (!ok).then(|| format!("{}: the state check failed", self.name()))
     }
-}
-
-// ## m3a-f2-visual
-/// Whether the waiting sentence for `name` (4 of 4 in use) can be read: drawn in the toolbar
-/// (its long or its short form), or a row of the console toolbar's ⋯ menu.
-fn waiting_readable(cx: &App, frame: &[RenderedText], name: &str) -> bool {
-    use hacivat_l10n::ArgValue::{Count, Text};
-    let whole = message(
-        cx,
-        "hv-console-waiting",
-        vec![
-            ("name", Text(name.to_string())),
-            ("inUse", Count(4)),
-            ("max", Count(4)),
-        ],
-    );
-    let menu = cx
-        .try_global::<hacivat_ui::toolbar::ToolbarProbe>()
-        .and_then(|p| p.menus.get("console-toolbar"))
-        .map(Vec::as_slice);
-    sentence_readable(frame, menu, &whole)
-}
-
-/// [`waiting_readable`] over a frame, the console toolbar's ⋯ menu rows, and the sentence.
-pub(super) fn sentence_readable(
-    frame: &[RenderedText],
-    menu: Option<&[SharedString]>,
-    whole: &str,
-) -> bool {
-    let drawn = frame
-        .iter()
-        .any(|r| r.visible && r.painted_px > 0.0 && r.path.ends_with("#console-waiting-text"));
-    let in_menu = menu.is_some_and(|rows| rows.iter().any(|r| super::strip(r) == whole));
-    drawn || in_menu
 }
 
 /// The message `id` with `args`, as the app renders it in the shot's locale.

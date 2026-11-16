@@ -28,7 +28,7 @@
 use std::rc::Rc;
 
 use hacivat_ui_core::gpui_surface::{
-    Anchor, AnyElement, App, AvailableSpace, Bounds, Context, Element, ElementId, Entity,
+    Anchor, AnyElement, App, AvailableSpace, Bounds, Context, Div, Element, ElementId, Entity,
     FocusHandle, Focusable, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement,
     LayoutId, MouseButton, ParentElement, Pixels, Role, RunCommand, SharedString,
     StatefulInteractiveElement, Style, Styled, Subscription, Window, anchored, canvas, deferred,
@@ -282,10 +282,6 @@ pub struct ToolbarProbe {
     pub staged: Option<Staged>,
     /// The width the row had.
     pub available: f32,
-    // ## m3a-f2-visual (named exception): what each toolbar of the frame moved into its ⋯
-    // menu, by toolbar ID: the menu rows' text (the shots check that a sentence that left the
-    // row is still readable there).
-    pub menus: std::collections::BTreeMap<String, Vec<SharedString>>,
 }
 
 impl Global for ToolbarProbe {}
@@ -395,6 +391,8 @@ pub struct Toolbar {
     items: Vec<ToolbarItem>,
     trailing: Vec<ToolbarItem>,
     height: Option<f32>,
+    // ## m3a-f2-visual (named exception)
+    wrap_row: bool,
 }
 
 impl Toolbar {
@@ -404,7 +402,17 @@ impl Toolbar {
             items: Vec::new(),
             trailing: Vec::new(),
             height: None,
+            wrap_row: false,
         }
+    }
+
+    // ## m3a-f2-visual (named exception)
+    /// The very last stage: when even the wrapping item cannot fit (a narrow pane), the row
+    /// itself wraps onto lines and the bar grows, so no pinned item (a trust signal: the
+    /// production lock, the read-only chip, the environment mark) is ever cut by its edge.
+    pub fn wrap_row(mut self) -> Self {
+        self.wrap_row = true;
+        self
     }
 
     /// An item on the left, after the ones already added.
@@ -426,11 +434,17 @@ impl Toolbar {
     }
 
     // ## m3a-f2-visual (named exception)
-    fn wraps(&self) -> bool {
-        self.items
+    /// Whether the bar measures itself (a wrapping item, or a wrapping row): its height can
+    /// grow. At most one item wraps (review M10).
+    fn measured(&self) -> bool {
+        let wrapping = self
+            .items
             .iter()
             .chain(self.trailing.iter())
-            .any(|i| i.wrap.is_some())
+            .filter(|i| i.wrap.is_some())
+            .count();
+        debug_assert!(wrapping <= 1, "a toolbar has at most one wrapping item");
+        wrapping > 0 || self.wrap_row
     }
 }
 
@@ -453,7 +467,7 @@ impl Toolbar {
         let ink: Hsla = c.text_2.to_hsla();
         // ## m3a-f2-visual (named exception): a bar with a wrapping item is at least its
         // height and grows with the wrapped lines (its row measures itself).
-        let wraps = self.wraps();
+        let wraps = self.measured();
         // The bar draws its own chrome; the row element inside it fills it.
         let bar = div()
             .debug_selector(move || selector)
@@ -532,6 +546,14 @@ fn slot_sized(
 
 // ## m3a-f2-visual (named exception): measuring shared by `request_layout` (a wrapping bar)
 // and `prepaint`, the row's width once staged, and the wrapping bar's height.
+
+/// The flexible space between the leading and the trailing items. Its negative right margin
+/// cancels the second gap the row would put around it, so the row is exactly as wide as
+/// [`staged_width`] counts (fix round 1: a tight row no longer pushes its trailing item a gap
+/// past its edge); with room to spare it draws as before.
+fn spacer(gap: f32) -> Div {
+    div().flex_1().min_w(px(0.0)).mr(px(-gap))
+}
 
 /// Half a pixel of slack: a row that fits within it does not wrap.
 const WRAP_SLACK_PX: f32 = 0.5;
@@ -616,49 +638,174 @@ fn text_run(text: &SharedString, style: &TypeStyle) -> TextRun {
     }
 }
 
-/// How tall the bar is at `width`: its own height (`bar`) while the row fits once staged;
-/// else its wrapping item's sentence wraps in the room the other items leave, at its style's
-/// line pitch, with [`WRAP_PAD_PX`] above and below (NOTES surface 11: padding 4, line height
-/// 16). `overhead` is what the item draws besides its sentence (a glyph and its gap).
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the measured inputs of one closure"
-)]
-fn wrapped_height(
-    items: &[FitItem],
-    wrap_ix: usize,
-    overhead: f32,
-    wrap: &Wrap,
-    gap: f32,
-    bar: f32,
-    width: f32,
-    window: &mut Window,
-) -> f32 {
-    let staged = stage_fit(items, width, gap, OVERFLOW_BUTTON_PX);
-    let total = staged_width(items, &staged, gap, OVERFLOW_BUTTON_PX);
-    if total <= width + WRAP_SLACK_PX || !staged.fit.shown.contains(&wrap_ix) {
-        return bar;
-    }
-    let own = own_width(items, &staged, wrap_ix);
-    // Half a pixel narrower than the paragraph gets: never fewer lines than it paints.
-    let room = (width - (total - own) - overhead - WRAP_SLACK_PX).max(1.0);
-    let pitch = px(wrap.style.line_height);
-    let lines: f32 = window
-        .text_system()
-        .shape_text(
-            wrap.text.clone(),
-            px(wrap.style.size_px),
-            &[text_run(&wrap.text, &wrap.style)],
-            Some(px(room)),
-            None,
-        )
-        .map(|lines| lines.iter().map(|l| f32::from(l.size(pitch).height)).sum())
-        .unwrap_or(wrap.style.line_height);
-    (lines + 2.0 * WRAP_PAD_PX).max(bar)
+/// The least room a wrapping sentence keeps before a row-wrapping bar puts its items on
+/// lines instead.
+const MIN_WRAP_TEXT_PX: f32 = 48.0;
+/// The overflow button's index in a [`Plan::Lines`] line.
+const BUTTON_SLOT: usize = usize::MAX;
+
+/// What a measured bar does at a width (the stages after [`stage_fit`]).
+#[derive(Debug, Clone, PartialEq)]
+enum Plan {
+    /// The row fits once staged: one line at the bar's height.
+    Fits,
+    /// The wrapping item's sentence wraps; its slot takes `room` px (its own width less the
+    /// excess).
+    Wrap { room: f32 },
+    /// The row itself wraps (a bar with [`Toolbar::wrap_row`]): each line's items (or
+    /// [`BUTTON_SLOT`]) with their widths. An item wider than the bar gets the bar's width;
+    /// the wrapping item then wraps its sentence in it.
+    Lines(Vec<Vec<(usize, f32)>>),
 }
 
-/// The measure function of a bar with a wrapping item: its natural width, and its height at
-/// the width it is given ([`wrapped_height`]). `None` for a bar without one.
+/// The measured inputs of a bar's last stages, shared by `request_layout` and `prepaint`.
+#[derive(Clone)]
+struct Measure {
+    items: Vec<FitItem>,
+    /// The wrapping item: its index, what it draws besides its sentence (a glyph, a button),
+    /// and its sentence.
+    wrap: Option<(usize, f32, Wrap)>,
+    wrap_row: bool,
+    gap: f32,
+    bar: f32,
+}
+
+impl Measure {
+    fn of(toolbar: &Toolbar, items: Vec<FitItem>, window: &mut Window, cx: &App) -> Measure {
+        let theme = *Theme::get(cx);
+        let wrap = toolbar
+            .items
+            .iter()
+            .chain(toolbar.trailing.iter())
+            .enumerate()
+            .find_map(|(i, item)| item.wrap.clone().map(|w| (i, w)))
+            .map(|(i, wrap)| {
+                let text = f32::from(
+                    window
+                        .text_system()
+                        .shape_line(
+                            wrap.text.clone(),
+                            px(wrap.style.size_px),
+                            &[text_run(&wrap.text, &wrap.style)],
+                            None,
+                        )
+                        .width,
+                );
+                // Against the form the item wraps in: its compact one when it has one.
+                let form = items[i].compact.unwrap_or(items[i].width);
+                (i, (form - text).max(0.0), wrap)
+            });
+        Measure {
+            items,
+            wrap,
+            wrap_row: toolbar.wrap_row,
+            gap: theme.tokens.spacing.md,
+            bar: toolbar
+                .height
+                .unwrap_or(theme.tokens.spacing.result_toolbar_height),
+        }
+    }
+
+    fn staged(&self, width: f32) -> Staged {
+        stage_fit(&self.items, width, self.gap, OVERFLOW_BUTTON_PX)
+    }
+
+    /// The last stages at `width`, once `staged`: the wrapping item's sentence wraps while it
+    /// keeps [`MIN_WRAP_TEXT_PX`] (at any room, in a bar that cannot wrap its row); then a
+    /// row-wrapping bar puts its items on lines, so no item is cut by the bar's edge.
+    fn plan(&self, staged: &Staged, width: f32) -> Plan {
+        let total = staged_width(&self.items, staged, self.gap, OVERFLOW_BUTTON_PX);
+        if total <= width + WRAP_SLACK_PX {
+            return Plan::Fits;
+        }
+        if let Some((w, overhead, _)) = &self.wrap
+            && staged.fit.shown.contains(w)
+        {
+            let room = own_width(&self.items, staged, *w) - (total - width);
+            if !self.wrap_row || room - overhead >= MIN_WRAP_TEXT_PX {
+                return Plan::Wrap { room };
+            }
+        }
+        if !self.wrap_row {
+            return Plan::Fits;
+        }
+        let mut seq: Vec<(usize, f32)> = staged
+            .fit
+            .shown
+            .iter()
+            .map(|&i| (i, own_width(&self.items, staged, i).min(width)))
+            .collect();
+        if !staged.menu.is_empty() {
+            seq.push((BUTTON_SLOT, OVERFLOW_BUTTON_PX));
+        }
+        let mut lines: Vec<Vec<(usize, f32)>> = Vec::new();
+        let mut used = 0.0;
+        for (i, w) in seq {
+            match lines.last_mut() {
+                Some(line) if used + self.gap + w <= width + WRAP_SLACK_PX => {
+                    line.push((i, w));
+                    used += self.gap + w;
+                }
+                _ => {
+                    lines.push(vec![(i, w)]);
+                    used = w;
+                }
+            }
+        }
+        Plan::Lines(lines)
+    }
+
+    /// The height of the wrapping item's sentence in `room` px of slot, with its padding.
+    fn wrapped(&self, room: f32, window: &mut Window) -> f32 {
+        let Some((_, overhead, wrap)) = &self.wrap else {
+            return self.bar;
+        };
+        // Half a pixel narrower than the paragraph gets: never fewer lines than it paints.
+        let text = (room - overhead - WRAP_SLACK_PX).max(1.0);
+        let pitch = px(wrap.style.line_height);
+        let lines: f32 = window
+            .text_system()
+            .shape_text(
+                wrap.text.clone(),
+                px(wrap.style.size_px),
+                &[text_run(&wrap.text, &wrap.style)],
+                Some(px(text)),
+                None,
+            )
+            .map(|lines| lines.iter().map(|l| f32::from(l.size(pitch).height)).sum())
+            .unwrap_or(wrap.style.line_height);
+        (lines + 2.0 * WRAP_PAD_PX).max(self.bar)
+    }
+
+    /// Whether `plan` squeezes the wrapping item `i` to `width` (its sentence wraps).
+    fn squeezed(&self, staged: &Staged, i: usize, width: f32) -> bool {
+        self.wrap.as_ref().is_some_and(|(w, ..)| *w == i)
+            && width + WRAP_SLACK_PX < own_width(&self.items, staged, i)
+    }
+
+    /// Each line's height in `plan`: the bar's, or the wrapped sentence's when taller.
+    fn line_heights(&self, plan: &Plan, staged: &Staged, window: &mut Window) -> Vec<f32> {
+        match plan {
+            Plan::Fits => vec![self.bar],
+            Plan::Wrap { room } => vec![self.wrapped(*room, window)],
+            Plan::Lines(lines) => lines
+                .iter()
+                .map(|line| {
+                    line.iter().fold(self.bar, |h, &(i, w)| {
+                        if self.squeezed(staged, i, w) {
+                            h.max(self.wrapped(w, window))
+                        } else {
+                            h
+                        }
+                    })
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The measure function of a bar with a wrapping item or a wrapping row: its natural width,
+/// and its height at the width it is given. `None` for any other bar.
 #[allow(clippy::type_complexity, reason = "GPUI's measure function")]
 fn wrap_measure(
     toolbar: &Toolbar,
@@ -673,37 +820,15 @@ fn wrap_measure(
     ) -> hacivat_ui_core::gpui_surface::Size<Pixels>
     + 'static,
 > {
-    let all: Vec<&ToolbarItem> = toolbar
-        .items
-        .iter()
-        .chain(toolbar.trailing.iter())
-        .collect();
-    let wrap_ix = all.iter().position(|i| i.wrap.is_some())?;
-    let wrap = all[wrap_ix].wrap.clone()?;
-    let theme = *Theme::get(cx);
-    let gap = theme.tokens.spacing.md;
-    let bar = toolbar
-        .height
-        .unwrap_or(theme.tokens.spacing.result_toolbar_height);
+    if !toolbar.measured() {
+        return None;
+    }
     let (items, _) = measure_items(toolbar, AvailableSpace::MaxContent, window, cx);
-    let text = f32::from(
-        window
-            .text_system()
-            .shape_line(
-                wrap.text.clone(),
-                px(wrap.style.size_px),
-                &[text_run(&wrap.text, &wrap.style)],
-                None,
-            )
-            .width,
-    );
-    // Against the form the item wraps in: its compact one when it has one.
-    let form = items[wrap_ix].compact.unwrap_or(items[wrap_ix].width);
-    let overhead = (form - text).max(0.0);
+    let m = Measure::of(toolbar, items, window, cx);
     let natural = staged_width(
-        &items,
-        &stage_fit(&items, f32::INFINITY, gap, OVERFLOW_BUTTON_PX),
-        gap,
+        &m.items,
+        &m.staged(f32::INFINITY),
+        m.gap,
         OVERFLOW_BUTTON_PX,
     );
     Some(
@@ -717,19 +842,12 @@ fn wrap_measure(
             });
             match width {
                 Some(w) => {
-                    let h = wrapped_height(
-                        &items,
-                        wrap_ix,
-                        overhead,
-                        &wrap,
-                        gap,
-                        bar,
-                        f32::from(w),
-                        window,
-                    );
+                    let staged = m.staged(f32::from(w));
+                    let plan = m.plan(&staged, f32::from(w));
+                    let h: f32 = m.line_heights(&plan, &staged, window).iter().sum();
                     size(w, px(h))
                 }
-                None => size(px(natural), px(bar)),
+                None => size(px(natural), px(m.bar)),
             }
         },
     )
@@ -823,15 +941,6 @@ impl Element for Row {
             probe.measured = measured;
             probe.staged = Some(staged.clone());
             probe.available = f32::from(bounds.size.width);
-            // ## m3a-f2-visual (named exception)
-            let rows = staged
-                .menu
-                .iter()
-                .map(|&i| (all[i].overflow_label)(cx))
-                .collect();
-            cx.global_mut::<ToolbarProbe>()
-                .menus
-                .insert(id.to_string(), rows);
         }
 
         // The menu's rows for the overflow button.
@@ -844,16 +953,66 @@ impl Element for Row {
                 on_choose: all[i].on_choose.clone(),
             })
             .collect();
-        let has_menu = !entries.is_empty();
-        state.update(cx, |s, _| s.entries = entries);
-        // ## m3a-f2-visual (named exception): the last stage, the wrapping item's sentence
-        // wraps when the row still does not fit (its slot takes the room the others leave).
-        let total = staged_width(&fit_items, &staged, gap, OVERFLOW_BUTTON_PX);
-        let width = f32::from(bounds.size.width);
-        let wrapped = all
+        // ## m3a-f2-visual (named exception, review M7): no ⋯ menu without a row that can be
+        // chosen (a menu of disabled rows would take the focus with nowhere to go).
+        let has_menu = entries
             .iter()
-            .position(|i| i.wrap.is_some())
-            .filter(|w| staged.fit.shown.contains(w) && total > width + WRAP_SLACK_PX);
+            .any(|e| e.action.is_some() || e.on_choose.is_some());
+        let entries = if has_menu { entries } else { Vec::new() };
+        state.update(cx, |s, _| s.entries = entries);
+        // ## m3a-f2-visual (named exception): the last stages: the wrapping item's sentence
+        // wraps (its slot takes the room the others leave), then a row-wrapping bar puts its
+        // items on lines.
+        let width = f32::from(bounds.size.width);
+        let m = Measure::of(&toolbar, fit_items, window, cx);
+        let plan = if m.wrap.is_some() || m.wrap_row {
+            m.plan(&staged, width)
+        } else {
+            Plan::Fits
+        };
+        if let Plan::Lines(lines) = &plan {
+            let heights = m.line_heights(&plan, &staged, window);
+            let mut column = div().flex().flex_col().w(bounds.size.width);
+            for (line, h) in lines.iter().zip(heights) {
+                let mut row = div().flex().flex_row().items_center().gap(px(gap)).h(px(h));
+                for &(i, w) in line {
+                    if i == BUTTON_SLOT {
+                        if has_menu {
+                            row = row.child(overflow_button(&id, state, window, cx));
+                        }
+                        continue;
+                    }
+                    let item = all[i];
+                    let compact = staged.compact.contains(&i);
+                    let tip = compact.then(|| (item.overflow_label)(cx));
+                    let element = match (&item.wrap, m.squeezed(&staged, i, w)) {
+                        (Some(wrap), true) => (wrap.element)(window, cx),
+                        _ if compact => {
+                            let form = item.compact.as_ref().expect("a compact item has its form");
+                            form(window, cx)
+                        }
+                        _ => (item.element)(window, cx),
+                    };
+                    row = row.child(slot_sized(&id, i, element, tip, Some(w)));
+                }
+                column = column.child(row);
+            }
+            let mut column = column.into_any_element();
+            column.prepaint_as_root(
+                bounds.origin,
+                size(
+                    AvailableSpace::Definite(bounds.size.width),
+                    AvailableSpace::Definite(bounds.size.height),
+                ),
+                window,
+                cx,
+            );
+            return Some(RowPrepaint { row: column });
+        }
+        let wrapped: Option<(usize, f32)> = match plan {
+            Plan::Wrap { room } => m.wrap.as_ref().map(|(w, ..)| (*w, room)),
+            _ => None,
+        };
 
         // Pass two: the row.
         let mut row = div()
@@ -866,17 +1025,17 @@ impl Element for Row {
         let mut spacer_done = false;
         for &i in &staged.fit.shown {
             if i >= lead && !spacer_done {
-                row = row.child(div().flex_1().min_w(px(0.0)));
+                row = row.child(spacer(gap));
                 spacer_done = true;
             }
             let item = all[i];
             // ## m3a-f2-visual (named exception): the wrapped item takes the room the others
             // leave (its own width less the excess); a compact one keeps its whole text as the
             // tooltip.
-            if wrapped == Some(i)
+            if let Some((wi, room)) = wrapped
+                && wi == i
                 && let Some(wrap) = &item.wrap
             {
-                let room = own_width(&fit_items, &staged, i) - (total - width);
                 let tip = staged
                     .compact
                     .contains(&i)
@@ -894,7 +1053,7 @@ impl Element for Row {
             row = row.child(element);
         }
         if !spacer_done {
-            row = row.child(div().flex_1().min_w(px(0.0)));
+            row = row.child(spacer(gap));
         }
         if has_menu {
             row = row.child(overflow_button(&id, state, window, cx));

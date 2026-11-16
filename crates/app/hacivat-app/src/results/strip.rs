@@ -315,7 +315,10 @@ pub fn render(
     cx: &App,
 ) -> AnyElement {
     let t = Theme::get(cx).tokens;
-    let mut bar = Toolbar::new(STRIP_ID).height(t.spacing.strip_height);
+    // ## m3a-f2-visual (fix round 1, I2): in a narrow pane the row wraps; nothing is cut.
+    let mut bar = Toolbar::new(STRIP_ID)
+        .height(t.spacing.strip_height)
+        .wrap_row();
     let sentence = model.sentence(cx);
     let lead = lead_glyph(model.kind);
     let count_like = matches!(
@@ -345,7 +348,7 @@ pub fn render(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(t.spacing.sm))
                     .flex_1()
                     .min_w(px(0.0))
                     .children(lead.map(|g| g.element(cx)))

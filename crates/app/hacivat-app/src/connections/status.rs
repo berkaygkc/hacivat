@@ -272,7 +272,7 @@ fn connection_parts(
 //   the state words. The environment, the transaction and the cursor never give way; the
 //   message ellipsizes (its SQL is data) down to a floor. ## m3a-f2-visual (named exception):
 //   a cell gives way whole (NOTES cross-cutting #7: never ellipsized chrome); the message
-//   ellipsizes at its turn, after the path and before rows · timing.
+//   ellipsizes only once every other cell gave way (fix round 1, I1).
 // - **Session state** is mirrored, never read on the paint path: one foreground task per
 //   console session awaits its `watch` (a `tokio::sync` receiver) and repaints only when the
 //   projection the bar shows ([`SessionView`]) changes. The projection is Task 23's
@@ -597,11 +597,11 @@ fn give_of(part: Part) -> Give {
 const GIVE_EDITOR: Give = Yield::Whole(40);
 /// Rows · timing gives way after the path.
 const GIVE_ROWS: Give = Yield::Whole(20);
-/// The message's SQL label ellipsizes, down to a floor, once the path gave way and before
-/// rows · timing does; the sentence never disappears.
+/// The message ellipsizes, down to a floor, only once every cell that can give way left
+/// (rows · timing and the state words last): hide before truncate (NOTES #7; fix round 1, I1).
 const GIVE_MESSAGE: Give = Yield::Shrink {
     floor: 160.0,
-    rank: 25,
+    rank: 5,
 };
 
 /// The bar of the followed console `console`, bound to `p` (see the block comment above).

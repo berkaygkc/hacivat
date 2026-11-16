@@ -188,16 +188,39 @@ fn status(vcx: &VisualTestContext) -> String {
 // ## m3a-f2-visual
 /// The status bar's chrome labels (all but the message, whose SQL is data) that the last
 /// frame drew ellipsized, or laid out and cut away to nothing.
+///
+/// Fix round 1: the cursor button's label counts (M3), and so does the message (I1): it may
+/// ellipsize only once every cell that can give way has left the bar ("hide before
+/// truncate", NOTES #7).
 fn chrome_cut(vcx: &VisualTestContext) -> Vec<String> {
-    registry_frame(vcx)
-        .into_iter()
-        .filter(|r| {
-            r.path.contains("hacivat-ui/src/statusbar.rs:")
-                || r.path.contains("hacivat-app/src/connections/status.rs:")
-                || r.path.contains("hacivat-app/src/console/status.rs:")
-        })
-        .filter(|r| !r.path.ends_with("#status-message"))
-        .filter(|r| r.truncated || r.clipped || !r.visible)
+    let in_bar = |r: &hacivat_ui::text::RenderedText| {
+        r.path.contains("hacivat-ui/src/statusbar.rs:")
+            || r.path.contains("hacivat-app/src/connections/status.rs:")
+            || r.path.contains("hacivat-app/src/console/status.rs:")
+            || r.path.ends_with("#button-label-status-cursor")
+    };
+    let frame = registry_frame(vcx);
+    let cut = |r: &hacivat_ui::text::RenderedText| r.truncated || r.clipped || !r.visible;
+    // The cells that can give way: all but the environment, the transaction, the cursor and
+    // the message.
+    let hideable_left = frame.iter().any(|r| {
+        in_bar(r)
+            && r.visible
+            && ![
+                "#status-env-label",
+                "#status-tx-open",
+                "#status-tx-failed",
+                "#status-message",
+                "#button-label-status-cursor",
+            ]
+            .iter()
+            .any(|id| r.path.ends_with(id))
+    });
+    frame
+        .iter()
+        .filter(|r| in_bar(r))
+        .filter(|r| !r.path.ends_with("#status-message") || hideable_left)
+        .filter(|r| cut(r))
         .map(|r| format!("{} ({})", r.text, r.path))
         .collect()
 }

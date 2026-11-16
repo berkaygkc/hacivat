@@ -58,7 +58,17 @@ pub fn give_way(yields: &[Yield], widths: &[f32], available: f32) -> Widths {
             _ => None,
         };
     }
-    // The room left over goes to the last cell shown.
+    // Fix round 1 (M4): room a later cell freed goes back first to data that shrank, up to its
+    // natural width; what is left goes to the last cell shown.
+    for i in 0..yields.len() {
+        let slack = available - total(&out);
+        if slack <= 0.0 {
+            break;
+        }
+        if let (Yield::Shrink { .. }, Some(w)) = (yields[i], out[i]) {
+            out[i] = Some((w + slack).min(widths[i].max(w)));
+        }
+    }
     let slack = available - total(&out);
     if slack > 0.0
         && let Some(last) = out.iter_mut().rev().flatten().next()
@@ -255,6 +265,12 @@ mod tests {
             give_way(&y, &w, 20.0),
             vec![Some(10.0), None, Some(30.0), None]
         );
+        // Fix round 1 (M4): data that shrank before a lower-ranked cell left gets the room
+        // that cell freed back, up to its natural width; only the rest goes to the last cell.
+        let y = [msg, Yield::Whole(1), W];
+        let w = [80.0, 50.0, 10.0];
+        assert_eq!(give_way(&y, &w, 70.0), vec![Some(60.0), None, Some(10.0)]);
+        assert_eq!(give_way(&y, &w, 45.0), vec![Some(35.0), None, Some(10.0)]);
         // A floor wider than the cell keeps the cell's own width.
         let wide = Yield::Shrink {
             floor: 50.0,
