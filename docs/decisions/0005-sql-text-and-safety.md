@@ -1249,6 +1249,24 @@ column as a call), and **foreign tables** (a read or write of one reaches a remo
 - **Leading BOM (M9):** parsed as three spaces (same offsets); our lexer reads it as whitespace,
   and a server that does not strip it rejects the text.
 
+**Fix round 2 (round 1 re-review).**
+- **A procedure is never a builtin (R1-I1):** a `CALL`'s target is `FnUnknown` + `UNKNOWN`
+  whatever its name (`CALL lower(1)` may resolve to a user procedure), and any item with
+  `ROUTINE_CALL` (`CALL`, `DO`, an `EXECUTE` of a prepared `CALL`) makes later items unknown.
+- **`UPDATE pg_settings` is `set_config` (R1-I2):** the view's update rule runs
+  `set_config(name, setting, false)`, so an `UPDATE` of a relation named `pg_settings` (any
+  schema, any spelling that reads as that name) adds `SESSION_STATE | ADMIN`, `SessionState`
+  and `AdminControl`, and makes later items unknown.
+- **More context changers (R1-M1, R1-M2):** `pg_reload_conf()` (a reload brings `ALTER
+  SYSTEM`'s values into the session), `LOAD` (a library's `_PG_init` may set anything), and any
+  item with `DDL` or `DDL_TEMP` effects (it may create a function, operator, cast, type, or a
+  temp view that shadows a table, which a later name resolves to) make later items unknown.
+- **R1-M3:** a `search_path` element with a control character is unreadable (fail closed).
+  **R1-M4:** `"char"[]` keeps its array suffix in the cast check.
+- **Carry wording (R1-M5, controller):** across separately classified units the session must
+  refresh the context after the unit that *executes* code which changes it (`EXECUTE`, `FETCH`
+  of a cursor whose query calls `set_config`), not only after the unit that contains it.
+
 **Tests.** `sql-oracle-pg/tests/tree.rs`; `sql-safety/tests/pg_backend.rs` (the `alg/13`
 cases 1–21, 33, 34 with their read-only decisions, CVE T12 shapes, UNSAFE-01..10, combine rule,
 hostile inputs: comment tricks, `$$` bodies, `DO`, `EXPLAIN ANALYZE <write>`, data-modifying

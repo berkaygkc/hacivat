@@ -1407,3 +1407,98 @@ fn round1_a_leading_bom_is_whitespace() {
     assert_eq!(d.request_class, CoarseClass::Write);
     assert_eq!(d.items[0].destructive[0].kind, DestructiveKind::NoWhere);
 }
+
+// ## Fix round 2 (review task-m3b-09-review.md, round 1 re-review)
+
+/// R1-I1, R1-I2, R1-M1, R1-M2: every further way an item may change how later items read.
+#[test]
+fn round2_more_context_changes_make_later_items_unknown() {
+    let mut allow = ctx();
+    allow.fn_allowlist = Arc::from(vec![Arc::from("app.safe_fn")]);
+    for (s, c) in [
+        // R1-I1: a procedure is never a builtin, whatever its name.
+        ("CALL lower(1); SELECT lower('A')", ctx()),
+        ("CALL pg_catalog.now(); SELECT lower('A')", ctx()),
+        ("CALL app.safe_fn(); SELECT lower('A')", allow.clone()),
+        (
+            "PREPARE p AS CALL lower(1); EXECUTE p; SELECT lower('A')",
+            ctx(),
+        ),
+        // R1-I2: `pg_settings`'s update rule is `set_config`.
+        (
+            "UPDATE pg_settings SET setting = 'evil, pg_catalog' WHERE name = 'search_path'; SELECT lower('A')",
+            ctx(),
+        ),
+        (
+            "UPDATE pg_catalog.pg_settings SET setting = 'off' WHERE name = 'standard_conforming_strings'; SELECT 'a\\'' ; DELETE FROM t; -- '",
+            ctx(),
+        ),
+        (
+            "UPDATE \"pg_settings\" SET setting = 'x' WHERE name = 'search_path'; SELECT 1",
+            ctx(),
+        ),
+        (
+            "UPDATE PG_CATALOG.PG_SETTINGS SET setting = 'x' WHERE name = 'role'; SELECT 1",
+            ctx(),
+        ),
+        // R1-M1
+        (
+            "ALTER SYSTEM SET search_path = evil, pg_catalog; SELECT pg_reload_conf(); SELECT lower('A')",
+            ctx(),
+        ),
+        ("LOAD 'x'; SELECT lower('A')", ctx()),
+        // R1-M2: DDL may create what a later name resolves to.
+        (
+            "CREATE FUNCTION public.lower(varchar) RETURNS text LANGUAGE sql AS 'SELECT 1'; SELECT lower(v) FROM t",
+            ctx(),
+        ),
+        (
+            "CREATE OPERATOR public.= (leftarg = varchar, rightarg = varchar, function = f); SELECT 1",
+            ctx(),
+        ),
+        ("CREATE TEMP VIEW t AS SELECT f(); SELECT * FROM t", ctx()),
+        (
+            "CREATE CAST (text AS my_t) WITH FUNCTION f(text); SELECT 1",
+            ctx(),
+        ),
+    ] {
+        let r = classify_script(s, &c);
+        let last = r.items.last().unwrap();
+        assert_eq!(last.class, CoarseClass::Unknown, "{s}: {r:?}");
+        assert!(last.effects.contains(EffectSet::UNKNOWN), "{s}");
+        assert_eq!(read_only(&r), "Deny", "{s}");
+    }
+    // The procedure call itself is unknown, and so is `UPDATE pg_settings` as a session change.
+    let call = one("CALL lower(1)");
+    assert_eq!(call.class, CoarseClass::Unknown);
+    assert!(
+        call.reasons
+            .iter()
+            .any(|x| x.code == ReasonCode::FnUnknown && x.arg.as_deref() == Some("lower"))
+    );
+    let upd = one("UPDATE pg_settings SET setting = 'x' WHERE name = 'search_path'");
+    assert!(
+        upd.effects
+            .contains(EffectSet::SESSION_STATE | EffectSet::ADMIN | EffectSet::WRITE_DATA)
+    );
+    assert_eq!(upd.class, CoarseClass::Admin);
+    // An ordinary table update does not taint.
+    let r = classify_script("UPDATE t SET a = 1 WHERE id = 2; SELECT lower('A')", &ctx());
+    assert_eq!(r.items[1].class, CoarseClass::Read);
+}
+
+/// R1-M3: control characters make a search path element unreadable; R1-M4: `"char"[]`.
+#[test]
+fn round2_search_path_control_characters_and_char_arrays() {
+    for bad in ["pg_catalog\0", "app\u{7}", "\u{1b}[31mpublic"] {
+        let mut c = ctx();
+        c.search_path = Arc::from(vec![Arc::from(bad)]);
+        assert_eq!(
+            classify_with("SELECT lower(x) FROM t", &c).request_class,
+            CoarseClass::Unknown,
+            "{bad:?}"
+        );
+    }
+    let r = classify_pg("SELECT '{a}'::\"char\"[]");
+    assert_eq!(r.request_class, CoarseClass::Read, "{r:?}");
+}

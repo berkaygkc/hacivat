@@ -18,9 +18,11 @@
 //!    `ParserDisagreement` to every item.
 //! 4. A server newer than the grammar (PostgreSQL 18) adds `SyntaxNewerThanAgent`.
 //! 5. A statement that may change how later statements read (a search path that may not keep
-//!    `pg_catalog` first, `set_config`, a lexing-mode or role change, `RESET ALL`, `DISCARD
-//!    ALL`, or anything `UNKNOWN`, which may run code that does any of these) makes every
-//!    later item `Unknown` (`EffectsUnknown`): they were read against the context before it.
+//!    `pg_catalog` first, `set_config` or `UPDATE pg_settings`, a lexing-mode or role change,
+//!    `RESET ALL`, `DISCARD ALL`, `pg_reload_conf`, `LOAD`, a routine call (`CALL`, `DO`), DDL
+//!    (it may create a function, operator, cast or view a later name resolves to), or anything
+//!    `UNKNOWN`, which may run code that does any of these) makes every later item `Unknown`
+//!    (`EffectsUnknown`): they were read against the context before it.
 //!
 //! A limit (the guard's size and nesting caps, prost's decode depth of 100 messages) is
 //! `TooComplex`, a syntax error `ParseError`. A leading byte-order mark is parsed as spaces
@@ -590,8 +592,12 @@ pub(crate) fn analyse(sql: &str, items: &[TextRange], ctx: &ClassifyCtx) -> Vec<
     }
     let toks = toks.unwrap_or_default();
     // An item that may change what later items mean (the search_path, the lexing modes, the
-    // role, or code the classifier cannot see into) makes every later item `Unknown`: they
-    // were classified against the context as it was before it (fix round 1, I2a).
+    // role, code the classifier cannot see into, a routine it calls, or DDL that may create a
+    // function, operator, cast, type or view a later name resolves to) makes every later item
+    // `Unknown`: they were classified against the context as it was before it (fix round 1,
+    // I2a; round 2, R1-I1, R1-M2).
+    let taints =
+        EffectSet::UNKNOWN | EffectSet::ROUTINE_CALL | EffectSet::DDL | EffectSet::DDL_TEMP;
     let mut stale = false;
     items
         .iter()
@@ -604,7 +610,7 @@ pub(crate) fn analyse(sql: &str, items: &[TextRange], ctx: &ClassifyCtx) -> Vec<
             if stale {
                 doubt(&mut r, ReasonCode::EffectsUnknown);
             }
-            stale |= changes_context || r.effects.contains(EffectSet::UNKNOWN);
+            stale |= changes_context || r.effects.intersects(taints);
             r
         })
         .collect()
@@ -1104,6 +1110,18 @@ impl<'a, 's> Classifier<'a, 's> {
                 self.dml(s.relation.as_ref());
             }
             PgRef::UpdateStmt(s) => {
+                if s.relation
+                    .as_ref()
+                    .is_some_and(|rv| rv.relname == "pg_settings")
+                {
+                    // `pg_settings`'s update rule runs `set_config(name, setting, false)`: the
+                    // same session change, in any schema (a user relation of that name is read
+                    // the same way, conservatively; round 2, R1-I2).
+                    self.effects |= EffectSet::SESSION_STATE | EffectSet::ADMIN;
+                    self.reason(ReasonCode::SessionState, None, Some("pg_settings"));
+                    self.reason(ReasonCode::AdminControl, None, None);
+                    self.changes_context = true;
+                }
                 let target = self.dml(s.relation.as_ref());
                 self.unbounded(
                     s.where_clause.as_deref(),
@@ -1211,6 +1229,21 @@ impl<'a, 's> Classifier<'a, 's> {
             }
             PgRef::DeclareCursorStmt(s) if s.options & CURSOR_OPT_HOLD != 0 => {
                 self.effects |= EffectSet::SESSION_STATE;
+            }
+            PgRef::CallStmt(s) => {
+                // A procedure is never a reviewed builtin function, whatever its name: its
+                // target is unknown, and it may change any setting (round 2, R1-I1).
+                let name = s
+                    .funccall
+                    .as_ref()
+                    .and_then(|f| strings(&f.funcname))
+                    .map(|p| p.join("."));
+                self.unknown(ReasonCode::FnUnknown, None, name.as_deref());
+                self.changes_context = true;
+            }
+            PgRef::LoadStmt(_) => {
+                // A loaded library's `_PG_init` may change any setting (round 2, R1-M1).
+                self.changes_context = true;
             }
             PgRef::DiscardStmt(s) if s.target == pb::DiscardMode::DiscardAll as i32 => {
                 // `DISCARD ALL` includes `SET SESSION AUTHORIZATION DEFAULT` and `RESET ALL`
@@ -1398,6 +1431,14 @@ impl<'a, 's> Classifier<'a, 's> {
             .push(object(qn.clone(), ObjectKind::Function));
         let range = Some(self.at(location));
         let by_catalog = parts.len() == 2 && parts[0] == "pg_catalog";
+        if parts
+            .last()
+            .is_some_and(|n| n.eq_ignore_ascii_case("pg_reload_conf"))
+        {
+            // A reload gives the session every setting it has not overridden itself, `ALTER
+            // SYSTEM`'s new values included (round 2, R1-M1).
+            self.changes_context = true;
+        }
         match lookup_fn(self.dialect, &qn, self.ctx.dialect.version) {
             FnClass::Denied(group) => {
                 self.reason(ReasonCode::FnDenylisted, range, Some(&dotted));
@@ -1567,6 +1608,9 @@ impl<'a, 's> Classifier<'a, 's> {
                     .is_some_and(|(t, _, _)| t == "\"char\"");
             if quoted_char {
                 text = "\"char\"".to_string();
+                if !tn.array_bounds.is_empty() {
+                    text.push_str("[]");
+                }
             }
             !tn.pct_type
                 && !tn.setof
@@ -1737,14 +1781,16 @@ impl<'a> Visitor<'a> for Classifier<'a, '_> {
 /// literally as `$user`. Empty means unknown: the server searches `pg_catalog` first when the
 /// path does not name it, so an unknown path assumes it.
 ///
-/// Fail closed: an element that cannot be such a name (empty, with a comma, a double quote or
-/// edge whitespace, as a raw `SHOW` string has), or that is `pg_catalog` in another case (an
+/// Fail closed: an element that cannot be such a name (empty, with a comma, a double quote, a
+/// control character or edge whitespace, as a raw `SHOW` string has), or that is `pg_catalog`
+/// in another case (an
 /// unfolded spelling), makes the answer `false`. Otherwise `pg_catalog` must be absent or first.
 fn catalog_first(path: &[Arc<str>]) -> bool {
     let mut first_named: Option<usize> = None;
     for (i, s) in path.iter().enumerate() {
         let parseable = !s.is_empty()
             && !s.contains([',', '"'])
+            && !s.chars().any(char::is_control)
             && s.trim() == &**s
             && (**s == *"pg_catalog" || !s.eq_ignore_ascii_case("pg_catalog"));
         if !parseable {
