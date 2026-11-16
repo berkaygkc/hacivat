@@ -72,7 +72,6 @@ const BOUND: &[(&str, &str, Option<&str>, Option<&str>)] = &[
         Some("cmd-u"),
         Some("ctrl-u"),
     ),
-    ("editor.find", "Editor", Some("cmd-f"), Some("ctrl-f")),
     ("editor.find_next", "Editor", Some("cmd-g"), Some("f3")),
     (
         "editor.find_prev",
@@ -172,7 +171,8 @@ const BOUND: &[(&str, &str, Option<&str>, Option<&str>)] = &[
         Some("cmd-shift-h"),
         Some("ctrl-shift-h"),
     ),
-    // Palette-only.
+    // Palette-only. `editor.find` stays unbound until Task 33 binds `cmd-f`/`ctrl-f` (ruling R5).
+    ("editor.find", "Editor", None, None),
     ("editor.split_selection_into_lines", "Editor", None, None),
     ("editor.redo_selection", "Editor", None, None),
     ("editor.fold", "Editor", None, None),
@@ -525,6 +525,53 @@ fn results_context_is_active_on_the_results_root(cx: &mut TestAppContext) {
             .any(|b| b.command == "results.next_tab"
                 && b.context == RESULTS_CONTEXT
                 && chord_string(&b.chord) == canonical(keymap.platform(), "ctrl-pagedown"))
+    );
+}
+
+// ---- R5: ⌘F / Ctrl+F in the editor before Task 33 --------------------------------------------
+
+/// Controller ruling R5: until Task 33 binds `editor.find`, ⌘F / Ctrl+F with the editor focused
+/// still reaches `explorer.focus_filter` (the Workspace binding), which shows the explorer.
+#[cfg(unix)]
+#[gpui::test]
+fn primary_f_in_the_editor_still_reaches_the_explorer_filter(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections(cx, "en");
+    in_window(vcx, |window, _| window.activate_window());
+    let p = test_profile("orders-dev", None, "10.0.0.5");
+    let profile = add_profile(vcx, p.clone());
+    let (session, _fake) = test_session(vcx, p);
+    let id = register_test_console(vcx, profile, session);
+    let editor = vcx.cx.read(|cx| {
+        Consoles::get(cx, id)
+            .and_then(|s| s.editor.clone())
+            .expect("the console has an editor")
+    });
+    run(vcx, "workspace.toggle_explorer");
+    assert!(!layout(vcx).1.explorer_visible);
+    in_window(vcx, |window, cx| {
+        let handle = editor.read(cx).focus_handle(cx);
+        hacivat_app::shell::register_focus_context(
+            cx,
+            handle.clone(),
+            hacivat_ui_editor::EDITOR_CONTEXT,
+        );
+        window.focus(&handle, cx);
+    });
+    vcx.run_until_parked();
+    assert_eq!(
+        context_stack(vcx).0.last(),
+        Some(&hacivat_ui_editor::EDITOR_CONTEXT)
+    );
+    let key = if cfg!(target_os = "macos") {
+        "cmd-f"
+    } else {
+        "ctrl-f"
+    };
+    vcx.simulate_keystrokes(key);
+    vcx.run_until_parked();
+    assert!(
+        layout(vcx).1.explorer_visible,
+        "{key} did not reach the explorer filter"
     );
 }
 
