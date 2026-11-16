@@ -1,8 +1,8 @@
 //! M3b Task 1c: the run service's M3b seams fail closed (F31) until their tasks: the gate
 //! denies, parameter preparation refuses placeholders, the history was disabled (until Task
 //! 17), the classifier pool answers `sql-safety`'s stub and denies on the read-only path, Count rows
-//! answers `Internal`, and a request with M3b-only fields sends nothing. M3a's run shape
-//! still builds and runs.
+//! without a check is refused, and a request with only one M3b field sends nothing. M3a's
+//! run shape still builds and runs.
 
 mod common;
 
@@ -18,9 +18,7 @@ use hacivat_exec::{
 };
 use hacivat_exec::{ConnSafety, GateItem};
 use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
-use hacivat_session::session::{
-    ExecErrorKind, RoCheck, StatementClassifier, TxMode, TxOwner, UnitVerdict,
-};
+use hacivat_session::session::{RoCheck, StatementClassifier, TxMode, TxOwner, UnitVerdict};
 use hacivat_values::BindValue;
 use sql_dialect::ClientFlavor;
 use sql_split::exec_range::UnitKind;
@@ -35,6 +33,8 @@ fn unit_at(text: &str, start: usize) -> ExecUnit {
         doc_range: start..start + text.len(),
         kind: UnitKind::Statement,
         suspendable: false,
+        // ## m3b-t16-run-service (named exception)
+        title: None,
     }
 }
 
@@ -290,7 +290,8 @@ async fn run_request_m3a_shape_still_builds() {
 }
 
 #[tokio::test]
-async fn a_request_with_m3b_fields_sends_nothing_until_task_16() {
+// ## m3b-t16-run-service (fix round 1, review m14: renamed; each M3b field alone is refused)
+async fn a_request_with_only_one_m3b_field_sends_nothing() {
     let (b, s, f) = service_over(fake_pg()).await;
     let before = f.call_log().len();
     let plan_ok = GatePlan::default();
@@ -316,18 +317,32 @@ async fn a_request_with_m3b_fields_sends_nothing_until_task_16() {
     assert!(f.call_log()[before..].is_empty());
 }
 
+// ## m3b-t16-run-service (named exception: Task 16 fills Count rows; the stub test becomes the
+// fail-closed half that stays: without a check, nothing is sent)
 #[tokio::test]
-async fn count_stub_answers_internal() {
-    let (b, s, _f) = service_over(fake_pg()).await;
+async fn count_without_a_check_is_refused_and_sends_nothing() {
+    let (b, s, f) = service_over(fake_pg()).await;
+    let before = f.call_log().len();
     let e = b
         .svc
-        .count(&s, "SELECT COUNT(*) FROM t".into())
+        .count(hacivat_exec::CountRequest {
+            console: s.clone(),
+            sessions: None,
+            engine: DbmsKind::Postgres,
+            sql: "SELECT COUNT(*) FROM t".into(),
+            binds: std::sync::Arc::from(Vec::new()),
+        })
+        .done
         .await
         .unwrap()
         .unwrap_err();
-    assert_eq!(e.kind, ExecErrorKind::Internal);
+    assert!(matches!(e, hacivat_exec::CountError::Refused(_)), "{e:?}");
+    assert!(f.call_log()[before..].is_empty());
     let doc = common::doc("SELECT * FROM t");
-    assert_eq!(count_sql(&doc, &unit_at("SELECT * FROM t", 0)), None);
+    assert_eq!(
+        count_sql(&doc, &unit_at("SELECT * FROM t", 0)).as_deref(),
+        Some("SELECT COUNT(*) FROM (\nSELECT * FROM t\n) hv_c")
+    );
 }
 
 #[test]

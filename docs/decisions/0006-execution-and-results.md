@@ -624,3 +624,107 @@ wired into Run before Task 24 (R-M3-52).
   - *Over-masking* is accepted: every string after a secret word in its statement, the next
     non-keyword word after `PASSWORD`, whole strings and comment words near `password`/`secret`,
     and error text such as `password authentication failed for user …` (m6, not changed).
+
+## m3b-t16 — run service
+
+- **Two paths.** A `RunRequest` without `prepared`, `plan` and `run_as_one` is M3a's run,
+  unchanged. With `prepared` and `plan` it is an M3b run: each unit is sent as
+  `PreparedUnit::final_text` with its binds, the gate item's verdict and effects, its masked
+  text and `max_result_sets: 100`; `run_as_one` sends `Protocol::Simple`, never suspended.
+- **The plan is checked, never assumed.** It must hold one item per prepared unit in order,
+  and the prepared units must be the request's units. `Run`, `RunInTxThenConfirm` and
+  `ExplainAnalyzeRollback` are sent. A unit the user skipped is not sent: `apply_answer` turns
+  its `Confirm`/`Warn` into `Deny(exec-skipped-by-user)`, logged once as `SkippedByUser { n }`
+  and counted in the summary's skipped (R-M3-84). An unanswered `Confirm`/`Warn`, any other
+  `Deny`, a short or empty plan, or `plan`/`prepared`/`run_as_one` alone sends nothing. An
+  answer never turns a `Deny` into a run.
+- **Questions on the ticket.** `RunTicket::choices` carries the pending `NeedsChoice` or
+  `NeedsCommit` with the run's request number, and clears when the run moves on (`UnitStarted`,
+  `UnitEnded`, `CommitDecided`, `RunEnded`). A question asked before the request number is
+  known is published as soon as it is. A `NeedsCommit` also goes to `RunRequest::confirm`
+  (none answers `RollBack`). The port's answer goes back with
+  `SessionHandle::commit_decision(seq, unit, question, ..)`, for exactly that question.
+  `CommitQuestion::production` is `true` (confirm-in-transaction exists only on production,
+  P-M3b-30). `connection` is empty: the port belongs to its console and names it.
+- **Tabs and titles (R-M3-66).** One tab per result set, `TabKey { console, unit, set }`. The
+  title is the unit's directly preceding comment, without its markers, its last comment and
+  first line (`ExecUnit::title`, set by `resolve_units` from `UnitSpan::title_comment`); else
+  `Result N`, where N counts the run's units that opened a tab. Further sets add ` (k)`.
+  `ResultTab::title` keeps the whole title (the tooltip). `short_title()` cuts it after 40
+  graphemes with `…`. Clusters are approximated without a segmentation table, since the crate
+  takes no new dependency: combining marks, variation selectors, emoji modifiers, tags, ZWJ
+  joins and regional-indicator pairs. A prepared unit past 100 sets logs
+  `ResultSetLimit { total, limit: 100 }`; M3a's units keep `MoreResultSets`.
+- **Count rows (R-M3-76).** `count_sql` reads the unit's tokens. The first word must be
+  `SELECT`/`WITH`/`VALUES`/`TABLE`. A locking clause, `INTO`, a second statement, an executable
+  comment, a client command or a lexer error refuses it. A trailing `;` and trivia go. A
+  top-level `ORDER BY` goes unless a top-level `LIMIT`/`FETCH`/`OFFSET` follows. The count is a
+  separate query sent only by `ExecService::count`, never implicitly. The read-only check
+  (`StatementClassifier::check_read_only`; the pool's from `with_classifier`) must allow it;
+  without a check it is refused (fail closed). It runs on a pooled `Service` session when the
+  console holds no transaction of the user's, else on the console (after its cursor is
+  released, as for any run). It runs as a `Request::Run`, so a read-only or production
+  session's guard applies unchanged (R-M3-52). It is cancelled after 30 s
+  (`CountError::TimedOut`) and can be cancelled earlier (`CountTicket::cancel`).
+- **Auditor chain (R-M3-63).** Every event goes first to the synchronous auditors in order,
+  then is `try_send` to each sink. A full sink counts a drop and never waits. A closed sink is
+  ignored. `RowsFetched` reaches the sinks at most once per 50 ms per result. The output log
+  stays the console's bounded, non-blocking `SessionLog` ring, written by the observer as in
+  M3a, so its order and timing are M3a's. The chain's drops end the run as one
+  `Dropped { n }` line.
+  The chain is an event pipeline, not an audit trail. What a sink drops is gone, and the
+  history is never evidence of what ran.
+- **History sink.** There is one record per `UnitEnded` of a unit that ran, sent when
+  `RunRequest::history` is `Some` and not private. A profile that records no history gets
+  `None` from Task 24, and the store's `set_do_not_record` drops its records as well. The
+  record holds `PreparedUnit::masked` only, never the text sent. Its `error_message` has every
+  bind value scrubbed out: longest first, and a value of one or two bytes only where it stands
+  alone. `text_hash` and `fingerprint` are left zero, since the store computes both from its
+  own redacted text (Task 17). A record is never `{:?}`-formatted.
+- **Log lines.**
+  - *Notices and MySQL warnings.* These are `Notice` lines. The server's text stays verbatim in
+    its own field, and the code is a chip, not a sentence argument. The session reads MySQL
+    warnings (`RawConn::warnings`) after a statement whose `Done` counted some, on read-write
+    sessions only (T13 review M-8). Notices past the cap are `NoticesDropped { n }`, carried by
+    `RunEvent::NoticesDropped`.
+  - *Run as one.* A stop that closed it early is `ClosedEarly { ran, rest_not_run }`, from
+    `take_close_report` via `RunEvent::ClosedEarly`. A PostgreSQL failure adds
+    `RunAsOneRolledBack`, because it is one implicit transaction (T13 review M-2).
+  - *Other events.* A retried statement logs `Retried`. An eviction of one of the run's results
+    logs `Evicted` on its console, through `MemoryBudget::on_evicted`.
+  - *DDL.* A DDL statement ends `exec-completed` on every engine (first word `CREATE`/`ALTER`/
+    `DROP`/`TRUNCATE`/`RENAME`/`COMMENT`, or the gate's DDL effect; PO, ledger 535). The unit's
+    status keeps the server's count.
+  - *Command tag.* A line keeps its statement's command tag (`LogLine::tag`, copied as
+    `tag=…`; ledger 340).
+- **One duration rule (PO, ledger 535).** `duration_message` gives `exec-dur-ms` under a
+  second, else `exec-dur-seconds` with two decimals, cut as the status bar's
+  `hv-status-duration-*` cuts them. The app formats the hundredths through
+  `UnitMsg::decimal`. The running clock keeps whole seconds and minutes.
+  `exec-dur-lt-ms` and `exec-dur-s-ms` are deleted: no code names them any more.
+- **Fix round 1 (review of e1bc91c).**
+  - *Titles (I-1).* A comment title never carries what could re-order or restyle the chrome.
+    - C0/C1 controls (a lone `\r`, ESC, NUL, tab), U+2028/2029, bidi marks, embeddings, overrides and isolates, and U+FEFF become white space.
+    - Runs of white space become one space.
+    - The stored title is cut after 256 graphemes with `…`; the tab shows 40.
+    - An optimizer hint or executable comment (`/*+`, `/*!`, `/*M!`) is never a title.
+  - *Two named exceptions to the one duration rule (m2; on the PO list).*
+    - Configured spans (`LogArg::SpanMs`, the idle bound) read the way the setting reads: whole seconds under a minute ("20 s"), then minutes and seconds ("10 min").
+    - The running clock shows whole seconds, then minutes and seconds. It repaints once a second.
+  - *Server text in the log (m3, ruling).* Server error and notice text stays verbatim in the console's output log, even when it echoes a bind value.
+    - The log is session-only and in memory, and nothing persists or traces it.
+    - The value was typed by the same user in the same session, so the exposure equals that of a literal in the editor.
+    - Scrubbing it would hide which value failed.
+    - History, the only store that outlives the session, is scrubbed.
+    - Anything that ever writes the log to disk (an export, a crash report) must apply the same scrub.
+  - *Not-run units (m5).* A unit that ends without starting (a queued run cancelled, a full queue) still gets a history record: at the run's start, with duration 0 and no rows, masked text as always. `HistoryRecord` has no flag of its own for this.
+  - *Count rows (m6–m8).*
+    - `count_prepared` wraps a prepared unit's `final_text` and carries its binds (`CountRequest::binds`) in slot order. A top-level `ORDER BY` holding a placeholder is kept. `count_sql` refuses placeholders, since it has no values.
+    - The cancel and the 30 s timeout cover the whole count: the read-only check and the pooled session's connect too.
+    - Dropping the ticket, or keeping only `done`, never cancels the count.
+  - *PostgreSQL Run as one (m9).* The line is chosen from the user's transaction status when the unit started (the session's at the run's start, then each `TxChanged`).
+    - Outside a transaction, a failure or a cancel logs `exec-run-as-one-rolled-back`.
+    - Inside one, nothing was rolled back yet, so it logs `exec-run-as-one-tx-failed`.
+  - *Stopped early (m10).* `ClosedEarly` is logged only when more statements ran; the stop's own line covers the rest.
+  - *Read-only sessions (m11).* MySQL warnings on a read-only session are not read, and their count is not logged either; the guard's `ROLLBACK` follows at once.
+  - *The output log is not a chain sink (m12, ruling).* The observer writes the output log directly, keeping M3a's order and timing, instead of through an async chain sink. The M8 chain sinks (`hacivat-audit`) will consume the same `RunEvent`s through `AuditorChain::push_sink`.

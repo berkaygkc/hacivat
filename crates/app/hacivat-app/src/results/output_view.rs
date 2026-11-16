@@ -20,7 +20,7 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
-use hacivat_exec::{LogArg, LogLine, LogMsg, Severity, duration_message};
+use hacivat_exec::{LogArg, LogLine, LogMsg, Severity, duration_message, span_message};
 use hacivat_l10n::ArgValue;
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::text::{Label, TextSource};
@@ -50,13 +50,22 @@ fn dynamic(cx: &App, id: &str, args: Vec<(&'static str, ArgValue)>) -> String {
     }
 }
 
-/// `ms` as one `exec-dur-*` message (`340 ms`, `2 s 340 ms`), its numbers in the format locale.
+/// `ms` as one `exec-dur-*` message (`340 ms`, `2.34 s`), its numbers in the format locale.
 pub fn duration_text(ms: u64, cx: &App) -> String {
-    let m = duration_message(ms);
+    unit_msg_text(duration_message(ms), cx)
+}
+
+// ## m3b-t16-run-service (named exception)
+/// An `exec-dur-*` message in the UI language: a seconds value with two decimals (the one
+/// duration rule, ledger 535), every other number a count in the format locale.
+fn unit_msg_text(m: hacivat_exec::UnitMsg, cx: &App) -> String {
     let args = m
         .args
         .iter()
-        .map(|(name, n)| (*name, ArgValue::Count(*n)))
+        .map(|(name, n)| match m.decimal(name) {
+            Some(d) => (*name, ArgValue::Decimal(hacivat_l10n::ExactDecimal(d))),
+            None => (*name, ArgValue::Count(*n)),
+        })
         .collect();
     dynamic(cx, m.id, args)
 }
@@ -72,6 +81,8 @@ pub fn core_text(msg: &LogMsg, cx: &App) -> SharedString {
                 LogArg::U64(n) => ArgValue::Count(n),
                 LogArg::Str(s) => ArgValue::Text(s.to_string()),
                 LogArg::DurationMs(ms) => ArgValue::Text(duration_text(ms, cx)),
+                // ## m3b-t16-run-service (named exception): a configured span (idle bound).
+                LogArg::SpanMs(ms) => ArgValue::Text(unit_msg_text(span_message(ms), cx)),
             };
             (name, value)
         })
@@ -106,6 +117,10 @@ fn glyph(msg: &LogMsg) -> (IconName, bool) {
         | LogMsg::ConfirmRolledBack { .. } => (IconName::GitCommit, false),
         LogMsg::SafetyDenied { .. } => (IconName::Lock, false),
         LogMsg::ConfirmStatementFailed => (IconName::TriangleAlert, true),
+        // ## m3b-t16-run-service (named exception): Task 25 owns their look.
+        LogMsg::NoticesDropped { .. } => (IconName::Ellipsis, false),
+        LogMsg::ClosedEarly { .. } => (IconName::Ban, false),
+        LogMsg::RunAsOneRolledBack | LogMsg::RunAsOneTxFailed => (IconName::Info, false),
     }
 }
 

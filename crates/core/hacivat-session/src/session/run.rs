@@ -683,7 +683,11 @@ impl Core {
             (u64::MAX, None)
         };
         match self.fetch_until(&mut s, first, target, bytes, w).await {
-            Step::Complete => self.completed(s, hold, control).await,
+            Step::Complete => {
+                // ## m3b-t16-run-service (named exception; T13 review M-8)
+                self.read_warnings(&mut s, w).await;
+                self.completed(s, hold, control).await
+            }
             // ## m3b-t11-session-runs: only the first set of the last unit stays suspended (a
             // unit with several sets never does, R-M3-66; the drivers never suspend one).
             Step::Suspend if last && s.ordinal == 0 => {
@@ -738,6 +742,37 @@ impl Core {
                 Ended::of(&s, outcome)
             }
             Step::Failed(e) => self.failed(s, hold, &e, control, w).await,
+        }
+    }
+
+    // ## m3b-t16-run-service (named exception; T13 review M-8, R-M3-77)
+    /// MySQL's warnings of the statement that just ended: read (`SHOW WARNINGS`, the driver's
+    /// `RawConn::warnings`) only when its `Done` counted some, and never on a read-only
+    /// session: the guard's `ROLLBACK` follows at once, and nothing of them reaches the run
+    /// (fix round 1, review m11: not even their count). Each one is a `RunEvent::Notice` of
+    /// the unit under the same cap as a notice; a failure to read them is traced without any
+    /// text and changes nothing else.
+    async fn read_warnings(&mut self, s: &mut Stream, w: &mut Watch) {
+        let counted = s.done.map_or(0, |d| d.warnings);
+        if self.read_only || counted == 0 {
+            return;
+        }
+        let read = match self.live.as_mut() {
+            Some(live) => w.guard(live.raw().warnings(), Fire::OnStop).await,
+            None => return,
+        };
+        self.note_settle(w);
+        match read {
+            Ok(warnings) => {
+                for notice in warnings {
+                    s.on_notice(notice);
+                }
+            }
+            Err(e) => tracing::debug!(
+                kind = ?e.kind,
+                counted,
+                "the statement's warnings could not be read"
+            ),
         }
     }
 

@@ -199,6 +199,8 @@ impl Bench {
                     doc_range: at..at + s.len(),
                     kind: sql_split::exec_range::UnitKind::Statement,
                     suspendable: s.starts_with("SELECT"),
+                    // ## m3b-t16-run-service (named exception)
+                    title: None,
                 };
                 at += s.len() + 2;
                 u
@@ -1461,6 +1463,104 @@ pub mod matrix {
         match major.split_once('.') {
             Some((a, b)) => a == v.major.to_string() && b == v.minor.to_string(),
             None => major == v.major.to_string(),
+        }
+    }
+}
+
+// ## m3b-t16-run-service
+// Task 16's helpers: M3b requests (prepared units with a gate plan the user answered) over the
+// fake console session, without Task 15's `prepare_units`/`gate` bodies (P-M3b-16: a plan is
+// built here item by item).
+
+pub mod m3b {
+    use std::sync::Arc;
+
+    use hacivat_exec::{
+        ErrorPolicy, ExecUnit, GateClass, GateDecision, GateItem, GatePlan, OffsetMap,
+        PreparedUnit, RunRequest,
+    };
+    use hacivat_session::session::{SessionEffects, UnitVerdict};
+    use hacivat_values::{BindValue, LogicalType};
+    use sql_split::exec_range::UnitKind;
+
+    use super::Bench;
+
+    /// A unit of `text` at `start`, titled `title`.
+    pub fn unit(text: &str, start: usize, title: Option<&str>) -> ExecUnit {
+        ExecUnit {
+            text: text.into(),
+            doc_range: start..start + text.len(),
+            kind: UnitKind::Statement,
+            suspendable: false,
+            title: title.map(Arc::from),
+        }
+    }
+
+    /// Units of `texts`, two bytes apart, untitled.
+    pub fn units(texts: &[&str]) -> Vec<ExecUnit> {
+        let mut at = 0;
+        texts
+            .iter()
+            .map(|t| {
+                let u = unit(t, at, None);
+                at += t.len() + 2;
+                u
+            })
+            .collect()
+    }
+
+    /// `unit` prepared as written: no binds, its own text masked.
+    pub fn prepared(unit: &ExecUnit) -> PreparedUnit {
+        PreparedUnit {
+            unit: unit.clone(),
+            final_text: unit.text.clone(),
+            binds: Arc::from(Vec::new()),
+            masked: unit.text.clone(),
+            offsets: OffsetMap::identity(unit.doc_range.start),
+        }
+    }
+
+    /// A text bind value.
+    pub fn text_bind(s: &str) -> BindValue {
+        BindValue::Typed {
+            hint: LogicalType::Text {
+                max_chars: None,
+                fixed: false,
+            },
+            text: s.into(),
+        }
+    }
+
+    /// A gate item for unit `i` deciding `decision`.
+    pub fn item(i: u32, decision: GateDecision) -> GateItem {
+        GateItem {
+            unit: i,
+            decision,
+            verdict: UnitVerdict::Unknown,
+            effects: SessionEffects::empty(),
+            class: GateClass::Read,
+            fingerprint: 0,
+        }
+    }
+
+    /// A plan that runs every one of `n` units.
+    pub fn run_all(n: usize) -> GatePlan {
+        GatePlan {
+            items: (0..n)
+                .map(|i| item(u32::try_from(i).unwrap(), GateDecision::Run))
+                .collect(),
+        }
+    }
+
+    /// An M3b request of `units` prepared as written, run by `plan`.
+    pub fn request(b: &Bench, units: Vec<ExecUnit>, plan: GatePlan) -> RunRequest {
+        let prepared = units.iter().map(prepared).collect();
+        RunRequest {
+            units,
+            prepared: Some(prepared),
+            plan: Some(plan),
+            policy: ErrorPolicy::StopOnError,
+            ..b.req(&[])
         }
     }
 }

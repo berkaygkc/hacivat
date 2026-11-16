@@ -1911,7 +1911,7 @@ hv-editor-mark-denied = not sent: read-only
 hv-editor-mark-cancelling = cancelling…
 # At the end of a statement's first line when it was cancelled.
 # Variables:
-#   $duration (String) - how long it ran (an exec-dur-* message), e.g. "12 s 408 ms".
+#   $duration (String) - how long it ran (an exec-dur-* message), e.g. "12.40 s".
 hv-editor-mark-cancelled = cancelled after { $duration }
 # At the end of a statement's first line when an earlier statement of its run failed.
 hv-editor-mark-skipped = skipped: an earlier statement failed

@@ -59,14 +59,17 @@ pub(crate) fn duration_text(cx: &App, ms: u64) -> String {
 /// frame painted it; under a second it reads "0 s", past a minute `exec-dur-min*`.
 pub(crate) fn clock_message(ms: u64) -> hacivat_exec::UnitMsg {
     let s = ms / 1_000;
-    if s < 60 {
-        hacivat_exec::UnitMsg {
-            id: "exec-dur-s",
-            args: vec![("s", s)],
-        }
+    // ## m3b-t16-run-service (named exception): the clock keeps its whole seconds and minutes;
+    // `duration_message` now gives a finished duration's seconds with two decimals.
+    let (min, rest) = (s / 60, s % 60);
+    let (id, args) = if s < 60 {
+        ("exec-dur-s", vec![("s", s)])
+    } else if rest == 0 {
+        ("exec-dur-min", vec![("min", min)])
     } else {
-        duration_message(s * 1_000)
-    }
+        ("exec-dur-min-s", vec![("min", min), ("s", rest)])
+    };
+    hacivat_exec::UnitMsg { id, args }
 }
 
 /// [`clock_message`] in the UI language.
@@ -76,10 +79,14 @@ pub(crate) fn clock_text(cx: &App, ms: u64) -> String {
 
 /// A `UnitMsg` in the UI language, its numbers in the format locale.
 fn unit_text(cx: &App, m: hacivat_exec::UnitMsg) -> String {
+    // ## m3b-t16-run-service (named exception): a seconds value has two decimals.
     let args = m
         .args
         .iter()
-        .map(|(k, v)| (*k, ArgValue::Count(*v)))
+        .map(|(k, v)| match m.decimal(k) {
+            Some(d) => (*k, ArgValue::Decimal(hacivat_l10n::ExactDecimal(d))),
+            None => (*k, ArgValue::Count(*v)),
+        })
         .collect();
     message(cx, m.id, args).to_string()
 }

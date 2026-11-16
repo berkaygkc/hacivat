@@ -219,13 +219,9 @@ error-exec-sqlite-busy-hint = Bu veritabanı dosyası başka bir program tarafı
 ## m3a-t23-exec
 
 # Review: PO
-exec-dur-lt-ms = <1 ms
-# Review: PO
 exec-dur-ms = { $ms } ms
 # Review: PO
 exec-dur-s = { $s } sn
-# Review: PO
-exec-dur-s-ms = { $s } sn { $ms } ms
 # Review: PO
 exec-dur-min = { $min } dk
 # Review: PO
@@ -487,3 +483,36 @@ safety-destructive-alter-type = { $table } içindeki bir sütunun türü değiş
 safety-destructive-merge-delete = MERGE, { $table } içinden satır siler.
 # Review: PO
 safety-destructive-update-limit-no-order = { $table } üzerinde ORDER BY olmadan UPDATE … LIMIT, satırları belirsiz bir sırayla değiştirir.
+
+## m3b-t16-run
+
+# Review: PO
+exec-dur-seconds = { NUMBER($seconds, minimumFractionDigits: 2) } sn
+# Review: PO
+exec-notice-debug = Sunucu hata ayıklama iletisi
+# Review: PO
+exec-notice-log = Sunucu günlük iletisi
+# Review: PO
+exec-notice-info = Sunucu bilgi iletisi
+# Review: PO
+exec-notice-notice = Sunucu bildirimi
+# Review: PO
+exec-notice-warning = Sunucu uyarısı
+# Review: PO
+exec-notices-dropped = { $n } sunucu bildirimi daha gösterilmedi.
+# Review: PO
+exec-result-set-limit = Deyim { $total } sonuç kümesi döndürdü; ilk { $limit } tanesi gösteriliyor.
+# Review: PO
+exec-skipped-by-user = İsteğiniz üzerine { $n } deyim atlandı.
+# Review: PO
+exec-retried = { $n }. deyim yeniden çalıştırılıyor
+# Review: PO
+cursor-closed-evicted = Bellek açmak için kapatıldı; { $rows } satır tutuldu.
+# Review: PO
+exec-run-as-one-closed-early = Durduruldu. { $n } deyim daha çalıştı; sonuçları gösterilmiyor.
+# Review: PO
+exec-run-as-one-closed-early-rest = Durduruldu. { $n } deyim daha çalıştı (sonuçları gösterilmiyor); geri kalanı çalışmadı.
+# Review: PO
+exec-run-as-one-rolled-back = PostgreSQL metni tek bir işlem olarak çalıştırdı; metin kendisi commit etmediyse, hatalı deyimden önceki deyimler de geri alındı.
+# Review: PO
+exec-run-as-one-tx-failed = İşlem başarısız oldu: geri alana kadar içinde başka bir şey çalışmaz.

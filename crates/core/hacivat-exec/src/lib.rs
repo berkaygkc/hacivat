@@ -48,6 +48,8 @@ pub use ux::session_live;
 pub use audit::{AuditorChain, SINK_CAPACITY, SyncAuditor};
 pub use classify_pool::ClassifyPool;
 pub use count::count_sql;
+// ## m3b-t16-run-service (fix round 1, named exception: re-export)
+pub use count::count_prepared;
 pub use explain_wrap::explain_analyze_inner;
 pub use gate::{
     CommitQuestion, ConfirmAnswer, ConfirmPort, ConfirmQuestion, ConnSafety, GateDecision,
@@ -67,3 +69,9 @@ pub use sql_safety::{
 };
 // The session's answers the run service's callers name with these (Tasks 21, 23, 24).
 pub use hacivat_session::session::{CommitAnswer, ErrorPolicy, RunChoice};
+// ## m3b-t16-run-service (named exception: re-exports only)
+pub use log::span_message;
+pub use service::{
+    COUNT_TIMEOUT, CountError, CountRequest, CountTicket, SKIPPED_BY_USER, apply_answer,
+};
+pub use titles::{TITLE_GRAPHEMES, TITLE_MAX_GRAPHEMES, comment_title, short_title};

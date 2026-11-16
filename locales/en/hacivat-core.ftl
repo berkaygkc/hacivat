@@ -312,8 +312,6 @@ error-exec-sqlite-busy-hint = Another program has locked this database file. Run
 # Durations and sizes in the output log, the gutter and the result strip (NOTES rule 6): each is
 # one message with its unit inside. Every number arrives pre-formatted in the format locale.
 
-# A duration under one millisecond.
-exec-dur-lt-ms = <1 ms
 # A duration under one second.
 # Variables:
 #   $ms (String) - the milliseconds, e.g. "340".
@@ -322,11 +320,6 @@ exec-dur-ms = { $ms } ms
 # Variables:
 #   $s (String) - the seconds, e.g. "2".
 exec-dur-s = { $s } s
-# A duration of seconds and milliseconds, under a minute.
-# Variables:
-#   $s (String) - the seconds, e.g. "2".
-#   $ms (String) - the milliseconds past them, e.g. "340".
-exec-dur-s-ms = { $s } s { $ms } ms
 # A duration of whole minutes.
 # Variables:
 #   $min (String) - the minutes, e.g. "3".
@@ -389,7 +382,7 @@ exec-tx-rolled-back = Transaction rolled back
 #   $executed (Number) - the statements that ran, e.g. 2.
 #   $total (Number) - the statements in the run, e.g. 3.
 #   $failed (Number) - the statements that failed, e.g. 1.
-#   $duration (String) - how long the run took (an exec-dur-* message), e.g. "1 s 200 ms".
+#   $duration (String) - how long the run took (an exec-dur-* message), e.g. "1.20 s".
 exec-summary = { $total ->
         [one] { $executed } of { $total } statement executed, { $failed } failed, in { $duration }
        *[other] { $executed } of { $total } statements executed, { $failed } failed, in { $duration }
@@ -400,7 +393,7 @@ exec-summary = { $total ->
 exec-error = Statement { $n } failed
 # The statement in flight was cancelled.
 # Variables:
-#   $duration (String) - how long it ran (an exec-dur-* message), e.g. "2 s".
+#   $duration (String) - how long it ran (an exec-dur-* message), e.g. "2.00 s".
 exec-cancelled = Cancelled after { $duration }
 # A statement returned more than one result set (R-M3-25).
 # Variables:
@@ -779,3 +772,73 @@ safety-destructive-merge-delete = The MERGE deletes rows of { $table }.
 # Variables:
 #   $table (String) - the table's name as written in the statement.
 safety-destructive-update-limit-no-order = UPDATE … LIMIT on { $table } without ORDER BY changes rows in no fixed order.
+
+## m3b-t16-run
+
+# A duration of a second or more (the one duration rule of the log, the gutter and the status
+# bar: milliseconds under a second, else seconds with two decimals).
+# Variables:
+#   $seconds (Decimal) - seconds with two decimals, e.g. 2.45.
+exec-dur-seconds = { NUMBER($seconds, minimumFractionDigits: 2) } s
+# A server message the statement produced (PostgreSQL DEBUG). The server's own text follows on
+# its own row, verbatim.
+exec-notice-debug = Server debug message
+# A server message the statement produced (PostgreSQL LOG).
+exec-notice-log = Server log message
+# A server message the statement produced (PostgreSQL INFO).
+exec-notice-info = Server info message
+# A server notice the statement produced (PostgreSQL NOTICE, MySQL Note).
+exec-notice-notice = Server notice
+# A server warning the statement produced (PostgreSQL WARNING, MySQL Warning).
+exec-notice-warning = Server warning
+# Server notices past the per-statement limit were counted and not shown.
+# Variables:
+#   $n (Number) - the notices not shown, e.g. 12.
+exec-notices-dropped = { $n ->
+        [one] { $n } more server notice was not shown.
+       *[other] { $n } more server notices were not shown.
+    }
+# A statement returned more result sets than a run keeps (R-M3-66).
+# Variables:
+#   $total (Number) - the result sets it returned, e.g. 150.
+#   $limit (Number) - the result sets kept, e.g. 100.
+exec-result-set-limit = The statement returned { $total } result sets; the first { $limit } are shown.
+# The user skipped statements in the confirmation before the run.
+# Variables:
+#   $n (Number) - the statements skipped, e.g. 2.
+exec-skipped-by-user = { $n ->
+        [one] { $n } statement skipped at your request.
+       *[other] { $n } statements skipped at your request.
+    }
+# A failed statement was run again (the error bar's Retry).
+# Variables:
+#   $n (String) - the statement's number in the run, e.g. "3".
+exec-retried = Running statement { $n } again
+# A background result was closed to free memory; its first rows stay.
+# Variables:
+#   $rows (Number) - the rows kept, e.g. 1000.
+cursor-closed-evicted = { $rows ->
+        [one] Closed to free memory; { $rows } row kept.
+       *[other] Closed to free memory; { $rows } rows kept.
+    }
+# A text run as one was stopped; statements after the stopped result ran, and their results
+# are not shown.
+# Variables:
+#   $n (Number) - the statements that ran, e.g. 2.
+exec-run-as-one-closed-early = { $n ->
+        [one] Stopped. { $n } more statement ran; its result isn't shown.
+       *[other] Stopped. { $n } more statements ran; their results aren't shown.
+    }
+# As exec-run-as-one-closed-early, and the rest of the text did not run.
+# Variables:
+#   $n (Number) - the statements that ran, e.g. 2.
+exec-run-as-one-closed-early-rest = { $n ->
+        [one] Stopped. { $n } more statement ran (its result isn't shown); the rest didn't run.
+       *[other] Stopped. { $n } more statements ran (their results aren't shown); the rest didn't run.
+    }
+# PostgreSQL ran a text sent as one in a single transaction, so a failure rolled back the
+# statements before it too.
+exec-run-as-one-rolled-back = PostgreSQL ran the text as one transaction, so the statements before the failing one were rolled back too, unless the text committed them itself.
+# A text run as one failed or was stopped inside the user's open transaction on PostgreSQL:
+# nothing was rolled back yet, but the transaction failed (fix round 1, review m9).
+exec-run-as-one-tx-failed = The transaction failed: nothing more runs in it until you roll it back.

@@ -733,6 +733,19 @@ pub enum RunEvent {
         unit: UnitId,
         notice: hacivat_driver::Notice,
     },
+    // ## m3b-t16-run-service (named exception: the run service logs these)
+    /// `n` notices of `unit` past the per-unit cap (and the driver's own) were counted, never
+    /// reported; their text is never kept (R-M3-77).
+    NoticesDropped {
+        unit: UnitId,
+        n: u32,
+    },
+    /// A unit run as one (`Protocol::Simple`) was closed before its end (a stop), and the
+    /// driver reported what ran after the closed result (`RawConn::take_close_report`, Task 13).
+    ClosedEarly {
+        unit: UnitId,
+        report: hacivat_driver::CloseReport,
+    },
 }
 
 /// The open cursor a session holds (its snapshot's `cursor`).
