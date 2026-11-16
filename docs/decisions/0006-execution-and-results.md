@@ -583,3 +583,44 @@ wired into Run before Task 24 (R-M3-52).
   (`set_do_not_record`).
 - **Shutdown.** `shutdown(grace)` writes what is queued, checkpoints the log and closes within
   the grace (2 s); later calls answer `Disabled`.
+- **Review fix round 1 (redaction).**
+  - *Comments follow the reading (I1).* The MySQL reading takes `#` as a line comment, `--`
+    only before whitespace, block comments that do not nest, and the bodies of `/*!…*/` and
+    `/*M!…*/` as code; the standard reading nests block comments. A comment's body is read as
+    code by the same rules, and `password=` values and URI passwords in it are masked in place
+    (m1). An apostrophe in `# Bob's` or in a nested PostgreSQL comment no longer hides what
+    follows.
+  - *Quoted names (I2).* `"password" '…'` and `` `passwd` = '…' `` arm like the bare word.
+  - *Turkish keyboard (I3).* Keywords are compared through a fixed table (ASCII capitals;
+    `İ`, `ı` → `I`), so `İDENTİFİED` and `ıdentıfıed` arm. No locale casing.
+  - *Functions (m2).* Every string argument of `crypt`, `pgp_sym_encrypt`/`decrypt`
+    (`_bytea`), `pgp_pub_decrypt` (`_bytea`), `encrypt`/`decrypt` (`_iv`),
+    `AES_ENCRYPT`/`AES_DECRYPT` and `DES_ENCRYPT`/`DES_DECRYPT` is masked and scrubbed from
+    errors; so is `set_config`'s value when its name has a secret part.
+  - *Also.* The corrupt file's `-wal`/`-shm` are moved before the file itself, so a crash in
+    between never leaves an old log beside a fresh file (m7); `temp_store = MEMORY` (m13);
+    only FTS5 syntax errors read as "no match" (m9).
+  - *Tested by* the review's hostile probe, kept as a table
+    (`review_probe_every_case_is_caught_or_a_documented_gap`, 87 rows): each row is caught
+    (statement, error, parameters, search and the file's bytes) or is a gap whose phrase the
+    module docs must contain.
+- **What redaction does not catch.** Known limits: a secret written this way can reach the
+  history file. m3–m5 are on the PO list.
+  - *Other secret words (m3):* `TOKEN`, `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY` and other
+    names without a `password`/`passwd`/`pwd`/`secret` part (`OPTIONS (token '…')`);
+    SQLCipher `PRAGMA key`/`rekey` and `ATTACH … KEY '…'`; MySQL user variables without a
+    secret part in their name (`SET @pw = '…'`, then `IDENTIFIED BY @pw`).
+  - *URIs (m4):* a password with an unencoded `/`, `#`, `?`, `'` or whitespace; a scheme-less
+    `user:password@host`; shell command lines such as `COPY … PROGRAM 'curl -u u:pw …'`.
+  - *Error echoes (m5):* only whole secret values are scrubbed from errors. An echo cut short
+    (MySQL `near '%.80s'`) keeps the part it shows, and a string masked only because it follows
+    a secret word (the second of two adjacent strings, `PASSWORD 'a' 'b'`) is not removed
+    from the error.
+  - *Bind values* quoted back by the server: the store never sees them; Task 16 scrubs them.
+  - *Free text and other functions:* a secret in prose (`-- the pw is …`), in a function not
+    listed (`hmac`, user-defined functions), or built at run time
+    (`'… PASSWORD ' || quote_literal(v)`).
+  - *Depth:* code quoted in code, and comments, are read to three levels.
+  - *Over-masking* is accepted: every string after a secret word in its statement, the next
+    non-keyword word after `PASSWORD`, whole strings and comment words near `password`/`secret`,
+    and error text such as `password authentication failed for user …` (m6, not changed).

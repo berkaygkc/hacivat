@@ -475,8 +475,11 @@ impl Db {
         match run() {
             Ok(h) => Ok(h),
             // FTS5 refusing an expression ("fts5: syntax error …") is "no match", never an
-            // error the user sees. `match_expr` should never build one.
-            Err(rusqlite::Error::SqliteFailure(_, Some(m))) if m.starts_with("fts5:") => {
+            // error the user sees. `match_expr` should never build one. Any other FTS5 error
+            // (an index out of step with its table) is reported.
+            Err(rusqlite::Error::SqliteFailure(_, Some(m)))
+                if m.starts_with("fts5: syntax error") =>
+            {
                 Ok(Vec::new())
             }
             Err(e) => Err(sql(e)),

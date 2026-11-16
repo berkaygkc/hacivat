@@ -9,8 +9,10 @@
 //! directory is the app's (`LocalPaths::history_db()`'s parent, created private by the app;
 //! T1a review M7). Opening runs `PRAGMA quick_check`: a file SQLite reports as not a database or
 //! corrupt is renamed `history.sqlite.corrupt-<unix seconds>` (with its `-wal` and `-shm`, so
-//! an old log is never replayed into the new file) and a fresh file takes its place. Nothing is
-//! deleted. A busy or unreadable file is an error, never a rotation.
+//! an old log is never replayed into the new file; the log is moved first) and a fresh file
+//! takes its place. Nothing is deleted. A busy or unreadable file is an error, never a
+//! rotation. Another process that still has the corrupt file open keeps writing to the moved
+//! file (its own handle), not to the fresh one, until it reopens.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -166,7 +168,8 @@ fn try_open(path: &Path) -> Result<Connection, Fail> {
     }
     conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0))
         .map_err(classify)?;
-    conn.execute_batch("PRAGMA synchronous = NORMAL")
+    // Large sorts stay in memory: no (redacted) text spills into the temporary directory.
+    conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY")
         .map_err(classify)?;
     conn.execute_batch(&format!(
         "BEGIN IMMEDIATE; {DDL} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
@@ -227,12 +230,14 @@ fn rotate(path: &Path) -> std::io::Result<PathBuf> {
         target = sibling(path, &format!(".corrupt-{secs}-{n}"));
         n += 1;
     }
-    std::fs::rename(path, &target)?;
+    // The log first: a crash between the renames must never leave an old `-wal` beside a
+    // fresh file (SQLite would replay it into the new database).
     for suffix in ["-wal", "-shm"] {
         let from = sibling(path, suffix);
         if from.exists() {
             std::fs::rename(&from, sibling(&target, suffix))?;
         }
     }
+    std::fs::rename(path, &target)?;
     Ok(target)
 }

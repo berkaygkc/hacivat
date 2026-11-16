@@ -9,25 +9,67 @@
 //! (standard SQL), and masks the union of what either reading finds: a string the two readings
 //! disagree about is masked whichever reading is right.
 //!
+//! - **The two readings' comments.** The MySQL reading takes `#` as a line comment, `--` only
+//!   before whitespace, block comments that do not nest, and the bodies of executable comments
+//!   (`/*!80000 … */`, `/*M!100000 … */`) as code. The standard reading takes `--`, and block
+//!   comments that nest (PostgreSQL). So an apostrophe in `# Bob's` or in a nested
+//!   `/* /* */ it's */` cannot hide the statement after it from both readings.
 //! - **Secret keywords.** A word `PASSWORD`, `PASSWD`, `PWD`, `SECRET` or `IDENTIFIED`, or a
 //!   word with such an `_`-separated part (`MASTER_PASSWORD`, `client_secret`), arms the rest
 //!   of its statement (up to a `;`, or a psql meta-command): every quoted string after it
 //!   (`'…'`, `"…"`, `$tag$…$tag$`) is masked. The value right after the keyword is masked even
 //!   when it is a bare word (Oracle `IDENTIFIED BY tiger`): after `PASSWORD [=|(]`, after
 //!   `IDENTIFIED [WITH plugin] BY|AS [PASSWORD|RANDOM]`, after `REPLACE`, and after
-//!   `SET PASSWORD FOR <user> =`.
+//!   `SET PASSWORD FOR <user> =`. A quoted name (`"password" '…'`, `` `passwd` = '…' ``) arms
+//!   like the bare word. Keywords are compared through a fixed table, never locale casing:
+//!   ASCII capitals, and `İ`/`ı` read as `I` (`İDENTİFİED`, `ıdentıfıed`).
 //! - **Connection strings.** A quoted string with `password`, `passwd`, `pwd=` or `secret` in
 //!   it (ASCII case-insensitive), or a URI with a password in its user part
 //!   (`postgresql://u:pw@h`), is masked wherever it stands (`CREATE SUBSCRIPTION … CONNECTION`,
 //!   `dblink_connect(…)`).
+//! - **Comments.** A comment's body is read as code by the same rules (`-- password x`), and
+//!   the `password=` values and URI passwords in it are masked in place; the rest of the
+//!   comment stays.
+//! - **Crypto functions and secret settings.** Every string argument of `crypt`,
+//!   `pgp_sym_encrypt`/`pgp_sym_decrypt` (and `_bytea`), `pgp_pub_decrypt` (and `_bytea`),
+//!   `encrypt`/`decrypt` (and `_iv`), `AES_ENCRYPT`/`AES_DECRYPT` and
+//!   `DES_ENCRYPT`/`DES_DECRYPT` is masked; so is `set_config`'s value when its name has a
+//!   secret part (`app.secret`).
 //! - **psql meta-commands.** From a `\` outside quotes to the end of its line, the text becomes
 //!   its `HvNorm1` form (Task 6): `\name` and one `?` for every argument
 //!   (`\connect db u password=…` → `\connect ?`).
 //!
 //! A masked string becomes `'***'`, a masked word `***`. The values found in value positions
-//! (and the `password=` values inside connection strings) are the record's *secrets*: the
-//! writer also removes them from the error message and the parameter text, since servers quote
-//! the failing statement in their errors (MySQL 1064: `near 'BY '…''`).
+//! (and the `password=` values inside connection strings and comments, and the string
+//! arguments of the functions above) are the record's *secrets*: the writer also removes them
+//! from the error message and the parameter text, since servers quote the failing statement in
+//! their errors (MySQL 1064: `near 'BY '…''`). Masking errs towards too much: every string
+//! after a secret word in its statement, the next non-keyword word after `PASSWORD`, and a
+//! whole string or dollar body that mentions `password` or `secret`.
+//!
+//! # What redaction does not catch
+//!
+//! These are known limits (T17 review round 1; m3–m5 are on the PO list). A secret written
+//! this way can reach the history file:
+//!
+//! - **Other secret words** (m3): `TOKEN`, `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY` and other
+//!   names without a `password`/`passwd`/`pwd`/`secret` part (`OPTIONS (token '…')`); SQLCipher's
+//!   `PRAGMA key`/`rekey` and `ATTACH … KEY '…'`; MySQL user variables whose name has no
+//!   secret part (`SET @pw = '…'`, then `IDENTIFIED BY @pw`).
+//! - **URIs** (m4): a password with an unencoded `/`, `#`, `?`, `'` or whitespace ends the
+//!   authority early (`postgresql://u:a/b@h`), and a scheme-less `user:password@host` is not
+//!   read as a URI. `COPY … PROGRAM 'curl -u u:pw …'` and other shell command lines are kept.
+//! - **Error echoes** (m5): the error scrub removes whole secret values only. A server echo cut
+//!   short (MySQL's `near '%.80s'` keeps the first 80 characters) keeps the part it shows,
+//!   and a string masked only because it follows a secret word, not in value position (the
+//!   second of two adjacent strings, `PASSWORD 'a' 'b'`), is masked in the statement but not
+//!   removed from the error.
+//! - **Bind values** quoted back by the server (`invalid input syntax for type integer:
+//!   "…"`): the store never sees the bound value; the run service scrubs it (Task 16).
+//! - **Free text and other functions**: a secret in prose (`-- the pw is …`), in a function not
+//!   listed above (`hmac(d, '…', 'sha256')`, user-defined functions), or built at run time
+//!   (`EXECUTE 'ALTER ROLE r PASSWORD ' || quote_literal(v)`, the value from a column).
+//! - **Depth**: code quoted in code, and comments, are read to three levels.
 
 use std::ops::Range;
 
@@ -58,12 +100,29 @@ pub(crate) fn redact(text: &str) -> Redacted {
     redact_at(text, 0)
 }
 
+/// Both readings of `text` (module docs), their masks and secret values added to `masks` and
+/// `secrets` with every range shifted by `offset`.
+fn scan_into(
+    text: &str,
+    depth: u8,
+    offset: usize,
+    masks: &mut Vec<Mask>,
+    secrets: &mut Vec<String>,
+) {
+    let mut local = Vec::new();
+    for backslash in [false, true] {
+        Scan::new(text, backslash, depth, &mut local, secrets).run();
+    }
+    masks.extend(local.into_iter().map(|m| Mask {
+        range: m.range.start + offset..m.range.end + offset,
+        kind: m.kind,
+    }));
+}
+
 fn redact_at(text: &str, depth: u8) -> Redacted {
     let mut masks = Vec::new();
     let mut secrets = Vec::new();
-    for backslash in [false, true] {
-        Scan::new(text, backslash, depth, &mut masks, &mut secrets).run();
-    }
+    scan_into(text, depth, 0, &mut masks, &mut secrets);
     secrets.retain(|s: &String| !s.trim().is_empty() && s != MASK);
     secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
     secrets.dedup();
@@ -146,8 +205,12 @@ struct Mask {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tok {
+    /// Whitespace, and in the MySQL reading the `/*!80000` / `/*M!` opener and its `*/`.
     Space,
-    Comment,
+    /// A comment; `inner` is its body.
+    Comment {
+        inner: (usize, usize),
+    },
     /// A quoted string (`'…'`, `"…"`) or a dollar body; `inner` is its content.
     String {
         inner: (usize, usize),
@@ -178,6 +241,26 @@ enum Expect {
     UserThenEq,
 }
 
+/// A function whose string arguments carry secrets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallKind {
+    /// Every string argument is a key or a password (`crypt`, `pgp_sym_encrypt`, …).
+    Crypto,
+    /// `set_config(name, value, local)`: the value, when the name names a secret.
+    SetConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Call {
+    kind: CallKind,
+    /// Parentheses open inside the call (1 = its own argument list).
+    depth: u32,
+    /// The argument at depth 1 being read.
+    arg: u32,
+    /// `set_config`'s first argument names a secret.
+    secret_key: bool,
+}
+
 struct Scan<'a> {
     text: &'a str,
     bytes: &'a [u8],
@@ -189,6 +272,11 @@ struct Scan<'a> {
     armed: bool,
     identified: bool,
     expect: Expect,
+    /// MySQL reading: executable comments (`/*!…`, `/*M!…`) open around the cursor.
+    exec: u32,
+    /// A secret-carrying function name was read; its `(` comes next.
+    pending_call: Option<CallKind>,
+    call: Option<Call>,
 }
 
 impl<'a> Scan<'a> {
@@ -210,6 +298,9 @@ impl<'a> Scan<'a> {
             armed: false,
             identified: false,
             expect: Expect::Nothing,
+            exec: 0,
+            pending_call: None,
+            call: None,
         }
     }
 
@@ -223,6 +314,8 @@ impl<'a> Scan<'a> {
         self.armed = false;
         self.identified = false;
         self.expect = Expect::Nothing;
+        self.pending_call = None;
+        self.call = None;
     }
 
     fn mask(&mut self, range: Range<usize>, kind: Kind) {
@@ -235,8 +328,12 @@ impl<'a> Scan<'a> {
 
     fn step(&mut self, tok: Tok, range: Range<usize>) {
         let piece = &self.text[range.clone()];
+        if !matches!(tok, Tok::Space | Tok::Comment { .. }) {
+            self.track_call(tok);
+        }
         match tok {
-            Tok::Space | Tok::Comment => {}
+            Tok::Space => {}
+            Tok::Comment { inner } => self.comment(inner),
             Tok::Semicolon => self.reset(),
             Tok::Meta => {
                 self.mask(range.clone(), Kind::Meta);
@@ -255,9 +352,17 @@ impl<'a> Scan<'a> {
             Tok::String { inner } => {
                 let content = &self.text[inner.0..inner.1];
                 let value = matches!(self.expect, Expect::Value | Expect::StrictValue);
+                // `"password" 'pw'` (a quoted option or column name): the name arms like the
+                // bare keyword and stays as it is.
+                if !value && self.bytes[range.start] == b'"' && is_secret_word(&kw_upper(content)) {
+                    self.armed = true;
+                    self.expect = Expect::Value;
+                    return;
+                }
                 if value {
                     self.secret(content);
                 }
+                let in_call = self.call_string(content);
                 let conninfo = looks_like_conninfo(content);
                 if conninfo {
                     for v in key_values(content) {
@@ -278,10 +383,18 @@ impl<'a> Scan<'a> {
                         self.secrets.extend(inner.secrets);
                     }
                 }
-                if self.armed || value || conninfo {
+                if self.armed || value || conninfo || in_call {
                     self.mask(range, Kind::String);
                 }
                 self.after_value();
+            }
+            Tok::Ident
+                if !matches!(self.expect, Expect::Value | Expect::StrictValue)
+                    && is_secret_word(&kw_upper(piece.trim_matches('`'))) =>
+            {
+                // `` `password` = 'pw' ``: as the bare keyword.
+                self.armed = true;
+                self.expect = Expect::Value;
             }
             Tok::Ident | Tok::Number => {
                 if matches!(self.expect, Expect::Value | Expect::StrictValue) {
@@ -303,6 +416,80 @@ impl<'a> Scan<'a> {
         }
     }
 
+    /// Follows the argument list of a secret-carrying call (`crypt(…)`, `set_config(…)`).
+    fn track_call(&mut self, tok: Tok) {
+        if let Some(kind) = self.pending_call.take()
+            && tok == Tok::Punct(b'(')
+        {
+            self.call = Some(Call {
+                kind,
+                depth: 0,
+                arg: 0,
+                secret_key: false,
+            });
+        }
+        let Some(call) = self.call.as_mut() else {
+            return;
+        };
+        match tok {
+            Tok::Punct(b'(') => call.depth += 1,
+            Tok::Punct(b')') => {
+                call.depth = call.depth.saturating_sub(1);
+                if call.depth == 0 {
+                    self.call = None;
+                }
+            }
+            Tok::Punct(b',') if call.depth == 1 => call.arg += 1,
+            _ => {}
+        }
+    }
+
+    /// A string inside a secret-carrying call: whether it is masked (and then a secret).
+    fn call_string(&mut self, content: &str) -> bool {
+        let Some(call) = self.call.as_mut() else {
+            return false;
+        };
+        let hide = match call.kind {
+            CallKind::Crypto => true,
+            CallKind::SetConfig if call.depth == 1 && call.arg == 0 => {
+                call.secret_key = names_a_secret(content);
+                false
+            }
+            CallKind::SetConfig => call.depth == 1 && call.arg == 1 && call.secret_key,
+        };
+        if hide {
+            self.secret(content);
+        }
+        hide
+    }
+
+    /// A comment's body is read as code (`-- password x`, `/* … IDENTIFIED BY … */`, the
+    /// standard reading of `/*!… */`), and the `password=` values and URI passwords in it are
+    /// masked in place. The comment does not change the statement around it.
+    fn comment(&mut self, inner: (usize, usize)) {
+        let text = self.text;
+        let body = &text[inner.0..inner.1];
+        if self.depth < MAX_DEPTH {
+            scan_into(
+                body,
+                self.depth + 1,
+                inner.0,
+                &mut *self.masks,
+                &mut *self.secrets,
+            );
+        }
+        let mut found: Vec<&str> = key_values(body);
+        found.extend(uri_password(body));
+        for v in found {
+            if v.is_empty() {
+                continue;
+            }
+            let start = inner.0 + (v.as_ptr() as usize - body.as_ptr() as usize);
+            self.mask(start..start + v.len(), Kind::Word);
+            self.secret(v);
+        }
+    }
+
     /// After a value: `IDENTIFIED BY 'x' REPLACE 'y'` keeps the `IDENTIFIED` chain alive.
     fn after_value(&mut self) {
         self.expect = match self.expect {
@@ -314,7 +501,7 @@ impl<'a> Scan<'a> {
 
     fn word(&mut self, w: &str, range: Range<usize>) {
         // A string prefix (`E'…'`, `N'…'`, `_utf8mb4'…'`): the string is the value.
-        let upper = w.to_ascii_uppercase();
+        let upper = kw_upper(w);
         let next = self.bytes.get(range.end);
         let unicode = upper == "U"
             && next == Some(&b'&')
@@ -326,6 +513,14 @@ impl<'a> Scan<'a> {
                     "E" | "N" | "B" | "X" | "U" | "R" | "BR" | "RB"
                 ) || upper.starts_with('_'))
         {
+            return;
+        }
+        // `crypt(…)`, `set_config(…)`: their string arguments, not the name, are the secrets.
+        if let Some(kind) = call_kind(&upper)
+            && matches!(self.expect, Expect::Nothing | Expect::Value)
+        {
+            self.pending_call = Some(kind);
+            self.expect = Expect::Nothing;
             return;
         }
         match self.expect {
@@ -387,13 +582,52 @@ impl<'a> Scan<'a> {
                 self.at = self.skip_while(start, |c| c.is_ascii_whitespace());
                 Tok::Space
             }
-            b'-' if b.get(start + 1) == Some(&b'-') => {
+            // `--`: in the MySQL reading only before whitespace or the end (`1--1` is
+            // arithmetic there); `#` is a line comment in the MySQL reading only.
+            b'-' if b.get(start + 1) == Some(&b'-')
+                && (!self.backslash
+                    || b.get(start + 2)
+                        .is_none_or(|c| c.is_ascii_whitespace() || *c < 0x20)) =>
+            {
                 self.at = self.line_end(start);
-                Tok::Comment
+                Tok::Comment {
+                    inner: (start + 2, self.at),
+                }
+            }
+            b'#' if self.backslash => {
+                self.at = self.line_end(start);
+                Tok::Comment {
+                    inner: (start + 1, self.at),
+                }
+            }
+            // MySQL reading: `/*!80000 … */` and `/*M!100000 … */` are code; only the opener
+            // and the closer are skipped.
+            b'/' if self.backslash
+                && b.get(start + 1) == Some(&b'*')
+                && (b.get(start + 2) == Some(&b'!')
+                    || (b.get(start + 2) == Some(&b'M') && b.get(start + 3) == Some(&b'!'))) =>
+            {
+                let bang = if b[start + 2] == b'!' { 3 } else { 4 };
+                self.at = self.skip_while(start + bang, |c| c.is_ascii_digit());
+                self.exec += 1;
+                Tok::Space
+            }
+            b'*' if self.backslash && self.exec > 0 && b.get(start + 1) == Some(&b'/') => {
+                self.exec -= 1;
+                self.at = start + 2;
+                Tok::Space
             }
             b'/' if b.get(start + 1) == Some(&b'*') => {
-                self.at = find(b, start + 2, b"*/").map_or(b.len(), |e| e + 2);
-                Tok::Comment
+                // MySQL block comments do not nest; standard (PostgreSQL) ones do.
+                let (inner_end, end) = if self.backslash {
+                    find(b, start + 2, b"*/").map_or((b.len(), b.len()), |e| (e, e + 2))
+                } else {
+                    self.nested_comment_end(start)
+                };
+                self.at = end;
+                Tok::Comment {
+                    inner: (start + 2, inner_end),
+                }
             }
             b'\'' | b'"' => {
                 let end = self.quoted(start, c);
@@ -462,6 +696,31 @@ impl<'a> Scan<'a> {
         i
     }
 
+    /// A nesting block comment opened at `start`: (end of its body, end past its `*/`); the
+    /// end of the text for both when it never closes.
+    fn nested_comment_end(&self, start: usize) -> (usize, usize) {
+        let b = self.bytes;
+        let mut depth = 1u32;
+        let mut i = start + 2;
+        while i + 1 < b.len() {
+            match (b[i], b[i + 1]) {
+                (b'/', b'*') => {
+                    depth += 1;
+                    i += 2;
+                }
+                (b'*', b'/') => {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        return (i - 2, i);
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        (b.len(), b.len())
+    }
+
     fn line_end(&self, i: usize) -> usize {
         self.skip_while(i, |c| c != b'\n')
     }
@@ -506,6 +765,55 @@ impl<'a> Scan<'a> {
 /// character (identifiers may be Turkish).
 fn is_word_byte(c: u8) -> bool {
     c.is_ascii_alphabetic() || c == b'_' || c >= 0x80
+}
+
+/// `w` uppercased for keyword comparison by a fixed table, never locale casing: ASCII letters
+/// to their capitals, and the Turkish `İ` and `ı` to `I` (a Turkish keyboard types
+/// `İDENTİFİED` with Caps Lock and `ıdentıfıed` without the dot).
+fn kw_upper(w: &str) -> String {
+    w.chars()
+        .map(|c| match c {
+            'İ' | 'ı' => 'I',
+            c => c.to_ascii_uppercase(),
+        })
+        .collect()
+}
+
+/// Functions whose string arguments are keys or passwords (`upper` from [`kw_upper`]).
+const CRYPTO_FUNCTIONS: &[&str] = &[
+    "AES_DECRYPT",
+    "AES_ENCRYPT",
+    "CRYPT",
+    "DECRYPT",
+    "DECRYPT_IV",
+    "DES_DECRYPT",
+    "DES_ENCRYPT",
+    "ENCRYPT",
+    "ENCRYPT_IV",
+    "PGP_PUB_DECRYPT",
+    "PGP_PUB_DECRYPT_BYTEA",
+    "PGP_SYM_DECRYPT",
+    "PGP_SYM_DECRYPT_BYTEA",
+    "PGP_SYM_ENCRYPT",
+    "PGP_SYM_ENCRYPT_BYTEA",
+];
+
+fn call_kind(upper: &str) -> Option<CallKind> {
+    if CRYPTO_FUNCTIONS.contains(&upper) {
+        Some(CallKind::Crypto)
+    } else if upper == "SET_CONFIG" {
+        Some(CallKind::SetConfig)
+    } else {
+        None
+    }
+}
+
+/// A setting name naming a secret: one of its `.`/`_`-separated parts is a secret word
+/// (`app.secret`, `myapp.db_password`).
+fn names_a_secret(name: &str) -> bool {
+    kw_upper(name)
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|p| matches!(p, "PASSWORD" | "PASSWD" | "PWD" | "SECRET"))
 }
 
 fn find(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {

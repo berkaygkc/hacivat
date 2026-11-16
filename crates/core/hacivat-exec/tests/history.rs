@@ -374,6 +374,12 @@ async fn corrupt_file_rotates() {
     let name = moved.file_name().unwrap().to_str().unwrap();
     assert!(name.starts_with("history.sqlite.corrupt-"), "{name}");
     assert_eq!(std::fs::read(&moved).unwrap(), junk, "moved, never wiped");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&moved).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the moved file stays owner-only");
+    }
     // The fresh file works.
     put(&store, rec(1, "SELECT 1")).await;
     assert_eq!(texts(&store).await, ["SELECT 1"]);
@@ -421,8 +427,11 @@ async fn file_mode_is_0600() {
     assert_eq!(texts(&store).await.len(), 1);
     assert_eq!(mode(&t.path), 0o600);
     let wal = PathBuf::from(format!("{}-wal", t.path.display()));
-    if wal.exists() {
-        assert_eq!(mode(&wal), 0o600);
+    let shm = PathBuf::from(format!("{}-shm", t.path.display()));
+    for side in [&wal, &shm] {
+        if side.exists() {
+            assert_eq!(mode(side), 0o600, "{}", side.display());
+        }
     }
     store.shutdown(Duration::from_secs(2)).await;
 
@@ -593,6 +602,437 @@ async fn error_messages_are_capped_at_4_kib() {
     let m = h[0].record.error_message.as_deref().unwrap();
     assert!(m.len() <= 4 << 10 && m.len() > (4 << 10) - 2, "{}", m.len());
     assert_eq!(h[0].record.outcome, Outcome::Failed);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The review's hostile probe (T17 review round 1): every case is caught, or is a gap that the
+// redaction module documents ("What redaction does not catch").
+
+/// The probe's secret (`{P}` in the table).
+const PROBE: &str = "s3cretQZ8w";
+
+#[derive(Debug, Clone, Copy)]
+enum Probe {
+    /// Masked in the statement, the error message and the parameter text, never searchable,
+    /// never in the file.
+    Caught,
+    /// A documented limit: the phrase must appear in `redact.rs`'s gap list.
+    Gap(&'static str),
+}
+
+/// `(statement, error message, parameter text, expectation)`; `{P}` is [`PROBE`].
+const PROBE_TABLE: &[(&str, Option<&str>, Option<&str>, Probe)] = {
+    use Probe::{Caught as C, Gap as G};
+    &[
+        // IDENTIFIED BY in every quoting.
+        ("CREATE USER u IDENTIFIED BY '{P}'", None, None, C),
+        ("CREATE USER u IDENTIFIED BY \"{P}\"", None, None, C),
+        ("CREATE USER u IDENTIFIED BY `{P}`", None, None, C),
+        ("CREATE USER u IDENTIFIED BY {P}", None, None, C),
+        ("CREATE USER u IDENTIFIED BY $${P}$$", None, None, C),
+        ("CREATE USER u IDENTIFIED BY q'[{P}]'", None, None, C),
+        ("ALTER ROLE r PASSWORD E'{P}'", None, None, C),
+        ("CREATE USER u IDENTIFIED BY _utf8mb4'{P}'", None, None, C),
+        ("create user u identified by '{P}'", None, None, C),
+        // Roles and SET PASSWORD.
+        ("CREATE ROLE r LOGIN PASSWORD '{P}'", None, None, C),
+        (
+            "CREATE ROLE r LOGIN ENCRYPTED PASSWORD '{P}'",
+            None,
+            None,
+            C,
+        ),
+        (
+            "ALTER ROLE r VALID UNTIL 'infinity' PASSWORD '{P}'",
+            None,
+            None,
+            C,
+        ),
+        ("ALTER ROLE r\n  PASSWORD\n  '{P}'", None, None, C),
+        ("alter role r with password '{P}'", None, None, C),
+        ("SET PASSWORD = '{P}'", None, None, C),
+        ("SET PASSWORD FOR 'u'@'%' = '{P}'", None, None, C),
+        ("SET PASSWORD FOR u = PASSWORD('{P}')", None, None, C),
+        // Plugins, MariaDB, GRANT, several users.
+        (
+            "ALTER USER u IDENTIFIED WITH mysql_native_password BY '{P}'",
+            None,
+            None,
+            C,
+        ),
+        (
+            "ALTER USER u IDENTIFIED WITH 'caching_sha2_password' BY '{P}'",
+            None,
+            None,
+            C,
+        ),
+        (
+            "CREATE USER u IDENTIFIED VIA ed25519 USING PASSWORD('{P}')",
+            None,
+            None,
+            C,
+        ),
+        ("GRANT ALL ON *.* TO u IDENTIFIED BY '{P}'", None, None, C),
+        (
+            "CREATE USER a IDENTIFIED BY '{P}', b IDENTIFIED BY '{P}'",
+            None,
+            None,
+            C,
+        ),
+        // Turkish passwords, escapes, prefixes.
+        ("CREATE USER u IDENTIFIED BY 'ŞİFRE_{P}'", None, None, C),
+        ("CREATE USER u IDENTIFIED BY şifre_{P}", None, None, C),
+        ("ALTER ROLE r PASSWORD 'it''s{P}'", None, None, C),
+        ("ALTER USER u IDENTIFIED BY 'it\\'s{P}'", None, None, C),
+        ("ALTER ROLE r PASSWORD U&'{P}'", None, None, C),
+        // SQL Server.
+        (
+            "ALTER LOGIN l WITH PASSWORD = '{P}' OLD_PASSWORD = 'old1'",
+            None,
+            None,
+            C,
+        ),
+        (
+            "CREATE CREDENTIAL c WITH IDENTITY = 'u', SECRET = '{P}'",
+            None,
+            None,
+            C,
+        ),
+        // Comments between the keyword and the value.
+        ("ALTER ROLE r PASSWORD /* new */ '{P}'", None, None, C),
+        ("-- it's\nALTER ROLE r PASSWORD '{P}'", None, None, C),
+        // psql meta-commands.
+        ("\\password {P}", None, None, C),
+        ("\\connect \"dbname=d password={P}\"", None, None, C),
+        (
+            "\\c -reuse-previous=on \"host=h password={P}\"",
+            None,
+            None,
+            C,
+        ),
+        ("\\c postgresql://u:{P}@h/db", None, None, C),
+        ("\\setenv PGPASSWORD {P}", None, None, C),
+        ("\\set pw {P}", None, None, C),
+        ("\\! PGPASSWORD={P} psql -h h", None, None, C),
+        ("SELECT 1 \\g\n\\c \"password={P}\"", None, None, C),
+        // Connection strings.
+        (
+            "SELECT * FROM dblink('host=h password={P}', 'SELECT 1') AS t(a int)",
+            None,
+            None,
+            C,
+        ),
+        (
+            "SELECT dblink_connect('c', 'host=h password = {P}')",
+            None,
+            None,
+            C,
+        ),
+        (
+            "SELECT dblink_connect('postgresql://u:{P}@h/db')",
+            None,
+            None,
+            C,
+        ),
+        (
+            "SELECT dblink_connect('postgresql://u%40x:{P}@h/db')",
+            None,
+            None,
+            C,
+        ),
+        (
+            "SELECT f('jdbc:postgresql://h/db?user=u&password={P}')",
+            None,
+            None,
+            C,
+        ),
+        (
+            "SELECT f('Driver={x};Server=h;Uid=u;Pwd={P};')",
+            None,
+            None,
+            C,
+        ),
+        (
+            "CREATE TABLE t (a int) ENGINE=FEDERATED CONNECTION='mysql://u:{P}@h:3306/db/t'",
+            None,
+            None,
+            C,
+        ),
+        (
+            "CREATE SERVER s FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'h', password '{P}')",
+            None,
+            None,
+            C,
+        ),
+        (
+            "CREATE USER MAPPING FOR u SERVER s OPTIONS (user 'u', password '{P}')",
+            None,
+            None,
+            C,
+        ),
+        (
+            "ALTER USER MAPPING FOR u SERVER s OPTIONS (SET password '{P}')",
+            None,
+            None,
+            C,
+        ),
+        (
+            "CREATE SUBSCRIPTION s CONNECTION 'host=h password={P}' PUBLICATION p",
+            None,
+            None,
+            C,
+        ),
+        (
+            "CREATE SERVER s FOREIGN DATA WRAPPER mysql OPTIONS (USER 'u', PASSWORD '{P}')",
+            None,
+            None,
+            C,
+        ),
+        (
+            "CHANGE MASTER TO MASTER_HOST='h', MASTER_PASSWORD='{P}'",
+            None,
+            None,
+            C,
+        ),
+        (
+            "CHANGE REPLICATION SOURCE TO SOURCE_PASSWORD = '{P}'",
+            None,
+            None,
+            C,
+        ),
+        (
+            "DO $$ BEGIN EXECUTE format('ALTER ROLE r PASSWORD %L', '{P}'); END $$",
+            None,
+            None,
+            C,
+        ),
+        // Echoes in the error and the parameter text.
+        (
+            "CREATE USER u IDENTIFIED BY '{P}'",
+            Some("You have an error in your SQL syntax; near 'BY '{P}'' at line 1"),
+            None,
+            C,
+        ),
+        ("SELECT 1", None, Some("password={P}"), C),
+        // I1: comments that change the lexing, and MySQL executable comments.
+        (
+            "# Bob's account\nCREATE USER u IDENTIFIED BY '{P}'",
+            None,
+            None,
+            C,
+        ),
+        (
+            "/* a /* b */ it's */ ALTER ROLE r PASSWORD '{P}'",
+            None,
+            None,
+            C,
+        ),
+        (
+            "/*!80000 ALTER USER u IDENTIFIED BY '{P}' */",
+            None,
+            None,
+            C,
+        ),
+        (
+            "/*M!100000 ALTER USER u IDENTIFIED BY '{P}' */",
+            None,
+            None,
+            C,
+        ),
+        // I2: quoted secret names.
+        (
+            "CREATE USER MAPPING FOR u SERVER s OPTIONS (\"user\" 'u', \"password\" '{P}')",
+            None,
+            None,
+            C,
+        ),
+        ("UPDATE t SET \"password\" = '{P}'", None, None, C),
+        ("UPDATE t SET `passwd` = '{P}'", None, None, C),
+        // I3: the Turkish keyboard.
+        ("ALTER USER X İDENTİFİED BY '{P}'", None, None, C),
+        ("alter user x ıdentıfıed by '{P}'", None, None, C),
+        // m1: comments carrying secrets.
+        ("-- password {P}\nSELECT 1", None, None, C),
+        ("SELECT 1 /* postgresql://u:{P}@h */", None, None, C),
+        ("SELECT 1 /* host=h password={P} */", None, None, C),
+        // m2: crypto functions and secret settings.
+        ("SELECT pgp_sym_encrypt('x', '{P}')", None, None, C),
+        ("SELECT pgp_sym_decrypt(d, '{P}') FROM t", None, None, C),
+        ("SELECT AES_ENCRYPT('x', '{P}')", None, None, C),
+        ("SELECT crypt('{P}', gen_salt('bf'))", None, None, C),
+        ("SELECT decrypt(d, '{P}', 'aes') FROM t", None, None, C),
+        (
+            "SELECT set_config('app.secret', '{P}', false)",
+            None,
+            None,
+            C,
+        ),
+        // m3: other secret words (documented gaps, PO list).
+        ("SET @pw = '{P}'", None, None, G("MySQL user variables")),
+        ("PRAGMA key = '{P}'", None, None, G("PRAGMA key")),
+        (
+            "ATTACH DATABASE 'x.db' AS x KEY '{P}'",
+            None,
+            None,
+            G("ATTACH … KEY"),
+        ),
+        (
+            "CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (token '{P}')",
+            None,
+            None,
+            G("TOKEN"),
+        ),
+        // m4: URI edge cases and COPY PROGRAM (documented gaps).
+        (
+            "SELECT f('postgresql://u:a/{P}@h/db')",
+            None,
+            None,
+            G("unencoded"),
+        ),
+        (
+            "SELECT f('mysql://u:a#{P}@h/db')",
+            None,
+            None,
+            G("unencoded"),
+        ),
+        (
+            "SELECT f('postgresql://u:a?{P}@h')",
+            None,
+            None,
+            G("unencoded"),
+        ),
+        (
+            "SELECT f('postgresql://u:a {P}@h')",
+            None,
+            None,
+            G("unencoded"),
+        ),
+        ("SELECT f('u:{P}@h')", None, None, G("scheme-less")),
+        (
+            "COPY t FROM PROGRAM 'curl -u u:{P} http://h/x'",
+            None,
+            None,
+            G("COPY … PROGRAM"),
+        ),
+        // m5: echoes the scrub cannot recognise (documented gaps).
+        (
+            "CREATE USER u IDENTIFIED BY '{P}{P}{P}'",
+            Some("near 'BY '{P}{P}' at line 1"),
+            None,
+            G("cut short"),
+        ),
+        (
+            "ALTER ROLE r PASSWORD 'abc' '{P}'",
+            Some("near ''{P}'' at line 1"),
+            None,
+            G("second of two adjacent strings"),
+        ),
+        // A bound value quoted by the server (T16 scrubs it; the store never sees binds).
+        (
+            "SELECT * FROM t WHERE id = $1",
+            Some("invalid input syntax for type integer: \"{P}\""),
+            None,
+            G("bound value"),
+        ),
+    ]
+};
+
+#[tokio::test]
+async fn review_probe_every_case_is_caught_or_a_documented_gap() {
+    // The module docs as one line of words (a phrase may wrap).
+    let docs = include_str!("../src/history/redact.rs")
+        .replace("//!", " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let caught_dir = tmp();
+    let gaps_dir = tmp();
+    let caught = open(&caught_dir.path).await;
+    let gaps = open(&gaps_dir.path).await;
+    let mut n_caught = 0;
+    let mut undocumented = Vec::new();
+    for (i, (sql, err, params, probe)) in PROBE_TABLE.iter().enumerate() {
+        let fill = |s: &str| s.replace("{P}", PROBE);
+        // A distinct data source per case, so dedup never merges two cases.
+        let mut r = rec(1_000 + i as u32, &fill(sql));
+        r.error_message = err.map(fill);
+        r.params_masked = params.map(fill);
+        match probe {
+            Probe::Caught => {
+                n_caught += 1;
+                put(&caught, r).await;
+            }
+            Probe::Gap(phrase) => {
+                if !docs.contains(phrase) {
+                    undocumented.push(*phrase);
+                }
+                put(&gaps, r).await;
+            }
+        }
+    }
+    // The gaps are recorded like any other statement (no panic, no refusal).
+    assert_eq!(hits(&gaps, all()).await.len(), PROBE_TABLE.len() - n_caught);
+
+    let h = hits(&caught, all()).await;
+    assert_eq!(h.len(), n_caught);
+    // Cases are named by their table row (data source `1000 + row`), never printed with
+    // their secret.
+    let row = |r: &HistoryRecord| {
+        let s = r.profile.to_string();
+        s[s.len() - 4..].parse::<usize>().unwrap() - 1_000
+    };
+    let mut leaked: Vec<usize> = h
+        .iter()
+        .filter(|hit| {
+            let r = &hit.record;
+            !r.redacted
+                || [
+                    Some(r.statement_masked.to_string()),
+                    r.error_message.clone(),
+                    r.params_masked.clone(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|f| f.contains(PROBE))
+        })
+        .map(|hit| row(&hit.record))
+        .collect();
+    leaked.sort_unstable();
+    assert!(leaked.is_empty(), "probe rows leaked: {leaked:?}");
+    let found = hits(
+        &caught,
+        HistoryQuery {
+            text: Some(PROBE.into()),
+            ..all()
+        },
+    )
+    .await;
+    assert!(found.is_empty(), "a probe secret is searchable");
+    caught.shutdown(Duration::from_secs(2)).await;
+    assert!(
+        !contains(&db_bytes(&caught_dir.path), PROBE),
+        "a probe secret reached the file"
+    );
+    gaps.shutdown(Duration::from_secs(2)).await;
+    assert!(
+        undocumented.is_empty(),
+        "undocumented gaps: {undocumented:?}"
+    );
+}
+
+#[tokio::test]
+async fn comments_without_secrets_are_kept_verbatim() {
+    for sql in [
+        "-- it's fine\nSELECT 'x'",
+        "# note\nSELECT 1",
+        "/* a /* nested */ comment */ SELECT 2",
+        "/*!40101 SET NAMES utf8mb4 */",
+        "SELECT 1--1",
+    ] {
+        let h = stored(sql).await;
+        assert_eq!(&*h.record.statement_masked, sql);
+        assert!(!h.record.redacted, "{sql}");
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
