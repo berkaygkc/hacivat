@@ -7,13 +7,23 @@
 //!   `oid`/`xid`/`cid`, `float4`/`float8`, `numeric`, the text family (`text`, `varchar`,
 //!   `bpchar`, `name`, `"char"`), `bytea`, `uuid`, `json`, `jsonb`, `date`, `time`, `timetz`,
 //!   `timestamp`, `timestamptz`, `interval`, and every enum (its label).
-//! - **Text** for everything else (arrays, composites and `record`, ranges, network types, bit
-//!   strings, geometry, `money`, `reg*`, XML, `tsvector`, extension types, unknown OIDs),
-//!   stored as `Value::Opaque { type_name, text }` in a `Values` buffer (R-M3-31, P8). Each cell
-//!   holds its own `OpaqueVal` (32 bytes plus the shared type name's length and the text, as the
-//!   budget counts it); the type name is one `Arc<str>` shared by the column's cells. Text that
-//!   is not UTF-8 (a `SQL_ASCII` database) is kept as `Lossy` bytes, and text past the cell cap
-//!   as `Truncated` with a `Text` prefix, exactly as a `Var(Text)` column keeps them.
+//! - **Binary, to canonical text** (M3b Task 7, R-M3-67): arrays of every type above and of
+//!   the network and bit types ([`array`]: the PostgreSQL literal, lower bounds included, as
+//!   `Value::Text` under `LogicalType::Array(elem)`); `inet`, `cidr`, `macaddr`, `macaddr8`
+//!   (`LogicalType::Network`) and `bit`, `varbit` (`LogicalType::BitString`) ([`network`]).
+//! - **Text, typed** (M3b Task 7): `money` (`Money`: the server's `lc_monetary` text verbatim,
+//!   never parsed, no currency guessed), `xml` (`Xml`), composites and `record` (`Composite`
+//!   with the fields' logical types), ranges and multiranges (`Range` of the element), the
+//!   geometric types `point`, `line`, `lseg`, `box`, `path`, `polygon`, `circle` (`Geometry`),
+//!   and arrays of any type without a binary decoder (`Array` of the element's logical type):
+//!   the server's text in a `Var(Text)` buffer, so alignment and sorting follow the type.
+//! - **Text, opaque** for everything else (`int2vector`, `oidvector`, `reg*`, `tsvector`,
+//!   `tsquery`, `pg_lsn`, extension types, unknown OIDs), stored as
+//!   `Value::Opaque { type_name, text }` in a `Values` buffer (R-M3-31, P8). Each cell holds its
+//!   own `OpaqueVal` (32 bytes plus the shared type name's length and the text, as the budget
+//!   counts it); the type name is one `Arc<str>` shared by the column's cells. Text that is not
+//!   UTF-8 (a `SQL_ASCII` database) is kept as `Lossy` bytes, and text past the cell cap as
+//!   `Truncated` with a `Text` prefix, exactly as a `Var(Text)` column keeps them.
 //!
 //! Chunks are built with `ChunkBuilder::with_schema`, so a temporal column's buffer knows its
 //! logical type. **Server bytes never panic and are never altered:** a cell whose bytes no
@@ -26,14 +36,19 @@
 use std::sync::Arc;
 
 use hacivat_values::{
-    BufKind, ChunkBuilder, ColumnMeta, DecimalVal, ErrorVal, LogicalType, NativeType, OriginHint,
-    ResultSchema, TempUnit, Value, VarKind,
+    BufKind, ChunkBuilder, ColumnMeta, DecimalVal, ErrorVal, LogicalType, NativeType, NetKind,
+    OriginHint, ResultSchema, TempUnit, Value, VarKind,
 };
 use postgres_types::{Kind, Type};
 
+// ## m3b-t07-types
+pub mod array;
+pub mod network;
 pub mod numeric;
 pub mod scalar;
 pub mod temporal;
+
+use array::ArrayCol;
 
 /// The most base-10000 digits a `numeric` cell may have; more is an `Error` cell (a bound on
 /// what one hostile cell costs; PostgreSQL's own limit is about 36,900).
@@ -71,7 +86,32 @@ mod oid {
     pub const NUMERIC: u32 = 1700;
     pub const UUID: u32 = 2950;
     pub const JSONB: u32 = 3802;
+    // ## m3b-t07-types
+    pub const INT2VECTOR: u32 = 22;
+    pub const OIDVECTOR: u32 = 30;
+    pub const XML: u32 = 142;
+    pub const POINT: u32 = 600;
+    pub const LSEG: u32 = 601;
+    pub const PATH: u32 = 602;
+    pub const BOX: u32 = 603;
+    pub const POLYGON: u32 = 604;
+    pub const LINE: u32 = 628;
+    pub const CIDR: u32 = 650;
+    pub const CIRCLE: u32 = 718;
+    pub const MACADDR8: u32 = 774;
+    pub const MONEY: u32 = 790;
+    pub const MACADDR: u32 = 829;
+    pub const INET: u32 = 869;
+    pub const BIT: u32 = 1560;
+    pub const VARBIT: u32 = 1562;
+    pub const RECORD: u32 = 2249;
+    /// `record[]`, a pseudo-type (not `Kind::Array`).
+    pub const RECORD_ARRAY: u32 = 2287;
 }
+
+/// How deep a composite's fields (and an array's or range's element) are typed; deeper ones
+/// are `Opaque` (a bound on recursion over catalog-made types).
+const MAX_TYPE_DEPTH: u8 = 8;
 
 /// How one result column is requested and decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +141,18 @@ pub enum Col {
     Timestamp,
     TimestampTz,
     Interval,
+    // ## m3b-t07-types (R-M3-67)
+    Inet,
+    Cidr,
+    MacAddr,
+    MacAddr8,
+    /// `bit` and `varbit`.
+    Bits,
+    /// A binary array of a type with a binary decoder: its literal as text.
+    Array(Box<ArrayCol>),
+    /// Requested as text, kept as the server's text under the column's own logical type
+    /// (`money`, `xml`, composites, ranges, geometry, arrays of text-only types).
+    TypedText,
     /// Requested as text, kept as `Value::Opaque` with this type name.
     Opaque(Arc<str>),
 }
@@ -108,6 +160,46 @@ pub enum Col {
 impl Col {
     /// The decoder of a column of `ty`.
     pub fn for_type(ty: &Type) -> Col {
+        // ## m3b-t07-types: the typed matrix first; M3a's scalars below.
+        match ty.oid() {
+            oid::INET => return Col::Inet,
+            oid::CIDR => return Col::Cidr,
+            oid::MACADDR => return Col::MacAddr,
+            oid::MACADDR8 => return Col::MacAddr8,
+            oid::BIT | oid::VARBIT => return Col::Bits,
+            // Printed as space-separated lists, not array literals: their own text.
+            oid::INT2VECTOR | oid::OIDVECTOR => return Col::Opaque(ty.name().into()),
+            oid::MONEY
+            | oid::XML
+            | oid::RECORD
+            | oid::RECORD_ARRAY
+            | oid::POINT
+            | oid::LSEG
+            | oid::PATH
+            | oid::BOX
+            | oid::POLYGON
+            | oid::LINE
+            | oid::CIRCLE => return Col::TypedText,
+            _ => {}
+        }
+        match ty.kind() {
+            // tokio-postgres marks any type with an element type (`typelem ≠ 0`) as an array,
+            // a user's fixed-length `ELEMENT = …` type too; only PostgreSQL's array types
+            // (named `_elem`) send `array_send`'s format (fix round 1, review m-2).
+            Kind::Array(elem) if ty.name().starts_with('_') => {
+                let decoder = Col::for_type(elem);
+                return match decoder {
+                    Col::Array(_) | Col::TypedText | Col::Opaque(_) => Col::TypedText,
+                    decoder => Col::Array(Box::new(ArrayCol {
+                        elem_logical: decoder.logical(elem, -1),
+                        elem: decoder,
+                        elem_oid: elem.oid(),
+                    })),
+                };
+            }
+            Kind::Range(_) | Kind::Multirange(_) | Kind::Composite(_) => return Col::TypedText,
+            _ => {}
+        }
         match ty.oid() {
             oid::BOOL => Col::Bool,
             oid::INT2 => Col::Int2,
@@ -136,7 +228,7 @@ impl Col {
     /// The result format code to request ([`BINARY_FORMAT`] or [`TEXT_FORMAT`]).
     pub fn format(&self) -> i16 {
         match self {
-            Col::Opaque(_) => TEXT_FORMAT,
+            Col::Opaque(_) | Col::TypedText => TEXT_FORMAT,
             _ => BINARY_FORMAT,
         }
     }
@@ -168,11 +260,23 @@ impl Col {
             },
             Col::TimeTz => BufKind::Temporal2,
             Col::Interval | Col::Opaque(_) => BufKind::Values,
+            Col::Inet
+            | Col::Cidr
+            | Col::MacAddr
+            | Col::MacAddr8
+            | Col::Bits
+            | Col::Array(_)
+            | Col::TypedText => BufKind::Var(VarKind::Text),
         }
     }
 
     /// The logical type of a column of `ty` with `typmod`.
     pub fn logical(&self, ty: &Type, typmod: i32) -> LogicalType {
+        self.logical_at(ty, typmod, 0)
+    }
+
+    /// [`Col::logical`] at `depth` levels inside a composite, array or range.
+    fn logical_at(&self, ty: &Type, typmod: i32, depth: u8) -> LogicalType {
         let text_len = || (typmod >= VARHDRSZ).then(|| (typmod - VARHDRSZ) as u32);
         match self {
             Col::Bool => LogicalType::Bool,
@@ -253,6 +357,20 @@ impl Col {
             Col::Opaque(type_name) => LogicalType::Opaque {
                 type_name: type_name.clone(),
             },
+            Col::Inet => LogicalType::Network(NetKind::Inet),
+            Col::Cidr => LogicalType::Network(NetKind::Cidr),
+            Col::MacAddr => LogicalType::Network(NetKind::MacAddr),
+            Col::MacAddr8 => LogicalType::Network(NetKind::MacAddr8),
+            // `bit(n)` and `varbit(n)` keep `n` itself as their modifier.
+            Col::Bits => LogicalType::BitString {
+                len: u32::try_from(typmod).ok().filter(|n| *n > 0),
+            },
+            // An array column's modifier is its elements' (`varchar(10)[]`, `numeric(10,2)[]`).
+            Col::Array(a) => LogicalType::Array(Box::new(match ty.kind() {
+                Kind::Array(elem) => a.elem.logical(elem, typmod),
+                _ => a.elem_logical.clone(),
+            })),
+            Col::TypedText => typed_text_logical(ty, depth),
         }
     }
 
@@ -278,7 +396,60 @@ impl Col {
             Col::TimestampTz => temporal::timestamp(raw, true),
             Col::Interval => temporal::interval(raw),
             Col::Opaque(type_name) => Decoded::Value(scalar::opaque(type_name, raw, cell_cap)),
+            Col::Inet => network::inet(raw, false),
+            Col::Cidr => network::inet(raw, true),
+            Col::MacAddr => network::macaddr(raw, 6),
+            Col::MacAddr8 => network::macaddr(raw, 8),
+            Col::Bits => network::bits(raw, cell_cap),
+            Col::Array(a) => array::decode(raw, a, cell_cap),
+            Col::TypedText => Decoded::Var(raw),
         }
+    }
+}
+
+// ## m3b-t07-types
+
+/// The logical type of a column of `ty` at `depth`: its decoder's, or `Opaque` past
+/// [`MAX_TYPE_DEPTH`].
+fn logical_of_type(ty: &Type, typmod: i32, depth: u8) -> LogicalType {
+    if depth > MAX_TYPE_DEPTH {
+        return LogicalType::Opaque {
+            type_name: ty.name().into(),
+        };
+    }
+    Col::for_type(ty).logical_at(ty, typmod, depth)
+}
+
+/// The logical type of a text-format typed column of `ty`.
+fn typed_text_logical(ty: &Type, depth: u8) -> LogicalType {
+    let inner = |t: &Type| Box::new(logical_of_type(t, -1, depth + 1));
+    match (ty.oid(), ty.kind()) {
+        (oid::MONEY, _) => LogicalType::Money,
+        (oid::XML, _) => LogicalType::Xml,
+        (oid::RECORD, _) => LogicalType::Composite(Arc::from([])),
+        (oid::RECORD_ARRAY, _) => {
+            LogicalType::Array(Box::new(LogicalType::Composite(Arc::from([]))))
+        }
+        (
+            oid::POINT | oid::LSEG | oid::PATH | oid::BOX | oid::POLYGON | oid::LINE | oid::CIRCLE,
+            _,
+        ) => LogicalType::Geometry { srid: None },
+        (_, Kind::Array(elem)) => LogicalType::Array(inner(elem)),
+        (_, Kind::Range(elem) | Kind::Multirange(elem)) => LogicalType::Range(inner(elem)),
+        (_, Kind::Composite(fields)) => LogicalType::Composite(
+            fields
+                .iter()
+                .map(|f| {
+                    (
+                        Arc::from(f.name()),
+                        logical_of_type(f.type_(), -1, depth + 1),
+                    )
+                })
+                .collect(),
+        ),
+        _ => LogicalType::Opaque {
+            type_name: ty.name().into(),
+        },
     }
 }
 

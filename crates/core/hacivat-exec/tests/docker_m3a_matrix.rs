@@ -35,7 +35,7 @@ use hacivat_session::session::{
     RunObserver, RunSpec, RunUnit, SessionState, TxOwner, UnitId,
 };
 use hacivat_values::{
-    DateVal, DecimalVal, LogicalType, OpaqueVal, ResultSchema, SpecialVal, TimeVal, TsVal, Value,
+    DateVal, DecimalVal, LogicalType, ResultSchema, SpecialVal, TimeVal, TsVal, Value,
 };
 
 /// The cancel test's budget is measured on a quiet matrix: it takes this for writing, every
@@ -319,13 +319,6 @@ fn bytes(b: &[u8]) -> Value {
     Value::Bytes(b.into())
 }
 
-fn opaque(type_name: &str, text: &str) -> Value {
-    Value::Opaque(Arc::new(OpaqueVal {
-        type_name: type_name.into(),
-        text: text.into(),
-    }))
-}
-
 fn civil(y: i32, m: u8, d: u8) -> DateVal {
     DateVal::from_civil(y, m, d).unwrap()
 }
@@ -449,8 +442,8 @@ fn golden_rows(line: &Line) -> Vec<Vec<Value>> {
                         micros: ((4 * 60 + 5) * 60 + 6) * 1_000_000 + 7,
                     },
                     text("happy"),
-                    opaque("_int4", "{1,NULL,3}"),
-                    opaque("inet", "192.168.0.1/24"),
+                    text("{1,NULL,3}"),
+                    text("192.168.0.1/24"),
                 ],
                 vec![
                     Value::Int(2),
@@ -473,8 +466,8 @@ fn golden_rows(line: &Line) -> Vec<Vec<Value>> {
                         micros: 0,
                     },
                     text("sad"),
-                    opaque("_int4", "{}"),
-                    opaque("inet", "::1"),
+                    text("{}"),
+                    text("::1"),
                 ],
                 std::iter::once(Value::Int(3))
                     .chain((0..17).map(|_| Value::Null))
@@ -529,7 +522,7 @@ fn golden_rows(line: &Line) -> Vec<Vec<Value>> {
                     date(2024, 2, 29),
                     ts(leap_day + 13 * 3_600 + 14 * 60 + 15, 123_456_000),
                     Value::Time(TimeVal::from_micros(13 * H + 14 * 60_000_000 + 15_250_000)),
-                    opaque("bit", "10110"),
+                    text("10110"),
                 ],
                 std::iter::once(Value::Int(2))
                     .chain((0..13).map(|_| Value::Null))
@@ -553,7 +546,7 @@ fn golden_rows(line: &Line) -> Vec<Vec<Value>> {
                         days: 0,
                         micros: -(H + 30 * 60_000_000 + 500_000),
                     },
-                    opaque("bit", "00000"),
+                    text("00000"),
                 ],
             ]
         }
@@ -608,12 +601,8 @@ fn golden_types(line: &Line) -> Vec<(&'static str, LogicalType)> {
                     tz: false,
                 },
             ),
-            (
-                "bt",
-                LogicalType::Opaque {
-                    type_name: "bit".into(),
-                },
-            ),
+            // m3b-t07 (R-M3-67): a bit string.
+            ("bt", LogicalType::BitString { len: Some(5) }),
         ],
     }
 }

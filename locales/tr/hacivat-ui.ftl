@@ -1911,3 +1911,8 @@ hv-cmd-history-open = Sorgu geçmişini aç
 ## m3a-f4-ime
 # Review: PO
 hv-cmd-app-character-palette = Emoji ve Semboller
+
+## m3b-t07-types
+
+# Review: PO
+hv-results-type-mysql-code = MySQL türü { $code }

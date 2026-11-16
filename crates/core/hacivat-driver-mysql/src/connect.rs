@@ -335,14 +335,16 @@ async fn connect_in_time(req: &DriverConnect, mode: TlsMode) -> Result<MySqlConn
     // ## m3a-t14-mysql-typed: the server's `net_write_timeout` bounds how long a suspended
     // cursor may idle (ER6, R19); read once here, never set. A connection that cannot answer
     // it (an I/O or protocol failure) fails the connect.
-    let net_write_timeout = match typed::read_net_write_timeout(&mut conn).await {
+    // ## m3b-t07-types: the same round trip reads the session `time_zone` (ledger 194).
+    let (net_write_timeout, time_zone) = match typed::read_net_write_timeout(&mut conn).await {
         Ok(v) => v,
         Err(e) => {
             conn.abandon();
             return Err(e);
         }
     };
-    let typed = typed::TypedState::new(u64::from(conn.id()), net_write_timeout);
+    let mut typed = typed::TypedState::new(u64::from(conn.id()), net_write_timeout);
+    typed.time_zone = time_zone;
     Ok(MySqlConn {
         conn: Some(conn),
         guard,

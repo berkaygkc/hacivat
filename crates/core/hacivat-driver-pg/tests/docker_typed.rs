@@ -368,23 +368,28 @@ async fn type_golden_table_hv_types() {
             Value::F64(v) => assert!(v == 0.0 && v.is_sign_negative(), "{id} -0"),
             other => panic!("{id}: {other:?}"),
         }
-        for (name, type_name, text) in [
-            ("ai", "_int4", Some("{1,NULL,3}")),
-            ("mo", "money", None),
-            ("ine", "inet", Some("192.168.0.1/24")),
-            ("tsv", "tsvector", Some("'a' 'b'")),
-        ] {
-            match r.cell(0, at(name)) {
-                Value::Opaque(o) => {
-                    assert_eq!(&*o.type_name, type_name, "{id} {name}");
-                    if let Some(text) = text {
-                        assert_eq!(&*o.text, text, "{id} {name}");
-                    } else {
-                        assert!(o.text.contains("12"), "{id} {name}: {}", o.text);
-                    }
-                }
-                other => panic!("{id} {name}: {other:?}"),
+        // m3b-t07 (R-M3-67): arrays and network types decode in binary to their canonical
+        // text, money is typed text in the server's `lc_monetary` form; tsvector stays opaque.
+        assert_eq!(
+            r.cell(0, at("ai")),
+            Value::Text("{1,NULL,3}".into()),
+            "{id}"
+        );
+        assert_eq!(
+            r.cell(0, at("ine")),
+            Value::Text("192.168.0.1/24".into()),
+            "{id}"
+        );
+        match r.cell(0, at("mo")) {
+            Value::Text(t) => assert!(t.contains("12"), "{id} mo: {t}"),
+            other => panic!("{id} mo: {other:?}"),
+        }
+        match r.cell(0, at("tsv")) {
+            Value::Opaque(o) => {
+                assert_eq!(&*o.type_name, "tsvector", "{id}");
+                assert_eq!(&*o.text, "'a' 'b'", "{id}");
             }
+            other => panic!("{id} tsv: {other:?}"),
         }
 
         // Row 1: the special values. `"char"` `''` is its byte 0 in binary, kept as U+0000

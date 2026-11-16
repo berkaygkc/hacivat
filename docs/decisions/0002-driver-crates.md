@@ -1313,3 +1313,84 @@ behaviour.
   `call_log()` (`executed()` records only execute/batch text; P-M3b-18).
 - **Named exception:** `hacivat-driver-sqlite/src/typed.rs` gains `QueryEvent::Notice` in one
   exhaustive match (SQLite has none).
+
+## m3b-t07 — type matrix
+
+M3b Task 7 (R-M3-67) closes M3a's R-M3-31 deferral: the types M3a kept as `Value::Opaque`
+get their own logical type, and the ones with a stable binary format decode in binary.
+
+- **PostgreSQL arrays** (`decode/array.rs`) of every type with a binary decoder (M3a's scalars,
+  enums, the network types, bit strings) are requested in binary and kept as `Value::Text` of
+  the literal `array_out` writes, under `LogicalType::Array(elem)`: lower bounds as `[lb:ub]`
+  when any is not 1 (`[0:2]={1,2,3}`), nested braces, `NULL`, `array_out`'s quoting (empty,
+  the word `NULL` in any case, `"`, `\`, braces, `,`, the six `array_isspace` characters).
+  Elements are spelled by `valfmt::raw_text` (PostgreSQL's spellings, checked against the
+  server's output on pg14–18) but `bool` is `t`/`f`, and a `timestamptz` element is written in
+  UTC (`+00`): a literal has no display zone and the instant round-trips. `int2vector` and
+  `oidvector` (`Kind::Array` in `postgres-types`) print space-separated lists and stay opaque
+  text; arrays of types without a binary decoder (`money[]`, `record[]`, composites) are text
+  typed `Array(elem)`.
+- **Hostile arrays** never panic and never show a partial array: more than 6 dimensions, a
+  negative or zero dimension, flags other than 0/1, another element OID than the column's, more
+  elements than the bytes can hold (checked before any loop), an upper bound past `i32`, an
+  element length below -1 or past the buffer, trailing bytes, or any element its own decoder
+  refuses make the whole cell `Error` (`pg-array`).
+- **Large arrays** are written under the cell cap: bytes past it are only counted, so the cell
+  is `Truncated` with the literal's exact total length (M3a's 1 MiB cap, R-M3-82).
+- **Network and bit types** (`decode/network.rs`) decode in binary to `network_out`'s text
+  (`inet`: no `/bits` at full width; `cidr`: always; IPv6 with the first longest zero run of
+  two or more shortened and an embedded IPv4 for `::a.b.c.d` / `::ffff:a.b.c.d`), lower-case
+  `macaddr`/`macaddr8`, and `bit`/`varbit` digits, as `Value::Text` under
+  `LogicalType::Network` / `BitString { len: typmod }`. A family, width, address length or cidr
+  flag no server sends is an `Error` cell.
+- **Typed text.** `money` (`Money`), `xml` (`Xml`), composites and `record` (`Composite` with
+  the fields' logical types, 8 levels deep at most, then `Opaque`), ranges and multiranges
+  (`Range` of the element), the geometric types (`Geometry { srid: None }`) stay text format
+  in a `Var(Text)` buffer. **`money` is the server's `lc_monetary` text verbatim**: never
+  parsed, never regrouped by the region, no currency guessed; it is right-aligned as a number.
+  Copy gives the same text, which the same server reads back under the same `lc_monetary`.
+  `tsvector`, `reg*`, `pg_lsn` and extension types keep `Opaque`.
+- **MySQL/MariaDB.** `BIT(n)` is `Text` of its `n` digits under `BitString { len: Some(n) }`
+  (P-M3b-26); `GEOMETRY` is `Text` of its internal value as `HEX()` prints it, under
+  `Geometry { srid: None }` — the SRID (4 bytes little-endian) is kept before the WKB, never
+  stripped (the per-value SRID has no column-level place); `VECTOR` stays opaque. A `TIMESTAMP`
+  column's `NativeType::MySql.time_zone` names the session `time_zone` read at connect in the
+  same round trip as `net_write_timeout` (no extra query; ledger 194). **Known limit:** a later
+  `SET time_zone` in the session is not followed (mysql_async does not surface session-state
+  tracking); the values themselves are the server's text, so only the label could be stale.
+  Named exceptions: `typed.rs` (`TypedState.time_zone`, the setup query, two `Plan` sites) and
+  `connect.rs` (one line), owned by Task 13 in W2.
+- **SQLite** decoders are unchanged.
+- **Display (`hacivat-values`).** MySQL, MariaDB, TiDB and SQLite floats print in the shortest
+  round-trip form (fixed for decimal exponents −6..=20, else `1e+21`/`1.5e-7`; an `f32` at its
+  own width, never widened), not PostgreSQL's spelling (ledger 177); PostgreSQL keeps its own.
+  `valfmt::type_label` names MySQL columns from their definition (`decimal(14,2)`,
+  `bigint unsigned`, `varchar(40)` — a text length only for the character sets it knows, never
+  a wrong one), and the app's header uses it for MySQL/MariaDB (ledger 246; named exception in
+  `results/adapter.rs`). Raw text stays locale-free.
+- **Goldens.** `tests/data/types_pg.sql` (72 cases after fix round 1) and `tests/data/types_mysql.sql` (31 cases,
+  both protocols) run through the wrapper on pg14–18 and mysql80/84 + mariadb106/1011/114; the
+  PostgreSQL cases also compare with the server's own output text.
+- **Fix round 1 (review).**
+  - I-1: a scalar `bit`/`varbit` cell honours the cell cap: at most `cap` digits are written and
+    a longer value is `Truncated` with its exact bit count (a 1 MiB `varbit` is 1 MiB of digits,
+    never 8 MiB).
+  - m-2: only types named like PostgreSQL arrays (`_elem`) are requested as binary arrays; a
+    user or extension type with `ELEMENT = …` (tokio-postgres's `Kind::Array`) stays opaque text.
+  - m-3: a `"char"` array element with the high bit set is `charout`'s PostgreSQL 15+ `\ooo` on
+    every line (PostgreSQL 14 printed the raw byte, which is not text in a UTF-8 literal).
+  - m-4 (**copy**): a `timestamptz[]` cell copies with `+00` offsets, while a scalar
+    `timestamptz` copies in the console's display zone; psql in a non-UTC session prints the
+    array in its own zone. Same instants, different spelling — a decision, recorded here.
+  - m-8: `LogicalType::Geometry` documents MySQL's 4-byte SRID prefix before the WKB.
+  - m-9: a MySQL type code without an SQL name gets an empty `type_label`; the app names it
+    through Fluent (`hv-results-type-mysql-code`, TR for PO review) and rebuilds that label when
+    the language changes.
+  - m-11: the collation-width table was checked against every MySQL/MariaDB line's
+    `information_schema` (`COLLATIONS`, plus MariaDB 10.10+'s
+    `COLLATION_CHARACTER_SET_APPLICABILITY`) by a Docker test: every ID it names that a server
+    knows has that width, MariaDB included.
+  - Carries: T13 (simple protocol: binary-decoded columns must take the server's text, review
+    m-10); T18 (fold the `sql_mode` read into the same setup query) and the settings model
+    (`EnvStep::TimeZone` must refresh `TypedState.time_zone`); session-state tracking for
+    `time_zone` needs a vendored mysql_async patch (`CLIENT_SESSION_TRACK`) first.
