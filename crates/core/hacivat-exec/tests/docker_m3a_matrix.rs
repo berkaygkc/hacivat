@@ -1605,13 +1605,31 @@ async fn production_console_confirms_every_write_on_every_engine() {
         let pool = ClassifyPool::new(2);
         let gated = Con::open(line, Spec::production(), &pool).await;
         let mut outcomes = Vec::new();
+        // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1): the MySQL family asks
+        // before it sends a DML; PostgreSQL and SQLite run it in a transaction, then ask.
+        let dml = if line.is_mysql_family() {
+            "confirm"
+        } else {
+            "tx-confirm"
+        };
         for (sql, want) in [
-            (insert.clone(), "tx-confirm"),
+            (insert.clone(), dml),
             (format!("DELETE FROM {t}"), "confirm+type"),
             (format!("UPDATE {t} SET a = 2"), "confirm+type"),
         ] {
             let planned = gated.plan(&sql, &[]).await;
             assert_eq!(planned.shapes(), [want], "{id} `{sql}`: asked first");
+            // ## m3b-t26-prod-unlock (fix round 1, A-M6): the name asked is the table's.
+            if want == "confirm+type" {
+                let typed = match &planned.plan.items[0].decision {
+                    hacivat_exec::GateDecision::Confirm {
+                        type_to_confirm: Some(n),
+                        ..
+                    } => n.to_string(),
+                    other => panic!("{id} `{sql}`: {other:?}"),
+                };
+                assert_eq!(typed, t, "{id} `{sql}`: the typed name");
+            }
             let ran = if want == "tx-confirm" {
                 // Run in the user's transaction, then asked: Undo keeps nothing.
                 let port = Port::new();

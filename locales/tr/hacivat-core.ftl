@@ -652,3 +652,7 @@ exec-gate-run-as-one-read-only = Gönderilmedi: tek parça çalıştırma salt o
 
 # Review: PO
 exec-run-context-unconfirmed = Gönderilmedi: Hacivat bu bağlantının ayarlarını zamanında doğrulayamadı. Yeniden çalıştırın.
+# Review: PO
+exec-confirm-not-undone = Geri alınmadı: tablo işlemleri desteklemiyor; ifadenin yaptığı değişiklikler kalıyor.
+# Review: PO
+exec-error-confirm-not-undone = Geri alınmadı: tablo işlemleri desteklemiyor; bu ifadenin yaptığı değişiklikler kalıyor.

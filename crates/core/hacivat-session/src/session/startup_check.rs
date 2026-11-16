@@ -14,10 +14,11 @@
 //! - **Fail closed.** A session without a classifier runs no production script; one statement
 //!   refused refuses all of it (none is sent) and the session (`config.invalid`). The warning
 //!   names the statement's number in the script, never its text.
-//! - **The tag the session opened with.** The session reads its own profile's environment (as it
-//!   reads the script itself): a session opened before its profile was tagged production
-//!   replays the script it already ran, unchecked, on its own reset or reconnect; every session
-//!   opened after the tag is checked (ADR 0004 `m3b-t26`).
+//! - **Either tag.** A script is checked when the profile the session opened with or the
+//!   profile's live tag (`ProfileActivity::production`, set by `SessionManager::update_profile`)
+//!   is production (fix round 1, A-I1): a session opened before a retag checks the script it
+//!   replays on its own reset or reconnect, and the retag closes the idle pooled sessions
+//!   (ADR 0004 `m3b-t26`).
 
 use std::sync::Arc;
 
@@ -28,13 +29,15 @@ use crate::session::verdict::{ClassifierContext, RoCheck};
 
 impl Core {
     /// The number (from 1) of the first statement of `statements` a production profile's
-    /// startup script may not run (the module docs); `None` when every one may, or the profile
-    /// is not production.
+    /// startup script may not run (the module docs); `None` when every one may, or neither the
+    /// opening nor the live tag is production.
     pub(crate) async fn refused_startup_statement(
         &mut self,
         statements: &[String],
     ) -> Option<usize> {
-        if self.profile.environment != Some(EnvTag::Production) || statements.is_empty() {
+        let production = self.profile.environment == Some(EnvTag::Production)
+            || self.live_env.as_ref().is_some_and(|a| a.production());
+        if !production || statements.is_empty() {
             return None;
         }
         let Some(classifier) = self.classifier.clone() else {

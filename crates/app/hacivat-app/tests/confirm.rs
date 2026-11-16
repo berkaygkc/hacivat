@@ -832,9 +832,11 @@ fn ask_plan_asks_in_order_and_execute_all_still_asks_for_a_typed_name(cx: &mut T
     });
     vcx.run_until_parked();
     assert!(shows(vcx, "statement 1 of 5"));
+    // ## m3b-t26-prod-unlock (fix round 1, B-I3): on production Execute all covers the later
+    // statement of the same kind only (unit 2; was units 2 and 4).
     assert!(shows(
         vcx,
-        "Execute all also runs the remaining 2 statements that would ask, without asking. A statement that needs its name typed still asks, and a production change still waits for your answer after it runs."
+        "Execute all also runs the remaining 1 statement of this kind that would ask, without asking. A statement of any other kind, or one that needs its name typed, still asks."
     ));
     arm(vcx);
     click_button(vcx, "confirm-execute-all");
@@ -842,6 +844,12 @@ fn ask_plan_asks_in_order_and_execute_all_still_asks_for_a_typed_name(cx: &mut T
     assert!(vcx.cx.read(confirm_open));
     assert!(shows(vcx, "statement 2 of 5"));
     set_field(vcx, "confirm-type", NAME);
+    arm(vcx);
+    click_button(vcx, "confirm-execute");
+    // Unit 4, a lock warning of another kind, shows its own dialog.
+    wait_until(vcx, "the lock warning", |vcx| {
+        shows(vcx, "statement 5 of 5")
+    });
     arm(vcx);
     click_button(vcx, "confirm-execute");
     wait_until(vcx, "the plan", |_| out.borrow().is_some());
@@ -1500,5 +1508,66 @@ fn an_untypeable_name_says_why_and_stays_closed(cx: &mut TestAppContext) {
     assert_eq!(
         button(vcx, "confirm-execute"),
         Some((ButtonKind::Danger, false))
+    );
+}
+
+// ## m3b-t26-prod-unlock (fix round 1, B-I3)
+/// On production one Execute all on a lock warning approves only later units of the same class:
+/// a DROP TABLE, a GRANT, a CALL, a DO and an unknown statement after it each still show their
+/// own dialog. Off production RC-1 stands (every later unit that asks, but a typed name).
+#[test]
+fn execute_all_on_production_covers_only_the_same_class() {
+    let plan = || GatePlan {
+        items: vec![
+            warn_item(0),
+            confirm_item(1, None, GateClass::DdlDestructive),
+            confirm_item(2, None, GateClass::Admin),
+            confirm_item(3, None, GateClass::Routine),
+            confirm_item(4, None, GateClass::Routine),
+            confirm_item(5, None, GateClass::Unknown),
+            warn_item(6),
+            confirm_item(7, Some(NAME), GateClass::DmlUnsafe),
+        ],
+    };
+    assert_eq!(
+        hacivat_app::exec_ui::confirm::execute_all_covers_on(&plan(), 0, true),
+        vec![6]
+    );
+    let mut p = plan();
+    assert_eq!(
+        hacivat_app::exec_ui::confirm::answer_plan_on(
+            &mut p,
+            0,
+            ConfirmAnswer::ExecuteAll,
+            false,
+            true
+        ),
+        PlanFlow::Go(None)
+    );
+    assert_eq!(p.items[0].decision, GateDecision::Run);
+    assert_eq!(p.items[6].decision, GateDecision::Run, "the same class");
+    for i in 1..=5 {
+        assert!(
+            matches!(p.items[i].decision, GateDecision::Confirm { .. }),
+            "unit {i} still asks: {:?}",
+            p.items[i].decision
+        );
+    }
+    assert!(matches!(
+        p.items[7].decision,
+        GateDecision::Confirm {
+            type_to_confirm: Some(_),
+            ..
+        }
+    ));
+    // A routine shown: the next routine is covered, nothing else.
+    assert_eq!(
+        hacivat_app::exec_ui::confirm::execute_all_covers_on(&plan(), 3, true),
+        vec![4]
+    );
+    // Off production (RC-1): every later unit that asks, but the typed name.
+    assert_eq!(
+        hacivat_app::exec_ui::confirm::execute_all_covers_on(&plan(), 0, false),
+        vec![1, 2, 3, 4, 5, 6]
     );
 }

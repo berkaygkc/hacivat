@@ -1658,6 +1658,9 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
             cx.default_global::<RunPrep>().suppressed.clone(),
         )
     });
+    // ## m3b-t26-prod-unlock (fix round 1, B-M4/A-M4): what the plan was gated under; the
+    // dialogs show it, and the send re-reads it (step 5).
+    let gated = (conn.env, conn.read_only);
     let (prepared, mut plan, changes, switches) = {
         let c = console.0;
         cx.background_executor()
@@ -1776,7 +1779,9 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
         let asked = cx.update(|cx: &mut App| {
             crate::console::tx_badge::set_choice_pending(console, true, cx);
             let facts = crate::exec_ui::confirm::console_facts(cx, console);
-            let production = job.profile.environment == Some(EnvTag::Production);
+            // ## m3b-t26-prod-unlock (fix round 1, A-M4): the live profile's tag the plan was
+            // gated under, never the tag the job was started with.
+            let production = gated.0 == Some(EnvTag::Production);
             let base = crate::exec_ui::confirm::ConfirmContext {
                 env: facts.as_ref().and_then(|f| f.env),
                 engine: facts.as_ref().and_then(|f| f.engine.clone()),
@@ -1882,6 +1887,22 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
 
     // 5. One run.
     cx.update(|cx: &mut App| {
+        // ## m3b-t26-prod-unlock (fix round 1, B-M4/A-M4): the live profile's tag and the
+        // session's read-only flag are read again right before the send (the context generation
+        // is checked by the session); a plan gated under another tag or flag (a retag while
+        // the dialogs were open) sends nothing.
+        let live = profile_of(cx, console).unwrap_or_else(|| job.profile.clone());
+        if (live.environment, job.session.state().borrow().read_only) != gated {
+            refuse(
+                console,
+                job.version,
+                ranges(&job.units),
+                (CONNECTION_CHANGED, Vec::new()),
+                NOT_SENT,
+                cx,
+            );
+            return;
+        }
         submit(
             console,
             job.version,

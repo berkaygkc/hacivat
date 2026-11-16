@@ -179,6 +179,10 @@ pub enum TxError {
     /// MySQL/MariaDB: the user's `LOCK TABLES` locks are held, and the transaction this needed
     /// would release them; nothing was sent.
     TableLocksHeld,
+    // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1)
+    /// MySQL/MariaDB: the rollback of the confirmed (or wrapped) statement ran, but the server
+    /// warned that a table does not support transactions (1196 and kin): its changes stay.
+    ConfirmNotUndone,
 }
 
 /// The transaction mode a profile starts with: Manual on production, else Auto.

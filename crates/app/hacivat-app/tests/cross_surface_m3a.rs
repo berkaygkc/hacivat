@@ -260,11 +260,21 @@ fn a_production_insert_is_confirmed_before_it_is_kept(cx: &mut TestAppContext) {
     };
     // The PO's demo statement (Turkish identifiers), then a writable CTE: each runs in the
     // user's transaction under the savepoint and waits for Keep/Undo.
-    for sql in ["INSERT INTO müşteri VALUES (9, 'x', 1)", cte] {
+    for (undone, sql) in ["INSERT INTO müşteri VALUES (9, 'x', 1)", cte]
+        .into_iter()
+        .enumerate()
+    {
         let sent_before = fake(vcx).call_log().len();
         type_script(vcx, &editor, &format!("{sql};\n"), 3);
         editor_command(vcx, &editor, "editor.run");
         wait_until(vcx, "the Keep/Undo prompt", commit_open);
+        // ## m3b-t26-prod-unlock (fix round 1, A-M5): the gutter shows it running while the
+        // answer is awaited.
+        assert!(
+            matches!(marks(vcx, id).as_slice(), [ExecMarkState::Running { .. }]),
+            "{sql}: {:?}",
+            marks(vcx, id)
+        );
         let calls = fake(vcx).call_log()[sent_before..].to_vec();
         assert!(
             calls.iter().any(|c| matches!(c,
@@ -293,6 +303,26 @@ fn a_production_insert_is_confirmed_before_it_is_kept(cx: &mut TestAppContext) {
             })
         });
         wait_until(vcx, "the prompt to close", |vcx| !commit_open(vcx));
+        // ## m3b-t26-prod-unlock (fix round 1, A-M5): the log says it was undone, and the gutter
+        // no longer shows it running.
+        wait_until(vcx, "the undo's log line", |vcx| {
+            log(vcx, id)
+                .iter()
+                .filter(|m| m.fluent_id() == "exec-confirm-undone")
+                .count()
+                == undone + 1
+        });
+        wait_until(vcx, "the settled mark", |vcx| {
+            !matches!(marks(vcx, id).as_slice(), [ExecMarkState::Running { .. }])
+        });
+        assert!(
+            matches!(
+                marks(vcx, id).as_slice(),
+                [ExecMarkState::Failed { sqlstate: None }]
+            ),
+            "{sql}: {:?}",
+            marks(vcx, id)
+        );
     }
     // An unbounded DELETE asks with the typed name before anything is sent; Escape cancels.
     let sent_before = fake(vcx).call_log().len();
@@ -324,12 +354,46 @@ fn a_production_insert_is_confirmed_before_it_is_kept(cx: &mut TestAppContext) {
         )),
         "{lines:?}"
     );
+    // ## m3b-t26-prod-unlock (fix round 1, B-M5): nothing of it in the whole call log (typed,
+    // simple, batch and execute calls alike).
     let calls = fake(vcx).call_log();
     assert!(
-        !calls[sent_before..].iter().any(|c| matches!(c,
-            hacivat_driver::fake::FakeCall::Typed(FakeTypedCall::Query(q)) if q.starts_with("DELETE"))),
+        !calls[sent_before..]
+            .iter()
+            .any(|c| format!("{c:?}").contains("DELETE")),
         "{:?}",
         &calls[sent_before..]
+    );
+    // ## m3b-t26-prod-unlock (fix round 1, A-M5): a run cancelled before it was sent leaves no
+    // gutter mark (no run started), and the Output tab says what happened to each statement:
+    // the two undone, the DELETE cancelled.
+    assert!(marks(vcx, id).is_empty(), "{:?}", marks(vcx, id));
+    enable_registry(vcx);
+    vcx.cx.update(|cx| {
+        let results = Consoles::get(cx, id)
+            .and_then(|s| s.results.clone())
+            .expect("the console's results");
+        results.update(cx, |r, cx| {
+            r.set_active(hacivat_app::results::ActiveResult::Output, cx)
+        });
+    });
+    refresh(vcx);
+    let out: Vec<String> = registry_frame(vcx)
+        .into_iter()
+        .filter(|r| r.path.contains("hacivat-app/src/results/output_view.rs"))
+        .map(|r| r.text.to_string())
+        .collect();
+    assert_eq!(
+        out.iter()
+            .filter(|t| t.contains("Undone: the confirmed statement was rolled back"))
+            .count(),
+        2,
+        "{out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|t| t.contains("Nothing was sent: you cancelled at statement")),
+        "{out:?}"
     );
     // Nothing was committed; the user's transaction is still open (Manual).
     assert!(

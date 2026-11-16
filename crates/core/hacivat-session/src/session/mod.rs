@@ -792,6 +792,12 @@ pub enum RunEvent {
         answer: CommitAnswer,
         by_deadline: bool,
     },
+    // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1)
+    /// Sent right before `CommitDecided` when the rollback of `unit` did not undo it: the server
+    /// warned that a table does not support transactions. The log never says "undone" then.
+    ConfirmNotUndone {
+        unit: UnitId,
+    },
     /// A server notice of the unit (R-M3-77; Tasks 11 and 13).
     Notice {
         unit: UnitId,

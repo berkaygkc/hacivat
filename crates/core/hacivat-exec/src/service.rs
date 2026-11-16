@@ -280,6 +280,11 @@ pub struct ExecService {
     /// ([`RunSpec::CONFIRM_DEADLINE`]); a test injects a shorter one
     /// ([`with_confirm_deadline`](Self::with_confirm_deadline)).
     confirm_deadline: Duration,
+    // ## m3b-t26-prod-unlock (named exception, fix round 1, A-M2)
+    /// Whether a request with neither prepared units nor a plan runs M3a's plan-less path
+    /// ([`with_plan_less_runs`](Self::with_plan_less_runs), test seams only); off, it is
+    /// refused and sends nothing, so no caller can reach a session around the gate.
+    plan_less: bool,
 }
 
 impl fmt::Debug for ExecService {
@@ -317,7 +322,19 @@ impl ExecService {
             evictions,
             // ## m3b-t26-prod-unlock
             confirm_deadline: RunSpec::CONFIRM_DEADLINE,
+            plan_less: false,
         }
+    }
+
+    // ## m3b-t26-prod-unlock (named exception, fix round 1, A-M2)
+    /// Lets this service run a request with neither prepared units nor a plan (M3a's plan-less
+    /// path: no binds, no verdict, no gate). For test seams only (the app turns it on under its
+    /// `test-support` feature); without it such a request is refused and sends nothing.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_plan_less_runs(mut self) -> Self {
+        self.plan_less = true;
+        self
     }
 
     // ## m3b-t26-prod-unlock (named exception, the T28 deviation carry)
@@ -428,7 +445,12 @@ impl ExecService {
     pub fn run(&self, console: &SessionHandle, req: RunRequest) -> RunTicket {
         let run = RunId(self.next_run.fetch_add(1, Ordering::SeqCst));
         // ## m3b-t16-run-service: the request's plan, checked (the module docs).
-        let planned = req.planned();
+        // ## m3b-t26-prod-unlock (fix round 1, A-M2): the plan-less path only where a test seam
+        // turned it on; anywhere else it fails closed.
+        let planned = match req.planned() {
+            Planned::M3a if !self.plan_less => Planned::Refused,
+            planned => planned,
+        };
         let refused = matches!(planned, Planned::Refused);
         let (units, plan): (Arc<[RunUnit]>, Option<Vec<PlannedUnit>>) = match planned {
             // M3a's path: no binds, no verdict, one result set per unit.

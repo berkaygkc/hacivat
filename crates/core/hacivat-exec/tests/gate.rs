@@ -124,11 +124,16 @@ fn hv_exec_04_table_per_level() {
     // Transaction control asks on production, runs elsewhere.
     assert_eq!(shape(&decision("BEGIN", conn_prod())), "confirm");
     assert_eq!(shape(&decision("BEGIN", conn_dev())), "run");
-    // `EXPLAIN ANALYZE <x>`: the wrap at every level.
-    for c in [conn_dev(), conn_staging(), conn_prod()] {
+    // `EXPLAIN ANALYZE <x>`: the wrap off production; asked first on production
+    // (## m3b-t26-prod-unlock fix round 1, B-M2).
+    for (c, want) in [
+        (conn_dev(), "explain-wrap"),
+        (conn_staging(), "explain-wrap"),
+        (conn_prod(), "confirm"),
+    ] {
         assert_eq!(
             shape(&decision("EXPLAIN ANALYZE DELETE FROM t WHERE id = 1", c)),
-            "explain-wrap"
+            want
         );
     }
     // A connection with no environment tag is not production.
@@ -365,16 +370,32 @@ fn production_dml_is_run_in_tx_then_confirm_in_every_tx_state() {
         assert_eq!(item.verdict, UnitVerdict::TxThenConfirm);
         assert!(item.effects.contains(SessionEffects::OPENS_WRITE));
     }
-    // MySQL too, inside a user transaction (the session takes the savepoint form).
-    let my = ConnSafety {
-        tx_status: TxStatus::InTx,
-        tx_owner: TxOwner::User,
-        ..mysql(EnvTag::Production)
-    };
-    assert!(matches!(
-        decision("UPDATE t SET a = 1 WHERE id = 3", my),
-        GateDecision::RunInTxThenConfirm { .. }
-    ));
+    // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1): MySQL asks before it sends,
+    // in a user transaction or not (a non-transactional table keeps the write; was
+    // `RunInTxThenConfirm` inside a user transaction).
+    for (status, owner) in [
+        (TxStatus::InTx, TxOwner::User),
+        (TxStatus::Idle, TxOwner::None),
+    ] {
+        let my = ConnSafety {
+            tx_status: status,
+            tx_owner: owner,
+            ..mysql(EnvTag::Production)
+        };
+        let item = item_of("UPDATE t SET a = 1 WHERE id = 3", &my);
+        assert!(
+            matches!(
+                item.decision,
+                GateDecision::Confirm {
+                    type_to_confirm: None,
+                    ..
+                }
+            ),
+            "{:?}",
+            item.decision
+        );
+        assert_eq!(item.verdict, UnitVerdict::Write);
+    }
 }
 
 #[test]
@@ -1591,6 +1612,9 @@ fn oracle(
         match eff {
             G::Read | G::Session => "run",
             G::Lock => "warn",
+            // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1): asked before it is sent
+            // on the MySQL family.
+            G::Dml if mysql => "confirm",
             G::Dml => "tx-confirm",
             _ => "confirm",
         }
@@ -1743,7 +1767,8 @@ fn explain_analyze_table_for_every_inner_class() {
                     || (mysql && matches!(inner, G::DdlOther | G::DdlDestructive))
                 {
                     "deny"
-                } else if production && (inner == G::Unknown || mysql) {
+                } else if production {
+                    // ## m3b-t26-prod-unlock (fix round 1, B-M2): every inner on production.
                     "confirm"
                 } else {
                     "explain-wrap"
@@ -2046,6 +2071,40 @@ fn joined_and_comma_updates_ask_for_the_table_that_changes() {
             // A MySQL modifier is never the table (it was read as one before Task 26).
             ("UPDATE LOW_PRIORITY orders SET a = 1", "orders"),
             ("DELETE QUICK FROM orders", "orders"),
+            // ## m3b-t26-prod-unlock (fix round 1): nested joins (A-C1), a WITH prefix (A-C2),
+            // a multi-table DELETE's alias (B-C1), a WHERE that keeps every row (review B).
+            (
+                "UPDATE a JOIN (b JOIN c ON b.id = c.id) ON a.id = b.id SET c.y = 2",
+                "c",
+            ),
+            ("UPDATE a, (b JOIN c ON b.id = c.id) SET c.y = 2", "c"),
+            (
+                "WITH x AS (SELECT 1) UPDATE LOW_PRIORITY orders SET a = 1",
+                "orders",
+            ),
+            ("WITH x AS (SELECT 1) DELETE QUICK FROM orders", "orders"),
+            ("DELETE archive FROM orders AS archive", "orders"),
+            ("DELETE FROM archive USING orders AS archive", "orders"),
+            ("DELETE t FROM t AS u, u AS t", "u"),
+            ("DELETE FROM orders WHERE id = 3 || 1", "orders"),
+            ("UPDATE orders SET a = 1 WHERE id <=> id", "orders"),
+            ("UPDATE (a JOIN b ON a.id = b.id) SET b.y = 2", "b"),
+            (
+                "UPDATE a AS p JOIN (b AS q JOIN a AS r ON q.id = r.id) ON p.id = q.id SET q.y = 2",
+                "b",
+            ),
+            ("UPDATE LOW_PRIORITY IGNORE a, b SET b.y = 2", "b"),
+            (
+                "WITH w AS (SELECT 1) UPDATE LOW_PRIORITY a JOIN b ON a.id = b.id SET b.y = 2",
+                "b",
+            ),
+            ("DELETE q FROM a AS p JOIN b AS q ON p.id = q.id", "b"),
+            ("DELETE FROM q USING a AS p JOIN b AS q ON p.id = q.id", "b"),
+            ("DELETE QUICK IGNORE b FROM a JOIN b ON a.id = b.id", "b"),
+            (
+                "WITH w AS (SELECT 1) DELETE QUICK q FROM a AS p JOIN b AS q ON p.id = q.id",
+                "b",
+            ),
         ] {
             let item = run(text);
             match &item.decision {
@@ -2064,7 +2123,6 @@ fn joined_and_comma_updates_ask_for_the_table_that_changes() {
             "UPDATE a JOIN b ON a.id = b.id SET y = 2",
             "UPDATE a, b SET a.x = 1, b.y = 2",
             "UPDATE a, b SET y = 2",
-            "UPDATE a, b SET c.y = 2",
             "UPDATE a JOIN b SET a.x = 1, b.y = 2 WHERE a.id = b.id",
         ] {
             let item = run(text);
@@ -2074,15 +2132,35 @@ fn joined_and_comma_updates_ask_for_the_table_that_changes() {
                 "{engine:?} {text}"
             );
         }
-        // Bounded by a WHERE: no unsafe pattern, so no typed name; the DML runs in a
-        // transaction and asks (production's DML row), never `Unknown`.
+        // ## m3b-t26-prod-unlock (fix round 1, A-C1, B-C1): a reference that names no table is
+        // never guessed: denied on production (was several targets for the comma form).
+        for text in [
+            "UPDATE a, b SET c.y = 2",
+            "UPDATE a JOIN b ON a.id = b.id SET c.y = 2",
+            "DELETE q FROM orders AS archive",
+        ] {
+            let item = run(text);
+            assert_eq!(
+                deny_id(&item.decision),
+                "safety-reason-too-complex",
+                "{engine:?} {text}"
+            );
+        }
+        // Bounded by a WHERE: no unsafe pattern, so no typed name; the DML asks before it is
+        // sent on the MySQL family (fix round 1, ruling on A-I2/B-I1), never `Unknown`.
         for text in [
             "UPDATE a JOIN b ON a.id = b.id SET b.y = 2 WHERE a.id = 3",
             "UPDATE a, b SET b.y = a.y WHERE a.id = b.id",
         ] {
             let item = run(text);
             assert!(
-                matches!(item.decision, GateDecision::RunInTxThenConfirm { .. }),
+                matches!(
+                    item.decision,
+                    GateDecision::Confirm {
+                        type_to_confirm: None,
+                        ..
+                    }
+                ),
                 "{engine:?} {text}: {:?}",
                 item.decision
             );
@@ -2096,4 +2174,167 @@ fn joined_and_comma_updates_ask_for_the_table_that_changes() {
             item.decision
         );
     }
+}
+
+// ## m3b-t26-prod-unlock (fix round 1: B-I2, B-M1, B-M2, B-M6) over the real classifier.
+fn real_item(engine: DbmsKind, text: &str, c: &ConnSafety, s: &SuppressSet) -> GateItem {
+    let dialect = match engine {
+        DbmsKind::MySql => DialectId::MySql,
+        DbmsKind::MariaDb => DialectId::MariaDb,
+        _ => DialectId::Postgres,
+    };
+    let ctx = sql_safety::ClassifyCtx::new(
+        sql_dialect::DialectCtx::new(dialect, None),
+        sql_dialect::ClientFlavor::None,
+        sql_safety::Expect::SingleStatement,
+    );
+    let unit = prepared_on(engine, text, &[]);
+    let report = sql_safety::classify(&unit.final_text, &ctx);
+    gate(&[unit], &[report], c, s, 7).items.remove(0)
+}
+
+/// B-I2: a routine definition is never suppressible on production, and its "don't ask again"
+/// key holds its whole body elsewhere: a new body is asked again.
+#[test]
+fn routine_definitions_are_never_suppressed_on_production_and_keyed_by_body() {
+    let none = SuppressSet::default();
+    let defs = [
+        (
+            "CREATE OR REPLACE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+            "CREATE OR REPLACE FUNCTION f() RETURNS int LANGUAGE sql AS 'DELETE FROM t RETURNING 1'",
+        ),
+        (
+            "CREATE OR REPLACE FUNCTION f() RETURNS int LANGUAGE sql AS $$SELECT 1$$",
+            "CREATE OR REPLACE FUNCTION f() RETURNS int LANGUAGE sql AS $$DELETE FROM t RETURNING 1$$",
+        ),
+    ];
+    for (a, b) in defs {
+        let prod = real_item(DbmsKind::Postgres, a, &conn_prod(), &none);
+        assert!(
+            matches!(
+                prod.decision,
+                GateDecision::Confirm {
+                    suppressible: false,
+                    ..
+                }
+            ),
+            "{a}: {:?}",
+            prod.decision
+        );
+        // Elsewhere the key is the body's: suppressing `a` never silences `b`.
+        let ka = real_item(DbmsKind::Postgres, a, &conn_staging(), &none).fingerprint;
+        let kb = real_item(DbmsKind::Postgres, b, &conn_staging(), &none).fingerprint;
+        assert_ne!(ka, kb, "{a} / {b}");
+        let mut s = SuppressSet::default();
+        s.insert(7, ka);
+        let again = real_item(DbmsKind::Postgres, b, &conn_prod(), &s);
+        assert_ne!(again.decision, GateDecision::Run, "{b}");
+    }
+    for text in [
+        "CREATE PROCEDURE p() BEGIN DELETE FROM t; END",
+        "CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1",
+        "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO DELETE FROM t",
+        "ALTER PROCEDURE p COMMENT 'x'",
+    ] {
+        let item = real_item(DbmsKind::MySql, text, &mysql(EnvTag::Production), &none);
+        assert!(
+            matches!(
+                item.decision,
+                GateDecision::Confirm {
+                    suppressible: false,
+                    ..
+                } | GateDecision::Deny(_)
+            ),
+            "{text}: {:?}",
+            item.decision
+        );
+    }
+}
+
+/// B-M1: on production a statement that turns off later writes' checks or replication, and
+/// `NOTIFY`, asks first; the harmless `SET`s still run.
+#[test]
+fn production_session_settings_that_weaken_later_writes_ask() {
+    let none = SuppressSet::default();
+    for (engine, c, text) in [
+        (
+            DbmsKind::Postgres,
+            conn_prod(),
+            "SET session_replication_role = replica",
+        ),
+        (DbmsKind::Postgres, conn_prod(), "NOTIFY jobs, 'run'"),
+        (
+            DbmsKind::MySql,
+            mysql(EnvTag::Production),
+            "SET sql_log_bin = 0",
+        ),
+        (
+            DbmsKind::MySql,
+            mysql(EnvTag::Production),
+            "SET SESSION sql_log_bin = 0",
+        ),
+        (
+            DbmsKind::MySql,
+            mysql(EnvTag::Production),
+            "SET FOREIGN_KEY_CHECKS = 0",
+        ),
+        (
+            DbmsKind::MySql,
+            mysql(EnvTag::Production),
+            "SET @@session.unique_checks = 0",
+        ),
+    ] {
+        let item = real_item(engine, text, &c, &none);
+        assert!(
+            matches!(
+                item.decision,
+                GateDecision::Confirm { .. } | GateDecision::Deny(_)
+            ),
+            "{text}: {:?}",
+            item.decision
+        );
+        assert_ne!(item.decision, GateDecision::Run, "{text}");
+    }
+    assert_eq!(
+        real_item(
+            DbmsKind::Postgres,
+            "SET search_path = public",
+            &conn_prod(),
+            &none
+        )
+        .decision,
+        GateDecision::Run
+    );
+}
+
+/// B-M6: a plain `EXPLAIN` of a data change plans it and runs nothing: a read (no Keep/Undo);
+/// B-M2: `EXPLAIN ANALYZE` of it asks first on production.
+#[test]
+fn plain_explain_of_dml_is_a_read_and_explain_analyze_asks_on_production() {
+    let none = SuppressSet::default();
+    for (engine, c) in [
+        (DbmsKind::Postgres, conn_prod()),
+        (DbmsKind::MySql, mysql(EnvTag::Production)),
+    ] {
+        for text in [
+            "EXPLAIN DELETE FROM t WHERE id = 1",
+            "EXPLAIN UPDATE t SET a = 1",
+        ] {
+            let item = real_item(engine, text, &c, &none);
+            assert_eq!(item.decision, GateDecision::Run, "{engine:?} {text}");
+            assert_eq!(item.verdict, UnitVerdict::Read, "{engine:?} {text}");
+        }
+    }
+    let item = real_item(
+        DbmsKind::Postgres,
+        "EXPLAIN ANALYZE DELETE FROM t WHERE id = 1",
+        &conn_prod(),
+        &none,
+    );
+    assert!(
+        matches!(item.decision, GateDecision::Confirm { .. }),
+        "{:?}",
+        item.decision
+    );
+    assert_eq!(item.verdict, UnitVerdict::ExplainAnalyzeRollback);
 }

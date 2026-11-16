@@ -82,18 +82,13 @@ fn pg_fake(first: Vec<FakeExec>) -> FakeDriver {
         .exec(script)
 }
 
-/// Polls `pred` for about `ms` milliseconds of real time (letting the app run); whether it
-/// held. Never panics (the caller decides).
-fn poll(vcx: &VisualTestContext, ms: u64, mut pred: impl FnMut() -> bool) -> bool {
-    for _ in 0..ms.div_ceil(5) {
-        vcx.executor().allow_parking();
-        vcx.run_until_parked();
-        if pred() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    false
+/// ## m3b-t26-prod-unlock (fix round 1, B-M5): whether any call of the fake's whole log (typed
+/// queries, simple statements, batches, executes) carries `needle`; "nothing sent" checks read
+/// this, never the typed log alone.
+fn ever_sent(f: &FakeDriver, needle: &str) -> bool {
+    f.call_log()
+        .iter()
+        .any(|c| format!("{c:?}").contains(needle))
 }
 
 /// The shell with profile `name` (`env`) connected over `fake` and its `Console 1` bound with
@@ -279,7 +274,7 @@ fn production_delete_without_where_asks_before_anything_is_sent(cx: &mut TestApp
     run_at(vcx, 0);
     wait_until(vcx, "the confirmation", confirm_dialog_open);
     // DmlUnsafe → Confirm before send (P-M3b-18).
-    assert!(f.typed_log().is_empty(), "{:?}", f.typed_log());
+    assert!(!ever_sent(&f, "DELETE"), "{:?}", f.call_log());
     assert!(confirm_dialog_open(vcx));
     stop_core_runtime_test(cx);
 }
@@ -359,7 +354,11 @@ fn production_delete_without_where_needs_the_typed_name(cx: &mut TestAppContext)
             .any(|b| b.answer == hacivat_exec::ConfirmAnswer::Execute && b.enabled),
         "{on:?}"
     );
-    assert!(f.typed_log().is_empty(), "nothing sent before Execute");
+    assert!(
+        !ever_sent(&f, "DELETE"),
+        "nothing sent before Execute: {:?}",
+        f.call_log()
+    );
     stop_core_runtime_test(cx);
 }
 
@@ -377,7 +376,11 @@ fn closing_a_dialog_never_sends_or_keeps(cx: &mut TestAppContext) {
     wait_until(vcx, "the confirmation to close", |vcx| {
         !confirm_dialog_open(vcx)
     });
-    assert!(f.typed_log().is_empty(), "Cancel sent nothing");
+    assert!(
+        !ever_sent(&f, "DELETE"),
+        "Cancel sent nothing: {:?}",
+        f.call_log()
+    );
     assert!(log_ids(vcx).contains(&"exec-confirm-cancelled"));
 
     set_text(vcx, "UPDATE t SET a=1 WHERE id=3");
@@ -469,14 +472,49 @@ fn retag_to_production_applies_confirmations_on_the_next_run(cx: &mut TestAppCon
             .read(|cx| hacivat_app::exec_ui::last_run_ended(id, cx))
     });
     set_text(vcx, "DELETE FROM t;");
-    let queries = f.typed_log().len();
     run_at(vcx, 0);
     wait_until(vcx, "the confirmation", confirm_dialog_open);
-    assert_eq!(
-        f.typed_log().len(),
-        queries,
-        "nothing sent before the answer"
+    assert!(
+        !ever_sent(&f, "DELETE"),
+        "nothing sent before the answer: {:?}",
+        f.call_log()
     );
+    stop_core_runtime_test(cx);
+}
+
+/// ## m3b-t26-prod-unlock (fix round 1, B-M4/A-M4): a profile retagged to production while a
+/// confirmation of its console is open. The answer sends nothing: the send reads the live tag
+/// again, finds it is not the tag the plan was gated under, and refuses the run.
+#[gpui::test]
+fn a_retag_while_a_confirmation_is_open_sends_nothing(cx: &mut TestAppContext) {
+    let vcx = bound(cx, "orders", EnvTag::Dev, pg_fake(Vec::new()));
+    let f = support::fake(vcx);
+    set_text(vcx, "DELETE FROM t;");
+    run_at(vcx, 0);
+    wait_until(vcx, "the confirmation", confirm_dialog_open);
+    arm(vcx);
+    let execute = vcx
+        .cx
+        .read(confirm::open_dialog_buttons)
+        .into_iter()
+        .find(|b| b.answer == hacivat_exec::ConfirmAnswer::Execute && b.enabled)
+        .expect("Execute, with no name to type off production");
+    // The profile is tagged production while the dialog is open.
+    let pid = profile_id(vcx, "orders");
+    let mut p = vcx
+        .cx
+        .read(|cx| (*cx.global::<ConnectionsModel>().get(pid).expect("saved")).clone());
+    p.environment = Some(EnvTag::Production);
+    save_draft(vcx, hacivat_session::profile::ProfileDraft::edit(p));
+    assert!(confirm_dialog_open(vcx), "the dialog is still open");
+    click(
+        vcx,
+        Box::leak(format!("button-{}", execute.id).into_boxed_str()),
+    );
+    wait_until(vcx, "the refusal", |vcx| {
+        log_ids(vcx).contains(&"exec-run-connection-changed")
+    });
+    assert!(!ever_sent(&f, "DELETE"), "nothing sent: {:?}", f.call_log());
     stop_core_runtime_test(cx);
 }
 
@@ -549,28 +587,17 @@ fn production_run_refuses_when_its_context_read_times_out(cx: &mut TestAppContex
     };
     let (vcx, f) = prod_console_over(cx, "SELECT 1", pg_fake(vec![slow]));
     run_at(vcx, 0);
-    // Run waits `CONTEXT_WAIT` (10 s of the executor's clock) for each of its two reads.
-    for _ in 0..40 {
-        if log_ids(vcx).contains(&"exec-run-context-unconfirmed") {
-            break;
-        }
+    // Run waits `CONTEXT_WAIT` (10 s of the executor's clock) for each of its two reads: the
+    // clock moves on until the refusal is logged (a condition wait; fix round 1, A-M7).
+    wait_until(vcx, "the refusal", |vcx| {
         vcx.executor().advance_clock(Duration::from_secs(11));
-        vcx.run_until_parked();
-        poll(vcx, 100, || {
-            log_ids(vcx).contains(&"exec-run-context-unconfirmed")
-        });
-    }
+        log_ids(vcx).contains(&"exec-run-context-unconfirmed")
+    });
+    // Fix round 1 (B-M5): nothing of it in the whole call log.
     assert!(
-        log_ids(vcx).contains(&"exec-run-context-unconfirmed"),
-        "{:?}",
-        log_ids(vcx)
-    );
-    assert!(
-        !f.typed_log()
-            .iter()
-            .any(|c| matches!(c, FakeTypedCall::Query(q) if q == "SELECT 1")),
+        !ever_sent(&f, "\"SELECT 1\""),
         "nothing sent: {:?}",
-        f.typed_log()
+        f.call_log()
     );
     stop_core_runtime_test(cx);
 }
@@ -662,6 +689,37 @@ fn no_ungated_send_path_in_the_app() {
             .to_string()],
         "the only plan-less run"
     );
+    // ## m3b-t26-prod-unlock (fix round 1, A-M2/A-M3): the run service refuses a plan-less
+    // request unless it was built `with_plan_less_runs`, and the app builds it so only in a
+    // `test-support` build.
+    let opt_in = ["with_plan", "_less_runs"].concat();
+    let mut stack = vec![src.clone()];
+    let mut opt_ins = 0;
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("a readable directory") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a source file");
+            for (at, _) in text.match_indices(&opt_in) {
+                opt_ins += 1;
+                let before: Vec<&str> = text[..at].lines().rev().take(3).collect();
+                assert!(
+                    before
+                        .iter()
+                        .any(|l| l.trim() == "#[cfg(feature = \"test-support\")]"),
+                    "{}: the plan-less opt-in outside test-support",
+                    path.display()
+                );
+            }
+        }
+    }
+    assert_eq!(opt_ins, 1, "the app opts in once, for its test seam");
     let (_, text) = &plan_less[0];
     let at = text.find(&["plan", ": None"].concat()).unwrap();
     let seam = text[..at]

@@ -26,14 +26,21 @@ fn refused_id(d: &GateDecision) -> &'static str {
 fn explain_analyze_of_delete_is_wrapped_and_of_call_refused() {
     for c in [conn_dev(), conn_prod(), conn_prod_user_tx()] {
         let item = item_of("EXPLAIN ANALYZE DELETE FROM t WHERE id = 1", &c);
-        assert_eq!(item.decision, GateDecision::ExplainAnalyzeRollback);
         assert_eq!(item.verdict, UnitVerdict::ExplainAnalyzeRollback);
         assert_eq!(item.class, GateClass::Dml);
-        // Even a DELETE without WHERE: the rollback undoes it, nobody types a name.
-        assert_eq!(
-            decision("EXPLAIN ANALYZE DELETE FROM t", c),
-            GateDecision::ExplainAnalyzeRollback
-        );
+        // ## m3b-t26-prod-unlock (fix round 1, B-M2): on production it asks first, naming what
+        // the rollback does not undo (row locks, bloat, a trigger's side effects); elsewhere
+        // wrapped at once. Even a DELETE without WHERE: nobody types a name.
+        if c.env == Some(EnvTag::Production) {
+            assert_confirms_not_undone(&item.decision);
+            assert_confirms_not_undone(&decision("EXPLAIN ANALYZE DELETE FROM t", c));
+        } else {
+            assert_eq!(item.decision, GateDecision::ExplainAnalyzeRollback);
+            assert_eq!(
+                decision("EXPLAIN ANALYZE DELETE FROM t", c),
+                GateDecision::ExplainAnalyzeRollback
+            );
+        }
         assert_eq!(
             refused_id(&decision("EXPLAIN ANALYZE CALL p()", c)),
             "exec-explain-analyze-refused"
@@ -58,11 +65,14 @@ fn admin_inners_are_refused_and_unknown_inners_wrapped() {
         } else {
             assert_eq!(item.decision, GateDecision::ExplainAnalyzeRollback);
         }
-        // PostgreSQL rolls DDL back: `CREATE TABLE … AS` is wrapped.
-        assert_eq!(
-            decision("EXPLAIN ANALYZE CREATE TABLE x AS SELECT 1", c),
-            GateDecision::ExplainAnalyzeRollback
-        );
+        // PostgreSQL rolls DDL back: `CREATE TABLE … AS` is wrapped (## m3b-t26-prod-unlock
+        // fix round 1, B-M2: asked first on production).
+        let d = decision("EXPLAIN ANALYZE CREATE TABLE x AS SELECT 1", c);
+        if c.env == Some(EnvTag::Production) {
+            assert_confirms_not_undone(&d);
+        } else {
+            assert_eq!(d, GateDecision::ExplainAnalyzeRollback);
+        }
     }
     // MySQL/MariaDB commit before DDL, so a DDL inner would escape the rollback.
     for engine in [DbmsKind::MySql, DbmsKind::MariaDb] {

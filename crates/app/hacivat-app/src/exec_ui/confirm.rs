@@ -289,18 +289,34 @@ fn needs_name(item: &GateItem) -> bool {
 }
 
 /// The later units of `plan` after the item of unit `unit` that Execute all answers (they ask,
-/// without a typed name; RC-1), by unit.
+/// without a typed name; RC-1), by unit. Off production; [`execute_all_covers_on`] says it for
+/// either.
 pub fn execute_all_covers(plan: &GatePlan, unit: u32) -> Vec<u32> {
+    execute_all_covers_on(plan, unit, false)
+}
+
+// ## m3b-t26-prod-unlock (named exception, fix round 1, B-I3)
+/// [`execute_all_covers`] on a connection that is (`production`) or is not production: on
+/// production Execute all covers only later units of the same `GateClass` as the unit shown
+/// (never a typed name, RC-1); a later unit of any other class still shows its own dialog.
+pub fn execute_all_covers_on(plan: &GatePlan, unit: u32, production: bool) -> Vec<u32> {
+    let shown = plan.items.iter().find(|i| i.unit == unit).map(|i| i.class);
     plan.items
         .iter()
         .filter(|i| i.unit > unit && asks(i) && !needs_name(i))
+        .filter(|i| !production || shown == Some(i.class))
         .map(|i| i.unit)
         .collect()
 }
 
 /// What the dialog for the item of unit `unit` shows about the rest of the run.
-fn plan_context(plan: &GatePlan, unit: u32, base: &ConfirmContext) -> ConfirmContext {
-    let covered = execute_all_covers(plan, unit);
+fn plan_context(
+    plan: &GatePlan,
+    unit: u32,
+    base: &ConfirmContext,
+    production: bool,
+) -> ConfirmContext {
+    let covered = execute_all_covers_on(plan, unit, production);
     let later_asks = plan
         .items
         .iter()
@@ -346,6 +362,19 @@ pub fn answer_plan(
     answer: ConfirmAnswer,
     offered: bool,
 ) -> PlanFlow {
+    answer_plan_on(plan, unit, answer, offered, false)
+}
+
+// ## m3b-t26-prod-unlock (named exception, fix round 1, B-I3)
+/// [`answer_plan`] on a production (`production`) or other connection: Execute all answers
+/// [`execute_all_covers_on`].
+pub fn answer_plan_on(
+    plan: &mut GatePlan,
+    unit: u32,
+    answer: ConfirmAnswer,
+    offered: bool,
+    production: bool,
+) -> PlanFlow {
     let fingerprint = plan
         .items
         .iter()
@@ -361,7 +390,7 @@ pub fn answer_plan(
             return PlanFlow::Go(fingerprint.filter(|_| offered));
         }
         ConfirmAnswer::ExecuteAll => {
-            let covered = execute_all_covers(plan, unit);
+            let covered = execute_all_covers_on(plan, unit, production);
             apply_answer(plan, unit, ConfirmAnswer::Execute);
             for later in covered {
                 apply_answer(plan, later, ConfirmAnswer::ExecuteAll);
@@ -433,11 +462,11 @@ pub fn ask_plan_at(
             else {
                 continue;
             };
-            let ctx = plan_context(&plan, item.unit, &base);
+            let ctx = plan_context(&plan, item.unit, &base, production);
             let offered = offers_suppress(&q, ctx.class);
             let rx = cx.update(|cx| open_in(q, ctx, cx));
             let answer = rx.await.unwrap_or(ConfirmAnswer::Cancel);
-            match answer_plan(&mut plan, item.unit, answer, offered) {
+            match answer_plan_on(&mut plan, item.unit, answer, offered, production) {
                 PlanFlow::Cancelled => return Err(item.unit),
                 PlanFlow::Go(key) => suppress.extend(key),
             }
@@ -1098,7 +1127,13 @@ impl Render for ConfirmDialog {
                 &theme,
                 message(
                     cx,
-                    "hv-confirm-execute-all-scope",
+                    // ## m3b-t26-prod-unlock (fix round 1, B-I3): on production only statements
+                    // of the same kind are covered, and the note says so.
+                    if self.q.production {
+                        "hv-confirm-execute-all-scope-production"
+                    } else {
+                        "hv-confirm-execute-all-scope"
+                    },
                     vec![("n", ArgValue::Count(u64::from(self.ctx.covered)))],
                 ),
                 "confirm-execute-all-scope",

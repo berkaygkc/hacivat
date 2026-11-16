@@ -154,9 +154,42 @@ async fn production_dml_without_an_answer_leaves_nothing_visible() {
             );
         }
 
+        let update = format!("UPDATE {t} SET a = 2 WHERE id = 1");
+        // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1): on the MySQL family the
+        // UPDATE is confirmed before it is sent (nothing sent unanswered; Execute, then the
+        // user's COMMIT of the Manual transaction makes it visible).
+        if line.is_mysql_family() {
+            let mut p = c.plan(&update, &[]).await;
+            assert_eq!(p.shapes(), ["confirm"], "{id}: {update}");
+            let ran = ended(c.send(&p, ErrorPolicy::StopOnError, None)).await;
+            assert_eq!(ran.names(), ["Skipped"], "{id}: not sent unanswered");
+            p.answer(ConfirmAnswer::Execute);
+            let ran = ended(c.send(&p, ErrorPolicy::StopOnError, None)).await;
+            assert_eq!(ran.outcome(), "ran", "{id}");
+            assert_eq!(
+                a.scalar(&format!("SELECT a FROM {t} WHERE id = 1")).await,
+                "1",
+                "{id}: in the user's transaction, not yet committed"
+            );
+            user_commit(&c).await;
+            assert_eq!(
+                a.scalar(&format!("SELECT a FROM {t} WHERE id = 1")).await,
+                "2",
+                "{id}: committed by the user"
+            );
+            table.add(
+                line,
+                c.version.as_ref(),
+                "DELETE unanswered / UPDATE confirmed first + commit",
+                "nothing sent before an answer",
+            );
+            c.shutdown().await;
+            a.batch(&format!("DROP TABLE {t}")).await;
+            a.close().await;
+            continue;
+        }
         // UPDATE: runs in the user's transaction under the savepoint and asks; the side
         // channel never sees it; Undo keeps nothing.
-        let update = format!("UPDATE {t} SET a = 2 WHERE id = 1");
         let p = c.plan(&update, &[]).await;
         assert_eq!(p.shapes(), ["tx-confirm"], "{id}: {update}");
         let port = Port::new();
@@ -237,6 +270,23 @@ async fn production_dml_rolls_back_at_the_deadline() {
         let p = c
             .plan(&format!("UPDATE {t} SET a = 7 WHERE id = 1"), &[])
             .await;
+        // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1): the MySQL family asks
+        // before it sends, so no deadline form exists there: nothing is sent unanswered.
+        if line.is_mysql_family() {
+            assert_eq!(p.shapes(), ["confirm"], "{id}");
+            let ran = ended(c.send(&p, ErrorPolicy::StopOnError, None)).await;
+            assert_eq!(ran.names(), ["Skipped"], "{id}");
+            assert_eq!(
+                a.scalar(&format!("SELECT a FROM {t} WHERE id = 1")).await,
+                "1",
+                "{id}"
+            );
+            table.add(line, c.version.as_ref(), "deadline", "asked before sending");
+            c.shutdown().await;
+            a.batch(&format!("DROP TABLE {t}")).await;
+            a.close().await;
+            continue;
+        }
         assert_eq!(p.shapes(), ["tx-confirm"], "{id}");
         let port = Port::new();
         let started = std::time::Instant::now();
@@ -348,10 +398,26 @@ async fn mysql_joined_and_comma_updates_name_the_table_that_changes() {
         a.batch(&format!("INSERT INTO {tb} VALUES (1, 1), (2, 1)"))
             .await;
         let c = production(line, &pool, Duration::from_secs(300)).await;
-        for sql in [
+        // ## m3b-t26-prod-unlock (fix round 1, A-M6): nested and parenthesised joins (A-C1),
+        // the modifiers (A-C2; after `WITH` on MySQL, which runs a CTE before UPDATE/DELETE),
+        // and aliases (B-C1): the name asked is always the changed table's, never an alias.
+        let mut updates = vec![
             format!("UPDATE {ta} JOIN {tb} ON {ta}.id = {tb}.id SET {tb}.y = 2"),
             format!("UPDATE {ta}, {tb} SET {tb}.y = 3"),
-        ] {
+            format!("UPDATE ({ta} JOIN {tb} ON {ta}.id = {tb}.id) SET {tb}.y = 4"),
+            format!(
+                "UPDATE {ta} AS p JOIN ({tb} AS q JOIN {ta} AS r ON q.id = r.id) ON p.id = q.id \
+                 SET q.y = 5"
+            ),
+            format!("UPDATE LOW_PRIORITY IGNORE {ta}, {tb} SET {tb}.y = 6"),
+        ];
+        if line.engine == DbmsKind::MySql {
+            updates.push(format!(
+                "WITH w AS (SELECT 1) UPDATE LOW_PRIORITY {ta} JOIN {tb} ON {ta}.id = {tb}.id \
+                 SET {tb}.y = 7"
+            ));
+        }
+        for sql in updates {
             let mut p = c.plan(&sql, &[]).await;
             assert_eq!(
                 typed(&p.plan.items[0].decision).as_deref(),
@@ -391,11 +457,47 @@ async fn mysql_joined_and_comma_updates_name_the_table_that_changes() {
                 "{id}: `{sql}`"
             );
         }
+        // Multi-table DELETE through aliases (B-C1): the name asked is the table's.
+        let mut deletes = vec![
+            format!("DELETE q FROM {ta} AS p JOIN {tb} AS q ON p.id = q.id"),
+            format!("DELETE FROM q USING {ta} AS p JOIN {tb} AS q ON p.id = q.id"),
+            format!("DELETE QUICK IGNORE {tb} FROM {ta} JOIN {tb} ON {ta}.id = {tb}.id"),
+        ];
+        if line.engine == DbmsKind::MySql {
+            deletes.push(format!(
+                "WITH w AS (SELECT 1) DELETE QUICK q FROM {ta} AS p JOIN {tb} AS q ON p.id = q.id"
+            ));
+        }
+        for sql in deletes {
+            a.batch(&format!("DELETE FROM {tb}")).await;
+            a.batch(&format!("INSERT INTO {tb} VALUES (1, 1), (2, 1)"))
+                .await;
+            let mut p = c.plan(&sql, &[]).await;
+            assert_eq!(
+                typed(&p.plan.items[0].decision).as_deref(),
+                Some(&*tb),
+                "{id}: `{sql}` asks for the table that changes"
+            );
+            p.answer(ConfirmAnswer::Execute);
+            let ran = ended(c.send(&p, ErrorPolicy::StopOnError, None)).await;
+            assert_eq!(ran.outcome(), "ran", "{id}: `{sql}`");
+            user_commit(&c).await;
+            assert_eq!(
+                a.count(&format!("SELECT count(*) FROM {tb}")).await,
+                0,
+                "{id}: `{sql}` emptied {tb}"
+            );
+            assert_eq!(
+                a.count(&format!("SELECT count(*) FROM {ta}")).await,
+                2,
+                "{id}: `{sql}` left {ta} alone"
+            );
+        }
         table.add(
             line,
             c.version.as_ref(),
-            "joined/comma UPDATE",
-            "typed name = SET table; two denied",
+            "joined/comma/nested/aliased UPDATE and DELETE",
+            "typed name = the changed table; two denied",
         );
         c.shutdown().await;
         a.batch(&format!("DROP TABLE {ta}")).await;
@@ -514,4 +616,133 @@ async fn run_context_read_never_aborts_the_users_transaction() {
         a.close().await;
     }
     table.finish("t26-run-context-in-tx", &lines);
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1): non-transactional tables (mysql84)
+
+/// The mysql84 line: in every Docker set (`pr` and `full`), so a missing one fails the leg.
+fn mysql84() -> Line {
+    lines()
+        .into_iter()
+        .find(|l| l.id == "mysql84")
+        .expect("mysql84 is in every Docker set")
+}
+
+/// On production a DML of a MyISAM table is confirmed before it is sent: unanswered, the server
+/// never sees it (the row stays); after Execute it is written at once (MyISAM keeps no
+/// transaction), so the confirmation is the only barrier.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn production_myisam_dml_is_confirmed_before_it_is_sent() {
+    if !docker_enabled() {
+        return;
+    }
+    let line = mysql84();
+    let id = &line.id;
+    let pool = pool();
+    let t = unique("hv_t31_t26_myisam");
+    let mut a = admin(&line).await;
+    a.batch(&format!(
+        "CREATE TABLE {t} (id int PRIMARY KEY, a int) ENGINE = MyISAM"
+    ))
+    .await;
+    a.batch(&format!("INSERT INTO {t} VALUES (1, 1)")).await;
+    let c = production(&line, &pool, Duration::from_secs(300)).await;
+    let mut p = c
+        .plan(&format!("UPDATE {t} SET a = 2 WHERE id = 1"), &[])
+        .await;
+    assert_eq!(p.shapes(), ["confirm"], "{id}: asked before it is sent");
+    let ran = ended(c.send(&p, ErrorPolicy::StopOnError, None)).await;
+    assert_eq!(ran.names(), ["Skipped"], "{id}: not sent unanswered");
+    assert_eq!(
+        a.scalar(&format!("SELECT a FROM {t} WHERE id = 1")).await,
+        "1",
+        "{id}: nothing reached the server"
+    );
+    p.answer(ConfirmAnswer::Execute);
+    let ran = ended(c.send(&p, ErrorPolicy::StopOnError, None)).await;
+    assert_eq!(ran.outcome(), "ran", "{id}");
+    assert_eq!(
+        a.scalar(&format!("SELECT a FROM {t} WHERE id = 1")).await,
+        "2",
+        "{id}: MyISAM writes at once, after the answer"
+    );
+    c.shutdown().await;
+    a.batch(&format!("DROP TABLE {t}")).await;
+    a.close().await;
+}
+
+/// On a development console the session's confirm-in-transaction form over a MyISAM table
+/// (the plan forced to it, as the gate never plans it on this engine): Undo runs the rollback,
+/// the server warns 1196, and the log says "not undone", never "undone" or "discarded"; the
+/// unit fails with `ConfirmNotUndone`; the row keeps the change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn myisam_rollback_is_logged_as_not_undone() {
+    if !docker_enabled() {
+        return;
+    }
+    let line = mysql84();
+    let id = &line.id;
+    let pool = pool();
+    let t = unique("hv_t31_t26_notundone");
+    let mut a = admin(&line).await;
+    a.batch(&format!(
+        "CREATE TABLE {t} (id int PRIMARY KEY, a int) ENGINE = MyISAM"
+    ))
+    .await;
+    a.batch(&format!("INSERT INTO {t} VALUES (1, 1)")).await;
+    let c = Con::open(&line, Spec::dev(), &pool).await;
+    for (mode, savepoint) in [(TxMode::Auto, false), (TxMode::Manual, true)] {
+        c.set_mode(mode).await;
+        let value = if savepoint { "3" } else { "2" };
+        let mut p = c
+            .plan(&format!("UPDATE {t} SET a = {value} WHERE id = 1"), &[])
+            .await;
+        let item = &mut p.plan.items[0];
+        item.decision = GateDecision::RunInTxThenConfirm {
+            reasons: Vec::new(),
+        };
+        item.verdict = hacivat_session::session::UnitVerdict::TxThenConfirm;
+        let port = Port::new();
+        let run = c.send(
+            &p,
+            ErrorPolicy::StopOnError,
+            Some(port.clone() as Arc<dyn ConfirmPort>),
+        );
+        let q = port.question(id, 1).await;
+        assert_eq!(q.savepoint, savepoint, "{id} {mode:?}");
+        port.answer(CommitAnswer::RollBack);
+        let ran = ended(run).await;
+        c.settled().await;
+        let ids = log_ids(&c);
+        assert!(
+            ids.contains(&"exec-confirm-not-undone"),
+            "{id} {mode:?}: {ids:?} ({})",
+            ran.outcome()
+        );
+        assert!(
+            !ids.contains(&"exec-confirm-undone")
+                && !ids.contains(&"exec-confirm-rolled-back")
+                && !ids.contains(&"exec-confirm-rolled-back-deadline"),
+            "{id} {mode:?}: never said undone: {ids:?}"
+        );
+        assert_eq!(
+            ran.outcome(),
+            "exec-error-confirm-not-undone",
+            "{id} {mode:?}"
+        );
+        if savepoint {
+            user_commit(&c).await;
+        }
+        assert_eq!(
+            a.scalar(&format!("SELECT a FROM {t} WHERE id = 1")).await,
+            value,
+            "{id} {mode:?}: the change stayed"
+        );
+    }
+    c.shutdown().await;
+    a.batch(&format!("DROP TABLE {t}")).await;
+    a.close().await;
 }

@@ -1017,3 +1017,9 @@ exec-gate-run-as-one-read-only = Not sent: Run as one doesn't work on a read-onl
 # connection's settings in time before sending (the read timed out), so it can't prove they
 # are the ones it checked the statement under: nothing was sent.
 exec-run-context-unconfirmed = Not sent: Hacivat couldn't confirm this connection's settings in time. Run it again.
+# Fix round 1 (ruling on non-transactional tables): the confirmed statement's rollback ran, but
+# the server said a table does not support transactions (MySQL/MariaDB 1196), so its changes
+# stay.
+exec-confirm-not-undone = Not undone: the table doesn't support transactions, so the statement's changes stay.
+# The unit's error for the same case.
+exec-error-confirm-not-undone = Not undone: the table doesn't support transactions, so this statement's changes stay.

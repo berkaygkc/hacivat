@@ -595,3 +595,78 @@ async fn production_startup_script_is_checked_again_on_reset() {
         2
     );
 }
+
+// ## m3b-t26-prod-unlock (fix round 1, A-I1): the live tag. A profile tagged production while
+// its sessions are open: the idle pooled ones close, a borrowed one (a Count rows borrow, the
+// run service's `SessionKind::Service`) checks the script its reset replays and is refused,
+// and a new borrow is checked at its connect. Nothing of the write-y script is sent again.
+#[tokio::test(start_paused = true)]
+async fn a_retag_to_production_checks_the_scripts_of_sessions_opened_before_it() {
+    const WRITE: &str = "UPDATE hv_t SET a = 1";
+    let check = Arc::new(ScriptCheck::default());
+    let (deps, f) = deps_with(fake());
+    let dev = scripted(EnvTag::Dev, WRITE);
+    let sm = SessionManager::new(
+        tokio::runtime::Handle::current(),
+        dev.clone(),
+        Arc::new(deps),
+        Arc::new(budget_for(&dev)),
+    );
+    sm.set_classifier(Some(check.clone()));
+    let sent = |f: &FakeDriver| f.executed().iter().filter(|s| *s == WRITE).count();
+    // Off production the script runs unchecked: two borrows (one busy, one released and
+    // parked after its reset).
+    let busy = sm.pooled(SessionKind::Service).await.unwrap();
+    let parked = sm.pooled(SessionKind::Service).await.unwrap();
+    for h in [&busy, &parked] {
+        let _ = h
+            .submit(hacivat_session::session::Request::Ping)
+            .reply
+            .await;
+    }
+    drop(parked);
+    settle_until("the released session is parked", || sm.parked_count() == 1).await;
+    assert_eq!(sent(&f), 3, "connect ×2 and the release's reset");
+    assert!(
+        check.asked.lock().unwrap().is_empty(),
+        "unchecked off production"
+    );
+
+    // The retag: the parked session closes at once; none is handed out again.
+    sm.update_profile(Arc::new(Profile {
+        environment: Some(EnvTag::Production),
+        ..(*dev).clone()
+    }));
+    assert_eq!(sm.parked_count(), 0, "the idle sessions close on the retag");
+
+    // The busy borrow ends: its reset replays the script it opened with, now checked under the
+    // live tag, and refused; nothing of it is sent, and the session is not parked.
+    let calls = f.call_log().len();
+    drop(busy);
+    settle_until("the release's reset ran", || f.reset_calls() >= 2).await;
+    settle().await;
+    assert_eq!(
+        *check.asked.lock().unwrap(),
+        [WRITE],
+        "checked at the reset"
+    );
+    assert_eq!(sent(&f), 3, "nothing of the script sent at the reset");
+    assert!(
+        !f.call_log()[calls..]
+            .iter()
+            .any(|c| format!("{c:?}").contains("hv_t")),
+        "nothing of the script in the whole call log: {:?}",
+        &f.call_log()[calls..]
+    );
+    assert_eq!(sm.parked_count(), 0, "the refused session is not parked");
+
+    // A new borrow connects under the production profile: checked, refused, nothing sent.
+    let again = sm.pooled(SessionKind::Service).await;
+    settle().await;
+    assert_eq!(sent(&f), 3, "nothing sent by a new borrow: {again:?}");
+    assert_eq!(
+        check.asked.lock().unwrap().len(),
+        2,
+        "checked at the connect"
+    );
+}

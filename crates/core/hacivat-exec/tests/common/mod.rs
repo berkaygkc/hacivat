@@ -243,7 +243,8 @@ pub async fn service_over(fake: FakeDriver) -> (Bench, SessionHandle, Arc<FakeDr
     let engine = fake.descriptor().kind;
     let (h, f) = fake_session(tokio::runtime::Handle::current(), fake, profile_of(engine)).await;
     let bench = Bench {
-        svc: ExecService::new(MemoryBudget::new(1 << 30, 256 << 20)),
+        // ## m3b-t26-prod-unlock (fix round 1, A-M2): `req` builds M3a's plan-less requests.
+        svc: ExecService::new(MemoryBudget::new(1 << 30, 256 << 20)).with_plan_less_runs(),
         log: SessionLog::new(),
         engine,
     };
@@ -984,7 +985,8 @@ pub mod matrix {
                 m,
                 profile,
                 s,
-                svc: ExecService::new(MemoryBudget::new(4 << 30, 256 << 20)),
+                // ## m3b-t26-prod-unlock (fix round 1, A-M2): its M3a legs run plan-less.
+                svc: ExecService::new(MemoryBudget::new(4 << 30, 256 << 20)).with_plan_less_runs(),
                 log: SessionLog::new(),
                 ctx: sqlctx::dialect_ctx(line.engine, version.as_ref(), None),
                 version,
@@ -2356,8 +2358,10 @@ pub mod t28 {
                 m,
                 profile,
                 s,
+                // ## m3b-t26-prod-unlock (fix round 1, A-M2): its M3a legs run plan-less.
                 svc: ExecService::new(MemoryBudget::new(4 << 30, 256 << 20))
-                    .with_classifier(pool.clone()),
+                    .with_classifier(pool.clone())
+                    .with_plan_less_runs(),
                 log: SessionLog::new(),
                 ctx: sqlctx::dialect_ctx(line.engine, version.as_ref(), None),
                 version,

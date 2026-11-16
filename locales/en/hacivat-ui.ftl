@@ -2635,3 +2635,14 @@ hv-history-console-gone = The console to insert into is closed.
 hv-history-insert-refused = The statement couldn't be inserted: the editor is read-only, composing text, or would get too large.
 hv-history-pin-failed = The pin couldn't be changed.
 hv-history-open-failed = The new console didn't open in time; nothing was inserted.
+
+## m3b-t26-prod-unlock
+
+# Fix round 1 (B-I3): what Execute all also answers on a production connection: only the later
+# statements of the same kind as this one; any other kind still shows its own confirmation.
+# Variables:
+#   $n (Number) - the later statements of this kind Execute all runs without asking.
+hv-confirm-execute-all-scope-production = { $n ->
+        [one] Execute all also runs the remaining { $n } statement of this kind that would ask, without asking. A statement of any other kind, or one that needs its name typed, still asks.
+       *[other] Execute all also runs the remaining { $n } statements of this kind that would ask, without asking. A statement of any other kind, or one that needs its name typed, still asks.
+    }

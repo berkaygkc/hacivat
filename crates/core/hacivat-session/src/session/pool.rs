@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use hacivat_net::ssh::HopSecrets;
-use hacivat_proto::{Department, ErrClass};
+use hacivat_proto::{Department, EnvTag, ErrClass};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -535,7 +535,8 @@ impl SessionManager {
         deps: Arc<ConnectDeps>,
         budget: Arc<Budget>,
     ) -> Arc<SessionManager> {
-        Arc::new_cyclic(|me| SessionManager {
+        let opening_production = profile.environment == Some(EnvTag::Production);
+        let manager = Arc::new_cyclic(|me| SessionManager {
             rt,
             deps,
             budget,
@@ -562,7 +563,10 @@ impl SessionManager {
             default_lock: tokio::sync::Mutex::new(()),
             me: me.clone(),
             activity: Arc::default(),
-        })
+        });
+        // ## m3b-t26-prod-unlock (fix round 1, A-I1): the live tag starts as the profile's.
+        manager.activity.set_production(opening_production);
+        manager
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -852,6 +856,14 @@ impl SessionManager {
     /// Replaces the overlay's profile, keeping the consent and the secrets (Q17) while the
     /// profile still names the same destination.
     pub fn update_profile(&self, profile: Arc<Profile>) {
+        // ## m3b-t26-prod-unlock (fix round 1, A-I1): the live tag every session reads for its
+        // startup check; a retag to production closes the idle pooled sessions, so none opened
+        // under the old tag is handed out again (a borrowed one checks its script on its reset).
+        let production = profile.environment == Some(EnvTag::Production);
+        let was = self.activity.set_production(production);
+        if production && !was {
+            self.close_idle();
+        }
         let mut st = self.lock();
         // ## m2b-t17-liveness (T15 R1): connects in flight lose the consent too.
         if takes_consent_back(&st.profile, &profile) {
