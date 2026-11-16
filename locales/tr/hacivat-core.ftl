@@ -560,6 +560,40 @@ exec-param-too-many-binds = Gönderilmedi: ifadede 65.535'ten fazla parametre va
 # Review: PO
 exec-param-unbindable = Gönderilmedi: ifadede Hacivat'ın dolduramadığı bir parametre işareti var; sunucu ona bir değer alamaz.
 
+## m3b-t19-confirm-tx
+
+# İşlem içinde onay (HV-EXEC-04; D-014, R-M3-55, P-M3b-1). Çıktı günlüğü satırları ve
+# oturumun onaylanan bir ifadeyi bitirdiği hataların başlıkları.
+
+# Review: PO
+exec-confirm-committed = Commit edildi: onaylanan ifadenin değişiklikleri kaydedildi.
+# Review: PO
+exec-confirm-undone = Geri alındı: onaylanan ifade geri alındı; işleminiz hâlâ açık.
+# Review: PO
+exec-confirm-rolled-back = Geri alındı: onaylanan ifadenin değişiklikleri atıldı.
+# Review: PO
+exec-confirm-rolled-back-deadline = Geri alındı: zamanında yanıt gelmedi, bu yüzden onaylanan ifadenin değişiklikleri atıldı.
+# Review: PO
+exec-confirm-statement-failed = Onaylanan ifade başarısız oldu. Yalnızca o geri alındı; işleminiz sağlam.
+# Review: PO
+exec-implicit-commit = Sunucu bu ifadeyi çalıştırmadan önce açık işleminizi commit etti.
+# Review: PO
+exec-error-tx-implicit-commit = Gönderilmedi: bu ifade, bu çalıştırmada daha önceki bir ifadenin açtığı ve sizin onaylamadığınız işlemi commit ederdi. Tek başına çalıştırın.
+# Review: PO
+exec-confirm-already-committed = Zaten commit edildi: sunucu bu ifadeyi kendiliğinden commit etti, bu yüzden Hacivat önce soramadı. Çalıştırmanın geri kalanı gönderilmedi.
+# Review: PO
+exec-error-confirm-timed-out = Geri alındı: zamanında yanıt gelmedi, ifade geri alındı ve çalıştırmanın geri kalanı gönderilmedi.
+# Review: PO
+exec-error-confirm-undone = İsteğiniz üzerine geri alındı: ifadenin değişiklikleri atıldı.
+# Review: PO
+exec-error-tx-table-locks = Gönderilmedi: LOCK TABLES kilitleriniz tutuluyor ve bir işlem başlatmak onları bırakırdı. Önce UNLOCK TABLES çalıştırın.
+# Review: PO
+exec-tx-rolled-back-by-server = Sunucu işleminizin tamamını geri aldı: işlem başladığından beri yapılan her değişiklik kayboldu.
+# Review: PO
+exec-tx-ended-by-statement = İşleminiz bu ifadeyle sona erdi. Önceki değişikliklerinizin commit edilip edilmediğini denetleyin.
+# Review: PO
+exec-explain-not-rolled-back = EXPLAIN ANALYZE bir işlemin dışında çalıştı, bu yüzden değişiklikleri geri alınamadı. Çalıştırmanın geri kalanı gönderilmedi.
+
 ## m3b-t18-safe06
 
 # Review: PO

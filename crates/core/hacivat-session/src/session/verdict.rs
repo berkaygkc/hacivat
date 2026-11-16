@@ -28,10 +28,10 @@ pub enum UnitVerdict {
     #[default]
     Unknown,
     /// Run it inside a transaction, then ask Commit/Roll back (or Keep/Undo in the savepoint
-    /// form, which the session picks; P-M3b-1). Refused with `Internal` until Task 19.
+    /// form, which the session picks; P-M3b-1). m3b-t19: `confirm.rs`.
     TxThenConfirm,
-    /// `EXPLAIN ANALYZE` of a non-read statement, wrapped in a rollback (D-062). Refused with
-    /// `Internal` until Task 19.
+    /// `EXPLAIN ANALYZE` of a non-read statement, wrapped in a rollback (D-062). m3b-t19:
+    /// `confirm.rs`.
     ExplainAnalyzeRollback,
     /// A DDL on MySQL/MariaDB that the user confirmed although it commits the open
     /// transaction.

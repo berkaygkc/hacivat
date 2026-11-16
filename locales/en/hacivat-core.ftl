@@ -897,6 +897,40 @@ exec-param-too-many-binds = Not sent: the statement has more than 65,535 paramet
 # A marker the server would read as a parameter, but Hacivat can't give it a value.
 exec-param-unbindable = Not sent: the statement holds a parameter marker Hacivat can't fill, so the server would get no value for it.
 
+## m3b-t19-confirm-tx
+
+# Confirm-in-transaction (HV-EXEC-04; D-014, R-M3-55, P-M3b-1). Output log lines and the
+# titles of the errors the session ends a confirmed statement with.
+
+# The user committed (or kept) the confirmed statement.
+exec-confirm-committed = Committed: the confirmed statement's changes are saved.
+# Savepoint form: the user undid the confirmed statement; their transaction stays open.
+exec-confirm-undone = Undone: the confirmed statement was rolled back, and your transaction is still open.
+# Hacivat's own transaction: the user rolled the confirmed statement back (or the console closed).
+exec-confirm-rolled-back = Rolled back: the confirmed statement's changes were discarded.
+# Nobody answered in time (D-014): the confirmed statement was rolled back.
+exec-confirm-rolled-back-deadline = Rolled back: no answer came in time, so the confirmed statement's changes were discarded.
+# Savepoint form: the confirmed statement failed; only it was rolled back.
+exec-confirm-statement-failed = The confirmed statement failed. Only it was rolled back; your transaction is intact.
+# MySQL/MariaDB: a statement the user confirmed committed their open transaction before it ran.
+exec-implicit-commit = The server committed your open transaction before it ran this statement.
+# MySQL/MariaDB: a statement would commit a transaction an earlier statement of the run opened.
+exec-error-tx-implicit-commit = Not sent: this statement would commit the transaction an earlier statement of this run opened, which you didn't confirm. Run it on its own.
+# The server committed the statement on its own (autocommit was on), so nothing could be asked.
+exec-confirm-already-committed = Already committed: the server committed this statement on its own, so Hacivat couldn't ask first. The rest of the run wasn't sent.
+# The deadline rolled the confirmed statement back; the run stopped.
+exec-error-confirm-timed-out = Rolled back: no answer came in time, so the statement was undone and the rest of the run wasn't sent.
+# The user rolled the confirmed statement back; the run treats it as not run.
+exec-error-confirm-undone = Rolled back at your request: the statement's changes were discarded.
+# MySQL/MariaDB: starting a transaction would release the user's LOCK TABLES locks.
+exec-error-tx-table-locks = Not sent: your LOCK TABLES locks are held, and starting a transaction would release them. Run UNLOCK TABLES first.
+# A statement failed and the server rolled back the whole open transaction with it.
+exec-tx-rolled-back-by-server = The server rolled back your whole transaction: every change since it began is gone.
+# A statement failed and the user's transaction ended with it, but the statement may have committed it first (fix round 2).
+exec-tx-ended-by-statement = Your transaction ended with this statement. Check whether your earlier changes were committed.
+# EXPLAIN ANALYZE ran with no transaction open, so what it changed couldn't be rolled back; the run stopped.
+exec-explain-not-rolled-back = EXPLAIN ANALYZE ran outside a transaction, so its changes couldn't be rolled back. The rest of the run wasn't sent.
+
 ## m3b-t18-safe06
 
 # A read-only console refused a statement before sending it: Hacivat's classifier couldn't

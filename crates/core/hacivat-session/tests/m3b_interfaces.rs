@@ -1,6 +1,6 @@
 //! M3b Task 1c: the session's M3b seams. Out-of-band answers reach the actor as commands that
-//! never queue behind the running request (P-M3b-3); units that need Task 19 fail closed with
-//! nothing sent; the classifier plumbing changes no M3a behaviour (P-M3b-11); one ownership
+//! never queue behind the running request (P-M3b-3); units that needed Task 19 failed closed
+//! with nothing sent until it (m3b-t19: they now run wrapped); the classifier plumbing changes no M3a behaviour (P-M3b-11); one ownership
 //! rule for Hacivat's transactions (P-M3b-12); the FakeDriver's binds, notices and warnings;
 //! the profile's new fields (P-M3b-10).
 
@@ -23,11 +23,13 @@ use hacivat_session::profile::{
     Profile, ProfileDiag, ProfileStore, valid_fn_allowlist_entry, valid_startup_script,
 };
 use hacivat_session::session::{
-    CommitAnswer, ErrorPolicy, ExecErrorKind, RoCheck, RunChoice, RunEvent, RunId, RunSpec,
-    RunUnit, SafetyDenial, SessionEffects, SessionState, StatementClassifier, TxCommand, TxMode,
-    TxOwner, UnitEnd, UnitId, UnitVerdict,
+    CommitAnswer, ErrorPolicy, RoCheck, RunChoice, RunEvent, RunId, RunSpec, RunUnit, SafetyDenial,
+    SessionEffects, SessionState, StatementClassifier, TxCommand, TxMode, TxOwner, UnitId,
+    UnitVerdict,
 };
 use hacivat_session::{ManagerConfig, profile::ProfileEndpoint};
+// ## m3b-t18-safe06 (merge with T19)
+use hacivat_session::session::ExecErrorKind;
 use hacivat_values::{BindValue, LogicalType};
 
 // ---------------------------------------------------------------------------------------------
@@ -187,33 +189,57 @@ async fn choose_on_a_closed_session_answers_false() {
 // ---------------------------------------------------------------------------------------------
 // Fail-closed units (R-M3-52)
 
-#[tokio::test]
-async fn tx_then_confirm_unit_fails_closed_until_task_19() {
-    for verdict in [
-        UnitVerdict::TxThenConfirm,
-        UnitVerdict::ExplainAnalyzeRollback,
+// ## m3b-t19-confirm-tx (named exception): the two T1c tests asserted the fail-closed stub
+// ("refused with `Internal`, nothing sent") that Task 19 replaces. They now pin what the
+// filled path sends first; the full behaviour is in `tests/{confirm_tx,explain_wrap}.rs`.
+#[tokio::test(start_paused = true)]
+async fn tx_then_confirm_and_explain_units_run_wrapped_since_task_19() {
+    for (verdict, last) in [
+        (UnitVerdict::TxThenConfirm, "COMMIT"),
+        (UnitVerdict::ExplainAnalyzeRollback, "ROLLBACK"),
     ] {
-        let (h, f) = session(fake_pg()).await;
+        let (h, f) = session(fake_pg().tracks_transactions()).await;
         let before = f.call_log().len();
         let o = Recorder::new();
         let t = h.run(spec_with_verdict(&o, "UPDATE t SET a=1", verdict));
-        let e = t.reply.await.unwrap().unwrap_err();
-        assert_eq!(e.kind, ExecErrorKind::Internal, "{verdict:?}");
-        assert!(
-            matches!(&o.unit_ends()[..], [UnitEnd::Failed(e)] if e.kind == ExecErrorKind::Internal),
-            "{verdict:?}: {:?}",
-            o.unit_ends()
-        );
-        assert!(
-            calls_since(&f, before).is_empty(),
-            "{verdict:?}: nothing sent"
+        if verdict == UnitVerdict::TxThenConfirm {
+            settle_until("the run asks", || {
+                o.events()
+                    .iter()
+                    .any(|e| matches!(e, RunEvent::NeedsCommit { .. }))
+            })
+            .await;
+            let (unit, question) = o
+                .events()
+                .into_iter()
+                .find_map(|e| match e {
+                    RunEvent::NeedsCommit { unit, question, .. } => Some((unit, question)),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(
+                h.commit_decision(t.seq, unit, question, CommitAnswer::Commit)
+                    .await
+                    .unwrap()
+            );
+        }
+        t.reply.await.unwrap().unwrap();
+        assert_eq!(
+            calls_since(&f, before),
+            [
+                FakeCall::Statement("BEGIN".into()),
+                FakeCall::Typed(FakeTypedCall::Query("UPDATE t SET a=1".into())),
+                FakeCall::Statement(last.into()),
+            ],
+            "{verdict:?}"
         );
     }
 }
 
-#[tokio::test]
-async fn refused_units_send_nothing_in_manual_mode_either() {
-    // Manual mode would send its `BEGIN` first: the refusal comes before it.
+#[tokio::test(start_paused = true)]
+async fn manual_mode_confirm_opens_the_users_tx_then_its_savepoint() {
+    // Manual mode sends its `BEGIN` first, then the savepoint form (P-M3b-1); the statement is
+    // never sent outside a transaction.
     let (h, f) = session(fake_pg().tracks_transactions()).await;
     tx_cmd(&h, TxCommand::SetMode(TxMode::Manual))
         .await
@@ -225,10 +251,30 @@ async fn refused_units_send_nothing_in_manual_mode_either() {
         "UPDATE t SET a=1",
         UnitVerdict::TxThenConfirm,
     ));
-    assert!(t.reply.await.unwrap().is_err());
-    // ## m3b-t11-session-runs (named exception): a unit with binds runs since Task 11
-    // (`tests/run_m3b.rs`); this test keeps the Task 19 refusal.
-    assert!(calls_since(&f, before).is_empty());
+    settle_until("the run asks", || {
+        o.events().iter().any(|e| {
+            matches!(
+                e,
+                RunEvent::NeedsCommit {
+                    savepoint: true,
+                    ..
+                }
+            )
+        })
+    })
+    .await;
+    assert_eq!(
+        calls_since(&f, before),
+        [
+            FakeCall::Statement("BEGIN".into()),
+            FakeCall::Statement("SAVEPOINT hv_confirm".into()),
+            FakeCall::Typed(FakeTypedCall::Query("UPDATE t SET a=1".into())),
+        ]
+    );
+    h.close(hacivat_session::session::ClosePolicy::RollBack)
+        .await
+        .unwrap();
+    drop(t);
     assert_eq!(snap(&h).tx.status, hacivat_driver::TxStatus::Idle);
 }
 
