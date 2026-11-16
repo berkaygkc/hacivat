@@ -901,3 +901,154 @@ wired into Run before Task 24 (R-M3-52).
     (`hv-confirm-type-untypeable`). PO list: whether such statements need another way to run.
   - *IME (m7):* Escape during a composition in the type field ends the composition (its text
     stays) and keeps the dialog; the next Escape cancels.
+
+## m3b-t28 — conformance
+
+**What the matrix is.** `crates/core/hacivat-exec/tests/docker_m3b_matrix.rs` holds twelve
+Docker tests (the E-rows of the M3b gate), with their helpers in `tests/common/mod.rs`
+(`// ## m3b-t28-matrix`, module `t28`). Each case goes the app's M3b way:
+
+1. a console document in the context the console read at bind;
+2. `resolve_units` (Execute3), or one `Verbatim` unit sent as written (Run as one);
+3. `prepare_units`, every prompt answered by name (`prepare_units_with`);
+4. the real `ClassifyPool` (`classify_units`) over exactly the prepared bytes, in the
+   session's own context read from the server (lexing-mode setting, PostgreSQL's search path or
+   the MySQL family's `DATABASE()`, the server version; `guard_ctx_in`, modes known);
+5. `gate` on the live connection (the session snapshot's transaction status, owner and mode),
+   with `Confirm`/`Warn` answered through `apply_answer`;
+6. `ExecService::run`, a real session from a `ConnectionManager` with `ManagerConfig::m2b()`, and
+   the typed driver.
+
+An admin side channel (M3a T31's `matrix::Side`) checks what reached the server after each
+case.
+
+- **Lines.** These come from `matrix::lines()`: the `targets(Some(engine))` properties, never a
+  list. Under `full` they are PostgreSQL 14–18, MySQL 8.0 and 8.4, and MariaDB 10.6, 10.11 and
+  11.4; under `pr` they are pg17 and mysql84; SQLite (a file per test) runs in every set.
+  - Every test ends in `Table::finish`. It fails when a line of the active set recorded nothing,
+    and it writes `t28-<test>.tsv`.
+  - Per-engine differences are explicit expectations, never skips. Examples: no `CALL` on
+    SQLite; PostgreSQL's Run-as-one cells are `Text` (the simple protocol names no type, T13);
+    `EXPLAIN ANALYZE` is a syntax error on MariaDB and SQLite; no notices on SQLite.
+- **Production writes.** A production console here is `ManagerConfig::m2b()`, which keeps
+  production writable as Task 26 will. The production policy flag is never named (P-M3b-7). A
+  production profile starts in Manual (`tx::default_mode`); the test asserts that and sets Auto
+  for the own-form legs.
+- **The 2 s deadline.** `ExecService::run` always sends D-014's 5 minutes, so the deadline legs
+  use `Con::run_with_deadline`. It sends the same prepared units, with the gate's verdicts and
+  effects, straight to the session with a 2 s `confirm_deadline` (the T31 precedent of a pass
+  through `SessionHandle::run`). That reply is `Tx(ConfirmTimedOut)`, and the events carry
+  `CommitDecided { RollBack, by_deadline: true }`.
+- **Read-only, layer by layer.** The cases below run on a read-only console whose guard asks
+  the real pool:
+  - The gate denies `INSERT`, and the run service refuses a denied plan: nothing executed or
+    failed, every unit `Skipped`, the log's "not started" (fix round 1, I2).
+  - With the gate bypassed, the session's first-keyword input layer refuses it (DEMO-7, outcome
+    `input`).
+  - A write that starts like a read is denied by the gate. With the gate bypassed, step 0b
+    denies it (`exec-deny-classifier`):
+    - PG: a writable CTE;
+    - MySQL: `WITH … DELETE` (fix round 1, M2: a real write, not a locking read);
+    - MariaDB: `SET STATEMENT … FOR DELETE` (MariaDB has no `WITH … DELETE`);
+    - SQLite: `WITH … INSERT`.
+  - With a classifier that allows everything (`AllowAll`), the server's own layers stop the
+    same statement:
+    - PostgreSQL and the MySQL family answer `25006`, the read-only transaction (the MySQL
+      family's 1792, by its SQLSTATE);
+    - SQLite answers `23`, the read-only connection's authorizer.
+  - On PostgreSQL, a read that the real classifier allows still writes through a view over a
+    `VOLATILE` function. The server stops it with `25006`.
+  - The side channel's row count is unchanged after every step. Every statement of these
+    legs would change that count if the server ran it, so the count is evidence on every
+    engine.
+- **Mutation check (plan Step 2).** Undo's `ROLLBACK TO SAVEPOINT` was replaced by `RELEASE`
+  only in `session/confirm.rs`. `confirm_in_tx_both_forms_per_engine` then went red on pg17
+  ("Undo keeps the user's transaction": `Failed`, not `InTx`). The mutation was reverted.
+- **Case 12** (`physical_memory_bytes_is_known`) is not in this file: `hacivat-exec` may not
+  reach `hacivat-ui-core` (layering). `hacivat-ui-core`'s
+  `physical_memory_is_known_on_this_platform` runs in `build-test` on all three OSes.
+- **Case 11** runs both offline and on Docker. Task 15's
+  `gate::gate_end_to_end_over_real_classify` is no longer `#[ignore]`d (a named exception in
+  `tests/gate.rs`), and the Docker case runs the same shapes on live production, development and
+  read-only consoles of every line. `DROP TABLE`/`TRUNCATE` on production ask without a typed
+  name (R-M3-55 types only unsafe-DML targets and `DROP DATABASE`/`SCHEMA`, which the rows
+  include).
+
+**Fix round 1 (review I1, I2, M1–M5, M7).**
+
+- **pg17-tr (I1).** `turkish_cases_on_pg17_tr` runs on the `pg17-tr` twin
+  (`lc_messages = tr_TR.UTF-8`) through `require_target`, and fails under `full` when the target
+  is missing (M3a's pattern). It covers:
+  - Turkish text binds stored byte for byte (side channel) and found by a Turkish bind;
+  - a notice in Turkish (`tablo "…" mevcut değil, atlanıyor`) that still names the table;
+  - Ask decided by the SQLSTATE `42P01` under a Turkish message;
+  - production's typed name for `DELETE FROM hv_t31_m3b_müşteri_…`, which equals the table's
+    exact bytes;
+  - a Turkish-identifier `UPDATE … WHERE` through confirm-in-transaction, visible only after
+    Commit.
+- **A denied plan sends nothing (I2).** `denied_plan_sends_nothing_on_production`: a production
+  console in Auto runs as one `DELETE FROM a; DELETE FROM b`.
+  - The gate denies it (`exec-unsafe-several-targets`). Nothing later would stop it: the session
+    is writable and the server would run it.
+  - The test asserts the refused shape (executed 0, failed 0, every unit `Skipped`, "not
+    started"), and the side channel still sees both tables' rows.
+  - Mutation: the run service sending a `Deny` unit (`service.rs`, `Planned`) turned this test
+    and case 7 red on pg17, mysql84 and SQLite. The side channel went from (2, 2) to (0, 0). The
+    mutation was reverted.
+- **D-062 (M1).**
+  - PG and MySQL run the savepoint form inside the user's transaction: the explained `DELETE` is
+    undone, and the user's own `INSERT` and transaction stay (4 rows after the user's COMMIT).
+  - MariaDB and SQLite have no `EXPLAIN ANALYZE`: the server answers a syntax error, so their
+    "rows kept" cell proves nothing about the wrap ("n/a" below).
+  - **MariaDB `ANALYZE <dml>`** really executes its statement. By the controller ruling, the
+    interim backend (`sql-safety` `backend/interim.rs`, named exception) classifies
+    `ANALYZE INSERT|UPDATE|DELETE|REPLACE` as the bare statement. `ANALYZE SELECT` and
+    `ANALYZE FORMAT=…` stay `Unknown`. The gate then treats it exactly like the bare DML:
+    `run` on development (`WHERE`), `tx-confirm` on production.
+  - On Docker, production's `ANALYZE DELETE` asks. Roll back leaves 3 rows; Commit leaves 0,
+    showing that it executes.
+  - The T20 seed for `ANALYZE DELETE FROM t` (MariaDB) moved from admin `deny` to `allow`, a
+    named exception in `classifier_seeds.toml`. Read-only stays `deny`. PO list: MariaDB
+    `ANALYZE <dml>` and D-062.
+- **A multi-table `DELETE` names every target (found in this round).**
+  - Before: MySQL and MariaDB `DELETE a, b FROM a JOIN b …` and `DELETE FROM a, b USING …`
+    reported a no-`WHERE` pattern on `a` only, so typing `a` approved deleting from `b` too.
+  - Now the interim backend reports every listed table (named exception, unit test). The gate
+    then denies the several targets on production.
+- **Side channel in case 1 (M3).** Each hint's bound row equals its literal row as the server's
+  own text, and the NULL bind is stored as NULL.
+- **Typed names (M4).** Case 11 asserts the exact bytes of production's typed name: `müşteri`,
+  `s` (`DROP SCHEMA`) and `d` (`DROP DATABASE`).
+- **Artifacts (M5).** Every `t28-<test>.tsv` row now holds measured values: outcomes, codes,
+  counts, end states. No row is a constant description.
+- **E-row mapping for T30 (M7).**
+  - E5's 100-result-set cap is not on Docker; T11 and T16 cover it offline.
+  - E2's "DmlUnsafe, DDL and Admin send nothing before an answer" is not on Docker here, since
+    every `Planned::answer` is Execute. T30 cites T26's Docker test for that clause.
+  - E4, E5 (multi-result, Run as one, error policy) and E2's confirm-in-transaction clauses are
+    this file.
+- **Carried to T24's merge (M6, controller):** the classify context is still rebuilt by the
+  helper. It should switch to T24's session-held source.
+
+| Case (test) | pg14–18 | mysql80, mysql84 | mariadb106, 1011, 114 | SQLite |
+|---|---|---|---|---|
+| 1 `binds_round_trip_every_type_hint` | 14/14 hints stored equal + NULL | 11/11 + NULL | 11/11 + NULL | 9/9 + NULL |
+| 1 `value_with_quote_is_bound_not_spliced` | stored as written | same | same | same |
+| 2 `multi_result_call_and_run_as_one` | CALL 1 tab (INOUT); as one 3 text tabs | CALL 3 tabs; as one 2 | CALL 3 tabs; as one 2 | as one 2 |
+| 3 `error_policy_ask_ignore_stop_and_rollback_and_continue` | Ignore, Stop, Roll back and continue (Auto, Manual) | Ignore, Stop, Ignore in tx (Auto, Manual) | same as MySQL | same as MySQL |
+| 4 `confirm_in_tx_both_forms_per_engine` | own ×3, savepoint ×4, Manual keep+undo, Smart | same | same | same |
+| 5 `smart_mode_opens_only_before_writes` | read: none; write: opened | same | same | same |
+| 6 `explain_analyze_dml_is_rolled_back` | wrap, ran, rows kept; savepoint form in a user tx | same | n/a (no `EXPLAIN ANALYZE`: 42000); `ANALYZE DELETE` gated as bare DML, rollback 3 / commit 0 | n/a (no `EXPLAIN ANALYZE`: 1) |
+| 7 `read_only_classifier_denies_and_server_layers_hold` | gate (refused shape), input, 0b, server 25006, view 25006 | gate, input, 0b, server 25006 (`WITH … DELETE`) | gate, input, 0b, server 25006 (`SET STATEMENT … FOR DELETE`) | gate, input, 0b, authorizer 23 |
+| 8 `notices_and_warnings_reach_the_log` | 2 notices | 1 warning | 1 warning | none |
+| 9 `count_rows_matches_count_star` | 20, 15 | 20, 15 | 20, 15 | 20, 15 |
+| 10 `type_goldens_match` | 72 values (T7 file) | 31 values (T7 file) | 31 values (T7 file) | 8 values |
+| 11 `gate_end_to_end_over_real_classify` | 9 × 3 consoles, typed `müşteri`, `s` | 9 × 3, typed `müşteri`, `d` | 9 × 3, typed `müşteri`, `d` | 5 × 3, typed `müşteri` |
+| (I2) `denied_plan_sends_nothing_on_production` | refused shape, rows (2, 2) | same | same | same |
+
+| pg17-tr | `turkish_cases_on_pg17_tr` |
+|---|---|
+| binds | 5 Turkish words stored byte for byte; found by `İstanbul` |
+| notice | `tablo "hv_t31_m3b_yok_ğ_…" mevcut değil, atlanıyor` |
+| Ask | unit 1, `42P01` |
+| production | typed name = the table's bytes; `UPDATE … WHERE` own form, `İstanbul` → `Ömer` after Commit |

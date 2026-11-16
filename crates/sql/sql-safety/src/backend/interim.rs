@@ -679,6 +679,26 @@ fn narrow(view: &str, t: &Toks<'_>, ctx: &ClassifyCtx, depth: u8, acc: &mut Acc)
         Describe::Explain(at) => Some(at),
         _ => prescan::narrow_explain(t),
     };
+    // ## m3b-t28-matrix (named exception, T28 review M1 ruling): MariaDB's `ANALYZE <dml>`
+    // (a data change) runs its statement (it is MariaDB's EXPLAIN ANALYZE, with no rollback). It is classified
+    // as the inner statement itself, so it is gated exactly like the bare DML (never the D-062
+    // wrap, never `Unknown`). `ANALYZE SELECT`, `ANALYZE FORMAT=…` and anything else stay
+    // `ParseError`.
+    if inner_at.is_none()
+        && ctx.dialect.id == DialectId::MariaDb
+        && depth < MAX_EXPLAIN_DEPTH
+        && let Some(at) = mariadb_analyze_inner(t)
+    {
+        let mut bytes = view.as_bytes().to_vec();
+        blank(&mut bytes, 0, at);
+        let Ok(inner) = String::from_utf8(bytes) else {
+            acc.doubt(ReasonCode::ParseError, whole);
+            return;
+        };
+        let inner = analyse_view(&inner, ctx, depth + 1, None);
+        acc.absorb(inner);
+        return;
+    }
     match inner_at {
         Some(at) if mysql && depth < MAX_EXPLAIN_DEPTH => {
             let mut bytes = view.as_bytes().to_vec();
@@ -694,6 +714,15 @@ fn narrow(view: &str, t: &Toks<'_>, ctx: &ClassifyCtx, depth: u8, acc: &mut Acc)
         }
         _ => acc.doubt(ReasonCode::ParseError, whole),
     }
+}
+
+// ## m3b-t28-matrix (named exception, T28 review M1 ruling)
+/// Where the data change of a MariaDB `ANALYZE <dml>` starts (`ANALYZE INSERT|UPDATE|DELETE|
+/// REPLACE …`), `None` for any other `ANALYZE`. `ANALYZE SELECT` stays T10's MariaDB-only form
+/// (never a read).
+fn mariadb_analyze_inner(t: &Toks<'_>) -> Option<usize> {
+    const INNER: [&str; 4] = ["INSERT", "UPDATE", "DELETE", "REPLACE"];
+    (t.is(0, "ANALYZE") && t.is_any(1, &INNER)).then(|| t.start(1))
 }
 
 /// Statements in a view by our lexer: segments between top-level `;` holding a token.
@@ -1182,21 +1211,32 @@ impl<'c, 'a> Walk<'c, 'a> {
                     sqlparser::ast::FromTable::WithFromKeyword(v)
                     | sqlparser::ast::FromTable::WithoutKeyword(v) => v.as_slice(),
                 };
-                let target = d.tables.first().cloned().or_else(|| match from.first() {
-                    Some(TableWithJoins {
-                        relation: TableFactor::Table { name, .. },
-                        ..
-                    }) => Some(name.clone()),
-                    _ => None,
-                });
-                self.unbounded(
-                    d.selection.as_ref(),
-                    &d.limit,
-                    d.order_by.is_empty(),
-                    target.as_ref(),
-                );
+                // ## m3b-t28-matrix (named exception, T28 fix round 1 finding): a MySQL
+                // multi-table `DELETE a, b FROM …` deletes from every listed table, so each one
+                // is a target of its patterns: typing one name must never approve another (the
+                // gate then denies the several targets on production).
+                // `DELETE a, b FROM …` lists them before `FROM`; `DELETE FROM a, b USING …` (and
+                // the single-table form) in `FROM`.
+                let mut targets: Vec<ObjectName> = d.tables.clone();
+                if targets.is_empty() {
+                    targets.extend(from.iter().filter_map(|t| match &t.relation {
+                        TableFactor::Table { name, .. } => Some(name.clone()),
+                        _ => None,
+                    }));
+                }
+                if targets.is_empty() {
+                    self.unbounded(d.selection.as_ref(), &d.limit, d.order_by.is_empty(), None);
+                }
+                for t in &targets {
+                    self.unbounded(
+                        d.selection.as_ref(),
+                        &d.limit,
+                        d.order_by.is_empty(),
+                        Some(t),
+                    );
+                }
                 self.joins_without_on(from);
-                if let Some(t) = &target {
+                for t in &targets {
                     self.write_target(t);
                 }
             }
@@ -1697,6 +1737,102 @@ mod tests {
         assert_eq!(variant_name(&s[0]), "ShowTables");
         let s = Parser::parse_sql(&MySqlDialect {}, "SELECT 1").unwrap();
         assert_eq!(variant_name(&s[0]), "Query");
+    }
+
+    // ## m3b-t28-matrix (named exception, T28 review M1 ruling)
+    /// MariaDB's `ANALYZE <dml>` runs its statement: it is classified exactly as the bare
+    /// statement (kind, effects, class, destructive patterns), never `Unknown` and never an
+    /// `EXPLAIN ANALYZE`. On MySQL (no such statement) and for other `ANALYZE` forms
+    /// (`ANALYZE SELECT`, `FORMAT=`) nothing changes: they stay `Unknown`.
+    #[test]
+    fn mariadb_analyze_dml_is_the_dml_itself() {
+        let ctx = |d| {
+            ClassifyCtx::new(
+                DialectCtx::new(d, None),
+                sql_dialect::ClientFlavor::None,
+                crate::Expect::SingleStatement,
+            )
+        };
+        let maria = ctx(DialectId::MariaDb);
+        let shape = |r: &SafetyReport| {
+            let s = &r.items[0];
+            (
+                s.kind,
+                s.effects,
+                s.class,
+                r.request_class,
+                s.destructive.iter().map(|d| d.kind).collect::<Vec<_>>(),
+                s.flags.contains(RiskFlags::EXPLAIN_ANALYZE),
+            )
+        };
+        for inner in [
+            "DELETE FROM t WHERE a > 0",
+            "DELETE FROM t",
+            "UPDATE t SET a = 1 WHERE a > 0",
+            "UPDATE t SET a = 1",
+            "INSERT INTO t VALUES (1)",
+            "REPLACE INTO t VALUES (1)",
+        ] {
+            let bare = classify_interim(inner, &maria);
+            let analyzed = classify_interim(&format!("ANALYZE {inner}"), &maria);
+            assert_eq!(shape(&analyzed), shape(&bare), "ANALYZE {inner}");
+            assert_ne!(
+                analyzed.request_class,
+                CoarseClass::Unknown,
+                "ANALYZE {inner}"
+            );
+            assert!(!shape(&analyzed).5, "ANALYZE {inner}: never the D-062 wrap");
+        }
+        let w = classify_interim("ANALYZE DELETE FROM t WHERE a > 0", &maria);
+        assert!(w.items[0].effects.contains(EffectSet::WRITE_DATA));
+        // Other forms stay as they were: MySQL has no `ANALYZE <dml>`, and `FORMAT=JSON` is
+        // not followed.
+        for (d, sql) in [
+            (DialectId::MySql, "ANALYZE DELETE FROM t WHERE a > 0"),
+            (
+                DialectId::MariaDb,
+                "ANALYZE FORMAT=JSON DELETE FROM t WHERE a > 0",
+            ),
+            (DialectId::MariaDb, "ANALYZE SELECT a FROM t"),
+        ] {
+            let r = classify_interim(sql, &ctx(d));
+            assert_eq!(r.request_class, CoarseClass::Unknown, "{d:?} {sql}");
+        }
+    }
+
+    // ## m3b-t28-matrix (named exception, T28 fix round 1 finding)
+    /// A multi-table `DELETE` names every table it deletes from as a target of its unbounded
+    /// pattern (MySQL and MariaDB, both spellings); a single-table one is unchanged.
+    #[test]
+    fn multi_table_delete_targets_every_table() {
+        for d in [DialectId::MySql, DialectId::MariaDb] {
+            let ctx = ClassifyCtx::new(
+                DialectCtx::new(d, None),
+                sql_dialect::ClientFlavor::None,
+                crate::Expect::SingleStatement,
+            );
+            let targets = |sql: &str| -> Vec<String> {
+                let r = classify_interim(sql, &ctx);
+                r.items
+                    .iter()
+                    .flat_map(|s| &s.destructive)
+                    .filter(|x| x.kind == DestructiveKind::NoWhere)
+                    .filter_map(|x| x.target.as_ref().map(|t| format!("{:?}", t.name)))
+                    .collect()
+            };
+            for sql in [
+                "DELETE a, b FROM a JOIN b ON a.x = b.x",
+                "DELETE FROM a, b USING a JOIN b ON a.x = b.x",
+            ] {
+                assert_eq!(targets(sql).len(), 2, "{d:?} {sql}: {:?}", targets(sql));
+            }
+            assert_eq!(targets("DELETE FROM a").len(), 1, "{d:?}");
+            assert_eq!(
+                targets("DELETE a FROM a JOIN b ON a.x = b.x").len(),
+                1,
+                "{d:?}"
+            );
+        }
     }
 
     // ## m3b-t15-gate (named exception, T15 fix round 1, I3)

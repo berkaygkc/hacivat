@@ -2124,3 +2124,735 @@ pub mod t18 {
         matches!(reply, Err(e) if matches!(e.kind, ExecErrorKind::SafetyDenied(_)))
     }
 }
+
+// ## m3b-t28-matrix
+/// Task 28's helpers (the M3b gate's E-rows over the Docker matrix, `docker_m3b_matrix`): a
+/// console driven the app's M3b way. A document goes through `resolve_units`, then
+/// `prepare_units` (the prompts answered by name), then the real `ClassifyPool` in the
+/// session's own context, then `gate` on the live connection, then `ExecService::run`, a real
+/// session and the typed driver. The lines, the side channel and the waits are Task 31's
+/// (`matrix`).
+pub mod t28 {
+    use std::collections::VecDeque;
+    use std::fmt::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use futures::future::BoxFuture;
+    use hacivat_driver::{ExecOpts, Protocol, SemVerLoose};
+    use hacivat_exec::classify_pool::{ClassifyPool, guard_ctx_in};
+    use hacivat_exec::{
+        ClassifyCtx, CommitQuestion, ConfirmAnswer, ConfirmPort, ConfirmQuestion, ConnSafety,
+        ExecService, ExecUnit, Expect, GateDecision, GatePlan, ParamAnswers, ParamValueStore,
+        Prepared, PreparedUnit, Resolution, RunAction, RunRequest, RunTicket, SafetyReport,
+        SessionLog, SuppressSet, apply_answer, gate, prepare_units, prepare_units_with,
+        resolve_units, sqlctx,
+    };
+    use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
+    use hacivat_results::{FetchPolicy, MemoryBudget, ResultId, ResultStore, ResultWriter};
+    use hacivat_secrets::SecretString;
+    use hacivat_session::pipeline::Interaction;
+    use hacivat_session::profile::{Profile, ProfileEndpoint};
+    use hacivat_session::session::{
+        ClassifierContext, CommitAnswer, ErrorPolicy, ExecOrigin, ObserverRef, Request, RoAnswer,
+        RoCheck, RunEvent, RunId, RunObserver, RunSpec, RunUnit, SessionEffects, SessionHandle,
+        SessionSnapshot, SessionState, StatementClassifier, TxCommand, TxMode, UnitId,
+    };
+    use hacivat_session::{ConnectionManager, LiveState, ManagerConfig};
+    use hacivat_values::{BindValue, ResultSchema};
+    use sql_dialect::DialectCtx;
+    use sql_split::exec_range::UnitKind;
+    use sql_split::{DocSnapshot, ParamSettings};
+    use tokio::sync::oneshot;
+
+    use super::matrix::{Line, Ran, deps, ended, profile_of, secs};
+
+    /// How a console is opened.
+    pub struct Spec {
+        pub env: Option<EnvTag>,
+        pub read_only: bool,
+        /// The read-only guard's classifier (`ManagerConfig::classifier`, step 0b).
+        pub classifier: Option<Arc<dyn StatementClassifier>>,
+    }
+
+    impl Spec {
+        pub fn dev() -> Spec {
+            Spec {
+                env: Some(EnvTag::Dev),
+                read_only: false,
+                classifier: None,
+            }
+        }
+
+        /// A production console that writes (as Task 26 leaves it): `ManagerConfig::m2b()`
+        /// keeps production sessions writable, so the gate's confirmations are the only
+        /// barrier (P-M3b-7: the production policy flag is never named here).
+        pub fn production() -> Spec {
+            Spec {
+                env: Some(EnvTag::Production),
+                read_only: false,
+                classifier: None,
+            }
+        }
+
+        /// A read-only development console whose guard asks `classifier`.
+        pub fn read_only(classifier: Arc<dyn StatementClassifier>) -> Spec {
+            Spec {
+                env: Some(EnvTag::Dev),
+                read_only: true,
+                classifier: Some(classifier),
+            }
+        }
+    }
+
+    /// The values a run remembers (none: every prompt is answered by the test).
+    struct NoMemory;
+
+    impl ParamValueStore for NoMemory {
+        fn get(&self, _: &ProfileId, _: &str) -> Option<BindValue> {
+            None
+        }
+        fn put(&self, _: &ProfileId, _: &str, _: BindValue) {}
+    }
+
+    /// A run of a console, planned: the units, their prepared form (exactly the bytes sent),
+    /// the pool's reports of those bytes, and the gate's plan on the live connection.
+    #[derive(Debug, Clone)]
+    pub struct Planned {
+        pub units: Vec<ExecUnit>,
+        pub prepared: Vec<PreparedUnit>,
+        pub reports: Vec<SafetyReport>,
+        pub plan: GatePlan,
+        pub run_as_one: bool,
+        /// The units that asked before the run (`Confirm`/`Warn`), answered by
+        /// [`Planned::answer`].
+        pub asked: Vec<u32>,
+    }
+
+    impl Planned {
+        /// Each unit's decision, as a short name ([`shape`]).
+        pub fn shapes(&self) -> Vec<&'static str> {
+            self.plan.items.iter().map(|i| shape(&i.decision)).collect()
+        }
+
+        /// The user's `answer` to every `Confirm`/`Warn` (the app's dialogs, Task 21).
+        pub fn answer(&mut self, answer: ConfirmAnswer) {
+            let asking: Vec<u32> = self
+                .plan
+                .items
+                .iter()
+                .filter(|i| {
+                    matches!(
+                        i.decision,
+                        GateDecision::Confirm { .. } | GateDecision::Warn(_)
+                    )
+                })
+                .map(|i| i.unit)
+                .collect();
+            for unit in asking {
+                assert!(apply_answer(&mut self.plan, unit, answer), "{answer:?}");
+                self.asked.push(unit);
+            }
+        }
+
+        /// Unit `i`'s plan item turned to `Run` (a gate that missed): what the session's own
+        /// layers must still stop.
+        pub fn forced(mut self, i: usize) -> Planned {
+            self.plan.items[i].decision = GateDecision::Run;
+            self
+        }
+    }
+
+    /// A short name for a decision (the gate tests' table names).
+    pub fn shape(d: &GateDecision) -> &'static str {
+        match d {
+            GateDecision::Run => "run",
+            GateDecision::Warn(_) => "warn",
+            GateDecision::Confirm {
+                type_to_confirm: Some(_),
+                ..
+            } => "confirm+type",
+            GateDecision::Confirm { .. } => "confirm",
+            GateDecision::RunInTxThenConfirm { .. } => "tx-confirm",
+            GateDecision::ExplainAnalyzeRollback => "explain-wrap",
+            GateDecision::Deny(_) => "deny",
+        }
+    }
+
+    /// PostgreSQL's `SHOW search_path` split into its elements, quotes removed (`$user` kept).
+    fn split_search_path(raw: &str) -> Vec<Arc<str>> {
+        raw.split(',')
+            .map(|s| Arc::<str>::from(s.trim().trim_matches('"')))
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    static CONSOLES: AtomicU64 = AtomicU64::new(1_000);
+
+    /// A console of the M3b pipeline (the module docs).
+    pub struct Con {
+        pub line: Line,
+        pub m: Arc<ConnectionManager>,
+        pub profile: Arc<Profile>,
+        pub s: SessionHandle,
+        pub svc: ExecService,
+        pub log: Arc<SessionLog>,
+        pub ctx: DialectCtx,
+        pub version: Option<SemVerLoose>,
+        pub pool: Arc<ClassifyPool>,
+        console: u64,
+    }
+
+    impl Con {
+        /// Connects `line` as `spec` says; the run service classifies with `pool` (also its
+        /// "Count rows" check).
+        pub async fn open(line: &Line, spec: Spec, pool: &Arc<ClassifyPool>) -> Con {
+            let mut p = profile_of(line);
+            p.read_only = spec.read_only;
+            p.environment = spec.env;
+            if spec.read_only
+                && let ProfileEndpoint::File {
+                    create_if_missing, ..
+                } = &mut p.endpoint
+            {
+                *create_if_missing = false;
+            }
+            let config = ManagerConfig {
+                classifier: spec.classifier,
+                ..ManagerConfig::m2b()
+            };
+            let m =
+                ConnectionManager::new(tokio::runtime::Handle::current(), Arc::new(deps()), config);
+            let profile = Arc::new(p);
+            let password = line
+                .target
+                .as_ref()
+                .map(|t| SecretString::from(t.password.clone()));
+            m.connect(profile.clone(), password, Interaction::Headless);
+            let mut changes = m.changes();
+            let deadline = Instant::now() + secs(60);
+            let version = loop {
+                match m.state(profile.id) {
+                    LiveState::Connected(info) => break info.server.version.clone(),
+                    LiveState::Failed(e) => {
+                        panic!("{}: the connect failed: {:?}", line.id, e.class)
+                    }
+                    LiveState::Lost { class } => panic!("{}: lost: {class:?}", line.id),
+                    _ => {}
+                }
+                assert!(Instant::now() < deadline, "{}: never connected", line.id);
+                tokio::select! {
+                    _ = changes.changed() => {}
+                    () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
+            };
+            let s = m
+                .sessions(profile.id)
+                .expect("connected")
+                .default_session()
+                .expect("a default session");
+            assert_eq!(s.state().borrow().read_only, spec.read_only, "{}", line.id);
+            let mut c = Con {
+                line: line.clone(),
+                m,
+                profile,
+                s,
+                svc: ExecService::new(MemoryBudget::new(4 << 30, 256 << 20))
+                    .with_classifier(pool.clone()),
+                log: SessionLog::new(),
+                ctx: sqlctx::dialect_ctx(line.engine, version.as_ref(), None),
+                version,
+                pool: pool.clone(),
+                console: CONSOLES.fetch_add(1, Ordering::SeqCst),
+            };
+            if let Some(sql) = sqlctx::probe_sql(line.engine) {
+                let row = c.internal(sql).await;
+                c.ctx = sqlctx::dialect_ctx(line.engine, c.version.as_ref(), row.as_deref());
+            }
+            c
+        }
+
+        /// Hacivat's own idempotent statement: its first value (`None` for NULL, no row, or a
+        /// failure).
+        pub async fn internal(&self, sql: &str) -> Option<String> {
+            self.s
+                .submit(Request::Exec {
+                    sql: sql.to_string(),
+                    opts: ExecOpts {
+                        max_rows: 10,
+                        protocol: Protocol::Simple,
+                    },
+                    origin: ExecOrigin::Internal { idempotent: true },
+                })
+                .reply
+                .await
+                .expect("the actor replies")
+                .ok()?
+                .rows
+                .first()?
+                .first()
+                .cloned()
+                .flatten()
+        }
+
+        /// What the run path classifies with (the T24 carry): the session's own context, read
+        /// now (its lexing-mode setting, PostgreSQL's search path, the MySQL family's current
+        /// database as `search_path[0]`, the server version), modes known when read.
+        pub async fn classify_ctx(&self, expect: Expect) -> ClassifyCtx {
+            let (lex_modes, search_path) = match self.line.engine {
+                DbmsKind::Postgres => (
+                    self.internal("SHOW standard_conforming_strings").await,
+                    self.internal("SHOW search_path")
+                        .await
+                        .map(|p| split_search_path(&p)),
+                ),
+                DbmsKind::MySql | DbmsKind::MariaDb => (
+                    self.internal("SELECT @@SESSION.sql_mode").await,
+                    self.internal("SELECT DATABASE()")
+                        .await
+                        .map(|d| vec![Arc::<str>::from(d)]),
+                ),
+                _ => (None, None),
+            };
+            let c = ClassifierContext {
+                lex_modes: lex_modes.map(Arc::from),
+                search_path: search_path.map(Arc::from),
+                server_version: self.version.clone(),
+            };
+            let mut ctx = guard_ctx_in(self.line.engine, Arc::from(Vec::new()), &c);
+            ctx.expect = expect;
+            ctx
+        }
+
+        pub fn snap(&self) -> SessionSnapshot {
+            self.s.state().borrow().clone()
+        }
+
+        /// The snapshot once the session left its request (the run's reply follows `Idle`).
+        pub async fn settled(&self) -> SessionSnapshot {
+            let mut state = self.s.state();
+            let left = |s: &SessionSnapshot| {
+                !matches!(
+                    s.state,
+                    SessionState::Busy { .. } | SessionState::Cancelling { .. }
+                )
+            };
+            match tokio::time::timeout(secs(10), state.wait_for(left)).await {
+                Ok(Ok(snap)) => snap.clone(),
+                Ok(Err(_)) => panic!("{}: the session ended", self.line.id),
+                Err(_) => panic!("{}: the session stayed busy", self.line.id),
+            }
+        }
+
+        /// The gate's view of the connection now.
+        pub fn conn(&self) -> ConnSafety {
+            let snap = self.snap();
+            ConnSafety {
+                engine: self.line.engine,
+                env: self.profile.environment,
+                read_only: snap.read_only,
+                tx_status: snap.tx.status,
+                tx_owner: snap.tx.owner,
+                tx_mode: snap.tx.mode,
+                confirm_unsafe_where: true,
+            }
+        }
+
+        pub fn doc(&self, text: &str) -> DocSnapshot {
+            super::doc_in(text, self.ctx)
+        }
+
+        /// The units Run Execute3 (the whole script) sends for `text`.
+        pub fn units(&self, text: &str) -> Vec<ExecUnit> {
+            match resolve_units(
+                &self.doc(text),
+                &[super::caret(0)],
+                RunAction::Execute3,
+                None,
+            ) {
+                Resolution::Units(units) => units,
+                other => panic!("{}: `{text}` resolved to {other:?}", self.line.id),
+            }
+        }
+
+        /// `text` as one unit, sent as written (Run as one, R-M3-60).
+        pub fn as_one(&self, text: &str) -> Vec<ExecUnit> {
+            vec![ExecUnit {
+                text: Arc::from(text),
+                doc_range: 0..text.len(),
+                kind: UnitKind::Verbatim,
+                suspendable: false,
+                title: None,
+            }]
+        }
+
+        /// Prepares `units` (every prompt answered from `values` by its name), classifies the
+        /// prepared bytes on the pool in the session's context and gates them on the live
+        /// connection.
+        pub async fn plan_units(
+            &self,
+            units: Vec<ExecUnit>,
+            values: &[(&str, BindValue)],
+            run_as_one: bool,
+        ) -> Planned {
+            let id = &self.line.id;
+            let settings = ParamSettings::default();
+            let profile = self.profile.id;
+            let prepared =
+                match prepare_units(units.clone(), &self.ctx, &settings, &NoMemory, &profile) {
+                    Prepared::Ready(p) => p,
+                    Prepared::NeedsValues(prompts) => {
+                        let mut answers = ParamAnswers::default();
+                        for p in &prompts {
+                            let (_, v) = values
+                                .iter()
+                                .find(|(n, _)| *n == &*p.name)
+                                .unwrap_or_else(|| panic!("{id}: no value for `{}`", p.name));
+                            answers.insert(p, v.clone());
+                        }
+                        match prepare_units_with(
+                            units.clone(),
+                            &self.ctx,
+                            &settings,
+                            &NoMemory,
+                            &profile,
+                            &answers,
+                        ) {
+                            Prepared::Ready(p) => p,
+                            other => panic!("{id}: {other:?}"),
+                        }
+                    }
+                    other => panic!("{id}: {other:?}"),
+                };
+            let expect = if run_as_one {
+                Expect::Script
+            } else {
+                Expect::SingleStatement
+            };
+            let texts: Vec<Arc<str>> = prepared.iter().map(|p| p.final_text.clone()).collect();
+            let reports = match self
+                .pool
+                .classify_units(texts, self.classify_ctx(expect).await)
+                .await
+            {
+                Ok(r) => r,
+                Err(never) => match never {},
+            };
+            let plan = gate(
+                &prepared,
+                &reports,
+                &self.conn(),
+                &SuppressSet::default(),
+                self.console,
+            );
+            Planned {
+                units,
+                prepared,
+                reports,
+                plan,
+                run_as_one,
+                asked: Vec::new(),
+            }
+        }
+
+        /// [`Con::plan_units`] of Run Execute3 on `text`.
+        pub async fn plan(&self, text: &str, values: &[(&str, BindValue)]) -> Planned {
+            self.plan_units(self.units(text), values, false).await
+        }
+
+        /// Sends `p` through the run service.
+        pub fn send(
+            &self,
+            p: &Planned,
+            policy: ErrorPolicy,
+            confirm: Option<Arc<dyn ConfirmPort>>,
+        ) -> RunTicket {
+            self.svc.run(
+                &self.s,
+                RunRequest {
+                    console: self.console,
+                    engine: self.line.engine,
+                    units: p.units.clone(),
+                    fetch: FetchPolicy::default(),
+                    log: self.log.clone(),
+                    prepared: Some(p.prepared.clone()),
+                    plan: Some(p.plan.clone()),
+                    policy,
+                    run_as_one: p.run_as_one,
+                    history: None,
+                    confirm,
+                },
+            )
+        }
+
+        /// Plans `text` with `values`, answers every confirmation Execute, runs it (stop on
+        /// error) and waits for its end.
+        pub async fn run_with(&self, text: &str, values: &[(&str, BindValue)]) -> Ran {
+            let mut p = self.plan(text, values).await;
+            p.answer(ConfirmAnswer::Execute);
+            ended(self.send(&p, ErrorPolicy::StopOnError, None)).await
+        }
+
+        pub async fn run(&self, text: &str) -> Ran {
+            self.run_with(text, &[]).await
+        }
+
+        /// [`Con::run`]; every unit must succeed.
+        pub async fn ok(&self, text: &str) -> Ran {
+            let ran = self.run(text).await;
+            assert_eq!(ran.outcome(), "ran", "{}: `{text}`", self.line.id);
+            ran
+        }
+
+        /// Sets the transaction mode (the chip, Task 22).
+        pub async fn set_mode(&self, mode: TxMode) {
+            let r = self
+                .s
+                .submit(Request::Tx(TxCommand::SetMode(mode)))
+                .reply
+                .await
+                .expect("the actor replies");
+            assert!(r.is_ok(), "{}: SetMode({mode:?}): {r:?}", self.line.id);
+        }
+
+        /// Sends `p`'s units straight to the session with `deadline` as the confirm deadline,
+        /// unanswered; the run's events. The run service has no deadline of its own to inject
+        /// (D-014's 5 minutes, `RunSpec::CONFIRM_DEADLINE`), so this pass builds the same
+        /// `RunUnit`s the service builds (the M3a T31 precedent: a run through
+        /// `SessionHandle::run` with an observer of the test's own).
+        pub async fn run_with_deadline(&self, p: &Planned, deadline: Duration) -> Vec<RunEvent> {
+            static RUNS: AtomicU64 = AtomicU64::new(u64::MAX / 2);
+            let run = RunId(RUNS.fetch_add(1, Ordering::SeqCst));
+            let units: Arc<[RunUnit]> = p
+                .prepared
+                .iter()
+                .zip(&p.plan.items)
+                .enumerate()
+                .map(|(i, (prep, item))| {
+                    assert!(
+                        matches!(
+                            item.decision,
+                            GateDecision::Run
+                                | GateDecision::RunInTxThenConfirm { .. }
+                                | GateDecision::ExplainAnalyzeRollback
+                        ),
+                        "{}: unit {i} is not to be sent: {:?}",
+                        self.line.id,
+                        item.decision
+                    );
+                    RunUnit {
+                        id: UnitId {
+                            run,
+                            ordinal: u32::try_from(i).unwrap(),
+                        },
+                        sql: prep.final_text.clone(),
+                        protocol: Protocol::Extended,
+                        suspendable: false,
+                        binds: prep.binds.clone(),
+                        verdict: item.verdict,
+                        effects: item.effects,
+                        masked: prep.masked.clone(),
+                        max_result_sets: 100,
+                        cell_cap: None,
+                    }
+                })
+                .collect();
+            let events = Arc::new(Events::default());
+            let spec = RunSpec {
+                run,
+                units,
+                policy: ErrorPolicy::StopOnError,
+                fetch: FetchPolicy::default(),
+                observer: ObserverRef(events.clone()),
+                confirm_deadline: deadline,
+            };
+            // The reply of a run whose deadline rolled back is `Tx(ConfirmTimedOut)`; the
+            // events say what happened.
+            let reply = self.s.run(spec).reply.await.expect("the actor replies");
+            if let Err(e) = &reply {
+                assert!(
+                    matches!(
+                        e.kind,
+                        hacivat_session::session::ExecErrorKind::Tx(
+                            hacivat_session::session::TxError::ConfirmTimedOut
+                        )
+                    ),
+                    "{}: {:?}",
+                    self.line.id,
+                    e.kind
+                );
+            }
+            events.take()
+        }
+
+        pub async fn shutdown(self) {
+            self.m.shutdown().await;
+        }
+    }
+
+    /// The events of a run sent straight to the session.
+    #[derive(Default)]
+    struct Events {
+        events: Mutex<Vec<RunEvent>>,
+    }
+
+    impl Events {
+        fn take(&self) -> Vec<RunEvent> {
+            std::mem::take(&mut *self.events.lock().unwrap())
+        }
+    }
+
+    impl RunObserver for Events {
+        fn open_result(&self, _: UnitId, _: u32, schema: Arc<ResultSchema>) -> ResultWriter {
+            let budget = MemoryBudget::new(1 << 30, 256 << 20);
+            let (_store, writer) = ResultStore::new(ResultId(u64::MAX), schema, budget, 0);
+            writer
+        }
+
+        fn event(&self, ev: &RunEvent) {
+            self.events.lock().unwrap().push(ev.clone());
+        }
+    }
+
+    /// The confirm-in-transaction port of a test: it records every question and holds it
+    /// until the test answers ([`Port::answer`]), so the side channel can look first.
+    #[derive(Debug, Default)]
+    pub struct Port {
+        asked: Mutex<Vec<CommitQuestion>>,
+        waiting: Mutex<VecDeque<oneshot::Sender<CommitAnswer>>>,
+    }
+
+    impl Port {
+        pub fn new() -> Arc<Port> {
+            Arc::new(Port::default())
+        }
+
+        /// The questions asked so far.
+        pub fn asked(&self) -> Vec<CommitQuestion> {
+            self.asked.lock().unwrap().clone()
+        }
+
+        /// Waits (real time, at most 30 s) until `n` questions were asked; the `n`-th.
+        pub async fn question(&self, id: &str, n: usize) -> CommitQuestion {
+            let deadline = Instant::now() + secs(30);
+            loop {
+                if let Some(q) = self.asked.lock().unwrap().get(n - 1) {
+                    return q.clone();
+                }
+                assert!(Instant::now() < deadline, "{id}: question {n} never came");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        /// Answers the oldest question still waiting.
+        pub fn answer(&self, a: CommitAnswer) {
+            let tx = self
+                .waiting
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("a question waits");
+            assert!(tx.send(a).is_ok(), "the run still waits");
+        }
+    }
+
+    impl ConfirmPort for Port {
+        fn confirm(&self, _: ConfirmQuestion) -> oneshot::Receiver<ConfirmAnswer> {
+            // Pre-run confirmations are answered on the plan ([`Planned::answer`]).
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(ConfirmAnswer::Cancel);
+            rx
+        }
+
+        fn commit_decision(&self, q: CommitQuestion) -> oneshot::Receiver<CommitAnswer> {
+            let (tx, rx) = oneshot::channel();
+            self.waiting.lock().unwrap().push_back(tx);
+            self.asked.lock().unwrap().push(q);
+            rx
+        }
+    }
+
+    /// A read-only guard classifier that allows everything (a classifier that missed): what
+    /// the server's own layers must still stop.
+    #[derive(Debug)]
+    pub struct AllowAll;
+
+    impl StatementClassifier for AllowAll {
+        fn check_read_only(
+            &self,
+            _: DbmsKind,
+            _: Arc<str>,
+            _: Arc<[Arc<str>]>,
+        ) -> BoxFuture<'static, RoCheck> {
+            Box::pin(async { RoCheck::Allow })
+        }
+
+        fn effects(&self, _: DbmsKind, _: Arc<str>) -> BoxFuture<'static, Option<SessionEffects>> {
+            Box::pin(async { None })
+        }
+
+        fn check_read_only_in(
+            &self,
+            _: DbmsKind,
+            _: Arc<str>,
+            _: Arc<[Arc<str>]>,
+            _: ClassifierContext,
+        ) -> BoxFuture<'static, RoAnswer> {
+            Box::pin(async {
+                RoAnswer {
+                    check: RoCheck::Allow,
+                    changes_context: false,
+                }
+            })
+        }
+    }
+
+    /// The engine × version × case table of one test, written to the Docker artifact
+    /// `t28-<test>.tsv` (ADR 0006 `m3b-t28` tabulates them).
+    #[derive(Debug, Default)]
+    pub struct Table {
+        rows: Mutex<Vec<(String, String, String, String)>>,
+    }
+
+    impl Table {
+        pub fn new() -> Table {
+            Table::default()
+        }
+
+        pub fn add(&self, line: &Line, version: Option<&SemVerLoose>, case: &str, outcome: &str) {
+            let v = version.map_or_else(String::new, |v| {
+                format!("{}.{}.{}", v.major, v.minor, v.patch)
+            });
+            self.rows.lock().unwrap().push((
+                line.id.clone(),
+                v,
+                case.to_string(),
+                outcome.to_string(),
+            ));
+        }
+
+        /// Asserts that every line of `lines` recorded a row, in order (no engine is skipped
+        /// silently), and writes the artifact.
+        pub fn finish(&self, test: &str, lines: &[Line]) {
+            let rows = self.rows.lock().unwrap();
+            let mut seen: Vec<&str> = Vec::new();
+            for (id, ..) in rows.iter() {
+                if !seen.contains(&id.as_str()) {
+                    seen.push(id);
+                }
+            }
+            let want: Vec<&str> = lines.iter().map(|l| l.id.as_str()).collect();
+            assert_eq!(seen, want, "{test}: a line of the active set did not run");
+            let mut out = String::new();
+            for (id, v, case, outcome) in rows.iter() {
+                let _ = writeln!(out, "{id}\t{v}\t{case}\t{outcome}");
+            }
+            let path = hacivat_testkit::artifact(&format!("t28-{test}.tsv"));
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).expect("the artifact directory");
+            }
+            std::fs::write(&path, out).expect("the record is written");
+        }
+    }
+}
