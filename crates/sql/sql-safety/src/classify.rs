@@ -32,6 +32,13 @@ pub struct ClassifyCtx {
     pub catalog: Option<Arc<dyn FnCatalog>>,
     /// The profile's read-only function allowlist (P-M3b-10).
     pub fn_allowlist: Arc<[Arc<str>]>,
+    // ## m3b-t09-pg-backend (named exception, fix round 1, I2b): the field's contract.
+    /// The session's search path, one schema per element, each its name exactly as the server
+    /// stores it (folded: what `current_schemas(true)` returns, or `SHOW search_path` split and
+    /// folded), `$user` kept literally. Empty means unknown (`pg_catalog` assumed first, as the
+    /// server searches it first unless it is listed). An element that cannot be such a name
+    /// (a raw `SHOW` string, quotes, a comma, edge spaces, `pg_catalog` in another case) is
+    /// read fail-closed: unqualified builtins are then unknown (PG backend, P-M3b-T3-1).
     pub search_path: Arc<[Arc<str>]>,
     pub limits: Limits,
 }

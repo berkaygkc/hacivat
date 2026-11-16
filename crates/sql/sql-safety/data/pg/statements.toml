@@ -1,1 +1,145 @@
-# owner: Task 9 (the PG statement table). Empty until Task 9 fills it.
+# The PostgreSQL statement table (`alg/13` SQL-SAFE-02 "Statement tables: PostgreSQL";
+# M3b Task 9): one row per statement message of libpg_query's `pg_query.proto` (every
+# `pb::node::Node` variant whose message name ends in `Stmt`, `RawStmt` excepted), with the
+# statement's `StmtKind` and its base effects. The PG backend unions the deep walk's effects
+# (functions, operators, casts, locking clauses, `INTO`, nested statements) with these.
+# A test checks that the rows and the statement messages are the same set.
+#
+# - `kind`: a `StmtKind` name (`Explain`: the backend decides `analyze`; `Grant` and `Begin`:
+#   the backend refines to `Revoke`, `Commit`, `Rollback` or `Savepoint`).
+# - `effects`: `EffectSet` flag names. Empty only where the backend decides the effects
+#   itself (`COPY`, `CREATE TABLE`/`SEQUENCE`/`VIEW`, `CREATE TABLE AS`, `DECLARE`: temp or
+#   not, direction, inner query); a statement that ends with no effect is `UNKNOWN`.
+# - `flags`, `reasons`: `RiskFlags` names and `ReasonCode` names (optional).
+# - `deferred = true`: the statement's sub-statements do not run now (a routine body, a rule
+#   action, a prepared statement, a view's query): their effects still count (conservative),
+#   but they give no destructive reason (`alg/13` SAFE-07 step 6).
+# Departures from `alg/13`'s table, all toward caution: `CREATE`/`ALTER SUBSCRIPTION` and
+# `IMPORT FOREIGN SCHEMA` also reach the network (`EXTERNAL_IO`); `ALTER ROLE … SET` and
+# `DROP OWNED` also change privileges; `SetOperationStmt` and `PLAssignStmt` never occur in a
+# raw top-level parse and are `UNKNOWN`. Owner: M3b Task 9.
+rows = [
+  # Reads
+  { node = "SelectStmt", kind = "Select", effects = ["READ"] },
+  { node = "VariableShowStmt", kind = "Show", effects = ["READ"] },
+  { node = "ExplainStmt", kind = "Explain", effects = ["READ"] },
+  { node = "ReturnStmt", kind = "Other", effects = ["READ"] },
+  { node = "SetOperationStmt", kind = "Other", effects = ["UNKNOWN"], reasons = ["EffectsUnknown"] },
+  { node = "PLAssignStmt", kind = "Other", effects = ["UNKNOWN"], reasons = ["EffectsUnknown"] },
+  # Data changes
+  { node = "InsertStmt", kind = "Insert", effects = ["WRITE_DATA"] },
+  { node = "UpdateStmt", kind = "Update", effects = ["WRITE_DATA"] },
+  { node = "DeleteStmt", kind = "Delete", effects = ["WRITE_DATA"] },
+  { node = "MergeStmt", kind = "Merge", effects = ["WRITE_DATA"] },
+  { node = "TruncateStmt", kind = "Truncate", effects = ["WRITE_DATA", "DDL"] },
+  { node = "CopyStmt", kind = "Copy", effects = [] },
+  # Schema changes
+  { node = "CreateStmt", kind = "CreateTable", effects = [] },
+  { node = "CreateTableAsStmt", kind = "CreateTable", effects = [] },
+  { node = "CreateForeignTableStmt", kind = "CreateTable", effects = ["DDL"] },
+  { node = "CreateSeqStmt", kind = "CreateOther", effects = [] },
+  { node = "ViewStmt", kind = "CreateOther", effects = [], deferred = true },
+  { node = "CreateSchemaStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateTableSpaceStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateExtensionStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateFdwStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateForeignServerStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateUserMappingStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "ImportForeignSchemaStmt", kind = "CreateOther", effects = ["DDL", "EXTERNAL_IO"] },
+  { node = "CreatePolicyStmt", kind = "CreateOther", effects = ["DDL"], deferred = true },
+  { node = "CreateAmStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateTrigStmt", kind = "CreateOther", effects = ["DDL"], deferred = true },
+  { node = "CreateEventTrigStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreatePLangStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "DefineStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateDomainStmt", kind = "CreateOther", effects = ["DDL"], deferred = true },
+  { node = "CreateOpClassStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateOpFamilyStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "IndexStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateStatsStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateFunctionStmt", kind = "CreateOther", effects = ["DDL"], deferred = true },
+  { node = "RuleStmt", kind = "CreateOther", effects = ["DDL"], deferred = true },
+  { node = "CompositeTypeStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateEnumStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateRangeStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreatedbStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateConversionStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateCastStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateTransformStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreatePublicationStmt", kind = "CreateOther", effects = ["DDL"] },
+  { node = "CreateSubscriptionStmt", kind = "CreateOther", effects = ["DDL", "EXTERNAL_IO"] },
+  { node = "AlterTableStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "ReplicaIdentityStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterCollationStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterDomainStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterTableSpaceOptionsStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterTableMoveAllStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterExtensionStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterExtensionContentsStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterFdwStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterForeignServerStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterUserMappingStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterPolicyStmt", kind = "Alter", effects = ["DDL"], deferred = true },
+  { node = "AlterEventTrigStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterSeqStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterOpFamilyStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterStatsStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterFunctionStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "RenameStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterObjectDependsStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterObjectSchemaStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterOperatorStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterTypeStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterEnumStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterDatabaseStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterDatabaseRefreshCollStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterDatabaseSetStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterTSDictionaryStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterTSConfigurationStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterPublicationStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "AlterSubscriptionStmt", kind = "Alter", effects = ["DDL", "EXTERNAL_IO"] },
+  { node = "CommentStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "SecLabelStmt", kind = "Alter", effects = ["DDL"] },
+  { node = "DropStmt", kind = "Drop", effects = ["DDL"] },
+  { node = "DropTableSpaceStmt", kind = "Drop", effects = ["DDL"] },
+  { node = "DropUserMappingStmt", kind = "Drop", effects = ["DDL"] },
+  { node = "DropdbStmt", kind = "Drop", effects = ["DDL"] },
+  { node = "DropSubscriptionStmt", kind = "Drop", effects = ["DDL"] },
+  { node = "ClusterStmt", kind = "Other", effects = ["DDL"] },
+  { node = "VacuumStmt", kind = "Other", effects = ["DDL"] },
+  { node = "ReindexStmt", kind = "Other", effects = ["DDL"] },
+  { node = "RefreshMatViewStmt", kind = "Other", effects = ["DDL"] },
+  # Privileges (DCL)
+  { node = "GrantStmt", kind = "Grant", effects = ["PRIVILEGE"] },
+  { node = "GrantRoleStmt", kind = "Grant", effects = ["PRIVILEGE"] },
+  { node = "AlterDefaultPrivilegesStmt", kind = "Alter", effects = ["PRIVILEGE"] },
+  { node = "CreateRoleStmt", kind = "CreateOther", effects = ["PRIVILEGE"] },
+  { node = "AlterRoleStmt", kind = "Alter", effects = ["PRIVILEGE"] },
+  { node = "AlterRoleSetStmt", kind = "Alter", effects = ["DDL", "PRIVILEGE"] },
+  { node = "DropRoleStmt", kind = "Drop", effects = ["PRIVILEGE"] },
+  { node = "AlterOwnerStmt", kind = "Alter", effects = ["PRIVILEGE"] },
+  { node = "ReassignOwnedStmt", kind = "Alter", effects = ["PRIVILEGE"] },
+  { node = "DropOwnedStmt", kind = "Drop", effects = ["DDL", "PRIVILEGE"] },
+  # Transactions and session state
+  { node = "TransactionStmt", kind = "Begin", effects = ["TXN_CONTROL"] },
+  { node = "ConstraintsSetStmt", kind = "Other", effects = ["TXN_CONTROL"] },
+  { node = "VariableSetStmt", kind = "Set", effects = ["SESSION_STATE"] },
+  { node = "DiscardStmt", kind = "Other", effects = ["SESSION_STATE"] },
+  { node = "DeclareCursorStmt", kind = "Other", effects = [] },
+  { node = "FetchStmt", kind = "Other", effects = ["SESSION_STATE"] },
+  { node = "ClosePortalStmt", kind = "Other", effects = ["SESSION_STATE"] },
+  { node = "PrepareStmt", kind = "Prepare", effects = ["PREPARE"], deferred = true },
+  { node = "DeallocateStmt", kind = "Other", effects = ["SESSION_STATE"] },
+  { node = "ListenStmt", kind = "Listen", effects = ["SESSION_STATE"] },
+  { node = "UnlistenStmt", kind = "Listen", effects = ["SESSION_STATE"] },
+  { node = "NotifyStmt", kind = "Notify", effects = ["NOTIFY"] },
+  { node = "LockStmt", kind = "Lock", effects = ["LOCK_TABLE"] },
+  # Code that runs (opaque to the classifier)
+  { node = "DoStmt", kind = "Do", effects = ["ROUTINE_CALL", "UNKNOWN"], flags = ["DYNAMIC_SQL"], reasons = ["ProceduralCode", "DynamicSql"] },
+  { node = "CallStmt", kind = "Call", effects = ["ROUTINE_CALL"], reasons = ["ProceduralCode"] },
+  { node = "ExecuteStmt", kind = "Execute", effects = ["UNKNOWN"], reasons = ["DynamicSql"] },
+  # Server administration
+  { node = "LoadStmt", kind = "Other", effects = ["ADMIN", "PROCESS_EXEC"], reasons = ["ProcessExec"] },
+  { node = "CheckPointStmt", kind = "Other", effects = ["ADMIN"] },
+  { node = "AlterSystemStmt", kind = "Other", effects = ["ADMIN"] },
+]

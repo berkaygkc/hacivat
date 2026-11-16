@@ -170,6 +170,11 @@ jobs:
       # checks; `--from-docker` and `--from-pg-query` are run by hand when the data changes.
       - name: Keyword tables are fresh
         run: cargo run --locked -p xtask -- gen-sql-tables --check
+      # ## m3b-t09-visitor: the generated PostgreSQL visitor
+      # (`crates/sql/sql-safety/src/visit/pg_generated.rs`) matches the vendored
+      # `pg_query.proto`; `--check` regenerates in memory (rustfmt from the pinned toolchain).
+      - name: PG visitor is fresh
+        run: cargo run --locked -p xtask -- gen-pg-visitor --check
 
   l10n-check:
     name: l10n-check

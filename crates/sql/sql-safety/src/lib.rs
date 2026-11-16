@@ -55,3 +55,8 @@ pub use pragmas::sqlite_read_pragmas;
 pub use backend::interim::classify_interim;
 // Fix round 1 (I2): the SAFE-07 constant-predicate rule every backend shares.
 pub use destructive::{CmpOp, Predicate, always_true};
+// ## m3b-t09-pg-backend (named exception, Task 1a's file): the PG backend's test hooks for
+// `tests/pg_backend.rs` and `tests/pg_coverage.rs`. Hidden: not an API, and no `pg_query`
+// type crosses them.
+#[doc(hidden)]
+pub use backend::pg::hooks as pg_backend_hooks;
