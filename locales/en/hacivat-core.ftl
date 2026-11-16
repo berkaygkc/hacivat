@@ -607,3 +607,175 @@ exec-uncertain-comment-end = Where an executable comment or optimizer hint ends 
 exec-uncertain-client-command = A client command inside the statement can't be run as written.
 # Several carets or selections share part of one statement.
 exec-uncertain-overlapping-units = Two of the carets or selections share part of a statement, which would run it twice.
+
+## m3b-t04-safety
+
+# The classifier's classes, reasons and destructive patterns (sql-safety, Task 4). A class is
+# a short label for what a statement does (badges, dialog headings); a reason is one sentence
+# on why a statement is refused or needs a confirmation; a destructive pattern is one sentence
+# naming the table it touches. SQL keywords stay in English.
+
+# Class: the statement only reads.
+safety-class-read = Reads data
+# Class: transaction control or session settings.
+safety-class-session = Changes the session
+# Class: the statement changes rows (or locks them).
+safety-class-write = Modifies data
+# Class: the statement changes the schema.
+safety-class-ddl = Changes the schema
+# Class: privileges, server administration, files, network or programs on the server.
+safety-class-admin = Administrative or external side effects
+# Class: Hacivat can't tell what the statement does.
+safety-class-unknown = Effects can't be determined
+
+# Reason: the check isn't built yet, so nothing runs.
+safety-reason-not-implemented = Hacivat can't check this statement yet.
+# Reason: an unterminated quote or comment, or a character the lexer rejects.
+safety-reason-lex-error = The statement has a quote, comment or character Hacivat can't read.
+# Reason: a psql or mysql client command (\copy, DELIMITER, …) inside the text.
+safety-reason-client-command = The text contains a client command, which the server can't run.
+# Reason: a template variable such as ${name} that nobody filled in.
+safety-reason-template-variable = The text contains a template variable that hasn't been filled in.
+# Reason: only comments or semicolons.
+safety-reason-no-statement = There's no statement to run.
+# Reason: a unit holds more than one statement.
+safety-reason-multi-statement = The text holds more than one statement.
+# Reason: the statement boundary is uncertain.
+safety-reason-ambiguous-boundary = Where the statement ends is uncertain.
+# Reason: the parser rejected the statement.
+safety-reason-parse-error = The statement couldn't be parsed.
+# Reason: two parsers read the statement differently.
+safety-reason-parser-disagreement = Hacivat's two readings of the statement disagree.
+# Reason: the statement is past the size, token or nesting limits.
+safety-reason-too-complex = The statement is too large or too deeply nested to check.
+# Reason: syntax from a newer server version than this build knows.
+safety-reason-syntax-newer-than-agent = The statement uses syntax newer than this version of Hacivat knows.
+# Reason: no classifier for this database yet.
+safety-reason-unsupported-dialect = Hacivat can't check statements for this database yet.
+# Reason: a function known to have side effects.
+# Variables:
+#   $name (String) - the function's name as written in the statement, e.g. "pg_sleep".
+safety-reason-fn-denylisted = { $name } is on the list of functions with side effects.
+# Reason: a function Hacivat has no data on.
+# Variables:
+#   $name (String) - the function's name as written in the statement.
+safety-reason-fn-unknown = Hacivat doesn't know what { $name } does.
+# Reason: an operator Hacivat has no data on.
+# Variables:
+#   $name (String) - the operator as written, e.g. "###".
+safety-reason-operator-unknown = Hacivat doesn't know what the operator { $name } does.
+# Reason: a cast to a type Hacivat has no data on.
+# Variables:
+#   $name (String) - the target type's name as written.
+safety-reason-cast-unknown = Hacivat doesn't know what a conversion to { $name } does.
+# Reason: a MySQL/MariaDB executable comment.
+safety-reason-executable-comment = An executable comment (/*! … */) runs code that's hidden in a comment.
+# Reason: SET sql_mode, NAMES, standard_conforming_strings and the like.
+safety-reason-lex-mode-change = The statement changes how the server reads SQL text.
+# Reason: SET ROLE, SET SESSION AUTHORIZATION and the like.
+safety-reason-privilege-change = The statement changes roles or privileges.
+# Reason: WITH x AS (DELETE …) and the like.
+safety-reason-data-modifying-cte = A WITH clause changes data.
+# Reason: FOR UPDATE, FOR SHARE, LOCK IN SHARE MODE.
+safety-reason-locking-clause = The statement locks rows.
+# Reason: EXPLAIN ANALYZE executes its statement.
+safety-reason-explain-analyze = EXPLAIN ANALYZE runs the statement.
+# Reason: SQL assembled from text at run time (EXECUTE, query_to_xml, …).
+safety-reason-dynamic-sql = The statement runs SQL that's built from text.
+# Reason: DO blocks and other procedural code.
+safety-reason-procedural-code = The statement runs procedural code.
+# Reason: BEGIN, COMMIT, ROLLBACK, SAVEPOINT.
+safety-reason-txn-control = The statement controls the transaction.
+# Reason: SET, RESET, USE, LISTEN and the like.
+safety-reason-session-state = The statement changes the session's settings.
+# Reason: reading or writing server files.
+safety-reason-external-file = The statement reads or writes files on the server.
+# Reason: dblink, foreign tables and the like.
+safety-reason-external-network = The statement reaches another server over the network.
+# Reason: COPY … PROGRAM and the like.
+safety-reason-process-exec = The statement runs a program on the server.
+# Reason: server administration (CHECKPOINT, ALTER SYSTEM, KILL, …).
+safety-reason-admin-control = The statement administers the server.
+# Reason: txid_current() and the like.
+safety-reason-xid-consume = The statement uses up a transaction ID.
+# Reason: nextval() and the like.
+safety-reason-sequence-advance = The statement advances a sequence.
+# Reason: writes to temporary tables.
+safety-reason-write-temp = The statement writes to a temporary table.
+# Reason: MAX_EXECUTION_TIME(0) or another hint that lifts the time limit.
+safety-reason-hint-exec-time = An optimizer hint lifts the time limit.
+# Reason: a SET_VAR optimizer hint.
+safety-reason-hint-set-var = An optimizer hint changes a setting.
+# Reason: CALL of a routine.
+safety-reason-routine-call = The statement calls a routine whose effects can't be checked.
+# Reason: SET of a variable that isn't on the harmless list, on a read-only connection.
+# Variables:
+#   $name (String) - the setting's name as written in the statement, e.g. "work_mem".
+safety-reason-set-not-allowlisted = On a read-only connection only harmless settings can be changed, and { $name } isn't one of them.
+# Reason: INSERT, UPDATE, DELETE, MERGE.
+safety-reason-write-data = The statement changes data.
+# Reason: CREATE, ALTER, DROP.
+safety-reason-schema-change = The statement changes the schema.
+# Reason: LOCK TABLE(S).
+safety-reason-table-lock = The statement locks whole tables.
+# Reason: pg_advisory_lock(), GET_LOCK() and the like.
+safety-reason-advisory-lock = The statement takes an advisory lock.
+# Reason: files or the network outside the database.
+safety-reason-external-io = The statement reaches files or the network outside the database.
+# Reason: PREPARE.
+safety-reason-prepared-statement = The statement prepares another statement to run later.
+# Reason: NOTIFY.
+safety-reason-notify = The statement sends a notification to other sessions.
+# Reason: the classifier couldn't determine the effects.
+safety-reason-effects-unknown = What the statement does can't be determined.
+# Reason: a destructive pattern (the patterns below say which).
+safety-reason-destructive = The statement can change or remove a lot of data.
+# Reason: GRANT, REVOKE, CREATE ROLE and the like.
+safety-reason-privilege-grant = The statement grants or revokes privileges or roles.
+# Reason: a volatile function no allowlist covers (its effects can't be checked).
+safety-reason-volatile-function = The statement calls a volatile function whose effects can't be checked.
+
+# Destructive pattern: UPDATE or DELETE without WHERE.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-no-where = { $table } has no WHERE clause, so every row changes.
+# Destructive pattern: a WHERE that is always true (1=1, TRUE, …).
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-always-true = The WHERE clause on { $table } is always true, so every row changes.
+# Destructive pattern: a DELETE/UPDATE join that never limits the target's rows.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-join-without-on = The join never limits the rows of { $table }, so every row can change.
+# Destructive pattern: DROP.
+# Variables:
+#   $table (String) - the object's name as written in the statement.
+safety-destructive-drop = Removes { $table }.
+# Destructive pattern: DROP … CASCADE.
+# Variables:
+#   $table (String) - the object's name as written in the statement.
+safety-destructive-drop-cascade = Removes { $table } and everything that depends on it.
+# Destructive pattern: TRUNCATE.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-truncate = Removes every row of { $table }.
+# Destructive pattern: ALTER … DROP COLUMN.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-drop-column = Removes a column of { $table } and its data.
+# Destructive pattern: ALTER … DROP CONSTRAINT.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-drop-constraint = Removes a constraint of { $table }.
+# Destructive pattern: ALTER … TYPE (rewrites the column).
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-alter-type = Changes a column type of { $table }, which rewrites its data.
+# Destructive pattern: MERGE … WHEN MATCHED THEN DELETE.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-merge-delete = The MERGE deletes rows of { $table }.
+# Destructive pattern: MySQL UPDATE … LIMIT without ORDER BY.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-update-limit-no-order = UPDATE … LIMIT on { $table } without ORDER BY changes rows in no fixed order.

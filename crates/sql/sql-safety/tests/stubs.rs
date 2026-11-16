@@ -19,7 +19,8 @@ fn ctx_pg() -> ClassifyCtx {
     )
 }
 
-fn all_reason_codes() -> [ReasonCode; 37] {
+// ## m3b-t04-safety (named exception): Task 4 adds eleven policy reasons (48 codes).
+fn all_reason_codes() -> [ReasonCode; 48] {
     ReasonCode::ALL
 }
 
@@ -46,8 +47,11 @@ fn classified_hash_matches_only_the_exact_bytes() {
     assert_eq!(r.classified_hash, sql_safety::classified_hash("SELECT $1"));
 }
 
+// ## m3b-t04-safety (named exception): `decide` is real since Task 4; it still denies the
+// classify stub's report in every profile, because that report is pre-decided
+// (`[NotImplemented]`) and a pre-decision denies everywhere, `Admin` included.
 #[test]
-fn decide_stub_denies() {
+fn decide_denies_the_classify_stub() {
     assert!(matches!(
         decide(
             &classify("SELECT 1", &ctx_pg()),

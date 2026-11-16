@@ -352,3 +352,138 @@ exec-uncertain-comment-end = Yürütülebilir bir yorumun ya da optimizer ipucun
 exec-uncertain-client-command = İfadenin içindeki bir istemci komutu yazıldığı gibi çalıştırılamaz.
 # Review: PO
 exec-uncertain-overlapping-units = İmleçlerden ya da seçimlerden ikisi bir ifadenin bir kısmını paylaşıyor; ifade iki kez çalışırdı.
+
+## m3b-t04-safety
+
+# Review: PO
+safety-class-read = Veri okur
+# Review: PO
+safety-class-session = Oturumu değiştirir
+# Review: PO
+safety-class-write = Veriyi değiştirir
+# Review: PO
+safety-class-ddl = Şemayı değiştirir
+# Review: PO
+safety-class-admin = Yönetimsel ya da dış yan etkileri var
+# Review: PO
+safety-class-unknown = Etkileri belirlenemiyor
+
+# Review: PO
+safety-reason-not-implemented = Hacivat bu ifadeyi henüz denetleyemiyor.
+# Review: PO
+safety-reason-lex-error = İfadede Hacivat'ın okuyamadığı bir tırnak, yorum ya da karakter var.
+# Review: PO
+safety-reason-client-command = Metinde sunucunun çalıştıramayacağı bir istemci komutu var.
+# Review: PO
+safety-reason-template-variable = Metinde doldurulmamış bir şablon değişkeni var.
+# Review: PO
+safety-reason-no-statement = Çalıştırılacak bir ifade yok.
+# Review: PO
+safety-reason-multi-statement = Metinde birden fazla ifade var.
+# Review: PO
+safety-reason-ambiguous-boundary = İfadenin nerede bittiği belirsiz.
+# Review: PO
+safety-reason-parse-error = İfade ayrıştırılamadı.
+# Review: PO
+safety-reason-parser-disagreement = Hacivat'ın ifadeyi iki okuyuşu birbirini tutmuyor.
+# Review: PO
+safety-reason-too-complex = İfade denetlenemeyecek kadar büyük ya da iç içe.
+# Review: PO
+safety-reason-syntax-newer-than-agent = İfade, Hacivat'ın bu sürümünün bilmediği daha yeni bir söz dizimi kullanıyor.
+# Review: PO
+safety-reason-unsupported-dialect = Hacivat bu veritabanının ifadelerini henüz denetleyemiyor.
+# Review: PO
+safety-reason-fn-denylisted = { $name }, yan etkisi olan işlevler listesinde.
+# Review: PO
+safety-reason-fn-unknown = Hacivat { $name } işlevinin ne yaptığını bilmiyor.
+# Review: PO
+safety-reason-operator-unknown = Hacivat { $name } işlecinin ne yaptığını bilmiyor.
+# Review: PO
+safety-reason-cast-unknown = Hacivat { $name } türüne dönüştürmenin ne yaptığını bilmiyor.
+# Review: PO
+safety-reason-executable-comment = Yürütülebilir bir yorum (/*! … */), yorumun içine gizlenmiş kodu çalıştırır.
+# Review: PO
+safety-reason-lex-mode-change = İfade, sunucunun SQL metnini okuma biçimini değiştiriyor.
+# Review: PO
+safety-reason-privilege-change = İfade rolleri ya da yetkileri değiştiriyor.
+# Review: PO
+safety-reason-data-modifying-cte = Bir WITH bölümü veriyi değiştiriyor.
+# Review: PO
+safety-reason-locking-clause = İfade satırları kilitliyor.
+# Review: PO
+safety-reason-explain-analyze = EXPLAIN ANALYZE ifadeyi çalıştırır.
+# Review: PO
+safety-reason-dynamic-sql = İfade, metinden oluşturulan SQL'i çalıştırıyor.
+# Review: PO
+safety-reason-procedural-code = İfade yordamsal kod çalıştırıyor.
+# Review: PO
+safety-reason-txn-control = İfade işlemi denetliyor.
+# Review: PO
+safety-reason-session-state = İfade oturumun ayarlarını değiştiriyor.
+# Review: PO
+safety-reason-external-file = İfade sunucudaki dosyaları okuyor ya da yazıyor.
+# Review: PO
+safety-reason-external-network = İfade ağ üzerinden başka bir sunucuya erişiyor.
+# Review: PO
+safety-reason-process-exec = İfade sunucuda bir program çalıştırıyor.
+# Review: PO
+safety-reason-admin-control = İfade sunucuyu yönetiyor.
+# Review: PO
+safety-reason-xid-consume = İfade bir işlem kimliği (XID) tüketiyor.
+# Review: PO
+safety-reason-sequence-advance = İfade bir diziyi (sequence) ilerletiyor.
+# Review: PO
+safety-reason-write-temp = İfade geçici bir tabloya yazıyor.
+# Review: PO
+safety-reason-hint-exec-time = Bir optimizer ipucu süre sınırını kaldırıyor.
+# Review: PO
+safety-reason-hint-set-var = Bir optimizer ipucu bir ayarı değiştiriyor.
+# Review: PO
+safety-reason-routine-call = İfade, etkileri denetlenemeyen bir yordamı çağırıyor.
+# Review: PO
+safety-reason-set-not-allowlisted = Salt okunur bağlantıda yalnızca zararsız ayarlar değiştirilebilir; { $name } onlardan biri değil.
+# Review: PO
+safety-reason-write-data = İfade veriyi değiştiriyor.
+# Review: PO
+safety-reason-schema-change = İfade şemayı değiştiriyor.
+# Review: PO
+safety-reason-table-lock = İfade tabloları bütünüyle kilitliyor.
+# Review: PO
+safety-reason-advisory-lock = İfade bir danışma kilidi (advisory lock) alıyor.
+# Review: PO
+safety-reason-external-io = İfade veritabanının dışındaki dosyalara ya da ağa erişiyor.
+# Review: PO
+safety-reason-prepared-statement = İfade, daha sonra çalışacak başka bir ifade hazırlıyor.
+# Review: PO
+safety-reason-notify = İfade diğer oturumlara bir bildirim gönderiyor.
+# Review: PO
+safety-reason-effects-unknown = İfadenin ne yaptığı belirlenemiyor.
+# Review: PO
+safety-reason-destructive = İfade çok sayıda veriyi değiştirebilir ya da silebilir.
+# Review: PO
+safety-reason-privilege-grant = İfade yetki ya da rol veriyor veya geri alıyor.
+# Review: PO
+safety-reason-volatile-function = İfade, etkileri denetlenemeyen değişken (volatile) bir işlev çağırıyor.
+
+# Review: PO
+safety-destructive-no-where = { $table } için WHERE yok; bu yüzden her satır değişir.
+# Review: PO
+safety-destructive-always-true = { $table } üzerindeki WHERE koşulu her zaman doğru; bu yüzden her satır değişir.
+# Review: PO
+safety-destructive-join-without-on = Birleştirme { $table } satırlarını hiç sınırlamıyor; her satır değişebilir.
+# Review: PO
+safety-destructive-drop = { $table } kaldırılır.
+# Review: PO
+safety-destructive-drop-cascade = { $table } ve ona bağlı her şey kaldırılır.
+# Review: PO
+safety-destructive-truncate = { $table } içindeki bütün satırlar silinir.
+# Review: PO
+safety-destructive-drop-column = { $table } içindeki bir sütun, verisiyle birlikte kaldırılır.
+# Review: PO
+safety-destructive-drop-constraint = { $table } üzerindeki bir kısıt kaldırılır.
+# Review: PO
+safety-destructive-alter-type = { $table } içindeki bir sütunun türü değişir; veri yeniden yazılır.
+# Review: PO
+safety-destructive-merge-delete = MERGE, { $table } içinden satır siler.
+# Review: PO
+safety-destructive-update-limit-no-order = { $table } üzerinde ORDER BY olmadan UPDATE … LIMIT, satırları belirsiz bir sırayla değiştirir.

@@ -1,0 +1,138 @@
+# SQL-SAFE-01 cases (`alg/13` :141 and the effect table above it, on M3b's effect bits), plus
+# the GateClass each maps to (P-M3b-4, `alg/20` :266-278). Read by `tests/policy.rs`
+# (`safe01_cases`). `effects` are `EffectSet` flag names; `class` a `CoarseClass`, `gate` a
+# `GateClass` (Debug spelling).
+
+# alg/13 :141 — class(READ_DATA|LOCK_ROWS) = Write
+[[case]]
+effects = ["READ", "LOCK_ROW"]
+class = "Write"
+gate = "Lock"
+
+# alg/13 :141 — class(SESSION_STATE) = Session
+[[case]]
+effects = ["SESSION_STATE"]
+class = "Session"
+gate = "Session"
+
+# alg/13 :141 — class(READ_DATA|PROCEDURAL_CODE) = Unknown (a routine call is opaque)
+[[case]]
+effects = ["READ", "ROUTINE_CALL"]
+class = "Unknown"
+gate = "Routine"
+
+# alg/13 edge cases — READ_DATA|UNKNOWN → Unknown; the empty set is not a read
+[[case]]
+effects = ["READ", "UNKNOWN"]
+class = "Unknown"
+gate = "Unknown"
+
+[[case]]
+effects = []
+class = "Unknown"
+gate = "Unknown"
+
+[[case]]
+effects = ["READ"]
+class = "Read"
+gate = "Read"
+
+# Test 2: a data-modifying CTE
+[[case]]
+effects = ["READ", "WRITE_DATA"]
+class = "Write"
+gate = "Dml"
+
+# Test 3: SELECT … INTO
+[[case]]
+effects = ["READ", "DDL", "WRITE_DATA"]
+class = "Ddl"
+gate = "DdlOther"
+
+# Test 5 / 17: server administration, server files
+[[case]]
+effects = ["READ", "ADMIN"]
+class = "Admin"
+gate = "Admin"
+
+[[case]]
+effects = ["READ", "EXTERNAL_IO"]
+class = "Admin"
+gate = "Admin"
+
+# Test 6: nextval
+[[case]]
+effects = ["READ", "SEQUENCE"]
+class = "Write"
+gate = "Dml"
+
+# Test 8: SET ROLE / set_config of a guard
+[[case]]
+effects = ["SESSION_STATE", "PRIVILEGE"]
+class = "Admin"
+gate = "Admin"
+
+# Test 9: COMMIT
+[[case]]
+effects = ["TXN_CONTROL"]
+class = "Session"
+gate = "Tx"
+
+# Test 10: COPY … TO PROGRAM
+[[case]]
+effects = ["READ", "PROCESS_EXEC"]
+class = "Admin"
+gate = "Admin"
+
+# Test 18: txid_current()
+[[case]]
+effects = ["READ", "XID_CONSUME"]
+class = "Write"
+gate = "Dml"
+
+# Test 19: LISTEN / DECLARE … WITH HOLD
+[[case]]
+effects = ["SESSION_STATE"]
+class = "Session"
+gate = "Session"
+
+# Test 26: GET_LOCK
+[[case]]
+effects = ["READ", "ADVISORY_LOCK"]
+class = "Write"
+gate = "Lock"
+
+# LOCK TABLE
+[[case]]
+effects = ["LOCK_TABLE"]
+class = "Write"
+gate = "Lock"
+
+# SQL Server SELECT … INTO #t (Test 30 shape): temp DDL + temp write
+[[case]]
+effects = ["READ", "WRITE_TEMP", "DDL_TEMP"]
+class = "Ddl"
+gate = "DdlOther"
+
+# NOTIFY, PREPARE
+[[case]]
+effects = ["NOTIFY"]
+class = "Session"
+gate = "Session"
+
+[[case]]
+effects = ["PREPARE"]
+class = "Session"
+gate = "Session"
+
+# GRANT
+[[case]]
+effects = ["PRIVILEGE"]
+class = "Admin"
+gate = "Admin"
+
+# Admin with UNKNOWN: Unknown dominates
+[[case]]
+effects = ["ADMIN", "UNKNOWN"]
+class = "Unknown"
+gate = "Unknown"

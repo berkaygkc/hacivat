@@ -1,1 +1,119 @@
-# owner: Task 4 (the policy table's profiles). Empty until Task 4 fills it.
+# owner: Task 4 (the policy table's profiles; `alg/13` SQL-SAFE-04 :317-329).
+#
+# One table per effect group, one rule per built-in profile: "allow", "confirm" or "deny".
+# Every group and every profile must be present (the loader denies unknown or missing keys,
+# and a table that fails to load makes `decide` deny everything). Compiled in with
+# `include_str!` by `src/policy.rs`; the effect bits, risk flags, statement kinds and reason
+# codes that select a group are in `policy.rs` (`GROUP_OF_BIT`, `FLAG_RULES`, `kind_rule`,
+# `reason_rule`). Actor rules (AI agents) and the deny-only flags and reasons (executable
+# comments, lexical-mode changes, role switches, hints) are code, not data: they deny in every
+# profile they name. A `SET` whose targets are all on the dialect's harmless list is a read on
+# the two read-only profiles, for a human only (P-M3b-6); everywhere else it is `session`.
+#
+# Deliberate differences from the spec's table (ADR 0005 `m3b-t04`):
+# - `write_unbounded` (UPDATE/DELETE that may touch every row) also confirms under `ddl`: the
+#   `ddl` profile is a superset of `read_write_dml`, so it must not ask less.
+# - `routine` (CALL) has its own row with the `unknown` rules: a routine body is opaque.
+# - `info_disclosure` and `resource_heavy` have no rows: M3b has no such effect bits; the
+#   function data (Task 3) denies the functions behind them.
+
+version = 1
+
+# SELECT, VALUES, TABLE, SHOW, EXPLAIN without ANALYZE (an inner write is its own effects).
+[read]
+read_only = "allow"
+read_only_plus_explain = "allow"
+read_write_dml = "allow"
+ddl = "allow"
+admin = "allow"
+
+# EXPLAIN ANALYZE whose inner statement is a read.
+[explain_analyze_read]
+read_only = "deny"
+read_only_plus_explain = "allow"
+read_write_dml = "allow"
+ddl = "allow"
+admin = "allow"
+
+# Transaction control, session state, NOTIFY, PREPARE (a SET on the dialect's harmless list
+# is a read; P-M3b-6).
+[session]
+read_only = "deny"
+read_only_plus_explain = "deny"
+read_write_dml = "deny"
+ddl = "deny"
+admin = "confirm"
+
+# Row, table and advisory locks.
+[lock]
+read_only = "deny"
+read_only_plus_explain = "deny"
+read_write_dml = "allow"
+ddl = "allow"
+admin = "allow"
+
+# Data writes, sequence advances, XID consumption.
+[write]
+read_only = "deny"
+read_only_plus_explain = "deny"
+read_write_dml = "allow"
+ddl = "allow"
+admin = "allow"
+
+# UPDATE/DELETE without WHERE, with an always-true WHERE, a JOIN without ON, UPDATE … LIMIT
+# without ORDER BY, MERGE … THEN DELETE.
+[write_unbounded]
+read_only = "deny"
+read_only_plus_explain = "deny"
+read_write_dml = "confirm"
+ddl = "confirm"
+admin = "allow"
+
+# Writes to temporary objects (D-059: denied on read-only in v1).
+[write_temp]
+read_only = "deny"
+read_only_plus_explain = "deny"
+read_write_dml = "allow"
+ddl = "allow"
+admin = "allow"
+
+# Schema changes (temporary ones included).
+[ddl]
+read_only = "deny"
+read_only_plus_explain = "deny"
+read_write_dml = "deny"
+ddl = "allow"
+admin = "allow"
+
+# DROP, TRUNCATE, ALTER … DROP COLUMN/CONSTRAINT, ALTER … TYPE.
+[ddl_destructive]
+read_only = "deny"
+read_only_plus_explain = "deny"
+read_write_dml = "deny"
+ddl = "confirm"
+admin = "allow"
+
+# Privileges, server administration, files and network outside the database, processes.
+[admin]
+read_only = "deny"
+read_only_plus_explain = "deny"
+read_write_dml = "deny"
+ddl = "deny"
+admin = "confirm"
+
+# CALL: the routine's body is opaque.
+[routine]
+read_only = "deny"
+read_only_plus_explain = "deny"
+read_write_dml = "deny"
+ddl = "deny"
+admin = "confirm"
+
+# UNKNOWN, an empty or unnamed effect set, unresolved functions, operators and casts,
+# dynamic SQL, procedural code (audit flag under admin).
+[unknown]
+read_only = "deny"
+read_only_plus_explain = "deny"
+read_write_dml = "deny"
+ddl = "deny"
+admin = "confirm"

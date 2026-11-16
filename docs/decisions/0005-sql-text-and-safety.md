@@ -589,6 +589,182 @@ the catalog read is a `hacivat-exec` Docker test, P-M3b-13), `bench-sql` and `fe
   its `differential` feature, so the lexer's plain test loop builds neither libpg_query nor
   `sqlparser`.
 
+## m3b-t04 — the policy table
+
+Task 4 fills `sql-safety`'s report model: `class_of`, `merge`, `gate_class`, `opens_write`,
+`decide` and the Fluent ids of every class, reason and destructive pattern.
+
+**Every effect bit maps on purpose.** Three tables name each of the 20 effect bits once:
+`COARSE_OF_BIT` (the `CoarseClass`), `GATE_OF_BIT` (the `GateClass`) and the policy's
+`GROUP_OF_BIT` (a group in `data/profiles.toml`). A unit test checks each table against
+`EffectSet::all()`, so a new bit without a row fails the build's tests. At run time these sets
+are `Unknown`, never `Read`:
+
+- the empty set;
+- a set with a bit no table names;
+- a `RiskFlags` value with a bit that has no name.
+
+`GateClass` is declared in its total order (P-M3b-4) and derives `Ord`. Destructive reasons
+raise the gate class whatever the effects say: an unsafe-DML kind raises it to at least
+`DmlUnsafe`, a destructive-DDL kind to at least `DdlDestructive`. `DYNAMIC_SQL` is `Unknown`.
+`ROUTINE_CALL` is `Routine` for the gate but `Unknown` for the coarse class, because a routine
+body is opaque (`alg/13` test 13).
+
+**`decide`.** The rule for each (effect group, profile) pair lives in `data/profiles.toml`,
+compiled in. The loader rejects unknown and missing keys. If the table doesn't load, `decide`
+denies everything. The strictest rule wins: Deny, then Confirm, then Allow. Fail-closed
+choices:
+
+- `decide` judges request-level fields as well as statements. A statement's `class` field, the
+  request's class, request-level effect bits the statements don't show, and request-level flags
+  each count, so a producer that leaves a field behind can't lower the decision.
+- A reason is evidence of its effect group. `ExternalFile` on a bare `READ` still denies on
+  read-only.
+- Doubt codes deny in every profile, `Admin` included. These are the lexing, splitting,
+  parsing and limit codes, `LexModeChange` and `PrivilegeChange`.
+- `FnUnknown`, `OperatorUnknown`, `CastUnknown`, `DynamicSql` and `ProceduralCode` count as
+  `unknown`.
+- An executable comment (D-058) or a denylisted function denies on the read-only profiles and
+  for an AI agent.
+- A `SET_VAR` hint denies unless its variable is harmless.
+- `MAX_EXECUTION_TIME` denies when its limit is 0 or can't be read.
+
+**Harmless `SET` (P-M3b-6).** `decide` has no dialect argument, so `SafetyReport` gains
+`dialect: Option<DialectId>`. Task 14's `classify` sets it, and `pre_decided` leaves it `None`.
+A `SET` statement counts as a read in every profile only when all of these hold:
+
+- its effects are exactly `SESSION_STATE`;
+- it has no flag, no destructive pattern and a class no higher than `Session`;
+- it has at least one reason, and every reason is `SessionState` with the variable name as its
+  argument;
+- `set_allowed(dialect, name)` accepts every one of those names.
+
+Backends (Tasks 9 and 10) must emit one `SessionState` reason per `SET` target. Any other `SET`
+names `SetNotAllowlisted` for each refused target. A `SET` with no dialect or no named target
+is never harmless.
+
+**Differences from `alg/13` SQL-SAFE-04's table.**
+
+- Unbounded `UPDATE`/`DELETE` also confirms under `ddl`. That profile is a superset of
+  `read_write_dml`, so it must not ask less.
+- `CALL` has its own `routine` row with the `unknown` rules.
+- An AI agent is refused `EXPLAIN ANALYZE` on both read-only profiles. Per the plan's test
+  name, a human alone may run it there.
+- A harmless `SET` is a read in every profile, not only the read-only ones, so the allowlist
+  never makes a read-only profile more permissive than a writable one.
+- `LEX_MODE_CHANGE` denies in every profile, as `alg/13` asks of Karagöz, because `decide` is
+  shared.
+- The spec's info-disclosure and resource-heavy rows have no bits in M3b. Task 3's function
+  data denies the functions behind them.
+
+**New reason codes.** The policy names every refusal, so `ReasonCode` gains nine codes for
+groups that had none: `WriteData`, `SchemaChange`, `TableLock`, `AdvisoryLock`, `ExternalIo`,
+`PreparedStatement`, `Notify`, `EffectsUnknown` and `Destructive`.
+
+**Fluent.** The `safety-*` ids live in `hacivat-core.ftl` under the block `## m3b-t04-safety`.
+The `safety` prefix is added to three lists, a named exception (P-M3b-T4-1):
+
+- xtask's domain prefixes;
+- its id-module list;
+- `hacivat-l10n-schema::is_valid_id`.
+
+Function, operator and cast names reach the messages as `$name`, and table names as `$table`.
+Fluent isolates both with FSI/PDI. The Turkish messages carry `# Review: PO`.
+
+**Visibility.** `effects::class_of` and `report::merge` are `pub`, not `pub(crate)` as the plan
+says. The plan's integration tests call them, and P-M3b-16's report builders must merge the
+way `classify` does.
+
+**Fix round 1 (controller rulings on the review).** These rulings override the earlier text of
+this section where they differ.
+
+- **The gate reads what `decide` reads (I1).** `gate_class` used to read only the effect bits.
+  It now takes the most critical of seven sources:
+  - the effect bits;
+  - the statement's `class` field (`Unknown` means `Unknown`);
+  - its kind;
+  - its risk flags;
+  - its reasons, through the policy's own `reason_rule` (`reason_gate_floor`);
+  - its destructive patterns;
+  - an unnamed flag bit, which means `Unknown`.
+
+  The property test `gate_and_decide_agree` holds this invariant: a gate class of `Read` implies
+  `decide(ReadOnlyPlusExplain, Human)` allows. `ReadOnly` differs from it only in refusing
+  `EXPLAIN ANALYZE` of a read. The gate calls that statement `Read`, because R-M3-55 says
+  "class of x", so the invariant is stated against the human read-only profile (R-M3-56).
+  Conversely, whatever a read-only profile allows, the gate calls `Read` or `Session`.
+- **Flags (I2).** `FLAG_RULES` covers `RiskFlags::all()` and has a coverage test. Each flag's
+  meaning:
+  - `VOLATILE_FN` means `Unknown` (`alg/13` S-04). Producers set it only for a volatile
+    function that no allowlist covers.
+  - `LEX_MODE_CHANGE` and `DYNAMIC_SQL` mean `Unknown` for the gate.
+  - `EXEC_COMMENT` means `Unknown` for the gate, so production confirms it. `decide` still
+    denies it only on the read-only profiles and for an AI agent.
+  - `EXPLAIN_ANALYZE` takes the class of the inner statement.
+- **Harmless `SET` (I3).** A harmless `SET` is a read only on the two read-only profiles, and
+  only for `Human`. Everywhere else a `SET` follows `alg/13`'s Session row: Deny in
+  `read_write_dml` and `ddl`, Confirm in `admin`. This reverses the "read in every profile"
+  rule above.
+- **`EXPLAIN ANALYZE` for AI (I4).** An AI agent on `ReadOnlyPlusExplain` may run
+  `EXPLAIN ANALYZE` of a read (`alg/13` :331).
+- **Kinds are floors (I5).** `kind_rule` is an exhaustive match. It sets a minimum class for
+  each kind that has one; `SELECT`, `VALUES`, `TABLE`, `SHOW`, `COPY`, `PRAGMA`, `Other` and
+  plain `EXPLAIN` are left to their effects.
+
+  | Kinds | Minimum class |
+  |---|---|
+  | `SET` | Session, judged through the harmless list even without its bit |
+  | `INSERT`, `UPDATE`, `DELETE`, `MERGE` | Dml |
+  | `DROP`, `TRUNCATE` | DdlDestructive |
+  | `CREATE…`, `ALTER` | DdlOther |
+  | `GRANT`, `REVOKE` | Admin |
+  | `CALL`, `DO` | Routine |
+  | `EXECUTE` | Unknown |
+  | `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT` | Tx |
+  | `LOCK` | Lock |
+  | `USE`, `LISTEN`, `PREPARE`, `NOTIFY` | Session |
+  | `EXPLAIN ANALYZE` | the inner statement's class, or Unknown |
+- **`SET` targets.** `StmtReport` gains `set_targets: Vec<SetTarget { name, value }>`, filled by
+  the backends for `SET`/`RESET`. The harmless check passes each target's value to the list,
+  for P-M3b-T3-1 (`search_path` is harmless only when `pg_catalog` is absent or first). A
+  `None` value is fail-closed. `decide` calls Task 3's `set_allowed(d, name, value)` directly
+  since Task 3 merged (`search_path_value_reaches_the_list`). A `SET` that names no target is
+  refused with `SessionState`, so every `SetNotAllowlisted` names its variable.
+- **Minor fixes (M1–M5).**
+  - **M1:** `Decision.class` rises with reason evidence.
+  - **M2:** the `PRIVILEGE` bit names the new `PrivilegeGrant`, confirmed under `admin`.
+    `PrivilegeChange` is only a role or authorization switch and denies everywhere.
+  - **M3:** a bare `Destructive` reason is destructive-DDL evidence.
+  - **M5:** `merge` adds `UNKNOWN` to the request's effects for an empty or unnamed statement.
+- **Not implemented, recorded (M6–M7).**
+  - **M6:** the `MAX_EXECUTION_TIME` ceiling (`alg/13` SAFE-04 step 3). `decide` has no
+    ceilings input and the plan names none, so only 0 or an unreadable limit denies.
+  - **M7, for M8:** an AI agent's unbounded `UPDATE`/`DELETE` follows `alg/13` step 5 here
+    (Deny). The spec's L9 makes it an approvable critical class; M8's broker must reconcile
+    the two.
+- **The class field's gate floor (D1).** A statement's `class` field floors the gate class at
+  the least gate class of its coarse class (Write → Lock, Unknown → Routine). The backends
+  write `class_of(effects)`, which is `Unknown` for `ROUTINE_CALL`, so an Unknown floor would
+  turn every `CALL` into `Unknown` against P-M3b-4.
+  - **The price:** the gate is not monotone in the class *label* from Ddl or Admin up to
+    Unknown. A READ statement labelled Ddl or Admin is `DdlOther` or `Admin`, but labelled
+    Unknown it is only `Routine`. It is still monotone in *evidence*: adding bits, reasons,
+    flags or destructive kinds never lowers it.
+  - **No R-M3-55 decision changes because of it.** `DdlOther`, `Admin`, `Routine` and
+    `Unknown` are all Confirm on production, Run elsewhere and Deny on read-only. The only
+    row keyed on DDL is MySQL's implicit commit, which an Unknown statement doesn't get either.
+    In the `EXPLAIN ANALYZE` row, `Routine` is stricter: it is refused, where an `Unknown`
+    inner gets the D-062 wrap.
+  - **Producer contract (T9, T10, T14):** every Unknown outcome must also set
+    `EffectSet::UNKNOWN` or an unknown-group or doubt reason, never only the class field.
+- **`SET` reasons and targets agree (re-review R1-M3).** A `SET` is harmless only when its
+  `SessionState` reason arguments and its `set_targets` names are the same list, compared
+  byte-exact as multisets. A reason naming a variable outside the targets is refused by that
+  name.
+- **The group-skip rule (re-review R1-M1).** `decide` skips a class field's group when a group
+  of the same coarse class was already applied. A unit test pins what makes that safe: every
+  group of a coarse class is at least as strict as that class's own group in every profile.
+
 ## m3b-t06 — parameters
 
 **What the scan reads.** `sql_split::scan_params` lexes the unit on its own, from the initial
