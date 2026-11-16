@@ -383,20 +383,25 @@ fn line_start(text: &str, at: usize) -> bool {
 // ---------------------------------------------------------------------------------------------
 // The inventory
 
-/// A MySQL/MariaDB `SHOW` that discloses other sessions' activity or the server's replication
-/// and engine state (controller ruling, fix round 1, I3): `SHOW [FULL] PROCESSLIST`,
-/// `SHOW ENGINE … {STATUS|MUTEX|LOGS}`, `SHOW {REPLICA|SLAVE|MASTER} STATUS`,
-/// `SHOW ALL {REPLICAS|SLAVES} STATUS`, `SHOW BINARY LOG STATUS`, `SHOW REPLICAS`,
-/// `SHOW SLAVE HOSTS`, `SHOW {BINLOG|RELAYLOG} EVENTS`, and `SHOW GRANTS FOR` another account
-/// (`CURRENT_USER` and `CURRENT_USER()` are one's own). Returns the form's name.
+/// A MySQL/MariaDB `SHOW` that discloses other sessions' activity, other accounts or the
+/// server's replication, binary-log and engine state (controller rulings, fix rounds 1 and 2):
+///
+/// - `SHOW [FULL] PROCESSLIST`; `SHOW ENGINE …`;
+/// - `SHOW {REPLICA|SLAVE|MASTER} ['<connection>'] … STATUS …`, `SHOW ALL {REPLICAS|SLAVES}
+///   STATUS`, `SHOW BINARY LOG STATUS`, `SHOW REPLICAS`, `SHOW SLAVE HOSTS`;
+/// - `SHOW {BINARY|MASTER} LOGS`, `SHOW {BINLOG|RELAYLOG} EVENTS`;
+/// - MariaDB `SHOW {EXPLAIN|ANALYZE} [FORMAT=…] FOR <connection>` (every `SHOW EXPLAIN|ANALYZE`
+///   form names another connection), `SHOW {USER|CLIENT}_STATISTICS`;
+/// - `SHOW GRANTS FOR` and `SHOW CREATE USER` of another account (`CURRENT_USER` and
+///   `CURRENT_USER()` are one's own).
+///
+/// Returns the form's name. Defence in depth: the server's PROCESS, SUPER and REPLICATION
+/// privileges decide what it shows.
 fn info_disclosure(t: &Toks<'_>) -> Option<&'static str> {
     if !t.is(0, "SHOW") {
         return None;
     }
-    let mut j = 1;
-    if t.is(j, "FULL") {
-        j += 1;
-    }
+    let j = if t.is(1, "FULL") { 2 } else { 1 };
     if t.is(j, "PROCESSLIST") {
         return Some("SHOW PROCESSLIST");
     }
@@ -404,8 +409,8 @@ fn info_disclosure(t: &Toks<'_>) -> Option<&'static str> {
     if t.is(1, "ENGINE") {
         return Some("SHOW ENGINE");
     }
-    let replication = ["REPLICA", "SLAVE", "MASTER"];
-    if t.is_any(1, &replication) && t.is(2, "STATUS") {
+    // `SHOW SLAVE 'conn' STATUS`, `SHOW REPLICA STATUS FOR CHANNEL c`, `SHOW MASTER STATUS`.
+    if t.is_any(1, &["REPLICA", "SLAVE", "MASTER"]) && (2..t.len()).any(|k| t.is(k, "STATUS")) {
         return Some("SHOW REPLICA STATUS");
     }
     if t.is(1, "ALL") && t.is_any(2, &["REPLICAS", "SLAVES"]) && t.is(3, "STATUS") {
@@ -414,24 +419,97 @@ fn info_disclosure(t: &Toks<'_>) -> Option<&'static str> {
     if t.is(1, "BINARY") && t.is(2, "LOG") && t.is(3, "STATUS") {
         return Some("SHOW BINARY LOG STATUS");
     }
+    if t.is_any(1, &["BINARY", "MASTER"]) && t.is(2, "LOGS") {
+        return Some("SHOW BINARY LOGS");
+    }
     if (t.is(1, "REPLICAS") && t.len() == 2) || (t.is(1, "SLAVE") && t.is(2, "HOSTS")) {
         return Some("SHOW REPLICAS");
     }
-    // MariaDB's `SHOW EXPLAIN|ANALYZE FOR <connection>` shows another session's statement.
-    if t.is_any(1, &["EXPLAIN", "ANALYZE"]) && t.is(2, "FOR") {
+    if t.is_any(1, &["EXPLAIN", "ANALYZE"]) {
         return Some("SHOW EXPLAIN FOR");
     }
     if t.is_any(1, &["BINLOG", "RELAYLOG"]) && t.is(2, "EVENTS") {
         return Some("SHOW BINLOG EVENTS");
     }
-    if t.is(1, "GRANTS") && t.is(2, "FOR") {
-        let own = t.is(3, "CURRENT_USER")
-            && (t.len() == 4
-                || (t.len() == 6
-                    && t.kind(4) == Some(TokenKind::LParen)
-                    && t.kind(5) == Some(TokenKind::RParen)));
-        if !own {
-            return Some("SHOW GRANTS FOR");
+    if t.is_any(1, &["USER_STATISTICS", "CLIENT_STATISTICS"]) {
+        return Some("SHOW USER_STATISTICS");
+    }
+    if t.is(1, "GRANTS") && t.is(2, "FOR") && !own_account(t, 3) {
+        return Some("SHOW GRANTS FOR");
+    }
+    if t.is(1, "CREATE") && t.is(2, "USER") && !own_account(t, 3) {
+        return Some("SHOW CREATE USER");
+    }
+    None
+}
+
+/// Whether the account named from token `j` to the end is one's own: `CURRENT_USER` or
+/// `CURRENT_USER()`.
+fn own_account(t: &Toks<'_>, j: usize) -> bool {
+    t.is(j, "CURRENT_USER")
+        && (t.len() == j + 1
+            || (t.len() == j + 3
+                && t.kind(j + 1) == Some(TokenKind::LParen)
+                && t.kind(j + 2) == Some(TokenKind::RParen)))
+}
+
+/// The MySQL/MariaDB tables and views that hold other sessions' activity and statement text
+/// (controller ruling, fix round 2, RR-I2), as `(schema, name)`, ASCII lower case. Matched in
+/// any quoting and letter case.
+const DISCLOSURE_TABLES: [(&str, &str); 11] = [
+    ("information_schema", "processlist"),
+    ("information_schema", "user_statistics"),
+    ("information_schema", "client_statistics"),
+    ("performance_schema", "threads"),
+    ("performance_schema", "events_statements_current"),
+    ("performance_schema", "events_statements_history"),
+    ("performance_schema", "events_statements_history_long"),
+    ("sys", "processlist"),
+    ("sys", "session"),
+    ("sys", "x$processlist"),
+    ("sys", "x$session"),
+];
+
+/// The names of [`DISCLOSURE_TABLES`] specific enough to match unqualified too (a default
+/// database of `information_schema`, `performance_schema` or `sys` reaches them unqualified);
+/// `threads` and `session` are common user table names and match only qualified.
+const DISCLOSURE_UNQUALIFIED: [&str; 8] = [
+    "processlist",
+    "user_statistics",
+    "client_statistics",
+    "events_statements_current",
+    "events_statements_history",
+    "events_statements_history_long",
+    "x$processlist",
+    "x$session",
+];
+
+/// The first reference in the reading to a [`DISCLOSURE_TABLES`] table: `schema.name` in any
+/// quoting and case, or one of [`DISCLOSURE_UNQUALIFIED`] standing alone (not a qualifier, a
+/// column of another table, or a call).
+fn disclosure_table(t: &Toks<'_>) -> Option<(TextRange, String)> {
+    let lower = |j: usize| t.name(j).0.to_ascii_lowercase();
+    for j in 0..t.len() {
+        if !t.is_name(j) {
+            continue;
+        }
+        if t.kind(j + 1) == Some(TokenKind::Dot) && t.is_name(j + 2) {
+            let (schema, name) = (lower(j), lower(j + 2));
+            if DISCLOSURE_TABLES
+                .iter()
+                .any(|(s, n)| *s == schema && *n == name)
+            {
+                return Some((t.span(j, j + 2), format!("{schema}.{name}")));
+            }
+            continue;
+        }
+        let qualified_part = j > 0 && t.kind(j - 1) == Some(TokenKind::Dot);
+        let call = t.kind(j + 1) == Some(TokenKind::LParen);
+        if !qualified_part && !call {
+            let name = lower(j);
+            if DISCLOSURE_UNQUALIFIED.contains(&name.as_str()) {
+                return Some((t.range(j), name));
+            }
         }
     }
     None
@@ -454,6 +532,13 @@ pub(crate) fn inventory(t: &Toks<'_>, ctx: &ClassifyCtx, acc: &mut Acc) {
             acc.doubt(ReasonCode::EffectsUnknown, t.whole());
             if let Some(r) = acc.reasons.last_mut() {
                 r.arg = Some(arc(what));
+            }
+        }
+        // The same data through tables (fix round 2, RR-I2).
+        if let Some((range, name)) = disclosure_table(t) {
+            acc.doubt(ReasonCode::EffectsUnknown, Some(range));
+            if let Some(r) = acc.reasons.last_mut() {
+                r.arg = Some(arc(&name));
             }
         }
         if t.is(0, "HANDLER") {

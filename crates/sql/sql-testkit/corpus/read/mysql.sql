@@ -332,7 +332,6 @@ EXPLAIN SELECT COUNT(*) FROM numbers;
 EXPLAIN WITH x AS (SELECT 1) SELECT * FROM x;
 SELECT attrs->>'$.color', attrs->'$.roast' FROM products;
 EXPLAIN FORMAT=TREE SELECT * FROM customers;
-SHOW BINARY LOGS;
 VALUES ROW(1, 'a'), ROW(2, 'b');
 SELECT REGEXP_LIKE(email, '^a'), REGEXP_SUBSTR(email, '[a-z]+') FROM customers;
 SELECT BIN_TO_UUID(UUID_TO_BIN(UUID()));

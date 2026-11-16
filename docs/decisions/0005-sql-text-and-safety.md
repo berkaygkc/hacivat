@@ -1260,3 +1260,28 @@ M1–M19 and L1–L9; Task 18 replaces it with the bypass TOML.
   - MariaDB's quoted pseudo-column ``seq.`nextval` `` is `SEQUENCE`.
   - A golden test pins `sqlparser` at `=0.64.0` and checks the `Debug` text the walk reads: variant names, `Join(None)`, `CrossJoin(None)` and `SetDataType`.
   - The read corpus now also runs at MySQL 8.0.12 and 8.4.0 and at MariaDB 10.6.0, with zero false denials. It gained 8 MariaDB-specific reads: `seq_1_to_n`, `OFFSET … FETCH`, `INTERSECT ALL`/`EXCEPT ALL`, `JSON_TABLE`. Its sizes are now 325, 335, 312 and 304.
+
+**Fix round 2 (re-review).**
+
+- **Grammar escapes (RR-I1).**
+  - Every MariaDB `SHOW EXPLAIN|ANALYZE …` is denied, `FORMAT=…` forms included, because each one names another connection.
+  - `SHOW {REPLICA|SLAVE|MASTER} … STATUS` is denied with a named connection (`SHOW SLAVE 'c' STATUS`) or a channel.
+- **Same-category `SHOW` forms (controller ruling).** These are `Unknown` too:
+  - `SHOW {BINARY|MASTER} LOGS`;
+  - MariaDB's `SHOW {USER|CLIENT}_STATISTICS`;
+  - `SHOW CREATE USER` of any account other than `CURRENT_USER[()]`.
+- **Table routes to the same data (RR-I2, controller ruling).** On MySQL and MariaDB these are
+  `Unknown` (an `EffectsUnknown` doubt naming the table) and read-only denies them:
+  - `information_schema.PROCESSLIST`;
+  - `performance_schema.threads`;
+  - `performance_schema.events_statements_{current,history,history_long}`;
+  - `sys.{processlist,session,x$processlist,x$session}`;
+  - MariaDB's `information_schema.{USER,CLIENT}_STATISTICS`.
+
+  The match covers any letter case, any quoting, whitespace around the dot, and anywhere in the statement (subqueries, joins and CTEs included). The names specific enough to be safe also match unqualified, which covers a default database of `information_schema`, `performance_schema` or `sys`. `threads` and `session` match only qualified, because they are common user table names. `performance_schema.session_variables` of other threads is not covered: a query cannot tell them apart from one's own. The corpus dropped `SHOW BINARY LOGS`.
+- **Defence in depth, not the control.** These denies stop Hacivat from showing other sessions'
+  activity or statement text on a read-only console. They are defence in depth: the real
+  control is still the server's PROCESS, SUPER, REPLICATION CLIENT and
+  `performance_schema`/`sys` privileges (L5), which decide what any route shows. A route not on
+  the list is not denied by this rule. The PostgreSQL equivalent (other sessions' query text
+  in `pg_stat_activity`) is routed to Tasks 9 and 3.

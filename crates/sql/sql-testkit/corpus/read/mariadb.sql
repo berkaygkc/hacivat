@@ -330,7 +330,6 @@ EXPLAIN customers;
 DESCRIBE SELECT * FROM orders;
 EXPLAIN SELECT COUNT(*) FROM numbers;
 EXPLAIN WITH x AS (SELECT 1) SELECT * FROM x;
-SHOW BINARY LOGS;
 SELECT JSON_VALUE(attrs, '$.color') FROM products;
 SELECT JSON_QUERY(attrs, '$') FROM products;
 SELECT JSON_DETAILED(attrs) FROM products;

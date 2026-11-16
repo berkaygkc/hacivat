@@ -1411,3 +1411,96 @@ fn quoted_nextval_pseudo_column_is_a_sequence() {
     let r = classify_mariadb("SELECT s.`nextval`");
     assert!(r.request_effects.contains(EffectSet::SEQUENCE), "{r:?}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 2
+
+/// RR-I1 and the same-category gaps: the remaining `SHOW` routes to other sessions, accounts
+/// and the binary log are Unknown and denied on read-only.
+#[test]
+fn information_disclosure_show_forms_round_2() {
+    let both = [
+        "SHOW SLAVE 'conn1' STATUS",
+        "SHOW REPLICA 'conn1' STATUS",
+        "SHOW REPLICA STATUS FOR CHANNEL c1",
+        "SHOW BINARY LOGS",
+        "SHOW MASTER LOGS",
+        "SHOW CREATE USER other",
+        "SHOW CREATE USER 'root'@'%'",
+    ];
+    let mariadb = [
+        "SHOW EXPLAIN FORMAT=JSON FOR 1",
+        "SHOW ANALYZE FORMAT=JSON FOR 1",
+        "SHOW EXPLAIN FOR 1",
+        "SHOW USER_STATISTICS",
+        "SHOW CLIENT_STATISTICS",
+    ];
+    for (d, list) in [
+        (DialectId::MySql, &both[..]),
+        (DialectId::MariaDb, &both[..]),
+        (DialectId::MariaDb, &mariadb[..]),
+    ] {
+        for s in list {
+            let r = run(d, s);
+            assert_eq!(r.request_class, CoarseClass::Unknown, "{d:?}: {s}");
+            assert!(has(&r, ReasonCode::EffectsUnknown), "{d:?}: {s}");
+            assert!(read_only_denies(&r), "{d:?}: {s}");
+        }
+    }
+}
+
+/// RR-I2 (controller ruling): the table routes to the same data, in any qualification,
+/// quoting or letter case, and wherever they stand in the statement.
+#[test]
+fn information_disclosure_tables_are_unknown() {
+    let routes = [
+        "SELECT * FROM information_schema.PROCESSLIST",
+        "SELECT * FROM INFORMATION_SCHEMA.processlist",
+        "SELECT * FROM `information_schema`.`PROCESSLIST`",
+        "SELECT * FROM information_schema . processlist",
+        "SELECT id, info FROM information_schema.processlist WHERE id <> CONNECTION_ID()",
+        "SELECT * FROM performance_schema.threads",
+        "SELECT * FROM `performance_schema`.`threads`",
+        "SELECT * FROM performance_schema.events_statements_current",
+        "SELECT * FROM performance_schema.events_statements_history",
+        "SELECT * FROM performance_schema.events_statements_history_long",
+        "SELECT * FROM sys.processlist",
+        "SELECT * FROM sys.session",
+        "SELECT * FROM sys.`x$processlist`",
+        "SELECT * FROM sys.x$session",
+        "SELECT * FROM SYS.SESSION",
+        "SELECT * FROM processlist",
+        "SELECT * FROM events_statements_current",
+        "SELECT 1 WHERE EXISTS (SELECT 1 FROM performance_schema.threads)",
+        "SELECT c.id FROM customers c JOIN information_schema.processlist p ON p.id = c.id",
+        "WITH x AS (SELECT * FROM sys.processlist) SELECT * FROM x",
+        "SELECT * FROM (SELECT info FROM information_schema.processlist) AS d",
+    ];
+    for s in routes {
+        for d in [DialectId::MySql, DialectId::MariaDb] {
+            let r = run(d, s);
+            assert_eq!(r.request_class, CoarseClass::Unknown, "{d:?}: {s}");
+            assert!(has(&r, ReasonCode::EffectsUnknown), "{d:?}: {s}");
+            assert!(read_only_denies(&r), "{d:?}: {s}");
+        }
+    }
+    for s in [
+        "SELECT * FROM information_schema.USER_STATISTICS",
+        "SELECT * FROM information_schema.client_statistics",
+    ] {
+        let r = classify_mariadb(s);
+        assert_eq!(r.request_class, CoarseClass::Unknown, "{s}");
+        assert!(read_only_denies(&r), "{s}");
+    }
+    // Not routes: other catalog tables, a user table named `threads` or `session`, text.
+    for s in [
+        "SELECT * FROM information_schema.tables",
+        "SELECT * FROM performance_schema.global_status",
+        "SELECT * FROM threads",
+        "SELECT * FROM session",
+        "SELECT 'information_schema.processlist'",
+        "SHOW TABLES FROM performance_schema LIKE 'threads'",
+    ] {
+        assert_eq!(classify_mysql(s).request_class, CoarseClass::Read, "{s}");
+    }
+}
