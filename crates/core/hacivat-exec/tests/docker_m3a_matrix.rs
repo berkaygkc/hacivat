@@ -2021,11 +2021,10 @@ async fn dml_and_ddl_report_update_counts_on_a_dev_console() {
                 other => other.fluent_id().into(),
             })
             .collect();
-        let created = if line.is_pg() {
-            "completed"
-        } else {
-            "affected 0"
-        };
+        // ## m3b-t16-run-service (named exception; PO, ledger 535): the log says "Completed"
+        // for a DDL statement on every engine, whatever count the server gave (the unit's
+        // status above keeps it).
+        let created = "completed";
         assert_eq!(
             lines_logged,
             [

@@ -137,6 +137,22 @@ pub enum LogMsg {
     Evicted {
         rows: u64,
     },
+    // ## m3b-t16-run-service
+    /// `n` server notices of a statement past the cap were counted, never shown (R-M3-77).
+    NoticesDropped {
+        n: u32,
+    },
+    /// A unit run as one was stopped before its end: `ran` statements after the closed result
+    /// ran and none of their results is shown; `rest_not_run`: the statements after those did
+    /// not run (Task 13's `CloseReport`).
+    ClosedEarly {
+        ran: u32,
+        rest_not_run: bool,
+    },
+    /// A unit run as one failed on PostgreSQL: it ran as one implicit transaction, so the
+    /// statements before the failing one were rolled back too (unless the text committed them
+    /// itself; ADR 0002 `m3b-t13` M-2).
+    RunAsOneRolledBack,
 }
 
 /// A message argument. Counts are numbers the app formats in the format locale; a statement
@@ -148,6 +164,10 @@ pub enum LogArg {
     Str(Arc<str>),
     /// A duration in milliseconds: render [`duration_message`] and pass its text.
     DurationMs(u64),
+    // ## m3b-t16-run-service
+    /// A configured span in milliseconds (an idle bound), not a measured time: render
+    /// [`span_message`] and pass its text.
+    SpanMs(u64),
 }
 
 impl LogMsg {
@@ -192,6 +212,16 @@ impl LogMsg {
             LogMsg::SkippedByUser { .. } => "exec-skipped-by-user",
             LogMsg::Retried { .. } => "exec-retried",
             LogMsg::Evicted { .. } => "cursor-closed-evicted",
+            // ## m3b-t16-run-service
+            LogMsg::NoticesDropped { .. } => "exec-notices-dropped",
+            LogMsg::ClosedEarly {
+                rest_not_run: false,
+                ..
+            } => "exec-run-as-one-closed-early",
+            LogMsg::ClosedEarly {
+                rest_not_run: true, ..
+            } => "exec-run-as-one-closed-early-rest",
+            LogMsg::RunAsOneRolledBack => "exec-run-as-one-rolled-back",
         }
     }
 
@@ -224,8 +254,10 @@ impl LogMsg {
                 ..
             } => {
                 let mut args = vec![("rows", LogArg::U64(*rows))];
+                // ## m3b-t16-run-service: the idle bound is a setting ("10 min"), not a run's
+                // time: it keeps whole minutes and seconds.
                 if *reason == CloseReason::IdleTimeout {
-                    args.push(("duration", LogArg::DurationMs(*idle_ms)));
+                    args.push(("duration", LogArg::SpanMs(*idle_ms)));
                 }
                 args
             }
@@ -246,12 +278,10 @@ impl LogMsg {
             | LogMsg::ReadOnlyDenied(_)
             | LogMsg::CopyUnsupported
             | LogMsg::NotStarted(_) => Vec::new(),
-            // ## m3b-t01c-core-seams: a notice's text is server text (the view shows it in its
-            // own field, verbatim); only its code is an argument.
-            LogMsg::Notice { code, .. } => code
-                .iter()
-                .map(|c| ("code", LogArg::Str(c.clone())))
-                .collect(),
+            // ## m3b-t16-run-service: a notice's text is server text and its code a chip, as an
+            // error's (the view shows both in their own fields, verbatim; `copy_invariant`
+            // writes them after the message): the sentence takes no argument.
+            LogMsg::Notice { .. } => Vec::new(),
             LogMsg::ResultSetLimit { total, limit } => vec![
                 ("total", LogArg::U64(u64::from(*total))),
                 ("limit", LogArg::U64(u64::from(*limit))),
@@ -267,6 +297,10 @@ impl LogMsg {
             | LogMsg::SafetyDenied { .. }
             | LogMsg::ConfirmRolledBack { .. }
             | LogMsg::ConfirmStatementFailed => Vec::new(),
+            // ## m3b-t16-run-service
+            LogMsg::NoticesDropped { n } => vec![("n", LogArg::U64(u64::from(*n)))],
+            LogMsg::ClosedEarly { ran, .. } => vec![("n", LogArg::U64(u64::from(*ran)))],
+            LogMsg::RunAsOneRolledBack => Vec::new(),
         }
     }
 
@@ -294,6 +328,9 @@ impl LogMsg {
             | LogMsg::SkippedByUser { .. }
             | LogMsg::Evicted { .. } => Severity::Notice,
             LogMsg::ConfirmCommitted { .. } | LogMsg::Retried { .. } => Severity::Info,
+            // ## m3b-t16-run-service
+            LogMsg::NoticesDropped { .. } | LogMsg::ClosedEarly { .. } => Severity::Notice,
+            LogMsg::RunAsOneRolledBack => Severity::Warning,
             LogMsg::RowsRetrieved { .. }
             | LogMsg::RowsAffected { .. }
             | LogMsg::Completed { .. }
@@ -363,24 +400,62 @@ pub(crate) fn deny_id(layer: DenyLayer) -> &'static str {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UnitMsg {
     pub id: &'static str,
-    /// The arguments: whole numbers, except a size's `n`, which is in tenths (12.5 MB is 125):
-    /// the app formats it with one fraction digit.
+    /// The arguments: whole numbers, except a size's `n`, which is in tenths (12.5 MB is 125),
+    /// and a duration's `seconds`, in hundredths (2.45 s is 245): the app formats each with
+    /// [`UnitMsg::fraction_digits`] digits ([`UnitMsg::decimal`]).
     pub args: Vec<(&'static str, u64)>,
 }
 
-/// The `exec-dur-*` message of `ms` milliseconds: `<1 ms`, `340 ms`, `2 s 340 ms`, `3 min 5 s`
-/// (minutes keep counting past an hour). Whole seconds and minutes drop their zero part.
+// ## m3b-t16-run-service
+impl UnitMsg {
+    /// How many of argument `name`'s digits are after the decimal point: 1 for a size's `n`,
+    /// 2 for a duration's `seconds`, else 0 (a whole number).
+    pub fn fraction_digits(&self, name: &str) -> u32 {
+        match (self.id, name) {
+            ("exec-size-kb" | "exec-size-mb" | "exec-size-gb", "n") => 1,
+            ("exec-dur-seconds", "seconds") => 2,
+            _ => 0,
+        }
+    }
+
+    /// Argument `name` as exact decimal text with its fraction digits (`245` with 2 is
+    /// `"2.45"`), or `None` for a whole-number argument (or none of that name).
+    pub fn decimal(&self, name: &str) -> Option<String> {
+        let digits = self.fraction_digits(name);
+        if digits == 0 {
+            return None;
+        }
+        let (_, v) = self.args.iter().find(|(n, _)| *n == name)?;
+        let scale = 10u64.pow(digits);
+        let width = usize::try_from(digits).unwrap_or(2);
+        Some(format!("{}.{:0width$}", v / scale, v % scale))
+    }
+}
+
+/// The `exec-dur-*` message of `ms` milliseconds, by the one duration rule the output log, the
+/// gutter marks and the status bar share (PO, ledger 535): under a second, whole milliseconds
+/// (`exec-dur-ms`: `0 ms`, `340 ms`); from a second on, seconds with two decimals, cut, not
+/// rounded (`exec-dur-seconds`: `2.34 s`, `185.40 s`), as the status bar's
+/// `hv-status-duration-*` write it.
 pub fn duration_message(ms: u64) -> UnitMsg {
-    let (min, s, rest) = (ms / 60_000, (ms / 1_000) % 60, ms % 1_000);
-    let (id, args) = if ms == 0 {
-        ("exec-dur-lt-ms", Vec::new())
-    } else if ms < 1_000 {
+    let (id, args) = if ms < 1_000 {
         ("exec-dur-ms", vec![("ms", ms)])
-    } else if ms < 60_000 && rest == 0 {
-        ("exec-dur-s", vec![("s", s)])
-    } else if ms < 60_000 {
-        ("exec-dur-s-ms", vec![("s", s), ("ms", rest)])
-    } else if s == 0 {
+    } else {
+        ("exec-dur-seconds", vec![("seconds", ms / 10)])
+    };
+    UnitMsg { id, args }
+}
+
+// ## m3b-t16-run-service
+/// The `exec-dur-*` message of a configured span of `ms` milliseconds (an idle bound: "10 min",
+/// "1 min 30 s"), which reads as the setting reads: whole minutes and seconds from a minute
+/// on (the seconds' fraction dropped), else as [`duration_message`].
+pub fn span_message(ms: u64) -> UnitMsg {
+    if ms < 60_000 {
+        return duration_message(ms);
+    }
+    let (min, s) = (ms / 60_000, (ms / 1_000) % 60);
+    let (id, args) = if s == 0 {
         ("exec-dur-min", vec![("min", min)])
     } else {
         ("exec-dur-min-s", vec![("min", min), ("s", s)])
@@ -415,6 +490,10 @@ pub struct LogLine {
     /// The statement's range in the document (a click selects it).
     pub source: Option<Range<usize>>,
     pub unit: Option<UnitId>,
+    // ## m3b-t16-run-service (ledger 340: the run service kept no command tag)
+    /// The server's command tag of the statement the line reports (PostgreSQL's
+    /// `INSERT 0 3`), verbatim, when it sent one.
+    pub tag: Option<Arc<str>>,
 }
 
 #[derive(Debug, Default)]
@@ -462,6 +541,18 @@ impl SessionLog {
     /// Appends a line saying `msg` now, with the next sequence number and `msg`'s severity
     /// (numbered under the ring's lock: concurrent appends never share a number).
     pub fn append(&self, msg: LogMsg, source: Option<Range<usize>>, unit: Option<UnitId>) {
+        self.append_tagged(msg, None, source, unit);
+    }
+
+    // ## m3b-t16-run-service
+    /// [`append`](Self::append) with the statement's command tag (ledger 340).
+    pub fn append_tagged(
+        &self,
+        msg: LogMsg,
+        tag: Option<Arc<str>>,
+        source: Option<Range<usize>>,
+        unit: Option<UnitId>,
+    ) {
         self.push_with(|seq| LogLine {
             seq,
             at: SystemTime::now(),
@@ -469,6 +560,7 @@ impl SessionLog {
             msg,
             source,
             unit,
+            tag,
         });
     }
 
@@ -510,6 +602,7 @@ impl SessionLog {
                 },
                 source: None,
                 unit: None,
+                tag: None,
             });
         }
         out.extend(ring.lines.iter().cloned());
@@ -575,13 +668,24 @@ pub fn copy_invariant(lines: &[LogLine]) -> String {
                 LogArg::U64(n) => {
                     let _ = write!(out, "\t{name}={n}");
                 }
-                LogArg::DurationMs(ms) => {
+                LogArg::DurationMs(ms) | LogArg::SpanMs(ms) => {
                     let _ = write!(out, "\t{name}={ms}ms");
                 }
                 LogArg::Str(s) => {
                     let _ = write!(out, "\t{name}={}", escaped(&s));
                 }
             }
+        }
+        // ## m3b-t16-run-service: the command tag, verbatim.
+        if let Some(tag) = &line.tag {
+            let _ = write!(out, "\ttag={}", escaped(tag));
+        }
+        // ## m3b-t16-run-service: a notice's code and the server's text, verbatim.
+        if let LogMsg::Notice { code, text, .. } = &line.msg {
+            if let Some(code) = code {
+                let _ = write!(out, "\tcode={}", escaped(code));
+            }
+            let _ = write!(out, "\t{}", escaped(text));
         }
         if let LogMsg::Error { view, .. } | LogMsg::NotStarted(view) = &line.msg {
             let _ = write!(out, "\t{}", view.title_id);

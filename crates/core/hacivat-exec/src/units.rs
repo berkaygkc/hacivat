@@ -86,6 +86,10 @@ pub struct ExecUnit {
     pub doc_range: Range<usize>,
     pub kind: UnitKind,
     pub suspendable: bool,
+    // ## m3b-t16-run-service (named exception): the result tabs' title (R-M3-66).
+    /// The unit's title: its directly preceding comment without the comment markers
+    /// (`UnitSpan::title_comment`, `titles::comment_title`), `None` without one.
+    pub title: Option<Arc<str>>,
 }
 
 /// Why Run sends nothing although the range is certain.
@@ -285,6 +289,8 @@ fn unit(doc: &DocSnapshot, range: TextRange, kind: UnitKind) -> ExecUnit {
         doc_range: span(range),
         kind,
         suspendable: kind == UnitKind::Statement && head::cursor_eligible(doc, range),
+        // ## m3b-t16-run-service (named exception): set by `units_of` from the span.
+        title: None,
     }
 }
 
@@ -301,7 +307,19 @@ fn units_of(doc: &DocSnapshot, spans: &[UnitSpan]) -> Resolution {
             reason,
         };
     }
-    Resolution::Units(spans.iter().map(|s| unit(doc, s.range, s.kind)).collect())
+    // ## m3b-t16-run-service (named exception): each unit's comment title (R-M3-66).
+    Resolution::Units(
+        spans
+            .iter()
+            .map(|s| ExecUnit {
+                title: s
+                    .title_comment
+                    .and_then(|t| doc.text().get(span(t)))
+                    .and_then(crate::titles::comment_title),
+                ..unit(doc, s.range, s.kind)
+            })
+            .collect(),
+    )
 }
 
 /// The chooser without the candidates Run would refuse; the preselected one stays selected

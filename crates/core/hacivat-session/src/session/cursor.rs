@@ -741,6 +741,11 @@ impl Stream {
                 notices_dropped = dropped,
                 "notices past the cap were counted, not reported"
             );
+            // ## m3b-t16-run-service (named exception): the count reaches the output log.
+            self.observer.0.event(&RunEvent::NoticesDropped {
+                unit: self.unit,
+                n: dropped,
+            });
         }
         self.set_state(state);
         if let Some(result) = self.result() {
@@ -1312,6 +1317,18 @@ impl Core {
     ) -> (bool, bool, Option<ExecError>) {
         let fire = self.close_fire(s, true, w.overdue);
         let closed = self.close_open(CloseHow::Now, fire, true, w).await;
+        // ## m3b-t16-run-service (named exception): what a unit run as one ran past the
+        // closed result (Task 13; `None` for any other unit), for the output log.
+        if let Some(report) = self
+            .live
+            .as_mut()
+            .and_then(|live| live.raw().take_close_report())
+        {
+            s.observer.0.event(&RunEvent::ClosedEarly {
+                unit: s.unit,
+                report,
+            });
+        }
         let (completed, total, failure) = match closed {
             Ok(Closed::Completed { rows }) => (true, rows, None),
             Ok(_) => (false, 0, None),
