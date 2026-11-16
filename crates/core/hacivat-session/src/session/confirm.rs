@@ -38,6 +38,24 @@
 //! - **Fail closed:** a wrapped unit run "as one" (`Protocol::Simple`, which could end the
 //!   transaction itself) or on a read-only session is refused before anything is sent; a
 //!   transaction a statement ended itself is reported, never asked about.
+//!
+//! Fix round 1 (controller rulings on the review):
+//! - **C1.** "Open" reads MySQL's own `autocommit` flag first, so a Manual session whose
+//!   server turned `autocommit` back on takes the own form. After a statement that succeeded
+//!   with nothing open (it committed on its own), nothing is asked and nothing is rolled back
+//!   to: the unit ends `Tx(ConfirmAlreadyCommitted)` (`exec-confirm-already-committed`) and the
+//!   run stops.
+//! - **C2.** The deadline ends the unit `Tx(ConfirmTimedOut)` and the run stops whatever its
+//!   policy; the user's Undo (and a close) ends it `Tx(ConfirmUndone)`, so the error policy
+//!   decides. Commit/Keep leaves it `Succeeded`; a cancel `Cancelled`.
+//! - **I1.** A statement that failed with nothing open any more (the server rolled back the
+//!   whole transaction: a SQLite interrupt, a MySQL deadlock) sends no rollback, publishes the
+//!   state and keeps the session (`exec-tx-rolled-back-by-server`); "intact"
+//!   (`exec-confirm-statement-failed`) is logged only after an undo that worked.
+//! - **m1.** A refused `RELEASE` (after Keep, or after a `ROLLBACK TO` that worked) is logged and
+//!   the session stays; only a refused `ROLLBACK TO` breaks it. **m3.** A stop asked for while
+//!   the statement ran rolls back without a question. **m5.** No own-form `START TRANSACTION`
+//!   over MySQL table locks (`Tx(TableLocksHeld)`, nothing sent).
 
 use hacivat_driver::{Protocol, TxStatus};
 use hacivat_proto::ErrClass;
@@ -116,24 +134,62 @@ pub(crate) struct Wrap {
     opened: TxStatus,
 }
 
-/// How rolling back the wrap went.
+/// How ending the wrap went.
 enum Undone {
     Done,
     /// The connection is gone: the server rolled back.
     Lost(ExecError),
     /// The server refused; the session is broken (nothing may run in a transaction Hacivat
-    /// could not end).
+    /// could not end), or, for a refused `COMMIT`, the server rolled back.
     Refused(ExecError),
 }
 
 impl Core {
-    /// Whether a transaction is open now, for the form (P-M3b-1) and Smart: the protocol's
-    /// status, and on MySQL/MariaDB also Manual mode and the user's `autocommit = 0` (a
-    /// transaction is then always open; `START TRANSACTION` would commit it).
+    /// Whether a transaction is open now, for the form (P-M3b-1), Smart and the implicit-commit
+    /// backstop: the protocol's status, and on MySQL/MariaDB the server's own `autocommit`
+    /// flag when the driver reports it (off: a transaction is always open, and `START
+    /// TRANSACTION` would commit it), else Manual mode or the user's `SET autocommit = 0`.
+    /// Fix round 1 (C1): a Manual MySQL session whose server turned `autocommit` back on (the
+    /// user's `SET autocommit = 1` earlier in the run) has nothing open.
     pub(crate) fn tx_open_now(&self) -> bool {
-        self.tx.status != TxStatus::Idle
-            || (family(self.kind) == Family::MySql
-                && (self.tx.mode == TxMode::Manual || self.users_autocommit_off()))
+        if self.tx.status != TxStatus::Idle {
+            return true;
+        }
+        family(self.kind) == Family::MySql
+            && match self.server_autocommit {
+                Some(on) => !on,
+                None => self.tx.mode == TxMode::Manual || self.autocommit_off,
+            }
+    }
+
+    // ## m3b-t19-confirm-tx (fix round 1, m5)
+    /// MySQL/MariaDB: the user's `LOCK TABLES` locks may be held, and a `START TRANSACTION`
+    /// would release them.
+    pub(crate) fn table_locks_block(&self) -> bool {
+        family(self.kind) == Family::MySql && self.table_locks
+    }
+
+    /// Follows the user's table locks after `sql` ran (MySQL/MariaDB): `LOCK TABLE[S]` (or the
+    /// gate's `SessionEffects::LOCK_TABLES`) takes them; `UNLOCK TABLES` and a transaction's
+    /// start release them. A reconnect and a reset clear them (`actor.rs`).
+    pub(crate) fn note_table_locks(&mut self, sql: &str, effects: Option<SessionEffects>) {
+        if family(self.kind) != Family::MySql {
+            return;
+        }
+        let mut words = sql
+            .split(|c: char| c.is_whitespace() || c == ';')
+            .filter(|w| !w.is_empty())
+            .map(str::to_ascii_uppercase);
+        let first = words.next().unwrap_or_default();
+        let second = words.next().unwrap_or_default();
+        match first.as_str() {
+            "LOCK" if matches!(second.as_str(), "TABLE" | "TABLES") => self.table_locks = true,
+            "UNLOCK" | "START" | "BEGIN" => self.table_locks = false,
+            _ if effects.is_some_and(|e| e.contains(SessionEffects::LOCK_TABLES)) => {
+                self.table_locks = true;
+            }
+            _ => {}
+        }
     }
 
     /// Why `unit` may not run here, before anything of it is sent (the Manual `BEGIN`
@@ -173,7 +229,8 @@ impl Core {
     }
 
     /// Opens the wrap of `kind` around the next statement (after the Manual or Smart
-    /// `BEGIN`): the savepoint inside an open transaction, else Hacivat's own transaction.
+    /// `BEGIN`): the savepoint inside an open transaction, else Hacivat's own transaction
+    /// (never over MySQL table locks, which it would release: `TableLocksHeld`, nothing sent).
     pub(crate) async fn open_wrap(&mut self, kind: WrapKind) -> Result<Wrap, ExecError> {
         let form = if self.tx_open_now() {
             Form::Savepoint
@@ -183,6 +240,9 @@ impl Core {
         match form {
             Form::Savepoint => self.control(kind.savepoint()).await?,
             Form::Own => {
+                if self.table_locks_block() {
+                    return Err(ExecError::of(ExecErrorKind::Tx(TxError::TableLocksHeld)));
+                }
                 self.holder = TxOwner::Confirm;
                 for statement in self.own_begin(kind) {
                     if let Err(e) = self.control(&statement).await {
@@ -257,8 +317,77 @@ impl Core {
             };
         }
         if !matches!(ended, UnitEnd::Succeeded { .. }) {
-            // P-M3b-5: only the statement is undone; the unit keeps its error.
-            let undone = self.undo(wrap).await;
+            return self.after_failure(run, ordinal, wrap, ended).await;
+        }
+        // Fix round 1 (C1): nothing is open after the statement, so it committed on its own (a
+        // savepoint taken outside a transaction is a no-op on MySQL, or the statement ended the
+        // transaction itself). Never asked, nothing rolled back to: reported, and the run stops
+        // (`run.rs`).
+        if self.tx.status == TxStatus::Idle {
+            if wrap.form == Form::Own {
+                self.end_own();
+            }
+            tracing::warn!(
+                run,
+                unit = ordinal,
+                savepoint = wrap.form == Form::Savepoint,
+                notice = "exec-confirm-already-committed",
+                "the wrapped statement was committed by the server on its own; nothing was asked \
+                 and the rest of the run is not sent"
+            );
+            self.publish_tx();
+            return UnitEnd::Failed(ExecError::of(ExecErrorKind::Tx(
+                TxError::ConfirmAlreadyCommitted,
+            )));
+        }
+        match wrap.kind {
+            WrapKind::Explain => {
+                let undone = self.undo(wrap).await;
+                tracing::info!(
+                    run,
+                    unit = ordinal,
+                    "EXPLAIN ANALYZE ran inside a transaction that was rolled back (D-062)"
+                );
+                self.publish_tx();
+                match undone {
+                    Undone::Done => ended,
+                    Undone::Lost(e) | Undone::Refused(e) => UnitEnd::Failed(e),
+                }
+            }
+            WrapKind::Confirm => self.decide(spec, unit, wrap, ended, w).await,
+        }
+    }
+
+    /// The wrapped statement failed or was cancelled (P-M3b-5): only it is undone and the unit
+    /// keeps its error. Fix round 1 (I1): when nothing is open any more, the server ended the
+    /// transaction itself (a SQLite interrupt and a MySQL deadlock roll back the whole
+    /// transaction): nothing is sent, the state is published, and the session stays.
+    async fn after_failure(
+        &mut self,
+        run: u64,
+        ordinal: u32,
+        wrap: Wrap,
+        ended: UnitEnd,
+    ) -> UnitEnd {
+        if self.tx.status == TxStatus::Idle {
+            if wrap.form == Form::Own {
+                self.end_own();
+            }
+            if wrap.opened != TxStatus::Idle {
+                tracing::warn!(
+                    run,
+                    unit = ordinal,
+                    savepoint = wrap.form == Form::Savepoint,
+                    notice = "exec-tx-rolled-back-by-server",
+                    "the wrapped statement failed and the server rolled back the whole \
+                     transaction"
+                );
+            }
+            self.publish_tx();
+            return ended;
+        }
+        let undone = self.undo(wrap).await;
+        if matches!(undone, Undone::Done) {
             match (wrap.kind, wrap.form) {
                 (WrapKind::Confirm, Form::Savepoint) => tracing::info!(
                     run,
@@ -279,44 +408,14 @@ impl Core {
                     "EXPLAIN ANALYZE failed or was cancelled; its rollback ran (D-062)"
                 ),
             }
-            self.publish_tx();
-            return match undone {
-                Undone::Done => ended,
-                Undone::Lost(e) | Undone::Refused(e) => match ended {
-                    UnitEnd::Failed(first) => UnitEnd::Failed(first),
-                    _ => UnitEnd::Failed(e),
-                },
-            };
         }
-        // The statement ended the transaction itself: nothing is left to ask about or roll
-        // back. Reported, never asked (the gate sends no such statement; fail loud).
-        if wrap.opened != TxStatus::Idle && self.tx.status == TxStatus::Idle {
-            if wrap.form == Form::Own {
-                self.end_own();
-            }
-            tracing::warn!(
-                run,
-                unit = ordinal,
-                "the wrapped statement ended the transaction itself; its changes stand"
-            );
-            self.publish_tx();
-            return ended;
-        }
-        match wrap.kind {
-            WrapKind::Explain => {
-                let undone = self.undo(wrap).await;
-                tracing::info!(
-                    run,
-                    unit = ordinal,
-                    "EXPLAIN ANALYZE ran inside a transaction that was rolled back (D-062)"
-                );
-                self.publish_tx();
-                match undone {
-                    Undone::Done => ended,
-                    Undone::Lost(e) | Undone::Refused(e) => UnitEnd::Failed(e),
-                }
-            }
-            WrapKind::Confirm => self.decide(spec, unit, wrap, ended, w).await,
+        self.publish_tx();
+        match undone {
+            Undone::Done => ended,
+            Undone::Lost(e) | Undone::Refused(e) => match ended {
+                UnitEnd::Failed(first) => UnitEnd::Failed(first),
+                _ => UnitEnd::Failed(e),
+            },
         }
     }
 
@@ -329,13 +428,31 @@ impl Core {
         ended: UnitEnd,
         w: &mut Watch,
     ) -> UnitEnd {
+        let run = spec.run.0;
+        let ordinal = unit.id.ordinal;
+        let savepoint = wrap.form == Form::Savepoint;
+        // Fix round 1 (m3): a stop asked for while the statement ran is never asked about.
+        if w.stop.is_requested() {
+            let undone = self.undo(wrap).await;
+            tracing::info!(
+                run,
+                unit = ordinal,
+                savepoint,
+                "the confirmed statement was rolled back: the run was cancelled before the \
+                 question"
+            );
+            self.publish_tx();
+            return match undone {
+                Undone::Done => UnitEnd::Cancelled,
+                Undone::Lost(e) | Undone::Refused(e) => UnitEnd::Failed(e),
+            };
+        }
         let affected = match &ended {
             UnitEnd::Succeeded {
                 rows: Some(RowsOutcome::Affected(n)),
             } => Some(*n),
             _ => None,
         };
-        let savepoint = wrap.form == Form::Savepoint;
         let gate = self.gate.clone();
         // The snapshot shows the transaction the question is about while the run waits.
         self.publish_tx();
@@ -367,8 +484,6 @@ impl Core {
             (answer, by_deadline)
         };
         let closing = gate.closing();
-        let run = spec.run.0;
-        let ordinal = unit.id.ordinal;
         let done = match answer {
             CommitAnswer::Commit => self.keep(wrap).await,
             CommitAnswer::RollBack => self.undo(wrap).await,
@@ -397,20 +512,41 @@ impl Core {
                     answer,
                     by_deadline,
                 });
-                if cancelled { UnitEnd::Cancelled } else { ended }
+                // Fix round 1 (C2): an undone statement did not take effect. The deadline's
+                // stops the run whatever its policy (the user is away); the user's Undo (or a
+                // close) leaves the rest to the error policy.
+                match answer {
+                    _ if cancelled => UnitEnd::Cancelled,
+                    CommitAnswer::Commit => ended,
+                    CommitAnswer::RollBack if by_deadline => {
+                        UnitEnd::Failed(ExecError::of(ExecErrorKind::Tx(TxError::ConfirmTimedOut)))
+                    }
+                    CommitAnswer::RollBack => {
+                        UnitEnd::Failed(ExecError::of(ExecErrorKind::Tx(TxError::ConfirmUndone)))
+                    }
+                }
             }
             Undone::Lost(mut e) => {
-                tracing::info!(
-                    run,
-                    unit = ordinal,
-                    "the connection was lost while the confirmed statement waited; the server \
-                     rolled back these changes"
-                );
-                // A rollback that met a lost connection rolled back all the same.
-                if answer == CommitAnswer::RollBack {
-                    e.kind = ExecErrorKind::ConnectionLost {
-                        outcome_unknown: false,
-                    };
+                // Fix round 1 (m2): worded per answer.
+                match answer {
+                    CommitAnswer::Commit => tracing::info!(
+                        run,
+                        unit = ordinal,
+                        "the connection was lost at the commit; its outcome is unknown, and a \
+                         server rolls back a transaction whose commit did not reach it"
+                    ),
+                    CommitAnswer::RollBack => {
+                        tracing::info!(
+                            run,
+                            unit = ordinal,
+                            "the connection was lost while the confirmed statement waited; the \
+                             server rolled back these changes"
+                        );
+                        // A rollback that met a lost connection rolled back all the same.
+                        e.kind = ExecErrorKind::ConnectionLost {
+                            outcome_unknown: false,
+                        };
+                    }
                 }
                 UnitEnd::Failed(e)
             }
@@ -447,7 +583,7 @@ impl Core {
             }
             Form::Savepoint => {
                 let released = self.control(wrap.kind.release()).await;
-                self.after_savepoint(released)
+                self.after_release(released)
             }
         }
     }
@@ -459,13 +595,19 @@ impl Core {
                 let rolled = self.control("ROLLBACK").await;
                 self.after_own(rolled)
             }
-            Form::Savepoint => {
-                let mut ended = self.control(wrap.kind.rollback_to()).await;
-                if ended.is_ok() {
-                    ended = self.control(wrap.kind.release()).await;
+            Form::Savepoint => match self.control(wrap.kind.rollback_to()).await {
+                Ok(()) => {
+                    let released = self.control(wrap.kind.release()).await;
+                    self.after_release(released)
                 }
-                self.after_savepoint(ended)
-            }
+                // The statement may still be in the user's transaction: the session is not
+                // used again (the server rolls back; the loss is reported like any other).
+                Err(e) if self.broken.is_some() => Undone::Lost(e),
+                Err(e) => {
+                    self.broken.get_or_insert(ErrClass::Internal);
+                    Undone::Refused(e)
+                }
+            },
         }
     }
 
@@ -499,16 +641,22 @@ impl Core {
         }
     }
 
-    /// The user's transaction after the savepoint's release or rollback: a failure leaves it in
-    /// a state Hacivat cannot vouch for, so the session is not used again (the server rolls
-    /// back; the loss is reported like any other).
-    fn after_savepoint(&mut self, ended: Result<(), ExecError>) -> Undone {
-        match ended {
+    /// The savepoint's `RELEASE` after Keep, or after a `ROLLBACK TO` that undid the
+    /// statement. Fix round 1 (m1): a release the server refused leaves at most an extra
+    /// savepoint (or, on PostgreSQL, a failed transaction the snapshot shows as it is): it is
+    /// logged and the session stays; only a lost connection is a loss.
+    fn after_release(&mut self, released: Result<(), ExecError>) -> Undone {
+        match released {
             Ok(()) => Undone::Done,
             Err(e) if self.broken.is_some() => Undone::Lost(e),
             Err(e) => {
-                self.broken.get_or_insert(ErrClass::Internal);
-                Undone::Refused(e)
+                tracing::warn!(
+                    kind = ?e.kind,
+                    status = ?self.tx.status,
+                    "the server refused to release Hacivat's savepoint; the session keeps the \
+                     transaction as the server reports it"
+                );
+                Undone::Done
             }
         }
     }

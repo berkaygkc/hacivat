@@ -267,6 +267,11 @@ pub struct FakeQuery {
     /// What `RawConn::warnings` answers once the query is `Done` (its `QueryDone::warnings`
     /// counts them), until the next query.
     pub warnings: Vec<Notice>,
+    // ## m3b-t19-confirm-tx (named exception, fix round 1, I1)
+    /// The connection's transaction status after the query fails (an error or a cancel): an
+    /// engine that rolls back the whole transaction (a SQLite interrupt, a MySQL deadlock)
+    /// leaves `Idle`. `None`: PostgreSQL fails an open transaction, other engines keep it.
+    pub tx_after_error: Option<TxStatus>,
 }
 
 /// A typed call, as `typed_log` records it.
@@ -1590,8 +1595,15 @@ impl FakeConn {
 
     /// Ends the open run with `err`; inside a PostgreSQL transaction the server fails it.
     fn fail_typed(&mut self, err: RawError) -> RawError {
+        // ## m3b-t19-confirm-tx (named exception): a scripted status after a failure.
+        let after = self
+            .typed
+            .as_ref()
+            .and_then(|run| run.script.tx_after_error);
         self.end_typed();
-        if pg_wire(self.kind) && self.tx == TxStatus::InTx {
+        if let Some(tx) = after {
+            self.tx = tx;
+        } else if pg_wire(self.kind) && self.tx == TxStatus::InTx {
             self.tx = TxStatus::Failed;
         }
         err

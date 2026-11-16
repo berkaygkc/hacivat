@@ -198,3 +198,31 @@ async fn smart_opens_before_a_user_exec() {
     assert_eq!(snap(&h).tx.status, TxStatus::Idle);
     assert_eq!(snap(&h).tx.mode, TxMode::Smart);
 }
+
+// ## m3b-t19-confirm-tx (fix round 1, m4)
+/// Smart never opens a transaction before a statement that cannot run inside one: it runs as
+/// in Auto (PostgreSQL `VACUUM`, `CREATE INDEX CONCURRENTLY`; MySQL `SET TRANSACTION`).
+#[tokio::test(start_paused = true)]
+async fn smart_never_opens_before_a_statement_that_cannot_run_in_a_transaction() {
+    for sql in [
+        "VACUUM",
+        "CREATE INDEX CONCURRENTLY i ON t (a)",
+        "ALTER SYSTEM SET work_mem = '8MB'",
+    ] {
+        let (h, f, before) = smart(fake_pg().tracks_transactions()).await;
+        let t = run_verdict(&h, sql, UnitVerdict::Write);
+        t.ticket.reply.await.unwrap().unwrap();
+        assert_eq!(sent(&f, before), [q(sql)], "{sql}");
+        run(&h, sql).await.unwrap();
+        assert_eq!(
+            sent(&f, before),
+            [q(sql), st(sql)],
+            "{sql}: the Exec path too"
+        );
+    }
+    let (h, f, before) = smart(fake(DbmsKind::MySql)).await;
+    let sql = "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE";
+    let t = run_verdict(&h, sql, UnitVerdict::Write);
+    t.ticket.reply.await.unwrap().unwrap();
+    assert_eq!(sent(&f, before), [q(sql)]);
+}

@@ -22,6 +22,14 @@
 //!   a Manual MySQL session turns `autocommit` back on), and a profile's Smart mode starts as
 //!   Smart. `Request::Exec` of the user (no verdict) opens before any statement but the user's
 //!   transaction control.
+//! - Fix round 1 (controller rulings m4, m5): Smart never opens before a statement that cannot
+//!   run inside a transaction ([`outside_tx_only`]: PostgreSQL `VACUUM`, `CREATE`/`DROP
+//!   DATABASE`, `CREATE`/`DROP INDEX CONCURRENTLY`, `REINDEX … CONCURRENTLY`, `ALTER SYSTEM`,
+//!   `CREATE`/`DROP TABLESPACE`, `CLUSTER` without a table; MySQL/MariaDB `SET TRANSACTION`,
+//!   and `LOCK`/`UNLOCK TABLES`, which end any transaction themselves; SQLite `VACUUM`): it
+//!   runs as in Auto. On MySQL/MariaDB, while the user's `LOCK TABLES`
+//!   locks may be held, Smart's `START TRANSACTION` (which would release them) is refused
+//!   (`TxError::TableLocksHeld`), nothing sent.
 
 use crate::session::actor::Core;
 use crate::session::schema::{Family, family};
@@ -35,6 +43,7 @@ impl Core {
     pub(crate) fn smart_opens_before(&self, unit: &RunUnit, control: bool) -> bool {
         self.tx.mode == TxMode::Smart
             && !control
+            && !outside_tx_only(self.kind, &unit.sql)
             && !self.tx_open_now()
             && !matches!(
                 unit.verdict,
@@ -51,5 +60,93 @@ impl Core {
             Family::MySql => begin_sql(self.kind, self.tx.isolation, false),
             _ => self.manual_begin(keyword),
         }
+    }
+}
+
+// ## m3b-t19-confirm-tx (fix round 1, m4)
+/// Whether `sql` is a statement `kind` refuses inside a transaction block, so Smart lets it run
+/// as in Auto (the module docs). Reads the leading words only; a unit carries no leading
+/// comment.
+pub(crate) fn outside_tx_only(kind: hacivat_proto::DbmsKind, sql: &str) -> bool {
+    let words: Vec<String> = sql
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '(' | ')' | ','))
+        .filter(|w| !w.is_empty())
+        .take(8)
+        .map(str::to_ascii_uppercase)
+        .collect();
+    let w = |i: usize| words.get(i).map_or("", String::as_str);
+    match family(kind) {
+        Family::Postgres => match (w(0), w(1)) {
+            ("VACUUM", _) | ("ALTER", "SYSTEM") => true,
+            ("CREATE" | "DROP", "DATABASE" | "TABLESPACE") => true,
+            ("CREATE", _) => {
+                let at = if w(1) == "UNIQUE" { 2 } else { 1 };
+                w(at) == "INDEX" && w(at + 1) == "CONCURRENTLY"
+            }
+            ("DROP", "INDEX") => w(2) == "CONCURRENTLY",
+            ("REINDEX", _) => words.iter().any(|w| w == "CONCURRENTLY"),
+            ("CLUSTER", _) => words.iter().skip(1).all(|w| w == "VERBOSE"),
+            _ => false,
+        },
+        // `LOCK`/`UNLOCK TABLES` end any transaction themselves (and Smart's own start would
+        // release the user's locks before an `UNLOCK TABLES` could).
+        Family::MySql => matches!(
+            (w(0), w(1)),
+            ("SET", "TRANSACTION") | ("LOCK" | "UNLOCK", "TABLE" | "TABLES")
+        ),
+        Family::Sqlite => w(0) == "VACUUM",
+        Family::Other => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hacivat_proto::DbmsKind;
+
+    #[test]
+    fn statements_that_cannot_run_in_a_transaction() {
+        let pg = |sql| outside_tx_only(DbmsKind::Postgres, sql);
+        for sql in [
+            "VACUUM",
+            "vacuum analyze t",
+            "CREATE DATABASE d",
+            "DROP DATABASE d",
+            "CREATE INDEX CONCURRENTLY i ON t (a)",
+            "CREATE UNIQUE INDEX CONCURRENTLY i ON t (a)",
+            "DROP INDEX CONCURRENTLY i",
+            "REINDEX TABLE CONCURRENTLY t",
+            "REINDEX (VERBOSE) INDEX CONCURRENTLY i",
+            "ALTER SYSTEM SET work_mem = '64MB'",
+            "CREATE TABLESPACE s LOCATION '/x'",
+            "DROP TABLESPACE s",
+            "CLUSTER",
+            "CLUSTER VERBOSE",
+        ] {
+            assert!(pg(sql), "{sql}");
+        }
+        for sql in [
+            "CREATE INDEX i ON t (a)",
+            "DROP INDEX i",
+            "REINDEX TABLE t",
+            "CLUSTER t USING i",
+            "ALTER TABLE t ADD a int",
+            "UPDATE t SET a = 1",
+            "CREATE TABLE concurrently (a int)",
+        ] {
+            assert!(!pg(sql), "{sql}");
+        }
+        assert!(outside_tx_only(
+            DbmsKind::MySql,
+            "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+        ));
+        assert!(!outside_tx_only(
+            DbmsKind::MySql,
+            "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+        ));
+        assert!(outside_tx_only(DbmsKind::MySql, "UNLOCK TABLES"));
+        assert!(outside_tx_only(DbmsKind::MySql, "LOCK TABLES t WRITE"));
+        assert!(outside_tx_only(DbmsKind::Sqlite, "VACUUM"));
+        assert!(!outside_tx_only(DbmsKind::Sqlite, "UPDATE t SET a = 1"));
     }
 }

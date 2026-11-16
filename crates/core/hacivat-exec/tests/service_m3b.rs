@@ -283,7 +283,12 @@ async fn needs_commit_reaches_the_confirm_port_and_answer_returns() {
             .await
             .expect("the answer reached the session")
             .unwrap();
-        assert_eq!((summary.executed, summary.failed), (1, 0), "{answer:?}");
+        // Fix round 1 (C2): a rolled-back statement is no success.
+        let expected = match answer {
+            hacivat_exec::CommitAnswer::Commit => (1, 0),
+            hacivat_exec::CommitAnswer::RollBack => (0, 1),
+        };
+        assert_eq!((summary.executed, summary.failed), expected, "{answer:?}");
         assert_eq!(*port.1.lock().unwrap(), [false], "Hacivat's own form");
         assert_eq!(
             f.call_log()[before..],

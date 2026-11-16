@@ -350,6 +350,8 @@ pub(crate) fn spawn_supervised(
         // ## m3b-t01c-core-seams
         classifier,
         observed_sql_mode: None,
+        // ## m3b-t19-confirm-tx
+        table_locks: false,
         gate: gate.clone(),
         request_seq: 0,
         // ## m3b-t11-session-runs (fix round 1)
@@ -423,7 +425,9 @@ pub(crate) struct Core {
     /// MySQL: the server's `SERVER_STATUS_AUTOCOMMIT` as of the last round trip, when the
     /// driver reports it (fix round 4, R5): procedures, prepared statements, variables,
     /// `init_connect` and global defaults are all seen.
-    server_autocommit: Option<bool>,
+    // ## m3b-t19-confirm-tx (named exception: crate-visible for `confirm::tx_open_now`, which
+    // reads the server's own flag first; fix round 1, C1).
+    pub(crate) server_autocommit: Option<bool>,
     // ## m3a-t18-session-run
     /// The suspended query the session holds (a console cursor). No other request runs while
     /// it is open: `handle` releases it first.
@@ -447,6 +451,10 @@ pub(crate) struct Core {
     /// every reset (P-M3b-33; Task 18 fills it).
     #[allow(dead_code, reason = "Task 18 fills and reads it")]
     pub(crate) observed_sql_mode: Option<String>,
+    // ## m3b-t19-confirm-tx (fix round 1, m5)
+    /// MySQL/MariaDB: the user's `LOCK TABLES` locks may be held (`confirm::note_table_locks`);
+    /// a `START TRANSACTION` of Hacivat's would release them, so none is sent meanwhile.
+    pub(crate) table_locks: bool,
     /// Where a waiting run gets its out-of-band answers (P-M3b-3; Tasks 11 and 19 wait on it).
     pub(crate) gate: Arc<RunGate>,
     /// The sequence number of the request being handled (`run_one` sets it): a waiting run's
@@ -510,8 +518,7 @@ impl Core {
     /// implicit transaction, and a reconnect would silently turn it back on. The server's flag
     /// decides when the driver reports it, else the statements seen. Never in the app's own
     /// Manual mode, which sets it itself and replays it.
-    // ## m3b-t19-confirm-tx (named exception: crate-visible for `confirm::tx_open_now`).
-    pub(crate) fn users_autocommit_off(&self) -> bool {
+    fn users_autocommit_off(&self) -> bool {
         family(self.kind) == Family::MySql
             && self.tx.mode != TxMode::Manual
             && self.server_autocommit.map_or(self.autocommit_off, |on| !on)
@@ -661,6 +668,8 @@ impl Core {
                     self.tracked = Tracked::default();
                     // `COM_RESET_CONNECTION` restores the session's `autocommit`.
                     self.autocommit_off = false;
+                    // ## m3b-t19-confirm-tx: and releases table locks.
+                    self.table_locks = false;
                 }
                 reset
             }
@@ -742,12 +751,18 @@ impl Core {
                 }
             }
             // ## m3b-t19-confirm-tx (named exception, C2): a user statement of a Smart session
-            // carries no verdict, so Smart opens the user's transaction before it (`smart.rs`).
+            // carries no verdict, so Smart opens the user's transaction before it (`smart.rs`;
+            // fix round 1: never before a statement that cannot run inside one (m4), and never
+            // over MySQL table locks (m5)).
             if origin == ExecOrigin::User
                 && self.tx.mode == TxMode::Smart
                 && !self.tx_open_now()
                 && !control
+                && !crate::session::smart::outside_tx_only(self.kind, sql)
             {
+                if self.table_locks_block() {
+                    return Err(tx_error(TxError::TableLocksHeld));
+                }
                 for statement in self.smart_begin(&keyword) {
                     self.control(&statement).await?;
                 }
@@ -767,6 +782,8 @@ impl Core {
         };
         // ## m2b-t17-liveness: what a reconnect would lose (B19).
         if origin == ExecOrigin::User {
+            // ## m3b-t19-confirm-tx (fix round 1, m5): the user's table locks.
+            self.note_table_locks(sql, None);
             // ## m3b-t01c-core-seams (P-M3b-11): no verdict on this path.
             track_statement(&mut self.tracked, sql, None);
             if family(self.kind) == Family::MySql
@@ -950,6 +967,8 @@ impl Core {
         let status = live.raw().tx_status();
         self.server_autocommit = live.raw().autocommit();
         self.autocommit_off = false;
+        // ## m3b-t19-confirm-tx: a new connection holds no table locks.
+        self.table_locks = false;
         // ## m3a-t18-session-run: a new connection has no transaction of Hacivat's, and no
         // kill is on its way to it.
         self.holder = TxOwner::User;

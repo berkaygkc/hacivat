@@ -14,15 +14,15 @@ use std::sync::Arc;
 
 use common::confirm::*;
 use common::runs::Recorder;
-use common::runs_m3b::{answering, failing};
+use common::runs_m3b::{answering, asked, failing, nth_question, spec_units};
 use common::*;
 use hacivat_driver::fake::{FakeCall, FakeDriver, FakeExec, FakeQuery};
 use hacivat_driver::{ExecSummary, Protocol, TxStatus};
 use hacivat_proto::DbmsKind;
 use hacivat_session::session::{
-    ClosePolicy, CommitAnswer, DenyLayer, ExecErrorKind, IsolationLevel, RunEvent, RunSpec,
-    SessionEffects, SessionEvent, SessionHandle, SessionState, TxCommand, TxError, TxMode, TxOwner,
-    UnitEnd, UnitVerdict,
+    ClosePolicy, CommitAnswer, DenyLayer, ErrorPolicy, ExecError, ExecErrorKind, IsolationLevel,
+    RunChoice, RunEvent, RunSpec, SessionEffects, SessionEvent, SessionHandle, SessionState,
+    TxCommand, TxError, TxMode, TxOwner, UnitEnd, UnitVerdict,
 };
 
 const UPDATE: &str = "UPDATE t SET a=1 WHERE id=3";
@@ -670,7 +670,11 @@ async fn deadline_rolls_back_only_the_confirmed_statement() {
         .unwrap_or(false),
         "a late answer is refused"
     );
-    t.ticket.reply.await.unwrap().unwrap();
+    // Fix round 1 (C2): the deadline's rollback is no success.
+    assert_eq!(
+        t.ticket.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::Tx(TxError::ConfirmTimedOut)
+    );
 
     // The own form.
     let (h, f) = session(fake_pg().tracks_transactions()).await;
@@ -925,10 +929,12 @@ async fn wrapped_units_run_as_one_or_read_only_are_refused() {
     }
 }
 
-/// A confirmed unit in the middle of a run: the run waits for it, then goes on; a rolled-back
-/// unit does not stop the run (only a cancel does).
+// ## m3b-t19-confirm-tx (fix round 1)
+
+/// C2: an explicit Undo is no success, so the error policy decides. `StopOnError` stops (the
+/// next unit is never sent); `Ask` asks, and `Ignore` goes on.
 #[tokio::test(start_paused = true)]
-async fn the_run_goes_on_after_the_decision() {
+async fn an_undo_follows_the_error_policy() {
     let (h, f) = session(fake_pg().tracks_transactions()).await;
     let before = f.call_log().len();
     let t = run_units(
@@ -942,9 +948,332 @@ async fn the_run_goes_on_after_the_decision() {
     nth_commit(&t.o, 1).await;
     assert_eq!(sent(&f, before), [st("BEGIN"), q(UPDATE)], "unit 2 waits");
     answer_rollback(&h, &t).await;
-    t.ticket.reply.await.unwrap().unwrap();
+    assert_eq!(
+        t.ticket.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::Tx(TxError::ConfirmUndone)
+    );
+    assert_eq!(sent(&f, before), [st("BEGIN"), q(UPDATE), st("ROLLBACK")]);
+    assert_eq!(t.o.unit_ends()[1], UnitEnd::Skipped);
+
+    // Ask: the run asks, and Ignore goes on.
+    let before = f.call_log().len();
+    let o = Recorder::new();
+    let spec = RunSpec {
+        policy: ErrorPolicy::Ask,
+        ..spec_units(
+            &o,
+            vec![
+                verdict_unit(0, UPDATE, UnitVerdict::TxThenConfirm),
+                verdict_unit(1, "SELECT 1", UnitVerdict::Read),
+            ],
+        )
+    };
+    let ticket = h.run(spec);
+    let t = Ran { o, ticket };
+    assert!(answer_nth(&h, &t, 1, CommitAnswer::RollBack).await);
+    let question = nth_question(&t.o, 1).await;
+    assert_eq!(
+        question.error.kind,
+        ExecErrorKind::Tx(TxError::ConfirmUndone)
+    );
+    assert!(
+        h.choose(t.ticket.seq, question.question, RunChoice::Ignore)
+            .await
+            .unwrap()
+    );
+    until_ended(&t.o).await;
     assert_eq!(
         sent(&f, before),
         [st("BEGIN"), q(UPDATE), st("ROLLBACK"), q("SELECT 1")]
+    );
+}
+
+/// C2 (the review's data-loss path): the deadline rolls back the copy, and the pre-confirmed
+/// `DROP` after it is never sent, whatever the policy (`Ask` asks nothing: the user is away).
+#[tokio::test(start_paused = true)]
+async fn the_deadline_stops_the_run() {
+    const COPY: &str = "INSERT INTO new_t SELECT * FROM old_t";
+    for policy in [ErrorPolicy::StopOnError, ErrorPolicy::Ask] {
+        let (h, f) = session(fake_pg().tracks_transactions()).await;
+        let before = f.call_log().len();
+        let o = Recorder::new();
+        let spec = RunSpec {
+            policy,
+            confirm_deadline: secs(2),
+            ..spec_units(
+                &o,
+                vec![
+                    verdict_unit(0, COPY, UnitVerdict::TxThenConfirm),
+                    verdict_unit(1, "DROP TABLE old_t", UnitVerdict::Write),
+                ],
+            )
+        };
+        let ticket = h.run(spec);
+        let t = Ran { o, ticket };
+        nth_commit(&t.o, 1).await;
+        tokio::time::sleep(secs(3)).await;
+        until_ended(&t.o).await;
+        assert_eq!(
+            sent(&f, before),
+            [st("BEGIN"), q(COPY), st("ROLLBACK")],
+            "{policy:?}: the DROP is never sent"
+        );
+        assert!(asked(&t.o).is_empty(), "{policy:?}: nobody is asked");
+        assert_eq!(
+            t.o.unit_ends(),
+            [
+                UnitEnd::Failed(ExecError::of(ExecErrorKind::Tx(TxError::ConfirmTimedOut))),
+                UnitEnd::Skipped
+            ],
+            "{policy:?}"
+        );
+    }
+}
+
+/// C1: a Manual MySQL session whose script turned `autocommit` back on: the savepoint is a
+/// no-op outside a transaction and the statement commits on its own. Nothing is asked, no
+/// `ROLLBACK TO` goes out, and the run stops (also under `Ask`).
+#[tokio::test(start_paused = true)]
+async fn an_already_committed_change_is_never_offered_keep_or_undo() {
+    let (h, f) = session(fake(DbmsKind::MySql)).await;
+    tx_cmd(&h, TxCommand::SetMode(TxMode::Manual))
+        .await
+        .unwrap();
+    let before = mark(&h, &f).await;
+    let mut set = verdict_unit(0, "SET autocommit = 1", UnitVerdict::ImplicitCommit);
+    set.effects = SessionEffects::COMMITS_FIRST;
+    let o = Recorder::new();
+    let spec = RunSpec {
+        policy: ErrorPolicy::Ask,
+        ..spec_units(
+            &o,
+            vec![
+                set,
+                verdict_unit(1, UPDATE, UnitVerdict::TxThenConfirm),
+                verdict_unit(2, "UPDATE u SET b=2", UnitVerdict::Write),
+            ],
+        )
+    };
+    let ticket = h.run(spec);
+    let e = ticket.reply.await.unwrap().unwrap_err();
+    assert_eq!(e.kind, ExecErrorKind::Tx(TxError::ConfirmAlreadyCommitted));
+    assert_eq!(
+        sent(&f, before),
+        [
+            q("SET autocommit = 1"),
+            st("SAVEPOINT hv_confirm"),
+            q(UPDATE)
+        ],
+        "never a ROLLBACK TO, and unit 3 is not sent"
+    );
+    assert!(commit_questions(&o).is_empty());
+    assert!(asked(&o).is_empty());
+    assert_eq!(o.unit_ends()[2], UnitEnd::Skipped);
+
+    // The own form whose statement ended the transaction itself is reported the same way.
+    let (h, f) = session(
+        fake_pg()
+            .tracks_transactions()
+            .queries(vec![leaves("UPDATE", TxStatus::Idle)]),
+    )
+    .await;
+    let before = f.call_log().len();
+    let t = run_verdict(&h, UPDATE, UnitVerdict::TxThenConfirm);
+    assert_eq!(
+        t.ticket.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::Tx(TxError::ConfirmAlreadyCommitted)
+    );
+    assert_eq!(sent(&f, before), [st("BEGIN"), q(UPDATE)]);
+    assert!(commit_questions(&t.o).is_empty());
+    assert_eq!(snap(&h).tx.owner, TxOwner::None);
+}
+
+/// Whether `calls` hold an `execute`/`batch` starting with `prefix`.
+fn sends(calls: &[FakeCall], prefix: &str) -> bool {
+    calls
+        .iter()
+        .any(|c| matches!(c, FakeCall::Statement(s) if s.starts_with(prefix)))
+}
+
+/// I1: the server rolled back the whole transaction with the failed statement (a SQLite
+/// interrupt, a MySQL deadlock 1213): no `ROLLBACK TO` is sent, `TxChanged` says it ended, and
+/// the session stays usable.
+#[tokio::test(start_paused = true)]
+async fn the_server_rolling_back_the_whole_transaction_is_reported_not_undone() {
+    // SQLite: a cancel interrupts the statement inside the savepoint.
+    let slow = FakeQuery {
+        first_delay: secs(30),
+        tx_after_error: Some(TxStatus::Idle),
+        ..answering("UPDATE")
+    };
+    let (h, f) =
+        session(fake(DbmsKind::Sqlite).queries(vec![leaves("BEGIN", TxStatus::InTx), slow])).await;
+    let before = mark(&h, &f).await;
+    let t = run_units(
+        &h,
+        vec![
+            verdict_unit(0, "BEGIN", UnitVerdict::Write),
+            verdict_unit(1, UPDATE, UnitVerdict::TxThenConfirm),
+        ],
+        RunSpec::CONFIRM_DEADLINE,
+    );
+    settle_until("the confirmed statement runs", || {
+        f.call_log()[before..].contains(&q(UPDATE))
+    })
+    .await;
+    drop(h.cancel(t.ticket.seq));
+    assert_eq!(
+        t.ticket.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::Cancelled
+    );
+    let calls = sent(&f, before);
+    assert!(
+        !sends(&calls, "ROLLBACK") && !sends(&calls, "RELEASE"),
+        "{calls:?}"
+    );
+    assert!(t.o.events().contains(&RunEvent::TxChanged {
+        from: TxStatus::InTx,
+        to: TxStatus::Idle
+    }));
+    assert_eq!(snap(&h).tx.status, TxStatus::Idle);
+    assert_eq!(snap(&h).state, SessionState::Idle, "the session stays");
+    run_verdict(&h, "SELECT 1", UnitVerdict::Read)
+        .ticket
+        .reply
+        .await
+        .unwrap()
+        .expect("the session is usable");
+
+    // MySQL: a deadlock (1213, SQLSTATE 40001) rolls back the whole InnoDB transaction.
+    let deadlock = FakeQuery {
+        fail_after: Some((0, db("40001"))),
+        tx_after_error: Some(TxStatus::Idle),
+        ..answering("UPDATE")
+    };
+    let (h, f) = session(
+        fake(DbmsKind::MySql).queries(vec![leaves("START TRANSACTION", TxStatus::InTx), deadlock]),
+    )
+    .await;
+    let before = mark(&h, &f).await;
+    let t = run_units(
+        &h,
+        vec![
+            verdict_unit(0, "START TRANSACTION", UnitVerdict::Write),
+            verdict_unit(1, UPDATE, UnitVerdict::TxThenConfirm),
+        ],
+        RunSpec::CONFIRM_DEADLINE,
+    );
+    let e = t.ticket.reply.await.unwrap().unwrap_err();
+    assert_eq!(e.kind, ExecErrorKind::Db, "the server's error is kept");
+    let calls = sent(&f, before);
+    assert!(!sends(&calls, "ROLLBACK"), "{calls:?}");
+    assert_eq!(snap(&h).tx.status, TxStatus::Idle);
+    assert_eq!(snap(&h).state, SessionState::Idle);
+
+    // The own form: Hacivat's transaction is already gone; no `ROLLBACK` is sent.
+    let gone = FakeQuery {
+        fail_after: Some((0, db("40001"))),
+        tx_after_error: Some(TxStatus::Idle),
+        ..answering("UPDATE")
+    };
+    let (h, f) = session(fake(DbmsKind::MySql).queries(vec![gone])).await;
+    let before = mark(&h, &f).await;
+    let t = run_verdict(&h, UPDATE, UnitVerdict::TxThenConfirm);
+    assert_eq!(
+        t.ticket.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::Db
+    );
+    assert!(!sends(&sent(&f, before), "ROLLBACK"));
+    let tx = snap(&h).tx;
+    assert_eq!((tx.status, tx.owner), (TxStatus::Idle, TxOwner::None));
+}
+
+/// m1: a `RELEASE` the server refuses after a `ROLLBACK TO` that worked (or after Keep) is
+/// logged and the session stays; the statement was undone (or kept).
+#[tokio::test(start_paused = true)]
+async fn a_refused_release_keeps_the_session() {
+    for answer in [CommitAnswer::RollBack, CommitAnswer::Commit] {
+        let (h, _f) = session(
+            fake_pg()
+                .tracks_transactions()
+                .exec(vec![tx_err("RELEASE", "3B001", TxStatus::InTx)])
+                .queries(vec![leaves("BEGIN", TxStatus::InTx)]),
+        )
+        .await;
+        let t = run_units(
+            &h,
+            vec![
+                verdict_unit(0, "BEGIN", UnitVerdict::Write),
+                verdict_unit(1, UPDATE, UnitVerdict::TxThenConfirm),
+            ],
+            RunSpec::CONFIRM_DEADLINE,
+        );
+        assert!(answer_nth(&h, &t, 1, answer).await);
+        until_ended(&t.o).await;
+        assert_eq!(decided(&t.o), [(answer, false)], "{answer:?}");
+        let _ = t.ticket.reply.await.unwrap();
+        assert_eq!(snap(&h).state, SessionState::Idle, "{answer:?}: not broken");
+        assert_eq!(snap(&h).tx.status, TxStatus::InTx, "{answer:?}");
+    }
+}
+
+/// m3: a stop asked for while the statement ran to its end: no question, the statement is
+/// rolled back.
+#[tokio::test(start_paused = true)]
+async fn no_question_after_a_stop() {
+    let stubborn = FakeQuery {
+        first_delay: secs(30),
+        ignores_cancel: true,
+        ..affects("UPDATE", 1)
+    };
+    let (h, f) = session(fake_pg().tracks_transactions().queries(vec![stubborn])).await;
+    let before = f.call_log().len();
+    let t = run_verdict(&h, UPDATE, UnitVerdict::TxThenConfirm);
+    settle_until("the confirmed statement runs", || {
+        f.call_log()[before..].contains(&q(UPDATE))
+    })
+    .await;
+    drop(h.cancel(t.ticket.seq));
+    let _ = t.ticket.reply.await.unwrap();
+    until_ended(&t.o).await;
+    assert!(commit_questions(&t.o).is_empty(), "never asked");
+    let calls = sent(&f, before);
+    assert_eq!(calls.last(), Some(&st("ROLLBACK")), "{calls:?}");
+    assert!(!calls.contains(&st("COMMIT")));
+    assert_eq!(snap(&h).tx.status, TxStatus::Idle);
+}
+
+/// m5: MySQL table locks: Hacivat's own `START TRANSACTION` (and Smart's) would release them,
+/// so the unit is refused, nothing sent; after `UNLOCK TABLES` it runs.
+#[tokio::test(start_paused = true)]
+async fn mysql_table_locks_refuse_hacivats_own_transaction() {
+    let (h, f) = session(fake(DbmsKind::MySql)).await;
+    run(&h, "LOCK TABLES t WRITE").await.unwrap();
+    let before = f.call_log().len();
+    let t = run_verdict(&h, UPDATE, UnitVerdict::TxThenConfirm);
+    assert_eq!(
+        t.ticket.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::Tx(TxError::TableLocksHeld)
+    );
+    assert!(sent(&f, before).is_empty(), "nothing sent");
+
+    tx_cmd(&h, TxCommand::SetMode(TxMode::Smart)).await.unwrap();
+    let before = f.call_log().len();
+    let t = run_verdict(&h, "UPDATE u SET b=2", UnitVerdict::Write);
+    assert_eq!(
+        t.ticket.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::Tx(TxError::TableLocksHeld)
+    );
+    assert!(sent(&f, before).is_empty(), "Smart sends nothing either");
+
+    // `UNLOCK TABLES` (a run unit; Smart does not open before it) releases them.
+    let t = run_verdict(&h, "UNLOCK TABLES", UnitVerdict::Write);
+    t.ticket.reply.await.unwrap().unwrap();
+    let before = f.call_log().len();
+    let t = run_verdict(&h, "UPDATE u SET b=2", UnitVerdict::Write);
+    t.ticket.reply.await.unwrap().unwrap();
+    assert_eq!(
+        sent(&f, before),
+        [st("START TRANSACTION"), q("UPDATE u SET b=2")]
     );
 }

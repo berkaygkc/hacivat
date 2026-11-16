@@ -162,6 +162,19 @@ pub enum TxError {
     /// unit of the run opened it); it would commit that transaction, so nothing was sent
     /// (Task 19).
     ImplicitCommitUnconfirmed,
+    // ## m3b-t19-confirm-tx (fix round 1, C1, C2, m5)
+    /// The confirmed statement was committed by the server on its own (`autocommit` was on):
+    /// nothing was asked, nothing could be undone, and the rest of the run was not sent.
+    ConfirmAlreadyCommitted,
+    /// Nobody answered the confirmed statement before the D-014 deadline: it was rolled back
+    /// and the rest of the run was not sent.
+    ConfirmTimedOut,
+    /// The user rolled back (undid) the confirmed statement: it did not take effect, so the
+    /// run's error policy decides what follows.
+    ConfirmUndone,
+    /// MySQL/MariaDB: the user's `LOCK TABLES` locks are held, and the transaction this needed
+    /// would release them; nothing was sent.
+    TableLocksHeld,
 }
 
 /// The transaction mode a profile starts with: Manual on production, else Auto.

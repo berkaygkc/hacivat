@@ -22,7 +22,7 @@ use hacivat_driver::TxStatus;
 use hacivat_proto::DbmsKind;
 use hacivat_session::pipeline::{Interaction, LiveConnection, connect};
 use hacivat_session::session::{
-    CommitAnswer, Request, SessionHandle, TxCommand, TxMode, UnitVerdict,
+    CommitAnswer, Request, SessionEffects, SessionHandle, TxCommand, TxMode, UnitVerdict,
 };
 use hacivat_testkit::{DockerTarget, require_target};
 
@@ -193,6 +193,44 @@ async fn server_leg(t: &DockerTarget) {
             1,
             "{id}: Manual, committed"
         );
+
+        // ## m3b-t19-confirm-tx (fix round 1, m6): Manual Undo. The savepoint was the first
+        // statement under `autocommit = 0`; `ROLLBACK TO` undoes the insert, the user's COMMIT
+        // commits nothing of it.
+        let ran = confirmed(&on.s, &format!("INSERT INTO {table} (a) VALUES (9)"));
+        assert!(asked(id, &ran).await, "{id}: Manual, savepoint form");
+        answer(id, &on.s, &ran, CommitAnswer::RollBack).await;
+        user(id, &on.s, "COMMIT").await;
+        assert_eq!(seen(&mut side, &table, 9).await, 0, "{id}: Manual, undone");
+
+        // Fix round 1 (C1): `SET autocommit = 1; INSERT …` in Manual. The server's own flag
+        // says nothing is open after the first statement, so the confirmed one takes Hacivat's
+        // own transaction (never a no-op savepoint over an autocommitted change), and Undo
+        // undoes it.
+        let mut set = verdict_unit(0, "SET autocommit = 1", UnitVerdict::ImplicitCommit);
+        set.effects = SessionEffects::COMMITS_FIRST;
+        let ran = run_units(
+            &on.s,
+            vec![
+                set,
+                verdict_unit(
+                    1,
+                    &format!("INSERT INTO {table} (a) VALUES (11)"),
+                    UnitVerdict::TxThenConfirm,
+                ),
+            ],
+            DEADLINE,
+        );
+        assert!(
+            !asked(id, &ran).await,
+            "{id}: autocommit on: Hacivat's own transaction, not a savepoint"
+        );
+        answer(id, &on.s, &ran, CommitAnswer::RollBack).await;
+        assert_eq!(
+            seen(&mut side, &table, 11).await,
+            0,
+            "{id}: the change was undone, never committed behind a Keep/Undo"
+        );
     }
 
     on.shutdown().await;
@@ -228,6 +266,44 @@ async fn confirm_in_tx_on_the_matrix() {
     .await
     .unwrap_or_else(|e| panic!("sqlite side channel: {:?}", e.class));
     both_forms("sqlite", DbmsKind::Sqlite, &on.s, &mut side, "t19").await;
+
+    // ## m3b-t19-confirm-tx (fix round 1, I1, m6): a cancel interrupts the confirmed statement
+    // inside the savepoint; SQLite rolls back the whole transaction with it. Nothing is asked,
+    // no `ROLLBACK TO` is needed, the session stays usable, and the user's earlier insert is
+    // gone (as the server did it).
+    let s = &on.s;
+    user("sqlite", s, "BEGIN").await;
+    user("sqlite", s, "INSERT INTO t19 (a) VALUES (10)").await;
+    let slow = "UPDATE t19 SET a = a WHERE (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL \
+                SELECT x + 1 FROM c WHERE x < 1000000000) SELECT count(*) FROM c) > 0";
+    let ran = confirmed(s, slow);
+    wait_until("sqlite: the slow statement runs", LIMIT, || {
+        ran.o
+            .events()
+            .iter()
+            .any(|e| matches!(e, hacivat_session::session::RunEvent::UnitStarted { .. }))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _ = s.cancel(ran.ticket.seq).await;
+    ended("sqlite", &ran).await;
+    assert!(commit_questions(&ran.o).is_empty(), "sqlite: never asked");
+    assert_eq!(
+        ran.o.unit_ends(),
+        [hacivat_session::session::UnitEnd::Cancelled],
+        "sqlite"
+    );
+    assert_eq!(
+        s.state().borrow().tx.status,
+        TxStatus::Idle,
+        "sqlite: the interrupt rolled back the whole transaction"
+    );
+    user("sqlite", s, "SELECT 1").await;
+    assert_eq!(
+        seen(&mut side, "t19", 10).await,
+        0,
+        "sqlite: rolled back by the server"
+    );
     side.close().await;
     on.shutdown().await;
 }

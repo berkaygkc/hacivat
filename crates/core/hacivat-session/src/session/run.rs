@@ -276,8 +276,12 @@ impl Core {
             };
             // A failure: `StopOnError`, a last unit, a stop asked for, or a connection that
             // cannot run anything more ends the run here.
+            // ## m3b-t19-confirm-tx (fix round 1, C1, C2): a confirmed statement the deadline
+            // rolled back (nobody is there) or one that committed on its own stops the run
+            // whatever its policy.
             let asks = spec.policy == ErrorPolicy::Ask
                 && i + 1 < count
+                && !stops_the_run(&error)
                 && !w.stop.is_requested()
                 && self.broken.is_none()
                 && self.live.is_some();
@@ -501,6 +505,8 @@ impl Core {
             let effects = (unit.verdict != UnitVerdict::Unknown).then_some(unit.effects);
             for part in &parts {
                 track_statement(&mut self.tracked, part, effects);
+                // ## m3b-t19-confirm-tx (fix round 1, m5): the user's MySQL table locks.
+                self.note_table_locks(part, effects);
             }
             // One statement says what it set; in a batch only an "off" is believed (a split
             // inside a string must not turn a real "off" back on).
@@ -650,6 +656,13 @@ impl Core {
             // its form chosen from the transaction open now (P-M3b-1). A wrapped statement runs
             // to its end inside the wrap: it never suspends.
             if self.smart_opens_before(unit, control) {
+                // Fix round 1 (m5): Smart's `START TRANSACTION` would release the user's MySQL
+                // table locks.
+                if self.table_locks_block() {
+                    return Ended::refused(ExecError::of(ExecErrorKind::Tx(
+                        TxError::TableLocksHeld,
+                    )));
+                }
                 for statement in self.smart_begin(keyword) {
                     if let Err(e) = self.control(&statement).await {
                         return Ended::refused(e);
@@ -897,6 +910,17 @@ impl Core {
         };
         Ended::of(&s, outcome)
     }
+}
+
+// ## m3b-t19-confirm-tx (fix round 1, C1, C2)
+/// Whether a unit that failed with `error` ends the run under any policy: the D-014 deadline
+/// rolled its confirmed statement back (the user is away), or it committed on its own before it
+/// could be confirmed.
+fn stops_the_run(error: &ExecError) -> bool {
+    matches!(
+        error.kind,
+        ExecErrorKind::Tx(TxError::ConfirmTimedOut | TxError::ConfirmAlreadyCommitted)
+    )
 }
 
 // ## m3b-t11-session-runs

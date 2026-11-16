@@ -709,7 +709,7 @@ impl ExecObserver {
             st.tx_ended.take_if(|(_, o)| *o == unit.ordinal)
         };
         if let Some((from, _)) = tx_ended
-            && let Some(msg) = tx_line(&u.text, from, outcome)
+            && let Some(msg) = tx_line(&u.text, from, outcome, u.ddl)
         {
             self.line(msg, Some(&u));
         }
@@ -900,7 +900,7 @@ impl ExecObserver {
 ///   transaction without committing it: a failed COMMIT, as a deferred constraint or a
 ///   serialization failure, rolls it back);
 /// - anything else (an implicit end, a loss, a cancel): nothing. Better silent than wrong.
-fn tx_line(sql: &str, from: TxStatus, outcome: &UnitEnd) -> Option<LogMsg> {
+fn tx_line(sql: &str, from: TxStatus, outcome: &UnitEnd, ddl: bool) -> Option<LogMsg> {
     let word = first_word(sql);
     let is = |w: &str| word.eq_ignore_ascii_case(w);
     let commit = is("COMMIT") || is("END");
@@ -911,6 +911,13 @@ fn tx_line(sql: &str, from: TxStatus, outcome: &UnitEnd) -> Option<LogMsg> {
         }
         UnitEnd::Succeeded { .. } if commit || rollback => Some(LogMsg::TxRolledBack),
         UnitEnd::Failed(_) if commit || rollback => Some(LogMsg::TxRolledBack),
+        // ## m3b-t19-confirm-tx (named exception, fix round 1, I1): any other statement that
+        // failed or was cancelled while the user's open transaction ended: the server rolled
+        // the whole transaction back (a SQLite interrupt, a MySQL deadlock). Not after a DDL,
+        // which on MySQL commits the transaction before it runs.
+        UnitEnd::Failed(_) | UnitEnd::Cancelled if from == TxStatus::InTx && !ddl => {
+            Some(LogMsg::TxRolledBackByServer)
+        }
         _ => None,
     }
 }
