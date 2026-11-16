@@ -1123,6 +1123,12 @@ fn the_edit_menu_opens_the_character_palette(cx: &mut TestAppContext) {
     activate(vcx);
     let editor = editor_of(vcx, id);
     focus_editor(vcx, &editor);
+    // ## m3a-f4-ime (review M5): the main case, the editor focused and idle: the Workspace
+    // binding reaches through the editor's context.
+    vcx.simulate_keystrokes("ctrl-cmd-space");
+    vcx.run_until_parked();
+    assert_eq!(requests(vcx), 3, "from the focused editor");
+    assert_eq!(text(vcx, &editor), "", "the chord typed nothing");
     in_window(vcx, |window, cx| {
         editor.update(cx, |v, cx| {
             gpui::EntityInputHandler::replace_and_mark_text_in_range(
@@ -1139,7 +1145,7 @@ fn the_edit_menu_opens_the_character_palette(cx: &mut TestAppContext) {
         },
     );
     vcx.run_until_parked();
-    assert_eq!(requests(vcx), 2, "nothing during a composition");
+    assert_eq!(requests(vcx), 3, "nothing during a composition");
     stop_core_runtime_test(cx);
 }
 

@@ -440,10 +440,11 @@ fn removing_or_splitting_the_long_line_ends_reduced_mode_after_a_rest(cx: &mut T
     assert_eq!(*events.borrow(), [Tier::Full, Tier::Reduced, Tier::Full]);
 }
 
-/// An edit while a re-measure waits restarts the wait, and a measure never applies to text
-/// newer than the one it read: a long line added meanwhile keeps T1.
+/// An edit while a re-measure waits restarts the wait (the waiting measure is dropped), so a
+/// long line added meanwhile keeps T1. (`after_edit`'s version check is a second guard that
+/// this path does not reach: every text change replaces the waiting task first; review M2.)
 #[gpui::test]
-fn a_remeasure_never_applies_to_newer_text(cx: &mut TestAppContext) {
+fn an_edit_restarts_the_remeasure_wait(cx: &mut TestAppContext) {
     let long = format!("SELECT '{}';\n", "x".repeat(70_000));
     let (e, vcx) = open(cx, format!("{long}SELECT 1;\n"));
     // Split the long line (both halves short), then, before the rest is over, add a long line.

@@ -1823,4 +1823,4 @@ hv-exec-rerun-edited = İfade çalıştırıldıktan sonra düzenlendi. Düzenle
 
 ## m3a-f4-ime
 # Review: PO
-hv-cmd-app-character-palette = Emoji ve Simgeler
+hv-cmd-app-character-palette = Emoji ve Semboller

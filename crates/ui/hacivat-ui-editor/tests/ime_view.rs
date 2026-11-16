@@ -920,7 +920,7 @@ fn a_click_outside_the_marked_text_commits_once_and_discards_it(cx: &mut TestApp
 /// Row 5a: a click inside the marked text commits it once too, the caret at the click.
 #[gpui::test]
 fn a_click_inside_the_marked_text_commits_once_and_discards_it(cx: &mut TestAppContext) {
-    let o = composing_two_lines(cx);
+    let mut o = composing_two_lines(cx);
     let inside = "SELECT 1;か".len();
     let p = point_at(&o, inside);
     o.vcx.simulate_click(p, gpui::Modifiers::none());
@@ -928,6 +928,43 @@ fn a_click_inside_the_marked_text_commits_once_and_discards_it(cx: &mut TestAppC
     assert_eq!(text(&o), "SELECT 1;かんじ\nSELECT 2;");
     assert_eq!(selection(&o), inside..inside);
     assert_eq!(discards(&o), 1);
+    // ## m3a-f4-ime (review M4): the platform heard it, and the composition is one undo group.
+    assert_eq!(platform_discards(&o), 1);
+    assert_eq!(undo_all(&mut o), 1);
+    assert_eq!(text(&o), "SELECT 1;\nSELECT 2;");
+}
+
+// ## m3a-f4-ime (review M4): the other two click paths of `mouse::down`.
+
+/// A Shift-click while composing commits once, extends the selection from its anchor (the
+/// caret after the composition) to the click, and discards the platform's copy.
+#[gpui::test]
+fn a_shift_click_while_composing_commits_once_and_discards_it(cx: &mut TestAppContext) {
+    let o = composing_two_lines(cx);
+    let line2 = "SELECT 1;かんじ\n".len() + 3;
+    let p = point_at(&o, line2);
+    o.vcx.simulate_click(p, gpui::Modifiers::shift());
+    assert!(!composing(&o));
+    assert_eq!(text(&o), "SELECT 1;かんじ\nSELECT 2;");
+    assert_eq!(selection(&o), "SELECT 1;かんじ".len()..line2);
+    assert_eq!((discards(&o), platform_discards(&o)), (1, 1));
+}
+
+/// A right click while composing commits once, places the caret at the pointer (the context
+/// menu opens there) and discards the platform's copy.
+#[gpui::test]
+fn a_right_click_while_composing_commits_once_and_discards_it(cx: &mut TestAppContext) {
+    let o = composing_two_lines(cx);
+    let line2 = "SELECT 1;かんじ\n".len() + 3;
+    let p = point_at(&o, line2);
+    o.vcx
+        .simulate_mouse_down(p, gpui::MouseButton::Right, gpui::Modifiers::none());
+    o.vcx
+        .simulate_mouse_up(p, gpui::MouseButton::Right, gpui::Modifiers::none());
+    assert!(!composing(&o));
+    assert_eq!(text(&o), "SELECT 1;かんじ\nSELECT 2;");
+    assert_eq!(selection(&o), line2..line2);
+    assert_eq!((discards(&o), platform_discards(&o)), (1, 1));
 }
 
 /// A click with no composition, and a focus move (the platform discards on the focus loss
@@ -944,6 +981,7 @@ fn clicks_without_a_composition_and_focus_moves_discard_nothing(cx: &mut TestApp
     draw(o.vcx);
     assert!(!composing(&o));
     assert_eq!(discards(&o), 0);
+    assert_eq!(platform_discards(&o), 0);
 }
 
 /// An app path that ends a composition (here a redo run while composing) discards the
@@ -958,6 +996,8 @@ fn app_paths_that_end_a_composition_discard_it(cx: &mut TestAppContext) {
     draw(o.vcx);
     assert!(!composing(&o));
     assert_eq!(discards(&o), 1);
+    // ## m3a-f4-ime (review M3): the editor's count is what reached the platform.
+    assert_eq!(platform_discards(&o), 1);
     mark(&mut o, "感じ");
     draw(o.vcx);
     o.editor
@@ -965,9 +1005,11 @@ fn app_paths_that_end_a_composition_discard_it(cx: &mut TestAppContext) {
     assert!(!composing(&o));
     assert_eq!(text(&o), "ş感じ");
     assert_eq!(discards(&o), 2, "at once, before any frame");
+    assert_eq!(platform_discards(&o), 2);
     draw(o.vcx);
     o.editor
         .update_in(o.vcx, |v, window, cx| v.end_composition(window, cx));
     draw(o.vcx);
     assert_eq!(discards(&o), 2, "nothing to end");
+    assert_eq!(platform_discards(&o), 2);
 }

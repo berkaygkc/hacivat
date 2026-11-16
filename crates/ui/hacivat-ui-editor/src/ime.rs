@@ -120,7 +120,11 @@ impl EditorView {
 
     // ## m3a-f4-ime
     /// How many times the editor told the platform to discard its composition
-    /// (`Window::discard_marked_text`).
+    /// (`Window::discard_marked_text`), counted when the editor is focused. The window
+    /// forwards a call only while the editor is also its focused text input (set by a drawn
+    /// frame), and returns nothing, so this counts calls made, not calls delivered; the tests
+    /// cross-check it with the test window's own count (review M3). Every path that owes a
+    /// discard runs on a composing editor, which a drawn frame has made the focused input.
     pub fn marked_text_discards(&self) -> u64 {
         self.input.discards
     }
