@@ -1,0 +1,15 @@
+[package]
+name = "sql-text"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "SQL text positions: byte offsets, line index, edits and the chunked text interface"
+
+# M3a (Task 1b): a `crates/sql` crate (Core layer). It reaches no runtime, no `hacivat-l10n`,
+# no GPUI (`SqlNotRuntimeFree`) and no `crates/core` crate (`SqlReachesCore`).
+[dependencies]
+text-size.workspace = true
+
+[lints]
+workspace = true

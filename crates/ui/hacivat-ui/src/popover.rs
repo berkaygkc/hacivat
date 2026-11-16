@@ -96,6 +96,16 @@ pub struct A11yDecl {
     pub disabled: bool,
     pub modal: bool,
     pub active_descendant: bool,
+    /// Expanded (`true`) or collapsed (`false`); `None` where the state does not apply.
+    pub expanded: Option<bool>,
+    /// Checked state of a checkbox, radio or toggle button; `None` where it does not apply.
+    pub toggled: Option<bool>,
+    /// The 1-based position of an item in its set and the set's size (a list item).
+    pub position: Option<(usize, usize)>,
+    /// Declared by an [`A11yNode`] wrapper rather than on the interactive element itself. An
+    /// assistive-technology Click reaches only an element's own `on_click`, so an enabled
+    /// clickable control declares itself (`Declare`) and is never a wrapper.
+    pub wrapper: bool,
 }
 
 impl A11yDecl {
@@ -119,6 +129,16 @@ impl A11yDecl {
 
     pub fn active_descendant(mut self) -> Self {
         self.active_descendant = true;
+        self
+    }
+
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        self.expanded = Some(expanded);
+        self
+    }
+
+    pub fn toggled(mut self, toggled: bool) -> Self {
+        self.toggled = Some(toggled);
         self
     }
 }
@@ -168,6 +188,12 @@ pub trait Declare: StatefulInteractiveElement + Sized {
         if decl.active_descendant {
             el = el.aria_active_descendant();
         }
+        if let Some(expanded) = decl.expanded {
+            el = el.aria_expanded(expanded);
+        }
+        if let Some(toggled) = decl.toggled {
+            el = el.aria_toggled(accesskit::Toggled::from(toggled));
+        }
         el
     }
 }
@@ -192,6 +218,7 @@ impl A11yNode {
     ) -> Self {
         let mut decl = A11yDecl::new(role, label);
         decl.modal = modal;
+        decl.wrapper = true;
         Self {
             id: id.into(),
             decl,
@@ -222,6 +249,24 @@ impl A11yNode {
 
     pub fn selected(mut self, selected: Option<bool>) -> Self {
         self.decl.selected = selected;
+        self
+    }
+
+    /// Expanded (`true`) or collapsed (`false`): a combo box with its list open.
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        self.decl.expanded = Some(expanded);
+        self
+    }
+
+    /// The checked state (a disabled checkbox still reports it).
+    pub fn toggled(mut self, toggled: bool) -> Self {
+        self.decl.toggled = Some(toggled);
+        self
+    }
+
+    /// The item's 1-based position in its set of `size` items ("3 of 5").
+    pub fn position(mut self, position: usize, size: usize) -> Self {
+        self.decl.position = Some((position, size));
         self
     }
 }
@@ -298,6 +343,16 @@ impl Element for A11yNode {
         }
         if let Some(live) = d.live {
             node.set_live(live);
+        }
+        if let Some(expanded) = d.expanded {
+            node.set_expanded(expanded);
+        }
+        if let Some(toggled) = d.toggled {
+            node.set_toggled(accesskit::Toggled::from(toggled));
+        }
+        if let Some((position, size)) = d.position {
+            node.set_position_in_set(position);
+            node.set_size_of_set(size);
         }
     }
 }

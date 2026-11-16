@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d861e0d40493c30ae8ba6033625c18ab5f417420b7038cd502089e0ab7344aca # shrinks to script = "CREATE TRIGGER g0 AFTER INSERT ON u BEGIN SELECT end FROM t; END;\n"

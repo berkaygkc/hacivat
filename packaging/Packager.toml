@@ -10,6 +10,13 @@ description = "Hacivat, a native SQL client"
 publisher = "Hacivat"
 copyright = "Hacivat"
 category = "DeveloperTool"
+# M3a Task 1a (R-M3-1, P23): the third-party notices ship in every bundle (the .app's
+# Contents/Resources, next to the NSIS executable, the AppImage and deb resources). cargo-packager
+# resolves `src` from the directory of the config it is given, the rendered
+# `packaging/.Packager.generated.toml`, so the path climbs to the repository root.
+resources = [
+    { src = "../THIRD_PARTY_NOTICES.md", target = "THIRD_PARTY_NOTICES.md" },
+]
 
 [[binaries]]
 path = "hacivat"

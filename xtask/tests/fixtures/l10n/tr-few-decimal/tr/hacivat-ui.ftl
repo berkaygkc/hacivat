@@ -1,0 +1,3 @@
+### Arayüz.
+
+hv-title = Hacivat

@@ -1,0 +1,28 @@
+[package]
+name = "hacivat-ui-editor"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The editor element: view, paint, IME and clipboard, gutter marks, the Run preview band, accessibility, large-file tiers"
+
+[features]
+# Paint-level checks (caret, selection, gutter, band geometry): `Window::rendered_scene`.
+scene-check = ["hacivat-ui-core/scene-check"]
+
+[dependencies]
+hacivat-ui-core.workspace = true
+hacivat-ui.workspace = true
+hacivat-text.workspace = true
+smallvec.workspace = true
+lru.workspace = true
+unicode-segmentation.workspace = true
+twox-hash.workspace = true
+
+[dev-dependencies]
+# F1: `#[gpui::test]` expands to `gpui::` paths; production code uses `gpui_surface` only.
+gpui = { workspace = true, features = ["test-support"] }
+hacivat-ui-core = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

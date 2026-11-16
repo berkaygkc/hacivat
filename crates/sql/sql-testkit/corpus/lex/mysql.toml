@@ -1,0 +1,626 @@
+# The MySQL and MariaDB lexer corpus (M3a Task 4).
+#
+# Expectations come from `alg/10` SQL-LEX-01, -02 and -05 (Docker-verified executable
+# comments, #mysql-comments), ADR 0004 step 1a (how the server reads comments, fix rounds 1
+# and 2) and the MySQL reference manual, never from MySQL's GPL sources. Fields are documented
+# in `sql-testkit/src/lex.rs`; `dialect = "mysql"` is MySQL 8.0/8.4 (one lexical profile). A
+# carriage return is always spelled `\r`, never a raw CR (P15).
+
+# --- alg/10 SQL-LEX-02 tests ---
+
+[[case]]
+id = "LEX02-04"
+source = "alg/10 SQL-LEX-02 test 4 (MySQL comments do not nest)"
+dialect = "mysql"
+input = "/* a /* b */ c */"
+kinds = ["BlockComment", "Whitespace", "Word", "Whitespace", "Op", "Op"]
+texts = ["/* a /* b */", " ", "c", " ", "*", "/"]
+
+[[case]]
+id = "LEX02-05a"
+source = "alg/10 SQL-LEX-02 test 5 (-- needs whitespace)"
+dialect = "mysql"
+input = "SELECT 1--1"
+kinds = ["Word", "Whitespace", "Number", "Op", "Op", "Number"]
+
+[[case]]
+id = "LEX02-05b"
+source = "alg/10 SQL-LEX-02 test 5"
+dialect = "mysql"
+input = "SELECT 1 -- c"
+kinds = ["Word", "Whitespace", "Number", "Whitespace", "LineComment"]
+
+[[case]]
+id = "LEX02-06a"
+source = "alg/10 SQL-LEX-02 test 6 (backslash escapes)"
+dialect = "mysql"
+input = "'a\\'b'"
+kinds = ["String"]
+
+# Erratum (Task 4): `alg/10` test 6 lists `String('a\') Word(b) String(unterminated)`, but
+# `b'…'` is a MySQL bit-value literal (rule 4's prefix): the tail is one unterminated bit
+# string. LEX02-06c keeps the word/string split with a letter that is no prefix.
+[[case]]
+id = "LEX02-06b"
+source = "alg/10 SQL-LEX-02 test 6 (NO_BACKSLASH_ESCAPES), with the rule-4 erratum"
+dialect = "mysql"
+modes = { no_backslash_escapes = true }
+input = "'a\\'b'"
+kinds = ["String", "BitString"]
+texts = ["'a\\'", "b'"]
+flags = ["", "UNTERMINATED"]
+errors = ["UnterminatedString"]
+
+[[case]]
+id = "LEX02-06c"
+source = "alg/10 SQL-LEX-02 test 6 (NO_BACKSLASH_ESCAPES)"
+dialect = "mysql"
+modes = { no_backslash_escapes = true }
+input = "'a\\'c'"
+kinds = ["String", "Word", "String"]
+texts = ["'a\\'", "c", "'"]
+flags = ["", "", "UNTERMINATED"]
+errors = ["UnterminatedString"]
+
+[[case]]
+id = "LEX02-13"
+source = "alg/10 SQL-LEX-02 test 13"
+dialect = "mysql"
+input = "/*!50110 KEY_BLOCK_SIZE=1024 */"
+kinds = ["ExecutableComment"]
+
+[[case]]
+id = "LEX02-16c"
+source = "alg/10 SQL-LEX-02 test 16 and SQL-LEX-01 test (ANSI_QUOTES off)"
+dialect = "mysql"
+version = "8.4.0"
+input = "\"a\""
+kinds = ["String"]
+
+# --- alg/10 SQL-LEX-01: session modes ---
+
+[[case]]
+id = "LEX01-ansi-quotes"
+source = "alg/10 SQL-LEX-01 test (ANSI_QUOTES on)"
+dialect = "mysql"
+version = "8.4.0"
+modes = { ansi_quotes = true }
+input = "\"a\" 'b'"
+kinds = ["QuotedIdent", "Whitespace", "String"]
+
+[[case]]
+id = "LEX01-double-quoted-backslash"
+source = "alg/10 SQL-LEX-01 step 3 (\"…\" strings read backslashes)"
+dialect = "mysql"
+input = "\"a\\\"b\""
+kinds = ["String"]
+
+[[case]]
+id = "LEX01-ansi-quotes-no-backslash-in-ident"
+source = "MySQL manual: backslash is not an escape in quoted identifiers"
+dialect = "mysql"
+modes = { ansi_quotes = true }
+input = "\"a\\\"b\""
+kinds = ["QuotedIdent", "Word", "QuotedIdent"]
+texts = ["\"a\\\"", "b", "\""]
+flags = ["", "", "UNTERMINATED"]
+errors = ["UnterminatedQuotedIdent"]
+
+# --- comments (ADR 0004 step 1a) ---
+
+[[case]]
+id = "MY-dash-needs-space"
+source = "ADR 0004 step 1a: -- is a comment only before whitespace or a control character"
+dialect = "mysql"
+input = "1--1"
+kinds = ["Number", "Op", "Op", "Number"]
+
+[[case]]
+id = "MY-dash-space"
+source = "ADR 0004 step 1a"
+dialect = "mysql"
+input = "1-- x"
+kinds = ["Number", "LineComment"]
+
+[[case]]
+id = "MY-dash-tab"
+source = "ADR 0004 step 1a (a control character)"
+dialect = "mysql"
+input = "1--\tx"
+kinds = ["Number", "LineComment"]
+
+[[case]]
+id = "MY-dash-eof"
+source = "alg/10 SQL-LEX-01 matrix: -- before the end is a comment"
+dialect = "mysql"
+input = "x --"
+kinds = ["Word", "Whitespace", "LineComment"]
+
+[[case]]
+id = "MY-dash-word"
+source = "ADR 0004 step 1a"
+dialect = "mysql"
+input = "--x"
+kinds = ["Op", "Op", "Word"]
+
+[[case]]
+id = "MY-hash-comment"
+source = "alg/10 SQL-LEX-02 rule 3: # comments"
+dialect = "mysql"
+input = "#temp\nSELECT"
+kinds = ["LineComment", "Newline", "Word"]
+
+[[case]]
+id = "MY-line-comment-ends-at-lf"
+source = "ADR 0004 step 1a: a line comment ends at a line feed only"
+dialect = "mysql"
+input = "-- x\rSELECT 1\nCOMMIT"
+kinds = ["LineComment", "Newline", "Word"]
+texts = ["-- x\rSELECT 1", "\n", "COMMIT"]
+
+[[case]]
+id = "MY-hash-ends-at-lf"
+source = "ADR 0004 step 1a"
+dialect = "mysql"
+input = "# x\rSELECT 1\nCOMMIT"
+kinds = ["LineComment", "Newline", "Word"]
+
+[[case]]
+id = "MY-nested-closes-at-first"
+source = "alg/10 SQL-LEX-02 edge cases: /* /* */ (MySQL closed)"
+dialect = "mysql"
+input = "/* /* */"
+kinds = ["BlockComment"]
+
+[[case]]
+id = "MY-close-without-opener"
+source = "alg/10 SQL-LEX-02 edge cases: */ without opener"
+dialect = "mysql"
+input = "*/"
+kinds = ["Op", "Op"]
+
+# --- executable comments and hints (alg/10 SQL-LEX-05; ADR 0004 step 1a) ---
+
+[[case]]
+id = "LEX05-active"
+source = "alg/10 SQL-LEX-05 test: SELECT 1 /*!50000 , 2 */"
+dialect = "mysql"
+input = "SELECT 1 /*!50000 , 2 */"
+kinds = ["Word", "Whitespace", "Number", "Whitespace", "ExecutableComment"]
+
+[[case]]
+id = "LEX05-skipped"
+source = "alg/10 SQL-LEX-05 test: SELECT 1 /*!99999 , SLEEP(100) */"
+dialect = "mysql"
+input = "SELECT 1 /*!99999 , SLEEP(100) */"
+kinds = ["Word", "Whitespace", "Number", "Whitespace", "ExecutableComment"]
+
+[[case]]
+id = "LEX05-whole-statement"
+source = "alg/10 SQL-LEX-05 test: /*!50000 DROP TABLE t */;"
+dialect = "mysql"
+input = "/*!50000 DROP TABLE t */;"
+kinds = ["ExecutableComment", "Semicolon"]
+
+[[case]]
+id = "LEX05-semicolon-in-body"
+source = "alg/10 SQL-LEX-05 test (FX-SPLIT-MY-04); both readings end at the same */"
+dialect = "mysql"
+input = "/*!80000 SELECT 'versioned;' */;"
+kinds = ["ExecutableComment", "Semicolon"]
+flags = ["", ""]
+errors = []
+
+[[case]]
+id = "LEX05-unversioned-semicolon"
+source = "Task 8 test semicolon_in_executable_comment_is_ambiguous (its input)"
+dialect = "mysql"
+input = "SELECT 1 /*! ; DROP TABLE t */"
+kinds = ["Word", "Whitespace", "Number", "Whitespace", "ExecutableComment"]
+
+[[case]]
+id = "LEX05-version-then-code"
+source = "alg/10 SQL-LEX-05 edge cases: /*!12345SELECT*/"
+dialect = "mysql"
+input = "/*!12345SELECT*/"
+kinds = ["ExecutableComment"]
+
+[[case]]
+id = "LEX05-unterminated"
+source = "alg/10 SQL-LEX-02 edge cases: /*! unterminated"
+dialect = "mysql"
+input = "/*! SELECT 1"
+kinds = ["ExecutableComment"]
+flags = ["UNTERMINATED"]
+errors = ["UnterminatedComment"]
+
+[[case]]
+id = "LEX05-mysqldump"
+source = "alg/10 SQL-LEX-05 edge cases: mysqldump's /*!40101 SET NAMES utf8 */;"
+dialect = "mysql"
+input = "/*!40101 SET NAMES utf8 */;"
+kinds = ["ExecutableComment", "Semicolon"]
+
+[[case]]
+id = "LEX05-skipped-holds-one-nested"
+source = "plan Task 4; ADR 0004 step 1a fix round 2: a skipped version-gated comment holds one nested comment"
+dialect = "mysql"
+version = "8.4.0"
+input = "/*!99999 a /* b */ c */ SELECT 1"
+kinds = ["ExecutableComment", "Whitespace", "Word", "Whitespace", "Number"]
+texts = ["/*!99999 a /* b */ c */", " ", "SELECT", " ", "1"]
+
+[[case]]
+id = "LEX05-nested-bang-is-the-one-level"
+source = "ADR 0004 step 1a: inside a skipped comment /*! is a plain nested comment; a running reading would run the inner executable comment, which the lexer does not follow (review I1: fail closed)"
+dialect = "mysql"
+input = "/*!99999 /*!40000 x */ SELECT 1 */ ROLLBACK"
+kinds = ["ExecutableComment", "Whitespace", "Word"]
+texts = ["/*!99999 /*!40000 x */ SELECT 1 */", " ", "ROLLBACK"]
+flags = ["ERROR", "", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "LEX05-only-one-level"
+source = "ADR 0004 step 1a: a second /* inside the nested comment is text"
+dialect = "mysql"
+input = "/*!99999 /* a /* b */ SELECT 1 */ BEGIN"
+kinds = ["ExecutableComment", "Whitespace", "Word"]
+texts = ["/*!99999 /* a /* b */ SELECT 1 */", " ", "BEGIN"]
+
+[[case]]
+id = "LEX05-unversioned-holds-one-nested"
+source = "ADR 0004 step 1a: a running body reads its inner /*…*/ as an ordinary comment before its own */"
+dialect = "mysql"
+input = "/*! a /* b */ c */ d"
+kinds = ["ExecutableComment", "Whitespace", "Word"]
+texts = ["/*! a /* b */ c */", " ", "d"]
+
+[[case]]
+id = "LEX05-mariadb-marker-on-mysql"
+source = "alg/10 SQL-LEX-05: /*M! is an ordinary comment on MySQL"
+dialect = "mysql"
+input = "/*M!999999 /* x */ SELECT 1 */ COMMIT"
+kinds = ["BlockComment", "Whitespace", "Word", "Whitespace", "Number", "Whitespace", "Op", "Op", "Whitespace", "Word"]
+texts = ["/*M!999999 /* x */", " ", "SELECT", " ", "1", " ", "*", "/", " ", "COMMIT"]
+
+[[case]]
+id = "LEX05-mariadb-marker"
+source = "alg/10 SQL-LEX-05: /*M! is executable on MariaDB"
+dialect = "mariadb"
+input = "/*M!999999 /* x */ SELECT 1 */ COMMIT"
+kinds = ["ExecutableComment", "Whitespace", "Word"]
+
+[[case]]
+id = "LEX05-mariadb-bang"
+source = "alg/10 SQL-LEX-05 matrix"
+dialect = "mariadb"
+input = "/*!100100 x */"
+kinds = ["ExecutableComment"]
+
+[[case]]
+id = "LEX05-mysql-marker-plain"
+source = "alg/10 SQL-LEX-05 test: SELECT 1 /*M! , 'x' */ on MySQL"
+dialect = "mysql"
+input = "SELECT 1 /*M! , 'x' */"
+kinds = ["Word", "Whitespace", "Number", "Whitespace", "BlockComment"]
+
+[[case]]
+id = "LEX05-hint"
+source = "alg/10 SQL-LEX-05 test: SELECT /*+ MAX_EXECUTION_TIME(0) */ 1"
+dialect = "mysql"
+input = "SELECT /*+ MAX_EXECUTION_TIME(0) */ 1"
+kinds = ["Word", "Whitespace", "HintComment", "Whitespace", "Number"]
+errors = []
+
+# --- review I1: a body whose */ sits inside quotes or a line comment (two readings) ---
+# A server that runs the comment reads its body as code and ends it elsewhere than the
+# skipped reading (the token's extent). The token is flagged ERROR with AmbiguousCommentEnd;
+# Task 8 makes its statement Ambiguous. Hints fail closed the same way (controller ruling).
+
+[[case]]
+id = "I1-quoted-close-versioned"
+source = "T4 review I1 probe: MySQL 8.4 runs the comment and then DROP TABLE t"
+dialect = "mysql"
+version = "8.4.0"
+input = "SELECT 1 /*!50000 , '*/' */ ; DROP TABLE t; -- '"
+kinds = ["Word", "Whitespace", "Number", "Whitespace", "ExecutableComment", "String"]
+texts = ["SELECT", " ", "1", " ", "/*!50000 , '*/", "' */ ; DROP TABLE t; -- '"]
+flags = ["", "", "", "", "ERROR", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-quoted-close-unversioned"
+source = "T4 review I1 probe: an unversioned comment always runs"
+dialect = "mysql"
+input = "SELECT 1 /*! , '*/' */ ; DROP TABLE t; -- '"
+kinds = ["Word", "Whitespace", "Number", "Whitespace", "ExecutableComment", "String"]
+flags = ["", "", "", "", "ERROR", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-double-quoted-close"
+source = "T4 review I1 probe: \"…\" is a string without ANSI_QUOTES"
+dialect = "mysql"
+input = "SELECT 1 /*!50000 , \"*/\" */ ; DROP TABLE t; # \""
+kinds = ["Word", "Whitespace", "Number", "Whitespace", "ExecutableComment", "String"]
+texts = ["SELECT", " ", "1", " ", "/*!50000 , \"*/", "\" */ ; DROP TABLE t; # \""]
+flags = ["", "", "", "", "ERROR", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-hash-comment-close"
+source = "T4 review I1: a */ inside a running body's # comment does not close it"
+dialect = "mysql"
+input = "SELECT 1 /*! # */\n */ ; DROP TABLE t"
+kinds = ["Word", "Whitespace", "Number", "Whitespace", "ExecutableComment", "Newline", "Whitespace", "Op", "Op", "Whitespace", "Semicolon", "Whitespace", "Word", "Whitespace", "Word", "Whitespace", "Word"]
+flags = ["", "", "", "", "ERROR", "", "", "", "", "", "", "", "", "", "", "", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-dash-comment-close"
+source = "T4 review I1: nor inside a -- comment"
+dialect = "mysql"
+input = "/*!50000 -- */\n */"
+kinds = ["ExecutableComment", "Newline", "Whitespace", "Op", "Op"]
+flags = ["ERROR", "", "", "", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-backtick-close"
+source = "T4 review I1: nor inside a backtick identifier"
+dialect = "mysql"
+input = "SELECT /*! `*/` */ 1"
+kinds = ["Word", "Whitespace", "ExecutableComment", "QuotedIdent"]
+flags = ["", "", "ERROR", "UNTERMINATED"]
+errors = ["AmbiguousCommentEnd", "UnterminatedQuotedIdent"]
+
+[[case]]
+id = "I1-ansi-quotes-close"
+source = "T4 review I1: under ANSI_QUOTES \"…\" is an identifier, which hides */ too"
+dialect = "mysql"
+modes = { ansi_quotes = true }
+input = "/*! \"*/\" */ x\""
+kinds = ["ExecutableComment", "QuotedIdent"]
+texts = ["/*! \"*/", "\" */ x\""]
+flags = ["ERROR", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-backslash-quote-close"
+source = "T4 review I1: with backslash escapes '\\' */ ' is one string, so the body runs on"
+dialect = "mysql"
+input = "/*! '\\' */ ' */"
+kinds = ["ExecutableComment", "Whitespace", "String"]
+texts = ["/*! '\\' */", " ", "' */"]
+flags = ["ERROR", "", "UNTERMINATED"]
+errors = ["AmbiguousCommentEnd", "UnterminatedString"]
+
+[[case]]
+id = "I1-no-backslash-escapes-agrees"
+source = "T4 review I1: with NO_BACKSLASH_ESCAPES '\\' closes, and both readings end at the first */"
+dialect = "mysql"
+modes = { no_backslash_escapes = true }
+input = "/*! '\\' */ ' */"
+kinds = ["ExecutableComment", "Whitespace", "String"]
+flags = ["", "", "UNTERMINATED"]
+errors = ["UnterminatedString"]
+
+[[case]]
+id = "I1-running-closes-first"
+source = "T4 review I1: a /* inside quotes nests only in the skipped reading, so the running one closes first"
+dialect = "mysql"
+input = "/*! '/*' */ ; DROP t; */ x"
+kinds = ["ExecutableComment", "Whitespace", "Word"]
+texts = ["/*! '/*' */ ; DROP t; */", " ", "x"]
+flags = ["ERROR", "", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-unterminated-and-ambiguous"
+source = "T4 review I1: the skipped reading never closes, the running one does"
+dialect = "mysql"
+input = "/*! '/*' */"
+kinds = ["ExecutableComment"]
+flags = ["UNTERMINATED|ERROR"]
+errors = ["UnterminatedComment", "AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-mariadb-marker"
+source = "T4 review I1: MariaDB's /*M! runs the same way"
+dialect = "mariadb"
+input = "/*M! '*/' */ ; DROP TABLE t; -- '"
+kinds = ["ExecutableComment", "String"]
+flags = ["ERROR", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-hint-quoted-close"
+source = "T4 review I1 probe and controller ruling: a hint with a quoted */ fails closed"
+dialect = "mysql"
+input = "SELECT /*+ SET_VAR(sql_mode='*/') */ 1; DROP TABLE t; -- '"
+kinds = ["Word", "Whitespace", "HintComment", "String"]
+texts = ["SELECT", " ", "/*+ SET_VAR(sql_mode='*/", "') */ 1; DROP TABLE t; -- '"]
+flags = ["", "", "ERROR", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-hint-quoted-value-agrees"
+source = "T4 review I1: a quoted hint value without */ is read the same both ways"
+dialect = "mysql"
+input = "SELECT /*+ SET_VAR(sql_mode='ANSI_QUOTES') */ 1"
+kinds = ["Word", "Whitespace", "HintComment", "Whitespace", "Number"]
+flags = ["", "", "", "", ""]
+errors = []
+
+[[case]]
+id = "I1-mysqldump-agrees"
+source = "mysqldump lines: backticks, quotes and nested readings that agree are not flagged"
+dialect = "mysql"
+input = "/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`localhost`*/ /*!50003 TRIGGER t BEFORE INSERT ON x FOR EACH ROW SET NEW.a = 'b' */;;"
+kinds = ["ExecutableComment", "Whitespace", "ExecutableComment", "Whitespace", "ExecutableComment", "Semicolon", "Semicolon"]
+flags = ["", "", "", "", "", "", ""]
+errors = []
+
+[[case]]
+id = "LEX05-hint-unterminated"
+source = "alg/10 SQL-LEX-02 rule 3"
+dialect = "mysql"
+input = "/*+ x"
+kinds = ["HintComment"]
+flags = ["UNTERMINATED"]
+errors = ["UnterminatedComment"]
+
+# --- numbers and words ---
+
+[[case]]
+id = "MY-1e5x"
+source = "alg/10 SQL-LEX-02 edge cases: MySQL 1e5x is an identifier"
+dialect = "mysql"
+input = "1e5x"
+kinds = ["Word"]
+
+[[case]]
+id = "MY-0X12"
+source = "alg/10 SQL-LEX-02 edge cases: MySQL 0X12 is not hex"
+dialect = "mysql"
+input = "0X12"
+kinds = ["Word"]
+
+[[case]]
+id = "MY-0x12"
+source = "alg/10 SQL-LEX-02 edge cases: MySQL 0x12"
+dialect = "mysql"
+input = "0x12 0b101"
+kinds = ["Number", "Whitespace", "Number"]
+
+[[case]]
+id = "MY-0B101"
+source = "alg/10 SQL-LEX-01 matrix: MySQL radix prefixes are lower case only"
+dialect = "mysql"
+input = "0B101"
+kinds = ["Word"]
+
+[[case]]
+id = "MY-123abc"
+source = "alg/10 SQL-LEX-02 edge cases: 123abc (MySQL identifier)"
+dialect = "mysql"
+input = "123abc 1ex 0xfz 0x"
+kinds = ["Word", "Whitespace", "Word", "Whitespace", "Word", "Whitespace", "Word"]
+
+[[case]]
+id = "MY-number-then-word"
+source = "alg/10 SQL-LEX-02 rule 7: a fraction is no identifier"
+dialect = "mysql"
+input = "1.5x 123 .5"
+kinds = ["Number", "Word", "Whitespace", "Number", "Whitespace", "Number"]
+texts = ["1.5", "x", " ", "123", " ", ".5"]
+
+[[case]]
+id = "MY-dollar-identifiers"
+source = "alg/10 SQL-LEX-01 matrix: $ in MySQL identifiers; no dollar quotes"
+dialect = "mysql"
+input = "$$a;b$$"
+kinds = ["Word", "Semicolon", "Word"]
+texts = ["$$a", ";", "b$$"]
+
+[[case]]
+id = "MY-turkish"
+source = "alg/10 SQL-LEX-01 i18n notes"
+dialect = "mysql"
+input = "SELECT ışık FROM şehir"
+kinds = ["Word", "Whitespace", "Word", "Whitespace", "Word", "Whitespace", "Word"]
+
+# --- quotes ---
+
+[[case]]
+id = "MY-backtick"
+source = "alg/10 SQL-LEX-01 matrix: `…` with doubled backticks"
+dialect = "mysql"
+input = "`a``b` `c\\`"
+kinds = ["QuotedIdent", "Whitespace", "QuotedIdent"]
+texts = ["`a``b`", " ", "`c\\`"]
+
+[[case]]
+id = "MY-backtick-unterminated"
+source = "alg/10 SQL-LEX-02 rule 5"
+dialect = "mysql"
+input = "`ab"
+kinds = ["QuotedIdent"]
+flags = ["UNTERMINATED"]
+errors = ["UnterminatedQuotedIdent"]
+
+[[case]]
+id = "MY-escape-at-end"
+source = "alg/10 SQL-LEX-02 rule 5"
+dialect = "mysql"
+input = "'ab\\"
+kinds = ["String"]
+flags = ["UNTERMINATED"]
+errors = ["UnterminatedString"]
+
+[[case]]
+id = "MY-prefixed-literals"
+source = "alg/10 SQL-LEX-01 matrix: X, B, N prefixes"
+dialect = "mysql"
+input = "X'1F' B'01' N'x\\'y' x'ab'"
+kinds = ["HexString", "Whitespace", "BitString", "Whitespace", "String", "Whitespace", "HexString"]
+
+[[case]]
+id = "MY-introducer"
+source = "Task 4: a charset introducer is its own word before the string"
+dialect = "mysql"
+input = "_utf8mb4'abc'"
+kinds = ["Word", "String"]
+
+# --- variables, parameters, operators ---
+
+[[case]]
+id = "MY-variables"
+source = "alg/10 SQL-LEX-02 rule 8 and edge cases: @@, @, @1"
+dialect = "mysql"
+input = "@a @@session @1 @@ ?"
+kinds = ["UserVar", "Whitespace", "SystemVar", "Whitespace", "UserVar", "Whitespace", "Op", "Op", "Whitespace", "QuestionParam"]
+
+[[case]]
+id = "MY-user-variable-dot"
+source = "MySQL manual: user variable names may hold ."
+dialect = "mysql"
+input = "@a.b"
+kinds = ["UserVar"]
+
+[[case]]
+id = "MY-system-variable-scope"
+source = "alg/10 SQL-LEX-02 rule 8"
+dialect = "mysql"
+input = "@@SESSION.sql_mode"
+kinds = ["SystemVar", "Dot", "Word"]
+
+[[case]]
+id = "MY-account-name"
+source = "MySQL manual: 'user'@'host'"
+dialect = "mysql"
+input = "'u'@'localhost'"
+kinds = ["String", "Op", "String"]
+
+[[case]]
+id = "MY-operators"
+source = "alg/10 SQL-LEX-02 rule 10 (MySQL's fixed set)"
+dialect = "mysql"
+input = "a<=>b->>'$.x' c:=1 d&&e||f !g"
+kinds = ["Word", "Op", "Word", "Op", "String", "Whitespace", "Word", "Op", "Number", "Whitespace", "Word", "Op", "Word", "Op", "Word", "Whitespace", "Op", "Word"]
+texts = ["a", "<=>", "b", "->>", "'$.x'", " ", "c", ":=", "1", " ", "d", "&&", "e", "||", "f", " ", "!", "g"]
+
+[[case]]
+id = "MY-question-number"
+source = "alg/10 SQL-LEX-02 rule 8: MySQL ? takes no number"
+dialect = "mysql"
+input = "?1"
+kinds = ["QuestionParam", "Number"]
+
+[[case]]
+id = "MY-client-command-backslash"
+source = "alg/10 SQL-SPLIT-01: \\G is the client's (the lexer sees a lone backslash)"
+dialect = "mysql"
+input = "SELECT 1\\G"
+kinds = ["Word", "Whitespace", "Number", "Unknown", "Word"]

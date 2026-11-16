@@ -30,3 +30,31 @@ pub fn host(
     });
     vcx
 }
+
+// ## m3a-t01b-seams
+
+/// The drawn runs that spell `label` (P15): the one run with exactly that text, else the
+/// consecutive runs whose texts join into it. On Linux and Windows a `PopupMenu` draws an item
+/// as runs around its access-key letter ("b" + "astion"); a test that finds a menu or button
+/// label by its drawn text uses this. `None` when nothing spells it.
+pub fn find_label_runs(
+    frame: &[hacivat_ui::text::RenderedText],
+    label: &str,
+) -> Option<Vec<hacivat_ui::text::RenderedText>> {
+    if let Some(r) = frame.iter().find(|r| r.text.as_ref() == label) {
+        return Some(vec![r.clone()]);
+    }
+    for i in 0..frame.len() {
+        let mut spelled = String::new();
+        for j in i..frame.len() {
+            spelled.push_str(frame[j].text.as_ref());
+            if spelled == label {
+                return Some(frame[i..=j].to_vec());
+            }
+            if !label.starts_with(spelled.as_str()) {
+                break;
+            }
+        }
+    }
+    None
+}

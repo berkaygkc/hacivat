@@ -1,6 +1,8 @@
 //! Debug builds only: the programmatic focus move for the IME check (Task 19).
 //! `HACIVAT_DEBUG_FOCUS_MOVE_MS=<n>` makes the first IME composition schedule a focus move to
 //! the palette's query field `n` ms later, opening the palette when needed.
+//!
+//! M3a (Task 33, R-M3-47): the M2b cancel demo (Q39) is gone; `exec.cancel` replaces it.
 
 use std::time::Duration;
 

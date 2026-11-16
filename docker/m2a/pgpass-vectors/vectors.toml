@@ -1,0 +1,146 @@
+# `.pgpass` parity vectors (HV-SEC-04, Task 19). Each vector is a pgpass file and a lookup
+# tuple. `crates/core/hacivat-session/tests/docker_pgpass.rs` runs each one twice and compares
+# the outcomes:
+#
+# - ours: `hacivat_secrets::pgpass_lookup(file, host, port, database, Some(user))`;
+# - libpq: `psql -w` inside `m2a-pg17` with `PGPASSFILE` set to the same bytes, connecting as
+#   `host=<host> hostaddr=<container ip>` so the server asks for a password (scram-sha-256)
+#   while libpq looks the file up under `host`.
+#
+# Fields:
+# - `lines`: the file, one entry per line, joined with "\n" and ending with "\n". A line that
+#   ends in "\r" gives a CRLF file. `@PW@` stands for the servers' throwaway test password,
+#   which the test substitutes; any other password is wrong.
+# - `host`, `database`, `user`: the lookup tuple. `port = 0` means no port was given (libpq's
+#   default, 5432); the server always listens on 5432.
+# - `expect`: the outcome both sides must give: `accepted` (the matched password is the right
+#   one), `rejected` (a password matched but the server refuses it) or `no_password` (no line
+#   matched, or the matched password is empty: libpq sends no empty password).
+# - `edge`: the HV-SEC-04 edge case the vector covers.
+
+[[vector]]
+name = "escaped-colon"
+edge = "`\\:` in a field is a literal colon (database `hv:test`)"
+lines = ["localhost:5432:hv\\:test:hv_test:@PW@"]
+host = "localhost"
+port = 5432
+database = "hv:test"
+user = "hv_test"
+expect = "accepted"
+
+[[vector]]
+name = "wildcard"
+edge = "a field that is exactly `*` matches anything"
+lines = ["*:*:*:*:@PW@"]
+host = "localhost"
+port = 5432
+database = "hv_test"
+user = "hv_test"
+expect = "accepted"
+
+[[vector]]
+name = "case-mismatch"
+edge = "fields compare case-sensitively: `LOCALHOST` and `HV_TEST` never match"
+lines = [
+  "LOCALHOST:5432:hv_test:hv_test:@PW@",
+  "localhost:5432:HV_TEST:hv_test:@PW@",
+  "localhost:5432:hv_test:HV_TEST:@PW@",
+]
+host = "localhost"
+port = 5432
+database = "hv_test"
+user = "hv_test"
+expect = "no_password"
+
+[[vector]]
+name = "empty-password"
+edge = "an empty password field matches and ends the search; libpq then sends no password"
+lines = [
+  "localhost:5432:hv_test:hv_test:",
+  "*:*:*:*:@PW@",
+]
+host = "localhost"
+port = 5432
+database = "hv_test"
+user = "hv_test"
+expect = "no_password"
+
+[[vector]]
+name = "crlf"
+edge = "CRLF line ends are stripped, including after a comment"
+lines = [
+  "# written on Windows\r",
+  "localhost:5432:hv_test:hv_test:@PW@\r",
+]
+host = "localhost"
+port = 5432
+database = "hv_test"
+user = "hv_test"
+expect = "accepted"
+
+# Only `/var/run/postgresql` is tested on purpose: it is the `DEFAULT_PGSOCKET_DIR` of
+# Debian's libpq (the psql in `m2a-pg17`), the only directory that build looks up as
+# `localhost`. `pgpass_lookup` also maps `/tmp` and `/run/postgresql` to `localhost` (the
+# defaults of other builds), which this psql would match literally, so those two are
+# intentionally untested here.
+[[vector]]
+name = "localhost-vs-socket"
+edge = "the default socket directory is looked up as `localhost`, never as its path"
+lines = [
+  "/var/run/postgresql:5432:hv_test:hv_test:wrong",
+  "localhost:5432:hv_test:hv_test:@PW@",
+]
+host = "/var/run/postgresql"
+port = 5432
+database = "hv_test"
+user = "hv_test"
+expect = "accepted"
+
+[[vector]]
+name = "replication-database"
+edge = "a database named `replication` matches a `replication` line like any other name"
+lines = [
+  "localhost:5432:hv_test:hv_test:wrong",
+  "localhost:5432:replication:hv_test:@PW@",
+]
+host = "localhost"
+port = 5432
+database = "replication"
+user = "hv_test"
+expect = "accepted"
+
+[[vector]]
+name = "default-port"
+edge = "no port means 5432, compared as text (`05432` is another port)"
+lines = [
+  "localhost:05432:hv_test:hv_test:wrong",
+  "localhost:5432:hv_test:hv_test:@PW@",
+]
+host = "localhost"
+port = 0
+database = "hv_test"
+user = "hv_test"
+expect = "accepted"
+
+[[vector]]
+name = "trailing-space-kept"
+edge = "trailing whitespace is part of the password"
+lines = ["localhost:5432:hv_test:hv_test:@PW@ "]
+host = "localhost"
+port = 5432
+database = "hv_test"
+user = "hv_test"
+expect = "rejected"
+
+[[vector]]
+name = "first-match-wins"
+edge = "the first matching line wins, even over a more specific line after it"
+lines = [
+  "*:*:*:hv_test:wrong",
+  "localhost:5432:hv_test:hv_test:@PW@",
+]
+host = "localhost"
+port = 5432
+database = "hv_test"
+user = "hv_test"
+expect = "rejected"

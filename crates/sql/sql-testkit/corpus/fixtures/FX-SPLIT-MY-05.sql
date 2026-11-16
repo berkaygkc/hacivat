@@ -1,0 +1,8 @@
+-- FX-SPLIT-MY-05  event with BEGIN...END and labels
+DELIMITER $$
+CREATE EVENT hv_e ON SCHEDULE EVERY 1 DAY DO
+lbl: BEGIN
+  DELETE FROM audit_log WHERE happened_at < NOW() - INTERVAL 30 DAY;
+  LEAVE lbl;
+END$$
+DELIMITER ;

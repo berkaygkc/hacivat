@@ -89,6 +89,9 @@ jobs:
           $issues | Format-Table -AutoSize
           if ($issues) { exit 1 }
 
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy
@@ -109,6 +112,34 @@ jobs:
 
       - name: Test (4/4) app, scene-check + pseudo
         run: cargo test --locked -p hacivat-app --features scene-check,pseudo
+
+      # ## m3a-t01b-seams: full test set lines 6-8 (P10), which no job ran before.
+      - name: Test (6) testkit, ssh
+        run: cargo test --locked -p hacivat-testkit --features ssh
+
+      - name: Test (7) ui-editor, scene-check
+        run: cargo test --locked -p hacivat-ui-editor --features scene-check
+
+      - name: Test (8) ui-grid, test-support + scene-check
+        run: cargo test --locked -p hacivat-ui-grid --features test-support,scene-check
+
+      # ## m3a-t01a-proofs
+      # After every build of this job (clippy, release, the test builds): nothing under the
+      # vendored pg_query was written or added, ignored paths included. Runners have no protoc,
+      # so the static guard is what catches PATCHES.md §1 being undone.
+      - name: The builds leave third_party/pg_query unchanged
+        run: |
+          changed="$(git status --porcelain --ignored -- third_party/pg_query)"
+          if [ -n "$changed" ]; then
+            printf '%s\n' "$changed"
+            echo "::error::a build wrote into third_party/pg_query (PATCHES.md §1)"
+            exit 1
+          fi
+          if grep -nE '^[^#]*prost-build' third_party/pg_query/Cargo.toml \
+            || grep -nE '^[^/]*(Command::new|REGENERATE_PROTOBUF|prost_build)' third_party/pg_query/build.rs; then
+            echo "::error::PATCHES.md §1 is undone: the vendored build.rs can regenerate src/protobuf.rs"
+            exit 1
+          fi
 
   tokens:
     name: tokens
@@ -135,6 +166,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Dependency guard
         run: cargo run --locked -p xtask -- check-deps
+      # ## m3a-t03-sql-tables: the generated keyword tables match data/keywords/*.toml. CI only
+      # checks; `--from-docker` and `--from-pg-query` are run by hand when the data changes.
+      - name: Keyword tables are fresh
+        run: cargo run --locked -p xtask -- gen-sql-tables --check
 
   l10n-check:
     name: l10n-check
@@ -169,6 +204,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends locales
           sudo locale-gen tr_TR.UTF-8
           locale -a | grep -i '^tr_TR'
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
       - name: Test (1/4) workspace
         run: cargo test --workspace --locked
@@ -178,6 +216,13 @@ jobs:
         run: cargo test --locked -p hacivat-l10n --features pseudo
       - name: Test (4/4) app, scene-check + pseudo
         run: cargo test --locked -p hacivat-app --features scene-check,pseudo
+      # ## m3a-t01b-seams: full test set lines 6-8 (P10).
+      - name: Test (6) testkit, ssh
+        run: cargo test --locked -p hacivat-testkit --features ssh
+      - name: Test (7) ui-editor, scene-check
+        run: cargo test --locked -p hacivat-ui-editor --features scene-check
+      - name: Test (8) ui-grid, test-support + scene-check
+        run: cargo test --locked -p hacivat-ui-grid --features test-support,scene-check
 
   # Spec 7.1 / F29: runtime language switching (tests of Tasks 13, 16 and 17).
   switch:
@@ -210,6 +255,9 @@ jobs:
             fi
           fi
           xcrun -sdk macosx metal --version
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
       - name: Detect the shell tests
         id: guard
@@ -280,11 +328,36 @@ jobs:
             fi
           fi
           xcrun -sdk macosx metal --version
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        if: steps.guard.outputs.present == 'true'
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
         if: steps.guard.outputs.present == 'true'
       - name: Build the release binary
         if: steps.guard.outputs.present == 'true'
         run: cargo build --release --locked -p hacivat
+      # ## m3a-t01a-proofs
+      # The shipped binary (`-p hacivat`, not the feature-unified workspace build). Task 1a's budget
+      # (R-M3-1, plan Task 1a Step 5): libpg_query may add at most 10 MiB over the M2b gate's macOS
+      # arm64 binary, 37,138,656 bytes; only that architecture has a recorded baseline. Over the
+      # budget is a warning, not a failure: later M3a tasks grow the binary on purpose, and the
+      # budget asks for a ruling, not a red build.
+      - name: Shipped binary size
+        if: steps.guard.outputs.present == 'true'
+        run: |
+          bin=target/release/hacivat
+          [ -f "$bin" ] || bin=target/release/hacivat.exe
+          size="$(wc -c < "$bin" | tr -d ' ')"
+          echo "shipped binary $bin: $size bytes ($RUNNER_OS $(uname -m))"
+          if [ "$RUNNER_OS" = macOS ] && [ "$(uname -m)" = arm64 ]; then
+            budget=$((37138656 + 10 * 1024 * 1024))
+            if [ "$size" -gt "$budget" ]; then
+              echo "::warning::the shipped binary is $size bytes, over Task 1a's budget of $budget (M2b + 10 MiB): a size ruling is due"
+            else
+              echo "within Task 1a's budget: $size <= $budget bytes (M2b + 10 MiB)"
+            fi
+          fi
       - name: Launch smoke
         if: steps.guard.outputs.present == 'true'
         shell: bash
@@ -297,6 +370,12 @@ jobs:
           fi
           grep -Eq '^first-frame-ms=[0-9]+' smoke.log || { echo "::error::no first-frame-ms= line"; exit 1; }
           grep -Eq '^idle-rss-mib=[0-9]+' smoke.log || { echo "::error::no idle-rss-mib= line"; exit 1; }
+      # ## m3a-t01a-proofs
+      - name: The shipped binary links libpg_query
+        if: steps.guard.outputs.present == 'true'
+        run: |
+          grep -Eq '^libpg-query=pg_query 18\.1\.0 \(PostgreSQL 18\.[0-9]+\) statements=1$' smoke.log \
+            || { echo "::error::no libpg-query= line with one statement"; exit 1; }
 
   deny:
     name: cargo-deny
@@ -330,7 +409,7 @@ jobs:
     name: bench (regression signal only)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -339,16 +418,21 @@ jobs:
 
       - uses: ./.github/actions/linux-deps
 
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
 
+      # ## m3a-t20-bench: the synthetic B1 runs the real grid (`hacivat-ui-grid`'s `b1_synthetic`
+      # example) in place of `spike-grid`, which stays in the tree as the frozen M0 record.
       - name: Build spikes
-        run: cargo build --release --locked -p spike-grid -p spike-editor
+        run: cargo build --release --locked -p spike-editor
 
       - name: Generate B3 fixture
         run: cargo xtask gen-sql --lines 50000 --long-line 100000 --out target/fixtures/b3-50k.sql
 
-      - name: Bench spike-grid fling (software rendering under a virtual display)
-        run: xvfb-run -a cargo run --locked -p spike-grid --release -- --bench fling
+      - name: Bench b1_synthetic fling (software rendering under a virtual display)
+        run: xvfb-run -a cargo run --locked --release -p hacivat-ui-grid --features bench,test-support --example b1_synthetic -- --bench fling
 
       - name: Bench spike-editor typing
         run: xvfb-run -a cargo run --locked -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench typing
@@ -358,6 +442,28 @@ jobs:
 
       - name: Bench spike-editor completion
         run: xvfb-run -a cargo run --locked -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench completion
+
+      # ## m3a-t36-bench: the real-app benches (`hacivat-app` examples `b3` and `b1_real`,
+      # feature `bench`). Relative signal only (L2): software rendering under a virtual display
+      # with no window manager, so `--allow-inactive` lets a run go on when the window never
+      # becomes key (its verdict then fails by construction and exits 0). B1-real proper
+      # (PostgreSQL, the PO's 120 Hz / 2x panel) is the gate's; here `--engine sqlite` builds the
+      # same 1M x 50 shape under `--any-display` (the ungraded `b1-offpanel-real-*` label).
+      # B3 `typing` needs the full-tier (T0) fixture: 50k lines, no long line (fix round 1, I4).
+      - name: Build the real-app benches
+        run: cargo build --locked --release -p hacivat-app --features bench --examples
+
+      - name: Real-app bench harness tests (headless)
+        run: cargo test --locked --release -p hacivat-app --features bench --lib bench
+
+      - name: Generate the B3 T0 fixture
+        run: cargo xtask gen-sql --lines 50000 --out target/fixtures/b3-50k-t0.sql
+
+      - name: Bench b3 typing (real app)
+        run: xvfb-run -a cargo run --locked --release -p hacivat-app --features bench --example b3 -- --file target/fixtures/b3-50k-t0.sql --bench typing --allow-inactive
+
+      - name: Bench b1_real fling over SQLite (real app)
+        run: xvfb-run -a cargo run --locked --release -p hacivat-app --features bench --example b1_real -- --engine sqlite --any-display --allow-inactive
 
       - name: Upload bench JSON (regression signal only, not authoritative)
         uses: actions/upload-artifact@v4
@@ -404,6 +510,9 @@ jobs:
           fi
           xcrun -sdk macosx metal --version
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-packager
         shell: bash
@@ -417,6 +526,14 @@ jobs:
         env:
           NIGHTLY_VERSION: ${{ steps.version.outputs.value }}
         run: packaging/package-macos.sh "$NIGHTLY_VERSION"
+      # ## m3a-t01a-proofs
+      - name: Universal binary size (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          for bin in target/packager/*/hacivat; do
+            lipo -info "$bin"
+            echo "universal binary $bin: $(wc -c < "$bin" | tr -d ' ') bytes"
+          done
       - name: Package (Linux, unsigned AppImage and deb)
         if: runner.os == 'Linux'
         env:
@@ -482,6 +599,10 @@ jobs:
             fi
           fi
           xcrun -sdk macosx metal --version
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        if: steps.guard.outputs.present == 'true'
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
         if: steps.guard.outputs.present == 'true'
       - name: Render the pseudo-locale screens
@@ -505,3 +626,114 @@ jobs:
       - name: Compare with the M1 baselines (shot-diff)
         if: steps.guard.outputs.present == 'true' && runner.os == 'macOS' && hashFiles('design/baselines/m1/macos/*.png') != ''
         run: cargo run --locked -p xtask -- shot-diff --baseline design/baselines/m1/macos --candidate target/shots
+
+  # ## m2a-t11-docker
+  # Full test set line 5 (the FakeDriver tests) and line 7 with `--set pr` (R17). CI has no
+  # controller, so this job starts the pr servers (pg17, mysql84) itself. It uses no secrets:
+  # the servers run with the throwaway test credentials of docker/m2a.
+  docker-pr:
+    name: docker-pr
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (5) driver, fake
+        run: cargo test --locked -p hacivat-driver --features fake
+      # ## m2b-t16-docker-matrix
+      - name: Check image digest pins
+        run: cargo run --locked -p xtask -- docker check-pins
+      - name: Start the pr servers
+        run: cargo run --locked -p xtask -- docker up --set pr
+      - name: Docker tests (pr set)
+        run: cargo run --locked -p xtask -- docker test --set pr
+      - name: Server logs
+        if: failure()
+        run: docker compose -f docker/m2a/compose.yml logs --no-color
+      - name: Stop the servers
+        if: always()
+        run: cargo run --locked -p xtask -- docker down
+
+  # ## m2b-t16-docker-matrix
+  # The whole matrix (pg13-18, auth/TLS/Turkish variants, MySQL, MariaDB, the sshd bastions) on
+  # a schedule or by hand. No secrets: the servers use the throwaway credentials of docker/m2a.
+  docker-full:
+    name: docker-full
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
+      - uses: Swatinem/rust-cache@v2
+      - name: Check image digest pins
+        run: cargo run --locked -p xtask -- docker check-pins
+      - name: Start every server
+        run: cargo run --locked -p xtask -- docker up --set full
+      - name: Docker tests (full set)
+        run: cargo run --locked -p xtask -- docker test --set full
+      - name: Server logs
+        if: failure()
+        run: docker compose -f docker/m2a/compose.yml logs --no-color
+      - name: Stop the servers
+        if: always()
+        run: cargo run --locked -p xtask -- docker down
+
+  # ## m2b-t16-keyring
+  # The live OS keyring round trip (B15). A broken D-Bus setup fails the
+  # round trip loudly (the Linux build has the Secret Service backend only).
+  keyring-linux:
+    name: keyring-linux
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the Secret Service
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring dbus-x11
+      - name: Live keyring round trip (gnome-keyring over D-Bus)
+        run: |
+          dbus-run-session -- bash -c 'echo hv | gnome-keyring-daemon --unlock --components=secrets && HACIVAT_KEYRING_LIVE=1 cargo test --locked -p hacivat-secrets -- --ignored live_keyring_round_trip'
+
+  keyring-windows:
+    name: keyring-windows
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Live keyring round trip (Windows Credential Manager)
+        env:
+          HACIVAT_KEYRING_LIVE: "1"
+        run: cargo test --locked -p hacivat-secrets -- --ignored live_keyring_round_trip
+
+  # No D-Bus session on this runner: the Linux backend must fall back to the vault. Task 6
+  # owns the test and writes it as `#[ignore = "ci-linux"]`.
+  vault-linux:
+    name: vault-linux
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Vault fallback without a Secret Service
+        run: cargo test --locked -p hacivat-secrets --test fallback -- --include-ignored linux_without_secret_service_uses_vault

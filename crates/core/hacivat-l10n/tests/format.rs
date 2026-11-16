@@ -269,15 +269,38 @@ fn instant_converts_to_zone_and_local_does_not() {
     );
 }
 
+// ## m2b-t22-live (controller ruling): list conjunctions follow the UI language, the language
+// of the bundle that renders the sentence; the regional format never changes them.
 #[test]
 fn lists() {
     assert_eq!(
-        fmt("tr-TR", "{ LIST($l) }", l(&["a", "b", "c"])),
+        fmt_in(
+            langid!("tr"),
+            "en-US",
+            "UTC",
+            "{ LIST($l) }",
+            l(&["a", "b", "c"])
+        ),
         "a, b ve c"
     );
     assert_eq!(
-        fmt("en-US", "{ LIST($l) }", l(&["a", "b", "c"])),
+        fmt_in(
+            langid!("en"),
+            "tr-TR",
+            "UTC",
+            "{ LIST($l) }",
+            l(&["a", "b", "c"])
+        ),
         "a, b, and c"
+    );
+    // A list argument placed straight into a sentence too.
+    assert_eq!(
+        fmt_in(langid!("tr"), "en-US", "UTC", "{ $l }", l(&["a", "b"])),
+        "a ve b"
+    );
+    assert_eq!(
+        fmt_in(langid!("en"), "tr-TR", "UTC", "{ $l }", l(&["a", "b"])),
+        "a and b"
     );
 }
 
@@ -492,12 +515,25 @@ fn unknown_time_zone_formats_in_utc() {
 
 #[test]
 fn list_types_and_sizes() {
+    // ## m2b-t22-live: by the UI language (see `lists`).
     assert_eq!(
-        fmt("tr-TR", "{ LIST($l, type: \"or\") }", l(&["a", "b"])),
+        fmt_in(
+            langid!("tr"),
+            "en-US",
+            "UTC",
+            "{ LIST($l, type: \"or\") }",
+            l(&["a", "b"])
+        ),
         "a veya b"
     );
     assert_eq!(
-        fmt("en-US", "{ LIST($l, type: \"or\") }", l(&["a", "b"])),
+        fmt_in(
+            langid!("en"),
+            "tr-TR",
+            "UTC",
+            "{ LIST($l, type: \"or\") }",
+            l(&["a", "b"])
+        ),
         "a or b"
     );
     // Edge 12.

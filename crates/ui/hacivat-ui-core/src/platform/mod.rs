@@ -11,6 +11,8 @@ mod memory;
 mod text_rendering;
 
 pub use memory::resident_set_mib;
+// ## m3a-t01b-seams
+pub use memory::physical_memory_bytes;
 pub use text_rendering::{
     TEXT_RENDERING_IS_LIVE, app_font_smoothing_override, apply_text_rendering,
 };

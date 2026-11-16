@@ -1,0 +1,292 @@
+//! Tokens and the lexed struct of arrays (Task 4).
+
+use std::ops::Range;
+
+use sql_dialect::KwEntry;
+use sql_text::{TextRange, TextSize};
+
+use crate::state::LexState;
+
+/// What a token is.
+#[repr(u8)]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TokenKind {
+    Whitespace,
+    Newline,
+    LineComment,
+    BlockComment,
+    HintComment,
+    /// MySQL/MariaDB `/*! … */`, with its version gate (`exec_comment_gate`).
+    ExecutableComment,
+    Word,
+    QuotedIdent,
+    UnicodeQuotedIdent,
+    String,
+    DollarString,
+    Number,
+    BitString,
+    HexString,
+    /// psql `COPY … FROM STDIN` data up to `\.`.
+    InlineData,
+    PositionalParam,
+    QuestionParam,
+    NamedParam,
+    UserVar,
+    SystemVar,
+    ClientVar,
+    Op,
+    LParen,
+    RParen,
+    LBracket,
+    RBracket,
+    LBrace,
+    RBrace,
+    Comma,
+    Semicolon,
+    Dot,
+    /// psql `\cmd`, mysql `DELIMITER`, sqlite3 `.cmd`.
+    ClientCommand,
+    Unknown,
+}
+
+bitflags::bitflags! {
+    /// What a token carries besides its kind.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct TokenFlags: u8 {
+        /// A string, comment, dollar string, quoted identifier or `COPY` data block that never
+        /// closed: it runs to the end of the text.
+        const UNTERMINATED = 1;
+        /// A number or `$n` parameter directly followed by an identifier, which the server
+        /// rejects ("trailing junk": PostgreSQL 15 and later, SQLite); the identifier is the
+        /// next token.
+        const JUNK = 2;
+        /// `_` digit separators in a number (PostgreSQL 16, SQLite 3.46).
+        const HAS_SEPARATORS = 4;
+        /// A UTF-8 byte-order mark read as whitespace.
+        const BOM = 8;
+        /// A token the server rejects or reads in a way the lexer cannot pin down: an unknown
+        /// character, an operator of 64 bytes or more, a `U&''` string without
+        /// `standard_conforming_strings`, a malformed SQLite blob or variable, an executable
+        /// comment or hint whose end depends on how the server reads it.
+        const ERROR = 16;
+    }
+}
+
+/// A lexing error over one token's range. Every token flagged `ERROR` or `JUNK` has one, and
+/// so does every `UNTERMINATED` token except an SQLite block comment (the server accepts it)
+/// and `COPY` data without its `\.` line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LexError {
+    pub range: TextRange,
+    pub code: LexErrorCode,
+}
+
+/// Why a range did not lex cleanly.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LexErrorCode {
+    UnterminatedString,
+    UnterminatedComment,
+    UnterminatedDollar,
+    UnterminatedQuotedIdent,
+    /// A PostgreSQL `U&''` string with `standard_conforming_strings` off.
+    InvalidEscape,
+    /// A NUL byte.
+    Nul,
+    /// A character that starts no token in this dialect (`Unknown`; NUL is `Nul`).
+    UnknownCharacter,
+    /// An identifier directly after a number or `$n` parameter (`JUNK`).
+    TrailingJunk,
+    /// A PostgreSQL operator of 64 bytes or more (`NAMEDATALEN`).
+    OperatorTooLong,
+    /// A malformed SQLite blob (`X'…'` with an odd or non-hex digit count) or variable (a
+    /// `(…)` suffix that does not close before whitespace).
+    InvalidLiteral,
+    /// A MySQL/MariaDB executable comment or optimizer hint whose end depends on how the
+    /// server reads its body: read as a skipped comment it ends at the token's `*/`, read as
+    /// running code (quotes, identifiers and line comments honoured) it ends elsewhere or
+    /// never. The token keeps the skipped reading's extent; a statement holding it has no
+    /// exact boundary (Task 8: `Ambiguous`, so Run asks and never sends it).
+    AmbiguousCommentEnd,
+}
+
+impl LexErrorCode {
+    /// The code names a construct that ran to the end of the text.
+    pub fn is_unterminated(self) -> bool {
+        matches!(
+            self,
+            LexErrorCode::UnterminatedString
+                | LexErrorCode::UnterminatedComment
+                | LexErrorCode::UnterminatedDollar
+                | LexErrorCode::UnterminatedQuotedIdent
+        )
+    }
+}
+
+/// A lexed text: token kinds, sorted start offsets, flags and keywords, one entry per token;
+/// the tokens tile the text without gaps (lossless).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lexed {
+    pub(crate) kinds: Vec<TokenKind>,
+    pub(crate) starts: Vec<TextSize>,
+    pub(crate) flags: Vec<TokenFlags>,
+    pub(crate) keywords: Vec<Option<KwEntry>>,
+    pub(crate) errors: Vec<LexError>,
+    pub(crate) end_state: LexState,
+    /// The text's length (the end of the last token).
+    pub(crate) len: TextSize,
+}
+
+impl Lexed {
+    /// The number of tokens.
+    pub fn len(&self) -> usize {
+        self.kinds.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.kinds.is_empty()
+    }
+
+    pub fn kind(&self, i: usize) -> TokenKind {
+        self.kinds[i]
+    }
+
+    /// Token `i`'s range: from its start to the next token's (or the text's end).
+    pub fn range(&self, i: usize) -> TextRange {
+        let end = self.starts.get(i + 1).copied().unwrap_or(self.len);
+        TextRange::new(self.starts[i], end)
+    }
+
+    pub fn flags(&self, i: usize) -> TokenFlags {
+        self.flags[i]
+    }
+
+    pub fn keyword(&self, i: usize) -> Option<KwEntry> {
+        self.keywords[i]
+    }
+
+    /// Whitespace, newlines and comments (an executable comment is not trivia).
+    pub fn is_trivia(&self, i: usize) -> bool {
+        matches!(
+            self.kinds[i],
+            TokenKind::Whitespace
+                | TokenKind::Newline
+                | TokenKind::LineComment
+                | TokenKind::BlockComment
+                | TokenKind::HintComment
+        )
+    }
+
+    /// Every error, in token order (a token may have two: an unterminated executable comment
+    /// whose end is also ambiguous). Empty means every token lexed cleanly: no token is flagged
+    /// `ERROR` or `JUNK`, and none ran unterminated except where the server accepts it.
+    pub fn errors(&self) -> &[LexError] {
+        &self.errors
+    }
+
+    /// The state lexing ended in (an unterminated construct), to resume from.
+    pub fn end_state(&self) -> &LexState {
+        &self.end_state
+    }
+
+    /// The token containing `at` (the last token for the text's end); O(log n).
+    pub fn token_at(&self, at: TextSize) -> Option<usize> {
+        self.token_at_probed(at).0
+    }
+
+    /// [`Lexed::token_at`] and the number of offsets its binary search compared (the
+    /// complexity tests read it).
+    #[doc(hidden)]
+    pub fn token_at_probed(&self, at: TextSize) -> (Option<usize>, u32) {
+        if self.kinds.is_empty() || at > self.len {
+            return (None, 0);
+        }
+        let (after, probes) = partition(&self.starts, |s| s <= at);
+        (Some(after.saturating_sub(1)), probes)
+    }
+
+    /// The tokens overlapping `r`; O(log n).
+    pub fn tokens_in(&self, r: TextRange) -> Range<usize> {
+        self.tokens_in_probed(r).0
+    }
+
+    /// [`Lexed::tokens_in`] and the number of offsets its binary searches compared.
+    #[doc(hidden)]
+    pub fn tokens_in_probed(&self, r: TextRange) -> (Range<usize>, u32) {
+        let (after_start, first_probes) = partition(&self.starts, |s| s <= r.start());
+        let (last, last_probes) = partition(&self.starts, |s| s < r.end());
+        let first = after_start.saturating_sub(1);
+        (first.min(last)..last, first_probes + last_probes)
+    }
+
+    /// The deepest parenthesis nesting inside `tokens` (R-M3-35).
+    pub fn max_paren_depth(&self, tokens: Range<usize>) -> u16 {
+        let (mut depth, mut max) = (0u16, 0u16);
+        for kind in &self.kinds[tokens] {
+            match kind {
+                TokenKind::LParen => {
+                    depth = depth.saturating_add(1);
+                    max = max.max(depth);
+                }
+                TokenKind::RParen => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        max
+    }
+
+    /// An empty lexing of a `len`-byte text, with room for `tokens` tokens.
+    pub(crate) fn with_capacity(tokens: usize, len: TextSize) -> Lexed {
+        Lexed {
+            kinds: Vec::with_capacity(tokens),
+            starts: Vec::with_capacity(tokens),
+            flags: Vec::with_capacity(tokens),
+            keywords: Vec::with_capacity(tokens),
+            errors: Vec::new(),
+            end_state: LexState::Initial,
+            len,
+        }
+    }
+
+    /// Appends a token starting at `start` (after every token pushed so far).
+    pub(crate) fn push(
+        &mut self,
+        start: TextSize,
+        kind: TokenKind,
+        flags: TokenFlags,
+        keyword: Option<KwEntry>,
+    ) {
+        debug_assert!(self.starts.last().is_none_or(|s| *s < start));
+        self.kinds.push(kind);
+        self.starts.push(start);
+        self.flags.push(flags);
+        self.keywords.push(keyword);
+    }
+
+    /// Records an error over `range`.
+    pub(crate) fn push_error(&mut self, range: TextRange, code: LexErrorCode) {
+        self.errors.push(LexError { range, code });
+    }
+
+    /// Sets the state lexing ended in.
+    pub(crate) fn set_end_state(&mut self, state: LexState) {
+        self.end_state = state;
+    }
+}
+
+/// The number of leading `starts` for which `below` holds (they are sorted, so `below` holds
+/// for a prefix), and how many it compared: a binary search, O(log n).
+fn partition(starts: &[TextSize], below: impl Fn(TextSize) -> bool) -> (usize, u32) {
+    let (mut lo, mut hi, mut probes) = (0, starts.len(), 0);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        probes += 1;
+        if below(starts[mid]) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    (lo, probes)
+}

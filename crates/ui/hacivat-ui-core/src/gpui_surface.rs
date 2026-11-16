@@ -13,12 +13,29 @@ pub use gpui::{
 #[rustfmt::skip] pub use gpui::{Action, AnyView, AnyWindowHandle, Axis, ClickEvent, Decorations, EntityId, EventEmitter, FocusOutEvent, Global, KeyBinding, Menu, MenuItem, MouseButton, MouseDownEvent, OsAction, Overflow, Subscription, SystemMenuType, Task, WindowAppearance, WindowControlArea, WindowDecorations};
 // Task 13: Linux client-side decoration resize edges (`Window::start_window_resize`).
 pub use gpui::ResizeEdge;
+// M2a Task 21: a scroll viewport's offset and size (the connection sheet's scroll thumb).
+pub use gpui::ScrollHandle;
+// ## m3a-f5-demo (review m-4): the shell's focus contexts hold their handles weakly, so a view
+// that is gone (a closed window's grid) leaves nothing behind.
+pub use gpui::WeakFocusHandle;
 // Widgets: stateful elements (`role`, `aria_label`, `aria_selected`, `on_click`, `on_drag`,
 // `tooltip` live on `StatefulInteractiveElement` at the pin), builders, pointer events.
 #[rustfmt::skip] pub use gpui::{AssetSource, DragMoveEvent, MouseMoveEvent, MouseUpEvent, Stateful, StatefulInteractiveElement, WeakEntity};
-pub use crate::actions::RunCommand;
+// M2a (Task 1): anchored popovers and selects (`deferred(anchored())`), file pickers.
+pub use crate::actions::{InertCommand, RunCommand};
+// ## m3a-t01b-seams: the editor and grid elements (Tasks 19, 20, 27, 28): hitboxes and cursor
+// styles, view caching, the accessibility subtree, the text input configuration, the
+// clipboard's string with metadata, pointer and modifier events, quads and their edges and
+// corners, scroll deltas, strikethrough runs.
+#[rustfmt::skip] pub use gpui::{A11ySubtreeBuilder, Autocapitalize, BorderStyle, ClipboardString, Corners, CursorStyle, Edges, Hitbox, HitboxBehavior, ModifiersChangedEvent, MouseExitEvent, PaintQuad, ScrollDelta, StrikethroughStyle, StyleRefinement, TextInputConfiguration, TouchPhase, quad};
+// ## m3a-t20-grid: the grid's text cache keeps bare line layouts (`WindowTextSystem::layout_line`)
+// and paints them with its own one-run decoration (`LineLayout::paint`), so a cached shape costs
+// its glyphs, not a `ShapedLine`'s 32-run inline decoration buffer (about 3 KB, times 50k), and a
+// theme switch recolours the cached shapes instead of reshaping them.
+#[rustfmt::skip] pub use gpui::{DecorationRun, LineLayout};
 /// `.when(..)`/`.map(..)` builders (`gpui::prelude::FluentBuilder` at the pin).
 pub use gpui::prelude::FluentBuilder;
+pub use gpui::{Anchor, AnchoredPositionMode, PathPromptOptions, anchored, deferred};
 /// GPUI's test contexts, for downstream tests (`test-support`).
 #[cfg(feature = "test-support")]
 pub use gpui::{HeadlessAppContext, TestAppContext, VisualTestContext};

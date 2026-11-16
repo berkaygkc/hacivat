@@ -9,8 +9,12 @@ use hacivat_ui_core::gpui_surface::{AnyView, App, Global, Window};
 /// What a tab holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TabKind {
-    /// A SQL console, `Console <n>`.
-    Console { n: u32 },
+    /// A SQL console, `Console <n>`, bound to `profile` once a connection is chosen (R-M3-37;
+    /// saved in `workspace.json`, P12).
+    Console {
+        n: u32,
+        profile: Option<hacivat_proto::ProfileId>,
+    },
     /// Content registered under this kind in the [`TabContentRegistry`].
     Registered(&'static str),
 }

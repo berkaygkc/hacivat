@@ -1,0 +1,51 @@
+[package]
+name = "hacivat-session"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# M2b (Task 1, fix round 1): test seams (`ConnectionManager::{publish_event,
+# event_subscribers}`), enabled only by test dev-dependencies, never by a product build.
+test-support = [
+    # ## m3a-t01b-seams: `testing::fake_session` builds sessions over a `FakeDriver` (P6).
+    "hacivat-driver/fake",
+]
+
+[dependencies]
+hacivat-proto.workspace = true
+hacivat-net.workspace = true
+hacivat-secrets.workspace = true
+hacivat-driver.workspace = true
+hacivat-driver-pg.workspace = true
+hacivat-driver-mysql.workspace = true
+hacivat-driver-sqlite.workspace = true
+hacivat-settings.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macros"] }
+tokio-util.workspace = true
+futures.workspace = true
+secrecy.workspace = true
+toml_edit.workspace = true
+tracing.workspace = true
+# M2b (Task 1): the read-only guard (partly re-exported, Q5) and the reconnect jitter.
+hacivat-guard.workspace = true
+getrandom.workspace = true
+# ## m3a-t01b-seams: `Request::Run` streams typed results into the result store.
+hacivat-values.workspace = true
+hacivat-results.workspace = true
+
+[dev-dependencies]
+# ## m3a-t01b-seams: stores from rows for the run tests (Task 18).
+hacivat-results = { workspace = true, features = ["test-support"] }
+hacivat-driver = { workspace = true, features = ["fake"] }
+# M2b (Task 1, Q5): `ssh` here too, so `cargo test -p hacivat-session` builds what
+# `cargo test --workspace` builds through feature unification.
+hacivat-testkit = { workspace = true, features = ["ssh"] }
+tracing-subscriber.workspace = true
+tracing-log.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

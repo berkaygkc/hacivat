@@ -6,6 +6,8 @@ use hacivat_ui_core::gpui_surface::{
 };
 use hacivat_ui_core::theme::{Theme, TypeStyle};
 
+use crate::capsule::{EnvKind, env_swatch};
+use crate::icon::{Icon, IconName, IconSize};
 use crate::popover::lazy;
 use crate::text::{Label, TextSource};
 
@@ -23,6 +25,77 @@ pub fn status_label_in(
     style: TypeStyle,
 ) -> Label {
     Label::new(text, source, style, theme.tokens.colors.text_2.to_hsla())
+}
+
+/// The environment segment, the first on the left (DESIGN.md Status Bar; NOTES §7 "the status
+/// bar mirrors the capsule"): the environment mark and `label` (a Fluent text such as
+/// "Production · read-only").
+///
+/// Production is tinted edge to edge in `red-tint`, with the label in `red` at weight 600 and,
+/// when `read_only`, a red lock. Other environments draw the mark and the label in `text` on the
+/// plain ground (only production has a hue). Debug selector: `status-env`.
+pub fn env_segment(
+    theme: &Theme,
+    kind: EnvKind,
+    label: SharedString,
+    read_only: bool,
+) -> AnyElement {
+    let t = theme.tokens;
+    let c = &t.colors;
+    let segment = div()
+        .debug_selector(|| "status-env".to_string())
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(t.spacing.sm))
+        .h_full()
+        .flex_none()
+        .child(env_swatch(kind, theme));
+    if kind != EnvKind::Production {
+        return segment
+            .child(
+                Label::new(
+                    label,
+                    TextSource::Fluent,
+                    t.type_ramp.caption,
+                    c.text.to_hsla(),
+                )
+                // ## m3a-t35-shots (fix round 1, I2; named exception): the shots require
+                // this trust label by its id.
+                .id("status-env-label"),
+            )
+            .into_any_element();
+    }
+    // The tint covers the whole cell: the negative margins cancel the bar's cell padding, and
+    // the segment keeps the mock's 12 px lead (`.envseg { padding-left: 12px }`).
+    let mut segment = segment
+        .ml(px(-t.spacing.lg))
+        .mr(px(-t.spacing.lg))
+        .pl(px(t.spacing.xl))
+        .pr(px(t.spacing.lg))
+        .bg(c.red_tint.to_hsla());
+    if read_only {
+        segment = segment.child(
+            Icon::new(IconName::Lock)
+                .size(IconSize::Chrome)
+                .color(c.red.to_hsla()),
+        );
+    }
+    segment
+        .child(
+            Label::new(
+                label,
+                TextSource::Fluent,
+                TypeStyle {
+                    weight: 600,
+                    ..t.type_ramp.caption
+                },
+                c.red.to_hsla(),
+            )
+            // ## m3a-t35-shots (fix round 1, I2; named exception)
+            .id("status-env-label"),
+        )
+        .into_any_element()
 }
 
 #[derive(Default)]
@@ -70,6 +143,26 @@ impl IntoElement for StatusBar {
                     .child(child);
                 if left { d.border_r_1() } else { d.border_l_1() }
             };
+            // ## m2b-t22-live (fix round 1): when the left segments outgrow the bar (long
+            // locales at the minimum window), the segments after the first give way, the later
+            // ones far more (shrink weights 1, 8, 27, …), and their truncating labels
+            // ellipsize instead of the bar running off the window. The first (the environment)
+            // never shrinks.
+            let left: Vec<AnyElement> = self
+                .left
+                .into_iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    let d = segment(s, true);
+                    if i == 0 {
+                        d
+                    } else {
+                        let weight = (i * i * i) as f32;
+                        d.flex_shrink(weight).min_w(px(0.0)).overflow_hidden()
+                    }
+                    .into_any_element()
+                })
+                .collect();
             div()
                 .debug_selector(|| "status-bar".to_string())
                 .flex()
@@ -82,7 +175,7 @@ impl IntoElement for StatusBar {
                 .border_color(c.seam.to_hsla())
                 .bg(c.ground.to_hsla())
                 .text_color(c.text_2.to_hsla())
-                .children(self.left.into_iter().map(|s| segment(s, true)))
+                .children(left)
                 .child(div().flex_1())
                 .children(self.right.into_iter().map(|s| segment(s, false)))
                 .into_any_element()

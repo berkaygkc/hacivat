@@ -8,20 +8,106 @@ use hacivat_l10n::{Catalogs, Status, Text, ids};
 use hacivat_settings::{LanguagePref, ThemePref};
 use hacivat_ui::actions::{ActionDef, ActionFn, ActionRegistry};
 use hacivat_ui::button::ButtonKind;
-use hacivat_ui::dialog::{DialogButton, DialogSpec};
+use hacivat_ui::dialog::{DialogButton, DialogSize, DialogSpec};
 use hacivat_ui::panes::Axis;
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
-use hacivat_ui_core::gpui_surface::{App, AppContext as _, Context, Window};
+use hacivat_ui_core::gpui_surface::{App, AppContext as _, Context, SharedString, Window};
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 
 use crate::commands::palette;
 use crate::l10n_global::{L10nGlobal, switch_locale, text_fn, text_fn_id, tr, ui_language};
 use crate::menus;
 use crate::shell::{AppState, Workspace, flush_pending_writes, update_settings};
+// ## m3a-t01b-seams
+use crate::shell::CloseDecision;
 use crate::theme_pref::apply_theme;
 
 /// The key context every command here belongs to.
 const WORKSPACE: &str = "Workspace";
+
+// ## m3a-t01b-seams
+/// `app.quit`: asks the quit guard (`ShellHooks::quit_guard`) first and quits only on
+/// `Proceed`; on `Defer` the guard calls `cx.quit()` itself after its prompt.
+pub fn request_quit(cx: &mut App) -> CloseDecision {
+    let decision = crate::shell::hooks::quit_decision(cx);
+    if decision == CloseDecision::Proceed {
+        #[cfg(feature = "test-support")]
+        {
+            cx.default_global::<QuitRequests>().0 += 1;
+        }
+        cx.quit();
+    }
+    decision
+}
+
+// ## m3a-t33-exec-ui (named exception, T33 review C3): restart asks the quit guard too.
+/// `app.restart` and the settings' "Restart now": as [`request_quit`], the quit guard is asked
+/// first (an open user transaction prompts, D-014); on `Proceed` the pending writes are flushed
+/// and the platform restarts after this update; on `Defer` the guard restarts after its prompt.
+pub fn request_restart(cx: &mut App) -> CloseDecision {
+    cx.default_global::<RestartIntent>().0 = true;
+    let decision = crate::shell::hooks::quit_decision(cx);
+    // The guard took the intent (`take_restart_intent`); with no guard it is cleared here.
+    cx.default_global::<RestartIntent>().0 = false;
+    if decision == CloseDecision::Proceed {
+        // Deferred, so nothing is being updated when it runs; a restart inside an update runs
+        // no quit hooks.
+        cx.defer(|cx| {
+            flush_pending_writes(cx);
+            cx.restart();
+        });
+    }
+    decision
+}
+
+/// Set while [`request_restart`] asks the quit guard, so the guard knows a restart (not a
+/// quit) follows its prompt.
+#[derive(Debug, Clone, Copy, Default)]
+struct RestartIntent(bool);
+
+impl hacivat_ui_core::gpui_surface::Global for RestartIntent {}
+
+/// Whether the quit guard is being asked for a restart (and clears it): the guard's prompt
+/// then restarts instead of quitting.
+pub fn take_restart_intent(cx: &mut App) -> bool {
+    std::mem::take(&mut cx.default_global::<RestartIntent>().0)
+}
+
+/// Closing the window (the title bar's client-drawn close, Windows' caption close, macOS's
+/// traffic light): the window is the app, so the quit guard is asked first (D-014; fix round
+/// 1). `Proceed` lets the window close as before; on `Defer` the guard quits after its prompt.
+pub fn request_window_close(window: &mut Window, cx: &mut App) -> CloseDecision {
+    let _ = window;
+    crate::shell::hooks::quit_decision(cx)
+}
+
+/// The title bar's client-drawn close button (Linux client decorations): asks the quit guard
+/// once ([`request_window_close`]) and removes the window on `Proceed`; removing it does not
+/// ask again (round 2). The platform's own close goes through the should-close callback
+/// `Workspace::new` installs.
+pub fn close_window(window: &mut Window, cx: &mut App) -> CloseDecision {
+    let decision = request_window_close(window, cx);
+    if decision == CloseDecision::Proceed {
+        window.remove_window();
+    }
+    decision
+}
+
+/// How often the app asked the platform to quit (test seam, feature `test-support`: the test
+/// platform's quit does nothing observable).
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QuitRequests(pub u32);
+
+#[cfg(feature = "test-support")]
+impl hacivat_ui_core::gpui_surface::Global for QuitRequests {}
+
+/// How often the app asked the platform to quit (test seam, feature `test-support`).
+#[cfg(feature = "test-support")]
+pub fn quit_requests(cx: &App) -> u32 {
+    cx.try_global::<QuitRequests>().map_or(0, |q| q.0)
+}
+
 /// The tab kind Task 17 registers for the settings.
 const SETTINGS_TAB: &str = "settings";
 
@@ -74,7 +160,12 @@ pub fn register_workspace_actions(reg: &mut ActionRegistry) {
         (
             "workspace.close_tab",
             ids::hv::CMD_WORKSPACE_CLOSE_TAB.id,
-            on_workspace(Workspace::close_active_tab),
+            // ## m3a-t01b-seams: through the tab close guard (the open-transaction prompt).
+            Rc::new(|window, cx| {
+                if let Some(ws) = window.root::<Workspace>().flatten() {
+                    Workspace::request_close_active_tab(&ws, window, cx);
+                }
+            }),
             always,
         ),
         (
@@ -146,20 +237,20 @@ pub fn register_workspace_actions(reg: &mut ActionRegistry) {
         (
             "app.restart",
             ids::hv::CMD_APP_RESTART.id,
-            // Deferred, so nothing is being updated when it runs. The pending settings and
-            // layout writes land first: a restart inside an update runs no quit hooks.
+            // ## m3a-t33-exec-ui (named exception, T33 review C3): through the quit guard
+            // (`request_restart` defers the restart and flushes the pending writes first).
             Rc::new(|_, cx| {
-                cx.defer(|cx| {
-                    flush_pending_writes(cx);
-                    cx.restart();
-                })
+                request_restart(cx);
             }),
             always,
         ),
         (
             "app.quit",
             ids::hv::CMD_APP_QUIT.id,
-            Rc::new(|_, cx| cx.quit()),
+            // ## m3a-t01b-seams: through the quit guard (the open-transaction prompt).
+            Rc::new(|_, cx| {
+                request_quit(cx);
+            }),
             always,
         ),
         (
@@ -281,29 +372,53 @@ fn open_about(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspac
         }],
         cancel: 0,
         primary: 0,
+        size: DialogSize::Standard,
     };
     ws.open_dialog(spec, window, cx);
 }
 
 /// The Windows/Linux in-window menu: the same model as the macOS menu bar, under the title
 /// bar's app-menu button at the right end of the title bar.
+// ## m3a-f5-demo (DEMO-6; review m-9)
+/// The Windows/Linux in-window menu's rows for `window` now. With a result grid focused, Copy
+/// and Select All run the grid's commands (`routed_menu_command`) and follow their enabled
+/// state, under the Edit menu's own labels ("Copy", not the palette's "Grid: copy").
+pub fn in_window_menu_items(
+    window: &Window,
+    cx: &App,
+) -> Option<Vec<hacivat_ui::menu::MenuItemSpec>> {
+    let reg = cx.try_global::<ActionRegistry>()?;
+    let mut items = menus::popup_items(&menus::menu_model(reg), cx);
+    for item in items.iter_mut().filter(|i| !i.separator) {
+        let routed = super::routed_menu_command(item.action.as_ref(), window, cx);
+        if routed != item.action.as_ref() {
+            let enabled = reg.get(routed).is_some_and(|d| (d.enabled)(cx));
+            item.action = SharedString::from(routed);
+            item.disabled = !enabled;
+        }
+    }
+    Some(items)
+}
+
 fn show_menu(window: &mut Window, cx: &mut App) {
     let Some(ws) = window.root::<Workspace>().flatten() else {
         return;
     };
-    let items = match cx.try_global::<ActionRegistry>() {
-        Some(reg) => menus::popup_items(&menus::menu_model(reg), cx),
-        None => return,
+    let Some(items) = in_window_menu_items(window, cx) else {
+        return;
     };
     let anchor = menus::in_window_menu_anchor(&items, window, cx);
     let menu = ws.update(cx, |ws, cx| ws.open_popup_menu(anchor, items, window, cx));
     menu.update(cx, |m, _| m.label(text_fn_id("hui-menu-app")));
 }
 
-/// Shows the explorer when it is hidden, so its connection filter is on screen. The M1 filter
-/// is a static field (Task 13) with nothing to filter yet, so there is no input to focus.
+/// Shows the explorer when it is hidden, so its connection filter is on screen, and focuses
+/// the filter when the connections explorer is there (M2a, Task 18; the M1 filter is a static
+/// field with nothing to focus).
 fn focus_explorer_filter(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     if !ws.layout().1.explorer_visible {
         ws.toggle_explorer(window, cx);
     }
+    // ## m2a-t18-explorer: after this update, so the explorer view is free to read.
+    window.defer(cx, crate::connections::explorer::focus_filter);
 }

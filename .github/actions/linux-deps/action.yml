@@ -1,5 +1,7 @@
 name: linux-deps
-description: System packages GPUI needs to build and run (software Vulkan, xvfb) on Ubuntu runners.
+description: >
+  System packages GPUI needs to build and run (software Vulkan, xvfb) on Ubuntu runners, and
+  libclang for the vendored pg_query's bindgen (M3a Task 1a, R-M3-1).
 
 runs:
   using: composite
@@ -12,4 +14,5 @@ runs:
           gcc g++ clang lld cmake make pkg-config \
           libasound2-dev libfontconfig-dev libssl-dev libzstd-dev \
           libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev \
-          libvulkan-dev mesa-vulkan-drivers libxcb1-dev xvfb
+          libvulkan-dev mesa-vulkan-drivers libxcb1-dev xvfb \
+          libclang-dev

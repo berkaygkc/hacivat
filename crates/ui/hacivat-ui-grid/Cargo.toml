@@ -1,0 +1,53 @@
+[package]
+name = "hacivat-ui-grid"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The database-agnostic data grid: model, element with fast-scroll, view and a virtual list (HV-GRID-01..05)"
+
+[features]
+# `testing::SyntheticSource` (the M0 spike's source behind `GridDataSource`), for tests and the
+# synthetic B1 bench; never in a product build.
+test-support = []
+# Paint-level checks (the 11 px floor, hairlines, no `cp_fill`).
+scene-check = ["hacivat-ui-core/scene-check"]
+# Frame recording for the synthetic B1 bench (`examples/b1_synthetic.rs`, Task 20).
+bench = ["hacivat-ui-core/bench"]
+
+[dependencies]
+hacivat-ui-core.workspace = true
+hacivat-ui.workspace = true
+smallvec.workspace = true
+bitflags.workspace = true
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+# F1: `#[gpui::test]` expands to `gpui::` paths; production code uses `gpui_surface` only.
+gpui = { workspace = true, features = ["test-support"] }
+hacivat-ui-core = { workspace = true, features = ["test-support"] }
+
+[[example]]
+name = "b1_synthetic"
+required-features = ["bench", "test-support"]
+
+# Test targets over `SyntheticSource` build only with `--features test-support` (P6).
+[[test]]
+name = "element"
+required-features = ["test-support"]
+
+[[test]]
+name = "view"
+required-features = ["test-support"]
+
+[[test]]
+name = "list"
+required-features = ["test-support"]
+
+# Task 1b's seam checks (the source contract, the key context).
+[[test]]
+name = "seams"
+required-features = ["test-support"]
+
+[lints]
+workspace = true

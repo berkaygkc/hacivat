@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/ui/*", "crates/core/*", "crates/app/*", "crates/bin/*", "xtask", "spikes/*"]
+members = ["crates/ui/*", "crates/core/*", "crates/sql/*", "crates/app/*", "crates/bin/*", "xtask", "spikes/*"]
+# M2b (Task 1, Q29): the vendored `mysql_async` is a `[patch]` path crate, never a member;
+# so is the vendored `pg_query` (M3a Task 1a, P1).
+exclude = ["third_party"]
 
 [workspace.package]
 edition = "2024"
@@ -17,11 +20,12 @@ disallowed_methods = "deny"
 
 [workspace.dependencies]
 # GPUI pin: the zed fork berkaygkc/zed, branch hacivat/912159c, which is zed-industries/zed @ 912159c
-# plus the carried IME patch (R1; see crates/ui/hacivat-ui-core/patches/README.md).
+# plus the carried IME patches (R1) and the TestScheduler lock-order patch (R-M3-13); see
+# crates/ui/hacivat-ui-core/patches/README.md.
 # Only crates/ui/hacivat-ui-core may depend on these
 # (crates/ui and crates/app may add `gpui` with `test-support` as a dev-dependency, F1).
-gpui = { git = "https://github.com/berkaygkc/zed", rev = "a1eaa20480d5bfe62e21ab1248e3900232dab92b" }
-gpui_platform = { git = "https://github.com/berkaygkc/zed", rev = "a1eaa20480d5bfe62e21ab1248e3900232dab92b", features = ["font-kit", "wayland", "x11"] }
+gpui = { git = "https://github.com/berkaygkc/zed", rev = "e9dd32a4bf0fbe035466766810da34261bb47cce" }
+gpui_platform = { git = "https://github.com/berkaygkc/zed", rev = "e9dd32a4bf0fbe035466766810da34261bb47cce", features = ["font-kit", "wayland", "x11"] }
 anyhow = "1"
 cargo_metadata = "0.19"
 
@@ -33,6 +37,35 @@ hacivat-l10n-schema = { path = "crates/core/hacivat-l10n-schema" }
 hacivat-settings = { path = "crates/core/hacivat-settings" }
 hacivat-ui = { path = "crates/ui/hacivat-ui" }
 hacivat-ui-core = { path = "crates/ui/hacivat-ui-core" }
+# M2a (Task 1): the connect stack.
+hacivat-proto = { path = "crates/core/hacivat-proto" }
+hacivat-net = { path = "crates/core/hacivat-net" }
+hacivat-secrets = { path = "crates/core/hacivat-secrets" }
+hacivat-driver = { path = "crates/core/hacivat-driver" }
+hacivat-driver-pg = { path = "crates/core/hacivat-driver-pg" }
+hacivat-driver-mysql = { path = "crates/core/hacivat-driver-mysql" }
+hacivat-driver-sqlite = { path = "crates/core/hacivat-driver-sqlite" }
+hacivat-session = { path = "crates/core/hacivat-session" }
+hacivat-testkit = { path = "crates/core/hacivat-testkit" }
+# M2b (Task 1): the sans-I/O read-only guard.
+hacivat-guard = { path = "crates/core/hacivat-guard" }
+# M3a (Task 1a): the PostgreSQL parser oracle (libpg_query; R-M3-1).
+sql-oracle-pg = { path = "crates/sql/sql-oracle-pg" }
+# ## m3a-t01b-seams: the SQL text family (Core layer), the editor and grid crates (Ui layer,
+# `hacivat-text` headless), the value model, the result store and the run service (Core), and
+# the SQL adapter (App).
+sql-text = { path = "crates/sql/sql-text" }
+sql-dialect = { path = "crates/sql/sql-dialect" }
+sql-lexer = { path = "crates/sql/sql-lexer" }
+sql-split = { path = "crates/sql/sql-split" }
+sql-testkit = { path = "crates/sql/sql-testkit" }
+hacivat-text = { path = "crates/ui/hacivat-text" }
+hacivat-ui-editor = { path = "crates/ui/hacivat-ui-editor" }
+hacivat-ui-grid = { path = "crates/ui/hacivat-ui-grid" }
+hacivat-values = { path = "crates/core/hacivat-values" }
+hacivat-results = { path = "crates/core/hacivat-results" }
+hacivat-exec = { path = "crates/core/hacivat-exec" }
+hacivat-sql-editor = { path = "crates/app/hacivat-sql-editor" }
 
 # Localization (Fluent + ICU4X 2.4).
 fluent-bundle = "0.16.0"
@@ -84,8 +117,87 @@ windows-sys = "0.61.2"
 # Tests.
 tempfile = "3.27.0"
 trybuild = "1.0.122"
+# Docker targets (`hacivat-testkit`) and the CI workflow check (`xtask`).
+yaml-rust2 = "0.13"
+
+# M2a connect stack (Task 1, P2). rustls uses the ring provider only: `aws-lc-rs` and
+# `aws-lc-sys` are banned in `deny.toml` (P5).
+tokio = { version = "1", default-features = false }
+tokio-util = "0.7"
+futures = "0.3"
+tokio-postgres = "0.7"
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls-ring"] }
+rusqlite = { version = "0.42", features = ["bundled", "column_metadata"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-platform-verifier = "0.7"
+rustls-pki-types = { version = "1", features = ["std"] }
+# OS trust roots for the MySQL driver only (P10).
+rustls-native-certs = "0.8"
+# Without these features keyring silently falls back to its non-persistent mock store.
+keyring = { version = "3", features = ["apple-native", "windows-native", "async-secret-service", "crypto-rust", "tokio"] }
+# `serde`: the vault JSON is parsed straight into `SecretString` (M2b, Q30).
+secrecy = { version = "0.10", features = ["serde"] }
+zeroize = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+percent-encoding = "2"
+regex = "1"
+# Test certificates; its default crypto backend is ring.
+rcgen = "0.14"
+
+# M3a (Task 1a): SQL text. `pg_query` is the vendored third_party/pg_query (see
+# `[patch.crates-io]`); only `sql-oracle-pg` may depend on it (`BackendOutsideOwner`).
+pg_query = "=18.1.0"
+text-size = "1.1.1"
+# ## m3a-t01b-seams (the Task 1b manifest table, exhaustive with Task 1a's rows; P6).
+# `alloc` gates the streaming XXH3-128 hasher (`content_hash` over rope chunks, the multi-part
+# `StmtKey`); never `xxhash-rust`, which is BSL-1.0 (R-M3-4).
+twox-hash = { version = "2.1.5", default-features = false, features = ["xxhash3_64", "xxhash3_128", "alloc"] }
+phf = "0.13"
+# `xtask gen-sql-tables` only (Task 3).
+phf_codegen = "0.13"
+memchr = "2"
+bitflags = "2"
+smallvec = "1"
+proptest = "1.12"
+# No `unicode_lines`: U+2028 and U+0085 are not line breaks in the editor.
+ropey = { version = "1.6.1", default-features = false, features = ["cr_lines", "simd"] }
+unicode-width = "0.2"
+unicode-ident = "1"
+lru = "0.18"
+slotmap = "1"
+bytes = "1"
+postgres-types = "0.2.14"
+# `hacivat-ui-core/src/platform/memory.rs` on macOS (`sysctlbyname("hw.memsize")`, Task 33).
+libc = "0.2"
+
+# M2b secure network and sessions (Task 1). SSH uses ring, never aws-lc (Q28): no default
+# features, so russh's `aws-lc-rs` default is off.
+russh = { version = "0.65.1", default-features = false, features = ["ring", "rsa", "flate2"] }
+x509-parser = "0.18"
+sha2 = "0.10"
+# Encrypted client keys (PKCS #8 PBES2, OpenSSL's default `-v2 aes-256-cbc`; Q5, Q36).
+pkcs8 = { version = "0.10.2", features = ["encryption", "pkcs5", "pem", "std", "sha1-insecure"] }
+# The vault (Q30): XChaCha20-Poly1305 under an Argon2id key; nonces and salts from
+# `getrandom::fill`.
+chacha20poly1305 = "0.10.1"
+argon2 = "0.5.3"
+getrandom = "0.3"
+# Hashed `known_hosts` entries (`|1|salt|hash`, HMAC-SHA1).
+hmac = "0.12"
+sha1 = "0.10"
+# `capture_tracing`'s `log` bridge (Q33).
+tracing-log = "0.2"
 
 [patch.crates-io]
+# M2b (Task 1, Q2, Q29): Hacivat's patched copy (third_party/mysql_async/PATCHES.md).
+mysql_async = { path = "third_party/mysql_async" }
+# M3a (Task 1a, R-M3-1, P1): no protobuf regeneration in `build.rs`
+# (third_party/pg_query/PATCHES.md), so a `protoc` on PATH never rewrites the source.
+pg_query = { path = "third_party/pg_query" }
+# M3a (Task 1b, R-M3-18): Hacivat's copy, pristine until Task 12's patch §1
+# (third_party/tokio-postgres/PATCHES.md).
+tokio-postgres = { path = "third_party/tokio-postgres" }
 # zed Cargo.toml:1045
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 # zed Cargo.toml:1046
@@ -98,3 +210,7 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# M3a (Task 1a): libpg_query's C code at -O1 in debug builds; tests parse a lot of SQL.
+[profile.dev.package.pg_query]
+opt-level = 1

@@ -25,10 +25,10 @@ use hacivat_ui::titlebar::TitleBar;
 use hacivat_ui::toast::ToastStack;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, Context, Decorations, Div, Entity, EntityId,
-    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ResizeEdge, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, Window, WindowHandle, div, point, px,
-    relative,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ResizeEdge,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Window, WindowHandle,
+    anchored, div, point, px, relative,
 };
 use hacivat_ui_core::keymap::ContextStack;
 use hacivat_ui_core::theme::{Theme, ThemeMode, popover_surface};
@@ -36,10 +36,14 @@ use hacivat_ui_core::window::{
     ChromeKind, WorkspaceWindowSpec, chrome_kind, open_workspace_window,
 };
 use serde::{Deserialize, Serialize};
+// ## m3a-t34-status-follows (fix round 1)
+use hacivat_ui_core::gpui_surface::Global;
 
 use crate::PendingChord;
 use crate::l10n_global::{L10nGlobal, WINDOW_TITLE, switch_locale, tr, ui_language};
-use crate::shell::hooks::key_capture;
+use crate::shell::hooks::{focused_contexts, hooks, key_capture};
+// ## m3a-t01b-seams
+use crate::shell::hooks::{CloseDecision, TabDecor, tab_close_decision};
 use crate::shell::keymap_state::shortcut_label;
 use crate::shell::layers::{DIALOG_CONTEXT, Layer, Layers, MENU_CONTEXT};
 use crate::shell::persist::LatestWriter;
@@ -49,6 +53,8 @@ use crate::shell::tiles::TileBounds;
 use crate::shell::tiles::{self, Seam, TileLayout};
 use crate::shell::{AppState, update_settings};
 use crate::theme_pref::{apply_theme, follow_appearance};
+use hacivat_proto::ProfileId;
+use hacivat_ui_core::gpui_surface::FluentBuilder as _;
 
 /// The `workspace.json` format version this build writes and reads.
 pub const WORKSPACE_STATE_VERSION: u32 = 1;
@@ -60,6 +66,8 @@ pub const WORKSPACE_CONTEXT: &str = "Workspace";
 const PALETTE_ACTION: &str = "workspace.command_palette";
 /// The action the Windows/Linux app-menu button runs (registered by Task 16, F14).
 const APP_MENU_ACTION: &str = "app.show_menu";
+/// The key context of an anchored popover layer (`open_anchored`).
+pub const POPOVER_CONTEXT: &str = "Popover";
 
 /// The harman demo connection (`--vf-demo`): a production capsule. The name and engine are
 /// connection data, not chrome text.
@@ -83,8 +91,16 @@ impl DemoCapsule {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum SavedKind {
-    Console { n: u32 },
-    Registered { name: String },
+    Console {
+        n: u32,
+        // ## m3a-t01b-seams: the console's connection (R-M3-37, P12). An M2b file has none;
+        // an unbound console writes none, so its JSON is unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+    },
+    Registered {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,6 +129,12 @@ pub struct Workspace {
     kind_contexts: HashMap<&'static str, &'static str>,
     next_tab: u32,
     capsule: Option<DemoCapsule>,
+    /// Views from the `explorer` and `connection_panel` hooks, built once (P17).
+    explorer_view: Option<AnyView>,
+    connection_panel_view: Option<AnyView>,
+    // ## m3a-t01b-seams
+    /// The `results_view` hook's tile, built once; `None` keeps the M1 tile.
+    results_view: Option<AnyView>,
     layers: Layers,
     focus: FocusHandle,
     drag: Option<Seam>,
@@ -164,14 +186,32 @@ impl Workspace {
         ];
         // ... and before the window's view goes (the window closed).
         cx.on_release(|this, _| this.saver.flush()).detach();
+        // ## m3a-t01b-seams (fix round 1): the platform's close asks the quit guard (D-014).
+        window.on_window_should_close(cx, |window, cx| {
+            crate::commands::request_window_close(window, cx) == CloseDecision::Proceed
+        });
+        // The hook views are built once; hooks are set before the workspace opens (P17).
+        let slots = hooks(cx);
+        let explorer_view = slots.explorer.map(|build| build(window, cx));
+        let connection_panel_view = slots.connection_panel.map(|build| build(window, cx));
+        let results_view = slots.results_view.map(|build| build(window, cx));
         let mut ws = Self {
             tiles: TileLayout::default(),
             panes: PaneTree::new(TabId(0)),
-            tabs: BTreeMap::from([(TabId(0), TabKind::Console { n: 1 })]),
+            tabs: BTreeMap::from([(
+                TabId(0),
+                TabKind::Console {
+                    n: 1,
+                    profile: None,
+                },
+            )]),
             tab_views: HashMap::new(),
             kind_contexts: HashMap::new(),
             next_tab: 1,
             capsule: demo,
+            explorer_view,
+            connection_panel_view,
+            results_view,
             layers: Layers::default(),
             focus: cx.focus_handle(),
             drag: None,
@@ -241,7 +281,10 @@ impl Workspace {
                 .map(|(id, kind)| SavedTab {
                     id: *id,
                     kind: match kind {
-                        TabKind::Console { n } => SavedKind::Console { n: *n },
+                        TabKind::Console { n, profile } => SavedKind::Console {
+                            n: *n,
+                            profile: profile.map(|p| p.to_string()),
+                        },
                         TabKind::Registered(name) => SavedKind::Registered {
                             name: (*name).to_string(),
                         },
@@ -251,8 +294,19 @@ impl Workspace {
         }
     }
 
+    // ## m3a-t34-status-follows (fix round 1, C1; named exception)
+    /// Mirrors the focused pane's active tab into [`ActiveTab`] when it changed.
+    fn mirror_active_tab(&self, cx: &mut App) {
+        let now = ActiveTab(self.active_tab());
+        if cx.try_global::<ActiveTab>() != Some(&now) {
+            cx.set_global(now);
+        }
+    }
+
     /// Repaints and saves the layout after `SAVE_DEBOUNCE`; a later change restarts the wait.
     fn layout_changed(&mut self, cx: &mut Context<Self>) {
+        // ## m3a-t34-status-follows (fix round 1, C1)
+        self.mirror_active_tab(cx);
         cx.notify();
         let Some(path) = self.state_path.clone() else {
             return;
@@ -311,7 +365,7 @@ impl Workspace {
         self.tabs
             .values()
             .filter_map(|k| match k {
-                TabKind::Console { n } => Some(*n),
+                TabKind::Console { n, .. } => Some(*n),
                 TabKind::Registered(_) => None,
             })
             .max()
@@ -331,25 +385,91 @@ impl Workspace {
         }
     }
 
-    /// Opens `Console <n>` in the focused pane.
-    pub fn new_console_tab(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let n = self.next_console();
-        let Some(tab) = self.fresh_tab(TabKind::Console { n }) else {
-            return;
-        };
-        self.add_to_focused(tab);
-        self.layout_changed(cx);
+    /// Opens `Console <n>` in the focused pane, bound to the `console_binding` hook's profile
+    /// (R-M3-37; unbound without the hook).
+    pub fn new_console_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let profile = hooks(cx).console_binding.and_then(|binding| binding(cx));
+        self.open_console_tab(profile, window, cx);
     }
 
-    /// Closes the focused pane's active tab.
-    pub fn close_active_tab(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.active_tab() else {
+    // ## m3a-t01b-seams
+
+    /// Opens `Console <n>` bound to `profile` in the focused pane, active; its tab.
+    pub fn open_console_tab(
+        &mut self,
+        profile: Option<ProfileId>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<TabId> {
+        let n = self.next_console();
+        let tab = self.fresh_tab(TabKind::Console { n, profile })?;
+        self.add_to_focused(tab);
+        self.layout_changed(cx);
+        Some(tab)
+    }
+
+    /// Binds console `tab` to `profile` (the first connect binds the focused unbound console,
+    /// R-M3-37); saved with the layout. Nothing for a tab that is not a console.
+    pub fn set_console_profile(
+        &mut self,
+        tab: TabId,
+        profile: Option<ProfileId>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(TabKind::Console { profile: bound, .. }) = self.tabs.get_mut(&tab) {
+            *bound = profile;
+            self.layout_changed(cx);
+        }
+    }
+
+    /// The kind of `tab`, if it is open.
+    pub fn tab_kind(&self, tab: TabId) -> Option<TabKind> {
+        self.tabs.get(&tab).copied()
+    }
+
+    /// Closes `tab` without asking the close guard (the guard calls it after its prompt).
+    pub fn force_close_tab(&mut self, tab: TabId, cx: &mut Context<Self>) {
+        let pane = self
+            .panes
+            .panes
+            .iter()
+            .find(|(_, p)| p.tabs.contains(&tab))
+            .map(|(pane, _)| *pane);
+        match pane {
+            Some(pane) => self.close_tab(pane, tab, cx),
+            None => {
+                self.tabs.remove(&tab);
+                self.tab_views.remove(&tab);
+                self.layout_changed(cx);
+            }
+        }
+    }
+
+    /// `workspace.close_tab`: asks the tab close guard first, outside this view's update (the
+    /// guard may open a prompt on the workspace); `Defer` leaves the closing to the guard.
+    pub fn request_close_active_tab(ws: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
+        let Some(tab) = ws.read(cx).active_tab() else {
             return;
         };
-        self.panes.close_tab(self.panes.focused, tab);
-        self.tabs.remove(&tab);
-        self.tab_views.remove(&tab);
+        if tab_close_decision(tab, window, cx) == CloseDecision::Proceed {
+            ws.update(cx, |ws, cx| ws.force_close_tab(tab, cx));
+        }
+    }
+
+    // ## m3a-f5-demo (DEMO-1)
+    /// Makes `tab` its pane's active tab and focuses that pane; `false` when it is not open.
+    pub fn focus_tab(&mut self, tab: TabId, cx: &mut Context<Self>) -> bool {
+        let found = self
+            .panes
+            .panes
+            .iter()
+            .find_map(|(pane, p)| Some((*pane, p.tabs.iter().position(|t| *t == tab)?)));
+        let Some((pane, idx)) = found else {
+            return false;
+        };
+        self.panes.activate(pane, idx);
         self.layout_changed(cx);
+        true
     }
 
     pub fn activate_next_tab(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -366,7 +486,9 @@ impl Workspace {
     /// focus.
     pub fn split_focused(&mut self, axis: Axis, _window: &mut Window, cx: &mut Context<Self>) {
         let n = self.next_console();
-        let Some(tab) = self.fresh_tab(TabKind::Console { n }) else {
+        // ## m3a-t01b-seams: bound like a new console tab (R-M3-37).
+        let profile = hooks(cx).console_binding.and_then(|binding| binding(cx));
+        let Some(tab) = self.fresh_tab(TabKind::Console { n, profile }) else {
             return;
         };
         if self.panes.panes.contains_key(&self.panes.focused) {
@@ -478,7 +600,11 @@ impl Workspace {
         if layer.restore_focus.is_none() {
             layer.restore_focus = window.focused(cx);
         }
+        let first_modal = layer.modal && !self.layers.has_modal();
         self.layers.push(layer, subscription);
+        if first_modal {
+            rebuild_menus_later(cx);
+        }
         cx.notify();
     }
 
@@ -492,8 +618,9 @@ impl Workspace {
         Some(self.closed(layer, window, cx))
     }
 
-    /// Removes the layer showing `view` (wherever it is in the stack).
-    fn remove_layer(&mut self, view: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+    /// Removes the layer showing `view` (wherever it is in the stack) and gives the focus back
+    /// (`pub` since m2a-t17: a custom modal layer closes itself by its view).
+    pub fn remove_layer(&mut self, view: EntityId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(layer) = self.layers.remove_view(view) {
             self.closed(layer, window, cx);
         }
@@ -508,6 +635,9 @@ impl Workspace {
         match &layer.restore_focus {
             Some(handle) => window.focus(handle, cx),
             None => window.focus(&self.focus, cx),
+        }
+        if layer.modal && !self.layers.has_modal() {
+            rebuild_menus_later(cx);
         }
         cx.notify();
         layer.id
@@ -545,6 +675,7 @@ impl Workspace {
             context: DIALOG_CONTEXT,
             view: dialog.clone().into(),
             restore_focus: restore,
+            modal: true,
         };
         self.push_layer_with(layer, Some(subscription), window, cx);
         dialog
@@ -584,17 +715,59 @@ impl Workspace {
             context: MENU_CONTEXT,
             view: menu.clone().into(),
             restore_focus: restore,
+            modal: false,
         };
         self.push_layer_with(layer, Some(subscription), window, cx);
         menu
     }
 
-    /// The active key contexts, innermost last: `Workspace`, the active tab's context, then each
-    /// layer's context from the bottom up.
-    pub fn context_stack(&self, _window: &Window) -> ContextStack {
+    /// Opens `view` as a non-modal layer `id` (context `Popover`) with its top-left at `anchor`
+    /// (window coordinates); a press outside it closes it.
+    pub fn open_anchored(
+        &mut self,
+        id: &'static str,
+        anchor: Point<Pixels>,
+        view: AnyView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let restore = window.focused(cx);
+        let host = cx.new(|_| AnchoredHost { anchor, view });
+        let host_id = host.entity_id();
+        let subscription = cx.subscribe_in(
+            &host,
+            window,
+            move |this, host, _: &AnchorDismissed, window, cx| {
+                // As in `open_dialog`: the host lives until this event reached every subscriber.
+                let keep = host.clone();
+                this.remove_layer(host_id, window, cx);
+                cx.defer(move |_| drop(keep));
+            },
+        );
+        let layer = Layer {
+            id,
+            context: POPOVER_CONTEXT,
+            view: host.into(),
+            restore_focus: restore,
+            modal: false,
+        };
+        self.push_layer_with(layer, Some(subscription), window, cx);
+    }
+
+    /// The top layer's context while a modal layer is open: the only context whose bindings
+    /// resolve then, besides `app.quit` (P47).
+    pub fn modal_context(&self) -> Option<&'static str> {
+        self.layers.modal_context()
+    }
+
+    /// The active key contexts, innermost last: `Workspace`, the active tab's context, each
+    /// layer's context from the bottom up, then each registered focus context whose handle is
+    /// focused (`register_focus_context`).
+    pub fn context_stack(&self, window: &Window, cx: &App) -> ContextStack {
         let mut stack = vec![WORKSPACE_CONTEXT];
         stack.extend(self.active_tab_kind().and_then(|k| self.tab_context(k)));
         stack.extend(self.layers.contexts());
+        stack.extend(focused_contexts(window, cx));
         ContextStack(stack)
     }
 
@@ -614,22 +787,70 @@ impl Workspace {
 
     // ---- capsule -----------------------------------------------------------------------------
 
-    /// What the title-bar capsule shows, in the current language.
+    /// What the title-bar capsule shows, in the current language: the demo connection, else
+    /// the `capsule` hook's model, else the M1 placeholder.
     pub fn capsule_model(&self, cx: &App) -> CapsuleModel {
         match &self.capsule {
-            None => CapsuleModel::Placeholder {
-                label: tr(cx, ids::hv::CAPSULE_NO_CONNECTION, NoArgs),
-            },
+            None => hooks(cx)
+                .capsule
+                .and_then(|model| model(cx))
+                .unwrap_or_else(|| CapsuleModel::Placeholder {
+                    label: tr(cx, ids::hv::CAPSULE_NO_CONNECTION, NoArgs),
+                }),
             Some(demo) => CapsuleModel::Connection {
                 env: EnvKind::Production,
                 env_label: tr(cx, ids::hv::CAPSULE_ENV_PRODUCTION, NoArgs),
                 name: demo.name.clone(),
                 engine: demo.engine.clone(),
                 access: tr(cx, ids::hv::CAPSULE_ACCESS_READ_ONLY, NoArgs),
+                read_only: true,
                 path: tr(cx, ids::hv::CAPSULE_PATH_DIRECT, NoArgs),
+                direct: true,
+                latency: None,
+                unencrypted: None,
+                unsupported: None,
             },
         }
     }
+}
+
+/// Emitted by an [`AnchoredHost`] when a press lands outside its view.
+struct AnchorDismissed;
+
+// ## m3a-t34-status-follows (fix round 1, C1; named exception)
+/// The focused pane's active tab, mirrored for code that cannot read the workspace: the
+/// status bar and the capsule are built while the workspace renders (Task 34 follows the
+/// console of this tab). Set by `layout_changed` and at the start of every render.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActiveTab(pub Option<TabId>);
+
+impl Global for ActiveTab {}
+
+/// Places a popover view at its anchor and reports a press outside it (`open_anchored`).
+struct AnchoredHost {
+    anchor: Point<Pixels>,
+    view: AnyView,
+}
+
+impl EventEmitter<AnchorDismissed> for AnchoredHost {}
+
+impl Render for AnchoredHost {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(
+            anchored().position(self.anchor).snap_to_window().child(
+                div()
+                    .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(AnchorDismissed)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.view.clone()),
+            ),
+        )
+    }
+}
+
+/// The menus follow the first modal layer opening and the last one closing (P47: their items
+/// turn inert, all but Quit). Rebuilt once this update is done, when the workspace is readable.
+fn rebuild_menus_later(cx: &mut App) {
+    cx.defer(crate::menus::rebuild);
 }
 
 /// Writes `workspace.json`; a failure keeps the previous file and the next change tries again.
@@ -673,7 +894,11 @@ fn validate(
     let mut described: BTreeMap<TabId, Option<TabKind>> = BTreeMap::new();
     for tab in saved_tabs {
         let kind = match tab.kind {
-            SavedKind::Console { n } => Some(TabKind::Console { n }),
+            SavedKind::Console { n, profile } => Some(TabKind::Console {
+                n,
+                // An unreadable binding restores the console unbound.
+                profile: profile.and_then(|p| p.parse().ok()),
+            }),
             SavedKind::Registered { name } => registered(&name).map(TabKind::Registered),
         };
         if described.insert(tab.id, kind).is_some() {
@@ -741,11 +966,52 @@ fn repair_ratios(node: &mut PaneNode) {
 // ---- rendering -------------------------------------------------------------------------------
 
 impl Workspace {
-    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if event.keystroke.key == "escape" && !self.layers.is_empty() {
-            self.pop_layer(window, cx);
+    /// Escape pops the topmost layer; with no layer open it goes to the `escape` hook. Runs
+    /// without borrowing the workspace, so the hook may update it.
+    fn on_escape(ws: &Entity<Workspace>, event: &KeyDownEvent, window: &mut Window, cx: &mut App) {
+        if Self::on_tab(ws, event, window, cx) {
+            return;
+        }
+        if event.keystroke.key != "escape" {
+            return;
+        }
+        if !ws.read(cx).layers.is_empty() {
+            ws.update(cx, |ws, cx| ws.pop_layer(window, cx));
+            cx.stop_propagation();
+            return;
+        }
+        if let Some(hook) = hooks(cx).escape
+            && hook(window, cx)
+        {
             cx.stop_propagation();
         }
+    }
+
+    // ## m2a-t18-explorer
+    /// Tab and Shift-Tab that reach the workspace (no focused element consumed them, and no
+    /// layer is open: a modal layer traps Tab itself) move the focus to the next or previous
+    /// tab stop, for keyboard-only use (v1 criterion, M2a Task 18). Returns whether it moved.
+    fn on_tab(
+        ws: &Entity<Workspace>,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let stroke = &event.keystroke;
+        let m = &stroke.modifiers;
+        if stroke.key != "tab" || m.control || m.alt || m.platform || m.function {
+            return false;
+        }
+        if !ws.read(cx).layers.is_empty() {
+            return false;
+        }
+        if m.shift {
+            window.focus_prev(cx);
+        } else {
+            window.focus_next(cx);
+        }
+        cx.stop_propagation();
+        true
     }
 
     fn on_drag_move(
@@ -795,9 +1061,22 @@ impl Workspace {
         let keys: SharedString = shortcut_label(cx, PALETTE_ACTION)
             .unwrap_or_default()
             .into();
+        // ## m2b-t22-live (fix round 1, M5): what the read-only access segment does.
+        let mut capsule = Capsule::new(self.capsule_model(cx)).access_hint(tr(
+            cx,
+            ids::hv::CMD_CONNECTION_EXPLAIN_ACCESS,
+            NoArgs,
+        ));
+        if let Some(on_segment) = hooks(cx).capsule_segment {
+            capsule = capsule.on_segment(move |segment, anchor, window, cx| {
+                on_segment(segment, anchor, window, cx)
+            });
+        }
+        let modal = self.layers.has_modal();
         let mut bar = TitleBar::new(chrome)
+            .inert(modal)
             .brand(tr(cx, ids::cm::BRAND_HACIVAT_CAPS, NoArgs))
-            .capsule(Capsule::new(self.capsule_model(cx)))
+            .capsule(capsule)
             .palette_field(
                 tr(cx, ids::hv::TITLEBAR_PALETTE, NoArgs),
                 keys,
@@ -805,21 +1084,38 @@ impl Workspace {
                     ActionRegistry::run(PALETTE_ACTION, window, cx);
                 },
             )
-            .right(vec![language_switch(cx), theme_switch(theme, cx)]);
+            .right(vec![
+                language_switch(cx, modal),
+                theme_switch(theme, cx, modal),
+            ]);
         if matches!(chrome, ChromeKind::WindowsCaption | ChromeKind::LinuxClient) {
             bar = bar.app_menu(|_, window, cx| {
                 ActionRegistry::run(APP_MENU_ACTION, window, cx);
             });
         }
+        // ## m3a-t01b-seams (fix round 1): the client-drawn close asks the quit guard (D-014).
+        bar = bar.on_close(|window, cx| {
+            crate::commands::close_window(window, cx);
+        });
         bar
     }
 
     fn status_bar(&self, theme: &Theme, cx: &App) -> StatusBar {
-        let mut bar = StatusBar::new().left(status_label(
-            theme,
-            tr(cx, ids::hv::STATUS_NO_CONNECTION, NoArgs),
-            TextSource::Fluent,
-        ));
+        let mut bar = StatusBar::new();
+        match hooks(cx).status_left {
+            Some(left) => {
+                for segment in left(theme, cx) {
+                    bar = bar.left(segment);
+                }
+            }
+            None => {
+                bar = bar.left(status_label(
+                    theme,
+                    tr(cx, ids::hv::STATUS_NO_CONNECTION, NoArgs),
+                    TextSource::Fluent,
+                ));
+            }
+        }
         if let Some(chord) = cx.try_global::<PendingChord>().and_then(|p| p.0.clone()) {
             let text = tr(
                 cx,
@@ -841,6 +1137,14 @@ impl Workspace {
     ) -> AnyElement {
         let c = &theme.tokens.colors;
         let l = self.tiles;
+        let explorer = match &self.explorer_view {
+            Some(view) => view.clone().into_any_element(),
+            None => tiles::explorer(theme, cx).into_any_element(),
+        };
+        let connection_panel = match &self.connection_panel_view {
+            Some(view) => view.clone().into_any_element(),
+            None => tiles::connection_panel(theme, cx).into_any_element(),
+        };
         let left = l.explorer_visible.then(|| {
             div()
                 .flex()
@@ -855,14 +1159,14 @@ impl Workspace {
                         .flex_1()
                         .min_h(px(0.0))
                         .overflow_hidden()
-                        .child(tiles::explorer(theme, cx)),
+                        .child(explorer),
                 )
                 .child(
                     div()
                         .h(px(l.conn_panel_h))
                         .flex_none()
                         .overflow_hidden()
-                        .child(tiles::connection_panel(theme, cx)),
+                        .child(connection_panel),
                 )
         });
         let root = self.panes.root.clone();
@@ -887,7 +1191,11 @@ impl Workspace {
                     .flex_1()
                     .min_h(px(0.0))
                     .overflow_hidden()
-                    .child(tiles::results(theme, cx)),
+                    // ## m3a-t01b-seams: the `results_view` hook's tile, else the M1 one.
+                    .child(match &self.results_view {
+                        Some(view) => view.clone().into_any_element(),
+                        None => tiles::results(theme, cx).into_any_element(),
+                    }),
             );
         let grabs: Vec<Div> = tiles::seam_grabs(&l)
             .into_iter()
@@ -964,17 +1272,41 @@ impl Workspace {
         let Some(pane) = self.panes.panes.get(&id).cloned() else {
             return div().into_any_element();
         };
+        // ## m3a-t01b-seams: the `tab_decor` hook's title and mark (none: the kind's title).
+        let decor_of = hooks(cx).tab_decor;
+        let decor = |tab: TabId, cx: &App| {
+            decor_of
+                .as_ref()
+                .map(|decor| decor(tab, cx))
+                .unwrap_or_default()
+        };
         let specs: Vec<TabSpec> = pane
             .tabs
             .iter()
-            .map(|tab| TabSpec {
-                id: *tab,
-                title: self.tab_title(*tab, cx),
-                title_source: TextSource::Fluent,
-                dirty: false,
-                env: None,
+            .map(|tab| {
+                let TabDecor {
+                    title,
+                    title_source,
+                    env,
+                    ..
+                } = decor(*tab, cx);
+                let (title, title_source) = match title {
+                    Some(title) => (title, title_source),
+                    None => (self.tab_title(*tab, cx), TextSource::Fluent),
+                };
+                TabSpec {
+                    id: *tab,
+                    title,
+                    title_source,
+                    dirty: false,
+                    env,
+                }
             })
             .collect();
+        let hairline = pane
+            .tabs
+            .get(pane.active)
+            .is_some_and(|tab| decor(*tab, cx).hairline);
         let weak = cx.entity().downgrade();
         let on_close = weak.clone();
         let strip = TabStrip::new(id, specs)
@@ -982,8 +1314,11 @@ impl Workspace {
             .on_activate(move |pane, tab, _, cx| {
                 let _ = weak.update(cx, |w, cx| w.activate_tab(pane, tab, cx));
             })
-            .on_close(move |pane, tab, _, cx| {
-                let _ = on_close.update(cx, |w, cx| w.close_tab(pane, tab, cx));
+            .on_close(move |pane, tab, window, cx| {
+                // ## m3a-t01b-seams: the close guard first, outside the workspace's update.
+                if tab_close_decision(tab, window, cx) == CloseDecision::Proceed {
+                    let _ = on_close.update(cx, |w, cx| w.close_tab(pane, tab, cx));
+                }
             });
         let content = match pane.tabs.get(pane.active) {
             Some(tab) => self.tab_content(*tab, theme, window, cx),
@@ -1021,6 +1356,18 @@ impl Workspace {
                     .min_h(px(0.0))
                     .child(content),
             )
+            // ## m3a-t01b-seams: the 1 px production hairline over the pane's top edge.
+            .when(hairline, |pane| {
+                pane.relative().child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(1.0))
+                        .bg(c.red.to_hsla()),
+                )
+            })
             .into_any_element()
     }
 
@@ -1031,32 +1378,71 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        match self.tabs.get(&tab) {
+        match self.tabs.get(&tab).copied() {
             Some(TabKind::Registered(_)) => match self.build_view(tab, window, cx) {
                 Some(view) => div().size_full().child(view).into_any_element(),
                 None => editor_empty(theme, cx),
             },
-            _ => editor_empty(theme, cx),
+            // ## m3a-t01b-seams: the `console_view` hook's view, built once per tab; its root
+            // takes the content area as the M2 home does (no wrapper).
+            Some(TabKind::Console { n, profile }) => {
+                match self.console_view(tab, n, profile, window, cx) {
+                    Some(view) => view.into_any_element(),
+                    None => editor_empty(theme, cx),
+                }
+            }
+            None => editor_empty(theme, cx),
         }
+    }
+
+    // ## m3a-t01b-seams
+    /// The view of console `tab` from the `console_view` hook, built once.
+    fn console_view(
+        &mut self,
+        tab: TabId,
+        n: u32,
+        profile: Option<ProfileId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyView> {
+        if let Some(view) = self.tab_views.get(&tab) {
+            return Some(view.clone());
+        }
+        let build = hooks(cx).console_view?;
+        let view = build(tab, n, profile, window, cx);
+        self.tab_views.insert(tab, view.clone());
+        Some(view)
     }
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // ## m3a-t34-status-follows (fix round 1, C1): every path to a new active tab (a
+        // restored layout included) is mirrored before the status bar and capsule are built.
+        self.mirror_active_tab(cx);
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let c = &t.colors;
         // The hook may run actions that update this view, so it runs without borrowing it.
         let weak = cx.entity().downgrade();
+        let weak_escape = weak.clone();
         let capture = move |event: &KeyDownEvent, window: &mut Window, cx: &mut App| {
             let Some(hook) = key_capture(cx) else {
                 return;
             };
-            let Some(stack) = weak.upgrade().map(|ws| ws.read(cx).context_stack(window)) else {
+            let Some(stack) = weak
+                .upgrade()
+                .map(|ws| ws.read(cx).context_stack(window, cx))
+            else {
                 return;
             };
             if hook(event, &stack, window, cx) {
                 cx.stop_propagation();
+            }
+        };
+        let escape = move |event: &KeyDownEvent, window: &mut Window, cx: &mut App| {
+            if let Some(ws) = weak_escape.upgrade() {
+                Self::on_escape(&ws, event, window, cx);
             }
         };
         let title_bar = self.title_bar(&theme, window, cx);
@@ -1073,20 +1459,28 @@ impl Render for Workspace {
             .bg(c.ground.to_hsla())
             .text_color(c.text.to_hsla())
             .capture_key_down(capture)
-            .on_key_down(cx.listener(Self::on_key_down))
+            .on_key_down(escape)
             .on_mouse_move(cx.listener(Self::on_drag_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
             .child(title_bar)
             .child(tiles)
             .child(status_bar)
             .children(self.layers.elements(&theme))
-            .child(ToastStack::new().above(t.spacing.statusbar_height));
+            .child(
+                ToastStack::new()
+                    .above(t.spacing.statusbar_height)
+                    .inert(self.layers.has_modal()),
+            );
         client_decorations(root.into_any_element(), window, &theme)
     }
 }
 
-/// The editor area of a console with no connection.
-fn editor_empty(theme: &Theme, cx: &App) -> AnyElement {
+/// The editor area of a console with no connection: the `editor_empty` hook's element, else
+/// the M1 empty state. (## m3a-t01b-seams: `pub(crate)` for the console view stub.)
+pub(crate) fn editor_empty(theme: &Theme, cx: &App) -> AnyElement {
+    if let Some(element) = hooks(cx).editor_empty {
+        return element(theme, cx);
+    }
     tiles::empty_state(theme, tr(cx, ids::hv::EDITOR_EMPTY, NoArgs), "editor-empty")
         .into_any_element()
 }
@@ -1135,8 +1529,9 @@ pub(crate) fn set_theme(cx: &mut App, pref: ThemePref) {
 /// (11.5 px mono, DESIGN.md Segmented Controls). The names are catalog data, not messages, so the
 /// segments are `Verbatim`; the tooltip and the accessible name of a segment is the language's
 /// native name (the visible short name `TR` is announced as `Türkçe`). Focusable and keyboard-operable like every `Segmented`.
-fn language_switch(cx: &App) -> AnyElement {
-    let mut group = Segmented::new("language-switch").mono(true);
+/// `inert` while a modal layer is open (the title bar ignores the pointer then).
+fn language_switch(cx: &App, inert: bool) -> AnyElement {
+    let mut group = Segmented::new("language-switch").mono(true).inert(inert);
     for choice in language_choices(cx) {
         let tag = choice.tag;
         group = group.item(SegmentItem {
@@ -1151,7 +1546,7 @@ fn language_switch(cx: &App) -> AnyElement {
 }
 
 /// The title bar's theme control: moon (dark) and sun (light).
-fn theme_switch(theme: &Theme, cx: &App) -> AnyElement {
+fn theme_switch(theme: &Theme, cx: &App, inert: bool) -> AnyElement {
     let segment = |icon, pressed, tooltip, pref: ThemePref| SegmentItem {
         content: SegmentContent::Icon(icon),
         pressed,
@@ -1160,6 +1555,7 @@ fn theme_switch(theme: &Theme, cx: &App) -> AnyElement {
         on_click: Rc::new(move |_, _, cx| set_theme(cx, pref)),
     };
     Segmented::new("theme-switch")
+        .inert(inert)
         .item(segment(
             IconName::Moon,
             theme.mode == ThemeMode::Dark,
@@ -1371,8 +1767,79 @@ mod validate_tests {
     fn console(id: u32, n: u32) -> SavedTab {
         SavedTab {
             id: TabId(id),
-            kind: SavedKind::Console { n },
+            kind: SavedKind::Console { n, profile: None },
         }
+    }
+
+    // ## m3a-t01b-seams
+
+    /// A `workspace.json` as M2b wrote it: consoles without a binding (P12, P18).
+    const M2B_WORKSPACE_JSON: &str = r#"{
+        "tiles": {"explorer_w": 260.0, "conn_panel_h": 180.0, "editor_h": 420.0,
+                  "inspector_w": 300.0, "explorer_visible": true},
+        "panes": {"root": {"Leaf": 0}, "panes": {"0": {"tabs": [0, 1], "active": 1}},
+                  "focused": 0},
+        "tabs": [{"id": 0, "kind": "console", "n": 1},
+                 {"id": 1, "kind": "registered", "name": "settings"}]
+    }"#;
+
+    fn first_console(s: &SavedState) -> &SavedKind {
+        s.tabs
+            .iter()
+            .map(|t| &t.kind)
+            .find(|k| matches!(k, SavedKind::Console { .. }))
+            .expect("a console tab")
+    }
+
+    #[test]
+    fn old_workspace_file_parses_with_the_new_console_field() {
+        let s: SavedState = serde_json::from_str(M2B_WORKSPACE_JSON).unwrap();
+        assert!(matches!(
+            first_console(&s),
+            SavedKind::Console {
+                n: 1,
+                profile: None
+            }
+        ));
+    }
+
+    #[test]
+    fn a_console_binding_round_trips_and_an_unbound_one_writes_no_field() {
+        let id: ProfileId = "6f1c2a4e-1d16-4a16-8a16-000000000016".parse().unwrap();
+        let bound = SavedKind::Console {
+            n: 2,
+            profile: Some(id.to_string()),
+        };
+        let json = serde_json::to_string(&bound).unwrap();
+        assert_eq!(serde_json::from_str::<SavedKind>(&json).unwrap(), bound);
+        let unbound = serde_json::to_string(&SavedKind::Console {
+            n: 1,
+            profile: None,
+        })
+        .unwrap();
+        assert!(!unbound.contains("profile"), "{unbound}");
+        // A restored binding becomes the tab's; a garbled one restores the console unbound.
+        let mut saved = two_panes();
+        saved.tabs[0].kind = bound;
+        saved.tabs[1].kind = SavedKind::Console {
+            n: 3,
+            profile: Some("not-a-uuid".into()),
+        };
+        let r = validate(saved, none, bounds()).unwrap();
+        assert_eq!(
+            r.tabs.get(&TabId(0)),
+            Some(&TabKind::Console {
+                n: 2,
+                profile: Some(id)
+            })
+        );
+        assert_eq!(
+            r.tabs.get(&TabId(1)),
+            Some(&TabKind::Console {
+                n: 3,
+                profile: None
+            })
+        );
     }
 
     fn two_panes() -> SavedState {

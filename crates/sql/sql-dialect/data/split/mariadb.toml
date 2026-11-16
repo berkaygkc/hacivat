@@ -1,0 +1,15 @@
+# Splitter-table fixtures for the `mariadb` profile (`sql-dialect/src/split_profile/mysql.rs`; M3a
+# Task 8): every table row has at least one case that covers it (`covers`), and the meta-test in
+# `sql-split/tests/split.rs` fails when a row has none. Expectations come from `alg/10`
+# SQL-SPLIT-01..03. Cases marked "synthetic" isolate a row from the head rules with a `SELECT`
+# head; they test the splitter, not SQL validity. Fields: `sql-testkit/src/split.rs`.
+# The rows MariaDB shares with MySQL are covered by mysql.toml, which runs under both.
+
+dialects = ["mariadb"]
+flavor = "mysql"
+
+[[case]]
+id = "opener-FOR"
+covers = ["opener:FOR", "end:FOR"]
+input = "CREATE PROCEDURE p() BEGIN FOR i IN 1..3 DO SELECT i; END FOR; END; SELECT 2"
+editor = ["CREATE PROCEDURE p() BEGIN FOR i IN 1..3 DO SELECT i; END FOR; END", "SELECT 2"]

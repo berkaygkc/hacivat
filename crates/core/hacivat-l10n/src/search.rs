@@ -323,23 +323,45 @@ fn score(kind: MatchKind, pos: usize) -> u32 {
 }
 
 /// Finds `query` in `text`. An empty (or all-whitespace) query matches everything without a
-/// highlight.
+/// highlight. To match one query against many keys, fold it once with [`PreparedQuery`].
 pub fn find(text: &SearchKey, query: &str, o: &SearchOpts) -> Option<Match> {
-    let q = Folder::new(o.turkish_tolerant).query(query);
-    if q.is_empty() {
-        return Some(Match {
-            ranges: Vec::new(),
-            score: 0,
-            kind: MatchKind::Substring,
-        });
+    PreparedQuery::new(query, o).matches(text)
+}
+
+/// A query folded once, to match against many keys (a filter over a list): the same answers as
+/// [`find`] with the same options, without folding the query again per key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PreparedQuery {
+    folded: String,
+    mode: MatchMode,
+}
+
+impl PreparedQuery {
+    pub fn new(query: &str, o: &SearchOpts) -> PreparedQuery {
+        PreparedQuery {
+            folded: Folder::new(o.turkish_tolerant).query(query),
+            mode: o.mode,
+        }
     }
-    if q.len() > text.folded.len() && o.mode != MatchMode::Fuzzy {
-        return None;
-    }
-    match o.mode {
-        MatchMode::Contains => contains(text, &q),
-        MatchMode::WordPrefix => word_prefix(text, &q),
-        MatchMode::Fuzzy => contains(text, &q).or_else(|| fuzzy(text, &q)),
+
+    /// Matches the query in `key`, which was built with the same `turkish_tolerant` option.
+    pub fn matches(&self, key: &SearchKey) -> Option<Match> {
+        let q = self.folded.as_str();
+        if q.is_empty() {
+            return Some(Match {
+                ranges: Vec::new(),
+                score: 0,
+                kind: MatchKind::Substring,
+            });
+        }
+        if q.len() > key.folded.len() && self.mode != MatchMode::Fuzzy {
+            return None;
+        }
+        match self.mode {
+            MatchMode::Contains => contains(key, q),
+            MatchMode::WordPrefix => word_prefix(key, q),
+            MatchMode::Fuzzy => contains(key, q).or_else(|| fuzzy(key, q)),
+        }
     }
 }
 

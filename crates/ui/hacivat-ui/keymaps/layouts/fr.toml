@@ -13,3 +13,12 @@ chord = "cmd-shift-1"
 command = "workspace.toggle_explorer"
 context = "Workspace"
 platforms = ["macos"]
+
+## m3a-t01b-seams
+# Cancel a run (R-M3-38): `.` needs Shift on AZERTY, so `cmd-.` becomes `cmd-shift-.`.
+
+[[binding]]
+chord = "cmd-shift-."
+command = "exec.cancel"
+context = "Console"
+platforms = ["macos"]

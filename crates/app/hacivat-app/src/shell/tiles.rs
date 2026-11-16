@@ -182,6 +182,29 @@ pub fn empty_state(theme: &Theme, text: SharedString, id: &'static str) -> Div {
         )
 }
 
+// ## m2a-t21-shots
+/// [`empty_state`] whose line wraps, centred, where the tile is narrow (the M2a connection
+/// sheet). M1's tiles keep the one-line label their approved baselines show.
+pub fn empty_state_wrapping(theme: &Theme, text: SharedString, id: &'static str) -> Div {
+    let t = theme.tokens;
+    div()
+        .flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .px(px(t.spacing.xl))
+        .child(
+            hacivat_ui::text::paragraph(
+                text,
+                TextSource::Fluent,
+                t.type_ramp.body,
+                t.colors.text_3.to_hsla(),
+            )
+            .id(id)
+            .centered(),
+        )
+}
+
 /// The explorer: header, filter field and the empty state (no connections in M1).
 pub fn explorer(theme: &Theme, cx: &App) -> Div {
     let t = theme.tokens;

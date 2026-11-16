@@ -1,2 +1,13 @@
 [alias]
 xtask = "run -p xtask --"
+
+# ## m2a-t04-secrets
+# macOS dev builds are signed with the stable local "Hacivat Dev" identity, so the Keychain
+# does not prompt after every rebuild (R7, P35). The runner never fails: without the identity
+# it prints one hint and runs the binary unsigned. Create the identity once with
+# scripts/dev-sign.sh --create-identity
+[target.aarch64-apple-darwin]
+runner = "scripts/dev-run.sh"
+
+[target.x86_64-apple-darwin]
+runner = "scripts/dev-run.sh"

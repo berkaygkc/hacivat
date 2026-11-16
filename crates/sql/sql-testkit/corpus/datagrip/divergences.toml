@@ -1,0 +1,15 @@
+# The divergence register of the D-011 goldens (ALG-TEST-01 step 5; M3a Task 13): corpus cases
+# where Hacivat's M3a answer differs on purpose from what the scenario presumes, or from what
+# the catalogue specifies for a later milestone. Each entry names its reason and sources.
+
+[[divergence]]
+id = "CHOOSE-01"
+what = "The chooser offers [statement, whole script]: no subquery candidate for the innermost SELECT."
+reason = "The subquery references the outer row (c.id) and the CTE, so it cannot run alone; running a correlated subquery alone is rejected. M3a also has no parse tree: the subquery candidate needs the SubqueryOracle (M5)."
+sources = ["alg/10 SQL-SPLIT-04 test cases (FX-CARET-01)", "alg/10 SQL-SPLIT-04 decision (rejected: executing correlated subqueries alone)", "plan M3a Task 13"]
+
+[[divergence]]
+id = "SEL-07"
+what = "A selection run as one statement that ends inside a string literal sends nothing and answers Ambiguous."
+reason = "The catalogue sends such a selection as written and lets the server report the error. In M3a an uncertain boundary never reaches the server; running a verbatim selection arrives with M3b."
+sources = ["R-M3-24", "alg/10 SQL-SPLIT-04 edge cases (selection spanning half a string literal)"]

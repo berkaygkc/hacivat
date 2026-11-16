@@ -118,6 +118,12 @@ impl From<Text> for ArgValue {
     }
 }
 
+impl From<ExactDecimal> for ArgValue {
+    fn from(d: ExactDecimal) -> Self {
+        ArgValue::Decimal(d)
+    }
+}
+
 impl From<WhenValue> for ArgValue {
     fn from(w: WhenValue) -> Self {
         ArgValue::When(w)
@@ -261,6 +267,10 @@ mod tests {
         assert_eq!(NoArgs.into_args(), Vec::new());
         assert_eq!(ArgValue::from(Count(2)), ArgValue::Count(2));
         assert_eq!(ArgValue::from(Text("x".into())), ArgValue::Text("x".into()));
+        assert_eq!(
+            ArgValue::from(ExactDecimal("1234.50".into())),
+            ArgValue::Decimal(ExactDecimal("1234.50".into()))
+        );
     }
 
     #[test]

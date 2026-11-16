@@ -4,8 +4,9 @@ use gpui::{
     Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _,
     TestAppContext, Window, div, point, px, size,
 };
+use hacivat_ui::dialog::{DialogSize, dialog_frame};
 use hacivat_ui::l10n::{EnglishDefaults, UiTextProvider};
-use hacivat_ui::text::{Label, RenderedText, TextRegistry, TextSource};
+use hacivat_ui::text::{Label, RenderedText, TextRegistry, TextSource, paragraph};
 use hacivat_ui_core::theme::{DARK, Theme, ThemeMode, TypeStyle};
 
 #[test]
@@ -98,6 +99,25 @@ fn clipped_label_is_recorded(cx: &mut TestAppContext) {
     assert!(reg.frame[0].clipped);
     let reg = draw_label_in(cx, "A very long label", 40.0, true);
     assert!(reg.frame[0].truncated && !reg.frame[0].clipped);
+}
+
+// ## m3a-t35-shots: a truncating label given less room than its ellipsis (a status-bar cell
+// that gave way almost to nothing) draws nothing rather than a cut glyph.
+#[gpui::test]
+fn a_truncating_label_narrower_than_its_ellipsis_draws_nothing(cx: &mut TestAppContext) {
+    let reg = draw_label_in(cx, "PostgreSQL 16.4", 3.0, true);
+    let r = &reg.frame[0];
+    assert!(r.truncated && !r.clipped, "{r:?}");
+    assert_eq!(r.painted_px, 0.0, "{r:?}");
+    // Fix round 1 (M3): what drew nothing is not visible to any check.
+    assert!(!r.visible, "{r:?}");
+    // With room for the ellipsis (and a glyph), it ellipsizes as before.
+    let reg = draw_label_in(cx, "PostgreSQL 16.4", 30.0, true);
+    let r = &reg.frame[0];
+    assert!(
+        r.truncated && !r.clipped && r.painted_px > 0.0 && r.visible,
+        "{r:?}"
+    );
 }
 
 #[gpui::test]
@@ -293,4 +313,82 @@ fn small_caps_paint_exactly_their_measured_run(cx: &mut TestAppContext) {
             assert!(!reg.frame[0].clipped, "{text} at ink width");
         }
     }
+}
+
+// ## m2b-t24-shots (follow-up, R1): check (f)'s detection, through a real dialog card.
+
+/// A sentence that cannot fit a 420 px card on one line.
+const TOO_WIDE: &str =
+    "A label with no room to wrap that runs well past the right side of its dialog card";
+
+/// A 420 px dialog card holding a label that fits, a label wider than the card, a paragraph
+/// laid out in a column wider than the card and one that wraps inside it; then a wide label
+/// outside any card.
+struct CardHost;
+
+impl Render for CardHost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *Theme::get(cx);
+        let ink = DARK.colors.text.to_hsla();
+        let body = DARK.type_ramp.body;
+        let card = dialog_frame(&theme, DialogSize::Standard)
+            .child(Label::new("Fits", TextSource::Data, body, ink).id("fits"))
+            .child(
+                div()
+                    .flex_none()
+                    .child(Label::new(TOO_WIDE, TextSource::Data, body, ink).id("too-wide")),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(700.0))
+                    .child(paragraph(TOO_WIDE, TextSource::Data, body, ink).id("wide-paragraph")),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .child(paragraph(TOO_WIDE, TextSource::Data, body, ink).id("wrapped")),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .child(card)
+            .child(Label::new(TOO_WIDE, TextSource::Data, body, ink).id("no-card"))
+    }
+}
+
+#[gpui::test]
+fn text_past_its_dialog_card_is_recorded_as_such(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    let (_, vcx) = cx.add_window_view(|_, _| CardHost);
+    vcx.simulate_resize(size(px(1400.0), px(900.0)));
+    vcx.run_until_parked();
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let outside = |id: &str| {
+        let suffix = format!("#{id}");
+        frame
+            .iter()
+            .find(|r| r.path.ends_with(&suffix))
+            .unwrap_or_else(|| panic!("{id} was recorded: {frame:?}"))
+            .outside_card
+    };
+    assert!(!outside("fits"), "a label inside its card");
+    assert!(outside("too-wide"), "a label past the card's right side");
+    assert!(
+        outside("wide-paragraph"),
+        "a paragraph past the card's right side"
+    );
+    assert!(
+        !outside("wrapped"),
+        "a paragraph that wraps inside the card"
+    );
+    // The scope closes with the card: text after it is never measured against it.
+    assert!(!outside("no-card"), "a label outside any card");
 }

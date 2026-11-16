@@ -11,6 +11,7 @@ mod smoke;
 use std::time::Instant;
 
 use hacivat_app::Startup;
+use hacivat_app::connections::ConnectionsBoot;
 use hacivat_app::shell::DemoCapsule;
 use hacivat_l10n::OsLocale;
 use hacivat_settings::{LocalPaths, TextRenderingPref};
@@ -50,7 +51,8 @@ fn main() {
         overrides = !flags.overrides.is_empty(),
         "settings loaded"
     );
-    let startup = Startup::with_overrides(paths, outcome, OsLocale::detect(), &flags.overrides);
+    let mut startup = Startup::with_overrides(paths, outcome, OsLocale::detect(), &flags.overrides);
+    startup.connections = Some(ConnectionsBoot::load(&startup.paths));
     let boot = Boot {
         text_rendering: match startup.settings.ui.text_rendering {
             TextRenderingPref::Crisp => TextRendering::Crisp,

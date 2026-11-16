@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use gpui::{App, Role, TestAppContext, VisualTestContext, point, px};
 use hacivat_ui::button::{Button, ButtonKind};
-use hacivat_ui::dialog::{Dialog, DialogButton, DialogSpec};
+use hacivat_ui::dialog::{Dialog, DialogButton, DialogSize, DialogSpec};
 use hacivat_ui::icon::IconName;
 use hacivat_ui::menu::{MenuItemSpec, PopupMenu};
 use hacivat_ui::panes::{PaneId, TabId, TabSpec, TabStrip};
@@ -93,6 +93,7 @@ fn dialog_and_popup_menu_expose_roles_and_names(cx: &mut TestAppContext) {
             .collect(),
         cancel: 0,
         primary: 1,
+        size: DialogSize::Standard,
     };
     let (host_view, vcx) =
         cx.add_window_view(|window, cx| Wrap::Dialog(Dialog::new(spec, window, cx)));
@@ -118,6 +119,54 @@ fn dialog_and_popup_menu_expose_roles_and_names(cx: &mut TestAppContext) {
     assert!(n.iter().any(|x| x.0 == Role::Menu));
     assert!(n.contains(&(Role::MenuItem, "Copy".into(), false)));
     assert!(n.contains(&(Role::MenuItem, "Paste".into(), false)));
+}
+
+/// Where access keys show (Linux, Windows) a dialog button's label is drawn as runs around its
+/// key letter, but a screen reader still reads the whole label: the button's accessible name is
+/// never split (CI run 43779216264). Access keys are turned on so every platform checks it.
+#[gpui::test]
+fn access_key_runs_keep_a_buttons_accessible_name_whole(cx: &mut TestAppContext) {
+    use hacivat_ui::text::TextRegistry;
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    a11y_record();
+    let spec = DialogSpec {
+        title: text("Roll back?"),
+        body: text("The transaction is open."),
+        buttons: ["Commit and close", "Roll back and close", "Cancel"]
+            .into_iter()
+            .map(|l| DialogButton {
+                label: text(l),
+                kind: ButtonKind::Default,
+                accesskey: None,
+                english_accesskey: None,
+            })
+            .collect(),
+        cancel: 2,
+        primary: 0,
+        size: DialogSize::Standard,
+    };
+    let (_, vcx) = cx.add_window_view(|window, cx| {
+        let d = Dialog::new(spec, window, cx);
+        d.update(cx, |d, _| d.set_access_keys(true));
+        Wrap::Dialog(d)
+    });
+    vcx.run_until_parked();
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let runs = support::find_label_runs(&frame, "Roll back and close").expect("drawn");
+    assert!(runs.len() > 1, "drawn as runs around its key: {runs:?}");
+    let n = a11y_nodes(vcx);
+    for name in ["Commit and close", "Roll back and close", "Cancel"] {
+        assert!(
+            n.contains(&(Role::Button, name.into(), false)),
+            "{name}: {n:?}"
+        );
+    }
 }
 
 fn declared(decls: &[A11yDecl], role: Role, name: &str) -> A11yDecl {
@@ -165,6 +214,7 @@ fn dialog_is_modal_and_described_by_its_body(cx: &mut TestAppContext) {
         }],
         cancel: 0,
         primary: 0,
+        size: DialogSize::Standard,
     };
     let _ = cx.add_window_view(|window, cx| Wrap::Dialog(Dialog::new(spec, window, cx)));
     let dialog = declared(&a11y_take(), Role::Dialog, "Delete?");
@@ -236,6 +286,11 @@ fn capsule_describes_environment_access_and_path(cx: &mut TestAppContext) {
                 engine: "PostgreSQL 16".into(),
                 access: "read-only".into(),
                 path: "Direct".into(),
+                read_only: true,
+                direct: true,
+                latency: None,
+                unencrypted: None,
+                unsupported: None,
             }))
             .into_any_element()
     });
@@ -259,4 +314,135 @@ impl gpui::Render for Wrap {
             Wrap::Menu(m) => el.child(m.clone()),
         }
     }
+}
+
+// ## m2b-t24-shots
+
+/// Popup triggers say whether their popup is open (`aria-expanded`): a button that opens one,
+/// and the capsule's access and unencrypted segments, which read the app's `ExpandedSegment`.
+/// A plain button says nothing.
+#[gpui::test]
+fn popup_triggers_declare_their_expanded_state(cx: &mut TestAppContext) {
+    use hacivat_ui::capsule::{Capsule, CapsuleModel, CapsuleSegment, EnvKind, ExpandedSegment};
+
+    let vcx = host(cx, |_, _| {
+        div()
+            .child(
+                Capsule::new(CapsuleModel::Connection {
+                    env: EnvKind::Staging,
+                    env_label: "staging".into(),
+                    name: "orders".into(),
+                    engine: "PostgreSQL 16".into(),
+                    access: "read-only (guarded)".into(),
+                    path: "Direct".into(),
+                    read_only: true,
+                    direct: true,
+                    latency: None,
+                    unencrypted: Some("unencrypted".into()),
+                    unsupported: None,
+                })
+                .on_segment(|_, _, _, _| {}),
+            )
+            .child(Button::new("import", "Import…".into()).expanded(false))
+            .child(Button::new("plain", "Plain".into()))
+            .into_any_element()
+    });
+    let frame = |vcx: &mut VisualTestContext| {
+        a11y_record();
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        a11y_take()
+    };
+    let expanded = |decls: &[A11yDecl], name: &str| declared(decls, Role::Button, name).expanded;
+    let decls = frame(vcx);
+    assert_eq!(expanded(&decls, "read-only (guarded)"), Some(false));
+    assert_eq!(expanded(&decls, "unencrypted"), Some(false));
+    assert_eq!(expanded(&decls, "Import…"), Some(false));
+    assert_eq!(expanded(&decls, "Plain"), None);
+    // The app opened the access explanation.
+    vcx.update(|_, cx| cx.set_global(ExpandedSegment(Some(CapsuleSegment::Access))));
+    let decls = frame(vcx);
+    assert_eq!(expanded(&decls, "read-only (guarded)"), Some(true));
+    assert_eq!(expanded(&decls, "unencrypted"), Some(false));
+    vcx.update(|_, cx| cx.set_global(ExpandedSegment(Some(CapsuleSegment::Unencrypted))));
+    let decls = frame(vcx);
+    assert_eq!(expanded(&decls, "read-only (guarded)"), Some(false));
+    assert_eq!(expanded(&decls, "unencrypted"), Some(true));
+}
+
+/// T20 review M1b: a popup menu's title row (12 px text-2, not an item; it names the menu) and
+/// mono items, whose labels are data; a hint can be data too.
+#[gpui::test]
+fn popup_menu_title_row_and_mono_items(cx: &mut TestAppContext) {
+    use hacivat_ui::text::TextRegistry;
+
+    cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
+    a11y_record();
+    let (_, vcx) = cx.add_window_view(|window, cx| {
+        let menu = PopupMenu::new(
+            point(px(10.), px(10.)),
+            vec![
+                MenuItemSpec::new(text("bastion"), "0")
+                    .mono(true)
+                    .hint(text("deploy@bastion.acme.io · ProxyJump jump-eu")),
+                MenuItemSpec::new(text("reports"), "1")
+                    .mono(true)
+                    .hint(text("ops@10.0.4.7"))
+                    .hint_source(TextSource::Data),
+            ],
+            window,
+            cx,
+        );
+        menu.update(cx, |m, _| m.title(text("Hosts in ~/.ssh/config")));
+        Wrap::Menu(menu)
+    });
+    vcx.update(|window, cx| {
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+        window.refresh();
+    });
+    vcx.run_until_parked();
+    let n = a11y_nodes(vcx);
+    assert!(n.contains(&(Role::Menu, "Hosts in ~/.ssh/config".into(), false)));
+    assert!(n.contains(&(Role::MenuItem, "bastion".into(), false)));
+    assert!(
+        !n.iter()
+            .any(|x| x.0 == Role::MenuItem && x.1 == "Hosts in ~/.ssh/config"),
+        "the title is not an item"
+    );
+    assert!(vcx.debug_bounds("popup-menu-title").is_some());
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let drawn = |s: &str| {
+        frame
+            .iter()
+            .find(|r| r.text.as_ref() == s)
+            .unwrap_or_else(|| panic!("{s} is drawn"))
+            .clone()
+    };
+    let t = hacivat_ui_core::theme::DARK;
+    let title = drawn("Hosts in ~/.ssh/config");
+    assert_eq!(title.source, TextSource::Fluent);
+    assert_eq!(title.size_px, t.type_ramp.caption.size_px);
+    // Where access keys show (Linux, Windows), the label is drawn as runs around its key
+    // letter ("b" + "astion"): find the consecutive runs that spell it (P15).
+    let runs =
+        |s: &str| support::find_label_runs(&frame, s).unwrap_or_else(|| panic!("{s} is drawn"));
+    let alias = runs("bastion");
+    assert!(
+        alias.iter().all(|r| r.source == TextSource::Data),
+        "{alias:?}"
+    );
+    assert!(
+        alias
+            .iter()
+            .all(|r| r.size_px == t.type_ramp.mono_data.size_px),
+        "{alias:?}"
+    );
+    assert_eq!(
+        drawn("deploy@bastion.acme.io · ProxyJump jump-eu").source,
+        TextSource::Fluent
+    );
+    assert_eq!(drawn("ops@10.0.4.7").source, TextSource::Data);
 }

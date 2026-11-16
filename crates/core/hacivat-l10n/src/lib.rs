@@ -37,6 +37,7 @@ pub use pseudo::{PseudoMode, transform_literal, transform_resource, wrap_message
 pub use render::{Rendered, Sink};
 pub use runtime::{Bundles, FormatInputs, L10n, Runtime, build_runtime};
 pub use search::{
-    Match, MatchKind, MatchMode, SearchKey, SearchOpts, build_key, find, turkish_tolerant_for,
+    Match, MatchKind, MatchMode, PreparedQuery, SearchKey, SearchOpts, build_key, find,
+    turkish_tolerant_for,
 };
 pub use unic_langid::LanguageIdentifier;

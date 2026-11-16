@@ -1,8 +1,8 @@
 //! FTL signature extraction (the `# Variables:` blocks), shared by `hacivat-l10n`'s build
 //! script and `xtask l10n check` (I18N-01 step 7, I18N-04 step 1, I18N-17 L003/L004/L006).
 //!
-//! A documented variable looks like this (the type is one of `String`, `Number`, `DateTime`,
-//! `List` or `Enum(a, b, ...)`):
+//! A documented variable looks like this (the type is one of `String`, `Number`, `Decimal`,
+//! `DateTime`, `List` or `Enum(a, b, ...)`):
 //!
 //! ```ftl
 //! # Variables:
@@ -19,7 +19,10 @@ use fluent_syntax::parser;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VarType {
     String,
+    /// A count: an integer that selects plural variants.
     Number,
+    /// An exact decimal passed as text (`ExactDecimal`), never through `f64`.
+    Decimal,
     DateTime,
     List,
     /// One of a closed set of values (`Enum(table, view)`), passed as text.
@@ -77,7 +80,7 @@ impl fmt::Display for SchemaError {
             ),
             SchemaErrorKind::BadVariableDoc { id, text } => write!(
                 f,
-                "`{id}` has a malformed `# Variables:` line `{text}` (want `$name (String|Number|DateTime|List|Enum(a, b)) - description`)"
+                "`{id}` has a malformed `# Variables:` line `{text}` (want `$name (String|Number|Decimal|DateTime|List|Enum(a, b)) - description`)"
             ),
         }
     }
@@ -183,8 +186,10 @@ pub fn extract_partial(ftl: &str, file: &str) -> (Vec<Signature>, Vec<SchemaErro
 /// Whether `id` follows the message ID grammar
 /// `^(cm|hui|hv|hc|kg|ps|pw|pe|db|error)-[a-z0-9]+(-[a-z0-9]+)*$`.
 pub fn is_valid_id(id: &str) -> bool {
-    const PREFIXES: [&str; 10] = [
-        "cm", "hui", "hv", "hc", "kg", "ps", "pw", "pe", "db", "error",
+    // `exec` and `cursor` (M3a): execution log and cursor messages in `hacivat-core.ftl`, which
+    // xtask's scan list already names (Task 1b); the grammar now agrees with it.
+    const PREFIXES: [&str; 12] = [
+        "cm", "hui", "hv", "hc", "kg", "ps", "pw", "pe", "db", "error", "exec", "cursor",
     ];
     let Some((prefix, rest)) = id.split_once('-') else {
         return false;
@@ -275,6 +280,7 @@ fn parse_var_doc(line: &str) -> Option<(String, VarType)> {
     let ty = match rest[..close].trim() {
         "String" => VarType::String,
         "Number" => VarType::Number,
+        "Decimal" => VarType::Decimal,
         "DateTime" => VarType::DateTime,
         "List" => VarType::List,
         other => {
@@ -370,6 +376,20 @@ mod tests {
             .into_iter()
             .map(|e| (e.line, e.kind))
             .collect()
+    }
+
+    #[test]
+    fn exec_and_cursor_prefixes_are_valid_ids() {
+        for id in [
+            "exec-dur-ms",
+            "cursor-closed-memory-limit",
+            "error-exec-sqlite-busy-hint",
+        ] {
+            assert!(is_valid_id(id), "{id}");
+        }
+        for id in ["execs-x", "cursors-x", "exec", "exec-", "exec-Upper"] {
+            assert!(!is_valid_id(id), "{id}");
+        }
     }
 
     #[test]
@@ -492,6 +512,17 @@ hv-ok = again
                 (4, SchemaErrorKind::DuplicateId { id: "hv-ok".into() }),
             ]
         );
+    }
+
+    #[test]
+    fn decimal_is_a_variable_type() {
+        let ftl = "# Variables:\n#   $seconds (Decimal) - elapsed time.\nhv-clock = { NUMBER($seconds, minimumFractionDigits: 2) } s\n";
+        let sigs = extract(ftl, "en/hacivat-ui.ftl").unwrap();
+        assert_eq!(
+            sigs[0].vars,
+            vec![("seconds".to_string(), VarType::Decimal)]
+        );
+        assert!(extract("# Variables:\n#   $s (decimal) - x\nhv-c = { $s }\n", "f").is_err());
     }
 
     #[test]

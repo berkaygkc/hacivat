@@ -135,3 +135,1692 @@ hv-settings-keymap-hacivat = { -brand-hacivat }
 hv-settings-keymap-datagrip = DataGrip
 # Review: PO
 hv-settings-keymap-collision = { $chord } → { $char }
+
+## m2a-t01-menu
+
+# Review: PO
+hv-menu-file = Dosya
+
+## m2a-t12-profiles
+
+# Review: PO
+hv-conn-keyring-unavailable = Parolalar şu an sistemin anahtar deposuna kaydedilemiyor. { -brand-hacivat } onları kapanana kadar saklar.
+# Review: PO
+hv-conn-store-read-only = Bağlantılar dosyanız daha yeni bir { -brand-hacivat } sürümünden. Bu sürümde bağlantı eklenemez ya da değiştirilemez.
+# Review: PO
+hv-conn-file-quarantined = Bağlantılar dosyanız okunamadı. { $file } olarak kaydedildi ve hiçbir bağlantı yüklenmedi.
+# Review: PO
+hv-conn-file-entries-skipped = Bağlantılar dosyanızdaki { $count } bağlantı okunamadı ve atlandı.
+# Review: PO
+hv-conn-file-password-ignored = Bağlantılar dosyanızdaki bir parola yok sayıldı. { -brand-hacivat } parolaları o dosyada değil, sistemin anahtar deposunda saklar.
+# Review: PO
+hv-conn-toast-dup = { $name } olarak çoğaltıldı
+# Review: PO
+hv-conn-file-unreadable = { -brand-hacivat } bağlantılar dosyanızı okuyamıyor. Dosya olduğu gibi bırakıldı; okunabilene kadar bağlantılar değiştirilemez.
+# Review: PO
+hv-conn-file-values-ignored = Bağlantılar dosyanızdaki { $count } ayar okunamadı ve yok sayıldı.
+
+## m2a-t18-explorer
+
+# Review: PO
+hv-cmd-connection-new = Yeni bağlantı
+# Review: PO
+hv-cmd-connection-paste-url = Kopyalanan URL'den yeni bağlantı
+# Review: PO
+hv-cmd-connection-toggle-connect = Bağlan ya da bağlantıyı kes
+# Review: PO
+hv-cmd-connection-edit = Bağlantıyı düzenle
+# Review: PO
+hv-cmd-connection-duplicate = Bağlantıyı çoğalt
+# Review: PO
+hv-cmd-connection-copy-url = Bağlantıyı URL olarak kopyala
+# Review: PO
+hv-cmd-connection-delete = Bağlantıyı sil
+# Review: PO
+hv-cmd-connection-context-menu = Bağlantı menüsünü göster
+# Review: PO
+hv-cmd-connection-import-pg-service = pg_service.conf içe aktar
+# Review: PO
+hv-cmd-connection-retry = Bağlantıyı yeniden dene
+# Review: PO
+hv-cmd-connection-explain-unencrypted = Şifrelemesiz bağlantıyı açıkla
+# Review: PO
+hv-cmd-workspace-focus-notification = En yeni bildirime git
+# Review: PO
+hv-explorer-empty-body = Bir PostgreSQL, MySQL, MariaDB ya da SQLite veritabanı ekleyin. Bir bağlantı URL'si yapıştırırsanız { -brand-hacivat } formu sizin için doldurur.
+# Review: PO
+hv-explorer-new = Yeni bağlantı
+# Review: PO
+hv-explorer-paste = URL yapıştır
+# Review: PO
+hv-explorer-import = pg_service.conf içe aktar…
+# Review: PO
+hv-explorer-group-production = ÜRETİM
+# Review: PO
+hv-explorer-group-staging = HAZIRLIK
+# Review: PO
+hv-explorer-group-test = TEST
+# Review: PO
+hv-explorer-group-dev = GELİŞTİRME
+# Review: PO
+hv-explorer-group-local = YEREL
+# Review: PO
+hv-explorer-group-unset = ORTAM YOK
+# Review: PO
+hv-conn-menu-connect = Bağlan
+# Review: PO
+hv-conn-menu-disconnect = Bağlantıyı kes
+# Review: PO
+hv-conn-menu-edit = Düzenle…
+# Review: PO
+hv-conn-menu-dup = Çoğalt
+# Review: PO
+hv-conn-menu-copy-url = URL olarak kopyala
+# Review: PO
+hv-conn-menu-delete = Sil…
+# Review: PO
+hv-conn-del-title = { $name } silinsin mi?
+# Review: PO
+hv-conn-del-body = Kayıtlı parolası Anahtar Zinciri'nden de silinir. Betikler ve sorgu geçmişi kalır. Bu işlem geri alınamaz.
+# Review: PO
+hv-conn-del-btn = Sil
+# Review: PO
+hv-conn-del-cancel = Vazgeç
+# Review: PO
+hv-conn-toast-deleted = { $name } silindi
+# Review: PO
+hv-conn-toast-cancelled = { $name } bağlantısı iptal edildi.
+# Review: PO
+hv-conn-sheet-none = Ayrıntılarını görmek için bir bağlantı seçin.
+# Review: PO
+hv-conn-kv-env = Ortam
+# Review: PO
+hv-conn-kv-engine = Motor
+# Review: PO
+hv-conn-kv-host = Adres
+# Review: PO
+hv-conn-kv-file = Dosya
+# Review: PO
+hv-conn-kv-user = Kullanıcı
+# Review: PO
+hv-conn-kv-access = Erişim
+# Review: PO
+hv-conn-kv-path = Yol
+# Review: PO
+hv-conn-kv-enc = Şifreleme
+# Review: PO
+hv-conn-kv-secret = Parola
+# Review: PO
+hv-conn-access-ro-guarded = salt okunur (korumalı)
+# Review: PO
+hv-conn-enc-verified = { $version } · doğrulandı
+# Review: PO
+hv-conn-enc-unverified = { $version } · doğrulanmadı
+# Review: PO
+hv-conn-enc-unencrypted = şifrelenmemiş
+# Review: PO
+hv-conn-enc-none-file = geçerli değil (dosya)
+# Review: PO
+hv-conn-secret-forever = Anahtar Zinciri · kalıcı
+# Review: PO
+hv-conn-secret-never = her seferinde sorar
+# Review: PO
+hv-conn-secret-session = bu oturum boyunca
+# Review: PO
+hv-conn-secret-restart = yeniden başlatana kadar
+# Review: PO
+hv-conn-secret-pgpass = ~/.pgpass dosyasından
+# Review: PO
+hv-conn-secret-none = yok
+# Review: PO
+hv-conn-unenc-title = Şifrelemesiz bağlanıldı
+# Review: PO
+hv-conn-unenc-body = { $host } TLS sunmuyor. Adres özel bir ağda olduğu için { -brand-hacivat } şifresiz bağlantıya izin verdi. Bağlantı şifresiz kaldıkça bu rozet görünür.
+# Review: PO
+hv-conn-unenc-fix = Kaldırmak için sunucuda TLS'i açın ya da SSH üzerinden bağlanın.
+# Review: PO
+hv-capsule-connecting = Bağlanıyor
+# Review: PO
+hv-capsule-failed = Bağlanılamadı
+# Review: PO
+hv-capsule-retry = Yeniden dene
+# Review: PO
+hv-capsule-clock = { NUMBER($seconds, minimumFractionDigits: 2) } sn
+# Review: PO
+hv-capsule-unsupported = desteklenmiyor
+# Review: PO
+hv-capsule-access-read-write = okuma-yazma
+# Review: PO
+hv-capsule-latency = { $ms } ms
+# Review: PO
+hv-status-env = { $env } · { $access }
+# Review: PO
+hv-home-title = Açık sorgu yok
+# Review: PO
+hv-home-hint = Gezgin'den bir bağlantı seçin ya da yeni bir tane ekleyin.
+# Review: PO
+hv-home-new = Yeni bağlantı
+# Review: PO
+hv-home-paste = Kopyalanan URL'den yeni bağlantı
+# Review: PO
+hv-home-connect = Seçili bağlantıya bağlan
+# Review: PO
+hv-conn-import-title = pg_service.conf'tan içe aktar
+# Review: PO
+hv-conn-import-body = İçe aktarılacak servisleri seçin. Her uzak servis için bir ortam gerekir.
+# Review: PO
+hv-conn-import-confirm = İçe aktar
+# Review: PO
+hv-conn-import-cancel = Vazgeç
+# Review: PO
+hv-conn-import-row = { $service } · { $target }
+# Review: PO
+hv-conn-import-empty = pg_service.conf içinde servis bulunamadı.
+# Review: PO
+hv-conn-import-unreadable = pg_service.conf okunamadı.
+# Review: PO
+hv-conn-import-password-ignored = Dosyayı başka kullanıcılar okuyabildiği için { $service } parolası yok sayıldı.
+# Review: PO
+hv-conn-import-done = { $count } bağlantı içe aktarıldı
+## m2a-t20-errors
+
+# Review: PO
+hv-conn-test-running = Test ediliyor
+# Review: PO
+hv-conn-test-clock = { NUMBER($seconds, minimumFractionDigits: 2) } sn
+# Review: PO
+hv-conn-test-ok = { $ms } ms içinde bağlandı
+# Review: PO
+hv-conn-test-ok-sub = Hiçbir şey kaydedilmedi. Test kendi bağlantısını açtı ve kapattı.
+# Review: PO
+hv-conn-test-copy = Raporu kopyala
+# Review: PO
+hv-conn-diag-server = Sunucu
+# Review: PO
+hv-conn-diag-latency = Gecikme
+# Review: PO
+hv-conn-diag-tls = Şifreleme
+# Review: PO
+hv-conn-diag-cipher = Şifre takımı
+# Review: PO
+hv-conn-diag-auth = Oturum
+# Review: PO
+hv-conn-diag-warn = Uyarılar
+# Review: PO
+hv-conn-diag-none = Yok
+# Review: PO
+hv-conn-diag-server-v = { $product } { $version }
+# Review: PO
+hv-conn-diag-latency-v = { $ms } ms · 3 ölçümün ortancası
+# Review: PO
+hv-conn-diag-auth-v = { $user } · { $method ->
+        [password] Parola
+        [pgpass] pgpass
+        [client_cert] İstemci sertifikası
+       *[none] parolasız
+    }
+# Review: PO
+hv-conn-diag-auth-method = { $method ->
+        [password] Parola
+        [pgpass] pgpass
+        [client_cert] İstemci sertifikası
+       *[none] Parolasız
+    }
+# Review: PO
+hv-conn-diag-tls-v = TLS { $version } · { $state ->
+        [full] doğrulandı
+        [ca_only] CA doğrulandı
+       *[no] doğrulanmadı
+    }
+# Review: PO
+hv-conn-diag-tls-nov = TLS · { $state ->
+        [full] doğrulandı
+        [ca_only] CA doğrulandı
+       *[no] doğrulanmadı
+    }
+# Review: PO
+hv-conn-diag-tls-none = şifrelenmemiş
+# Review: PO
+hv-conn-diag-file = geçerli değil (dosya)
+# Review: PO
+hv-conn-diag-row = { $label }: { $value }
+# Review: PO
+hv-conn-step-resolve = Çözümle
+# Review: PO
+hv-conn-step-tcp = Bağlan
+# Review: PO
+hv-conn-step-tls = TLS
+# Review: PO
+hv-conn-step-auth = Oturum aç
+# Review: PO
+hv-conn-step-check = Sunucuyu denetle
+# Review: PO
+hv-conn-step-pgpass = pgpass
+# Review: PO
+hv-conn-step-open = Dosyayı aç
+# Review: PO
+hv-conn-step-ms = { $ms } ms
+# Review: PO
+hv-conn-step-list = Bağlantı adımları
+# Review: PO
+hv-conn-step-state-pending = başlamadı
+# Review: PO
+hv-conn-step-state-running = sürüyor
+# Review: PO
+hv-conn-step-state-done = tamam
+# Review: PO
+hv-conn-step-state-failed = başarısız
+# Review: PO
+hv-conn-step-state-skipped = atlandı
+# Review: PO
+hv-conn-warn-no-tls = Bağlantı şifrelenmemiş.
+# Review: PO
+hv-conn-warn-tls-not-verified = Bağlantı şifreli, ama sunucunun sertifikası doğrulanmadı.
+# Review: PO
+hv-conn-warn-not-tested = { -brand-hacivat } henüz { $version } sürümüyle test edilmedi.
+# Review: PO
+hv-conn-warn-unsupported = { $version } sürümü, desteklenen sürümlerden eski. Yine de bağlanmayı seçtiniz.
+# Review: PO
+hv-conn-warn-replica = Sunucu salt okunur bir kopya (replika).
+# Review: PO
+hv-conn-warn-server-read-only = Sunucu salt okunur kipte.
+# Review: PO
+hv-conn-warn-super-read-only = Sunucu süper salt okunur kipte: yöneticiler dahil kimse yazamaz.
+# Review: PO
+hv-conn-warn-low-wait-timeout = Sunucu boştaki bağlantıları { $seconds } sn sonra kapatır.
+# Review: PO
+hv-conn-warn-local-infile-on = Sunucu LOAD DATA LOCAL INFILE'a izin veriyor; bu Mac'ten dosya isteyebilir.
+# Review: PO
+hv-conn-warn-sqlite-file-not-writable = Veritabanı dosyasına yazılamıyor; salt okunur açılır.
+# Review: PO
+hv-conn-warn-sqlite-journal = Veritabanı { $mode } günlük kipini kullanıyor.
+# Review: PO
+hv-conn-err-title = { $name } bağlantısı kurulamadı
+# Review: PO
+hv-conn-err-attempt = 3 denemeden { $n }.
+# Review: PO
+hv-conn-err-new-pw = { $user } için parola
+# Review: PO
+hv-conn-err-tech = Teknik ayrıntılar
+# Review: PO
+hv-conn-err-stage = Hata adımı
+# Review: PO
+hv-conn-err-class = Sınıf
+# Review: PO
+hv-conn-err-code = Kod
+# Review: PO
+hv-conn-err-server = Sunucu mesajı
+# Review: PO
+hv-conn-err-elapsed-label = Geçen süre
+# Review: PO
+hv-conn-err-elapsed = { NUMBER($seconds, minimumFractionDigits: 3) } sn
+# Review: PO
+hv-conn-err-copy = Ayrıntıları kopyala (İngilizce)
+# Review: PO
+hv-conn-fix-reenter = Parolayı yeniden gir
+# Review: PO
+hv-conn-fix-edit = Bağlantıyı düzenle
+# Review: PO
+hv-conn-fix-retry = Yeniden dene
+# Review: PO
+hv-conn-fix-use-db = { $db } kullan
+# Review: PO
+hv-conn-fix-versions = Desteklenen sürümler
+# Review: PO
+hv-conn-fix-anyway = Yine de bağlan (desteksiz)
+# Review: PO
+hv-conn-fix-connect = Bağlan
+# Review: PO
+hv-conn-fix-close = Kapat
+# Review: PO
+hv-conn-fix-read-only = Bağlantılar dosyanız değiştirilemiyor; bu yüzden bağlantıyı düzenleyen düzeltmeler kapalı.
+# Review: PO
+hv-conn-fix-save-failed = Değişiklik bağlantılar dosyanıza kaydedilemedi.
+# Review: PO
+hv-conn-prod-title = { -brand-hacivat } { $name } için ne kadar dikkatli olsun?
+# Review: PO
+hv-conn-prod-body = { $host } bu Mac'te değil. Nasıl bir veritabanı olduğunu seçin. Bunu daha sonra bağlantı ayarlarından değiştirebilirsiniz.
+# Review: PO
+hv-conn-prod-suggest = Adreste “{ $token }” geçtiği için önerildi.
+# Review: PO
+hv-conn-prod-suggest-name = Bağlantı adında “{ $token }” geçtiği için önerildi.
+# Review: PO
+hv-conn-prod-opt-production = Üretim
+# Review: PO
+hv-conn-prod-opt-production-d = İnsanların ya da servislerin dayandığı canlı veri
+# Review: PO
+hv-conn-prod-opt-staging = Hazırlık
+# Review: PO
+hv-conn-prod-opt-staging-d = Üretimi yansıtan bir kopya
+# Review: PO
+hv-conn-prod-opt-test = Test
+# Review: PO
+hv-conn-prod-opt-test-d = Ortak test ya da CI verisi
+# Review: PO
+hv-conn-prod-opt-dev = Geliştirme
+# Review: PO
+hv-conn-prod-opt-dev-d = Bozulmasında sakınca olmayan geliştirme veritabanı
+# Review: PO
+hv-conn-prod-choices = Ortam
+# Review: PO
+hv-conn-prod-changes = Üretim seçilirse { -brand-hacivat }:
+# Review: PO
+hv-conn-prod-c1 = bu bağlantıda çalışırken başlık çubuğunda { $word } kapsülünü gösterir,
+# Review: PO
+hv-conn-prod-c1-word = PROD
+# Review: PO
+hv-conn-prod-c2 = veriyi ya da şemayı değiştiren ifadeler için onay ister,
+# Review: PO
+hv-conn-prod-c3 = elle commit kullanır: siz commit edene kadar hiçbir şey yazılmaz.
+# Review: PO
+hv-conn-prod-other = Ek onay yok. İfadeler çalıştıkça commit edilir.
+# Review: PO
+hv-conn-prod-save = { $env ->
+        [production] Üretim olarak kaydet
+        [staging] Hazırlık olarak kaydet
+        [test] Test olarak kaydet
+       *[dev] Geliştirme olarak kaydet
+    }
+# Review: PO
+hv-conn-prod-pick = Bir ortam seçin
+# Review: PO
+hv-conn-prod-cancel = Vazgeç
+# Review: PO
+hv-conn-pw-title = { $name } oturumu
+# Review: PO
+hv-conn-pw-body = { $user } için parolayı girin. Yalnızca bağlantı kurulursa saklanır.
+# Review: PO
+hv-conn-pw-cancel = Vazgeç
+## m2a-t17-dialog
+
+# Review: PO
+hv-cmd-connection-dialog-test = Bağlantıyı test et
+# Review: PO
+hv-cmd-connection-dialog-save = Bağlantıyı kaydet
+# Review: PO
+hv-cmd-connection-dialog-save-and-connect = Kaydet ve bağlan
+# Review: PO
+hv-cmd-connection-dialog-copy-url = Bağlantıyı URL olarak kopyala
+# Review: PO
+hv-conn-dlg-title-new = Yeni bağlantı
+# Review: PO
+hv-conn-dlg-title-edit = { $name } bağlantısını düzenle
+# Review: PO
+hv-conn-dlg-sub-new = Henüz kaydedilmedi
+# Review: PO
+hv-conn-dlg-sub-edit = Kayıtlı · değişiklikler bir sonraki bağlanışta geçerli olur
+# Review: PO
+hv-conn-dlg-url = URL
+# Review: PO
+hv-conn-dlg-url-ph = Formu doldurmak için bir bağlantı URL'si yapıştırın
+# Review: PO
+hv-conn-dlg-copy-url = URL olarak kopyala
+# Review: PO
+hv-conn-dlg-engine = Motor
+# Review: PO
+hv-conn-dlg-name = Ad
+# Review: PO
+hv-conn-dlg-env = Ortam
+# Review: PO
+hv-conn-dlg-env-ask = Bu adres bu Mac'te olmadığı için kaydederken sorulur.
+# Review: PO
+hv-conn-dlg-env-local = Yerel olarak ayarlandı: sunucu bu Mac'te çalışıyor.
+# Review: PO
+hv-conn-dlg-ro = Salt okunur
+# Review: PO
+hv-conn-dlg-ro-hint = · Veriyi ya da şemayı değiştiren ifadeleri engelle
+# Review: PO
+hv-conn-section-server = SUNUCU
+# Review: PO
+hv-conn-section-auth = KİMLİK DOĞRULAMA
+# Review: PO
+hv-conn-section-tls = Şifreleme (TLS)
+# Review: PO
+hv-conn-section-advanced = Gelişmiş
+# Review: PO
+hv-conn-dlg-host = Adres
+# Review: PO
+hv-conn-dlg-port = Port
+# Review: PO
+hv-conn-dlg-db = Veritabanı
+# Review: PO
+hv-conn-dlg-user = Kullanıcı
+# Review: PO
+hv-conn-dlg-file = Dosya
+# Review: PO
+hv-conn-dlg-choose = Seç…
+# Review: PO
+hv-conn-dlg-sqlite-ro = Dosyayı salt okunur aç
+# Review: PO
+hv-conn-dlg-sqlite-create = Dosya yoksa oluştur
+# Review: PO
+hv-conn-dlg-auth = Kimlik doğrulama
+# Review: PO
+hv-conn-auth-password = Parola
+# Review: PO
+hv-conn-auth-pgpass = pgpass
+# Review: PO
+hv-conn-auth-cert = İstemci sertifikası
+# Review: PO
+hv-conn-auth-none = Yok
+# Review: PO
+hv-conn-dlg-password = Parola
+# Review: PO
+hv-conn-dlg-remember = Hatırla
+# Review: PO
+hv-conn-dlg-pw-saved = Anahtar Zinciri'nde kayıtlı
+# Review: PO
+hv-conn-dlg-pw-from-url = yapıştırılan URL'den
+# Review: PO
+hv-conn-ret-never = Hiçbir zaman
+# Review: PO
+hv-conn-ret-never-h = her bağlanışta sor
+# Review: PO
+hv-conn-ret-restart = Yeniden başlatana kadar
+# Review: PO
+hv-conn-ret-restart-h = bellekte tutulur
+# Review: PO
+hv-conn-ret-session = Bu oturum boyunca
+# Review: PO
+hv-conn-ret-session-h = bağlantı kesilince unutulur
+# Review: PO
+hv-conn-ret-forever = Kalıcı (Anahtar Zinciri)
+# Review: PO
+hv-conn-ret-forever-h = macOS Anahtar Zinciri'nde saklanır
+# Review: PO
+hv-conn-ret-forever-off-h = sistemin anahtar deposu kullanılamıyor
+# Review: PO
+hv-conn-pgpass-match = ~/.pgpass dosyasının { $n }. satırıyla eşleşiyor
+# Review: PO
+hv-conn-pgpass-none = ~/.pgpass dosyasında bu bağlantıyla eşleşen bir satır henüz yok.
+# Review: PO
+hv-conn-pgpass-note = Her bağlanışta okunur. { -brand-hacivat } bu bağlantı için parola saklamaz.
+# Review: PO
+hv-conn-dlg-cert = Sertifika
+# Review: PO
+hv-conn-dlg-key = Özel anahtar
+# Review: PO
+hv-conn-auth-none-note = Parolasız bağlanır. Yalnızca bu makineye güvenen sunucularda kullanın.
+# Review: PO
+hv-conn-tls-sum-auto = Otomatik: sunucu TLS sunarsa doğrula
+# Review: PO
+hv-conn-tls-mode = Mod
+# Review: PO
+hv-conn-tls-auto = Otomatik
+# Review: PO
+hv-conn-tls-auto-h = sunulursa doğrula; şifresiz yalnızca özel ağlarda
+# Review: PO
+hv-conn-tls-auto-loopback-h = sunulursa doğrula; şifresiz yalnızca bu Mac'e
+# Review: PO
+hv-conn-tls-require = Zorunlu
+# Review: PO
+hv-conn-tls-require-h = şifrele, doğrulama
+# Review: PO
+hv-conn-tls-verify-ca = CA'yı doğrula
+# Review: PO
+hv-conn-tls-verify-ca-h = zinciri denetle
+# Review: PO
+hv-conn-tls-verify-full = Tam doğrula
+# Review: PO
+hv-conn-tls-verify-full-h = zinciri ve sunucu adını denetle
+# Review: PO
+hv-conn-tls-disable = Kapalı
+# Review: PO
+hv-conn-tls-disable-h = hiç şifreleme
+# Review: PO
+hv-conn-tls-disable-warn = Şifreleme kapalıyken parola ağda düz metin olarak taşınır; ağ yolundaki herkes onu okuyabilir.
+# Review: PO
+hv-conn-tls-ca = CA sertifikası
+# Review: PO
+hv-conn-tls-ca-ph = Sistem güven deposu
+# Review: PO
+hv-conn-adv-sum = Zaman aşımı { $timeout } sn · { $keepalive ->
+        [on] { $seconds } sn'de bir canlı tutma
+       *[off] canlı tutma kapalı
+    }
+# Review: PO
+hv-conn-adv-timeout = Bağlanma zaman aşımı
+# Review: PO
+hv-conn-adv-timeout-unit = saniye
+# Review: PO
+hv-conn-adv-keepalive = Canlı tutma aralığı
+# Review: PO
+hv-conn-adv-off = Kapalı
+# Review: PO
+hv-conn-adv-every = { $seconds } sn
+# Review: PO
+hv-conn-adv-app = Uygulama adı
+# Review: PO
+hv-conn-adv-extra = Ek özellikler
+# Review: PO
+hv-conn-adv-extra-add = Özellik ekle
+# Review: PO
+hv-conn-adv-extra-key = anahtar
+# Review: PO
+hv-conn-adv-extra-value = değer
+# Review: PO
+hv-conn-adv-extra-remove = Özelliği kaldır
+# Review: PO
+hv-conn-adv-budget = Bağlantı sayısı
+# Review: PO
+hv-conn-adv-budget-v = Aynı anda en çok { $max } açık; fazlası sıra bekler
+# Review: PO
+hv-conn-dlg-test = Bağlantıyı test et
+# Review: PO
+hv-conn-dlg-test-stop = Durdur
+# Review: PO
+hv-conn-dlg-cancel = İptal
+# Review: PO
+hv-conn-dlg-save = Kaydet
+# Review: PO
+hv-conn-dlg-save-connect = Kaydet ve bağlan
+# Review: PO
+hv-conn-dlg-store-read-only = Bağlantılar dosyasına yazılamadığı için bağlantılar şu an kaydedilemiyor.
+# Review: PO
+hv-conn-dlg-save-failed = Bağlantı kaydedilemedi. Yeniden deneyin.
+# Review: PO
+hv-conn-dlg-save-gone = Bu bağlantı silindiği için değişiklikler kaydedilmedi.
+# Review: PO
+hv-conn-dlg-save-secret = Bağlantı kaydedildi, ancak parolası saklanamadı.
+# Review: PO
+hv-conn-env-local = yerel
+# Review: PO
+hv-conn-env-dev = geliştirme
+# Review: PO
+hv-conn-env-test = test
+# Review: PO
+hv-conn-env-staging = hazırlık
+# Review: PO
+hv-conn-env-production = üretim
+# Review: PO
+hv-conn-url-filled = Yapıştırılan URL'den dolduruldu.
+# Review: PO
+hv-conn-url-secret = Parola URL'den ayrıldı. Kaydettiğinizde Anahtar Zinciri'ne gider.
+# Review: PO
+hv-conn-url-secret-other = { $ret ->
+        [never] Parola URL'den ayrıldı. { -brand-hacivat } onu saklamaz ve her bağlanışta sorar.
+        [until_restart] Parola URL'den ayrıldı. { -brand-hacivat } onu yeniden başlatana kadar bellekte tutar.
+       *[for_session] Parola URL'den ayrıldı. { -brand-hacivat } onu bu oturum boyunca tutar.
+    }
+# Review: PO
+hv-conn-url-mapped = şuna dönüştü: { $setting }
+# Review: PO
+hv-conn-url-setting-tls = Şifreleme: { $mode }
+# Review: PO
+hv-conn-url-extra = ek özellik olarak saklandı
+# Review: PO
+hv-conn-url-engine-set = Motor URL'ye göre { $engine } olarak ayarlandı.
+# Review: PO
+hv-conn-url-undo = Geri al
+# Review: PO
+hv-conn-url-switch = Bu bir { $engine } URL'si, form ise { $current } için ayarlı.
+# Review: PO
+hv-conn-url-switch-l2 = Henüz hiçbir şey değişmedi.
+# Review: PO
+hv-conn-url-switch-btn = { $engine } motoruna geç ve doldur
+# Review: PO
+hv-conn-url-keep = { $current } kalsın
+# Review: PO
+hv-conn-url-unrec = { -brand-hacivat } bunu bir bağlantı URL'si olarak okuyamıyor. Hiçbir şey değişmedi.
+# Review: PO
+hv-conn-url-formats = postgres://, mysql://, mariadb://, jdbc:… URL'lerini, anahtar=değer dizelerini ve SQLite dosya yollarını okur.
+# Review: PO
+hv-conn-url-multihost = URL'de { $count } sunucu var. { -brand-hacivat } ilkine, { $host } adresine bağlanır.
+# Review: PO
+hv-conn-url-dismiss = Kapat
+# Review: PO
+hv-conn-toast-saved = { $name } kaydedildi
+# Review: PO
+hv-conn-toast-copied = URL olarak kopyalandı
+# Review: PO
+hv-conn-toast-nopw = Parola dahil değil.
+# Review: PO
+hv-conn-issue-name-missing = Bir ad girin.
+# Review: PO
+hv-conn-issue-host-missing = Bir adres girin.
+# Review: PO
+hv-conn-issue-host-invalid = Bu adres kullanılamıyor. Boşlukları ve URL karakterlerini kaldırın.
+# Review: PO
+hv-conn-issue-port-invalid = 1 ile 65535 arasında bir port girin.
+# Review: PO
+hv-conn-issue-file-missing = Bir veritabanı dosyası seçin ya da { -brand-hacivat } onu oluştursun.
+# Review: PO
+hv-conn-issue-path-refused = { -brand-hacivat } bu yolu açmaz. Yerel bir dosya seçin.
+# Review: PO
+hv-conn-issue-create-and-read-only = Yeni bir dosya salt okunur açılamaz. İkisinden birini kapatın.
+# Review: PO
+hv-conn-issue-transport-unavailable = Bu bağlantı, bu sürümün henüz açamadığı bir tünel kullanıyor.
+# Review: PO
+hv-conn-issue-tls-ca-unreadable = CA sertifikası okunamıyor. CA doğrulaması için bir sertifika gerekir.
+# Review: PO
+hv-conn-issue-tls-cert-unreadable = İstemci sertifikası ya da anahtarı okunamıyor.
+# Review: PO
+hv-conn-issue-tls-mode-unsupported = { $mode } bu motor için henüz kullanılamıyor.
+# Review: PO
+hv-conn-issue-option-rejected = { $key } özelliğine burada izin verilmiyor.
+
+## m2a-t21-shots
+
+# Review: PO
+hv-conn-env-unset = ortam yok
+# Review: PO
+hv-conn-import-choose = Seçin…
+# Review: PO
+hv-conn-toast-delete-secret = Bağlantı silindi, ancak kayıtlı parolası sistemin anahtar deposundan kaldırılamadı.
+
+## m2a-finalfix
+
+# Review: PO
+hv-conn-enc-ca-only = { $version } · CA doğrulandı
+# Review: PO
+hv-conn-issue-option-secret = { $key } özelliği bir parola taşıyor. Özelliği kaldırın, parolayı Parola alanına yazın.
+
+## m2b-t01-interfaces
+
+# Review: PO
+hv-conn-issue-ssh-host-missing = SSH sunucusunu girin.
+# Review: PO
+hv-conn-issue-ssh-user-missing = Oturum açılacak kullanıcıyı girin.
+# Review: PO
+hv-conn-issue-ssh-too-many-hops = Bir tünel en fazla 8 ara sunucudan geçebilir.
+# Review: PO
+hv-conn-issue-ssh-key-file-missing = Bu anahtar dosyası bulunamıyor. ~/.ssh/id_ed25519 gibi özel anahtarı seçin.
+# Review: PO
+hv-conn-issue-tls-key-legacy-encrypted = Bu anahtar, { -brand-hacivat } uygulamasının okuyamadığı eski bir biçimde şifrelenmiş. Anahtarı şifreli bir PKCS #8 anahtarına dönüştürün (openssl pkcs8 -topk8), sonra yeni dosyayı seçin.
+
+## m2b-t20-ssh
+
+# Review: PO
+hv-conn-section-ssh = SSH tüneli
+# Review: PO
+hv-conn-ssh-sum-off = Kapalı
+# Review: PO
+hv-conn-ssh-sum-on = { $host } üzerinden
+# Review: PO
+hv-conn-ssh-sum-hops = { $host } üzerinden · { $n } ara sunucu
+# Review: PO
+hv-conn-ssh-use = SSH tüneli üzerinden bağlan
+# Review: PO
+hv-conn-ssh-import = ~/.ssh/config'den içe aktar…
+# Review: PO
+hv-conn-ssh-host = SSH sunucusu
+# Review: PO
+hv-conn-ssh-user = SSH kullanıcısı
+# Review: PO
+hv-conn-ssh-auth-agent = Ajan
+# Review: PO
+hv-conn-ssh-auth-key = Anahtar dosyası
+# Review: PO
+hv-conn-ssh-auth-password = Parola
+# Review: PO
+hv-conn-ssh-auth-kbd = Klavye etkileşimli
+# Review: PO
+hv-conn-ssh-agent-note = ssh-agent'a yüklü anahtarları kullanır.
+# Review: PO
+hv-conn-ssh-key = Anahtar dosyası
+# Review: PO
+hv-conn-ssh-passphrase = Parola ifadesi
+# Review: PO
+hv-conn-ssh-kbd-note = Sunucunun soruları, örneğin tek kullanımlık kod, bağlanırken gösterilir.
+# Review: PO
+hv-conn-ssh-jumps = Ara sunucular
+# Review: PO
+hv-conn-ssh-add-jump = Ara sunucu ekle
+# Review: PO
+hv-conn-ssh-remove-jump = { $n }. ara sunucuyu kaldır
+# Review: PO
+hv-conn-ssh-jump-host-missing = Ara sunucuyu girin.
+# Review: PO
+hv-conn-ssh-jump-key-missing = Bir ara sunucunun anahtar dosyası bulunamıyor. ~/.ssh/config içindeki IdentityFile satırını düzeltip sunucuyu yeniden içe aktarın.
+# Review: PO
+hv-conn-ssh-route = Rota
+# Review: PO
+hv-conn-ssh-this-mac = { $os ->
+        [mac] bu Mac
+       *[other] bu bilgisayar
+    }
+# Review: PO
+hv-conn-ssh-hostkeys = Sunucu anahtarları
+# Review: PO
+hv-conn-ssh-hk-ask = Yeni sunucularda sor
+# Review: PO
+hv-conn-ssh-hk-accept = Yeniyi kabul et, değişirse dur
+# Review: PO
+hv-conn-ssh-hk-strict = Yalnızca bilinen sunucular
+# Review: PO
+hv-conn-ssh-import-title = ~/.ssh/config içindeki sunucular
+# Review: PO
+hv-conn-ssh-proxycmd = ProxyCommand kullanıyor, desteklenmiyor
+# Review: PO
+hv-conn-ssh-unusable-secret = parolaya benzeyen bir değer içeriyor, içe aktarılmadı
+# Review: PO
+hv-conn-ssh-unusable-token = { $token } kullanıyor, desteklenmiyor
+# Review: PO
+hv-conn-ssh-unusable-depth = ara sunucuları çok derin iç içe
+# Review: PO
+hv-conn-ssh-unusable-unknown = dosyada olmayan bir ara sunucuyu adlandırıyor
+# Review: PO
+hv-conn-ssh-import-via = { $target } · ProxyJump { $jumps }
+# Review: PO
+hv-conn-ssh-import-key = { $target } · IdentityFile { $key }
+# Review: PO
+hv-conn-ssh-import-none = ~/.ssh/config içinde sunucu yok
+# Review: PO
+hv-conn-ssh-import-unreadable = ~/.ssh/config okunamıyor
+# Review: PO
+hv-conn-ssh-imported = { $alias }, ~/.ssh/config'den içe aktarıldı: adres, kullanıcı, anahtar ve ara sunucu.
+# Review: PO
+hv-conn-ssh-notice-match = { $line }. satır: Match blokları atlandı.
+# Review: PO
+hv-conn-ssh-notice-include = { $line }. satır: Include çok derin iç içe, adlandırdığı dosyalar atlandı.
+# Review: PO
+hv-conn-ssh-notice-known-hosts = { $alias }: UserKnownHostsFile yok sayıldı. { -brand-hacivat } kendi bilinen sunucular listesini ve ~/.ssh/known_hosts dosyasını denetler.
+# Review: PO
+hv-conn-ssh-notice-strict-no = { $alias }: StrictHostKeyChecking no, Yeni sunucularda sor olarak okundu.
+# Review: PO
+hv-conn-ssh-notice-agent = { $alias }: IdentityAgent yok sayıldı. { -brand-hacivat } SSH_AUTH_SOCK içindeki ajanı kullanır.
+# Review: PO
+hv-conn-ssh-notice-jump-password = { $alias }: ProxyJump bir parola içeriyordu; parola kaldırıldı ve saklanmadı.
+# Review: PO
+hv-conn-step-ssh = SSH
+
+## m2a-demo-extra
+
+# Review: PO
+hv-conn-url-left-out = { $reason ->
+        [unknown] { $engine } için bir bağlantı seçeneği değil, bu yüzden alınmadı
+       *[refused] izin verilmiyor, bu yüzden alınmadı
+    }
+# Review: PO
+hv-conn-err-property = Özellik
+# Review: PO
+hv-conn-err-path = Yol
+# Review: PO
+hv-conn-err-problem = Sorun
+# Review: PO
+hv-conn-err-refused = { $name } — { $reason ->
+        [unknown] içe aktarılan bağlantılarda izin verilmiyor
+        [encoding] iki kez kodlanmış
+        [script] komut çalıştırıyor, içe aktarılan bağlantılarda izin verilmiyor
+        [secret] bir parola taşıyor; parolayı Parola alanına yazın
+        [path] { -brand-hacivat } bu yolu açmaz
+       *[denied] hiçbir zaman izin verilmiyor
+    }
+
+## m2a-dialog-retries
+
+# Review: PO
+hv-conn-err-attempts-used = 3 denemenin hepsi kullanıldı. Hesap kilitlenmesin diye { -brand-hacivat } başka parola göndermez.
+# Review: PO
+hv-conn-dlg-attempts-used = Bu sunucu için deneme hakkı kalmadı. Yeniden denemek için adresi, portu ya da kullanıcıyı değiştirin veya bu pencereyi kapatıp yeniden açın.
+
+## m2b-t22-live
+
+# Review: PO
+hv-capsule-reconnecting = Yeniden bağlanıyor · { $n }. deneme
+# Review: PO
+hv-capsule-next = { $seconds } sn sonra
+# Review: PO
+hv-conn-path-ssh = { $host } üzerinden SSH
+# Review: PO
+hv-conn-idle-cap = Bağlantı kesik (boşta)
+# Review: PO
+hv-conn-idle-disconnected = { $name } bağlantısı { $hours } sa boşta kaldıktan sonra kesildi. Kullandığınızda yeniden bağlanır.
+# Review: PO
+hv-conn-idle-disconnected-minutes = { $name } bağlantısı { $minutes } dk boşta kaldıktan sonra kesildi. Kullandığınızda yeniden bağlanır.
+# Review: PO
+hv-conn-idle-tx = { $name } üzerindeki bir işlem { $minutes } dakikadır açık ve boşta. Commit edilene ya da geri alınana kadar kilitlerini tutar.
+# Review: PO
+hv-conn-lost-title = { $state ->
+        [reconnected] { $name } ile yeniden bağlanıldı
+       *[lost] { $name } oturumu kayboldu
+    }
+# Review: PO
+hv-conn-lost-body = { $state ->
+        [reconnected] Sunucu oturumu sona erdi; { -brand-hacivat } yeni bir oturum açtı.
+       *[lost] Sunucu oturumu süren bir iş varken sona erdi; bu yüzden { -brand-hacivat } kendiliğinden yeniden bağlanmadı. Yeniden dene ile tekrar bağlanabilirsiniz.
+    }
+# Review: PO
+hv-conn-lost-tx = Açık işleminiz sona erdi ve sunucu commit edilmemiş değişikliklerini geri aldı.
+# Review: PO
+hv-conn-lost-other = Ayrıca kayboldu: { $items }
+# Review: PO
+hv-conn-lost-item-temp = geçici tablolar
+# Review: PO
+hv-conn-lost-item-vars = oturum değişkenleri
+# Review: PO
+hv-conn-lost-item-prepared = { $count } hazırlanmış ifade
+# Review: PO
+hv-conn-lost-item-locks = oturum kilitleri
+# Review: PO
+hv-conn-lost-details = Ayrıntıları göster
+# Review: PO
+hv-conn-lost-dismiss = Kapat
+# Review: PO
+hv-conn-gap-title = { $name } üzerinde salt okunur koruma
+# Review: PO
+hv-conn-gap-tx-ended = { -brand-hacivat }, salt okunur bir bağlantıda salt okunur işlemi sonlandıran bir ifadeyi durdurdu ve o oturumu kapattı.
+# Review: PO
+hv-conn-gap-changed-data = { -brand-hacivat }, salt okunur bir bağlantıda veri değiştiren bir ifadeyi durdurdu ve o oturumu kapattı.
+# Review: PO
+hv-conn-access-ro-enforced = salt okunur (sunucu rolüyle zorunlu)
+# Review: PO
+hv-conn-ro-sheet-enforced = salt okunur · zorunlu
+# Review: PO
+hv-conn-ro-sheet-guarded = salt okunur · korumalı
+# Review: PO
+hv-conn-ro-pop-enf-title = Salt okunur, sunucu tarafından zorunlu
+# Review: PO
+hv-conn-ro-pop-enf-body = { $user } rolü burada yalnızca okuyabilir. { -brand-hacivat } içinde ne çalışırsa çalışsın, yazmaları sunucunun kendisi reddeder.
+# Review: PO
+hv-conn-ro-pop-enf-temp = Tek başına TEMP yetkisi zorunluluğu zayıflatmaz; etiket zorunlu kalır.
+# Review: PO
+hv-conn-ro-pop-g-title = Salt okunurluk korumalı, zorunlu değil
+# Review: PO
+hv-conn-ro-pop-g-body = { $user } rolü burada yalnızca okumayla sınırlı değil; bu yüzden yazmaları { -brand-hacivat } kendisi durdurur: her ifadeyi denetler ve salt okunur çalıştırır.
+# Review: PO
+hv-conn-ro-pop-g-limit = Bu, hataları yakalar. Kesin güvence ancak sunucudaki salt okunur bir rolle sağlanır.
+# Review: PO
+hv-conn-ro-pop-g-fix = Zorunlu hale getirmek için veritabanı yöneticinizden böyle bir rol isteyin ve onu bu bağlantının kullanıcısı yapın:
+# Review: PO
+hv-conn-ro-pop-maria-body = { -brand-hacivat } bir MariaDB rolünün salt okunur olduğunu henüz doğrulayamıyor; bu yüzden MariaDB bağlantılarını her zaman kendisi korur.
+# Review: PO
+hv-conn-ro-pop-no-fix = Hiçbir rol değişikliği bu etiketi zorunlu yapmaz; bu yüzden kopyalanacak SQL yok.
+# Review: PO
+hv-conn-ro-pop-sqlite-body = SQLite'ta sunucu rolü yoktur. { -brand-hacivat } dosyayı salt okunur açar ve yalnızca okuyan ifadelere izin verir.
+# Review: PO
+hv-conn-ro-copy-sql = SQL'i kopyala
+# Review: PO
+hv-conn-ro-copied = SQL kopyalandı. Çalıştırmadan önce köşeli parantez içindeki değerleri değiştirin.
+# Review: PO
+hv-conn-ro-warn-head = Bu rolde bulunanlar:
+# Review: PO
+hv-conn-ro-warn-superuser = Süper kullanıcı.
+# Review: PO
+hv-conn-ro-warn-bypass-rls = Satır düzeyi güvenliği atlıyor.
+# Review: PO
+hv-conn-ro-warn-replication = Çoğaltma başlatabilir.
+# Review: PO
+hv-conn-ro-warn-create-role = Rol oluşturup değiştirebilir.
+# Review: PO
+hv-conn-ro-warn-server-file-roles = Veritabanı sunucusundaki dosyaları okuyabilir ya da yazabilir.
+# Review: PO
+hv-conn-ro-warn-execute-server-program = Veritabanı sunucusunda program çalıştırabilir.
+# Review: PO
+hv-conn-ro-warn-signal-backend = Başka oturumları iptal edebilir ya da sonlandırabilir.
+# Review: PO
+hv-conn-ro-warn-write-privileges = Bazı tablolardaki verileri değiştirebilir.
+# Review: PO
+hv-conn-ro-warn-temp-privilege = Geçici tablo oluşturabilir; salt okunur işlemler bunları engeller.
+# Review: PO
+hv-conn-ro-warn-egress-extension = { $name } eklentisi başka sunuculara erişebilir.
+# Review: PO
+hv-conn-ro-warn-role-grant-not-expanded = Ona başka roller verilmiş; { -brand-hacivat } bunların neye izin verdiğini göremiyor.
+# Review: PO
+hv-conn-ro-warn-unparsed = { -brand-hacivat } yetkilerini okuyamadı.
+# Review: PO
+hv-cmd-connection-explain-access = Salt okunur erişimi açıkla
+
+## m2b-t21-prompts
+
+# Review: PO
+hv-conn-hk-title = { $host } ile ilk bağlantı
+# Review: PO
+hv-conn-hk-body = { $os ->
+        [mac] Bu Mac bu SSH sunucusuna daha önce bağlanmadı. Parmak izini yöneticinizin verdiğiyle karşılaştırın.
+       *[other] Bu bilgisayar bu SSH sunucusuna daha önce bağlanmadı. Parmak izini yöneticinizin verdiğiyle karşılaştırın.
+    }
+# Review: PO
+hv-conn-hk-fp = Sunucu anahtarı
+# Review: PO
+hv-conn-hk-store = { -brand-hacivat } bunu kendi bilinen sunucular listesine kaydeder. ~/.ssh/known_hosts değişmez.
+# Review: PO
+hv-conn-hk-trust = Güven ve bağlan
+# Review: PO
+hv-conn-hk-copy-fp = Parmak izini kopyala
+
+# Review: PO
+hv-conn-hk-changed-title = { $host } sunucusunun anahtarı değişti
+# Review: PO
+hv-conn-hk-changed-body = Sunucu, kayıtlı anahtarından farklı bir anahtarla yanıt verdi. Bu, sunucu yeniden kurulduğunda ya da anahtarları yenilendiğinde olur; biri bağlantının arasına girdiğinde de olur. { -brand-hacivat } oturum açmadan önce durdu.
+# Review: PO
+hv-conn-hk-changed-old = Kayıtlı anahtar
+# Review: PO
+hv-conn-hk-changed-new = Şimdi gönderilen
+# Review: PO
+hv-conn-hk-changed-stored-in = Kayıtlı olduğu yer
+# Review: PO
+hv-conn-hk-changed-src-hacivat = Hacivat'ın bilinen sunucuları
+# Review: PO
+hv-conn-hk-changed-src-openssh = { $file }, { NUMBER($n, useGrouping: "false") }. satır
+# Review: PO
+hv-conn-hk-changed-ask = { $host } sunucusunu yöneten kişiye anahtarın değişip değişmediğini sorun ve güvenmeden önce yeni parmak izini karşılaştırın.
+# Review: PO
+hv-conn-hk-changed-replace = Eski anahtarı sil, yenisine güven
+# Review: PO
+hv-conn-hk-changed-openssh-note = { -brand-hacivat } { $file } dosyasını değiştirmez. Yeni anahtar gerçekse eski satırı bir terminalde silin, sonra yeniden deneyin:
+# Review: PO
+hv-conn-hk-changed-copy = Komutu kopyala
+# Review: PO
+hv-conn-hk-changed-copied = Komut kopyalandı
+# Review: PO
+hv-conn-hk-changed-trusted = { $host } sunucusunun yeni anahtarına güvenildi
+
+# Review: PO
+hv-conn-kbd-title = { $host } oturumu
+# Review: PO
+hv-conn-kbd-asks = { $host } soruyor:
+# Review: PO
+hv-conn-kbd-from-server = Sunucunun gönderdiği metin, olduğu gibi
+# Review: PO
+hv-conn-kbd-no-text = Sunucu bir ad ya da açıklama göndermedi.
+# Review: PO
+hv-conn-kbd-attempt = 3 denemeden { $n }.
+# Review: PO
+hv-conn-kbd-not-kept = Yanıtlar yalnızca bu sunucuya gider ve saklanmaz.
+# Review: PO
+hv-conn-kbd-rejected = Sunucu yanıtları kabul etmedi ve yeniden sordu.
+# Review: PO
+hv-conn-kbd-continue = Devam et
+
+# Review: PO
+hv-conn-ssh-secret-hop = { $host }, { $total } atlamadan { $n }.
+# Review: PO
+hv-conn-ssh-secret-pw-title = { $host } için SSH parolası
+# Review: PO
+hv-conn-ssh-secret-pw-body = { $user } için SSH parolasını girin. Yalnızca bağlantı kurulursa saklanır.
+# Review: PO
+hv-conn-ssh-secret-pass-title = { $key } için parola ifadesi
+# Review: PO
+hv-conn-ssh-secret-pass-body = Bu anahtar dosyası şifreli. Parola ifadesini girin. Yalnızca bağlantı kurulursa saklanır.
+# Review: PO
+hv-conn-ssh-secret-wrong = { $host } parolayı kabul etmedi.
+# Review: PO
+hv-conn-ssh-secret-pass-wrong = Bu parola ifadesi anahtarı açmadı.
+# Review: PO
+hv-conn-ssh-secret-attempt = 3 denemeden { $n }.
+# Review: PO
+hv-conn-ssh-secret-continue = Devam et
+
+# Review: PO
+hv-conn-vault-create-title = Kayıtlı parolalar için bir kasa oluşturun
+# Review: PO
+hv-conn-vault-create-why = Bu bilgisayarda sistem anahtarlığı yok.
+# Review: PO
+hv-conn-vault-create-what = { -brand-hacivat }, kalıcı olarak kaydettiğiniz parolaları ana parolayla kilitlenen şifreli bir dosyada tutar.
+# Review: PO
+hv-conn-vault-master = Ana parola
+# Review: PO
+hv-conn-vault-repeat = Tekrar
+# Review: PO
+hv-conn-vault-min = En az 8 karakter
+# Review: PO
+hv-conn-vault-match = İki giriş eşleşiyor
+# Review: PO
+hv-conn-vault-mismatch = İki giriş eşleşmiyor
+# Review: PO
+hv-conn-vault-norecover = { -brand-hacivat } bu parolayı kurtaramaz. Unutursanız kasayı sıfırlar ve kayıtlı parolalarınızı yeniden girersiniz.
+# Review: PO
+hv-conn-vault-notnow-note = Şimdi değil derseniz bu parola { -brand-hacivat } yeniden başlayana kadar tutulur.
+# Review: PO
+hv-conn-vault-notnow = Şimdi değil
+# Review: PO
+hv-conn-vault-create-btn = Kasayı oluştur
+# Review: PO
+hv-conn-vault-created = Kasa oluşturuldu. Kalıcı kaydettiğiniz parolalar oraya gider.
+# Review: PO
+hv-conn-vault-unlock-title = Kasanın kilidini açın
+# Review: PO
+hv-conn-vault-unlock-body = Hacivat'ın { $name } için kayıtlı parolayı okuyabilmesi için ana parola gerekiyor. Kasa, uygulamadan çıkana kadar açık kalır.
+# Review: PO
+hv-conn-vault-unlock-body-any = Hacivat'ın kayıtlı parolalarınızı okuyabilmesi için ana parola gerekiyor. Kasa, uygulamadan çıkana kadar açık kalır.
+# Review: PO
+hv-conn-vault-unlock-wrong = Bu, ana parola değil.
+# Review: PO
+hv-conn-vault-attempt = 3 denemeden { $n }.
+# Review: PO
+hv-conn-vault-unlock-btn = Kilidi aç
+# Review: PO
+hv-conn-vault-reset-link = Kasayı sıfırla…
+# Review: PO
+hv-conn-vault-reset-title = Kasa sıfırlansın mı?
+# Review: PO
+hv-conn-vault-reset-body = Bu işlem kasayı ve içindeki bütün kayıtlı parolaları siler. Bağlantılarınız kalır; { -brand-hacivat } her parolayı bir sonraki bağlanışta sorar. Bu işlem geri alınamaz.
+# Review: PO
+hv-conn-vault-reset-type = Onaylamak için { $word } yazın
+# Review: PO
+hv-conn-vault-reset-word = reset
+# Review: PO
+hv-conn-vault-reset-btn = Kasayı sıfırla
+# Review: PO
+hv-conn-vault-reset-done = Kasa sıfırlandı. İçindeki kayıtlı parolalar silindi.
+# Review: PO
+hv-conn-vault-damaged-title = Kasa okunamıyor
+# Review: PO
+hv-conn-vault-damaged-body = Kasa dosyası bütünlük denetiminden geçemedi; { -brand-hacivat } dosyayı kullanmadı ve değiştirmedi. Bir yedekten geri yükleyin ya da kasayı sıfırlayın.
+# Review: PO
+hv-conn-vault-damaged-meanwhile = O zamana kadar girdiğiniz parolalar { -brand-hacivat } yeniden başlayana kadar tutulur.
+# Review: PO
+hv-conn-ret-forever-vault = Kalıcı (şifreli dosya)
+# Review: PO
+hv-conn-ret-forever-vault-h = Hacivat'ın kasasında, ana parolayla
+
+# Review: PO
+hv-conn-fix-review-host-key = Sunucu anahtarını incele…
+
+# Review: PO
+hv-conn-ssh-secret-remember-all = Bu bağlantının tüm atlamalarındaki kayıtlı SSH parolalarına ve parola ifadelerine uygulanır.
+# Review: PO
+hv-conn-save-unchanged = Hiçbir şey değiştirilmedi: kayıtlı parolalar taşınamadı ya da silinemedi. { -brand-hacivat } sorarsa kasanın kilidini açın, sonra yeniden deneyin.
+# Review: PO
+hv-conn-vault-denied = { -brand-hacivat } kasa dosyasını kullanamıyor: dosya normal bir dosya değil. Girdiğiniz parolalar { -brand-hacivat } yeniden başlayana kadar tutulur.
+
+## m2b-t19-tls
+
+# Review: PO
+hv-conn-fix-review-cert = Sertifikayı incele…
+# Review: PO
+hv-conn-fix-import-ca = CA içe aktar…
+# Review: PO
+hv-conn-tls-title = Sertifikaya güvenilmiyor
+# Review: PO
+hv-conn-tls-body = { $host }:{ $port }, bu Mac'in güvendiği hiçbir CA'nın imzalamadığı bir sertifika sundu. Devam etmeden önce parmak izini sunucuyu yöneten kişiyle karşılaştırın.
+# Review: PO
+hv-conn-tls-subject = Verildiği ad
+# Review: PO
+hv-conn-tls-issuer = Veren
+# Review: PO
+hv-conn-tls-valid = Geçerlilik sonu
+hv-conn-tls-valid-date = { DATETIME($when, dateStyle: "long") }
+# Review: PO
+hv-conn-tls-fp = SHA-256 parmak izi
+# Review: PO
+hv-conn-tls-copy-fp = Parmak izini kopyala
+# Review: PO
+hv-conn-tls-chain = Zincir
+# Review: PO
+hv-conn-tls-leaf = sunucu
+# Review: PO
+hv-conn-tls-inter = ara sertifika
+# Review: PO
+hv-conn-tls-root = kök · bu Mac güvenmiyor
+# Review: PO
+hv-conn-tls-pin-note = Sabitleme, { $host }:{ $port } için yalnızca bu sertifikaya güvenir. Sertifika bir gün değişirse { -brand-hacivat } durur ve yeniden sorar. Sabitleme geçerlilik süresini uzatmaz.
+# Review: PO
+hv-conn-tls-pin-btn = Bu sertifikayı sabitle
+# Review: PO
+hv-conn-tls-import = CA içe aktar…
+# Review: PO
+hv-conn-tls-dates-note = { $state ->
+        [expired] Bu sertifikanın süresi dolmuş. Sabitleme geçerlilik süresini uzatmadığı için sertifika sabitlenemez. Sunucuyu yöneten kişiden sertifikayı yenilemesini isteyin.
+       *[early] Bu sertifika henüz geçerli değil. Bu Mac'in tarih ve saatini denetleyin ya da sunucuyu yöneten kişiye sorun.
+    }
+# Review: PO
+# Fix round 1 (review M2): shorter than the mock's "Sabitlenmiş sertifika", which the 140 px
+# form label column cut off; it reads with "Sabitlemeyi kaldır" beside it.
+hv-conn-tls-pin = Sabitleme
+# Review: PO
+hv-conn-tls-pin-none = Yok
+# Review: PO
+hv-conn-tls-remove-pin = Sabitlemeyi kaldır
+# Review: PO
+hv-conn-issue-tls-disable-ignores-pin = Şifreleme kapalıyken sabitlenmiş sertifika denetlenmez. Sabitlemeyi kullanmak için başka bir mod seçin.
+# Review: PO
+hv-conn-dlg-key-pass = Anahtar parolası
+# Review: PO
+hv-conn-issue-tls-key-passphrase = Bu anahtar şifreli. Parolasını girin.
+# Review: PO
+hv-conn-tls-pin-changed-title = { $host }:{ $port } sertifikası değişti
+# Review: PO
+hv-conn-tls-pin-changed-body = Bu bağlantı tek bir sertifikaya sabitlendi; sunucu şimdi farklı bir sertifika sunuyor. { -brand-hacivat } oturum açmadan önce durdu.
+# Review: PO
+hv-conn-tls-pin-changed-old = Sabitlenen
+# Review: PO
+hv-conn-tls-pin-changed-new = Şimdiki
+# Review: PO
+hv-conn-tls-pin-changed-ask = Yenilenmiş bir sertifika da böyle görünür. Sabitlemeyi değiştirmeden önce sunucuyu yöneten kişiye sorun.
+# Review: PO
+hv-conn-tls-pin-changed-note = Sabitlemeyi değiştirmek, { $host }:{ $port } için yalnızca yeni sertifikaya güvenir ve eski sabitlemeyi kaldırır. Sabitleme geçerlilik süresini uzatmaz.
+# Review: PO
+hv-conn-tls-pin-changed-replace = Sabitlemeyi değiştir
+# Review: PO
+hv-conn-tls-pin-changed-done = { $host } sunucusunun yeni sertifikası sabitlendi
+# Review: PO
+hv-conn-plain-title = { $host } şifreleme sunmuyor
+# Review: PO
+hv-conn-plain-body = { $ip } yalnızca şifresiz bağlantı kabul ediyor ve özel bir ağda değil. Parolanız ve sorgu sonuçlarınız ağda düz metin olarak taşınır.
+# Review: PO
+hv-conn-plain-ssh = SSH tüneli kullan…
+# Review: PO
+hv-conn-plain-connect = Şifrelemeden bağlan
+# Review: PO
+hv-conn-plain-remember = Bu bağlantı için bir daha sorma
+
+## m2b-t23-f1
+
+# Review: PO
+hv-conn-ro-warn-non-transactional-write = Etkileri ROLLBACK ile geri alınamayan fonksiyonlar çalıştırabilir.
+
+## m2b-t24-shots
+
+# Review: PO
+hv-conn-enc-pinned = { $version } · sabitlendi
+# Review: PO
+hv-conn-diag-tls-pinned = TLS { $version } · sabitlendi
+# Review: PO
+hv-conn-diag-tls-nov-pinned = TLS · sabitlendi
+# Review: PO
+hv-conn-fix-ssh = SSH üzerinden bağlan…
+# Review: PO
+hv-conn-secret-vault = kasa · kalıcı
+
+## m3a-t01b-seams
+
+# Review: PO
+hv-menu-edit = Düzen
+
+## m3a-t25-editor-commands
+
+# Review: PO
+hv-cmd-editor-move-left = Sola git
+# Review: PO
+hv-cmd-editor-move-right = Sağa git
+# Review: PO
+hv-cmd-editor-move-up = Yukarı git
+# Review: PO
+hv-cmd-editor-move-down = Aşağı git
+# Review: PO
+hv-cmd-editor-select-left = Seçimi sola genişlet
+# Review: PO
+hv-cmd-editor-select-right = Seçimi sağa genişlet
+# Review: PO
+hv-cmd-editor-select-up = Seçimi yukarı genişlet
+# Review: PO
+hv-cmd-editor-select-down = Seçimi aşağı genişlet
+# Review: PO
+hv-cmd-editor-move-word-left = Önceki sözcüğe git
+# Review: PO
+hv-cmd-editor-move-word-right = Sonraki sözcüğe git
+# Review: PO
+hv-cmd-editor-select-word-left = Seçimi önceki sözcüğe genişlet
+# Review: PO
+hv-cmd-editor-select-word-right = Seçimi sonraki sözcüğe genişlet
+# Review: PO
+hv-cmd-editor-move-line-start = Satır başına git
+# Review: PO
+hv-cmd-editor-move-line-end = Satır sonuna git
+# Review: PO
+hv-cmd-editor-select-line-start = Seçimi satır başına genişlet
+# Review: PO
+hv-cmd-editor-select-line-end = Seçimi satır sonuna genişlet
+# Review: PO
+hv-cmd-editor-move-document-start = Belge başına git
+# Review: PO
+hv-cmd-editor-move-document-end = Belge sonuna git
+# Review: PO
+hv-cmd-editor-select-document-start = Seçimi belge başına genişlet
+# Review: PO
+hv-cmd-editor-select-document-end = Seçimi belge sonuna genişlet
+# Review: PO
+hv-cmd-editor-page-up = Sayfa yukarı
+# Review: PO
+hv-cmd-editor-page-down = Sayfa aşağı
+# Review: PO
+hv-cmd-editor-select-page-up = Seçimi bir sayfa yukarı genişlet
+# Review: PO
+hv-cmd-editor-select-page-down = Seçimi bir sayfa aşağı genişlet
+# Review: PO
+hv-cmd-editor-newline = Satır sonu ekle
+# Review: PO
+hv-cmd-editor-tab = Girintile
+# Review: PO
+hv-cmd-editor-outdent = Girintiyi azalt
+# Review: PO
+hv-cmd-editor-delete-backward = Geriye doğru sil
+# Review: PO
+hv-cmd-editor-delete-forward = İleriye doğru sil
+# Review: PO
+hv-cmd-editor-delete-word-backward = Önceki sözcüğü sil
+# Review: PO
+hv-cmd-editor-delete-word-forward = Sonraki sözcüğü sil
+# Review: PO
+hv-cmd-editor-delete-to-line-start = Satır başına kadar sil
+# Review: PO
+hv-cmd-editor-select-all = Tümünü seç
+# Review: PO
+hv-cmd-editor-undo = Geri al
+# Review: PO
+hv-cmd-editor-redo = Yinele
+# Review: PO
+hv-cmd-editor-copy = Kopyala
+# Review: PO
+hv-cmd-editor-cut = Kes
+# Review: PO
+hv-cmd-editor-paste = Yapıştır
+# Review: PO
+hv-cmd-editor-escape = Seçimi daralt
+# Review: PO
+hv-cmd-editor-toggle-tab-moves-focus = Sekme tuşuyla odak taşımayı aç veya kapat
+# Review: PO
+hv-cmd-editor-context-menu = Düzenleyici menüsünü göster
+# Review: PO
+hv-cmd-editor-run = Çalıştır
+# Review: PO
+hv-cmd-editor-run-2 = Çalıştır (2)
+# Review: PO
+hv-cmd-editor-run-3 = Çalıştır (3)
+# Review: PO
+hv-cmd-editor-describe-exec-range = Çalıştırma aralığını açıkla
+# Review: PO
+hv-editor-describe-one = Çalıştır, { $from }–{ $to }. satırları çalıştırır: { $label }
+# Review: PO
+hv-editor-describe-one-line = Çalıştır, { $line }. satırı çalıştırır: { $label }
+# Review: PO
+hv-editor-describe-many = Çalıştır, { $from }–{ $to }. satırlardaki { $n } ifadeyi çalıştırır
+# Review: PO
+hv-editor-describe-many-line = Çalıştır, { $line }. satırdaki { $n } ifadeyi çalıştırır
+# Review: PO
+hv-editor-describe-ask = Çalıştır, hangi ifadenin çalıştırılacağını sorar
+# Review: PO
+hv-editor-describe-nothing = Burada çalıştırılacak bir şey yok
+# Review: PO
+hv-editor-describe-uncertain = Sınır belirsiz: çalıştırmak için ifadeyi seçin
+# Review: PO
+hv-editor-describe-offline = Bağlı değil: Çalıştır önce bağlanır ve hiçbir şey çalıştırmaz
+# Review: PO
+hv-editor-describe-pending = Düzenleyici bu metni hâlâ okuyor. Birazdan yeniden deneyin.
+# Review: PO
+hv-editor-tab-moves-focus-on = Sekme tuşu odağı taşır
+# Review: PO
+hv-editor-tab-moves-focus-off = Sekme tuşu girinti ekler
+
+## m3a-t26-results-model
+
+# Review: PO
+hv-results-result-n = Sonuç { $n }
+# Review: PO
+hv-grid-truncated = … { $size }
+# Review: PO
+hv-grid-size-bytes = { $n } B
+# Review: PO
+hv-grid-size-kb = { $n } KB
+# Review: PO
+hv-grid-size-mb = { $n } MB
+# Review: PO
+hv-grid-size-gb = { $n } GB
+# Review: PO
+hv-grid-size-chars = { $n } karakter
+# Review: PO
+hv-grid-decode-error = Çözümlenemedi
+# Review: PO
+hv-copy-done = { $rows } × { $cols } hücre kopyalandı
+# Review: PO
+hv-copy-done-line = Sekmeyle ayrılmış, ham değerler
+# Review: PO
+hv-copy-done-incomplete = Kopyalanan değerlerden { $n } tanesi eksik: kısaltılmış ya da çözümlenememiş.
+# Review: PO
+hv-copy-working = { $cells } hücre kopyalanıyor…
+# Review: PO
+hv-copy-refused-title = Kopyalanamayacak kadar büyük
+# Review: PO
+hv-copy-refused-body = Seçimde { $cells } hücre var. Kopyalama en çok { $max } hücre ya da { $size } alır; daha az satır ya da sütun seçin.
+# Review: PO
+hv-copy-refused-multiple = Bu seçimler birlikte kopyalanamaz. Tek bir blok ya da aynı satırları veya sütunları paylaşan bloklar seçin.
+
+## m3a-t34-status-follows
+
+# Review: PO
+hv-tx-open = İşlem açık · { $n } ifade
+# Review: PO
+hv-tx-open-tip = BEGIN'den bu yana çalışan ifadeler henüz commit edilmedi. Komut paletinden commit edin ya da geri alın.
+# Review: PO
+hv-tx-failed = İşlem başarısız · bitirmek için geri alın
+# Review: PO
+hv-tx-failed-tip = Bir hata ya da iptal işlemi durdurdu. Sunucu artık yalnızca geri almayı kabul eder.
+# Review: PO
+hv-results-rows = { $rows } satır
+# Review: PO
+hv-results-rows-more = { $rows }+ satır
+# Review: PO
+hv-results-rows-timing = { $rows } satır · { $duration }
+# Review: PO
+hv-results-rows-more-timing = { $rows }+ satır · { $duration }
+# Review: PO
+hv-status-duration-ms = { $ms } ms
+# Review: PO
+hv-status-duration-s = { NUMBER($seconds, minimumFractionDigits: 2) } sn
+# Review: PO
+hv-results-status-cursor = İmleç açık
+# Review: PO
+hv-results-status-cursor-tip = Veritabanı anlık görüntüsü tutuluyor. İmleci kapatmak için tıklayın.
+
+## m3a-t28-gutter
+
+# Review: PO
+hv-editor-nothing-to-run = Burada çalıştırılacak bir şey yok
+# Review: PO
+hv-editor-uncertain = Sınır belirsiz: çalıştırmak için ifadeyi seçin
+# Review: PO
+hv-editor-preview-unit = { $i }/{ $n }
+# Review: PO
+hv-editor-preview-offline = bağlı değil
+# Review: PO
+hv-editor-preview-uncertain = sınır belirsiz
+# Review: PO
+hv-editor-mark-stale = çalıştırıldıktan sonra düzenlendi
+# Review: PO
+hv-editor-tip-stale = Çalıştırıldıktan sonra düzenlendi. İşaretler son çalıştırmayı gösterir.
+# Review: PO
+hv-editor-tip-two = Bu satırda iki ifade var
+
+## m3a-t32-console
+
+# Review: PO
+hv-console-tab-title = { $name } ({ $n })
+# Review: PO
+hv-console-run = Çalıştır
+# Review: PO
+hv-console-stop = Durdur
+# Review: PO
+hv-console-running = Çalışıyor
+# Review: PO
+hv-console-clock = { $s } sn
+# Review: PO
+hv-console-cancelling = İptal ediliyor…
+# Review: PO
+hv-console-waiting = { $name } için boş bağlantı bekleniyor (kullanımda: { $inUse }/{ $max })
+# Review: PO
+hv-console-waiting-short = Bağlantı bekleniyor (kullanımda: { $inUse }/{ $max })
+# Review: PO
+hv-console-waiting-cancel = Vazgeç
+# Review: PO
+hv-console-prod-notice = Üretim bu sürümde salt okunur
+# Review: PO
+hv-console-prod-short = salt okunur
+# Review: PO
+hv-console-prod-why = Bu konsol neden salt okunur…
+# Review: PO
+hv-console-prod-pop-title = Bu konsol neden salt okunur
+# Review: PO
+hv-console-prod-pop-body = Üretimde yazmak ifade onayları gerektirir ve { -brand-hacivat } bu sürümünde bu onaylara henüz sahip değil. O zamana kadar her üretim konsolu, bağlantı neye izin verirse versin salt okunur çalışır.
+# Review: PO
+hv-console-prod-pop-reads = Okuma ifadeleri her zamanki gibi çalışır. Veriyi ya da şemayı değiştirecek bir ifade gönderilmez; nedenini Çıktı sekmesi söyler.
+# Review: PO
+hv-editor-lncol = Sat { NUMBER($line, useGrouping: "false") }, Süt { NUMBER($col, useGrouping: "false") }
+# Review: PO
+hv-editor-selected = { $n } seçili
+# Review: PO
+hv-editor-reduced = Kısıtlı mod
+# Review: PO
+hv-console-size-mb = { NUMBER($mb, minimumFractionDigits: 1, maximumFractionDigits: 1) } MB
+# Review: PO
+hv-console-restore-refused-title = { $name } yeniden açılamadı
+# Review: PO
+hv-console-restore-refused-body = Kayıtlı metni { $size }; bu sürüm en çok { $limit } açabiliyor. Dosya değiştirilmeden { $file } adıyla saklandı.
+# Review: PO
+hv-console-restore-unreadable-body = Kayıtlı metni okunamadı. Dosya değiştirilmeden { $file } adıyla saklandı.
+# Review: PO
+hv-edit-undo-typing = Yazmayı Geri Al
+# Review: PO
+hv-edit-undo-paste = Yapıştırmayı Geri Al
+# Review: PO
+hv-edit-undo-drop = Bırakmayı Geri Al
+# Review: PO
+hv-edit-undo-delete = Silmeyi Geri Al
+# Review: PO
+hv-edit-undo-cut = Kesmeyi Geri Al
+# Review: PO
+hv-edit-undo-indent = Girintiyi Geri Al
+# Review: PO
+hv-edit-undo-outdent = Girinti Azaltmayı Geri Al
+# Review: PO
+hv-edit-redo-typing = Yazmayı Yinele
+# Review: PO
+hv-edit-redo-paste = Yapıştırmayı Yinele
+# Review: PO
+hv-edit-redo-drop = Bırakmayı Yinele
+# Review: PO
+hv-edit-redo-delete = Silmeyi Yinele
+# Review: PO
+hv-edit-redo-cut = Kesmeyi Yinele
+# Review: PO
+hv-edit-redo-indent = Girintiyi Yinele
+# Review: PO
+hv-edit-redo-outdent = Girinti Azaltmayı Yinele
+# Review: PO
+hv-console-ro-pending = { $name }, açık işlemi commit edildiğinde ya da geri alındığında salt okunur olur.
+# Review: PO
+hv-console-ro-pending-short = Bu işlemden sonra salt okunur
+# Review: PO
+hv-console-session-failed = { $name } için bağlantı açılamadı. Çalıştır yeniden dener.
+# Review: PO
+hv-console-release-busy = Önce açık soruyu yanıtlayın, sonra yeniden deneyin.
+## m3a-t30-results-view
+
+# Review: PO
+hv-results-output = Çıktı
+# Review: PO
+hv-results-unread = Yeni çıktı
+# Review: PO
+hv-results-tabs = Sonuç sekmeleri
+# Review: PO
+hv-results-env-suffix = ({ $env })
+# Review: PO
+hv-results-copy = Kopyala
+# Review: PO
+hv-results-log-clear = Temizle
+# Review: PO
+hv-results-log-end = Sona kaydır
+# Review: PO
+hv-results-log-empty = Henüz çıktı yok. Çalıştırdığınız ifadelerin iletileri burada görünür.
+# Review: PO
+hv-results-log-label = Çıktı günlüğü
+# Review: PO
+hv-grid-no-rows = Satır yok
+# Review: PO
+hv-grid-too-many-columns = { $n } sütun. Geniş sonuçlar yana kayar; daha rahat okumak için daha az sütun seçin.
+# Review: PO
+hv-grid-loading = Yükleniyor
+# Review: PO
+hv-strip-fetching = Getiriliyor… { $rows } satır
+# Review: PO
+hv-strip-rows-more = { $rows }+ satır
+# Review: PO
+hv-strip-cursor-open = İmleç açık — veritabanı anlık görüntüsü tutuluyor
+# Review: PO
+hv-strip-cursor-open-short = İmleç açık
+# Review: PO
+hv-strip-close-cursor = İmleci kapat
+# Review: PO
+hv-strip-fetch-more = Daha fazla getir
+# Review: PO
+hv-strip-fetch-all = Tümünü getir
+# Review: PO
+hv-strip-complete = { $rows } satır
+# Review: PO
+hv-strip-rerun = Yeniden çalıştır
+# Review: PO
+hv-strip-cancelled = { $rows } satırdan sonra iptal edildi
+# Review: PO
+hv-strip-memory = Bu sonucun bellek sınırına ulaşıldı ({ $rows } satır, { $size })
+# Review: PO
+hv-strip-fetch-anyway = Yine de getir
+# Review: PO
+hv-strip-truncated = { $rows } satır tutuldu: bu sonucun bellek sınırına ulaşıldı
+# Review: PO
+hv-strip-closed-idle = { $rows } satırdan sonra imleç kapandı: çok uzun süre boşta kaldı.
+# Review: PO
+hv-strip-more-sets = { $n } sonuç kümesi daha gösterilmedi
+# Review: PO
+hv-strip-selection = Seçim
+# Review: PO
+hv-strip-dims = { $rows } × { $cols }
+# Review: PO
+hv-cmd-results-copy = Seçili sonuç hücrelerini kopyala
+# Review: PO
+hv-cmd-results-fetch-more = Sonucun daha fazla satırını getir
+# Review: PO
+hv-cmd-results-fetch-all = Sonucun tüm satırlarını getir
+# Review: PO
+hv-cmd-results-close-cursor = Sonucun imlecini kapat
+# Review: PO
+hv-cmd-results-rerun = Sonucun ifadesini yeniden çalıştır
+# Review: PO
+hv-cmd-grid-move-left = Tablo: sola git
+# Review: PO
+hv-cmd-grid-move-right = Tablo: sağa git
+# Review: PO
+hv-cmd-grid-move-up = Tablo: yukarı git
+# Review: PO
+hv-cmd-grid-move-down = Tablo: aşağı git
+# Review: PO
+hv-cmd-grid-select-left = Tablo: seçimi sola genişlet
+# Review: PO
+hv-cmd-grid-select-right = Tablo: seçimi sağa genişlet
+# Review: PO
+hv-cmd-grid-select-up = Tablo: seçimi yukarı genişlet
+# Review: PO
+hv-cmd-grid-select-down = Tablo: seçimi aşağı genişlet
+# Review: PO
+hv-cmd-grid-jump-left = Tablo: ilk sütuna atla
+# Review: PO
+hv-cmd-grid-jump-right = Tablo: son sütuna atla
+# Review: PO
+hv-cmd-grid-jump-up = Tablo: ilk satıra atla
+# Review: PO
+hv-cmd-grid-jump-down = Tablo: yüklenen son satıra atla
+# Review: PO
+hv-cmd-grid-home = Tablo: satırın ilk hücresine git
+# Review: PO
+hv-cmd-grid-end = Tablo: satırın son hücresine git
+# Review: PO
+hv-cmd-grid-first-row = Tablo: ilk satıra git
+# Review: PO
+hv-cmd-grid-last-row = Tablo: son satıra git
+# Review: PO
+hv-cmd-grid-page-up = Tablo: sayfa yukarı
+# Review: PO
+hv-cmd-grid-page-down = Tablo: sayfa aşağı
+# Review: PO
+hv-cmd-grid-next-cell = Tablo: sonraki hücre
+# Review: PO
+hv-cmd-grid-prev-cell = Tablo: önceki hücre
+# Review: PO
+hv-cmd-grid-select-all = Tablo: tümünü seç
+# Review: PO
+hv-cmd-grid-select-row = Tablo: satırı seç
+# Review: PO
+hv-cmd-grid-select-column = Tablo: sütunu seç
+# Review: PO
+hv-cmd-grid-copy = Tablo: kopyala
+# Review: PO
+hv-cmd-grid-copy-with-headers = Tablo: başlıklarla kopyala
+# Review: PO
+hv-cmd-grid-escape = Tablo: seçimi temizle
+## m3a-t33-exec-ui
+
+# Review: PO
+hv-cmd-exec-cancel = Çalışan ifadeyi durdur
+# Review: PO
+hv-cmd-tx-commit = İşlemi commit et
+# Review: PO
+hv-cmd-tx-rollback = İşlemi geri al
+# Review: PO
+hv-console-connect-first = { $name } bağlantısı kuruluyor. Bağlandıktan sonra yeniden çalıştırın.
+# Review: PO
+hv-editor-mark-queued = sırada
+# Review: PO
+hv-editor-mark-running = çalışıyor · { $duration }
+# Review: PO
+hv-editor-mark-rows = çalıştı · { $duration } · { $rows } satır
+# Review: PO
+hv-editor-mark-rows-more = çalıştı · { $duration } · { $rows }+ satır
+# Review: PO
+hv-editor-mark-affected = { $rows } satır etkilendi · { $duration }
+# Review: PO
+hv-editor-mark-done = çalıştı · { $duration }
+# Review: PO
+hv-editor-mark-failed = başarısız
+# Review: PO
+hv-editor-mark-denied = gönderilmedi: salt okunur
+# Review: PO
+hv-editor-mark-cancelling = iptal ediliyor…
+# Review: PO
+hv-editor-mark-cancelled = { $duration } sonra iptal edildi
+# Review: PO
+hv-editor-mark-skipped = atlandı: önceki bir ifade başarısız oldu
+# Review: PO
+hv-editor-mark-short-done = { $duration }
+# Review: PO
+hv-editor-mark-short-running = { $duration }
+# Review: PO
+hv-editor-preview-choices = { $n } seçenek
+# Review: PO
+hv-chooser-title = Neyin çalışacağını seçin
+# Review: PO
+hv-chooser-statement = İfade
+# Review: PO
+hv-chooser-subquery = Alt sorgu
+# Review: PO
+hv-chooser-largest = En geniş ifade
+# Review: PO
+hv-chooser-from-caret = İmleçten sona
+# Review: PO
+hv-chooser-whole = Tüm betik
+# Review: PO
+hv-chooser-row = { $n ->
+        [one] { $kind }
+       *[other] { $kind } · { $n } ifade
+    }
+# Review: PO
+hv-chooser-uncertain-title = Sınır belirsiz
+# Review: PO
+hv-chooser-uncertain-body = Hacivat bu ifadenin tam olarak nerede bittiğini anlayamıyor; bu yüzden hiçbir şey göndermedi.
+# Review: PO
+hv-chooser-uncertain-fix = Çalıştırılacak metni tam olarak seçin, sonra { $key } tuşuna basın.
+# Review: PO
+hv-chooser-uncertain-fix-unbound = Çalıştırılacak metni tam olarak seçin, sonra çalıştırın.
+# Review: PO
+hv-tx-close-title = { $name } üzerinde { $n } ifadelik açık bir işlem var
+# Review: PO
+hv-tx-close-body = Bu konsolu kapatmak işlemini sonlandırır. Commit değişiklikleri korur, geri alma onları atar.
+# Review: PO
+hv-tx-restart-body = Yeniden başlatmak oturumu sonlandırır. Commit değişiklikleri korur, geri alma onları atar.
+# Review: PO
+hv-tx-commit-restart = Commit et ve yeniden başlat
+# Review: PO
+hv-tx-rollback-restart = Geri al ve yeniden başlat
+# Review: PO
+hv-tx-release-body = Konsolun bağlantısı değişmek üzere; bu, işlemi sonlandırır. Commit değişiklikleri korur, geri alma onları atar.
+# Review: PO
+hv-tx-commit-continue = Commit et ve devam et
+# Review: PO
+hv-tx-rollback-continue = Geri al ve devam et
+# Review: PO
+hv-tx-quit-body = Çıkmak oturumu sonlandırır. Commit değişiklikleri korur, geri alma onları atar.
+# Review: PO
+hv-tx-commit-close = Commit et ve kapat
+# Review: PO
+hv-tx-rollback-close = Geri al ve kapat
+# Review: PO
+hv-tx-commit-quit = Commit et ve çık
+# Review: PO
+hv-tx-rollback-quit = Geri al ve çık
+# Review: PO
+hv-tx-cancel = Vazgeç
+# Review: PO
+hv-tx-failed-title = { $name } üzerindeki işlem başarısız oldu
+# Review: PO
+hv-tx-failed-body = Bir hata ya da iptal onu durdurdu; artık yalnızca geri alınabilir. İçindeki { $n } ifade korunmayacak.
+# Review: PO
+hv-tx-end-failed = { $name } üzerindeki işlem sona ermedi; hiçbir şey kapatılmadı.
+# Review: PO
+hv-tx-failed-by-stop = İfadeyi durdurmak { $name } üzerindeki işlemi başarısız kıldı. Artık yalnızca geri alma onu sonlandırabilir.
+# Review: PO
+hv-exec-pending-read-only = Hiçbir şey gönderilmedi: bu konsol, açık işlemi sona erdiğinde salt okunur olur. Önce commit edin ya da geri alın.
+# Review: PO
+hv-exec-rerun-edited = İfade çalıştırıldıktan sonra düzenlendi. Düzenleyiciden çalıştırın.
+
+## m3a-f4-ime
+# Review: PO
+hv-cmd-app-character-palette = Emoji ve Semboller

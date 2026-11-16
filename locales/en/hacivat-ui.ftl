@@ -115,7 +115,7 @@ hv-settings-restart-body = Hacivat closes and opens again to apply the new text 
 hv-settings-restart-later = Later
 # A sample of the regional format: a number and a date with time, as the chosen format shows them.
 # Variables:
-#   $number (Number) - a sample number, 1234.5.
+#   $number (Decimal) - a sample number, 1234.5.
 #   $when (DateTime) - a sample wall-clock time, 2026-11-11 14:05.
 hv-settings-regional-preview = { NUMBER($number) } · { DATETIME($when, dateStyle: "short", timeStyle: "short") }
 # Warning toast after choosing a keymap preset whose shortcuts type characters on this keyboard layout.
@@ -134,3 +134,1887 @@ hv-settings-keymap-datagrip = DataGrip
 #   $chord (String) - the shortcut as the keyboard shows it, e.g. "Ctrl+Alt+S".
 #   $char (String) - the character it types on this layout, e.g. "ś".
 hv-settings-keymap-collision = { $chord } → { $char }
+
+## m2a-t01-menu
+
+# The File menu title (the macOS menu bar and the Windows/Linux in-window menu).
+hv-menu-file = File
+
+## m2a-t12-profiles
+
+# Toast when a password could not be saved to the system keyring; it is kept in memory until quit.
+hv-conn-keyring-unavailable = Passwords can't be saved to the system keyring right now. { -brand-hacivat } keeps them until it quits.
+# Toast at startup when connections.toml was written by a newer Hacivat: connections can't be changed.
+hv-conn-store-read-only = Your connections file is from a newer { -brand-hacivat }. Connections can't be added or changed in this version.
+# Error toast at startup when connections.toml could not be parsed and was set aside.
+# Variables:
+#   $file (String) - the name the unreadable file was saved under, e.g. "connections.toml.corrupt-1731400000".
+hv-conn-file-quarantined = Your connections file could not be read. It was saved as { $file } and no connections are loaded.
+# Toast at startup when some entries of connections.toml could not be read (invalid, duplicate or for an unknown engine).
+# Variables:
+#   $count (Number) - how many entries were skipped, e.g. 2.
+hv-conn-file-entries-skipped = { $count ->
+        [one] One connection in your connections file couldn't be read and was skipped.
+       *[other] { $count } connections in your connections file couldn't be read and were skipped.
+    }
+# Toast at startup when connections.toml contained a password; the value is never shown.
+hv-conn-file-password-ignored = A password in your connections file was ignored. { -brand-hacivat } keeps passwords in the system keyring, never in that file.
+# Toast after duplicating a connection.
+# Variables:
+#   $name (String) - the new connection's name, e.g. "orders-prod-2".
+hv-conn-toast-dup = Duplicated as { $name }
+# Error toast at startup when connections.toml exists but could not be read (permissions, disk error) or could not be set aside; the file is left untouched and connections can't be changed.
+hv-conn-file-unreadable = { -brand-hacivat } can't read your connections file. It was left as it is, and connections can't be changed until it can be read.
+# Toast at startup when some values in connections.toml were not understood and were ignored (an unknown environment, an organization tag on a connection the organization does not manage).
+# Variables:
+#   $count (Number) - how many values were ignored, e.g. 2.
+hv-conn-file-values-ignored = { $count ->
+        [one] One setting in your connections file couldn't be read and was ignored.
+       *[other] { $count } settings in your connections file couldn't be read and were ignored.
+    }
+
+## m2a-t18-explorer
+
+# Command titles of the connection commands (palette rows and menu items).
+hv-cmd-connection-new = New connection
+hv-cmd-connection-paste-url = New connection from a copied URL
+hv-cmd-connection-toggle-connect = Connect or disconnect
+hv-cmd-connection-edit = Edit connection
+hv-cmd-connection-duplicate = Duplicate connection
+hv-cmd-connection-copy-url = Copy connection as URL
+hv-cmd-connection-delete = Delete connection
+hv-cmd-connection-context-menu = Show the connection menu
+hv-cmd-connection-import-pg-service = Import pg_service.conf
+hv-cmd-connection-retry = Retry the connection
+hv-cmd-connection-explain-unencrypted = Explain the unencrypted connection
+hv-cmd-workspace-focus-notification = Go to the newest notification
+# The explorer with no saved connection: the sentence under the title and its three buttons.
+hv-explorer-empty-body = Add a PostgreSQL, MySQL, MariaDB or SQLite database. If you paste a connection URL, { -brand-hacivat } fills the form for you.
+hv-explorer-new = New connection
+hv-explorer-paste = Paste URL
+hv-explorer-import = Import pg_service.conf…
+# Explorer group headers, in small caps: pre-cased here, never cased in code.
+hv-explorer-group-production = PRODUCTION
+hv-explorer-group-staging = STAGING
+hv-explorer-group-test = TEST
+hv-explorer-group-dev = DEV
+hv-explorer-group-local = LOCAL
+# The group of connections without an environment (hand-edited files only).
+hv-explorer-group-unset = NO ENVIRONMENT
+# The connection menu (explorer row, Shift-F10).
+hv-conn-menu-connect = Connect
+hv-conn-menu-disconnect = Disconnect
+hv-conn-menu-edit = Edit…
+hv-conn-menu-dup = Duplicate
+hv-conn-menu-copy-url = Copy as URL
+hv-conn-menu-delete = Delete…
+# The delete confirmation.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-conn-del-title = Delete { $name }?
+hv-conn-del-body = Its saved password is removed from the Keychain too. Scripts and query history stay. This can't be undone.
+hv-conn-del-btn = Delete
+hv-conn-del-cancel = Cancel
+# Toast after a connection was deleted.
+# Variables:
+#   $name (String) - the deleted connection's name, e.g. "orders-prod".
+hv-conn-toast-deleted = Deleted { $name }
+# Toast after Escape cancelled a connect in progress.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-conn-toast-cancelled = Connecting to { $name } was cancelled.
+# The connection sheet under the explorer.
+hv-conn-sheet-none = Select a connection to see its details.
+hv-conn-kv-env = Environment
+hv-conn-kv-engine = Engine
+hv-conn-kv-host = Host
+hv-conn-kv-file = File
+hv-conn-kv-user = User
+hv-conn-kv-access = Access
+hv-conn-kv-path = Path
+hv-conn-kv-enc = Encryption
+hv-conn-kv-secret = Password
+# A read-only connection: M2a sets the session read-only but cannot enforce it (R10).
+hv-conn-access-ro-guarded = read-only (guarded)
+# The Encryption row of a live connection.
+# Variables:
+#   $version (String) - the TLS version the server negotiated, e.g. "TLS 1.3".
+hv-conn-enc-verified = { $version } · verified
+# Variables:
+#   $version (String) - the TLS version the server negotiated, e.g. "TLS 1.3".
+hv-conn-enc-unverified = { $version } · not verified
+hv-conn-enc-unencrypted = unencrypted
+hv-conn-enc-none-file = not applicable (file)
+# Where the connection's password comes from (the sheet's Password row).
+hv-conn-secret-forever = Keychain · forever
+hv-conn-secret-never = asks every time
+hv-conn-secret-session = for this session
+hv-conn-secret-restart = until restart
+hv-conn-secret-pgpass = from ~/.pgpass
+hv-conn-secret-none = none
+# The popover of the capsule's "unencrypted" segment.
+hv-conn-unenc-title = Connected without encryption
+# Variables:
+#   $host (String) - the server's host name or address, e.g. "10.0.4.12".
+hv-conn-unenc-body = { $host } doesn't offer TLS. { -brand-hacivat } allowed plaintext because the address is on a private network. This badge stays for as long as the connection is unencrypted.
+hv-conn-unenc-fix = To remove it, turn on TLS on the server or connect through SSH.
+# The capsule while connecting, after a failure, and its Retry segment.
+hv-capsule-connecting = Connecting
+hv-capsule-failed = Couldn't connect
+hv-capsule-retry = Retry
+# The capsule's running clock while connecting.
+# Variables:
+#   $seconds (Decimal) - seconds since the connect started, e.g. 1.25.
+hv-capsule-clock = { NUMBER($seconds, minimumFractionDigits: 2) } s
+# The capsule's mark of a server below the supported versions (PO Q3).
+hv-capsule-unsupported = unsupported
+# The capsule's access cell for a read-write connection.
+hv-capsule-access-read-write = read-write
+# A connection's latency (the capsule, the status bar and an explorer row).
+# Variables:
+#   $ms (Number) - the latency in whole milliseconds, e.g. 12.
+hv-capsule-latency = { $ms } ms
+# The status bar's environment segment: the current connection's environment and access.
+# Variables:
+#   $env (String) - the environment word (an hv-conn-env-* message), e.g. "production".
+#   $access (String) - the access word (an hv-capsule-access-* message), e.g. "read-write".
+hv-status-env = { $env } · { $access }
+# The editor area's home while no query is open: the title, the hint and the entry points.
+hv-home-title = No query open
+hv-home-hint = Pick a connection in the Explorer, or add one.
+hv-home-new = New connection
+hv-home-paste = New connection from a copied URL
+hv-home-connect = Connect to the selected connection
+# The pg_service.conf import dialog (R24).
+hv-conn-import-title = Import from pg_service.conf
+hv-conn-import-body = Choose the services to import. Every remote service needs an environment.
+hv-conn-import-confirm = Import
+hv-conn-import-cancel = Cancel
+# A service row of the import dialog: its name and the server it points to (connection data).
+# Variables:
+#   $service (String) - the service name, e.g. "orders-prod".
+#   $target (String) - its host, socket or database, e.g. "db-prod".
+hv-conn-import-row = { $service } · { $target }
+# Toast when no pg_service.conf, or no service in it, was found.
+hv-conn-import-empty = No services were found in pg_service.conf.
+# Toast when pg_service.conf exists but could not be read.
+hv-conn-import-unreadable = pg_service.conf couldn't be read.
+# A note in the import dialog: a password was left out because the file is readable by others.
+# Variables:
+#   $service (String) - the service name, e.g. "orders-prod".
+hv-conn-import-password-ignored = The password of { $service } was ignored because other users can read the file.
+# Toast after an import.
+# Variables:
+#   $count (Number) - how many connections were imported, e.g. 2.
+hv-conn-import-done = { $count ->
+        [one] Imported one connection
+       *[other] Imported { $count } connections
+    }
+## m2a-t20-errors
+
+# The connection dialog's test strip while a test runs (NOTES surface 1).
+hv-conn-test-running = Testing
+# The running clock of a test, in seconds with two decimals.
+# Variables:
+#   $seconds (Decimal) - seconds since the test started, e.g. 0.06.
+hv-conn-test-clock = { NUMBER($seconds, minimumFractionDigits: 2) } s
+# The test strip's heading after a successful test.
+# Variables:
+#   $ms (Number) - the whole test in whole milliseconds, e.g. 54.
+hv-conn-test-ok = Connected in { $ms } ms
+# The line under a successful test's heading.
+hv-conn-test-ok-sub = Nothing was saved. The test opened its own connection and closed it.
+# The button that copies the test report (always in English).
+hv-conn-test-copy = Copy report
+
+# Diagnostics of a successful test: row labels and values.
+hv-conn-diag-server = Server
+hv-conn-diag-latency = Latency
+hv-conn-diag-tls = Encryption
+hv-conn-diag-cipher = Cipher
+hv-conn-diag-auth = Signed in as
+hv-conn-diag-warn = Warnings
+hv-conn-diag-none = None
+# The server row's value.
+# Variables:
+#   $product (String) - the server's product name, e.g. "PostgreSQL".
+#   $version (String) - the server's version, e.g. "16.4".
+hv-conn-diag-server-v = { $product } { $version }
+# The latency row's value.
+# Variables:
+#   $ms (Number) - the median round trip in whole milliseconds, e.g. 12.
+hv-conn-diag-latency-v = { $ms } ms · median of 3 pings
+# The sign-in row's value: the user and the sign-in method.
+# Variables:
+#   $user (String) - the database user, e.g. "deploy".
+#   $method (Enum(password, none, pgpass, client_cert)) - how the user signed in.
+hv-conn-diag-auth-v = { $user } · { $method ->
+        [password] Password
+        [pgpass] pgpass
+        [client_cert] Client certificate
+       *[none] no password
+    }
+# The sign-in row's value when the user is unknown: the sign-in method alone.
+# Variables:
+#   $method (Enum(password, none, pgpass, client_cert)) - how the user signed in.
+hv-conn-diag-auth-method = { $method ->
+        [password] Password
+        [pgpass] pgpass
+        [client_cert] Client certificate
+       *[none] No password
+    }
+# The encryption row's value for an encrypted connection.
+# Variables:
+#   $version (String) - the TLS version number, e.g. "1.3".
+#   $state (Enum(full, ca_only, no)) - how far the server's certificate was verified.
+hv-conn-diag-tls-v = TLS { $version } · { $state ->
+        [full] verified
+        [ca_only] CA verified
+       *[no] not verified
+    }
+# The encryption row's value when the TLS version is unknown.
+# Variables:
+#   $state (Enum(full, ca_only, no)) - how far the server's certificate was verified.
+hv-conn-diag-tls-nov = TLS · { $state ->
+        [full] verified
+        [ca_only] CA verified
+       *[no] not verified
+    }
+# The encryption row's value for an unencrypted network connection.
+hv-conn-diag-tls-none = unencrypted
+# The encryption and sign-in rows of a database file (SQLite).
+hv-conn-diag-file = not applicable (file)
+# One line of a copied report (English): a row's label and its value.
+# Variables:
+#   $label (String) - the row's label, e.g. "Latency".
+#   $value (String) - the row's value, e.g. "12 ms · median of 3 pings".
+hv-conn-diag-row = { $label }: { $value }
+
+# The connect steps of the step trail (HV-CONN-01).
+hv-conn-step-resolve = Resolve
+hv-conn-step-tcp = Connect
+hv-conn-step-tls = TLS
+hv-conn-step-auth = Sign in
+hv-conn-step-check = Check server
+hv-conn-step-pgpass = pgpass
+hv-conn-step-open = Open file
+# A finished step's duration.
+# Variables:
+#   $ms (Number) - the step's time in whole milliseconds, e.g. 14.
+hv-conn-step-ms = { $ms } ms
+# The step trail's accessible name, and the state each step announces.
+hv-conn-step-list = Connection steps
+hv-conn-step-state-pending = not started
+hv-conn-step-state-running = in progress
+hv-conn-step-state-done = done
+hv-conn-step-state-failed = failed
+hv-conn-step-state-skipped = skipped
+
+# Warnings a successful test still reports.
+hv-conn-warn-no-tls = The connection isn't encrypted.
+hv-conn-warn-tls-not-verified = The connection is encrypted, but the server's certificate wasn't verified.
+# Variables:
+#   $version (String) - the server's version, e.g. "18.1".
+hv-conn-warn-not-tested = { -brand-hacivat } hasn't been tested with version { $version } yet.
+# Variables:
+#   $version (String) - the server's version, e.g. "9.6.24".
+hv-conn-warn-unsupported = Version { $version } is older than { -brand-hacivat } supports. You chose to connect anyway.
+hv-conn-warn-replica = The server is a read-only replica.
+hv-conn-warn-server-read-only = The server is in read-only mode.
+hv-conn-warn-super-read-only = The server is in super-read-only mode: nobody can write, not even administrators.
+# Variables:
+#   $seconds (Number) - the server's idle timeout in seconds, e.g. 60.
+hv-conn-warn-low-wait-timeout = The server closes idle connections after { $seconds } s.
+hv-conn-warn-local-infile-on = The server allows LOAD DATA LOCAL INFILE, so it can ask for files from this Mac.
+hv-conn-warn-sqlite-file-not-writable = The database file can't be written, so it opens read-only.
+# Variables:
+#   $mode (String) - the SQLite journal mode, e.g. "delete".
+hv-conn-warn-sqlite-journal = The database uses the { $mode } journal mode.
+
+# The connect-error dialog's title (NOTES surface 3).
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-conn-err-title = Couldn't connect to { $name }
+# Under the re-entered password field: which of the 3 attempts this is.
+# Variables:
+#   $n (Number) - the attempt, 1 to 3.
+hv-conn-err-attempt = Attempt { $n } of 3
+# Placeholder of the re-entered password field.
+# Variables:
+#   $user (String) - the database user, e.g. "deploy".
+hv-conn-err-new-pw = Password for { $user }
+# The technical details disclosure and its rows.
+hv-conn-err-tech = Technical details
+hv-conn-err-stage = Failed at
+hv-conn-err-class = Class
+hv-conn-err-code = Code
+hv-conn-err-server = Server message
+hv-conn-err-elapsed-label = Elapsed
+# The elapsed row's value, in seconds with three decimals.
+# Variables:
+#   $seconds (Decimal) - the connect's time in seconds, e.g. 0.214.
+hv-conn-err-elapsed = { NUMBER($seconds, minimumFractionDigits: 3) } s
+# The button that copies the technical details (always in English).
+hv-conn-err-copy = Copy details (English)
+
+# Quick fixes (HV-CONN-03).
+hv-conn-fix-reenter = Enter password again
+hv-conn-fix-edit = Edit connection
+hv-conn-fix-retry = Try again
+# Variables:
+#   $db (String) - a database the user can open, e.g. "orders".
+hv-conn-fix-use-db = Use { $db }
+hv-conn-fix-versions = Supported versions
+hv-conn-fix-anyway = Connect anyway, unsupported
+hv-conn-fix-connect = Connect
+hv-conn-fix-close = Close
+# Shown when the connections file is read-only: fixes that change the connection are off.
+hv-conn-fix-read-only = Your connections file can't be changed, so fixes that edit this connection are off.
+# Shown when a fix's change to the connection could not be saved.
+hv-conn-fix-save-failed = The change couldn't be saved to your connections file.
+
+# The production-tag prompt (NOTES surface 4, D-004).
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod-us".
+hv-conn-prod-title = How careful should { -brand-hacivat } be with { $name }?
+# Variables:
+#   $host (String) - the connection's host, e.g. "db-prod-us.acme.io".
+hv-conn-prod-body = { $host } isn't on this Mac. Pick the kind of database it is. You can change this later in the connection settings.
+# Why Production is preselected: a word of the host name.
+# Variables:
+#   $token (String) - the word that matched, e.g. "prod".
+hv-conn-prod-suggest = Suggested because the host name contains “{ $token }”.
+# Why Production is preselected: a word of the connection's name.
+# Variables:
+#   $token (String) - the word that matched, e.g. "prd".
+hv-conn-prod-suggest-name = Suggested because the name contains “{ $token }”.
+# The environment choices and their descriptions.
+hv-conn-prod-opt-production = Production
+hv-conn-prod-opt-production-d = Live data that people or services rely on
+hv-conn-prod-opt-staging = Staging
+hv-conn-prod-opt-staging-d = A copy that mirrors production
+hv-conn-prod-opt-test = Test
+hv-conn-prod-opt-test-d = Shared test or CI data
+hv-conn-prod-opt-dev = Dev
+hv-conn-prod-opt-dev-d = A development database you can break
+# The choice list's accessible name.
+hv-conn-prod-choices = Environment
+# What changes with Production, as a list.
+hv-conn-prod-changes = With production, { -brand-hacivat }:
+# Variables:
+#   $word (String) - the capsule's word, hv-conn-prod-c1-word, drawn in red small caps.
+hv-conn-prod-c1 = shows the { $word } capsule in the title bar while you work on it,
+# The capsule's word in the list, in small caps: pre-cased here, never cased in code.
+hv-conn-prod-c1-word = PRODUCTION
+hv-conn-prod-c2 = asks you to confirm statements that change data or schema,
+hv-conn-prod-c3 = uses manual commit: nothing is written until you commit.
+# Shown instead of the list for any other environment.
+hv-conn-prod-other = No extra confirmations. Statements commit as they run.
+# The primary button: it names the result.
+# Variables:
+#   $env (Enum(production, staging, test, dev)) - the chosen tag.
+hv-conn-prod-save = { $env ->
+        [production] Save as production
+        [staging] Save as staging
+        [test] Save as test
+       *[dev] Save as dev
+    }
+# The primary button while nothing is chosen (disabled).
+hv-conn-prod-pick = Pick an environment
+hv-conn-prod-cancel = Cancel
+
+# The password prompt a connect asks through (R14).
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-conn-pw-title = Sign in to { $name }
+# Variables:
+#   $user (String) - the database user, e.g. "deploy".
+hv-conn-pw-body = Enter the password for { $user }. It's kept only if the connection works.
+hv-conn-pw-cancel = Cancel
+## m2a-t17-dialog
+
+# Palette titles of the connection dialog's commands (they run only while the dialog is open).
+hv-cmd-connection-dialog-test = Test connection
+hv-cmd-connection-dialog-save = Save connection
+hv-cmd-connection-dialog-save-and-connect = Save and connect
+hv-cmd-connection-dialog-copy-url = Copy connection as URL
+# Connection dialog title for a new connection.
+hv-conn-dlg-title-new = New connection
+# Connection dialog title while editing a saved connection.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-conn-dlg-title-edit = Edit { $name }
+# Line under the dialog title for a new connection.
+hv-conn-dlg-sub-new = Not saved yet
+# Line under the dialog title for a saved connection.
+hv-conn-dlg-sub-edit = Saved · changes apply on the next connect
+# Form row labels and placeholders of the connection dialog.
+hv-conn-dlg-url = URL
+hv-conn-dlg-url-ph = Paste a connection URL to fill the form
+hv-conn-dlg-copy-url = Copy as URL
+hv-conn-dlg-engine = Engine
+hv-conn-dlg-name = Name
+hv-conn-dlg-env = Environment
+# Hint under the environment choice when the host is not this machine.
+hv-conn-dlg-env-ask = Asked when you save, because this host isn't on this Mac.
+# Hint under the environment choice when the host is this machine.
+hv-conn-dlg-env-local = Set to local: the server runs on this Mac.
+hv-conn-dlg-ro = Read-only
+# Dimmer text after the Read-only checkbox, starting with its separator dot.
+hv-conn-dlg-ro-hint = · Block statements that change data or schema
+# Section headings of the connection form, in small caps: pre-cased here, never cased in code.
+hv-conn-section-server = SERVER
+hv-conn-section-auth = AUTHENTICATION
+# Titles of the folding sections of the connection form.
+hv-conn-section-tls = Encryption (TLS)
+hv-conn-section-advanced = Advanced
+hv-conn-dlg-host = Host
+hv-conn-dlg-port = Port
+hv-conn-dlg-db = Database
+hv-conn-dlg-user = User
+hv-conn-dlg-file = File
+# Button that opens a file picker.
+hv-conn-dlg-choose = Choose…
+hv-conn-dlg-sqlite-ro = Open the file read-only
+hv-conn-dlg-sqlite-create = Create the file if it doesn't exist
+# Row label of the sign-in method choice.
+hv-conn-dlg-auth = Authentication
+# The sign-in methods.
+hv-conn-auth-password = Password
+hv-conn-auth-pgpass = pgpass
+hv-conn-auth-cert = Client certificate
+hv-conn-auth-none = None
+hv-conn-dlg-password = Password
+# Label of the choice of how long a password is kept.
+hv-conn-dlg-remember = Remember
+# Placeholder of the password field when a password is already stored.
+hv-conn-dlg-pw-saved = saved in the Keychain
+# Next to a password that came from a pasted URL.
+hv-conn-dlg-pw-from-url = from the pasted URL
+# How long a password is kept, each with a hint.
+hv-conn-ret-never = Never
+hv-conn-ret-never-h = ask on every connect
+hv-conn-ret-restart = Until restart
+hv-conn-ret-restart-h = kept in memory
+hv-conn-ret-session = For this session
+hv-conn-ret-session-h = forgotten on disconnect
+hv-conn-ret-forever = Forever (Keychain)
+hv-conn-ret-forever-h = stored in the macOS Keychain
+# Hint of the disabled "Forever" choice when the system keyring can't be used.
+hv-conn-ret-forever-off-h = the system keyring isn't available
+# The pgpass line that matches the connection.
+# Variables:
+#   $n (Number) - the 1-based line number, e.g. 3.
+hv-conn-pgpass-match = Matches line { $n } of ~/.pgpass
+# Shown when no pgpass line matches the connection.
+hv-conn-pgpass-none = No line of ~/.pgpass matches this connection yet.
+hv-conn-pgpass-note = Read on every connect. { -brand-hacivat } stores no password for this connection.
+hv-conn-dlg-cert = Certificate
+hv-conn-dlg-key = Private key
+hv-conn-auth-none-note = Connects without a password. Use only for servers that trust this machine.
+# Summary of the folded encryption section in Auto mode.
+hv-conn-tls-sum-auto = Auto: verify when the server offers TLS
+hv-conn-tls-mode = Mode
+# The encryption modes, each with a hint.
+hv-conn-tls-auto = Auto
+hv-conn-tls-auto-h = verify if offered; plaintext only on private networks
+# Hint of Auto for MySQL and MariaDB, which send credentials in plain text only to this machine.
+hv-conn-tls-auto-loopback-h = verify if offered; plaintext only to this Mac
+hv-conn-tls-require = Require
+hv-conn-tls-require-h = encrypt, don't verify
+hv-conn-tls-verify-ca = Verify CA
+hv-conn-tls-verify-ca-h = check the chain
+hv-conn-tls-verify-full = Verify full
+hv-conn-tls-verify-full-h = check the chain and host name
+hv-conn-tls-disable = Disable
+hv-conn-tls-disable-h = never encrypt
+# Warning when encryption is turned off for MySQL or MariaDB.
+hv-conn-tls-disable-warn = With encryption off, the password crosses the network in plain text, where anyone on the network path can read it.
+hv-conn-tls-ca = CA certificate
+hv-conn-tls-ca-ph = System trust store
+# Summary of the folded Advanced section.
+# Variables:
+#   $timeout (Number) - the connect timeout in seconds, e.g. 15.
+#   $keepalive (Enum(on, off)) - whether keep-alive is on.
+#   $seconds (Number) - the keep-alive interval in seconds, e.g. 60.
+hv-conn-adv-sum = Timeout { $timeout } s · { $keepalive ->
+        [on] keep-alive every { $seconds } s
+       *[off] keep-alive off
+    }
+hv-conn-adv-timeout = Connect timeout
+# Unit after the connect timeout field.
+hv-conn-adv-timeout-unit = seconds
+hv-conn-adv-keepalive = Keep-alive every
+hv-conn-adv-off = Off
+# A keep-alive interval choice.
+# Variables:
+#   $seconds (Number) - the interval in seconds, e.g. 60.
+hv-conn-adv-every = { $seconds } s
+hv-conn-adv-app = Application name
+hv-conn-adv-extra = Extra properties
+hv-conn-adv-extra-add = Add property
+# Placeholders of an extra property's name and value fields.
+hv-conn-adv-extra-key = key
+hv-conn-adv-extra-value = value
+hv-conn-adv-extra-remove = Remove property
+hv-conn-adv-budget = Connections
+# The connection budget, stated as a fact.
+# Variables:
+#   $max (Number) - how many connections may be open at once, e.g. 4.
+hv-conn-adv-budget-v = Up to { $max } open at once; more consoles wait their turn
+# Footer buttons of the connection dialog.
+hv-conn-dlg-test = Test connection
+hv-conn-dlg-test-stop = Stop
+hv-conn-dlg-cancel = Cancel
+hv-conn-dlg-save = Save
+hv-conn-dlg-save-connect = Save and connect
+# Notice in the dialog when connections.toml can't be written.
+hv-conn-dlg-store-read-only = Connections can't be saved now, because the connections file can't be written.
+# Notice in the dialog when saving failed.
+hv-conn-dlg-save-failed = The connection couldn't be saved. Try again.
+# Notice in the dialog when the connection being edited was deleted meanwhile.
+hv-conn-dlg-save-gone = This connection was deleted, so the changes weren't saved.
+# Notice in the dialog when the connection was saved but its password was not.
+hv-conn-dlg-save-secret = The connection was saved, but its password couldn't be stored.
+# Environment names in the connection form, lowercase as the marks' labels.
+hv-conn-env-local = local
+hv-conn-env-dev = dev
+hv-conn-env-test = test
+hv-conn-env-staging = staging
+hv-conn-env-production = production
+# Notice after a connection URL filled the form.
+hv-conn-url-filled = Filled from the pasted URL.
+hv-conn-url-secret = The password was taken out of the URL. It goes to the Keychain when you save.
+# The password line of the notice when it is not kept in the Keychain.
+# Variables:
+#   $ret (Enum(never, until_restart, for_session)) - how long the password is kept.
+hv-conn-url-secret-other = { $ret ->
+        [never] The password was taken out of the URL. { -brand-hacivat } doesn't keep it and asks on every connect.
+        [until_restart] The password was taken out of the URL. { -brand-hacivat } keeps it in memory until restart.
+       *[for_session] The password was taken out of the URL. { -brand-hacivat } keeps it for this session.
+    }
+# After a URL parameter, what it became in the form.
+# Variables:
+#   $setting (String) - the form setting, e.g. "Encryption: Verify full".
+hv-conn-url-mapped = became { $setting }
+# The encryption setting a URL parameter became.
+# Variables:
+#   $mode (String) - the encryption mode, e.g. "Verify full".
+hv-conn-url-setting-tls = Encryption: { $mode }
+# After an unknown URL parameter.
+hv-conn-url-extra = kept as an extra property
+# Variables:
+#   $engine (String) - the database engine, e.g. "MySQL".
+hv-conn-url-engine-set = Engine set to { $engine } from the URL.
+hv-conn-url-undo = Undo
+# A pasted URL is for another engine than the form.
+# Variables:
+#   $engine (String) - the URL's engine, e.g. "MySQL".
+#   $current (String) - the form's engine, e.g. "PostgreSQL".
+hv-conn-url-switch = This is a { $engine } URL, and the form is set to { $current }.
+hv-conn-url-switch-l2 = Nothing was changed yet.
+# Variables:
+#   $engine (String) - the URL's engine, e.g. "MySQL".
+hv-conn-url-switch-btn = Switch to { $engine } and fill
+# Variables:
+#   $current (String) - the form's engine, e.g. "PostgreSQL".
+hv-conn-url-keep = Keep { $current }
+hv-conn-url-unrec = { -brand-hacivat } can't read this as a connection URL. Nothing was changed.
+hv-conn-url-formats = It reads postgres://, mysql://, mariadb://, jdbc:… URLs, key=value strings and SQLite file paths.
+# A pasted URL named several hosts.
+# Variables:
+#   $count (Number) - how many hosts the URL names, e.g. 2.
+#   $host (String) - the host that is used, e.g. "db-1.acme.io".
+hv-conn-url-multihost = The URL names { $count } hosts. { -brand-hacivat } connects to the first, { $host }.
+# Closes the URL notice.
+hv-conn-url-dismiss = Dismiss
+# Toast after saving a connection.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-conn-toast-saved = Saved { $name }
+# Toast title after "Copy as URL"; the URL follows on its own line.
+hv-conn-toast-copied = Copied as URL
+hv-conn-toast-nopw = The password isn't included.
+# Problems that stop a save, shown under the field they belong to.
+hv-conn-issue-name-missing = Enter a name.
+hv-conn-issue-host-missing = Enter a host.
+hv-conn-issue-host-invalid = This host can't be used. Remove spaces and URL characters.
+hv-conn-issue-port-invalid = Enter a port from 1 to 65535.
+hv-conn-issue-file-missing = Choose a database file, or let { -brand-hacivat } create it.
+hv-conn-issue-path-refused = { -brand-hacivat } won't open this path. Choose a local file.
+hv-conn-issue-create-and-read-only = A new file can't be opened read-only. Turn one of the two off.
+hv-conn-issue-transport-unavailable = This connection uses a tunnel this version can't open yet.
+hv-conn-issue-tls-ca-unreadable = The CA certificate can't be read. Verify CA needs one.
+hv-conn-issue-tls-cert-unreadable = The client certificate or its key can't be read.
+# Variables:
+#   $mode (String) - the encryption mode, e.g. "Verify CA".
+hv-conn-issue-tls-mode-unsupported = { $mode } isn't available for this engine yet.
+# Variables:
+#   $key (String) - the property's name, e.g. "sslkey".
+hv-conn-issue-option-rejected = The property { $key } isn't allowed here.
+
+## m2a-t21-shots
+
+# A connection without an environment tag, as a word (the sheet and the capsule; hand-edited files only).
+hv-conn-env-unset = no environment
+# The import dialog's environment choice before one is picked.
+hv-conn-import-choose = Choose…
+# Toast when a deleted connection's saved password could not be removed from the system keyring.
+hv-conn-toast-delete-secret = The connection was deleted, but its saved password couldn't be removed from the system keyring.
+
+## m2a-finalfix
+
+# The Encryption row of a live connection whose certificate chain was checked but whose host name was not (Verify CA).
+# Variables:
+#   $version (String) - the TLS version the server negotiated, e.g. "TLS 1.3".
+hv-conn-enc-ca-only = { $version } · CA verified
+# Under Advanced, when an extra property's key holds a password (db_password, x-pwd, ...).
+# Variables:
+#   $key (String) - the property's name, e.g. "db_password".
+hv-conn-issue-option-secret = The property { $key } holds a password. Remove it and type the password in the Password field.
+
+## m2b-t01-interfaces
+
+# Placeholder issue texts for the SSH section and the TLS key (Task 1); Task 20 rewrites the
+# SSH ones and Task 19 the TLS one.
+# An SSH hop has no host.
+# Review: PO
+hv-conn-issue-ssh-host-missing = Enter the SSH host.
+# An SSH hop has no user.
+# Review: PO
+hv-conn-issue-ssh-user-missing = Enter the user to sign in as.
+# The tunnel has more jump hosts than Hacivat supports.
+# Review: PO
+hv-conn-issue-ssh-too-many-hops = A tunnel can go through at most 8 jump hosts.
+# The SSH key file is missing or can't be read.
+# Review: PO
+hv-conn-issue-ssh-key-file-missing = This key file can't be found. Choose the private key, such as ~/.ssh/id_ed25519.
+# The TLS client key uses the old OpenSSL encryption, which can't be decrypted.
+# m2b-t19-tls (named exception): the placeholder rewritten.
+# Review: PO
+hv-conn-issue-tls-key-legacy-encrypted = This key is encrypted in an old format { -brand-hacivat } can't read. Convert it to an encrypted PKCS #8 key (openssl pkcs8 -topk8), then choose the new file.
+
+## m2b-t20-ssh
+
+# The SSH disclosure of the connection dialog (NOTES M2a surface 6).
+hv-conn-section-ssh = SSH tunnel
+# Summary of the folded SSH section when the connection uses no tunnel.
+hv-conn-ssh-sum-off = Off
+# Summary of the folded SSH section: a tunnel without jump hosts.
+# Variables:
+#   $host (String) - the SSH host, e.g. "bastion.acme.io".
+hv-conn-ssh-sum-on = via { $host }
+# Summary of the folded SSH section: a tunnel through jump hosts.
+# Variables:
+#   $host (String) - the SSH host, e.g. "bastion.acme.io".
+#   $n (Number) - how many jump hosts lead to it, e.g. 1.
+hv-conn-ssh-sum-hops = via { $host } · { $n ->
+        [one] { $n } jump host
+       *[other] { $n } jump hosts
+    }
+hv-conn-ssh-use = Connect through an SSH tunnel
+hv-conn-ssh-import = Import from ~/.ssh/config…
+hv-conn-ssh-host = SSH host
+hv-conn-ssh-user = SSH user
+# The SSH sign-in methods (a segmented control).
+hv-conn-ssh-auth-agent = Agent
+hv-conn-ssh-auth-key = Key file
+hv-conn-ssh-auth-password = Password
+hv-conn-ssh-auth-kbd = Keyboard-interactive
+hv-conn-ssh-agent-note = Uses the keys loaded in ssh-agent.
+hv-conn-ssh-key = Key file
+hv-conn-ssh-passphrase = Passphrase
+hv-conn-ssh-kbd-note = The server's questions, such as a one-time code, appear when you connect.
+hv-conn-ssh-jumps = Jump hosts
+hv-conn-ssh-add-jump = Add jump host
+# The remove button of a jump host row (its tooltip and accessible name).
+# Variables:
+#   $n (Number) - the row's 1-based position, e.g. 2.
+hv-conn-ssh-remove-jump = Remove jump host { $n }
+# Under a jump host row without a host.
+hv-conn-ssh-jump-host-missing = Enter the jump host.
+# Under the jump host list when a jump host's key file (from ~/.ssh/config) is missing.
+hv-conn-ssh-jump-key-missing = A jump host's key file can't be found. Fix its IdentityFile in ~/.ssh/config, then import the host again.
+hv-conn-ssh-route = Route
+# The first stop of the route row: this computer.
+# Variables:
+#   $os (Enum(mac, other)) - whether this computer is a Mac.
+hv-conn-ssh-this-mac = { $os ->
+        [mac] this Mac
+       *[other] this computer
+    }
+hv-conn-ssh-hostkeys = Host keys
+# The host key policies (a select; there is never an "accept everything" choice).
+hv-conn-ssh-hk-ask = Ask for new hosts
+hv-conn-ssh-hk-accept = Accept new, stop on change
+hv-conn-ssh-hk-strict = Known hosts only
+# The accessible name of the import menu.
+hv-conn-ssh-import-title = Hosts in ~/.ssh/config
+# Why an import entry is disabled.
+hv-conn-ssh-proxycmd = uses ProxyCommand, not supported
+# Why an import entry is disabled: one of its values looked like a password (never shown).
+hv-conn-ssh-unusable-secret = holds a value that looks like a password, not imported
+# Why an import entry is disabled.
+# Variables:
+#   $token (String) - the unsupported token, e.g. "%C".
+hv-conn-ssh-unusable-token = uses { $token }, not supported
+# Why an import entry is disabled: a cycle, or a chain longer than a tunnel allows.
+hv-conn-ssh-unusable-depth = its jump hosts nest too deep
+# Why an import entry is disabled: a ProxyJump names a host the file doesn't define.
+hv-conn-ssh-unusable-unknown = names a jump host that isn't in the file
+# What an import entry resolves to, through jump hosts.
+# Variables:
+#   $target (String) - the user and host it signs in to, e.g. "deploy@bastion.acme.io".
+#   $jumps (String) - its ProxyJump hosts, e.g. "jump-eu".
+hv-conn-ssh-import-via = { $target } · ProxyJump { $jumps }
+# What an import entry resolves to, with a key file.
+# Variables:
+#   $target (String) - the user and host it signs in to, e.g. "ci@10.0.4.7".
+#   $key (String) - its first IdentityFile, e.g. "~/.ssh/ci_ed25519".
+hv-conn-ssh-import-key = { $target } · IdentityFile { $key }
+# The import menu's only row when the file names no host.
+hv-conn-ssh-import-none = No hosts in ~/.ssh/config
+# The import menu's only row when the file can't be read.
+hv-conn-ssh-import-unreadable = ~/.ssh/config can't be read
+# The notice after an import.
+# Variables:
+#   $alias (String) - the imported Host alias, e.g. "bastion".
+hv-conn-ssh-imported = Imported { $alias } from ~/.ssh/config: host, user, key and jump host.
+# Lines of the import notice: what the import skipped or changed.
+# Variables:
+#   $line (Number) - the line in ~/.ssh/config, e.g. 12.
+hv-conn-ssh-notice-match = Line { $line }: Match blocks were skipped.
+# Variables:
+#   $line (Number) - the line in ~/.ssh/config, e.g. 3.
+hv-conn-ssh-notice-include = Line { $line }: Include nests too deep, so the files it names were skipped.
+# Variables:
+#   $alias (String) - the Host alias, e.g. "bastion".
+hv-conn-ssh-notice-known-hosts = { $alias }: UserKnownHostsFile was ignored. { -brand-hacivat } checks its own known hosts and ~/.ssh/known_hosts.
+# Variables:
+#   $alias (String) - the Host alias, e.g. "bastion".
+hv-conn-ssh-notice-strict-no = { $alias }: StrictHostKeyChecking no is read as Ask for new hosts.
+# Variables:
+#   $alias (String) - the Host alias, e.g. "bastion".
+hv-conn-ssh-notice-agent = { $alias }: IdentityAgent was ignored. { -brand-hacivat } uses the agent in SSH_AUTH_SOCK.
+# Variables:
+#   $alias (String) - the Host alias, e.g. "bastion".
+hv-conn-ssh-notice-jump-password = { $alias }: its ProxyJump held a password, which was removed and not kept.
+# The SSH step of the connect trail.
+hv-conn-step-ssh = SSH
+
+## m2a-demo-extra
+
+# After a URL parameter the connection may not use (the paste notice): it is not added.
+# Variables:
+#   $reason (Enum(unknown, refused)) - unknown: not an option Hacivat allows for this engine when the connection comes from a pasted or imported text; refused: never allowed here.
+#   $engine (String) - the database engine, e.g. "PostgreSQL".
+hv-conn-url-left-out = { $reason ->
+        [unknown] isn't a connection option for { $engine }, so it was left out
+       *[refused] isn't allowed, so it was left out
+    }
+# Technical details rows of a setting that stopped the connect before anything was sent.
+hv-conn-err-property = Property
+hv-conn-err-path = Path
+hv-conn-err-problem = Problem
+# The value of the Property or Path row: what was refused, then why.
+# Variables:
+#   $name (String) - the property's name (e.g. "foo") or the file's path.
+#   $reason (Enum(unknown, encoding, script, secret, path, denied)) - why it was refused.
+hv-conn-err-refused = { $name } — { $reason ->
+        [unknown] not allowed for imported connections
+        [encoding] encoded twice
+        [script] runs commands, not allowed for imported connections
+        [secret] holds a password; type it in the Password field
+        [path] { -brand-hacivat } won't open this path
+       *[denied] never allowed
+    }
+
+## m2a-dialog-retries
+
+# Under a rejected password's error, once the server rejected 3 passwords in a row: no more are sent.
+hv-conn-err-attempts-used = All 3 attempts are used. { -brand-hacivat } won't send another password, so the account isn't locked.
+# Under the connection dialog's Password field after 3 rejected passwords: how to try again.
+hv-conn-dlg-attempts-used = No attempts left for this server. To try again, change the host, port or user, or reopen this dialog.
+
+## m2b-t22-live
+
+# The capsule while a lost connection reconnects (B19): the attempt under way.
+# Variables:
+#   $n (Number) - the attempt, from 1, e.g. 3.
+hv-capsule-reconnecting = Reconnecting · attempt { $n }
+# The capsule between two reconnect attempts: when the next one starts.
+# Variables:
+#   $seconds (Number) - whole seconds until the next attempt, e.g. 4.
+hv-capsule-next = in { $seconds } s
+# The path of a connection through an SSH tunnel (the capsule, the status bar and the sheet).
+# Variables:
+#   $host (String) - the SSH host the database is reached from (the last hop), e.g. "bastion.acme.io".
+hv-conn-path-ssh = SSH via { $host }
+# The capsule, the status bar and the explorer after an idle disconnect (B18).
+hv-conn-idle-cap = Disconnected (idle)
+# Toast after an idle disconnect whose threshold is a whole number of hours.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+#   $hours (Number) - the idle threshold in hours, e.g. 4.
+hv-conn-idle-disconnected = Disconnected { $name } after { $hours } h idle. It reconnects when you use it.
+# Toast after an idle disconnect whose threshold is not a whole number of hours.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+#   $minutes (Number) - the idle threshold in minutes, e.g. 90.
+hv-conn-idle-disconnected-minutes = Disconnected { $name } after { $minutes } min idle. It reconnects when you use it.
+# Toast when a transaction has stayed open and idle for the connection's idle threshold.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+#   $minutes (Number) - how long it has been idle, in minutes, e.g. 60.
+hv-conn-idle-tx = A transaction on { $name } has been open and idle for { $minutes } min. It holds its locks until you commit it or roll it back.
+# The sticky toast after a lost server session (D-085, B19): its title.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+#   $state (Enum(reconnected, lost)) - reconnected: Hacivat opened a new session on its own; lost: it did not, because work was in progress.
+hv-conn-lost-title = { $state ->
+        [reconnected] Reconnected to { $name }
+       *[lost] The session on { $name } was lost
+    }
+# The toast's first line.
+# Variables:
+#   $state (Enum(reconnected, lost)) - as in hv-conn-lost-title.
+hv-conn-lost-body = { $state ->
+        [reconnected] The server session ended, so { -brand-hacivat } opened a new one.
+       *[lost] The server session ended while work was in progress, so { -brand-hacivat } didn't reconnect on its own. Retry connects again.
+    }
+# A line of the toast, only when a transaction was open.
+hv-conn-lost-tx = Your open transaction ended, and the server rolled back its uncommitted changes.
+# A line of the toast: what else the old session held.
+# Variables:
+#   $items (List) - what was lost, each an hv-conn-lost-item-* message, e.g. "temporary tables".
+hv-conn-lost-other = Also gone: { $items }
+hv-conn-lost-item-temp = temporary tables
+hv-conn-lost-item-vars = session variables
+# Variables:
+#   $count (Number) - how many prepared statements were lost, e.g. 2.
+hv-conn-lost-item-prepared = { $count ->
+        [one] a prepared statement
+       *[other] { $count } prepared statements
+    }
+hv-conn-lost-item-locks = session locks
+hv-conn-lost-details = Show details
+hv-conn-lost-dismiss = Dismiss
+# The sticky alert after the read-only guard stopped a statement (Q35): its title.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-conn-gap-title = Read-only guard on { $name }
+# The alert's line when the statement ended the guard's read-only transaction.
+hv-conn-gap-tx-ended = { -brand-hacivat } stopped a statement that ended the read-only transaction on a read-only connection and closed that session.
+# The alert's line when the statement changed data.
+hv-conn-gap-changed-data = { -brand-hacivat } stopped a statement that changed data on a read-only connection and closed that session.
+# A read-only connection whose role the server limits to reading (B21; the capsule, the status bar and the popover).
+hv-conn-access-ro-enforced = read-only (enforced by server role)
+# The sheet's short forms of the access labels (they fit its narrow value column).
+hv-conn-ro-sheet-enforced = read-only · enforced
+hv-conn-ro-sheet-guarded = read-only · guarded
+# The read-only explanation popover (NOTES M2b surface 6).
+hv-conn-ro-pop-enf-title = Read-only, enforced by the server
+# Variables:
+#   $user (String) - the role the connection signs in as, e.g. "app_ro".
+hv-conn-ro-pop-enf-body = The role { $user } can only read here. The server itself refuses writes, whatever runs in { -brand-hacivat }.
+hv-conn-ro-pop-enf-temp = TEMP alone doesn't weaken enforcement, so the label stays enforced.
+hv-conn-ro-pop-g-title = Read-only is guarded, not enforced
+# Variables:
+#   $user (String) - the role the connection signs in as, e.g. "qa".
+hv-conn-ro-pop-g-body = The role { $user } isn't limited to reading here, so { -brand-hacivat } stops writes itself: it checks every statement and runs it read-only.
+hv-conn-ro-pop-g-limit = That catches mistakes. Only a read-only role on the server is a hard guarantee.
+hv-conn-ro-pop-g-fix = To enforce it, ask your DBA for a role like this, then make it this connection's user:
+hv-conn-ro-pop-maria-body = { -brand-hacivat } can't yet confirm that a MariaDB role is read-only, so it always guards MariaDB connections itself.
+hv-conn-ro-pop-no-fix = No role change makes this label enforced, so there is no SQL to copy.
+hv-conn-ro-pop-sqlite-body = SQLite has no server roles. { -brand-hacivat } opens the file read-only and lets through only statements that read.
+hv-conn-ro-copy-sql = Copy SQL
+# Toast after Copy SQL.
+hv-conn-ro-copied = Copied the SQL. Replace the values in angle brackets before you run it.
+# The lead of the role probe's findings, then one line each.
+hv-conn-ro-warn-head = Found on this role:
+hv-conn-ro-warn-superuser = It is a superuser.
+hv-conn-ro-warn-bypass-rls = It bypasses row-level security.
+hv-conn-ro-warn-replication = It can start replication.
+hv-conn-ro-warn-create-role = It can create and change roles.
+hv-conn-ro-warn-server-file-roles = It can read or write files on the database server.
+hv-conn-ro-warn-execute-server-program = It can run programs on the database server.
+hv-conn-ro-warn-signal-backend = It can cancel or end other sessions.
+hv-conn-ro-warn-write-privileges = It can change data in some tables.
+hv-conn-ro-warn-temp-privilege = It can create temporary tables, which read-only transactions block.
+# Variables:
+#   $name (String) - the extension's name, from the probe's fixed list, e.g. "dblink".
+hv-conn-ro-warn-egress-extension = The { $name } extension can reach other servers.
+hv-conn-ro-warn-role-grant-not-expanded = Other roles are granted to it, and { -brand-hacivat } can't see what they allow.
+hv-conn-ro-warn-unparsed = { -brand-hacivat } couldn't read its privileges.
+# The palette command that opens the read-only explanation of the current connection.
+hv-cmd-connection-explain-access = Explain read-only access
+
+## m2b-t21-prompts
+
+# The new-host-key prompt (M2a NOTES surface 6). Its title.
+# Variables:
+#   $host (String) - the SSH host Hacivat dialled, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-hk-title = First connection to { $host }
+# Variables:
+#   $os (Enum(mac, other)) - whether this computer is a Mac.
+# Review: PO
+hv-conn-hk-body = { $os ->
+        [mac] This Mac hasn't connected to this SSH server before. Compare the fingerprint with the one your administrator gave you.
+       *[other] This computer hasn't connected to this SSH server before. Compare the fingerprint with the one your administrator gave you.
+    }
+# The fingerprint inset's label.
+# Review: PO
+hv-conn-hk-fp = Host key
+# Review: PO
+hv-conn-hk-store = { -brand-hacivat } saves it in its own known-hosts list. ~/.ssh/known_hosts isn't changed.
+# The primary button.
+# Review: PO
+hv-conn-hk-trust = Trust and connect
+# The tooltip and accessible name of the Copy button of a fingerprint inset.
+# Review: PO
+hv-conn-hk-copy-fp = Copy fingerprint
+
+# The changed-host-key review (NOTES surface 1): a hard stop whose default is Cancel.
+# Variables:
+#   $host (String) - the SSH host Hacivat dialled, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-hk-changed-title = The host key of { $host } changed
+# Review: PO
+hv-conn-hk-changed-body = The server answered with a different key from the one stored for it. That happens when a server is rebuilt or its keys are rotated, and also when someone is intercepting the connection. { -brand-hacivat } stopped before signing in.
+# The two fingerprint insets.
+# Review: PO
+hv-conn-hk-changed-old = Stored key
+# Review: PO
+hv-conn-hk-changed-new = Offered now
+# Under the stored key: where it is stored.
+# Review: PO
+hv-conn-hk-changed-stored-in = Stored in
+# Review: PO
+hv-conn-hk-changed-src-hacivat = { -brand-hacivat }'s known hosts
+# Variables:
+#   $file (String) - the OpenSSH file, e.g. "~/.ssh/known_hosts".
+#   $n (Number) - the line in that file, e.g. 14.
+# Review: PO
+hv-conn-hk-changed-src-openssh = { $file } line { NUMBER($n, useGrouping: "false") }
+# Variables:
+#   $host (String) - the SSH host, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-hk-changed-ask = Ask whoever runs { $host } whether its key changed, and compare the new fingerprint before you trust it.
+# The trust-widening button: never the default.
+# Review: PO
+hv-conn-hk-changed-replace = Remove the old key and trust the new one
+# Above the ssh-keygen command when the old key is in an OpenSSH file.
+# Variables:
+#   $file (String) - the OpenSSH file, e.g. "~/.ssh/known_hosts".
+# Review: PO
+hv-conn-hk-changed-openssh-note = { -brand-hacivat } doesn't change { $file }. If the new key is genuine, remove the old line in a terminal, then try again:
+# Review: PO
+hv-conn-hk-changed-copy = Copy command
+# Toast after Copy command.
+# Review: PO
+hv-conn-hk-changed-copied = Copied the command
+# Toast after the old key was replaced.
+# Variables:
+#   $host (String) - the SSH host, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-hk-changed-trusted = Trusted the new key of { $host }
+
+# The keyboard-interactive prompt (NOTES surface 2). Server text is never placed in these.
+# Variables:
+#   $host (String) - the SSH host Hacivat dialled, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-kbd-title = Sign in to { $host }
+# Variables:
+#   $host (String) - the SSH host Hacivat dialled, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-kbd-asks = { $host } asks:
+# The caption of the inset holding the server's own text.
+# Review: PO
+hv-conn-kbd-from-server = Sent by the server, shown as received
+# Review: PO
+hv-conn-kbd-no-text = The server sent no name or instructions.
+# Variables:
+#   $n (Number) - the attempt, 1 to 3.
+# Review: PO
+hv-conn-kbd-attempt = Attempt { $n } of 3
+# Review: PO
+hv-conn-kbd-not-kept = Answers go to this server only and aren't kept.
+# Review: PO
+hv-conn-kbd-rejected = The server didn't accept the answers and asked again.
+# Review: PO
+hv-conn-kbd-continue = Continue
+
+# The SSH password and key passphrase prompts (NOTES surface 3).
+# Variables:
+#   $host (String) - the asking hop's host, e.g. "jump-eu.acme.io".
+#   $n (Number) - the hop's 1-based position, e.g. 1.
+#   $total (Number) - how many hops the route has, e.g. 2.
+# Review: PO
+hv-conn-ssh-secret-hop = { $host }, hop { $n } of { $total }
+# Variables:
+#   $host (String) - the asking hop's host, e.g. "jump-eu.acme.io".
+# Review: PO
+hv-conn-ssh-secret-pw-title = SSH password for { $host }
+# Variables:
+#   $user (String) - the SSH user and host, e.g. "deploy@jump-eu.acme.io".
+# Review: PO
+hv-conn-ssh-secret-pw-body = Enter the SSH password for { $user }. It's kept only if the connection works.
+# Variables:
+#   $key (String) - the key file, e.g. "~/.ssh/id_ed25519".
+# Review: PO
+hv-conn-ssh-secret-pass-title = Passphrase for { $key }
+# Review: PO
+hv-conn-ssh-secret-pass-body = This key file is encrypted. Enter its passphrase. It's kept only if the connection works.
+# Variables:
+#   $host (String) - the asking hop's host, e.g. "jump-eu.acme.io".
+# Review: PO
+hv-conn-ssh-secret-wrong = { $host } didn't accept the password.
+# After a passphrase that didn't decrypt the key (new: the mock shows only the password's line).
+# Review: PO
+hv-conn-ssh-secret-pass-wrong = That passphrase didn't unlock the key.
+# Variables:
+#   $n (Number) - the attempt, 1 to 3.
+# Review: PO
+hv-conn-ssh-secret-attempt = Attempt { $n } of 3
+# Review: PO
+hv-conn-ssh-secret-continue = Continue
+
+# The vault (NOTES surface 4): create, unlock, reset, damaged.
+# Review: PO
+hv-conn-vault-create-title = Create a vault for saved passwords
+# Review: PO
+hv-conn-vault-create-why = This computer has no system keyring.
+# Review: PO
+hv-conn-vault-create-what = { -brand-hacivat } keeps the passwords you save Forever in an encrypted file, locked with a master password.
+# Review: PO
+hv-conn-vault-master = Master password
+# Review: PO
+hv-conn-vault-repeat = Repeat
+# The create dialog's two live rules.
+# Review: PO
+hv-conn-vault-min = At least 8 characters
+# Review: PO
+hv-conn-vault-match = Both entries match
+# Review: PO
+hv-conn-vault-mismatch = The two entries don't match
+# Review: PO
+hv-conn-vault-norecover = { -brand-hacivat } can't recover it. If you forget it, you reset the vault and enter your saved passwords again.
+# Review: PO
+hv-conn-vault-notnow-note = Not now keeps this password until { -brand-hacivat } restarts.
+# Review: PO
+hv-conn-vault-notnow = Not now
+# Review: PO
+hv-conn-vault-create-btn = Create vault
+# Toast after the vault was created.
+# Review: PO
+hv-conn-vault-created = Vault created. Passwords you save Forever go there.
+# Review: PO
+hv-conn-vault-unlock-title = Unlock the vault
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+# Review: PO
+hv-conn-vault-unlock-body = { -brand-hacivat } needs the master password to read the saved password for { $name }. The vault stays unlocked until you quit.
+# The unlock body when no single connection asks (new: the pipeline's question names none).
+# Review: PO
+hv-conn-vault-unlock-body-any = { -brand-hacivat } needs the master password to read your saved passwords. The vault stays unlocked until you quit.
+# Review: PO
+hv-conn-vault-unlock-wrong = That isn't the master password.
+# Variables:
+#   $n (Number) - the attempt, 1 to 3.
+# Review: PO
+hv-conn-vault-attempt = Attempt { $n } of 3
+# Review: PO
+hv-conn-vault-unlock-btn = Unlock
+# Review: PO
+hv-conn-vault-reset-link = Reset vault…
+# Review: PO
+hv-conn-vault-reset-title = Reset the vault?
+# The mock counts the passwords; a locked or damaged vault can't be counted, so the body names none.
+# Review: PO
+hv-conn-vault-reset-body = This deletes the vault and every password saved in it. Your connections stay, and { -brand-hacivat } asks for each password the next time you connect. This can't be undone.
+# Variables:
+#   $word (String) - the word to type, hv-conn-vault-reset-word, e.g. "reset".
+# Review: PO
+hv-conn-vault-reset-type = Type { $word } to confirm
+# The word typed to confirm a reset: the same in every language on purpose (B13).
+# Review: PO
+hv-conn-vault-reset-word = reset
+# Review: PO
+hv-conn-vault-reset-btn = Reset vault
+# Toast after a reset.
+# Review: PO
+hv-conn-vault-reset-done = The vault was reset. Its saved passwords are gone.
+# Review: PO
+hv-conn-vault-damaged-title = The vault can't be read
+# Review: PO
+hv-conn-vault-damaged-body = The vault file failed its integrity check, so { -brand-hacivat } didn't use it and didn't change it. Restore it from a backup, or reset the vault.
+# Review: PO
+hv-conn-vault-damaged-meanwhile = Until then, passwords you enter are kept until { -brand-hacivat } restarts.
+# The Remember choice "Forever" when the vault holds the secrets, with its hint.
+# Review: PO
+hv-conn-ret-forever-vault = Forever (encrypted file)
+# Review: PO
+hv-conn-ret-forever-vault-h = in { -brand-hacivat }'s vault, behind a master password
+
+# The quick fix of ssh.host_key_changed: opens the review (NOTES surface 1).
+# Review: PO
+hv-conn-fix-review-host-key = Review host key…
+
+# Fix round 1. Under the SSH secret prompt's Remember: the choice is the connection's.
+# Review: PO
+hv-conn-ssh-secret-remember-all = Applies to the saved SSH passwords and passphrases of every hop of this connection.
+# Fix round 1. A save or delete that changed nothing because the stored passwords could not be
+# moved or deleted (a locked vault whose unlock was declined, a refused write).
+# Review: PO
+hv-conn-save-unchanged = Nothing was changed: the saved passwords couldn't be moved or removed. If { -brand-hacivat } asks, unlock the vault, then try again.
+# Fix round 1. The vault file is a link or not a regular file, so it can't be used.
+# Review: PO
+hv-conn-vault-denied = { -brand-hacivat } can't use the vault file: it isn't a regular file. Passwords you enter are kept until { -brand-hacivat } restarts.
+
+## m2b-t19-tls
+
+# Quick fixes of an untrusted certificate (B6): open the certificate review, or choose its CA file.
+hv-conn-fix-review-cert = Review certificate…
+hv-conn-fix-import-ca = Import CA…
+# The certificate review's title (NOTES M2a surface 5).
+hv-conn-tls-title = Certificate not trusted
+# Variables:
+#   $host (String) - the server's host as the connection names it, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-body = { $host }:{ $port } offered a certificate that no CA trusted by this Mac has signed. Compare the fingerprint with whoever runs the server before you continue.
+# The certificate's facts.
+hv-conn-tls-subject = Issued to
+hv-conn-tls-issuer = Issued by
+hv-conn-tls-valid = Valid until
+# The certificate's expiry date, in the regional format.
+# Variables:
+#   $when (DateTime) - the moment the certificate expires, e.g. 2027-03-14.
+hv-conn-tls-valid-date = { DATETIME($when, dateStyle: "long") }
+hv-conn-tls-fp = SHA-256 fingerprint
+# The tooltip of the button that copies a fingerprint.
+hv-conn-tls-copy-fp = Copy fingerprint
+hv-conn-tls-chain = Chain
+# A certificate's place in the chain, after its name.
+hv-conn-tls-leaf = server
+hv-conn-tls-inter = intermediate
+hv-conn-tls-root = root · not trusted by this Mac
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-pin-note = Pinning trusts exactly this certificate for { $host }:{ $port }. If it ever changes, { -brand-hacivat } stops and asks again. A pin doesn't extend the expiry date.
+hv-conn-tls-pin-btn = Pin this certificate
+hv-conn-tls-import = Import CA…
+# Under the certificate's facts when today is outside its dates: why nothing can trust it.
+# Variables:
+#   $state (Enum(expired, early)) - expired: past its expiry date; early: not valid yet.
+hv-conn-tls-dates-note = { $state ->
+        [expired] This certificate has expired. A pin doesn't extend the expiry date, so it can't be pinned. Ask whoever runs the server to renew it.
+       *[early] This certificate isn't valid yet. Check the date and time of this Mac, or ask whoever runs the server.
+    }
+# The TLS section of the connection dialog: the endpoint's pinned certificate.
+hv-conn-tls-pin = Pinned certificate
+hv-conn-tls-pin-none = None
+hv-conn-tls-remove-pin = Remove pin
+# In the TLS section when Encryption is Disable and the endpoint has a pinned certificate.
+hv-conn-issue-tls-disable-ignores-pin = With encryption off, the pinned certificate isn't checked. Choose another mode to use the pin.
+# The client certificate's key passphrase field.
+hv-conn-dlg-key-pass = Key passphrase
+# Under the key passphrase field when the key is encrypted and the passphrase is missing or wrong.
+hv-conn-issue-tls-key-passphrase = This key is encrypted. Enter its passphrase.
+# The certificate of a pinned endpoint changed (NOTES M2b surface 5).
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-pin-changed-title = The certificate of { $host }:{ $port } changed
+hv-conn-tls-pin-changed-body = This connection is pinned to one certificate, and the server now presents a different one. { -brand-hacivat } stopped before signing in.
+# The two fingerprints: the pinned one, and the one the server presents now.
+hv-conn-tls-pin-changed-old = Pinned
+hv-conn-tls-pin-changed-new = Now
+hv-conn-tls-pin-changed-ask = A renewed certificate looks like this too. Ask whoever runs the server before you replace the pin.
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-pin-changed-note = Replacing the pin trusts exactly the new certificate for { $host }:{ $port } and removes the old pin. A pin doesn't extend the expiry date.
+hv-conn-tls-pin-changed-replace = Replace pin
+# Toast after Replace pin.
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+hv-conn-tls-pin-changed-done = Pinned the new certificate of { $host }
+# The public-plaintext question (NOTES M2a surface 5): a public host offered no TLS.
+# Variables:
+#   $host (String) - the server's host, e.g. "db.acme.io".
+hv-conn-plain-title = { $host } doesn't offer encryption
+# Variables:
+#   $ip (String) - the server's address, e.g. "203.0.113.10".
+hv-conn-plain-body = { $ip } accepts only unencrypted connections and isn't on a private network. Your password and query results would cross the network in plain text.
+hv-conn-plain-ssh = Use an SSH tunnel…
+hv-conn-plain-connect = Connect without encryption
+hv-conn-plain-remember = Don't ask again for this connection
+
+## m2b-t23-f1
+
+# A line of the read-only popover's findings list (the hv-conn-ro-warn-* family of Task 22):
+# the role may run a PostgreSQL function that writes something a rollback can't undo, such as
+# pg_logical_emit_message (RoleWarning::NonTransactionalWrite).
+hv-conn-ro-warn-non-transactional-write = It can run functions whose effects a rollback can't undo.
+
+## m2b-t24-shots
+
+# The Encryption value of a live connection whose certificate is pinned (M2a NOTES enc-pinned).
+# Variables:
+#   $version (String) - the TLS version the server negotiated, e.g. "TLS 1.3".
+hv-conn-enc-pinned = { $version } · pinned
+# The test report's encryption row for a pinned certificate.
+# Variables:
+#   $version (String) - the TLS version number, e.g. "1.3".
+hv-conn-diag-tls-pinned = TLS { $version } · pinned
+# The same row for a pinned certificate when the TLS version is unknown.
+hv-conn-diag-tls-nov-pinned = TLS · pinned
+# The quick fix of tls.not_supported_by_server: the connection's SSH section (M2a NOTES fix-ssh).
+hv-conn-fix-ssh = Connect through SSH…
+# The sheet's Password row when Forever passwords live in Hacivat's vault (NOTES M2b vault-secret).
+hv-conn-secret-vault = vault · forever
+
+## m3a-t01b-seams
+
+# The Edit menu title (the macOS menu bar and the Windows/Linux in-window menu); the group shows
+# only while the editor commands are registered.
+hv-menu-edit = Edit
+
+## m3a-t25-editor-commands
+
+# Command titles of the editor's commands (palette rows, the Edit menu and the editor's context menu).
+hv-cmd-editor-move-left = Move left
+hv-cmd-editor-move-right = Move right
+hv-cmd-editor-move-up = Move up
+hv-cmd-editor-move-down = Move down
+hv-cmd-editor-select-left = Extend selection left
+hv-cmd-editor-select-right = Extend selection right
+hv-cmd-editor-select-up = Extend selection up
+hv-cmd-editor-select-down = Extend selection down
+hv-cmd-editor-move-word-left = Move to previous word
+hv-cmd-editor-move-word-right = Move to next word
+hv-cmd-editor-select-word-left = Extend selection to previous word
+hv-cmd-editor-select-word-right = Extend selection to next word
+hv-cmd-editor-move-line-start = Move to line start
+hv-cmd-editor-move-line-end = Move to line end
+hv-cmd-editor-select-line-start = Extend selection to line start
+hv-cmd-editor-select-line-end = Extend selection to line end
+hv-cmd-editor-move-document-start = Move to document start
+hv-cmd-editor-move-document-end = Move to document end
+hv-cmd-editor-select-document-start = Extend selection to document start
+hv-cmd-editor-select-document-end = Extend selection to document end
+hv-cmd-editor-page-up = Page up
+hv-cmd-editor-page-down = Page down
+hv-cmd-editor-select-page-up = Extend selection a page up
+hv-cmd-editor-select-page-down = Extend selection a page down
+hv-cmd-editor-newline = Insert line break
+hv-cmd-editor-tab = Indent
+hv-cmd-editor-outdent = Outdent
+hv-cmd-editor-delete-backward = Delete backward
+hv-cmd-editor-delete-forward = Delete forward
+hv-cmd-editor-delete-word-backward = Delete previous word
+hv-cmd-editor-delete-word-forward = Delete next word
+hv-cmd-editor-delete-to-line-start = Delete to line start
+hv-cmd-editor-select-all = Select all
+hv-cmd-editor-undo = Undo
+hv-cmd-editor-redo = Redo
+hv-cmd-editor-copy = Copy
+hv-cmd-editor-cut = Cut
+hv-cmd-editor-paste = Paste
+hv-cmd-editor-escape = Collapse selection
+# Turns a mode on or off in which the Tab key moves the keyboard focus out of the editor instead of indenting.
+hv-cmd-editor-toggle-tab-moves-focus = Toggle Tab moves focus
+hv-cmd-editor-context-menu = Show editor menu
+# Runs the statement at the caret, or the selection.
+hv-cmd-editor-run = Run
+# The second and third configurable variants of Run.
+hv-cmd-editor-run-2 = Run (2)
+hv-cmd-editor-run-3 = Run (3)
+# Says in one sentence which lines Run would execute (the status bar and screen readers).
+hv-cmd-editor-describe-exec-range = Describe execution range
+# The sentence of "Describe execution range" when Run would execute one statement that spans several lines.
+# Variables:
+#   $from (Number) - the statement's first line, e.g. 12.
+#   $to (Number) - the statement's last line, e.g. 14.
+#   $label (String) - the start of the statement's text, e.g. "SELECT o.id, c.full_name, …".
+hv-editor-describe-one = Run executes lines { $from }–{ $to }: { $label }
+# The same when the statement is on one line.
+# Variables:
+#   $line (Number) - the statement's line, e.g. 12.
+#   $label (String) - the start of the statement's text, e.g. "SELECT 1;".
+hv-editor-describe-one-line = Run executes line { $line }: { $label }
+# The sentence when Run would execute several statements (always two or more).
+# Variables:
+#   $n (Number) - how many statements, e.g. 3.
+#   $from (Number) - the first statement's first line, e.g. 2.
+#   $to (Number) - the last statement's last line, e.g. 4.
+hv-editor-describe-many = Run executes { $n } statements on lines { $from }–{ $to }
+# The same when the statements are all on one line.
+# Variables:
+#   $n (Number) - how many statements, e.g. 2.
+#   $line (Number) - their line, e.g. 7.
+hv-editor-describe-many-line = Run executes { $n } statements on line { $line }
+# The sentence when Run would first ask which of several statements to execute.
+hv-editor-describe-ask = Run asks which statement to execute
+# The sentence when there is no statement at the caret.
+hv-editor-describe-nothing = Nothing to run here
+# The sentence when the editor can't tell where the statement at the caret ends.
+hv-editor-describe-uncertain = Boundary uncertain: select the statement to run it
+# The sentence when the console has no open connection.
+hv-editor-describe-offline = Not connected: Run connects first and runs nothing
+# The sentence when the editor has not finished reading the text just typed.
+hv-editor-describe-pending = The editor is still reading this text. Try again in a moment.
+# Status bar message and screen reader announcement after turning "Tab moves focus" on.
+hv-editor-tab-moves-focus-on = Tab moves focus
+# The same after turning it off.
+hv-editor-tab-moves-focus-off = Tab indents
+
+## m3a-t26-results-model
+
+# A result tab's title (NOTES surface 9).
+# Variables:
+#   $n (Number) - the result's number in its console, from 1.
+hv-results-result-n = Result { $n }
+# The chip after a cell whose value was cut (NOTES surface 10, "… 5.2 MB").
+# Variables:
+#   $size (String) - the value's whole size (an hv-grid-size-* message), e.g. "5.2 MB".
+hv-grid-truncated = … { $size }
+# A value's size in bytes, inside the truncation chip.
+# Variables:
+#   $n (Number) - the bytes, e.g. 512.
+hv-grid-size-bytes = { $n } B
+# A value's size in kilobytes, inside the truncation chip and the copy limit.
+# Variables:
+#   $n (Decimal) - the kilobytes, e.g. 12.5.
+hv-grid-size-kb = { $n } KB
+# A value's size in megabytes.
+# Variables:
+#   $n (Decimal) - the megabytes, e.g. 5.2.
+hv-grid-size-mb = { $n } MB
+# A value's size in gigabytes.
+# Variables:
+#   $n (Decimal) - the gigabytes, e.g. 1.5.
+hv-grid-size-gb = { $n } GB
+# A value's length in characters, inside the truncation chip.
+# Variables:
+#   $n (Number) - the characters, e.g. 1999.
+hv-grid-size-chars = { $n ->
+        [one] { $n } character
+       *[other] { $n } characters
+    }
+# A cell whose value could not be decoded (NOTES surface 10).
+hv-grid-decode-error = Can't decode
+# Toast after a copy from the grid (NOTES surface 14).
+# Variables:
+#   $rows (Number) - the rows copied, e.g. 3.
+#   $cols (Number) - the columns copied, e.g. 8.
+hv-copy-done = Copied { $rows } × { $cols } cells
+# The second line of the copy toast.
+hv-copy-done-line = Tab-separated, raw values
+# The second line of the copy toast when some copied values are not whole: values the result
+# cut short (their kept beginning was copied) or could not decode (copied as empty cells).
+# Variables:
+#   $n (Number) - how many of the copied values are incomplete, e.g. 3.
+hv-copy-done-incomplete = { $n ->
+        [one] { $n } of the copied values is incomplete: cut short or not decodable.
+       *[other] { $n } of the copied values are incomplete: cut short or not decodable.
+    }
+# Toast while a large copy is prepared in the background.
+# Variables:
+#   $cells (Number) - the cells being copied, e.g. 48000.
+hv-copy-working = Copying { $cells } cells…
+# Toast title when a selection is too large to copy.
+hv-copy-refused-title = Too much to copy
+# Toast body when a selection is too large to copy.
+# Variables:
+#   $cells (Number) - the cells selected, e.g. 8000000.
+#   $max (Number) - the most cells a copy takes, 1000000.
+#   $size (String) - the most text a copy takes (an hv-grid-size-* message), e.g. "100 MB".
+hv-copy-refused-body = The selection has { $cells } cells. Copy takes at most { $max } cells or { $size }; select fewer rows or columns.
+# Toast when separate selections neither stack nor sit side by side, so they have no table shape.
+hv-copy-refused-multiple = These selections can't be copied together. Select one block, or blocks that share their rows or their columns.
+
+## m3a-t34-status-follows
+
+# The status bar's transaction segment: the user's open transaction (NOTES M3a surface 6).
+# Variables:
+#   $n (Number) - the statements run since BEGIN, e.g. 3.
+hv-tx-open = { $n ->
+        [one] Transaction open · { $n } statement
+       *[other] Transaction open · { $n } statements
+    }
+# The tooltip of the transaction segment.
+hv-tx-open-tip = The statements since BEGIN aren't committed yet. Commit or roll back from the command palette.
+# The transaction segment after an error or a cancel stopped the transaction.
+hv-tx-failed = Transaction failed · roll back to end it
+# The tooltip of the failed transaction segment.
+hv-tx-failed-tip = An error or a cancel stopped the transaction. The server now accepts only a rollback.
+# The active result's rows in the status bar, before its time is known.
+# Variables:
+#   $rows (Number) - the rows loaded, e.g. 100.
+hv-results-rows = { $rows ->
+        [one] { $rows } row
+       *[other] { $rows } rows
+    }
+# The active result's rows while more may come (a cursor is open, rows are still arriving, or a
+# limit cut it short).
+# Variables:
+#   $rows (Number) - the rows loaded so far, e.g. 10000.
+hv-results-rows-more = { $rows }+ rows
+# The active result's rows and time in the status bar.
+# Variables:
+#   $rows (Number) - the rows loaded, e.g. 100.
+#   $duration (String) - the time (an hv-status-duration-* message), e.g. "131 ms".
+hv-results-rows-timing = { $rows ->
+        [one] { $rows } row · { $duration }
+       *[other] { $rows } rows · { $duration }
+    }
+# The active result's rows and time while more may come.
+# Variables:
+#   $rows (Number) - the rows loaded so far, e.g. 10000.
+#   $duration (String) - the time (an hv-status-duration-* message), e.g. "131 ms".
+hv-results-rows-more-timing = { $rows }+ rows · { $duration }
+# A time under a second in the status bar.
+# Variables:
+#   $ms (Number) - whole milliseconds, e.g. 131.
+hv-status-duration-ms = { $ms } ms
+# A time of a second or more in the status bar.
+# Variables:
+#   $seconds (Decimal) - seconds with two decimals, e.g. 2.45.
+hv-status-duration-s = { NUMBER($seconds, minimumFractionDigits: 2) } s
+# The status bar's button that closes the open cursor.
+hv-results-status-cursor = Cursor open
+# The tooltip of the cursor button.
+hv-results-status-cursor-tip = Holding a database snapshot. Click to close the cursor.
+
+## m3a-t28-gutter
+
+# The status bar's sentence when the caret is where Run would run nothing (a blank line, a comment).
+hv-editor-nothing-to-run = Nothing to run here
+# The status bar's sentence when the statement at the caret has an uncertain boundary, so Run sends nothing.
+hv-editor-uncertain = Boundary uncertain: select the statement to run it
+# At the end of a statement's first line when a selection runs as separate statements.
+# Variables:
+#   $i (Number) - the statement's position, e.g. 2.
+#   $n (Number) - the statements the selection runs, e.g. 3.
+hv-editor-preview-unit = { $i } of { $n }
+# At the end of the statement's first line when the console is not connected (Run connects first and runs nothing).
+hv-editor-preview-offline = not connected
+# At the end of the statement's first line when its boundary is uncertain.
+hv-editor-preview-uncertain = boundary uncertain
+# At the end of an executed statement's first line once it was edited.
+hv-editor-mark-stale = edited since execution
+# Tooltip of an executed statement's gutter mark once the statement was edited.
+hv-editor-tip-stale = Edited since execution. The marks show the last run.
+# Tooltip title of a gutter mark when two executed statements share its line; each statement's own outcome follows.
+hv-editor-tip-two = Two statements on this line
+
+## m3a-t32-console
+
+# A bound console's tab title from the second console of a connection on; the first shows the connection's name alone.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+#   $n (Number) - the console's number among that connection's consoles, e.g. 2.
+hv-console-tab-title = { $name } ({ $n })
+# The console toolbar's Run button.
+hv-console-run = Run
+# The console toolbar's Stop button, in place of Run while a statement runs.
+hv-console-stop = Stop
+# The console toolbar's run state while a statement runs; the elapsed time follows it.
+hv-console-running = Running
+# The elapsed time of the running statement in the console toolbar, repainted once a second.
+# Variables:
+#   $s (Number) - whole seconds since the run started, e.g. 3.
+hv-console-clock = { $s } s
+# The console toolbar's run state after Stop, until the server answers.
+hv-console-cancelling = Cancelling…
+# The console toolbar while the console waits for a session of its connection (every connection the profile allows is in use).
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+#   $inUse (Number) - connections in use, e.g. 4.
+#   $max (Number) - connections the profile allows, e.g. 4.
+hv-console-waiting = Waiting for a free connection to { $name } ({ $inUse } of { $max } in use)
+# The short form of the waiting sentence when the toolbar is narrow (the connection's name is already in the toolbar).
+# Variables:
+#   $inUse (Number) - connections in use, e.g. 4.
+#   $max (Number) - connections the profile allows, e.g. 4.
+hv-console-waiting-short = Waiting for a connection ({ $inUse } of { $max } in use)
+# Stops waiting for a free connection.
+hv-console-waiting-cancel = Cancel
+# The console toolbar's notice on a production connection (a button that opens the explanation).
+hv-console-prod-notice = Production is read-only in this version
+# The notice's short form when the toolbar is narrow.
+hv-console-prod-short = read-only
+# The overflow menu row that opens the explanation when the notice is short.
+hv-console-prod-why = Why this console is read-only…
+# The explanation popover's title.
+hv-console-prod-pop-title = Why this console is read-only
+# The explanation popover's first paragraph.
+hv-console-prod-pop-body = Writing to production needs statement confirmations, and this version of { -brand-hacivat } doesn't have them yet. Until it does, every production console runs read-only, whatever the connection allows.
+# The explanation popover's second paragraph.
+hv-console-prod-pop-reads = Reads run as usual. A statement that would change data or schema isn't sent, and the Output tab says why.
+# The status bar's caret position in the console's editor (raw numbers, like the line numbers).
+# Variables:
+#   $line (Number) - the caret's line, from 1, e.g. 14.
+#   $col (Number) - the caret's column, from 1, e.g. 49.
+hv-editor-lncol = Ln { NUMBER($line, useGrouping: "false") }, Col { NUMBER($col, useGrouping: "false") }
+# The status bar's count of selected characters in the console's editor.
+# Variables:
+#   $n (Number) - selected characters, e.g. 186.
+hv-editor-selected = { $n } selected
+# The status bar's mark while the console's editor is in reduced mode (a large document).
+hv-editor-reduced = Reduced mode
+# A document size in megabytes, in the regional format (the reduced-mode banner, the restore notice).
+# Variables:
+#   $mb (Decimal) - the size in megabytes, e.g. 18.4.
+hv-console-size-mb = { NUMBER($mb, minimumFractionDigits: 1, maximumFractionDigits: 1) } MB
+# A notice when a console's saved text is too large to open at launch.
+# Variables:
+#   $name (String) - the console's tab title, e.g. "orders-dev (2)".
+hv-console-restore-refused-title = Couldn't reopen { $name }
+# The notice's text.
+# Variables:
+#   $size (String) - the saved text's size (an hv-console-size-mb message), e.g. "31.4 MB".
+#   $limit (String) - the largest size the editor opens (an hv-console-size-mb message), e.g. "20.0 MB".
+#   $file (String) - the name the unchanged file was kept under, next to the console's own, e.g. "2.sql.too-large-1794755669".
+hv-console-restore-refused-body = Its saved text is { $size }, more than the { $limit } this version opens. The file was kept unchanged as { $file }.
+# The notice's text when the console's saved text could not be read.
+# Variables:
+#   $file (String) - the name the unchanged file was kept under, e.g. "2.sql.unreadable-1794755669".
+hv-console-restore-unreadable-body = Its saved text couldn't be read. The file was kept unchanged as { $file }.
+# The Edit menu's Undo when it would take back typing.
+hv-edit-undo-typing = Undo Typing
+# The Edit menu's Undo when it would take back a paste.
+hv-edit-undo-paste = Undo Paste
+# The Edit menu's Undo when it would take back a drop.
+hv-edit-undo-drop = Undo Drop
+# The Edit menu's Undo when it would take back a deletion.
+hv-edit-undo-delete = Undo Delete
+# The Edit menu's Undo when it would take back a cut.
+hv-edit-undo-cut = Undo Cut
+# The Edit menu's Undo when it would take back an indent.
+hv-edit-undo-indent = Undo Indent
+# The Edit menu's Undo when it would take back an outdent.
+hv-edit-undo-outdent = Undo Outdent
+# The Edit menu's Redo when it would apply typing again.
+hv-edit-redo-typing = Redo Typing
+# The Edit menu's Redo when it would apply a paste again.
+hv-edit-redo-paste = Redo Paste
+# The Edit menu's Redo when it would apply a drop again.
+hv-edit-redo-drop = Redo Drop
+# The Edit menu's Redo when it would apply a deletion again.
+hv-edit-redo-delete = Redo Delete
+# The Edit menu's Redo when it would apply a cut again.
+hv-edit-redo-cut = Redo Cut
+# The Edit menu's Redo when it would apply an indent again.
+hv-edit-redo-indent = Redo Indent
+# The Edit menu's Redo when it would apply an outdent again.
+hv-edit-redo-outdent = Redo Outdent
+# A notice when a connection was made read-only (tagged production) while a console holds its open transaction: the console turns read-only once that transaction ends.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders".
+hv-console-ro-pending = { $name } turns read-only once its open transaction is committed or rolled back.
+# The short form of the pending read-only chip in a narrow console toolbar.
+hv-console-ro-pending-short = Read-only after this transaction
+# A notice when a console's own session could not be opened.
+# Variables:
+#   $name (String) - the console's tab title, e.g. "orders-dev (2)".
+hv-console-session-failed = Couldn't open a connection for { $name }. Run tries again.
+# A notice when Disconnect or Delete must ask about an open transaction while another such question is still open.
+hv-console-release-busy = Answer the open question first, then try again.
+## m3a-t30-results-view
+
+# The results tile's first tab: the console's output log (NOTES surface 9).
+hv-results-output = Output
+# The accessible name of the dot on the Output tab: a line arrived while another tab was active.
+hv-results-unread = New output
+# The accessible name of the results tile's tab list.
+hv-results-tabs = Result tabs
+# After a result tab's title when its connection is not production (production has the red swatch).
+# Variables:
+#   $env (String) - the environment word (an hv-conn-env-* message), e.g. "staging".
+hv-results-env-suffix = ({ $env })
+# The result toolbar's copy button, and the Output toolbar's.
+hv-results-copy = Copy
+# The Output toolbar: empty the log.
+hv-results-log-clear = Clear
+# The Output toolbar: show the newest line and follow new ones.
+hv-results-log-end = Scroll to end
+# The Output tab before anything ran in this console.
+hv-results-log-empty = No output yet. Messages from the statements you run appear here.
+# The accessible name of the output log.
+hv-results-log-label = Output log
+# The body of a finished result that has no rows; its header stays.
+hv-grid-no-rows = No rows
+# The info row under the result toolbar when a result has more than 2,000 columns.
+# Variables:
+#   $n (Number) - the result's columns, e.g. 2412.
+hv-grid-too-many-columns = { $n } columns. Wide results scroll sideways; select fewer columns to read them more easily.
+# A grid row that is not loaded yet.
+hv-grid-loading = Loading
+# The cursor strip while rows arrive.
+# Variables:
+#   $rows (Number) - the rows so far, e.g. 3500.
+hv-strip-fetching = { $rows ->
+        [one] Fetching… { $rows } row
+       *[other] Fetching… { $rows } rows
+    }
+# The cursor strip's count while a cursor holds more rows.
+# Variables:
+#   $rows (Number) - the rows loaded, e.g. 10000.
+hv-strip-rows-more = { $rows }+ rows
+# The cursor strip while a cursor is open.
+hv-strip-cursor-open = Cursor open — holding a database snapshot
+# hv-strip-cursor-open when the strip is short; the whole sentence stays in its tooltip.
+hv-strip-cursor-open-short = Cursor open
+# Cursor strip button: close the open cursor.
+hv-strip-close-cursor = Close cursor
+# Cursor strip button: fetch the next rows.
+hv-strip-fetch-more = Fetch more
+# Cursor strip button: fetch every row, up to the memory limit.
+hv-strip-fetch-all = Fetch all
+# The cursor strip of a complete result.
+# Variables:
+#   $rows (Number) - the result's rows, e.g. 1000000.
+hv-strip-complete = { $rows ->
+        [one] { $rows } row
+       *[other] { $rows } rows
+    }
+# Cursor strip button: run the statement behind a closed or cancelled result again.
+hv-strip-rerun = Re-run
+# The cursor strip of a cancelled result.
+# Variables:
+#   $rows (Number) - the rows it had, e.g. 3500.
+hv-strip-cancelled = { $rows ->
+        [one] Cancelled after { $rows } row
+       *[other] Cancelled after { $rows } rows
+    }
+# The memory banner in the cursor strip (R-M3-33).
+# Variables:
+#   $rows (Number) - the rows kept, e.g. 412880.
+#   $size (String) - the memory they take (an hv-grid-size-* message), e.g. "256 MB".
+hv-strip-memory = Memory limit for this result reached ({ $rows } rows, { $size })
+# Memory banner button: raise the limit to the shared budget and fetch on.
+hv-strip-fetch-anyway = Fetch more anyway
+# The cursor strip of a result whose rows past the memory limit were counted, not kept.
+# Variables:
+#   $rows (Number) - the rows kept, e.g. 412880.
+hv-strip-truncated = { $rows ->
+        [one] { $rows } row kept: the memory limit for this result was reached
+       *[other] { $rows } rows kept: the memory limit for this result was reached
+    }
+# The cursor strip of a cursor closed for being idle when its idle bound is not known (the log
+# line that said it is gone); never says a duration.
+# Variables:
+#   $rows (Number) - the rows the result has, e.g. 100.
+hv-strip-closed-idle = { $rows ->
+        [one] Cursor closed after { $rows } row: it was idle too long.
+       *[other] Cursor closed after { $rows } rows: it was idle too long.
+    }
+# The cursor strip after a statement returned more than one result set (R-M3-25).
+# Variables:
+#   $n (Number) - the result sets read and not shown, e.g. 2.
+hv-strip-more-sets = { $n ->
+        [one] { $n } more result set not shown
+       *[other] { $n } more result sets not shown
+    }
+# The word before the selection's size on the right of the cursor strip.
+hv-strip-selection = Selection
+# The selection's size.
+# Variables:
+#   $rows (Number) - the selected rows, e.g. 3.
+#   $cols (Number) - the selected columns, e.g. 2.
+hv-strip-dims = { $rows } × { $cols }
+# Command palette titles of the results tile's commands.
+hv-cmd-results-copy = Copy the selected result cells
+hv-cmd-results-fetch-more = Fetch more rows of the result
+hv-cmd-results-fetch-all = Fetch all rows of the result
+hv-cmd-results-close-cursor = Close the result's cursor
+hv-cmd-results-rerun = Re-run the result's statement
+# Command palette titles of the grid's commands.
+hv-cmd-grid-move-left = Grid: move left
+hv-cmd-grid-move-right = Grid: move right
+hv-cmd-grid-move-up = Grid: move up
+hv-cmd-grid-move-down = Grid: move down
+hv-cmd-grid-select-left = Grid: extend the selection left
+hv-cmd-grid-select-right = Grid: extend the selection right
+hv-cmd-grid-select-up = Grid: extend the selection up
+hv-cmd-grid-select-down = Grid: extend the selection down
+hv-cmd-grid-jump-left = Grid: jump to the first column
+hv-cmd-grid-jump-right = Grid: jump to the last column
+hv-cmd-grid-jump-up = Grid: jump to the first row
+hv-cmd-grid-jump-down = Grid: jump to the last loaded row
+hv-cmd-grid-home = Grid: go to the row's first cell
+hv-cmd-grid-end = Grid: go to the row's last cell
+hv-cmd-grid-first-row = Grid: go to the first row
+hv-cmd-grid-last-row = Grid: go to the last row
+hv-cmd-grid-page-up = Grid: page up
+hv-cmd-grid-page-down = Grid: page down
+hv-cmd-grid-next-cell = Grid: next cell
+hv-cmd-grid-prev-cell = Grid: previous cell
+hv-cmd-grid-select-all = Grid: select all
+hv-cmd-grid-select-row = Grid: select the row
+hv-cmd-grid-select-column = Grid: select the column
+hv-cmd-grid-copy = Grid: copy
+hv-cmd-grid-copy-with-headers = Grid: copy with headers
+hv-cmd-grid-escape = Grid: clear the selection
+## m3a-t33-exec-ui
+
+# Command: stop the running statement of the focused console (or stop fetching its rows).
+hv-cmd-exec-cancel = Stop the running statement
+# Command: commit the user's open transaction on the focused console.
+hv-cmd-tx-commit = Commit transaction
+# Command: roll back the user's open (or failed) transaction on the focused console.
+hv-cmd-tx-rollback = Roll back transaction
+# Run on a console whose connection is not connected: Hacivat connects and runs nothing.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+hv-console-connect-first = Connecting to { $name }. Run again once it's connected.
+# At the end of a statement's first line while it waits to run.
+hv-editor-mark-queued = queued
+# At the end of a statement's first line while it runs; the clock repaints once a second.
+# Variables:
+#   $duration (String) - how long it has run (an exec-dur-* message), e.g. "3 s".
+hv-editor-mark-running = running · { $duration }
+# At the end of a statement's first line when it returned rows.
+# Variables:
+#   $duration (String) - how long it took (an exec-dur-* message), e.g. "42 ms".
+#   $rows (Number) - the rows it returned, e.g. 100.
+hv-editor-mark-rows = { $rows ->
+        [one] executed · { $duration } · { $rows } row
+       *[other] executed · { $duration } · { $rows } rows
+    }
+# At the end of a statement's first line when it returned rows and more are available (its cursor is open).
+# Variables:
+#   $duration (String) - how long it took (an exec-dur-* message), e.g. "42 ms".
+#   $rows (Number) - the rows fetched so far, e.g. 10000.
+hv-editor-mark-rows-more = executed · { $duration } · { $rows }+ rows
+# At the end of a statement's first line when it changed rows.
+# Variables:
+#   $rows (Number) - the rows affected, e.g. 12.
+#   $duration (String) - how long it took (an exec-dur-* message), e.g. "38 ms".
+hv-editor-mark-affected = { $rows ->
+        [one] { $rows } row affected · { $duration }
+       *[other] { $rows } rows affected · { $duration }
+    }
+# At the end of a statement's first line when it finished without rows or a count (DDL, SET).
+# Variables:
+#   $duration (String) - how long it took (an exec-dur-* message), e.g. "12 ms".
+hv-editor-mark-done = executed · { $duration }
+# At the end of a statement's first line when it failed (the SQLSTATE chip follows).
+hv-editor-mark-failed = failed
+# At the end of a statement's first line when a read-only console did not send it.
+hv-editor-mark-denied = not sent: read-only
+# At the end of a statement's first line while its cancel is on its way.
+hv-editor-mark-cancelling = cancelling…
+# At the end of a statement's first line when it was cancelled.
+# Variables:
+#   $duration (String) - how long it ran (an exec-dur-* message), e.g. "12 s 408 ms".
+hv-editor-mark-cancelled = cancelled after { $duration }
+# At the end of a statement's first line when an earlier statement of its run failed.
+hv-editor-mark-skipped = skipped: an earlier statement failed
+# The short form of a status on a long line, after the green check: how long the statement took.
+# Variables:
+#   $duration (String) - how long it took (an exec-dur-* message), e.g. "42 ms".
+hv-editor-mark-short-done = { $duration }
+# The short form of a running status on a long line: the clock, in amber.
+# Variables:
+#   $duration (String) - how long it has run (an exec-dur-* message), e.g. "3 s".
+hv-editor-mark-short-running = { $duration }
+# At the end of the first line of the statement Run would open the chooser on, with the chevrons-up-down glyph.
+# Variables:
+#   $n (Number) - the candidates the chooser offers, e.g. 2.
+hv-editor-preview-choices = { $n } choices
+# The statement chooser's title (D-011): Run has more than one candidate.
+hv-chooser-title = Choose what to run
+# Chooser kind: the statement at the caret.
+hv-chooser-statement = Statement
+# Chooser kind: the subquery at the caret.
+hv-chooser-subquery = Subquery
+# Chooser kind: the largest statement (or batch) at the caret.
+hv-chooser-largest = Largest statement
+# Chooser kind: from the statement at the caret to the end of the script.
+hv-chooser-from-caret = From caret
+# Chooser kind: every statement of the script.
+hv-chooser-whole = Whole script
+# A chooser row: the candidate's kind, and its count of statements when it runs several.
+# Variables:
+#   $kind (String) - the kind (an hv-chooser-statement, -largest, -from-caret, -whole or -subquery message), e.g. "Whole script".
+#   $n (Number) - the statements the candidate runs, e.g. 5.
+hv-chooser-row = { $n ->
+        [one] { $kind }
+       *[other] { $kind } · { $n } statements
+    }
+# The chooser's state when Run sent nothing because a statement boundary is uncertain.
+hv-chooser-uncertain-title = Boundary uncertain
+# The first line under "Boundary uncertain"; the reason follows on its own line.
+hv-chooser-uncertain-body = Hacivat can't tell exactly where this statement ends, so it sent nothing.
+# The last line under "Boundary uncertain": what to do instead.
+# Variables:
+#   $key (String) - the Run shortcut, e.g. "⌘↵".
+hv-chooser-uncertain-fix = Select exactly the text to run, then press { $key }.
+# The last line under "Boundary uncertain" when no key runs the statement.
+hv-chooser-uncertain-fix-unbound = Select exactly the text to run, then run it.
+# The open-transaction prompt's title when a console or the app closes.
+# Variables:
+#   $name (String) - the console's title (the connection's name), e.g. "orders-dev".
+#   $n (Number) - the statements in the open transaction, e.g. 3.
+hv-tx-close-title = { $n ->
+        [one] { $name } has an open transaction with { $n } statement
+       *[other] { $name } has an open transaction with { $n } statements
+    }
+# The open-transaction prompt's body when a console closes (its transaction ends with it, on whichever session it runs).
+hv-tx-close-body = Closing this console ends its transaction. Commit keeps the changes; Roll back discards them.
+# The open-transaction prompt's body when the app restarts.
+hv-tx-restart-body = Restarting ends the session. Commit keeps the changes; Roll back discards them.
+# Button: commit the transaction, then restart.
+hv-tx-commit-restart = Commit and restart
+# Button: roll back the transaction, then restart.
+hv-tx-rollback-restart = Roll back and restart
+# The open-transaction prompt's body when the console's connection is about to change (released or replaced).
+hv-tx-release-body = The console's connection is about to change, which ends this transaction. Commit keeps the changes; Roll back discards them.
+# Button: commit the transaction, then go on (the connection changes).
+hv-tx-commit-continue = Commit and continue
+# Button: roll back the transaction, then go on (the connection changes).
+hv-tx-rollback-continue = Roll back and continue
+# The open-transaction prompt's body when the app quits.
+hv-tx-quit-body = Quitting ends the session. Commit keeps the changes; Roll back discards them.
+# Button: commit the transaction, then close the console.
+hv-tx-commit-close = Commit and close
+# Button: roll back the transaction, then close the console.
+hv-tx-rollback-close = Roll back and close
+# Button: commit the transaction, then quit.
+hv-tx-commit-quit = Commit and quit
+# Button: roll back the transaction, then quit.
+hv-tx-rollback-quit = Roll back and quit
+# Button: keep the console (or the app) open; the safe default.
+hv-tx-cancel = Cancel
+# The prompt's title when the console's transaction failed (only a rollback ends it).
+# Variables:
+#   $name (String) - the console's title (the connection's name), e.g. "orders-dev".
+hv-tx-failed-title = The transaction on { $name } failed
+# The prompt's body when the console's transaction failed.
+# Variables:
+#   $n (Number) - the statements in the failed transaction, e.g. 3.
+hv-tx-failed-body = { $n ->
+        [one] An error or a cancel stopped it, so it can only be rolled back. Its { $n } statement won't be kept.
+       *[other] An error or a cancel stopped it, so it can only be rolled back. Its { $n } statements won't be kept.
+    }
+# Toast when Commit or Roll back did not end the transaction (the console or the app stays open).
+# Variables:
+#   $name (String) - the console's title (the connection's name), e.g. "orders-dev".
+hv-tx-end-failed = The transaction on { $name } didn't end, so nothing was closed.
+# Toast when stopping a statement inside the user's transaction failed that transaction (R-M3-16 amended).
+# Variables:
+#   $name (String) - the console's title (the connection's name), e.g. "orders-dev".
+hv-tx-failed-by-stop = Stopping the statement failed the transaction on { $name }. Only a rollback can end it now.
+# Run on a production console whose open transaction must end before it reconnects read-only: nothing is sent.
+hv-exec-pending-read-only = Nothing was sent: this console becomes read-only once its open transaction ends. Commit or roll back first.
+# Toast when Re-run is refused because the statement was edited since it ran.
+hv-exec-rerun-edited = The statement was edited since it ran. Run it from the editor.
+
+## m3a-f4-ime
+# The Edit menu item (macOS) that opens the system's Emoji & Symbols palette; AppKit's own name for it.
+hv-cmd-app-character-palette = Emoji & Symbols

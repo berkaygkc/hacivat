@@ -1,0 +1,66 @@
+# The SEL family (selection modes) of `docs/research/datagrip/13-behavioral-test-corpus.md`
+# §3.7, as Hacivat goldens (M3a Task 13). Fields: `sql-testkit/src/golden/mod.rs`. Clean room:
+# see `caret.toml`.
+
+[[case]]
+id = "SEL-01"
+input = "«SELECT 1; SELECT 2;»"
+policy = { selection = "as_one" }
+expect.units_text = ["SELECT 1; SELECT 2;"]
+expect.unit_kinds = ["verbatim"]
+sources = ["alg/20 HV-EXEC-01 step 2 (AsOne: one unit, the selected text verbatim)"]
+note = "M3a's Run actions never choose AsOne; running a verbatim unit is M3b (R-M3-24)."
+
+[[case]]
+id = "SEL-02"
+input = "«SELECT 1; SELECT 2;»"
+policy = { selection = "as_separate" }
+expect.units_text = ["SELECT 1", "SELECT 2"]
+expect.unit_kinds = ["statement", "statement"]
+sources = ["D-011 (a selection runs exactly as selected, split into separate statements)", "alg/20 HV-EXEC-01 step 2 (AsSeparate)"]
+
+[[case]]
+id = "SEL-03"
+input = "SELECT «1; SELECT 2»;"
+policy = { selection = "smart_expand" }
+expect.units_text = ["SELECT 1", "SELECT 2"]
+sources = ["alg/10 SQL-SPLIT-04 test cases (SEL-03: both full statements)", "alg/20 HV-EXEC-01 test 5"]
+
+[[case]]
+id = "SEL-04"
+input = "«SELECT 1» + 2;"
+policy = { selection = "smart_expand" }
+expect.units_text = ["SELECT 1"]
+expect.unit_kinds = ["verbatim"]
+sources = ["alg/10 SQL-SPLIT-04 test cases (SEL-04: no boundary inside the selection: verbatim)"]
+
+[[case]]
+id = "SEL-05"
+dialect = "mysql"
+fixture = "FX-SPLIT-MY-01"
+select = { all = true }
+policy = { selection = "as_separate" }
+expect.units_text = ["CREATE PROCEDURE hv_p()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND", "CALL hv_p()"]
+sources = ["alg/20 HV-EXEC-01 test 7 (DELIMITER applied client-side, never sent)", "alg/10 SQL-SPLIT-04 edge cases (`DELIMITER //` active for AsSeparate)"]
+
+[[case]]
+id = "SEL-06"
+dialect = "mssql"
+requires = ["dialect:mssql"]
+skip = "dialect:mssql"
+sources = ["alg/10 SQL-SPLIT-04 edge cases (selection across GO: v1.x, SQL Server is not an M3a dialect)"]
+
+[[case]]
+id = "SEL-07"
+input = "«SELECT 'ab»c';"
+policy = { selection = "as_one" }
+expect.resolution = "ambiguous"
+sources = ["R-M3-24 (an uncertain boundary sends nothing in M3a)", "divergences.toml SEL-07"]
+
+[[case]]
+id = "SEL-08"
+input = "«BEGIN; UPDATE customers SET city = city WHERE id = 1; COMMIT;»"
+policy = { selection = "as_one" }
+expect.units_text = ["BEGIN; UPDATE customers SET city = city WHERE id = 1; COMMIT;"]
+expect.unit_kinds = ["verbatim"]
+sources = ["alg/20 HV-EXEC-01 step 2 (AsOne: one unit, the selected text verbatim)"]

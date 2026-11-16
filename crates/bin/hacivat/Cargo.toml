@@ -14,6 +14,9 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
+# M3a Task 1a (R-M3-1): `--smoke` prints the linked libpg_query, so the bundled binary (and the
+# universal macOS build) compiles it before anything else in the binary reaches it.
+sql-oracle-pg.workspace = true
 
 [lints]
 workspace = true

@@ -12,11 +12,11 @@ use std::rc::Rc;
 
 use hacivat_ui_core::fonts::{font_for, small_caps_glyphs, small_caps_tracking_px};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, AnyView, App, AppContext as _, Bounds, ContentMask, Context, Element, ElementId,
-    Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
-    ParentElement, Pixels, Point, Render, ShapedLine, SharedString,
+    AnyElement, AnyView, App, AppContext as _, Bounds, ContentMask, Context, Div, Element,
+    ElementId, FontStyle, Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement,
+    IntoElement, LayoutId, ParentElement, Pixels, Point, Render, ShapedLine, SharedString,
     StatefulInteractiveElement as _, Style, Styled, TextAlign, TextRun, UnderlineStyle, Window,
-    div, point, px, relative,
+    canvas, div, point, px, relative,
 };
 use hacivat_ui_core::theme::{Caps, Theme, TypeStyle, popover_surface};
 use unicode_segmentation::UnicodeSegmentation as _;
@@ -59,6 +59,13 @@ pub struct RenderedText {
     /// Where the text was created (`file:line:column`, plus `#id` for a label with an ID). The
     /// file uses `/` separators on every platform.
     pub path: SharedString,
+    // ## m2b-t24-shots (fix round 1, I1, I2)
+    /// Some of it lies inside the clip it is painted in (the window, a scroll viewport): a
+    /// label scrolled out of its viewport, or laid out below the window, is not visible.
+    pub visible: bool,
+    /// It runs past a side of the dialog card it is drawn in ([`card_scope`]): the card's own
+    /// clip is the window, so check (b) cannot see this.
+    pub outside_card: bool,
 }
 
 /// What the last frame drew, when `enabled` (tests and debug tooling; off by default). Each
@@ -87,17 +94,125 @@ impl TextRegistry {
             return;
         }
         let text = text();
-        let first_of_frame = !std::mem::replace(&mut cx.default_global::<RecordingFrame>().0, true);
-        let reg = cx.global_mut::<TextRegistry>();
-        if first_of_frame {
-            reg.frame.clear();
-        }
-        reg.frame.push(text);
-        if first_of_frame {
-            // Deferred effects run once the current update (and with it this draw) is done.
-            cx.defer(|cx| cx.default_global::<RecordingFrame>().0 = false);
-        }
+        begin_record(cx);
+        cx.global_mut::<TextRegistry>().frame.push(text);
     }
+
+    // ## m2a-t21-shots
+    /// Notes the clip of a scroll viewport (`mask`, recorded by [`scroll_viewport`]) for this
+    /// frame, when the registry is enabled: text that this clip cuts at its top or bottom is
+    /// scrolling, not clipped.
+    pub fn note_scroll_viewport(cx: &mut App, mask: Bounds<Pixels>) {
+        if !cx.try_global::<TextRegistry>().is_some_and(|r| r.enabled) {
+            return;
+        }
+        begin_record(cx);
+        cx.default_global::<ScrollViewports>().0.push(mask);
+    }
+}
+
+// ## m2a-t21-shots
+/// The scroll viewports' clips of the current frame (see [`TextRegistry::note_scroll_viewport`]).
+#[derive(Default)]
+struct ScrollViewports(Vec<Bounds<Pixels>>);
+
+impl Global for ScrollViewports {}
+
+/// Starts a frame's debug records on the first record of the frame (a label, a paragraph, a
+/// scroll viewport or the capsule probe): the text frame, the scroll viewports and the capsule
+/// probe start empty, so nothing from an earlier frame is ever read as this frame's. Records
+/// happen only while the registry is enabled or the probe installed (tests and the shots).
+pub(crate) fn begin_record(cx: &mut App) {
+    let first_of_frame = !std::mem::replace(&mut cx.default_global::<RecordingFrame>().0, true);
+    if !first_of_frame {
+        return;
+    }
+    if cx.has_global::<TextRegistry>() {
+        cx.global_mut::<TextRegistry>().frame.clear();
+    }
+    if cx.has_global::<ScrollViewports>() {
+        cx.global_mut::<ScrollViewports>().0.clear();
+    }
+    if cx.has_global::<crate::capsule::CapsuleProbe>() {
+        cx.global_mut::<crate::capsule::CapsuleProbe>().bounds = None;
+    }
+    // Deferred effects run once the current update (and with it this draw) is done.
+    cx.defer(|cx| cx.default_global::<RecordingFrame>().0 = false);
+}
+
+/// Marks its parent as a scroll viewport for the frame checks: put it first among the children
+/// of an `overflow_*_scroll` element. It records the clip it is laid out in, which is the
+/// viewport's own clip (not its scrolled content), so text cut at that clip's top or bottom
+/// edge counts as scrolled, not clipped.
+pub fn scroll_viewport() -> impl IntoElement {
+    canvas(
+        |_, window, cx| TextRegistry::note_scroll_viewport(cx, window.content_mask().bounds),
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_0()
+}
+
+// ## m2b-t24-shots (fix round 1, I1)
+/// The dialog cards being prepainted, innermost last (see [`card_scope`]).
+#[derive(Default)]
+struct CardScopes(Vec<Bounds<Pixels>>);
+
+impl Global for CardScopes {}
+
+/// Marks `card` as a dialog card for the containment check: every label and paragraph
+/// prepainted inside it records whether it runs past the card's left or right side
+/// ([`RenderedText::outside_card`]). The card's first child, an absolute probe that draws
+/// nothing, opens the scope at prepaint; the card's children-prepainted hook closes it. Call it
+/// on the card before adding its children (`dialog_frame` does).
+pub fn card_scope(card: Div) -> Div {
+    card.relative()
+        .child(
+            canvas(
+                |bounds, _, cx| cx.default_global::<CardScopes>().0.push(bounds),
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        )
+        .on_children_prepainted(|_, _, cx| {
+            cx.default_global::<CardScopes>().0.pop();
+        })
+}
+
+/// Whether a text laid out from `left` to `right` runs past a side of the innermost card being
+/// prepainted (half a pixel of slack).
+pub(crate) fn outside_card(cx: &App, left: Pixels, right: Pixels) -> bool {
+    let slack = px(0.5);
+    cx.try_global::<CardScopes>()
+        .and_then(|c| c.0.last().copied())
+        .is_some_and(|card| left < card.left() - slack || right > card.right() + slack)
+}
+
+/// Whether some of `bounds` lies inside `mask` (the clip it is painted in).
+pub(crate) fn shows_in(bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> bool {
+    bounds.top() < mask.bottom()
+        && bounds.bottom() > mask.top()
+        && bounds.left() < mask.right()
+        && bounds.right() > mask.left()
+}
+
+/// Whether `mask` is the clip of a scroll viewport noted this frame (each edge within 1 px):
+/// a nested, non-scrolling clip inside a viewport is smaller and does not count.
+fn is_scroll_viewport(cx: &App, mask: Bounds<Pixels>) -> bool {
+    let near = |a: Pixels, b: Pixels| (a - b).abs() <= px(1.0);
+    cx.try_global::<ScrollViewports>().is_some_and(|v| {
+        v.0.iter().any(|v| {
+            near(v.left(), mask.left())
+                && near(v.right(), mask.right())
+                && near(v.top(), mask.top())
+                && near(v.bottom(), mask.bottom())
+        })
+    })
 }
 
 /// One line of text in a type style.
@@ -112,6 +227,8 @@ pub struct Label {
     highlight: Vec<Range<usize>>,
     highlight_color: Option<Hsla>,
     location: &'static Location<'static>,
+    // ## m2b-t22-live
+    italic: bool,
 }
 
 impl Label {
@@ -132,13 +249,26 @@ impl Label {
             highlight: Vec::new(),
             highlight_color: None,
             location: Location::caller(),
+            italic: false,
         }
+    }
+
+    // ## m2b-t22-live
+    /// Draws the text in the family's italic face (the placeholders and comments of the SQL
+    /// inset, NOTES M2b surface 6). Not applied to synthesized small caps.
+    pub fn italic(mut self, italic: bool) -> Self {
+        self.italic = italic;
+        self
     }
 
     /// Ellipsize with `…` instead of overflowing; the full text becomes the tooltip.
     ///
     /// A truncating label must be drawn inside a view (any `Render` entity): GPUI's tooltip
     /// machinery reads the current view and panics without one.
+    ///
+    /// Narrower than its ellipsis, a truncating label draws nothing (and is recorded as not
+    /// visible). So a trust signal (the environment, read-only, transaction or cursor label,
+    /// DESIGN.md / NOTES cross-cutting #7: they never collapse) must never be truncating.
     pub fn truncate(mut self, truncate: bool) -> Self {
         self.truncate = truncate;
         self
@@ -302,7 +432,10 @@ pub(crate) fn fitting_prefix(
 
 impl LabelElement {
     fn runs(&self, text_len: usize, highlight: &[Range<usize>]) -> Vec<TextRun> {
-        let font = font_for(&self.label.style);
+        let mut font = font_for(&self.label.style);
+        if self.label.italic {
+            font.style = FontStyle::Italic;
+        }
         let run = |len, underline: Option<UnderlineStyle>| TextRun {
             len,
             font: font.clone(),
@@ -453,6 +586,13 @@ impl LabelElement {
             return Some(Painted::Line(Box::new(line)));
         }
         let ellipsis = self.shape(ELLIPSIS.into(), 0, window).width;
+        // ## m3a-t35-shots (named exception): not even the ellipsis fits (a status-bar cell
+        // that gave way almost to nothing): nothing is drawn, never a cut glyph, and the
+        // label is recorded as not visible (fix round 1, M3). The synthesized small-caps path
+        // above keeps its old behaviour (it never truncates in the product).
+        if ellipsis > bounds.size.width + px(0.5) {
+            return None;
+        }
         let text = &self.label.text;
         let end = fitting_prefix(text, bounds.size.width, ellipsis, |b| line.x_for_index(b));
         let shown = format!("{}{ELLIPSIS}", &text[..end]);
@@ -557,6 +697,9 @@ impl Element for LabelElement {
             flag.set(ellipsize);
         }
         let painted = self.plan(bounds, measured, ellipsize, window);
+        // ## m3a-t35-shots (fix round 1, M3): a truncating label that drew nothing (narrower
+        // than its ellipsis, `plan`) is recorded as not visible, so no check counts it shown.
+        let drew_nothing = ellipsize && painted.is_none();
         // What is recorded as clipped is what the painted run really overflows by, not what
         // was measured: the two are the same widths by construction, and this keeps it so.
         let painted_width = match &painted {
@@ -564,14 +707,19 @@ impl Element for LabelElement {
             Some(Painted::Caps(_, width)) => *width,
             None => px(0.0),
         };
+        let mask = window.content_mask().bounds;
+        let cut = cut_by_clip(bounds, mask, is_scroll_viewport(cx, mask));
+        let outside = outside_card(cx, bounds.left(), bounds.left() + painted_width);
         TextRegistry::record(cx, || RenderedText {
             text: self.label.text.clone(),
             source: self.label.source,
             size_px: self.label.style.size_px,
             painted_px: f32::from(painted_width),
-            clipped: painted_width > bounds.size.width + px(0.5),
+            clipped: !drew_nothing && (painted_width > bounds.size.width + px(0.5) || cut),
             truncated: ellipsize,
             path: self.label.path(),
+            visible: !drew_nothing && shows_in(bounds, mask),
+            outside_card: outside,
         });
         painted
     }
@@ -614,6 +762,194 @@ impl Element for LabelElement {
                 }
             }
         });
+    }
+}
+
+// ## m2a-t21-shots
+
+/// Wrapping prose (a [`Label`] is one line), recorded in the [`TextRegistry`] while it is laid
+/// out, in the tree's order like a label, with what it really drew: `painted_px` is its widest wrapped
+/// line, and `clipped` is set when the wrapped text is taller or wider than its box, or when
+/// the box runs past the clip of its container on the left or right, or is cut at its top or
+/// bottom edge. The frame checks (pseudo-locale
+/// bracketing, nothing clipped, the 11 px floor) then see paragraphs too.
+pub struct Paragraph {
+    text: SharedString,
+    source: TextSource,
+    style: TypeStyle,
+    color: Hsla,
+    id: Option<&'static str>,
+    centered: bool,
+    location: &'static Location<'static>,
+}
+
+/// A [`Paragraph`] of `text` in `style` and `color`.
+#[track_caller]
+pub fn paragraph(
+    text: impl Into<SharedString>,
+    source: TextSource,
+    style: TypeStyle,
+    color: Hsla,
+) -> Paragraph {
+    Paragraph {
+        text: text.into(),
+        source,
+        style,
+        color,
+        id: None,
+        centered: false,
+        location: Location::caller(),
+    }
+}
+
+impl Paragraph {
+    /// Appended to the recorded path as `#id`, for tests.
+    pub fn id(mut self, id: &'static str) -> Self {
+        self.id = Some(id);
+        self
+    }
+
+    /// Centres each wrapped line (empty states).
+    pub fn centered(mut self) -> Self {
+        self.centered = true;
+        self
+    }
+}
+
+/// The clip policy shared by [`Label`] and [`Paragraph`]: whether text laid out in `bounds`
+/// is cut by its container's clip (`mask`).
+/// - Text wholly outside the clip is hidden, not cut (a row scrolled away).
+/// - Text that shows and runs past the clip's left or right edge is cut (a control row wider
+///   than its card). No Hacivat surface scrolls sideways.
+/// - Text that shows and runs past the clip's top or bottom edge is cut, unless the clip is a
+///   scroll viewport (`scrolls`, marked with [`scroll_viewport`]): there the rest of it is a
+///   scroll away.
+///
+/// Limits: the check sees the nearest clip only (an outer clip cutting a nested one is seen by
+/// the nested text as the intersection, which is what it draws in); a scroll container that is
+/// not marked with [`scroll_viewport`] counts as a cutting container; and text painted outside
+/// the elements it was laid out in (`absolute` overlays with no clip) is not checked against
+/// what it covers. Half a pixel of slack absorbs rounding.
+fn cut_by_clip(bounds: Bounds<Pixels>, mask: Bounds<Pixels>, scrolls: bool) -> bool {
+    let slack = px(0.5);
+    let shows = bounds.top() < mask.bottom()
+        && bounds.bottom() > mask.top()
+        && bounds.left() < mask.right()
+        && bounds.right() > mask.left();
+    if !shows {
+        return false;
+    }
+    let sideways = bounds.left() < mask.left() - slack || bounds.right() > mask.right() + slack;
+    let vertically = bounds.top() < mask.top() - slack || bounds.bottom() > mask.bottom() + slack;
+    sideways || (vertically && !scrolls)
+}
+
+/// What a paragraph laid out in `bounds` (clipped to `mask`) drew: its widest line and whether
+/// part of it is cut off. `lines` holds each wrapped line's width and height. Half a pixel of
+/// slack absorbs rounding.
+fn paragraph_fit(
+    lines: &[(Pixels, Pixels)],
+    bounds: Bounds<Pixels>,
+    mask: Bounds<Pixels>,
+    scrolls: bool,
+) -> (Pixels, bool) {
+    let slack = px(0.5);
+    let widest = lines.iter().map(|(w, _)| *w).fold(px(0.0), Pixels::max);
+    let height = lines.iter().map(|(_, h)| *h).fold(px(0.0), |a, b| a + b);
+    let clipped = height > bounds.size.height + slack
+        || widest > bounds.size.width + slack
+        || cut_by_clip(bounds, mask, scrolls);
+    (widest, clipped)
+}
+
+impl IntoElement for Paragraph {
+    type Element = AnyElement;
+
+    fn into_element(self) -> AnyElement {
+        let Paragraph {
+            text,
+            source,
+            style,
+            color,
+            id,
+            centered,
+            location,
+        } = self;
+        let file = location.file().replace('\\', "/");
+        let path: SharedString = match id {
+            Some(id) => format!("{file}:{}:{}#{id}", location.line(), location.column()),
+            None => format!("{file}:{}:{}", location.line(), location.column()),
+        }
+        .into();
+        let recorded = text.clone();
+        // Recorded in prepaint, as `Label` records, so the registry keeps the tree's order.
+        let probe = canvas(
+            move |bounds, window, cx| {
+                if !cx.try_global::<TextRegistry>().is_some_and(|r| r.enabled) {
+                    return;
+                }
+                let run = TextRun {
+                    len: recorded.len(),
+                    font: font_for(&style),
+                    color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let line_height = px(style.line_height);
+                let lines: Vec<(Pixels, Pixels)> = window
+                    .text_system()
+                    .shape_text(
+                        recorded.clone(),
+                        px(style.size_px),
+                        &[run],
+                        Some(bounds.size.width),
+                        None,
+                    )
+                    .map(|lines| {
+                        lines
+                            .iter()
+                            .map(|l| {
+                                let size = l.size(line_height);
+                                (size.width, size.height)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mask = window.content_mask().bounds;
+                let scrolls = is_scroll_viewport(cx, mask);
+                let (painted, clipped) = paragraph_fit(&lines, bounds, mask, scrolls);
+                let outside = outside_card(cx, bounds.left(), bounds.left() + painted);
+                TextRegistry::record(cx, || RenderedText {
+                    text: recorded,
+                    source,
+                    size_px: style.size_px,
+                    painted_px: f32::from(painted),
+                    clipped,
+                    truncated: false,
+                    path,
+                    visible: shows_in(bounds, mask),
+                    outside_card: outside,
+                });
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
+        let mut block = div().relative().w_full();
+        if centered {
+            block = block.text_center();
+        }
+        block
+            .font(font_for(&style))
+            .text_size(px(style.size_px))
+            .line_height(px(style.line_height))
+            .text_color(color)
+            .child(text)
+            .child(probe)
+            .into_any_element()
     }
 }
 
@@ -750,5 +1086,43 @@ mod tests {
         );
         // A cut inside a character floors to its boundary.
         assert_eq!(el.highlight_in(&shown, 1), Vec::<Range<usize>>::new());
+    }
+
+    // ## m2a-t21-shots
+
+    #[test]
+    fn paragraphs_and_labels_cut_by_their_box_or_their_clip_are_clipped() {
+        let b = |x: f32, y: f32, w: f32, h: f32| {
+            Bounds::new(
+                point(px(x), px(y)),
+                hacivat_ui_core::gpui_surface::size(px(w), px(h)),
+            )
+        };
+        let mask = b(0.0, 0.0, 300.0, 1000.0);
+        let lines = [(px(120.0), px(18.0)), (px(80.0), px(18.0))];
+        // Two 18 px lines in a 36 px box: everything shows.
+        assert_eq!(
+            paragraph_fit(&lines, b(10.0, 0.0, 276.0, 36.0), mask, false),
+            (px(120.0), false)
+        );
+        // A box one line short; a line wider than its box (a word that cannot wrap).
+        assert!(paragraph_fit(&lines, b(10.0, 0.0, 276.0, 18.0), mask, false).1);
+        assert!(paragraph_fit(&lines, b(10.0, 0.0, 100.0, 36.0), mask, false).1);
+        // Past the clip on the right or the left: cut, scrolling or not.
+        for scrolls in [false, true] {
+            assert!(cut_by_clip(b(200.0, 0.0, 120.0, 18.0), mask, scrolls));
+            assert!(cut_by_clip(b(-4.0, 0.0, 276.0, 18.0), mask, scrolls));
+        }
+        // Past the clip's bottom: cut by a non-scrolling container, scrolling in a viewport.
+        let short = b(0.0, 0.0, 300.0, 10.0);
+        assert!(cut_by_clip(b(10.0, 0.0, 200.0, 18.0), short, false));
+        assert!(!cut_by_clip(b(10.0, 0.0, 200.0, 18.0), short, true));
+        assert!(paragraph_fit(&lines, b(10.0, 0.0, 276.0, 36.0), short, false).1);
+        assert!(!paragraph_fit(&lines, b(10.0, 0.0, 276.0, 36.0), short, true).1);
+        // Wholly outside the clip: hidden, not cut.
+        let above = b(0.0, -100.0, 300.0, 50.0);
+        assert!(!cut_by_clip(b(10.0, 0.0, 276.0, 36.0), above, false));
+        // Inside: never cut.
+        assert!(!cut_by_clip(b(10.0, 0.0, 200.0, 18.0), mask, false));
     }
 }

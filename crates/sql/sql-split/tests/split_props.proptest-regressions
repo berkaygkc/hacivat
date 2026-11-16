@@ -1,0 +1,18 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6c908a33357c915d0fe21d845ebe0f8e9052ecc53c17868937aef1f15fd2ef9f # shrinks to s = " ", (id, flavor) = (Postgres, None)
+cc c325ee6f8cb6c0d7bca02577ff039bf89b4041cf854904e3ab590146b51d6391 # shrinks to s = " ", (id, flavor) = (Postgres, None)
+cc efa51b6d0adcfa4a99c0c3f5eb0b0bfb4d3abed12b59151287ca956d475906f0 # shrinks to s = "SELECT /* \nDELIMITER $$\n", (id, flavor) = (Postgres, None)
+cc 91f3569a33e27c146e03d750f2f2ed597526b038eedb454519c0508fd1989172 # shrinks to s = "/*+ /*!50000 */", maria = false
+cc b7299d7dfdfb273cb9c5caeaf6f387048061d20fd942d611541e7ce9881a0ebb # shrinks to s = "\\ source f\n  ", (id, flavor) = (MySql, MySqlCli)
+cc 6f91f16d38189b9adec8781088df8b07f766d21696da4878d15a500bf4b6c16a # shrinks to s = "/*!50000 x'\\'*/'", maria = false
+cc ea10d30b876b38cef7e668537168a723249604e0733a122e4db6cfa08c7aaaaa # shrinks to s = "FOR \nDELIMITER $$\n ;", (id, flavor) = (MariaDb, MySqlCli)
+cc 9c8d6bb59d5aa3e132d106502e9c179dd81ea2480c683c7b8fabf95b1008302e # shrinks to s = "/*!50000 '/*!50000 '*/''*/'", maria = false
+cc 83454c7ec1a77589903afb0e3b0688dce24a7b068ebcd12b29057c52e37f05ad # shrinks to script = "SELECT t.end FROM t;\nDELETE FROM t WHERE t.end < 1;\nCREATE FUNCTION f() RETURNS SETOF int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t; END;\n"
+cc d34898e78ded7fa730b0538ecb707e3a23c914e4cd6166a8b9bed6d65fa064d5 # shrinks to s = "' CASE # c\n source f\n 'a;b' 1 SELECT ' \n.mode csv\n \n.mode csv\n /*!50000 '*/' */ CREATE FUNCTION f() RETURNS int LANGUAGE sql $$ \\;", (id, flavor) = (MySql, None)
+cc da6077416f4e3133c840e5edd24a5ac92c0bf2d1976dd28507912d75ac4ebc76 # shrinks to s = "=   FUNCTION END \"x;y\" 'a;b'   1 t.end \\echo x\n WITH   -- c\n BEGIN SELECT SELECT SELECT ) */ $$;$$ */ $$ \t \t \t /* ; */ $$ AS case", (id, flavor) = (Postgres, None)
+cc e69e0611ebef8611e8cf4986c9ce7cd735b62b7ed68bbda09a4b24cbe03591ac # shrinks to s = "$a_tag_longer_than_any_cut_margin$ x; $a_tag_longer_than_any_cut_margin$", (id, flavor) = (Postgres, None), first = 1, one_line = false

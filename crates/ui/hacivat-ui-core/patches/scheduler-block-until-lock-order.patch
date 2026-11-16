@@ -1,0 +1,25 @@
+--- a/crates/scheduler/src/test_scheduler.rs
++++ b/crates/scheduler/src/test_scheduler.rs
+@@ -1,3 +1,8 @@
++// Modified by the Hacivat project (2026-11-14): `block_until` reads `timeout_ticks` under the
++// `state` lock and drops that guard before it locks `rng`. It locked `rng` and then `state`,
++// while `schedule_local` and `schedule_background_with_priority` lock `state` and then `rng`,
++// so a task scheduled from another thread could deadlock a timed block. Original work: Zed
++// Industries, Apache-2.0, zed@912159c7ad77ce6296a93be77efc298b0b00fd50.
+ use crate::{
+     BackgroundExecutor, Clock, Instant, LocalExecutor, Priority, RunnableMeta, Scheduler,
+     SessionId, Task, TestClock, Timer,
+@@ -110,9 +115,10 @@ impl TestScheduler {
+         });
+         let waker = unsafe { Waker::new(Box::into_raw(waker) as *const (), &WAKER_VTABLE) };
+         let max_ticks = if timeout.is_some() {
+-            self.rng
+-                .lock()
+-                .random_range(self.state.lock().timeout_ticks.clone())
++            // `state` before `rng`, as in `schedule_local` and `schedule_background_with_priority`:
++            // the `state` guard is dropped before `rng` is locked.
++            let timeout_ticks = self.state.lock().timeout_ticks.clone();
++            self.rng.lock().random_range(timeout_ticks)
+         } else {
+             usize::MAX
+         };

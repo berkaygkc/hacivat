@@ -1,0 +1,25 @@
+[package]
+name = "sql-split"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "SQL statement splitting, SqlDocument and caret/selection to execution units (SQL-SPLIT-01..04)"
+
+[dependencies]
+sql-lexer.workspace = true
+sql-dialect.workspace = true
+sql-text.workspace = true
+twox-hash.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+sql-testkit.workspace = true
+# The SQLite splitter differential (Task 8).
+rusqlite.workspace = true
+# The PostgreSQL parser differential (Task 13).
+sql-oracle-pg.workspace = true
+
+[lints]
+workspace = true
