@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use sql_dialect::KwEntry;
+use sql_dialect::{ClientFlavor, KwEntry};
 use sql_text::{TextRange, TextSize};
 
 use crate::state::LexState;
@@ -126,7 +126,11 @@ impl LexErrorCode {
 
 /// A lexed text: token kinds, sorted start offsets, flags and keywords, one entry per token;
 /// the tokens tile the text without gaps (lossless).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Two lexings are equal when their tokens, errors, states and client are: the checkpoints
+/// are a lookup aid (any set of exact restart points serves), and an incremental relex keeps a
+/// different but equally valid set than a fresh lex (`incremental`).
+#[derive(Debug)]
 pub struct Lexed {
     pub(crate) kinds: Vec<TokenKind>,
     pub(crate) starts: Vec<TextSize>,
@@ -136,9 +140,77 @@ pub struct Lexed {
     pub(crate) end_state: LexState,
     /// The text's length (the end of the last token).
     pub(crate) len: TextSize,
+    // ## m3b-t05-incremental: what an incremental relex needs (SQL-LEX-03).
+    /// The state lexing began in, at offset 0.
+    pub(crate) start: LexState,
+    /// The client whose backslash commands are `ClientCommand` tokens (`ClientFlavor::None`:
+    /// none).
+    pub(crate) client: ClientFlavor,
+    /// Exact restart points (`checkpoint_before`): token starts at a line start, lexed in
+    /// `Initial`, not at a byte-order mark; about every `CHECKPOINT_BYTES`.
+    pub(crate) checkpoints: Vec<TextSize>,
 }
 
+// ## m3b-t05-incremental: `clone_from` reuses the target's arrays, so a document that copies a
+// revision's lexing before relexing it (a snapshot still holds the old one) writes into warm
+// memory instead of fresh pages.
+impl Clone for Lexed {
+    fn clone(&self) -> Lexed {
+        Lexed {
+            kinds: self.kinds.clone(),
+            starts: self.starts.clone(),
+            flags: self.flags.clone(),
+            keywords: self.keywords.clone(),
+            errors: self.errors.clone(),
+            end_state: self.end_state.clone(),
+            len: self.len,
+            start: self.start.clone(),
+            client: self.client,
+            checkpoints: self.checkpoints.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, source: &Lexed) {
+        self.kinds.clone_from(&source.kinds);
+        self.starts.clone_from(&source.starts);
+        self.flags.clone_from(&source.flags);
+        self.keywords.clone_from(&source.keywords);
+        self.errors.clone_from(&source.errors);
+        self.end_state.clone_from(&source.end_state);
+        self.len = source.len;
+        self.start.clone_from(&source.start);
+        self.client = source.client;
+        self.checkpoints.clone_from(&source.checkpoints);
+    }
+}
+
+impl PartialEq for Lexed {
+    fn eq(&self, other: &Lexed) -> bool {
+        self.kinds == other.kinds
+            && self.starts == other.starts
+            && self.flags == other.flags
+            && self.keywords == other.keywords
+            && self.errors == other.errors
+            && self.end_state == other.end_state
+            && self.len == other.len
+            && self.start == other.start
+            && self.client == other.client
+    }
+}
+
+impl Eq for Lexed {}
+
 impl Lexed {
+    /// The client whose backslash commands this lexing reads as `ClientCommand` tokens.
+    pub fn client(&self) -> ClientFlavor {
+        self.client
+    }
+
+    /// The state lexing began in.
+    pub fn start_state(&self) -> &LexState {
+        &self.start
+    }
+
     /// The number of tokens.
     pub fn len(&self) -> usize {
         self.kinds.len()
@@ -246,6 +318,9 @@ impl Lexed {
             errors: Vec::new(),
             end_state: LexState::Initial,
             len,
+            start: LexState::Initial,
+            client: ClientFlavor::None,
+            checkpoints: Vec::new(),
         }
     }
 

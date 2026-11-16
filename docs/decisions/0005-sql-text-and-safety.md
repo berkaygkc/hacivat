@@ -588,3 +588,61 @@ the catalog read is a `hacivat-exec` Docker test, P-M3b-13), `bench-sql` and `fe
 - **`sql-testkit`** no longer depends on `sql-safety`. It reaches `sql-oracle-pg` only through
   its `differential` feature, so the lexer's plain test loop builds neither libpg_query nor
   `sqlparser`.
+
+## m3b-t05 — incremental analysis
+
+**Relex (SQL-LEX-03).** `sql_lexer::relex` restarts at an exact point before the edit: the
+start of the edit's line when the old lexing has a token there, else the last checkpoint
+(`Lexed::checkpoint_before`: token starts at a line start, lexed in `Initial`, not at a
+byte-order mark, about every 2 KiB), else offset 0 in the lexing's start state. It lexes the
+whole new text with one cursor from there and stops at the first token start at or after the
+edit's end whose old position is a token start too; the tokens after it are the old ones,
+moved. That is exact because the lexer never looks behind a token's start (the byte-order-mark
+rule reads the absolute offset, which one cursor over the whole text keeps). An edit that
+touches a client command, a `DELIMITER` line or a lexical-mode setting relexes to the end on
+purpose and says so (`RelexDelta::full`, R-M3-65). Checkpoints are a lookup aid: two lexings
+that differ only in them are equal.
+
+**Resplit (SQL-SPLIT-05).** `SqlDocument::apply` turns a batch into one change (the common
+prefix and suffix of the two texts), relexes, and splits again only a window `[A, B)` between
+two *anchors*: line starts where the structural pass carries nothing forward but the client
+delimiter (no statement open, no `COPY` data due, only white space since the last item, client
+command or data, no byte-order mark). The window's split replaces the old items between the
+anchors; the items after `B` keep their `StmtKey`s and move. A window whose split does not end
+as the old pass stood at `B` (a statement or a `\copy` still open, another delimiter, another
+psql `\if` depth, an unterminated construct) grows, and last runs to the end of the text. The
+whole pass runs again instead when something reaches across every window: the stability rule
+of an unterminated construct before it, an executable comment or hint with an ambiguous end
+before `B`, the MySQL stray-`END` backstop in or after the window, a psql `\if` branch at `A`,
+or a restart at a byte-order mark (the pass reads one there as white space when it lexes
+again, as text when the document's lexing has a token there: an M3a inconsistency the window
+cannot reproduce, so it is left to the whole pass). The property
+`incremental_resplit_equals_full_split` checks every answer of the document (lexing, both
+splits, `split_start_at`, `selection_cuts`) against one built from the new text, over scripts
+with `$$` bodies, `COPY` data, psql commands, MySQL executable comments and client delimiters.
+
+**Speed (R-M3-9).** The previous revision's text and lexing are written over by the next
+`apply` once no snapshot holds them (`Lexed::clone_from` reuses the arrays): copying a 2 MB
+script's lexing into fresh pages on every keystroke cost more than the relex itself. The
+worker keeps its document between jobs and applies the change between the two texts (one
+comparison of the old text with the rope) instead of rebuilding (R-M3-22 stays: nothing of
+this runs on the UI thread).
+
+**Lexer follow-ups.** (a) A body the server runs reads `x'…'` and `b'…'` as raw literals
+(`BodyReading::RawQuoted`), as the lexer reads them in code (ledger 200). (b) The document is
+lexed with its client flavor (`lex_with_client`): a psql or mysql-client backslash command is
+one `ClientCommand` token whose argument ends at the end of its line (psql: or at a `\\`
+outside single quotes), as the splitter's pre-pass reads it, so a quote in the argument
+(`\echo don't`) no longer makes the rest of the file a string in the document's lexing (ledger
+274). That removes the second cost of the m3a-t13 section for backslash commands; `DELIMITER`,
+`source` and sqlite3 `.cmd` lines count only at statement start, which the lexer cannot know,
+and keep it.
+
+**`StreamSplitter`.** It holds the text from the last anchor, splits it, and gives out the
+items before the latest anchor that later text can no longer change: before an executable
+comment with an ambiguous end, outside a psql `\if` branch and, on MySQL/MariaDB, before the
+last block-tracked statement (a later stray `END` refuses back to it; with none held, nothing
+is given out before the end of the stream). Fed in any chunking, it yields the execution split
+of the whole script. It splits the held text again whenever that has doubled since a split
+that gave out nothing (O(n) overall). A statement still open past `STREAM_STATEMENT_MAX` is
+`TooLong` and ends the stream: its end is never looked for. No consumer until M4b.

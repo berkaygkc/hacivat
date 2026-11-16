@@ -197,6 +197,12 @@ fn read_running(
                         state = BodyReading::Nested;
                         i += 2;
                     }
+                    // ## m3b-t05-incremental: follow-up (a), ledger 200: `x'…'` and `b'…'` are
+                    // raw literals in a running body too, as the lexer reads them in code.
+                    b'\'' if raw_prefix(c, i) => {
+                        state = BodyReading::RawQuoted { quote: b'\'' };
+                        i += 1;
+                    }
                     quote @ (b'\'' | b'"' | b'`') => {
                         state = BodyReading::Quoted { quote };
                         i += 1;
@@ -235,6 +241,18 @@ fn read_running(
                     }
                 }
             }
+            BodyReading::RawQuoted { quote } => {
+                let window = &b[i..limit];
+                let found = memchr::memchr(quote, window);
+                c.steps += found.map_or(window.len(), |f| f + 1) as u64;
+                match found {
+                    None => i = limit,
+                    Some(f) => {
+                        state = BodyReading::Code;
+                        i += f + 1;
+                    }
+                }
+            }
             BodyReading::LineComment => {
                 let window = &b[i..limit];
                 let found = memchr::memchr(b'\n', window);
@@ -262,6 +280,17 @@ fn read_running(
         }
     }
     Err(state)
+}
+
+/// Whether the `'` at `i` opens a bit or hex literal the profile has: a `b`/`B` or `x`/`X`
+/// right before it that starts a word (the lexer's `strings::prefixed`, read in a body).
+fn raw_prefix(c: &Cursor, i: usize) -> bool {
+    let Some(p) = i.checked_sub(1).map(|p| c.b[p].to_ascii_lowercase()) else {
+        return false;
+    };
+    let prefixes = c.p.quotes.prefixes;
+    let known = (p == b'x' && prefixes.hex) || (p == b'b' && prefixes.bit);
+    known && i.checked_sub(2).is_none_or(|q| !c.ident_continue(c.b[q]))
 }
 
 /// The index after the `*/` that closes a comment `depth` levels deep, scanning from `from`;
