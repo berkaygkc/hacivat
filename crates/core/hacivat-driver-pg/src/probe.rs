@@ -13,6 +13,8 @@ use hacivat_driver::{
 };
 // ## m3a-t12-pg-typed
 use hacivat_driver::{CloseHow, Closed, QueryEvent, QuerySpec, RawErrorKind, TypedCaps};
+// ## m3b-t13-drivers (fix round 1; controller-approved named lines)
+use hacivat_driver::CloseReport;
 use hacivat_net::{TlsMode, TlsSummary, TlsVerified};
 use hacivat_proto::DbmsKind;
 use tokio::task::JoinHandle;
@@ -111,6 +113,9 @@ pub struct PgConn {
     // ## m3a-t12-pg-typed
     /// The open typed query (Task 12).
     typed: Option<typed::Open>,
+    // ## m3b-t13-drivers (fix round 1, I-1)
+    /// What the last close of a Run as one did beyond its result (`take_close_report`).
+    close_report: Option<CloseReport>,
 }
 
 impl PgConn {
@@ -132,6 +137,7 @@ impl PgConn {
             notices,
             cancel: Arc::new(cancel),
             typed: None,
+            close_report: None,
         }
     }
 
@@ -143,6 +149,8 @@ impl PgConn {
             wire,
             notices,
             typed,
+            cancel,
+            close_report,
             ..
         } = self;
         (
@@ -150,6 +158,9 @@ impl PgConn {
                 client,
                 wire,
                 notices,
+                // ## m3b-t13-drivers (fix round 1, I-1)
+                cancel,
+                report: close_report,
             },
             typed,
         )
@@ -469,6 +480,15 @@ impl RawConn for PgConn {
             self.drop_if_broken();
             r
         })
+    }
+
+    // ## m3b-t13-drivers (fix round 1, I-1 and M-3)
+    fn take_close_report(&mut self) -> Option<CloseReport> {
+        self.close_report.take()
+    }
+
+    fn take_notices_dropped(&mut self) -> u32 {
+        crate::exec::take_notices_dropped(&self.notices)
     }
 }
 

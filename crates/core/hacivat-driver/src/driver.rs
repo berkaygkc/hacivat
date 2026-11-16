@@ -18,6 +18,8 @@ use crate::server::ServerInfo;
 use crate::typed::{CloseHow, Closed, QueryEvent, QuerySpec, TypedCaps};
 // ## m3b-t01c-core-seams
 use crate::typed::Notice;
+// ## m3b-t13-drivers
+use crate::typed::CloseReport;
 
 /// How a running statement is cancelled (HV-DRV-01).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -274,6 +276,18 @@ pub trait RawConn: Send + 'static {
     /// `warnings > 0`, R-M3-77; Task 13). The default has none.
     fn warnings(&mut self) -> BoxFuture<'_, Result<Vec<Notice>, RawError>> {
         Box::pin(async { Ok(Vec::new()) })
+    }
+    // ## m3b-t13-drivers (fix round 1, I-1 and M-3; controller-approved named exception)
+    /// How the last `close_query` of a Run as one (`Protocol::Simple`) closed before its end
+    /// went beyond the result it closed ([`CloseReport`]), taken once; `None` when it did not
+    /// (or the engine needs none: MySQL kills, SQLite never runs the statements not reached).
+    fn take_close_report(&mut self) -> Option<CloseReport> {
+        None
+    }
+    /// The server notices dropped past the driver's own cap (PostgreSQL: 100 per query) since
+    /// the last call, taken once: they were never sent as `QueryEvent::Notice`.
+    fn take_notices_dropped(&mut self) -> u32 {
+        0
     }
 }
 

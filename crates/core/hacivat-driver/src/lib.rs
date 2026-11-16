@@ -42,3 +42,5 @@ pub use typed::{
 };
 // ## m3b-t01c-core-seams
 pub use typed::Notice;
+// ## m3b-t13-drivers
+pub use typed::CloseReport;
