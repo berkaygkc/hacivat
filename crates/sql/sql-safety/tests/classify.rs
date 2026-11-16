@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 use std::time::Instant;
+// ## m3b-t24-exec-ui (named exception)
+use std::sync::Arc;
 
 use sql_dialect::{ClientFlavor, DialectCtx, DialectId, LexModes, PgWireFlavor, ServerVersion};
 use sql_safety::{
@@ -1672,12 +1674,125 @@ fn round_one_minors() {
     );
     assert_eq!(reports[3].request_class, CoarseClass::Unknown);
     // M4: `USE db` on MySQL and MariaDB.
+    // ## m3b-t24-exec-ui (named exception, the T24 I5 ruling): a `USE` of a literal name
+    // still changes the context, and the later unit is now read in it (`sys` current, so the
+    // unqualified `session` is that schema's table) instead of being `Unknown`; one the
+    // classifier can't read exactly still makes it `Unknown`.
     for d in [DialectId::MySql, DialectId::MariaDb] {
         let reports = classify_units(&["USE sys", "SELECT * FROM session"], &single(d));
         assert!(changes_context("USE sys", &reports[0]), "{d:?}");
-        assert_eq!(reports[1].request_class, CoarseClass::Unknown, "{d:?}");
+        let alone = classify("SELECT * FROM session", &{
+            let mut c = single(d);
+            c.search_path = Arc::from(vec![Arc::<str>::from("sys")]);
+            c
+        });
+        assert_eq!(reports[1].request_class, alone.request_class, "{d:?}");
+        assert_eq!(codes(&reports[1]), codes(&alone), "{d:?}");
     }
     // M7 lives in `hacivat-exec` (`read_only_check`).
+}
+
+// ## m3b-t24-exec-ui (named exception: the T24 I5 ruling)
+/// A context change whose new value is read exactly from the text sets the context of the
+/// later units of the run; anything else still makes them `Unknown`.
+#[test]
+fn literal_context_switches_carry_into_later_units() {
+    let path_of =
+        |c: &ClassifyCtx| -> Vec<String> { c.search_path.iter().map(|s| s.to_string()).collect() };
+    let with_path = |mut c: ClassifyCtx, p: &[&str]| {
+        c.search_path = Arc::from(p.iter().map(|s| Arc::<str>::from(*s)).collect::<Vec<_>>());
+        c
+    };
+    // MySQL/MariaDB `USE`: plain and backquoted names.
+    for d in [DialectId::MySql, DialectId::MariaDb] {
+        for (use_stmt, db) in [("USE shop", "shop"), ("use `my``db`", "my`db")] {
+            let reports = classify_units(&[use_stmt, "SELECT id FROM orders"], &single(d));
+            let alone = classify("SELECT id FROM orders", &with_path(single(d), &[db]));
+            assert_eq!(
+                reports[1].request_class,
+                CoarseClass::Read,
+                "{d:?} {use_stmt}"
+            );
+            assert_eq!(codes(&reports[1]), codes(&alone), "{d:?} {use_stmt}");
+        }
+        assert!(path_of(&with_path(single(d), &["shop"])) == ["shop"]);
+    }
+    // PostgreSQL `SET search_path`: names folded, quoted names and literals kept.
+    for set in [
+        "SET search_path = app, public",
+        "SET search_path TO app, \"public\"",
+        "set session search_path to 'app', public",
+    ] {
+        let reports = classify_units(&[set, "SELECT lower('a') FROM t"], &pg_single());
+        let alone = classify(
+            "SELECT lower('a') FROM t",
+            &with_path(pg_single(), &["app", "public"]),
+        );
+        assert_eq!(reports[1].request_class, alone.request_class, "{set}");
+        assert_eq!(codes(&reports[1]), codes(&alone), "{set}");
+        assert_ne!(reports[1].request_class, CoarseClass::Unknown, "{set}");
+    }
+    // A path the harmless-SET list refuses (`pg_catalog` no longer first) does change the
+    // context: the later unit is read in exactly that path, where an unqualified builtin may
+    // be shadowed (the backend's `catalog_first` rule), never in the old one.
+    let set = "SET search_path = evil, pg_catalog";
+    let reports = classify_units(&[set, "SELECT lower('a') FROM t"], &pg_single());
+    assert!(changes_context(set, &reports[0]));
+    let alone = classify(
+        "SELECT lower('a') FROM t",
+        &with_path(pg_single(), &["evil", "pg_catalog"]),
+    );
+    assert_eq!(reports[1].request_class, alone.request_class);
+    assert_eq!(codes(&reports[1]), codes(&alone));
+    assert_ne!(
+        reports[1].request_class,
+        classify("SELECT lower('a') FROM t", &pg_single()).request_class,
+        "never the old path's reading"
+    );
+    // Still `Unknown`: anything not read exactly.
+    let pg_still = [
+        "SET LOCAL search_path = app",
+        "SET search_path = DEFAULT",
+        "SET search_path TO app, $user",
+        "SELECT set_config('search_path', 'app', false)",
+        "SET search_path = app /* x */",
+        "SET role app_user",
+        "CALL p()",
+        "SET search_path = 'a,b'",
+    ];
+    for first in pg_still {
+        let reports = classify_units(&[first, "SELECT lower('a') FROM t"], &pg_single());
+        if changes_context(first, &reports[0]) {
+            assert_eq!(
+                reports[1].request_class,
+                CoarseClass::Unknown,
+                "{first}: {:?}",
+                codes(&reports[1])
+            );
+        }
+    }
+    for d in [DialectId::MySql, DialectId::MariaDb] {
+        for first in ["USE `shop", "USE shop; SELECT 1", "CALL p()", "SET @a = 1"] {
+            let reports = classify_units(&[first, "SELECT id FROM orders"], &single(d));
+            if changes_context(first, &reports[0]) {
+                assert_eq!(
+                    reports[1].request_class,
+                    CoarseClass::Unknown,
+                    "{d:?} {first}"
+                );
+            }
+        }
+    }
+    // Once a run is `Unknown` it stays so, a later literal switch notwithstanding.
+    let reports = classify_units(
+        &[
+            "CALL p()",
+            "SET search_path = app",
+            "SELECT lower('a') FROM t",
+        ],
+        &pg_single(),
+    );
+    assert_eq!(reports[2].request_class, CoarseClass::Unknown);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1794,4 +1909,28 @@ fn measure(text: &str, ctx: &ClassifyCtx, runs: usize, bound: f64) -> (f64, f64,
         }
     }
     (best, p50, p95, 3)
+}
+
+// ## m3b-t24-exec-ui (fix round 2, R1-C1): which units' switches were carried.
+#[test]
+fn carried_switches_names_the_units_the_later_ones_depend_on() {
+    let units = ["USE app", "SELECT * FROM session", "USE shop", "SELECT 1"];
+    let reports = classify_units(&units, &single(DialectId::MySql));
+    assert_eq!(sql_safety::carried_switches(&units, &reports), [0, 2]);
+    // After a change that is not read exactly, nothing later is carried (the rest is
+    // `Unknown`).
+    let units = ["SET @@session.sql_mode = 'ANSI'", "USE app", "SELECT 1"];
+    let reports = classify_units(&units, &single(DialectId::MySql));
+    assert!(sql_safety::carried_switches(&units, &reports).is_empty());
+    // PostgreSQL: a path without `pg_catalog` first is carried; one with it first is the
+    // harmless `SET` (no context change, nothing carried).
+    let units = [
+        "SET search_path TO app, pg_catalog",
+        "SELECT lower('a') FROM t",
+    ];
+    let reports = classify_units(&units, &pg_single());
+    assert_eq!(sql_safety::carried_switches(&units, &reports), [0]);
+    let units = ["SET search_path TO app", "SELECT lower('a') FROM t"];
+    let reports = classify_units(&units, &pg_single());
+    assert!(sql_safety::carried_switches(&units, &reports).is_empty());
 }

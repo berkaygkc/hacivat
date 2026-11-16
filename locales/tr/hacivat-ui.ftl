@@ -2229,3 +2229,78 @@ hv-errbar-rollback-continue = Geri al ve devam et
 hv-errbar-rollback-continue-tip = Açık işleminizi ({ $n } ifade) geri alır, sonra { $next }. ifadeden yeni bir işlemde devam eder.
 # Review: PO
 hv-errbar-rollback-continue-tip-auto = Açık işleminizi ({ $n } ifade) geri alır, sonra { $next }. ifadeden devam eder; her ifade çalışınca commit edilir.
+
+## m3b-t24-exec-ui
+
+# Review: PO
+hv-params-title = Bu ifadenin değerleri
+# Review: PO
+hv-params-sub = { $n } parametre
+# Review: PO
+hv-params-col-name = Ad
+# Review: PO
+hv-params-col-value = Değer
+# Review: PO
+hv-params-col-type = Tür
+# Review: PO
+hv-params-null-tip = NULL gönder
+# Review: PO
+hv-params-remembered = hatırlandı
+# Review: PO
+hv-params-remembered-tip = Bu uygulama oturumundaki önceki bir çalıştırmadan; diske hiç kaydedilmez.
+# Review: PO
+hv-params-ambiguous = Ondalık { $value } olarak okunur: burada nokta ondalık ayırıcıdır. { $plain } demek istediyseniz noktasız yazın.
+# Review: PO
+hv-params-ambiguous-use = { $value } kullan
+# Review: PO
+hv-params-bad-hex = \x ile yazılan baytlar onaltılık rakam çiftleri (0–9, a–f) olmalıdır.
+# Review: PO
+hv-params-template = { $var } bir şablon değişkeni, parametre değil. Hacivat onu doldurmaz; bu yüzden ifade bu hâliyle çalıştırılamaz.
+# Review: PO
+hv-params-pg-q = PostgreSQL'de ? burada parametre değildir, çünkü jsonb işleçleri onu kullanır. Ayarlar › Parametreler bölümünden açılabilir.
+# Review: PO
+hv-params-note = Değerler yalnızca bu uygulama oturumu boyunca tutulur ve geçmişte maskelenir.
+# Review: PO
+hv-params-run = Çalıştır
+# Review: PO
+hv-params-cancel = Vazgeç
+# Review: PO
+hv-params-resolve-first = Önce işaretli değeri düzeltin
+# Review: PO
+hv-params-type-unknown = bilinmiyor
+# Review: PO
+hv-chooser-run-as-one = Tek parça çalıştır
+# Review: PO
+hv-chooser-run-as-one-hint = Tek parça çalıştırma bölgenin tamamını tek istekte gönderir; sonuçları türsüz gelir.
+# Review: PO
+hv-chooser-run-as-one-ro = Salt okunur oturumda kullanılamaz: koruma her seferinde tek bir ifadeyi denetler.
+# Review: PO
+hv-chooser-customize = Özelleştir…
+# Review: PO
+hv-policy-title = Bu konsolda Çalıştır hangi ifadeleri seçer
+# Review: PO
+hv-policy-inside = İmleç bir ifadenin içindeyken
+# Review: PO
+hv-policy-inside-ask = Sor
+# Review: PO
+hv-policy-inside-smallest = En küçük ifade
+# Review: PO
+hv-policy-inside-largest = En geniş ifade
+# Review: PO
+hv-policy-inside-whole = Tüm betik
+# Review: PO
+hv-policy-selection = Seçim varken
+# Review: PO
+hv-policy-sel-separate = Ayrı ifadeler olarak
+# Review: PO
+hv-policy-sel-as-one = Tek parça olarak
+# Review: PO
+hv-policy-note = Bu konsol kapanana kadar geçerli.
+# Review: PO
+hv-editor-mark-awaiting = Commit ya da geri alma bekleniyor
+# Review: PO
+hv-editor-mark-awaiting-sp = Yanıt bekleniyor: Koru ya da İfadeyi geri al
+# Review: PO
+hv-editor-mark-not-sent = gönderilmedi
+# Review: PO
+hv-exec-history-recovered = Sorgu geçmişi dosyası bozulmuştu; Hacivat onu bir kenara ayırıp yenisini başlattı.

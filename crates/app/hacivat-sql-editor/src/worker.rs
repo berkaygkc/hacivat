@@ -23,7 +23,8 @@ use sql_text::{TextEdit, TextRange, TextSize};
 use tokio::sync::watch;
 
 use crate::chunks::RopeChunks;
-use crate::preview::{PreviewKey, preview_of};
+// ## m3b-t24-exec-ui (named exception): under the console's run policy (CHOOSE-06).
+use crate::preview::{PreviewKey, preview_with};
 use crate::{highlight, statements};
 
 /// What to analyse: one editor version under one SQL context.
@@ -240,7 +241,7 @@ pub(crate) async fn previews(
         if let Some(job) = job {
             let k = &job.key;
             let answer = contained(&faults, || {
-                preview_of(&job.doc, &k.at, k.action, true, k.remembered)
+                preview_with(&job.doc, &k.at, k.action, true, k.remembered, &k.policy)
             });
             if let Some(answer) = answer
                 && out.send(Some((job.key.clone(), answer))).is_err()

@@ -21,6 +21,8 @@ mod worker;
 
 pub use chunks::RopeChunks;
 pub use preview::{SYNC_SELECTION_LIMIT, points as exec_points, preview_of};
+// ## m3b-t24-exec-ui (named exception: re-exports only)
+pub use preview::{InsideChoice, RunPolicy, preview_with, run_policy};
 pub use service::{SqlLanguageService, effective_flavor};
 /// The statement spans of an analysis (the property tests read them without the executor).
 #[doc(hidden)]

@@ -78,6 +78,8 @@ use crate::audit::AuditorChain;
 use crate::gate::{CommitQuestion, ConfirmPort};
 use crate::params::OffsetMap;
 use crate::titles::tab_title;
+// ## m3b-t24-exec-ui (named exception)
+use hacivat_session::session::UnitVerdict;
 
 /// The result sets a prepared unit keeps (R-M3-66).
 pub(crate) const MAX_RESULT_SETS: u32 = 100;
@@ -123,6 +125,11 @@ struct UnitInfo {
     // ## m3b-t19-confirm-tx (fix round 2, R1-I1)
     /// The gate's effects say it commits an open transaction first (`COMMITS_FIRST`).
     commits_first: bool,
+    // ## m3b-t24-exec-ui (named exception: the T19 carry's log lines)
+    /// The gate's verdict (`Unknown` for an M3a unit): a `TxThenConfirm` unit that fails in an
+    /// open transaction, and an `ImplicitCommit` unit that ends the user's transaction, each
+    /// say so in the log.
+    verdict: UnitVerdict,
 }
 
 impl UnitInfo {
@@ -225,6 +232,9 @@ pub(crate) struct PlannedUnit {
     pub commits_first: bool,
     /// The user skipped it at the confirmation (R-M3-84): never sent.
     pub skipped: bool,
+    // ## m3b-t24-exec-ui (named exception)
+    /// The gate item's verdict, as sent (`RunUnit::verdict`).
+    pub verdict: UnitVerdict,
 }
 
 struct ResultInfo {
@@ -263,6 +273,9 @@ struct State {
     tx_now: TxStatus,
     /// The user's transaction status when each unit started.
     tx_at_start: HashMap<u32, TxStatus>,
+    // ## m3b-t24-exec-ui (named exception)
+    /// The units whose confirm-in-transaction question was asked (`NeedsCommit`).
+    commit_asked: std::collections::HashSet<u32>,
 }
 
 /// The parts a run shares with its observer.
@@ -344,6 +357,7 @@ impl ExecObserver {
                         run_as_one: plan.run_as_one,
                         ddl: plan.ddl || is_ddl(&plan.sent),
                         commits_first: plan.commits_first,
+                        verdict: plan.verdict,
                     },
                     None => UnitInfo {
                         id,
@@ -355,6 +369,7 @@ impl ExecObserver {
                         run_as_one: false,
                         ddl: is_ddl(&u.text),
                         commits_first: false,
+                        verdict: UnitVerdict::Unknown,
                     },
                 }
             })
@@ -709,17 +724,41 @@ impl ExecObserver {
             }
             UnitEnd::Skipped => self.set_unit(unit.ordinal, true, UnitStatus::Skipped),
         }
-        let tx_ended = {
+        let (tx_ended, asked, at_start) = {
             let mut st = lock(&self.state);
             if st.current == Some(unit.ordinal) {
                 st.current = None;
             }
-            st.tx_ended.take_if(|(_, o)| *o == unit.ordinal)
+            (
+                st.tx_ended.take_if(|(_, o)| *o == unit.ordinal),
+                st.commit_asked.contains(&unit.ordinal),
+                st.tx_at_start.get(&unit.ordinal).copied(),
+            )
         };
-        if let Some((from, _)) = tx_ended
-            && let Some(msg) = tx_line(&u.text, from, outcome, may_commit(&u))
+        // ## m3b-t24-exec-ui (named exception: the T19 carry). The session says these only in
+        // its tracing, so the log derives them from the gate's verdict:
+        // - a MySQL/MariaDB statement confirmed although it commits the open transaction did
+        //   commit it (`TxChanged` to idle while it ran): `exec-implicit-commit`, in place of
+        //   the generic "the transaction ended" line;
+        // - a confirm-in-transaction statement that failed or was cancelled in the user's open
+        //   transaction before any question was asked ran in the savepoint form, which rolled
+        //   back only it (P-M3b-5, T19 m9): `exec-confirm-statement-failed`. Not when the
+        //   transaction ended with it (the server's rollback line says that instead).
+        if let Some((from, _)) = tx_ended {
+            let line = if u.verdict == UnitVerdict::ImplicitCommit && from == TxStatus::InTx {
+                Some(LogMsg::ImplicitCommit)
+            } else {
+                tx_line(&u.text, from, outcome, may_commit(&u))
+            };
+            if let Some(msg) = line {
+                self.line(msg, Some(&u));
+            }
+        } else if u.verdict == UnitVerdict::TxThenConfirm
+            && !asked
+            && matches!(outcome, UnitEnd::Failed(_) | UnitEnd::Cancelled)
+            && at_start.is_some_and(|s| s != TxStatus::Idle)
         {
-            self.line(msg, Some(&u));
+            self.line(LogMsg::ConfirmStatementFailed, Some(&u));
         }
     }
 
@@ -1117,9 +1156,12 @@ impl RunObserver for ExecObserver {
                 deadline,
                 savepoint,
             } => {
-                lock(&self.state)
-                    .commit_savepoint
-                    .insert(unit.ordinal, *savepoint);
+                {
+                    let mut st = lock(&self.state);
+                    st.commit_savepoint.insert(unit.ordinal, *savepoint);
+                    // ## m3b-t24-exec-ui (named exception)
+                    st.commit_asked.insert(unit.ordinal);
+                }
                 self.publish_choice(ev);
                 self.forward_commit(*unit, *question, *affected, *deadline, *savepoint);
             }
@@ -1269,6 +1311,7 @@ mod tests {
             run_as_one,
             ddl: super::is_ddl(text),
             commits_first,
+            verdict: hacivat_session::session::UnitVerdict::Unknown,
         };
         let failed = super::UnitEnd::Failed(hacivat_session::session::ExecError::of(
             hacivat_session::session::ExecErrorKind::Db,
@@ -1601,9 +1644,11 @@ mod tests {
         }
     }
 
-    /// Until Task 19 no session asks `NeedsCommit`; the observer's half is tested on a
-    /// synthetic event: the question reaches the port and the ticket's `choices` with the
-    /// run's request number, and the run's decision clears it and is logged.
+    /// The observer's half of a confirm-in-transaction question, on a synthetic event (the
+    /// session's half, which emits `NeedsCommit` since Task 19, is tested in the session
+    /// crate; ## m3b-t24-exec-ui: the stale "until Task 19" note fixed): the question reaches
+    /// the port and the ticket's `choices` with the run's request number, and the run's
+    /// decision clears it and is logged.
     #[tokio::test]
     async fn needs_commit_reaches_the_confirm_port_and_answer_returns() {
         let profile = Profile {

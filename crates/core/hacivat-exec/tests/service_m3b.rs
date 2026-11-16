@@ -476,3 +476,100 @@ async fn a_non_read_verdict_never_produces_a_suspendable_unit() {
         }
     }
 }
+
+// ## m3b-t24-exec-ui (fix round 2)
+
+/// Another console queues a context change after Run's last context read: the run carries the
+/// generation it was classified under, the session refuses it, nothing is sent, and the log
+/// says why.
+#[tokio::test]
+async fn a_run_whose_context_moved_is_refused_and_logged() {
+    use hacivat_session::session::{ExecOrigin, Request};
+    let (b, s, f) = service_over(fake_pg()).await;
+    let (_, generation) = s.run_context().await;
+    assert!(generation.is_some());
+    s.submit(Request::Exec {
+        sql: "SET search_path = app".into(),
+        opts: hacivat_driver::ExecOpts::default(),
+        origin: ExecOrigin::User,
+    })
+    .reply
+    .await
+    .unwrap()
+    .unwrap();
+    let mark = f.typed_log().len();
+    let mut req = request(&b, units(&["SELECT * FROM t"]), run_all(1));
+    req.context_generation = generation;
+    let mut t = b.svc.run(&s, req);
+    let summary = (&mut t.done).await.unwrap();
+    assert_eq!(summary.executed, 0, "{summary:?}");
+    assert_eq!(f.typed_log().len(), mark, "nothing sent");
+    let said = b.log_msgs().iter().any(
+        |m| matches!(m, LogMsg::Error { view, .. } if view.title_id == "exec-run-context-changed"),
+    );
+    assert!(said, "{:?}", b.log_msgs());
+}
+
+/// R1-m4: when the session asks to commit a confirm-in-transaction statement in the user's
+/// transaction (the savepoint form), its snapshot already counts that statement, so the
+/// "statements before" a lost connection names is `statements - 1`.
+#[tokio::test]
+async fn the_commit_question_sees_the_confirmed_statement_counted() {
+    use hacivat_session::session::{ExecOrigin, Request, SessionHandle, TxCommand};
+    #[derive(Debug)]
+    struct Counting(SessionHandle, std::sync::Mutex<Vec<(bool, u32)>>);
+    impl hacivat_exec::ConfirmPort for Counting {
+        fn confirm(
+            &self,
+            _: hacivat_exec::ConfirmQuestion,
+        ) -> tokio::sync::oneshot::Receiver<ConfirmAnswer> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send(ConfirmAnswer::Cancel);
+            rx
+        }
+        fn commit_decision(
+            &self,
+            q: hacivat_exec::CommitQuestion,
+        ) -> tokio::sync::oneshot::Receiver<hacivat_exec::CommitAnswer> {
+            let statements = self.0.state().borrow().tx.statements;
+            self.1.lock().unwrap().push((q.savepoint, statements));
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send(hacivat_exec::CommitAnswer::Commit);
+            rx
+        }
+    }
+    let (b, s, _f) = service_over(fake_pg()).await;
+    s.submit(Request::Tx(TxCommand::Begin))
+        .reply
+        .await
+        .unwrap()
+        .expect("BEGIN");
+    s.submit(Request::Exec {
+        sql: "UPDATE a SET x = 1".into(),
+        opts: hacivat_driver::ExecOpts::default(),
+        origin: ExecOrigin::User,
+    })
+    .reply
+    .await
+    .unwrap()
+    .expect("the user's statement");
+    let before = s.state().borrow().tx.statements;
+    let mut plan = run_all(1);
+    plan.items[0].decision = GateDecision::RunInTxThenConfirm {
+        reasons: Vec::new(),
+    };
+    plan.items[0].verdict = hacivat_session::session::UnitVerdict::TxThenConfirm;
+    let port = Arc::new(Counting(s.clone(), std::sync::Mutex::new(Vec::new())));
+    let mut req = request(&b, units(&["UPDATE t SET a = 1"]), plan);
+    req.confirm = Some(port.clone());
+    let mut t = b.svc.run(&s, req);
+    tokio::time::timeout(Duration::from_secs(10), &mut t.done)
+        .await
+        .expect("answered")
+        .unwrap();
+    assert_eq!(
+        *port.1.lock().unwrap(),
+        [(true, before + 1)],
+        "the savepoint form, the confirmed statement counted"
+    );
+}

@@ -2373,6 +2373,7 @@ pub mod runs {
             observer: ObserverRef(o.clone()),
             // ## m3b-t01c-core-seams
             confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
+            context_generation: None,
         }
     }
 
@@ -2462,6 +2463,7 @@ pub mod runs_m3b {
             fetch: FetchPolicy::default(),
             observer: ObserverRef(o.clone()),
             confirm_deadline: RunSpec::CONFIRM_DEADLINE,
+            context_generation: None,
         }
     }
 
@@ -2647,6 +2649,7 @@ pub mod confirm {
         let o = Recorder::new();
         let spec = RunSpec {
             confirm_deadline: deadline,
+            context_generation: None,
             ..spec_units(&o, units)
         };
         let ticket = h.run(spec);

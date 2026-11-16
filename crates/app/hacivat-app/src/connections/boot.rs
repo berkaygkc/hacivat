@@ -175,8 +175,11 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         ..ManagerConfig::m2b()
     };
     // ## m3b-t18-safe06 (named exception): the read-only guard's classifier (R-M3-83).
+    // ## m3b-t24-exec-ui (named exception): one pool for the guard and for Run (R-M3-53).
+    let pool = hacivat_exec::classify_pool::ClassifyPool::new(2);
+    crate::exec_ui::orchestrator::install_classifier(pool.clone(), cx);
     let config = ManagerConfig {
-        classifier: Some(hacivat_exec::classify_pool::ClassifyPool::new(2)),
+        classifier: Some(pool),
         ..config
     };
     let manager = ConnectionManager::new(runtime.handle(), Arc::new(deps), config);
@@ -211,6 +214,9 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
     // ## m3b-t22-tx-ui (named exception)
     follow_time_zone(cx);
     push_store_toasts(cx, &diags, quarantined.as_deref());
+    // ## m3b-t24-exec-ui (named exception): the query history opens on the core runtime,
+    // never holding the window (R-M3-62; T17 carries).
+    crate::exec_ui::orchestrator::open_history(cx);
 }
 
 // ## m2b-t22-live

@@ -149,6 +149,9 @@ pub(crate) struct ActiveRun {
     pub(crate) cancel_asked: bool,
     /// The run's status (`exec.cancel` reads which unit is in flight).
     pub(crate) status: tokio::sync::watch::Receiver<hacivat_exec::RunStatus>,
+    // ## m3b-t24-exec-ui (fix round 2)
+    /// The error policy the run was sent with (`last_run_policy`).
+    pub(crate) policy: hacivat_session::session::ErrorPolicy,
     pub(crate) _tasks: Vec<Task<()>>,
 }
 
@@ -180,9 +183,22 @@ pub(crate) fn exec_service(cx: &mut App) -> Arc<ExecService> {
     if let Some(m) = cx.try_global::<crate::connections::ConnectionsModel>() {
         service = service.with_runtime(m.runtime());
     }
+    // ## m3b-t24-exec-ui (named exception): Run classifies on the app's one classifier pool
+    // (R-M3-53; the read-only guard's too), and the runs' history records go to the store once
+    // it has opened (`orchestrator::open_history`).
+    service = service
+        .with_classifier(orchestrator::classifier(cx))
+        .with_history_sink(orchestrator::history_sink(cx));
     let service = Arc::new(service);
     cx.default_global::<ExecUi>().service = Some(service.clone());
     service
+}
+
+// ## m3b-t24-exec-ui (named exception)
+/// Drops the app's run service, so the next run builds it again (with the classifier pool
+/// installed since: `orchestrator::install_classifier`).
+pub(crate) fn reset_service(cx: &mut App) {
+    cx.default_global::<ExecUi>().service = None;
 }
 
 /// The marks of console `console`'s latest run, in unit order (`None` for a mark that is gone):
@@ -191,6 +207,11 @@ pub fn last_run_marks(
     console: ConsoleId,
     cx: &App,
 ) -> Vec<Option<hacivat_ui_editor::ExecMarkState>> {
+    // ## m3b-t24-exec-ui (named exception): a Run still being prepared shows nothing yet, and a
+    // refused one its refused units' marks.
+    if let Some(marks) = orchestrator::latest_marks_override(console, cx) {
+        return marks;
+    }
     let Some(exec) = console_exec(cx, console) else {
         return Vec::new();
     };
@@ -207,6 +228,18 @@ pub fn last_run_ended(console: ConsoleId, cx: &App) -> bool {
     console_exec(cx, console)
         .and_then(|e| e.run.as_ref())
         .is_some_and(|r| r.ended)
+}
+
+// ## m3b-t24-exec-ui (fix round 2)
+/// The error policy console `console`'s last run was sent with: `Ask` offers the error bar
+/// after a failure (Ignore, Skip, Retry), `StopOnError` never does.
+pub fn last_run_policy(
+    console: ConsoleId,
+    cx: &App,
+) -> Option<hacivat_session::session::ErrorPolicy> {
+    console_exec(cx, console)
+        .and_then(|e| e.run.as_ref())
+        .map(|r| r.policy)
 }
 
 /// The workspace window (the active one first).

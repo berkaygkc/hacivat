@@ -505,11 +505,9 @@ fn read_only_denial_marks_the_gutter_failed_with_its_reason(cx: &mut TestAppCont
         drawn.iter().any(|t| t == "not sent: read-only"),
         "{drawn:?}"
     );
-    assert!(
-        c.log_ids()
-            .iter()
-            .any(|id| id.starts_with("exec-deny-read-only"))
-    );
+    // ## m3b-t24-exec-ui (named exception): the gate denies it before the session guard would
+    // (R-M3-55), naming the class.
+    assert!(c.log_ids().contains(&"exec-gate-read-only"));
     stop_core_runtime_test(cx);
 }
 
@@ -955,7 +953,9 @@ fn a_stop_that_fails_the_users_transaction_says_so(cx: &mut TestAppContext) {
     wait_until(c.vcx, "the user's transaction", |_| {
         c.tx().owner == TxOwner::User && c.tx().status == TxStatus::InTx
     });
-    c.set_text("UPDATE t SET a = a + 1 RETURNING a");
+    // ## m3b-t24-exec-ui (named exception): with a WHERE, so the unsafe-WHERE confirmation
+    // (R-M3-55, off production) does not ask before this stop test runs.
+    c.set_text("UPDATE t SET a = a + 1 WHERE id > 0 RETURNING a");
     c.run_at(0);
     c.wait_marks("the update to run", |m| {
         matches!(m, [ExecMarkState::Running { .. }])
@@ -1017,7 +1017,8 @@ fn a_stop_that_fails_the_transaction_says_so_after_the_session_settles(cx: &mut 
     wait_until(c.vcx, "the user's transaction", |_| {
         c.tx().owner == TxOwner::User && c.tx().status == TxStatus::InTx
     });
-    c.set_text("UPDATE t SET a = a + 1 RETURNING a");
+    // ## m3b-t24-exec-ui (named exception): with a WHERE (see above).
+    c.set_text("UPDATE t SET a = a + 1 WHERE id > 0 RETURNING a");
     c.run_at(0);
     c.wait_marks("the update to run", |m| {
         matches!(m, [ExecMarkState::Running { .. }])
@@ -1792,8 +1793,11 @@ fn a_read_only_console_the_guard_cannot_verify_keeps_its_session(cx: &mut TestAp
 
 // ## m3a-f5-demo (DEMO-9): a MySQL `CALL` that answers three result sets shows the first in a
 // result tab, says the others were not shown (strip and Output), on the PO's exact text.
+// ## m3b-t24-exec-ui (named exception): since Run goes through the M3b path, a unit keeps up to
+// 100 result sets, each in its own tab (R-M3-66, Task 16): the three sets are three tabs and
+// nothing is "not shown". (Task 25 owns how the tabs look.)
 #[gpui::test]
-fn a_call_with_three_result_sets_shows_the_first_and_notes_the_rest(cx: &mut TestAppContext) {
+fn a_call_with_three_result_sets_keeps_each_in_its_own_tab(cx: &mut TestAppContext) {
     let set = |n: i64| FakeResultSet {
         columns: vec![(
             "n",
@@ -1819,26 +1823,14 @@ fn a_call_with_three_result_sets_shows_the_first_and_notes_the_rest(cx: &mut Tes
     c.wait_marks("the CALL to succeed", |m| matches!(m, [s] if succeeded(s)));
     assert_eq!(c.queries(), ["CALL hv_test.hv_t14_three()"]);
     let ids = c.log_ids();
-    assert!(ids.contains(&"exec-more-result-sets"), "{ids:?}");
-    let tabs = c.vcx.cx.read(|cx| {
-        Consoles::get(cx, c.id)
-            .and_then(|s| s.results.clone())
-            .map(|r| r.read(cx).tabs().len())
-    });
-    assert_eq!(tabs, Some(1), "one result tab");
-    enable_registry(c.vcx);
-    in_window(c.vcx, |window, _| window.refresh());
-    c.vcx.run_until_parked();
-    let drawn: Vec<String> = registry_frame(c.vcx)
-        .into_iter()
-        .map(|r| r.text.to_string())
-        .collect();
-    assert!(
-        drawn
-            .iter()
-            .any(|t| t.contains("2 more result sets not shown")),
-        "{drawn:?}"
-    );
-    assert!(drawn.iter().any(|t| t == "Result 1"), "{drawn:?}");
+    assert!(!ids.contains(&"exec-more-result-sets"), "{ids:?}");
+    let tabs = || {
+        c.vcx.cx.read(|cx| {
+            Consoles::get(cx, c.id)
+                .and_then(|s| s.results.clone())
+                .map_or(0, |r| r.read(cx).tabs().len())
+        })
+    };
+    wait_until(c.vcx, "a tab per result set", |_| tabs() == 3);
     stop_core_runtime_test(cx);
 }

@@ -36,7 +36,9 @@ use sql_split::exec_range::CandidateKind;
 use tokio::sync::watch;
 
 use crate::highlight::HighlightSource;
-use crate::preview::{PreviewKey, off_thread, preview_of};
+use crate::preview::{PreviewKey, off_thread};
+// ## m3b-t24-exec-ui (named exception)
+use crate::preview::{RunPolicy, preview_with};
 use crate::statements;
 use crate::words::TokenWords;
 use crate::worker::{self, Analysis, Faults, Job, PreviewJob};
@@ -77,6 +79,9 @@ pub(crate) struct DocShared {
     selection: RefCell<Option<(PreviewKey, ExecPreview)>>,
     /// The key last handed to the preview worker (asked once, not per frame).
     asked: RefCell<Option<PreviewKey>>,
+    // ## m3b-t24-exec-ui (named exception: CHOOSE-06)
+    /// The console's run policy ("Customize…"): the preview asks Run's question under it.
+    policy: Cell<RunPolicy>,
 }
 
 struct StatementsCache {
@@ -100,6 +105,7 @@ impl DocShared {
             statements: RefCell::new(None),
             selection: RefCell::new(None),
             asked: RefCell::new(None),
+            policy: Cell::new(RunPolicy::default()),
         }
     }
 
@@ -340,6 +346,23 @@ impl SqlLanguageService {
         }
     }
 
+    // ## m3b-t24-exec-ui (named exception: CHOOSE-06)
+    /// The console's run policy (`RunPolicy`, "Customize…"): the preview resolves under it, as
+    /// Run does. May be called before `open`; ignored for a closed document. A change tells the
+    /// editor, deferred like [`Self::set_remembered_kind`]'s.
+    pub fn set_run_policy(&self, doc: DocId, policy: RunPolicy, cx: &mut App) {
+        if self.closed.borrow().contains(&doc) {
+            return;
+        }
+        let mut docs = self.docs.borrow_mut();
+        let e = docs.entry(doc).or_insert_with(DocEntry::new);
+        if e.shared.policy.replace(policy) != policy
+            && let Some(notify) = e.shared.notifier()
+        {
+            cx.defer(move |cx| notify(cx));
+        }
+    }
+
     /// How many analyses the workers have run (tests: `open` and `change` analyse nothing on
     /// the calling thread).
     #[doc(hidden)]
@@ -525,12 +548,14 @@ impl LanguageService for SqlLanguageService {
             return None;
         }
         if !off_thread(at) {
-            return Some(preview_of(
+            // ## m3b-t24-exec-ui (named exception): under the console's run policy.
+            return Some(preview_with(
                 &a.doc,
                 at,
                 action,
                 connected,
                 sh.remembered.get(),
+                &sh.policy.get(),
             ));
         }
         // A long selection is lexed and split by the preview worker, never here (review I1):
@@ -541,6 +566,8 @@ impl LanguageService for SqlLanguageService {
             at: at.clone(),
             action,
             remembered: sh.remembered.get(),
+            // ## m3b-t24-exec-ui (named exception)
+            policy: sh.policy.get(),
         };
         if let Some((k, p)) = sh.selection.borrow().as_ref()
             && *k == key

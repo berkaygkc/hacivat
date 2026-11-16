@@ -75,6 +75,7 @@ fn spec_of(sqls: &[&str], observer: Arc<Recorder>) -> RunSpec {
         observer: ObserverRef(observer),
         // ## m3b-t01c-core-seams
         confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
+        context_generation: None,
     }
 }
 

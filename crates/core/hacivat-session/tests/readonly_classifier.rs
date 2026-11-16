@@ -702,3 +702,189 @@ async fn a_schema_switch_whose_probe_fails_leaves_the_schema_unknown() {
         .collect();
     assert_eq!(path, ["app"]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// ## m3b-t24-exec-ui (fix round 1, I1/I2/I6): Run's classification context, the session's own
+
+/// T18's constant context read (`readonly::PG_CONTEXT_SQL`), which Run's context reads too.
+const RUN_CTX_READ: &str = "SELECT pg_catalog.current_setting('standard_conforming_strings')";
+
+fn path_of(ctx: &ClassifierContext) -> Vec<String> {
+    ctx.search_path
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn ctx_reads(f: &FakeDriver) -> usize {
+    f.executed()
+        .iter()
+        .filter(|s| s.starts_with(RUN_CTX_READ))
+        .count()
+}
+
+#[tokio::test]
+async fn run_context_is_the_sessions_own_read_and_never_stale() {
+    let fake = fake_pg().tracks_transactions().exec(vec![
+        rows(RUN_CTX_READ, &[&["off", "\"$user\", Public, \"My S\""]]),
+        rows(RUN_CTX_READ, &[&["on", "app"]]),
+    ]);
+    let (h, f) = session(fake).await;
+    let ctx = h.classifier_context().await;
+    assert_eq!(ctx.lex_modes.as_deref(), Some("off"));
+    assert_eq!(path_of(&ctx), ["$user", "public", "My S"], "T18's parser");
+    // Every console that shares the session gets the same context, read once.
+    let other = h.clone();
+    assert_eq!(other.classifier_context().await, ctx);
+    assert_eq!(ctx_reads(&f), 1);
+    // A user statement that may change it: the session reads it again before it answers,
+    // whichever console asks.
+    run(&h, "SET standard_conforming_strings = on")
+        .await
+        .unwrap();
+    let again = other.classifier_context().await;
+    assert_eq!(again.lex_modes.as_deref(), Some("on"));
+    assert_eq!(path_of(&again), ["app"]);
+    assert_eq!(ctx_reads(&f), 2);
+}
+
+#[tokio::test]
+async fn run_context_read_never_counts_or_runs_in_a_failed_transaction() {
+    let fails = FakeExec {
+        prefix: "SELECT 1/0",
+        result: Err(db("22012")),
+        delay: std::time::Duration::ZERO,
+        tx_after: Some(hacivat_driver::TxStatus::Failed),
+        panics: false,
+    };
+    let fake = fake_pg().tracks_transactions().exec(vec![
+        rows(RUN_CTX_READ, &[&["on", "public"]]),
+        fails,
+        rows(RUN_CTX_READ, &[&["on", "public"]]),
+    ]);
+    let (h, f) = session(fake).await;
+    tx_cmd(&h, hacivat_session::session::TxCommand::Begin)
+        .await
+        .unwrap();
+    run(&h, "SET search_path = app").await.unwrap();
+    let before = snap(&h).tx.statements;
+    // M7: Hacivat's own read is not a statement of the user's transaction.
+    let ctx = h.classifier_context().await;
+    assert_eq!(ctx.lex_modes.as_deref(), Some("on"));
+    assert_eq!(
+        snap(&h).tx.statements,
+        before,
+        "the badge's count is unchanged"
+    );
+    // A failed transaction: nothing is read (it would fail there), the context is unknown.
+    let _ = run(&h, "SELECT 1/0").await;
+    assert_eq!(snap(&h).tx.status, hacivat_driver::TxStatus::Failed);
+    let mark = f.call_log().len();
+    let ctx = h.classifier_context().await;
+    assert_eq!(ctx.lex_modes, None);
+    assert_eq!(ctx.search_path, None);
+    assert!(since(&f, mark).is_empty(), "{:?}", since(&f, mark));
+}
+
+#[tokio::test]
+async fn run_context_read_is_hacivats_own_and_the_same_text_from_the_user_is_guarded() {
+    let c = Arc::new(Fake {
+        deny_word: Some("SELECT"),
+        changes_context: true,
+        ..Fake::default()
+    });
+    let mut script: Vec<FakeExec> = (0..3).map(|_| clean_canary()).collect();
+    script.push(rows(RUN_CTX_READ, &[&["on", "app"]]));
+    let fake = fake_pg()
+        .tracks_transactions()
+        .exec(script)
+        .session_settings(settings(Some("on"), Some("public")));
+    let (h, f, _m) = ro_over(fake, ro_profile(), c.clone()).await;
+    exec_user(&h, "SET search_path = app").await.unwrap();
+    let asked = c.asked().len();
+    let mark = f.call_log().len();
+    // Hacivat's own read runs outside the guard: sent, and the classifier is not asked.
+    let ctx = h.classifier_context().await;
+    assert_eq!(path_of(&ctx), ["app"]);
+    assert!(
+        since(&f, mark)
+            .iter()
+            .any(|c| matches!(c, FakeCall::Statement(s) if s.starts_with(RUN_CTX_READ))),
+        "{:?}",
+        since(&f, mark)
+    );
+    assert_eq!(c.asked().len(), asked, "{:?}", c.asked());
+    // The same text from the user goes through step 0b: asked, refused, never sent.
+    let text = format!("{RUN_CTX_READ}, pg_catalog.current_setting('search_path')");
+    let mark = f.call_log().len();
+    assert!(safety_denied(&exec_user(&h, &text).await));
+    assert_eq!(c.asked().last().map(|(s, _)| s.clone()), Some(text.clone()));
+    assert!(!sent(&f, mark, &text), "{:?}", since(&f, mark));
+}
+
+// ## m3b-t24-exec-ui (fix round 2): the context generation; Redshift/Cockroach in a transaction.
+
+/// Another console queues a context change between Run's last context read and its `Run`:
+/// the generation has moved, so the session refuses the run and sends nothing.
+#[tokio::test]
+async fn a_run_classified_under_a_moved_context_is_refused() {
+    let fake = fake_pg().tracks_transactions().exec(vec![
+        rows(RUN_CTX_READ, &[&["on", "public"]]),
+        rows(RUN_CTX_READ, &[&["on", "public"]]),
+    ]);
+    let (h, f) = session(fake).await;
+    let (_, generation) = h.run_context().await;
+    let generation = generation.expect("a generation");
+    // Another console on the same session, in between.
+    run(&h, "SET search_path = app").await.unwrap();
+    let o = Recorder::new();
+    let mut spec = spec_of(&o, &["SELECT * FROM t"]);
+    spec.context_generation = Some(generation);
+    let mark = f.call_log().len();
+    let reply = h.run(spec).reply.await.unwrap();
+    assert!(
+        matches!(&reply, Err(e) if e.kind == ExecErrorKind::ContextChanged),
+        "{reply:?}"
+    );
+    assert!(since(&f, mark).is_empty(), "{:?}", since(&f, mark));
+    // Classified under the generation the session has now, the run goes.
+    let (_, now) = h.run_context().await;
+    assert_ne!(now, Some(generation));
+    let o = Recorder::new();
+    let mut spec = spec_of(&o, &["SELECT * FROM t"]);
+    spec.context_generation = now;
+    assert!(h.run(spec).reply.await.unwrap().is_ok());
+}
+
+/// Redshift and Cockroach: the context read inside an open user transaction is not proven,
+/// so it is not sent there; the answer is unknown (fail-closed). PostgreSQL still reads.
+#[tokio::test]
+async fn unproven_engines_never_read_the_context_in_an_open_transaction() {
+    for (kind, reads) in [
+        (DbmsKind::Redshift, 0),
+        (DbmsKind::Cockroach, 0),
+        (DbmsKind::Postgres, 1),
+    ] {
+        let fake = FakeDriver::new(kind)
+            .tracks_transactions()
+            .exec(vec![rows(RUN_CTX_READ, &[&["on", "public"]])]);
+        let profile = Profile {
+            engine: kind,
+            ..pg_profile(TlsMode::Disable)
+        };
+        let (h, f) = spawn_over(fake, profile, false, Arc::new(FakeDriver::new(kind))).await;
+        tx_cmd(&h, hacivat_session::session::TxCommand::Begin)
+            .await
+            .unwrap();
+        let ctx = h.classifier_context().await;
+        assert_eq!(ctx_reads(&f), reads, "{kind:?}");
+        if reads == 0 {
+            assert_eq!(ctx.lex_modes, None, "{kind:?}");
+            assert_eq!(ctx.search_path, None, "{kind:?}");
+        } else {
+            assert_eq!(ctx.lex_modes.as_deref(), Some("on"));
+        }
+    }
+}

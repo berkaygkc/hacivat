@@ -109,3 +109,66 @@ async fn a_whole_transaction_rolled_back_by_the_server_is_logged() {
         "after the statement's error: {ids:?}"
     );
 }
+
+// ## m3b-t24-exec-ui (fix round 1, I6.3): the lines the observer derives from the gate's verdict.
+
+/// A MySQL statement confirmed although it commits the open transaction did commit it: the log
+/// says `exec-implicit-commit`, not the generic "the transaction ended" line.
+#[tokio::test]
+async fn a_confirmed_implicit_commit_is_logged_as_one() {
+    let begin = FakeQuery {
+        prefix: "BEGIN",
+        tx_after: Some(TxStatus::InTx),
+        ..FakeQuery::default()
+    };
+    let create = FakeQuery {
+        prefix: "CREATE",
+        tx_after: Some(TxStatus::Idle),
+        ..FakeQuery::default()
+    };
+    let fake = hacivat_driver::fake::FakeDriver::new(hacivat_proto::DbmsKind::MySql)
+        .tracks_transactions()
+        .queries(vec![begin, create]);
+    let (b, s, _f) = service_over(fake).await;
+    let mut plan = run_all(2);
+    plan.items[1].verdict = hacivat_session::session::UnitVerdict::ImplicitCommit;
+    let mut t = b.svc.run(
+        &s,
+        request(&b, units(&["BEGIN", "CREATE TABLE x (a INT)"]), plan),
+    );
+    let summary = (&mut t.done).await.unwrap();
+    assert_eq!(summary.failed, 0, "{summary:?} {:?}", b.log_ids());
+    let ids = b.log_ids();
+    assert!(ids.contains(&"exec-implicit-commit"), "{ids:?}");
+}
+
+/// A confirm-in-transaction statement that failed in the user's open transaction before any
+/// question ran in the savepoint form, which rolled back only it: `exec-confirm-statement-failed`.
+#[tokio::test]
+async fn a_confirm_in_transaction_statement_that_failed_says_only_it_was_undone() {
+    let begin = FakeQuery {
+        prefix: "BEGIN",
+        tx_after: Some(TxStatus::InTx),
+        ..FakeQuery::default()
+    };
+    let fails = FakeQuery {
+        prefix: "UPDATE",
+        sets: vec![generated(1)],
+        fail_after: Some((0, pg_error("23505", "duplicate key value"))),
+        ..FakeQuery::default()
+    };
+    let (b, s, _f) = service_over(fake_pg().queries(vec![begin, fails])).await;
+    let mut plan = run_all(2);
+    plan.items[1].decision = hacivat_exec::GateDecision::RunInTxThenConfirm {
+        reasons: Vec::new(),
+    };
+    plan.items[1].verdict = hacivat_session::session::UnitVerdict::TxThenConfirm;
+    let mut t = b.svc.run(
+        &s,
+        request(&b, units(&["BEGIN", "UPDATE t SET a = 1"]), plan),
+    );
+    let summary = (&mut t.done).await.unwrap();
+    assert_eq!(summary.failed, 1, "{summary:?} {:?}", b.log_ids());
+    let ids = b.log_ids();
+    assert!(ids.contains(&"exec-confirm-statement-failed"), "{ids:?}");
+}

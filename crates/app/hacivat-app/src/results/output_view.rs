@@ -155,6 +155,10 @@ fn glyph(msg: &LogMsg) -> (IconName, bool) {
         LogMsg::TerminateFailed => (IconName::OctagonX, true),
         LogMsg::Disconnected { .. } => (IconName::Unplug, false),
         LogMsg::RunStopped { .. } | LogMsg::RolledBackContinue { .. } => (IconName::Info, false),
+        // ## m3b-t24-exec-ui (named exception): the run UI's lines before a run is sent: a
+        // refusal in ink (as `NotStarted`), an answer as a note.
+        LogMsg::RunUi { warn: true, .. } => (IconName::TriangleAlert, true),
+        LogMsg::RunUi { warn: false, .. } => (IconName::Info, false),
     }
 }
 

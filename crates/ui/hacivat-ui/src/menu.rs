@@ -317,6 +317,14 @@ impl PopupMenu {
         }
     }
 
+    // ## m3b-t24-exec-ui (named exception): the chooser's "Run as one" row is never
+    // preselected (R-M3-60, NOTES surface 9): Enter does nothing until ↓ highlights it.
+    /// Highlights no row: Enter chooses nothing until an arrow key or the pointer highlights
+    /// one.
+    pub fn clear_selection(&mut self) {
+        self.selected = None;
+    }
+
     fn step(&mut self, forward: bool) {
         let n = self.items.len();
         if n == 0 {
