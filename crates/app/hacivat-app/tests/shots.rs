@@ -97,6 +97,8 @@ use hacivat_app::connections::{
     import, kbd_prompt, plaintext_prompt, prod_prompt, secret_prompt, test_strip, vault_dialog,
 };
 use hacivat_app::l10n_global::text_fn_id;
+// ## m3b-t21-confirm: the confirmation and confirm-in-transaction dialogs' fixtures.
+use hacivat_app::exec_ui::{commit_prompt, confirm};
 use hacivat_app::menus;
 use hacivat_app::shell::DemoCapsule;
 use hacivat_app::shell::Workspace;
@@ -211,6 +213,10 @@ enum Surface {
     LiveVaultSecret,
     // ## m3a-t35-shots: every M3a state (`m3a::M3A`), at 1280x800 and 960x600.
     M3a(m3a::M3a),
+    // ## m3b-t21-confirm: the M3b dialogs of surfaces 1 and 2 (`design/m3b-safe`), at 1280x800
+    // and 960x600.
+    Confirm(confirm::fixtures::State),
+    Commit(commit_prompt::fixtures::State),
 }
 
 const SURFACES: [Surface; 78] = [
@@ -388,6 +394,9 @@ impl Surface {
             Surface::LiveVaultSecret => "live-vault-secret",
             // ## m3a-t35-shots
             Surface::M3a(s) => s.name(),
+            // ## m3b-t21-confirm
+            Surface::Confirm(s) => s.name(),
+            Surface::Commit(s) => s.name(),
         }
     }
 
@@ -415,7 +424,7 @@ impl Surface {
     fn sizes(self) -> &'static [(f32, f32)] {
         // ## m2b-t24-shots: every M2b surface, at the default window and the minimum one.
         // ## m3a-t35-shots: and every M3a state.
-        if self.is_live() || self.is_m2b() || matches!(self, Surface::M3a(_)) {
+        if self.is_live() || self.is_m2b() || matches!(self, Surface::M3a(_)) || self.is_t21() {
             // ## m2b-t22-live: the default window and the minimum one (ruling I1).
             return &[(1280.0, 800.0), (960.0, 600.0)];
         }
@@ -435,6 +444,12 @@ impl Surface {
 
     fn is_demo(self) -> bool {
         self == Surface::ShellDemoProduction
+    }
+
+    // ## m3b-t21-confirm
+    /// Whether the surface is one of Task 21's dialog states.
+    fn is_t21(self) -> bool {
+        matches!(self, Surface::Confirm(_) | Surface::Commit(_))
     }
 
     // ## m2b-t24-shots
@@ -590,6 +605,9 @@ impl Surface {
             Surface::LiveVaultSecret => ("#sheet-secret-vault", None),
             // ## m3a-t35-shots
             Surface::M3a(s) => s.marker(),
+            // ## m3b-t21-confirm
+            Surface::Confirm(_) => ("hacivat-app/src/exec_ui/confirm.rs:", None),
+            Surface::Commit(_) => ("hacivat-app/src/exec_ui/commit_prompt.rs:", None),
         }
     }
 
@@ -692,6 +710,12 @@ impl Surface {
         // ## m3a-t35-shots: an M3a state is reached by its steps (`m3a::M3a::steps`).
         if let Surface::M3a(_) = self {
             return;
+        }
+        // ## m3b-t21-confirm: the dialogs open through their fixtures.
+        match self {
+            Surface::Confirm(state) => return confirm::fixtures::open(state, window, cx),
+            Surface::Commit(state) => return commit_prompt::fixtures::open(state, window, cx),
+            _ => {}
         }
         if self.needs_connections() {
             open_m2a(self, window, cx);
@@ -976,7 +1000,36 @@ fn shots() -> Vec<Shot> {
             }
         }
     }
+    // ## m3b-t21-confirm: the M3b dialog states, after every M3a shot.
+    for surface in t21_surfaces() {
+        for &size in surface.sizes() {
+            for theme in THEMES {
+                for locale in LOCALES {
+                    out.push(Shot {
+                        surface,
+                        theme,
+                        locale,
+                        size,
+                    });
+                }
+            }
+        }
+    }
     out
+}
+
+// ## m3b-t21-confirm
+/// Task 21's surfaces: every confirmation state, then every commit-prompt state.
+fn t21_surfaces() -> Vec<Surface> {
+    confirm::fixtures::STATES
+        .into_iter()
+        .map(Surface::Confirm)
+        .chain(
+            commit_prompt::fixtures::STATES
+                .into_iter()
+                .map(Surface::Commit),
+        )
+        .collect()
 }
 
 fn out_dir() -> PathBuf {
@@ -1457,10 +1510,14 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     assert_eq!(
         all.len(),
         8 * 4 * 2 + 4 + 8 + 26 * 8 + 4 * 8 + 10 * 8 * 2 + 34 * 8 * 2 + m3a::M3A.len() * 8 * 2
+            // ## m3b-t21-confirm (named exception): plus Task 21's dialog states.
+            + t21_surfaces().len() * 8 * 2
     );
     // ## m3a-t35-shots: the 1,012 M1/M2 shots first, unchanged; then 68 M3a states x 16.
     // ## m3a-f5-demo (review m-5): plus the app menu at 960x600 (8).
-    assert_eq!(all.len(), 1020 + 68 * 16);
+    // ## m3b-t21-confirm (named exception): plus 19 dialog states x 16, after the M3a shots.
+    assert_eq!(all.len(), 1020 + 68 * 16 + 19 * 16);
+    assert!(all[1020 + 68 * 16..].iter().all(|s| s.surface.is_t21()));
     assert!(
         all[..1020]
             .iter()

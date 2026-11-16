@@ -326,11 +326,15 @@ fn commit_question() -> CommitQuestion {
     }
 }
 
+// ## m3b-t21-confirm (named exception): Task 21 filled the dialogs and the port. With no
+// window to ask in, the dialogs still answer the safe value at once, and so does a port that is
+// not connected to the UI (`AppConfirmPort::default()`; the port now holds state, so it is no
+// longer a unit struct).
 #[gpui::test]
 fn confirm_stub_answers_cancel(cx: &mut TestAppContext) {
     let mut rx = cx.update(|cx| confirm::open(confirm_question(), cx));
     assert!(matches!(rx.try_recv(), Ok(ConfirmAnswer::Cancel)));
-    let mut rx = AppConfirmPort.confirm(confirm_question());
+    let mut rx = AppConfirmPort::default().confirm(confirm_question());
     assert!(matches!(rx.try_recv(), Ok(ConfirmAnswer::Cancel)));
 }
 
@@ -338,7 +342,7 @@ fn confirm_stub_answers_cancel(cx: &mut TestAppContext) {
 fn commit_prompt_stub_answers_roll_back(cx: &mut TestAppContext) {
     let mut rx = cx.update(|cx| commit_prompt::open(commit_question(), cx));
     assert!(matches!(rx.try_recv(), Ok(CommitAnswer::RollBack)));
-    let mut rx = AppConfirmPort.commit_decision(commit_question());
+    let mut rx = AppConfirmPort::default().commit_decision(commit_question());
     assert!(matches!(rx.try_recv(), Ok(CommitAnswer::RollBack)));
 }
 
