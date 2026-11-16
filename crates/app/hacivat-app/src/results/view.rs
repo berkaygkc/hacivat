@@ -63,7 +63,7 @@ use crate::results::tabs::{ActiveResult, ConsoleResults, MemoryBanner, ResultEnt
 use crate::results::toolbar::{self, OnActivate, TabsModel, WIDE_RESULT_COLUMNS};
 use crate::shell::Workspace;
 // ## m3a-f5-demo
-use crate::shell::{register_focus_context, unregister_focus_context};
+use crate::shell::register_focus_context;
 
 /// What the results tile asks of the console's run UI (Task 33 handles them). The tile emits
 /// them on the console's [`ConsoleResults`] entity.
@@ -498,11 +498,10 @@ impl ResultsHost {
         let view = cx.new(|cx| GridView::new(source, config, cx));
         // ## m3a-f5-demo (DEMO-6): while the grid has the focus its key context is on the
         // workspace's context stack, so its keys (⌘C, arrows, ⌘A …) resolve through the
-        // dispatcher; the registration goes when the grid is released.
+        // dispatcher. The registration holds the handle weakly, so it ends with the grid
+        // however the grid goes (a closed tab, a closed window; review m-4).
         let focus = view.read(cx).focus_handle(cx);
-        register_focus_context(cx, focus.clone(), GRID_CONTEXT);
-        cx.observe_release(&view, move |_, _, cx| unregister_focus_context(cx, &focus))
-            .detach();
+        register_focus_context(cx, focus, GRID_CONTEXT);
         view.update(cx, |g, cx| {
             for (col, width) in widths {
                 g.set_column_width(col, width, cx);

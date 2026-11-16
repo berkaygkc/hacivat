@@ -1674,3 +1674,39 @@ fn another_connect_opens_no_console(cx: &mut TestAppContext) {
     assert_eq!(tab_titles(vcx), vec!["orders-dev".to_string()]);
     stop_core_runtime_test(cx);
 }
+
+/// Review m-8: an Explorer connect cancelled from elsewhere (the capsule's or the dialog's
+/// cancel) leaves no intent behind: a later connect of that profile from elsewhere opens no
+/// console.
+#[gpui::test]
+fn an_explorer_connect_cancelled_elsewhere_leaves_no_intent(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(cx, "en", pg_fake().gated());
+    add_profile(
+        vcx,
+        test_profile("orders-dev", Some(EnvTag::Dev), "10.0.0.7"),
+    );
+    add_profile(
+        vcx,
+        test_profile("orders-stg", Some(EnvTag::Staging), "10.0.0.8"),
+    );
+    activate(vcx);
+    let stg = profile_id(vcx, "orders-stg");
+    // Held at the driver: the Explorer's connect is under way, then cancelled elsewhere.
+    explorer_connect(vcx, "orders-stg");
+    wait_until(vcx, "orders-stg to be connecting", |vcx| {
+        matches!(live(vcx, "orders-stg"), LiveState::Connecting(_))
+    });
+    vcx.cx
+        .update(|cx| ConnectionsModel::cancel_connect(cx, stg));
+    wait_until(vcx, "orders-stg to stop", |vcx| {
+        !matches!(live(vcx, "orders-stg"), LiveState::Connecting(_))
+    });
+    fake(vcx).release();
+    // orders-dev binds the unbound console; orders-stg then connects from elsewhere.
+    connect_and_wait(vcx, "orders-dev");
+    wait_active_console(vcx);
+    connect_and_wait(vcx, "orders-stg");
+    vcx.run_until_parked();
+    assert_eq!(tab_titles(vcx), vec!["orders-dev".to_string()]);
+    stop_core_runtime_test(cx);
+}

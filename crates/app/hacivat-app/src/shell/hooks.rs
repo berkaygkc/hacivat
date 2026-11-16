@@ -4,7 +4,8 @@ use std::rc::Rc;
 
 use hacivat_ui::capsule::{CapsuleModel, CapsuleSegment};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, AnyView, App, FocusHandle, Global, KeyDownEvent, Pixels, Point, Window,
+    AnyElement, AnyView, App, FocusHandle, Global, KeyDownEvent, Pixels, Point, WeakFocusHandle,
+    Window,
 };
 // ## m3a-t01b-seams
 use hacivat_proto::ProfileId;
@@ -217,30 +218,56 @@ pub(crate) fn key_capture(cx: &App) -> Option<KeyCaptureHook> {
 }
 
 /// Views that add a key context while focused (the explorer list, P4).
+///
+/// ## m3a-f5-demo (review m-4): the handles are held weakly. A registration lives as long as
+/// its view's focus handle, whatever ends it (a closed tab, a closed window, a view dropped
+/// without telling anyone): a lookup skips a dead one and every registration prunes them.
 #[derive(Default)]
-pub struct FocusContexts(Vec<(FocusHandle, &'static str)>);
+pub struct FocusContexts(Vec<(WeakFocusHandle, &'static str)>);
 
 impl Global for FocusContexts {}
 
+impl FocusContexts {
+    /// The contexts registered for live handles, in registration order (tests).
+    pub fn live(cx: &App) -> Vec<&'static str> {
+        cx.try_global::<FocusContexts>()
+            .map(|f| {
+                f.0.iter()
+                    .filter(|(h, _)| h.upgrade().is_some())
+                    .map(|(_, c)| *c)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Every registration, live or dead (tests: nothing piles up).
+    pub fn stored(cx: &App) -> usize {
+        cx.try_global::<FocusContexts>().map_or(0, |f| f.0.len())
+    }
+}
+
 /// Pushes `context` onto `Workspace::context_stack` while `handle` is focused. A view built
 /// inside `Workspace::new` calls it with the `App` it gets (P4). Registering a handle again
-/// replaces its context.
+/// replaces its context. Registrations whose handle is gone are dropped here.
 pub fn register_focus_context(cx: &mut App, handle: FocusHandle, context: &'static str) {
     let contexts = &mut cx.default_global::<FocusContexts>().0;
-    match contexts.iter_mut().find(|(h, _)| *h == handle) {
+    contexts.retain(|(h, _)| h.upgrade().is_some());
+    match contexts
+        .iter_mut()
+        .find(|(h, _)| h.upgrade().is_some_and(|h| h == handle))
+    {
         Some(entry) => entry.1 = context,
-        None => contexts.push((handle, context)),
+        None => contexts.push((handle.downgrade(), context)),
     }
 }
 
 // ## m3a-f5-demo
-/// Drops the context registered for `handle` (a view built and dropped many times, such as a
-/// result tab's grid, unregisters itself when it is released).
+/// Drops the context registered for `handle`, and every registration whose handle is gone.
 pub fn unregister_focus_context(cx: &mut App, handle: &FocusHandle) {
     if cx.has_global::<FocusContexts>() {
         cx.global_mut::<FocusContexts>()
             .0
-            .retain(|(h, _)| h != handle);
+            .retain(|(h, _)| h.upgrade().is_some_and(|h| h != *handle));
     }
 }
 
@@ -249,7 +276,7 @@ pub(crate) fn focused_contexts(window: &Window, cx: &App) -> Vec<&'static str> {
     cx.try_global::<FocusContexts>()
         .map(|f| {
             f.0.iter()
-                .filter(|(h, _)| h.is_focused(window))
+                .filter(|(h, _)| h.upgrade().is_some_and(|h| h.is_focused(window)))
                 .map(|(_, c)| *c)
                 .collect()
         })

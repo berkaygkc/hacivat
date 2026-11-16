@@ -1271,6 +1271,9 @@ const PG_ROWS: &[Row] = &[
     ("W3", "DELETE FROM {t}", &[INPUT]),
     ("W4", "TRUNCATE {t}", &[INPUT]),
     ("W5", "DROP TABLE {t}", &[INPUT]),
+    // F5 review m-1: `ANALYZE` runs inside a read-only transaction and its statistics outlive
+    // the rollback.
+    ("W7", "ANALYZE {t}", &[INPUT]),
     (
         "P1",
         "WITH d AS (DELETE FROM {t} RETURNING *) SELECT * FROM d",
@@ -1329,6 +1332,8 @@ const MYSQL_ROWS: &[Row] = &[
     ),
     ("M8", "CREATE TABLE {t}_m8 (a int)", &[INPUT]),
     ("M8", "TRUNCATE TABLE {t}", &[INPUT]),
+    // F5 review m-1: statistics writes.
+    ("W7", "ANALYZE TABLE {t}", &[INPUT]),
     ("M13", "XA START 'hv_t31'", &["protocol", "XAE09"]),
     ("M17", "CREATE TEMPORARY TABLE {t}_tmp (a int)", &[INPUT]),
     ("M7", "/*!50000 COMMIT */", &["1a"]),
@@ -1346,6 +1351,8 @@ const SQLITE_ROWS: &[Row] = &[
     ("S3", "ATTACH DATABASE '{t}_x.db' AS x", &[INPUT]),
     ("S4", "PRAGMA user_version = 7", &["23", "8"]),
     ("S5", "VACUUM", &[INPUT]),
+    // F5 review m-1: statistics writes.
+    ("S7", "ANALYZE", &[INPUT]),
     ("S6", "SELECT 1; DELETE FROM {t}", &[INPUT]),
     // A write the first keyword does not show meets the authorizer.
     (

@@ -604,6 +604,9 @@ async fn writes_are_refused_before_anything_is_sent() {
         "GRANT SELECT ON t TO PUBLIC",
         "CALL p()",
         "DO $$ BEGIN END $$",
+        // F5 review m-1.
+        "ANALYZE t",
+        "analyze",
     ];
     let mysql_rows = [
         "INSERT INTO müşteri VALUES (9,'x',1)",
@@ -613,7 +616,16 @@ async fn writes_are_refused_before_anything_is_sent() {
         "# c\nUPDATE t SET a = 1",
         "RENAME TABLE t TO u",
         "CALL hv_test.hv_t14_three()",
+        "ANALYZE TABLE t",
     ];
+    // F5 review m-6: readings cut short (more version-gated comments than are followed) are
+    // refused by this layer on its own.
+    let cut_short = format!("{}SELECT 1", "/*!99999 x */ ".repeat(24));
+    let mysql_rows: Vec<&str> = mysql_rows
+        .iter()
+        .copied()
+        .chain([cut_short.as_str()])
+        .collect();
     for (fake, profile, kind, rows) in [
         (pg(Vec::new()), ro_pg(), "pg", &pg_rows[..]),
         (mysql(), ro_mysql(), "mysql", &mysql_rows[..]),
@@ -637,6 +649,50 @@ async fn writes_are_refused_before_anything_is_sent() {
             &f.call_log()[base..]
         );
         assert_eq!(snap(&h).state, SessionState::Idle, "{kind}");
+    }
+}
+
+// F5 review m-7: a read whose comment or literal holds a write word still runs (the layer reads
+// the first keyword only, as the server does), on PostgreSQL and MySQL.
+#[tokio::test(start_paused = true)]
+async fn reads_that_mention_a_write_word_still_run() {
+    const PG_READS: [&str; 4] = [
+        "/* DELETE */ SELECT 1",
+        "-- DROP\nSELECT 1",
+        "SELECT 'INSERT'",
+        "/* nested /* UPDATE */ */ SELECT 2",
+    ];
+    const MYSQL_READS: [&str; 4] = [
+        "# UPDATE\nSELECT 1",
+        "/* DELETE */ SELECT 1",
+        "-- DROP\nSELECT 1",
+        "SELECT 'INSERT'",
+    ];
+    let pg_fake =
+        pg(clean(PG_READS.len())).queries(PG_READS.iter().map(|s| select(s, 1)).collect());
+    let my_fake = mysql().queries(MYSQL_READS.iter().map(|s| select(s, 1)).collect());
+    for (fake, profile, kind, rows) in [
+        (pg_fake, ro_pg(), "pg", &PG_READS[..]),
+        (my_fake, ro_mysql(), "mysql", &MYSQL_READS[..]),
+    ] {
+        let (h, f, base) = ro(fake, profile).await;
+        for sql in rows {
+            let (o, reply) = run_one(&h, sql, false).await;
+            reply.unwrap_or_else(|e| panic!("{kind} {sql:?}: {:?}", e.kind));
+            assert_eq!(o.rows(), 1, "{kind} {sql:?}");
+        }
+        let queried: Vec<String> = f.typed_log()[..]
+            .iter()
+            .filter_map(|c| match c {
+                hacivat_driver::fake::FakeTypedCall::Query(q) => Some(q.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            rows.iter().all(|r| queried.iter().any(|q| q == r)),
+            "{kind}: {queried:?}"
+        );
+        assert!(f.call_log().len() > base, "{kind}: the reads were sent");
     }
 }
 
@@ -967,6 +1023,7 @@ async fn sqlite_authorizer_and_stmt_readonly_on_the_typed_path() {
         "DELETE FROM t",
         "VACUUM",
         "ATTACH 'x.db' AS x",
+        "ANALYZE",
     ] {
         let (_, reply) = run_one(&on.s, sql, false).await;
         assert_eq!(

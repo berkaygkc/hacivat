@@ -14,6 +14,8 @@ pub use registry::quit_requests;
 pub use registry::{close_window, request_quit, request_window_close};
 // ## m3a-t33-exec-ui (named exception)
 pub use registry::{request_restart, take_restart_intent};
+// ## m3a-f5-demo (review m-9)
+pub use registry::in_window_menu_items;
 
 use std::cell::RefCell;
 use std::rc::Rc;

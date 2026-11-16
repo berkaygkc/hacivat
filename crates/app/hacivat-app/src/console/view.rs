@@ -154,14 +154,16 @@ pub(crate) fn install(cx: &mut App) {
 /// Profiles the user connected from the Explorer (double-click, Connect) whose connect has not
 /// ended yet.
 #[derive(Default)]
-struct ExplorerConnects(HashSet<ProfileId>);
+struct ExplorerConnects(HashMap<ProfileId, bool>);
 
 impl Global for ExplorerConnects {}
 
 /// The user asked the Explorer to connect `profile` (`connection.toggle_connect`): once it is
 /// connected, a console of that profile gets the focus ([`console_for_connect`]).
 pub(crate) fn note_explorer_connect(cx: &mut App, profile: ProfileId) {
-    cx.default_global::<ExplorerConnects>().0.insert(profile);
+    cx.default_global::<ExplorerConnects>()
+        .0
+        .insert(profile, false);
 }
 
 /// The user disconnected or cancelled `profile`: its pending Explorer connect is dropped.
@@ -172,29 +174,40 @@ pub(crate) fn forget_explorer_connect(cx: &mut App, profile: ProfileId) {
 }
 
 /// The connections changed: an Explorer connect that connected is followed by its console
-/// (after every host has seen the change, so an unbound focused console binds first); one that
-/// failed is dropped.
+/// (after every host has seen the change, so an unbound focused console binds first). One that
+/// failed, or that went back to disconnected after it was seen connecting (cancelled from
+/// anywhere: the capsule, the dialog, a delete; review m-8), or whose profile is gone, is
+/// dropped.
 fn follow_explorer_connects(cx: &mut App) {
     let Some(wanted) = cx
         .try_global::<ExplorerConnects>()
         .filter(|w| !w.0.is_empty())
-        .map(|w| w.0.iter().copied().collect::<Vec<_>>())
+        .map(|w| w.0.iter().map(|(p, seen)| (*p, *seen)).collect::<Vec<_>>())
     else {
         return;
     };
     let Some(m) = cx.try_global::<ConnectionsModel>() else {
         return;
     };
-    let states: Vec<(ProfileId, LiveState)> = wanted.into_iter().map(|p| (p, m.live(p))).collect();
-    for (profile, state) in states {
+    let states: Vec<(ProfileId, bool, Option<LiveState>)> = wanted
+        .into_iter()
+        .map(|(p, seen)| (p, seen, m.get(p).map(|_| m.live(p))))
+        .collect();
+    for (profile, seen_connecting, state) in states {
         match state {
-            LiveState::Connected(_) => {
+            Some(LiveState::Connected(_)) => {
                 forget_explorer_connect(cx, profile);
                 cx.defer(move |cx| console_for_connect(profile, cx));
             }
-            LiveState::Failed(_) | LiveState::Lost { .. } => forget_explorer_connect(cx, profile),
-            LiveState::Connecting(_) | LiveState::Reconnecting { .. } | LiveState::Disconnected => {
+            Some(LiveState::Connecting(_) | LiveState::Reconnecting { .. }) => {
+                if let Some(seen) = cx.global_mut::<ExplorerConnects>().0.get_mut(&profile) {
+                    *seen = true;
+                }
             }
+            // Not started yet (the state the intent is noted in).
+            Some(LiveState::Disconnected) if !seen_connecting => {}
+            Some(LiveState::Disconnected | LiveState::Failed(_) | LiveState::Lost { .. })
+            | None => forget_explorer_connect(cx, profile),
         }
     }
 }

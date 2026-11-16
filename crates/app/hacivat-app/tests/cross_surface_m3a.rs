@@ -718,3 +718,91 @@ fn edit_copy_and_select_all_from_the_menu_reach_the_focused_grid(cx: &mut TestAp
     );
     stop_core_runtime_test(cx);
 }
+
+// ## m3a-f5-demo (review m-4): a grid's key-context registration ends with the grid, whatever
+// ends it: a closed console tab, or its whole window.
+fn live_grids(vcx: &VisualTestContext) -> usize {
+    vcx.cx.read(|cx| {
+        hacivat_app::shell::FocusContexts::live(cx)
+            .into_iter()
+            .filter(|c| *c == hacivat_ui_grid::GRID_CONTEXT)
+            .count()
+    })
+}
+
+#[gpui::test]
+fn closing_the_console_drops_its_grids_key_context(cx: &mut TestAppContext) {
+    let (vcx, grid) = three_by_three(cx);
+    assert_eq!(live_grids(vcx), 1);
+    drop(grid);
+    let tab = with_ws(vcx, |ws, _, _| ws.active_tab()).expect("the console's tab");
+    with_ws(vcx, |ws, _, cx| ws.force_close_tab(tab, cx));
+    vcx.run_until_parked();
+    wait_until(vcx, "the grid's registration to end", |vcx| {
+        live_grids(vcx) == 0
+    });
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn closing_the_window_drops_its_grids_key_context(cx: &mut TestAppContext) {
+    let (vcx, grid) = three_by_three(cx);
+    assert_eq!(live_grids(vcx), 1);
+    drop(grid);
+    let stored = vcx.cx.read(hacivat_app::shell::FocusContexts::stored);
+    assert!(stored >= 1);
+    in_window(vcx, |window, _| window.remove_window());
+    vcx.cx.run_until_parked();
+    assert_eq!(
+        live_grids(vcx),
+        0,
+        "no grid of the closed window stays registered"
+    );
+    // The next registration prunes what the closed window left behind.
+    let probe = vcx.cx.update(|cx| cx.focus_handle());
+    vcx.cx.update(|cx| {
+        hacivat_app::shell::register_focus_context(cx, probe.clone(), "Probe");
+    });
+    let live = vcx.cx.read(hacivat_app::shell::FocusContexts::live);
+    let stored = vcx.cx.read(hacivat_app::shell::FocusContexts::stored);
+    assert_eq!(
+        stored,
+        live.len(),
+        "dead registrations were dropped: {live:?}"
+    );
+    drop(probe);
+    stop_core_runtime_test(cx);
+}
+
+// Review m-9: with a result grid focused, the in-window Edit menu keeps its own labels while
+// Copy and Select All run the grid's commands.
+#[gpui::test]
+fn the_in_window_edit_menu_keeps_its_labels_over_the_grid(cx: &mut TestAppContext) {
+    let (vcx, grid) = three_by_three(cx);
+    vcx.simulate_click(grid_cell_center(vcx, &grid, 0, 0), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    let rows: Vec<(String, String, bool)> = in_window(vcx, |window, cx| {
+        hacivat_app::commands::in_window_menu_items(window, cx)
+            .expect("the menu")
+            .into_iter()
+            .filter(|i| !i.separator)
+            .map(|i| ((i.label)(cx).to_string(), i.action.to_string(), i.disabled))
+            .collect()
+    });
+    let row = |action: &str| {
+        rows.iter()
+            .find(|(_, a, _)| a == action)
+            .unwrap_or_else(|| panic!("{action}: {rows:?}"))
+            .clone()
+    };
+    assert_eq!(row("grid.copy"), ("Copy".into(), "grid.copy".into(), false));
+    assert_eq!(
+        row("grid.select_all"),
+        ("Select all".into(), "grid.select_all".into(), false)
+    );
+    assert!(
+        !rows.iter().any(|(l, _, _)| l.starts_with("Grid")),
+        "{rows:?}"
+    );
+    stop_core_runtime_test(cx);
+}
