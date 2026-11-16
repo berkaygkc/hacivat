@@ -1081,3 +1081,127 @@ it; `cargo test --workspace` runs both freshness tests.
 **Tests.** `sql-ident/tests/fold.rs`; `sql-safety/tests/functions.rs` and
 `tests/set_allow.rs`; the unit tests of `functions/{mod,data}.rs`; `xtask` `gen_fn_catalog`
 tests; the candidate rules of `hacivat-exec/tests/gen_fn_catalog.rs` run without Docker.
+
+## m3b-t09 — PG backend
+
+**The tree comes from libpg_query, behind the oracle's guard.** `sql_oracle_pg::tree::{parse_tree,
+scan_tokens, fingerprint}` run on the oracle's one 16 MiB parser thread through the same
+`guarded` path as the splitter (NUL refused, 8 MiB cap, bracket depth ≤ 256 from PostgreSQL's own
+scanner), so no input reaches libpg_query unchecked. `parse_tree` parses exactly the text it is
+given (no placeholder normalisation: the classifier sees `$n`, P-M3b-2). The protobuf decode
+stops at prost's limit of 100 nested messages (47 nested `ARRAY[`, 100 `UNION`s): that is an
+`Err`, and the backend answers `Unknown` with `ParseError`. `pg_query::parse` also fills its own
+summary with `pg_query`'s walker; the oracle drops it unread, and a test forbids `nodes()`,
+`NodeRef`, the summary fields and `deparse` in `sql-safety` and `tree.rs` (R9).
+
+**stderr ruling (ledger 151, 164): measured, no patch.** The vendored libpg_query 18.1.0
+defines `DEBUG` in `src/pg_query_internal.h` (upstream, unpatched), which every C entry point
+includes before its `#ifndef DEBUG` stderr-redirect blocks: the per-call `dup2` of fd 2 onto a
+pipe is compiled out. `sql-oracle-pg/tests/tree.rs` `concurrent_stderr_is_not_lost_during_parses`
+proves it: a child process writes 10,000 numbered lines to fd 2 from one thread while another
+keeps libpg_query busy (parse, scan, fingerprint) until the writer is done, and the parent finds
+every line. `PATCHES.md` §2 is therefore not needed. Consequences: (a) the M3a text that says
+libpg_query redirects stderr per call (`stack.rs` module docs, ledger 151) describes the
+upstream source without the header's define; the one serial parser thread stays for its other
+reasons (per-thread memory, one in-flight call); (b) a `WARNING` the grammar raises (`GLOBAL`
+in `CREATE GLOBAL TEMP TABLE`, …) goes to the process's stderr, not to
+`ParseResult::warnings`, which Hacivat never reads; (c) child processes never inherit a
+libpg_query pipe. The test fails if a future libpg_query brings the redirect back. The two
+`pg_query` functions with the null-slice hazard stay unreachable (a grep test over `crates/`).
+
+**Generated visitor (R-M3-2).** `cargo xtask gen-pg-visitor` reads
+`third_party/pg_query/libpg_query/protobuf/pg_query.proto` with a small proto3 reader (no
+`protoc`; anything it does not understand is an error) and writes
+`sql-safety/src/visit/pg_generated.rs`: `MsgKind` (every top-level message), `PgRef<'a>`,
+`push_children` (every message-typed field, singular, repeated and `oneof`, of every message),
+the `Node` variant table and an iterative `walk` with an explicit stack (no recursion). The
+first line records the schema's XXH3-64; `generated_visitor_is_fresh` compares it, xtask's
+`the_checked_in_visitor_is_fresh` regenerates in full, and CI runs `gen-pg-visitor --check`
+(`# ## m3b-t09-visitor`). Only `SummaryResult` (not part of a parse tree) is skipped.
+`pg_visitor_reaches_every_node_kind_in_the_corpus` counts the `Node` kinds of each corpus tree
+independently (serde JSON of the tree) and requires the generated walk to visit exactly as many
+of each; a mutation that skipped `SelectStmt.with_clause` failed it. The corpus (Hacivat-authored
+plus the splitter corpus) reaches 197 `Node` kinds, every kind a raw tree holds in a `Node`.
+
+**Every message kind has a role** (`backend::pg::role`, an exhaustive match, so a new libpg_query
+message does not compile until placed): `Stmt` (a row of `data/pg/statements.toml`; a test
+requires the rows and the statement messages to be the same set), `Rule` (`FuncCall`, `A_Expr`,
+`TypeCast`, `IntoClause`, `LockingClause`, `RangeVar`, `RangeTableSample`, `SubLink`, `SortBy`,
+`CommonTableExpr`, `AlterTableCmd`), `Neutral` (raw structure and builtin expressions), or
+`Unhandled`: analysed-tree nodes (`FuncExpr`, `OpExpr`, `Query`, …) whose functions are OIDs
+the classifier cannot name, and scanner/summary messages. Met in a tree, `Unhandled` is
+`Unknown` with `EffectsUnknown`; the coverage test requires that no corpus statement meets one.
+
+**Combine rule.** libpg_query is the authority: (1) one parse of the whole text, an error is
+`ParseError` on every item; (2) its raw statements must be our items (same count, each item
+inside its raw statement's span), else `ParserDisagreement` on every item, plus `MultiStatement`
+when one unit was expected and the parser found several; (3) token-boundary agreement between
+our lexer (the session's modes, the version's profile) and PostgreSQL's scanner on significant
+tokens, else `ParserDisagreement` (`SELECT 0x1F` on a PostgreSQL 14 session is `0 AS x1F` to the
+server and one number to libpg_query); the one equivalence is a `:name` token of ours that the
+scanner reads as `:` and a name (array slices); with `standard_conforming_strings` off any
+backslash in a plain string is a disagreement (libpg_query parses with it on); (4) a server
+newer than PostgreSQL 18 adds `SyntaxNewerThanAgent`. Every `Unknown` outcome carries `UNKNOWN`
+or a doubt reason (Task 4's producer contract); `class == class_of(effects)` always.
+
+**Statement rules beyond the table.** `INTO` anywhere is DDL and a write (`INTO TEMP`:
+`DDL_TEMP`, `WRITE_TEMP`; `CREATE TEMP TABLE/SEQUENCE/VIEW` likewise `DDL_TEMP`). A data change
+inside a CTE adds `DataModifyingCte`. `EXPLAIN`: any `analyze`/`analyse` option that is not
+plainly false (`false`, `off`, `0`) is `EXPLAIN_ANALYZE` (`yes`, which PostgreSQL rejects,
+counts as true); the inner statement's effects count with or without it (S-08: `EXPLAIN
+(ANALYZE off) DELETE` is a write). `COPY`: from is a write, to a read, a server file
+`EXTERNAL_IO`, a program `PROCESS_EXEC`, a query its own effects (S-12, export only through the
+export API, is the policy's, not the effects'). Two-phase commit (`PREPARE TRANSACTION`,
+`COMMIT/ROLLBACK PREPARED`) adds `WRITE_DATA | ADMIN`. `DECLARE … WITH HOLD` is session state.
+Departures toward caution: `CREATE/ALTER SUBSCRIPTION` and `IMPORT FOREIGN SCHEMA` also
+`EXTERNAL_IO`; `ALTER ROLE … SET` and `DROP OWNED` also `PRIVILEGE`.
+
+**`SET` (Task 4's producer contract).** A top-level `SET`/`RESET` gives one `SetTarget` per
+variable, named as the server resolved it (`SET TIME ZONE` is `timezone`, `SET NAMES`
+`client_encoding`, `SET SCHEMA` `search_path`), with its value as written (the text from the
+first argument to the statement's end, trimmed; `None` for `DEFAULT`, `FROM CURRENT`, `RESET`
+and the multi-word forms), and one `SessionState` reason whose argument is that name. `RESET
+ALL` has no target. `role` and `session_authorization` add `PRIVILEGE` and `PrivilegeChange`
+(denied in every profile); `standard_conforming_strings`, `client_encoding` and
+`backslash_quote` add `LEX_MODE_CHANGE`. `SET search_path` reports its value faithfully and the
+allowlist decides (P-M3b-T3-1). `set_config` is denied by name (`SetConfig`: `SESSION_STATE |
+ADMIN`, case 8), its literal name gets the same variable rules, and a non-literal name is
+`UNKNOWN`.
+
+**Functions, operators, casts (SAFE-03 through Task 3's data).** The raw tree holds names as
+the server resolved them, so each part is looked up exactly (`quoted = true` to `lookup_fn`:
+folding again would make a quoted `"Lower"` read as `lower`). Order: the deny list by bare name
+(`FnDenylisted` plus the group's effects: `Sleep` stays `READ`, file and network `EXTERNAL_IO`,
+`dblink*` also `DYNAMIC_SQL`, admin and replication `ADMIN`, large objects `WRITE_DATA`, dynamic
+SQL `UNKNOWN`, advisory locks, sequences and XIDs their bits); then Task 3's reviewed builtins,
+unqualified or `pg_catalog.`, **written unquoted** (a quoted part, found from the scanner's
+tokens at the call's location, is never taken as a builtin; a name with no place in the text
+counts as quoted unless `pg_catalog` qualifies it); then the profile's allowlist (each entry
+read as a PostgreSQL name and folded; exact part-by-part match; `Confidence::Conservative`);
+then a catalog (`FnLookup::Known { volatile: false, writes: false }` is a conservative read,
+`volatile` sets `VOLATILE_FN` and is `UNKNOWN` (S-04), `writes` adds `WRITE_DATA` and `UNKNOWN`);
+else `UNKNOWN` with `FnUnknown`. `TABLESAMPLE` methods are looked up like functions. Operators
+(`A_Expr`, `SubLink`'s and `ORDER BY … USING`'s) must be `operator_known`, unqualified or
+`OPERATOR(pg_catalog.…)`; `BETWEEN` needs `>=` and `<=`. Casts must be `cast_known`, written
+unquoted (an ASCII capital in the tree's name proves quoting), without `%TYPE`.
+
+**Destructive patterns (SAFE-07)** on statements that run now: `UPDATE`/`DELETE` without
+`WHERE` (`NoWhere`), a `WHERE` that folds to true (`AlwaysTrue`: `1=1`, `TRUE`, `'a'='a'`,
+`NULL IS NULL`, `NOT FALSE`, `x OR 1=1`, `'t'::boolean`, `IS TRUE`), a `USING`/`FROM` join whose
+`WHERE` never names the target (`JoinWithoutOn`; an unqualified column counts as the target's),
+`TRUNCATE`, every `DROP` (`CASCADE` flagged), `ALTER TABLE … DROP COLUMN/CONSTRAINT/ALTER TYPE`,
+`MERGE … THEN DELETE`. Nothing inside a routine body, rule action, prepared statement, view,
+policy, trigger or plain `EXPLAIN` (step 6), though their effects still count. No temp-table
+exemption is configured in M3b (step 4 "when configured"). Targets are the tree's names.
+
+**Not assessed (residual, covered by L4/L5 and the catalog in M4):** implicit casts and
+operators on user types, user-defined subscripting, column defaults, triggers and RLS policies
+that a statement fires, view bodies, and function overloads in later `search_path` schemas.
+
+**Tests.** `sql-oracle-pg/tests/tree.rs`; `sql-safety/tests/pg_backend.rs` (the `alg/13`
+cases 1–21, 33, 34 with their read-only decisions, CVE T12 shapes, UNSAFE-01..10, combine rule,
+hostile inputs: comment tricks, `$$` bodies, `DO`, `EXPLAIN ANALYZE <write>`, data-modifying
+CTEs, `SELECT … INTO`, `COPY … TO PROGRAM`, `CREATE TEMP`, `LOCK`, writing functions in a
+`SELECT`, `CALL`, `PREPARE`/`EXECUTE`, Turkish identifiers) and `tests/pg_coverage.rs`; xtask's
+`gen_pg_visitor` tests. The backend is reached through the hidden `pg_backend_hooks` until Task
+14's `classify` dispatches to it.

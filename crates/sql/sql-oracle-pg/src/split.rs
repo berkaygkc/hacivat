@@ -279,7 +279,8 @@ fn checked_ranges(
 
 /// Runs `run` on the parser thread, after the input checks and the nesting check (module
 /// docs). `run` gets the text and its scan.
-fn guarded<T, F>(sql: &str, run: F) -> Result<T, PgError>
+// ## m3b-t09-pg-backend (named exception): crate-visible so `tree.rs` passes the same guard.
+pub(crate) fn guarded<T, F>(sql: &str, run: F) -> Result<T, PgError>
 where
     T: Send + 'static,
     F: FnOnce(&str, &Scanned) -> Result<T, PgError> + Send + 'static,
