@@ -32,7 +32,7 @@ use tokio::sync::oneshot;
 
 use crate::explain_wrap::{explain_analyze_inner, wrap_allowed};
 use crate::implicit_commit::{
-    atoms, commits, engine_commits_implicitly, mentions_write, temporary_table,
+    atoms, commits, engine_commits_implicitly, mentions_write, raw_words, temporary_table,
 };
 use crate::params::PreparedUnit;
 use crate::sqlctx::dialect_id;
@@ -315,10 +315,10 @@ fn admin_row_allows(class: GateClass) -> bool {
     }
 }
 
-/// The session-level effects a unit of unknown effects may have: every bit but `DDL` (which
-/// says the unit is a DDL statement; the gate does not know that it is).
+/// The session-level effects a unit of unknown effects may have: every bit but `DDL` and
+/// `COMMITS_FIRST` (which say what the statement is; the gate does not know).
 fn unknown_effects() -> SessionEffects {
-    SessionEffects::all().difference(SessionEffects::DDL)
+    SessionEffects::all().difference(SessionEffects::DDL | SessionEffects::COMMITS_FIRST)
 }
 
 /// Whether `s` is a DDL statement: its effects, kind, class field, gate class or destructive
@@ -346,12 +346,12 @@ fn is_ddl(s: &StmtReport) -> bool {
 /// mapping from a report to `SessionEffects` (fix round 1, M8): the classifier pool's
 /// `StatementClassifier::effects` (Task 14) delegates here.
 ///
-/// `DDL` means "commits an open transaction first" on MySQL/MariaDB/TiDB: every statement of
-/// [`crate::implicit_commit`]'s list (DDL but `CREATE`/`DROP TEMPORARY TABLE`, privileges,
-/// `BEGIN`, `LOCK TABLES`, `SET autocommit = 1`, `FLUSH`, …; I5, M3), so the session's T19
-/// backstop reuses that list through this bit. On every other engine it is set for every DDL
-/// statement. A report with no statements has every bit but `DDL`, plus `DDL` when its words
-/// are on the list.
+/// `DDL` is set for every DDL statement on every engine (temporary-table DDL included).
+/// `COMMITS_FIRST` (fix round 2, R1-I1) is set on MySQL/MariaDB/TiDB for exactly the statements
+/// of [`crate::implicit_commit`]'s list (DDL but `CREATE`/`DROP TEMPORARY TABLE`, privileges,
+/// `BEGIN`, `LOCK TABLES`, `SET autocommit = 1`, `FLUSH`, `LOAD DATA`, …), so the session's T19
+/// backstop reuses that list through it. A report with no statements has every bit but those
+/// two, plus `COMMITS_FIRST` when its words are on the list.
 pub fn session_effects_of(report: &SafetyReport, text: &str, engine: DbmsKind) -> SessionEffects {
     let mysql = commits_on_ddl(engine);
     let d = dialect_for(report, engine);
@@ -359,7 +359,7 @@ pub fn session_effects_of(report: &SafetyReport, text: &str, engine: DbmsKind) -
         let commits_first = mysql && commits(&atoms(text, d));
         return unknown_effects()
             | if commits_first {
-                SessionEffects::DDL
+                SessionEffects::COMMITS_FIRST
             } else {
                 SessionEffects::empty()
             };
@@ -396,13 +396,12 @@ pub fn session_effects_of(report: &SafetyReport, text: &str, engine: DbmsKind) -
         }
         let privilege = e.contains(EffectSet::PRIVILEGE)
             || matches!(s.kind, StmtKind::Grant | StmtKind::Revoke);
-        let ddl = if mysql {
-            commits(&words) || privilege || (is_ddl(s) && !temporary_table(&words))
-        } else {
-            is_ddl(s)
-        };
-        if ddl {
+        if is_ddl(s) {
             out |= SessionEffects::DDL;
+        }
+        let commits_first = commits(&words) || privilege || (is_ddl(s) && !temporary_table(&words));
+        if mysql && commits_first {
+            out |= SessionEffects::COMMITS_FIRST;
         }
     }
     out
@@ -710,6 +709,15 @@ fn drop_database_name(stmt: &str, d: DialectId) -> Option<Option<Arc<str>>> {
         }
         end = i;
     }
+    // Fix round 2 (R1-M3): a list (`DROP SCHEMA a, b`) drops more than one name; typing one
+    // must not approve the others, so no single name is read.
+    let after = code
+        .iter()
+        .position(|&i| i == end)
+        .and_then(|j| code.get(j + 1));
+    if after.is_some_and(|&i| lexed.kind(i) == TokenKind::Comma) {
+        return Some(None);
+    }
     let range = TextRange::new(lexed.range(first).start(), lexed.range(end).end());
     Some(
         slice(stmt, range)
@@ -789,7 +797,7 @@ fn gate_unit(
     }
     let production = conn.env == Some(EnvTag::Production);
     let mysql = commits_on_ddl(conn.engine);
-    let commits_first = mysql && effects.contains(SessionEffects::DDL);
+    let commits_first = mysql && effects.contains(SessionEffects::COMMITS_FIRST);
     let implicit_commit = commits_first && tx_open(conn);
 
     // 2b. Fix round 1 (I1): a report that analysed nothing (pre-decided, or no statement).
@@ -809,7 +817,10 @@ fn gate_unit(
                 .unwrap_or_else(|| GateReason::of(NOT_ANALYSED));
             return deny(GateClass::Unknown, reason);
         }
-        let writes = mentions_write(&atoms(text, dialect_for(report, conn.engine)));
+        // Fix round 2 (R1-M1): the raw words of the whole text, strings and comments included,
+        // so a lexing-mode difference (`NO_BACKSLASH_ESCAPES`, `ANSI_QUOTES`) cannot hide a
+        // write inside what the default lexer reads as a string.
+        let writes = mentions_write(&raw_words(text));
         let decision = if writes || implicit_commit {
             let mut reasons = vec![GateReason::of(NOT_ANALYSED)];
             if implicit_commit {

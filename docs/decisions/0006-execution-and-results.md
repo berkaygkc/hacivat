@@ -633,3 +633,18 @@ wired into Run before Task 24 (R-M3-52).
     `DdlDestructive`, `Admin`, `Routine` or `Unknown` units (`Routine` added because R-M3-55
     treats it as `Unknown`); a unit of several statements with a write is never suppressible;
     the key (`GateItem.fingerprint`) mixes the fingerprint with the class.
+- **Fix round 2.**
+  - *Two bits (R1-I1, controller ruling).* `SessionEffects::COMMITS_FIRST = 128` (named
+    exception in `hacivat-session` `verdict.rs`) is set on MySQL/MariaDB/TiDB for exactly the
+    statements of `implicit_commit::commits` (plus privilege statements and DDL other than
+    `CREATE`/`DROP TEMPORARY TABLE`); the gate's implicit-commit rule and T19's backstop key on
+    it. `DDL` means "a DDL statement" again on every engine, temporary-table DDL included, so
+    T16's "schema change" reading holds (`LOAD DATA` keeps its row count). The round-1 bullet
+    that put the list into `DDL` is superseded.
+  - *Raw words (R1-M1).* An unanalysed report's scan reads every ASCII word of the text, strings
+    and comments included, so a lexing-mode difference (`NO_BACKSLASH_ESCAPES`) cannot hide a
+    write; over-counting asks more, never less. Added keywords (R1-M2): `COMMENT`, `NOTIFY`,
+    `XA`, `BINLOG`, `RESTART`, `CLONE`, `ANALYZE`, and `SET GLOBAL`/`PERSIST`/`PERSIST_ONLY`/
+    `@@global.`.
+  - *Listed schemas (R1-M3).* `DROP SCHEMA a, b` read from the words names no single name, so it
+    is denied on production (`exec-unsafe-no-target`).

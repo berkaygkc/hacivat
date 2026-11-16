@@ -1,8 +1,9 @@
 // ## m3b-t15-gate (fix round 1, I5)
 //! Statements that make MySQL, MariaDB and TiDB commit an open transaction before they run,
 //! read from the statement's words. This is the one list the gate uses; the session's T19
-//! backstop (`TxError::ImplicitCommitUnconfirmed`) reuses it through `SessionEffects::DDL`,
-//! which the gate sets for exactly these statements on those engines.
+//! backstop (`TxError::ImplicitCommitUnconfirmed`) reuses it through
+//! `SessionEffects::COMMITS_FIRST` (fix round 2), which the gate sets for exactly these
+//! statements on those engines.
 //!
 //! Sources: MySQL 8.4 Reference Manual §15.3.3 "Statements That Cause an Implicit Commit"
 //! (also 8.0 §13.3.3); MariaDB Knowledge Base "SQL statements That Cause an Implicit Commit".
@@ -71,6 +72,12 @@ fn exec_body(token: &str) -> &str {
         .or_else(|| t.strip_prefix("/*!"))
         .unwrap_or(t);
     t.trim_start_matches(|c: char| c.is_ascii_digit())
+}
+
+/// Every word of `text` (ASCII letters, digits, `_`, `@`, `.`), uppercased: strings and
+/// comments included (fix round 2, R1-M1).
+pub(crate) fn raw_words(text: &str) -> Vec<String> {
+    words(text)
 }
 
 /// Every word of `text` (ASCII letters, digits, `_`, `@`, `.`), uppercased.
@@ -193,9 +200,24 @@ const WRITE_WORDS: &[&str] = &[
     "REASSIGN",
     "SECURITY",
     "PREPARE",
+    // ## m3b-t15-gate (fix round 2, R1-M2)
+    "COMMENT",
+    "NOTIFY",
+    "XA",
+    "BINLOG",
+    "RESTART",
+    "CLONE",
+    "ANALYZE",
 ];
 
-/// Whether `atoms` hold a word of [`WRITE_WORDS`] anywhere.
+/// Whether `atoms` hold a word of [`WRITE_WORDS`] anywhere, or a `SET` of a global or persisted
+/// variable (`SET GLOBAL`, `SET PERSIST`, `SET PERSIST_ONLY`, `SET @@global.x`; R1-M2).
 pub(crate) fn mentions_write(atoms: &[String]) -> bool {
-    atoms.iter().any(|a| WRITE_WORDS.contains(&a.as_str()))
+    let set_global = atoms.iter().any(|a| a == "SET")
+        && atoms.iter().any(|a| {
+            matches!(a.as_str(), "GLOBAL" | "PERSIST" | "PERSIST_ONLY")
+                || a.starts_with("@@GLOBAL")
+                || a.starts_with("@@PERSIST")
+        });
+    set_global || atoms.iter().any(|a| WRITE_WORDS.contains(&a.as_str()))
 }

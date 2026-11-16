@@ -536,7 +536,7 @@ fn mysql_ddl_with_open_manual_tx_confirms_implicit_commit() {
                 other => panic!("{engine:?} {s}: {other:?}"),
             }
             assert_eq!(item.verdict, UnitVerdict::ImplicitCommit, "{s}");
-            assert!(item.effects.contains(SessionEffects::DDL), "{s}");
+            assert!(item.effects.contains(SessionEffects::COMMITS_FIRST), "{s}");
         }
     }
     // A user transaction in Auto mode counts as open too; an idle Auto session does not.
@@ -1359,6 +1359,7 @@ fn routine_is_unknown_with_unknown_effects() {
                 | SessionEffects::PREPARE
         ));
         assert!(!item.effects.contains(SessionEffects::DDL));
+        assert!(!item.effects.contains(SessionEffects::COMMITS_FIRST));
     }
 }
 
@@ -1386,7 +1387,14 @@ fn effects_map_to_session_effects() {
     );
     assert!(e("LOCK TABLES t WRITE", mysql(EnvTag::Dev)).contains(SessionEffects::LOCK_TABLES));
     assert!(!e("LOCK TABLE t", conn_dev()).contains(SessionEffects::LOCK_TABLES));
-    assert!(e("GRANT SELECT ON t TO bob", mysql(EnvTag::Dev)).contains(SessionEffects::DDL));
+    // Fix round 2 (R1-I1): `DDL` is "a DDL statement"; `COMMITS_FIRST` is MySQL's implicit commit.
+    let grant = e("GRANT SELECT ON t TO bob", mysql(EnvTag::Dev));
+    assert!(grant.contains(SessionEffects::COMMITS_FIRST) && !grant.contains(SessionEffects::DDL));
+    assert!(!e("GRANT SELECT ON t TO bob", conn_dev()).contains(SessionEffects::COMMITS_FIRST));
+    let create = e("CREATE TABLE x (a int)", conn_dev());
+    assert!(
+        create.contains(SessionEffects::DDL) && !create.contains(SessionEffects::COMMITS_FIRST)
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1848,7 +1856,7 @@ fn mysql_rows_over_the_real_backend() {
                 item.decision
             );
             assert!(
-                item.effects.contains(SessionEffects::DDL),
+                item.effects.contains(SessionEffects::COMMITS_FIRST),
                 "{engine:?} {text}"
             );
             assert!(
@@ -1871,10 +1879,26 @@ fn mysql_rows_over_the_real_backend() {
                 "{engine:?} {text}"
             );
             assert!(
-                !item.effects.contains(SessionEffects::DDL),
+                !item.effects.contains(SessionEffects::COMMITS_FIRST),
+                "{engine:?} {text}"
+            );
+            // Temporary-table DDL is still DDL (R1-I1), just no implicit commit.
+            let ddl = text.contains("TEMPORARY");
+            assert_eq!(
+                item.effects.contains(SessionEffects::DDL),
+                ddl,
                 "{engine:?} {text}"
             );
         }
+        // `LOAD DATA` commits first on MySQL (some engines) but is no DDL (R1-I1: T16 reads
+        // `DDL` as "schema change" and must keep its row count).
+        let item = run("LOAD DATA INFILE '/tmp/x' INTO TABLE t", &manual);
+        assert!(
+            item.effects.contains(SessionEffects::COMMITS_FIRST),
+            "{engine:?}"
+        );
+        assert!(!item.effects.contains(SessionEffects::DDL), "{engine:?}");
+        assert_eq!(item.verdict, UnitVerdict::ImplicitCommit, "{engine:?}");
         // An idle Auto session has nothing to commit.
         let idle = conn(engine, Some(EnvTag::Dev));
         assert_ne!(run("BEGIN", &idle).verdict, UnitVerdict::ImplicitCommit);
@@ -1906,4 +1930,79 @@ fn gate_end_to_end_over_real_classify() {
         let item = one(unit, report, &conn_prod());
         assert_eq!(shape(&item.decision), want, "{sql}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 2
+
+/// R1-M1 and R1-M2: an unanalysed report's scan reads the raw words of the whole text, so a
+/// write the default lexer reads as a string (MySQL `NO_BACKSLASH_ESCAPES`) still asks, and the
+/// added administrative and write keywords ask; a dump's session `SET`s still run.
+#[test]
+fn unanalysed_scan_reads_raw_words() {
+    let pre = |engine: DbmsKind, text: &str| {
+        let unit = prepared_on(engine, text, &[]);
+        let mut r = fake_classify(text, dialect_of(engine));
+        r.items.clear();
+        r.pre_decision = Some(vec![reason(ReasonCode::LexError, None)]);
+        one(unit, r, &conn(engine, Some(EnvTag::Dev))).decision
+    };
+    let asks = |d: &GateDecision| {
+        matches!(
+            d,
+            GateDecision::Confirm {
+                suppressible: false,
+                ..
+            }
+        )
+    };
+    // Under NO_BACKSLASH_ESCAPES the server reads `'a\'` as a whole string and runs the DELETE.
+    assert!(asks(&pre(
+        DbmsKind::MySql,
+        r"SELECT 'a\'; DELETE FROM t; -- '"
+    )));
+    for text in [
+        "COMMENT ON TABLE t IS 'x'",
+        "NOTIFY ch",
+        "ANALYZE t",
+        "CLUSTER t",
+        "RESTART",
+    ] {
+        assert!(asks(&pre(DbmsKind::Postgres, text)), "{text}");
+    }
+    for text in [
+        "XA START 'x'",
+        "BINLOG 'abc'",
+        "CLONE LOCAL DATA DIRECTORY = '/tmp/x'",
+        "SET GLOBAL max_connections = 1",
+        "SET PERSIST max_connections = 1",
+        "SET PERSIST_ONLY max_connections = 1",
+        "SET @@global.max_connections = 1",
+    ] {
+        assert!(asks(&pre(DbmsKind::MySql, text)), "{text}");
+    }
+    for text in [
+        "/*!40101 SET NAMES utf8 */",
+        "/*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */",
+        "SELECT @@global.version",
+    ] {
+        assert_eq!(pre(DbmsKind::MySql, text), GateDecision::Run, "{text}");
+    }
+}
+
+/// R1-M3: a comma-listed `DROP SCHEMA`/`DROP DATABASE` read from the words names no single
+/// name to type, so it is denied on production.
+#[test]
+fn a_listed_drop_schema_from_the_words_is_denied() {
+    let bare = stmt(StmtKind::Drop, EffectSet::DDL);
+    for text in ["DROP SCHEMA a, b", "DROP SCHEMA IF EXISTS a , b CASCADE"] {
+        let item = gated(text, vec![bare.clone()], &conn_prod());
+        assert_eq!(deny_id(&item.decision), "exec-unsafe-no-target", "{text}");
+    }
+    // One name still asks to type it.
+    let item = gated("DROP SCHEMA a CASCADE", vec![bare], &conn_prod());
+    assert!(matches!(
+        &item.decision,
+        GateDecision::Confirm { type_to_confirm: Some(t), .. } if &**t == "a"
+    ));
 }
