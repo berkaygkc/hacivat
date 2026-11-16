@@ -31,6 +31,13 @@
 //! behind it, and the actor calls [`RunGate::close`]: a choice question waiting now is answered
 //! `Stop`, and so is any the request asks after it. `run_one` sets the flag again at the start
 //! of each request from the closes already queued ([`RunGate::set_closing`]).
+//!
+//! ## m3b-t19-confirm-tx
+//! **A close answers a commit question `RollBack`** (D-014, P-M3b-12): a confirmed statement
+//! waiting for Commit/Roll back (Keep/Undo) when the session is closed is rolled back (Hacivat's
+//! own transaction) or undone (the savepoint form), never committed; a commit question asked
+//! after the close is answered the same way at once. The run then sends the rollback, and the
+//! close follows it: Hacivat's own transaction never refuses a close.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -40,7 +47,6 @@ use crate::session::{CommitAnswer, RunChoice, UnitId};
 
 /// What a run asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(not(test), allow(dead_code, reason = "Task 19 asks for commits"))]
 pub(crate) enum Ask {
     /// A unit failed under the `Ask` policy (Task 11).
     Choice,
@@ -94,7 +100,6 @@ impl RunGate {
     /// A run of request `run_seq` starts waiting for an answer about `unit`; any earlier
     /// question (and an answer it was never given) is gone. Returns the new question's id,
     /// which the run's event carries.
-    #[cfg_attr(not(test), allow(dead_code, reason = "Task 19 asks for commits"))]
     pub(crate) fn ask(&self, kind: Ask, run_seq: u64, unit: UnitId) -> u64 {
         self.ask_with(kind, run_seq, unit, false)
     }
@@ -113,9 +118,10 @@ impl RunGate {
         // ## m3b-t11-session-runs
         slot.failed_tx = failed_tx;
         // A close that came first answers a choice at once (the module docs).
-        if kind == Ask::Choice && slot.closing {
+        // ## m3b-t19-confirm-tx: and a commit question `RollBack`.
+        if slot.closing {
             slot.pending = None;
-            slot.answer = Some(Answer::Choice(RunChoice::Stop));
+            slot.answer = Some(on_close(kind));
             drop(slot);
             self.notify.notify_one();
         }
@@ -131,18 +137,19 @@ impl RunGate {
     }
 
     /// A close of the session waits behind the running request: a choice question waiting
-    /// now is answered `Stop`, and so is any the request asks later (the module docs).
+    /// now is answered `Stop`, and so is any the request asks later (the module docs); a
+    /// commit question `RollBack` (m3b-t19).
     pub(crate) fn close(&self) {
         let filled = {
             let mut slot = self.lock();
             slot.closing = true;
             match slot.pending {
-                Some(p) if p.kind == Ask::Choice => {
+                Some(p) => {
                     slot.pending = None;
-                    slot.answer = Some(Answer::Choice(RunChoice::Stop));
+                    slot.answer = Some(on_close(p.kind));
                     true
                 }
-                _ => false,
+                None => false,
             }
         };
         if filled {
@@ -169,7 +176,7 @@ impl RunGate {
     }
 
     /// The question waiting now.
-    #[cfg_attr(not(test), allow(dead_code, reason = "Tasks 11 and 19 read it"))]
+    #[cfg_attr(not(test), allow(dead_code, reason = "the tests read it"))]
     pub(crate) fn pending(&self) -> Option<Pending> {
         self.lock().pending
     }
@@ -248,6 +255,16 @@ impl RunGate {
     }
 }
 
+// ## m3b-t19-confirm-tx
+/// What a close answers a question of `kind` (the module docs): `Stop` a choice, `RollBack` a
+/// commit (D-014: a close never commits).
+fn on_close(kind: Ask) -> Answer {
+    match kind {
+        Ask::Choice => Answer::Choice(RunChoice::Stop),
+        Ask::Commit => Answer::Commit(CommitAnswer::RollBack),
+    }
+}
+
 // ## m3b-t11-session-runs
 /// Whether `choice` answers a choice question asked inside a failed PostgreSQL transaction
 /// (`failed_tx`) or outside one (R-M3-61, P-M3b-19; the module docs).
@@ -291,8 +308,10 @@ mod tests {
         assert!(gate.choose(7, q, RunChoice::Ignore));
     }
 
-    /// A close answers the waiting choice `Stop`, and any the request asks after it; a commit
-    /// question is left to Task 19.
+    /// A close answers the waiting choice `Stop`, and any the request asks after it.
+    // ## m3b-t19-confirm-tx (named exception: the T1c/T11 test said "a commit question is left
+    // to Task 19"): a commit question asked after the close is answered `RollBack` at once, and
+    // a user's later `Commit` is refused.
     #[tokio::test]
     async fn a_close_answers_a_choice_stop() {
         let gate = RunGate::default();
@@ -304,12 +323,30 @@ mod tests {
         let _ = gate.ask_choice(7, unit(2), true);
         assert_eq!(gate.answered().await, Answer::Choice(RunChoice::Stop));
         let c = gate.ask(Ask::Commit, 7, unit(3));
-        assert_eq!(gate.take_answer(), None);
-        assert!(gate.commit(7, unit(3), c, CommitAnswer::RollBack));
+        assert_eq!(
+            gate.answered().await,
+            Answer::Commit(CommitAnswer::RollBack)
+        );
+        assert!(!gate.commit(7, unit(3), c, CommitAnswer::Commit));
         // The next request starts without a close behind it.
         gate.set_closing(false);
         let _ = gate.ask_choice(8, unit(1), false);
         assert_eq!(gate.take_answer(), None);
+    }
+
+    // ## m3b-t19-confirm-tx
+    /// A close while a commit question waits answers it `RollBack`; the user's `Commit` that
+    /// arrives after the close is refused (D-014: a close never commits).
+    #[tokio::test]
+    async fn a_close_rolls_back_a_waiting_commit_question() {
+        let gate = RunGate::default();
+        let c = gate.ask(Ask::Commit, 7, unit(1));
+        gate.close();
+        assert!(!gate.commit(7, unit(1), c, CommitAnswer::Commit));
+        assert_eq!(
+            gate.answered().await,
+            Answer::Commit(CommitAnswer::RollBack)
+        );
     }
 
     fn unit(ordinal: u32) -> UnitId {

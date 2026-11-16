@@ -281,14 +281,11 @@ pub(crate) fn spawn_supervised(
     let (initial_mode, initial_isolation) = if read_only {
         (TxMode::Auto, IsolationLevel::Default)
     } else {
-        // Smart needs the classifier (M3); until then it starts as the safer Manual.
-        let mode = match profile
+        // ## m3b-t19-confirm-tx (C2): a profile's Smart mode starts as Smart (`smart.rs`); it
+        // started as the safer Manual until Task 19.
+        let mode = profile
             .tx_mode
-            .unwrap_or_else(|| default_mode(profile.environment))
-        {
-            TxMode::Smart => TxMode::Manual,
-            mode => mode,
-        };
+            .unwrap_or_else(|| default_mode(profile.environment));
         (mode, profile.isolation.unwrap_or_default())
     };
     let mut tx = TxState {
@@ -513,7 +510,8 @@ impl Core {
     /// implicit transaction, and a reconnect would silently turn it back on. The server's flag
     /// decides when the driver reports it, else the statements seen. Never in the app's own
     /// Manual mode, which sets it itself and replays it.
-    fn users_autocommit_off(&self) -> bool {
+    // ## m3b-t19-confirm-tx (named exception: crate-visible for `confirm::tx_open_now`).
+    pub(crate) fn users_autocommit_off(&self) -> bool {
         family(self.kind) == Family::MySql
             && self.tx.mode != TxMode::Manual
             && self.server_autocommit.map_or(self.autocommit_off, |on| !on)
@@ -743,6 +741,17 @@ impl Core {
                     self.control(&statement).await?;
                 }
             }
+            // ## m3b-t19-confirm-tx (named exception, C2): a user statement of a Smart session
+            // carries no verdict, so Smart opens the user's transaction before it (`smart.rs`).
+            if origin == ExecOrigin::User
+                && self.tx.mode == TxMode::Smart
+                && !self.tx_open_now()
+                && !control
+            {
+                for statement in self.smart_begin(&keyword) {
+                    self.control(&statement).await?;
+                }
+            }
             // ## m2b-t17-liveness (fix round 4, I9): a user's "autocommit off" counts whatever
             // happens next (it errs toward "off").
             if origin == ExecOrigin::User
@@ -826,13 +835,14 @@ impl Core {
                     };
                 }
                 match mode {
-                    TxMode::Smart => return Err(tx_error(TxError::NeedsClassifier)),
                     TxMode::Manual => {
                         if self.tx.mode != TxMode::Manual && mysql {
                             self.control("SET autocommit = 0").await?;
                         }
                     }
-                    TxMode::Auto => {
+                    // ## m3b-t19-confirm-tx (C2): Smart is accepted like Auto (`smart.rs`); it
+                    // answered `NeedsClassifier` until Task 19.
+                    TxMode::Auto | TxMode::Smart => {
                         if self.tx.status != TxStatus::Idle {
                             return Err(tx_error(TxError::InProgress));
                         }
@@ -2027,7 +2037,8 @@ fn may_open_tx(request: &Request, mode: TxMode) -> bool {
             sql,
             origin: ExecOrigin::User,
             ..
-        } => mode == TxMode::Manual || touches_tx(sql),
+        // ## m3b-t19-confirm-tx (named exception): Smart begins one first too (C2).
+        } => mode != TxMode::Auto || touches_tx(sql),
         // ## m3a-t01b-seams (fail closed): a run may hold a user `BEGIN` unit, Hacivat's own
         // cursor transaction or a Manual session's `BEGIN`; a resumed cursor runs inside one.
         Request::Run(_) | Request::FetchMore { .. } | Request::FetchAll { .. } => true,

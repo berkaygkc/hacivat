@@ -43,6 +43,18 @@
 //!   the session publishes its transaction state (`Core::publish_tx`; still `Busy`).
 //! - **A cancelled queued run** reports every unit `Cancelled` and `RunEnded` (ledger 318);
 //!   one dropped from the queue for any other reason still never started.
+//!
+//! ## m3b-t19-confirm-tx (ADR 0004 `m3b-t19`)
+//! - **Before anything of a unit is sent** (`Core::refused_before_send`): the implicit-commit
+//!   backstop (a MySQL/MariaDB `COMMITS_FIRST` unit meeting an open transaction its verdict
+//!   did not confirm: `Tx(ImplicitCommitUnconfirmed)`), and a wrapped unit run as one or on a
+//!   read-only session.
+//! - **After a Manual session's `BEGIN`**: Smart's `BEGIN` (`smart.rs`), then the wrap of a
+//!   `TxThenConfirm` or `ExplainAnalyzeRollback` unit, its form chosen from the live state
+//!   (`confirm.rs`, P-M3b-1). A wrapped unit never suspends.
+//! - **After the statement**: `Core::finish_wrap` rolls back what failed, rolls back an
+//!   `EXPLAIN ANALYZE`, or asks Commit/Roll back (Keep/Undo) and waits (D-014). An
+//!   `ImplicitCommit` unit that ended the open transaction is logged.
 
 use std::time::Instant;
 
@@ -59,8 +71,9 @@ use crate::session::{
     RunSummary, RunUnit, TxError, TxMode, TxOwner, UnitEnd, UnitId, needs_schema_reprobe,
 };
 // ## m3b-t01c-core-seams
-use crate::session::confirm;
 use crate::session::verdict::UnitVerdict;
+// ## m3b-t19-confirm-tx
+use crate::session::confirm::{Wrap, WrapKind};
 // ## m3b-t11-session-runs
 use crate::session::actor::ends_failed_tx;
 use crate::session::cursor::MAX_RESULT_SETS;
@@ -404,10 +417,9 @@ impl Core {
         last: bool,
         w: &mut Watch,
     ) -> Ended {
-        // ## m3b-t01c-core-seams (fail closed until the filling tasks): a unit that needs
-        // confirm-in-transaction or the D-062 wrap (Task 19), or carries binds (Task 11), is
-        // refused before anything of it is sent.
-        if let Some(e) = confirm::refused_before_task_19(unit.verdict) {
+        // ## m3b-t19-confirm-tx: the implicit-commit backstop and the wraps' refusals, before
+        // anything of the unit is sent (the Manual `BEGIN` included).
+        if let Some(e) = self.refused_before_send(unit) {
             return Ended::refused(e);
         }
         // ## m3b-t11-session-runs: binds go to the driver with the query (`query_spec`); a
@@ -445,9 +457,30 @@ impl Core {
         if unit.protocol == Protocol::Simple {
             w.overdue = std::time::Duration::ZERO;
         }
-        let ended = self.unit_body(spec, unit, last, &keyword, control, w).await;
+        // ## m3b-t19-confirm-tx: whether a transaction was open before the unit (the implicit
+        // commit's log line), and the wrap the unit runs in, if any.
+        let open_before = self.tx_open_now();
+        let mut wrap = None;
+        let mut ended = self
+            .unit_body(spec, unit, last, &keyword, control, &mut wrap, w)
+            .await;
         w.overdue = overdue;
+        if let Some(wrap) = wrap {
+            ended.outcome = self.finish_wrap(spec, unit, wrap, ended.outcome, w).await;
+        }
         let succeeded = matches!(ended.outcome, UnitEnd::Succeeded { .. });
+        if succeeded
+            && unit.verdict == UnitVerdict::ImplicitCommit
+            && open_before
+            && self.tx.status == TxStatus::Idle
+        {
+            tracing::info!(
+                run = spec.run.0,
+                unit = unit.id.ordinal,
+                notice = "exec-implicit-commit",
+                "the confirmed statement committed the open transaction first (implicit commit)"
+            );
+        }
         // Fix round 1 (review m2): a batch that failed or was stopped partway may have run
         // (and on MySQL committed) its first statements: its bookkeeping errs toward "seen".
         let batch = unit.protocol == Protocol::Simple
@@ -521,6 +554,10 @@ impl Core {
         s
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "crate-private; `run_unit` is its one caller (m3b-t19: the wrap it opens)"
+    )]
     async fn unit_body(
         &mut self,
         spec: &RunSpec,
@@ -528,6 +565,7 @@ impl Core {
         last: bool,
         keyword: &str,
         control: bool,
+        wrap: &mut Option<Wrap>,
         w: &mut Watch,
     ) -> Ended {
         // Advisory (first keyword only): the server refuses anyway.
@@ -606,6 +644,24 @@ impl Core {
                         return Ended::refused(e);
                     }
                 }
+            }
+            // ## m3b-t19-confirm-tx: Smart opens the user's transaction before a unit that is
+            // not a read (C2), then a confirmed statement or an `EXPLAIN ANALYZE` gets its wrap,
+            // its form chosen from the transaction open now (P-M3b-1). A wrapped statement runs
+            // to its end inside the wrap: it never suspends.
+            if self.smart_opens_before(unit, control) {
+                for statement in self.smart_begin(keyword) {
+                    if let Err(e) = self.control(&statement).await {
+                        return Ended::refused(e);
+                    }
+                }
+            }
+            if let Some(kind) = WrapKind::of(unit.verdict) {
+                match self.open_wrap(kind).await {
+                    Ok(opened) => *wrap = Some(opened),
+                    Err(e) => return Ended::refused(e),
+                }
+                suspendable = false;
             }
             // A PostgreSQL portal lives in a transaction block (P5): Hacivat's own in
             // autocommit, a savepoint inside the user's (R-M3-23). A failed transaction takes
