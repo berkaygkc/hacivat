@@ -27,6 +27,10 @@ pub enum CloseReason {
     Cancelled,
     /// The read-only guard found a write (the connection was discarded).
     EnforcementGap,
+    // ## m3b-t01c-core-seams
+    /// The memory budget needed room: a background result kept only its first chunk
+    /// (R-M3-68; Task 8). Re-run brings it back.
+    Evicted,
 }
 
 /// Why a result kept fewer rows than the server sent.
@@ -89,6 +93,14 @@ pub trait ResultSource: Send + Sync + 'static {
     fn close_cursor(&self);
     /// "Fetch more anyway": the store's cap rises to the global budget, then `fetch_all`.
     fn raise_cap(&self);
+    // ## m3b-t01c-core-seams (Task 8 fills them for `StoreSource`)
+    /// Whether "Fetch more anyway" raised this result's cap (R-M3-68).
+    fn cap_raised(&self) -> bool {
+        false
+    }
+    /// The result's tab became visible (or hidden): eviction spares a visible result
+    /// (R-M3-68).
+    fn set_visible(&self, _visible: bool) {}
 }
 
 /// The [`ResultSource`] over a store and its session (Task 7).

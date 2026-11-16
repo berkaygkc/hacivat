@@ -9,6 +9,8 @@
 
 pub mod budget;
 pub mod cursor;
+// ## m3b-t01c-core-seams: background eviction (Task 8).
+pub mod evict;
 #[cfg(feature = "test-support")]
 mod fixture;
 pub mod snapshot;
@@ -21,6 +23,8 @@ pub use cursor::{
     CloseReason, Completeness, CursorInfo, FetchControl, ResultSource, SourceCaps, StoreSource,
     TruncReason,
 };
+// ## m3b-t01c-core-seams
+pub use evict::EvictionRegistry;
 pub use snapshot::StoreSnapshot;
 pub use store::{ResultId, ResultStore};
 pub use window::FetchPolicy;

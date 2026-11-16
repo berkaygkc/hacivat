@@ -104,6 +104,9 @@ use crate::session::cancel::{
 // ## m3a-t18-session-run
 use crate::session::cursor::{OpenCursor, StopSignal};
 use crate::session::{RunSpec, TxOwner};
+// ## m3b-t01c-core-seams
+use crate::session::run_gate::RunGate;
+use crate::session::verdict::StatementClassifier;
 use hacivat_results::{CloseReason, ResultId};
 // ## m2b-t17-liveness
 use crate::session::liveness::{LivenessAction, LivenessPolicy, Supervisor};
@@ -186,12 +189,18 @@ pub fn spawn_session(
     live: LiveConnection,
     hooks: SessionHooks,
 ) -> SessionHandle {
-    spawn_supervised(rt, spec, profile, live, hooks, None, None)
+    spawn_supervised(rt, spec, profile, live, hooks, None, None, None)
 }
 
 // ## m2b-t17-liveness
 /// [`spawn_session`] with `liveness` ticking a [`Supervisor`] (the module docs); `None` never
 /// ticks. `activity` (follow-up F1-b): the profile's shared activity the session reports to.
+/// `classifier` (m3b-t01c, R-M3-83): the read-only guard's classifier (`Core::step0b`);
+/// `None` keeps the M2b/M3a behaviour.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "crate-private; the pool and `spawn_session` call it"
+)]
 pub(crate) fn spawn_supervised(
     rt: &Handle,
     spec: SessionSpec,
@@ -200,6 +209,7 @@ pub(crate) fn spawn_supervised(
     hooks: SessionHooks,
     liveness: Option<LivenessPolicy>,
     activity: Option<Arc<ProfileActivity>>,
+    classifier: Option<Arc<dyn StatementClassifier>>,
 ) -> SessionHandle {
     let read_only = spec.read_only || profile.read_only;
     let kind = live.raw().kind();
@@ -241,6 +251,8 @@ pub(crate) fn spawn_supervised(
         cursor: None,
     };
     let id = next_id();
+    // ## m3b-t01c-core-seams (P-M3b-3): shared by the control side and the running request.
+    let gate = Arc::new(RunGate::default());
     let (commands, receiver) = mpsc::unbounded_channel();
     let state = Arc::new(watch::Sender::new(snapshot));
     let events = broadcast::Sender::new(EVENT_CAPACITY);
@@ -273,6 +285,11 @@ pub(crate) fn spawn_supervised(
         side: hooks.side.clone(),
         stop: Arc::new(StopSignal::default()),
         stray_kill: false,
+        // ## m3b-t01c-core-seams
+        classifier,
+        observed_sql_mode: None,
+        gate: gate.clone(),
+        request_seq: 0,
     };
     let ctl = Ctl {
         id,
@@ -285,6 +302,8 @@ pub(crate) fn spawn_supervised(
         held: None,
         // ## m3a-f1-followups
         profile: activity.map(|activity| ProfileSlot { activity, id }),
+        // ## m3b-t01c-core-seams
+        gate,
     };
     rt.spawn(async move {
         let mut ctl = ctl;
@@ -351,6 +370,21 @@ pub(crate) struct Core {
     /// MySQL: a `KILL QUERY` went out for the open (or just ended) statement and no 1317
     /// answered it yet (`cursor::absorb_kill`).
     pub(crate) stray_kill: bool,
+    // ## m3b-t01c-core-seams
+    /// The read-only guard's classifier (R-M3-83; `step0b`, Task 18); `None`: M2b/M3a's layers
+    /// only.
+    #[allow(dead_code, reason = "Task 18's step 0b reads it")]
+    pub(crate) classifier: Option<Arc<dyn StatementClassifier>>,
+    /// MySQL/MariaDB read-only sessions: the `sql_mode` read once after connect, pinned after
+    /// every reset (P-M3b-33; Task 18 fills it).
+    #[allow(dead_code, reason = "Task 18 fills and reads it")]
+    pub(crate) observed_sql_mode: Option<String>,
+    /// Where a waiting run gets its out-of-band answers (P-M3b-3; Tasks 11 and 19 wait on it).
+    pub(crate) gate: Arc<RunGate>,
+    /// The sequence number of the request being handled (`run_one` sets it): a waiting run's
+    /// question names it (`Pending::run_seq`).
+    #[allow(dead_code, reason = "Tasks 11 and 19 ask with it")]
+    pub(crate) request_seq: u64,
 }
 
 fn not_connected() -> ExecError {
@@ -574,6 +608,12 @@ impl Core {
         let context_probe = matches!(origin, ExecOrigin::Internal { .. })
             && context_probe_sql(self.kind) == Some(sql);
         let mut summary = if self.read_only && !context_probe {
+            // ## m3b-t01c-core-seams (P-M3b-11): step 0b, the injected classifier, before the
+            // guard; user statements only (internal ones are exempt, as today). A stub until
+            // Task 18.
+            if origin == ExecOrigin::User {
+                self.step0b(sql).await?;
+            }
             let replay = self.env_plan().replay();
             let kind = self.kind;
             let ran = guarded(self.conn()?, kind, sql, opts, &replay).await;
@@ -612,7 +652,8 @@ impl Core {
         };
         // ## m2b-t17-liveness: what a reconnect would lose (B19).
         if origin == ExecOrigin::User {
-            track_statement(&mut self.tracked, sql);
+            // ## m3b-t01c-core-seams (P-M3b-11): no verdict on this path.
+            track_statement(&mut self.tracked, sql, None);
             if family(self.kind) == Family::MySql
                 && let Some(on) = autocommit_set(sql)
             {
@@ -847,6 +888,12 @@ type CloseReply = oneshot::Sender<Result<(), CloseRefused>>;
 
 /// What waits its turn: requests and closes, in the order they came (review M2: a close never
 /// jumps ahead of a request queued before it).
+// ## m3b-t01c-core-seams: `RunSpec::confirm_deadline` took `Request` past clippy's size
+// threshold; a session queues a handful of jobs, so boxing each request buys nothing.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a short per-session queue; boxing every request costs more than it saves"
+)]
 enum Job {
     Request(Queued),
     Close(ClosePolicy, CloseReply),
@@ -868,6 +915,9 @@ struct Ctl {
     // ## m3a-f1-followups
     /// The profile's shared activity, for a session its `SessionManager` started.
     profile: Option<ProfileSlot>,
+    // ## m3b-t01c-core-seams
+    /// The slot a waiting run reads its answers from (shared with `Core::gate`, P-M3b-3).
+    gate: Arc<RunGate>,
 }
 
 // ## m3a-f1-followups
@@ -1097,6 +1147,37 @@ impl Ctl {
                 let _ = reply.send(CancelOutcome::AlreadyFinished);
             }
             Command::Close { policy, reply } => self.queue.push_back(Job::Close(policy, reply)),
+            // ## m3b-t01c-core-seams (P-M3b-3): answered at once, never queued.
+            cmd @ (Command::Choose { .. } | Command::CommitDecision { .. }) => self.answer(cmd),
+        }
+    }
+
+    // ## m3b-t01c-core-seams (P-M3b-3)
+    /// Answers a `Choose` or `CommitDecision` through the run gate: `true` when the run it
+    /// names waits for it. Never queued, so it never waits behind the request that asked.
+    fn answer(&self, cmd: Command) {
+        match cmd {
+            Command::Choose {
+                run_seq,
+                question,
+                choice,
+                reply,
+            } => {
+                let _ = reply.send(self.gate.choose(run_seq, question, choice));
+            }
+            Command::CommitDecision {
+                run_seq,
+                unit,
+                question,
+                answer,
+                reply,
+            } => {
+                let _ = reply.send(self.gate.commit(run_seq, unit, question, answer));
+            }
+            Command::Submit { .. }
+            | Command::Cancel { .. }
+            | Command::Escalate { .. }
+            | Command::Close { .. } => {}
         }
     }
 
@@ -1157,6 +1238,10 @@ impl Ctl {
                 }
                 Command::Close { reply, .. } => {
                     let _ = reply.send(Ok(()));
+                }
+                // ## m3b-t01c-core-seams: no run waits any more.
+                Command::Choose { reply, .. } | Command::CommitDecision { reply, .. } => {
+                    let _ = reply.send(false);
                 }
             }
         }
@@ -1293,9 +1378,11 @@ async fn on_tick(core: &mut Core, ctl: &mut Ctl) -> Flow {
     // ## m3a-t18-session-run: Hacivat's own transaction around a cursor is not an idle
     // transaction of the user's (no warning for it, and it does not keep the session from
     // its idle disconnect; the close releases the cursor first).
-    let user_tx = match core.tx.owner {
-        TxOwner::Cursor | TxOwner::Guard => TxStatus::Idle,
-        TxOwner::User | TxOwner::None => core.tx.status,
+    // ## m3b-t01c-core-seams (P-M3b-12): every owner of Hacivat's, Confirm included.
+    let user_tx = if core.tx.owner.is_hacivats() {
+        TxStatus::Idle
+    } else {
+        core.tx.status
     };
     // ## m3a-f1-followups: the profile's other sessions hold the idle disconnect off (F1-b).
     if let Some(p) = &ctl.profile {
@@ -1705,8 +1792,8 @@ async fn recover(
 async fn close(core: &mut Core, ctl: &mut Ctl, policy: ClosePolicy, reply: CloseReply) -> bool {
     // ## m3a-t18-session-run: Hacivat's own transaction around a cursor (or the guard's) is
     // not the user's, so it never refuses a close; a refused close leaves the cursor as it is.
-    let users = core.tx.status != TxStatus::Idle
-        && !matches!(core.tx.owner, TxOwner::Cursor | TxOwner::Guard);
+    // ## m3b-t01c-core-seams (P-M3b-12): every owner of Hacivat's, Confirm included.
+    let users = core.tx.status != TxStatus::Idle && !core.tx.owner.is_hacivats();
     if core.live.is_some() && users && policy == ClosePolicy::RefuseIfOpenTx {
         let _ = reply.send(Err(CloseRefused::OpenTransaction));
         return false;
@@ -1811,6 +1898,10 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
     let since = Instant::now();
     ctl.publish(|s| s.state = SessionState::Busy { req: seq, since });
     let (tx_before, schema_before) = (core.tx.clone(), core.schema.clone());
+    // ## m3b-t01c-core-seams (P-M3b-3): a question of this request names its number; none
+    // outlives it.
+    core.request_seq = seq;
+    core.gate.withdraw();
     let mut prewarm_at =
         (family(core.kind) == Family::MySql).then(|| tokio::time::Instant::now() + SIDE_PREWARM);
 
@@ -1856,6 +1947,9 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
         }
     };
 
+    // ## m3b-t01c-core-seams: a question the request left (a stop, a panic, a deactivate) is
+    // answered `false` from now on.
+    core.gate.withdraw();
     let mut deactivated = None;
     let mut result = match ended {
         Ended::Abandoned => {
@@ -2139,6 +2233,9 @@ impl Ladder {
                 self.climb(ctl, Some(CancelState::Deactivating));
                 return Some(reply);
             }
+            // ## m3b-t01c-core-seams (P-M3b-3): the running request may be the run that waits
+            // for this answer; it is answered now through the gate, never queued behind it.
+            cmd @ (Command::Choose { .. } | Command::CommitDecision { .. }) => ctl.answer(cmd),
             other => ctl.idle_command(other),
         }
         None

@@ -310,16 +310,18 @@ fn run_one(
     let run = RunId(1);
     h.run(RunSpec {
         run,
-        units: vec![RunUnit {
-            id: UnitId { run, ordinal: 0 },
-            sql: sql.into(),
-            protocol: Protocol::Extended,
+        units: vec![RunUnit::plain(
+            UnitId { run, ordinal: 0 },
+            sql.into(),
+            Protocol::Extended,
             suspendable,
-        }]
+        )]
         .into(),
         policy: ErrorPolicy::StopOnError,
         fetch: FetchPolicy::default(),
         observer: ObserverRef(Stores::new()),
+        // ## m3b-t01c-core-seams
+        confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
     })
 }
 

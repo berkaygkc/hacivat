@@ -55,6 +55,8 @@ use crate::test_conn::TestReport;
 // ## m3a-t01b-seams
 use crate::session::{SessionPolicy, effective_read_only};
 use crate::test_conn::test_connection_with_policy;
+// ## m3b-t01c-core-seams
+use crate::session::StatementClassifier;
 
 /// How the bytes travel, as the capsule shows it (HV-CONN-01). Only `Direct` in M2a.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -133,7 +135,10 @@ pub enum LiveState {
 }
 
 /// Manager timings (CONN-04, P15).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// ## m3b-t01c-core-seams: equality and hashing compare `classifier` by pointer (a
+/// `dyn StatementClassifier` has no value equality), as `ObserverRef` does.
+#[derive(Debug, Clone)]
 pub struct ManagerConfig {
     /// How often a live connection is pinged: the keep-alive of every profile without one of
     /// its own, unless `presets` (M2a compatibility).
@@ -154,6 +159,52 @@ pub struct ManagerConfig {
     /// connections (`effective_read_only`). Off in `default()` and `m2b()`; the app's boot
     /// turns it on. M3b removes it when confirmations land.
     pub production_read_only: bool,
+    // ## m3b-t01c-core-seams (R-M3-83, P-M3b-11)
+    /// The classifier every read-only session's step 0b asks (`Core::step0b`, Task 18); the
+    /// app's boot installs `hacivat-exec`'s `ClassifyPool` (Task 18). `None` (the default, and
+    /// `m2b()`) keeps the M2b/M3a behaviour: the guard's layers alone.
+    pub classifier: Option<Arc<dyn StatementClassifier>>,
+}
+
+// ## m3b-t01c-core-seams (review M1)
+/// What equality and hashing compare: every field, the classifier by its address.
+type ConfigKey = (Duration, Duration, bool, bool, bool, Option<*const ()>);
+
+impl ManagerConfig {
+    /// Every field, by value; the classifier by address. The destructuring names each field
+    /// (no `..`), so a field added later is a compile error here until it joins the key.
+    fn key(&self) -> ConfigKey {
+        let Self {
+            liveness,
+            shutdown_budget,
+            presets,
+            reconnect,
+            production_read_only,
+            classifier,
+        } = self;
+        (
+            *liveness,
+            *shutdown_budget,
+            *presets,
+            *reconnect,
+            *production_read_only,
+            classifier.as_ref().map(|c| Arc::as_ptr(c).cast::<()>()),
+        )
+    }
+}
+
+impl PartialEq for ManagerConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+
+impl Eq for ManagerConfig {}
+
+impl std::hash::Hash for ManagerConfig {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key().hash(state);
+    }
 }
 
 impl Default for ManagerConfig {
@@ -166,6 +217,8 @@ impl Default for ManagerConfig {
             presets: false,
             reconnect: false,
             production_read_only: false,
+            // ## m3b-t01c-core-seams
+            classifier: None,
         }
     }
 }
@@ -403,6 +456,8 @@ impl Shared {
         sessions.set_policy(SessionPolicy {
             production_read_only: self.config.production_read_only,
         });
+        // ## m3b-t01c-core-seams (P-M3b-11): the read-only guard's classifier, likewise.
+        sessions.set_classifier(self.config.classifier.clone());
         // ## m2b-t22-live (T17 carry): the gaps of the profile's other sessions (pooled
         // read-only ones) are relayed as the default session's are (Q35).
         let weak = Arc::downgrade(self);

@@ -16,6 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use hacivat_results::CloseReason;
 use hacivat_session::session::{DenyLayer, RunSummary, UnitId};
+// ## m3b-t01c-core-seams
+use hacivat_driver::NoticeSeverity;
 use tokio::sync::watch;
 
 use crate::status::ErrorView;
@@ -91,6 +93,50 @@ pub enum LogMsg {
     /// The run never started (its session answered before running anything: closed, lost);
     /// the view says why. It names no statement.
     NotStarted(ErrorView),
+    // ## m3b-t01c-core-seams (Task 16 and the tasks named per variant write these lines; their
+    // strings come with them)
+    /// A server notice or a MySQL warning (R-M3-77): the text verbatim, never formatted.
+    Notice {
+        severity: NoticeSeverity,
+        code: Option<Arc<str>>,
+        text: Arc<str>,
+    },
+    /// A unit returned more result sets than kept (R-M3-66).
+    ResultSetLimit {
+        total: u32,
+        limit: u32,
+    },
+    /// A MySQL/MariaDB DDL committed the open transaction (confirmed).
+    ImplicitCommit,
+    /// The classifier refused the statement on a read-only console (Task 18).
+    SafetyDenied {
+        class_id: &'static str,
+    },
+    /// The confirmed statement's transaction was committed (Task 19).
+    ConfirmCommitted {
+        rows: Option<u64>,
+    },
+    /// The confirmed statement was rolled back: by the user, by the D-014 deadline, or undone
+    /// in the savepoint form (Task 19).
+    ConfirmRolledBack {
+        by_deadline: bool,
+        savepoint: bool,
+    },
+    /// The confirmed statement failed in the savepoint form: only it was rolled back, the
+    /// user's transaction is intact (P-M3b-5).
+    ConfirmStatementFailed,
+    /// The user skipped `n` statements at the confirmation (R-M3-84).
+    SkippedByUser {
+        n: u32,
+    },
+    /// Statement `n` was retried (R-M3-61).
+    Retried {
+        n: u32,
+    },
+    /// A background result was evicted, keeping `rows` (R-M3-68, Task 8).
+    Evicted {
+        rows: u64,
+    },
 }
 
 /// A message argument. Counts are numbers the app formats in the format locale; a statement
@@ -129,6 +175,23 @@ impl LogMsg {
             LogMsg::Dropped { .. } => "exec-events-dropped",
             LogMsg::CopyUnsupported => "exec-copy-unsupported",
             LogMsg::NotStarted(_) => "exec-not-started",
+            // ## m3b-t01c-core-seams
+            LogMsg::Notice { severity, .. } => notice_id(*severity),
+            LogMsg::ResultSetLimit { .. } => "exec-result-set-limit",
+            LogMsg::ImplicitCommit => "exec-implicit-commit",
+            LogMsg::SafetyDenied { .. } => "exec-deny-classifier",
+            LogMsg::ConfirmCommitted { .. } => "exec-confirm-committed",
+            LogMsg::ConfirmRolledBack {
+                savepoint: true, ..
+            } => "exec-confirm-undone",
+            LogMsg::ConfirmRolledBack {
+                by_deadline: true, ..
+            } => "exec-confirm-rolled-back-deadline",
+            LogMsg::ConfirmRolledBack { .. } => "exec-confirm-rolled-back",
+            LogMsg::ConfirmStatementFailed => "exec-confirm-statement-failed",
+            LogMsg::SkippedByUser { .. } => "exec-skipped-by-user",
+            LogMsg::Retried { .. } => "exec-retried",
+            LogMsg::Evicted { .. } => "cursor-closed-evicted",
         }
     }
 
@@ -183,6 +246,27 @@ impl LogMsg {
             | LogMsg::ReadOnlyDenied(_)
             | LogMsg::CopyUnsupported
             | LogMsg::NotStarted(_) => Vec::new(),
+            // ## m3b-t01c-core-seams: a notice's text is server text (the view shows it in its
+            // own field, verbatim); only its code is an argument.
+            LogMsg::Notice { code, .. } => code
+                .iter()
+                .map(|c| ("code", LogArg::Str(c.clone())))
+                .collect(),
+            LogMsg::ResultSetLimit { total, limit } => vec![
+                ("total", LogArg::U64(u64::from(*total))),
+                ("limit", LogArg::U64(u64::from(*limit))),
+            ],
+            LogMsg::ConfirmCommitted { rows } => {
+                rows.iter().map(|r| ("rows", LogArg::U64(*r))).collect()
+            }
+            LogMsg::SkippedByUser { n } => vec![("n", LogArg::U64(u64::from(*n)))],
+            // A statement number stays raw (ASCII digits, never grouped).
+            LogMsg::Retried { n } => vec![("n", LogArg::Str(n.to_string().into()))],
+            LogMsg::Evicted { rows } => vec![("rows", LogArg::U64(*rows))],
+            LogMsg::ImplicitCommit
+            | LogMsg::SafetyDenied { .. }
+            | LogMsg::ConfirmRolledBack { .. }
+            | LogMsg::ConfirmStatementFailed => Vec::new(),
         }
     }
 
@@ -195,6 +279,21 @@ impl LogMsg {
             | LogMsg::NotStarted(_) => Severity::Error,
             LogMsg::Cancelled { .. } | LogMsg::Dropped { .. } => Severity::Warning,
             LogMsg::CursorClosed { .. } | LogMsg::MoreResultSets { .. } => Severity::Notice,
+            // ## m3b-t01c-core-seams
+            LogMsg::SafetyDenied { .. } | LogMsg::ConfirmStatementFailed => Severity::Error,
+            LogMsg::Notice { severity, .. } => match severity {
+                NoticeSeverity::Warning => Severity::Warning,
+                NoticeSeverity::Debug
+                | NoticeSeverity::Log
+                | NoticeSeverity::Info
+                | NoticeSeverity::Notice => Severity::Notice,
+            },
+            LogMsg::ResultSetLimit { .. }
+            | LogMsg::ImplicitCommit
+            | LogMsg::ConfirmRolledBack { .. }
+            | LogMsg::SkippedByUser { .. }
+            | LogMsg::Evicted { .. } => Severity::Notice,
+            LogMsg::ConfirmCommitted { .. } | LogMsg::Retried { .. } => Severity::Info,
             LogMsg::RowsRetrieved { .. }
             | LogMsg::RowsAffected { .. }
             | LogMsg::Completed { .. }
@@ -229,6 +328,20 @@ fn cursor_closed_id(reason: CloseReason, rolled_back: bool) -> &'static str {
         (CloseReason::Cancelled, true) => "cursor-closed-cancelled-rolled-back",
         (CloseReason::EnforcementGap, false) => "cursor-closed-enforcement-gap",
         (CloseReason::EnforcementGap, true) => "cursor-closed-enforcement-gap-rolled-back",
+        // ## m3b-t01c-core-seams: an evicted result held no cursor of its own to roll back.
+        (CloseReason::Evicted, _) => "cursor-closed-evicted",
+    }
+}
+
+// ## m3b-t01c-core-seams
+/// One `exec-notice-*` message per [`NoticeSeverity`].
+fn notice_id(severity: NoticeSeverity) -> &'static str {
+    match severity {
+        NoticeSeverity::Debug => "exec-notice-debug",
+        NoticeSeverity::Log => "exec-notice-log",
+        NoticeSeverity::Info => "exec-notice-info",
+        NoticeSeverity::Notice => "exec-notice-notice",
+        NoticeSeverity::Warning => "exec-notice-warning",
     }
 }
 
@@ -240,6 +353,8 @@ pub(crate) fn deny_id(layer: DenyLayer) -> &'static str {
         DenyLayer::Transaction => "exec-deny-read-only-transaction",
         DenyLayer::Engine => "exec-deny-read-only-engine",
         DenyLayer::Function => "exec-deny-read-only-function",
+        // ## m3b-t01c-core-seams (Task 18)
+        DenyLayer::Classifier => "exec-deny-read-only-classifier",
     }
 }
 
@@ -311,6 +426,9 @@ struct Ring {
     read_upto: Option<u64>,
     /// Lines that left the ring before a reader saw them, since the last clear.
     unseen_dropped: u64,
+    // ## m3b-t01c-core-seams (review M3)
+    /// The newest `seq` the ring pushed out for room (never one a clear removed).
+    dropped_upto: Option<u64>,
 }
 
 /// A console's output log: a ring of the newest lines.
@@ -362,9 +480,12 @@ impl SessionLog {
             ring.next_seq = ring.next_seq.max(line.seq.saturating_add(1));
             if ring.lines.len() == Self::CAPACITY
                 && let Some(old) = ring.lines.pop_front()
-                && ring.read_upto.is_none_or(|seen| old.seq > seen)
             {
-                ring.unseen_dropped += 1;
+                // ## m3b-t01c-core-seams (review M3): `lines_since`'s gap.
+                ring.dropped_upto = Some(old.seq);
+                if ring.read_upto.is_none_or(|seen| old.seq > seen) {
+                    ring.unseen_dropped += 1;
+                }
             }
             ring.lines.push_back(line);
         }
@@ -396,6 +517,26 @@ impl SessionLog {
             ring.read_upto = Some(last.seq);
         }
         out.into()
+    }
+
+    // ## m3b-t01c-core-seams
+    /// The lines numbered `seq` or later, oldest first, and whether the ring pushed some of
+    /// them out for room before this read (the gap a reader that remembers its next `seq` must
+    /// show; Task 25). Lines a [`clear`](Self::clear) removed are no gap. Marks them read, as
+    /// [`lines`](Self::lines) does; never adds a `Dropped` line.
+    pub fn lines_since(&self, seq: u64) -> (Arc<[LogLine]>, bool) {
+        let mut ring = self.lock();
+        let out: Vec<LogLine> = ring
+            .lines
+            .iter()
+            .filter(|l| l.seq >= seq)
+            .cloned()
+            .collect();
+        let gap = ring.dropped_upto.is_some_and(|dropped| dropped >= seq);
+        if let Some(last) = ring.lines.back() {
+            ring.read_upto = Some(last.seq);
+        }
+        (out.into(), gap)
     }
 
     /// Bumped on every push and clear.

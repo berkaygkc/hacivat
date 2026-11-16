@@ -1497,16 +1497,18 @@ fn open_cursor() -> Step {
             let run = RunId(0xC0FFEE);
             let _ticket = session.run(RunSpec {
                 run,
-                units: vec![RunUnit {
-                    id: UnitId { run, ordinal: 0 },
-                    sql: BIG.into(),
-                    protocol: Protocol::Extended,
-                    suspendable: true,
-                }]
+                units: vec![RunUnit::plain(
+                    UnitId { run, ordinal: 0 },
+                    BIG.into(),
+                    Protocol::Extended,
+                    true,
+                )]
                 .into(),
                 policy: ErrorPolicy::StopOnError,
                 fetch: FetchPolicy::default(),
                 observer: ObserverRef(Arc::new(Stores::default())),
+                // ## m3b-t01c-core-seams
+                confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
             });
         },
         |window, cx| session_in(window, cx).is_some_and(|s| s.state().borrow().cursor.is_some()),

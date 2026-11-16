@@ -210,6 +210,13 @@ impl Bench {
             units,
             fetch,
             log: self.log.clone(),
+            // ## m3b-t01c-core-seams: M3a's run (P-M3b-22).
+            prepared: None,
+            plan: None,
+            policy: hacivat_session::session::ErrorPolicy::StopOnError,
+            run_as_one: false,
+            history: None,
+            confirm: None,
         }
     }
 
@@ -1076,6 +1083,13 @@ pub mod matrix {
                     units,
                     fetch,
                     log: self.log.clone(),
+                    // ## m3b-t01c-core-seams: M3a's run (P-M3b-22).
+                    prepared: None,
+                    plan: None,
+                    policy: hacivat_session::session::ErrorPolicy::StopOnError,
+                    run_as_one: false,
+                    history: None,
+                    confirm: None,
                 },
             )
         }
@@ -1091,6 +1105,13 @@ pub mod matrix {
                     units,
                     fetch,
                     log: self.log.clone(),
+                    // ## m3b-t01c-core-seams: M3a's run (P-M3b-22).
+                    prepared: None,
+                    plan: None,
+                    policy: hacivat_session::session::ErrorPolicy::StopOnError,
+                    run_as_one: false,
+                    history: None,
+                    confirm: None,
                 },
             )
         }

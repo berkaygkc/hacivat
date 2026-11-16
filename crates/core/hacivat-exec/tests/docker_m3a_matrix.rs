@@ -2075,19 +2075,23 @@ async fn dml_and_ddl_report_update_counts_on_a_dev_console() {
             units: units
                 .iter()
                 .enumerate()
-                .map(|(i, u)| RunUnit {
-                    id: UnitId {
-                        run,
-                        ordinal: u32::try_from(i).unwrap(),
-                    },
-                    sql: u.text.clone(),
-                    protocol: Protocol::Extended,
-                    suspendable: u.suspendable,
+                .map(|(i, u)| {
+                    RunUnit::plain(
+                        UnitId {
+                            run,
+                            ordinal: u32::try_from(i).unwrap(),
+                        },
+                        u.text.clone(),
+                        Protocol::Extended,
+                        u.suspendable,
+                    )
                 })
                 .collect(),
             policy: ErrorPolicy::StopOnError,
             fetch: FetchPolicy::default(),
             observer: ObserverRef(tags.clone()),
+            // ## m3b-t01c-core-seams
+            confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
         };
         c.s.run(spec)
             .reply

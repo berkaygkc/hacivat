@@ -2353,14 +2353,16 @@ pub mod runs {
         let units: Vec<RunUnit> = units
             .iter()
             .enumerate()
-            .map(|(i, (sql, suspendable))| RunUnit {
-                id: UnitId {
-                    run,
-                    ordinal: i as u32,
-                },
-                sql: (*sql).into(),
-                protocol: Protocol::Extended,
-                suspendable: *suspendable,
+            .map(|(i, (sql, suspendable))| {
+                RunUnit::plain(
+                    UnitId {
+                        run,
+                        ordinal: i as u32,
+                    },
+                    (*sql).into(),
+                    Protocol::Extended,
+                    *suspendable,
+                )
             })
             .collect();
         RunSpec {
@@ -2369,6 +2371,8 @@ pub mod runs {
             policy: ErrorPolicy::StopOnError,
             fetch,
             observer: ObserverRef(o.clone()),
+            // ## m3b-t01c-core-seams
+            confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
         }
     }
 
