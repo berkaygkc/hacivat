@@ -97,6 +97,61 @@ pub trait StatementClassifier: Send + Sync + fmt::Debug + 'static {
 
     /// The session-level effects of `sql` (C8), `None` when unknown.
     fn effects(&self, kind: DbmsKind, sql: Arc<str>) -> BoxFuture<'static, Option<SessionEffects>>;
+
+    // ## m3b-t18-safe06 (named exception: the plan amendment C2(b)/I1 extends the trait)
+    /// [`StatementClassifier::check_read_only`] in the session's real context (`ctx`: its
+    /// lexing-mode setting, search path and server version, as the read-only guard knows them),
+    /// and whether `sql` may change that context (the guard then reads it again before the
+    /// next check). The read-only guard's step 0b calls this one.
+    ///
+    /// The default ignores `ctx` (the context-free check, unknown modes) and answers that the
+    /// context may have changed.
+    fn check_read_only_in(
+        &self,
+        kind: DbmsKind,
+        sql: Arc<str>,
+        allow: Arc<[Arc<str>]>,
+        ctx: ClassifierContext,
+    ) -> BoxFuture<'static, RoAnswer> {
+        let _ = ctx;
+        let check = self.check_read_only(kind, sql, allow);
+        Box::pin(async move {
+            RoAnswer {
+                check: check.await,
+                changes_context: true,
+            }
+        })
+    }
+}
+
+// ## m3b-t18-safe06 (plan amendment C2(b)/I1)
+/// What the read-only guard knows of the session's context when it asks the classifier
+/// ([`StatementClassifier::check_read_only_in`]): server values, verbatim, never parsed here
+/// (the classifier side reads them as the console's SQL context does).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct ClassifierContext {
+    /// The setting that decides how the server lexes: PostgreSQL
+    /// `standard_conforming_strings` (`on`/`off`), MySQL/MariaDB `sql_mode`. `None`: unknown
+    /// (the classifier then reads the text under every mode, fail-closed).
+    pub lex_modes: Option<Arc<str>>,
+    /// PostgreSQL: the session's search path, one schema per element as the server stores it
+    /// (folded; `$user` literal). `None`: unknown, so an unqualified builtin is unknown too
+    /// (fail-closed). MySQL and MariaDB: the current database, alone (the T20 carry: the
+    /// classifier reads unqualified `performance_schema`/`sys` names by it); `None` when there is
+    /// none or it was not read. SQLite: `None`.
+    pub search_path: Option<Arc<[Arc<str>]>>,
+    /// The server's version as the connect read it.
+    pub server_version: Option<hacivat_driver::SemVerLoose>,
+}
+
+/// The read-only check's answer in context ([`StatementClassifier::check_read_only_in`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RoAnswer {
+    pub check: RoCheck,
+    /// The statement may change how later statements read (the search path, the lexing modes,
+    /// a role, code run from a cursor or prepared statement): the guard reads the context again
+    /// before its next check.
+    pub changes_context: bool,
 }
 
 #[cfg(test)]

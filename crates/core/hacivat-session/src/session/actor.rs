@@ -329,6 +329,8 @@ pub(crate) fn spawn_supervised(
         events: events.clone(),
         next_seq: Arc::new(AtomicU64::new(1)),
     };
+    // ## m3b-t18-safe06 (named exception): the `sql_mode` this session pins (R-M3-57).
+    let observed_sql_mode = crate::session::readonly::observed_sql_mode(read_only, live.raw());
     let core = Core {
         kind,
         profile,
@@ -352,7 +354,9 @@ pub(crate) fn spawn_supervised(
         stray_kill: false,
         // ## m3b-t01c-core-seams
         classifier,
-        observed_sql_mode: None,
+        // ## m3b-t18-safe06 (named exception): filled from the connect's own read (R-M3-57).
+        observed_sql_mode,
+        ro_context: crate::session::readonly::RoContextRead::Connect,
         gate: gate.clone(),
         request_seq: 0,
         // ## m3b-t11-session-runs (fix round 1)
@@ -444,12 +448,15 @@ pub(crate) struct Core {
     // ## m3b-t01c-core-seams
     /// The read-only guard's classifier (R-M3-83; `step0b`, Task 18); `None`: M2b/M3a's layers
     /// only.
-    #[allow(dead_code, reason = "Task 18's step 0b reads it")]
     pub(crate) classifier: Option<Arc<dyn StatementClassifier>>,
     /// MySQL/MariaDB read-only sessions: the `sql_mode` read once after connect, pinned after
     /// every reset (P-M3b-33; Task 18 fills it).
-    #[allow(dead_code, reason = "Task 18 fills and reads it")]
     pub(crate) observed_sql_mode: Option<String>,
+    // ## m3b-t18-safe06 (named exception: one field; plan amendment C2(b)/I1)
+    /// Which session settings the read-only guard's classifier is told
+    /// (`readonly::RoContextRead`): the connect's, or ones read again after a statement that
+    /// may have changed them. A reconnect starts over from the new connection's.
+    pub(crate) ro_context: crate::session::readonly::RoContextRead,
     /// Where a waiting run gets its out-of-band answers (P-M3b-3; Tasks 11 and 19 wait on it).
     pub(crate) gate: Arc<RunGate>,
     /// The sequence number of the request being handled (`run_one` sets it): a waiting run's
@@ -551,13 +558,15 @@ impl Core {
     /// The session's current environment plan (its last schema included).
     pub(crate) fn env_plan(&self) -> EnvPlan {
         // ## m3b-t12-session-carries: with the settings' time zone (C11).
-        build_env_plan_with(
+        let plan = build_env_plan_with(
             self.kind,
             &self.profile,
             self.read_only,
             self.schema.as_ref(),
             self.time_zone.as_deref().and_then(SessionZone::usable),
-        )
+        );
+        // ## m3b-t18-safe06 (named exception): the observed `sql_mode` pinned (R-M3-57).
+        self.pin_observed(plan)
     }
 
     /// Classifies a driver error; a lost connection breaks the session. `sent`: the statement
@@ -944,6 +953,8 @@ impl Core {
         // kill is on its way to it.
         self.holder = TxOwner::User;
         self.stray_kill = false;
+        // ## m3b-t18-safe06 (named exception): the new connection's own context read.
+        self.ro_context = crate::session::readonly::RoContextRead::Connect;
         self.live = Some(live);
         self.broken = None;
         self.last_class = None;

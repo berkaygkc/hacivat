@@ -559,3 +559,8 @@ exec-param-mixed-styles = Gönderilmedi: ifade farklı parametre biçimlerini ka
 exec-param-too-many-binds = Gönderilmedi: ifadede 65.535'ten fazla parametre var.
 # Review: PO
 exec-param-unbindable = Gönderilmedi: ifadede Hacivat'ın dolduramadığı bir parametre işareti var; sunucu ona bir değer alamaz.
+
+## m3b-t18-safe06
+
+# Review: PO
+exec-deny-classifier = Gönderilmedi: bu konsol salt okunur ve Hacivat ifadenin yalnızca okuduğunu doğrulayamadı.

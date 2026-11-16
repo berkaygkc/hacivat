@@ -22,6 +22,8 @@ pub use functions::{
 pub use input::{InputViolation, MAX_STATEMENT_BYTES, check_input};
 pub use label::{access_label, remediation, remediation_for};
 pub use plan::{GuardPlan, ResetKind, plan_for};
+// ## m3b-t18-safe06 (named exception)
+pub use plan::{GuardInputs, pinnable_sql_mode, plan_for_with};
 pub use post::{GapReason, PostCheck, PostFacts, TxStatusLite, check_post};
 pub use probe::{RoleFindings, RoleWarning, interpret_probe, role_probe_sql};
 pub use sqlite::{

@@ -131,6 +131,13 @@ pub(crate) struct TypedState {
     // ## m3b-t07-types (ledger 194)
     /// The session `time_zone` read at connect, which `TIMESTAMP` columns carry.
     pub time_zone: Option<Arc<str>>,
+    // ## m3b-t18-safe06 (named exception; plan amendment C2(b)/I1)
+    /// The session `sql_mode` read at connect in the same round trip
+    /// (`RawConn::session_settings`; the read-only guard classifies and pins with it).
+    pub sql_mode: Option<Arc<str>>,
+    /// The current database (`DATABASE()`) read at connect in the same round trip (the
+    /// classifier's `search_path[0]` on MySQL and MariaDB, the T20 carry); `None` when none.
+    pub database: Option<Arc<str>>,
 }
 
 impl TypedState {
@@ -145,6 +152,9 @@ impl TypedState {
             poisoned: false,
             force_text: false,
             time_zone: None,
+            // ## m3b-t18-safe06
+            sql_mode: None,
+            database: None,
         }
     }
 
@@ -330,11 +340,16 @@ pub(crate) async fn warnings(cx: Ctx<'_>) -> Result<Vec<Notice>, RawError> {
 /// ## m3b-t07-types (ledger 194): the same round trip reads the session `time_zone`
 /// (`SYSTEM`, `+03:00`, a named zone), verbatim; `None` when not text. A server that refuses
 /// the pair is asked for `net_write_timeout` alone, as before (its zone is then `None`).
-pub(crate) async fn read_net_write_timeout(
-    conn: &mut Conn,
-) -> Result<(Option<Duration>, Option<Arc<str>>), RawError> {
+///
+/// ## m3b-t18-safe06 (named exception; plan amendment C2(b)/I1, R-M3-57): and the session
+/// `sql_mode`, verbatim (the third value; `None` when not text or refused), and the current
+/// database (`DATABASE()`, the fourth; `None` for SQL NULL), folded into this round trip rather
+/// than a separate one.
+pub(crate) async fn read_net_write_timeout(conn: &mut Conn) -> Result<ConnectReads, RawError> {
     let row = match conn
-        .query_first::<Row, _>("SELECT @@net_write_timeout, @@session.time_zone")
+        .query_first::<Row, _>(
+            "SELECT @@net_write_timeout, @@session.time_zone, @@session.sql_mode, DATABASE()",
+        )
         .await
     {
         Ok(row) => row,
@@ -344,7 +359,7 @@ pub(crate) async fn read_net_write_timeout(
                 .await
             {
                 Ok(row) => row,
-                Err(mysql_async::Error::Server(_)) => return Ok((None, None)),
+                Err(mysql_async::Error::Server(_)) => return Ok((None, None, None, None)),
                 Err(e) => return Err(raw_error(&e)),
             }
         }
@@ -356,12 +371,24 @@ pub(crate) async fn read_net_write_timeout(
         .and_then(|secs| u64::try_from(secs).ok())
         .filter(|s| *s > 0)
         .map(Duration::from_secs);
-    let zone = row.as_ref().and_then(|r| match r.as_ref(1) {
-        Some(mysql_async::Value::Bytes(b)) => std::str::from_utf8(b).ok().map(Arc::from),
-        _ => None,
-    });
-    Ok((timeout, zone))
+    let text = |i: usize| {
+        row.as_ref().and_then(|r| match r.as_ref(i) {
+            Some(mysql_async::Value::Bytes(b)) => std::str::from_utf8(b).ok().map(Arc::from),
+            _ => None,
+        })
+    };
+    Ok((timeout, text(1), text(2), text(3)))
 }
+
+// ## m3b-t18-safe06
+/// What the connect's setup query reads: `net_write_timeout`, the session `time_zone`, the
+/// session `sql_mode` and the current database.
+pub(crate) type ConnectReads = (
+    Option<Duration>,
+    Option<Arc<str>>,
+    Option<Arc<str>>,
+    Option<Arc<str>>,
+);
 
 /// What the typed path uses of a connection.
 pub(crate) struct Ctx<'a> {

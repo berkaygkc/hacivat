@@ -289,6 +289,29 @@ pub trait RawConn: Send + 'static {
     fn take_notices_dropped(&mut self) -> u32 {
         0
     }
+    // ## m3b-t18-safe06 (named exception; plan amendment C2(b)/I1)
+    /// The session settings this connection read at connect ([`SessionSettings`]), folded into
+    /// a round trip the connect makes anyway where there is one. The read-only guard
+    /// classifies with them (`Core::step0b`). The default read nothing.
+    fn session_settings(&self) -> SessionSettings {
+        SessionSettings::default()
+    }
+}
+
+// ## m3b-t18-safe06 (named exception; plan amendment C2(b)/I1)
+/// What a connection read of its session's settings at connect, verbatim as the server
+/// answered (never parsed here), for the read-only guard's classifier (Task 18). `None`: not
+/// read (the engine has no such setting, the driver does not read it, or the read failed).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct SessionSettings {
+    /// The setting that decides how the server lexes: PostgreSQL `standard_conforming_strings`
+    /// (`on`/`off`, from the startup `ParameterStatus`), MySQL and MariaDB `@@SESSION.sql_mode`
+    /// (from the connect's own `SELECT @@net_write_timeout, …` round trip).
+    pub lex_modes: Option<Arc<str>>,
+    /// PostgreSQL: the `search_path` setting as `current_setting('search_path')` shows it,
+    /// read at connect on a read-only connection only. MySQL and MariaDB: the current database
+    /// (`DATABASE()`, in the same round trip as `sql_mode`; `None` when there is none).
+    pub search_path: Option<Arc<str>>,
 }
 
 // ## m3a-t01b-seams

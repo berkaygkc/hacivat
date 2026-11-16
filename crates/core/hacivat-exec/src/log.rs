@@ -396,7 +396,10 @@ pub(crate) fn deny_id(layer: DenyLayer) -> &'static str {
         DenyLayer::Engine => "exec-deny-read-only-engine",
         DenyLayer::Function => "exec-deny-read-only-function",
         // ## m3b-t01c-core-seams (Task 18)
-        DenyLayer::Classifier => "exec-deny-read-only-classifier",
+        // ## m3b-t18-safe06 (named exception, T1c review M2): one Fluent ID for one classifier
+        // denial. Step 0b reports `ExecErrorKind::SafetyDenied`; this layer is never produced,
+        // and should it be, it reads as the same sentence.
+        DenyLayer::Classifier => "exec-deny-classifier",
     }
 }
 

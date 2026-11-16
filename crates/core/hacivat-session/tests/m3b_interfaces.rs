@@ -283,11 +283,12 @@ async fn manager_default_has_no_classifier() {
     );
 }
 
+// ## m3b-t18-safe06 (named exception): Task 18 filled step 0b, so the installed classifier is
+// now asked, and its denial is final (this test said "changes nothing until Task 18").
 #[tokio::test]
-async fn an_installed_classifier_changes_nothing_until_task_18() {
-    // `ManagerConfig::classifier` reaches the sessions the manager starts; step 0b is a stub,
-    // so a read-only session with a denying classifier still runs its reads through the guard
-    // (typed and M2b paths) and never asks the classifier.
+async fn an_installed_classifier_is_asked_from_task_18() {
+    // `ManagerConfig::classifier` reaches the sessions the manager starts; a read-only session
+    // with a denying classifier refuses its reads before the guard (typed and M2b paths).
     let deny = Arc::new(DenyAll::default());
     let config = ManagerConfig {
         classifier: Some(deny.clone()),
@@ -305,14 +306,15 @@ async fn an_installed_classifier_changes_nothing_until_task_18() {
     assert!(snap(&h).read_only);
     let o = Recorder::new();
     let reply = h.run(spec_of(&o, &["SELECT 1"])).reply.await.unwrap();
-    assert!(reply.is_ok(), "{reply:?}");
     assert!(
-        f.typed_log()
-            .contains(&FakeTypedCall::Query("SELECT 1".into()))
+        matches!(&reply, Err(e) if matches!(e.kind, ExecErrorKind::SafetyDenied(_))),
+        "{reply:?}"
     );
-    run(&h, "SELECT 2").await.unwrap();
-    assert!(f.executed().iter().any(|s| s == "SELECT 2"));
-    assert_eq!(*deny.calls.lock().unwrap(), 0);
+    assert!(f.typed_log().is_empty());
+    let e = run(&h, "SELECT 2").await.unwrap_err();
+    assert!(matches!(e.kind, ExecErrorKind::SafetyDenied(_)), "{e:?}");
+    assert!(!f.executed().iter().any(|s| s == "SELECT 2"));
+    assert_eq!(*deny.calls.lock().unwrap(), 2);
 }
 
 // ---------------------------------------------------------------------------------------------

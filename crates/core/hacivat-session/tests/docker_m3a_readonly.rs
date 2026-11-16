@@ -155,6 +155,46 @@ const MYSQL_SERVER_BLOCKED: &[Row] = &[
     ("M7", "/*!50000 COMMIT */", &["1a"]),
 ];
 
+// ## m3b-t18-safe06 (named exception: the C19 rows judged, R-M3-58)
+/// MariaDB's server-blocked rows through `Run`: MySQL's, with the outcomes run B recorded for
+/// MariaDB where it differs (`sql-testkit/bypass/mariadb.toml`, `observed`): `LOCK TABLES` is
+/// caught by L6 (`gap`: its implicit commit ended the read-only transaction; the side channel
+/// shows nothing persisted), `HANDLER … OPEN` runs and the reset closes it (`ran`, judged by the
+/// side channel), `XA START` is refused by the server (`1400`). Judged since Task 18 (C19).
+const MARIADB_SERVER_BLOCKED: &[Row] = &[
+    ("M1", "/*!50000 DROP TABLE hv_t22_bypass */", &[INPUT]),
+    (
+        "M1",
+        "/*!50000 INSERT INTO hv_t22_bypass VALUES (50) */",
+        &[INPUT],
+    ),
+    ("M2", "SELECT 1; DROP TABLE hv_t22_bypass", &["1064"]),
+    (
+        "M5",
+        "SELECT * FROM hv_t22_bypass FOR UPDATE",
+        &[MY_RO, MY_TABLE_PRIV],
+    ),
+    ("M5", "LOCK TABLES hv_t22_bypass WRITE", &[PROTOCOL, GAP]),
+    (
+        "M6",
+        "PREPARE hv_t22_s FROM 'DELETE FROM hv_t22_bypass'",
+        &[PROTOCOL],
+    ),
+    ("M8", "CREATE TABLE hv_t22_m8 (a int)", &[INPUT]),
+    ("M8", "TRUNCATE TABLE hv_t22_bypass", &[INPUT]),
+    ("M8", "DELETE FROM hv_t22_bypass", &[INPUT]),
+    // MariaDB has no `WITH … DELETE`: the server refuses its syntax (`1064`) before it runs.
+    (
+        "M8",
+        "WITH x AS (SELECT 1 AS a) DELETE FROM hv_t22_bypass WHERE a = 1",
+        &[MY_RO, MY_TABLE_PRIV, "1064"],
+    ),
+    ("M12", "HANDLER hv_t22_bypass OPEN", &[PROTOCOL, "ran"]),
+    ("M13", "XA START 'hv_t22'", &[PROTOCOL, "1400"]),
+    ("M17", "CREATE TEMPORARY TABLE hv_t22_tmp (a int)", &[INPUT]),
+    ("M7", "/*!50000 COMMIT */", &["1a"]),
+];
+
 // ---------------------------------------------------------------------------------------------
 // Outcomes
 
@@ -431,16 +471,25 @@ async fn server_blocked_bypass_rows_are_blocked_through_run() {
         a.into_inner().close().await;
         pg_drop_fixture(&t).await;
     }
-    for t in lines_of(DbmsKind::MySql) {
+    // ## m3b-t18-safe06 (named exception): MariaDB's lines too, judged (C19).
+    let my_lines = lines_of(DbmsKind::MySql)
+        .into_iter()
+        .chain(lines_of(DbmsKind::MariaDb));
+    for t in my_lines {
         mysql_fixture(&t).await;
         let a = tokio::sync::Mutex::new(admin(&t).await);
+        let rows = if t.engine == DbmsKind::MariaDb {
+            MARIADB_SERVER_BLOCKED
+        } else {
+            MYSQL_SERVER_BLOCKED
+        };
         for user in ["hv_ro", t.user.as_str()] {
             let ro = Ro::open(&t, user, &t.database).await;
             judge_rows(
                 &t,
                 user,
                 &ro,
-                MYSQL_SERVER_BLOCKED,
+                rows,
                 || async { mysql_snapshot(&mut *a.lock().await, &t).await },
                 &mut failures,
                 &mut record,
@@ -1085,8 +1134,8 @@ const MY_LOCKING_BIG: &str = "WITH d AS (SELECT 0 AS x UNION ALL SELECT 1 UNION 
 
 /// Review M6: a real read-only MySQL cursor's release (drain, `KILL QUERY` on the side
 /// connection, the guard's `ROLLBACK`, `COM_RESET_CONNECTION`, the replay) on the same
-/// connection. MariaDB is included here (its cursor release is the same path); its bypass rows
-/// stay out of `Run`'s judged groups, as run B records them unjudged (C19, M3b).
+/// connection. MariaDB is included here (its cursor release is the same path). ## m3b-t18-safe06:
+/// its bypass rows are judged through `Run` since Task 18 (`MARIADB_SERVER_BLOCKED`, C19).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "docker"]
 async fn mysql_a_read_only_cursor_release_keeps_the_connection_and_drops_its_lock() {

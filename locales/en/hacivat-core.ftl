@@ -896,3 +896,10 @@ exec-param-mixed-styles = Not sent: the statement mixes parameter styles. Use on
 exec-param-too-many-binds = Not sent: the statement has more than 65,535 parameters.
 # A marker the server would read as a parameter, but Hacivat can't give it a value.
 exec-param-unbindable = Not sent: the statement holds a parameter marker Hacivat can't fill, so the server would get no value for it.
+
+## m3b-t18-safe06
+
+# A read-only console refused a statement before sending it: Hacivat's classifier couldn't
+# confirm that it only reads (or found that it doesn't). One sentence for every classifier
+# denial (T1c review M2).
+exec-deny-classifier = Not sent: this console is read-only, and Hacivat couldn't confirm that the statement only reads.

@@ -174,6 +174,11 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         production_read_only: true,
         ..ManagerConfig::m2b()
     };
+    // ## m3b-t18-safe06 (named exception): the read-only guard's classifier (R-M3-83).
+    let config = ManagerConfig {
+        classifier: Some(hacivat_exec::classify_pool::ClassifyPool::new(2)),
+        ..config
+    };
     let manager = ConnectionManager::new(runtime.handle(), Arc::new(deps), config);
     let LoadedProfiles {
         profiles,

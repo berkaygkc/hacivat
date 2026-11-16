@@ -156,6 +156,10 @@ async fn startup_option_refused_falls_back_to_set() {
         let retried = startup_params(&read_untyped(&mut second).await);
         accept(&mut second).await;
         let sql = answer_query(&mut second).await;
+        // ## m3b-t18-safe06 (named exception): then the read-only connect's `search_path`
+        // read, last (answered without a row here: the setting stays unread).
+        let read = answer_query(&mut second).await;
+        assert_eq!(read, "SELECT pg_catalog.current_setting('search_path')");
         (refused, retried, sql, second)
     });
     let conn = PgDriver::new()

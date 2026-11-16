@@ -95,6 +95,10 @@ async fn in_recovery(client: &Client) -> Result<Option<bool>, RawError> {
         .map(|v| v == "t"))
 }
 
+// ## m3b-t18-safe06 (named exception)
+/// How long a read-only connect waits for its `search_path` read.
+const SEARCH_PATH_READ_LIMIT: Duration = Duration::from_secs(5);
+
 /// A live PostgreSQL connection (HV-CONN-01). The connection task runs on the core runtime
 /// until [`RawConn::close`] or drop.
 pub struct PgConn {
@@ -116,6 +120,9 @@ pub struct PgConn {
     // ## m3b-t13-drivers (fix round 1, I-1)
     /// What the last close of a Run as one did beyond its result (`take_close_report`).
     close_report: Option<CloseReport>,
+    // ## m3b-t18-safe06 (named exception; plan amendment C2(b)/I1)
+    /// What the connect read of the session's settings (`RawConn::session_settings`).
+    settings: hacivat_driver::SessionSettings,
 }
 
 impl PgConn {
@@ -138,7 +145,34 @@ impl PgConn {
             cancel: Arc::new(cancel),
             typed: None,
             close_report: None,
+            // ## m3b-t18-safe06
+            settings: hacivat_driver::SessionSettings::default(),
         }
+    }
+
+    // ## m3b-t18-safe06 (named exception; plan amendment C2(b)/I1)
+    /// Records the connect's `standard_conforming_strings` from the startup `ParameterStatus`
+    /// (no round trip).
+    pub(crate) fn note_lex_modes(&mut self, scs: Option<Arc<str>>) {
+        self.settings.lex_modes = scs;
+    }
+
+    /// Reads the `search_path` setting once, at the end of a read-only connect (after the
+    /// pooler fallback's `SET`s): `pg_catalog` qualified, so no schema can shadow the read. A
+    /// failed read, or one not answered within [`SEARCH_PATH_READ_LIMIT`] (a proxy that never
+    /// answers), leaves it `None` (unknown: the guard's classifier then treats unqualified
+    /// builtins as unknown); it never fails the connect.
+    pub(crate) async fn read_search_path(&mut self) {
+        let read = scalar(
+            &self.client,
+            "SELECT pg_catalog.current_setting('search_path')",
+        );
+        self.settings.search_path = tokio::time::timeout(SEARCH_PATH_READ_LIMIT, read)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+            .map(Arc::from);
     }
 
     // ## m3a-t12-pg-typed
@@ -489,6 +523,11 @@ impl RawConn for PgConn {
 
     fn take_notices_dropped(&mut self) -> u32 {
         crate::exec::take_notices_dropped(&self.notices)
+    }
+
+    // ## m3b-t18-safe06 (named exception)
+    fn session_settings(&self) -> hacivat_driver::SessionSettings {
+        self.settings.clone()
     }
 }
 

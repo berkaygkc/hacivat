@@ -73,6 +73,8 @@ pub use tx::TxOwner;
 pub use schema::context_probe_sql;
 // ## m3b-t01c-core-seams
 pub use verdict::{RoCheck, SafetyDenial, SessionEffects, StatementClassifier, UnitVerdict};
+// ## m3b-t18-safe06
+pub use verdict::{ClassifierContext, RoAnswer};
 
 /// A session's ID, unique in the process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

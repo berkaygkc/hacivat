@@ -44,3 +44,5 @@ pub use typed::{
 pub use typed::Notice;
 // ## m3b-t13-drivers
 pub use typed::CloseReport;
+// ## m3b-t18-safe06 (named exception)
+pub use driver::SessionSettings;

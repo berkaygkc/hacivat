@@ -22,6 +22,42 @@ pub struct GuardPlan {
     pub canary: Option<&'static str>,
     pub after: Vec<&'static str>,
     pub reset: ResetKind,
+    // ## m3b-t18-safe06 (named exception; R-M3-57, P-M3b-33)
+    /// Session setup built from what the session observed ([`plan_for_with`]), run right after
+    /// `session_setup` wherever it runs (after every reset): MySQL and MariaDB
+    /// `SET SESSION sql_mode = '<observed>'`. Empty from [`plan_for`].
+    pub pinned: Vec<String>,
+}
+
+// ## m3b-t18-safe06 (named exception; R-M3-57, P-M3b-33)
+/// What a session observed that its guard plan pins ([`plan_for_with`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct GuardInputs {
+    /// MySQL/MariaDB: the session's `sql_mode` as read at connect, verbatim.
+    pub sql_mode: Option<String>,
+}
+
+/// Whether `mode` can be pinned as it is: a `sql_mode` value is a comma-separated list of
+/// mode names (ASCII letters, digits, `_`), possibly empty. Anything else is never put into a
+/// statement.
+pub fn pinnable_sql_mode(mode: &str) -> bool {
+    mode.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b',')
+}
+
+/// [`plan_for`] with what the session observed (R-M3-57): on MySQL and MariaDB a pinnable
+/// `sql_mode` ([`pinnable_sql_mode`]) becomes `SET SESSION sql_mode = '<mode>'` in `pinned`, so
+/// the server lexes after `COM_RESET_CONNECTION` (which restores the global default) as the
+/// classifier does. A value that is not pinnable pins nothing (the classifier then reads the
+/// text under every mode, fail-closed). Other engines ignore `inputs`.
+pub fn plan_for_with(kind: DbmsKind, inputs: &GuardInputs) -> Option<GuardPlan> {
+    let mut plan = plan_for(kind)?;
+    if matches!(kind, DbmsKind::MySql | DbmsKind::MariaDb)
+        && let Some(mode) = inputs.sql_mode.as_deref().filter(|m| pinnable_sql_mode(m))
+    {
+        plan.pinned.push(format!("SET SESSION sql_mode = '{mode}'"));
+    }
+    Some(plan)
 }
 
 /// The guard plan of `kind`: PostgreSQL, MySQL and MariaDB, and SQLite (whose layers are
@@ -45,6 +81,7 @@ pub fn plan_for(kind: DbmsKind) -> Option<GuardPlan> {
             canary: Some("SELECT pg_catalog.txid_current_if_assigned()"),
             after: vec!["ROLLBACK"],
             reset: ResetKind::DiscardAll,
+            pinned: Vec::new(),
         }),
         DbmsKind::MySql | DbmsKind::MariaDb => Some(GuardPlan {
             session_setup: vec!["SET SESSION TRANSACTION READ ONLY", "SET NAMES utf8mb4"],
@@ -52,6 +89,7 @@ pub fn plan_for(kind: DbmsKind) -> Option<GuardPlan> {
             canary: None,
             after: vec!["ROLLBACK"],
             reset: ResetKind::ResetConnection,
+            pinned: Vec::new(),
         }),
         DbmsKind::Sqlite => Some(GuardPlan {
             session_setup: Vec::new(),
@@ -59,7 +97,54 @@ pub fn plan_for(kind: DbmsKind) -> Option<GuardPlan> {
             canary: None,
             after: Vec::new(),
             reset: ResetKind::None,
+            pinned: Vec::new(),
         }),
         _ => None,
+    }
+}
+
+// ## m3b-t18-safe06
+#[cfg(test)]
+mod m3b_t18_tests {
+    use super::*;
+
+    #[test]
+    fn plan_for_with_pins_an_observed_sql_mode_on_mysql_only() {
+        let inputs = GuardInputs {
+            sql_mode: Some("ANSI_QUOTES,NO_BACKSLASH_ESCAPES".into()),
+        };
+        for k in [DbmsKind::MySql, DbmsKind::MariaDb] {
+            let p = plan_for_with(k, &inputs).unwrap();
+            assert_eq!(
+                p.pinned,
+                ["SET SESSION sql_mode = 'ANSI_QUOTES,NO_BACKSLASH_ESCAPES'"]
+            );
+            assert_eq!(p.session_setup, plan_for(k).unwrap().session_setup);
+        }
+        assert!(
+            plan_for_with(DbmsKind::Postgres, &inputs)
+                .unwrap()
+                .pinned
+                .is_empty()
+        );
+        assert!(plan_for(DbmsKind::MySql).unwrap().pinned.is_empty());
+        // An empty mode is a mode (no flags); text that is no mode list is never sent.
+        let empty = GuardInputs {
+            sql_mode: Some(String::new()),
+        };
+        assert_eq!(
+            plan_for_with(DbmsKind::MySql, &empty).unwrap().pinned,
+            ["SET SESSION sql_mode = ''"]
+        );
+        for hostile in ["x'; DROP TABLE t; --", "A B", "A\\", "ANSI\u{0}"] {
+            let p = plan_for_with(
+                DbmsKind::MySql,
+                &GuardInputs {
+                    sql_mode: Some(hostile.into()),
+                },
+            )
+            .unwrap();
+            assert!(p.pinned.is_empty(), "{hostile:?}");
+        }
     }
 }

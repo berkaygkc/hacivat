@@ -56,6 +56,15 @@ use hacivat_proto::{AccessLabel, DbmsKind, ErrClass};
 use crate::session::recovery::connection_ending;
 use crate::session::schema::{Family, family};
 use crate::session::{DenyLayer, ExecError, ExecErrorKind, Reply};
+// ## m3b-t18-safe06
+use std::sync::Arc;
+
+use hacivat_driver::SessionSettings;
+use hacivat_guard::{GuardInputs, pinnable_sql_mode, plan_for_with};
+
+use crate::session::env::{EnvPlan, EnvStep};
+use crate::session::schema::split_search_path;
+use crate::session::verdict::{ClassifierContext, RoCheck};
 
 /// First keywords a read-only statement may not start with (Q35): they end or nest the guard's
 /// transaction. This list produces `DenyLayer::Transaction`; it is not a classifier, and the
@@ -114,21 +123,228 @@ pub fn run_guarded<'a>(
     Box::pin(async move { guarded(conn, kind, sql, opts, replay).await.reply })
 }
 
-// ## m3b-t01c-core-seams (P-M3b-11)
+// ## m3b-t01c-core-seams (P-M3b-11), m3b-t18-safe06 (the body)
 impl crate::session::actor::Core {
     /// Step 0b (R-M3-83, Task 18): a user statement of a read-only session (a typed `Run`
     /// unit, an M2b `Exec { origin: User }`) is checked by the injected classifier
-    /// (`Core::classifier`) with the profile's function allowlist before the guard runs it;
-    /// `RoCheck::Deny(d)` → `ExecErrorKind::SafetyDenied(d)`, nothing sent. `None` keeps the
-    /// M2b/M3a layers alone (run B). The actor calls it right before `guarded` and
-    /// `guarded_query`; internal statements never reach it.
+    /// (`Core::classifier`) with the profile's function allowlist, in the session's context
+    /// ([`Core::classifier_context`]), before the guard runs it; `RoCheck::Deny(d)` →
+    /// `ExecErrorKind::SafetyDenied(d)`, nothing sent. `None` keeps the M2b/M3a layers alone
+    /// (run B). The actor calls it right before `guarded` and `guarded_query`; internal
+    /// statements never reach it.
     ///
-    /// STUB until Task 18: `Ok(())`, which is M3a's behaviour (the guard's layers still run).
-    #[allow(clippy::unused_async, reason = "Task 18's body awaits the classifier")]
+    /// The classifier only ever denies early: an `Allow` sends the statement into the guard's
+    /// layers (L3–L6) exactly as without a classifier (`alg/13` §0.1). A statement the
+    /// classifier says may change the context makes the next check read the context again.
     pub(crate) async fn step0b(&mut self, sql: &str) -> Result<(), ExecError> {
-        let _ = sql;
-        Ok(())
+        let Some(classifier) = self.classifier.clone() else {
+            return Ok(());
+        };
+        if !self.read_only {
+            return Ok(());
+        }
+        let ctx = self.classifier_context().await;
+        let allow: Arc<[Arc<str>]> = self
+            .profile
+            .read_only_fn_allowlist
+            .iter()
+            .map(|name| Arc::from(name.as_str()))
+            .collect();
+        let answer = classifier
+            .check_read_only_in(self.kind, Arc::from(sql), allow, ctx)
+            .await;
+        match answer.check {
+            RoCheck::Allow => {
+                if answer.changes_context {
+                    self.ro_context = RoContextRead::Stale;
+                }
+                Ok(())
+            }
+            RoCheck::Deny(denial) => Err(ExecError::of(ExecErrorKind::SafetyDenied(denial))),
+        }
     }
+
+    /// What the classifier is told of the session's context (plan amendment C2(b)/I1): the
+    /// server version and the settings the connect read (`RawConn::session_settings`), or the
+    /// ones read again after a statement that may have changed them ([`RoContextRead`]), seen
+    /// through what the guard puts back after every statement (the reset, then the replay).
+    ///
+    /// - **PostgreSQL:** the lexing modes are known only when `standard_conforming_strings`
+    ///   reads `on`: the replay's setup pins it `on` after every reset, so a connection that
+    ///   started `off` would lex its first statement otherwise; then they are unknown (the
+    ///   classifier reads every mode, fail-closed). The search path is the one the replay
+    ///   restores when it restores one (the session's last schema context), else the one read;
+    ///   unread, it is unknown (`None`: unqualified builtins are then unknown, T9 D5).
+    /// - **MySQL and MariaDB:** the observed `sql_mode`, which the replay pins after every
+    ///   `COM_RESET_CONNECTION` (R-M3-57); unknown when it was not read or cannot be pinned. The
+    ///   "search path" is the current database alone (the T20 carry): the one the replay
+    ///   restores (`USE`, the session's last schema), else `DATABASE()` as the connect (or a read
+    ///   after a context change) read it; `None` when there is none.
+    /// - **SQLite:** no setting (its lexing has no session mode).
+    pub(crate) async fn classifier_context(&mut self) -> ClassifierContext {
+        let server_version = self
+            .live
+            .as_ref()
+            .and_then(|live| live.server.version.clone());
+        if self.ro_context == RoContextRead::Stale {
+            let read = self.read_context_again().await;
+            self.ro_context = RoContextRead::Reread(read);
+        }
+        let settings = match &self.ro_context {
+            RoContextRead::Reread(read) => read.clone(),
+            _ => self
+                .live
+                .as_mut()
+                .map(|live| live.raw().session_settings())
+                .unwrap_or_default(),
+        };
+        match family(self.kind) {
+            Family::Postgres => {
+                let lex_modes = settings
+                    .lex_modes
+                    .filter(|scs| scs.trim().eq_ignore_ascii_case("on"));
+                let replayed = replayed_search_path(&self.env_plan());
+                let search_path = replayed
+                    .or_else(|| settings.search_path.map(|s| split_search_path(&s)))
+                    .map(|path| path.into_iter().map(Arc::from).collect());
+                ClassifierContext {
+                    lex_modes,
+                    search_path,
+                    server_version,
+                }
+            }
+            Family::MySql => {
+                // A context read again is the server's own answer; else the pinned one.
+                let lex_modes = match &self.ro_context {
+                    RoContextRead::Reread(read) => read.lex_modes.clone(),
+                    _ => self.observed_sql_mode.as_deref().map(Arc::from),
+                }
+                .filter(|mode| pinnable_sql_mode(mode));
+                let database = replayed_search_path(&self.env_plan())
+                    .and_then(|path| path.into_iter().next())
+                    .or_else(|| settings.search_path.as_deref().map(str::to_string));
+                ClassifierContext {
+                    lex_modes,
+                    search_path: database.map(|db| Arc::from(vec![Arc::<str>::from(db)])),
+                    server_version,
+                }
+            }
+            Family::Sqlite | Family::Other => ClassifierContext {
+                lex_modes: None,
+                search_path: None,
+                server_version,
+            },
+        }
+    }
+
+    /// Reads the session's context again after a statement that may have changed it (one
+    /// internal round trip; Hacivat's own constant text, outside the guard): PostgreSQL
+    /// `standard_conforming_strings` and `search_path`, MySQL/MariaDB `sql_mode` and the current
+    /// database. A read that
+    /// fails or answers no row leaves the settings unknown (fail-closed).
+    async fn read_context_again(&mut self) -> SessionSettings {
+        let sql = match family(self.kind) {
+            Family::Postgres => PG_CONTEXT_SQL,
+            Family::MySql => MYSQL_CONTEXT_SQL,
+            Family::Sqlite | Family::Other => return SessionSettings::default(),
+        };
+        let Ok(conn) = self.conn() else {
+            return SessionSettings::default();
+        };
+        let row = match conn.execute(sql, ExecOpts::values(1)).await {
+            Ok(answer) if !answer.truncated => answer.rows.into_iter().next(),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::debug!(kind = ?e.kind, "the read-only guard could not read the context");
+                None
+            }
+        };
+        self.observe(false);
+        let cell = |i: usize| -> Option<Arc<str>> {
+            row.as_ref()
+                .and_then(|r| r.get(i).cloned().flatten())
+                .map(Arc::from)
+        };
+        match family(self.kind) {
+            Family::Postgres => SessionSettings {
+                lex_modes: cell(0),
+                search_path: cell(1),
+            },
+            _ => SessionSettings {
+                lex_modes: cell(0),
+                search_path: cell(1),
+            },
+        }
+    }
+
+    /// `plan` with the observed `sql_mode` pinned after the read-only setup (R-M3-57,
+    /// P-M3b-33: `hacivat_guard::plan_for_with`), so every replay after the guard's
+    /// `COM_RESET_CONNECTION`, and a reconnect's, puts it back: the server then lexes as the
+    /// classifier does. Nothing changes on a read-write session, on other engines, or when no
+    /// pinnable `sql_mode` was observed.
+    pub(crate) fn pin_observed(&self, mut plan: EnvPlan) -> EnvPlan {
+        if !self.read_only || family(self.kind) != Family::MySql {
+            return plan;
+        }
+        let inputs = GuardInputs {
+            sql_mode: self.observed_sql_mode.clone(),
+        };
+        let Some(pinned) = plan_for_with(self.kind, &inputs).map(|p| p.pinned) else {
+            return plan;
+        };
+        if pinned.is_empty() {
+            return plan;
+        }
+        match plan.steps.iter_mut().find_map(|step| match step {
+            EnvStep::ReadOnly(setup) => Some(setup),
+            _ => None,
+        }) {
+            Some(setup) => setup.extend(pinned),
+            None => plan.steps.insert(0, EnvStep::ReadOnly(pinned)),
+        }
+        plan
+    }
+}
+
+// ## m3b-t18-safe06
+/// Which session settings the read-only guard's classifier is told (`Core::ro_context`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum RoContextRead {
+    /// The ones the live connection read at connect (`RawConn::session_settings`).
+    #[default]
+    Connect,
+    /// A statement may have changed them: read them again before the next check.
+    Stale,
+    /// The ones read again.
+    Reread(SessionSettings),
+}
+
+/// PostgreSQL's context read after a statement that may have changed it (`pg_catalog`
+/// qualified: no schema on the search path can shadow it).
+const PG_CONTEXT_SQL: &str = "SELECT pg_catalog.current_setting('standard_conforming_strings'), \
+                              pg_catalog.current_setting('search_path')";
+/// MySQL's and MariaDB's: the mode and the current database (the T20 carry).
+const MYSQL_CONTEXT_SQL: &str = "SELECT @@SESSION.sql_mode, DATABASE()";
+
+/// The `sql_mode` a read-only MySQL/MariaDB session pins (R-M3-57): what its first connection
+/// read at connect, in the connect's own round trip (no round trip of its own, the T18
+/// carry). `None` on a read-write session and on other engines. A reconnect keeps it: the
+/// replay pins it on the new connection too.
+pub(crate) fn observed_sql_mode(read_only: bool, conn: &dyn RawConn) -> Option<String> {
+    (read_only && family(conn.kind()) == Family::MySql)
+        .then(|| conn.session_settings().lex_modes)
+        .flatten()
+        .map(|mode| mode.to_string())
+}
+
+/// The search path the replay restores (`EnvStep::RestoreSearchPath`, or a PostgreSQL
+/// `RestoreSchema`, which sets the path to that one schema), in the classifier's form.
+fn replayed_search_path(plan: &EnvPlan) -> Option<Vec<String>> {
+    plan.steps.iter().rev().find_map(|step| match step {
+        EnvStep::RestoreSearchPath(path) => Some(path.clone()),
+        EnvStep::RestoreSchema(name) => Some(vec![name.clone()]),
+        _ => None,
+    })
 }
 
 /// [`run_guarded`], and whether the connection must be discarded (the actor's entry point).
@@ -904,7 +1120,8 @@ impl GuardFailure {
 #[derive(Debug)]
 pub(crate) struct GuardedCursor {
     pub(crate) kind: DbmsKind,
-    plan: GuardPlan,
+    /// ## m3b-t18-safe06: boxed (the plan grew `pinned`; `cursor::Hold` stays small).
+    plan: Box<GuardPlan>,
     /// The readings of the statement's first keyword (step 7).
     keywords: Keywords,
 }
@@ -938,7 +1155,7 @@ pub(crate) async fn guarded_query(
         .await;
     let guard = GuardedCursor {
         kind,
-        plan,
+        plan: Box::new(plan),
         keywords,
     };
     let Err(e) = queried else {
@@ -1053,6 +1270,8 @@ impl GuardedCursor {
 /// `hacivat-exec/tests/cross_crate_equalities.rs`: each reading ASCII upper-cased, `Some("")`
 /// when the statement starts with something other than a word, `None` when the reading holds
 /// no statement; and whether the readings are complete (`false` when a limit cut them short).
+// ## m3b-t18-safe06 (T1a review R1-M1): a test seam, not API.
+#[doc(hidden)]
 pub fn guard_keyword_readings(kind: DbmsKind, sql: &str) -> (Vec<Option<String>>, bool) {
     let k = guard_keywords(kind, sql);
     (k.readings, k.complete)

@@ -25,6 +25,12 @@
 //!   printed or recorded.
 //! - MariaDB's results are recorded, not judged: its label stays guarded (C19).
 //! - `sqlite_bypass_rows_blocked_without_classifier` needs no server: it runs on every PR.
+//! - ## m3b-t18-safe06: this is SQL-SAFE-06 run B. Its rows live in
+//!   `crates/sql/sql-testkit/bypass/{pg,mysql,mariadb,sqlite}.toml` (the rows an account runs,
+//!   by `kind`, in file order), read by path with no crate edge (P-M3b-13); the sessions still
+//!   have no classifier (`ManagerConfig::m2b()`). MariaDB's file records each row's outcome
+//!   here (`observed`, C19). Run A is `sql-safety/tests/bypass_run_a.rs`, run A′
+//!   `hacivat-exec/tests/docker_m3b_bypass.rs`.
 
 #![allow(
     clippy::result_large_err,
@@ -49,18 +55,8 @@ use tokio::sync::broadcast;
 // ---------------------------------------------------------------------------------------------
 // Rows
 
-/// One SQL-SAFE-06 row: its id, the statement, and the outcomes that count as stopped — a
-/// server code (the SQLSTATE on PostgreSQL, the vendor code on MySQL and MariaDB), `1a` (the
-/// transaction-keyword layer, before any I/O), `protocol` (MySQL will not prepare it on a
-/// read-only connection) or `gap` (L6 found the escape and discarded the connection).
-type Row = (&'static str, &'static str, &'static [&'static str]);
-
 /// PostgreSQL's read-only transaction refusal.
 const PG_RO: &str = "25006";
-/// "transaction read-write mode must be set before any query": the snapshot is pinned.
-const PG_PINNED: &str = "25001";
-/// PostgreSQL's privilege refusal.
-const PG_PRIV: &str = "42501";
 
 /// The fixture large object (`lo_from_bytea(LO, 'hv')`).
 const LO: u32 = 230_023;
@@ -70,303 +66,79 @@ const LO: u32 = 230_023;
 /// channel is unchanged: the `ROLLBACK` undid the effect.
 const GAP: &str = "gap";
 
-/// Rows the read-only transaction (or 1a, the extended protocol, or L6's canary with the
-/// rollback) stops whoever runs them: P1 P2 P3 P4 P5 P7 P8 P14 (`COPY FROM`) P26 (temp table)
-/// P37 P38, and the large-object writes (T5 review m-5). `hv_ro` may meet its missing
-/// privilege first (`42501`).
-///
-/// Observed: the read-only transaction refuses the large-object writes (`lo_create`,
-/// `lo_from_bytea`, and for an owner `lo_put`, `lo_unlink`, `lo_import`) only from PostgreSQL
-/// 16 (`25006`). On 13–15 they run, assign a transaction ID, and L6's canary reports the gap
-/// after the guard's `ROLLBACK` has undone them: nothing persists (the side channel), and the
-/// connection is discarded. `query_to_xml` cannot run a `DELETE` at all (`0A000`), so a
-/// PL/pgSQL `EXECUTE` stands for P38's dynamic SQL.
-const PG_SERVER_BLOCKED: &[Row] = &[
-    (
-        "P1",
-        "WITH d AS (DELETE FROM hv_t23 RETURNING *) SELECT * FROM d",
-        &[PG_RO],
-    ),
-    ("P2", "SELECT * INTO hv_t23_p2 FROM hv_t23", &[PG_RO]),
-    ("P3", "EXPLAIN (ANALYZE) DELETE FROM hv_t23", &[PG_RO]),
-    ("P4", "SELECT 1; DROP TABLE hv_t23", &["42601"]),
-    ("P4", "COMMIT; DROP TABLE hv_t23", &["1a"]),
-    ("P5", "SET TRANSACTION READ WRITE", &[PG_PINNED]),
-    ("P5", "SET transaction_read_only = off", &[PG_PINNED]),
-    (
-        "P5",
-        "SELECT set_config('transaction_read_only', 'off', true)",
-        &[PG_PINNED],
-    ),
-    ("P7", "COMMIT", &["1a"]),
-    ("P7", "COMMIT AND CHAIN", &["1a"]),
-    ("P7", "/* x */ END", &["1a"]),
-    ("P7", "ROLLBACK", &["1a"]),
-    ("P8", "CALL hv_t23_commit()", &["2D000"]),
-    (
-        "P9",
-        "DO $$ BEGIN INSERT INTO hv_t23 VALUES (9); END $$",
-        &[PG_RO],
-    ),
-    ("P14", "COPY hv_t23 FROM '/etc/hostname'", &[PG_RO, PG_PRIV]),
-    (
-        "P26",
-        "CREATE TEMP TABLE hv_t23_tmp (a int)",
-        &[PG_RO, PG_PRIV],
-    ),
-    ("P37", "SELECT nextval('hv_t23_seq')", &[PG_RO, PG_PRIV]),
-    ("P37", "SELECT setval('hv_t23_seq', 100)", &[PG_RO, PG_PRIV]),
-    ("P38", "SELECT hv_t23_sd_write()", &[PG_RO]),
-    ("P38", "SELECT hv_t23_dyn_write()", &[PG_RO]),
-    (
-        "P38",
-        "SELECT query_to_xml('DELETE FROM hv_t23 RETURNING a', true, true, '')",
-        &[PG_RO, "0A000"],
-    ),
-    ("P38", "SELECT lo_from_bytea(0, '\\x6876')", &[PG_RO, GAP]),
-    ("P38", "SELECT lo_create(0)", &[PG_RO, GAP]),
-    (
-        "P38",
-        "SELECT lo_put(230023, 0, '\\x00')",
-        &[PG_RO, PG_PRIV, GAP],
-    ),
-    ("P38", "SELECT lo_unlink(230023)", &[PG_RO, PG_PRIV, GAP]),
-    (
-        "P38",
-        "SELECT lo_import('/etc/hostname')",
-        &[PG_RO, PG_PRIV, GAP],
-    ),
-    ("P35", "SELECT txid_current()", &[GAP]),
-];
-
-/// Rows the server accepts inside the read-only transaction, which the request's end
-/// neutralises (L6: `ROLLBACK`, then `DISCARD ALL` and the environment replay): P5 (`RESET`:
-/// it restores L4's `default_transaction_read_only = on`, so it changes nothing) P6 P10 P15 P17
-/// P23 P25 P26 (`LISTEN`, `WITH HOLD`). A refusal is fine too. Nothing may linger.
-const PG_NEUTRALISED: &[(&str, &str)] = &[
-    ("P5", "RESET transaction_read_only"),
-    (
-        "P6",
-        "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
-    ),
-    ("P6", "SET default_transaction_read_only = off"),
-    ("P6", "RESET ALL"),
-    ("P10", "PREPARE hv_t23_s AS SELECT 1"),
-    ("P15", "SELECT pg_advisory_lock(230023)"),
-    ("P15", "LOCK TABLE hv_t23 IN ACCESS EXCLUSIVE MODE"),
-    ("P17", "SET search_path = pg_catalog"),
-    ("P23", "SET standard_conforming_strings = off"),
-    ("P25", "NOTIFY hv_t23, 'x'"),
-    ("P25", "SELECT pg_notify('hv_t23', 'x')"),
-    ("P26", "LISTEN hv_t23"),
-    ("P26", "DECLARE hv_t23_c CURSOR WITH HOLD FOR SELECT 1"),
-];
-
 // ## m2b-t23-f1
 /// The guard's text layer refused a call no rollback undoes, before any I/O (1b).
 const FUNCTION: &str = "function";
-
-/// Task 23 finding F1, run as `hv_ro` while `PUBLIC` still holds `EXECUTE` on
-/// `pg_logical_emit_message` (every cluster's default): the label must be guarded
-/// (`NonTransactionalWrite`), and the guard's text layer refuses the call in every spelling, so
-/// nothing reaches the server.
-const PG_NON_TRANSACTIONAL_TEXT: &[Row] = &[
-    (
-        "P32",
-        "SELECT pg_logical_emit_message(false, 'hv_t23', 'x')",
-        &[FUNCTION],
-    ),
-    (
-        "P32",
-        "SELECT pg_catalog.pg_logical_emit_message(false, 'hv_t23', 'x'::bytea)",
-        &[FUNCTION],
-    ),
-    (
-        "P32",
-        "SELECT \"pg_catalog\".\"pg_logical_emit_message\"(false, 'hv_t23', 'x')",
-        &[FUNCTION],
-    ),
-    (
-        "P32",
-        "SELECT PG_LOGICAL_EMIT_MESSAGE /* c */ (false, 'hv_t23', 'x')",
-        &[FUNCTION],
-    ),
-    (
-        "P32",
-        "SELECT U&\"pg\\005flogical_emit_message\"(false, 'hv_t23', 'x')",
-        &[FUNCTION],
-    ),
-    (
-        "P32",
-        "DO $$ BEGIN PERFORM pg_logical_emit_message(false, 'hv_t23', 'x'); END $$",
-        &[FUNCTION],
-    ),
-    (
-        "P32",
-        "SELECT pg_logical_emit_message(true, 'hv_t23', 'x')",
-        &[FUNCTION],
-    ),
-];
-
-/// Rows the read-only transaction does not stop: only the principal's privileges (L5) do. Run
-/// as `hv_ro` only. P11 P13 P14 (read, `COPY TO` a file) P16 P31 P32 P33 P34.
-///
-/// ## m2b-t23-f1: the guard's text layer (1b) refuses a direct call of a function no rollback
-/// undoes (`function`); SQL built at run time gets past it and meets `hv_ro`'s missing
-/// privilege (after the remediation's `REVOKE` of `pg_logical_emit_message`), which is why the
-/// label is enforced only once that `REVOKE` ran.
-const PG_PRIVILEGE_ONLY: &[Row] = &[
-    ("P11", "SELECT pg_terminate_backend({victim})", &[PG_PRIV]),
-    ("P13", "COPY (SELECT 1) TO PROGRAM 'true'", &[PG_PRIV]),
-    ("P14", "SELECT pg_read_file('/etc/hostname')", &[PG_PRIV]),
-    ("P14", "COPY hv_t23 TO '/tmp/hv_t23_copy'", &[PG_PRIV]),
-    ("P16", "SET ROLE hv_test", &[PG_PRIV]),
-    ("P16", "SET SESSION AUTHORIZATION hv_test", &[PG_PRIV]),
-    (
-        "P31",
-        "SELECT pg_create_physical_replication_slot('hv_t23_slot')",
-        &[FUNCTION],
-    ),
-    (
-        "P31",
-        "DO $$ BEGIN EXECUTE 'SELECT pg_create_physical_' || 'replication_slot(''hv_t23_slot'')'; END $$",
-        &[PG_PRIV],
-    ),
-    ("P32", "SELECT pg_switch_wal()", &[FUNCTION]),
-    (
-        "P32",
-        "DO $$ BEGIN EXECUTE 'SELECT pg_switch' || '_wal()'; END $$",
-        &[PG_PRIV],
-    ),
-    (
-        "P32",
-        "SELECT pg_logical_emit_message(true, 'hv_t23', 'x')",
-        &[FUNCTION],
-    ),
-    (
-        "P32",
-        "SELECT pg_logical_emit_message(false, 'hv_t23', 'x')",
-        &[FUNCTION],
-    ),
-    (
-        "P32",
-        "DO $$ BEGIN EXECUTE 'SELECT pg_logical_' || 'emit_message(true, ''hv_t23'', ''x'')'; END $$",
-        &[PG_PRIV],
-    ),
-    (
-        "P32",
-        "DO $$ BEGIN EXECUTE 'SELECT pg_logical_' || 'emit_message(false, ''hv_t23'', ''x'')'; END $$",
-        &[PG_PRIV],
-    ),
-    (
-        "P33",
-        "SELECT lo_export(230023, '/tmp/hv_t23_lo')",
-        &[PG_PRIV],
-    ),
-    ("P34", "CHECKPOINT", &[PG_PRIV]),
-    ("P34", "SELECT pg_stat_reset()", &[PG_PRIV]),
-];
 
 /// The connection was lost (the session recovered on its own).
 const LOST: &str = "lost";
 
 /// MySQL's read-only transaction refusal (`ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION`).
 const MY_RO: &str = "1792";
-/// Table-level privilege refusals: `ER_TABLEACCESS_DENIED_ERROR`, `ER_DBACCESS_DENIED_ERROR`.
+/// Table-level privilege refusals: `ER_TABLEACCESS_DENIED_ERROR`.
 const MY_TABLE_PRIV: &str = "1142";
-const MY_DB_PRIV: &str = "1044";
-/// The global privilege refusal: `ER_SPECIFIC_ACCESS_DENIED_ERROR`.
-const MY_PRIV: &str = "1227";
 
-/// Rows the read-only transaction or session setting (or the prepared-statement protocol)
-/// stops whoever runs them: M1 M2 M5 (`FOR UPDATE`, `LOCK TABLES`) M6 M8 M12 M13 M17. `hv_ro`
-/// may meet its missing privilege first.
-const MYSQL_SERVER_BLOCKED: &[Row] = &[
-    (
-        "M1",
-        "/*!50000 DROP TABLE hv_t23_bypass */",
-        &[MY_RO, MY_TABLE_PRIV],
-    ),
-    (
-        "M1",
-        "/*!50000 INSERT INTO hv_t23_bypass VALUES (50) */",
-        &[MY_RO, MY_TABLE_PRIV],
-    ),
-    ("M2", "SELECT 1; DROP TABLE hv_t23_bypass", &["1064"]),
-    (
-        "M5",
-        "SELECT * FROM hv_t23_bypass FOR UPDATE",
-        &[MY_RO, MY_TABLE_PRIV],
-    ),
-    ("M5", "LOCK TABLES hv_t23_bypass WRITE", &["protocol"]),
-    (
-        "M6",
-        "PREPARE hv_t23_s FROM 'DELETE FROM hv_t23_bypass'",
-        &["protocol"],
-    ),
-    (
-        "M8",
-        "CREATE TABLE hv_t23_m8 (a int)",
-        &[MY_RO, MY_TABLE_PRIV],
-    ),
-    (
-        "M8",
-        "TRUNCATE TABLE hv_t23_bypass",
-        &[MY_RO, MY_TABLE_PRIV],
-    ),
-    ("M8", "DELETE FROM hv_t23_bypass", &[MY_RO, MY_TABLE_PRIV]),
-    ("M12", "HANDLER hv_t23_bypass OPEN", &["protocol"]),
-    ("M13", "XA START 'hv_t23'", &["protocol"]),
-    (
-        "M17",
-        "CREATE TEMPORARY TABLE hv_t23_tmp (a int)",
-        &[MY_RO, MY_DB_PRIV],
-    ),
-];
+// ## m3b-t18-safe06 (named exception: the rows moved to `sql-testkit/bypass/*.toml`, read by
+// path with no crate edge, P-M3b-13). Run B is unchanged: the same rows, in the same order, with
+// the same outcomes allowed, and no classifier.
 
-/// Rows only `hv_ro`'s missing privileges stop (L5), including T18's carries: `SET GLOBAL`,
-/// `SET PERSIST`, `RESET PERSIST` (no implicit commit; administrative privileges) and a
-/// `CALL` of a procedure that commits and writes (no `EXECUTE`). M4 M7 M10 M11.
-const MYSQL_PRIVILEGE_ONLY: &[Row] = &[
-    (
-        "M4",
-        "SELECT a FROM hv_t23_bypass INTO OUTFILE '/tmp/hv_t23_out'",
-        &[MY_PRIV],
-    ),
-    // ## m2b-fix-f2: F2 is fixed (a `SET` runs over `COM_QUERY`), so a lost connection no
-    // longer counts as stopped here: the server's refusal is owed.
-    ("M10", "SET GLOBAL max_connections = 999", &[MY_PRIV]),
-    (
-        "M10",
-        "SET PERSIST max_connections = 999",
-        &[MY_PRIV, "1064"],
-    ),
-    // 3615: the variable is not persisted; nothing to reset, nothing reset.
-    ("M10", "RESET PERSIST max_connections", &["3615"]),
-    ("M10", "FLUSH TABLES", &[MY_PRIV]),
-    ("M10", "KILL {victim}", &["1095"]),
-    (
-        "M11",
-        "CREATE FUNCTION hv_t23_udf RETURNS STRING SONAME 'hv_t23.so'",
-        &["protocol"],
-    ),
-    ("M7", "CALL hv_t23_escape()", &["1370"]),
-];
+/// One SQL-SAFE-06 row: its id, the statement, and the outcomes that count as stopped — a
+/// server code (the SQLSTATE on PostgreSQL, the vendor code on MySQL and MariaDB), `1a` (the
+/// transaction-keyword layer, before any I/O), `protocol` (MySQL will not prepare it on a
+/// read-only connection) or `gap` (L6 found the escape and discarded the connection).
+struct Row {
+    id: String,
+    sql: String,
+    allowed: Vec<String>,
+}
 
-/// Rows the server accepts, which the request's end neutralises (`ROLLBACK`,
-/// `COM_RESET_CONNECTION` and the read-only setup again): M1 (a lock in an executable
-/// comment) M3 M5 (`GET_LOCK`) M9 M14. `{tro}` is the engine's transaction read-only variable.
-const MYSQL_NEUTRALISED: &[(&str, &str)] = &[
-    (
-        "M1",
-        "SELECT 1 /*!50000 , (SELECT GET_LOCK('hv_t23_m1', 0)) */",
-    ),
-    ("M3", "SET sql_mode = 'NO_BACKSLASH_ESCAPES'"),
-    ("M5", "SELECT GET_LOCK('hv_t23_m5', 0)"),
-    ("M9", "SET SESSION TRANSACTION READ WRITE"),
-    ("M9", "SET @@session.{tro} = 0"),
-    ("M14", "SET @hv_t23 = 1"),
-];
+impl Row {
+    fn allowed(&self) -> Vec<&str> {
+        self.allowed.iter().map(String::as_str).collect()
+    }
+}
+
+/// The run B rows of `file` (`pg`, `mysql`, `mariadb`, `sqlite`) of `kind`
+/// (`server_blocked`, `neutralised`, `privilege_only`, `non_transactional`), in file order: the
+/// rows an account runs (`accounts` not empty), with their `server_off` outcomes.
+fn rows(file: &str, kind: &str) -> Vec<Row> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../sql/sql-testkit/bypass")
+        .join(format!("{file}.toml"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+    let doc: toml_edit::DocumentMut = text.parse().unwrap_or_else(|e| panic!("{path:?}: {e}"));
+    let strings = |v: Option<&toml_edit::Item>| -> Vec<String> {
+        v.and_then(toml_edit::Item::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    doc["row"]
+        .as_array_of_tables()
+        .unwrap_or_else(|| panic!("{path:?}: no rows"))
+        .iter()
+        .filter(|r| r.get("kind").and_then(toml_edit::Item::as_str) == Some(kind))
+        .filter(|r| !strings(r.get("accounts")).is_empty())
+        .map(|r| Row {
+            id: r["id"].as_str().expect("an id").to_string(),
+            sql: r["sql"].as_str().expect("a statement").to_string(),
+            allowed: strings(r.get("server_off")),
+        })
+        .collect()
+}
+
+/// The MySQL-family rows of `t`: MariaDB's file for a MariaDB line (the same rows, with their
+/// recorded outcomes, C19).
+fn my_file(t: &DockerTarget) -> &'static str {
+    if t.engine == DbmsKind::MariaDb {
+        "mariadb"
+    } else {
+        "mysql"
+    }
+}
 
 /// The name of the transaction read-only variable: `transaction_read_only` on MySQL 8 and
 /// MariaDB 11.1+, `tx_read_only` on MariaDB 10.
@@ -850,16 +622,17 @@ async fn pg_server_blocked(
     a: &mut LiveConnection,
     record: &mut Record,
 ) {
+    let server_blocked = rows("pg", "server_blocked");
     for user in ["hv_ro", t.user.as_str()] {
         let ro = Ro::open_on(t, path, user, PG_DB).await;
         let baseline = pg_snapshot(a, ro.app()).await;
         let who = leg(user, path);
-        for (id, sql, allowed) in PG_SERVER_BLOCKED {
-            let reply = ro.try_row(sql).await;
+        for row in &server_blocked {
+            let reply = ro.try_row(&row.sql).await;
             let after = pg_snapshot(a, ro.app()).await;
             let result = judge(&reply, &baseline, &after);
-            let ok = stopped(&result, allowed);
-            record.row(t, &who, id, sql, result, ok);
+            let ok = stopped(&result, &row.allowed());
+            record.row(t, &who, &row.id, &row.sql, result, ok);
         }
         ro.close().await;
     }
@@ -884,12 +657,12 @@ async fn pg_non_transactional_rows(t: &DockerTarget, a: &mut LiveConnection, rec
         ));
     }
     let baseline = pg_snapshot(a, ro.app()).await;
-    for (id, sql, allowed) in PG_NON_TRANSACTIONAL_TEXT {
-        let reply = ro.try_row(sql).await;
+    for row in rows("pg", "non_transactional") {
+        let reply = ro.try_row(&row.sql).await;
         let after = pg_snapshot(a, ro.app()).await;
         let result = judge(&reply, &baseline, &after);
-        let ok = stopped(&result, allowed);
-        record.row(t, "hv_ro (PUBLIC EXECUTE)", id, sql, result, ok);
+        let ok = stopped(&result, &row.allowed());
+        record.row(t, "hv_ro (PUBLIC EXECUTE)", &row.id, &row.sql, result, ok);
     }
     ro.close().await;
     batch(a, &t.id, &revoke_emit_message(t)).await;
@@ -932,7 +705,7 @@ async fn pg_bypass_rows(t: &DockerTarget) -> Record {
         record.fail(format!("{} hv_ro: the label is {label:?}", t.id));
     }
     let baseline = pg_snapshot(&mut a, ro.app()).await;
-    for (id, sql) in PG_NEUTRALISED {
+    for Row { id, sql, .. } in &rows("pg", "neutralised") {
         let reply = ro.try_row(sql).await;
         let mut lingering = ro.lingering(&checks).await;
         // A write is still refused by the read-only transaction.
@@ -948,13 +721,13 @@ async fn pg_bypass_rows(t: &DockerTarget) -> Record {
 
     // A backend of another role for P11: the admin's own.
     let victim = scalar(&mut a, "SELECT pg_backend_pid()").await;
-    for (id, sql, allowed) in PG_PRIVILEGE_ONLY {
-        let run_sql = sql.replace("{victim}", &victim);
+    for row in rows("pg", "privilege_only") {
+        let run_sql = row.sql.replace("{victim}", &victim);
         let reply = ro.try_row(&run_sql).await;
         let after = pg_snapshot(&mut a, ro.app()).await;
         let result = judge(&reply, &baseline, &after);
-        let ok = stopped(&result, allowed);
-        record.row(t, "hv_ro", id, &shown(sql), result, ok);
+        let ok = stopped(&result, &row.allowed());
+        record.row(t, "hv_ro", &row.id, &shown(&row.sql), result, ok);
     }
     // P11's victim is alive (the side channel itself).
     assert_eq!(scalar(&mut a, "SELECT 1").await, "1", "{} P11", t.id);
@@ -1061,16 +834,16 @@ async fn mysql_server_blocked(
     record: &mut Record,
 ) {
     let baseline = mysql_snapshot(a, t).await;
-    for (id, sql, allowed) in MYSQL_SERVER_BLOCKED {
-        let reply = ro.try_row(sql).await;
+    for row in rows(my_file(t), "server_blocked") {
+        let reply = ro.try_row(&row.sql).await;
         let after = mysql_snapshot(a, t).await;
         let result = judge(&reply, &baseline, &after);
         let ok = if judged {
-            stopped(&result, allowed)
+            stopped(&result, &row.allowed())
         } else {
             !matches!(result, BypassResult::Unknown(_))
         };
-        record.row(t, who, id, sql, result, ok);
+        record.row(t, who, &row.id, &row.sql, result, ok);
     }
 }
 
@@ -1144,7 +917,7 @@ async fn mysql_bypass_rows(t: &DockerTarget, judged: bool) -> Record {
         record.fail(format!("{} hv_ro: the label is {label:?}", t.id));
     }
     let baseline = mysql_snapshot(&mut a, t).await;
-    for (id, sql) in MYSQL_NEUTRALISED {
+    for Row { id, sql, .. } in &rows(my_file(t), "neutralised") {
         let run_sql = sql.replace("{tro}", tro(t));
         let reply = ro.try_row(&run_sql).await;
         let mut lingering = ro.lingering(&checks).await;
@@ -1162,13 +935,13 @@ async fn mysql_bypass_rows(t: &DockerTarget, judged: bool) -> Record {
     }
 
     let victim = scalar(&mut a, "SELECT CONNECTION_ID()").await;
-    for (id, sql, allowed) in MYSQL_PRIVILEGE_ONLY {
-        let run_sql = sql.replace("{victim}", &victim);
+    for row in rows(my_file(t), "privilege_only") {
+        let run_sql = row.sql.replace("{victim}", &victim);
         let reply = ro.try_row(&run_sql).await;
         let after = mysql_snapshot(&mut a, t).await;
         let result = judge(&reply, &baseline, &after);
-        let ok = required(stopped(&result, allowed), &result);
-        record.row(t, "hv_ro", id, &shown(sql), result, ok);
+        let ok = required(stopped(&result, &row.allowed()), &result);
+        record.row(t, "hv_ro", &row.id, &shown(&row.sql), result, ok);
     }
     // M10's victim is alive (the side channel itself).
     assert_eq!(scalar(&mut a, "SELECT 1").await, "1", "{} M10 KILL", t.id);
@@ -1447,19 +1220,12 @@ async fn sqlite_bypass_rows_blocked_without_classifier() {
     };
     let ro = OnManager::connect(deps(), p).await;
     let d = dir.path().display();
-    let rows = [
-        ("L9", "INSERT INTO t VALUES (2)".to_string()),
-        ("L2", format!("ATTACH '{d}/n.db' AS n")),
-        ("L2", format!("VACUUM INTO '{d}/c.db'")),
-        ("L1", "PRAGMA query_only = 0".to_string()),
-        ("L8", "CREATE TEMP TABLE x (a)".to_string()),
-        ("L3", format!("SELECT writefile('{d}/w', 'x')")),
-        ("L3", "SELECT load_extension('hv_t23')".to_string()),
-        ("L4", "PRAGMA writable_schema = 1".to_string()),
-        ("L9", "PRAGMA user_version = 7".to_string()),
-        ("L9", "PRAGMA journal_mode = WAL".to_string()),
-        ("L6", "BEGIN IMMEDIATE".to_string()),
-    ];
+    // ## m3b-t18-safe06: the rows from `sql-testkit/bypass/sqlite.toml` (`{d}`: this directory).
+    let rows: Vec<(String, String)> = rows("sqlite", "server_blocked")
+        .into_iter()
+        .map(|r| (r.id, r.sql.replace("{d}", &d.to_string())))
+        .collect();
+    assert_eq!(rows.len(), 11, "run B's SQLite rows");
     for (id, sql) in &rows {
         let reply = run(&ro.s, sql).await;
         assert!(reply.is_err(), "{id} `{sql}` ran");
