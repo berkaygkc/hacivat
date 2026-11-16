@@ -161,6 +161,11 @@ pub enum LogMsg {
     /// A statement failed or was cancelled and the server rolled back the user's whole
     /// transaction with it (a SQLite interrupt, a MySQL deadlock).
     TxRolledBackByServer,
+    /// Fix round 2 (R1-I1): a statement failed or was cancelled and the user's transaction
+    /// ended with it, but the statement may have committed it first (an implicit-commit
+    /// statement on MySQL/MariaDB, a DDL, a unit run as one, a statement Hacivat can't read):
+    /// the user checks what was committed.
+    TxEndedByStatement,
 }
 
 /// A message argument. Counts are numbers the app formats in the format locale; a statement
@@ -233,6 +238,7 @@ impl LogMsg {
             LogMsg::RunAsOneTxFailed => "exec-run-as-one-tx-failed",
             // ## m3b-t19-confirm-tx
             LogMsg::TxRolledBackByServer => "exec-tx-rolled-back-by-server",
+            LogMsg::TxEndedByStatement => "exec-tx-ended-by-statement",
         }
     }
 
@@ -313,7 +319,7 @@ impl LogMsg {
             LogMsg::ClosedEarly { ran, .. } => vec![("n", LogArg::U64(u64::from(*ran)))],
             LogMsg::RunAsOneRolledBack | LogMsg::RunAsOneTxFailed => Vec::new(),
             // ## m3b-t19-confirm-tx
-            LogMsg::TxRolledBackByServer => Vec::new(),
+            LogMsg::TxRolledBackByServer | LogMsg::TxEndedByStatement => Vec::new(),
         }
     }
 
@@ -345,7 +351,7 @@ impl LogMsg {
             LogMsg::NoticesDropped { .. } | LogMsg::ClosedEarly { .. } => Severity::Notice,
             LogMsg::RunAsOneRolledBack | LogMsg::RunAsOneTxFailed => Severity::Warning,
             // ## m3b-t19-confirm-tx
-            LogMsg::TxRolledBackByServer => Severity::Warning,
+            LogMsg::TxRolledBackByServer | LogMsg::TxEndedByStatement => Severity::Warning,
             LogMsg::RowsRetrieved { .. }
             | LogMsg::RowsAffected { .. }
             | LogMsg::Completed { .. }

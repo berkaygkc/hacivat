@@ -919,7 +919,11 @@ impl Core {
 fn stops_the_run(error: &ExecError) -> bool {
     matches!(
         error.kind,
-        ExecErrorKind::Tx(TxError::ConfirmTimedOut | TxError::ConfirmAlreadyCommitted)
+        ExecErrorKind::Tx(
+            TxError::ConfirmTimedOut
+                | TxError::ConfirmAlreadyCommitted
+                | TxError::ExplainNotRolledBack
+        )
     )
 }
 

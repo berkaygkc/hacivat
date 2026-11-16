@@ -162,3 +162,35 @@ async fn smart_leaves_the_explain_to_its_wrap() {
             .any(|e| matches!(e, RunEvent::NeedsCommit { .. }))
     );
 }
+
+// ## m3b-t19-confirm-tx (fix round 2, R1-m3)
+/// A Manual MySQL `EXPLAIN ANALYZE` whose statement left nothing open (it touched no
+/// transactional table): its changes stand, it is reported in its own words, and the run stops.
+#[tokio::test(start_paused = true)]
+async fn an_explain_that_left_nothing_open_has_its_own_reason() {
+    let (h, f) = session(FakeDriver::new(DbmsKind::MySql).tracks_transactions()).await;
+    tx_cmd(&h, TxCommand::SetMode(TxMode::Manual))
+        .await
+        .unwrap();
+    tx_cmd(&h, TxCommand::SetIsolation(IsolationLevel::Default))
+        .await
+        .unwrap();
+    let before = f.call_log().len();
+    let t = run_units(
+        &h,
+        vec![
+            verdict_unit(0, EXPLAIN, UnitVerdict::ExplainAnalyzeRollback),
+            verdict_unit(1, "SELECT 1", UnitVerdict::Read),
+        ],
+        RunSpec::CONFIRM_DEADLINE,
+    );
+    assert_eq!(
+        t.ticket.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::Tx(hacivat_session::session::TxError::ExplainNotRolledBack)
+    );
+    assert_eq!(
+        sent(&f, before),
+        [st("SAVEPOINT hv_explain"), q(EXPLAIN)],
+        "no ROLLBACK TO, and the next unit is not sent"
+    );
+}

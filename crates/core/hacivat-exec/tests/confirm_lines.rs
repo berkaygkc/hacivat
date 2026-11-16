@@ -48,6 +48,7 @@ fn every_confirm_line_and_error_title_has_its_strings() {
         LogMsg::ConfirmStatementFailed,
         LogMsg::ImplicitCommit,
         LogMsg::TxRolledBackByServer,
+        LogMsg::TxEndedByStatement,
     ];
     let titles = [
         TxError::ImplicitCommitUnconfirmed,
@@ -55,6 +56,7 @@ fn every_confirm_line_and_error_title_has_its_strings() {
         TxError::ConfirmTimedOut,
         TxError::ConfirmUndone,
         TxError::TableLocksHeld,
+        TxError::ExplainNotRolledBack,
     ]
     .map(|e| error_title_id(&ExecErrorKind::Tx(e)));
     for locale in ["en", "tr"] {

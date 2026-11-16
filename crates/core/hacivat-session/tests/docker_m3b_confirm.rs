@@ -271,32 +271,54 @@ async fn confirm_in_tx_on_the_matrix() {
     // inside the savepoint; SQLite rolls back the whole transaction with it. Nothing is asked,
     // no `ROLLBACK TO` is needed, the session stays usable, and the user's earlier insert is
     // gone (as the server did it).
+    // Fix round 2 (R1-I2): no fixed sleep decides the assertions. The cancel goes out right
+    // after `UnitStarted`; if it beat the statement (the transaction is still open: only the
+    // statement was cancelled, the user's transaction is intact), the attempt is rolled back
+    // and repeated with a short backoff, at most `ATTEMPTS` times. Every outcome is asserted.
+    const ATTEMPTS: u64 = 10;
     let s = &on.s;
-    user("sqlite", s, "BEGIN").await;
-    user("sqlite", s, "INSERT INTO t19 (a) VALUES (10)").await;
     let slow = "UPDATE t19 SET a = a WHERE (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL \
                 SELECT x + 1 FROM c WHERE x < 1000000000) SELECT count(*) FROM c) > 0";
-    let ran = confirmed(s, slow);
-    wait_until("sqlite: the slow statement runs", LIMIT, || {
-        ran.o
-            .events()
-            .iter()
-            .any(|e| matches!(e, hacivat_session::session::RunEvent::UnitStarted { .. }))
-    })
-    .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let _ = s.cancel(ran.ticket.seq).await;
-    ended("sqlite", &ran).await;
-    assert!(commit_questions(&ran.o).is_empty(), "sqlite: never asked");
-    assert_eq!(
-        ran.o.unit_ends(),
-        [hacivat_session::session::UnitEnd::Cancelled],
-        "sqlite"
-    );
-    assert_eq!(
-        s.state().borrow().tx.status,
-        TxStatus::Idle,
-        "sqlite: the interrupt rolled back the whole transaction"
+    let mut interrupted = false;
+    for attempt in 0..ATTEMPTS {
+        user("sqlite", s, "BEGIN").await;
+        user("sqlite", s, "INSERT INTO t19 (a) VALUES (10)").await;
+        let ran = confirmed(s, slow);
+        wait_until("sqlite: the slow statement starts", LIMIT, || {
+            ran.o
+                .events()
+                .iter()
+                .any(|e| matches!(e, hacivat_session::session::RunEvent::UnitStarted { .. }))
+        })
+        .await;
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(100 * attempt)).await;
+        }
+        let _ = s.cancel(ran.ticket.seq).await;
+        ended("sqlite", &ran).await;
+        assert!(commit_questions(&ran.o).is_empty(), "sqlite: never asked");
+        assert_eq!(
+            ran.o.unit_ends(),
+            [hacivat_session::session::UnitEnd::Cancelled],
+            "sqlite"
+        );
+        let tx = s.state().borrow().tx.clone();
+        if tx.status == TxStatus::Idle {
+            // The interrupt hit the running statement: SQLite rolled back the whole transaction.
+            interrupted = true;
+            break;
+        }
+        // The cancel beat the statement: the user's transaction is intact and theirs.
+        assert_eq!(
+            (tx.status, tx.owner),
+            (TxStatus::InTx, hacivat_session::session::TxOwner::User),
+            "sqlite: attempt {attempt}"
+        );
+        user("sqlite", s, "ROLLBACK").await;
+    }
+    assert!(
+        interrupted,
+        "sqlite: the cancel never reached the running statement in {ATTEMPTS} attempts"
     );
     user("sqlite", s, "SELECT 1").await;
     assert_eq!(

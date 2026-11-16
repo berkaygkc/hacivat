@@ -64,6 +64,7 @@ use crate::session::actor::Core;
 use crate::session::cursor::Watch;
 use crate::session::run_gate::{Answer, Ask};
 use crate::session::schema::{Family, family};
+use crate::session::smart::leading_words;
 use crate::session::tx::begin_sql;
 use crate::session::verdict::{SessionEffects, UnitVerdict};
 use crate::session::{
@@ -137,6 +138,9 @@ pub(crate) struct Wrap {
 /// How ending the wrap went.
 enum Undone {
     Done,
+    /// Fix round 2 (R1-m2): Keep's `RELEASE` was refused and left the transaction failed
+    /// (PostgreSQL): the kept statement will not survive the user's `COMMIT`.
+    TxFailed(ExecError),
     /// The connection is gone: the server rolled back.
     Lost(ExecError),
     /// The server refused; the session is broken (nothing may run in a transaction Hacivat
@@ -170,21 +174,22 @@ impl Core {
     }
 
     /// Follows the user's table locks after `sql` ran (MySQL/MariaDB): `LOCK TABLE[S]` (or the
-    /// gate's `SessionEffects::LOCK_TABLES`) takes them; `UNLOCK TABLES` and a transaction's
-    /// start release them. A reconnect and a reset clear them (`actor.rs`).
+    /// gate's `SessionEffects::LOCK_TABLES`) takes them; `UNLOCK TABLE[S]`, `START TRANSACTION`
+    /// and `BEGIN` release them. A reconnect and a reset clear them (`actor.rs`). Fix round 2
+    /// (R1-m1): the words are read past leading comments and inside an executable comment, and
+    /// only those statements release (not `START REPLICA`, `UNLOCK INSTANCE`, `BEGIN NOT
+    /// ATOMIC`).
     pub(crate) fn note_table_locks(&mut self, sql: &str, effects: Option<SessionEffects>) {
         if family(self.kind) != Family::MySql {
             return;
         }
-        let mut words = sql
-            .split(|c: char| c.is_whitespace() || c == ';')
-            .filter(|w| !w.is_empty())
-            .map(str::to_ascii_uppercase);
-        let first = words.next().unwrap_or_default();
-        let second = words.next().unwrap_or_default();
-        match first.as_str() {
-            "LOCK" if matches!(second.as_str(), "TABLE" | "TABLES") => self.table_locks = true,
-            "UNLOCK" | "START" | "BEGIN" => self.table_locks = false,
+        let words = leading_words(sql, 2);
+        let w = |i: usize| words.get(i).map_or("", String::as_str);
+        match (w(0), w(1)) {
+            ("LOCK", "TABLE" | "TABLES") => self.table_locks = true,
+            ("UNLOCK", "TABLE" | "TABLES") | ("START", "TRANSACTION") => self.table_locks = false,
+            ("BEGIN", second) if second != "NOT" => self.table_locks = false,
+            ("UNLOCK" | "START" | "BEGIN", _) => {}
             _ if effects.is_some_and(|e| e.contains(SessionEffects::LOCK_TABLES)) => {
                 self.table_locks = true;
             }
@@ -327,18 +332,27 @@ impl Core {
             if wrap.form == Form::Own {
                 self.end_own();
             }
+            // Fix round 2 (R1-m3): an `EXPLAIN ANALYZE` has its own wording.
+            let (reason, notice) = match wrap.kind {
+                WrapKind::Confirm => (
+                    TxError::ConfirmAlreadyCommitted,
+                    "exec-confirm-already-committed",
+                ),
+                WrapKind::Explain => (
+                    TxError::ExplainNotRolledBack,
+                    "exec-explain-not-rolled-back",
+                ),
+            };
             tracing::warn!(
                 run,
                 unit = ordinal,
                 savepoint = wrap.form == Form::Savepoint,
-                notice = "exec-confirm-already-committed",
+                notice,
                 "the wrapped statement was committed by the server on its own; nothing was asked \
                  and the rest of the run is not sent"
             );
             self.publish_tx();
-            return UnitEnd::Failed(ExecError::of(ExecErrorKind::Tx(
-                TxError::ConfirmAlreadyCommitted,
-            )));
+            return UnitEnd::Failed(ExecError::of(ExecErrorKind::Tx(reason)));
         }
         match wrap.kind {
             WrapKind::Explain => {
@@ -351,7 +365,9 @@ impl Core {
                 self.publish_tx();
                 match undone {
                     Undone::Done => ended,
-                    Undone::Lost(e) | Undone::Refused(e) => UnitEnd::Failed(e),
+                    Undone::Lost(e) | Undone::Refused(e) | Undone::TxFailed(e) => {
+                        UnitEnd::Failed(e)
+                    }
                 }
             }
             WrapKind::Confirm => self.decide(spec, unit, wrap, ended, w).await,
@@ -412,7 +428,7 @@ impl Core {
         self.publish_tx();
         match undone {
             Undone::Done => ended,
-            Undone::Lost(e) | Undone::Refused(e) => match ended {
+            Undone::Lost(e) | Undone::Refused(e) | Undone::TxFailed(e) => match ended {
                 UnitEnd::Failed(first) => UnitEnd::Failed(first),
                 _ => UnitEnd::Failed(e),
             },
@@ -444,7 +460,7 @@ impl Core {
             self.publish_tx();
             return match undone {
                 Undone::Done => UnitEnd::Cancelled,
-                Undone::Lost(e) | Undone::Refused(e) => UnitEnd::Failed(e),
+                Undone::Lost(e) | Undone::Refused(e) | Undone::TxFailed(e) => UnitEnd::Failed(e),
             };
         }
         let affected = match &ended {
@@ -526,6 +542,9 @@ impl Core {
                     }
                 }
             }
+            // Fix round 2 (R1-m2): not reported as kept; the unit fails with the server's text
+            // and the snapshot shows the failed transaction.
+            Undone::TxFailed(e) => UnitEnd::Failed(e),
             Undone::Lost(mut e) => {
                 // Fix round 1 (m2): worded per answer.
                 match answer {
@@ -583,7 +602,17 @@ impl Core {
             }
             Form::Savepoint => {
                 let released = self.control(wrap.kind.release()).await;
-                self.after_release(released)
+                match released {
+                    Err(e) if self.broken.is_none() && self.tx.status == TxStatus::Failed => {
+                        tracing::warn!(
+                            kind = ?e.kind,
+                            "the server refused to release Hacivat's savepoint after Keep and \
+                             failed the transaction; the kept statement is not kept"
+                        );
+                        Undone::TxFailed(e)
+                    }
+                    other => self.after_release(other),
+                }
             }
         }
     }

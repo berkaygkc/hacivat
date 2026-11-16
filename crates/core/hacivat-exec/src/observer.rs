@@ -120,6 +120,9 @@ struct UnitInfo {
     run_as_one: bool,
     /// A DDL statement: its end says `exec-completed` on every engine (ledger 340).
     ddl: bool,
+    // ## m3b-t19-confirm-tx (fix round 2, R1-I1)
+    /// The gate's effects say it commits an open transaction first (`COMMITS_FIRST`).
+    commits_first: bool,
 }
 
 impl UnitInfo {
@@ -217,6 +220,9 @@ pub(crate) struct PlannedUnit {
     pub run_as_one: bool,
     /// The gate's effects say DDL.
     pub ddl: bool,
+    // ## m3b-t19-confirm-tx (named exception, fix round 2, R1-I1)
+    /// The gate's effects say MySQL/MariaDB commit an open transaction before it.
+    pub commits_first: bool,
     /// The user skipped it at the confirmation (R-M3-84): never sent.
     pub skipped: bool,
 }
@@ -337,6 +343,7 @@ impl ExecObserver {
                         multi: true,
                         run_as_one: plan.run_as_one,
                         ddl: plan.ddl || is_ddl(&plan.sent),
+                        commits_first: plan.commits_first,
                     },
                     None => UnitInfo {
                         id,
@@ -347,6 +354,7 @@ impl ExecObserver {
                         multi: false,
                         run_as_one: false,
                         ddl: is_ddl(&u.text),
+                        commits_first: false,
                     },
                 }
             })
@@ -709,7 +717,7 @@ impl ExecObserver {
             st.tx_ended.take_if(|(_, o)| *o == unit.ordinal)
         };
         if let Some((from, _)) = tx_ended
-            && let Some(msg) = tx_line(&u.text, from, outcome, u.ddl)
+            && let Some(msg) = tx_line(&u.text, from, outcome, may_commit(&u))
         {
             self.line(msg, Some(&u));
         }
@@ -892,6 +900,20 @@ impl ExecObserver {
     }
 }
 
+// ## m3b-t19-confirm-tx (fix round 2, R1-I1)
+/// Whether `u` may have committed the user's open transaction itself before it failed: a unit
+/// run as one (its own `COMMIT`), one the gate says commits first, a DDL, a statement on
+/// MySQL/MariaDB's implicit-commit list (read from every word of its text), or one whose first
+/// word Hacivat can't read (a leading comment, a parenthesis). Then a transaction that ended
+/// with the failure is never reported as rolled back.
+fn may_commit(u: &UnitInfo) -> bool {
+    u.run_as_one
+        || u.commits_first
+        || u.ddl
+        || first_word(u.text.trim_start()).is_empty()
+        || crate::implicit_commit::commits(&crate::implicit_commit::raw_words(&u.text))
+}
+
 /// What a unit whose statement `sql` moved the user's transaction from `from` to idle says
 /// about it, once the unit ended as `outcome`:
 /// - `COMMIT`/`END` that succeeded: committed (unless the transaction had failed, which
@@ -899,8 +921,13 @@ impl ExecObserver {
 /// - `ROLLBACK`/`ABORT`, or any of these four that failed: rolled back (the server ended the
 ///   transaction without committing it: a failed COMMIT, as a deferred constraint or a
 ///   serialization failure, rolls it back);
-/// - anything else (an implicit end, a loss, a cancel): nothing. Better silent than wrong.
-fn tx_line(sql: &str, from: TxStatus, outcome: &UnitEnd, ddl: bool) -> Option<LogMsg> {
+/// - ## m3b-t19-confirm-tx (fix rounds 1 and 2): any other statement that failed or was
+///   cancelled inside the transaction: the server rolled it back (`TxRolledBackByServer`),
+///   unless the statement `may_commit` it first, which only says it ended
+///   (`TxEndedByStatement`);
+/// - anything else (an implicit end after a success, a loss): nothing. Better silent than
+///   wrong.
+fn tx_line(sql: &str, from: TxStatus, outcome: &UnitEnd, may_commit: bool) -> Option<LogMsg> {
     let word = first_word(sql);
     let is = |w: &str| word.eq_ignore_ascii_case(w);
     let commit = is("COMMIT") || is("END");
@@ -911,13 +938,16 @@ fn tx_line(sql: &str, from: TxStatus, outcome: &UnitEnd, ddl: bool) -> Option<Lo
         }
         UnitEnd::Succeeded { .. } if commit || rollback => Some(LogMsg::TxRolledBack),
         UnitEnd::Failed(_) if commit || rollback => Some(LogMsg::TxRolledBack),
-        // ## m3b-t19-confirm-tx (named exception, fix round 1, I1): any other statement that
-        // failed or was cancelled while the user's open transaction ended: the server rolled
-        // the whole transaction back (a SQLite interrupt, a MySQL deadlock). Not after a DDL,
-        // which on MySQL commits the transaction before it runs.
-        UnitEnd::Failed(_) | UnitEnd::Cancelled if from == TxStatus::InTx && !ddl => {
-            Some(LogMsg::TxRolledBackByServer)
-        }
+        // ## m3b-t19-confirm-tx (named exception, fix rounds 1 and 2, I1, R1-I1): any other
+        // statement that failed or was cancelled while the user's open transaction ended: the
+        // server rolled the whole transaction back (a SQLite interrupt, a MySQL deadlock), unless
+        // the statement may have committed it first ([`may_commit`]); then the line only says
+        // the transaction ended and asks the user to check what was committed.
+        UnitEnd::Failed(_) | UnitEnd::Cancelled if from == TxStatus::InTx => Some(if may_commit {
+            LogMsg::TxEndedByStatement
+        } else {
+            LogMsg::TxRolledBackByServer
+        }),
         _ => None,
     }
 }
@@ -1218,6 +1248,65 @@ mod tests {
     //! The observer fed synthetic run events: outcomes the FakeDriver cannot produce (a COMMIT
     //! that fails and leaves the connection idle, as PostgreSQL's deferred-constraint and
     //! serialization failures do).
+
+    // ## m3b-t19-confirm-tx (named exception, fix round 2, R1-I1)
+    /// A failed statement whose user transaction ended is reported as rolled back by the
+    /// server only when it cannot have committed the transaction itself.
+    #[test]
+    fn a_transaction_ended_by_a_statement_that_may_commit_is_never_called_rolled_back() {
+        let info = |text: &str, run_as_one: bool, commits_first: bool| super::UnitInfo {
+            id: hacivat_session::session::UnitId {
+                run: hacivat_session::session::RunId(1),
+                ordinal: 0,
+            },
+            text: text.into(),
+            range: 0..text.len(),
+            title: None,
+            offsets: None,
+            multi: false,
+            run_as_one,
+            ddl: super::is_ddl(text),
+            commits_first,
+        };
+        let failed = super::UnitEnd::Failed(hacivat_session::session::ExecError::of(
+            hacivat_session::session::ExecErrorKind::Db,
+        ));
+        let line = |u: &super::UnitInfo| {
+            super::tx_line(&u.text, TxStatus::InTx, &failed, super::may_commit(u))
+        };
+        for u in [
+            info("LOCK TABLES missing WRITE", false, false),
+            info("GRANT SELECT ON t TO no_such_user", false, false),
+            info("ANALYZE TABLE t", false, false),
+            info(
+                "INSERT INTO t VALUES (1); COMMIT; INSERT INTO t VALUES ('bad')",
+                true,
+                false,
+            ),
+            info("SET autocommit = 1", false, false),
+            info("CREATE TABLE x (a int)", false, false),
+            info("/* c */ UPDATE t SET a = 1", false, false),
+            info("UPDATE t SET a = 1", false, true),
+        ] {
+            assert_eq!(
+                line(&u),
+                Some(super::LogMsg::TxEndedByStatement),
+                "{}",
+                u.text
+            );
+        }
+        let plain = info("UPDATE t SET a = 1", false, false);
+        assert_eq!(line(&plain), Some(super::LogMsg::TxRolledBackByServer));
+        assert_eq!(
+            super::tx_line(
+                &plain.text,
+                TxStatus::InTx,
+                &super::UnitEnd::Cancelled,
+                super::may_commit(&plain)
+            ),
+            Some(super::LogMsg::TxRolledBackByServer)
+        );
+    }
 
     use std::sync::Arc;
     use std::time::Instant;

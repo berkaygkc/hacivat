@@ -172,6 +172,10 @@ pub enum TxError {
     /// The user rolled back (undid) the confirmed statement: it did not take effect, so the
     /// run's error policy decides what follows.
     ConfirmUndone,
+    // ## m3b-t19-confirm-tx (fix round 2, R1-m3)
+    /// An `EXPLAIN ANALYZE` ran outside a transaction (nothing was open after it), so what it
+    /// changed could not be rolled back; the rest of the run was not sent.
+    ExplainNotRolledBack,
     /// MySQL/MariaDB: the user's `LOCK TABLES` locks are held, and the transaction this needed
     /// would release them; nothing was sent.
     TableLocksHeld,

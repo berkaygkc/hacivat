@@ -65,15 +65,10 @@ impl Core {
 
 // ## m3b-t19-confirm-tx (fix round 1, m4)
 /// Whether `sql` is a statement `kind` refuses inside a transaction block, so Smart lets it run
-/// as in Auto (the module docs). Reads the leading words only; a unit carries no leading
-/// comment.
+/// as in Auto (the module docs). Reads the leading words ([`leading_words`]: comments skipped,
+/// fix round 2, R1-m4).
 pub(crate) fn outside_tx_only(kind: hacivat_proto::DbmsKind, sql: &str) -> bool {
-    let words: Vec<String> = sql
-        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '(' | ')' | ','))
-        .filter(|w| !w.is_empty())
-        .take(8)
-        .map(str::to_ascii_uppercase)
-        .collect();
+    let words = leading_words(sql, 8);
     let w = |i: usize| words.get(i).map_or("", String::as_str);
     match family(kind) {
         Family::Postgres => match (w(0), w(1)) {
@@ -99,10 +94,79 @@ pub(crate) fn outside_tx_only(kind: hacivat_proto::DbmsKind, sql: &str) -> bool 
     }
 }
 
+// ## m3b-t19-confirm-tx (fix round 2, R1-m1, R1-m4)
+/// The first `n` words of `sql`, ASCII-uppercased: leading whitespace and comments (`--`, `#`,
+/// `/* */`) are skipped, and a MySQL/MariaDB executable comment (`/*!…`, `/*!50000 …`,
+/// `/*M!…`) is read as code (its marker and version skipped, its `*/` a separator). `(`, `)`,
+/// `,` and `;` separate words; any other character ends the scan as a one-character word of its
+/// own, so "something else follows" is never mistaken for the end of the statement.
+pub(crate) fn leading_words(sql: &str, n: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = sql;
+    while out.len() < n {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        if let Some(r) = rest.strip_prefix("--").or_else(|| rest.strip_prefix('#')) {
+            rest = r.find('\n').map_or("", |i| &r[i + 1..]);
+        } else if let Some(r) = rest
+            .strip_prefix("/*!")
+            .or_else(|| rest.strip_prefix("/*M!"))
+        {
+            rest = r.trim_start_matches(|c: char| c.is_ascii_digit());
+        } else if let Some(r) = rest.strip_prefix("/*") {
+            match r.find("*/") {
+                Some(i) => rest = &r[i + 2..],
+                None => break,
+            }
+        } else if let Some(r) = rest.strip_prefix("*/") {
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix(['(', ')', ',', ';']) {
+            rest = r;
+        } else {
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '$')))
+                .unwrap_or(rest.len());
+            if end == 0 {
+                let c = rest.chars().next().unwrap_or_default();
+                out.push(c.to_string());
+                break;
+            }
+            out.push(rest[..end].to_ascii_uppercase());
+            rest = &rest[end..];
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use hacivat_proto::DbmsKind;
+
+    #[test]
+    fn leading_words_skip_comments_and_read_executable_comments() {
+        assert_eq!(
+            leading_words("/* c */ -- x\n  lock tables t write", 2),
+            ["LOCK", "TABLES"]
+        );
+        assert_eq!(
+            leading_words("/*!40000 LOCK TABLES t */", 2),
+            ["LOCK", "TABLES"]
+        );
+        assert_eq!(
+            leading_words("/*M!100000 UNLOCK TABLES */", 2),
+            ["UNLOCK", "TABLES"]
+        );
+        assert_eq!(leading_words("# c\nVACUUM", 2), ["VACUUM"]);
+        assert_eq!(leading_words("CLUSTER \"t\"", 4), ["CLUSTER", "\""]);
+        assert_eq!(
+            leading_words("REINDEX (VERBOSE) INDEX CONCURRENTLY i", 8),
+            ["REINDEX", "VERBOSE", "INDEX", "CONCURRENTLY", "I"]
+        );
+        assert!(leading_words("/* never closed", 2).is_empty());
+    }
 
     #[test]
     fn statements_that_cannot_run_in_a_transaction() {
@@ -122,6 +186,8 @@ mod tests {
             "DROP TABLESPACE s",
             "CLUSTER",
             "CLUSTER VERBOSE",
+            "/* maintenance */ VACUUM",
+            "-- nightly\nCREATE INDEX CONCURRENTLY i ON t (a)",
         ] {
             assert!(pg(sql), "{sql}");
         }
@@ -133,6 +199,7 @@ mod tests {
             "ALTER TABLE t ADD a int",
             "UPDATE t SET a = 1",
             "CREATE TABLE concurrently (a int)",
+            "CLUSTER \"t\"",
         ] {
             assert!(!pg(sql), "{sql}");
         }

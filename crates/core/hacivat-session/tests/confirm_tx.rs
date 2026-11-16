@@ -1277,3 +1277,65 @@ async fn mysql_table_locks_refuse_hacivats_own_transaction() {
         [st("START TRANSACTION"), q("UPDATE u SET b=2")]
     );
 }
+
+// ## m3b-t19-confirm-tx (fix round 2)
+
+/// R1-m1: table locks are seen past leading and executable comments, and only `UNLOCK
+/// TABLE[S]`, `START TRANSACTION`/`BEGIN`, a reset or a reconnect release them (`START
+/// REPLICA` and `UNLOCK INSTANCE` do not).
+#[tokio::test(start_paused = true)]
+async fn table_locks_are_read_past_comments_and_released_only_by_their_statements() {
+    // The fake reads any leading START as a transaction start; the server does not.
+    let (h, f) =
+        session(fake(DbmsKind::MySql).exec(vec![tx("START REPLICA", TxStatus::Idle)])).await;
+    run(&h, "/*!40000 LOCK TABLES t WRITE */").await.unwrap();
+    for releases_nothing in ["START REPLICA", "UNLOCK INSTANCE"] {
+        run(&h, releases_nothing).await.unwrap();
+        let before = f.call_log().len();
+        let t = run_verdict(&h, UPDATE, UnitVerdict::TxThenConfirm);
+        assert_eq!(
+            t.ticket.reply.await.unwrap().unwrap_err().kind,
+            ExecErrorKind::Tx(TxError::TableLocksHeld),
+            "after {releases_nothing}"
+        );
+        assert!(sent(&f, before).is_empty());
+    }
+    run(&h, "-- done\nUNLOCK TABLES").await.unwrap();
+    let before = f.call_log().len();
+    let t = run_verdict(&h, UPDATE, UnitVerdict::TxThenConfirm);
+    assert!(answer_nth(&h, &t, 1, CommitAnswer::Commit).await);
+    until_ended(&t.o).await;
+    assert_eq!(
+        sent(&f, before),
+        [st("START TRANSACTION"), q(UPDATE), st("COMMIT")]
+    );
+}
+
+/// R1-m2: Keep whose `RELEASE` the server refused and left the PostgreSQL transaction failed:
+/// the statement is not reported kept (no `CommitDecided`), the unit fails with the server's
+/// text, the snapshot shows the failed transaction, and the session stays.
+#[tokio::test(start_paused = true)]
+async fn keep_with_a_refused_release_that_fails_the_transaction_is_no_success() {
+    let (h, _f) = session(
+        fake_pg()
+            .tracks_transactions()
+            .exec(vec![tx_err("RELEASE", "XX000", TxStatus::Failed)])
+            .queries(vec![leaves("BEGIN", TxStatus::InTx)]),
+    )
+    .await;
+    let t = run_units(
+        &h,
+        vec![
+            verdict_unit(0, "BEGIN", UnitVerdict::Write),
+            verdict_unit(1, UPDATE, UnitVerdict::TxThenConfirm),
+        ],
+        RunSpec::CONFIRM_DEADLINE,
+    );
+    assert!(answer_nth(&h, &t, 1, CommitAnswer::Commit).await);
+    let e = t.ticket.reply.await.unwrap().unwrap_err();
+    assert_eq!(e.kind, ExecErrorKind::Db);
+    assert!(e.server.is_some(), "the server's text");
+    assert!(decided(&t.o).is_empty(), "never reported kept");
+    assert_eq!(snap(&h).tx.status, TxStatus::Failed);
+    assert_eq!(snap(&h).state, SessionState::Idle, "not broken");
+}

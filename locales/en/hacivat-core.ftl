@@ -926,3 +926,7 @@ exec-error-confirm-undone = Rolled back at your request: the statement's changes
 exec-error-tx-table-locks = Not sent: your LOCK TABLES locks are held, and starting a transaction would release them. Run UNLOCK TABLES first.
 # A statement failed and the server rolled back the whole open transaction with it.
 exec-tx-rolled-back-by-server = The server rolled back your whole transaction: every change since it began is gone.
+# A statement failed and the user's transaction ended with it, but the statement may have committed it first (fix round 2).
+exec-tx-ended-by-statement = Your transaction ended with this statement. Check whether your earlier changes were committed.
+# EXPLAIN ANALYZE ran with no transaction open, so what it changed couldn't be rolled back; the run stopped.
+exec-explain-not-rolled-back = EXPLAIN ANALYZE ran outside a transaction, so its changes couldn't be rolled back. The rest of the run wasn't sent.

@@ -2373,3 +2373,20 @@ P-M3b-12). Code blocks are fenced `// ## m3b-t19-confirm-tx`; the bodies are
     strings Task 16 left to Task 19, plus `exec-confirm-already-committed`,
     `exec-error-confirm-timed-out`, `exec-error-confirm-undone`, `exec-error-tx-table-locks` and
     `exec-tx-rolled-back-by-server` (en, tr marked `Review: PO`).
+- **Fix round 2 (controller rulings on the re-check).**
+  - *R1-I1.* The run service never says the server rolled back a transaction that the failed
+    statement may have committed first: a unit run as one, a unit whose gate effects carry
+    `COMMITS_FIRST`, a DDL, a statement on the implicit-commit list (`implicit_commit::commits`
+    over every word of its text, e.g. `LOCK TABLES`, `GRANT`), or one whose first word cannot be
+    read get the neutral `exec-tx-ended-by-statement` ("check whether your earlier changes were
+    committed") instead of `exec-tx-rolled-back-by-server`.
+  - *R1-m1.* Table locks are read with `smart::leading_words` (leading comments skipped, an
+    executable comment read as code); only `UNLOCK TABLE[S]`, `START TRANSACTION` and `BEGIN`
+    (not `BEGIN NOT ATOMIC`) release them, besides a reset and a reconnect; `START REPLICA` and
+    `UNLOCK INSTANCE` do not.
+  - *R1-m2.* Keep whose `RELEASE` the server refused and left the PostgreSQL transaction failed
+    is no success: no `CommitDecided`, the unit fails with the server's text, the snapshot shows
+    the failed transaction, the session stays.
+  - *R1-m3.* A D-062 `EXPLAIN ANALYZE` that left nothing open ends `Tx(ExplainNotRolledBack)`
+    (`exec-explain-not-rolled-back`) instead of the confirm wording; the run stops.
+  - *R1-m4.* Smart's "cannot run in a transaction" check reads past leading comments.

@@ -589,3 +589,7 @@ exec-error-confirm-undone = İsteğiniz üzerine geri alındı: ifadenin değiş
 exec-error-tx-table-locks = Gönderilmedi: LOCK TABLES kilitleriniz tutuluyor ve bir işlem başlatmak onları bırakırdı. Önce UNLOCK TABLES çalıştırın.
 # Review: PO
 exec-tx-rolled-back-by-server = Sunucu işleminizin tamamını geri aldı: işlem başladığından beri yapılan her değişiklik kayboldu.
+# Review: PO
+exec-tx-ended-by-statement = İşleminiz bu ifadeyle sona erdi. Önceki değişikliklerinizin commit edilip edilmediğini denetleyin.
+# Review: PO
+exec-explain-not-rolled-back = EXPLAIN ANALYZE bir işlemin dışında çalıştı, bu yüzden değişiklikleri geri alınamadı. Çalıştırmanın geri kalanı gönderilmedi.

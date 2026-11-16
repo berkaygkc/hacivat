@@ -221,6 +221,8 @@ impl RunRequest {
                     offsets: p.offsets.clone(),
                     run_as_one: self.run_as_one,
                     ddl: item.effects.contains(SessionEffects::DDL),
+                    // ## m3b-t19-confirm-tx (named exception, fix round 2, R1-I1)
+                    commits_first: item.effects.contains(SessionEffects::COMMITS_FIRST),
                     skipped,
                 },
                 item.verdict,
