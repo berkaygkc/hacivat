@@ -2013,11 +2013,18 @@ nothing new is wired into Run (R-M3-52).
   `oneshot::Sender<bool>` reply; `SessionHandle::{choose, commit_decision}` return the
   receiver. `Ladder::command` answers them while a request runs and the idle loop otherwise,
   through the session's one `RunGate` (`Mutex<{pending, answer}>` + `Notify`, shared by `Ctl` and
-  `Core` like `StopSignal`). An answer counts only for the question waiting now (the request's
-  sequence number; for a commit also the unit); anything else, a second answer, an answer
-  after the request ended, or a closed session answers `false`. `run_one` sets
-  `Core::request_seq` and withdraws any question before and after each request. `Request`
-  gains no variant. No run waits yet (Tasks 11, 19), so every answer is `false`.
+  `Core` like `StopSignal`). **Question identity (fix round 1, review I1):** `RunGate::ask`
+  gives every question an id from a counter that only grows for the session's life;
+  `RunEvent::{NeedsChoice, NeedsCommit}` carry it as `question`, and
+  `choose(run_seq, question, choice)` / `commit_decision(run_seq, unit, question, answer)`
+  name it. An answer counts only when its kind, request sequence number and question id (and,
+  for a commit, the unit) match the question waiting now. A double click, an answer from an
+  older bar that arrives after the run asked again (also after a Retry re-asked for the same
+  unit), any other id, an answer after the request ended, or a closed session answers `false`
+  and changes nothing. Tasks 11 and 19 call `ask` before emitting the event, with no `.await`
+  between them. `run_one` sets `Core::request_seq` and withdraws any question before and after
+  each request. `Request` gains no variant. No run waits yet (Tasks 11, 19), so every answer
+  is `false`.
 - **Verdicts.** `RunUnit` gains `binds`, `verdict` (`UnitVerdict`, default `Unknown`),
   `effects` (`SessionEffects`, `bitflags`), `masked`, `max_result_sets`, `cell_cap`
   (`RunUnit::plain` builds M3a's shape). Until their tasks: a `TxThenConfirm` or

@@ -166,24 +166,36 @@ pub struct ManagerConfig {
     pub classifier: Option<Arc<dyn StatementClassifier>>,
 }
 
-// ## m3b-t01c-core-seams
+// ## m3b-t01c-core-seams (review M1)
+/// What equality and hashing compare: every field, the classifier by its address.
+type ConfigKey = (Duration, Duration, bool, bool, bool, Option<*const ()>);
+
 impl ManagerConfig {
-    /// The classifier's address, the identity equality and hashing use.
-    fn classifier_addr(&self) -> Option<*const ()> {
-        self.classifier
-            .as_ref()
-            .map(|c| Arc::as_ptr(c).cast::<()>())
+    /// Every field, by value; the classifier by address. The destructuring names each field
+    /// (no `..`), so a field added later is a compile error here until it joins the key.
+    fn key(&self) -> ConfigKey {
+        let Self {
+            liveness,
+            shutdown_budget,
+            presets,
+            reconnect,
+            production_read_only,
+            classifier,
+        } = self;
+        (
+            *liveness,
+            *shutdown_budget,
+            *presets,
+            *reconnect,
+            *production_read_only,
+            classifier.as_ref().map(|c| Arc::as_ptr(c).cast::<()>()),
+        )
     }
 }
 
 impl PartialEq for ManagerConfig {
     fn eq(&self, other: &Self) -> bool {
-        self.liveness == other.liveness
-            && self.shutdown_budget == other.shutdown_budget
-            && self.presets == other.presets
-            && self.reconnect == other.reconnect
-            && self.production_read_only == other.production_read_only
-            && self.classifier_addr() == other.classifier_addr()
+        self.key() == other.key()
     }
 }
 
@@ -191,12 +203,7 @@ impl Eq for ManagerConfig {}
 
 impl std::hash::Hash for ManagerConfig {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.liveness.hash(state);
-        self.shutdown_budget.hash(state);
-        self.presets.hash(state);
-        self.reconnect.hash(state);
-        self.production_read_only.hash(state);
-        self.classifier_addr().hash(state);
+        self.key().hash(state);
     }
 }
 

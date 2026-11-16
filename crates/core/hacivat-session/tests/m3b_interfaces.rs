@@ -19,7 +19,6 @@ use hacivat_driver::{
     QuerySpec, RawConn,
 };
 use hacivat_proto::DbmsKind;
-use hacivat_results::FetchPolicy;
 use hacivat_session::profile::{
     Profile, ProfileDiag, ProfileStore, valid_fn_allowlist_entry, valid_startup_script,
 };
@@ -121,13 +120,13 @@ impl StatementClassifier for DenyAll {
 #[tokio::test]
 async fn choose_without_a_waiting_run_answers_false() {
     let (h, _) = session(fake_pg()).await;
-    assert!(!h.choose(7, RunChoice::Ignore).await.unwrap());
+    assert!(!h.choose(7, 1, RunChoice::Ignore).await.unwrap());
     let unit = UnitId {
         run: RunId(1),
         ordinal: 0,
     };
     assert!(
-        !h.commit_decision(7, unit, CommitAnswer::Commit)
+        !h.commit_decision(7, unit, 1, CommitAnswer::Commit)
             .await
             .unwrap()
     );
@@ -153,14 +152,14 @@ async fn choose_is_served_while_a_request_runs() {
     let start = tokio::time::Instant::now();
     // Answered by `Ladder::command` while the run is in flight, not after it (a queued
     // request would wait the 30 s): no run waits for a choice yet (Task 11), so `false`.
-    assert!(!h.choose(t.seq + 1, RunChoice::Ignore).await.unwrap());
-    assert!(!h.choose(t.seq, RunChoice::Stop).await.unwrap());
+    assert!(!h.choose(t.seq + 1, 1, RunChoice::Ignore).await.unwrap());
+    assert!(!h.choose(t.seq, 1, RunChoice::Stop).await.unwrap());
     let unit = UnitId {
         run: RunId(1),
         ordinal: 0,
     };
     assert!(
-        !h.commit_decision(t.seq, unit, CommitAnswer::RollBack)
+        !h.commit_decision(t.seq, unit, 1, CommitAnswer::RollBack)
             .await
             .unwrap()
     );
@@ -182,7 +181,7 @@ async fn choose_on_a_closed_session_answers_false() {
         snap(&h).state == SessionState::Disconnected
     })
     .await;
-    assert!(!h.choose(1, RunChoice::Stop).await.unwrap_or(false));
+    assert!(!h.choose(1, 1, RunChoice::Stop).await.unwrap_or(false));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -527,5 +526,4 @@ fn allowlist_and_script_rules() {
 #[test]
 fn run_spec_deadline_is_five_minutes() {
     assert_eq!(RunSpec::CONFIRM_DEADLINE, Duration::from_secs(300));
-    let _ = FetchPolicy::default();
 }

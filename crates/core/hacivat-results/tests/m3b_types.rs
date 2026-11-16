@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use hacivat_results::{
-    CloseReason, EvictionRegistry, MemoryBudget, ResultId, ResultSource, ResultStore, SourceCaps,
-    StoreSnapshot,
+    CloseReason, Completeness, EvictionRegistry, MemoryBudget, ResultId, ResultSource, ResultStore,
+    SourceCaps, StoreSnapshot,
 };
-use hacivat_values::ResultSchema;
+use hacivat_values::{Chunk, ColumnMeta, LogicalType, NativeType, ResultSchema, Value};
 
 fn store(id: u64, budget: &Arc<MemoryBudget>) -> Arc<ResultStore> {
     let schema = Arc::new(ResultSchema {
@@ -73,7 +73,43 @@ fn registry_holds_stores_weakly() {
     assert!(registry.is_empty());
 }
 
+/// An evicted result reads as closed by eviction (Re-run brings it back; R-M3-68), never as a
+/// result the memory limit closed, and keeps the rows it holds.
 #[test]
-fn evicted_is_a_close_reason_of_its_own() {
-    assert_ne!(CloseReason::Evicted, CloseReason::MemoryLimit);
+fn an_evicted_store_reads_as_closed_by_eviction() {
+    let budget = MemoryBudget::new(1 << 20, 1 << 20);
+    let schema = Arc::new(ResultSchema {
+        columns: vec![ColumnMeta {
+            name: "n".into(),
+            logical: LogicalType::Int {
+                bits: 64,
+                signed: true,
+            },
+            native: NativeType::Unknown,
+            origin: None,
+        }]
+        .into(),
+    });
+    let (store, mut writer) = ResultStore::new(ResultId(1), schema.clone(), budget, 1);
+    writer.append(Chunk::from_values(
+        &schema,
+        vec![vec![Value::Int(1)], vec![Value::Int(2)]],
+    ));
+    writer.set_state(Completeness::Closed {
+        reason: CloseReason::Evicted,
+    });
+    let snap = store.snapshot();
+    assert_eq!(
+        *snap.completeness(),
+        Completeness::Closed {
+            reason: CloseReason::Evicted
+        }
+    );
+    assert_ne!(
+        *snap.completeness(),
+        Completeness::Closed {
+            reason: CloseReason::MemoryLimit
+        }
+    );
+    assert_eq!(snap.row_count(), 2, "its rows stay");
 }

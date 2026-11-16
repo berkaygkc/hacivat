@@ -310,19 +310,12 @@ fn run_one(
     let run = RunId(1);
     h.run(RunSpec {
         run,
-        units: vec![RunUnit {
-            id: UnitId { run, ordinal: 0 },
-            sql: sql.into(),
-            protocol: Protocol::Extended,
+        units: vec![RunUnit::plain(
+            UnitId { run, ordinal: 0 },
+            sql.into(),
+            Protocol::Extended,
             suspendable,
-            // ## m3b-t01c-core-seams: the M3b fields at their M3a values.
-            binds: Vec::new().into(),
-            verdict: hacivat_session::session::UnitVerdict::Unknown,
-            effects: hacivat_session::session::SessionEffects::empty(),
-            masked: "".into(),
-            max_result_sets: 1,
-            cell_cap: None,
-        }]
+        )]
         .into(),
         policy: ErrorPolicy::StopOnError,
         fetch: FetchPolicy::default(),

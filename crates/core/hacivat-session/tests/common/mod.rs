@@ -2353,21 +2353,16 @@ pub mod runs {
         let units: Vec<RunUnit> = units
             .iter()
             .enumerate()
-            .map(|(i, (sql, suspendable))| RunUnit {
-                id: UnitId {
-                    run,
-                    ordinal: i as u32,
-                },
-                sql: (*sql).into(),
-                protocol: Protocol::Extended,
-                suspendable: *suspendable,
-                // ## m3b-t01c-core-seams: the M3b fields at their M3a values.
-                binds: Vec::new().into(),
-                verdict: hacivat_session::session::UnitVerdict::Unknown,
-                effects: hacivat_session::session::SessionEffects::empty(),
-                masked: "".into(),
-                max_result_sets: 1,
-                cell_cap: None,
+            .map(|(i, (sql, suspendable))| {
+                RunUnit::plain(
+                    UnitId {
+                        run,
+                        ordinal: i as u32,
+                    },
+                    (*sql).into(),
+                    Protocol::Extended,
+                    *suspendable,
+                )
             })
             .collect();
         RunSpec {

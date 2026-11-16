@@ -1497,19 +1497,12 @@ fn open_cursor() -> Step {
             let run = RunId(0xC0FFEE);
             let _ticket = session.run(RunSpec {
                 run,
-                units: vec![RunUnit {
-                    id: UnitId { run, ordinal: 0 },
-                    sql: BIG.into(),
-                    protocol: Protocol::Extended,
-                    suspendable: true,
-                    // ## m3b-t01c-core-seams: the M3b fields at their M3a values.
-                    binds: Vec::new().into(),
-                    verdict: hacivat_session::session::UnitVerdict::Unknown,
-                    effects: hacivat_session::session::SessionEffects::empty(),
-                    masked: "".into(),
-                    max_result_sets: 1,
-                    cell_cap: None,
-                }]
+                units: vec![RunUnit::plain(
+                    UnitId { run, ordinal: 0 },
+                    BIG.into(),
+                    Protocol::Extended,
+                    true,
+                )]
                 .into(),
                 policy: ErrorPolicy::StopOnError,
                 fetch: FetchPolicy::default(),

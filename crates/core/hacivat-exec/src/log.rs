@@ -426,6 +426,9 @@ struct Ring {
     read_upto: Option<u64>,
     /// Lines that left the ring before a reader saw them, since the last clear.
     unseen_dropped: u64,
+    // ## m3b-t01c-core-seams (review M3)
+    /// The newest `seq` the ring pushed out for room (never one a clear removed).
+    dropped_upto: Option<u64>,
 }
 
 /// A console's output log: a ring of the newest lines.
@@ -477,9 +480,12 @@ impl SessionLog {
             ring.next_seq = ring.next_seq.max(line.seq.saturating_add(1));
             if ring.lines.len() == Self::CAPACITY
                 && let Some(old) = ring.lines.pop_front()
-                && ring.read_upto.is_none_or(|seen| old.seq > seen)
             {
-                ring.unseen_dropped += 1;
+                // ## m3b-t01c-core-seams (review M3): `lines_since`'s gap.
+                ring.dropped_upto = Some(old.seq);
+                if ring.read_upto.is_none_or(|seen| old.seq > seen) {
+                    ring.unseen_dropped += 1;
+                }
             }
             ring.lines.push_back(line);
         }
@@ -514,9 +520,10 @@ impl SessionLog {
     }
 
     // ## m3b-t01c-core-seams
-    /// The lines numbered `seq` or later, oldest first, and whether some of them left the ring
-    /// before this read (the gap a reader that remembers its next `seq` must show; Task 25).
-    /// Marks them read, as [`lines`](Self::lines) does; never adds a `Dropped` line.
+    /// The lines numbered `seq` or later, oldest first, and whether the ring pushed some of
+    /// them out for room before this read (the gap a reader that remembers its next `seq` must
+    /// show; Task 25). Lines a [`clear`](Self::clear) removed are no gap. Marks them read, as
+    /// [`lines`](Self::lines) does; never adds a `Dropped` line.
     pub fn lines_since(&self, seq: u64) -> (Arc<[LogLine]>, bool) {
         let mut ring = self.lock();
         let out: Vec<LogLine> = ring
@@ -525,8 +532,7 @@ impl SessionLog {
             .filter(|l| l.seq >= seq)
             .cloned()
             .collect();
-        let oldest_kept = ring.lines.front().map_or(ring.next_seq, |l| l.seq);
-        let gap = seq < oldest_kept && seq < ring.next_seq;
+        let gap = ring.dropped_upto.is_some_and(|dropped| dropped >= seq);
         if let Some(last) = ring.lines.back() {
             ring.read_upto = Some(last.seq);
         }

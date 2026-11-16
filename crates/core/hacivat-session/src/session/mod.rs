@@ -314,15 +314,18 @@ pub(crate) enum Command {
         reply: oneshot::Sender<Result<(), CloseRefused>>,
     },
     // ## m3b-t01c-core-seams (P-M3b-3): answers to a waiting run, through the `RunGate`
-    // slot; never queued behind the request that waits. `reply`: a run waited on it.
+    // slot; never queued behind the request that waits. `question`: the id the run's event
+    // carried (review I1). `reply`: the run waited on exactly that question.
     Choose {
         run_seq: u64,
+        question: u64,
         choice: RunChoice,
         reply: oneshot::Sender<bool>,
     },
     CommitDecision {
         run_seq: u64,
         unit: UnitId,
+        question: u64,
         answer: CommitAnswer,
         reply: oneshot::Sender<bool>,
     },
@@ -394,13 +397,16 @@ impl SessionHandle {
     }
 
     // ## m3b-t01c-core-seams (P-M3b-3, P-M3b-25)
-    /// Answers the error-policy question of the run sent as request `run_seq`
-    /// (`RunEvent::NeedsChoice`, Task 11): `true` when that run waited for a choice. It never
-    /// queues behind the running request. Without a running actor, `false`.
-    pub fn choose(&self, run_seq: u64, c: RunChoice) -> oneshot::Receiver<bool> {
+    /// Answers question `question` (`RunEvent::NeedsChoice::question`, Task 11) of the run sent
+    /// as request `run_seq`: `true` when that run waits on exactly that question. A second
+    /// answer, an answer to an older question (also one a Retry asked again for the same unit)
+    /// or any other id is refused (`false`) and changes nothing (review I1). It never queues
+    /// behind the running request. Without a running actor, `false`.
+    pub fn choose(&self, run_seq: u64, question: u64, c: RunChoice) -> oneshot::Receiver<bool> {
         let (reply, rx) = oneshot::channel();
         let command = Command::Choose {
             run_seq,
+            question,
             choice: c,
             reply,
         };
@@ -412,19 +418,22 @@ impl SessionHandle {
         rx
     }
 
-    /// Answers the confirm-in-transaction question of `unit` in the run sent as request
-    /// `run_seq` (`RunEvent::NeedsCommit`, Task 19): `true` when that run waited for it.
-    /// Without a running actor, `false`.
+    /// Answers the confirm-in-transaction question `question` about `unit`
+    /// (`RunEvent::NeedsCommit::question`, Task 19) of the run sent as request `run_seq`:
+    /// `true` when that run waits on exactly that question; anything else is refused, as for
+    /// [`choose`](Self::choose). Without a running actor, `false`.
     pub fn commit_decision(
         &self,
         run_seq: u64,
         unit: UnitId,
+        question: u64,
         a: CommitAnswer,
     ) -> oneshot::Receiver<bool> {
         let (reply, rx) = oneshot::channel();
         let command = Command::CommitDecision {
             run_seq,
             unit,
+            question,
             answer: a,
             reply,
         };
@@ -697,6 +706,8 @@ pub enum RunEvent {
     /// (Task 11). `rollback_and_continue`: inside a failed PostgreSQL transaction (no Retry).
     NeedsChoice {
         unit: UnitId,
+        /// The question's id: `SessionHandle::choose` names it (review I1).
+        question: u64,
         error: ExecError,
         rollback_and_continue: bool,
     },
@@ -705,6 +716,8 @@ pub enum RunEvent {
     /// session chose (P-M3b-1): Keep/Undo inside an open transaction, else Commit/Roll back.
     NeedsCommit {
         unit: UnitId,
+        /// The question's id: `SessionHandle::commit_decision` names it (review I1).
+        question: u64,
         affected: Option<u64>,
         deadline: Instant,
         savepoint: bool,

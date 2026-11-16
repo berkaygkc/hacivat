@@ -194,6 +194,8 @@ pub enum ConfirmAnswer {
 pub struct CommitQuestion {
     pub run: RunId,
     pub unit: UnitId,
+    /// `NeedsCommit::question`: the answer goes back with it (`commit_decision`; review I1).
+    pub question: u64,
     pub affected: Option<u64>,
     pub deadline: Instant,
     /// The form the session chose (`NeedsCommit::savepoint`): Keep/Undo when true.

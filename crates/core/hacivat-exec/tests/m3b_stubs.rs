@@ -7,7 +7,6 @@
 mod common;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::{fake_pg, pg18, service_over};
 use hacivat_driver::TxStatus;
@@ -348,5 +347,24 @@ fn log_lines_since_reports_a_gap() {
         LogMsg::Evicted { rows: 3 }.fluent_id(),
         "cursor-closed-evicted"
     );
-    let _ = Duration::ZERO;
+}
+
+/// Review M3: lines a clear removed are no gap; lines the ring pushed out for room still are.
+#[test]
+fn a_cleared_log_is_no_gap() {
+    let log = SessionLog::new();
+    for _ in 0..3 {
+        log.append(LogMsg::TxCommitted, None, None);
+    }
+    log.clear();
+    let (lines, gap) = log.lines_since(1);
+    assert!(lines.is_empty());
+    assert!(!gap, "nothing was dropped, the user cleared the log");
+    // The ring pushes out lines 3 and 4 (`CAPACITY + 2` lines after the 3 cleared).
+    for _ in 0..SessionLog::CAPACITY + 2 {
+        log.append(LogMsg::TxRolledBack, None, None);
+    }
+    log.clear();
+    assert!(log.lines_since(4).1, "line 4 was pushed out for room");
+    assert!(!log.lines_since(5).1, "line 5 was cleared, not dropped");
 }

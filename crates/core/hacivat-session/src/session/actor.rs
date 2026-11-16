@@ -382,7 +382,7 @@ pub(crate) struct Core {
     /// Where a waiting run gets its out-of-band answers (P-M3b-3; Tasks 11 and 19 wait on it).
     pub(crate) gate: Arc<RunGate>,
     /// The sequence number of the request being handled (`run_one` sets it): a waiting run's
-    /// question names it (`Pending::{Choice, Commit}::run_seq`).
+    /// question names it (`Pending::run_seq`).
     #[allow(dead_code, reason = "Tasks 11 and 19 ask with it")]
     pub(crate) request_seq: u64,
 }
@@ -1159,18 +1159,20 @@ impl Ctl {
         match cmd {
             Command::Choose {
                 run_seq,
+                question,
                 choice,
                 reply,
             } => {
-                let _ = reply.send(self.gate.choose(run_seq, choice));
+                let _ = reply.send(self.gate.choose(run_seq, question, choice));
             }
             Command::CommitDecision {
                 run_seq,
                 unit,
+                question,
                 answer,
                 reply,
             } => {
-                let _ = reply.send(self.gate.commit(run_seq, unit, answer));
+                let _ = reply.send(self.gate.commit(run_seq, unit, question, answer));
             }
             Command::Submit { .. }
             | Command::Cancel { .. }
