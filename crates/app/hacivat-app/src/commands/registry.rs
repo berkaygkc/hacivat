@@ -383,10 +383,17 @@ fn show_menu(window: &mut Window, cx: &mut App) {
     let Some(ws) = window.root::<Workspace>().flatten() else {
         return;
     };
-    let items = match cx.try_global::<ActionRegistry>() {
-        Some(reg) => menus::popup_items(&menus::menu_model(reg), cx),
+    let mut model = match cx.try_global::<ActionRegistry>() {
+        Some(reg) => menus::menu_model(reg),
         None => return,
     };
+    // ## m3a-f5-demo (DEMO-6): with a result grid focused, Copy and Select All are the grid's.
+    for entry in model.iter_mut().flat_map(|g| g.items.iter_mut()) {
+        if let menus::MenuEntry::Action(id) = entry {
+            *id = super::routed_menu_command(id, window, cx);
+        }
+    }
+    let items = menus::popup_items(&model, cx);
     let anchor = menus::in_window_menu_anchor(&items, window, cx);
     let menu = ws.update(cx, |ws, cx| ws.open_popup_menu(anchor, items, window, cx));
     menu.update(cx, |m, _| m.label(text_fn_id("hui-menu-app")));

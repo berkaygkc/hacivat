@@ -29,6 +29,7 @@ use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_session::LiveState;
 use hacivat_session::session::TxOwner;
 use hacivat_ui_editor::{EditorView, ExecMarkState, preview};
+use hacivat_ui_grid::GridView;
 use hacivat_values::{LogicalType, Value};
 use support::*;
 
@@ -490,5 +491,181 @@ fn closing_a_console_in_a_transaction_asks_and_roll_back_closes_it(cx: &mut Test
         fake.executed()
     );
     assert!(vcx.cx.read(|cx| Consoles::get(cx, id).is_none()));
+    stop_core_runtime_test(cx);
+}
+
+// ## m3a-f5-demo: DEMO-6 — the grid's keys and Edit ▸ Copy through the real dispatch (a
+// mouse selection, then the keystroke through the window; the menu's `RunCommand`).
+
+/// The platform's chord for `key` with the command modifier.
+fn primary(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("cmd-{key}")
+    } else {
+        format!("ctrl-{key}")
+    }
+}
+
+/// The centre of body cell `(row, col)` of `grid` in its last frame.
+fn grid_cell_center(
+    vcx: &VisualTestContext,
+    grid: &Entity<GridView>,
+    row: u64,
+    col: usize,
+) -> gpui::Point<gpui::Pixels> {
+    vcx.cx.read(|cx| {
+        let v = grid.read(cx);
+        let g = v.geometry().expect("the grid painted");
+        let layout = v.column_layout();
+        let s = v.scroll_state();
+        let x = f32::from(g.body.left())
+            + (layout.x_of(col) - s.left_x) as f32
+            + layout.width_at(col) / 2.0;
+        let y = f32::from(g.body.top()) + s.row_top(row) as f32 + 10.0;
+        gpui::point(gpui::px(x), gpui::px(y))
+    })
+}
+
+fn clipboard_text(vcx: &VisualTestContext) -> String {
+    vcx.cx
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .unwrap_or_default()
+}
+
+fn first_grid(vcx: &VisualTestContext, id: ConsoleId) -> Option<Entity<GridView>> {
+    vcx.cx.read(|cx| {
+        hosts(cx)
+            .into_iter()
+            .find_map(|h| h.read(cx).grid_of(id, 0, cx))
+    })
+}
+
+/// A console with a 3 × 3 result in its grid; the editor keeps the focus, as after ⌘↵.
+fn three_by_three(
+    cx: &mut TestAppContext,
+) -> (&'static mut VisualTestContext, Entity<GridView>) {
+    let rows = FakeQuery {
+        prefix: "SELECT id, city, total FROM shops",
+        sets: vec![FakeResultSet {
+            columns: vec![("id", int8()), ("city", text()), ("total", int8())],
+            rows: FakeRows::Literal(vec![
+                vec![Value::Int(1), Value::Text("İzmir".into()), Value::Int(10)],
+                vec![Value::Int(2), Value::Null, Value::Int(20)],
+                vec![
+                    Value::Int(3),
+                    Value::Text("Şanlıurfa".into()),
+                    Value::Int(1_234_567),
+                ],
+            ]),
+        }],
+        ..Default::default()
+    };
+    let (vcx, id) = connected(cx, DEV, EnvTag::Dev, vec![rows]);
+    enable_registry(vcx);
+    let editor = editor_of(vcx, id);
+    type_script(vcx, &editor, "SELECT id, city, total FROM shops;\n", 3);
+    editor_command(vcx, &editor, "editor.run");
+    wait_until(vcx, "the statement to succeed", |vcx| {
+        matches!(marks(vcx, id).as_slice(), [ExecMarkState::Succeeded { .. }])
+    });
+    wait_until(vcx, "the grid to paint", |vcx| {
+        first_grid(vcx, id).is_some_and(|g| vcx.cx.read(|cx| g.read(cx).geometry().is_some()))
+    });
+    refresh(vcx);
+    let grid = first_grid(vcx, id).expect("the grid");
+    let handle = vcx.cx.read(|cx| editor.read(cx).focus_handle(cx));
+    in_window(vcx, |window, cx| window.focus(&handle, cx));
+    vcx.run_until_parked();
+    (vcx, grid)
+}
+
+#[gpui::test]
+fn a_click_shift_click_selection_copies_with_the_copy_chord(cx: &mut TestAppContext) {
+    let (vcx, grid) = three_by_three(cx);
+    vcx.cx
+        .write_to_clipboard(gpui::ClipboardItem::new_string("before".into()));
+    let a = grid_cell_center(vcx, &grid, 0, 0);
+    let b = grid_cell_center(vcx, &grid, 2, 1);
+    vcx.simulate_click(a, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    vcx.simulate_click(b, gpui::Modifiers::shift());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes(&primary("c"));
+    vcx.run_until_parked();
+    assert_eq!(clipboard_text(vcx), "1\tİzmir\n2\t\n3\tŞanlıurfa\n");
+    refresh(vcx);
+    let toasts = toast_texts(vcx);
+    assert!(
+        toasts.iter().any(|t| t.contains("Copied 3 × 2 cells")),
+        "{toasts:?}"
+    );
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn a_dragged_selection_copies_with_the_copy_chord(cx: &mut TestAppContext) {
+    let (vcx, grid) = three_by_three(cx);
+    let a = grid_cell_center(vcx, &grid, 0, 1);
+    let b = grid_cell_center(vcx, &grid, 1, 2);
+    vcx.simulate_mouse_down(a, gpui::MouseButton::Left, gpui::Modifiers::none());
+    vcx.simulate_mouse_move(b, Some(gpui::MouseButton::Left), gpui::Modifiers::none());
+    vcx.simulate_mouse_up(b, gpui::MouseButton::Left, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes(&primary("c"));
+    vcx.run_until_parked();
+    assert_eq!(clipboard_text(vcx), "İzmir\t10\n\t20\n");
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn the_grid_chords_move_select_and_copy_with_headers(cx: &mut TestAppContext) {
+    let (vcx, grid) = three_by_three(cx);
+    let focus = |vcx: &VisualTestContext| {
+        vcx.cx.read(|cx| {
+            grid.read(cx)
+                .selection()
+                .focus()
+                .map(|f| (f.row.0, f.col.0))
+        })
+    };
+    vcx.simulate_click(grid_cell_center(vcx, &grid, 0, 0), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("down right");
+    vcx.run_until_parked();
+    assert_eq!(focus(vcx), Some((1, 1)));
+    vcx.simulate_keystrokes("shift-down");
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes(&primary("c"));
+    vcx.run_until_parked();
+    assert_eq!(clipboard_text(vcx), "\nŞanlıurfa\n");
+    vcx.simulate_keystrokes(&primary("a"));
+    vcx.simulate_keystrokes(&primary("shift-c"));
+    vcx.run_until_parked();
+    assert_eq!(
+        clipboard_text(vcx),
+        "id\tcity\ttotal\n1\tİzmir\t10\n2\t\t20\n3\tŞanlıurfa\t1234567\n"
+    );
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn edit_copy_and_select_all_from_the_menu_reach_the_focused_grid(cx: &mut TestAppContext) {
+    let (vcx, grid) = three_by_three(cx);
+    vcx.simulate_click(grid_cell_center(vcx, &grid, 2, 2), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    // What the macOS Edit menu items deliver (F1).
+    let menu = |vcx: &mut VisualTestContext, id: &str| {
+        vcx.dispatch_action(hacivat_ui_core::gpui_surface::RunCommand { id: id.to_string().into() });
+        vcx.run_until_parked();
+    };
+    menu(vcx, "editor.copy");
+    assert_eq!(clipboard_text(vcx), "1234567\n");
+    menu(vcx, "editor.select_all");
+    menu(vcx, "editor.copy");
+    assert_eq!(
+        clipboard_text(vcx),
+        "1\tİzmir\t10\n2\t\t20\n3\tŞanlıurfa\t1234567\n"
+    );
     stop_core_runtime_test(cx);
 }

@@ -233,6 +233,17 @@ pub fn register_focus_context(cx: &mut App, handle: FocusHandle, context: &'stat
     }
 }
 
+// ## m3a-f5-demo
+/// Drops the context registered for `handle` (a view built and dropped many times, such as a
+/// result tab's grid, unregisters itself when it is released).
+pub fn unregister_focus_context(cx: &mut App, handle: &FocusHandle) {
+    if cx.has_global::<FocusContexts>() {
+        cx.global_mut::<FocusContexts>()
+            .0
+            .retain(|(h, _)| h != handle);
+    }
+}
+
 /// The registered contexts whose handle is focused in `window`, in registration order.
 pub(crate) fn focused_contexts(window: &Window, cx: &App) -> Vec<&'static str> {
     cx.try_global::<FocusContexts>()
