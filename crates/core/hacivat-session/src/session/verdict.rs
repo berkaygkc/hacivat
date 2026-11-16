@@ -104,24 +104,16 @@ pub trait StatementClassifier: Send + Sync + fmt::Debug + 'static {
     /// and whether `sql` may change that context (the guard then reads it again before the
     /// next check). The read-only guard's step 0b calls this one.
     ///
-    /// The default ignores `ctx` (the context-free check, unknown modes) and answers that the
-    /// context may have changed.
+    /// No default (fix round 1, I1): an implementer that dropped the context would classify
+    /// with an empty search path, which PostgreSQL's backend reads as `pg_catalog` first, and
+    /// without MySQL's current database; every implementer says how it uses `ctx`.
     fn check_read_only_in(
         &self,
         kind: DbmsKind,
         sql: Arc<str>,
         allow: Arc<[Arc<str>]>,
         ctx: ClassifierContext,
-    ) -> BoxFuture<'static, RoAnswer> {
-        let _ = ctx;
-        let check = self.check_read_only(kind, sql, allow);
-        Box::pin(async move {
-            RoAnswer {
-                check: check.await,
-                changes_context: true,
-            }
-        })
-    }
+    ) -> BoxFuture<'static, RoAnswer>;
 }
 
 // ## m3b-t18-safe06 (plan amendment C2(b)/I1)

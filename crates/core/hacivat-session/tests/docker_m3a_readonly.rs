@@ -155,45 +155,91 @@ const MYSQL_SERVER_BLOCKED: &[Row] = &[
     ("M7", "/*!50000 COMMIT */", &["1a"]),
 ];
 
-// ## m3b-t18-safe06 (named exception: the C19 rows judged, R-M3-58)
-/// MariaDB's server-blocked rows through `Run`: MySQL's, with the outcomes run B recorded for
-/// MariaDB where it differs (`sql-testkit/bypass/mariadb.toml`, `observed`): `LOCK TABLES` is
-/// caught by L6 (`gap`: its implicit commit ended the read-only transaction; the side channel
-/// shows nothing persisted), `HANDLER … OPEN` runs and the reset closes it (`ran`, judged by the
-/// side channel), `XA START` is refused by the server (`1400`). Judged since Task 18 (C19).
-const MARIADB_SERVER_BLOCKED: &[Row] = &[
-    ("M1", "/*!50000 DROP TABLE hv_t22_bypass */", &[INPUT]),
-    (
-        "M1",
-        "/*!50000 INSERT INTO hv_t22_bypass VALUES (50) */",
-        &[INPUT],
-    ),
-    ("M2", "SELECT 1; DROP TABLE hv_t22_bypass", &["1064"]),
-    (
-        "M5",
-        "SELECT * FROM hv_t22_bypass FOR UPDATE",
-        &[MY_RO, MY_TABLE_PRIV],
-    ),
-    ("M5", "LOCK TABLES hv_t22_bypass WRITE", &[PROTOCOL, GAP]),
-    (
-        "M6",
-        "PREPARE hv_t22_s FROM 'DELETE FROM hv_t22_bypass'",
-        &[PROTOCOL],
-    ),
-    ("M8", "CREATE TABLE hv_t22_m8 (a int)", &[INPUT]),
-    ("M8", "TRUNCATE TABLE hv_t22_bypass", &[INPUT]),
-    ("M8", "DELETE FROM hv_t22_bypass", &[INPUT]),
-    // MariaDB has no `WITH … DELETE`: the server refuses its syntax (`1064`) before it runs.
-    (
-        "M8",
-        "WITH x AS (SELECT 1 AS a) DELETE FROM hv_t22_bypass WHERE a = 1",
-        &[MY_RO, MY_TABLE_PRIV, "1064"],
-    ),
-    ("M12", "HANDLER hv_t22_bypass OPEN", &[PROTOCOL, "ran"]),
-    ("M13", "XA START 'hv_t22'", &[PROTOCOL, "1400"]),
-    ("M17", "CREATE TEMPORARY TABLE hv_t22_tmp (a int)", &[INPUT]),
-    ("M7", "/*!50000 COMMIT */", &["1a"]),
-];
+// ## m3b-t18-safe06 (named exception: the C19 rows judged, R-M3-58; fix round 1, m7)
+/// A row this file judges, owned (the MariaDB rows are built at run time).
+type OwnedRow = (String, String, Vec<String>);
+
+fn owned(rows: &[Row]) -> Vec<OwnedRow> {
+    rows.iter()
+        .map(|(id, sql, allowed)| {
+            (
+                id.to_string(),
+                sql.to_string(),
+                allowed.iter().map(|a| a.to_string()).collect(),
+            )
+        })
+        .collect()
+}
+
+/// The `Run` outcome of run B's recorded MariaDB outcome (`BypassResult::label`): `blocked X`
+/// is `X`, an L6 gap is `gap`, a neutralised run is `ran` (judged by the side channel).
+fn run_outcome(observed: &str) -> Option<String> {
+    if let Some(code) = observed.strip_prefix("blocked ") {
+        Some(code.to_string())
+    } else if observed.starts_with("gap") {
+        Some(GAP.to_string())
+    } else if observed == "ran, neutralised" {
+        Some("ran".to_string())
+    } else {
+        None
+    }
+}
+
+/// MariaDB's server-blocked rows through `Run`, generated, never copied: MySQL's rows, each
+/// also allowing the outcome run B recorded for MariaDB for the same row
+/// (`sql-testkit/bypass/mariadb.toml`, `observed`, read by path; this file's fixtures are
+/// `hv_t22_*` where the catalogue's are `hv_t23_*`). One `Run`-only row has no catalogue
+/// twin: MariaDB has no `WITH … DELETE`, so the server refuses its syntax (`1064`).
+fn mariadb_server_blocked() -> Vec<OwnedRow> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../sql/sql-testkit/bypass/mariadb.toml");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+    let doc: toml_edit::DocumentMut = text.parse().unwrap_or_else(|e| panic!("{path:?}: {e}"));
+    let rows = doc["row"].as_array_of_tables().expect("rows");
+    let recorded = |id: &str, sql: &str| -> Vec<String> {
+        let sql = sql.replace("hv_t22", "hv_t23");
+        rows.iter()
+            .filter(|r| r["id"].as_str() == Some(id) && r["sql"].as_str() == Some(sql.as_str()))
+            .filter_map(|r| r.get("observed").and_then(toml_edit::Item::as_inline_table))
+            .flat_map(|t| {
+                t.iter()
+                    .filter_map(|(_, v)| v.as_str().and_then(run_outcome))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    owned(MYSQL_SERVER_BLOCKED)
+        .into_iter()
+        .map(|(id, sql, mut allowed)| {
+            for o in recorded(&id, &sql) {
+                if !allowed.contains(&o) {
+                    allowed.push(o);
+                }
+            }
+            if sql.starts_with("WITH ") {
+                allowed.push("1064".to_string());
+            }
+            (id, sql, allowed)
+        })
+        .collect()
+}
+
+#[test]
+fn mariadb_rows_come_from_the_catalogue() {
+    // Every MySQL row with a catalogue twin finds MariaDB's recorded outcome; the differences
+    // run B recorded are the ones `Run` allows (C19).
+    let rows = mariadb_server_blocked();
+    let allowed = |sql: &str| -> Vec<String> {
+        rows.iter()
+            .find(|(_, s, _)| s == sql)
+            .map(|(_, _, a)| a.clone())
+            .unwrap_or_default()
+    };
+    assert!(allowed("LOCK TABLES hv_t22_bypass WRITE").contains(&GAP.to_string()));
+    assert!(allowed("HANDLER hv_t22_bypass OPEN").contains(&"ran".to_string()));
+    assert!(allowed("XA START 'hv_t22'").contains(&"1400".to_string()));
+    assert_eq!(rows.len(), MYSQL_SERVER_BLOCKED.len());
+}
 
 // ---------------------------------------------------------------------------------------------
 // Outcomes
@@ -338,7 +384,7 @@ async fn judge_rows<F, Fut>(
     t: &DockerTarget,
     who: &str,
     ro: &Ro,
-    rows: &[Row],
+    rows: &[OwnedRow],
     mut snapshot: F,
     failures: &mut Vec<String>,
     record: &mut String,
@@ -358,7 +404,7 @@ async fn judge_rows<F, Fut>(
                  {after}",
                 t.id
             ));
-        } else if !allowed.contains(&got.as_str()) {
+        } else if !allowed.contains(&got) {
             failures.push(format!(
                 "{} {who} {id} `{sql}`: {got}, not one of {allowed:?}",
                 t.id
@@ -460,7 +506,7 @@ async fn server_blocked_bypass_rows_are_blocked_through_run() {
                 &t,
                 user,
                 &ro,
-                PG_SERVER_BLOCKED,
+                &owned(PG_SERVER_BLOCKED),
                 || async { pg_snapshot(&mut *a.lock().await).await },
                 &mut failures,
                 &mut record,
@@ -479,9 +525,9 @@ async fn server_blocked_bypass_rows_are_blocked_through_run() {
         mysql_fixture(&t).await;
         let a = tokio::sync::Mutex::new(admin(&t).await);
         let rows = if t.engine == DbmsKind::MariaDb {
-            MARIADB_SERVER_BLOCKED
+            mariadb_server_blocked()
         } else {
-            MYSQL_SERVER_BLOCKED
+            owned(MYSQL_SERVER_BLOCKED)
         };
         for user in ["hv_ro", t.user.as_str()] {
             let ro = Ro::open(&t, user, &t.database).await;
@@ -489,7 +535,7 @@ async fn server_blocked_bypass_rows_are_blocked_through_run() {
                 &t,
                 user,
                 &ro,
-                rows,
+                &rows,
                 || async { mysql_snapshot(&mut *a.lock().await, &t).await },
                 &mut failures,
                 &mut record,
@@ -1135,7 +1181,7 @@ const MY_LOCKING_BIG: &str = "WITH d AS (SELECT 0 AS x UNION ALL SELECT 1 UNION 
 /// Review M6: a real read-only MySQL cursor's release (drain, `KILL QUERY` on the side
 /// connection, the guard's `ROLLBACK`, `COM_RESET_CONNECTION`, the replay) on the same
 /// connection. MariaDB is included here (its cursor release is the same path). ## m3b-t18-safe06:
-/// its bypass rows are judged through `Run` since Task 18 (`MARIADB_SERVER_BLOCKED`, C19).
+/// its bypass rows are judged through `Run` since Task 18 (`mariadb_server_blocked`, C19).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "docker"]
 async fn mysql_a_read_only_cursor_release_keeps_the_connection_and_drops_its_lock() {

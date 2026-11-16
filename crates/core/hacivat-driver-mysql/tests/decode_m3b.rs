@@ -334,3 +334,52 @@ async fn the_connection_reads_the_session_sql_mode_in_its_setup_query() {
         assert_eq!(reads, 1);
     }
 }
+
+// ## m3b-t18-safe06 (named exception; fix round 1, m11)
+#[tokio::test]
+async fn a_server_that_refuses_sql_mode_or_database_keeps_the_zone() {
+    // A server (or proxy) that refuses the four-value read steps down to T7's pair, so the
+    // zone is still read; `sql_mode` and the database stay unread.
+    let ts = column_def("ts", T_TIMESTAMP, 0, BINARY, 19, 0);
+    let cols = [ts];
+    let (mut c, server, _) = scripted(true, move |cmd| {
+        if cmd.code == COM_QUERY && cmd.text().contains("sql_mode") {
+            return Some(packets(vec![err_packet(
+                1193,
+                "HY000",
+                "Unknown system variable 'sql_mode'",
+            )]));
+        }
+        if cmd.code == COM_QUERY && cmd.text().contains("time_zone") {
+            return Some(timeout_and_zone("Europe/Istanbul"));
+        }
+        match cmd.code {
+            COM_STMT_PREPARE => Some(prepare_ok(&cols, 0)),
+            COM_STMT_EXECUTE => {
+                let mut steps = header(&cols);
+                steps.push(Step::Packet(terminator(AUTOCOMMIT, 0)));
+                Some(steps)
+            }
+            _ => None,
+        }
+    })
+    .await;
+    assert!(
+        server
+            .commands()
+            .iter()
+            .any(|cmd| cmd.text() == "SELECT @@net_write_timeout, @@session.time_zone")
+    );
+    assert_eq!(
+        c.session_settings(),
+        hacivat_driver::SessionSettings::default()
+    );
+    c.query(spec("SELECT ts FROM t", false, 501)).await.unwrap();
+    let QueryEvent::ResultStart(schema) = event(&mut c).await else {
+        panic!("ResultStart first");
+    };
+    assert_eq!(
+        time_zone_of(&schema.columns[0].native).as_deref(),
+        Some("Europe/Istanbul")
+    );
+}

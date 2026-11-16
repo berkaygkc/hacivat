@@ -266,11 +266,15 @@ fn track_effects(t: &mut Tracked, sql: &str, effects: SessionEffects) {
         // `PREPARE` and `DEALLOCATE` both touch prepared statements; only the words tell which.
         let words = words(sql, !sql.contains('\\'));
         let word = |i: usize| words.get(i).map(String::as_str).unwrap_or_default();
-        if first_keyword(sql) == "DEALLOCATE" {
-            let all = word(1) == "ALL" || (word(1) == "PREPARE" && word(2) == "ALL");
-            t.prepared = if all { 0 } else { t.prepared.saturating_sub(1) };
-        } else {
-            t.prepared = t.prepared.saturating_add(1);
+        // ## fix round 1 (m8): a unit's effects are its union, passed with each of its parts;
+        // only a part that prepares (or deallocates) moves the count.
+        match first_keyword(sql).as_str() {
+            "DEALLOCATE" => {
+                let all = word(1) == "ALL" || (word(1) == "PREPARE" && word(2) == "ALL");
+                t.prepared = if all { 0 } else { t.prepared.saturating_sub(1) };
+            }
+            "PREPARE" => t.prepared = t.prepared.saturating_add(1),
+            _ => {}
         }
     }
 }

@@ -29,7 +29,7 @@ use hacivat_session::session::{
 };
 use hacivat_session::{ManagerConfig, profile::ProfileEndpoint};
 // ## m3b-t18-safe06 (merge with T19)
-use hacivat_session::session::ExecErrorKind;
+use hacivat_session::session::{ClassifierContext, ExecErrorKind, RoAnswer};
 use hacivat_values::{BindValue, LogicalType};
 
 // ---------------------------------------------------------------------------------------------
@@ -113,6 +113,23 @@ impl StatementClassifier for DenyAll {
         _sql: Arc<str>,
     ) -> BoxFuture<'static, Option<SessionEffects>> {
         Box::pin(async { Some(SessionEffects::all()) })
+    }
+    // ## m3b-t18-safe06 (fix round 1, I1): the trait has no default; this fake ignores the
+    // context.
+    fn check_read_only_in(
+        &self,
+        kind: DbmsKind,
+        sql: Arc<str>,
+        allow: Arc<[Arc<str>]>,
+        _ctx: ClassifierContext,
+    ) -> BoxFuture<'static, RoAnswer> {
+        let check = self.check_read_only(kind, sql, allow);
+        Box::pin(async move {
+            RoAnswer {
+                check: check.await,
+                changes_context: false,
+            }
+        })
     }
 }
 

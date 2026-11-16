@@ -23,6 +23,8 @@ use hacivat_session::session::{
     Request, RoCheck, SafetyDenial, SessionEffects, SessionHandle, StatementClassifier, TxCommand,
 };
 use hacivat_session::{ConnectionManager, LiveState, ManagerConfig};
+// ## m3b-t18-safe06 (fix round 1, I1)
+use hacivat_session::session::{ClassifierContext, RoAnswer};
 use hacivat_values::{LogicalType, Value};
 use sql_split::exec_range::UnitKind;
 
@@ -101,6 +103,23 @@ impl StatementClassifier for Allow {
     fn effects(&self, _: DbmsKind, _: Arc<str>) -> BoxFuture<'static, Option<SessionEffects>> {
         Box::pin(async { None })
     }
+    // ## m3b-t18-safe06 (fix round 1, I1): the trait has no default; this fake ignores the
+    // context.
+    fn check_read_only_in(
+        &self,
+        kind: DbmsKind,
+        sql: Arc<str>,
+        allow: Arc<[Arc<str>]>,
+        _ctx: ClassifierContext,
+    ) -> BoxFuture<'static, RoAnswer> {
+        let check = self.check_read_only(kind, sql, allow);
+        Box::pin(async move {
+            RoAnswer {
+                check: check.await,
+                changes_context: false,
+            }
+        })
+    }
 }
 
 /// Refuses every statement.
@@ -123,6 +142,23 @@ impl StatementClassifier for Deny {
     }
     fn effects(&self, _: DbmsKind, _: Arc<str>) -> BoxFuture<'static, Option<SessionEffects>> {
         Box::pin(async { None })
+    }
+    // ## m3b-t18-safe06 (fix round 1, I1): the trait has no default; this fake ignores the
+    // context.
+    fn check_read_only_in(
+        &self,
+        kind: DbmsKind,
+        sql: Arc<str>,
+        allow: Arc<[Arc<str>]>,
+        _ctx: ClassifierContext,
+    ) -> BoxFuture<'static, RoAnswer> {
+        let check = self.check_read_only(kind, sql, allow);
+        Box::pin(async move {
+            RoAnswer {
+                check: check.await,
+                changes_context: false,
+            }
+        })
     }
 }
 
@@ -306,6 +342,23 @@ impl StatementClassifier for Stuck {
     }
     fn effects(&self, _: DbmsKind, _: Arc<str>) -> BoxFuture<'static, Option<SessionEffects>> {
         Box::pin(async { None })
+    }
+    // ## m3b-t18-safe06 (fix round 1, I1): the trait has no default; this fake ignores the
+    // context.
+    fn check_read_only_in(
+        &self,
+        kind: DbmsKind,
+        sql: Arc<str>,
+        allow: Arc<[Arc<str>]>,
+        _ctx: ClassifierContext,
+    ) -> BoxFuture<'static, RoAnswer> {
+        let check = self.check_read_only(kind, sql, allow);
+        Box::pin(async move {
+            RoAnswer {
+                check: check.await,
+                changes_context: false,
+            }
+        })
     }
 }
 

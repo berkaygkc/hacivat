@@ -23,9 +23,11 @@ pub struct GuardPlan {
     pub after: Vec<&'static str>,
     pub reset: ResetKind,
     // ## m3b-t18-safe06 (named exception; R-M3-57, P-M3b-33)
-    /// Session setup built from what the session observed ([`plan_for_with`]), run right after
-    /// `session_setup` wherever it runs (after every reset): MySQL and MariaDB
-    /// `SET SESSION sql_mode = '<observed>'`. Empty from [`plan_for`].
+    /// Session setup built from what the session observed ([`plan_for_with`]): MySQL and
+    /// MariaDB `SET SESSION sql_mode = '<observed>'`. Empty from [`plan_for`]. The guard's own
+    /// steps never read it: the session's environment plan carries it in its read-only step,
+    /// after `session_setup`, so every replay (after each reset, and a reconnect's) runs it
+    /// (fix round 1, m9).
     pub pinned: Vec<String>,
 }
 

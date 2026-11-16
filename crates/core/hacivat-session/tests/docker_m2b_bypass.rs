@@ -23,7 +23,10 @@
 //!   whole matrix. Each target's results are written to the Docker artifact
 //!   `t23-bypass-<target>.tsv` (ADR 0004 `m2b-t23`). A statement that holds a password is never
 //!   printed or recorded.
-//! - MariaDB's results are recorded, not judged: its label stays guarded (C19).
+//! - MariaDB's results are recorded; its label stays guarded (C19). ## m3b-t18-safe06 (fix round
+//!   1, m7): the rows of `mariadb.toml` are judged by their recorded outcome (`observed`); run
+//!   B's inline rows (M9 with its follow-up, `GET_LOCK('hv_m5')`, n-3, M7/I-2) stay recorded
+//!   only.
 //! - `sqlite_bypass_rows_blocked_without_classifier` needs no server: it runs on every PR.
 //! - ## m3b-t18-safe06: this is SQL-SAFE-06 run B. Its rows live in
 //!   `crates/sql/sql-testkit/bypass/{pg,mysql,mariadb,sqlite}.toml` (the rows an account runs,
@@ -90,11 +93,29 @@ struct Row {
     id: String,
     sql: String,
     allowed: Vec<String>,
+    // ## m3b-t18-safe06 (fix round 1, m7)
+    /// MariaDB: run B's recorded outcome per account (`hv_ro`, `owner`), as `BypassResult::label`
+    /// writes it (C19, R-M3-58).
+    observed: Vec<(String, String)>,
 }
 
 impl Row {
     fn allowed(&self) -> Vec<&str> {
         self.allowed.iter().map(String::as_str).collect()
+    }
+
+    // ## m3b-t18-safe06 (fix round 1, m7)
+    /// MariaDB's judgement: the row ended as it was recorded for `who` (`hv_ro`, or the test
+    /// account, possibly through SSH).
+    fn as_recorded(&self, who: &str, result: &BypassResult) -> bool {
+        let account = if who.starts_with("hv_ro") {
+            "hv_ro"
+        } else {
+            "owner"
+        };
+        self.observed
+            .iter()
+            .any(|(a, o)| a == account && *o == result.label())
     }
 }
 
@@ -126,6 +147,15 @@ fn rows(file: &str, kind: &str) -> Vec<Row> {
             id: r["id"].as_str().expect("an id").to_string(),
             sql: r["sql"].as_str().expect("a statement").to_string(),
             allowed: strings(r.get("server_off")),
+            observed: r
+                .get("observed")
+                .and_then(toml_edit::Item::as_inline_table)
+                .map(|t| {
+                    t.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|v| (k.to_string(), v.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
         .collect()
 }
@@ -838,10 +868,11 @@ async fn mysql_server_blocked(
         let reply = ro.try_row(&row.sql).await;
         let after = mysql_snapshot(a, t).await;
         let result = judge(&reply, &baseline, &after);
+        // ## m3b-t18-safe06 (fix round 1, m7): MariaDB is judged by its recorded outcome.
         let ok = if judged {
             stopped(&result, &row.allowed())
         } else {
-            !matches!(result, BypassResult::Unknown(_))
+            row.as_recorded(who, &result)
         };
         record.row(t, who, &row.id, &row.sql, result, ok);
     }
@@ -917,7 +948,8 @@ async fn mysql_bypass_rows(t: &DockerTarget, judged: bool) -> Record {
         record.fail(format!("{} hv_ro: the label is {label:?}", t.id));
     }
     let baseline = mysql_snapshot(&mut a, t).await;
-    for Row { id, sql, .. } in &rows(my_file(t), "neutralised") {
+    for row in &rows(my_file(t), "neutralised") {
+        let (id, sql) = (&row.id, &row.sql);
         let run_sql = sql.replace("{tro}", tro(t));
         let reply = ro.try_row(&run_sql).await;
         let mut lingering = ro.lingering(&checks).await;
@@ -927,10 +959,12 @@ async fn mysql_bypass_rows(t: &DockerTarget, judged: bool) -> Record {
         }
         let after = mysql_snapshot(&mut a, t).await;
         let result = judge_neutralised(&reply, &baseline, &after, &lingering);
-        let ok = required(
-            matches!(result, BypassResult::Neutralised | BypassResult::Blocked(_)),
-            &result,
-        );
+        // ## m3b-t18-safe06 (fix round 1, m7): MariaDB is judged by its recorded outcome.
+        let ok = if judged {
+            matches!(result, BypassResult::Neutralised | BypassResult::Blocked(_))
+        } else {
+            row.as_recorded("hv_ro", &result)
+        };
         record.row(t, "hv_ro", id, &shown(sql), result, ok);
     }
 
@@ -940,7 +974,12 @@ async fn mysql_bypass_rows(t: &DockerTarget, judged: bool) -> Record {
         let reply = ro.try_row(&run_sql).await;
         let after = mysql_snapshot(&mut a, t).await;
         let result = judge(&reply, &baseline, &after);
-        let ok = required(stopped(&result, &row.allowed()), &result);
+        // ## m3b-t18-safe06 (fix round 1, m7): MariaDB is judged by its recorded outcome.
+        let ok = if judged {
+            stopped(&result, &row.allowed())
+        } else {
+            row.as_recorded("hv_ro", &result)
+        };
         record.row(t, "hv_ro", &row.id, &shown(&row.sql), result, ok);
     }
     // M10's victim is alive (the side channel itself).

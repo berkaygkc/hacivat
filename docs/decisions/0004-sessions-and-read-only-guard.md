@@ -2484,3 +2484,39 @@ boot installs `hacivat_exec::classify_pool::ClassifyPool::new(2)` (`boot.rs`, on
   equal; for generated statements the guard's first-keyword readings ⊆ the lexer's (a stray
   top-level `*/`, which the guard's scanner skips and the server reads as an operator, is left
   out: the guard then over-reads, which only refuses more).
+- **Fix round 1 (review `task-m3b-18-review.md`, controller rulings).**
+  - *I1.* `StatementClassifier::check_read_only_in` has no default: an implementer that
+    dropped the context would classify with an empty search path (read by the PostgreSQL
+    backend as `pg_catalog` first) and without MySQL's database. Every implementer, test fakes
+    included, says how it uses the context.
+  - *m1 (ledger 279).* A typed statement that completed without a result end (a release whose
+    drain read a MySQL result to its end has no final OK) has no tag and no count. When a
+    reading of its first keyword is judged by its count (`INSERT`, `UPDATE`, `DELETE`, `MERGE`,
+    `COPY`, `REPLACE`, `LOAD`; on MySQL/MariaDB also `WITH`, `CALL`, `DO`; readings cut short
+    too) it is unknown, never clean: the guard ends, then the connection is discarded as a gap
+    (`WriteSucceeded`). A drained `SELECT` (the common release) stays clean: a `SELECT` writes
+    only through a function or `INTO OUTFILE`, which the read-only transaction, the principal
+    and step 0b stop.
+  - *m2.* A failed context read stays due: the check it was for is told nothing (fail-closed),
+    and the next check reads again, at most once per check (one per statement).
+  - *m3.* After `SwitchSchema`, a re-probe that fails (or reads nothing) leaves the database /
+    search path unknown to the classifier (`RoContextRead::DatabaseUnknown`), never the
+    replay's old one or the connect's, until the next context read or a switch that probes
+    (`Core::reprobe` now says whether it answered; named exception in `actor.rs`).
+  - *m4.* A′'s PostgreSQL side channel is the console backend's `query_start`: any statement
+    sent moves it; only Hacivat's own context read may run on a denied row. MySQL/MariaDB: the
+    test account cannot read another thread's statements, so A′ checks server state only and
+    the offline FakeDriver call-log tests are the proof that nothing is sent.
+  - *m5.* An allowed A′ row that run B also runs ends as run B allows (`server_off`; a
+    neutralised row runs or draws a server code). Only PostgreSQL has such rows.
+  - *m7.* Run B judges MariaDB's catalogue rows by their recorded outcome (`observed`);
+    `docker_m3a_readonly`'s MariaDB rows are generated from MySQL's plus `mariadb.toml`'s
+    recorded outcomes (one `Run`-only difference, `WITH … DELETE` → `1064`). PO list: MariaDB
+    `CALL hv_t23_escape()` as the owner, without a classifier, committed a row (the reason
+    MariaDB stays "guarded"; step 0b denies it).
+  - *m8.* C8 counts a prepared statement only for a part that prepares (a unit's effects are
+    its union, passed with each part).
+  - *m9.* `GuardPlan.pinned` is documented as the environment plan's: the guard's own steps
+    never read it. *m10.* `read_context_again`'s arms merged. *m11.* MySQL's connect read
+    steps down from four values to T7's pair (keeping the zone), then to `net_write_timeout`.
+  - *m12* (Count rows keeps the context-free check) is carried to T24.

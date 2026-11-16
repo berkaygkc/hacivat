@@ -11,6 +11,21 @@
 //! mariadb106/1011/114).
 //!
 //! The offline part (a real pool over a fake server) runs on every PR.
+//!
+//! ## Fix round 1 (m4, m5): what the side channel proves
+//! - **PostgreSQL:** the console backend's `query_start` (`pg_stat_activity`, found by the
+//!   profile's unique `application_name`; direct profiles have no keep-alive, so nothing else
+//!   runs on it). Any statement the console sends moves it, so a denied row leaves it where it
+//!   was. The one exception is Hacivat's own context read after a statement that may have
+//!   changed the context: then the backend's last statement must be that read, never the
+//!   guard's replay (which ends every statement that was sent).
+//! - **MySQL and MariaDB:** only server state (global settings, user locks, the database's
+//!   tables); the test account cannot read another thread's statement history. That nothing is
+//!   sent is proven offline by the FakeDriver call log (`hacivat-session/tests/
+//!   readonly_classifier.rs` and this file's offline tests), not here.
+//! - **Allowed rows** that run B also runs (`accounts` not empty) must end as run B allows
+//!   (`server_off`; a neutralised row: it ran, or a server code). Only PostgreSQL has such rows;
+//!   on MySQL and MariaDB every run B row is denied by step 0b.
 
 #![allow(
     clippy::result_large_err,
@@ -59,6 +74,10 @@ struct Row {
     allowlist: Option<Vec<String>>,
     classifier: Expected,
     accounts: Vec<String>,
+    // ## fix round 1 (m5)
+    #[serde(default)]
+    server_off: Vec<String>,
+    kind: String,
 }
 
 fn rows_of(file: &str) -> Vec<Row> {
@@ -103,8 +122,7 @@ fn sql_of(row: &Row) -> String {
 
 /// What the admin connection sees: server state a bypass would change (advisory and user locks,
 /// replication slots, prepared transactions, the global settings run B's rows try), and on
-/// PostgreSQL the last statement the console's own backend ran (`pg_stat_activity.query`), which
-/// a denied row never becomes.
+/// PostgreSQL the console backend's `query_start` with its last statement (the module docs).
 async fn snapshot(a: &mut Side, engine: DbmsKind, app: &str) -> (String, String) {
     match engine {
         DbmsKind::Postgres => {
@@ -117,8 +135,8 @@ async fn snapshot(a: &mut Side, engine: DbmsKind, app: &str) -> (String, String)
                 .await;
             let last = a
                 .scalar(&format!(
-                    "SELECT coalesce(string_agg(query, ' | '), '') FROM pg_catalog.pg_stat_activity \
-                     WHERE application_name = '{}'",
+                    "SELECT coalesce(string_agg(query_start::text || ' ' || query, ' | '), '') \
+                     FROM pg_catalog.pg_stat_activity WHERE application_name = '{}'",
                     app.replace('\'', "''")
                 ))
                 .await;
@@ -141,6 +159,10 @@ async fn snapshot(a: &mut Side, engine: DbmsKind, app: &str) -> (String, String)
 
 // ---------------------------------------------------------------------------------------------
 // Run A′
+
+/// The start of Hacivat's own context read after a statement that may have changed the
+/// context (`session/readonly.rs`).
+const CONTEXT_READ: &str = "SELECT pg_catalog.current_setting('standard_conforming_strings')";
 
 /// What one row came to in A′.
 fn outcome(reply: &Reply) -> String {
@@ -238,7 +260,9 @@ async fn a_prime(
                     line.id, row.id
                 ));
             }
-            if before != after {
+            // Only Hacivat's context read may have run (the module docs).
+            let read_only_context = after.1.contains(CONTEXT_READ) && !after.1.contains(" | ");
+            if before.0 != after.0 || (before.1 != after.1 && !read_only_context) {
                 failures.push(format!(
                     "{} {who} {} `{shown}`: the side channel changed: {before:?} → {after:?}",
                     line.id, row.id
@@ -258,6 +282,20 @@ async fn a_prime(
                     "{} {who} {} `{shown}`: {got}, and the server state changed: {} → {}",
                     line.id, row.id, before.0, after.0
                 ));
+            }
+            // ## fix round 1 (m5): a row run B also runs ends as run B allows.
+            if !row.accounts.is_empty() {
+                let as_run_b = if row.kind == "neutralised" {
+                    got == "ran" || got.chars().all(|c| c.is_ascii_alphanumeric())
+                } else {
+                    row.server_off.contains(&got)
+                };
+                if !as_run_b {
+                    failures.push(format!(
+                        "{} {who} {} `{shown}`: {got}, which run B does not allow ({:?})",
+                        line.id, row.id, row.server_off
+                    ));
+                }
             }
         }
     }

@@ -346,24 +346,26 @@ pub(crate) async fn warnings(cx: Ctx<'_>) -> Result<Vec<Notice>, RawError> {
 /// database (`DATABASE()`, the fourth; `None` for SQL NULL), folded into this round trip rather
 /// than a separate one.
 pub(crate) async fn read_net_write_timeout(conn: &mut Conn) -> Result<ConnectReads, RawError> {
-    let row = match conn
-        .query_first::<Row, _>(
-            "SELECT @@net_write_timeout, @@session.time_zone, @@session.sql_mode, DATABASE()",
-        )
-        .await
-    {
-        Ok(row) => row,
-        Err(mysql_async::Error::Server(_)) => {
-            match conn
-                .query_first::<Row, _>("SELECT @@net_write_timeout")
-                .await
-            {
-                Ok(row) => row,
-                Err(mysql_async::Error::Server(_)) => return Ok((None, None, None, None)),
-                Err(e) => return Err(raw_error(&e)),
+    // ## m3b-t18-safe06 (fix round 1, m11): a server that refuses one of the four steps down
+    // to T7's pair (so it keeps its zone), then to `net_write_timeout` alone.
+    const QUERIES: [&str; 3] = [
+        "SELECT @@net_write_timeout, @@session.time_zone, @@session.sql_mode, DATABASE()",
+        "SELECT @@net_write_timeout, @@session.time_zone",
+        "SELECT @@net_write_timeout",
+    ];
+    let mut row = None;
+    for sql in QUERIES {
+        match conn.query_first::<Row, _>(sql).await {
+            Ok(answer) => {
+                row = Some(answer);
+                break;
             }
+            Err(mysql_async::Error::Server(_)) => {}
+            Err(e) => return Err(raw_error(&e)),
         }
-        Err(e) => return Err(raw_error(&e)),
+    }
+    let Some(row) = row else {
+        return Ok((None, None, None, None));
     };
     let timeout = row
         .as_ref()

@@ -592,3 +592,113 @@ async fn the_managers_classifier_reaches_every_read_only_session() {
         ["SELECT 1", "SELECT 2"]
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// ## m3b-t18-safe06 fix round 1
+
+/// What the re-read query answers: no row (a failed read).
+fn reread_without_row(prefix: &'static str) -> FakeExec {
+    FakeExec {
+        prefix,
+        result: Ok(ExecSummary::default()),
+        delay: std::time::Duration::ZERO,
+        tx_after: None,
+        panics: false,
+    }
+}
+
+#[tokio::test]
+async fn a_failed_reread_is_tried_again_at_the_next_check() {
+    // m2: a failed read is not sticky. The check after it is told nothing (fail-closed), the
+    // next one reads again, once per statement.
+    let reread = "SELECT pg_catalog.current_setting('standard_conforming_strings')";
+    let c = Arc::new(Fake {
+        changes_context: true,
+        ..Fake::default()
+    });
+    let mut script: Vec<FakeExec> = (0..4).map(|_| clean_canary()).collect();
+    script.push(reread_without_row(reread));
+    script.push(rows(reread, &[&["on", "app, pg_catalog"]]));
+    let fake = fake_pg()
+        .tracks_transactions()
+        .exec(script)
+        .session_settings(settings(Some("on"), Some("public")));
+    let (h, f, _m) = ro_over(fake, ro_profile(), c.clone()).await;
+    let reads = |f: &FakeDriver| {
+        f.call_log()
+            .iter()
+            .filter(|c| matches!(c, FakeCall::Statement(s) if s.starts_with(reread)))
+            .count()
+    };
+    exec_user(&h, "FETCH ALL FROM c").await.unwrap();
+    assert_eq!(reads(&f), 0);
+    exec_user(&h, "SELECT 41").await.unwrap();
+    assert_eq!(reads(&f), 1, "one read for the second statement");
+    exec_user(&h, "SELECT 42").await.unwrap();
+    assert_eq!(reads(&f), 2, "read again, once, for the third");
+    let asked = c.asked();
+    assert_eq!(asked[1].1.search_path, None, "the failed read: unknown");
+    assert_eq!(asked[1].1.lex_modes, None);
+    let path: Vec<String> = asked[2]
+        .1
+        .search_path
+        .as_deref()
+        .expect("the second read answered")
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(path, ["app", "pg_catalog"]);
+}
+
+#[tokio::test]
+async fn a_schema_switch_whose_probe_fails_leaves_the_schema_unknown() {
+    // m3: after `SwitchSchema`, a re-probe that fails never lets the classifier use the old
+    // schema (the replay's) or the connect's: the search path is unknown.
+    let probe = "SELECT current_database()";
+    let fails = FakeExec {
+        prefix: probe,
+        result: Err(db("XX000")),
+        delay: std::time::Duration::ZERO,
+        tx_after: None,
+        panics: false,
+    };
+    let mut script: Vec<FakeExec> = (0..2).map(|_| clean_canary()).collect();
+    script.push(fails);
+    let c = fake_classifier_allowing();
+    let fake = fake_pg()
+        .tracks_transactions()
+        .exec(script)
+        .session_settings(settings(Some("on"), Some("public")));
+    let (h, _f, _m) = ro_over(fake, ro_profile(), c.clone()).await;
+    h.submit(Request::SwitchSchema("app".into()))
+        .reply
+        .await
+        .unwrap()
+        .unwrap();
+    exec_user(&h, "SELECT 1").await.unwrap();
+    assert_eq!(c.asked()[0].1.search_path, None);
+    // A switch whose probe answers gives the classifier the new path.
+    let mut script: Vec<FakeExec> = (0..2).map(|_| clean_canary()).collect();
+    script.push(rows(probe, &[&["db", "app", "pg_catalog,app", "u", "app"]]));
+    let c = fake_classifier_allowing();
+    let fake = fake_pg()
+        .tracks_transactions()
+        .exec(script)
+        .session_settings(settings(Some("on"), Some("public")));
+    let (h, _f, _m) = ro_over(fake, ro_profile(), c.clone()).await;
+    h.submit(Request::SwitchSchema("app".into()))
+        .reply
+        .await
+        .unwrap()
+        .unwrap();
+    exec_user(&h, "SELECT 1").await.unwrap();
+    let path: Vec<String> = c.asked()[0]
+        .1
+        .search_path
+        .as_deref()
+        .expect("the probed path")
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(path, ["app"]);
+}

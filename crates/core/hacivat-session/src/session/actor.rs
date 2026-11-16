@@ -822,13 +822,14 @@ impl Core {
     }
 
     /// Probes the schema context again (Q27); a failed probe keeps the last one.
-    pub(crate) async fn reprobe(&mut self) {
+    /// ## m3b-t18-safe06 (named exception, fix round 1 m3): true when the probe answered.
+    pub(crate) async fn reprobe(&mut self) -> bool {
         let sql = schema_probe_sql(self.kind);
         if sql.is_empty() {
-            return;
+            return false;
         }
         let Ok(conn) = self.conn() else {
-            return;
+            return false;
         };
         // F3: the values path; the extended protocol only counts the probe's rows.
         let probed = conn
@@ -839,11 +840,13 @@ impl Core {
                 self.observe(false);
                 let ctx = parse_schema_probe(self.kind, &answer);
                 self.schema = (ctx != SchemaCtx::default()).then_some(ctx);
+                true
             }
             Err(e) => {
                 let e = self.raw_error(&e, false);
                 self.observe(false);
                 tracing::debug!(kind = ?e.kind, "the schema probe failed");
+                false
             }
         }
     }
@@ -930,7 +933,11 @@ impl Core {
             return Err(ExecError::of(ExecErrorKind::Internal));
         }
         self.control(&sql).await?;
-        self.reprobe().await;
+        // ## m3b-t18-safe06 (named exception, fix round 1 m3): a re-probe that did not read
+        // the new schema leaves the read-only guard's context unknown for it.
+        let probed = self.reprobe().await;
+        let known = probed && self.schema.is_some();
+        self.note_schema_switch(known);
         Ok(self.summary())
     }
 

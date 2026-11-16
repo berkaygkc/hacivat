@@ -94,3 +94,12 @@ fn lost_state_from_effects_and_scan_fallback() {
     ]);
     assert!(lost_state(&t).session_vars);
 }
+
+// ## m3b-t18-safe06 (fix round 1, m8)
+#[test]
+fn a_units_prepare_effect_counts_only_its_prepare_part() {
+    // Run passes a unit's effects (their union) with each of its parts.
+    let union = Some(SessionEffects::PREPARE);
+    let t = after(&[("PREPARE a AS SELECT 1", union), ("SELECT 1", union)]);
+    assert_eq!(lost_state(&t).prepared, 1);
+}
