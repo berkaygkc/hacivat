@@ -1172,6 +1172,8 @@ fn lost_unit() -> UnitStatus {
         server_text: None,
         hint_id: None,
         doc_offset: None,
+        // ## m3b-t25-results (named exception)
+        vendor_code: None,
     })
 }
 

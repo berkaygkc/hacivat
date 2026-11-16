@@ -1,6 +1,6 @@
 //! M3b Task 15: the exec gate (HV-EXEC-04, R-M3-55, R-M3-84; R-M3-23 ANDed). Reports are built
 //! by hand over the exact final text (P-M3b-16, `common::gate_fx`); the end-to-end test over
-//! the real classifier is `#[ignore]`d until Task 28 turns it on.
+//! the real classifier was `#[ignore]`d until Task 28 turned it on (m3b-t28, named exception).
 
 mod common;
 
@@ -1908,8 +1908,9 @@ fn mysql_rows_over_the_real_backend() {
 // ---------------------------------------------------------------------------------------------
 // The end-to-end gate over the real classifier (P-M3b-16): Task 28 turns it on.
 
+// ## m3b-t28-matrix (named exception): on since Task 14's `classify` merged; the same check
+// over the live Docker matrix is `docker_m3b_matrix::gate_end_to_end_over_real_classify`.
 #[test]
-#[ignore = "Task 28 turns it on once Task 14's classify has merged (P-M3b-16)"]
 fn gate_end_to_end_over_real_classify() {
     let ctx = sql_safety::ClassifyCtx::new(
         sql_dialect::DialectCtx::new(DialectId::Postgres, None),

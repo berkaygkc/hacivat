@@ -552,6 +552,8 @@ fn view_of(title_id: &'static str) -> ErrorView {
         server_text: None,
         hint_id: None,
         doc_offset: None,
+        // ## m3b-t25-results (named exception)
+        vendor_code: None,
     }
 }
 
@@ -884,9 +886,16 @@ fn rerun(console: ConsoleId, ordinal: u32, cx: &mut App) {
         .and_then(|s| s.results.clone())
         .and_then(|r| {
             let r = r.read(cx);
-            r.tabs()
-                .iter()
-                .find(|t| t.key().unit_ordinal == ordinal && t.key().result_ordinal == 0)
+            // ## m3b-t25-results (named exception): Re-run is asked from the active tab (its
+            // strip, `results.rerun`); a pinned tab of an older run may share its ordinal, and
+            // a further result set its unit, so the active tab answers first.
+            r.active_tab()
+                .filter(|t| t.key().unit_ordinal == ordinal)
+                .or_else(|| {
+                    r.tabs()
+                        .iter()
+                        .find(|t| t.key().unit_ordinal == ordinal && t.key().result_ordinal == 0)
+                })
                 .map(|t| t.unit())
         });
     let Some((unit, key)) = tab_unit.and_then(|id| exec.tab_units.get(&id).cloned()) else {

@@ -16,6 +16,13 @@
 //! - **Re-run** emits `ResultsEvent::Rerun` for the console's run UI.
 //!
 //! Counts are formatted in the format locale; the selection's size likewise.
+//!
+//! ## m3b-t25-results
+//! - **Closed to free memory** (R-M3-68): a background result eviction cut to its first chunk
+//!   says so ("Closed to free memory; the first 4,096 rows are kept.", info glyph `text-2`) and
+//!   offers Re-run (design/m3b-safe surface 10).
+//! - **The result-set limit** (R-M3-66) is read from the log as the drained sets are, for the
+//!   tile's info row ([`StripFacts::set_limit`]).
 
 use std::rc::Rc;
 
@@ -72,6 +79,11 @@ pub enum StripKind {
     Cancelled {
         rows: u64,
     },
+    // ## m3b-t25-results
+    /// Closed to free memory (R-M3-68): `rows` kept.
+    Evicted {
+        rows: u64,
+    },
 }
 
 // ## m3a-t30 fix round 1 (I2): the facts the strip takes from the log, kept per tab by the tile
@@ -85,13 +97,23 @@ pub struct StripFacts {
     pub closed: Option<(CloseReason, bool, u64)>,
     /// Result sets read and not shown (R-M3-25).
     pub more_sets: Option<u32>,
+    // ## m3b-t25-results
+    /// The statement returned more result sets than a run keeps (R-M3-66): `(total, limit)`.
+    pub set_limit: Option<(u32, u32)>,
 }
 
 impl StripFacts {
     /// What `log` says about `unit` (its newest lines win).
     pub fn from_log(log: &[LogLine], unit: UnitId) -> StripFacts {
+        Self::from_lines(log, unit)
+    }
+
+    // ## m3b-t25-results
+    /// [`from_log`](Self::from_log) over any run of lines (the tile's rows, the new lines of a
+    /// change).
+    pub fn from_lines<'a>(log: impl IntoIterator<Item = &'a LogLine>, unit: UnitId) -> StripFacts {
         let mut facts = StripFacts::default();
-        for line in log.iter().filter(|l| l.unit == Some(unit)) {
+        for line in log.into_iter().filter(|l| l.unit == Some(unit)) {
             match line.msg {
                 LogMsg::CursorClosed {
                     reason,
@@ -101,6 +123,10 @@ impl StripFacts {
                 } => facts.closed = Some((reason, rolled_back, idle_ms)),
                 LogMsg::MoreResultSets { skipped } if skipped > 0 => {
                     facts.more_sets = Some(skipped);
+                }
+                // ## m3b-t25-results
+                LogMsg::ResultSetLimit { total, limit } if total > limit => {
+                    facts.set_limit = Some((total, limit));
                 }
                 _ => {}
             }
@@ -115,6 +141,10 @@ impl StripFacts {
         }
         if newer.more_sets.is_some() {
             self.more_sets = newer.more_sets;
+        }
+        // ## m3b-t25-results
+        if newer.set_limit.is_some() {
+            self.set_limit = newer.set_limit;
         }
     }
 }
@@ -158,6 +188,10 @@ impl StripModel {
                 StripKind::Complete { rows }
             }
             Completeness::Truncated(TruncReason::ResultCap) => StripKind::Truncated { rows },
+            // ## m3b-t25-results
+            Completeness::Closed {
+                reason: CloseReason::Evicted,
+            } => StripKind::Evicted { rows },
             Completeness::Closed { reason } => closed(*reason),
             Completeness::Cancelled => StripKind::Cancelled { rows },
             // The rows were given back with their tab: nothing on screen shows them.
@@ -191,6 +225,8 @@ impl StripModel {
             StripKind::Complete { .. } => ids::hv::STRIP_COMPLETE.id,
             StripKind::Truncated { .. } => ids::hv::STRIP_TRUNCATED.id,
             StripKind::Cancelled { .. } => ids::hv::STRIP_CANCELLED.id,
+            // ## m3b-t25-results
+            StripKind::Evicted { .. } => ids::hv::STRIP_EVICTED.id,
             StripKind::Closed { .. } if self.idle_unknown().is_some() => {
                 ids::hv::STRIP_CLOSED_IDLE.id
             }
@@ -254,6 +290,12 @@ impl StripModel {
                 ids::hv::STRIP_CANCELLED,
                 ids::hv::HvStripCancelled { rows: Count(rows) },
             ),
+            // ## m3b-t25-results
+            StripKind::Evicted { rows } => tr(
+                cx,
+                ids::hv::STRIP_EVICTED,
+                ids::hv::HvStripEvicted { rows: Count(rows) },
+            ),
             StripKind::Closed { .. } => match self.idle_unknown() {
                 Some(rows) => tr(
                     cx,
@@ -278,6 +320,8 @@ impl StripModel {
                 | StripKind::Cancelled { .. }
                 | StripKind::Memory { .. }
                 | StripKind::Truncated { .. }
+                // ## m3b-t25-results
+                | StripKind::Evicted { .. }
         )
     }
 
@@ -285,7 +329,7 @@ impl StripModel {
     pub fn offers_rerun(&self) -> bool {
         matches!(
             self.kind,
-            StripKind::Closed { .. } | StripKind::Cancelled { .. }
+            StripKind::Closed { .. } | StripKind::Cancelled { .. } | StripKind::Evicted { .. }
         )
     }
 }
@@ -323,7 +367,10 @@ pub fn render(
     let lead = lead_glyph(model.kind);
     let count_like = matches!(
         model.kind,
-        StripKind::Suspended { .. } | StripKind::Memory { .. } | StripKind::Closed { .. }
+        StripKind::Suspended { .. }
+            | StripKind::Memory { .. }
+            | StripKind::Closed { .. }
+            | StripKind::Evicted { .. }
     );
     let sentence_text: TextFn = {
         let s = sentence.clone();
@@ -611,6 +658,8 @@ fn lead_glyph(kind: StripKind) -> Option<Lead> {
         StripKind::Truncated { .. } => Some(Lead::Icon(IconName::CircleAlert, Ink::Text)),
         StripKind::Closed { .. } => Some(Lead::Icon(IconName::Info, Ink::Text2)),
         StripKind::Cancelled { .. } => Some(Lead::Icon(IconName::Ban, Ink::Text2)),
+        // ## m3b-t25-results
+        StripKind::Evicted { .. } => Some(Lead::Icon(IconName::Info, Ink::Text2)),
     }
 }
 

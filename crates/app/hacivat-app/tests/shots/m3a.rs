@@ -138,7 +138,27 @@ pub(super) enum M3a {
     TxSegmentMenu,
     TxIdleToast,
     TxShared,
+    // ## m3b-t25-results (named exception): design/m3b-safe surface 10's tab menu (the other
+    // states are `Results(..)` fixtures, [`M3B_T25`]).
+    ResultsTabMenu,
 }
+
+// ## m3b-t25-results (named exception)
+/// The Task 25 states (after Task 22's).
+pub(super) const M3B_T25: [M3a; 11] = [
+    M3a::Results(ResultsShot::TitledTabs),
+    M3a::ResultsTabMenu,
+    M3a::Results(ResultsShot::Untyped),
+    M3a::Results(ResultsShot::SetLimit),
+    M3a::Results(ResultsShot::Counting),
+    M3a::Results(ResultsShot::CountExact),
+    M3a::Results(ResultsShot::Evicted),
+    M3a::Results(ResultsShot::FetchAll),
+    M3a::Results(ResultsShot::Notices),
+    M3a::Results(ResultsShot::MysqlWarnings),
+    // ## m3b-t25-results (fix round 1, I1)
+    M3a::Results(ResultsShot::CrowdedTabs),
+];
 
 // ## m3b-t22-tx-ui (named exception)
 /// The Task 22 states (after every M3a state).
@@ -379,6 +399,8 @@ impl M3a {
             M3a::TxSegmentMenu => "tx-segment-menu",
             M3a::TxIdleToast => "tx-idle-toast",
             M3a::TxShared => "tx-shared",
+            // ## m3b-t25-results (named exception)
+            M3a::ResultsTabMenu => "results-tab-menu",
         }
     }
 
@@ -445,6 +467,9 @@ impl M3a {
             M3a::TxBadgeFailed => ("#tx-badge-failed", None),
             M3a::TxIdleToast => (TOAST, None),
             M3a::TxShared => ("#tx-chip-mode", None),
+            // ## m3b-t25-results (named exception)
+            // The menu's rows are button labels; `check` asks for the menu layer.
+            M3a::ResultsTabMenu => ("hacivat-ui/src/button.rs:", None),
         }
     }
 
@@ -890,6 +915,10 @@ impl M3a {
                 s.push(editor_command("editor.describe_exec_range"));
                 s
             }
+            // ## m3b-t25-results (fix round 1, I1): the crowded strip on production.
+            Results(ResultsShot::CrowdedTabs) => {
+                results(ResultsShot::CrowdedTabs, Some(EnvTag::Production))
+            }
             Results(r) => results(r, Some(EnvTag::Dev)),
             GridRange => {
                 let mut s = results(ResultsShot::Rows, Some(EnvTag::Dev));
@@ -1022,6 +1051,19 @@ impl M3a {
                 s.push(user_tx(&["BEGIN", UPD1], Some(1), false));
                 s
             }
+            // ## m3b-t25-results (named exception): the titled tabs, then the first tab's menu
+            // under it.
+            ResultsTabMenu => {
+                let mut s = results(ResultsShot::TitledTabs, Some(EnvTag::Dev));
+                s.push(step(
+                    |window, cx| {
+                        let console = active_console(window, cx).expect("a console");
+                        hacivat_app::results::view::open_tab_menu_for(console, 3, window, cx);
+                    },
+                    |window, cx| menu_open(window, cx),
+                ));
+                s
+            }
         }
     }
 
@@ -1139,6 +1181,8 @@ impl M3a {
                         }))
             }
             StatusProductionResult | Results(_) | GridRange | NoticeReducedMode => true,
+            // ## m3b-t25-results (named exception)
+            ResultsTabMenu => menu_open(window, cx),
             NoticePasteRefused => toast("hui-editor-paste-refused-title"),
             NoticeNul => text().contains('\0') && toast("hui-editor-nul-title"),
             NoticeClipboard => toast("hui-editor-clipboard-title"),
@@ -1292,6 +1336,17 @@ fn results_name(r: ResultsShot) -> &'static str {
         ResultsShot::MoreResultSets => "strip-more-result-sets",
         ResultsShot::RunLog => "output-run-log",
         ResultsShot::EventsDropped => "output-events-dropped",
+        // ## m3b-t25-results (named exception)
+        ResultsShot::TitledTabs => "results-titled-tabs",
+        ResultsShot::Untyped => "results-untyped",
+        ResultsShot::SetLimit => "results-set-limit",
+        ResultsShot::Counting => "results-counting",
+        ResultsShot::CountExact => "results-count-exact",
+        ResultsShot::Evicted => "strip-evicted",
+        ResultsShot::FetchAll => "results-fetch-all",
+        ResultsShot::Notices => "output-notices",
+        ResultsShot::MysqlWarnings => "output-mysql-warnings",
+        ResultsShot::CrowdedTabs => "results-crowded-tabs",
     }
 }
 
@@ -1313,6 +1368,16 @@ fn results_marker(r: ResultsShot) -> (&'static str, Option<&'static str>) {
         | ResultsShot::Error
         | ResultsShot::RunLog
         | ResultsShot::EventsDropped => (OUTPUT, None),
+        // ## m3b-t25-results (named exception)
+        ResultsShot::TitledTabs => ("#results-tab-0", None),
+        ResultsShot::Untyped => ("#results-tab-0-untyped", None),
+        ResultsShot::SetLimit => ("#results-set-limit", None),
+        ResultsShot::Counting | ResultsShot::CountExact => ("#results-count-state", None),
+        ResultsShot::Evicted => (STRIP, None),
+        ResultsShot::FetchAll => (DIALOG, None),
+        ResultsShot::Notices => ("#log-notice-0", None),
+        ResultsShot::MysqlWarnings => ("#log-code-2", None),
+        ResultsShot::CrowdedTabs => ("#results-tabs-more", None),
     }
 }
 
@@ -1616,6 +1681,8 @@ fn failed(code: &str, server: &str) -> (UnitStatus, Duration) {
             server_text: Some(server.into()),
             hint_id: None,
             doc_offset: None,
+            // ## m3b-t25-results (named exception)
+            vendor_code: None,
         }),
         Duration::from_millis(9),
     )
