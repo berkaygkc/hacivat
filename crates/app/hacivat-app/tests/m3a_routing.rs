@@ -188,17 +188,19 @@ fn edit_menu_appears_only_with_editor_commands(cx: &mut TestAppContext) {
             hacivat_app::menus::MenuEntry::Separator => None,
         })
         .collect();
-    assert_eq!(
-        actions,
-        [
-            "editor.undo",
-            "editor.redo",
-            "editor.cut",
-            "editor.copy",
-            "editor.paste",
-            "editor.select_all"
-        ]
-    );
+    // ## m3a-f4-ime (named exception, E7 row 6b): macOS adds Emoji & Symbols last.
+    let mut want = vec![
+        "editor.undo",
+        "editor.redo",
+        "editor.cut",
+        "editor.copy",
+        "editor.paste",
+        "editor.select_all",
+    ];
+    if cfg!(target_os = "macos") {
+        want.push("app.character_palette");
+    }
+    assert_eq!(actions, want);
     vcx.cx.update(|cx| {
         assert!(
             cx.global_mut::<ActionRegistry>()

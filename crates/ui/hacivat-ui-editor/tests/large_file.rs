@@ -271,11 +271,12 @@ fn a_long_line_says_why_without_a_size(cx: &mut TestAppContext) {
     let (e, vcx) = open(cx, text);
     assert_eq!(state(&e, vcx).tier, Tier::Reduced);
     assert!(vcx.debug_bounds("editor-t1-banner").is_some());
+    // ## m3a-f4-ime (EDIT-2): the long-line copy says when it ends, as the size copy does.
     assert_eq!(
         description(&e, vcx).as_deref(),
         Some(
             "This document has a very long line, so the editor is in reduced mode. \
-             Reduced mode keeps typing fast."
+             Reduced mode keeps typing fast. It ends when every line is shorter than 51 KB."
         )
     );
 }
@@ -292,7 +293,7 @@ fn the_copy_follows_the_cause(cx: &mut TestAppContext) {
         description(&e, vcx).as_deref(),
         Some(
             "This document has a very long line, so the editor is in reduced mode. \
-             Reduced mode keeps typing fast."
+             Reduced mode keeps typing fast. It ends when every line is shorter than 51 KB."
         )
     );
 }
@@ -343,4 +344,192 @@ fn typing_in_reduced_mode_stays_within_budget(cx: &mut TestAppContext) {
     took.sort();
     let p95 = took[took.len() * 95 / 100];
     assert!(p95.as_secs_f64() < 0.016, "p95 {p95:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## m3a-f4-ime (PO finding EDIT-2): a long-line T1 ends once its cause is gone.
+
+/// Replaces the UTF-16 range `r` (ASCII text: bytes) with `text` through the input handler, as
+/// typing over a selection does.
+fn replace(
+    e: &Entity<EditorView>,
+    vcx: &mut VisualTestContext,
+    r: std::ops::Range<usize>,
+    text: &str,
+) {
+    e.update_in(vcx, |v, window, cx| {
+        use gpui::EntityInputHandler as _;
+        v.replace_text_in_range(Some(r), text, window, cx);
+    });
+}
+
+/// Records the host's `TierChanged` events.
+fn tier_events(e: &Entity<EditorView>, vcx: &mut VisualTestContext) -> Rc<RefCell<Vec<Tier>>> {
+    let events: Rc<RefCell<Vec<Tier>>> = Rc::default();
+    let seen = events.clone();
+    vcx.update(|_, cx| {
+        cx.subscribe(e, move |_, ev: &EditorEvent, _| {
+            if let EditorEvent::TierChanged(t) = ev {
+                seen.borrow_mut().push(*t);
+            }
+        })
+        .detach();
+    });
+    events
+}
+
+/// Lets the text rest past the re-measure delay.
+fn rest(vcx: &mut VisualTestContext) {
+    vcx.executor()
+        .advance_clock(large_file::REMEASURE_AFTER + std::time::Duration::from_millis(10));
+    draw(vcx);
+}
+
+/// The PO's repro: Select All and Delete in a long-line T1 leaves an empty document, and the
+/// banner, the status segment and the host's tier leave with the text (at once: no line is
+/// longer than the document).
+#[gpui::test]
+fn emptying_a_long_line_document_ends_reduced_mode(cx: &mut TestAppContext) {
+    let text = format!("SELECT '{}';\n", "x".repeat(70_000));
+    let len = text.len();
+    let (e, vcx) = open(cx, text);
+    assert_eq!(state(&e, vcx).tier, Tier::Reduced);
+    let events = tier_events(&e, vcx);
+    replace(&e, vcx, 0..len, "");
+    draw(vcx);
+    assert_eq!(state(&e, vcx).tier, Tier::Full);
+    assert_eq!(vcx.read(|cx| e.read(cx).status().tier), Tier::Full);
+    assert!(vcx.debug_bounds("editor-t1-banner").is_none());
+    assert_eq!(description(&e, vcx), None);
+    assert_eq!(*events.borrow(), [Tier::Full]);
+}
+
+/// Deleting the long line from a larger document, or splitting it into short lines, ends T1
+/// once the text has rested (the longest line is measured again off the UI thread, never per
+/// keystroke); a line still above 80 % of 64 KB keeps it (the hysteresis).
+#[gpui::test]
+fn removing_or_splitting_the_long_line_ends_reduced_mode_after_a_rest(cx: &mut TestAppContext) {
+    let head = sql_of(MB);
+    let long = format!("SELECT '{}';\n", "x".repeat(70_000));
+    let at = head.len();
+    let (e, vcx) = open(cx, format!("{head}{long}{head}"));
+    assert_eq!(state(&e, vcx).tier, Tier::Reduced);
+    let events = tier_events(&e, vcx);
+    // Shortened to 60 KB: legal in T0, but above 80 % of 64 KB.
+    replace(&e, vcx, at + 8..at + 8 + 10_000, "");
+    draw(vcx);
+    assert_eq!(state(&e, vcx).tier, Tier::Reduced, "not per keystroke");
+    rest(vcx);
+    assert_eq!(state(&e, vcx).tier, Tier::Reduced, "the margin holds");
+    assert!(events.borrow().is_empty());
+    // Split in two 30 KB lines: both below the margin.
+    replace(&e, vcx, at + 30_000..at + 30_000, "\n");
+    draw(vcx);
+    assert_eq!(state(&e, vcx).tier, Tier::Reduced, "not per keystroke");
+    rest(vcx);
+    assert_eq!(state(&e, vcx).tier, Tier::Full);
+    assert!(vcx.debug_bounds("editor-t1-banner").is_none());
+    assert_eq!(*events.borrow(), [Tier::Full]);
+    // A long line again, then deleted outright: back to T1, then out after a rest.
+    replace(&e, vcx, at..at, &long);
+    draw(vcx);
+    assert_eq!(state(&e, vcx).tier, Tier::Reduced);
+    replace(&e, vcx, at..at + long.len(), "");
+    rest(vcx);
+    assert_eq!(state(&e, vcx).tier, Tier::Full);
+    assert_eq!(*events.borrow(), [Tier::Full, Tier::Reduced, Tier::Full]);
+}
+
+/// An edit while a re-measure waits restarts the wait (the waiting measure is dropped), so a
+/// long line added meanwhile keeps T1. (`after_edit`'s version check is a second guard that
+/// this path does not reach: every text change replaces the waiting task first; review M2.)
+#[gpui::test]
+fn an_edit_restarts_the_remeasure_wait(cx: &mut TestAppContext) {
+    let long = format!("SELECT '{}';\n", "x".repeat(70_000));
+    let (e, vcx) = open(cx, format!("{long}SELECT 1;\n"));
+    // Split the long line (both halves short), then, before the rest is over, add a long line.
+    replace(&e, vcx, 30_000..30_000, "\n");
+    vcx.executor()
+        .advance_clock(large_file::REMEASURE_AFTER / 2);
+    replace(&e, vcx, 0..0, &long);
+    rest(vcx);
+    assert_eq!(
+        state(&e, vcx).tier,
+        Tier::Reduced,
+        "the newer long line counts"
+    );
+}
+
+/// Both causes: the copy names both exits.
+#[gpui::test]
+fn both_causes_name_both_exits(cx: &mut TestAppContext) {
+    let mut text = sql_of(5 * MB);
+    text.push_str(&format!("SELECT '{}';\n", "x".repeat(70_000)));
+    let (e, vcx) = open(cx, text);
+    assert_eq!(
+        description(&e, vcx).as_deref(),
+        Some(
+            "This document is large (5.1 MB), so the editor is in reduced mode. \
+             Reduced mode keeps typing fast. It ends when the document is smaller than 3.2 MB \
+             and every line is shorter than 51 KB."
+        )
+    );
+}
+
+// ## m3a-f4-ime (PO finding EDIT-3): the T1 notice sits above the code, never under it.
+
+/// Scrolled by part of a row, the first row starts above the code area. The editor element
+/// paints inside a content mask of its own bounds, so nothing of that row (its line number
+/// above all, which the gutter draws unclipped) reaches the notice above it. The test platform
+/// draws no glyphs, so the check reads the mask on the element's own ground quad; the shots
+/// (`notice-reduced-mode`) show the glyphs.
+#[cfg(feature = "scene-check")]
+#[gpui::test]
+fn a_part_row_never_paints_over_the_t1_notice(cx: &mut TestAppContext) {
+    let mut text = "SELECT col FROM t;\n".repeat(400);
+    text.push_str(&format!("SELECT '{}';\n", "x".repeat(70_000)));
+    let (e, vcx) = open(cx, text);
+    assert_eq!(state(&e, vcx).tier, Tier::Reduced);
+    vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: gpui::point(gpui::px(450.0), gpui::px(400.0)),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-14.0))),
+        ..Default::default()
+    });
+    draw(vcx);
+    let banner = vcx.debug_bounds("editor-t1-banner").expect("the T1 notice");
+    let (first_top, area_top) = vcx.read(|cx| {
+        let rows = e.read(cx).last_layout().unwrap().rows().clone();
+        (rows.first_y, rows.bounds.top())
+    });
+    assert!(
+        first_top < area_top,
+        "a part row: {first_top:?} {area_top:?}"
+    );
+    let ground = vcx.read(|cx| Theme::get(cx).tokens.colors.panel.to_hsla());
+    // The element's ground: the tall quad of the editor's ground under the notice, and the
+    // top of the content mask it was painted in.
+    let masks: Vec<(f32, f32)> = vcx.update(|window, _| {
+        let scale = window.scale_factor();
+        window
+            .rendered_scene()
+            .quads
+            .iter()
+            .filter(|q| q.background.as_solid() == Some(ground))
+            .filter(|q| q.bounds.origin.y.0 / scale >= f32::from(banner.bottom()))
+            .filter(|q| q.bounds.size.height.0 / scale > 100.0)
+            .map(|q| {
+                (
+                    q.bounds.origin.y.0 / scale,
+                    q.content_mask.bounds.origin.y.0 / scale,
+                )
+            })
+            .collect()
+    });
+    assert_eq!(masks.len(), 1, "the editor's ground: {masks:?}");
+    let (top, mask_top) = masks[0];
+    assert!(
+        mask_top >= top - 0.5,
+        "the editor paints in a mask of its bounds (top {top}), not one from {mask_top}"
+    );
+    assert!(mask_top >= f32::from(banner.bottom()));
 }
