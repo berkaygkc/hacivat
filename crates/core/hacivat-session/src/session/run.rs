@@ -22,8 +22,9 @@
 //! (`Cancelled` for a stop).
 //!
 //! ## m3b-t11-session-runs (ADR 0004 `m3b-t11`)
-//! - **Binds** (HV-EXEC-03): `RunUnit::binds` reach the driver in slot order; a
-//!   driver that cannot bind refuses the query before sending it.
+//! - **Binds** (HV-EXEC-03): `RunUnit::binds` reach the driver in slot order, only when its
+//!   typed path binds (`TypedCaps::binds`) and never with a unit run "as one"; otherwise the
+//!   unit is refused (`Internal`), nothing sent (fix round 1, I2).
 //! - **Result sets** (R-M3-66): a unit keeps `max_result_sets` sets (at most 100), each its own
 //!   result (`open_result(unit, ordinal, ..)`, the ordinal is the set's place in the unit); an
 //!   earlier set's `ResultEnded` comes when the unit ends. Only the first set of the last unit
@@ -38,7 +39,8 @@
 //!   `Ignore` goes on, `IgnoreAll` goes on without asking again, `Stop` skips the rest (the
 //!   reply is the unit's error), `RollbackAndContinue` sends `ROLLBACK`, keeps the mode and
 //!   goes on. A cancel or a close answers `Stop`. A run that went on to its end replies `Ok`
-//!   unless its last unit failed.
+//!   unless its last unit failed. Before it asks, and after the `ROLLBACK` an answer sends,
+//!   the session publishes its transaction state (`Core::publish_tx`; still `Busy`).
 //! - **A cancelled queued run** reports every unit `Cancelled` and `RunEnded` (ledger 318);
 //!   one dropped from the queue for any other reason still never started.
 
@@ -333,6 +335,9 @@ impl Core {
         let failed_tx = family(self.kind) == Family::Postgres
             && self.tx.status == TxStatus::Failed
             && !self.tx.owner.is_hacivats();
+        // Fix round 1 (review I1): the snapshot shows the transaction the question is about
+        // (status, owner, statements) while the run waits; the session stays `Busy`.
+        self.publish_tx();
         let question = gate.ask_choice(self.request_seq, unit, failed_tx);
         spec.observer.0.event(&RunEvent::NeedsChoice {
             unit,
@@ -374,6 +379,8 @@ impl Core {
                 to: after,
             });
         }
+        // Fix round 1 (review I1): what the answer ended is shown at once.
+        self.publish_tx();
         rolled
     }
 
@@ -412,6 +419,13 @@ impl Core {
                 DenyLayer::Protocol,
             )));
         }
+        // Fix round 1 (review I2): values are bound only where the driver says its typed path
+        // binds, and never to a unit run "as one" (a simple query or a batch carries no
+        // parameters: a driver could run its placeholders as NULL). Nothing is sent.
+        if !unit.binds.is_empty() && (unit.protocol == Protocol::Simple || !self.typed_caps().binds)
+        {
+            return Ended::refused(ExecError::of(ExecErrorKind::Internal));
+        }
         let keyword = first_keyword(&unit.sql);
         let control = TX_CONTROL.contains(&keyword.as_str());
         let before = self.shown_status();
@@ -423,8 +437,32 @@ impl Core {
         if mysql && parts.iter().any(|p| autocommit_set(p) == Some(false)) {
             self.autocommit_off = true;
         }
+        // Fix round 1 (T13 review I-1, ruling (b)): a unit run "as one" is stopped by the
+        // server cancel at once, whatever the transaction state: waiting the overdue time
+        // would let the server run later statements of the script meanwhile. A zero overdue
+        // makes both the wait on a call and the close after a stop send it now.
+        let overdue = w.overdue;
+        if unit.protocol == Protocol::Simple {
+            w.overdue = std::time::Duration::ZERO;
+        }
         let ended = self.unit_body(spec, unit, last, &keyword, control, w).await;
-        if matches!(ended.outcome, UnitEnd::Succeeded { .. }) {
+        w.overdue = overdue;
+        let succeeded = matches!(ended.outcome, UnitEnd::Succeeded { .. });
+        // Fix round 1 (review m2): a batch that failed or was stopped partway may have run
+        // (and on MySQL committed) its first statements: its bookkeeping errs toward "seen".
+        let batch = unit.protocol == Protocol::Simple
+            && matches!(ended.outcome, UnitEnd::Failed(_) | UnitEnd::Cancelled);
+        // Review m3: a batch's statements count in the user's open transaction (one is
+        // counted by `observe`).
+        if (succeeded || batch)
+            && parts.len() > 1
+            && self.tx.status != TxStatus::Idle
+            && !self.tx.owner.is_hacivats()
+        {
+            let more = u32::try_from(parts.len() - 1).unwrap_or(u32::MAX);
+            self.tx.statements = self.tx.statements.saturating_add(more);
+        }
+        if succeeded || batch {
             // ## m3b-t01c-core-seams (P-M3b-11): the gate's effects when it classified the
             // unit; Task 18 makes `track_statement` use them.
             let effects = (unit.verdict != UnitVerdict::Unknown).then_some(unit.effects);
@@ -433,7 +471,8 @@ impl Core {
             }
             // One statement says what it set; in a batch only an "off" is believed (a split
             // inside a string must not turn a real "off" back on).
-            if mysql
+            if succeeded
+                && mysql
                 && let [part] = parts.as_slice()
                 && let Some(on) = autocommit_set(part)
             {
@@ -722,9 +761,10 @@ impl Core {
                 command_tag: end.command_tag.clone(),
             });
         }
-        if let Some(skipped) = s.done.map(|d| d.skipped_result_sets)
-            && skipped > 0
-        {
+        // ## m3b-t11-session-runs (fix round 1, review m1): the sets the stream did not keep
+        // count too.
+        let skipped = s.skipped_sets();
+        if skipped > 0 {
             s.observer.0.event(&RunEvent::MoreResultSets {
                 unit: s.unit,
                 skipped,
@@ -802,4 +842,15 @@ fn statements_of(unit: &RunUnit) -> Vec<&str> {
 /// whoever awaits its reply.
 pub(crate) fn report_cancelled_queued(spec: &RunSpec) {
     Tally::new(spec).finish(&UnitEnd::Cancelled, true);
+}
+
+/// A run the session refused to queue (`QueueFull`, C9; fix round 1, review m6): its observer
+/// hears its first unit end `Failed` with `error` (none started), the rest `Skipped`, then
+/// `RunEnded`, so a run nobody awaits still shows why it never ran.
+pub(crate) fn report_refused(spec: &RunSpec, error: &ExecError) {
+    let mut tally = Tally::new(spec);
+    if !spec.units.is_empty() {
+        tally.end(Ended::refused(error.clone()));
+    }
+    tally.finish(&UnitEnd::Skipped, true);
 }

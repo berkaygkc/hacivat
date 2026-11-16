@@ -302,6 +302,10 @@ pub(crate) fn spawn_supervised(
         observed_sql_mode: None,
         gate: gate.clone(),
         request_seq: 0,
+        // ## m3b-t11-session-runs (fix round 1)
+        snapshot: state.clone(),
+        events: events.clone(),
+        published_tx: None,
     };
     let ctl = Ctl {
         id,
@@ -396,6 +400,14 @@ pub(crate) struct Core {
     /// The sequence number of the request being handled (`run_one` sets it): a waiting run's
     /// question names it (`Pending::run_seq`).
     pub(crate) request_seq: u64,
+    // ## m3b-t11-session-runs (fix round 1, review I1)
+    /// The session's snapshot and events, so a run that waits for an answer publishes the
+    /// transaction state the question is about (`Core::publish_tx`).
+    snapshot: Arc<watch::Sender<SessionSnapshot>>,
+    events: broadcast::Sender<SessionEvent>,
+    /// The transaction state a request published while it ran (`run_one` compares its end
+    /// with it, so `TxChanged` is not sent twice for one state).
+    published_tx: Option<TxState>,
 }
 
 fn not_connected() -> ExecError {
@@ -446,6 +458,27 @@ impl Core {
         family(self.kind) == Family::MySql
             && self.tx.mode != TxMode::Manual
             && self.server_autocommit.map_or(self.autocommit_off, |on| !on)
+    }
+
+    // ## m3b-t11-session-runs (fix round 1, review I1)
+    /// Publishes the transaction state while the request still runs (the snapshot stays
+    /// `Busy`) and emits `SessionEvent::TxChanged` when it moved: a run that waits for an
+    /// answer shows the transaction the question is about (the badge, the "Roll back and
+    /// continue" count), and what that answer changed.
+    pub(crate) fn publish_tx(&mut self) {
+        let tx = self.tx.clone();
+        let moved = self.snapshot.send_if_modified(|s| {
+            if s.tx == tx {
+                return false;
+            }
+            s.tx = tx.clone();
+            s.generation = s.generation.wrapping_add(1);
+            true
+        });
+        if moved {
+            let _ = self.events.send(SessionEvent::TxChanged(tx.clone()));
+        }
+        self.published_tx = Some(tx);
     }
 
     /// The reply of a request without rows.
@@ -1180,7 +1213,12 @@ impl Ctl {
             .filter(|j| matches!(j, Job::Request(_)))
             .count();
         if waiting >= QUEUE_CAP {
-            let _ = job.reply.send(Err(ExecError::of(ExecErrorKind::QueueFull)));
+            let full = ExecError::of(ExecErrorKind::QueueFull);
+            // Fix round 1 (review m6): a refused run tells its observer too.
+            if let Request::Run(spec) = &job.request {
+                crate::session::run::report_refused(spec, &full);
+            }
+            let _ = job.reply.send(Err(full));
             return;
         }
         self.queue.push_back(Job::Request(job));
@@ -1945,6 +1983,7 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
     // ## m3b-t11-session-runs: a close already queued behind this request answers its choices
     // `Stop` (R-M3-61).
     core.gate.set_closing(ctl.close_queued());
+    core.published_tx = None;
     let mut prewarm_at =
         (family(core.kind) == Family::MySql).then(|| tokio::time::Instant::now() + SIDE_PREWARM);
 
@@ -2096,7 +2135,10 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
             s.cursor = cursor;
         });
     }
-    if core.tx != tx_before {
+    // ## m3b-t11-session-runs (fix round 1): against what the request last published, if it
+    // published while it ran.
+    let shown_tx = core.published_tx.take().unwrap_or(tx_before);
+    if core.tx != shown_tx {
         ctl.emit(SessionEvent::TxChanged(core.tx.clone()));
     }
     if core.schema != schema_before {

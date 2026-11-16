@@ -2119,3 +2119,36 @@ M3b Task 11 (HV-EXEC-05/-07/-08 session side; C9, C13; R-M3-60, -61, -66, -74, -
   `Protocol::Simple` answers its scripted sets and never suspends; in a failed PostgreSQL
   transaction a typed query that ends or recovers it is taken (the server takes `ROLLBACK` and
   `ABORT` on either protocol).
+- **Fix round 1.**
+  - **Publishing while a choice waits (I1).** `Core` holds the session's snapshot sender and
+    event sender. `Core::publish_tx` republishes `tx` while the request runs (the state stays
+    `Busy`) and emits `SessionEvent::TxChanged` when the state moved. It runs right before
+    `NeedsChoice` and after the `ROLLBACK` of Roll back and continue. `run_one` compares the
+    request's end with what was last published, so one state never gives two events.
+  - **Binds (I2).** A unit with binds is refused before anything is sent (`Internal`) when
+    the driver's typed path does not bind (`TypedCaps::binds`), and always when it runs "as
+    one": a simple query or a batch carries no parameters. The FakeDriver now reports
+    `binds: true`, as Task 13's drivers do (named exception).
+  - **Memory (I3).** A suspendable stream that runs past the rows admitted for it without
+    suspending (the first batch, then each `fetch_more`) admits every further chunk against the
+    budgets, as a stream that cannot stop does. A MySQL `CALL` and a text-route statement can
+    no longer stream their first set past the budgets.
+  - **Gap on the failure path (I4).** `fail_stream` reads the guard's verdict: a gap closes
+    every result of the unit (`Closed { EnforcementGap }`). The reply stays the statement's
+    error; whether it should be the gap is left to the T18/T22 owner.
+  - **Sets past the limit (m1).** When a driver emits more sets than the unit keeps, the
+    stream counts them with the driver's skipped sets (`MoreResultSets`,
+    `Truncated(FollowingResultSets)`), keeps their rows out of the kept set, and still lets the
+    guard judge their affected rows.
+  - **Run-as-one bookkeeping (m2, m3).** For a unit run "as one" that failed or was stopped,
+    the session still tracks each part and reprobes the schema when a part needs it. Each part
+    counts in the user's open transaction (`TxState::statements`).
+  - **`QueueFull` (m6).** A run refused with `QueueFull` tells its observer: its first unit
+    ends `Failed(QueueFull)`, the rest `Skipped`, then `RunEnded`.
+  - **Stopping a Run as one (T13 review I-1, ruling (b)).** The overdue time is zero for a
+    unit run "as one". A Stop then sends the server cancel at once, both while the session
+    waits on a call and when it closes the query, whatever the transaction state.
+  - **Noted.** `Close { RefuseIfOpenTx }` answers a pending choice `Stop` even when that close
+    is then refused (R-M3-61: any close of the console) (m4). The notice cap is per unit,
+    which differs from per statement only for a Run-as-one unit (m10). Earlier sets of a
+    dropped stream publish their own state (m5; recorded, unchanged).

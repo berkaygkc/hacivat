@@ -454,3 +454,94 @@ async fn a_cancel_that_races_the_answer_wins() {
     assert_eq!(o.unit_ends()[2], UnitEnd::Skipped);
     assert_eq!(queries(&f).len(), 2, "unit 3 never sent");
 }
+
+// ## m3b-t11-session-runs (fix round 1, review I1)
+
+/// The `SessionEvent::TxChanged` events, in order, received so far.
+fn tx_events(
+    ev: &mut tokio::sync::broadcast::Receiver<hacivat_session::session::SessionEvent>,
+) -> Vec<hacivat_session::session::TxState> {
+    let mut out = Vec::new();
+    while let Ok(e) = ev.try_recv() {
+        if let hacivat_session::session::SessionEvent::TxChanged(tx) = e {
+            out.push(tx);
+        }
+    }
+    out
+}
+
+/// While a choice waits, the snapshot and the session's events show the transaction the
+/// question is about (the badge, the "Roll back and continue" count); the session stays busy.
+/// What the answer ends is shown at once, while the run goes on.
+#[tokio::test(start_paused = true)]
+async fn a_pending_choice_shows_the_failed_transaction() {
+    let slow_third = hacivat_driver::fake::FakeQuery {
+        first_delay: secs(30),
+        ..answering("SELECT 3")
+    };
+    let (h, _f) = session(pg().queries(vec![
+        answering("SELECT 1"),
+        failing("SELECT * FROM missing"),
+        slow_third,
+    ]))
+    .await;
+    run(&h, "BEGIN").await.unwrap();
+    let mut ev = h.events();
+    let o = Recorder::new();
+    let t = h.run(ask_spec(&o, &THREE));
+    let q = nth_question(&o, 1).await;
+    assert!(q.rollback_and_continue);
+    let s = snap(&h);
+    assert!(matches!(s.state, SessionState::Busy { req, .. } if req == t.seq));
+    assert_eq!(
+        (s.tx.status, s.tx.owner, s.tx.statements),
+        (TxStatus::Failed, TxOwner::User, 2)
+    );
+    let seen = tx_events(&mut ev);
+    assert_eq!(seen.last().map(|tx| tx.status), Some(TxStatus::Failed));
+
+    assert!(
+        h.choose(t.seq, q.question, RunChoice::RollbackAndContinue)
+            .await
+            .unwrap()
+    );
+    // Unit 3 is held 30 s (paused): the rollback is already shown, the run still busy.
+    settle_until("the rollback is shown", || {
+        snap(&h).tx.status == TxStatus::Idle
+    })
+    .await;
+    assert!(matches!(snap(&h).state, SessionState::Busy { req, .. } if req == t.seq));
+    assert_eq!(
+        tx_events(&mut ev).last().map(|tx| tx.status),
+        Some(TxStatus::Idle)
+    );
+    t.reply.await.unwrap().unwrap();
+    // The end of the run changed nothing more: no second event for the same state.
+    assert!(tx_events(&mut ev).is_empty());
+}
+
+/// Manual mode: the failed transaction, then its rollback, then the next unit's new
+/// transaction, each one event.
+#[tokio::test(start_paused = true)]
+async fn manual_mode_shows_each_transaction_state_once() {
+    let (h, _f) = session(three()).await;
+    tx_cmd(&h, TxCommand::SetMode(TxMode::Manual))
+        .await
+        .unwrap();
+    let mut ev = h.events();
+    let o = Recorder::new();
+    let t = h.run(ask_spec(&o, &THREE));
+    let q = nth_question(&o, 1).await;
+    assert_eq!(snap(&h).tx.status, TxStatus::Failed);
+    assert!(
+        h.choose(t.seq, q.question, RunChoice::RollbackAndContinue)
+            .await
+            .unwrap()
+    );
+    t.reply.await.unwrap().unwrap();
+    let statuses: Vec<TxStatus> = tx_events(&mut ev).iter().map(|tx| tx.status).collect();
+    assert_eq!(
+        statuses,
+        vec![TxStatus::Failed, TxStatus::Idle, TxStatus::InTx]
+    );
+}

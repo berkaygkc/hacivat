@@ -312,18 +312,19 @@ const FIRST_THREAD_ID: u64 = 1_000;
 
 /// What a fake connection's typed path reports unless `with_typed_caps` says otherwise: the
 /// real drivers' shapes (MySQL: a kill to close early, `net_write_timeout` − 15 s at the
-/// server default).
+/// server default). ## m3b-t11-session-runs (fix round 1, named exception): every engine binds
+/// (`binds: true`, as Task 13's drivers report).
 fn default_typed_caps(kind: DbmsKind) -> TypedCaps {
     match kind {
         DbmsKind::MySql | DbmsKind::MariaDb | DbmsKind::TiDb => TypedCaps {
             suspend: true,
-            binds: false,
+            binds: true,
             close_needs_kill: true,
             idle_bound: Some(Duration::from_secs(45)),
         },
         _ => TypedCaps {
             suspend: true,
-            binds: false,
+            binds: true,
             close_needs_kill: false,
             idle_bound: None,
         },

@@ -426,6 +426,17 @@ pub(crate) struct Stream {
     judged: Option<ResultEnd>,
     notices: u32,
     notices_dropped: u32,
+    // Fix round 1 (review I3, m1).
+    /// Rows the session admitted for a suspendable stream before asking for them (the first
+    /// batch, then each `fetch_more`).
+    allowed: u64,
+    /// The stream ran past `allowed` without suspending: every chunk is admitted from then on.
+    outran: bool,
+    /// A result set past `max_sets` is being read: it is counted, its rows are not kept.
+    dropping: bool,
+    /// Result sets the stream itself did not keep (a driver that emits more than it was asked
+    /// for); counted with the driver's skipped sets.
+    sets_dropped: u32,
 }
 
 /// A stream that goes away without its final state (its request was dropped by a deactivate,
@@ -479,7 +490,29 @@ impl Stream {
             judged: None,
             notices: 0,
             notices_dropped: 0,
+            // Fix round 1: the drivers' first batch is `first_rows` (a chunk's worth for 0).
+            allowed: u64::from(match fetch.first_rows {
+                0 => fetch.chunk_rows.max(1),
+                n => n,
+            }),
+            outran: false,
+            dropping: false,
+            sets_dropped: 0,
         }
+    }
+
+    // ## m3b-t11-session-runs (fix round 1, review I3)
+    /// `rows` more were admitted and asked for (`fetch_more`).
+    pub(crate) fn allow(&mut self, rows: u64) {
+        self.allowed = self.allowed.saturating_add(rows);
+    }
+
+    /// Result sets after the kept ones: the driver's drained ones and those the stream did
+    /// not keep (review m1).
+    pub(crate) fn skipped_sets(&self) -> u32 {
+        self.done
+            .map_or(0, |d| d.skipped_result_sets)
+            .saturating_add(self.sets_dropped)
     }
 
     pub(crate) fn result(&self) -> Option<ResultId> {
@@ -503,12 +536,17 @@ impl Stream {
         if self.started {
             // ## m3b-t11-session-runs: the next set of a unit that keeps several (R-M3-66)
             // gets its own result once the current one ended.
-            if self.end.is_some() && self.ordinal.saturating_add(1) < self.max_sets {
+            if !self.dropping
+                && self.end.is_some()
+                && self.ordinal.saturating_add(1) < self.max_sets
+            {
                 self.next_set();
             } else {
-                // A second result set the unit does not keep (the driver keeps
-                // `max_result_sets`, R-M3-25): its rows are not this result's.
-                self.capped = true;
+                // A result set the unit does not keep (the driver keeps `max_result_sets`,
+                // R-M3-25): fix round 1 (review m1): it is counted with the driver's skipped
+                // sets, and its rows are not the kept result's.
+                self.dropping = true;
+                self.sets_dropped = self.sets_dropped.saturating_add(1);
                 return;
             }
         }
@@ -579,7 +617,8 @@ impl Stream {
                 ..first
             },
         });
-        if self.end.is_none() {
+        // A set the unit does not keep counts for the guard only (review m1).
+        if self.end.is_none() && !self.dropping {
             self.end = Some(end);
         }
     }
@@ -612,11 +651,24 @@ impl Stream {
         self.fetching += now.saturating_duration_since(self.mark);
         self.mark = now;
         let rows = u64::from(chunk.rows());
+        // ## m3b-t11-session-runs (fix round 1, review m1): a set the unit does not keep.
+        if self.dropping {
+            return;
+        }
         self.seen = self.seen.saturating_add(rows);
+        // Review I3: a "suspendable" stream that runs past the rows admitted for it without
+        // suspending (a driver that never suspends this query: a MySQL `CALL`, a text-route
+        // statement) is admitted chunk by chunk from then on, as a stream that cannot stop.
+        if self.suspendable && !self.outran && self.seen > self.allowed {
+            self.outran = true;
+        }
         let Some(writer) = self.writer.as_mut() else {
             return;
         };
-        if !self.suspendable && !self.capped && writer.admit(chunk.bytes()) != Admission::Ok {
+        if (!self.suspendable || self.outran)
+            && !self.capped
+            && writer.admit(chunk.bytes()) != Admission::Ok
+        {
             self.capped = true;
         }
         if self.capped {
@@ -730,7 +782,7 @@ impl Stream {
     pub(crate) fn completed_state(&self) -> Completeness {
         if self.capped && self.seen > self.rows {
             Completeness::Truncated(TruncReason::ResultCap)
-        } else if self.done.is_some_and(|d| d.skipped_result_sets > 0) {
+        } else if self.skipped_sets() > 0 {
             Completeness::Truncated(TruncReason::FollowingResultSets)
         } else {
             Completeness::Complete
@@ -830,7 +882,7 @@ impl Core {
         }
     }
 
-    fn typed_caps(&mut self) -> TypedCaps {
+    pub(crate) fn typed_caps(&mut self) -> TypedCaps {
         self.live
             .as_mut()
             .map_or(TypedCaps::NONE, |live| live.raw().typed_caps())
@@ -911,6 +963,8 @@ impl Core {
             if let Err(e) = resumed {
                 return Step::Failed(e);
             }
+            // ## m3b-t11-session-runs (fix round 1, review I3): the batch was admitted.
+            s.allow(u64::from(batch));
             pumped = self.pump(s, w).await;
         }
     }
@@ -1309,10 +1363,21 @@ impl Core {
             // nothing.
             let _ = self.close_open(CloseHow::Now, Fire::Never, false, w).await;
         }
-        let (rolled_back, _) = self.end_hold(hold, false, s.judged_end().as_ref()).await;
+        let (rolled_back, ended) = self.end_hold(hold, false, s.judged_end().as_ref()).await;
         let cancelled = w.stop.is_requested()
             && (error.kind == ExecErrorKind::Cancelled || is_cancel_code(self.kind, &error));
-        let (reason, state) = if self.broken.is_some() {
+        // ## m3b-t11-session-runs (fix round 1, review I4): a gap the guard found after the
+        // failure closes every result of the unit (`finish` closes the earlier sets too). The
+        // reply stays the statement's error (whether it should be the gap is recorded for the
+        // T18/T22 owner).
+        let gap = matches!(
+            &ended,
+            Err(e) if matches!(e.kind, ExecErrorKind::EnforcementGap(_))
+        );
+        let (reason, state) = if gap {
+            let reason = CloseReason::EnforcementGap;
+            (reason, Completeness::Closed { reason })
+        } else if self.broken.is_some() {
             let reason = CloseReason::ConnectionLost;
             (reason, Completeness::Closed { reason })
         } else if cancelled {
@@ -1392,5 +1457,105 @@ impl Core {
         }
         self.release_cursor(reason, w).await?;
         Ok(self.summary())
+    }
+}
+
+// ## m3b-t11-session-runs (fix round 1, review I4 and m1)
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::session::{RunId, RunObserver};
+
+    /// Keeps the events; opens no result (the streams here have no columns).
+    #[derive(Default)]
+    struct Events(Mutex<Vec<RunEvent>>);
+
+    impl RunObserver for Events {
+        fn open_result(&self, _: UnitId, _: u32, _: Arc<ResultSchema>) -> ResultWriter {
+            unreachable!("no result with columns here")
+        }
+
+        fn event(&self, ev: &RunEvent) {
+            self.0.lock().unwrap().push(ev.clone());
+        }
+    }
+
+    fn stream(max_sets: u32) -> (Stream, Arc<Events>) {
+        let events = Arc::new(Events::default());
+        let unit = UnitId {
+            run: RunId(1),
+            ordinal: 0,
+        };
+        let mut s = Stream::new(
+            unit,
+            ObserverRef(events.clone()),
+            FetchPolicy::default(),
+            false,
+        );
+        s.max_sets = max_sets;
+        (s, events)
+    }
+
+    fn no_columns() -> Arc<ResultSchema> {
+        Arc::new(ResultSchema {
+            columns: Arc::from(Vec::new()),
+        })
+    }
+
+    fn end(tag: &str, affected: Option<u64>) -> ResultEnd {
+        ResultEnd {
+            rows: 0,
+            kept: 0,
+            rows_affected: affected,
+            command_tag: Some(tag.to_string()),
+        }
+    }
+
+    /// The guard judges a unit by its first set's end with the most rows any set reported
+    /// affected: a write in a later set is never hidden behind a read.
+    #[test]
+    fn the_guard_sees_the_largest_affected_count_of_any_set() {
+        let (mut s, _) = stream(100);
+        for e in [
+            end("SELECT", None),
+            end("UPDATE", Some(3)),
+            end("DELETE", Some(1)),
+        ] {
+            s.on_start(no_columns());
+            s.on_end(e);
+        }
+        assert_eq!(s.judged_end(), Some(end("SELECT", Some(3))));
+        // The unit's own update count is the last set's.
+        assert_eq!(s.end, Some(end("DELETE", Some(1))));
+        assert_eq!(s.ordinal, 2);
+    }
+
+    /// A set past the ones the unit keeps is counted with the skipped sets; its end counts for
+    /// the guard only, and the kept set is not labelled cut at its cap.
+    #[test]
+    fn a_set_the_unit_does_not_keep_is_counted_not_kept() {
+        let (mut s, events) = stream(1);
+        s.on_start(no_columns());
+        s.on_end(end("SELECT", None));
+        s.on_start(no_columns());
+        s.on_end(end("UPDATE", Some(4)));
+        assert_eq!(s.skipped_sets(), 1);
+        assert_eq!(s.end, Some(end("SELECT", None)), "the kept set's end");
+        assert_eq!(s.judged_end(), Some(end("SELECT", Some(4))));
+        assert_eq!(
+            s.completed_state(),
+            Completeness::Truncated(TruncReason::FollowingResultSets)
+        );
+        assert!(
+            !events
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, RunEvent::UpdateCount { .. })),
+            "no count reported for the set not kept"
+        );
     }
 }

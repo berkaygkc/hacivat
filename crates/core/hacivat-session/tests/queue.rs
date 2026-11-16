@@ -31,6 +31,27 @@ async fn queue_over_256_is_queue_full() {
     let refused = h.submit(exec("SELECT 256"));
     let e = refused.reply.await.unwrap().unwrap_err();
     assert_eq!(e.kind, ExecErrorKind::QueueFull);
+    // Fix round 1 (review m6): a refused run tells its observer why it never ran.
+    let o = Recorder::new();
+    let refused_run = h.run(ask_spec(&o, &["SELECT 1", "SELECT 2"]));
+    assert_eq!(
+        refused_run.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::QueueFull
+    );
+    assert_eq!(
+        o.unit_ends(),
+        vec![
+            UnitEnd::Failed(hacivat_session::session::ExecError::of(
+                ExecErrorKind::QueueFull
+            )),
+            UnitEnd::Skipped,
+        ]
+    );
+    let summary = o.summaries();
+    assert_eq!(
+        (summary.len(), summary[0].failed, summary[0].skipped),
+        (1, 1, 1)
+    );
     assert!(matches!(snap(&h).state, SessionState::Busy { req, .. } if req == running.seq));
     for t in &mut queued {
         assert_eq!(t.reply.try_recv(), Err(TryRecvError::Empty), "still queued");

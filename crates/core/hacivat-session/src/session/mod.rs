@@ -525,8 +525,9 @@ pub struct RunUnit {
     /// last unit of its run stays suspended).
     pub suspendable: bool,
     // ## m3b-t01c-core-seams
-    /// The bind values, in placeholder order (Task 11 sends them with the query; a driver
-    /// that cannot bind refuses the query before sending it).
+    /// The bind values, in placeholder order (Task 11 sends them with the query when the
+    /// driver's typed path binds, never with `Protocol::Simple`; otherwise the unit is refused
+    /// before anything is sent).
     pub binds: Arc<[BindValue]>,
     /// The exec gate's verdict (`Unknown` when no gate ran); scheduling only, never trusted
     /// for safety (R-M3-83).
