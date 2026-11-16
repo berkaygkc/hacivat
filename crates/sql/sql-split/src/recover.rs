@@ -219,7 +219,13 @@ fn stability(a: &Analysis, text: &str, anchor: TextSize, depth: u32, split: &mut
     {
         let start = usize::from(s.strict.start());
         let line_end = client::line_end(text, usize::from(anchor));
-        let end = last_significant_end(text, start, line_end, &ctx).max(start + 1);
+        // ## m3b-t05-incremental fix round 1 (named exception): at least the statement's first
+        // *character*, not byte. A statement may start with a byte-order mark that the
+        // document's lexing reads as text (not at offset 0), while the line lexed alone here
+        // reads it as white space: `start + 1` then fell inside it and the key's slice panicked
+        // (M3a; found by the incremental property at 100k cases).
+        let first = text[start..].chars().next().map_or(1, char::len_utf8);
+        let end = last_significant_end(text, start, line_end, &ctx).max(start + first);
         let strict = TextRange::new(s.strict.start(), size(end));
         let delimiter = a.delimiter_at(s.strict.start());
         *s = Stmt {

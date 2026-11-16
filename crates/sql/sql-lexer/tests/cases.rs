@@ -470,8 +470,10 @@ fn lex_chunks_equals_lex() {
     assert!(lex_chunks(&empty, p, ctx.modes, &LexState::Initial).is_empty());
 }
 
+// ## m3b-t05-incremental (named exception): the M3a stub was a full relex; the relex is
+// incremental now (`tests/incremental.rs`), and reports the unchanged prefix as unchanged.
 #[test]
-fn relex_is_a_full_relex() {
+fn relex_equals_a_full_lex() {
     let ctx = pg();
     let p = profile(&ctx);
     let mut l = lex("SELECT 1", p, ctx.modes, &LexState::Initial);
@@ -482,8 +484,9 @@ fn relex_is_a_full_relex() {
     };
     let delta = relex(&mut l, &new_text, &edit, p, ctx.modes);
     assert_eq!(l, lex(new_text, p, ctx.modes, &LexState::Initial));
+    // The quote runs to the end: nothing re-synchronises after it.
     assert!(delta.full);
-    assert_eq!(delta.changed, 0..l.len());
+    assert_eq!(delta.changed, 2..l.len());
 }
 
 #[test]

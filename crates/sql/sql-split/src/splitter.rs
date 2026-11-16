@@ -149,6 +149,9 @@ impl Tok {
                 | TokenKind::Whitespace
                 | TokenKind::Newline
                 | TokenKind::InlineData
+                // ## m3b-t05-incremental: a client command's line is never searched for the
+                // client delimiter (its `\` token never was).
+                | TokenKind::ClientCommand
         )
     }
 }
@@ -453,6 +456,10 @@ pub(crate) struct RawStmt {
     pub uncertain: bool,
     /// The key of its strict text (computed once, shared by both views).
     pub key: StmtKey,
+    // ## m3b-t05-incremental
+    /// It opened a block other than a parenthesis (the MySQL stray-`END` backstop refuses back
+    /// to the last such statement; the streaming splitter keeps it).
+    pub block: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -517,7 +524,10 @@ pub(crate) fn analyze_chunked(
     first: usize,
 ) -> Analysis {
     let lp = lexer_for(ctx);
-    let lexed = lexed.filter(|_| start.lex == LexState::Initial);
+    // ## m3b-t05-incremental: a lexing that reads another client's commands is not this one's.
+    let lexed = lexed.filter(|l| {
+        start.lex == LexState::Initial && (l.client() == ClientFlavor::None || l.client() == flavor)
+    });
     let mut w = Walker {
         text,
         ctx,
@@ -850,7 +860,11 @@ impl<'a> Walker<'a, '_> {
     fn client_command(&mut self, t: &Tok) -> bool {
         let cp = self.cp;
         let at = t.start();
-        if cp.backslash_commands && t.kind == TokenKind::Unknown && &self.text[t.range] == "\\" {
+        // ## m3b-t05-incremental: the document's lexing reads a backslash command as one
+        // `ClientCommand` token (`sql_lexer::lex_with_client`); the splitter's own as `\`.
+        let backslash = t.kind == TokenKind::ClientCommand
+            || (t.kind == TokenKind::Unknown && &self.text[t.range] == "\\");
+        if cp.backslash_commands && backslash {
             match client::backslash(self.text, at, cp) {
                 Backslash::InlineSemicolon { end } => {
                     self.segment(at, end, ClientKind::InlineSemicolon, false);
@@ -1849,6 +1863,7 @@ impl<'a> Walker<'a, '_> {
             cuts: cur.cuts,
             uncertain: cur.uncertain,
             key: StmtKey::of(self.ctx, self.delim.as_deref(), &self.text[strict]),
+            block: cur.had_block,
         }));
         let idx = self.out.items.len() - 1;
         if cur.had_block {
