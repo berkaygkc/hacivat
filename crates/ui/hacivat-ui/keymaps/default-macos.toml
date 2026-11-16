@@ -605,6 +605,7 @@ context = "Results"
 [[binding]]
 chord = "cmd-shift-h"
 command = "history.open"
+context = "Workspace"
 
 ## m3a-f4-ime
 # M3a F4 (E7 row 6b, named exception): Edit > Emoji & Symbols opens the system character
