@@ -637,6 +637,13 @@ impl RunObserver for ExecObserver {
                 fetch_ms,
             } => self.on_unit_ended(*unit, outcome, *exec_ms, *fetch_ms),
             RunEvent::RunEnded(summary) => self.on_run_ended(*summary),
+            // ## m3b-t01c-core-seams (named exception): the M3b events reach the log and the
+            // dialogs from Task 16 on; no M3a run emits them (Notice only with a scripted
+            // notice, which no M3a test has).
+            RunEvent::NeedsChoice { .. }
+            | RunEvent::NeedsCommit { .. }
+            | RunEvent::CommitDecided { .. }
+            | RunEvent::Notice { .. } => {}
         }
     }
 }

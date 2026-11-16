@@ -570,6 +570,13 @@ pub(crate) fn start_run(console: ConsoleId, version: u64, units: Vec<ExecUnit>, 
             units: units.clone(),
             fetch: FetchPolicy::default(),
             log: state.log.clone(),
+            // ## m3b-t01c-core-seams: M3a's run (P-M3b-22).
+            prepared: None,
+            plan: None,
+            policy: hacivat_session::session::ErrorPolicy::StopOnError,
+            run_as_one: false,
+            history: None,
+            confirm: None,
         },
     );
     let keys: Vec<MarkKey> = (0..units.len())

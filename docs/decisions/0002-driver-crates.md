@@ -1293,3 +1293,23 @@ is folded into the bullets below.
   within 1 s), a short rest drained to `Completed`, `CALL` with three sets (one kept, two
   counted), the 1295 routes, a value past `max_allowed_packet` (NULL and a warning), DML/DDL
   results, the idle bound, and the `net_write_timeout` loss.
+
+## m3b-t01c — core seams
+
+M3b Task 1c adds the driver seams the M3b drivers fill (Task 13); no real driver changes
+behaviour.
+
+- **Notices.** `hacivat_driver::Notice { severity, code, text }` (`Eq`, `Hash`: it rides in
+  `RunEvent`; P-M3b-23) reuses `NoticeSeverity`. `Notice::new` caps the text at 16 KiB, cut at
+  a character boundary. `QueryEvent::Notice` may come before any event but `Done`; it changes
+  nothing in the grammar around it. Server text: never in tracing logs or the history.
+- **Warnings.** `RawConn::warnings()` (provided, `Ok(vec![])`) is MySQL/MariaDB's `SHOW
+  WARNINGS` after a `Done` with `warnings > 0` (Task 13; not on read-only sessions).
+- **FakeDriver (working).** `FakeQuery::{notices, warnings}`: the notices come first, the
+  warnings are what `warnings()` answers once the query is `Done` (counted in
+  `QueryDone::warnings`, taken once, cleared by the next query). A query with binds logs
+  `FakeTypedCall::Binds(..)` right after its `Query` (a query without binds logs as in M3a);
+  `FakeDriver::binds_seen()` keeps every query's binds. Sent statements are asserted on
+  `call_log()` (`executed()` records only execute/batch text; P-M3b-18).
+- **Named exception:** `hacivat-driver-sqlite/src/typed.rs` gains `QueryEvent::Notice` in one
+  exhaustive match (SQLite has none).

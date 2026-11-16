@@ -55,14 +55,16 @@ fn spec_of(sqls: &[&str], observer: Arc<Recorder>) -> RunSpec {
     let units: Vec<RunUnit> = sqls
         .iter()
         .enumerate()
-        .map(|(i, sql)| RunUnit {
-            id: UnitId {
-                run,
-                ordinal: i as u32,
-            },
-            sql: (*sql).into(),
-            protocol: Protocol::Extended,
-            suspendable: true,
+        .map(|(i, sql)| {
+            RunUnit::plain(
+                UnitId {
+                    run,
+                    ordinal: i as u32,
+                },
+                (*sql).into(),
+                Protocol::Extended,
+                true,
+            )
         })
         .collect();
     RunSpec {
@@ -71,6 +73,8 @@ fn spec_of(sqls: &[&str], observer: Arc<Recorder>) -> RunSpec {
         policy: ErrorPolicy::StopOnError,
         fetch: FetchPolicy::default(),
         observer: ObserverRef(observer),
+        // ## m3b-t01c-core-seams
+        confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
     }
 }
 

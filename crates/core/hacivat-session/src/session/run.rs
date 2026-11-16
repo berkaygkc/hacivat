@@ -35,6 +35,9 @@ use crate::session::{
     ExecError, ExecErrorKind, ObserverRef, Reply, RowsOutcome, RunEvent, RunSpec, RunSummary,
     RunUnit, TxError, TxMode, TxOwner, UnitEnd, UnitId, needs_schema_reprobe,
 };
+// ## m3b-t01c-core-seams
+use crate::session::confirm;
+use crate::session::verdict::UnitVerdict;
 
 /// How one unit ended.
 struct Ended {
@@ -229,9 +232,11 @@ impl Core {
     /// The transaction status the user sees: Hacivat's own transaction (around a cursor, or
     /// the guard's) is not theirs.
     fn shown_status(&self) -> TxStatus {
-        match self.tx.owner {
-            TxOwner::Cursor | TxOwner::Guard => TxStatus::Idle,
-            TxOwner::User | TxOwner::None => self.tx.status,
+        // ## m3b-t01c-core-seams (P-M3b-12): every owner of Hacivat's, Confirm included.
+        if self.tx.owner.is_hacivats() {
+            TxStatus::Idle
+        } else {
+            self.tx.status
         }
     }
 
@@ -244,6 +249,15 @@ impl Core {
         last: bool,
         w: &mut Watch,
     ) -> Ended {
+        // ## m3b-t01c-core-seams (fail closed until the filling tasks): a unit that needs
+        // confirm-in-transaction or the D-062 wrap (Task 19), or carries binds (Task 11), is
+        // refused before anything of it is sent.
+        if let Some(e) = confirm::refused_before_task_19(unit.verdict) {
+            return Ended::refused(e);
+        }
+        if !unit.binds.is_empty() {
+            return Ended::refused(ExecError::of(ExecErrorKind::Internal));
+        }
         let keyword = first_keyword(&unit.sql);
         let control = TX_CONTROL.contains(&keyword.as_str());
         let before = self.shown_status();
@@ -254,7 +268,10 @@ impl Core {
         }
         let ended = self.unit_body(spec, unit, last, &keyword, control, w).await;
         if matches!(ended.outcome, UnitEnd::Succeeded { .. }) {
-            track_statement(&mut self.tracked, &unit.sql);
+            // ## m3b-t01c-core-seams (P-M3b-11): the gate's effects when it classified the
+            // unit; Task 18 makes `track_statement` use them.
+            let effects = (unit.verdict != UnitVerdict::Unknown).then_some(unit.effects);
+            track_statement(&mut self.tracked, &unit.sql, effects);
             if mysql && let Some(on) = autocommit_set(&unit.sql) {
                 self.autocommit_off = !on;
             }
@@ -282,7 +299,10 @@ impl Core {
             first_rows: spec.fetch.first_rows,
             chunk_rows: spec.fetch.chunk_rows,
             chunk_bytes: spec.fetch.chunk_bytes,
-            cell_cap: spec.fetch.cell_cap,
+            // ## m3b-t01c-core-seams: the unit's own cap (R-M3-82) when it has one.
+            cell_cap: unit.cell_cap.unwrap_or(spec.fetch.cell_cap),
+            // ## m3b-t01c-core-seams: `RunUnit::max_result_sets` is clamped to 1 until Task 11
+            // (R-M3-25 holds: one result set kept per unit).
             max_result_sets: 1,
         }
     }
@@ -316,6 +336,11 @@ impl Core {
         let mut s;
 
         if self.read_only {
+            // ## m3b-t01c-core-seams (P-M3b-11): step 0b, the injected classifier, before the
+            // guard (a stub until Task 18).
+            if let Err(e) = self.step0b(&unit.sql).await {
+                return Ended::refused(e);
+            }
             // The guard opens its own read-only transaction and sends the query (Task 22).
             self.holder = TxOwner::Guard;
             s = Stream::new(unit.id, spec.observer.clone(), spec.fetch, suspendable);

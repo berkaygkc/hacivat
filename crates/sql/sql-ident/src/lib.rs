@@ -8,3 +8,7 @@
 pub mod fold;
 pub mod ident;
 pub mod qualified;
+
+pub use fold::{fold, ident_eq};
+pub use ident::{Ident, QualifiedName};
+pub use qualified::parse_qualified;

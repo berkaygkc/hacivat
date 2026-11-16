@@ -787,7 +787,9 @@ pub(crate) async fn next_event(
                     QueryEvent::Rows(chunk) => q.delivered += u64::from(chunk.rows()),
                     QueryEvent::Suspended => q.stage = Stage::Suspended,
                     QueryEvent::ResultEnd(end) => q.completed = Some(end.rows),
-                    QueryEvent::ResultStart(_) | QueryEvent::Done(_) => {}
+                    // ## m3b-t01c-core-seams (named exception): `Notice` is new; SQLite has
+                    // none (R-M3-77).
+                    QueryEvent::ResultStart(_) | QueryEvent::Done(_) | QueryEvent::Notice(_) => {}
                 }
                 Ok(event)
             }

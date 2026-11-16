@@ -14,10 +14,16 @@ sql-lexer.workspace = true
 sql-dialect.workspace = true
 serde.workspace = true
 toml.workspace = true
-# ## m3b-t01a-seams: the bypass corpus and the differential (Tasks 18, 20). Used only from
-# `sql-safety/tests/*`, never from `#[cfg(test)]` units in `src/` (P-M3b-34).
-sql-safety.workspace = true
-sql-oracle-pg.workspace = true
+# ## m3b-t01a-seams (fix round 1, M5): the PG differential (Task 20) only, behind the
+# `differential` feature, so the lexer's and splitter's plain test loops do not build
+# libpg_query through this crate. No `sql-safety` edge: Task 18's bypass corpus is data
+# (`bypass/*.toml`) read by path.
+sql-oracle-pg = { workspace = true, optional = true }
+
+[features]
+# ## m3b-t01a-seams: `src/differential/**` (Task 20); the nightly `sql-differential` job turns
+# it on.
+differential = ["dep:sql-oracle-pg"]
 
 [lints]
 workspace = true

@@ -91,6 +91,21 @@ pub enum TxOwner {
     Cursor,
     /// The read-only guard's plan.
     Guard,
+    // ## m3b-t01c-core-seams
+    /// Hacivat's own `BEGIN` around a confirmed statement on an idle Auto session (P-M3b-1,
+    /// Task 19): Commit/Roll back, the D-014 deadline rolls it back.
+    Confirm,
+}
+
+// ## m3b-t01c-core-seams (P-M3b-12)
+impl TxOwner {
+    /// Whether Hacivat opened the transaction itself (around a cursor, the guard's, or a
+    /// confirmed statement's): it is never the user's, never refuses a close and is no idle
+    /// transaction of the user's. Every ownership check asks this, so a new owner of
+    /// Hacivat's is one line here.
+    pub fn is_hacivats(self) -> bool {
+        matches!(self, Self::Cursor | Self::Guard | Self::Confirm)
+    }
 }
 
 impl TxState {
@@ -98,8 +113,8 @@ impl TxState {
     /// Whether a transaction of the user's is open (`InTx` or `Failed`, not Hacivat's own
     /// around a cursor or the guard's).
     pub(crate) fn user_open(&self) -> bool {
-        !matches!(self.owner, TxOwner::Cursor | TxOwner::Guard)
-            && matches!(self.status, TxStatus::InTx | TxStatus::Failed)
+        // ## m3b-t01c-core-seams (P-M3b-12)
+        !self.owner.is_hacivats() && matches!(self.status, TxStatus::InTx | TxStatus::Failed)
     }
 
     /// Takes the protocol's `status` after a round trip; `statement` counts a user statement
@@ -142,6 +157,11 @@ pub enum TxError {
     Unsupported,
     /// The transaction failed: only a rollback is accepted.
     FailedNeedsRollback,
+    // ## m3b-t01c-core-seams (P-M3b-1)
+    /// MySQL/MariaDB: a DDL met an open transaction the gate did not confirm it for (an earlier
+    /// unit of the run opened it); it would commit that transaction, so nothing was sent
+    /// (Task 19).
+    ImplicitCommitUnconfirmed,
 }
 
 /// The transaction mode a profile starts with: Manual on production, else Auto.

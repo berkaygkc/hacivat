@@ -38,9 +38,12 @@
 //! `Unsupported`; PostgreSQL runs a statement while the query is suspended (the canary). A
 //! cancel (latched like M10) or a scripted `fail_after` error inside a PostgreSQL transaction
 //! leaves it `Failed`, as the server does. `typed_log` records every typed call; `call_log`
-//! every statement, typed call and reset in order. `tracks_transactions` makes connections set
-//! their status from the leading keywords of `execute`/`batch` text (`BEGIN`, `COMMIT`, ...)
-//! when no script entry says otherwise.
+//! every statement, typed call and reset in order. M3b (Task 1c): a query with binds logs
+//! `FakeTypedCall::Binds` right after its `Query` (`binds_seen` keeps every query's), its
+//! scripted `notices` come first as `QueryEvent::Notice`, and its scripted `warnings` are what
+//! `RawConn::warnings` answers once it is `Done` (counted in `QueryDone::warnings`).
+//! `tracks_transactions` makes connections set their status from the leading keywords of
+//! `execute`/`batch` text (`BEGIN`, `COMMIT`, ...) when no script entry says otherwise.
 //!
 //! M3a (Task 12 fix round 1, the PostgreSQL driver's behaviour, pinned by its Docker tests):
 //! - a PostgreSQL batch that returns exactly its limit suspends even when no row is left; the
@@ -96,6 +99,9 @@ use crate::server::ServerInfo;
 // ## m3a-t01b-seams
 use crate::typed::{CloseHow, Closed, QueryDone, QueryEvent, QuerySpec, ResultEnd, TypedCaps};
 use hacivat_values::{Chunk, ColumnMeta, LogicalType, NativeType, ResultSchema, Value};
+// ## m3b-t01c-core-seams
+use crate::typed::Notice;
+use hacivat_values::BindValue;
 
 // ## m2b-t01-interfaces
 /// One scripted statement (Q23): used once, by the first statement starting with `prefix`.
@@ -120,6 +126,9 @@ struct ExecState {
     queries: Mutex<Vec<Option<FakeQuery>>>,
     typed: Mutex<Vec<FakeTypedCall>>,
     calls: Mutex<Vec<FakeCall>>,
+    // ## m3b-t01c-core-seams
+    /// Every typed query's bind values, in order (`binds_seen`).
+    binds: Mutex<Vec<Vec<BindValue>>>,
 }
 
 impl ExecState {
@@ -249,6 +258,12 @@ pub struct FakeQuery {
     /// `Err(Io(TimedOut))`, and the connection is lost (every later call answers
     /// `Io(NotConnected)`), as the real driver abandons it.
     pub kill_ignored: bool,
+    // ## m3b-t01c-core-seams (R-M3-77)
+    /// Server notices, sent as `QueryEvent::Notice` in order before the first other event.
+    pub notices: Vec<Notice>,
+    /// What `RawConn::warnings` answers once the query is `Done` (its `QueryDone::warnings`
+    /// counts them), until the next query.
+    pub warnings: Vec<Notice>,
 }
 
 /// A typed call, as `typed_log` records it.
@@ -257,6 +272,9 @@ pub enum FakeTypedCall {
     Query(String),
     FetchMore(u32),
     Close(CloseHow),
+    // ## m3b-t01c-core-seams
+    /// A query's bind values, logged right after its `Query` when it has any.
+    Binds(Vec<BindValue>),
 }
 
 /// Every call on a fake connection that touches the server, in order (`call_log`).
@@ -369,6 +387,9 @@ struct TypedRun {
     /// PostgreSQL ended the transaction under this suspended portal: the run is kept (still the
     /// connection's one open query, as the real driver keeps it) but the server has no portal.
     gone: bool,
+    // ## m3b-t01c-core-seams
+    /// The scripted notices not sent yet.
+    notices: VecDeque<Notice>,
 }
 
 /// The result set a typed query is delivering.
@@ -397,7 +418,9 @@ impl TypedRun {
             n => u64::from(n),
         };
         let suspends = spec.suspendable && can_suspend && single;
+        let notices = script.notices.iter().cloned().collect();
         TypedRun {
+            notices,
             savepoint_depth: 0,
             sets,
             skipped,
@@ -818,6 +841,13 @@ impl FakeDriver {
         lock(&self.exec.calls).clone()
     }
 
+    // ## m3b-t01c-core-seams
+    /// The bind values of every typed `query`, in order (an empty list for a query without
+    /// binds).
+    pub fn binds_seen(&self) -> Vec<Vec<BindValue>> {
+        lock(&self.exec.binds).clone()
+    }
+
     /// Connections set their transaction status from the leading keywords of `execute` and
     /// `batch` text (`BEGIN`/`START` → in a transaction; `COMMIT`/`END`/`ROLLBACK` → idle;
     /// `ROLLBACK TO` keeps it and recovers a failed one), unless a script entry's `tx_after`
@@ -881,6 +911,8 @@ impl Driver for FakeDriver {
             exec: self.exec.clone(),
             tx: TxStatus::Idle,
             born: self.counters.killed.load(Ordering::SeqCst),
+            // ## m3b-t01c-core-seams
+            warnings: Vec::new(),
             cancel: Arc::default(),
             ignores_cancel: self.ignores_cancel,
             reset_fails: self.reset_fails,
@@ -977,6 +1009,9 @@ struct FakeConn {
     tx: TxStatus,
     /// `Counters::killed` when the connection was made.
     born: u64,
+    // ## m3b-t01c-core-seams
+    /// The last finished query's scripted warnings (`RawConn::warnings` takes them).
+    warnings: Vec<Notice>,
     cancel: Arc<CancelLatch>,
     ignores_cancel: bool,
     reset_fails: bool,
@@ -1321,8 +1356,21 @@ impl RawConn for FakeConn {
     fn query<'a>(&'a mut self, spec: QuerySpec<'a>) -> BoxFuture<'a, Result<(), RawError>> {
         self.exec
             .log_typed(FakeTypedCall::Query(spec.sql.to_string()));
+        // ## m3b-t01c-core-seams: the binds, right after the query (only when it has any, so
+        // a query without binds logs as in M3a).
+        if !spec.binds.is_empty() {
+            self.exec
+                .log_typed(FakeTypedCall::Binds(spec.binds.to_vec()));
+        }
+        lock(&self.exec.binds).push(spec.binds.to_vec());
         let started = self.start_query(&spec);
         Box::pin(async move { started })
+    }
+
+    // ## m3b-t01c-core-seams
+    fn warnings(&mut self) -> BoxFuture<'_, Result<Vec<Notice>, RawError>> {
+        let answered = self.alive().map(|()| std::mem::take(&mut self.warnings));
+        Box::pin(async move { answered })
     }
 
     fn next_event(&mut self) -> BoxFuture<'_, Result<QueryEvent, RawError>> {
@@ -1496,6 +1544,8 @@ impl FakeConn {
             return Err(unsupported());
         }
         let script = self.exec.take_query(spec.sql).unwrap_or_default();
+        // ## m3b-t01c-core-seams: warnings belong to the last statement.
+        self.warnings.clear();
         let mut run = TypedRun::new(spec, script, self.caps.suspend);
         run.savepoint_depth = self.savepoints.len();
         self.typed = Some(run);
@@ -1587,6 +1637,10 @@ impl FakeConn {
             return Err(unsupported());
         };
         run.started = true;
+        // ## m3b-t01c-core-seams: the scripted notices come first.
+        if let Some(notice) = run.notices.pop_front() {
+            return Ok(QueryEvent::Notice(notice));
+        }
         let Some(open) = run.current.as_mut() else {
             if let Some(set) = run.sets.pop_front() {
                 let schema = set.schema();
@@ -1604,10 +1658,14 @@ impl FakeConn {
             if let Some(tx) = run.script.tx_after {
                 self.tx = tx;
             }
+            // ## m3b-t01c-core-seams: the scripted warnings, counted in `Done`.
+            let warnings = run.script.warnings.clone();
+            let count = u16::try_from(warnings.len()).unwrap_or(u16::MAX);
+            self.warnings = warnings;
             self.end_typed();
             return Ok(QueryEvent::Done(QueryDone {
                 tx: self.tx,
-                warnings: 0,
+                warnings: count,
                 skipped_result_sets: skipped,
             }));
         };

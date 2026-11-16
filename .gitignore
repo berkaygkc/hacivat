@@ -9,3 +9,5 @@ target/docker/
 *.key
 .claude/worktrees/
 docker/m2a/artifacts/
+# ## m3b-t01a-seams: the PostgreSQL regression corpus `cargo xtask fetch-pg-regress` fetches (Task 20).
+target-pg-regress/

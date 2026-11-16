@@ -1,0 +1,28 @@
+# Hacivat SQL fuzz targets
+
+A separate cargo workspace for `cargo fuzz` (nightly). It is excluded from the root workspace,
+never shipped, and not checked by the root `deny.toml`. `libfuzzer-sys` is
+`(MIT OR Apache-2.0) AND NCSA`; NCSA is accepted for this workspace only (ADR 0005 `m3b-t20`).
+
+The five targets under `fuzz_targets/` (`lex_lossless`, `relex_equivalence`, `split_items`,
+`params_rewrite`, `classify_no_panic`) are declared as `[[bin]]` rows in `Cargo.toml` by Task
+1a (fix round 1) with stub bodies that accept every input; Task 20 writes the bodies and edits
+no manifest.
+
+## Patches and the lockfile (P-M3b-15)
+
+A separate workspace does not inherit the root `[patch.crates-io]`. `Cargo.toml` copies the
+root's `third_party` entries with `../third_party/...` paths, so `pg_query` resolves to the
+vendored copy, never the registry one. Cargo prints "patch … was not used" for `mysql_async`
+and `tokio-postgres`: they are not in this graph yet, and keeping them means a future edge
+can never reach the registry crates.
+
+`Cargo.lock` is generated from the root lock: copy `../Cargo.lock` here, then run
+`cargo metadata` in this directory, which keeps every shared version and drops the rest.
+CI builds with `--locked` and checks that `git status --porcelain third_party` is empty.
+
+```sh
+cd fuzz
+cargo metadata --locked --format-version 1 > /dev/null   # resolves pg_query to ../third_party
+cargo +nightly fuzz run <target>                          # once Task 20 adds targets
+```

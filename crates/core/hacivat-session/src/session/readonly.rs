@@ -114,6 +114,23 @@ pub fn run_guarded<'a>(
     Box::pin(async move { guarded(conn, kind, sql, opts, replay).await.reply })
 }
 
+// ## m3b-t01c-core-seams (P-M3b-11)
+impl crate::session::actor::Core {
+    /// Step 0b (R-M3-83, Task 18): a user statement of a read-only session (a typed `Run`
+    /// unit, an M2b `Exec { origin: User }`) is checked by the injected classifier
+    /// (`Core::classifier`) with the profile's function allowlist before the guard runs it;
+    /// `RoCheck::Deny(d)` → `ExecErrorKind::SafetyDenied(d)`, nothing sent. `None` keeps the
+    /// M2b/M3a layers alone (run B). The actor calls it right before `guarded` and
+    /// `guarded_query`; internal statements never reach it.
+    ///
+    /// STUB until Task 18: `Ok(())`, which is M3a's behaviour (the guard's layers still run).
+    #[allow(clippy::unused_async, reason = "Task 18's body awaits the classifier")]
+    pub(crate) async fn step0b(&mut self, sql: &str) -> Result<(), ExecError> {
+        let _ = sql;
+        Ok(())
+    }
+}
+
 /// [`run_guarded`], and whether the connection must be discarded (the actor's entry point).
 pub(crate) async fn guarded(
     conn: &mut dyn RawConn,
@@ -974,5 +991,42 @@ impl GuardedCursor {
             None => Ran::default(),
         };
         post_steps(conn, self.kind, &self.plan, &self.keywords, ran, replay).await
+    }
+}
+
+// ## m3b-t01a-seams (fix round 1, I1)
+/// The guard's first-keyword readings of `sql` on `kind` (what steps 1a and 7 judge), for
+/// Task 18's `guard_keywords_are_a_subset_of_lexer_readings` in
+/// `hacivat-exec/tests/cross_crate_equalities.rs`: each reading ASCII upper-cased, `Some("")`
+/// when the statement starts with something other than a word, `None` when the reading holds
+/// no statement; and whether the readings are complete (`false` when a limit cut them short).
+pub fn guard_keyword_readings(kind: DbmsKind, sql: &str) -> (Vec<Option<String>>, bool) {
+    let k = guard_keywords(kind, sql);
+    (k.readings, k.complete)
+}
+
+// ## m3b-t01a-seams (fix round 1, I1)
+#[cfg(test)]
+mod m3b_t01a_tests {
+    use super::*;
+
+    #[test]
+    fn guard_keyword_readings_expose_the_guards_readings() {
+        assert_eq!(
+            guard_keyword_readings(DbmsKind::Postgres, "  /* c */ select 1"),
+            (vec![Some("SELECT".to_string())], true)
+        );
+        // A version-gated executable comment is read both ways on MySQL.
+        let (readings, complete) =
+            guard_keyword_readings(DbmsKind::MySql, "/*!50000 BEGIN */ SELECT 1");
+        assert!(complete);
+        assert!(
+            readings.contains(&Some("BEGIN".to_string())),
+            "{readings:?}"
+        );
+        assert!(
+            readings.contains(&Some("SELECT".to_string())),
+            "{readings:?}"
+        );
     }
 }

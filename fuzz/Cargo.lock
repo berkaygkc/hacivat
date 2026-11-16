@@ -161,9 +161,11 @@ name = "hacivat-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "sql-dialect",
  "sql-lexer",
  "sql-safety",
  "sql-split",
+ "sql-text",
 ]
 
 [[package]]

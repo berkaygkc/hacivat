@@ -12,6 +12,8 @@ use crate::schema::{
     CaretBlinkPref, EditorSettings, KeymapPreset, LanguagePref, SETTINGS_VERSION, Settings,
     TabSize, TextRenderingPref, ThemePref, TimeZonePref,
 };
+// ## m3b-t01c-core-seams
+use crate::schema::{ExecSettings, HistorySettings, ValueLimit};
 
 /// A problem found while loading; Task 13 shows each code as a toast.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +88,54 @@ pub fn load(path: &Path) -> LoadOutcome {
         );
         s.editor.caret_blink = read_key_or(ed, "editor", "caret_blink", def.caret_blink, d);
     }
+    // ## m3b-t01c-core-seams (P-M3b-9): a missing table means its defaults.
+    if let Some(ex) = section(root, "exec", d) {
+        let def = ExecSettings::default();
+        s.exec.confirm_unsafe_where = read_key_or(
+            ex,
+            "exec",
+            "confirm_unsafe_where",
+            def.confirm_unsafe_where,
+            d,
+        );
+        s.exec.error_policy_ask =
+            read_key_or(ex, "exec", "error_policy_ask", def.error_policy_ask, d);
+    }
+    if let Some(rs) = section(root, "results", d) {
+        s.results.max_value_bytes = read_value_limit(rs, d);
+    }
+    if let Some(hi) = section(root, "history", d) {
+        let def = HistorySettings::default();
+        s.history.enabled = read_key_or(hi, "history", "enabled", def.enabled, d);
+    }
+    if let Some(gr) = section(root, "grid", d) {
+        s.grid.raw_display = read_key(gr, "grid", "raw_display", d);
+    }
     out
+}
+
+// ## m3b-t01c-core-seams (P-M3b-9)
+/// `results.max_value_bytes`: an integer clamped to `ValueLimit`'s range, with a diagnostic
+/// when it was out of it (the value still counts, at the nearest bound); anything else is the
+/// default, with a diagnostic.
+fn read_value_limit(table: &dyn TableLike, diags: &mut Vec<SettingsDiag>) -> ValueLimit {
+    const KEY: &str = "results.max_value_bytes";
+    match table.get("max_value_bytes") {
+        None => ValueLimit::default(),
+        Some(item) => match item.as_integer() {
+            Some(n) => {
+                let limit = ValueLimit::clamped(n);
+                if i64::from(limit.get()) != n {
+                    diags.push(diag("settings-invalid-value", KEY));
+                }
+                limit
+            }
+            None => {
+                diags.push(diag("settings-invalid-value", KEY));
+                ValueLimit::default()
+            }
+        },
+    }
 }
 
 /// Merges `new` into the file at `path` with `toml_edit`: only keys whose value changed are
@@ -134,6 +183,37 @@ pub fn save_changes(path: &Path, new: &Settings) -> io::Result<()> {
         &ed.caret_blink,
         &def.caret_blink,
     );
+    // ## m3b-t01c-core-seams (P-M3b-9): each key written only when it changed; a key at its
+    // default is never added.
+    let def = ExecSettings::default();
+    write_key_or(
+        &mut doc,
+        "exec",
+        "confirm_unsafe_where",
+        &new.exec.confirm_unsafe_where,
+        &def.confirm_unsafe_where,
+    );
+    write_key_or(
+        &mut doc,
+        "exec",
+        "error_policy_ask",
+        &new.exec.error_policy_ask,
+        &def.error_policy_ask,
+    );
+    write_key(
+        &mut doc,
+        "results",
+        "max_value_bytes",
+        &new.results.max_value_bytes,
+    );
+    write_key_or(
+        &mut doc,
+        "history",
+        "enabled",
+        &new.history.enabled,
+        &HistorySettings::default().enabled,
+    );
+    write_key(&mut doc, "grid", "raw_display", &new.grid.raw_display);
     fsio::atomic_write(path, doc.to_string().as_bytes())
 }
 
@@ -358,6 +438,26 @@ impl Pref for bool {
     }
     fn to_value(&self) -> Value {
         Value::from(*self)
+    }
+}
+
+// ## m3b-t01c-core-seams
+/// `results.max_value_bytes`: a TOML integer in `ValueLimit`'s range (loading clamps one out
+/// of it, `read_value_limit`).
+impl Pref for ValueLimit {
+    fn parse(text: &str) -> Option<Self> {
+        text.parse::<u32>().ok().and_then(ValueLimit::new)
+    }
+    fn as_text(&self) -> String {
+        self.get().to_string()
+    }
+    fn from_item(item: &Item) -> Option<Self> {
+        item.as_integer()
+            .and_then(|v| u32::try_from(v).ok())
+            .and_then(ValueLimit::new)
+    }
+    fn to_value(&self) -> Value {
+        Value::from(i64::from(self.get()))
     }
 }
 
@@ -615,5 +715,74 @@ mod tests {
         );
         assert!(!t.contains("copy_line_without_selection"), "{t}");
         assert_eq!(load(&p).settings.editor, s.editor);
+    }
+
+    // ## m3b-t01c-core-seams (P-M3b-9)
+
+    /// A settings file as an M3a build writes it.
+    const M3A_SETTINGS_TEXT: &str = "version = 1\n[ui]\ntheme = \"light\"\nlanguage = \"tr\"\n[keymap]\npreset = \"datagrip\"\n[editor]\ntab_size = 2\n";
+
+    #[test]
+    fn m3a_settings_file_loads_with_new_defaults_and_no_diagnostic() {
+        let o = load(&write_tmp(M3A_SETTINGS_TEXT));
+        assert!(o.diags.is_empty(), "{:?}", o.diags);
+        assert!(o.settings.exec.confirm_unsafe_where);
+        assert!(o.settings.exec.error_policy_ask);
+        assert_eq!(o.settings.results.max_value_bytes.get(), 1 << 20);
+        assert!(o.settings.history.enabled);
+        assert!(!o.settings.grid.raw_display);
+        assert_eq!(o.settings.ui.theme, ThemePref::Light);
+    }
+
+    #[test]
+    fn value_limit_clamps_with_a_diagnostic() {
+        let o = load(&write_tmp("[results]\nmax_value_bytes = 1\n"));
+        assert_eq!(o.settings.results.max_value_bytes.get(), 65_536);
+        assert_eq!(o.diags.len(), 1);
+        assert_eq!(o.diags[0].key, "results.max_value_bytes");
+        let o = load(&write_tmp("[results]\nmax_value_bytes = 1000000000000\n"));
+        assert_eq!(o.settings.results.max_value_bytes.get(), 67_108_864);
+        assert_eq!(o.diags.len(), 1);
+        let o = load(&write_tmp("[results]\nmax_value_bytes = \"big\"\n"));
+        assert_eq!(o.settings.results.max_value_bytes.get(), 1 << 20);
+        assert_eq!(o.diags.len(), 1);
+        let o = load(&write_tmp("[results]\nmax_value_bytes = 2097152\n"));
+        assert_eq!(o.settings.results.max_value_bytes.get(), 2 << 20);
+        assert!(o.diags.is_empty());
+    }
+
+    #[test]
+    fn new_tables_round_trip_through_save() {
+        let p = write_tmp(M3A_SETTINGS_TEXT);
+        let mut s = load(&p).settings;
+        // Defaults write nothing: an M3a file stays as it was.
+        save_changes(&p, &s).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), M3A_SETTINGS_TEXT);
+        s.exec.confirm_unsafe_where = false;
+        s.exec.error_policy_ask = false;
+        s.results.max_value_bytes = ValueLimit::new(8 << 20).unwrap();
+        s.history.enabled = false;
+        s.grid.raw_display = true;
+        save_changes(&p, &s).unwrap();
+        let t = std::fs::read_to_string(&p).unwrap();
+        for line in [
+            "confirm_unsafe_where = false",
+            "error_policy_ask = false",
+            "max_value_bytes = 8388608",
+            "enabled = false",
+            "raw_display = true",
+        ] {
+            assert!(t.contains(line), "{line} in {t}");
+        }
+        let back = load(&p);
+        assert!(back.diags.is_empty());
+        assert_eq!(back.settings, s);
+        // A wrong type keeps the default alone, beside the good keys.
+        let o = load(&write_tmp(
+            "[exec]\nconfirm_unsafe_where = \"no\"\nerror_policy_ask = false\n",
+        ));
+        assert!(o.settings.exec.confirm_unsafe_where);
+        assert!(!o.settings.exec.error_policy_ask);
+        assert_eq!(o.diags[0].key, "exec.confirm_unsafe_where");
     }
 }

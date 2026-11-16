@@ -16,6 +16,8 @@ use crate::errors::{RawError, RawErrorKind};
 use crate::server::ServerInfo;
 // ## m3a-t01b-seams
 use crate::typed::{CloseHow, Closed, QueryEvent, QuerySpec, TypedCaps};
+// ## m3b-t01c-core-seams
+use crate::typed::Notice;
 
 /// How a running statement is cancelled (HV-DRV-01).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -266,6 +268,12 @@ pub trait RawConn: Send + 'static {
     fn close_query(&mut self, how: CloseHow) -> BoxFuture<'_, Result<Closed, RawError>> {
         let _ = how;
         Box::pin(async { Err(unsupported()) })
+    }
+    // ## m3b-t01c-core-seams
+    /// The warnings of the last statement (MySQL/MariaDB `SHOW WARNINGS` after a `Done` with
+    /// `warnings > 0`, R-M3-77; Task 13). The default has none.
+    fn warnings(&mut self) -> BoxFuture<'_, Result<Vec<Notice>, RawError>> {
+        Box::pin(async { Ok(Vec::new()) })
     }
 }
 

@@ -1,1 +1,2 @@
-//! Placeholder (M3b Task 1a's manifest commit); the seam lands in Task 1a's second commit.
+//! The interim backend for MySQL, MariaDB and SQLite (Task 10; R-M3-54): `sqlparser`'s derived
+//! `Visit`, unioned with the lexer pre-scan. Empty until Task 10.

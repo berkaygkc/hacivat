@@ -886,7 +886,10 @@ async fn the_idle_bound_releases_the_cursor_and_rolls_back() {
 async fn the_session_is_busy_while_the_idle_bound_releases_its_cursor() {
     // Fix round 1 (review M4). A MySQL release drains, kills on a side connection and reads
     // on: the snapshot says `Busy` meanwhile (request 0: no request has that number).
-    let side = Arc::new(fake_mysql());
+    // The side connection is gated, so the release waits at its kill until the test has seen
+    // `Busy`: a watch keeps only the latest value, and an ungated release can go `Busy` ->
+    // `Idle` before this task is polled again (CI flake, `Elapsed`).
+    let side = Arc::new(fake_mysql().gated());
     let (h, _f) = session_with_side(
         fake_mysql().queries(vec![select("SELECT * FROM big", 1_000_000)]),
         &side,
@@ -909,6 +912,17 @@ async fn the_session_is_busy_while_the_idle_bound_releases_its_cursor() {
     // Still the cursor's: it is being released, not gone.
     assert!(busy.cursor.is_some());
     assert!(o.releases().is_empty());
+    // The release is held at the kill's side connection, and still `Busy` there.
+    settle_until("the kill to wait at the side connection's gate", || {
+        side.connect_calls() == 1
+    })
+    .await;
+    assert!(side.executed().is_empty(), "{:?}", side.executed());
+    let held = h.state().borrow().clone();
+    assert!(matches!(held.state, SessionState::Busy { req: 0, .. }));
+    assert!(held.cursor.is_some());
+    assert!(o.releases().is_empty());
+    side.release();
     let mut state = h.state();
     let idle = tokio::time::timeout(
         secs(60),

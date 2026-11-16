@@ -64,14 +64,17 @@ pub fn format_cell(
     s: &DisplaySettings,
     p: Purpose,
 ) -> Display {
-    // M3a formats every purpose alike: the raw tooltip under a fraction cap and the grid's
-    // screen-reader subtree arrive with their features (M3b).
-    let _ = p;
-    cell(v, col, s)
+    // ## m3b-t01c-core-seams (P-M3b-17): each purpose has its own file; the tooltip (Task 38)
+    // and the screen-reader text (Task 40) are stubs that answer the cell's text until then.
+    match p {
+        Purpose::Cell => cell(v, col, s),
+        Purpose::Tooltip => super::tooltip::text(v, col, s),
+        Purpose::A11y => super::a11y_text::text(v, col, s),
+    }
 }
 
-/// [`format_cell`]'s body.
-fn cell(v: ValueRef<'_>, col: &ColumnFacts<'_>, s: &DisplaySettings) -> Display {
+/// [`format_cell`]'s body: the cell's text.
+pub(super) fn cell(v: ValueRef<'_>, col: &ColumnFacts<'_>, s: &DisplaySettings) -> Display {
     let cap = s.max_display_chars as usize;
     let mut d = Display {
         text: String::new(),

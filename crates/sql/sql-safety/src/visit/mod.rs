@@ -1,3 +1,4 @@
-//! Placeholder (M3b Task 1a's manifest commit); the seam lands in Task 1a's second commit.
+//! Tree visitors (R-M3-2): the PostgreSQL visitor is generated from the vendored
+//! `pg_query.proto` by `cargo xtask gen-pg-visitor` (Task 9); no hand-written walker.
 
 pub(crate) mod pg_generated;

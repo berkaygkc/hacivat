@@ -94,6 +94,18 @@ fn glyph(msg: &LogMsg) -> (IconName, bool) {
         LogMsg::Error { .. } | LogMsg::CopyUnsupported | LogMsg::NotStarted(_) => {
             (IconName::TriangleAlert, true)
         }
+        // ## m3b-t01c-core-seams (named exception): the M3b lines, with existing glyphs; no
+        // M3a run writes them (Tasks 16 and 25 own their look).
+        LogMsg::Notice { .. }
+        | LogMsg::Retried { .. }
+        | LogMsg::Evicted { .. }
+        | LogMsg::SkippedByUser { .. } => (IconName::Info, false),
+        LogMsg::ResultSetLimit { .. } => (IconName::Layers, false),
+        LogMsg::ImplicitCommit
+        | LogMsg::ConfirmCommitted { .. }
+        | LogMsg::ConfirmRolledBack { .. } => (IconName::GitCommit, false),
+        LogMsg::SafetyDenied { .. } => (IconName::Lock, false),
+        LogMsg::ConfirmStatementFailed => (IconName::TriangleAlert, true),
     }
 }
 

@@ -2003,3 +2003,58 @@ verify (an unanswered canary, e.g. a PostgreSQL-wire server without
   on the read-only session, the profile stays `Connected` and the session `Idle`, `SELECT 1`
   runs and a `CREATE TABLE` is refused) and F1-a's
   `a_parenthesis_before_copy_is_a_syntax_error_on_postgresql` (ADR 0005 `m3a-f1`).
+
+## m3b-t01c — core seams
+
+M3b Task 1c's session seams (P-M3b-1, -3, -10, -11, -12, -33). Every M3a behaviour is kept;
+nothing new is wired into Run (R-M3-52).
+
+- **Out-of-band answers (P-M3b-3).** `Command::{Choose, CommitDecision}` with a
+  `oneshot::Sender<bool>` reply; `SessionHandle::{choose, commit_decision}` return the
+  receiver. `Ladder::command` answers them while a request runs and the idle loop otherwise,
+  through the session's one `RunGate` (`Mutex<{pending, answer}>` + `Notify`, shared by `Ctl` and
+  `Core` like `StopSignal`). **Question identity (fix round 1, review I1):** `RunGate::ask`
+  gives every question an id from a counter that only grows for the session's life;
+  `RunEvent::{NeedsChoice, NeedsCommit}` carry it as `question`, and
+  `choose(run_seq, question, choice)` / `commit_decision(run_seq, unit, question, answer)`
+  name it. An answer counts only when its kind, request sequence number and question id (and,
+  for a commit, the unit) match the question waiting now. A double click, an answer from an
+  older bar that arrives after the run asked again (also after a Retry re-asked for the same
+  unit), any other id, an answer after the request ended, or a closed session answers `false`
+  and changes nothing. Tasks 11 and 19 call `ask` before emitting the event, with no `.await`
+  between them. `run_one` sets `Core::request_seq` and withdraws any question before and after
+  each request. `Request` gains no variant. No run waits yet (Tasks 11, 19), so every answer
+  is `false`.
+- **Verdicts.** `RunUnit` gains `binds`, `verdict` (`UnitVerdict`, default `Unknown`),
+  `effects` (`SessionEffects`, `bitflags`), `masked`, `max_result_sets`, `cell_cap`
+  (`RunUnit::plain` builds M3a's shape). Until their tasks: a `TxThenConfirm` or
+  `ExplainAnalyzeRollback` unit, and a unit with binds, end `Failed(Internal)` before anything
+  of them is sent (the Manual `BEGIN` included); `max_result_sets` is clamped to 1; `cell_cap`
+  overrides the run's when set. The verdict is scheduling only: the read-only guard never
+  trusts it (R-M3-83). `RunSpec::confirm_deadline` (D-014: 300 s, `RunSpec::CONFIRM_DEADLINE`).
+  `ErrorPolicy::Ask` stops as `StopOnError` until Task 11. New `RunEvent`s (`NeedsChoice`,
+  `NeedsCommit { savepoint }`, `CommitDecided`, `Notice`); a driver notice is forwarded as
+  `RunEvent::Notice` already.
+- **The classifier hook (R-M3-83, P-M3b-11).** `StatementClassifier` (`Debug` supertrait) in
+  `session/verdict.rs`; `ManagerConfig::classifier` (`None` in `default()` and `m2b()`;
+  equality and hashing compare it by pointer) → `SessionManager::set_classifier` →
+  `spawn_supervised` → `Core::classifier`. `Core::step0b` (in `readonly.rs`, `&mut self` so
+  Task 18 can read `Core::observed_sql_mode` once) is called right before `guarded` (M2b
+  `Exec`, user statements only) and before `guarded_query` (typed units); it is a stub
+  (`Ok(())`). `track_statement(t, sql, effects)`: the typed path passes the gate's effects when
+  the unit has a verdict, the `Exec` path `None`; the effects are ignored until Task 18. So
+  Task 18 edits only `readonly.rs` and `recovery.rs`.
+- **Hacivat's transactions (P-M3b-12).** `TxOwner::Confirm` and `TxOwner::is_hacivats()`
+  (`Cursor | Guard | Confirm`) replace the five ownership checks: `TxState::user_open`
+  (`tx.rs`), the liveness tick and the close check (`actor.rs`), `shown_status` (`run.rs`) and
+  `OpenCursor::in_user_tx` (`cursor.rs`). `TxError::ImplicitCommitUnconfirmed` (P-M3b-1).
+  `DenyLayer::Classifier`, `ExecErrorKind::{SafetyDenied, QueueFull}`.
+- **Profile fields (P-M3b-10).** `startup_script`, `read_only_fn_allowlist`, `record_history`
+  (default `true`), each written only when it differs from its default, so an M2b/M3a file
+  round-trips byte for byte. The key is `read_only_fn_allowlist`, not R-M3-56's
+  `read_only.function_allowlist`: `read_only` is already a boolean key of the entry, and TOML
+  cannot make it a table too. An invalid value (a wrong type, a script over 64 KiB or with a
+  NUL, an allowlist entry with whitespace, a control character, `;`, `(`, `)`, `,` or `'`, or
+  more than 1,000 entries) makes the entry invalid (`InvalidEntry`): it stays on disk untouched
+  and is shown, never loaded half-read.
+- `testing::fake_session_classified` gives Task 18's tests a fake session with a classifier.
