@@ -32,6 +32,9 @@ use crate::text::{KeyFn, Label, TextFn, TextSource};
 pub const MENU_MIN_WIDTH_PX: f32 = 200.0;
 /// Height of one row.
 pub const MENU_ROW_PX: f32 = 24.0;
+// ## m3a-f2-visual (named exception)
+/// The key-hint footer: 24 px, plus the 4 px it keeps from the last row.
+pub const MENU_FOOTER_PX: f32 = 28.0;
 
 #[derive(Clone)]
 pub struct MenuItemSpec {
@@ -182,6 +185,11 @@ pub struct PopupMenu {
     /// The visible title row, when set.
     title: Option<TextFn>,
     access_keys: bool,
+    // ## m3a-f2-visual (named exception): the statement chooser's anatomy (NOTES surface 4).
+    /// The highlighted row takes `blue-tint-strong` and its hint goes to `text`.
+    active_tint: bool,
+    /// A 24 px key-hint footer on `head`: `(chord, Fluent ID)` pairs.
+    key_hints: Vec<(&'static str, &'static str)>,
 }
 
 impl EventEmitter<PopupMenuEvent> for PopupMenu {}
@@ -236,6 +244,8 @@ impl PopupMenu {
                 label: None,
                 title: None,
                 access_keys: !cfg!(target_os = "macos"),
+                active_tint: false,
+                key_hints: Vec::new(),
             }
         })
     }
@@ -263,6 +273,20 @@ impl PopupMenu {
     /// the menu for assistive technology unless [`PopupMenu::label`] does.
     pub fn title(&mut self, title: TextFn) {
         self.title = Some(title);
+    }
+
+    // ## m3a-f2-visual (named exception)
+    /// The highlighted row reads as a selection, not a hover: `blue-tint-strong`, its hint in
+    /// `text` (the chooser: Enter runs that row; NOTES ruling 18).
+    pub fn set_active_tint(&mut self, on: bool) {
+        self.active_tint = on;
+    }
+
+    // ## m3a-f2-visual (named exception)
+    /// A 24 px footer on `head` listing the menu's keys: each a chord (drawn for the platform,
+    /// as the palette's footer) and its Fluent ID, such as `("enter", "hui-palette-hint-run")`.
+    pub fn set_key_hints(&mut self, hints: Vec<(&'static str, &'static str)>) {
+        self.key_hints = hints;
     }
 
     /// Whether access keys are shown and accepted (default: Windows and Linux).
@@ -415,6 +439,12 @@ impl Render for PopupMenu {
                     t.type_ramp.caption.line_height + 2.0 * t.spacing.xs
                 } else {
                     0.0
+                }
+                // ## m3a-f2-visual: the key-hint footer.
+                + if self.key_hints.is_empty() {
+                    0.0
+                } else {
+                    MENU_FOOTER_PX
                 };
             let left = if anchor.x + self.min_width > viewport.width {
                 (viewport.width - self.min_width).max(px(0.0))
@@ -506,18 +536,19 @@ impl Render for PopupMenu {
                         // ## m3a-t35-shots (named exception): the hint gives way to the label.
                         .min_w(px(0.0));
                     if let Some(hint) = &item.hint {
+                        // ## m3a-f2-visual: the active row's hint goes to `text` (chooser).
+                        let hint_ink = if self.active_tint && selected && !item.disabled {
+                            c.text.to_hsla()
+                        } else {
+                            c.text_2.to_hsla()
+                        };
                         // Raised Ink Rule: the hint on the raised menu uses text-2.
                         // ## m3a-t35-shots (named exception): a hint wider than the menu leaves
                         // it ellipsizes (the chooser's SQL label, data, NOTES surface 4), the
                         // whole text in its tooltip; one that fits draws as before.
                         trail = trail.child(
-                            Label::new(
-                                hint(cx),
-                                item.hint_source,
-                                t.type_ramp.caption,
-                                c.text_2.to_hsla(),
-                            )
-                            .truncate(true),
+                            Label::new(hint(cx), item.hint_source, t.type_ramp.caption, hint_ink)
+                                .truncate(true),
                         );
                     }
                     if let Some(shortcut) = &item.keys {
@@ -543,7 +574,13 @@ impl Render for PopupMenu {
                         }))
                         .on_click(cx.listener(move |this, _, _, cx| this.choose(action_index, cx)));
                     if selected {
-                        row = row.bg(c.hover.to_hsla());
+                        // ## m3a-f2-visual: `blue-tint-strong` where the row reads as a
+                        // selection (the chooser), else the hover fill.
+                        row = row.bg(if self.active_tint {
+                            c.blue_tint_strong.to_hsla()
+                        } else {
+                            c.hover.to_hsla()
+                        });
                     }
                 }
                 if item.disabled {
@@ -614,7 +651,48 @@ impl Render for PopupMenu {
                     .id("popup-menu-title"),
                 )
         });
-        menu.children(title).children(rows)
+        // ## m3a-f2-visual: the key-hint footer (the mock's `.menu .mfoot`: 24 px on `head`, a
+        // `seam` top edge, edge to edge under the rows; chords in mono 11, words 11.5, both
+        // `text-2` on the raised menu).
+        let footer = (!self.key_hints.is_empty()).then(|| {
+            let hint = |(chord, id): &(&'static str, &'static str)| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(5.0))
+                    .child(Label::new(
+                        crate::palette::key_label(chord),
+                        TextSource::Shortcut,
+                        t.type_ramp.mono_kbd,
+                        c.text_2.to_hsla(),
+                    ))
+                    .child(Label::new(
+                        crate::l10n::ui_text(cx, id),
+                        TextSource::Fluent,
+                        t.type_ramp.micro,
+                        c.text_2.to_hsla(),
+                    ))
+            };
+            div()
+                .debug_selector(|| "popup-menu-footer".to_string())
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(t.spacing.xl))
+                .h(px(MENU_FOOTER_PX - t.spacing.xs))
+                .mt(px(t.spacing.xs))
+                .mx(px(-t.spacing.xs))
+                .mb(px(-t.spacing.xs))
+                .px(px(t.spacing.lg))
+                .border_t_1()
+                .border_color(c.seam.to_hsla())
+                .bg(c.head.to_hsla())
+                .rounded_bl(px(t.radii.md))
+                .rounded_br(px(t.radii.md))
+                .children(self.key_hints.iter().map(hint))
+        });
+        menu.children(title).children(rows).children(footer)
     }
 }
 

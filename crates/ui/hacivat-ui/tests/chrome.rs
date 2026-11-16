@@ -141,6 +141,51 @@ fn buttons_and_segments_have_the_design_heights(cx: &mut TestAppContext) {
     );
 }
 
+// ## m3a-f2-visual: the cursor strip's compact buttons (NOTES "Strip buttons": 20 px, padding
+// 0/7, a 12 px label); the default size is unchanged.
+#[gpui::test]
+fn a_compact_button_is_20_px_with_a_12_px_label(cx: &mut TestAppContext) {
+    let vcx = host(cx, |_, _| {
+        div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .child(Button::new("plain", "Fetch all".into()))
+            .child(Button::new("small", "Fetch all".into()).compact(true))
+            .into_any_element()
+    });
+    vcx.update(|_, cx| {
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        })
+    });
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    let plain = vcx.debug_bounds("button-plain").unwrap();
+    let small = vcx.debug_bounds("button-small").unwrap();
+    assert_eq!(plain.size.height, px(24.));
+    assert_eq!(small.size.height, px(20.));
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let size = |id: &str| {
+        frame
+            .iter()
+            .find(|r| r.path.ends_with(id))
+            .map(|r| (r.size_px, r.painted_px))
+            .unwrap()
+    };
+    let (plain_px, plain_w) = size("#button-label-plain");
+    let (small_px, small_w) = size("#button-label-small");
+    assert_eq!((plain_px, small_px), (12.5, 12.0));
+    // 7 px padding instead of 9 on each side, and the smaller label.
+    assert!(
+        (f32::from(plain.size.width) - f32::from(small.size.width) - 4.0 - (plain_w - small_w))
+            .abs()
+            < 0.5,
+        "{plain:?} {small:?}"
+    );
+}
+
 #[gpui::test]
 fn button_click_fires_and_disabled_button_does_not(cx: &mut TestAppContext) {
     let hits = Rc::new(Cell::new(0));
@@ -384,6 +429,106 @@ fn a_menu_at_its_max_width_ellipsizes_the_hint_not_the_label(cx: &mut TestAppCon
         .find(|r| r.text.as_ref() == "Whole script · 2 statements")
         .expect("the label");
     assert!(!row.truncated && !row.clipped, "{row:?}");
+}
+
+// ## m3a-f2-visual: the chooser's anatomy (NOTES surface 4): the active row reads as a
+// selection (`blue-tint-strong`), and a 24 px footer on `head` lists the keys.
+#[gpui::test]
+fn a_menu_can_tint_its_active_row_and_list_its_keys(cx: &mut TestAppContext) {
+    use hacivat_ui::menu::{MenuItemSpec, PopupMenu};
+    use hacivat_ui_core::theme::{Theme, ThemeMode};
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    let label = |s: &'static str| -> hacivat_ui::text::TextFn { Rc::new(move |_| s.into()) };
+    let (_host, vcx) = cx.add_window_view(|window, cx| {
+        let menu = PopupMenu::new(
+            point(px(10.), px(10.)),
+            vec![
+                MenuItemSpec::new(label("Statement"), "run.0").hint(label("SELECT 1")),
+                MenuItemSpec::new(label("Whole script"), "run.1").hint(label("SELECT 1; …")),
+            ],
+            window,
+            cx,
+        );
+        menu.update(cx, |m, _| {
+            m.set_min_width(px(300.0));
+            m.set_active_tint(true);
+            m.set_key_hints(vec![
+                ("up down", "hui-palette-hint-navigate"),
+                ("enter", "hui-palette-hint-run"),
+                ("escape", "hui-palette-hint-close"),
+            ]);
+        });
+        MenuHost(menu)
+    });
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    let menu = vcx.debug_bounds("popup-menu").expect("the menu");
+    let footer = vcx.debug_bounds("popup-menu-footer").expect("the footer");
+    assert_eq!(footer.size.height, px(24.0));
+    // Edge to edge inside the menu's 1 px border, flush with its bottom.
+    assert_eq!(footer.left(), menu.left() + px(1.0));
+    assert_eq!(footer.right(), menu.right() - px(1.0));
+    assert_eq!(footer.bottom(), menu.bottom() - px(1.0));
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    for id in [
+        "hui-palette-hint-navigate",
+        "hui-palette-hint-run",
+        "hui-palette-hint-close",
+    ] {
+        let r = frame
+            .iter()
+            .find(|r| r.text.as_ref() == id)
+            .unwrap_or_else(|| panic!("{id}: {frame:?}"));
+        assert!(r.visible && !r.clipped, "{r:?}");
+    }
+    #[cfg(feature = "scene-check")]
+    {
+        use hacivat_ui_core::theme::DARK;
+        let active = vcx.debug_bounds("menu-item-0").expect("the active row");
+        let fills: Vec<(gpui::Bounds<gpui::Pixels>, gpui::Hsla)> = vcx.update(|window, _| {
+            let s = window.scale_factor();
+            window
+                .rendered_scene()
+                .quads
+                .iter()
+                .filter_map(|q| {
+                    let b = gpui::Bounds::new(
+                        point(px(q.bounds.origin.x.0 / s), px(q.bounds.origin.y.0 / s)),
+                        gpui::size(
+                            px(q.bounds.size.width.0 / s),
+                            px(q.bounds.size.height.0 / s),
+                        ),
+                    );
+                    q.background.as_solid().map(|c| (b, c))
+                })
+                .collect()
+        });
+        let at_row: Vec<gpui::Hsla> = fills
+            .iter()
+            .filter(|(b, _)| *b == active)
+            .map(|(_, c)| *c)
+            .collect();
+        assert!(
+            at_row.contains(&DARK.colors.blue_tint_strong.to_hsla()),
+            "the active row is blue-tint-strong: {at_row:?}"
+        );
+        assert!(
+            !at_row.contains(&DARK.colors.hover.to_hsla()),
+            "not the hover fill: {at_row:?}"
+        );
+        assert!(
+            fills
+                .iter()
+                .any(|(b, c)| *b == footer && *c == DARK.colors.head.to_hsla()),
+            "the footer is on head"
+        );
+    }
 }
 
 struct MenuHost(gpui::Entity<hacivat_ui::menu::PopupMenu>);

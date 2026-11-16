@@ -13,6 +13,8 @@ pub mod explain;
 // ## m2b-t24-shots (fix round 1, I2): scroll containers that follow the focus.
 pub mod follow;
 pub mod form;
+// ## m3a-f2-visual: a row of cells that gives way whole (the status bar, NOTES rule 7).
+pub mod give_way;
 pub mod icon;
 pub mod input;
 pub mod keymaps;

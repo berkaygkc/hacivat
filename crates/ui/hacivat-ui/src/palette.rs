@@ -171,7 +171,9 @@ fn current_platform() -> KeymapPlatform {
 }
 
 /// A generated shortcut label for a chord such as `"up down"`.
-fn key_label(chord: &str) -> SharedString {
+// ## m3a-f2-visual (named exception): crate-visible, the menu's key-hint footer draws its
+// chords the same way.
+pub(crate) fn key_label(chord: &str) -> SharedString {
     let presses = parse_chord(chord).unwrap_or_default();
     display_chord(&presses, current_platform()).into()
 }

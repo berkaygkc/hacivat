@@ -18,6 +18,13 @@ use crate::icon::{Icon, IconName, IconSize};
 use crate::popover::{A11yDecl, A11yNode, Declare, Tip, lazy};
 use crate::text::{Label, TextSource};
 
+// ## m3a-f2-visual (named exception): the compact size (NOTES "Strip buttons": the Button at
+// 20 px height, padding 0/7, 12 px label; the mock's `.strip .btn` gap 5).
+pub const COMPACT_HEIGHT_PX: f32 = 20.0;
+const COMPACT_PAD_PX: f32 = 7.0;
+const COMPACT_GAP_PX: f32 = 5.0;
+const COMPACT_LABEL_PX: f32 = 12.0;
+
 /// A click handler shared between the widgets that take one.
 pub type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
@@ -52,6 +59,8 @@ pub struct Button {
     on_raised: bool,
     // ## m2b-t24-shots
     expanded: Option<bool>,
+    // ## m3a-f2-visual (named exception): the cursor strip's compact size.
+    compact: bool,
 }
 
 impl Button {
@@ -70,6 +79,7 @@ impl Button {
             inert: false,
             on_raised: false,
             expanded: None,
+            compact: false,
         }
     }
 
@@ -146,6 +156,14 @@ impl Button {
     /// (`aria-expanded`).
     pub fn expanded(mut self, expanded: bool) -> Self {
         self.expanded = Some(expanded);
+        self
+    }
+
+    // ## m3a-f2-visual (named exception)
+    /// The compact size of the cursor strip (NOTES "Strip buttons"): 20 px tall, 7 px padding,
+    /// 5 px icon gap, a 12 px label.
+    pub fn compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
         self
     }
 }
@@ -344,6 +362,7 @@ impl Button {
             inert,
             on_raised,
             expanded,
+            compact,
         } = self;
 
         // Hover and focus state live with the element across frames.
@@ -355,6 +374,13 @@ impl Button {
         let look = look(kind, disabled, hot, &theme);
 
         let mut style = t.type_ramp.control;
+        // ## m3a-f2-visual: the compact size (the strip).
+        let (height, pad, gap) = if compact {
+            style.size_px = COMPACT_LABEL_PX;
+            (COMPACT_HEIGHT_PX, COMPACT_PAD_PX, COMPACT_GAP_PX)
+        } else {
+            (t.spacing.control_height, 9.0, t.spacing.sm)
+        };
         if kind == ButtonKind::Primary {
             style.weight = 600;
         }
@@ -372,14 +398,14 @@ impl Button {
             .flex_row()
             .items_center()
             .flex_none()
-            .gap(px(t.spacing.sm))
-            .h(px(t.spacing.control_height))
+            .gap(px(gap))
+            .h(px(height))
             .px(px(if fixed_width.is_some() {
                 0.0
             } else if icon_only {
                 6.0
             } else {
-                9.0
+                pad
             }))
             .rounded(px(t.radii.sm))
             .border_1()
