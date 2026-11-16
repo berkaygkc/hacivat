@@ -1,0 +1,37 @@
+# The SQL fuzz targets (cargo-fuzz; Task 20 adds them under `fuzz_targets/`). M3b Task 1a's
+# skeleton.
+#
+# Its own workspace, excluded from the root one (`exclude = ["third_party", "fuzz"]`): it needs
+# a nightly toolchain and `libfuzzer-sys`, whose NCSA licence is accepted for this excluded,
+# never-shipped workspace only (ADR 0005 `m3b-t20`; `deny.toml` checks the root workspace).
+#
+# A separate workspace does not inherit the root `[patch.crates-io]`, so the entries below copy
+# the root's `third_party` ones with `../` paths (P-M3b-15): without them this workspace would
+# build the registry `pg_query` (M3a P1). `Cargo.lock` here is generated from the root lock and
+# checked in; CI builds `--locked` and asserts `git status --porcelain third_party` is empty.
+[package]
+name = "hacivat-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/berkaygkc/hacivat"
+description = "Dev-only: cargo-fuzz targets over the SQL lexer, splitter, parameters and classifier (SQL-T13)"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sql-lexer = { path = "../crates/sql/sql-lexer" }
+sql-split = { path = "../crates/sql/sql-split" }
+sql-safety = { path = "../crates/sql/sql-safety" }
+
+# Copied from the root `Cargo.toml` (P-M3b-15); keep in step with it.
+[patch.crates-io]
+mysql_async = { path = "../third_party/mysql_async" }
+pg_query = { path = "../third_party/pg_query" }
+tokio-postgres = { path = "../third_party/tokio-postgres" }
