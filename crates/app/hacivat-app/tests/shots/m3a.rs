@@ -129,7 +129,31 @@ pub(super) enum M3a {
     CopyCopied,
     CopyCopying,
     CopyTooMuch,
+    // ## m3b-t22-tx-ui (named exception): design/m3b-safe surfaces 3, 4, 5 and 12, rendered
+    // by the M3a machinery until Task 29 moves them to `shots/m3b.rs` ([`M3B_T22`]).
+    TxChipMenu,
+    TxIsolationMenu,
+    TxBadgeOpen,
+    TxBadgeFailed,
+    TxSegmentMenu,
+    TxIdleToast,
+    TxShared,
 }
+
+// ## m3b-t22-tx-ui (named exception)
+/// The Task 22 states (after every M3a state).
+pub(super) const M3B_T22: [M3a; 7] = [
+    M3a::TxChipMenu,
+    M3a::TxIsolationMenu,
+    M3a::TxBadgeOpen,
+    M3a::TxBadgeFailed,
+    M3a::TxSegmentMenu,
+    M3a::TxIdleToast,
+    M3a::TxShared,
+];
+
+/// The single-session connection (surface 12).
+pub(super) const SHARED: &str = "orders-shared";
 
 pub(super) const M3A: [M3a; 68] = [
     M3a::ConsoleEditor,
@@ -347,6 +371,14 @@ impl M3a {
             M3a::CopyCopied => "copy-copied",
             M3a::CopyCopying => "copy-copying",
             M3a::CopyTooMuch => "copy-too-much",
+            // ## m3b-t22-tx-ui
+            M3a::TxChipMenu => "tx-chip-menu",
+            M3a::TxIsolationMenu => "tx-isolation-menu",
+            M3a::TxBadgeOpen => "tx-badge-open",
+            M3a::TxBadgeFailed => "tx-badge-failed",
+            M3a::TxSegmentMenu => "tx-segment-menu",
+            M3a::TxIdleToast => "tx-idle-toast",
+            M3a::TxShared => "tx-shared",
         }
     }
 
@@ -405,6 +437,14 @@ impl M3a {
                 (DIALOG, None)
             }
             M3a::CopyCopied | M3a::CopyCopying | M3a::CopyTooMuch => (TOAST, None),
+            // ## m3b-t22-tx-ui: the menu's title row, the badge's own labels, the toast.
+            M3a::TxChipMenu | M3a::TxIsolationMenu | M3a::TxSegmentMenu => {
+                ("#popup-menu-title", None)
+            }
+            M3a::TxBadgeOpen => ("#tx-badge-text", None),
+            M3a::TxBadgeFailed => ("#tx-badge-failed", None),
+            M3a::TxIdleToast => (TOAST, None),
+            M3a::TxShared => ("#tx-chip-mode", None),
         }
     }
 
@@ -427,14 +467,27 @@ impl M3a {
         // has no room (960 px in the pseudo-locales) the result tile's toolbar, which says the
         // same, must still show it: the surface never loses the count.
         const ROWS: &[&str] = &["#status-rows", "#results-rows-timing"];
+        // ## m3b-t22-tx-ui (named exception): the transaction badge and the mode chip are
+        // trust signals too (NOTES M3b cross-cutting #7).
+        const BADGE: &[&str] = &["#tx-badge-text"];
+        const BADGE_FAILED: &[&str] = &["#tx-badge-failed"];
+        const CHIP: &[&str] = &["#tx-chip-mode"];
         match self {
+            M3a::TxChipMenu | M3a::TxIsolationMenu => &[CHIP],
+            M3a::TxBadgeOpen | M3a::TxShared => &[TX, BADGE, CHIP],
+            M3a::TxBadgeFailed => &[TX_FAILED, BADGE_FAILED, CHIP],
+            M3a::TxSegmentMenu | M3a::TxIdleToast => &[TX, BADGE],
+            M3a::StatusTxOpen => &[TX, BADGE],
+            M3a::StatusTxFailed => &[TX_FAILED, BADGE_FAILED],
             M3a::ConsoleProduction | M3a::ToolbarProductionWaiting | M3a::MarksDenied => {
                 &[PROD_NOTICE, ENV]
             }
             M3a::StatusProductionResult => &[ENV],
             M3a::ToolbarRunning => &[CLOCK],
-            M3a::StatusTxOpen | M3a::PromptClose | M3a::PromptQuit => &[TX],
-            M3a::StatusTxFailed | M3a::PromptFailed | M3a::PromptFailedQuit => &[TX_FAILED],
+            // ## m3b-t22-tx-ui (named exception): `StatusTxOpen` / `StatusTxFailed` moved up,
+            // with the badge.
+            M3a::PromptClose | M3a::PromptQuit => &[TX],
+            M3a::PromptFailed | M3a::PromptFailedQuit => &[TX_FAILED],
             M3a::StatusCursorOpen => &[CURSOR],
             M3a::StatusEverything => &[TX, CURSOR, ROWS],
             _ => &[],
@@ -912,6 +965,63 @@ impl M3a {
                 }));
                 s
             }
+            // ## m3b-t22-tx-ui
+            TxChipMenu | TxIsolationMenu => {
+                let mut s = live(
+                    DEV,
+                    SCRIPT,
+                    caret(SCRIPT, "o.total"),
+                    Expect::Band(BandStyle::Run),
+                );
+                s.push(tx_menu(if self == TxChipMenu {
+                    TxMenu::Chip
+                } else {
+                    TxMenu::Isolation
+                }));
+                s
+            }
+            TxBadgeOpen | TxIdleToast | TxSegmentMenu => {
+                let mut s = live(
+                    DEV,
+                    SCRIPT,
+                    caret(SCRIPT, "o.total"),
+                    Expect::Band(BandStyle::Run),
+                );
+                s.push(user_tx(&["BEGIN", UPD1, UPD2, UPD3], Some(3), false));
+                if self == TxSegmentMenu {
+                    s.push(tx_menu(TxMenu::Segment));
+                }
+                if self == TxIdleToast {
+                    s.push(step(
+                        |window, cx| {
+                            let session = session_in(window, cx).expect("the console's session");
+                            hacivat_app::console::idle_toast::show(session.id(), 10, cx);
+                        },
+                        |_, cx| !ToastQueue::visible_ids(cx).is_empty(),
+                    ));
+                }
+                s
+            }
+            TxBadgeFailed => {
+                let mut s = live(
+                    DEV,
+                    SCRIPT,
+                    caret(SCRIPT, "o.total"),
+                    Expect::Band(BandStyle::Run),
+                );
+                s.push(user_tx(&["BEGIN", UPD1, UPD2, FAILS], None, true));
+                s
+            }
+            TxShared => {
+                let mut s = live(
+                    SHARED,
+                    SCRIPT,
+                    caret(SCRIPT, "o.total"),
+                    Expect::Band(BandStyle::Run),
+                );
+                s.push(user_tx(&["BEGIN", UPD1], Some(1), false));
+                s
+            }
         }
     }
 
@@ -1056,6 +1166,26 @@ impl M3a {
                 ),
             ),
             CopyTooMuch => toast("hv-copy-refused-title"),
+            // ## m3b-t22-tx-ui
+            TxChipMenu | TxIsolationMenu => {
+                menu_open(window, cx)
+                    && tx().is_none()
+                    && console
+                        .is_some_and(|c| hacivat_app::console::tx_badge::view(c, cx).is_some())
+            }
+            TxBadgeOpen => console.is_some_and(|c| {
+                hacivat_app::console::tx_badge::user_tx(c, cx)
+                    .is_some_and(|u| !u.failed && u.statements == 3)
+            }),
+            TxShared => console.is_some_and(|c| {
+                hacivat_app::console::tx_badge::user_tx(c, cx).is_some_and(|u| !u.failed)
+                    && hacivat_app::console::tx_chip::render_shared(c, false, cx).is_some()
+            }),
+            TxBadgeFailed => console.is_some_and(|c| {
+                hacivat_app::console::tx_badge::user_tx(c, cx).is_some_and(|u| u.failed)
+            }),
+            TxSegmentMenu => menu_open(window, cx) && tx().is_some_and(|t| t.statements == 3),
+            TxIdleToast => toast("hv-tx-idle-body"),
         };
         (!ok).then(|| format!("{}: the state check failed", self.name()))
     }
@@ -1080,6 +1210,43 @@ fn shows_label(frame: &[RenderedText], file: &str, text: &str) -> bool {
 /// Whether a toast shows `text` (its title or body).
 fn shows_toast(frame: &[RenderedText], text: &str) -> bool {
     shows_label(frame, TOAST, text)
+}
+
+// ## m3b-t22-tx-ui (named exception)
+/// Which transaction menu a state opens.
+#[derive(Debug, Clone, Copy)]
+enum TxMenu {
+    Chip,
+    Isolation,
+    Segment,
+}
+
+/// Opens the active console's transaction menu (from its chip or its status segment) or its
+/// isolation menu, and waits for the menu layer.
+fn tx_menu(which: TxMenu) -> Step {
+    step(
+        move |window, cx| {
+            let console = active_console(window, cx).expect("a console");
+            match which {
+                TxMenu::Chip => hacivat_app::console::tx_chip::open_chip_menu(console, window, cx),
+                TxMenu::Isolation => {
+                    hacivat_app::console::tx_chip::open_isolation_menu(console, window, cx);
+                }
+                TxMenu::Segment => {
+                    hacivat_app::console::tx_chip::open_segment_menu(console, window, cx);
+                }
+            }
+        },
+        |window, cx| menu_open(window, cx),
+    )
+}
+
+/// Whether a popup menu is the window's top layer.
+fn menu_open(window: &mut Window, cx: &App) -> bool {
+    window
+        .root::<Workspace>()
+        .flatten()
+        .is_some_and(|ws| ws.read(cx).layer_ids().last() == Some(&"menu"))
 }
 
 /// Whether the first fixture mark is stale and the second is not (`marks-stale`, M9).
@@ -1769,6 +1936,8 @@ fn profile(name: &str) -> Profile {
         name: name.to_string(),
         engine,
         environment: Some(env),
+        // ## m3b-t22-tx-ui (named exception): the single-session connection.
+        single_session: name == SHARED,
         endpoint: ProfileEndpoint::Server {
             host: "10.0.4.12".to_string(),
             port: None,

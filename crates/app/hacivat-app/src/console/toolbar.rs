@@ -92,6 +92,22 @@ fn same(text: SharedString) -> TextFn {
 
 /// The console's toolbar (32 px, `raised`).
 pub fn build(model: &ToolbarModel, actions: &ToolbarActions, cx: &App) -> Toolbar {
+    build_for(model, actions, None, cx)
+}
+
+// ## m3b-t22-tx-ui (named exception): the transaction items of console `console` (NOTES
+// surfaces 3, 4 and 12; ruling 9): the mode chip and the "Shared session" chip right after the
+// connection label, the transaction badge on the right before the lock. The chip and the badge
+// are trust signals, pinned. The Overflow Rule's order (NOTES surface 4): the badge takes its
+// compact form first (no age, icon-only buttons; priority 12), then the shared chip its icon
+// (13, ruling 26), then the pending read-only sentence (15) and the waiting sentence (20).
+/// The console's toolbar with console `console`'s transaction items.
+pub fn build_for(
+    model: &ToolbarModel,
+    actions: &ToolbarActions,
+    console: Option<crate::console::ConsoleId>,
+    cx: &App,
+) -> Toolbar {
     let theme = *Theme::get(cx);
     let height = theme.tokens.spacing.editor_toolbar_height;
     // ## m3a-f2-visual (named exception, fix round 1, I2): in a narrow pane the row wraps, so
@@ -130,6 +146,36 @@ pub fn build(model: &ToolbarModel, actions: &ToolbarActions, cx: &App) -> Toolba
         same(model.name.clone()),
     ));
 
+    // ## m3b-t22-tx-ui (named exception): the mode chip, then the shared-session chip.
+    if let Some(console) = console {
+        if crate::console::tx_chip::render(console, cx).is_some() {
+            let label: TextFn = Rc::new(move |cx| crate::console::tx_chip::chip_label(console, cx));
+            bar = bar.item(ToolbarItem::pinned(
+                item(move |_, cx| {
+                    crate::console::tx_chip::render(console, cx)
+                        .unwrap_or_else(|| div().into_any_element())
+                }),
+                label,
+            ));
+        }
+        if crate::console::tx_chip::render_shared(console, false, cx).is_some() {
+            bar = bar.item(
+                ToolbarItem::new(
+                    13,
+                    item(move |_, cx| {
+                        crate::console::tx_chip::render_shared(console, false, cx)
+                            .unwrap_or_else(|| div().into_any_element())
+                    }),
+                    text_fn(ids::hv::CONSOLE_SHARED),
+                )
+                .compact(item(move |_, cx| {
+                    crate::console::tx_chip::render_shared(console, true, cx)
+                        .unwrap_or_else(|| div().into_any_element())
+                })),
+            );
+        }
+    }
+
     // The waiting state: the sentence, then its short form; Cancel stays.
     // ## m3a-f2-visual (named exception, fix round 1): a trust signal never gives way to the
     // sentence, and the sentence never leaves the bar: after its short form it wraps (the
@@ -156,6 +202,30 @@ pub fn build(model: &ToolbarModel, actions: &ToolbarActions, cx: &App) -> Toolba
                 waiting(&short_name, in_use, max, true, &a2, cx)
             }))
             .wraps(wrap),
+        );
+    }
+
+    // ## m3b-t22-tx-ui (named exception): the user's transaction, right-aligned before what is
+    // true about writing (ruling 9).
+    if let Some(console) = console
+        && crate::console::tx_badge::render(console, cx).is_some()
+    {
+        let label: TextFn = Rc::new(move |cx| {
+            crate::console::tx_badge::badge_text(console, true, cx).unwrap_or_default()
+        });
+        bar = bar.trailing(
+            ToolbarItem::pinned(
+                item(move |_, cx| {
+                    crate::console::tx_badge::render(console, cx)
+                        .unwrap_or_else(|| div().into_any_element())
+                }),
+                label,
+            )
+            .priority(12)
+            .compact(item(move |_, cx| {
+                crate::console::tx_badge::render_compact(console, cx)
+                    .unwrap_or_else(|| div().into_any_element())
+            })),
         );
     }
 

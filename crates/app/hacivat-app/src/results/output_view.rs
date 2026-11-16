@@ -121,6 +121,8 @@ fn glyph(msg: &LogMsg) -> (IconName, bool) {
         LogMsg::NoticesDropped { .. } => (IconName::Ellipsis, false),
         LogMsg::ClosedEarly { .. } => (IconName::Ban, false),
         LogMsg::RunAsOneRolledBack | LogMsg::RunAsOneTxFailed => (IconName::Info, false),
+        // ## m3b-t22-tx-ui (named exception): the read-only skip of a startup script.
+        LogMsg::StartupScriptSkipped => (IconName::Lock, false),
     }
 }
 

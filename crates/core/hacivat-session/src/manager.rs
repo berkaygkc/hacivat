@@ -360,14 +360,48 @@ struct Shared {
     /// time, so the first brings the chain back and the others share it (B20).
     transport_locks: Mutex<HashMap<TransportGeneration, Arc<tokio::sync::Mutex<()>>>>,
     // ## m3b-t12-session-carries (C11; fix round 1, review m7)
-    /// The settings' time zone, shared by every profile's sessions: one a server refused is
-    /// sent by none, across reconnects too.
-    zone: Option<Arc<crate::session::env::SessionZone>>,
+    // ## m3b-t22-tx-ui (named exception, T12 carry r1-m2): one zone per profile, so one
+    // server that refuses it never stops it reaching another profile's server; replaced by
+    // `ConnectionManager::set_time_zone`.
+    /// The settings' time zone, per profile: one a server refused is sent by none of that
+    /// profile's sessions, across reconnects too.
+    zone: Mutex<ZoneScope>,
+}
+
+// ## m3b-t22-tx-ui (named exception, T12 carry r1-m2)
+/// The settings' time zone and each profile's own [`SessionZone`](crate::session::env::SessionZone)
+/// of it, made on the profile's first connect after the zone was set.
+#[derive(Debug, Default)]
+struct ZoneScope {
+    /// The IANA name sessions send; `None` keeps the server's.
+    name: Option<String>,
+    by_profile: HashMap<ProfileId, Arc<crate::session::env::SessionZone>>,
+}
+
+impl ZoneScope {
+    fn of(&mut self, id: ProfileId) -> Option<Arc<crate::session::env::SessionZone>> {
+        let name = self.name.as_deref()?;
+        Some(
+            self.by_profile
+                .entry(id)
+                .or_insert_with(|| Arc::new(crate::session::env::SessionZone::new(name)))
+                .clone(),
+        )
+    }
 }
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    // ## m3b-t22-tx-ui (named exception, T12 carry r1-m2)
+    /// Profile `id`'s time zone (lock order: `inner`, then `zone`).
+    fn zone_of(&self, id: ProfileId) -> Option<Arc<crate::session::env::SessionZone>> {
+        self.zone
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .of(id)
     }
 
     /// Sets `id`'s state and bumps the generation.
@@ -490,7 +524,8 @@ impl Shared {
         // ## m3b-t01c-core-seams (P-M3b-11): the read-only guard's classifier, likewise.
         sessions.set_classifier(self.config.classifier.clone());
         // ## m3b-t12-session-carries (C11): the settings' time zone, likewise.
-        sessions.set_time_zone(self.zone.clone());
+        // ## m3b-t22-tx-ui (named exception): the profile's own zone (carry r1-m2).
+        sessions.set_time_zone(self.zone_of(id));
         // ## m2b-t22-live (T17 carry): the gaps of the profile's other sessions (pooled
         // read-only ones) are relayed as the default session's are (Q35).
         let weak = Arc::downgrade(self);
@@ -1181,9 +1216,11 @@ impl Drop for ConnectionManager {
 impl ConnectionManager {
     pub fn new(rt: Handle, deps: Arc<ConnectDeps>, config: ManagerConfig) -> Arc<Self> {
         // ## m3b-t12-session-carries
-        let zone = config
-            .zone()
-            .map(|z| Arc::new(crate::session::env::SessionZone::new(&z)));
+        // ## m3b-t22-tx-ui (named exception): per profile (carry r1-m2).
+        let zone = Mutex::new(ZoneScope {
+            name: config.zone(),
+            by_profile: HashMap::new(),
+        });
         let shared = Arc::new(Shared {
             rt,
             deps,
@@ -1234,6 +1271,35 @@ impl ConnectionManager {
     pub fn policy(&self) -> crate::session::SessionPolicy {
         crate::session::SessionPolicy {
             production_read_only: self.shared.config.production_read_only,
+        }
+    }
+
+    // ## m3b-t22-tx-ui (named exception, T12 concern 2 / carry r1-m2)
+    /// Changes the settings' time zone (`ui.time_zone`) at runtime: every session opened from
+    /// now on, of every profile, sends `zone` on PostgreSQL (`System` sends nothing); sessions
+    /// already open keep the zone they connected with. Each profile gets a fresh zone, so a
+    /// name a server refused before is tried again once per profile. The app's boot calls it
+    /// with the settings' value, and again whenever the setting changes.
+    pub fn set_time_zone(&self, zone: hacivat_settings::TimeZonePref) {
+        let name = match zone {
+            hacivat_settings::TimeZonePref::Iana(z) => Some(z),
+            hacivat_settings::TimeZonePref::System => None,
+        };
+        let inner = self.shared.lock();
+        let mut scope = self
+            .shared
+            .zone
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if scope.name == name {
+            return;
+        }
+        scope.name = name;
+        scope.by_profile.clear();
+        for (id, entry) in &inner.entries {
+            if let Some(live) = &entry.live {
+                live.sessions.set_time_zone(scope.of(*id));
+            }
         }
     }
 

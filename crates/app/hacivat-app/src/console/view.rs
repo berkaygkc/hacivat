@@ -1523,7 +1523,8 @@ impl Render for ConsoleHost {
         self.watch_session(window, cx);
         let model = self.toolbar_model(cx);
         let actions = self.actions(cx);
-        let bar = toolbar::build(&model, &actions, cx);
+        // ## m3b-t22-tx-ui (named exception): with the console's transaction items.
+        let bar = toolbar::build_for(&model, &actions, self.console(), cx);
         div()
             .id(("console", self.tab.0))
             .flex()

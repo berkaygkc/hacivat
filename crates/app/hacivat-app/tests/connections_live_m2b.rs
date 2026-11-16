@@ -478,7 +478,8 @@ fn session_lost_toast_lists_lost_items(cx: &mut TestAppContext) {
         toast
             .lines
             .iter()
-            .any(|l| l == &t(vcx, ids::hv::CONN_LOST_TX)),
+            // ## m3b-t22-tx-ui (named exception, T12 carry r1-m1): the line says "may have".
+            .any(|l| l == &t(vcx, ids::hv::TX_LOST_MAYBE)),
         "{toast:?}"
     );
     assert!(
@@ -546,7 +547,8 @@ fn a_reconnected_session_claims_no_rollback(cx: &mut TestAppContext) {
         },
     );
     let toast = sticky_toast(vcx);
-    let rollback = t(vcx, ids::hv::CONN_LOST_TX);
+    // ## m3b-t22-tx-ui (named exception, T12 carry r1-m1)
+    let rollback = t(vcx, ids::hv::TX_LOST_MAYBE);
     assert!(!toast.lines.contains(&rollback), "{toast:?}");
     assert!(
         toast.lines.iter().all(|l| !l.contains("rolled back")),

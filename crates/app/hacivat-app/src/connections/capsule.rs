@@ -281,7 +281,9 @@ pub fn model(cx: &App) -> Option<CapsuleModel> {
     let env = env_kind(p.environment);
     let env_label = capsule_env_label(cx, p.environment);
     let name: SharedString = p.name.clone().into();
-    match m.live(p.id) {
+    // ## m3b-t22-tx-ui (named exception): kept for the failed form's action.
+    let live = m.live(p.id);
+    match live.clone() {
         // ## m2b-t22-live: an idle disconnect keeps the profile in the capsule.
         LiveState::Disconnected if session_toasts::is_idle(cx, p.id) => Some(CapsuleModel::Idle {
             env,
@@ -335,7 +337,14 @@ pub fn model(cx: &App) -> Option<CapsuleModel> {
             env_label,
             label: tr(cx, ids::hv::CAPSULE_FAILED, NoArgs),
             name,
-            retry: tr(cx, ids::hv::CAPSULE_RETRY, NoArgs),
+            // ## m3b-t22-tx-ui (named exception, T12 concern 4): a connection the profile's
+            // own settings broke (a startup script, a time zone the server refused) offers
+            // "Edit connection", never Retry: retrying would fail the same way.
+            retry: if is_config_loss(&live) {
+                tr(cx, ids::hv::CONN_FIX_EDIT, NoArgs)
+            } else {
+                tr(cx, ids::hv::CAPSULE_RETRY, NoArgs)
+            },
         }),
         // ## m2b-t22-live: the attempt, and between attempts the countdown to the next.
         LiveState::Reconnecting { attempt, next_in } => Some(CapsuleModel::Reconnecting {
@@ -370,6 +379,8 @@ pub fn on_segment(
 ) {
     match segment {
         CapsuleSegment::Body => open_failure(window, cx),
+        // ## m3b-t22-tx-ui (named exception, T12 concern 4)
+        CapsuleSegment::Retry if config_loss(cx).is_some() => edit_config_loss(window, cx),
         CapsuleSegment::Retry => retry(cx),
         CapsuleSegment::Unencrypted => explain_unencrypted(anchor, window, cx),
         // ## m2b-t22-live: the read-only explanation under the segment.
@@ -385,6 +396,11 @@ fn open_failure(window: &mut Window, cx: &mut App) {
     };
     match cx.global::<ConnectionsModel>().live(p.id) {
         LiveState::Failed(error) => open_error_dialog(p.id, error, window, cx),
+        // ## m3b-t22-tx-ui (named exception, T12 concern 4): a configuration loss is edited,
+        // never retried.
+        LiveState::Lost {
+            class: hacivat_proto::ErrClass::ConfigInvalid,
+        } => edit_config_loss(window, cx),
         // A lost connection has no connect error to show: the body retries, like Retry.
         LiveState::Lost { .. } => retry(cx),
         // ## m2b-t22-live
@@ -399,11 +415,39 @@ fn open_failure(window: &mut Window, cx: &mut App) {
 /// Whether the current profile's last connect failed or its connection was lost.
 pub fn can_retry(cx: &App) -> bool {
     current_profile(cx).is_some_and(|p| {
-        matches!(
-            cx.global::<ConnectionsModel>().live(p.id),
-            LiveState::Failed(_) | LiveState::Lost { .. }
-        )
+        let live = cx.global::<ConnectionsModel>().live(p.id);
+        // ## m3b-t22-tx-ui (named exception, T12 concern 4): never a configuration loss.
+        matches!(live, LiveState::Failed(_) | LiveState::Lost { .. }) && !is_config_loss(&live)
     })
+}
+
+// ## m3b-t22-tx-ui (named exception, T12 concern 4)
+/// A connection lost to the profile's own configuration (`config.invalid`: its startup script,
+/// or a time zone the server refused): retrying fails the same way.
+pub fn is_config_loss(live: &LiveState) -> bool {
+    matches!(
+        live,
+        LiveState::Lost {
+            class: hacivat_proto::ErrClass::ConfigInvalid
+        }
+    )
+}
+
+/// The current profile, when its connection was lost to its configuration.
+fn config_loss(cx: &App) -> Option<ProfileId> {
+    let p = current_profile(cx)?;
+    is_config_loss(&cx.try_global::<ConnectionsModel>()?.live(p.id)).then_some(p.id)
+}
+
+/// Opens the connection dialog of the profile lost to its configuration.
+fn edit_config_loss(window: &mut Window, cx: &mut App) {
+    if let Some(id) = config_loss(cx) {
+        crate::connections::dialog::open_connection_dialog(
+            crate::connections::dialog::DialogMode::Edit(id),
+            window,
+            cx,
+        );
+    }
 }
 
 /// Connects the current profile again after a failure (capsule Retry, `connection.retry`).

@@ -157,6 +157,10 @@ pub enum LogMsg {
     /// nothing was rolled back yet, but the transaction failed and waits for their rollback
     /// (fix round 1, review m9).
     RunAsOneTxFailed,
+    // ## m3b-t22-tx-ui (named exception, T12 carry m9)
+    /// The profile's startup script was not run because the console's session is read-only
+    /// (a read-only session never runs it, C3). Its SQL is never in the line.
+    StartupScriptSkipped,
 }
 
 /// A message argument. Counts are numbers the app formats in the format locale; a statement
@@ -227,6 +231,8 @@ impl LogMsg {
             } => "exec-run-as-one-closed-early-rest",
             LogMsg::RunAsOneRolledBack => "exec-run-as-one-rolled-back",
             LogMsg::RunAsOneTxFailed => "exec-run-as-one-tx-failed",
+            // ## m3b-t22-tx-ui (named exception)
+            LogMsg::StartupScriptSkipped => "exec-startup-script-skipped-read-only",
         }
     }
 
@@ -306,6 +312,8 @@ impl LogMsg {
             LogMsg::NoticesDropped { n } => vec![("n", LogArg::U64(u64::from(*n)))],
             LogMsg::ClosedEarly { ran, .. } => vec![("n", LogArg::U64(u64::from(*ran)))],
             LogMsg::RunAsOneRolledBack | LogMsg::RunAsOneTxFailed => Vec::new(),
+            // ## m3b-t22-tx-ui (named exception)
+            LogMsg::StartupScriptSkipped => Vec::new(),
         }
     }
 
@@ -336,6 +344,8 @@ impl LogMsg {
             // ## m3b-t16-run-service
             LogMsg::NoticesDropped { .. } | LogMsg::ClosedEarly { .. } => Severity::Notice,
             LogMsg::RunAsOneRolledBack | LogMsg::RunAsOneTxFailed => Severity::Warning,
+            // ## m3b-t22-tx-ui (named exception)
+            LogMsg::StartupScriptSkipped => Severity::Notice,
             LogMsg::RowsRetrieved { .. }
             | LogMsg::RowsAffected { .. }
             | LogMsg::Completed { .. }

@@ -896,3 +896,11 @@ exec-param-mixed-styles = Not sent: the statement mixes parameter styles. Use on
 exec-param-too-many-binds = Not sent: the statement has more than 65,535 parameters.
 # A marker the server would read as a parameter, but Hacivat can't give it a value.
 exec-param-unbindable = Not sent: the statement holds a parameter marker Hacivat can't fill, so the server would get no value for it.
+
+## m3b-t22-tx-ui
+
+# A transaction's age under a minute (the badge, the idle toast); whole minutes are exec-dur-min.
+exec-dur-lt-min = <1 min
+# Output: the profile's startup script did not run, because this console's session is
+# read-only (a read-only session never runs it). The script's SQL is never shown.
+exec-startup-script-skipped-read-only = The connection's startup script was not run: this session is read-only.

@@ -666,10 +666,18 @@ fn console_segments(
     let view = view_of(cx, console);
     match view.map_or(TxSegment::None, |v| v.tx) {
         TxSegment::None => {}
+        // ## m3b-t22-tx-ui (named exception): the segment is a button that opens the
+        // transaction menu above itself (NOTES surface 4).
         TxSegment::Open { statements } => {
-            cells.push((Give::Never, tx_open(theme, cx, statements)));
+            cells.push((
+                Give::Never,
+                tx_segment_button(theme, cx, console, tx_open(theme, cx, statements)),
+            ));
         }
-        TxSegment::Failed => cells.push((Give::Never, tx_failed(theme, cx))),
+        TxSegment::Failed => cells.push((
+            Give::Never,
+            tx_segment_button(theme, cx, console, tx_failed(theme, cx)),
+        )),
     }
     if let Some(rows) = rc.as_ref().map(|rc| rows_timing(cx, rc)) {
         cells.push((
@@ -841,6 +849,62 @@ fn tx_open(theme: &Theme, cx: &App, statements: u32) -> AnyElement {
         )
         .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
         .into_any_element()
+}
+
+// ## m3b-t22-tx-ui (named exception)
+/// The transaction segment as a button (`segment`, M3a's open or failed form): a Tab stop
+/// that Enter, Space or a click opens the console's transaction menu with, anchored 4 px above
+/// the segment, left edges aligned (NOTES surface 4, M2); its tooltip says so. The segment's own
+/// tooltip gives way to this one.
+fn tx_segment_button(
+    theme: &Theme,
+    cx: &App,
+    console: ConsoleId,
+    segment: AnyElement,
+) -> AnyElement {
+    use std::rc::Rc;
+
+    let t = theme.tokens;
+    let tip = tr(cx, ids::hv::TX_SEGMENT_TIP, NoArgs);
+    let open = Rc::new(
+        move |window: &mut hacivat_ui_core::gpui_surface::Window, cx: &mut App| {
+            crate::console::tx_chip::open_segment_menu(console, window, cx);
+        },
+    );
+    let (on_click, on_key) = (open.clone(), open);
+    let button = div()
+        .id("status-tx-button")
+        .debug_selector(|| "status-tx-button".to_string())
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .rounded(px(t.radii.sm))
+        .cursor_pointer()
+        .child(segment)
+        .children(crate::console::tx_badge::record_bounds(
+            console,
+            crate::console::tx_badge::Focus::Segment,
+            cx,
+        ))
+        .on_click(move |_, window, cx| on_click(window, cx))
+        .on_key_down(move |e, window, cx| {
+            if matches!(e.keystroke.key.as_str(), "enter" | "space")
+                && !e.keystroke.modifiers.modified()
+            {
+                cx.stop_propagation();
+                on_key(window, cx);
+            }
+        })
+        .tooltip(move |_, cx| Tip::view(tip.clone(), cx));
+    match crate::console::tx_badge::focus_of(console, crate::console::tx_badge::Focus::Segment, cx)
+    {
+        Some(focus) => button
+            .track_focus(&focus)
+            .focus_visible(|s| s.bg(t.colors.blue_tint.to_hsla()))
+            .into_any_element(),
+        None => button.into_any_element(),
+    }
 }
 
 /// "Transaction failed · roll back to end it" with the ink alert glyph (an error takes no hue).

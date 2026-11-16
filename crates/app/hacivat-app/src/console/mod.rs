@@ -38,4 +38,7 @@ pub fn install(cx: &mut App) {
     // ## m3a-t01b-seams (fix round 1): the profile a new console tab binds to (R-M3-37).
     set_console_binding(cx, Rc::new(view::console_binding));
     commands::register(cx);
+    // ## m3b-t22-tx-ui (named exception): the transaction mirror and the idle reminders.
+    tx_badge::install(cx);
+    idle_toast::install(cx);
 }

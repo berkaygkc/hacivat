@@ -171,6 +171,8 @@ pub(crate) struct Focus {
     pub(crate) cancel: FocusHandle,
     pub(crate) save: FocusHandle,
     pub(crate) save_connect: FocusHandle,
+    // ## m3b-t22-tx-ui (named exception): the single-session checkbox (Advanced).
+    pub(crate) single_session: FocusHandle,
 }
 
 impl Focus {
@@ -201,6 +203,8 @@ impl Focus {
             cancel: stop(cx),
             save: stop(cx),
             save_connect: stop(cx),
+            // ## m3b-t22-tx-ui (named exception)
+            single_session: stop(cx),
         }
     }
 }
@@ -835,6 +839,8 @@ impl ConnectionDialog {
             ("cancel", &f.cancel),
             ("save", &f.save),
             ("save-connect", &f.save_connect),
+            // ## m3b-t22-tx-ui (named exception)
+            ("single-session", &f.single_session),
         ];
         if let Some((name, _)) = selects.iter().find(|(_, h)| h.is_focused(window)) {
             return Some(name);

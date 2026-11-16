@@ -559,3 +559,10 @@ exec-param-mixed-styles = Gönderilmedi: ifade farklı parametre biçimlerini ka
 exec-param-too-many-binds = Gönderilmedi: ifadede 65.535'ten fazla parametre var.
 # Review: PO
 exec-param-unbindable = Gönderilmedi: ifadede Hacivat'ın dolduramadığı bir parametre işareti var; sunucu ona bir değer alamaz.
+
+## m3b-t22-tx-ui
+
+# Review: PO
+exec-dur-lt-min = <1 dk
+# Review: PO
+exec-startup-script-skipped-read-only = Bağlantının başlangıç betiği çalıştırılmadı: bu oturum salt okunur.
