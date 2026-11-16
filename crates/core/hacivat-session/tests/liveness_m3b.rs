@@ -283,8 +283,9 @@ async fn deactivating_a_non_default_console_breaks_only_it() {
     // The open transaction is named before anything closes it.
     let open = sessions.open_transactions();
     assert_eq!(open.len(), 1, "{open:?}");
-    assert_eq!(open[0].1, SessionKind::Console(ClientId(2)));
-    assert_eq!(open[0].2.status, TxStatus::InTx);
+    assert_eq!(open[0].kind, SessionKind::Console(ClientId(2)));
+    assert_eq!(open[0].tx.status, TxStatus::InTx);
+    assert!(!open[0].running);
 
     // A statement held open on console 2 (600 s on the paused clock).
     let job = console2.submit(user_exec("SELECT pg_sleep(600)"));
@@ -307,12 +308,21 @@ async fn deactivating_a_non_default_console_breaks_only_it() {
     assert_eq!(default.state().borrow().state, SessionState::Idle);
     ok(&default, "SELECT 1").await;
     assert!(sessions.open_transactions().is_empty());
+    // Fix round 1 (review C1): its rolled-back transaction is told, as the profile's.
+    until("console 2's loss", || {
+        drain(&mut ev).iter().any(|e| {
+            matches!(
+                e,
+                ConnectionEvent::SessionLost { profile: p, lost } if *p == profile.id && lost.open_tx
+            )
+        })
+    })
+    .await;
     let events = drain(&mut ev);
     assert!(
-        !events.iter().any(|e| matches!(
-            e,
-            ConnectionEvent::SessionLost { .. } | ConnectionEvent::IdleDisconnected { .. }
-        )),
+        !events
+            .iter()
+            .any(|e| matches!(e, ConnectionEvent::IdleDisconnected { .. })),
         "{events:?}"
     );
     assert!(f.executed().iter().any(|s| s == "SELECT 1"));
@@ -335,8 +345,9 @@ async fn deactivating_the_default_closes_the_profile_and_publishes_every_transac
     let sessions = m.sessions(profile.id).expect("connected");
     let open = sessions.open_transactions();
     assert_eq!(open.len(), 1);
-    assert_eq!(open[0].2.statements, 1);
+    assert_eq!(open[0].tx.statements, 1);
     let mut ev2 = console2.events();
+    let mut ev = m.events();
 
     let job = default.submit(user_exec("SELECT pg_sleep(600)"));
     until("the statement runs", || {
@@ -365,4 +376,92 @@ async fn deactivating_the_default_closes_the_profile_and_publishes_every_transac
             .any(|e| matches!(e, SessionEvent::TxChanged(tx) if tx.status == TxStatus::Idle)),
         "console 2's rolled-back transaction is published"
     );
+    // Fix round 1 (review I1): and the profile says a transaction was rolled back.
+    assert!(
+        drain(&mut ev).iter().any(|e| matches!(
+            e,
+            ConnectionEvent::SessionLost { profile: p, lost } if *p == profile.id && lost.open_tx
+        )),
+        "the default's Disconnect told console 2's rollback"
+    );
+}
+
+/// Fix round 1 (review C1): only console 2's connection dies (its keep-alive fails; the
+/// default runs a statement meanwhile and pings nothing) while it holds a user transaction:
+/// the session says so and the profile reports it, with reconnects on and the default still
+/// up.
+#[tokio::test(start_paused = true)]
+async fn a_console_that_loses_its_connection_in_a_transaction_tells_it() {
+    let (m, _f) = manager_with(
+        server()
+            .exec(vec![common::slow("SELECT pg_sleep(600)", secs(600))])
+            .pings(vec![Err(io_reset())]),
+        config(),
+    );
+    let profile = idle(0);
+    let mut ev = m.events();
+    connect(&m, &profile).await;
+    let default = default_of(&m, &profile);
+    let console2 = console(&m, &profile, 2).await;
+    let mut ev2 = console2.events();
+    // The default is busy for 600 s, so it sends no keep-alive.
+    let running = default.submit(user_exec("SELECT pg_sleep(600)"));
+    until("the default runs", || {
+        matches!(default.state().borrow().state, SessionState::Busy { .. })
+    })
+    .await;
+    ok(&console2, "BEGIN").await;
+    until("console 2's loss", || {
+        matches!(console2.state().borrow().state, SessionState::Broken(_))
+    })
+    .await;
+    assert_eq!(
+        console2.state().borrow().state,
+        SessionState::Broken(ErrClass::NetworkReset)
+    );
+    assert!(
+        drain(&mut ev2)
+            .iter()
+            .any(|e| matches!(e, SessionEvent::Lost(lost) if lost.open_tx)),
+        "the session says what it lost"
+    );
+    until("the profile's SessionLost", || {
+        drain(&mut ev).iter().any(|e| {
+            matches!(
+                e,
+                ConnectionEvent::SessionLost { profile: p, lost } if *p == profile.id && lost.open_tx
+            )
+        })
+    })
+    .await;
+    // The profile and its default are untouched.
+    assert!(connected(&m, &profile), "{:?}", m.state(profile.id));
+    assert!(matches!(
+        default.state().borrow().state,
+        SessionState::Busy { .. }
+    ));
+    drop(running);
+}
+
+/// Fix round 1 (review I1): a console that runs a user request is listed as one that may be
+/// opening a transaction, before its snapshot shows one.
+#[tokio::test(start_paused = true)]
+async fn open_transactions_lists_a_console_running_a_user_request() {
+    let (m, _f) = manager_with(
+        server().exec(vec![common::slow("UPDATE t", secs(600))]),
+        config(),
+    );
+    let profile = idle(0);
+    connect(&m, &profile).await;
+    let console2 = console(&m, &profile, 2).await;
+    let _running = console2.submit(user_exec("UPDATE t SET a = 1"));
+    until("the UPDATE runs", || {
+        matches!(console2.state().borrow().state, SessionState::Busy { .. })
+    })
+    .await;
+    let open = m.sessions(profile.id).unwrap().open_transactions();
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].kind, SessionKind::Console(ClientId(2)));
+    assert!(open[0].running);
+    assert_eq!(open[0].tx.status, TxStatus::Idle, "not yet in the snapshot");
 }

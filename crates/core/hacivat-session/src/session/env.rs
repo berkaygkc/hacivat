@@ -13,7 +13,8 @@
 //!   server's zone tables). Connect cannot set it, so the session sends it once after connect
 //!   (`EnvPlan::after_connect`).
 //! - **C3:** a read-write session runs the profile's startup script after connect and after
-//!   every reset or reconnect, last in the plan (it may override anything before it). The
+//!   every reset or reconnect, after the time zone and before the schema restore (the user's
+//!   own switch wins over the script's starting context; fix round 1, review I3a). The
 //!   script is split in execution mode ([`startup_statements`]); one uncertain boundary or one
 //!   client command refuses it whole, and nothing of it is sent. A read-only session never
 //!   gets it: the guard's reset after each statement would wipe it, and its replay is trusted
@@ -84,6 +85,11 @@ impl EnvPlan {
     }
 
     // ## m3b-t12-session-carries
+    /// The statements of one of this plan's steps.
+    pub fn step_statements(&self, step: &EnvStep) -> Vec<String> {
+        step_statements(self.kind, step)
+    }
+
     /// What the session sends once after connect, which connect itself did not set: the time
     /// zone (C11) and the startup script (C3), in plan order. The identity, the read-only
     /// setup and the schema came with the connect (Q27).
@@ -129,9 +135,9 @@ fn step_statements(kind: DbmsKind, step: &EnvStep) -> Vec<String> {
 /// 1. the client identity (PostgreSQL; MySQL's connect attribute already carries it);
 /// 2. the read-only setup of `kind`'s guard plan, when `read_only`;
 /// 3. the time zone: none here ([`build_env_plan_with`] takes one);
-/// 4. the last schema, only when one is known (Q27);
-/// 5. ## m3b-t12-session-carries: the profile's startup script, on a read-write session whose
-///    script splits with certainty (C3).
+/// 4. ## m3b-t12-session-carries: the profile's startup script, on a read-write session whose
+///    script splits with certainty (C3);
+/// 5. the last schema, only when one is known (Q27).
 pub fn build_env_plan(
     kind: DbmsKind,
     profile: &Profile,
@@ -167,6 +173,19 @@ pub fn build_env_plan_with(
     {
         steps.push(EnvStep::TimeZone(zone.to_string()));
     }
+    // ## m3b-t12-session-carries (C3): read-write only, and only a script that splits with
+    // certainty (the session refuses the other kind at connect, `StartupScriptRefused`).
+    // Fix round 1 (review I3a): before the schema restore, so the script sets the starting
+    // context and the user's own later switch wins on a reset or reconnect.
+    if !read_only
+        && let Some(Ok(statements)) = profile
+            .startup_script
+            .as_deref()
+            .map(|script| startup_statements(kind, script))
+        && !statements.is_empty()
+    {
+        steps.push(EnvStep::StartupScript(statements));
+    }
     // PostgreSQL restores the whole setting when it is known (M11 ruling), else the schema.
     let path = last_schema.map(|s| &s.search_path_setting);
     if family(kind) == Family::Postgres
@@ -178,17 +197,6 @@ pub fn build_env_plan_with(
         && !switch_schema_sql(kind, name).is_empty()
     {
         steps.push(EnvStep::RestoreSchema(name.clone()));
-    }
-    // ## m3b-t12-session-carries (C3): read-write only, and only a script that splits with
-    // certainty (the session refuses the other kind at connect, `StartupScriptRefused`).
-    if !read_only
-        && let Some(Ok(statements)) = profile
-            .startup_script
-            .as_deref()
-            .map(|script| startup_statements(kind, script))
-        && !statements.is_empty()
-    {
-        steps.push(EnvStep::StartupScript(statements));
     }
     EnvPlan { kind, steps }
 }
@@ -313,4 +321,57 @@ mod tests {
         assert_eq!(tz(DbmsKind::Sqlite).statements(), ["SET work_mem = '64MB'"]);
         assert_eq!(quote_my_literal("a\\'b"), "'a\\\\''b'");
     }
+}
+
+// ## m3b-t12-session-carries (C11; fix round 1, review m7)
+/// The settings' time zone as the sessions of one profile share it. A name that is no IANA
+/// shape, or one a server refused, is never sent again: the first refusal breaks its session
+/// with `config.invalid` and says which setting it was; every later session keeps the
+/// server's zone instead of failing too.
+#[derive(Debug)]
+pub struct SessionZone {
+    name: String,
+    refused: std::sync::atomic::AtomicBool,
+}
+
+impl SessionZone {
+    /// The zone `name`; one that is not an IANA-shaped name is refused at once (logged once).
+    pub fn new(name: &str) -> SessionZone {
+        let valid = valid_zone_name(name);
+        if !valid {
+            tracing::warn!(
+                setting = "ui.time_zone",
+                "the time zone setting is not a time zone name; sessions keep the server's zone"
+            );
+        }
+        SessionZone {
+            name: name.to_string(),
+            refused: std::sync::atomic::AtomicBool::new(!valid),
+        }
+    }
+
+    /// The name to send, unless it was refused.
+    pub fn usable(&self) -> Option<&str> {
+        (!self.refused.load(std::sync::atomic::Ordering::SeqCst)).then_some(self.name.as_str())
+    }
+
+    /// A server refused it: no session sends it again. True the first time (the caller says
+    /// so once).
+    pub fn refuse(&self) -> bool {
+        !self.refused.swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// An IANA-shaped zone name (`Area/Location`), as the settings check it: 1 to 64 characters
+/// of ASCII letters, digits, `/`, `_`, `-`, `+`, no leading, trailing or doubled `/`, no `..`.
+pub fn valid_zone_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+        && !name.contains("//")
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '+'))
 }

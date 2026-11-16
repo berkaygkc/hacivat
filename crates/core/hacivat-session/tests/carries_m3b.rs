@@ -17,14 +17,14 @@ use hacivat_driver::{ExecSummary, TxStatus};
 use hacivat_net::TlsMode;
 use hacivat_proto::{DbmsKind, ErrClass};
 use hacivat_results::FetchPolicy;
-use hacivat_session::ManagerConfig;
 use hacivat_session::pipeline::Interaction;
 use hacivat_session::profile::Profile;
 use hacivat_session::session::env::{build_env_plan_with, startup_statements};
 use hacivat_session::session::{
     CancelOutcome, ClosePolicy, EnvStep, Escalation, Request, SessionEvent, SessionHandle,
-    SessionState, TxMode, TxOwner,
+    SessionState, TxMode, TxOwner, schema_probe_sql,
 };
+use hacivat_session::{ConnectionManager, LiveState, ManagerConfig};
 use hacivat_settings::TimeZonePref;
 
 const SCRIPT: &str = "SET search_path = app; SET work_mem = '64MB';";
@@ -52,6 +52,18 @@ async fn until(what: &str, mut done: impl FnMut() -> bool) {
         );
         tokio::time::sleep(ms(10)).await;
     }
+}
+
+/// What `f` was sent, without the session's schema probes.
+fn sent(f: &FakeDriver) -> Vec<String> {
+    let probes = [
+        schema_probe_sql(DbmsKind::Postgres),
+        schema_probe_sql(DbmsKind::MySql),
+    ];
+    f.executed()
+        .into_iter()
+        .filter(|s| !probes.contains(&s.as_str()))
+        .collect()
 }
 
 /// How many times `sql` was sent.
@@ -123,19 +135,28 @@ async fn startup_script_runs_after_connect_and_reset_on_read_write() {
         session_with_profile(pg_resettable(1), profile_script(DbmsKind::Postgres, SCRIPT)).await;
     assert!(f.executed().contains(&"SET search_path = app".into()));
     assert_eq!(count(&f, "SET work_mem = '64MB'"), 1);
-    // In the script's order, nothing else before it on a fresh session (Q27).
+    // In the script's order, nothing else before it on a fresh session (Q27); then the
+    // schema is probed again, so the session shows what the script set (review I3b).
     assert_eq!(
         f.executed(),
-        ["SET search_path = app", "SET work_mem = '64MB'"]
+        [
+            "SET search_path = app",
+            "SET work_mem = '64MB'",
+            schema_probe_sql(DbmsKind::Postgres)
+        ]
     );
     reset(&h).await;
     assert_eq!(count(&f, "SET work_mem = '64MB'"), 2);
     assert_eq!(count(&f, "SET search_path = app"), 2);
-    // Last in the plan, after the reset's own steps.
-    let executed = f.executed();
+    // Last of the reset's statements (no schema is known to restore), then the probe.
+    let executed = sent(&f);
     assert_eq!(
         executed.last().map(String::as_str),
         Some("SET work_mem = '64MB'")
+    );
+    assert_eq!(
+        f.executed().last().map(String::as_str),
+        Some(schema_probe_sql(DbmsKind::Postgres))
     );
     assert_eq!(snap(&h).state, SessionState::Idle);
 }
@@ -329,6 +350,7 @@ async fn mysql_side_connection_stays_warm_for_30s() {
     );
     // The next long statement uses it again: no new connect, and its 30 s start over.
     run(&h, "SELECT SLEEP(3)").await.unwrap();
+    let last_use = tokio::time::Instant::now();
     assert_eq!(side.connect_calls(), 1);
     tokio::time::sleep(secs(29)).await;
     assert_eq!(side.open_connections(), 1);
@@ -336,6 +358,12 @@ async fn mysql_side_connection_stays_warm_for_30s() {
         side.open_connections() == 0
     })
     .await;
+    // Review m4: 30 s after its last use, within one 10 ms step of the wait.
+    let closed_after = last_use.elapsed();
+    assert!(
+        closed_after >= secs(30) && closed_after <= secs(30) + ms(20),
+        "{closed_after:?}"
+    );
     assert_eq!(side.connect_calls(), 1);
     assert_eq!(snap(&h).state, SessionState::Idle);
 }
@@ -359,11 +387,13 @@ async fn a_cancel_kills_on_the_warm_side_connection() {
         matches!(snap(&h).state, SessionState::Busy { .. })
     })
     .await;
-    let _outcome = h.cancel(job.seq);
+    let outcome = h.cancel(job.seq);
     // The kill went out on the warm connection: no second connect. (This side fake is not the
-    // session's server, so the statement itself runs on to its end.)
+    // session's server, so the statement itself runs on: the caller hears `StillRunning`
+    // after its 2 s wait.)
     until("the kill", || side.executed() == ["KILL QUERY 1000"]).await;
     assert_eq!(side.connect_calls(), 1);
+    assert_eq!(outcome.await.unwrap(), CancelOutcome::StillRunning);
     let _ = job.reply.await.unwrap();
 }
 
@@ -663,4 +693,353 @@ fn the_script_splits_into_its_statements() {
     // A client command refuses it whole.
     assert!(startup_statements(DbmsKind::MySql, "DELIMITER //\nSET @a = 1//").is_err());
     assert!(startup_statements(DbmsKind::Postgres, "\\set x 1\nSET a = 1;").is_err());
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## Fix round 1 (review I2, I3, m2, m3, m7)
+
+/// A manager with reconnects, over `fake`, with `zone` as the settings' time zone.
+fn reconnecting(fake: FakeDriver, zone: TimeZonePref) -> (Arc<ConnectionManager>, Arc<FakeDriver>) {
+    manager_with(
+        fake,
+        ManagerConfig {
+            reconnect: true,
+            time_zone: zone,
+            ..ManagerConfig::default()
+        },
+    )
+}
+
+fn default_of(m: &ConnectionManager, profile: &Profile) -> SessionHandle {
+    m.sessions(profile.id)
+        .and_then(|s| s.default_session())
+        .expect("the default session")
+}
+
+/// Review I2: a script that waits holds the session `Busy` (request 0), a request waits its
+/// turn, and a close ends it at once.
+#[tokio::test(start_paused = true)]
+async fn a_waiting_script_holds_the_session_busy_and_a_close_ends_it() {
+    let side = Arc::new(fake_pg());
+    let (h, f) = spawn_over(
+        fake_pg().exec(vec![slow("SELECT pg_advisory_lock", secs(600))]),
+        profile_script(DbmsKind::Postgres, "SELECT pg_advisory_lock(1)"),
+        false,
+        side,
+    )
+    .await;
+    until("the script runs", || {
+        matches!(snap(&h).state, SessionState::Busy { req: 0, .. })
+    })
+    .await;
+    // A request waits behind it; a cancel finds nothing of its own running.
+    let queued = h.submit(exec("SELECT 1"));
+    assert_eq!(
+        h.cancel(queued.seq).await.unwrap(),
+        CancelOutcome::AlreadyFinished
+    );
+    let started = tokio::time::Instant::now();
+    h.close(ClosePolicy::RollBack).await.unwrap();
+    assert!(started.elapsed() < secs(1), "the close is served at once");
+    assert_eq!(snap(&h).state, SessionState::Disconnected);
+    assert!(queued.reply.await.unwrap().is_err());
+    assert!(!f.executed().iter().any(|s| s == "SELECT 1"));
+}
+
+/// Review I2: a script still running at the profile's connect timeout fails closed.
+#[tokio::test(start_paused = true)]
+async fn a_script_past_the_connect_timeout_breaks_the_session() {
+    let side = Arc::new(fake_pg());
+    let profile = Profile {
+        connect_timeout_s: 5,
+        ..profile_script(DbmsKind::Postgres, "SELECT pg_advisory_lock(1)")
+    };
+    let (h, _f) = spawn_over(
+        fake_pg().exec(vec![slow("SELECT pg_advisory_lock", secs(600))]),
+        profile,
+        false,
+        side,
+    )
+    .await;
+    let started = tokio::time::Instant::now();
+    until("the session ends", || {
+        matches!(snap(&h).state, SessionState::Broken(_))
+    })
+    .await;
+    assert_eq!(
+        snap(&h).state,
+        SessionState::Broken(ErrClass::ConfigInvalid)
+    );
+    let took = started.elapsed();
+    assert!(took >= secs(4) && took < secs(6), "{took:?}");
+}
+
+/// Review I3a: the script sets the starting context; the user's own schema is restored after
+/// it.
+#[test]
+fn the_script_runs_before_the_schema_restore() {
+    let plan = build_env_plan_with(
+        DbmsKind::Postgres,
+        &profile_script(DbmsKind::Postgres, SCRIPT),
+        false,
+        Some(&schema("sales")),
+        Some("Europe/Istanbul"),
+    );
+    assert_eq!(
+        plan.statements(),
+        [
+            "SET application_name = 'Hacivat'",
+            "SET TIME ZONE 'Europe/Istanbul'",
+            "SET search_path = app",
+            "SET work_mem = '64MB'",
+            "SET search_path TO \"sales\"",
+        ]
+    );
+}
+
+/// Review I3b: after the script the schema is probed, and the session shows it.
+#[tokio::test(start_paused = true)]
+async fn the_session_shows_the_schema_the_script_set() {
+    let probe = rows(
+        "SELECT current_database()",
+        &[&["hv_test", "app", "app", "hv_test", "app"]],
+    );
+    let (h, _f) = session_with_profile(
+        fake_pg().exec(vec![probe]),
+        profile_script(DbmsKind::Postgres, "SET search_path = app"),
+    )
+    .await;
+    assert_eq!(
+        snap(&h).schema.and_then(|s| s.schema).as_deref(),
+        Some("app")
+    );
+    assert_eq!(snap(&h).state, SessionState::Idle);
+}
+
+/// Review I3c: a script that leaves a transaction open is refused.
+#[tokio::test(start_paused = true)]
+async fn a_script_that_leaves_a_transaction_open_is_refused() {
+    let side = Arc::new(fake_pg());
+    let (h, _f) = spawn_over(
+        fake_pg().tracks_transactions(),
+        profile_script(DbmsKind::Postgres, "BEGIN; SET LOCAL work_mem = '64MB'"),
+        false,
+        side,
+    )
+    .await;
+    until("the session ends", || {
+        !matches!(
+            snap(&h).state,
+            SessionState::Idle | SessionState::Busy { .. }
+        )
+    })
+    .await;
+    assert_eq!(
+        snap(&h).state,
+        SessionState::Broken(ErrClass::ConfigInvalid)
+    );
+    assert_eq!(snap(&h).tx.status, TxStatus::Idle);
+}
+
+/// Review I3d and m2: a Manual MySQL session sends `autocommit = 0` after the script, on
+/// connect and on a reconnect alike.
+#[tokio::test(start_paused = true)]
+async fn manual_mysql_turns_autocommit_off_after_the_script_on_connect_and_reconnect() {
+    let (m, f) = reconnecting(fake_mysql(), TimeZonePref::System);
+    let profile = Arc::new(Profile {
+        tx_mode: Some(TxMode::Manual),
+        ..profile_script(DbmsKind::MySql, "SET autocommit = 1; SET @app = 1")
+    });
+    m.connect(profile.clone(), None, Interaction::Headless);
+    wait_connected(&m, profile.id).await;
+    let once = ["SET autocommit = 1", "SET @app = 1", "SET autocommit = 0"];
+    until("the connect's steps", || sent(&f) == once).await;
+    let default = default_of(&m, &profile);
+    assert_eq!(snap(&default).tx.mode, TxMode::Manual);
+    f.kill_connections();
+    let _ = default.submit(Request::Ping);
+    until("the reconnect's replay", || sent(&f).len() == 6).await;
+    assert_eq!(sent(&f)[3..], once);
+    until("connected again", || {
+        matches!(m.state(profile.id), LiveState::Connected(_))
+    })
+    .await;
+    assert_eq!(snap(&default_of(&m, &profile)).tx.mode, TxMode::Manual);
+}
+
+/// Review m2: a reconnect replays the time zone and the script (before the schema restore).
+#[tokio::test(start_paused = true)]
+async fn a_reconnect_replays_the_time_zone_and_the_script() {
+    let (m, f) = reconnecting(fake_pg(), TimeZonePref::Iana("Europe/Istanbul".into()));
+    let profile = Arc::new(profile_script(DbmsKind::Postgres, SCRIPT));
+    m.connect(profile.clone(), None, Interaction::Headless);
+    wait_connected(&m, profile.id).await;
+    until("the connect's steps", || {
+        count(&f, "SET work_mem = '64MB'") == 1
+    })
+    .await;
+    f.kill_connections();
+    let _ = default_of(&m, &profile).submit(Request::Ping);
+    until("the replay", || count(&f, "SET work_mem = '64MB'") == 2).await;
+    assert_eq!(count(&f, "SET TIME ZONE 'Europe/Istanbul'"), 2);
+    let replayed = sent(&f);
+    let tz = replayed
+        .iter()
+        .rposition(|s| s == "SET TIME ZONE 'Europe/Istanbul'")
+        .unwrap();
+    assert_eq!(
+        replayed[tz..tz + 3],
+        [
+            "SET TIME ZONE 'Europe/Istanbul'",
+            "SET search_path = app",
+            "SET work_mem = '64MB'"
+        ]
+    );
+}
+
+/// Review m2: a script that fails on a reconnect ends the profile with `config.invalid`, as at
+/// connect, and is not retried as a lost connection.
+#[tokio::test(start_paused = true)]
+async fn a_script_failing_on_reconnect_is_config_invalid() {
+    let fake = fake_pg().exec(vec![
+        tx("SET app.mode", TxStatus::Idle),
+        tx_err("SET app.mode", "22023", TxStatus::Idle),
+    ]);
+    let (m, f) = reconnecting(fake, TimeZonePref::System);
+    let profile = Arc::new(profile_script(DbmsKind::Postgres, "SET app.mode = 'x'"));
+    m.connect(profile.clone(), None, Interaction::Headless);
+    wait_connected(&m, profile.id).await;
+    until("the connect's script", || {
+        count(&f, "SET app.mode = 'x'") == 1
+    })
+    .await;
+    let connects = f.connect_calls();
+    f.kill_connections();
+    let _ = default_of(&m, &profile).submit(Request::Ping);
+    until("the profile ends", || {
+        matches!(m.state(profile.id), LiveState::Lost { .. })
+    })
+    .await;
+    assert_eq!(
+        m.state(profile.id),
+        LiveState::Lost {
+            class: ErrClass::ConfigInvalid
+        }
+    );
+    assert_eq!(
+        f.connect_calls(),
+        connects + 1,
+        "one reconnect, no backoff loop"
+    );
+}
+
+/// Review m7: a zone the server refuses breaks one session, says which setting it was, and is
+/// never sent again; a name that is no zone is never sent at all.
+#[tokio::test(start_paused = true)]
+async fn an_unknown_time_zone_is_refused_once() {
+    const ZONE: &str = "SET TIME ZONE 'Mars/Olympus'";
+    let logs = capture_tracing(|| async {
+        let fake = fake_pg().exec(vec![tx_err("SET TIME ZONE", "22023", TxStatus::Idle)]);
+        let (m, f) = reconnecting(fake, TimeZonePref::Iana("Mars/Olympus".into()));
+        let profile = p();
+        m.connect(profile.clone(), None, Interaction::Headless);
+        until("the refusal", || {
+            matches!(m.state(profile.id), LiveState::Lost { .. })
+        })
+        .await;
+        assert_eq!(
+            m.state(profile.id),
+            LiveState::Lost {
+                class: ErrClass::ConfigInvalid
+            }
+        );
+        // Connecting again works, without the zone.
+        m.connect(profile.clone(), None, Interaction::Headless);
+        wait_connected(&m, profile.id).await;
+        let default = default_of(&m, &profile);
+        run(&default, "SELECT 1").await.unwrap();
+        assert_eq!(count(&f, ZONE), 1);
+    })
+    .await;
+    assert_eq!(
+        logs.matches("the server refused the time zone setting")
+            .count(),
+        1,
+        "{logs}"
+    );
+    assert!(logs.contains("ui.time_zone"));
+
+    let (m, f) = reconnecting(fake_pg(), TimeZonePref::Iana("../etc/passwd".into()));
+    connect_and_wait(&m).await;
+    let default = default_of(&m, &p());
+    run(&default, "SELECT 1").await.unwrap();
+    assert!(f.executed().iter().all(|s| !s.contains("TIME ZONE")));
+}
+
+/// Review m3: only a use of the side connection moves its clock; short requests do not keep
+/// it open.
+#[tokio::test(start_paused = true)]
+async fn a_short_request_does_not_keep_the_warm_connection_open() {
+    let side = Arc::new(fake_mysql());
+    let (h, _f) = session_with_side(
+        fake_mysql().exec(vec![slow("SELECT SLEEP(2)", secs(2))]),
+        &side,
+    )
+    .await;
+    run(&h, "SELECT SLEEP(2)").await.unwrap();
+    let last_use = tokio::time::Instant::now();
+    until("the warm connection", || side.open_connections() == 1).await;
+    for _ in 0..5 {
+        tokio::time::sleep(secs(5)).await;
+        run(&h, "SELECT 1").await.unwrap();
+    }
+    until("the warm connection closes", || {
+        side.open_connections() == 0
+    })
+    .await;
+    let closed_after = last_use.elapsed();
+    assert!(
+        closed_after >= secs(30) && closed_after <= secs(30) + ms(20),
+        "{closed_after:?}"
+    );
+}
+
+/// Review m3: a warm connect that fails is tried once more.
+#[tokio::test(start_paused = true)]
+async fn a_failed_warm_connect_is_tried_once_more() {
+    let side = Arc::new(fake_mysql().script(vec![Err(refused()), Ok(())]));
+    let (h, _f) = session_with_side(
+        fake_mysql().exec(vec![slow("SELECT SLEEP(2)", secs(2))]),
+        &side,
+    )
+    .await;
+    run(&h, "SELECT SLEEP(2)").await.unwrap();
+    until("the second connect", || side.open_connections() == 1).await;
+    assert_eq!(side.connect_calls(), 2);
+}
+
+/// Review m3: a cursor release that drains in time kills nothing and leaves the warm
+/// connection as it was.
+#[tokio::test(start_paused = true)]
+async fn a_release_that_drains_in_time_leaves_the_warm_connection() {
+    let side = Arc::new(fake_mysql());
+    let (h, _f) = session_with_side(
+        fake_mysql().queries(vec![select("SELECT * FROM small", 12_000)]),
+        &side,
+    )
+    .await;
+    let o = Recorder::new();
+    run_spec(
+        &h,
+        spec_with(&o, &[("SELECT * FROM small", true)], FetchPolicy::default()),
+    )
+    .await
+    .unwrap();
+    assert!(snap(&h).cursor.is_some());
+    until("the warm connection", || side.open_connections() == 1).await;
+    run(&h, "SELECT 2").await.unwrap();
+    assert!(snap(&h).cursor.is_none());
+    assert!(side.executed().is_empty(), "{:?}", side.executed());
+    assert_eq!(side.open_connections(), 1, "still warm");
+    assert_eq!(side.connect_calls(), 1);
 }

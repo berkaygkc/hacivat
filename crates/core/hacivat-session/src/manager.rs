@@ -359,6 +359,10 @@ struct Shared {
     /// One lock per SSH chain generation: the dependents of a dead chain reconnect one at a
     /// time, so the first brings the chain back and the others share it (B20).
     transport_locks: Mutex<HashMap<TransportGeneration, Arc<tokio::sync::Mutex<()>>>>,
+    // ## m3b-t12-session-carries (C11; fix round 1, review m7)
+    /// The settings' time zone, shared by every profile's sessions: one a server refused is
+    /// sent by none, across reconnects too.
+    zone: Option<Arc<crate::session::env::SessionZone>>,
 }
 
 impl Shared {
@@ -486,7 +490,7 @@ impl Shared {
         // ## m3b-t01c-core-seams (P-M3b-11): the read-only guard's classifier, likewise.
         sessions.set_classifier(self.config.classifier.clone());
         // ## m3b-t12-session-carries (C11): the settings' time zone, likewise.
-        sessions.set_time_zone(self.config.zone());
+        sessions.set_time_zone(self.zone.clone());
         // ## m2b-t22-live (T17 carry): the gaps of the profile's other sessions (pooled
         // read-only ones) are relayed as the default session's are (Q35).
         let weak = Arc::downgrade(self);
@@ -496,6 +500,15 @@ impl Shared {
                     profile: id,
                     reason,
                 });
+            }
+        }));
+        // ## m3b-t12-session-carries (fix round 1, review C1): a console session that loses
+        // its connection while it holds, or may be opening, a user transaction is told as
+        // the default session's loss is.
+        let weak = Arc::downgrade(self);
+        sessions.relay_losses(Arc::new(move |lost| {
+            if let Some(shared) = weak.upgrade() {
+                shared.emit(ConnectionEvent::SessionLost { profile: id, lost });
             }
         }));
         let stop = CancellationToken::new();
@@ -869,6 +882,10 @@ async fn monitor(
                         return;
                     }
                     SessionState::Broken(ErrClass::Cancelled) => {
+                        // ## m3b-t12-session-carries (fix round 1, review I1): the default's
+                        // Disconnect closes the profile (R-M3-73); `end_live` is
+                        // `end_live_with(.., None)`, so another session's user transaction,
+                        // held or maybe opening at that moment, is told as `SessionLost`.
                         shared.end_live(id, seq, LiveState::Disconnected);
                         return;
                     }
@@ -1163,6 +1180,10 @@ impl Drop for ConnectionManager {
 
 impl ConnectionManager {
     pub fn new(rt: Handle, deps: Arc<ConnectDeps>, config: ManagerConfig) -> Arc<Self> {
+        // ## m3b-t12-session-carries
+        let zone = config
+            .zone()
+            .map(|z| Arc::new(crate::session::env::SessionZone::new(&z)));
         let shared = Arc::new(Shared {
             rt,
             deps,
@@ -1178,6 +1199,7 @@ impl ConnectionManager {
             events: broadcast::Sender::new(64),
             tunnel_watch: CancellationToken::new(),
             transport_locks: Mutex::new(HashMap::new()),
+            zone,
         });
         // ## m2b-t17-liveness (B20)
         watch_tunnels(&shared);

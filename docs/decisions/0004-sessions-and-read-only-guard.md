@@ -2161,14 +2161,23 @@ fenced `// ## m3b-t12-session-carries`.
 - **After connect (C3, C11).** Connect sets the identity and the read-only settings (Q27); the
   session now sends, once, what connect cannot: PostgreSQL's time zone and, on a read-write
   session, the profile's startup script (`EnvPlan::after_connect`). Both are in the environment
-  plan, so a reset and a reconnect send them again; the script comes last, after the restored
-  schema, so it may override anything before it.
+  plan, so a reset and a reconnect send them again. The script comes after the time zone and
+  before the schema restore (fix round 1, I3a): it sets the starting context, and the user's own
+  schema switch wins on a reset or reconnect.
 - **Startup scripts (C3).** Split in execution mode with the engine's client flavor
   (`env::startup_statements`); an uncertain boundary or a client command refuses the whole
   script and nothing of it is sent. A refused or failing script breaks the session with
-  `config.invalid` (a lost connection keeps its own class): a session never runs without the
-  environment its profile asks for, and the failure is reported, never skipped. The script's
-  text is never logged. A read-only session (production included while it is read-only) never
+  `config.invalid` (a lost connection keeps its own class), at connect, on a reset and on a
+  reconnect alike (fix round 1, m2): a session never runs without the environment its profile
+  asks for, and the failure is reported, never skipped. The script's text is never logged. A
+  script that leaves a transaction open is refused the same way (I3c), and after it the
+  schema is probed again and published (I3b).
+- **After connect, bounded and served (fix round 1, I2).** The steps after connect run as a
+  reconnect's replay does: under the profile's connect timeout (past it: `config.invalid`, or
+  `network.timeout` when only Manual MySQL's `autocommit = 0` was sent), serving commands
+  (a close ends it at once, a cancel finds nothing running, requests wait their turn), with the
+  session `Busy` (request 0) while a time zone or a script runs. A Manual MySQL session sends
+  `SET autocommit = 0` after the script, at connect, on a reconnect and after a reset (I3d). A read-only session (production included while it is read-only) never
   runs it: the guard's reset after each statement would wipe it, and its replay is trusted SQL,
   which a user's script is not. It logs one notice, `exec-startup-script-skipped-read-only`.
 - **MySQL autocommit (C6).** After a request, a Manual MySQL session whose server reports
@@ -2184,9 +2193,19 @@ fenced `// ## m3b-t12-session-carries`.
 - **Disconnect scope (R-M3-73).** `Escalation::Deactivate` on the default session closes the
   profile (`end_live`, every session closed with a rollback); on any other console it breaks
   only that session. Before either, `SessionManager::open_transactions` lists every user
-  transaction open on a usable session (its kind and `TxState`), so the UI names each one and
-  says it will be rolled back. Nothing is rolled back silently: a closing rollback of a user
-  transaction is logged, and every closed or broken session publishes its end.
+  transaction open on a usable session, and (fix round 1, I1) every session running a user
+  request, which may be opening one the snapshot does not show yet (`OpenTransaction::running`),
+  so the UI names each one and says it will be rolled back (T23 carry). After it, the default's
+  Disconnect reports another session's transaction, held or maybe opening at that moment, as
+  `ConnectionEvent::SessionLost { open_tx }` (`end_live` is `end_live_with(.., None)`).
+- **Lost user transactions (fix round 1, C1).** A session that cannot reconnect (every console,
+  and an M2a default) and ends with a user transaction open, maybe opening (a user request in
+  flight) or under the user's own MySQL `autocommit = 0` emits `SessionEvent::Lost { open_tx:
+  true }`; its `SessionManager` relays it as `ConnectionEvent::SessionLost` (as it relays
+  enforcement gaps). So a console whose own keep-alive finds its connection dead, or that the
+  user disconnects, never ends a transaction silently. A closing rollback of a user transaction
+  is logged, and every closed or broken session publishes its end. A broken session's
+  supervisor stops ticking (m6).
 - **Close and break (ledger 331).** A session that closes, breaks or ends a recovery on a close
   publishes its final `TxState` (`Idle`, owner `None`, no statements, mode and isolation kept)
   and `cursor: None`, and emits `TxChanged` when the transaction state moved. A request that
@@ -2195,17 +2214,29 @@ fenced `// ## m3b-t12-session-carries`.
   `cancel::WarmSide`: from a statement's 500 ms mark (`SIDE_PREWARM`, for typed requests too)
   and while a cursor is suspended it holds one side connection; a kill takes it after a ping
   (a dead one is replaced by a fresh connect); 30 s after its last use (`SIDE_KEEP`) it closes,
-  and at once when the session closes, breaks or loses its connection.
+  and at once when the session closes, breaks or loses its connection. Fix round 1 (m3): the
+  last use is the end of the statement or cursor that held it; requests that did not need it
+  never move that clock; a failed connect is tried once more; a cursor release asks for it only
+  when it really kills (a release that drains in time leaves it warm).
 - **Time zone (C11).** `ManagerConfig::time_zone` carries the settings' `ui.time_zone`; an IANA
   zone becomes `EnvStep::TimeZone` on PostgreSQL only (never MySQL or MariaDB, R5); `System`
   sends nothing. The app's boot sets it (Task 22 or a later boot touch; `boot.rs` is not this
-  task's).
+  task's). Fix round 1 (m7): the zone is one `SessionZone` per `ConnectionManager`; a name that
+  is no IANA shape is never sent, and one a server refuses breaks that one session with
+  `config.invalid`, is logged once naming `ui.time_zone`, and is sent by no session again (a
+  runtime change of the setting needs a setter: T22).
 - **Pooler fallback (C11, ledger 294).** `hacivat-driver-pg`'s `connect_conn` (named
   exception): a read-only connect refused for its startup `options` (`08P01` "unsupported
   startup parameter: options", a proxy's `0A000`) whose options are Hacivat's own only connects
   once more without them and sends `SET default_transaction_read_only = on; SET
   idle_in_transaction_session_timeout = '30s'` before the connection is handed out; a failure
   fails the connect. With the profile's own options, or any other refusal, it is not retried.
+  Fix round 1 (m1): a startup value survives the role probe's reset and the guard's `RESET ALL`
+  / `DISCARD ALL`; these `SET`s do not. Read-only still holds (the guard's `BEGIN … READ ONLY`
+  and its replayed `session_setup`), but the idle bound is missing between a guarded reset and
+  its replay, and under PgBouncer transaction pooling a session `SET` does not stick across
+  transactions at all. Accepted: the fallback only makes such a pooler usable; the guard's
+  per-statement transaction keeps each statement read-only.
 - **Notices (the T13 carry).** After a query's `Done` the session adds
   `RawConn::take_notices_dropped` to the unit's dropped count, so the log line at its end has
   the driver's drops too.

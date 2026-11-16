@@ -122,7 +122,9 @@ use crate::session::cancel::{
 };
 // ## m3b-t12-session-carries
 use crate::session::cancel::WarmSide;
-use crate::session::env::{StartupScriptRefused, build_env_plan_with, startup_statements};
+use crate::session::env::{
+    EnvStep, SessionZone, StartupScriptRefused, build_env_plan_with, startup_statements,
+};
 use crate::session::liveness::LivenessRole;
 // ## m3a-t18-session-run
 use crate::session::cursor::{OpenCursor, StopSignal};
@@ -167,6 +169,11 @@ pub trait SideConnector: Send + Sync {
     fn rest(&self) {}
     /// The session ends or lost its connection: close the warm connection now.
     fn drop_warm(&self) {}
+    /// Whether this connector keeps one warm: a kill that may not be needed then takes it
+    /// only when it kills (`cursor::SideSlot`, review m3), instead of opening one ahead.
+    fn keeps_warm(&self) -> bool {
+        false
+    }
 }
 
 /// Reconnects a lost session (Task 17); `attempt` counts from 1.
@@ -258,7 +265,7 @@ pub(crate) fn spawn_supervised(
     liveness: Option<(LivenessPolicy, LivenessRole)>,
     activity: Option<Arc<ProfileActivity>>,
     classifier: Option<Arc<dyn StatementClassifier>>,
-    time_zone: Option<String>,
+    time_zone: Option<Arc<SessionZone>>,
 ) -> SessionHandle {
     let read_only = spec.read_only || profile.read_only;
     let kind = live.raw().kind();
@@ -457,8 +464,9 @@ pub(crate) struct Core {
     /// with it, so `TxChanged` is not sent twice for one state).
     published_tx: Option<TxState>,
     // ## m3b-t12-session-carries
-    /// The settings' time zone (C11; the plan sends it on PostgreSQL only).
-    time_zone: Option<String>,
+    /// The settings' time zone (C11; the plan sends it on PostgreSQL only), shared by the
+    /// profile's sessions: one a server refused is sent by none (review m7).
+    time_zone: Option<Arc<SessionZone>>,
 }
 
 fn not_connected() -> ExecError {
@@ -548,7 +556,7 @@ impl Core {
             &self.profile,
             self.read_only,
             self.schema.as_ref(),
-            self.time_zone.as_deref(),
+            self.time_zone.as_deref().and_then(SessionZone::usable),
         )
     }
 
@@ -945,10 +953,12 @@ impl Core {
 
     /// Replays the environment after a reconnect (B19): the plan (identity, read-only setup,
     /// the last schema), then MySQL's `autocommit = 0` for a Manual session.
+    /// ## m3b-t12-session-carries (fix round 1, review I3d, m2): through `send_env`, so the
+    /// script fails with `config.invalid` and is checked as at connect; `autocommit = 0` comes
+    /// after the script, as at connect.
     async fn replay(&mut self) -> Result<(), ExecError> {
-        for statement in self.env_plan().statements() {
-            self.control(&statement).await?;
-        }
+        let plan = self.env_plan();
+        self.send_env(&plan, |_| true).await?;
         if !self.read_only && self.tx.mode == TxMode::Manual && family(self.kind) == Family::MySql {
             self.control("SET autocommit = 0").await?;
         }
@@ -957,9 +967,10 @@ impl Core {
 
     // ## m3b-t12-session-carries
 
-    /// What connect did not set (C3, C11; the module docs): `Err` with the class that breaks
-    /// the session. The script's text is never logged.
-    async fn after_connect(&mut self, session: SessionId) -> Result<(), ErrClass> {
+    /// What connect did not set (C3, C11; the module docs), then a Manual MySQL session's
+    /// `autocommit = 0` (after the script, as on a reconnect; fix round 1, review I3d): `Err`
+    /// with the class that breaks the session. The script's text is never logged.
+    async fn connect_steps(&mut self, session: SessionId) -> Result<(), ErrClass> {
         if let Some(script) = self.profile.startup_script.as_deref() {
             if self.read_only {
                 tracing::info!(
@@ -970,23 +981,85 @@ impl Core {
             } else if startup_statements(self.kind, script) == Err(StartupScriptRefused) {
                 tracing::warn!(
                     session = session.0,
-                    "the profile's startup script has an uncertain statement boundary; none of \
-                     it was sent and the session is closed"
+                    "the profile's startup script has an uncertain statement boundary or a \
+                     client command; none of it was sent and the session is closed"
                 );
                 return Err(ErrClass::ConfigInvalid);
             }
         }
-        for statement in self.env_plan().after_connect() {
-            if let Err(e) = self.control(&statement).await {
-                let class = self.broken.unwrap_or(ErrClass::ConfigInvalid);
-                tracing::warn!(
-                    session = session.0,
-                    kind = ?e.kind,
-                    class = class.id(),
-                    "the session environment failed after connect; the session is closed"
-                );
-                return Err(class);
+        let plan = self.env_plan();
+        let class = |core: &Core| {
+            core.broken
+                .or(core.last_class)
+                .unwrap_or(ErrClass::Internal)
+        };
+        if self
+            .send_env(&plan, |step| {
+                matches!(step, EnvStep::TimeZone(_) | EnvStep::StartupScript(_))
+            })
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                session = session.0,
+                class = class(self).id(),
+                "the session environment failed after connect; the session is closed"
+            );
+            return Err(class(self));
+        }
+        if !self.read_only && self.tx.mode == TxMode::Manual && family(self.kind) == Family::MySql {
+            self.control("SET autocommit = 0")
+                .await
+                .map_err(|_| class(self))?;
+        }
+        self.follow_autocommit(session);
+        Ok(())
+    }
+
+    /// Sends the steps of `plan` that `want` picks, in plan order (fix round 1, review I3).
+    /// A time zone or startup-script step that fails sets `last_class` to `config.invalid`
+    /// (a lost connection keeps its own class); a time zone the server refused is not sent by
+    /// any session again, said once (review m7). After a script: a transaction it left open
+    /// refuses the session (`config.invalid`, review I3c), and the schema is probed again, so
+    /// the session shows where the server is (review I3a, I3b).
+    pub(crate) async fn send_env(
+        &mut self,
+        plan: &EnvPlan,
+        want: impl Fn(&EnvStep) -> bool,
+    ) -> Result<(), ExecError> {
+        let mut script_ran = false;
+        for step in plan.steps.iter().filter(|step| want(step)) {
+            let config = matches!(step, EnvStep::TimeZone(_) | EnvStep::StartupScript(_));
+            for statement in plan.step_statements(step) {
+                if let Err(e) = self.control(&statement).await {
+                    if config && self.broken.is_none() {
+                        self.last_class = Some(ErrClass::ConfigInvalid);
+                        if matches!(step, EnvStep::TimeZone(_))
+                            && self.time_zone.as_ref().is_some_and(|z| z.refuse())
+                        {
+                            tracing::warn!(
+                                setting = "ui.time_zone",
+                                "the server refused the time zone setting; sessions keep the \
+                                 server's zone from now on"
+                            );
+                        } else if matches!(step, EnvStep::StartupScript(_)) {
+                            tracing::warn!(kind = ?e.kind, "the profile's startup script failed");
+                        }
+                    }
+                    return Err(e);
+                }
             }
+            script_ran |= matches!(step, EnvStep::StartupScript(_));
+        }
+        if script_ran {
+            if self.conn()?.tx_status() != TxStatus::Idle {
+                tracing::warn!(
+                    "the profile's startup script left a transaction open; the session is closed"
+                );
+                self.last_class = Some(ErrClass::ConfigInvalid);
+                return Err(ExecError::of(ExecErrorKind::Internal));
+            }
+            self.reprobe().await;
         }
         Ok(())
     }
@@ -1478,9 +1551,112 @@ impl Ctl {
     }
 }
 
+// ## m3b-t12-session-carries (fix round 1, review I2)
+/// The steps after connect, as they ended: in time or not, then panicked or not.
+type StepsEnded =
+    Result<Result<Result<(), ErrClass>, Box<dyn Any + Send>>, tokio::time::error::Elapsed>;
+
+/// How the steps after connect ended.
+enum Started {
+    Done(StepsEnded),
+    Closed(CloseReply),
+    Abandoned,
+}
+
+/// Sends what connect did not set (`Core::connect_steps`) like a reconnect's replay: bounded
+/// by the profile's connect timeout, serving commands meanwhile (a close ends it at once; a
+/// cancel finds nothing running; requests wait their turn), and `Busy` (request 0, which no
+/// request has) while a time zone or a script runs. False when the actor is done (closed, or
+/// every handle gone). A timeout fails closed: `config.invalid` when the time zone or a script
+/// ran, else `network.timeout`.
+async fn connect_steps(core: &mut Core, ctl: &mut Ctl) -> bool {
+    let has_env = !core.env_plan().after_connect().is_empty();
+    let manual_mysql =
+        !core.read_only && core.tx.mode == TxMode::Manual && family(core.kind) == Family::MySql;
+    if core.live.is_none() || !(has_env || manual_mysql || core.profile.startup_script.is_some()) {
+        return true;
+    }
+    let before = (core.tx.clone(), core.schema.clone());
+    if has_env {
+        let since = Instant::now();
+        ctl.publish(|s| s.state = SessionState::Busy { req: 0, since });
+    }
+    let limit = std::time::Duration::from_secs(u64::from(core.profile.connect_timeout_s.max(1)));
+    let id = ctl.id;
+    let started = {
+        let work = tokio::time::timeout(
+            limit,
+            AssertUnwindSafe(core.connect_steps(id)).catch_unwind(),
+        );
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                biased;
+                done = &mut work => break Started::Done(done),
+                cmd = next_command(&mut ctl.held, &mut ctl.commands) => match cmd {
+                    None => break Started::Abandoned,
+                    Some(Command::Close { reply, .. }) => break Started::Closed(reply),
+                    Some(other) => ctl.idle_command(other),
+                },
+            }
+        }
+    };
+    let class = match started {
+        Started::Abandoned => {
+            core.close().await;
+            return false;
+        }
+        Started::Closed(reply) => {
+            // Whatever ran is cut off with the connection.
+            close_recovering(core, ctl, reply).await;
+            return false;
+        }
+        Started::Done(Ok(Ok(Ok(())))) => None,
+        Started::Done(Ok(Ok(Err(class)))) => Some(class),
+        Started::Done(Ok(Err(_))) => {
+            tracing::error!(session = ctl.id.0, "a driver call panicked after connect");
+            Some(ErrClass::Internal)
+        }
+        Started::Done(Err(_)) => {
+            tracing::warn!(
+                session = ctl.id.0,
+                "the session environment did not finish within the connect timeout; the \
+                 session is closed"
+            );
+            Some(if has_env {
+                ErrClass::ConfigInvalid
+            } else {
+                ErrClass::NetworkTimeout
+            })
+        }
+    };
+    if let Some(class) = class {
+        break_now(core, ctl, class).await;
+        return true;
+    }
+    // Review I3b: what the script did is what the session shows.
+    if has_env {
+        let (tx, schema) = (core.tx.clone(), core.schema.clone());
+        ctl.publish(|s| {
+            s.state = SessionState::Idle;
+            s.tx = tx.clone();
+            s.schema = schema.clone();
+        });
+        if tx != before.0 {
+            ctl.emit(SessionEvent::TxChanged(tx));
+        }
+        if schema != before.1 {
+            ctl.emit(SessionEvent::SchemaChanged(schema.unwrap_or_default()));
+        }
+    }
+    true
+}
+
 /// Breaks the session now: closes the connection, answers the queued requests
 /// `NotConnected` and publishes `Broken(class)`.
 async fn break_now(core: &mut Core, ctl: &mut Ctl, class: ErrClass) {
+    // ## m3b-t12-session-carries (fix round 1, review m6): a broken session ticks no more.
+    ctl.liveness = None;
     core.broken = Some(class);
     core.close().await;
     ctl.drain(&ExecErrorKind::NotConnected);
@@ -1491,36 +1667,10 @@ async fn break_now(core: &mut Core, ctl: &mut Ctl, class: ErrClass) {
 async fn run(mut core: Core, mut ctl: Ctl) {
     // Mode enforcement, not the environment plan (Q27 clarification): a Manual MySQL session
     // must not autocommit. A driver panic here breaks the session like any other (review M5).
-    if !core.read_only && core.tx.mode == TxMode::Manual && family(core.kind) == Family::MySql {
-        let set = AssertUnwindSafe(core.control("SET autocommit = 0"))
-            .catch_unwind()
-            .await;
-        let class = match set {
-            Ok(Ok(())) => None,
-            Ok(Err(_)) => Some(
-                core.broken
-                    .or(core.last_class)
-                    .unwrap_or(ErrClass::Internal),
-            ),
-            Err(_) => Some(ErrClass::Internal),
-        };
-        if let Some(class) = class {
-            break_now(&mut core, &mut ctl, class).await;
-        }
-    }
-    // ## m3b-t12-session-carries: the time zone and the startup script (C11, C3).
-    if core.live.is_some() && core.broken.is_none() {
-        let sent = AssertUnwindSafe(core.after_connect(ctl.id))
-            .catch_unwind()
-            .await;
-        let class = match sent {
-            Ok(Ok(())) => None,
-            Ok(Err(class)) => Some(class),
-            Err(_) => Some(ErrClass::Internal),
-        };
-        if let Some(class) = class {
-            break_now(&mut core, &mut ctl, class).await;
-        }
+    // ## m3b-t12-session-carries: with the time zone and the startup script before it (C11,
+    // C3), under the connect timeout and serving commands (fix round 1, review I2).
+    if !connect_steps(&mut core, &mut ctl).await {
+        return;
     }
     loop {
         match ctl.queue.pop_front() {
@@ -1804,7 +1954,27 @@ fn begin_recovery(
     class: ErrClass,
     tx_unknown: bool,
 ) -> Option<BoxFuture<'static, Result<LiveConnection, ConnectError>>> {
-    let reconnector = ctl.hooks.reconnect.clone()?;
+    // ## m3b-t12-session-carries (fix round 1, review C1): a session that cannot reconnect (a
+    // console, an M2a default) and held a user transaction, or may have been opening one, or
+    // ran under the user's own MySQL `autocommit = 0`, says so: its transaction is gone, and
+    // never silently (its `SessionManager` relays it as `ConnectionEvent::SessionLost`).
+    let Some(reconnector) = ctl.hooks.reconnect.clone() else {
+        if core.tx.user_open() || tx_unknown || core.users_autocommit_off() {
+            let before = core.tx.status;
+            core.note_loss(before);
+            let lost = core.lost.take().unwrap_or_default();
+            tracing::debug!(
+                session = ctl.id.0,
+                class = class.id(),
+                "the session ended with a user transaction open or possibly open"
+            );
+            ctl.emit(SessionEvent::Lost(LostState {
+                open_tx: true,
+                ..lost
+            }));
+        }
+        return None;
+    };
     let closing = ctl.queue.iter().any(|j| matches!(j, Job::Close(..)));
     if !is_recovery_case(class) || closing {
         return None;

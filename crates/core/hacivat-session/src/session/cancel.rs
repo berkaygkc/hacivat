@@ -33,8 +33,10 @@
 //! it may be needed: from the moment a statement has run for [`SIDE_PREWARM`], and while a
 //! cursor is suspended. A kill takes it (it was checked with a ping first; a dead one is
 //! replaced by a fresh connect), so a cancel never waits for a connect it could have had
-//! ready. Once nothing needs it, it closes [`SIDE_KEEP`] after its last use; it closes at once
-//! when the session closes, breaks or loses its connection.
+//! ready; a cursor's release takes it only when it really kills. Once nothing needs it, it
+//! closes [`SIDE_KEEP`] after its last use (the end of the last statement or cursor that held
+//! it; a request that did not need it does not count); it closes at once when the session
+//! closes, breaks or loses its connection. A connect that fails is tried once more.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -130,38 +132,65 @@ pub(crate) fn terminate_sql(kind: DbmsKind, id: u64) -> Option<String> {
     }
 }
 
-// ## m3b-t12-session-carries (C10)
-
-type Opening = JoinHandle<Result<LiveConnection, ConnectError>>;
+// ## m3b-t12-session-carries (C10; fix round 1, review m3)
 
 /// A MySQL session's side connections, one of them kept warm (the module docs). It wraps the
 /// session's own [`SideConnector`]; every side connection of the session goes through it.
+///
+/// - `warm()` (a statement past its 500 ms mark, a suspended cursor) holds one and marks a
+///   use; `rest()` ends the hold, and the use ends with it. A request that never needed the
+///   connection does not move its clock.
+/// - The expiry closes it [`SIDE_KEEP`] after its last use, unless it is held again first.
+/// - A connect that fails is tried once more; a slot whose connects failed is empty, and the
+///   next `warm()` tries again.
 pub(crate) struct WarmSide {
     inner: Arc<dyn SideConnector>,
     slot: Arc<Mutex<WarmSlot>>,
 }
 
-#[derive(Default)]
+/// The warm connection's state.
+enum Warm {
+    None,
+    /// Its connect runs; it puts the connection in the slot when it lands.
+    Opening(JoinHandle<()>),
+    /// A kill waits for the connect in flight (it holds the task).
+    Awaited,
+    Ready(Box<LiveConnection>),
+}
+
 struct WarmSlot {
-    /// The warm connection, or its connect in flight.
-    conn: Option<Opening>,
-    /// Bumped by every use: an expiry armed before it does nothing.
-    generation: u64,
+    warm: Warm,
+    /// The last use: the end of a hold, or a `warm()`.
+    last_use: tokio::time::Instant,
+    /// A statement or a suspended cursor may need it now: it never expires meanwhile.
+    holding: bool,
+    /// An expiry task is waiting.
+    armed: bool,
 }
 
 fn slot_lock(slot: &Mutex<WarmSlot>) -> MutexGuard<'_, WarmSlot> {
     slot.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Closes the connection `task` opens (or opened), on the current runtime. Without one (a drop
-/// outside any runtime) the task is left to end with its runtime.
-fn close_opening(task: Opening) {
-    if let Ok(rt) = tokio::runtime::Handle::try_current() {
-        rt.spawn(async move {
-            if let Ok(Ok(live)) = task.await {
-                live.close().await;
-            }
-        });
+/// Closes `live` on the current runtime. Without one (a drop outside any runtime) its guards
+/// run as it drops.
+fn close_later(live: LiveConnection) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(rt) => {
+            rt.spawn(live.close());
+        }
+        Err(_) => drop(live),
+    }
+}
+
+impl Warm {
+    /// Ends whatever is held: a connect in flight is aborted, a connection closed.
+    fn discard(self) {
+        match self {
+            Warm::None | Warm::Awaited => {}
+            Warm::Opening(task) => task.abort(),
+            Warm::Ready(live) => close_later(*live),
+        }
     }
 }
 
@@ -169,24 +198,113 @@ impl WarmSide {
     pub(crate) fn new(inner: Arc<dyn SideConnector>) -> WarmSide {
         WarmSide {
             inner,
-            slot: Arc::default(),
+            slot: Arc::new(Mutex::new(WarmSlot {
+                warm: Warm::None,
+                last_use: tokio::time::Instant::now(),
+                holding: false,
+                armed: false,
+            })),
         }
+    }
+
+    /// Opens one into the slot: tried twice, then the slot is left empty.
+    fn open_into_slot(&self) -> JoinHandle<()> {
+        let inner = self.inner.clone();
+        let slot = Arc::downgrade(&self.slot);
+        tokio::spawn(async move {
+            let mut opened = inner.open_side().await;
+            if opened.is_err() {
+                opened = inner.open_side().await;
+            }
+            let Some(slot) = slot.upgrade() else {
+                if let Ok(live) = opened {
+                    live.close().await;
+                }
+                return;
+            };
+            let unwanted = {
+                let mut s = slot_lock(&slot);
+                if matches!(s.warm, Warm::Opening(_) | Warm::Awaited) {
+                    s.warm = match opened {
+                        Ok(live) => Warm::Ready(Box::new(live)),
+                        Err(_) => Warm::None,
+                    };
+                    None
+                } else {
+                    // Dropped meanwhile: nobody waits for this one.
+                    opened.ok()
+                }
+            };
+            if let Some(live) = unwanted {
+                live.close().await;
+            }
+        })
+    }
+
+    /// Arms the expiry unless one waits already.
+    fn arm(&self, s: &mut WarmSlot) {
+        if s.armed {
+            return;
+        }
+        s.armed = true;
+        let slot = Arc::downgrade(&self.slot);
+        tokio::spawn(async move {
+            loop {
+                let at = match slot.upgrade() {
+                    Some(slot) => slot_lock(&slot).last_use + SIDE_KEEP,
+                    None => return,
+                };
+                tokio::time::sleep_until(at).await;
+                let Some(slot) = slot.upgrade() else {
+                    return;
+                };
+                let mut s = slot_lock(&slot);
+                if s.holding || matches!(s.warm, Warm::None) {
+                    s.armed = false;
+                    return;
+                }
+                if tokio::time::Instant::now() >= s.last_use + SIDE_KEEP {
+                    s.armed = false;
+                    std::mem::replace(&mut s.warm, Warm::None).discard();
+                    return;
+                }
+            }
+        });
     }
 }
 
 impl SideConnector for WarmSide {
     /// The warm connection when it still answers a ping, else a fresh one.
     fn open_side(&self) -> BoxFuture<'static, Result<LiveConnection, ConnectError>> {
-        let warm = {
-            let mut slot = slot_lock(&self.slot);
-            slot.generation = slot.generation.wrapping_add(1);
-            slot.conn.take()
+        // Another kill waiting for the connect in flight keeps it.
+        let taken = {
+            let mut s = slot_lock(&self.slot);
+            if matches!(s.warm, Warm::Awaited) {
+                Warm::None
+            } else {
+                std::mem::replace(&mut s.warm, Warm::None)
+            }
         };
+        let slot = self.slot.clone();
         let inner = self.inner.clone();
         Box::pin(async move {
-            if let Some(task) = warm
-                && let Ok(Ok(mut live)) = task.await
-            {
+            let ready = match taken {
+                Warm::Ready(live) => Some(*live),
+                Warm::Opening(task) => {
+                    // Its connect puts the connection in the slot when it lands.
+                    slot_lock(&slot).warm = Warm::Awaited;
+                    let _ = task.await;
+                    match std::mem::replace(&mut slot_lock(&slot).warm, Warm::None) {
+                        Warm::Ready(live) => Some(*live),
+                        other => {
+                            other.discard();
+                            None
+                        }
+                    }
+                }
+                Warm::None | Warm::Awaited => None,
+            };
+            if let Some(mut live) = ready {
                 let checked = tokio::time::timeout(WARM_CHECK, live.raw().ping()).await;
                 if matches!(checked, Ok(Ok(_))) {
                     return Ok(live);
@@ -197,59 +315,38 @@ impl SideConnector for WarmSide {
         })
     }
 
+    fn keeps_warm(&self) -> bool {
+        true
+    }
+
     fn warm(&self) {
-        let mut slot = slot_lock(&self.slot);
-        // A use: no expiry armed before it closes it.
-        slot.generation = slot.generation.wrapping_add(1);
-        if slot.conn.is_none() {
-            slot.conn = Some(tokio::spawn(self.inner.open_side()));
+        let mut s = slot_lock(&self.slot);
+        s.holding = true;
+        s.last_use = tokio::time::Instant::now();
+        if matches!(s.warm, Warm::None) {
+            s.warm = Warm::Opening(self.open_into_slot());
         }
     }
 
     fn rest(&self) {
-        let generation = {
-            let mut slot = slot_lock(&self.slot);
-            if slot.conn.is_none() {
-                return;
-            }
-            slot.generation = slot.generation.wrapping_add(1);
-            slot.generation
-        };
-        let slot = Arc::downgrade(&self.slot);
-        tokio::spawn(async move {
-            tokio::time::sleep(SIDE_KEEP).await;
-            let Some(slot) = slot.upgrade() else {
-                return;
-            };
-            let expired = {
-                let mut slot = slot_lock(&slot);
-                if slot.generation != generation {
-                    return;
-                }
-                slot.conn.take()
-            };
-            if let Some(task) = expired {
-                close_opening(task);
-            }
-        });
+        let mut s = slot_lock(&self.slot);
+        if std::mem::take(&mut s.holding) {
+            s.last_use = tokio::time::Instant::now();
+        }
+        if !matches!(s.warm, Warm::None) {
+            self.arm(&mut s);
+        }
     }
 
     fn drop_warm(&self) {
-        let task = {
-            let mut slot = slot_lock(&self.slot);
-            slot.generation = slot.generation.wrapping_add(1);
-            slot.conn.take()
-        };
-        if let Some(task) = task {
-            close_opening(task);
-        }
+        let mut s = slot_lock(&self.slot);
+        s.holding = false;
+        std::mem::replace(&mut s.warm, Warm::None).discard();
     }
 }
 
 impl Drop for WarmSide {
     fn drop(&mut self) {
-        if let Some(task) = slot_lock(&self.slot).conn.take() {
-            close_opening(task);
-        }
+        std::mem::replace(&mut slot_lock(&self.slot).warm, Warm::None).discard();
     }
 }

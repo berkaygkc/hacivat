@@ -210,11 +210,6 @@ async fn losing_the_default_never_rolls_back_another_sessions_transaction_silent
     let mut ev = m.events();
     connect(&m, &profile).await;
     let console2 = own_session(&m, &profile, 2).await;
-    // ## m3b-t12-session-carries (named exception): console 2 now keeps its own keep-alive
-    // (R-M3-73) and this fake fails every connection's first ping; its `BEGIN` comes 5 s
-    // after the connect, so its ping is due after the default's and the default is lost
-    // first, as this test means.
-    tokio::time::sleep(secs(5)).await;
     ok(&console2, "BEGIN").await;
     until("the loss", || {
         matches!(m.state(profile.id), LiveState::Lost { .. })
@@ -241,6 +236,58 @@ async fn losing_the_default_never_rolls_back_another_sessions_transaction_silent
             console2.state().borrow().state,
             SessionState::Idle | SessionState::Busy { .. }
         )
+    })
+    .await;
+    // ## m3b-t12-session-carries (named exception; fix round 1, review C1): console 2 now
+    // keeps its own keep-alive (R-M3-73), and this fake fails every connection's first ping,
+    // so console 2's connection may die first. Then the server rolled its transaction back
+    // (no ROLLBACK could be sent) and console 2 told it itself; either way the app heard it
+    // (`SessionLost { open_tx }` above). The order the original test meant is the case below.
+    let lost_itself = matches!(
+        console2.state().borrow().state,
+        SessionState::Broken(ErrClass::NetworkReset)
+    );
+    assert_eq!(
+        rollbacks(&f),
+        usize::from(!lost_itself),
+        "{:?}",
+        f.executed()
+    );
+}
+
+// ## m3b-t12-session-carries (fix round 1, review C1)
+/// The original order of the test above: the default's keep-alive fails first (console 2's
+/// own is due 5 s later), so closing the profile rolls console 2's transaction back, and the
+/// manager says so.
+#[tokio::test(start_paused = true)]
+async fn losing_the_default_first_rolls_back_another_sessions_transaction_and_says_so() {
+    let (m, f) = manager_with(
+        server().pings(vec![Err(io_reset())]),
+        ManagerConfig::default(),
+    );
+    let profile = Arc::new(pg_profile(TlsMode::Disable));
+    let mut ev = m.events();
+    connect(&m, &profile).await;
+    let console2 = own_session(&m, &profile, 2).await;
+    tokio::time::sleep(secs(5)).await;
+    ok(&console2, "BEGIN").await;
+    until("the SessionLost event", || {
+        drain(&mut ev).into_iter().any(|e| {
+            matches!(
+                e,
+                ConnectionEvent::SessionLost { profile: p, lost } if p == profile.id && lost.open_tx
+            )
+        })
+    })
+    .await;
+    assert_eq!(
+        m.state(profile.id),
+        LiveState::Lost {
+            class: ErrClass::NetworkReset
+        }
+    );
+    until("console 2's close", || {
+        console2.state().borrow().state == SessionState::Disconnected
     })
     .await;
     assert_eq!(rollbacks(&f), 1, "{:?}", f.executed());

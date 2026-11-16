@@ -338,6 +338,13 @@ impl ProfileActivity {
         self.lock().held.remove(&id);
     }
 
+    // ## m3b-t12-session-carries (fix round 1, review I1)
+    /// Whether session `id` holds the profile now (a user transaction, or a user request
+    /// that runs).
+    pub(crate) fn holds(&self, id: SessionId) -> bool {
+        self.lock().held.contains(&id)
+    }
+
     /// Whether a session other than `me` holds the profile, and the profile's last activity.
     pub(crate) fn others(&self, me: SessionId) -> (bool, Option<Instant>) {
         let inner = self.lock();

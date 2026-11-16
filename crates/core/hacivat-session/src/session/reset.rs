@@ -71,9 +71,11 @@ impl Core {
                 return Err(ExecError::of(ExecErrorKind::Internal));
             }
         }
-        for statement in self.env_plan().statements() {
-            self.control(&statement).await?;
-        }
+        // ## m3b-t12-session-carries (named exception; fix round 1, review I3): the plan
+        // through `send_env`: a failing script is `config.invalid`, one that leaves a
+        // transaction open is refused, and the schema is probed again after it.
+        let plan = self.env_plan();
+        self.send_env(&plan, |_| true).await?;
         if self.initial_mode == TxMode::Manual && family(self.kind) == Family::MySql {
             self.control("SET autocommit = 0").await?;
         }
