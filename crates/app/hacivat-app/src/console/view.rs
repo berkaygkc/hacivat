@@ -68,7 +68,7 @@ use crate::console::status::EditorSegment;
 use crate::console::toolbar::{self, RunUx, ToolbarActions, ToolbarModel};
 use crate::l10n_global::tr;
 use crate::results::ConsoleResults;
-use crate::shell::{AppState, Workspace, register_focus_context};
+use crate::shell::{AppState, TabKind, Workspace, register_focus_context};
 
 // ---- the hosts ------------------------------------------------------------------------------
 
@@ -139,11 +139,134 @@ pub(crate) fn install(cx: &mut App) {
     cx.set_global(SizeText(Rc::new(|bytes, cx: &App| size_text(cx, bytes))));
     cx.observe_global::<ConnectionsModel>(enforce_read_only)
         .detach();
+    // ## m3a-f5-demo (DEMO-1)
+    cx.observe_global::<ConnectionsModel>(follow_explorer_connects)
+        .detach();
     cx.on_app_quit(|cx| {
         save_all_now(cx);
         async {}
     })
     .detach();
+}
+
+// ## m3a-f5-demo (DEMO-1): a connect from the Explorer ends at a console of that profile.
+
+/// Profiles the user connected from the Explorer (double-click, Connect) whose connect has not
+/// ended yet.
+#[derive(Default)]
+struct ExplorerConnects(HashSet<ProfileId>);
+
+impl Global for ExplorerConnects {}
+
+/// The user asked the Explorer to connect `profile` (`connection.toggle_connect`): once it is
+/// connected, a console of that profile gets the focus ([`console_for_connect`]).
+pub(crate) fn note_explorer_connect(cx: &mut App, profile: ProfileId) {
+    cx.default_global::<ExplorerConnects>().0.insert(profile);
+}
+
+/// The user disconnected or cancelled `profile`: its pending Explorer connect is dropped.
+pub(crate) fn forget_explorer_connect(cx: &mut App, profile: ProfileId) {
+    if cx.has_global::<ExplorerConnects>() {
+        cx.global_mut::<ExplorerConnects>().0.remove(&profile);
+    }
+}
+
+/// The connections changed: an Explorer connect that connected is followed by its console
+/// (after every host has seen the change, so an unbound focused console binds first); one that
+/// failed is dropped.
+fn follow_explorer_connects(cx: &mut App) {
+    let Some(wanted) = cx
+        .try_global::<ExplorerConnects>()
+        .filter(|w| !w.0.is_empty())
+        .map(|w| w.0.iter().copied().collect::<Vec<_>>())
+    else {
+        return;
+    };
+    let Some(m) = cx.try_global::<ConnectionsModel>() else {
+        return;
+    };
+    let states: Vec<(ProfileId, LiveState)> =
+        wanted.into_iter().map(|p| (p, m.live(p))).collect();
+    for (profile, state) in states {
+        match state {
+            LiveState::Connected(_) => {
+                forget_explorer_connect(cx, profile);
+                cx.defer(move |cx| console_for_connect(profile, cx));
+            }
+            LiveState::Failed(_) | LiveState::Lost { .. } => forget_explorer_connect(cx, profile),
+            LiveState::Connecting(_)
+            | LiveState::Reconnecting { .. }
+            | LiveState::Disconnected => {}
+        }
+    }
+}
+
+/// `profile` connected from the Explorer (the ruling on PO demo finding 1): the focused pane's
+/// console stays when it is bound to `profile` (an unbound one has just bound to it, R-M3-37);
+/// else a console of `profile` that is open is activated and focused; else a new console bound
+/// to it opens, active and focused.
+fn console_for_connect(profile: ProfileId, cx: &mut App) {
+    let Some(window) = cx
+        .active_window()
+        .into_iter()
+        .chain(cx.windows())
+        .find_map(|w| w.downcast::<Workspace>())
+    else {
+        return;
+    };
+    let _ = window.update(cx, |ws, window, cx| {
+        let active = ws.active_tab();
+        let bound: Vec<TabId> = cx
+            .try_global::<Hosts>()
+            .map(|h| {
+                let mut tabs: Vec<TabId> = h
+                    .by_tab
+                    .iter()
+                    .filter(|(_, e)| {
+                        e.binding.is_some_and(|(p, _)| p == profile) && e.host.upgrade().is_some()
+                    })
+                    .map(|(tab, _)| *tab)
+                    .collect();
+                tabs.sort_by_key(|t| t.0);
+                tabs
+            })
+            .unwrap_or_default();
+        if active.is_some_and(|a| bound.contains(&a)) {
+            return;
+        }
+        // An unbound focused console that did not bind on its own (it never saw the profile
+        // disconnected) binds now: R-M3-37's rule comes first.
+        if let Some(tab) = active
+            && matches!(ws.tab_kind(tab), Some(TabKind::Console { profile: None, .. }))
+            && let Some(host) = host_of(cx, tab)
+        {
+            // After this update: the binding updates the workspace.
+            window.defer(cx, move |window, cx| {
+                host.update(cx, |h, cx| {
+                    if matches!(h.mode, Mode::Unbound) {
+                        h.bind_fresh(profile, window, cx);
+                    }
+                });
+            });
+            return;
+        }
+        if let Some(tab) = bound.into_iter().find(|t| ws.tab_kind(*t).is_some()) {
+            ws.focus_tab(tab, cx);
+            let editor = Consoles::by_tab(cx, tab)
+                .and_then(|id| Consoles::get(cx, id))
+                .and_then(|s| s.editor.clone());
+            if let Some(editor) = editor {
+                let focus = editor.focus_handle(cx);
+                window.defer(cx, move |window, cx| window.focus(&focus, cx));
+            }
+            return;
+        }
+        // A new console starts empty and takes the focus (as `console_binding`'s).
+        if let Some(hosts) = cx.try_global::<Hosts>() {
+            hosts.fresh.borrow_mut().push((profile, None));
+        }
+        ws.open_console_tab(Some(profile), window, cx);
+    });
 }
 
 /// `bytes` in megabytes, in the regional format ("18,4 MB" in Turkey).

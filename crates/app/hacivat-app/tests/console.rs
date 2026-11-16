@@ -1452,3 +1452,91 @@ fn toolbar_fixtures_show_running_waiting_and_the_lock(cx: &mut TestAppContext) {
     }
     stop_core_runtime_test(cx);
 }
+
+// ## m3a-f5-demo (DEMO-1): connecting a profile from the Explorer (double-click or Connect, both
+// `connection.toggle_connect`) opens a console bound to it and focuses it when none is bound to
+// it; an existing one is focused instead; an unbound focused console still binds first.
+
+/// The Explorer's connect of `name`: select its row, then what a double-click (or the menu's
+/// Connect) runs.
+fn explorer_connect(vcx: &VisualTestContext, name: &str) {
+    let id = profile_id(vcx, name);
+    vcx.cx
+        .update(|cx| ConnectionsModel::select(cx, Some(id)));
+    vcx.run_until_parked();
+    assert!(run(vcx, "connection.toggle_connect"), "toggle_connect ran");
+}
+
+/// The profile the active tab's console is bound to.
+fn active_binding(vcx: &VisualTestContext) -> Option<ProfileId> {
+    match with_ws(vcx, |ws, _, _| ws.active_tab_kind()) {
+        Some(TabKind::Console { profile, .. }) => profile,
+        _ => None,
+    }
+}
+
+fn console_tabs(vcx: &VisualTestContext) -> usize {
+    tab_titles(vcx).len()
+}
+
+#[gpui::test]
+fn an_explorer_connect_opens_and_focuses_a_console_for_that_profile(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    add_profile(vcx, test_profile("orders-stg", Some(EnvTag::Staging), "10.0.0.8"));
+    activate(vcx);
+    let (dev, stg) = (profile_id(vcx, "orders-dev"), profile_id(vcx, "orders-stg"));
+
+    // The unbound focused console binds first (R-M3-37): no new tab.
+    explorer_connect(vcx, "orders-dev");
+    wait_until(vcx, "orders-dev's console", |vcx| {
+        active_binding(vcx) == Some(dev) && active_console(vcx).is_some()
+    });
+    assert_eq!(tab_titles(vcx), vec!["orders-dev".to_string()]);
+
+    // The focused console is bound to another profile: a new console opens for orders-stg,
+    // active and focused.
+    explorer_connect(vcx, "orders-stg");
+    wait_until(vcx, "orders-stg's console", |vcx| {
+        active_binding(vcx) == Some(stg) && active_console(vcx).is_some()
+    });
+    assert_eq!(
+        tab_titles(vcx),
+        vec!["orders-dev".to_string(), "orders-stg".to_string()]
+    );
+    let stg_console = active_console(vcx).expect("the console");
+    let stg_editor = editor_of(vcx, stg_console);
+    wait_until(vcx, "its editor to take the focus", |vcx| {
+        editor_focused(vcx, &stg_editor)
+    });
+
+    // Back on orders-dev; orders-stg disconnects and connects again from the Explorer: its
+    // console exists, so it is focused, and nothing new opens.
+    vcx.cx.update(|cx| ConnectionsModel::disconnect(cx, stg));
+    wait_until(vcx, "orders-stg to disconnect", |vcx| {
+        matches!(live(vcx, "orders-stg"), LiveState::Disconnected)
+    });
+    with_ws(vcx, |ws, window, cx| ws.activate_prev_tab(window, cx));
+    vcx.run_until_parked();
+    assert_eq!(active_binding(vcx), Some(dev));
+    explorer_connect(vcx, "orders-stg");
+    wait_until(vcx, "orders-stg's console to be focused", |vcx| {
+        active_binding(vcx) == Some(stg) && editor_focused(vcx, &stg_editor)
+    });
+    assert_eq!(console_tabs(vcx), 2);
+    stop_core_runtime_test(cx);
+}
+
+/// A connect that does not come from the Explorer (the connection dialog, a test helper) keeps
+/// R-M3-37 as it was: a bound focused console opens nothing.
+#[gpui::test]
+fn another_connect_opens_no_console(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    add_profile(vcx, test_profile("orders-stg", Some(EnvTag::Staging), "10.0.0.8"));
+    activate(vcx);
+    connect_and_wait(vcx, "orders-dev");
+    wait_active_console(vcx);
+    connect_and_wait(vcx, "orders-stg");
+    vcx.run_until_parked();
+    assert_eq!(tab_titles(vcx), vec!["orders-dev".to_string()]);
+    stop_core_runtime_test(cx);
+}
