@@ -47,3 +47,11 @@ pub use report::{
 pub mod pragmas;
 
 pub use pragmas::sqlite_read_pragmas;
+
+// ## m3b-t10-interim (named exception in T1a's file): the interim backend's harness entry, for
+// Task 10's tests and read corpus until Task 14's `classify` runs the backend. It takes and
+// gives this crate's types only (R-M3-54).
+#[doc(hidden)]
+pub use backend::interim::classify_interim;
+// Fix round 1 (I2): the SAFE-07 constant-predicate rule every backend shares.
+pub use destructive::{CmpOp, Predicate, always_true};

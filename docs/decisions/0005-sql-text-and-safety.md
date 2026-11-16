@@ -1176,3 +1176,207 @@ that gave out nothing (O(n) overall). A statement still open past `STREAM_STATEM
   leave the rest of the file inside a string take the whole pass); typing in the middle of a
   100,000-character line p50 5 ms, p95 6–8 ms (no line starts there: the relex and the window cover the line); in a
   1 MiB one-line script p50 47 ms (the whole text, as in M3a). All of it runs on the worker.
+
+## m3b-t10 — interim backend
+
+Task 10 fills the interim classifier backend for MySQL, MariaDB and SQLite (R-M3-54):
+`sql-safety/src/backend/{interim,prescan}.rs`, the statement tables
+`data/{mysql,sqlite}/statements.toml` (MySQL's serves MariaDB), `data/mysql/known_gaps.toml`, the
+SQLite read-pragma list (`pragmas.rs`) and the read corpora `sql-testkit/corpus/read/*.sql`.
+
+**Pipeline per statement range.** Our lexer reads the range first; a lexing error is
+`LexError`. Each executable comment is then read at every **version threshold**: with `k`
+distinct gate versions there are `k + 1` readings, an unversioned `/*!` is always active, and
+an `AmbiguousCommentEnd` comment adds its running reading (the end a server that runs the body
+sees). Readings are built by blanking bytes with spaces, so every offset stays the source's.
+More than `Limits.max_exec_comment_views` (16) readings is `TooComplex`. On a MySQL connection a
+MariaDB `/*M!` comment is read as a view too: MySQL skips it, but a MariaDB server behind a MySQL
+profile runs it, and the most dangerous reading wins. Each reading must:
+
+1. lex cleanly again;
+2. **agree** with `sqlparser`'s tokenizer: every byte is code, quoted text or trivia for both,
+   and every quoted token has the same extent. Spans are mapped from `sqlparser`'s 1-based line
+   and character column through `LineIndex`. Code tokens may split differently (`@v` is one
+   token for us and for `sqlparser`, `x'0A'` keeps its `x` as code); a string, identifier or
+   comment boundary may not differ. A tokenizer error where our lexer read the text is also a
+   disagreement. Either is `ParserDisagreement`;
+3. hold the same number of statements for both (else `ParserDisagreement`; more than one is
+   `MultiStatement`);
+4. parse in strict mode: `MySqlDialect` or `SQLiteDialect`, no trailing commas, recursion
+   limit 50 (`TooComplex` at the limit). A failure is `ParseError`, except for the narrow
+   P-M3b-35 grammars below.
+
+The walk is `sqlparser`'s derived `Visit`. It maps every statement, top-level or nested,
+through the table and adds what the tree shows:
+
+- locking clauses and `SELECT … INTO` (variables are `SESSION_STATE`, a table is DDL);
+- data-modifying CTEs and `EXPLAIN ANALYZE`;
+- every function call, in expressions and in table functions, through Task 3's `lookup_fn`
+  (deny list, then the reviewed builtins with their probe floors), then the profile's
+  allowlist, then the catalog (volatile is `VOLATILE_FN`, S-04);
+- touched objects;
+- the SAFE-07 destructive patterns: no `WHERE`, an always-true `WHERE`, `LIMIT` without
+  `ORDER BY`, a join without a condition, `DROP`, `TRUNCATE`, and `DROP COLUMN`, a dropped
+  constraint or a type change in `ALTER`. The inner statement of a plain `EXPLAIN` adds its
+  effects but no destructive pattern (it does not run).
+
+The lexer pre-scan inventory, on each reading:
+
+- a denied `word(` or `"quoted"(` call, by bare name, in any schema or quoting;
+- `INTO OUTFILE|DUMPFILE|@var`, `FOR UPDATE|SHARE`, `LOCK IN SHARE MODE`, `:=`, `HANDLER`,
+  `XA`, `LOAD DATA|XML` and `RETURNING`;
+- the P-M3b-8 MariaDB forms: `NEXT|PREVIOUS VALUE FOR`, `NEXTVAL(`, `LASTVAL(`, `SETVAL(`,
+  `seq.nextval`, `FOR SYSTEM_TIME`, `BEGIN NOT ATOMIC`;
+- SQLite's `ATTACH`, `DETACH`, `VACUUM [INTO]`, `REINDEX` and `CREATE VIRTUAL TABLE`;
+- client commands (`DELIMITER`, `SOURCE`, `SYSTEM`, `\…`, sqlite3's `.commands`) and
+  unreadable tokens;
+- `SET_VAR` and `MAX_EXECUTION_TIME` hints.
+
+The readings are then **unioned**: effects, flags, reasons, destructive patterns and targets,
+with the kind of the most critical reading by `gate_class`. Any doubt code (`reason_rule`
+`DenyAlways` or the `unknown` group) adds `UNKNOWN` and makes the class `Unknown`. The class
+field never carries an Unknown outcome on its own (the T4 producer contract).
+
+**Grammars of our own.**
+- **`SET` (MySQL, MariaDB).** One `SetTarget` and one `SessionState` reason per assignment,
+  with the name as written: quotes removed, the `@@session.`/`@@global.` scope stripped, a user
+  variable kept as `@v`. The value is kept as written. Targets are de-duplicated by the name's
+  byte range, so the two lists always match. When two readings disagree on a value, the value
+  is `None`. `GLOBAL`, `PERSIST`, `PERSIST_ONLY`, `@@global.` and `@@persist.` add `ADMIN`.
+  `sql_mode`, `character_set_client`, `character_set_connection` and `collation_connection`
+  set `LEX_MODE_CHANGE`. The special forms carry no target:
+  - `NAMES` and `CHARACTER SET` set `LEX_MODE_CHANGE`;
+  - `PASSWORD` and `DEFAULT ROLE` are `PrivilegeGrant`;
+  - `ROLE` is `PrivilegeChange`, the only role switch;
+  - `TRANSACTION` is `TXN_CONTROL`;
+  - `RESOURCE GROUP` is `ADMIN`.
+
+  A `SET` the grammar cannot read is `SESSION_STATE` with an argument-less `SessionState`, never
+  harmless.
+- **`PRAGMA` (SQLite).** It is a read only without an argument for a `sqlite_read_pragmas()`
+  name (the guard's 20), or with one name argument for the six introspection pragmas. Every `=`
+  form and every other pragma is `ADMIN` (`AdminControl`). `sqlparser` is not asked: it rejects
+  `PRAGMA table_info(t)`.
+- **Narrow reads (P-M3b-35).** These apply only where `sqlparser` rejects the form:
+  - `SHOW <words> [LIKE … | WHERE …]` with no call, no subquery, no variable and no `:=`;
+  - `DESCRIBE <qualified name> [<column or pattern>]`;
+  - `EXPLAIN|DESCRIBE [FORMAT = w] <statement>`. Its inner statement is blanked out of the
+    reading and classified on its own (depth ≤ 2), and `ANALYZE` never takes this path.
+
+**Choices.**
+- **Sleep has no bit.** A denied `Sleep` call adds only `FnDenylisted`, so `SELECT 1 /*!99999 ,
+  SLEEP(100) */` is `Read` with `EXEC_COMMENT`, as `alg/13` test 22 says. The gate is `Unknown`
+  and read-only denies it. Every other deny group maps to its bits: file I/O is `EXTERNAL_IO`,
+  advisory locks `ADVISORY_LOCK`, sequences `SEQUENCE` and dynamic SQL `UNKNOWN`.
+- **`EXPLAIN` without `ANALYZE` carries its inner statement's effects** (S-08: an EXPLAIN of a
+  non-read is not a read), but no destructive pattern.
+- **`SELECT @v := 1` is `Session`.** `alg/13` S-13 allows it on read-only with a flag. M3b has
+  no `USER_VAR_ASSIGN` flag, so read-only denies it (known gap).
+- **Information disclosure is Unknown** (fix round 1, I3, which replaces the first version's
+  `permissive` gap). See the fix-round-1 notes below.
+- **`sql_mode=ORACLE` on MariaDB is `UnsupportedDialect`.** No interim parser reads that
+  grammar.
+- **A lone CR in a reading is `ParserDisagreement`.** `sqlparser` counts only LF as a line
+  break, while `LineIndex` also counts a lone CR.
+- **Harness entry.** `sql_safety::classify_interim(&str, &ClassifyCtx) -> SafetyReport`
+  (`#[doc(hidden)]`, a fenced named exception in `lib.rs`) splits in execution mode, analyses
+  each strict range and merges. It is the entry for Task 10's tests and corpus; Task 14's
+  `classify` is the production entry. No `sqlparser` type is public:
+  `no_sqlparser_type_in_the_interim_public_api` checks every `pub` line of the backend and the
+  one re-export.
+
+**Known gaps** (`data/mysql/known_gaps.toml`, each row asserted by
+`known_gaps_each_have_a_test`):
+- **False denials:** the `MOD` operator, MySQL's `TABLE t`, `CAST … CHARACTER SET`,
+  `EXPLAIN EXTENDED`, `EXPLAIN FOR CONNECTION`, `CHECKSUM TABLE`, MariaDB's
+  `LIMIT ROWS EXAMINED`, SQLite's table-valued functions (not on Task 3's allowlist),
+  `ISNULL`/`NOTNULL`, `AS MATERIALIZED`, `PRAGMA x = name`, and a lone CR.
+- **Stricter than `alg/13`:** `LOCK IN SHARE MODE`, `INTO OUTFILE`, `LOAD DATA` and
+  `VACUUM INTO` are `Unknown` because `sqlparser` rejects them; the pre-scan still names their
+  bits. `SELECT @v := 1` is the S-13 gap above.
+- **MariaDB-only forms (P-M3b-8):**
+  - Accepted by `sqlparser`: `NEXTVAL`, `SETVAL`, `LASTVAL`, `RETURNING`, and `/*M!` read as a
+    plain comment.
+  - Rejected by `sqlparser`: `NEXT VALUE FOR`, `PREVIOUS VALUE FOR`, `FOR SYSTEM_TIME`,
+    `BEGIN NOT ATOMIC` and `sql_mode=ORACLE`.
+
+  None is `Read` at the gate, and each is denied on read-only.
+
+**Read corpus.** `sql-testkit/corpus/read/{mysql,mariadb,sqlite,pg}.sql` hold 326, 330, 312 and
+304 Hacivat-authored reads over the `datagrip/13` §3.1 seed schema. They include
+`SHOW`/`DESCRIBE`/`EXPLAIN` and the read `PRAGMA`s. The interim backend calls every MySQL,
+MariaDB and SQLite entry `Read`: zero false denials, each allowed on both read-only profiles
+and `Read` at the gate. The PostgreSQL file is Task 9's and Task 14's; here each entry is only
+checked to be one statement that libpg_query parses.
+
+**Tests.** `sql-safety/tests/interim.rs` (27) and `tests/read_corpus.rs` (4, plus the
+`#[ignore = "perf"]` budget test on the perf line); the unit tests of `backend/{interim,
+prescan}.rs` and `pragmas.rs`. `tests/data/safe06_interim.toml` holds the offline run A rows
+M1–M19 and L1–L9; Task 18 replaces it with the bypass TOML.
+
+**Fix round 1 (review of Task 10).** These rulings override the text above where they differ.
+
+- **Skipped readings (C1).** Every executable comment a server may skip is also read with the
+  comment removed. A MariaDB `/*M!` without version digits on a MySQL profile used to be read
+  only as code. Its one running reading now has the version `NEVER_ON_MYSQL` (`u32::MAX`), so
+  the threshold views always include the skipped reading as well. Each comment now carries a
+  list of readings, each with its own opener, end and version:
+  - MySQL's six-digit gate is read both as five digits plus a body digit and as six digits
+    (M7);
+  - an ambiguous end adds the running end;
+  - a version gate adds the skipped reading.
+
+  The union of readings is the classification. The views cover an unknown server version, a
+  version below each gate and a version above it, whatever version is known.
+- **The reading cap (C2).** The number of readings is
+  `(distinct versions + 1) × Π readings per comment`, counted with checked arithmetic, and
+  counting stops as soon as it passes `max_exec_comment_views`. Past 16, the statement is
+  `TooComplex` before any reading is built, with no loop over readings. Readings are then
+  enumerated with a mixed-radix counter that the bound limits. 62, 63, 64 and 200 ambiguous
+  comments are `TooComplex` within the test's time bound, in debug and in release.
+- **`SET` (I1).**
+  - `@@global.`, `@@persist.` and `@@persist_only.` take dotted component names (`@@global.validate_password.length`).
+  - A `SET` the grammar cannot read keeps the targets it read and is `Unknown`, with `ParseError` and `UNKNOWN`.
+  - It is also `ADMIN` when any `GLOBAL`, `PERSIST` or `PERSIST_ONLY` word, or any `@@global`/`@@persist` scope, appears anywhere in it.
+- **Constant predicates (I2).** SAFE-07's `AlwaysTrue` uses a shared, parser-free rule in
+  `destructive.rs` (`Predicate`, `always_true`), a named exception in Task 4's file.
+  - **How it decides.** It evaluates three-valued logic over literals: `NULL IS NULL`, `NOT FALSE`, `TRUE`, `1 = 1`, `'a' = 'a'` and `… OR TRUE` are `AlwaysTrue`. An expression that reads nothing of the row but whose value the rule does not model (`1 + 1 = 2`, a user variable, a bound parameter) counts as always true too, the safe direction. FALSE or NULL for every row, or anything that reads the row, is not.
+  - **Strings** compare as equal only when their bytes are equal; any other pair is left to the server's collation, which also counts as constant.
+  - **Backends.** The interim backend maps `sqlparser` expressions to `Predicate`. Under ANSI_QUOTES, `"a"` is a column. Task 9 maps PostgreSQL's tree the same way (routed carry).
+- **Information disclosure (I3, controller ruling; PO list).** These are `Unknown` (an
+  `EffectsUnknown` doubt naming the form) and are denied on read-only. M3b has no
+  `INFO_DISCLOSURE` bit, and this matches Task 3's line for `version()` and `current_setting`.
+  - The forms: `SHOW [FULL] PROCESSLIST`, `SHOW ENGINE …`, `SHOW {REPLICA|SLAVE|MASTER} STATUS`, `SHOW ALL {REPLICAS|SLAVES} STATUS`, `SHOW BINARY LOG STATUS`, `SHOW REPLICAS`, `SHOW SLAVE HOSTS`, `SHOW {BINLOG|RELAYLOG} EVENTS`, MariaDB's `SHOW {EXPLAIN|ANALYZE} FOR <connection>`, and `SHOW GRANTS FOR` another account.
+  - Still reads: `SHOW GRANTS`, `SHOW GRANTS FOR CURRENT_USER[()]` and `SHOW ENGINES`.
+  - The corpus drops these forms, and the `permissive` gap is gone.
+- **Minors.**
+  - `CALL` is always `FnUnknown` with `UNKNOWN`: a procedure is never a builtin function. Its deny-list effects are kept.
+  - A query whose body is a data change (`WITH … DELETE`) has that change's kind.
+  - MariaDB's quoted pseudo-column ``seq.`nextval` `` is `SEQUENCE`.
+  - A golden test pins `sqlparser` at `=0.64.0` and checks the `Debug` text the walk reads: variant names, `Join(None)`, `CrossJoin(None)` and `SetDataType`.
+  - The read corpus now also runs at MySQL 8.0.12 and 8.4.0 and at MariaDB 10.6.0, with zero false denials. It gained 8 MariaDB-specific reads: `seq_1_to_n`, `OFFSET … FETCH`, `INTERSECT ALL`/`EXCEPT ALL`, `JSON_TABLE`. Its sizes are now 325, 335, 312 and 304.
+
+**Fix round 2 (re-review).**
+
+- **Grammar escapes (RR-I1).**
+  - Every MariaDB `SHOW EXPLAIN|ANALYZE …` is denied, `FORMAT=…` forms included, because each one names another connection.
+  - `SHOW {REPLICA|SLAVE|MASTER} … STATUS` is denied with a named connection (`SHOW SLAVE 'c' STATUS`) or a channel.
+- **Same-category `SHOW` forms (controller ruling).** These are `Unknown` too:
+  - `SHOW {BINARY|MASTER} LOGS`;
+  - MariaDB's `SHOW {USER|CLIENT}_STATISTICS`;
+  - `SHOW CREATE USER` of any account other than `CURRENT_USER[()]`.
+- **Table routes to the same data (RR-I2, controller ruling).** On MySQL and MariaDB these are
+  `Unknown` (an `EffectsUnknown` doubt naming the table) and read-only denies them:
+  - `information_schema.PROCESSLIST`;
+  - `performance_schema.threads`;
+  - `performance_schema.events_statements_{current,history,history_long}`;
+  - `sys.{processlist,session,x$processlist,x$session}`;
+  - MariaDB's `information_schema.{USER,CLIENT}_STATISTICS`.
+
+  The match covers any letter case, any quoting, whitespace around the dot, and anywhere in the statement (subqueries, joins and CTEs included). The names specific enough to be safe also match unqualified, which covers a default database of `information_schema`, `performance_schema` or `sys`. `threads` and `session` match only qualified, because they are common user table names. `performance_schema.session_variables` of other threads is not covered: a query cannot tell them apart from one's own. The corpus dropped `SHOW BINARY LOGS`.
+- **Defence in depth, not the control.** These denies stop Hacivat from showing other sessions'
+  activity or statement text on a read-only console. They are defence in depth: the real
+  control is still the server's PROCESS, SUPER, REPLICATION CLIENT and
+  `performance_schema`/`sys` privileges (L5), which decide what any route shows. A route not on
+  the list is not denied by this rule. The PostgreSQL equivalent (other sessions' query text
+  in `pg_stat_activity`) is routed to Tasks 9 and 3.
