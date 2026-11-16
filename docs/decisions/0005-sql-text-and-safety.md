@@ -1786,3 +1786,17 @@ unit tests (panic, deadline, shutdown).
   16 MiB thread already marked, the only way to get one, so a small stack cannot be marked.
   An `unsafe fn` would need `unsafe` blocks in `hacivat-exec`, which `unsafe_code = "deny"`
   and the global constraint (unsafe only in `hacivat-ui-core/src/platform`) forbid.
+
+**Fix round 3 (round 2 re-check).**
+- **R2-C1.** MySQL and MariaDB run an executable comment's body as code, `;` included, and the
+  body is one comment token, so a statement may end inside it where no `;` token shows
+  (`SELECT 'a\' /*!; DO SLEEP(5); */ x'` ran `DO SLEEP(5)` on a `NO_BACKSLASH_ESCAPES`
+  server over a multi-statement `COM_QUERY` while the reading was dropped). The strict rule:
+  a reading is never dropped as a whole-text lexing failure when the text holds `/*!` or
+  `/*M!` (any case) anywhere. The reviewer's five texts deny on the unknown-modes path.
+- **R2-M1.** A reading whose `;` tokens (count or position) differ from the base reading's
+  makes the request `AmbiguousBoundary`, pre-decided, on every dialect, PostgreSQL with
+  `standard_conforming_strings` known `off` included (`SELECT 'a\' || ' ; DELETE FROM t;
+  --'`), instead of an `Unknown` item a dialog would ask about.
+- **Perf tests** are load-tolerant: up to three rounds of best-of-N, asserting the 2 ms
+  interim on the best.

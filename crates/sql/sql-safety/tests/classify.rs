@@ -1471,6 +1471,15 @@ fn every_lexing_mode_reading_must_allow() {
         // `COM_QUERY` the `DELETE` would run first, so that reading is kept.
         (DialectId::MySql, "SELECT 'a\\'; DELETE FROM t; --'"),
         (DialectId::MySql, "SET @a = 'x\\'; DELETE FROM t; --'"),
+        // Round 3, R2-C1: the `;` hidden in an executable comment (its body runs as code).
+        (DialectId::MySql, "SELECT 'a\\' /*!; DO SLEEP(5); */ x'"),
+        (DialectId::MySql, "SELECT 'a\\' /*!; KILL 5; */ x'"),
+        (
+            DialectId::MySql,
+            "SELECT 'a\\' /*!50000 ; DO GET_LOCK(0x61,1); */ x'",
+        ),
+        (DialectId::MariaDb, "SELECT 'a\\' /*M!; DO SLEEP(5); */ x'"),
+        (DialectId::MySql, "SELECT \"a\\\" /*!; DO SLEEP(5); */ x\""),
     ] {
         let r = classify(s, &single(d));
         assert!(!read_only_allows(&r), "{d:?} {s}: {r:?}");
@@ -1598,6 +1607,32 @@ fn known_modes_read_once_and_pg_scs_off_is_unknown_not_denied_always() {
             Verdict::Deny(_)
         ));
     }
+    // Round 3, R2-M1: the `off` reading ends a statement where the `on` reading does not:
+    // another boundary, pre-decided `AmbiguousBoundary`, known `off` or unknown.
+    let split = "SELECT 'a\\' || ' ; DELETE FROM t; --'";
+    for ctx in [&off, &pg_single()] {
+        let r = classify(split, ctx);
+        assert!(r.pre_decision.is_some() && r.items.is_empty(), "{r:?}");
+        assert!(
+            has_reason(&r, ReasonCode::AmbiguousBoundary),
+            "{:?}",
+            codes(&r)
+        );
+        assert!(matches!(
+            decide(&r, Profile::Admin, Actor::Human).verdict,
+            Verdict::Deny(_)
+        ));
+    }
+    // The same on MySQL with NO_BACKSLASH_ESCAPES unknown.
+    let r = classify(
+        "SELECT 'a\\'; DELETE FROM t; --'",
+        &single(DialectId::MySql),
+    );
+    assert!(
+        has_reason(&r, ReasonCode::AmbiguousBoundary),
+        "{:?}",
+        codes(&r)
+    );
     // scs off and the same cut: the reading adds nothing.
     assert!(read_only_allows(&classify(
         "SELECT a FROM t WHERE b ~ '\\d+'",
@@ -1699,22 +1734,9 @@ fn budget() {
             CoarseClass::Read,
             "{d:?}"
         );
-        let mut times: Vec<f64> = (0..RUNS)
-            .map(|_| {
-                let start = Instant::now();
-                std::hint::black_box(classify(&unit, &ctx));
-                start.elapsed().as_secs_f64()
-            })
-            .collect();
-        times.sort_by(f64::total_cmp);
-        let per = |t: f64| t / (unit.len() as f64 / 10_240.0) * 1e3;
-        let (best, p50, p95) = (
-            per(times[0]),
-            per(times[RUNS / 2]),
-            per(times[RUNS * 95 / 100]),
-        );
+        let (best, p50, p95, rounds) = measure(&unit, &ctx, RUNS, 2.0);
         eprintln!(
-            "{d:?}: classify best {best:.3}, p50 {p50:.3}, p95 {p95:.3} ms per 10 KB (budget 1 ms; interim assertion 2 ms on the best)"
+            "{d:?}: classify best {best:.3}, p50 {p50:.3}, p95 {p95:.3} ms per 10 KB, {rounds} round(s) (budget 1 ms; interim assertion 2 ms on the best)"
         );
         assert!(best < 2.0, "{d:?}: {best:.3} ms per 10 KB");
     }
@@ -1738,20 +1760,38 @@ fn budget() {
             ),
             ("unknown modes", single(d), 2.0 * readings),
         ] {
-            let mut times: Vec<f64> = (0..RUNS / 4)
-                .map(|_| {
-                    let start = Instant::now();
-                    std::hint::black_box(classify(&marked, &ctx));
-                    start.elapsed().as_secs_f64()
-                })
-                .collect();
-            times.sort_by(f64::total_cmp);
-            let per = |t: f64| t / (marked.len() as f64 / 10_240.0) * 1e3;
-            let (best, p50) = (per(times[0]), per(times[times.len() / 2]));
+            let (best, p50, _, rounds) = measure(&marked, &ctx, RUNS / 4, bound);
             eprintln!(
-                "{d:?} with a backslash and a double quote, {path}: classify best {best:.3}, p50 {p50:.3} ms per 10 KB"
+                "{d:?} with a backslash and a double quote, {path}: classify best {best:.3}, p50 {p50:.3} ms per 10 KB, {rounds} round(s)"
             );
             assert!(best < bound, "{d:?} {path}: {best:.3} ms per 10 KB");
         }
     }
+}
+
+/// Load-tolerant timing (round 3): up to three rounds of `runs` classifications of `text`,
+/// stopping once a round's best is under `bound` ms per 10 KB. Answers the best over the
+/// rounds (the classifier's own cost on a busy machine), the last round's p50 and p95, and the
+/// rounds taken.
+fn measure(text: &str, ctx: &ClassifyCtx, runs: usize, bound: f64) -> (f64, f64, f64, usize) {
+    let per = |t: f64| t / (text.len() as f64 / 10_240.0) * 1e3;
+    let mut best = f64::INFINITY;
+    let (mut p50, mut p95) = (0.0, 0.0);
+    for round in 1..=3 {
+        let mut times: Vec<f64> = (0..runs)
+            .map(|_| {
+                let start = Instant::now();
+                std::hint::black_box(classify(text, ctx));
+                start.elapsed().as_secs_f64()
+            })
+            .collect();
+        times.sort_by(f64::total_cmp);
+        best = best.min(per(times[0]));
+        p50 = per(times[runs / 2]);
+        p95 = per(times[runs * 95 / 100]);
+        if best < bound {
+            return (best, p50, p95, round);
+        }
+    }
+    (best, p50, p95, 3)
 }

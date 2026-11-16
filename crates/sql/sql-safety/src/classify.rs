@@ -171,11 +171,14 @@ impl fmt::Debug for ClassifyCtx {
 ///    it, with no `;` before it, and the text is one statement in the base reading, it is
 ///    dropped: no statement is complete in that reading, so a server in that mode rejects the
 ///    whole text as a syntax error before running any of it (a `;` before the unterminated
-///    token keeps the reading: over a multi-statement `COM_QUERY` what precedes it would run);
-/// 3. on PostgreSQL (libpg_query parses only with `standard_conforming_strings` on, so the
+///    token keeps the reading: over a multi-statement `COM_QUERY` what precedes it would run;
+///    so does any executable comment in the text, whose body may hold a `;`);
+/// 3. a reading whose `;` tokens differ from the base reading's (another statement count or
+///    boundary) makes the request `AmbiguousBoundary`, pre-decided, on every dialect;
+/// 4. on PostgreSQL (libpg_query parses only with `standard_conforming_strings` on, so the
 ///    `off` reading cannot be parsed) a reading that cuts other tokens makes every item
 ///    `Unknown` (`EffectsUnknown`, `standard_conforming_strings`);
-/// 4. on MySQL/MariaDB it is classified in full, and the reports are united
+/// 5. on MySQL/MariaDB it is classified in full, and the reports are united
 ///    ([`union_readings`]): the result allows only what every reading allows.
 pub fn classify(sql: &str, ctx: &ClassifyCtx) -> SafetyReport {
     on_classifier_stack(
@@ -318,15 +321,21 @@ fn classify_readings(sql: &str, ctx: &ClassifyCtx) -> SafetyReport {
     // The readings already taken: an alternative that cuts the tokens of any of them adds
     // nothing (rule 1; `NO_BACKSLASH_ESCAPES` and `ANSI_QUOTES` together often cut as one of
     // them alone).
-    let mut taken = vec![lex_in(ctx.dialect.modes)];
+    let base_lexed = lex_in(ctx.dialect.modes);
+    let base_semicolons = semicolons(&base_lexed);
+    let mut taken = vec![base_lexed];
     let mut united = base;
     for modes in &readings[1..] {
         let alt = lex_in(*modes);
         if taken.iter().any(|t| same_cut(t, &alt)) {
             continue;
         }
-        if united.items.len() <= 1 && runs_unterminated(&alt) {
+        if united.items.len() <= 1 && runs_unterminated(sql, &alt) {
             continue;
+        }
+        // Fix round 3, R2-M1: a reading that ends statements elsewhere is another boundary.
+        if semicolons(&alt) != base_semicolons {
+            return ambiguous(united);
         }
         taken.push(alt);
         let mut other = ctx.clone();
@@ -363,10 +372,40 @@ fn classify_pg_readings(sql: &str, ctx: &ClassifyCtx, plan: Plan) -> SafetyRepor
         lex_with_client(sql, profile, modes, &LexState::Initial, ctx.flavor)
     };
     let off = lex_in(false);
-    if same_cut(&lex_in(true), &off) || (r.items.len() <= 1 && runs_unterminated(&off)) {
+    let on_lexed = lex_in(true);
+    if same_cut(&on_lexed, &off) || (r.items.len() <= 1 && runs_unterminated(sql, &off)) {
         return r;
     }
+    // Fix round 3, R2-M1: the `off` reading ends statements elsewhere: another boundary, not
+    // an item to confirm.
+    if semicolons(&off) != semicolons(&on_lexed) {
+        return ambiguous(r);
+    }
     mark_unknown_reading(&mut r, "standard_conforming_strings");
+    r
+}
+
+/// The ranges of the `;` tokens of a lexing (statement ends outside strings and comments).
+fn semicolons(lexed: &Lexed) -> Vec<TextRange> {
+    (0..lexed.len())
+        .filter(|&i| lexed.kind(i) == TokenKind::Semicolon)
+        .map(|i| lexed.range(i))
+        .collect()
+}
+
+/// `r` pre-decided with `AmbiguousBoundary`: two readings of the text end its statements at
+/// different places (fix round 3, R2-M1).
+fn ambiguous(mut r: SafetyReport) -> SafetyReport {
+    let mut reasons = r.pre_decision.take().unwrap_or_default();
+    let reason = Reason::new(ReasonCode::AmbiguousBoundary);
+    if !reasons.contains(&reason) {
+        reasons.push(reason);
+    }
+    r.items.clear();
+    r.request_class = CoarseClass::Unknown;
+    r.request_effects = EffectSet::UNKNOWN;
+    r.flags = RiskFlags::empty();
+    r.pre_decision = Some(reasons);
     r
 }
 
@@ -384,7 +423,15 @@ fn same_cut(a: &Lexed, b: &Lexed) -> bool {
 /// (which runs each statement before it parses the next: a `;` before the unterminated token
 /// would let what precedes it run, so that reading is kept). An unterminated comment does not
 /// count (SQLite, for one, accepts it).
-fn runs_unterminated(lexed: &Lexed) -> bool {
+///
+/// Fix round 3, R2-C1: never when the text holds an executable comment (`/*!`, `/*M!`, any
+/// case) anywhere: MySQL and MariaDB run its body as code, `;` included, so a statement may end
+/// inside it where no `;` token shows.
+fn runs_unterminated(sql: &str, lexed: &Lexed) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    if lower.contains("/*!") || lower.contains("/*m!") {
+        return false;
+    }
     let Some(at) = lexed
         .errors()
         .iter()
@@ -405,7 +452,7 @@ fn runs_unterminated(lexed: &Lexed) -> bool {
 }
 
 /// Every item of `r` made `Unknown` because a reading under another mode (`mode`) cuts other
-/// tokens and cannot be parsed (the [`classify`] docs, 3).
+/// tokens and cannot be parsed (the [`classify`] docs, 4).
 fn mark_unknown_reading(r: &mut SafetyReport, mode: &str) {
     for item in &mut r.items {
         doubt(item, ReasonCode::EffectsUnknown, Some(mode));
