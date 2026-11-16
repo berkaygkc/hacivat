@@ -18,6 +18,8 @@ use hacivat_driver::{RawError, TxStatus};
 use hacivat_proto::{DbmsKind, ErrClass, ErrFamily};
 
 use crate::session::schema::first_keyword;
+// ## m3b-t01c-core-seams
+use crate::session::verdict::SessionEffects;
 
 /// The reconnect schedule.
 #[derive(Debug, Clone, PartialEq)]
@@ -208,7 +210,12 @@ pub struct Tracked {
 }
 
 /// Notes what the user statement `sql` does to the session's state (the module docs).
-pub fn track_statement(t: &mut Tracked, sql: &str) {
+///
+/// `effects` (## m3b-t01c-core-seams, P-M3b-11): the exec gate's session effects of the unit
+/// when it classified it, else `None`. Task 18 uses them (C8) with this scan as the fallback;
+/// until then the scan alone decides, as in M3a.
+pub fn track_statement(t: &mut Tracked, sql: &str, effects: Option<SessionEffects>) {
+    let _ = effects;
     // A backslash in quoted text leaves the end of the string unsure: read the quotes too.
     let words = words(sql, !sql.contains('\\'));
     let word = |i: usize| words.get(i).map(String::as_str).unwrap_or_default();

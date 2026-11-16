@@ -2,8 +2,10 @@
 //!
 //! TOML keys: `version`, `ui.language`, `ui.regional_format`, `ui.time_zone`, `ui.theme`,
 //! `ui.text_rendering`, `keymap.preset`; since M3a (Task 1b, R-M3-44) `editor.tab_size`,
-//! `editor.insert_spaces`, `editor.copy_line_without_selection`, `editor.caret_blink`. Values: `"system"`, `"dark"`, `"light"`, `"crisp"`,
-//! `"standard"`, `"hacivat"`, `"datagrip"`, or a BCP-47 tag or IANA zone. Reading and writing
+//! `editor.insert_spaces`, `editor.copy_line_without_selection`, `editor.caret_blink`; since M3b
+//! (Task 1c, P-M3b-9) `exec.confirm_unsafe_where`, `exec.error_policy_ask`,
+//! `results.max_value_bytes`, `history.enabled`, `grid.raw_display`. Values: `"system"`,
+//! `"dark"`, `"light"`, `"crisp"`, `"standard"`, `"hacivat"`, `"datagrip"`, or a BCP-47 tag or IANA zone. Reading and writing
 //! (with per-key validation) land in Task 7.
 
 /// The current settings format version.
@@ -17,6 +19,16 @@ pub struct Settings {
     pub keymap: KeymapSettings,
     /// `[editor]` (## m3a-t01b-seams; its Settings-UI rows are M3b, R-M3-44).
     pub editor: EditorSettings,
+    // ## m3b-t01c-core-seams (P-M3b-9): hand-loaded like `[editor]`; Settings-UI rows in
+    // Task 42.
+    /// `[exec]`.
+    pub exec: ExecSettings,
+    /// `[results]`.
+    pub results: ResultsSettings,
+    /// `[history]`.
+    pub history: HistorySettings,
+    /// `[grid]`.
+    pub grid: GridSettings,
 }
 
 impl Default for Settings {
@@ -26,6 +38,11 @@ impl Default for Settings {
             ui: UiSettings::default(),
             keymap: KeymapSettings::default(),
             editor: EditorSettings::default(),
+            // ## m3b-t01c-core-seams
+            exec: ExecSettings::default(),
+            results: ResultsSettings::default(),
+            history: HistorySettings::default(),
+            grid: GridSettings::default(),
         }
     }
 }
@@ -152,6 +169,87 @@ pub enum CaretBlinkPref {
     #[default]
     System,
     Off,
+}
+
+// ## m3b-t01c-core-seams (P-M3b-9)
+
+/// The `[exec]` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExecSettings {
+    /// `exec.confirm_unsafe_where`: off production, a `DmlUnsafe` statement asks first
+    /// (R-M3-55; default `true`, PO question Q1).
+    pub confirm_unsafe_where: bool,
+    /// `exec.error_policy_ask`: a multi-unit run asks after a failure (R-M3-61; default
+    /// `true`); `false` stops at the first failure.
+    pub error_policy_ask: bool,
+}
+
+impl Default for ExecSettings {
+    fn default() -> Self {
+        Self {
+            confirm_unsafe_where: true,
+            error_policy_ask: true,
+        }
+    }
+}
+
+/// The most bytes a console keeps of one value (`results.max_value_bytes`, R-M3-82): 64 KiB
+/// to 64 MiB, default 1 MiB. A value outside the range is clamped to it, with a diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ValueLimit(u32);
+
+impl ValueLimit {
+    pub const MIN: u32 = 64 << 10;
+    pub const MAX: u32 = 64 << 20;
+    pub const DEFAULT: u32 = 1 << 20;
+
+    /// `n` when it is in range.
+    pub fn new(n: u32) -> Option<Self> {
+        (Self::MIN..=Self::MAX).contains(&n).then_some(Self(n))
+    }
+
+    /// `n` clamped to the range.
+    pub fn clamped(n: i64) -> Self {
+        Self(n.clamp(i64::from(Self::MIN), i64::from(Self::MAX)) as u32)
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for ValueLimit {
+    fn default() -> Self {
+        Self(Self::DEFAULT)
+    }
+}
+
+/// The `[results]` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ResultsSettings {
+    /// `results.max_value_bytes`: the console's cell cap (`FetchPolicy::cell_cap`).
+    pub max_value_bytes: ValueLimit,
+}
+
+/// The `[history]` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HistorySettings {
+    /// `history.enabled`: statements go to the query history (D-061; default `true`).
+    pub enabled: bool,
+}
+
+impl Default for HistorySettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// The `[grid]` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct GridSettings {
+    /// `grid.raw_display`: numbers as the server sent them (default `false`: L3's formatted
+    /// numbers).
+    pub raw_display: bool,
 }
 
 #[cfg(test)]

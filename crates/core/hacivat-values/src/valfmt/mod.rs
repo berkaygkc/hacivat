@@ -24,9 +24,12 @@
 //!   [`raw_text_in`] is the raw channel with a `timestamptz` in the display zone, so a copied
 //!   instant reads as the cell shows it.
 
+// ## m3b-t01c-core-seams (P-M3b-17): `Purpose::{Tooltip, A11y}` (Tasks 38, 40).
+mod a11y_text;
 mod display;
 mod idlike;
 mod raw;
+mod tooltip;
 
 pub use display::format_cell;
 #[doc(hidden)]

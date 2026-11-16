@@ -436,3 +436,49 @@ pg17-tr is a `full` line.
 - `turkish_collation_text_round_trips_on_pg17_tr`
 - `incomplete_cursor_leaves_no_transaction_in_pg_stat_activity`
 - `dml_and_ddl_report_update_counts_on_a_dev_console`
+
+## m3b-t01c — core seams
+
+M3b Task 1c's run-service and result-store seams. Every stub fails closed (F31) and none is
+wired into Run before Task 24 (R-M3-52).
+
+- **Gate (Task 15).** `gate()` denies every unit: `exec-gate-stale-classification` when the
+  unit's report does not match its `final_text` (P-M3b-2, `SafetyReport::matches_text`), else
+  `exec-gate-not-implemented`. `ConnSafety`, `GateReason`, `GateDecision` (no form for
+  `RunInTxThenConfirm`: the session picks it, P-M3b-1), `GateItem`, `GatePlan`,
+  `ConfirmPort` (`Debug` supertrait), `ConfirmQuestion`/`ConfirmAnswer`/`CommitQuestion`.
+  `explain_analyze_inner` answers `None`; `SuppressSet` works.
+- **Params (Task 15).** `prepare_units` refuses the first unit holding a `:`, `$` or `?` byte
+  (`ParamDiag::TooManyBinds`, at its document offset); every other unit is `Ready` as written
+  with an identity `OffsetMap` (a working piecewise-linear map).
+- **Classifier pool (Task 14).** `ClassifyPool::classify` answers `sql-safety`'s stub at once;
+  as a `StatementClassifier` it denies every statement and knows no effects. Nothing installs
+  it before Task 18.
+- **Run service.** `RunRequest` gains `prepared`, `plan`, `policy`, `run_as_one`, `history`,
+  `confirm` (P-M3b-22: every M3a literal sets `None`/`StopOnError`/`false`). A request with
+  `prepared`, `plan` or `run_as_one` is refused before anything is sent (`never_started`,
+  `Internal`) until Task 16: ignoring a plan could send what the gate denied. `policy` reaches
+  the session. `with_history`, `with_classifier`; `count` answers `Err(Internal)` and
+  `count_sql` `None` (Task 16). The units keep M3a's shape (`RunUnit::plain`).
+- **Log.** `LogMsg` gains `Notice`, `ResultSetLimit`, `ImplicitCommit`, `SafetyDenied`,
+  `ConfirmCommitted`, `ConfirmRolledBack`, `ConfirmStatementFailed`, `SkippedByUser`, `Retried`,
+  `Evicted`, each with a literal Fluent ID; their strings come with the tasks that write them
+  (none is written before). `SessionLog::lines_since(seq)` answers the lines from `seq` and
+  whether some left the ring first. `DenyLayer::Classifier` → `exec-deny-read-only-classifier`;
+  the new error kinds have titles (`status.rs`, named exception).
+- **Auditor chain (Task 16).** `SyncAuditor`, `AuditorChain` (the synchronous half works; no
+  sinks yet), `SINK_CAPACITY` = 10,000.
+- **History (Task 17).** The types, and `HistoryStore::open` answering
+  `Err(HistoryError::Disabled)` with nothing touched on disk. `rusqlite` (`bundled`) has FTS5
+  (`fts5_is_compiled_in`).
+- **Results (Task 8).** `CloseReason::Evicted`, `ResultSource::{cap_raised, set_visible}`
+  (defaults `false` and nothing), `MemoryBudget::evict_for` (stub `0`), `EvictionRegistry`
+  (weak stores and their visibility; nothing evicts yet).
+- **Values (P-M3b-17).** `format_cell` dispatches `Purpose::Tooltip` to `valfmt/tooltip.rs`
+  (Task 38) and `Purpose::A11y` to `valfmt/a11y_text.rs` (Task 40); both answer the cell's text.
+- **Settings (P-M3b-9).** `[exec]`, `[results]`, `[history]`, `[grid]` are hand-loaded like
+  `[editor]`; `results.max_value_bytes` is a `ValueLimit` clamped to 64 KiB..=64 MiB with a
+  `settings-invalid-value` diagnostic; an M3a file loads with no diagnostic and saves unchanged.
+- **Ruling I2.** The app takes no `sql-safety` dependency: `hacivat-exec` re-exports
+  `ClassifyCtx`, `Expect`, `FnCatalog`, `GateClass`, `Limits`, `Reason`, `ReasonCode` and
+  `SafetyReport`, and the session's `CommitAnswer`, `ErrorPolicy` and `RunChoice`.

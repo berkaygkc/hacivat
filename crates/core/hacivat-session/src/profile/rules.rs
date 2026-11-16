@@ -130,3 +130,26 @@ pub fn duplicate_name(name: &str, existing: &[&str]) -> String {
 pub fn needs_environment_prompt(p: &Profile) -> bool {
     p.environment.is_none() && !is_local_endpoint(&p.endpoint)
 }
+
+// ## m3b-t01c-core-seams (P-M3b-10)
+
+/// The most bytes of one read-only allowlist entry.
+const FN_NAME_MAX_BYTES: usize = 128;
+
+/// Whether `name` may be an entry of `Profile::read_only_fn_allowlist`: a function name,
+/// optionally schema-qualified (`audit.mask_email`), 1 to 128 bytes, with no whitespace or
+/// control character and none of `;`, `(`, `)`, `,` or `'` (a name, never an expression).
+/// Non-ASCII letters are kept as typed (never case-mapped).
+pub fn valid_fn_allowlist_entry(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= FN_NAME_MAX_BYTES
+        && !name.chars().any(|c| {
+            c.is_whitespace() || c.is_control() || matches!(c, ';' | '(' | ')' | ',' | '\'')
+        })
+}
+
+/// Whether `sql` may be a profile's `startup_script`: at most
+/// [`super::STARTUP_SCRIPT_MAX_BYTES`] and no NUL (no driver sends one).
+pub fn valid_startup_script(sql: &str) -> bool {
+    sql.len() <= super::STARTUP_SCRIPT_MAX_BYTES && !sql.contains('\0')
+}

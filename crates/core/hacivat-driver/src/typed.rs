@@ -7,7 +7,8 @@
 //! `close_query` default to failing closed with `RawErrorKind::Unsupported`; Tasks 12, 14 and 15
 //! implement them per engine, `FakeDriver` (feature `fake`) scripts them.
 //!
-//! **Event grammar.** `(ResultStart Rows* (Suspended {fetch_more} Rows*)* ResultEnd)* Done`. A
+//! **Event grammar.** `(ResultStart Rows* (Suspended {fetch_more} Rows*)* ResultEnd)* Done`,
+//! with a `Notice` allowed before any event but `Done` (m3b-t01c, R-M3-77). A
 //! statement that returns no rows (DML, DDL, `SET`) still reports one result, with an empty
 //! schema: `ResultStart` of zero columns, then `ResultEnd` with `rows_affected` and the command
 //! tag. The first chunk holds at most `first_rows` rows, later chunks `chunk_rows` rows or
@@ -77,6 +78,36 @@ pub enum NoticeSeverity {
     Warning,
 }
 
+// ## m3b-t01c-core-seams
+/// A server notice (PostgreSQL `NOTICE`/`WARNING`, a MySQL warning; R-M3-77): server text,
+/// kept verbatim and never written to tracing logs or the history. [`Notice::new`] caps the
+/// text at [`Notice::MAX_TEXT_BYTES`], cut at a character boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Notice {
+    pub severity: NoticeSeverity,
+    /// The server's code (a SQLSTATE, a MySQL error number), when it sent one.
+    pub code: Option<Arc<str>>,
+    pub text: Arc<str>,
+}
+
+impl Notice {
+    /// The most bytes of a notice's text kept (16 KiB).
+    pub const MAX_TEXT_BYTES: usize = 16 * 1024;
+
+    /// A notice whose text is `text` cut to [`Self::MAX_TEXT_BYTES`] at a character boundary.
+    pub fn new(severity: NoticeSeverity, code: Option<&str>, text: &str) -> Notice {
+        let mut end = text.len().min(Self::MAX_TEXT_BYTES);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        Notice {
+            severity,
+            code: code.map(Arc::from),
+            text: Arc::from(&text[..end]),
+        }
+    }
+}
+
 /// The end of one result set.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResultEnd {
@@ -104,6 +135,10 @@ pub enum QueryEvent {
     ResultEnd(ResultEnd),
     Suspended,
     Done(QueryDone),
+    // ## m3b-t01c-core-seams
+    /// A server notice (R-M3-77): may come before any event but `Done` and changes nothing in
+    /// the grammar around it (Task 13's drivers; `FakeQuery::notices`).
+    Notice(Notice),
 }
 
 /// How `close_query` ends an open query.

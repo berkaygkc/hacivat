@@ -114,6 +114,23 @@ pub fn run_guarded<'a>(
     Box::pin(async move { guarded(conn, kind, sql, opts, replay).await.reply })
 }
 
+// ## m3b-t01c-core-seams (P-M3b-11)
+impl crate::session::actor::Core {
+    /// Step 0b (R-M3-83, Task 18): a user statement of a read-only session (a typed `Run`
+    /// unit, an M2b `Exec { origin: User }`) is checked by the injected classifier
+    /// (`Core::classifier`) with the profile's function allowlist before the guard runs it;
+    /// `RoCheck::Deny(d)` → `ExecErrorKind::SafetyDenied(d)`, nothing sent. `None` keeps the
+    /// M2b/M3a layers alone (run B). The actor calls it right before `guarded` and
+    /// `guarded_query`; internal statements never reach it.
+    ///
+    /// STUB until Task 18: `Ok(())`, which is M3a's behaviour (the guard's layers still run).
+    #[allow(clippy::unused_async, reason = "Task 18's body awaits the classifier")]
+    pub(crate) async fn step0b(&mut self, sql: &str) -> Result<(), ExecError> {
+        let _ = sql;
+        Ok(())
+    }
+}
+
 /// [`run_guarded`], and whether the connection must be discarded (the actor's entry point).
 pub(crate) async fn guarded(
     conn: &mut dyn RawConn,

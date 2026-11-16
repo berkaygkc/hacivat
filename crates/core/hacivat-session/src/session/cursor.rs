@@ -614,9 +614,10 @@ impl OpenCursor {
 
     /// Whether the cursor sits inside the user's own transaction.
     pub(crate) fn in_user_tx(&self, tx: TxStatus, owner: TxOwner) -> bool {
+        // ## m3b-t01c-core-seams (P-M3b-12): one ownership rule (`TxOwner::is_hacivats`).
         tx != TxStatus::Idle
             && matches!(self.hold, Hold::Savepoint | Hold::None)
-            && owner == TxOwner::User
+            && !owner.is_hacivats()
     }
 
     fn badge(&self) -> Option<CursorBadge> {
@@ -715,6 +716,12 @@ impl Core {
                     }
                 }
                 Ok(QueryEvent::Suspended) => return Pumped::Suspended,
+                // ## m3b-t01c-core-seams: a server notice goes to the run's observer as it
+                // comes (R-M3-77); it changes nothing in the stream.
+                Ok(QueryEvent::Notice(notice)) => s.observer.0.event(&RunEvent::Notice {
+                    unit: s.unit,
+                    notice,
+                }),
                 Ok(QueryEvent::Done(done)) => {
                     s.on_first_response();
                     s.done = Some(done);

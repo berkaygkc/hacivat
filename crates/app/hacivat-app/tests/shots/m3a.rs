@@ -1502,11 +1502,20 @@ fn open_cursor() -> Step {
                     sql: BIG.into(),
                     protocol: Protocol::Extended,
                     suspendable: true,
+                    // ## m3b-t01c-core-seams: the M3b fields at their M3a values.
+                    binds: Vec::new().into(),
+                    verdict: hacivat_session::session::UnitVerdict::Unknown,
+                    effects: hacivat_session::session::SessionEffects::empty(),
+                    masked: "".into(),
+                    max_result_sets: 1,
+                    cell_cap: None,
                 }]
                 .into(),
                 policy: ErrorPolicy::StopOnError,
                 fetch: FetchPolicy::default(),
                 observer: ObserverRef(Arc::new(Stores::default())),
+                // ## m3b-t01c-core-seams
+                confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
             });
         },
         |window, cx| session_in(window, cx).is_some_and(|s| s.state().borrow().cursor.is_some()),

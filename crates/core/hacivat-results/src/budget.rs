@@ -62,6 +62,18 @@ impl MemoryBudget {
         self.per_result
     }
 
+    // ## m3b-t01c-core-seams
+    /// Evicts background results (not the visible tab of any console) oldest first, each
+    /// keeping its first chunk, until `need` bytes would be released (R-M3-68, P-M3b-29; Task 8,
+    /// through the `EvictionRegistry`). Answers the bytes released from the budget once the
+    /// evicted chunks drop (a snapshot still holding them delays it).
+    ///
+    /// STUB until Task 8: evicts nothing, `0`.
+    pub fn evict_for(&self, need: u64) -> u64 {
+        let _ = need;
+        0
+    }
+
     /// A chunk of `bytes` joined a result.
     pub(crate) fn charge(&self, bytes: u64) {
         self.used.fetch_add(bytes, Ordering::SeqCst);

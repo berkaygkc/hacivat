@@ -2361,6 +2361,13 @@ pub mod runs {
                 sql: (*sql).into(),
                 protocol: Protocol::Extended,
                 suspendable: *suspendable,
+                // ## m3b-t01c-core-seams: the M3b fields at their M3a values.
+                binds: Vec::new().into(),
+                verdict: hacivat_session::session::UnitVerdict::Unknown,
+                effects: hacivat_session::session::SessionEffects::empty(),
+                masked: "".into(),
+                max_result_sets: 1,
+                cell_cap: None,
             })
             .collect();
         RunSpec {
@@ -2369,6 +2376,8 @@ pub mod runs {
             policy: ErrorPolicy::StopOnError,
             fetch,
             observer: ObserverRef(o.clone()),
+            // ## m3b-t01c-core-seams
+            confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
         }
     }
 

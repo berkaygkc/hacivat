@@ -121,6 +121,11 @@ pub fn error_title_id(kind: &ExecErrorKind) -> &'static str {
         ExecErrorKind::EnforcementGap(_) => "exec-error-enforcement-gap",
         ExecErrorKind::NotConnected => "exec-error-not-connected",
         ExecErrorKind::Internal => "exec-error-internal",
+        // ## m3b-t01c-core-seams (named exception): their strings come with the tasks that
+        // produce them (Tasks 11, 18 and 19; none is produced before).
+        ExecErrorKind::Tx(TxError::ImplicitCommitUnconfirmed) => "exec-error-tx-implicit-commit",
+        ExecErrorKind::SafetyDenied(_) => "exec-deny-classifier",
+        ExecErrorKind::QueueFull => "exec-error-queue-full",
     }
 }
 

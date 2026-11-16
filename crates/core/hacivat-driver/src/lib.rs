@@ -40,3 +40,5 @@ pub use url::carries_secret; // ## m2b-t01-interfaces: the secret-scan invariant
 pub use typed::{
     CloseHow, Closed, NoticeSeverity, QueryDone, QueryEvent, QuerySpec, ResultEnd, TypedCaps,
 };
+// ## m3b-t01c-core-seams
+pub use typed::Notice;

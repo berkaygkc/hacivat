@@ -21,6 +21,12 @@ pub mod router;
 pub mod run;
 pub mod schema;
 pub mod tx;
+// ## m3b-t01c-core-seams: verdicts and the classifier hook (R-M3-83), confirm-in-transaction
+// and Smart (Task 19), out-of-band answers (P-M3b-3).
+pub(crate) mod confirm;
+pub(crate) mod run_gate;
+pub(crate) mod smart;
+pub mod verdict;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,6 +47,9 @@ use hacivat_results::{
     CloseReason, Completeness, FetchControl, FetchPolicy, ResultId, ResultWriter,
 };
 use hacivat_values::ResultSchema;
+// ## m3b-t01c-core-seams
+use hacivat_values::BindValue;
+use std::time::Duration;
 
 use crate::profile::Profile;
 
@@ -62,6 +71,8 @@ pub use pool::SessionPolicy;
 pub use tx::TxOwner;
 // ## m3a-f1-followups
 pub use schema::context_probe_sql;
+// ## m3b-t01c-core-seams
+pub use verdict::{RoCheck, SafetyDenial, SessionEffects, StatementClassifier, UnitVerdict};
 
 /// A session's ID, unique in the process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -190,6 +201,9 @@ pub enum DenyLayer {
     /// PostgreSQL: the statement calls a function whose effect a rollback does not undo
     /// (`hacivat_guard::check_functions`; Task 23 finding F1).
     Function,
+    // ## m3b-t01c-core-seams
+    /// The injected classifier refused it (`Core::step0b`, R-M3-83; Task 18).
+    Classifier,
 }
 
 /// Why a request failed.
@@ -207,6 +221,11 @@ pub enum ExecErrorKind {
     EnforcementGap(GapReason),
     NotConnected,
     Internal,
+    // ## m3b-t01c-core-seams
+    /// The classifier refused the statement on a read-only session (Task 18): nothing sent.
+    SafetyDenied(SafetyDenial),
+    /// The session's queue is full (Task 11): nothing queued.
+    QueueFull,
 }
 
 /// A failed request.
@@ -294,6 +313,19 @@ pub(crate) enum Command {
         policy: ClosePolicy,
         reply: oneshot::Sender<Result<(), CloseRefused>>,
     },
+    // ## m3b-t01c-core-seams (P-M3b-3): answers to a waiting run, through the `RunGate`
+    // slot; never queued behind the request that waits. `reply`: a run waited on it.
+    Choose {
+        run_seq: u64,
+        choice: RunChoice,
+        reply: oneshot::Sender<bool>,
+    },
+    CommitDecision {
+        run_seq: u64,
+        unit: UnitId,
+        answer: CommitAnswer,
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// A session's handle (Clone): submit requests, cancel them, watch the state, close.
@@ -361,6 +393,49 @@ impl SessionHandle {
         rx
     }
 
+    // ## m3b-t01c-core-seams (P-M3b-3, P-M3b-25)
+    /// Answers the error-policy question of the run sent as request `run_seq`
+    /// (`RunEvent::NeedsChoice`, Task 11): `true` when that run waited for a choice. It never
+    /// queues behind the running request. Without a running actor, `false`.
+    pub fn choose(&self, run_seq: u64, c: RunChoice) -> oneshot::Receiver<bool> {
+        let (reply, rx) = oneshot::channel();
+        let command = Command::Choose {
+            run_seq,
+            choice: c,
+            reply,
+        };
+        if let Err(mpsc::error::SendError(Command::Choose { reply, .. })) =
+            self.commands.send(command)
+        {
+            let _ = reply.send(false);
+        }
+        rx
+    }
+
+    /// Answers the confirm-in-transaction question of `unit` in the run sent as request
+    /// `run_seq` (`RunEvent::NeedsCommit`, Task 19): `true` when that run waited for it.
+    /// Without a running actor, `false`.
+    pub fn commit_decision(
+        &self,
+        run_seq: u64,
+        unit: UnitId,
+        a: CommitAnswer,
+    ) -> oneshot::Receiver<bool> {
+        let (reply, rx) = oneshot::channel();
+        let command = Command::CommitDecision {
+            run_seq,
+            unit,
+            answer: a,
+            reply,
+        };
+        if let Err(mpsc::error::SendError(Command::CommitDecision { reply, .. })) =
+            self.commands.send(command)
+        {
+            let _ = reply.send(false);
+        }
+        rx
+    }
+
     pub fn state(&self) -> watch::Receiver<SessionSnapshot> {
         self.state.clone()
     }
@@ -406,6 +481,29 @@ pub enum ErrorPolicy {
     /// The first failure stops the run; later units end `Skipped`.
     #[default]
     StopOnError,
+    // ## m3b-t01c-core-seams
+    /// A failure asks (`RunEvent::NeedsChoice`, answered by `SessionHandle::choose`;
+    /// R-M3-61, Task 11). Until Task 11 the session stops as `StopOnError` does.
+    Ask,
+}
+
+// ## m3b-t01c-core-seams
+/// The answer to `RunEvent::NeedsChoice` (R-M3-61, P-M3b-19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RunChoice {
+    Retry,
+    Ignore,
+    IgnoreAll,
+    Stop,
+    /// Inside a failed PostgreSQL transaction: `ROLLBACK`, keep the session's mode, go on.
+    RollbackAndContinue,
+}
+
+/// The answer to `RunEvent::NeedsCommit` (Keep/Undo in the savepoint form).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CommitAnswer {
+    Commit,
+    RollBack,
 }
 
 /// One statement of a run: the exact text sent (no terminator, no leading comments).
@@ -417,6 +515,39 @@ pub struct RunUnit {
     /// The unit may stay suspended as a console cursor (R-M3-23: a read head, and only the
     /// last unit of its run stays suspended).
     pub suspendable: bool,
+    // ## m3b-t01c-core-seams
+    /// The bind values, in placeholder order (Task 11 sends them; until then a unit with
+    /// binds is refused with `Internal`, nothing sent).
+    pub binds: Arc<[BindValue]>,
+    /// The exec gate's verdict (`Unknown` when no gate ran); scheduling only, never trusted
+    /// for safety (R-M3-83).
+    pub verdict: UnitVerdict,
+    pub effects: SessionEffects,
+    /// The text with the bind values masked, for the log and the history.
+    pub masked: Arc<str>,
+    /// Result sets kept (R-M3-66: 100). Clamped to 1 until Task 11.
+    pub max_result_sets: u32,
+    /// The cell cap of this unit (R-M3-82: a re-run with a 64 MiB limit); `None` takes
+    /// `RunSpec::fetch`'s.
+    pub cell_cap: Option<u32>,
+}
+
+impl RunUnit {
+    /// A unit as M3a sends it: no binds, no verdict, one result set, the run's cell cap.
+    pub fn plain(id: UnitId, sql: Arc<str>, protocol: Protocol, suspendable: bool) -> RunUnit {
+        RunUnit {
+            id,
+            masked: sql.clone(),
+            sql,
+            protocol,
+            suspendable,
+            binds: Arc::from(Vec::new()),
+            verdict: UnitVerdict::Unknown,
+            effects: SessionEffects::empty(),
+            max_result_sets: 1,
+            cell_cap: None,
+        }
+    }
 }
 
 /// One `Request::Run`.
@@ -427,6 +558,16 @@ pub struct RunSpec {
     pub policy: ErrorPolicy,
     pub fetch: FetchPolicy,
     pub observer: ObserverRef,
+    // ## m3b-t01c-core-seams
+    /// How long a confirm-in-transaction question waits before the statement is rolled back
+    /// (D-014: [`RunSpec::CONFIRM_DEADLINE`]; tests inject a shorter one; Task 19).
+    pub confirm_deadline: Duration,
+}
+
+impl RunSpec {
+    // ## m3b-t01c-core-seams
+    /// D-014's deadline: 5 minutes.
+    pub const CONFIRM_DEADLINE: Duration = Duration::from_secs(300);
 }
 
 /// Sees a run on the actor task. Every call is O(1) and never blocks.
@@ -551,6 +692,33 @@ pub enum RunEvent {
         fetch_ms: u64,
     },
     RunEnded(RunSummary),
+    // ## m3b-t01c-core-seams
+    /// A unit failed under the `Ask` policy; the run waits for `SessionHandle::choose`
+    /// (Task 11). `rollback_and_continue`: inside a failed PostgreSQL transaction (no Retry).
+    NeedsChoice {
+        unit: UnitId,
+        error: ExecError,
+        rollback_and_continue: bool,
+    },
+    /// A confirmed statement ran inside a transaction; the run waits for
+    /// `SessionHandle::commit_decision` until `deadline` (Task 19). `savepoint`: the form the
+    /// session chose (P-M3b-1): Keep/Undo inside an open transaction, else Commit/Roll back.
+    NeedsCommit {
+        unit: UnitId,
+        affected: Option<u64>,
+        deadline: Instant,
+        savepoint: bool,
+    },
+    CommitDecided {
+        unit: UnitId,
+        answer: CommitAnswer,
+        by_deadline: bool,
+    },
+    /// A server notice of the unit (R-M3-77; Tasks 11 and 13).
+    Notice {
+        unit: UnitId,
+        notice: hacivat_driver::Notice,
+    },
 }
 
 /// The open cursor a session holds (its snapshot's `cursor`).

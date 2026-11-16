@@ -65,6 +65,8 @@ use crate::session::{
 };
 // ## m3a-t01b-seams
 use crate::session::effective_read_only;
+// ## m3b-t01c-core-seams
+use crate::session::verdict::StatementClassifier;
 
 /// How long a released pooled session stays idle before it closes (HV-SESS-01).
 pub const IDLE_CLOSE: Duration = Duration::from_secs(60);
@@ -317,6 +319,10 @@ struct State {
     // ## m3a-t01b-seams
     /// The manager-wide session policy (`set_policy`).
     policy: SessionPolicy,
+    // ## m3b-t01c-core-seams
+    /// The read-only guard's classifier every session started from now on gets (R-M3-83,
+    /// P-M3b-11; `set_classifier`).
+    classifier: Option<Arc<dyn StatementClassifier>>,
 }
 
 impl State {
@@ -521,6 +527,8 @@ impl SessionManager {
                 consent_gen: 0,
                 gap_sink: None,
                 policy: SessionPolicy::default(),
+                // ## m3b-t01c-core-seams
+                classifier: None,
             }),
             default_lock: tokio::sync::Mutex::new(()),
             me: me.clone(),
@@ -538,6 +546,14 @@ impl SessionManager {
     /// `ConnectionManager` calls it right after `new`, before any session exists.
     pub fn set_policy(&self, p: SessionPolicy) {
         self.lock().policy = p;
+    }
+
+    // ## m3b-t01c-core-seams (P-M3b-11)
+    /// Sets the classifier the read-only guard of every session opened from now on asks
+    /// (`ManagerConfig::classifier`, R-M3-83). `ConnectionManager` calls it right after `new`,
+    /// before any session exists; `None` keeps the M2b/M3a layers alone.
+    pub fn set_classifier(&self, c: Option<Arc<dyn StatementClassifier>>) {
+        self.lock().classifier = c;
     }
 
     /// The policy this manager's sessions follow (fix round 1).
@@ -1012,6 +1028,7 @@ impl SessionManager {
             reconnect: hooked.reconnect,
         };
         // ## m3a-f1-followups: every session reports to the profile's activity (F1-b).
+        // ## m3b-t01c-core-seams: and gets the manager's classifier (P-M3b-11).
         let handle = spawn_supervised(
             &self.rt,
             spec,
@@ -1020,6 +1037,7 @@ impl SessionManager {
             hooks,
             hooked.liveness,
             Some(self.activity.clone()),
+            st.classifier.clone(),
         );
         st.sessions.insert(
             handle.id,
