@@ -11,11 +11,20 @@
 
 pub mod autosize;
 mod columns;
+// ## m3b-t01b-seams: filter rows (Tasks 35, 37), frozen columns (Task 35), go to row (Task 37),
+// local sort (Task 36).
+pub mod filter;
+mod frozen;
+pub mod goto;
 mod keys;
 mod scroll;
 mod selection;
+pub mod sort;
 
 pub use columns::ColumnLayout;
 pub use keys::{Dir, KeyCtx, KeyOutcome, apply_command};
 pub use scroll::{DEFAULT_ROW_HEIGHT, MIN_THUMB_PX, OVERSCAN_ROWS, ScrollState};
 pub use selection::{CellRect, CopyRefusal, CopyRegion, MAX_COPY_CELLS, Selection, ViewMap};
+// ## m3b-t01b-seams
+pub use goto::{GotoError, GotoTarget, parse_goto};
+pub use sort::{SortKey, SortSpec};

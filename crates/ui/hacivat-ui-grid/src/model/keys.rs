@@ -268,6 +268,16 @@ impl Grid {
             | GridCommand::SelectColumn
             | GridCommand::Copy { .. }
             | GridCommand::Escape => return None,
+            // ## m3b-t01b-seams: `GridView::dispatch` handles these before the key model.
+            GridCommand::GrowSelection
+            | GridCommand::ShrinkSelection
+            | GridCommand::Find
+            | GridCommand::GotoRow
+            | GridCommand::OpenValue
+            | GridCommand::ContextMenu
+            | GridCommand::AutoFit
+            | GridCommand::Freeze
+            | GridCommand::Unfreeze => return None,
         })
     }
 }

@@ -14,8 +14,14 @@
 //!
 //! M3a has no local sort: [`ViewMap`] is the identity, so view rows equal model rows, and
 //! [`Selection::cell_count`] relies on that.
+//!
+//! ## m3b-t01b-seams: [`ViewMap::Permuted`] (a local sort, Task 36) and [`ViewMap::Filtered`]
+//! (filter rows, Task 37) map working (P-M3b-24: the map is no longer `Copy`); nothing builds
+//! them yet, and the grid still builds the identity per frame until Task 35 reads
+//! `GridView::view_map`.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::source::{ColId, ModelCell, ModelRow, ViewRow};
 
@@ -23,11 +29,27 @@ use crate::source::{ColId, ModelCell, ModelRow, ViewRow};
 pub const MAX_COPY_CELLS: u128 = 1_000_000;
 
 /// How view rows map to model rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ViewMap {
     /// No local sort or filter (all of M3a): view row `n` is model row `n`. `loaded` rows
     /// exist; a row past them maps to itself (a placeholder).
     Identity { loaded: u64 },
+    // ## m3b-t01b-seams
+    /// A local sort (Task 36): view row `i < order.len()` is model row `order[i]`; the rows
+    /// after them are the unsorted tail, in source order from model row `tail_from` (rows that
+    /// arrived during or after the sort; a row past `loaded` is a placeholder, as for the
+    /// identity). `loaded` rows exist.
+    Permuted {
+        order: Arc<[u64]>,
+        tail_from: u64,
+        loaded: u64,
+    },
+    /// Filter rows (Task 37): view row `i` is model row `rows[i]`; no other row is shown.
+    /// `source_loaded` is the source's loaded rows the filter ran over.
+    Filtered {
+        rows: Arc<[u64]>,
+        source_loaded: u64,
+    },
 }
 
 impl ViewMap {
@@ -35,10 +57,11 @@ impl ViewMap {
         ViewMap::Identity { loaded }
     }
 
-    /// The loaded rows.
+    /// The loaded rows, as the view shows them (a filter shows only the rows it kept).
     pub fn len(&self) -> u64 {
         match self {
-            ViewMap::Identity { loaded } => *loaded,
+            ViewMap::Identity { loaded } | ViewMap::Permuted { loaded, .. } => *loaded,
+            ViewMap::Filtered { rows, .. } => rows.len() as u64,
         }
     }
 
@@ -46,17 +69,56 @@ impl ViewMap {
         self.len() == 0
     }
 
+    /// The model row view row `row` shows; `None` for a row a filter does not show.
     pub fn view_to_model(&self, row: ViewRow) -> Option<ModelRow> {
         match self {
             ViewMap::Identity { .. } => Some(ModelRow(row.0)),
+            ViewMap::Permuted {
+                order, tail_from, ..
+            } => {
+                let sorted = order.len() as u64;
+                if row.0 < sorted {
+                    order
+                        .get(usize::try_from(row.0).ok()?)
+                        .copied()
+                        .map(ModelRow)
+                } else {
+                    tail_from.checked_add(row.0 - sorted).map(ModelRow)
+                }
+            }
+            ViewMap::Filtered { rows, .. } => rows
+                .get(usize::try_from(row.0).ok()?)
+                .copied()
+                .map(ModelRow),
         }
     }
 
+    /// The view row that shows model row `row`; `None` for a row a filter does not show. The
+    /// sorted part is searched linearly (Task 35 adds the inverse index its perf line needs).
     pub fn model_to_view(&self, row: ModelRow) -> Option<ViewRow> {
         match self {
             ViewMap::Identity { .. } => Some(ViewRow(row.0)),
+            ViewMap::Permuted {
+                order, tail_from, ..
+            } => {
+                if row.0 >= *tail_from {
+                    (order.len() as u64)
+                        .checked_add(row.0 - tail_from)
+                        .map(ViewRow)
+                } else {
+                    position(order, row.0)
+                }
+            }
+            ViewMap::Filtered { rows, .. } => position(rows, row.0),
         }
     }
+}
+
+/// The index of `model` in `rows`, as a view row.
+fn position(rows: &[u64], model: u64) -> Option<ViewRow> {
+    rows.iter()
+        .position(|&r| r == model)
+        .map(|i| ViewRow(i as u64))
 }
 
 /// A rectangle of cells, half-open: view rows × column positions (module docs).
@@ -550,6 +612,9 @@ fn corner(cell: ModelCell, map: &ViewMap) -> (u64, u32) {
 fn model_rows_to_view(map: &ViewMap, rows: &Range<u64>) -> Range<u64> {
     match map {
         ViewMap::Identity { .. } => rows.clone(),
+        // ## m3b-t01b-seams: M3a's identity reading until Task 35 maps row sets through a
+        // sort or a filter (nothing builds those maps before it).
+        ViewMap::Permuted { .. } | ViewMap::Filtered { .. } => rows.clone(),
     }
 }
 

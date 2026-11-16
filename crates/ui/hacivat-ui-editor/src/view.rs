@@ -37,8 +37,8 @@ use std::sync::Arc;
 
 use hacivat_text::display::HeightMap;
 use hacivat_text::{
-    Annotations, Bias, ChangeSet, Committed, EditorModel, ImeCore, MapMode, ModelConfig, Origin,
-    SelectionRange, SelectionSet, Snapshot, TextBuffer, Transaction, UserEvent,
+    Annotations, Bias, ChangeSet, Committed, EditorModel, FoldSet, ImeCore, MapMode, ModelConfig,
+    Origin, SelectionRange, SelectionSet, Snapshot, TextBuffer, Transaction, UserEvent,
 };
 use hacivat_ui::text::TextFn;
 use hacivat_ui_core::gpui_surface::{
@@ -52,7 +52,10 @@ use crate::a11y::{self, A11yFrame, A11yState};
 use crate::clipboard::PasteState;
 use crate::commands::{self, CommandState, command_by_id};
 use crate::config::{DocContext, DocId, EditorConfig, Tier};
+// ## m3b-t01b-seams
 use crate::element::{EditorElement, FrameLayout};
+use crate::find::{self, FindMatcher, FindState, FindStatus};
+use crate::fold_gutter::{self, FoldState};
 use crate::ime::{self, InputState};
 use crate::large_file::{self, TierState};
 use crate::layout_cache::{LayoutCache, LayoutStats};
@@ -100,6 +103,17 @@ pub enum EditorEvent {
     ContextMenuOpened {
         at: Point<Pixels>,
     },
+    // ## m3b-t01b-seams
+    /// `editor.find` (Task 33 emits it): the host opens its find bar, seeded with the
+    /// selection's text when it is on one line.
+    FindRequested {
+        seed: Option<String>,
+    },
+    /// The document's line endings changed between uniform and mixed (Task 34 emits it; the
+    /// host's status bar offers `editor.normalize_line_endings`).
+    LineEndingsChanged {
+        mixed: bool,
+    },
 }
 
 /// The focused editor, for the app's commands (`enabled` = an editor is focused).
@@ -129,6 +143,9 @@ pub struct EditorView {
     // the commands (Task 25), and the focus subscriptions.
     pub(crate) input: InputState,
     pub(crate) commands: CommandState,
+    // ## m3b-t01b-seams: module-owned state of find (Task 33) and folding (Task 32).
+    pub(crate) find: FindState,
+    pub(crate) fold: FoldState,
     _subscriptions: Vec<Subscription>,
     // ## m3a-t01b-seams (round 2): the label as last evaluated, with the UI-text generation it
     // was evaluated at (re-read only when the language changes).
@@ -241,6 +258,8 @@ impl EditorView {
             layout: None,
             input: InputState::default(),
             commands: CommandState::default(),
+            find: FindState::default(),
+            fold: FoldState::default(),
             _subscriptions: subscriptions,
             a11y_label_cache: None,
             fanned_version: opened_version,
@@ -391,6 +410,38 @@ impl EditorView {
         cx.emit(EditorEvent::CompositionChanged(composing));
         cx.emit(EditorEvent::StatusChanged);
         cx.notify();
+    }
+
+    // ## m3b-t01b-seams: find (Task 33) and folding (Task 32), each one line into its module.
+
+    /// Sets (or clears, `None`) the find query the next steps use.
+    pub fn set_find(&mut self, m: Option<Rc<dyn FindMatcher>>, cx: &mut Context<Self>) {
+        find::set_find(self, m, cx);
+    }
+
+    /// Selects the next (`back`: previous) match and answers it; `None` when there is none.
+    pub fn find_step(&mut self, back: bool, cx: &mut Context<Self>) -> Option<Range<usize>> {
+        find::find_step(self, back, cx)
+    }
+
+    /// Selects every match, at most `cap`; answers how many.
+    pub fn select_all_matches(&mut self, cap: u32, cx: &mut Context<Self>) -> u32 {
+        find::select_all_matches(self, cap, cx)
+    }
+
+    /// The find panel's status ("k of N").
+    pub fn find_status(&self) -> FindStatus {
+        find::status(self)
+    }
+
+    /// The folded ranges.
+    pub fn folds(&self) -> &FoldSet {
+        fold_gutter::folds(self)
+    }
+
+    /// Folds or unfolds at `line` (0-based); `true` when anything changed.
+    pub fn toggle_fold_at(&mut self, line: u32, cx: &mut Context<Self>) -> bool {
+        fold_gutter::toggle_fold_at(self, line, cx)
     }
 
     /// Runs the editor command `id`; `false` when there is no such command.
@@ -715,6 +766,9 @@ impl EditorView {
             self.scroll.reveal = true;
         }
         marks::on_commit(&mut self.marks, &committed, self.model.changelog(), &snap);
+        // ## m3b-t01b-seams: folds follow the text; find matches go stale (Tasks 32, 33).
+        fold_gutter::on_commit(self, &committed);
+        find::on_commit(self, &committed);
         if text_changed {
             self.service.change(self.doc, &snap, &committed.desc, cx);
             let text_len = snap.buffer.len_bytes() as u64;

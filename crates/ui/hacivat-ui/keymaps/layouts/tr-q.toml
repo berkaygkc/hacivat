@@ -1,3 +1,19 @@
 # Layout overlay: Turkish Q (KBDTUQ). Base-layer characters that need Shift. The M1 defaults
 # need no alternative chord here.
 shift_level = "!%&'()+/:;=>?^_"
+
+## m3b-t01b-seams
+# Toggle comment (Task 34): `/` needs Shift on this layout, so `cmd-/` and `ctrl-/` become
+# `cmd-shift-/` and `ctrl-shift-/` (the M3a `cmd-shift-.` precedent).
+
+[[binding]]
+chord = "cmd-shift-/"
+command = "editor.toggle_comment"
+context = "Editor"
+platforms = ["macos"]
+
+[[binding]]
+chord = "ctrl-shift-/"
+command = "editor.toggle_comment"
+context = "Editor"
+platforms = ["windows", "linux"]

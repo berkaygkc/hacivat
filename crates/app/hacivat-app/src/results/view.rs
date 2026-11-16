@@ -42,8 +42,8 @@ use hacivat_ui::popover::Declare as _;
 use hacivat_ui::text::TextFn;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter,
-    Focusable, Global, InteractiveElement, IntoElement, ParentElement, Render, Role, SharedString,
-    StyleRefinement, Styled, Subscription, Task, WeakEntity, Window, div,
+    FocusHandle, Focusable, Global, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    SharedString, StyleRefinement, Styled, Subscription, Task, WeakEntity, Window, div,
 };
 use hacivat_ui_core::theme::Theme;
 use hacivat_ui_grid::model::{DEFAULT_ROW_HEIGHT, ViewMap};
@@ -122,6 +122,9 @@ impl ConsoleTile {
 pub struct ResultsHost {
     shown: Option<ConsoleId>,
     tiles: HashMap<ConsoleId, ConsoleTile>,
+    // ## m3b-t01b-seams (P-M3b-21): the tile root's focus, registered as the `Results` key
+    // context.
+    focus: FocusHandle,
 }
 
 impl std::fmt::Debug for ResultsHost {
@@ -177,6 +180,8 @@ fn grid_config(number: u32, adapter: &Rc<GridAdapter>) -> GridConfig {
             no_rows: text_fn(ids::hv::GRID_NO_ROWS),
         },
         a11y_label: Rc::new(move |cx: &App| result_title(number, cx)),
+        // ## m3b-t01b-seams: a table until Task 38's views.
+        transposed: false,
     }
 }
 
@@ -264,10 +269,11 @@ fn selection_dims(grid: &GridView, loaded: u64) -> Option<(u64, u64)> {
 }
 
 impl ResultsHost {
-    fn new() -> Self {
+    fn new(cx: &mut Context<Self>) -> Self {
         ResultsHost {
             shown: None,
             tiles: HashMap::new(),
+            focus: cx.focus_handle(),
         }
     }
 
@@ -531,6 +537,16 @@ impl ResultsHost {
             }
             GridEvent::SelectionChanged => cx.notify(),
             GridEvent::FocusChanged(_) | GridEvent::VisibleRegion { .. } => {}
+            // ## m3b-t01b-seams: each M3b request goes to its module (stubs until Tasks 36–39
+            // fill them); the frozen count needs nothing from the tile yet (Task 35).
+            GridEvent::SortRequested(spec) => super::sort::on_requested(console, spec.clone(), cx),
+            GridEvent::FindRequested => super::find::open(console, cx),
+            GridEvent::GotoRequested => super::goto::open(console, cx),
+            GridEvent::ValueRequested(cell) => super::value_viewer::open(console, *cell, cx),
+            GridEvent::ContextMenuRequested { at, cell, header } => {
+                super::context_menu::open(console, *at, *cell, *header, cx);
+            }
+            GridEvent::FrozenChanged(_) => {}
         });
         self.tiles.get_mut(&console)?.grids.push(GridSlot {
             adapter,
@@ -578,6 +594,8 @@ impl ResultsHost {
         );
         let mut column = div()
             .id("results-tile")
+            // ## m3b-t01b-seams (P-M3b-21): the `Results` key context's root.
+            .track_focus(&self.focus)
             .flex()
             .flex_col()
             .size_full()
@@ -708,6 +726,13 @@ fn strip_actions(
     }
 }
 
+// ## m3b-t01b-seams
+impl Focusable for ResultsHost {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
 impl Render for ResultsHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
@@ -734,15 +759,19 @@ impl Render for ResultsHost {
 /// The `results_view` hook (a `ViewBuilder`): the results tile, built once per window.
 pub fn build(window: &mut Window, cx: &mut App) -> AnyView {
     let _ = window;
-    let host = cx.new(|_| ResultsHost::new());
+    let host = cx.new(ResultsHost::new);
     cx.default_global::<ResultsHosts>().0.push(host.downgrade());
+    // ## m3b-t01b-seams (P-M3b-21): `Results` joins the context stack while the tile root has
+    // the focus.
+    let focus = host.read(cx).focus.clone();
+    crate::shell::register_focus_context(cx, focus, super::RESULTS_CONTEXT);
     host.into()
 }
 
 // ---- commands -------------------------------------------------------------------------------
 
 /// The palette title of each grid command (`hv-cmd-<id with . and _ as ->`, R5).
-static GRID_TITLES: [(&str, &str); 26] = [
+static GRID_TITLES: [(&str, &str); 35] = [
     ("grid.move_left", "hv-cmd-grid-move-left"),
     ("grid.move_right", "hv-cmd-grid-move-right"),
     ("grid.move_up", "hv-cmd-grid-move-up"),
@@ -769,6 +798,16 @@ static GRID_TITLES: [(&str, &str); 26] = [
     ("grid.copy", "hv-cmd-grid-copy"),
     ("grid.copy_with_headers", "hv-cmd-grid-copy-with-headers"),
     ("grid.escape", "hv-cmd-grid-escape"),
+    // ## m3b-t01b-seams
+    ("grid.grow_selection", "hv-cmd-grid-grow-selection"),
+    ("grid.shrink_selection", "hv-cmd-grid-shrink-selection"),
+    ("grid.find", "hv-cmd-grid-find"),
+    ("grid.goto_row", "hv-cmd-grid-goto-row"),
+    ("grid.open_value", "hv-cmd-grid-open-value"),
+    ("grid.context_menu", "hv-cmd-grid-context-menu"),
+    ("grid.auto_fit", "hv-cmd-grid-auto-fit"),
+    ("grid.freeze", "hv-cmd-grid-freeze"),
+    ("grid.unfreeze", "hv-cmd-grid-unfreeze"),
 ];
 
 /// The palette title of grid command `id`.

@@ -84,6 +84,11 @@ pub enum ExecMarkState {
     },
     Cancelled,
     Skipped,
+    // ## m3b-t01b-seams: a cancel escalated to Terminate/Deactivate (Task 23 sets it; Task 34
+    // paints its gutter badge). Until then it reads as Cancelling everywhere.
+    Escalated {
+        since: Instant,
+    },
 }
 
 /// How long a running mark shows nothing (no flash for a fast statement).
@@ -563,7 +568,8 @@ fn glyph_of(m: &Mark, now: Instant) -> Option<Glyph> {
         }
         ExecMarkState::Succeeded { .. } => Glyph::Succeeded,
         ExecMarkState::Failed { .. } => Glyph::Failed,
-        ExecMarkState::Cancelling { .. } => Glyph::Cancelling,
+        // ## m3b-t01b-seams: Escalated paints as Cancelling until Task 34's badge.
+        ExecMarkState::Cancelling { .. } | ExecMarkState::Escalated { .. } => Glyph::Cancelling,
         ExecMarkState::Cancelled => Glyph::Cancelled,
         ExecMarkState::Skipped => Glyph::Skipped,
     })
@@ -584,7 +590,10 @@ fn next_tick(m: &MarkStore, now: Instant) -> Option<Instant> {
         .iter()
         .filter_map(|mk| match mk.state.as_ref()? {
             ExecMarkState::Running { started } => Some(next(*started, true)),
-            ExecMarkState::Cancelling { since } => Some(next(*since, false)),
+            // ## m3b-t01b-seams: Escalated ticks as Cancelling.
+            ExecMarkState::Cancelling { since } | ExecMarkState::Escalated { since } => {
+                Some(next(*since, false))
+            }
             _ => None,
         })
         .min()

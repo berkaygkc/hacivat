@@ -68,11 +68,99 @@ pub enum IconName {
     // both SVGs were already bundled.
     Table2,
     Layers,
-    /// The Hacivat mark (`icons/hacivat/hv-mark.svg`).
+    // ## m3b-t01b-seams (P-M3b-37): Run (Task 41), pinned tabs and history rows, Count rows,
+    // filter rows, sort and frozen columns. `Search` and `ChevronsUpDown` are above.
+    Play,
+    Pin,
+    Sigma,
+    Filter,
+    ArrowUpDown,
+    Snowflake,
+    // ## m3b-t01b-seams (controller ruling RC-4): the M3b mocks' icons.
+    History,
+    Timer,
+    Hourglass,
+    Users,
+    EyeOff,
+    OctagonX,
+    Clock,
+    /// The Hacivat mark (`icons/hacivat/hv-mark.svg`). Keep it the last variant: [`IconName::ALL`]
+    /// is checked against it.
     HvMark,
 }
 
 impl IconName {
+    // ## m3b-t01b-seams (controller ruling RC-4)
+    /// Every icon, in declaration order (a test checks that every one resolves to a bundled
+    /// asset, and that this list is complete).
+    pub const ALL: [IconName; 65] = [
+        IconName::ArrowLeftRight,
+        IconName::Check,
+        IconName::ChevronDown,
+        IconName::ChevronRight,
+        IconName::ChevronsUpDown,
+        IconName::CircleCheck,
+        IconName::Ellipsis,
+        IconName::FileCode,
+        IconName::GitCommit,
+        IconName::Info,
+        IconName::Languages,
+        IconName::LayoutPanelLeft,
+        IconName::Lock,
+        IconName::Menu,
+        IconName::Minus,
+        IconName::Moon,
+        IconName::Plus,
+        IconName::Search,
+        IconName::Square,
+        IconName::Sun,
+        IconName::TriangleAlert,
+        IconName::X,
+        IconName::Database,
+        IconName::LockOpen,
+        IconName::RotateCw,
+        IconName::Copy,
+        IconName::ClipboardPaste,
+        IconName::Plug,
+        IconName::Unplug,
+        IconName::Pencil,
+        IconName::Trash2,
+        IconName::ExternalLink,
+        IconName::Route,
+        IconName::CircleAlert,
+        IconName::CircleX,
+        IconName::FolderOpen,
+        IconName::Undo2,
+        IconName::FileKey,
+        IconName::FileUp,
+        IconName::KeyRound,
+        IconName::ArrowRight,
+        IconName::Fingerprint,
+        IconName::ScrollText,
+        IconName::SkipForward,
+        IconName::ArrowDownToLine,
+        IconName::Eraser,
+        IconName::ClipboardX,
+        IconName::Ban,
+        IconName::CopyCheck,
+        IconName::Table2,
+        IconName::Layers,
+        IconName::Play,
+        IconName::Pin,
+        IconName::Sigma,
+        IconName::Filter,
+        IconName::ArrowUpDown,
+        IconName::Snowflake,
+        IconName::History,
+        IconName::Timer,
+        IconName::Hourglass,
+        IconName::Users,
+        IconName::EyeOff,
+        IconName::OctagonX,
+        IconName::Clock,
+        IconName::HvMark,
+    ];
+
     /// The bundled asset path.
     pub fn path(self) -> &'static str {
         match self {
@@ -129,6 +217,20 @@ impl IconName {
             // ## m3a-t30-results-view
             IconName::Table2 => "icons/lucide/table-2.svg",
             IconName::Layers => "icons/lucide/layers.svg",
+            // ## m3b-t01b-seams
+            IconName::Play => "icons/lucide/play.svg",
+            IconName::Pin => "icons/lucide/pin.svg",
+            IconName::Sigma => "icons/lucide/sigma.svg",
+            IconName::Filter => "icons/lucide/filter.svg",
+            IconName::ArrowUpDown => "icons/lucide/arrow-up-down.svg",
+            IconName::Snowflake => "icons/lucide/snowflake.svg",
+            IconName::History => "icons/lucide/history.svg",
+            IconName::Timer => "icons/lucide/timer.svg",
+            IconName::Hourglass => "icons/lucide/hourglass.svg",
+            IconName::Users => "icons/lucide/users.svg",
+            IconName::EyeOff => "icons/lucide/eye-off.svg",
+            IconName::OctagonX => "icons/lucide/octagon-x.svg",
+            IconName::Clock => "icons/lucide/clock.svg",
             IconName::HvMark => "icons/hacivat/hv-mark.svg",
         }
     }
@@ -317,5 +419,16 @@ mod tests {
     fn sizes_are_the_design_sizes() {
         assert_eq!(IconSize::Chrome.px(), 12.0);
         assert_eq!(IconSize::Default.px(), 14.0);
+    }
+
+    // ## m3b-t01b-seams (controller ruling RC-4)
+    /// `IconName::ALL` holds every variant once, in declaration order (`HvMark` stays last), so
+    /// the app's asset test covers every icon.
+    #[test]
+    fn all_lists_every_icon_in_declaration_order() {
+        assert_eq!(IconName::ALL.len(), IconName::HvMark as usize + 1);
+        for (i, n) in IconName::ALL.iter().enumerate() {
+            assert_eq!(*n as usize, i, "{n:?}");
+        }
     }
 }

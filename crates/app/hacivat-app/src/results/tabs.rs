@@ -30,7 +30,7 @@ use hacivat_l10n::{Count, ids};
 use hacivat_proto::{AccessLabel, DbmsKind};
 use hacivat_results::{Completeness, PauseReason, ResultSource};
 use hacivat_session::session::{RunId, UnitId};
-use hacivat_ui_core::gpui_surface::{App, Context, SharedString};
+use hacivat_ui_core::gpui_surface::{App, Context, SharedString, Window};
 use hacivat_ui_grid::{ColId, GridDataSource};
 use hacivat_values::valfmt::DisplayZone;
 
@@ -389,6 +389,21 @@ impl ConsoleResults {
         }
         cx.notify();
     }
+}
+
+// ## m3b-t01b-seams (named exception): the bodies of `results.next_tab`/`prev_tab` (Task 25).
+
+/// Activates the next (`forward`) or previous tab of the results `window` shows. STUB:
+/// nothing.
+pub(crate) fn step_tab(forward: bool, window: &mut Window, cx: &mut App) {
+    let _ = (forward, window, cx);
+}
+
+/// Whether `results.next_tab`/`prev_tab` can run. STUB: `false` (palette-hidden; the keys
+/// pass through).
+pub(crate) fn can_step_tab(cx: &App) -> bool {
+    let _ = cx;
+    false
 }
 
 /// `Result N`.

@@ -8,7 +8,7 @@ use crate::model::Dir;
 use crate::view::GridCommand;
 
 /// Every grid command id, in palette order, and its command.
-pub static GRID_COMMANDS: [(&str, GridCommand); 26] = [
+pub static GRID_COMMANDS: [(&str, GridCommand); 35] = [
     ("grid.move_left", mv(Dir::Left, false)),
     ("grid.move_right", mv(Dir::Right, false)),
     ("grid.move_up", mv(Dir::Up, false)),
@@ -43,7 +43,7 @@ pub static GRID_COMMANDS: [(&str, GridCommand); 26] = [
     ("grid.prev_cell", GridCommand::NextCell { back: true }),
     ("grid.select_all", GridCommand::SelectAll),
     ("grid.select_row", GridCommand::SelectRow),
-    // Palette-only in M3a (R-M3-38).
+    // Palette-only in M3a (R-M3-38); bound since M3b Task 1b (P25).
     ("grid.select_column", GridCommand::SelectColumn),
     ("grid.copy", GridCommand::Copy { headers: false }),
     (
@@ -51,6 +51,18 @@ pub static GRID_COMMANDS: [(&str, GridCommand); 26] = [
         GridCommand::Copy { headers: true },
     ),
     ("grid.escape", GridCommand::Escape),
+    // ## m3b-t01b-seams: the M3b rows. The sort and view rows (`grid.sort_asc`, `sort_desc`,
+    // `clear_sort`, `view_table`, `view_transposed`, `view_text`, `toggle_record`) are not
+    // grid commands: the app registers them over its results (`results::{sort, views}`).
+    ("grid.grow_selection", GridCommand::GrowSelection),
+    ("grid.shrink_selection", GridCommand::ShrinkSelection),
+    ("grid.find", GridCommand::Find),
+    ("grid.goto_row", GridCommand::GotoRow),
+    ("grid.open_value", GridCommand::OpenValue),
+    ("grid.context_menu", GridCommand::ContextMenu),
+    ("grid.auto_fit", GridCommand::AutoFit),
+    ("grid.freeze", GridCommand::Freeze),
+    ("grid.unfreeze", GridCommand::Unfreeze),
 ];
 
 const fn mv(dir: Dir, extend: bool) -> GridCommand {

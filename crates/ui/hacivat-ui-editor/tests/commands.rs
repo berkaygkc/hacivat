@@ -429,6 +429,43 @@ const SPECIAL: &[(&str, &str)] = &[
         "editor.describe_exec_range",
         "describe_says_what_run_would_execute",
     ),
+    // ## m3b-t01b-seams (named exception): the M3b rows are stubs until Tasks 31-34; each
+    // task moves its ids from `m3b_stub_commands_change_nothing` to a test of its own.
+    ("editor.add_caret_above", "m3b_stub_commands_change_nothing"),
+    ("editor.add_caret_below", "m3b_stub_commands_change_nothing"),
+    (
+        "editor.select_next_occurrence",
+        "m3b_stub_commands_change_nothing",
+    ),
+    (
+        "editor.select_all_occurrences",
+        "m3b_stub_commands_change_nothing",
+    ),
+    (
+        "editor.split_selection_into_lines",
+        "m3b_stub_commands_change_nothing",
+    ),
+    ("editor.undo_selection", "m3b_stub_commands_change_nothing"),
+    ("editor.redo_selection", "m3b_stub_commands_change_nothing"),
+    ("editor.fold", "m3b_stub_commands_change_nothing"),
+    ("editor.unfold", "m3b_stub_commands_change_nothing"),
+    ("editor.fold_all", "m3b_stub_commands_change_nothing"),
+    ("editor.unfold_all", "m3b_stub_commands_change_nothing"),
+    ("editor.find", "m3b_stub_commands_change_nothing"),
+    ("editor.find_next", "m3b_stub_commands_change_nothing"),
+    ("editor.find_prev", "m3b_stub_commands_change_nothing"),
+    ("editor.find_close", "m3b_stub_commands_change_nothing"),
+    ("editor.toggle_comment", "m3b_stub_commands_change_nothing"),
+    ("editor.duplicate_line", "m3b_stub_commands_change_nothing"),
+    ("editor.delete_line", "m3b_stub_commands_change_nothing"),
+    ("editor.move_line_up", "m3b_stub_commands_change_nothing"),
+    ("editor.move_line_down", "m3b_stub_commands_change_nothing"),
+    (
+        "editor.normalize_line_endings",
+        "m3b_stub_commands_change_nothing",
+    ),
+    ("editor.history_prev", "m3b_stub_commands_change_nothing"),
+    ("editor.history_next", "m3b_stub_commands_change_nothing"),
 ];
 
 fn untested_commands() -> Vec<&'static str> {
@@ -467,6 +504,44 @@ fn every_command_has_a_test(cx: &mut TestAppContext) {
     }
     for (id, before, want) in CASES {
         assert_eq!(after(cx, before, id), *want, "{id} on {before:?}");
+    }
+}
+
+// ## m3b-t01b-seams (named exception)
+/// The M3b commands are registered with stub bodies (Task 1b): each runs and changes neither the
+/// text nor the selection.
+#[gpui::test]
+fn m3b_stub_commands_change_nothing(cx: &mut TestAppContext) {
+    for id in [
+        "editor.add_caret_above",
+        "editor.add_caret_below",
+        "editor.select_next_occurrence",
+        "editor.select_all_occurrences",
+        "editor.split_selection_into_lines",
+        "editor.undo_selection",
+        "editor.redo_selection",
+        "editor.fold",
+        "editor.unfold",
+        "editor.fold_all",
+        "editor.unfold_all",
+        "editor.find",
+        "editor.find_next",
+        "editor.find_prev",
+        "editor.find_close",
+        "editor.toggle_comment",
+        "editor.duplicate_line",
+        "editor.delete_line",
+        "editor.move_line_up",
+        "editor.move_line_down",
+        "editor.normalize_line_endings",
+        "editor.history_prev",
+        "editor.history_next",
+    ] {
+        assert_eq!(
+            after(cx, "SELECT «a┃», b;\nFROM t;", id),
+            "SELECT «a┃», b;\nFROM t;",
+            "{id}"
+        );
     }
 }
 

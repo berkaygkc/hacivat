@@ -687,7 +687,10 @@ pub fn exec_announcement(cx: &App, statement: u32, state: &ExecMarkState) -> Opt
     let n = ("n", UiArg::Count(u64::from(statement)));
     let rows = |rows: u64| ("rows", UiArg::Count(rows));
     let (id, more): (&'static str, Option<(&'static str, UiArg)>) = match state {
-        ExecMarkState::Queued | ExecMarkState::Cancelling { .. } => return None,
+        // ## m3b-t01b-seams: Escalated is not announced, as Cancelling.
+        ExecMarkState::Queued
+        | ExecMarkState::Cancelling { .. }
+        | ExecMarkState::Escalated { .. } => return None,
         ExecMarkState::Running { .. } => ("hui-editor-exec-running", None),
         ExecMarkState::Succeeded { rows: None, .. } => ("hui-editor-exec-done", None),
         ExecMarkState::Succeeded {

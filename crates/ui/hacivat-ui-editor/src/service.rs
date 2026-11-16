@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use hacivat_text::display::{Decoration, RangeSet};
-use hacivat_text::{ChangeDesc, ChangeLog, Snapshot, TokenOracle};
+use hacivat_text::{ChangeDesc, ChangeLog, FoldRange, Snapshot, TokenOracle};
 use hacivat_ui_core::gpui_surface::App;
 use smallvec::{SmallVec, smallvec};
 
@@ -121,6 +121,12 @@ pub trait LanguageService: 'static {
     ) -> Option<ExecPreview>;
     fn token_oracle(&self, doc: DocId) -> Rc<dyn TokenOracle>;
     fn decoration_sources(&self, doc: DocId) -> SmallVec<[Rc<dyn DecorationSource>; 2]>;
+    // ## m3b-t01b-seams
+    /// The ranges of `doc` that can fold at `version` (Task 32; the app's adapter fills it).
+    /// Default: none, so nothing folds.
+    fn folding_ranges(&self, _doc: DocId, _version: u64) -> Arc<[FoldRange]> {
+        Arc::from([])
+    }
 }
 
 /// A token oracle that knows no words (the class fallback applies).

@@ -8,6 +8,8 @@ pub mod connections;
 // ## m3a-t01b-seams
 pub mod console;
 pub mod exec_ui;
+// ## m3b-t01b-seams: the history dialog (Task 27).
+pub mod history;
 pub mod l10n_global;
 pub mod menus;
 pub mod results;
@@ -40,6 +42,8 @@ pub fn init(cx: &mut App) {
     console::install(cx);
     results::install(cx);
     exec_ui::install(cx);
+    // ## m3b-t01b-seams
+    history::install(cx);
 }
 
 #[cfg(test)]

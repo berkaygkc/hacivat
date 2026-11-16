@@ -18,6 +18,18 @@
 pub mod cancel;
 pub mod chooser;
 pub mod close_prompt;
+// ## m3b-t01b-seams: the M3b run UI (stubs that draw nothing and answer the safe value):
+// confirmation and confirm-in-transaction (Task 21), cancel escalation and the error-policy bar
+// (Task 23), the parameter prompt and the run-policy popover (Task 24). `pending_core` is the
+// placeholder of Task 1c's types, deleted at that merge.
+pub mod commit_prompt;
+pub mod confirm;
+pub mod error_bar;
+pub mod escalation;
+pub mod params_prompt;
+#[doc(hidden)]
+pub mod pending_core;
+pub mod policy_popover;
 // ## m3a-t33-exec-ui (fix round 1): the SQL context, known or unknown.
 pub mod context;
 // ## m3a-t35-shots (named exception): the gutter marks' shots fixtures.
@@ -32,7 +44,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use hacivat_exec::{ExecService, ExecUnit, SplitOracle};
-use hacivat_results::MemoryBudget;
+use hacivat_results::{FetchPolicy, MemoryBudget};
 use hacivat_session::session::{RunId, SessionHandle, UnitId};
 use hacivat_ui::menu::PopupMenu;
 use hacivat_ui_core::gpui_surface::{
@@ -42,6 +54,9 @@ use hacivat_ui_editor::{EditorView, MarkKey};
 use sql_split::exec_range::{CandidateKind, TextRange};
 
 pub use orchestrator::{agrees, attach, handle_results_event, rebind, resolve_for_run};
+// ## m3b-t01b-seams
+pub use confirm::AppConfirmPort;
+pub use error_bar::{ErrorAsk, on_choice};
 
 use crate::console::ConsoleId;
 use crate::shell::{Workspace, set_quit_guard, set_tab_close_guard};
@@ -250,6 +265,24 @@ pub fn pending_read_only(console: ConsoleId, cx: &App) -> bool {
 pub fn connected(console: ConsoleId, cx: &App) -> bool {
     !matches!(sql_context(console, cx), context::SqlContext::Pending)
         && orchestrator::live_session(cx, console).is_some()
+}
+
+// ## m3b-t01b-seams
+
+/// The fetch policy of console `console`'s next run (Task 24 calls it when it builds the run;
+/// P-M3b-17). STUB: M3a's `FetchPolicy::default()`; Task 25 fills it here with
+/// `results.max_value_bytes` as the cell cap.
+pub fn fetch_policy_for(console: ConsoleId, cx: &App) -> FetchPolicy {
+    let _ = (console, cx);
+    FetchPolicy::default()
+}
+
+/// A receiver that already holds `answer` (the M3b stubs' answers).
+pub(crate) fn answered<T>(answer: T) -> tokio::sync::oneshot::Receiver<T> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // The receiver is alive here, so the send cannot fail.
+    let _ = tx.send(answer);
+    rx
 }
 
 /// Sets or clears console `console`'s pending read-only flag (Task 32's seam).

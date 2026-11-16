@@ -54,3 +54,43 @@ chord = "ctrl-f2"
 command = "exec.cancel"
 context = "Console"
 platforms = ["windows", "linux"]
+
+## m3b-t01b-seams
+# DataGrip's chords where M3b's defaults differ (Task 1b): Delete line is cmd-backspace on macOS
+# (it takes the chord from `editor.delete_to_line_start`, which stays in the palette), and
+# Extend/Shrink selection in a grid are ctrl-w/ctrl-shift-w on Windows and Linux; there ctrl-w
+# hides `workspace.close_tab` while a grid has the focus (P-M3b-21, PO Q10; ctrl-f4 still closes
+# the tab on Windows). Every other M3b chord is the default's.
+
+[[binding]]
+chord = "cmd-backspace"
+command = "editor.delete_line"
+context = "Editor"
+platforms = ["macos"]
+
+[[binding]]
+chord = "ctrl-w"
+command = "grid.grow_selection"
+context = "Grid"
+platforms = ["windows", "linux"]
+
+[[binding]]
+chord = "ctrl-shift-w"
+command = "grid.shrink_selection"
+context = "Grid"
+platforms = ["windows", "linux"]
+
+[[binding]]
+chord = "ctrl-alt-shift-j"
+command = "editor.select_all_occurrences"
+context = "Editor"
+platforms = ["windows", "linux"]
+
+# Accepted, documented AltGr shadowing (Task 1b): on TR-F AltGr+Shift+J types `<`, so there
+# DataGrip's Select all occurrences types the character instead; the command stays in the
+# palette.
+
+[[accepted_altgr_shadowing]]
+chord = "ctrl-alt-shift-j"
+layout = "tr-f"
+produces = "<"

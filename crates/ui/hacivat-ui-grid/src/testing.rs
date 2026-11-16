@@ -45,6 +45,8 @@ pub fn grid_config(a11y_label: &'static str) -> GridConfig {
             no_rows: fixed("No rows"),
         },
         a11y_label: fixed(a11y_label),
+        // ## m3b-t01b-seams
+        transposed: false,
     }
 }
 

@@ -24,8 +24,12 @@
 //! menu's key hints, which only the app's keymap knows).
 
 mod edit;
+// ## m3b-t01b-seams: find (Task 33), lines (Task 34), multi-cursor (Task 31).
+mod find;
+mod lines;
 mod menu;
 mod movement;
+mod multi;
 mod run;
 mod selection;
 
@@ -222,7 +226,7 @@ const fn command(
 
 /// Every editor command, in palette order.
 #[rustfmt::skip]
-static COMMANDS: [EditorCommand; 45] = [
+static COMMANDS: [EditorCommand; 68] = [
     command("editor.move_left", "hv-cmd-editor-move-left", movement::move_left, false),
     command("editor.move_right", "hv-cmd-editor-move-right", movement::move_right, false),
     command("editor.move_up", "hv-cmd-editor-move-up", movement::move_up, false),
@@ -268,6 +272,35 @@ static COMMANDS: [EditorCommand; 45] = [
     command("editor.run_2", "hv-cmd-editor-run-2", run::run_2, true),
     command("editor.run_3", "hv-cmd-editor-run-3", run::run_3, true),
     command("editor.describe_exec_range", "hv-cmd-editor-describe-exec-range", run::describe_exec_range, false),
+    // ## m3b-t01b-seams: the M3b rows (stub bodies until the named task fills them; none seals
+    // the history yet, so a stub changes nothing at all: the filling task sets `seals_history`).
+    // Task 31: multi-cursor.
+    command("editor.add_caret_above", "hv-cmd-editor-add-caret-above", multi::add_caret_above, false),
+    command("editor.add_caret_below", "hv-cmd-editor-add-caret-below", multi::add_caret_below, false),
+    command("editor.select_next_occurrence", "hv-cmd-editor-select-next-occurrence", multi::select_next_occurrence, false),
+    command("editor.select_all_occurrences", "hv-cmd-editor-select-all-occurrences", multi::select_all_occurrences, false),
+    command("editor.split_selection_into_lines", "hv-cmd-editor-split-selection-into-lines", multi::split_selection_into_lines, false),
+    command("editor.undo_selection", "hv-cmd-editor-undo-selection", multi::undo_selection, false),
+    command("editor.redo_selection", "hv-cmd-editor-redo-selection", multi::redo_selection, false),
+    // Task 32: folding.
+    command("editor.fold", "hv-cmd-editor-fold", crate::fold_gutter::fold, false),
+    command("editor.unfold", "hv-cmd-editor-unfold", crate::fold_gutter::unfold, false),
+    command("editor.fold_all", "hv-cmd-editor-fold-all", crate::fold_gutter::fold_all, false),
+    command("editor.unfold_all", "hv-cmd-editor-unfold-all", crate::fold_gutter::unfold_all, false),
+    // Task 33: find.
+    command("editor.find", "hv-cmd-editor-find", find::find, false),
+    command("editor.find_next", "hv-cmd-editor-find-next", find::find_next, false),
+    command("editor.find_prev", "hv-cmd-editor-find-prev", find::find_prev, false),
+    command("editor.find_close", "hv-cmd-editor-find-close", find::find_close, false),
+    // Task 34: lines and history recall.
+    command("editor.toggle_comment", "hv-cmd-editor-toggle-comment", lines::toggle_comment, false),
+    command("editor.duplicate_line", "hv-cmd-editor-duplicate-line", lines::duplicate_line, false),
+    command("editor.delete_line", "hv-cmd-editor-delete-line", lines::delete_line, false),
+    command("editor.move_line_up", "hv-cmd-editor-move-line-up", lines::move_line_up, false),
+    command("editor.move_line_down", "hv-cmd-editor-move-line-down", lines::move_line_down, false),
+    command("editor.normalize_line_endings", "hv-cmd-editor-normalize-line-endings", lines::normalize_line_endings, false),
+    command("editor.history_prev", "hv-cmd-editor-history-prev", lines::history_prev, false),
+    command("editor.history_next", "hv-cmd-editor-history-next", lines::history_next, false),
 ];
 
 /// Every editor command (the app registers them; the keymap's `editor.*` rows name them).
