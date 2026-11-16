@@ -13,6 +13,11 @@
 //! pinned. The production notice collapses first to its lock chip "read-only" (still red, still
 //! a button) and puts "Why this console is read-only…" in the ⋯ menu; then the waiting
 //! sentence takes its short form. Nothing else moves.
+//!
+//! ## m3a-f2-visual (named exception): when even that does not fit (960 px in the long
+//! pseudo-locales), the waiting sentence moves into the ⋯ menu, a row that keeps it readable,
+//! so the production notice (a trust signal) is never pushed off the bar; the hollow marker and
+//! Cancel stay.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -123,22 +128,31 @@ pub fn build(model: &ToolbarModel, actions: &ToolbarActions, cx: &App) -> Toolba
     ));
 
     // The waiting state: the sentence, then its short form; Cancel stays.
+    // ## m3a-f2-visual (named exception): a trust signal never gives way to the sentence. The
+    // hollow marker, the sentence and Cancel are three items: after its short form, the
+    // sentence moves into the ⋯ menu (its row keeps it readable) when the bar still does not
+    // hold the production notice's lock chip; the marker and Cancel stay.
     if let Some((name, in_use, max)) = model.waiting.clone() {
-        let a = actions.clone();
+        let empty: TextFn = Rc::new(|_| SharedString::default());
+        bar = bar.item(ToolbarItem::pinned(item(|_, cx| waiting_marker(cx)), empty));
         let long_name = name.clone();
         let full: TextFn = Rc::new(move |cx| waiting_text(cx, &long_name, in_use, max, false));
-        let a2 = actions.clone();
         let short_name = name.clone();
         bar = bar.item(
-            ToolbarItem::pinned(
-                item(move |_, cx| waiting(&name, in_use, max, false, &a, cx)),
+            ToolbarItem::new(
+                20,
+                item(move |_, cx| waiting(&name, in_use, max, false, cx)),
                 full,
             )
-            .priority(20)
             .compact(item(move |_, cx| {
-                waiting(&short_name, in_use, max, true, &a2, cx)
+                waiting(&short_name, in_use, max, true, cx)
             })),
         );
+        let a = actions.clone();
+        bar = bar.item(ToolbarItem::pinned(
+            item(move |_, cx| waiting_cancel(&a, cx)),
+            text_fn(ids::hv::CONSOLE_WAITING_CANCEL),
+        ));
     }
 
     // Right: what is true about writing. A pending read-only reconnect first (C1), then the
@@ -327,50 +341,50 @@ fn waiting_text(cx: &App, name: &str, in_use: u8, max: u8, short: bool) -> Share
     }
 }
 
-fn waiting(
-    name: &str,
-    in_use: u8,
-    max: u8,
-    short: bool,
-    actions: &ToolbarActions,
-    cx: &App,
-) -> AnyElement {
+// ## m3a-f2-visual (named exception): the waiting state's hollow `seam-strong` marker, its own
+// item (it stays when the sentence moves into the ⋯ menu).
+fn waiting_marker(cx: &App) -> AnyElement {
+    let c = Theme::get(cx).tokens.colors;
+    div()
+        .size(px(7.0))
+        .flex_none()
+        .border_1()
+        .border_color(c.seam_strong.to_hsla())
+        .into_any_element()
+}
+
+// ## m3a-f2-visual (named exception): the sentence; the marker and Cancel are their own items.
+fn waiting(name: &str, in_use: u8, max: u8, short: bool, cx: &App) -> AnyElement {
     let theme = *Theme::get(cx);
     let t = theme.tokens;
-    let c = &t.colors;
-    let cancel = actions.cancel_wait.clone();
     div()
         .id("console-waiting")
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(t.spacing.sm))
-        .child(
-            div()
-                .size(px(7.0))
-                .flex_none()
-                .border_1()
-                .border_color(c.seam_strong.to_hsla()),
-        )
         .child(
             Label::new(
                 waiting_text(cx, name, in_use, max, short),
                 TextSource::Fluent,
                 t.type_ramp.caption,
-                c.text.to_hsla(),
+                t.colors.text.to_hsla(),
             )
             .id("console-waiting-text"),
         )
-        .child(
-            Button::new(
-                "console-waiting-cancel",
-                tr(cx, ids::hv::CONSOLE_WAITING_CANCEL, NoArgs),
-            )
-            .kind(ButtonKind::Ghost)
-            .on_raised(true)
-            .on_click(move |_, window, cx| cancel(window, cx)),
-        )
         .into_any_element()
+}
+
+// ## m3a-f2-visual (named exception): Cancel of the wait, pinned (it never hides).
+fn waiting_cancel(actions: &ToolbarActions, cx: &App) -> AnyElement {
+    let cancel = actions.cancel_wait.clone();
+    Button::new(
+        "console-waiting-cancel",
+        tr(cx, ids::hv::CONSOLE_WAITING_CANCEL, NoArgs),
+    )
+    .kind(ButtonKind::Ghost)
+    .on_raised(true)
+    .on_click(move |_, window, cx| cancel(window, cx))
+    .into_any_element()
 }
 
 fn pending_text(cx: &App, name: &str) -> SharedString {

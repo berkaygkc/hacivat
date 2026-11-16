@@ -41,6 +41,12 @@ pub const CHOOSER_LAYER: &str = "chooser";
 const CHOOSER_WIDTH_PX: f32 = 460.0;
 /// The action ID prefix of a candidate row (`chooser.<index>`).
 const ACTION_PREFIX: &str = "chooser.";
+// ## m3a-f2-visual: the chooser's key-hint footer (the palette's words; NOTES surface 4).
+const CHOOSER_KEYS: [(&str, &str); 3] = [
+    ("up down", "hui-palette-hint-navigate"),
+    ("enter", "hui-palette-hint-run"),
+    ("escape", "hui-palette-hint-close"),
+];
 
 fn kind_id(kind: CandidateKind) -> &'static str {
     match kind {
@@ -133,6 +139,10 @@ pub(crate) fn open(
             // ellipsizes inside it, never past the window.
             m.set_max_width(px(CHOOSER_WIDTH_PX));
             m.title(crate::l10n_global::text_fn_id("hv-chooser-title"));
+            // ## m3a-f2-visual (named exception): the active row reads as a selection and the
+            // footer lists the keys (NOTES surface 4).
+            m.set_active_tint(true);
+            m.set_key_hints(CHOOSER_KEYS.to_vec());
             m.select(preselect);
         });
         // The band follows the highlighted row.
@@ -230,6 +240,8 @@ pub(crate) fn open_uncertain(console: ConsoleId, reasons: Vec<&'static str>, cx:
             m.set_access_keys(false);
             m.set_min_width(px(CHOOSER_WIDTH_PX));
             m.title(crate::l10n_global::text_fn_id("hv-chooser-uncertain-title"));
+            // ## m3a-f2-visual (named exception): only Escape does anything here.
+            m.set_key_hints(vec![("escape", "hui-palette-hint-close")]);
         });
         let closed = cx.subscribe(&menu, move |_menu, _: &PopupMenuEvent, cx| {
             close(console, cx)

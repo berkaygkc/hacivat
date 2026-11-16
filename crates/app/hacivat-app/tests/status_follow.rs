@@ -185,6 +185,23 @@ fn status(vcx: &VisualTestContext) -> String {
         .join(" ")
 }
 
+// ## m3a-f2-visual
+/// The status bar's chrome labels (all but the message, whose SQL is data) that the last
+/// frame drew ellipsized, or laid out and cut away to nothing.
+fn chrome_cut(vcx: &VisualTestContext) -> Vec<String> {
+    registry_frame(vcx)
+        .into_iter()
+        .filter(|r| {
+            r.path.contains("hacivat-ui/src/statusbar.rs:")
+                || r.path.contains("hacivat-app/src/connections/status.rs:")
+                || r.path.contains("hacivat-app/src/console/status.rs:")
+        })
+        .filter(|r| !r.path.ends_with("#status-message"))
+        .filter(|r| r.truncated || r.clipped || !r.visible)
+        .map(|r| format!("{} ({})", r.text, r.path))
+        .collect()
+}
+
 fn capsule_name(vcx: &VisualTestContext) -> (String, EnvKind) {
     match capsule_model(vcx) {
         CapsuleModel::Connection { name, env, .. } => (name.to_string(), env),
@@ -617,8 +634,31 @@ fn at_960_in_turkish_the_trust_segments_keep_their_place(cx: &mut TestAppContext
     assert!(cursor.right() <= bar.right(), "{cursor:?} in {bar:?}");
     let s = status(vcx);
     assert!(s.contains("hazırlık · okuma-yazma"), "{s}");
+    // ## m3a-f2-visual (named exception in Task 34's test): a cell gives way whole, so no
+    // chrome ellipsizes ("ş…") and no cell is cut to a blank sliver, at 960 and at every width
+    // up to where nothing gives way; the transaction and the cursor stay at every width.
+    // Rows · timing gives way last (NOTES surface 6): this test's text metrics are wider than
+    // the shipped fonts', so at its 960 px the empty console's sentence leaves no room for it;
+    // it is checked where it fits (the shots check it at 960 in Turkish, `status-everything`).
+    for width in (960..=1400).step_by(7) {
+        vcx.simulate_resize(gpui::size(gpui::px(width as f32), gpui::px(600.0)));
+        vcx.run_until_parked();
+        let cut = chrome_cut(vcx);
+        assert!(
+            cut.is_empty(),
+            "{width}: chrome cut in the status bar: {cut:?}"
+        );
+        let s = status(vcx);
+        assert!(
+            s.contains("İşlem açık") && s.contains("İmleç açık"),
+            "{width}: {s}"
+        );
+    }
+    let s = status(vcx);
     // More rows may come: "10,000+".
     assert!(s.contains("+ satır · 131 ms"), "{s}");
+    vcx.simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
+    vcx.run_until_parked();
     // The cells that gave way leave no trace: never two seams side by side, at 960 and at
     // every width up to where nothing gives way (odd steps, so some cell is caught mid-way).
     #[cfg(feature = "scene-check")]

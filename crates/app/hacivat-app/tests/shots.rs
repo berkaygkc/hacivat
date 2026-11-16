@@ -108,6 +108,8 @@ use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::capsule::CapsuleProbe;
 use hacivat_ui::text::{RenderedText, TextRegistry, TextSource};
 use hacivat_ui::titlebar::{PALETTE_MIN_PX, TitleBarProbe};
+// ## m3a-f2-visual: what each toolbar moved into its ⋯ menu (the waiting states' check).
+use hacivat_ui::toolbar::ToolbarProbe;
 use hacivat_ui_core::app::{TextRendering, bootstrap};
 use hacivat_ui_core::assets::BundledAssets;
 use hacivat_ui_core::gpui_surface::{
@@ -1190,6 +1192,8 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         });
         cx.set_global(CapsuleProbe::default());
         cx.set_global(TitleBarProbe::default());
+        // ## m3a-f2-visual
+        cx.set_global(ToolbarProbe::default());
     });
     let root = tempfile::tempdir().expect("temp dir");
     let paths = LocalPaths::under(root.path());
@@ -1964,7 +1968,15 @@ fn an_m3a_grid_state_without_its_grid_fails() {
         (m3a::M3a::ToolbarRunning, "console-running"),
         (m3a::M3a::ToolbarCancelling, "console-cancelling"),
         (m3a::M3a::ToolbarReadOnly, "console-lock-label"),
-        (m3a::M3a::ToolbarWaiting, "console-waiting-text"),
+        // ## m3a-f2-visual: the wait's Cancel (the sentence is the state check's).
+        (
+            m3a::M3a::ToolbarWaiting,
+            "button-label-console-waiting-cancel",
+        ),
+        (
+            m3a::M3a::ToolbarProductionWaiting,
+            "button-label-console-waiting-cancel",
+        ),
     ] {
         let surface = Surface::M3a(state);
         assert!(
@@ -1983,6 +1995,36 @@ fn an_m3a_grid_state_without_its_grid_fails() {
     )];
     let describe = Surface::M3a(m3a::M3a::ContextDescribe);
     assert!(describe.missing_from("s", &segment).is_some());
+    // ## m3a-f2-visual: the waiting sentence is drawn, or is a ⋯ menu row word for word;
+    // dropped, or another row in the menu, it fails.
+    let whole = "Waiting for a free connection to orders-prod (4 of 4 in use)";
+    let sentence = [at(
+        "crates/app/hacivat-app/src/console/toolbar.rs:360:13#console-waiting-text",
+        "Waiting for a connection (4 of 4 in use)",
+    )];
+    assert!(m3a::sentence_readable(&sentence, None, whole));
+    let menu = [hacivat_ui_core::gpui_surface::SharedString::from(whole)];
+    assert!(m3a::sentence_readable(
+        &toolbar("orders-prod"),
+        Some(&menu),
+        whole
+    ));
+    assert!(!m3a::sentence_readable(
+        &toolbar("orders-prod"),
+        None,
+        whole
+    ));
+    let other = [hacivat_ui_core::gpui_surface::SharedString::from(
+        "Why this console is read-only…",
+    )];
+    assert!(!m3a::sentence_readable(
+        &toolbar("orders-prod"),
+        Some(&other),
+        whole
+    ));
+    let mut cut = sentence.clone();
+    cut[0].painted_px = 0.0;
+    assert!(!m3a::sentence_readable(&cut, Some(&other), whole));
 }
 
 // ## m3a-t35-shots (fix round 1, I2)
@@ -2046,6 +2088,15 @@ fn trust_signals_must_be_drawn() {
     ];
     assert!(everything.trust_missing("s", &all).is_empty());
     assert_eq!(everything.trust_missing("s", &all[..1]).len(), 2);
+    // ## m3a-f2-visual: the tile's rows · timing stands in for the bar's cell that gave way;
+    // with neither, the count is missing.
+    let tile = [
+        at("status-tx-open", 90.0, true),
+        at("button-label-status-cursor", 60.0, true),
+        at("results-rows-timing", 60.0, true),
+    ];
+    assert!(everything.trust_missing("s", &tile).is_empty());
+    assert_eq!(everything.trust_missing("s", &tile[..2]).len(), 1);
     let failed = Surface::M3a(m3a::M3a::PromptFailed);
     assert_eq!(failed.trust_missing("s", &all).len(), 1);
     // Every production state requires the production signals.

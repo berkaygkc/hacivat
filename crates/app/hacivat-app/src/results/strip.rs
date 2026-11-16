@@ -25,12 +25,12 @@ use hacivat_results::{CloseReason, Completeness, StoreSnapshot, TruncReason};
 use hacivat_session::session::UnitId;
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
-use hacivat_ui::text::{Label, TextFn, TextSource};
-use hacivat_ui::toolbar::{ItemFn, Toolbar, ToolbarItem};
+use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
+use hacivat_ui::toolbar::{ItemFn, Toolbar, ToolbarItem, Wrap};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, div, px,
 };
-use hacivat_ui_core::theme::Theme;
+use hacivat_ui_core::theme::{Theme, TypeStyle};
 
 use crate::l10n_global::tr;
 use crate::results::adapter::Texts;
@@ -268,6 +268,19 @@ impl StripModel {
         }
     }
 
+    // ## m3a-f2-visual (named exception)
+    /// Whether the leading sentence may wrap: a reason (closed, cancelled, the memory limit,
+    /// the cap), never a count.
+    pub fn wraps(&self) -> bool {
+        matches!(
+            self.kind,
+            StripKind::Closed { .. }
+                | StripKind::Cancelled { .. }
+                | StripKind::Memory { .. }
+                | StripKind::Truncated { .. }
+        )
+    }
+
     /// Whether the strip offers Re-run (a result that ended without all its rows).
     pub fn offers_rerun(&self) -> bool {
         matches!(
@@ -291,6 +304,9 @@ pub struct StripActions {
 /// `results-strip`.
 pub const STRIP_ID: &str = "results-strip";
 
+// ## m3a-f2-visual: the wrapped reason's line pitch (NOTES surface 11).
+const WRAP_LINE_PX: f32 = 16.0;
+
 /// The cursor strip of `model`, with the selection's size (`rows × cols`) on the right.
 pub fn render(
     model: StripModel,
@@ -310,7 +326,49 @@ pub fn render(
         let s = sentence.clone();
         Rc::new(move |_| s.clone())
     };
-    bar = bar.item(ToolbarItem::pinned(
+    // ## m3a-f2-visual (named exception): a reason sentence that still does not fit once the
+    // strip's other forms are compact wraps, and the strip grows (NOTES surface 11: padding 4,
+    // line height 16). Counts never wrap: Fetching, the suspended row count, Complete.
+    let wrap = model.wraps().then(|| {
+        let t = Theme::get(cx).tokens;
+        let style = TypeStyle {
+            line_height: WRAP_LINE_PX,
+            ..t.type_ramp.caption
+        };
+        let s = sentence.clone();
+        Wrap {
+            text: sentence.clone(),
+            style,
+            element: Rc::new(move |_, cx| {
+                let t = Theme::get(cx).tokens;
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .children(lead.map(|g| g.element(cx)))
+                    .child(
+                        div().flex_1().min_w(px(0.0)).child(
+                            paragraph(
+                                s.clone(),
+                                TextSource::Fluent,
+                                style,
+                                if count_like {
+                                    t.colors.text.to_hsla()
+                                } else {
+                                    t.colors.text_2.to_hsla()
+                                },
+                            )
+                            .id("strip-sentence"),
+                        ),
+                    )
+                    .into_any_element()
+            }),
+        }
+    });
+    let sentence_item = ToolbarItem::pinned(
         Rc::new(move |_, cx| {
             let t = Theme::get(cx).tokens;
             // Counts and reasons in `text`; the strip's other words in `text-2`.
@@ -337,7 +395,12 @@ pub fn render(
                 .into_any_element()
         }),
         sentence_text,
-    ));
+    );
+    // ## m3a-f2-visual (named exception)
+    bar = bar.item(match wrap {
+        Some(wrap) => sentence_item.wraps(wrap),
+        None => sentence_item,
+    });
     match model.kind {
         StripKind::Suspended { .. } => {
             bar = bar.item(seam());
@@ -347,10 +410,39 @@ pub fn render(
                 let whole = whole.clone();
                 Rc::new(move |_| whole.clone())
             };
+            // ## m3a-f2-visual (named exception): "Cursor open" wraps as the last stage (the
+            // count before it never does; the buttons never truncate).
+            let t = Theme::get(cx).tokens;
+            let style = TypeStyle {
+                line_height: WRAP_LINE_PX,
+                ..t.type_ramp.caption
+            };
+            let wrapped = short.clone();
+            let wrap = Wrap {
+                text: short.clone(),
+                style,
+                element: Rc::new(move |_, cx| {
+                    let t = Theme::get(cx).tokens;
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(
+                            paragraph(
+                                wrapped.clone(),
+                                TextSource::Fluent,
+                                style,
+                                t.colors.text_2.to_hsla(),
+                            )
+                            .id("strip-cursor"),
+                        )
+                        .into_any_element()
+                }),
+            };
             bar = bar.item(
                 ToolbarItem::pinned(caption_item(whole, "strip-cursor"), label)
                     .compact(caption_item(short, "strip-cursor"))
-                    .priority(2),
+                    .priority(2)
+                    .wraps(wrap),
             );
             bar = bar.item(button(
                 "strip-close-cursor",
@@ -591,6 +683,8 @@ fn button(
             Button::new(id, text.clone())
                 .kind(ButtonKind::Default)
                 .on_raised(true)
+                // ## m3a-f2-visual (named exception): the strip's 20 px compact buttons.
+                .compact(true)
                 .on_click(move |_, window, cx| on_click(window, cx))
                 .into_any_element()
         }),

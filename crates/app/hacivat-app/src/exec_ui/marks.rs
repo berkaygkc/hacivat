@@ -49,7 +49,33 @@ pub(crate) fn message(cx: &App, id: &str, args: Vec<(&'static str, ArgValue)>) -
 
 /// `ms` as an `exec-dur-*` message.
 pub(crate) fn duration_text(cx: &App, ms: u64) -> String {
-    let m = duration_message(ms);
+    // ## m3a-f2-visual: one formatter for this and the running clock.
+    unit_text(cx, duration_message(ms))
+}
+
+// ## m3a-f2-visual (named exception in Task 33's file)
+/// The running clock's duration: whole seconds, as the toolbar's clock ("running · 3 s",
+/// NOTES surface 5). It repaints once a second, so a millisecond part would only show which
+/// frame painted it; under a second it reads "0 s", past a minute `exec-dur-min*`.
+pub(crate) fn clock_message(ms: u64) -> hacivat_exec::UnitMsg {
+    let s = ms / 1_000;
+    if s < 60 {
+        hacivat_exec::UnitMsg {
+            id: "exec-dur-s",
+            args: vec![("s", s)],
+        }
+    } else {
+        duration_message(s * 1_000)
+    }
+}
+
+/// [`clock_message`] in the UI language.
+pub(crate) fn clock_text(cx: &App, ms: u64) -> String {
+    unit_text(cx, clock_message(ms))
+}
+
+/// A `UnitMsg` in the UI language, its numbers in the format locale.
+fn unit_text(cx: &App, m: hacivat_exec::UnitMsg) -> String {
     let args = m
         .args
         .iter()
@@ -313,7 +339,7 @@ pub(crate) fn short_of(
                         .now()
                         .saturating_duration_since(started),
                 );
-                let d = duration_text(cx, ms);
+                let d = clock_text(cx, ms); // ## m3a-f2-visual
                 message(
                     cx,
                     "hv-editor-mark-short-running",
@@ -364,7 +390,7 @@ pub(crate) fn mark_of(
                         .now()
                         .saturating_duration_since(started),
                 );
-                let d = duration_text(cx, ms);
+                let d = clock_text(cx, ms); // ## m3a-f2-visual
                 message(
                     cx,
                     "hv-editor-mark-running",
@@ -483,5 +509,28 @@ pub(crate) fn mark_of(
             let eol = fixed("hv-editor-mark-skipped");
             (ExecMarkState::Skipped, eol.clone(), eol)
         }
+    }
+}
+
+// ## m3a-f2-visual: the running clock in whole seconds (NOTES surface 5, "running · 3 s").
+#[cfg(test)]
+mod clock_tests {
+    use super::clock_message;
+
+    fn msg(ms: u64) -> (&'static str, Vec<(&'static str, u64)>) {
+        let m = clock_message(ms);
+        (m.id, m.args)
+    }
+
+    /// A running clock repaints once a second, so it shows whole seconds: never the
+    /// milliseconds of the frame that happened to paint it, and "0 s" before the first second.
+    #[test]
+    fn the_running_clock_counts_whole_seconds() {
+        assert_eq!(msg(0), ("exec-dur-s", vec![("s", 0)]));
+        assert_eq!(msg(999), ("exec-dur-s", vec![("s", 0)]));
+        assert_eq!(msg(3_012), ("exec-dur-s", vec![("s", 3)]));
+        assert_eq!(msg(59_999), ("exec-dur-s", vec![("s", 59)]));
+        assert_eq!(msg(61_500), ("exec-dur-min-s", vec![("min", 1), ("s", 1)]));
+        assert_eq!(msg(120_400), ("exec-dur-min", vec![("min", 2)]));
     }
 }

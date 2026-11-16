@@ -20,7 +20,7 @@ use hacivat_ui::text::TextFn;
 use hacivat_ui_core::gpui_surface::App;
 
 use crate::console::{ConsoleId, Consoles};
-use crate::exec_ui::marks::{duration_text, mark_key, message};
+use crate::exec_ui::marks::{clock_text, mark_key, message};
 
 /// The run every fixture mark belongs to (far from the runs a console makes).
 const FIXTURE_RUN: RunId = RunId(0xF_FFFF);
@@ -62,7 +62,8 @@ pub fn show_marks(
             let ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
             let fixed = |id: &'static str| -> TextFn {
                 Rc::new(move |cx: &App| {
-                    let d = duration_text(cx, ms);
+                    // ## m3a-f2-visual: the live clock's whole seconds.
+                    let d = clock_text(cx, ms);
                     message(cx, id, vec![("duration", ArgValue::Text(d))])
                 })
             };
