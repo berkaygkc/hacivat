@@ -9,6 +9,14 @@
 //! enforces the insecure-auth guard (B8) and records the PID, the transaction status and the
 //! command tags; the connection is driven through `poll_message`, so notices reach `execute`
 //! (Q12); and the connection keeps a cancel handle over the same factory and TLS settings (B23).
+//!
+//! ## m3b-t12-session-carries (named exception; C11 fallback, ledger 294)
+//! A pooler that refuses the startup `options` parameter (PgBouncer: `unsupported startup
+//! parameter: options`) would refuse every read-only connect, whose `options` carry only
+//! Hacivat's own read-only settings. Such a connect is made again once without `options`, and
+//! the same settings are sent by `SET` before the connection is handed out (any failure fails
+//! the connect). A connect whose `options` also carry the profile's own values is not retried:
+//! those would be lost.
 
 use std::io;
 use std::sync::PoisonError;
@@ -126,6 +134,12 @@ fn startup_options(
 /// switches the role in its `options` (`startup_options`).
 #[doc(hidden)]
 pub fn config_for(req: &DriverConnect) -> Result<Config, RawError> {
+    config_with(req, true)
+}
+
+// ## m3b-t12-session-carries (named exception)
+/// [`config_for`]; without the startup `options` when `options` is false (the fallback).
+fn config_with(req: &DriverConnect, options: bool) -> Result<Config, RawError> {
     let mut c = Config::new();
     if let Some(user) = &req.user {
         c.user(user);
@@ -137,8 +151,10 @@ pub fn config_for(req: &DriverConnect) -> Result<Config, RawError> {
         c.dbname(db);
     }
     c.application_name(&req.application_name);
-    if let Some(options) = startup_options(req.read_only, &req.options)? {
-        c.options(options);
+    if let Some(startup) = startup_options(req.read_only, &req.options)?
+        && options
+    {
+        c.options(startup);
     }
     let mode = req.tls.as_ref().map_or(SslMode::Disable, |t| {
         ssl_mode(t.settings.mode, t.plaintext_allowed)
@@ -151,7 +167,36 @@ pub fn config_for(req: &DriverConnect) -> Result<Config, RawError> {
 /// to reach the client.
 #[doc(hidden)]
 pub async fn connect_conn(req: DriverConnect) -> Result<PgConn, RawError> {
-    connect_conn_with(req, |_| {}).await
+    // ## m3b-t12-session-carries (named exception): the pooler fallback (module docs).
+    match connect_once(&req, |_| {}, true).await {
+        Err(e) if startup_options_refused(&req, &e) => {
+            let mut conn = connect_once(&req, |_| {}, false).await?;
+            hacivat_driver::RawConn::batch(&mut conn, READ_ONLY_SET_AFTER_CONNECT).await?;
+            Ok(conn)
+        }
+        other => other,
+    }
+}
+
+// ## m3b-t12-session-carries (named exception)
+/// What a read-only connect's startup `options` set, as statements (the fallback).
+const READ_ONLY_SET_AFTER_CONNECT: &str =
+    "SET default_transaction_read_only = on; SET idle_in_transaction_session_timeout = '30s'";
+
+/// Whether `e` is a refusal of the startup `options` parameter of `req`, a read-only connect
+/// whose `options` are Hacivat's own only: the server named the parameter (PgBouncer's
+/// `08P01` "unsupported startup parameter: options", a proxy's `0A000`).
+fn startup_options_refused(req: &DriverConnect, e: &RawError) -> bool {
+    let Some(server) = &e.server else {
+        return false;
+    };
+    let code = server.sqlstate.as_deref();
+    let text = server.text.to_ascii_lowercase();
+    req.read_only
+        && matches!(startup_options(false, &req.options), Ok(None))
+        && matches!(code, Some("08P01" | "0A000"))
+        && text.contains("options")
+        && (text.contains("startup parameter") || text.contains("command-line"))
 }
 
 /// [`connect_conn`] with the `tokio-postgres` configuration adjusted by `adjust` before the
@@ -160,6 +205,15 @@ pub async fn connect_conn(req: DriverConnect) -> Result<PgConn, RawError> {
 pub async fn connect_conn_with(
     req: DriverConnect,
     adjust: impl FnOnce(&mut Config),
+) -> Result<PgConn, RawError> {
+    connect_once(&req, adjust, true).await
+}
+
+/// One connect attempt; `options`: send the startup `options` parameter.
+async fn connect_once(
+    req: &DriverConnect,
+    adjust: impl FnOnce(&mut Config),
+    options: bool,
 ) -> Result<PgConn, RawError> {
     let Endpoint::Network { factory, .. } = &req.endpoint else {
         return Err(raw(RawErrorKind::Unsupported));
@@ -170,7 +224,7 @@ pub async fn connect_conn_with(
     }
     let shared = Shared::default();
     let connector = Connector::new(req.tls.as_ref(), req.events.clone(), shared.clone());
-    let mut config = config_for(&req)?;
+    let mut config = config_with(req, options)?;
     adjust(&mut config);
     let mode = config.get_ssl_mode();
     let events = req.events.clone();

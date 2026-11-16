@@ -73,6 +73,25 @@
 //! request starts or work ends (activity, and whether it holds a user transaction or runs a
 //! user request), and leaves it when its actor ends. The default session's tick reads it, so
 //! its idle disconnect waits for the profile (`liveness` module docs).
+//!
+//! M3b Task 12 (`// ## m3b-t12-session-carries` blocks; ADR 0004 `m3b-t12`):
+//! - **After connect** a session sends what connect did not set: PostgreSQL's time zone (C11)
+//!   and, on a read-write session, the profile's startup script (C3), both from the
+//!   environment plan (`EnvPlan::after_connect`); a reset or reconnect sends them again with
+//!   the rest of the plan. A script that is refused (an uncertain boundary) or fails breaks the
+//!   session with `config.invalid` (a lost connection with its own class): a session never
+//!   runs without the environment its profile asks for, and the failure is never silent. Its
+//!   text is never logged. A read-only session logs one notice instead
+//!   (`exec-startup-script-skipped-read-only`).
+//! - **C6:** in Manual mode, when MySQL reports `autocommit` on after a request, the session
+//!   follows the server to Auto (`TxChanged`, one log line), and replays no `SET autocommit =
+//!   0` from then on.
+//! - **C7, R-M3-73:** a session the pool starts for a console runs its own supervisor
+//!   (`LivenessRole::Console`): keep-alive and its own `IdleTransaction`, never a disconnect.
+//! - **C10:** a MySQL session's side connections go through `cancel::WarmSide`.
+//! - **Close and break** publish the final transaction state (`Idle`, no owner, mode and
+//!   isolation kept) and no cursor, with `TxChanged` when that moved; a closing rollback of the
+//!   user's transaction is logged (never the SQL).
 
 use std::any::Any;
 use std::collections::VecDeque;
@@ -101,6 +120,10 @@ use crate::profile::Profile;
 use crate::session::cancel::{
     CANCEL_WAIT, SIDE_PREWARM, SLOW_CANCEL, kill_query_sql, terminate_sql,
 };
+// ## m3b-t12-session-carries
+use crate::session::cancel::WarmSide;
+use crate::session::env::{StartupScriptRefused, build_env_plan_with, startup_statements};
+use crate::session::liveness::LivenessRole;
 // ## m3a-t18-session-run
 use crate::session::cursor::{OpenCursor, StopSignal};
 use crate::session::{RunSpec, TxOwner};
@@ -125,14 +148,25 @@ use crate::session::{
     CancelOutcome, CancelState, ClosePolicy, CloseRefused, Command, EnvPlan, Escalation, ExecError,
     ExecErrorKind, ExecOrigin, IsolationLevel, Reply, Request, SchemaCtx, SessionEvent,
     SessionHandle, SessionId, SessionSnapshot, SessionSpec, SessionState, TxCommand, TxError,
-    TxMode, TxState, begin_sql, build_env_plan, default_mode, needs_schema_reprobe,
-    parse_schema_probe, schema_probe_sql, switch_schema_sql,
+    TxMode, TxState, begin_sql, default_mode, needs_schema_reprobe, parse_schema_probe,
+    schema_probe_sql, switch_schema_sql,
 };
 
 /// Opens the side connection a cancel or a kill needs (`Department::Cancel`). Task 15's
 /// implementation connects with the session overlay (Q17).
 pub trait SideConnector: Send + Sync {
     fn open_side(&self) -> BoxFuture<'static, Result<LiveConnection, ConnectError>>;
+
+    // ## m3b-t12-session-carries (C10): a MySQL session's `cancel::WarmSide` keeps one side
+    // connection warm; every other connector opens one per use. The defaults do nothing.
+    /// A statement has run for `SIDE_PREWARM`, or a cursor is suspended: have one ready and
+    /// keep it until [`rest`](Self::rest).
+    fn warm(&self) {}
+    /// Nothing needs it now: close the warm connection `SIDE_KEEP` from now, unless it is used
+    /// or warmed again first.
+    fn rest(&self) {}
+    /// The session ends or lost its connection: close the warm connection now.
+    fn drop_warm(&self) {}
 }
 
 /// Reconnects a lost session (Task 17); `attempt` counts from 1.
@@ -201,7 +235,7 @@ pub fn spawn_session(
     live: LiveConnection,
     hooks: SessionHooks,
 ) -> SessionHandle {
-    spawn_supervised(rt, spec, profile, live, hooks, None, None, None)
+    spawn_supervised(rt, spec, profile, live, hooks, None, None, None, None)
 }
 
 // ## m2b-t17-liveness
@@ -209,6 +243,8 @@ pub fn spawn_session(
 /// ticks. `activity` (follow-up F1-b): the profile's shared activity the session reports to.
 /// `classifier` (m3b-t01c, R-M3-83): the read-only guard's classifier (`Core::step0b`);
 /// `None` keeps the M2b/M3a behaviour.
+/// ## m3b-t12-session-carries: `liveness` names the supervisor's role (R-M3-73), and
+/// `time_zone` is the settings' zone (C11, PostgreSQL only).
 #[allow(
     clippy::too_many_arguments,
     reason = "crate-private; the pool and `spawn_session` call it"
@@ -219,12 +255,22 @@ pub(crate) fn spawn_supervised(
     profile: Arc<Profile>,
     mut live: LiveConnection,
     hooks: SessionHooks,
-    liveness: Option<LivenessPolicy>,
+    liveness: Option<(LivenessPolicy, LivenessRole)>,
     activity: Option<Arc<ProfileActivity>>,
     classifier: Option<Arc<dyn StatementClassifier>>,
+    time_zone: Option<String>,
 ) -> SessionHandle {
     let read_only = spec.read_only || profile.read_only;
     let kind = live.raw().kind();
+    // ## m3b-t12-session-carries (C10): a MySQL session keeps one side connection warm.
+    let hooks = if family(kind) == Family::MySql {
+        SessionHooks {
+            side: Arc::new(WarmSide::new(hooks.side.clone())),
+            ..hooks
+        }
+    } else {
+        hooks
+    };
     let (initial_mode, initial_isolation) = if read_only {
         (TxMode::Auto, IsolationLevel::Default)
     } else {
@@ -306,6 +352,8 @@ pub(crate) fn spawn_supervised(
         snapshot: state.clone(),
         events: events.clone(),
         published_tx: None,
+        // ## m3b-t12-session-carries
+        time_zone,
     };
     let ctl = Ctl {
         id,
@@ -324,7 +372,7 @@ pub(crate) fn spawn_supervised(
     rt.spawn(async move {
         let mut ctl = ctl;
         // On the runtime: an interval needs its timer.
-        ctl.liveness = liveness.map(Liveness::new);
+        ctl.liveness = liveness.map(|(policy, role)| Liveness::new(policy, role));
         // The driver calls have their own guard (`run_one`); this one keeps a defect in the
         // actor itself from leaving a session that claims to be usable.
         if AssertUnwindSafe(run(core, ctl))
@@ -408,6 +456,9 @@ pub(crate) struct Core {
     /// The transaction state a request published while it ran (`run_one` compares its end
     /// with it, so `TxChanged` is not sent twice for one state).
     published_tx: Option<TxState>,
+    // ## m3b-t12-session-carries
+    /// The settings' time zone (C11; the plan sends it on PostgreSQL only).
+    time_zone: Option<String>,
 }
 
 fn not_connected() -> ExecError {
@@ -491,11 +542,13 @@ impl Core {
 
     /// The session's current environment plan (its last schema included).
     pub(crate) fn env_plan(&self) -> EnvPlan {
-        build_env_plan(
+        // ## m3b-t12-session-carries: with the settings' time zone (C11).
+        build_env_plan_with(
             self.kind,
             &self.profile,
             self.read_only,
             self.schema.as_ref(),
+            self.time_zone.as_deref(),
         )
     }
 
@@ -841,6 +894,8 @@ impl Core {
     async fn close(&mut self) {
         // ## m3a-t18-session-run: a cursor does not outlive its connection; its rows stay.
         self.cursor_lost(CloseReason::ConnectionLost);
+        // ## m3b-t12-session-carries (C10): nothing will need the warm side connection.
+        self.side.drop_warm();
         if let Some(live) = self.live.take()
             && AssertUnwindSafe(live.close()).catch_unwind().await.is_err()
         {
@@ -898,6 +953,73 @@ impl Core {
             self.control("SET autocommit = 0").await?;
         }
         Ok(())
+    }
+
+    // ## m3b-t12-session-carries
+
+    /// What connect did not set (C3, C11; the module docs): `Err` with the class that breaks
+    /// the session. The script's text is never logged.
+    async fn after_connect(&mut self, session: SessionId) -> Result<(), ErrClass> {
+        if let Some(script) = self.profile.startup_script.as_deref() {
+            if self.read_only {
+                tracing::info!(
+                    session = session.0,
+                    notice = "exec-startup-script-skipped-read-only",
+                    "a read-only session does not run the profile's startup script"
+                );
+            } else if startup_statements(self.kind, script) == Err(StartupScriptRefused) {
+                tracing::warn!(
+                    session = session.0,
+                    "the profile's startup script has an uncertain statement boundary; none of \
+                     it was sent and the session is closed"
+                );
+                return Err(ErrClass::ConfigInvalid);
+            }
+        }
+        for statement in self.env_plan().after_connect() {
+            if let Err(e) = self.control(&statement).await {
+                let class = self.broken.unwrap_or(ErrClass::ConfigInvalid);
+                tracing::warn!(
+                    session = session.0,
+                    kind = ?e.kind,
+                    class = class.id(),
+                    "the session environment failed after connect; the session is closed"
+                );
+                return Err(class);
+            }
+        }
+        Ok(())
+    }
+
+    /// C6: a Manual MySQL session whose server reports `autocommit` on (the user's `SET
+    /// autocommit = 1`, a procedure) follows it to Auto, so the badge never claims a
+    /// transaction the server will not keep; from then on nothing turns autocommit off again
+    /// (a reset starts Auto too).
+    fn follow_autocommit(&mut self, session: SessionId) {
+        if self.read_only
+            || self.tx.mode != TxMode::Manual
+            || family(self.kind) != Family::MySql
+            || self.server_autocommit != Some(true)
+        {
+            return;
+        }
+        self.tx.mode = TxMode::Auto;
+        self.initial_mode = TxMode::Auto;
+        tracing::info!(
+            session = session.0,
+            "the server turned autocommit on; the session follows it to Auto"
+        );
+    }
+
+    /// The final transaction state of a session that closed or broke: nothing open, nobody's,
+    /// its mode and isolation kept.
+    fn end_tx(&mut self) -> TxState {
+        self.tx = TxState {
+            mode: self.tx.mode,
+            isolation: self.tx.isolation,
+            ..TxState::default()
+        };
+        self.tx.clone()
     }
 }
 
@@ -1055,12 +1177,13 @@ struct Liveness {
 }
 
 impl Liveness {
-    fn new(policy: LivenessPolicy) -> Liveness {
+    // ## m3b-t12-session-carries: with the supervisor's role (R-M3-73).
+    fn new(policy: LivenessPolicy, role: LivenessRole) -> Liveness {
         let mut ticker = tokio::time::interval(policy.tick);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let (now, wall) = clocks();
         Liveness {
-            sup: Supervisor::new(policy, now, wall),
+            sup: Supervisor::new(policy, now, wall).with_role(role),
             ticker,
         }
     }
@@ -1114,6 +1237,25 @@ enum Flow {
     Stop,
     /// The connection was lost; the reconnect runs.
     Recover(BoxFuture<'static, Result<LiveConnection, ConnectError>>),
+}
+
+// ## m3b-t12-session-carries
+/// Publishes a session's end (`state`: `Disconnected` or `Broken`): its final transaction
+/// state, no cursor, no cancel; `TxChanged` when the transaction state moved.
+fn publish_end(core: &mut Core, ctl: &Ctl, state: SessionState) {
+    let tx = core.end_tx();
+    let mut moved = false;
+    ctl.state.send_modify(|s| {
+        moved = s.tx != tx;
+        s.state = state;
+        s.cancel = CancelState::Idle;
+        s.cursor = None;
+        s.tx = tx.clone();
+        s.generation = s.generation.wrapping_add(1);
+    });
+    if moved {
+        ctl.emit(SessionEvent::TxChanged(tx));
+    }
 }
 
 impl Ctl {
@@ -1342,11 +1484,8 @@ async fn break_now(core: &mut Core, ctl: &mut Ctl, class: ErrClass) {
     core.broken = Some(class);
     core.close().await;
     ctl.drain(&ExecErrorKind::NotConnected);
-    ctl.publish(|s| {
-        s.state = SessionState::Broken(class);
-        s.cancel = CancelState::Idle;
-        s.cursor = None;
-    });
+    // ## m3b-t12-session-carries: the final transaction state with it.
+    publish_end(core, ctl, SessionState::Broken(class));
 }
 
 async fn run(mut core: Core, mut ctl: Ctl) {
@@ -1363,6 +1502,20 @@ async fn run(mut core: Core, mut ctl: Ctl) {
                     .or(core.last_class)
                     .unwrap_or(ErrClass::Internal),
             ),
+            Err(_) => Some(ErrClass::Internal),
+        };
+        if let Some(class) = class {
+            break_now(&mut core, &mut ctl, class).await;
+        }
+    }
+    // ## m3b-t12-session-carries: the time zone and the startup script (C11, C3).
+    if core.live.is_some() && core.broken.is_none() {
+        let sent = AssertUnwindSafe(core.after_connect(ctl.id))
+            .catch_unwind()
+            .await;
+        let class = match sent {
+            Ok(Ok(())) => None,
+            Ok(Err(class)) => Some(class),
             Err(_) => Some(ErrClass::Internal),
         };
         if let Some(class) = class {
@@ -1518,6 +1671,8 @@ async fn release_idle(core: &mut Core, ctl: &mut Ctl) -> Flow {
     if core.tx != tx_before {
         ctl.emit(SessionEvent::TxChanged(core.tx.clone()));
     }
+    // ## m3b-t12-session-carries (C10): the cursor is gone; the warm side may rest.
+    core.side.rest();
     flow
 }
 
@@ -1751,10 +1906,8 @@ fn recovering_command(ctl: &mut Ctl, cmd: Option<Command>) -> Recovering {
 async fn close_recovering(core: &mut Core, ctl: &mut Ctl, reply: CloseReply) {
     core.close().await;
     ctl.shut();
-    ctl.publish(|s| {
-        s.state = SessionState::Disconnected;
-        s.cancel = CancelState::Idle;
-    });
+    // ## m3b-t12-session-carries: the final transaction state with it.
+    publish_end(core, ctl, SessionState::Disconnected);
     let _ = reply.send(Ok(()));
 }
 
@@ -1900,6 +2053,15 @@ async fn close(core: &mut Core, ctl: &mut Ctl, policy: ClosePolicy, reply: Close
                 return false;
             }
             ClosePolicy::RollBack => {
+                // ## m3b-t12-session-carries: never silent. The snapshot showed the open
+                // transaction up to here; the end below publishes it gone.
+                if core.tx.user_open() {
+                    tracing::info!(
+                        session = ctl.id.0,
+                        statements = core.tx.statements,
+                        "closing the session rolls back its open transaction"
+                    );
+                }
                 if let Err(e) = core.control("ROLLBACK").await {
                     tracing::debug!(kind = ?e.kind, "the closing rollback failed");
                 }
@@ -1908,11 +2070,8 @@ async fn close(core: &mut Core, ctl: &mut Ctl, policy: ClosePolicy, reply: Close
     }
     ctl.shut();
     core.close().await;
-    ctl.publish(|s| {
-        s.state = SessionState::Disconnected;
-        s.cancel = CancelState::Idle;
-        s.cursor = None;
-    });
+    // ## m3b-t12-session-carries: the final transaction state with it.
+    publish_end(core, ctl, SessionState::Disconnected);
     let _ = reply.send(Ok(()));
     true
 }
@@ -2035,7 +2194,6 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
     let mut deactivated = None;
     let mut result = match ended {
         Ended::Abandoned => {
-            ladder.release();
             ladder.finish(CancelOutcome::Disconnected);
             core.close().await;
             return Flow::Stop;
@@ -2080,7 +2238,6 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
     } else {
         ladder.abort();
     }
-    ladder.release();
 
     // Task 18: a gap breaks the session. Task 17 fix round 4 (I10): the event goes out before
     // the session publishes `Broken`, so an owner that stops at `Broken` has already got it.
@@ -2113,17 +2270,36 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
             }));
         }
     }
+    // ## m3b-t12-session-carries (C6): a Manual MySQL session follows the server's autocommit.
+    // `TxChanged` below carries the new mode.
+    if recovery.is_none() && core.broken.is_none() {
+        core.follow_autocommit(ctl.id);
+    }
+    // ## m3b-t12-session-carries (C10): a suspended cursor keeps the warm side connection;
+    // otherwise it rests.
+    if core.live.is_some() && core.cursor.is_some() {
+        core.side.warm();
+    } else {
+        core.side.rest();
+    }
     if recovery.is_some() {
         // `begin_recovery` published `Connecting`.
     } else if let Some(class) = core.broken {
         ctl.drain(&ExecErrorKind::NotConnected);
-        ctl.publish(|s| {
-            s.state = SessionState::Broken(class);
-            s.cancel = CancelState::Idle;
-            s.tx = core.tx.clone();
-            s.schema = core.schema.clone();
-            s.cursor = None;
-        });
+        // ## m3b-t12-session-carries: the transaction as the request left it goes out first
+        // (`TxChanged` below compares against it), then the session's end.
+        let (open, schema) = (core.tx.clone(), core.schema.clone());
+        ctl.publish(|s| s.schema = schema);
+        let shown_tx = core
+            .published_tx
+            .take()
+            .unwrap_or_else(|| tx_before.clone());
+        if open != shown_tx {
+            ctl.emit(SessionEvent::TxChanged(open.clone()));
+        }
+        core.published_tx = Some(open);
+        publish_end(core, ctl, SessionState::Broken(class));
+        core.published_tx = Some(core.tx.clone());
     } else {
         // ## m3a-t18-session-run: the snapshot mirrors the open cursor.
         let cursor = core.cursor_badge();
@@ -2236,8 +2412,6 @@ struct Ladder {
     failed: Option<ErrClass>,
     /// The cancel or kill in flight.
     mechanism: Option<JoinHandle<Result<(), ErrClass>>>,
-    /// MySQL's pre-opened side connection (Q37).
-    prewarmed: Option<JoinHandle<Result<LiveConnection, ConnectError>>>,
     // ## m3a-t18-session-run
     /// The running request's stop signal: a cancel sets it.
     stop: Option<Arc<StopSignal>>,
@@ -2270,7 +2444,6 @@ impl Ladder {
             waiters: Vec::new(),
             failed: None,
             mechanism: None,
-            prewarmed: None,
             stop: None,
             typed: false,
             aliases: Vec::new(),
@@ -2393,25 +2566,18 @@ impl Ladder {
         self.on_side(sql);
     }
 
-    /// Runs `sql` on a side connection (the pre-opened one, else a new one), then closes it.
+    /// Runs `sql` on a side connection (## m3b-t12-session-carries: the warm one when the
+    /// session keeps one, C10; else a new one), then closes it.
     fn on_side(&mut self, sql: Option<String>) {
         let Some(sql) = sql else {
             // No server connection ID, or an engine without the statement.
             self.fail(ErrClass::Internal);
             return;
         };
-        let opened = self.prewarmed.take().map(AbortOnDrop);
         let side = self.side.clone();
         let kind = self.kind;
         self.spawn(async move {
-            let connected = match opened {
-                Some(task) => match task.await {
-                    Ok(connected) => connected,
-                    Err(_) => return Err(ErrClass::Internal),
-                },
-                None => side.open_side().await,
-            };
-            let mut live = connected.map_err(|e| e.class)?;
+            let mut live = side.open_side().await.map_err(|e| e.class)?;
             let ran = live.raw().batch(&sql).await;
             live.close().await;
             ran.map_err(|e| classify(kind, Phase::PostConnect, &e).class)
@@ -2476,13 +2642,14 @@ impl Ladder {
         }
     }
 
-    /// Pre-opens MySQL's side connection (Q37), unless a cancel already went out. Not for a
-    /// typed request, whose kills are its own (`cursor::Canceller`).
+    /// Pre-opens MySQL's side connection (Q37), unless a cancel already went out.
+    /// ## m3b-t12-session-carries (C10): the session's `WarmSide` keeps it past the request,
+    /// for a typed request's kills (`cursor::Canceller`) too.
     fn prewarm(&mut self) {
-        if self.typed || self.cancel_sent || self.prewarmed.is_some() {
+        if self.cancel_sent {
             return;
         }
-        self.prewarmed = Some(tokio::spawn(self.side.open_side()));
+        self.side.warm();
     }
 
     /// Waits up to [`CANCEL_WAIT`] for the cancel in flight. False when it did not end: it is
@@ -2504,17 +2671,6 @@ impl Ladder {
     fn abort(&mut self) {
         if let Some(task) = self.mechanism.take() {
             task.abort();
-        }
-    }
-
-    /// Closes a pre-opened side connection nobody used.
-    fn release(&mut self) {
-        if let Some(task) = self.prewarmed.take() {
-            tokio::spawn(async move {
-                if let Ok(Ok(live)) = task.await {
-                    live.close().await;
-                }
-            });
         }
     }
 

@@ -164,11 +164,25 @@ pub struct ManagerConfig {
     /// app's boot installs `hacivat-exec`'s `ClassifyPool` (Task 18). `None` (the default, and
     /// `m2b()`) keeps the M2b/M3a behaviour: the guard's layers alone.
     pub classifier: Option<Arc<dyn StatementClassifier>>,
+    // ## m3b-t12-session-carries (C11)
+    /// The settings' `ui.time_zone`: every PostgreSQL session sends `SET TIME ZONE` with an
+    /// IANA zone after connect and in its environment replay (never MySQL or MariaDB, R5).
+    /// `System` (the default) keeps the server's zone.
+    pub time_zone: hacivat_settings::TimeZonePref,
 }
 
 // ## m3b-t01c-core-seams (review M1)
 /// What equality and hashing compare: every field, the classifier by its address.
-type ConfigKey = (Duration, Duration, bool, bool, bool, Option<*const ()>);
+type ConfigKey = (
+    Duration,
+    Duration,
+    bool,
+    bool,
+    bool,
+    Option<*const ()>,
+    // ## m3b-t12-session-carries
+    hacivat_settings::TimeZonePref,
+);
 
 impl ManagerConfig {
     /// Every field, by value; the classifier by address. The destructuring names each field
@@ -181,6 +195,7 @@ impl ManagerConfig {
             reconnect,
             production_read_only,
             classifier,
+            time_zone,
         } = self;
         (
             *liveness,
@@ -189,7 +204,17 @@ impl ManagerConfig {
             *reconnect,
             *production_read_only,
             classifier.as_ref().map(|c| Arc::as_ptr(c).cast::<()>()),
+            time_zone.clone(),
         )
+    }
+
+    // ## m3b-t12-session-carries (C11)
+    /// The IANA zone sessions send, if any.
+    fn zone(&self) -> Option<String> {
+        match &self.time_zone {
+            hacivat_settings::TimeZonePref::Iana(zone) => Some(zone.clone()),
+            hacivat_settings::TimeZonePref::System => None,
+        }
     }
 }
 
@@ -219,6 +244,8 @@ impl Default for ManagerConfig {
             production_read_only: false,
             // ## m3b-t01c-core-seams
             classifier: None,
+            // ## m3b-t12-session-carries
+            time_zone: hacivat_settings::TimeZonePref::System,
         }
     }
 }
@@ -458,6 +485,8 @@ impl Shared {
         });
         // ## m3b-t01c-core-seams (P-M3b-11): the read-only guard's classifier, likewise.
         sessions.set_classifier(self.config.classifier.clone());
+        // ## m3b-t12-session-carries (C11): the settings' time zone, likewise.
+        sessions.set_time_zone(self.config.zone());
         // ## m2b-t22-live (T17 carry): the gaps of the profile's other sessions (pooled
         // read-only ones) are relayed as the default session's are (Q35).
         let weak = Arc::downgrade(self);

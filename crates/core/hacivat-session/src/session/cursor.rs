@@ -922,6 +922,13 @@ impl Core {
                 Ok(QueryEvent::Done(done)) => {
                     s.on_first_response();
                     s.done = Some(done);
+                    // ## m3b-t12-session-carries (named exception; the T13 carry): the
+                    // notices the driver dropped past its own cap join the unit's count, so
+                    // the log line at its end has the whole number (never their text).
+                    if let Some(live) = self.live.as_mut() {
+                        let dropped = live.raw().take_notices_dropped();
+                        s.notices_dropped = s.notices_dropped.saturating_add(dropped);
+                    }
                     return Pumped::Done;
                 }
             }

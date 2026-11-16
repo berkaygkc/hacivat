@@ -27,13 +27,25 @@
 //! the slow cancel at [`SLOW_CANCEL`] and both escalations are as above. A cancel names the
 //! running request, or a fetch merged into it; a run that ended (its cursor still open) and an
 //! earlier fetch are `AlreadyFinished`.
+//!
+//! ## m3b-t12-session-carries: the warm side connection (C10; ADR 0004 `m3b-t12`)
+//! A MySQL session's side connections go through a [`WarmSide`], which keeps one open while
+//! it may be needed: from the moment a statement has run for [`SIDE_PREWARM`], and while a
+//! cursor is suspended. A kill takes it (it was checked with a ping first; a dead one is
+//! replaced by a fresh connect), so a cancel never waits for a connect it could have had
+//! ready. Once nothing needs it, it closes [`SIDE_KEEP`] after its last use; it closes at once
+//! when the session closes, breaks or loses its connection.
 
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use futures::future::BoxFuture;
 use hacivat_proto::{DbmsKind, ErrClass};
+use tokio::task::JoinHandle;
 
-use crate::session::ExecError;
+use crate::pipeline::{ConnectError, LiveConnection};
 use crate::session::schema::{Family, family};
+use crate::session::{ExecError, SideConnector};
 
 /// How long a cancel's caller waits for the request to end before `StillRunning`.
 pub const CANCEL_WAIT: Duration = Duration::from_secs(2);
@@ -43,6 +55,13 @@ pub const SLOW_CANCEL: Duration = Duration::from_secs(10);
 
 /// How long a MySQL statement runs before its side connection is pre-opened (Q37).
 pub const SIDE_PREWARM: Duration = Duration::from_millis(500);
+
+// ## m3b-t12-session-carries (C10)
+/// How long a warm MySQL side connection stays open after its last use.
+pub const SIDE_KEEP: Duration = Duration::from_secs(30);
+
+/// How long a warm side connection may take to answer the ping before a kill uses it.
+const WARM_CHECK: Duration = Duration::from_secs(2);
 
 /// Where a session's cancel is.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -108,5 +127,129 @@ pub(crate) fn terminate_sql(kind: DbmsKind, id: u64) -> Option<String> {
         Family::Postgres => Some(format!("SELECT pg_terminate_backend({id})")),
         Family::MySql => Some(format!("KILL CONNECTION {id}")),
         Family::Sqlite | Family::Other => None,
+    }
+}
+
+// ## m3b-t12-session-carries (C10)
+
+type Opening = JoinHandle<Result<LiveConnection, ConnectError>>;
+
+/// A MySQL session's side connections, one of them kept warm (the module docs). It wraps the
+/// session's own [`SideConnector`]; every side connection of the session goes through it.
+pub(crate) struct WarmSide {
+    inner: Arc<dyn SideConnector>,
+    slot: Arc<Mutex<WarmSlot>>,
+}
+
+#[derive(Default)]
+struct WarmSlot {
+    /// The warm connection, or its connect in flight.
+    conn: Option<Opening>,
+    /// Bumped by every use: an expiry armed before it does nothing.
+    generation: u64,
+}
+
+fn slot_lock(slot: &Mutex<WarmSlot>) -> MutexGuard<'_, WarmSlot> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Closes the connection `task` opens (or opened), on the current runtime. Without one (a drop
+/// outside any runtime) the task is left to end with its runtime.
+fn close_opening(task: Opening) {
+    if let Ok(rt) = tokio::runtime::Handle::try_current() {
+        rt.spawn(async move {
+            if let Ok(Ok(live)) = task.await {
+                live.close().await;
+            }
+        });
+    }
+}
+
+impl WarmSide {
+    pub(crate) fn new(inner: Arc<dyn SideConnector>) -> WarmSide {
+        WarmSide {
+            inner,
+            slot: Arc::default(),
+        }
+    }
+}
+
+impl SideConnector for WarmSide {
+    /// The warm connection when it still answers a ping, else a fresh one.
+    fn open_side(&self) -> BoxFuture<'static, Result<LiveConnection, ConnectError>> {
+        let warm = {
+            let mut slot = slot_lock(&self.slot);
+            slot.generation = slot.generation.wrapping_add(1);
+            slot.conn.take()
+        };
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            if let Some(task) = warm
+                && let Ok(Ok(mut live)) = task.await
+            {
+                let checked = tokio::time::timeout(WARM_CHECK, live.raw().ping()).await;
+                if matches!(checked, Ok(Ok(_))) {
+                    return Ok(live);
+                }
+                live.close().await;
+            }
+            inner.open_side().await
+        })
+    }
+
+    fn warm(&self) {
+        let mut slot = slot_lock(&self.slot);
+        // A use: no expiry armed before it closes it.
+        slot.generation = slot.generation.wrapping_add(1);
+        if slot.conn.is_none() {
+            slot.conn = Some(tokio::spawn(self.inner.open_side()));
+        }
+    }
+
+    fn rest(&self) {
+        let generation = {
+            let mut slot = slot_lock(&self.slot);
+            if slot.conn.is_none() {
+                return;
+            }
+            slot.generation = slot.generation.wrapping_add(1);
+            slot.generation
+        };
+        let slot = Arc::downgrade(&self.slot);
+        tokio::spawn(async move {
+            tokio::time::sleep(SIDE_KEEP).await;
+            let Some(slot) = slot.upgrade() else {
+                return;
+            };
+            let expired = {
+                let mut slot = slot_lock(&slot);
+                if slot.generation != generation {
+                    return;
+                }
+                slot.conn.take()
+            };
+            if let Some(task) = expired {
+                close_opening(task);
+            }
+        });
+    }
+
+    fn drop_warm(&self) {
+        let task = {
+            let mut slot = slot_lock(&self.slot);
+            slot.generation = slot.generation.wrapping_add(1);
+            slot.conn.take()
+        };
+        if let Some(task) = task {
+            close_opening(task);
+        }
+    }
+}
+
+impl Drop for WarmSide {
+    fn drop(&mut self) {
+        if let Some(task) = slot_lock(&self.slot).conn.take() {
+            close_opening(task);
+        }
     }
 }

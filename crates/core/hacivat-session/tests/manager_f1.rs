@@ -210,6 +210,11 @@ async fn losing_the_default_never_rolls_back_another_sessions_transaction_silent
     let mut ev = m.events();
     connect(&m, &profile).await;
     let console2 = own_session(&m, &profile, 2).await;
+    // ## m3b-t12-session-carries (named exception): console 2 now keeps its own keep-alive
+    // (R-M3-73) and this fake fails every connection's first ping; its `BEGIN` comes 5 s
+    // after the connect, so its ping is due after the default's and the default is lost
+    // first, as this test means.
+    tokio::time::sleep(secs(5)).await;
     ok(&console2, "BEGIN").await;
     until("the loss", || {
         matches!(m.state(profile.id), LiveState::Lost { .. })
