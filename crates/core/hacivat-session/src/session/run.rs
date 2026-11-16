@@ -20,6 +20,27 @@
 //!
 //! The reply is `Ok` when every unit ran, else the error of the unit that stopped the run
 //! (`Cancelled` for a stop).
+//!
+//! ## m3b-t11-session-runs (ADR 0004 `m3b-t11`)
+//! - **Binds** (HV-EXEC-03): `RunUnit::binds` reach the driver in slot order; a
+//!   driver that cannot bind refuses the query before sending it.
+//! - **Result sets** (R-M3-66): a unit keeps `max_result_sets` sets (at most 100), each its own
+//!   result (`open_result(unit, ordinal, ..)`, the ordinal is the set's place in the unit); an
+//!   earlier set's `ResultEnded` comes when the unit ends. Only the first set of the last unit
+//!   may stay suspended.
+//! - **Run as one** (R-M3-60): a `Protocol::Simple` unit is sent whole, never suspends, and is
+//!   refused on a read-only session (`ReadOnlyDenied(Protocol)`), nothing sent.
+//! - **Notices** (R-M3-77): `RunEvent::Notice`, at most 100 per unit; the rest are counted in a
+//!   log line (`notices_dropped`), their text never logged.
+//! - **The `Ask` policy** (R-M3-61, P-M3b-3, P-M3b-19): a failed unit with later units emits
+//!   `NeedsChoice` and waits on the run gate while the actor serves cancels and closes; `Retry`
+//!   runs it again (`UnitStarted`/`UnitEnded` again; the summary counts its last attempt),
+//!   `Ignore` goes on, `IgnoreAll` goes on without asking again, `Stop` skips the rest (the
+//!   reply is the unit's error), `RollbackAndContinue` sends `ROLLBACK`, keeps the mode and
+//!   goes on. A cancel or a close answers `Stop`. A run that went on to its end replies `Ok`
+//!   unless its last unit failed.
+//! - **A cancelled queued run** reports every unit `Cancelled` and `RunEnded` (ledger 318);
+//!   one dropped from the queue for any other reason still never started.
 
 use std::time::Instant;
 
@@ -38,6 +59,12 @@ use crate::session::{
 // ## m3b-t01c-core-seams
 use crate::session::confirm;
 use crate::session::verdict::UnitVerdict;
+// ## m3b-t11-session-runs
+use crate::session::actor::ends_failed_tx;
+use crate::session::cursor::MAX_RESULT_SETS;
+use crate::session::run_gate::Answer;
+use crate::session::{ErrorPolicy, RunChoice};
+use hacivat_driver::Protocol;
 
 /// How one unit ended.
 struct Ended {
@@ -129,6 +156,14 @@ impl Tally {
         });
     }
 
+    // ## m3b-t11-session-runs
+    /// The unit that just ended `Failed` runs again (`RunChoice::Retry`): its failed attempt is
+    /// superseded by the next one, which reports `UnitStarted` and `UnitEnded` again.
+    fn retry(&mut self) {
+        self.next = self.next.saturating_sub(1);
+        self.summary.failed = self.summary.failed.saturating_sub(1);
+    }
+
     /// Ends the run: the units it never reached end as `rest` (`Skipped`, or `Cancelled` after
     /// a stop; both count as skipped), then `RunEnded`.
     fn finish(&mut self, rest: &UnitEnd, aborted: bool) {
@@ -193,7 +228,11 @@ impl Core {
         }
         let count = spec.units.len();
         let mut failure = None;
-        for (i, unit) in spec.units.iter().enumerate() {
+        // ## m3b-t11-session-runs: the error policy (R-M3-61). `i` moves on unless a unit is
+        // retried; `ignore_all` continues past later failures without asking.
+        let mut ignore_all = false;
+        let mut i = 0;
+        while let Some(unit) = spec.units.get(i) {
             if w.stop.is_requested() {
                 failure = Some(cancelled());
                 break;
@@ -204,14 +243,56 @@ impl Core {
             }
             tally.start(unit.id, tokio::time::Instant::now().into_std());
             let ended = self.run_unit(&spec, unit, i + 1 == count, w).await;
-            match &ended.outcome {
-                UnitEnd::Failed(e) => failure = Some(e.clone()),
-                UnitEnd::Cancelled => failure = Some(cancelled()),
-                UnitEnd::Succeeded { .. } | UnitEnd::Skipped => {}
-            }
+            let error = match &ended.outcome {
+                UnitEnd::Failed(e) => Some(e.clone()),
+                UnitEnd::Cancelled => {
+                    failure = Some(cancelled());
+                    None
+                }
+                UnitEnd::Succeeded { .. } | UnitEnd::Skipped => None,
+            };
             tally.end(ended);
             if failure.is_some() {
                 break;
+            }
+            let Some(error) = error else {
+                i += 1;
+                continue;
+            };
+            // A failure: `StopOnError`, a last unit, a stop asked for, or a connection that
+            // cannot run anything more ends the run here.
+            let asks = spec.policy == ErrorPolicy::Ask
+                && i + 1 < count
+                && !w.stop.is_requested()
+                && self.broken.is_none()
+                && self.live.is_some();
+            if !asks {
+                failure = Some(error);
+                break;
+            }
+            let choice = if ignore_all {
+                RunChoice::IgnoreAll
+            } else {
+                self.choice_after(&spec, unit.id, &error, w).await
+            };
+            match choice {
+                RunChoice::Retry => tally.retry(),
+                RunChoice::Ignore => i += 1,
+                RunChoice::IgnoreAll => {
+                    ignore_all = true;
+                    i += 1;
+                }
+                RunChoice::RollbackAndContinue => match self.roll_back_to_continue(&spec).await {
+                    Ok(()) => i += 1,
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
+                },
+                RunChoice::Stop => {
+                    failure = Some(error);
+                    break;
+                }
             }
         }
         let stopped = failure
@@ -227,6 +308,73 @@ impl Core {
             None => Ok(self.summary()),
             Some(e) => Err(e),
         }
+    }
+
+    // ## m3b-t11-session-runs
+    /// The error policy's question after `unit` failed with `error` (R-M3-61; P-M3b-3): asks
+    /// through the run gate, emits `NeedsChoice` with nothing awaited in between, and waits for
+    /// the answer, the stop signal (a cancel) or a close, whichever comes first. A stop and a
+    /// close answer `Stop`; a stop that races an answer wins. No cursor is open meanwhile: only
+    /// the last unit keeps one, and the last unit never asks.
+    async fn choice_after(
+        &mut self,
+        spec: &RunSpec,
+        unit: UnitId,
+        error: &ExecError,
+        w: &mut Watch,
+    ) -> RunChoice {
+        let gate = self.gate.clone();
+        if gate.closing() || w.stop.is_requested() {
+            return RunChoice::Stop;
+        }
+        debug_assert!(self.cursor.is_none(), "no cursor is open while a run asks");
+        // Roll back and continue (instead of Ignore and Retry) only inside the user's own
+        // failed PostgreSQL transaction: a rollback never ends one the question did not name.
+        let failed_tx = family(self.kind) == Family::Postgres
+            && self.tx.status == TxStatus::Failed
+            && !self.tx.owner.is_hacivats();
+        let question = gate.ask_choice(self.request_seq, unit, failed_tx);
+        spec.observer.0.event(&RunEvent::NeedsChoice {
+            unit,
+            question,
+            error: error.clone(),
+            rollback_and_continue: failed_tx,
+        });
+        let answer = tokio::select! {
+            biased;
+            () = w.stop.requested() => None,
+            answer = gate.answered() => Some(answer),
+        };
+        gate.withdraw();
+        match answer {
+            _ if w.stop.is_requested() => RunChoice::Stop,
+            Some(Answer::Choice(choice)) => choice,
+            Some(Answer::Commit(_)) | None => RunChoice::Stop,
+        }
+    }
+
+    /// `RunChoice::RollbackAndContinue` (P-M3b-19): `ROLLBACK` ends the user's failed
+    /// transaction (logged, never its text), the session keeps its mode (a Manual session
+    /// opens its next transaction before the next unit, as for any unit), and the run goes on.
+    async fn roll_back_to_continue(&mut self, spec: &RunSpec) -> Result<(), ExecError> {
+        let before = self.shown_status();
+        let rolled = self.control("ROLLBACK").await;
+        if rolled.is_ok() {
+            tracing::info!(
+                run = spec.run.0,
+                "roll back and continue: the user's failed transaction was rolled back"
+            );
+            // A rollback may undo a schema switch made inside the transaction (Q27).
+            self.reprobe().await;
+        }
+        let after = self.shown_status();
+        if before != after {
+            spec.observer.0.event(&RunEvent::TxChanged {
+                from: before,
+                to: after,
+            });
+        }
+        rolled
     }
 
     /// The transaction status the user sees: Hacivat's own transaction (around a cursor, or
@@ -255,15 +403,24 @@ impl Core {
         if let Some(e) = confirm::refused_before_task_19(unit.verdict) {
             return Ended::refused(e);
         }
-        if !unit.binds.is_empty() {
-            return Ended::refused(ExecError::of(ExecErrorKind::Internal));
+        // ## m3b-t11-session-runs: binds go to the driver with the query (`query_spec`); a
+        // driver that cannot bind refuses the query before sending it (`Unsupported`). A
+        // read-only session never runs "as one" (R-M3-60): its guard judges one statement,
+        // through the prepared protocol.
+        if self.read_only && unit.protocol == Protocol::Simple {
+            return Ended::refused(ExecError::of(ExecErrorKind::ReadOnlyDenied(
+                DenyLayer::Protocol,
+            )));
         }
         let keyword = first_keyword(&unit.sql);
         let control = TX_CONTROL.contains(&keyword.as_str());
         let before = self.shown_status();
         let mysql = family(self.kind) == Family::MySql;
+        // ## m3b-t11-session-runs: a unit run "as one" is several statements; what the session
+        // tracks reads each of them (a naive split on `;` errs toward "seen").
+        let parts = statements_of(unit);
         // A user's "autocommit off" counts whatever happens next (it errs toward "off").
-        if mysql && autocommit_set(&unit.sql) == Some(false) {
+        if mysql && parts.iter().any(|p| autocommit_set(p) == Some(false)) {
             self.autocommit_off = true;
         }
         let ended = self.unit_body(spec, unit, last, &keyword, control, w).await;
@@ -271,12 +428,22 @@ impl Core {
             // ## m3b-t01c-core-seams (P-M3b-11): the gate's effects when it classified the
             // unit; Task 18 makes `track_statement` use them.
             let effects = (unit.verdict != UnitVerdict::Unknown).then_some(unit.effects);
-            track_statement(&mut self.tracked, &unit.sql, effects);
-            if mysql && let Some(on) = autocommit_set(&unit.sql) {
+            for part in &parts {
+                track_statement(&mut self.tracked, part, effects);
+            }
+            // One statement says what it set; in a batch only an "off" is believed (a split
+            // inside a string must not turn a real "off" back on).
+            if mysql
+                && let [part] = parts.as_slice()
+                && let Some(on) = autocommit_set(part)
+            {
                 self.autocommit_off = !on;
             }
             // Never under an open cursor: nothing else runs there.
-            if self.cursor.is_none() && self.broken.is_none() && needs_schema_reprobe(&unit.sql) {
+            if self.cursor.is_none()
+                && self.broken.is_none()
+                && parts.iter().any(|p| needs_schema_reprobe(p))
+            {
                 self.reprobe().await;
             }
         }
@@ -293,7 +460,8 @@ impl Core {
     fn query_spec<'a>(spec: &RunSpec, unit: &'a RunUnit, suspendable: bool) -> QuerySpec<'a> {
         QuerySpec {
             sql: &unit.sql,
-            binds: &[],
+            // ## m3b-t11-session-runs: the unit's bind values, in slot order (HV-EXEC-03).
+            binds: &unit.binds,
             protocol: unit.protocol,
             suspendable,
             first_rows: spec.fetch.first_rows,
@@ -301,10 +469,17 @@ impl Core {
             chunk_bytes: spec.fetch.chunk_bytes,
             // ## m3b-t01c-core-seams: the unit's own cap (R-M3-82) when it has one.
             cell_cap: unit.cell_cap.unwrap_or(spec.fetch.cell_cap),
-            // ## m3b-t01c-core-seams: `RunUnit::max_result_sets` is clamped to 1 until Task 11
-            // (R-M3-25 holds: one result set kept per unit).
-            max_result_sets: 1,
+            // ## m3b-t11-session-runs: the unit's result sets, at most 100 (R-M3-66).
+            max_result_sets: result_sets(unit),
         }
+    }
+
+    // ## m3b-t11-session-runs
+    /// A new stream of `unit`, keeping its result sets.
+    fn stream(spec: &RunSpec, unit: &RunUnit, suspendable: bool) -> Stream {
+        let mut s = Stream::new(unit.id, spec.observer.clone(), spec.fetch, suspendable);
+        s.max_sets = result_sets(unit);
+        s
     }
 
     async fn unit_body(
@@ -317,7 +492,8 @@ impl Core {
         w: &mut Watch,
     ) -> Ended {
         // Advisory (first keyword only): the server refuses anyway.
-        if self.tx.status == TxStatus::Failed && keyword != "ROLLBACK" {
+        // ## m3b-t11-session-runs: `ABORT` is PostgreSQL's `ROLLBACK` (R-M3-74).
+        if self.tx.status == TxStatus::Failed && !ends_failed_tx(self.kind, keyword) {
             return Ended::refused(ExecError::of(ExecErrorKind::Tx(
                 TxError::FailedNeedsRollback,
             )));
@@ -331,7 +507,11 @@ impl Core {
             .live
             .as_mut()
             .map_or(hacivat_driver::TypedCaps::NONE, |l| l.raw().typed_caps());
-        let mut suspendable = unit.suspendable && caps.suspend && engine != Family::Other;
+        // ## m3b-t11-session-runs: a unit run "as one" never suspends (R-M3-60, R-M3-66).
+        let mut suspendable = unit.suspendable
+            && unit.protocol != Protocol::Simple
+            && caps.suspend
+            && engine != Family::Other;
         let mut hold = Hold::None;
         let mut s;
 
@@ -350,7 +530,7 @@ impl Core {
             }
             // The guard opens its own read-only transaction and sends the query (Task 22).
             self.holder = TxOwner::Guard;
-            s = Stream::new(unit.id, spec.observer.clone(), spec.fetch, suspendable);
+            s = Self::stream(spec, unit, suspendable);
             let q = Self::query_spec(spec, unit, suspendable);
             let kind = self.kind;
             // ## m3a-t22-typed-readonly: the guard ends itself when the query is refused at
@@ -411,7 +591,7 @@ impl Core {
                     TxStatus::Failed => suspendable = false,
                 }
             }
-            s = Stream::new(unit.id, spec.observer.clone(), spec.fetch, suspendable);
+            s = Self::stream(spec, unit, suspendable);
             let q = Self::query_spec(spec, unit, suspendable);
             // The overdue clock runs from here: a slow statement holds `query` itself until
             // its first header.
@@ -465,7 +645,9 @@ impl Core {
         };
         match self.fetch_until(&mut s, first, target, bytes, w).await {
             Step::Complete => self.completed(s, hold, control).await,
-            Step::Suspend if last => {
+            // ## m3b-t11-session-runs: only the first set of the last unit stays suspended (a
+            // unit with several sets never does, R-M3-66; the drivers never suspend one).
+            Step::Suspend if last && s.ordinal == 0 => {
                 let outcome = UnitEnd::Succeeded {
                     rows: Some(RowsOutcome::Fetched {
                         rows: s.rows,
@@ -479,7 +661,7 @@ impl Core {
             }
             Step::Suspend => {
                 // Only the last unit keeps its cursor: this one read ahead, and the next unit
-                // needs the session.
+                // needs the session (m3b-t11: also a later set that suspended).
                 let outcome = UnitEnd::Succeeded {
                     rows: Some(RowsOutcome::Fetched {
                         rows: s.rows,
@@ -524,7 +706,7 @@ impl Core {
     async fn completed(&mut self, mut s: Stream, hold: Hold, control: bool) -> Ended {
         // First what Hacivat opened (the commit, the guard's checks): a result is complete
         // only once that held.
-        let (_, ended) = self.end_hold(hold, true, s.end.as_ref()).await;
+        let (_, ended) = self.end_hold(hold, true, s.judged_end().as_ref()).await;
         self.observe(!control);
         let state = s.state_after(&ended);
         s.finish(state);
@@ -584,4 +766,40 @@ impl Core {
         };
         Ended::of(&s, outcome)
     }
+}
+
+// ## m3b-t11-session-runs
+
+/// The result sets `unit` keeps: its own count, at least 1 and at most [`MAX_RESULT_SETS`]
+/// (R-M3-66).
+fn result_sets(unit: &RunUnit) -> u32 {
+    unit.max_result_sets.clamp(1, MAX_RESULT_SETS)
+}
+
+/// The statements of `unit` for the session's bookkeeping (what a reconnect would lose, a
+/// schema switch, MySQL's `autocommit`): a unit run "as one" (`Protocol::Simple`) split on
+/// every `;`, a split inside a quoted string included (it errs toward "seen"); any other unit
+/// whole.
+fn statements_of(unit: &RunUnit) -> Vec<&str> {
+    if unit.protocol != Protocol::Simple {
+        return vec![&unit.sql];
+    }
+    let parts: Vec<&str> = unit
+        .sql
+        .split(';')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.is_empty() {
+        vec![&unit.sql]
+    } else {
+        parts
+    }
+}
+
+/// A run that was still queued when a cancel dropped the queue (ledger 318): its observer
+/// hears every unit end `Cancelled` (none started) and `RunEnded`, so it reads "cancelled"
+/// whoever awaits its reply.
+pub(crate) fn report_cancelled_queued(spec: &RunSpec) {
+    Tally::new(spec).finish(&UnitEnd::Cancelled, true);
 }

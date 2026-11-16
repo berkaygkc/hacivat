@@ -815,23 +815,53 @@ async fn a_mysql_drain_of_a_large_rest_asks_for_a_kill_by_its_caps() {
     );
 }
 
-/// M3a's typed path is the extended protocol only (`typed.rs`): `Simple` is refused before
-/// anything is sent, on every engine.
+/// M3a's typed path was the extended protocol only. ## m3b-t11-session-runs (named exception):
+/// since M3b `Simple` is "run as one" (R-M3-60): the fake answers its result and never
+/// suspends, even when asked to, on every engine.
 #[tokio::test]
-async fn a_simple_protocol_query_is_refused() {
-    for f in [fake_pg().tracks_transactions(), fake_mysql()] {
+async fn a_simple_protocol_query_runs_as_one() {
+    let thousand = || FakeQuery {
+        prefix: "SELECT 1",
+        sets: vec![FakeResultSet {
+            columns: vec![(
+                "id",
+                LogicalType::Int {
+                    bits: 64,
+                    signed: true,
+                },
+            )],
+            rows: FakeRows::Generated {
+                count: 1_000,
+                cell: id_cell,
+            },
+        }],
+        ..FakeQuery::default()
+    };
+    for f in [
+        fake_pg().tracks_transactions().queries(vec![thousand()]),
+        fake_mysql().queries(vec![thousand()]),
+    ] {
         let mut c = connect_fake(&f).await;
-        let e = c
-            .query(QuerySpec {
-                protocol: Protocol::Simple,
-                ..spec("SELECT 1", false)
-            })
-            .await
-            .unwrap_err();
-        assert_eq!(e.kind, RawErrorKind::Unsupported);
+        if f.descriptor().kind == DbmsKind::Postgres {
+            c.batch("BEGIN").await.unwrap();
+        }
+        c.query(QuerySpec {
+            protocol: Protocol::Simple,
+            ..spec("SELECT 1", true)
+        })
+        .await
+        .unwrap();
+        loop {
+            match c.next_event().await.unwrap() {
+                QueryEvent::Suspended => panic!("a query run as one never suspends"),
+                QueryEvent::Done(_) => break,
+                _ => {}
+            }
+        }
         assert_eq!(
             c.next_event().await.unwrap_err().kind,
-            RawErrorKind::Unsupported
+            RawErrorKind::Unsupported,
+            "nothing is open after it"
         );
     }
 }

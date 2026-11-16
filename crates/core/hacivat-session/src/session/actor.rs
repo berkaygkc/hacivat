@@ -180,6 +180,18 @@ const EVENT_CAPACITY: usize = 64;
 /// not counted as statements of the open transaction.
 pub(crate) const TX_CONTROL: [&str; 6] = ["BEGIN", "START", "COMMIT", "END", "ROLLBACK", "ABORT"];
 
+// ## m3b-t11-session-runs
+/// Whether a statement whose first keyword is `keyword` may run in a failed transaction (the
+/// advisory check; the server decides): `ROLLBACK`, and on PostgreSQL its synonym `ABORT`
+/// (R-M3-74). MySQL and SQLite have no `ABORT` statement.
+pub(crate) fn ends_failed_tx(kind: DbmsKind, keyword: &str) -> bool {
+    keyword == "ROLLBACK" || (keyword == "ABORT" && family(kind) == Family::Postgres)
+}
+
+/// The most requests a session queues behind the running one (C9); the next is answered
+/// `ExecErrorKind::QueueFull` without being queued.
+pub const QUEUE_CAP: usize = 256;
+
 /// Starts the actor of `live` on `rt` (the module docs). The session is read-only when `spec`
 /// or `profile` says so.
 pub fn spawn_session(
@@ -383,7 +395,6 @@ pub(crate) struct Core {
     pub(crate) gate: Arc<RunGate>,
     /// The sequence number of the request being handled (`run_one` sets it): a waiting run's
     /// question names it (`Pending::run_seq`).
-    #[allow(dead_code, reason = "Tasks 11 and 19 ask with it")]
     pub(crate) request_seq: u64,
 }
 
@@ -596,7 +607,8 @@ impl Core {
     async fn exec(&mut self, sql: &str, opts: ExecOpts, origin: ExecOrigin) -> Reply {
         let keyword = first_keyword(sql);
         // Advisory (first keyword only): the server refuses anyway.
-        if self.tx.status == TxStatus::Failed && keyword != "ROLLBACK" {
+        // ## m3b-t11-session-runs: `ABORT` is PostgreSQL's `ROLLBACK` (R-M3-74).
+        if self.tx.status == TxStatus::Failed && !ends_failed_tx(self.kind, &keyword) {
             return Err(tx_error(TxError::FailedNeedsRollback));
         }
         let control = TX_CONTROL.contains(&keyword.as_str());
@@ -1090,6 +1102,13 @@ impl Ctl {
         for job in std::mem::take(&mut self.queue) {
             match job {
                 Job::Request(q) => {
+                    // ## m3b-t11-session-runs (ledger 318): a cancel tells a queued run's
+                    // observer that its units were cancelled, not skipped.
+                    if *kind == ExecErrorKind::Cancelled
+                        && let Request::Run(spec) = &q.request
+                    {
+                        crate::session::run::report_cancelled_queued(spec);
+                    }
                     let _ = q.reply.send(Err(ExecError::of(kind.clone())));
                 }
                 close @ Job::Close(..) => self.queue.push_back(close),
@@ -1135,13 +1154,12 @@ impl Ctl {
     /// A command while no request runs.
     fn idle_command(&mut self, cmd: Command) {
         match cmd {
+            // ## m3b-t11-session-runs (C9): at most `QUEUE_CAP` requests wait.
             Command::Submit {
                 seq,
                 request,
                 reply,
-            } => self
-                .queue
-                .push_back(Job::Request(Queued::new(seq, request, reply))),
+            } => self.enqueue(Queued::new(seq, request, reply)),
             // Q18: only a running request can be cancelled.
             Command::Cancel { reply, .. } | Command::Escalate { reply, .. } => {
                 let _ = reply.send(CancelOutcome::AlreadyFinished);
@@ -1150,6 +1168,28 @@ impl Ctl {
             // ## m3b-t01c-core-seams (P-M3b-3): answered at once, never queued.
             cmd @ (Command::Choose { .. } | Command::CommitDecision { .. }) => self.answer(cmd),
         }
+    }
+
+    // ## m3b-t11-session-runs
+    /// Queues `job` behind the requests already waiting, unless [`QUEUE_CAP`] of them do (C9):
+    /// then it is answered `QueueFull` and never runs. Queued closes do not count.
+    fn enqueue(&mut self, job: Queued) {
+        let waiting = self
+            .queue
+            .iter()
+            .filter(|j| matches!(j, Job::Request(_)))
+            .count();
+        if waiting >= QUEUE_CAP {
+            let _ = job.reply.send(Err(ExecError::of(ExecErrorKind::QueueFull)));
+            return;
+        }
+        self.queue.push_back(Job::Request(job));
+    }
+
+    /// Whether a close waits in the queue (or was read ahead).
+    fn close_queued(&self) -> bool {
+        matches!(self.held, Some(Command::Close { .. }))
+            || self.queue.iter().any(|j| matches!(j, Job::Close(..)))
     }
 
     // ## m3b-t01c-core-seams (P-M3b-3)
@@ -1651,8 +1691,8 @@ fn recovering_command(ctl: &mut Ctl, cmd: Option<Command>) -> Recovering {
             request,
             reply,
         }) if is_retryable(&request) => {
-            ctl.queue
-                .push_back(Job::Request(Queued::new(seq, request, reply)));
+            // ## m3b-t11-session-runs (C9)
+            ctl.enqueue(Queued::new(seq, request, reply));
             Recovering::Go
         }
         Some(Command::Submit { reply, .. }) => {
@@ -1902,6 +1942,9 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
     // outlives it.
     core.request_seq = seq;
     core.gate.withdraw();
+    // ## m3b-t11-session-runs: a close already queued behind this request answers its choices
+    // `Stop` (R-M3-61).
+    core.gate.set_closing(ctl.close_queued());
     let mut prewarm_at =
         (family(core.kind) == Family::MySql).then(|| tokio::time::Instant::now() + SIDE_PREWARM);
 
@@ -2236,6 +2279,12 @@ impl Ladder {
             // ## m3b-t01c-core-seams (P-M3b-3): the running request may be the run that waits
             // for this answer; it is answered now through the gate, never queued behind it.
             cmd @ (Command::Choose { .. } | Command::CommitDecision { .. }) => ctl.answer(cmd),
+            // ## m3b-t11-session-runs: a close waits behind the request, and answers the
+            // run's choice `Stop` (R-M3-61: any close of the console).
+            close @ Command::Close { .. } => {
+                ctl.idle_command(close);
+                ctl.gate.close();
+            }
             other => ctl.idle_command(other),
         }
         None

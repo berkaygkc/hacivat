@@ -18,6 +18,19 @@
 //! the run asked again (also a Retry that re-asks for the same unit), or an answer naming any
 //! other question is answered `false` and changes nothing (fail closed: nothing is sent on an
 //! answer to a question the user never saw).
+//!
+//! ## m3b-t11-session-runs
+//! **Choices are checked against their question** (R-M3-61, P-M3b-19). A choice question
+//! ([`RunGate::ask_choice`]) says whether the run stopped inside a failed PostgreSQL
+//! transaction: there `RollbackAndContinue`, `IgnoreAll` and `Stop` are the answers (no
+//! `Retry`, no `Ignore`), elsewhere `Retry`, `Ignore`, `IgnoreAll` and `Stop` (never
+//! `RollbackAndContinue`, which would end a transaction the question did not name). Any other
+//! choice is refused (`false`) and the question keeps waiting.
+//!
+//! **A close answers Stop.** A `Close` command that arrives while a request runs is queued
+//! behind it, and the actor calls [`RunGate::close`]: a choice question waiting now is answered
+//! `Stop`, and so is any the request asks after it. `run_one` sets the flag again at the start
+//! of each request from the closes already queued ([`RunGate::set_closing`]).
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -27,7 +40,7 @@ use crate::session::{CommitAnswer, RunChoice, UnitId};
 
 /// What a run asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(not(test), allow(dead_code, reason = "Tasks 11 and 19 ask"))]
+#[cfg_attr(not(test), allow(dead_code, reason = "Task 19 asks for commits"))]
 pub(crate) enum Ask {
     /// A unit failed under the `Ask` policy (Task 11).
     Choice,
@@ -37,7 +50,6 @@ pub(crate) enum Ask {
 
 /// The question a run waits on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(not(test), allow(dead_code, reason = "Tasks 11 and 19 ask"))]
 pub(crate) struct Pending {
     pub(crate) kind: Ask,
     /// The run's request sequence number (`RunTicket::seq`).
@@ -60,6 +72,11 @@ struct Slot {
     answer: Option<Answer>,
     /// The last question id given (ids start at 1).
     last_question: u64,
+    // ## m3b-t11-session-runs
+    /// The waiting choice question was asked inside a failed PostgreSQL transaction.
+    failed_tx: bool,
+    /// A close of the session waits behind the running request: it asks nothing more.
+    closing: bool,
 }
 
 /// The session's one slot for out-of-band answers (the module docs).
@@ -77,8 +94,12 @@ impl RunGate {
     /// A run of request `run_seq` starts waiting for an answer about `unit`; any earlier
     /// question (and an answer it was never given) is gone. Returns the new question's id,
     /// which the run's event carries.
-    #[cfg_attr(not(test), allow(dead_code, reason = "Tasks 11 and 19 ask"))]
+    #[cfg_attr(not(test), allow(dead_code, reason = "Task 19 asks for commits"))]
     pub(crate) fn ask(&self, kind: Ask, run_seq: u64, unit: UnitId) -> u64 {
+        self.ask_with(kind, run_seq, unit, false)
+    }
+
+    fn ask_with(&self, kind: Ask, run_seq: u64, unit: UnitId, failed_tx: bool) -> u64 {
         let mut slot = self.lock();
         slot.last_question = slot.last_question.wrapping_add(1).max(1);
         let question = slot.last_question;
@@ -89,7 +110,54 @@ impl RunGate {
             question,
         });
         slot.answer = None;
+        // ## m3b-t11-session-runs
+        slot.failed_tx = failed_tx;
+        // A close that came first answers a choice at once (the module docs).
+        if kind == Ask::Choice && slot.closing {
+            slot.pending = None;
+            slot.answer = Some(Answer::Choice(RunChoice::Stop));
+            drop(slot);
+            self.notify.notify_one();
+        }
         question
+    }
+
+    // ## m3b-t11-session-runs
+    /// [`ask`](Self::ask) for the error policy's choice (R-M3-61). `failed_tx`: the failed unit
+    /// left a failed PostgreSQL transaction, which decides the choices
+    /// [`choose`](Self::choose) accepts (the module docs).
+    pub(crate) fn ask_choice(&self, run_seq: u64, unit: UnitId, failed_tx: bool) -> u64 {
+        self.ask_with(Ask::Choice, run_seq, unit, failed_tx)
+    }
+
+    /// A close of the session waits behind the running request: a choice question waiting
+    /// now is answered `Stop`, and so is any the request asks later (the module docs).
+    pub(crate) fn close(&self) {
+        let filled = {
+            let mut slot = self.lock();
+            slot.closing = true;
+            match slot.pending {
+                Some(p) if p.kind == Ask::Choice => {
+                    slot.pending = None;
+                    slot.answer = Some(Answer::Choice(RunChoice::Stop));
+                    true
+                }
+                _ => false,
+            }
+        };
+        if filled {
+            self.notify.notify_one();
+        }
+    }
+
+    /// Whether a close waits behind the running request.
+    pub(crate) fn closing(&self) -> bool {
+        self.lock().closing
+    }
+
+    /// A request starts: `closing` when a close is already queued behind it.
+    pub(crate) fn set_closing(&self, closing: bool) {
+        self.lock().closing = closing;
     }
 
     /// The run stops waiting (a stop, its deadline, the end of its request): a later answer
@@ -112,7 +180,6 @@ impl RunGate {
     }
 
     /// Waits until the question is answered (cancel-safe: a dropped wait loses nothing).
-    #[cfg_attr(not(test), allow(dead_code, reason = "Tasks 11 and 19 wait"))]
     pub(crate) async fn answered(&self) -> Answer {
         loop {
             if let Some(answer) = self.take_answer() {
@@ -124,12 +191,14 @@ impl RunGate {
         }
     }
 
-    /// Fills the slot when `matches` the waiting question; true when it did.
-    fn answer(&self, matches: impl FnOnce(Pending) -> bool, answer: Answer) -> bool {
+    /// Fills the slot when `matches` the waiting question (and whether it was asked inside a
+    /// failed transaction); true when it did.
+    fn answer(&self, matches: impl FnOnce(Pending, bool) -> bool, answer: Answer) -> bool {
         let filled = {
             let mut slot = self.lock();
+            let failed_tx = slot.failed_tx;
             match slot.pending {
-                Some(p) if matches(p) => {
+                Some(p) if matches(p, failed_tx) => {
                     slot.pending = None;
                     slot.answer = Some(answer);
                     true
@@ -144,10 +213,16 @@ impl RunGate {
     }
 
     /// A `Command::Choose`: true when the run of request `run_seq` waits for a choice on
-    /// question `question`.
+    /// question `question`, and `choice` is one of that question's answers (m3b-t11: the
+    /// module docs).
     pub(crate) fn choose(&self, run_seq: u64, question: u64, choice: RunChoice) -> bool {
         self.answer(
-            |p| p.kind == Ask::Choice && p.run_seq == run_seq && p.question == question,
+            |p, failed_tx| {
+                p.kind == Ask::Choice
+                    && p.run_seq == run_seq
+                    && p.question == question
+                    && choice_allowed(choice, failed_tx)
+            },
             Answer::Choice(choice),
         )
     }
@@ -162,7 +237,7 @@ impl RunGate {
         answer: CommitAnswer,
     ) -> bool {
         self.answer(
-            |p| {
+            |p, _| {
                 p.kind == Ask::Commit
                     && p.run_seq == run_seq
                     && p.unit == unit
@@ -173,10 +248,69 @@ impl RunGate {
     }
 }
 
+// ## m3b-t11-session-runs
+/// Whether `choice` answers a choice question asked inside a failed PostgreSQL transaction
+/// (`failed_tx`) or outside one (R-M3-61, P-M3b-19; the module docs).
+pub(crate) fn choice_allowed(choice: RunChoice, failed_tx: bool) -> bool {
+    match choice {
+        RunChoice::Retry | RunChoice::Ignore => !failed_tx,
+        RunChoice::RollbackAndContinue => failed_tx,
+        RunChoice::IgnoreAll | RunChoice::Stop => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::RunId;
+
+    // ## m3b-t11-session-runs
+    /// A choice the question does not offer is refused and the question keeps waiting.
+    #[tokio::test]
+    async fn a_choice_the_question_does_not_offer_is_refused() {
+        let gate = RunGate::default();
+        let q = gate.ask_choice(7, unit(1), false);
+        assert!(!gate.choose(7, q, RunChoice::RollbackAndContinue));
+        assert_eq!(gate.pending().map(|p| p.question), Some(q), "still waiting");
+        assert!(gate.choose(7, q, RunChoice::Retry));
+        assert_eq!(gate.answered().await, Answer::Choice(RunChoice::Retry));
+
+        let q = gate.ask_choice(7, unit(2), true);
+        for refused in [RunChoice::Retry, RunChoice::Ignore] {
+            assert!(!gate.choose(7, q, refused), "{refused:?}");
+        }
+        assert_eq!(gate.take_answer(), None);
+        assert!(gate.choose(7, q, RunChoice::RollbackAndContinue));
+        assert_eq!(
+            gate.answered().await,
+            Answer::Choice(RunChoice::RollbackAndContinue)
+        );
+        // A later question outside a failed transaction forgets the flag.
+        let q = gate.ask_choice(7, unit(3), false);
+        assert!(!gate.choose(7, q, RunChoice::RollbackAndContinue));
+        assert!(gate.choose(7, q, RunChoice::Ignore));
+    }
+
+    /// A close answers the waiting choice `Stop`, and any the request asks after it; a commit
+    /// question is left to Task 19.
+    #[tokio::test]
+    async fn a_close_answers_a_choice_stop() {
+        let gate = RunGate::default();
+        let q = gate.ask_choice(7, unit(1), false);
+        gate.close();
+        assert_eq!(gate.answered().await, Answer::Choice(RunChoice::Stop));
+        assert!(!gate.choose(7, q, RunChoice::Ignore), "answered already");
+        assert!(gate.closing());
+        let _ = gate.ask_choice(7, unit(2), true);
+        assert_eq!(gate.answered().await, Answer::Choice(RunChoice::Stop));
+        let c = gate.ask(Ask::Commit, 7, unit(3));
+        assert_eq!(gate.take_answer(), None);
+        assert!(gate.commit(7, unit(3), c, CommitAnswer::RollBack));
+        // The next request starts without a close behind it.
+        gate.set_closing(false);
+        let _ = gate.ask_choice(8, unit(1), false);
+        assert_eq!(gate.take_answer(), None);
+    }
 
     fn unit(ordinal: u32) -> UnitId {
         UnitId {

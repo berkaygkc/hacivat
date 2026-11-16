@@ -837,8 +837,15 @@ async fn a_run_queued_behind_a_cancel_never_starts() {
         b.reply.await.unwrap().unwrap_err().kind,
         ExecErrorKind::Cancelled
     );
-    // It never ran, so the observer heard nothing: a reply without `RunEnded`.
-    assert!(o.events().is_empty());
+    // ## m3b-t11-session-runs (named exception, ledger 318): it never ran, and its observer
+    // hears that it was cancelled (every unit `Cancelled`, then `RunEnded`), none started.
+    assert_eq!(o.unit_ends(), vec![UnitEnd::Cancelled]);
+    assert!(
+        !o.events()
+            .iter()
+            .any(|e| matches!(e, RunEvent::UnitStarted { .. }))
+    );
+    assert_eq!(o.summaries().len(), 1);
     assert!(
         !f.call_log()
             .contains(&FakeCall::Typed(FakeTypedCall::Query("SELECT 1".into())))

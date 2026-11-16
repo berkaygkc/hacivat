@@ -226,21 +226,16 @@ async fn refused_units_send_nothing_in_manual_mode_either() {
         UnitVerdict::TxThenConfirm,
     ));
     assert!(t.reply.await.unwrap().is_err());
-    // A unit with binds before Task 11.
-    let mut spec = spec_of(&o, &["UPDATE t SET a=$1"]);
-    let mut units: Vec<RunUnit> = spec.units.to_vec();
-    units[0].binds = vec![BindValue::Null].into();
-    spec.units = units.into();
-    let e = h.run(spec).reply.await.unwrap().unwrap_err();
-    assert_eq!(e.kind, ExecErrorKind::Internal);
+    // ## m3b-t11-session-runs (named exception): a unit with binds runs since Task 11
+    // (`tests/run_m3b.rs`); this test keeps the Task 19 refusal.
     assert!(calls_since(&f, before).is_empty());
     assert_eq!(snap(&h).tx.status, hacivat_driver::TxStatus::Idle);
 }
 
 #[tokio::test]
 async fn read_and_write_verdicts_run_as_in_m3a() {
-    // Two result sets scripted: `max_result_sets` is clamped to 1 until Task 11 (R-M3-25), so
-    // the second is drained and counted, as in M3a.
+    // Two result sets scripted. ## m3b-t11-session-runs (named exception): since Task 11 a unit
+    // keeps `max_result_sets` of them (R-M3-66), each its own result.
     let two_sets = FakeQuery {
         prefix: "SELECT 1",
         sets: vec![generated(1), generated(1)],
@@ -256,10 +251,11 @@ async fn read_and_write_verdicts_run_as_in_m3a() {
     spec.units = units.into();
     h.run(spec).reply.await.unwrap().unwrap();
     assert_eq!(f.typed_log(), vec![FakeTypedCall::Query("SELECT 1".into())]);
+    assert_eq!(o.stores(), 2);
     assert!(
-        o.events()
+        !o.events()
             .iter()
-            .any(|e| matches!(e, RunEvent::MoreResultSets { skipped: 1, .. }))
+            .any(|e| matches!(e, RunEvent::MoreResultSets { .. }))
     );
 }
 

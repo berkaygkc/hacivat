@@ -2058,3 +2058,64 @@ nothing new is wired into Run (R-M3-52).
   more than 1,000 entries) makes the entry invalid (`InvalidEntry`): it stays on disk untouched
   and is shown, never loaded half-read.
 - `testing::fake_session_classified` gives Task 18's tests a fake session with a classifier.
+
+## m3b-t11 — runs
+
+M3b Task 11 (HV-EXEC-05/-07/-08 session side; C9, C13; R-M3-60, -61, -66, -74, -77).
+
+- **Binds.** `query_spec` passes `RunUnit::binds` in slot order. The session neither formats
+  nor checks them: a driver that cannot bind refuses the query before sending it (M3a's drivers
+  answer `Unsupported`; Task 13's bind as parameters). What is bound (the rewritten text and
+  its slots, nothing sent when a placeholder is unbindable) is Task 15's.
+- **Result sets (R-M3-66).** `max_result_sets` is clamped to 1..=100 and passed to the driver.
+  Each set gets its own result (`open_result(unit, ordinal, schema)`; the ordinal is the set's
+  place in the unit, so a set without columns, which opens none, still takes a number). A set's
+  update count is reported when it ends; its `ResultEnded` (`Complete`, or `Truncated(ResultCap)`)
+  comes when the unit ends, after what Hacivat opened around the statement held: a gap the
+  read-only guard finds closes every result of the unit (`Closed { EnforcementGap }`). The guard
+  judges the statement by the first set's end with the most rows any set reported affected, so
+  a write in a later set is never hidden behind a read. After the first set the stream admits
+  every chunk against the budgets (a query with several sets never suspends); only the first
+  set of the last unit may stay suspended.
+- **Run as one (R-M3-60).** A `Protocol::Simple` unit is sent whole and never suspends (no
+  transaction of Hacivat's around it). A read-only session refuses it,
+  `ReadOnlyDenied(Protocol)`, nothing sent: its guard judges one statement through the prepared
+  protocol. What a reconnect would lose, a schema switch and MySQL's `autocommit` are read from
+  each `;`-separated part (a split inside a string errs toward "seen"; in a batch only an
+  `autocommit` "off" is believed).
+- **Notices (R-M3-77).** At most 100 `RunEvent::Notice` per unit; the rest are counted and one
+  `notices_dropped` count is logged when the unit's result ends, never their text.
+- **The `Ask` policy (R-M3-61, P-M3b-3, P-M3b-19).** A unit that fails while later units wait
+  (and the session is usable, no stop asked for) asks: `RunGate::ask_choice` gives the question
+  its id and records whether the user's PostgreSQL transaction failed with it; `NeedsChoice`
+  goes out with no `.await` between; the run then selects on the gate's answer and the stop
+  signal while `Ladder::command` serves commands. No cursor is open meanwhile (only the last
+  unit keeps one, and it never asks).
+  - The gate checks the choice against the question: inside a failed transaction
+    `RollbackAndContinue`, `IgnoreAll`, `Stop`; elsewhere `Retry`, `Ignore`, `IgnoreAll`,
+    `Stop`. Anything else is `false` and the question keeps waiting, so no `ROLLBACK` is ever
+    sent for a transaction the question did not name.
+  - `Retry` runs the unit again (`UnitStarted`/`UnitEnded` again; the summary counts its last
+    attempt); a new failure asks a new question. `Ignore` goes on; `IgnoreAll` goes on and
+    never asks again in this run. `Stop` skips the rest; the reply is the unit's error.
+    `RollbackAndContinue` sends `ROLLBACK` (logged without text, `TxChanged`, schema reprobe)
+    and goes on with the session's mode: a Manual session opens its next transaction before
+    the next unit, as for any unit. A failed `ROLLBACK` ends the run with its error.
+  - A cancel answers `Stop`, also when it races an answer (the stop is checked after the
+    answer is taken). A close that comes while a request runs is queued behind it and answers
+    the run's choice `Stop` (`RunGate::close`); a close already queued when a request starts
+    makes it ask nothing (`RunGate::set_closing`). Commit questions (Task 19) are not touched.
+  - A run that goes on to its end replies `Ok` unless its last unit failed.
+- **`ABORT` (R-M3-74).** In a failed transaction the advisory check lets `ROLLBACK` through and,
+  on PostgreSQL only, `ABORT` (`actor::ends_failed_tx`), on the `Exec` and the typed path.
+- **Queue cap (C9).** `QUEUE_CAP` = 256 requests wait behind the running one; the next is
+  answered `QueueFull` at once and never queued (closes do not count; queued fetches still
+  coalesce when they run). A recovering session's waiting internal reads count too.
+- **A cancelled queued run (ledger 318).** When a cancel (or a deactivate) drops the queue, a
+  queued `Run` reports every unit `Cancelled` and `RunEnded` before its `Cancelled` reply, so its
+  observer reads "cancelled" whether or not anyone awaits the reply (`ExecService::with_runtime`).
+  A run dropped for any other reason (a loss, a close) still never started.
+- **FakeDriver (named exception, `hacivat-driver/src/fake.rs`).** A typed query with
+  `Protocol::Simple` answers its scripted sets and never suspends; in a failed PostgreSQL
+  transaction a typed query that ends or recovers it is taken (the server takes `ROLLBACK` and
+  `ABORT` on either protocol).

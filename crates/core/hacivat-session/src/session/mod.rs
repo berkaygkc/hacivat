@@ -492,7 +492,7 @@ pub enum ErrorPolicy {
     StopOnError,
     // ## m3b-t01c-core-seams
     /// A failure asks (`RunEvent::NeedsChoice`, answered by `SessionHandle::choose`;
-    /// R-M3-61, Task 11). Until Task 11 the session stops as `StopOnError` does.
+    /// R-M3-61, Task 11) when later units wait; a failed last unit ends the run.
     Ask,
 }
 
@@ -525,8 +525,8 @@ pub struct RunUnit {
     /// last unit of its run stays suspended).
     pub suspendable: bool,
     // ## m3b-t01c-core-seams
-    /// The bind values, in placeholder order (Task 11 sends them; until then a unit with
-    /// binds is refused with `Internal`, nothing sent).
+    /// The bind values, in placeholder order (Task 11 sends them with the query; a driver
+    /// that cannot bind refuses the query before sending it).
     pub binds: Arc<[BindValue]>,
     /// The exec gate's verdict (`Unknown` when no gate ran); scheduling only, never trusted
     /// for safety (R-M3-83).
@@ -534,7 +534,7 @@ pub struct RunUnit {
     pub effects: SessionEffects,
     /// The text with the bind values masked, for the log and the history.
     pub masked: Arc<str>,
-    /// Result sets kept (R-M3-66: 100). Clamped to 1 until Task 11.
+    /// Result sets kept (R-M3-66: 100), each its own result; clamped to 1..=100.
     pub max_result_sets: u32,
     /// The cell cap of this unit (R-M3-82: a re-run with a 64 MiB limit); `None` takes
     /// `RunSpec::fetch`'s.
