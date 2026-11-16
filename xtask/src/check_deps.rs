@@ -52,7 +52,8 @@ pub enum Rule {
     SqlNotRuntimeFree,
     /// A `crates/sql/*` crate depends on a `crates/core/*` crate (any edge, dev included).
     SqlReachesCore,
-    /// A crate other than `sql-oracle-pg` depends on `pg_query` directly.
+    /// A crate other than `sql-oracle-pg` depends on `pg_query` directly, or (M3b) a crate
+    /// other than `sql-safety` depends on `sqlparser` directly; any edge kind counts.
     BackendOutsideOwner,
     /// `hacivat-text` (the headless editor core) reaches `hacivat-ui-core`, GPUI or a zed
     /// crate through its normal dependencies.
@@ -144,8 +145,9 @@ const SQL_FORBIDDEN: [&str; 8] = [
 ];
 /// The dev-only SQL corpus crate: `SqlNotRuntimeFree` does not apply to it.
 const SQL_TESTKIT: &str = "sql-testkit";
-/// The one crate that may depend on `pg_query` (R-M3-1).
-const PG_BACKEND: (&str, &str) = ("pg_query", "sql-oracle-pg");
+/// Each parser backend and the one crate that may depend on it directly: `pg_query` only in
+/// `sql-oracle-pg` (R-M3-1); ## m3b-t01a-seams: `sqlparser` only in `sql-safety` (R-M3-54).
+const BACKENDS: [(&str, &str); 2] = [("pg_query", "sql-oracle-pg"), ("sqlparser", "sql-safety")];
 /// The headless editor core (`TextCoreNotHeadless`).
 const TEXT_CORE: &str = "hacivat-text";
 /// The rope under `hacivat-text`, and the features that change its line breaks.
@@ -320,13 +322,13 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
                 }
             }
         }
-        if name != PG_BACKEND.1 {
+        for (backend, owner) in BACKENDS {
+            if name == owner {
+                continue;
+            }
             for (dep_id, _) in edges.get(&root.id).into_iter().flatten() {
-                if pkgs
-                    .get(dep_id)
-                    .is_some_and(|d| d.name.as_str() == PG_BACKEND.0)
-                {
-                    add(name, Rule::BackendOutsideOwner, vec![PG_BACKEND.0.into()]);
+                if pkgs.get(dep_id).is_some_and(|d| d.name.as_str() == backend) {
+                    add(name, Rule::BackendOutsideOwner, vec![backend.into()]);
                 }
             }
         }
@@ -1037,6 +1039,74 @@ mod tests {
             &[],
         );
         assert_eq!(rule_of(&md, "hacivat-exec"), Rule::BackendOutsideOwner);
+    }
+
+    // ## m3b-t01a-seams
+    #[test]
+    fn sqlparser_outside_safety_is_flagged() {
+        let md = fx_at(&[("sql-split", "crates/sql", &["sqlparser"])]);
+        assert_eq!(rule_of(&md, "sql-split"), Rule::BackendOutsideOwner);
+        // A core crate, the oracle and a dev-dependency are flagged alike.
+        let md = fx_at(&[("hacivat-exec", "crates/core", &["sqlparser"])]);
+        assert_eq!(rule_of(&md, "hacivat-exec"), Rule::BackendOutsideOwner);
+        let md = fx_at(&[("sql-oracle-pg", "crates/sql", &["sqlparser"])]);
+        assert_eq!(rule_of(&md, "sql-oracle-pg"), Rule::BackendOutsideOwner);
+        let md = fx_kind_at(
+            "sql-testkit",
+            "crates/sql",
+            "sqlparser",
+            DepKind::Development,
+            &[],
+        );
+        assert_eq!(rule_of(&md, "sql-testkit"), Rule::BackendOutsideOwner);
+        // Each backend has its own owner: sql-safety may not take pg_query directly.
+        let md = fx_at(&[("sql-safety", "crates/sql", &["pg_query"])]);
+        assert_eq!(rule_of(&md, "sql-safety"), Rule::BackendOutsideOwner);
+    }
+
+    #[test]
+    fn sqlparser_in_safety_is_allowed() {
+        let md = fx_at(&[("sql-safety", "crates/sql", &["sqlparser"])]);
+        assert!(violations(&md, &lints_ok).is_empty());
+        // Through sql-safety is fine (only direct edges count).
+        let md = fx_at(&[
+            ("hacivat-exec", "crates/core", &["sql-safety"]),
+            ("sql-safety", "crates/sql", &["sqlparser"]),
+        ]);
+        assert!(violations(&md, &lints_ok).is_empty());
+    }
+
+    /// The M3b crates are Core-layer members with no violation; `fuzz/` is its own workspace.
+    #[test]
+    fn m3b_crates_sit_in_their_layers_and_are_clean() {
+        let md = cargo_metadata::MetadataCommand::new()
+            .current_dir(crate::workspace_root())
+            .exec()
+            .unwrap();
+        let v = violations(&md, &|p| std::fs::read_to_string(p).unwrap_or_default());
+        for c in ["sql-ident", "sql-safety"] {
+            let member = md
+                .workspace_packages()
+                .into_iter()
+                .find(|p| p.name.as_str() == c)
+                .unwrap_or_else(|| panic!("{c} is not a workspace member"));
+            assert_eq!(layer_of(&md, member), Some(Layer::Core), "{c}");
+            assert!(v.iter().all(|x| x.krate != c), "{c}: {v:?}");
+        }
+        assert!(
+            md.workspace_packages()
+                .iter()
+                .all(|p| p.name.as_str() != "hacivat-fuzz"),
+            "fuzz/ must stay excluded"
+        );
+        // Only sql-safety reaches sqlparser directly.
+        let direct: Vec<&str> = md
+            .workspace_packages()
+            .iter()
+            .filter(|p| p.dependencies.iter().any(|d| d.name == "sqlparser"))
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(direct, ["sql-safety"]);
     }
 
     #[test]

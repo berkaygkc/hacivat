@@ -34,3 +34,19 @@ pub use item::{
 };
 pub use key::StmtKey;
 pub use splitter::{SplitStart, split, split_from};
+
+// ## m3b-t01a-seams: parameters, templates and HvNorm1 (Task 6); incremental resplit and the
+// streaming splitter (Task 5). Fail-closed stubs until then.
+pub mod fingerprint;
+pub mod incremental;
+pub mod params;
+pub mod stream;
+pub mod templates;
+
+pub use fingerprint::{Fingerprint, FingerprintAlgo, hv_norm1};
+pub use params::{
+    BindPlan, ParamDiag, ParamScan, ParamSettings, Placeholder, PlaceholderKind, RewrittenSql,
+    scan_params,
+};
+pub use stream::{STREAM_STATEMENT_MAX, StreamItem, StreamSplitter};
+pub use templates::{TemplatePattern, TemplateVar};

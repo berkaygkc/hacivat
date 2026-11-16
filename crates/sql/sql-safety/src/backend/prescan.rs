@@ -1,1 +1,2 @@
-//! Placeholder (M3b Task 1a's manifest commit); the seam lands in Task 1a's second commit.
+//! The lexer pre-scan inventory that runs before any parse (Task 10; P-M3b-8, P-M3b-35).
+//! Empty until Task 10.

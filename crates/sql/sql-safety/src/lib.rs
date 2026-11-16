@@ -27,3 +27,17 @@ pub mod policy;
 pub mod reason;
 pub mod report;
 mod visit;
+
+pub use classify::{ClassifyCtx, Expect, classify};
+pub use destructive::{DestructiveKind, DestructiveReason};
+pub use effects::{CoarseClass, EffectSet, RiskFlags};
+pub use fingerprint::classified_hash;
+pub use functions::{FnCatalog, FnLookup, denied_function_names, set_allowed};
+pub use gate_class::{GateClass, gate_class, opens_write};
+pub use limits::Limits;
+pub use policy::{Actor, Decision, Profile, Verdict, decide};
+pub use reason::{Reason, ReasonCode};
+pub use report::{
+    BackendVersion, Confidence, ObjectKind, ObjectRef, SafetyReport, StmtKind, StmtReport,
+    TouchedObjects,
+};

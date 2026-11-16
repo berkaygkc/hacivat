@@ -1,1 +1,2 @@
-//! Placeholder (M3b Task 1a's manifest commit); the seam lands in Task 1a's second commit.
+//! Which backend and pre-scan the orchestrator runs for a dialect (Task 14). Empty until
+//! Task 14.

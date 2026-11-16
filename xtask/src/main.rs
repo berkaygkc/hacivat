@@ -10,6 +10,11 @@ mod vf;
 mod docker;
 // ## m3a-t03-sql-tables
 mod gen_sql_tables;
+// ## m3b-t01a-seams: exit-2 stubs until their tasks (P7).
+mod bench_sql;
+mod fetch_pg_regress;
+mod gen_fn_catalog;
+mod gen_pg_visitor;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -19,6 +24,13 @@ use std::process::ExitCode;
 pub fn workspace_root() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest.parent().unwrap_or(manifest).to_path_buf()
+}
+
+// ## m3b-t01a-seams
+/// A command whose task has not landed: says which task fills it and exits 2.
+pub fn not_yet(command: &str, owner: &str) -> ExitCode {
+    eprintln!("xtask {command}: not implemented yet ({owner} fills it)");
+    ExitCode::from(2)
 }
 
 fn main() -> ExitCode {
@@ -35,12 +47,21 @@ fn main() -> ExitCode {
         Some("docker") => docker::run(),
         // ## m3a-t03-sql-tables
         Some("gen-sql-tables") => gen_sql_tables::run(),
+        // ## m3b-t01a-seams
+        Some("gen-pg-visitor") => gen_pg_visitor::run(),
+        Some("gen-fn-catalog") => gen_fn_catalog::run(),
+        Some("bench-sql") => bench_sql::run(),
+        Some("fetch-pg-regress") => fetch_pg_regress::run(),
         other => {
             eprintln!(
                 "unknown xtask command: {other:?}\navailable: bench-report, check-deps, check-update-key, docker, gen-sql, l10n, shot-diff, tokens, vf"
             );
             // ## m3a-t03-sql-tables
             eprintln!("also available: gen-sql-tables");
+            // ## m3b-t01a-seams
+            eprintln!(
+                "also available: bench-sql, fetch-pg-regress, gen-fn-catalog, gen-pg-visitor"
+            );
             ExitCode::from(2)
         }
     }

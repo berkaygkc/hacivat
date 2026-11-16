@@ -526,3 +526,51 @@ before Task 23's oracle).
 (`run_reads_a_copy_from_the_splitters_kind`, `an_oracle_region_holding_copy_stays_uncertain`),
 `hacivat-sql-editor/tests/preview_truth.rs` (`the_preview_reads_copy_from_the_splitter` and
 the committed seed).
+
+## m3b-t01a — SQL seams
+
+**Two new Core-layer crates under `crates/sql`.** `sql-ident` (identifiers, qualified names,
+ASCII-only folding) and `sql-safety` (the classifier) obey every M3a rule: no runtime, no
+`hacivat-l10n`, no core crate, `salsa` and `sql-sema` still forbidden. `sql-safety` is pure and
+synchronous; its thread pool is `hacivat-exec::classify_pool` (R-M3-53), so the SQL layer stays
+runtime-free.
+
+**`BackendOutsideOwner` gains a `sqlparser` arm.** Each parser backend has exactly one owner
+that may depend on it directly, by any edge kind: `pg_query` in `sql-oracle-pg`, `sqlparser`
+(`=0.64.0`, Apache-2.0, no default features; `std`, `visitor`, `recursive-protection`) in
+`sql-safety` (R-M3-54). Neither crate re-exports a backend type through `sql-safety`: the
+`backend` and `visit` modules are private, and `tests/stubs.rs` checks the public lines of
+`src/` for `sqlparser::` and `pg_query::`. The one `pg_query` re-export is
+`sql_oracle_pg::tree::pb`, the protobuf tree the PG backend walks (Task 9).
+
+**Classification is tied to the bytes sent (P-M3b-2).** `SafetyReport` carries
+`classified_len` and `classified_hash` (XXH3-64 of the exact text classified,
+`sql_safety::classified_hash`). `SafetyReport::matches_text` is the comparison the exec gate
+makes before it sends a unit, so `hacivat-exec` needs no hashing crate of its own.
+
+**Fail-closed stubs (F31).** Until their tasks land: `classify` answers `Unknown` with
+`request_effects = UNKNOWN` and the pre-decision `[NotImplemented]` (Task 14); `decide` answers
+`Deny([NotImplemented])` (Task 4); `gate_class` answers `Unknown` and `opens_write` `true`
+(Task 4); `denied_function_names` is empty and `set_allowed` `false` (Task 3);
+`sql_ident::{fold, ident_eq, parse_qualified}` change nothing, compare bytes and recognise
+nothing (Task 3); `sql_split::scan_params` reports every `:`, `$` and `?` byte as an unbindable
+placeholder and rewrites nothing, so Run refuses the unit (Task 6); `hv_norm1` hashes the raw
+text at version 0 (Task 6); `StreamSplitter` yields one `Ambiguous` at offset 0 (Task 5);
+`Lexed::checkpoint_before` answers `(0, Initial)`, a full relex (Task 5);
+`sql_oracle_pg::tree::{parse_tree, scan_tokens, fingerprint}` answer `Err` (Task 9). Nothing
+here is wired into Run (R-M3-52).
+
+**`fuzz/` is its own workspace (P-M3b-15).** It is excluded from the root workspace, copies
+the root's `third_party` `[patch.crates-io]` entries with `../` paths (so `pg_query` is the
+vendored copy) and checks in a `Cargo.lock` generated from the root lock. Cargo warns that the
+`mysql_async` and `tokio-postgres` patches are unused; they stay so a later edge cannot reach the
+registry crates. `libfuzzer-sys`'s NCSA licence is recorded in Task 20's section.
+
+**xtask stubs.** `gen-pg-visitor` (Task 9), `gen-fn-catalog` (offline `--check` only, Task 3;
+the catalog read is a `hacivat-exec` Docker test, P-M3b-13), `bench-sql` and `fetch-pg-regress`
+(Task 20) exit 2 and name the task that fills them.
+
+**Data placeholders.** `sql-safety/data/` holds the TOML tables later tasks fill, each with an
+`# owner: Task NN` header: `<engine>/{allow,deny,operators,types,set_allow}.toml` and
+`functions.digest` (Task 3), `profiles.toml` (Task 4), `pg/statements.toml` (Task 9),
+`{mysql,sqlite}/statements.toml` and `mysql/known_gaps.toml` (Task 10).
