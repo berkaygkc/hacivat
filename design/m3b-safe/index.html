@@ -1002,9 +1002,9 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
 .pop .pnote { margin:8px 0 0; font-size:12px; color:var(--text-2); }
 
 /* Parameter prompt (480): one row per name */
-.prow { display:grid; grid-template-columns:minmax(0,104px) minmax(0,1fr) 80px auto; column-gap:8px; align-items:center; min-height:26px; }
+.prow { display:grid; grid-template-columns:minmax(0,104px) minmax(0,1fr) 80px 48px; column-gap:8px; align-items:center; min-height:26px; }
 .prow + .prow, .pflag + .prow { margin-top:8px; }
-.phead { display:grid; grid-template-columns:minmax(0,104px) minmax(0,1fr) 80px auto; column-gap:8px; font-size:12px; color:var(--text-2); margin:0 0 4px; }
+.phead { display:grid; grid-template-columns:minmax(0,104px) minmax(0,1fr) 80px 48px; column-gap:8px; font-size:12px; color:var(--text-2); margin:0 0 4px; }
 .prow .pn { font:400 11.5px "Fragment Mono", monospace; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .prow .pt { font:400 11px "Fragment Mono", monospace; color:var(--text-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .prow .in.mono input { font:400 12px "Fragment Mono", monospace; }
@@ -1167,11 +1167,8 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
 <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <polyline points="12 6 12 12 16 14" /></symbol>
 <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /> <path d="M3 3v5h5" /> <path d="M12 7v5l4 2" /></symbol>
 <symbol id="i-hourglass" viewBox="0 0 24 24"><path d="M5 22h14" /> <path d="M5 2h14" /> <path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22" /> <path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2" /></symbol>
-<symbol id="i-list-filter" viewBox="0 0 24 24"><path d="M3 6h18" /> <path d="M7 12h10" /> <path d="M10 18h4" /></symbol>
 <symbol id="i-octagon-x" viewBox="0 0 24 24"><path d="m15 9-6 6" /> <path d="M2.586 16.726A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2h6.624a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586z" /> <path d="m9 9 6 6" /></symbol>
-<symbol id="i-pin-off" viewBox="0 0 24 24"><path d="M12 17v5" /> <path d="M15 9.34V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H7.89" /> <path d="m2 2 20 20" /> <path d="M9 9v1.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h11" /></symbol>
 <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 17v5" /> <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></symbol>
-<symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10" /> <path d="M18.4 6.6a9 9 0 1 1-12.77.04" /></symbol>
 <symbol id="i-timer" viewBox="0 0 24 24"><line x1="10" x2="14" y1="2" y2="2" /> <line x1="12" x2="15" y1="14" y2="11" /> <circle cx="12" cy="14" r="8" /></symbol>
 <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /> <circle cx="9" cy="7" r="4" /> <path d="M22 21v-2a4 4 0 0 0-3-3.87" /> <path d="M16 3.13a4 4 0 0 1 0 7.75" /></symbol>
 </defs></svg>
@@ -1742,7 +1739,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-commit-sp-title": "{rows} rows changed inside your transaction",
   "hv-commit-sp-title#one": "{rows} row changed inside your transaction",
   "hv-commit-sp-keep-line": "Keep: the change joins your open transaction. Nothing is committed yet.",
-  "hv-commit-sp-undo-line": "Undo: undo this statement; your transaction stays open.",
+  "hv-commit-sp-undo-line": "Undo: removes this statement's change; your transaction stays open.",
   "hv-commit-sp-locks": "With no answer, Hacivat undoes the statement after 5 minutes and leaves your transaction open.",
   "hv-commit-keep": "Keep",
   "hv-commit-undo": "Undo",
@@ -1797,16 +1794,13 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-cancel-slow-title": "Cancelling is taking long",
   "hv-cancel-slow-body": "The server hasn't stopped the statement on {name} after {duration}.",
   "hv-cancel-terminate": "Terminate on server",
-  "hv-cancel-deactivate": "Deactivate",
   "hv-cancel-dlg-title": "The statement isn't answering the cancel",
   "hv-cancel-dlg-body": "It has been cancelling for {duration}. Hacivat keeps waiting unless you choose otherwise.",
   "hv-cancel-keep-waiting": "Keep waiting",
-  "hv-cancel-terminate-line": "Terminate on server ends this session on the server with {fn}; its open transaction rolls back.",
-  "hv-cancel-deactivate-line": "Deactivate closes every connection of {name} here. The statement may continue on the server.",
+  "hv-cancel-terminate-line": "Terminate on server ends this session on the server with {fn}.",
   "hv-cancel-terminate-failed": "Couldn't terminate the session. Hacivat is still waiting for the cancel.",
-  "exec-terminated": "Session terminated on the server; its transaction was rolled back.",
+  "exec-terminated": "Session terminated on the server; its open transaction ({n} statements) was rolled back.",
   "exec-terminate-failed": "Couldn't terminate the session on the server.",
-  "exec-deactivated": "Disconnected {name}. The statement may still be running on the server.",
   "hv-errbar-failed": "Statement {i} of {n} failed",
   "hv-errbar-aborted": "Statement {i} of {n} failed, and the transaction failed with it",
   "hv-errbar-waiting": "{n} more wait",
@@ -1815,7 +1809,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-errbar-ignore-all": "Ignore all",
   "hv-errbar-stop": "Stop",
   "hv-errbar-rollback-continue": "Roll back and continue",
-  "hv-errbar-rollback-continue-tip": "Rolls back the whole transaction, statements 1 to {i}, then runs the rest in a new one.",
+  "hv-errbar-rollback-continue-tip": "Rolls back your open transaction ({n} statements), then continues with statement {next} in a new transaction.",
   "exec-run-stopped": "Stopped at statement {i}: you chose Stop.",
   "exec-run-rolled-back-continue": "Transaction rolled back; continuing with statement {i}.",
   "hv-params-title": "Values for this statement",
@@ -1908,12 +1902,26 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-conn-single-session-sub": "Consoles of this connection share one session: its transaction, variables and temporary tables.",
   "hv-conn-budget-single": "One session, shared by every console",
   "hv-console-shared": "Shared session",
-  "hv-console-shared-tip": "Every console of {name} uses this session: a transaction opened here is open in all of them."
+  "hv-console-shared-tip": "Every console of {name} uses this session: a transaction opened here is open in all of them.",
+  "hv-confirm-execute-all-scope": "Execute all also runs the remaining {n} statements that would ask, without asking. A statement that needs its name typed still asks, and a production change still waits for your answer after it runs.",
+  "hv-confirm-execute-all-scope#one": "Execute all also runs the remaining {n} statement that would ask, without asking. A statement that needs its name typed still asks, and a production change still waits for your answer after it runs.",
+  "hv-commit-dropped-sp-body": "The server rolled back your open transaction: this statement and the {n} before it. Nothing was committed.",
+  "exec-confirm-dropped-sp": "Connection lost: the server rolled back your open transaction ({n} statements).",
+  "hv-cancel-disconnect": "Disconnect",
+  "hv-cancel-options": "Show options…",
+  "hv-cancel-own-tx": "This console's open transaction ({n} statements) rolls back.",
+  "hv-cancel-disconnect-line-all": "Disconnect closes every connection of {name} here; the statement may continue on the server.",
+  "hv-cancel-disconnect-line-one": "Disconnect closes only this console's session ({console}); the statement may continue on the server.",
+  "hv-cancel-other-tx": "{console} also has an open transaction ({n} statements); the server rolls it back.",
+  "exec-disconnected": "Disconnected {name}. The statement may still be running on the server.",
+  "hv-errbar-rollback-continue-tip-auto": "Rolls back your open transaction ({n} statements), then continues with statement {next}, committing each statement as it runs.",
+  "hv-chooser-run-as-one-ro": "Not on a read-only session: its guard checks one statement at a time.",
+  "hv-history-target": "Goes into {name}, the focused console; Run checks it there."
  },
  "tr": {
   "hv-confirm-title": "Bu ifade {name} üzerinde çalıştırılsın mı?",
   "hv-confirm-title-warn": "Bu ifade {name} üzerinde satırları kilitler",
-  "hv-confirm-sub-unit": "{n} ifadeden {i}.",
+  "hv-confirm-sub-unit": "ifade {i}/{n}",
   "hv-confirm-sql": "İfade",
   "hv-confirm-effect": "Etkisi",
   "hv-confirm-prod-line": "Siz seçene kadar hiçbir şey gönderilmez.",
@@ -1949,13 +1957,13 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "safety-reason-implicit-commit": "MySQL önce açık işleminizi ({n} ifade) commit eder, sonra DDL'i çalıştırır.",
   "hv-commit-title": "{name} üzerinde {rows} satır değişti",
   "hv-commit-body-own": "Hacivat bu ifadeyi kendi açtığı bir işlemde çalıştırdı. Commit edene kadar diğer oturumlar değişikliği görmez.",
-  "hv-commit-locks": "Bu pencere beklerken satırlar kilitli kalır. Yanıt gelmezse Hacivat 5 dakika sonra geri alır.",
+  "hv-commit-locks": "Yanıt beklenirken satırlar kilitli kalır. Yanıt gelmezse Hacivat 5 dakika sonra geri alır.",
   "hv-commit-commit": "Commit et",
   "hv-commit-rollback": "Geri al",
   "hv-commit-countdown": "{time} sonra geri alınır",
   "hv-commit-sp-title": "İşleminizin içinde {rows} satır değişti",
   "hv-commit-sp-keep-line": "Koru: değişiklik açık işleminize katılır. Henüz hiçbir şey commit edilmez.",
-  "hv-commit-sp-undo-line": "İfadeyi geri al: yalnızca bu ifade geri alınır; işleminiz açık kalır.",
+  "hv-commit-sp-undo-line": "İfadeyi geri al: yalnızca bu ifadenin değişikliği kaldırılır; işleminiz açık kalır.",
   "hv-commit-sp-locks": "Yanıt gelmezse Hacivat 5 dakika sonra ifadeyi geri alır ve işleminizi açık bırakır.",
   "hv-commit-keep": "Koru",
   "hv-commit-undo": "İfadeyi geri al",
@@ -1964,7 +1972,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-commit-dropped-body": "Sunucu bu değişiklikleri geri aldı. Hiçbir şey commit edilmedi.",
   "hv-commit-close": "Kapat",
   "hv-editor-mark-awaiting": "Commit ya da geri alma bekleniyor",
-  "hv-editor-mark-awaiting-sp": "Koru ya da geri al bekleniyor",
+  "hv-editor-mark-awaiting-sp": "Yanıt bekleniyor: Koru ya da İfadeyi geri al",
   "hv-editor-mark-escalated": "iptal yanıtlanmadı · {duration}",
   "hv-editor-mark-rolled-back": "geri alındı",
   "exec-confirm-deadline": "{duration} içinde yanıt gelmedi: ifade geri alındı.",
@@ -2005,27 +2013,24 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-tx-idle-rollback": "Geri al",
   "hv-tx-idle-keep": "Açık bırak",
   "hv-cancel-slow-title": "İptal uzun sürüyor",
-  "hv-cancel-slow-body": "Sunucu {name} üzerindeki ifadeyi {duration} sonra hâlâ durdurmadı.",
+  "hv-cancel-slow-body": "{duration} geçti; sunucu {name} üzerindeki ifadeyi hâlâ durdurmadı.",
   "hv-cancel-terminate": "Sunucuda sonlandır",
-  "hv-cancel-deactivate": "Bağlantıları kapat",
   "hv-cancel-dlg-title": "İfade iptale yanıt vermiyor",
   "hv-cancel-dlg-body": "{duration} süredir iptal ediliyor. Siz başka bir şey seçmedikçe Hacivat beklemeyi sürdürür.",
   "hv-cancel-keep-waiting": "Beklemeyi sürdür",
-  "hv-cancel-terminate-line": "Sunucuda sonlandır, bu oturumu sunucuda {fn} ile kapatır; açık işlemi geri alınır.",
-  "hv-cancel-deactivate-line": "Bağlantıları kapat, {name} için buradaki tüm bağlantıları kapatır. İfade sunucuda çalışmayı sürdürebilir.",
+  "hv-cancel-terminate-line": "“Sunucuda sonlandır” bu oturumu sunucuda {fn} ile kapatır.",
   "hv-cancel-terminate-failed": "Oturum sonlandırılamadı. Hacivat iptali beklemeyi sürdürüyor.",
-  "exec-terminated": "Oturum sunucuda sonlandırıldı; işlemi geri alındı.",
+  "exec-terminated": "Oturum sunucuda sonlandırıldı; açık işlemi ({n} ifade) geri alındı.",
   "exec-terminate-failed": "Oturum sunucuda sonlandırılamadı.",
-  "exec-deactivated": "{name} bağlantıları kapatıldı. İfade sunucuda hâlâ çalışıyor olabilir.",
-  "hv-errbar-failed": "{n} ifadeden {i}. başarısız oldu",
-  "hv-errbar-aborted": "{n} ifadeden {i}. başarısız oldu; işlem de onunla birlikte başarısız oldu",
+  "hv-errbar-failed": "{i}. ifade başarısız oldu ({n} ifadeden)",
+  "hv-errbar-aborted": "{i}. ifade başarısız oldu; işlem de başarısız oldu",
   "hv-errbar-waiting": "{n} ifade daha bekliyor",
   "hv-errbar-retry": "Yeniden dene",
   "hv-errbar-ignore": "Yok say",
   "hv-errbar-ignore-all": "Tümünü yok say",
   "hv-errbar-stop": "Durdur",
   "hv-errbar-rollback-continue": "Geri al ve devam et",
-  "hv-errbar-rollback-continue-tip": "Tüm işlemi (1'den {i}'e kadar olan ifadeleri) geri alır, sonra kalanları yeni bir işlemde çalıştırır.",
+  "hv-errbar-rollback-continue-tip": "Açık işleminizi ({n} ifade) geri alır, sonra {next}. ifadeden yeni bir işlemde devam eder.",
   "exec-run-stopped": "{i}. ifadede durduruldu: Durdur'u seçtiniz.",
   "exec-run-rolled-back-continue": "İşlem geri alındı; {i}. ifadeden devam ediliyor.",
   "hv-params-title": "Bu ifadenin değerleri",
@@ -2048,7 +2053,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-chooser-run-as-one": "Tek parça çalıştır",
   "hv-chooser-run-as-one-hint": "Tek parça çalıştırma bölgenin tamamını tek istekte gönderir; sonuçları türsüz gelir.",
   "hv-chooser-customize": "Özelleştir…",
-  "hv-policy-title": "Çalıştır bu konsolda ifadeleri nasıl seçer",
+  "hv-policy-title": "Bu konsolda Çalıştır hangi ifadeleri seçer",
   "hv-policy-inside": "İmleç bir ifadenin içindeyken",
   "hv-policy-inside-ask": "Sor",
   "hv-policy-inside-smallest": "En küçük ifade",
@@ -2064,7 +2069,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-results-tab-pin": "Sekmeyi sabitle",
   "hv-results-tab-unpin": "Sabitlemeyi kaldır",
   "hv-results-tab-close-others": "Diğer sekmeleri kapat",
-  "hv-results-untyped": "türsüz (tek parça çalıştırıldı)",
+  "hv-results-untyped": "türsüz (tek parça)",
   "hv-results-untyped-short": "türsüz",
   "hv-results-untyped-tip": "Tek parça çalıştırma ifadeleri birlikte gönderir; bu yüzden sunucu her sütunu metin olarak döndürür. Sayılar metin gibi sıralanır.",
   "hv-results-set-limit": "İlk {kept} sonuç kümesi gösteriliyor; {skipped} küme daha okundu ve tutulmadı.",
@@ -2112,7 +2117,20 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-conn-single-session-sub": "Bu bağlantının konsolları tek oturumu paylaşır: işlemini, değişkenlerini ve geçici tablolarını.",
   "hv-conn-budget-single": "Tüm konsolların paylaştığı tek oturum",
   "hv-console-shared": "Paylaşılan oturum",
-  "hv-console-shared-tip": "{name} bağlantısının tüm konsolları bu oturumu kullanır: burada açılan bir işlem hepsinde açıktır."
+  "hv-console-shared-tip": "{name} bağlantısının tüm konsolları bu oturumu kullanır: burada açılan bir işlem hepsinde açıktır.",
+  "hv-confirm-execute-all-scope": "Tümünü çalıştır, sorulacak kalan {n} ifadeyi de sormadan çalıştırır. Adının yazılması gereken bir ifade yine sorar; üretimdeki bir değişiklik de çalıştıktan sonra yine yanıtınızı bekler.",
+  "hv-commit-dropped-sp-body": "Sunucu açık işleminizi geri aldı: bu ifade ve ondan önceki {n} ifade. Hiçbir şey commit edilmedi.",
+  "exec-confirm-dropped-sp": "Bağlantı koptu: sunucu açık işleminizi ({n} ifade) geri aldı.",
+  "hv-cancel-disconnect": "Bağlantıyı kes",
+  "hv-cancel-options": "Seçenekleri göster…",
+  "hv-cancel-own-tx": "Bu konsolun açık işlemi ({n} ifade) geri alınır.",
+  "hv-cancel-disconnect-line-all": "“Bağlantıyı kes”, {name} için buradaki tüm bağlantıları kapatır; ifade sunucuda çalışmayı sürdürebilir.",
+  "hv-cancel-disconnect-line-one": "“Bağlantıyı kes” yalnızca bu konsolun oturumunu ({console}) kapatır; ifade sunucuda çalışmayı sürdürebilir.",
+  "hv-cancel-other-tx": "{console} konsolunda da açık bir işlem var ({n} ifade); sunucu onu geri alır.",
+  "exec-disconnected": "{name} bağlantısı kesildi. İfade sunucuda hâlâ çalışıyor olabilir.",
+  "hv-errbar-rollback-continue-tip-auto": "Açık işleminizi ({n} ifade) geri alır, sonra {next}. ifadeden devam eder; her ifade çalışınca commit edilir.",
+  "hv-chooser-run-as-one-ro": "Salt okunur oturumda kullanılamaz: koruma her seferinde tek bir ifadeyi denetler.",
+  "hv-history-target": "Odaktaki konsola, {name} bağlantısına eklenir; Çalıştır denetimi orada yapılır."
  }
 }
 </script>
@@ -2473,7 +2491,8 @@ function errbarHTML(k) {
   const title = B.aborted ? te("hv-errbar-aborted", { i:nf(B.i), n:nf(B.n) }) : te("hv-errbar-failed", { i:nf(B.i), n:nf(B.n) });
   const b = (act, key, extra = "") => `<button class="btn" data-act="${act}" data-fk="${act}" ${extra}>${te(key)}</button>`;
   const btns = B.aborted
-    ? b("ebRollbackContinue", "hv-errbar-rollback-continue", `title="${te("hv-errbar-rollback-continue-tip", { i:nf(B.i) })}"`) + b("ebIgnoreAll", "hv-errbar-ignore-all") + b("ebStop", "hv-errbar-stop")
+    /* I4: the tooltip counts the whole open transaction (it may predate this run) and says how the rest runs, from the live mode */
+    ? b("ebRollbackContinue", "hv-errbar-rollback-continue", `title="${te(k.mode === "auto" ? "hv-errbar-rollback-continue-tip-auto" : "hv-errbar-rollback-continue-tip", { n:nf(k.tx ? k.tx.n : B.i), next:nf(B.i + 1) })}"`) + b("ebIgnoreAll", "hv-errbar-ignore-all") + b("ebStop", "hv-errbar-stop")
     : b("ebRetry", "hv-errbar-retry") + b("ebIgnore", "hv-errbar-ignore") + b("ebIgnoreAll", "hv-errbar-ignore-all") + b("ebStop", "hv-errbar-stop");
   return `<div class="errbar" id="errbar" role="alert" aria-label="${title}">${ic("triangle-alert","i12")}<span class="t">${title}</span><span class="chip">${esc(B.code)}</span><span class="w" id="ebWait">${te("hv-errbar-waiting", { n:nf(B.n - B.i) })}</span><span class="grow"></span>${btns}</div>`;
 }
@@ -2755,7 +2774,7 @@ const LOG_GLYPH = { ok:"check", err:"triangle-alert", tx:"git-commit-horizontal"
 function logLineHTML(x, i) {
   /* M3b: a server notice or warning is one row: the glyph, the translated label, the server's severity and code as chips (verbatim), then the
      server's text verbatim in its own mono field. MySQL shows the vendor code beside SQLSTATE ("1292 · 22007"). */
-  if (x.g === "notice" || x.g === "warn") return `<div class="lg ${x.g === "warn" ? "warn" : "ntc"}">${ic(LOG_GLYPH[x.g],"i12")}<span class="lbl2">${te(x.g === "warn" ? "exec-warning" : "exec-notice")}</span><span class="sev">${esc(x.sev)}</span>${x.code ? `<span class="sev">${esc(x.code)}</span>` : ""}<span class="st2" lang="en" title="${esc(x.srv)}">${esc(x.srv)}</span></div>`;
+  if (x.g === "notice" || x.g === "warn") return `<div class="lg ${x.g === "warn" ? "warn" : "ntc"}">${ic(LOG_GLYPH[x.g],"i12")}<span class="lbl2">${te(x.g === "warn" ? "exec-warning" : "exec-notice")}</span>${x.sev.toUpperCase() === (x.g === "warn" ? "WARNING" : "NOTICE") ? "" : `<span class="sev">${esc(x.sev)}</span>`}${x.code ? `<span class="sev">${esc(x.code)}</span>` : ""}<span class="st2" lang="en" title="${esc(x.srv)}">${esc(x.srv)}</span></div>`;
   const v = Object.fromEntries(Object.entries(x.v || {}).map(([n, val]) => [n, n === "duration" ? dur(val) : typeof val === "number" ? nf(val) : val]));
   const m = esc(t(x.k, v));
   let h = `<div class="lg ${x.g === "err" ? "err" : x.g === "sum" ? "sum" : x.g === "drop" ? "dim" : ""}" ${x.g === "err" ? `data-act="logErr" data-unit="${x.unit}"` : ""}>${ic(LOG_GLYPH[x.g],"i12")}<span class="m">${m}</span>${x.chip ? `<span class="chip">${esc(x.chip)}</span>` : ""}</div>`;
@@ -2807,7 +2826,7 @@ function renderStatus() {
   if (!c || live !== "connected") h += `<span class="s envseg np">${te("sb-noconn")}</span>`;
   else {
     const envTxt = t("sb-env", { env:t("env-" + c.env), access:c.ro ? roLabel(c) : t("acc-rw") });
-    h += c.env === "production" ? `<span class="s envseg">${mark("production")}${ic("lock","i12")}<span>${esc(envTxt)}</span></span>`
+    h += c.env === "production" ? `<span class="s envseg">${mark("production")}${c.ro ? ic("lock","i12") : ""}<span>${esc(envTxt)}</span></span>`   /* RC-6: the lock only on read-only production */
       : `<span class="s envseg np">${mark(c.env)}<span>${esc(envTxt)}</span><span class="mono" style="color:var(--text-2)">${esc(c.id)}</span></span>`;
     if (c.engine !== "sqlite") h += seg("path", `${ic("arrow-left-right","i12")}<span>${te("path-direct")}</span><span class="mono">${esc(dur(c.lat))}</span>`, "g");
     h += seg("enc", `${ic("lock","i12")}<span>${te("enc-verified")}</span>`);
@@ -2864,8 +2883,8 @@ function menuHTML() {
   if (M.type === "uncertain") {
     rows += `<div class="unc"><b>${ic("circle-alert","i12")}${te("hv-chooser-uncertain-title")}</b><p class="r" style="margin:0 0 4px">${te("hv-chooser-uncertain-body")}</p><p style="margin:0 0 4px">${te("hv-chooser-uncertain-exec-comment")}</p><p style="margin:0">${te("hv-chooser-uncertain-fix", { key:KEY_RUN })}</p></div>`;
     /* M3b (R-M3-60): "Run as one" is the explicit way out. It is never preselected: Enter does nothing until it is highlighted */
-    if (M.items.length) rows += `<div class="sep"></div>` + M.items.map((it, i) => `<div class="mi${i === M.active ? " on" : ""}" data-mi="${i}" role="menuitem"><span class="ck"></span><span class="kind">${te("hv-chooser-run-as-one")}</span><span class="cnt">${te("hv-chooser-count", { n:nf(it.count) })}</span></div><div class="mnote">${te("hv-chooser-run-as-one-hint")}</div>`).join("");
-    rows += M.items.length ? `<div class="mfoot"><span><kbd>↑↓</kbd>${te("hui-palette-hint-navigate")}</span><span><kbd>↵</kbd>${te("hui-palette-hint-run")}</span><span><kbd>esc</kbd>${te("hui-palette-hint-close")}</span></div>`
+    if (M.items.length) rows += `<div class="sep"></div>` + M.items.map((it, i) => `<div class="mi${i === M.active ? " on" : ""}${it.dis ? " dis" : ""}" data-mi="${i}" role="menuitem"${it.dis ? ` aria-disabled="true"` : ""}><span class="ck"></span><span class="kind lab2">${te("hv-chooser-run-as-one")}</span><span class="cnt">${te("hv-chooser-count", { n:nf(it.count) })}</span></div><div class="mnote">${te(it.dis ? "hv-chooser-run-as-one-ro" : "hv-chooser-run-as-one-hint")}</div>`).join("");
+    rows += M.items.some(x => !x.dis) ? `<div class="mfoot"><span><kbd>↑↓</kbd>${te("hui-palette-hint-navigate")}</span><span><kbd>↵</kbd>${te("hui-palette-hint-run")}</span><span><kbd>esc</kbd>${te("hui-palette-hint-close")}</span></div>`
       : `<div class="mfoot"><span><kbd>esc</kbd>${te("hui-palette-hint-close")}</span></div>`;
   }
   if (M.type === "context" || M.type === "ovf" || M.type === "tab") rows += M.items.map((it, i) => it.sep ? `<div class="sep"></div>`
@@ -2884,7 +2903,7 @@ function txMenuRows(M) {
 function txMenuItems() {
   const k = K(), c = conn(k.conn), open = !!k.tx, failed = open && k.tx.failed, reason = t("hv-tx-menu-reason-open");
   const items = [];
-  if (open) { if (!failed) items.push({ label:t("hv-tx-cmd-commit"), icon:"check", act:"badgeCommit" }); items.push({ label:t("hv-tx-cmd-rollback"), icon:"undo-2", act:"badgeRollback" }, { sep:true }); }
+  if (open) { if (!failed) items.push({ label:t("hv-tx-cmd-commit"), icon:"git-commit-horizontal", act:"badgeCommit" }); items.push({ label:t("hv-tx-cmd-rollback"), icon:"undo-2", act:"badgeRollback" }, { sep:true }); }
   items.push({ head:t("hv-tx-menu-title") });
   for (const m of ["auto", "manual", "smart"]) items.push({ label:t("hv-tx-chip-" + m), radio:true, cur:k.mode === m, hint:open ? reason : t("hv-tx-mode-" + m + "-hint"), dis:open, act:"setMode", v:m });
   items.push({ sep:true }, { label:t("hv-tx-menu-isolation"), sub:true, hint:open ? reason : `${t("hv-tx-iso-default")} · ${c.engine === "mysql" ? "REPEATABLE READ" : "READ COMMITTED"}`, dis:open, act:"isoSub" });
@@ -2930,7 +2949,7 @@ function placePop() {
   p.style.left = Math.max(8, Math.min(r.right - W0.left - 300, W0.width - 312)) + "px"; p.style.top = top + "px"; p.style.visibility = "visible";
 }
 function placeMenu() {
-  const m = $("menu"); if (!m) return; const W0 = winRect(), b = m.getBoundingClientRect();
+  const m = $("menu"); if (!m || W.menu.above) return; const W0 = winRect(), b = m.getBoundingClientRect();
   if (b.right > W0.right - 8) { W.menu.x = Math.max(8, W0.width - b.width - 8); m.style.left = W.menu.x + "px"; }
   if (b.bottom > W0.bottom - 30) { W.menu.y = Math.max(44, W.menu.y - b.height - 26); m.style.top = W.menu.y + "px"; }
 }
@@ -2959,15 +2978,19 @@ function confirmLayer(L) {
   body += `<div class="effrow"><span class="l">${te("hv-confirm-effect")}</span><span class="v">${te("hv-confirm-class-" + Q.cls)}</span></div>`;
   if (Q.mysqlDdl) body += `<div class="notice">${ic("info","i12")}<div class="nb">${te("hv-confirm-mysql-ddl")}</div></div>`;
   const typedOk = !Q.typeName || Q.typed === Q.typeName;
-  if (Q.typeName) body += `<div class="typerow"><div class="tl">${th("hv-confirm-type-label", { name:`<span class="mono">${esc(Q.typeName)}</span>` })}</div>
+  /* the exact name is a selectable mono run with a Copy button, so a name spelled in a form the keyboard can't type (NFD, pasted) can still be pasted */
+  if (Q.typeName) body += `<div class="typerow"><div class="tl" style="display:flex;align-items:center;gap:6px">${th("hv-confirm-type-label", { name:`<span class="mono" style="user-select:all">${esc(Q.typeName)}</span>` })}<button class="btn ghost icon" data-act="cfCopyName" title="${te("hv-results-copy")}" aria-label="${te("hv-results-copy")}" style="height:20px">${ic("copy","i12")}</button></div>
     <label class="in mono${Q.typed && !typedOk ? " err" : ""}"><input id="typeField" data-fk="typeField" value="${esc(Q.typed || "")}" spellcheck="false" autocomplete="off" aria-label="${te("hv-confirm-type-label", { name:Q.typeName })}"></label>
     ${Q.typed && !typedOk ? `<div class="th">${ic("circle-alert","i12")}<span>${te("hv-confirm-type-hint")}</span></div>` : ""}</div>`;
   if (Q.suppressible && !Q.typeName) body += `<p class="meta2" style="font-size:12px">${te("hv-confirm-suppress-scope", { console:tabTitle(W.consoles.find(x => x.conn === Q.conn) || { conn:Q.conn, n:1 }) })}</p>`;
+  /* RC-1: Execute all states what it covers: the remaining units that would ask, never one that needs its name typed, never a Commit / Roll back prompt */
+  if (multi) body += `<p class="meta2" style="font-size:12px" id="cfAllScope">${te("hv-confirm-execute-all-scope", { n:nf(Q.n - Q.i) })}</p>`;
   body += Q.calm ? `<p class="meta2" style="margin-bottom:2px">${te("hv-confirm-calm-line")}</p>` : `<p class="meta2" style="margin-bottom:2px">${te("hv-confirm-prod-line")}</p>`;
-  /* Execute is the Danger variant (never the Enter default) whenever the unit is destructive or unknown; Warn (FOR UPDATE) changes no data, so its Execute is a Default button */
-  const run = Q.warn ? "btn" : "btn danger";
+  /* Execute is the Danger variant (never the Enter default) whenever the unit is destructive or unknown; Warn (FOR UPDATE) changes no data, so its Execute is a Default button (RC-2).
+     Execute all is gated by the typed name exactly like Execute, and is Danger unless this unit and every unit it would answer are Warn (RC-1). */
+  const run = Q.warn ? "btn" : "btn danger", runAll = Q.warn && Q.restWarn ? "btn" : "btn danger";
   let left = `<button class="${run}" data-act="cfExecute" data-fk="cfExecute" ${typedOk ? "" : "disabled"}>${te("hv-confirm-execute")}</button>`;
-  if (multi) left += `<button class="${run}" data-act="cfExecuteAll" data-fk="cfExecuteAll">${te("hv-confirm-execute-all")}</button>`;
+  if (multi) left += `<button class="${runAll}" data-act="cfExecuteAll" data-fk="cfExecuteAll" aria-describedby="cfAllScope" ${typedOk ? "" : "disabled"}>${te("hv-confirm-execute-all")}</button>`;
   if (Q.suppressible && !Q.typeName) left += `<button class="${run}" data-act="cfSuppress" data-fk="cfSuppress">${te(Q.calm ? "hv-confirm-execute-suppress" : "hv-confirm-execute-suppress-prod")}</button>`;
   let right = multi ? `<button class="btn" data-act="cfSkip" data-fk="cfSkip">${te("hv-confirm-skip")}</button><button class="btn" data-act="cfSkipAll" data-fk="cfSkipAll">${te("hv-confirm-skip-all")}</button>` : "";
   right += `<button class="btn primary cancel" data-act="cfCancel" data-fk="safe">${te("hv-confirm-cancel")}</button>`;
@@ -2975,7 +2998,8 @@ function confirmLayer(L) {
 }
 function commitLayer(L) {
   const c = conn(L.conn);
-  if (L.dropped) return dlg2({ w:"w480", alert:true, title:t("hv-commit-dropped-title", { name:c.id }), sub:subOf(c), body:`<div class="lead2">${ic("unplug","i12")}<span>${te("hv-commit-dropped-body")}</span></div>`,
+  /* I2: in the savepoint form a drop loses the user's whole transaction, so the sentence counts it */
+  if (L.dropped) return dlg2({ w:"w480", alert:true, title:t("hv-commit-dropped-title", { name:c.id }), sub:subOf(c), body:`<div class="lead2">${ic("unplug","i12")}<span>${L.sp ? te("hv-commit-dropped-sp-body", { n:nf(L.before) }) : te("hv-commit-dropped-body")}</span></div>`,
     right:`<button class="btn primary cancel" data-act="layerEsc" data-fk="safe">${te("hv-commit-close")}</button>` });
   const clock = `<span class="mono" id="cdClock">${esc(fmtClock(L.left))}</span>`;
   let body = `<div class="sqlbox" tabindex="-1">${sqlHTML(L.sql)}</div>`;
@@ -2992,9 +3016,17 @@ function escalateLayer(L) {
   let body = `<p class="strong">${te("hv-cancel-dlg-body", { duration:dur(L.s * 1000) })}</p>`;
   if (L.failed) body += `<div class="lead2">${ic("triangle-alert","i12")}<span>${te("hv-cancel-terminate-failed")}</span></div><div class="srvbox"><div class="cap2">${te("err-server")} · SQLSTATE 42501</div><code lang="en">ERROR:  permission denied to terminate process
 DETAIL:  Only roles with privileges of the role whose process is being terminated or with privileges of the "pg_signal_backend" role may terminate this process.</code></div>`;
-  body += `<ul class="expl"><li>${th("hv-cancel-terminate-line", { fn:mn("pg_terminate_backend(18342)") })}</li><li>${te("hv-cancel-deactivate-line", { name:c.id })}</li></ul>`;
-  const left = `<button class="btn" data-act="escTerminate" data-fk="escTerminate">${ic("octagon-x","i12")}<span>${te("hv-cancel-terminate")}</span></button><button class="btn danger" data-act="escDeactivate" data-fk="escDeactivate">${ic("power","i12")}<span>${te("hv-cancel-deactivate")}</span></button>`;
-  const right = `<button class="btn primary cancel" data-act="escKeep" data-fk="safe">${te("hv-cancel-keep-waiting")}</button>`;
+  /* I3: each action's consequence is stated before it, naming every user transaction it rolls back. Disconnect follows R-M3-73: the profile's
+     default console closes every connection of the profile; any other console closes only its own session. */
+  const k = W.consoles.find(x => x.id === L.console) || K(), own = k.tx ? " " + te("hv-cancel-own-tx", { n:nf(k.tx.n) }) : "";
+  const all = k.n === 1, others = all ? W.consoles.filter(x => x !== k && x.conn === k.conn && x.tx) : [];
+  const lines = [];
+  if (!L.noTerm) lines.push(`<li>${th("hv-cancel-terminate-line", { fn:mn(L.fn || "pg_terminate_backend(18342)") })}${own}</li>`);
+  lines.push(`<li>${te(all ? "hv-cancel-disconnect-line-all" : "hv-cancel-disconnect-line-one", { name:c.id, console:tabTitle(k) })}${own}${others.map(o => " " + te("hv-cancel-other-tx", { console:tabTitle(o), n:nf(o.tx.n) })).join("")}</li>`);
+  body += `<ul class="expl">${lines.join("")}</ul>`;
+  /* M8: the Danger Disconnect alone on the far left; Terminate (Default) beside Keep waiting (Primary, focused) */
+  const left = `<button class="btn danger" data-act="escDisconnect" data-fk="escDisconnect">${ic("unplug","i12")}<span>${te("hv-cancel-disconnect")}</span></button>`;
+  const right = (L.noTerm ? "" : `<button class="btn" data-act="escTerminate" data-fk="escTerminate">${ic("octagon-x","i12")}<span>${te("hv-cancel-terminate")}</span></button>`) + `<button class="btn primary cancel" data-act="escKeep" data-fk="safe">${te("hv-cancel-keep-waiting")}</button>`;
   return dlg2({ w:"w420", alert:true, title:t("hv-cancel-dlg-title"), sub:subOf(c), body, left, right });
 }
 function paramsLayer(L) {
@@ -3046,12 +3078,13 @@ function historyLayer(L) {
   let prev = "";
   if (sel) {
     const cc = conn(sel.conn);
-    prev = `<div class="hprev"><div class="hm">${mark(cc.env)}<span class="mono">${esc(sel.conn)}</span><span class="mono" title="ISO">2026-11-${sel.d ? 15 : 16} ${esc(sel.tm)}</span><span class="og${sel.out === "ok" ? " ok" : ""}">${sel.out === "ok" ? ic("check","i12") : sel.out === "failed" ? ic("triangle-alert","i12") : ic("ban","i12")}<span>${te("hv-history-outcome-" + (sel.out === "ok" ? "ok" : sel.out))}</span></span><span class="mono">${esc(dur(sel.ms))}</span>${sel.rows !== undefined ? `<span class="mono">${esc(t("hv-history-rows", { rows:nf(sel.rows) }))}</span>` : ""}<span>${te("hv-history-ran", { n:nf(sel.runs) })}</span>${sel.redacted ? `<span class="redchip">${te("hv-history-redacted")}</span>` : ""}<span class="grow" style="flex:1"></span><button class="btn ghost icon" data-act="hPin" title="${te("hv-history-pin")}" aria-pressed="${!!sel.pin}">${ic(sel.pin ? "pin-off" : "pin","i12")}</button><button class="btn ghost icon" data-act="hOpenNew" title="${te("hv-history-open-new")}">${ic("external-link","i12")}</button></div>
+    prev = `<div class="hprev"><div class="hm">${mark(cc.env)}<span class="mono">${esc(sel.conn)}</span><span class="mono" title="ISO">2026-11-${sel.d ? 15 : 16} ${esc(sel.tm)}</span><span class="og${sel.out === "ok" ? " ok" : ""}">${sel.out === "ok" ? ic("check","i12") : sel.out === "failed" ? ic("triangle-alert","i12") : ic("ban","i12")}<span>${te("hv-history-outcome-" + (sel.out === "ok" ? "ok" : sel.out))}</span></span><span class="mono">${esc(dur(sel.ms))}</span>${sel.rows !== undefined ? `<span class="mono">${esc(t("hv-history-rows", { rows:nf(sel.rows) }))}</span>` : ""}<span>${te("hv-history-ran", { n:nf(sel.runs) })}</span>${sel.redacted ? `<span class="redchip">${te("hv-history-redacted")}</span>` : ""}<span class="grow" style="flex:1"></span><button class="btn ghost icon" data-act="hPin" title="${te("hv-history-pin")}" aria-pressed="${!!sel.pin}">${ic("pin","i12")}</button><button class="btn ghost icon" data-act="hOpenNew" title="${te("hv-history-open-new")}">${ic("external-link","i12")}</button></div>
       <div class="sqlbox" tabindex="-1" style="white-space:pre-wrap;overflow-wrap:anywhere">${sqlHTML([sel.sql])}</div>
       ${sel.redacted ? `<div class="lead2" style="color:var(--text-2)">${ic("eye-off","i12")}<span>${te("hv-history-redacted-line")}</span></div>` : ""}
+      ${sel.conn !== c.id ? `<div class="lead2" style="color:var(--text-2)">${ic("arrow-right","i12")}<span>${th("hv-history-target", { name:`${mark(c.env)} <span class="mono">${esc(c.id)}</span>` })}</span></div>` : ""}
       ${sel.srv ? `<div class="srvbox" style="margin-top:0"><div class="cap2">${te("err-server")} · ${esc(sel.code)}</div><code lang="en">${esc(sel.srv)}</code></div>` : ""}</div>`;
   }
-  const outSel = `<button class="sel2" data-act="hOutcome" aria-haspopup="listbox">${ic("list-filter","i12")}<span>${te("hv-history-outcome-" + (L.outcome && L.outcome !== "any" ? L.outcome : "any"))}</span>${ic("chevrons-up-down","i12")}</button>`;
+  const outSel = `<button class="sel2" data-act="hOutcome" aria-haspopup="listbox">${ic("filter","i12")}<span>${te("hv-history-outcome-" + (L.outcome && L.outcome !== "any" ? L.outcome : "any"))}</span>${ic("chevrons-up-down","i12")}</button>`;
   const body = `<div class="hbar"><label class="in" title="${te("hv-history-search-tip")}">${ic("search","i12")}<input id="hq" data-fk="hq" value="${esc(q)}" placeholder="${te("hv-history-search")}" spellcheck="false"></label>
       <div class="seg" role="radiogroup"><button aria-pressed="${L.scope !== "all"}" data-act="hScope" data-v="this">${te("hv-history-filter-this")}</button><button aria-pressed="${L.scope === "all"}" data-act="hScope" data-v="all">${te("hv-history-filter-all")}</button></div>${outSel}</div>
     <div class="hlist" role="listbox" aria-label="${te("hv-history-title")}">${list}</div>${prev}`;
@@ -3127,17 +3160,17 @@ function renderWork() { renderTitle(); $("explorer").innerHTML = explorerHTML();
 
 /* ═════════════ Mock bar + notes (mock only) ═════════════ */
 const SURF = [
-  { id:"confirm", label:"Confirm", sc:[["single","Production · one statement"],["multi","Statement 2 of 3"],["type","Type the name (no WHERE)"],["typed","Name typed"],["typecase","Wrong letter case"],["dropschema","DROP SCHEMA"],["mysqlddl","MySQL DDL"],["implicit","MySQL implicit commit"],["routine","Routine (CALL)"],["calm","Off production (calm)"],["warn","Warn · FOR UPDATE"],["suppressed","After “don't ask again”"],["tr960","960 · TR · button rows"]] },
-  { id:"commit", label:"Confirm in tx", sc:[["own","Own transaction"],["many","214 rows"],["sp","Savepoint · Keep / Undo"],["dropped","Connection lost"],["deadline","Deadline reached"],["kept","After Keep"],["tr960","960 · TR"]] },
+  { id:"confirm", label:"Confirm", sc:[["single","Production · one statement"],["multi","Statement 2 of 3"],["multitype","Statement 2 of 3 · type the name"],["type","Type the name (no WHERE)"],["typed","Name typed"],["typecase","Wrong letter case"],["dropschema","DROP SCHEMA"],["mysqlddl","MySQL DDL"],["implicit","MySQL implicit commit"],["routine","Routine (CALL)"],["calm","Off production (calm)"],["warn","Warn · FOR UPDATE"],["suppressed","After “don't ask again”"],["tr960","960 · TR · button rows"]] },
+  { id:"commit", label:"Confirm in tx", sc:[["manual","Manual · first change"],["own","Auto · own transaction"],["many","214 rows"],["sp","Savepoint · Keep / Undo"],["dropped","Connection lost (own)"],["droppedsp","Connection lost · savepoint"],["deadline","Deadline reached"],["kept","After Keep"],["tr960","960 · TR"]] },
   { id:"txchip", label:"Tx chip", sc:[["auto","Auto-commit chip"],["menu","Mode menu"],["iso","Isolation submenu"],["open","Transaction open"],["ro","Read-only (disabled)"],["prod","Production · Manual"],["smart","Smart"]] },
   { id:"badge", label:"Tx badge", sc:[["open","Open · 3 statements"],["failed","Failed: roll back only"],["status","Status segment menu"],["prod","Production"],["tr960","960 · TR · overflow"]] },
   { id:"idle", label:"Idle toast", sc:[["toast","Idle 10 min"],["replaced","Newer replaces older"],["tr960","960 · TR"]] },
-  { id:"cancel", label:"Cancel escalation", sc:[["slow","Slow cancel (10 s)"],["dialog","Second press"],["failed","Terminate failed"],["gutter","Kept waiting (gutter)"],["terminated","Terminated"],["deactivated","Deactivated"],["tr960","960 · TR"]] },
+  { id:"cancel", label:"Cancel escalation", sc:[["slow","Slow cancel (10 s)"],["dialog","Second press"],["failed","Terminate failed"],["gutter","Kept waiting (gutter)"],["noterm","No terminate (SQLite)"],["terminated","Terminated"],["deactivated","Disconnected"],["tr960","960 · TR"]] },
   { id:"errbar", label:"Error bar", sc:[["ask","Statement 2 of 5 failed"],["pgabort","PG transaction failed"],["focus","Keyboard (F6)"],["done","After Ignore all"],["tr960","960 · TR · wraps"]] },
   { id:"params", label:"Parameters", sc:[["prompt","Two names"],["remembered","Remembered"],["ambiguous","Turkish 1.234"],["null","NULL"],["template","Template ${var}"],["pgq","PG ? off"],["tr960","960 · TR"]] },
-  { id:"chooser", label:"Chooser", sc:[["runasone","Uncertain → Run as one"],["asonehi","Run as one highlighted"],["customize","Customize…"],["popover","Policy popover"],["selection","Selection as one"],["tr960","960 · TR"]] },
+  { id:"chooser", label:"Chooser", sc:[["runasone","Uncertain → Run as one"],["asonehi","Run as one highlighted"],["customize","Customize…"],["asonero","Run as one · read-only"],["popover","Policy popover"],["selection","Selection as one"],["tr960","960 · TR"]] },
   { id:"results", label:"Results", sc:[["titles","Titled tabs, pin"],["tabmenu","Tab menu"],["untyped","Untyped (run as one)"],["limit","Result-set limit"],["estimate","Count · estimate"],["counting","Count · counting"],["exact","Count · exact"],["evicted","Closed to free memory"],["fetchall","Fetch-all question"],["notices","PG notices"],["warnings","MySQL warnings"],["tr960","960 · TR"]] },
-  { id:"history", label:"History", sc:[["list","List + preview"],["search","Turkish search"],["all","All · failed"],["redacted","Redacted entry"],["empty","Empty"],["nomatch","No match"],["tr960","960 · TR"]] },
+  { id:"history", label:"History", sc:[["list","List + preview"],["search","Turkish search"],["all","All · failed"],["redacted","Redacted entry"],["other","Other connection"],["empty","Empty"],["nomatch","No match"],["tr960","960 · TR"]] },
   { id:"session", label:"Single session", sc:[["dialog","Advanced · checkbox"],["chip","Shared session chip"],["chiptx","Shared, with a transaction"],["tr960","960 · TR"]] },
   { id:"prod", label:"Production unlocked", sc:[["after","After the unlock"],["before","M3a (for comparison)"],["status","Status and capsule"],["tr960","960 · TR"]] },
 ];
@@ -3154,19 +3187,19 @@ function renderMockbar() {
 }
 const NOTES = {
   confirm:{ intent:"Before anything is sent, a statement the gate marks Confirm or Warn asks once, in a 480 px alertdialog that names the connection, shows the SQL and says in words why it asks. The safe answer is the default.",
-    points:["Cancel is the primary button and has the initial focus: Enter (key-down, no repeat, no modifier) and Escape both cancel. Execute is the Danger variant (red outline, filled only on hover or keyboard focus) and is never the Enter default.","Warn (FOR UPDATE) changes no data, so its Execute is a Default button; everything else the gate asks about is destructive or unknown, so its Execute is Danger.","The SQL inset shows the masked text Run would send (at most 6 lines, then it scrolls). Reasons are a bulleted list; identifiers in them are mono and bidi-isolated. The effect row names the GateClass in words.","Type-to-confirm (DmlUnsafe on production, DROP SCHEMA/DATABASE): Execute stays disabled until the field holds exactly the bytes of the name (no case folding, no Turkish İ/i folding). Enter in the field never executes. Don't ask again is never offered with it.","Multi-unit runs ask each unit in order before the run is sent (R-M3-84): statement k of n in the subtitle; Execute / Execute all / Execute and don't ask again on the left, Skip / Skip all / Cancel on the right.","Footer rule: two groups 28 px apart. When they don't fit one line, the right group wraps under the left one, still right-aligned (the M2a footer rule); no label truncates.","MySQL DDL says it can't be rolled back; DDL inside an open MySQL transaction says MySQL commits that transaction first.","Off production the calm variant asks only before an unsafe WHERE (exec.confirm_unsafe_where): no production line, the setting named in words.","“Don't ask again” names its scope: this statement shape in this console until it closes. On production the button itself names the console."] },
-  commit:{ intent:"On production a DML statement runs inside a transaction and waits for an answer (R-M3-55, D-014). The dialog says what changed, offers the safe answer as the default, and counts down to the automatic undo.",
-    points:["Own transaction (Hacivat's BEGIN): \"214 rows changed on orders-prod\", Commit (outline) and Roll back (primary, focused). Neither is Danger: the destructive question was asked before the run.","Savepoint form (any transaction already open): Keep (outline) and Undo (primary, focused). The body says what each does: Keep joins your open transaction and commits nothing; Undo undoes this statement and your transaction stays open.","The countdown sits at the left of the footer: \"Rolls back in 4:32\" / \"Undoes this statement in 4:32\", the time in Fragment Mono 11.5 text-2, repainted once a second on the executor clock. No colour change near the end (no alarm hue).","Escape answers the safe value (Roll back / Undo). It never sends a cancel. Quitting with the dialog open answers Roll back.","Connection lost: \"The server rolled back these changes. Nothing was committed.\" with Close only.","The deadline undoes the confirmed statement only (R-M3-55); the Output tab says so and the gutter shows the undo glyph.","Production only: there is no non-production confirm-in-transaction (P-M3b-30)."] },
+    points:["Cancel is the primary button and has the initial focus: Enter (key-down, no repeat, no modifier) and Escape both cancel. Execute is the Danger variant (red outline, filled only on hover or keyboard focus) and is never the Enter default.", "Warn (FOR UPDATE) changes no data, so its Execute is a Default button and is never focused (RC-2); every other class the gate asks about is destructive or unknown, so its Execute is Danger.", "Type-to-confirm: Execute AND Execute all stay disabled until the field holds exactly the bytes of the name (no case or İ folding). Enter in the field never executes. The name is a selectable mono run with a Copy button.", "Execute all (RC-1) answers only the remaining units that would ask without a typed name; a unit that needs its name typed still asks, and a production change still waits for Commit/Roll back or Keep/Undo after it runs. One line in the dialog says so. It is Danger unless every unit it answers is Warn.", "Multi-unit footer: Execute / Execute all / Execute and don't ask again (all Danger, RC-3) on the left, Skip / Skip all / Cancel on the right, 28 px apart with no seam; the right group wraps under the left, right-aligned.", "MySQL DDL says it can't be rolled back; DDL inside an open MySQL transaction says MySQL commits that transaction first.", "Off production the calm variant asks only before an unsafe WHERE (exec.confirm_unsafe_where, PO Q1; it amends M2a's 'No extra confirmations' line).", "“Don't ask again” names its scope; never offered with type-to-confirm or a MySQL implicit commit."] },
+  commit:{ intent:"On production a DML statement runs inside a transaction and waits for an answer (R-M3-55, D-014). The form follows CommitQuestion.savepoint: Manual and Smart always get Keep / Undo; only Auto-commit with no transaction open gets Hacivat's own BEGIN with Commit / Roll back.",
+    points:["Manual (the production default), first change: “1 row changed inside your transaction”, Keep / Undo; no badge before the answer, “Transaction · 1 statement” after Keep.", "Auto-commit, no transaction: “214 rows changed on orders-prod”, Commit (outline) and Roll back (primary, focused). Neither is Danger: the destructive question was asked before the run.", "The countdown sits at the left of the footer: “Rolls back in 4:32” / “Undoes this statement in 4:32”, the time in Fragment Mono 11.5 text-2, repainted once a second. No colour change near the end.", "Escape answers the safe value (Roll back / Undo). It never sends a cancel.", "Connection lost: in the own form “The server rolled back these changes”; in the savepoint form the sentence counts the user's whole transaction that the server rolled back.", "The deadline undoes the confirmed statement only; the Output tab says so and the gutter shows the undo glyph.", "Production only: there is no non-production confirm-in-transaction (P-M3b-30)."] },
   txchip:{ intent:"The transaction mode is visible and changeable where you run: a chip in the editor toolbar right after the connection label.",
     points:["The chip reads Auto-commit, Manual or Smart, with the commit glyph and a chevron. It opens a menu: Transaction mode (radio items with a one-line hint), Isolation › (the levels as SQL keywords in mono, untranslated).","While a transaction is open the chip still opens the menu, but its modes and Isolation are disabled with the reason \"Commit or roll back first\" as their hint; Commit and Roll back lead the menu.","A read-only session shows a disabled Auto-commit chip; its reason is the tooltip (it stays focusable so the reason is reachable from the keyboard).","Production consoles start in Manual (D-036); the menu says so in a note.","Smart is opt-in on any connection: Manual from the first change."] },
   badge:{ intent:"An open user transaction is a trust signal: a badge in the editor toolbar with the pending stamp, the statement count and age, and Commit / Roll back right there.",
     points:["7 px amber stamp (pending), \"Transaction · 3 statements · 2 min\" (counts in mono, the age repainted once a minute), then Commit and Roll back as Default buttons with ink icons.","Failed: the ink alert glyph and \"Transaction failed\" with Roll back only. The word follows M3a's shipped \"Transaction failed\" (ruling): one word for one state across the badge, the status bar and the close prompt.","Shown only for the user's transaction (TxOwner::User), never for Hacivat's own (cursor, guard, confirm).","The status-bar segment is now a button: it opens the same menu (Commit / Roll back, modes, isolation).","Overflow Rule: the database crumb hides first, then the badge drops its age, then the shared-session chip and the badge buttons become icon-only (their words stay in the tooltip and the accessible name). The stamp and \"Transaction · n statements\" never hide or truncate."] },
   idle:{ intent:"A transaction left idle is named, never ended silently (D-014): one sticky toast per session.",
     points:["\"Transaction open for 10 min on orders-prod\" / \"It may hold locks that block other sessions.\" Commit, Roll back, Keep open.","Keep open never rolls back and only dismisses this toast; the badge stays. A newer reminder for the same session replaces the older one.","The toast never takes the focus unless asked (F6); Escape dismisses it (= Keep open)."] },
-  cancel:{ intent:"A cancel that doesn't land escalates in steps the user controls; nothing escalates by itself and Escape never escalates.",
-    points:["At 10 s the slow-cancel toast (wide, sticky): \"Cancelling is taking long\", the connection and the time, Terminate on server (only when the engine supports it and the role may) and Deactivate.","A second Stop press opens a 420 alertdialog: Keep waiting is primary and focused; Terminate on server is a Default button; Deactivate is Danger and its line says the statement may continue on the server.","A failed terminate keeps the dialog open: the ink alert line, then the server's message verbatim in its own mono field.","The gutter keeps the hourglass in amber and \"cancel not answered · 14 s\" (once a second) after Keep waiting."] },
+  cancel:{ intent:"A cancel that doesn't land escalates in steps the user controls; nothing escalates by itself, Escape never escalates, and every consequence is stated before the action.",
+    points:["At 10 s the slow-cancel toast (wide, sticky): “Cancelling is taking long”, the connection and the time, and one button, Show options…, which opens the dialog. The toast never terminates or disconnects in one click.", "A second Stop press (or Show options…) opens a 420 alertdialog: Disconnect (Danger) alone on the far left; Terminate on server (Default) and Keep waiting (Primary, focused) on the right.", "Each line names what is lost: Terminate rolls back this console's open transaction (n statements); Disconnect (R-M3-73) from the profile's default console closes every connection of the profile and names each other console's open transaction, from any other console it closes only that session.", "No terminate (SQLite, or a role that may not): the button and its line are omitted.", "A failed terminate keeps the dialog open: the ink alert line, then the server's message verbatim in its own mono field.", "The gutter keeps the hourglass in amber and “cancel not answered · 14 s” (once a second) after Keep waiting."] },
   errbar:{ intent:"When one statement of a multi-statement run fails, the run pauses and asks inline, between the editor and the results; never a modal.",
-    points:["32 px raised bar: the ink alert glyph, \"Statement 2 of 5 failed\" (600), the SQLSTATE chip, \"3 more wait\", then Retry / Ignore / Ignore all / Stop.","Inside a failed PostgreSQL transaction: Roll back and continue replaces Ignore, and Retry is gone (P-M3b-19); its tooltip says what it rolls back.","The bar doesn't take the focus (role alert announces it); F6 moves into it at Retry. Tab order Retry → Stop. Escape in the bar answers Stop; it never cancels anything running.","Narrow: the \"n more wait\" count hides first, then the sentence wraps to a second line; buttons never truncate."] },
+    points:["32 px raised bar: the ink alert glyph, \"Statement 2 of 5 failed\" (600), the SQLSTATE chip, \"3 more wait\", then Retry / Ignore / Ignore all / Stop.","Inside a failed PostgreSQL transaction: Roll back and continue replaces Ignore, and Retry is gone (P-M3b-19); its tooltip counts the whole open transaction (it may predate the run) and says how the rest runs: in a new transaction (Manual/Smart) or committing each statement (Auto).","The bar doesn't take the focus (role alert announces it); F6 moves into it first, a second F6 to the toasts, a third back to the editor. Tab order Retry → Stop. Escape in the bar answers Stop; it never cancels anything running.","Narrow: the \"n more wait\" count hides first, then the sentence wraps to a second line; buttons never truncate."] },
   params:{ intent:"Bind values are asked for before classification, once per name, and are data: never re-formatted by the UI locale.",
     points:["480 px dialog: the SQL inset, then one row per name: the name in mono, a mono value field, the type hint in mono, a NULL toggle, and a \"remembered\" marker for values from earlier runs in this app session.","Machine format first: a Turkish \"1.234\" is flagged as ambiguous with the reading spelled out and a \"Use 1.234\" button; Run stays disabled until it is resolved (fail-closed).","A template variable ${var} is refused with its diagnostic; Run stays disabled.","On PostgreSQL ? isn't a parameter by default (jsonb operators); the prompt says so when the text has one.","Run is the primary; Cancel sends nothing. Enter in the last field runs."] },
   chooser:{ intent:"M3a's chooser gains the explicit way out of an uncertain boundary and the per-console policy.",
@@ -3178,13 +3211,13 @@ const NOTES = {
   session:{ intent:"A connection can make its consoles share one session; the console says so where you run.",
     points:["Connection dialog › Advanced: \"Use one session for every console\" with a sub-label that names what is shared (transaction, variables, temporary tables). The Connections row then reads \"One session, shared by every console\".","Console toolbar: a \"Shared session\" chip with the users glyph; its tooltip says a transaction opened here is open in every console of the connection.","A transaction opened in one shared console shows its badge in all of them."] },
   prod:{ intent:"After the unlock (Task 26) a production console is writable behind the gate; production stays visually unmistakable.",
-    points:["The M3a notice \"Production is read-only in this version\" is gone. The hairline, the tab swatch, the capsule's filled block and the status bar's production segment are unchanged.","The chip shows Manual: production consoles start in Manual (D-036).","The capsule and the status bar say read-write.","The M3a scenario is kept for comparison."] },
+    points:["The M3a notice \"Production is read-only in this version\" is gone. The hairline, the tab swatch and the capsule's filled block are unchanged; the status bar's production segment keeps its tint, swatch and red text but shows the lock only when access is read-only (RC-6).","The chip shows Manual: production consoles start in Manual (D-036).","The capsule and the status bar say read-write.","The M3a scenario is kept for comparison."] },
 };
 const KEY_PREFIX = {
   confirm:["hv-confirm-","safety-reason-","exec-confirm-suppressed","exec-confirm-skipped","exec-confirm-cancelled"],
   commit:["hv-commit-","hv-editor-mark-awaiting","hv-editor-mark-rolled-back","exec-confirm-deadline","exec-confirm-committed","exec-confirm-rolled-back","exec-confirm-kept","exec-confirm-undone","exec-confirm-dropped"],
   txchip:["hv-tx-chip-","hv-tx-menu-","hv-tx-mode-","hv-tx-iso-"], badge:["hv-tx-badge","hv-tx-segment","exec-dur-lt-min"], idle:["hv-tx-idle-"],
-  cancel:["hv-cancel-","hv-editor-mark-escalated","exec-terminate","exec-deactivated"], errbar:["hv-errbar-","exec-run-"], params:["hv-params-"],
+  cancel:["hv-cancel-","hv-editor-mark-escalated","exec-terminate","exec-disconnected"], errbar:["hv-errbar-","exec-run-"], params:["hv-params-"],
   chooser:["hv-chooser-","hv-policy-","hv-editor-preview-as-one"], results:["hv-results-","hv-strip-evicted","hv-fetchall-","exec-notice","exec-warning","exec-notices-dropped","exec-result-set-limit"],
   history:["hv-history-"], session:["hv-conn-","hv-console-shared"], prod:[],
 };
@@ -3203,7 +3236,7 @@ function renderNotes() {
 const RB = (key, v) => th(key, Object.fromEntries(Object.entries(v).map(([n, x]) => [n, `<bdi class="mono">${esc(x)}</bdi>`])));   /* identifiers bidi-isolated (FSI/PDI) */
 const okL = (l, rows = 1, ms = 6) => ({ l, st:"ok", range:[l, l], eol:{ k:"affected", rows:nf(rows), ms } });
 function setup(id, sc) {
-  clearTimers(); W = world(); W.pre = false; conn("orders-prod").ro = undefined;
+  clearTimers(); W = world(); W.pre = false; conn("orders-prod").ro = undefined; conn("api-dev").ro = undefined;
   const dev = W.consoles[0], prod = W.consoles[1], stg = W.consoles[2];
   const focus = cid => { W.active = cid; };
   const tr960 = () => { LANG = "tr"; S.size = "960"; };
@@ -3219,6 +3252,10 @@ function setup(id, sc) {
     if (v === "single") { const k = prodWith(SQL_GATE1, { caret:{ l:2, c:18 }, preview:{ kind:"band", units:[U(1, 0, 2, 18)] } }); confirm(k, { sql:SQL_GATE1.slice(1), cls:"unknown", reasons:[RB("safety-reason-unknown-function", { fn:"fn_yeniden_hesapla" })], suppressible:true }); }
     if (v === "multi") { const k = prodWith(SQL_GATE3, { sel:{ a:{ l:1, c:0 }, b:{ l:3, c:52 } }, caret:{ l:3, c:52 }, preview:{ kind:"band", units:[1, 2, 3].map(l => lineUnit(SQL_GATE3, l)), hints:{ all:"unit" } } });
       confirm(k, { i:2, n:3, sql:[SQL_GATE3[2]], cls:"ddl-destructive", reasons:[RB("safety-reason-drop-table", { object:"kampanya_2024" })], suppressible:true }); }
+    /* RC-1: unit 2 needs its name typed: Execute and Execute all stay disabled until it matches */
+    if (v === "multitype") { const L3 = ["-- Segment düzeltmesi", "TRUNCATE sepet_gecici;", "UPDATE müşteriler SET segment = 'bronz';", "DROP TABLE kampanya_2024;"];
+      const k = prodWith(L3, { sel:{ a:{ l:1, c:0 }, b:{ l:3, c:25 } }, caret:{ l:3, c:25 }, preview:{ kind:"band", units:[1, 2, 3].map(l => lineUnit(L3, l)), hints:{ all:"unit" } } });
+      confirm(k, { i:2, n:3, sql:[L3[2]], cls:"dml-unsafe", reasons:[RB("safety-reason-no-where", { table:"müşteriler" })], typeName:"müşteriler" }); }
     if (v === "type" || v === "typed" || v === "typecase") { const k = prodWith(SQL_NOWHERE, { caret:{ l:1, c:20 }, preview:{ kind:"band", units:[lineUnit(SQL_NOWHERE, 1)] } });
       confirm(k, { sql:[SQL_NOWHERE[1]], cls:"dml-unsafe", reasons:[RB("safety-reason-no-where", { table:"müşteriler" })], typeName:"müşteriler", typed:v === "typed" ? "müşteriler" : v === "typecase" ? "Müşteriler" : "" }); }
     if (v === "dropschema") { const k = prodWith(SQL_DROPSCHEMA, { caret:{ l:1, c:20 }, preview:{ kind:"band", units:[lineUnit(SQL_DROPSCHEMA, 1)] } });
@@ -3236,11 +3273,17 @@ function setup(id, sc) {
   }
   if (id === "commit") {
     W.focus = "dialog";
-    const v = sc === "tr960" ? "own" : sc;
+    const v = sc === "tr960" ? "manual" : sc;
     if (sc === "tr960") tr960();
     const cp = o => W.layers.push({ type:"commit", conn:"orders-prod", left:272, ...o });
+    /* RC-5: the form follows CommitQuestion.savepoint. Own BEGIN only in Auto-commit with no transaction open; Manual and Smart always get Keep / Undo */
+    if (["own", "many", "dropped", "deadline"].includes(v)) prod.mode = "auto";
     if (v === "own") { const k = prodWith(SQL_COMMIT, { caret:{ l:1, c:30 }, marks:[{ l:1, st:"awaiting", eol:{ k:"awaiting" } }] }); k.tb = { state:"awaiting" }; cp({ sql:[SQL_COMMIT[1]], rows:1 }); }
     if (v === "many") { const k = prodWith(SQL_COMMIT_N, { caret:{ l:2, c:30 }, marks:[{ l:1, st:"awaiting", eol:{ k:"awaiting" } }] }); k.tb = { state:"awaiting" }; cp({ sql:SQL_COMMIT_N.slice(1), rows:214, left:298 }); }
+    /* the commonest production write: a Manual console (the default), no BEGIN typed. The session opened the transaction; no badge until Keep */
+    if (v === "manual") { const k = prodWith(SQL_COMMIT, { caret:{ l:1, c:30 }, marks:[{ l:1, st:"awaiting", eol:{ k:"awaiting", sp:true } }] }); k.tb = { state:"awaiting" }; cp({ sp:true, sql:[SQL_COMMIT[1]], rows:1, left:296 }); }
+    if (v === "droppedsp") { const k = prodWith(SQL_USERTX, { caret:{ l:4, c:30 }, marks:[{ l:0, st:"rolledback", eol:{ k:"rolledback" } }, ...[1, 2, 3, 4].map(l => ({ l, st:"rolledback", eol:{ k:"rolledback" } }))] });
+      k.res = resWith({}, "out", [{ g:"err", k:"exec-confirm-dropped-sp", v:{ n:4 }, unit:4 }]); cp({ dropped:true, sp:true, before:3 }); }
     if (v === "sp") { const k = prodWith(SQL_USERTX, { caret:{ l:4, c:30 }, marks:[{ l:0, st:"ok", range:[0, 0], eol:{ k:"done", ms:1 } }, okL(1), okL(2), okL(3), { l:4, st:"awaiting", eol:{ k:"awaiting", sp:true } }] }); k.tx = { n:3, age:2 }; k.tb = { state:"awaiting" };
       cp({ sp:true, sql:[SQL_USERTX[4]], rows:1, left:291 }); }
     if (v === "dropped") { const k = prodWith(SQL_COMMIT_N, { caret:{ l:2, c:30 }, marks:[{ l:1, st:"rolledback", eol:{ k:"rolledback" } }] }); k.res = resWith({}, "out", [{ g:"err", k:"exec-confirm-dropped", unit:1 }]); cp({ dropped:true }); }
@@ -3274,13 +3317,20 @@ function setup(id, sc) {
   if (id === "cancel") {
     const v = sc === "tr960" ? "dialog" : sc;
     if (sc === "tr960") tr960();
-    devWith(SQL_SLOW, { caret:{ l:1, c:30 } });
+    /* I3: the stuck console is orders-dev in Manual with an open transaction; a second console of the profile holds one too */
+    const TXL = ["BEGIN;", "UPDATE orders SET status = 'kargoda' WHERE id = 1048211;", "UPDATE stok SET adet = adet - 1 WHERE urun_id = 4471;"];
+    if (v === "noterm") { const k = addConsole("k-db", "app.db", ["UPDATE kayitlar SET durum = 'arsiv' WHERE yil < 2020;"], { caret:{ l:0, c:30 } }); k.tb = { state:"cancelling", elapsed:14 }; k.ed.marks = [{ l:0, st:"escalated", eol:{ k:"escalated", s:14 } }];
+      W.focus = "dialog"; W.layers.push({ type:"escalate", conn:"app.db", console:"k-db", s:14, noTerm:true }); }
+    else {
+    devWith(TXL, { caret:{ l:2, c:30 }, marks:[{ l:0, st:"ok", range:[0, 0], eol:{ k:"done", ms:1 } }, okL(1)] }); dev.mode = "manual"; dev.tx = { n:3, age:2 };
+    const d2 = consoleOf("k-dev2", "orders-dev", edState(SQL_TX, { caret:{ l:3, c:20 } }), resNone(), { n:2, mode:"manual", tx:{ n:3, age:6 } }); W.consoles = [dev, d2, prod]; focus("k-dev");
     const s = v === "slow" ? 11 : v === "failed" ? 21 : 14;
-    if (["slow", "dialog", "failed", "gutter"].includes(v)) { dev.tb = { state:"cancelling", elapsed:s }; dev.ed.marks = [{ l:1, st:v === "slow" ? "cancelling" : "escalated", eol:v === "slow" ? { k:"cancelling" } : { k:"escalated", s } }]; }
+    if (["slow", "dialog", "failed", "gutter"].includes(v)) { dev.tb = { state:"cancelling", elapsed:s }; dev.ed.marks.push({ l:2, st:v === "slow" ? "cancelling" : "escalated", eol:v === "slow" ? { k:"cancelling" } : { k:"escalated", s } }); }
     if (v === "slow") W.pendingToast = () => slowToast(dev, s);
-    if (v === "dialog" || v === "failed") { W.focus = "dialog"; W.layers.push({ type:"escalate", conn:"orders-dev", s, failed:v === "failed" }); }
-    if (v === "terminated") { dev.ed.marks = [{ l:1, st:"cancelled", eol:{ k:"cancelled", ms:23108 } }]; dev.res = resWith({}, "out", [{ g:"cancel", k:"exec-cancelled", v:{ duration:23108 } }, { g:"term", k:"exec-terminated" }]); }
-    if (v === "deactivated") { dev.ed.marks = [{ l:1, st:"cancelled", eol:{ k:"cancelled", ms:19402 } }]; dev.res = resWith({}, "out", [{ g:"deact", k:"exec-deactivated", v:{ name:"orders-dev" } }]); W.live["orders-dev"] = "none"; }
+    if (v === "dialog" || v === "failed") { W.focus = "dialog"; W.layers.push({ type:"escalate", conn:"orders-dev", console:"k-dev", s, failed:v === "failed" }); }
+    if (v === "terminated") { dev.tx = null; dev.ed.marks = [{ l:2, st:"cancelled", eol:{ k:"cancelled", ms:23108 } }]; dev.res = resWith({}, "out", [{ g:"cancel", k:"exec-cancelled", v:{ duration:23108 } }, { g:"term", k:"exec-terminated", v:{ n:3 } }]); }
+    if (v === "deactivated") { dev.tx = null; d2.tx = null; dev.ed.marks = [{ l:2, st:"cancelled", eol:{ k:"cancelled", ms:19402 } }]; dev.res = resWith({}, "out", [{ g:"deact", k:"exec-disconnected", v:{ name:"orders-dev" } }]); W.live["orders-dev"] = "none"; }
+    }
   }
   if (id === "errbar") {
     const v = sc === "tr960" ? "pgabort" : sc;
@@ -3311,7 +3361,7 @@ function setup(id, sc) {
     dev.res = resNone(); dev.ed.marks = [];
     const v = sc === "tr960" ? "runasone" : sc;
     if (sc === "tr960") tr960();
-    if (v === "runasone" || v === "asonehi") { addConsole("k-my", "api-dev", SQL_MYSQL, { caret:{ l:0, c:30 }, preview:{ kind:"unc", units:[U(0, 0, 0, 80)], hints:{ 0:"uncertain" } } }); W.pendingMenu = v === "asonehi" ? "uncertainAsOneHi" : "uncertainAsOne"; }
+    if (v === "runasone" || v === "asonehi" || v === "asonero") { if (v === "asonero") conn("api-dev").ro = "guarded"; addConsole("k-my", "api-dev", SQL_MYSQL, { caret:{ l:0, c:30 }, preview:{ kind:"unc", units:[U(0, 0, 0, 80)], hints:{ 0:"uncertain" } } }); W.pendingMenu = v === "asonehi" ? "uncertainAsOneHi" : "uncertainAsOne"; }
     if (v === "customize") W.pendingMenu = "chooserCustomize";
     if (v === "popover") { dev.policy = { inside:"ask", sel:"asone" }; W.pop = "policy"; }
     if (v === "selection") { dev.policy = { inside:"ask", sel:"asone" }; dev.ed.sel = { a:{ l:1, c:0 }, b:{ l:13, c:54 } }; dev.ed.caret = { l:13, c:54 }; dev.ed.preview = { kind:"band", units:[U(1, 0, 13, 54)], hints:{ 0:"asone" }, count:2 }; }
@@ -3350,6 +3400,7 @@ function setup(id, sc) {
     if (v === "search") H({ scope:"all", q:"musteri" });
     if (v === "all") H({ scope:"all", outcome:"failed" });
     if (v === "redacted") H({ sel:2 });
+    if (v === "other") H({ scope:"all", sel:0 });
     if (v === "empty") H({ empty:true });
     if (v === "nomatch") H({ q:"faturalar" });
   }
@@ -3397,7 +3448,7 @@ function startM3bClocks() {
   clearInterval(SEC); clearInterval(MIN); if (S.shot) return;
   SEC = setInterval(() => {
     const L = W.layers.find(x => x.type === "commit" && !x.dropped);
-    if (L) { L.left = Math.max(0, L.left - 1); const c = $("cdClock"); if (c) c.textContent = fmtClock(L.left); if (L.left === 0) deadline(L); }
+    if (L) { L.left = Math.max(0, L.left - 1); const c = $("cdClock"); if (c) { c.textContent = fmtClock(L.left); c.closest(".cdown")?.setAttribute("title", fmtClock(L.left)); } if (L.left === 0) deadline(L); }
     const k = K(); if (k && k.tb.state === "cancelling") { k.tb.elapsed++; let touched = false; k.ed.marks.forEach(m => { if (m.st === "escalated") { m.eol.s = k.tb.elapsed; touched = true; } }); if (touched && !W.layers.length) renderEditor(); }
   }, 1000);
   MIN = setInterval(() => { W.consoles.forEach(k => { if (k.tx) k.tx.age++; }); const a = $("badgeAge"), k = K(); if (a && k.tx) a.textContent = t("exec-dur-min", { min:nf(k.tx.age) }); }, 60000);
@@ -3416,8 +3467,9 @@ function idleToast(k) {
     { icon:"clock", keep:true, wide:true, kind:"idle", console:k.id, alert:true });
 }
 function slowToast(k, s) {
+  /* I3: the toast never acts in one click: its one button opens the escalation dialog, where each consequence is stated first */
   const c = conn(k.conn);
-  toast(`<div class="t1">${te("hv-cancel-slow-title")}</div><div class="l2">${te("hv-cancel-slow-body", { name:c.id, duration:dur(s * 1000) })}</div><div class="acts"><button class="btn" data-act="escTerminate">${ic("octagon-x","i12")}<span>${te("hv-cancel-terminate")}</span></button><button class="btn" data-act="escDeactivate">${ic("power","i12")}<span>${te("hv-cancel-deactivate")}</span></button></div>`,
+  toast(`<div class="t1">${te("hv-cancel-slow-title")}</div><div class="l2">${te("hv-cancel-slow-body", { name:c.id, duration:dur(s * 1000) })}</div><div class="acts"><button class="btn" data-act="escOpen">${te("hv-cancel-options")}</button></div>`,
     { icon:"hourglass", keep:true, wide:true, kind:"slow", alert:true });
 }
 
@@ -3453,7 +3505,7 @@ function placeIme() {
 }
 function openChooser(uncertain, remembered, hover, asOneActive, customizeActive) {
   const a = caretAnchor(); if (!a) return; const p = anchorBelow(a, -2, 3);
-  if (uncertain) { const k = K(); W.menu = { type:"uncertain", x:p.x, y:p.y, items:k.conn === "api-dev" ? [{ asOne:true, count:2 }] : [], active:asOneActive ? 0 : -1 }; renderMenus(); return; }
+  if (uncertain) { const k = K(); const roC = conn(k.conn).ro; W.menu = { type:"uncertain", x:p.x, y:p.y, items:k.conn === "api-dev" ? [{ asOne:true, count:2, dis:!!roC }] : [], active:asOneActive && !roC ? 0 : -1 }; renderMenus(); return; }
   const items = [...chooserItems(), { sep:true }, { customize:true }]; if (remembered) items[1].remembered = true;
   const k = K(); W.menu = { type:"chooser", x:p.x, y:p.y, items, active:customizeActive ? items.length - 1 : remembered ? 1 : 0, savedPreview:k.ed.preview };
   if (hover) { W.menu.active = 1; k.ed.preview = { kind:"band", units:items[1].units }; renderEditor(); }
@@ -3496,7 +3548,7 @@ function openIso() {
 function openTabMenu(tab, x, y) {
   if (!tab) return; const k = K(), R = k.res.results[tab.dataset.id]; if (!R) return; const W0 = winRect(), r = tab.getBoundingClientRect();
   W.menu = { type:"tab", x:x ?? r.left - W0.left + 8, y:y ?? r.bottom - W0.top + 2, tab:tab.dataset.id, active:0, w:220,
-    items:[{ label:t(R.pinned ? "hv-results-tab-unpin" : "hv-results-tab-pin"), icon:R.pinned ? "pin-off" : "pin", act:"tabPin" }, { sep:true }, { label:t("hui-tab-close"), icon:"x", act:"tabClose" }, { label:t("hv-results-tab-close-others"), act:"tabCloseOthers" }] };
+    items:[{ label:t(R.pinned ? "hv-results-tab-unpin" : "hv-results-tab-pin"), icon:"pin", act:"tabPin" }, { sep:true }, { label:t("hui-tab-close"), icon:"x", act:"tabClose" }, { label:t("hv-results-tab-close-others"), act:"tabCloseOthers" }] };
   renderMenus();
 }
 
@@ -3535,14 +3587,15 @@ function doRun() {
     W.focus = "dialog"; renderLayers(); renderEditor(); focusInitial(); return;
   }
   if (c.env === "production" && /^\s*(UPDATE|INSERT|DELETE)\b/i.test(text) && /\bWHERE\b/i.test(text)) {
-    k.tb = { state:"awaiting" }; k.ed.marks = units.map(u => ({ l:u.a.l, st:"awaiting", eol:{ k:"awaiting", sp:!!k.tx } }));
-    W.layers.push({ type:"commit", conn:k.conn, sql:E.lines.slice(units[0].a.l, units[0].b.l + 1).filter(l => !/^\s*--/.test(l)), rows:1, left:300, sp:!!k.tx }); W.focus = "dialog"; renderLayers(); renderEditor(); focusInitial(); startM3bClocks(); return;
+    const sp = k.mode !== "auto" || !!k.tx;     /* RC-5: CommitQuestion.savepoint: Manual and Smart always, Auto only inside an open transaction */
+    k.tb = { state:"awaiting" }; k.ed.marks = units.map(u => ({ l:u.a.l, st:"awaiting", eol:{ k:"awaiting", sp } }));
+    W.layers.push({ type:"commit", conn:k.conn, sql:E.lines.slice(units[0].a.l, units[0].b.l + 1).filter(l => !/^\s*--/.test(l)), rows:1, left:300, sp }); W.focus = "dialog"; renderLayers(); renderEditor(); focusInitial(); startM3bClocks(); return;
   }
   runNow(k, units);
 }
 function doStop() {
   const k = K();
-  if (k.tb.state === "cancelling") { W.layers.push({ type:"escalate", conn:k.conn, s:k.tb.elapsed || 12 }); W.toasts = W.toasts.filter(x => x.kind !== "slow"); renderToasts(); renderLayers(); focusInitial(); return; }   /* a second press asks; nothing escalates by itself */
+  if (k.tb.state === "cancelling") { W.layers.push({ type:"escalate", conn:k.conn, console:k.id, s:k.tb.elapsed || 12, noTerm:conn(k.conn).engine === "sqlite" }); W.toasts = W.toasts.filter(x => x.kind !== "slow"); renderToasts(); renderLayers(); focusInitial(); return; }   /* a second press asks; nothing escalates by itself */
   if (k.tb.state !== "running") return; clearTimers(); k.tb = { state:"cancelling", elapsed:k.tb.elapsed };
   k.ed.marks.forEach(m => { if (m.st === "run") { m.st = "cancelling"; m.eol = { k:"cancelling" }; } }); renderWork();
   later(() => { k.tb = { state:"idle" }; k.ed.marks.forEach(m => { if (m.st === "cancelling") { m.st = "cancelled"; m.eol = { k:"cancelled", ms:(k.tb.elapsed || 3) * 1000 + 212 }; } });
@@ -3621,7 +3674,11 @@ const ACT = {
   /* M3b · surface 1: gate confirmation */
   cfExecute: () => { const L = topLayer(), k = K(); popLayer(); if (L.i < L.n) { W.layers.push({ ...L, i:L.i + 1, sql:[k.ed.lines[L.i + 1]], cls:"ddl-other", reasons:[te("hv-confirm-class-ddl-other")], typed:"" }); renderLayers(); focusInitial(); return; }
     const units = k.ed.preview ? k.ed.preview.units : []; runNow(k, units); },
-  cfExecuteAll: () => { const k = K(); popLayer(); runNow(k, k.ed.preview ? k.ed.preview.units : []); },
+  /* RC-1: Execute all answers the remaining units that would ask, except one that needs its name typed (it still asks); Commit / Roll back prompts still come */
+  cfExecuteAll: () => { const L = topLayer(), k = K(); popLayer(); const later = (L.later || []).find(u => u.typeName);
+    if (later) { W.layers.push({ ...L, ...later, typed:"" }); renderLayers(); focusInitial(); return; }
+    runNow(k, k.ed.preview ? k.ed.preview.units : []); },
+  cfCopyName: () => toast(`<div>${te("hv-results-copy")} ✓</div>`, { icon:"copy" }),
   cfSuppress: () => { const L = topLayer(), k = K(); popLayer(); logTo(k, { g:"info", k:"exec-confirm-suppressed", v:{ console:tabTitle(k) } }); runNow(k, k.ed.preview ? k.ed.preview.units : []); },
   cfSkip: () => { const L = topLayer(), k = K(); logTo(k, { g:"skip", k:"exec-confirm-skipped", v:{ n:L.i } }); ACT.cfExecute(); },
   cfSkipAll: () => { const L = topLayer(), k = K(); popLayer(); for (let i = L.i; i <= L.n; i++) logTo(k, { g:"skip", k:"exec-confirm-skipped", v:{ n:i } }); renderWork(); },
@@ -3629,7 +3686,7 @@ const ACT = {
   /* M3b · surface 2: confirm in transaction */
   cpCommit: () => { const L = topLayer(), k = K(); popLayer(); k.tb = { state:"idle" }; k.ed.marks.forEach(m => { if (m.st === "awaiting") { m.st = "ok"; m.range = [m.l, m.l]; m.eol = { k:"affected", rows:nf(L.rows), ms:12 }; } }); logTo(k, { g:"tx", k:"exec-confirm-committed", v:{ rows:L.rows } }); renderWork(); },
   cpRollback: () => { const k = K(); popLayer(); k.tb = { state:"idle" }; k.ed.marks.forEach(m => { if (m.st === "awaiting") { m.st = "rolledback"; m.eol = { k:"rolledback" }; } }); logTo(k, { g:"rb", k:"exec-confirm-rolled-back" }); renderWork(); },
-  cpKeep: () => { const k = K(); popLayer(); k.tb = { state:"idle" }; if (k.tx) k.tx.n++; k.ed.marks.forEach(m => { if (m.st === "awaiting") { m.st = "ok"; m.range = [m.l, m.l]; m.eol = { k:"affected", rows:nf(1), ms:5 }; } }); logTo(k, { g:"tx", k:"exec-confirm-kept" }); renderWork(); },
+  cpKeep: () => { const k = K(); popLayer(); k.tb = { state:"idle" }; if (k.tx) k.tx.n++; else k.tx = { n:1, age:0 };     /* Manual's first change: the badge appears with Keep */ k.ed.marks.forEach(m => { if (m.st === "awaiting") { m.st = "ok"; m.range = [m.l, m.l]; m.eol = { k:"affected", rows:nf(1), ms:5 }; } }); logTo(k, { g:"tx", k:"exec-confirm-kept" }); renderWork(); },
   cpUndo: () => { const k = K(); popLayer(); k.tb = { state:"idle" }; k.ed.marks.forEach(m => { if (m.st === "awaiting") { m.st = "rolledback"; m.eol = { k:"rolledback" }; } }); logTo(k, { g:"rb", k:"exec-confirm-undone" }); renderWork(); },
   /* M3b · surfaces 3–5: mode chip, badge, idle toast */
   txMenu: (a, e) => { e?.stopPropagation(); if (W.menu && W.menu.type === "tx") return closeMenu(); openTxMenu($("txChip")); },
@@ -3642,9 +3699,10 @@ const ACT = {
   /* M3b · surface 6: escalation */
   escKeep: () => { const k = K(); popLayer(); k.ed.marks.forEach(m => { if (m.st === "cancelling") { m.st = "escalated"; m.eol = { k:"escalated", s:k.tb.elapsed || 14 }; } }); renderWork(); },
   escTerminate: () => { const k = K(); W.layers = W.layers.filter(x => x.type !== "escalate"); W.toasts = W.toasts.filter(x => x.kind !== "slow"); renderToasts(); k.tb = { state:"idle" };
-    k.ed.marks.forEach(m => { if (m.st === "escalated" || m.st === "cancelling") { m.st = "cancelled"; m.eol = { k:"cancelled", ms:(k.tb.elapsed || 23) * 1000 }; } }); logTo(k, { g:"term", k:"exec-terminated" }); renderLayers(); renderWork(); },
-  escDeactivate: () => { const k = K(); W.layers = W.layers.filter(x => x.type !== "escalate"); W.toasts = W.toasts.filter(x => x.kind !== "slow"); renderToasts(); k.tb = { state:"idle" };
-    k.ed.marks.forEach(m => { if (m.st === "escalated" || m.st === "cancelling") { m.st = "cancelled"; m.eol = { k:"cancelled", ms:19402 }; } }); logTo(k, { g:"deact", k:"exec-deactivated", v:{ name:k.conn } }); W.live[k.conn] = "none"; renderLayers(); renderWork(); },
+    k.ed.marks.forEach(m => { if (m.st === "escalated" || m.st === "cancelling") { m.st = "cancelled"; m.eol = { k:"cancelled", ms:(k.tb.elapsed || 23) * 1000 }; } }); logTo(k, { g:"term", k:"exec-terminated", v:{ n:k.tx ? k.tx.n : 1 } }); k.tx = null; renderLayers(); renderWork(); },
+  escOpen: () => { const k = K(); W.toasts = W.toasts.filter(x => x.kind !== "slow"); renderToasts(); W.layers.push({ type:"escalate", conn:k.conn, console:k.id, s:k.tb.elapsed || 11, noTerm:conn(k.conn).engine === "sqlite" }); renderLayers(); focusInitial(); },
+  escDisconnect: () => { const k = K(); W.layers = W.layers.filter(x => x.type !== "escalate"); W.toasts = W.toasts.filter(x => x.kind !== "slow"); renderToasts(); k.tb = { state:"idle" };
+    k.ed.marks.forEach(m => { if (m.st === "escalated" || m.st === "cancelling") { m.st = "cancelled"; m.eol = { k:"cancelled", ms:19402 }; } }); logTo(k, { g:"deact", k:"exec-disconnected", v:{ name:k.conn } }); k.tx = null; if (k.n === 1) { W.consoles.forEach(x => { if (x.conn === k.conn) x.tx = null; }); W.live[k.conn] = "none"; } renderLayers(); renderWork(); },
   /* M3b · surface 7: error bar (the run is paused; nothing is cancelled) */
   ebRetry: () => { const k = K(); toast(`<div>${te("hv-errbar-retry")}…</div>`, { icon:"rotate-cw" }); },
   ebIgnore: () => ebContinue(false), ebIgnoreAll: () => ebContinue(true),
@@ -3737,7 +3795,10 @@ document.addEventListener("keydown", e => {
     return;
   }
   /* F6 moves the focus into the error bar (it never takes it by itself); Escape there answers Stop */
-  if (e.key === "F6" && K()?.errbar) { e.preventDefault(); document.querySelector('[data-fk="ebRetry"], [data-fk="ebRollbackContinue"]')?.focus(); return; }
+  /* M6: one F6 cycle: the error bar first, then the toasts, then back to the editor */
+  if (e.key === "F6" && (K()?.errbar || W.toasts.length)) { e.preventDefault(); const ae = document.activeElement;
+    const bar = document.querySelector('[data-fk="ebRetry"], [data-fk="ebRollbackContinue"]'), tst = document.querySelector("#toasts .toast .btn");
+    if (bar && !ae?.closest("#errbar") && !ae?.closest("#toasts")) bar.focus(); else if (tst && !ae?.closest("#toasts")) tst.focus(); else { ae?.blur(); W.focus = "editor"; renderEditor(); } return; }
   if (e.key === "Escape" && document.activeElement?.closest("#errbar")) { e.preventDefault(); ACT.ebStop(); return; }
   if (e.key === "Escape") { if (W.pop) { const was = W.pop; W.pop = null; renderEditor(); renderMenus(); if (was === "prod") $("prodNote")?.focus(); return; } if (W.tip) { W.tip = null; renderMenus(); return; } }
   if (meta && e.key === "Enter") { e.preventDefault(); doRun(); return; }
