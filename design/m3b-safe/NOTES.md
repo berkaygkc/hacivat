@@ -586,3 +586,434 @@ None of the Turkish below has been signed off yet; the Status column says so for
 | `hv-errbar-rollback-continue-tip-auto` | Rolls back your open transaction ({ $n } statements), then continues with statement { $next }, committing each statement as it runs. | Açık işleminizi ({ $n } ifade) geri alır, sonra { $next }. ifadeden devam eder; her ifade çalışınca commit edilir. | Review: PO |
 | `hv-chooser-run-as-one-ro` | Not on a read-only session: its guard checks one statement at a time. | Salt okunur oturumda kullanılamaz: koruma her seferinde tek bir ifadeyi denetler. | Review: PO |
 | `hv-history-target` | Goes into { $name }, the focused console; Run checks it there. | Odaktaki konsola, { $name } bağlantısına eklenir; Çalıştır denetimi orada yapılır. | Review: PO |
+
+---
+
+## M3c surfaces
+
+**Binding for M3c (surfaces 14–24, plus the Task 42 settings rows as surface 25). Task 2b, appended to the M3b part above, which stays binding as it is.** Everything in the M3b part's cross-cutting decisions holds here too; this part adds what M3c needs.
+
+**How to drive it.** The mock bar's first row now holds 25 surfaces; 14–25 are M3c (the tag reads "MOCK · M3b + M3c"). Deep links work as before: `?s=16&sc=invalid&theme=light&lang=tr&size=960&bar=0&shot=1`. The number keys still reach surfaces 1–12 only; use the bar or a link for 13–25. The M3b surfaces keep their approved state: the M3c toolbar, grid and editor additions (view switch, record toggle, find bars, folds, carets) appear in the M3c surfaces only (ruling M3c-1). Mock-only marks are dashed: the "M3c" tags in the Settings navigation, the pane width labels, the mock notes and the OS candidate window.
+
+**Flows that run.** Find: the toggles press, ↑/↓ (or Enter / ⇧Enter in the field) step the count, Escape closes the bar. Grid find: the same, plus Filter rows; Escape closes it. Folding: a chevron or a "⋯ n lines" inlay folds and unfolds. Gutter: ▶ runs the statement through the same path as Run. Mixed line endings: the status button opens the menu; Normalize removes the button. Views: the Segmented switches Table / Transposed / Text (Text above 100,000 rows asks first); the record toggle opens and closes the inspector, ▲▼ move it, Show more opens the value viewer. Value viewer: Raw / Pretty switch, Copy raw value, Re-run, Escape. Go to row: ⌘L opens it in any M3c grid; Escape or Enter closes it. Menus: arrows, Enter and Escape as in M3b; a menu item with an action performs it (Undo the selection change, Normalize, Open value viewer, Go to row…).
+
+**Product truth used:** the plan's "New UI surfaces" 14–24, Tasks 2b, 31–39, 41, 42, the Task 1b chord table, R-M3-10, -64, -69, -70, -75, -82, P-M3b-17/-20/-21; DESIGN.md; this file's M3b part (RC-1…RC-6 and rulings 1–44); the shipped Settings page (`settings_ui/mod.rs`: 176 px navigation, 200 px title column, 320 px search, Segmented rows) and status bar (`connections/status.rs`); the Task 1b command titles and the M3a/M3b console strings, reused verbatim (`i18n-app`).
+
+### M3c cross-cutting decisions
+
+1. **One field anatomy for find.** The editor find bar and the grid find bar share the find field (search glyph, mono query, toggles inside the well), the count, previous / next and close. The grid adds Filter rows; the editor adds Select all matches.
+2. **Find never invents a hue.** Other matches are a 1 px `text-3` outline; the current match is the selection (`blue-tint-strong`, the caret or the blue box); scrollbar ticks are `text-2`, the current one blue. A pending count uses the static amber marker; an invalid pattern is ink.
+3. **Nothing covers a trust signal.** The find bar is a row under the editor toolbar (not a box over the code); the go-to popover and the value viewer never cross the title bar or the status bar (they flip or clamp); menus stop above the status bar. The checker asserts it in every render.
+4. **Data ellipsizes, chrome wraps or collapses.** Cell values, names in crumbs and tabs, the value viewer's title ellipsize (data). Chrome follows the Overflow Rule: the result toolbar drops rows · timing first (the strip and the status bar repeat it), then the view switch keeps its icons; narrow console toolbars wrap into two rows and chips wrap inside themselves; nothing chrome ends in "…".
+5. **Local is said to be local.** A sort or a filter over fetched rows says so in a note under the toolbar; the database's order is never implied.
+6. **Copy is raw and follows what is shown.** Pretty-printing, raw display and sorting change what you see, never the bytes Copy writes (Copy raw value; copy through the ViewMap).
+7. **Keyboard-complete.** Every new surface has its chord or its menu path (Task 1b table); popovers take the focus (the go-to field, the value well, the fetch confirmation's primary) and Escape returns it; menus opened from the keyboard start on their first item, which takes the selection tint (ruling M3c-36).
+
+### 14 · Editor multi-cursor (Task 31)
+**Intent.** Several carets edit as one; nothing about it is surprising for the IME or the clipboard.
+
+**Anatomy.**
+- Every caret is the existing 2 px blue caret; carets blink in phase (one timer); there is no visual "primary". Each selection uses `blue-tint-strong` (the M3a selection); unfocused, they dim to `seam-strong` like M3a's.
+- **Status bar:** "3 carets" (editor group, before "27 selected"); it gives way together with the selected count. One caret shows nothing new.
+- **Column selection** (⌥-drag; Ctrl+Alt-drag elsewhere): a box in display columns; a line shorter than the box gets an empty range with its caret at the line end (no virtual space).
+- **IME, mirrored:** with every caret in plain text the marked text appears at every caret with the M3a underline (1 px, the selected clause 2 px); the OS candidate window anchors to the main caret only.
+- **IME, main caret only (R-M3-64):** when any caret sits inside a string or a comment, the other carets collapse first and the composition goes to the main caret; the status bar says once: "Input method: typing at the main caret only, because another caret was inside a string or comment" (polite announcement).
+
+**States.** Next occurrence × 3 · Column selection · IME mirrored · IME main caret only · 960 × 600 in Turkish.
+
+**Keyboard.** ⌃G select the next occurrence (case- and Turkish-exact), ⌃⌘G select all occurrences, ⌘⌥↑/↓ add a caret above/below, ⌘U undo the selection change, Escape collapses to the main caret (M3a `editor.escape`).
+
+### 15 · Folding (Task 32)
+**Intent.** Long scripts fold by statement, block, block comment and `-- region`, without hiding what ran.
+
+**Anatomy.**
+- **Fold column:** the gutter's last 14 px, right of the line numbers (the gutter keeps M3a's 58 px + digits width). Chevron 12 px `text-2` (`text` on hover); chevron-down on an open range, chevron-right on a folded one. Open ranges show their chevrons only while the pointer is over the gutter or a gutter button has the keyboard focus; a folded header always shows its chevron.
+- **Folded range:** the header line stays; after its text an inlay "⋯ 5 lines" (Source Sans 3 500 11/14, `text-2`, `seam-soft` fill (light: `seam`), radius 3, 8 px before it; `text` on hover; clicking unfolds); a 1 px `seam-soft` line under the header row. Line numbers skip the hidden lines.
+- **Marks:** a mark inside a fold paints on the header row; the most severe wins (failed > running > cancelled > done); a failure's end-of-line status reads "failed inside the fold · line 9" with its SQLSTATE chip (the line is the failing statement's first line). Range bars collapse to the header row.
+- **Run at a caret inside a folded statement** runs the whole statement; the preview band and the gutter bar cover the header row; Describe execution range names the real lines ("Run executes lines 9–14: …").
+- **Focus:** a focused chevron draws the 1 px blue focus ring.
+
+**States.** Chevrons on hover · Folded statements · Folds + execution marks · Failure inside a fold · Run at a caret in a fold · Keyboard: focused chevron · 960 × 600 in Turkish.
+
+**Keyboard / a11y.** No default chord (Task 1b: Fold, Unfold, Fold all, Unfold all are palette commands). Chevrons are buttons (`aria-expanded`, name "Fold lines 2–7" / "Unfold lines 2–7"); folded lines leave the AccessKit text runs.
+
+### 16 · Editor find panel (Task 33)
+**Intent.** Find in a script without covering it or its toolbar, Turkish-aware.
+
+**Anatomy** (the find bar, 32 px, `raised`, seam below, padding 0 10 0 12, gap 6, under the editor toolbar; Raised Ink Rule).
+- **Find field** (the shared primitive): 24 px, field well (`panel` dark / `ground` light), 1 px `seam-strong`, radius 4, flex 1 1 300 px (150–380 px); search glyph 12 `text-3`; the query in Fragment Mono 12 (placeholder "Find" in Source Sans 12.5 `text-3`); then four 20 × 18 toggles inside the well: Match case (case-sensitive), Whole words (whole-word), Regular expression (regex), Turkish-tolerant (languages). A toggle is `text-2`; pressed: `blue-tint-strong` fill + 1 px blue border + `text`. Names and the Turkish-tolerant explanation are tooltips and accessible names.
+- **Count:** Fragment Mono 11.5 `text-2`, at least 58 px wide so the bar does not jump: "3 of 41"; "No matches" (Source Sans 12 `text-2`); counting: the static amber marker and "3 of 1,240+"; invalid: ink circle-alert + "Invalid pattern" (`text`), the parser's message in the tooltip, and the field border `text-2`.
+- Previous / next (ghost icon buttons, arrow-up / arrow-down), **Select all matches** (ghost, words; capped at 10,000: the status bar says "Selected the first 10,000 of 41,208 matches"), the grow, close (ghost x).
+- **Matches in the text:** others a 1 px `text-3` outline (no fill); the current one is the selection with the caret. **Scrollbar:** a 9 px track at the code area's right edge with a 2 px tick per match (`text-2`), the current one blue.
+
+**States.** 3 of 41 · Turkish-tolerant (on by default in Turkish) · Regex · Invalid regex · No matches · Counting · Select all · capped · 960 × 600 in Turkish.
+
+**Keyboard.** ⌘F opens (the field takes the focus, seeded from the selection), Enter / ⇧Enter or ⌘G / ⇧⌘G step, ⌃⌘G selects all, Tab order field → toggles → previous → next → Select all → close; Escape closes and returns the caret to where find started. While the editor has the focus ⌘F shadows the explorer's filter focus (P-M3b-21).
+
+### 17 · Gutter extras and line commands (Task 34)
+**Intent.** Run a statement from its gutter and see its last runs; edit lines with one key; never be surprised by line endings.
+
+**Anatomy.**
+- **▶ (gutter run):** a 16 × 18 button in the mark column of a statement's first row, shown while the pointer is on that row or a gutter button has the focus; the 10 px play glyph `text-2`; hover: `hover` fill, `text`; focus: the 1 px blue ring. It takes the mark's place until the pointer leaves (the end-of-line status still shows the outcome). It runs through the same resolve, preview and gate path as ⌘↵.
+- **Last-runs tooltip** (the gutter tooltip anatomy, 300 px): "Run this statement" with the ⌘↵ key, caption "Last runs", up to three rows (outcome glyph: green check / ink alert / ban `text-2`; the time in Fragment Mono 11 `text-2`; the M3a mark sentence; a failure's SQLSTATE chip), then "Runs through the same checks as Run." A statement never run says "Not run yet."
+- **Mixed line endings:** a status-bar button "Mixed line endings" (`text`, the editor's right group, after Reduced mode). Its menu opens above it: a header "214 lines end in LF, 12 in CRLF", then "Normalize to LF" with the hint "most lines" (the dominant ending, first) and "Normalize to CRLF". One undo group; the button leaves once the endings are uniform.
+- **Line commands** in the editor menu (and the palette), with their keys: Comment or uncomment ⌘/, Duplicate line ⌘D, Delete line ⇧⌘K, Move line up ⌥⇧↑, Move line down ⌥⇧↓; then Select all occurrences ⌃⌘G and Undo the selection change ⌘U. A moved line carries a fold with it.
+- **History recall:** ⌃⌥↑ / ⌃⌥↓ at the last line of an empty or recalled console puts the statement in the editor; the status bar says "From history: statement 2 of 48 · ⌃⌥↑ older · ⌃⌥↓ newer".
+
+**States.** ▶ on hover · Last three runs · Keyboard: focused ▶ · Mixed line endings · Normalize… · Line commands (menu) · Undo selection (⌘U) · History recall · 960 × 600 in Turkish.
+
+### 18 · Grid model states (Tasks 35, 36)
+**Intent.** Sort, freeze and select locally, and say so.
+
+**Anatomy.**
+- **Sort indicator:** in the header after the name, a 12 px blue arrow (up ascending, down descending); with two or more levels the level number follows in Fragment Mono 11 blue. Tooltip: "Sort level 1, ascending. Text compares by the column's collation, tr-x-icu." or, without a mapped collation, "…has no equivalent here, so text compares by code point."
+- **Sort note** (the info row under the result toolbar; `raised`, padding 5/12, 12 px `text-2`, glyph arrow-up-down): partial result "Sorted locally: the database might order differently. Only the 10,000 fetched rows are sorted." + Clear sort (Default 20 px); sorting (after 200 ms) the static amber marker + "Sorting 1,048,576 rows…" + Cancel (the grid keeps the old order meanwhile); tail "1,500 new rows at the end (not sorted)" + Re-sort.
+- **Unsorted tail boundary:** a 1 px dashed `text-3` line above the first tail row.
+- **Frozen columns:** their own layer, a 1 px `seam-strong` right edge on the last frozen column (header and rows); the rest scrolls under it; no glyph; header tooltip "Frozen: stays in place when you scroll sideways".
+- **Multi-rect selection:** one blue box per range (the M3a box and 5 px handle), the active cell `blue-tint-strong`; the strip says "Selection 2 ranges · 10 cells".
+- **Column resize:** the header edge shows a 1 px `text-2` handle on hover; while dragging a dashed `text-2` guide runs down the grid and a tooltip shows the width ("136 px · Drag to resize · double-click to fit"); double-click fits.
+
+**States.** Sort · one level · Sort · levels 1 and 2 · Sorted locally (partial) · Sorting a million rows · Unsorted tail · Re-sort · Frozen columns, scrolled · Multi-rect selection · Column resize handle · 960 × 600 in Turkish.
+
+### 19 · Grid find bar (Task 37)
+**Intent.** Find over what the grid shows.
+
+**Anatomy.** The find bar replaces the result toolbar's left group (Copy, Count rows) inside the 34 px toolbar: the find field (min 180 px, max 400 px) with five toggles (Match case, Whole words, Regular expression, Filter rows (filter glyph), Turkish-tolerant), the count, previous / next, close. The right group stays (rows · timing, the view switch, Record). Matches: a 1 px `text-3` outline around the matching text in the cell; the current one `blue-tint-strong` with a blue outline, in the focused cell with the blue box. The placeholder "Find in the shown values" carries the scope in its tooltip ("…NULL never matches."). Truncated cells add "· may be incomplete" (dotted underline, tooltip "1 value was cut at 1 MB; text past the cut isn't searched."). Scanning: "3 of 214+" with the static amber marker. Filter rows: only matching rows, numbered as view rows 1…n; the strip says "41 of 10,000+ rows match".
+
+**States.** k of N · Filter rows · May be incomplete · Scanning · Invalid regex · 960 × 600 in Turkish.
+
+**Keyboard.** ⌘F in the grid (shadows the explorer's filter focus while the grid has the focus), Enter / ⇧Enter step, Escape closes and returns the focus to the cell.
+
+### 20 · Go to row (Task 37)
+**Intent.** Jump to a row and column by number, in the format locale.
+
+**Anatomy** (the explanation-popover anatomy, 300 px, under the result toolbar's left edge; clamped above the status bar): title "Go to row" with the list-ordered glyph and the ⌘L key; a 26 px mono field (placeholder "row or row:column"); one line under it (12 px, a 12 px glyph column): the hint (info `text-2`), the live target ("→ Row 1,000, column city"; `1.000` is row 1000 in Turkish), or an ink error with the field border `text-2`: "There's no row 40: the result has 12 rows.", "No column is named ilce.", "Column meta is hidden." + Show it and go (Default). Key hints "↵ Go · esc Close". Past the fetched rows on an open cursor it fetches; above 1,000,000 rows it asks in place: "Row 1,500,000 isn't fetched yet. Fetching 1,490,000 more rows takes a while, and the result's memory limit still applies." with Cancel (Default) and **Fetch and go** (Primary, focused: bounded by the memory limit, cancellable).
+
+**States.** Popover · Turkish 1.000 · Out of range · Unknown column · Hidden column · Fetch to row (> 1M) · 960 × 600 in Turkish.
+
+### 21 · Transposed, record and text views (Task 38)
+**Intent.** Read a result the way it reads best, one record at a time when that's easier.
+
+**Anatomy.**
+- **View switch:** a 22 px Segmented in the result toolbar's right group: Table / Transposed / Text (table-2, table-properties, align-left glyphs + words). Transposed is disabled above 100,000 rows: `text-3`, no hover, focusable, reason in its tooltip ("Transposed shows up to 100,000 rows; this result has 1,048,576."). Overflow: the words go first (icons stay, names in tooltips and accessible names).
+- **Record toggle:** a ghost icon button (panel-right) after the switch; pressed: `blue-tint-strong` + blue border. A one-row result shows it with its word ("Record").
+- **Record inspector:** 252 px on the `gutter` tone with a seam on its left; a 30 px header (`head`): small-caps "RECORD", "Row 4 of 184" (numbers in mono), ▲ ▼ (Alt+↑ / Alt+↓). One field per column: the name (Fragment Mono 11 `text`), a duplicate suffix "(2)" in `text-2` with a tooltip, the type right-aligned (mono 11 `text-3`), the value below (13 px; mono 11.5 for mono types; numbers right-aligned) clamped to three lines with "Show more" (opens the value viewer). Fields are divided by `seam-soft`; virtualized above 200 columns.
+- **Transposed:** the first column (150 px, `head` tone) holds each column's name (600) and type (mono 11 `text-3`); one column per row titled by its number (mono, right-aligned); 34 px rows.
+- **Text:** a Pretty ASCII table in Fragment Mono 11.5/17 on the panel, rules in `text-2`, widths capped at 255 characters; whole lines select (`blue-tint-strong`) and copy. Above 100,000 rows it asks in place with an inline notice: "Show 1,048,576 rows as text?" / "Building the text view for this many rows takes a while and uses about 180 MB of memory." with **Show as text** (Primary) and Back to the table (Default).
+
+**States.** Transposed disabled · Transposed · Record inspector · Duplicate names · Show more · One-row result · Text view · Text view > 100k asks · 960 × 600 in Turkish.
+
+### 22 · Value viewer (Task 38, R-M3-82)
+**Intent.** Read one value whole; copy exactly what the server sent.
+
+**Anatomy** (480 px popover on the dialog anatomy: `raised`, 1 px `seam-strong`, radius 6, popover shadow; no scrim, not modal; anchored under its cell, flipped above or clamped so it never crosses the title bar or the status bar).
+- **Header:** the column name (Fragment Mono 12.5/600, data, ellipsizes), "{type} · row 4" (12.5 `text-2`, type and row in mono), the x.
+- **Control row:** for JSON and XML a 22 px Segmented Raw / Pretty (Pretty's tooltip: "Display only: Copy raw value copies the server's text unchanged."; invalid JSON keeps Pretty disabled with "Not valid JSON, …"); for binary a single "Hex" segment.
+- **Value well:** `panel` / `ground`, 1 px `seam-strong`, radius 4, padding 7/10, Fragment Mono 11.5/17, wrapped, scrolls past 240 px (4 px thumb). JSON uses the syntax tokens (keys identifier ink, strings green, numbers number ink, literals keyword ink). Hex: offset (`text-3`), 16 bytes in 2-byte groups, the ASCII column (`text-2`).
+- **Truncated value:** an inline notice "Showing the first 1 MB of 5.2 MB." with **Re-run with a 64 MB value limit** (Default, rotate-cw; tooltip: it re-runs the statement with a larger cell cap through the same checks as Run; on production the gate asks).
+- **Footer:** the size ("1,048,576 characters", "48,213 bytes", mono 11.5 `text-2`) and **Copy raw value** (Default).
+
+**States.** Wrapped text · JSON Pretty · JSON Raw · Binary (hex) · Truncated · Re-run · 960 × 600 in Turkish.
+
+**Keyboard.** ⇧↵ opens from the focused cell; the value well takes the focus (arrows scroll); Tab: Raw / Pretty → well → Re-run → Copy raw value → x; Escape closes and returns the focus to the cell.
+
+### 23 · Grid context menu (Task 39)
+**Intent.** Every grid command within reach, with disabled items saying why.
+
+**Anatomy** (the PopupMenu with a 12 px icon column; M3c menus share one row anatomy). Disabled items keep their place, `text-3`, with the reason as the right-hand hint in `text-2`; a checkbox item (Raw display) shows the blue check in the icon column and its scope hint "this column".
+- **Cell:** Copy ⌘C · Copy with headers | Open value viewer ⇧↵ · Raw display (this column) | Sort ascending · Sort descending · Clear sort | Go to row… ⌘L.
+- **Header:** Sort ascending (✓ when current) · Sort descending · Clear sort · Add as sort level 2 (when another column is sorted) | Freeze up to here / Unfreeze columns · Hide column · Show all columns · Fit width | Raw display · Copy column name.
+- **Row number:** Copy rows ⌘C · Copy with headers | Show as record · Go to row… ⌘L.
+- Reasons: "Ranges don't line up" (copy of a non-stackable union, M3a refusal), "Select one cell", "Not sorted", "None hidden", "Last shown column".
+
+**States.** Cell · Header · Row number · Disabled with reasons · Keyboard (⇧F10) · 960 × 600 in Turkish.
+
+**Keyboard.** ⇧F10 or the context-menu key opens it at the focus cell with the first item active (selection tint); a double-click on a header edge fits the column.
+
+### 24 · Narrow panes (Task 41, R-M3-75)
+**Intent.** A console split down to 120 px keeps every trust signal whole in every locale.
+
+**Anatomy** (below the per-locale minimum: en 126, tr 141, pseudo 219; the mock draws panes of 120, 141, 180 and 219 px).
+- The console toolbar wraps into two rows (`Toolbar::wrap_row`; padding 4/8, 4 px between rows). Run and Stop are icon-only (their names and keys in the tooltip). The crumb keeps its environment mark and ellipsizes the connection name (data, whole in the tooltip); it may move to the second row. The mode chip keeps its glyph and chevron (it never shrinks).
+- **Read-only chip, narrow form:** the lock (red on production) and the short word "read-only" / "salt okunur" (`hv-capsule-access-read-only`); "read-only (guarded)" stays in the tooltip.
+- **Waiting item, narrow form:** two lines, "Waiting for a connection" / "4 of 4 in use" (`text-2`), then Cancel.
+- **Chips wrap inside themselves** rather than clip (the pending read-only chip "Read-only after this transaction", the badge's short form "Transaction · 3 statements"); no chrome ends in "…".
+- **Strip:** "Cursor open" (the short form), Close cursor, Fetch more as an icon; the strip wraps.
+- **Status bar:** the editor's segment sits in the right group before the version (the M3a order); Reduced mode never gives way; Ln/Col gives way after the path; the collapse order is version, encryption, selected count, carets, mixed line endings, path, Ln/Col, rows · timing.
+- The production hairline and tab swatch stay on every production pane.
+
+**States.** Idle · read-only production · Running / cancelling · Waiting (two lines) · Pending read-only + badge · Strip · Cursor open · Status · Reduced never gives way · Pseudo en-XA · 219 px · 960 × 600 in Turkish.
+
+### 25 · Settings rows (Task 42)
+**Intent.** The M3b settings get rows on the shipped Settings page.
+
+**Anatomy** (the shipped page: a 176 px navigation on the `side` tone, the selected item `blue-tint` with a 1 px blue left edge; a search bar (field max 320 px, padding 8/12, seam below); a 30 px small-caps section title (`text-2`); rows padding 6/12, a 200 px title column in 13 px `text-2`, the control (26 px Segmented), then notes in 12 px `text-2`).
+- Four sections join General / Appearance / Keyboard: **Editor** (Tab size 2 / 4 / 8 in mono; Indent with spaces; Copy the line when nothing is selected; Blinking caret), **Execution** (Confirm UPDATE or DELETE without WHERE off production, note "Production always asks, with the table's name typed."; Ask what to do when a statement fails, note "Off: a run of several statements stops at the first failure."), **Results** (Largest value kept per cell: an 88 px mono number field, right-aligned, and a 76 px KB / MB Select, note "From 64 KB to 64 MB. …"; Show grid values raw, note), **History** (Record query history, note).
+- **Clamp:** a value above 64 MB (or below 64 KB) is set to the bound and says so under the control with the info glyph: "128 MB is above the largest allowed, so it was set to 64 MB."
+- **Search** finds rows across sections in English and Turkish (Turkish-tolerant); while searching, the section title hides (shipped behaviour) and each row names its section after the control.
+
+**States.** Editor · Execution · Results · Value limit clamped · Search (TR) · 960 × 600 in Turkish.
+
+### New primitives (M3c)
+
+All use existing tokens only and are reproducible in GPUI.
+
+| Primitive | Anatomy and exact tokens |
+|---|---|
+| **Find field** | 24 px; field well `panel` / `ground`; 1 px `seam-strong`; radius 4; padding 0 2 0 7; search glyph 12 `text-3`; query Fragment Mono 12; invalid: border `text-2`. |
+| **Find toggle** | 20 × 18 inside the field; radius 3; 1 px transparent border; glyph 13 px `text-2`; hover `hover` + `text`; pressed `blue-tint-strong` + 1 px blue + `text`; focus ring 1 px blue. |
+| **Find count** | min 58 px; Fragment Mono 11.5 `text-2`; counting: 7 px amber marker; invalid: ink glyph + `text`; incomplete: `text-2` dotted underline. |
+| **Find bar** | 32 px, `raised`, seam below, padding 0 10 0 12, gap 6; buttons 22 px. |
+| **Match outline** | 1 px `text-3` outline, no fill; the current match is the selection. |
+| **Scrollbar ticks** | 9 px track, `seam-soft` left edge, thumb `seam-strong` radius 3; ticks 2 px `text-2`, current blue. |
+| **Fold chevron** | 12 × 18 in the gutter's last 14 px; chevron-down / -right 12 px `text-2`; focus ring 1 px blue. |
+| **Fold inlay** | 14 px; Source Sans 3 500 11/14 `text-2`; `seam-soft` (light `seam`); radius 3; padding 0 5; 8 px before; "⋯ n lines". |
+| **Gutter ▶** | 16 × 18 in the mark column; play 10 px `text-2`; hover `hover` + `text`; focus ring 1 px blue. |
+| **Sort indicator** | arrow-up / arrow-down 12 px blue; level digit Fragment Mono 11 blue (two or more levels only). |
+| **Grid note row** | the M3a info row (`raised`, padding 5/12, 12 px `text-2`); glyph 12; a 20 px Default button on the right; pending: the 7 px amber marker. |
+| **Tail boundary** | 1 px dashed `text-3` across the row above the tail. |
+| **Frozen edge** | 1 px `seam-strong` right border on the last frozen column. |
+| **Resize handle / guide** | 1 px `text-2` on the header edge; dashed 1 px `text-2` guide; width tooltip (popover anatomy, 12 px, mono value). |
+| **View switch** | 22 px Segmented; segments 12 px with a 12 px glyph; disabled `text-3`, focusable; compact: glyphs only. |
+| **Record inspector** | 252 px `gutter`; header 30 px `head`; fields padding 5/12/6, `seam-soft` dividers; key mono 11, type mono 11 `text-3`, value 13 (mono 11.5) clamped to 3 lines. |
+| **Value viewer** | 480 px popover on the dialog anatomy (header 12/12/0/16, body 8/16, footer 12/16/14); value well like the SQL inset, max 240 px. |
+| **Go-to popover** | 300 px explanation-popover anatomy; 26 px mono field; one 12 px line with a 12 px glyph column; key hints 11.5 `text-2`. |
+| **M3c menu row** | PopupMenu row + 12 px icon / check column; disabled reason as `text-2` hint; keyboard-active row `blue-tint-strong`. |
+| **Narrow toolbar** | `wrap_row`: padding 4/8, row gap 4, column gap 6; icon-only Run / Stop; chips wrap (line 15 px). |
+| **Settings row** | padding 6/12; title column 200 px 13 `text-2`; 26 px Segmented / field; notes 12 `text-2`. |
+
+**Icons (RC-4 pattern).** The mock adds four Lucide 0.460 icons (ISC) that the app does not ship: `arrow-up` (ascending sort, previous match, previous record), `case-sensitive`, `whole-word`, `regex` (find toggles). They come from one Task 1b-owned addendum (SVGs, `assets.rs` rows, `IconName` variants, `new_icons_are_embedded`), routed by the controller, like M3b's seven. Everything else reuses shipped glyphs: `languages` (Turkish-tolerant), `filter` (Filter rows), `snowflake` (freeze), `arrow-up-down` (sort notes, add a sort level), `table-2` / `table-properties` / `align-left` (views), `panel-right` (record), `eye` / `eye-off`, `arrow-left-right` (fit width), `list-ordered` (go to row), `play` (gutter run), `chevron-down` / `chevron-right` (folds).
+
+### M3c rulings
+
+Each answers an open layout question so the build is not blocked; the controller or the PO can change any.
+
+1. **M3c-1 · The M3b surfaces stay as approved.** The M3c additions (view switch, record toggle, find bars, folds, carets) appear in surfaces 14–25 only; surfaces 1–13 render pixel-identically to the approved M3b mock (verified). *Cost if wrong:* none (mock structure).
+2. **M3c-2 · Carets look alike.** Every caret is the M3a caret and they blink in phase; nothing marks the main caret (only the IME and the OS need it). *Cost:* one paint flag in Task 31.
+3. **M3c-3 · "3 carets" in the status bar,** in the editor group before the selected count, giving way with it. *Cost:* one segment.
+4. **M3c-4 · The IME fallback is said once,** as a transient status sentence (polite), never a toast. *Cost:* one string.
+5. **M3c-5 · Fold column right of the line numbers,** in the gutter's existing 14 px right padding, so the gutter width does not change; open chevrons only on gutter hover or focus, folded ones always. *Cost:* gutter layout in Task 32.
+6. **M3c-6 · Fold inlay "⋯ n lines"** on the DESIGN.md inlay token; n is the hidden line count. *Cost:* one string.
+7. **M3c-7 · Marks in a fold:** the most severe on the header; a failure names the failing statement's first line. *Cost:* one string, one rule.
+8. **M3c-8 · No default fold chord** (Task 1b table lists none): palette, gutter buttons and AccessKit. *Cost:* a later keymap row.
+9. **M3c-9 · The editor find bar is a 32 px row under the toolbar,** not a box floating over the code: the toolbar's trust signals and the first lines stay visible, and it is the same anatomy the grid uses. *Cost:* layout in Task 33.
+10. **M3c-10 · Match colours:** outline `text-3` for other matches, the selection for the current one, `text-2` / blue scrollbar ticks; no amber (pending) or red. *Cost:* paint constants.
+11. **M3c-11 · An invalid regex is ink, not red** (Task 33's text says "turns the field red"; Hue Is Meaning and the M3b type-to-confirm precedent): border `text-2`, ink glyph, "Invalid pattern". *Cost:* one colour.
+12. **M3c-12 · Counting shows "3 of 1,240+"** with the static amber marker (no spinner; M3a ruling 5). *Cost:* one string.
+13. **M3c-13 · Select all matches past 10,000** selects the first 10,000 and says so in the status bar. *Cost:* one string.
+14. **M3c-14 · Find toggles are icon buttons** inside the field (case-sensitive, whole-word, regex, languages; filter in the grid); the words live in tooltips and accessible names. *Cost:* four icons (Task 1b addendum).
+15. **M3c-15 · ▶ replaces the mark while hovered or focused;** its tooltip shows the last three runs; a failure's details stay reachable from the end-of-line chip and Output. *Cost:* gutter hit-testing in Task 34.
+16. **M3c-16 · Mixed line endings is a status-bar button** in the editor group with a menu (counts, dominant ending first with "most lines"); never automatic. *Cost:* one segment, one menu.
+17. **M3c-17 · Line commands live in the editor menu** (two new groups) and the palette, each with its chord. *Cost:* menu rows.
+18. **M3c-18 · History recall says where you are** in the status bar ("From history: statement 2 of 48 · ⌃⌥↑ older · ⌃⌥↓ newer"). *Cost:* one string.
+19. **M3c-19 · Sort level numbers only with two or more levels;** the collation lives in the header tooltip. *Cost:* one condition.
+20. **M3c-20 · Local sort states are a note row** under the toolbar (partial, sorting, unsorted tail) with one Default button each; the tail is marked in the grid by a dashed `text-3` line. *Cost:* one row component.
+21. **M3c-21 · Frozen columns get an edge, no glyph.** *Cost:* none.
+22. **M3c-22 · Multi-rect strip reads "2 ranges · 10 cells".** *Cost:* one string.
+23. **M3c-23 · Column resize** draws a `text-2` handle, a dashed guide and the width in px. Surface 18's "column grow/shrink handle" is read as this width handle; growing and shrinking the selection (⌥↑ / ⌥↓, cell → row segment → row → all) has no surface beyond the M3a selection box. *Cost:* paint in Task 35.
+24. **M3c-24 · The grid find bar keeps the right group;** the toolbar's Overflow order is rows · timing first, then the view switch's words. *Cost:* priorities in Task 37/38.
+25. **M3c-25 · Grid matches outline the matching text,** not the whole cell (what you see is what matched). *Cost:* text-run decoration in the grid.
+26. **M3c-26 · Filter rows numbers view rows 1…n** and says "41 of 10,000+ rows match" in the strip. *Cost:* one string.
+27. **M3c-27 · Go to row is a popover,** not a dialog; errors inline; above 1M rows the fetch confirmation is inline with **Fetch and go** Primary and focused (bounded by the memory limit and cancellable; the M3b fetch-all precedent, ruling 22). *Cost:* focus target.
+28. **M3c-28 · The view switch is a Segmented in the right group;** disabled Transposed keeps `text-3` and its reason in the tooltip (it is focusable, like the read-only chip). *Cost:* none.
+29. **M3c-29 · A one-row result shows the Record toggle with its word,** no hue (Task 38's "highlights the toggle"). *Cost:* one label.
+30. **M3c-30 · Text view above 100k asks in place** (an inline notice, not a dialog), Show as text Primary. *Cost:* one notice.
+31. **M3c-31 · The value viewer is non-modal,** anchored to its cell, never over the title or status bar; Re-run and Copy raw value are Default (nothing destructive, no single primary action). *Cost:* none.
+32. **M3c-32 · Sizes read "64 MB",** formatted by the existing `exec-size-*` messages; the plan's "64 MiB" names the binary unit the app already displays as MB. *Cost:* one string.
+33. **M3c-33 · Raw display is per column in the menu** (a checkbox item with "this column") and global in Settings. *Cost:* none.
+34. **M3c-34 · Narrow forms:** two-row toolbar, icon-only Run / Stop, the crumb's name ellipsizes (data) but never its mark, the read-only chip keeps the lock and "read-only" (reusing `hv-capsule-access-read-only`), chips wrap inside themselves, the mode chip never shrinks, Fetch more becomes an icon in the strip. *Cost:* `ToolbarItem::narrow` forms in Task 41.
+35. **M3c-35 · Status bar order:** the editor segment stays in the right group before the version, as the M3a NOTES (binding) draw it; Task 41's "right of the version" is read as "in the right-aligned group". *Cost:* the order of two cells.
+36. **M3c-36 · Keyboard-active menu rows take the selection tint** (`blue-tint-strong`, the completion popup and chooser rule) in the M3c menus: the PopupMenu's `hover` row is nearly invisible on `raised` in dark. *Cost:* one token in the menu.
+37. **M3c-37 · Settings get four sections** (Editor, Execution, Results, History) rather than one "M3b" section; the value limit is a number field plus a KB / MB Select with a clamp note. *Cost:* navigation rows in Task 42.
+
+### Open items for the PO (M3c)
+
+1. **Turkish copy:** every M3c TR string is `Review: PO`; in particular "Türkçe esnek" (Turkish-tolerant), "Devrik" (Transposed), "Biçimli" / "Ham" (Pretty / Raw), "Onaltılık" (Hex), "harmanlama" (collation), "Satırları süz" (Filter rows), "Ham görünüm" (Raw display), "Karışık satır sonları", "Hepsini LF yap" (Normalize to LF).
+2. **Run with several carets** (open): the mock keeps M3a's rule (the preview follows the main caret). The alternative is running every statement that holds a caret, in order.
+3. **How the gutter buttons get the keyboard focus** (open): AccessKit always; for the keyboard the mock assumes M3a's "Tab moves focus" mode makes ▶ and the chevrons Tab stops. The alternative is an F6 stop.
+4. **Disabled segments in dark** (`text-3` vs `text-2` differ little): the reason is in the tooltip and the segment does not respond; the PO may want a stronger disabled look system-wide.
+5. **Keyboard-active menu rows** (ruling M3c-36) differ from the shipped PopupMenu's hover row; the PO may want it everywhere.
+6. **Status bar order** (ruling M3c-35) against Task 41's wording.
+7. **No default fold chords** (ruling M3c-8).
+8. **Icons:** four new Lucide icons need the Task 1b addendum (RC-4 pattern).
+9. **Invalid regex is ink, not red** (ruling M3c-11), a named deviation from Task 33's text.
+
+### Verification (M3c)
+
+See the Task 2b report for the run log. In short:
+- The harness (rebuilt in the session scratchpad, not committed; Node 20 `--experimental-websocket` + headless Chrome over DevTools) rendered every M3c scenario (12 surfaces, 85 scenarios) × EN/TR × dark/light × 1280 × 800 and 960 × 600 with `bar=0&shot=1`: **680 renders (85 scenarios × 8), 0 findings.**
+- Checks per render: console errors and exceptions; sideways overflow of every chrome container (toolbars, find bars and fields, strips, note rows, tabs, capsule, menus, popovers, the value viewer, the go-to popover, the inspector header, settings rows, chips, the crumb); chrome text that ellipsizes (data exempt: cells, names, crumbs, tab titles, the value viewer's title); floating layers inside the window and off the title bar and status bar; exactly one cp-fill block when the focused console is production, none otherwise; the 11 px floor; `text-3` on `raised` in dark; `NaN`, `undefined`, unfilled placeholders and raw Fluent ids in text and tooltips; every trust signal (capsule block, status environment segment, transaction segment, badge, mode chip, read-only chips, crumb marks, tab swatches, run states, Reduced mode, Cursor open) drawn whole inside every clipping ancestor; the production hairline on every production editor and pane; Danger only in dialogs; an alertdialog opening on its safe answer; no duplicated Fluent id across PRIOR / M3a / M3b / app / M3c; the value viewer and the go-to popover holding the focus.
+- Regression: surfaces 1–13 were rendered from the M3b file and from this file (186 renders each: every scenario in EN · dark · 1280 and TR · light · 960) and compared pixel by pixel: no pixel differs (the checker flags the same two renders on both files: the template scenario literally shows `${tablo}`, which is data).
+- The PNGs were looked at (EN · dark · 1280 and TR · light · 960, crops at 3× where detail mattered). That review caught, and the design fixed: a pinyin composition with an apostrophe lexed as a string (now `shuju`); a mock note over the candidate window; the 960 px narrow-pane layout leaving a 19 px fifth pane (now the widest pane fills); the badge's short form clipped in a 120 px pane (now wraps); the strip's Fetch more wider than a 120 px pane (now an icon); the width label over the strip; grid find's current match and the unsorted-tail boundary scrolled out of view; a gutter fixture whose end-of-line status ran under long text; the value viewer's subtitle spaced by its flex gap; the resize guide not drawn; an undo-selection fixture selecting a word that wasn't there; the keyboard-active menu row invisible in dark (ruling M3c-36).
+- The copy table below is generated from the mock's `i18n-m3c` block (150 ids), so the two cannot drift.
+
+### Copy strings (EN / TR), M3c
+
+Placeholders, plurals and isolation follow the M3b table's rules. The `i18n-app` block reuses, verbatim, strings the app already ships (Task 1b's command titles, `hv-console-ro-pending`, `hv-console-ro-pending-short`, the Settings page strings); they are listed in the mock, not here, and M3c redefines none of them.
+
+| Prefix | File | Owner (own `## m3b-tNN-*` block) |
+|---|---|---|
+| `hv-editor-carets`, `hv-editor-ime-*` | `locales/{en,tr}/hacivat-ui.ftl` | Task 31 |
+| `hv-editor-fold-*`, `hv-editor-unfold-name` | `locales/{en,tr}/hacivat-ui.ftl` | Task 32 |
+| `hv-find-*` | `locales/{en,tr}/hacivat-ui.ftl` | Task 33 (`## m3b-t33-find`; Task 37 reuses them) |
+| `hv-gutter-*`, `hv-eol-*`, `hv-history-recall` | `locales/{en,tr}/hacivat-ui.ftl` | Task 34 (`## m3b-t34-editor`) |
+| `hv-grid-frozen-tip`, `hv-grid-resize-tip`, `hv-grid-width`, `hv-strip-ranges` | `locales/{en,tr}/hacivat-ui.ftl` | Task 35 |
+| `hv-grid-sort*`, `hv-grid-sorted-*`, `hv-grid-clear-sort`, `hv-grid-unsorted-tail`, `hv-grid-resort`, `hv-grid-dir-*` | `locales/{en,tr}/hacivat-ui.ftl` | Task 36 (`## m3b-t36-sort`) |
+| `hv-gfind-*`, `hv-goto-*` | `locales/{en,tr}/hacivat-ui.ftl` | Task 37 (`## m3b-t37-find-goto`) |
+| `hv-view-*`, `hv-transposed-col`, `hv-record*`, `hv-text-*`, `hv-vv-*` | `locales/{en,tr}/hacivat-ui.ftl` | Task 38 (`## m3b-t38-views`) |
+| `hv-gmenu-*` | `locales/{en,tr}/hacivat-ui.ftl` | Task 39 (`## m3b-t39-grid-menu`) |
+| `hv-console-waiting-l1`, `hv-console-waiting-l2` | `locales/{en,tr}/hacivat-ui.ftl` | Task 41 |
+| `hv-settings-*` | `locales/{en,tr}/hacivat-ui.ftl` | Task 42 (`## m3b-t42-settings`) |
+
+| Id | EN | TR | Status |
+|---|---|---|---|
+| `hv-editor-carets` | { $n } carets | { $n } imleç | Review: PO |
+| `hv-editor-ime-primary-only` | Input method: typing at the main caret only, because another caret was inside a string or comment | Giriş yöntemi: başka bir imleç bir dizenin ya da yorumun içinde olduğu için yalnızca ana imleçte yazılıyor | Review: PO |
+| `hv-editor-fold-lines` | { $n } lines | { $n } satır | Review: PO |
+| `hv-editor-fold-tip` | Lines { $from }–{ $to } are folded. Click to unfold. | { $from }–{ $to }. satırlar katlandı. Açmak için tıklayın. | Review: PO |
+| `hv-editor-fold-name` | Fold lines { $from }–{ $to } | { $from }–{ $to }. satırları katla | Review: PO |
+| `hv-editor-unfold-name` | Unfold lines { $from }–{ $to } | { $from }–{ $to }. satırların katlamasını aç | Review: PO |
+| `hv-editor-fold-failed` | failed inside the fold · line { $line } | katlanmış bölümde başarısız · satır { $line } | Review: PO |
+| `hv-find-placeholder` | Find | Bul | Review: PO |
+| `hv-find-match-case` | Match case | Büyük/küçük harf eşleşsin | Review: PO |
+| `hv-find-words` | Whole words | Tam sözcük | Review: PO |
+| `hv-find-regex` | Regular expression | Düzenli ifade | Review: PO |
+| `hv-find-tolerant` | Turkish-tolerant | Türkçe esnek | Review: PO |
+| `hv-find-tolerant-tip` | Turkish-tolerant: İ, I, ı and i find each other, and accents are ignored. | Türkçe esnek: İ, I, ı ve i birbirini bulur, aksanlar yok sayılır. | Review: PO |
+| `hv-find-count` | { $i } of { $n } | { $i }/{ $n } | Review: PO |
+| `hv-find-count-more` | { $i } of { $n }+ | { $i }/{ $n }+ | Review: PO |
+| `hv-find-counting-tip` | Still counting; the number grows as the rest of the document is searched. | Sayım sürüyor; belgenin geri kalanı arandıkça sayı artar. | Review: PO |
+| `hv-find-none` | No matches | Eşleşme yok | Review: PO |
+| `hv-find-invalid` | Invalid pattern | Geçersiz desen | Review: PO |
+| `hv-find-invalid-tip` | The regular expression can't be read, so nothing is searched: { $error } | Düzenli ifade okunamadığı için hiçbir şey aranmıyor: { $error } | Review: PO |
+| `hv-find-prev` | Previous match | Önceki eşleşme | Review: PO |
+| `hv-find-next` | Next match | Sonraki eşleşme | Review: PO |
+| `hv-find-select-all` | Select all matches | Tüm eşleşmeleri seç | Review: PO |
+| `hv-find-capped` | Selected the first { $max } of { $n } matches | { $n } eşleşmenin ilk { $max } tanesi seçildi | Review: PO |
+| `hv-gutter-run` | Run this statement | Bu ifadeyi çalıştır | Review: PO |
+| `hv-gutter-last-runs` | Last runs | Son çalıştırmalar | Review: PO |
+| `hv-gutter-never-run` | Not run yet. | Henüz çalıştırılmadı. | Review: PO |
+| `hv-gutter-same-path` | Runs through the same checks as Run. | Çalıştır ile aynı denetimlerden geçer. | Review: PO |
+| `hv-eol-mixed` | Mixed line endings | Karışık satır sonları | Review: PO |
+| `hv-eol-mixed-tip` | Lines end in both LF and CRLF. Click to normalize them. | Satırlar hem LF hem CRLF ile bitiyor. Eşitlemek için tıklayın. | Review: PO |
+| `hv-eol-counts` | { $lf } lines end in LF, { $crlf } in CRLF | { $lf } satır LF, { $crlf } satır CRLF ile bitiyor | Review: PO |
+| `hv-eol-to` | Normalize to { $ending } | Hepsini { $ending } yap | Review: PO |
+| `hv-eol-most` | most lines | çoğu satır | Review: PO |
+| `hv-history-recall` | From history: statement { $i } of { $n } · { $older } older · { $newer } newer | Geçmişten: ifade { $i }/{ $n } · { $older } daha eski · { $newer } daha yeni | Review: PO |
+| `hv-grid-sorted-locally` | Sorted locally: the database might order differently. | Yerel olarak sıralandı: veritabanı farklı sıralayabilir. | Review: PO |
+| `hv-grid-sorted-locally-more` | Only the { $rows } fetched rows are sorted. | Yalnızca getirilen { $rows } satır sıralandı. | Review: PO |
+| `hv-grid-clear-sort` | Clear sort | Sıralamayı kaldır | Review: PO |
+| `hv-grid-unsorted-tail` | { $rows } new rows at the end (not sorted) (one: { $rows } new row at the end (not sorted)) | Sonda { $rows } yeni satır (sıralanmadı) | Review: PO |
+| `hv-grid-resort` | Re-sort | Yeniden sırala | Review: PO |
+| `hv-grid-sorting` | Sorting { $rows } rows… | { $rows } satır sıralanıyor… | Review: PO |
+| `hv-grid-sort-cancel` | Cancel | Vazgeç | Review: PO |
+| `hv-grid-sort-tip` | Sort level { $lvl }, { $dir }. Text compares by the column's collation, { $collation }. | Sıralama düzeyi { $lvl }, { $dir }. Metin, sütunun harmanlamasına ({ $collation }) göre karşılaştırılır. | Review: PO |
+| `hv-grid-sort-tip-cp` | Sort level { $lvl }, { $dir }. The column's collation { $collation } has no equivalent here, so text compares by code point. | Sıralama düzeyi { $lvl }, { $dir }. Sütunun { $collation } harmanlamasının burada karşılığı yok; metin kod noktasına göre karşılaştırılır. | Review: PO |
+| `hv-grid-dir-asc` | ascending | artan | Review: PO |
+| `hv-grid-dir-desc` | descending | azalan | Review: PO |
+| `hv-grid-frozen-tip` | Frozen: stays in place when you scroll sideways | Donduruldu: yana kaydırınca yerinde kalır | Review: PO |
+| `hv-grid-resize-tip` | Drag to resize · double-click to fit | Boyutlandırmak için sürükleyin · sığdırmak için çift tıklayın | Review: PO |
+| `hv-grid-width` | { $px } px | { $px } px | Review: PO |
+| `hv-strip-ranges` | { $n } ranges · { $cells } cells | { $n } aralık · { $cells } hücre | Review: PO |
+| `hv-gfind-placeholder` | Find in the shown values | Görünen değerlerde bul | Review: PO |
+| `hv-gfind-filter` | Filter rows | Satırları süz | Review: PO |
+| `hv-gfind-filter-tip` | Filter rows: show only the rows with a match | Satırları süz: yalnızca eşleşen satırları göster | Review: PO |
+| `hv-gfind-incomplete` | may be incomplete | eksik olabilir | Review: PO |
+| `hv-gfind-incomplete-tip` | { $n } values were cut at { $size }; text past the cut isn't searched. (one: { $n } value was cut at { $size }; text past the cut isn't searched.) | { $n } değer { $size } sınırında kesildi; kesilen kısım aranmaz. | Review: PO |
+| `hv-gfind-filtered` | { $shown } of { $rows } rows match | { $rows } satırdan { $shown } tanesi eşleşiyor | Review: PO |
+| `hv-gfind-null-tip` | Searches what the grid shows, row by row from the focused cell. NULL never matches. | Tablonun gösterdiği değerlerde, odaktaki hücreden başlayarak arar. NULL hiçbir zaman eşleşmez. | Review: PO |
+| `hv-gfind-close` | Close find | Bulmayı kapat | Review: PO |
+| `hv-goto-title` | Go to row | Satıra git | Review: PO |
+| `hv-goto-placeholder` | row or row:column | satır ya da satır:sütun | Review: PO |
+| `hv-goto-hint` | A row number, then an optional column by name or position: 1500:city or 1500:3 | Satır numarası, ardından isteğe bağlı sütun adı ya da sırası: 1500:city veya 1500:3 | Review: PO |
+| `hv-goto-target` | Row { $row }, column { $col } | { $row }. satır, { $col } sütunu | Review: PO |
+| `hv-goto-target-row` | Row { $row } | { $row }. satır | Review: PO |
+| `hv-goto-past-end` | There's no row { $row }: the result has { $total } rows. | { $row }. satır yok: sonuçta { $total } satır var. | Review: PO |
+| `hv-goto-unknown-col` | No column is named { $name }. | { $name } adında bir sütun yok. | Review: PO |
+| `hv-goto-hidden-col` | Column { $name } is hidden. | { $name } sütunu gizli. | Review: PO |
+| `hv-goto-show-col` | Show it and go | Gösterip git | Review: PO |
+| `hv-goto-fetch` | Row { $row } isn't fetched yet. Fetching { $more } more rows takes a while, and the result's memory limit still applies. | { $row }. satır henüz getirilmedi. { $more } satır daha getirmek zaman alır; sonucun bellek sınırı yine geçerlidir. | Review: PO |
+| `hv-goto-fetch-ok` | Fetch and go | Getir ve git | Review: PO |
+| `hv-goto-cancel` | Cancel | Vazgeç | Review: PO |
+| `hv-goto-key-go` | Go | Git | Review: PO |
+| `hv-goto-key-close` | Close | Kapat | Review: PO |
+| `hv-view-table` | Table | Tablo | Review: PO |
+| `hv-view-transposed` | Transposed | Devrik | Review: PO |
+| `hv-view-text` | Text | Metin | Review: PO |
+| `hv-view-label` | View | Görünüm | Review: PO |
+| `hv-view-transposed-off` | Transposed shows up to { $max } rows; this result has { $rows }. | Devrik görünüm en çok { $max } satır gösterir; bu sonuçta { $rows } satır var. | Review: PO |
+| `hv-transposed-col` | Column | Sütun | Review: PO |
+| `hv-record` | Record | Kayıt | Review: PO |
+| `hv-record-tip` | Show the focused row as a record | Odaktaki satırı kayıt olarak göster | Review: PO |
+| `hv-record-pos` | Row { $i } of { $n } | Satır { $i }/{ $n } | Review: PO |
+| `hv-record-prev` | Previous row | Önceki satır | Review: PO |
+| `hv-record-next` | Next row | Sonraki satır | Review: PO |
+| `hv-record-show-more` | Show more | Devamını göster | Review: PO |
+| `hv-record-dup-tip` | The result has { $n } columns named { $name }; this is number { $i }. | Sonuçta { $name } adında { $n } sütun var; bu { $i }. sütun. | Review: PO |
+| `hv-text-big-title` | Show { $rows } rows as text? | { $rows } satır metin olarak gösterilsin mi? | Review: PO |
+| `hv-text-big-body` | Building the text view for this many rows takes a while and uses about { $size } of memory. | Bu kadar satır için metin görünümünü oluşturmak zaman alır ve yaklaşık { $size } bellek kullanır. | Review: PO |
+| `hv-text-big-ok` | Show as text | Metin olarak göster | Review: PO |
+| `hv-text-big-back` | Back to the table | Tabloya dön | Review: PO |
+| `hv-vv-sub` | { $type } · row { $row } | { $type } · { $row }. satır | Review: PO |
+| `hv-vv-raw` | Raw | Ham | Review: PO |
+| `hv-vv-pretty` | Pretty | Biçimli | Review: PO |
+| `hv-vv-hex` | Hex | Onaltılık | Review: PO |
+| `hv-vv-pretty-tip` | Display only: Copy raw value copies the server's text unchanged. | Yalnızca görünüm: Ham değeri kopyala, sunucunun metnini değiştirmeden kopyalar. | Review: PO |
+| `hv-vv-chars` | { $size } · { $n } characters (one: { $size } · { $n } character) | { $size } · { $n } karakter | Review: PO |
+| `hv-vv-bytes` | { $n } bytes (one: { $n } byte) | { $n } bayt | Review: PO |
+| `hv-vv-truncated` | Showing the first { $shown } of { $size }. | Değerin ilk { $shown } kısmı gösteriliyor (toplam { $size }). | Review: PO |
+| `hv-vv-rerun` | Re-run with a { $limit } value limit | { $limit } değer sınırıyla yeniden çalıştır | Review: PO |
+| `hv-vv-rerun-tip` | Runs this statement again with a larger limit for every value. It goes through the same checks as Run. | Bu ifadeyi her değer için daha büyük bir sınırla yeniden çalıştırır. Çalıştır ile aynı denetimlerden geçer. | Review: PO |
+| `hv-vv-copy` | Copy raw value | Ham değeri kopyala | Review: PO |
+| `hv-vv-not-json` | Not valid JSON, so Pretty is off and the value shows as the server sent it. | Geçerli JSON değil; Biçimli kapalı, değer sunucunun gönderdiği gibi gösteriliyor. | Review: PO |
+| `hv-gmenu-copy` | Copy | Kopyala | Review: PO |
+| `hv-gmenu-copy-headers` | Copy with headers | Başlıklarla kopyala | Review: PO |
+| `hv-gmenu-copy-rows` | Copy rows | Satırları kopyala | Review: PO |
+| `hv-gmenu-copy-name` | Copy column name | Sütun adını kopyala | Review: PO |
+| `hv-gmenu-open-value` | Open value viewer | Değer görüntüleyiciyi aç | Review: PO |
+| `hv-gmenu-sort-asc` | Sort ascending | Artan sırala | Review: PO |
+| `hv-gmenu-sort-desc` | Sort descending | Azalan sırala | Review: PO |
+| `hv-gmenu-add-sort` | Add as sort level { $lvl } | { $lvl }. sıralama düzeyi olarak ekle | Review: PO |
+| `hv-gmenu-freeze` | Freeze up to here | Buraya kadar dondur | Review: PO |
+| `hv-gmenu-unfreeze` | Unfreeze columns | Sütunları çöz | Review: PO |
+| `hv-gmenu-hide` | Hide column | Sütunu gizle | Review: PO |
+| `hv-gmenu-show-all` | Show all columns | Tüm sütunları göster | Review: PO |
+| `hv-gmenu-autofit` | Fit width | Genişliği sığdır | Review: PO |
+| `hv-gmenu-raw` | Raw display | Ham görünüm | Review: PO |
+| `hv-gmenu-raw-hint` | this column | bu sütun | Review: PO |
+| `hv-gmenu-goto` | Go to row… | Satıra git… | Review: PO |
+| `hv-gmenu-record` | Show as record | Kayıt olarak göster | Review: PO |
+| `hv-gmenu-why-one-cell` | Select one cell | Tek hücre seçin | Review: PO |
+| `hv-gmenu-why-not-sorted` | Not sorted | Sıralı değil | Review: PO |
+| `hv-gmenu-why-no-hidden` | None hidden | Gizli sütun yok | Review: PO |
+| `hv-gmenu-why-ranges` | Ranges don't line up | Aralıklar hizalı değil | Review: PO |
+| `hv-gmenu-why-last` | Last shown column | Görünen son sütun | Review: PO |
+| `hv-console-waiting-l1` | Waiting for a connection | Bağlantı bekleniyor | Review: PO |
+| `hv-console-waiting-l2` | { $inUse } of { $max } in use | kullanımda: { $inUse }/{ $max } | Review: PO |
+| `hv-settings-nav-editor` | Editor | Düzenleyici | Review: PO |
+| `hv-settings-nav-execution` | Execution | Çalıştırma | Review: PO |
+| `hv-settings-nav-results` | Results | Sonuçlar | Review: PO |
+| `hv-settings-nav-history` | History | Geçmiş | Review: PO |
+| `hv-settings-section-editor` | EDITOR | DÜZENLEYİCİ | Review: PO |
+| `hv-settings-section-execution` | EXECUTION | ÇALIŞTIRMA | Review: PO |
+| `hv-settings-section-results` | RESULTS | SONUÇLAR | Review: PO |
+| `hv-settings-section-history` | HISTORY | GEÇMİŞ | Review: PO |
+| `hv-settings-on` | On | Açık | Review: PO |
+| `hv-settings-off` | Off | Kapalı | Review: PO |
+| `hv-settings-tab-size` | Tab size | Sekme genişliği | Review: PO |
+| `hv-settings-insert-spaces` | Indent with spaces | Boşlukla girintile | Review: PO |
+| `hv-settings-copy-line` | Copy the line when nothing is selected | Seçim yokken satırı kopyala | Review: PO |
+| `hv-settings-caret-blink` | Blinking caret | Yanıp sönen imleç | Review: PO |
+| `hv-settings-confirm-unsafe-where` | Confirm UPDATE or DELETE without WHERE off production | Üretim dışında WHERE içermeyen UPDATE ya da DELETE için onay iste | Review: PO |
+| `hv-settings-confirm-unsafe-where-note` | Production always asks, with the table's name typed. | Üretim her zaman sorar ve tablonun adını yazdırır. | Review: PO |
+| `hv-settings-error-policy` | Ask what to do when a statement fails | Bir ifade başarısız olunca ne yapılacağını sor | Review: PO |
+| `hv-settings-error-policy-note` | Off: a run of several statements stops at the first failure. | Kapalı: birden çok ifadelik çalıştırma ilk hatada durur. | Review: PO |
+| `hv-settings-max-value` | Largest value kept per cell | Hücre başına saklanan en büyük değer | Review: PO |
+| `hv-settings-max-value-note` | From 64 KB to 64 MB. Larger values are cut; the value viewer can re-run with the largest limit. | 64 KB ile 64 MB arası. Daha büyük değerler kesilir; değer görüntüleyici en büyük sınırla yeniden çalıştırabilir. | Review: PO |
+| `hv-settings-max-value-clamped` | { $typed } is above the largest allowed, so it was set to { $max }. | { $typed } izin verilen en büyük değerin üstünde; { $max } yapıldı. | Review: PO |
+| `hv-settings-unit-kb` | KB | KB | Review: PO |
+| `hv-settings-unit-mb` | MB | MB | Review: PO |
+| `hv-settings-raw-display` | Show grid values raw | Tablo değerlerini ham göster | Review: PO |
+| `hv-settings-raw-display-note` | Numbers and dates as the server sent them, without regional formatting. Copy is always raw. | Sayılar ve tarihler bölgesel biçim olmadan, sunucunun gönderdiği gibi. Kopyalama her zaman hamdır. | Review: PO |
+| `hv-settings-history` | Record query history | Sorgu geçmişini kaydet | Review: PO |
+| `hv-settings-history-note` | Statements you run are kept for 90 days, with passwords and secrets removed. | Çalıştırdığınız ifadeler, parolalar ve gizli bilgiler çıkarılarak 90 gün saklanır. | Review: PO |
