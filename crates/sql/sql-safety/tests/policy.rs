@@ -5,7 +5,8 @@
 mod common;
 
 use common::{
-    explain_analyze_read, reason, report, request, request_in, set_of, single, stmt_full, unknown,
+    arb_parts, explain_analyze_read, reason, report, request, request_in, set_of, set_with, single,
+    stmt_full, unknown,
 };
 use proptest::prelude::*;
 use serde::Deserialize;
@@ -523,8 +524,8 @@ fn explain_analyze_of_a_read_is_allowed_for_humans_only() {
         decide(&explain_analyze_read(), Profile::ReadOnly, Actor::AiAgent).verdict,
         Verdict::Deny(_)
     ));
-    // An AI agent on read_only_plus_explain is refused too: the read-only profiles let only a
-    // human run EXPLAIN ANALYZE.
+    // An AI agent on read_only_plus_explain is allowed: that profile is the MCP path to
+    // `explain_query analyze=true` (`alg/13` :331; fix round 1, I4).
     assert!(matches!(
         decide(
             &explain_analyze_read(),
@@ -532,7 +533,7 @@ fn explain_analyze_of_a_read_is_allowed_for_humans_only() {
             Actor::AiAgent
         )
         .verdict,
-        Verdict::Deny(_)
+        Verdict::Allow
     ));
     // EXPLAIN ANALYZE of a write: the inner class decides, so read-only profiles deny.
     let ea_write = request(vec![stmt_full(
@@ -565,6 +566,7 @@ fn read_only_denies_set_unless_allowlisted() {
         "idle_in_transaction_session_timeout",
         "standard_conforming_strings",
     ] {
+        // T3-merge: pass value — `set_allowed(DialectId::Postgres, name, Some(value_for(name)))`.
         let allowed = set_allowed(DialectId::Postgres, name);
         for p in [Profile::ReadOnly, Profile::ReadOnlyPlusExplain] {
             let d = decide(&set_of(pg, &[name]), p, Actor::Human);
@@ -619,10 +621,16 @@ fn read_only_denies_set_unless_allowlisted() {
         )),
         V::D
     );
-    // No named target (RESET ALL, a non-literal name), or no dialect: denied.
+    // No named target (RESET ALL, a non-literal name), or no dialect: denied. With no target
+    // the refusal is a session change; every SetNotAllowlisted names its variable (M8).
     let d = decide(&set_of(pg, &[]), Profile::ReadOnly, Actor::Human);
     assert_eq!(v(&d), V::D);
-    assert!(codes(&d).contains(&ReasonCode::SetNotAllowlisted));
+    assert!(codes(&d).contains(&ReasonCode::SessionState));
+    assert!(
+        reasons(&d)
+            .iter()
+            .all(|r| r.code != ReasonCode::SetNotAllowlisted || r.arg.is_some())
+    );
     assert_eq!(
         v(&decide(
             &set_of(None, &["search_path"]),
@@ -752,6 +760,215 @@ fn automation_is_decided_like_a_human() {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Fix round 1
+
+/// I2: `VOLATILE_FN` is `Unknown` (`alg/13` S-04): denied outside Admin, confirmed there.
+#[test]
+fn volatile_functions_are_unknown() {
+    let r = request(vec![stmt_full(
+        StmtKind::Select,
+        EffectSet::READ,
+        RiskFlags::VOLATILE_FN,
+        &[],
+        Vec::new(),
+    )]);
+    for a in ACTORS {
+        assert_eq!(
+            PROFILES.map(|p| v(&decide(&r, p, a))),
+            [V::D, V::D, V::D, V::D, V::C],
+            "{a:?}"
+        );
+    }
+    let d = decide(&r, Profile::ReadOnly, Actor::AiAgent);
+    assert!(codes(&d).contains(&ReasonCode::VolatileFunction));
+    assert_eq!(d.class, CoarseClass::Unknown);
+    assert_eq!(gate_class(&r.items[0]), GateClass::Unknown);
+}
+
+/// I5 (H6): the kind is evidence: a READ-only report of a DELETE, DROP, GRANT, CALL, BEGIN,
+/// SET … is refused on read-only and judged as its kind elsewhere.
+#[test]
+fn kinds_are_policy_evidence() {
+    use StmtKind as K;
+    use V::{A, C, D};
+    for (k, want) in [
+        (K::Insert, [D, D, A, A, A]),
+        (K::Update, [D, D, A, A, A]),
+        (K::Delete, [D, D, A, A, A]),
+        (K::Merge, [D, D, A, A, A]),
+        (K::Drop, [D, D, D, C, A]),
+        (K::Truncate, [D, D, D, C, A]),
+        (K::CreateTable, [D, D, D, A, A]),
+        (K::Alter, [D, D, D, A, A]),
+        (K::Grant, [D, D, D, D, C]),
+        (K::Revoke, [D, D, D, D, C]),
+        (K::Call, [D, D, D, D, C]),
+        (K::Do, [D, D, D, D, C]),
+        (K::Execute, [D, D, D, D, C]),
+        (K::Begin, [D, D, D, D, C]),
+        (K::Commit, [D, D, D, D, C]),
+        (K::Rollback, [D, D, D, D, C]),
+        (K::Savepoint, [D, D, D, D, C]),
+        (K::Lock, [D, D, A, A, A]),
+        (K::Use, [D, D, D, D, C]),
+        (K::Listen, [D, D, D, D, C]),
+        (K::Prepare, [D, D, D, D, C]),
+        (K::Notify, [D, D, D, D, C]),
+        (K::Set, [D, D, D, D, C]),
+        (K::Explain { analyze: true }, [D, A, A, A, A]),
+        (K::Select, [A, A, A, A, A]),
+        (K::Copy, [A, A, A, A, A]),
+        (K::Pragma, [A, A, A, A, A]),
+    ] {
+        let r = request(vec![stmt_full(
+            k,
+            EffectSet::READ,
+            RiskFlags::empty(),
+            &[],
+            Vec::new(),
+        )]);
+        assert_eq!(human(&r), want, "{k:?}");
+    }
+    // A SET without its SESSION_STATE bit still goes through the harmless list: the refused
+    // target is named.
+    for name in ["role", "search_path"] {
+        let mut set = set_of(Some(DialectId::Postgres), &[name]);
+        set.items[0].effects = EffectSet::READ;
+        let d = decide(&set, Profile::ReadOnly, Actor::Human);
+        assert_eq!(v(&d), V::D, "{name}");
+        if name == "role" {
+            assert!(reasons(&d).iter().any(
+                |r| r.code == ReasonCode::SetNotAllowlisted && r.arg.as_deref() == Some("role")
+            ));
+        }
+    }
+}
+
+/// I3: a SET is never harmless outside the read-only profiles or for an AI agent; there it is
+/// `alg/13`'s Session row (the real list is Task 3's; the harmless path itself is a unit test
+/// in `policy.rs` with a fake list).
+#[test]
+fn a_set_off_the_read_only_profiles_is_the_session_row() {
+    let r = set_of(Some(DialectId::Postgres), &["search_path"]);
+    for a in ACTORS {
+        assert_eq!(v(&decide(&r, Profile::ReadWriteDml, a)), V::D, "{a:?}");
+        assert_eq!(v(&decide(&r, Profile::Ddl, a)), V::D, "{a:?}");
+        assert_eq!(v(&decide(&r, Profile::Admin, a)), V::C, "{a:?}");
+    }
+    for a in [Actor::AiAgent, Actor::Automation] {
+        for p in [Profile::ReadOnly, Profile::ReadOnlyPlusExplain] {
+            assert_eq!(v(&decide(&r, p, a)), V::D, "{p:?} {a:?}");
+        }
+    }
+}
+
+/// T3-merge (P-M3b-T3-1): `SET search_path` is harmless only when `pg_catalog` is absent or
+/// first. Ignored until Task 3's `set_allowed(d, name, value)` lands; the controller enables
+/// it at the merge.
+#[test]
+#[ignore = "T3-merge: needs Task 3's set_allowed(d, name, value) and its PG list"]
+fn search_path_value_reaches_the_list() {
+    let pg = Some(DialectId::Postgres);
+    let ro = |value| {
+        decide(
+            &set_with(pg, &[("search_path", value)]),
+            Profile::ReadOnly,
+            Actor::Human,
+        )
+    };
+    assert!(ro(Some("public")).allows());
+    assert!(ro(Some("pg_catalog, public")).allows());
+    assert!(!ro(Some("evil, pg_catalog")).allows());
+    assert!(!ro(None).allows());
+}
+
+/// M2: a GRANT's PRIVILEGE bit confirms under Admin; a role switch denies everywhere, and the
+/// two reasons are distinct codes, so a GRANT's decision reasons fed back stay confirmable.
+#[test]
+fn grant_and_role_switch_are_distinct() {
+    let grant = request(vec![stmt_full(
+        StmtKind::Grant,
+        EffectSet::PRIVILEGE,
+        RiskFlags::empty(),
+        &[],
+        Vec::new(),
+    )]);
+    let d = decide(&grant, Profile::Admin, Actor::Human);
+    assert_eq!(v(&d), V::C);
+    assert_eq!(codes(&d), [ReasonCode::PrivilegeGrant]);
+    // Its own reasons back in a report: still Confirm.
+    let again = request(vec![stmt_full(
+        StmtKind::Grant,
+        EffectSet::PRIVILEGE,
+        RiskFlags::empty(),
+        &[],
+        reasons(&d).to_vec(),
+    )]);
+    assert_eq!(v(&decide(&again, Profile::Admin, Actor::Human)), V::C);
+    let role = request(vec![stmt_full(
+        StmtKind::Set,
+        EffectSet::SESSION_STATE,
+        RiskFlags::empty(),
+        &[],
+        vec![reason(ReasonCode::PrivilegeChange, Some("role"))],
+    )]);
+    for p in PROFILES {
+        assert_eq!(v(&decide(&role, p, Actor::Human)), V::D, "{p:?}");
+    }
+}
+
+/// M3 (H5): a bare `Destructive` reason is destructive-DDL evidence.
+#[test]
+fn a_bare_destructive_reason_counts() {
+    let r = request(vec![stmt_full(
+        StmtKind::Other,
+        EffectSet::READ,
+        RiskFlags::empty(),
+        &[],
+        vec![reason(ReasonCode::Destructive, None)],
+    )]);
+    assert_eq!(human(&r), [V::D, V::D, V::D, V::C, V::A]);
+    assert_eq!(gate_class(&r.items[0]), GateClass::DdlDestructive);
+}
+
+/// M1: `Decision.class` follows reason evidence.
+#[test]
+fn the_decision_class_follows_reason_evidence() {
+    for (code, class) in [
+        (ReasonCode::ExternalFile, CoarseClass::Admin),
+        (ReasonCode::ProcessExec, CoarseClass::Admin),
+        (ReasonCode::WriteData, CoarseClass::Write),
+        (ReasonCode::LockingClause, CoarseClass::Write),
+        (ReasonCode::SchemaChange, CoarseClass::Ddl),
+        (ReasonCode::TxnControl, CoarseClass::Session),
+        (ReasonCode::FnUnknown, CoarseClass::Unknown),
+    ] {
+        let r = request(vec![stmt_full(
+            StmtKind::Select,
+            EffectSet::READ,
+            RiskFlags::empty(),
+            &[],
+            vec![reason(code, Some("x"))],
+        )]);
+        let d = decide(&r, Profile::ReadOnly, Actor::Human);
+        assert_eq!(v(&d), V::D, "{code:?}");
+        assert_eq!(d.class, class, "{code:?}");
+    }
+}
+
+/// M5 (H7): an empty statement among reads makes the request Unknown, its effects included.
+#[test]
+fn an_empty_statement_is_unknown_in_the_request() {
+    let r = request(vec![
+        report(EffectSet::READ, &[]),
+        report(EffectSet::empty(), &[]),
+    ]);
+    assert_eq!(r.request_class, CoarseClass::Unknown);
+    assert!(r.request_effects.contains(EffectSet::UNKNOWN));
+    assert_eq!(human(&r), [V::D, V::D, V::D, V::D, V::C]);
+}
+
 fn rank(x: V) -> u8 {
     match x {
         V::A => 0,
@@ -768,44 +985,57 @@ fn arb_actor() -> impl Strategy<Value = Actor> {
     prop::sample::select(ACTORS.to_vec())
 }
 
-fn arb_kinds() -> impl Strategy<Value = Vec<DestructiveKind>> {
-    prop::collection::vec(prop::sample::select(DestructiveKind::ALL.to_vec()), 0..3)
-}
-
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(20_000))]
 
-    /// More effects, flags or destructive reasons never make a decision more permissive.
+    /// Fix round 1, I6: adding a bit, flag, reason or destructive kind to a statement never
+    /// loosens a decision or lowers its class, in any profile, for any actor.
     #[test]
-    fn decide_is_monotone(
-        a in any::<u32>(), b in any::<u32>(), fa in any::<u16>(), fb in any::<u16>(),
-        ka in arb_kinds(), kb in arb_kinds(), p in arb_profile(), actor in arb_actor(),
-    ) {
-        let (ea, eb) = (EffectSet::from_bits_retain(a), EffectSet::from_bits_retain(b));
-        let (xa, xb) = (RiskFlags::from_bits_retain(fa), RiskFlags::from_bits_retain(fb));
-        let base = request(vec![stmt_full(StmtKind::Other, ea, xa, &ka, Vec::new())]);
-        let mut kk = ka.clone();
-        kk.extend(kb.iter().copied());
-        let more = request(vec![stmt_full(StmtKind::Other, ea | eb, xa | xb, &kk, Vec::new())]);
+    fn decide_is_monotone(a in arb_parts(), b in arb_parts(), p in arb_profile(), actor in arb_actor()) {
+        // From a non-empty effect set: the empty set is `unknown` because nothing was proved.
+        let a = common::non_empty(a);
+        let base = request(vec![a.stmt()]);
+        let more = request(vec![a.grown(&b).stmt()]);
         let (d0, d1) = (decide(&base, p, actor), decide(&more, p, actor));
-        prop_assert!(rank(v(&d1)) >= rank(v(&d0)), "{:?} -> {:?}", d0, d1);
-        prop_assert!(d1.class >= d0.class);
+        prop_assert!(rank(v(&d1)) >= rank(v(&d0)), "{a:?} + {b:?}: {d0:?} -> {d1:?}");
+        prop_assert!(d1.class >= d0.class, "{a:?} + {b:?}");
     }
 
-    /// Nothing but a non-empty READ-only statement (or EXPLAIN ANALYZE of one) is allowed on
-    /// read_only, and `Unknown` is never allowed anywhere.
+    /// The strictest statement wins, in either order, and merging never lowers a class.
     #[test]
-    fn read_only_allows_only_reads(e in any::<u32>(), f in any::<u16>(), k in arb_kinds(), actor in arb_actor()) {
-        let e = EffectSet::from_bits_retain(e);
-        let r = request(vec![stmt_full(StmtKind::Other, e, RiskFlags::from_bits_retain(f), &k, Vec::new())]);
-        let d = decide(&r, Profile::ReadOnly, actor);
-        if v(&d) == V::A {
-            prop_assert_eq!(e, EffectSet::READ);
-            prop_assert!(k.is_empty());
+    fn merge_takes_the_strictest(a in arb_parts(), b in arb_parts(), p in arb_profile(), actor in arb_actor()) {
+        let (s, t) = (a.stmt(), b.stmt());
+        let one = decide(&request(vec![s.clone()]), p, actor);
+        let two = decide(&request(vec![t.clone()]), p, actor);
+        let ab = decide(&request(vec![s.clone(), t.clone()]), p, actor);
+        let ba = decide(&request(vec![t.clone(), s.clone()]), p, actor);
+        let strictest = rank(v(&one)).max(rank(v(&two)));
+        prop_assert_eq!(rank(v(&ab)), strictest, "{:?} ; {:?}", a, b);
+        prop_assert_eq!(rank(v(&ba)), strictest, "{:?} ; {:?}", b, a);
+        prop_assert!(ab.class >= one.class.max(two.class));
+        let (c, e, _) = sql_safety::report::merge(&[s.clone(), t.clone()]);
+        prop_assert_eq!(c, sql_safety::report::merge(&[s]).0.max(sql_safety::report::merge(&[t]).0));
+        prop_assert!(e.contains(a.effects & EffectSet::all()));
+    }
+
+    /// Read-only allows nothing but reads; `Unknown` (bits, class field, or a doubt) is never
+    /// allowed anywhere.
+    #[test]
+    fn read_only_allows_only_reads(p in arb_parts(), actor in arb_actor()) {
+        let s = p.stmt();
+        let r = request(vec![s.clone()]);
+        for prof in [Profile::ReadOnly, Profile::ReadOnlyPlusExplain] {
+            let d = decide(&r, prof, actor);
+            if d.allows() {
+                prop_assert_eq!(s.effects, EffectSet::READ, "{:?} {:?}", p, prof);
+                prop_assert!(s.destructive.is_empty());
+                prop_assert!(s.class == CoarseClass::Read);
+                prop_assert!(gate_class(&s) == GateClass::Read);
+            }
         }
-        if class_of(e) == CoarseClass::Unknown {
-            for p in PROFILES {
-                prop_assert_ne!(v(&decide(&r, p, actor)), V::A);
+        if class_of(s.effects) == CoarseClass::Unknown || s.class == CoarseClass::Unknown {
+            for prof in PROFILES {
+                prop_assert!(!decide(&r, prof, actor).allows(), "{p:?} {prof:?}");
             }
         }
     }

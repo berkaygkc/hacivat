@@ -67,11 +67,20 @@ pub enum ReasonCode {
     EffectsUnknown,
     /// The statement holds a destructive pattern (`DestructiveKind`; the report lists which).
     Destructive,
+    // ## m3b-t04-safety (fix round 1): M2 splits the PRIVILEGE bit's reason from
+    // `PrivilegeChange` (a role or authorization switch, denied in every profile); I2 names the
+    // volatile-function flag.
+    /// The statement grants or revokes privileges or roles (the `PRIVILEGE` bit: `GRANT`,
+    /// `REVOKE`, `CREATE ROLE`, …). Confirmed under `Admin`, unlike `PrivilegeChange`.
+    PrivilegeGrant,
+    /// The statement calls a volatile function that is not on an allowlist
+    /// (`RiskFlags::VOLATILE_FN`; `alg/13` S-04: Unknown).
+    VolatileFunction,
 }
 
 impl ReasonCode {
     /// Every code, in declaration order.
-    pub const ALL: [ReasonCode; 46] = [
+    pub const ALL: [ReasonCode; 48] = [
         ReasonCode::NotImplemented,
         ReasonCode::LexError,
         ReasonCode::ClientCommand,
@@ -118,6 +127,8 @@ impl ReasonCode {
         ReasonCode::Notify,
         ReasonCode::EffectsUnknown,
         ReasonCode::Destructive,
+        ReasonCode::PrivilegeGrant,
+        ReasonCode::VolatileFunction,
     ];
 
     /// The Fluent message id, a literal per arm (P24).
@@ -169,6 +180,8 @@ impl ReasonCode {
             ReasonCode::Notify => "safety-reason-notify",
             ReasonCode::EffectsUnknown => "safety-reason-effects-unknown",
             ReasonCode::Destructive => "safety-reason-destructive",
+            ReasonCode::PrivilegeGrant => "safety-reason-privilege-grant",
+            ReasonCode::VolatileFunction => "safety-reason-volatile-function",
         }
     }
 }
@@ -245,6 +258,8 @@ mod tests {
             ReasonCode::Notify => 43,
             ReasonCode::EffectsUnknown => 44,
             ReasonCode::Destructive => 45,
+            ReasonCode::PrivilegeGrant => 46,
+            ReasonCode::VolatileFunction => 47,
         }
     }
 

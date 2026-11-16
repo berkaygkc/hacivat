@@ -19,8 +19,8 @@ fn ctx_pg() -> ClassifyCtx {
     )
 }
 
-// ## m3b-t04-safety (named exception): Task 4 adds nine policy reasons (46 codes).
-fn all_reason_codes() -> [ReasonCode; 46] {
+// ## m3b-t04-safety (named exception): Task 4 adds eleven policy reasons (48 codes).
+fn all_reason_codes() -> [ReasonCode; 48] {
     ReasonCode::ALL
 }
 

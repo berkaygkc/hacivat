@@ -709,7 +709,9 @@ safety-reason-hint-set-var = An optimizer hint changes a setting.
 # Reason: CALL of a routine.
 safety-reason-routine-call = The statement calls a routine whose effects can't be checked.
 # Reason: SET of a variable that isn't on the harmless list, on a read-only connection.
-safety-reason-set-not-allowlisted = On a read-only connection only harmless settings can be changed, and this isn't one of them.
+# Variables:
+#   $name (String) - the setting's name as written in the statement, e.g. "work_mem".
+safety-reason-set-not-allowlisted = On a read-only connection only harmless settings can be changed, and { $name } isn't one of them.
 # Reason: INSERT, UPDATE, DELETE, MERGE.
 safety-reason-write-data = The statement changes data.
 # Reason: CREATE, ALTER, DROP.
@@ -728,6 +730,10 @@ safety-reason-notify = The statement sends a notification to other sessions.
 safety-reason-effects-unknown = What the statement does can't be determined.
 # Reason: a destructive pattern (the patterns below say which).
 safety-reason-destructive = The statement can change or remove a lot of data.
+# Reason: GRANT, REVOKE, CREATE ROLE and the like.
+safety-reason-privilege-grant = The statement grants or revokes privileges or roles.
+# Reason: a volatile function no allowlist covers (its effects can't be checked).
+safety-reason-volatile-function = The statement calls a volatile function whose effects can't be checked.
 
 # Destructive pattern: UPDATE or DELETE without WHERE.
 # Variables:

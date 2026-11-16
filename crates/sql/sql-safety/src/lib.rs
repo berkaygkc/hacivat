@@ -38,8 +38,8 @@ pub use limits::Limits;
 pub use policy::{Actor, Decision, Profile, Verdict, decide};
 pub use reason::{Reason, ReasonCode};
 pub use report::{
-    BackendVersion, Confidence, ObjectKind, ObjectRef, SafetyReport, StmtKind, StmtReport,
-    TouchedObjects,
+    BackendVersion, Confidence, ObjectKind, ObjectRef, SafetyReport, SetTarget, StmtKind,
+    StmtReport, TouchedObjects,
 };
 
 // ## m3b-t01a-seams (fix round 1, I1): the SQLite read-pragma list (Task 10) that Task 18's

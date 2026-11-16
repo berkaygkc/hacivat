@@ -7,23 +7,27 @@
 //!
 //! - **Effects:** each effect bit selects a group of `data/profiles.toml` ([`GROUP_OF_BIT`]);
 //!   an empty set or an unnamed bit is the `unknown` group, which denies in every built-in
-//!   profile but `Admin` (Confirm, audit flag). A `SET` whose every target is on the
-//!   dialect's harmless list ([`crate::set_allowed`], P-M3b-6) is a read; any other `SET`
-//!   names `SetNotAllowlisted`.
-//! - **Classes:** a statement's `class` field, the request's class and request-level effect
-//!   bits the statements do not show each select their group too, so a producer cannot lower
-//!   a decision by leaving a field behind.
-//! - **Destructive patterns:** unsafe DML confirms under the writable profiles
-//!   (`write_unbounded`), destructive DDL under `ddl` (`ddl_destructive`).
-//! - **Flags and reasons:** doubt (lexing, splitting, parsing, limits), a lexical-mode change
-//!   and a privilege change deny in every profile; unresolved functions, operators and casts,
-//!   dynamic SQL and procedural code are `unknown`; an executable comment (D-058) or a
-//!   denylisted function denies on the read-only profiles and for an AI agent; a `SET_VAR`
-//!   hint denies unless its variable is harmless; `MAX_EXECUTION_TIME(0)` (or an unreadable
-//!   limit) denies. Every other reason is evidence of its effect group.
-//! - **Actors:** an AI agent is never allowed an executable comment, a denylisted function,
-//!   `EXPLAIN ANALYZE` on a read-only profile, or an UPDATE/DELETE without a bounding WHERE
-//!   (`alg/13` SAFE-04 step 5); `Automation` is decided like a human.
+//!   profile but `Admin` (Confirm, audit flag).
+//! - **Evidence beyond the effects** selects groups too, so a producer cannot lower a decision
+//!   by leaving a field behind: the statement's `class` field, its kind ([`kind_rule`]: a
+//!   `DELETE` is a write whatever its bits say), its risk flags ([`FLAG_RULES`]), its reasons
+//!   ([`reason_rule`]: a reason is evidence of its group), its destructive patterns, and the
+//!   request's class, effects and flags.
+//! - **Harmless `SET` (P-M3b-6):** on the read-only profiles, for a human, a `SET` whose every
+//!   target is on the dialect's harmless list ([`crate::set_allowed`]) is a read. Everywhere
+//!   else a `SET` is the `session` row (`alg/13`: Deny in `read_write_dml` and `ddl`, Confirm
+//!   in `admin`); a refused target is named by `SetNotAllowlisted`.
+//! - **Doubt** (lexing, splitting, parsing, limits), a lexical-mode change and a role switch
+//!   deny in every profile. An executable comment (D-058) or a denylisted function denies on
+//!   the read-only profiles and for an AI agent. A `SET_VAR` hint denies unless its variable
+//!   is harmless; `MAX_EXECUTION_TIME(0)` (or an unreadable limit) denies.
+//! - **Actors:** an AI agent is never allowed an executable comment, a denylisted function or
+//!   an UPDATE/DELETE without a bounding WHERE (`alg/13` SAFE-04 step 5); `Automation` is
+//!   decided like a human except that the harmless-`SET` relaxation is a human's only.
+//!
+//! [`crate::gate_class`] reads the same evidence through [`reason_gate_floor`],
+//! [`FLAG_RULES`] and [`kind_rule`], so the gate never calls `Read` what `decide` refuses on a
+//! read-only profile (fix round 1, I1).
 
 use std::sync::OnceLock;
 
@@ -33,8 +37,9 @@ use sql_text::TextRange;
 
 use crate::effects::{CoarseClass, EffectSet, RiskFlags, class_of, flags_are_named};
 use crate::functions::set_allowed;
+use crate::gate_class::GateClass;
 use crate::reason::{Reason, ReasonCode};
-use crate::report::{SafetyReport, StmtKind, StmtReport};
+use crate::report::{SafetyReport, SetTarget, StmtKind, StmtReport};
 
 /// What a connection allows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -75,9 +80,20 @@ pub struct Decision {
     pub class: CoarseClass,
 }
 
+impl Decision {
+    /// Whether the verdict is `Allow`.
+    pub fn allows(&self) -> bool {
+        self.verdict == Verdict::Allow
+    }
+}
+
 /// The verdict for `r` under `p` for `a` (`alg/13` SQL-SAFE-04; see the module docs).
 pub fn decide(r: &SafetyReport, p: Profile, a: Actor) -> Decision {
-    decide_with(r, p, a, &set_allowed)
+    // T3-merge: pass value. Task 3 changes `set_allowed` to take the value
+    // (`set_allowed(d, name, value)`, P-M3b-T3-1); this becomes `decide_with(r, p, a,
+    // &set_allowed)`. Until then the value is dropped, which only refuses more (the stub list
+    // allows nothing).
+    decide_with(r, p, a, &|d, name, _value| set_allowed(d, name))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -136,7 +152,7 @@ struct Table {
 
 /// An effect group: a table of `data/profiles.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Group {
+pub(crate) enum Group {
     Read,
     ExplainAnalyzeRead,
     Session,
@@ -149,6 +165,39 @@ enum Group {
     Admin,
     Routine,
     Unknown,
+}
+
+impl Group {
+    /// The gate class this group stands for (`Session` covers transaction control too; the
+    /// callers that know a statement is transaction control use `Tx`).
+    pub(crate) fn gate(self) -> GateClass {
+        match self {
+            Group::Read | Group::ExplainAnalyzeRead => GateClass::Read,
+            Group::Session => GateClass::Session,
+            Group::Lock => GateClass::Lock,
+            Group::Write | Group::WriteTemp => GateClass::Dml,
+            Group::WriteUnbounded => GateClass::DmlUnsafe,
+            Group::Ddl => GateClass::DdlOther,
+            Group::DdlDestructive => GateClass::DdlDestructive,
+            Group::Admin => GateClass::Admin,
+            Group::Routine => GateClass::Routine,
+            Group::Unknown => GateClass::Unknown,
+        }
+    }
+
+    /// The coarse class this group stands for (`Decision.class` evidence, M1).
+    fn coarse(self) -> CoarseClass {
+        match self {
+            Group::Read | Group::ExplainAnalyzeRead => CoarseClass::Read,
+            Group::Session => CoarseClass::Session,
+            Group::Lock | Group::Write | Group::WriteUnbounded | Group::WriteTemp => {
+                CoarseClass::Write
+            }
+            Group::Ddl | Group::DdlDestructive => CoarseClass::Ddl,
+            Group::Admin => CoarseClass::Admin,
+            Group::Routine | Group::Unknown => CoarseClass::Unknown,
+        }
+    }
 }
 
 impl Table {
@@ -183,6 +232,9 @@ fn table() -> Option<&'static Table> {
         })
         .as_ref()
 }
+
+// ---------------------------------------------------------------------------------------------
+// Evidence: effect bits, flags, kinds, reasons
 
 /// The group and the policy's reason for every named effect bit. `READ` names no reason.
 const GROUP_OF_BIT: [(EffectSet, Group, Option<ReasonCode>); 20] = [
@@ -231,7 +283,7 @@ const GROUP_OF_BIT: [(EffectSet, Group, Option<ReasonCode>); 20] = [
     (
         EffectSet::PRIVILEGE,
         Group::Admin,
-        Some(ReasonCode::PrivilegeChange),
+        Some(ReasonCode::PrivilegeGrant),
     ),
     (
         EffectSet::ADMIN,
@@ -276,8 +328,111 @@ const GROUP_OF_BIT: [(EffectSet, Group, Option<ReasonCode>); 20] = [
     ),
 ];
 
+/// What a risk flag means (fix round 1, I2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlagRule {
+    /// The `unknown` group (`DYNAMIC_SQL`; `VOLATILE_FN`, `alg/13` S-04).
+    Unknown(ReasonCode),
+    /// Deny in every profile (`LEX_MODE_CHANGE`, `alg/13` SAFE-04 step 3).
+    DenyAlways(ReasonCode),
+    /// Deny on the read-only profiles and for an AI agent (`EXEC_COMMENT`, D-058).
+    DenyReadOnlyOrAi(ReasonCode),
+    /// The `EXPLAIN ANALYZE` rule over the statement's (inner) effects.
+    ExplainAnalyze,
+}
+
+/// Every named risk flag with its policy rule and its gate-class floor (a coverage test checks
+/// the table against `RiskFlags::all()`, so a new flag cannot be ignored silently).
+///
+/// `VOLATILE_FN` is set by the producers only for a volatile function no allowlist covers (a
+/// user function, or a builtin without a `reviewed` allow row; Task 3's volatile-but-pure hand
+/// rows and `ClassifyCtx.fn_allowlist` entries never set it). `EXEC_COMMENT` is `Unknown` for
+/// the gate: the executable views are unioned into the effects (`alg/13` SAFE-02 step 4), but
+/// a production console confirms before running hidden code.
+pub(crate) const FLAG_RULES: [(RiskFlags, FlagRule, GateClass); 5] = [
+    (
+        RiskFlags::EXEC_COMMENT,
+        FlagRule::DenyReadOnlyOrAi(ReasonCode::ExecutableComment),
+        GateClass::Unknown,
+    ),
+    (
+        RiskFlags::DYNAMIC_SQL,
+        FlagRule::Unknown(ReasonCode::DynamicSql),
+        GateClass::Unknown,
+    ),
+    (
+        RiskFlags::LEX_MODE_CHANGE,
+        FlagRule::DenyAlways(ReasonCode::LexModeChange),
+        GateClass::Unknown,
+    ),
+    (
+        RiskFlags::EXPLAIN_ANALYZE,
+        FlagRule::ExplainAnalyze,
+        GateClass::Read,
+    ),
+    (
+        RiskFlags::VOLATILE_FN,
+        FlagRule::Unknown(ReasonCode::VolatileFunction),
+        GateClass::Unknown,
+    ),
+];
+
+/// What a statement kind says about the statement, whatever its effect bits (fix round 1, I5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KindRule {
+    /// The effects decide (`SELECT`, `VALUES`, `TABLE`, `SHOW`, `COPY`, `PRAGMA`, `Other`,
+    /// `EXPLAIN` without `ANALYZE`).
+    Effects,
+    /// At least this group and gate class, named by this reason.
+    Floor(Group, GateClass, ReasonCode),
+    /// `SET`: the `session` group through the harmless list.
+    Set,
+    /// `EXPLAIN ANALYZE`: the class of its inner statement (its effects), or `Unknown`.
+    ExplainAnalyze,
+}
+
+/// The minimum a statement kind implies (the controller's floors for round 1, extended to the
+/// plan's remaining unambiguous kinds; an exhaustive match, so a new kind must be placed).
+pub(crate) fn kind_rule(k: StmtKind) -> KindRule {
+    use GateClass as G;
+    use ReasonCode as R;
+    use StmtKind as K;
+    match k {
+        K::Select
+        | K::Values
+        | K::Table
+        | K::Show
+        | K::Copy
+        | K::Pragma
+        | K::Other
+        | K::Explain { analyze: false } => KindRule::Effects,
+        K::Explain { analyze: true } => KindRule::ExplainAnalyze,
+        K::Set => KindRule::Set,
+        K::Insert | K::Update | K::Delete | K::Merge => {
+            KindRule::Floor(Group::Write, G::Dml, R::WriteData)
+        }
+        K::Drop | K::Truncate => {
+            KindRule::Floor(Group::DdlDestructive, G::DdlDestructive, R::Destructive)
+        }
+        K::CreateTable | K::CreateOther | K::Alter => {
+            KindRule::Floor(Group::Ddl, G::DdlOther, R::SchemaChange)
+        }
+        K::Grant | K::Revoke => KindRule::Floor(Group::Admin, G::Admin, R::PrivilegeGrant),
+        K::Call | K::Do => KindRule::Floor(Group::Routine, G::Routine, R::RoutineCall),
+        K::Execute => KindRule::Floor(Group::Unknown, G::Unknown, R::DynamicSql),
+        K::Begin | K::Commit | K::Rollback | K::Savepoint => {
+            KindRule::Floor(Group::Session, G::Tx, R::TxnControl)
+        }
+        K::Lock => KindRule::Floor(Group::Lock, G::Lock, R::TableLock),
+        K::Use | K::Listen => KindRule::Floor(Group::Session, G::Session, R::SessionState),
+        K::Prepare => KindRule::Floor(Group::Session, G::Session, R::PreparedStatement),
+        K::Notify => KindRule::Floor(Group::Session, G::Session, R::Notify),
+    }
+}
+
 /// What a reason code in a statement means to the policy.
-enum ReasonRule {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReasonRule {
     /// Deny in every profile, for every actor.
     DenyAlways,
     /// Deny on the read-only profiles and for an AI agent.
@@ -292,12 +447,15 @@ enum ReasonRule {
     HintExecTime,
     /// The group of the statement's `EXPLAIN ANALYZE` (the flag's rule).
     ExplainAnalyze,
-    /// Nothing beyond the statement's effects (the destructive list is judged on its own).
-    None,
 }
 
 /// The policy's reading of `code`: an exhaustive match, so a new code must be placed.
-fn reason_rule(code: ReasonCode) -> ReasonRule {
+///
+/// `PrivilegeChange` is a role or authorization switch (`SET ROLE`, `SET SESSION
+/// AUTHORIZATION`), denied everywhere (`alg/13` SAFE-04 step 3); a `GRANT`'s `PRIVILEGE` bit
+/// names `PrivilegeGrant`, the `admin` group (fix round 1, M2). A bare `Destructive` reason is
+/// destructive DDL evidence (M3).
+pub(crate) fn reason_rule(code: ReasonCode) -> ReasonRule {
     use ReasonCode as R;
     match code {
         R::NotImplemented
@@ -321,7 +479,8 @@ fn reason_rule(code: ReasonCode) -> ReasonRule {
         | R::CastUnknown
         | R::DynamicSql
         | R::ProceduralCode
-        | R::EffectsUnknown => ReasonRule::Group(Group::Unknown),
+        | R::EffectsUnknown
+        | R::VolatileFunction => ReasonRule::Group(Group::Unknown),
         R::HintSetVar => ReasonRule::HintSetVar,
         R::HintExecTime => ReasonRule::HintExecTime,
         R::ExplainAnalyze => ReasonRule::ExplainAnalyze,
@@ -332,13 +491,42 @@ fn reason_rule(code: ReasonCode) -> ReasonRule {
         R::TxnControl | R::SessionState | R::PreparedStatement | R::Notify => {
             ReasonRule::Group(Group::Session)
         }
-        R::ExternalFile | R::ExternalNetwork | R::ProcessExec | R::AdminControl | R::ExternalIo => {
-            ReasonRule::Group(Group::Admin)
-        }
+        R::ExternalFile
+        | R::ExternalNetwork
+        | R::ProcessExec
+        | R::AdminControl
+        | R::ExternalIo
+        | R::PrivilegeGrant => ReasonRule::Group(Group::Admin),
         R::WriteTemp => ReasonRule::Group(Group::WriteTemp),
         R::SchemaChange => ReasonRule::Group(Group::Ddl),
         R::RoutineCall => ReasonRule::Group(Group::Routine),
-        R::Destructive => ReasonRule::None,
+        R::Destructive => ReasonRule::Group(Group::DdlDestructive),
+    }
+}
+
+/// Whether a `MAX_EXECUTION_TIME` hint's limit is a positive whole number of milliseconds.
+/// `decide` has no ceilings input, so a positive limit is accepted whatever its size (`alg/13`
+/// SAFE-04 step 3's ceiling is not in the plan; ADR 0005 `m3b-t04`, fix round 1, M6).
+fn hint_exec_time_ok(r: &Reason) -> bool {
+    r.arg
+        .as_deref()
+        .and_then(|n| n.trim().parse::<u64>().ok())
+        .is_some_and(|n| n > 0)
+}
+
+/// The least gate class a reason in a statement implies (fix round 1, I1). Doubt and every
+/// rule that denies regardless of the effects is `Unknown`, a role switch `Admin`, a reason of
+/// a group that group's class (transaction control `Tx`), a hint `Session`.
+pub(crate) fn reason_gate_floor(r: &Reason) -> GateClass {
+    match reason_rule(r.code) {
+        ReasonRule::DenyAlways if r.code == ReasonCode::PrivilegeChange => GateClass::Admin,
+        ReasonRule::DenyAlways | ReasonRule::DenyReadOnlyOrAi => GateClass::Unknown,
+        ReasonRule::DenyReadOnly | ReasonRule::HintSetVar => GateClass::Session,
+        ReasonRule::Group(_) if r.code == ReasonCode::TxnControl => GateClass::Tx,
+        ReasonRule::Group(g) => g.gate(),
+        ReasonRule::HintExecTime if hint_exec_time_ok(r) => GateClass::Read,
+        ReasonRule::HintExecTime => GateClass::Session,
+        ReasonRule::ExplainAnalyze => GateClass::Read,
     }
 }
 
@@ -358,6 +546,10 @@ fn group_of_class(c: CoarseClass) -> (Group, ReasonCode) {
 // ---------------------------------------------------------------------------------------------
 // The judgement
 
+/// The harmless-`SET` list `decide` consults: dialect, variable name, value (`None` when the
+/// statement sets none or the backend could not read it; fail-closed in the list).
+type Allowed<'a> = &'a dyn Fn(DialectId, &str, Option<&str>) -> bool;
+
 /// The decision being built: the strictest rule so far and the reasons for it.
 struct Judge<'a> {
     table: &'a Table,
@@ -366,6 +558,18 @@ struct Judge<'a> {
     deny: Vec<Reason>,
     confirm: Vec<Reason>,
     class: CoarseClass,
+    /// The coarse classes of the groups applied to the current statement.
+    applied: Vec<CoarseClass>,
+    /// The coarse classes of the groups applied to any statement.
+    all_applied: Vec<CoarseClass>,
+}
+
+fn at(code: ReasonCode, range: Option<TextRange>) -> Reason {
+    Reason {
+        code,
+        range,
+        arg: None,
+    }
 }
 
 impl Judge<'_> {
@@ -388,29 +592,52 @@ impl Judge<'_> {
         self.push(Rule::Deny, reason);
     }
 
-    fn group(&mut self, g: Group, reason: Reason) {
-        if g == Group::Unknown {
-            self.class = CoarseClass::Unknown;
+    /// The group of a class field (a statement's or the request's) unless a group of the same
+    /// coarse class was already applied: groups of one coarse class have the same row or a
+    /// stricter one (`write_unbounded`, `ddl_destructive`), so skipping only drops a duplicate
+    /// reason. Applied whatever the effects say: a `Session` field over `WRITE_DATA` still
+    /// takes the `session` row, which is stricter than `write` (fix round 1; found by
+    /// `decide_is_monotone`).
+    fn class_floor(&mut self, c: CoarseClass, range: Option<TextRange>, request: bool) {
+        let applied = if request {
+            &self.all_applied
+        } else {
+            &self.applied
+        };
+        if c == CoarseClass::Read || applied.contains(&c) {
+            return;
         }
+        let (g, code) = group_of_class(c);
+        self.group(g, at(code, range));
+    }
+
+    /// Records that a group of coarse class `c` was applied (or, for a harmless `SET`, that its
+    /// `Session` class was judged by the harmless list).
+    fn mark(&mut self, c: CoarseClass) {
+        for list in [&mut self.applied, &mut self.all_applied] {
+            if !list.contains(&c) {
+                list.push(c);
+            }
+        }
+    }
+
+    fn group(&mut self, g: Group, reason: Reason) {
+        self.class = self.class.max(g.coarse());
+        self.mark(g.coarse());
         let rule = self.table.row(g).rule(self.profile);
         self.push(rule, reason);
     }
 
     /// The groups of `effects`' bits; an empty set or an unnamed bit is `unknown`.
-    /// `session_reason` replaces the `SESSION_STATE` reason (a `SET` names its targets).
+    /// `session` replaces the `SESSION_STATE` reason (a `SET` names its refused targets).
     fn effects(
         &mut self,
         effects: EffectSet,
         range: Option<TextRange>,
         session: Option<&[Reason]>,
     ) {
-        let at = |code| Reason {
-            code,
-            range,
-            arg: None,
-        };
         if effects.is_empty() {
-            self.group(Group::Unknown, at(ReasonCode::EffectsUnknown));
+            self.group(Group::Unknown, at(ReasonCode::EffectsUnknown, range));
             return;
         }
         let mut named = EffectSet::empty();
@@ -425,51 +652,45 @@ impl Judge<'_> {
                         self.group(g, r.clone());
                     }
                 }
-                (_, _, Some(code)) => self.group(g, at(code)),
-                (_, _, None) => self.group(g, at(ReasonCode::EffectsUnknown)),
+                (_, _, Some(code)) => self.group(g, at(code, range)),
+                (_, _, None) => self.group(g, at(ReasonCode::EffectsUnknown, range)),
             }
         }
         if named.bits() != effects.bits() {
-            self.group(Group::Unknown, at(ReasonCode::EffectsUnknown));
+            self.group(Group::Unknown, at(ReasonCode::EffectsUnknown, range));
         }
     }
 
-    /// `EXPLAIN ANALYZE` over `effects` (the inner statement's).
+    /// `EXPLAIN ANALYZE` over `effects` (the inner statement's): the `explain_analyze_read`
+    /// row when the inner statement is a read; otherwise the inner effects decide (judged with
+    /// the statement), and an empty inner set is `unknown` there.
     fn explain_analyze(&mut self, effects: EffectSet, range: Option<TextRange>) {
-        let reason = Reason {
-            code: ReasonCode::ExplainAnalyze,
-            range,
-            arg: None,
-        };
-        if self.ai() && self.profile.is_read_only() {
-            self.deny(reason.clone());
-        }
         if class_of(effects) == CoarseClass::Read {
-            self.group(Group::ExplainAnalyzeRead, reason);
+            self.group(
+                Group::ExplainAnalyzeRead,
+                at(ReasonCode::ExplainAnalyze, range),
+            );
         }
-        // Otherwise the inner statement's effects decide (judged with the statement).
     }
 
     fn flags(&mut self, flags: RiskFlags, effects: EffectSet, range: Option<TextRange>) {
-        let at = |code| Reason {
-            code,
-            range,
-            arg: None,
-        };
         if !flags_are_named(flags) {
-            self.group(Group::Unknown, at(ReasonCode::EffectsUnknown));
+            self.group(Group::Unknown, at(ReasonCode::EffectsUnknown, range));
         }
-        if flags.contains(RiskFlags::DYNAMIC_SQL) {
-            self.group(Group::Unknown, at(ReasonCode::DynamicSql));
-        }
-        if flags.contains(RiskFlags::LEX_MODE_CHANGE) {
-            self.deny(at(ReasonCode::LexModeChange));
-        }
-        if flags.contains(RiskFlags::EXEC_COMMENT) && (self.profile.is_read_only() || self.ai()) {
-            self.deny(at(ReasonCode::ExecutableComment));
-        }
-        if flags.contains(RiskFlags::EXPLAIN_ANALYZE) {
-            self.explain_analyze(effects, range);
+        for (flag, rule, _) in FLAG_RULES {
+            if !flags.contains(flag) {
+                continue;
+            }
+            match rule {
+                FlagRule::Unknown(code) => self.group(Group::Unknown, at(code, range)),
+                FlagRule::DenyAlways(code) => self.deny(at(code, range)),
+                FlagRule::DenyReadOnlyOrAi(code) => {
+                    if self.profile.is_read_only() || self.ai() {
+                        self.deny(at(code, range));
+                    }
+                }
+                FlagRule::ExplainAnalyze => self.explain_analyze(effects, range),
+            }
         }
     }
 
@@ -478,8 +699,7 @@ impl Judge<'_> {
         r: &Reason,
         s: &StmtReport,
         dialect: Option<DialectId>,
-        allowed: &dyn Fn(DialectId, &str) -> bool,
-        harmless_set: bool,
+        allowed: Allowed<'_>,
     ) {
         match reason_rule(r.code) {
             ReasonRule::DenyAlways => self.deny(r.clone()),
@@ -493,12 +713,11 @@ impl Judge<'_> {
                     self.deny(r.clone());
                 }
             }
-            ReasonRule::Group(Group::Session)
-                if harmless_set && r.code == ReasonCode::SessionState => {}
             ReasonRule::Group(g) => self.group(g, r.clone()),
             ReasonRule::HintSetVar => {
+                // The hint's value is not carried: `None` (fail-closed in the list).
                 let ok = match (dialect, r.arg.as_deref()) {
-                    (Some(d), Some(var)) => allowed(d, var),
+                    (Some(d), Some(var)) => allowed(d, var, None),
                     _ => false,
                 };
                 if !ok {
@@ -506,71 +725,64 @@ impl Judge<'_> {
                 }
             }
             ReasonRule::HintExecTime => {
-                let ok = r
-                    .arg
-                    .as_deref()
-                    .and_then(|n| n.trim().parse::<u64>().ok())
-                    .is_some_and(|n| n > 0);
-                if !ok {
+                if !hint_exec_time_ok(r) {
                     self.deny(r.clone());
                 }
             }
             ReasonRule::ExplainAnalyze => self.explain_analyze(s.effects, r.range),
-            ReasonRule::None => {}
         }
     }
 
-    fn statement(
-        &mut self,
-        s: &StmtReport,
-        dialect: Option<DialectId>,
-        allowed: &dyn Fn(DialectId, &str) -> bool,
-    ) {
+    fn statement(&mut self, s: &StmtReport, dialect: Option<DialectId>, allowed: Allowed<'_>) {
         let range = Some(s.range);
-        let effects_class = class_of(s.effects);
-        self.class = self.class.max(s.class).max(effects_class);
-        // A class field more critical than the effects: that class's group.
-        if s.class > effects_class {
-            let (g, code) = group_of_class(s.class);
-            self.group(
-                g,
-                Reason {
-                    code,
-                    range,
-                    arg: None,
-                },
-            );
-        }
-        let harmless = harmless_set(s, dialect, allowed);
-        if harmless {
-            self.group(Group::Read, Reason::new(ReasonCode::SessionState));
-        } else if s.kind == StmtKind::Set {
-            let refused = set_refusals(s, dialect, allowed);
-            self.effects(s.effects, range, Some(&refused));
-        } else {
-            self.effects(s.effects, range, None);
+        self.applied.clear();
+        self.class = self.class.max(s.class).max(class_of(s.effects));
+        let harmless = self.profile.is_read_only()
+            && self.actor == Actor::Human
+            && harmless_set(s, dialect, allowed);
+        match kind_rule(s.kind) {
+            KindRule::Effects => self.effects(s.effects, range, None),
+            KindRule::Floor(g, _, code) => {
+                self.group(g, at(code, range));
+                self.effects(s.effects, range, None);
+            }
+            KindRule::ExplainAnalyze => {
+                self.explain_analyze(s.effects, range);
+                self.effects(s.effects, range, None);
+            }
+            KindRule::Set if harmless => {
+                self.class = self.class.max(CoarseClass::Session);
+                self.mark(CoarseClass::Session);
+                self.group(Group::Read, at(ReasonCode::SessionState, range));
+            }
+            KindRule::Set => {
+                let refused = set_refusals(s, dialect, allowed);
+                for r in &refused {
+                    self.group(Group::Session, r.clone());
+                }
+                self.effects(s.effects, range, Some(&refused));
+            }
         }
         self.flags(s.flags, s.effects, range);
         for r in &s.reasons {
-            self.reason(r, s, dialect, allowed, harmless);
+            if harmless && r.code == ReasonCode::SessionState {
+                continue;
+            }
+            self.reason(r, s, dialect, allowed);
         }
         for d in &s.destructive {
-            let reason = Reason {
-                code: ReasonCode::Destructive,
-                range: Some(d.range),
-                arg: None,
-            };
+            let reason = at(ReasonCode::Destructive, Some(d.range));
             if d.kind.is_unsafe_dml() {
-                self.class = self.class.max(CoarseClass::Write);
                 if self.ai() && d.kind.denied_for_ai() {
                     self.deny(reason.clone());
                 }
                 self.group(Group::WriteUnbounded, reason);
             } else {
-                self.class = self.class.max(CoarseClass::Ddl);
                 self.group(Group::DdlDestructive, reason);
             }
         }
+        // The class field, after the evidence that names its group more precisely.
+        self.class_floor(s.class, range, false);
     }
 
     fn finish(self) -> Decision {
@@ -588,64 +800,52 @@ impl Judge<'_> {
     }
 }
 
+/// Whether the harmless list accepts `t` on `dialect` (no dialect: never).
+fn target_allowed(t: &SetTarget, dialect: Option<DialectId>, allowed: Allowed<'_>) -> bool {
+    dialect.is_some_and(|d| allowed(d, &t.name, t.value.as_deref()))
+}
+
 /// A `SET` the dialect's harmless list covers: only `SESSION_STATE`, no flag, no destructive
-/// pattern, a known dialect, and at least one target, every reason naming a target
-/// (`SessionState` with the variable as its argument) that `allowed` accepts.
-fn harmless_set(
-    s: &StmtReport,
-    dialect: Option<DialectId>,
-    allowed: &dyn Fn(DialectId, &str) -> bool,
-) -> bool {
-    let Some(d) = dialect else {
-        return false;
-    };
+/// pattern, a class no higher than `Session`, a known dialect, at least one target in
+/// `set_targets` and every one accepted by `allowed` with its value, and no reason but
+/// `SessionState`. The caller applies it on the read-only profiles for a human only
+/// (P-M3b-6; fix round 1, I3).
+fn harmless_set(s: &StmtReport, dialect: Option<DialectId>, allowed: Allowed<'_>) -> bool {
     s.kind == StmtKind::Set
         && s.effects == EffectSet::SESSION_STATE
         && s.flags.is_empty()
         && s.destructive.is_empty()
         && s.class <= CoarseClass::Session
-        && !s.reasons.is_empty()
-        && s.reasons.iter().all(|r| {
-            r.code == ReasonCode::SessionState && r.arg.as_deref().is_some_and(|n| allowed(d, n))
-        })
+        && !s.set_targets.is_empty()
+        && s.set_targets
+            .iter()
+            .all(|t| target_allowed(t, dialect, allowed))
+        && s.reasons.iter().all(|r| r.code == ReasonCode::SessionState)
 }
 
-/// Why a `SET` is not harmless: `SetNotAllowlisted` for each target the list refuses (all of
-/// them when the dialect is unknown), or once without an argument when it names none.
-fn set_refusals(
-    s: &StmtReport,
-    dialect: Option<DialectId>,
-    allowed: &dyn Fn(DialectId, &str) -> bool,
-) -> Vec<Reason> {
+/// Why a `SET` is refused: `SetNotAllowlisted` naming each target the list refuses (all of
+/// them when the dialect is unknown); a `SET` that names no target (`RESET ALL`, a computed
+/// name) is `SessionState` without an argument, so every `SetNotAllowlisted` names its
+/// variable (fix round 1, M8).
+fn set_refusals(s: &StmtReport, dialect: Option<DialectId>, allowed: Allowed<'_>) -> Vec<Reason> {
     let mut out: Vec<Reason> = s
-        .reasons
+        .set_targets
         .iter()
-        .filter(|r| r.code == ReasonCode::SessionState)
-        .filter_map(|r| r.arg.as_ref().map(|n| (r, n)))
-        .filter(|(_, n)| !dialect.is_some_and(|d| allowed(d, n)))
-        .map(|(r, n)| Reason {
+        .filter(|t| !target_allowed(t, dialect, allowed))
+        .map(|t| Reason {
             code: ReasonCode::SetNotAllowlisted,
-            range: r.range.or(Some(s.range)),
-            arg: Some(n.clone()),
+            range: Some(s.range),
+            arg: Some(t.name.clone()),
         })
         .collect();
     if out.is_empty() {
-        out.push(Reason {
-            code: ReasonCode::SetNotAllowlisted,
-            range: Some(s.range),
-            arg: None,
-        });
+        out.push(at(ReasonCode::SessionState, Some(s.range)));
     }
     out
 }
 
 /// [`decide`] with the harmless-`SET` list injected (the unit tests use a fake one).
-fn decide_with(
-    r: &SafetyReport,
-    p: Profile,
-    a: Actor,
-    allowed: &dyn Fn(DialectId, &str) -> bool,
-) -> Decision {
+fn decide_with(r: &SafetyReport, p: Profile, a: Actor, allowed: Allowed<'_>) -> Decision {
     let refuse = |reasons: Vec<Reason>| Decision {
         verdict: Verdict::Deny(reasons),
         class: CoarseClass::Unknown,
@@ -670,6 +870,8 @@ fn decide_with(
         deny: Vec::new(),
         confirm: Vec::new(),
         class: CoarseClass::Read,
+        applied: Vec::new(),
+        all_applied: Vec::new(),
     };
     let mut shown = EffectSet::empty();
     for s in &r.items {
@@ -681,12 +883,12 @@ fn decide_with(
     if !extra.is_empty() {
         j.effects(extra, None, None);
     }
-    let request_class = r.request_class.max(class_of(r.request_effects));
-    if request_class > j.class {
-        let (g, code) = group_of_class(request_class);
-        j.group(g, Reason::new(code));
-    }
-    j.class = j.class.max(request_class);
+    j.class_floor(r.request_class, None, true);
+    j.class_floor(class_of(r.request_effects), None, true);
+    j.class = j
+        .class
+        .max(r.request_class)
+        .max(class_of(r.request_effects));
     j.flags(r.flags, r.request_effects, None);
     j.finish()
 }
@@ -738,7 +940,71 @@ mod tests {
         assert_eq!(union, EffectSet::all());
     }
 
+    /// Fix round 1, I2: a new risk flag must be placed in `FLAG_RULES`.
+    #[test]
+    fn every_named_flag_has_a_rule() {
+        let mut union = RiskFlags::empty();
+        for (flag, _, _) in FLAG_RULES {
+            assert_eq!(flag.bits().count_ones(), 1, "{flag:?}");
+            assert!(!union.intersects(flag), "{flag:?} twice");
+            union |= flag;
+        }
+        assert_eq!(union, RiskFlags::all());
+    }
+
+    /// A floor's gate class and its group agree (transaction control is the one `Tx`).
+    #[test]
+    fn kind_floors_agree_with_their_groups() {
+        use StmtKind as K;
+        for k in [
+            K::Insert,
+            K::Update,
+            K::Delete,
+            K::Merge,
+            K::Drop,
+            K::Truncate,
+            K::CreateTable,
+            K::CreateOther,
+            K::Alter,
+            K::Grant,
+            K::Revoke,
+            K::Call,
+            K::Do,
+            K::Execute,
+            K::Begin,
+            K::Commit,
+            K::Rollback,
+            K::Savepoint,
+            K::Lock,
+            K::Use,
+            K::Listen,
+            K::Prepare,
+            K::Notify,
+        ] {
+            let KindRule::Floor(g, gate, code) = kind_rule(k) else {
+                panic!("{k:?} has no floor");
+            };
+            if gate == GateClass::Tx {
+                assert_eq!(g, Group::Session, "{k:?}");
+            } else {
+                assert_eq!(g.gate(), gate, "{k:?}");
+            }
+            assert_eq!(
+                reason_gate_floor(&Reason::new(code)),
+                gate,
+                "{k:?}: its reason implies its floor"
+            );
+        }
+    }
+
     fn set_report(d: Option<DialectId>, names: &[&str]) -> SafetyReport {
+        let targets: Vec<(&str, Option<&str>)> = names.iter().map(|n| (*n, Some("x"))).collect();
+        set_report_with(d, &targets)
+    }
+
+    /// A `SET` of `targets` (name, value), one `SessionState` reason per target.
+    fn set_report_with(d: Option<DialectId>, targets: &[(&str, Option<&str>)]) -> SafetyReport {
+        let names: Vec<&str> = targets.iter().map(|(n, _)| *n).collect();
         let s = StmtReport {
             range: TextRange::default(),
             kind: StmtKind::Set,
@@ -756,6 +1022,13 @@ mod tests {
                 .collect(),
             destructive: Vec::new(),
             confidence: Confidence::Exact,
+            set_targets: targets
+                .iter()
+                .map(|(n, v)| SetTarget {
+                    name: Arc::from(*n),
+                    value: v.map(Arc::from),
+                })
+                .collect(),
         };
         let items = vec![s];
         let (request_class, request_effects, flags) = merge(&items);
@@ -774,30 +1047,90 @@ mod tests {
         }
     }
 
-    /// The harmless-SET path with a fake list (Task 3 fills the real one in parallel).
+    /// A fake list: PG `search_path` only, and only with a value whose `pg_catalog` (if any)
+    /// comes first (the shape of P-M3b-T3-1); no value is refused.
+    fn list(d: DialectId, n: &str, value: Option<&str>) -> bool {
+        let Some(v) = value else {
+            return false;
+        };
+        let first = v.split(',').next().unwrap_or_default().trim();
+        d == DialectId::Postgres
+            && n == "search_path"
+            && (!v.contains("pg_catalog") || first == "pg_catalog")
+    }
+
+    /// The SET's value reaches the list (P-M3b-T3-1 plumbing; fix round 1).
     #[test]
-    fn a_harmless_set_is_a_read_on_every_profile() {
-        let list = |d: DialectId, n: &str| d == DialectId::Postgres && n == "search_path";
+    fn the_set_value_reaches_the_list() {
         let pg = Some(DialectId::Postgres);
-        for p in [
-            Profile::ReadOnly,
-            Profile::ReadOnlyPlusExplain,
-            Profile::ReadWriteDml,
-            Profile::Ddl,
-            Profile::Admin,
-        ] {
-            for a in [Actor::Human, Actor::AiAgent, Actor::Automation] {
-                let d = decide_with(&set_report(pg, &["search_path"]), p, a, &list);
-                assert_eq!(d.verdict, Verdict::Allow, "{p:?} {a:?}");
-                assert_eq!(d.class, CoarseClass::Session);
+        let ro = |targets: &[(&str, Option<&str>)]| {
+            decide_with(
+                &set_report_with(pg, targets),
+                Profile::ReadOnly,
+                Actor::Human,
+                &list,
+            )
+        };
+        assert!(ro(&[("search_path", Some("public"))]).allows());
+        assert!(ro(&[("search_path", Some("pg_catalog, public"))]).allows());
+        let d = ro(&[("search_path", Some("evil, pg_catalog"))]);
+        assert!(!d.allows());
+        let Verdict::Deny(reasons) = d.verdict else {
+            panic!()
+        };
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.code == ReasonCode::SetNotAllowlisted
+                    && r.arg.as_deref() == Some("search_path"))
+        );
+        // No value (RESET, unreadable): fail-closed.
+        assert!(!ro(&[("search_path", None)]).allows());
+    }
+
+    /// The harmless-SET path with a fake list (Task 3 fills the real one in parallel): a read
+    /// on the read-only profiles for a human only (P-M3b-6; fix round 1, I3).
+    #[test]
+    fn a_harmless_set_is_a_read_on_read_only_for_a_human() {
+        let pg = Some(DialectId::Postgres);
+        let r = set_report(pg, &["search_path"]);
+        for p in [Profile::ReadOnly, Profile::ReadOnlyPlusExplain] {
+            let d = decide_with(&r, p, Actor::Human, &list);
+            assert_eq!(d.verdict, Verdict::Allow, "{p:?}");
+            assert_eq!(d.class, CoarseClass::Session);
+            for a in [Actor::AiAgent, Actor::Automation] {
+                assert!(
+                    matches!(decide_with(&r, p, a, &list).verdict, Verdict::Deny(_)),
+                    "{p:?} {a:?}"
+                );
             }
         }
-        // A target off the list, another dialect, or no dialect: refused on read-only.
-        for (d, names) in [
-            (pg, &["search_path", "role"][..]),
-            (Some(DialectId::MySql), &["search_path"][..]),
-            (None, &["search_path"][..]),
-            (pg, &[][..]),
+        // Elsewhere: the `session` row (alg/13), whatever the actor.
+        for a in [Actor::Human, Actor::AiAgent, Actor::Automation] {
+            for p in [Profile::ReadWriteDml, Profile::Ddl] {
+                assert!(
+                    matches!(decide_with(&r, p, a, &list).verdict, Verdict::Deny(_)),
+                    "{p:?} {a:?}"
+                );
+            }
+            assert!(
+                matches!(
+                    decide_with(&r, Profile::Admin, a, &list).verdict,
+                    Verdict::Confirm(_)
+                ),
+                "{a:?}"
+            );
+        }
+        // A target off the list, another dialect, or no dialect: refused on read-only, the
+        // refused variable named.
+        for (d, names, refused) in [
+            (pg, &["search_path", "role"][..], &["role"][..]),
+            (
+                Some(DialectId::MySql),
+                &["search_path"][..],
+                &["search_path"][..],
+            ),
+            (None, &["search_path"][..], &["search_path"][..]),
         ] {
             let dec = decide_with(
                 &set_report(d, names),
@@ -808,46 +1141,51 @@ mod tests {
             let Verdict::Deny(reasons) = dec.verdict else {
                 panic!("{d:?} {names:?}: {dec:?}");
             };
-            assert!(
-                reasons
-                    .iter()
-                    .any(|r| r.code == ReasonCode::SetNotAllowlisted),
-                "{reasons:?}"
-            );
+            let named: Vec<_> = reasons
+                .iter()
+                .filter(|r| r.code == ReasonCode::SetNotAllowlisted)
+                .map(|r| r.arg.as_deref().unwrap())
+                .collect();
+            assert_eq!(named, refused, "{d:?} {names:?}");
         }
-        // Only the refused target is named.
-        let Verdict::Deny(reasons) = decide_with(
-            &set_report(pg, &["search_path", "role"]),
-            Profile::ReadOnly,
-            Actor::Human,
-            &list,
-        )
-        .verdict
+        // No target: refused as a session change, never a nameless SetNotAllowlisted.
+        let Verdict::Deny(reasons) =
+            decide_with(&set_report(pg, &[]), Profile::ReadOnly, Actor::Human, &list).verdict
         else {
             panic!()
         };
-        let named: Vec<_> = reasons
-            .iter()
-            .filter(|r| r.code == ReasonCode::SetNotAllowlisted)
-            .map(|r| r.arg.as_deref())
-            .collect();
-        assert_eq!(named, [Some("role")]);
-        // A harmless SET_VAR hint is accepted, any other refused.
+        assert!(reasons.iter().any(|r| r.code == ReasonCode::SessionState));
+        assert!(
+            reasons
+                .iter()
+                .all(|r| r.code != ReasonCode::SetNotAllowlisted || r.arg.is_some())
+        );
+        // A SET_VAR hint reaches the list by name, without a value (`None`): accepted only
+        // where the list accepts a name alone; this fake list never does.
         let mut hinted = set_report(pg, &["search_path"]);
         hinted.items[0].kind = StmtKind::Select;
         hinted.items[0].effects = EffectSet::READ;
         hinted.items[0].class = CoarseClass::Read;
+        hinted.items[0].set_targets.clear();
         hinted.items[0].reasons[0].code = ReasonCode::HintSetVar;
         let (c, e, f) = merge(&hinted.items);
         (hinted.request_class, hinted.request_effects, hinted.flags) = (c, e, f);
-        assert_eq!(
-            decide_with(&hinted, Profile::ReadOnly, Actor::Human, &list).verdict,
-            Verdict::Allow
-        );
+        assert!(!decide_with(&hinted, Profile::ReadOnly, Actor::Human, &list).allows());
+        let name_only = |d: DialectId, n: &str, _: Option<&str>| {
+            d == DialectId::Postgres && n == "statement_timeout"
+        };
+        hinted.items[0].reasons[0].arg = Some(Arc::from("statement_timeout"));
+        assert!(decide_with(&hinted, Profile::ReadOnly, Actor::Human, &name_only).allows());
         hinted.items[0].reasons[0].arg = Some(Arc::from("transaction_read_only"));
-        assert!(matches!(
-            decide_with(&hinted, Profile::ReadOnly, Actor::Human, &list).verdict,
-            Verdict::Deny(_)
-        ));
+        assert!(!decide_with(&hinted, Profile::ReadOnly, Actor::Human, &name_only).allows());
+    }
+
+    /// I1's invariant on the harmless path the integration tests cannot reach before Task 3:
+    /// the gate calls a harmless SET `Session`, never `Read`.
+    #[test]
+    fn a_harmless_set_is_session_for_the_gate() {
+        let r = set_report(Some(DialectId::Postgres), &["search_path"]);
+        assert_eq!(crate::gate_class(&r.items[0]), GateClass::Session);
+        assert!(decide_with(&r, Profile::ReadOnlyPlusExplain, Actor::Human, &list).allows());
     }
 }

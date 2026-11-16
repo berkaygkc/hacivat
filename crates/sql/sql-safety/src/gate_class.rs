@@ -3,13 +3,15 @@
 //! Total order (the most critical wins): `Unknown > Admin > DdlDestructive > DdlOther >
 //! DmlUnsafe > Dml > Routine > Lock > Tx > Session > Read`. Every named effect bit has a row
 //! in [`GATE_OF_BIT`] (a test proves it covers [`EffectSet::all`]); an empty set, a bit the
-//! table does not name, an unnamed risk flag or `DYNAMIC_SQL` is `Unknown`, never `Read`.
-//! Destructive reasons raise the class: an unsafe-DML kind to at least `DmlUnsafe`, a
-//! destructive-DDL kind to at least `DdlDestructive`, whatever the effects say (a destructive
-//! reason is evidence of a write even when a backend failed to set its bit).
+//! table does not name, or an unnamed risk flag is `Unknown`, never `Read`. Evidence beyond
+//! the bits raises the class whatever the effects say (fix round 1, I1, I5): the statement's
+//! `class` field, its kind, its risk flags, its reasons and its destructive patterns (an
+//! unsafe-DML kind to at least `DmlUnsafe`, a destructive-DDL kind to at least
+//! `DdlDestructive`).
 
-use crate::effects::{CoarseClass, EffectSet, RiskFlags, class_of, flags_are_named};
-use crate::report::StmtReport;
+use crate::effects::{CoarseClass, EffectSet, class_of, flags_are_named};
+use crate::policy::{FLAG_RULES, KindRule, kind_rule, reason_gate_floor};
+use crate::report::{StmtKind, StmtReport};
 
 /// The gate's class of a statement, declared from the least to the most critical (the
 /// derived `Ord` is the total order of P-M3b-4). The default is `Unknown` (fix round 1, M3),
@@ -92,14 +94,60 @@ fn class_of_effects(effects: EffectSet) -> GateClass {
     class
 }
 
-/// The gate's class of `r` (P-M3b-4): the most critical of its effect bits' rows, raised by
-/// its destructive reasons; `Unknown` for an empty or unnamed effect set, an unnamed risk flag
-/// or `DYNAMIC_SQL`.
+/// The least gate class a statement's `class` field implies: the least gate class whose bits
+/// have that coarse class (`Write` → `Lock`, a row lock's class; `Unknown` → `Routine`, a
+/// `CALL`'s class, since `class_of(ROUTINE_CALL)` is `Unknown`). Always applied, so the gate
+/// stays monotone; `Routine` and `Unknown` take the same R-M3-55 decisions (production
+/// Confirm, read-only Deny, Run elsewhere).
+fn coarse_floor(c: CoarseClass) -> GateClass {
+    match c {
+        CoarseClass::Read => GateClass::Read,
+        CoarseClass::Session => GateClass::Session,
+        CoarseClass::Write => GateClass::Lock,
+        CoarseClass::Ddl => GateClass::DdlOther,
+        CoarseClass::Admin => GateClass::Admin,
+        CoarseClass::Unknown => GateClass::Routine,
+    }
+}
+
+/// The least gate class a statement kind implies (fix round 1, I5): `SET` is `Session`,
+/// `EXPLAIN ANALYZE` the class of its inner statement (its effects; empty is `Unknown`).
+fn kind_floor(k: StmtKind) -> GateClass {
+    match kind_rule(k) {
+        KindRule::Effects | KindRule::ExplainAnalyze => GateClass::Read,
+        KindRule::Floor(_, gate, _) => gate,
+        KindRule::Set => GateClass::Session,
+    }
+}
+
+/// The gate's class of `r` (P-M3b-4): the most critical of
+/// - its effect bits' rows ([`GATE_OF_BIT`]; empty or unnamed → `Unknown`),
+/// - its `class` field (the least gate class of that coarse class: an `Unknown` field over
+///   READ effects is at least `Routine`),
+/// - its kind (a `DELETE` is at least `Dml`, a `DROP` `DdlDestructive`, …),
+/// - its risk flags (`LEX_MODE_CHANGE`, `DYNAMIC_SQL`, `EXEC_COMMENT`, `VOLATILE_FN` and any
+///   unnamed flag → `Unknown`),
+/// - its reasons (the policy's reading of each code: doubt and unresolved names → `Unknown`,
+///   a reason of an effect group → that group's class),
+/// - its destructive reasons (unsafe DML → `DmlUnsafe`, destructive DDL → `DdlDestructive`).
+///
+/// It reads the evidence `decide` reads, so it never says `Read` for a statement `decide`
+/// refuses on `ReadOnlyPlusExplain` (fix round 1, I1; the property test `gate_and_decide_agree`).
 pub fn gate_class(r: &StmtReport) -> GateClass {
-    if r.flags.contains(RiskFlags::DYNAMIC_SQL) || !flags_are_named(r.flags) {
+    if !flags_are_named(r.flags) {
         return GateClass::Unknown;
     }
-    let mut class = class_of_effects(r.effects);
+    let mut class = class_of_effects(r.effects)
+        .max(coarse_floor(r.class))
+        .max(kind_floor(r.kind));
+    for (flag, _, floor) in FLAG_RULES {
+        if r.flags.contains(flag) {
+            class = class.max(floor);
+        }
+    }
+    for reason in &r.reasons {
+        class = class.max(reason_gate_floor(reason));
+    }
     for d in &r.destructive {
         let floor = if d.kind.is_unsafe_dml() {
             GateClass::DmlUnsafe

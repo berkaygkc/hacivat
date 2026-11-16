@@ -674,3 +674,71 @@ Fluent isolates both with FSI/PDI. The Turkish messages carry `# Review: PO`.
 **Visibility.** `effects::class_of` and `report::merge` are `pub`, not `pub(crate)` as the plan
 says. The plan's integration tests call them, and P-M3b-16's report builders must merge the
 way `classify` does.
+
+**Fix round 1 (controller rulings on the review).** These rulings override the earlier text of
+this section where they differ.
+
+- **The gate reads what `decide` reads (I1).** `gate_class` used to read only the effect bits.
+  It now takes the most critical of seven sources:
+  - the effect bits;
+  - the statement's `class` field (`Unknown` means `Unknown`);
+  - its kind;
+  - its risk flags;
+  - its reasons, through the policy's own `reason_rule` (`reason_gate_floor`);
+  - its destructive patterns;
+  - an unnamed flag bit, which means `Unknown`.
+
+  The property test `gate_and_decide_agree` holds this invariant: a gate class of `Read` implies
+  `decide(ReadOnlyPlusExplain, Human)` allows. `ReadOnly` differs from it only in refusing
+  `EXPLAIN ANALYZE` of a read. The gate calls that statement `Read`, because R-M3-55 says
+  "class of x", so the invariant is stated against the human read-only profile (R-M3-56).
+  Conversely, whatever a read-only profile allows, the gate calls `Read` or `Session`.
+- **Flags (I2).** `FLAG_RULES` covers `RiskFlags::all()` and has a coverage test. Each flag's
+  meaning:
+  - `VOLATILE_FN` means `Unknown` (`alg/13` S-04). Producers set it only for a volatile
+    function that no allowlist covers.
+  - `LEX_MODE_CHANGE` and `DYNAMIC_SQL` mean `Unknown` for the gate.
+  - `EXEC_COMMENT` means `Unknown` for the gate, so production confirms it. `decide` still
+    denies it only on the read-only profiles and for an AI agent.
+  - `EXPLAIN_ANALYZE` takes the class of the inner statement.
+- **Harmless `SET` (I3).** A harmless `SET` is a read only on the two read-only profiles, and
+  only for `Human`. Everywhere else a `SET` follows `alg/13`'s Session row: Deny in
+  `read_write_dml` and `ddl`, Confirm in `admin`. This reverses the "read in every profile"
+  rule above.
+- **`EXPLAIN ANALYZE` for AI (I4).** An AI agent on `ReadOnlyPlusExplain` may run
+  `EXPLAIN ANALYZE` of a read (`alg/13` :331).
+- **Kinds are floors (I5).** `kind_rule` is an exhaustive match. It sets a minimum class for
+  each kind that has one; `SELECT`, `VALUES`, `TABLE`, `SHOW`, `COPY`, `PRAGMA`, `Other` and
+  plain `EXPLAIN` are left to their effects.
+
+  | Kinds | Minimum class |
+  |---|---|
+  | `SET` | Session, judged through the harmless list even without its bit |
+  | `INSERT`, `UPDATE`, `DELETE`, `MERGE` | Dml |
+  | `DROP`, `TRUNCATE` | DdlDestructive |
+  | `CREATE…`, `ALTER` | DdlOther |
+  | `GRANT`, `REVOKE` | Admin |
+  | `CALL`, `DO` | Routine |
+  | `EXECUTE` | Unknown |
+  | `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT` | Tx |
+  | `LOCK` | Lock |
+  | `USE`, `LISTEN`, `PREPARE`, `NOTIFY` | Session |
+  | `EXPLAIN ANALYZE` | the inner statement's class, or Unknown |
+- **`SET` targets.** `StmtReport` gains `set_targets: Vec<SetTarget { name, value }>`, filled by
+  the backends for `SET`/`RESET`. The harmless check passes each target's value to the list,
+  for P-M3b-T3-1 (`search_path` is harmless only when `pg_catalog` is absent or first). A
+  `None` value is fail-closed. Until Task 3's `set_allowed(d, name, value)` merges, `decide`
+  drops the value; the site is marked `T3-merge: pass value`. A `SET` that names no target is
+  refused with `SessionState`, so every `SetNotAllowlisted` names its variable.
+- **Minor fixes (M1–M5).**
+  - **M1:** `Decision.class` rises with reason evidence.
+  - **M2:** the `PRIVILEGE` bit names the new `PrivilegeGrant`, confirmed under `admin`.
+    `PrivilegeChange` is only a role or authorization switch and denies everywhere.
+  - **M3:** a bare `Destructive` reason is destructive-DDL evidence.
+  - **M5:** `merge` adds `UNKNOWN` to the request's effects for an empty or unnamed statement.
+- **Not implemented, recorded (M6–M7).**
+  - **M6:** the `MAX_EXECUTION_TIME` ceiling (`alg/13` SAFE-04 step 3). `decide` has no
+    ceilings input and the plan names none, so only 0 or an unreadable limit denies.
+  - **M7, for M8:** an AI agent's unbounded `UPDATE`/`DELETE` follows `alg/13` step 5 here
+    (Deny). The spec's L9 makes it an approvable critical class; M8's broker must reconcile
+    the two.

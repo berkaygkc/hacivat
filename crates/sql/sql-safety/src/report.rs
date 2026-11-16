@@ -1,6 +1,8 @@
 //! What [`crate::classify`] answers: one [`StmtReport`] per statement and the request's
 //! [`SafetyReport`] (`alg/13`; Task 4 fills the reports, Tasks 9, 10 and 14 produce them).
 
+use std::sync::Arc;
+
 use smallvec::SmallVec;
 use sql_dialect::DialectId;
 use sql_ident::QualifiedName;
@@ -96,6 +98,21 @@ pub struct StmtReport {
     pub reasons: Vec<Reason>,
     pub destructive: Vec<DestructiveReason>,
     pub confidence: Confidence,
+    // ## m3b-t04-safety (fix round 1): the targets of a `SET`/`RESET`, with their values, for
+    // the harmless-SET check (P-M3b-6, P-M3b-T3-1). Empty for every other statement.
+    pub set_targets: Vec<SetTarget>,
+}
+
+/// One target of a `SET` (`SET a = 1, b TO 'x'`, `RESET a`, `SET LOCAL a …`), as the
+/// backend read it (Tasks 9, 10).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SetTarget {
+    /// The variable's name exactly as written (quotes removed; no case folding).
+    pub name: Arc<str>,
+    /// The value exactly as written (the text after `=`/`TO`, trimmed), or `None` when the
+    /// statement sets none (`RESET`, `TO DEFAULT`) or the backend could not read it. `None`
+    /// is never more permissive: `set_allowed` treats it fail-closed (P-M3b-T3-1).
+    pub value: Option<Arc<str>>,
 }
 
 /// A backend that took part (`"libpg_query"`/`"18.1.0"`, `"sqlparser"`/`"0.64.0"`,
@@ -159,7 +176,9 @@ impl SafetyReport {
 /// The request-level class, effects and flags of `items` (`alg/13` SQL-SAFE-02 step 8): the
 /// union of the effects and flags, and the most critical of every statement's class and of
 /// `class_of` over its effects (a statement whose `class` field is lower than its effects say
-/// does not lower the request). No statement is `(Unknown, UNKNOWN, ∅)`: nothing was proved.
+/// does not lower the request). A statement with an empty effect set or an unnamed bit adds
+/// `UNKNOWN` to the request's effects (fix round 1, M5). No statement is
+/// `(Unknown, UNKNOWN, ∅)`: nothing was proved.
 ///
 /// Public (the plan names it `pub(crate)`) so report builders outside the orchestrator (the
 /// gate's tests, P-M3b-16) merge the way `classify` does.
@@ -173,6 +192,9 @@ pub fn merge(items: &[StmtReport]) -> (CoarseClass, EffectSet, RiskFlags) {
     for s in items {
         class = class.max(s.class).max(class_of(s.effects));
         effects |= s.effects;
+        if s.effects.is_empty() || EffectSet::from_bits(s.effects.bits()).is_none() {
+            effects |= EffectSet::UNKNOWN;
+        }
         flags |= s.flags;
     }
     (class, effects, flags)
@@ -194,6 +216,7 @@ mod tests {
             reasons: Vec::new(),
             destructive: Vec::new(),
             confidence: Confidence::Exact,
+            set_targets: Vec::new(),
         }
     }
 
@@ -219,11 +242,23 @@ mod tests {
         // A class field higher than the effects raises it.
         let admin = stmt(EffectSet::READ, C::Admin, RiskFlags::empty());
         assert_eq!(merge(&[a, admin]).0, C::Admin);
-        // An empty statement effect set is not a read.
+        // An empty statement effect set is not a read, and the request's effects say so.
+        let read = stmt(EffectSet::READ, C::Read, RiskFlags::empty());
+        let empty = stmt(EffectSet::empty(), C::Read, RiskFlags::empty());
         assert_eq!(
-            merge(&[stmt(EffectSet::empty(), C::Read, RiskFlags::empty())]).0,
-            C::Unknown
+            merge(&[read.clone(), empty]),
+            (
+                C::Unknown,
+                EffectSet::READ | EffectSet::UNKNOWN,
+                RiskFlags::empty()
+            )
         );
+        let unnamed = stmt(
+            EffectSet::from_bits_retain(1 << 20),
+            C::Read,
+            RiskFlags::empty(),
+        );
+        assert!(merge(&[read, unnamed]).1.contains(EffectSet::UNKNOWN));
     }
 
     #[test]

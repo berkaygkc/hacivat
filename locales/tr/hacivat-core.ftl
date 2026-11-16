@@ -441,7 +441,7 @@ safety-reason-hint-set-var = Bir optimizer ipucu bir ayarı değiştiriyor.
 # Review: PO
 safety-reason-routine-call = İfade, etkileri denetlenemeyen bir yordamı çağırıyor.
 # Review: PO
-safety-reason-set-not-allowlisted = Salt okunur bağlantıda yalnızca zararsız ayarlar değiştirilebilir; bu onlardan biri değil.
+safety-reason-set-not-allowlisted = Salt okunur bağlantıda yalnızca zararsız ayarlar değiştirilebilir; { $name } onlardan biri değil.
 # Review: PO
 safety-reason-write-data = İfade veriyi değiştiriyor.
 # Review: PO
@@ -460,6 +460,10 @@ safety-reason-notify = İfade diğer oturumlara bir bildirim gönderiyor.
 safety-reason-effects-unknown = İfadenin ne yaptığı belirlenemiyor.
 # Review: PO
 safety-reason-destructive = İfade çok sayıda veriyi değiştirebilir ya da silebilir.
+# Review: PO
+safety-reason-privilege-grant = İfade yetki ya da rol veriyor veya geri alıyor.
+# Review: PO
+safety-reason-volatile-function = İfade, etkileri denetlenemeyen değişken (volatile) bir işlev çağırıyor.
 
 # Review: PO
 safety-destructive-no-where = { $table } için WHERE yok; bu yüzden her satır değişir.

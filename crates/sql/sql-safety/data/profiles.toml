@@ -3,10 +3,12 @@
 # One table per effect group, one rule per built-in profile: "allow", "confirm" or "deny".
 # Every group and every profile must be present (the loader denies unknown or missing keys,
 # and a table that fails to load makes `decide` deny everything). Compiled in with
-# `include_str!` by `src/policy.rs`; the effect bits and reason codes that select a group are
-# in `policy.rs` (`GROUP_OF_BIT`, `reason_group`). Actor rules (AI agents) and the flags
-# (executable comments, lexical-mode changes, hints) are code, not data: they deny in every
-# profile they name.
+# `include_str!` by `src/policy.rs`; the effect bits, risk flags, statement kinds and reason
+# codes that select a group are in `policy.rs` (`GROUP_OF_BIT`, `FLAG_RULES`, `kind_rule`,
+# `reason_rule`). Actor rules (AI agents) and the deny-only flags and reasons (executable
+# comments, lexical-mode changes, role switches, hints) are code, not data: they deny in every
+# profile they name. A `SET` whose targets are all on the dialect's harmless list is a read on
+# the two read-only profiles, for a human only (P-M3b-6); everywhere else it is `session`.
 #
 # Deliberate differences from the spec's table (ADR 0005 `m3b-t04`):
 # - `write_unbounded` (UPDATE/DELETE that may touch every row) also confirms under `ddl`: the
