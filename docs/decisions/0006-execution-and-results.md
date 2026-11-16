@@ -534,3 +534,52 @@ wired into Run before Task 24 (R-M3-52).
     eviction with `evict::Eviction { result, kept_rows, previous }`. The call comes after the
     lock is released and the chunks are freed, on the evicting thread. Listeners must not
     block. The run service turns it into `LogMsg::Evicted` (Task 16).
+
+## m3b-t17 — history
+
+- **Store (R-M3-62, `alg/20` HV-EXEC-12).** `hacivat-exec::history`: SQLite + FTS5 at
+  `LocalPaths::history_db()`, schema version 1 (`PRAGMA user_version`), WAL, a 5 s busy
+  timeout and `BEGIN IMMEDIATE` writes, so several windows (or two processes) share the file.
+  One writer task owns the connection and runs every call on the blocking pool; searches,
+  recall and pins go through it, after the records already queued, so a search sees what was
+  sent before it. A batch that fails (disk full, a lock past the timeout) is dropped. History
+  is never an audit trail: it drops records when full, busy or broken.
+- **Secrets (HV-EXEC-12 step 2).** The writer redacts before it hashes, fingerprints, caps or
+  stores. No dialect rides on a record, so the scan reads the text with and without backslash
+  escapes and masks the union. It masks every string after `PASSWORD`/`PASSWD`/`PWD`/
+  `SECRET`/`IDENTIFIED` (or a word with such an `_` part, `MASTER_PASSWORD`) up to `;`, the
+  bare value in value position (Oracle `IDENTIFIED BY tiger`, `REPLACE`, `SET PASSWORD FOR …
+  =`), any string carrying `password`/`pwd=`/`secret` or a URI password, and psql
+  meta-commands to the end of the line through `HvNorm1` (`\connect ?`). The values found
+  are also removed from the error message (MySQL 1064 quotes the statement) and the
+  parameter text. `redacted` is set when anything was masked.
+- **Hash and fingerprint are the store's.** `text_hash` is SHA-256 of the whole redacted
+  statement and `fingerprint` is `HvNorm1` (generic dialect) of it; the record's values are
+  ignored. Rejected: storing the producer's hash of the sent text, a guessing oracle for the
+  password it held.
+- **Caps and retention (D-061).** Statements over `statement_cap` (64 KiB) keep a prefix ending
+  on a character boundary and the hash of the whole; error messages 4 KiB. Dedup by
+  `(data source, text_hash)` increments `run_count` and moves the entry to the front (latest
+  start, outcome and metrics). Per data source the newest 10,000 unpinned entries stay, and
+  unpinned entries last run more than 90 days ago go: after each batch for the touched
+  sources, at open, and every 10 minutes, in batches of 1,000; `auto_vacuum = INCREMENTAL`
+  gives the pages back. Pinned entries never expire and do not count against the cap.
+- **Search.** FTS5 (`unicode61 remove_diacritics 2`) over two shadow columns, the folded
+  statement (`search_key`) and the folded error message (`error_key`, an addition to the
+  `alg/20` schema so Turkish error text is found the same way). The fold is a fixed table
+  (`İ`, `I`, `ı` → `i`; `ş` `s`, `ğ` `g`, `ç` `c`, `ö` `o`, `ü` `u`; ASCII capitals; combining
+  marks U+0300–U+036F dropped), never locale casing, applied to both sides. The user's text is
+  never FTS5 syntax: its words (letters and digits) become quoted prefix phrases ANDed in one
+  bound parameter; text with no word matches nothing. Recall is an exact prefix
+  (`substr(…) = ?`, never `LIKE`). `HistoryQuery` gains `fingerprint` ("Similar").
+- **File.** Created `0600` before SQLite opens it (SQLite gives `-wal`/`-shm` the same mode);
+  a wider mode on an existing file is tightened. The directory is the app's (T1a review M7).
+  `PRAGMA quick_check` at open: a file SQLite calls not a database or corrupt is renamed
+  `history.sqlite.corrupt-<unix seconds>` with its `-wal`/`-shm` (an old log is never replayed
+  into the new file) and a fresh file is made; `recovered_from()` tells the app, once. A busy
+  file is an error, never a rotation.
+- **Who is not recorded.** A private console never reaches the sink (Task 16); a profile with
+  "do not record history" is dropped by the run service (Task 24) and by the writer too
+  (`set_do_not_record`).
+- **Shutdown.** `shutdown(grace)` writes what is queued, checkpoints the log and closes within
+  the grace (2 s); later calls answer `Disabled`.
