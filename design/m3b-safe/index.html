@@ -1263,7 +1263,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
 .qbar.narrow .qchip > span { min-width:0; }
 .qbar.narrow .qchip.tx { flex:none; }
 .qbar.narrow .txbadge .lab { white-space:normal; line-height:15px; }
-.qbar.narrow .txbadge .run { align-self:flex-start; margin-top:4px; }
+
 .pane .strip.wrap { flex-wrap:wrap; row-gap:4px; }
 .qbar.narrow .btn.icon1 { padding:0 6px; min-width:0; }
 .qbar.narrow .qchip { height:auto; min-height:22px; white-space:normal; padding:2px 7px; line-height:15px; text-align:left; }
@@ -1307,14 +1307,14 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
 /* ── Fix round 1 (system-wide, owned by Task 41; DESIGN.md rows in Task 43) ──
    Disabled ink: one token for disabled buttons, segments, chips and menu rows, never remapped by the Raised Ink Rule.
    dark #636A76: 2.68:1 on raised, 1.77:1 from text-2 · light #A0A0A8: 2.60:1 on white, 2.84:1 from text-2. */
-:root, :root[data-theme="dark"] { --text-dis:#636A76; }
-:root[data-theme="light"] { --text-dis:#A0A0A8; }
-.btn[disabled], .btn[disabled]:hover, .btn.danger[disabled], .btn.danger[disabled]:hover { color:var(--text-dis); }
-.btn[disabled] .k, .btn[disabled] svg { color:var(--text-dis); }
-.seg button[disabled], .seg button[disabled]:hover, .rtool .seg button[disabled], .rtool .seg button[disabled]:hover { color:var(--text-dis); }
-.ftog[disabled] { color:var(--text-dis); }
-.menu .mi.dis, .menu .mi.dis .lab2, .menu .mi.dis .k, .menu .mi.dis .ico2, .menu .mi.dis .kind, .menu .mi.dis .lab, .menu .mi.dis .cnt { color:var(--text-dis); }
-.qchip[aria-disabled="true"], .qchip[aria-disabled="true"]:hover, .qchip[aria-disabled="true"] svg { color:var(--text-dis); }
+:root, :root[data-theme="dark"] { --text-disabled:#636A76; }
+:root[data-theme="light"] { --text-disabled:#A0A0A8; }
+.btn[disabled], .btn[disabled]:hover, .btn.danger[disabled], .btn.danger[disabled]:hover { color:var(--text-disabled); }
+.btn[disabled] .k, .btn[disabled] svg { color:var(--text-disabled); }
+.seg button[disabled], .seg button[disabled]:hover, .rtool .seg button[disabled], .rtool .seg button[disabled]:hover { color:var(--text-disabled); }
+.ftog[disabled] { color:var(--text-disabled); }
+.menu .mi.dis, .menu .mi.dis .lab2, .menu .mi.dis .k, .menu .mi.dis .ico2, .menu .mi.dis .kind, .menu .mi.dis .lab, .menu .mi.dis .cnt { color:var(--text-disabled); }
+.qchip[aria-disabled="true"], .qchip[aria-disabled="true"]:hover, .qchip[aria-disabled="true"] svg { color:var(--text-disabled); }
 /* The keyboard-active menu row, every PopupMenu: the selection tint, a 1 px blue left edge (the settings-navigation cue) and text ink */
 .menu .mi.on { background:var(--blue-a2); color:var(--text); position:relative; }
 .menu .mi.on::before { content:""; position:absolute; left:0; top:0; bottom:0; width:1px; background:var(--blue); }
@@ -1325,6 +1325,8 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
 .qbar.narrow .qchip.tx .w { white-space:nowrap; }
 .qbar.narrow .txbadge .btn { height:20px; padding:0 4px; }
 .qbar.narrow .txbadge { flex-wrap:wrap; row-gap:2px; }
+.qbar.narrow .txbadge .bl1 { display:flex; align-items:flex-start; gap:7px; min-width:0; flex:0 1 auto; }
+.qbar.narrow .txbadge .bl1 .run { flex:none; margin-top:4px; }
 .pane .lines .l.phl { white-space:normal; height:auto; line-height:17px; padding-right:8px; }
 .pane .pbody { flex:1; min-height:0; display:flex; flex-direction:column; }
 .pane .pbody .code { flex:1; }
@@ -4790,10 +4792,11 @@ function placeVV() {
   const r = a ? a.getBoundingClientRect() : { left:W0.left + 400, bottom:W0.top + 300, top:W0.top + 280 };
   const st = $("strip"), maxBottom = st ? st.getBoundingClientRect().top - W0.top - 4 : W0.height - 30; let left = r.left - W0.left, top = r.bottom - W0.top + 4;
   left = Math.max(8, Math.min(left, W0.width - p.offsetWidth - 8));
-  const box = p.querySelector(".vbox"), wrap = p.querySelector(".vwrap");
+  const box = p.querySelector(".vbox"), wrap = p.querySelector(".vwrap"), minTop = belowToolbar(W0);
+  if (box && p.offsetHeight > maxBottom - minTop) box.style.maxHeight = Math.max(120, box.clientHeight - (p.offsetHeight - (maxBottom - minTop))) + "px";
   if (box && wrap && box.scrollHeight > box.clientHeight + 1 && !wrap.querySelector(".vthumb")) { const h = Math.max(18, box.clientHeight * box.clientHeight / box.scrollHeight); wrap.insertAdjacentHTML("beforeend", `<i class="vthumb" style="top:3px;height:${h}px"></i>`); }
-  if (top + p.offsetHeight > maxBottom) top = Math.max(46, r.top - W0.top - p.offsetHeight - 4);
-  if (top + p.offsetHeight > maxBottom) top = Math.max(46, maxBottom - p.offsetHeight);
+  if (top + p.offsetHeight > maxBottom) top = r.top - W0.top - p.offsetHeight - 4;
+  top = Math.max(minTop, Math.min(top, maxBottom - p.offsetHeight));
   p.style.left = left + "px"; p.style.top = top + "px"; p.style.visibility = "visible";
 }
 function gotoHTML() {
@@ -4810,9 +4813,11 @@ function gotoHTML() {
   const keys = G.state === "fetch" || G.state === "fetching" ? "" : `<div class="keys"><span><kbd>↵</kbd>${te("hv-goto-key-go")}</span><span><kbd>esc</kbd>${te("hui-palette-hint-close")}</span></div>`;
   return `<div class="goto" id="goto" role="dialog" aria-labelledby="gotoTitle" style="left:0;top:0;visibility:hidden"><b id="gotoTitle">${ic("list-ordered","i12")}<span>${te("hv-goto-title")}</span><kbd style="margin-left:auto">⌘L</kbd></b><label class="in mono${bad ? " err" : ""}"><input data-fk="gotoQ" value="${esc(G.q)}" spellcheck="false" autocomplete="off" placeholder="${te("hv-goto-placeholder")}" aria-label="${te("hv-goto-title")}"></label>${lines}${keys}</div>`;
 }
+/* popovers never rise over the focused console's toolbar (cross-cutting 3): their top stops 4 px below it */
+function belowToolbar(W0) { const q = $("qbar"); return q ? q.getBoundingClientRect().bottom - W0.top + 4 : 46; }
 function placeGoto() {
   const p = $("goto"), a = $("rtool"); if (!p || !a) return; const W0 = winRect(), r = a.getBoundingClientRect();
-  const st = $("strip"), maxBottom = st ? st.getBoundingClientRect().top - W0.top - 4 : W0.height - 30; let top = r.bottom - W0.top + 4; if (top + p.offsetHeight > maxBottom) top = Math.max(46, maxBottom - p.offsetHeight);
+  const st = $("strip"), maxBottom = st ? st.getBoundingClientRect().top - W0.top - 4 : W0.height - 30; let top = r.bottom - W0.top + 4; top = Math.max(belowToolbar(W0), Math.min(top, maxBottom - p.offsetHeight));
   p.style.left = Math.max(8, Math.min(r.left - W0.left + 8, W0.width - 312)) + "px"; p.style.top = top + "px"; p.style.visibility = "visible";
 }
 function gtipHTML() { const T = W.gtip; return T ? `<div class="gtip" id="gtip" role="tooltip" style="left:0;top:0;visibility:hidden">${T.html}</div>` : ""; }
@@ -4870,7 +4875,7 @@ function narrowQbarHTML(p) {
   else h.push(`<button class="qchip tx" data-mode="${p.mode}" aria-haspopup="menu" title="${T("hv-tx-chip-tip", { mode:t("hv-tx-chip-" + p.mode) })}" aria-label="${T("hv-tx-chip-" + p.mode)}"><span class="w">${T(p.mode === "auto" ? "hv-tx-chip-auto-short" : "hv-tx-chip-" + p.mode)}</span><span class="chev">${ic("chevron-down","i12")}</span></button>`);
   /* N4: the badge drops its age and keeps Commit and Roll back as icon buttons (words in tooltips and names) */
   if (p.tx) { const b = (key, icon) => `<button class="btn" title="${T(key)}" aria-label="${T(key)}">${ic(icon,"i12")}</button>`;
-    h.push(`<span class="qchip txbadge" role="status" title="${T("hv-tx-badge-tip")}" style="border:0;padding:0"><i class="run" aria-hidden="true"></i><span class="lab">${p.pseudo ? T("hv-tx-badge-short", { n:nf(p.tx) }) : th("hv-tx-badge-short", { n:`<span class="mono">${esc(nf(p.tx))}</span>` })}</span>${b("hv-tx-badge-commit", "check")}${b("hv-tx-badge-rollback", "undo-2")}</span>`); }
+    h.push(`<span class="qchip txbadge" role="status" title="${T("hv-tx-badge-tip")}" style="border:0;padding:0"><span class="bl1"><i class="run" aria-hidden="true"></i><span class="lab">${p.pseudo ? T("hv-tx-badge-short", { n:nf(p.tx) }) : th("hv-tx-badge-short", { n:`<span class="mono">${esc(nf(p.tx))}</span>` })}</span></span>${b("hv-tx-badge-commit", "check")}${b("hv-tx-badge-rollback", "undo-2")}</span>`); }
   /* N3: the read-only chip keeps its whole label ("read-only (guarded)"), wrapping inside the chip */
   if (p.pending) h.push(`<span class="qchip" title="${T("hv-console-ro-pending", { name:c.id })}">${ic("lock","i12")}<span>${T("hv-console-ro-pending-short")}</span></span>`);
   else if (c.ro) h.push(`<span class="qchip${c.env === "production" ? " prod" : ""}" title="${esc(roLabel(c))}">${ic("lock","i12")}<span>${p.pseudo ? esc(pseudo(roLabel(c))) : esc(roLabel(c))}</span></span>`);
