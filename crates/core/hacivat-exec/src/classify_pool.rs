@@ -9,14 +9,22 @@
 //! - **Threads.** [`ClassifyPool::new`] starts `threads` std threads (R-M3-53: 2), each with a
 //!   16 MiB stack, that take jobs from one queue. Every libpg_query call a job makes (parse
 //!   tree, scanner tokens, fingerprint) runs on `sql-oracle-pg`'s own serial parser thread,
-//!   never on a pool thread (T9 ruling), so two pool threads never parse at once.
-//! - **Fail closed.** A job that panics answers an `Unknown` report (`EffectsUnknown`), and the
-//!   thread lives on. After [`ClassifyPool::shutdown`] (or when no thread could start) every
-//!   request answers an `Unknown` report at once. A report that does not arrive within the
-//!   deadline is `Unknown` too ([`ClassifyPool::classify_within`]; the job keeps its thread
-//!   until it ends: a C call cannot be cancelled). An `Unknown` report never runs on a
+//!   never on a pool thread (T9 ruling), so two pool threads never parse at once. Each pool
+//!   thread marks itself (`sql_safety::mark_classifier_thread`), so `classify` runs on it
+//!   directly; called anywhere else, `classify` makes its own 16 MiB stack (fix round 1, I2).
+//! - **Fail closed.** Every entry resolves to a report, never an error the caller must map
+//!   (`Result<_, Infallible>`, fix round 1). A job that panics answers an `Unknown` report
+//!   (`EffectsUnknown`), and the thread lives on. After [`ClassifyPool::shutdown`] (or when no
+//!   thread could start), and while [`QUEUE_CAPACITY`] jobs already wait, every request
+//!   answers an `Unknown` report at once. A report that does not arrive within the deadline
+//!   is `Unknown` too ([`ClassifyPool::classify_within`]); a queued job whose caller stopped
+//!   waiting is skipped, and one whose deadline has passed answers `Unknown` without
+//!   classifying (a running C call cannot be cancelled). An `Unknown` report never runs on a
 //!   read-only session and always asks on production (R-M3-55): nothing is sent unconfirmed
 //!   on a classifier failure.
+//! - **Lexing modes.** The read-only guard's seam carries no session modes, so `classify`
+//!   reads a text the modes would lex differently under each of them and allows it only if
+//!   every reading allows (fix round 1, C2; `sql_safety::classify`).
 //! - **Units one at a time.** [`ClassifyPool::classify_units`] classifies a run's units in
 //!   order on one thread (`sql_safety::classify_units`): once a unit may change the context
 //!   (search path, lexing modes, role, code the classifier cannot see, a cursor or prepared
@@ -29,29 +37,35 @@
 //!
 //! Nothing here is wired into Run (R-M3-52): Tasks 15, 18, 24 and 26 do that.
 
+use std::convert::Infallible;
+use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
 use hacivat_proto::DbmsKind;
 use hacivat_session::session::{RoCheck, SafetyDenial, SessionEffects, StatementClassifier};
 use sql_dialect::{ClientFlavor, DialectId};
 use sql_safety::{
-    Actor, ClassifyCtx, CoarseClass, EffectSet, Expect, Profile, Reason, ReasonCode, SafetyReport,
-    Verdict, decide,
+    Actor, ClassifyCtx, CoarseClass, EffectSet, Expect, Profile, ReasonCode, SafetyReport, Verdict,
+    decide,
 };
 use tokio::sync::oneshot;
 
 use crate::sqlctx::dialect_ctx;
 
-/// A classifier thread's stack (R-M3-3).
-pub const CLASSIFY_STACK_BYTES: usize = 16 << 20;
+/// A classifier thread's stack (R-M3-3): `sql-safety`'s own.
+pub const CLASSIFY_STACK_BYTES: usize = sql_safety::CLASSIFIER_STACK_BYTES;
 
 /// How long the read-only guard waits for a report before it denies (the module docs).
 pub const READ_ONLY_CHECK_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How many jobs may wait in the queue; a request past it answers `Unknown` at once (fix round
+/// 1, M1).
+pub const QUEUE_CAPACITY: usize = 256;
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
@@ -59,7 +73,7 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 #[derive(Debug)]
 pub struct ClassifyPool {
     threads: usize,
-    queue: Mutex<Option<mpsc::Sender<Job>>>,
+    queue: Mutex<Option<mpsc::SyncSender<Job>>>,
 }
 
 impl ClassifyPool {
@@ -67,7 +81,7 @@ impl ClassifyPool {
     /// stack. A thread that cannot start is not counted; with none, every request answers
     /// `Unknown`.
     pub fn new(threads: usize) -> Arc<Self> {
-        let (tx, rx) = mpsc::channel::<Job>();
+        let (tx, rx) = mpsc::sync_channel::<Job>(QUEUE_CAPACITY);
         let rx = Arc::new(Mutex::new(rx));
         let mut started = 0;
         for i in 0..threads.max(1) {
@@ -75,7 +89,11 @@ impl ClassifyPool {
             let spawned = thread::Builder::new()
                 .name(format!("hacivat-classify-{i}"))
                 .stack_size(CLASSIFY_STACK_BYTES)
-                .spawn(move || worker(&rx));
+                .spawn(move || {
+                    // This thread's stack is the classifier's: it runs on it directly.
+                    sql_safety::mark_classifier_thread();
+                    worker(&rx);
+                });
             if spawned.is_ok() {
                 started += 1;
             }
@@ -100,11 +118,14 @@ impl ClassifyPool {
             .take();
     }
 
-    /// Classifies `sql` in `ctx` on a pool thread; the report arrives on the receiver. A panic
-    /// in the classifier, and a pool that is shut down, answer an `Unknown` report; the
-    /// receiver errs only if the job is lost, which the caller treats as `Unknown` too
-    /// ([`ClassifyPool::classify_within`] does).
-    pub fn classify(&self, sql: Arc<str>, ctx: ClassifyCtx) -> oneshot::Receiver<SafetyReport> {
+    /// Classifies `sql` in `ctx` on a pool thread. The future always resolves to a report (the
+    /// `Result` cannot fail): a panic in the classifier, a full or shut-down pool, and a lost
+    /// job each answer an `Unknown` report of `sql` (fix round 1, M1).
+    pub fn classify(
+        &self,
+        sql: Arc<str>,
+        ctx: ClassifyCtx,
+    ) -> impl Future<Output = Result<SafetyReport, Infallible>> + Send + 'static {
         self.classify_by(sql, ctx, sql_safety::classify)
     }
 
@@ -114,13 +135,34 @@ impl ClassifyPool {
         sql: Arc<str>,
         ctx: ClassifyCtx,
         classifier: fn(&str, &ClassifyCtx) -> SafetyReport,
+    ) -> impl Future<Output = Result<SafetyReport, Infallible>> + Send + 'static {
+        let rx = self.start(Arc::clone(&sql), ctx.clone(), None, classifier);
+        async move { Ok(rx.await.unwrap_or_else(|_| failed(&sql, &ctx))) }
+    }
+
+    /// Queues one classification and gives its receiver. The job is skipped when nobody waits
+    /// for it any more (a caller past its deadline dropped the receiver), and answers
+    /// `Unknown` without classifying once `deadline` has passed (fix round 1, M1).
+    fn start(
+        &self,
+        sql: Arc<str>,
+        ctx: ClassifyCtx,
+        deadline: Option<Instant>,
+        classifier: fn(&str, &ClassifyCtx) -> SafetyReport,
     ) -> oneshot::Receiver<SafetyReport> {
         let (tx, rx) = oneshot::channel();
         let job_sql = Arc::clone(&sql);
         let job_ctx = ctx.clone();
         let job: Job = Box::new(move || {
-            let report = catch_unwind(AssertUnwindSafe(|| classifier(&job_sql, &job_ctx)))
-                .unwrap_or_else(|_| failed(&job_sql, &job_ctx));
+            if tx.is_closed() {
+                return;
+            }
+            let report = if deadline.is_some_and(|d| Instant::now() >= d) {
+                failed(&job_sql, &job_ctx)
+            } else {
+                catch_unwind(AssertUnwindSafe(|| classifier(&job_sql, &job_ctx)))
+                    .unwrap_or_else(|_| failed(&job_sql, &job_ctx))
+            };
             let _ = tx.send(report);
         });
         if self.submit(job) {
@@ -130,14 +172,21 @@ impl ClassifyPool {
     }
 
     /// [`ClassifyPool::classify`], awaited for at most `deadline`: a report that does not
-    /// arrive in time, or a lost job, is an `Unknown` report of `sql` (never an error).
+    /// arrive in time, or a lost job, is an `Unknown` report of `sql` (never an error); the job
+    /// does not run once its deadline has passed.
     pub async fn classify_within(
         &self,
         sql: Arc<str>,
         ctx: ClassifyCtx,
         deadline: Duration,
     ) -> SafetyReport {
-        let rx = self.classify(Arc::clone(&sql), ctx.clone());
+        let until = Instant::now() + deadline;
+        let rx = self.start(
+            Arc::clone(&sql),
+            ctx.clone(),
+            Some(until),
+            sql_safety::classify,
+        );
         match tokio::time::timeout(deadline, rx).await {
             Ok(Ok(report)) => report,
             Ok(Err(_)) | Err(_) => failed(&sql, &ctx),
@@ -146,13 +195,13 @@ impl ClassifyPool {
 
     /// Classifies a run's units in order on one pool thread, each with `ctx`
     /// (`sql_safety::classify_units`: after a unit that may change the context every later
-    /// unit is `Unknown`). One report per unit; a panic or a shut-down pool answers `Unknown`
-    /// for every unit.
+    /// unit is `Unknown`). Always one report per unit: a panic, a full or shut-down pool, or a
+    /// lost job answers `Unknown` for every unit.
     pub fn classify_units(
         &self,
         units: Vec<Arc<str>>,
         ctx: ClassifyCtx,
-    ) -> oneshot::Receiver<Vec<SafetyReport>> {
+    ) -> impl Future<Output = Result<Vec<SafetyReport>, Infallible>> + Send + 'static {
         let all_failed = |units: &[Arc<str>], ctx: &ClassifyCtx| -> Vec<SafetyReport> {
             units.iter().map(|u| failed(u, ctx)).collect()
         };
@@ -160,23 +209,28 @@ impl ClassifyPool {
         let job_units = units.clone();
         let job_ctx = ctx.clone();
         let job: Job = Box::new(move || {
+            if tx.is_closed() {
+                return;
+            }
             let reports = catch_unwind(AssertUnwindSafe(|| {
                 sql_safety::classify_units(&job_units, &job_ctx)
             }))
             .unwrap_or_else(|_| all_failed(&job_units, &job_ctx));
             let _ = tx.send(reports);
         });
-        if self.submit(job) {
-            return rx;
-        }
-        answered(all_failed(&units, &ctx))
+        let rx = if self.submit(job) {
+            rx
+        } else {
+            answered(all_failed(&units, &ctx))
+        };
+        async move { Ok(rx.await.unwrap_or_else(|_| all_failed(&units, &ctx))) }
     }
 
-    /// Queues `job`; false when the pool takes no more jobs (shut down, no thread started, or
-    /// every thread gone).
+    /// Queues `job`; false when the pool takes no more jobs (shut down, no thread started,
+    /// every thread gone, or [`QUEUE_CAPACITY`] jobs already waiting).
     fn submit(&self, job: Job) -> bool {
         let queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
-        queue.as_ref().is_some_and(|q| q.send(job).is_ok())
+        queue.as_ref().is_some_and(|q| q.try_send(job).is_ok())
     }
 }
 
@@ -213,13 +267,7 @@ fn answered<T>(value: T) -> oneshot::Receiver<T> {
 /// The report of a classification that did not happen (a panic, a deadline, a shut-down pool):
 /// `Unknown`, pre-decided with `EffectsUnknown`, for exactly `sql`'s bytes and `ctx`'s dialect.
 fn failed(sql: &str, ctx: &ClassifyCtx) -> SafetyReport {
-    let mut r = SafetyReport::pre_decided(
-        sql,
-        sql_split::hv_norm1(sql, &ctx.dialect),
-        vec![Reason::new(ReasonCode::EffectsUnknown)],
-    );
-    r.dialect = Some(ctx.dialect.id);
-    r
+    sql_safety::unknown_report(sql, ctx, ReasonCode::EffectsUnknown)
 }
 
 /// The session-level effects of a report (C8, Smart, the D-062 wrap), `None` when they are
@@ -278,6 +326,7 @@ pub fn read_only_check(r: &SafetyReport) -> RoCheck {
         Verdict::Allow => RoCheck::Allow,
         Verdict::Confirm(reasons) | Verdict::Deny(reasons) => {
             let mut ids: Vec<&'static str> = reasons.iter().map(|x| x.code.fluent_id()).collect();
+            ids.sort_unstable();
             ids.dedup();
             if ids.is_empty() {
                 ids.push(ReasonCode::EffectsUnknown.fluent_id());
@@ -301,7 +350,13 @@ impl StatementClassifier for ClassifyPool {
         allow: Arc<[Arc<str>]>,
     ) -> BoxFuture<'static, RoCheck> {
         let ctx = guard_ctx(kind, allow);
-        let rx = self.classify(Arc::clone(&sql), ctx.clone());
+        let until = Instant::now() + READ_ONLY_CHECK_DEADLINE;
+        let rx = self.start(
+            Arc::clone(&sql),
+            ctx.clone(),
+            Some(until),
+            sql_safety::classify,
+        );
         Box::pin(async move {
             let report = match tokio::time::timeout(READ_ONLY_CHECK_DEADLINE, rx).await {
                 Ok(Ok(r)) => r,
@@ -315,7 +370,8 @@ impl StatementClassifier for ClassifyPool {
     /// they are unknown or the report does not arrive within [`READ_ONLY_CHECK_DEADLINE`].
     fn effects(&self, kind: DbmsKind, sql: Arc<str>) -> BoxFuture<'static, Option<SessionEffects>> {
         let ctx = guard_ctx(kind, Arc::from(Vec::new()));
-        let rx = self.classify(sql, ctx);
+        let until = Instant::now() + READ_ONLY_CHECK_DEADLINE;
+        let rx = self.start(sql, ctx, Some(until), sql_safety::classify);
         Box::pin(async move {
             match tokio::time::timeout(READ_ONLY_CHECK_DEADLINE, rx).await {
                 Ok(Ok(r)) => session_effects(&r),
@@ -343,12 +399,16 @@ mod tests {
         panic!("an injected classifier panic")
     }
 
-    /// A job that holds a pool thread until the returned sender is dropped or sends.
+    /// A job that holds a pool thread until the returned sender is dropped or sends; it
+    /// returns once the thread has taken the job (so the queue holds only later jobs).
     fn hold(p: &ClassifyPool) -> mpsc::Sender<()> {
         let (tx, rx) = mpsc::channel::<()>();
+        let (started_tx, started) = mpsc::channel::<()>();
         assert!(p.submit(Box::new(move || {
+            let _ = started_tx.send(());
             let _ = rx.recv();
         })));
+        started.recv().expect("the pool thread takes the job");
         tx
     }
 
@@ -410,5 +470,80 @@ mod tests {
         assert_eq!(refused.request_class, CoarseClass::Unknown);
         drop(release);
         assert_eq!(queued.await.unwrap().request_class, CoarseClass::Write);
+    }
+
+    // ## fix round 1, M1
+
+    #[tokio::test]
+    async fn a_full_queue_answers_unknown_at_once() {
+        let p = ClassifyPool::new(1);
+        let release = hold(&p);
+        // The held job may still sit in the queue or already run: fill every slot left.
+        let mut waiting = Vec::new();
+        while p.submit(Box::new(|| {})) {
+            waiting.push(());
+            assert!(waiting.len() <= QUEUE_CAPACITY + 1);
+        }
+        let r = p.classify("SELECT 1".into(), pg()).await.unwrap();
+        assert_eq!(r.request_class, CoarseClass::Unknown);
+        assert!(r.matches_text("SELECT 1"));
+        let units = p
+            .classify_units(vec!["SELECT 1".into()], pg())
+            .await
+            .unwrap();
+        assert_eq!(units[0].request_class, CoarseClass::Unknown);
+        drop(release);
+        // Drained, the pool classifies again.
+        let r = loop {
+            let r = p.classify("SELECT 1".into(), pg()).await.unwrap();
+            if r.pre_decision.is_none() {
+                break r;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(r.request_class, CoarseClass::Read);
+    }
+
+    fn counting(sql: &str, ctx: &ClassifyCtx) -> SafetyReport {
+        RAN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        sql_safety::classify(sql, ctx)
+    }
+
+    static RAN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    #[tokio::test]
+    async fn a_job_past_its_deadline_or_without_a_waiter_does_not_classify() {
+        let p = ClassifyPool::new(1);
+        let release = hold(&p);
+        // Past its deadline when the thread reaches it: Unknown, not classified.
+        let late = p.start("SELECT 1".into(), pg(), Some(Instant::now()), counting);
+        // Nobody waits any more: skipped.
+        drop(p.start("SELECT 2".into(), pg(), None, counting));
+        let before = RAN.load(std::sync::atomic::Ordering::SeqCst);
+        drop(release);
+        let r = late.await.unwrap();
+        assert_eq!(r.request_class, CoarseClass::Unknown);
+        assert!(r.matches_text("SELECT 1"));
+        // A later job runs after both: neither of them classified.
+        let after = p
+            .start("SELECT 3".into(), pg(), None, counting)
+            .await
+            .unwrap();
+        assert_eq!(after.request_class, CoarseClass::Read);
+        assert_eq!(RAN.load(std::sync::atomic::Ordering::SeqCst), before + 1);
+    }
+
+    #[test]
+    fn denial_reasons_are_unique() {
+        let r = sql_safety::classify("SELECT f(1), g(2), f(3)", &pg());
+        match read_only_check(&r) {
+            RoCheck::Deny(d) => {
+                let mut sorted = d.reasons.clone();
+                sorted.sort_unstable();
+                sorted.dedup();
+                assert_eq!(sorted.len(), d.reasons.len(), "{:?}", d.reasons);
+            }
+            RoCheck::Allow => panic!("unknown functions allowed"),
+        }
     }
 }

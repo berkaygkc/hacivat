@@ -2213,7 +2213,16 @@ pub mod hooks {
 
     /// `sql` split in execution mode, each statement through the PG backend, merged as the
     /// orchestrator merges (no L0 checks, no pre-pass: Task 14's).
+    // ## m3b-t14-orchestrator (named exception, fix round 1, I2): the harness entries run on a
+    // classifier stack, as `classify` does.
     pub fn classify_pg(sql: &str, ctx: &ClassifyCtx) -> SafetyReport {
+        crate::classify::on_classifier_stack(
+            || classify_pg_here(sql, ctx),
+            || crate::classify::unknown_report(sql, ctx, ReasonCode::EffectsUnknown),
+        )
+    }
+
+    fn classify_pg_here(sql: &str, ctx: &ClassifyCtx) -> SafetyReport {
         let items: Vec<TextRange> = match lex_profile(&ctx.dialect) {
             Ok(profile) => {
                 let lexed = sql_lexer::lex(sql, profile, ctx.dialect.modes, &LexState::Initial);
@@ -2244,7 +2253,15 @@ pub mod hooks {
 
     /// The backend on explicit items.
     pub fn analyse_pg(sql: &str, items: &[TextRange], ctx: &ClassifyCtx) -> Vec<StmtReport> {
-        super::analyse(sql, items, ctx)
+        crate::classify::on_classifier_stack(
+            || super::analyse(sql, items, ctx),
+            || {
+                items
+                    .iter()
+                    .map(|r| super::unknown_report(*r, &[ReasonCode::EffectsUnknown]))
+                    .collect()
+            },
+        )
     }
 
     /// How many `Node`s of each oneof variant (prost's name) the generated walk visits in the

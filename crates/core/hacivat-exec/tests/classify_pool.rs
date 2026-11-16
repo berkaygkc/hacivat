@@ -100,10 +100,11 @@ async fn pool_classifies_deep_input_without_overflowing() {
 /// The longest operator chains the token limit lets through (200,000 significant tokens):
 /// `sqlparser` builds them as left-deep trees, which its derived walk and drop recurse through.
 /// Measured while writing this: a 2 MiB thread (a tokio worker's default) aborts the process on
-/// `SELECT 1 + 1 + …` from ~50,000 terms in a debug build and below 99,000 in release; the
-/// pool's 16 MiB threads read every one of these. This is why `classify` runs only here.
+/// `SELECT 1 + 1 + …` from ~50,000 terms in a debug build and below 99,000 in release. Since
+/// fix round 1 the interim path refuses chains over `MAX_OPERATOR_CHAIN` before `sqlparser`
+/// (C1), and PostgreSQL's parser has its own limits; every one answers on the pool.
 #[tokio::test]
-async fn the_longest_chains_the_token_limit_allows_fit_the_pool_stack() {
+async fn the_longest_chains_the_token_limit_allows_answer_on_the_pool() {
     let p = pool();
     let plus = format!("SELECT 1{}", " + 1".repeat(99_000));
     let and = format!(
@@ -126,8 +127,67 @@ async fn the_longest_chains_the_token_limit_allows_fit_the_pool_stack() {
                 .await
                 .unwrap();
             assert!(r.matches_text(s), "{d:?}");
+            // Fix round 1, C1: on the interim path the chains are over the operator cap.
+            if d != DialectId::Postgres {
+                assert_eq!(r.request_class, CoarseClass::Unknown, "{d:?}");
+                assert!(reasons(&r).contains(&ReasonCode::TooComplex), "{d:?}");
+            }
         }
     }
+    // The reviewer's quadratic chains (C1) answer at once on the pool, Unknown.
+    for (d, s) in [
+        (
+            DialectId::Sqlite,
+            format!("SELECT a{}", " REGEXP a".repeat(5_000)),
+        ),
+        (
+            DialectId::MySql,
+            format!("SELECT a{}", " DIV a".repeat(20_000)),
+        ),
+    ] {
+        let start = Instant::now();
+        let r = p
+            .classify(s.as_str().into(), ctx_for(d, Expect::SingleStatement))
+            .await
+            .unwrap();
+        assert!(start.elapsed() < Duration::from_secs(2), "{d:?}");
+        assert!(reasons(&r).contains(&ReasonCode::TooComplex), "{d:?}");
+    }
+}
+
+/// C2 (controller ruling): the read-only guard has no slot for the session's lexing modes, so
+/// a text the modes read differently is checked under each, and denied unless every reading
+/// allows (the reviewer's repros).
+#[tokio::test]
+async fn read_only_check_denies_what_any_lexing_mode_reading_denies() {
+    let p = pool();
+    for (kind, s) in [
+        (DbmsKind::MySql, "SELECT 'a\\' INTO OUTFILE '/tmp/x' -- '"),
+        (DbmsKind::MariaDb, "SELECT 'a\\' INTO OUTFILE '/tmp/x' -- '"),
+        (DbmsKind::MySql, "SELECT \"a\\\" , SLEEP(1) -- \""),
+        (
+            DbmsKind::Postgres,
+            "SELECT 'a\\' || ' , dblink_exec($q$h$q$, $q$DELETE FROM t$q$) --'",
+        ),
+        (
+            DbmsKind::Postgres,
+            "SELECT 'a\\' || ' , pg_terminate_backend(1) --'",
+        ),
+    ] {
+        assert!(
+            matches!(
+                p.check_read_only(kind, s.into(), none()).await,
+                RoCheck::Deny(_)
+            ),
+            "{kind:?} {s}"
+        );
+    }
+    // A plain read keeps its verdict.
+    assert_eq!(
+        p.check_read_only(DbmsKind::MySql, "SELECT \"a\" FROM t".into(), none())
+            .await,
+        RoCheck::Allow
+    );
 }
 
 #[tokio::test]

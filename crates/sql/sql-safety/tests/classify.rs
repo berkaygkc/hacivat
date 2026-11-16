@@ -9,9 +9,9 @@ use std::time::Instant;
 
 use sql_dialect::{ClientFlavor, DialectCtx, DialectId, LexModes, PgWireFlavor, ServerVersion};
 use sql_safety::{
-    Actor, ClassifyCtx, CoarseClass, EffectSet, Expect, GateClass, Limits, Profile, ReasonCode,
-    SafetyReport, Verdict, changes_context, classify, classify_interim, classify_units, decide,
-    gate_class, pg_backend_hooks,
+    Actor, ClassifyCtx, CoarseClass, EffectSet, Expect, GateClass, Limits, MAX_CLONING_WORK,
+    MAX_OPERATOR_CHAIN, Profile, ReasonCode, SafetyReport, Verdict, changes_context, classify,
+    classify_interim, classify_units, decide, gate_class, pg_backend_hooks,
 };
 use sql_split::FingerprintAlgo;
 
@@ -591,6 +591,13 @@ fn a_context_change_makes_every_later_item_unknown() {
         "RESET ALL; SELECT 1",
     ] {
         let r = classify(s, &pg_script());
+        assert!(!read_only_allows(&r), "{s}");
+        if r.pre_decision.is_some() {
+            // Fix round 1, C2: the two `standard_conforming_strings` readings cut the
+            // backslash script differently.
+            assert!(has_reason(&r, ReasonCode::AmbiguousBoundary), "{s}: {r:?}");
+            continue;
+        }
         let last = r.items.last().unwrap();
         assert_eq!(last.class, CoarseClass::Unknown, "{s}: {r:?}");
         assert!(
@@ -1036,7 +1043,10 @@ fn corpus(file: &str) -> Vec<String> {
 
 /// The PostgreSQL corpus entries that read-only consoles refuse by an earlier ruling: none
 /// may join them silently.
-const PG_RULED_DENIALS: [&str; 4] = [
+const PG_RULED_DENIALS: [&str; 5] = [
+    // Fix round 1, C2 (controller ruling): `U&''` does not lex with
+    // `standard_conforming_strings` off, and the session's setting is not known to `classify`.
+    "SELECT E'tab\\there', U&'d\\0061t\\+000061'",
     // T3 ruling (5): `version()` stays unknown (PO list).
     "SELECT version()",
     // T9 fix round 1, I1: a coercion to a user type may run a domain CHECK or a user cast.
@@ -1103,6 +1113,339 @@ fn a_lent_lexing_classifies_exactly_like_the_backends_own() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Fix round 1
+
+/// Every infix operator of each interim dialect, as `(operator, right operand)`.
+fn infix_operators(d: DialectId) -> Vec<(&'static str, &'static str)> {
+    let shared: &[(&str, &str)] = &[
+        ("+", "a"),
+        ("-", "a"),
+        ("*", "a"),
+        ("/", "a"),
+        ("%", "a"),
+        ("=", "a"),
+        ("<>", "a"),
+        ("!=", "a"),
+        ("<", "a"),
+        (">", "a"),
+        ("<=", "a"),
+        (">=", "a"),
+        ("||", "a"),
+        ("AND", "a"),
+        ("OR", "a"),
+        ("LIKE", "a"),
+        ("NOT LIKE", "a"),
+        ("LIKE a ESCAPE", "'x'"),
+        ("REGEXP", "a"),
+        ("NOT REGEXP", "a"),
+        ("|", "a"),
+        ("&", "a"),
+        ("<<", "a"),
+        (">>", "a"),
+        ("->", "'$'"),
+        ("->>", "'$'"),
+        ("COLLATE", "binary"),
+        ("IS", "NULL"),
+        ("IS NOT", "NULL"),
+        ("IN", "(a)"),
+        ("NOT IN", "(a)"),
+        ("BETWEEN a AND", "a"),
+    ];
+    let own: &[(&str, &str)] = match d {
+        DialectId::Sqlite => &[
+            ("==", "a"),
+            ("GLOB", "a"),
+            ("NOT GLOB", "a"),
+            ("MATCH", "a"),
+            ("NOT MATCH", "a"),
+            ("IS DISTINCT FROM", "a"),
+        ],
+        _ => &[
+            ("DIV", "a"),
+            ("MOD", "a"),
+            ("XOR", "a"),
+            ("&&", "a"),
+            ("<=>", "a"),
+            ("^", "a"),
+            ("RLIKE", "a"),
+            ("SOUNDS LIKE", "a"),
+            ("MEMBER OF", "(a)"),
+        ],
+    };
+    shared.iter().chain(own).copied().collect()
+}
+
+/// Whether `op` counts as an operator `sqlparser` parses by cloning its left operand
+/// (`MAX_CLONING_WORK`): MySQL/MariaDB `DIV`, SQLite `REGEXP`/`GLOB`/`MATCH`, counted on every
+/// interim dialect (fail closed).
+fn cloning(_d: DialectId, op: &str) -> bool {
+    ["DIV", "REGEXP", "GLOB", "MATCH"]
+        .iter()
+        .any(|w| op.ends_with(w))
+}
+
+/// C1: every infix operator of every interim dialect, chained as long as the caps allow,
+/// classifies on the test thread (2 MiB: `classify` hops to its own stack) in a bounded time,
+/// and one more link is `TooComplex` before any parser runs.
+#[test]
+fn every_infix_operator_chain_is_capped_and_classifies_in_bounded_time() {
+    // n cloning links of `per_link` counted operators each: n × n·per_link ≤ MAX_CLONING_WORK.
+    let mut slowest = (0.0f64, String::new());
+    for d in [DialectId::MySql, DialectId::MariaDb, DialectId::Sqlite] {
+        for (op, rhs) in infix_operators(d) {
+            // Operators per link (`NOT LIKE` is two counted words, `BETWEEN a AND` two, …).
+            let per_link = op
+                .split(' ')
+                .filter(|w| {
+                    !w.is_empty()
+                        && ([
+                            "AND", "OR", "XOR", "NOT", "DIV", "MOD", "LIKE", "RLIKE", "REGEXP",
+                            "GLOB", "MATCH", "SOUNDS", "IS", "IN", "BETWEEN", "COLLATE", "ESCAPE",
+                            "MEMBER",
+                        ]
+                        .contains(w)
+                            || !w.chars().all(|c| c.is_ascii_alphabetic()))
+                })
+                .count()
+                .max(1);
+            let links = if cloning(d, op) {
+                ((MAX_CLONING_WORK as f64) / per_link as f64).sqrt() as usize
+            } else {
+                MAX_OPERATOR_CHAIN as usize / per_link
+            };
+            let chain = |n: usize| format!("SELECT a{}", format!(" {op} {rhs}").repeat(n));
+            let at = chain(links);
+            let start = Instant::now();
+            let r = classify(&at, &single(d));
+            let took = start.elapsed().as_secs_f64();
+            assert!(
+                !has_reason(&r, ReasonCode::TooComplex) || r.pre_decision.is_none(),
+                "{d:?} `{op}` ×{links}: refused at the cap ({:?})",
+                codes(&r)
+            );
+            assert!(took < 2.0, "{d:?} `{op}` ×{links}: {took:.2} s");
+            if std::env::var("T14_CHAIN_TIMES").is_ok() {
+                eprintln!("chain {d:?} `{op}` ×{links}: {:.1} ms", took * 1e3);
+            }
+            if took > slowest.0 {
+                slowest = (took, format!("{d:?} `{op}` ×{links}"));
+            }
+            let past = classify(&chain(links + 1), &single(d));
+            assert!(
+                past.pre_decision
+                    .as_deref()
+                    .is_some_and(|p| p.iter().any(|x| x.code == ReasonCode::TooComplex)),
+                "{d:?} `{op}` ×{}: not capped ({:?})",
+                links + 1,
+                codes(&past)
+            );
+        }
+    }
+    eprintln!(
+        "slowest chain at the cap: {} in {:.0} ms",
+        slowest.1,
+        slowest.0 * 1e3
+    );
+    // A long linear chain followed by cloning operators: the clones copy the whole chain.
+    for d in [DialectId::MySql, DialectId::Sqlite] {
+        let op = if d == DialectId::Sqlite {
+            "REGEXP"
+        } else {
+            "DIV"
+        };
+        let s = format!(
+            "SELECT a{}{}",
+            " + a".repeat(1_000),
+            format!(" {op} a").repeat(23)
+        );
+        let start = Instant::now();
+        let r = classify(&s, &single(d));
+        assert!(start.elapsed().as_secs_f64() < 2.0, "{d:?}");
+        assert!(r.matches_text(&s));
+        assert!(
+            !has_reason(&r, ReasonCode::TooComplex),
+            "{d:?}: {:?}",
+            codes(&r)
+        );
+        let more = format!("{s}{}", format!(" {op} a").repeat(8));
+        assert!(
+            has_reason(&classify(&more, &single(d)), ReasonCode::TooComplex),
+            "{d:?}"
+        );
+    }
+}
+
+/// C1: the reviewer's crashing inputs are refused before `sqlparser` sees them, quickly.
+#[test]
+fn the_reviewers_quadratic_chains_are_too_complex_at_once() {
+    for (d, s) in [
+        (
+            DialectId::Sqlite,
+            format!("SELECT a{}", " REGEXP a".repeat(5_000)),
+        ),
+        (
+            DialectId::Sqlite,
+            format!("SELECT a{}", " REGEXP a".repeat(20_000)),
+        ),
+        (
+            DialectId::Sqlite,
+            format!("SELECT a{}", " GLOB a".repeat(99_994)),
+        ),
+        (
+            DialectId::Sqlite,
+            format!("SELECT a{}", " MATCH a".repeat(99_994)),
+        ),
+        (
+            DialectId::MySql,
+            format!("SELECT a{}", " DIV a".repeat(20_000)),
+        ),
+        (
+            DialectId::MariaDb,
+            format!("SELECT a{}", " DIV a".repeat(5_000)),
+        ),
+        (
+            DialectId::MySql,
+            format!("SELECT 1{}", " + 1".repeat(99_000)),
+        ),
+        (
+            DialectId::Sqlite,
+            format!(
+                "SELECT 1 FROM t WHERE {}",
+                vec!["a = 1"; 49_000].join(" AND ")
+            ),
+        ),
+    ] {
+        let start = Instant::now();
+        let r = classify(&s, &single(d));
+        assert!(start.elapsed().as_secs_f64() < 2.0, "{d:?}");
+        assert!(
+            r.items.is_empty() && has_reason(&r, ReasonCode::TooComplex),
+            "{d:?}"
+        );
+    }
+    // A chain split by commas or statements is many short chains.
+    let items = vec!["a REGEXP a"; 2_000].join(", ");
+    let r = classify(&format!("SELECT {items}"), &single(DialectId::Sqlite));
+    assert!(
+        has_reason(&r, ReasonCode::TooComplex),
+        "cloning work is per statement"
+    );
+    let list = vec!["a + a"; 3_000].join(", ");
+    let r = classify(&format!("SELECT {list}"), &single(DialectId::Sqlite));
+    assert!(!has_reason(&r, ReasonCode::TooComplex), "{:?}", codes(&r));
+}
+
+/// I2: `classify`, `classify_units` and the harnesses run on their own 16 MiB stack when the
+/// calling thread is small. Before the fix these aborted the process on a 2 MiB thread.
+#[test]
+fn every_entry_is_safe_on_a_two_mib_thread() {
+    let at_cap = format!("SELECT a{}", " + a".repeat(MAX_OPERATOR_CHAIN as usize));
+    let deep = format!("SELECT 1{}", " + 1".repeat(99_000));
+    let h = std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || {
+            let my = single(DialectId::MySql);
+            let a = classify(&at_cap, &my).request_class;
+            let b = classify_units(&[at_cap.as_str(), "SELECT 1"], &my).len();
+            // The harness has no L0: its tree is 99,000 deep.
+            let c = classify_interim(&deep, &my).request_class;
+            let d = pg_backend_hooks::classify_pg(&deep, &pg_single()).request_class;
+            (a, b, c, d)
+        })
+        .unwrap();
+    let (a, b, c, _) = h.join().expect("no stack overflow");
+    assert_eq!(a, CoarseClass::Read);
+    assert_eq!(b, 2);
+    assert_eq!(c, CoarseClass::Read);
+}
+
+/// C2 (controller ruling): the session's lexing modes are not known to `classify`, so every
+/// reading the bytes allow is taken and the union denies what any reading denies. The
+/// reviewer's repros, with the dialect's default modes.
+#[test]
+fn every_lexing_mode_reading_must_allow() {
+    for (d, s) in [
+        (DialectId::MySql, "SELECT 'a\\' INTO OUTFILE '/tmp/x' -- '"),
+        (
+            DialectId::MariaDb,
+            "SELECT 'a\\' INTO OUTFILE '/tmp/x' -- '",
+        ),
+        (DialectId::MySql, "SELECT \"a\\\" , SLEEP(1) -- \""),
+        (
+            DialectId::Postgres,
+            "SELECT 'a\\' || ' , dblink_exec($q$h$q$, $q$DELETE FROM t$q$) --'",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT 'a\\' || ' , pg_terminate_backend(1) --'",
+        ),
+    ] {
+        let r = classify(s, &single(d));
+        assert!(!read_only_allows(&r), "{d:?} {s}: {r:?}");
+        assert!(r.matches_text(s));
+    }
+    // The other way round: a session the caller says is NO_BACKSLASH_ESCAPES still denies
+    // what the default reading denies.
+    let mut nbe = single(DialectId::MySql);
+    nbe.dialect.modes = LexModes::from_mysql_sql_mode("NO_BACKSLASH_ESCAPES");
+    let r = classify("SELECT 'a\\' , ' INTO OUTFILE ''/tmp/x'' -- '", &nbe);
+    assert!(!read_only_allows(&r), "{r:?}");
+    // Texts the modes read alike keep one reading and their verdicts.
+    for (d, s) in [
+        (DialectId::MySql, "SELECT 'a' FROM t WHERE b = 1"),
+        (DialectId::MySql, "SELECT 'it\\'s' FROM t"),
+        (DialectId::Postgres, "SELECT E'a\\nb' FROM t"),
+        (DialectId::Postgres, "SELECT a FROM t WHERE b = 'x'"),
+    ] {
+        let r = classify(s, &single(d));
+        if !s.contains('\\') {
+            assert!(read_only_allows(&r), "{d:?} {s}: {r:?}");
+        }
+        assert!(r.matches_text(s));
+    }
+}
+
+/// Minors M2–M4 of the review.
+#[test]
+fn round_one_minors() {
+    // M2: an oversized text is never lexed for its fingerprint.
+    let mut tiny = single(DialectId::MySql);
+    tiny.limits.max_bytes = 16;
+    let s = "SELECT 1, 2, 3, 4, 5";
+    let r = classify(s, &tiny);
+    assert!(r.fingerprint.normalized.is_empty());
+    assert_eq!(r.fingerprint.hash, sql_safety::classified_hash(s));
+    let u = sql_safety::unknown_report(s, &tiny, ReasonCode::EffectsUnknown);
+    assert!(u.fingerprint.normalized.is_empty() && u.matches_text(s));
+    // M3: a PostgreSQL rollback undoes transactional SETs.
+    for rb in [
+        "ROLLBACK",
+        "ABORT",
+        "ROLLBACK TO SAVEPOINT s",
+        "rollback prepared 'x'",
+    ] {
+        assert!(changes_context(rb, &classify(rb, &pg_single())), "{rb}");
+    }
+    let reports = classify_units(
+        &[
+            "BEGIN",
+            "SET LOCAL search_path = public",
+            "ROLLBACK",
+            "SELECT lower('a')",
+        ],
+        &pg_single(),
+    );
+    assert_eq!(reports[3].request_class, CoarseClass::Unknown);
+    // M4: `USE db` on MySQL and MariaDB.
+    for d in [DialectId::MySql, DialectId::MariaDb] {
+        let reports = classify_units(&["USE sys", "SELECT * FROM session"], &single(d));
+        assert!(changes_context("USE sys", &reports[0]), "{d:?}");
+        assert_eq!(reports[1].request_class, CoarseClass::Unknown, "{d:?}");
+    }
+    // M7 lives in `hacivat-exec` (`read_only_check`).
+}
+
+// ---------------------------------------------------------------------------------------------
 // The budget (release, HACIVAT_PERF=1)
 
 /// One dense ~10 KB read unit: a wide select list over a join.
@@ -1165,5 +1508,30 @@ fn classify_10kb_unit_under_1ms() {
             "{d:?}: classify best {best:.3}, p50 {p50:.3}, p95 {p95:.3} ms per 10 KB (budget 1 ms; interim assertion 2 ms on the best)"
         );
         assert!(best < 2.0, "{d:?}: {best:.3} ms per 10 KB");
+    }
+    // Fix round 1, C2: a unit whose bytes the lexing modes read differently is classified once
+    // per reading (PostgreSQL 2, MySQL/MariaDB up to 4). Printed for the report; bounded by
+    // the readings × the interim 2 ms.
+    let marked = unit.replacen("'İstanbul'", "'İst\\anbul' AND c.note = \"x\"", 1);
+    for (d, readings) in [
+        (DialectId::Postgres, 2.0),
+        (DialectId::MySql, 4.0),
+        (DialectId::Sqlite, 1.0),
+    ] {
+        let ctx = single(d);
+        let mut times: Vec<f64> = (0..RUNS / 4)
+            .map(|_| {
+                let start = Instant::now();
+                std::hint::black_box(classify(&marked, &ctx));
+                start.elapsed().as_secs_f64()
+            })
+            .collect();
+        times.sort_by(f64::total_cmp);
+        let per = |t: f64| t / (marked.len() as f64 / 10_240.0) * 1e3;
+        let (best, p50) = (per(times[0]), per(times[times.len() / 2]));
+        eprintln!(
+            "{d:?} with a backslash and a double quote: classify best {best:.3}, p50 {p50:.3} ms per 10 KB ({readings} readings)"
+        );
+        assert!(best < 2.0 * readings, "{d:?}: {best:.3} ms per 10 KB");
     }
 }

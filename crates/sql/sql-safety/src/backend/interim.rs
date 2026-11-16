@@ -113,7 +113,16 @@ impl Backend for InterimBackend {
 /// `Unknown`, merged as `classify` merges. Task 10's tests and corpus run through it; Task 14's
 /// [`crate::classify`] is the production entry and supersedes it (it adds the limits, the
 /// templates and the per-dialect plan).
+// ## m3b-t14-orchestrator (named exception, fix round 1, I2): the harness runs on a classifier
+// stack too (it has no L0 limits, so its trees can be deeper than `classify`'s).
 pub fn classify_interim(sql: &str, ctx: &ClassifyCtx) -> SafetyReport {
+    crate::classify::on_classifier_stack(
+        || classify_interim_here(sql, ctx),
+        || crate::classify::unknown_report(sql, ctx, ReasonCode::EffectsUnknown),
+    )
+}
+
+fn classify_interim_here(sql: &str, ctx: &ClassifyCtx) -> SafetyReport {
     let fingerprint = sql_split::hv_norm1(sql, &ctx.dialect);
     let decided = |code: ReasonCode| {
         let mut r = SafetyReport::pre_decided(sql, fingerprint.clone(), vec![Reason::new(code)]);

@@ -1679,8 +1679,8 @@ default lexing modes, no client flavor) with the profile's allowlist and allows 
 **Stack.** The token limit lets a left-deep operator chain of ~100,000 terms through (`SELECT
 1 + 1 + …`), and `sqlparser`'s derived walk and drop recurse through it: measured here, a 2 MiB
 thread aborts the process on it (from ~50,000 terms in a debug build; at 99,000 in release),
-an 8 MiB thread in a debug build too; the pool's 16 MiB threads read every chain the limit
-allows (a test runs them). `classify` must run on the pool only.
+an 8 MiB thread in a debug build too. (The claim first made here, that the pool's 16 MiB threads
+read every chain the limit allows, was wrong: see fix round 1, C1.)
 
 **Budget.** p50/p95 per 10 KB unit (release, 200 runs, a busy machine): PostgreSQL ~1.8–2.0 /
 2.0–2.4 ms, MySQL/MariaDB ~1.45 / 1.5–1.8 ms, SQLite ~1.25 / 1.3–1.45 ms, against SQL-SAFE-02's
@@ -1701,3 +1701,49 @@ through `classify`, PostgreSQL's four ruled denials pinned; lent vs own lexing; 
 budget), unit tests in `classify.rs` (injected failing backends, the producer contract),
 `backend/plan.rs` and `fingerprint.rs`; `hacivat-exec/tests/classify_pool.rs` and the pool's
 unit tests (panic, deadline, shutdown).
+
+**Fix round 1 (review `task-m3b-14-review.md`).**
+- **C1, operator chains.** `sqlparser` 0.64 parses MySQL/MariaDB `DIV` and SQLite `REGEXP`,
+  `GLOB`, `MATCH` by cloning the whole left operand (`parse_div_infix`,
+  `SQLiteDialect::parse_infix`): a chain of n is n² clones and a recursion n deep, which
+  aborted a 16 MiB thread at 5,000 links (debug) and 20,000 (release), after tens of seconds.
+  L0 now counts, on the interim plan, every infix operator (each `Op` token and the words
+  `AND OR XOR NOT DIV MOD LIKE ILIKE RLIKE REGEXP GLOB MATCH SOUNDS SIMILAR IS ISNULL NOTNULL
+  IN BETWEEN COLLATE ESCAPE MEMBER OVERLAPS UNION INTERSECT EXCEPT JOIN`) per expression (a
+  count per open bracket, reset at a comma, the statement's at a top-level `;`), and answers
+  `TooComplex` past **`MAX_OPERATOR_CHAIN` = 1,024** in one expression or past
+  **`MAX_CLONING_WORK` = 65,536** (cloning operators × operators) in one statement.
+  Measurements (debug, every infix operator of each dialect chained): 2,048 links took up to
+  62 ms (`IN`), over the 50 ms bound; 1,024 take 6–20 ms (one 41 ms outlier under load); the
+  cloning ones take 7 ms at 256 (the cloning cap for a plain chain), 23–31 ms at 512 and
+  87–99 ms at 1,024. A test sweeps every infix operator of MySQL, MariaDB and SQLite at the
+  cap (classified, under 2 s) and one link past it (`TooComplex`), plus the reviewer's
+  crashing inputs. PostgreSQL keeps libpg_query's own limits (prost's decode depth, its stack
+  check).
+- **C2, lexing modes (controller ruling, part a).** The session's modes do not reach every
+  caller yet (the read-only guard's seam has no slot), so `classify` reads a text under every
+  mode combination its bytes can tell apart, `ctx`'s modes first: PostgreSQL
+  `standard_conforming_strings` on and off when the text holds `\` or `&` (`U&''`);
+  MySQL/MariaDB `NO_BACKSLASH_ESCAPES` on and off when it holds `\`, crossed with
+  `ANSI_QUOTES` on and off when it holds `"`.
+  `PIPES_AS_CONCAT` and `HIGH_NOT_PRECEDENCE` change no reading here (neither the lexer nor the
+  interim backend reads them). The readings are united: a pre-decision in any is the union's
+  (with every reading's reasons); statements cut differently are `AmbiguousBoundary`; otherwise
+  each item takes every reading's effects, flags, reasons, destructive patterns, objects and
+  `SET` targets, so `decide` (monotone in evidence) allows only what every reading allows. The
+  reviewer's repros deny. Cost (release, 10 KB): PostgreSQL 1.84 → 3.74 ms (2 readings),
+  MySQL 1.6 → 6.1 ms (4 readings), only for texts holding those bytes. Part (b), the
+  session's real modes, search path and version in `ClassifyCtx` (one reading), is a plan
+  amendment for Tasks 18 and 24. New ruled denial: a PostgreSQL `U&''` string (it does not lex
+  with `standard_conforming_strings` off).
+- **I2, the stack.** `classify`, `classify_units`, `classify_interim` and the PG hooks run on a
+  scoped thread of `CLASSIFIER_STACK_BYTES` (16 MiB) unless the calling thread is marked
+  (`mark_classifier_thread`, a hidden hook the pool's threads call); a scoped thread that cannot
+  start or panics answers an `Unknown` report. A test classifies at the caps and runs the
+  harnesses on a 99,000-deep chain from a 2 MiB thread.
+- **Minors.** The pool's entries resolve to a report always (`Result<_, Infallible>`); its
+  queue holds at most `QUEUE_CAPACITY` (256) jobs and a request past it is `Unknown` at once; a
+  job whose caller stopped waiting is skipped, one past its deadline answers `Unknown`
+  unclassified (M1). An oversized text is fingerprinted by its bytes, never lexed
+  (`unknown_report`, M2). On PostgreSQL `ROLLBACK`/`ABORT` (any form), on MySQL/MariaDB `USE`,
+  change the context (M3, M4). Denial reasons are sorted and unique (M7).

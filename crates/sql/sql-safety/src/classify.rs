@@ -11,7 +11,10 @@
 //!    character, trailing junk, …), except `AmbiguousCommentEnd`, which is
 //!    `AmbiguousBoundary`. More than `Limits.max_tokens` significant tokens, or brackets
 //!    (`(`, `[`, `{`, counted together) plus `CASE … END` blocks nested deeper than
-//!    `Limits.max_nesting`, → `TooComplex`.
+//!    `Limits.max_nesting`, → `TooComplex`. On the interim path (MySQL, MariaDB, SQLite) a
+//!    chain of more than [`MAX_OPERATOR_CHAIN`] infix operators in one expression, or more
+//!    than [`MAX_CLONING_WORK`] of `sqlparser`'s left-operand cloning in one statement, →
+//!    `TooComplex` before `sqlparser` sees the text (fix round 1, C1).
 //! 2. **Pre-pass.** Any client command (psql `\cmd`, mysql `DELIMITER`, sqlite3 `.cmd`) or
 //!    `COPY … FROM STDIN` data → `ClientCommand`: those bytes are never what Run sends. A
 //!    template variable (`${x}`, `%x%`, `<x>`, SQL-PARAM-02) → `TemplateVariable`.
@@ -41,6 +44,8 @@
 //! or a reason the policy reads as doubt or unknown). A debug build asserts both; a release
 //! build that meets a violation makes the item `Unknown` (`EffectsUnknown`), never lower.
 //!
+//! **Lexing-mode readings and the stack** (fix round 1, C2 and I2): see [`classify`].
+//!
 //! **Units classified one at a time** ([`classify_units`]): the caller classifies a run's
 //! units before any of them runs (R-M3-84), so a unit that changes the context cannot be
 //! followed by a refreshed one: every later unit is `Unknown` instead (ADR 0005 `m3b-t09`
@@ -50,10 +55,12 @@
 use std::fmt;
 use std::sync::Arc;
 
-use sql_dialect::{ClientFlavor, DialectCtx, DialectId, lex_profile};
+use smallvec::SmallVec;
+use sql_dialect::{ClientFlavor, DialectCtx, DialectId, LexModes, lex_profile};
 use sql_lexer::{LexErrorCode, LexState, Lexed, TokenKind, lex_with_client};
+use sql_split::fingerprint::HV_NORM1_VERSION;
 use sql_split::item::StmtHead;
-use sql_split::{ParamSettings, SplitMode, scan_params};
+use sql_split::{Fingerprint, FingerprintAlgo, ParamSettings, SplitMode, scan_params};
 use sql_text::{TextRange, TextSize};
 
 use crate::backend::Backend;
@@ -130,16 +137,212 @@ impl fmt::Debug for ClassifyCtx {
 /// module docs). Every libpg_query call it makes runs on the oracle's own serial parser
 /// thread.
 ///
-/// **Call it on `hacivat-exec::classify_pool`'s 16 MiB threads only** (R-M3-3, R-M3-53): the
-/// token limit lets a left-deep operator chain of ~100,000 terms through (`SELECT 1 + 1 + …`),
-/// which `sqlparser`'s derived walk and drop recurse through; measured at Task 14, a 2 MiB
-/// thread (a tokio worker's default) aborts the process on it, in release too.
+/// **Stack** (R-M3-3, R-M3-53; fix round 1, I2): the backends recurse through the trees they
+/// build (`sqlparser`'s derived walk, drop and clone). On a thread the classifier pool did not
+/// mark ([`mark_classifier_thread`]), `classify` runs on a scoped thread of
+/// [`CLASSIFIER_STACK_BYTES`] and answers an `Unknown` report if that thread cannot start or
+/// panics: no caller can overflow a small stack with it.
+///
+/// **Lexing modes** (fix round 1, C2, controller ruling): the session's real modes are not
+/// known to every caller yet, so a text whose bytes lex differently under another mode of the
+/// dialect (a backslash: PostgreSQL `standard_conforming_strings`, MySQL/MariaDB
+/// `NO_BACKSLASH_ESCAPES`; a double quote: `ANSI_QUOTES`; `&`: PostgreSQL `U&''`) is classified
+/// under every combination, `ctx`'s first, and the reports are united: the result allows only
+/// what every reading allows ([`union_readings`]).
 pub fn classify(sql: &str, ctx: &ClassifyCtx) -> SafetyReport {
-    let plan = plan_for(ctx.dialect.id);
-    classify_with(sql, ctx, plan, plan.backend())
+    on_classifier_stack(
+        || classify_readings(sql, ctx),
+        || unknown_report(sql, ctx, ReasonCode::EffectsUnknown),
+    )
 }
 
-/// [`classify`] with the plan's backend given (the unit tests inject failing ones).
+/// A classifier thread's stack: 16 MiB (R-M3-3).
+pub const CLASSIFIER_STACK_BYTES: usize = 16 << 20;
+
+std::thread_local! {
+    static ON_CLASSIFIER_STACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks the calling thread as one with a stack of at least [`CLASSIFIER_STACK_BYTES`], so the
+/// classifier runs on it directly. Only `hacivat-exec::classify_pool`'s threads call it; a
+/// thread with a smaller stack must never.
+#[doc(hidden)]
+pub fn mark_classifier_thread() {
+    ON_CLASSIFIER_STACK.with(|c| c.set(true));
+}
+
+/// Runs `f` on a classifier stack: here when the thread is marked, else on a scoped thread of
+/// [`CLASSIFIER_STACK_BYTES`]; `failed()` when that thread cannot start or `f` panics on it.
+pub(crate) fn on_classifier_stack<R: Send>(
+    f: impl FnOnce() -> R + Send,
+    failed: impl FnOnce() -> R,
+) -> R {
+    if ON_CLASSIFIER_STACK.with(std::cell::Cell::get) {
+        return f();
+    }
+    let out = std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .name("hacivat-classify-scoped".to_string())
+            .stack_size(CLASSIFIER_STACK_BYTES)
+            .spawn_scoped(s, || {
+                mark_classifier_thread();
+                f()
+            })
+            .ok()
+            .and_then(|h| h.join().ok())
+    });
+    out.unwrap_or_else(failed)
+}
+
+/// An `Unknown` report of `sql`, pre-decided with `code`, for `ctx`'s dialect: what a
+/// classification that did not happen answers (a panic, a deadline, a full or shut-down pool).
+/// A text over `ctx.limits.max_bytes` is fingerprinted by its bytes, never lexed (fix round 1,
+/// M2).
+pub fn unknown_report(sql: &str, ctx: &ClassifyCtx, code: ReasonCode) -> SafetyReport {
+    let mut r =
+        SafetyReport::pre_decided(sql, cheap_fingerprint(sql, ctx), vec![Reason::new(code)]);
+    r.dialect = Some(ctx.dialect.id);
+    r
+}
+
+/// `HvNorm1`, except over a text longer than `ctx.limits.max_bytes`: then the XXH3-64 of its
+/// bytes, with an empty normalised form (the text is never lexed).
+fn cheap_fingerprint(sql: &str, ctx: &ClassifyCtx) -> Fingerprint {
+    if sql.len() > ctx.limits.max_bytes {
+        Fingerprint {
+            algo: FingerprintAlgo::HvNorm1,
+            hash: crate::fingerprint::classified_hash(sql),
+            normalized: Arc::from(""),
+            version: HV_NORM1_VERSION,
+        }
+    } else {
+        sql_split::hv_norm1(sql, &ctx.dialect)
+    }
+}
+
+/// The lexing modes `sql` is read under: `ctx`'s first, then every combination of the modes of
+/// the dialect that `sql`'s bytes can tell apart (the [`classify`] docs).
+fn mode_readings(sql: &str, ctx: &ClassifyCtx) -> SmallVec<[LexModes; 4]> {
+    let base = ctx.dialect.modes;
+    let mut out: SmallVec<[LexModes; 4]> = SmallVec::new();
+    out.push(base);
+    match ctx.dialect.id {
+        DialectId::Postgres | DialectId::PgWire(_) => {
+            if sql.contains('\\') || sql.contains('&') {
+                out.push(LexModes {
+                    standard_conforming_strings: !base.standard_conforming_strings,
+                    ..base
+                });
+            }
+        }
+        DialectId::MySql | DialectId::MariaDb => {
+            let nbe: &[bool] = if sql.contains('\\') {
+                &[false, true]
+            } else {
+                &[false]
+            };
+            let ansi: &[bool] = if sql.contains('"') {
+                &[false, true]
+            } else {
+                &[false]
+            };
+            for flip_nbe in nbe {
+                for flip_ansi in ansi {
+                    if *flip_nbe || *flip_ansi {
+                        out.push(LexModes {
+                            no_backslash_escapes: base.no_backslash_escapes ^ flip_nbe,
+                            ansi_quotes: base.ansi_quotes ^ flip_ansi,
+                            ..base
+                        });
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// [`classify`] on the classifier stack: one classification per mode reading, united.
+fn classify_readings(sql: &str, ctx: &ClassifyCtx) -> SafetyReport {
+    let plan = plan_for(ctx.dialect.id);
+    if sql.len() > ctx.limits.max_bytes {
+        // L0's first check, before the readings scan the bytes.
+        return classify_with(sql, ctx, plan, plan.backend());
+    }
+    let readings = mode_readings(sql, ctx);
+    let mut united = classify_with(sql, ctx, plan, plan.backend());
+    for modes in &readings[1..] {
+        let mut other = ctx.clone();
+        other.dialect.modes = *modes;
+        united = union_readings(united, classify_with(sql, &other, plan, plan.backend()));
+    }
+    united
+}
+
+/// The union of two readings of the same bytes: `a`'s fingerprint, versions and dialect; a
+/// pre-decision in either makes the union pre-decided with both reasons; statements cut
+/// differently are `AmbiguousBoundary`; otherwise each item takes both readings' evidence
+/// (effects, flags, reasons, destructive patterns, objects and `SET` targets), so `decide`,
+/// monotone in evidence, allows the union only when it allows both.
+fn union_readings(mut a: SafetyReport, b: SafetyReport) -> SafetyReport {
+    let pre = |r: &SafetyReport| r.pre_decision.clone().unwrap_or_default();
+    let same_cut = a.items.len() == b.items.len()
+        && a.items
+            .iter()
+            .zip(&b.items)
+            .all(|(x, y)| x.range == y.range);
+    if a.pre_decision.is_some() || b.pre_decision.is_some() || !same_cut {
+        let mut reasons = pre(&a);
+        for r in pre(&b) {
+            if !reasons.contains(&r) {
+                reasons.push(r);
+            }
+        }
+        if reasons.is_empty() {
+            reasons.push(Reason::new(ReasonCode::AmbiguousBoundary));
+        }
+        a.items.clear();
+        a.request_class = CoarseClass::Unknown;
+        a.request_effects = EffectSet::UNKNOWN;
+        a.flags = RiskFlags::empty();
+        a.pre_decision = Some(reasons);
+        return a;
+    }
+    for (x, y) in a.items.iter_mut().zip(b.items) {
+        if class_of(y.effects) > class_of(x.effects) {
+            x.kind = y.kind;
+        }
+        if y.confidence != x.confidence || y != *x {
+            x.confidence = crate::report::Confidence::Conservative;
+        }
+        x.effects |= y.effects;
+        x.flags |= y.flags;
+        extend_unique(&mut x.reasons, y.reasons);
+        extend_unique(&mut x.destructive, y.destructive);
+        extend_unique(&mut x.touched.reads, y.touched.reads);
+        extend_unique(&mut x.touched.writes, y.touched.writes);
+        extend_unique(&mut x.touched.calls, y.touched.calls);
+        extend_unique(&mut x.set_targets, y.set_targets);
+        x.class = class_of(x.effects);
+    }
+    let (class, effects, flags) = merge(&a.items);
+    a.request_class = class;
+    a.request_effects = effects;
+    a.flags = flags;
+    a
+}
+
+fn extend_unique<T: PartialEq>(into: &mut Vec<T>, from: Vec<T>) {
+    for v in from {
+        if !into.contains(&v) {
+            into.push(v);
+        }
+    }
+}
+
+/// [`classify`] with the plan's backend given, under `ctx`'s modes only (the unit tests inject
+/// failing backends).
 fn classify_with(
     sql: &str,
     ctx: &ClassifyCtx,
@@ -147,7 +350,7 @@ fn classify_with(
     backend: Option<&dyn Backend>,
 ) -> SafetyReport {
     let decided = |reasons: Vec<Reason>| {
-        let mut r = SafetyReport::pre_decided(sql, sql_split::hv_norm1(sql, &ctx.dialect), reasons);
+        let mut r = SafetyReport::pre_decided(sql, cheap_fingerprint(sql, ctx), reasons);
         r.dialect = Some(ctx.dialect.id);
         r.backends = plan.versions();
         r
@@ -171,7 +374,7 @@ fn classify_with(
         ctx.flavor,
     );
     let mut reasons = Vec::new();
-    limits_and_lexing(sql, &lexed, &ctx.limits, &mut reasons);
+    limits_and_lexing(sql, &lexed, &ctx.limits, plan, &mut reasons);
 
     // Step 2: the pre-pass; step 3: the execution-mode split.
     let split = sql_split::split(sql, &lexed, &ctx.dialect, ctx.flavor, SplitMode::Execution);
@@ -252,19 +455,29 @@ fn classify_with(
 /// Classifies a run's units in order, each with `ctx` (the module docs): once a unit may change
 /// the context ([`changes_context`]), every later unit is `Unknown` (`EffectsUnknown` on every
 /// item; a pre-decided report stays as it is). One report per unit, in order.
-pub fn classify_units<S: AsRef<str>>(units: &[S], ctx: &ClassifyCtx) -> Vec<SafetyReport> {
-    let mut stale = false;
-    units
-        .iter()
-        .map(|u| {
-            let mut r = classify(u.as_ref(), ctx);
-            if stale {
-                mark_stale(&mut r);
-            }
-            stale |= changes_context(u.as_ref(), &r);
-            r
-        })
-        .collect()
+pub fn classify_units<S: AsRef<str> + Sync>(units: &[S], ctx: &ClassifyCtx) -> Vec<SafetyReport> {
+    on_classifier_stack(
+        || {
+            let mut stale = false;
+            units
+                .iter()
+                .map(|u| {
+                    let mut r = classify(u.as_ref(), ctx);
+                    if stale {
+                        mark_stale(&mut r);
+                    }
+                    stale |= changes_context(u.as_ref(), &r);
+                    r
+                })
+                .collect()
+        },
+        || {
+            units
+                .iter()
+                .map(|u| unknown_report(u.as_ref(), ctx, ReasonCode::EffectsUnknown))
+                .collect()
+        },
+    )
 }
 
 /// Whether running the request `r`, the report of `sql`, may change how a later request must
@@ -360,9 +573,15 @@ fn item_changes_context(item: &StmtReport, sql: &str, dialect: DialectId) -> boo
         return true;
     }
     let word = first_word(sql, item.range);
-    RUNS_DEFINED_CODE
-        .iter()
-        .any(|w| word.eq_ignore_ascii_case(w))
+    let is = |w: &&str| word.eq_ignore_ascii_case(w);
+    // Fix round 1, M3/M4: a PostgreSQL rollback undoes the transaction's `SET`s (search path,
+    // role, lexing); a MySQL/MariaDB `USE` changes the database unqualified names resolve in.
+    let dialect_words: &[&str] = match dialect {
+        DialectId::Postgres | DialectId::PgWire(_) => &["ROLLBACK", "ABORT"],
+        DialectId::MySql | DialectId::MariaDb => &["USE"],
+        _ => &[],
+    };
+    RUNS_DEFINED_CODE.iter().any(is) || dialect_words.iter().any(is)
 }
 
 /// The leading ASCII letters of `sql[range]`.
@@ -466,8 +685,127 @@ fn push_once(reasons: &mut Vec<Reason>, code: ReasonCode, range: Option<TextRang
     }
 }
 
-/// Step 1's checks on the lexing: errors, the token count, the nesting.
-fn limits_and_lexing(sql: &str, lexed: &Lexed, limits: &Limits, reasons: &mut Vec<Reason>) {
+// ## m3b-t14-orchestrator (fix round 1, C1): operator chains on the interim path.
+
+/// The longest chain of infix operators one expression may hold before `sqlparser` reads it
+/// (interim plan). `sqlparser` builds a chain as a left-deep tree and its derived walk, drop and
+/// clone recurse through it. Measured at Task 14 fix round 1 (debug build, `classify` of
+/// `SELECT a <op> a <op> …` for every infix operator of MySQL, MariaDB and SQLite, machine
+/// load ~10): 2,048 links took up to 62 ms (`IN`), over the 50 ms bound; 1,024 take 6–20 ms
+/// (one outlier 41 ms), a ~2.5x time margin and ~5x below the depth a debug 16 MiB stack
+/// survives (`+` ×5,000 aborted a 16 MiB debug thread only through a cloning operator).
+pub const MAX_OPERATOR_CHAIN: u32 = 1_024;
+
+/// The most cloning work one statement may hold (interim plan): (operators that `sqlparser`
+/// parses by cloning their whole left operand) × (infix operators in the statement). The
+/// cloning operators are MySQL/MariaDB `DIV` and SQLite `REGEXP`, `GLOB` and `MATCH`
+/// (`sqlparser` 0.64 `parse_div_infix`, `SQLiteDialect::parse_infix`): a chain of n of them
+/// costs n² node clones. Measured (debug, 16 MiB): 256 → 7 ms, 512 → 23–31 ms, 1,024 →
+/// 87–99 ms; 65,536 (a chain of 256) keeps a ~4x time margin to 50 ms.
+pub const MAX_CLONING_WORK: u64 = 65_536;
+
+/// Words that are infix operators in some interim dialect (counted with every `Op` token).
+const INFIX_WORDS: [&str; 27] = [
+    "AND",
+    "OR",
+    "XOR",
+    "NOT",
+    "DIV",
+    "MOD",
+    "LIKE",
+    "ILIKE",
+    "RLIKE",
+    "REGEXP",
+    "GLOB",
+    "MATCH",
+    "SOUNDS",
+    "SIMILAR",
+    "IS",
+    "ISNULL",
+    "NOTNULL",
+    "IN",
+    "BETWEEN",
+    "COLLATE",
+    "ESCAPE",
+    "MEMBER",
+    "OVERLAPS",
+    "UNION",
+    "INTERSECT",
+    "EXCEPT",
+    "JOIN",
+];
+
+/// The infix operators `sqlparser` 0.64 parses by cloning their left operand.
+const CLONING_WORDS: [&str; 4] = ["DIV", "REGEXP", "GLOB", "MATCH"];
+
+/// Operator-chain counters (`MAX_OPERATOR_CHAIN`, `MAX_CLONING_WORK`): one count per open
+/// bracket (an expression inside brackets is a chain of its own; after the closing bracket the
+/// outer chain goes on), reset at a comma; the statement's totals reset at a top-level `;`.
+#[derive(Default)]
+struct Chains {
+    frames: Vec<u32>,
+    current: u32,
+    ops: u64,
+    cloning: u64,
+    over: bool,
+}
+
+impl Chains {
+    fn token(&mut self, sql: &str, lexed: &Lexed, i: usize) {
+        let (is_op, clones) = match lexed.kind(i) {
+            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                self.frames.push(self.current);
+                self.current = 0;
+                return;
+            }
+            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                self.current = self.frames.pop().unwrap_or(0);
+                return;
+            }
+            TokenKind::Comma => {
+                self.current = 0;
+                return;
+            }
+            TokenKind::Semicolon => {
+                if self.frames.is_empty() {
+                    self.current = 0;
+                    self.ops = 0;
+                    self.cloning = 0;
+                }
+                return;
+            }
+            TokenKind::Op => (true, false),
+            TokenKind::Word => {
+                let w = token_text(sql, lexed, i);
+                if w.len() > 9 || !INFIX_WORDS.iter().any(|k| w.eq_ignore_ascii_case(k)) {
+                    return;
+                }
+                (
+                    true,
+                    CLONING_WORDS.iter().any(|k| w.eq_ignore_ascii_case(k)),
+                )
+            }
+            _ => return,
+        };
+        if is_op {
+            self.current = self.current.saturating_add(1);
+            self.ops = self.ops.saturating_add(1);
+            self.cloning += u64::from(clones);
+            self.over |= self.current > MAX_OPERATOR_CHAIN
+                || self.cloning.saturating_mul(self.ops) > MAX_CLONING_WORK;
+        }
+    }
+}
+
+/// Step 1's checks on the lexing: errors, the token count, the nesting and (interim plan) the
+/// operator chains.
+fn limits_and_lexing(
+    sql: &str,
+    lexed: &Lexed,
+    limits: &Limits,
+    plan: Plan,
+    reasons: &mut Vec<Reason>,
+) {
     for e in lexed.errors() {
         let code = if e.code == LexErrorCode::AmbiguousCommentEnd {
             ReasonCode::AmbiguousBoundary
@@ -480,6 +818,7 @@ fn limits_and_lexing(sql: &str, lexed: &Lexed, limits: &Limits, reasons: &mut Ve
     let mut brackets: u32 = 0;
     let mut cases: u32 = 0;
     let mut deepest: u32 = 0;
+    let mut chains = (plan == Plan::Interim).then(Chains::default);
     let mut i = 0;
     while i < lexed.len() {
         if lexed.is_trivia(i) {
@@ -502,11 +841,15 @@ fn limits_and_lexing(sql: &str, lexed: &Lexed, limits: &Limits, reasons: &mut Ve
             }
             _ => {}
         }
+        if let Some(c) = chains.as_mut() {
+            c.token(sql, lexed, i);
+        }
         deepest = deepest.max(brackets.saturating_add(cases));
         i += 1;
     }
     let too_deep = deepest > u32::from(limits.max_nesting);
-    if significant > limits.max_tokens || too_deep {
+    let too_long = chains.is_some_and(|c| c.over);
+    if significant > limits.max_tokens || too_deep || too_long {
         push_once(reasons, ReasonCode::TooComplex, None);
     }
 }

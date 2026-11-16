@@ -197,6 +197,21 @@ fn read_corpus_classifies_within_budget() {
     if std::env::var("HACIVAT_PERF").as_deref() != Ok("1") {
         return;
     }
+    // ## m3b-t14-orchestrator (named exception, fix round 1, I2): measured on a classifier
+    // thread (16 MiB, marked), as the pool runs it; elsewhere each call first moves to a
+    // scoped thread of its own, which this budget is not about.
+    std::thread::Builder::new()
+        .stack_size(sql_safety::CLASSIFIER_STACK_BYTES)
+        .spawn(|| {
+            sql_safety::mark_classifier_thread();
+            within_budget();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn within_budget() {
     const RUNS: u32 = 20;
     for e in [Engine::MySql, Engine::MariaDb, Engine::Sqlite] {
         // One ~10 KB read: a wide select list over a join, the shape of a reporting query.
