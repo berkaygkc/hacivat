@@ -1302,14 +1302,15 @@ impl GuardedCursor {
 
 // ## m3b-t18-safe06 (fix round 1, m1; ledger 279)
 /// First keywords whose statement is judged by its affected-row count (`hacivat_guard`'s
-/// row-write tags; on MySQL and MariaDB also `WITH`, `CALL` and `DO`). `SELECT` is left out:
-/// a drained MySQL `SELECT` is the common release, and a `SELECT` writes only through a
+/// row-write tags; on MySQL and MariaDB also `CALL` and `DO`). Only a statement with a result
+/// set is ever drained, so `SELECT` and `WITH … SELECT` are left out: a drained read is the
+/// common release (Docker: a locking `WITH` cursor), and such a read writes only through a
 /// function or `INTO OUTFILE`, which the read-only transaction (1792), the principal (no
-/// `FILE`) and step 0b already stop.
+/// `FILE`) and step 0b already stop; a MySQL `WITH … DELETE` has no result set to drain.
 const COUNT_JUDGED: [&str; 7] = [
     "INSERT", "UPDATE", "DELETE", "MERGE", "COPY", "REPLACE", "LOAD",
 ];
-const MYSQL_COUNT_JUDGED: [&str; 3] = ["WITH", "CALL", "DO"];
+const MYSQL_COUNT_JUDGED: [&str; 2] = ["CALL", "DO"];
 
 /// Whether some reading of the statement's first keyword is one whose post-check needs the
 /// count (readings cut short count too: fail-closed).
@@ -1377,7 +1378,10 @@ mod m3b_t18_tests {
         let needs = |kind, sql| needs_count(kind, &guard_keywords(kind, sql));
         assert!(needs(DbmsKind::MySql, "CALL p()"));
         assert!(needs(DbmsKind::MariaDb, "do release_lock('x')"));
-        assert!(needs(DbmsKind::MySql, "WITH x AS (SELECT 1) DELETE FROM t"));
+        assert!(!needs(
+            DbmsKind::MySql,
+            "WITH d AS (SELECT 1) SELECT * FROM d"
+        ));
         assert!(needs(DbmsKind::MySql, "/*!50000 CALL p() */ SELECT 1"));
         assert!(needs(DbmsKind::Postgres, "INSERT INTO t VALUES (1)"));
         assert!(!needs(DbmsKind::MySql, "SELECT * FROM t"));

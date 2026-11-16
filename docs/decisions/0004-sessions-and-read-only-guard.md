@@ -2492,11 +2492,12 @@ boot installs `hacivat_exec::classify_pool::ClassifyPool::new(2)` (`boot.rs`, on
   - *m1 (ledger 279).* A typed statement that completed without a result end (a release whose
     drain read a MySQL result to its end has no final OK) has no tag and no count. When a
     reading of its first keyword is judged by its count (`INSERT`, `UPDATE`, `DELETE`, `MERGE`,
-    `COPY`, `REPLACE`, `LOAD`; on MySQL/MariaDB also `WITH`, `CALL`, `DO`; readings cut short
-    too) it is unknown, never clean: the guard ends, then the connection is discarded as a gap
-    (`WriteSucceeded`). A drained `SELECT` (the common release) stays clean: a `SELECT` writes
-    only through a function or `INTO OUTFILE`, which the read-only transaction, the principal
-    and step 0b stop.
+    `COPY`, `REPLACE`, `LOAD`; on MySQL/MariaDB also `CALL`, `DO`; readings cut short too) it
+    is unknown, never clean: the guard ends, then the connection is discarded as a gap
+    (`WriteSucceeded`). A drained `SELECT` or `WITH … SELECT` (the common release; Docker's
+    locking `WITH` cursor) stays clean: such a read writes only through a function or `INTO
+    OUTFILE`, which the read-only transaction, the principal and step 0b stop, and a MySQL
+    `WITH … DELETE` has no result set to drain.
   - *m2.* A failed context read stays due: the check it was for is told nothing (fail-closed),
     and the next check reads again, at most once per check (one per statement).
   - *m3.* After `SwitchSchema`, a re-probe that fails (or reads nothing) leaves the database /
