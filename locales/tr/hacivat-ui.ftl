@@ -2153,3 +2153,16 @@ hv-fetchall-body = Sorgunun satırları { $size } sınırına sığmıyor. Haciv
 hv-fetchall-ok = Bellek sınırına kadar getir
 # Review: PO
 hv-fetchall-cancel = Vazgeç
+
+## m3b-t25-results-r1
+
+# Review: PO
+hv-results-tab-repeat = ({ $n })
+# Review: PO
+hv-results-tabs-more = +{ $n }
+# Review: PO
+hv-results-tabs-more-tip = { $n } sonuç sekmesi daha
+# Review: PO
+hv-results-count-rerun = Satırları saymak için ifadeyi yeniden çalıştırın.
+# Review: PO
+hv-results-count-context = Sayılmadı: konsolun SQL ayarları henüz bilinmiyor.

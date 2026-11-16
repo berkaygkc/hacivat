@@ -1530,10 +1530,10 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     // ## m3a-f5-demo (review m-5): plus the app menu at 960x600 (8).
     // ## m3b-t22-tx-ui (named exception): plus Task 22's 7 states x 16.
     // ## m3b-t21-confirm (named exception): plus 19 dialog states x 16, after Task 22's.
-    // ## m3b-t25-results (named exception): plus Task 25's 10 states x 16, before Task 21's.
-    assert_eq!(all.len(), 1020 + 68 * 16 + 7 * 16 + 10 * 16 + 19 * 16);
+    // ## m3b-t25-results (named exception): plus Task 25's 11 states x 16, before Task 21's.
+    assert_eq!(all.len(), 1020 + 68 * 16 + 7 * 16 + 11 * 16 + 19 * 16);
     assert!(
-        all[1020 + 68 * 16 + 7 * 16 + 10 * 16..]
+        all[1020 + 68 * 16 + 7 * 16 + 11 * 16..]
             .iter()
             .all(|s| s.surface.is_t21())
     );

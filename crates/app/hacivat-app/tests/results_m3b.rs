@@ -191,11 +191,13 @@ struct Tile {
 }
 
 fn tile(cx: &mut TestAppContext) -> Tile {
+    tile_in(cx, EnvTag::Dev)
+}
+
+/// [`tile`] on a console of a connection in `env`.
+fn tile_in(cx: &mut TestAppContext, env: EnvTag) -> Tile {
     let vcx = shell_with_connections(cx, "en");
-    let profile = add_profile(
-        vcx,
-        test_profile("orders-dev", Some(EnvTag::Dev), "10.0.0.5"),
-    );
+    let profile = add_profile(vcx, test_profile("orders-dev", Some(env), "10.0.0.5"));
     let ws = workspace(vcx);
     let (console, results, log) = in_window(vcx, |window, cx| {
         let tab = ws
@@ -350,10 +352,9 @@ fn comment_titles_and_suffixes_on_tabs(cx: &mut TestAppContext) {
         ]
     );
     assert_eq!(t.text("results-tab-0").as_deref(), Some("Şehre göre ciro"));
-    assert_eq!(
-        t.text("results-tab-1").as_deref(),
-        Some("Şehre göre ciro (2)")
-    );
+    // Fix round 1 (m9): the repeat is its own label after the title, so a cut title keeps it.
+    assert_eq!(t.text("results-tab-1").as_deref(), Some("Şehre göre ciro"));
+    assert_eq!(t.text("results-tab-1-repeat").as_deref(), Some("(2)"));
     assert_eq!(t.text("results-tab-2").as_deref(), Some("Result 2"));
     // A comment title alone is data; a repeat and `Result N` are Fluent messages.
     t.vcx.read(|cx| {
@@ -370,9 +371,12 @@ fn comment_titles_and_suffixes_on_tabs(cx: &mut TestAppContext) {
         // The statement's second set shares its N.
         assert_eq!(r.tab(0).map(|e| e.number()), r.tab(1).map(|e| e.number()));
     });
-    // The result run as one says it is untyped, the others nothing. Five tabs do not fit the
-    // strip: the note takes its short form (NOTES ruling 30); alone it is whole.
-    assert_eq!(t.text("results-tab-4-untyped").as_deref(), Some("untyped"));
+    // The result run as one says it is untyped (whole while the strip has room; its short form
+    // in a crowded strip is checked there), the others nothing.
+    assert_eq!(
+        t.text("results-tab-4-untyped").as_deref(),
+        Some("untyped (run as one)")
+    );
     assert_eq!(t.text("results-tab-0-untyped"), None);
     in_window(t.vcx, |_, cx| {
         t.results.update(cx, |r, cx| r.close_others(4, cx))
@@ -498,6 +502,7 @@ fn pinned_tab_is_never_reused(cx: &mut TestAppContext) {
 struct Console {
     vcx: &'static mut VisualTestContext,
     id: ConsoleId,
+    fake: Arc<FakeDriver>,
     editor: Entity<hacivat_ui_editor::EditorView>,
 }
 
@@ -554,7 +559,7 @@ fn pg_console(cx: &mut TestAppContext, queries: Vec<FakeQuery>) -> Console {
             .core_runtime()
             .handle()
     });
-    let (session, _fake, _side) =
+    let (session, fake, _side) =
         futures::executor::block_on(hacivat_session::testing::fake_session_with_side(
             rt,
             fake,
@@ -572,7 +577,12 @@ fn pg_console(cx: &mut TestAppContext, queries: Vec<FakeQuery>) -> Console {
             .and_then(|s| s.editor.clone())
             .expect("the console has an editor")
     });
-    Console { vcx, id, editor }
+    Console {
+        vcx,
+        id,
+        fake,
+        editor,
+    }
 }
 
 impl Console {
@@ -1245,4 +1255,237 @@ fn the_cell_cap_comes_from_the_value_size_setting(cx: &mut TestAppContext) {
         });
     });
     assert_eq!(cap(vcx), 64 << 10);
+}
+
+// ---- fix round 1 ------------------------------------------------------------------------------------
+
+/// The debug selector of result tab `ix`.
+fn tab_selector(ix: usize) -> &'static str {
+    Box::leak(format!("results-tab-{ix}").into_boxed_str())
+}
+
+/// I1: a crowded strip (R-M3-66 allows 100 result sets) never squeezes a tab below its chrome:
+/// the tabs that fit are drawn whole, with the production swatch, inside the strip, the
+/// active one always among them; the rest are counted on "+N", whose menu shows any of them.
+#[gpui::test]
+fn a_crowded_strip_keeps_whole_tabs_and_lists_the_rest(cx: &mut TestAppContext) {
+    let mut t = tile_in(cx, EnvTag::Production);
+    let untyped = Arc::new(ResultSchema {
+        columns: vec![ColumnMeta {
+            name: "n".into(),
+            logical: LogicalType::Text {
+                max_chars: None,
+                fixed: false,
+            },
+            native: NativeType::Unknown,
+            origin: None,
+        }]
+        .into(),
+    });
+    let tabs: Vec<ResultTab> = (0..30)
+        .map(|u| {
+            let source: Arc<dyn ResultSource> = if u == 27 {
+                StoreSource::new(
+                    ResultStore::from_rows(
+                        untyped.clone(),
+                        vec![vec![Value::Text("1".into())]],
+                        Completeness::Complete,
+                    ),
+                    Arc::new(Control::default()),
+                    FetchPolicy::default(),
+                )
+            } else {
+                finished(1)
+            };
+            result_tab(1, u, 0, &format!("Bölge {u} satışları"), source)
+        })
+        .collect();
+    t.apply(&tabs);
+    // The strip is measured in the first frame and fitted in the next.
+    t.redraw();
+    let strip = t
+        .vcx
+        .debug_bounds("results-tabs")
+        .expect("the strip is drawn");
+    let drawn = |t: &mut Tile| -> Vec<usize> {
+        (0..30)
+            .filter(|ix| t.vcx.debug_bounds(tab_selector(*ix)).is_some())
+            .collect()
+    };
+    let shown = drawn(&mut t);
+    assert!(!shown.is_empty() && shown.len() < 30, "{shown:?}");
+    let more = t.text("results-tabs-more").expect("the +N button");
+    assert_eq!(more, format!("+{}", 30 - shown.len()));
+    // Every drawn tab, and the button, lie whole inside the strip.
+    for ix in &shown {
+        let b = t.vcx.debug_bounds(tab_selector(*ix)).unwrap();
+        assert!(
+            b.right() <= strip.right() && b.left() >= strip.left(),
+            "tab {ix}"
+        );
+    }
+    let button = t.vcx.debug_bounds("results-tabs-more").unwrap();
+    assert!(button.right() <= strip.right());
+    // The active tab is always drawn, however far it is.
+    t.set_active(ActiveResult::Tab(27));
+    t.redraw();
+    assert!(drawn(&mut t).contains(&27));
+    // A crowded strip takes the short forms (NOTES ruling 30).
+    assert_eq!(t.text("results-tab-27-untyped").as_deref(), Some("untyped"));
+    // "+N" lists the others; choosing one shows it.
+    let hidden_first = (0..30).find(|ix| !drawn(&mut t).contains(ix)).unwrap();
+    t.click("results-tabs-more");
+    assert_eq!(layer_ids(t.vcx).last(), Some(&"menu"));
+    t.vcx.simulate_keystrokes("enter");
+    t.vcx.run_until_parked();
+    t.redraw();
+    assert_eq!(
+        t.vcx.read(|cx| t.results.read(cx).active()),
+        ActiveResult::Tab(hidden_first)
+    );
+    assert!(drawn(&mut t).contains(&hidden_first));
+}
+
+/// m4: an evicted result whose tab is shown before the tab ever answered the eviction clears
+/// its selection after the frame (its adapter moves to a new generation), once.
+#[gpui::test]
+fn an_eviction_seen_while_shown_clears_the_selection(cx: &mut TestAppContext) {
+    let t = tile(cx);
+    let evicted = ResultStore::from_rows(
+        schema(2),
+        rows(0..10, 2),
+        Completeness::Closed {
+            reason: CloseReason::Evicted,
+        },
+    );
+    t.apply(&[result_tab(
+        1,
+        0,
+        0,
+        "",
+        StoreSource::new(
+            evicted,
+            Arc::new(Control::default()),
+            FetchPolicy::default(),
+        ),
+    )]);
+    t.redraw();
+    let generation = |t: &Tile| {
+        t.vcx.read(|cx| {
+            t.results
+                .read(cx)
+                .tab(0)
+                .map(|e| e.adapter().generation())
+                .unwrap()
+        })
+    };
+    assert_eq!(generation(&t), 2, "the shown tab answered its eviction");
+    t.redraw();
+    assert_eq!(generation(&t), 2, "once");
+}
+
+/// m5: a closed tab tells its source it is out of sight at once (close and close others).
+#[gpui::test]
+fn closed_tabs_are_hidden_at_once(cx: &mut TestAppContext) {
+    let t = tile(cx);
+    let store = || ResultStore::from_rows(schema(1), rows(0..3, 1), Completeness::Complete);
+    let (a, b, c) = (Spy::over(store()), Spy::over(store()), Spy::over(store()));
+    t.apply(&[
+        result_tab(1, 0, 0, "", a.clone()),
+        result_tab(1, 1, 0, "", b.clone()),
+        result_tab(1, 2, 0, "", c.clone()),
+    ]);
+    in_window(t.vcx, |_, cx| {
+        t.results.update(cx, |r, cx| r.close_tab(0, cx))
+    });
+    assert_eq!(a.seen().last(), Some(&false));
+    in_window(t.vcx, |_, cx| {
+        t.results.update(cx, |r, cx| r.close_others(0, cx))
+    });
+    assert_eq!(c.seen().last(), Some(&false));
+    assert_eq!(b.seen().last(), Some(&true), "the kept tab is shown");
+}
+
+/// m6: a count under way is cancelled when its console's results go.
+#[gpui::test]
+fn a_count_stops_with_its_console(cx: &mut TestAppContext) {
+    let cancelled = Rc::new(std::cell::Cell::new(false));
+    let results = cx.new(|_| ConsoleResults::new(SessionLog::new()));
+    let flag = cancelled.clone();
+    results.update(cx, |r, cx| {
+        r.apply(&[result_tab(1, 0, 0, "", finished(1))], cx);
+        r.start_count(0, Rc::new(move || flag.set(true)), cx);
+    });
+    assert!(!cancelled.get());
+    let weak = results.downgrade();
+    drop(results);
+    cx.run_until_parked();
+    cx.update(|_| {});
+    assert!(weak.upgrade().is_none(), "the results are gone");
+    assert!(cancelled.get());
+}
+
+/// m7: Clear empties the view even when a line arrives before the view reads the change.
+#[gpui::test]
+fn clear_is_never_lost_to_a_line_in_the_same_tick(cx: &mut TestAppContext) {
+    let t = tile(cx);
+    for ms in 0..5 {
+        t.log.append(LogMsg::Completed { ms }, None, None);
+    }
+    t.redraw();
+    let list = t
+        .vcx
+        .read(|cx| t.host().read(cx).log_list(t.console))
+        .expect("the log list");
+    let at = t
+        .vcx
+        .debug_bounds("button-results-log-clear")
+        .expect("Clear is drawn")
+        .center();
+    t.vcx.simulate_click(at, gpui::Modifiers::none());
+    t.log.append(LogMsg::Completed { ms: 99 }, None, None);
+    t.redraw();
+    assert_eq!(t.vcx.read(|cx| list.read(cx).rows().line_count()), 1);
+}
+
+/// m8: the title comes from the unit (`ExecUnit::title`): a comment that reads like the run
+/// service's own `Result n` is still the statement's comment, shown as data.
+#[gpui::test]
+fn a_comment_reading_result_n_is_still_a_comment(cx: &mut TestAppContext) {
+    let c = pg_console(cx, vec![three_rows("SELECT * FROM orders")]);
+    c.run("-- Result 1\nSELECT * FROM orders");
+    c.redraw();
+    let (title, source) = c.vcx.cx.read(|cx| {
+        Consoles::get(cx, c.id)
+            .and_then(|s| s.results.clone())
+            .and_then(|r| r.read(cx).title_with_source(0, cx))
+            .expect("a tab")
+    });
+    assert_eq!(title.as_ref(), "Result 1");
+    assert_eq!(source, hacivat_ui::text::TextSource::Data);
+    stop_core_runtime_test(cx);
+}
+
+/// m2: the real count path (no test counter): with no read-only check installed (the run
+/// service's classifier arrives with Task 24) the count is refused and nothing is sent.
+#[gpui::test]
+fn a_count_without_a_check_is_refused_and_sends_nothing(cx: &mut TestAppContext) {
+    let c = pg_console(cx, vec![three_rows("SELECT * FROM orders")]);
+    c.run("SELECT * FROM orders");
+    c.redraw();
+    click(&mut *c.vcx, "button-results-count");
+    wait_until(c.vcx, "the refusal", |_| {
+        c.count() == CountState::Refused("hv-results-count-refused")
+    });
+    let sent: Vec<String> = c
+        .fake
+        .typed_log()
+        .into_iter()
+        .filter_map(|call| match call {
+            hacivat_driver::fake::FakeTypedCall::Query(sql) => Some(sql),
+            _ => None,
+        })
+        .collect();
+    assert!(sent.iter().all(|q| !q.contains("COUNT(*)")), "{sent:?}");
+    stop_core_runtime_test(cx);
 }

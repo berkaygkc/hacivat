@@ -239,10 +239,10 @@ impl GridAdapter {
 
     /// The result's source (the cursor strip's commands and state).
     ///
-    /// Its `raise_cap()` raises the cap without the tab knowing: "Fetch more anyway" goes
-    /// through `ConsoleResults::raise_cap`, which records the raise for the memory banner. A
-    /// raise made here leaves the banner offering the button after a global-budget pause (each
-    /// click pauses again; nothing is fetched past the budget).
+    // ## m3b-t25-results (named exception, doc only; review m11)
+    /// "Fetch more anyway" goes through `ConsoleResults::raise_cap`, which calls its
+    /// `raise_cap()`. The store records the raise (`ResultSource::cap_raised`), and the memory
+    /// banner reads it there, so a raise made here is seen as well.
     pub fn source(&self) -> Arc<dyn ResultSource> {
         self.target.borrow().source.clone()
     }

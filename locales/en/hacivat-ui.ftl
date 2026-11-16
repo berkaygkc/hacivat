@@ -2355,3 +2355,26 @@ hv-fetchall-title = Fetching every row would pass this result's memory limit
 hv-fetchall-body = The query has more rows than fit in { $size }. Hacivat can fetch up to the limit and keep the cursor open for the rest.
 hv-fetchall-ok = Fetch up to the memory limit
 hv-fetchall-cancel = Cancel
+
+## m3b-t25-results-r1
+
+# A repeated result tab title's number, drawn after the title so a cut title keeps it.
+# Variables:
+#   $n (Number) - which repeat this is, from 2.
+hv-results-tab-repeat = ({ $n })
+# The button after the result tabs that fit: how many more there are (a menu lists them).
+# Variables:
+#   $n (Number) - the result tabs not drawn, e.g. 12.
+hv-results-tabs-more = +{ $n }
+# The tooltip and accessible name of hv-results-tabs-more.
+# Variables:
+#   $n (Number) - the result tabs not drawn, e.g. 12.
+hv-results-tabs-more-tip = { $n ->
+        [one] { $n } more result tab
+       *[other] { $n } more result tabs
+    }
+# Beside Count rows: the tab's statement is no longer known to the console (an older run).
+hv-results-count-rerun = Re-run the statement to count its rows.
+# Beside Count rows: the console has not read its SQL settings, so the statement can't be
+# read safely yet.
+hv-results-count-context = Not counted: the console's SQL settings aren't known yet.

@@ -27,9 +27,11 @@
 //!   the console's statements that opened a tab, so a statement's further sets share its N. A
 //!   title shown by an earlier tab of the console again gets `(2)`, `(3)` …
 //!   (`hv-results-tab-dup`): a statement's further result sets, two statements under one
-//!   comment. The run service's own title tells which: it is `Result n[ (k)]` (n counting the
-//!   run's statements that opened a tab) when the statement has no comment; a comment that
-//!   reads exactly so is shown as the console's `Result N`.
+//!   comment. The unit's own title (`ExecUnit::title`, kept by the run UI) tells which (fix
+//!   round 1, m8); only for a result the run UI does not know (fixtures, tests) is the run
+//!   service's title read back: `Result n[ (k)]` (n counting the run's statements that opened
+//!   a tab) means no comment. A repeat's `(k)` is drawn after the title, so a cut title keeps
+//!   it (m9).
 //! - **Pinned tabs** ([`ConsoleResults::set_pinned`]) are never reused: the next run of the same
 //!   statement opens a new tab beside it.
 //! - **Visibility for eviction** (R-M3-68, the Task 8 carries). Every result tab reports to its
@@ -101,6 +103,19 @@ pub enum CountState {
     Exact(u64),
     /// No count: why, a Fluent ID (`hv-results-count-*`).
     Refused(&'static str),
+}
+
+/// A tab's title as the strip draws it ([`ConsoleResults::titles`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabTitle {
+    /// The statement's comment, or `Result N`.
+    pub base: SharedString,
+    /// Data for a comment, Fluent for `Result N`.
+    pub source: TextSource,
+    /// `k` of `(k)` when an earlier tab shows the same base.
+    pub repeat: Option<u64>,
+    /// The whole title (`hv-results-tab-dup` with a repeat): the tab's accessible name.
+    pub whole: SharedString,
 }
 
 /// What a tab's title is made of: its statement's comment, or the console's `Result N`.
@@ -375,27 +390,48 @@ impl ConsoleResults {
     /// [`title`](Self::title) and where its text comes from: a comment title alone is data,
     /// everything else a Fluent message.
     pub fn title_with_source(&self, ix: usize, cx: &App) -> Option<(SharedString, TextSource)> {
-        let entry = self.tabs.get(ix)?;
-        let base = entry.base();
-        let repeat = 1 + self.tabs[..ix].iter().filter(|t| t.base() == base).count() as u64;
-        let (text, source) = match &base {
-            Base::Comment(c) => (SharedString::from(c.to_string()), TextSource::Data),
-            Base::Number(n) => (result_title(*n, cx), TextSource::Fluent),
-        };
-        if repeat == 1 {
-            return Some((text, source));
-        }
-        Some((
-            tr(
-                cx,
-                ids::hv::RESULTS_TAB_DUP,
-                ids::hv::HvResultsTabDup {
-                    title: Text(text.to_string()),
-                    n: Count(repeat),
-                },
-            ),
-            TextSource::Fluent,
-        ))
+        let title = self.titles(cx).into_iter().nth(ix)?;
+        Some(match title.repeat {
+            None => (title.base, title.source),
+            Some(_) => (title.whole, TextSource::Fluent),
+        })
+    }
+
+    /// Every tab's title, in one pass (fix round 1, m12): its base (the comment or `Result N`)
+    /// and where that comes from, its repeat number when an earlier tab shows the same base
+    /// (drawn after the base, so a cut title keeps it; m9), and the whole title.
+    pub fn titles(&self, cx: &App) -> Vec<TabTitle> {
+        let mut seen: std::collections::HashMap<Base, u64> = std::collections::HashMap::new();
+        self.tabs
+            .iter()
+            .map(|entry| {
+                let base = entry.base();
+                let count = seen.entry(base.clone()).or_insert(0);
+                *count += 1;
+                let repeat = (*count > 1).then_some(*count);
+                let (text, source) = match &base {
+                    Base::Comment(c) => (SharedString::from(c.to_string()), TextSource::Data),
+                    Base::Number(n) => (result_title(*n, cx), TextSource::Fluent),
+                };
+                let whole = match repeat {
+                    None => text.clone(),
+                    Some(n) => tr(
+                        cx,
+                        ids::hv::RESULTS_TAB_DUP,
+                        ids::hv::HvResultsTabDup {
+                            title: Text(text.to_string()),
+                            n: Count(n),
+                        },
+                    ),
+                };
+                TabTitle {
+                    base: text,
+                    source,
+                    repeat,
+                    whole,
+                }
+            })
+            .collect()
     }
 
     /// The console's format locale, display zone and engine, for the tabs it has and the ones
@@ -428,7 +464,12 @@ impl ConsoleResults {
             if shown {
                 continue;
             }
-            let comment = comment_of(tab, run);
+            // Fix round 1 (m8): the unit's own title when the run UI knows the unit; the run
+            // service's title read back only for a result it does not (fixtures, tests).
+            let comment = match unit_title(tab, cx) {
+                Some(title) => title,
+                None => comment_of(tab, run),
+            };
             match self.tabs.iter().position(|t| t.key == tab.key && !t.pinned) {
                 Some(ix) => {
                     let entry = &mut self.tabs[ix];
@@ -580,7 +621,9 @@ impl ConsoleResults {
         if let Some(cancel) = self.tabs[ix].count_cancel.take() {
             cancel();
         }
-        self.tabs.remove(ix);
+        // Fix round 1 (m5): a closed tab is out of sight at once.
+        let closed = self.tabs.remove(ix);
+        closed.adapter.source().set_visible(false);
         let was = self.active;
         self.active = match self.active {
             ActiveResult::Tab(a) if a == ix => match ix.checked_sub(1) {
@@ -617,6 +660,10 @@ impl ConsoleResults {
             {
                 cancel();
             }
+        }
+        // Fix round 1 (m5): closed tabs are out of sight at once.
+        for tab in self.tabs.iter().filter(|t| t.id != keep) {
+            tab.adapter.source().set_visible(false);
         }
         self.tabs.retain(|t| t.id == keep);
         self.active = match self.active {
@@ -728,7 +775,7 @@ impl ConsoleResults {
     /// The active tab was just shown: a result evicted since it was last answered moves its
     /// adapter to a new generation over the same result, so the grid clears a selection that
     /// may reach past the rows it kept (the Task 8 carry: a copy is never clamped silently).
-    fn on_shown(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn on_shown(&mut self, cx: &mut Context<Self>) {
         let ActiveResult::Tab(ix) = self.active else {
             return;
         };
@@ -740,6 +787,14 @@ impl ConsoleResults {
             let source = tab.adapter.source();
             tab.adapter.retarget(source, cx);
         }
+    }
+
+    /// Fix round 1 (m4): whether the active tab's result was evicted and its selection not yet
+    /// cleared (an eviction that landed while the tab was shown); the tile then calls
+    /// [`on_shown`](Self::on_shown) after its frame.
+    pub fn active_evicted_unanswered(&self) -> bool {
+        self.active_tab()
+            .is_some_and(|t| !t.evicted_seen && t.evicted())
     }
 
     /// Whether tab `ix` is on screen to eviction: active, pinned or shown by another view.
@@ -787,6 +842,27 @@ impl ConsoleResults {
 }
 
 // ## m3b-t25-results
+
+// Fix round 1 (m6): a count under way stops with its console's results.
+impl Drop for ConsoleResults {
+    fn drop(&mut self) {
+        for tab in &mut self.tabs {
+            if let Some(cancel) = tab.count_cancel.take() {
+                cancel();
+            }
+        }
+    }
+}
+
+/// Fix round 1 (m8): the comment title of `tab`'s unit as the run UI keeps it
+/// (`ExecUnit::title`): `Some(None)` for a unit without one, `None` when the run UI does not
+/// know the unit.
+fn unit_title(tab: &ResultTab, cx: &App) -> Option<Option<Arc<str>>> {
+    let console = crate::console::ConsoleId(tab.key.console);
+    let exec = crate::exec_ui::console_exec(cx, console)?;
+    let (unit, _) = exec.tab_units.get(&tab.unit)?;
+    Some(unit.title.clone())
+}
 
 /// The comment title of `tab` (one of `run`'s tabs), or `None` when the run service titled it
 /// `Result n[ (k)]` (module docs) or not at all (an M3a title).

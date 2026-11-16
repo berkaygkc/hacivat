@@ -61,6 +61,13 @@ pub struct TabsModel {
     /// The strip is short: the untyped note takes its short form and titles ellipsize at
     /// [`SHORT_TITLE_PX`] (NOTES ruling 30).
     pub short: bool,
+    // Fix round 1 (I1, m9)
+    /// Each result tab's whole title (its accessible name; `results` holds what the label
+    /// draws, the repeat `(k)` apart).
+    pub names: Vec<SharedString>,
+    /// The result tabs the strip draws, in order (`None`: every one); the others are counted
+    /// on the "+N" button ([`more_button`]).
+    pub shown: Option<Vec<usize>>,
 }
 
 // ## m3b-t25-results
@@ -78,7 +85,25 @@ pub struct TabFacts {
     pub pinned: bool,
     /// The result came untyped (run as one).
     pub untyped: bool,
+    /// Fix round 1 (m9): `k` of `(k)`, drawn after the title so a cut title keeps it.
+    pub repeat: Option<u64>,
 }
+
+// Fix round 1 (I1): a result tab never shrinks below its chrome; tabs that do not fit leave
+// the strip for the "+N" menu, so every drawn tab (and its environment swatch) is whole.
+
+/// A tab's padding, glyph and right seam.
+pub const TAB_CHROME_PX: f32 = 12.0 * 2.0 + 12.0 + 1.0;
+/// The gap between a tab's parts.
+pub const TAB_GAP_PX: f32 = 7.0;
+/// The pin glyph, and the environment swatch.
+pub const TAB_GLYPH_PX: f32 = 12.0;
+pub const TAB_SWATCH_PX: f32 = 7.0;
+/// The unread dot.
+pub const TAB_DOT_PX: f32 = 6.0;
+
+/// What a press on the "+N" button does, at the point under it.
+pub type OnMore = Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>;
 
 /// What a right press on result tab `ix` does (at the pointer).
 pub type OnTabMenu = Rc<dyn Fn(usize, Point<Pixels>, &mut Window, &mut App)>;
@@ -95,6 +120,7 @@ pub fn tab_strip(
     on_activate: OnActivate,
     on_menu: Option<OnTabMenu>,
     on_bounds: Option<OnTabBounds>,
+    on_more: Option<OnMore>,
     cx: &App,
 ) -> AnyElement {
     let theme = Theme::get(cx);
@@ -130,11 +156,19 @@ pub fn tab_strip(
             short: model.short,
             on_menu: None,
             on_bounds: None,
+            name: None,
         },
         on_activate.clone(),
         cx,
     ));
-    for (ix, title) in model.results.iter().enumerate() {
+    let shown: Vec<usize> = match &model.shown {
+        Some(shown) => shown.clone(),
+        None => (0..model.results.len()).collect(),
+    };
+    for ix in shown.iter().copied() {
+        let Some(title) = model.results.get(ix) else {
+            continue;
+        };
         let env = match model.env {
             Some(EnvTag::Production) => Some((EnvTag::Production, None)),
             Some(EnvTag::Staging) => Some((
@@ -167,12 +201,76 @@ pub fn tab_strip(
                 on_bounds: on_bounds
                     .clone()
                     .map(|f| -> Rc<dyn Fn(Bounds<Pixels>)> { Rc::new(move |b| f(ix, b)) }),
+                name: model.names.get(ix).cloned(),
             },
             on_activate.clone(),
             cx,
         ));
     }
+    // Fix round 1 (I1): the tabs left out.
+    let hidden = model.results.len().saturating_sub(shown.len());
+    if hidden > 0 {
+        strip = strip.child(more_button(hidden, on_more, cx));
+    }
     strip.into_any_element()
+}
+
+// Fix round 1 (I1)
+/// The "+N" button after the drawn tabs: `hidden` result tabs, listed in a menu.
+pub fn more_button(hidden: usize, on_more: Option<OnMore>, cx: &App) -> AnyElement {
+    let t = Theme::get(cx).tokens;
+    let c = t.colors;
+    let text = more_text(hidden, cx);
+    let tip = tr(
+        cx,
+        ids::hv::RESULTS_TABS_MORE_TIP,
+        ids::hv::HvResultsTabsMoreTip {
+            n: Count(hidden as u64),
+        },
+    );
+    let mut el = div()
+        .id("results-tabs-more")
+        .debug_selector(|| "results-tabs-more".to_string())
+        .declare(Role::Button, tip.clone(), None)
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(t.spacing.panel_header_height))
+        .flex_none()
+        .px(px(12.0))
+        .cursor_pointer()
+        .hover(|s| s.bg(c.hover.to_hsla()))
+        .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+        .child(
+            Label::new(
+                text,
+                TextSource::Fluent,
+                t.type_ramp.body,
+                c.text_2.to_hsla(),
+            )
+            .id("results-tabs-more"),
+        );
+    if let Some(on_more) = on_more {
+        el = el
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |event, window, cx| {
+                let at = event.position();
+                let on_more = on_more.clone();
+                window.defer(cx, move |window, cx| on_more(at, window, cx));
+            });
+    }
+    el.into_any_element()
+}
+
+/// The "+N" button's text.
+pub fn more_text(hidden: usize, cx: &App) -> SharedString {
+    tr(
+        cx,
+        ids::hv::RESULTS_TABS_MORE,
+        ids::hv::HvResultsTabsMore {
+            n: Count(hidden as u64),
+        },
+    )
 }
 
 struct TabSpec {
@@ -192,6 +290,8 @@ struct TabSpec {
     short: bool,
     on_menu: Option<OnTabMenu>,
     on_bounds: Option<Rc<dyn Fn(Bounds<Pixels>)>>,
+    /// The accessible name when it differs from the drawn title (a repeat).
+    name: Option<SharedString>,
 }
 
 fn tab(spec: TabSpec, on_activate: OnActivate, cx: &App) -> AnyElement {
@@ -204,7 +304,11 @@ fn tab(spec: TabSpec, on_activate: OnActivate, cx: &App) -> AnyElement {
     let mut el = div()
         .id(ElementId::Name(spec.selector.clone()))
         .debug_selector(move || selector)
-        .declare(Role::Tab, spec.title.clone(), Some(spec.active))
+        .declare(
+            Role::Tab,
+            spec.name.clone().unwrap_or_else(|| spec.title.clone()),
+            Some(spec.active),
+        )
         .flex()
         .flex_row()
         .items_center()
@@ -216,11 +320,6 @@ fn tab(spec: TabSpec, on_activate: OnActivate, cx: &App) -> AnyElement {
         .border_color(c.seam.to_hsla())
         .cursor_pointer()
         .child(Icon::new(spec.icon).size(IconSize::Chrome).color(ink));
-    // ## m3b-t25-results: a result tab gives way before the strip clips it: its title
-    // ellipsizes further (the whole stays in the tooltip).
-    if spec.facts.is_some() {
-        el = el.flex_shrink(1.0).min_w(px(0.0));
-    }
     // ## m3b-t25-results: a result tab's title is capped and ellipsized (the whole in its
     // tooltip); its pin glyph and untyped note follow it.
     el = match spec.facts {
@@ -235,13 +334,26 @@ fn tab(spec: TabSpec, on_activate: OnActivate, cx: &App) -> AnyElement {
                 TextSource::Fluent
             };
             let cap = if spec.short { SHORT_TITLE_PX } else { TITLE_PX };
-            el.child(
+            let el = el.child(
                 div().min_w(px(0.0)).max_w(px(cap)).child(
                     Label::new(spec.title, source, t.type_ramp.body, ink)
                         .truncate(true)
-                        .id(ElementId::Name(spec.label_id)),
+                        .id(ElementId::Name(spec.label_id.clone())),
                 ),
-            )
+            );
+            // Fix round 1 (m9): the repeat after the cut title, whole.
+            match facts.repeat {
+                Some(n) => el.child(
+                    Label::new(
+                        repeat_text(n, cx),
+                        TextSource::Fluent,
+                        t.type_ramp.body,
+                        ink,
+                    )
+                    .id(ElementId::Name(format!("{}-repeat", spec.label_id).into())),
+                ),
+                None => el,
+            }
         }
     };
     if let Some(facts) = spec.facts {
@@ -340,6 +452,16 @@ fn tab(spec: TabSpec, on_activate: OnActivate, cx: &App) -> AnyElement {
     el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, cx| on_activate(target, window, cx))
         .into_any_element()
+}
+
+// Fix round 1 (m9)
+/// A repeated title's `(k)`.
+pub fn repeat_text(n: u64, cx: &App) -> SharedString {
+    tr(
+        cx,
+        ids::hv::RESULTS_TAB_REPEAT,
+        ids::hv::HvResultsTabRepeat { n: Count(n) },
+    )
 }
 
 /// What a toolbar button does.

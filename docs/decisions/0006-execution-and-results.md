@@ -1086,3 +1086,19 @@ case.
 | notice | `tablo "hv_t31_m3b_yok_ğ_…" mevcut değil, atlanıyor` |
 | Ask | unit 1, `42P01` |
 | production | typed name = the table's bytes; `UPDATE … WHERE` own form, `İstanbul` → `Ömer` after Commit |
+
+## m3b-t25 — results, fix round 1
+
+- **Crowded strips (I1).** A result tab never shrinks: it is drawn whole or not at all. The
+  strip is fitted to last frame's width: every tab whole, else every tab in its short form
+  (ruling 30), else the short form of as many as fit, in order, the active tab always among
+  them, and a "+N" button whose menu lists the rest by their whole titles. Every drawn tab,
+  with its environment swatch, is therefore inside the strip. Text widths are cached per
+  string (m12) and the titles computed in one pass.
+- **Titles (m8, m9).** The comment comes from the unit (`ExecUnit::title`, the run UI's
+  `tab_units`); the service's title is read back only for a result the run UI does not know. A
+  repeat's `(k)` is its own label after the cut title (`hv-results-tab-repeat`); the whole
+  title (`hv-results-tab-dup`) stays the accessible name.
+- **Lifecycle (m4–m7).** An eviction the shown tab has not answered is answered after the
+  tile's frame; a closed tab is hidden to eviction at once; a count stops when its console's
+  results drop; the toolbar's Clear empties the view directly.

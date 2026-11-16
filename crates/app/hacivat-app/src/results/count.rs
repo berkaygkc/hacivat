@@ -85,6 +85,8 @@ const REFUSED: &str = "hv-results-count-refused";
 const TIMED_OUT: &str = "hv-results-count-timeout";
 const FAILED: &str = "hv-results-count-failed";
 const OFFLINE: &str = "hv-results-count-offline";
+const RERUN: &str = "hv-results-count-rerun";
+const CONTEXT: &str = "hv-results-count-context";
 
 /// The count statement of console `console`'s statement `unit` and its engine, or why there
 /// is none (module docs).
@@ -93,10 +95,12 @@ fn count_statement(
     unit: hacivat_session::session::UnitId,
     cx: &App,
 ) -> Result<(String, DbmsKind), &'static str> {
-    let exec = crate::exec_ui::console_exec(cx, console).ok_or(UNAVAILABLE)?;
-    let (unit, _) = exec.tab_units.get(&unit).ok_or(UNAVAILABLE)?;
+    // Fix round 1 (m2): a statement the console no longer knows, or a context not read yet,
+    // is said for what it is (not "this query can't be counted").
+    let exec = crate::exec_ui::console_exec(cx, console).ok_or(RERUN)?;
+    let (unit, _) = exec.tab_units.get(&unit).ok_or(RERUN)?;
     let SqlContext::Known(ctx) = exec.context else {
-        return Err(UNAVAILABLE);
+        return Err(CONTEXT);
     };
     let text = unit.text.to_string();
     let len = text.len();

@@ -127,6 +127,9 @@ struct ConsoleTile {
     log_focus: FocusHandle,
     /// The tab strip's width in the last frame (its short form follows it).
     strip_width: Rc<Cell<Option<f32>>>,
+    /// Fix round 1 (m12): the laid-out widths of the strip's texts (titles, notes), so a frame
+    /// shapes only what is new.
+    text_widths: Rc<std::cell::RefCell<HashMap<SharedString, f32>>>,
     /// Where each result tab was painted (its menu opens under it).
     tab_bounds: TabBounds,
     _observe: Subscription,
@@ -393,6 +396,7 @@ impl ResultsHost {
                 facts: HashMap::new(),
                 log_focus,
                 strip_width: Rc::new(Cell::new(None)),
+                text_widths: Rc::default(),
                 tab_bounds: TabBounds::default(),
                 _observe: observe,
                 _events: events,
@@ -639,22 +643,25 @@ impl ResultsHost {
         let tile = self.tiles.get(&console)?;
         let results = tile.results.clone();
         // ## m3b-t25-results: each tab's title, its source, pin and untyped note.
-        let (active, unread, titles, facts) = {
+        // ## m3b-t25-results: each tab's title, its source, pin and untyped note; fix round 1:
+        // every title in one pass, its repeat apart (m9, m12).
+        let (active, unread, titles, facts, names) = {
             let r = results.read(cx);
-            let mut titles = Vec::with_capacity(r.tabs().len());
-            let mut facts = Vec::with_capacity(r.tabs().len());
-            for (ix, entry) in r.tabs().iter().enumerate() {
-                let Some((title, source)) = r.title_with_source(ix, cx) else {
-                    continue;
-                };
-                titles.push(title);
+            let all = r.titles(cx);
+            let mut titles = Vec::with_capacity(all.len());
+            let mut facts = Vec::with_capacity(all.len());
+            let mut names = Vec::with_capacity(all.len());
+            for (entry, title) in r.tabs().iter().zip(all) {
                 facts.push(TabFacts {
-                    data_title: source == hacivat_ui::text::TextSource::Data,
+                    data_title: title.source == hacivat_ui::text::TextSource::Data,
                     pinned: entry.pinned(),
                     untyped: entry.untyped(),
+                    repeat: title.repeat,
                 });
+                titles.push(title.base);
+                names.push(title.whole);
             }
-            (r.active(), r.unread_output(), titles, facts)
+            (r.active(), r.unread_output(), titles, facts, names)
         };
         let env = Consoles::get(cx, console)
             .and_then(|s| s.profile)
@@ -664,11 +671,22 @@ impl ResultsHost {
         let on_activate: OnActivate = Rc::new(move |a, _, cx| {
             let _ = weak.update(cx, |r, cx| r.set_active(a, cx));
         });
-        // ## m3b-t25-results: the short form when last frame's strip could not hold the tabs.
+        // ## m3b-t25-results: the short form, then (fix round 1, I1) the "+N" menu, when last
+        // frame's strip could not hold the tabs whole.
         let strip_width = tile.strip_width.clone();
-        let short = strip_width
-            .get()
-            .is_some_and(|w| strip_need(&titles, &facts, env.is_some(), window, cx) > w);
+        let (short, shown) = strip_fit(
+            &StripTexts {
+                titles: &titles,
+                facts: &facts,
+                env,
+                unread,
+            },
+            active,
+            strip_width.get(),
+            &tile.text_widths,
+            window,
+            cx,
+        );
         let on_menu: OnTabMenu = Rc::new(move |ix, at, window, cx| {
             super::pin::open_tab_menu(console, ix, at, window, cx);
         });
@@ -676,6 +694,17 @@ impl ResultsHost {
         bounds.borrow_mut().clear();
         let on_bounds: toolbar::OnTabBounds = Rc::new(move |ix, b| {
             bounds.borrow_mut().insert(ix, b);
+        });
+        let hidden: Vec<usize> = match &shown {
+            Some(shown) => (0..titles.len()).filter(|ix| !shown.contains(ix)).collect(),
+            None => Vec::new(),
+        };
+        let hidden_names: Vec<(usize, SharedString)> = hidden
+            .iter()
+            .filter_map(|ix| names.get(*ix).map(|n| (*ix, n.clone())))
+            .collect();
+        let on_more: toolbar::OnMore = Rc::new(move |at, window, cx| {
+            open_more_menu(console, hidden_names.clone(), at, window, cx);
         });
         let strip_tabs = toolbar::tab_strip(
             &TabsModel {
@@ -685,10 +714,13 @@ impl ResultsHost {
                 env,
                 facts,
                 short,
+                names,
+                shown,
             },
             on_activate,
             Some(on_menu),
             Some(on_bounds),
+            Some(on_more),
             cx,
         );
         let measured = strip_width.clone();
@@ -732,10 +764,16 @@ impl ResultsHost {
                 let keys = list.downgrade();
                 let emit = results.downgrade();
                 let shown = list.clone();
+                let cleared = list.clone();
                 let ends = list.clone();
                 column = column
                     .child(toolbar::output_toolbar(
-                        Rc::new(move |_, _| log.clear()),
+                        // Fix round 1 (m7): the rows forget their lines with the log, so a line
+                        // appended before the change is read never keeps them.
+                        Rc::new(move |_, cx| {
+                            log.clear();
+                            cleared.update(cx, |l, cx| l.rows_mut(cx).clear());
+                        }),
                         Rc::new(move |_, cx| {
                             let text = copy_invariant(&shown.read(cx).rows().lines());
                             cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -775,6 +813,14 @@ impl ResultsHost {
                     (entry.key(), entry.unit())
                 };
                 let facts = self.facts_of(console, key, unit, cx);
+                // Fix round 1 (m4): an eviction that landed while this tab was shown clears its
+                // selection too (after this frame: the adapter tells this tile).
+                if results.read(cx).active_evicted_unanswered() {
+                    let weak = results.downgrade();
+                    cx.defer(move |cx| {
+                        let _ = weak.update(cx, |r, cx| r.on_shown(cx));
+                    });
+                }
                 let r = results.read(cx);
                 let entry = r.tab(ix)?;
                 let adapter = entry.adapter().clone();
@@ -978,35 +1024,191 @@ fn text_px(window: &Window, text: &SharedString, style: hacivat_ui_core::theme::
     )
 }
 
-/// The width the tab strip needs for `titles` in their full form (Output first; each tab's
-/// padding, glyph and gaps; its title up to [`TITLE_PX`]; its pin, untyped note and swatch).
-fn strip_need(
-    titles: &[SharedString],
-    facts: &[TabFacts],
-    env: bool,
+// Fix round 1 (I1)
+
+/// What the tab strip draws, for its fit.
+struct StripTexts<'a> {
+    titles: &'a [SharedString],
+    facts: &'a [TabFacts],
+    env: Option<hacivat_proto::EnvTag>,
+    unread: bool,
+}
+
+/// The laid-out width of `text` (the body style), from `cache` when it was shaped before.
+fn cached_px(
+    cache: &std::cell::RefCell<HashMap<SharedString, f32>>,
+    text: &SharedString,
     window: &Window,
     cx: &App,
 ) -> f32 {
-    const TAB_CHROME_PX: f32 = 24.0 + 12.0 + 7.0 + 1.0;
-    let style = Theme::get(cx).tokens.type_ramp.body;
-    let output = tr(cx, ids::hv::RESULTS_OUTPUT, hacivat_l10n::NoArgs);
-    let untyped = tr(cx, ids::hv::RESULTS_UNTYPED, hacivat_l10n::NoArgs);
-    let mut need = TAB_CHROME_PX + text_px(window, &output, style) + 13.0;
-    for (ix, title) in titles.iter().enumerate() {
-        let f = facts.get(ix).copied().unwrap_or_default();
-        need += TAB_CHROME_PX + text_px(window, title, style).min(TITLE_PX);
-        if f.pinned {
-            need += 7.0 + 12.0;
-        }
-        if f.untyped {
-            need += 7.0 + text_px(window, &untyped, style);
-        }
-        if env {
-            need += 14.0 + SHORT_TITLE_PX / 2.0;
-        }
+    if let Some(w) = cache.borrow().get(text) {
+        return *w;
     }
-    need
+    let w = text_px(window, text, Theme::get(cx).tokens.type_ramp.body);
+    let mut cache = cache.borrow_mut();
+    if cache.len() > 4_096 {
+        cache.clear();
+    }
+    cache.insert(text.clone(), w);
+    w
 }
+
+/// How the tab strip draws its tabs in `width` (last frame's; `None` before the first): whole
+/// when they fit (`(false, None)`), else in their short form (NOTES ruling 30), else the short
+/// form of as many as fit, the active tab always among them, the rest behind "+N"
+/// (`(true, Some(drawn))`). A drawn tab is never narrower than its chrome, so its environment
+/// swatch is always whole.
+fn strip_fit(
+    texts: &StripTexts,
+    active: ActiveResult,
+    width: Option<f32>,
+    cache: &std::cell::RefCell<HashMap<SharedString, f32>>,
+    window: &Window,
+    cx: &App,
+) -> (bool, Option<Vec<usize>>) {
+    use toolbar::{TAB_CHROME_PX, TAB_DOT_PX, TAB_GAP_PX, TAB_GLYPH_PX, TAB_SWATCH_PX};
+    let Some(avail) = width else {
+        return (false, None);
+    };
+    let px = |text: &SharedString| cached_px(cache, text, window, cx);
+    let output = tr(cx, ids::hv::RESULTS_OUTPUT, hacivat_l10n::NoArgs);
+    let mut output_w = TAB_CHROME_PX + TAB_GAP_PX + px(&output);
+    if texts.unread {
+        output_w += TAB_GAP_PX + TAB_DOT_PX;
+    }
+    let untyped = tr(cx, ids::hv::RESULTS_UNTYPED, hacivat_l10n::NoArgs);
+    let untyped_short = tr(cx, ids::hv::RESULTS_UNTYPED_SHORT, hacivat_l10n::NoArgs);
+    let staging = match texts.env {
+        Some(hacivat_proto::EnvTag::Staging) => Some(tr(
+            cx,
+            ids::hv::RESULTS_ENV_SUFFIX,
+            ids::hv::HvResultsEnvSuffix {
+                env: Text(
+                    tr(
+                        cx,
+                        crate::connections::capsule::env_word_id(Some(
+                            hacivat_proto::EnvTag::Staging,
+                        )),
+                        hacivat_l10n::NoArgs,
+                    )
+                    .to_string(),
+                ),
+            },
+        )),
+        _ => None,
+    };
+    let swatch = matches!(
+        texts.env,
+        Some(hacivat_proto::EnvTag::Production | hacivat_proto::EnvTag::Staging)
+    );
+    let widths = |short: bool| -> Vec<f32> {
+        let cap = if short { SHORT_TITLE_PX } else { TITLE_PX };
+        texts
+            .titles
+            .iter()
+            .enumerate()
+            .map(|(ix, title)| {
+                let f = texts.facts.get(ix).copied().unwrap_or_default();
+                let mut w = TAB_CHROME_PX + TAB_GAP_PX + px(title).min(cap);
+                if let Some(n) = f.repeat {
+                    w += TAB_GAP_PX + px(&toolbar::repeat_text(n, cx));
+                }
+                if f.pinned {
+                    w += TAB_GAP_PX + TAB_GLYPH_PX;
+                }
+                if f.untyped {
+                    w += TAB_GAP_PX + px(if short { &untyped_short } else { &untyped });
+                }
+                if swatch {
+                    w += TAB_GAP_PX + TAB_SWATCH_PX;
+                }
+                if let Some(staging) = &staging {
+                    w += TAB_GAP_PX + px(staging);
+                }
+                w
+            })
+            .collect()
+    };
+    let full = widths(false);
+    if output_w + full.iter().sum::<f32>() <= avail {
+        return (false, None);
+    }
+    let short = widths(true);
+    if output_w + short.iter().sum::<f32>() <= avail {
+        return (true, None);
+    }
+    let more = toolbar::more_text(texts.titles.len(), cx);
+    let budget = avail - output_w - (TAB_CHROME_PX - TAB_GLYPH_PX + px(&more));
+    let mut drawn = Vec::new();
+    let mut used = 0.0;
+    let active = match active {
+        ActiveResult::Tab(ix) if ix < short.len() => Some(ix),
+        _ => None,
+    };
+    if let Some(a) = active {
+        drawn.push(a);
+        used += short[a];
+    }
+    for (ix, w) in short.iter().enumerate() {
+        if Some(ix) == active {
+            continue;
+        }
+        if used + w > budget {
+            break;
+        }
+        drawn.push(ix);
+        used += w;
+    }
+    drawn.sort_unstable();
+    (true, Some(drawn))
+}
+
+/// The "+N" menu: every tab the strip left out, by its whole title; choosing one shows it.
+fn open_more_menu(
+    console: ConsoleId,
+    hidden: Vec<(usize, SharedString)>,
+    at: hacivat_ui_core::gpui_surface::Point<hacivat_ui_core::gpui_surface::Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(ws) = window.root::<Workspace>().flatten() else {
+        return;
+    };
+    let items: Vec<hacivat_ui::menu::MenuItemSpec> = hidden
+        .iter()
+        .map(|(ix, name)| {
+            let name = name.clone();
+            hacivat_ui::menu::MenuItemSpec::new(
+                Rc::new(move |_: &App| name.clone()),
+                format!("{MORE_ACTION}{ix}"),
+            )
+        })
+        .collect();
+    // Kept inside the window.
+    let room = window.viewport_size().width - hacivat_ui_core::gpui_surface::px(TAB_MENU_PX);
+    let at = hacivat_ui_core::gpui_surface::point(at.x.min(room), at.y);
+    let menu = ws.update(cx, |ws, cx| ws.open_popup_menu(at, items, window, cx));
+    menu.update(cx, |m: &mut hacivat_ui::menu::PopupMenu, _| {
+        m.set_access_keys(false);
+    });
+    cx.subscribe(
+        &menu,
+        move |_, event: &hacivat_ui::menu::PopupMenuEvent, cx| {
+            if let hacivat_ui::menu::PopupMenuEvent::Chosen(action) = event
+                && let Some(ix) = action
+                    .strip_prefix(MORE_ACTION)
+                    .and_then(|ix| ix.parse::<usize>().ok())
+                && let Some(results) = Consoles::get(cx, console).and_then(|s| s.results.clone())
+            {
+                results.update(cx, |r, cx| r.set_active(ActiveResult::Tab(ix), cx));
+            }
+        },
+    )
+    .detach();
+}
+
+/// The "+N" menu's action IDs (answered by its subscription; no command has them).
+const MORE_ACTION: &str = "results.tabs_more.";
 
 /// Fetch all on tab `ix` of `results`: at once, unless its exact count says the rows would
 /// pass the result's memory limit (R-M3-68); then the question first, whose "Fetch up to the
@@ -1443,10 +1645,13 @@ mod fixtures {
         Notices,
         /// MySQL warnings and an error whose chip shows `1792 · 25006`.
         MysqlWarnings,
+        /// Fix round 1 (I1): 30 tabs on a production console; the active one far along; the
+        /// tabs that do not fit behind "+N".
+        CrowdedTabs,
     }
 
     /// The Task 25 states (design/m3b-safe surface 10).
-    pub const T25_SHOTS: [ResultsShot; 9] = [
+    pub const T25_SHOTS: [ResultsShot; 10] = [
         ResultsShot::TitledTabs,
         ResultsShot::Untyped,
         ResultsShot::SetLimit,
@@ -1456,6 +1661,7 @@ mod fixtures {
         ResultsShot::FetchAll,
         ResultsShot::Notices,
         ResultsShot::MysqlWarnings,
+        ResultsShot::CrowdedTabs,
     ];
 
     /// A long comment title: the tab ellipsizes it, the tooltip keeps it whole.
@@ -1836,6 +2042,21 @@ mod fixtures {
                 line(LogMsg::NoticesDropped { n: 97 }, Some(1));
                 line(LogMsg::Completed { ms: 41 }, Some(1));
             }
+            ResultsShot::CrowdedTabs => {
+                for u in 0..30u32 {
+                    let title = match u % 3 {
+                        0 => format!("Bölge {u} satışları"),
+                        1 => "Şehre göre ciro".to_string(),
+                        _ => String::new(),
+                    };
+                    tabs.push(titled(
+                        u,
+                        0,
+                        &title,
+                        store(3 + u64::from(u), Completeness::Complete),
+                    ));
+                }
+            }
             ResultsShot::MysqlWarnings => {
                 line(
                     LogMsg::Notice {
@@ -1881,6 +2102,12 @@ mod fixtures {
         match shot {
             ResultsShot::TitledTabs => {
                 results.update(cx, |r, cx| r.set_pinned(3, true, cx));
+            }
+            ResultsShot::CrowdedTabs => {
+                results.update(cx, |r, cx| {
+                    r.set_pinned(1, true, cx);
+                    r.set_active(ActiveResult::Tab(20), cx);
+                });
             }
             ResultsShot::Counting => {
                 results.update(cx, |r, cx| r.start_count(0, Rc::new(|| {}), cx));

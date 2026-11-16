@@ -145,7 +145,7 @@ pub(super) enum M3a {
 
 // ## m3b-t25-results (named exception)
 /// The Task 25 states (after Task 22's).
-pub(super) const M3B_T25: [M3a; 10] = [
+pub(super) const M3B_T25: [M3a; 11] = [
     M3a::Results(ResultsShot::TitledTabs),
     M3a::ResultsTabMenu,
     M3a::Results(ResultsShot::Untyped),
@@ -156,6 +156,8 @@ pub(super) const M3B_T25: [M3a; 10] = [
     M3a::Results(ResultsShot::FetchAll),
     M3a::Results(ResultsShot::Notices),
     M3a::Results(ResultsShot::MysqlWarnings),
+    // ## m3b-t25-results (fix round 1, I1)
+    M3a::Results(ResultsShot::CrowdedTabs),
 ];
 
 // ## m3b-t22-tx-ui (named exception)
@@ -913,6 +915,10 @@ impl M3a {
                 s.push(editor_command("editor.describe_exec_range"));
                 s
             }
+            // ## m3b-t25-results (fix round 1, I1): the crowded strip on production.
+            Results(ResultsShot::CrowdedTabs) => {
+                results(ResultsShot::CrowdedTabs, Some(EnvTag::Production))
+            }
             Results(r) => results(r, Some(EnvTag::Dev)),
             GridRange => {
                 let mut s = results(ResultsShot::Rows, Some(EnvTag::Dev));
@@ -1340,6 +1346,7 @@ fn results_name(r: ResultsShot) -> &'static str {
         ResultsShot::FetchAll => "results-fetch-all",
         ResultsShot::Notices => "output-notices",
         ResultsShot::MysqlWarnings => "output-mysql-warnings",
+        ResultsShot::CrowdedTabs => "results-crowded-tabs",
     }
 }
 
@@ -1370,6 +1377,7 @@ fn results_marker(r: ResultsShot) -> (&'static str, Option<&'static str>) {
         ResultsShot::FetchAll => (DIALOG, None),
         ResultsShot::Notices => ("#log-notice-0", None),
         ResultsShot::MysqlWarnings => ("#log-code-2", None),
+        ResultsShot::CrowdedTabs => ("#results-tabs-more", None),
     }
 }
 
