@@ -335,12 +335,21 @@ pub fn model(cx: &App) -> Option<CapsuleModel> {
         LiveState::Failed(_) | LiveState::Lost { .. } => Some(CapsuleModel::Failed {
             env,
             env_label,
-            label: tr(cx, ids::hv::CAPSULE_FAILED, NoArgs),
+            // ## m3b-t22-tx-ui (named exception, review I4): a time zone the server refused
+            // is said; the profile's sessions no longer send it, so Retry connects.
+            label: match refused_zone(cx, p.id).filter(|_| is_config_loss(&live)) {
+                Some(zone) => tr(
+                    cx,
+                    ids::hv::CONN_ZONE_REFUSED,
+                    ids::hv::HvConnZoneRefused { zone: Text(zone) },
+                ),
+                None => tr(cx, ids::hv::CAPSULE_FAILED, NoArgs),
+            },
             name,
-            // ## m3b-t22-tx-ui (named exception, T12 concern 4): a connection the profile's
-            // own settings broke (a startup script, a time zone the server refused) offers
-            // "Edit connection", never Retry: retrying would fail the same way.
-            retry: if is_config_loss(&live) {
+            // ## m3b-t22-tx-ui (named exception, T12 concern 4, review I4): a connection its
+            // startup script broke offers "Edit connection", never Retry (retrying fails the
+            // same way); every other loss keeps Retry.
+            retry: if edits_instead(cx, p.id, &live) {
                 tr(cx, ids::hv::CONN_FIX_EDIT, NoArgs)
             } else {
                 tr(cx, ids::hv::CAPSULE_RETRY, NoArgs)
@@ -396,11 +405,11 @@ fn open_failure(window: &mut Window, cx: &mut App) {
     };
     match cx.global::<ConnectionsModel>().live(p.id) {
         LiveState::Failed(error) => open_error_dialog(p.id, error, window, cx),
-        // ## m3b-t22-tx-ui (named exception, T12 concern 4): a configuration loss is edited,
-        // never retried.
-        LiveState::Lost {
-            class: hacivat_proto::ErrClass::ConfigInvalid,
-        } => edit_config_loss(window, cx),
+        // ## m3b-t22-tx-ui (named exception, T12 concern 4, review I4): a startup-script loss
+        // is edited, never retried.
+        live @ LiveState::Lost { .. } if edits_instead(cx, p.id, &live) => {
+            edit_config_loss(window, cx);
+        }
         // A lost connection has no connect error to show: the body retries, like Retry.
         LiveState::Lost { .. } => retry(cx),
         // ## m2b-t22-live
@@ -416,14 +425,16 @@ fn open_failure(window: &mut Window, cx: &mut App) {
 pub fn can_retry(cx: &App) -> bool {
     current_profile(cx).is_some_and(|p| {
         let live = cx.global::<ConnectionsModel>().live(p.id);
-        // ## m3b-t22-tx-ui (named exception, T12 concern 4): never a configuration loss.
-        matches!(live, LiveState::Failed(_) | LiveState::Lost { .. }) && !is_config_loss(&live)
+        // ## m3b-t22-tx-ui (named exception, T12 concern 4, review I4): never a
+        // startup-script loss.
+        matches!(live, LiveState::Failed(_) | LiveState::Lost { .. })
+            && !edits_instead(cx, p.id, &live)
     })
 }
 
 // ## m3b-t22-tx-ui (named exception, T12 concern 4)
 /// A connection lost to the profile's own configuration (`config.invalid`: its startup script,
-/// or a time zone the server refused): retrying fails the same way.
+/// or a time zone the server refused; [`edits_instead`] tells them apart).
 pub fn is_config_loss(live: &LiveState) -> bool {
     matches!(
         live,
@@ -433,10 +444,24 @@ pub fn is_config_loss(live: &LiveState) -> bool {
     )
 }
 
-/// The current profile, when its connection was lost to its configuration.
+/// The time zone a server of `profile` refused (review I4), if one did.
+pub fn refused_zone(cx: &App, profile: ProfileId) -> Option<String> {
+    cx.try_global::<ConnectionsModel>()?
+        .manager()
+        .refused_time_zone(profile)
+}
+
+/// Whether `profile`'s loss `live` is edited instead of retried: a configuration loss that
+/// is not a refused time zone (its startup script, review I4).
+pub fn edits_instead(cx: &App, profile: ProfileId, live: &LiveState) -> bool {
+    is_config_loss(live) && refused_zone(cx, profile).is_none()
+}
+
+/// The current profile, when its connection was lost to its startup script.
 fn config_loss(cx: &App) -> Option<ProfileId> {
     let p = current_profile(cx)?;
-    is_config_loss(&cx.try_global::<ConnectionsModel>()?.live(p.id)).then_some(p.id)
+    let live = cx.try_global::<ConnectionsModel>()?.live(p.id);
+    edits_instead(cx, p.id, &live).then_some(p.id)
 }
 
 /// Opens the connection dialog of the profile lost to its configuration.

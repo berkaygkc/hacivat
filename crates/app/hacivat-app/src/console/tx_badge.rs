@@ -87,7 +87,10 @@ impl TxView {
             snap.state,
             SessionState::Busy { req, .. } if req != 0
         ) || matches!(snap.state, SessionState::Cancelling { .. });
-        let user = (!ended && snap.tx.owner == TxOwner::User)
+        // Fix round 1 (m4): the status segment's rule (`hacivat_exec::session_live`): a
+        // session that is connecting, closed or broken shows no transaction.
+        let live = hacivat_exec::session_live(&snap.state);
+        let user = (live && snap.tx.owner == TxOwner::User)
             .then_some(snap.tx.status)
             .and_then(|status| match status {
                 TxStatus::InTx => Some(UserTxView {
@@ -117,6 +120,11 @@ struct Watched {
     view: TxView,
     /// When the user's transaction opened, on the executor clock (the badge's age).
     opened: Option<Instant>,
+    /// The session's own start of that transaction (fix round 1, m5: a COMMIT and a BEGIN
+    /// the watch coalesced start a new age).
+    since: Option<Instant>,
+    /// The console holds its profile's default session (fix round 1, I1).
+    holds_default: bool,
     _task: Task<()>,
 }
 
@@ -143,6 +151,8 @@ pub enum Focus {
     Chip,
     /// The status bar's transaction segment.
     Segment,
+    /// The "Shared session" chip (fix round 1, I2: the shots check it is drawn).
+    Shared,
 }
 
 /// Where console `console`'s `which` control was last painted.
@@ -187,6 +197,10 @@ pub fn install(cx: &mut App) {
     cx.default_global::<TxMirror>();
     cx.observe_global::<Consoles>(watch_sessions).detach();
     watch_sessions(cx);
+    // ## fix round 1 (I1)
+    cx.observe_global::<ConnectionsModel>(follow_single_session)
+        .detach();
+    follow_single_session(cx);
 }
 
 /// Keeps one watcher per console session.
@@ -205,6 +219,10 @@ fn watch_sessions(cx: &mut App) {
     mirror
         .focus
         .retain(|(id, _), _| wanted.iter().any(|(want, _)| want == id));
+    // Fix round 1 (m10): a console that closed leaves no pending question behind.
+    mirror
+        .pending
+        .retain(|id| wanted.iter().any(|(want, _)| want == id));
     let dropped = mirror.watched.len() != before;
     let new: Vec<(ConsoleId, SessionHandle)> = wanted
         .into_iter()
@@ -227,6 +245,7 @@ fn watch_sessions(cx: &mut App) {
         }
         let now = cx.background_executor().now();
         let opened = view.user.map(|_| opened_at(now, &snap));
+        let holds_default = holds_default_session(id, &session, cx);
         // The foreground task awaits a `tokio::sync::watch` receiver only (Q4 ruling).
         let task = cx.spawn(async move |cx| {
             while rx.changed().await.is_ok() {
@@ -240,6 +259,8 @@ fn watch_sessions(cx: &mut App) {
                 session: session.id(),
                 view,
                 opened,
+                since: snap.tx.since,
+                holds_default,
                 _task: task,
             },
         );
@@ -247,6 +268,101 @@ fn watch_sessions(cx: &mut App) {
     tick(cx);
     if dropped || added {
         cx.refresh_windows();
+    }
+}
+
+// ## fix round 1 (I1)
+/// Whether console `console`'s `session` is its profile's default session.
+fn holds_default_session(console: ConsoleId, session: &SessionHandle, cx: &App) -> bool {
+    Consoles::get(cx, console)
+        .and_then(|s| s.profile)
+        .and_then(|p| cx.try_global::<ConnectionsModel>()?.manager().sessions(p))
+        .and_then(|s| s.default_session())
+        .is_some_and(|d| d.id() == session.id())
+}
+
+/// Whether console `console` shares its session, as the consoles hold them now (fix round 1,
+/// I1; never the saved setting alone, which applies only to sessions opened afterwards):
+/// another console shows the same session, or this console holds its profile's default
+/// session, the profile gives every console that session (single-session, SQLite), and no
+/// other console of the profile holds a session of its own.
+pub fn shares_session(console: ConsoleId, cx: &App) -> bool {
+    let Some(m) = cx.try_global::<TxMirror>() else {
+        return false;
+    };
+    let Some(me) = m.watched.get(&console) else {
+        return false;
+    };
+    if me.view.ended {
+        return false;
+    }
+    if m.watched
+        .iter()
+        .any(|(id, w)| *id != console && w.session == me.session)
+    {
+        return true;
+    }
+    let profile_of = |c: ConsoleId| Consoles::get(cx, c).and_then(|s| s.profile);
+    let Some(profile) = profile_of(console) else {
+        return false;
+    };
+    let single = cx
+        .try_global::<ConnectionsModel>()
+        .and_then(|model| model.get(profile))
+        .is_some_and(|p| p.single_session || p.engine == DbmsKind::Sqlite);
+    me.holds_default
+        && single
+        && !m.watched.iter().any(|(id, w)| {
+            *id != console && profile_of(*id) == Some(profile) && w.session != me.session
+        })
+}
+
+/// The saved single-session setting of each connected profile, as last seen (fix round 1,
+/// I1): a change applies to sessions opened after the next reconnect, which a toast says.
+#[derive(Default)]
+struct SingleSeen(HashMap<hacivat_proto::ProfileId, bool>);
+
+impl Global for SingleSeen {}
+
+/// Says "applies after reconnect" when a connected profile's single-session setting changed.
+fn follow_single_session(cx: &mut App) {
+    let Some(model) = cx.try_global::<ConnectionsModel>() else {
+        return;
+    };
+    let now: Vec<(hacivat_proto::ProfileId, bool, String, bool)> = model
+        .profiles()
+        .iter()
+        .map(|p| {
+            (
+                p.id,
+                p.single_session,
+                p.name.clone(),
+                matches!(model.live(p.id), hacivat_session::LiveState::Connected(_)),
+            )
+        })
+        .collect();
+    let mut changed: Vec<String> = Vec::new();
+    let seen = cx.default_global::<SingleSeen>();
+    for (id, single, name, connected) in now {
+        let before = seen.0.insert(id, single);
+        if connected && before.is_some_and(|b| b != single) {
+            changed.push(name);
+        }
+    }
+    for name in changed {
+        let text: hacivat_ui::text::TextFn = Rc::new(move |cx: &App| {
+            tr(
+                cx,
+                ids::hv::CONN_SINGLE_SESSION_RECONNECT,
+                ids::hv::HvConnSingleSessionReconnect {
+                    name: Text(name.clone()),
+                },
+            )
+        });
+        hacivat_ui::toast::ToastQueue::push(
+            cx,
+            hacivat_ui::toast::Toast::new(hacivat_ui::toast::ToastKind::Info, text),
+        );
     }
 }
 
@@ -289,12 +405,15 @@ fn note(cx: &mut App, id: ConsoleId, snap: &SessionSnapshot) {
     let Some(w) = cx.default_global::<TxMirror>().watched.get_mut(&id) else {
         return;
     };
-    if w.view == view {
+    let swapped = view.user.is_some() && snap.tx.since != w.since;
+    w.since = snap.tx.since;
+    if w.view == view && !swapped {
         return;
     }
     match (w.view.user, view.user) {
-        (None, Some(_)) => w.opened = Some(opened_at(now, snap)),
         (_, None) => w.opened = None,
+        (None, Some(_)) => w.opened = Some(opened_at(now, snap)),
+        (Some(_), Some(_)) if swapped => w.opened = Some(opened_at(now, snap)),
         _ => {}
     }
     w.view = view;
@@ -499,7 +618,8 @@ fn end_button(
         (
             "tx-badge-commit",
             tr(cx, ids::hv::TX_BADGE_COMMIT, NoArgs),
-            IconName::GitCommit,
+            // NOTES surface 4: Commit (check), Roll back (undo).
+            IconName::Check,
         )
     } else {
         (

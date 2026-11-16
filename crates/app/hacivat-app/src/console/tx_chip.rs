@@ -83,11 +83,14 @@ pub fn level_sql(level: IsolationLevel) -> Option<&'static str> {
 }
 
 /// The level an engine runs at when none is asked for (shown in mono beside "Server default").
-pub fn engine_default_level(engine: Option<DbmsKind>) -> &'static str {
-    match engine {
-        Some(DbmsKind::MySql | DbmsKind::MariaDb) => "REPEATABLE READ",
-        Some(DbmsKind::Sqlite) => "SERIALIZABLE",
-        _ => "READ COMMITTED",
+/// Fix round 1 (m3): only the engines Hacivat knows (their built-in default; a server set up
+/// otherwise is not read); `None` for any other, whose row then says "Server default" alone.
+pub fn engine_default_level(engine: Option<DbmsKind>) -> Option<&'static str> {
+    match engine? {
+        DbmsKind::Postgres => Some("READ COMMITTED"),
+        DbmsKind::MySql | DbmsKind::MariaDb => Some("REPEATABLE READ"),
+        DbmsKind::Sqlite => Some("SERIALIZABLE"),
+        _ => None,
     }
 }
 
@@ -208,15 +211,14 @@ pub fn render(console: ConsoleId, cx: &App) -> Option<AnyElement> {
     Some(chip.into_any_element())
 }
 
-/// The "Shared session" chip of a console whose connection gives every console one session
-/// (`Profile::single_session`, and every SQLite connection): the users glyph and the words; `icon_only` keeps the glyph
+/// The "Shared session" chip of a console that shares its session
+/// ([`tx_badge::shares_session`]: the live relation, fix round 1 I1): the users glyph and the words; `icon_only` keeps the glyph
 /// (the words stay its tooltip and accessible name). `None` otherwise.
 pub fn render_shared(console: ConsoleId, icon_only: bool, cx: &App) -> Option<AnyElement> {
     let profile = Consoles::get(cx, console)?.profile?;
     let p = cx.try_global::<ConnectionsModel>()?.get(profile)?;
-    // SQLite always shares one connection between its consoles (the pool's rule).
-    let shared = p.single_session || p.engine == DbmsKind::Sqlite;
-    if !shared || tx_badge::view(console, cx).is_none_or(|v| v.ended) {
+    // Fix round 1 (I1): what the consoles hold now, never the saved setting alone.
+    if !tx_badge::shares_session(console, cx) {
         return None;
     }
     let theme = *Theme::get(cx);
@@ -231,6 +233,8 @@ pub fn render_shared(console: ConsoleId, icon_only: bool, cx: &App) -> Option<An
     );
     let mut chip = div()
         .id("tx-shared")
+        .debug_selector(|| "tx-shared".to_string())
+        .relative()
         .flex()
         .flex_row()
         .flex_none()
@@ -258,8 +262,13 @@ pub fn render_shared(console: ConsoleId, icon_only: bool, cx: &App) -> Option<An
         );
     }
     Some(
-        chip.tooltip(move |_, cx| Tip::view(tip.clone(), cx))
-            .into_any_element(),
+        chip.children(tx_badge::record_bounds(
+            console,
+            tx_badge::Focus::Shared,
+            cx,
+        ))
+        .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+        .into_any_element(),
     )
 }
 
@@ -304,19 +313,22 @@ pub fn menu_items(console: ConsoleId, cx: &App) -> Vec<MenuItemSpec> {
     } else {
         match level_sql(level) {
             Some(sql) => Rc::new(move |_: &App| SharedString::from(sql)),
-            None => Rc::new(move |cx: &App| {
-                tr(
+            None => Rc::new(move |cx: &App| match engine_default_level(engine) {
+                Some(level) => tr(
                     cx,
                     ids::hv::TX_ISO_DEFAULT_HINT,
                     ids::hv::HvTxIsoDefaultHint {
-                        level: Text(engine_default_level(engine).to_string()),
+                        level: Text(level.to_string()),
                     },
-                )
+                ),
+                None => tr(cx, ids::hv::TX_ISO_DEFAULT, NoArgs),
             }),
         }
     };
     items.push(
         MenuItemSpec::new(text_fn(ids::hv::TX_MENU_ISOLATION), ISOLATION)
+            // Fix round 1 (m1): the row opens a menu of its own ("Isolation ›").
+            .keys(Rc::new(|_: &App| SharedString::from("›")))
             .disabled(open || view.read_only)
             .hint(level_hint)
             .hint_source(if open || level_sql(level).is_none() {
@@ -347,11 +359,15 @@ pub fn isolation_items(console: ConsoleId, cx: &App) -> Vec<MenuItemSpec> {
                     MenuItemSpec::new(Rc::new(move |_: &App| SharedString::from(sql)), action)
                         .mono(true)
                 }
-                None => MenuItemSpec::new(text_fn(ids::hv::TX_ISO_DEFAULT), action)
-                    .hint(Rc::new(move |_: &App| {
-                        SharedString::from(engine_default_level(engine))
-                    }))
-                    .hint_source(TextSource::Data),
+                None => {
+                    let item = MenuItemSpec::new(text_fn(ids::hv::TX_ISO_DEFAULT), action);
+                    match engine_default_level(engine) {
+                        Some(level) => item
+                            .hint(Rc::new(move |_: &App| SharedString::from(level)))
+                            .hint_source(TextSource::Data),
+                        None => item,
+                    }
+                }
             };
             item.checked(view.isolation == level)
         })

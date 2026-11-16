@@ -2148,3 +2148,19 @@ hv-console-shared = Shared session
 # Variables:
 #   $name (String) - the connection's name, e.g. "orders-dev".
 hv-console-shared-tip = Every console of { $name } uses this session: a transaction opened here is open in all of them.
+
+## m3b-t22-tx-ui-r1
+
+# The idle-transaction toast's Commit or Roll back while the console's run waits for an answer
+# (or still runs): nothing was sent.
+hv-tx-idle-waits = The console is waiting for an answer to its run. Commit or roll back once it's answered.
+# A connected profile's single-session setting changed: it applies to the sessions opened after
+# the next reconnect.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+hv-conn-single-session-reconnect = The session setting of { $name } applies after it reconnects.
+# The capsule of a connection whose server refused the time zone in Settings. Retry connects
+# without it.
+# Variables:
+#   $zone (String) - the time zone name (an IANA name, untranslated), e.g. "Europe/Istanbul".
+hv-conn-zone-refused = The server refused time zone { $zone }

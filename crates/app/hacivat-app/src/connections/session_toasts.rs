@@ -202,8 +202,9 @@ pub(crate) fn lost(profile: ProfileId, lost: LostState, cx: &mut App) {
 }
 
 // ## m3b-t22-tx-ui (named exception, T12 carry r1-m1)
-/// `lost`, joined with what the profile's visible "lost" toast already says when both are
-/// losses without a reconnect (one close reported twice); recorded as what the toast now says.
+/// `lost`, joined with what the profile's visible "lost" toast already says when that one
+/// may have rolled a transaction back (one close reported twice, or a later loss of another
+/// session: fix round 1, m6); recorded as what the toast now says.
 fn merged_loss(cx: &mut App, profile: ProfileId, lost: LostState) -> LostState {
     let visible = ToastQueue::visible_ids(cx);
     let toasts = cx.default_global::<SessionToasts>();
@@ -212,7 +213,9 @@ fn merged_loss(cx: &mut App, profile: ProfileId, lost: LostState) -> LostState {
         .get(&(profile, Kind::Lost))
         .is_some_and(|id| visible.contains(id));
     let merged = match toasts.lost.get(&profile) {
-        Some(before) if on_screen && before.open_tx && lost.open_tx => LostState {
+        // Fix round 1 (m6): an earlier loss that may have rolled a transaction back stays
+        // said until the toast goes, whatever a later loss of another session says.
+        Some(before) if on_screen && before.open_tx => LostState {
             open_tx: true,
             temp_objects: before.temp_objects || lost.temp_objects,
             session_vars: before.session_vars || lost.session_vars,

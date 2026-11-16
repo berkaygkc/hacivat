@@ -1303,6 +1303,19 @@ impl ConnectionManager {
         }
     }
 
+    // ## m3b-t22-tx-ui (named exception, review I4)
+    /// The settings' time zone a server of profile `id` refused, if one did: that profile's
+    /// sessions no longer send it, so a retry connects (the UI keeps Retry and says why).
+    pub fn refused_time_zone(&self, id: ProfileId) -> Option<String> {
+        self.shared
+            .zone
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .by_profile
+            .get(&id)
+            .and_then(|z| z.refused_by_server().map(str::to_string))
+    }
+
     /// The sessions of a connected (or reconnecting) profile (B4): its default console session
     /// is `SessionManager::default_session`.
     pub fn sessions(&self, id: ProfileId) -> Option<Arc<SessionManager>> {

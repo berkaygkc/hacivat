@@ -72,13 +72,23 @@ fn session_with(
     fake: FakeDriver,
     read_only: bool,
 ) -> SessionHandle {
+    session_and_fake(vcx, id, fake, read_only).0
+}
+
+/// [`session_with`], with the session's fake (its call log).
+fn session_and_fake(
+    vcx: &VisualTestContext,
+    id: ProfileId,
+    fake: FakeDriver,
+    read_only: bool,
+) -> (SessionHandle, std::sync::Arc<FakeDriver>) {
     let (rt, mut profile) = vcx.cx.read(|cx| {
         let m = cx.global::<ConnectionsModel>();
         let profile = m.get(id).expect("a saved profile");
         (m.core_runtime().handle(), (*profile).clone())
     });
     profile.read_only = read_only;
-    futures::executor::block_on(hacivat_session::testing::fake_session(rt, fake, profile)).0
+    futures::executor::block_on(hacivat_session::testing::fake_session(rt, fake, profile))
 }
 
 /// A focused staging console over `fake` (read-write).
@@ -503,7 +513,10 @@ fn badge_answers_wait_while_the_session_runs(cx: &mut TestAppContext) {
 #[gpui::test]
 fn idle_toast_keep_never_rolls_back(cx: &mut TestAppContext) {
     let vcx = shell_staging(cx, "en");
-    let (console, h) = console_over(vcx, pg().tracks_transactions());
+    let id = profile_id(vcx, STAGING);
+    let (h, fake) = session_and_fake(vcx, id, pg().tracks_transactions(), false);
+    let console = register_test_console(vcx, id, h.clone());
+    focus_console(vcx, console);
     user_exec(&h, "BEGIN");
     user_exec(&h, "UPDATE t SET a = 1");
     wait_until(vcx, "the user's transaction", |vcx| {
@@ -524,11 +537,14 @@ fn idle_toast_keep_never_rolls_back(cx: &mut TestAppContext) {
     }
     // Keep open: the toast goes, nothing is sent, the transaction stays.
     let sent = fake_sent(&h);
+    let log = fake.executed();
     let keep = toast_button(vcx, &h, 2);
     click(vcx, keep);
     vcx.run_until_parked();
     assert!(vcx.cx.read(idle_toast::shown).is_empty());
     assert_eq!(fake_sent(&h), sent);
+    // Fix round 1 (m9): the connection heard nothing.
+    assert_eq!(fake.executed(), log);
     assert_eq!(snapshot(&h).tx.status, TxStatus::InTx);
     assert!(vcx.cx.read(|cx| tx_badge::user_tx(console, cx)).is_some());
     // Its Roll back is the user's answer.
@@ -598,7 +614,10 @@ fn single_session_checkbox_writes_through_the_model(cx: &mut TestAppContext) {
             cx,
         )
     });
-    settle(vcx, Duration::from_millis(20));
+    // Fix round 1 (I5): wait for the dialog, never a fixed time.
+    wait_until_mut(vcx, "the dialog", |vcx| {
+        vcx.debug_bounds("disclosure-conn-advanced").is_some()
+    });
     click(vcx, "disclosure-conn-advanced");
     assert_eq!(
         text_of(vcx, "conn-adv-budget").as_deref(),
@@ -625,14 +644,19 @@ fn single_session_checkbox_writes_through_the_model(cx: &mut TestAppContext) {
         std::fs::read_to_string(paths(vcx).connections_toml())
             .is_ok_and(|t| t.contains("single_session = true"))
     });
-    // A console of the connection says it shares the session.
+    // Fix round 1 (I1): the connection is connected, so the setting applies after it
+    // reconnects; a toast says so, and a console holding a session of its own claims nothing.
+    let texts = toast_texts(vcx);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("applies after it reconnects")),
+        "{texts:?}"
+    );
     let (console, _h) = console_over(vcx, pg().tracks_transactions());
     redraw(vcx);
-    assert_eq!(
-        text_of(vcx, "tx-shared-label").as_deref(),
-        Some("Shared session")
-    );
-    let _ = console;
+    assert!(text_of(vcx, "tx-shared-label").is_none());
+    assert!(!vcx.cx.read(|cx| tx_badge::shares_session(console, cx)));
     stop_core_runtime_test(cx);
 }
 
@@ -675,7 +699,17 @@ fn badge_and_segment_are_never_clipped_at_960_tr_xt(cx: &mut TestAppContext) {
     assert_eq!(layer_ids(vcx), ["menu"]);
     let rows = menu_rows(vcx, console);
     assert_eq!(rows.len(), 6, "{rows:?}");
-    let _ = segment;
+    // Fix round 1 (m9): the menu opens above the segment, left edges aligned.
+    redraw(vcx);
+    let menu = vcx.debug_bounds("popup-menu").expect("the menu");
+    assert!(
+        menu.bottom() <= segment.top(),
+        "menu {menu:?} above segment {segment:?}"
+    );
+    assert!(
+        (f32::from(menu.left()) - f32::from(segment.left())).abs() <= 2.0,
+        "menu {menu:?} aligned with segment {segment:?}"
+    );
     stop_core_runtime_test(cx);
 }
 
@@ -834,6 +868,203 @@ fn the_settings_time_zone_reaches_the_sessions(cx: &mut TestAppContext) {
             .executed()
             .iter()
             .any(|s| s == "SET TIME ZONE 'Europe/Istanbul'")
+    });
+    stop_core_runtime_test(cx);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 1
+
+/// I1: the "Shared session" chip follows what the consoles hold, never the saved setting
+/// alone; a change of the setting while connected applies after a reconnect, and says so.
+#[gpui::test]
+fn the_shared_chip_follows_the_consoles_not_the_saved_setting(cx: &mut TestAppContext) {
+    let vcx = shell_staging(cx, "en");
+    let id = profile_id(vcx, STAGING);
+    let (one, h1) = console_over(vcx, pg().tracks_transactions());
+    let (two, _h2) = console_over(vcx, pg().tracks_transactions());
+    let shared =
+        |vcx: &VisualTestContext, c: ConsoleId| vcx.cx.read(|cx| tx_badge::shares_session(c, cx));
+    assert!(!shared(vcx, one) && !shared(vcx, two));
+    // Turned on while connected: the consoles keep their own sessions, so no chip claims
+    // otherwise, and a toast says when it applies.
+    let mut p = vcx
+        .cx
+        .read(|cx| (*cx.global::<ConnectionsModel>().get(id).expect("saved")).clone());
+    p.single_session = true;
+    save_draft(vcx, hacivat_session::profile::ProfileDraft::edit(p.clone()));
+    wait_until(vcx, "the saved setting", |vcx| {
+        vcx.cx.read(|cx| {
+            cx.global::<ConnectionsModel>()
+                .get(id)
+                .is_some_and(|p| p.single_session)
+        })
+    });
+    redraw(vcx);
+    assert!(!shared(vcx, one) && !shared(vcx, two));
+    let texts = toast_texts(vcx);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("applies after it reconnects")),
+        "{texts:?}"
+    );
+    // Turned off while two consoles hold one session: they still share it, and say so.
+    p.single_session = false;
+    save_draft(vcx, hacivat_session::profile::ProfileDraft::edit(p));
+    let three = register_test_console(vcx, id, h1.clone());
+    wait_until(vcx, "the third console's mirror", |vcx| {
+        vcx.cx.read(|cx| tx_badge::view(three, cx).is_some())
+    });
+    assert!(shared(vcx, one) && shared(vcx, three));
+    assert!(!shared(vcx, two));
+    focus_console(vcx, three);
+    redraw(vcx);
+    assert_eq!(
+        text_of(vcx, "tx-shared-label").as_deref(),
+        Some("Shared session")
+    );
+    stop_core_runtime_test(cx);
+}
+
+/// I3: the idle toast's Commit waits as the badge's: while the session runs the user's
+/// request, nothing is sent, the reminder stays and says why.
+#[gpui::test]
+fn idle_toast_answers_wait_while_the_session_runs(cx: &mut TestAppContext) {
+    let vcx = shell_staging(cx, "en");
+    let slow = FakeExec {
+        prefix: "UPDATE",
+        result: Ok(ExecSummary::default()),
+        delay: Duration::from_secs(600),
+        tx_after: None,
+        panics: false,
+    };
+    let (console, h) = console_over(vcx, pg().tracks_transactions().exec(vec![slow]));
+    user_exec(&h, "BEGIN");
+    wait_until(vcx, "the user's transaction", |vcx| {
+        vcx.cx.read(|cx| tx_badge::user_tx(console, cx).is_some())
+    });
+    vcx.cx.update(|cx| idle_toast::show(h.id(), 10, cx));
+    vcx.run_until_parked();
+    let _running = h.submit(Request::Exec {
+        sql: "UPDATE t SET a = 1".into(),
+        opts: ExecOpts::default(),
+        origin: ExecOrigin::User,
+    });
+    wait_until(vcx, "the session busy", |vcx| {
+        vcx.cx.read(|cx| tx_badge::answer_waits(console, cx))
+    });
+    let commit = toast_button(vcx, &h, 0);
+    click(vcx, commit);
+    vcx.run_until_parked();
+    assert_eq!(snapshot(&h).tx.status, TxStatus::InTx);
+    assert_eq!(vcx.cx.read(idle_toast::shown), [(h.id(), 10)]);
+    let texts = toast_texts(vcx);
+    assert!(
+        texts.iter().any(|t| t.contains("waiting for an answer")),
+        "{texts:?}"
+    );
+    // The palette's Commit and Roll back wait too.
+    vcx.cx.update(|cx| Consoles::set_focused(cx, Some(console)));
+    assert!(!run(vcx, "tx.commit"));
+    assert!(!run(vcx, "tx.rollback"));
+    stop_core_runtime_test(cx);
+}
+
+/// I3: the toast belongs to the transaction it was raised for.
+#[gpui::test]
+fn the_idle_toast_goes_with_its_transaction(cx: &mut TestAppContext) {
+    let vcx = shell_staging(cx, "en");
+    let (console, h) = console_over(vcx, pg().tracks_transactions());
+    user_exec(&h, "BEGIN");
+    wait_until(vcx, "the user's transaction", |vcx| {
+        vcx.cx.read(|cx| tx_badge::user_tx(console, cx).is_some())
+    });
+    vcx.cx.update(|cx| idle_toast::show(h.id(), 10, cx));
+    vcx.run_until_parked();
+    assert_eq!(vcx.cx.read(idle_toast::shown).len(), 1);
+    // Committed and begun again before the toast followed: another transaction.
+    user_exec(&h, "COMMIT");
+    user_exec(&h, "BEGIN");
+    wait_until(vcx, "the toast to go", |vcx| {
+        vcx.cx.read(idle_toast::shown).is_empty()
+    });
+    stop_core_runtime_test(cx);
+}
+
+fn failing(prefix: &'static str) -> FakeExec {
+    FakeExec {
+        prefix,
+        result: Err(RawError {
+            kind: RawErrorKind::Db,
+            server: None,
+        }),
+        delay: Duration::ZERO,
+        tx_after: None,
+        panics: false,
+    }
+}
+
+/// I4: a startup script that fails offers "Edit connection", never Retry.
+#[gpui::test]
+fn a_failed_startup_script_offers_edit_connection(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(cx, "en", pg().exec(vec![failing("SET search_path")]));
+    let mut p = test_profile(STAGING, Some(EnvTag::Staging), "10.0.4.13");
+    p.startup_script = Some("SET search_path = app".into());
+    add_profile(vcx, p);
+    connect(vcx, STAGING);
+    wait_until(vcx, "the loss", |vcx| {
+        matches!(live(vcx, STAGING), LiveState::Lost { .. })
+    });
+    let id = profile_id(vcx, STAGING);
+    assert!(vcx.cx.read(|cx| {
+        let live = cx.global::<ConnectionsModel>().live(id);
+        hacivat_app::connections::capsule::edits_instead(cx, id, &live)
+    }));
+    assert!(!vcx.cx.read(hacivat_app::connections::capsule::can_retry));
+    match capsule_model(vcx) {
+        hacivat_ui::capsule::CapsuleModel::Failed { retry, .. } => {
+            assert_eq!(retry.as_ref(), "Edit connection");
+        }
+        other => panic!("{other:?}"),
+    }
+    stop_core_runtime_test(cx);
+}
+
+/// I4: a time zone the server refused keeps Retry (the profile's sessions no longer send it)
+/// and the capsule says which zone.
+#[gpui::test]
+fn a_refused_time_zone_keeps_retry_and_says_so(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(cx, "en", pg().exec(vec![failing("SET TIME ZONE")]));
+    add_profile(
+        vcx,
+        test_profile(STAGING, Some(EnvTag::Staging), "10.0.4.13"),
+    );
+    vcx.cx.update(|cx| {
+        hacivat_app::shell::update_settings(cx, |s| {
+            s.ui.time_zone = hacivat_settings::TimeZonePref::Iana("Mars/Olympus".into());
+        });
+    });
+    vcx.run_until_parked();
+    connect(vcx, STAGING);
+    wait_until(vcx, "the loss", |vcx| {
+        matches!(live(vcx, STAGING), LiveState::Lost { .. })
+    });
+    assert!(vcx.cx.read(hacivat_app::connections::capsule::can_retry));
+    match capsule_model(vcx) {
+        hacivat_ui::capsule::CapsuleModel::Failed { label, retry, .. } => {
+            assert_eq!(
+                label.replace(['\u{2068}', '\u{2069}'], ""),
+                "The server refused time zone Mars/Olympus"
+            );
+            assert_eq!(retry.as_ref(), "Retry");
+        }
+        other => panic!("{other:?}"),
+    }
+    // Retry connects without the zone.
+    vcx.cx.update(hacivat_app::connections::capsule::retry);
+    wait_until(vcx, "the reconnect", |vcx| {
+        matches!(live(vcx, STAGING), LiveState::Connected(_))
     });
     stop_core_runtime_test(cx);
 }

@@ -1180,6 +1180,18 @@ impl M3a {
             TxShared => console.is_some_and(|c| {
                 hacivat_app::console::tx_badge::user_tx(c, cx).is_some_and(|u| !u.failed)
                     && hacivat_app::console::tx_chip::render_shared(c, false, cx).is_some()
+                    // Fix round 1 (I2): the chip (its words or its icon) is painted inside the
+                    // window.
+                    && hacivat_app::console::tx_badge::bounds_of(
+                        c,
+                        hacivat_app::console::tx_badge::Focus::Shared,
+                        cx,
+                    )
+                    .is_some_and(|b| {
+                        b.size.width > hacivat_ui_core::gpui_surface::px(0.0)
+                            && b.right() <= viewport.width
+                            && b.bottom() <= viewport.height
+                    })
             }),
             TxBadgeFailed => console.is_some_and(|c| {
                 hacivat_app::console::tx_badge::user_tx(c, cx).is_some_and(|u| u.failed)

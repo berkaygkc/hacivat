@@ -1987,3 +1987,12 @@ hv-conn-budget-single = Tüm konsolların paylaştığı tek oturum
 hv-console-shared = Paylaşılan oturum
 # Review: PO
 hv-console-shared-tip = { $name } bağlantısının tüm konsolları bu oturumu kullanır: burada açılan bir işlem hepsinde açıktır.
+
+## m3b-t22-tx-ui-r1
+
+# Review: PO
+hv-tx-idle-waits = Konsol, çalıştırmasıyla ilgili bir yanıt bekliyor. Yanıtlandıktan sonra commit edin ya da geri alın.
+# Review: PO
+hv-conn-single-session-reconnect = { $name } için oturum ayarı yeniden bağlandıktan sonra geçerli olur.
+# Review: PO
+hv-conn-zone-refused = Sunucu { $zone } saat dilimini reddetti

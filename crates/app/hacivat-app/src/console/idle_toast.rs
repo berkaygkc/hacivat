@@ -17,7 +17,10 @@
 //!   transaction that ended takes its toast away.
 //! - **Nothing ends silently.** Keep open only dismisses the toast; a dismissed or timed-out
 //!   toast sends nothing (the toast is sticky: it has no timeout). Commit and Roll back are the
-//!   user's answer, through `exec_ui::tx::end_tx`, as the badge's.
+//!   user's answer, through `exec_ui::tx::end_tx`, as the badge's, and wait as the badge's do
+//!   (fix round 1, I3): while the session runs the user's request or a question is open the
+//!   reminder stays and a line says why. The toast goes when the transaction it was raised for
+//!   ends, or another one of the session's takes its place.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -45,6 +48,9 @@ struct Followed {
 #[derive(Default)]
 struct IdleToasts {
     shown: HashMap<SessionId, u64>,
+    /// The start of the transaction each toast was raised for (fix round 1, I3): another
+    /// transaction of the session takes the toast away.
+    raised: HashMap<SessionId, Option<std::time::Instant>>,
     followed: HashMap<SessionId, Followed>,
     /// What each toast said, for the tests: (toast id, session, minutes).
     #[cfg(feature = "test-support")]
@@ -115,10 +121,19 @@ fn follow_sessions(cx: &mut App) {
         });
         let ends = cx.spawn(async move |cx| {
             while state.changed().await.is_ok() {
-                let open = user_open(&state.borrow_and_update());
-                if !open {
-                    cx.update(|cx| clear(id, cx));
-                }
+                let (open, since) = {
+                    let snap = state.borrow_and_update();
+                    (user_open(&snap), snap.tx.since)
+                };
+                cx.update(|cx| {
+                    let other = cx
+                        .try_global::<IdleToasts>()
+                        .and_then(|t| t.raised.get(&id).copied())
+                        .is_some_and(|raised| raised != since);
+                    if !open || other {
+                        clear(id, cx);
+                    }
+                });
             }
             cx.update(|cx| clear(id, cx));
         });
@@ -187,9 +202,22 @@ pub fn show(session: SessionId, minutes: u32, cx: &mut App) {
     let answer = |commit: bool| -> hacivat_ui::actions::ActionFn {
         Rc::new(move |_, cx| {
             // The console that shows the session now (a console may have closed since).
-            if let Some(console) = console_of(session, cx)
-                && tx_badge::user_tx(console, cx).is_some_and(|u| !(commit && u.failed))
-            {
+            let Some(console) = console_of(session, cx) else {
+                return;
+            };
+            // Fix round 1 (I3): as the badge's, never while the session runs the user's
+            // request or a question of its run is open; the reminder comes back and says so.
+            if tx_badge::answer_waits(console, cx) {
+                cx.defer(move |cx| {
+                    show(session, minutes, cx);
+                    ToastQueue::push(
+                        cx,
+                        Toast::new(ToastKind::Info, text_fn(ids::hv::TX_IDLE_WAITS)),
+                    );
+                });
+                return;
+            }
+            if tx_badge::user_tx(console, cx).is_some_and(|u| !(commit && u.failed)) {
                 crate::exec_ui::tx::end_tx(console, commit, cx).detach();
             }
         })
@@ -216,9 +244,13 @@ pub fn show(session: SessionId, minutes: u32, cx: &mut App) {
     if let Some(old) = old {
         ToastQueue::dismiss(cx, old);
     }
+    let since = Consoles::get(cx, console)
+        .and_then(|s| s.session.as_ref())
+        .and_then(|h| h.state().borrow().tx.since);
     let toast_id = ToastQueue::push_id(cx, toast);
     let toasts = cx.default_global::<IdleToasts>();
     toasts.shown.insert(session, toast_id);
+    toasts.raised.insert(session, since);
     #[cfg(feature = "test-support")]
     toasts.record.push((toast_id, session, minutes));
 }
@@ -229,7 +261,9 @@ fn clear(session: SessionId, cx: &mut App) {
         .try_global::<IdleToasts>()
         .and_then(|t| t.shown.get(&session).copied())
     {
-        cx.default_global::<IdleToasts>().shown.remove(&session);
+        let toasts = cx.default_global::<IdleToasts>();
+        toasts.shown.remove(&session);
+        toasts.raised.remove(&session);
         ToastQueue::dismiss(cx, old);
     }
 }

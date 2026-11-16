@@ -159,15 +159,17 @@ pub fn build_for(
             ));
         }
         if crate::console::tx_chip::render_shared(console, false, cx).is_some() {
+            // Fix round 1 (I2): pinned, so it never leaves the row; it may still take its
+            // icon-only form (NOTES ruling 26).
             bar = bar.item(
-                ToolbarItem::new(
-                    13,
+                ToolbarItem::pinned(
                     item(move |_, cx| {
                         crate::console::tx_chip::render_shared(console, false, cx)
                             .unwrap_or_else(|| div().into_any_element())
                     }),
                     text_fn(ids::hv::CONSOLE_SHARED),
                 )
+                .priority(13)
                 .compact(item(move |_, cx| {
                     crate::console::tx_chip::render_shared(console, true, cx)
                         .unwrap_or_else(|| div().into_any_element())

@@ -58,14 +58,25 @@ pub fn user_tx(console: ConsoleId, cx: &App) -> Option<UserTx> {
     user_tx_of(Consoles::get(cx, console)?.session.as_ref()?)
 }
 
+// ## m3b-t22-tx-ui (named exception, review I3): the palette's Commit and Roll back wait
+// as the badge's do: never while the console's session runs the user's request or a question
+// of its run is open (T11 I1, T19 carry 3).
+fn answer_waits(console: ConsoleId, cx: &App) -> bool {
+    crate::console::tx_badge::answer_waits(console, cx)
+}
+
 fn can_commit(cx: &App) -> bool {
     focused_console(cx)
+        .filter(|c| !answer_waits(*c, cx))
         .and_then(|c| user_tx(c, cx))
         .is_some_and(|t| !t.failed)
 }
 
 fn can_roll_back(cx: &App) -> bool {
-    focused_console(cx).and_then(|c| user_tx(c, cx)).is_some()
+    focused_console(cx)
+        .filter(|c| !answer_waits(*c, cx))
+        .and_then(|c| user_tx(c, cx))
+        .is_some()
 }
 
 /// Ends console `console`'s user transaction (`commit`, else roll back). The task answers
@@ -141,15 +152,17 @@ pub fn end_tx(console: ConsoleId, commit: bool, cx: &mut App) -> Task<bool> {
 }
 
 fn run_commit(_window: &mut Window, cx: &mut App) {
-    if let Some(console) =
-        focused_console(cx).filter(|c| user_tx(*c, cx).is_some_and(|t| !t.failed))
+    if let Some(console) = focused_console(cx)
+        .filter(|c| !answer_waits(*c, cx) && user_tx(*c, cx).is_some_and(|t| !t.failed))
     {
         end_tx(console, true, cx).detach();
     }
 }
 
 fn run_roll_back(_window: &mut Window, cx: &mut App) {
-    if let Some(console) = focused_console(cx).filter(|c| user_tx(*c, cx).is_some()) {
+    if let Some(console) =
+        focused_console(cx).filter(|c| !answer_waits(*c, cx) && user_tx(*c, cx).is_some())
+    {
         end_tx(console, false, cx).detach();
     }
 }

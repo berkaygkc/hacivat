@@ -332,6 +332,9 @@ mod tests {
 pub struct SessionZone {
     name: String,
     refused: std::sync::atomic::AtomicBool,
+    // ## m3b-t22-tx-ui (named exception, review I4)
+    /// A server refused it (not merely a name that is no zone).
+    by_server: std::sync::atomic::AtomicBool,
 }
 
 impl SessionZone {
@@ -347,6 +350,7 @@ impl SessionZone {
         SessionZone {
             name: name.to_string(),
             refused: std::sync::atomic::AtomicBool::new(!valid),
+            by_server: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -358,7 +362,19 @@ impl SessionZone {
     /// A server refused it: no session sends it again. True the first time (the caller says
     /// so once).
     pub fn refuse(&self) -> bool {
+        // ## m3b-t22-tx-ui (named exception, review I4)
+        self.by_server
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         !self.refused.swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    // ## m3b-t22-tx-ui (named exception, review I4)
+    /// The zone's name once a server refused it (the UI says so; a retry connects without
+    /// it).
+    pub fn refused_by_server(&self) -> Option<&str> {
+        self.by_server
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .then_some(self.name.as_str())
     }
 }
 

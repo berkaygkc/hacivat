@@ -77,11 +77,17 @@ async fn a_refused_zone_stays_with_the_profile_whose_server_refused_it() {
         }
     );
     assert_eq!(count(&f, refused), 1);
+    // T22 fix round 1 (I4): the UI can say which zone was refused, for that profile only.
+    assert_eq!(
+        m.refused_time_zone(first.id).as_deref(),
+        Some("Mars/Olympus")
+    );
     // Another profile's server still gets the zone (before: shared manager-wide, it did not).
     let second = another_profile();
     m.connect(second.clone(), None, Interaction::Headless);
     wait_connected(&m, second.id).await;
     assert_eq!(count(&f, refused), 2);
+    assert_eq!(m.refused_time_zone(second.id), None);
     // The profile that refused it connects again without it.
     m.connect(first.clone(), None, Interaction::Headless);
     wait_connected(&m, first.id).await;
