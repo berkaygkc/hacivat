@@ -1255,9 +1255,6 @@ type Row = (&'static str, &'static str, &'static [&'static str]);
 
 const PG_RO: &str = "25006";
 
-/// The PostgreSQL rows (run B's server-blocked catalogue on this task's fixture, plus plain
-/// writes): every one is sent through Run with no classifier. Ordered so the one that ends in
-/// a gap (which discards the connection) comes last.
 // ## m3a-f5-demo (DEMO-7): a statement whose first keyword changes data or schema is
 // refused by the console before anything is sent (`INPUT`); the rows a first keyword does not
 // show still meet the guard and the server.
@@ -1265,6 +1262,9 @@ const PG_RO: &str = "25006";
 /// The client-side refusal: "Not sent: this console is read-only …" (`DenyLayer::Input`).
 const INPUT: &str = "input";
 
+/// The PostgreSQL rows (run B's server-blocked catalogue on this task's fixture, plus plain
+/// writes): every one goes through Run with no classifier. Ordered so the one that ends in
+/// a gap (which discards the connection) comes last.
 const PG_ROWS: &[Row] = &[
     ("W1", "INSERT INTO {t} VALUES (7)", &[INPUT]),
     ("W2", "UPDATE {t} SET a = a + 1", &[INPUT]),
