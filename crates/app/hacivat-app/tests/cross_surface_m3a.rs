@@ -325,41 +325,30 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
         "{out:?}"
     );
 
-    // The server layer behind it.
+    // ## m3b-t18-safe06 (merge reconciliation): a write its first keyword does not show (a
+    // writable CTE) no longer reaches the server: the read-only classifier (step 0b, installed
+    // at boot) refuses it before anything is sent. The server layer itself (25006 inside
+    // `BEGIN … READ ONLY`) stays covered by the Docker runs without a classifier
+    // (`docker_m2b_bypass` run B, `docker_m3a_readonly`).
+    let sent_before = fake(vcx).call_log().len();
     type_script(vcx, &editor, &format!("{cte};\n"), 3);
     editor_command(vcx, &editor, "editor.run");
     wait_until(vcx, "the Failed mark", |vcx| {
-        matches!(
-            marks(vcx, id).as_slice(),
-            [ExecMarkState::Failed { sqlstate: Some(code) }] if code.as_ref() == "25006"
-        )
+        matches!(marks(vcx, id).as_slice(), [ExecMarkState::Failed { .. }])
     });
     let lines = log(vcx, id);
     assert!(
-        lines.iter().any(|m| matches!(
-            m,
-            LogMsg::Error { view, .. }
-                if view.code.as_deref() == Some("25006")
-                    && view.server_text.as_deref()
-                        == Some("cannot execute INSERT in a read-only transaction")
-        )),
+        lines.iter().any(
+            |m| matches!(m, LogMsg::Error { view, .. } if view.title_id == "exec-deny-classifier")
+        ),
         "{lines:?}"
     );
-    // Fix round 1 (M8): the session's read-only wrapper reached the server before the
-    // statement did (the 25006 is the fake's script; what the product sent is not).
     let calls = fake(vcx).call_log();
-    let write = calls
-        .iter()
-        .position(|c| {
-            matches!(c, hacivat_driver::fake::FakeCall::Typed(FakeTypedCall::Query(q))
-                if q.starts_with("WITH a AS (INSERT INTO audit"))
-        })
-        .expect("the CTE reached the fake");
     assert!(
-        calls[..write].iter().any(|c| matches!(
+        !calls[sent_before..].iter().any(|c| matches!(
             c,
-            hacivat_driver::fake::FakeCall::Statement(sql)
-                if sql.contains("READ ONLY") || sql.contains("default_transaction_read_only = on")
+            hacivat_driver::fake::FakeCall::Typed(FakeTypedCall::Query(q))
+                if q.starts_with("WITH a AS (INSERT INTO audit")
         )),
         "{calls:?}"
     );
@@ -373,7 +362,8 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
         env.contains("production") && env.contains("read-only"),
         "{env:?}"
     );
-    // The Output tab says it: the server's text verbatim, on its own row.
+    // The Output tab says it (m3b-t18 merge reconciliation: the classifier's sentence, not a
+    // server text — nothing reached the server).
     vcx.cx.update(|cx| {
         let results = Consoles::get(cx, id)
             .and_then(|s| s.results.clone())
@@ -384,7 +374,7 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
     let out = output(vcx);
     assert!(
         out.iter()
-            .any(|t| t.contains("cannot execute INSERT in a read-only transaction")),
+            .any(|t| t.contains("Hacivat couldn't confirm that the statement only reads")),
         "{out:?}"
     );
     stop_core_runtime_test(cx);
