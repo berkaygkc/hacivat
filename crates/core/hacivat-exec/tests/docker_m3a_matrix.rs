@@ -1258,12 +1258,19 @@ const PG_RO: &str = "25006";
 /// The PostgreSQL rows (run B's server-blocked catalogue on this task's fixture, plus plain
 /// writes): every one is sent through Run with no classifier. Ordered so the one that ends in
 /// a gap (which discards the connection) comes last.
+// ## m3a-f5-demo (DEMO-7): a statement whose first keyword changes data or schema is
+// refused by the console before anything is sent (`INPUT`); the rows a first keyword does not
+// show still meet the guard and the server.
+
+/// The client-side refusal: "Not sent: this console is read-only …" (`DenyLayer::Input`).
+const INPUT: &str = "input";
+
 const PG_ROWS: &[Row] = &[
-    ("W1", "INSERT INTO {t} VALUES (7)", &[PG_RO]),
-    ("W2", "UPDATE {t} SET a = a + 1", &[PG_RO]),
-    ("W3", "DELETE FROM {t}", &[PG_RO]),
-    ("W4", "TRUNCATE {t}", &[PG_RO]),
-    ("W5", "DROP TABLE {t}", &[PG_RO]),
+    ("W1", "INSERT INTO {t} VALUES (7)", &[INPUT]),
+    ("W2", "UPDATE {t} SET a = a + 1", &[INPUT]),
+    ("W3", "DELETE FROM {t}", &[INPUT]),
+    ("W4", "TRUNCATE {t}", &[INPUT]),
+    ("W5", "DROP TABLE {t}", &[INPUT]),
     (
         "P1",
         "WITH d AS (DELETE FROM {t} RETURNING *) SELECT * FROM d",
@@ -1271,8 +1278,8 @@ const PG_ROWS: &[Row] = &[
     ),
     ("P2", "SELECT * INTO {t}_p2 FROM {t}", &[PG_RO]),
     ("P3", "EXPLAIN (ANALYZE) DELETE FROM {t}", &[PG_RO]),
-    // Split by the console into `SELECT 1` and the DROP, which the server refuses.
-    ("P4", "SELECT 1; DROP TABLE {t}", &[PG_RO]),
+    // Split by the console into `SELECT 1` and the DROP, which is never sent.
+    ("P4", "SELECT 1; DROP TABLE {t}", &[INPUT]),
     ("P5", "SET TRANSACTION READ WRITE", &["25001"]),
     (
         "P5",
@@ -1282,14 +1289,14 @@ const PG_ROWS: &[Row] = &[
     ("P7", "COMMIT", &["1a"]),
     ("P7", "/* x */ END", &["1a"]),
     ("P7", "ROLLBACK", &["1a"]),
-    ("P8", "CALL {t}_commit()", &["2D000"]),
+    ("P8", "CALL {t}_commit()", &[INPUT]),
     (
         "P9",
         "DO $$ BEGIN INSERT INTO {t} VALUES (9); END $$",
-        &[PG_RO],
+        &[INPUT],
     ),
     ("P14", "COPY {t} FROM '/etc/hostname'", &["protocol"]),
-    ("P26", "CREATE TEMP TABLE {t}_tmp (a int)", &[PG_RO]),
+    ("P26", "CREATE TEMP TABLE {t}_tmp (a int)", &[INPUT]),
     ("P37", "SELECT nextval('{t}_seq')", &[PG_RO]),
     ("P38", "SELECT {t}_sd_write()", &[PG_RO]),
     (
@@ -1307,39 +1314,45 @@ const MY_RO: &str = "25006";
 /// The MySQL and MariaDB rows (run B's on this task's fixture, plus plain writes). The rows
 /// that end in a gap on MariaDB (`LOCK TABLES`) come last.
 const MYSQL_ROWS: &[Row] = &[
-    ("W1", "INSERT INTO {t} VALUES (7)", &[MY_RO]),
-    ("W2", "UPDATE {t} SET a = a + 1", &[MY_RO]),
-    ("W3", "DELETE FROM {t}", &[MY_RO]),
-    ("M1", "/*!50000 INSERT INTO {t} VALUES (50) */", &[MY_RO]),
-    ("M1", "/*!50000 DROP TABLE {t} */", &[MY_RO]),
-    // Split by the console into `SELECT 1` and the DROP, which the server refuses.
-    ("M2", "SELECT 1; DROP TABLE {t}", &[MY_RO]),
+    ("W1", "INSERT INTO {t} VALUES (7)", &[INPUT]),
+    ("W2", "UPDATE {t} SET a = a + 1", &[INPUT]),
+    ("W3", "DELETE FROM {t}", &[INPUT]),
+    ("M1", "/*!50000 INSERT INTO {t} VALUES (50) */", &[INPUT]),
+    ("M1", "/*!50000 DROP TABLE {t} */", &[INPUT]),
+    // Split by the console into `SELECT 1` and the DROP, which is never sent.
+    ("M2", "SELECT 1; DROP TABLE {t}", &[INPUT]),
     ("M5", "SELECT * FROM {t} FOR UPDATE", &[MY_RO]),
     (
         "M6",
         "PREPARE hv_t31_s FROM 'DELETE FROM {t}'",
         &["protocol"],
     ),
-    ("M8", "CREATE TABLE {t}_m8 (a int)", &[MY_RO]),
-    ("M8", "TRUNCATE TABLE {t}", &[MY_RO]),
+    ("M8", "CREATE TABLE {t}_m8 (a int)", &[INPUT]),
+    ("M8", "TRUNCATE TABLE {t}", &[INPUT]),
     ("M13", "XA START 'hv_t31'", &["protocol", "XAE09"]),
-    ("M17", "CREATE TEMPORARY TABLE {t}_tmp (a int)", &[MY_RO]),
+    ("M17", "CREATE TEMPORARY TABLE {t}_tmp (a int)", &[INPUT]),
     ("M7", "/*!50000 COMMIT */", &["1a"]),
     ("M5", "LOCK TABLES {t} WRITE", &["protocol", "gap"]),
 ];
 
 /// The SQLite rows: writes, schema changes, `ATTACH` and pragmas that write.
 const SQLITE_ROWS: &[Row] = &[
-    ("W1", "INSERT INTO {t} VALUES (7)", &["23", "8"]),
-    ("W2", "UPDATE {t} SET a = a + 1", &["23", "8"]),
-    ("W3", "DELETE FROM {t}", &["23", "8"]),
-    ("W5", "DROP TABLE {t}", &["23", "8"]),
-    ("S1", "CREATE TABLE {t}_new (a int)", &["23", "8"]),
-    ("S2", "CREATE TEMP TABLE {t}_tmp (a int)", &["23", "8"]),
-    ("S3", "ATTACH DATABASE '{t}_x.db' AS x", &["23", "8"]),
+    ("W1", "INSERT INTO {t} VALUES (7)", &[INPUT]),
+    ("W2", "UPDATE {t} SET a = a + 1", &[INPUT]),
+    ("W3", "DELETE FROM {t}", &[INPUT]),
+    ("W5", "DROP TABLE {t}", &[INPUT]),
+    ("S1", "CREATE TABLE {t}_new (a int)", &[INPUT]),
+    ("S2", "CREATE TEMP TABLE {t}_tmp (a int)", &[INPUT]),
+    ("S3", "ATTACH DATABASE '{t}_x.db' AS x", &[INPUT]),
     ("S4", "PRAGMA user_version = 7", &["23", "8"]),
-    ("S5", "VACUUM", &["23", "8"]),
-    ("S6", "SELECT 1; DELETE FROM {t}", &["23", "8"]),
+    ("S5", "VACUUM", &[INPUT]),
+    ("S6", "SELECT 1; DELETE FROM {t}", &[INPUT]),
+    // A write the first keyword does not show meets the authorizer.
+    (
+        "W6",
+        "WITH x AS (SELECT 1 AS a) DELETE FROM {t} WHERE a = 1",
+        &["23", "8"],
+    ),
 ];
 
 /// The read-only fixture of `line` (table `t` holding 1, 2, 3; PostgreSQL also a sequence, a
@@ -1606,13 +1619,10 @@ async fn production_console_rejects_insert_on_every_engine() {
             );
             outcomes.push(ran.outcome());
         }
-        let allowed: &[&str] = match line.engine {
-            DbmsKind::Postgres => &[PG_RO],
-            DbmsKind::Sqlite => &["23", "8"],
-            _ => &[MY_RO],
-        };
+        // ## m3a-f5-demo (DEMO-7): refused by the console, nothing sent (`input`), on
+        // every engine; not merely rejected by the server.
         assert!(
-            outcomes.iter().all(|o| allowed.contains(&o.as_str())),
+            outcomes.iter().all(|o| o == INPUT),
             "{id}: {outcomes:?}"
         );
         // Reads still run on production.
@@ -2123,4 +2133,52 @@ async fn dml_and_ddl_report_update_counts_on_a_dev_console() {
     }
     assert_every_line_ran(&record, &lines);
     record.write("dml");
+}
+
+// ## m3a-f5-demo (DEMO-9): the PO's demo step 9 through the run service on every MySQL-family
+// line: `CALL` of a procedure answering three result sets keeps the first (`n = 1`) in one
+// result tab and says two more were read and not shown. The demo script as the PO ran it (the
+// fixture's `CREATE PROCEDURE` and the `CALL`, as a whole script, with the procedure already
+// there) stops at the failed `CREATE` (R-M3-26), so its `CALL` is skipped and shows nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn call_with_three_result_sets_shows_the_first_through_run() {
+    if !docker_enabled() {
+        return;
+    }
+    let _quiet = QUIET.read().await;
+    let record = Record::new();
+    let lines: Vec<Line> = server_lines()
+        .into_iter()
+        .filter(Line::is_mysql_family)
+        .collect();
+    let create = "CREATE PROCEDURE hv_test.hv_t14_three() \
+                  BEGIN SELECT 1 AS n; SELECT 2 AS n; SELECT 3 AS n; END";
+    for line in &lines {
+        let id = &line.id;
+        let mut a = admin(line).await;
+        a.batch(&create.replace("CREATE PROCEDURE", "CREATE PROCEDURE IF NOT EXISTS"))
+            .await;
+        let c = Console::dev(line).await;
+        let ran = c.ok("CALL hv_test.hv_t14_three();").await;
+        assert_eq!(ran.tabs.len(), 1, "{id}: one result tab");
+        assert_eq!(int(&cell(ran.tab(0), 0, 0)), 1, "{id}: the first set");
+        assert!(
+            c.log_ids().contains(&"exec-more-result-sets"),
+            "{id}: {:?}",
+            c.log_ids()
+        );
+        let script = c.run(&format!("{create};\nCALL hv_test.hv_t14_three();")).await;
+        assert_eq!(script.names(), ["Failed", "Skipped"], "{id}");
+        record.add(
+            line,
+            c.version.as_ref(),
+            "CALL with three result sets",
+            &format!("{} tab, script {:?}", ran.tabs.len(), script.names()),
+        );
+        c.shutdown().await;
+        a.close().await;
+    }
+    assert!(!lines.is_empty(), "no MySQL-family line");
+    record.write("call-three-sets");
 }

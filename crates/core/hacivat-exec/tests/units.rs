@@ -723,3 +723,21 @@ fn the_probe_text_is_the_sessions_for_every_engine() {
         );
     }
 }
+
+// ## m3a-f5-demo (DEMO-9): the demo doc's fixture text. The MySQL splitter keeps a
+// `BEGIN … END` procedure body whole (its inner semicolons do not end the statement), so
+// `CREATE PROCEDURE … BEGIN SELECT 1; SELECT 2; SELECT 3; END` is one unit and `CALL` another.
+#[test]
+fn a_mysql_procedure_body_is_one_unit() {
+    let text = "CREATE PROCEDURE p() BEGIN SELECT 1 AS n; SELECT 2 AS n; SELECT 3 AS n; END;\n\
+                CALL p();";
+    let r = resolve_units(&mysql_doc(text), &[caret(0)], RunAction::Execute3, None);
+    let sqls: Vec<String> = units(&r).iter().map(|u| u.text.to_string()).collect();
+    assert_eq!(
+        sqls,
+        [
+            "CREATE PROCEDURE p() BEGIN SELECT 1 AS n; SELECT 2 AS n; SELECT 3 AS n; END",
+            "CALL p()",
+        ],
+    );
+}
