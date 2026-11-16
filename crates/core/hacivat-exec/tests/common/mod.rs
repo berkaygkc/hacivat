@@ -270,6 +270,31 @@ pub async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
     panic!("never happened: {what}");
 }
 
+// ## m3a-f3-ci (fix round 1)
+/// `h`'s snapshot once the session has left its request (CI run 43779216264). A run's `done`
+/// follows its `RunEnded`, which the session sends while still `Busy` with the run's request;
+/// it publishes `Idle` with its transaction and cursor just before it replies (`hacivat-session`
+/// test `run_ended_comes_while_busy_and_the_reply_after_idle`). So a test that checks the state
+/// a run left waits here on the snapshot watch (no polling) instead of reading it at once.
+/// Panics after 10 s.
+pub async fn settled(
+    h: &hacivat_session::session::SessionHandle,
+) -> hacivat_session::session::SessionSnapshot {
+    use hacivat_session::session::SessionState;
+    let mut state = h.state();
+    let left = |s: &hacivat_session::session::SessionSnapshot| {
+        !matches!(
+            s.state,
+            SessionState::Busy { .. } | SessionState::Cancelling { .. }
+        )
+    };
+    match tokio::time::timeout(Duration::from_secs(10), state.wait_for(left)).await {
+        Ok(Ok(snap)) => snap.clone(),
+        Ok(Err(_)) => panic!("the session ended"),
+        Err(_) => panic!("the session stayed busy: {:?}", h.state().borrow().clone()),
+    }
+}
+
 // ## m3a-t31-matrix
 // Task 31's helpers: consoles on the Docker matrix and on SQLite files, driven exactly as the
 // app drives them (document → `resolve_units` → `ExecService` → session → typed driver), with
@@ -1101,6 +1126,31 @@ pub mod matrix {
 
         pub fn snap(&self) -> SessionSnapshot {
             self.s.state().borrow().clone()
+        }
+
+        /// The session's snapshot once it has left its request (CI run 43779216264). A run's
+        /// `done` follows its `RunEnded`, which the session sends while still `Busy` with the
+        /// run's request; it publishes `Idle` with its transaction and cursor just before it
+        /// replies (`hacivat-session` test `run_ended_comes_while_busy_and_the_reply_after_idle`).
+        /// So a test that checks the state a run left waits here on the snapshot watch (no
+        /// polling) instead of reading [`snap`](Self::snap) at once. Panics after 10 s.
+        pub async fn settled(&self) -> SessionSnapshot {
+            let mut state = self.s.state();
+            let left = |s: &SessionSnapshot| {
+                !matches!(
+                    s.state,
+                    SessionState::Busy { .. } | SessionState::Cancelling { .. }
+                )
+            };
+            match tokio::time::timeout(secs(10), state.wait_for(left)).await {
+                Ok(Ok(snap)) => snap.clone(),
+                Ok(Err(_)) => panic!("{}: the session ended", self.line.id),
+                Err(_) => panic!(
+                    "{}: the session stayed busy: {:?}",
+                    self.line.id,
+                    self.snap()
+                ),
+            }
         }
 
         /// The Fluent IDs of the console's log lines, oldest first.

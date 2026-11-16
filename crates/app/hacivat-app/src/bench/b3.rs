@@ -700,10 +700,7 @@ async fn replay<C: AppContext>(
         if let Some(wait) = due.checked_duration_since(Instant::now()) {
             sleep(wait).await;
         }
-        match ws.update(cx, |_, window, cx| {
-            window.dispatch_keystroke(key.keystroke(), cx);
-            window.is_window_active()
-        }) {
+        match send_key(cx, ws, *key) {
             Ok(true) => {}
             Ok(false) => inactive += 1,
             Err(e) => {
@@ -713,6 +710,23 @@ async fn replay<C: AppContext>(
         }
     }
     (inactive, false)
+}
+
+/// Sends one key through the window's dispatcher; whether the window was active.
+///
+/// It updates the window only, as the platform's key events do, never the root `Workspace`:
+/// a dispatch draws a dirty window first, and that draw renders the root view, which must not
+/// be leased then (CI run 43779216264: "cannot update Workspace while it is already being
+/// updated").
+pub(crate) fn send_key<C: AppContext>(
+    cx: &mut C,
+    ws: WindowHandle<Workspace>,
+    key: Key,
+) -> anyhow::Result<bool> {
+    cx.update_window(ws.into(), |_, window, cx| {
+        window.dispatch_keystroke(key.keystroke(), cx);
+        window.is_window_active()
+    })
 }
 
 fn dump(latency: &LatencyProbe, run: &RunInfo) -> bool {
