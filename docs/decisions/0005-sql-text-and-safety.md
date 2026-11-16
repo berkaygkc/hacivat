@@ -588,3 +588,85 @@ the catalog read is a `hacivat-exec` Docker test, P-M3b-13), `bench-sql` and `fe
 - **`sql-testkit`** no longer depends on `sql-safety`. It reaches `sql-oracle-pg` only through
   its `differential` feature, so the lexer's plain test loop builds neither libpg_query nor
   `sqlparser`.
+
+## m3b-t06 — parameters
+
+**What the scan reads.** `sql_split::scan_params` lexes the unit on its own, from the initial
+state, as the server receives it. Only code tokens are read. A marker inside a string, quoted
+identifier, comment, dollar body, client command or `COPY` data is never a placeholder; after
+a `COPY`'s first `;` the rest of a unit is data. An executable comment's body is code to the
+server, so it is lexed and read too.
+
+**One rule for refusal: if one placeholder cannot bind, none does.** When any placeholder
+cannot bind, every placeholder is `bindable: false` and `rewritten` is `None`. Run then
+refuses the unit and sends nothing. `rewritten` is `Some` exactly when there is at least one
+placeholder and every one binds. Every refusal carries a diagnostic:
+
+- `ParamInDdl`: a placeholder in `CREATE`/`ALTER`/`DROP`, unless `in_ddl` is on. The head is
+  the caller's `StmtHead` or the unit's own first word, so a stale head cannot unlock DDL.
+- `MixedStyles`: `$n`, `?` and `:name` mixed in one unit. This includes SQLite's `?NNN` beside
+  names, because the rewrite would renumber them.
+- `TooManyBinds`: more than 65,535 driver slots. That is distinct names on PostgreSQL,
+  occurrences elsewhere, and the largest `$n`/`?NNN` number.
+- `TemplateVariable`: any template variable in the unit.
+- `Unbindable`: a variant this task added, for a marker the server may read as a parameter
+  that Hacivat cannot bind:
+  - `?` or `:name` inside a MySQL/MariaDB executable comment;
+  - `?` under `CALL`/`EXEC`/`EXECUTE` (ODBC escape semantics);
+  - psql `:"name"`, which substitutes an identifier: binding it would turn `WHERE :"col" = 1`
+    into `WHERE $1 = 1`;
+  - psql `:{?name}`;
+  - `$0`, or `$n` with trailing junk;
+  - an SQLite `:name` while `:name` parameters are off, or a malformed SQLite variable
+    (SQLite binds an unbound variable as NULL, so sending it would be silent);
+  - any placeholder of a `COPY` or `PREPARE`;
+  - any placeholder in a unit of several statements (a verbatim "Run as one" unit). No
+    protocol binds values across statements, and the head describes only the first;
+  - any placeholder beside a comment end the server decides (`AmbiguousCommentEnd`);
+  - a PostgreSQL operator that only contains `?` (`=?`) while `?` binds;
+  - every `:`, `$`, `?`, `@` byte in a dialect with no lexer profile;
+  - a placeholder whose replacement would merge with a neighbouring byte. `:'v'2.5` would
+    become `$12.5`, `SELECT?` would become `SELECT$1` (one identifier), and SQLite `$a(x)1`
+    would become `?1`. The replacement must have no identifier byte on either side.
+
+**Not placeholders.** These are left as written and never reported: `::` casts, `:=`, the
+jsonb and geometric `?` operators, `@`/`@@` variables, and PostgreSQL `:name` inside `[…]`
+(array slices). The DBeaver prefix guard also rules out a `:` right after an identifier
+character, `$`, `:`, `?`, `\`, `/` or `[`. The server reads all of these the same way whether
+or not Hacivat binds. With `pg_question_marks` off, a PostgreSQL `?` in operand position gets
+only a `QuestionMarkOff` hint (D-08).
+
+**Deterministic rewrite.** Only placeholder ranges change, and `edits` lists each one. On
+PostgreSQL, `:name` and `:'name'` become `$k` by first occurrence, and a repeated name reuses
+its `$k`. With `pg_question_marks` on, `?` becomes `$k` in text order. `$n` is unchanged. On
+MySQL, MariaDB, SQLite and the generic dialect, `:name` (and SQLite's `@name`, `$name`,
+`#name`) becomes `?`, with one slot per occurrence. `?` and `?NNN` are unchanged. Plan names
+are the `:name`'s name (SQLite's other sigils kept: `:a`, `@a` and `$a` are three
+parameters), `?k` for the k-th `?`, and a positional placeholder's own text (`$2`, `?2`).
+Names compare by bytes; Turkish `İ`/`ı` never fold. The rewritten text is what is classified
+and hashed (P-M3b-2). The properties check that every byte outside an edit is unchanged, that
+every token outside a placeholder lexes the same, that each replacement lexes as one
+placeholder token, and that rescanning the output finds the same placeholders.
+
+**Templates (D-053).** `${var}`, `%var%` and `<var>` are detected in code only; nothing is ever
+substituted. `${` is a template anywhere in code. `%var%` and `<var>` also read as arithmetic
+and comparisons (`10%n%3`, `a<b>c`), so they count only in operand position. That means after
+the start, an operator, `(`, `,`, `[` or an expression keyword, and before an operator,
+closer, `,`, `;` or keyword. Text inside strings is data: Hacivat has no "substitute inside
+strings" switch (PARAM-05/06).
+
+**`HvNorm1` (version 1).** The text is lexed from the initial state. Whitespace and comments
+are dropped. Literals, `COPY` data and parameters become `?`, and a MySQL charset introducer
+joins its string. A parenthesised list of `?` only becomes `(?…)`, and mixed lists keep
+their shape. A hint becomes `/*+…*/`. An executable comment keeps its opener and its body is
+normalised as code. Keywords from the lexer's table are ASCII-uppercased (P-M3b-18).
+Identifiers and quoted text stay byte-exact, with no case folding and no NFC. Tokens are
+joined by single spaces, with none after `(`/`[`/`.` and none before `)`/`]`/`,`/`.`/`;`.
+`hash` is XXH3-64 of the normalised text. Every keyword is uppercased, including unreserved
+ones such as `NAME`, so `update` and `UPDATE` agree. alg/10's sample text `AND name = ?`
+therefore reads `AND NAME = ?`.
+
+**Corpus.** `sql-testkit/corpus/datagrip/param.toml` holds PARAM rows 01–06, 12–15 and 18–20
+for PostgreSQL and MySQL, with each D-053/D-08 divergence recorded. The SQL Server row 12 runs
+on both of those dialects. Because `sql-split` has no TOML dependency, the test reads the file
+with a small line reader, and the file keeps to that subset.
