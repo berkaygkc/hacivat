@@ -805,8 +805,8 @@ fn target_allowed(t: &SetTarget, dialect: Option<DialectId>, allowed: Allowed<'_
 /// A `SET` the dialect's harmless list covers: only `SESSION_STATE`, no flag, no destructive
 /// pattern, a class no higher than `Session`, a known dialect, at least one target in
 /// `set_targets` and every one accepted by `allowed` with its value, and no reason but
-/// `SessionState`. The caller applies it on the read-only profiles for a human only
-/// (P-M3b-6; fix round 1, I3).
+/// `SessionState`, whose arguments name exactly the targets ([`targets_match_reasons`]). The
+/// caller applies it on the read-only profiles for a human only (P-M3b-6; fix round 1, I3).
 fn harmless_set(s: &StmtReport, dialect: Option<DialectId>, allowed: Allowed<'_>) -> bool {
     s.kind == StmtKind::Set
         && s.effects == EffectSet::SESSION_STATE
@@ -818,23 +818,57 @@ fn harmless_set(s: &StmtReport, dialect: Option<DialectId>, allowed: Allowed<'_>
             .iter()
             .all(|t| target_allowed(t, dialect, allowed))
         && s.reasons.iter().all(|r| r.code == ReasonCode::SessionState)
+        && targets_match_reasons(s)
+}
+
+/// Whether the `SessionState` reasons' arguments and the `set_targets` names are the same
+/// list (as multisets, byte-exact; a `SessionState` reason without an argument never
+/// matches). The producer contract emits one of each per target; a report where the two
+/// disagree names a variable the harmless check did not see, so it is not harmless (re-review
+/// R1-M3: the "field left behind" pattern).
+fn targets_match_reasons(s: &StmtReport) -> bool {
+    let mut named: Vec<Option<&str>> = s
+        .reasons
+        .iter()
+        .filter(|r| r.code == ReasonCode::SessionState)
+        .map(|r| r.arg.as_deref())
+        .collect();
+    let mut targets: Vec<Option<&str>> = s.set_targets.iter().map(|t| Some(&*t.name)).collect();
+    named.sort_unstable();
+    targets.sort_unstable();
+    named == targets
 }
 
 /// Why a `SET` is refused: `SetNotAllowlisted` naming each target the list refuses (all of
 /// them when the dialect is unknown); a `SET` that names no target (`RESET ALL`, a computed
 /// name) is `SessionState` without an argument, so every `SetNotAllowlisted` names its
-/// variable (fix round 1, M8).
+/// variable (fix round 1, M8). A `SessionState` reason naming a variable that is not among
+/// the targets is refused by that name too (re-review R1-M3).
 fn set_refusals(s: &StmtReport, dialect: Option<DialectId>, allowed: Allowed<'_>) -> Vec<Reason> {
+    let refused = |name: &std::sync::Arc<str>| Reason {
+        code: ReasonCode::SetNotAllowlisted,
+        range: Some(s.range),
+        arg: Some(name.clone()),
+    };
     let mut out: Vec<Reason> = s
         .set_targets
         .iter()
         .filter(|t| !target_allowed(t, dialect, allowed))
-        .map(|t| Reason {
-            code: ReasonCode::SetNotAllowlisted,
-            range: Some(s.range),
-            arg: Some(t.name.clone()),
-        })
+        .map(|t| refused(&t.name))
         .collect();
+    for r in &s.reasons {
+        if r.code != ReasonCode::SessionState {
+            continue;
+        }
+        if let Some(name) = &r.arg
+            && !s.set_targets.iter().any(|t| t.name == *name)
+        {
+            let reason = refused(name);
+            if !out.contains(&reason) {
+                out.push(reason);
+            }
+        }
+    }
     if out.is_empty() {
         out.push(at(ReasonCode::SessionState, Some(s.range)));
     }
@@ -1054,6 +1088,92 @@ mod tests {
         d == DialectId::Postgres
             && n == "search_path"
             && (!v.contains("pg_catalog") || first == "pg_catalog")
+    }
+
+    /// Re-review R1-M3: the `SessionState` reasons and `set_targets` must name the same
+    /// variables; a report where they disagree is not harmless, and the unseen name is refused.
+    #[test]
+    fn reasons_and_targets_must_name_the_same_variables() {
+        let pg = Some(DialectId::Postgres);
+        let ro = |r: &SafetyReport| decide_with(r, Profile::ReadOnly, Actor::Human, &list);
+        // The consistent report is harmless.
+        assert!(ro(&set_report_with(pg, &[("search_path", Some("public"))])).allows());
+        // A reason names `role`, the target says `search_path = public`.
+        let mut swapped = set_report_with(pg, &[("search_path", Some("public"))]);
+        swapped.items[0].reasons[0].arg = Some(Arc::from("role"));
+        let d = ro(&swapped);
+        let Verdict::Deny(reasons) = d.verdict else {
+            panic!("{d:?}")
+        };
+        assert!(
+            reasons.iter().any(
+                |r| r.code == ReasonCode::SetNotAllowlisted && r.arg.as_deref() == Some("role")
+            )
+        );
+        // An extra reason naming another variable.
+        let mut extra = set_report_with(pg, &[("search_path", Some("public"))]);
+        extra.items[0].reasons.push(Reason {
+            code: ReasonCode::SessionState,
+            range: None,
+            arg: Some(Arc::from("role")),
+        });
+        assert!(!ro(&extra).allows());
+        // A target no reason names.
+        let mut unnamed = set_report_with(pg, &[("search_path", Some("public"))]);
+        unnamed.items[0].reasons.clear();
+        assert!(!ro(&unnamed).allows());
+        // A SessionState reason without an argument.
+        let mut bare = set_report_with(pg, &[("search_path", Some("public"))]);
+        bare.items[0].reasons[0].arg = None;
+        assert!(!ro(&bare).allows());
+        // The same name twice in the reasons but once in the targets.
+        let mut twice = set_report_with(pg, &[("search_path", Some("public"))]);
+        let again = twice.items[0].reasons[0].clone();
+        twice.items[0].reasons.push(again);
+        assert!(!ro(&twice).allows());
+    }
+
+    /// Re-review R1-M1: `class_floor` skips a class field's group when a group of the same
+    /// coarse class was already applied. That is sound only while every group of coarse
+    /// class `c` is at least as strict as `group_of_class(c)` in every profile.
+    #[test]
+    fn groups_of_one_coarse_class_are_at_least_as_strict_as_its_floor_group() {
+        const GROUPS: [Group; 12] = [
+            Group::Read,
+            Group::ExplainAnalyzeRead,
+            Group::Session,
+            Group::Lock,
+            Group::Write,
+            Group::WriteUnbounded,
+            Group::WriteTemp,
+            Group::Ddl,
+            Group::DdlDestructive,
+            Group::Admin,
+            Group::Routine,
+            Group::Unknown,
+        ];
+        let t = table().expect("data/profiles.toml");
+        for c in CoarseClass::ALL {
+            if c == CoarseClass::Read {
+                continue; // `class_floor` never applies a Read field.
+            }
+            let (floor, _) = group_of_class(c);
+            assert_eq!(floor.coarse(), c, "{c:?}");
+            for g in GROUPS.into_iter().filter(|g| g.coarse() == c) {
+                for p in [
+                    Profile::ReadOnly,
+                    Profile::ReadOnlyPlusExplain,
+                    Profile::ReadWriteDml,
+                    Profile::Ddl,
+                    Profile::Admin,
+                ] {
+                    assert!(
+                        t.row(g).rule(p) >= t.row(floor).rule(p),
+                        "{g:?} is looser than {floor:?} (the {c:?} floor) under {p:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// The SET's value reaches the list (P-M3b-T3-1 plumbing; fix round 1).

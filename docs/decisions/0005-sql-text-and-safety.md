@@ -742,6 +742,28 @@ this section where they differ.
   - **M7, for M8:** an AI agent's unbounded `UPDATE`/`DELETE` follows `alg/13` step 5 here
     (Deny). The spec's L9 makes it an approvable critical class; M8's broker must reconcile
     the two.
+- **The class field's gate floor (D1).** A statement's `class` field floors the gate class at
+  the least gate class of its coarse class (Write → Lock, Unknown → Routine). The backends
+  write `class_of(effects)`, which is `Unknown` for `ROUTINE_CALL`, so an Unknown floor would
+  turn every `CALL` into `Unknown` against P-M3b-4.
+  - **The price:** the gate is not monotone in the class *label* from Ddl or Admin up to
+    Unknown. A READ statement labelled Ddl or Admin is `DdlOther` or `Admin`, but labelled
+    Unknown it is only `Routine`. It is still monotone in *evidence*: adding bits, reasons,
+    flags or destructive kinds never lowers it.
+  - **No R-M3-55 decision changes because of it.** `DdlOther`, `Admin`, `Routine` and
+    `Unknown` are all Confirm on production, Run elsewhere and Deny on read-only. The only
+    row keyed on DDL is MySQL's implicit commit, which an Unknown statement doesn't get either.
+    In the `EXPLAIN ANALYZE` row, `Routine` is stricter: it is refused, where an `Unknown`
+    inner gets the D-062 wrap.
+  - **Producer contract (T9, T10, T14):** every Unknown outcome must also set
+    `EffectSet::UNKNOWN` or an unknown-group or doubt reason, never only the class field.
+- **`SET` reasons and targets agree (re-review R1-M3).** A `SET` is harmless only when its
+  `SessionState` reason arguments and its `set_targets` names are the same list, compared
+  byte-exact as multisets. A reason naming a variable outside the targets is refused by that
+  name.
+- **The group-skip rule (re-review R1-M1).** `decide` skips a class field's group when a group
+  of the same coarse class was already applied. A unit test pins what makes that safe: every
+  group of a coarse class is at least as strict as that class's own group in every profile.
 
 ## m3b-t06 — parameters
 
