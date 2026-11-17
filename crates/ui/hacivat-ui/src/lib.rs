@@ -33,3 +33,5 @@ pub mod titlebar;
 pub mod toast;
 // ## m3a-t01b-seams: the Overflow Rule toolbar (Task 21).
 pub mod toolbar;
+// ## m4-spike-tree: the virtualized tree (plan-m4 Task 8).
+pub mod tree;
