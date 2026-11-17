@@ -13,6 +13,10 @@ cargo build --release --locked -p hacivat
 cp "$TARGET_DIR/release/hacivat" "$OUT/"
 CFG="$ROOT/packaging/.Packager.generated.toml"
 trap 'rm -f "$CFG"' EXIT
-sed -e "s/@VERSION@/$VERSION/" -e '/@SIGNING_IDENTITY@/d' packaging/Packager.toml > "$CFG"
+# ## m3b-ci (controller fix): `#linux-only# ` lines (the square PNG icons the AppImage requires)
+# are enabled for Linux only; the macOS and Windows scripts leave them as comments.
+sed -e "s/@VERSION@/$VERSION/" -e '/@SIGNING_IDENTITY@/d' -e 's/^#linux-only# //' \
+  packaging/Packager.toml > "$CFG"
+grep -q '^icons = ' "$CFG" || { echo "package-linux.sh: no icons line in $CFG" >&2; exit 1; }
 cargo packager -c "$CFG" --formats appimage,deb --out-dir "$OUT"
 echo "done (unsigned): $OUT"
