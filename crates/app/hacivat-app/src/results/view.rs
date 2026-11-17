@@ -1688,6 +1688,9 @@ pub fn register_commands(cx: &mut App) {
             } else if id == "grid.goto_row" {
                 // ## m3c-t38: so is go to row.
                 |cx| !super::find::field_focused(cx) && super::views::table_shown(cx)
+            } else if !matches!(cmd, GridCommand::Copy { .. }) {
+                // ## m3c-int (M4): the Text view takes only Copy (`views::route`).
+                |cx| !super::find::field_focused(cx) && !super::views::text_shown(cx)
             } else {
                 |cx| !super::find::field_focused(cx)
             },

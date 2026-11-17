@@ -3148,3 +3148,9 @@ hv-vv-copied-cut = Copied the first { $shown } of the value: the rest wasn't fet
 hv-vv-rerun-not-read = Only a query that reads data is run again with a larger value limit. Run this statement again from the editor.
 # The re-run button's tooltip while the console runs a statement.
 hv-vv-rerun-busy = A statement is running in this console. Re-run once it ends.
+
+## m3c-int-fixes
+
+# The go-to line when fetching toward a row (or its question before a large fetch) ended
+# because the result was run again: no row of the new result is fetched or gone to.
+hv-goto-fetch-rerun = Fetching stopped: the result was run again.

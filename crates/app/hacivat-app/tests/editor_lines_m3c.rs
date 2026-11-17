@@ -353,3 +353,38 @@ fn the_mixed_line_endings_menu_offers_the_dominant_ending_first(cx: &mut TestApp
     );
     stop_core_runtime_test(cx);
 }
+
+// ## m3c-int (M1): the ▶'s gate is Run's whole enablement: not while a run is being prepared
+// (here the parameter prompt is open) nor while a read-only reconnect is pending.
+#[cfg(unix)]
+#[gpui::test]
+fn the_gutter_run_gate_is_off_while_preparing_or_pending_read_only(cx: &mut TestAppContext) {
+    use hacivat_app::exec_ui::params_prompt;
+    let (vcx, id, _, editor) = console(cx, vec![]);
+    set_text(vcx, &editor, "SELECT * FROM t WHERE id = :id", 0);
+    assert!(gate(vcx, id), "idle: Run would be enabled");
+    command(vcx, &editor, "editor.run");
+    wait_until(vcx, "the parameter prompt", |vcx| {
+        vcx.cx.read(|cx| params_prompt::open_prompt(cx).is_some())
+    });
+    assert!(!gate(vcx, id), "no ▶ while the parameter prompt asks");
+    let prompt = vcx.cx.read(params_prompt::open_prompt).expect("open");
+    in_window(vcx, |window, cx| {
+        prompt.update(cx, |p, cx| p.cancel(window, cx))
+    });
+    // The open prompt is the one nobody holds once it closed.
+    drop(prompt);
+    wait_until(vcx, "the prompt to close and Run to be enabled", |vcx| {
+        vcx.cx.read(|cx| params_prompt::open_prompt(cx).is_none()) && gate(vcx, id)
+    });
+    vcx.cx
+        .update(|cx| hacivat_app::exec_ui::set_pending_read_only(id, true, cx));
+    assert!(
+        !gate(vcx, id),
+        "no ▶ while a read-only reconnect is pending"
+    );
+    vcx.cx
+        .update(|cx| hacivat_app::exec_ui::set_pending_read_only(id, false, cx));
+    assert!(gate(vcx, id));
+    stop_core_runtime_test(cx);
+}

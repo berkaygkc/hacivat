@@ -2665,3 +2665,8 @@ hv-vv-copied-cut = Değerin ilk { $shown } kısmı kopyalandı: gerisi getirilme
 hv-vv-rerun-not-read = Daha büyük bir değer sınırıyla yalnızca veri okuyan sorgular yeniden çalıştırılır. Bu ifadeyi düzenleyiciden yeniden çalıştırın.
 # Review: PO
 hv-vv-rerun-busy = Bu konsolda bir ifade çalışıyor. Bittiğinde yeniden çalıştırın.
+
+## m3c-int-fixes
+
+# Review: PO
+hv-goto-fetch-rerun = Getirme durdu: sonuç yeniden çalıştırıldı.

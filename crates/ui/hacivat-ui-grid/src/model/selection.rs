@@ -401,6 +401,100 @@ impl CellRect {
     }
 }
 
+// ## m3c-int (I4)
+/// A selection's rectangles indexed by row (Select all occurrences makes up to 10,000, and the
+/// paint and the screen-reader rows test every visible cell): sorted by first row, with an
+/// implicit balanced tree over them (each range's middle is its root) holding the largest end
+/// row under each node. A row's rectangles are found in O((m + 1) log k) for the m over it.
+/// Built lazily, once per change of the rectangles (a selection edit resets it); a function of
+/// the rectangles, so it never decides equality or hashing.
+#[derive(Clone, Default)]
+struct RectIndex(OnceLock<RectTree>);
+
+#[derive(Clone)]
+struct RectTree {
+    sorted: Box<[CellRect]>,
+    max_end: Box<[u64]>,
+}
+
+impl RectTree {
+    fn of(rects: &[CellRect]) -> Self {
+        let mut sorted: Vec<CellRect> = rects.to_vec();
+        // Stable and run-aware: rectangles made in view order (Select all occurrences) are
+        // already sorted.
+        sorted.sort_by_key(|r| r.rows.start);
+        let mut max_end = vec![0; sorted.len()];
+        Self::build(&sorted, &mut max_end, 0, sorted.len());
+        RectTree {
+            sorted: sorted.into(),
+            max_end: max_end.into(),
+        }
+    }
+
+    fn build(sorted: &[CellRect], max_end: &mut [u64], lo: usize, hi: usize) -> u64 {
+        if lo >= hi {
+            return 0;
+        }
+        let mid = lo + (hi - lo) / 2;
+        let left = Self::build(sorted, max_end, lo, mid);
+        let right = Self::build(sorted, max_end, mid + 1, hi);
+        max_end[mid] = sorted[mid].rows.end.max(left).max(right);
+        max_end[mid]
+    }
+
+    /// Whether a rectangle over view row `row` passes `f`.
+    fn any(&self, row: u64, f: &impl Fn(&CellRect) -> bool) -> bool {
+        self.stab(0, self.sorted.len(), row, f)
+    }
+
+    fn stab(&self, lo: usize, hi: usize, row: u64, f: &impl Fn(&CellRect) -> bool) -> bool {
+        if lo >= hi {
+            return false;
+        }
+        let mid = lo + (hi - lo) / 2;
+        if self.max_end[mid] <= row {
+            return false;
+        }
+        if self.stab(lo, mid, row, f) {
+            return true;
+        }
+        let r = &self.sorted[mid];
+        // Every rectangle right of `mid` starts at or after it.
+        if r.rows.start > row {
+            return false;
+        }
+        (r.rows.end > row && f(r)) || self.stab(mid + 1, hi, row, f)
+    }
+}
+
+impl RectIndex {
+    fn tree(&self, rects: &[CellRect]) -> &RectTree {
+        self.0.get_or_init(|| RectTree::of(rects))
+    }
+}
+
+impl std::fmt::Debug for RectIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.get().is_some() {
+            "RectIndex(built)"
+        } else {
+            "RectIndex(lazy)"
+        })
+    }
+}
+
+impl PartialEq for RectIndex {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for RectIndex {}
+
+impl std::hash::Hash for RectIndex {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+}
+
 /// One piece of a selection, in the order the user made them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Part {
@@ -427,6 +521,9 @@ pub struct Selection {
     pending: Option<ModelCell>,
     /// The rectangles of `parts`, in order.
     rects: Vec<CellRect>,
+    // ## m3c-int (I4)
+    /// `rects` by row (reset with them in `refresh`).
+    by_row: RectIndex,
     /// The row pieces, sorted and merged.
     rows: Vec<Range<u64>>,
     /// The column pieces, sorted and merged.
@@ -717,8 +814,9 @@ impl Selection {
     }
 
     /// Whether `(row, col)` is selected: `all`, or the row set holds its model row, or the
-    /// column set holds the column, or a rectangle holds the cell. O(log k) for the sets, O(k)
-    /// for the rectangles.
+    /// column set holds the column, or a rectangle holds the cell. O(log k) for the sets,
+    /// O((m + 1) log k) for the k rectangles, m of them over the row.
+    // ## m3c-int (I4): the rectangles by row (was O(k) per cell).
     pub fn contains(&self, row: ViewRow, col: ColId, map: &ViewMap) -> bool {
         if self.all || in_ranges(&self.cols, col.0) {
             return true;
@@ -729,7 +827,24 @@ impl Selection {
         {
             return true;
         }
-        self.rects.iter().any(|r| r.contains(row.0, col.0))
+        self.rects_over(row.0, |r| r.cols.contains(&col.0))
+    }
+
+    // ## m3c-int (I4)
+    /// Whether a rectangle covers view row `row` (the gutter's tint), as [`contains`] finds it.
+    ///
+    /// [`contains`]: Selection::contains
+    pub fn row_in_rects(&self, row: u64) -> bool {
+        self.rects_over(row, |_| true)
+    }
+
+    /// Whether a rectangle over view row `row` passes `f` (a few are scanned directly).
+    fn rects_over(&self, row: u64, f: impl Fn(&CellRect) -> bool) -> bool {
+        const SCAN: usize = 16;
+        if self.rects.len() <= SCAN {
+            return self.rects.iter().any(|r| r.rows.contains(&row) && f(r));
+        }
+        self.by_row.tree(&self.rects).any(row, &f)
     }
 
     /// Whether `row` is selected whole (the gutter's tint).
@@ -1082,6 +1197,8 @@ impl Selection {
     }
 
     fn refresh(&mut self) {
+        // ## m3c-int (I4)
+        self.by_row = RectIndex::default();
         self.rects = self
             .parts
             .iter()

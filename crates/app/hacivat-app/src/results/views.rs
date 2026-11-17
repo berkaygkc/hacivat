@@ -133,6 +133,9 @@ struct Transposed {
     grid: Entity<GridView>,
     source: Rc<TransposedSource>,
     key: BuildKey,
+    // ## m3c-int (I1)
+    /// The adapter generation it was built over (a re-run retargets the adapter in place).
+    generation: u64,
     _events: Subscription,
 }
 
@@ -367,6 +370,18 @@ pub fn table_shown(cx: &App) -> bool {
     mode(console, cx) == ViewMode::Table
 }
 
+// ## m3c-int (I3, M4)
+/// Whether `grid`'s tab shows its table (find, Filter rows and go to row act only then).
+pub(crate) fn shows_table(grid: &Entity<GridView>, cx: &App) -> bool {
+    tab_of(grid.entity_id(), cx).is_none_or(|t| t.mode == ViewMode::Table)
+}
+
+/// Whether the shown console's active result shows as text (the grid commands other than Copy
+/// do nothing there: their `enabled`).
+pub fn text_shown(cx: &App) -> bool {
+    super::view::active_entry(cx).is_some_and(|(console, _, _)| mode(console, cx) == ViewMode::Text)
+}
+
 /// The tile shows `grid` over `adapter` for console `console` (each frame): the Transposed and
 /// Text views follow the table (rebuilt when its rows, order or columns change); a Transposed
 /// view past its rows goes back to the table.
@@ -474,17 +489,41 @@ fn ensure_transposed(
     force: bool,
     cx: &mut App,
 ) {
-    let key = build_key(table, cx);
+    // ## m3c-int (I1): a re-run retargets the adapter in place: the view is rebuilt at once,
+    // also while the new result streams, so the old rows and column names never read the new
+    // result's cells. Until the table grid paints the re-run, its map and columns are the old
+    // result's: the view is built as the table will show the new one (its rows in the source
+    // order, every column).
+    let generation = adapter.generation();
+    let key = if table.read(cx).generation().is_some_and(|g| g != generation) {
+        let loaded = adapter.snapshot().row_count();
+        BuildKey {
+            generation: Some(generation),
+            loaded,
+            map: ViewMap::identity(loaded),
+            cols: hacivat_ui_grid::GridDataSource::columns(&**adapter)
+                .iter()
+                .map(|c| c.id)
+                .collect(),
+        }
+    } else {
+        build_key(table, cx)
+    };
     let current = tab_of(table.entity_id(), cx).and_then(|t| {
-        t.transposed
-            .as_ref()
-            .map(|tr| (tr.key == key, tr.grid.clone()))
+        t.transposed.as_ref().map(|tr| {
+            (
+                tr.key == key && tr.generation == generation,
+                tr.grid.clone(),
+                tr.generation != generation,
+            )
+        })
     });
     match current {
-        Some((true, _)) => return,
-        Some((false, _)) if !force && streaming(adapter) => return,
+        Some((true, _, _)) => return,
+        Some((false, _, false)) if !force && streaming(adapter) => return,
         _ => {}
     }
+    let current = current.map(|(same, grid, _)| (same, grid));
     let name_title = message(cx, "hv-transposed-col", vec![]);
     let inner: Rc<dyn hacivat_ui_grid::GridDataSource> = adapter.clone();
     let source = Rc::new(TransposedSource::new(
@@ -520,6 +559,7 @@ fn ensure_transposed(
         {
             t.source = source;
             t.key = key;
+            t.generation = generation;
         }
         return;
     }
@@ -544,6 +584,7 @@ fn ensure_transposed(
         grid,
         source,
         key,
+        generation,
         _events: events,
     });
 }
