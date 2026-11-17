@@ -314,8 +314,9 @@ fn tx_open(conn: &ConnSafety) -> bool {
 /// Whether `report` (of gate class `class`) is the B-M6 read: every statement a plain `EXPLAIN`
 /// of a data change that calls no code. A plain `EXPLAIN` still plans, and planning runs code:
 /// PostgreSQL pre-evaluates IMMUTABLE functions with constant arguments while planning (and
-/// STABLE ones for estimates), MySQL through 8.0.21 ran a stored function in a derived table
-/// under a plain `EXPLAIN` (bug #31468). So the class must be exactly `Dml` (a routine class
+/// STABLE ones for estimates), and MySQL builds derived tables under a plain `EXPLAIN`, so a
+/// stored function in a `FROM` subquery runs (MySQL bug #31468, closed as documented; ADR 0004
+/// `m3b-gate-explain` has the sources). So the class must be exactly `Dml` (a routine class
 /// below it is hidden by the maximum, hence the explicit checks), and any evidence of a call
 /// or of `ANALYZE` keeps the class: a touched call, the `ROUTINE_CALL` bit on a statement or
 /// on the request, a destructive pattern, an `EXPLAIN_ANALYZE` flag or reason, or a policy

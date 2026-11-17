@@ -2638,12 +2638,21 @@ transaction after it (Task 19); the session itself runs no production policy.
   a read asks first, with the rollback note; a plain `EXPLAIN <dml>` (no `ANALYZE`) is a read
   (no Keep/Undo), decided in the gate (the classifier's own verdict is unchanged).
   Since `m3b-gate-explain` (fenced `// ## m3b-gate-explain`) the read is decided after the
-  production AND-check and D-062, never before them, and only for a plan of code-free statements: a `ROUTINE_CALL` bit (statement or
-  request), a touched call, a destructive pattern, any `ANALYZE` evidence (kind, flag or
-  reason) or a policy that does not simply allow it under `Admin` (a routine reason, session
-  effects) keeps the class, so production asks. Planning runs code: PostgreSQL pre-evaluates
-  IMMUTABLE functions with constant arguments while planning, and MySQL through 8.0.21 ran a
-  stored function in a derived table under a plain `EXPLAIN` (MySQL bug #31468).
+  production AND-check and D-062, never before them, and only for a plan of code-free
+  statements: a `ROUTINE_CALL` bit (statement or request), a touched call, a destructive
+  pattern, any `ANALYZE` evidence (kind, flag or reason), a request-level class above `Dml`, or
+  a policy that does not simply allow it under `Admin` (a routine reason, session effects)
+  keeps the class, so production asks. Planning runs code. PostgreSQL may pre-evaluate
+  IMMUTABLE functions with constant arguments while planning
+  (<https://www.postgresql.org/docs/current/xfunc-volatility.html>). MySQL builds derived
+  tables under a plain `EXPLAIN`, so a stored function in a `FROM` subquery runs; MySQL bug
+  #31468 (<https://bugs.mysql.com/bug.php?id=31468>, 2007, versions 4.1 and later) shows its
+  `INSERT` executing, and was closed as documented behaviour. A Percona post
+  (<https://www.percona.com/blog/uncommon-sense-mysql-when-explain-can-trash-your-database/>,
+  2020) shows a `DELETE` run the same way on MySQL 8.0.21 and earlier.
+  Residual risk: code the text does not show (column defaults, RLS policies, rules, view
+  bodies, overloaded operators, type input functions) can run while planning. A production
+  `SELECT` over the same objects has the same exposure, so this read does not widen it.
 - **The plan-less run (A-M2, A-M3).** `ExecService` refuses a request with neither prepared
   units nor a plan unless built `with_plan_less_runs` (a test seam); the app opts in only in a
   `test-support` build, and `prod_unlock` checks that.
