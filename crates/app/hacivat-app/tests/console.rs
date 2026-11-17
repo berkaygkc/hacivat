@@ -516,10 +516,12 @@ fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext)
         vcx.debug_bounds("console-lock").is_none(),
         "no false read-only lock chip: {frame}"
     );
+    // ## m3b-ci (controller): the chip falls back to its short form when the sentence does not
+    // fit; non-macOS fonts are wider, so either form is the pending chip.
     assert!(
         frame.contains(
             "orders turns read-only once its open transaction is committed or rolled back."
-        ),
+        ) || frame.contains("Read-only after this transaction"),
         "the pending chip: {frame}"
     );
     activate(vcx);
