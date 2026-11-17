@@ -529,12 +529,18 @@ async fn read_delta<C: CatalogConn + ?Sized>(
             CommentOwner::Schema => schema = true,
         }
     }
-    // A column change re-deparses every text of the same relation that names columns
-    // (partition key, index expressions, constraint and trigger definitions).
+    // Same-relation cascade. A column change re-deparses every text of the relation that names
+    // columns (partition key, index expressions, constraint and trigger definitions); a change
+    // of the relation's own row (a rename) re-deparses the texts that name the relation (index
+    // and trigger definitions, self-referencing foreign keys). `pg/ChangedDependents` cannot
+    // find these: an index that backs a constraint depends on the constraint (`i`), not on the
+    // table, so it is two `pg_depend` hops from a renamed table.
     rels.retain(|oid, _| alive.relations.contains(oid));
     for f in rels.values_mut() {
         if f.columns {
             f.rel = true;
+        }
+        if f.rel {
             f.indexes = true;
             f.constraints = true;
             f.triggers = true;
