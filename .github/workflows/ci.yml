@@ -567,7 +567,8 @@ jobs:
     name: pseudo-screens (${{ matrix.os }})
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # ## m3b-ci (controller): the M3b shot set (3,244 states) outgrew 60 min on hosted runners.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
