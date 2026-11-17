@@ -19,8 +19,10 @@ use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AppContext, Bounds, Context, ElementId, EventEmitter, FocusHandle, Focusable,
     Global, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
     Point, Render, Role, ScrollEvent, SharedString, StatefulInteractiveElement, Styled, Window,
-    accesskit, anchored, div, point, px,
+    accesskit, div, point, px,
 };
+// ## m3b-ci (controller fix): `KeepInWindow`.
+use hacivat_ui_core::gpui_surface::{Element, GlobalElementId, InspectorElementId, LayoutId};
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
 use crate::accesskey::{AccessKey, AccessKeyAssigner, AccessKeyLocale, typed_matches};
@@ -889,11 +891,14 @@ impl Render for PopupMenu {
         } else {
             crate::text::card_scope(surface)
         };
-        let menu = surface
+        let mut menu = surface
             .id("popup-menu")
             .debug_selector(|| "popup-menu".to_string())
             .track_focus(&self.focus)
             .declare(Role::Menu, menu_name.clone(), None);
+        if let Some((left, top)) = position {
+            menu = menu.absolute().left(left).top(top);
+        }
         let mut menu = menu.min_w(self.min_width);
         // ## m3a-t35-shots (named exception)
         // ## m3b-ci (controller fix): an anchored menu is also never wider than the window
@@ -995,16 +1000,91 @@ impl Render for PopupMenu {
         // ## m3b-ci (controller fix): an anchored menu wider than the room right of its anchor
         // moves left until it ends inside the window (CI run 44051024805: with Linux's wider
         // fonts the transaction menu ran past the right edge at 960x600 and its hints were cut
-        // there). Placing from `min_width` alone cannot see the menu's real width; `anchored`
-        // shifts it once laid out. A menu that fits stays where it was placed.
+        // there). Placing from `min_width` alone cannot see the menu's real width, so
+        // [`KeepInWindow`] shifts it once laid out. A menu that fits is drawn exactly where it
+        // was placed (no rounding, unlike GPUI's `anchored`).
         match position {
-            Some((left, top)) => anchored()
-                .position(point(left, top))
-                .snap_to_window_with_margin(px(t.spacing.xs))
-                .child(menu)
-                .into_any_element(),
+            Some(_) => KeepInWindow {
+                child: menu.into_any_element(),
+                margin: px(t.spacing.xs),
+            }
+            .into_any_element(),
             None => menu.into_any_element(),
         }
+    }
+}
+
+// ## m3b-ci (controller fix)
+/// Draws `child` (an absolutely placed menu) moved left just enough to end `margin` inside the
+/// window's right side when its laid-out bounds run past that side, and never past the window's
+/// left side by the same margin. Its layout is the child's own; a child that fits is drawn with
+/// no offset at all.
+struct KeepInWindow {
+    child: AnyElement,
+    margin: Pixels,
+}
+
+impl KeepInWindow {
+    /// How far to move bounds `left..right` along x so they end inside a window `width` wide:
+    /// 0 when they already do (with half a pixel of slack), else a shift left that ends them
+    /// `margin` before the right side but starts them no closer than `margin` to the left one.
+    fn shift(left: Pixels, right: Pixels, width: Pixels, margin: Pixels) -> Pixels {
+        if right <= width + px(0.5) {
+            return px(0.0);
+        }
+        (width - margin - right).max(margin - left).min(px(0.0))
+    }
+}
+
+impl Element for KeepInWindow {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let width = window.viewport_size().width;
+        let dx = Self::shift(bounds.left(), bounds.right(), width, self.margin);
+        window.with_element_offset(point(dx, px(0.0)), |window| {
+            self.child.prepaint(window, cx);
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
     }
 }
 
@@ -1020,6 +1100,28 @@ mod tests {
 
     fn item() -> MenuItemSpec {
         MenuItemSpec::new(Rc::new(|_: &App| SharedString::from("Delete…")), "x.delete")
+    }
+
+    // ## m3b-ci (controller fix)
+    #[test]
+    fn keep_in_window_moves_only_what_runs_past_the_right_side() {
+        use hacivat_ui_core::gpui_surface::px;
+
+        use super::KeepInWindow;
+        let shift =
+            |l: f32, r: f32| f32::from(KeepInWindow::shift(px(l), px(r), px(960.0), px(4.0)));
+        assert_eq!(shift(600.0, 900.0), 0.0, "fits: not moved");
+        assert_eq!(shift(600.0, 960.4), 0.0, "within half a pixel: not moved");
+        assert_eq!(
+            shift(600.0, 1060.0),
+            -104.0,
+            "ends 4 px inside the right side"
+        );
+        assert_eq!(
+            shift(100.0, 1100.0),
+            -96.0,
+            "never starts closer than 4 px to the left"
+        );
     }
 
     #[test]

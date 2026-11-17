@@ -741,12 +741,11 @@ fn open_menu_at(
     list: Vec<hacivat_ui::menu::MenuItemSpec>,
 ) -> &mut VisualTestContext {
     let (_host, vcx) = cx.add_window_view(move |window, cx| {
-        MenuHost(hacivat_ui::menu::PopupMenu::new(
-            point(px(anchor_x), px(40.)),
-            list,
-            window,
-            cx,
-        ))
+        let menu = hacivat_ui::menu::PopupMenu::new(point(px(anchor_x), px(40.)), list, window, cx);
+        // Access keys shown on every platform, as Linux and Windows draw them (the label in
+        // runs around its key letter), so macOS checks the same drawing.
+        menu.update(cx, |m, _| m.set_access_keys(true));
+        MenuHost(menu)
     });
     vcx.simulate_resize(gpui::size(px(window_w), px(800.)));
     vcx
@@ -799,8 +798,13 @@ fn a_menu_wider_than_the_window_stays_inside_and_ellipsizes_its_hint(cx: &mut Te
     );
     let shown = drawn(vcx, hint);
     assert!(shown.truncated && !shown.clipped, "{shown:?}");
-    let label = drawn(vcx, "Manual");
-    assert!(!label.truncated && !label.clipped, "{label:?}");
+    // Where access keys show (Linux, Windows) the label is drawn as runs around its key letter
+    // (P15): every run must be whole.
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let runs = support::find_label_runs(&frame, "Manual").expect("the label is drawn");
+    for run in &runs {
+        assert!(!run.truncated && !run.clipped, "{run:?}");
+    }
 }
 
 #[gpui::test]
