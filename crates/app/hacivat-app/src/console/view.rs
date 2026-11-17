@@ -71,6 +71,8 @@ use crate::console::autosave::{self, Autosave, RESTORE_MAX_BYTES, Restored};
 use crate::console::decor::{console_title, profile_of};
 use crate::console::registry::{ConsoleId, ConsoleState, Consoles};
 use crate::console::status::EditorSegment;
+// ## m3c-t41-chrome
+use crate::console::status::{SegmentCell, SegmentPart};
 use crate::console::toolbar::{self, RunUx, ToolbarActions, ToolbarModel};
 use crate::l10n_global::tr;
 use crate::results::ConsoleResults;
@@ -528,6 +530,8 @@ pub struct ConsoleHost {
     clock: Option<(u64, Instant)>,
     clock_task: Option<Task<()>>,
     segment: Option<Entity<EditorSegment>>,
+    // ## m3c-t41-chrome: one status bar cell per part of the segment.
+    segment_cells: Vec<Entity<SegmentCell>>,
     autosave: Option<Autosave>,
     autosave_task: Option<Task<()>>,
     /// The console's session is its own (not the profile's default session): only such a
@@ -587,6 +591,7 @@ impl ConsoleHost {
             clock: None,
             clock_task: None,
             segment: None,
+            segment_cells: Vec::new(),
             autosave: None,
             autosave_task: None,
             paint_errors: 0,
@@ -644,7 +649,7 @@ impl ConsoleHost {
         // Its keys reach the editor's commands like a console of ours.
         let focus = editor.focus_handle(cx);
         register_focus_context(cx, focus, EDITOR_CONTEXT);
-        self.segment = Some(cx.new(|cx| EditorSegment::new(&editor, cx)));
+        self.set_segment(&editor, cx);
         self.mode = Mode::Ready {
             console,
             editor,
@@ -682,6 +687,56 @@ impl ConsoleHost {
     /// The editor status segment.
     pub fn segment(&self) -> Option<&Entity<EditorSegment>> {
         self.segment.as_ref()
+    }
+
+    // ## m3c-t41-chrome
+    /// Gives the console's results the format locale and time zone again when they changed
+    /// from what the attach or the last refresh applied (a settings change refreshes the
+    /// windows).
+    fn follow_display(&mut self, cx: &mut Context<Self>) {
+        let Some(console) = self.console() else {
+            return;
+        };
+        let Some(format) = cx
+            .try_global::<crate::l10n_global::L10nGlobal>()
+            .map(|g| g.l10n.snapshot().format.clone())
+        else {
+            return;
+        };
+        let key = (format.format_locale.clone(), format.time_zone.clone());
+        // ## fix round 1 (m8): against what the attach (or the last refresh) applied, so a
+        // change made before this console's first frame is followed too.
+        match crate::exec_ui::orchestrator::display_applied(console, cx) {
+            Some(applied) if applied != key => {
+                cx.defer(move |cx| crate::exec_ui::orchestrator::refresh_display(console, cx));
+            }
+            _ => {}
+        }
+    }
+
+    // ## m3c-t41-chrome
+    /// The editor's status segment and a status bar cell for each of its parts; and the
+    /// placeholder an empty console shows ("Write SQL here. ⌘↵ runs the statement at the
+    /// caret.", design/m3a-query surface 1, m3b-safe surface 24).
+    fn set_segment(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
+        let placeholder: hacivat_ui::text::TextFn = Rc::new(|cx: &App| {
+            let key =
+                crate::shell::keymap_state::shortcut_label(cx, "editor.run").unwrap_or_default();
+            tr(
+                cx,
+                ids::hv::EDITOR_PLACEHOLDER,
+                ids::hv::HvEditorPlaceholder {
+                    key: hacivat_l10n::Text(key),
+                },
+            )
+        });
+        editor.update(cx, |e, cx| e.set_placeholder(Some(placeholder), cx));
+        let segment = cx.new(|cx| EditorSegment::new(editor, cx));
+        self.segment_cells = SegmentPart::ALL
+            .into_iter()
+            .map(|part| cx.new(|cx| SegmentCell::new(&segment, part, cx)))
+            .collect();
+        self.segment = Some(segment);
     }
 
     /// The autosave file, once the console has one.
@@ -927,7 +982,7 @@ impl ConsoleHost {
             }),
         ];
         self._subscriptions.extend(subscriptions);
-        self.segment = Some(cx.new(|cx| EditorSegment::new(&editor, cx)));
+        self.set_segment(&editor, cx);
         self.autosave = autosave.and_then(|on_disk| {
             let paths = cx.try_global::<AppState>()?.paths.clone();
             Some(Autosave::new(
@@ -1464,6 +1519,10 @@ impl ConsoleHost {
         }
         // ## m3c-t33-find (named exception)
         crate::console::find_bar::console_closed(console, cx);
+        // ## m3c-t41-chrome: the editor's key context leaves with the console (its handle may
+        // outlive the tab, held by a pending task).
+        let handle = editor.read(cx).focus_handle(cx);
+        crate::shell::unregister_focus_context(cx, &handle);
         if owned {
             // The last edits are written now, on the closing thread (fix round 2, M16): a new
             // console that reuses this number starts after it, and its autosave takes the file
@@ -1509,6 +1568,9 @@ impl Render for ConsoleHost {
         };
         // A registrant may swap the console's session (Task 34's tests do).
         self.watch_session(window, cx);
+        // ## m3c-t41-chrome: a regional format or time zone change reaches the results
+        // (`ConsoleResults::set_display` again; the console's attach applied the first).
+        self.follow_display(cx);
         let model = self.toolbar_model(cx);
         let actions = self.actions(cx);
         // ## m3b-t22-tx-ui (named exception): with the console's transaction items.
@@ -1693,6 +1755,34 @@ pub fn editor_segment(console: ConsoleId, cx: &App) -> Option<AnyView> {
     let tab = Consoles::get(cx, console)?.tab;
     let host = cx.try_global::<Hosts>()?.by_tab.get(&tab)?.host.upgrade()?;
     host.read(cx).segment.clone().map(Into::into)
+}
+
+// ## m3c-t41-chrome (F2 M8; M3c-35)
+/// The status bar's cells of `console`'s editor segment: one per part it shows now, left to
+/// right ("Reduced mode", "Mixed line endings", the carets, the selected count, Ln/Col).
+pub fn editor_segment_cells(console: ConsoleId, cx: &App) -> Vec<(SegmentPart, AnyView)> {
+    let Some(tab) = Consoles::get(cx, console).map(|s| s.tab) else {
+        return Vec::new();
+    };
+    let Some(host) = cx
+        .try_global::<Hosts>()
+        .and_then(|h| h.by_tab.get(&tab))
+        .and_then(|e| e.host.upgrade())
+    else {
+        return Vec::new();
+    };
+    let host = host.read(cx);
+    let Some(segment) = &host.segment else {
+        return Vec::new();
+    };
+    let shown = segment.read(cx).parts().to_vec();
+    host.segment_cells
+        .iter()
+        .filter_map(|cell| {
+            let part = cell.read(cx).part();
+            shown.contains(&part).then(|| (part, cell.clone().into()))
+        })
+        .collect()
 }
 
 /// The host of console tab `tab` (tests, the shots fixtures).

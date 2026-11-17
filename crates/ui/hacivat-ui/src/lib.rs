@@ -20,6 +20,8 @@ pub mod input;
 pub mod keymaps;
 pub mod l10n;
 pub mod menu;
+// ## m3c-t41-chrome
+pub mod metrics;
 pub mod notice;
 pub mod palette;
 pub mod panes;

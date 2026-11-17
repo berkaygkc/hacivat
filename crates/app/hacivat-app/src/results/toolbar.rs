@@ -498,6 +498,16 @@ fn tool_button(
     .on_choose(move |window, cx| choose(window, cx))
 }
 
+// ## m3c-t41-chrome (named exception; PO M3c-18): the narrow result toolbar's give-way order.
+// The view switch and the record toggle (Task 38's right-group items) take their compact
+// forms first, at [`VIEW_ITEMS_PRIORITY`]; Count rows (priority 1) moves into ⋯ before Copy;
+// Copy gives way last.
+/// Copy's priority: the last of the result toolbar's items to give way.
+pub const COPY_PRIORITY: u8 = 200;
+/// The priority the view switch and the record toggle carry, so they take their compact forms
+/// before Copy moves (lower than [`COPY_PRIORITY`]).
+pub const VIEW_ITEMS_PRIORITY: u8 = 100;
+
 /// The toolbar of a result tab: Copy, and `rows` (the rows and their time) on the right.
 /// ## m3b-t25-results: `extra` (Count rows) follows Copy.
 pub fn result_toolbar(
@@ -527,7 +537,8 @@ pub fn result_toolbar_with(
         "results-copy",
         IconName::Copy,
         ids::hv::RESULTS_COPY,
-        2,
+        // ## m3c-t41-chrome (PO M3c-18)
+        COPY_PRIORITY,
         copy,
         cx,
     ));

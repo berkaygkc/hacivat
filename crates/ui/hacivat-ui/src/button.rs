@@ -20,10 +20,9 @@ use crate::text::{Label, TextSource};
 
 // ## m3a-f2-visual (named exception): the compact size (NOTES "Strip buttons": the Button at
 // 20 px height, padding 0/7, 12 px label; the mock's `.strip .btn` gap 5).
-pub const COMPACT_HEIGHT_PX: f32 = 20.0;
-const COMPACT_PAD_PX: f32 = 7.0;
-const COMPACT_GAP_PX: f32 = 5.0;
-const COMPACT_LABEL_PX: f32 = 12.0;
+// ## m3c-t41-chrome (F2 review M9): named in `metrics`.
+pub use crate::metrics::COMPACT_HEIGHT_PX;
+use crate::metrics::{COMPACT_GAP_PX, COMPACT_LABEL_PX, COMPACT_PAD_PX};
 
 /// A click handler shared between the widgets that take one.
 pub type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -63,6 +62,9 @@ pub struct Button {
     compact: bool,
     // ## m3b-t21-confirm (named exception): a minimum outer width (the gate dialog's Cancel).
     min_width: Option<f32>,
+    // ## m3c-t41 (named exception): any kind drawn as its icon alone (N1: Run and Stop in a
+    // narrow pane); the label is its tooltip and accessible name.
+    glyph_only: bool,
 }
 
 impl Button {
@@ -83,6 +85,7 @@ impl Button {
             expanded: None,
             compact: false,
             min_width: None,
+            glyph_only: false,
         }
     }
 
@@ -177,6 +180,14 @@ impl Button {
         self.compact = compact;
         self
     }
+
+    // ## m3c-t41 (named exception)
+    /// Draws the button's icon alone, in its kind's look (a primary keeps its blue fill), with
+    /// 6 px padding; its label is the tooltip and the accessible name (design/m3b-safe N1).
+    pub fn icon_only(mut self, on: bool) -> Self {
+        self.glyph_only = on;
+        self
+    }
 }
 
 /// The ink, fill and outline of a button in one state.
@@ -191,9 +202,10 @@ fn look(kind: ButtonKind, disabled: bool, hot: bool, theme: &Theme) -> Look {
     let c = &theme.tokens.colors;
     let clear = TRANSPARENT;
     if disabled {
-        // text-3 ink; the seam-strong outline stays except on ghost, which has none.
+        // ## m3c-t41 (M3c-38): the `text-disabled` ink (never remapped on a raised surface);
+        // the seam-strong outline stays except on ghost, which has none.
         return Look {
-            ink: c.text_3.to_hsla(),
+            ink: c.text_disabled.to_hsla(),
             fill: None,
             outline: match kind {
                 ButtonKind::Ghost | ButtonKind::Icon => clear,
@@ -375,6 +387,7 @@ impl Button {
             expanded,
             compact,
             min_width,
+            glyph_only,
         } = self;
 
         // Hover and focus state live with the element across frames.
@@ -396,7 +409,8 @@ impl Button {
         if kind == ButtonKind::Primary {
             style.weight = 600;
         }
-        let icon_only = kind == ButtonKind::Icon;
+        // ## m3c-t41: or any kind drawn as its icon alone.
+        let icon_only = kind == ButtonKind::Icon || glyph_only;
         let selector = format!("button-{id}");
         let node_id = ElementId::from((id.clone(), "node"));
         // ## m2b-t24-shots (follow-up): the label's ID (`button-label-<id>`), so a test or a
@@ -444,11 +458,14 @@ impl Button {
                 Some(&label_id),
             ));
         }
-        if let Some(hint) = key_hint {
+        // ## m3c-t41: an icon-only button's keys are in its label (its tooltip).
+        if let Some(hint) = key_hint.filter(|_| !icon_only) {
             // A primary's hint takes its own ink (on-accent) on every surface: text-3 on its
             // blue fill is unreadable (m2a-t21-shots). On a raised surface the others use
             // text-2 (never text-3).
             let dim = match (on_raised, kind) {
+                // ## m3c-t41 (M3c-38): a disabled button's keys take its disabled ink.
+                _ if disabled => look.ink,
                 (_, ButtonKind::Primary) => look.ink,
                 (true, _) => t.colors.text_2.to_hsla(),
                 (false, _) => t.colors.text_3.to_hsla(),
@@ -531,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_buttons_have_text_3_ink_no_fill_and_no_hover_response() {
+    fn disabled_buttons_have_disabled_ink_no_fill_and_no_hover_response() {
         for kind in [
             ButtonKind::Default,
             ButtonKind::Primary,
@@ -540,7 +557,7 @@ mod tests {
             ButtonKind::Icon,
         ] {
             let rest = look(kind, true, false, &theme());
-            assert_eq!(rest.ink, DARK.colors.text_3.to_hsla(), "{kind:?}");
+            assert_eq!(rest.ink, DARK.colors.text_disabled.to_hsla(), "{kind:?}");
             assert_eq!(rest.fill, None, "{kind:?}");
         }
         assert_eq!(

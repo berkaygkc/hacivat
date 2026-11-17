@@ -7,7 +7,7 @@
 //!   the commit glyph, the mode ("Auto-commit", "Manual", "Smart") and a chevron; a Tab stop
 //!   that Enter, Space or a click opens. Production consoles start in Manual
 //!   (`session::default_mode`, D-036); the chip shows what the session says.
-//! - **Read-only session.** The chip reads Auto-commit, disabled (no chevron, `text-3`), still a
+//! - **Read-only session.** The chip reads Auto-commit, disabled (no chevron, `text-disabled`), still a
 //!   Tab stop; its tooltip is the reason (Q14: a read-only session is always Auto).
 //! - **Menu** (`PopupMenu`, title "Transaction mode"). With a user transaction open: "Commit
 //!   transaction" and "Roll back transaction" first (Commit only on an open, not a failed one;
@@ -123,6 +123,34 @@ fn is_production(console: ConsoleId, cx: &App) -> bool {
 /// The chip of console `console`; `None` until it has a session. It opens its menu under
 /// itself.
 pub fn render(console: ConsoleId, cx: &App) -> Option<AnyElement> {
+    render_form(console, false, cx)
+}
+
+// ## m3c-t41 (named exception; design/m3b-safe surface 24, N4): the narrow form keeps the
+// mode word and its chevron and drops the commit glyph; "Auto-commit" reads "Auto" there,
+// except on a read-only session, whose disabled chip keeps "Auto-commit".
+/// The chip's form in a narrow pane.
+pub fn render_narrow(console: ConsoleId, cx: &App) -> Option<AnyElement> {
+    render_form(console, true, cx)
+}
+
+// ## m3c-t41
+/// The word the narrow chip shows (the toolbar measures its lines); `None` without a chip.
+pub fn narrow_word(console: ConsoleId, cx: &App) -> Option<SharedString> {
+    let view = tx_badge::view(console, cx)?;
+    if view.ended {
+        return None;
+    }
+    Some(if view.read_only {
+        mode_text(cx, TxMode::Auto)
+    } else if view.mode == TxMode::Auto {
+        tr(cx, ids::hv::TX_CHIP_AUTO_SHORT, NoArgs)
+    } else {
+        mode_text(cx, view.mode)
+    })
+}
+
+fn render_form(console: ConsoleId, narrow: bool, cx: &App) -> Option<AnyElement> {
     let view = tx_badge::view(console, cx)?;
     if view.ended {
         return None;
@@ -136,6 +164,12 @@ pub fn render(console: ConsoleId, cx: &App) -> Option<AnyElement> {
         view.mode
     };
     let word = mode_text(cx, mode);
+    // ## m3c-t41 (N4)
+    let shown = if narrow && !view.read_only && mode == TxMode::Auto {
+        tr(cx, ids::hv::TX_CHIP_AUTO_SHORT, NoArgs)
+    } else {
+        word.clone()
+    };
     let tip = if view.read_only {
         tr(cx, ids::hv::TX_CHIP_RO_REASON, NoArgs)
     } else {
@@ -147,36 +181,70 @@ pub fn render(console: ConsoleId, cx: &App) -> Option<AnyElement> {
             },
         )
     };
-    let ink = if view.read_only { c.text_3 } else { c.text };
-    let glyph = if view.read_only { c.text_3 } else { c.text_2 };
-    let mut chip = div()
+    // ## m3c-t41 (M3c-38): the read-only chip is disabled: the disabled ink.
+    let ink = if view.read_only {
+        c.text_disabled
+    } else {
+        c.text
+    };
+    let glyph = if view.read_only {
+        c.text_disabled
+    } else {
+        c.text_2
+    };
+    let chip = div()
         .id("tx-chip")
         .debug_selector(|| "tx-chip".to_string())
         .relative()
         .flex()
         .flex_row()
-        .flex_none()
-        .items_center()
         .gap(px(t.spacing.xs))
-        .h(px(22.0))
         .px(px(t.spacing.sm))
         .rounded(px(t.radii.sm))
         .border_1()
-        .border_color(c.seam_strong.to_hsla())
-        .child(
-            Icon::new(IconName::GitCommit)
-                .size(IconSize::Chrome)
-                .color(glyph.to_hsla()),
-        )
-        .child(
-            Label::new(word, TextSource::Fluent, t.type_ramp.caption, ink.to_hsla())
+        .border_color(c.seam_strong.to_hsla());
+    // ## m3c-t41 (N4): the narrow form drops the commit glyph and wraps its word inside the
+    // chip should a long locale's word not fit the pane (chips never clip, NOTES surface 24).
+    let mut chip = if narrow {
+        let style = tx_badge::narrow_style(cx);
+        chip.flex_1()
+            .min_w(px(0.0))
+            .items_center()
+            .min_h(px(22.0))
+            .py(px(hacivat_ui::metrics::NARROW_CHIP_PAD_Y_PX))
+            .child(
+                div().flex_1().min_w(px(0.0)).child(
+                    hacivat_ui::text::paragraph(shown, TextSource::Fluent, style, ink.to_hsla())
+                        .id("tx-chip-mode"),
+                ),
+            )
+    } else {
+        chip.flex_none()
+            .items_center()
+            .h(px(22.0))
+            .child(
+                Icon::new(IconName::GitCommit)
+                    .size(IconSize::Chrome)
+                    .color(glyph.to_hsla()),
+            )
+            .child(
+                Label::new(
+                    shown,
+                    TextSource::Fluent,
+                    t.type_ramp.caption,
+                    ink.to_hsla(),
+                )
                 .id("tx-chip-mode"),
-        );
+            )
+    };
     if !view.read_only {
         chip = chip.child(
-            Icon::new(IconName::ChevronDown)
-                .size(IconSize::Chrome)
-                .color(glyph.to_hsla()),
+            // ## m3c-t41: never shrinks beside a wrapping word.
+            div().flex_none().child(
+                Icon::new(IconName::ChevronDown)
+                    .size(IconSize::Chrome)
+                    .color(glyph.to_hsla()),
+            ),
         );
     }
     chip = chip

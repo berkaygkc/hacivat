@@ -2734,3 +2734,16 @@ hv-settings-history-note = Bağlantı başına en çok 10.000 ifade 90 gün sakl
 
 # Review: PO
 hv-goto-fetch-rerun = Getirme durdu: sonuç yeniden çalıştırıldı.
+
+## m3b-t41-chrome
+
+# Review: PO
+hv-tx-chip-auto-short = Otomatik
+# Review: PO
+hv-console-waiting-l1 = Bağlantı bekleniyor
+# Review: PO
+hv-console-waiting-l2 = kullanımda: { $inUse }/{ $max }
+# Review: PO
+hv-console-button-keys = { $label } · { $keys }
+# Review: PO
+hv-editor-placeholder = SQL'i buraya yazın. { $key }, imlecin bulunduğu ifadeyi çalıştırır.

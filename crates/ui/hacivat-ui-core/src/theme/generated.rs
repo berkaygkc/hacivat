@@ -40,6 +40,7 @@ pub struct Colors {
     pub text: Color,
     pub text_2: Color,
     pub text_3: Color,
+    pub text_disabled: Color,
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SharedColors {
@@ -373,6 +374,7 @@ const DARK_COLORS: Colors = Colors {
     text: Color(0xC9D1D9FF),
     text_2: Color(0x8B949EFF),
     text_3: Color(0x828A96FF),
+    text_disabled: Color(0x636A76FF),
 };
 const LIGHT_COLORS: Colors = Colors {
     amber: Color(0xA35C00FF),
@@ -411,6 +413,7 @@ const LIGHT_COLORS: Colors = Colors {
     text: Color(0x1B1B1FFF),
     text_2: Color(0x55555EFF),
     text_3: Color(0x6C6C76FF),
+    text_disabled: Color(0xA0A0A8FF),
 };
 pub const DARK: ThemeTokens = ThemeTokens {
     colors: DARK_COLORS,

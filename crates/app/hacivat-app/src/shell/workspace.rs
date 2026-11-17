@@ -579,8 +579,15 @@ impl Workspace {
             .get(&pane)
             .and_then(|p| p.tabs.iter().position(|t| *t == tab))
         {
+            // ## m3c-t41-chrome (named exception; ledger 331): a click on the tab that is
+            // already active says "this one" again: the status bar and the capsule follow its
+            // console again after an explorer pick (`ActiveTab` observers re-run).
+            let again = self.active_tab() == Some(tab);
             self.panes.activate(pane, idx);
             self.layout_changed(cx);
+            if again {
+                cx.set_global(ActiveTab(Some(tab)));
+            }
         }
     }
 

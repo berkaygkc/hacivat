@@ -269,7 +269,10 @@ fn connection_parts(
 //   console's editor segment (Task 32's entity); the server version.
 // - **Collapse order at narrow widths** (first given way first): the version, the encryption
 //   (and the "unsupported" mark), the editor segment, the path and latency, rows · timing,
-//   the state words. The environment, the transaction and the cursor never give way; the
+//   the state words. ## m3c-t41-chrome (F2 M8, M3c-35; design/m3b-safe surface 24): the
+//   editor segment's parts give way one by one: the selected count, the carets and "Mixed line
+//   endings" before the path, Ln/Col after it; "Reduced mode" never. The segment and the
+//   version sit right-aligned (the room left over goes to the cell before them). The environment, the transaction and the cursor never give way; the
 //   message ellipsizes (its SQL is data) down to a floor. ## m3a-f2-visual (named exception):
 //   a cell gives way whole (NOTES cross-cutting #7: never ellipsized chrome); the message
 //   ellipsizes only once every other cell gave way (fix round 1, I1).
@@ -593,8 +596,19 @@ fn give_of(part: Part) -> Give {
     }
 }
 
-/// The editor segment gives way after the encryption, before the path.
-const GIVE_EDITOR: Give = Yield::Whole(40);
+// ## m3c-t41-chrome (F2 M8 = T34 M6; NOTES surface 24): the editor segment's parts, each with
+// its own rank: the selected count, the carets, "Mixed line endings" after the encryption and
+// before the path; Ln/Col after the path, before rows · timing; Reduced mode never.
+fn give_editor(part: crate::console::status::SegmentPart) -> Give {
+    use crate::console::status::SegmentPart;
+    match part {
+        SegmentPart::Reduced => Yield::Never,
+        SegmentPart::Selected => Yield::Whole(46),
+        SegmentPart::Carets => Yield::Whole(45),
+        SegmentPart::LineEndings => Yield::Whole(44),
+        SegmentPart::LnCol => Yield::Whole(25),
+    }
+}
 /// Rows · timing gives way after the path.
 const GIVE_ROWS: Give = Yield::Whole(20);
 /// The message ellipsizes, down to a floor, only once every cell that can give way left
@@ -728,10 +742,22 @@ fn console_segments(
             .into_any_element(),
         ));
     }
-    if let Some(segment) = crate::console::editor_segment(console, cx) {
-        cells.push((GIVE_EDITOR, segment.into_any_element()));
+    // ## m3c-t41-chrome: the right-aligned group: the editor segment's parts, then the
+    // version; the cell before them takes the room left over.
+    let right = cells.len();
+    for (part, cell) in crate::console::editor_segment_cells(console, cx) {
+        cells.push((give_editor(part), cell.into_any_element()));
     }
     if let Some((part, segment)) = version {
+        // ## m3c-t41-chrome: its selector, for the order test.
+        let segment = div()
+            .debug_selector(|| "status-version".to_string())
+            .flex()
+            .flex_row()
+            .items_center()
+            .min_w(px(0.0))
+            .child(segment)
+            .into_any_element();
         cells.push((give_of(part), segment));
     }
     let mut cells = cells.into_iter();
@@ -742,7 +768,9 @@ fn console_segments(
     if rest.is_empty() {
         return vec![first];
     }
-    vec![first, give_way_row(theme, rest)]
+    // In `rest`, the cell before the right group (none when the group starts the row).
+    let grow = right.checked_sub(2);
+    vec![first, give_way_row(theme, rest, grow)]
 }
 
 /// The cells after the first, as one bar segment that lays them out itself, so each gives
@@ -759,7 +787,7 @@ fn console_segments(
 ///   ever narrower than its content (its SQL ellipsizes, down to its floor); it clips.
 /// - The row covers its bar segment's padding; on the right it reaches one pixel further, so
 ///   the last cell's seam lies on the bar's own seam after the segment.
-fn give_way_row(theme: &Theme, cells: Vec<(Give, AnyElement)>) -> AnyElement {
+fn give_way_row(theme: &Theme, cells: Vec<(Give, AnyElement)>, grow: Option<usize>) -> AnyElement {
     let t = theme.tokens;
     let seam = t.colors.seam.to_hsla();
     // The least an inner box keeps: its padding and its seam.
@@ -804,6 +832,8 @@ fn give_way_row(theme: &Theme, cells: Vec<(Give, AnyElement)>) -> AnyElement {
         .collect();
     GiveWayRow::new(cells)
         .margins(-t.spacing.lg, -t.spacing.lg - 1.0)
+        // ## m3c-t41-chrome (M3c-35)
+        .grow(grow)
         .into_any_element()
 }
 

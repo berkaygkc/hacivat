@@ -9,6 +9,13 @@
 //! The line and column are raw numbers like the gutter's; the selected count
 //! uses the format locale. "Reduced mode" is a trust signal and never gives way (Task 34's row
 //! decides the giving-way order; [`EditorSegment::reduced`] tells it).
+//!
+//! ## m3c-t41-chrome (F2 M8 = T34 M6; design/m3b-safe surface 24, M3c-35): the status bar
+//! places each part in its own cell ([`SegmentCell`], one view per [`SegmentPart`], notified
+//! with the segment), so each gives way by its own rank: Reduced mode never; the selected
+//! count, the carets and "Mixed line endings" before the path; Ln/Col after it. The segment
+//! refreshes the windows only when a part appears or leaves (typing re-renders the cells, not
+//! the status bar).
 
 use hacivat_l10n::{Count, NoArgs, ids};
 use hacivat_ui::text::{Label, TextSource};
@@ -39,6 +46,50 @@ pub struct EditorSegment {
     _subscription: Subscription,
     // ## m3c-t34-editor (named exception): the editor the line endings menu normalises.
     editor: WeakEntity<EditorView>,
+    // ## m3c-t41-chrome
+    /// The parts it shows now (a change refreshes the status bar).
+    parts: Vec<SegmentPart>,
+}
+
+// ## m3c-t41-chrome
+/// A part of the editor segment, in the status bar's order (NOTES surface 6 and 17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SegmentPart {
+    /// "Reduced mode": a trust signal, never gives way.
+    Reduced,
+    /// The "Mixed line endings" button.
+    LineEndings,
+    /// "3 carets".
+    Carets,
+    /// "186 selected".
+    Selected,
+    /// "Ln 14, Col 49".
+    LnCol,
+}
+
+impl SegmentPart {
+    /// Every part, left to right.
+    pub const ALL: [SegmentPart; 5] = [
+        SegmentPart::Reduced,
+        SegmentPart::LineEndings,
+        SegmentPart::Carets,
+        SegmentPart::Selected,
+        SegmentPart::LnCol,
+    ];
+}
+
+/// The parts `status` shows (`eol`: the editor is offered the line endings button).
+fn parts_of(status: EditorStatus, eol: bool) -> Vec<SegmentPart> {
+    SegmentPart::ALL
+        .into_iter()
+        .filter(|p| match p {
+            SegmentPart::Reduced => status.tier == Tier::Reduced,
+            SegmentPart::LineEndings => status.mixed_line_endings && eol,
+            SegmentPart::Carets => status.carets > 1,
+            SegmentPart::Selected => status.selected_chars > 0,
+            SegmentPart::LnCol => true,
+        })
+        .collect()
 }
 
 impl EditorSegment {
@@ -53,6 +104,13 @@ impl EditorSegment {
                 let now = editor.read(cx).status();
                 if now != this.status {
                     this.status = now;
+                    // ## m3c-t41-chrome: a part that appears or leaves changes the status
+                    // bar's cells.
+                    let parts = parts_of(now, eol_offered(&editor, cx));
+                    if parts != this.parts {
+                        this.parts = parts;
+                        cx.refresh_windows();
+                    }
                     cx.notify();
                 }
             }
@@ -62,7 +120,14 @@ impl EditorSegment {
             renders: 0,
             _subscription: subscription,
             editor: editor.downgrade(),
+            parts: parts_of(status, eol_offered(editor, cx)),
         }
+    }
+
+    // ## m3c-t41-chrome
+    /// The parts it shows, left to right.
+    pub fn parts(&self) -> &[SegmentPart] {
+        &self.parts
     }
 
     /// What the segment shows.
@@ -84,13 +149,11 @@ impl EditorSegment {
 impl Render for EditorSegment {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
-        let theme = *Theme::get(cx);
-        let t = theme.tokens;
-        let ink = t.colors.text_2.to_hsla();
-        let style = t.type_ramp.caption;
-        let s = self.status;
+        let t = Theme::get(cx).tokens;
         // The status bar's cell gives it its padding and seam and lets it give way (Task 34's
         // row): the segment itself shrinks, clipping, and adds neither.
+        // ## m3c-t41-chrome: the status bar shows the parts in cells of their own
+        // ([`SegmentCell`]); the whole segment draws them side by side.
         let mut row = div()
             .id("editor-segment")
             .flex()
@@ -99,65 +162,131 @@ impl Render for EditorSegment {
             .min_w(px(0.0))
             .overflow_hidden()
             .gap(px(t.spacing.md));
-        if s.tier == Tier::Reduced {
-            row = row.child(
-                Label::new(
-                    tr(cx, ids::hv::EDITOR_REDUCED, NoArgs),
-                    TextSource::Fluent,
-                    style,
-                    t.colors.text.to_hsla(),
-                )
-                .id("editor-segment-reduced"),
-            );
+        for part in self.parts.clone() {
+            if let Some(element) = part_element(part, self.status, &self.editor, cx) {
+                row = row.child(element);
+            }
         }
+        row
+    }
+}
+
+// ## m3c-t41-chrome
+/// One part of the segment as the status bar draws it in its own cell.
+pub struct SegmentCell {
+    segment: Entity<EditorSegment>,
+    part: SegmentPart,
+    _observe: Subscription,
+}
+
+impl SegmentCell {
+    /// The cell of `segment`'s `part`; it repaints with the segment.
+    pub fn new(segment: &Entity<EditorSegment>, part: SegmentPart, cx: &mut Context<Self>) -> Self {
+        SegmentCell {
+            segment: segment.clone(),
+            part,
+            _observe: cx.observe(segment, |_, _, cx| cx.notify()),
+        }
+    }
+
+    /// The part it shows.
+    pub fn part(&self) -> SegmentPart {
+        self.part
+    }
+}
+
+impl Render for SegmentCell {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (status, editor) = {
+            let s = self.segment.read(cx);
+            (s.status, s.editor.clone())
+        };
+        let selector = match self.part {
+            SegmentPart::Reduced => "status-cell-reduced",
+            SegmentPart::LineEndings => "status-cell-eol",
+            SegmentPart::Carets => "status-cell-carets",
+            SegmentPart::Selected => "status-cell-selected",
+            SegmentPart::LnCol => "status-cell-lncol",
+        };
+        div()
+            .debug_selector(move || selector.to_string())
+            .flex()
+            .flex_row()
+            .items_center()
+            .min_w(px(0.0))
+            .children(part_element(self.part, status, &editor, cx))
+    }
+}
+
+/// The element of `part` for `status`; `None` when the part shows nothing.
+fn part_element(
+    part: SegmentPart,
+    s: EditorStatus,
+    editor: &WeakEntity<EditorView>,
+    cx: &App,
+) -> Option<AnyElement> {
+    let theme = *Theme::get(cx);
+    let t = theme.tokens;
+    let ink = t.colors.text_2.to_hsla();
+    let style = t.type_ramp.caption;
+    match part {
+        SegmentPart::Reduced if s.tier == Tier::Reduced => Some(
+            Label::new(
+                tr(cx, ids::hv::EDITOR_REDUCED, NoArgs),
+                TextSource::Fluent,
+                style,
+                t.colors.text.to_hsla(),
+            )
+            .id("editor-segment-reduced")
+            .into_any_element(),
+        ),
         // ## m3c-t34-editor (named exception, NOTES 17 and M3c-16): "Mixed line endings", after
         // Reduced mode; its menu normalises to one ending (never automatic).
         // ## fix round 1 (M3): not on a read-only editor.
-        let offered = self.editor.upgrade().is_some_and(|e| eol_offered(&e, cx));
-        if s.mixed_line_endings && offered {
-            row = row.child(eol_button(self.editor.clone(), cx));
+        SegmentPart::LineEndings
+            if s.mixed_line_endings && editor.upgrade().is_some_and(|e| eol_offered(&e, cx)) =>
+        {
+            Some(eol_button(editor.clone(), cx))
         }
         // ## m3c-t31-multi (named exception, NOTES surface 14): "3 carets" before the selected
         // count, from two carets on; it gives way with it.
-        if s.carets > 1 {
-            row = row.child(
-                Label::new(
-                    tr(
-                        cx,
-                        ids::hv::EDITOR_CARETS,
-                        ids::hv::HvEditorCarets {
-                            n: Count(u64::from(s.carets)),
-                        },
-                    ),
-                    TextSource::Fluent,
-                    style,
-                    ink,
-                )
-                .truncate(true)
-                .id("editor-segment-carets"),
-            );
-        }
-        if s.selected_chars > 0 {
-            row = row.child(
-                Label::new(
-                    tr(
-                        cx,
-                        ids::hv::EDITOR_SELECTED,
-                        ids::hv::HvEditorSelected {
-                            n: Count(s.selected_chars),
-                        },
-                    ),
-                    TextSource::Fluent,
-                    style,
-                    ink,
-                )
-                // ## m3a-t35-shots (named exception): ellipsized when the bar gives way, never
-                // cut mid-glyph (the 960 px Turkish shots).
-                .truncate(true)
-                .id("editor-segment-selected"),
-            );
-        }
-        row.child(
+        SegmentPart::Carets if s.carets > 1 => Some(
+            Label::new(
+                tr(
+                    cx,
+                    ids::hv::EDITOR_CARETS,
+                    ids::hv::HvEditorCarets {
+                        n: Count(u64::from(s.carets)),
+                    },
+                ),
+                TextSource::Fluent,
+                style,
+                ink,
+            )
+            .truncate(true)
+            .id("editor-segment-carets")
+            .into_any_element(),
+        ),
+        SegmentPart::Selected if s.selected_chars > 0 => Some(
+            Label::new(
+                tr(
+                    cx,
+                    ids::hv::EDITOR_SELECTED,
+                    ids::hv::HvEditorSelected {
+                        n: Count(s.selected_chars),
+                    },
+                ),
+                TextSource::Fluent,
+                style,
+                ink,
+            )
+            // ## m3a-t35-shots (named exception): ellipsized when the bar gives way, never
+            // cut mid-glyph (the 960 px Turkish shots).
+            .truncate(true)
+            .id("editor-segment-selected")
+            .into_any_element(),
+        ),
+        SegmentPart::LnCol => Some(
             Label::new(
                 tr(
                     cx,
@@ -173,8 +302,10 @@ impl Render for EditorSegment {
             )
             // ## m3a-t35-shots (named exception): as the selected count.
             .truncate(true)
-            .id("editor-segment-lncol"),
-        )
+            .id("editor-segment-lncol")
+            .into_any_element(),
+        ),
+        _ => None,
     }
 }
 

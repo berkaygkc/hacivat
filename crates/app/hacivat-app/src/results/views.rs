@@ -2584,14 +2584,17 @@ pub(crate) fn toolbar_items(
     )
     .compact(Rc::new(move |window, cx| {
         view_switch(console, shown, refused, false, window, cx)
-    }));
+    }))
+    // ## m3c-t41 merge (M3c-18): the view items compact before Copy gives way.
+    .priority(crate::results::toolbar::VIEW_ITEMS_PRIORITY);
     let open = record_open(window, cx);
     let one_row = shown_rows(grid, cx) == 1;
     let record_label: TextFn = Rc::new(|cx: &App| message(cx, "hv-record-tip", vec![]));
     let record = ToolbarItem::pinned(
         Rc::new(move |window, cx| record_toggle(console, open, one_row, window, cx)),
         record_label,
-    );
+    )
+    .priority(crate::results::toolbar::VIEW_ITEMS_PRIORITY);
     vec![switch, record]
 }
 

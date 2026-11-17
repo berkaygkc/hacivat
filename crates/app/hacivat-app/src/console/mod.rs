@@ -27,6 +27,8 @@ use hacivat_ui_core::gpui_surface::App;
 
 pub use registry::{ConsoleId, ConsoleState, Consoles};
 pub use view::{console_binding, editor_segment, focused_console};
+// ## m3c-t41-chrome
+pub use view::editor_segment_cells;
 
 use crate::shell::{set_console_binding, set_console_view, set_tab_decor};
 

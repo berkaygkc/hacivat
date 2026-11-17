@@ -176,7 +176,7 @@ impl MenuItemSpec {
         self
     }
 
-    /// The label's ink: `text-3` when disabled, `red` for an enabled destructive item, else
+    /// The label's ink: `text-disabled` when disabled, `red` for an enabled destructive item, else
     /// `text`.
     pub fn label_ink(
         &self,
@@ -186,7 +186,8 @@ impl MenuItemSpec {
         if self.note {
             c.text_2
         } else if self.disabled {
-            c.text_3
+            // ## m3c-t41 (M3c-38): the disabled ink, never remapped on the raised menu.
+            c.text_disabled
         } else if self.danger {
             c.red
         } else {
@@ -289,7 +290,8 @@ impl PopupMenu {
                 label: None,
                 title: None,
                 access_keys: !cfg!(target_os = "macos"),
-                active_tint: false,
+                // ## m3c-t41 (M3c-36): every menu's active row takes the selection tint.
+                active_tint: true,
                 key_hints: Vec::new(),
                 first: 0,
                 wheel: 0.0,
@@ -679,7 +681,14 @@ impl Render for PopupMenu {
                         .into_any_element();
                 }
                 let selected = self.selected == Some(i);
-                let ink = item.label_ink(c);
+                // ## m3c-t41 (M3c-36): the active row's label, hint and keys take `text` (a
+                // destructive row keeps its red: Hue Is Meaning).
+                let active = selected && self.active_tint && !item.disabled && !item.note;
+                let ink = if active && !item.danger {
+                    c.text.to_hsla()
+                } else {
+                    item.label_ink(c)
+                };
                 let text = (item.label)(cx);
                 // ## m3b-t29-shots (named exception; T29 review I1): a wrapping sentence takes the
                 // menu's width and as many lines as it needs, inside the card.
@@ -772,7 +781,7 @@ impl Render for PopupMenu {
                         .min_w(px(0.0));
                     if let Some(hint) = &item.hint {
                         // ## m3a-f2-visual: the active row's hint goes to `text` (chooser).
-                        let hint_ink = if self.active_tint && selected && !item.disabled {
+                        let hint_ink = if active {
                             c.text.to_hsla()
                         } else {
                             c.text_2.to_hsla()
@@ -789,12 +798,21 @@ impl Render for PopupMenu {
                         );
                     }
                     if let Some(shortcut) = &item.keys {
+                        // ## m3c-t41 (M3c-36, M3c-38): `text` on the active row, the disabled
+                        // ink on a disabled one.
+                        let key_ink = if active {
+                            c.text
+                        } else if item.disabled {
+                            c.text_disabled
+                        } else {
+                            c.text_2
+                        };
                         trail = trail.child(Label::new(
                             shortcut(cx),
                             TextSource::Shortcut,
                             t.type_ramp.mono_kbd,
                             // Raised Ink Rule: key hints on the raised menu use text-2.
-                            c.text_2.to_hsla(),
+                            key_ink.to_hsla(),
                         ));
                     }
                     row = row.child(trail);
@@ -818,6 +836,19 @@ impl Render for PopupMenu {
                         } else {
                             c.hover.to_hsla()
                         });
+                        // ## m3c-t41 (M3c-36): and a 1 px blue left edge, the non-text cue.
+                        if active {
+                            row = row.relative().child(
+                                div()
+                                    .debug_selector(move || format!("menu-item-edge-{i}"))
+                                    .absolute()
+                                    .left_0()
+                                    .top_0()
+                                    .h_full()
+                                    .w(px(1.0))
+                                    .bg(c.blue.to_hsla()),
+                            );
+                        }
                     }
                 }
                 if item.disabled {
@@ -875,14 +906,14 @@ impl Render for PopupMenu {
         } else {
             crate::text::card_scope(surface)
         };
-        let mut menu = surface
+        let menu = surface
             .id("popup-menu")
             .debug_selector(|| "popup-menu".to_string())
             .track_focus(&self.focus)
             .declare(Role::Menu, menu_name.clone(), None);
-        if let Some((left, top)) = position {
-            menu = menu.absolute().left(left).top(top);
-        }
+        // ## m3c-t41-chrome (fix round 1, m5): an anchored menu is placed by GPUI's `anchored`,
+        // which measures it before it paints: one wider than its minimum near the window's right
+        // edge moves inside the window on its first frame (below).
         let mut menu = menu.min_w(self.min_width);
         // ## m3a-t35-shots (named exception)
         if let Some(max) = self.max_width {
@@ -922,7 +953,8 @@ impl Render for PopupMenu {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(5.0))
+                    // ## m3c-t41-chrome (F2 review M9)
+                    .gap(px(crate::metrics::MENU_FOOTER_GAP_PX))
                     .child(Label::new(
                         crate::palette::key_label(chord),
                         TextSource::Shortcut,
@@ -972,7 +1004,16 @@ impl Render for PopupMenu {
             column
         };
         let column = column.children(rows);
-        menu.children(title).child(column).children(footer)
+        let menu = menu.children(title).child(column).children(footer);
+        // ## m3c-t41-chrome (fix round 1, m5)
+        match position {
+            Some((left, top)) => hacivat_ui_core::gpui_surface::anchored()
+                .position(hacivat_ui_core::gpui_surface::point(left, top))
+                .snap_to_window()
+                .child(menu)
+                .into_any_element(),
+            None => menu.into_any_element(),
+        }
     }
 }
 
@@ -998,7 +1039,7 @@ mod tests {
             assert_eq!(item().danger(true).label_ink(c), c.red.to_hsla());
             assert_eq!(
                 item().danger(true).disabled(true).label_ink(c),
-                c.text_3.to_hsla()
+                c.text_disabled.to_hsla()
             );
         }
     }

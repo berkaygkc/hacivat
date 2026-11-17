@@ -667,3 +667,180 @@ fn a_click_toggles_the_menu_and_a_press_outside_closes_it(cx: &mut TestAppContex
         "a press elsewhere closes it"
     );
 }
+
+// ## m3c-t41-chrome: `ToolbarItem::narrow` (R-M3-75; design/m3b-safe surface 24) and the ⋯
+// reservation (F2 review N3).
+
+/// A narrow pane's bar keeps 8 px of padding on each side (NOTES "Narrow toolbar": 4/8).
+const NARROW_RIGHT: f32 = 8.0;
+
+/// The chip's label, long enough that its own form is wider than a 120 px pane.
+const GUARDED_LONG: &str = "read-only (guarded) by the profile";
+
+/// The trust chip's sentence: 12 px caption on 15 px lines (NOTES "Narrow toolbar").
+fn chip_style() -> hacivat_ui_core::theme::TypeStyle {
+    hacivat_ui_core::theme::TypeStyle {
+        line_height: 15.0,
+        ..hacivat_ui_core::theme::DARK.type_ramp.caption
+    }
+}
+
+/// A read-only-like chip: a 12 px glyph and its label; the narrow form's label wraps inside the
+/// chip (it fills the slot the bar gives it).
+fn chip(label: &'static str, narrow: bool) -> Build {
+    use hacivat_ui_core::gpui_surface::InteractiveElement as _;
+    Rc::new(move |_, cx| {
+        let t = Theme::get(cx).tokens;
+        let ink = t.colors.text_2.to_hsla();
+        let text: AnyElement = if narrow {
+            gpui::div()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(
+                    hacivat_ui::text::paragraph(label, TextSource::Fluent, chip_style(), ink)
+                        .id("chip-label"),
+                )
+                .into_any_element()
+        } else {
+            Label::new(label, TextSource::Fluent, chip_style(), ink)
+                .id("chip-label")
+                .into_any_element()
+        };
+        let body = gpui::div()
+            .debug_selector(move || if narrow { "chip-narrow" } else { "chip-full" }.into())
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap(px(4.0))
+            .px(px(7.0))
+            .py(px(2.0))
+            .border_1()
+            .child(gpui::div().size(px(12.0)).flex_none().mt(px(1.5)))
+            .child(text);
+        if narrow {
+            body.flex_1().min_w(px(0.0)).into_any_element()
+        } else {
+            body.into_any_element()
+        }
+    })
+}
+
+fn narrow_bar(label: &'static str, extra: bool) -> AnyElement {
+    let run_narrow: Build = Rc::new(|_, _| {
+        Button::new("Run-narrow", "Run".into())
+            .kind(ButtonKind::Icon)
+            .icon(hacivat_ui::icon::IconName::Play)
+            .into_any_element()
+    });
+    let mut bar = Toolbar::new("narrow")
+        .height(32.0)
+        .wrap_row()
+        .item(button_item("Run").narrow(run_narrow))
+        .item(ToolbarItem::pinned(
+            text_element("orders-prod".into()),
+            Rc::new(|_| "orders-prod".into()),
+        ));
+    if extra {
+        // Movable, with nothing to choose: it leaves the row and has no ⋯ row (M7).
+        bar = bar.item(label_item("a crumb that can move".into(), 1));
+    }
+    let bar = bar.trailing(
+        ToolbarItem::pinned(chip(label, false), Rc::new(move |_| label.into()))
+            .narrow(chip(label, true))
+            .narrow_wraps(label.into(), chip_style()),
+    );
+    gpui::div().w_full().child(bar).into_any_element()
+}
+
+/// R-M3-75: a wide bar draws every item's own form; once an item no longer fits whole on a
+/// line (a split pane down to its 120 px floor), the items with a narrow form take it, the
+/// chip's label wraps inside the chip, the bar grows, and nothing is cut by its edge.
+#[gpui::test]
+fn a_narrow_form_is_taken_only_below_where_every_item_fits_whole(cx: &mut TestAppContext) {
+    let vcx = host(cx, |_, _| narrow_bar(GUARDED_LONG, false));
+    vcx.update(|_, cx| {
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+        cx.set_global(ToolbarProbe::default());
+    });
+    vcx.simulate_resize(gpui::size(px(800.0), px(600.0)));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("chip-full").is_some());
+    assert!(vcx.debug_bounds("chip-narrow").is_none());
+    assert!(vcx.debug_bounds("button-Run").is_some());
+    assert!(!probe(vcx).narrow, "a wide bar is not narrow");
+    assert_eq!(
+        vcx.debug_bounds("toolbar-narrow").unwrap().size.height,
+        px(32.0)
+    );
+    let mut went_narrow = false;
+    for width in (120..=420).rev().step_by(7) {
+        vcx.simulate_resize(gpui::size(px(width as f32), px(600.0)));
+        vcx.run_until_parked();
+        let bar = vcx.debug_bounds("toolbar-narrow").expect("the bar");
+        let narrow = probe(vcx).narrow;
+        assert_eq!(
+            narrow,
+            vcx.debug_bounds("chip-narrow").is_some(),
+            "{width}: the probe says what is drawn"
+        );
+        let right = if narrow { NARROW_RIGHT } else { INNER_RIGHT };
+        let (chip_id, run_id) = if narrow {
+            ("chip-narrow", "button-Run-narrow")
+        } else {
+            ("chip-full", "button-Run")
+        };
+        for id in [chip_id, run_id] {
+            let b = vcx.debug_bounds(id).expect(id);
+            assert!(
+                b.left() >= bar.left()
+                    && b.right() <= bar.right() - px(right) + px(0.5)
+                    && b.top() >= bar.top()
+                    && b.bottom() <= bar.bottom(),
+                "{width}: {id} {b:?} outside {bar:?}"
+            );
+        }
+        let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+        let label = frame
+            .iter()
+            .find(|r| r.path.ends_with("#chip-label"))
+            .expect("the chip's label");
+        assert!(
+            !label.clipped && !label.truncated && label.visible && label.painted_px > 0.0,
+            "{width}: {label:?}"
+        );
+        went_narrow |= narrow;
+    }
+    assert!(went_narrow, "the 120 px pane takes the narrow forms");
+    let bar = vcx.debug_bounds("toolbar-narrow").unwrap();
+    assert!(bar.size.height > px(32.0), "the narrow bar grew: {bar:?}");
+}
+
+/// F2 review N3: rows that cannot be chosen draw no ⋯ button (M7), so the bar reserves no room
+/// for one: a row-wrapping bar whose only moved item has nothing to choose opens no extra line.
+#[gpui::test]
+fn the_menu_button_is_not_reserved_for_rows_that_cannot_be_chosen(cx: &mut TestAppContext) {
+    for width in [150.0, 190.0, 240.0] {
+        let heights: Vec<gpui::Pixels> = [false, true]
+            .into_iter()
+            .map(|extra| {
+                let vcx = host(cx, move |_, _| narrow_bar("read-only", extra));
+                vcx.update(|_, cx| cx.set_global(ToolbarProbe::default()));
+                vcx.simulate_resize(gpui::size(px(width), px(600.0)));
+                vcx.run_until_parked();
+                if extra {
+                    let staged = probe(vcx).staged.expect("a frame");
+                    assert_eq!(staged.fit.overflow, vec![2], "{width}: the crumb moved");
+                    assert!(vcx.debug_bounds("toolbar-overflow").is_none());
+                }
+                vcx.debug_bounds("toolbar-narrow").unwrap().size.height
+            })
+            .collect();
+        assert_eq!(
+            heights[0], heights[1],
+            "{width}: no line for an empty ⋯ slot"
+        );
+    }
+}
