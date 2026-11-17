@@ -8328,6 +8328,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "spike-intro-mysql-sqlite"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "hacivat-driver",
+ "hacivat-driver-mysql",
+ "hacivat-driver-sqlite",
+ "hacivat-net",
+ "hacivat-proto",
+ "hacivat-testkit",
+ "hacivat-values",
+ "rusqlite",
+ "secrecy",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "spike-probes"
 version = "0.0.0"
 dependencies = [

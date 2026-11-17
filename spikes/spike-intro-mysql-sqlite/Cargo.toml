@@ -1,0 +1,27 @@
+[package]
+name = "spike-intro-mysql-sqlite"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "M4 pre-work spike: the MySQL/MariaDB and SQLite introspectors (HV-INTRO-01..05, -07, -08, -11..15) over the existing RawConn API."
+
+[dependencies]
+hacivat-driver.workspace = true
+hacivat-values.workspace = true
+futures.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+hacivat-driver-mysql.workspace = true
+hacivat-driver-sqlite.workspace = true
+hacivat-net.workspace = true
+hacivat-proto.workspace = true
+hacivat-testkit.workspace = true
+rusqlite.workspace = true
+secrecy.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }
+
+[lints]
+workspace = true
