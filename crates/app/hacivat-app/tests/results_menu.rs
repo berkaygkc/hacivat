@@ -388,7 +388,15 @@ fn menu_variants_and_disabled_reasons(cx: &mut TestAppContext) {
         .expect("the menu is open");
     assert_eq!(t.vcx.cx.read(|cx| menu.read(cx).selected()), None);
     let bounds = t.vcx.debug_bounds("popup-menu").expect("drawn");
-    assert_eq!(bounds.origin, cell_at);
+    // ## m3c-t41 merge: anchored menus snap to whole pixels (T41 m5), so the origin is the
+    // pointer to within half a pixel.
+    assert!(
+        (f32::from(bounds.origin.x) - f32::from(cell_at.x)).abs() <= 0.5
+            && (f32::from(bounds.origin.y) - f32::from(cell_at.y)).abs() <= 0.5,
+        "{:?} vs {:?}",
+        bounds.origin,
+        cell_at
+    );
     assert_eq!(
         t.items(&grid, on_cell(1, 1)),
         strs(&[
