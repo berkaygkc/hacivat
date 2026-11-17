@@ -76,3 +76,21 @@ platforms = ["windows", "linux"]
 chord = "ctrl-alt-shift-j"
 layout = "tr-f"
 produces = "<"
+
+## m3c-t35-grid
+# Named exception (Task 35, as the Task 1b note above asks): DataGrip's Extend / Shrink selection
+# in a grid on Windows and Linux. With a grid innermost, ctrl-w grows the selection instead of
+# closing the tab (P-M3b-21 / Q10 accept the shadowing); elsewhere ctrl-w still closes the tab.
+# Ctrl-only letter chords: no AltGr collision on any CI layout (TR-Q, TR-F, DE, FR, PL).
+
+[[binding]]
+chord = "ctrl-w"
+command = "grid.grow_selection"
+context = "Grid"
+platforms = ["windows", "linux"]
+
+[[binding]]
+chord = "ctrl-shift-w"
+command = "grid.shrink_selection"
+context = "Grid"
+platforms = ["windows", "linux"]

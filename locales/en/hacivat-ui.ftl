@@ -2699,3 +2699,28 @@ hv-editor-fold-done = Folded lines { $from }–{ $to }
 #   $from (Number) - the fold's first line, e.g. 2.
 #   $to (Number) - its last line, e.g. 7.
 hv-editor-unfold-done = Unfolded lines { $from }–{ $to }
+
+## m3b-t35-grid
+
+# The header tooltip of a frozen column (frozen columns keep their place when the grid scrolls
+# sideways).
+hv-grid-frozen-tip = Frozen: stays in place when you scroll sideways
+# The column-resize tag's hint, after the width (hv-grid-width), while the pointer is on or
+# drags a column header's edge.
+hv-grid-resize-tip = Drag to resize · double-click to fit
+# A column's width in the column-resize tag.
+# Variables:
+#   $px (Number) - the width in logical pixels, e.g. 136.
+hv-grid-width = { $px } px
+# The selection's size on the right of the cursor strip when it holds several ranges
+# (Ctrl/Cmd-click adds one).
+# Variables:
+#   $n (Number) - the ranges, e.g. 2.
+#   $cells (Number) - the cells they cover together, e.g. 10.
+hv-strip-ranges = { $n } ranges · { $cells ->
+        [one] { $cells } cell
+       *[other] { $cells } cells
+    }
+# Fix round 1: the notice when Freeze columns is refused because the frozen columns would
+# leave too little of the grid to scroll.
+hv-grid-freeze-refused = These columns can't be frozen: there would be no room left to scroll. Widen the pane or freeze fewer columns.

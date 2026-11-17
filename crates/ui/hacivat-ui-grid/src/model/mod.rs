@@ -24,7 +24,10 @@ pub mod sort;
 pub use columns::ColumnLayout;
 pub use keys::{Dir, KeyCtx, KeyOutcome, apply_command};
 pub use scroll::{DEFAULT_ROW_HEIGHT, MIN_THUMB_PX, OVERSCAN_ROWS, ScrollState};
-pub use selection::{CellRect, CopyRefusal, CopyRegion, MAX_COPY_CELLS, Selection, ViewMap};
+// ## m3c-t35: `GrowStep` and `ViewIndex` added.
+pub use selection::{
+    CellRect, CopyRefusal, CopyRegion, GrowStep, MAX_COPY_CELLS, Selection, ViewIndex, ViewMap,
+};
 // ## m3b-t01b-seams
 pub use goto::{GotoError, GotoTarget, parse_goto};
 pub use sort::{SortKey, SortSpec};

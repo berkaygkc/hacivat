@@ -66,19 +66,17 @@ pub static GRID_COMMANDS: [(&str, GridCommand); 35] = [
 ];
 
 // ## m3b-t01b-seams (fix round 2, I3)
-/// The grid commands that do nothing until their task fills them (Tasks 35, 37, 38, 39): the
-/// app registers them disabled, so the palette does not list them and their keys pass through.
+/// The grid commands that do nothing until their task fills them (Tasks 37, 38, 39): the app
+/// registers them disabled, so the palette does not list them and their keys pass through.
 /// The filling task removes its ids (a named exception).
-pub static STUB_COMMANDS: [&str; 9] = [
-    "grid.grow_selection",
-    "grid.shrink_selection",
+///
+/// ## m3c-t35 (named exception): Task 35 removed `grid.grow_selection`,
+/// `grid.shrink_selection`, `grid.auto_fit`, `grid.freeze` and `grid.unfreeze`.
+pub static STUB_COMMANDS: [&str; 4] = [
     "grid.find",
     "grid.goto_row",
     "grid.open_value",
     "grid.context_menu",
-    "grid.auto_fit",
-    "grid.freeze",
-    "grid.unfreeze",
 ];
 
 /// Whether grid command `id` is a stub ([`STUB_COMMANDS`]).

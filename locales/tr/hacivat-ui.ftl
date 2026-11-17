@@ -2399,3 +2399,16 @@ hv-editor-fold-hidden = { $n } satır katlandı
 hv-editor-fold-done = { $from }–{ $to }. satırlar katlandı
 # Review: PO
 hv-editor-unfold-done = { $from }–{ $to }. satırların katlaması açıldı
+
+## m3b-t35-grid
+
+# Review: PO
+hv-grid-frozen-tip = Donduruldu: yana kaydırınca yerinde kalır
+# Review: PO
+hv-grid-resize-tip = Boyutlandırmak için sürükleyin · sığdırmak için çift tıklayın
+# Review: PO
+hv-grid-width = { $px } px
+# Review: PO
+hv-strip-ranges = { $n } aralık · { $cells } hücre
+# Review: PO
+hv-grid-freeze-refused = Bu sütunlar dondurulamaz: kaydıracak yer kalmaz. Bölmeyi genişletin ya da daha az sütun dondurun.
