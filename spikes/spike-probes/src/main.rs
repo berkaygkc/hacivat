@@ -5,7 +5,10 @@
 //!
 //! The `a11y` probe follows `crates/gpui/examples/a11y.rs` at the GPUI pin (Apache-2.0).
 
-#![allow(unsafe_code, reason = "M0 probes call platform APIs directly; spike only")]
+#![allow(
+    unsafe_code,
+    reason = "M0 probes call platform APIs directly; spike only"
+)]
 
 use std::cell::RefCell;
 use std::rc::Rc;
