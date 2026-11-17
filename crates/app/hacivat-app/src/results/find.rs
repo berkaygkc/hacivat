@@ -364,6 +364,9 @@ struct FilterRows {
     shown: Option<(u64, ViewMap)>,
     /// The fetched rows it ran over.
     rows: u64,
+    // ## m3c-t37 fix round 1 (m1)
+    /// The grid generation it was built for: a filter of an older run is refused.
+    generation: Option<u64>,
 }
 
 /// What a grid shows: a sort's order and a filter over it.
@@ -436,6 +439,13 @@ fn base_of(grid: &Entity<GridView>, loaded: u64, cx: &App) -> (ViewMap, u64) {
 
 /// Sets (or drops) `grid`'s filter.
 fn set_filter(grid: &Entity<GridView>, filter: Option<FilterRows>, cx: &mut App) {
+    // ## m3c-t37 fix round 1 (m1): a filter of another run never lands on these rows.
+    if filter
+        .as_ref()
+        .is_some_and(|f| f.generation != grid.read(cx).generation())
+    {
+        return;
+    }
     let entry = views_entry(grid, cx);
     entry.filter = filter;
     refresh_view(grid, cx);
@@ -681,8 +691,12 @@ pub struct GridFindBar {
     take_focus: bool,
     error: Option<SharedString>,
     target: Option<Target>,
-    /// Where find started: (view row, column place).
-    origin: (u64, u32),
+    // ## m3c-t37 fix round 1 (I1, I2): the origin is a cell; its place is taken in the order
+    // the scan reads (the source or sort order, never a filter's).
+    /// Where find started.
+    origin: Option<ModelCell>,
+    /// The origin's (view row, column place) in the current scan's order.
+    origin_key: (u64, u32),
     /// The cell find last selected (a focus elsewhere is a new origin).
     made: Option<ModelCell>,
     scan: Scan,
@@ -692,6 +706,16 @@ pub struct GridFindBar {
     auto: bool,
     select_all_pending: bool,
     marks: Rc<RefCell<MarkTable>>,
+    // ## m3c-t37 fix round 1
+    /// A rescan of the same query (a new order or columns): the current match is found again
+    /// by its cell, and nothing moves (I1, m6).
+    relocate: Option<ModelCell>,
+    /// The last settled count, shown (pending) until a new scan's first slice lands (I4).
+    last: Option<FindView>,
+    /// A new scan has not landed a slice yet: the last count and marks stay (I4).
+    pending_first: bool,
+    /// The filter is being built: a Select all waits for it (I3).
+    filter_building: bool,
     /// The count's accessible name: changed only when a count settles (announced once).
     announced: SharedString,
     _subscriptions: Vec<Subscription>,
@@ -807,6 +831,11 @@ pub fn incomplete_text(console: ConsoleId, cx: &App) -> Option<SharedString> {
     let b = bar(console, cx)?;
     let b = b.read(cx);
     b.incomplete(cx).map(|(text, _)| text)
+}
+
+/// Whether the step buttons and Select all are enabled (as drawn).
+pub fn can_step(console: ConsoleId, cx: &App) -> bool {
+    bar(console, cx).is_some_and(|b| b.read(cx).searchable(cx))
 }
 
 /// The kept matching cells, in the order shown.
@@ -1051,13 +1080,18 @@ impl GridFindBar {
             take_focus: false,
             error: None,
             target: None,
-            origin: (0, 0),
+            origin: None,
+            origin_key: (0, 0),
             made: None,
             scan: Scan::default(),
             current: None,
             auto: false,
             select_all_pending: false,
             marks: Rc::default(),
+            relocate: None,
+            last: None,
+            pending_first: false,
+            filter_building: false,
             announced: SharedString::default(),
             _subscriptions: subscriptions,
         }
@@ -1148,34 +1182,84 @@ impl GridFindBar {
             .as_ref()
             .is_some_and(|t| t.generation != generation)
         {
-            // A re-run: once the grid shows its rows (and their columns), scan them.
+            // ## m3c-t37 fix round 1 (m1): a re-run drops the old scan and its marks at once.
+            if self.scan.input.is_some() || !self.marks.borrow().cells.is_empty() {
+                self.reset_scan(true);
+                self.current = None;
+                grid.update(cx, |_, cx| cx.notify());
+            }
+            // Once the grid shows the new rows (and their columns), scan them.
             if grid.read(cx).generation() != Some(generation) {
                 return;
             }
             if let Some(t) = self.target.as_mut() {
                 t.generation = generation;
             }
-            self.origin = (0, 0);
+            self.origin = None;
             self.made = None;
+            self.last = None;
             self.apply(cx);
             return;
         }
-        // Rows fetched since the scan: scan them too (they come after it in the view).
-        let loaded = adapter.snapshot().row_count();
-        if self.scan.done
-            && self.scan.input.is_some()
-            && grid.read(cx).generation() == Some(generation)
-        {
-            let (base, version) = base_of(grid, loaded, cx);
-            if version == self.scan.base_version && base.len() > self.scan.covered {
-                self.extend(adapter, base, cx);
-            }
+        if grid.read(cx).generation() != Some(generation) || self.scan.input.is_none() {
+            return;
         }
+        let loaded = adapter.snapshot().row_count();
+        let (base, version) = base_of(grid, loaded, cx);
+        // ## m3c-t37 fix round 1 (I1, m6): a new order (a sort, Clear sort) or other columns
+        // shown: scan again in what the grid shows, keeping the current match.
+        let cols_changed = self.scan.input.as_ref().is_some_and(|i| {
+            let shown = grid.read(cx).column_layout().visible();
+            i.cols.len() != shown.len() || i.cols.iter().zip(shown).any(|(a, b)| *a != b.0)
+        });
+        if version != self.scan.base_version || cols_changed {
+            self.rescan(cx);
+            return;
+        }
+        // Rows fetched since the scan: scan them too (they come after it in the view).
+        if self.scan.done && base.len() > self.scan.covered {
+            self.extend(adapter, base, cx);
+        }
+    }
+
+    /// Drops the scan (a new id); `marks`: its marks too (else they stay until the new scan's
+    /// first slice, I4).
+    fn reset_scan(&mut self, marks: bool) {
+        self.scan.stop();
+        let id = self.scan.id + 1;
+        self.scan = Scan {
+            id,
+            ..Scan::default()
+        };
+        self.filter_building = false;
+        if marks {
+            let mut m = self.marks.borrow_mut();
+            m.cells.clear();
+            m.current = None;
+            self.pending_first = false;
+        }
+    }
+
+    /// The same query again over a new order or other columns: nothing moves, the current
+    /// match is found again by its cell.
+    fn rescan(&mut self, cx: &mut Context<Self>) {
+        let keep = self
+            .current
+            .and_then(|k| self.scan.index_of(k))
+            .and_then(|i| self.scan.hit(i))
+            .map(Hit::cell);
+        let pending = self.select_all_pending;
+        self.apply(cx);
+        self.auto = false;
+        self.relocate = keep;
+        self.select_all_pending = pending;
     }
 
     /// The previous target loses its marks and its filter.
     fn leave_target(&mut self, cx: &mut Context<Self>) {
-        self.scan.stop();
+        // ## m3c-t37 fix round 1: nothing of this grid's find carries over.
+        self.reset_scan(true);
+        self.last = None;
         if let Some((grid, _)) = self.target() {
             grid.update(cx, |g, cx| g.set_highlights(None, cx));
             set_filter(&grid, None, cx);
@@ -1183,22 +1267,10 @@ impl GridFindBar {
         self.target = None;
     }
 
-    /// Find starts from the grid's focus cell (its view row and column place).
+    /// Find starts from the grid's focus cell (its place is taken when a scan starts, in the
+    /// order the scan reads).
     fn take_origin(&mut self, grid: &Entity<GridView>, cx: &App) {
-        let g = grid.read(cx);
-        let focus = g.selection().focus();
-        self.origin = focus
-            .map(|f| {
-                let view = g.view_map().model_to_view(f.row).map_or(0, |v| v.0);
-                let col = g
-                    .column_layout()
-                    .visible()
-                    .iter()
-                    .position(|c| *c == f.col)
-                    .unwrap_or(0) as u32;
-                (view, col)
-            })
-            .unwrap_or((0, 0));
+        self.origin = grid.read(cx).selection().focus();
         self.made = None;
     }
 
@@ -1207,19 +1279,15 @@ impl GridFindBar {
         if !self.open {
             return;
         }
-        self.scan.stop();
-        let id = self.scan.id + 1;
-        self.scan = Scan {
-            id,
-            ..Scan::default()
-        };
-        self.current = None;
-        self.select_all_pending = false;
-        {
-            let mut m = self.marks.borrow_mut();
-            m.cells.clear();
-            m.current = None;
+        // ## m3c-t37 fix round 1 (I4): the last settled count (and the marks) stay, pending,
+        // until the new scan's first slice lands.
+        if !self.pending_first && self.scan.input.is_some() {
+            self.last = Some(self.view(cx));
         }
+        self.reset_scan(false);
+        self.current = None;
+        self.relocate = None;
+        self.select_all_pending = false;
         let query = self.input.read(cx).value().to_owned();
         let built = build_matcher(&query, self.opts);
         self.error = built.as_ref().err().map(|e| SharedString::from(e.clone()));
@@ -1236,6 +1304,8 @@ impl GridFindBar {
             Ok(Some(m)) => Arc::new(m),
             Ok(None) | Err(_) => {
                 // Nothing to find: no marks, no filter.
+                self.reset_scan(true);
+                self.last = None;
                 set_filter(&grid, None, cx);
                 grid.update(cx, |_, cx| cx.notify());
                 cx.notify();
@@ -1253,7 +1323,16 @@ impl GridFindBar {
             .map(|c| c.0)
             .collect();
         let n = base.len();
-        let start = self.origin.0.min(n);
+        // ## m3c-t37 fix round 1 (I2): the origin's place in the order scanned.
+        self.origin_key = self
+            .origin
+            .map(|o| {
+                let view = base.model_to_view(o.row).map_or(0, |v| v.0);
+                let col = cols.iter().position(|c| *c == o.col.0).unwrap_or(0) as u32;
+                (view, col)
+            })
+            .unwrap_or((0, 0));
+        let start = self.origin_key.0.min(n);
         let input = ScanInput {
             snapshot: raw.snapshot,
             facts: raw.facts,
@@ -1265,6 +1344,7 @@ impl GridFindBar {
         self.scan.covered = n;
         self.scan.base_version = version;
         self.auto = true;
+        self.pending_first = true;
         let run = ScanRun::new(vec![
             Segment {
                 rows: start..n,
@@ -1355,6 +1435,11 @@ impl GridFindBar {
         }
         {
             let mut m = self.marks.borrow_mut();
+            // ## m3c-t37 fix round 1 (I4): the old marks go with the new scan's first slice.
+            if std::mem::take(&mut self.pending_first) {
+                m.cells.clear();
+                m.current = None;
+            }
             for h in out.after.iter().chain(&out.before) {
                 m.cells.insert((h.row, h.col), h.ranges.clone());
             }
@@ -1365,12 +1450,13 @@ impl GridFindBar {
         self.scan.count_before += out.count_before;
         self.scan.incomplete += out.incomplete;
         if self.auto && self.current.is_none() {
-            let origin = self.origin;
+            let origin = self.origin_key;
             let at = self.scan.after.partition_point(|h| h.key() < origin);
             if at < self.scan.after.len() {
                 self.select_index(self.scan.before.len() + at, false, cx);
             }
         }
+        self.find_relocated();
         if let Some((grid, _)) = self.target() {
             grid.update(cx, |_, cx| cx.notify());
         }
@@ -1388,6 +1474,15 @@ impl GridFindBar {
         self.scan.task = None;
         self.scan.run = Some(run);
         self.scan.rows = Some(rows);
+        // A scan that found nothing: the old marks go now (I4).
+        if std::mem::take(&mut self.pending_first) {
+            let mut m = self.marks.borrow_mut();
+            m.cells.clear();
+            m.current = None;
+        }
+        self.last = None;
+        self.find_relocated();
+        self.relocate = None;
         if self.auto && self.current.is_none() && self.scan.kept() > 0 {
             self.select_index(0, false, cx);
         }
@@ -1395,9 +1490,14 @@ impl GridFindBar {
         if self.filter {
             self.build_filter(cx);
         }
-        if self.select_all_pending {
+        // ## m3c-t37 fix round 1 (I3): under Filter rows a waiting Select all runs once the
+        // new filter is shown (`build_filter`), else its ranges would be dropped with the map.
+        if self.select_all_pending && !self.filter_building {
             self.select_all_pending = false;
             self.select_all(cx);
+        }
+        if let Some((grid, _)) = self.target() {
+            grid.update(cx, |_, cx| cx.notify());
         }
         notify_hosts(cx);
         cx.notify();
@@ -1411,6 +1511,8 @@ impl GridFindBar {
         let loaded = adapter.snapshot().row_count();
         let version = self.scan.base_version;
         let id = self.scan.id;
+        let generation = grid.read(cx).generation();
+        self.filter_building = true;
         let job = cx.background_spawn(async move {
             let shown = ViewMap::filtered(rows.clone(), loaded);
             let mut sorted = rows.to_vec();
@@ -1422,6 +1524,7 @@ impl GridFindBar {
                 plain,
                 shown: Some((version, shown)),
                 rows: loaded,
+                generation,
             }
         });
         let weak = grid.downgrade();
@@ -1431,6 +1534,7 @@ impl GridFindBar {
                 if b.scan.id != id || !b.filter || !b.open {
                     return;
                 }
+                b.filter_building = false;
                 let Some(grid) = weak.upgrade() else { return };
                 set_filter(&grid, Some(filter), cx);
                 // A focus the filter hides moves to the current match (logged ruling).
@@ -1441,6 +1545,10 @@ impl GridFindBar {
                     .is_some_and(|f| !grid.read(cx).view_map().shows(f.row));
                 if hidden && let Some(h) = b.current.and_then(|k| b.scan.index_of(k)) {
                     b.select_index(h, false, cx);
+                }
+                // ## m3c-t37 fix round 1 (I3)
+                if std::mem::take(&mut b.select_all_pending) {
+                    b.select_all(cx);
                 }
                 notify_hosts(cx);
                 cx.notify();
@@ -1478,13 +1586,13 @@ impl GridFindBar {
             (Some(i), false) => (i + 1) % n,
             (Some(i), true) => (i + n - 1) % n,
             (None, false) => {
-                let origin = self.origin;
+                let origin = self.origin_key;
                 (0..n)
                     .find(|i| self.scan.hit(*i).is_some_and(|h| h.key() >= origin))
                     .unwrap_or(0)
             }
             (None, true) => {
-                let origin = self.origin;
+                let origin = self.origin_key;
                 (0..n)
                     .rev()
                     .find(|i| self.scan.hit(*i).is_some_and(|h| h.key() < origin))
@@ -1500,7 +1608,7 @@ impl GridFindBar {
         if self.error.is_some() || self.scan.input.is_none() {
             return;
         }
-        if !self.scan.done {
+        if !self.scan.done || self.filter_building {
             self.select_all_pending = true;
             return;
         }
@@ -1625,6 +1733,24 @@ impl GridFindBar {
         }
     }
 
+    /// The state the bar draws: while a new scan has not landed a slice, the last settled one
+    /// (pending), so the count, the buttons and the marks do not flash (I4).
+    fn shown_view(&self, cx: &App) -> (FindView, bool) {
+        match self.last {
+            Some(last) if self.pending_first && self.error.is_none() => (last, true),
+            _ => (self.view(cx), false),
+        }
+    }
+
+    /// Whether the step buttons and Select all are enabled.
+    fn searchable(&self, cx: &App) -> bool {
+        let (v, _) = self.shown_view(cx);
+        self.error.is_none()
+            && !self.input.read(cx).value().is_empty()
+            && v.total.is_none_or(|n| n > 0)
+            && v.counted > 0
+    }
+
     /// The find's state.
     fn view(&self, cx: &App) -> FindView {
         let counted = self.scan.count_after + self.scan.count_before;
@@ -1655,16 +1781,41 @@ impl GridFindBar {
 
     /// What the count shows: (text, tooltip, counting, invalid).
     fn count(&self, cx: &App) -> Option<(SharedString, Option<SharedString>, bool, bool)> {
-        let v = self.view(cx);
+        let (v, pending) = self.shown_view(cx);
         let empty = self.input.read(cx).value().is_empty();
-        count_parts(
+        let (text, tip, counting, invalid) = count_parts(
             self.error.as_ref(),
             empty,
             v.total,
             v.counted,
             v.current,
             cx,
-        )
+        )?;
+        if pending {
+            // The last count, with the amber marker and the counting tooltip.
+            let tip = message(cx, "hv-find-counting-tip", vec![]);
+            return Some((text, Some(tip), true, invalid));
+        }
+        Some((text, tip, counting, invalid))
+    }
+
+    /// A rescan finds its current match again by cell (no focus move).
+    fn find_relocated(&mut self) {
+        let Some(cell) = self.relocate else {
+            return;
+        };
+        let found = self
+            .scan
+            .before
+            .iter()
+            .chain(&self.scan.after)
+            .find(|h| h.cell() == cell)
+            .map(Hit::key);
+        if let Some(key) = found {
+            self.current = Some(key);
+            self.relocate = None;
+            self.marks.borrow_mut().current = Some((cell.row.0, cell.col.0));
+        }
     }
 
     /// "may be incomplete" and its tooltip, when the scan met values cut at the value-size
@@ -1726,12 +1877,9 @@ impl Render for GridFindBar {
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let c = &t.colors;
-        let v = self.view(cx);
+        let (v, _) = self.shown_view(cx);
         let count = self.count(cx);
-        let searchable = self.error.is_none()
-            && !self.input.read(cx).value().is_empty()
-            && v.total.is_none_or(|n| n > 0)
-            && v.counted > 0;
+        let searchable = self.searchable(cx);
         let field_focused = self.input.focus_handle(cx).is_focused(window);
         let field_handle = self.input.focus_handle(cx).tab_stop(true);
         let mut field = field_well("grid-find-field", self.error.is_some(), cx)

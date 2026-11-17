@@ -2541,3 +2541,11 @@ hv-goto-fetch-ok = Getir ve git
 hv-goto-cancel = Vazgeç
 # Review: PO
 hv-goto-key-go = Git
+# Review: PO
+hv-goto-not-a-row = Bu bir satır numarası değil.
+# Review: PO
+hv-goto-past-end-filter = { $row }. satır yok: süzgeç { $total } satır gösteriyor.
+# Review: PO
+hv-goto-fetch-closed = Getirme { $row }. satırda durdu: imleç kapalı.
+# Review: PO
+hv-goto-fetch-paused = Getirme { $row }. satırda durdu: sonuç bellek sınırına ulaştı.

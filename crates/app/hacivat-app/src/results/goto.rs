@@ -397,10 +397,16 @@ impl GotoPopover {
         match parsed {
             Err(GotoError::Empty) => hint(),
             Err(GotoError::UnknownColumn) => {
+                // ## m3c-t37 fix round 1 (m3): split where `parse_goto` does (a comma names
+                // the column only where it groups nothing).
                 let text = self.input.read(cx).value();
+                let group = self
+                    .target()
+                    .map_or(',', |(_, a)| separators(&a.display()).1);
                 let name = text
-                    .split_once([':', ','])
-                    .map_or("", |(_, c)| c)
+                    .char_indices()
+                    .find(|(_, c)| *c == ':' || (*c == ',' && group != ','))
+                    .map_or("", |(at, c)| &text[at + c.len_utf8()..])
                     .trim()
                     .to_owned();
                 GotoLine::Error(message(
@@ -409,7 +415,10 @@ impl GotoPopover {
                     vec![("name", ArgValue::Text(name))],
                 ))
             }
-            Err(GotoError::OutOfRange { last }) => self.past_end(u64::MAX, last, cx),
+            // ## m3c-t37 fix round 1 (m3): a number too large for a row, or no number.
+            Err(GotoError::OutOfRange { .. } | GotoError::NotANumber) => {
+                GotoLine::Error(message(cx, "hv-goto-not-a-row", vec![]))
+            }
             Err(_) => GotoLine::Error(message(cx, "hv-goto-hint", vec![])),
             Ok(t) => {
                 if let Some(col) = t.col()
@@ -449,9 +458,17 @@ impl GotoPopover {
     }
 
     fn past_end(&self, row: u64, last: Option<u64>, cx: &App) -> GotoLine {
+        // ## m3c-t37 fix round 1 (m3): under Filter rows the rows are the filter's.
+        let filtered = self
+            .target()
+            .is_some_and(|(g, _)| matches!(g.read(cx).view_map(), ViewMap::Filtered { .. }));
         GotoLine::Error(message(
             cx,
-            "hv-goto-past-end",
+            if filtered {
+                "hv-goto-past-end-filter"
+            } else {
+                "hv-goto-past-end"
+            },
             vec![
                 ("row", ArgValue::Count(row)),
                 ("total", ArgValue::Count(last.unwrap_or(0))),
@@ -555,10 +572,33 @@ impl GotoPopover {
         let loaded = snapshot.row_count();
         if loaded >= target.row() {
             // The grid must have painted the rows first (its count is the last frame's).
-            if grid.read(cx).generation() == Some(adapter.generation())
-                && let Ok(GotoPlace::Shown(_)) = grid.update(cx, |g, cx| g.go_to(target, cx))
-            {
-                self.landed(&grid, cx);
+            if grid.read(cx).generation() != Some(adapter.generation()) {
+                return;
+            }
+            match grid.update(cx, |g, cx| g.go_to(target, cx)) {
+                Ok(GotoPlace::Shown(_)) => self.landed(&grid, cx),
+                Ok(GotoPlace::NotFetched) => {}
+                // ## m3c-t37 fix round 1 (m4): the rows came but the row is not shown (Filter
+                // rows went on, the column was hidden): the fetching ends and says why.
+                Err(e) => {
+                    self.state = GotoState::Idle;
+                    self.pending = None;
+                    self.error = match e {
+                        GotoError::OutOfRange { last } => {
+                            match self.past_end(target.row(), last, cx) {
+                                GotoLine::Error(e) => Some(e),
+                                _ => None,
+                            }
+                        }
+                        GotoError::HiddenColumn(col) => Some(message(
+                            cx,
+                            "hv-goto-hidden-col",
+                            vec![("name", ArgValue::Text(self.column_name(col).to_string()))],
+                        )),
+                        _ => None,
+                    };
+                    cx.notify();
+                }
             }
             return;
         }
@@ -571,14 +611,20 @@ impl GotoPopover {
             }
             Completeness::Streaming => {}
             other => {
-                let complete = matches!(other, Completeness::Complete);
                 self.state = GotoState::Idle;
                 self.pending = None;
-                if complete
-                    && let GotoLine::Error(e) = self.past_end(target.row(), Some(loaded), cx)
-                {
-                    self.error = Some(e);
-                }
+                // ## m3c-t37 fix round 1 (m4): say why the fetching stopped.
+                let row = ArgValue::Count(loaded);
+                self.error = match other {
+                    Completeness::Complete => match self.past_end(target.row(), Some(loaded), cx) {
+                        GotoLine::Error(e) => Some(e),
+                        _ => None,
+                    },
+                    Completeness::Suspended(_) => {
+                        Some(message(cx, "hv-goto-fetch-paused", vec![("row", row)]))
+                    }
+                    _ => Some(message(cx, "hv-goto-fetch-closed", vec![("row", row)])),
+                };
                 cx.notify();
             }
         }

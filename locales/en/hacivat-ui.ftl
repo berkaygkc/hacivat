@@ -2939,3 +2939,22 @@ hv-goto-fetch-ok = Fetch and go
 hv-goto-cancel = Cancel
 # The go-to key hint's word after the return glyph ("↵ Go").
 hv-goto-key-go = Go
+# The go-to error when the row part is not a row number (or too large for one).
+hv-goto-not-a-row = That isn't a row number.
+# The go-to error past the last row while Filter rows shows only the matching rows.
+# Variables:
+#   $row (Number) - the row asked for, e.g. 40.
+#   $total (Number) - the rows the filter shows, e.g. 12.
+hv-goto-past-end-filter = { $total ->
+        [one] There's no row { $row }: the filter shows { $total } row.
+       *[other] There's no row { $row }: the filter shows { $total } rows.
+    }
+# The go-to line when fetching toward a row ended because the cursor closed (an error, a
+# cancel, a lost connection).
+# Variables:
+#   $row (Number) - the rows fetched, e.g. 214,000.
+hv-goto-fetch-closed = Fetching stopped at row { $row }: the cursor is closed.
+# The go-to line when fetching toward a row ended at the result's memory limit.
+# Variables:
+#   $row (Number) - the rows fetched, e.g. 214,000.
+hv-goto-fetch-paused = Fetching stopped at row { $row }: the result reached its memory limit.

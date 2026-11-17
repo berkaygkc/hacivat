@@ -652,6 +652,286 @@ fn primary_f_in_a_grid_opens_its_find_bar(cx: &mut TestAppContext) {
     assert!(t.vcx.cx.read(|cx| grid.read(cx).highlights().is_none()));
 }
 
+// ---- fix round 1 ----------------------------------------------------------------------------
+
+/// The model rows of the kept matches, in the order shown.
+fn hit_rows(t: &Tile) -> Vec<u64> {
+    t.vcx
+        .cx
+        .read(|cx| find::hits(t.console, cx))
+        .iter()
+        .map(|c| c.row.0)
+        .collect()
+}
+
+fn step(t: &Tile, back: bool) {
+    let console = t.console;
+    in_window(t.vcx, move |_, cx| find::step(console, back, cx));
+    t.redraw();
+}
+
+fn sort_by(t: &Tile, grid: &Entity<GridView>, spec: SortSpec) {
+    let g = grid.clone();
+    in_window(t.vcx, move |_, cx| {
+        g.update(cx, |g, cx| g.request_sort(spec, cx))
+    });
+    t.redraw();
+    t.redraw();
+}
+
+/// I1: a sort (or Clear sort) while find is open rescans in the order shown: the steps and
+/// "k of N" follow the sorted rows; rows that arrive after the sort are scanned, and with
+/// Filter rows on the matching ones appear.
+#[gpui::test]
+fn a_sort_while_finding_rescans_in_the_order_shown(cx: &mut TestAppContext) {
+    let t = tile(cx, "en-US");
+    let rows = vec![
+        row(1, "kiwi c"),
+        row(2, "fig"),
+        row(3, "kiwi a"),
+        row(4, "plum"),
+        row(5, "kiwi b"),
+    ];
+    let (source, mut writer, _) = live(rows, Completeness::Suspended(cursor()));
+    let grid = t.show(source);
+    t.find("kiwi");
+    assert_eq!(hit_rows(&t), [0, 2, 4]);
+    // Sort by name: kiwi a (2), kiwi b (4), kiwi c (0).
+    sort_by(&t, &grid, SortSpec::by(ColId(1), false));
+    assert_eq!(
+        hit_rows(&t),
+        [2, 4, 0],
+        "the matches follow the order shown"
+    );
+    in_window(t.vcx, |_, cx| {
+        grid.update(cx, |g, cx| g.focus_cell(cell(2, 1), cx))
+    });
+    t.redraw();
+    let console = t.console;
+    in_window(t.vcx, move |_, cx| find::set_query(console, "kiwi", cx));
+    t.redraw();
+    assert_eq!(t.focus(&grid), Some(cell(2, 1)));
+    step(&t, false);
+    assert_eq!(t.focus(&grid), Some(cell(4, 1)));
+    assert_eq!(t.status().current, Some(2));
+    // Filter rows on, then a row arrives after the sort: it is scanned and shown.
+    t.flip(Toggle::Filter);
+    assert_eq!(t.shown(&grid), [2, 4, 0]);
+    writer.append(Chunk::from_values(
+        &schema(),
+        vec![row(6, "kiwi d"), row(7, "pear")],
+    ));
+    t.redraw();
+    t.redraw();
+    assert_eq!(t.status().total, Some(4));
+    assert_eq!(
+        t.shown(&grid),
+        [2, 4, 0, 5],
+        "the new match joins the filter"
+    );
+    // Clear sort: rescanned in the source order.
+    sort_by(&t, &grid, SortSpec::default());
+    assert_eq!(hit_rows(&t), [0, 2, 4, 5]);
+    assert_eq!(t.shown(&grid), [0, 2, 4, 5]);
+}
+
+/// I2: under a filter, find starts from the focus's place in the source order, not its place
+/// among the filtered rows.
+#[gpui::test]
+fn the_origin_under_a_filter_is_the_focus_in_the_source_order(cx: &mut TestAppContext) {
+    let t = tile(cx, "en-US");
+    let rows = vec![
+        row(1, "xa"),
+        row(2, "b"),
+        row(3, "xc"),
+        row(4, "d"),
+        row(5, "xe"),
+    ];
+    let (source, _w, _) = live(rows, Completeness::Complete);
+    let grid = t.show(source);
+    t.find("x");
+    t.flip(Toggle::Filter);
+    assert_eq!(t.shown(&grid), [0, 2, 4]);
+    // The third row shown is model row 4.
+    in_window(t.vcx, |_, cx| {
+        grid.update(cx, |g, cx| g.focus_cell(cell(4, 1), cx))
+    });
+    t.redraw();
+    let console = t.console;
+    in_window(t.vcx, move |_, cx| find::set_query(console, "x", cx));
+    t.redraw();
+    assert_eq!(t.focus(&grid), Some(cell(4, 1)), "find starts at the focus");
+}
+
+/// I3: Select all occurrences asked while the count runs under Filter rows selects every match
+/// once the new filter is shown (a filter applied after the selection would drop it).
+#[gpui::test]
+fn a_pending_select_all_under_a_filter_survives(cx: &mut TestAppContext) {
+    let t = tile(cx, "en-US");
+    let rows = vec![row(1, "ab"), row(2, "b"), row(3, "ac"), row(4, "ad")];
+    let (source, _w, _) = live(rows, Completeness::Complete);
+    let grid = t.show(source);
+    t.find("b");
+    t.flip(Toggle::Filter);
+    let console = t.console;
+    in_window(t.vcx, move |_, cx| {
+        find::set_query(console, "a", cx);
+        find::select_all(console, cx);
+    });
+    t.redraw();
+    t.redraw();
+    assert_eq!(t.shown(&grid), [0, 2, 3]);
+    let ranges = t.vcx.cx.read(|cx| grid.read(cx).selection().ranges());
+    assert_eq!(ranges, 3, "every match stays selected");
+}
+
+/// I4: while a new count starts, the last count, its buttons and the marks stay (no "0+"
+/// flash); the new ones replace them when they land.
+#[gpui::test]
+fn the_last_count_and_marks_stay_while_a_new_scan_starts(cx: &mut TestAppContext) {
+    let t = tile(cx, "en-US");
+    let rows = vec![row(1, "kiwi"), row(2, "fig"), row(3, "kiwi")];
+    let (source, _w, _) = live(rows, Completeness::Complete);
+    let grid = t.show(source);
+    t.find("kiwi");
+    let settled = t
+        .vcx
+        .cx
+        .read(|cx| find::count_text(t.console, cx))
+        .map(|c| plain(&c));
+    let console = t.console;
+    let g = grid.clone();
+    let (pending, marked, steppable) = in_window(t.vcx, move |_, cx| {
+        find::set_query(console, "kiw", cx);
+        let pending = find::count_text(console, cx).map(|c| plain(&c));
+        let marked = g
+            .read(cx)
+            .highlights()
+            .and_then(|h| h(ModelRow(0), ColId(1)))
+            .is_some();
+        (pending, marked, find::can_step(console, cx))
+    });
+    assert_eq!(
+        pending, settled,
+        "the last count stays until the new one lands"
+    );
+    assert!(marked, "the marks stay until the new ones land");
+    assert!(steppable, "the step buttons stay enabled");
+    t.redraw();
+    assert_eq!(t.status().total, Some(2));
+}
+
+/// m1: a re-run while find (and Filter rows) is open drops the old scan, marks and filter, and
+/// finds again in the new rows.
+#[gpui::test]
+fn a_rerun_finds_again_in_the_new_rows(cx: &mut TestAppContext) {
+    let t = tile(cx, "en-US");
+    let (source, _w, _) = live(
+        vec![row(1, "ab"), row(2, "b"), row(3, "ac")],
+        Completeness::Complete,
+    );
+    let grid = t.show(source);
+    t.find("a");
+    t.flip(Toggle::Filter);
+    assert_eq!(t.shown(&grid), [0, 2]);
+    let (source, _w2, _) = live(
+        vec![row(1, "x"), row(2, "xa"), row(3, "y"), row(4, "ya")],
+        Completeness::Complete,
+    );
+    let _ = t.show(source);
+    t.redraw();
+    t.redraw();
+    assert_eq!(hit_rows(&t), [1, 3]);
+    assert_eq!(t.shown(&grid), [1, 3]);
+    let stale = t.vcx.cx.read(|cx| {
+        grid.read(cx)
+            .highlights()
+            .and_then(|h| h(ModelRow(2), ColId(1)))
+            .is_some()
+    });
+    assert!(!stale, "no mark of the old rows");
+}
+
+/// m6: hiding a column while find is open rescans the columns shown.
+#[gpui::test]
+fn hiding_a_column_rescans(cx: &mut TestAppContext) {
+    let t = tile(cx, "en-US");
+    let (source, _w, _) = live(vec![row(12, "a1"), row(3, "b")], Completeness::Complete);
+    let grid = t.show(source);
+    t.find("1");
+    assert_eq!(t.status().total, Some(2));
+    in_window(t.vcx, |_, cx| {
+        grid.update(cx, |g, cx| g.set_column_hidden(ColId(0), true, cx))
+    });
+    t.redraw();
+    t.redraw();
+    assert_eq!(t.status().total, Some(1));
+    assert_eq!(t.vcx.cx.read(|cx| find::hits(t.console, cx)), [cell(0, 1)]);
+}
+
+/// m3: the go-to line says what is wrong: a number too large is not a row number; an unknown
+/// column is named whole (in `en` the comma groups); past the end of a filter names the filter.
+#[gpui::test]
+fn goto_lines_name_what_is_wrong(cx: &mut TestAppContext) {
+    let t = tile(cx, "en-US");
+    let rows: Vec<Vec<Value>> = (0..12)
+        .map(|i| row(i, if i % 2 == 0 { "a" } else { "b" }))
+        .collect();
+    let (source, _w, _) = live(rows, Completeness::Complete);
+    let _grid = t.show(source);
+    let console = t.console;
+    let line = |text: &'static str| {
+        in_window(t.vcx, move |_, cx| {
+            goto::open(console, cx);
+            goto::set_text(console, text, cx);
+            match goto::line(console, cx) {
+                Some(goto::GotoLine::Error(e)) => plain(&e),
+                other => format!("{other:?}"),
+            }
+        })
+    };
+    assert_eq!(line("99999999999999999999999"), "That isn't a row number.");
+    assert_eq!(line("1,000:ilce"), "No column is named ilce.");
+    assert_eq!(line("40"), "There's no row 40: the result has 12 rows.");
+    t.find("a");
+    t.flip(Toggle::Filter);
+    assert_eq!(line("7"), "There's no row 7: the filter shows 6 rows.");
+}
+
+/// m4: a fetching toward a row that ends without it says why (here the cursor closed).
+#[gpui::test]
+fn goto_fetching_that_ends_says_why(cx: &mut TestAppContext) {
+    let t = tile(cx, "en-US");
+    let rows: Vec<Vec<Value>> = (0..10).map(|i| row(i, "x")).collect();
+    let (source, mut writer, _) = live(rows, Completeness::Suspended(cursor()));
+    let _grid = t.show(source);
+    let console = t.console;
+    in_window(t.vcx, move |_, cx| {
+        goto::open(console, cx);
+        goto::set_text(console, "500", cx);
+        goto::submit(console, cx);
+    });
+    t.redraw();
+    assert!(matches!(
+        t.vcx.cx.read(|cx| goto::state(console, cx)),
+        Some(GotoState::Fetching { .. })
+    ));
+    writer.set_state(Completeness::Closed {
+        reason: CloseReason::ConnectionLost,
+    });
+    t.redraw();
+    t.redraw();
+    assert_eq!(
+        t.vcx.cx.read(|cx| goto::state(console, cx)),
+        Some(GotoState::Idle)
+    );
+    let line = t.vcx.cx.read(|cx| goto::line(console, cx));
+    assert!(
+        matches!(&line, Some(goto::GotoLine::Error(e)) if plain(e) == "Fetching stopped at row 10: the cursor is closed."),
+        "{line:?}"
+    );
+}
+
 /// The perf line (HACIVAT_PERF=1, release): the find scan over 1,048,576 rows × 2 columns (the
 /// job the background executor runs) and the filter's map over its matching rows.
 #[test]
