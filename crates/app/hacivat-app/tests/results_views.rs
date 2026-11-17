@@ -360,6 +360,8 @@ fn transposed_disabled_above_100k_rows(cx: &mut TestAppContext) {
         "the sorted order"
     );
     assert_eq!(t.vcx.cx.read(|cx| tgrid.read(cx).frozen()), 1);
+    // ## m3c-t38 fix round 1 (I4): the table grid under the view is hidden from AT.
+    assert!(t.vcx.cx.read(|cx| grid.read(cx).a11y_hidden()));
     // The focus followed: model row 2 is the first column, `name` the second row.
     assert_eq!(
         t.vcx.cx.read(|cx| tgrid.read(cx).selection().focus()),
@@ -395,6 +397,7 @@ fn transposed_disabled_above_100k_rows(cx: &mut TestAppContext) {
     assert!(t.set_mode(ViewMode::Table));
     assert!(t.vcx.cx.read(|cx| !grid.read(cx).sort().is_empty()));
     assert!(t.command_enabled("grid.find"));
+    assert!(t.vcx.cx.read(|cx| !grid.read(cx).a11y_hidden()));
 }
 
 /// The record inspector shows the focused row (a model row) with one field per column; a

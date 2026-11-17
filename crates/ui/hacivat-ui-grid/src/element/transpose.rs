@@ -218,6 +218,20 @@ impl GridFrame for TransposedFrame {
             None => placeholder(),
         }
     }
+
+    // ## m3c-t38 fix round 1 (I4): the screen reader hears the table cell's own text.
+    fn a11y_cell(&self, row: ModelRow, col: ColId) -> CellContent {
+        let Some(r) = usize::try_from(row.0).ok().filter(|r| *r < self.cols.len()) else {
+            return placeholder();
+        };
+        if col.0 == 0 {
+            return self.cell(row, col);
+        }
+        match self.rows.get(col.0 as usize - 1) {
+            Some(table_row) => self.inner.a11y_cell(*table_row, self.cols[r]),
+            None => placeholder(),
+        }
+    }
 }
 
 impl GridDataSource for TransposedSource {

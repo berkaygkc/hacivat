@@ -303,6 +303,10 @@ pub struct GridView {
     /// The AccessKit rows and cells of the last frame, and the live announcement (only while
     /// assistive technology is active; `element::a11y_rows`).
     pub(crate) a11y: element::a11y_rows::A11yState,
+    // ## m3c-t38 fix round 1 (I4, named exception)
+    /// The host shows another view in this grid's place (it keeps taking frames at no size):
+    /// no accessibility node, subtree or announcement.
+    pub(crate) a11y_hidden: bool,
 }
 
 // ## m3c-t36
@@ -355,6 +359,8 @@ impl GridView {
             sort: SortShown::default(),
             // ## m3c-t40
             a11y: Default::default(),
+            // ## m3c-t38 fix round 1 (I4)
+            a11y_hidden: false,
         }
     }
 
@@ -764,6 +770,22 @@ impl GridView {
         self.config.transposed
     }
 
+    // ## m3c-t38 fix round 1 (I4, named exception)
+    /// Hides the grid from assistive technology while the host shows another view in its place
+    /// (the Transposed and Text views keep the table grid taking frames at no size): no node,
+    /// no rows, no announcement.
+    pub fn set_a11y_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        if self.a11y_hidden != hidden {
+            self.a11y_hidden = hidden;
+            cx.notify();
+        }
+    }
+
+    /// Whether the grid is hidden from assistive technology.
+    pub fn a11y_hidden(&self) -> bool {
+        self.a11y_hidden
+    }
+
     /// Marks the cells `cells` answers `true` for (a find's matches, Task 37); `None` clears.
     ///
     /// ## m3c-t37 (named exception, Task 1b seam R3): `cells` answers each painted cell's
@@ -1143,7 +1165,8 @@ impl Render for GridView {
             .key_context(GRID_CONTEXT)
             .track_focus(&self.focus);
         // ## m3a-t30-results-view: the accessibility node is the element that tracks the focus.
-        let root = self.a11y_node(root, window.is_a11y_active(), cx);
+        // ## m3c-t38 fix round 1 (I4): none while the host hides the grid.
+        let root = self.a11y_node(root, window.is_a11y_active() && !self.a11y_hidden, cx);
         // ## m3c-t40: the rows and cells, the active descendant and the live region (only
         // while assistive technology is active).
         let (root, a11y_rows) = element::a11y_rows::subtree(self, root, window, cx);

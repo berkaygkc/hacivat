@@ -380,6 +380,12 @@ pub(crate) fn sync(
     let Some(mode) = tab_of(grid.entity_id(), cx).map(|t| t.mode) else {
         return;
     };
+    // ## m3c-t38 fix round 1 (I4): the table grid taking frames under another view is hidden
+    // from assistive technology.
+    let hidden = mode != ViewMode::Table;
+    if grid.read(cx).a11y_hidden() != hidden {
+        grid.update(cx, |g, cx| g.set_a11y_hidden(hidden, cx));
+    }
     match mode {
         ViewMode::Table => {}
         ViewMode::Transposed => {

@@ -526,7 +526,8 @@ impl A11yState {
 
 /// Whether the grid builds its subtree this frame.
 fn active(v: &GridView, window: &Window) -> bool {
-    v.a11y.forced || window.is_a11y_active()
+    // ## m3c-t38 fix round 1 (I4, named exception): never while the host hides the grid.
+    !v.a11y_hidden && (v.a11y.forced || window.is_a11y_active())
 }
 
 /// The message `id` from the installed UI text, or the id itself.
