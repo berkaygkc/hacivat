@@ -4,11 +4,16 @@
 use std::rc::Rc;
 
 use hacivat_l10n::{MsgRef, NoArgs, Status, Text, ids};
-use hacivat_settings::{KeymapPreset, LanguagePref, Settings, TextRenderingPref, ThemePref};
+use hacivat_settings::{
+    CaretBlinkPref, FindTolerancePref, KeymapPreset, LanguagePref, Settings, TabSize,
+    TextRenderingPref, ThemePref,
+};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{App, SharedString};
 use hacivat_ui_core::keymap::{Collision, display_chord, parse_chord};
+use hacivat_ui_editor::CaretBlink;
 
+use crate::console::Consoles;
 use crate::l10n_global::{L10nGlobal, switch_locale, tr};
 use crate::shell::keymap_state::set_keymap_preset;
 use crate::shell::workspace::{set_language, set_theme};
@@ -20,9 +25,28 @@ pub const REGIONAL_FORMAT: &str = "ui.regional_format";
 pub const THEME: &str = "ui.theme";
 pub const TEXT_RENDERING: &str = "ui.text_rendering";
 pub const KEYMAP_PRESET: &str = "keymap.preset";
+// ## m3b-t42-settings: the M3b settings (R-M3-44; NOTES surface 25).
+pub const TAB_SIZE: &str = "editor.tab_size";
+pub const INSERT_SPACES: &str = "editor.insert_spaces";
+pub const COPY_LINE: &str = "editor.copy_line_without_selection";
+pub const CARET_BLINK: &str = "editor.caret_blink";
+pub const FIND_TOLERANT: &str = "editor.find_turkish_tolerant";
+pub const CONFIRM_UNSAFE_WHERE: &str = "exec.confirm_unsafe_where";
+pub const ERROR_POLICY_ASK: &str = "exec.error_policy_ask";
+pub const MAX_VALUE_BYTES: &str = "results.max_value_bytes";
+pub const RAW_DISPLAY: &str = "grid.raw_display";
+pub const HISTORY_ENABLED: &str = "history.enabled";
 
 /// The value of the choice that follows the operating system.
 pub const SYSTEM: &str = "system";
+// ## m3b-t42-settings
+/// The values of an on/off row, and the Turkish-tolerant row's third choice.
+pub const ON: &str = "on";
+pub const OFF: &str = "off";
+pub const AUTO: &str = "auto";
+
+/// The tab sizes the Tab size row offers; a hand-edited other size shows as one more segment.
+const TAB_SIZES: [u8; 3] = [2, 4, 8];
 
 /// The page sections, in navigation order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,17 +54,36 @@ pub enum Section {
     General,
     Appearance,
     Keyboard,
+    // ## m3b-t42-settings (ruling M3c-37: four sections rather than one "M3b" section)
+    Editor,
+    Execution,
+    Results,
+    History,
 }
 
 impl Section {
-    pub const ALL: [Section; 3] = [Section::General, Section::Appearance, Section::Keyboard];
+    pub const ALL: [Section; 7] = [
+        Section::General,
+        Section::Appearance,
+        Section::Keyboard,
+        // ## m3b-t42-settings
+        Section::Editor,
+        Section::Execution,
+        Section::Results,
+        Section::History,
+    ];
 
-    /// The navigation label.
+    /// The navigation label (and the section a search result names).
     pub fn title(self) -> MsgRef<NoArgs> {
         match self {
             Section::General => ids::hv::SETTINGS_NAV_GENERAL,
             Section::Appearance => ids::hv::SETTINGS_NAV_APPEARANCE,
             Section::Keyboard => ids::hv::SETTINGS_NAV_KEYBOARD,
+            // ## m3b-t42-settings
+            Section::Editor => ids::hv::SETTINGS_NAV_EDITOR,
+            Section::Execution => ids::hv::SETTINGS_NAV_EXECUTION,
+            Section::Results => ids::hv::SETTINGS_NAV_RESULTS,
+            Section::History => ids::hv::SETTINGS_NAV_HISTORY,
         }
     }
 }
@@ -52,6 +95,11 @@ impl Section {
             Section::General => ids::hv::SETTINGS_SECTION_GENERAL,
             Section::Appearance => ids::hv::SETTINGS_SECTION_APPEARANCE,
             Section::Keyboard => ids::hv::SETTINGS_SECTION_KEYBOARD,
+            // ## m3b-t42-settings
+            Section::Editor => ids::hv::SETTINGS_SECTION_EDITOR,
+            Section::Execution => ids::hv::SETTINGS_SECTION_EXECUTION,
+            Section::Results => ids::hv::SETTINGS_SECTION_RESULTS,
+            Section::History => ids::hv::SETTINGS_SECTION_HISTORY,
         }
     }
 }
@@ -63,45 +111,111 @@ pub struct SettingRow {
     pub title: MsgRef<NoArgs>,
 }
 
+// ## m3b-t42-settings
+/// A row of the page: its section, its title, the note under its control, and the element IDs
+/// its title and note are drawn with (the tests and the shots read them).
+#[derive(Debug, Clone, Copy)]
+struct RowSpec {
+    section: Section,
+    row: SettingRow,
+    note: Option<MsgRef<NoArgs>>,
+    title_id: &'static str,
+    note_id: &'static str,
+}
+
+/// A [`RowSpec`] whose element IDs are made from its key at compile time (a `Paragraph`'s ID
+/// is a `&'static str`).
+macro_rules! row {
+    ($section:ident, $key:literal, $title:expr) => {
+        row!(@spec $section, $key, $title, None)
+    };
+    ($section:ident, $key:literal, $title:expr, $note:expr) => {
+        row!(@spec $section, $key, $title, Some($note))
+    };
+    (@spec $section:ident, $key:literal, $title:expr, $note:expr) => {
+        RowSpec {
+            section: Section::$section,
+            row: SettingRow {
+                key: $key,
+                title: $title,
+            },
+            note: $note,
+            title_id: concat!("settings-row-title-", $key),
+            note_id: concat!("settings-row-note-", $key),
+        }
+    };
+}
+
 /// Every row with its section, in page order. The text rendering row exists on macOS only (the
 /// other platforms have no such setting to change).
-const ALL_ROWS: [(Section, SettingRow); 5] = [
-    (
-        Section::General,
-        SettingRow {
-            key: LANGUAGE,
-            title: ids::hv::SETTINGS_LANGUAGE,
-        },
+const ALL_ROWS: [RowSpec; 15] = [
+    row!(General, "ui.language", ids::hv::SETTINGS_LANGUAGE),
+    row!(
+        General,
+        "ui.regional_format",
+        ids::hv::SETTINGS_REGIONAL_FORMAT
     ),
-    (
-        Section::General,
-        SettingRow {
-            key: REGIONAL_FORMAT,
-            title: ids::hv::SETTINGS_REGIONAL_FORMAT,
-        },
+    row!(Appearance, "ui.theme", ids::hv::SETTINGS_THEME),
+    row!(
+        Appearance,
+        "ui.text_rendering",
+        ids::hv::SETTINGS_TEXT_RENDERING
     ),
-    (
-        Section::Appearance,
-        SettingRow {
-            key: THEME,
-            title: ids::hv::SETTINGS_THEME,
-        },
+    row!(Keyboard, "keymap.preset", ids::hv::SETTINGS_KEYMAP),
+    // ## m3b-t42-settings (NOTES surface 25)
+    row!(Editor, "editor.tab_size", ids::hv::SETTINGS_TAB_SIZE),
+    row!(
+        Editor,
+        "editor.insert_spaces",
+        ids::hv::SETTINGS_INSERT_SPACES
     ),
-    (
-        Section::Appearance,
-        SettingRow {
-            key: TEXT_RENDERING,
-            title: ids::hv::SETTINGS_TEXT_RENDERING,
-        },
+    row!(
+        Editor,
+        "editor.copy_line_without_selection",
+        ids::hv::SETTINGS_COPY_LINE
     ),
-    (
-        Section::Keyboard,
-        SettingRow {
-            key: KEYMAP_PRESET,
-            title: ids::hv::SETTINGS_KEYMAP,
-        },
+    row!(Editor, "editor.caret_blink", ids::hv::SETTINGS_CARET_BLINK),
+    row!(
+        Editor,
+        "editor.find_turkish_tolerant",
+        ids::hv::SETTINGS_FIND_TOLERANT,
+        ids::hv::SETTINGS_FIND_TOLERANT_NOTE
+    ),
+    row!(
+        Execution,
+        "exec.confirm_unsafe_where",
+        ids::hv::SETTINGS_CONFIRM_UNSAFE_WHERE,
+        ids::hv::SETTINGS_CONFIRM_UNSAFE_WHERE_NOTE
+    ),
+    row!(
+        Execution,
+        "exec.error_policy_ask",
+        ids::hv::SETTINGS_ERROR_POLICY,
+        ids::hv::SETTINGS_ERROR_POLICY_NOTE
+    ),
+    row!(
+        Results,
+        "results.max_value_bytes",
+        ids::hv::SETTINGS_MAX_VALUE,
+        ids::hv::SETTINGS_MAX_VALUE_NOTE
+    ),
+    row!(
+        Results,
+        "grid.raw_display",
+        ids::hv::SETTINGS_RAW_DISPLAY,
+        ids::hv::SETTINGS_RAW_DISPLAY_NOTE
+    ),
+    row!(
+        History,
+        "history.enabled",
+        ids::hv::SETTINGS_HISTORY,
+        ids::hv::SETTINGS_HISTORY_NOTE
     ),
 ];
+
+fn spec(key: &str) -> Option<&'static RowSpec> {
+    ALL_ROWS.iter().find(|r| r.row.key == key)
+}
 
 /// Whether `key` is a setting on this platform.
 fn available(key: &str) -> bool {
@@ -112,17 +226,30 @@ fn available(key: &str) -> bool {
 pub fn settings_rows() -> Vec<SettingRow> {
     ALL_ROWS
         .iter()
-        .filter(|(_, row)| available(row.key))
-        .map(|(_, row)| *row)
+        .filter(|r| available(r.row.key))
+        .map(|r| r.row)
         .collect()
 }
 
 /// The section of `key`.
 pub fn row_section(key: &str) -> Option<Section> {
-    ALL_ROWS
-        .iter()
-        .find(|(_, row)| row.key == key)
-        .map(|(section, _)| *section)
+    spec(key).map(|r| r.section)
+}
+
+// ## m3b-t42-settings
+/// The note under row `key`'s control, if it has one.
+pub fn row_note(key: &str) -> Option<MsgRef<NoArgs>> {
+    spec(key).and_then(|r| r.note)
+}
+
+/// The element IDs of row `key`'s title and note.
+pub fn row_ids(key: &str) -> Option<(&'static str, &'static str)> {
+    spec(key).map(|r| (r.title_id, r.note_id))
+}
+
+/// Whether row `key` shows its choices in the monospace face (the tab sizes, NOTES surface 25).
+pub fn is_mono(key: &str) -> bool {
+    key == TAB_SIZE
 }
 
 /// What a choice shows.
@@ -159,7 +286,7 @@ fn data(value: &str, label: &str) -> Choice {
 /// Regional formats the page offers.
 const REGIONAL_FORMATS: [&str; 2] = ["en-US", "tr-TR"];
 
-/// The choices of row `key`.
+/// The choices of row `key` (none for the largest-value row, a field with a unit).
 pub fn choices(cx: &App, key: &str) -> Vec<Choice> {
     match key {
         LANGUAGE => {
@@ -194,6 +321,32 @@ pub fn choices(cx: &App, key: &str) -> Vec<Choice> {
             msg("hacivat", ids::hv::SETTINGS_KEYMAP_HACIVAT),
             msg("datagrip", ids::hv::SETTINGS_KEYMAP_DATAGRIP),
         ],
+        // ## m3b-t42-settings
+        TAB_SIZE => {
+            let current = cx
+                .try_global::<AppState>()
+                .map_or_else(TabSize::default, |s| s.settings.editor.tab_size)
+                .get();
+            let mut sizes = TAB_SIZES.to_vec();
+            if !sizes.contains(&current) {
+                sizes.push(current);
+                sizes.sort_unstable();
+            }
+            sizes
+                .into_iter()
+                .map(|n| data(&n.to_string(), &n.to_string()))
+                .collect()
+        }
+        FIND_TOLERANT => vec![
+            msg(AUTO, ids::hv::SETTINGS_AUTO),
+            msg(ON, ids::hv::SETTINGS_ON),
+            msg(OFF, ids::hv::SETTINGS_OFF),
+        ],
+        INSERT_SPACES | COPY_LINE | CARET_BLINK | CONFIRM_UNSAFE_WHERE | ERROR_POLICY_ASK
+        | RAW_DISPLAY | HISTORY_ENABLED => vec![
+            msg(ON, ids::hv::SETTINGS_ON),
+            msg(OFF, ids::hv::SETTINGS_OFF),
+        ],
         _ => Vec::new(),
     }
 }
@@ -203,6 +356,11 @@ fn pref_value(pref: &LanguagePref) -> String {
         LanguagePref::System => SYSTEM.to_string(),
         LanguagePref::Tag(tag) => tag.clone(),
     }
+}
+
+// ## m3b-t42-settings
+fn on_off(on: bool) -> String {
+    if on { ON } else { OFF }.to_string()
 }
 
 /// The stored value of row `key` in `settings`.
@@ -226,6 +384,22 @@ pub fn current_value(settings: &Settings, key: &str) -> String {
             KeymapPreset::Datagrip => "datagrip",
         }
         .to_string(),
+        // ## m3b-t42-settings
+        TAB_SIZE => settings.editor.tab_size.get().to_string(),
+        INSERT_SPACES => on_off(settings.editor.insert_spaces),
+        COPY_LINE => on_off(settings.editor.copy_line_without_selection),
+        CARET_BLINK => on_off(settings.editor.caret_blink == CaretBlinkPref::System),
+        FIND_TOLERANT => match settings.editor.find_turkish_tolerant {
+            FindTolerancePref::Auto => AUTO,
+            FindTolerancePref::On => ON,
+            FindTolerancePref::Off => OFF,
+        }
+        .to_string(),
+        CONFIRM_UNSAFE_WHERE => on_off(settings.exec.confirm_unsafe_where),
+        ERROR_POLICY_ASK => on_off(settings.exec.error_policy_ask),
+        MAX_VALUE_BYTES => settings.results.max_value_bytes.get().to_string(),
+        RAW_DISPLAY => on_off(settings.grid.raw_display),
+        HISTORY_ENABLED => on_off(settings.history.enabled),
         _ => String::new(),
     }
 }
@@ -297,7 +471,79 @@ pub fn apply_choice(cx: &mut App, key: &str, value: &str) {
             let collisions = set_keymap_preset(cx, preset);
             warn_about_collisions(cx, &collisions);
         }
+        // ## m3b-t42-settings: each through the one writer; the editor rows also reach the
+        // open editors (a console reads `[editor]` only when it makes its editor).
+        TAB_SIZE => {
+            if let Some(size) = value.parse().ok().and_then(TabSize::new) {
+                update_settings(cx, |s| s.editor.tab_size = size);
+                apply_editor_settings(cx);
+            }
+        }
+        INSERT_SPACES => {
+            update_settings(cx, |s| s.editor.insert_spaces = value == ON);
+            apply_editor_settings(cx);
+        }
+        COPY_LINE => {
+            update_settings(cx, |s| s.editor.copy_line_without_selection = value == ON);
+            apply_editor_settings(cx);
+        }
+        CARET_BLINK => {
+            let blink = if value == ON {
+                CaretBlinkPref::System
+            } else {
+                CaretBlinkPref::Off
+            };
+            update_settings(cx, |s| s.editor.caret_blink = blink);
+            apply_editor_settings(cx);
+        }
+        FIND_TOLERANT => {
+            // `auto` is the default, which the store does not write (T33).
+            let pref = match value {
+                ON => FindTolerancePref::On,
+                OFF => FindTolerancePref::Off,
+                _ => FindTolerancePref::Auto,
+            };
+            update_settings(cx, |s| s.editor.find_turkish_tolerant = pref);
+        }
+        CONFIRM_UNSAFE_WHERE => {
+            update_settings(cx, |s| s.exec.confirm_unsafe_where = value == ON);
+        }
+        ERROR_POLICY_ASK => {
+            update_settings(cx, |s| s.exec.error_policy_ask = value == ON);
+        }
+        RAW_DISPLAY => {
+            update_settings(cx, |s| s.grid.raw_display = value == ON);
+        }
+        HISTORY_ENABLED => {
+            update_settings(cx, |s| s.history.enabled = value == ON);
+        }
         _ => {}
+    }
+}
+
+// ## m3b-t42-settings
+/// Hands the `[editor]` settings to every open console's editor, keeping what the console set
+/// itself (read-only, the tiers, the screen-reader window).
+fn apply_editor_settings(cx: &mut App) {
+    let Some(editor) = cx.try_global::<AppState>().map(|s| s.settings.editor) else {
+        return;
+    };
+    let views: Vec<_> = Consoles::ids(cx)
+        .into_iter()
+        .filter_map(|id| Consoles::get(cx, id).and_then(|c| c.editor.clone()))
+        .collect();
+    for view in views {
+        view.update(cx, |view, cx| {
+            let mut cfg = *view.config();
+            cfg.tab_size = editor.tab_size.get();
+            cfg.insert_spaces = editor.insert_spaces;
+            cfg.copy_line_without_selection = editor.copy_line_without_selection;
+            cfg.caret_blink = match editor.caret_blink {
+                CaretBlinkPref::System => CaretBlink::System,
+                CaretBlinkPref::Off => CaretBlink::Off,
+            };
+            view.set_config(cfg, cx);
+        });
     }
 }
 

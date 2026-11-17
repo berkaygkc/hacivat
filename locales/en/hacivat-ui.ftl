@@ -3012,3 +3012,59 @@ hv-eol-counts-cr = Line endings: LF { $lf }, CRLF { $crlf }, CR { $cr }
 # Variables:
 #   $line (Number) - the statement's first line, 1-based, e.g. 12.
 hv-gutter-run-line = Run the statement at line { $line }
+
+## m3b-t42-settings
+
+# The settings navigation's four M3b sections (NOTES surface 25, ruling M3c-37).
+hv-settings-nav-editor = Editor
+hv-settings-nav-execution = Execution
+hv-settings-nav-results = Results
+hv-settings-nav-history = History
+# The headings of those sections, pre-cased for small caps.
+hv-settings-section-editor = EDITOR
+hv-settings-section-execution = EXECUTION
+hv-settings-section-results = RESULTS
+hv-settings-section-history = HISTORY
+# The two choices of an on/off setting.
+hv-settings-on = On
+hv-settings-off = Off
+# The choice that decides by itself (the Turkish-tolerant find: on for Turkish users).
+hv-settings-auto = Auto
+# Setting titles (the Editor section).
+hv-settings-tab-size = Tab size
+hv-settings-insert-spaces = Indent with spaces
+hv-settings-copy-line = Copy the line when nothing is selected
+hv-settings-caret-blink = Blinking caret
+hv-settings-find-tolerant = Turkish-tolerant find
+# The note under the Turkish-tolerant find row.
+hv-settings-find-tolerant-note = Auto: on when the language or the regional format is Turkish. The find bar's toggle changes this setting too.
+# Setting titles and notes (the Execution section).
+hv-settings-confirm-unsafe-where = Confirm UPDATE or DELETE without WHERE off production
+hv-settings-confirm-unsafe-where-note = Production always asks, with the table's name typed.
+hv-settings-error-policy = Ask what to do when a statement fails
+hv-settings-error-policy-note = Off: a run of several statements stops at the first failure.
+# Setting title and note (the Results section): the most bytes a cell keeps of one value.
+hv-settings-max-value = Largest value kept per cell
+hv-settings-max-value-note = From 64 KB to 64 MB. Larger values are cut; the value viewer can re-run with the largest limit.
+# The number in the largest-value field, in the regional format (the unit is the select beside it).
+# Variables:
+#   $n (Decimal) - the size in the chosen unit, e.g. 0.5.
+hv-settings-max-value-amount = { $n }
+# Under the largest-value field after a size above the largest allowed was typed (the info glyph).
+# Variables:
+#   $typed (String) - the size typed (an exec-size-* message), e.g. "128 MB".
+#   $max (String) - the largest size allowed (an exec-size-* message), e.g. "64 MB".
+hv-settings-max-value-clamped = { $typed } is above the largest allowed, so it was set to { $max }.
+# Under the largest-value field after a size below the smallest allowed was typed (the info glyph).
+# Variables:
+#   $typed (String) - the size typed (an exec-size-* message), e.g. "10 KB".
+#   $min (String) - the smallest size allowed (an exec-size-* message), e.g. "64 KB".
+hv-settings-max-value-clamped-low = { $typed } is below the smallest allowed, so it was set to { $min }.
+# The two units of the largest-value select.
+hv-settings-unit-kb = KB
+hv-settings-unit-mb = MB
+hv-settings-raw-display = Show grid values raw
+hv-settings-raw-display-note = Numbers and dates as the server sent them, without regional formatting. Copy is always raw.
+# Setting title and note (the History section).
+hv-settings-history = Record query history
+hv-settings-history-note = Up to 10,000 statements per connection are kept for 90 days; recognised passwords and secrets are masked.
