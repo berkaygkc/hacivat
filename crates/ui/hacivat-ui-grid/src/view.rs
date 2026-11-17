@@ -24,7 +24,8 @@ use hacivat_ui::text::{Label, TextFn, TextSource};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, Context, Div, EventEmitter, FocusHandle, Focusable,
     InteractiveElement, IntoElement, ParentElement, Pixels, Point, Render, Role, ScrollEvent,
-    SharedString, Stateful, StatefulInteractiveElement, Styled, Task, Window, div, point, px,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, Subscription, Task, Window, div,
+    point, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
@@ -44,7 +45,7 @@ pub struct GridLabels {
     // ## m3a-t30-results-view (ledger: the "No rows" text is built in Task 30)
     /// A finished result without rows: "No rows" (12.5 `text-3`) in the body, under the header.
     pub no_rows: TextFn,
-    // ## m3b-t35
+    // ## m3c-t35
     /// A frozen column's header tooltip: "Frozen: stays in place when you scroll sideways".
     pub frozen_tip: TextFn,
     /// The resize tag's hint after the width: "Drag to resize · double-click to fit".
@@ -53,7 +54,7 @@ pub struct GridLabels {
     pub width: WidthFn,
 }
 
-// ## m3b-t35
+// ## m3c-t35
 /// Text for a width in logical px (the resize tag's "136 px").
 pub type WidthFn = Rc<dyn Fn(f32, &App) -> SharedString>;
 
@@ -133,7 +134,7 @@ pub enum GridCommand {
     // ## m3b-t01b-seams: Task 35 fills grow/shrink, freeze/unfreeze and auto-fit; Find,
     // GotoRow, OpenValue and ContextMenu tell the host (`GridEvent`), which Tasks 37, 38 and 39
     // answer.
-    /// Cell → row segment (the on-screen columns around the focus) → row → all (## m3b-t35).
+    /// Cell → row segment (the on-screen columns around the focus) → row → all (## m3c-t35).
     GrowSelection,
     /// The grow steps back down to the focus cell.
     ShrinkSelection,
@@ -189,9 +190,13 @@ pub enum GridEvent {
     /// The frozen column count changed (Task 35): `grid.freeze`, `grid.unfreeze`, never
     /// `GridView::set_frozen` (the host's own change).
     FrozenChanged(usize),
+    // ## m3c-t35 fix round 1 (M3)
+    /// `grid.freeze` was refused: the columns up to the focus would leave less than
+    /// `MIN_WIDTH` of the body to scroll (the host says so).
+    FreezeRefused,
 }
 
-// ## m3b-t35
+// ## m3c-t35
 /// While the pointer drags a selection past the body's edge and stays still, the grid scrolls
 /// on at this interval (ledger 213).
 pub const AUTOSCROLL_TICK: Duration = Duration::from_millis(16);
@@ -258,15 +263,18 @@ pub struct GridView {
     a11y_reads: u64,
     // ## m3b-t01b-seams
     /// The view map the host set (`set_view_map`); `None`: the identity over the loaded rows.
-    /// The frame, the keys and the pointer read it (## m3b-t35).
+    /// The frame, the keys and the pointer read it (## m3c-t35).
     view_map: Option<ViewMap>,
     /// The identity over the loaded rows, kept for [`GridView::view_map`] while no map is set.
     identity_map: ViewMap,
     /// The cells a find marks (Task 37), as model row and column.
     pub(crate) highlights: Option<Rc<dyn Fn(ModelRow, ColId) -> bool>>,
-    // ## m3b-t35
+    // ## m3c-t35
     /// The edge autoscroll's timer while a drag rests past the body's edge.
     pub(crate) autoscroll: Option<Task<()>>,
+    // ## m3c-t35 fix round 1 (I3)
+    /// Blur and window-deactivation subscriptions that end a drag (set by the first frame).
+    pub(crate) drag_hooks: Option<(Subscription, Subscription)>,
 }
 
 impl std::fmt::Debug for GridView {
@@ -305,6 +313,7 @@ impl GridView {
             identity_map: ViewMap::identity(0),
             highlights: None,
             autoscroll: None,
+            drag_hooks: None,
         }
     }
 
@@ -342,7 +351,7 @@ impl GridView {
                     layout.set_width(*id, w);
                 }
             }
-            // ## m3b-t35: the same columns keep their frozen ones.
+            // ## m3c-t35: the same columns keep their frozen ones.
             layout.set_frozen(self.layout.frozen());
         } else {
             self.autosize.restart();
@@ -358,7 +367,7 @@ impl GridView {
         if self.dispatch_m3b(cmd, cx) {
             return;
         }
-        // ## m3b-t35: keys move through the view map (an `Arc` clone, no copy of the rows).
+        // ## m3c-t35: keys move through the view map (an `Arc` clone, no copy of the rows).
         let map = self.view_map().clone();
         let ctx = KeyCtx {
             map: &map,
@@ -418,7 +427,7 @@ impl GridView {
                     header: None,
                 });
             }
-            // ## m3b-t35
+            // ## m3c-t35
             GridCommand::GrowSelection | GridCommand::ShrinkSelection => {
                 let grow = cmd == GridCommand::GrowSelection;
                 self.grow_or_shrink(grow, cx);
@@ -436,10 +445,9 @@ impl GridView {
         true
     }
 
-    // ## m3b-t35
-    /// Grows (or shrinks) the selection one step; the row segment is the run of on-screen
-    /// columns holding the focus: the frozen columns, or the scrolling ones the last frame
-    /// showed.
+    // ## m3c-t35
+    /// Grows (or shrinks) the selection one step; the row segment is the pane holding the
+    /// focus: the frozen columns, or the columns after them (never the horizontal scroll).
     fn grow_or_shrink(&mut self, grow: bool, cx: &mut Context<Self>) {
         let map = self.view_map().clone();
         let order = self.layout.visible().to_vec();
@@ -462,18 +470,18 @@ impl GridView {
         }
     }
 
-    /// The on-screen run of visible columns that holds the focus column (empty when none).
+    /// The pane of visible columns that holds the focus column (## m3c-t35 fix round 1, M2:
+    /// ruling 2 as the controller changed it): the frozen columns, or every column after them.
+    /// With nothing frozen it is the whole row, so the grow ladder skips the segment step.
     fn focus_segment(&self) -> Range<usize> {
-        let Some(g) = self.geometry.as_ref() else {
-            return 0..0;
-        };
+        let frozen = self.layout.frozen_shown();
         let at = self
             .selection
             .focus()
             .and_then(|f| self.layout.index_of(f.col));
         match at {
-            Some(ix) if ix < g.frozen => 0..g.frozen,
-            _ => g.cols.clone(),
+            Some(ix) if ix < frozen => 0..frozen,
+            _ => frozen..self.layout.len(),
         }
     }
 
@@ -501,7 +509,9 @@ impl GridView {
     }
 
     /// `grid.freeze`: the columns up to and including the focus column, when they leave
-    /// `MIN_WIDTH` of the last frame's body to scroll; else nothing.
+    /// `MIN_WIDTH` of the last frame's body to scroll; else the host hears why
+    /// ([`GridEvent::FreezeRefused`], ## m3c-t35 fix round 1, M3). Without a focus there is
+    /// nothing to freeze up to.
     fn freeze_to_focus(&mut self, cx: &mut Context<Self>) {
         let Some(ix) = self
             .selection
@@ -515,7 +525,11 @@ impl GridView {
             .geometry
             .as_ref()
             .map_or(0.0, |g| f32::from(g.body.size.width));
-        if n == self.layout.frozen() || self.layout.frozen_fitting(n, body_w) < n {
+        if n == self.layout.frozen() {
+            return;
+        }
+        if self.layout.frozen_fitting(n, body_w) < n {
+            cx.emit(GridEvent::FreezeRefused);
             return;
         }
         self.set_frozen(n, cx);
@@ -575,7 +589,7 @@ impl GridView {
     /// Sets the view map (a local sort, Task 36; filter rows, Task 37); `ViewMap::Identity`
     /// goes back to the source order.
     ///
-    /// ## m3b-t35: the frame, the keys and the pointer read it. The selection follows (digest
+    /// ## m3c-t35: the frame, the keys and the pointer read it. The selection follows (digest
     /// 04 R15): the focus and the row and column sets stay with their data, rectangles (view
     /// rows of the old order) clear (`Selection::on_view_map_changed`). A sort's map follows the
     /// rows that arrive after it (they join its unsorted tail, `ViewMap::with_loaded`). **A
@@ -608,7 +622,7 @@ impl GridView {
         if self.identity_map.len() != loaded {
             self.identity_map = ViewMap::identity(loaded);
         }
-        // ## m3b-t35
+        // ## m3c-t35
         if let Some(map @ ViewMap::Permuted { .. }) = self.view_map.as_ref()
             && map.len() != loaded
         {
@@ -616,7 +630,7 @@ impl GridView {
         }
     }
 
-    // ## m3b-t35
+    // ## m3c-t35
     /// A re-run's new rows have no order yet: back to the source order.
     pub(crate) fn drop_view_map(&mut self) {
         self.view_map = None;
@@ -666,7 +680,7 @@ impl GridView {
         self.highlights.as_ref()
     }
 
-    /// Scrolls `cell` into view, both ways: its view row (## m3b-t35), and its column unless it
+    /// Scrolls `cell` into view, both ways: its view row (## m3c-t35), and its column unless it
     /// is frozen (a scrolling column comes out from under the frozen ones).
     pub(crate) fn reveal(&mut self, cell: ModelCell) {
         self.scroll.scroll_into_view(self.view_row_of(cell.row));
@@ -780,7 +794,11 @@ impl GridView {
             return el;
         }
         let (role, label) = self.a11y_declaration(cx);
-        let rows = self.data.known_total().unwrap_or(self.data.count.loaded);
+        // ## m3c-t35 fix round 1 (M7): a filter announces the rows it keeps.
+        let rows = match self.view_map.as_ref() {
+            Some(map @ ViewMap::Filtered { .. }) => map.len(),
+            _ => self.data.known_total().unwrap_or(self.data.count.loaded),
+        };
         el.role(role)
             .aria_label(label)
             .aria_row_count(usize::try_from(rows).unwrap_or(usize::MAX))
@@ -899,7 +917,7 @@ impl Render for GridView {
         // An ellipsized header name keeps its whole text in a tooltip (NOTES rule 7): one hover
         // area per such header of the last frame (a frame whose headers differ asks for this
         // render again). The areas take no click: the element's own hitbox handles the pointer.
-        // ## m3b-t35: a frozen column's header says so ("Frozen: stays in place when you scroll
+        // ## m3c-t35: a frozen column's header says so ("Frozen: stays in place when you scroll
         // sideways"), after its whole name when that is ellipsized.
         let origin = self.geometry.as_ref().map(|g| g.bounds.origin);
         let frozen_tip = self.config.labels.frozen_tip.clone();
@@ -946,10 +964,10 @@ impl Render for GridView {
 }
 
 impl GridView {
-    // ## m3b-t35
-    /// The resize tag (NOTES surface 18, M3c-23): under the header, right of the edge being
-    /// hovered or dragged, the width in mono and the hint ("136 px · Drag to resize ·
-    /// double-click to fit"), on the popover anatomy. Never over the header itself.
+    // ## m3c-t35
+    /// The resize tag (NOTES surface 18, M3c-23): under the header, beside the edge being
+    /// hovered or dragged (on the side with room), the width in mono and the hint ("136 px ·
+    /// Drag to resize · double-click to fit"), on the popover anatomy. Never over the header.
     fn resize_tag_element(&self, cx: &App) -> Option<AnyElement> {
         let (col, width) = self.resize_tag()?;
         let g = self.geometry.as_ref()?;
@@ -957,17 +975,23 @@ impl GridView {
         let edge = f32::from(g.body.left())
             + self.layout.screen_x(ix, self.scroll.left_x) as f32
             + self.layout.width_at(ix);
-        let left = edge - f32::from(g.bounds.left()) + RESIZE_TAG_GAP_PX;
+        let local = edge - f32::from(g.bounds.left());
+        let grid_w = f32::from(g.bounds.size.width);
         let top = f32::from(g.header.bottom()) - f32::from(g.bounds.top()) + RESIZE_TAG_GAP_PX;
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let labels = &self.config.labels;
+        // ## m3c-t35 fix round 1 (M4): the tag stays inside the grid: right of an edge in the
+        // grid's left half, left of an edge in its right half (it never hangs over a
+        // neighbouring pane).
+        let tag = popover_surface(&theme).absolute().top(px(top));
+        let tag = if local <= grid_w / 2.0 {
+            tag.left(px(local + RESIZE_TAG_GAP_PX))
+        } else {
+            tag.right(px((grid_w - local + RESIZE_TAG_GAP_PX).max(0.0)))
+        };
         Some(
-            popover_surface(&theme)
-                .absolute()
-                .left(px(left))
-                .top(px(top))
-                .px(px(8.0))
+            tag.px(px(8.0))
                 .py(px(4.0))
                 .flex()
                 .flex_row()
@@ -994,7 +1018,7 @@ impl GridView {
 const RESIZE_TAG_GAP_PX: f32 = 6.0;
 
 /// The tooltip of a header: the column's whole name when it is ellipsized (catalog text, never
-/// translated) and, for a frozen column (## m3b-t35), that it is frozen, on a popover surface.
+/// translated) and, for a frozen column (## m3c-t35), that it is frozen, on a popover surface.
 struct HeaderNameTip {
     name: Option<SharedString>,
     frozen: Option<SharedString>,

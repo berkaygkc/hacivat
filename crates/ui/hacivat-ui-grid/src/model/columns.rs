@@ -26,11 +26,11 @@ pub struct ColumnLayout {
     slots: Vec<u32>,
     /// The left edge of each visible column, then the total width: `visible.len() + 1` entries.
     prefix: Vec<f64>,
-    // ## m3b-t35: frozen columns (`frozen.rs`).
+    // ## m3c-t35: frozen columns (`frozen.rs`).
     /// Leading visible columns the user froze (clamped to the visible columns when read).
     pub(super) frozen: usize,
-    /// The most frozen columns the last frame's body could show (`usize::MAX` before any).
-    pub(super) frozen_cap: Option<usize>,
+    /// The body width the last frame laid the frozen columns out in (`None` before any).
+    pub(super) frozen_body: Option<f32>,
 }
 
 impl ColumnLayout {

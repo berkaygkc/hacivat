@@ -1,7 +1,7 @@
 //! Frozen columns (HV-GRID-02 frozen; M3c Task 35): the first `n` visible columns stay put
 //! while the body scrolls horizontally, painted in their own layer.
 //!
-//! ## m3b-t01b-seams: the seam (Task 1b). ## m3b-t35: the bodies.
+//! ## m3b-t01b-seams: the seam (Task 1b). ## m3c-t35: the bodies.
 //!
 //! **Coordinates.** `left_x` keeps its M3a meaning (how far the content is scrolled), but the
 //! scroll covers only the columns after the frozen ones: the element gives `ScrollState` a
@@ -32,17 +32,21 @@ impl ColumnLayout {
         self.frozen.min(self.len())
     }
 
-    /// How many frozen columns the frame shows: [`ColumnLayout::frozen`], less any the last
-    /// [`ColumnLayout::fit_frozen`] found no room for.
+    /// How many frozen columns the frame shows: [`ColumnLayout::frozen`], less any the body
+    /// the last [`ColumnLayout::fit_frozen`] noted has no room for. O(frozen): nothing frozen
+    /// is O(1) (## m3c-t35 fix round 1, M5).
     pub fn frozen_shown(&self) -> usize {
-        self.frozen().min(self.frozen_cap.unwrap_or(usize::MAX))
+        match self.frozen_body {
+            Some(body_w) => self.frozen_fitting(self.frozen(), body_w),
+            None => self.frozen(),
+        }
     }
 
     /// Notes the body width `body_w` of the frame being laid out: from now on at most
-    /// [`ColumnLayout::frozen_fitting`]`(len, body_w)` frozen columns show. The element calls it
-    /// once per frame, before it lays out the scroll.
+    /// [`ColumnLayout::frozen_fitting`]`(frozen, body_w)` frozen columns show. The element
+    /// calls it once per frame, before it lays out the scroll.
     pub fn fit_frozen(&mut self, body_w: f32) {
-        self.frozen_cap = Some(self.frozen_fitting(self.len(), body_w));
+        self.frozen_body = Some(body_w);
     }
 
     /// The most of the first `n` columns that fit frozen in a body `body_w` wide: they leave

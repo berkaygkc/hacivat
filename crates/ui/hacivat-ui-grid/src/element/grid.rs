@@ -11,7 +11,7 @@
 //! 3. `paint` ([`paint_frame`]): the regions body → header → gutter → corner → scrollbars, each
 //!    in its content mask, the layers of [`super::layers`] inside each; the pointer listeners.
 //!
-//! ## m3b-t35 (M3c Task 35)
+//! ## m3c-t35 (M3c Task 35)
 //! - **The view map.** Rows are painted in view order: view row `r` shows model row
 //!   `GridView::view_map().view_to_model(r)`; the gutter numbers view rows; a filter's kept rows
 //!   are all the grid scrolls over. A re-run drops the map; rows appended after a sort join its
@@ -156,7 +156,7 @@ fn sync_data(v: &mut GridView, frame: &dyn GridFrame, cx: &mut Context<GridView>
         v.adopt_columns(columns, true);
         if !first {
             // A re-run: both models start over; a focus is kept pending until rows arrive.
-            // ## m3b-t35: the new rows have no order yet; the host sorts them again.
+            // ## m3c-t35: the new rows have no order yet; the host sorts them again.
             v.drop_view_map();
             v.scroll.on_generation_changed();
             let map = ViewMap::identity(count.loaded);
@@ -169,7 +169,7 @@ fn sync_data(v: &mut GridView, frame: &dyn GridFrame, cx: &mut Context<GridView>
         v.data.generation = Some(generation);
         v.data.replaced = false;
     } else if count.loaded > v.data.count.loaded {
-        // An append keeps the selection and places a pending focus (## m3b-t35: through the
+        // An append keeps the selection and places a pending focus (## m3c-t35: through the
         // view map, which takes the new rows into a sort's unsorted tail).
         v.note_loaded(count.loaded);
         let map = v.view_map().clone();
@@ -184,7 +184,7 @@ fn sync_data(v: &mut GridView, frame: &dyn GridFrame, cx: &mut Context<GridView>
     v.data.count = count;
     // ## m3b-t01b-seams: `GridView::view_map` answers the identity over the loaded rows.
     v.note_loaded(count.loaded);
-    // ## m3b-t35: a filter scrolls over its kept rows only.
+    // ## m3c-t35: a filter scrolls over its kept rows only.
     v.data.rows = v.scroll_rows();
     if v.shows_no_rows() != showed_no_rows {
         cx.notify();
@@ -243,11 +243,11 @@ pub(crate) fn prepaint_frame(
         let view = cx.entity();
         window.on_next_frame(move |_, cx| view.update(cx, |_, cx| cx.notify()));
     }
-    // ## m3b-t35: an auto-fit's width is the user's; the host keeps it like a dragged one.
+    // ## m3c-t35: an auto-fit's width is the user's; the host keeps it like a dragged one.
     for (col, width) in autosize.fitted {
         cx.emit(GridEvent::ColumnResized { col, width });
     }
-    // ## m3b-t35: the frozen columns that fit this body, then the scroll over the rest.
+    // ## m3c-t35: the frozen columns that fit this body, then the scroll over the rest.
     v.layout.fit_frozen(body_w);
     let frozen = v.layout.frozen_shown();
     let frozen_w = (v.layout.frozen_width() as f32).min(body_w);
@@ -307,6 +307,8 @@ pub(crate) fn prepaint_frame(
         (v.pointer.hover, v.pointer.border) = v.hover_at(&geom, p);
     }
 
+    // ## m3c-t35 fix round 1 (I3): a drag ends on blur and on window deactivation.
+    v.watch_drag_end(window, cx);
     let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
     // ## m3b-t01b-seams: Task 40's AccessKit rows and cells (nothing until then).
     super::a11y_rows::prepaint(v, &*frame, &geom, window, cx);
@@ -441,7 +443,7 @@ pub(crate) fn paint_frame(
     degraded
 }
 
-// ## m3b-t35
+// ## m3c-t35
 /// A run of visible columns painted with one horizontal offset inside one clip: the scrolling
 /// columns (scrolled by `left_x`, right of the frozen layer) or the frozen ones (never
 /// scrolled).
@@ -510,7 +512,7 @@ fn paint_body(
         }
     }
 
-    // ## m3b-t35: the view map (an `Arc` clone) and the segments.
+    // ## m3c-t35: the view map (an `Arc` clone) and the segments.
     let map = v.view_map().clone();
     for seg in segments(v, g).into_iter().flatten() {
         let clip = rect(seg.x0, top, seg.x1 - seg.x0, bottom - top);
@@ -529,7 +531,7 @@ fn paint_body(
         ));
     }
 
-    // Layer 10: the resize guide (dashed, ## m3b-t35).
+    // Layer 10: the resize guide (dashed, ## m3c-t35).
     if let Some(ix) = v.pointer.resize_guide(&v.layout) {
         dashed_vline(snap, v.col_right(g, ix), top, bottom, palette.text2, window);
     }
@@ -791,7 +793,7 @@ fn box_rows(rows: std::ops::Range<u64>, visible: &std::ops::Range<u64>) -> std::
 
 /// Calls `f(r0, r1, c0, c1)` for each box of the selection's pieces, in view rows and visible
 /// column indices: select-all, the row pieces, the column pieces, the rectangles. Under a sort
-/// or a filter (## m3b-t35) a row piece (model rows) shows as the runs of view rows near the
+/// or a filter (## m3c-t35) a row piece (model rows) shows as the runs of view rows near the
 /// view that hold its rows.
 fn for_each_box(
     v: &GridView,
@@ -954,7 +956,7 @@ fn paint_header(
         snap.hline(hx, f32::from(header.right()), hy + hh),
         palette.seam_strong,
     ));
-    // ## m3b-t35: the frozen edge, the hovered edge's handle, the dashed guide.
+    // ## m3c-t35: the frozen edge, the hovered edge's handle, the dashed guide.
     if g.frozen > 0 {
         window.paint_quad(fill(
             snap.vline(hx + g.frozen_w, hy, hy + hh),
@@ -1087,7 +1089,7 @@ fn paint_header_segment(
                     budget.allocs += u32::from(recorded);
                     if is_name && (truncated || seg.frozen) {
                         // An ellipsized name: the whole name is its tooltip (NOTES rule 7);
-                        // ## m3b-t35: a frozen column's header says it is frozen.
+                        // ## m3c-t35: a frozen column's header says it is frozen.
                         paint.header_tips.push(super::HeaderTip {
                             col,
                             name: text.clone(),
@@ -1115,7 +1117,7 @@ fn paint_header_segment(
 }
 
 /// The row-number gutter: background, row numbers (raw digits; `blue` for selected rows,
-/// `text-2` on the hovered row), the row hairlines and the `seam` edge. ## m3b-t35: the numbers
+/// `text-2` on the hovered row), the row hairlines and the `seam` edge. ## m3c-t35: the numbers
 /// are view rows (a sorted grid numbers its rows 1…n as shown); a row is selected by its model
 /// row.
 fn paint_gutter(

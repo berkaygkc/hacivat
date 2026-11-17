@@ -43,7 +43,7 @@ pub fn grid_config(a11y_label: &'static str) -> GridConfig {
             too_many_columns: fixed("Too many columns"),
             // ## m3a-t30-results-view
             no_rows: fixed("No rows"),
-            // ## m3b-t35
+            // ## m3c-t35
             frozen_tip: fixed("Frozen: stays in place when you scroll sideways"),
             resize_tip: fixed("Drag to resize · double-click to fit"),
             width: Rc::new(|px: f32, _: &App| SharedString::from(format!("{px} px"))),

@@ -2657,3 +2657,6 @@ hv-strip-ranges = { $n } ranges · { $cells ->
         [one] { $cells } cell
        *[other] { $cells } cells
     }
+# Fix round 1: the notice when Freeze columns is refused because the frozen columns would
+# leave too little of the grid to scroll.
+hv-grid-freeze-refused = These columns can't be frozen: there would be no room left to scroll. Widen the pane or freeze fewer columns.

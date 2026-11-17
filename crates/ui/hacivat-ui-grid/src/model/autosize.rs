@@ -134,7 +134,7 @@ pub fn fit_width(sample_widths: &[f32], header_w: f32) -> f32 {
     sized(sample_widths, header_w, MAX_WIDTH)
 }
 
-// ## m3b-t35: per-type width bounds (ledger 179).
+// ## m3c-t35: per-type width bounds (ledger 179).
 /// The narrowest and widest a column of `kind` is sized **for its data** by the initial size
 /// (logical px, padding included): a flag never needs more than a short word, a number or a
 /// timestamp never more than its longest form, while text, JSON and binary may take the whole
@@ -227,7 +227,7 @@ fn sized(sample_widths: &[f32], header_w: f32, max: f32) -> f32 {
     candidate.max(header).ceil().clamp(MIN_WIDTH, max)
 }
 
-// ## m3b-t35
+// ## m3c-t35
 #[cfg(test)]
 mod tests {
     use super::*;

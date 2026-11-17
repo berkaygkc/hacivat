@@ -472,25 +472,39 @@ and `Filtered` gain an `index: ViewIndex` field, the inverse (model row → view
 the maps with `ViewMap::permuted(order, tail_from, loaded)` and `ViewMap::filtered(rows,
 source_loaded)`: they build the index (O(n), so Task 36 calls `permuted` on the background
 executor with its sort and publishes the result with `GridView::set_view_map`). Match variants
-with `..`. The index is a cache: it never decides `==` or `Hash`; a bare variant builds it on
-its first lookup; every hit is checked against the order, and a miss is trusted only when the
-index was built from the same `Arc` (it keeps a `Weak` to it, so the allocation cannot be
-reused), so an index from another map scans, never answers wrong. A sparse filter (few kept
-rows of a huge source) gets a sorted `(model, view)` table instead (O(log n)). Other helpers:
+with `..`. The index is a cache: it never decides `==` or `Hash`; it has no public
+constructor (fix round 1), so the two builders are the only way to make one and no map builds
+its index on the UI thread by accident; every hit is checked against the order, and a miss is
+trusted only when the index was built from the same `Arc` (it keeps a `Weak` to it, so the
+allocation cannot be reused), so an index moved into another map scans, never answers wrong. A
+sparse filter (few kept rows of a huge source; a dense table only up to 16 entries per kept row
+or 64 Ki) gets a sorted `(model, view)` table instead (O(log n)), and a filter keeps its kept
+rows sorted for counts. `ViewMap` is `Send + Sync` (a compile-time check). Other helpers:
 `ViewMap::with_loaded` (rows appended after a sort join its unsorted tail), `is_identity`,
-`shows`.
+`shows`, `count_shown` (how many of a model range it shows, without mapping).
+
+**A late publish (T36 carry).** `set_view_map` has no generation guard: a sort that finishes
+after a re-run would put the old order on the new rows. Task 36 checks the result's generation
+before it calls `set_view_map` (or adds a checked variant).
 
 **Selection under a map (digest 04 R15).** The focus, the anchor and the row set are model
 rows; rectangles are view rows. `Selection::on_view_map_changed` (called by `set_view_map`)
 clears the rectangles, keeps the focus and the row and column sets, and selects the focus cell
 alone where the new map shows it when nothing else is left (a focus a filter hides selects
-nothing and stays for the next key). Copy (`normalize_for_copy`) and the count
-(`cell_count_in`, the map-aware `cell_count`) take a row set as the view rows that show it
-(rows a filter hides drop out); the copy region is in view rows, which Task 36's copy
-translates back. Shift-extending rows under a sort or a filter (`extend_rows_to_in`, used by
-the gutter, the row drag and Select row) takes the rows **as shown**: a whole-width rectangle
-of view rows (`cols: 0..u32::MAX`), because a model row range would select other rows than the
-user dragged over; one row stays a model row piece.
+nothing and stays for the next key). Copy (`normalize_for_copy`) takes a row set as the view
+rows that show it (rows a filter hides drop out); the copy region is in view rows, which Task
+36's copy translates back. The counts never map rows (fix round 1, I5): `cell_count_in` counts
+a row set with `count_shown` (a sort's is its length clipped to the loaded rows, a filter's a
+binary search in its sorted kept rows) and builds view runs only when rectangles share the
+selection with a row set; `size_in` gives the strip's `rows × cols` of one piece the same way.
+The rectangles are counted by a sweep down the rows with a segment tree over the compressed
+column edges, O(k log k) for k ranges (T37's 10,000 one-cell ranges count in well under a
+millisecond). Every Shift-extend of rows under a sort or a filter takes the rows **as
+shown**: `extend_rows_to_in` (the gutter, the row drag, Select row) and `extend_to` from a row
+piece (Shift+arrow, Page, ⌘↓, Shift+click on a cell after a gutter click; fix round 1, I1) make
+a whole-width rectangle of view rows (`cols: 0..u32::MAX`, which later extends keep whole),
+because a model row range would select other rows than the user extended over; one row stays a
+model row piece. An anchor the map hides makes the extend a click (M1).
 
 **The grid and the map.** `GridView::set_view_map` stores the map (a sort's follows the loaded
 rows), updates the selection and asks for a frame. **A re-run drops the map** (new rows have no
@@ -512,36 +526,57 @@ the last frozen column (NOTES M3c-21: no glyph). Nothing frozen is one segment, 
 M3a's frame. Both segments share the fast-scroll budget, frozen cells first (the columns kept in
 view are the last to fall back to skeleton bars), and the kept column buffer, so a frame of
 cache hits still allocates nothing.
-`grid.freeze` freezes up to the focus column (refused when that would leave less than
-`MIN_WIDTH` to scroll) and emits `FrozenChanged`; `grid.unfreeze` unfreezes; the host sets a
-count with `GridView::set_frozen` (no event). A re-run with the same columns keeps the count.
+`grid.freeze` freezes up to the focus column and emits `FrozenChanged`; when that would leave
+less than `MIN_WIDTH` to scroll it emits `FreezeRefused` and the app says why in a notice
+(`hv-grid-freeze-refused`; fix round 1, M3). `grid.unfreeze` unfreezes; the host sets a count
+with `GridView::set_frozen` (no event). A re-run with the same columns keeps the count.
+`frozen_shown` is O(frozen) (nothing frozen: O(1)).
 
 **Grow and shrink.** Cell → row segment → row → all, and back, at the focus. The row segment is
-the focus row across the on-screen run of columns holding the focus (the frozen columns, or the
-scrolling ones the frame shows), skipped when it is the cell or the whole row (NOTES M3c-23 reads
-the plan's "row segment" this way; ruling request). The row step is a model row piece, so it
-follows the data through a re-sort. Any other shape grows to everything and shrinks to the focus
-cell.
+the focus row across the **pane** holding the focus: the frozen columns, or every column after
+them (ruling 2 as the controller changed it in fix round 1: it never depends on the horizontal
+scroll). It is skipped when it is the cell or the whole row, so with nothing frozen the ladder
+is cell → row → all. The row step is a model row piece, so it follows the data through a
+re-sort. Any other shape grows to everything and shrinks to the focus cell.
 
 **Multi-rect.** ⌘/Ctrl-click and -drag add a range (M3a's pieces); the Excel copy rule and its
 refusal are unchanged. `Selection::ranges` counts pieces; the app's strip says "Selection 2
 ranges · 10 cells" (`hv-strip-ranges`) for more than one.
 
 **Edge autoscroll while still (ledger 213).** While a cell or row drag rests past the body's
-edge, a 16 ms timer on the GPUI executor does what a move to the resting pointer would (scroll
-by the distance, capped at 40 rows or 120 px sideways, then extend); it stops when the pointer
-comes back inside or the drag ends (including a missed mouse-up).
+edge, a 16 ms timer on the GPUI executor (in the grid's window) does what a move to the resting
+pointer would: scroll by the distance, capped at 40 rows (and, for a cell drag only, 120 px
+sideways; a row drag in the gutter scrolls only up and down), then extend. It stops (fix round
+1, I2, I3):
+- when the pointer comes back inside, or the mouse button goes up;
+- when the grid loses the focus (an `on_blur` hook, and a focus check on every tick) or the
+  window is deactivated (`observe_window_activation`); the drag ends there, a resize reporting
+  the width it reached;
+- when a tick changes neither the scroll nor the selection (the result's end, or a side that
+  cannot scroll). This bounds a lost mouse-up: the timer runs at most to the end of the loaded
+  rows, then stops; a later move with the button still down starts it again.
+
+A tick that changes nothing repaints nothing, and a tick allocates only when the selection
+moves (it extends only when the cell under the pointer is not already the focus).
 
 **Auto-size.** The initial size bounds a column's data width by its kind (`width_bounds`: flags
 ≤ 96 px, numbers ≤ 240, timestamps, UUIDs and binary ≤ 320, text and JSON ≤ 480; the header
 still widens past them, up to 320). `grid.auto_fit` (selected whole columns, else the focus
 column) and a double-click on a header's right edge queue an auto-fit: measured from the same
 samples inside the same 240-cell frame budget, up to 2,000 px, outliers trimmed as M3a's
-`fit_width` does; the width counts as the user's and is reported as `ColumnResized`. The
-fast-scroll thresholds are unchanged.
+`fit_width` does; the width counts as the user's (even when it did not change, so a pending
+initial size never overrides it) and a change is reported as `ColumnResized`. The fast-scroll
+thresholds are unchanged.
+
+**Keys (fix round 1, I4).** The datagrip preset binds Extend / Shrink selection in a grid,
+`ctrl-w` / `ctrl-shift-w` [Grid] on Windows and Linux, as the Task 1b note deferred to Task 35:
+with a grid innermost ctrl-w grows the selection instead of closing the tab (P-M3b-21);
+elsewhere it still closes the tab. Ctrl-only letter chords: no AltGr collision on any CI layout.
 
 **Resize.** The hovered header edge shows a 1 px `text-2` handle; while dragging, the guide is
 dashed; the view draws the width tag under the header ("136 px · Drag to resize ·
 double-click to fit", `hv-grid-width` + `hv-grid-resize-tip`) while hovering or dragging an
-edge. Frozen headers carry the tooltip `hv-grid-frozen-tip`. The labels are `GridLabels`'
+edge, on the side of the edge with room (right of an edge in the grid's left half, else left of
+it), so it never hangs over a neighbouring pane (fix round 1, M4). Frozen headers carry the
+tooltip `hv-grid-frozen-tip`. The labels are `GridLabels`'
 `frozen_tip`, `resize_tip` and `width`.

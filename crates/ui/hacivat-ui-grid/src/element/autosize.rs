@@ -18,7 +18,7 @@
 //!   measured again; nothing resizes after the layout settled. A column the user sized (a
 //!   header-edge drag, or the host's `set_column_width`) is never auto-sized.
 //!
-//! ## m3b-t35 (M3c Task 35)
+//! ## m3c-t35 (M3c Task 35)
 //! - **Per-type bounds** (ledger 179): the initial size bounds a column's data width by its kind
 //!   (`model::autosize::width_bounds`).
 //! - **Auto-fit** (`grid.auto_fit`, a double-click on a header's right edge): the column is
@@ -56,7 +56,7 @@ pub(crate) struct AutosizeState {
     widths: Vec<(ColId, f32)>,
     /// Columns the user sized: never auto-sized.
     user_sized: Vec<ColId>,
-    // ## m3b-t35
+    // ## m3c-t35
     /// Columns queued for an auto-fit, in order.
     fits: Vec<ColId>,
 }
@@ -84,7 +84,7 @@ impl AutosizeState {
         }
     }
 
-    // ## m3b-t35
+    // ## m3c-t35
     /// Fits `col` to its sampled cells in a coming frame.
     pub fn queue_fit(&mut self, col: ColId) {
         if !self.fits.contains(&col) {
@@ -246,7 +246,7 @@ pub(crate) fn step(
     };
     let mut widths: Vec<f32> = Vec::new();
 
-    // ## m3b-t35: auto-fits, each column whole, within the frame's budget (at least one).
+    // ## m3c-t35: auto-fits, each column whole, within the frame's budget (at least one).
     if !st.fits.is_empty() {
         let samples = sample_rows(count.loaded);
         let cell_avail = MAX_WIDTH - 2.0 * CELL_PAD_PX;
@@ -269,10 +269,14 @@ pub(crate) fn step(
             );
             out.measured += n.max(1);
             let width = fit_width(&widths, header_w);
-            if layout.set_width(col, width) {
-                if !st.user_sized.contains(&col) {
-                    st.user_sized.push(col);
-                }
+            // ## m3c-t35 fix round 1 (M9): a fitted column is the user's even when its width
+            // did not change, so a pending initial size never overrides it; only a change is
+            // reported.
+            if !st.user_sized.contains(&col) {
+                st.user_sized.push(col);
+            }
+            let before = layout.width_of(col);
+            if layout.set_width(col, width) && before != Some(width) {
                 out.fitted.push((col, width));
             }
         }

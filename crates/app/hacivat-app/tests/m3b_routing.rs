@@ -210,6 +210,31 @@ const DATAGRIP: &[(&str, &str, KeymapPlatform, &str)] = &[
         KeymapPlatform::Linux,
         "ctrl-alt-shift-j",
     ),
+    // ## m3c-t35 (named exception): DataGrip's grid Extend / Shrink selection.
+    (
+        "grid.grow_selection",
+        "Grid",
+        KeymapPlatform::Windows,
+        "ctrl-w",
+    ),
+    (
+        "grid.grow_selection",
+        "Grid",
+        KeymapPlatform::Linux,
+        "ctrl-w",
+    ),
+    (
+        "grid.shrink_selection",
+        "Grid",
+        KeymapPlatform::Windows,
+        "ctrl-shift-w",
+    ),
+    (
+        "grid.shrink_selection",
+        "Grid",
+        KeymapPlatform::Linux,
+        "ctrl-shift-w",
+    ),
 ];
 
 /// `chord` in the keymap's canonical spelling (modifier order).
@@ -268,17 +293,26 @@ fn every_m3b_command_id_is_registered_and_bound_as_listed(cx: &mut TestAppContex
         );
     }
     // Fix round 2 (I1, I2): datagrip binds neither Delete line nor grid grow/shrink before
-    // Tasks 34 and 35.
-    for (id, context) in [
-        ("editor.delete_line", "Editor"),
-        ("grid.grow_selection", "Grid"),
-        ("grid.shrink_selection", "Grid"),
+    // Tasks 34 and 35. ## m3c-t35 (named exception): Task 35 binds grid grow/shrink on Windows
+    // and Linux (the `DATAGRIP` rows above); macOS keeps the default's chords.
+    for (id, context, platforms) in [
+        (
+            "editor.delete_line",
+            "Editor",
+            &[
+                KeymapPlatform::MacOs,
+                KeymapPlatform::Windows,
+                KeymapPlatform::Linux,
+            ][..],
+        ),
+        ("grid.grow_selection", "Grid", &[KeymapPlatform::MacOs][..]),
+        (
+            "grid.shrink_selection",
+            "Grid",
+            &[KeymapPlatform::MacOs][..],
+        ),
     ] {
-        for platform in [
-            KeymapPlatform::MacOs,
-            KeymapPlatform::Windows,
-            KeymapPlatform::Linux,
-        ] {
+        for platform in platforms.iter().copied() {
             assert_eq!(
                 chords(platform, "datagrip", id, context),
                 chords(platform, "hacivat", id, context),
@@ -703,33 +737,39 @@ fn datagrip_cmd_backspace_still_deletes_to_line_start() {
     );
 }
 
-/// Fix round 2 (I2): under datagrip on Windows and Linux, ctrl-w with a grid innermost still
-/// closes the tab (M3a; the grid's context reaches the stack with m3a's F5).
+/// Fix round 2 (I2): under the default preset on Windows and Linux, ctrl-w with a grid innermost
+/// still closes the tab (M3a; the grid's context reaches the stack with m3a's F5).
+/// ## m3c-t35 (named exception): under datagrip, ctrl-w / ctrl-shift-w in a grid grow and
+/// shrink the selection (the plan's key table, P-M3b-21); outside a grid ctrl-w closes the tab.
 #[test]
-fn datagrip_ctrl_w_in_a_grid_still_closes_the_tab() {
+fn datagrip_ctrl_w_in_a_grid_grows_the_selection() {
     for platform in [KeymapPlatform::Windows, KeymapPlatform::Linux] {
-        for preset in ["hacivat", "datagrip"] {
-            let got = resolve(
-                platform,
-                preset,
-                vec!["Workspace", "Console", "Grid"],
-                "ctrl-w",
-            );
-            assert!(
-                matches!(&got, Resolution::Command(c) if c == "workspace.close_tab"),
-                "{platform:?} {preset}: {got:?}"
-            );
-            let got = resolve(
-                platform,
-                preset,
-                vec!["Workspace", "Console", "Grid"],
-                "ctrl-shift-w",
-            );
-            assert!(
-                matches!(got, Resolution::PassThrough),
-                "{platform:?} {preset}: {got:?}"
-            );
-        }
+        let in_grid = vec!["Workspace", "Console", "Grid"];
+        let got = resolve(platform, "hacivat", in_grid.clone(), "ctrl-w");
+        assert!(
+            matches!(&got, Resolution::Command(c) if c == "workspace.close_tab"),
+            "{platform:?} hacivat: {got:?}"
+        );
+        let got = resolve(platform, "hacivat", in_grid.clone(), "ctrl-shift-w");
+        assert!(
+            matches!(got, Resolution::PassThrough),
+            "{platform:?} hacivat: {got:?}"
+        );
+        let got = resolve(platform, "datagrip", in_grid.clone(), "ctrl-w");
+        assert!(
+            matches!(&got, Resolution::Command(c) if c == "grid.grow_selection"),
+            "{platform:?} datagrip: {got:?}"
+        );
+        let got = resolve(platform, "datagrip", in_grid, "ctrl-shift-w");
+        assert!(
+            matches!(&got, Resolution::Command(c) if c == "grid.shrink_selection"),
+            "{platform:?} datagrip: {got:?}"
+        );
+        let got = resolve(platform, "datagrip", vec!["Workspace", "Console"], "ctrl-w");
+        assert!(
+            matches!(&got, Resolution::Command(c) if c == "workspace.close_tab"),
+            "{platform:?} datagrip outside a grid: {got:?}"
+        );
     }
 }
 

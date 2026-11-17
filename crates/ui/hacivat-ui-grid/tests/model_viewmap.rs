@@ -347,3 +347,200 @@ fn permuted_map_lookup_under_50ns() {
     println!("permuted map: model→view→model {per:.1} ns per row (sum {sum})");
     assert!(per < 50.0, "{per:.1} ns per lookup");
 }
+
+// ## m3c-t35 fix round 1
+
+/// A non-monotonic order: a reversal maps ranges to ranges and hides model-range bugs.
+fn scrambled() -> ViewMap {
+    ViewMap::permuted(Arc::from([3u64, 7, 1, 9, 0, 5, 2, 8, 4, 6]), 10, 10)
+}
+
+fn move_cmd(dir: Dir, extend: bool) -> GridCommand {
+    GridCommand::Move { dir, extend }
+}
+
+/// I1: every Shift-extend from a gutter row works in view rows under a shuffled sort.
+#[test]
+fn shift_extends_from_a_gutter_row_take_view_rows_under_a_shuffled_sort() {
+    let map = scrambled();
+    let order = cols(3);
+    let ctx = KeyCtx {
+        map: &map,
+        order: &order,
+        page_rows: 3,
+    };
+    let copied = |s: &Selection| s.normalize_for_copy(&map, &order).unwrap();
+    // A gutter click on view row 1 (model row 7).
+    let mut s = Selection::default();
+    s.select_row(ModelRow(7), ColId(0));
+    // Shift+↓: view rows 1..=2, whole rows.
+    apply_command(move_cmd(Dir::Down, true), &mut s, &ctx);
+    assert_eq!(s.focus(), Some(c(1, 0)));
+    assert_eq!(
+        copied(&s),
+        CopyRegion {
+            rows: vec![1..3],
+            cols: order.clone()
+        }
+    );
+    // Again: the whole rows grow, never narrowing to the focus column.
+    apply_command(move_cmd(Dir::Down, true), &mut s, &ctx);
+    assert_eq!(copied(&s).rows, vec![1..4]);
+    assert_eq!(copied(&s).cols, order);
+    // PgDn (3 rows) and ⌘↓.
+    apply_command(
+        GridCommand::Page {
+            up: false,
+            extend: true,
+        },
+        &mut s,
+        &ctx,
+    );
+    assert_eq!(copied(&s).rows, vec![1..7]);
+    apply_command(
+        GridCommand::JumpEdge {
+            dir: Dir::Down,
+            extend: true,
+        },
+        &mut s,
+        &ctx,
+    );
+    assert_eq!(copied(&s).rows, vec![1..10]);
+    for v in 0..10 {
+        assert_eq!(s.contains(ViewRow(v), ColId(2), &map), v >= 1, "view {v}");
+    }
+    // Shift+click on view row 0 (model 3), column 2: view rows 0..=1, whole rows.
+    s.extend_to(c(3, 2), &map);
+    assert_eq!(s.focus(), Some(c(3, 2)));
+    assert_eq!(copied(&s).rows, vec![0..2]);
+    assert_eq!(copied(&s).cols, order);
+    assert_eq!(s.cell_count_in(&map, &order), 6);
+    // Shift+↑ from a gutter row: view rows 0..=1.
+    let mut t = Selection::default();
+    t.select_row(ModelRow(7), ColId(1));
+    apply_command(move_cmd(Dir::Up, true), &mut t, &ctx);
+    assert_eq!(t.focus(), Some(c(3, 1)));
+    assert_eq!(copied(&t).rows, vec![0..2]);
+    // In the source order the same keys extend the model range (M3a).
+    let ident = ViewMap::identity(10);
+    let ictx = KeyCtx {
+        map: &ident,
+        order: &order,
+        page_rows: 3,
+    };
+    let mut u = Selection::default();
+    u.select_row(ModelRow(2), ColId(0));
+    apply_command(move_cmd(Dir::Down, true), &mut u, &ictx);
+    assert_eq!(u.rows(), &[2..4]);
+}
+
+/// M1: an anchor the map hides makes a Shift-extend a plain click.
+#[test]
+fn an_anchor_a_filter_hides_makes_a_shift_extend_a_click() {
+    let kept = ViewMap::filtered(Arc::from([2u64, 4, 6]), 1_000);
+    let order = cols(2);
+    let mut s = Selection::default();
+    s.select_cell(c(500, 0), &ViewMap::identity(1_000));
+    s.on_view_map_changed(&kept);
+    s.extend_to(c(4, 0), &kept);
+    assert_eq!(s.rects(), &[CellRect::spanning((1, 0), (1, 0))]);
+    assert_eq!(
+        s.normalize_for_copy(&kept, &order).unwrap().rows,
+        vec![1..2]
+    );
+    let mut t = Selection::default();
+    t.select_row(ModelRow(500), ColId(0));
+    t.extend_rows_to_in(ModelRow(6), &kept);
+    assert_eq!(t.rows(), &[6..7]);
+}
+
+/// I5: the strip's count path never maps rows, and agrees with a walk over `contains`.
+#[test]
+fn counts_under_a_map_match_membership_and_need_no_mapping() {
+    let n = 40u64;
+    let order = cols(5);
+    for (case, map) in [
+        ViewMap::permuted(Arc::from(shuffled(n, 3)), n, n),
+        ViewMap::filtered(
+            Arc::from(shuffled(n, 4).into_iter().take(17).collect::<Vec<_>>()),
+            n,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let shown = map.len();
+        let mut s = Selection::default();
+        // A row piece (model rows 5..30 in source order), two rectangles and a column.
+        s.select_row(ModelRow(5), ColId(0));
+        s.extend_rows_to_in(ModelRow(29), &ViewMap::identity(n));
+        let r0 = map.view_to_model(ViewRow(1)).unwrap();
+        s.add_cell(c(r0.0, 1), &map);
+        let r1 = map.view_to_model(ViewRow(shown - 2)).unwrap();
+        s.extend_to(c(r1.0, 3), &map);
+        s.add_column(ColId(4), r1);
+        let brute = (0..shown)
+            .flat_map(|v| order.iter().map(move |col| (v, *col)))
+            .filter(|(v, col)| s.contains(ViewRow(*v), *col, &map))
+            .count() as u128;
+        assert_eq!(s.cell_count_in(&map, &order), brute, "case {case}");
+        // One row piece: its count, without a copy region.
+        let mut one = Selection::default();
+        one.select_row(ModelRow(5), ColId(0));
+        one.extend_rows_to_in(ModelRow(29), &ViewMap::identity(n));
+        let rows = (5..30u64).filter(|m| map.shows(ModelRow(*m))).count() as u64;
+        assert_eq!(one.size_in(&map, &order), Some((rows, 5)), "case {case}");
+        assert_eq!(
+            one.normalize_for_copy(&map, &order).unwrap().row_count(),
+            rows,
+            "case {case}"
+        );
+    }
+    // More than a copy takes: no size, as M3a's strip.
+    let mut all = Selection::default();
+    all.select_all();
+    assert_eq!(all.size_in(&ViewMap::identity(2_000_000), &cols(1)), None);
+}
+
+/// M13: 10,000 one-cell ranges (T37's Select all occurrences) count by the sweep.
+#[test]
+fn ten_thousand_ranges_count_exactly() {
+    let m = ViewMap::identity(20_000);
+    let order = cols(4);
+    let mut s = Selection::default();
+    s.select_cell(c(0, 0), &m);
+    for i in 1..10_000u64 {
+        s.add_cell(c(i * 2 % 20_000, (i % 4) as u32), &m);
+    }
+    // Every cell is distinct: (2i mod 20,000, i mod 4) repeats only after 10,000 steps.
+    assert_eq!(s.ranges(), 10_000);
+    assert_eq!(s.cell_count_in(&m, &order), 10_000);
+    // A block over all of them adds its other cells once.
+    s.add_cell(c(0, 0), &m);
+    s.extend_to(c(9, 3), &m);
+    let in_block = (0..10_000u64).filter(|i| (i * 2 % 20_000) < 10).count() as u128;
+    assert_eq!(s.cell_count_in(&m, &order), 10_000 + 40 - in_block);
+}
+
+#[test]
+#[ignore = "perf"]
+fn counting_10000_ranges_under_2ms() {
+    if std::env::var_os("HACIVAT_PERF").is_none_or(|v| v != "1") {
+        return;
+    }
+    let m = ViewMap::identity(1_000_000);
+    let order = cols(20);
+    let mut s = Selection::default();
+    s.select_cell(c(0, 0), &m);
+    for i in 1..10_000u64 {
+        s.add_cell(c(i * 97 % 1_000_000, (i % 20) as u32), &m);
+    }
+    let started = std::time::Instant::now();
+    let mut total = 0u128;
+    for _ in 0..10 {
+        total += s.cell_count_in(&m, &order);
+    }
+    let per = started.elapsed().as_secs_f64() * 1000.0 / 10.0;
+    println!("strip count of 10,000 ranges: {per:.3} ms ({total})");
+    assert!(per < 2.0, "{per:.3} ms");
+}

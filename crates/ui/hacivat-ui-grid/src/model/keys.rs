@@ -77,7 +77,7 @@ fn run(cmd: GridCommand, sel: &mut Selection, ctx: &KeyCtx<'_>) -> KeyOutcome {
         },
         GridCommand::Escape => changed(sel.collapse(ctx.map)),
         GridCommand::SelectAll => select(sel, ctx, |s, _| s.select_all()),
-        // ## m3b-t35: under a sort or a filter the rows are taken as shown.
+        // ## m3c-t35: under a sort or a filter the rows are taken as shown.
         GridCommand::SelectRow => {
             select(sel, ctx, |s, focus| s.extend_rows_to_in(focus.row, ctx.map))
         }

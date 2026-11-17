@@ -322,11 +322,9 @@ fn selection_dims(grid: &GridView, loaded: u64) -> Option<strip::StripSelection>
             cells: u64::try_from(cells).unwrap_or(u64::MAX),
         });
     }
-    let region = selection.normalize_for_copy(&map, order).ok()?;
-    Some(strip::StripSelection::Dims {
-        rows: region.row_count(),
-        cols: region.cols.len() as u64,
-    })
+    // ## m3c-t35 fix round 1 (I5): counted, never a copy region per render.
+    let (rows, cols) = selection.size_in(&map, order)?;
+    Some(strip::StripSelection::Dims { rows, cols })
 }
 
 impl ResultsHost {
@@ -649,6 +647,8 @@ impl ResultsHost {
                 super::context_menu::open(console, *at, *cell, *header, cx);
             }
             GridEvent::FrozenChanged(_) => {}
+            // ## m3c-t35 fix round 1 (M3): a refused freeze says why.
+            GridEvent::FreezeRefused => freeze_refused(cx),
         });
         self.tiles.get_mut(&console)?.grids.push(GridSlot {
             adapter,
@@ -984,6 +984,19 @@ fn copy_past_kept_rows(cx: &mut App) {
     let mut toast = hacivat_ui::toast::Toast::new(
         hacivat_ui::toast::ToastKind::Info,
         crate::l10n_global::text_fn(ids::hv::RESULTS_COPY_EVICTED),
+    );
+    toast.wide = true;
+    toast.icon = Some(hacivat_ui::icon::IconName::CircleAlert);
+    hacivat_ui::toast::ToastQueue::push(cx, toast);
+}
+
+// ## m3c-t35 fix round 1 (M3)
+/// `grid.freeze` was refused (the frozen columns would leave too little room to scroll): a
+/// notice says why, on the copy refusals' path.
+fn freeze_refused(cx: &mut App) {
+    let mut toast = hacivat_ui::toast::Toast::new(
+        hacivat_ui::toast::ToastKind::Info,
+        crate::l10n_global::text_fn(ids::hv::GRID_FREEZE_REFUSED),
     );
     toast.wide = true;
     toast.icon = Some(hacivat_ui::icon::IconName::CircleAlert);

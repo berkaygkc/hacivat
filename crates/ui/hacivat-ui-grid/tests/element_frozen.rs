@@ -233,14 +233,11 @@ fn freeze_refuses_to_leave_no_room_to_scroll(cx: &mut TestAppContext) {
             extend: false,
         },
     );
+    events.borrow_mut().clear();
     run(&view, vcx, GridCommand::Freeze);
     assert_eq!(view.read_with(vcx, |v, _| v.column_layout().frozen()), 0);
-    assert!(
-        events
-            .borrow()
-            .iter()
-            .all(|e| !matches!(e, GridEvent::FrozenChanged(_)))
-    );
+    // ## m3c-t35 fix round 1 (M3): the refusal is said, never silent.
+    assert_eq!(events.borrow().as_slice(), &[GridEvent::FreezeRefused]);
     // The host may set a count that later stops fitting (a narrower pane): the frame freezes
     // only what fits, and the layout keeps the count.
     view.update(vcx, |v, cx| v.set_frozen(5, cx));
@@ -368,10 +365,14 @@ fn cmd_click_and_drag_add_ranges(cx: &mut TestAppContext) {
     });
 }
 
+/// ## m3c-t35 fix round 1 (M2): the row segment is the pane holding the focus (the frozen
+/// columns, or every column after them), whatever the horizontal scroll.
 #[gpui::test]
-fn grow_uses_the_columns_on_screen_as_the_row_segment(cx: &mut TestAppContext) {
-    // Eight 120 px columns; about three and a half on screen.
+fn grow_uses_the_pane_holding_the_focus_as_the_row_segment(cx: &mut TestAppContext) {
+    // Eight 120 px columns; about three and a half on screen; two frozen.
     let (view, vcx, _) = open(cx, Rc::new(numbered(8, 30)), 500.0, 300.0);
+    view.update(vcx, |v, cx| v.set_frozen(2, cx));
+    frame(vcx);
     run(
         &view,
         vcx,
@@ -388,8 +389,8 @@ fn grow_uses_the_columns_on_screen_as_the_row_segment(cx: &mut TestAppContext) {
             extend: false,
         },
     );
+    // The focus (1, 0) is frozen: the segment is the frozen pane, columns 0..2.
     run(&view, vcx, GridCommand::GrowSelection);
-    let cols = view.read_with(vcx, |v, _| v.geometry().unwrap().cols.clone());
     view.read_with(vcx, |v, _| {
         let s = v.selection();
         assert_eq!(s.focus(), Some(mc(1, 0)));
@@ -397,10 +398,34 @@ fn grow_uses_the_columns_on_screen_as_the_row_segment(cx: &mut TestAppContext) {
             s.rects(),
             &[CellRect {
                 rows: 1..2,
-                cols: cols.start as u32..cols.end as u32
+                cols: 0..2
             }]
         );
     });
+    // In the scrolling pane, scrolled or not: columns 2..8.
+    for scroll in [0.0, 300.0] {
+        run(&view, vcx, GridCommand::Escape);
+        run(&view, vcx, GridCommand::End { extend: false });
+        view.update(vcx, |v, cx| {
+            v.scroll_px(0.0, scroll - v.scroll_state().left_x, cx)
+        });
+        frame(vcx);
+        run(&view, vcx, GridCommand::GrowSelection);
+        view.read_with(vcx, |v, _| {
+            assert_eq!(
+                v.selection().rects(),
+                &[CellRect {
+                    rows: 1..2,
+                    cols: 2..8
+                }],
+                "scrolled {scroll}"
+            );
+        });
+        run(&view, vcx, GridCommand::ShrinkSelection);
+    }
+    // Back on the frozen focus for the rest of the ladder.
+    run(&view, vcx, GridCommand::Home { extend: false });
+    run(&view, vcx, GridCommand::GrowSelection);
     run(&view, vcx, GridCommand::GrowSelection);
     assert_eq!(
         view.read_with(vcx, |v, _| v.selection().rows().to_vec()),
@@ -604,4 +629,140 @@ fn the_resize_tag_shows_the_width_while_hovering_or_dragging_an_edge(cx: &mut Te
     vcx.simulate_mouse_move(point(px(300.0), px(200.0)), None, Modifiers::none());
     vcx.run_until_parked();
     assert_eq!(view.read_with(vcx, |v, _| v.resize_tag()), None);
+}
+
+// ## m3c-t35 fix round 1
+
+/// A point in the gutter at body `y` px.
+fn gutter_point(
+    view: &Entity<GridView>,
+    vcx: &mut VisualTestContext,
+    y: f32,
+) -> Point<gpui::Pixels> {
+    view.read_with(vcx, |v, _| {
+        let g = v.geometry().expect("painted");
+        point(g.gutter.left() + px(10.0), g.body.top() + px(y))
+    })
+}
+
+/// I2: a row drag in the gutter scrolls only up and down, never sideways.
+#[gpui::test]
+fn a_gutter_row_drag_never_scrolls_sideways(cx: &mut TestAppContext) {
+    let (view, vcx, _) = open(cx, Rc::new(numbered(10, 500)), 500.0, 300.0);
+    view.update(vcx, |v, cx| v.scroll_px(0.0, 400.0, cx));
+    frame(vcx);
+    let left_x = view.read_with(vcx, |v, _| v.scroll_state().left_x);
+    assert_eq!(left_x, 400.0);
+    let from = gutter_point(&view, vcx, 30.0);
+    let to = gutter_point(&view, vcx, 90.0);
+    vcx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+    vcx.run_until_parked();
+    // Inside the body's rows: no autoscroll at all.
+    assert!(!view.read_with(vcx, |v, _| v.autoscrolling()));
+    vcx.executor().advance_clock(Duration::from_millis(200));
+    vcx.run_until_parked();
+    assert_eq!(view.read_with(vcx, |v, _| v.scroll_state().left_x), left_x);
+    // Below the body, in the gutter: down only.
+    let below = view.read_with(vcx, |v, _| {
+        let g = v.geometry().unwrap();
+        point(g.gutter.left() + px(10.0), g.body.bottom() + px(30.0))
+    });
+    vcx.simulate_mouse_move(below, Some(MouseButton::Left), Modifiers::none());
+    vcx.executor().advance_clock(Duration::from_millis(200));
+    vcx.run_until_parked();
+    view.read_with(vcx, |v, _| {
+        assert_eq!(v.scroll_state().left_x, left_x);
+        assert!(v.scroll_state().top_row > 0);
+    });
+    vcx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
+    vcx.run_until_parked();
+}
+
+/// I2, I3: the timer stops by itself once a tick changes nothing (the result's end), so a lost
+/// mouse-up never runs on, and nothing repaints while it rests.
+#[gpui::test]
+fn the_autoscroll_stops_at_the_end_of_the_result(cx: &mut TestAppContext) {
+    let (view, vcx, _) = open(cx, Rc::new(numbered(3, 40)), 500.0, 300.0);
+    let start = body_point(&view, vcx, 2, 20.0);
+    let below = view.read_with(vcx, |v, _| {
+        let g = v.geometry().unwrap();
+        point(
+            px(f32::from(g.body.left()) + 20.0),
+            g.body.bottom() + px(400.0),
+        )
+    });
+    vcx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(below, Some(MouseButton::Left), Modifiers::none());
+    vcx.run_until_parked();
+    assert!(view.read_with(vcx, |v, _| v.autoscrolling()));
+    vcx.executor().advance_clock(Duration::from_millis(500));
+    vcx.run_until_parked();
+    view.read_with(vcx, |v, _| {
+        assert_eq!(v.selection().focus(), Some(mc(39, 0)));
+        assert!(!v.autoscrolling(), "nothing left to scroll or select");
+    });
+    // Resting there repaints nothing.
+    let frames = view.read_with(vcx, |v, _| v.frame_log().frames);
+    vcx.executor().advance_clock(Duration::from_millis(500));
+    vcx.run_until_parked();
+    assert_eq!(view.read_with(vcx, |v, _| v.frame_log().frames), frames);
+}
+
+/// I3: deactivating the window ends the drag and its autoscroll.
+#[gpui::test]
+fn deactivating_the_window_stops_the_autoscroll(cx: &mut TestAppContext) {
+    let (view, vcx, _) = open(cx, Rc::new(numbered(3, 500)), 500.0, 300.0);
+    vcx.update(|window, _| window.activate_window());
+    vcx.run_until_parked();
+    let start = body_point(&view, vcx, 2, 20.0);
+    let below = view.read_with(vcx, |v, _| {
+        let g = v.geometry().unwrap();
+        point(
+            px(f32::from(g.body.left()) + 20.0),
+            g.body.bottom() + px(30.0),
+        )
+    });
+    vcx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(below, Some(MouseButton::Left), Modifiers::none());
+    vcx.run_until_parked();
+    assert!(view.read_with(vcx, |v, _| v.autoscrolling()));
+    vcx.deactivate_window();
+    vcx.run_until_parked();
+    let top = view.read_with(vcx, |v, _| v.scroll_state().top_row);
+    vcx.executor().advance_clock(Duration::from_millis(2_000));
+    vcx.run_until_parked();
+    view.read_with(vcx, |v, _| {
+        assert_eq!(v.scroll_state().top_row, top);
+        assert!(!v.autoscrolling());
+        assert!(!v.pointer_state().1, "the drag ended");
+    });
+}
+
+/// I3: the grid losing the focus ends the drag and its autoscroll.
+#[gpui::test]
+fn losing_the_focus_stops_the_autoscroll(cx: &mut TestAppContext) {
+    let (view, vcx, _) = open(cx, Rc::new(numbered(3, 500)), 500.0, 300.0);
+    let start = body_point(&view, vcx, 2, 20.0);
+    let below = view.read_with(vcx, |v, _| {
+        let g = v.geometry().unwrap();
+        point(
+            px(f32::from(g.body.left()) + 20.0),
+            g.body.bottom() + px(30.0),
+        )
+    });
+    vcx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(below, Some(MouseButton::Left), Modifiers::none());
+    vcx.run_until_parked();
+    assert!(view.read_with(vcx, |v, _| v.autoscrolling()));
+    let elsewhere = vcx.update(|_, cx| cx.focus_handle());
+    vcx.update(|window, cx| window.focus(&elsewhere, cx));
+    vcx.run_until_parked();
+    let top = view.read_with(vcx, |v, _| v.scroll_state().top_row);
+    vcx.executor().advance_clock(Duration::from_millis(500));
+    vcx.run_until_parked();
+    view.read_with(vcx, |v, _| {
+        assert_eq!(v.scroll_state().top_row, top);
+        assert!(!v.autoscrolling());
+    });
 }

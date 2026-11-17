@@ -147,12 +147,12 @@ pub struct Geometry {
     pub vtrack: Bounds<Pixels>,
     pub htrack: Option<Bounds<Pixels>>,
     pub row_h: f32,
-    /// Visible rows and columns (indices into the visible columns). ## m3b-t35: `cols` are the
+    /// Visible rows and columns (indices into the visible columns). ## m3c-t35: `cols` are the
     /// scrolling columns on screen; the frozen ones are `0..frozen`.
     pub rows: std::ops::Range<u64>,
     pub cols: std::ops::Range<usize>,
     pub scale: f32,
-    // ## m3b-t35
+    // ## m3c-t35
     /// The frozen columns this frame shows (`ColumnLayout::frozen_shown`) and their width: the
     /// frozen layer covers the body's (and the header's) first `frozen_w` px.
     pub frozen: usize,
@@ -166,7 +166,7 @@ pub struct PaintedCell {
     /// The view row.
     pub row: u64,
     pub col: ColId,
-    // ## m3b-t35
+    // ## m3c-t35
     /// The cell's left edge in window coordinates (a frozen column's never moves).
     pub left: f32,
     /// The painted text, controls shown as their chips, before any ellipsis (empty for a
@@ -228,7 +228,7 @@ pub struct PaintedHeader {
     pub degraded: bool,
 }
 
-/// A header whose name the last frame ellipsized, or (## m3b-t35) a frozen column's header: the
+/// A header whose name the last frame ellipsized, or (## m3c-t35) a frozen column's header: the
 /// grid shows a tooltip over `bounds` (window coordinates) with the whole name when ellipsized,
 /// and "Frozen: …" when frozen.
 #[derive(Debug, Clone, PartialEq)]
@@ -237,7 +237,7 @@ pub struct HeaderTip {
     /// The column's whole name (catalog text).
     pub name: SharedString,
     pub bounds: Bounds<Pixels>,
-    // ## m3b-t35
+    // ## m3c-t35
     /// The name was ellipsized.
     pub ellipsized: bool,
     /// The column is frozen.
@@ -245,7 +245,7 @@ pub struct HeaderTip {
 }
 
 /// The rows the grid scrolls over for `count`: the exact total when known, the skeleton rows
-/// while the first rows are arriving, the loaded rows otherwise. (## m3b-t35: moved from
+/// while the first rows are arriving, the loaded rows otherwise. (## m3c-t35: moved from
 /// `grid.rs`; `GridView::scroll_rows` gives a filter's kept rows instead.)
 pub(crate) fn scroll_rows(count: &crate::source::RowCount) -> u64 {
     match count.exact_total {

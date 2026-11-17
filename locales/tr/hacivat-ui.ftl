@@ -2380,3 +2380,5 @@ hv-grid-resize-tip = Boyutlandırmak için sürükleyin · sığdırmak için ç
 hv-grid-width = { $px } px
 # Review: PO
 hv-strip-ranges = { $n } aralık · { $cells } hücre
+# Review: PO
+hv-grid-freeze-refused = Bu sütunlar dondurulamaz: kaydıracak yer kalmaz. Bölmeyi genişletin ya da daha az sütun dondurun.
