@@ -343,6 +343,13 @@ fn typing_in_reduced_mode_stays_within_budget(cx: &mut TestAppContext) {
     }
     took.sort();
     let p95 = took[took.len() * 95 / 100];
+    // ## m3c-t44 (named line): the figure for the M3c bench notes (ledger 298).
+    eprintln!(
+        "PERF typing in a 19 MiB document (Reduced, commit + draw): p50 {:?} p95 {p95:?} max {:?} over {} keystrokes",
+        took[took.len() / 2],
+        took[took.len() - 1],
+        took.len()
+    );
     assert!(p95.as_secs_f64() < 0.016, "p95 {p95:?}");
 }
 
