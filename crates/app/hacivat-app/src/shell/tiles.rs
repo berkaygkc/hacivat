@@ -239,6 +239,10 @@ pub fn explorer(theme: &Theme, cx: &App) -> Div {
                     t.type_ramp.body_sm,
                     c.text_3.to_hsla(),
                 )
+                // ## m3b-ci (controller fix): the placeholder ellipsizes, as the live filter
+                // field's does (`hacivat-ui/src/input`): with wider fonts (Linux, CI run
+                // 44051024805) the pseudo-locale text overran the field and was clipped.
+                .truncate(true)
                 .id("explorer-filter"),
             ),
         );

@@ -629,9 +629,23 @@ jobs:
           if-no-files-found: error
       # F17: pixel comparison (dE2000) against the committed macOS baselines. Skipped until
       # Task 19 commits design/baselines/m1/macos/*.png.
+      # ## m3b-ci (controller fix): what this job gates, and what it leaves to the local gate.
+      # - The render above runs every harness check (a-g, m, t, markers) on all 3,244 states on
+      #   both OSes; any violation fails the job. Linux is checked like macOS: no check is
+      #   skipped or loosened there (access-key runs are joined into their label, see
+      #   tests/shots.rs `is_key_run`; trust labels must stay whole).
+      # - This step compares pixels only where a committed baseline is still meant to hold: the
+      #   44 M1 states nothing since M1 was meant to change. The 24 that M2a/M3a changed on
+      #   purpose (dialog-about, menu-app, toast-info) are listed in superseded.txt until the PO
+      #   re-baselines them; a stale line fails the step. States without a committed baseline
+      #   are listed as new and do not fail.
+      # - The approved M2-M3b states are not committed (1.2 GB): the milestone gate compares the
+      #   full render against the SDD baseline locally (docs/benchmarks/m3b.md, "pseudo-screens
+      #   in CI"). Linux renders have no pixel baseline (fonts differ); they gate on the checks.
       - name: Compare with the M1 baselines (shot-diff)
         if: steps.guard.outputs.present == 'true' && runner.os == 'macOS' && hashFiles('design/baselines/m1/macos/*.png') != ''
-        run: cargo run --locked -p xtask -- shot-diff --baseline design/baselines/m1/macos --candidate target/shots
+        # ## m3b-ci (controller fix): `--superseded`.
+        run: cargo run --locked -p xtask -- shot-diff --baseline design/baselines/m1/macos --candidate target/shots --superseded design/baselines/m1/macos/superseded.txt
 
   # ## m2a-t11-docker
   # Full test set line 5 (the FakeDriver tests) and line 7 with `--set pr` (R17). CI has no

@@ -343,3 +343,35 @@ fn session_overrides_never_write_settings(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!root.path().join("config/settings.toml").exists());
 }
+
+// ## m3b-ci (controller fix): the empty explorer's filter placeholder ellipsizes. CI run
+// 44051024805 (Linux) found it clipped in the pseudo locales: Linux fonts are wider, so the
+// text ran past the field. The same happens on any platform once the explorer is dragged
+// narrow, which this checks: at the narrowest explorer the placeholder is cut with an
+// ellipsis, never clipped.
+#[gpui::test]
+fn the_explorer_filter_placeholder_ellipsizes_in_a_narrow_explorer(cx: &mut TestAppContext) {
+    let root = tempfile::tempdir().unwrap();
+    let vcx = shell_at(cx, root.path(), "en");
+    workspace(vcx).update_in(vcx, |w, win, cx| w.new_console_tab(win, cx));
+    close_all_windows(vcx);
+    let path = root.path().join("data/workspace.json");
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("\"explorer_w\": 276.0"), "{saved}");
+    std::fs::write(
+        &path,
+        saved.replace("\"explorer_w\": 276.0", "\"explorer_w\": 120.0"),
+    )
+    .unwrap();
+    let vcx2 = shell_at(cx, root.path(), "en");
+    assert_eq!(layout(vcx2).1.explorer_w, 120.0);
+    enable_registry(vcx2);
+    let frame = registry_frame(vcx2);
+    let filter = frame
+        .iter()
+        .find(|r| r.path.ends_with("#explorer-filter"))
+        .expect("the explorer filter is drawn");
+    assert_eq!(filter.text.as_ref(), "Filter connections");
+    assert!(filter.truncated, "{filter:?}");
+    assert!(!filter.clipped, "{filter:?}");
+}
