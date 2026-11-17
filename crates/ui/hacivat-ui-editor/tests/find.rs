@@ -273,6 +273,126 @@ fn a_newer_query_drops_the_older_count(cx: &mut TestAppContext) {
     assert_eq!(status(&o).total, Some(0));
 }
 
+fn run_cmd(o: &mut Opened<'_>, id: &str) {
+    let ran = o
+        .editor
+        .update_in(o.vcx, |v, window, cx| v.run_command(id, window, cx));
+    assert!(ran, "{id}");
+    o.vcx.run_until_parked();
+}
+
+// ## m3c-t33-find (fix round 1, I1, I3)
+/// Find as you type (`find_from`) and a step while the count runs search nothing on the UI
+/// thread: the step waits for the background and lands as one selection change (one
+/// undo-selection step).
+#[gpui::test]
+fn find_from_searches_off_the_ui_thread_and_commits_once(cx: &mut TestAppContext) {
+    let text = "x SELECT 1; -- \n".repeat(1 << 14);
+    let mut o = open(cx, &text, 5);
+    let m = Lit::new("SELECT");
+    let calls = m.calls.clone();
+    let (from, step) = o.editor.update(o.vcx, |v, cx| {
+        v.set_find(Some(m), cx);
+        (v.find_from(5..5, cx), v.find_step(false, cx))
+    });
+    assert_eq!((from, step), (None, None), "both wait for the background");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "nothing searched on the UI thread"
+    );
+    assert_eq!(main_range(&o), 5..5);
+    o.vcx.run_until_parked();
+    assert_eq!(main_range(&o), 18..24, "the first match after the origin");
+    assert_eq!(o.vcx.read(|cx| o.editor.read(cx).find_made()), Some(18..24));
+    // One selection change: one undo-selection step back to the origin.
+    run_cmd(&mut o, "editor.undo_selection");
+    assert_eq!(main_range(&o), 5..5);
+}
+
+/// M8: select all while the count runs searches nothing on the UI thread; the selection lands
+/// from the background.
+#[gpui::test]
+fn select_all_while_counting_lands_from_the_background(cx: &mut TestAppContext) {
+    let o = open(cx, &"ab ".repeat(300), 0);
+    let m = Lit::new("ab");
+    let calls = m.calls.clone();
+    let n = o.editor.update(o.vcx, |v, cx| {
+        v.set_find(Some(m), cx);
+        v.select_all_matches(10_000, cx)
+    });
+    assert_eq!(n, 0, "it waits for the background");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    o.vcx.run_until_parked();
+    let ranges = o
+        .vcx
+        .read(|cx| o.editor.read(cx).snapshot().selection.ranges().len());
+    assert_eq!(ranges, 300);
+}
+
+/// A query with no match puts the selection back at the origin.
+#[gpui::test]
+fn find_from_without_a_match_returns_to_the_origin(cx: &mut TestAppContext) {
+    let o = open(cx, "ab ab", 1);
+    o.editor.update(o.vcx, |v, cx| {
+        v.set_find(Some(Lit::new("ab")), cx);
+        v.find_from(1..1, cx);
+    });
+    o.vcx.run_until_parked();
+    assert_eq!(main_range(&o), 3..5);
+    o.editor.update(o.vcx, |v, cx| {
+        v.set_find(Some(Lit::new("zz")), cx);
+        v.find_from(1..1, cx);
+    });
+    o.vcx.run_until_parked();
+    assert_eq!(main_range(&o), 1..1);
+}
+
+/// An edit while a count runs: the older count's batches never land; the total is the new
+/// text's.
+#[gpui::test]
+fn editing_while_a_count_runs_recounts(cx: &mut TestAppContext) {
+    let text = "ab ".repeat(400_000);
+    let o = open(cx, &text, 0);
+    o.editor.update(o.vcx, |v, cx| {
+        v.set_find(Some(Lit::new("ab")), cx);
+        v.set_text("ab xy ab", cx);
+    });
+    o.vcx.run_until_parked();
+    let s = status(&o);
+    assert_eq!((s.total, s.counted, s.capped), (Some(2), 2, false));
+}
+
+/// T31's select next occurrence says so when every occurrence is selected already, and its
+/// select all occurrences says how many of how many past the cap.
+#[gpui::test]
+fn occurrence_announcements(cx: &mut TestAppContext) {
+    let mut o = open(cx, "SELECT a FROM a;", 7);
+    run_cmd(&mut o, "editor.select_next_occurrence");
+    run_cmd(&mut o, "editor.select_next_occurrence");
+    assert_eq!(
+        o.vcx
+            .read(|cx| o.editor.read(cx).snapshot().selection.ranges().len()),
+        2
+    );
+    run_cmd(&mut o, "editor.select_next_occurrence");
+    let said = o.vcx.read(|cx| status_message(o.editor.read(cx)));
+    assert_eq!(said.as_deref(), Some("hv-find-no-more"));
+}
+
+#[gpui::test]
+fn select_all_occurrences_past_the_cap_says_so(cx: &mut TestAppContext) {
+    let text = "ab ".repeat(10_500);
+    let mut o = open(cx, &text, 0);
+    run_cmd(&mut o, "editor.select_all_occurrences");
+    let n = o
+        .vcx
+        .read(|cx| o.editor.read(cx).snapshot().selection.ranges().len());
+    assert_eq!(n, 10_000);
+    let said = o.vcx.read(|cx| status_message(o.editor.read(cx)));
+    assert_eq!(said.as_deref(), Some("hv-find-capped"));
+}
+
 #[gpui::test]
 fn a_step_into_a_fold_opens_it(cx: &mut TestAppContext) {
     let text = "SELECT 1;\nSELECT\n  a,\n  needle,\n  b\nFROM t;\nSELECT 2;\n";
@@ -432,7 +552,7 @@ fn counting_20_mb_under_200ms(cx: &mut TestAppContext) {
     }
     let line = "INSERT INTO t (id, name) VALUES (1, 'abc');\n";
     let text = line.repeat(20 * (1 << 20) / line.len());
-    let mut o = open(cx, &text, 0);
+    let o = open(cx, &text, 0);
     let at = std::time::Instant::now();
     o.editor
         .update(o.vcx, |v, cx| v.set_find(Some(Lit::new("INSERT")), cx));
@@ -443,9 +563,13 @@ fn counting_20_mb_under_200ms(cx: &mut TestAppContext) {
         s.total,
         Some(u32::try_from(text.len() / line.len()).unwrap())
     );
+    // Past the kept cap the step runs on the background executor (fix round 1, I1).
     let at = std::time::Instant::now();
-    assert_eq!(step(&mut o, false), Some(0..6));
+    let now = o.editor.update(o.vcx, |v, cx| v.find_step(false, cx));
+    let ui = at.elapsed();
+    o.vcx.run_until_parked();
     let stepped = at.elapsed();
-    println!("find perf: count of 20 MB {took:?}, first step {stepped:?}");
+    assert_eq!((now, main_range(&o)), (None, 0..6));
+    println!("find perf: count of 20 MB {took:?}, first step {stepped:?} (UI thread {ui:?})");
     assert!(took.as_millis() < 200, "{took:?}");
 }

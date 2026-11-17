@@ -19,13 +19,21 @@
 //!   number; its task is dropped too). The matches are kept in order, at most [`MAX_KEPT`]
 //!   (the outlines, the scrollbar ticks and the steps use them); counting goes on past that.
 //! - **Steps** ([`find_step`]) select the next (previous) match after the main range, wrapping
-//!   around; a main range that is itself a match steps past it. They use the kept matches once
-//!   the count is complete, else ask the matcher directly over the version's text (built here
-//!   on first need, then shared with the count). A step into a fold opens it (every selection
-//!   commit reveals the selection, `fold_gutter::on_commit`).
+//!   around: forward, the first match starting at or after the range that is not the range
+//!   itself; back, the last match starting before it. Once the count is complete the kept
+//!   matches answer at once; before that (or past the kept cap) the step runs on the
+//!   background executor and lands later, as one selection change, unless the text, the query
+//!   or the selection changed meanwhile (fix round 1, I1). **Nothing searches or flattens the
+//!   text on the UI thread.** [`find_from`] is find-as-you-type: the first match from an
+//!   origin, else the origin itself, as one selection change (I3). A step into a fold opens it
+//!   (every selection commit reveals the selection, `fold_gutter::on_commit`).
 //! - **Select all matches** ([`select_all_matches`]) selects at most `cap` of them as one
 //!   selection change; past the cap the status bar and the live region say "Selected the first
-//!   10,000 of 41,208 matches" (`hv-find-capped`).
+//!   10,000 of 41,208 matches" (`hv-find-capped`). Once the count is done the kept matches and
+//!   the total answer at once; while it runs, the selection is collected on the background
+//!   executor (M8).
+//! - **Scrollbar ticks** ([`tick_rows`]) are bucketed by track pixel row and cached per count
+//!   generation, extended as batches land (M9).
 //! - **Paint** ([`paint`]): every kept match on the painted rows but the main selection gets a
 //!   1 px `text-3` outline, no fill (NOTES M3c-10); the current match is the selection.
 //! - The view emits `EditorEvent::FindChanged` whenever the status may have changed (a count
@@ -34,9 +42,12 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use hacivat_text::display::HeightMap;
 use hacivat_text::{Committed, SelectionRange, SelectionSet, TextBuffer, UserEvent};
 use hacivat_ui::l10n::UiArg;
-use hacivat_ui_core::gpui_surface::{App, Context, Hsla, Task, Window, fill, hsla, px};
+use hacivat_ui_core::gpui_surface::{
+    App, Bounds, Context, Hsla, Pixels, Task, Window, fill, hsla, px,
+};
 
 use crate::commands;
 use crate::element::FrameLayout;
@@ -59,7 +70,8 @@ pub struct FindStatus {
     pub current: Option<u32>,
     /// The match count; `None` while counting.
     pub total: Option<u32>,
-    /// The count stopped at the cap.
+    /// The kept matches stopped at [`MAX_KEPT`]; the count goes on past it (`total` stays
+    /// exact).
     pub capped: bool,
     // ## m3c-t33-find
     /// The matches counted so far ("1,240+" while counting).
@@ -91,6 +103,22 @@ pub struct FindState {
     done: bool,
     /// The running count (dropping it cancels it).
     job: Option<Task<()>>,
+    // ## m3c-t33-find (fix round 1)
+    /// A step or a select all waiting for the background (a newer one replaces it).
+    step_job: Option<Task<()>>,
+    /// The selection find made last, and the text version it is for.
+    made: Option<(u64, Range<usize>)>,
+    /// The scrollbar's tick rows for a key, built from the first `.1` kept matches.
+    ticks: Option<(TickKey, usize, std::rc::Rc<Vec<u32>>)>,
+}
+
+/// What the cached tick rows depend on.
+#[derive(Debug, Clone, PartialEq)]
+struct TickKey {
+    generation: u64,
+    height: u32,
+    rows: u32,
+    hidden: Vec<Range<u32>>,
 }
 
 impl std::fmt::Debug for FindState {
@@ -154,17 +182,14 @@ fn scan(m: &dyn FindMatcher, hay: &str, from: usize) -> (Vec<Range<usize>>, usiz
     (found, hay.len(), true)
 }
 
-/// The text of the current version, built now when no count built it yet.
-fn text_now(v: &mut EditorView) -> Arc<str> {
+/// The text of the current version when a count already built it.
+fn text_ready(v: &EditorView) -> Option<Arc<str>> {
     let version = v.model.version();
-    if let Some((at, text)) = &v.find.text
-        && *at == version
-    {
-        return text.clone();
-    }
-    let text = flatten(v.model.buffer());
-    v.find.text = Some((version, text.clone()));
-    text
+    v.find
+        .text
+        .as_ref()
+        .filter(|(at, _)| *at == version)
+        .map(|(_, t)| t.clone())
 }
 
 /// Starts counting the current query over the current text (dropping any older count).
@@ -259,20 +284,28 @@ fn on_batch(
     !done
 }
 
-/// Sets (or clears, `None`) the query and starts counting it.
+/// Sets (or clears, `None`) the query and starts counting it. Clearing it drops the
+/// flattened text and the matches too (M2).
 pub(crate) fn set_find(
     v: &mut EditorView,
     m: Option<Arc<dyn FindMatcher>>,
     cx: &mut Context<EditorView>,
 ) {
     v.find.matcher = m;
+    v.find.step_job = None;
+    if v.find.matcher.is_none() {
+        v.find.text = None;
+        v.find.made = None;
+        v.find.ticks = None;
+        v.find.matches = Vec::new();
+    }
     recount(v, cx);
     cx.emit(EditorEvent::FindChanged);
     cx.notify();
 }
 
-/// The kept match after (`back`: before) the main range `r`, wrapping; a range that is itself
-/// a match steps past it.
+/// The kept match after (`back`: before) the range `r`, wrapping: forward, the first match
+/// starting at or after `r` that is not `r` itself; back, the last one starting before `r`.
 fn step_in(matches: &[Range<usize>], r: &Range<usize>, back: bool) -> Option<Range<usize>> {
     if matches.is_empty() {
         return None;
@@ -291,7 +324,7 @@ fn step_in(matches: &[Range<usize>], r: &Range<usize>, back: bool) -> Option<Ran
     matches.get(i).cloned()
 }
 
-/// [`step_in`] by asking the matcher over `hay`.
+/// [`step_in`] by asking the matcher over `hay` (the background's step).
 fn step_direct(
     m: &dyn FindMatcher,
     hay: &str,
@@ -299,22 +332,17 @@ fn step_direct(
     back: bool,
 ) -> Option<Range<usize>> {
     if back {
-        let before = |at: usize| {
-            let mut found = m.find_back(hay, at);
-            // A match ending inside the range that starts before it is fine; one that is the
-            // range itself is not.
-            while let Some(f) = found.clone() {
-                if f.start < r.start && f.end > f.start {
-                    return Some(f);
-                }
-                found = f.start.checked_sub(1).and_then(|b| m.find_back(hay, b));
+        // The last match starting before `r`, else (wrapping) the last of all (M7).
+        let (mut before, mut last) = (None, None);
+        let mut at = 0;
+        while let Some(f) = next_match(m, hay, at) {
+            at = f.end;
+            if f.start < r.start {
+                before = Some(f.clone());
             }
-            None
-        };
-        before(r.start).or_else(|| {
-            let last = m.find_back(hay, hay.len())?;
-            (last.end > last.start).then_some(last)
-        })
+            last = Some(f);
+        }
+        before.or(last)
     } else {
         let mut first = next_match(m, hay, r.start);
         if first.as_ref() == Some(r) {
@@ -324,63 +352,119 @@ fn step_direct(
     }
 }
 
-/// Selects the next (`back`: previous) match from the main range and answers it; `None` (the
-/// selection unchanged) when there is none.
+/// Lands a step: selects `r` as find's own selection (one selection change).
+fn land(v: &mut EditorView, r: Option<Range<usize>>, cx: &mut Context<EditorView>) {
+    if let Some(r) = r {
+        commands::select(
+            v,
+            SelectionRange::new(r.start, r.end),
+            UserEvent::Select,
+            cx,
+        );
+        v.find.made = Some((v.model.version(), r));
+    }
+    cx.emit(EditorEvent::FindChanged);
+    cx.notify();
+}
+
+/// Runs a step on the background executor: from `from` (`back`: backwards), else `fallback`.
+/// It lands only while the query, the text and the main selection are still the ones it was
+/// asked for.
+fn spawn_step(
+    v: &mut EditorView,
+    from: Range<usize>,
+    back: bool,
+    fallback: Option<Range<usize>>,
+    cx: &mut Context<EditorView>,
+) {
+    let Some(m) = v.find.matcher.clone() else {
+        return;
+    };
+    let generation = v.find.generation;
+    let version = v.model.version();
+    let main = v.model.selection().main().range();
+    let ready = text_ready(v);
+    let buf = v.model.buffer().clone();
+    v.find.step_job = Some(cx.spawn(async move |this, cx| {
+        let found = cx
+            .background_executor()
+            .spawn(async move {
+                let hay = ready.unwrap_or_else(|| flatten(&buf));
+                step_direct(m.as_ref(), &hay, &from, back)
+            })
+            .await;
+        let _ = this.update(cx, |v, cx| {
+            let same = v.find.generation == generation
+                && v.model.version() == version
+                && v.model.selection().main().range() == main;
+            if same {
+                v.find.step_job = None;
+                land(v, found.or(fallback), cx);
+            }
+        });
+    }));
+}
+
+/// The count is complete for this text: the kept list answers every step at once.
+fn answers_now(v: &EditorView) -> bool {
+    v.find.complete() && v.find.version == v.model.version()
+}
+
+/// Selects the next (`back`: previous) match from the main range and answers it. `None` when
+/// there is none, or when the step waits for the background (it lands later).
 pub(crate) fn find_step(
     v: &mut EditorView,
     back: bool,
     cx: &mut Context<EditorView>,
 ) -> Option<Range<usize>> {
-    let m = v.find.matcher.clone()?;
+    v.find.matcher.as_ref()?;
     let r = v.model.selection().main().range();
-    let found = if v.find.complete() && v.find.version == v.model.version() {
-        step_in(&v.find.matches, &r, back)
-    } else {
-        let hay = text_now(v);
-        step_direct(m.as_ref(), &hay, &r, back)
-    }?;
-    commands::select(
-        v,
-        SelectionRange::new(found.start, found.end),
-        UserEvent::Select,
-        cx,
-    );
-    cx.emit(EditorEvent::FindChanged);
+    if !answers_now(v) {
+        spawn_step(v, r, back, None, cx);
+        return None;
+    }
+    v.find.step_job = None;
+    let found = step_in(&v.find.matches, &r, back)?;
+    land(v, Some(found.clone()), cx);
     Some(found)
 }
 
-/// Selects every match (at most `cap`, as ranges of a multi-cursor selection) and answers how
-/// many. Past the cap it says how many of how many it selected. The main range is the match
-/// at or after the main caret.
-pub(crate) fn select_all_matches(
+// ## m3c-t33-find (fix round 1, I1, I3)
+/// Find as you type: selects the first match at or after `origin` (wrapping), else `origin`
+/// itself, as one selection change. Answers it when the count is complete; `None` when it
+/// waits for the background.
+pub(crate) fn find_from(
     v: &mut EditorView,
-    cap: u32,
+    origin: Range<usize>,
+    cx: &mut Context<EditorView>,
+) -> Option<Range<usize>> {
+    v.find.matcher.as_ref()?;
+    let len = v.model.buffer().len_bytes();
+    let origin = origin.start.min(len)..origin.end.min(len);
+    let at = origin.start..origin.start;
+    if !answers_now(v) {
+        spawn_step(v, at, false, Some(origin), cx);
+        return None;
+    }
+    v.find.step_job = None;
+    let found = step_in(&v.find.matches, &at, false).unwrap_or(origin);
+    land(v, Some(found.clone()), cx);
+    Some(found)
+}
+
+/// The selection find made last (a step, find as you type), while the text is the same.
+pub(crate) fn made(v: &EditorView) -> Option<Range<usize>> {
+    let (version, r) = v.find.made.as_ref()?;
+    (*version == v.model.version()).then(|| r.clone())
+}
+
+/// Selects `ranges` (the first `cap` matches) and says so past the cap.
+fn select_ranges(
+    v: &mut EditorView,
+    ranges: Vec<Range<usize>>,
+    total: u64,
     cx: &mut Context<EditorView>,
 ) -> u32 {
-    let Some(m) = v.find.matcher.clone() else {
-        return 0;
-    };
-    let cap = (cap.max(1)) as usize;
-    let (ranges, total): (Vec<Range<usize>>, u64) =
-        if v.find.complete() && v.find.version == v.model.version() {
-            let all = &v.find.matches;
-            (all[..all.len().min(cap)].to_vec(), all.len() as u64)
-        } else {
-            // The count has not finished: the matches are collected here (UI-EDIT-22's rare
-            // path; a select all while counting a large text).
-            let hay = text_now(v);
-            let mut kept = Vec::new();
-            let mut total = 0u64;
-            let mut at = 0;
-            while let Some(r) = next_match(m.as_ref(), &hay, at) {
-                at = r.end;
-                total += 1;
-                if kept.len() < cap {
-                    kept.push(r);
-                }
-            }
-            (kept, total)
-        };
     if ranges.is_empty() {
         return 0;
     }
@@ -396,11 +480,66 @@ pub(crate) fn select_all_matches(
         main,
     );
     commands::select_set(v, set, UserEvent::Select, cx);
+    v.find.made = None;
     if total > n as u64 {
         say_capped(v, n as u64, total, cx);
     }
     cx.emit(EditorEvent::FindChanged);
     u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// Selects every match (at most `cap`, as ranges of a multi-cursor selection) and answers how
+/// many. Past the cap it says how many of how many it selected. The main range is the match
+/// at or after the main caret. While the count runs (or when `cap` passes the kept matches of
+/// a capped count) the matches are collected on the background executor and selected when
+/// they land; it answers 0 then.
+pub(crate) fn select_all_matches(
+    v: &mut EditorView,
+    cap: u32,
+    cx: &mut Context<EditorView>,
+) -> u32 {
+    let Some(m) = v.find.matcher.clone() else {
+        return 0;
+    };
+    let cap = (cap.max(1)) as usize;
+    let st = &v.find;
+    if st.done && st.version == v.model.version() && (!st.status.capped || cap <= MAX_KEPT) {
+        v.find.step_job = None;
+        let all = &v.find.matches;
+        let ranges = all[..all.len().min(cap)].to_vec();
+        let total = u64::from(v.find.status.counted);
+        return select_ranges(v, ranges, total, cx);
+    }
+    let generation = v.find.generation;
+    let version = v.model.version();
+    let ready = text_ready(v);
+    let buf = v.model.buffer().clone();
+    v.find.step_job = Some(cx.spawn(async move |this, cx| {
+        let (ranges, total) = cx
+            .background_executor()
+            .spawn(async move {
+                let hay = ready.unwrap_or_else(|| flatten(&buf));
+                let mut kept = Vec::new();
+                let mut total = 0u64;
+                let mut at = 0;
+                while let Some(r) = next_match(m.as_ref(), &hay, at) {
+                    at = r.end;
+                    total += 1;
+                    if kept.len() < cap {
+                        kept.push(r);
+                    }
+                }
+                (kept, total)
+            })
+            .await;
+        let _ = this.update(cx, |v, cx| {
+            if v.find.generation == generation && v.model.version() == version {
+                v.find.step_job = None;
+                select_ranges(v, ranges, total, cx);
+            }
+        });
+    }));
+    0
 }
 
 /// Says "Selected the first `max` of `n` matches" (the status bar and the live region).
@@ -453,9 +592,60 @@ pub(crate) fn on_commit(
     }
     if text_changed {
         v.find.text = None;
+        v.find.step_job = None;
         recount(v, cx);
     }
     cx.emit(EditorEvent::FindChanged);
+}
+
+// ## m3c-t33-find (fix round 1, M9)
+/// The scrollbar's find ticks as track pixel rows (ascending, one per row), cached per count
+/// generation and extended as batches land: O(new matches) per frame, not O(kept).
+pub(crate) fn tick_rows(
+    v: &mut EditorView,
+    track: Bounds<Pixels>,
+    map: &HeightMap,
+) -> std::rc::Rc<Vec<u32>> {
+    if v.find.matcher.is_none() || v.find.version != v.model.version() {
+        return std::rc::Rc::default();
+    }
+    let key = TickKey {
+        generation: v.find.generation,
+        height: f32::from(track.size.height) as u32,
+        rows: map.visible_rows(),
+        hidden: map.hidden().to_vec(),
+    };
+    let (mut rows, from) = match v.find.ticks.take() {
+        Some((k, done, rows)) if k == key && done <= v.find.matches.len() => {
+            (std::rc::Rc::unwrap_or_clone(rows), done)
+        }
+        _ => (Vec::new(), 0),
+    };
+    let buf = v.model.buffer();
+    let mut last_line = None;
+    for r in &v.find.matches[from..] {
+        let line = u32::try_from(buf.byte_to_line(r.start)).unwrap_or(u32::MAX);
+        if last_line == Some(line) {
+            continue;
+        }
+        last_line = Some(line);
+        let row = crate::scrollbar::tick_row(track, map, line);
+        if rows.last() != Some(&row) {
+            rows.push(row);
+        }
+    }
+    let rows = std::rc::Rc::new(rows);
+    v.find.ticks = Some((key, v.find.matches.len(), rows.clone()));
+    rows
+}
+
+/// The track pixel row of the current match's tick (the main selection, when it is a kept
+/// match).
+pub(crate) fn current_tick(v: &EditorView, track: Bounds<Pixels>, map: &HeightMap) -> Option<u32> {
+    status(v).current?;
+    let r = v.model.selection().main().range();
+    let line = u32::try_from(v.model.buffer().byte_to_line(r.start)).unwrap_or(u32::MAX);
+    Some(crate::scrollbar::tick_row(track, map, line))
 }
 
 /// The 1 px `text-3` outline of every kept match on the painted rows, but the main selection
@@ -543,6 +733,19 @@ mod tests {
         let m = Lit("a");
         let kept = vec![0..1, 4..5, 8..9];
         for r in [0..0, 0..1, 3..3, 4..5, 8..9, 9..9, 2..6] {
+            for back in [false, true] {
+                assert_eq!(
+                    step_direct(&m, hay, &r, back),
+                    step_in(&kept, &r, back),
+                    "{r:?} back={back}"
+                );
+            }
+        }
+        // ## m3c-t33-find (fix round 1, M7): a caret inside a two-byte match.
+        let hay = "ab ab ab";
+        let m = Lit("ab");
+        let kept = vec![0..2, 3..5, 6..8];
+        for r in [1..1, 4..4, 7..7, 1..4, 3..5, 0..0, 8..8] {
             for back in [false, true] {
                 assert_eq!(
                     step_direct(&m, hay, &r, back),

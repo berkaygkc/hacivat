@@ -70,6 +70,9 @@ fn main() {
             async {}
         })
         .detach();
+        // ## m3c-t33-find (named exception, fix round 1 M10): the real app shares its find
+        // queries through the macOS find pasteboard; tests and shots never install it.
+        hacivat_app::console::find_bar::install_system_find_pasteboard(cx);
         match hacivat_app::start(cx, startup, demo) {
             Ok(window) => smoke::install(cx, window.into(), &flags, started),
             Err(err) => {

@@ -476,6 +476,22 @@ impl EditorView {
         find::status(self)
     }
 
+    // ## m3c-t33-find (named exception, fix round 1 I1/I3): find as you type, off the UI thread.
+    /// Selects the first match at or after `origin` (wrapping), else `origin`, as one
+    /// selection change; `None` while it waits for the background.
+    pub fn find_from(
+        &mut self,
+        origin: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        find::find_from(self, origin, cx)
+    }
+
+    /// The selection find made last (a step, find as you type), while the text is the same.
+    pub fn find_made(&self) -> Option<Range<usize>> {
+        find::made(self)
+    }
+
     /// The folded ranges.
     pub fn folds(&self) -> &FoldSet {
         fold_gutter::folds(self)

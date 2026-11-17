@@ -11,8 +11,9 @@
 //! **The matcher is built here, over the original text** (R-M3-10): a literal query is
 //! escaped; with Turkish-tolerant on, each letter becomes a class of its variants (`i` →
 //! `[iıìíîïĩīĭįIİÌÍÎÏĨĪĬĮ]`, the Turkish dotted and dotless `i` and the accented forms, each
-//! followed by `\p{Mn}*` so a decomposed accent is ignored too); Match case keeps the classes to
-//! the letter's own case (lower `i` finds `ı`, upper `I` finds `İ`). Exact mode never folds a
+//! followed by `[\x{300}-\x{36F}]*` so a decomposed accent is ignored too; a literal longer
+//! than `TOLERANT_MAX` is matched as written); Match case keeps the classes to the letter's own
+//! case (lower `i` finds `ı`, upper `I` finds `İ`). Exact mode never folds a
 //! Turkish letter: `(?i)` is the `regex` crate's simple case folding, where `i`/`I` do not
 //! reach `İ`/`ı`. A regular expression is the user's own, its literal letters rewritten the
 //! same way when Turkish-tolerant is on (escapes, classes' ranges, group names and flags are
@@ -94,6 +95,10 @@ pub struct RegexMatcher {
 
 /// The most a compiled pattern may take (ALG UI-EDIT-22 step 11).
 const SIZE_LIMIT: usize = 10 << 20;
+// ## m3c-t33-find (fix round 1, I2)
+/// The longest literal compiled with Turkish-tolerant classes (twice the 1,000-byte seed);
+/// a longer one is matched as written (case folding still applies).
+pub const TOLERANT_MAX: usize = 2_000;
 
 /// The Turkish-tolerant letter classes: each group's lower and upper case members (the
 /// Turkish letters and the Latin-1 / Latin Extended-A accents).
@@ -140,7 +145,9 @@ fn is_accent(c: char) -> bool {
 /// `c` as a tolerant class with its decomposed accents (a group, so a quantifier after it
 /// applies to the whole).
 fn tolerant_class(class: &str) -> String {
-    format!(r"(?:[{class}]\p{{Mn}}*)")
+    // ## m3c-t33-find (fix round 1, I2): the combining accents only (U+0300–U+036F), not all
+    // of `\p{Mn}`: its automaton per letter pushed a 550-letter query past the size limit.
+    format!(r"(?:[{class}][\x{{300}}-\x{{36F}}]*)")
 }
 
 /// A literal query as a pattern.
@@ -290,11 +297,15 @@ fn copy_class(chars: &[char], i: &mut usize, match_case: bool, out: &mut String)
         first = false;
         let range = chars.get(*i + 1) == Some(&'-') && chars.get(*i + 2).is_some_and(|&e| e != ']');
         if range {
-            for _ in 0..3 {
-                if let Some(&g) = chars.get(*i) {
-                    out.push(g);
-                    *i += 1;
-                }
+            out.push(c);
+            out.push('-');
+            *i += 2;
+            // Fix round 1 (M6): the range's end may be an escape (`[a-\x7A]`).
+            if chars.get(*i) == Some(&'\\') {
+                copy_escape(chars, i, out);
+            } else if let Some(&g) = chars.get(*i) {
+                out.push(g);
+                *i += 1;
             }
             continue;
         }
@@ -342,7 +353,21 @@ pub fn build_matcher(query: &str, o: FindOpts) -> Result<Option<RegexMatcher>, S
             }
         }
     } else {
-        compile(&literal_pattern(query, o), o.match_case).map_err(|e| short_error(&e))?
+        // A literal never fails (I2): longer than `TOLERANT_MAX` characters, or past the size
+        // limit, the tolerant classes fall back to the plain literal (case folding still
+        // applies); a literal too large even then searches nothing.
+        let plain = FindOpts {
+            tolerant: false,
+            ..o
+        };
+        let tolerant = o.tolerant && query.chars().count() <= TOLERANT_MAX;
+        let first = if tolerant { o } else { plain };
+        let built = compile(&literal_pattern(query, first), o.match_case)
+            .or_else(|_| compile(&literal_pattern(query, plain), o.match_case));
+        match built {
+            Ok(re) => re,
+            Err(_) => return Ok(None),
+        }
     };
     Ok(Some(RegexMatcher { re, words: o.words }))
 }
@@ -357,6 +382,22 @@ fn bounded(hay: &str, r: &Range<usize>) -> bool {
     let before = hay[..r.start].chars().next_back();
     let after = hay[r.end..].chars().next();
     !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char)
+}
+
+/// The first position after `at` whose preceding character is not a word character (the next
+/// place a whole word may start).
+fn past_word_run(hay: &str, at: usize) -> Option<usize> {
+    let mut chars = hay.get(at..)?.char_indices();
+    let (_, first) = chars.next()?;
+    if !is_word_char(first) {
+        return Some(at + first.len_utf8());
+    }
+    for (i, c) in chars {
+        if !is_word_char(c) {
+            return Some(at + i + c.len_utf8());
+        }
+    }
+    Some(hay.len())
 }
 
 /// The character boundary after `at`.
@@ -375,10 +416,17 @@ impl FindMatcher for RegexMatcher {
             }
             let m = self.re.find_at(hay, at)?;
             let r = m.range();
-            if !r.is_empty() && (!self.words || bounded(hay, &r)) {
+            if r.is_empty() {
+                at = after(hay, r.start)?;
+                continue;
+            }
+            if !self.words || bounded(hay, &r) {
                 return Some(r);
             }
-            at = after(hay, r.start)?;
+            // Fix round 1 (M5): a whole-word match starts only where the character before is
+            // not a word character, so the rest of this word run is skipped at once (linear,
+            // where retrying each next character was quadratic for a greedy pattern).
+            at = past_word_run(hay, r.start)?;
         }
         None
     }
@@ -517,10 +565,15 @@ pub struct FindBar {
     open: bool,
     /// The engine's message for an invalid pattern.
     error: Option<SharedString>,
-    /// The main selection when find started (Escape returns there).
+    /// The main selection when find started (Escape returns there while the selection is
+    /// still the one find made, `EditorView::find_made`).
     origin: Range<usize>,
-    /// The selection find made last: Escape returns to `origin` only while it still holds.
-    made: Option<Range<usize>>,
+    // ## m3c-t33-find (fix round 1, M3, M4)
+    /// The last count shown that was not waiting for its first batch: shown (as pending) while
+    /// a new count starts, so the count and the buttons do not flash.
+    last: Option<FindStatus>,
+    /// The count's accessible name: changed only when a count settles (announced once).
+    announced: SharedString,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -746,7 +799,8 @@ impl FindBar {
             open: false,
             error: None,
             origin: 0..0,
-            made: None,
+            last: None,
+            announced: SharedString::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -809,13 +863,20 @@ impl FindBar {
             self.opts.tolerant = tolerant_default(cx);
         }
         // Asked again after the user moved the caret: find starts from there now.
-        if self.made.as_ref() != Some(&main) {
+        if editor.read(cx).find_made().as_ref() != Some(&main) {
             self.origin = main;
-            self.made = None;
         }
         let seed = seed.or_else(|| {
             let empty = self.input.read(cx).value().is_empty();
             find_pasteboard(cx).filter(|_| empty)
+        });
+        // Fix round 1 (M11): a seed is text; with Regular expression on it is escaped.
+        let seed = seed.map(|s| {
+            if self.opts.regex {
+                regex::escape(&s)
+            } else {
+                s
+            }
         });
         if let Some(seed) = seed {
             self.input.update(cx, |i, cx| {
@@ -850,23 +911,21 @@ impl FindBar {
             Ok(Some(m)) => Arc::new(m),
             Ok(None) | Err(_) => Arc::new(Nothing),
         };
-        if !query.is_empty() {
-            write_find_pasteboard(&query, cx);
+        // Fix round 1 (M14): a caret the user moved since find last selected is the new origin.
+        let (main, made) = {
+            let v = editor.read(cx);
+            (v.snapshot().selection.main().range(), v.find_made())
+        };
+        if made.as_ref() != Some(&main) && main != self.origin {
+            self.origin = main;
         }
+        // Fix round 1 (I1, I3): the first match from the origin is found on the background
+        // executor and lands as one selection change.
         let origin = self.origin.clone();
-        let made = editor.update(cx, |v, cx| {
+        editor.update(cx, |v, cx| {
             v.set_find(Some(matcher), cx);
-            let at = origin.start;
-            v.select_range(at..at, cx);
-            match v.find_step(false, cx) {
-                Some(r) => r,
-                None => {
-                    v.select_range(origin.clone(), cx);
-                    origin.clone()
-                }
-            }
+            v.find_from(origin, cx);
         });
-        self.made = Some(made);
         cx.notify();
     }
 
@@ -874,9 +933,8 @@ impl FindBar {
         let Some(editor) = self.editor.upgrade() else {
             return;
         };
-        if let Some(r) = editor.update(cx, |v, cx| v.find_step(back, cx)) {
-            self.made = Some(r);
-        }
+        editor.update(cx, |v, cx| v.find_step(back, cx));
+        self.commit_query(cx);
         cx.notify();
     }
 
@@ -884,13 +942,12 @@ impl FindBar {
         let Some(editor) = self.editor.upgrade() else {
             return;
         };
-        let n = editor.update(cx, |v, cx| v.select_all_matches(SELECT_ALL_CAP, cx));
-        if n > 0 {
-            // The carets are the user's now: Escape leaves them, and the editor takes the keys.
-            self.made = None;
-            let handle = editor.read(cx).focus_handle(cx);
-            window.focus(&handle, cx);
-        }
+        // It answers 0 while it waits for the background (fix round 1, M8): the carets land
+        // then. Either way they are the user's, and the editor takes the keys.
+        editor.update(cx, |v, cx| v.select_all_matches(SELECT_ALL_CAP, cx));
+        self.commit_query(cx);
+        let handle = editor.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
         cx.notify();
     }
 
@@ -917,12 +974,13 @@ impl FindBar {
         }
         self.open = false;
         let had_focus = self.has_focus(window, cx);
+        self.commit_query(cx);
+        self.last = None;
         if let Some(editor) = self.editor.upgrade() {
             let origin = self.origin.clone();
-            let made = self.made.take();
             editor.update(cx, |v, cx| {
                 let main = v.snapshot().selection.main().range();
-                if restore && made.as_ref() == Some(&main) {
+                if restore && v.find_made().as_ref() == Some(&main) {
                     v.select_range(origin, cx);
                 }
                 if v.find_status().active {
@@ -937,6 +995,16 @@ impl FindBar {
         self.error = None;
         notify_host(self.console, cx);
         cx.notify();
+    }
+
+    // ## m3c-t33-find (fix round 1, M10)
+    /// A committed search (a step, Select all, close) writes its query to the find pasteboard;
+    /// typing never does.
+    fn commit_query(&self, cx: &App) {
+        let query = self.input.read(cx).value();
+        if !query.is_empty() && self.error.is_none() {
+            write_find_pasteboard(query, cx);
+        }
     }
 
     /// Enter and Shift+Enter in the field step (taken before the input, which would submit).
@@ -1014,28 +1082,53 @@ impl FindBar {
     }
 }
 
-/// The macOS find pasteboard's text (shared between apps); nothing elsewhere.
-fn find_pasteboard(cx: &App) -> Option<String> {
+// ## m3c-t33-find (fix round 1, M10)
+/// Reads the find pasteboard's query.
+pub type PasteboardRead = std::rc::Rc<dyn Fn(&App) -> Option<String>>;
+/// Writes a query to the find pasteboard.
+pub type PasteboardWrite = std::rc::Rc<dyn Fn(&str, &App)>;
+
+/// The find pasteboard the bar uses: none unless installed (tests and the shots harness never
+/// touch the system's); the app's binary installs the macOS one
+/// ([`install_system_find_pasteboard`]).
+struct FindPasteboard {
+    read: PasteboardRead,
+    write: PasteboardWrite,
+}
+
+impl Global for FindPasteboard {}
+
+/// Installs a find pasteboard (tests inject one).
+pub fn install_find_pasteboard(cx: &mut App, read: PasteboardRead, write: PasteboardWrite) {
+    cx.set_global(FindPasteboard { read, write });
+}
+
+/// Installs the macOS find pasteboard (shared between apps); nothing elsewhere.
+pub fn install_system_find_pasteboard(cx: &mut App) {
     #[cfg(target_os = "macos")]
-    {
-        cx.read_from_find_pasteboard()?
-            .text()
-            .filter(|t| !t.is_empty() && !t.contains(['\n', '\r']))
-    }
+    install_find_pasteboard(
+        cx,
+        std::rc::Rc::new(|cx: &App| cx.read_from_find_pasteboard()?.text()),
+        std::rc::Rc::new(|query: &str, cx: &App| {
+            cx.write_to_find_pasteboard(hacivat_ui_core::gpui_surface::ClipboardItem::new_string(
+                query.to_owned(),
+            ));
+        }),
+    );
     #[cfg(not(target_os = "macos"))]
-    {
-        let _ = cx;
-        None
-    }
+    let _ = cx;
+}
+
+/// The find pasteboard's query (one line, not empty).
+fn find_pasteboard(cx: &App) -> Option<String> {
+    let pb = cx.try_global::<FindPasteboard>()?;
+    (pb.read)(cx).filter(|t| !t.is_empty() && !t.contains(['\n', '\r']))
 }
 
 fn write_find_pasteboard(query: &str, cx: &App) {
-    #[cfg(target_os = "macos")]
-    cx.write_to_find_pasteboard(hacivat_ui_core::gpui_surface::ClipboardItem::new_string(
-        query.to_owned(),
-    ));
-    #[cfg(not(target_os = "macos"))]
-    let _ = (query, cx);
+    if let Some(pb) = cx.try_global::<FindPasteboard>() {
+        (pb.write)(query, cx);
+    }
 }
 
 impl Render for FindBar {
@@ -1048,6 +1141,19 @@ impl Render for FindBar {
             .upgrade()
             .map(|e| e.read(cx).find_status())
             .unwrap_or_default();
+        // Fix round 1 (M3): until the new count's first batch lands, the last count stays (as
+        // pending, with the amber marker) and so do the buttons.
+        let pending = status.active && status.total.is_none() && status.counted == 0;
+        let stale = pending && self.last.is_some();
+        let status = match self.last {
+            Some(last) if pending => last,
+            _ => {
+                if status.active && !pending {
+                    self.last = Some(status);
+                }
+                status
+            }
+        };
         let count = self.count(status, cx);
         let searchable = self.error.is_none()
             && !self.input.read(cx).value().is_empty()
@@ -1112,10 +1218,20 @@ impl Render for FindBar {
             .items_center()
             .min_w(px(58.0))
             .gap(px(6.0));
-        let mut count_name = SharedString::default();
+        // Fix round 1 (M4): the polite region's name changes only when a count settles.
+        match &count {
+            Some((text, _, false, _)) if !stale => self.announced = text.clone(),
+            None => self.announced = SharedString::default(),
+            _ => {}
+        }
+        let count_name = self.announced.clone();
         if let Some((text, tip, counting, invalid)) = count {
-            count_name = text.clone();
-            if counting {
+            let tip = if stale {
+                Some(message(cx, "hv-find-counting-tip", vec![]))
+            } else {
+                tip
+            };
+            if counting || stale {
                 count_el = count_el.child(run_marker(&theme));
             }
             if invalid {

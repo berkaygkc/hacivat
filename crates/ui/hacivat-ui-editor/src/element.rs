@@ -1130,17 +1130,17 @@ pub(crate) fn paint_frame(
     }
     v.cache.paint_failed(failed);
     // ## m3c-t33-find (named exception): markers by visible row, and the find ticks.
-    let uniform;
     let map = match v.layout.as_ref() {
-        Some(layout) => &layout.map,
-        None => {
-            uniform = HeightMap::uniform(
-                frame.total_lines,
-                f64::from(f32::from(frame.rows.line_height)),
-            );
-            &uniform
-        }
+        Some(layout) => layout.map.clone(),
+        None => HeightMap::uniform(
+            frame.total_lines,
+            f64::from(f32::from(frame.rows.line_height)),
+        ),
     };
+    // Fix round 1 (M9): bucketed by pixel row, cached per count generation.
+    let ticks = crate::find::tick_rows(v, frame.track, &map);
+    let current = crate::find::current_tick(v, frame.track, &map);
+    let map = &map;
     scrollbar::paint(
         &ScrollbarCtx {
             track: frame.track,
@@ -1150,7 +1150,8 @@ pub(crate) fn paint_frame(
             current_statement: frame.current_statement.clone(),
             snapshot: &frame.snapshot,
             map,
-            find: crate::find::matches_in(v, 0..usize::MAX),
+            find_ticks: &ticks,
+            find_current: current,
         },
         &v.marks,
         window,

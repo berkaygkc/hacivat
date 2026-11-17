@@ -57,8 +57,10 @@ pub struct ScrollbarCtx<'a> {
     // ## m3c-t33-find
     /// The frame's height map: markers sit by visible row.
     pub map: &'a HeightMap,
-    /// The kept find matches (byte ranges, in order).
-    pub find: &'a [Range<usize>],
+    /// The find ticks' track pixel rows, ascending (`find::tick_rows`; fix round 1, M9).
+    pub find_ticks: &'a [u32],
+    /// The current match's tick row.
+    pub find_current: Option<u32>,
 }
 
 /// The least height of a marker.
@@ -171,9 +173,18 @@ pub fn paint(s: &ScrollbarCtx<'_>, m: &MarkStore, window: &mut Window, cx: &mut 
     paint_ticks(s, &inks, window);
 }
 
-/// The find ticks (module docs): one per kept match, the main selection's in blue.
+/// The track pixel row of a find tick on line `line` (by visible row, inside the track).
+pub(crate) fn tick_row(track: Bounds<Pixels>, map: &HeightMap, line: u32) -> u32 {
+    let height = f32::from(track.size.height);
+    let b = row_span(track, map, line..line + 1);
+    let y = f32::from(b.top() - track.top()).min(height - TICK).max(0.0);
+    y.floor() as u32
+}
+
+/// The find ticks (module docs): one per matched row, the current match's in blue. O(track
+/// rows): the rows come bucketed and cached (`find::tick_rows`).
 fn paint_ticks(s: &ScrollbarCtx<'_>, inks: &Inks, window: &mut Window) {
-    if s.find.is_empty() {
+    if s.find_ticks.is_empty() && s.find_current.is_none() {
         return;
     }
     let track = s.track;
@@ -181,25 +192,13 @@ fn paint_ticks(s: &ScrollbarCtx<'_>, inks: &Inks, window: &mut Window) {
     let rows = height.ceil() as usize;
     // 0: nothing, 1: a match, 2: the current one.
     let mut at = vec![0u8; rows];
-    let buf = &s.snapshot.buffer;
-    let main = s.snapshot.selection.main().range();
-    let line_of = |b: usize| u32::try_from(buf.byte_to_line(b)).unwrap_or(u32::MAX);
-    let mut last: Option<(u32, usize)> = None;
-    for r in s.find {
-        let line = line_of(r.start);
-        let row = match last {
-            Some((l, row)) if l == line => row,
-            _ => {
-                let b = row_span(track, s.map, line..line + 1);
-                let y = f32::from(b.top() - track.top()).min(height - TICK).max(0.0);
-                y.floor() as usize
-            }
-        };
-        last = Some((line, row));
-        let kind = if *r == main { 2 } else { 1 };
-        if let Some(slot) = at.get_mut(row) {
-            *slot = (*slot).max(kind);
+    for &row in s.find_ticks {
+        if let Some(slot) = at.get_mut(row as usize) {
+            *slot = 1;
         }
+    }
+    if let Some(slot) = s.find_current.and_then(|r| at.get_mut(r as usize)) {
+        *slot = 2;
     }
     let mut row = 0;
     while row < rows {
