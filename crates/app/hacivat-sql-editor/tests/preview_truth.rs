@@ -921,3 +921,29 @@ fn a_selection_previews_as_one_unit_under_as_one() {
         "one unit: the selection as written"
     );
 }
+
+// ## m3c-t34-editor (named exception, the T24/T29 carry): the band's "as one · n statements".
+/// A selection previewed as one unit says how many statements it holds; run as separate
+/// statements, or at a caret, it says nothing of the kind.
+#[test]
+fn an_as_one_preview_counts_its_statements() {
+    let text = "SELECT 1; SELECT 2;\nSELECT 3;";
+    let snap = SqlDocument::new(
+        text.to_string(),
+        DialectCtx::new(DialectId::Postgres, None),
+        ClientFlavor::None,
+    )
+    .snapshot();
+    let at = ExecAt::Selections(smallvec![0..text.len()]);
+    let as_one = RunPolicy {
+        selection_as_one: true,
+        ..RunPolicy::default()
+    };
+    let one = preview_with(&snap, &at, ExecAction::Execute1, true, None, &as_one);
+    assert_eq!((one.ranges.len(), one.as_one), (1, 3));
+    let separate = preview_of(&snap, &at, ExecAction::Execute1, true, None);
+    assert_eq!(separate.as_one, 0);
+    let caret = ExecAt::Carets(smallvec![3]);
+    let at_caret = preview_with(&snap, &caret, ExecAction::Execute1, true, None, &as_one);
+    assert_eq!(at_caret.as_one, 0);
+}

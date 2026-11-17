@@ -18,6 +18,16 @@ use hacivat_ui_core::gpui_surface::{
 };
 use hacivat_ui_core::theme::Theme;
 use hacivat_ui_editor::{EditorEvent, EditorStatus, EditorView, Tier};
+// ## m3c-t34-editor
+use std::rc::Rc;
+
+use hacivat_text::LineEnding;
+use hacivat_ui::menu::{MenuItemSpec, PopupMenu, PopupMenuEvent};
+use hacivat_ui::popover::{Declare as _, Tip};
+use hacivat_ui::text::TextFn;
+use hacivat_ui_core::gpui_surface::{
+    AnyElement, App, Pixels, Point, Role, StatefulInteractiveElement as _, WeakEntity, point,
+};
 
 use crate::l10n_global::tr;
 
@@ -26,6 +36,8 @@ pub struct EditorSegment {
     status: EditorStatus,
     renders: u64,
     _subscription: Subscription,
+    // ## m3c-t34-editor (named exception): the editor the line endings menu normalises.
+    editor: WeakEntity<EditorView>,
 }
 
 impl EditorSegment {
@@ -48,6 +60,7 @@ impl EditorSegment {
             status,
             renders: 0,
             _subscription: subscription,
+            editor: editor.downgrade(),
         }
     }
 
@@ -95,6 +108,11 @@ impl Render for EditorSegment {
                 )
                 .id("editor-segment-reduced"),
             );
+        }
+        // ## m3c-t34-editor (named exception, NOTES 17 and M3c-16): "Mixed line endings", after
+        // Reduced mode; its menu normalises to one ending (never automatic).
+        if s.mixed_line_endings {
+            row = row.child(eol_button(self.editor.clone(), cx));
         }
         // ## m3c-t31-multi (named exception, NOTES surface 14): "3 carets" before the selected
         // count, from two carets on; it gives way with it.
@@ -155,4 +173,115 @@ impl Render for EditorSegment {
             .id("editor-segment-lncol"),
         )
     }
+}
+
+// ## m3c-t34-editor
+/// The status bar's "Mixed line endings" button (`text` ink): its menu opens above it.
+fn eol_button(editor: WeakEntity<EditorView>, cx: &App) -> AnyElement {
+    let theme = *Theme::get(cx);
+    let t = theme.tokens;
+    let label = tr(cx, ids::hv::EOL_MIXED, NoArgs);
+    let tip = tr(cx, ids::hv::EOL_MIXED_TIP, NoArgs);
+    div()
+        .id("editor-segment-eol")
+        .flex_none()
+        .cursor_pointer()
+        .child(
+            Label::new(
+                label.clone(),
+                TextSource::Fluent,
+                t.type_ramp.caption,
+                t.colors.text.to_hsla(),
+            )
+            .id("editor-segment-eol-label"),
+        )
+        .on_click(move |ev, window, cx| {
+            let at = ev.position();
+            open_eol_menu(editor.clone(), point(at.x, at.y - px(4.0)), window, cx);
+        })
+        .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+        .declare(Role::Button, label, None)
+        .into_any_element()
+}
+
+/// The line endings menu (NOTES 17): "Line endings: LF 214, CRLF 12", then the dominant ending
+/// first with "most lines", then the other; a row rewrites every ending as one undo group.
+pub fn open_eol_menu(
+    editor: WeakEntity<EditorView>,
+    anchor: Point<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(e) = editor.upgrade() else {
+        return;
+    };
+    let items = eol_menu_items(&e, cx);
+    let Some(ws) = window
+        .root::<crate::shell::workspace::Workspace>()
+        .flatten()
+    else {
+        return;
+    };
+    let menu = ws.update(cx, |ws, cx| ws.open_popup_menu(anchor, items, window, cx));
+    menu.update(cx, |m: &mut PopupMenu, _| m.set_access_keys(false));
+    cx.subscribe(&menu, move |_, event: &PopupMenuEvent, cx| {
+        if let PopupMenuEvent::Chosen(action) = event {
+            let to = match action.as_ref() {
+                EOL_LF => LineEnding::Lf,
+                EOL_CRLF => LineEnding::CrLf,
+                _ => return,
+            };
+            if let Some(e) = editor.upgrade() {
+                e.update(cx, |e, cx| {
+                    e.normalize_line_endings_to(to, cx);
+                });
+            }
+        }
+    })
+    .detach();
+}
+
+/// The menu's row actions.
+const EOL_LF: &str = "eol.lf";
+const EOL_CRLF: &str = "eol.crlf";
+
+/// The line endings menu's rows for `editor`.
+pub fn eol_menu_items(editor: &Entity<EditorView>, cx: &App) -> Vec<MenuItemSpec> {
+    let s = editor.read(cx).line_endings();
+    let (lf, crlf) = (u64::from(s.lf), u64::from(s.crlf));
+    let counts: TextFn = Rc::new(move |cx: &App| {
+        tr(
+            cx,
+            ids::hv::EOL_COUNTS,
+            ids::hv::HvEolCounts {
+                lf: Count(lf),
+                crlf: Count(crlf),
+            },
+        )
+    });
+    let row = |name: &'static str, action: &'static str| {
+        MenuItemSpec::new(
+            Rc::new(move |cx: &App| {
+                tr(
+                    cx,
+                    ids::hv::EOL_TO,
+                    ids::hv::HvEolTo {
+                        ending: hacivat_l10n::Text(name.to_string()),
+                    },
+                )
+            }),
+            action,
+        )
+    };
+    let most: TextFn = Rc::new(|cx: &App| tr(cx, ids::hv::EOL_MOST, NoArgs));
+    let (first, second) = if crlf > lf {
+        (row("CRLF", EOL_CRLF), row("LF", EOL_LF))
+    } else {
+        (row("LF", EOL_LF), row("CRLF", EOL_CRLF))
+    };
+    vec![
+        MenuItemSpec::new(counts, "eol.counts").note(true),
+        first.hint(most),
+        second,
+    ]
 }

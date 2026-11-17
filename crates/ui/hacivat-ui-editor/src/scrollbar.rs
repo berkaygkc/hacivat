@@ -100,9 +100,13 @@ fn hue(state: &ExecMarkState, stale: bool, inks: &Inks) -> Hsla {
         ExecMarkState::Succeeded { .. } if stale => inks.text_3,
         ExecMarkState::Succeeded { .. } => inks.green,
         // ## m3b-t01b-seams: Escalated keeps the Cancelling hue.
+        // ## m3c-t34-editor (named exception): waiting for an answer is amber (pending), a
+        // rolled-back statement `text_2` (its glyph's ink).
         ExecMarkState::Running { .. }
         | ExecMarkState::Cancelling { .. }
-        | ExecMarkState::Escalated { .. } => inks.amber,
+        | ExecMarkState::Escalated { .. }
+        | ExecMarkState::Awaiting => inks.amber,
+        ExecMarkState::RolledBack => inks.text_2,
         ExecMarkState::Queued => inks.seam_strong,
         ExecMarkState::Failed { .. } => inks.text,
         ExecMarkState::Cancelled => inks.text_3,

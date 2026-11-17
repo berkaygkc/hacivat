@@ -51,6 +51,8 @@ pub use menu::{ShortcutHints, context_menu_entries};
 pub use selection::{double_click_range, escape_released};
 
 pub(crate) use selection::double_click;
+// ## m3c-t34-editor (named exception): the fan-out's line-ending hooks.
+pub(crate) use lines::{after_commit as lines_after_commit, opened as lines_opened};
 
 /// One editor command.
 #[derive(Clone, Copy)]
@@ -118,6 +120,8 @@ pub struct CommandState {
     /// The model's commit count right after an occurrence search that began at a caret moved
     /// the selection: while it is still the count, the search matches whole words (M10).
     pub(crate) whole_word_at: Option<u64>,
+    // ## m3c-t34-editor (named exception): the line commands' state (line endings, recall).
+    pub(crate) lines: lines::LineState,
 }
 
 impl CommandState {
@@ -289,6 +293,9 @@ const fn command(
 
 // ## m3b-t01b-seams (fix round 2, I3)
 /// A stub row: no-op body, no history seal, disabled in the app until its task fills it.
+// ## m3c-t34-editor (named exception): Task 34 filled the last editor stubs; the constructor
+// stays for a later seam.
+#[allow(dead_code, reason = "no editor row is a stub since Task 34")]
 const fn stub(
     id: &'static str,
     title_id: &'static str,
@@ -377,14 +384,15 @@ static COMMANDS: [EditorCommand; 68] = [
     command("editor.find_prev", "hv-cmd-editor-find-prev", find::find_prev, false),
     command("editor.find_close", "hv-cmd-editor-find-close", find::find_close, false),
     // Task 34: lines and history recall.
-    stub("editor.toggle_comment", "hv-cmd-editor-toggle-comment", lines::toggle_comment),
-    stub("editor.duplicate_line", "hv-cmd-editor-duplicate-line", lines::duplicate_line),
-    stub("editor.delete_line", "hv-cmd-editor-delete-line", lines::delete_line),
-    stub("editor.move_line_up", "hv-cmd-editor-move-line-up", lines::move_line_up),
-    stub("editor.move_line_down", "hv-cmd-editor-move-line-down", lines::move_line_down),
-    stub("editor.normalize_line_endings", "hv-cmd-editor-normalize-line-endings", lines::normalize_line_endings),
-    stub("editor.history_prev", "hv-cmd-editor-history-prev", lines::history_prev),
-    stub("editor.history_next", "hv-cmd-editor-history-next", lines::history_next),
+    // ## m3c-t34-editor (named exception): the Task 34 rows are commands now.
+    command("editor.toggle_comment", "hv-cmd-editor-toggle-comment", lines::toggle_comment, false),
+    command("editor.duplicate_line", "hv-cmd-editor-duplicate-line", lines::duplicate_line, false),
+    command("editor.delete_line", "hv-cmd-editor-delete-line", lines::delete_line, false),
+    command("editor.move_line_up", "hv-cmd-editor-move-line-up", lines::move_line_up, false),
+    command("editor.move_line_down", "hv-cmd-editor-move-line-down", lines::move_line_down, false),
+    command("editor.normalize_line_endings", "hv-cmd-editor-normalize-line-endings", lines::normalize_line_endings, false),
+    command("editor.history_prev", "hv-cmd-editor-history-prev", lines::history_prev, false),
+    command("editor.history_next", "hv-cmd-editor-history-next", lines::history_next, false),
 ];
 
 /// Every editor command (the app registers them; the keymap's `editor.*` rows name them).

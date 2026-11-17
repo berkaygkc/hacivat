@@ -33,7 +33,9 @@ use crate::view::{EditorEvent, EditorView};
 const MENU_WIDTH_PX: f32 = 250.0;
 
 /// The menu's entries: editor command ids, `None` for a separator.
-const ENTRIES: [Option<&str>; 7] = [
+// ## m3c-t34-editor (named exception, NOTES 17): the line commands, then Select all
+// occurrences and Undo the selection change.
+const ENTRIES: [Option<&str>; 16] = [
     Some("editor.cut"),
     Some("editor.copy"),
     Some("editor.paste"),
@@ -41,6 +43,27 @@ const ENTRIES: [Option<&str>; 7] = [
     None,
     Some("editor.run"),
     Some("editor.describe_exec_range"),
+    None,
+    Some("editor.toggle_comment"),
+    Some("editor.duplicate_line"),
+    Some("editor.delete_line"),
+    Some("editor.move_line_up"),
+    Some("editor.move_line_down"),
+    None,
+    Some("editor.select_all_occurrences"),
+    Some("editor.undo_selection"),
+];
+
+// ## m3c-t34-editor
+/// The entries that edit the text (disabled on a read-only editor).
+const EDITS: [&str; 7] = [
+    "editor.cut",
+    "editor.paste",
+    "editor.toggle_comment",
+    "editor.duplicate_line",
+    "editor.delete_line",
+    "editor.move_line_up",
+    "editor.move_line_down",
 ];
 
 /// What [`ShortcutHints`] holds: the chord of the command with the given id, if it has one.
@@ -84,7 +107,7 @@ pub fn context_menu_entries(v: &EditorView, cx: &App) -> Vec<MenuItemSpec> {
                 return MenuItemSpec::separator();
             };
             let (id, title) = (command.id, command.title_id);
-            let edits = matches!(id, "editor.cut" | "editor.paste");
+            let edits = EDITS.contains(&id);
             let mut item = MenuItemSpec::new(Rc::new(move |cx: &App| ui_text(cx, title)), id)
                 .disabled(edits && v.config.read_only);
             if let Some(hints) = hints.clone().filter(|h| (h.0)(cx, id).is_some()) {

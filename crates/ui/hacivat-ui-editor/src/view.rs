@@ -80,6 +80,9 @@ pub struct EditorStatus {
     // ## m3c-t31-multi (named exception): "3 carets" (NOTES surface 14).
     /// How many ranges the selection has (1: one caret or one selection).
     pub carets: u32,
+    // ## m3c-t34-editor (named exception): the status bar's "Mixed line endings" (NOTES 17).
+    /// The text's lines end in more than one way.
+    pub mixed_line_endings: bool,
 }
 
 /// What an editor tells its host.
@@ -120,6 +123,13 @@ pub enum EditorEvent {
     // ## m3c-t33-find (named exception): the find status may have changed (a count batch, a
     // step, a new query, a commit while a query is set); the host's bar re-reads it.
     FindChanged,
+    // ## m3c-t34-editor (named exception)
+    /// `editor.history_prev` (`older`) or `_next` at the last line of an empty or recalled
+    /// editor: the host recalls a statement from its history and answers with
+    /// `EditorView::show_recalled`.
+    HistoryRecall {
+        older: bool,
+    },
 }
 
 /// The focused editor, for the app's commands (`enabled` = an editor is focused).
@@ -172,6 +182,10 @@ pub struct EditorView {
     pub(crate) scroll: ScrollState,
     pub(crate) blink: Blink,
     pub(crate) drag: Option<DragState>,
+    // ## m3c-t34-editor (named exception): the drag's edge autoscroll (`mouse.rs`) and the
+    // gutter's buttons (`gutter.rs`).
+    pub(crate) autoscroll: Option<crate::mouse::Autoscroll>,
+    pub(crate) gutter_ui: crate::gutter::GutterUi,
     /// The editor has the focus (the blink runs only then).
     has_focus: bool,
     /// The longest line seen, in bytes (the tier's long-line rule). Edits only grow it (a
@@ -272,7 +286,8 @@ impl EditorView {
             cx.on_focus(&focus, window, |v, window, cx| v.focused(window, cx)),
             cx.on_blur(&focus, window, |v, window, cx| v.blurred(window, cx)),
         ];
-        EditorView {
+        // ## m3c-t34-editor (named exception): the line endings' state starts from the text.
+        let mut view = EditorView {
             doc,
             model,
             ime: ImeCore::default(),
@@ -303,13 +318,17 @@ impl EditorView {
             scroll: ScrollState::default(),
             blink: Blink::default(),
             drag: None,
+            autoscroll: None,
+            gutter_ui: crate::gutter::GutterUi::default(),
             has_focus: false,
             longest_line: longest_line(text),
             fanned,
             input_marked: false,
             context_point: None,
             selected_cache: std::cell::Cell::new(None),
-        }
+        };
+        commands::lines_opened(&mut view);
+        view
     }
 
     /// The editor took the focus: it becomes the `FocusedEditor` the app's commands run on,
@@ -614,6 +633,8 @@ impl EditorView {
             tier: self.tier.tier,
             composing: self.ime.is_composing(),
             carets: u32::try_from(sel.ranges().len()).unwrap_or(u32::MAX),
+            // ## m3c-t34-editor (named exception): O(1), kept by the fan-out.
+            mixed_line_endings: self.commands.lines.mixed,
         }
     }
 
@@ -847,6 +868,8 @@ impl EditorView {
         fold_gutter::on_commit(self, &committed, text_changed);
         // ## m3c-t33-find (named exception): a text change recounts (it spawns the count).
         find::on_commit(self, &committed, text_changed, cx);
+        // ## m3c-t34-editor (named exception): the host hears of mixed line endings.
+        commands::lines_after_commit(self, text_changed, cx);
         if text_changed {
             self.service.change(self.doc, &snap, &committed.desc, cx);
             let text_len = snap.buffer.len_bytes() as u64;

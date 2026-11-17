@@ -279,6 +279,29 @@ pub fn preview_with(
         }
         _ => 0,
     };
+    // ## m3c-t34-editor (named exception; NOTES surface 9): a selection sent as one unit says
+    // how many statements it holds ("as one · 2 statements"): the units the same selection
+    // would run as one by one.
+    let as_one = match (&run, state) {
+        (RangeResolution::Units(u), PreviewState::Units)
+            if as_one && u.len() == 1 && u[0].kind == UnitKind::Verbatim =>
+        {
+            let mut separate = policy;
+            separate.selection = SelectionPolicy::AsSeparate;
+            match resolve(
+                doc,
+                &points,
+                &separate,
+                SplitMode::Execution,
+                None,
+                remembered,
+            ) {
+                RangeResolution::Units(s) => u32::try_from(s.len()).unwrap_or(u32::MAX),
+                _ => 0,
+            }
+        }
+        _ => 0,
+    };
     ExecPreview {
         ranges,
         state: if connected {
@@ -287,5 +310,6 @@ pub fn preview_with(
             PreviewState::NoConnection
         },
         choices,
+        as_one,
     }
 }

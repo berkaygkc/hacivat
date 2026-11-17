@@ -2484,3 +2484,30 @@ hv-find-total = { $n } eşleşme
 hv-find-total-more = { $n }+ eşleşme
 # Review: PO
 hv-find-no-more = Başka eşleşme yok
+
+## m3b-t34-editor
+
+# Review: PO
+hv-gutter-run = Bu ifadeyi çalıştır
+# Review: PO
+hv-gutter-last-runs = Son çalıştırmalar
+# Review: PO
+hv-gutter-never-run = Henüz çalıştırılmadı.
+# Review: PO
+hv-gutter-same-path = Çalıştır ile aynı denetimlerden geçer.
+# Review: PO
+hv-eol-mixed = Karışık satır sonları
+# Review: PO
+hv-eol-mixed-tip = Satırlar hem LF hem CRLF ile bitiyor. Eşitlemek için tıklayın.
+# Review: PO
+hv-eol-counts = Satır sonları: LF { $lf }, CRLF { $crlf }
+# Review: PO
+hv-eol-to = Hepsini { $ending } yap
+# Review: PO
+hv-eol-most = çoğu satır
+# Review: PO
+hv-history-recall = Geçmişten: ifade { $i }/{ $n } · { $older } daha eski · { $newer } daha yeni
+# Review: PO
+hv-editor-mark-rolled-back = geri alındı
+# Review: PO
+hv-editor-preview-as-one = tek parça · { $n } ifade

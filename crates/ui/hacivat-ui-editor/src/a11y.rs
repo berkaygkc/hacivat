@@ -730,9 +730,13 @@ pub fn exec_announcement(cx: &App, statement: u32, state: &ExecMarkState) -> Opt
     let rows = |rows: u64| ("rows", UiArg::Count(rows));
     let (id, more): (&'static str, Option<(&'static str, UiArg)>) = match state {
         // ## m3b-t01b-seams: Escalated is not announced, as Cancelling.
+        // ## m3c-t34-editor (named exception): nor waiting for an answer (its dialog has the
+        // focus and says it) or rolled back (the Output log line and the dialog's end say it).
         ExecMarkState::Queued
         | ExecMarkState::Cancelling { .. }
-        | ExecMarkState::Escalated { .. } => return None,
+        | ExecMarkState::Escalated { .. }
+        | ExecMarkState::Awaiting
+        | ExecMarkState::RolledBack => return None,
         ExecMarkState::Running { .. } => ("hui-editor-exec-running", None),
         ExecMarkState::Succeeded { rows: None, .. } => ("hui-editor-exec-done", None),
         ExecMarkState::Succeeded {

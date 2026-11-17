@@ -9,7 +9,10 @@
 //!   IME composition is committed first (`ImeCore::dispatch`), and the click tells the platform
 //!   to drop its copy (`ime::send_owed_discard`, F4).
 //! - **A drag past the text's top or bottom** scrolls by the overshoot on each move, so the
-//!   selection can grow beyond the view.
+//!   selection can grow beyond the view. ## m3c-t34-editor (ED18 carry): while the pointer
+//!   rests there, a timer goes on doing what a move would, once a frame
+//!   ([`DRAG_AUTOSCROLL_TICK`]), until the pointer is back inside, the button is up or the
+//!   editor lost the focus.
 //! - **Several carets** (## m3c-t31-multi): a click with Option (macOS) or Alt adds a caret,
 //!   the new main one; a drag with Option (macOS) or Ctrl+Alt selects a column, a box in
 //!   display columns (`hacivat_text::column_selection`), the main range on the pointer's line.
@@ -25,6 +28,7 @@
 //! handler (`ime.rs`).
 
 use std::ops::Range;
+use std::time::Duration;
 
 use hacivat_text::units::word_at;
 use hacivat_text::{
@@ -32,7 +36,7 @@ use hacivat_text::{
 };
 use hacivat_ui_core::gpui_surface::{
     Context, CursorStyle, Entity, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, ScrollEvent, Window,
+    MouseUpEvent, Pixels, Point, ScrollEvent, Task, Window,
 };
 
 use crate::element::FramePrepaint;
@@ -61,11 +65,67 @@ pub(crate) struct DragState {
     pub column_started: bool,
 }
 
+// ## m3c-t34-editor
+/// How often a drag resting past the text's edge scrolls on (once a frame).
+pub const DRAG_AUTOSCROLL_TICK: Duration = Duration::from_millis(16);
+
+/// The edge autoscroll of a drag: where the pointer rests, and the timer (dropping it stops it).
+pub(crate) struct Autoscroll {
+    at: Point<Pixels>,
+    _task: Task<()>,
+}
+
+impl std::fmt::Debug for Autoscroll {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Autoscroll")
+            .field("at", &self.at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The pointer is at `at` during a drag: past the edge (`over`) the timer runs (started once)
+/// and follows the pointer; back inside it stops.
+fn follow_edge(v: &mut EditorView, at: Point<Pixels>, over: bool, cx: &mut Context<EditorView>) {
+    if !over {
+        v.autoscroll = None;
+        return;
+    }
+    if let Some(a) = v.autoscroll.as_mut() {
+        a.at = at;
+        return;
+    }
+    let task = cx.spawn(async move |this, cx| {
+        loop {
+            cx.background_executor().timer(DRAG_AUTOSCROLL_TICK).await;
+            let more = this
+                .update(cx, |v, cx| {
+                    // The drag ended (button up, blur) or the pointer came back: done.
+                    let (Some(_), Some(at)) =
+                        (v.drag.as_ref(), v.autoscroll.as_ref().map(|a| a.at))
+                    else {
+                        v.autoscroll = None;
+                        return false;
+                    };
+                    drag(v, at, cx);
+                    cx.notify();
+                    v.autoscroll.is_some()
+                })
+                .unwrap_or(false);
+            if !more {
+                break;
+            }
+        }
+    });
+    v.autoscroll = Some(Autoscroll { at, _task: task });
+}
+
 // ## m3c-t31-multi (fix round 1, M2)
 /// The press's gesture ended (button up, a move without it, a blur): no drag, and the
 /// selection history's gesture closes.
 pub(crate) fn end_drag(v: &mut EditorView) -> bool {
     v.drag = None;
+    // ## m3c-t34-editor: the edge autoscroll ends with it.
+    v.autoscroll = None;
     v.model.end_selection_gesture();
     // ## m3c-t32-fold (named exception, fix round 1 M5): a column box reaching into a fold
     // opens it once the drag ends, not under the pointer mid-drag.
@@ -339,6 +399,8 @@ pub(crate) fn drag(v: &mut EditorView, position: Point<Pixels>, cx: &mut Context
         let dy = over.clamp(-DRAG_SCROLL_ROWS * lh, DRAG_SCROLL_ROWS * lh);
         v.scroll_by(f64::from(dy));
     }
+    // ## m3c-t34-editor: past the edge, it goes on while the pointer rests.
+    follow_edge(v, position, over != 0.0, cx);
     // ## m3c-t31-multi: a column drag selects the box to the pointer.
     if let Some(anchor) = state.column {
         if let Some(head) = line_and_column(v, position)
