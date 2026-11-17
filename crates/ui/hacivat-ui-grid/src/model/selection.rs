@@ -537,6 +537,25 @@ impl Selection {
         self.add_cell(cell, map);
     }
 
+    // ## m3c-t37
+    /// Select all occurrences: each of `cells` its own one-cell rectangle (in the order given,
+    /// the last the active one), `cells[focus]` the anchor and the focus; one refresh.
+    pub fn select_cells(&mut self, cells: &[ModelCell], focus: usize, map: &ViewMap) {
+        let Some(at) = cells.get(focus).or_else(|| cells.first()).copied() else {
+            return;
+        };
+        self.parts.clear();
+        self.all = false;
+        self.pending = None;
+        self.parts.extend(cells.iter().map(|c| {
+            let corner = corner(*c, map);
+            Part::Rect(CellRect::spanning(corner, corner))
+        }));
+        self.anchor = Some(at);
+        self.focus = Some(at);
+        self.refresh();
+    }
+
     /// Ctrl/Cmd+click: `cell` becomes a new rectangle, the active one.
     pub fn add_cell(&mut self, cell: ModelCell, map: &ViewMap) {
         self.anchor = Some(cell);

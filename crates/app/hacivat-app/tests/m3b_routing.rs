@@ -174,9 +174,16 @@ const BOUND: &[(&str, &str, Option<&str>, Option<&str>)] = &[
     ),
     // ## m3c-t33-find (named exception): Task 33 binds `editor.find` (ruling R5).
     ("editor.find", "Editor", Some("cmd-f"), Some("ctrl-f")),
+    // ## m3c-t37 (named exception): Task 37 binds `grid.find` (ruling R5) and its own Select all
+    // occurrences row (NOTES Plan notes, Task 37).
+    ("grid.find", "Grid", Some("cmd-f"), Some("ctrl-f")),
+    (
+        "grid.select_all_occurrences",
+        "Grid",
+        Some("ctrl-cmd-g"),
+        Some("ctrl-shift-l"),
+    ),
     // Palette-only.
-    // `grid.find` likewise until Task 37 (ruling R5).
-    ("grid.find", "Grid", None, None),
     ("editor.split_selection_into_lines", "Editor", None, None),
     ("editor.redo_selection", "Editor", None, None),
     ("editor.fold", "Editor", None, None),
@@ -650,7 +657,8 @@ fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
     // ## m3c-t35 (named exception): Task 35 filled five grid commands (grow/shrink, auto-fit,
     // freeze/unfreeze); four grid stubs remain.
     // ## m3c-t33 merge: 8 editor stubs (after T31, T32, T33) + 4 grid stubs.
-    assert_eq!(stubs.len(), 12);
+    // ## m3c-t37 (named exception): Task 37 filled `grid.find` and `grid.goto_row`: 8 + 2.
+    assert_eq!(stubs.len(), 10);
     // The app-registered stubs (disabled since Task 1b).
     // ## m3b-t27-history (named exception): `history.open` is no longer a stub; it is enabled
     // once the history store is open (`history_ui.rs` covers it).
@@ -693,6 +701,7 @@ fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
 /// covers the editor end to end; the grid's key context reaches the stack with m3a's F5).
 /// ## m3c-t33-find (named exception): in the editor it is `editor.find` now; the grid keeps the
 /// explorer filter until Task 37; the Workspace alone keeps it everywhere.
+/// ## m3c-t37 (named exception): in a grid it is `grid.find` now.
 #[test]
 fn primary_f_resolves_to_the_explorer_filter_in_the_editor_and_the_grid() {
     for (platform, chord) in [
@@ -704,7 +713,7 @@ fn primary_f_resolves_to_the_explorer_filter_in_the_editor_and_the_grid() {
         let press = normalize(&gpui::Keystroke::parse(chord).unwrap()).unwrap();
         for (inner, want) in [
             ("Editor", "editor.find"),
-            ("Grid", "explorer.focus_filter"),
+            ("Grid", "grid.find"),
             ("Console", "explorer.focus_filter"),
         ] {
             let stack = ContextStack(vec!["Workspace", "Console", inner]);

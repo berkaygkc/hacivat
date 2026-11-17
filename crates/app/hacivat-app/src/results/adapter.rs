@@ -564,6 +564,13 @@ fn cell_content(shown: Display, facts: &ColFacts, texts: &Texts) -> CellContent 
     }
 }
 
+// ## m3c-t37 (named exception): the grid find's whole-result scan (its perf line) formats as
+// the adapter does.
+/// The formatting facts of `schema`'s columns on `engine`, as an adapter keeps them.
+pub(crate) fn col_facts(schema: &ResultSchema, engine: DbmsKind) -> Arc<[ColFacts]> {
+    columns_of(schema, engine, &Texts(None)).facts
+}
+
 /// The grid's columns and the formatting facts of `schema`, in server order: a column's ID is
 /// its ordinal, so duplicate names keep their places.
 ///

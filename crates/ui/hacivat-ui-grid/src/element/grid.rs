@@ -375,6 +375,8 @@ pub(crate) fn paint_frame(
     {
         v.paint.recorded_sort_marks.clear();
         v.paint.recorded_tail_y = None;
+        // ## m3c-t37
+        v.paint.recorded_find_marks.clear();
     }
     // Keep the tips of the frame before (in the other kept buffer), to tell whether the
     // view's tooltip areas have to be rebuilt.
@@ -650,6 +652,8 @@ fn paint_body_segment(
         layout,
         scroll,
         columns,
+        // ## m3c-t37
+        highlights,
         ..
     } = &mut *v;
     let mut col_info = std::mem::take(&mut paint.col_scratch);
@@ -713,6 +717,16 @@ fn paint_body_segment(
                 col: ix,
             };
             let mut records = 0u32;
+            // ## m3c-t37: the find's marks in this cell (data cells only: never a NULL or an
+            // error's text).
+            let marks = match (highlights.as_ref(), model, kind) {
+                (Some(h), Some(m), k) if !matches!(k, CellKind::Null | CellKind::Error) => {
+                    h(m, col)
+                }
+                _ => None,
+            };
+            #[cfg(feature = "test-support")]
+            let marks_sink = &mut paint.recorded_find_marks;
             let outcome = masked(mask, window, |window| {
                 paint_cell_content(
                     &cell_paint,
@@ -725,6 +739,19 @@ fn paint_body_segment(
                     cell.align,
                     cell.chip.as_ref(),
                     at,
+                    marks.as_ref(),
+                    |x0, x1, current| {
+                        #[cfg(feature = "test-support")]
+                        marks_sink.push(super::PaintedFindMark {
+                            row: r,
+                            col,
+                            x0,
+                            x1,
+                            current,
+                        });
+                        #[cfg(not(feature = "test-support"))]
+                        let _ = (x0, x1, current);
+                    },
                     window,
                     cx,
                     |s, cx| {

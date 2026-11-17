@@ -576,6 +576,8 @@ impl ResultsHost {
         }
         for grid in closed {
             super::sort::grid_closed(grid, cx);
+            // ## m3c-t37
+            super::find::grid_closed(grid, cx);
         }
     }
 
@@ -670,8 +672,9 @@ impl ResultsHost {
             GridEvent::SortRequested(spec) => {
                 super::sort::on_requested(&grid, &copied, spec.clone(), repaint.clone(), cx);
             }
-            GridEvent::FindRequested => super::find::open(console, cx),
-            GridEvent::GotoRequested => super::goto::open(console, cx),
+            // ## m3c-t37: deferred, as they read this tile (it is being updated here).
+            GridEvent::FindRequested => cx.defer(move |cx| super::find::open(console, cx)),
+            GridEvent::GotoRequested => cx.defer(move |cx| super::goto::open(console, cx)),
             GridEvent::ValueRequested(cell) => super::value_viewer::open(console, *cell, cx),
             GridEvent::ContextMenuRequested { at, cell, header } => {
                 super::context_menu::open(console, *at, *cell, *header, cx);
@@ -679,6 +682,10 @@ impl ResultsHost {
             GridEvent::FrozenChanged(_) => {}
             // ## m3c-t35 fix round 1 (M3): a refused freeze says why.
             GridEvent::FreezeRefused => freeze_refused(cx),
+            // ## m3c-t37: the find's Select all occurrences.
+            GridEvent::SelectAllOccurrencesRequested => {
+                cx.defer(move |cx| super::find::select_all(console, cx));
+            }
         });
         self.tiles.get_mut(&console)?.grids.push(GridSlot {
             adapter,
@@ -868,6 +875,9 @@ impl ResultsHost {
                 // stops its job).
                 if let Some(adapter) = results.read(cx).tab(ix).map(|e| e.adapter().clone()) {
                     super::sort::sync(grid.entity_id(), &adapter, cx);
+                    // ## m3c-t37: the find bar and go to row follow the shown grid.
+                    super::find::sync(console, &grid, &adapter, cx);
+                    super::goto::sync(console, &grid, &adapter, cx);
                 }
                 self.guard_focus(Some(&grid), window, cx);
                 let (key, unit) = {
@@ -896,16 +906,20 @@ impl ResultsHost {
                 let copy_grid = grid.downgrade();
                 // ## m3b-t25-results: Σ Count rows after Copy.
                 let count = super::count::toolbar_items(console, ix, entry.count(), cx);
-                column = column.child(toolbar::result_toolbar(
-                    rows,
-                    Rc::new(move |window, cx| {
-                        let _ = copy_grid.update(cx, |g, cx| {
-                            g.dispatch(GridCommand::Copy { headers: false }, window, cx)
-                        });
-                    }),
-                    count,
-                    cx,
-                ));
+                // ## m3c-t37: an open find bar takes the toolbar's left group.
+                column = column.child(match super::find::toolbar(console, rows.clone(), cx) {
+                    Some(bar) => bar,
+                    None => toolbar::result_toolbar(
+                        rows,
+                        Rc::new(move |window, cx| {
+                            let _ = copy_grid.update(cx, |g, cx| {
+                                g.dispatch(GridCommand::Copy { headers: false }, window, cx)
+                            });
+                        }),
+                        count,
+                        cx,
+                    ),
+                });
                 if columns > WIDE_RESULT_COLUMNS {
                     column = column.child(toolbar::columns_hint(columns, cx));
                 }
@@ -917,16 +931,30 @@ impl ResultsHost {
                 if let Some(note) = super::sort::note_row(&grid, &adapter, &snapshot, cx) {
                     column = column.child(note);
                 }
+                // ## m3c-t37: the filter's note stacks under it (M3c-26).
+                if let Some(note) = super::find::note_row(console, &grid, cx) {
+                    column = column.child(note);
+                }
                 let mut style = StyleRefinement::default();
                 style.size.width = Some(hacivat_ui_core::gpui_surface::relative(1.0).into());
                 style.size.height = Some(hacivat_ui_core::gpui_surface::relative(1.0).into());
-                column = column.child(
+                // ## m3c-t37: the go-to popover lies over the grid, under the toolbar's left edge.
+                let mut body = div().flex_1().min_h_0().relative().child(
                     div()
-                        .flex_1()
-                        .min_h_0()
+                        .size_full()
                         .overflow_hidden()
                         .child(AnyView::from(grid).cached(style)),
                 );
+                if let Some(popover) = super::goto::overlay(console, cx) {
+                    body = body.child(
+                        div()
+                            .absolute()
+                            .top(hacivat_ui_core::gpui_surface::px(4.0))
+                            .left(hacivat_ui_core::gpui_surface::px(12.0))
+                            .child(popover),
+                    );
+                }
+                column = column.child(body);
                 column = column.child(strip::render(
                     model,
                     selection,
@@ -1419,7 +1447,7 @@ pub fn build(window: &mut Window, cx: &mut App) -> AnyView {
 // ---- commands -------------------------------------------------------------------------------
 
 /// The palette title of each grid command (`hv-cmd-<id with . and _ as ->`, R5).
-static GRID_TITLES: [(&str, &str); 35] = [
+static GRID_TITLES: [(&str, &str); 36] = [
     ("grid.move_left", "hv-cmd-grid-move-left"),
     ("grid.move_right", "hv-cmd-grid-move-right"),
     ("grid.move_up", "hv-cmd-grid-move-up"),
@@ -1456,6 +1484,11 @@ static GRID_TITLES: [(&str, &str); 35] = [
     ("grid.auto_fit", "hv-cmd-grid-auto-fit"),
     ("grid.freeze", "hv-cmd-grid-freeze"),
     ("grid.unfreeze", "hv-cmd-grid-unfreeze"),
+    // ## m3c-t37 (NOTES Plan notes, Task 37): the grid's own title.
+    (
+        "grid.select_all_occurrences",
+        "hv-cmd-grid-select-all-occurrences",
+    ),
 ];
 
 /// The palette title of grid command `id`.
@@ -1567,16 +1600,27 @@ pub fn register_commands(cx: &mut App) {
     let reg = cx.default_global::<ActionRegistry>();
     for (id, cmd) in GRID_COMMANDS.iter() {
         let cmd = *cmd;
+        let id: &'static str = id;
         let _ = reg.register(ActionDef {
             id,
             title_id: grid_title(id).unwrap_or(id),
             context: GRID_CONTEXT,
-            run: Rc::new(move |window, cx| dispatch_grid(cmd, window, cx)),
+            // ## m3c-t37: in the grid find field, `grid.find` and `grid.select_all_occurrences`
+            // act on the bar.
+            run: Rc::new(move |window, cx| {
+                if !super::find::run_in_bar(id, cx) {
+                    dispatch_grid(cmd, window, cx);
+                }
+            }),
             // ## m3b-t01b-seams (fix round 2, I3): a stub grid command stays disabled.
+            // ## m3c-t37: the other grid commands are disabled while the grid find field has
+            // the focus (it carries the `Grid` context), so its keys stay the field's.
             enabled: if hacivat_ui_grid::commands::is_stub(id) {
                 |_| false
-            } else {
+            } else if super::find::ROUTED.contains(&id) {
                 |_| true
+            } else {
+                |cx| !super::find::field_focused(cx)
             },
         });
     }
