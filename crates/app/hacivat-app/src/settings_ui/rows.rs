@@ -252,6 +252,16 @@ pub fn is_mono(key: &str) -> bool {
     key == TAB_SIZE
 }
 
+// ## m3c-t42 fix round 1 (review I1)
+/// Whether row `key` turns a safety guard off: its arrows only move the focus (Enter, Space and
+/// a click choose), so a stray arrow key never turns the guard off.
+pub fn is_guard(key: &str) -> bool {
+    matches!(
+        key,
+        CONFIRM_UNSAFE_WHERE | ERROR_POLICY_ASK | HISTORY_ENABLED
+    )
+}
+
 /// What a choice shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChoiceLabel {
@@ -515,7 +525,13 @@ pub fn apply_choice(cx: &mut App, key: &str, value: &str) {
             update_settings(cx, |s| s.grid.raw_display = value == ON);
         }
         HISTORY_ENABLED => {
-            update_settings(cx, |s| s.history.enabled = value == ON);
+            let on = value == ON;
+            update_settings(cx, |s| s.history.enabled = on);
+            // ## m3c-t42 fix round 1 (review I2): history off at boot opened no store; turning
+            // it on opens it now (on the core runtime, as boot does), not at the next start.
+            if on && crate::history::store(cx).is_none() {
+                crate::exec_ui::orchestrator::open_history(cx);
+            }
         }
         _ => {}
     }

@@ -756,35 +756,48 @@ fn the_value_limit_reads_and_writes_the_regional_format(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn choosing_the_other_unit_applies_the_number_in_it(cx: &mut TestAppContext) {
+fn choosing_the_other_unit_converts_the_saved_size(cx: &mut TestAppContext) {
+    // ## m3c-t42 fix round 1 (review m2, controller ruling): a unit converts the saved size; a
+    // number typed first is saved in the unit it was typed in.
     let (vcx, paths) = settings_tab(cx);
     // Active, so the field's focus-out listener runs as it does in the app.
     in_window(vcx, |window, _| window.activate_window());
     reveal(vcx, "results.max_value_bytes");
-    // Type 512 (no Enter), then choose KB: 512 KB, not 512 MB set to the bound on the way.
+    let choose_unit = |vcx: &mut VisualTestContext, index: usize| {
+        click(vcx, "settings-max-value-unit".to_string());
+        click(vcx, format!("menu-item-{index}"));
+    };
+    // 1 MB is 1,024 KB: nothing is written.
+    choose_unit(vcx, 0);
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 1 << 20);
+    assert_eq!(value_limit_field(vcx), ("1,024".to_string(), SizeUnit::Kb));
+    assert_eq!(clamp_note(vcx), None);
+    assert!(!read(paths.settings_toml()).contains("max_value_bytes"));
+    // 512 KB in MB is 0.5.
+    type_value_limit(vcx, "512");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 512 << 10);
+    choose_unit(vcx, 1);
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 512 << 10);
+    assert_eq!(value_limit_field(vcx), ("0.5".to_string(), SizeUnit::Mb));
+    // Typed (no Enter), then KB: the typed 512 is saved in MB (set to 64 MB, said), then shown
+    // in KB.
     click(vcx, "settings-max-value-field".to_string());
-    vcx.simulate_keystrokes("right backspace");
+    vcx.simulate_keystrokes("right right right backspace backspace backspace");
     vcx.simulate_input("512");
     click(vcx, "settings-max-value-unit".to_string());
     assert_eq!(
         settings(vcx).results.max_value_bytes.get(),
-        1 << 20,
-        "not yet"
+        512 << 10,
+        "not yet: the focus is still in the row"
     );
     click(vcx, "menu-item-0".to_string());
-    assert_eq!(settings(vcx).results.max_value_bytes.get(), 512 << 10);
-    assert_eq!(value_limit_field(vcx), ("512".to_string(), SizeUnit::Kb));
-    assert_eq!(clamp_note(vcx), None);
-    assert!(read(paths.settings_toml()).contains("max_value_bytes = 524288"));
-    // The number shown, in the other unit: 512 MB, set to 64 MB.
-    click(vcx, "settings-max-value-unit".to_string());
-    click(vcx, "menu-item-1".to_string());
     assert_eq!(settings(vcx).results.max_value_bytes.get(), 64 << 20);
-    assert_eq!(value_limit_field(vcx), ("64".to_string(), SizeUnit::Mb));
+    assert_eq!(value_limit_field(vcx), ("65,536".to_string(), SizeUnit::Kb));
     assert_eq!(
         clamp_note(vcx).as_deref(),
         Some("512 MB is above the largest allowed, so it was set to 64 MB.")
     );
+    assert!(read(paths.settings_toml()).contains("max_value_bytes = 67108864"));
 }
 
 #[gpui::test]
@@ -971,4 +984,172 @@ fn every_setting_has_a_row_but_the_version_and_the_time_zone() {
         .collect();
     // The time zone has no row yet (it follows the system unless set by hand): reported.
     assert_eq!(without, ["version", "ui.time_zone"]);
+}
+
+// ## m3c-t42 fix round 1
+
+/// Review I1: on the guard rows an arrow key moves the focus only; Enter chooses.
+#[gpui::test]
+fn arrow_keys_never_flip_a_guard_row(cx: &mut TestAppContext) {
+    let (vcx, paths) = settings_tab(cx);
+    in_window(vcx, |window, _| window.activate_window());
+    for key in [
+        "exec.confirm_unsafe_where",
+        "exec.error_policy_ask",
+        "history.enabled",
+    ] {
+        reveal(vcx, key);
+        let before = settings(vcx);
+        // The pressed On segment, then → and ← (each wraps to the other segment).
+        focus_segment(vcx, &format!("segmented-{key}-0"));
+        for arrow in ["right", "left", "right"] {
+            vcx.simulate_keystrokes(arrow);
+            vcx.run_until_parked();
+            assert_eq!(settings(vcx), before, "{key}: {arrow} wrote nothing");
+        }
+        let name = key.rsplit('.').next().unwrap();
+        assert!(!read(paths.settings_toml()).contains(name), "{key}");
+        // The focus moved to Off: Enter chooses it.
+        press_enter(vcx);
+        assert_eq!(rows::current_value(&settings(vcx), key), "off", "{key}");
+        choose(vcx, key, "on");
+    }
+    // Other rows keep the roving press (the default).
+    reveal(vcx, "editor.tab_size");
+    focus_segment(vcx, "segmented-editor.tab_size-1");
+    vcx.simulate_keystrokes("right");
+    vcx.run_until_parked();
+    assert_eq!(settings(vcx).editor.tab_size.get(), 8);
+}
+
+/// Review m1: a group mark stands only between groups of three digits, so `1,5` in English and
+/// `1.5` in Turkey are not sizes: the saved size comes back and nothing is written.
+#[gpui::test]
+fn a_misplaced_group_mark_is_not_a_size(cx: &mut TestAppContext) {
+    let (vcx, paths) = settings_tab_with(cx, support_platform(), "us", "Europe/Istanbul");
+    type_value_limit(vcx, "1,5");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 1 << 20);
+    assert_eq!(value_limit_field(vcx), ("1".to_string(), SizeUnit::Mb));
+    choose(vcx, "ui.regional_format", "tr-TR");
+    vcx.run_until_parked();
+    type_value_limit(vcx, "1.5");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 1 << 20);
+    assert_eq!(value_limit_field(vcx), ("1".to_string(), SizeUnit::Mb));
+    assert!(!read(paths.settings_toml()).contains("max_value_bytes"));
+    // In Turkey `,` is the decimal separator: 1,5 MB.
+    type_value_limit(vcx, "1,5");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 1536 << 10);
+}
+
+/// Review m3: a hand-edited size that is not a whole number of KB shows exactly, and an
+/// untouched field never rewrites it.
+#[gpui::test]
+fn a_hand_edited_size_shows_exactly(cx: &mut TestAppContext) {
+    let (vcx, _) = settings_tab(cx);
+    in_window(vcx, |window, _| window.activate_window());
+    set_value_limit(vcx, 65_537);
+    reveal(vcx, "results.max_value_bytes");
+    assert_eq!(
+        value_limit_field(vcx),
+        ("64.0009765625".to_string(), SizeUnit::Kb)
+    );
+    let before = settings(vcx);
+    click(vcx, "settings-max-value-field".to_string());
+    vcx.simulate_keystrokes("enter");
+    click(vcx, "settings-search".to_string());
+    assert_eq!(settings(vcx), before);
+    // The exact text is a size: typed back, it is the same bytes.
+    type_value_limit(vcx, "64.0009765625");
+    assert_eq!(settings(vcx).results.max_value_bytes.get(), 65_537);
+}
+
+/// Review I2: history off at boot opens no store; turning it on in Settings opens it, and the
+/// next statement is recorded.
+#[cfg(unix)]
+#[gpui::test]
+fn turning_history_back_on_opens_the_store_and_records(cx: &mut TestAppContext) {
+    use hacivat_driver::fake::{FakeDriver, FakeQuery, FakeResultSet, FakeRows};
+    use hacivat_proto::{DbmsKind, EnvTag};
+    let vcx = shell_with_connections_prepared(
+        cx,
+        "en",
+        std::sync::Arc::new(hacivat_secrets::MemoryBackend::new()),
+        |paths: &LocalPaths| {
+            write(
+                paths.settings_toml(),
+                "version = 1\n\n[history]\nenabled = false\n",
+            );
+        },
+    );
+    in_window(vcx, |window, _| window.activate_window());
+    let p = hacivat_session::profile::Profile {
+        engine: DbmsKind::Postgres,
+        ..test_profile("orders-dev", Some(EnvTag::Dev), "127.0.0.1")
+    };
+    let profile = add_profile(vcx, p.clone());
+    let rt = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::connections::ConnectionsModel>()
+            .core_runtime()
+            .handle()
+    });
+    let answer = FakeQuery {
+        prefix: "SELECT 42",
+        sets: vec![FakeResultSet {
+            columns: vec![(
+                "answer",
+                hacivat_values::LogicalType::Text {
+                    max_chars: None,
+                    fixed: false,
+                },
+            )],
+            rows: FakeRows::Literal(vec![vec![hacivat_values::Value::Text("42".into())]]),
+        }],
+        ..Default::default()
+    };
+    let (session, fake) = futures::executor::block_on(hacivat_session::testing::fake_session(
+        rt,
+        answers_probe_with(FakeDriver::new(DbmsKind::Postgres), vec![answer]),
+        p,
+    ));
+    let id = register_test_console(vcx, profile, session);
+    wait_until(vcx, "the console's SQL context", |vcx| {
+        vcx.cx.read(|cx| {
+            hacivat_app::exec_ui::sql_context(id, cx)
+                != hacivat_app::exec_ui::context::SqlContext::Pending
+        })
+    });
+    assert!(vcx.cx.read(|cx| hacivat_app::history::store(cx).is_none()));
+    // The row's own handler (the click path is `each_row_writes_through_update_settings`).
+    vcx.cx
+        .update(|cx| rows::apply_choice(cx, "history.enabled", "on"));
+    wait_until(vcx, "the history store", |vcx| {
+        vcx.cx.read(|cx| hacivat_app::history::store(cx).is_some())
+    });
+    let store = vcx
+        .cx
+        .read(hacivat_app::history::store)
+        .expect("the history store");
+    let editor = vcx.cx.read(|cx| {
+        hacivat_app::console::Consoles::get(cx, id)
+            .and_then(|s| s.editor.clone())
+            .expect("the console has an editor")
+    });
+    vcx.cx.update(|cx| {
+        editor.update(cx, |e, cx| {
+            e.set_text("SELECT 42 AS answer;", cx);
+            e.select_range(0..0, cx);
+        })
+    });
+    in_window(vcx, |window, cx| {
+        let handle = gpui::Focusable::focus_handle(editor.read(cx), cx);
+        window.focus(&handle, cx);
+        editor.update(cx, |e, cx| assert!(e.run_command("editor.run", window, cx)));
+    });
+    vcx.run_until_parked();
+    wait_until(vcx, "the statement in the history", |_| {
+        futures::executor::block_on(store.recall(profile, String::new(), 10))
+            .is_ok_and(|r| r.iter().any(|s| s.contains("SELECT 42")))
+    });
+    fake.kill_connections();
+    stop_core_runtime_test(cx);
 }

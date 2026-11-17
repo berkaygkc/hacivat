@@ -154,7 +154,7 @@ impl SettingsPage {
         });
         let limit_events = cx.subscribe(&limit_input, |this, _, event: &InputEvent, cx| {
             match event {
-                InputEvent::Submitted => this.commit_limit(None, cx),
+                InputEvent::Submitted => this.commit_limit(cx),
                 // Escape (F15: `Cancelled` is Escape) puts the saved size back.
                 InputEvent::Cancelled => this.restore_limit(cx),
                 InputEvent::Changed | InputEvent::CompositionChanged(_) => {}
@@ -163,12 +163,12 @@ impl SettingsPage {
         let unit_events = cx.subscribe(&limit_unit, |this, _, event: &SelectEvent, cx| {
             let SelectEvent::Changed(index) = *event;
             if let Some(unit) = SizeUnit::ALL.get(index) {
-                this.commit_limit(Some(*unit), cx);
+                this.change_unit(*unit, cx);
             }
         });
         // Leaving the row (the field, the select and its menu) keeps what was typed, as Enter
-        // does; moving from the field to the select does not, so a unit chosen next applies
-        // to the typed number.
+        // does; moving from the field to the select waits: choosing a unit then saves the
+        // typed number in the unit it was typed in, first (fix round 1, m2).
         let field_focus = limit_input.focus_handle(cx);
         let field_blur = cx.on_focus_out(&field_focus, window, |this, _, window, cx| {
             this.settle_limit(window, cx)
@@ -222,19 +222,18 @@ impl SettingsPage {
             .get()
     }
 
-    /// Saves the field's number in `unit` (the select's new unit, else the field's), set to the
-    /// nearest bound when outside 64 KB–64 MB (the row then says so). An untouched field saves
-    /// nothing; what is not a size puts the saved size back.
-    fn commit_limit(&mut self, new_unit: Option<SizeUnit>, cx: &mut Context<Self>) {
+    /// Saves the field's number in the field's unit, set to the nearest bound when outside
+    /// 64 KB–64 MB (the row then says so). An untouched field saves nothing; what is not a size
+    /// puts the saved size back.
+    fn commit_limit(&mut self, cx: &mut Context<Self>) {
         let saved = Self::saved_limit(cx);
-        let shown_unit = self
+        let unit = self
             .limit_shown
             .map_or_else(|| display_unit(saved, None), |(_, unit)| unit);
-        if new_unit.is_none() && !self.limit_typed(cx) {
+        if !self.limit_typed(cx) {
             return;
         }
         let text = self.limit_input.read(cx).value().to_string();
-        let unit = new_unit.unwrap_or(shown_unit);
         let (decimal, group) = value_limit::separators(cx);
         let Some(amount) = value_limit::parse_amount(&text, decimal, group) else {
             self.restore_limit(cx);
@@ -249,7 +248,18 @@ impl SettingsPage {
         if limit.get() != saved {
             update_settings(cx, |s| s.results.max_value_bytes = limit);
         }
-        self.show_limit(limit.get(), Some(unit), cx);
+        let limit = limit.get();
+        self.show_limit(limit, display_unit(limit, Some(unit)), cx);
+        cx.notify();
+    }
+
+    // ## m3c-t42 fix round 1 (review m2, controller ruling)
+    /// The select chose `unit`: a typed number is saved first, in the unit it was typed in;
+    /// then the saved size shows converted to `unit` (64 MB as 65,536 KB). Nothing else is
+    /// written.
+    fn change_unit(&mut self, unit: SizeUnit, cx: &mut Context<Self>) {
+        self.commit_limit(cx);
+        self.show_limit(Self::saved_limit(cx), unit, cx);
         cx.notify();
     }
 
@@ -259,13 +269,12 @@ impl SettingsPage {
         let (bytes, unit) = self
             .limit_shown
             .unwrap_or((saved, display_unit(saved, None)));
-        self.show_limit(bytes, Some(unit), cx);
+        self.show_limit(bytes, unit, cx);
         cx.notify();
     }
 
-    /// Puts `bytes` in the field, in `preferred` while it measures the size whole.
-    fn show_limit(&mut self, bytes: u32, preferred: Option<SizeUnit>, cx: &mut Context<Self>) {
-        let unit = display_unit(bytes, preferred);
+    /// Puts `bytes` in the field, exactly, in `unit`.
+    fn show_limit(&mut self, bytes: u32, unit: SizeUnit, cx: &mut Context<Self>) {
         let text = amount_text(cx, Amount::of(bytes, unit));
         self.limit_input.update(cx, |input, cx| {
             if input.value() != text {
@@ -298,7 +307,7 @@ impl SettingsPage {
     /// Saves what was typed once the focus has left the row.
     fn settle_limit(&mut self, window: &Window, cx: &mut Context<Self>) {
         if !self.limit_row_focused(window, cx) {
-            self.commit_limit(None, cx);
+            self.commit_limit(cx);
         }
     }
 
@@ -310,19 +319,18 @@ impl SettingsPage {
             return;
         }
         let saved = Self::saved_limit(cx);
-        let preferred = match self.limit_shown {
-            Some((bytes, unit)) if bytes == saved => Some(unit),
+        let unit = match self.limit_shown {
+            Some((bytes, unit)) if bytes == saved => unit,
             Some(_) => {
                 self.limit_note = None;
-                None
+                display_unit(saved, None)
             }
-            None => None,
+            None => display_unit(saved, None),
         };
-        let unit = display_unit(saved, preferred);
         let current = self.limit_shown == Some((saved, unit))
             && amount_text(cx, Amount::of(saved, unit)) == self.limit_shown_text;
         if !current {
-            self.show_limit(saved, Some(unit), cx);
+            self.show_limit(saved, unit, cx);
         }
     }
 
@@ -593,7 +601,10 @@ impl SettingsPage {
 /// Row `key`'s choices as one Segmented.
 fn segmented_row(key: &'static str, settings: &Settings, cx: &mut App) -> AnyElement {
     let current = current_value(settings, key);
-    let mut group = Segmented::new(key).mono(rows::is_mono(key));
+    let mut group = Segmented::new(key)
+        .mono(rows::is_mono(key))
+        // ## m3c-t42 fix round 1 (review I1)
+        .arrows_move_focus_only(rows::is_guard(key));
     for choice in rows::choices(cx, key) {
         let value = choice.value.clone();
         let (content, tooltip) = segment_content(cx, &choice);

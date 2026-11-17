@@ -4,9 +4,10 @@
 //! clamped to 64 KB–64 MB ([`ValueLimit`]); a typed size outside that range is set to the
 //! bound and the row says so.
 //!
-//! The row edits a pair: choosing the other unit applies the field's number in that unit
-//! (`1` with MB, then KB, is 1 KB, set to 64 KB with the note), so what the row shows is always
-//! what is stored.
+//! ## m3c-t42 fix round 1 (review m2, controller ruling): choosing the other unit converts the
+//! saved size (64 MB is shown as 65,536 KB); a number typed first is saved in the unit it was
+//! typed in. The field shows a size exactly in its unit (review m3), so what the row shows is
+//! always what is stored.
 
 use hacivat_l10n::{ArgValue, ExactDecimal, MsgRef, NoArgs, Text, ids};
 use hacivat_settings::ValueLimit;
@@ -19,8 +20,8 @@ const MIB: u64 = 1 << 20;
 
 /// Most digits a typed number may have; more is "too large" (always above the limit).
 const MAX_DIGITS: u32 = 30;
-/// Fraction digits the field shows a size that is not a whole number of its unit with.
-const SHOWN_FRACTION_DIGITS: u32 = 2;
+/// The most fraction digits a size needs in a 1,024-based unit (1 / 2^20 has 20).
+const MAX_FRACTION_DIGITS: u32 = 20;
 
 /// The unit of the largest-value field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -107,21 +108,25 @@ impl Amount {
             / pow
     }
 
-    /// `bytes` in `unit`, with at most [`SHOWN_FRACTION_DIGITS`] fraction digits (rounded half
-    /// up).
+    /// `bytes` in `unit`, exactly (a 1,024-based unit divides into a finite decimal): a
+    /// hand-edited 65,537 bytes is 64.0009765625 KB, never a rounded "64" that would misreport
+    /// the stored value (## m3c-t42 fix round 1, review m3).
     pub fn of(bytes: u32, unit: SizeUnit) -> Amount {
-        let scale = SHOWN_FRACTION_DIGITS;
-        let pow = 10u128.pow(scale);
         let unit = u128::from(unit.bytes());
+        let bytes = u128::from(bytes);
+        let scale = (0..=MAX_FRACTION_DIGITS)
+            .find(|s| (bytes * 10u128.pow(*s)) % unit == 0)
+            .unwrap_or(MAX_FRACTION_DIGITS);
         Amount {
-            mantissa: (u128::from(bytes) * pow + unit / 2) / unit,
+            mantissa: bytes * 10u128.pow(scale) / unit,
             scale,
         }
     }
 }
 
 /// Parses what was typed with the format locale's `decimal` and `group` separators: digits, the
-/// group separator between digits of the whole part (a space-like `group` accepts any space),
+/// group separator in the whole part between groups of exactly three digits (a space-like
+/// `group` accepts any space; `1.5` in Turkey and `1,5` in English are not sizes, review m1),
 /// then at most one `decimal` separator followed by digits. Anything else (a sign, a letter, a
 /// unit) is not a size.
 pub fn parse_amount(text: &str, decimal: char, group: char) -> Option<Amount> {
@@ -131,13 +136,18 @@ pub fn parse_amount(text: &str, decimal: char, group: char) -> Option<Amount> {
     let mut digits = 0u32;
     let mut scale: Option<u32> = None;
     let mut last_group = false;
+    // ## m3c-t42 fix round 1 (review m1): the whole part's digits since the last group mark,
+    // and whether it has one.
+    let mut run = 0u32;
+    let mut grouped = false;
     for c in text.chars() {
         if let Some(d) = c.to_digit(10) {
             if digits < MAX_DIGITS {
                 mantissa = mantissa * 10 + u128::from(d);
                 digits += 1;
-                if let Some(s) = scale.as_mut() {
-                    *s += 1;
+                match scale.as_mut() {
+                    Some(s) => *s += 1,
+                    None => run += 1,
                 }
             } else if scale.is_none() {
                 // Too large: keep the size above every limit.
@@ -147,15 +157,29 @@ pub fn parse_amount(text: &str, decimal: char, group: char) -> Option<Amount> {
                 });
             }
             last_group = false;
-        } else if c == decimal && scale.is_none() && digits > 0 && !last_group {
+        } else if c == decimal
+            && scale.is_none()
+            && digits > 0
+            && !last_group
+            && (!grouped || run == 3)
+        {
             scale = Some(0);
-        } else if is_group(c) && c != decimal && scale.is_none() && digits > 0 && !last_group {
+        } else if is_group(c)
+            && c != decimal
+            && scale.is_none()
+            && digits > 0
+            && !last_group
+            && (if grouped { run == 3 } else { run <= 3 })
+        {
             last_group = true;
+            grouped = true;
+            run = 0;
         } else {
             return None;
         }
     }
-    if digits == 0 || last_group || scale == Some(0) {
+    let groups_end_whole = scale.is_some() || !grouped || run == 3;
+    if digits == 0 || last_group || scale == Some(0) || !groups_end_whole {
         return None;
     }
     Some(Amount {
@@ -305,6 +329,18 @@ mod tests {
         ] {
             assert_eq!(parse_amount(bad, '.', ','), None, "{bad:?}");
         }
+        // ## m3c-t42 fix round 1 (m1): a group mark stands between groups of three digits.
+        assert_eq!(
+            parse_amount("1,234,567.5", '.', ','),
+            Some(amount(12_345_675, 1))
+        );
+        assert_eq!(parse_amount("65.536", ',', '.'), Some(amount(65_536, 0)));
+        for bad in ["1,5", "12,34", "1234,567", "1,2345", "1,234,56", "1,23.5"] {
+            assert_eq!(parse_amount(bad, '.', ','), None, "en {bad:?}");
+        }
+        for bad in ["1.5", "1.5,5", "12.34", "1.0000"] {
+            assert_eq!(parse_amount(bad, ',', '.'), None, "tr {bad:?}");
+        }
     }
 
     #[test]
@@ -335,7 +371,21 @@ mod tests {
         assert_eq!(display_unit(512 << 10, Some(SizeUnit::Mb)), SizeUnit::Kb);
         assert_eq!(Amount::of(1536 << 10, SizeUnit::Kb).decimal_text(), "1536");
         assert_eq!(Amount::of(1536 << 10, SizeUnit::Mb).decimal_text(), "1.5");
-        assert_eq!(Amount::of(100_000, SizeUnit::Kb).decimal_text(), "97.66");
+        // ## m3c-t42 fix round 1 (m3): exact, and back to the same bytes.
+        assert_eq!(Amount::of(100_000, SizeUnit::Kb).decimal_text(), "97.65625");
+        assert_eq!(
+            Amount::of(65_537, SizeUnit::Kb).decimal_text(),
+            "64.0009765625"
+        );
+        assert_eq!(
+            Amount::of(1, SizeUnit::Mb).decimal_text(),
+            "0.00000095367431640625"
+        );
+        for bytes in [1, 65_537, 100_000, 1 << 20, 64 << 20] {
+            for unit in SizeUnit::ALL {
+                assert_eq!(Amount::of(bytes, unit).bytes(unit), u128::from(bytes));
+            }
+        }
         assert_eq!(number_part("[\u{2068}1.536\u{2069}]"), "1.536");
     }
 }
