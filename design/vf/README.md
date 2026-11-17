@@ -32,7 +32,7 @@ cargo run -p xtask -- vf --reference target/vf/ref-dark-en-1x.png \
   --candidate target/vf/cand-app-dark-en-1x.png --samples design/vf/samples-m1-shell.json --scale 1 --theme dark
 ```
 
-`cargo xtask shot-diff --baseline <dir> --candidate target/shots [--max-de 2.0 --max-share 0.001]` compares same-named PNGs pixel by pixel (ΔE2000) and exits 1 when a shot changed in more than the allowed share of pixels, is missing, or changed size. The nightly `pseudo-screens` job runs it against `design/baselines/m1/macos` once those baselines exist (Task 19).
+`cargo xtask shot-diff --baseline <dir> --candidate target/shots [--max-de 2.0 --max-share 0.001]` compares same-named PNGs pixel by pixel (ΔE2000) and exits 1 when a shot changed in more than the allowed share of pixels, is missing, or changed size. The nightly `pseudo-screens` job runs it against `design/baselines/m1/macos` once those baselines exist (Task 19). `--superseded <file>` lists baselines a later milestone changed on purpose (not compared; a line matching no baseline is an error); the nightly job passes `design/baselines/m1/macos/superseded.txt` (m3b-ci).
 
 ## macOS
 

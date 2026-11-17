@@ -23,8 +23,25 @@
 //!   `SET PASSWORD FOR <user> =`. A quoted name (`"password" '…'`, `` `passwd` = '…' ``) arms
 //!   like the bare word. Keywords are compared through a fixed table, never locale casing:
 //!   ASCII capitals, and `İ`/`ı` read as `I` (`İDENTİFİED`, `ıdentıfıed`).
+//! - **Token and key names, SQLCipher keys, secret variables** (## m3b-po-redact, PO M3b-23;
+//!   narrowed in fix round 1). Secret parts are also `BEARER`, a bare `TOKEN` or a `TOKEN`
+//!   after `ACCESS`, `REFRESH`, `API`, `AUTH`, `BEARER`, `SESSION`, `ID`, `CLIENT`, … (never
+//!   `token_type`, `token_count`), and a `KEY` after `API`, `ACCESS`, `SECRET`, `PRIVATE`,
+//!   `ENCRYPTION`, `MASTER`, `SIGNING`, `AUTH`, `CLIENT`, `SERVICE`, `LICENSE`, `HMAC` or
+//!   `SESSION` (`API_KEY`, `aws_access_key_id`; never a surrogate, table or public key such as
+//!   `customer_key`, `idempotency_key`, `public_key`, `PRIMARY KEY`). A type name after a
+//!   secret column in DDL (`api_key text`) is never its value. After a `PRAGMA` head (or
+//!   `EXPLAIN [QUERY PLAN] PRAGMA`), the pragmas `key`, `rekey`, `hexkey`, `hexrekey` and
+//!   `textkey` take a value (`PRAGMA main.key = '…'`); after an `ATTACH` head, so does `KEY`.
+//!   A MySQL user variable that is a secret name or ends in `PW`, `PASS`, `PASSPHRASE`, `KEY`
+//!   or `TOKEN` (`@pw`, `@db_pass`, `@key`; never `@pass_count` or a system variable `@@…`)
+//!   takes a value after `=` or `:=`, and `SELECT '…' INTO @pw` masks the statement's strings
+//!   before it.
 //! - **Connection strings.** A quoted string with `password`, `passwd`, `pwd=` or `secret` in
-//!   it (ASCII case-insensitive), or a URI with a password in its user part
+//!   it (ASCII case-insensitive), or with a `name=value` pair, a JSON pair (`"access_token":
+//!   "…"`, `"apiKey":"…"`) or a SQLite URI key (`?key=`, `&hexkey=`, `textkey=`) whose name is
+//!   a secret name as above, or with `Bearer <credential>` (m3b-po fix round 1), or a URI with
+//!   a password in its user part
 //!   (`postgresql://u:pw@h`), is masked wherever it stands (`CREATE SUBSCRIPTION … CONNECTION`,
 //!   `dblink_connect(…)`).
 //! - **Comments.** A comment's body is read as code by the same rules (`-- password x`), and
@@ -49,13 +66,16 @@
 //!
 //! # What redaction does not catch
 //!
-//! These are known limits (T17 review round 1; m3–m5 are on the PO list). A secret written
-//! this way can reach the history file:
+//! These are known limits (T17 review round 1; m3–m5 are on the PO list; m3's token, `*_KEY`,
+//! `PRAGMA key` and `SET @pw` forms are caught since m3b-po). A secret written this way can
+//! reach the history file:
 //!
-//! - **Other secret words** (m3): `TOKEN`, `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY` and other
-//!   names without a `password`/`passwd`/`pwd`/`secret` part (`OPTIONS (token '…')`); SQLCipher's
-//!   `PRAGMA key`/`rekey` and `ATTACH … KEY '…'`; MySQL user variables whose name has no
-//!   secret part (`SET @pw = '…'`, then `IDENTIFIED BY @pw`).
+//! - **Other secret names** (m3, the rest): a name with none of the parts above
+//!   (`OPTIONS (apikey '…')`, `my_token = '…'`, `SET @v = '…'` then `IDENTIFIED BY @v`), and a
+//!   value set through a quoted user variable (`` SET @`pw` = '…' ``).
+//! - **Short and partial echoes** (fix round 1): the error scrub skips secrets shorter than 4
+//!   bytes and replaces only whole occurrences, so a 1–3 byte secret, or one the server glued
+//!   to other word characters, stays in the error text.
 //! - **URIs** (m4): a password with an unencoded `/`, `#`, `?`, `'` or whitespace ends the
 //!   authority early (`postgresql://u:a/b@h`), and a scheme-less `user:password@host` is not
 //!   read as a URI. `COPY … PROGRAM 'curl -u u:pw …'` and other shell command lines are kept.
@@ -172,17 +192,59 @@ fn redact_at(text: &str, depth: u8) -> Redacted {
 
 /// `text` (an error message, the parameter text) redacted, with every one of `secrets`
 /// replaced by `***`. Answers whether anything changed.
+///
+/// ## m3b-po-redact (fix round 1, review I1): only whole occurrences are replaced (a secret
+/// that starts or ends with a word character must not continue a longer word there), and
+/// only secrets of at least [`MIN_SCRUB`] bytes, so `ERROR 1054 … at line 1` survives a
+/// secret `1` and "integer" a secret `int`.
 pub(crate) fn scrub(text: &str, secrets: &[String]) -> (String, bool) {
     let r = redact(text);
     let mut out = r.text;
     let mut changed = r.changed;
     for s in secrets.iter().chain(&r.secrets) {
-        if !s.is_empty() && out.contains(s.as_str()) {
-            out = out.replace(s.as_str(), MASK);
+        if s.len() < MIN_SCRUB {
+            continue;
+        }
+        if let Some(next) = replace_whole(&out, s) {
+            out = next;
             changed = true;
         }
     }
     (out, changed)
+}
+
+// ## m3b-po-redact (fix round 1, I1)
+/// The shortest secret [`scrub`] removes from other text.
+const MIN_SCRUB: usize = 4;
+
+// ## m3b-po-redact (fix round 1, I1)
+/// `out` with every whole occurrence of `s` replaced by [`MASK`]; `None` when there is none.
+fn replace_whole(out: &str, s: &str) -> Option<String> {
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
+    let (b, sb) = (out.as_bytes(), s.as_bytes());
+    let (first, last) = (*sb.first()?, *sb.last()?);
+    let mut res = String::with_capacity(out.len());
+    let (mut at, mut from, mut any) = (0, 0, false);
+    while let Some(p) = out[from..].find(s) {
+        let i = from + p;
+        let j = i + s.len();
+        let open = i == 0 || !word(first) || !word(b[i - 1]);
+        let close = j == b.len() || !word(last) || !word(b[j]);
+        if open && close {
+            res.push_str(&out[at..i]);
+            res.push_str(MASK);
+            at = j;
+            from = j;
+            any = true;
+        } else {
+            from = i + s.chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    if !any {
+        return None;
+    }
+    res.push_str(&out[at..]);
+    Some(res)
 }
 
 fn psql() -> DialectCtx {
@@ -277,6 +339,25 @@ struct Scan<'a> {
     /// A secret-carrying function name was read; its `(` comes next.
     pending_call: Option<CallKind>,
     call: Option<Call>,
+    // ## m3b-po-redact (PO M3b-23)
+    /// The statement's first word (`PRAGMA`, `ATTACH`, …), once read.
+    head: Option<Head>,
+    // ## m3b-po-redact (fix round 1, m3)
+    /// The statement read `INTO` (MySQL `SELECT … INTO @pw`).
+    into: bool,
+    /// The statement's strings so far, unmasked: a later `INTO @<secret>` masks them.
+    strings: Vec<(Range<usize>, (usize, usize))>,
+}
+
+// ## m3b-po-redact (PO M3b-23)
+/// What a statement's first word says about the words after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Head {
+    /// `PRAGMA`: SQLCipher's `key`/`rekey`/`hexkey`/`hexrekey`/`textkey` take a key.
+    Pragma,
+    /// `ATTACH`: SQLCipher's `KEY '…'` is the attached database's key.
+    Attach,
+    Other,
 }
 
 impl<'a> Scan<'a> {
@@ -301,6 +382,9 @@ impl<'a> Scan<'a> {
             exec: 0,
             pending_call: None,
             call: None,
+            head: None,
+            into: false,
+            strings: Vec::new(),
         }
     }
 
@@ -316,6 +400,9 @@ impl<'a> Scan<'a> {
         self.expect = Expect::Nothing;
         self.pending_call = None;
         self.call = None;
+        self.head = None;
+        self.into = false;
+        self.strings.clear();
     }
 
     fn mask(&mut self, range: Range<usize>, kind: Kind) {
@@ -368,6 +455,10 @@ impl<'a> Scan<'a> {
                     for v in key_values(content) {
                         self.secret(v);
                     }
+                    // ## m3b-po-redact (fix round 1, I2, m1, m3)
+                    for v in string_secrets(content) {
+                        self.secret(v);
+                    }
                     if let Some(pw) = uri_password(content) {
                         self.secret(pw);
                     }
@@ -385,6 +476,9 @@ impl<'a> Scan<'a> {
                 }
                 if self.armed || value || conninfo || in_call {
                     self.mask(range, Kind::String);
+                } else {
+                    // ## m3b-po-redact (fix round 1, m3)
+                    self.strings.push((range, inner));
                 }
                 self.after_value();
             }
@@ -408,6 +502,9 @@ impl<'a> Scan<'a> {
                 // `U&'…'`: the `&` of the Unicode string prefix.
                 (Expect::Value | Expect::StrictValue, b'&')
                     if matches!(self.bytes.get(range.end), Some(b'\'' | b'"')) => {}
+                // ## m3b-po-redact (PO M3b-23): MySQL's `@pw := '…'`.
+                (Expect::Value | Expect::StrictValue, b':')
+                    if self.bytes.get(range.end) == Some(&b'=') => {}
                 (Expect::UserThenEq, b'=') => self.expect = Expect::Value,
                 (Expect::UserThenEq | Expect::Plugin, _) => {}
                 _ => self.expect = Expect::Nothing,
@@ -480,6 +577,8 @@ impl<'a> Scan<'a> {
         }
         let mut found: Vec<&str> = key_values(body);
         found.extend(uri_password(body));
+        // ## m3b-po-redact (fix round 1, I2)
+        found.extend(string_secrets(body));
         for v in found {
             if v.is_empty() {
                 continue;
@@ -502,6 +601,15 @@ impl<'a> Scan<'a> {
     fn word(&mut self, w: &str, range: Range<usize>) {
         // A string prefix (`E'…'`, `N'…'`, `_utf8mb4'…'`): the string is the value.
         let upper = kw_upper(w);
+        // ## m3b-po-redact (PO M3b-23): the statement's first word; (fix round 1, m2) after
+        // `EXPLAIN [QUERY PLAN]`.
+        if self.head.is_none() && !matches!(upper.as_str(), "EXPLAIN" | "QUERY" | "PLAN") {
+            self.head = Some(match upper.as_str() {
+                "PRAGMA" => Head::Pragma,
+                "ATTACH" => Head::Attach,
+                _ => Head::Other,
+            });
+        }
         let next = self.bytes.get(range.end);
         let unicode = upper == "U"
             && next == Some(&b'&')
@@ -522,6 +630,30 @@ impl<'a> Scan<'a> {
             self.pending_call = Some(kind);
             self.expect = Expect::Nothing;
             return;
+        }
+        // ## m3b-po-redact (PO M3b-23): a MySQL user variable named like a secret (`@pw`,
+        // `@password`, `@api_key`; never a system variable `@@…`): what is assigned to it is
+        // the value, and the rest of the statement is armed.
+        let user_var = range.start >= 1
+            && self.bytes[range.start - 1] == b'@'
+            && (range.start < 2 || self.bytes[range.start - 2] != b'@');
+        if user_var && is_secret_variable(&upper) {
+            // ## m3b-po-redact (fix round 1, m3): `SELECT '…' INTO @pw`: the statement's
+            // strings before it are the value.
+            if self.into {
+                let text = self.text;
+                for (r, inner) in std::mem::take(&mut self.strings) {
+                    self.secret(&text[inner.0..inner.1]);
+                    self.mask(r, Kind::String);
+                }
+            }
+            self.armed = true;
+            self.expect = Expect::Value;
+            return;
+        }
+        // ## m3b-po-redact (fix round 1, m3)
+        if upper == "INTO" {
+            self.into = true;
         }
         match self.expect {
             Expect::StrictValue => {
@@ -550,7 +682,11 @@ impl<'a> Scan<'a> {
                     self.expect = Expect::UserThenEq;
                     return;
                 }
-                if !is_secret_word(&upper) && !KEYWORDS.contains(&upper.as_str()) {
+                // ## m3b-po-redact (fix round 1, I1): a column's type is no value.
+                if !is_secret_word(&upper)
+                    && !KEYWORDS.contains(&upper.as_str())
+                    && !TYPE_WORDS.contains(&upper.as_str())
+                {
                     self.secret(w);
                     self.mask(range, Kind::Word);
                     self.expect = Expect::Nothing;
@@ -566,7 +702,12 @@ impl<'a> Scan<'a> {
             self.expect = Expect::Identified;
         } else if upper == "REPLACE" && self.identified {
             self.expect = Expect::StrictValue;
-        } else if is_secret_word(&upper) {
+        } else if is_secret_word(&upper)
+            // ## m3b-po-redact (PO M3b-23): SQLCipher's `PRAGMA [schema.]key = '…'` (and
+            // `rekey`, `hexkey`, `hexrekey`, `textkey`) and `ATTACH … KEY '…'`.
+            || (self.head == Some(Head::Pragma) && SQLCIPHER_PRAGMAS.contains(&upper.as_str()))
+            || (self.head == Some(Head::Attach) && upper == "KEY")
+        {
             self.armed = true;
             self.expect = Expect::Value;
         }
@@ -811,9 +952,72 @@ fn call_kind(upper: &str) -> Option<CallKind> {
 /// A setting name naming a secret: one of its `.`/`_`-separated parts is a secret word
 /// (`app.secret`, `myapp.db_password`).
 fn names_a_secret(name: &str) -> bool {
-    kw_upper(name)
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|p| matches!(p, "PASSWORD" | "PASSWD" | "PWD" | "SECRET"))
+    // ## m3b-po-redact (PO M3b-23; fix round 1, I1): token and key names too (`app.api_key`),
+    // read in the whole name and in its last dotted segment (`app.token`).
+    let upper = kw_upper(name);
+    let all: Vec<&str> = upper.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+    let last = upper.rsplit('.').next().unwrap_or_default();
+    let tail: Vec<&str> = last.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+    secret_parts(&all) || secret_parts(&tail)
+}
+
+// ## m3b-po-redact (fix round 1, I1)
+/// The parts before `KEY` that make a key a secret (`API_KEY`, `aws_access_key_id`). Never a
+/// table, surrogate or public key (`customer_key`, `public_key`, `idempotency_key`).
+const SECRET_KEY_KINDS: &[&str] = &[
+    "API",
+    "ACCESS",
+    "SECRET",
+    "PRIVATE",
+    "ENCRYPTION",
+    "MASTER",
+    "SIGNING",
+    "AUTH",
+    "CLIENT",
+    "SERVICE",
+    "LICENSE",
+    "HMAC",
+    "SESSION",
+];
+
+// ## m3b-po-redact (fix round 1, I1)
+/// The parts before `TOKEN` that make a token a secret (`access_token`, `refresh_token`); a
+/// bare `token` is one too. Never `token_type`, `token_count`.
+const SECRET_TOKEN_KINDS: &[&str] = &[
+    "ACCESS", "REFRESH", "API", "AUTH", "BEARER", "SESSION", "ID", "CLIENT", "SECURITY", "SERVICE",
+    "OAUTH", "JWT", "PERSONAL", "SECRET", "PRIVATE", "RESET",
+];
+
+// ## m3b-po-redact (PO M3b-23; fix round 1, I1)
+/// Name parts (ASCII-uppercased) that name a secret: `PASSWORD`, `PASSWD`, `PWD`, `SECRET` or
+/// `BEARER` anywhere; `TOKEN` alone or after a [`SECRET_TOKEN_KINDS`] part; `KEY` after a
+/// [`SECRET_KEY_KINDS`] part.
+fn secret_parts(parts: &[&str]) -> bool {
+    parts.iter().enumerate().any(|(i, p)| {
+        let before = i.checked_sub(1).map(|j| parts[j]);
+        match *p {
+            "PASSWORD" | "PASSWD" | "PWD" | "SECRET" | "BEARER" => true,
+            "TOKEN" => parts.len() == 1 || before.is_some_and(|b| SECRET_TOKEN_KINDS.contains(&b)),
+            "KEY" => before.is_some_and(|b| SECRET_KEY_KINDS.contains(&b)),
+            _ => false,
+        }
+    })
+}
+
+// ## m3b-po-redact (PO M3b-23)
+/// SQLCipher's pragmas that take a key (`upper` from [`kw_upper`]).
+const SQLCIPHER_PRAGMAS: &[&str] = &["KEY", "REKEY", "HEXKEY", "HEXREKEY", "TEXTKEY"];
+
+// ## m3b-po-redact (PO M3b-23; fix round 1, I1)
+/// A user variable's name (`upper`, without its `@`) naming a secret: a secret word, or a last
+/// part `PW`, `PASS`, `PASSPHRASE`, `KEY` or `TOKEN` (`@pw`, `@db_pass`, `@key`; never
+/// `@pass_count`).
+fn is_secret_variable(upper: &str) -> bool {
+    is_secret_word(upper)
+        || matches!(
+            upper.rsplit('_').next(),
+            Some("PW" | "PASS" | "PASSPHRASE" | "KEY" | "TOKEN")
+        )
 }
 
 fn find(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
@@ -829,9 +1033,9 @@ fn find(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 /// A word naming a secret: `PASSWORD`, `PASSWD`, `PWD`, `SECRET`, or one with such an
 /// `_`-separated part (`upper` is ASCII-uppercased).
 fn is_secret_word(upper: &str) -> bool {
-    upper
-        .split('_')
-        .any(|p| matches!(p, "PASSWORD" | "PASSWD" | "PWD" | "SECRET"))
+    // ## m3b-po-redact (PO M3b-23): token and key names too ([`secret_parts`]).
+    let parts: Vec<&str> = upper.split('_').collect();
+    secret_parts(&parts)
 }
 
 /// A string that looks like it carries a credential (a connection string, a URI with a
@@ -842,7 +1046,208 @@ fn looks_like_conninfo(s: &str) -> bool {
         .iter()
         .any(|k| lower.contains(k))
         || uri_password(s).is_some()
+        // ## m3b-po-redact (fix round 1, I1, I2, m1, m3)
+        || !string_secrets(s).is_empty()
 }
+
+// ## m3b-po-redact (fix round 1, I1, I2, m1, m3)
+/// The secret values inside a string: `name=value` pairs whose name is a secret name
+/// ([`secret_parts`]; `access_token=`, `api_key =`) or a SQLite URI key (`?key=`, `&hexkey=`,
+/// `textkey=`), JSON pairs whose name is one (`"access_token": "…"`, `"apiKey":"…"`), and the
+/// credential after `Bearer `.
+fn string_secrets(s: &str) -> Vec<&str> {
+    let mut out = named_pairs(s);
+    out.extend(json_pairs(s));
+    out.extend(bearer_values(s));
+    out
+}
+
+/// A name's parts, ASCII-uppercased: split at `_`, `-`, `.` and camelCase humps
+/// (`apiKey` → `API`, `KEY`).
+fn name_parts(name: &str) -> Vec<String> {
+    let mut parts = vec![String::new()];
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if matches!(c, '_' | '-' | '.') {
+            parts.push(String::new());
+            prev_lower = false;
+            continue;
+        }
+        if c.is_ascii_uppercase() && prev_lower {
+            parts.push(String::new());
+        }
+        prev_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+        if let Some(p) = parts.last_mut() {
+            p.push(c.to_ascii_uppercase());
+        }
+    }
+    parts
+}
+
+fn secret_name(name: &str) -> bool {
+    let parts = name_parts(name);
+    let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+    secret_parts(&refs)
+}
+
+/// The value at `i` in `s`: a quoted run, or a bare run up to white space or a delimiter.
+fn value_at<'s>(s: &'s str, mut i: usize, stops: &[char]) -> Option<&'s str> {
+    let b = s.as_bytes();
+    while i < b.len() && b[i] == b' ' {
+        i += 1;
+    }
+    let (start, end) = match b.get(i) {
+        Some(&q @ (b'\'' | b'"')) => {
+            let mut e = i + 1;
+            while e < b.len() && b[e] != q {
+                e += if b[e] == b'\\' { 2 } else { 1 };
+            }
+            (i + 1, e.min(b.len()))
+        }
+        _ => {
+            let e = s[i..]
+                .find(|c: char| c.is_whitespace() || stops.contains(&c))
+                .map_or(s.len(), |e| e + i);
+            (i, e)
+        }
+    };
+    (end > start && s.is_char_boundary(start) && s.is_char_boundary(end)).then(|| &s[start..end])
+}
+
+/// `name=value` pairs with a secret name, or SQLite URI keys after `?`/`&`.
+fn named_pairs(s: &str) -> Vec<&str> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    for (eq, _) in s.match_indices('=') {
+        let mut e = eq;
+        while e > 0 && b[e - 1] == b' ' {
+            e -= 1;
+        }
+        let mut st = e;
+        while st > 0 && (b[st - 1].is_ascii_alphanumeric() || b[st - 1] == b'_') {
+            st -= 1;
+        }
+        if st == e || b.get(eq + 1) == Some(&b'=') || (eq > 0 && b[eq - 1] == b'=') {
+            continue;
+        }
+        let name = &s[st..e];
+        let sqlite = st > 0
+            && matches!(b[st - 1], b'?' | b'&')
+            && matches!(
+                kw_upper(name).as_str(),
+                "KEY" | "HEXKEY" | "TEXTKEY" | "REKEY" | "HEXREKEY"
+            );
+        if !(sqlite || secret_name(name)) {
+            continue;
+        }
+        out.extend(value_at(s, eq + 1, &['\'', '"', ';', '&', ')', ',']));
+    }
+    out
+}
+
+/// JSON pairs (`"name": "value"`, `"name": value`) with a secret name.
+fn json_pairs(s: &str) -> Vec<&str> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(p) = s[i..].find('"') {
+        let start = i + p + 1;
+        let Some(q) = s[start..].find('"') else {
+            break;
+        };
+        let end = start + q;
+        i = end + 1;
+        let name = &s[start..end];
+        let mut j = end + 1;
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        let named = !name.is_empty()
+            && name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'));
+        if b.get(j) != Some(&b':') || !named || !secret_name(name) {
+            continue;
+        }
+        j += 1;
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if let Some(v) = value_at(s, j, &[',', '}', ']']) {
+            out.push(v);
+            // Past the value (and its closing quote): always a character boundary.
+            i = (v.as_ptr() as usize - s.as_ptr() as usize) + v.len();
+            if b.get(i) == Some(&b'"') {
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The credential after `Bearer ` (`Authorization: Bearer …`).
+fn bearer_values(s: &str) -> Vec<&str> {
+    let lower = s.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(p) = lower[from..].find("bearer ") {
+        let at = from + p + "bearer ".len();
+        from = at;
+        out.extend(value_at(s, at, &['\'', '"', ',', ';']));
+    }
+    out
+}
+
+// ## m3b-po-redact (fix round 1, I1)
+/// Type names: after a secret column name in DDL (`api_key text`), never its value.
+const TYPE_WORDS: &[&str] = &[
+    "BIGINT",
+    "BIGSERIAL",
+    "BINARY",
+    "BIT",
+    "BLOB",
+    "BOOL",
+    "BOOLEAN",
+    "BYTEA",
+    "CHAR",
+    "CHARACTER",
+    "CITEXT",
+    "CLOB",
+    "DATE",
+    "DATETIME",
+    "DECIMAL",
+    "DOUBLE",
+    "FLOAT",
+    "INET",
+    "INT",
+    "INT2",
+    "INT4",
+    "INT8",
+    "INTEGER",
+    "JSON",
+    "JSONB",
+    "LONGBLOB",
+    "LONGTEXT",
+    "MEDIUMBLOB",
+    "MEDIUMINT",
+    "MEDIUMTEXT",
+    "NCHAR",
+    "NUMERIC",
+    "NVARCHAR",
+    "REAL",
+    "SERIAL",
+    "SMALLINT",
+    "TEXT",
+    "TIME",
+    "TIMESTAMP",
+    "TIMESTAMPTZ",
+    "TINYBLOB",
+    "TINYINT",
+    "TINYTEXT",
+    "UUID",
+    "VARBINARY",
+    "VARCHAR",
+];
 
 /// The password of a URI's user part (`scheme://user:PASSWORD@host`).
 fn uri_password(s: &str) -> Option<&str> {
@@ -870,6 +1275,7 @@ fn uri_password(s: &str) -> Option<&str> {
 fn key_values(s: &str) -> Vec<&str> {
     let lower = s.to_ascii_lowercase();
     let mut out = Vec::new();
+    // ## m3b-po-redact (fix round 1, I1): token and key pairs are `named_pairs`' (allow-listed).
     for key in ["password", "passwd", "pwd", "secret"] {
         let mut from = 0;
         while let Some(p) = lower[from..].find(key) {
@@ -1032,12 +1438,233 @@ mod tests {
         assert!(s.contains(&"pw3".to_owned()));
     }
 
+    // ## m3b-po-redact (PO M3b-23): token and `*_KEY` names, SQLCipher keys, secret user
+    // variables. The secrets here are fixture values, asserted absent.
+    #[test]
+    fn token_and_key_names_sqlcipher_keys_and_user_variables_are_masked() {
+        for (sql, want, secret) in [
+            (
+                "CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (token 'hv_tk1')",
+                "CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (token '***')",
+                "hv_tk1",
+            ),
+            (
+                "SET app.api_token = 'hv_tk2'",
+                "SET app.api_token = '***'",
+                "hv_tk2",
+            ),
+            (
+                "UPDATE cfg SET access_token = hv_tk3 WHERE id = 1",
+                "UPDATE cfg SET access_token = *** WHERE id = 1",
+                "hv_tk3",
+            ),
+            (
+                "ALTER SERVER s OPTIONS (ADD api_key 'hv_k1')",
+                "ALTER SERVER s OPTIONS (ADD api_key '***')",
+                "hv_k1",
+            ),
+            (
+                "UPDATE t SET PRIVATE_KEY = 'hv_k2'",
+                "UPDATE t SET PRIVATE_KEY = '***'",
+                "hv_k2",
+            ),
+            (
+                "SELECT set_config('app.api_key', 'hv_k3', false)",
+                "SELECT set_config('app.api_key', '***', false)",
+                "hv_k3",
+            ),
+            (
+                "SELECT dblink_connect('host=h access_token=hv_k4')",
+                "SELECT dblink_connect('***')",
+                "hv_k4",
+            ),
+            ("PRAGMA key = 'hv_k5'", "PRAGMA key = '***'", "hv_k5"),
+            ("pragma KEY='hv_k6';", "pragma KEY='***';", "hv_k6"),
+            ("PRAGMA rekey = \"hv_k7\"", "PRAGMA rekey = '***'", "hv_k7"),
+            (
+                "PRAGMA main.hexkey = \"x'2DD29CA851E7'\"",
+                "PRAGMA main.hexkey = '***'",
+                "2DD29CA851E7",
+            ),
+            ("PRAGMA key = x'0A1B2C'", "PRAGMA key = x'***'", "0A1B2C"),
+            (
+                "ATTACH DATABASE 'x.db' AS x KEY 'hv_k8'",
+                "ATTACH DATABASE 'x.db' AS x KEY '***'",
+                "hv_k8",
+            ),
+            ("SET @pw = 'hv_pw1'", "SET @pw = '***'", "hv_pw1"),
+            ("SET @pw := 'hv_pw2'", "SET @pw := '***'", "hv_pw2"),
+            (
+                "SELECT @password := 'hv_pw3'",
+                "SELECT @password := '***'",
+                "hv_pw3",
+            ),
+            ("SET @db_pass = hv_pw4", "SET @db_pass = ***", "hv_pw4"),
+            ("SET @Key = 'hv_pw5'", "SET @Key = '***'", "hv_pw5"),
+            (
+                "SET @tok = 0, @token = 'hv_pw6'",
+                "SET @tok = 0, @token = '***'",
+                "hv_pw6",
+            ),
+        ] {
+            let r = redact(sql);
+            assert_eq!(r.text, want, "{sql}");
+            assert!(r.changed, "{sql}");
+            assert!(!r.text.contains(secret), "{sql}");
+            assert!(r.secrets.iter().any(|s| s.contains(secret)), "{sql}");
+        }
+        // The variable's value is a secret the error scrub removes.
+        let s = redact("SET @pw = 'hv_pw7'; CREATE USER u IDENTIFIED BY @pw").secrets;
+        let (out, _) = scrub("near 'hv_pw7' at line 1", &s);
+        assert!(!out.contains("hv_pw7"), "{out}");
+    }
+
+    #[test]
+    fn keys_tokens_and_variables_that_hold_no_secret_are_kept() {
+        for q in [
+            "SET FOREIGN_KEY_CHECKS = 0",
+            "SET unique_key_checks = 1",
+            "ALTER TABLE t ADD PRIMARY KEY (id)",
+            "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES u (id)",
+            "CREATE TABLE t (a int, KEY idx (a), b varchar(9) DEFAULT 'x')",
+            "INSERT INTO t VALUES ('a') ON DUPLICATE KEY UPDATE b = 'x'",
+            "SELECT primary_key, foreign_key FROM t WHERE x = 'y'",
+            "SELECT * FROM keys WHERE k = 'v'",
+            "PRAGMA foreign_keys = ON",
+            "PRAGMA journal_mode = 'wal'",
+            "PRAGMA table_info('t')",
+            "ATTACH DATABASE 'x.db' AS x",
+            "SET @n = 5",
+            "SET @name = 'bob'",
+            "SELECT @@max_connections, @@session.sql_mode",
+            "SELECT 'token', 'api key'",
+            "UPDATE t SET monkey = 'x', turnkey = 'y'",
+        ] {
+            let r = redact(q);
+            assert_eq!(r.text, q);
+            assert!(!r.changed, "{q}");
+        }
+    }
+
     #[test]
     fn scrub_removes_secrets_from_other_text() {
-        let s = redact("CREATE USER u IDENTIFIED BY 'pw4'").secrets;
-        let (out, changed) = scrub("near 'BY 'pw4'' at line 1", &s);
+        // ## m3b-po-redact (fix round 1, I1): a scrubbed secret is at least 4 bytes.
+        let s = redact("CREATE USER u IDENTIFIED BY 'pw4x'").secrets;
+        let (out, changed) = scrub("near 'BY 'pw4x'' at line 1", &s);
         assert!(changed);
-        assert!(!out.contains("pw4"), "{out}");
+        assert!(!out.contains("pw4x"), "{out}");
+    }
+
+    // ## m3b-po-redact (fix round 1, review I1, I2, m1-m3)
+    /// A masked value must be gone from the text and be one of the record's secrets.
+    fn masks(sql: &str, secret: &str) {
+        let r = redact(sql);
+        assert!(r.changed, "{sql}");
+        assert!(!r.text.contains(secret), "{sql} → {}", r.text);
+        assert!(
+            r.secrets.iter().any(|s| s.contains(secret)),
+            "{sql}: secret recorded"
+        );
+    }
+
+    #[test]
+    fn json_pairs_sqlite_uri_keys_explain_pragma_into_and_bearer_are_masked() {
+        for (sql, secret) in [
+            // I2: JSON pairs with a secret name.
+            (
+                "INSERT INTO cfg VALUES ('{\"access_token\": \"ghp_Hv1qz\"}')",
+                "ghp_Hv1qz",
+            ),
+            ("UPDATE integ SET cfg = '{\"api_key\":\"Hv2qz\"}'", "Hv2qz"),
+            ("SELECT '{\"token\":\"Hv3qz\"}'::jsonb", "Hv3qz"),
+            (
+                "SELECT '{\"a\": 1, \"refresh_token\" : \"Hv4qz\"}'",
+                "Hv4qz",
+            ),
+            ("SELECT '{\"client_secret\":\"Hv5qz\",\"x\":2}'", "Hv5qz"),
+            ("SELECT '{\"private_key\": \"Hv6qz\"}'", "Hv6qz"),
+            ("SELECT '{\"apiKey\": \"Hv7qz\"}'", "Hv7qz"),
+            ("SELECT '{\"accessToken\":\"Hv8qz\"}'", "Hv8qz"),
+            ("SELECT '{\"password\": \"Hv9qz\"}'", "Hv9qz"),
+            // m1: SQLite URI keys.
+            ("ATTACH DATABASE 'file:x.db?key=Hv10qz' AS x", "Hv10qz"),
+            (
+                "ATTACH DATABASE 'file:x.db?mode=ro&hexkey=Hv11qz' AS x",
+                "Hv11qz",
+            ),
+            ("ATTACH 'file:x.db?textkey=Hv12qz' AS x", "Hv12qz"),
+            // m2: EXPLAIN in front of PRAGMA.
+            ("EXPLAIN PRAGMA key = 'Hv13qz'", "Hv13qz"),
+            ("EXPLAIN QUERY PLAN PRAGMA rekey = 'Hv14qz'", "Hv14qz"),
+            // m3: SELECT … INTO a secret variable, bearer names and headers.
+            ("SELECT 'Hv15qz' INTO @pw", "Hv15qz"),
+            ("SELECT 'a', 'Hv16qz' INTO @x, @api_key", "Hv16qz"),
+            (
+                "SELECT http_get('https://h', 'Authorization: Bearer Hv17qz')",
+                "Hv17qz",
+            ),
+            ("UPDATE t SET bearer = 'Hv18qz'", "Hv18qz"),
+            ("UPDATE t SET bearer_token = 'Hv19qz'", "Hv19qz"),
+            // The allow-listed key and token names.
+            ("UPDATE t SET aws_access_key_id = 'Hv20qz'", "Hv20qz"),
+            ("UPDATE t SET encryption_key = 'Hv21qz'", "Hv21qz"),
+            ("UPDATE t SET signing_key = 'Hv22qz'", "Hv22qz"),
+            ("UPDATE t SET refresh_token = 'Hv23qz'", "Hv23qz"),
+            ("UPDATE t SET auth_token = 'Hv24qz'", "Hv24qz"),
+            (
+                "SELECT f('https://h/x?access_token=Hv25qz&page=2')",
+                "Hv25qz",
+            ),
+            ("SELECT set_config('app.token', 'Hv26qz', false)", "Hv26qz"),
+        ] {
+            masks(sql, secret);
+        }
+        // A column's type is never its value; the default after it is.
+        assert_eq!(
+            r("CREATE TABLE t (api_key text DEFAULT 'Hv27qz')"),
+            "CREATE TABLE t (api_key text DEFAULT '***')"
+        );
+    }
+
+    #[test]
+    fn surrogate_keys_token_counts_and_column_types_are_kept() {
+        for q in [
+            "SELECT * FROM fact_sales WHERE customer_key = 42 AND region = 'EU'",
+            "UPDATE dim_date SET date_key = 20240101 WHERE full_date = '2024-01-01'",
+            "UPDATE t SET idempotency_key = 'abc-123'",
+            "UPDATE t SET cache_key = 'user:42'",
+            "UPDATE t SET object_key = 'a/b.png', row_key = 'r1'",
+            "UPDATE t SET public_key = 'ssh-ed25519 AAAA'",
+            "UPDATE t SET sort_key = 1, partition_key = 'p'",
+            "UPDATE t SET token_type = 'refresh', token_count = 3",
+            "SET @pass_count := 3",
+            "SET @token_count = 3",
+            "SELECT f('https://h/x?sort_key=name&page=2')",
+            "SELECT '{\"token_type\": \"refresh\", \"count\": 2}'",
+            "SELECT 'file:x.db?mode=ro'",
+            "SELECT 'x' INTO @n",
+            "CREATE TABLE t (customer_key int PRIMARY KEY, name text DEFAULT 'x')",
+            "CREATE TABLE users (password varchar(64) NOT NULL)",
+            "ALTER TABLE t ADD COLUMN api_key text",
+            "EXPLAIN QUERY PLAN SELECT * FROM t WHERE k = 'v'",
+        ] {
+            let r = redact(q);
+            assert_eq!(r.text, q);
+            assert!(!r.changed, "{q}");
+            assert!(r.secrets.is_empty(), "{q}: {:?}", r.secrets.len());
+        }
+    }
+
+    #[test]
+    fn scrub_replaces_whole_secrets_of_four_bytes_or_more_only() {
+        let err =
+            "ERROR 1054 (42S22) at line 1: Unknown column 'x' in 'field list'; integer syntax";
+        let short: Vec<String> = ["1", "int", "x", "054"].map(String::from).to_vec();
+        assert_eq!(scrub(err, &short), (err.to_owned(), false));
+        let s = vec!["Hv77qz".to_owned()];
+        let (out, changed) = scrub("near 'Hv77qz' and xHv77qzy at line 1", &s);
+        assert!(changed);
+        assert_eq!(out, "near '***' and xHv77qzy at line 1");
     }
 
     proptest::proptest! {
@@ -1052,6 +1679,15 @@ mod tests {
         #[test]
         fn sql_shaped_text_never_panics(
             s in "(PASSWORD|IDENTIFIED|BY|WITH|FOR|REPLACE|U&|E|\\$\\$|\\$t\\$|'|\"|`|\\\\|;|=|\\(|\\)|/\\*|\\*/|--|\n| |ş|İ|x|1|password=|://u:p@h){0,40}"
+        ) {
+            let r = redact(&s);
+            let _ = scrub(&s, &r.secrets);
+        }
+
+        // ## m3b-po-redact (fix round 1): the pair, JSON, bearer and INTO readers.
+        #[test]
+        fn pair_and_json_text_never_panics(
+            s in "('|\"|\\{|\\}|:|=|\\?|&|,|;| |\u{a0}|ş|İ|x|1|\\\\|token|api_key|accessToken|key|hexkey|Bearer |INTO|@pw|PRAGMA|EXPLAIN|file:){0,40}"
         ) {
             let r = redact(&s);
             let _ = scrub(&s, &r.secrets);

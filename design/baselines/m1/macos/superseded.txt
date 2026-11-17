@@ -1,0 +1,19 @@
+# ## m3b-ci (controller fix): the M1 baselines that later milestones changed on purpose.
+#
+# `cargo xtask shot-diff --superseded <this file>` lists these as superseded and does not compare
+# them; the other 44 M1 shots are compared at the default tolerance (dE2000 2, 0.1 % of pixels),
+# because nothing since M1 was meant to change them. Each line matches all 8 variants of one
+# surface (dark and light x en, tr, en-XA, tr-XT at 1280x800@2x). The causes are recorded in
+# docs/benchmarks/m2a.md, section 7 ("The 24 M1 baselines that breach the shot-diff"):
+#
+#   dialog-about  M2a Task 9: the modal scrim starts below the title bar (R27).
+#   menu-app      M2a Task 18 (P18): File gained "New connection"; M3a added rows again.
+#   toast-info    M2a Task 9: the dismiss mark is an icon Button, a few px further left.
+#
+# When the PO re-baselines one (a new PNG committed here), its line goes. A line that matches no
+# baseline fails the comparison, so this list cannot outlive what it excuses. The approved
+# M2-M3b states (3,176 shots, 1.2 GB) are not committed; the local milestone gate compares them
+# against the SDD folder's baseline (docs/benchmarks/m3b.md, section "pseudo-screens in CI").
+dialog-about-*
+menu-app-*
+toast-info-*
