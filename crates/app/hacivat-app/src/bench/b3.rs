@@ -45,8 +45,8 @@
 //! `typing` grades it against 2 ms p95 (the 50k-line fixture R-M3-9 names). The figures go to
 //! `target/bench/relex/`.
 //!
-//! **Display (M3c Task 44).** A graded run needs the 120 Hz reference refresh (118–122 Hz, any
-//! scale: the PO's M3a B3 ran on a 120 Hz 1× display) and the `tr-TR` format; elsewhere the run
+//! **Display (M3c Task 44).** A graded run needs a refresh of at least 118 Hz (no upper bound,
+//! any scale; every result line records the actual Hz and scale) and the `tr-TR` format; elsewhere the run
 //! is INVALID (exit 3, no JSON) with the `PENDING-PO` note, or ungraded with `--any-display`
 //! (label `b3-offpanel-…`; another format gives `b3-offlocale-…`).
 //! A window that cannot become key (the display asleep, the session locked) is INVALID too.
@@ -233,19 +233,17 @@ pub fn fold_plan(lines: usize) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// The highest refresh B3 is graded at: a faster display shortens the wait for the next frame
-/// and so lowers the figure (the M3b gate's 240 Hz run said so).
-pub const B3_MAX_HZ: f64 = 122.0;
-
-/// Whether the window's display runs at B3's reference refresh, 120 Hz (118–122 Hz reported).
-/// The scale does not matter to a latency figure: the PO's graded M3a B3 ran on a 120 Hz 1×
-/// display (`bench-po-20261116-0643/b3.log`). Unknown refresh (the display asleep) is refused.
+/// Whether the window's display runs at B3's reference refresh: at least 118 Hz (B1-real's
+/// `PANEL_MIN_HZ`), with no upper bound and at any scale (controller ruling, T44 fix round 1:
+/// the PO's graded M3a B3 ran on a 120 Hz 1× display, the M3b gate's on 240 Hz 1×). Every
+/// result line records the actual refresh and scale. Unknown refresh (the display asleep) is
+/// refused.
 pub fn display_ok(hz: Option<f64>, scale: Option<f32>) -> Result<(), String> {
     let min = super::b1_real::PANEL_MIN_HZ;
     match hz {
-        Some(hz) if (min..=B3_MAX_HZ).contains(&hz) => Ok(()),
+        Some(hz) if hz >= min => Ok(()),
         _ => Err(format!(
-            "B3 is graded at the 120 Hz reference refresh ({min}-{B3_MAX_HZ} Hz); the display reports {hz:?} at scale {scale:?}"
+            "B3 is graded at >= {min} Hz; the display reports {hz:?} at scale {scale:?}"
         )),
     }
 }
@@ -352,7 +350,7 @@ pub const USAGE: &str = "usage: b3 --file <fixture> --bench typing|typing-long-l
   typing, typing-with-results, typing-multi-caret, typing-with-folds, open, scroll: --file target/fixtures/b3-50k-t0.sql (gen-sql --lines 50000)\n\
   typing-long-line, ime-bounds: --file target/fixtures/b3-50k.sql (gen-sql --lines 50000 --long-line 100000)\n\
   typing-19mb: --file target/fixtures/b3-19mb.sql (gen-sql --lines 520000; at least 19 MiB, Reduced mode)\n\
-  Graded only at the 120 Hz reference refresh (118-122 Hz) in tr-TR: elsewhere INVALID (exit 3, no JSON) unless --any-display (ungraded b3-offpanel-* label).\n\
+  Graded only at >= 118 Hz (any scale) in tr-TR: elsewhere INVALID (exit 3, no JSON) unless --any-display (ungraded b3-offpanel-* label).\n\
   The last line is `RESULT: PASS|FAIL|INVALID|n/a <label>`; exit 0 = PASS or ungraded, 1 = FAIL or aborted, 3 = INVALID (exit 0 is never a PASS by itself: read RESULT).";
 
 pub fn parse_args(args: &[String]) -> Result<Args, String> {
@@ -1548,17 +1546,20 @@ mod tests {
     }
 
     #[test]
-    fn b3_is_graded_only_at_the_reference_refresh() {
-        // The built-in panel, and the 120 Hz 1x external display of the PO's M3a run.
+    fn b3_is_graded_at_118_hz_or_faster_at_any_scale() {
+        // The built-in panel, the PO's M3a 120 Hz 1x display, the M3b gate's 240 Hz 1x display.
         assert_eq!(display_ok(Some(120.0), Some(2.0)), Ok(()));
-        assert_eq!(display_ok(Some(119.88), Some(2.0)), Ok(()));
+        assert_eq!(display_ok(Some(118.0), Some(2.0)), Ok(()));
         assert_eq!(display_ok(Some(120.000_004_8), Some(1.0)), Ok(()));
+        assert_eq!(display_ok(Some(240.0), Some(1.0)), Ok(()));
         assert_eq!(display_ok(Some(120.0), None), Ok(()));
-        // A 60 Hz display, the 240 Hz external display, an unknown refresh (asleep).
-        assert!(display_ok(Some(60.0), Some(2.0)).is_err());
-        let fast = display_ok(Some(240.0), Some(1.0)).unwrap_err();
-        assert!(fast.contains("120 Hz reference"), "{fast}");
-        assert!(display_ok(Some(122.5), Some(2.0)).is_err());
+        // A 60 Hz display, just under the floor, an unknown refresh (asleep).
+        let slow = display_ok(Some(60.0), Some(2.0)).unwrap_err();
+        assert!(
+            slow.contains(">= 118 Hz") && slow.contains("60.0"),
+            "{slow}"
+        );
+        assert!(display_ok(Some(117.9), Some(2.0)).is_err());
         assert!(display_ok(None, Some(2.0)).is_err());
     }
 

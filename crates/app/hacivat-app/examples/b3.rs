@@ -11,8 +11,8 @@
 //!
 //! Modes on the T0 fixture: `typing`, `typing-with-results`, `typing-multi-caret`,
 //! `typing-with-folds` (M3c), `open`, `scroll`; on the T1 fixture: `typing-long-line`,
-//! `ime-bounds`; on the 19 MiB file: `typing-19mb` (M3c). Graded only at the 120 Hz
-//! reference refresh (118–122 Hz) in `tr-TR`; elsewhere, or with the window unable to become frontmost (display
+//! `ime-bounds`; on the 19 MiB file: `typing-19mb` (M3c). Graded only at ≥ 118 Hz
+//! (any scale) in `tr-TR`; elsewhere, or with the window unable to become frontmost (display
 //! asleep, session locked), the run is INVALID (PENDING-PO) unless `--any-display` (ungraded).
 //! The last line is `RESULT: PASS|FAIL|INVALID|n/a`; exit 0 is PASS or ungraded, 1 FAIL or
 //! aborted, 3 INVALID. Keep the window frontmost and do not touch the mouse or keyboard while it

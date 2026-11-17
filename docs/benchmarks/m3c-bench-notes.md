@@ -21,9 +21,12 @@ A run is graded only under the reference conditions. Otherwise it is **INVALID**
 JSON written) with a `PENDING-PO` note. INVALID never means FAIL: it means the run could not
 measure.
 
-- **B3** needs the 120 Hz reference refresh (118–122 Hz reported, at any scale; the PO's graded M3a
-  B3 ran on a 120 Hz 1× display) and the `tr-TR` format. A 60 Hz or 240 Hz display is refused,
-  because a faster display lowers latency (the M3b gate's 240 Hz run showed this).
+- **B3** needs a refresh of at least 118 Hz, with no upper bound and at any scale, and the `tr-TR`
+  format. This is B1-real's `PANEL_MIN_HZ`. The PO's graded M3a B3 ran on a 120 Hz 1× display
+  and the M3b gate's on 240 Hz 1×; both count. A 60 Hz display, or one that reports no refresh
+  (asleep), is refused. Every result line prints `display_hz` and `display_scale`, and the
+  results table records them, because a faster display lowers latency (the wait for the next
+  frame is shorter).
 - **B1-real** keeps the M3a rule: 1440 × 900 needs the built-in panel at 2× and ≥ 118 Hz,
   2560 × 1440 needs a 1× display, and the viewport must cover ≥ 90 % of the requested size. The
   check runs before the load and again at the end.
@@ -51,7 +54,7 @@ cargo build --release -p hacivat-app --features bench --examples
 E=target/release/examples      # or $CARGO_TARGET_DIR/release/examples
 ```
 
-## 3. B3 in the real app (display: the 120 Hz reference refresh)
+## 3. B3 in the real app (display: >= 118 Hz, any scale)
 
 ```sh
 # Each run ends with `RESULT: PASS|FAIL|INVALID|n/a <label>`.
@@ -94,6 +97,12 @@ b3-typing-app R-M3-9 worker relex (one-edit diff + SqlDocument::apply, increment
 Only `typing` grades it (the 50k-line fixture R-M3-9 names). A FAIL there makes the run's RESULT
 a FAIL. The other typing modes print it ungraded.
 
+**Known and ungraded: the long-line relex.** `typing-long-line` types in the middle of a
+100,000-character line. Its worker relex is expected at about **5–8 ms p95**: M3b Task 5
+measured 5.6–8.3 ms on a 100k-character line, and 2.2–2.7 ms for a burst inside an open string.
+That is above R-M3-9's 2 ms, and by design R-M3-9 does not cover it (the requirement names the
+50k-line fixture of short lines). The figure is recorded, never graded.
+
 ## 4. B1-real (pg17, 1M × 50, `tr-TR`)
 
 ```sh
@@ -115,8 +124,16 @@ HACIVAT_DOCKER_SET=pr $E/b1_real --mode streaming       # not gating (M3a)
   frame is printed after it as an upper bound. The sidecar `target/bench/load/<dump>.json` holds
   the same figures and the load figures.
 
-`cargo xtask bench-report` accepts only `--milestone m<number>` (not `m3c`). The rows below are
-filled in from the printed lines and the JSON in `target/bench/`.
+To add the graded dumps as rows of the M3c gate report (`docs/benchmarks/m3c.md`):
+
+```sh
+cargo xtask bench-report --milestone m3c target/bench/b1-fling-real-*.json target/bench/b3-typing*-app-*.json
+```
+
+`bench-report` accepts a milestone with a letter suffix (`m3a`, `m3b`, `m3c`) since M3c Task 44.
+Before that it accepted only `m<number>`. The rows in section 5.1 come from the same dumps. The
+R-M3-9 figures (`target/bench/relex/`) and the paint and load figures (`target/bench/load/`) are
+sidecars: copy them from the printed lines.
 
 ## 5. Results
 
@@ -126,12 +143,12 @@ Build: PENDING-PO · Date: PENDING-PO · Machine: the PO's Mac
 
 | Bench | Display | p50 | p95 | p99 | max | Samples | Verdict |
 |---|---|---|---|---|---|---|---|
-| `b3 typing` | 120 Hz | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO |
-| `b3 typing-long-line` (Reduced) | 120 Hz | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO |
-| `b3 typing-with-results` (1M × 50 open) | 120 Hz | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO |
-| `b3 typing-multi-caret` (10 carets) | 120 Hz | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO |
-| `b3 typing-with-folds` (1,000 folds) | 120 Hz | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO |
-| `b3 typing-19mb` (Reduced, release; ledger 298) | 120 Hz | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO |
+| `b3 typing` | PENDING-PO (Hz, scale) | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO |
+| `b3 typing-long-line` (Reduced) | PENDING-PO (Hz, scale) | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO |
+| `b3 typing-with-results` (1M × 50 open) | PENDING-PO (Hz, scale) | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO |
+| `b3 typing-multi-caret` (10 carets) | PENDING-PO (Hz, scale) | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO |
+| `b3 typing-with-folds` (1,000 folds) | PENDING-PO (Hz, scale) | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO |
+| `b3 typing-19mb` (Reduced, release; ledger 298) | PENDING-PO (Hz, scale) | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO |
 | R-M3-9 worker relex (`b3 typing`) | — | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO | PENDING-PO |
 
 | Bench | Display | mean fps | gaps > 100 ms | frames | grid paint p50 / p95 / p99 / max | > 3 ms / > 6 ms | Verdict |
