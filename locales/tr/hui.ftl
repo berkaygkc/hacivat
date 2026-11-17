@@ -82,3 +82,20 @@ hui-editor-exec-skipped = { $n }. ifade atlandı: önceki bir ifade başarısız
 hui-editor-t1-line-size = { $n } KB
 # Review: PO
 hui-editor-t1-both-body = Kısıtlı mod yazmayı hızlı tutar. Belge { $size } boyutunun altına inip her satır { $line } boyutundan kısa olunca sona erer.
+
+## m3b-t40-grid-a11y
+
+# Review: PO
+hui-grid-a11y-null = boş değer (NULL)
+# Review: PO
+hui-grid-a11y-truncated = { $value }, kısaltıldı, { $size }
+# Review: PO
+hui-grid-a11y-cell = { $column }: { $value }
+# Review: PO
+hui-grid-a11y-row-of = Satır { $row } / { $total }, { $cell }
+# Review: PO
+hui-grid-a11y-row-of-more = Satır { $row } / { $total } veya daha fazla, { $cell }
+# Review: PO
+hui-grid-selection-summary = { $cells } hücre seçili
+# Review: PO
+hui-grid-a11y-more-rows = Daha fazla satır var

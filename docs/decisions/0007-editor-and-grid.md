@@ -841,3 +841,37 @@ back (palette-only; Task 39's menus add "Add as sort level N" through
   `GridView::go_to` takes **view** rows and focuses the cell (`focus_cell`, the public "focus
   this cell"); past the fetched rows of an open cursor the app fetches in steps of 100,000 rows
   (so Stop fetching can stop between them), asking first above a million rows to fetch.
+
+## m3b-t40 — grid AccessKit subtree
+
+- *Only while a screen reader is attached.* `element::a11y_rows::prepaint` (the Task 1b hook)
+  returns at once while `Window::is_a11y_active` is false, and the view's render adds nothing;
+  no node, name or announcement is built (R-M3-69, HV-GRID-16's "zero cost").
+- *Shape.* The grid's node stays on the view's focused root (T30): role `Grid`, its label, the
+  column count, and a row count that includes the header row (row 0; view row `v` is row
+  `v + 1`); an open result counts its loaded rows and says "More rows are available". Its
+  children are one zero-paint `Row` element per row (the header, then the view rows on screen
+  ± 5), each at its row's place, whose cells are **synthetic leaves** (`ColumnHeader`/`Cell`)
+  with their bounds, column index (place among the visible columns, frozen ones first), name,
+  selected state and, on a header, the sort direction with the sort tooltip as description.
+  The fork's synthetic children are leaves only, so rows must be elements; no fork patch.
+- *Stable ids.* A row element is keyed by its model row under the grid's own element, a cell by
+  its column under its row: ids follow `(grid, model row, column)` through scrolls, sorts and
+  filters. Rows past the loaded ones are one "loading" row each, without cells.
+- *Focus.* The focus cell is the grid node's **active descendant** (the AccessKit node
+  property, written by the root's synthetic-children hook once the rows have declared their
+  cells; AccessKit's consumer moves the platform focus to it). A find step and go to row move
+  the focus through `focus_cell`, so the current match is the active descendant.
+- *Names.* The cell's `GridFrame::a11y_cell` (the app: `Purpose::A11y`, controls spoken as one
+  space, 1,000 graphemes) capped at 1,000 characters; NULL, a truncated value (with its whole
+  size) and a placeholder have their own words (`hui-grid-a11y-*`).
+- *Announcements.* A polite `Status` leaf of the grid's node, labelled and valued, dropped after
+  3 s: a focus moving to another row says the row ("Row 3 of 1,000, email: …"), within its row
+  the cell, and a selection of more than one cell its size (`hui-grid-selection-summary`). The
+  find's count and the go-to dialog keep their own nodes; the grid never says a count of
+  matches.
+- *Actions.* Each data cell answers Focus (focus the grid and the cell), ScrollIntoView and
+  ShowContextMenu (focus the cell, then the menu as Shift+F10); a canvas registers them once the
+  leaves have their ids.
+- *Tab leaves the grid from any cell* (R-M3-69; M3a left only from the last loaded cell). The
+  arrows move between cells.
