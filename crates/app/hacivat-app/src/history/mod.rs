@@ -112,6 +112,17 @@ pub(crate) fn search(
     on_core(store.search(q), cx)
 }
 
+// ## m3c-t34-editor (named exception): the editor's history recall.
+/// The `n` newest statements of `profile`, newest first, off the UI thread.
+pub(crate) fn recall(
+    store: &HistoryStore,
+    profile: hacivat_proto::ProfileId,
+    n: u32,
+    cx: &App,
+) -> BoxFuture<'static, Result<Vec<Arc<str>>, HistoryError>> {
+    on_core(store.recall(profile, String::new(), n), cx)
+}
+
 /// Pins or unpins entry `id` off the UI thread.
 pub(crate) fn pin(
     store: &HistoryStore,

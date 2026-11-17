@@ -41,6 +41,7 @@ impl Scripted {
             ranges: ranges.iter().cloned().collect(),
             state,
             choices: 0,
+            as_one: 0, // ## m3c-t34-editor (named exception)
         });
     }
 }
@@ -369,12 +370,14 @@ impl LanguageService for AroundService {
                 ranges,
                 state: PreviewState::Nothing,
                 choices: 0,
+                as_one: 0, // ## m3c-t34-editor (named exception)
             }
         } else {
             ExecPreview {
                 ranges,
                 state,
                 choices: 0,
+                as_one: 0, // ## m3c-t34-editor (named exception)
             }
         })
     }
@@ -493,6 +496,7 @@ fn ask_preselected_shows_the_number_of_choices(cx: &mut TestAppContext) {
         ranges: smallvec![0..8],
         state: PreviewState::AskPreselected,
         choices: 3,
+        as_one: 0, // ## m3c-t34-editor (named exception)
     });
     e.update(vcx, |v, cx| v.select_range(3..3, cx));
     vcx.executor().advance_clock(PREVIEW_DELAY);
@@ -520,6 +524,7 @@ fn ask_preselected_shows_the_number_of_choices(cx: &mut TestAppContext) {
         ranges: smallvec![0..8],
         state: PreviewState::AskPreselected,
         choices: 2,
+        as_one: 0, // ## m3c-t34-editor (named exception)
     });
     e.update(vcx, |v, cx| v.select_range(3..3, cx));
     vcx.executor().advance_clock(PREVIEW_DELAY);

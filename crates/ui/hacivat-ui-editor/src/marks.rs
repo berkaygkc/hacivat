@@ -21,6 +21,9 @@
 //!   cancelling, a 7 px hollow amber square; cancelled, the ban glyph and skipped, skip-forward,
 //!   both `text_2`. **Never red.** Two marks on one row: the worse glyph and a 3 px `text_2`
 //!   dot at its lower right.
+//!   ## m3c-t34-editor (M3b badges): waiting for Commit or Roll back, the amber stamp; a cancel
+//!   not answered (`Escalated`), the 12 px amber hourglass; rolled back, `undo-2` in `text_2`.
+//!   A re-run keeps the replaced mark's outcomes, the gutter ▶'s "Last runs".
 //! - **End of line** (micro 11.5 `text_3`, right-aligned 14 px from the text area's right
 //!   edge): the app's `eol` text (running and cancelling in amber, failed in `text` with the
 //!   SQLSTATE chip, succeeded after a green check); two marks are listed divided by `|`. When
@@ -86,9 +89,15 @@ pub enum ExecMarkState {
     Skipped,
     // ## m3b-t01b-seams: a cancel escalated to Terminate/Deactivate (Task 23 sets it; Task 34
     // paints its gutter badge). Until then it reads as Cancelling everywhere.
+    // ## m3c-t34-editor: the 12 px amber hourglass ("cancel not answered", NOTES ruling 15).
     Escalated {
         since: Instant,
     },
+    // ## m3c-t34-editor (T32 ruling 5; the app sets both): waiting for the user's Commit or Roll
+    // back (Keep or Undo), the 7 px amber stamp; and a confirmed statement the user, the
+    // deadline or a close rolled back, the 12 px `undo-2` in `text_2` (NOTES M3b primitives).
+    Awaiting,
+    RolledBack,
 }
 
 /// How long a running mark shows nothing (no flash for a fast statement).
@@ -124,6 +133,51 @@ struct Mark {
     // ## m3a-t33-exec-ui (named exception): the app's short form on a long line.
     short: Option<TextFn>,
     stale: bool,
+    // ## m3c-t34-editor: when it ended (the app's time text), and the runs of the same
+    // statement before it, newest first (the gutter ▶'s "Last runs").
+    when: Option<TextFn>,
+    past: Vec<PastRun>,
+}
+
+// ## m3c-t34-editor
+/// An earlier run of a statement, as its mark showed it when the next run replaced it.
+#[derive(Clone)]
+struct PastRun {
+    state: ExecMarkState,
+    label: Option<TextFn>,
+    eol: Option<TextFn>,
+    when: Option<TextFn>,
+}
+
+/// The most runs the ▶'s tooltip lists (the current one included).
+pub const LAST_RUNS: usize = 3;
+
+/// Whether `state` is an outcome (the run ended).
+fn ended(state: &ExecMarkState) -> bool {
+    matches!(
+        state,
+        ExecMarkState::Succeeded { .. }
+            | ExecMarkState::Failed { .. }
+            | ExecMarkState::Cancelled
+            | ExecMarkState::Skipped
+            | ExecMarkState::RolledBack
+    )
+}
+
+impl Mark {
+    /// This mark's runs that ended, newest first: its own outcome, then the earlier ones.
+    fn runs(&self) -> Vec<PastRun> {
+        let own = self.state.as_ref().filter(|s| ended(s)).map(|s| PastRun {
+            state: s.clone(),
+            label: self.label.clone(),
+            eol: self.eol.clone(),
+            when: self.when.clone(),
+        });
+        own.into_iter()
+            .chain(self.past.iter().cloned())
+            .take(LAST_RUNS)
+            .collect()
+    }
 }
 
 /// A mark one edit deleted, kept so that putting the text back (undo) restores it.
@@ -346,17 +400,27 @@ pub fn add(
                 log.rebase(version, range.clone(), RangeKind::Content),
                 Rebased::Mapped(_)
             );
+        let header = header_of(buf, &now);
+        // ## m3c-t34-editor: a re-run of the statement (the mark it replaces: the same key or
+        // range) keeps the runs that mark knew, for the ▶'s "Last runs".
+        let mut past: Vec<PastRun> = Vec::new();
+        for m in s.marks.iter().filter(|m| m.key == key || m.range == now) {
+            past.extend(m.runs());
+        }
+        past.truncate(LAST_RUNS);
         s.marks.retain(|m| m.key != key && m.range != now);
         s.tombstones.retain(|t| t.mark.key != key);
         let mark = Mark {
             key,
-            header: header_of(buf, &now),
+            header,
             range: now,
             state: None,
             label: None,
             eol: None,
             short: None,
             stale,
+            when: None,
+            past,
         };
         let at = s
             .marks
@@ -396,6 +460,97 @@ pub fn set_short(s: &mut MarkStore, key: MarkKey, short: Option<TextFn>) {
     } else if let Some(t) = s.tombstones.iter_mut().find(|t| t.mark.key == key) {
         t.mark.short = short;
     }
+}
+
+// ## m3c-t34-editor
+/// Sets when the mark's run ended (the app's time text, the ▶'s "Last runs" column).
+pub fn set_when(s: &mut MarkStore, key: MarkKey, when: Option<TextFn>) {
+    if let Some(m) = s.marks.iter_mut().find(|m| m.key == key) {
+        m.when = when;
+    } else if let Some(t) = s.tombstones.iter_mut().find(|t| t.mark.key == key) {
+        t.mark.when = when;
+    }
+}
+
+impl MarkStore {
+    /// The outcomes of the last runs of the statement of mark `key`, newest first: its own
+    /// (once it ended) and the earlier ones its re-runs replaced; at most [`LAST_RUNS`].
+    pub fn last_runs(&self, key: MarkKey) -> Vec<ExecMarkState> {
+        self.mark(key)
+            .map(|m| m.runs().into_iter().map(|r| r.state).collect())
+            .unwrap_or_default()
+    }
+
+    /// The mark whose glyph sits at `header` (a statement's first code byte), if any: the one
+    /// the ▶ of that statement's row speaks for.
+    pub(crate) fn at_header(&self, header: usize) -> Option<MarkKey> {
+        self.marks
+            .iter()
+            .filter(|m| m.header == header)
+            .max_by_key(|m| m.state.is_some())
+            .map(|m| m.key)
+    }
+
+    /// Whether a mark on lines `lines` (by its glyph's line) needs the user or is still going
+    /// (awaiting, escalated, running, cancelling, queued): the ▶ never covers it.
+    pub(crate) fn busy_on(&self, buf: &TextBuffer, line: u32) -> bool {
+        self.marks.iter().any(|m| {
+            let own = u32::try_from(buf.byte_to_line(m.header.min(buf.len_bytes())));
+            own == Ok(line)
+                && m.state.as_ref().is_some_and(|s| {
+                    matches!(
+                        s,
+                        ExecMarkState::Queued
+                            | ExecMarkState::Running { .. }
+                            | ExecMarkState::Cancelling { .. }
+                            | ExecMarkState::Awaiting
+                            | ExecMarkState::Escalated { .. }
+                    )
+                })
+        })
+    }
+
+    /// The tooltip rows of mark `key`'s last runs: the outcome glyph, the time, the sentence and
+    /// a failure's SQLSTATE.
+    pub(crate) fn run_rows(&self, key: MarkKey, cx: &App) -> Vec<RunRow> {
+        let Some(m) = self.mark(key) else {
+            return Vec::new();
+        };
+        let inks = Inks::of(cx);
+        m.runs()
+            .into_iter()
+            .map(|r| {
+                let (icon, ink) = match &r.state {
+                    ExecMarkState::Succeeded { .. } => (IconName::Check, inks.green),
+                    ExecMarkState::Failed { .. } => (IconName::TriangleAlert, inks.text),
+                    ExecMarkState::Skipped => (IconName::SkipForward, inks.text_2),
+                    ExecMarkState::RolledBack => (IconName::Undo2, inks.text_2),
+                    _ => (IconName::Ban, inks.text_2),
+                };
+                let sqlstate = match &r.state {
+                    ExecMarkState::Failed { sqlstate } => sqlstate.clone(),
+                    _ => None,
+                };
+                RunRow {
+                    icon,
+                    ink,
+                    when: r.when.as_ref().map(|f| f(cx)),
+                    text: r.eol.as_ref().or(r.label.as_ref()).map(|f| f(cx)),
+                    sqlstate,
+                }
+            })
+            .collect()
+    }
+}
+
+/// One row of the ▶'s "Last runs".
+#[derive(Debug, Clone)]
+pub(crate) struct RunRow {
+    pub icon: IconName,
+    pub ink: Hsla,
+    pub when: Option<SharedString>,
+    pub text: Option<SharedString>,
+    pub sqlstate: Option<SharedString>,
 }
 
 /// Removes every mark (and every tombstone).
@@ -534,46 +689,59 @@ enum Glyph {
     Cancelling,
     Cancelled,
     Skipped,
+    // ## m3c-t34-editor
+    Awaiting,
+    Escalated,
+    RolledBack,
 }
 
 impl Glyph {
-    /// Which of two marks on one row shows: the worse.
+    /// Which of two marks on one row shows: the worse (## m3c-t34-editor: a mark that needs
+    /// the user first).
     fn severity(self) -> u8 {
         match self {
-            Glyph::Failed => 7,
-            Glyph::Cancelling => 6,
-            Glyph::Running => 5,
-            Glyph::Queued => 4,
-            Glyph::Cancelled => 3,
+            Glyph::Awaiting => 10,
+            Glyph::Escalated => 9,
+            Glyph::Failed => 8,
+            Glyph::Cancelling => 7,
+            Glyph::Running => 6,
+            Glyph::Queued => 5,
+            Glyph::Cancelled => 4,
+            Glyph::RolledBack => 3,
             Glyph::Skipped => 2,
             Glyph::Succeeded => 1,
         }
     }
 
-    /// Still in flight: staleness waits until it finishes.
+    /// Still in flight: staleness waits until it finishes (## m3c-t34-editor: a statement
+    /// waiting for an answer or for its cancel is still going; the gutter ▶ never covers it).
     fn live(self) -> bool {
-        matches!(self, Glyph::Queued | Glyph::Running | Glyph::Cancelling)
+        matches!(
+            self,
+            Glyph::Queued | Glyph::Running | Glyph::Cancelling | Glyph::Awaiting | Glyph::Escalated
+        )
     }
 }
 
 // ## m3c-t32-fold
 /// Which mark a folded header's row shows (NOTES M3c-7, controller carry): the one that most
 /// needs the user. The editor's states in that order: a cancel not answered (`Escalated`) >
-/// failed > running > cancelling > queued > cancelled > skipped > done > stale. The app shows
-/// "awaiting an answer" as a running mark and "rolled back" through its label (NOTES ruling
-/// 31), so they rank as those states here. Task 34 adds the two arms at their NOTES places:
-/// awaiting above escalated, rolled back between cancelled and skipped.
+/// failed > running > cancelling > queued > cancelled > skipped > done > stale.
+/// ## m3c-t34-editor (T32 ruling 5): the two M3b arms at their NOTES M3c-7 places: awaiting an
+/// answer above escalated, rolled back between cancelled and skipped.
 fn fold_rank(m: &Mark, glyph: Glyph) -> u8 {
     if m.stale && !glyph.live() {
         return 0;
     }
     match m.state {
-        Some(ExecMarkState::Escalated { .. }) => 9,
-        Some(ExecMarkState::Failed { .. }) => 8,
-        Some(ExecMarkState::Running { .. }) => 7,
-        Some(ExecMarkState::Cancelling { .. }) => 6,
-        Some(ExecMarkState::Queued) => 5,
-        Some(ExecMarkState::Cancelled) => 4,
+        Some(ExecMarkState::Awaiting) => 11,
+        Some(ExecMarkState::Escalated { .. }) => 10,
+        Some(ExecMarkState::Failed { .. }) => 9,
+        Some(ExecMarkState::Running { .. }) => 8,
+        Some(ExecMarkState::Cancelling { .. }) => 7,
+        Some(ExecMarkState::Queued) => 6,
+        Some(ExecMarkState::Cancelled) => 5,
+        Some(ExecMarkState::RolledBack) => 4,
         Some(ExecMarkState::Skipped) => 3,
         Some(ExecMarkState::Succeeded { .. }) => 2,
         None => 1,
@@ -592,8 +760,11 @@ fn glyph_of(m: &Mark, now: Instant) -> Option<Glyph> {
         }
         ExecMarkState::Succeeded { .. } => Glyph::Succeeded,
         ExecMarkState::Failed { .. } => Glyph::Failed,
-        // ## m3b-t01b-seams: Escalated paints as Cancelling until Task 34's badge.
-        ExecMarkState::Cancelling { .. } | ExecMarkState::Escalated { .. } => Glyph::Cancelling,
+        ExecMarkState::Cancelling { .. } => Glyph::Cancelling,
+        // ## m3c-t34-editor: Task 34's badges.
+        ExecMarkState::Escalated { .. } => Glyph::Escalated,
+        ExecMarkState::Awaiting => Glyph::Awaiting,
+        ExecMarkState::RolledBack => Glyph::RolledBack,
         ExecMarkState::Cancelled => Glyph::Cancelled,
         ExecMarkState::Skipped => Glyph::Skipped,
     })
@@ -707,7 +878,8 @@ fn status_parts(m: &Mark, glyph: Glyph, short: bool, inks: &Inks, cx: &App) -> V
                     parts.push(Part::Icon(IconName::Check, inks.green));
                     parts.push(Part::Text(text(cx), inks.text_3));
                 }
-                Glyph::Running | Glyph::Cancelling => {
+                // ## m3c-t34-editor: the waiting and escalated words are amber too.
+                Glyph::Running | Glyph::Cancelling | Glyph::Awaiting | Glyph::Escalated => {
                     parts.push(Part::Text(text(cx), inks.amber));
                 }
                 _ => {}
@@ -731,7 +903,10 @@ fn status_parts(m: &Mark, glyph: Glyph, short: bool, inks: &Inks, cx: &App) -> V
             parts.push(Part::Icon(IconName::Check, inks.green));
             parts.push(Part::Text(text, inks.text_3));
         }
-        (_, Glyph::Running | Glyph::Cancelling) => parts.push(Part::Text(text, inks.amber)),
+        // ## m3c-t34-editor: waiting for an answer, cancel not answered: amber (pending).
+        (_, Glyph::Running | Glyph::Cancelling | Glyph::Awaiting | Glyph::Escalated) => {
+            parts.push(Part::Text(text, inks.amber));
+        }
         (Some(ExecMarkState::Failed { sqlstate }), _) => {
             parts.push(Part::Text(text, inks.text));
             if let Some(code) = sqlstate {
@@ -773,6 +948,11 @@ fn glyph_element(glyph: Glyph, stale: bool, inks: &Inks) -> AnyElement {
         Glyph::Failed => icon(IconName::TriangleAlert, inks.text),
         Glyph::Cancelled => icon(IconName::Ban, inks.text_2),
         Glyph::Skipped => icon(IconName::SkipForward, inks.text_2),
+        // ## m3c-t34-editor (NOTES M3b primitives): the amber stamp (the run marker's square),
+        // the amber hourglass, the `undo-2` in `text_2`.
+        Glyph::Awaiting => square().bg(inks.amber).into_any_element(),
+        Glyph::Escalated => icon(IconName::Hourglass, inks.amber),
+        Glyph::RolledBack => icon(IconName::Undo2, inks.text_2),
     }
 }
 
@@ -780,7 +960,8 @@ fn glyph_element(glyph: Glyph, stale: bool, inks: &Inks) -> AnyElement {
 fn hint_message(cx: &App, hint: PreviewHint) -> SharedString {
     let (id, args) = hint_text(hint);
     // ## m3a-t33-exec-ui (named exception)
-    if let PreviewHint::Choices { n } = hint {
+    // ## m3c-t34-editor: "as one · n statements" counts too.
+    if let PreviewHint::Choices { n } | PreviewHint::AsOne { n } = hint {
         return crate::commands::message(cx, id, &[("n", UiArg::Count(u64::from(n)))]);
     }
     match args {
@@ -944,21 +1125,25 @@ pub fn prepaint(
             }
             _ => el = el.tooltip(move |_, cx| MarksTip::view(tip_lines.clone(), cx)),
         }
-        let mut el = el.into_any_element();
-        el.prepaint_as_root(
-            slot.origin,
-            size(
-                AvailableSpace::Definite(px(GLYPH_W)),
-                AvailableSpace::Definite(g.line_height),
-            ),
-            window,
-            cx,
-        );
-        out.elements.borrow_mut().push((el, false));
-        out.glyphs.push((
-            worst.key,
-            window.insert_hitbox(slot, HitboxBehavior::Normal),
-        ));
+        // ## m3c-t34-editor: the gutter ▶ takes a finished mark's place on its row (NOTES
+        // M3c-15); the status stays.
+        if !ov.play_rows.contains(line) {
+            let mut el = el.into_any_element();
+            el.prepaint_as_root(
+                slot.origin,
+                size(
+                    AvailableSpace::Definite(px(GLYPH_W)),
+                    AvailableSpace::Definite(g.line_height),
+                ),
+                window,
+                cx,
+            );
+            out.elements.borrow_mut().push((el, false));
+            out.glyphs.push((
+                worst.key,
+                window.insert_hitbox(slot, HitboxBehavior::Normal),
+            ));
+        }
         // The row's status: each mark's, divided.
         let (mut full, mut short) = (Vec::new(), Vec::new());
         // ## m3c-t32-fold (named exception): a failure inside a fold names its line.
@@ -1010,6 +1195,8 @@ pub fn prepaint(
             PreviewHint::Choices { .. } => {
                 parts.push(Part::Icon(IconName::ChevronsUpDown, inks.text_3));
             }
+            // ## m3c-t34-editor (NOTES surface 9): the layers glyph.
+            PreviewHint::AsOne { .. } => parts.push(Part::Icon(IconName::Layers, inks.text_3)),
         }
         parts.push(Part::Text(hint_message(cx, hint), inks.text_3));
         eols.push((line, parts, Vec::new()));

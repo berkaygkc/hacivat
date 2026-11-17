@@ -270,11 +270,11 @@ fn a_production_insert_is_confirmed_before_it_is_kept(cx: &mut TestAppContext) {
         wait_until(vcx, "the Keep/Undo prompt", commit_open);
         // ## m3b-t26-prod-unlock (fix round 1, A-M5): the gutter shows it running while the
         // answer is awaited.
-        assert!(
-            matches!(marks(vcx, id).as_slice(), [ExecMarkState::Running { .. }]),
-            "{sql}: {:?}",
-            marks(vcx, id)
-        );
+        // ## m3c-t34-editor (named exception; T32 ruling 5): as its own state, the awaiting stamp
+        // (set by the question's follower, which may land just after the prompt opens).
+        wait_until(vcx, "the awaiting mark", |vcx| {
+            matches!(marks(vcx, id).as_slice(), [ExecMarkState::Awaiting])
+        });
         let calls = fake(vcx).call_log()[sent_before..].to_vec();
         assert!(
             calls.iter().any(|c| matches!(c,
@@ -312,14 +312,16 @@ fn a_production_insert_is_confirmed_before_it_is_kept(cx: &mut TestAppContext) {
                 .count()
                 == undone + 1
         });
+        // ## m3c-t34-editor (named exception; the T24/T29 carry): an undone statement ends
+        // rolled back (the undo glyph), no longer failed.
         wait_until(vcx, "the settled mark", |vcx| {
-            !matches!(marks(vcx, id).as_slice(), [ExecMarkState::Running { .. }])
+            !matches!(
+                marks(vcx, id).as_slice(),
+                [ExecMarkState::Running { .. } | ExecMarkState::Awaiting]
+            )
         });
         assert!(
-            matches!(
-                marks(vcx, id).as_slice(),
-                [ExecMarkState::Failed { sqlstate: None }]
-            ),
+            matches!(marks(vcx, id).as_slice(), [ExecMarkState::RolledBack]),
             "{sql}: {:?}",
             marks(vcx, id)
         );

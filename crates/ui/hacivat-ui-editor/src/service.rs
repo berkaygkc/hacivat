@@ -13,6 +13,37 @@ use smallvec::{SmallVec, smallvec};
 
 use crate::config::{DocContext, DocId};
 
+// ## m3c-t34-editor
+/// A dialect's comment tokens (`editor.toggle_comment`): the line comment and the block
+/// comment's opening and closing tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CommentTokens {
+    /// The line comment (`None`: the dialect has none, and lines are wrapped in the block
+    /// comment instead; ## m3c-t34-editor fix round 1, M12).
+    pub line: Option<&'static str>,
+    pub block: (&'static str, &'static str),
+    /// The line comment needs white space (or the line's end) after it to be one: MySQL's
+    /// `-- ` (`--1` is an expression there; fix round 1, M9).
+    pub line_needs_space: bool,
+}
+
+impl CommentTokens {
+    /// Standard SQL's, which every supported dialect reads: `--` and `/* */` (MySQL needs a
+    /// space after `--`, and the command always writes one).
+    pub const SQL: CommentTokens = CommentTokens {
+        line: Some("--"),
+        block: ("/*", "*/"),
+        line_needs_space: false,
+    };
+
+    /// MySQL's and MariaDB's: `-- ` with its space (`#` also comments there, but `--` is what
+    /// the command writes).
+    pub const MYSQL: CommentTokens = CommentTokens {
+        line_needs_space: true,
+        ..CommentTokens::SQL
+    };
+}
+
 /// Whether a statement's boundaries are certain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Confidence {
@@ -49,6 +80,10 @@ pub struct ExecPreview {
     // ## m3a-t33-exec-ui (named exception, T28 ruling 2): the "N choices" hint.
     /// With `AskPreselected`, the candidates Run's chooser offers; 0 otherwise.
     pub choices: u32,
+    // ## m3c-t34-editor (named exception; the T24/T29 carry, NOTES surface 9): "as one · 2
+    // statements".
+    /// Run sends the selection as one unit holding this many statements; 0 otherwise.
+    pub as_one: u32,
 }
 
 /// Which Run (Run, Run 2, Run 3).
@@ -127,6 +162,11 @@ pub trait LanguageService: 'static {
     fn folding_ranges(&self, _doc: DocId, _version: u64) -> Arc<[FoldRange]> {
         Arc::from([])
     }
+    // ## m3c-t34-editor
+    /// The dialect's comment tokens (Task 34's toggle comment). Default: [`CommentTokens::SQL`].
+    fn comment_tokens(&self, _doc: DocId) -> CommentTokens {
+        CommentTokens::SQL
+    }
 }
 
 /// A token oracle that knows no words (the class fallback applies).
@@ -183,6 +223,7 @@ impl LanguageService for FailClosedService {
             ranges: smallvec![],
             state: PreviewState::Uncertain,
             choices: 0,
+            as_one: 0,
         })
     }
 

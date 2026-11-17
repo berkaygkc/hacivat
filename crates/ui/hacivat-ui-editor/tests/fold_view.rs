@@ -75,6 +75,7 @@ impl LanguageService for Svc {
             ranges,
             state,
             choices: 0,
+            as_one: 0, // ## m3c-t34-editor (named exception)
         })
     }
     fn token_oracle(&self, _: DocId) -> Rc<dyn TokenOracle> {
