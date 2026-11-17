@@ -116,7 +116,8 @@ impl Checkbox {
                 .child(
                     Icon::new(IconName::Check)
                         .size(IconSize::Chrome)
-                        .color(c.text_3.to_hsla()),
+                        // ## m3c-t41 (M3c-38): the disabled ink.
+                        .color(c.text_disabled.to_hsla()),
                 ),
             (false, _) => mark
                 .bg(well.to_hsla())
@@ -124,7 +125,8 @@ impl Checkbox {
         };
 
         let (ink, sub_ink) = if disabled {
-            (c.text_3, c.text_3)
+            // ## m3c-t41 (M3c-38): the disabled ink, never remapped (Raised Ink Rule exempt).
+            (c.text_disabled, c.text_disabled)
         } else {
             (c.text, c.text_2)
         };

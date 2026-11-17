@@ -155,6 +155,10 @@ pub struct EditorView {
     pub(crate) paste: PasteState,
     pub(crate) probe: Option<Rc<dyn FrameProbe>>,
     pub(crate) layout: Option<FrameLayout>,
+    // ## m3c-t41 (named exception; design/m3b-safe surface 24): the placeholder an empty
+    // document shows on its first line, and the text area it was last placed in.
+    pub(crate) placeholder: Option<TextFn>,
+    pub(crate) placeholder_at: Option<Bounds<Pixels>>,
     // ## m3a-t01b-seams (fix round 1): module-owned state of the input handler (Task 27) and
     // the commands (Task 25), and the focus subscriptions.
     pub(crate) input: InputState,
@@ -303,6 +307,9 @@ impl EditorView {
             paste: PasteState::default(),
             probe: None,
             layout: None,
+            // ## m3c-t41
+            placeholder: None,
+            placeholder_at: None,
             input: InputState::default(),
             commands: CommandState::default(),
             find: FindState::default(),
@@ -697,6 +704,62 @@ impl EditorView {
         self.layout.as_ref()
     }
 
+    // ## m3c-t41 (named exception)
+    /// The sentence an empty document shows on its first line, in `text-3`, wrapping in the
+    /// text area ("Write SQL here. ⌘↵ runs the statement at the caret."); `None`: none.
+    pub fn set_placeholder(&mut self, text: Option<TextFn>, cx: &mut Context<Self>) {
+        self.placeholder = text;
+        cx.notify();
+    }
+
+    /// The placeholder over the first line of an empty document, placed by the last painted
+    /// frame (a frame is asked for while it has none, or when the text area moved).
+    fn placeholder_element(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<hacivat_ui_core::gpui_surface::AnyElement> {
+        use hacivat_ui_core::gpui_surface::{IntoElement as _, anchored, point, px};
+        let text = self.placeholder.as_ref()?;
+        if self.model.snapshot().buffer.len_bytes() > 0 {
+            self.placeholder_at = None;
+            return None;
+        }
+        let Some(layout) = self.layout.as_ref() else {
+            window.request_animation_frame();
+            return None;
+        };
+        let rows = layout.rows();
+        if self.placeholder_at != Some(rows.bounds) {
+            self.placeholder_at = Some(rows.bounds);
+            window.request_animation_frame();
+        }
+        let t = hacivat_ui_core::theme::Theme::get(cx).tokens;
+        let x = layout.origin_x as f32;
+        let width = (f32::from(rows.bounds.right()) - x - t.spacing.md).max(0.0);
+        let style = hacivat_ui_core::theme::TypeStyle {
+            line_height: f32::from(rows.line_height),
+            ..t.type_ramp.body
+        };
+        Some(
+            anchored()
+                .position(point(px(x), rows.first_y))
+                .snap_to_window()
+                .child(
+                    div().w(px(width)).child(
+                        hacivat_ui::text::paragraph(
+                            text(cx),
+                            hacivat_ui::text::TextSource::Fluent,
+                            style,
+                            t.colors.text_3.to_hsla(),
+                        )
+                        .id("editor-placeholder"),
+                    ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The editor's accessible label.
     pub fn a11y_label(&self, cx: &App) -> SharedString {
         (self.a11y_label)(cx)
@@ -967,6 +1030,8 @@ impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let banner = large_file::banner(&self.tier, window, cx);
         let overlay = commands::overlay(self, window, cx);
+        // ## m3c-t41
+        let placeholder = self.placeholder_element(window, cx);
         let text = EditorElement::new(
             cx.entity(),
             self.focus.clone(),
@@ -984,6 +1049,8 @@ impl Render for EditorView {
             .children(banner)
             .child(text)
             .children(overlay)
+            // ## m3c-t41
+            .children(placeholder)
     }
 }
 

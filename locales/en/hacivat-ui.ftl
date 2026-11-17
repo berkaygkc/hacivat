@@ -3012,3 +3012,24 @@ hv-eol-counts-cr = Line endings: LF { $lf }, CRLF { $crlf }, CR { $cr }
 # Variables:
 #   $line (Number) - the statement's first line, 1-based, e.g. 12.
 hv-gutter-run-line = Run the statement at line { $line }
+
+## m3b-t41-chrome
+
+# The transaction mode chip's word for Auto-commit in a narrow pane (design/m3b-safe surface 24, N4): the chip keeps its mode word.
+hv-tx-chip-auto-short = Auto
+# The waiting item's first line in a narrow pane (NOTES surface 24): the sentence keeps all its words on two lines.
+hv-console-waiting-l1 = Waiting for a connection
+# The waiting item's second line in a narrow pane.
+# Variables:
+#   $inUse (Number) - connections in use, e.g. 4.
+#   $max (Number) - connections the profile allows, e.g. 4.
+hv-console-waiting-l2 = { $inUse } of { $max } in use
+# The tooltip and accessible name of an icon-only toolbar button in a narrow pane (N1): its word and its keys, e.g. "Run · ⌘↵".
+# Variables:
+#   $label (String) - the button's word, e.g. Run.
+#   $keys (String) - its shortcut, e.g. ⌘↵.
+hv-console-button-keys = { $label } · { $keys }
+# The first line of an empty console, in text-3 (design/m3a-query surface 1; m3b-safe surface 24: it wraps in a narrow pane).
+# Variables:
+#   $key (String) - the Run shortcut, e.g. ⌘↵.
+hv-editor-placeholder = Write SQL here. { $key } runs the statement at the caret.

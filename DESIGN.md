@@ -16,6 +16,8 @@ colors:
   dark-text: "#C9D1D9"
   dark-text-2: "#8B949E"
   dark-text-3: "#828A96"
+  # ## m3c-t41 (M3c-38): disabled ink, never remapped by the Raised Ink Rule (Task 43 adds its row).
+  dark-text-disabled: "#636A76"
   dark-on-accent: "#10141C"
   dark-on-red: "#10141C"
   dark-cp-fill: "#CE2C31"
@@ -53,6 +55,8 @@ colors:
   light-text: "#1B1B1F"
   light-text-2: "#55555E"
   light-text-3: "#6C6C76"
+  # ## m3c-t41 (M3c-38)
+  light-text-disabled: "#A0A0A8"
   light-on-accent: "#FFFFFF"
   light-on-red: "#FFFFFF"
   light-cp-fill: "#CE2C31"

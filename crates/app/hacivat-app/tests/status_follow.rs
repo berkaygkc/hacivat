@@ -1082,3 +1082,343 @@ fn without_a_console_the_m2_behaviour_is_unchanged(cx: &mut TestAppContext) {
     );
     stop_core_runtime_test(cx);
 }
+
+// ---------------------------------------------------------------------------------------------
+// ## m3c-t41-chrome: the status bar's Reduced mode and order (F2 M8 = T34 M6; design/m3b-safe
+// M3c-35, surface 24), and the chrome carries (the palette, a closed console's key context,
+// "Nothing to run here", the results' regional display, the empty console's placeholder, a
+// click on the active tab).
+
+/// The status bar's debug bounds of `selector`, when drawn.
+fn bounds_of(
+    vcx: &mut VisualTestContext,
+    selector: &'static str,
+) -> Option<gpui::Bounds<gpui::Pixels>> {
+    vcx.debug_bounds(selector)
+}
+
+/// Whether the last frame drew the label `#id`, visible and painted.
+fn drawn(vcx: &VisualTestContext, id: &str) -> bool {
+    let needle = format!("#{id}");
+    registry_frame(vcx)
+        .iter()
+        .any(|r| r.path.ends_with(&needle) && r.visible && r.painted_px > 0.0)
+}
+
+/// A console over a 5 MB text: its editor opens in reduced mode (T1), with two lines selected.
+fn reduced_console(vcx: &VisualTestContext) -> ConsoleId {
+    let id = profile_id(vcx, STAGING);
+    let line = "SELECT 'İzmir', 1234567;\n";
+    let text = line.repeat((5 << 20) / line.len() + 1);
+    let tab = in_window(vcx, |window, cx| {
+        hacivat_app::console::view::fixtures::open(id, &text, window, cx)
+    })
+    .expect("a console tab");
+    wait_until(vcx, "the fixture console", |vcx| {
+        vcx.cx.read(|cx| Consoles::by_tab(cx, tab)).is_some()
+    });
+    let console = vcx
+        .cx
+        .read(|cx| Consoles::by_tab(cx, tab))
+        .expect("console");
+    let editor = vcx
+        .cx
+        .read(|cx| Consoles::get(cx, console).and_then(|s| s.editor.clone()))
+        .expect("an editor");
+    in_window(vcx, |_, cx| {
+        editor.update(cx, |e, cx| e.select_range(0..40, cx))
+    });
+    focus_console(vcx, console);
+    console
+}
+
+#[gpui::test]
+fn reduced_mode_never_gives_way(cx: &mut TestAppContext) {
+    // NOTES surface 6 and 24: "Reduced mode" is a trust signal and never gives way; the
+    // selected count gives way before the path, Ln/Col after it.
+    let vcx = shell_two(cx);
+    // The long pseudo-locale makes the path give way at the narrowest window.
+    #[cfg(feature = "pseudo")]
+    switch_to(vcx, "tr-XT");
+    reduced_console(vcx);
+    wait_until(vcx, "the reduced cell", |vcx| {
+        drawn(vcx, "editor-segment-reduced")
+    });
+    let mut path_gone_with_lncol = false;
+    for width in (960..=1400).rev().step_by(7) {
+        vcx.simulate_resize(gpui::size(gpui::px(width as f32), gpui::px(600.0)));
+        vcx.run_until_parked();
+        assert!(
+            drawn(vcx, "editor-segment-reduced"),
+            "{width}: Reduced mode gave way"
+        );
+        let cut = chrome_cut(vcx);
+        assert!(cut.is_empty(), "{width}: chrome cut: {cut:?}");
+        let (path, lncol, selected) = (
+            drawn(vcx, "status-path"),
+            drawn(vcx, "editor-segment-lncol"),
+            drawn(vcx, "editor-segment-selected"),
+        );
+        assert!(
+            !selected || path,
+            "{width}: the selected count outlived the path"
+        );
+        assert!(!path || lncol, "{width}: Ln/Col gave way before the path");
+        path_gone_with_lncol |= !path && lncol;
+    }
+    #[cfg(feature = "pseudo")]
+    assert!(
+        path_gone_with_lncol,
+        "some width shows Ln/Col after the path gave way"
+    );
+    let _ = path_gone_with_lncol;
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn editor_segment_sits_before_the_version(cx: &mut TestAppContext) {
+    // M3c-35 (the M3a NOTES order): the editor segment and the version form the right group,
+    // right-aligned before the language segment; the segment comes first.
+    let vcx = shell_two(cx);
+    let staging = console_of(vcx, STAGING);
+    focus_console(vcx, staging);
+    vcx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(800.0)));
+    vcx.run_until_parked();
+    let lncol = bounds_of(vcx, "status-cell-lncol").expect("the Ln/Col cell");
+    let version = bounds_of(vcx, "status-version").expect("the version");
+    let env = bounds_of(vcx, "status-env").expect("the environment");
+    let bar = bounds_of(vcx, "status-bar").expect("the status bar");
+    assert!(lncol.right() <= version.left(), "{lncol:?} {version:?}");
+    // Right-aligned: the room left over sits between the left group and the editor segment.
+    let mid = bar.left() + bar.size.width / 2.0;
+    assert!(
+        lncol.left() > mid,
+        "{lncol:?} is not in the right group of {bar:?}"
+    );
+    assert!(env.right() < mid, "{env:?}");
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn palette_runs_editor_commands_in_the_editor(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let staging = console_of(vcx, STAGING);
+    let editor = vcx
+        .cx
+        .read(|cx| Consoles::get(cx, staging).and_then(|s| s.editor.clone()))
+        .expect("an editor");
+    in_window(vcx, |_, cx| {
+        editor.update(cx, |e, cx| {
+            e.set_text("SELECT 1", cx);
+            e.select_range(0..0, cx);
+        })
+    });
+    focus_console(vcx, staging);
+    assert!(run(vcx, "workspace.command_palette"));
+    vcx.run_until_parked();
+    let palette = vcx
+        .cx
+        .read(hacivat_app::commands::palette::open_palette_view)
+        .expect("the palette is open");
+    in_window(vcx, |_, cx| {
+        palette.update(cx, |_, cx| {
+            cx.emit(hacivat_ui::palette::PaletteEvent::Confirmed(
+                "editor.duplicate_line".into(),
+            ))
+        })
+    });
+    vcx.run_until_parked();
+    assert_eq!(editor_text(vcx, staging), "SELECT 1\nSELECT 1");
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn closing_a_console_unregisters_its_focus_context(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let staging = console_of(vcx, STAGING);
+    focus_console(vcx, staging);
+    // The editor outlives its tab here (the test holds it), as a pending task may.
+    let editor = vcx
+        .cx
+        .read(|cx| Consoles::get(cx, staging).and_then(|s| s.editor.clone()))
+        .expect("an editor");
+    // With its handle focused, the editor's key context is on the stack while its console is
+    // open, and no longer once it closed (its handle still alive).
+    let ws = workspace(vcx);
+    let with_editor_focused = |vcx: &VisualTestContext| {
+        in_window(vcx, |window, cx| {
+            let handle = editor.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+            ws.read(cx).context_stack(window, cx)
+        })
+    };
+    assert!(
+        with_editor_focused(vcx)
+            .0
+            .contains(&hacivat_ui_editor::EDITOR_CONTEXT),
+        "registered while open"
+    );
+    focus_console(vcx, staging);
+    assert!(run(vcx, "workspace.close_tab"));
+    wait_until(vcx, "the console to be forgotten", |vcx| {
+        vcx.cx.read(|cx| Consoles::get(cx, staging).is_none())
+    });
+    let stack = with_editor_focused(vcx);
+    assert!(
+        !stack.0.contains(&hacivat_ui_editor::EDITOR_CONTEXT),
+        "the closed console's context stayed: {stack:?}"
+    );
+    drop(editor);
+    stop_core_runtime_test(cx);
+}
+
+/// A connected staging console whose editor knows its SQL context (the Run preview speaks).
+fn connected_console(vcx: &VisualTestContext) -> ConsoleId {
+    let staging = console_of(vcx, STAGING);
+    in_window(vcx, |_, cx| {
+        let state = Consoles::get(cx, staging).expect("the console").clone();
+        let editor = state.editor.expect("an editor");
+        let service = state.service.expect("its language service");
+        let doc = editor.read(cx).doc();
+        editor.update(cx, |v, cx| {
+            v.set_doc_context(
+                hacivat_ui_editor::DocContext {
+                    connected: true,
+                    tier: v.status().tier,
+                },
+                cx,
+            );
+        });
+        service.set_sql_context(
+            doc,
+            sql_dialect::DialectCtx::new(sql_dialect::DialectId::Postgres, None),
+            sql_dialect::ClientFlavor::Psql,
+            cx,
+        );
+    });
+    focus_console(vcx, staging);
+    staging
+}
+
+#[gpui::test]
+fn nothing_to_run_is_a_status_sentence(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let staging = connected_console(vcx);
+    vcx.simulate_keystrokes("- - space x enter enter");
+    settle_until(vcx, Duration::from_secs(10), || {
+        text_of(vcx, "status-message").as_deref() == Some("Nothing to run here")
+    });
+    let editor = vcx
+        .cx
+        .read(|cx| Consoles::get(cx, staging).and_then(|s| s.editor.clone()))
+        .expect("an editor");
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |e, cx| assert!(e.run_command("editor.run", window, cx)));
+    });
+    settle(vcx, Duration::from_millis(500));
+    assert!(
+        !toast_ids(vcx).iter().any(|t| t.contains("nothing-to-run")),
+        "{:?}",
+        toast_ids(vcx)
+    );
+    assert!(
+        !toast_texts(vcx)
+            .iter()
+            .any(|t| t.contains("Nothing to run")),
+        "{:?}",
+        toast_texts(vcx)
+    );
+    assert_eq!(
+        text_of(vcx, "status-message").as_deref(),
+        Some("Nothing to run here")
+    );
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn display_settings_follow_a_settings_change(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let staging = console_of(vcx, STAGING);
+    focus_console(vcx, staging);
+    let results = vcx
+        .cx
+        .read(|cx| Consoles::get(cx, staging).and_then(|s| s.results.clone()))
+        .expect("the console's results");
+    let locale = |vcx: &VisualTestContext| {
+        vcx.cx.read(|cx| {
+            results
+                .read(cx)
+                .display()
+                .settings()
+                .format_locale
+                .to_string()
+        })
+    };
+    wait_until(vcx, "the first display", |vcx| locale(vcx) != "und");
+    assert_ne!(locale(vcx), "tr-TR");
+    vcx.cx.update(|cx| {
+        let settings = hacivat_app::shell::update_settings(cx, |s| {
+            s.ui.regional_format = hacivat_settings::LanguagePref::Tag("tr-TR".to_string());
+        });
+        hacivat_app::l10n_global::switch_locale(cx, &settings).detach();
+    });
+    wait_until(vcx, "the results to take the new region", |vcx| {
+        locale(vcx) == "tr-TR"
+    });
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn empty_console_draws_its_placeholder(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let staging = console_of(vcx, STAGING);
+    focus_console(vcx, staging);
+    wait_until(vcx, "the placeholder", |vcx| {
+        drawn(vcx, "editor-placeholder")
+    });
+    let text = text_of(vcx, "editor-placeholder").expect("the placeholder");
+    assert!(text.starts_with("Write SQL here."), "{text}");
+    // Narrow: it wraps inside the text area, never cut.
+    vcx.simulate_resize(gpui::size(gpui::px(700.0), gpui::px(600.0)));
+    // The placeholder sits where the last frame put the text area: one more frame after the
+    // resize places it (the editor asks for it).
+    for _ in 0..2 {
+        in_window(vcx, |window, _| window.refresh());
+        vcx.run_until_parked();
+    }
+    let r = registry_frame(vcx)
+        .into_iter()
+        .find(|r| r.path.ends_with("#editor-placeholder"))
+        .expect("drawn");
+    assert!(!r.clipped && !r.truncated, "{r:?}");
+    // Typing hides it.
+    vcx.simulate_keystrokes("s");
+    vcx.run_until_parked();
+    assert!(!drawn(vcx, "editor-placeholder"));
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn a_click_on_the_active_console_tab_follows_it_again(cx: &mut TestAppContext) {
+    // Ledger 331: after an explorer pick, a click on the console's tab that is already active
+    // brings the capsule and the status bar back to that console.
+    let vcx = shell_two(cx);
+    let prod = console_of(vcx, PROD);
+    focus_console(vcx, prod);
+    blur(vcx);
+    let staging_id = profile_id(vcx, STAGING);
+    vcx.cx
+        .update(|cx| ConnectionsModel::select(cx, Some(staging_id)));
+    vcx.run_until_parked();
+    assert_eq!(capsule_name(vcx), (STAGING.to_string(), EnvKind::Staging));
+    let tab = tab_of(vcx, prod);
+    let selector: &'static str = Box::leak(format!("tab-{}", tab.0).into_boxed_str());
+    let at = vcx
+        .debug_bounds(selector)
+        .expect("the console's tab")
+        .center();
+    vcx.simulate_click(at, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(capsule_name(vcx), (PROD.to_string(), EnvKind::Production));
+    stop_core_runtime_test(cx);
+}

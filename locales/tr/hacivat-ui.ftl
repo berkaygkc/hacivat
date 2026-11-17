@@ -2580,3 +2580,16 @@ hv-editor-preview-as-one = tek parça · { $n } ifade
 hv-eol-counts-cr = Satır sonları: LF { $lf }, CRLF { $crlf }, CR { $cr }
 # Review: PO
 hv-gutter-run-line = { $line }. satırdaki ifadeyi çalıştır
+
+## m3b-t41-chrome
+
+# Review: PO
+hv-tx-chip-auto-short = Otomatik
+# Review: PO
+hv-console-waiting-l1 = Bağlantı bekleniyor
+# Review: PO
+hv-console-waiting-l2 = kullanımda: { $inUse }/{ $max }
+# Review: PO
+hv-console-button-keys = { $label } · { $keys }
+# Review: PO
+hv-editor-placeholder = SQL'i buraya yazın. { $key }, imlecin bulunduğu ifadeyi çalıştırır.

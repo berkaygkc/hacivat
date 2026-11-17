@@ -545,6 +545,116 @@ pub fn render_compact(console: ConsoleId, cx: &App) -> Option<AnyElement> {
     badge(console, true, cx)
 }
 
+// ## m3c-t41 (named exception; design/m3b-safe surface 24, N3): the narrow form: the stamp
+// and the age-less text on its first line, wrapping inside the badge (15 px lines), then
+// Commit and Roll back as 20 px icon buttons (their words in tooltips and names).
+/// The badge's form in a narrow pane; it fills the width it is given.
+pub fn render_narrow(console: ConsoleId, cx: &App) -> Option<AnyElement> {
+    let user = user_tx(console, cx)?;
+    let theme = *Theme::get(cx);
+    let t = theme.tokens;
+    let c = &t.colors;
+    let text = badge_text(console, true, cx)?;
+    let tip = if user.failed {
+        tr(cx, ids::hv::TX_BADGE_FAILED_TIP, NoArgs)
+    } else {
+        tr(cx, ids::hv::TX_BADGE_TIP, NoArgs)
+    };
+    let waits = answer_waits(console, cx);
+    let glyph = if user.failed {
+        Icon::new(IconName::TriangleAlert)
+            .size(IconSize::Chrome)
+            .color(c.text.to_hsla())
+            .into_any_element()
+    } else {
+        run_marker(&theme).into_any_element()
+    };
+    let style = narrow_style(cx);
+    // The stamp sits on the label's first line.
+    let stamp_top = (style.line_height - 7.0).max(0.0) / 2.0;
+    let head = div()
+        .id("tx-badge-head")
+        .flex()
+        .flex_row()
+        .items_start()
+        .min_w(px(0.0))
+        .gap(px(t.spacing.sm))
+        .child(div().flex_none().mt(px(stamp_top)).child(glyph))
+        .child(div().flex_1().min_w(px(0.0)).child(
+            hacivat_ui::text::paragraph(text, TextSource::Fluent, style, c.text.to_hsla()).id(
+                if user.failed {
+                    "tx-badge-failed"
+                } else {
+                    "tx-badge-text"
+                },
+            ),
+        ))
+        .tooltip(move |_, cx| Tip::view(tip.clone(), cx));
+    let mut buttons = div().flex().flex_row().items_center().gap(px(t.spacing.xs));
+    if !user.failed {
+        buttons = buttons.child(end_button_narrow(console, true, waits, cx));
+    }
+    buttons = buttons.child(end_button_narrow(console, false, waits, cx));
+    Some(
+        div()
+            .id("tx-badge")
+            .debug_selector(|| "tx-badge".to_string())
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(0.0))
+            .gap(px(t.spacing.s_2xs))
+            .child(head)
+            .child(buttons)
+            .into_any_element(),
+    )
+}
+
+// ## m3c-t41
+/// The narrow badge's sentence (the toolbar measures its lines) and its style.
+pub fn narrow_text(console: ConsoleId, cx: &App) -> Option<SharedString> {
+    badge_text(console, true, cx)
+}
+
+// ## m3c-t41
+/// A narrow chip's wrapping label: the caption on 15 px lines (NOTES "Narrow toolbar").
+pub fn narrow_style(cx: &App) -> hacivat_ui_core::theme::TypeStyle {
+    hacivat_ui_core::theme::TypeStyle {
+        line_height: hacivat_ui::metrics::NARROW_LINE_PX,
+        ..Theme::get(cx).tokens.type_ramp.caption
+    }
+}
+
+// ## m3c-t41: Commit or Roll back as a 20 px icon button (N3).
+fn end_button_narrow(console: ConsoleId, commit: bool, waits: bool, cx: &App) -> AnyElement {
+    let (id, label, icon) = if commit {
+        (
+            "tx-badge-commit",
+            tr(cx, ids::hv::TX_BADGE_COMMIT, NoArgs),
+            IconName::Check,
+        )
+    } else {
+        (
+            "tx-badge-rollback",
+            tr(cx, ids::hv::TX_BADGE_ROLLBACK, NoArgs),
+            IconName::Undo2,
+        )
+    };
+    Button::new(id, label)
+        .kind(ButtonKind::Default)
+        .icon(icon)
+        .icon_only(true)
+        .compact(true)
+        .on_raised(true)
+        .disabled(waits)
+        .on_click(move |_, _, cx| {
+            if !answer_waits(console, cx) && user_tx(console, cx).is_some() {
+                crate::exec_ui::tx::end_tx(console, commit, cx).detach();
+            }
+        })
+        .into_any_element()
+}
+
 fn badge(console: ConsoleId, compact: bool, cx: &App) -> Option<AnyElement> {
     let user = user_tx(console, cx)?;
     let theme = *Theme::get(cx);
