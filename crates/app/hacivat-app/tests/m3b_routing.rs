@@ -604,9 +604,10 @@ fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
         .map(|c| c.id)
         .collect();
     // ## m3c-t31-multi (named exception): Task 31's seven editor rows are commands now.
-    assert_eq!(stubs.len(), 16);
+    // ## m3c-t32-fold (named exception): and Task 32's four folding rows.
+    assert_eq!(stubs.len(), 12);
     stubs.extend(hacivat_ui_grid::commands::STUB_COMMANDS);
-    assert_eq!(stubs.len(), 25);
+    assert_eq!(stubs.len(), 21);
     // The app-registered stubs (disabled since Task 1b).
     // ## m3b-t27-history (named exception): `history.open` is no longer a stub; it is enabled
     // once the history store is open (`history_ui.rs` covers it).

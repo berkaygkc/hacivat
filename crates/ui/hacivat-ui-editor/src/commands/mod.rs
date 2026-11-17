@@ -364,10 +364,12 @@ static COMMANDS: [EditorCommand; 68] = [
     command("editor.undo_selection", "hv-cmd-editor-undo-selection", multi::undo_selection, false),
     command("editor.redo_selection", "hv-cmd-editor-redo-selection", multi::redo_selection, false),
     // Task 32: folding.
-    stub("editor.fold", "hv-cmd-editor-fold", crate::fold_gutter::fold),
-    stub("editor.unfold", "hv-cmd-editor-unfold", crate::fold_gutter::unfold),
-    stub("editor.fold_all", "hv-cmd-editor-fold-all", crate::fold_gutter::fold_all),
-    stub("editor.unfold_all", "hv-cmd-editor-unfold-all", crate::fold_gutter::unfold_all),
+    // ## m3c-t32-fold (named exception): the Task 32 rows are commands now (palette only: no
+    // default chord, controller ruling 7).
+    command("editor.fold", "hv-cmd-editor-fold", crate::fold_gutter::fold, false),
+    command("editor.unfold", "hv-cmd-editor-unfold", crate::fold_gutter::unfold, false),
+    command("editor.fold_all", "hv-cmd-editor-fold-all", crate::fold_gutter::fold_all, false),
+    command("editor.unfold_all", "hv-cmd-editor-unfold-all", crate::fold_gutter::unfold_all, false),
     // Task 33: find.
     stub("editor.find", "hv-cmd-editor-find", find::find),
     stub("editor.find_next", "hv-cmd-editor-find-next", find::find_next),

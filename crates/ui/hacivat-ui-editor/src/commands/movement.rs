@@ -106,15 +106,34 @@ impl<'a> Geometry<'a> {
     }
 }
 
-/// A move of `lines` buffer lines (negative: up) at the goal column, at every range.
+/// A move of `lines` rows (negative: up) at the goal column, at every range; a folded range
+/// is one row (## m3c-t32-fold, named exception: the move steps over it).
 fn vertical(v: &mut EditorView, lines: isize, extend: bool, cx: &mut Context<EditorView>) {
     let snap = v.model.snapshot();
+    let total = u32::try_from(snap.buffer.len_lines()).unwrap_or(u32::MAX);
+    let map = crate::fold_gutter::height_map(v, total, 1.0);
+    // The buffer lines from `line` to the row `lines` rows away (at an edge: `lines`, so the
+    // move ends at the text's start or end as before).
+    let delta = |line: usize| -> isize {
+        if map.hidden().is_empty() {
+            return lines;
+        }
+        let line = u32::try_from(line).unwrap_or(u32::MAX);
+        let row = i64::from(map.row_of(line));
+        let rows = i64::from(map.visible_rows());
+        let target = row + lines as i64;
+        if target < 0 || target >= rows {
+            return lines;
+        }
+        let to = map.line_of_row(u32::try_from(target).unwrap_or(0));
+        to as isize - line as isize
+    };
     let next = {
         let geo = Geometry::of(v, &snap);
         map_ranges(v, |now| {
             now.moved_vertically(
                 &snap.buffer,
-                lines,
+                delta(snap.buffer.byte_to_line(now.head)),
                 extend,
                 |at| geo.x_of(at),
                 |line, x| geo.offset_at(line, x),

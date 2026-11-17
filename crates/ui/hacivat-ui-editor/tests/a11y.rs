@@ -162,6 +162,8 @@ fn frame_of(text: &str, selection: SelectionRange, config: EditorConfig, tier: T
         config,
         tier,
         focused: true,
+        // ## m3c-t32-fold (named exception): no fold.
+        hidden: Arc::from([]),
     }
 }
 

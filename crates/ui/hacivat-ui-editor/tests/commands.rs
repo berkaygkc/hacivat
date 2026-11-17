@@ -439,10 +439,11 @@ const SPECIAL: &[(&str, &str)] = &[
     ("editor.split_selection_into_lines", "multi_cursor_commands"),
     ("editor.undo_selection", "multi_cursor_commands"),
     ("editor.redo_selection", "multi_cursor_commands"),
-    ("editor.fold", "m3b_stub_commands_change_nothing"),
-    ("editor.unfold", "m3b_stub_commands_change_nothing"),
-    ("editor.fold_all", "m3b_stub_commands_change_nothing"),
-    ("editor.unfold_all", "m3b_stub_commands_change_nothing"),
+    // ## m3c-t32-fold (named exception): Task 32's rows.
+    ("editor.fold", "fold_commands_never_edit_the_text"),
+    ("editor.unfold", "fold_commands_never_edit_the_text"),
+    ("editor.fold_all", "fold_commands_never_edit_the_text"),
+    ("editor.unfold_all", "fold_commands_never_edit_the_text"),
     ("editor.find", "m3b_stub_commands_change_nothing"),
     ("editor.find_next", "m3b_stub_commands_change_nothing"),
     ("editor.find_prev", "m3b_stub_commands_change_nothing"),
@@ -505,11 +506,8 @@ fn every_command_has_a_test(cx: &mut TestAppContext) {
 #[gpui::test]
 fn m3b_stub_commands_change_nothing(cx: &mut TestAppContext) {
     // ## m3c-t31-multi (named exception): Task 31's rows moved to `multi_cursor_commands`.
+    // ## m3c-t32-fold (named exception): Task 32's to `fold_commands_never_edit_the_text`.
     for id in [
-        "editor.fold",
-        "editor.unfold",
-        "editor.fold_all",
-        "editor.unfold_all",
         "editor.find",
         "editor.find_next",
         "editor.find_prev",
@@ -526,6 +524,26 @@ fn m3b_stub_commands_change_nothing(cx: &mut TestAppContext) {
         assert_eq!(
             after(cx, "SELECT «a┃», b;\nFROM t;", id),
             "SELECT «a┃», b;\nFROM t;",
+            "{id}"
+        );
+    }
+}
+
+// ## m3c-t32-fold
+/// The folding commands change what is shown, never the text; without foldable ranges (this
+/// file's service reports none) they change nothing at all. What they fold is tested in
+/// `fold_view.rs`.
+#[gpui::test]
+fn fold_commands_never_edit_the_text(cx: &mut TestAppContext) {
+    for id in [
+        "editor.fold",
+        "editor.unfold",
+        "editor.fold_all",
+        "editor.unfold_all",
+    ] {
+        assert_eq!(
+            after(cx, "SELECT «a┃», b\nFROM t\nWHERE x;", id),
+            "SELECT «a┃», b\nFROM t\nWHERE x;",
             "{id}"
         );
     }

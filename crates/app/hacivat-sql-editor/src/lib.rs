@@ -12,6 +12,8 @@
 //!   `ClientFlavor::None` on PostgreSQL).
 
 mod chunks;
+// ## m3c-t32-fold
+mod folds;
 mod highlight;
 mod preview;
 mod service;
@@ -20,6 +22,8 @@ mod words;
 mod worker;
 
 pub use chunks::RopeChunks;
+// ## m3c-t32-fold
+pub use folds::folding_ranges;
 pub use preview::{SYNC_SELECTION_LIMIT, points as exec_points, preview_of};
 // ## m3b-t24-exec-ui (named exception: re-exports only)
 pub use preview::{InsideChoice, RunPolicy, preview_with, run_policy};

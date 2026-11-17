@@ -212,3 +212,22 @@ pub fn compose_line(
         fragments,
     }
 }
+
+// ## m3c-t32-fold
+/// Composes a folded range's one visual line (UI-EDIT-07 step 2, the line model of NOTES
+/// surface 15): header line `line` as [`compose_line`] does, then the fold's `placeholder` (the
+/// "⋯ n lines" inlay); the line covers buffer lines `line..=last_line`, which the height map
+/// hides after the header.
+pub fn compose_folded(
+    buf: &TextBuffer,
+    line: u32,
+    last_line: u32,
+    tab_size: u8,
+    decos: &[&RangeSet<Decoration>],
+    placeholder: PlaceholderId,
+) -> VisualLine {
+    let mut vl = compose_line(buf, line, tab_size, decos);
+    vl.fragments.push(Fragment::Placeholder { id: placeholder });
+    vl.last_line = last_line.max(line);
+    vl
+}

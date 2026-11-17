@@ -20,12 +20,15 @@ fn folding_ranges_default_is_empty() {
     assert!(FailClosedService.folding_ranges(DocId(1), 0).is_empty());
 }
 
+// ## m3c-t32-fold (named exception): Task 32 filled the chunked map; its tests are in
+// `hacivat-text/tests/fold.rs`. What stays here: without a hidden run it is the uniform map.
 #[test]
-fn chunked_height_map_stub_is_uniform() {
-    let chunked = HeightMap::chunked(100, 18.0, &[3..10, 40..41]);
-    assert_eq!(chunked, HeightMap::uniform(100, 18.0));
-    assert_eq!(chunked.y_of(50), 900.0);
+fn chunked_height_map_without_folds_is_uniform() {
+    let chunked = HeightMap::chunked(100, 18.0, &[]);
+    assert_eq!(chunked.y_of(50), HeightMap::uniform(100, 18.0).y_of(50));
     assert_eq!(chunked.total_height(), 1800.0);
+    let folded = HeightMap::chunked(100, 18.0, &[3..10, 40..41]);
+    assert_eq!(folded.total_height(), 92.0 * 18.0);
 }
 
 // ## m3c-t31-multi (named exception): Task 31 filled the text core's multi-cursor stubs; their
@@ -49,11 +52,14 @@ fn text_core_multi_cursor_bodies_clamp_to_the_text() {
     assert_eq!(hacivat_text::split_into_lines(&buf, &sel), sel);
 }
 
+// ## m3c-t32-fold (named exception): Task 32 filled the fold set (tests
+// `hacivat-text/tests/fold.rs`). What stays here: a range that does not fit the text folds
+// nothing.
 #[test]
-fn fold_set_stub_folds_nothing() {
+fn fold_set_refuses_a_range_past_the_text() {
     let buf = TextBuffer::from_str("SELECT 1\nFROM t\nWHERE x;\n");
     let mut folds = FoldSet::default();
-    assert!(!folds.fold(0..20));
+    assert!(!folds.fold(0..200, &buf));
     assert!(!folds.unfold_at(3));
     assert!(!folds.unfold_all());
     assert!(folds.folded().is_empty());
@@ -81,11 +87,17 @@ fn m3b_editor_commands_are_in_the_table() {
         );
         assert!(!c.stub && !c.seals_history, "{id}");
     }
+    // ## m3c-t32-fold (named exception): Task 32's rows are commands (tests `fold_view`).
     for id in [
         "editor.fold",
         "editor.unfold",
         "editor.fold_all",
         "editor.unfold_all",
+    ] {
+        let c = commands().iter().find(|c| c.id == id).unwrap();
+        assert!(!c.stub && !c.seals_history, "{id}");
+    }
+    for id in [
         "editor.find",
         "editor.find_next",
         "editor.find_prev",
@@ -108,7 +120,7 @@ fn m3b_editor_commands_are_in_the_table() {
         // Fix round 2 (I3): it is a stub, so the app keeps it disabled.
         assert!(c.stub, "{id}");
     }
-    assert_eq!(commands().iter().filter(|c| c.stub).count(), 16);
+    assert_eq!(commands().iter().filter(|c| c.stub).count(), 12);
     // M3a's commands are not stubs.
     for c in commands().iter().take(45) {
         assert!(!c.stub, "{}", c.id);

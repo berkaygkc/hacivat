@@ -8,7 +8,8 @@ mod rangeset;
 mod scroll;
 
 pub use compose::{
-    Fragment, VisualLine, compose_line, control_glyph, control_name, is_visible_control,
+    Fragment, VisualLine, compose_folded, compose_line, control_glyph, control_name,
+    is_visible_control,
 };
 // ## m3c-t31-multi (named exception): column selection's cell widths.
 pub(crate) use compose::cluster_cells;

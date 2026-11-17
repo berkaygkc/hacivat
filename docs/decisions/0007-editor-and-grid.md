@@ -528,3 +528,53 @@ primary read itself is synchronous: the fork has no asynchronous one (fork carry
 **Status.** `EditorStatus::carets` is new; `selected_chars` covers every range, counted with the
 rope's char index (O(k log n)) and cached by the model's commit count, so a frame reads it in
 O(1) (ledger 207).
+
+## m3b-t32 — folding
+
+**Lines, not bytes.** A fold keeps its first line (the header) and hides the lines after it to
+the line its range ends on; when only blanks stand before the range's end on that line (a
+block's closing `)` or `END` at the start of its line) that line stays visible. The folded
+header composes into one visual line (`compose_folded`: the header's text, then a placeholder
+the element draws as the "⋯ n lines" inlay). UI-EDIT-07 step 2's byte model (the last line's
+tail after the placeholder) is not needed by NOTES surface 15, which draws the header line and
+the inlay only. Every range spans at least three lines (NOTES M3c-43, `MIN_FOLD_LINES`), so the
+spec's two-line `--` comment folds no more.
+
+**Through edits.** A folded range maps as a container with its start biased after (text typed
+at the start goes above the fold, whose header stays its header; text typed at the end joins
+it); one edit deleting all of it drops it. An edit that deletes the header drops it: the
+range's first character (a block's `(`, a statement's first token) or the header line's break
+(joining the first hidden line, deleting the header line). `prune` then drops a fold left on
+fewer than three lines. This replaces UI-EDIT-10 step 4's reconciliation after a reparse: the
+fold goes at the edit, not at the next edit inside it, and needs no candidate list (the
+language service's answer may be mapped from an older analysis and could not tell a fresh
+"none" from a late one).
+
+**The chunked height map.** `HeightMap::Chunked` keeps the hidden runs sorted and merged with a
+prefix sum of hidden lines; `y_of`, `line_at_y` (through the visible row) and `row_of` are one
+binary search over the runs (28 ns a pair at 50,000 lines and 1,000 folds, budget 5 µs).
+Without a fold the editor builds the uniform map, so the M3a paths are unchanged. The element
+walks visible lines only (`next_visible`), a row over a fold is its header, and decorations are
+asked per run of rows between folds, never for hidden bytes. The scroll anchor a new fold hid
+re-pins onto the fold's header (`ScrollAnchor::snap_visible`).
+
+**A caret never hides.** Folding moves a range end on a hidden line to its header's end; a
+selection end that lands on a hidden line (go to line, an error position, undo) opens the folds
+hiding it unless the range holds the fold whole (select all keeps the folds); a vertical move
+counts a fold as one row. Run at a caret on a folded statement's header resolves the statement
+as before; the band and the gutter bar collapse onto the header's row.
+
+**Marks in a fold.** A mark whose glyph line is hidden paints on the fold's header row; the
+row shows the one that most needs the user (NOTES M3c-7): a cancel not answered > failed >
+running > cancelling > queued > cancelled > skipped > done > stale. The app encodes "awaiting
+an answer" as a running mark and "rolled back" through its label (NOTES ruling 31), so they
+rank as those states until `ExecMarkState` grows the arms. A failure inside says where: "failed
+inside the fold · line 9" with its SQLSTATE chip. Range bars collapse onto the header's row.
+
+**Candidates** (`hacivat-sql-editor::folds`, worker side, once per analysis): statements from
+their first token to their terminator, parenthesised groups (to before the `)`), `BEGIN … END`
+and `CASE … END` (a `BEGIN` before `;` or `TRANSACTION`/`WORK`/… is a transaction command; `END
+IF`/`LOOP`/… closes nothing), dollar-quoted bodies, block comments, runs of `--` comment lines,
+and `-- region`/`-- endregion` pairs. The service maps the latest analysis's ranges through the
+edits since; the editor asks once per version. No default chord: the four commands are palette
+rows (controller ruling 7).

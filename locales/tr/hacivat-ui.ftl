@@ -2376,3 +2376,16 @@ hv-history-open-failed = Yeni konsol zamanında açılmadı; hiçbir şey eklenm
 hv-editor-carets = { $n } imleç
 # Review: PO
 hv-editor-ime-primary-only = Giriş yöntemi: başka bir imleç bir dizenin ya da yorumun içinde olduğu için yalnızca ana imleçte yazılıyor
+
+## m3b-t32-fold
+
+# Review: PO
+hv-editor-fold-lines = { $n } satır
+# Review: PO
+hv-editor-fold-tip = { $from }–{ $to }. satırlar katlandı. Açmak için tıklayın.
+# Review: PO
+hv-editor-fold-name = { $from }–{ $to }. satırları katla
+# Review: PO
+hv-editor-unfold-name = { $from }–{ $to }. satırların katlamasını aç
+# Review: PO
+hv-editor-fold-failed = katlanmış bölümde başarısız · satır { $line }

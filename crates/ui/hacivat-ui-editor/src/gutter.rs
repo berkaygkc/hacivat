@@ -14,7 +14,7 @@
 use std::ops::Range;
 
 use hacivat_text::Snapshot;
-use hacivat_text::display::ScrollAnchor;
+use hacivat_text::display::{HeightMap, ScrollAnchor};
 use hacivat_ui_core::gpui_surface::{
     App, BorderStyle, Bounds, Corners, Edges, Hsla, Pixels, Point, Window, fill, point, px, quad,
     size,
@@ -56,7 +56,13 @@ pub struct GutterCtx<'a> {
 }
 
 impl GutterCtx<'_> {
-    /// The top of `line`'s row, in window coordinates (rows are uniform in M3a).
+    // ## m3c-t32-fold (named exception)
+    /// The bottom of the row `line` is drawn on (a hidden line: its fold's header row).
+    pub fn bottom_of(&self, line: u32) -> Pixels {
+        self.top_of(line) + self.line_height
+    }
+
+    /// The top of `line`'s row, in window coordinates (a hidden line: its fold's header row).
     pub fn top_of(&self, line: u32) -> Pixels {
         self.overlay.top_of(line).unwrap_or_else(|| {
             let lh = f64::from(f32::from(self.line_height));
@@ -72,8 +78,11 @@ impl GutterCtx<'_> {
 pub struct OverlayRow {
     pub line: u32,
     pub top: Pixels,
-    /// The window x where the row's text ends.
+    /// The window x where the row's text ends (a folded header's: its inlay's end).
     pub text_end: Pixels,
+    // ## m3c-t32-fold (named exception)
+    /// The last line the row covers (a folded header: the fold's last line).
+    pub last: u32,
 }
 
 /// What the gutter, the marks and the end-of-line statuses take from one frame's layout.
@@ -86,22 +95,47 @@ pub struct Overlay {
     pub text_area: Bounds<Pixels>,
     /// The band's gutter bars and end-of-line hints.
     pub band: preview::BandFrame,
+    // ## m3c-t32-fold (named exception)
+    /// The frame's height map (folded lines take no row); `None`: uniform rows.
+    pub map: Option<HeightMap>,
 }
 
 impl Overlay {
-    /// The top of `line`, extrapolated from the painted rows; `None` when nothing was painted.
+    /// The top of `line`'s row, extrapolated from the painted rows through the height map (a
+    /// hidden line: its fold's header row); `None` when nothing was painted.
     pub fn top_of(&self, line: u32) -> Option<Pixels> {
         let first = self.rows.first()?;
-        let rel =
-            (f64::from(line) - f64::from(first.line)) * f64::from(f32::from(self.line_height));
+        let rel = match &self.map {
+            // ## m3c-t32-fold (named exception)
+            Some(m) => m.y_of(m.visible_line(line)) - m.y_of(first.line),
+            None => {
+                (f64::from(line) - f64::from(first.line)) * f64::from(f32::from(self.line_height))
+            }
+        };
         Some(first.top + px(rel as f32))
     }
 
-    /// The painted row of `line`.
+    /// The painted row of `line` (`None` for a hidden line).
     pub fn row(&self, line: u32) -> Option<&OverlayRow> {
-        let first = self.rows.first()?.line;
-        let row = self.rows.get(line.checked_sub(first)? as usize)?;
-        (row.line == line).then_some(row)
+        let i = self.rows.binary_search_by_key(&line, |r| r.line).ok()?;
+        self.rows.get(i)
+    }
+
+    // ## m3c-t32-fold (named exception)
+    /// The row `line` is drawn on: its own, or its fold's header's.
+    pub fn row_showing(&self, line: u32) -> Option<&OverlayRow> {
+        let i = self
+            .rows
+            .partition_point(|r| r.line <= line)
+            .checked_sub(1)?;
+        let row = self.rows.get(i)?;
+        (line <= row.last).then_some(row)
+    }
+
+    /// The painted rows' lines, the last one's fold included (`None` when nothing was
+    /// painted).
+    pub fn covered(&self) -> Option<(u32, u32)> {
+        Some((self.rows.first()?.line, self.rows.last()?.last))
     }
 }
 
@@ -119,7 +153,11 @@ pub fn prepaint(
         .map(|r| OverlayRow {
             line: r.line,
             top: r.top,
-            text_end: px((layout.origin_x + f64::from(r.width)) as f32),
+            // ## m3c-t32-fold (named exception): a folded header's text ends after its inlay.
+            text_end: px((layout.origin_x
+                + f64::from(r.fold.map_or(r.width, |f| f.inlay_x + f.inlay_w)))
+                as f32),
+            last: r.fold.map_or(r.line, |f| f.last_line),
         })
         .collect();
     Overlay {
@@ -127,6 +165,8 @@ pub fn prepaint(
         line_height: layout.rows().line_height,
         text_area: layout.rows().bounds,
         band: preview::layout(band, marks, layout, snap),
+        // ## m3c-t32-fold (named exception)
+        map: Some(layout.map.clone()),
     }
 }
 
@@ -223,13 +263,14 @@ pub fn paint(g: &GutterCtx<'_>, window: &mut Window, cx: &mut App) {
 /// One of the band's bars: over its lines, inset 1 px at each end of a unit of several (the
 /// 2 px gap between neighbours), at x = 2 or 4 alike (review round 1, Minor 4).
 fn paint_bar(g: &GutterCtx<'_>, bar: &GutterBar, inks: &Inks, window: &mut Window) {
-    let lh = g.line_height;
     let top = g.top_of(bar.lines.start);
-    let rows = bar.lines.end.saturating_sub(bar.lines.start) as f32;
+    // ## m3c-t32-fold (named exception): a bar over folded lines collapses onto their header's
+    // row.
+    let span = g.bottom_of(bar.lines.end.saturating_sub(1).max(bar.lines.start)) - top;
     let (top, height) = if bar.gap {
-        (top + px(1.0), lh * rows - px(2.0))
+        (top + px(1.0), span - px(2.0))
     } else {
-        (top, lh * rows)
+        (top, span)
     };
     // Clip to the gutter (a bar of a unit that runs past the view).
     let y0 = top.max(g.bounds.top());
@@ -259,5 +300,52 @@ pub(crate) fn hint_text(h: PreviewHint) -> (&'static str, Option<(usize, usize)>
         PreviewHint::Offline => ("hv-editor-preview-offline", None),
         // ## m3a-t33-exec-ui (named exception): its `n` is passed by `marks::hint_message`.
         PreviewHint::Choices { .. } => ("hv-editor-preview-choices", None),
+    }
+}
+
+// ## m3c-t32-fold
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lines 1–3 folded under line 0: a hidden line is drawn on its header's row, a bar over
+    /// folded lines collapses onto it, and the painted rows cover the fold's lines.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init, reason = "a line range as data")]
+    fn hidden_lines_sit_on_their_headers_row() {
+        let lh = px(18.0);
+        let ov = Overlay {
+            rows: vec![
+                OverlayRow {
+                    line: 0,
+                    top: px(100.0),
+                    text_end: px(0.0),
+                    last: 3,
+                },
+                OverlayRow {
+                    line: 4,
+                    top: px(118.0),
+                    text_end: px(0.0),
+                    last: 4,
+                },
+            ],
+            line_height: lh,
+            map: Some(HeightMap::chunked(10, 18.0, &[1..4])),
+            ..Overlay::default()
+        };
+        assert_eq!(ov.top_of(0), Some(px(100.0)));
+        assert_eq!(ov.top_of(2), Some(px(100.0)));
+        assert_eq!(ov.top_of(4), Some(px(118.0)));
+        assert_eq!(ov.top_of(6), Some(px(154.0)), "extrapolated past the rows");
+        assert!(ov.row(2).is_none());
+        assert_eq!(ov.row_showing(2).map(|r| r.line), Some(0));
+        assert_eq!(ov.row_showing(4).map(|r| r.line), Some(4));
+        assert_eq!(ov.covered(), Some((0, 4)));
+        // Without a map (M3a's uniform rows), as before.
+        let flat = Overlay {
+            map: None,
+            ..ov.clone()
+        };
+        assert_eq!(flat.top_of(2), Some(px(136.0)));
     }
 }

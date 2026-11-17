@@ -53,6 +53,9 @@ pub(crate) struct Analysis {
     pub exec_inner: Vec<(Range<usize>, HighlightClass)>,
     /// The editor-mode statements, `Exact` only when execution would send them as they are.
     pub statements: Vec<StatementSpan>,
+    // ## m3c-t32-fold (named exception)
+    /// The foldable ranges (`folds::folding_ranges`).
+    pub folds: Arc<[hacivat_text::FoldRange]>,
 }
 
 // ## m3b-t05-incremental (named lines): the worker keeps its document between jobs and brings
@@ -79,6 +82,8 @@ pub(crate) fn analyse_from(kept: Option<Kept>, job: &Job) -> (Analysis, Kept) {
         regions: highlight::regions(&snap),
         exec_inner: highlight::exec_inner(&snap),
         statements: statements::spans(&snap),
+        // ## m3c-t32-fold (named exception)
+        folds: crate::folds::folding_ranges(&snap).into(),
         doc: snap,
     };
     (

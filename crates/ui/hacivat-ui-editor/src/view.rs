@@ -35,7 +35,6 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use hacivat_text::display::HeightMap;
 use hacivat_text::{
     Annotations, Bias, ChangeSet, Committed, EditorModel, FoldSet, ImeCore, MapMode, ModelConfig,
     Origin, SelectionRange, SelectionSet, Snapshot, TextBuffer, Transaction, UserEvent,
@@ -421,6 +420,8 @@ impl EditorView {
             config: self.config,
             tier: self.tier.tier,
             focused,
+            // ## m3c-t32-fold (named exception): folded lines leave the runs.
+            hidden: fold_gutter::hidden(self),
         }
     }
 
@@ -741,8 +742,10 @@ impl EditorView {
         };
         let rows = layout.rows();
         let lines = u32::try_from(self.model.buffer().len_lines()).unwrap_or(u32::MAX);
-        let map = HeightMap::uniform(lines, f64::from(f32::from(rows.line_height)));
+        // ## m3c-t32-fold (named exception): folded lines take no height.
+        let lh = f64::from(f32::from(rows.line_height));
         let view_h = f64::from(f32::from(rows.bounds.size.height));
+        let map = fold_gutter::height_map(self, lines, lh);
         self.scroll.scroll_by(&map, dy, view_h);
     }
 
