@@ -412,6 +412,11 @@ pub(super) const BY_CHECK_ALONE: [&str; 9] = [
 
 /// Where a known finding shows: the pseudo-locales (`en-XA`, `tr-XT`), only at the 960x600
 /// minimum, either of them, or everywhere.
+// ## m3c-shotfix: kept for the next finding while the list is empty.
+#[allow(
+    dead_code,
+    reason = "the known-findings list is empty after the M3c shot fixes"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Where {
     Pseudo,
@@ -448,6 +453,10 @@ pub(super) struct Finding {
     pub(super) owner: &'static str,
 }
 
+#[allow(
+    dead_code,
+    reason = "the known-findings list is empty after the M3c shot fixes"
+)]
 const fn finding(
     state: &'static str,
     at: Where,
@@ -463,112 +472,8 @@ const fn finding(
 }
 
 /// The known findings (see the Task 43 part A report, "Product findings").
-pub(super) const KNOWN_FINDINGS: [Finding; 23] = [
-    // F1 · The line-endings menu is wider than the 960 px window allows in the pseudo-locales:
-    // its header row and the "most lines" hint are cut.
-    finding("eol-menu", Where::PseudoMin, "#menu-item-label", "T34"),
-    finding("eol-menu", Where::PseudoMin, "#menu-item-hint", "T34"),
-    // F2 · The ▶ tooltip's last line ("Runs through the same checks as Run.") does not wrap in
-    // its 300 px card.
-    finding("gutter-last-runs", Where::Pseudo, "gutter.rs:708", "T34"),
-    // F3 · The sort note row's partial-with-tail sentence does not wrap at 960 px.
-    finding(
-        "sort-partial-tail",
-        Where::PseudoMin,
-        "#results-sort-note",
-        "T36",
-    ),
-    // F4 · The grid find bar's "Select all occurrences" is cut when the bar is crowded.
-    finding(
-        "gfind-incomplete",
-        Where::PseudoMin,
-        "#button-label-grid-find-select-all",
-        "T37",
-    ),
-    finding(
-        "gfind-invalid",
-        Where::PseudoMin,
-        "#button-label-grid-find-select-all",
-        "T37",
-    ),
-    // F5 · The go-to popover's one-line hint, error and "Escape hides this…" lines do not wrap
-    // in its 300 px card; the ask paragraph is flagged cut in every locale (its PNG reads
-    // whole: the paragraph's measured box against the popover's clip needs a look); the
-    // footer buttons are cut at 960 px in the pseudo-locales.
-    finding("goto-popover", Where::Pseudo, "#goto-line", "T37"),
-    finding("goto-hidden-column", Where::Pseudo, "#goto-line", "T37"),
-    finding("goto-fetch-ask", Where::All, "#goto-line", "T37"),
-    finding(
-        "goto-fetch-ask",
-        Where::PseudoMin,
-        "#button-label-goto-cancel",
-        "T37",
-    ),
-    finding(
-        "goto-fetch-ask",
-        Where::PseudoMin,
-        "#button-label-goto-fetch-ok",
-        "T37",
-    ),
-    finding("goto-fetching", Where::Pseudo, "goto.rs:883", "T37"),
-    finding(
-        "goto-fetching",
-        Where::PseudoMin,
-        "#button-label-goto-stop",
-        "T37",
-    ),
-    // F6 · The record inspector's "Row 4 of 184" is cut in its 252 px header.
-    finding("view-record", Where::Pseudo, "#record-pos", "T38"),
-    finding(
-        "view-record-duplicates",
-        Where::Pseudo,
-        "#record-pos",
-        "T38",
-    ),
-    finding("view-record-show-more", Where::Pseudo, "#record-pos", "T38"),
-    // F7 · The Transposed grid's name column header is a Fluent word in the grid's data header
-    // (pseudo-localised; check (g) says headers are data).
-    finding(
-        "view-transposed",
-        Where::Pseudo,
-        "a grid header is data",
-        "T38",
-    ),
-    // F8 · The value viewer's footer size is cut in the pseudo-locales; at 960 x 600 the viewer
-    // runs past the result tile (the well does not shrink first, NOTES cross-cutting 3): the
-    // footer and Copy raw value are cut or out of view.
-    finding("viewer-text", Where::Pseudo, "#value-viewer-size", "T38"),
-    finding(
-        "viewer-json-pretty",
-        Where::Pseudo,
-        "#value-viewer-size",
-        "T38",
-    ),
-    finding(
-        "viewer-json-raw",
-        Where::Pseudo,
-        "#value-viewer-size",
-        "T38",
-    ),
-    finding(
-        "viewer-xml-pretty",
-        Where::Pseudo,
-        "#value-viewer-size",
-        "T38",
-    ),
-    finding(
-        "viewer-json-invalid",
-        Where::PseudoOrMin,
-        "value-viewer-",
-        "T38",
-    ),
-    finding(
-        "viewer-truncated",
-        Where::PseudoOrMin,
-        "#value-viewer-size",
-        "T38",
-    ),
-];
+// ## m3c-shotfix: F1–F8 are fixed at their source (the shot-fix report); the list is empty.
+pub(super) const KNOWN_FINDINGS: [Finding; 0] = [];
 
 // ## m3c-t43-shots (fix round 1, I1, I2, m1)
 
@@ -962,11 +867,9 @@ impl M3c {
             GotoAsk => &["#header", "#goto-line"],
             GotoFetching => &["#header", "#goto-line"],
             ViewRecordMore => &["#header", "#button-label-record-show-more-0"],
-            // Fix round 1 (I1): the subtitle, which the viewer shows at every size; the footer's
-            // size runs out of the tile at 960 x 600 (F8), and a missing surface is never a known
-            // finding. The model check asks for the truncation notice. When F8 is fixed, ask for
-            // `#value-viewer-size` again.
-            ViewerTruncated => &["#value-viewer-sub"],
+            // ## m3c-shotfix F8: the footer's size again (the viewer keeps its header and footer
+            // in any room); the model check asks for the truncation notice.
+            ViewerTruncated => &["#value-viewer-size"],
             // A grid state shows its grid (a header it drew), whatever its own marker.
             s if s.is_grid() => &["#header"],
             _ => &[],

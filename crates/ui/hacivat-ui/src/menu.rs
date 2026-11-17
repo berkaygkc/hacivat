@@ -600,6 +600,13 @@ fn note_menu_rows(
     });
 }
 
+// ## m3c-shotfix F1 (fix round 1)
+/// The widest an anchored menu may be in a window `width` wide: the window less `margin` on
+/// each side.
+pub fn window_room(width: Pixels, margin: f32) -> Pixels {
+    (width - px(2.0 * margin)).max(px(0.0))
+}
+
 impl Render for PopupMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
@@ -916,8 +923,16 @@ impl Render for PopupMenu {
         // edge moves inside the window on its first frame (below).
         let mut menu = menu.min_w(self.min_width);
         // ## m3a-t35-shots (named exception)
-        if let Some(max) = self.max_width {
-            menu = menu.max_w(max.max(self.min_width));
+        let mut max = self.max_width.map(|max| max.max(self.min_width));
+        // ## m3c-shotfix F1 (fix round 1, controller ruling): an anchored menu is never wider
+        // than the window less its 4 px margins; past that its hints ellipsize (they give way,
+        // `menu-item-hint`), the label never.
+        if self.anchor.is_some() {
+            let cap = window_room(window.viewport_size().width, t.spacing.xs);
+            max = Some(max.map_or(cap, |max| max.min(cap)));
+        }
+        if let Some(max) = max {
+            menu = menu.max_w(max);
         }
         let menu = menu
             .py(px(t.spacing.xs))
@@ -1006,10 +1021,12 @@ impl Render for PopupMenu {
         let column = column.children(rows);
         let menu = menu.children(title).child(column).children(footer);
         // ## m3c-t41-chrome (fix round 1, m5)
+        // ## m3c-shotfix F1 (fix round 1, controller ruling): snapped inside the window with a
+        // 4 px margin on every side.
         match position {
             Some((left, top)) => hacivat_ui_core::gpui_surface::anchored()
                 .position(hacivat_ui_core::gpui_surface::point(left, top))
-                .snap_to_window()
+                .snap_to_window_with_margin(px(t.spacing.xs))
                 .child(menu)
                 .into_any_element(),
             None => menu.into_any_element(),

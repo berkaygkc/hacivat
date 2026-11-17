@@ -51,7 +51,7 @@
 //! act on the bar while it has the focus ([`run_in_bar`]); every other grid command is
 //! disabled there, so its keys stay the field's ([`field_focused`]).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::{Rc, Weak};
@@ -74,7 +74,7 @@ use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AppContext as _, Context, Entity, EntityId, FocusHandle, Focusable as _,
     Global, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, Role,
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity,
-    Window, div, px,
+    Window, canvas, div, px,
 };
 use hacivat_ui_core::theme::{Theme, focus_outline};
 use hacivat_ui_editor::FindMatcher;
@@ -700,6 +700,9 @@ pub struct GridFindBar {
     next: FocusHandle,
     all: FocusHandle,
     close: FocusHandle,
+    // ## m3c-shotfix F4 (fix round 1, m3)
+    /// Select all was drawn this frame (set as it prepaints, read as close prepaints).
+    all_shown: Rc<Cell<bool>>,
     opts: FindOpts,
     filter: bool,
     open: bool,
@@ -877,6 +880,14 @@ pub fn select_all(console: ConsoleId, cx: &mut App) {
     }
 }
 
+// ## m3c-shotfix F4 (fix round 1, m3)
+/// The Select all button's focus handle (tests: it is focused, then moves into the overflow
+/// menu).
+#[doc(hidden)]
+pub fn select_all_focus(console: ConsoleId, cx: &App) -> Option<FocusHandle> {
+    bar(console, cx).map(|b| b.read(cx).all.clone())
+}
+
 /// Closes the bar (no focus move: the tests' and the commands' close).
 pub fn close(console: ConsoleId, cx: &mut App) {
     if let Some(bar) = bar(console, cx) {
@@ -989,14 +1000,44 @@ pub(crate) fn toolbar(
         }),
         label,
     );
+    // ## m3c-shotfix F4: Select all occurrences and close are items of their own after the bar,
+    // so the Overflow Rule applies to the crowded bar (960 px, long locales): Select all moves
+    // into the overflow menu (after rows · timing; ⌃⌘G still selects), and when the row still
+    // does not fit it wraps onto a second line, so nothing is cut at the toolbar's edge.
+    let (b1, b2) = (bar.clone(), bar.clone());
+    let mut select_all_item = ToolbarItem::new(
+        1,
+        Rc::new(move |_, cx| GridFindBar::select_all_button(&b1, cx)),
+        Rc::new(|cx: &App| message(cx, "hv-gfind-select-all", vec![])),
+    );
+    // ## m3c-shotfix F4 (fix round 1, m1): its overflow row is off (drawn disabled) while the
+    // button would be: no pattern, an invalid one, or no match.
+    if bar.read(cx).searchable(cx) {
+        select_all_item = select_all_item.on_choose(move |_, cx| select_all(console, cx));
+    }
+    let close_item = ToolbarItem::pinned(
+        Rc::new(move |_, cx| GridFindBar::close_button(&b2, cx)),
+        Rc::new(|cx: &App| message(cx, "hv-gfind-close", vec![])),
+    );
     let bar = Toolbar::new("results-toolbar")
+        .wrap_row()
         .item(item)
+        .item(select_all_item)
+        .item(close_item)
         .trailing(rows_item);
+    // ## m3c-shotfix F4 (fix round 2, m-i): one search group spans the whole find toolbar, so the
+    // bar, Select all occurrences and close are announced in it (one landmark).
     Some(
-        trailing
-            .into_iter()
-            .fold(bar, |bar, item| bar.trailing(item))
-            .into_any_element(),
+        A11yNode::new(
+            ("grid-find-bar-node", console.0),
+            Role::Search,
+            message(cx, "hv-gfind-placeholder", vec![]),
+            false,
+            trailing
+                .into_iter()
+                .fold(bar, |bar, item| bar.trailing(item)),
+        )
+        .into_any_element(),
     )
 }
 
@@ -1104,6 +1145,7 @@ impl GridFindBar {
             next: handle(cx),
             all: handle(cx),
             close: handle(cx),
+            all_shown: Rc::default(),
             opts: FindOpts {
                 tolerant: tolerant_default(cx),
                 ..FindOpts::default()
@@ -2038,12 +2080,7 @@ impl Render for GridFindBar {
                 .disabled(disabled)
                 .focus_handle(handle.clone())
         };
-        let (e1, e2, e3, e4) = (
-            entity.clone(),
-            entity.clone(),
-            entity.clone(),
-            entity.clone(),
-        );
+        let (e1, e2) = (entity.clone(), entity.clone());
         let prev = icon_button(
             "grid-find-prev",
             "hv-find-prev",
@@ -2062,25 +2099,8 @@ impl Render for GridFindBar {
             cx,
         )
         .on_click(move |_, _, cx| e2.update(cx, |b, cx| b.step(false, cx)));
-        let all = Button::new(
-            "grid-find-select-all",
-            message(cx, "hv-gfind-select-all", vec![]),
-        )
-        .kind(ButtonKind::Ghost)
-        .compact(true)
-        .on_raised(true)
-        .disabled(!searchable)
-        .focus_handle(self.all.clone())
-        .on_click(move |_, _, cx| e3.update(cx, |b, cx| b.select_all(cx)));
-        let close = icon_button(
-            "grid-find-close",
-            "hv-gfind-close",
-            IconName::X,
-            &self.close,
-            false,
-            cx,
-        )
-        .on_click(move |_, window, cx| e4.update(cx, |b, cx| b.close(Some(window), cx)));
+        // ## m3c-shotfix F4: Select all occurrences and close are toolbar items of their own
+        // (`toolbar`, `select_all_button`, `close_button`).
         let row = div()
             .id(("grid-find-bar", self.console.0))
             .debug_selector(|| "grid-find-bar".to_string())
@@ -2095,16 +2115,80 @@ impl Render for GridFindBar {
             .child(count_el)
             .children(incomplete)
             .child(prev)
-            .child(next)
-            .child(all)
-            .child(close);
-        A11yNode::new(
-            "grid-find-bar-node",
-            Role::Search,
-            message(cx, "hv-gfind-placeholder", vec![]),
-            false,
-            row,
+            .child(next);
+        // ## m3c-shotfix F4 (fix round 2, m-i): the find's one search group is the toolbar
+        // around the bar, Select all and close (`toolbar`), not this row.
+        row
+    }
+}
+
+// ## m3c-shotfix F4
+impl GridFindBar {
+    /// Escape in an item of the bar outside its row closes the bar, as in the row. (Fix
+    /// round 2, m-i: the item lies inside the find's one search group, the toolbar's node.)
+    fn escape_closes(bar: &Entity<Self>, el: impl IntoElement) -> AnyElement {
+        let bar = bar.clone();
+        div()
+            .flex()
+            .items_center()
+            .on_key_down(move |ev: &KeyDownEvent, window, cx| {
+                bar.update(cx, |b, cx| b.on_bar_key(ev, window, cx));
+            })
+            .child(el)
+            .into_any_element()
+    }
+
+    /// Select all occurrences (ghost, ⌃⌘G), after the step buttons.
+    fn select_all_button(bar: &Entity<Self>, cx: &mut App) -> AnyElement {
+        let b = bar.read(cx);
+        let (searchable, handle) = (b.searchable(cx), b.all.clone());
+        let e = bar.clone();
+        let button = Button::new(
+            "grid-find-select-all",
+            message(cx, "hv-gfind-select-all", vec![]),
         )
+        .kind(ButtonKind::Ghost)
+        .compact(true)
+        .on_raised(true)
+        .disabled(!searchable)
+        .focus_handle(handle)
+        .on_click(move |_, _, cx| e.update(cx, |b, cx| b.select_all(cx)));
+        // ## fix round 1 (m3): drawing it says so for this frame (`close_button` reads it).
+        let shown = b.all_shown.clone();
+        let mark = canvas(move |_, _, _| shown.set(true), |_, (), _, _| {})
+            .absolute()
+            .size_0();
+        Self::escape_closes(bar, div().relative().child(button).child(mark))
+    }
+
+    /// The bar's close (×).
+    fn close_button(bar: &Entity<Self>, cx: &mut App) -> AnyElement {
+        let b = bar.read(cx);
+        let handle = b.close.clone();
+        // ## fix round 1 (m3): close is drawn after Select all on every frame. When Select all
+        // held the focus and was not drawn (it moved into the overflow menu), the focus goes to
+        // the field, so it never rests on a control that is not there.
+        let (shown, all, field) = (b.all_shown.clone(), b.all.clone(), b.input.focus_handle(cx));
+        let keep_focus = canvas(
+            move |_, window, cx| {
+                if !shown.replace(false) && all.is_focused(window) {
+                    let field = field.clone();
+                    window.defer(cx, move |window, cx| window.focus(&field, cx));
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .size_0();
+        let e = bar.clone();
+        let button = Button::new("grid-find-close", message(cx, "hv-gfind-close", vec![]))
+            .kind(ButtonKind::Icon)
+            .icon(IconName::X)
+            .compact(true)
+            .on_raised(true)
+            .focus_handle(handle)
+            .on_click(move |_, window, cx| e.update(cx, |b, cx| b.close(Some(window), cx)));
+        Self::escape_closes(bar, div().relative().child(button).child(keep_focus))
     }
 }
 

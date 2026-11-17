@@ -31,7 +31,7 @@ use hacivat_text::display::{HeightMap, ScrollAnchor};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::l10n::UiArg;
 use hacivat_ui::popover::{A11yDecl, Declare as _};
-use hacivat_ui::text::{Label, TextFn, TextSource};
+use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, AvailableSpace, BorderStyle, Bounds, Context,
     Corners, CursorStyle, Div, Edges, Entity, FocusHandle, Hsla, InteractiveElement as _,
@@ -869,12 +869,16 @@ impl Render for RunTip {
                 col = col.child(row);
             }
         }
-        col.child(Label::new(
-            msg(cx, "hv-gutter-same-path"),
-            TextSource::Fluent,
-            t.type_ramp.caption,
-            dim,
-        ))
+        // ## m3c-shotfix F2: the last line is prose; it wraps in the 300 px card.
+        col.child(
+            paragraph(
+                msg(cx, "hv-gutter-same-path"),
+                TextSource::Fluent,
+                t.type_ramp.caption,
+                dim,
+            )
+            .id("gutter-run-tip-same-path"),
+        )
     }
 }
 

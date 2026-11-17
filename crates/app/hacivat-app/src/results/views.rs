@@ -2170,39 +2170,51 @@ pub(crate) fn inspector(
             .icon(icon)
             .on_click(move |_, _, cx| record_step(console, back, cx))
     };
+    // ## m3c-shotfix F6: the title and "Row 4 of 184" share one line while both fit; a longer
+    // position wraps under the title (chrome wraps, NOTES cross-cutting 4) and the header grows
+    // from its 30 px, so the position always shows whole.
     let header = div()
-        .h(px(RECORD_HEADER_PX))
+        .min_h(px(RECORD_HEADER_PX))
         .flex_none()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(6.0))
         .px(px(10.0))
+        .py(px(2.0))
         .bg(c.head.to_hsla())
         .border_b_1()
         .border_color(c.seam.to_hsla())
         .child(
-            Label::new(
-                message(cx, "hv-record", vec![]),
-                TextSource::Fluent,
-                t.type_ramp.label_sc,
-                c.text_2.to_hsla(),
-            )
-            .id("record-title"),
-        )
-        .child(
-            div().flex_1().min_w_0().child(
-                Label::new(
-                    record
-                        .as_ref()
-                        .map(|r| r.position.clone())
-                        .unwrap_or_default(),
-                    TextSource::Fluent,
-                    t.type_ramp.mono_kbd,
-                    c.text_2.to_hsla(),
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_x(px(6.0))
+                .child(
+                    Label::new(
+                        message(cx, "hv-record", vec![]),
+                        TextSource::Fluent,
+                        t.type_ramp.label_sc,
+                        c.text_2.to_hsla(),
+                    )
+                    .id("record-title"),
                 )
-                .id("record-pos"),
-            ),
+                .child(
+                    Label::new(
+                        record
+                            .as_ref()
+                            .map(|r| r.position.clone())
+                            .unwrap_or_default(),
+                        TextSource::Fluent,
+                        t.type_ramp.mono_kbd,
+                        c.text_2.to_hsla(),
+                    )
+                    .id("record-pos"),
+                ),
         )
         .child(step(
             "record-prev",

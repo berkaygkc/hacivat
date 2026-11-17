@@ -47,7 +47,7 @@ use std::sync::Arc;
 use hacivat_l10n::ArgValue;
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::icon::IconName;
-use hacivat_ui::popover::{A11yNode, Tip};
+use hacivat_ui::popover::{A11yNode, Declare as _, Tip};
 use hacivat_ui::segmented::{SegmentContent, SegmentItem, Segmented};
 use hacivat_ui::text::{Label, TextSource};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
@@ -55,10 +55,10 @@ use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable as _,
     Global, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent,
-    ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledText, Task, WeakEntity, Window, div, px,
+    ParentElement as _, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, StyledText, Task, WeakEntity, Window, div, point, px,
 };
-use hacivat_ui_core::theme::{Theme, ThemeMode, popover_surface};
+use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline, popover_surface};
 use hacivat_ui_grid::{
     GridDataSource as _, GridView, ModelCell, RowRenderer, ViewRow, VirtualList,
 };
@@ -87,6 +87,83 @@ const POPOVER_PAD_X: f32 = 16.0;
 /// The rest of the popover around the well, for placing it (header, control row, notice,
 /// footer); the well takes what is left.
 const CHROME_PX: f32 = 170.0;
+// ## m3c-shotfix F8 (fix round 1, m10): the paddings the popover's rows are laid out with.
+// The room check adds them to the type ramp's line heights and the control heights
+// ([`Rows`]), so a token change moves the layout and the check together; a test pins the
+// check to the drawn rows (`results_views.rs`).
+const HEADER_PAD_TOP: f32 = 12.0;
+const FOOTER_PAD_TOP: f32 = 12.0;
+const FOOTER_PAD_BOTTOM: f32 = 14.0;
+/// Above the control row, the well and the notice.
+const ROW_GAP: f32 = 8.0;
+/// Between the notice and Re-run.
+const NOTICE_GAP: f32 = 6.0;
+/// The short layout's header and footer padding, and its gap above the well.
+const SHORT_PAD: f32 = 6.0;
+const SHORT_WELL_GAP: f32 = 4.0;
+
+/// The heights of the popover's rows in one layout (fix round 1, I1, m10).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rows {
+    pub header: f32,
+    pub control: f32,
+    /// The well at one line, with its gap above.
+    pub well_min: f32,
+    pub notice: f32,
+    pub footer: f32,
+}
+
+impl Rows {
+    /// The rows of the roomy layout (`short: false`) or the short one, from the tokens;
+    /// `form`: the value has a form switch (JSON, XML, binary).
+    fn of(
+        t: &hacivat_ui_core::theme::ThemeTokens,
+        short: bool,
+        form: bool,
+        window: &Window,
+    ) -> Rows {
+        let lh = |style: hacivat_ui_core::theme::TypeStyle| {
+            f32::from(window.pixel_snap(px(style.line_height)))
+        };
+        let control = t.spacing.control_height;
+        let field = t.spacing.field_height;
+        let compact = hacivat_ui::metrics::COMPACT_HEIGHT_PX;
+        let well = LINE_PX + 2.0 * WELL_PAD_Y + 2.0;
+        if short {
+            Rows {
+                // The column name, the form switch and the compact ×, on one row.
+                header: SHORT_PAD
+                    + lh(t.type_ramp.code)
+                        .max(if form { field } else { 0.0 })
+                        .max(compact),
+                control: 0.0,
+                well_min: SHORT_WELL_GAP + well,
+                notice: ROW_GAP + lh(t.type_ramp.caption) + NOTICE_GAP + control,
+                // The size and the compact Copy raw value (its glyph).
+                footer: SHORT_PAD + lh(t.type_ramp.mono_data).max(compact) + SHORT_PAD,
+            }
+        } else {
+            Rows {
+                header: HEADER_PAD_TOP
+                    + (lh(t.type_ramp.code) + lh(t.type_ramp.body_sm)).max(control),
+                control: ROW_GAP + field,
+                well_min: ROW_GAP + well,
+                notice: ROW_GAP + lh(t.type_ramp.caption) + NOTICE_GAP + control,
+                footer: FOOTER_PAD_TOP + lh(t.type_ramp.mono_data).max(control) + FOOTER_PAD_BOTTOM,
+            }
+        }
+    }
+
+    /// The popover's height with a one-line well.
+    fn total(&self, has_control: bool, notice: bool) -> f32 {
+        self.header
+            + if has_control { self.control } else { 0.0 }
+            + self.well_min
+            + if notice { self.notice } else { 0.0 }
+            + self.footer
+    }
+}
+
 /// The gap between the cell and the popover, and from the grid's edges.
 const GAP_PX: f32 = 4.0;
 
@@ -471,6 +548,21 @@ pub struct ValueViewer {
     focus: FocusHandle,
     /// The char advance of the well's font, measured once.
     advance: Cell<Option<f32>>,
+    // ## m3c-shotfix F8 (fix round 1, I1)
+    /// The scroll of what lies between the header and the footer (a short room).
+    middle_scroll: ScrollHandle,
+    /// Re-run's focus, so a focused Re-run is scrolled into view.
+    rerun_focus: FocusHandle,
+    /// What had the focus at the last frame: 0 nothing here, 1 the well, 2 Re-run, 3 the
+    /// refusal.
+    seen_focus: Cell<u8>,
+    // ## m3c-shotfix F8 (fix round 2, I-1)
+    /// The refusal line takes the focus when it appears (Re-run turns off under the focus).
+    refused_focus: FocusHandle,
+    /// A refusal arrived: the next frame focuses it and scrolls it into view.
+    focus_refusal: bool,
+    /// The layout the last frame drew: short, and its rows (for tests).
+    drawn_rows: Cell<Option<(bool, Rows)>>,
 }
 
 #[derive(Default)]
@@ -684,6 +776,20 @@ fn subtitle_of(
 }
 
 /// Whether console `console`'s viewer is open.
+// ## m3c-shotfix F8 (fix round 1, m10)
+/// The layout the open viewer of `console` drew last: whether it is the short one, and the
+/// heights of its rows as the room check reckons them.
+pub fn drawn_rows(console: ConsoleId, cx: &App) -> Option<(bool, Rows)> {
+    viewer(console, cx).and_then(|v| v.read(cx).drawn_rows.get())
+}
+
+// ## m3c-shotfix F8 (fix round 2, I-1)
+/// What held the focus in the open viewer of `console` at its last frame: 0 nothing of it,
+/// 1 the well, 2 Re-run, 3 the refusal line.
+pub fn focused_part(console: ConsoleId, cx: &App) -> u8 {
+    viewer(console, cx).map_or(0, |v| v.read(cx).seen_focus.get())
+}
+
 pub fn is_open(console: ConsoleId, cx: &App) -> bool {
     viewer(console, cx).is_some_and(|v| v.read(cx).open)
 }
@@ -729,10 +835,14 @@ pub fn rerun(console: ConsoleId, cx: &mut App) {
 }
 
 /// The run UI refused the viewer's re-run (not a read; fix round 1, I1): the viewer says why.
-pub(crate) fn rerun_refused(console: ConsoleId, cx: &mut App) {
+/// (Public for tests.)
+#[doc(hidden)]
+pub fn rerun_refused(console: ConsoleId, cx: &mut App) {
     if let Some(v) = viewer(console, cx).filter(|v| v.read(cx).open) {
         v.update(cx, |v, cx| {
             v.refused = Some(message(cx, "hv-vv-rerun-not-read", vec![]));
+            // ## m3c-shotfix F8 (fix round 2, I-1): the focus goes to what says why.
+            v.focus_refusal = true;
             cx.notify();
         });
         notify_hosts(cx);
@@ -776,7 +886,7 @@ pub(crate) fn sync(console: ConsoleId, adapter: &Rc<GridAdapter>, cx: &mut App) 
 /// The open viewer of console `console`, placed in the grid's area (the tile's body).
 pub(crate) fn overlay(console: ConsoleId, cx: &App) -> Option<AnyElement> {
     let v = viewer(console, cx).filter(|v| v.read(cx).open)?;
-    let (top, bottom, left, _) = v.read(cx).placement(cx);
+    let (top, bottom, left, _, _) = v.read(cx).placement(cx);
     let mut place = div().absolute().left(px(left));
     place = match (top, bottom) {
         (Some(top), _) => place.top(px(top)),
@@ -810,8 +920,16 @@ impl ValueViewer {
             well: cx.new(|_| VirtualList::new(WellLines::default(), LINE_PX)),
             cut_for: None,
             loading: None,
-            focus: cx.focus_handle(),
+            // ## m3c-shotfix F8 (fix round 1, I1): a Tab stop (NOTES 22: Raw / Pretty → well →
+            // Re-run → Copy raw value).
+            focus: cx.focus_handle().tab_stop(true),
             advance: Cell::new(None),
+            middle_scroll: ScrollHandle::new(),
+            rerun_focus: cx.focus_handle().tab_stop(true),
+            seen_focus: Cell::new(0),
+            refused_focus: cx.focus_handle().tab_stop(true),
+            focus_refusal: false,
+            drawn_rows: Cell::new(None),
         }
     }
 
@@ -998,19 +1116,21 @@ impl ValueViewer {
         }
     }
 
-    /// Where the popover goes in the grid's area: `(top, bottom, left, well height)` in the
-    /// area's coordinates (module docs).
-    fn placement(&self, cx: &App) -> (Option<f32>, Option<f32>, f32, f32) {
+    /// Where the popover goes in the grid's area: `(top, bottom, left, well height, room)` in
+    /// the area's coordinates (module docs). ## m3c-shotfix F8: `room` is the tallest the
+    /// popover may be there (from its edge to the area's far edge, less the gap): its value
+    /// well gives way first, so its header and footer always show (NOTES cross-cutting 3).
+    fn placement(&self, cx: &App) -> (Option<f32>, Option<f32>, f32, f32, Option<f32>) {
         let Some((grid, cell)) = self
             .anchor
             .as_ref()
             .and_then(|(g, c)| Some((g.upgrade()?, *c)))
         else {
-            return (Some(GAP_PX), None, GAP_PX, WELL_MAX_PX);
+            return (Some(GAP_PX), None, GAP_PX, WELL_MAX_PX, None);
         };
         let g = grid.read(cx);
         let Some(geom) = g.geometry() else {
-            return (Some(GAP_PX), None, GAP_PX, WELL_MAX_PX);
+            return (Some(GAP_PX), None, GAP_PX, WELL_MAX_PX, None);
         };
         let area_w = f32::from(geom.bounds.size.width);
         let area_h = f32::from(geom.bounds.size.height);
@@ -1032,25 +1152,23 @@ impl ValueViewer {
         let below = area_h - row_bottom - 2.0 * GAP_PX;
         let above = row_top - 2.0 * GAP_PX;
         let need = CHROME_PX + WELL_MAX_PX;
+        // ## m3c-shotfix F8: the room below a top edge, or above a bottom one.
+        let room = |edge: f32| Some((area_h - edge - GAP_PX).max(0.0));
         if below >= need {
-            (Some(row_bottom + GAP_PX), None, left, WELL_MAX_PX)
+            let top = row_bottom + GAP_PX;
+            (Some(top), None, left, WELL_MAX_PX, room(top))
         } else if above >= need {
-            (None, Some(area_h - row_top + GAP_PX), left, WELL_MAX_PX)
+            let bottom = area_h - row_top + GAP_PX;
+            (None, Some(bottom), left, WELL_MAX_PX, room(bottom))
         } else if below >= above {
             let well = (below - CHROME_PX).clamp(WELL_MIN_PX, WELL_MAX_PX);
-            (
-                Some(
-                    (row_bottom + GAP_PX)
-                        .min(area_h - CHROME_PX - well)
-                        .max(GAP_PX),
-                ),
-                None,
-                left,
-                well,
-            )
+            let top = (row_bottom + GAP_PX)
+                .min(area_h - CHROME_PX - well)
+                .max(GAP_PX);
+            (Some(top), None, left, well, room(top))
         } else {
             let well = (above - CHROME_PX).clamp(WELL_MIN_PX, WELL_MAX_PX);
-            (Some(GAP_PX), None, left, well)
+            (Some(GAP_PX), None, left, well, room(GAP_PX))
         }
     }
 
@@ -1111,7 +1229,7 @@ impl Render for ValueViewer {
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let c = &t.colors;
-        let (_, _, _, well_h) = self.placement(cx);
+        let (_, _, _, well_h, room) = self.placement(cx);
         let advance = self.advance(window, cx);
         let inner_w = VIEWER_WIDTH_PX - 2.0 * POPOVER_PAD_X - 2.0 * WELL_PAD_X - 6.0;
         let cols = ((inner_w / advance).floor() as usize).max(8);
@@ -1122,58 +1240,83 @@ impl Render for ValueViewer {
         let entity = cx.entity();
         let view = self.view_of(false, cx);
         let view = &view;
-        let header = div()
+        // ## m3c-shotfix F8 (fix round 1, I1): the short layout. When the roomy rows with a
+        // one-line well do not fit, the header loses its subtitle line (it stays the column's
+        // tooltip) and takes the form switch, × and Copy raw value turn compact, so one full line
+        // of the value always shows between the header and the footer.
+        let has_form = !matches!(view.form, ValueForm::Text);
+        let roomy = Rows::of(t, false, has_form, window);
+        // ## fix round 2 (m-d): against the body's room (the room less the surface's border).
+        let short = room.is_some_and(|r| r - 2.0 < roomy.total(has_form, view.truncated.is_some()));
+        let rows = if short {
+            Rows::of(t, true, has_form, window)
+        } else {
+            roomy
+        };
+        self.drawn_rows.set(Some((short, rows)));
+        let mut title = div()
+            .id("value-viewer-title")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .child(
+                Label::new(
+                    view.column.clone(),
+                    TextSource::Catalog,
+                    t.type_ramp.code,
+                    c.text.to_hsla(),
+                )
+                .truncate(true)
+                .id("value-viewer-column"),
+            );
+        if short {
+            let tip = view.subtitle.clone();
+            title = title.tooltip(move |_, cx| Tip::view(tip.clone(), cx));
+        } else {
+            title = title.child(
+                Label::new(
+                    view.subtitle.clone(),
+                    TextSource::Fluent,
+                    t.type_ramp.body_sm,
+                    c.text_2.to_hsla(),
+                )
+                .id("value-viewer-sub"),
+            );
+        }
+        let header_row = div()
+            .debug_selector(|| "value-viewer-header".to_string())
             .flex()
             .flex_row()
             .items_start()
             .gap(px(8.0))
-            .pt(px(12.0))
+            .pt(px(if short { SHORT_PAD } else { HEADER_PAD_TOP }))
             .px(px(POPOVER_PAD_X))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        Label::new(
-                            view.column.clone(),
-                            TextSource::Catalog,
-                            t.type_ramp.code,
-                            c.text.to_hsla(),
-                        )
-                        .truncate(true)
-                        .id("value-viewer-column"),
-                    )
-                    .child(
-                        Label::new(
-                            view.subtitle.clone(),
-                            TextSource::Fluent,
-                            t.type_ramp.body_sm,
-                            c.text_2.to_hsla(),
-                        )
-                        .id("value-viewer-sub"),
-                    ),
+            .child(title);
+        let close_button = {
+            let e = entity.clone();
+            Button::new(
+                "value-viewer-close",
+                message(cx, "hui-dialog-close", vec![]),
             )
-            .child({
-                let e = entity.clone();
-                Button::new(
-                    "value-viewer-close",
-                    message(cx, "hui-dialog-close", vec![]),
-                )
-                .kind(ButtonKind::Icon)
-                .icon(IconName::X)
-                .on_raised(true)
-                .on_click(move |_, _, cx| e.update(cx, |v, cx| v.close(cx)))
-            });
+            .kind(ButtonKind::Icon)
+            .icon(IconName::X)
+            .compact(short)
+            .on_raised(true)
+            .on_click(move |_, _, cx| e.update(cx, |v, cx| v.close(cx)))
+        };
         let mut control = div()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(8.0))
+            .debug_selector(|| "value-viewer-control".to_string())
             .px(px(POPOVER_PAD_X))
-            .pt(px(8.0));
+            .pt(px(ROW_GAP));
         let mut has_control = false;
+        // ## m3c-shotfix F8: the form switch and its note, placed once the room is known.
+        let mut seg_el: Option<AnyElement> = None;
+        let mut note_el: Option<AnyElement> = None;
         match view.form {
             ValueForm::Json { .. } | ValueForm::Xml => {
                 has_control = true;
@@ -1199,43 +1342,74 @@ impl Render for ValueViewer {
                         }),
                     });
                 }
-                control = control.child(seg);
+                seg_el = Some(seg.into_any_element());
                 if disabled {
-                    control =
-                        control.child(div().flex_1().min_w_0().child(hacivat_ui::text::paragraph(
-                            message(cx, "hv-vv-not-json", vec![]),
-                            TextSource::Fluent,
-                            t.type_ramp.caption,
-                            c.text_2.to_hsla(),
-                        )));
+                    note_el = Some(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(hacivat_ui::text::paragraph(
+                                message(cx, "hv-vv-not-json", vec![]),
+                                TextSource::Fluent,
+                                t.type_ramp.caption,
+                                c.text_2.to_hsla(),
+                            ))
+                            .into_any_element(),
+                    );
                 }
             }
             ValueForm::Binary => {
                 has_control = true;
-                control = control.child(Segmented::new("value-viewer-form").item(SegmentItem {
-                    content: SegmentContent::Label(message(cx, "hv-vv-hex", vec![])),
-                    pressed: true,
-                    tooltip: message(cx, "hv-vv-hex", vec![]),
-                    a11y_name: None,
-                    on_click: Rc::new(|_, _, _| {}),
-                }));
+                seg_el = Some(
+                    Segmented::new("value-viewer-form")
+                        .item(SegmentItem {
+                            content: SegmentContent::Label(message(cx, "hv-vv-hex", vec![])),
+                            pressed: true,
+                            tooltip: message(cx, "hv-vv-hex", vec![]),
+                            a11y_name: None,
+                            on_click: Rc::new(|_, _, _| {}),
+                        })
+                        .into_any_element(),
+                );
             }
             ValueForm::Text => {}
         }
+        // ## m3c-shotfix F8: in the short layout the form switch sits in the header row (before
+        // ×), so it shows whole.
+        let compact = short;
+        let header = match (compact, seg_el.take()) {
+            (true, Some(seg)) => header_row.child(seg),
+            (_, seg) => {
+                seg_el = seg;
+                header_row
+            }
+        }
+        .child(close_button);
+        if let Some(seg) = seg_el {
+            control = control.child(seg);
+        }
+        let has_control = (has_control && !compact) || note_el.is_some();
+        control = control.children(note_el);
         let well_fill = match theme.mode {
             ThemeMode::Dark => c.panel,
             ThemeMode::Light => c.ground,
         };
         let lines = self.well.read(cx).rows().len() as f32;
-        let height = (lines * LINE_PX).clamp(LINE_PX, well_h) + 2.0 * WELL_PAD_Y;
-        let e_keys = entity.clone();
+        // ## m3c-shotfix F8 (fix round 2, m-c): the box includes its 1 px border, as its
+        // one-line minimum does (a box asked 2 px under its own minimum drew the minimum, and its
+        // lines' viewport 2 px short of what was planned).
+        let height = (lines * LINE_PX).clamp(LINE_PX, well_h) + 2.0 * WELL_PAD_Y + 2.0;
+        let well_focused = self.focus.is_focused(window);
         let well = div()
             .id("value-viewer-well")
             .debug_selector(|| "value-viewer-well".to_string())
             .track_focus(&self.focus)
             .mx(px(POPOVER_PAD_X))
-            .mt(px(8.0))
+            .mt(px(if short { SHORT_WELL_GAP } else { ROW_GAP }))
             .h(px(height))
+            // ## m3c-shotfix F8: in a short room the well gives way first, down to one line.
+            .flex_shrink(1.0)
+            .min_h(px(LINE_PX + 2.0 * WELL_PAD_Y + 2.0))
             .px(px(WELL_PAD_X))
             .py(px(WELL_PAD_Y))
             .bg(well_fill.to_hsla())
@@ -1243,8 +1417,43 @@ impl Render for ValueViewer {
             .border_color(c.seam_strong.to_hsla())
             .rounded(px(4.0))
             .overflow_hidden()
-            .on_key_down(move |ev: &KeyDownEvent, _, cx| {
+            // ## m3c-shotfix F8 (fix round 2, m-b): a Tab stop that says what it is (the value
+            // of its column, read only) and shows its focus.
+            .declare(Role::Document, view.column.clone(), None)
+            .child(self.well.clone());
+        let well = focus_outline(well, &theme, well_focused);
+        // ## m3c-shotfix F8: the header and the footer (the size, Copy raw value) always show:
+        // in a room shorter than the popover the value well shrinks first, then what lies
+        // between them (the control row, the well, the truncation notice) scrolls.
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .w(px(VIEWER_WIDTH_PX))
+            .child(header.flex_none());
+        if let Some(room) = room {
+            // Less the surface's 1 px border on each side.
+            body = body.max_h(px((room - 2.0).max(0.0)));
+        }
+        // ## m3c-shotfix F8 (fix round 1, I1): the middle never goes under one full line of the
+        // value, and what takes the focus in it (the well, Re-run) is scrolled into view.
+        // ## m3c-shotfix F8 (fix round 2, I-1): ↑/↓/PgUp/PgDn are taken here for any focus
+        // inside the middle, in the nested order: ↓ scrolls the focused well to its end, then the
+        // middle; ↑ scrolls the middle back to its top first, then the well.
+        let e_keys = entity.clone();
+        let mut middle = div()
+            .id("value-viewer-middle")
+            .debug_selector(|| "value-viewer-middle".to_string())
+            .flex()
+            .flex_col()
+            .flex_shrink(1.0)
+            .min_h(px(rows.well_min))
+            .overflow_y_scroll()
+            .track_scroll(&self.middle_scroll)
+            .on_key_down(move |ev: &KeyDownEvent, window, cx| {
                 let k = &ev.keystroke;
+                if k.modifiers.modified() {
+                    return;
+                }
                 let dy = match k.key.as_str() {
                     "up" => -LINE_PX,
                     "down" => LINE_PX,
@@ -1252,26 +1461,78 @@ impl Render for ValueViewer {
                     "pagedown" => WELL_MAX_PX,
                     _ => return,
                 };
-                if k.modifiers.modified() {
-                    return;
+                let (well, mid, in_well) = {
+                    let v = e_keys.read(cx);
+                    (
+                        v.well.clone(),
+                        v.middle_scroll.clone(),
+                        v.focus.is_focused(window),
+                    )
+                };
+                let s = well.read(cx).scroll_state();
+                let well_can = in_well
+                    && if dy > 0.0 {
+                        s.row_top(s.row_count()) > f64::from(s.viewport().1) + 0.5
+                    } else {
+                        s.row_top(0) < -0.5
+                    };
+                let o = mid.offset();
+                let max = mid.max_offset().y.max(px(0.0));
+                let mid_can = if dy > 0.0 {
+                    o.y > -max + px(0.5)
+                } else {
+                    o.y < px(-0.5)
+                };
+                let middle_first = dy < 0.0 && mid_can;
+                if well_can && !middle_first {
+                    well.update(cx, |w, cx| w.scroll_px(f64::from(dy), cx));
+                } else if mid_can {
+                    mid.set_offset(point(o.x, (o.y - px(dy)).clamp(-max, px(0.0))));
+                    e_keys.update(cx, |_, cx| cx.notify());
                 }
-                let well = e_keys.read(cx).well.clone();
-                well.update(cx, |w, cx| w.scroll_px(f64::from(dy), cx));
                 cx.stop_propagation();
             })
-            .child(self.well.clone());
-        let mut body = div().flex().flex_col().w(px(VIEWER_WIDTH_PX)).child(header);
-        if has_control {
-            body = body.child(control);
+            .child(hacivat_ui::text::scroll_viewport());
+        // The middle's children, counted as they go in (`scroll_to_item`); the probe is 0.
+        let mut count = 1;
+        // In the short layout the well comes first (what is left of the control row, the "not
+        // valid JSON" line, follows it), so the value is what shows.
+        let control = has_control.then(|| control.flex_none());
+        let (before, after) = if short {
+            (None, control)
+        } else {
+            (control, None)
+        };
+        if let Some(control) = before {
+            middle = middle.child(control);
+            count += 1;
         }
-        body = body.child(well);
+        let well_ix = count;
+        middle = middle.child(well);
+        count += 1;
+        if let Some(control) = after {
+            middle = middle.child(control);
+            count += 1;
+        }
+        let mut rerun_ix = None;
+        let mut refused_ix = None;
+        // A focused Re-run that turned off (busy, refused) or went: the focus goes to the
+        // refusal when there is one, else to the well (never to a control not drawn).
+        let rerun_off = view.rerun.is_none() || view.rerun_off.is_some();
+        if self.rerun_focus.is_focused(window) && rerun_off && !self.focus_refusal {
+            let well_handle = self.focus.clone();
+            window.defer(cx, move |window, cx| window.focus(&well_handle, cx));
+        }
         if let Some(notice) = view.truncated.clone() {
-            let mut row = div()
+            let mut rerun_row = None;
+            let mut refused_row = None;
+            let notice_row = div()
+                .debug_selector(|| "value-viewer-notice".to_string())
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
+                .gap(px(NOTICE_GAP))
                 .px(px(POPOVER_PAD_X))
-                .pt(px(8.0))
+                .pt(px(ROW_GAP))
                 .child(hacivat_ui::text::paragraph(
                     notice,
                     TextSource::Fluent,
@@ -1286,61 +1547,171 @@ impl Render for ValueViewer {
                 let tip = off
                     .clone()
                     .unwrap_or_else(|| message(cx, "hv-vv-rerun-tip", vec![]));
-                row = row.child(
+                // ## m3c-shotfix F8 (fix round 1, I1): Re-run is a row of the middle of its own,
+                // so focusing it scrolls it (not the whole notice) into view.
+                rerun_row = Some(
                     div()
-                        .id("value-viewer-rerun-tip")
-                        .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+                        .debug_selector(|| "value-viewer-rerun-row".to_string())
+                        .flex_none()
+                        .px(px(POPOVER_PAD_X))
+                        .pt(px(NOTICE_GAP))
                         .child(
-                            Button::new("value-viewer-rerun", words)
-                                .kind(ButtonKind::Default)
-                                .icon(IconName::RotateCw)
-                                .on_raised(true)
-                                .disabled(off.is_some())
-                                .on_click(move |_, _, cx| e.update(cx, |v, cx| v.rerun(cx))),
+                            div()
+                                .id("value-viewer-rerun-tip")
+                                .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+                                .child(
+                                    Button::new("value-viewer-rerun", words)
+                                        .kind(ButtonKind::Default)
+                                        .icon(IconName::RotateCw)
+                                        .on_raised(true)
+                                        .focus_handle(self.rerun_focus.clone())
+                                        .disabled(off.is_some())
+                                        .on_click(move |_, _, cx| {
+                                            e.update(cx, |v, cx| v.rerun(cx))
+                                        }),
+                                ),
                         ),
                 );
                 if let Some(refused) = self.refused.clone() {
-                    row = row.child(
-                        hacivat_ui::text::paragraph(
-                            refused,
-                            TextSource::Fluent,
-                            t.type_ramp.caption,
-                            c.text.to_hsla(),
-                        )
-                        .id("value-viewer-refused"),
+                    // ## m3c-shotfix F8 (fix round 2, I-1): the refusal takes the focus when it
+                    // appears and is scrolled into view; it is a Tab stop that names itself.
+                    let refused_focused = self.refused_focus.is_focused(window);
+                    let line = div()
+                        .id("value-viewer-refused-row")
+                        .debug_selector(|| "value-viewer-refused-row".to_string())
+                        .track_focus(&self.refused_focus)
+                        .rounded(px(3.0))
+                        .declare(Role::Label, refused.clone(), None);
+                    refused_row = Some(
+                        div()
+                            .flex_none()
+                            .px(px(POPOVER_PAD_X))
+                            .pt(px(NOTICE_GAP))
+                            .child(
+                                focus_outline(line, &theme, refused_focused).child(
+                                    hacivat_ui::text::paragraph(
+                                        refused,
+                                        TextSource::Fluent,
+                                        t.type_ramp.caption,
+                                        c.text.to_hsla(),
+                                    )
+                                    .id("value-viewer-refused"),
+                                ),
+                            ),
                     );
                 }
             }
-            body = body.child(row);
+            // In the short layout the fact is said in the footer (it never scrolls away); the
+            // middle keeps Re-run and the refusal.
+            if !short {
+                middle = middle.child(notice_row.flex_none());
+                count += 1;
+            }
+            if let Some(r) = rerun_row {
+                middle = middle.child(r);
+                rerun_ix = Some(count);
+                count += 1;
+            }
+            if let Some(r) = refused_row {
+                middle = middle.child(r);
+                refused_ix = Some(count);
+            }
         }
+        if std::mem::take(&mut self.focus_refusal) && refused_ix.is_some() {
+            let handle = self.refused_focus.clone();
+            window.defer(cx, move |window, cx| window.focus(&handle, cx));
+        }
+        let focused = if self.focus.is_focused(window) {
+            1
+        } else if self.rerun_focus.is_focused(window) {
+            2
+        } else if self.refused_focus.is_focused(window) {
+            3
+        } else {
+            0
+        };
+        let scroll_to = match focused {
+            1 => Some(well_ix),
+            2 => rerun_ix,
+            3 => refused_ix,
+            _ => None,
+        };
+        if focused != self.seen_focus.replace(focused)
+            && let Some(ix) = scroll_to
+        {
+            self.middle_scroll.scroll_to_item(ix);
+        }
+        body = body.child(middle);
         let e = entity.clone();
+        let (pad_top, pad_bottom) = if short {
+            (SHORT_PAD, SHORT_PAD)
+        } else {
+            (FOOTER_PAD_TOP, FOOTER_PAD_BOTTOM)
+        };
+        // In the short layout Copy raw value is its glyph (its words the tooltip and name).
+        let copy = Button::new("value-viewer-copy", message(cx, "hv-vv-copy", vec![]))
+            .kind(if short {
+                ButtonKind::Icon
+            } else {
+                ButtonKind::Default
+            })
+            .icon(IconName::Copy)
+            .compact(short)
+            .on_raised(true)
+            .disabled(!view.can_copy)
+            .on_click(move |_, _, cx| e.update(cx, |v, cx| v.copy_raw(cx)));
         body = body.child(
             div()
+                .debug_selector(|| "value-viewer-footer".to_string())
                 .flex()
                 .flex_row()
+                .flex_none()
                 .items_center()
                 .justify_between()
                 .gap(px(8.0))
-                .pt(px(12.0))
-                .pb(px(14.0))
+                .pt(px(pad_top))
+                .pb(px(pad_bottom))
                 .px(px(POPOVER_PAD_X))
-                .child(
-                    Label::new(
-                        view.footer.clone(),
-                        TextSource::Fluent,
-                        t.type_ramp.mono_data,
-                        c.text_2.to_hsla(),
-                    )
-                    .id("value-viewer-size"),
-                )
-                .child(
-                    Button::new("value-viewer-copy", message(cx, "hv-vv-copy", vec![]))
-                        .kind(ButtonKind::Default)
-                        .icon(IconName::Copy)
-                        .on_raised(true)
-                        .disabled(!view.can_copy)
-                        .on_click(move |_, _, cx| e.update(cx, |v, cx| v.copy_raw(cx))),
-                ),
+                .child(match (short, view.truncated.clone()) {
+                    // ## m3c-shotfix F8 (fix round 2, I-1): in the short layout the truncation
+                    // fact takes the size slot, so it never scrolls away: one line, the whole
+                    // sentence its tooltip and accessible name.
+                    (true, Some(notice)) => {
+                        let tip = notice.clone();
+                        div()
+                            .id("value-viewer-size-slot")
+                            .flex_1()
+                            .min_w_0()
+                            .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+                            .declare(Role::Label, notice.clone(), None)
+                            .child(
+                                Label::new(
+                                    notice,
+                                    TextSource::Fluent,
+                                    t.type_ramp.caption,
+                                    c.text_2.to_hsla(),
+                                )
+                                .truncate(true)
+                                .id("value-viewer-size"),
+                            )
+                            .into_any_element()
+                    }
+                    // ## m3c-shotfix F8: the size wraps in the room Copy raw value leaves it.
+                    _ => div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            hacivat_ui::text::paragraph(
+                                view.footer.clone(),
+                                TextSource::Fluent,
+                                t.type_ramp.mono_data,
+                                c.text_2.to_hsla(),
+                            )
+                            .id("value-viewer-size"),
+                        )
+                        .into_any_element(),
+                })
+                .child(copy),
         );
         let panel = popover_surface(&theme)
             .id(("value-viewer", self.console.0))
@@ -1353,6 +1724,8 @@ impl Render for ValueViewer {
                 }
             }))
             .child(body);
+        // ## m3c-shotfix F8 (fix round 2, m-f): "{type} · row n" is the dialog's description, in
+        // either layout (the short one shows it only as a tooltip).
         A11yNode::new(
             "value-viewer-node",
             Role::Dialog,
@@ -1360,6 +1733,7 @@ impl Render for ValueViewer {
             false,
             panel,
         )
+        .description(view.subtitle.clone())
         .into_any_element()
     }
 }
