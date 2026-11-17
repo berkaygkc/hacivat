@@ -192,7 +192,8 @@ fn estimate(view: &RawView, region: &CopyRegion, map: &ViewMap, stop_above: usiz
 /// The bytes a cell's raw text is known to need before it is built: exact for binary values
 /// (`\x` and two digits per byte), a lower bound for text (quoting and escapes only add), 0
 /// for values whose text is short (numbers, dates) or is not copied (a decode error).
-fn known_len(value: ValueRef<'_>) -> usize {
+// ## m3c-t38 (named exception): crate-visible for the Transposed view's copy.
+pub(crate) fn known_len(value: ValueRef<'_>) -> usize {
     match value {
         ValueRef::Bytes(b) => 2 + 2 * b.len(),
         ValueRef::Text(t) | ValueRef::Json(t) | ValueRef::Xml(t) => t.len(),
@@ -276,7 +277,8 @@ pub(crate) fn build_tsv(
 
 /// One TSV cell: quoted when it holds a tab, a line break or a quote, or has outer white
 /// space; verbatim otherwise.
-fn push_cell(out: &mut String, text: &str) {
+// ## m3c-t38 (named exception): crate-visible for the Transposed and text views.
+pub(crate) fn push_cell(out: &mut String, text: &str) {
     let outer_space = text.chars().next().is_some_and(char::is_whitespace)
         || text.chars().next_back().is_some_and(char::is_whitespace);
     if !outer_space && !text.contains(['\t', '\n', '\r', '"']) {
@@ -353,7 +355,8 @@ pub fn copy_refused(refusal: CopyRefusal, cx: &mut App) {
 }
 
 /// Puts the text on the clipboard and says so, or refuses a text past the byte limit.
-fn finish(
+// ## m3c-t38 (named exception): crate-visible for the Transposed view's copy.
+pub(crate) fn finish(
     text: Result<Tsv, TooLarge>,
     rows: u64,
     cols: u64,
@@ -430,7 +433,8 @@ fn copied_toast(rows: u64, cols: u64, incomplete: u64) -> Toast {
 }
 
 /// The "Too much to copy" toast (NOTES surface 14): the selection's cells and both limits.
-fn refuse_too_much(cells: u128, cx: &mut App) {
+// ## m3c-t38 (named exception): crate-visible for the Transposed view's copy.
+pub(crate) fn refuse_too_much(cells: u128, cx: &mut App) {
     let count = saturating_u64(cells);
     let mut toast = Toast::new(
         ToastKind::Info,

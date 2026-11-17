@@ -42,6 +42,8 @@ pub use display::mysql_charset_width;
 pub use display::type_label;
 pub use idlike::id_like;
 pub use raw::{RawText, raw_text, raw_text_in};
+// ## m3c-t38: the tooltip's cap, a fraction of the cell's grapheme cap.
+pub use tooltip::TOOLTIP_FRACTION;
 
 use hacivat_proto::DbmsKind;
 

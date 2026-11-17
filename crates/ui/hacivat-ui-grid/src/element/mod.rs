@@ -48,6 +48,8 @@ pub use autosize::AUTOSIZE_MEASURES_PER_FRAME;
 pub(crate) use autosize::AutosizeState;
 pub(crate) use grid::GridElement;
 pub(crate) use pointer::PointerState;
+// ## m3c-t38: the Transposed view's source.
+pub use transpose::{TRANSPOSED_NAME_WIDTH, TRANSPOSED_ROW_WIDTH, TransposedSource};
 
 /// Above this many rows per frame the grid paints in fast-scroll mode (R-M3-12).
 pub const FAST_SCROLL_ROWS_PER_FRAME: f64 = 40.0;

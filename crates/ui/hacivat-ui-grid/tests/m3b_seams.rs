@@ -82,6 +82,8 @@ fn m3b_grid_commands_are_in_the_table() {
         // ## m3c-t37 (named exception): Task 37 filled find and go to row.
         "grid.find",
         "grid.goto_row",
+        // ## m3c-t38 (named exception): Task 38 filled the value viewer.
+        "grid.open_value",
     ];
     for (id, cmd) in [
         ("grid.grow_selection", GridCommand::GrowSelection),
@@ -103,7 +105,8 @@ fn m3b_grid_commands_are_in_the_table() {
         );
     }
     // ## m3c-t37 (named exception): 4 → 2.
-    assert_eq!(hacivat_ui_grid::commands::STUB_COMMANDS.len(), 2);
+    // ## m3c-t38 (named exception): 2 → 1.
+    assert_eq!(hacivat_ui_grid::commands::STUB_COMMANDS.len(), 1);
     // M3a's commands are not.
     for (id, _) in hacivat_ui_grid::GRID_COMMANDS.iter().take(26) {
         assert!(!hacivat_ui_grid::commands::is_stub(id), "{id}");

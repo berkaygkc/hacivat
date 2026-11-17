@@ -506,6 +506,19 @@ pub fn result_toolbar(
     extra: Vec<ToolbarItem>,
     cx: &App,
 ) -> AnyElement {
+    result_toolbar_with(rows, copy, extra, Vec::new(), cx)
+}
+
+// ## m3c-t38 (named exception): the right group's items after rows · timing (the view switch
+// and the record toggle).
+/// [`result_toolbar`] with `trailing` after rows · timing.
+pub fn result_toolbar_with(
+    rows: SharedString,
+    copy: Action,
+    extra: Vec<ToolbarItem>,
+    trailing: Vec<ToolbarItem>,
+    cx: &App,
+) -> AnyElement {
     let label: TextFn = {
         let rows = rows.clone();
         Rc::new(move |_| rows.clone())
@@ -521,7 +534,7 @@ pub fn result_toolbar(
     for item in extra {
         bar = bar.item(item);
     }
-    bar.trailing(ToolbarItem::pinned(
+    let bar = bar.trailing(ToolbarItem::pinned(
         Rc::new(move |_, cx| {
             let t = Theme::get(cx).tokens;
             Label::new(
@@ -534,8 +547,12 @@ pub fn result_toolbar(
             .into_any_element()
         }),
         label,
-    ))
-    .into_any_element()
+    ));
+    // ## m3c-t38
+    trailing
+        .into_iter()
+        .fold(bar, |bar, item| bar.trailing(item))
+        .into_any_element()
 }
 
 /// The Output tab's toolbar: Clear, Copy, Scroll to end.

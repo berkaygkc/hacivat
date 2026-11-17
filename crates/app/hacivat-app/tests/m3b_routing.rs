@@ -665,20 +665,16 @@ fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
     // ## m3c-t33 merge: 8 editor stubs (after T31, T32, T33) + 4 grid stubs.
     // ## m3c-t37 (named exception): Task 37 filled `grid.find` and `grid.goto_row`: 8 + 2.
     // ## m3c-t34 merge: 0 editor stubs (after T34) + 2 grid stubs (after T37).
-    assert_eq!(stubs.len(), 2);
+    // ## m3c-t38 (named exception): Task 38 filled `grid.open_value`: 0 + 1.
+    assert_eq!(stubs.len(), 1);
     // The app-registered stubs (disabled since Task 1b).
     // ## m3b-t27-history (named exception): `history.open` is no longer a stub; it is enabled
     // once the history store is open (`history_ui.rs` covers it).
     // ## m3c-t36 (named exception): `grid.sort_asc`, `grid.sort_desc` and `grid.clear_sort`
     // are no longer stubs (Task 36 filled them; enabled with a shown grid).
-    stubs.extend([
-        "results.next_tab",
-        "results.prev_tab",
-        "grid.view_table",
-        "grid.view_transposed",
-        "grid.view_text",
-        "grid.toggle_record",
-    ]);
+    // ## m3c-t38 (named exception): the view commands are no longer stubs (Task 38 filled
+    // them; enabled with a shown result).
+    stubs.extend(["results.next_tab", "results.prev_tab"]);
     let (enabled, listed) = vcx.cx.read(|cx| {
         let reg = cx.global::<ActionRegistry>();
         let enabled: Vec<&'static str> = reg
