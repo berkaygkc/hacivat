@@ -242,6 +242,22 @@ pub struct HeaderTip {
     pub ellipsized: bool,
     /// The column is frozen.
     pub frozen: bool,
+    // ## m3c-t36
+    /// The column's sort level (0: the first key), when it is sorted: its tooltip says so.
+    pub sort: Option<usize>,
+}
+
+// ## m3c-t36
+/// A sort indicator a recorded frame painted (`test-support`): the column, its level (0: the
+/// first key), the direction, the arrow's window x, and the level number when one was drawn.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaintedSortMark {
+    pub col: ColId,
+    pub level: usize,
+    pub desc: bool,
+    pub x: f32,
+    pub number: Option<SharedString>,
 }
 
 /// The rows the grid scrolls over for `count`: the exact total when known, the skeleton rows
@@ -300,6 +316,12 @@ pub(crate) struct PaintState {
     pub recorded: Option<Vec<PaintedCell>>,
     #[cfg(feature = "test-support")]
     pub recorded_headers: Option<Vec<PaintedHeader>>,
+    // ## m3c-t36
+    #[cfg(feature = "test-support")]
+    pub recorded_sort_marks: Vec<PaintedSortMark>,
+    /// The unsorted tail's boundary line the last recorded frame drew (window y).
+    #[cfg(feature = "test-support")]
+    pub recorded_tail_y: Option<f32>,
 }
 
 impl PaintState {
@@ -321,6 +343,10 @@ impl PaintState {
             recorded: None,
             #[cfg(feature = "test-support")]
             recorded_headers: None,
+            #[cfg(feature = "test-support")]
+            recorded_sort_marks: Vec::new(),
+            #[cfg(feature = "test-support")]
+            recorded_tail_y: None,
         }
     }
 
@@ -348,6 +374,19 @@ impl crate::view::GridView {
     #[cfg(feature = "test-support")]
     pub fn painted_headers(&self) -> &[PaintedHeader] {
         self.paint.recorded_headers.as_deref().unwrap_or(&[])
+    }
+
+    // ## m3c-t36
+    /// The sort indicators the last frame painted (`test-support`).
+    #[cfg(feature = "test-support")]
+    pub fn painted_sort_marks(&self) -> &[PaintedSortMark] {
+        &self.paint.recorded_sort_marks
+    }
+
+    /// The window y of the unsorted tail's boundary line the last frame drew (`test-support`).
+    #[cfg(feature = "test-support")]
+    pub fn painted_tail_y(&self) -> Option<f32> {
+        self.paint.recorded_tail_y
     }
 
     /// The hovered body cell (view row, visible column index) and whether a pointer drag is in

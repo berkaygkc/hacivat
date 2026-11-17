@@ -21,6 +21,7 @@ use hacivat_app::results::adapter::{GridAdapter, ResultDisplay};
 use hacivat_app::results::cache::{DISPLAY_CACHE_CAPACITY, DisplayCache, DisplayKey};
 use hacivat_app::results::context::result_context_of;
 use hacivat_app::results::copy::{self, CopyOutcome, MAX_COPY_BYTES, TooLarge};
+// ## m3c-t36 fix round 1 (named exception, m5): every copy entry point takes the view map.
 use hacivat_app::results::tabs::MemoryBanner;
 use hacivat_app::results::{ActiveResult, CompletenessView, ConsoleResults};
 use hacivat_driver::{SemVerLoose, ServerInfo, Support};
@@ -37,6 +38,7 @@ use hacivat_session::session::{RunId, UnitId};
 use hacivat_session::{LiveInfo, LiveState, PathKind};
 use hacivat_ui::toast::ToastQueue;
 use hacivat_ui_core::theme::{Theme, ThemeMode};
+use hacivat_ui_grid::model::ViewMap;
 use hacivat_ui_grid::model::{CopyRefusal, CopyRegion, Dir};
 use hacivat_ui_grid::testing::grid_config;
 use hacivat_ui_grid::{
@@ -161,9 +163,15 @@ fn whole(adapter: &GridAdapter) -> CopyRegion {
 }
 
 fn tsv(adapter: &GridAdapter) -> String {
-    copy::tsv(adapter, &whole(adapter), false, MAX_COPY_BYTES)
-        .expect("within the limits")
-        .text
+    copy::tsv(
+        adapter,
+        &whole(adapter),
+        &ViewMap::identity(0),
+        false,
+        MAX_COPY_BYTES,
+    )
+    .expect("within the limits")
+    .text
 }
 
 fn names(adapter: &GridAdapter) -> Vec<String> {
@@ -281,9 +289,15 @@ fn copy_with_headers_puts_the_column_names_first() {
         schema(vec![pg("id", int8(), "int8"), pg("a\tb", text(), "text")]),
         vec![vec![Value::Int(7), t("x")]],
     );
-    let text = copy::tsv(&adapter, &whole(&adapter), true, MAX_COPY_BYTES)
-        .unwrap()
-        .text;
+    let text = copy::tsv(
+        &adapter,
+        &whole(&adapter),
+        &ViewMap::identity(0),
+        true,
+        MAX_COPY_BYTES,
+    )
+    .unwrap()
+    .text;
     assert_eq!(text, "id\t\"a\tb\"\n7\tx\n");
 }
 
@@ -297,9 +311,15 @@ fn copy_takes_the_region_only_and_skips_what_the_result_lacks() {
         cols: vec![ColId(2), ColId(0), ColId(9)],
     };
     assert_eq!(
-        copy::tsv(&adapter, &region, false, MAX_COPY_BYTES)
-            .unwrap()
-            .text,
+        copy::tsv(
+            &adapter,
+            &region,
+            &ViewMap::identity(0),
+            false,
+            MAX_COPY_BYTES
+        )
+        .unwrap()
+        .text,
         "x\t2\n\" \"\t3\n"
     );
 }
@@ -308,13 +328,28 @@ fn copy_takes_the_region_only_and_skips_what_the_result_lacks() {
 fn a_text_past_the_byte_limit_is_refused() {
     let adapter = fixture_3x3();
     assert_eq!(
-        copy::tsv(&adapter, &whole(&adapter), false, 8),
+        copy::tsv(&adapter, &whole(&adapter), &ViewMap::identity(0), false, 8),
         Err(TooLarge)
     );
     let exact = tsv(&adapter).len();
-    assert!(copy::tsv(&adapter, &whole(&adapter), false, exact).is_ok());
+    assert!(
+        copy::tsv(
+            &adapter,
+            &whole(&adapter),
+            &ViewMap::identity(0),
+            false,
+            exact
+        )
+        .is_ok()
+    );
     assert_eq!(
-        copy::tsv(&adapter, &whole(&adapter), false, exact - 1),
+        copy::tsv(
+            &adapter,
+            &whole(&adapter),
+            &ViewMap::identity(0),
+            false,
+            exact - 1
+        ),
         Err(TooLarge)
     );
 }
@@ -445,20 +480,42 @@ fn truncated_and_undecodable_cells(cx: &mut TestAppContext) {
     assert_eq!(bad.align, Align::Start);
     // Copy: the kept prefix, and an empty cell for the value that could not be decoded. The
     // decoder's message is not a value the server sent: it never reaches the clipboard.
-    let copied = copy::tsv(&adapter, &whole(&adapter), false, MAX_COPY_BYTES).unwrap();
+    let copied = copy::tsv(
+        &adapter,
+        &whole(&adapter),
+        &ViewMap::identity(0),
+        false,
+        MAX_COPY_BYTES,
+    )
+    .unwrap();
     assert_eq!(copied.text, "the kept prefix\t\n");
     assert!(!copied.text.contains("invalid byte sequence"));
     assert_eq!(copied.incomplete, 2, "both cells are incomplete");
     // A complete result has none.
     let whole_3x3 = fixture_3x3();
     assert_eq!(
-        copy::tsv(&whole_3x3, &whole(&whole_3x3), false, MAX_COPY_BYTES)
-            .unwrap()
-            .incomplete,
+        copy::tsv(
+            &whole_3x3,
+            &whole(&whole_3x3),
+            &ViewMap::identity(0),
+            false,
+            MAX_COPY_BYTES
+        )
+        .unwrap()
+        .incomplete,
         0
     );
     let region = whole(&adapter);
-    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
+    let task = cx.update(|cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            false,
+            adapter.generation(),
+            cx,
+        )
+    });
     assert_eq!(
         task.now_or_never(),
         Some(CopyOutcome::Copied {
@@ -496,7 +553,16 @@ fn a_copy_with_incomplete_cells_warns_instead_of_plainly_succeeding(cx: &mut Tes
     let adapter = incomplete_fixture();
     let region = whole(&adapter);
     vcx.cx
-        .update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx))
+        .update(|cx| {
+            copy::copy_region(
+                &adapter,
+                region,
+                ViewMap::identity(0),
+                false,
+                adapter.generation(),
+                cx,
+            )
+        })
         .detach();
     vcx.run_until_parked();
     assert_eq!(toast_ids(vcx), ["hv-copy-done", "hv-copy-done-incomplete"]);
@@ -1526,7 +1592,16 @@ fn toasts(cx: &mut TestAppContext) -> usize {
 fn copy_puts_one_string_on_the_clipboard_and_says_so(cx: &mut TestAppContext) {
     let adapter = fixture_3x3();
     let region = whole(&adapter);
-    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
+    let task = cx.update(|cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            false,
+            adapter.generation(),
+            cx,
+        )
+    });
     let outcome = task.now_or_never().expect("a small copy ends at once");
     assert_eq!(
         outcome,
@@ -1548,8 +1623,16 @@ fn a_large_copy_is_built_in_the_background(cx: &mut TestAppContext) {
     let adapter = adapter_over(three_columns(), numbered_rows(0..5_001));
     let region = whole(&adapter);
     assert!(region.cell_count() > copy::BACKGROUND_COPY_CELLS);
-    let mut task =
-        cx.update(|cx| copy::copy_region(&adapter, region, true, adapter.generation(), cx));
+    let mut task = cx.update(|cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            true,
+            adapter.generation(),
+            cx,
+        )
+    });
     assert!(
         (&mut task).now_or_never().is_none(),
         "the text is not built on the UI thread"
@@ -1588,7 +1671,16 @@ fn copy_over_a_million_cells_is_refused(cx: &mut TestAppContext) {
     };
     let cells = region.cell_count();
     assert_eq!(cells, 1_000_002);
-    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
+    let task = cx.update(|cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            false,
+            adapter.generation(),
+            cx,
+        )
+    });
     assert_eq!(
         task.now_or_never(),
         Some(CopyOutcome::TooManyCells { cells })
@@ -1605,7 +1697,16 @@ fn copy_over_a_million_cells_is_refused(cx: &mut TestAppContext) {
         cols: vec![ColId(0), ColId(1)],
     };
     assert_eq!(region.cell_count(), copy::MAX_COPY_CELLS);
-    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
+    let task = cx.update(|cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            false,
+            adapter.generation(),
+            cx,
+        )
+    });
     cx.run_until_parked();
     assert!(matches!(
         task.now_or_never(),
@@ -1668,7 +1769,16 @@ fn a_copy_requested_before_a_rerun_was_painted_copies_nothing(cx: &mut TestAppCo
     assert_eq!(region.cell_count(), 2, "the first result's selection");
     assert_eq!(generation, 1, "cut from the first result");
     assert_eq!(adapter.generation(), 2);
-    let task = vcx.update(|_, cx| copy::copy_region(&adapter, region, false, generation, cx));
+    let task = vcx.update(|_, cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            false,
+            generation,
+            cx,
+        )
+    });
     assert_eq!(task.now_or_never(), Some(CopyOutcome::Stale));
     assert_eq!(
         vcx.read_from_clipboard().and_then(|i| i.text()).as_deref(),
@@ -1686,7 +1796,16 @@ fn a_copy_requested_before_a_rerun_was_painted_copies_nothing(cx: &mut TestAppCo
     vcx.run_until_parked();
     let (region, generation) = requests.borrow_mut().pop().expect("a copy was requested");
     assert_eq!(generation, 2);
-    let task = vcx.update(|_, cx| copy::copy_region(&adapter, region, false, generation, cx));
+    let task = vcx.update(|_, cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            false,
+            generation,
+            cx,
+        )
+    });
     assert_eq!(
         task.now_or_never(),
         Some(CopyOutcome::Copied {
@@ -1712,16 +1831,22 @@ fn a_cell_past_the_byte_limit_is_refused_from_its_known_length() {
     );
     let region = whole(&adapter);
     let exact = 2 + 2 * (2 << 20) + 1;
-    assert_eq!(copy::tsv(&adapter, &region, false, 1 << 20), Err(TooLarge));
     assert_eq!(
-        copy::tsv(&adapter, &region, false, exact - 1),
+        copy::tsv(&adapter, &region, &ViewMap::identity(0), false, 1 << 20),
+        Err(TooLarge)
+    );
+    assert_eq!(
+        copy::tsv(&adapter, &region, &ViewMap::identity(0), false, exact - 1),
         Err(TooLarge)
     );
     // The bound is the text's real size: exactly at the limit it fits.
-    let copied = copy::tsv(&adapter, &region, false, exact).unwrap();
+    let copied = copy::tsv(&adapter, &region, &ViewMap::identity(0), false, exact).unwrap();
     assert_eq!(copied.text.len(), exact);
     // The estimate the background decision uses is that same size, without building the text.
-    assert_eq!(copy::estimated_bytes(&adapter, &region), exact);
+    assert_eq!(
+        copy::estimated_bytes(&adapter, &region, &ViewMap::identity(0)),
+        exact
+    );
 }
 
 #[gpui::test]
@@ -1731,8 +1856,16 @@ fn a_few_large_cells_are_built_in_the_background(cx: &mut TestAppContext) {
     let adapter = one_cell(&big);
     let region = whole(&adapter);
     assert_eq!(region.cell_count(), 1);
-    let mut task =
-        cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
+    let mut task = cx.update(|cx| {
+        copy::copy_region(
+            &adapter,
+            region,
+            ViewMap::identity(0),
+            false,
+            adapter.generation(),
+            cx,
+        )
+    });
     assert!(
         (&mut task).now_or_never().is_none(),
         "a megabyte of text is not built on the UI thread"
@@ -1757,7 +1890,16 @@ fn copy_toasts_are_the_mocks_messages(cx: &mut TestAppContext) {
     let adapter = fixture_3x3();
     let region = whole(&adapter);
     vcx.cx
-        .update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx))
+        .update(|cx| {
+            copy::copy_region(
+                &adapter,
+                region,
+                ViewMap::identity(0),
+                false,
+                adapter.generation(),
+                cx,
+            )
+        })
         .detach();
     vcx.run_until_parked();
     assert_eq!(

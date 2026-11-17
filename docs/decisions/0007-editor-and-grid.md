@@ -718,3 +718,97 @@ edge, on the side of the edge with room (right of an edge in the grid's left hal
 it), so it never hangs over a neighbouring pane (fix round 1, M4). Frozen headers carry the
 tooltip `hv-grid-frozen-tip`. The labels are `GridLabels`'
 `frozen_tip`, `resize_tip` and `width`.
+
+## m3b-t36 — local sort
+
+M3c Task 36 (HV-GRID-07, R-M3-70; NOTES surface 18, M3c-19, M3c-20): a result grid sorts its
+fetched rows on this computer, by the column's database collation, off the UI thread; the copy
+follows the order shown.
+
+**Comparisons (`hacivat-values::valfmt::compare`).** `comparator_for(col, collation)` gives a
+column's ascending order. Text compares by the database collation mapped to ICU4X
+(`resolve_collation`: PostgreSQL ICU `tr-x-icu` / `und-u-ks-level2`, glibc `tr_TR.utf8`, MySQL
+and MariaDB UCA `utf8mb4_tr_0900_ai_ci`, `utf8mb4_turkish_ci`, `…_uca1400_turkish_ai_ci`, SQL
+Server `Turkish_CI_AS`; accent-insensitive → primary, case-insensitive → secondary, else
+tertiary), by code point for a binary collation (`C`, `*_bin`, SQLite `BINARY`), and by code
+point **as a fallback that the tooltip names** for anything else (`utf8mb4_general_ci`,
+`NOCASE`, `default`, an unknown name, or no collation at all). The UI locale and the process
+locale are never read. Exact decimals compare exactly (the 38-digit form by its words, longer
+ones by their digits), never through a float; floats by IEEE order with NaN after +∞; temporal
+values by instant; enums by declared label order; bytes and UUIDs by bytes; decode errors after
+every value; NULLs where the engine puts them ascending (`nulls_at`: last on PostgreSQL and its
+forks, Oracle, ClickHouse; first elsewhere). A descending key reverses the whole order, NULLs
+included, as `ORDER BY … DESC` does. Ties are equal: the sort is stable.
+
+**No column carries its collation today.** PostgreSQL's row description has none; MySQL's column
+definition carries the *connection's* result character set (`character_set_results`), not the
+column's collation. So `results::sort::collation_of` answers `None`, every text column sorts by
+code point, and its tooltip says the collation is not known (`hv-grid-sort-tip-unknown`). The
+mapping is ready for a catalog lookup through `OriginHint` (ruling request in the Task 36
+report).
+
+**The order (`hacivat-ui-grid::model::stable_order`).** A bottom-up stable merge sort of row
+numbers under the job's comparator (runs of 32 by insertion), which looks at a cancellation flag
+every 65,536 comparisons and before each merge pass; above 1,000,000 rows it splits the rows over
+up to four scoped threads and merges the runs pairwise, left first. It knows no values.
+
+**The job (`hacivat-app::results::sort`).** On a request the UI thread takes one snapshot and
+builds each key's comparator; the background executor extracts each key column into one
+`ValueRef` per row (borrowed from the snapshot), sorts, and builds `ViewMap::permuted(order,
+rows, rows)` with its O(n) index. The UI thread only publishes: `GridView::set_view_map` and
+`GridView::set_sort` (the header indicator and its tooltips). **Generation guard:** each grid's
+request number is bumped by every request, Cancel and Clear sort; a finished job publishes only
+when its number is current, the adapter is at the generation it sorted, and it is still the
+running job. A newer request raises the older job's flag. A re-run drops the map and the
+indicator (the grid does both at the new generation's first frame); sorting again is the
+user's call. Rows that arrive during or after a sort join the unsorted tail
+(`ViewMap::with_loaded`), and the grid draws a 1 px dashed `text-3` line above the tail's first
+row (`GridView::tail_boundary`, derived from the map: `order.len()` while `loaded > tail_from`).
+
+**The header.** A sorted column keeps room after its name (6 px gap) for a 12 px blue
+`arrow-up` / `arrow-down` and, with two or more keys only, its level number in Fragment Mono 11
+blue (a `Roles::sort_level` role); the name ellipsizes first. An end-aligned header puts the
+indicator at its end. Its tooltip (`HeaderTip::sort`) adds the key's text: "Sort level 1,
+ascending. Text compares by the column's collation, tr-x-icu." (`hv-grid-sort-tip`),
+`hv-grid-sort-tip-cp` for a collation with no equivalent, `hv-grid-sort-tip-unknown` when none
+is known, `hv-grid-sort-level` for a column that holds no text.
+
+**The note row** (under the result toolbar, M3c-20): "Sorting N rows…" with Cancel once a job has
+run 200 ms (the static amber marker); on a partial result (anything but `Complete` and
+`Truncated(FollowingResultSets)`) "Sorted locally: the database might order differently. Only
+the N fetched rows are sorted." with Clear sort; a tail on a partial result says both facts in
+one row with Re-sort and Clear sort; a tail on a complete result "N new rows at the end (not
+sorted)" with Re-sort.
+
+**Copy follows the view (ledger 253 I5).** `CopyRegion::rows` are view rows. The tile passes
+the grid's map to `copy::copy_region_in`, which reads each view row's model row, in view order;
+a view row the map does not show is left out. `copy_region` / `tsv` are the identity's.
+
+**Commands.** `grid.sort_asc` / `grid.sort_desc` sort by the focus column, `grid.clear_sort` goes
+back (palette-only; Task 39's menus add "Add as sort level N" through
+`GridView::request_sort`). A header click still selects the column, as in M3a.
+
+**Fix round 1.**
+- *Comparisons.* PostgreSQL 17's interval ±infinity sort around the finite intervals (I1). An
+  integer against a float compares exactly (the float's floor as an integer, then its
+  fraction), and an exact decimal against a float compares exactly through the float's exact
+  decimal expansion, so a SQLite column of mixed integers and reals has a total order (m1; the
+  earlier "no engine types a column that way" was wrong for SQLite). SQLite booleans are the
+  integers 0 and 1. `timetz` ties order by the zone in seconds west, as `timetz_cmp`. MySQL's
+  partial zero dates compare by their parts (`2020-00-15` between 2019 and `2020-01-00`).
+- *Collation names.* `resolve_collation(engine, name)` reads only the engine's spellings (a
+  PostgreSQL collation named like a MySQL one is not taken for MySQL's). SQL Server's `*_BIN`
+  / `*_BIN2` compare UTF-16 code units. MariaDB's `nopad` names map like their PAD SPACE twins.
+  PAD SPACE collations (MySQL's and MariaDB's except `_0900_`, `nopad` and `binary`; every SQL
+  Server collation) ignore trailing spaces (`pads_trailing_spaces`); PostgreSQL and SQLite do
+  not.
+- *Jobs.* A job stops when its state goes: a newer sort, Cancel, Clear sort, a re-run (the tile
+  drops the old run's state when it shows the grid at the new generation) and a closed tab or
+  console (`prune`). The `Running` value raises the flag when it drops. A request is refused,
+  claiming nothing, while the grid has not painted the adapter's current generation, and a
+  job publishes only to a grid showing the generation it sorted. A worker thread's panic is
+  re-raised (`stable_order`), never a cancel; the job catches it, keeps the order shown, and
+  says so in a notice (`hv-grid-sort-failed`).
+- *Memory.* Key extraction holds one `ValueRef` (32 B) per row and key: about 32 MB per key at
+  one million rows, freed when the job ends. No budget check (accepted at review).
+- *Copy.* Every copy entry point (`copy_region`, `tsv`, `estimated_bytes`) takes the `ViewMap`.

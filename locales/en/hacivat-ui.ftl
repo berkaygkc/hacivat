@@ -2724,3 +2724,73 @@ hv-strip-ranges = { $n } ranges · { $cells ->
 # Fix round 1: the notice when Freeze columns is refused because the frozen columns would
 # leave too little of the grid to scroll.
 hv-grid-freeze-refused = These columns can't be frozen: there would be no room left to scroll. Widen the pane or freeze fewer columns.
+
+## m3b-t36-sort
+
+# The sort note under the result toolbar when the rows were sorted on this computer and the
+# database may hold more rows (a partial result): its order might differ from ORDER BY.
+hv-grid-sorted-locally = Sorted locally: the database might order differently.
+# After hv-grid-sorted-locally on a partial result.
+# Variables:
+#   $rows (Number) - the fetched rows the sort ordered, e.g. 10,000.
+hv-grid-sorted-locally-more = Only the { $rows } fetched rows are sorted.
+# A button in the sort note: back to the order the database sent.
+hv-grid-clear-sort = Clear sort
+# The sort note when rows arrived after the sort of a complete result: they wait, unsorted,
+# after a dashed line at the end of the grid.
+# Variables:
+#   $rows (Number) - the rows that arrived after the sort, e.g. 1,500.
+hv-grid-unsorted-tail = { $rows ->
+        [one] { $rows } new row at the end (not sorted)
+       *[other] { $rows } new rows at the end (not sorted)
+    }
+# A button in the sort note: sort again, the new rows included.
+hv-grid-resort = Re-sort
+# The sort note while a long sort runs (shown after 200 ms; the grid keeps its old order
+# meanwhile).
+# Variables:
+#   $rows (Number) - the rows being sorted, e.g. 1,048,576.
+hv-grid-sorting = { $rows ->
+        [one] Sorting { $rows } row…
+       *[other] Sorting { $rows } rows…
+    }
+# After hv-grid-sorted-locally on a partial result whose new rows arrived after the sort: both
+# facts in one note.
+# Variables:
+#   $sorted (Number) - the fetched rows the sort ordered, e.g. 10,000.
+#   $rows (Number) - the rows that arrived after the sort, e.g. 1,500.
+hv-grid-sorted-tail = { $rows ->
+        [one] Only the { $sorted } fetched rows are sorted; { $rows } new row at the end is not.
+       *[other] Only the { $sorted } fetched rows are sorted; { $rows } new rows at the end are not.
+    }
+# A button in the sort note while a sort runs: stop it and keep the order shown.
+hv-grid-sort-cancel = Cancel
+# The tooltip of a sorted column's header.
+# Variables:
+#   $lvl (Number) - the sort level, 1 for the first key, e.g. 1.
+#   $dir (String) - hv-grid-dir-asc or hv-grid-dir-desc, e.g. "ascending".
+#   $collation (String) - the column's collation as the database names it, e.g. "tr-x-icu".
+hv-grid-sort-tip = Sort level { $lvl }, { $dir }. Text compares by the column's collation, { $collation }.
+# The tooltip of a sorted text column whose collation this app cannot follow.
+# Variables:
+#   $lvl (Number) - the sort level, 1 for the first key, e.g. 1.
+#   $dir (String) - hv-grid-dir-asc or hv-grid-dir-desc, e.g. "ascending".
+#   $collation (String) - the column's collation as the database names it, e.g. "utf8mb4_general_ci".
+hv-grid-sort-tip-cp = Sort level { $lvl }, { $dir }. The column's collation { $collation } has no equivalent here, so text compares by code point.
+# The sort direction inside the sort tooltips.
+hv-grid-dir-asc = ascending
+hv-grid-dir-desc = descending
+# The tooltip of a sorted text column when the result does not say which collation the column
+# uses (the database sends no collation with a result's columns).
+# Variables:
+#   $lvl (Number) - the sort level, 1 for the first key, e.g. 1.
+#   $dir (String) - hv-grid-dir-asc or hv-grid-dir-desc, e.g. "ascending".
+hv-grid-sort-tip-unknown = Sort level { $lvl }, { $dir }. The column's collation is not known here, so text compares by code point.
+# The tooltip of a sorted column that holds no text (numbers, dates…).
+# Variables:
+#   $lvl (Number) - the sort level, 1 for the first key, e.g. 1.
+#   $dir (String) - hv-grid-dir-asc or hv-grid-dir-desc, e.g. "ascending".
+hv-grid-sort-level = Sort level { $lvl }, { $dir }.
+# Fix round 1: the notice when a local sort stops on an internal error; the grid keeps the
+# order it showed.
+hv-grid-sort-failed = The sort stopped on an internal error. The grid keeps the order it showed.

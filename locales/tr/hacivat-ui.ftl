@@ -2412,3 +2412,36 @@ hv-grid-width = { $px } px
 hv-strip-ranges = { $n } aralık · { $cells } hücre
 # Review: PO
 hv-grid-freeze-refused = Bu sütunlar dondurulamaz: kaydıracak yer kalmaz. Bölmeyi genişletin ya da daha az sütun dondurun.
+
+## m3b-t36-sort
+
+# Review: PO
+hv-grid-sorted-locally = Yerel olarak sıralandı: veritabanı farklı sıralayabilir.
+# Review: PO
+hv-grid-sorted-locally-more = Yalnızca getirilen { $rows } satır sıralandı.
+# Review: PO
+hv-grid-clear-sort = Sıralamayı kaldır
+# Review: PO
+hv-grid-unsorted-tail = Sonda { $rows } yeni satır (sıralanmadı)
+# Review: PO
+hv-grid-resort = Yeniden sırala
+# Review: PO
+hv-grid-sorting = { $rows } satır sıralanıyor…
+# Review: PO
+hv-grid-sorted-tail = Yalnızca getirilen { $sorted } satır sıralandı; sondaki { $rows } yeni satır sıralanmadı.
+# Review: PO
+hv-grid-sort-cancel = Vazgeç
+# Review: PO
+hv-grid-sort-tip = Sıralama düzeyi { $lvl }, { $dir }. Metin, sütunun harmanlamasına ({ $collation }) göre karşılaştırılır.
+# Review: PO
+hv-grid-sort-tip-cp = Sıralama düzeyi { $lvl }, { $dir }. Sütunun { $collation } harmanlamasının burada karşılığı yok; metin kod noktasına göre karşılaştırılır.
+# Review: PO
+hv-grid-dir-asc = artan
+# Review: PO
+hv-grid-dir-desc = azalan
+# Review: PO
+hv-grid-sort-tip-unknown = Sıralama düzeyi { $lvl }, { $dir }. Sütunun harmanlaması burada bilinmiyor; metin kod noktasına göre karşılaştırılır.
+# Review: PO
+hv-grid-sort-level = Sıralama düzeyi { $lvl }, { $dir }.
+# Review: PO
+hv-grid-sort-failed = Sıralama bir iç hata yüzünden durdu. Tablo gösterdiği sırayı koruyor.

@@ -31,3 +31,5 @@ pub use selection::{
 // ## m3b-t01b-seams
 pub use goto::{GotoError, GotoTarget, parse_goto};
 pub use sort::{SortKey, SortSpec};
+// ## m3c-t36: the local sort's stable, cancellable order.
+pub use sort::{CANCEL_EVERY, Cancelled, PARALLEL_ABOVE, stable_order, stable_order_on};

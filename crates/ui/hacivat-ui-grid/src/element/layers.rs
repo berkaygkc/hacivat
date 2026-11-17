@@ -66,6 +66,9 @@ pub struct Roles {
     pub row_number: Role,
     pub header_name: Role,
     pub header_type: Role,
+    // ## m3c-t36
+    /// A sort level number after the arrow: Fragment Mono 11 `blue` (NOTES surface 18).
+    pub sort_level: Role,
     /// `0` … `9` in the row-number role: row numbers paint digit by digit at the tabular
     /// advance, so scrolling shapes no row number.
     pub digits: [Arc<LineLayout>; 10],
@@ -94,6 +97,7 @@ impl Roles {
             chip: Role::new(&r.mono_micro, ColorClass::Text2, window),
             header_name: Role::new(&r.body_strong, ColorClass::Text, window),
             header_type: Role::new(&r.mono_kbd, ColorClass::Text3, window),
+            sort_level: Role::new(&r.mono_micro, ColorClass::Blue, window),
             row_number,
             digits,
             digit_advance,
