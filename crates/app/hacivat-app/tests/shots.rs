@@ -1549,19 +1549,23 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     }
     image.save(dir.join(&name)).expect("write the PNG");
     println!("shot {name}: {} labels", frame.len());
+    // ## m3c-t43-shots (fix round 1, I1): the Transposed name column's word in this locale.
+    let header_word = m3c_state.map(|_| cx.update(|cx| m3c::header_word(cx)));
     support::stop_core_runtime(&mut cx);
     // ## m3c-t43-shots: a product defect this task found in a merged M3c surface and listed for
-    // its owner (`m3c::KNOWN_FINDINGS`) is printed, not failed; every other violation fails.
+    // its owner (`m3c::KNOWN_FINDINGS`) is printed, not failed; every other violation fails
+    // (fix round 1: only its one kind on its one label; never a trust, missing-surface or
+    // state-check line).
     if let Some(state) = m3c_state {
-        failures.retain(
-            |v| match m3c::known_finding(state, shot.locale, shot.size, v) {
+        failures.retain(|v| {
+            match m3c::known_finding(state, shot.locale, shot.size, v, header_word.as_deref()) {
                 Some(f) => {
                     println!("known finding ({}): {v}", f.owner);
                     false
                 }
                 None => true,
-            },
-        );
+            }
+        });
     }
     failures
 }
@@ -1599,6 +1603,8 @@ fn render_all_surfaces(names: &[String], all: bool) {
     let mut rendered = 0;
     let run_started = std::time::Instant::now();
     let mut slowest = std::time::Duration::ZERO;
+    // ## m3c-t43-shots (fix round 1, m1): the M3c shots rendered, per state.
+    let mut m3c_rendered: std::collections::BTreeMap<&'static str, usize> = Default::default();
     for shot in shots() {
         if !names.contains(&shot.file_name(2.0)) {
             continue;
@@ -1610,7 +1616,14 @@ fn render_all_surfaces(names: &[String], all: bool) {
         slowest = slowest.max(took);
         println!("shot time {}: {} ms", shot.file_name(2.0), took.as_millis());
         rendered += 1;
+        // ## m3c-t43-shots (fix round 1, m1)
+        if let Surface::M3c(state) = shot.surface {
+            *m3c_rendered.entry(state.name()).or_insert(0) += 1;
+        }
     }
+    // ## m3c-t43-shots (fix round 1, m1): a known finding of a state rendered whole (16 shots)
+    // that matched no line is stale: it fails the run (it would hide the next regression).
+    failures.extend(m3c::stale_findings(&m3c_rendered));
     let total = run_started.elapsed();
     println!(
         "shots: {rendered} rendered into {} in {:.1} s (mean {} ms, slowest {} ms per shot)",
@@ -1656,9 +1669,9 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     assert_eq!(m3b::t24().len(), 12);
     assert_eq!(m3b::all().len(), 7 + 11 + 20 + 9 + 12 + 7 + 1 + 4);
     // ## m3c-t43-shots: then the M3c states x 16: Task 31's 5, Task 32's 7, Task 33's 7, Task
-    // 34's 10, Tasks 35/36's 9, Task 37's 13, Task 38's 15 (part B adds Tasks 39, 41 and 42's).
-    assert_eq!(m3c::all().len(), 5 + 7 + 7 + 10 + 9 + 13 + 15);
-    assert_eq!(all.len(), 1020 + 68 * 16 + 71 * 16 + 66 * 16);
+    // 34's 10, Tasks 35/36's 10, Task 37's 13, Task 38's 15 (part B adds Tasks 39, 41 and 42's).
+    assert_eq!(m3c::all().len(), 5 + 7 + 7 + 10 + 10 + 13 + 15);
+    assert_eq!(all.len(), 1020 + 68 * 16 + 71 * 16 + 67 * 16);
     let m3b_from = 1020 + 68 * 16;
     let order = [
         m3b::T22.to_vec(),
@@ -1962,11 +1975,16 @@ fn main() {
         eprintln!("--shard {bad:?}: expected k/n with 1 <= k <= n");
         std::process::exit(2);
     }
-    let checks: [(&str, fn()); 10] = [
+    let checks: [(&str, fn()); 11] = [
         // ## m3c-t43-shots
         (
             "every_m3c_state_has_its_own_marker",
             every_m3c_state_has_its_own_marker,
+        ),
+        // ## m3c-t43-shots (fix round 1, m1)
+        (
+            "known_findings_are_empty_at_the_t45_gate",
+            known_findings_are_empty_at_the_t45_gate,
         ),
         // ## m3b-t29-shots
         (
@@ -2685,14 +2703,169 @@ fn every_m3c_state_has_its_own_marker() {
             "{f:?}"
         );
     }
-    let state = m3c::M3c::GotoAsk;
-    let line =
-        "goto-fetch-ask-dark-en-1280x800@2x.png: (b) clipped: \"x\" at goto.rs:808:25#goto-line";
-    assert!(m3c::known_finding(state, "en", (1280.0, 800.0), line).is_some());
-    let trust = "goto-fetch-ask-dark-en-1280x800@2x.png: (t) a trust signal is not shown whole";
-    assert!(m3c::known_finding(state, "en", (1280.0, 800.0), trust).is_none());
-    let other = "gfind-count-dark-en-XA-960x600@2x.png: (b) clipped: \"x\" at x#goto-line";
-    assert!(m3c::known_finding(m3c::M3c::GfindCount, "en-XA", (960.0, 600.0), other).is_none());
+    // ## m3c-t43-shots (fix round 1, I2): no finding names a trust label of any M3c state, by
+    // id or by a fragment of one.
+    for state in m3c::all() {
+        for id in m3c::trust_ids(state) {
+            for f in m3c::KNOWN_FINDINGS {
+                assert!(
+                    !id.contains(f.label) && !f.label.contains(id),
+                    "{f:?} names the trust label {id}"
+                );
+            }
+        }
+    }
+    known_findings_match_only_their_own_clip();
+}
+
+// ## m3c-t43-shots (fix round 1, I1, I2)
+/// A finding tolerates only its one kind on its one label (the real lines the harness prints),
+/// never a missing surface, a failed state check, another rule's line or a trust line, even
+/// when an entry is planted on a trust id.
+fn known_findings_match_only_their_own_clip() {
+    use m3c::{Finding, M3c, Where};
+    let (en, big) = ("en", (1280.0, 800.0));
+    let (tr_xt, min) = ("tr-XT", (960.0, 600.0));
+    let ask = Finding {
+        state: "goto-fetch-ask",
+        at: Where::All,
+        label: "#goto-line",
+        owner: "T37",
+    };
+    let s = M3c::GotoAsk;
+    let n = "goto-fetch-ask-dark-en-1280x800@2x.png";
+    let clip = format!(
+        "{n}: (b) clipped: \"Row 1,500,000 isn't fetched yet.\" (278.0 px painted) at \
+         crates/app/hacivat-app/src/results/goto.rs:808:25#goto-line"
+    );
+    assert!(ask.matches(s, en, big, &clip, None), "the real clip");
+    for never in [
+        format!("{n}: the surface is missing: [\"#goto-line\"] not visible"),
+        format!("{n}: the surface is missing: no visible label from #goto-line None"),
+        format!(
+            "{n}: goto-fetch-ask: the state check failed (carets 0, ▶ 0, chevrons 0, folded 0)"
+        ),
+        format!("{n}: (a) Fluent label not bracketed: \"x\" at goto.rs:808:25#goto-line"),
+        format!("{n}: (c) 10 px < 11: \"x\" at goto.rs:808:25#goto-line"),
+        format!("{n}: (f) runs past its dialog card: \"x\" at goto.rs:808:25#goto-line"),
+        // Another label of the same state, and the same label as a fragment of a longer id.
+        format!("{n}: (b) clipped: \"x\" (1.0 px painted) at goto.rs:1:1#goto-line-2"),
+        format!("{n}: (b) clipped: \"x\" (1.0 px painted) at goto.rs:1:1#button-label-goto-ok"),
+    ] {
+        assert!(!ask.matches(s, en, big, &never, None), "{never}");
+    }
+    // Another state's line on the same label.
+    assert!(!ask.matches(M3c::GotoOpen, en, big, &clip, None));
+    // An id fragment (`value-viewer-`) matches inside the line's id only, a clip only.
+    let viewer = Finding {
+        state: "viewer-json-invalid",
+        at: Where::PseudoOrMin,
+        label: "value-viewer-",
+        owner: "T38",
+    };
+    let v = M3c::ViewerJsonInvalid;
+    let vn = "viewer-json-invalid-dark-en-960x600@2x.png";
+    let copy = format!(
+        "{vn}: (b) clipped: \"Copy raw value\" (80.2 px painted) at \
+         crates/ui/hacivat-ui/src/button.rs:272:21#button-label-value-viewer-copy"
+    );
+    assert!(viewer.matches(v, en, min, &copy, None));
+    assert!(!viewer.matches(v, en, big, &copy, None), "out of its scope");
+    for never in [
+        format!(
+            "{vn}: the surface is missing: no visible label from #value-viewer-column Some(\"bozuk_belge\")"
+        ),
+        format!("{vn}: the surface is missing: [\"#value-viewer-size\"] not visible"),
+        format!(
+            "{vn}: (a) Fluent label not bracketed: \"x\" at value_viewer.rs:1:1#value-viewer-size"
+        ),
+    ] {
+        assert!(!viewer.matches(v, tr_xt, min, &never, None), "{never}");
+    }
+    // A creation site without an id.
+    let tip = Finding {
+        state: "gutter-last-runs",
+        at: Where::Pseudo,
+        label: "gutter.rs:708",
+        owner: "T34",
+    };
+    let line = "gutter-last-runs-dark-tr-XT-960x600@2x.png: (b) clipped: \"x\" (292.7 px painted) \
+                at crates/ui/hacivat-ui-editor/src/gutter.rs:708:19";
+    assert!(tip.matches(M3c::GutterLastRuns, tr_xt, min, line, None));
+    let with_id = format!("{line}#gutter-run");
+    assert!(!tip.matches(M3c::GutterLastRuns, tr_xt, min, &with_id, None));
+    // The header word: only the Transposed name column's word, never another header.
+    let word = Finding {
+        state: "view-transposed",
+        at: Where::Pseudo,
+        label: "a grid header is data",
+        owner: "T38",
+    };
+    let header = |text: &str| {
+        format!(
+            "view-transposed-dark-tr-XT-960x600@2x.png: (g) a grid header is data, never \
+             pseudo-localised: {text:?} at crates/ui/hacivat-ui-grid/src/element/layers.rs#header"
+        )
+    };
+    let t = M3c::ViewTransposed;
+    assert!(word.matches(
+        t,
+        tr_xt,
+        min,
+        &header("[Çööööŀüüüüḿƞ]"),
+        Some("[Çööööŀüüüüḿƞ]")
+    ));
+    assert!(!word.matches(t, tr_xt, min, &header("[şéhîr]"), Some("[Çööööŀüüüüḿƞ]")));
+    assert!(!word.matches(t, tr_xt, min, &header("[Çööööŀüüüüḿƞ]"), None));
+    // I2: an entry planted on a trust id never hides a trust line, nor the trust label's clip.
+    for (state, id) in [
+        (M3c::GotoAsk, "#status-env-label"),
+        (M3c::ViewerTruncated, "#status-env-label"),
+        (M3c::GotoAsk, "#capsule-text-name"),
+    ] {
+        let planted = Finding {
+            state: state.name(),
+            at: Where::All,
+            label: id,
+            owner: "T37",
+        };
+        let n = format!("{}-dark-en-1280x800@2x.png", state.name());
+        for line in [
+            format!("{n}: (t) a trust signal is not shown whole: [{id:?}]"),
+            format!("{n}: (t) a trust label is cut short: {id}"),
+            format!("{n}: (b) clipped: \"production\" (30.0 px painted) at status.rs:1:1{id}"),
+        ] {
+            assert!(!planted.matches(state, en, big, &line, None), "{line}");
+        }
+    }
+    // The listed entries, against the real lines the harness printed for them.
+    for (state, locale, size, line, word) in [
+        (M3c::GotoAsk, en, big, clip.as_str(), None),
+        (M3c::ViewerJsonInvalid, en, min, copy.as_str(), None),
+        (M3c::GutterLastRuns, tr_xt, min, line, None),
+    ] {
+        if m3c::KNOWN_FINDINGS.iter().any(|f| f.state == state.name()) {
+            assert!(
+                m3c::KNOWN_FINDINGS
+                    .iter()
+                    .any(|f| f.matches(state, locale, size, line, word)),
+                "{line}"
+            );
+        }
+    }
+}
+
+// ## m3c-t43-shots (fix round 1, m1)
+/// The T45 gate: with `HACIVAT_T45_GATE=1` no known finding may remain (the controller's ruling:
+/// the list is temporary and empty at the M3c gate).
+fn known_findings_are_empty_at_the_t45_gate() {
+    if std::env::var_os("HACIVAT_T45_GATE").is_some() {
+        assert!(
+            m3c::KNOWN_FINDINGS.is_empty(),
+            "the T45 gate: every known finding must be fixed first: {:?}",
+            m3c::KNOWN_FINDINGS
+        );
+    }
 }
 
 fn a_missing_surface_fails_its_frame() {
