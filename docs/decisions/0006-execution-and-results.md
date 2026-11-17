@@ -1236,14 +1236,31 @@ case.
   `exec-unsafe-several-targets` (typing one name must never approve another). Off production
   nothing changes. Views, indexes, functions, sequences and column drops keep a plain
   confirmation.
-- **More secret forms are masked in history (PO M3b-23).** A `TOKEN` part and a last `KEY`
-  part after another one (`API_KEY`, `private_key`; not `PRIMARY_KEY`/`FOREIGN_KEY`/
-  `UNIQUE_KEY`…) are secret parts like `PASSWORD`, in words, quoted names, `set_config` names
-  and `token=`/`…_key=` pairs inside strings; SQLCipher's `PRAGMA key|rekey|hexkey|hexrekey|
-  textkey` and `ATTACH … KEY` take a value; a MySQL user variable named like a secret (`@pw`,
-  `@db_pass`, `@key`, never `@@…`) takes a value after `=` or `:=`. The probe table's four m3
-  gap rows are caught now (plus ten new caught rows); the m4/m5 gaps stand. The bare word
-  `KEY` (`PRIMARY KEY`, `ON DUPLICATE KEY`) arms nothing.
+- **Limit of the typed name (fix round 1, review m4).** The typed name needs a target the
+  classifier can see. A `TRUNCATE` or `DROP TABLE` hidden from it — inside a `DO` block,
+  dynamic SQL (`EXECUTE '…'`), `dblink_exec(…)`, MySQL `PREPARE`/`EXECUTE`, or a routine a
+  `CALL` runs — and PostgreSQL's `DROP OWNED BY r CASCADE` (which drops every table the role
+  owns) get the plain production confirmation instead: never suppressible, nothing sent before
+  the answer, but no name to type. Open PO question: should `DROP OWNED` ask for the role's
+  name typed?
+- **More secret forms are masked in history (PO M3b-23; narrowed in fix round 1).** Secret
+  name parts are now also `BEARER`, a bare `TOKEN` or a `TOKEN` after a secret-ish qualifier
+  (`access_token`, `refresh_token`, `api_token`, `auth_token`; never `token_type`,
+  `token_count`), and a `KEY` after an allow-listed prefix (`API`, `ACCESS`, `SECRET`,
+  `PRIVATE`, `ENCRYPTION`, `MASTER`, `SIGNING`, `AUTH`, `CLIENT`, `SERVICE`, `LICENSE`, `HMAC`,
+  `SESSION`) — never surrogate, table or public keys (`customer_key`, `date_key`,
+  `idempotency_key`, `public_key`, `PRIMARY KEY`). They apply to words, quoted names,
+  `set_config` names, `name=value` and JSON pairs (`"access_token": "…"`, camelCase too)
+  inside strings. SQLCipher's `PRAGMA key|rekey|hexkey|hexrekey|textkey` (also after
+  `EXPLAIN [QUERY PLAN]`), `ATTACH … KEY` and SQLite URI keys (`?key=`, `&hexkey=`,
+  `textkey=`) take a value; a MySQL user variable named like a secret (`@pw`, `@db_pass`,
+  `@key`; never `@pass_count` or `@@…`) takes a value after `=` or `:=`, and
+  `SELECT '…' INTO @pw` masks the strings before it; `Bearer <credential>` in a string is
+  masked. A type name after a secret column in DDL is never its value.
+- **The error scrub replaces whole secrets of at least 4 bytes only (fix round 1, review I1).**
+  Before, a secret `1` or `int` turned `ERROR 1054 … at line 1` into `ERROR ***054 … at line
+  ***`. A secret glued to other word characters in an echo, or shorter than 4 bytes, now stays
+  in the error text (documented gap).
 - **The Execute all scope line names the real environment (PO M3b-26).** Execute all is never
   offered on production, so the line's old "a production change still waits for your answer"
   clause could never apply; it is gone, and the line says which environment the connection is

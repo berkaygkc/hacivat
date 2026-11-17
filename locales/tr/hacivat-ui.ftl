@@ -969,7 +969,7 @@ hv-conn-idle-disconnected = { $name } bağlantısı { $hours } sa boşta kaldık
 # Review: PO
 hv-conn-idle-disconnected-minutes = { $name } bağlantısı { $minutes } dk boşta kaldıktan sonra kesildi. Kullandığınızda yeniden bağlanır.
 # Review: PO
-hv-conn-idle-tx = { $name } üzerindeki bir transaction { $minutes } dakikadır açık ve boşta. Commit edilene ya da rollback yapılana kadar kilitlerini tutar.
+hv-conn-idle-tx = { $name } üzerindeki bir transaction { $minutes } dakikadır açık ve boşta. Commit edilene ya da rollback edilene kadar kilitlerini tutar.
 # Review: PO
 hv-conn-lost-title = { $state ->
         [reconnected] { $name } ile yeniden bağlanıldı
@@ -981,7 +981,7 @@ hv-conn-lost-body = { $state ->
        *[lost] Sunucu oturumu süren bir iş varken sona erdi; bu yüzden { -brand-hacivat } kendiliğinden yeniden bağlanmadı. Yeniden dene ile tekrar bağlanabilirsiniz.
     }
 # Review: PO
-hv-conn-lost-tx = Açık transaction'ınız sona erdi ve sunucu commit edilmemiş değişikliklerini rollback yaptı.
+hv-conn-lost-tx = Açık transaction'ınız sona erdi ve sunucu commit edilmemiş değişikliklerini rollback etti.
 # Review: PO
 hv-conn-lost-other = Ayrıca kayboldu: { $items }
 # Review: PO
@@ -1299,7 +1299,7 @@ hv-conn-plain-remember = Bu bağlantı için bir daha sorma
 ## m2b-t23-f1
 
 # Review: PO
-hv-conn-ro-warn-non-transactional-write = Etkileri ROLLBACK ile geri alınamayan fonksiyonlar çalıştırabilir.
+hv-conn-ro-warn-non-transactional-write = Etkileri rollback ile geri alınamayan fonksiyonlar çalıştırabilir.
 
 ## m2b-t24-shots
 
@@ -1472,9 +1472,9 @@ hv-copy-refused-multiple = Bu seçimler birlikte kopyalanamaz. Tek bir blok ya d
 # Review: PO
 hv-tx-open = Transaction açık · { $n } ifade
 # Review: PO
-hv-tx-open-tip = BEGIN'den bu yana çalışan ifadeler henüz commit edilmedi. Komut paletinden commit edin ya da rollback yapın.
+hv-tx-open-tip = BEGIN'den bu yana çalışan ifadeler henüz commit edilmedi. Komut paletinden commit edin ya da rollback edin.
 # Review: PO
-hv-tx-failed = Transaction başarısız · bitirmek için rollback yapın
+hv-tx-failed = Transaction başarısız · bitirmek için rollback edin
 # Review: PO
 hv-tx-failed-tip = Bir hata ya da iptal transaction'ı durdurdu. Sunucu artık yalnızca rollback kabul eder.
 # Review: PO
@@ -1576,7 +1576,7 @@ hv-edit-redo-indent = Girintiyi Yinele
 # Review: PO
 hv-edit-redo-outdent = Girinti Azaltmayı Yinele
 # Review: PO
-hv-console-ro-pending = { $name }, açık transaction'ı commit edildiğinde ya da rollback yapıldığında salt okunur olur.
+hv-console-ro-pending = { $name }, açık transaction'ı commit edildiğinde ya da rollback edildiğinde salt okunur olur.
 # Review: PO
 hv-console-ro-pending-short = Bu transaction'dan sonra salt okunur
 # Review: PO
@@ -1712,7 +1712,7 @@ hv-cmd-exec-cancel = Çalışan ifadeyi durdur
 # Review: PO
 hv-cmd-tx-commit = Transaction'ı commit et
 # Review: PO
-hv-cmd-tx-rollback = Transaction'ı rollback yap
+hv-cmd-tx-rollback = Transaction'ı rollback et
 # Review: PO
 hv-console-connect-first = { $name } bağlantısı kuruluyor. Bağlandıktan sonra yeniden çalıştırın.
 # Review: PO
@@ -1777,35 +1777,35 @@ hv-tx-restart-body = Yeniden başlatmak oturumu sonlandırır. Commit değişikl
 # Review: PO
 hv-tx-commit-restart = Commit et ve yeniden başlat
 # Review: PO
-hv-tx-rollback-restart = Rollback yap ve yeniden başlat
+hv-tx-rollback-restart = Rollback et ve yeniden başlat
 # Review: PO
 hv-tx-release-body = Konsolun bağlantısı değişmek üzere; bu, transaction'ı sonlandırır. Commit değişiklikleri korur, rollback onları atar.
 # Review: PO
 hv-tx-commit-continue = Commit et ve devam et
 # Review: PO
-hv-tx-rollback-continue = Rollback yap ve devam et
+hv-tx-rollback-continue = Rollback et ve devam et
 # Review: PO
 hv-tx-quit-body = Çıkmak oturumu sonlandırır. Commit değişiklikleri korur, rollback onları atar.
 # Review: PO
 hv-tx-commit-close = Commit et ve kapat
 # Review: PO
-hv-tx-rollback-close = Rollback yap ve kapat
+hv-tx-rollback-close = Rollback et ve kapat
 # Review: PO
 hv-tx-commit-quit = Commit et ve çık
 # Review: PO
-hv-tx-rollback-quit = Rollback yap ve çık
+hv-tx-rollback-quit = Rollback et ve çık
 # Review: PO
 hv-tx-cancel = Vazgeç
 # Review: PO
 hv-tx-failed-title = { $name } üzerindeki transaction başarısız oldu
 # Review: PO
-hv-tx-failed-body = Bir hata ya da iptal onu durdurdu; artık yalnızca rollback yapılabilir. İçindeki { $n } ifade korunmayacak.
+hv-tx-failed-body = Bir hata ya da iptal onu durdurdu; artık yalnızca rollback edilebilir. İçindeki { $n } ifade korunmayacak.
 # Review: PO
 hv-tx-end-failed = { $name } üzerindeki transaction sona ermedi; hiçbir şey kapatılmadı.
 # Review: PO
 hv-tx-failed-by-stop = İfadeyi durdurmak { $name } üzerindeki transaction'ı başarısız kıldı. Artık yalnızca rollback onu sonlandırabilir.
 # Review: PO
-hv-exec-pending-read-only = Hiçbir şey gönderilmedi: bu konsol, açık transaction'ı sona erdiğinde salt okunur olur. Önce commit edin ya da rollback yapın.
+hv-exec-pending-read-only = Hiçbir şey gönderilmedi: bu konsol, açık transaction'ı sona erdiğinde salt okunur olur. Önce commit edin ya da rollback edin.
 # Review: PO
 hv-exec-rerun-edited = İfade çalıştırıldıktan sonra düzenlendi. Düzenleyiciden çalıştırın.
 
@@ -1930,7 +1930,7 @@ hv-tx-iso-default = Sunucu varsayılanı
 # Review: PO
 hv-tx-iso-default-hint = Sunucu varsayılanı · { $level }
 # Review: PO
-hv-tx-menu-reason-open = Önce commit edin ya da rollback yapın
+hv-tx-menu-reason-open = Önce commit edin ya da rollback edin
 # Review: PO
 hv-tx-menu-prod-note = Üretim konsolları Manuel kipte başlar.
 # Review: PO
@@ -1948,7 +1948,7 @@ hv-tx-badge-failed-tip = Bir hata ya da iptal transaction'ı durdurdu. Sunucu ar
 # Review: PO
 hv-tx-badge-commit = Commit et
 # Review: PO
-hv-tx-badge-rollback = Rollback yap
+hv-tx-badge-rollback = Rollback et
 # Review: PO
 hv-tx-segment-tip = Commit, rollback ve transaction kipi için tıklayın.
 # Review: PO
@@ -1958,11 +1958,11 @@ hv-tx-idle-body = Diğer oturumları engelleyen kilitler tutuyor olabilir.
 # Review: PO
 hv-tx-idle-commit = Commit et
 # Review: PO
-hv-tx-idle-rollback = Rollback yap
+hv-tx-idle-rollback = Rollback et
 # Review: PO
 hv-tx-idle-keep = Açık bırak
 # Review: PO
-hv-tx-lost-maybe = Açık bir transaction'ı olmuş olabilir; öyleyse sunucu commit edilmemiş değişikliklerini rollback yaptı.
+hv-tx-lost-maybe = Açık bir transaction'ı olmuş olabilir; öyleyse sunucu commit edilmemiş değişikliklerini rollback etti.
 # Review: PO
 hv-conn-sessions = Oturumlar
 # Review: PO
@@ -1979,7 +1979,7 @@ hv-console-shared-tip = { $name } bağlantısının tüm konsolları bu oturumu 
 ## m3b-t22-tx-ui-r1
 
 # Review: PO
-hv-tx-idle-waits = Konsol, çalıştırmasıyla ilgili bir yanıt bekliyor. Yanıtlandıktan sonra commit edin ya da rollback yapın.
+hv-tx-idle-waits = Konsol, çalıştırmasıyla ilgili bir yanıt bekliyor. Yanıtlandıktan sonra commit edin ya da rollback edin.
 # Review: PO
 hv-conn-single-session-reconnect = { $name } için oturum ayarı yeniden bağlandıktan sonra geçerli olur.
 # Review: PO
@@ -2020,7 +2020,7 @@ hv-confirm-class-tx = Transaction'ı denetler
 # Review: PO
 hv-confirm-class-unknown = Bilinmiyor: Hacivat ne yaptığını anlayamıyor
 # Review: PO
-hv-confirm-mysql-ddl = MySQL DDL'i hemen commit eder; bu yüzden rollback yapılamaz.
+hv-confirm-mysql-ddl = MySQL DDL'i hemen commit eder; bu yüzden rollback edilemez.
 # Review: PO
 hv-confirm-type-label = Çalıştırmak için { $name } yazın
 # Review: PO
@@ -2053,13 +2053,13 @@ hv-commit-title-unknown = İfade { $name } üzerinde veriyi değiştirdi
 # Review: PO
 hv-commit-body-own = Hacivat bu ifadeyi kendi açtığı bir transaction'da çalıştırdı. Commit edene kadar diğer oturumlar değişikliği görmez.
 # Review: PO
-hv-commit-locks = Yanıt beklenirken satırlar kilitli kalır. Yanıt gelmezse Hacivat 5 dakika sonra rollback yapar.
+hv-commit-locks = Yanıt beklenirken satırlar kilitli kalır. Yanıt gelmezse Hacivat 5 dakika sonra rollback eder.
 # Review: PO
 hv-commit-commit = Commit et
 # Review: PO
-hv-commit-rollback = Rollback yap
+hv-commit-rollback = Rollback et
 # Review: PO
-hv-commit-countdown = { $time } sonra rollback yapılır
+hv-commit-countdown = { $time } sonra rollback edilir
 # Review: PO
 hv-commit-sp-title = Transaction'ınızın içinde { $rows } satır değişti
 # Review: PO
@@ -2079,11 +2079,11 @@ hv-commit-sp-countdown = İfade { $time } sonra geri alınır
 # Review: PO
 hv-commit-dropped-title = { $name } bağlantısı koptu
 # Review: PO
-hv-commit-dropped-body = Sunucu bu değişiklikleri rollback yaptı. Hiçbir şey commit edilmedi.
+hv-commit-dropped-body = Sunucu bu değişiklikleri rollback etti. Hiçbir şey commit edilmedi.
 # Review: PO
-hv-commit-dropped-sp-body = Sunucu açık transaction'ınızı rollback yaptı: bu ifade ve ondan önceki { $n } ifade. Hiçbir şey commit edilmedi.
+hv-commit-dropped-sp-body = Sunucu açık transaction'ınızı rollback etti: bu ifade ve ondan önceki { $n } ifade. Hiçbir şey commit edilmedi.
 # Review: PO
-hv-commit-dropped-sp-body-unknown = Sunucu, bu ifade de içinde olmak üzere açık transaction'ınızı rollback yaptı. Hiçbir şey commit edilmedi.
+hv-commit-dropped-sp-body-unknown = Sunucu, bu ifade de içinde olmak üzere açık transaction'ınızı rollback etti. Hiçbir şey commit edilmedi.
 # Review: PO
 hv-commit-close = Kapat
 # Review: PO
@@ -2174,13 +2174,13 @@ hv-cancel-terminate = Sunucuda sonlandır
 # Review: PO
 hv-cancel-terminate-line = “Sunucuda sonlandır” bu oturumu sunucuda { $fn } ile kapatır.
 # Review: PO
-hv-cancel-own-tx = Bu konsolun açık transaction'ı ({ $n } ifade) rollback yapılır.
+hv-cancel-own-tx = Bu konsolun açık transaction'ı ({ $n } ifade) rollback edilir.
 # Review: PO
-hv-cancel-own-tx-maybe = Bu konsolun açık bir transaction'ı olabilir; öyleyse rollback yapılır.
+hv-cancel-own-tx-maybe = Bu konsolun açık bir transaction'ı olabilir; öyleyse rollback edilir.
 # Review: PO
-hv-cancel-own-tx-hacivat = Hacivat'ın bu konsolda açtığı transaction (yanıtınızı bekleyen bir değişiklik ya da açık bir imleç) rollback yapılır.
+hv-cancel-own-tx-hacivat = Hacivat'ın bu konsolda açtığı transaction (yanıtınızı bekleyen bir değişiklik ya da açık bir imleç) rollback edilir.
 # Review: PO
-hv-cancel-other-tx-hacivat = { $console } konsolunda da Hacivat'ın açtığı bir transaction var; sunucu onu rollback yapar.
+hv-cancel-other-tx-hacivat = { $console } konsolunda da Hacivat'ın açtığı bir transaction var; sunucu onu rollback eder.
 # Review: PO
 hv-cancel-disconnect = Bağlantıyı kes
 # Review: PO
@@ -2190,9 +2190,9 @@ hv-cancel-disconnect-line-one = “Bağlantıyı kes” yalnızca bu konsolun ot
 # Review: PO
 hv-cancel-disconnect-line-local = “Bağlantıyı kes”, bu bağlantının konsollarının paylaştığı { $name } dosyası bağlantısını kapatır; SQLite, bağlantı kapanınca ifadeyi durdurur.
 # Review: PO
-hv-cancel-other-tx = { $console } konsolunda da açık bir transaction var ({ $n } ifade); sunucu onu rollback yapar.
+hv-cancel-other-tx = { $console } konsolunda da açık bir transaction var ({ $n } ifade); sunucu onu rollback eder.
 # Review: PO
-hv-cancel-other-tx-maybe = { $console } konsolunun da açık bir transaction'ı olabilir; öyleyse sunucu onu rollback yapar.
+hv-cancel-other-tx-maybe = { $console } konsolunun da açık bir transaction'ı olabilir; öyleyse sunucu onu rollback eder.
 # Review: PO
 hv-cancel-terminate-failed = Oturum sonlandırılamadı. Hacivat iptali beklemeyi sürdürüyor.
 # Review: PO
@@ -2212,11 +2212,11 @@ hv-errbar-ignore-all = Tümünü yok say
 # Review: PO
 hv-errbar-stop = Durdur
 # Review: PO
-hv-errbar-rollback-continue = Rollback yap ve devam et
+hv-errbar-rollback-continue = Rollback et ve devam et
 # Review: PO
-hv-errbar-rollback-continue-tip = Açık transaction'ınızı ({ $n } ifade) rollback yapar, sonra { $next }. ifadeden yeni bir transaction'da devam eder.
+hv-errbar-rollback-continue-tip = Açık transaction'ınızı ({ $n } ifade) rollback eder, sonra { $next }. ifadeden yeni bir transaction'da devam eder.
 # Review: PO
-hv-errbar-rollback-continue-tip-auto = Açık transaction'ınızı ({ $n } ifade) rollback yapar, sonra { $next }. ifadeden devam eder; her ifade çalışınca commit edilir.
+hv-errbar-rollback-continue-tip-auto = Açık transaction'ınızı ({ $n } ifade) rollback eder, sonra { $next }. ifadeden devam eder; her ifade çalışınca commit edilir.
 
 ## m3b-t24-exec-ui
 

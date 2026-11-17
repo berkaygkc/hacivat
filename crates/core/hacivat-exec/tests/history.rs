@@ -917,6 +917,29 @@ const PROBE_TABLE: &[(&str, Option<&str>, Option<&str>, Probe)] = {
             None,
             C,
         ),
+        // ## m3b-po-redact (fix round 1, review I2, m1-m3)
+        (
+            "INSERT INTO cfg VALUES ('{\"access_token\": \"{P}\"}')",
+            None,
+            None,
+            C,
+        ),
+        (
+            "UPDATE integ SET cfg = '{\"api_key\":\"{P}\"}'",
+            None,
+            None,
+            C,
+        ),
+        ("SELECT '{\"token\":\"{P}\"}'::jsonb", None, None, C),
+        ("ATTACH DATABASE 'file:x.db?key={P}' AS x", None, None, C),
+        ("EXPLAIN PRAGMA key = '{P}'", None, None, C),
+        ("SELECT '{P}' INTO @pw", None, None, C),
+        (
+            "SELECT http_get('https://h', 'Authorization: Bearer {P}')",
+            None,
+            None,
+            C,
+        ),
         // m4: URI edge cases and COPY PROGRAM (documented gaps).
         (
             "SELECT f('postgresql://u:a/{P}@h/db')",
