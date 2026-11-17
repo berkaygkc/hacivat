@@ -28,6 +28,8 @@ fuzz_target!(|data: &[u8]| {
         DialectId::MySql,
         DialectId::MariaDb,
         DialectId::Sqlite,
+        // ## m3b-params-proptest: the generic dialect too (it binds `:name` → `?`).
+        DialectId::Generic,
     ] {
         let ctx = DialectCtx::new(d, None);
         let Ok(profile) = lex_profile(&ctx) else {
