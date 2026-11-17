@@ -561,7 +561,8 @@ impl Glyph {
 /// needs the user. The editor's states in that order: a cancel not answered (`Escalated`) >
 /// failed > running > cancelling > queued > cancelled > skipped > done > stale. The app shows
 /// "awaiting an answer" as a running mark and "rolled back" through its label (NOTES ruling
-/// 31), so they rank as those states here.
+/// 31), so they rank as those states here. Task 34 adds the two arms at their NOTES places:
+/// awaiting above escalated, rolled back between cancelled and skipped.
 fn fold_rank(m: &Mark, glyph: Glyph) -> u8 {
     if m.stale && !glyph.live() {
         return 0;
@@ -881,8 +882,9 @@ pub fn prepaint(
         // ## m3c-t32-fold (named exception): a folded header's row shows the one mark that
         // most needs the user (NOTES M3c-7), saying where it is; other rows list theirs.
         let folded = all.iter().any(|m| m.2);
+        // ## fix round 1 (M11): of equal ranks, the first in the text (the root cause).
         let winner = if folded {
-            all.iter().max_by_key(|m| fold_rank(m.0, m.1))
+            all.iter().rev().max_by_key(|m| fold_rank(m.0, m.1))
         } else {
             all.iter().max_by_key(|m| m.1.severity())
         };

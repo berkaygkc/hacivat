@@ -169,13 +169,99 @@ fn the_service_answers_the_ranges_at_the_editors_version(cx: &mut TestAppContext
             .collect::<Vec<_>>(),
         vec![(0..text.len() - 1, FoldKind::Statement)]
     );
-    // Typed at its start, before the next analysis lands: mapped as a container (it grows
-    // with what is typed at its edge).
+    // Typed at its start, before the next analysis lands: mapped as the editor maps a fold,
+    // the new line above it (fix round 1, M10).
     d.edit(cx, 0..0, "-- x\n");
     let mapped = d.svc.folding_ranges(DOC, d.version());
-    assert_eq!(mapped[0].range, 0..text.len() + 4);
+    assert_eq!(mapped[0].range, 5..text.len() + 4);
     // The next analysis has the statement from its first token.
     cx.run_until_parked();
     let fresh = d.svc.folding_ranges(DOC, d.version());
     assert_eq!(fresh[0].range, 5..text.len() + 4);
+}
+
+/// Fix round 1 (I4): a blank line ends a run of `--` comment lines, whatever the lexer folds
+/// into one break token.
+#[test]
+fn a_blank_line_ends_a_run_of_comment_lines() {
+    for nl in ["\n", "\r\n"] {
+        let text = ["-- a", "-- b", "", "-- c", "-- d", "-- e", "SELECT 1;", ""].join(nl);
+        let got = texts(&text, &ranges(&text, pg()));
+        let comments: Vec<&String> = got
+            .iter()
+            .filter(|(k, _)| *k == FoldKind::Comment)
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(
+            comments,
+            vec![&["-- c", "-- d", "-- e"].join(nl)],
+            "{nl:?}: {got:#?}"
+        );
+    }
+}
+
+/// Fix round 1 (M12): a `CASE` left open at a `;` never pairs with a later plain `END`.
+#[test]
+fn an_unclosed_case_never_pairs_with_a_later_end() {
+    let text = "SELECT CASE\n  WHEN a THEN 1\n;\nSELECT 2;\nEND;\n";
+    let got = texts(text, &ranges(text, pg()));
+    assert!(
+        !got.iter()
+            .any(|(k, t)| *k == FoldKind::Block && t.starts_with("CASE")),
+        "{got:#?}"
+    );
+}
+
+/// Fix round 1 (M6): the blocks inside a dollar-quoted body fold too, and `IF … END IF`
+/// and `LOOP … END LOOP` are blocks; `IF EXISTS` and `IF(` are not.
+#[test]
+fn blocks_inside_dollar_bodies_and_if_and_loop_blocks() {
+    let text = "\
+CREATE FUNCTION f() RETURNS int AS $$
+BEGIN
+  IF x THEN
+    RETURN 1;
+    RETURN 2;
+  END IF;
+  LOOP
+    EXIT;
+    EXIT;
+  END LOOP;
+  RETURN 3;
+END
+$$ LANGUAGE plpgsql;
+DROP TABLE IF EXISTS t;
+SELECT IF(a,
+  1,
+  2);
+";
+    let got = texts(text, &ranges(text, pg()));
+    let blocks: Vec<&str> = got
+        .iter()
+        .filter(|(k, _)| *k == FoldKind::Block)
+        .map(|(_, t)| t.as_str())
+        .collect();
+    assert!(
+        blocks.iter().any(|t| t.starts_with("BEGIN\n  IF")),
+        "{blocks:#?}"
+    );
+    assert!(
+        blocks.iter().any(|t| t.starts_with("IF x THEN")),
+        "{blocks:#?}"
+    );
+    assert!(
+        blocks.iter().any(|t| t.starts_with("LOOP\n")),
+        "{blocks:#?}"
+    );
+    assert!(
+        !blocks.iter().any(|t| t.starts_with("IF EXISTS")),
+        "{blocks:#?}"
+    );
+    // The `IF(` call's parentheses fold as a group, never as an IF block.
+    assert!(!blocks.iter().any(|t| t.starts_with("IF(")), "{blocks:#?}");
+    let all = ranges(text, pg());
+    for f in &all {
+        assert!(f.range.end <= text.len());
+        assert!(text.is_char_boundary(f.range.start) && text.is_char_boundary(f.range.end));
+    }
 }

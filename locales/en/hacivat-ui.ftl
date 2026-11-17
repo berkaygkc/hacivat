@@ -2673,3 +2673,20 @@ hv-editor-unfold-name = Unfold lines { $from }–{ $to }
 # Variables:
 #   $line (Number) - the failed statement's first line, e.g. 9.
 hv-editor-fold-failed = failed inside the fold · line { $line }
+# A folded header's accessible description (screen readers), after its text.
+# Variables:
+#   $n (Number) - the lines the fold hides, e.g. 5.
+hv-editor-fold-hidden = { $n ->
+        [one] { $n } line folded
+       *[other] { $n } lines folded
+    }
+# Said politely after a fold (the gutter, the inlay or the palette).
+# Variables:
+#   $from (Number) - the fold's first line, e.g. 2.
+#   $to (Number) - its last line, e.g. 7.
+hv-editor-fold-done = Folded lines { $from }–{ $to }
+# Said politely after an unfold.
+# Variables:
+#   $from (Number) - the fold's first line, e.g. 2.
+#   $to (Number) - its last line, e.g. 7.
+hv-editor-unfold-done = Unfolded lines { $from }–{ $to }

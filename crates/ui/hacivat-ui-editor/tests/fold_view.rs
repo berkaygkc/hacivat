@@ -10,11 +10,11 @@
     reason = "byte ranges as data"
 )]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{
     AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
@@ -31,9 +31,14 @@ use hacivat_ui_editor::{
 use smallvec::SmallVec;
 
 /// Folds the ranges it is given; previews the statement holding the first caret.
+#[derive(Default)]
 struct Svc {
     folds: Vec<FoldRange>,
     statements: Vec<Range<usize>>,
+    /// Answers no folding range until set (an analysis that lands late, fix round 1 I1).
+    late: Option<Rc<Cell<bool>>>,
+    /// The editor's repaint callback (`on_update`).
+    notify: Rc<RefCell<Option<InvalidateFn>>>,
 }
 
 impl LanguageService for Svc {
@@ -41,7 +46,9 @@ impl LanguageService for Svc {
     fn set_context(&self, _: DocId, _: DocContext, _: &mut gpui::App) {}
     fn change(&self, _: DocId, _: &Snapshot, _: &ChangeDesc, _: &mut gpui::App) {}
     fn close(&self, _: DocId) {}
-    fn on_update(&self, _: DocId, _: InvalidateFn) {}
+    fn on_update(&self, _: DocId, notify: InvalidateFn) {
+        *self.notify.borrow_mut() = Some(notify);
+    }
     fn statements(&self, _: DocId, _: u64, _: Range<usize>) -> Arc<[StatementSpan]> {
         Arc::from(Vec::new())
     }
@@ -77,6 +84,9 @@ impl LanguageService for Svc {
         SmallVec::new()
     }
     fn folding_ranges(&self, _: DocId, _: u64) -> Arc<[FoldRange]> {
+        if self.late.as_ref().is_some_and(|l| !l.get()) {
+            return Arc::from([]);
+        }
         self.folds.clone().into()
     }
 }
@@ -196,6 +206,7 @@ fn script_svc() -> Svc {
             kind: FoldKind::Statement,
         }],
         statements: vec![stmt, two],
+        ..Svc::default()
     }
 }
 
@@ -267,6 +278,7 @@ fn select_all_keeps_the_fold_and_the_fold_keeps_select_all(cx: &mut TestAppConte
             kind: FoldKind::Statement,
         }],
         statements: vec![0..text.len()],
+        ..Svc::default()
     };
     let (e, vcx) = open(cx, text, svc);
     run(&e, vcx, "editor.select_all");
@@ -296,6 +308,7 @@ fn the_palette_commands_fold_unfold_fold_all_and_unfold_all(cx: &mut TestAppCont
             },
         ],
         statements: vec![stmt.clone()],
+        ..Svc::default()
     };
     let (e, vcx) = open(cx, text, svc);
     caret_at(&e, vcx, 3);
@@ -376,6 +389,7 @@ fn exec_mark_inside_a_fold_paints_on_the_header(cx: &mut TestAppContext) {
             kind: FoldKind::Region,
         }],
         statements: vec![s1.clone(), s2.clone(), s3.clone()],
+        ..Svc::default()
     };
     let (e, vcx) = open(cx, text, svc);
     let version = vcx.read(|cx| e.read(cx).snapshot().version);
@@ -436,7 +450,6 @@ fn exec_mark_inside_a_fold_paints_on_the_header(cx: &mut TestAppContext) {
         "{d:?}"
     );
     assert!(!d.contains(&"hv-editor-fold-failed".to_string()), "{d:?}");
-    let _ = Instant::now();
 }
 
 /// Run at a caret on a folded statement's header previews (and runs) the whole statement.
@@ -481,4 +494,152 @@ fn the_fold_follows_edits_and_a_deleted_header_unfolds(cx: &mut TestAppContext) 
     });
     draw(vcx);
     assert!(folded(&e, vcx).is_empty());
+}
+
+// ---- fix round 1 ---------------------------------------------------------------------------
+
+/// I1: an analysis that lands after the first frame, at the same text version, brings the
+/// chevrons and the fold commands without an edit.
+#[gpui::test]
+fn ranges_from_a_late_analysis_fold_without_an_edit(cx: &mut TestAppContext) {
+    let ready = Rc::new(Cell::new(false));
+    let svc = Svc {
+        late: Some(ready.clone()),
+        ..script_svc()
+    };
+    let notify = svc.notify.clone();
+    let (e, vcx) = open(cx, SCRIPT, svc);
+    assert!(!e.update(vcx, |v, cx| v.toggle_fold_at(0, cx)));
+    run(&e, vcx, "editor.fold_all");
+    assert!(folded(&e, vcx).is_empty());
+    let version = vcx.read(|cx| e.read(cx).snapshot().version);
+    // The analysis lands: the service says so through the editor's callback.
+    ready.set(true);
+    let f = notify
+        .borrow()
+        .clone()
+        .expect("the editor registered its callback");
+    vcx.update(|_, cx| f(cx));
+    draw(vcx);
+    assert_eq!(vcx.read(|cx| e.read(cx).snapshot().version), version);
+    run(&e, vcx, "editor.fold_all");
+    assert_eq!(folded(&e, vcx), vec![0..at(SCRIPT, "orders;") + 7]);
+}
+
+/// I2: Enter or a key before a folded block's visible closing `)` never joins the fold.
+#[gpui::test]
+fn typing_before_a_folded_blocks_closing_line_keeps_the_fold(cx: &mut TestAppContext) {
+    let text = "SELECT *\nFROM (\n  SELECT 1\n  FROM u\n) s;\n";
+    let paren = at(text, "(")..at(text, ") s");
+    let svc = Svc {
+        folds: vec![FoldRange {
+            range: paren.clone(),
+            kind: FoldKind::Block,
+        }],
+        ..Svc::default()
+    };
+    let (e, vcx) = open(cx, text, svc);
+    assert!(e.update(vcx, |v, cx| v.toggle_fold_at(1, cx)));
+    draw(vcx);
+    assert_eq!(painted(&e, vcx), vec![0, 1, 4, 5]);
+    caret_at(&e, vcx, paren.end);
+    e.update_in(vcx, |v, window, cx| {
+        use gpui::EntityInputHandler as _;
+        v.replace_text_in_range(None, "\n", window, cx);
+    });
+    draw(vcx);
+    assert_eq!(folded(&e, vcx), vec![paren.clone()]);
+    assert_eq!(painted(&e, vcx), vec![0, 1, 4, 5, 6], "the new line shows");
+    e.update_in(vcx, |v, window, cx| {
+        use gpui::EntityInputHandler as _;
+        v.replace_text_in_range(None, "x", window, cx);
+    });
+    draw(vcx);
+    assert_eq!(folded(&e, vcx), vec![paren.clone()]);
+    assert_eq!(painted(&e, vcx), vec![0, 1, 4, 5, 6]);
+}
+
+/// M1: ↓ on a folded last row that reaches the text's end keeps the fold; the caret goes to
+/// that row's end.
+#[gpui::test]
+fn down_on_a_folded_last_row_keeps_the_fold(cx: &mut TestAppContext) {
+    let text = "SELECT 1;\nSELECT a,\n  b\nFROM t;";
+    let svc = Svc {
+        folds: vec![FoldRange {
+            range: at(text, "SELECT a")..text.len(),
+            kind: FoldKind::Statement,
+        }],
+        ..Svc::default()
+    };
+    let (e, vcx) = open(cx, text, svc);
+    assert!(e.update(vcx, |v, cx| v.toggle_fold_at(1, cx)));
+    caret_at(&e, vcx, at(text, "SELECT a") + 2);
+    run(&e, vcx, "editor.move_down");
+    assert_eq!(folded(&e, vcx).len(), 1);
+    assert_eq!(head(&e, vcx), at(text, "\n  b"));
+}
+
+/// M9: folding and unfolding are said politely; a folded header's run says what it hides.
+#[gpui::test]
+fn folds_are_announced_and_described(cx: &mut TestAppContext) {
+    let (e, vcx) = open(cx, SCRIPT, script_svc());
+    // Toggles line 0 and answers what was queued for the live region (read before a frame
+    // without assistive technology drops it).
+    let toggle = |e: &Entity<EditorView>, vcx: &mut VisualTestContext| -> Vec<String> {
+        e.update(vcx, |v, cx| {
+            assert!(v.toggle_fold_at(0, cx));
+            a11y::state(v)
+                .nodes()
+                .pending
+                .iter()
+                .map(|t| t.to_string())
+                .collect()
+        })
+    };
+    assert_eq!(toggle(&e, vcx), vec!["hv-editor-fold-done".to_string()]);
+    let described: Vec<String> = e.update(vcx, |v, cx| {
+        a11y::declaration_of(v, true, cx)
+            .children
+            .iter()
+            .filter_map(|(_, n)| n.description().map(str::to_string))
+            .collect()
+    });
+    assert_eq!(described, vec!["hv-editor-fold-hidden".to_string()]);
+    assert!(toggle(&e, vcx).contains(&"hv-editor-unfold-done".to_string()));
+}
+
+/// M11: of two failures inside one fold, the first in the text is named (the root cause).
+#[gpui::test]
+fn the_first_failure_inside_a_fold_is_named(cx: &mut TestAppContext) {
+    let text = "-- region load\nSELECT x FROM a;\nSELECT y FROM b;\n-- endregion\nSELECT 9;\n";
+    let s1 = at(text, "SELECT x")..at(text, "a;") + 2;
+    let s2 = at(text, "SELECT y")..at(text, "b;") + 2;
+    let svc = Svc {
+        folds: vec![FoldRange {
+            range: 0..at(text, "-- endregion") + 12,
+            kind: FoldKind::Region,
+        }],
+        ..Svc::default()
+    };
+    let (e, vcx) = open(cx, text, svc);
+    let version = vcx.read(|cx| e.read(cx).snapshot().version);
+    e.update(vcx, |v, cx| {
+        v.add_exec_marks(version, vec![(MarkKey(1), s1), (MarkKey(2), s2)], cx);
+        for (k, code) in [(1, "42P01"), (2, "22012")] {
+            v.set_exec_state(
+                MarkKey(k),
+                ExecMarkState::Failed {
+                    sqlstate: Some(code.into()),
+                },
+                text_fn("failed tip"),
+                text_fn("failed"),
+                cx,
+            );
+        }
+    });
+    assert!(e.update(vcx, |v, cx| v.toggle_fold_at(0, cx)));
+    draw(vcx);
+    let d = drawn(vcx);
+    assert!(d.contains(&"42P01".to_string()), "{d:?}");
+    assert!(!d.contains(&"22012".to_string()), "{d:?}");
 }

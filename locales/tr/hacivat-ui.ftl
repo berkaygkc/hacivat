@@ -2389,3 +2389,9 @@ hv-editor-fold-name = { $from }–{ $to }. satırları katla
 hv-editor-unfold-name = { $from }–{ $to }. satırların katlamasını aç
 # Review: PO
 hv-editor-fold-failed = katlanmış bölümde başarısız · satır { $line }
+# Review: PO
+hv-editor-fold-hidden = { $n } satır katlandı
+# Review: PO
+hv-editor-fold-done = { $from }–{ $to }. satırlar katlandı
+# Review: PO
+hv-editor-unfold-done = { $from }–{ $to }. satırların katlaması açıldı

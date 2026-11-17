@@ -66,6 +66,8 @@ type CandidatesAt = (u64, Arc<[FoldRange]>, Headers);
 type Headers = Arc<[(u32, u32)]>;
 /// A text version, a fold generation, and the lines hidden then.
 type HiddenAt = (u64, u64, Arc<[Range<u32>]>);
+/// A text version, a fold generation, a line count and a row height, and the map then.
+type MapAt = (u64, u64, u32, u64, HeightMap);
 
 /// The folding module's state in `EditorView` (P11).
 #[derive(Debug, Default)]
@@ -76,9 +78,13 @@ pub struct FoldState {
     candidates: Option<CandidatesAt>,
     /// The hidden lines at (text version, fold generation).
     hidden: Option<HiddenAt>,
+    /// The height map at (text version, fold generation, lines, row height) (fix round 1, M7).
+    map: Option<MapAt>,
     /// The pointer is over the gutter (open ranges show their chevrons), and its row.
     pub(crate) gutter_hovered: bool,
     pub(crate) hover_line: Option<u32>,
+    /// The folded header whose inlay the pointer is over (its ink turns `text`, NOTES 15).
+    pub(crate) hover_inlay: Option<u32>,
 }
 
 /// The folded ranges.
@@ -102,12 +108,79 @@ pub(crate) fn hidden(v: &mut EditorView) -> Arc<[Range<u32>]> {
 }
 
 /// The height map of `lines` rows of `line_height` with the folds' hidden lines (the uniform
-/// map when nothing is folded, M3a's).
+/// map when nothing is folded, M3a's); cached by version, fold generation, lines and height.
 pub(crate) fn height_map(v: &mut EditorView, lines: u32, line_height: f64) -> HeightMap {
     if v.fold.folds.folded().is_empty() {
         return HeightMap::uniform(lines, line_height);
     }
-    HeightMap::chunked(lines, line_height, &hidden(v))
+    let key = (
+        v.model.snapshot().version,
+        v.fold.folds.generation(),
+        lines,
+        line_height.to_bits(),
+    );
+    if let Some((a, b, c, d, map)) = &v.fold.map
+        && (*a, *b, *c, *d) == key
+    {
+        return map.clone();
+    }
+    let map = HeightMap::chunked(lines, line_height, &hidden(v));
+    v.fold.map = Some((key.0, key.1, key.2, key.3, map.clone()));
+    map
+}
+
+/// A fresh analysis landed (`LanguageService::on_update`, fix round 1 I1): the foldable ranges
+/// are asked again at the same version.
+pub(crate) fn on_analysis(v: &mut EditorView) {
+    v.fold.candidates = None;
+}
+
+/// Says politely that lines `from`–`to` (0-based) were folded or unfolded (fix round 1, M9).
+fn announce(v: &EditorView, folded: bool, (from, to): (u32, u32), cx: &mut Context<EditorView>) {
+    let id = if folded {
+        "hv-editor-fold-done"
+    } else {
+        "hv-editor-unfold-done"
+    };
+    let text = message(cx, id, &line_args(from, to));
+    v.announce(text, cx);
+}
+
+/// Unfolds the folded range `r`, saying so.
+fn unfold_announced(v: &mut EditorView, r: &Range<usize>, cx: &mut Context<EditorView>) -> bool {
+    let Some(lines) = v.fold.folds.lines_of(r) else {
+        return false;
+    };
+    if !v.fold.folds.unfold_range(r) {
+        return false;
+    }
+    announce(v, false, lines, cx);
+    cx.notify();
+    true
+}
+
+/// The accessible descriptions of the folded headers: "n lines folded" by header line (fix
+/// round 1, M9; the chevrons' AccessKit buttons are Task 34's).
+pub(crate) fn a11y_notes(v: &mut EditorView, cx: &App) -> Arc<[(u32, SharedString)]> {
+    if v.fold.folds.folded().is_empty() {
+        return Arc::from([]);
+    }
+    let lines = u32::try_from(v.model.buffer().len_lines()).unwrap_or(u32::MAX);
+    let map = height_map(v, lines, 1.0);
+    let mut out: Vec<(u32, SharedString)> = v
+        .fold
+        .folds
+        .lines()
+        .iter()
+        .filter(|(h, last)| last > h && !map.is_hidden(*h))
+        .map(|&(h, last)| {
+            let n = UiArg::Count(u64::from(last - h));
+            (h, message(cx, "hv-editor-fold-hidden", &[("n", n)]))
+        })
+        .collect();
+    out.sort_by_key(|(h, _)| *h);
+    out.dedup_by_key(|(h, _)| *h);
+    out.into()
 }
 
 /// The service's foldable ranges at the current version (those that can fold here), and each
@@ -190,8 +263,11 @@ fn after_change(v: &mut EditorView, cx: &mut Context<EditorView>) {
 /// than three lines, one already folded, one crossing a folded one's edge (`FoldSet::fold`).
 pub fn fold_range(v: &mut EditorView, r: Range<usize>, cx: &mut Context<EditorView>) -> bool {
     let buf = v.model.buffer().clone();
-    if !v.fold.folds.fold(r, &buf) {
+    if !v.fold.folds.fold(r.clone(), &buf) {
         return false;
+    }
+    if let Some(lines) = v.fold.folds.lines_of(&r) {
+        announce(v, true, lines, cx);
     }
     after_change(v, cx);
     true
@@ -201,9 +277,8 @@ pub fn fold_range(v: &mut EditorView, r: Range<usize>, cx: &mut Context<EditorVi
 /// there; `true` when anything changed.
 pub(crate) fn toggle_fold_at(v: &mut EditorView, line: u32, cx: &mut Context<EditorView>) -> bool {
     let buf = v.model.buffer().clone();
-    if v.fold.folds.unfold_line(line, &buf) {
-        cx.notify();
-        return true;
+    if let Some(r) = v.fold.folds.fold_on_line(line, &buf) {
+        return unfold_announced(v, &r, cx);
     }
     let (cands, _) = candidates(v);
     let outer = cands
@@ -216,19 +291,38 @@ pub(crate) fn toggle_fold_at(v: &mut EditorView, line: u32, cx: &mut Context<Edi
     }
 }
 
-/// Every commit, from the fan-out (`EditorView::apply_committed`): the folds follow the text,
-/// and a selection end that landed on a hidden line opens the folds hiding it.
-pub(crate) fn on_commit(v: &mut EditorView, committed: &Committed) {
+/// Every commit, from the fan-out (`EditorView::apply_committed`): the folds follow the text
+/// (only a commit that changed it, at a new version: fix round 1, M2), and a selection end that
+/// landed on a hidden line opens the folds hiding it, except during a column drag, which
+/// reveals when it ends (M5, [`after_drag`]).
+pub(crate) fn on_commit(v: &mut EditorView, committed: &Committed, text_changed: bool) {
     if v.fold.folds.folded().is_empty() {
         return;
     }
     let buf = v.model.buffer().clone();
-    if committed.buffer_changed {
+    if text_changed {
         v.fold.folds.map(&committed.desc);
         v.fold.folds.prune(&buf);
     }
+    let column = v
+        .drag
+        .as_ref()
+        .is_some_and(|d| d.unit == crate::mouse::ClickUnit::Column);
+    if !column {
+        let sel = v.model.selection().clone();
+        v.fold.folds.reveal_selection(&sel, &buf);
+    }
+}
+
+/// A drag ended: a column selection reaching into a fold opens it now (fix round 1, M5);
+/// `true` when the folds changed.
+pub(crate) fn after_drag(v: &mut EditorView) -> bool {
+    if v.fold.folds.folded().is_empty() {
+        return false;
+    }
+    let buf = v.model.buffer().clone();
     let sel = v.model.selection().clone();
-    v.fold.folds.reveal_selection(&sel, &buf);
+    v.fold.folds.reveal_selection(&sel, &buf)
 }
 
 // ---- the folding commands (`editor.fold`, `unfold`, `fold_all`, `unfold_all`) ---------------
@@ -264,8 +358,13 @@ pub(crate) fn fold(v: &mut EditorView, _: &mut Window, cx: &mut Context<EditorVi
 pub(crate) fn unfold(v: &mut EditorView, _: &mut Window, cx: &mut Context<EditorView>) {
     let buf = v.model.buffer().clone();
     let head = v.model.selection().main().head;
-    if v.fold.folds.unfold_line(caret_line(v), &buf) || v.fold.folds.unfold_at(head) {
-        cx.notify();
+    let r = v
+        .fold
+        .folds
+        .fold_on_line(caret_line(v), &buf)
+        .or_else(|| v.fold.folds.fold_at(head));
+    if let Some(r) = r {
+        unfold_announced(v, &r, cx);
     }
 }
 
@@ -299,6 +398,8 @@ pub(crate) struct FoldFrame {
     inlays: RefCell<Vec<AnyElement>>,
     /// The 1 px lines under the folded headers.
     underlines: Vec<Bounds<Pixels>>,
+    /// Each inlay's bounds and its header line (the pointer's inlay inks `text`).
+    inlay_bounds: Vec<(Bounds<Pixels>, u32)>,
     /// The gutter's hit target (the open chevrons show while it is hovered).
     gutter: Option<Hitbox>,
     /// Each painted row's top and line, for the hovered row.
@@ -368,6 +469,7 @@ pub(crate) fn prepaint(
     };
     let hovered = v.fold.gutter_hovered;
     let hover_line = v.fold.hover_line;
+    let hover_inlay = v.fold.hover_inlay;
     let chevron_x = gutter.right() - px(NUMBER_PAD) + px(1.0);
     let mut widths: Vec<(u32, f32)> = Vec::new();
     for (line, top, fold) in rows {
@@ -422,6 +524,12 @@ pub(crate) fn prepaint(
         let n = u64::from(last - line);
         let label = message(cx, "hv-editor-fold-lines", &[("n", UiArg::Count(n))]);
         let tip: SharedString = message(cx, "hv-editor-fold-tip", &line_args(line, last));
+        // ## fix round 1 (M4): `text` under the pointer.
+        let ink = if hover_inlay == Some(line) {
+            inks.text
+        } else {
+            inks.text_2
+        };
         let target = view.clone();
         let mut el = div()
             .id(("hv-fold-inlay", u64::from(line)))
@@ -439,13 +547,13 @@ pub(crate) fn prepaint(
             .child(
                 Icon::new(IconName::Ellipsis)
                     .size(IconSize::Chrome)
-                    .color(inks.text_2),
+                    .color(ink),
             )
             .child(Label::new(
                 label,
                 TextSource::Fluent,
                 theme.tokens.type_ramp.inlay,
-                inks.text_2,
+                ink,
             ))
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 target.update(cx, |v, cx| {
@@ -466,11 +574,10 @@ pub(crate) fn prepaint(
             )
             .width;
         let x = origin_x + f64::from(inlay_x + INLAY_GAP);
-        el.prepaint_at(
-            point(px(x as f32), top + (lh - px(INLAY_H)) / 2.0),
-            window,
-            cx,
-        );
+        let at = point(px(x as f32), top + (lh - px(INLAY_H)) / 2.0);
+        el.prepaint_at(at, window, cx);
+        out.inlay_bounds
+            .push((Bounds::new(at, size(w, px(INLAY_H))), line));
         out.inlays.borrow_mut().push(el);
         widths.push((line, INLAY_GAP + f32::from(w)));
         out.underlines.push(Bounds::new(
@@ -516,6 +623,7 @@ pub(crate) fn listen(view: &Entity<EditorView>, frame: &FramePrepaint, window: &
         return;
     };
     let rows = frame.folds.rows.clone();
+    let inlays = frame.folds.inlay_bounds.clone();
     let lh = frame.folds.line_height;
     let v = view.clone();
     window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
@@ -530,10 +638,18 @@ pub(crate) fn listen(view: &Entity<EditorView>, frame: &FramePrepaint, window: &
                     .map(|(_, l)| *l)
             })
             .flatten();
+        let inlay = inlays
+            .iter()
+            .find(|(b, _)| b.contains(&ev.position))
+            .map(|(_, l)| *l);
         v.update(cx, |v, cx| {
-            if v.fold.gutter_hovered != over || v.fold.hover_line != line {
+            if v.fold.gutter_hovered != over
+                || v.fold.hover_line != line
+                || v.fold.hover_inlay != inlay
+            {
                 v.fold.gutter_hovered = over;
                 v.fold.hover_line = line;
+                v.fold.hover_inlay = inlay;
                 cx.notify();
             }
         });

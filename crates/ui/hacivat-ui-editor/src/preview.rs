@@ -507,10 +507,10 @@ pub(crate) fn layout(
         }
         let first = l0.max(rows.first_line);
         let last = l1.min(rows.last_line);
-        for line in first..=last {
-            let Some(row) = layout.row(line) else {
-                continue;
-            };
+        // ## m3c-t32-fold (named exception, fix round 1 M7): the painted rows only, never the
+        // hidden lines of a folded unit one by one.
+        for row in layout.rows_in(first, last) {
+            let line = row.line;
             let lr = buf.line_range(line as usize, false);
             let left_out =
                 line == l0 && !blank_outside(buf, lr.start..u.start.max(lr.start), false);

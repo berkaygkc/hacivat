@@ -64,9 +64,12 @@ pub(crate) struct DragState {
 // ## m3c-t31-multi (fix round 1, M2)
 /// The press's gesture ended (button up, a move without it, a blur): no drag, and the
 /// selection history's gesture closes.
-pub(crate) fn end_drag(v: &mut EditorView) {
+pub(crate) fn end_drag(v: &mut EditorView) -> bool {
     v.drag = None;
     v.model.end_selection_gesture();
+    // ## m3c-t32-fold (named exception, fix round 1 M5): a column box reaching into a fold
+    // opens it once the drag ends, not under the pointer mid-drag.
+    crate::fold_gutter::after_drag(v)
 }
 
 // ## m3c-t31-multi (UI-EDIT-05 steps 7 and 9; NOTES surface 14)
@@ -144,15 +147,19 @@ pub(crate) fn listen(view: &Entity<EditorView>, frame: &FramePrepaint, window: &
             }
             if ev.pressed_button == Some(MouseButton::Left) {
                 drag(v, ev.position, cx);
-            } else {
-                end_drag(v);
+            } else if end_drag(v) {
+                cx.notify();
             }
         });
     });
     let v = view.clone();
     window.on_mouse_event(move |ev: &MouseUpEvent, phase, _window, cx| {
         if phase.bubble() && ev.button == MouseButton::Left {
-            v.update(cx, |v, _| end_drag(v));
+            v.update(cx, |v, cx| {
+                if end_drag(v) {
+                    cx.notify();
+                }
+            });
         }
     });
     let v = view.clone();

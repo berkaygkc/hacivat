@@ -114,30 +114,42 @@ fn vertical(v: &mut EditorView, lines: isize, extend: bool, cx: &mut Context<Edi
     let map = crate::fold_gutter::height_map(v, total, 1.0);
     // The buffer lines from `line` to the row `lines` rows away (at an edge: `lines`, so the
     // move ends at the text's start or end as before).
-    let delta = |line: usize| -> isize {
+    // Fix round 1 (M1): past the last row when that row is a fold reaching the text's end, the
+    // end of that row's line (the hidden end would open the fold).
+    let tail_fold = !map.hidden().is_empty() && map.is_hidden(total.saturating_sub(1));
+    let last_row_end = {
+        let rows = map.visible_rows();
+        let line = map.line_of_row(rows.saturating_sub(1));
+        snap.buffer.line_range(line as usize, false).end
+    };
+    let delta = |line: usize| -> Option<isize> {
         if map.hidden().is_empty() {
-            return lines;
+            return Some(lines);
         }
         let line = u32::try_from(line).unwrap_or(u32::MAX);
         let row = i64::from(map.row_of(line));
         let rows = i64::from(map.visible_rows());
         let target = row + lines as i64;
+        if target >= rows && tail_fold {
+            return None;
+        }
         if target < 0 || target >= rows {
-            return lines;
+            return Some(lines);
         }
         let to = map.line_of_row(u32::try_from(target).unwrap_or(0));
-        to as isize - line as isize
+        Some(to as isize - line as isize)
     };
     let next = {
         let geo = Geometry::of(v, &snap);
-        map_ranges(v, |now| {
-            now.moved_vertically(
+        map_ranges(v, |now| match delta(snap.buffer.byte_to_line(now.head)) {
+            Some(d) => now.moved_vertically(
                 &snap.buffer,
-                delta(snap.buffer.byte_to_line(now.head)),
+                d,
                 extend,
                 |at| geo.x_of(at),
                 |line, x| geo.offset_at(line, x),
-            )
+            ),
+            None => now.moved_to(last_row_end, extend),
         })
     };
     select_set(v, next, event(extend), cx);

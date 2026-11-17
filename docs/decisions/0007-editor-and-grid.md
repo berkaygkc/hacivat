@@ -540,15 +540,27 @@ tail after the placeholder) is not needed by NOTES surface 15, which draws the h
 the inlay only. Every range spans at least three lines (NOTES M3c-43, `MIN_FOLD_LINES`), so the
 spec's two-line `--` comment folds no more.
 
-**Through edits.** A folded range maps as a container with its start biased after (text typed
-at the start goes above the fold, whose header stays its header; text typed at the end joins
-it); one edit deleting all of it drops it. An edit that deletes the header drops it: the
+**Through edits.** A folded range maps with its start biased after and its end before (text
+typed at the start goes above the fold, whose header stays its header; text typed at the end
+stays outside it, so Enter or a key before a block's visible closing `)` or `END` never joins
+the fold: fix round 1); an edit inside it keeps it; one edit deleting all of it drops it. An edit that deletes the header drops it: the
 range's first character (a block's `(`, a statement's first token) or the header line's break
 (joining the first hidden line, deleting the header line). `prune` then drops a fold left on
 fewer than three lines. This replaces UI-EDIT-10 step 4's reconciliation after a reparse: the
 fold goes at the edit, not at the next edit inside it, and needs no candidate list (the
 language service's answer may be mapped from an older analysis and could not tell a fresh
-"none" from a late one).
+"none" from a late one). **Undo does not restore a dropped fold:** the fold set is view state,
+not text, and is not in the history.
+
+**Cost per commit** (fix round 1). Each fold keeps its header and last line. `map` leaves the
+folds before the change alone, shifts the ones after it, and maps those around it in one sorted
+pass of the change's mapper; `prune` reads the text only for the folds the change reached (the
+others shift by its line delta) and checks nesting with a stack; `reveal_selection` binary-
+searches the sorted caret lines. With 3,000 folds a one-caret keystroke costs about 40 µs
+(map, prune and reveal), a 1,000-caret keystroke about 3.5 ms, a 1,000-caret reveal about
+0.1 ms (release). The height map is cached by version, fold generation, line count and row
+height; one decoration request spans rows whose hidden gaps are under 64 KB, so Fold all asks
+once per frame.
 
 **The chunked height map.** `HeightMap::Chunked` keeps the hidden runs sorted and merged with a
 prefix sum of hidden lines; `y_of`, `line_at_y` (through the visible row) and `row_of` are one
@@ -572,9 +584,16 @@ rank as those states until `ExecMarkState` grows the arms. A failure inside says
 inside the fold · line 9" with its SQLSTATE chip. Range bars collapse onto the header's row.
 
 **Candidates** (`hacivat-sql-editor::folds`, worker side, once per analysis): statements from
-their first token to their terminator, parenthesised groups (to before the `)`), `BEGIN … END`
-and `CASE … END` (a `BEGIN` before `;` or `TRANSACTION`/`WORK`/… is a transaction command; `END
-IF`/`LOOP`/… closes nothing), dollar-quoted bodies, block comments, runs of `--` comment lines,
-and `-- region`/`-- endregion` pairs. The service maps the latest analysis's ranges through the
-edits since; the editor asks once per version. No default chord: the four commands are palette
+their first token to their terminator, parenthesised groups (to before the `)`), `BEGIN … END`,
+`CASE … END`, `IF … END IF` and `LOOP … END LOOP` (a `BEGIN` before `;` or
+`TRANSACTION`/`WORK`/… is a transaction command; an `IF` is a block only once its `THEN` comes;
+a `CASE` open at a `;` is closed only by `END CASE`), dollar-quoted bodies (their text lexed
+again, so the PL/pgSQL blocks inside fold), block comments, runs of `--` comment lines (a blank
+line ends one), and `-- region`/`-- endregion` pairs. Not yet: `INSERT … VALUES` rows and a
+MySQL procedure's `BEGIN … END` under a client `DELIMITER` (M5 lexer work). The service maps the
+latest analysis's ranges through the edits since with the fold's own mapping (`map_fold`); the
+editor asks once per version and again when an analysis lands (`fold_gutter::on_analysis`).
+Folding and unfolding are said in the editor's polite live region, and a folded header's text
+run carries "n lines folded" as its description; the chevrons' AccessKit buttons and keyboard
+focus are Task 34's. No default chord: the four commands are palette
 rows (controller ruling 7).

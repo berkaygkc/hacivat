@@ -177,6 +177,14 @@ impl FrameLayout {
         self.lines.get(i)
     }
 
+    // ## m3c-t32-fold (named exception, fix round 1 M7)
+    /// The painted rows of lines `first..=last` (none of the hidden lines between them).
+    pub(crate) fn rows_in(&self, first: u32, last: u32) -> &[RowLayout] {
+        let a = self.lines.partition_point(|r| r.line < first);
+        let b = self.lines.partition_point(|r| r.line <= last).max(a);
+        &self.lines[a..b]
+    }
+
     // ## m3c-t32-fold (named exception)
     pub(crate) fn row_mut(&mut self, line: u32) -> Option<&mut RowLayout> {
         let i = self.lines.binary_search_by_key(&line, |r| r.line).ok()?;
@@ -391,6 +399,10 @@ impl FrameLayout {
         }
     }
 }
+
+// ## m3c-t32-fold (named exception, fix round 1 M7)
+/// The most hidden bytes between two painted rows that one decoration request spans.
+const DECORATION_GAP: usize = 64 << 10;
 
 /// The gutter's base width (three digits) and the scrollbar track's width.
 const GUTTER_BASE: f32 = 58.0;
@@ -939,14 +951,17 @@ pub(crate) fn prepaint_frame(
             line = next;
         }
         // Decorations for the visible bytes only (a long line at either end only its window),
-        // asked per run of rows between folds, so hidden lines are never decorated.
+        // one request per run of rows whose hidden gaps are small (fix round 1, M7: Fold all
+        // asks once), so a large folded range is never decorated.
         let mut rows = Vec::with_capacity(plans.len());
         let mut i = 0;
         while i < plans.len() {
-            let end = plans[i..]
-                .iter()
-                .position(|p| p.fold.is_some())
-                .map_or(plans.len(), |k| i + k + 1);
+            let mut end = i + 1;
+            while end < plans.len()
+                && plans[end].shaped().start - plans[end - 1].shaped().end <= DECORATION_GAP
+            {
+                end += 1;
+            }
             let seg = &plans[i..end];
             let span = seg[0].shaped().start..seg[seg.len() - 1].shaped().end;
             let mut sets: SmallVec<[(i16, Arc<RangeSet<Decoration>>); 2]> = sources

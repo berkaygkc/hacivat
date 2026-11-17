@@ -181,6 +181,9 @@ pub struct A11yFrame {
     // ## m3c-t32-fold (named exception)
     /// The lines folds hide (sorted, merged): they leave the window's runs.
     pub hidden: Arc<[Range<u32>]>,
+    /// Each folded header's line and its description ("5 lines folded"), sorted by line: the
+    /// header's last run carries it (fix round 1, M9).
+    pub fold_notes: Arc<[(u32, SharedString)]>,
 }
 
 /// One text run: at most [`RUN_MAX_CHARS`] characters of one line.
@@ -604,6 +607,19 @@ pub fn declaration(
     let w = &built.lines;
     let mut children: Vec<(ChildKey, accesskit::Node)> = Vec::with_capacity(built.nodes.len() + 1);
     children.extend(built.nodes.iter().cloned());
+    // ## m3c-t32-fold (named exception, fix round 1 M9): a folded header says what it hides.
+    for (line, note) in frame.fold_notes.iter() {
+        let Ok(i) = w.binary_search_by_key(&(*line as usize), |n| n.line) else {
+            continue;
+        };
+        let key = ChildKey::Run {
+            line: w[i].key,
+            run: u32::try_from(w[i].runs.len().saturating_sub(1)).unwrap_or(u32::MAX),
+        };
+        if let Some((_, node)) = children.iter_mut().find(|(k, _)| *k == key) {
+            node.set_description(note.to_string());
+        }
+    }
     let selection = (!w.is_empty()).then(|| (position(w, main.anchor), position(w, main.head)));
     let mut nodes = a.nodes();
     // ## m3a-t29 fix round 1 (I2): a live region leaves the tree once held for `LIVE_HOLD`,

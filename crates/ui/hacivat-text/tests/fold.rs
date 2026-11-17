@@ -252,12 +252,12 @@ fn edit_inside_a_fold_keeps_it_edit_on_header_unfolds() {
     f.map(&d);
     f.prune(&b2);
     assert_eq!(f.folded(), &[stmt.start..stmt.end + 1]);
-    // At its edges: typing after its end grows it, typing at its start too (a container).
+    // At its end: text typed there stays outside it (fix round 1, I2).
     let mut f = fold(&buf);
     let (d, b2) = edit(&buf, stmt.end..stmt.end, " -- x");
     f.map(&d);
     f.prune(&b2);
-    assert_eq!(f.folded(), &[stmt.start..stmt.end + 5]);
+    assert_eq!(f.folded(), &[stmt.clone()]);
     // Typing at its start: the text goes above the fold, whose header stays.
     let mut f = fold(&buf);
     let (d, b2) = edit(&buf, 0..0, "-- c\n");
@@ -307,6 +307,142 @@ fn edit_inside_a_fold_keeps_it_edit_on_header_unfolds() {
     let g0 = f.generation();
     assert!(f.fold(stmt.clone(), &buf));
     assert_ne!(f.generation(), g0);
+}
+
+/// Fix round 1 (I2): Enter or a key before a folded block's visible closing line never joins
+/// the fold: the fold and the lines it hides stay as they were.
+#[test]
+fn typing_at_a_blocks_visible_closing_line_keeps_the_fold() {
+    for (text, close) in [
+        ("SELECT *\nFROM (\n  SELECT 1\n  FROM u\n) s;\n", ") s"),
+        ("BEGIN\n  SELECT 1;\n  SELECT 2;\nEND;\n", "END;"),
+    ] {
+        let buf = TextBuffer::from_str(text);
+        let open = if text.starts_with("BEGIN") {
+            0
+        } else {
+            at(text, "(")
+        };
+        let r = open..at(text, close);
+        for typed in ["\n", "x", "\n\n"] {
+            let mut f = FoldSet::default();
+            assert!(f.fold(r.clone(), &buf));
+            let hidden = f.hidden_lines(&buf);
+            let (d, b2) = edit(&buf, r.end..r.end, typed);
+            f.map(&d);
+            f.prune(&b2);
+            assert_eq!(f.folded(), &[r.clone()], "{typed:?} before {close:?}");
+            assert_eq!(f.hidden_lines(&b2), hidden, "{typed:?} before {close:?}");
+            // A caret after what was typed is on a visible line: nothing opens.
+            let caret = SelectionSet::cursor(r.end + typed.len());
+            assert!(
+                !f.reveal_selection(&caret, &b2),
+                "{typed:?} before {close:?}"
+            );
+        }
+    }
+}
+
+/// Fix round 1 (M3): a range off a char boundary folds nothing and never panics.
+#[test]
+fn a_range_off_a_char_boundary_is_refused() {
+    let text = "SELECT 'ğ',\n  b\nFROM t;\n";
+    let buf = TextBuffer::from_str(text);
+    let g = at(text, "ğ");
+    let mut f = FoldSet::default();
+    assert!(!f.fold(g + 1..text.len() - 1, &buf));
+    assert!(!f.fold(0..g + 1, &buf));
+    assert!(!hacivat_text::fold::can_fold(&buf, &(g + 1..text.len())));
+    assert_eq!(
+        hacivat_text::fold::fold_lines(&buf, &(g + 1..text.len())).0,
+        0
+    );
+    assert!(f.fold(0..text.len() - 1, &buf));
+}
+
+/// 1,000 ten-line statements, each with two nested subqueries: 3,000 folds.
+fn three_thousand_folds() -> (TextBuffer, FoldSet, Vec<usize>) {
+    let stmt = "SELECT a,\n  (SELECT x\n   FROM (\n     SELECT 1\n     FROM u\n   ) q\n  ) b\nFROM t\nWHERE c;\n\n";
+    let text = stmt.repeat(1_000);
+    let buf = TextBuffer::from_str(&text);
+    let mut f = FoldSet::default();
+    let mut headers = Vec::new();
+    for i in 0..1_000 {
+        let base = i * stmt.len();
+        let s = |n: &str| base + stmt.find(n).unwrap();
+        let ranges = [
+            base..s("c;") + 2,
+            s("(SELECT")..s(") b"),
+            s("(\n     SELECT")..s(") q"),
+        ];
+        for r in ranges {
+            assert!(f.fold(r, &buf));
+        }
+        headers.push(base + 3);
+    }
+    assert_eq!(f.folded().len(), 3_000);
+    (buf, f, headers)
+}
+
+/// Fix round 1 (I3): a keystroke costs well under a millisecond with 3,000 folds, and a
+/// selection of 1,000 carets reveals in a few.
+#[test]
+#[ignore = "perf"]
+fn fold_upkeep_with_3000_folds_stays_cheap() {
+    if std::env::var_os("HACIVAT_PERF").is_none_or(|v| v != "1") {
+        return;
+    }
+    let (mut buf, mut f, headers) = three_thousand_folds();
+    let mut worst = Duration::ZERO;
+    for k in 0..200 {
+        // From the last statement back, so no insertion moves a header still to come.
+        let at = headers[headers.len() - 1 - k * 5] + 1;
+        let cs = ChangeSet::from_edits(buf.len_bytes(), [(at..at, Arc::from("x"))]).unwrap();
+        cs.apply(&mut buf);
+        let caret = SelectionSet::cursor(at + 1);
+        let start = Instant::now();
+        f.map(&cs.desc());
+        f.prune(&buf);
+        assert!(!f.reveal_selection(&caret, &buf));
+        worst = worst.max(start.elapsed());
+    }
+    assert_eq!(f.folded().len(), 3_000);
+    // A caret on every statement's header line (the statements are every third fold).
+    let ranges: Vec<SelectionRange> = f
+        .folded()
+        .iter()
+        .step_by(3)
+        .map(|r| SelectionRange::caret(r.start + 3))
+        .collect();
+    assert_eq!(ranges.len(), 1_000);
+    let carets = SelectionSet::normalized(ranges, 0);
+    let start = Instant::now();
+    assert!(!f.reveal_selection(&carets, &buf));
+    let reveal = start.elapsed();
+    // One keystroke at the 1,000 carets.
+    let edits: Vec<_> = carets
+        .ranges()
+        .iter()
+        .map(|r| (r.head..r.head, Arc::from("x")))
+        .collect();
+    let cs = ChangeSet::from_edits(buf.len_bytes(), edits).unwrap();
+    cs.apply(&mut buf);
+    let start = Instant::now();
+    f.map(&cs.desc());
+    f.prune(&buf);
+    let moved = carets.map(&cs.desc());
+    assert!(!f.reveal_selection(&moved, &buf));
+    let multi = start.elapsed();
+    assert_eq!(f.folded().len(), 3_000);
+    eprintln!(
+        "3,000 folds: worst 1-caret keystroke {worst:?} (map + prune + reveal); 1,000-caret reveal {reveal:?}; 1,000-caret keystroke {multi:?}"
+    );
+    assert!(
+        multi < Duration::from_millis(10),
+        "1,000-caret keystroke took {multi:?}"
+    );
+    assert!(worst < Duration::from_millis(1), "keystroke took {worst:?}");
+    assert!(reveal < Duration::from_millis(5), "reveal took {reveal:?}");
 }
 
 #[test]
