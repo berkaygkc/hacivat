@@ -908,7 +908,10 @@ impl IntoElement for Paragraph {
                     underline: None,
                     strikethrough: None,
                 };
-                let line_height = px(style.line_height);
+                // ## m3c-shotfix F3/F5: the line height the text is laid out with: GPUI's text
+                // element snaps it to the device pixel (`Window::pixel_snap`), so an unsnapped
+                // one measured n wrapped lines taller than the box that holds them.
+                let line_height = window.pixel_snap(px(style.line_height));
                 let lines: Vec<(Pixels, Pixels)> = window
                     .text_system()
                     .shape_text(

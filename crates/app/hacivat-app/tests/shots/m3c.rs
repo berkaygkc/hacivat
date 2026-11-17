@@ -606,6 +606,11 @@ pub(super) const BY_CHECK_ALONE: [&str; 12] = [
 
 /// Where a known finding shows: the pseudo-locales (`en-XA`, `tr-XT`), only at the 960x600
 /// minimum, either of them, or everywhere.
+// ## m3c-shotfix: kept for the next finding while the list is empty.
+#[allow(
+    dead_code,
+    reason = "the known-findings list is empty after the M3c shot fixes"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Where {
     Pseudo,
@@ -647,6 +652,10 @@ pub(super) struct Finding {
     pub(super) owner: &'static str,
 }
 
+#[allow(
+    dead_code,
+    reason = "the known-findings list is empty after the M3c shot fixes"
+)]
 const fn finding(
     state: &'static str,
     at: Where,
@@ -662,112 +671,8 @@ const fn finding(
 }
 
 /// The known findings (see the Task 43 part A report, "Product findings").
-pub(super) const KNOWN_FINDINGS: [Finding; 23] = [
-    // F1 · The line-endings menu is wider than the 960 px window allows in the pseudo-locales:
-    // its header row and the "most lines" hint are cut.
-    finding("eol-menu", Where::PseudoMin, "#menu-item-label", "T34"),
-    finding("eol-menu", Where::PseudoMin, "#menu-item-hint", "T34"),
-    // F2 · The ▶ tooltip's last line ("Runs through the same checks as Run.") does not wrap in
-    // its 300 px card.
-    finding("gutter-last-runs", Where::Pseudo, "gutter.rs:708", "T34"),
-    // F3 · The sort note row's partial-with-tail sentence does not wrap at 960 px.
-    finding(
-        "sort-partial-tail",
-        Where::PseudoMin,
-        "#results-sort-note",
-        "T36",
-    ),
-    // F4 · The grid find bar's "Select all occurrences" is cut when the bar is crowded.
-    finding(
-        "gfind-incomplete",
-        Where::PseudoMin,
-        "#button-label-grid-find-select-all",
-        "T37",
-    ),
-    finding(
-        "gfind-invalid",
-        Where::PseudoMin,
-        "#button-label-grid-find-select-all",
-        "T37",
-    ),
-    // F5 · The go-to popover's one-line hint, error and "Escape hides this…" lines do not wrap
-    // in its 300 px card; the ask paragraph is flagged cut in every locale (its PNG reads
-    // whole: the paragraph's measured box against the popover's clip needs a look); the
-    // footer buttons are cut at 960 px in the pseudo-locales.
-    finding("goto-popover", Where::Pseudo, "#goto-line", "T37"),
-    finding("goto-hidden-column", Where::Pseudo, "#goto-line", "T37"),
-    finding("goto-fetch-ask", Where::All, "#goto-line", "T37"),
-    finding(
-        "goto-fetch-ask",
-        Where::PseudoMin,
-        "#button-label-goto-cancel",
-        "T37",
-    ),
-    finding(
-        "goto-fetch-ask",
-        Where::PseudoMin,
-        "#button-label-goto-fetch-ok",
-        "T37",
-    ),
-    finding("goto-fetching", Where::Pseudo, "goto.rs:883", "T37"),
-    finding(
-        "goto-fetching",
-        Where::PseudoMin,
-        "#button-label-goto-stop",
-        "T37",
-    ),
-    // F6 · The record inspector's "Row 4 of 184" is cut in its 252 px header.
-    finding("view-record", Where::Pseudo, "#record-pos", "T38"),
-    finding(
-        "view-record-duplicates",
-        Where::Pseudo,
-        "#record-pos",
-        "T38",
-    ),
-    finding("view-record-show-more", Where::Pseudo, "#record-pos", "T38"),
-    // F7 · The Transposed grid's name column header is a Fluent word in the grid's data header
-    // (pseudo-localised; check (g) says headers are data).
-    finding(
-        "view-transposed",
-        Where::Pseudo,
-        "a grid header is data",
-        "T38",
-    ),
-    // F8 · The value viewer's footer size is cut in the pseudo-locales; at 960 x 600 the viewer
-    // runs past the result tile (the well does not shrink first, NOTES cross-cutting 3): the
-    // footer and Copy raw value are cut or out of view.
-    finding("viewer-text", Where::Pseudo, "#value-viewer-size", "T38"),
-    finding(
-        "viewer-json-pretty",
-        Where::Pseudo,
-        "#value-viewer-size",
-        "T38",
-    ),
-    finding(
-        "viewer-json-raw",
-        Where::Pseudo,
-        "#value-viewer-size",
-        "T38",
-    ),
-    finding(
-        "viewer-xml-pretty",
-        Where::Pseudo,
-        "#value-viewer-size",
-        "T38",
-    ),
-    finding(
-        "viewer-json-invalid",
-        Where::PseudoOrMin,
-        "value-viewer-",
-        "T38",
-    ),
-    finding(
-        "viewer-truncated",
-        Where::PseudoOrMin,
-        "#value-viewer-size",
-        "T38",
-    ),
-];
+// ## m3c-shotfix: F1–F8 are fixed at their source (the shot-fix report); the list is empty.
+pub(super) const KNOWN_FINDINGS: [Finding; 0] = [];
 
 // ## m3c-t43-shots (fix round 1, I1, I2, m1)
 
@@ -1036,6 +941,9 @@ const FOLDS: &str = "-- region Raporlar\nSELECT o.id,\n       o.total\n  FROM or
 const FOLD_1: &str = "SELECT o.id,\n       o.total\n  FROM orders o\n WHERE o.total > 100;";
 /// The second (line 6).
 const FOLD_2: &str = "UPDATE orders\n   SET status = 'shipped'\n WHERE id = 1042;";
+// ## m3c-gutter-no-run
+/// The gutter states' row (0-based): `FOLD_2`'s first line.
+const GUTTER_LINE: u32 = 6;
 /// The third (line 10).
 const FOLD_3: &str = "SELECT c.\"müşteri adı\",\n       count(*)\n  FROM customers c\n GROUP BY 1;";
 /// Line endings of both kinds (surface 17).
@@ -1323,15 +1231,14 @@ impl M3c {
             GotoAsk => &["#header", "#goto-line"],
             GotoFetching => &["#header", "#goto-line"],
             ViewRecordMore => &["#header", "#button-label-record-show-more-0"],
-            // Fix round 1 (I1): the subtitle, which the viewer shows at every size; the footer's
-            // size runs out of the tile at 960 x 600 (F8), and a missing surface is never a known
-            // finding. The model check asks for the truncation notice. When F8 is fixed, ask for
-            // `#value-viewer-size` again.
-            ViewerTruncated => &["#value-viewer-sub"],
+            // ## m3c-shotfix F8: the footer's size again (the viewer keeps its header and footer
+            // in any room); the model check asks for the truncation notice.
+            ViewerTruncated => &["#value-viewer-size"],
             // ## m3c-t43b
             GutterFocusMoved => &["#editor-segment-lncol"],
             GotoAskLive => &["#header", "#goto-line"],
-            ViewerTruncatedLive => &["#value-viewer-sub"],
+            // ## m3c-t43b-fix: F8 is fixed, so the live variant asks for the size too.
+            ViewerTruncatedLive => &["#value-viewer-size"],
             NarrowIdle | Narrow219 | NarrowNothing => &["#tx-chip-mode"],
             NarrowProductionRo | NarrowRunning | NarrowCancelling | NarrowBadge | NarrowStrip
             | NarrowEmpty => &["#console-connection-name"],
@@ -1583,10 +1490,10 @@ impl M3c {
                         });
                     }));
                 }
-                s.push(hover_gutter(Gutter::Run, 6));
+                s.push(hover_gutter(Gutter::Run, GUTTER_LINE));
                 if self == GutterLastRuns {
                     // Again over the ▶ the first move showed: its tooltip starts on a move over it.
-                    s.push(hover_gutter(Gutter::Run, 6));
+                    s.push(hover_gutter(Gutter::Run, GUTTER_LINE));
                 }
                 if self == GutterLastRuns {
                     s.push(step(|_, _| {}, |_, cx| tooltip_open(cx)));
@@ -1617,7 +1524,7 @@ impl M3c {
                         cx,
                     );
                 }));
-                s.push(hover_gutter(Gutter::Run, 6));
+                s.push(hover_gutter(Gutter::Run, GUTTER_LINE));
                 s
             }
             EolMixed | EolMenu => {
@@ -2289,6 +2196,17 @@ impl M3c {
                 .map_or(0, |e| e.read(cx).folds().folded().len())
         };
         let plays = || PLAYS.with(|p| *p.borrow());
+        // ## m3c-gutter-no-run: the gutter's own ▶ rows (the editor's last frame). The frame's
+        // play icons also count the toolbar's Run glyph (T41), so they cannot say whether the
+        // gutter drew one; each ▶ row is still one of the icons the frame drew.
+        let gutter_plays = || {
+            let rows = editor
+                .as_ref()
+                .map(|e| e.read(cx).gutter_play_rows().to_vec())
+                .unwrap_or_default();
+            (rows.len() <= plays()).then_some(rows)
+        };
+        let gutter_hovered = |line: u32| gutter_plays().is_some_and(|r| r == [line]);
         let ok = match self {
             MultiNext => carets == 3 && selected_words(&editor, cx) == 3,
             UndoSelection => carets == 2 && selected_words(&editor, cx) == 2,
@@ -2388,10 +2306,11 @@ impl M3c {
                     )
             }
             FindCapped => carets == 10_000 && drawn(frame, "status-message"),
-            GutterHover => plays() >= 1,
+            // ## m3c-gutter-no-run: the ▶ on the hovered row (line 7), and only there.
+            GutterHover => gutter_hovered(GUTTER_LINE),
             // Fix round 1 (m9): with the run's fixed time in the tooltip's row.
             GutterLastRuns => {
-                plays() >= 1
+                gutter_hovered(GUTTER_LINE)
                     && tooltip_open(cx)
                     && shows_label(
                         frame,
@@ -2400,7 +2319,7 @@ impl M3c {
                     )
             }
             GutterFocused => {
-                plays() >= 1
+                gutter_plays().is_some_and(|r| !r.is_empty())
                     && editor.as_ref().is_some_and(|e| {
                         matches!(
                             e.read(cx).gutter_focus(window),
@@ -2415,7 +2334,13 @@ impl M3c {
                         Some(ExecMarkState::Escalated { .. })
                     )
                 }) && HOVERED.with(|h| *h.borrow())
-                    && plays() == 0
+                    // ## m3c-gutter-no-run: no ▶ in the gutter (the toolbar's Run keeps its
+                    // glyph); Run itself would be enabled, so only the escalated mark under the
+                    // pointer keeps it away (DESIGN.md, the gutter ▶ row).
+                    && gutter_plays().is_some_and(|r| r.is_empty())
+                    && console.is_some_and(|c| {
+                        hacivat_app::console::commands::run_would_be_enabled(c, cx)
+                    })
             }
             EolMixed => status.is_some_and(|s| s.mixed_line_endings) && !menu_open(window, cx),
             EolMenu => status.is_some_and(|s| s.mixed_line_endings) && menu_open(window, cx),
@@ -2713,9 +2638,14 @@ impl M3c {
         };
         (!ok).then(|| {
             format!(
-                "{}: the state check failed (carets {carets}, ▶ {}, chevrons {}, folded {})",
+                // ## m3c-gutter-no-run: the gutter's ▶ rows next to the frame's play icons.
+                "{}: the state check failed (carets {carets}, ▶ {}, gutter ▶ rows {:?}, chevrons {}, folded {})",
                 self.name(),
                 plays(),
+                editor
+                    .as_ref()
+                    .map(|e| e.read(cx).gutter_play_rows().to_vec())
+                    .unwrap_or_default(),
                 CHEVRONS.with(|c| *c.borrow()),
                 folded()
             )

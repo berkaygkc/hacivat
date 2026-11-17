@@ -150,7 +150,12 @@ struct Tile {
 }
 
 fn tile(cx: &mut TestAppContext, region: &str) -> Tile {
-    let vcx = shell_with_connections(cx, "en");
+    tile_in(cx, "en", region)
+}
+
+/// [`tile`] in the UI language `lang`.
+fn tile_in(cx: &mut TestAppContext, lang: &str, region: &str) -> Tile {
+    let vcx = shell_with_connections(cx, lang);
     // An active window: the focused input is published only then (`FocusedInput`).
     in_window(vcx, |window, _| window.activate_window());
     let profile = add_profile(vcx, test_profile("orders-dev", None, "10.0.0.5"));
@@ -975,4 +980,200 @@ fn find_scan_and_filter_of_a_million_rows_perf() {
     // Off the UI thread; budgets for the background job.
     assert!(scan_ms <= 3_000, "the scan took {scan_ms} ms");
     assert!(filter_ms <= 200, "the filter map took {filter_ms} ms");
+}
+
+// ## m3c-shotfix F5 (fix round 1, I1, m10): asking in a short room (the 960 x 600 minimum) the
+// go-to popover gives up its title and its field to the question, stays in the grid's area, and
+// the question is read whole from the keyboard (the page keys scroll it from Fetch and go, which
+// holds the focus and shows). The short-room threshold is the popover as it draws.
+fn bounds(vcx: &mut VisualTestContext, sel: &'static str) -> gpui::Bounds<gpui::Pixels> {
+    vcx.debug_bounds(sel)
+        .unwrap_or_else(|| panic!("{sel} drew"))
+}
+
+fn ask(t: &Tile) -> Entity<GridView> {
+    let rows: Vec<Vec<Value>> = (0..100).map(|i| row(i, "x")).collect();
+    let (source, _writer, _asks) = live(rows, Completeness::Suspended(cursor()));
+    let grid = t.show(source);
+    let console = t.console;
+    in_window(t.vcx, move |_, cx| {
+        goto::open(console, cx);
+        goto::set_text(console, "1500000", cx);
+        goto::submit(console, cx);
+    });
+    t.redraw();
+    t.redraw();
+    assert!(matches!(
+        t.vcx.cx.read(|cx| goto::state(console, cx)),
+        Some(GotoState::Ask { .. })
+    ));
+    grid
+}
+
+fn goto_asks_in_a_short_room(cx: &mut TestAppContext, lang: &str, must_overflow: bool) {
+    let t = tile_in(cx, lang, "en-US");
+    t.vcx
+        .simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
+    let grid = ask(&t);
+    assert!(
+        t.vcx.debug_bounds("goto-title").is_none() && t.vcx.debug_bounds("goto-field").is_none(),
+        "{lang}: the title and the field give way to the question"
+    );
+    let area = t
+        .vcx
+        .cx
+        .read(|cx| grid.read(cx).geometry().map(|g| g.bounds))
+        .expect("the grid drew");
+    let slack = gpui::px(0.5);
+    let popover = bounds(t.vcx, "goto-popover");
+    assert!(
+        popover.top() >= area.top() - slack && popover.bottom() <= area.bottom() + slack,
+        "{lang}: the popover {popover:?} stays in the grid's area {area:?}"
+    );
+    let primary = bounds(t.vcx, "button-goto-fetch-ok");
+    assert!(
+        primary.bottom() <= popover.bottom() + slack,
+        "{lang}: {primary:?}"
+    );
+    // Fix round 2 (m-i): where the question is longer than the room (en-XA), it overflowed
+    // first, so the keys have something to scroll.
+    if must_overflow {
+        let (body, question) = (bounds(t.vcx, "goto-body"), bounds(t.vcx, "goto-question"));
+        assert!(
+            question.bottom() > body.bottom() + slack,
+            "{lang}: the question {question:?} overflows {body:?}"
+        );
+    }
+    // The page keys, from the focused Fetch and go, bring the question's end into view.
+    for _ in 0..8 {
+        t.vcx.simulate_keystrokes("pagedown");
+    }
+    t.redraw();
+    let (body, question) = (bounds(t.vcx, "goto-body"), bounds(t.vcx, "goto-question"));
+    assert!(
+        question.bottom() <= body.bottom() + slack,
+        "{lang}: the question's end {question:?} shows in {body:?}"
+    );
+    // And back to its start.
+    for _ in 0..8 {
+        t.vcx.simulate_keystrokes("pageup");
+    }
+    t.redraw();
+    let (body, question) = (bounds(t.vcx, "goto-body"), bounds(t.vcx, "goto-question"));
+    assert!(
+        question.top() >= body.top() - slack,
+        "{lang}: the question's start {question:?} shows in {body:?}"
+    );
+}
+
+#[gpui::test]
+fn goto_asks_in_a_short_room_with_the_question_first(cx: &mut TestAppContext) {
+    goto_asks_in_a_short_room(cx, "en", false);
+}
+
+#[cfg(feature = "pseudo")]
+#[gpui::test]
+fn goto_asks_in_a_short_room_with_the_question_first_in_en_xa(cx: &mut TestAppContext) {
+    goto_asks_in_a_short_room(cx, "en-XA", true);
+}
+
+/// m10: with room, the asking popover draws its title, field, question and buttons; its height
+/// less the question, plus a three-line question and the host's gaps, is the threshold.
+#[gpui::test]
+fn the_goto_short_room_is_the_asking_popover_as_it_draws(cx: &mut TestAppContext) {
+    let t = tile(cx, "en-US");
+    t.vcx
+        .simulate_resize(gpui::size(gpui::px(1600.0), gpui::px(1400.0)));
+    let _grid = ask(&t);
+    assert!(t.vcx.debug_bounds("goto-title").is_some());
+    let popover = bounds(t.vcx, "goto-popover");
+    let question = bounds(t.vcx, "goto-question");
+    let (line, threshold) = in_window(t.vcx, |window, cx| {
+        let t = hacivat_ui_core::theme::Theme::get(cx).tokens;
+        (
+            f32::from(window.pixel_snap(gpui::px(t.type_ramp.caption.line_height))),
+            goto::short_room_px(window, cx),
+        )
+    });
+    let drawn = f32::from(popover.size.height) - f32::from(question.size.height)
+        + 3.0 * line
+        + 2.0 * goto::HOST_GAP_PX;
+    assert!(
+        (drawn - threshold).abs() <= 1.0,
+        "the threshold {threshold} against the drawn popover {drawn}"
+    );
+}
+
+// ## m3c-shotfix F4 (fix round 1, m2, m3): Select all occurrences and close, items of the
+// toolbar of their own, are announced inside the find's search group (a search node of the same
+// name each); and when the focused Select all moves into the overflow menu (the window narrows),
+// the focus goes to the field instead of resting on a control that is not drawn.
+#[gpui::test]
+fn select_all_stays_in_the_search_group_and_its_focus_is_kept(cx: &mut TestAppContext) {
+    let t = tile(cx, "en-US");
+    t.vcx
+        .simulate_resize(gpui::size(gpui::px(1600.0), gpui::px(900.0)));
+    let rows: Vec<Vec<Value>> = (0..20).map(|i| row(i, "pear")).collect();
+    let (source, _w, _) = live(rows, Completeness::Complete);
+    let _grid = t.show(source);
+    t.find("pear");
+    hacivat_ui::popover::a11y_record();
+    t.redraw();
+    let decls = hacivat_ui::popover::a11y_take();
+    // Fix round 2 (m-i): one search group spans the whole find toolbar. Its node notes as it
+    // lays out, before the toolbar lays its items out inside it, so every Select all and close
+    // declaration comes after a search declaration; and no search node sits right around either
+    // button (round 1's per-item landmarks did).
+    let search = |d: &hacivat_ui::popover::A11yDecl| {
+        d.role == Some(gpui::Role::Search) && plain(&d.name) == "Find in the shown values"
+    };
+    let first_search = decls
+        .iter()
+        .position(search)
+        .expect("the find's search group");
+    for name in ["Select all occurrences", "Close find"] {
+        let at: Vec<usize> = decls
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.role == Some(gpui::Role::Button) && plain(&d.name) == name)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!at.is_empty(), "{name} is declared: {decls:?}");
+        for i in at {
+            assert!(
+                i > first_search,
+                "{name} at {i} lies in the search group: {decls:?}"
+            );
+            let around = decls[i.saturating_sub(1)..(i + 2).min(decls.len())]
+                .iter()
+                .any(search);
+            assert!(
+                !around,
+                "{name} at {i} has no search node of its own: {decls:?}"
+            );
+        }
+    }
+    assert!(t.vcx.debug_bounds("button-grid-find-select-all").is_some());
+    let console = t.console;
+    let all = t
+        .vcx
+        .cx
+        .read(|cx| find::select_all_focus(console, cx))
+        .expect("the bar is open");
+    in_window(t.vcx, |window, cx| window.focus(&all, cx));
+    t.redraw();
+    assert!(in_window(t.vcx, |window, _| all.is_focused(window)));
+    // Narrowed, Select all moves into the overflow menu; the field takes the focus.
+    t.vcx
+        .simulate_resize(gpui::size(gpui::px(700.0), gpui::px(600.0)));
+    t.redraw();
+    t.redraw();
+    assert!(
+        t.vcx.debug_bounds("button-grid-find-select-all").is_none(),
+        "Select all left the row"
+    );
+    assert!(
+        t.vcx.cx.read(find::field_focused),
+        "the field has the focus"
+    );
 }

@@ -2208,12 +2208,14 @@ hv-confirm-suppress-scope = Not asked again for statements of the same shape in 
 hv-confirm-skip = Skip
 hv-confirm-skip-all = Skip all
 hv-confirm-cancel = Cancel
-# What Execute all also answers (RC-1).
+# What Execute all also answers (RC-1). Never shown on production. (m3b-po, PO M3b-26: edited
+# in place to name the connection's real environment instead of "production".)
 # Variables:
 #   $n (Number) - the later statements Execute all runs without asking.
+#   $env (String) - the connection's environment word (an hv-conn-env-* message), e.g. "staging".
 hv-confirm-execute-all-scope = { $n ->
-        [one] Execute all also runs the remaining { $n } statement that would ask, without asking. A statement that needs its name typed still asks, and a production change still waits for your answer after it runs.
-       *[other] Execute all also runs the remaining { $n } statements that would ask, without asking. A statement that needs its name typed still asks, and a production change still waits for your answer after it runs.
+        [one] Execute all also runs, without asking, the remaining { $n } statement that would ask on this connection ({ $env }). A statement that needs its name typed still asks.
+       *[other] Execute all also runs, without asking, the remaining { $n } statements that would ask on this connection ({ $env }). A statement that needs its name typed still asks.
     }
 
 # The confirm-in-transaction prompt (R-M3-55, D-014; design/m3b-safe surface 2): a production

@@ -525,3 +525,76 @@ Every new TR string carries `# Review: PO` (blocks `m3b-t04-safety`, `-t15-gate`
    `ps -o rss= -p $(pgrep -x hacivat)` (KiB).
 6. **Controller (not PO):** `gh workflow run ci --ref m3b`; open the `m3b` → `main` PR for `docker-pr`;
    triage `main` run 43848594948's `docker-pr`.
+
+## 12. pseudo-screens in CI (m3b-ci, controller fix)
+
+The nightly `pseudo-screens` jobs of run 44051024805 (`m3b`, 180-minute timeout) both failed. This
+section records the triage, the fixes and the CI design that follows from them.
+
+### 12.1 ubuntu-24.04: 960 violations, by category
+
+| Category | Count | Where | Verdict |
+|---|---|---|---|
+| (a) "Fluent label not bracketed" on access-key runs | 876 (292 labels × 3 runs) | `hacivat-ui/src/button.rs#menu-item-label` 552 (`menu-app` 348, `context-menu` 144, `explorer-menu` 60), `#button-label-dialog-button-0/1/2` 324 (`prompt-*`, `results-fetch-all`, `dialog-about`, `conn-delete-confirm`) | **Harness rule.** Linux and Windows show access keys, drawn as three runs around the key letter (`[` `Ƈ` `ŀǿǿşḗ]`); macOS hides them, so its render never had runs. Each label is bracketed whole. |
+| "the surface is missing" (`ssh-import-menu`, marker `bastion`) | 16 (every theme × locale × size) | the same access-key runs (`""` `b` `astion`) | **Harness rule**, same cause. |
+| (b) clipped `#explorer-filter` (empty explorer's filter placeholder) | 36 (pseudo locales; shell, palette, settings, toast, about, app menu, demo) | `hacivat-app/src/shell/tiles.rs` | **UI defect.** The mock filter field's placeholder did not ellipsize; Linux fonts are wider, and any platform clips it with the explorer dragged to 120 px. |
+| (b) clipped `#menu-item-hint` (transaction menu hints) | 32 (`tx-chip-menu`, `tx-chip-production`, en-XA/tr-XT at 960x600) | `hacivat-ui/src/menu.rs` | **UI defect.** The menu was placed from its minimum width and ran past the window's right side; its hints were cut by the window. macOS ran off the window too in the same 6 states (no text cut, so no violation). |
+
+No trust signal (environment, read-only lock, pending read-only, mode chip word, transaction chip,
+waiting/cancel) was among the 960; the (t) checks stay as they were.
+
+### 12.2 Fixes and the one tolerant rule
+
+- **UI:** the empty explorer's filter placeholder ellipsizes, as the live filter field's does
+  (`shell/tiles.rs`; test `the_explorer_filter_placeholder_ellipsizes_in_a_narrow_explorer`).
+- **UI:** an anchored popup menu that runs past the window's right side moves left until it ends
+  4 px inside (`menu.rs` `KeepInWindow`, which applies an offset only then, so a menu that fits is
+  drawn exactly where it was placed); a menu wider than the window is capped to it and ellipsizes
+  its hints, never its label. Tests: `a_menu_wider_than_the_room_right_of_its_anchor_moves_left`,
+  `a_menu_wider_than_the_window_stays_inside_and_ellipsizes_its_hint` (access keys shown, as on
+  Linux), `keep_in_window_moves_only_what_runs_past_the_right_side`.
+- **Harness, stricter:** the (m) menu check (`MenuLayout::violations`) also fails a row past the
+  window's left or right side; before, only (b) could see it, and only when text was cut.
+- **Harness, tolerant (principled):** `tests/shots.rs` `is_key_run` recognises the one shape the
+  access-key split draws (`key_label_from`): three consecutive runs from `button.rs` with one `#id`,
+  one source, the middle one character; the same shape `tests/support` `button_labels` joins. (a)
+  checks the joined text and still fails runs that do not join into a bracketed label; a marker
+  may be matched by the joined text. (b), (c), (f) and the trust checks still see every run, so a
+  clipped key letter is a clipped label. Nothing is skipped on Linux. Self-checks cover the joined
+  pass and the four ways runs are not one label.
+
+### 12.3 macos-15: shot-diff design
+
+Run 44051024805's shot-diff ("68 compared, 24 breached, 3176 new") compared the committed M1
+baselines, 24 of which M2a/M3a changed on purpose (`dialog-about`, `menu-app`, `toast-info`;
+section 7 of `m2a.md`, re-baseline pending with the PO). The job now gates on:
+
+1. **Every harness check on all 3,244 states, on both OSes** (any violation fails).
+2. **Pixels where a committed baseline is meant to hold:** `xtask shot-diff --superseded
+   design/baselines/m1/macos/superseded.txt` compares the 44 M1 states nothing since M1 was meant
+   to change and lists the 24 as superseded; a list line that matches no baseline fails the step,
+   so the list cannot outlive what it excuses. New states (no committed baseline) do not fail.
+3. **The approved M2–M3b pixels stay a local-gate check:** they are 1.2 GB and not committed
+   (controller ruling); the milestone gate renders on the Mac and runs `shot-diff` against the SDD
+   folder's `baseline-m3b`. Linux renders have no pixel baseline (fonts differ by design).
+
+When the PO re-baselines one of the 24, its PNG is replaced and its line removed.
+
+### 12.4 Local evidence (macOS, `m3b-ci-pseudo` at `2ab72b6`)
+
+- Render: 3,244 shots in 3 shards, **0 violations**; self-checks 9/9.
+- `shot-diff --baseline design/baselines/m1/macos --superseded …/superseded.txt`: **44 compared,
+  0 breached, 24 superseded, 3,176 new**.
+- `shot-diff --baseline <sdd>/baseline-m3b`: 3,244 compared, 11 breached:
+  - **6 intended:** `tx-chip-menu-{dark,light}-en-XA-960x600` and
+    `tx-chip-production-{dark,light}-{en-XA,tr-XT}-960x600`. The transaction menu ran off the
+    window's right side on macOS too (the isolation row's `›` was cut at the edge); it now ends 4 px
+    inside, every hint whole. For PO sign-off with section 7.2.
+  - **5 not caused by this change:** tr at 960x600 (`chooser-uncertain`, `console-production`,
+    `preview-uncertain`, `status-production-result`, `toolbar-production-waiting`; 0.35–0.64 %).
+    The title-bar capsule either gives up its read-write segment or ellipsizes the palette field.
+    Which one it picks varies from render to render of the same binary. It does the same with this
+    branch's UI changes reverted (four renders of four states: 0, 1, 2 and 3 breached). The cause
+    is the capsule's fit memo (`capsule.rs` `FitMemo`, last frame's width), so the result depends on
+    frame history. **Follow-up (harness/capsule):** it is pre-existing and nondeterministic, and it
+    shows up only at tr 960x600. It needs its own fix before the full-set diff can be exact.

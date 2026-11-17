@@ -53,6 +53,9 @@ pub const SKELETON_H_PX: f32 = 7.0;
 /// Where the registry's records point (the cell and header paint).
 const CELL_PATH: &str = "crates/ui/hacivat-ui-grid/src/element/layers.rs#cell";
 const HEADER_PATH: &str = "crates/ui/hacivat-ui-grid/src/element/layers.rs#header";
+// ## m3c-shotfix F7: a header title that is chrome (a Fluent word), not data: the Transposed
+// view's name column ("Column").
+const HEADER_TITLE_PATH: &str = "crates/ui/hacivat-ui-grid/src/element/layers.rs#header-title";
 const ROW_NUMBER_PATH: &str = "crates/ui/hacivat-ui-grid/src/element/layers.rs#row-number";
 
 /// Every role the grid paints with, and the row numbers' digit layouts.
@@ -637,6 +640,8 @@ pub fn record_text(
 pub mod paths {
     pub const CELL: &str = super::CELL_PATH;
     pub const HEADER: &str = super::HEADER_PATH;
+    // ## m3c-shotfix F7
+    pub const HEADER_TITLE: &str = super::HEADER_TITLE_PATH;
     pub const ROW_NUMBER: &str = super::ROW_NUMBER_PATH;
 }
 
