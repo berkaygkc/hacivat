@@ -787,3 +787,28 @@ a view row the map does not show is left out. `copy_region` / `tsv` are the iden
 **Commands.** `grid.sort_asc` / `grid.sort_desc` sort by the focus column, `grid.clear_sort` goes
 back (palette-only; Task 39's menus add "Add as sort level N" through
 `GridView::request_sort`). A header click still selects the column, as in M3a.
+
+**Fix round 1.**
+- *Comparisons.* PostgreSQL 17's interval ±infinity sort around the finite intervals (I1). An
+  integer against a float compares exactly (the float's floor as an integer, then its
+  fraction), and an exact decimal against a float compares exactly through the float's exact
+  decimal expansion, so a SQLite column of mixed integers and reals has a total order (m1; the
+  earlier "no engine types a column that way" was wrong for SQLite). SQLite booleans are the
+  integers 0 and 1. `timetz` ties order by the zone in seconds west, as `timetz_cmp`. MySQL's
+  partial zero dates compare by their parts (`2020-00-15` between 2019 and `2020-01-00`).
+- *Collation names.* `resolve_collation(engine, name)` reads only the engine's spellings (a
+  PostgreSQL collation named like a MySQL one is not taken for MySQL's). SQL Server's `*_BIN`
+  / `*_BIN2` compare UTF-16 code units. MariaDB's `nopad` names map like their PAD SPACE twins.
+  PAD SPACE collations (MySQL's and MariaDB's except `_0900_`, `nopad` and `binary`; every SQL
+  Server collation) ignore trailing spaces (`pads_trailing_spaces`); PostgreSQL and SQLite do
+  not.
+- *Jobs.* A job stops when its state goes: a newer sort, Cancel, Clear sort, a re-run (the tile
+  drops the old run's state when it shows the grid at the new generation) and a closed tab or
+  console (`prune`). The `Running` value raises the flag when it drops. A request is refused,
+  claiming nothing, while the grid has not painted the adapter's current generation, and a
+  job publishes only to a grid showing the generation it sorted. A worker thread's panic is
+  re-raised (`stable_order`), never a cancel; the job catches it, keeps the order shown, and
+  says so in a notice (`hv-grid-sort-failed`).
+- *Memory.* Key extraction holds one `ValueRef` (32 B) per row and key: about 32 MB per key at
+  one million rows, freed when the job ends. No budget check (accepted at review).
+- *Copy.* Every copy entry point (`copy_region`, `tsv`, `estimated_bytes`) takes the `ViewMap`.

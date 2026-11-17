@@ -48,10 +48,16 @@ fn sorted_values(
     out
 }
 
-/// Texts sorted ascending on PostgreSQL with `collation`.
+/// Texts sorted ascending with `collation` on an engine that does not say which (every
+/// engine's spelling of a collation is tried; ## m3c-t36 fix round 1: `sorted_on` names one).
 fn sorted(words: &[&str], collation: Option<&str>) -> Vec<String> {
+    sorted_on(DbmsKind::Unknown, words, collation)
+}
+
+/// Texts sorted ascending on `engine` with `collation`.
+fn sorted_on(engine: DbmsKind, words: &[&str], collation: Option<&str>) -> Vec<String> {
     let values: Vec<Value> = words.iter().map(|w| Value::Text((*w).into())).collect();
-    sorted_values(&values, &text_type(), DbmsKind::Postgres, collation)
+    sorted_values(&values, &text_type(), engine, collation)
         .into_iter()
         .map(|v| match v {
             Value::Text(t) => t.to_string(),
@@ -150,7 +156,7 @@ fn code_point_order_without_a_mapped_collation() {
         assert_eq!(sorted(&words, Some(name)), expected, "{name}");
     }
     let cmp = |collation: Option<&str>| {
-        comparator_for(&facts(&text_type(), DbmsKind::Postgres), collation)
+        comparator_for(&facts(&text_type(), DbmsKind::Unknown), collation)
             .collation()
             .clone()
     };
@@ -294,7 +300,7 @@ fn nulls_follow_the_engine_default() {
 /// What each spelling of a collation resolves to.
 #[test]
 fn collation_names_resolve_per_engine() {
-    let icu = |name: &str| match resolve_collation(name) {
+    let icu = |name: &str| match resolve_collation(DbmsKind::Unknown, name) {
         Resolved::Icu { locale, strength } => Some((locale, strength)),
         _ => None,
     };
@@ -366,7 +372,11 @@ fn collation_names_resolve_per_engine() {
         "BINARY",
         "Latin1_General_BIN2",
     ] {
-        assert_eq!(resolve_collation(name), Resolved::CodePoint, "{name}");
+        assert_eq!(
+            resolve_collation(DbmsKind::Unknown, name),
+            Resolved::CodePoint,
+            "{name}"
+        );
     }
     for name in [
         "default",
@@ -377,7 +387,11 @@ fn collation_names_resolve_per_engine() {
         "xx_nowhere_ci",
         "tr",
     ] {
-        assert_eq!(resolve_collation(name), Resolved::NoEquivalent, "{name}");
+        assert_eq!(
+            resolve_collation(DbmsKind::Unknown, name),
+            Resolved::NoEquivalent,
+            "{name}"
+        );
     }
 }
 
@@ -591,4 +605,274 @@ fn the_comparator_is_send_and_sync() {
     fn check<T: Send + Sync>(_: &T) {}
     let cmp = comparator_for(&facts(&text_type(), DbmsKind::Postgres), tr_collation());
     check(&cmp);
+}
+
+// ---- ## m3c-t36 fix round 1 ---------------------------------------------------------------
+
+/// I1: PostgreSQL 17's `interval` ±infinity sort around the finite intervals, as PG does:
+/// `-infinity, 1 day, infinity` ascending.
+#[test]
+fn interval_infinity_sorts_around_the_finite_intervals() {
+    let day = Value::Interval {
+        months: 0,
+        days: 1,
+        micros: 0,
+    };
+    let values = [
+        day.clone(),
+        Value::Special(SpecialVal::PosInfinity),
+        Value::Special(SpecialVal::NegInfinity),
+    ];
+    let out = sorted_values(&values, &LogicalType::Interval, DbmsKind::Postgres, None);
+    assert_eq!(
+        out,
+        [
+            Value::Special(SpecialVal::NegInfinity),
+            day,
+            Value::Special(SpecialVal::PosInfinity),
+        ]
+    );
+}
+
+/// m1: an integer against a float compares exactly (no rounding through `f64` past 2^53), so
+/// the order is transitive; an exact decimal against a float too.
+#[test]
+fn integers_and_floats_compare_exactly() {
+    let real = LogicalType::Float { bits: 64 };
+    let cmp = comparator_for(&facts(&real, DbmsKind::Sqlite), None);
+    let big = 1i64 << 53;
+    let (a, f, b) = (
+        ValueRef::Int(big + 1),
+        ValueRef::F64(big as f64),
+        ValueRef::Int(big),
+    );
+    assert_eq!(cmp.cmp(a, f), Ordering::Greater);
+    assert_eq!(cmp.cmp(f, b), Ordering::Equal);
+    assert_eq!(cmp.cmp(a, b), Ordering::Greater);
+    assert_eq!(
+        cmp.cmp(ValueRef::F64(0.5), ValueRef::Int(0)),
+        Ordering::Greater
+    );
+    assert_eq!(
+        cmp.cmp(ValueRef::F64(0.5), ValueRef::Int(1)),
+        Ordering::Less
+    );
+    assert_eq!(
+        cmp.cmp(ValueRef::F64(-0.5), ValueRef::Int(0)),
+        Ordering::Less
+    );
+    assert_eq!(
+        cmp.cmp(ValueRef::F64(-0.5), ValueRef::Int(-1)),
+        Ordering::Greater
+    );
+    assert_eq!(
+        cmp.cmp(ValueRef::F64(1e30), ValueRef::UInt(u64::MAX)),
+        Ordering::Greater
+    );
+    assert_eq!(
+        cmp.cmp(ValueRef::F64(-1e30), ValueRef::Int(i64::MIN)),
+        Ordering::Less
+    );
+    assert_eq!(
+        cmp.cmp(ValueRef::Int(3), ValueRef::F64(3.0)),
+        Ordering::Equal
+    );
+    // 0.1 as a binary float is 0.1000000000000000055…: above the exact decimal 0.1.
+    let tenth = DecimalVal::parse("0.1").unwrap();
+    assert_eq!(
+        cmp.cmp(ValueRef::Decimal(tenth.view()), ValueRef::F64(0.1)),
+        Ordering::Less
+    );
+    let half = DecimalVal::parse("0.50").unwrap();
+    assert_eq!(
+        cmp.cmp(ValueRef::Decimal(half.view()), ValueRef::F64(0.5)),
+        Ordering::Equal
+    );
+    // A column of mixed integers and floats (SQLite) sorts the same whatever the input order.
+    let mixed = [
+        Value::Int(big + 1),
+        Value::F64(-0.25),
+        Value::Int(-1),
+        Value::Int(big),
+        Value::F64(big as f64 + 4.0),
+    ];
+    let one = sorted_values(&mixed, &real, DbmsKind::Sqlite, None);
+    let mut reversed = mixed.to_vec();
+    reversed.reverse();
+    let two = sorted_values(&reversed, &real, DbmsKind::Sqlite, None);
+    assert_eq!(one, two);
+    assert_eq!(
+        one,
+        [
+            Value::Int(-1),
+            Value::F64(-0.25),
+            Value::Int(big),
+            Value::Int(big + 1),
+            Value::F64(big as f64 + 4.0),
+        ]
+    );
+}
+
+/// m1: a SQLite `BOOLEAN` column holding other integers sorts them as numbers (SQLite does:
+/// `-1, 0, 1, 2`); elsewhere booleans keep their own kind.
+#[test]
+fn sqlite_booleans_sort_as_numbers() {
+    let values = [
+        Value::Int(2),
+        Value::Bool(true),
+        Value::Int(-1),
+        Value::Bool(false),
+    ];
+    assert_eq!(
+        sorted_values(&values, &LogicalType::Bool, DbmsKind::Sqlite, None),
+        [
+            Value::Int(-1),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Int(2)
+        ]
+    );
+}
+
+/// m7: two `timetz` values at the same UTC instant order as PostgreSQL's `timetz_cmp`: by the
+/// zone in seconds west, ascending (the eastern offset first).
+#[test]
+fn timetz_ties_follow_postgres() {
+    let time = LogicalType::Time {
+        precision: 6,
+        tz: true,
+    };
+    let cmp = comparator_for(&facts(&time, DbmsKind::Postgres), None);
+    let h = |n: u64| TimeVal {
+        nanos_of_day: n * 3_600_000_000_000,
+    };
+    // 12:00+03 and 09:00+00 are both 09:00 UTC.
+    assert_eq!(
+        cmp.cmp(ValueRef::TimeTz(h(12), 3 * 3600), ValueRef::TimeTz(h(9), 0)),
+        Ordering::Less
+    );
+}
+
+/// m7: MySQL's partial zero dates compare by their parts: `2020-00-15` after 2019 and before
+/// `2020-01-00`, which is before `2020-01-01`; the zero date first.
+#[test]
+fn mysql_partial_zero_dates_compare_by_their_parts() {
+    let partial = |t: &str| Value::Special(SpecialVal::PartialZeroDate(t.into()));
+    let values = [
+        Value::Date(hacivat_values::DateVal(18_262)), // 2020-01-01
+        partial("2020-01-00"),
+        partial("2020-00-15"),
+        Value::Special(SpecialVal::ZeroDate),
+        Value::Date(hacivat_values::DateVal(18_261)), // 2019-12-31
+    ];
+    assert_eq!(
+        sorted_values(&values, &LogicalType::Date, DbmsKind::MySql, None),
+        [
+            Value::Special(SpecialVal::ZeroDate),
+            Value::Date(hacivat_values::DateVal(18_261)),
+            partial("2020-00-15"),
+            partial("2020-01-00"),
+            Value::Date(hacivat_values::DateVal(18_262)),
+        ]
+    );
+}
+
+/// m7: SQL Server's `*_BIN2` orders by UTF-16 code unit: a supplementary character (a
+/// surrogate pair, 0xD83D…) before U+FFFD, the reverse of code-point order.
+#[test]
+fn sql_server_bin2_is_utf16_order() {
+    let words = ["\u{FFFD}", "\u{1F600}"];
+    assert_eq!(
+        sorted_on(DbmsKind::MsSql, &words, Some("Latin1_General_100_BIN2")),
+        ["\u{1F600}", "\u{FFFD}"]
+    );
+    assert_eq!(
+        sorted_on(DbmsKind::Postgres, &words, Some("C")),
+        ["\u{FFFD}", "\u{1F600}"]
+    );
+}
+
+/// m7: a collation name resolves with the engine known: a PostgreSQL collation named like a
+/// MySQL one is not taken for MySQL's rules, and the other way round.
+#[test]
+fn collation_names_resolve_with_the_engine() {
+    let tr = Resolved::Icu {
+        locale: "tr".into(),
+        strength: Strength::Primary,
+    };
+    assert_eq!(resolve_collation(DbmsKind::MySql, "utf8mb4_turkish_ci"), tr);
+    assert_eq!(
+        resolve_collation(DbmsKind::MariaDb, "utf8mb4_turkish_ci"),
+        tr
+    );
+    assert_eq!(
+        resolve_collation(DbmsKind::Postgres, "x_turkish_ci"),
+        Resolved::NoEquivalent
+    );
+    assert_eq!(
+        resolve_collation(DbmsKind::Postgres, "tr_TR.utf8"),
+        Resolved::Icu {
+            locale: "tr-TR".into(),
+            strength: Strength::Tertiary
+        }
+    );
+    assert_eq!(
+        resolve_collation(DbmsKind::MySql, "tr_TR.utf8"),
+        Resolved::NoEquivalent
+    );
+    assert_eq!(
+        resolve_collation(DbmsKind::Postgres, "utf8mb4_bin"),
+        Resolved::NoEquivalent
+    );
+    assert_eq!(
+        resolve_collation(DbmsKind::Sqlite, "BINARY"),
+        Resolved::CodePoint
+    );
+    assert_eq!(
+        resolve_collation(DbmsKind::Sqlite, "utf8mb4_turkish_ci"),
+        Resolved::NoEquivalent
+    );
+    assert_eq!(
+        resolve_collation(DbmsKind::MsSql, "Latin1_General_100_BIN2"),
+        Resolved::Utf16CodeUnits
+    );
+    // NO PAD collations (MariaDB `nopad`) map like their PAD SPACE twins.
+    assert_eq!(
+        resolve_collation(DbmsKind::MariaDb, "utf8mb4_uca1400_turkish_nopad_ai_ci"),
+        tr
+    );
+}
+
+/// m7: a PAD SPACE collation (MySQL's legacy and `uca1400` ones without `nopad`, SQL Server)
+/// ignores trailing spaces; a NO PAD one (MySQL 8's `_0900_`, PostgreSQL) does not.
+#[test]
+fn trailing_spaces_follow_the_pad_attribute() {
+    let cmp =
+        |engine: DbmsKind, name: &str| comparator_for(&facts(&text_type(), engine), Some(name));
+    let (a, a_space) = (ValueRef::Text("a"), ValueRef::Text("a  "));
+    assert_eq!(
+        cmp(DbmsKind::MySql, "utf8mb4_unicode_ci").cmp(a, a_space),
+        Ordering::Equal
+    );
+    assert_eq!(
+        cmp(DbmsKind::MySql, "utf8mb4_bin").cmp(a, a_space),
+        Ordering::Equal
+    );
+    assert_eq!(
+        cmp(DbmsKind::MySql, "utf8mb4_0900_ai_ci").cmp(a, a_space),
+        Ordering::Less
+    );
+    assert_eq!(
+        cmp(DbmsKind::MySql, "utf8mb4_0900_bin").cmp(a, a_space),
+        Ordering::Less
+    );
+    assert_eq!(
+        cmp(DbmsKind::MariaDb, "utf8mb4_uca1400_nopad_ai_ci").cmp(a, a_space),
+        Ordering::Less
+    );
+    assert_eq!(cmp(DbmsKind::Postgres, "C").cmp(a, a_space), Ordering::Less);
+    assert_eq!(
+        cmp(DbmsKind::MsSql, "Latin1_General_100_BIN2").cmp(a, a_space),
+        Ordering::Equal
+    );
 }

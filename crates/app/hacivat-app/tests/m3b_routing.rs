@@ -443,12 +443,9 @@ fn new_slots_render_nothing_so_m3a_shots_hold(cx: &mut TestAppContext) {
         .iter()
         .map(|e| e.id)
         .collect();
-    for id in [
-        "history.open",
-        "results.next_tab",
-        "grid.sort_asc",
-        "grid.view_text",
-    ] {
+    // ## m3c-t36 (named exception): the sort commands are real since Task 36 (enabled with a
+    // shown grid; `results_sort.rs` covers them), so they are not checked as stubs here.
+    for id in ["history.open", "results.next_tab", "grid.view_text"] {
         assert!(!listed.contains(&id), "{id}");
     }
 }
@@ -648,12 +645,11 @@ fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
     // The app-registered stubs (disabled since Task 1b).
     // ## m3b-t27-history (named exception): `history.open` is no longer a stub; it is enabled
     // once the history store is open (`history_ui.rs` covers it).
+    // ## m3c-t36 (named exception): `grid.sort_asc`, `grid.sort_desc` and `grid.clear_sort`
+    // are no longer stubs (Task 36 filled them; enabled with a shown grid).
     stubs.extend([
         "results.next_tab",
         "results.prev_tab",
-        "grid.sort_asc",
-        "grid.sort_desc",
-        "grid.clear_sort",
         "grid.view_table",
         "grid.view_transposed",
         "grid.view_text",

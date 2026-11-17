@@ -543,16 +543,28 @@ impl ResultsHost {
     }
 
     /// Forgets consoles that are gone and grids whose tab closed.
-    fn prune(&mut self, cx: &App) {
+    fn prune(&mut self, cx: &mut App) {
         let live = Consoles::ids(cx);
-        self.tiles.retain(|id, _| live.contains(id));
+        // ## m3c-t36 fix round 1 (m2): a grid that goes takes its sort state (and job) along.
+        let mut closed = Vec::new();
+        self.tiles.retain(|id, tile| {
+            let keep = live.contains(id);
+            if !keep {
+                closed.extend(tile.grids.iter().map(|slot| slot.view.entity_id()));
+            }
+            keep
+        });
         for tile in self.tiles.values_mut() {
             let results = tile.results.read(cx);
             tile.grids.retain(|slot| {
-                results
+                let keep = results
                     .tabs()
                     .iter()
-                    .any(|t| Rc::ptr_eq(t.adapter(), &slot.adapter))
+                    .any(|t| Rc::ptr_eq(t.adapter(), &slot.adapter));
+                if !keep {
+                    closed.push(slot.view.entity_id());
+                }
+                keep
             });
             // ## m3b-t25-results: the facts of tabs that are gone go with them.
             tile.facts.retain(|(key, unit), _| {
@@ -561,6 +573,9 @@ impl ResultsHost {
                     .iter()
                     .any(|t| t.key() == *key && t.unit() == *unit)
             });
+        }
+        for grid in closed {
+            super::sort::grid_closed(grid, cx);
         }
     }
 
@@ -631,8 +646,7 @@ impl ResultsHost {
                 // ## m3c-t36 (ledger 253 I5): the region is in view rows; the copy reads them
                 // through the grid's map, so it holds the rows the user sees.
                 let map = grid.read(cx).view_map().clone();
-                copy::copy_region_in(&copied, region.clone(), map, *headers, *generation, cx)
-                    .detach();
+                copy::copy_region(&copied, region.clone(), map, *headers, *generation, cx).detach();
             }
             GridEvent::CopyRefused(refusal) => copy::copy_refused(*refusal, cx),
             GridEvent::ColumnResized { col, width } => {
@@ -850,6 +864,11 @@ impl ResultsHost {
             }
             ActiveResult::Tab(ix) => {
                 let grid = self.ensure_grid(console, ix, cx)?;
+                // ## m3c-t36 fix round 1 (m2): a re-run's grid drops the old run's sort (and
+                // stops its job).
+                if let Some(adapter) = results.read(cx).tab(ix).map(|e| e.adapter().clone()) {
+                    super::sort::sync(grid.entity_id(), &adapter, cx);
+                }
                 self.guard_focus(Some(&grid), window, cx);
                 let (key, unit) = {
                     let entry = results.read(cx).tab(ix)?;

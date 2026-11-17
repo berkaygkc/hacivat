@@ -2791,3 +2791,6 @@ hv-grid-sort-tip-unknown = Sort level { $lvl }, { $dir }. The column's collation
 #   $lvl (Number) - the sort level, 1 for the first key, e.g. 1.
 #   $dir (String) - hv-grid-dir-asc or hv-grid-dir-desc, e.g. "ascending".
 hv-grid-sort-level = Sort level { $lvl }, { $dir }.
+# Fix round 1: the notice when a local sort stops on an internal error; the grid keeps the
+# order it showed.
+hv-grid-sort-failed = The sort stopped on an internal error. The grid keeps the order it showed.

@@ -89,7 +89,8 @@ impl<K: Fn() -> bool + ?Sized> Checker<'_, K> {
 /// their order), or [`Cancelled`] once `cancelled` answers `true` (looked at every
 /// [`CANCEL_EVERY`] comparisons, and before each merge pass). Above [`PARALLEL_ABOVE`] rows the
 /// rows are split into up to [`MAX_THREADS`] runs sorted on their own threads (scoped, so they
-/// borrow `cmp`), then merged pairwise, left run first.
+/// borrow `cmp`), then merged pairwise, left run first. A panic in `cmp` on a worker panics
+/// here too, as on the calling thread (never a [`Cancelled`]).
 ///
 /// Call it off the UI thread: it is O(n log n) comparisons.
 pub fn stable_order<C, K>(rows: u64, cmp: &C, cancelled: &K) -> Result<Vec<u64>, Cancelled>
@@ -131,7 +132,11 @@ where
             .collect();
         handles
             .into_iter()
-            .map(|h| h.join().unwrap_or(Err(Cancelled)))
+            // ## m3c-t36 fix round 1 (m4): a worker's panic is the caller's, never a cancel.
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
             .collect::<Result<Vec<_>, _>>()
     })?;
     // Merge neighbours pairwise (left first: stability), each level on its own threads.
@@ -164,7 +169,11 @@ where
                 .collect();
             handles
                 .into_iter()
-                .map(|h| h.join().unwrap_or(Err(Cancelled)))
+                // ## m3c-t36 fix round 1 (m4): a worker's panic is the caller's, never a cancel.
+                .map(|h| {
+                    h.join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
                 .collect::<Result<Vec<_>, _>>()
         })?;
     }
@@ -337,6 +346,20 @@ mod tests {
         assert!(calls.load(AtomicOrdering::Relaxed) <= CANCEL_EVERY);
         // On several threads too.
         assert_eq!(stable_order_on(n, 4, &cmp, &|| true), Err(Cancelled));
+    }
+
+    // ## m3c-t36 fix round 1 (m4)
+    #[test]
+    #[should_panic(expected = "comparator broke")]
+    fn a_worker_panic_is_not_a_cancellation() {
+        let n = 10_000;
+        let cmp = |a: u64, b: u64| {
+            if a == 7_777 || b == 7_777 {
+                panic!("comparator broke");
+            }
+            a.cmp(&b)
+        };
+        let _ = stable_order_on(n, 4, &cmp, &|| false);
     }
 
     #[test]

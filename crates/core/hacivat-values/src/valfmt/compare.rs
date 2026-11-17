@@ -5,7 +5,8 @@
 //! key, NULLs included, as `ORDER BY … DESC` does.
 //!
 //! - **Text compares by the column's database collation, never by the UI locale.** A
-//!   collation name the engine reports is resolved by [`resolve_collation`]: an ICU one
+//!   collation name the engine reports is resolved by [`resolve_collation`] (with the engine:
+//!   only its own spellings are read): an ICU one
 //!   (PostgreSQL `tr-x-icu`, `und-u-ks-level2`), a glibc locale (`tr_TR.utf8`), a MySQL or
 //!   MariaDB UCA one (`utf8mb4_tr_0900_ai_ci`, `utf8mb4_turkish_ci`,
 //!   `utf8mb4_uca1400_turkish_ai_ci`), a SQL Server one (`Turkish_CI_AS`) maps to the ICU4X
@@ -20,11 +21,14 @@
 //!   (sign, then the digits; `1.50` equals `1.5`, `-0.00` equals `0`), **never through a
 //!   float**, past 38 digits too; floats by IEEE order with NaN after +∞ (PostgreSQL's order)
 //!   and −0 equal to 0; −∞/+∞/NaN specials around the finite numbers. A float against an
-//!   exact number (a column the engine never types that way) compares through the float.
+//!   integer or an exact decimal compares exactly too (a SQLite column holds both; fix round 1,
+//!   m1), so the order stays total; SQLite's booleans are the integers 0 and 1.
 //! - **Temporal values compare by instant**: a `timestamptz` by its UTC instant whatever
-//!   offset the server sent, a date as its midnight, a `timetz` by its UTC time (then its
-//!   offset), an interval as PostgreSQL does (a month is 30 days, a day 24 hours); MySQL's
-//!   zero dates before every date, −infinity first and +infinity last.
+//!   offset the server sent, a date as its midnight, a `timetz` by its UTC time (then, as
+//!   PostgreSQL's `timetz_cmp`, its zone in seconds west), an interval as PostgreSQL does (a
+//!   month is 30 days, a day 24 hours) with its ±infinity around it; MySQL's zero date before
+//!   every date and its partial zero dates (`2020-00-15`) by their parts; −infinity first and
+//!   +infinity last.
 //! - **Enums** (PostgreSQL `CREATE TYPE … AS ENUM`, MySQL `ENUM`) compare by their labels'
 //!   declared order, as both engines sort them; a label the type does not list sorts after
 //!   them, by text.
@@ -75,6 +79,9 @@ pub enum Resolved {
     Icu { locale: String, strength: Strength },
     /// The collation orders by code point (binary on UTF-8).
     CodePoint,
+    // ## m3c-t36 fix round 1 (m7)
+    /// The collation orders by UTF-16 code unit (SQL Server's `*_BIN2` and `*_BIN`): exact.
+    Utf16CodeUnits,
     /// No equivalent here: text falls back to code point.
     NoEquivalent,
 }
@@ -133,11 +140,21 @@ pub struct Comparator {
     temporal: bool,
     /// An enum column's labels by declared position.
     labels: Option<HashMap<Arc<str>, usize>>,
+    // ## m3c-t36 fix round 1
+    /// The column holds intervals: ±infinity specials are intervals (I1).
+    interval: bool,
+    /// Booleans are the numbers 0 and 1 (SQLite, whose `BOOLEAN` holds any integer; m1).
+    numeric_bools: bool,
+    /// The collation ignores trailing spaces (PAD SPACE: MySQL's legacy collations, SQL
+    /// Server; m7).
+    pad_space: bool,
 }
 
 /// How text compares.
 enum TextOrder {
     CodePoint,
+    // ## m3c-t36 fix round 1 (m7)
+    Utf16,
     Icu(Box<CollatorBorrowed<'static>>),
 }
 
@@ -157,7 +174,7 @@ pub fn comparator_for(col: &ColumnFacts<'_>, collation: Option<&str>) -> Compara
         None => (TextOrder::CodePoint, CollationUse::Unknown),
         Some(name) => {
             let named: Arc<str> = Arc::from(name);
-            match resolve_collation(name) {
+            match resolve_collation(col.engine, name) {
                 Resolved::Icu { locale, strength } => match collator(&locale, strength) {
                     Some(c) => (
                         TextOrder::Icu(Box::new(c)),
@@ -169,12 +186,18 @@ pub fn comparator_for(col: &ColumnFacts<'_>, collation: Option<&str>) -> Compara
                     TextOrder::CodePoint,
                     CollationUse::CodePoint { name: named },
                 ),
+                Resolved::Utf16CodeUnits => {
+                    (TextOrder::Utf16, CollationUse::CodePoint { name: named })
+                }
                 Resolved::NoEquivalent => {
                     (TextOrder::CodePoint, CollationUse::Fallback { name: named })
                 }
             }
         }
     };
+    let pad_space = collation
+        .name()
+        .is_some_and(|n| pads_trailing_spaces(col.engine, n));
     Comparator {
         text,
         nulls: nulls_at(col.engine),
@@ -193,6 +216,47 @@ pub fn comparator_for(col: &ColumnFacts<'_>, collation: Option<&str>) -> Compara
             ),
             _ => None,
         },
+        interval: matches!(col.logical, LogicalType::Interval),
+        numeric_bools: col.engine == DbmsKind::Sqlite,
+        pad_space,
+    }
+}
+
+// ## m3c-t36 fix round 1 (m7)
+/// Whether `engine`'s collation `name` ignores trailing spaces when it compares (PAD SPACE):
+/// MySQL's and MariaDB's collations except MySQL 8's `_0900_` family, MariaDB's `nopad` ones
+/// and `binary`; every SQL Server collation. PostgreSQL and SQLite compare them.
+pub fn pads_trailing_spaces(engine: DbmsKind, name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    match family(engine) {
+        Family::MySql => lower != "binary" && !lower.contains("_0900_") && !lower.contains("nopad"),
+        Family::MsSql => true,
+        _ => false,
+    }
+}
+
+/// The engine families whose collation names [`resolve_collation`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    Postgres,
+    MySql,
+    MsSql,
+    Sqlite,
+    /// The engine does not say: every family's spelling is tried.
+    Any,
+}
+
+fn family(engine: DbmsKind) -> Family {
+    match engine {
+        DbmsKind::Postgres
+        | DbmsKind::Redshift
+        | DbmsKind::Cockroach
+        | DbmsKind::Yugabyte
+        | DbmsKind::Timescale => Family::Postgres,
+        DbmsKind::MySql | DbmsKind::MariaDb | DbmsKind::TiDb => Family::MySql,
+        DbmsKind::MsSql | DbmsKind::AzureSql => Family::MsSql,
+        DbmsKind::Sqlite => Family::Sqlite,
+        _ => Family::Any,
     }
 }
 
@@ -249,7 +313,7 @@ impl Comparator {
             Kind::Number => cmp_numbers(number(a), number(b)),
             Kind::Text => self.cmp_text(a, b),
             Kind::Bytes => as_bytes(&a).cmp(as_bytes(&b)),
-            Kind::DateTime => instant(a).cmp(&instant(b)),
+            Kind::DateTime => cmp_datetimes(a, b),
             Kind::Time => time_key(a).cmp(&time_key(b)),
             Kind::Interval => interval_key(a).cmp(&interval_key(b)),
         }
@@ -258,6 +322,8 @@ impl Comparator {
     fn kind(&self, v: ValueRef<'_>) -> Kind {
         match v {
             ValueRef::Null | ValueRef::Missing | ValueRef::Default => Kind::Null,
+            // ## m3c-t36 fix round 1 (m1): SQLite's booleans are integers.
+            ValueRef::Bool(_) if self.numeric_bools => Kind::Number,
             ValueRef::Bool(_) => Kind::Bool,
             ValueRef::Int(_)
             | ValueRef::UInt(_)
@@ -268,6 +334,10 @@ impl Comparator {
                 SpecialVal::ZeroDate | SpecialVal::PartialZeroDate(_) => Kind::DateTime,
                 SpecialVal::PosInfinity | SpecialVal::NegInfinity if self.temporal => {
                     Kind::DateTime
+                }
+                // ## m3c-t36 fix round 1 (I1): PostgreSQL 17's interval ±infinity.
+                SpecialVal::PosInfinity | SpecialVal::NegInfinity if self.interval => {
+                    Kind::Interval
                 }
                 _ => Kind::Number,
             },
@@ -301,10 +371,29 @@ impl Comparator {
                 return by_rank;
             }
         }
+        // ## m3c-t36 fix round 1 (m7): a PAD SPACE collation ignores trailing spaces.
+        let pad = |b: &'_ [u8]| -> usize {
+            if self.pad_space {
+                b.len() - b.iter().rev().take_while(|c| **c == b' ').count()
+            } else {
+                b.len()
+            }
+        };
         match &self.text {
             // UTF-8 byte order is code-point order.
-            TextOrder::CodePoint => text_bytes(&a).cmp(text_bytes(&b)),
-            TextOrder::Icu(c) => c.compare(&text_str(&a), &text_str(&b)),
+            TextOrder::CodePoint => {
+                let (x, y) = (text_bytes(&a), text_bytes(&b));
+                x[..pad(x)].cmp(&y[..pad(y)])
+            }
+            TextOrder::Utf16 => {
+                let (x, y) = (text_str(&a), text_str(&b));
+                let (x, y) = (&x[..pad(x.as_bytes())], &y[..pad(y.as_bytes())]);
+                x.encode_utf16().cmp(y.encode_utf16())
+            }
+            TextOrder::Icu(c) => {
+                let (x, y) = (text_str(&a), text_str(&b));
+                c.compare(&x[..pad(x.as_bytes())], &y[..pad(y.as_bytes())])
+            }
         }
     }
 }
@@ -409,6 +498,8 @@ fn number(v: ValueRef<'_>) -> Num<'_> {
         ValueRef::Decimal(d) => Num::Dec(d),
         ValueRef::Special(SpecialVal::NegInfinity) => Num::NegInf,
         ValueRef::Special(SpecialVal::PosInfinity) => Num::PosInf,
+        // ## m3c-t36 fix round 1 (m1): a SQLite boolean is the integer it holds.
+        ValueRef::Bool(b) => Num::Int(i128::from(b)),
         _ => Num::NaN,
     }
 }
@@ -423,20 +514,42 @@ fn cmp_numbers(a: Num<'_>, b: Num<'_>) -> Ordering {
         (Num::Dec(x), Num::Dec(y)) => cmp_decimals(x, y),
         (Num::Int(x), Num::Dec(y)) => cmp_decimal_text(&x.to_string(), &canonical(y)),
         (Num::Dec(x), Num::Int(y)) => cmp_decimal_text(&canonical(x), &y.to_string()),
-        // A float against a float, or (never typed so by an engine) an exact number.
-        (x, y) => as_f64(x).partial_cmp(&as_f64(y)).unwrap_or(Ordering::Equal),
+        // ## m3c-t36 fix round 1 (m1): a float against an exact number compares exactly (a
+        // SQLite column holds both), so the order stays transitive.
+        (Num::Float(x), Num::Float(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+        (Num::Int(x), Num::Float(y)) => cmp_int_float(x, y),
+        (Num::Float(x), Num::Int(y)) => cmp_int_float(y, x).reverse(),
+        (Num::Dec(x), Num::Float(y)) => cmp_decimal_text(&canonical(x), &exact_float(y)),
+        (Num::Float(x), Num::Dec(y)) => cmp_decimal_text(&exact_float(x), &canonical(y)),
+        // The bands above keep the specials out of here.
+        _ => Ordering::Equal,
     }
 }
 
-fn as_f64(n: Num<'_>) -> f64 {
-    match n {
-        Num::Int(i) => i as f64,
-        Num::Float(f) => f,
-        Num::Dec(d) => canonical(d).parse().unwrap_or(0.0),
-        Num::NegInf => f64::NEG_INFINITY,
-        Num::PosInf => f64::INFINITY,
-        Num::NaN => f64::NAN,
+/// An integer against a finite float, exactly: against the float's floor as an integer (exact:
+/// a float that large has no fraction), then its fraction.
+fn cmp_int_float(i: i128, f: f64) -> Ordering {
+    // Past every 64-bit integer: the float's sign decides.
+    const LIMIT: f64 = 1e20;
+    if f >= LIMIT {
+        return Ordering::Less;
     }
+    if f <= -LIMIT {
+        return Ordering::Greater;
+    }
+    let floor = f.floor();
+    // Exact: `floor` is an integer below 1e20 in magnitude.
+    let whole = floor as i128;
+    match i.cmp(&whole) {
+        Ordering::Equal if f > floor => Ordering::Less,
+        other => other,
+    }
+}
+
+/// A finite float's exact decimal value as text (a binary float has a finite decimal
+/// expansion: at most 1,074 fractional digits).
+fn exact_float(f: f64) -> String {
+    format!("{f:.1074}")
 }
 
 fn canonical(d: DecimalRef<'_>) -> String {
@@ -525,85 +638,171 @@ fn split_decimal(s: &str) -> (bool, &str, &str) {
 
 // ---- temporal values --------------------------------------------------------------------------
 
-/// A date or timestamp's instant, in nanoseconds since the epoch; specials around them.
-fn instant(v: ValueRef<'_>) -> (u8, i128) {
+/// Two dates or timestamps (module docs): by instant, MySQL's zero dates by their parts
+/// (## m3c-t36 fix round 1, m7), ±infinity around them.
+fn cmp_datetimes(a: ValueRef<'_>, b: ValueRef<'_>) -> Ordering {
+    let band = |v: &ValueRef<'_>| match v {
+        ValueRef::Special(SpecialVal::NegInfinity) => 0u8,
+        ValueRef::Special(SpecialVal::PosInfinity) => 2,
+        _ => 1,
+    };
+    let by_band = band(&a).cmp(&band(&b));
+    if by_band != Ordering::Equal || band(&a) != 1 {
+        return by_band;
+    }
+    let zero = |v: &ValueRef<'_>| {
+        matches!(
+            v,
+            ValueRef::Special(SpecialVal::ZeroDate | SpecialVal::PartialZeroDate(_))
+        )
+    };
+    if zero(&a) || zero(&b) {
+        return parts(a).cmp(&parts(b));
+    }
+    instant(a).cmp(&instant(b))
+}
+
+/// A date or timestamp's instant, in nanoseconds since the epoch.
+fn instant(v: ValueRef<'_>) -> i128 {
     const NANOS: i128 = 1_000_000_000;
     match v {
-        ValueRef::Special(SpecialVal::NegInfinity) => (0, 0),
-        ValueRef::Special(SpecialVal::ZeroDate) => (1, 0),
-        ValueRef::Special(SpecialVal::PartialZeroDate(_)) => (2, 0),
-        ValueRef::Date(d) => (3, i128::from(d.0) * 86_400 * NANOS),
+        ValueRef::Date(d) => i128::from(d.0) * 86_400 * NANOS,
         ValueRef::Timestamp(t) | ValueRef::TimestampTz { utc: t, .. } => {
-            (3, i128::from(t.secs) * NANOS + i128::from(t.nanos))
+            i128::from(t.secs) * NANOS + i128::from(t.nanos)
         }
-        _ => (4, 0),
+        _ => 0,
     }
 }
 
-/// A time of day at UTC (a `timetz` less its offset), then the offset.
-fn time_key(v: ValueRef<'_>) -> (i128, i32) {
+/// A date or timestamp as (year, month, day, nanoseconds of the day) in UTC, a MySQL zero
+/// date as the parts it spells (`2020-00-15`: month 0); the zero date before them all.
+fn parts(v: ValueRef<'_>) -> (i64, u32, u32, i128) {
+    const DAY: i128 = 86_400 * 1_000_000_000;
+    match v {
+        ValueRef::Special(SpecialVal::PartialZeroDate(text)) => {
+            let mut n = text
+                .split(|c: char| !c.is_ascii_digit())
+                .filter(|p| !p.is_empty());
+            let mut next = || n.next().and_then(|p| p.parse::<i64>().ok()).unwrap_or(0);
+            let (y, m, d) = (next(), next(), next());
+            let (h, mi, sec) = (next(), next(), next());
+            let nanos =
+                (i128::from(h) * 3600 + i128::from(mi) * 60 + i128::from(sec)) * 1_000_000_000;
+            (
+                y,
+                u32::try_from(m).unwrap_or(0),
+                u32::try_from(d).unwrap_or(0),
+                nanos,
+            )
+        }
+        // The zero date before every date (MySQL's dates start at year 0).
+        ValueRef::Special(_) => (i64::MIN, 0, 0, 0),
+        other => {
+            let at = instant(other);
+            let (days, time) = (at.div_euclid(DAY), at.rem_euclid(DAY));
+            let (y, m, d) = civil(i64::try_from(days).unwrap_or(0));
+            (y, m, d, time)
+        }
+    }
+}
+
+/// The proleptic Gregorian (year, month, day) of `days` since 1970-01-01.
+fn civil(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d)
+}
+
+/// A time of day at UTC (a `timetz` less its offset), then, as PostgreSQL's `timetz_cmp`, the
+/// zone in seconds west (## m3c-t36 fix round 1, m7: the eastern offset first).
+fn time_key(v: ValueRef<'_>) -> (i128, i64) {
     match v {
         ValueRef::Time(t) => (i128::from(t.nanos_of_day), 0),
         ValueRef::TimeTz(t, offset) => (
             i128::from(t.nanos_of_day) - i128::from(offset) * 1_000_000_000,
-            offset,
+            -i64::from(offset),
         ),
         _ => (0, 0),
     }
 }
 
-/// An interval's length as PostgreSQL compares it: a month is 30 days, a day 24 hours.
-fn interval_key(v: ValueRef<'_>) -> i128 {
+/// An interval's length as PostgreSQL compares it (a month is 30 days, a day 24 hours), after
+/// −infinity and before +infinity (PostgreSQL 17; ## m3c-t36 fix round 1, I1).
+fn interval_key(v: ValueRef<'_>) -> (u8, i128) {
     match v {
+        ValueRef::Special(SpecialVal::NegInfinity) => (0, 0),
         ValueRef::Interval {
             months,
             days,
             micros,
-        } => (i128::from(months) * 30 + i128::from(days)) * 86_400_000_000 + i128::from(micros),
-        _ => 0,
+        } => (
+            1,
+            (i128::from(months) * 30 + i128::from(days)) * 86_400_000_000 + i128::from(micros),
+        ),
+        _ => (2, 0),
     }
 }
 
 // ---- collation names ------------------------------------------------------------------------
 
-/// What the collation `name` (as the engine spells it) resolves to (module docs).
-pub fn resolve_collation(name: &str) -> Resolved {
+/// What `engine`'s collation `name` resolves to (module docs). The engine decides which
+/// spellings are read (## m3c-t36 fix round 1, m7): a PostgreSQL collation named like a MySQL
+/// one is not taken for MySQL's rules. An engine that is not known tries every spelling.
+pub fn resolve_collation(engine: DbmsKind, name: &str) -> Resolved {
     let name = name.trim();
     if name.is_empty() {
         return Resolved::NoEquivalent;
     }
     let lower = name.to_ascii_lowercase();
+    let fam = family(engine);
+    let any = fam == Family::Any;
+    let binary = lower.ends_with("_bin") || lower.ends_with("_bin2");
+    // SQL Server's binary collations compare UTF-16 code units.
+    if fam == Family::MsSql && binary {
+        return Resolved::Utf16CodeUnits;
+    }
     // Binary collations: code-point order (UTF-8 bytes; Latin-1 bytes are its code points).
-    if matches!(
+    let pg_binary = matches!(
         lower.as_str(),
-        "c" | "posix"
-            | "c.utf-8"
-            | "c.utf8"
-            | "ucs_basic"
-            | "pg_c_utf8"
-            | "pg_unicode_fast"
-            | "binary"
-    ) || lower.ends_with("_bin")
-        || lower.ends_with("_bin2")
+        "c" | "posix" | "c.utf-8" | "c.utf8" | "ucs_basic" | "pg_c_utf8" | "pg_unicode_fast"
+    );
+    if ((any || fam == Family::Postgres) && pg_binary)
+        || ((any || fam == Family::MySql) && (binary || lower == "binary"))
+        || (fam == Family::Sqlite && lower == "binary")
+        || (any && lower == "binary")
     {
         return Resolved::CodePoint;
     }
-    // PostgreSQL ICU collations: `tr-x-icu`, `tr-TR-x-icu`, `und-u-ks-level2`.
-    if let Some(tag) = lower.strip_suffix("-x-icu") {
-        return icu_tag(tag);
-    }
-    if lower.contains("-u-") {
-        return icu_tag(&lower);
-    }
-    // glibc locales: `tr_TR.utf8`, `de_DE`, `en_US.UTF-8@euro`.
-    if let Some(r) = glibc(name) {
-        return r;
+    if any || fam == Family::Postgres {
+        // PostgreSQL ICU collations: `tr-x-icu`, `tr-TR-x-icu`, `und-u-ks-level2`.
+        if let Some(tag) = lower.strip_suffix("-x-icu") {
+            return icu_tag(tag);
+        }
+        if lower.contains("-u-") {
+            return icu_tag(&lower);
+        }
+        // glibc locales: `tr_TR.utf8`, `de_DE`, `en_US.UTF-8@euro`.
+        if let Some(r) = glibc(name) {
+            return r;
+        }
     }
     // SQL Server: `Turkish_CI_AS`, `Turkish_100_CS_AS`, `Latin1_General_CI_AI`.
-    if let Some(r) = mssql(name) {
+    if (any || fam == Family::MsSql)
+        && let Some(r) = mssql(name)
+    {
         return r;
     }
-    mysql(&lower).unwrap_or(Resolved::NoEquivalent)
+    if any || fam == Family::MySql {
+        return mysql(&lower).unwrap_or(Resolved::NoEquivalent);
+    }
+    Resolved::NoEquivalent
 }
 
 /// An ICU locale tag with its `-u-ks-levelN` strength (tertiary when absent); the language,
@@ -689,7 +888,9 @@ fn mssql(name: &str) -> Option<Resolved> {
 /// A MySQL or MariaDB collation: `<charset>_<rest>`, lower case.
 fn mysql(lower: &str) -> Option<Resolved> {
     let (_charset, rest) = lower.split_once('_')?;
-    let words: Vec<&str> = rest.split('_').collect();
+    // ## m3c-t36 fix round 1 (m7): NO PAD (`nopad`) maps like its PAD SPACE twin; the pad
+    // attribute is `pads_trailing_spaces`'.
+    let words: Vec<&str> = rest.split('_').filter(|w| *w != "nopad").collect();
     // The strength suffix: `ai_ci`, `as_ci`, `as_cs` (MySQL 8, MariaDB uca1400), or the legacy
     // `ci` / `cs`.
     let (body, strength): (&[&str], Strength) = match words.as_slice() {

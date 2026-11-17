@@ -670,6 +670,13 @@ impl GridView {
         cx.notify();
     }
 
+    // ## m3c-t36 fix round 1 (m3)
+    /// The source generation the grid last painted (`None` before its first frame): a host
+    /// publishes an order only for the rows the grid has adopted.
+    pub fn generation(&self) -> Option<u64> {
+        self.data.generation
+    }
+
     /// The sort the header shows.
     pub fn sort(&self) -> &SortSpec {
         &self.sort.spec

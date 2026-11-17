@@ -2443,3 +2443,5 @@ hv-grid-dir-desc = azalan
 hv-grid-sort-tip-unknown = Sıralama düzeyi { $lvl }, { $dir }. Sütunun harmanlaması burada bilinmiyor; metin kod noktasına göre karşılaştırılır.
 # Review: PO
 hv-grid-sort-level = Sıralama düzeyi { $lvl }, { $dir }.
+# Review: PO
+hv-grid-sort-failed = Sıralama bir iç hata yüzünden durdu. Tablo gösterdiği sırayı koruyor.

@@ -21,6 +21,12 @@
 //!   still at the generation the job sorted (a re-run moves it on). So a stale sort never
 //!   replaces a newer one, and never puts its order on a re-run's rows. A newer request also
 //!   raises the older job's flag, so it stops at its next look.
+//! - **Fix round 1.** A job stops whenever its state goes (`Running`'s drop raises its flag): a
+//!   newer sort, Cancel, Clear sort, a re-run (the tile drops the old run's state, `sync`) and
+//!   a closed tab or console (`grid_closed`, from the tile's prune). A request is refused,
+//!   claiming nothing, while the grid has not painted the adapter's current generation, and a
+//!   job publishes only to a grid that shows the generation it sorted (m3). A job that panics
+//!   keeps the order shown and says so in a notice (`hv-grid-sort-failed`), never a cancel (m4).
 //! - **A re-run drops the sort** (the grid drops its map and indicator at the new generation's
 //!   first frame); sorting again is the user's call.
 //! - **Collation (R-M3-70).** Each key compares by `valfmt::compare::comparator_for` with the
@@ -60,7 +66,9 @@ use hacivat_values::valfmt::compare::{CollationUse, Comparator, comparator_for};
 use hacivat_values::valfmt::{BinaryDisplay, ColumnFacts};
 use hacivat_values::{ColumnMeta, LogicalType, ValueRef};
 
-use crate::l10n_global::tr;
+use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
+
+use crate::l10n_global::{text_fn, tr};
 use crate::results::adapter::GridAdapter;
 
 /// The sort commands: `(id, title)`.
@@ -177,7 +185,27 @@ pub fn sort_rows(
 
 /// Each grid's local sort, by the grid's entity.
 #[derive(Default)]
-struct Sorts(HashMap<EntityId, LocalSort>);
+struct Sorts(HashMap<EntityId, LocalSort>, TestHooks);
+
+// ## m3c-t36 fix round 1 (m8): test seams (`test-support`): finished jobs can be held and
+// published later in a chosen order, and the next job can be made to fail.
+#[derive(Default)]
+struct TestHooks {
+    #[cfg(feature = "test-support")]
+    held: Option<Vec<Finished>>,
+    #[cfg(feature = "test-support")]
+    fail_next: bool,
+}
+
+/// A finished job, waiting to be published.
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+struct Finished {
+    key: EntityId,
+    request: u64,
+    spec: SortSpec,
+    map: ViewMap,
+    tips: Vec<TextFn>,
+}
 
 impl Global for Sorts {}
 
@@ -210,6 +238,22 @@ impl Running {
     fn stop(&self) {
         self.cancel.store(true, AtomicOrdering::Relaxed);
     }
+}
+
+// ## m3c-t36 fix round 1 (m2): a job whose state goes (a newer sort, Cancel, Clear sort, a
+// re-run, a closed tab or grid) stops at its next look at the flag.
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// How a job ended.
+enum JobEnd {
+    Done(ViewMap),
+    Cancelled,
+    /// It panicked (a comparator bug): the old order stays and the user is told.
+    Failed,
 }
 
 /// A grid's sort, as the tests and the commands see it.
@@ -260,6 +304,13 @@ pub fn on_requested(
     }
     let key = grid.entity_id();
     let generation = adapter.generation();
+    // ## m3c-t36 fix round 1 (m3): the grid has not painted this run's rows yet (a re-run
+    // arrived a frame ago): an order now would land on rows it then drops. Nothing is sorted,
+    // and nothing says it is.
+    if grid.read(cx).generation() != Some(generation) {
+        forget(key, cx);
+        return;
+    }
     let snapshot = adapter.snapshot();
     let rows = snapshot.row_count();
     let engine = adapter.display().engine();
@@ -283,23 +334,46 @@ pub fn on_requested(
             state.shown = None;
         }
         state.on_change = on_change;
-        if let Some(old) = state.running.take() {
-            old.stop();
-        }
+        // A newer sort: the older job's drop raises its flag.
+        state.running = None;
         state.request += 1;
         state.request
     };
     let cancel = Arc::new(AtomicBool::new(false));
     let flag = cancel.clone();
+    #[cfg(feature = "test-support")]
+    let fail = std::mem::take(&mut cx.default_global::<Sorts>().1.fail_next);
+    #[cfg(not(feature = "test-support"))]
+    let fail = false;
     let job = cx.background_spawn(async move {
-        let order = sort_rows(&snapshot, &keys, &|| flag.load(AtomicOrdering::Relaxed))?;
-        Ok::<_, Cancelled>(ViewMap::permuted(Arc::from(order), rows, rows))
+        // ## m3c-t36 fix round 1 (m4): a panic is a failure the user sees, not a cancel.
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if fail {
+                panic!("a sort job failed on purpose (test seam)");
+            }
+            sort_rows(&snapshot, &keys, &|| flag.load(AtomicOrdering::Relaxed))
+        }));
+        match ran {
+            Ok(Ok(order)) => JobEnd::Done(ViewMap::permuted(Arc::from(order), rows, rows)),
+            Ok(Err(Cancelled)) => JobEnd::Cancelled,
+            Err(_) => JobEnd::Failed,
+        }
     });
-    let publish = cx.spawn(async move |cx| {
-        let Ok(map) = job.await else {
-            return;
-        };
-        cx.update(|cx| publish(key, request, spec, map, tips, cx));
+    let publish = cx.spawn(async move |cx| match job.await {
+        JobEnd::Done(map) => cx.update(|cx| {
+            publish(
+                Finished {
+                    key,
+                    request,
+                    spec,
+                    map,
+                    tips,
+                },
+                cx,
+            )
+        }),
+        JobEnd::Cancelled => {}
+        JobEnd::Failed => cx.update(|cx| failed(key, request, cx)),
     });
     let timer = cx.spawn(async move |cx| {
         cx.background_executor().timer(SLOW_AFTER).await;
@@ -319,24 +393,37 @@ pub fn on_requested(
 
 /// A job finished: the order goes to the grid if the job is still current (the generation
 /// guard, module docs).
-fn publish(
-    key: EntityId,
-    request: u64,
-    spec: SortSpec,
-    map: ViewMap,
-    tips: Vec<TextFn>,
-    cx: &mut App,
-) {
+fn publish(done: Finished, cx: &mut App) {
+    #[cfg(feature = "test-support")]
+    if let Some(held) = cx.default_global::<Sorts>().1.held.as_mut() {
+        held.push(done);
+        return;
+    }
+    let Finished {
+        key,
+        request,
+        spec,
+        map,
+        tips,
+    } = done;
     let Some(state) = cx.try_global::<Sorts>().and_then(|s| s.0.get(&key)) else {
         return;
     };
     let (Some(grid), Some(adapter)) = (state.grid.upgrade(), state.adapter.upgrade()) else {
+        forget(key, cx);
         return;
     };
+    // The guard: still the current request and the running job, the adapter still at the
+    // generation the job sorted, and (## m3c-t36 fix round 1, m3) the grid showing it.
     let current = state.request == request
         && state.running.as_ref().is_some_and(|r| r.request == request)
-        && adapter.generation() == state.generation;
+        && adapter.generation() == state.generation
+        && grid.read(cx).generation() == Some(state.generation);
     if !current {
+        if adapter.generation() != state.generation {
+            // A re-run: the state belongs to rows that are gone.
+            forget(key, cx);
+        }
         return;
     }
     let rows = map.len();
@@ -350,6 +437,88 @@ fn publish(
         g.set_sort(spec, tips, cx);
     });
     on_change(cx);
+}
+
+// ## m3c-t36 fix round 1 (m4)
+/// A job failed (it panicked): the order shown stays, the note goes, and a notice says so.
+fn failed(key: EntityId, request: u64, cx: &mut App) {
+    let Some(state) = cx.default_global::<Sorts>().0.get_mut(&key) else {
+        return;
+    };
+    if state.running.as_ref().is_none_or(|r| r.request != request) {
+        return;
+    }
+    state.running = None;
+    let on_change = state.on_change.clone();
+    let mut toast = Toast::new(ToastKind::Info, text_fn(ids::hv::GRID_SORT_FAILED));
+    toast.icon = Some(IconName::CircleAlert);
+    toast.wide = true;
+    ToastQueue::push(cx, toast);
+    on_change(cx);
+}
+
+/// Drops `key`'s sort state (its job, if any, stops: `Running`'s drop).
+fn forget(key: EntityId, cx: &mut App) {
+    if let Some(sorts) = cx.try_global::<Sorts>()
+        && sorts.0.contains_key(&key)
+    {
+        cx.default_global::<Sorts>().0.remove(&key);
+    }
+}
+
+// ## m3c-t36 fix round 1 (m2)
+/// The tile shows `grid` over `adapter` at its current generation: a sort state of an older
+/// run (a re-run) goes, and its job stops.
+pub(crate) fn sync(grid: EntityId, adapter: &GridAdapter, cx: &mut App) {
+    let stale = cx
+        .try_global::<Sorts>()
+        .and_then(|s| s.0.get(&grid))
+        .is_some_and(|s| s.generation != adapter.generation());
+    if stale {
+        forget(grid, cx);
+    }
+}
+
+/// `grid` is gone (its tab closed, its console closed): its sort state goes, its job stops.
+pub(crate) fn grid_closed(grid: EntityId, cx: &mut App) {
+    forget(grid, cx);
+}
+
+/// How many grids keep a sort state (the tests check nothing leaks).
+#[doc(hidden)]
+pub fn tracked(cx: &App) -> usize {
+    cx.try_global::<Sorts>().map_or(0, |s| s.0.len())
+}
+
+/// Holds every finished job from now on instead of publishing it (`test-support`): a test
+/// then publishes them in the order it wants with [`release_held`].
+#[cfg(feature = "test-support")]
+pub fn hold_publishing(cx: &mut App) {
+    cx.default_global::<Sorts>().1.held = Some(Vec::new());
+}
+
+/// Publishes the held jobs, the newest first when `newest_first`, through the same guard
+/// (`test-support`); later jobs publish as they finish.
+#[cfg(feature = "test-support")]
+pub fn release_held(newest_first: bool, cx: &mut App) {
+    let mut held = cx
+        .default_global::<Sorts>()
+        .1
+        .held
+        .take()
+        .unwrap_or_default();
+    if newest_first {
+        held.reverse();
+    }
+    for done in held {
+        publish(done, cx);
+    }
+}
+
+/// The next job panics (`test-support`).
+#[cfg(feature = "test-support")]
+pub fn fail_next_job(cx: &mut App) {
+    cx.default_global::<Sorts>().1.fail_next = true;
 }
 
 /// A job has run past [`SLOW_AFTER`]: the note says so.
@@ -372,21 +541,16 @@ pub fn cancel(grid: &Entity<GridView>, cx: &mut App) {
         return;
     };
     state.request += 1;
-    if let Some(running) = state.running.take() {
-        running.stop();
-    }
+    // Dropping it raises its flag.
+    state.running = None;
     let on_change = state.on_change.clone();
     on_change(cx);
 }
 
 /// Back to the source order (Clear sort): any job stops, the map and the indicator go.
 pub fn clear(grid: &Entity<GridView>, cx: &mut App) {
+    // Dropping the state raises its job's flag.
     let state = cx.default_global::<Sorts>().0.remove(&grid.entity_id());
-    if let Some(state) = state.as_ref()
-        && let Some(running) = state.running.as_ref()
-    {
-        running.stop();
-    }
     grid.update(cx, |g, cx| {
         g.set_view_map(ViewMap::identity(0), cx);
         g.set_sort(SortSpec::default(), Vec::new(), cx);

@@ -40,10 +40,11 @@
 //!   [`CopyOutcome::Stale`], with no clipboard write and no toast: the rows under the old
 //!   selection's positions are rows the user neither saw nor selected.
 //! - **View rows go through the map** (## m3c-t36, ledger 253 I5). `CopyRegion::rows` are the
-//!   grid's *view* rows. [`copy_region_in`] takes the grid's `ViewMap` and reads each view row's
+//!   grid's *view* rows. [`copy_region`] takes the grid's `ViewMap` and reads each view row's
 //!   model row (`view_to_model`), in view order, so a copy after a sort or under a filter holds
 //!   exactly the rows the user sees, in the order shown; a view row the map does not show is
-//!   left out. [`copy_region`] and [`tsv`] are the identity map's (view row = model row).
+//!   left out. Fix round 1 (m5): every entry point takes the map, so no caller can read view
+//!   rows as model rows (a grid without a sort or filter passes `ViewMap::identity`).
 //!
 //! # The TSV
 //!
@@ -123,21 +124,9 @@ pub struct Tsv {
     pub incomplete: u64,
 }
 
-/// The TSV of `region` of the result `adapter` shows now (module docs), or [`TooLarge`] past
-/// `max_bytes`. Rows and columns the result does not have are left out. The region's rows
-/// are read as model rows (the identity map; [`tsv_in`] takes a grid's map).
+/// The TSV of `region` (view rows of `map`, module docs) of the result `adapter` shows now,
+/// or [`TooLarge`] past `max_bytes`. Rows and columns the result does not have are left out.
 pub fn tsv(
-    adapter: &GridAdapter,
-    region: &CopyRegion,
-    headers: bool,
-    max_bytes: usize,
-) -> Result<Tsv, TooLarge> {
-    tsv_in(adapter, region, &ViewMap::identity(0), headers, max_bytes)
-}
-
-// ## m3c-t36
-/// [`tsv`] of a region in the view rows of `map` (module docs).
-pub fn tsv_in(
     adapter: &GridAdapter,
     region: &CopyRegion,
     map: &ViewMap,
@@ -149,14 +138,10 @@ pub fn tsv_in(
 
 /// The least text `region`'s TSV needs, without building it: every cell's known length (the
 /// hex of a binary value, the bytes of a text) plus the separators. Numbers, dates and the
-/// quoting are not counted, so the real text is at least this long.
-pub fn estimated_bytes(adapter: &GridAdapter, region: &CopyRegion) -> usize {
-    estimate(
-        &adapter.raw_view(),
-        region,
-        &ViewMap::identity(0),
-        usize::MAX,
-    )
+/// quoting are not counted, so the real text is at least this long. `region`'s rows are view
+/// rows of `map`.
+pub fn estimated_bytes(adapter: &GridAdapter, region: &CopyRegion, map: &ViewMap) -> usize {
+    estimate(&adapter.raw_view(), region, map, usize::MAX)
 }
 
 // ## m3c-t36
@@ -315,29 +300,9 @@ fn push_cell(out: &mut String, text: &str) {
 /// `expected_generation` is the event's `generation`: the result the region was cut from.
 /// When the adapter has moved on (a re-run), nothing is copied ([`CopyOutcome::Stale`]).
 ///
-/// The region's rows are read as model rows (the identity map; [`copy_region_in`] takes the
-/// grid's map).
+/// ## m3c-t36: `region`'s rows are view rows of `map` (the grid's map when it asked): the copy
+/// holds the rows the user sees, in the order shown (module docs).
 pub fn copy_region(
-    adapter: &GridAdapter,
-    region: CopyRegion,
-    headers: bool,
-    expected_generation: u64,
-    cx: &mut App,
-) -> Task<CopyOutcome> {
-    copy_region_in(
-        adapter,
-        region,
-        ViewMap::identity(0),
-        headers,
-        expected_generation,
-        cx,
-    )
-}
-
-// ## m3c-t36
-/// [`copy_region`] of a region in the view rows of `map` (the grid's map when it asked): the
-/// copy holds the rows the user sees, in the order shown (module docs).
-pub fn copy_region_in(
     adapter: &GridAdapter,
     region: CopyRegion,
     map: ViewMap,

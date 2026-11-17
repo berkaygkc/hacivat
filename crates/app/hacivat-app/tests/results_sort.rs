@@ -169,8 +169,10 @@ fn tile(cx: &mut TestAppContext) -> Tile {
 impl Tile {
     fn show(&self, store: Arc<ResultStore>) -> Entity<GridView> {
         in_window(self.vcx, |_, cx| {
-            self.results
-                .update(cx, |r, cx| r.apply(&[tab(source(store))], cx))
+            self.results.update(cx, |r, cx| {
+                r.apply(&[tab(source(store))], cx);
+                r.set_active(hacivat_app::results::ActiveResult::Tab(0), cx);
+            })
         });
         self.redraw();
         self.grid()
@@ -454,24 +456,32 @@ fn sort_of_a_million_rows_is_cancellable_and_off_thread(cx: &mut TestAppContext)
 
 // ---- more cases ---------------------------------------------------------------------------
 
-/// The generation guard: of two requests the later one lands, and a sort that finishes after
-/// a re-run never puts its order on the new rows.
+/// The generation guard (## m3c-t36 fix round 1, m8: deterministic). The jobs are held when
+/// they finish and published in the order the test picks: the older of two requests, published
+/// after the newer, never replaces it; a job that finishes after a re-run (painted) never puts
+/// its order on the new rows.
 #[gpui::test]
 fn a_stale_sort_never_replaces_a_newer_one(cx: &mut TestAppContext) {
     let t = tile(cx);
     let rows = vec![row(2, "b"), row(3, "c"), row(1, "a")];
     let (store, _w) = live_store(rows.clone(), Completeness::Complete);
     let grid = t.show(store);
-    t.request(&grid, SortSpec::by(ColId(0), false));
-    t.request(&grid, SortSpec::by(ColId(0), true));
+    in_window(t.vcx, |_, cx| sort::hold_publishing(cx));
+    t.sort_by(&grid, 0, false);
+    t.sort_by(&grid, 0, true);
+    assert!(t.map(&grid).is_identity(), "a held job published");
+    // The newer (descending) first, then the stale ascending one.
+    in_window(t.vcx, |_, cx| sort::release_held(true, cx));
     t.redraw();
     assert_eq!(t.shown(&grid), [1, 0, 2]);
     assert_eq!(
         t.vcx.cx.read(|cx| grid.read(cx).sort().clone()),
         SortSpec::by(ColId(0), true)
     );
-    // A re-run arrives while a sort is pending: the new rows keep their order.
-    t.request(&grid, SortSpec::by(ColId(0), false));
+
+    // A re-run lands and is painted while a finished sort waits: the new rows keep their order.
+    in_window(t.vcx, |_, cx| sort::hold_publishing(cx));
+    t.sort_by(&grid, 0, false);
     let (store, _w) = live_store(rows, Completeness::Complete);
     in_window(t.vcx, |_, cx| {
         t.results
@@ -479,8 +489,131 @@ fn a_stale_sort_never_replaces_a_newer_one(cx: &mut TestAppContext) {
     });
     t.redraw();
     assert!(t.map(&grid).is_identity());
+    in_window(t.vcx, |_, cx| sort::release_held(true, cx));
+    t.redraw();
+    assert!(t.map(&grid).is_identity());
     assert!(t.vcx.cx.read(|cx| grid.read(cx).sort().is_empty()));
     assert_eq!(t.note(), None);
+}
+
+/// m3: a sort asked for after a re-run but before the grid painted the new rows is not
+/// published onto rows the grid then drops, and nothing claims a sort: no indicator, no note,
+/// no state, Clear sort disabled. Asked again once the rows are shown, it sorts.
+#[gpui::test]
+fn a_sort_asked_before_the_new_rows_are_painted_claims_nothing(cx: &mut TestAppContext) {
+    let t = tile(cx);
+    let rows = vec![row(2, "b"), row(3, "c"), row(1, "a")];
+    let (store, _w) = live_store(rows.clone(), Completeness::Suspended(cursor()));
+    let grid = t.show(store);
+    t.focus(&grid);
+    let (store, _w2) = live_store(rows, Completeness::Suspended(cursor()));
+    // The re-run and the request in one turn: no frame between them.
+    in_window(t.vcx, |_, cx| {
+        t.results
+            .update(cx, |r, cx| r.apply(&[tab(source(store))], cx));
+        grid.update(cx, |g, cx| {
+            g.request_sort(SortSpec::by(ColId(0), false), cx)
+        });
+    });
+    t.redraw();
+    t.redraw();
+    let shown_sorted = !t.map(&grid).is_identity();
+    let indicator = t.vcx.cx.read(|cx| !grid.read(cx).sort().is_empty());
+    let state = t
+        .vcx
+        .cx
+        .read(|cx| sort::status(&grid, cx))
+        .is_some_and(|s| s.sorted.is_some());
+    assert!(
+        !shown_sorted && !indicator && !state,
+        "{shown_sorted} {indicator} {state}"
+    );
+    assert_eq!(t.note(), None);
+    let enabled = t.vcx.cx.read(|cx| {
+        cx.global::<hacivat_ui::actions::ActionRegistry>()
+            .all()
+            .iter()
+            .find(|d| d.id == "grid.clear_sort")
+            .is_some_and(|d| (d.enabled)(cx))
+    });
+    assert!(!enabled, "Clear sort is offered with nothing sorted");
+    // Now the new rows are shown: the same request sorts them.
+    t.sort_by(&grid, 0, false);
+    assert_eq!(t.shown(&grid), [2, 0, 1]);
+    assert!(t.note().is_some());
+}
+
+/// m2: a re-run, a closed tab and Clear sort take the grid's sort state along (its job is
+/// stopped with it); nothing is left behind.
+#[gpui::test]
+fn a_rerun_or_a_closed_tab_drops_the_sort_state(cx: &mut TestAppContext) {
+    let t = tile(cx);
+    let rows = vec![row(2, "b"), row(3, "c"), row(1, "a")];
+    let (store, _w) = live_store(rows.clone(), Completeness::Complete);
+    let grid = t.show(store);
+    let tracked = |t: &Tile| t.vcx.cx.read(sort::tracked);
+    // A job still running (held) when the re-run lands.
+    in_window(t.vcx, |_, cx| sort::hold_publishing(cx));
+    t.sort_by(&grid, 0, false);
+    assert_eq!(tracked(&t), 1);
+    let (store, _w2) = live_store(rows.clone(), Completeness::Complete);
+    in_window(t.vcx, |_, cx| {
+        t.results
+            .update(cx, |r, cx| r.apply(&[tab(source(store))], cx))
+    });
+    t.redraw();
+    assert_eq!(tracked(&t), 0, "a re-run left the sort state");
+    in_window(t.vcx, |_, cx| sort::release_held(false, cx));
+    t.redraw();
+    assert!(t.map(&grid).is_identity());
+    // Sorted, then its tab closes.
+    t.sort_by(&grid, 0, true);
+    assert_eq!(tracked(&t), 1);
+    in_window(t.vcx, |_, cx| {
+        t.results.update(cx, |r, cx| r.close_tab(0, cx))
+    });
+    t.redraw();
+    assert_eq!(tracked(&t), 0, "a closed tab left the sort state");
+    // Clear sort.
+    let (store, _w3) = live_store(rows, Completeness::Complete);
+    let grid = t.show(store);
+    t.sort_by(&grid, 0, true);
+    assert_eq!(tracked(&t), 1);
+    t.request(&grid, SortSpec::default());
+    t.redraw();
+    assert_eq!(tracked(&t), 0);
+}
+
+/// m4: a job that fails (a panic in the comparison) is not taken for a cancel: the order shown
+/// stays, no state claims a sort, and a notice says what happened.
+#[gpui::test]
+fn a_failed_sort_says_so(cx: &mut TestAppContext) {
+    let t = tile(cx);
+    let (store, _w) = live_store(
+        vec![row(2, "b"), row(3, "c"), row(1, "a")],
+        Completeness::Complete,
+    );
+    let grid = t.show(store);
+    in_window(t.vcx, |_, cx| sort::fail_next_job(cx));
+    t.sort_by(&grid, 0, false);
+    assert!(t.map(&grid).is_identity());
+    let status = t.vcx.cx.read(|cx| sort::status(&grid, cx));
+    assert!(
+        status
+            .as_ref()
+            .is_none_or(|s| s.running.is_none() && s.sorted.is_none()),
+        "{status:?}"
+    );
+    let toasts = toast_texts(t.vcx);
+    assert!(
+        toasts
+            .iter()
+            .any(|x| x.contains("The sort stopped on an internal error")),
+        "{toasts:?}"
+    );
+    // The next sort works.
+    t.sort_by(&grid, 0, false);
+    assert_eq!(t.shown(&grid), [2, 0, 1]);
 }
 
 /// The header shows the indicator: an up arrow ascending, a down arrow descending, the level
