@@ -3463,6 +3463,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hacivat-meta"
+version = "0.0.0"
+dependencies = [
+ "arc-swap",
+ "bitflags 2.13.2",
+ "hacivat-meta",
+ "hacivat-proto",
+ "rusqlite",
+ "smallvec",
+ "tempfile",
+ "twox-hash",
+]
+
+[[package]]
 name = "hacivat-net"
 version = "0.0.0"
 dependencies = [

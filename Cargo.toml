@@ -72,6 +72,8 @@ hacivat-sql-editor = { path = "crates/app/hacivat-sql-editor" }
 # ## m3b-t01a-seams: identifiers and the classifier (Core layer, `crates/sql`).
 sql-ident = { path = "crates/sql/sql-ident" }
 sql-safety = { path = "crates/sql/sql-safety" }
+# ## m4-spike-model: the metadata model, snapshots and catalog cache (HV-MODEL-01..03).
+hacivat-meta = { path = "crates/core/hacivat-meta" }
 
 # Localization (Fluent + ICU4X 2.4).
 fluent-bundle = "0.16.0"

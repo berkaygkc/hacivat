@@ -1,0 +1,38 @@
+[package]
+name = "hacivat-meta"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "The metadata model: object arenas, stable identity, catalog snapshots and the on-disk catalog cache (HV-MODEL-01..03)"
+
+[features]
+# `fixture::synthetic_catalog`, a generated catalog at any scale for tests and benches
+# (the 160k-column load budget, HV-MODEL-03); enabled only by test dev-dependencies.
+test-support = []
+
+[dependencies]
+hacivat-proto.workspace = true
+arc-swap.workspace = true
+bitflags.workspace = true
+smallvec.workspace = true
+# The checksum over a cached namespace body (XXH3-64) and the source-text content hash
+# (XXH3-128); already a workspace dependency, so no new crate.
+twox-hash.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+hacivat-meta = { path = ".", features = ["test-support"] }
+tempfile.workspace = true
+
+[[test]]
+name = "perf"
+required-features = ["test-support"]
+
+[[test]]
+name = "persist"
+required-features = ["test-support"]
+
+[lints]
+workspace = true
