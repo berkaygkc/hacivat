@@ -721,6 +721,42 @@ fn a_menu_that_fits_the_room_moves_up_rather_than_scroll(cx: &mut TestAppContext
     );
 }
 
+// ## m3c-shotfix F1: a menu wider than the room right of its anchor moves left until it ends at
+// the window's right edge, every row whole; one that fits keeps its anchor's left.
+#[gpui::test]
+fn a_wide_menu_near_the_right_edge_moves_left_into_the_window(cx: &mut TestAppContext) {
+    registry_on(cx);
+    let wide: hacivat_ui::text::TextFn =
+        Rc::new(|_| "A menu row whose label is far wider than the room right of its anchor".into());
+    let list = vec![
+        hacivat_ui::menu::MenuItemSpec::new(wide, "menu.wide"),
+        items(1, |_| false).remove(0),
+    ];
+    let (_host, vcx) = cx.add_window_view(move |window, cx| {
+        MenuHost(hacivat_ui::menu::PopupMenu::new(
+            point(px(1100.), px(100.)),
+            list,
+            window,
+            cx,
+        ))
+    });
+    vcx.simulate_resize(gpui::size(px(1280.), px(800.)));
+    let layout = layout_of(vcx);
+    let column = layout.viewport.expect("the column");
+    assert!(f32::from(column.right()) <= 1280.0, "{column:?}");
+    assert!(
+        f32::from(column.left()) < 1100.0,
+        "it moved left: {column:?}"
+    );
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let clipped: Vec<_> = frame.iter().filter(|r| r.clipped).collect();
+    assert!(clipped.is_empty(), "{clipped:?}");
+    // A menu that fits keeps its left at the anchor.
+    let (_host, vcx) = open_menu(cx, 100.0, items(3, |_| false));
+    let column = layout_of(vcx).viewport.expect("the column");
+    assert!((f32::from(column.left()) - 900.0).abs() < 8.0, "{column:?}");
+}
+
 struct MenuHost(gpui::Entity<hacivat_ui::menu::PopupMenu>);
 
 impl gpui::Render for MenuHost {

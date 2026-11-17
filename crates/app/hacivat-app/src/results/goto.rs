@@ -38,7 +38,7 @@ use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, Global,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, Role, SharedString,
-    Styled as _, Subscription, WeakEntity, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 use hacivat_ui_core::keymap::{KeymapPlatform, display_chord, parse_chord};
 use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline, popover_surface};
@@ -345,6 +345,15 @@ impl GotoPopover {
             self.grid.as_ref()?.upgrade()?,
             self.adapter.as_ref()?.upgrade()?,
         ))
+    }
+
+    // ## m3c-shotfix F5
+    /// Whether the grid's area (the popover's room, less its 4 px gaps) is too short for the
+    /// title, the field, a three-line question and the buttons.
+    fn short_room(&self, cx: &App) -> bool {
+        self.target()
+            .and_then(|(grid, _)| grid.read(cx).geometry().map(|g| g.bounds.size.height))
+            .is_some_and(|h| f32::from(h) < SHORT_ROOM_PX)
     }
 
     /// The field's text, parsed against the grid's columns in the format locale.
@@ -669,6 +678,10 @@ impl GotoPopover {
     }
 }
 
+// ## m3c-shotfix F5: padding 20, title 16, field 26, three lines 48, buttons 28, gaps 32, the
+// popover's 4 px gaps 8.
+const SHORT_ROOM_PX: f32 = 186.0;
+
 impl Render for GotoPopover {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let asking = matches!(
@@ -691,6 +704,7 @@ impl Render for GotoPopover {
         let title = div()
             .flex()
             .flex_row()
+            .flex_none()
             .items_center()
             .gap(px(6.0))
             .child(
@@ -728,12 +742,24 @@ impl Render for GotoPopover {
             .bg(well.to_hsla())
             .child(div().flex_1().child(self.input.clone()));
         let field = focus_outline(field, &theme, field_focused);
+        // ## m3c-shotfix F5: the popover never runs past its room (under the toolbar, above the
+        // strip; NOTES cross-cutting 3): its title and its keys or buttons always show, and in
+        // a short room what lies between them (the field and the lines) scrolls.
         let mut body = div()
+            .id("goto-body")
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .child(title)
-            .child(field);
+            .flex_shrink(1.0)
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .child(hacivat_ui::text::scroll_viewport());
+        // While it asks or fetches in a short room, the question takes the field's place (it
+        // names the row the field holds); with room, the field stays above it.
+        if !(asking && self.short_room(cx)) {
+            body = body.child(field);
+        }
+        let foot: AnyElement;
         match self.state {
             GotoState::Idle => {
                 let (glyph, ink, text) = match &line {
@@ -791,60 +817,55 @@ impl Render for GotoPopover {
                             c.text_2.to_hsla(),
                         ))
                 };
-                body = body.child(row).child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(12.0))
-                        .child(hint("enter", "hv-goto-key-go"))
-                        .child(hint("escape", "hui-palette-hint-close")),
-                );
+                body = body.child(row);
+                foot = div()
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(hint("enter", "hv-goto-key-go"))
+                    .child(hint("escape", "hui-palette-hint-close"))
+                    .into_any_element();
             }
             GotoState::Ask { row, more } => {
                 let (e1, e2) = (entity.clone(), entity.clone());
-                body = body
+                body = body.child(
+                    paragraph(
+                        message(
+                            cx,
+                            "hv-goto-fetch",
+                            vec![
+                                ("row", ArgValue::Count(row)),
+                                ("more", ArgValue::Count(more)),
+                            ],
+                        ),
+                        TextSource::Fluent,
+                        t.type_ramp.caption,
+                        c.text.to_hsla(),
+                    )
+                    .id("goto-line"),
+                );
+                foot = div()
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .justify_end()
+                    .gap(px(8.0))
                     .child(
-                        paragraph(
-                            message(
-                                cx,
-                                "hv-goto-fetch",
-                                vec![
-                                    ("row", ArgValue::Count(row)),
-                                    ("more", ArgValue::Count(more)),
-                                ],
-                            ),
-                            TextSource::Fluent,
-                            t.type_ramp.caption,
-                            c.text.to_hsla(),
-                        )
-                        .id("goto-line"),
+                        Button::new("goto-cancel", message(cx, "hv-goto-cancel", vec![]))
+                            .kind(ButtonKind::Default)
+                            .on_raised(true)
+                            .on_click(move |_, _, cx| e1.update(cx, |p, cx| p.stop(cx))),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .justify_end()
-                            .gap(px(8.0))
-                            .child(
-                                Button::new("goto-cancel", message(cx, "hv-goto-cancel", vec![]))
-                                    .kind(ButtonKind::Default)
-                                    .on_raised(true)
-                                    .on_click(move |_, _, cx| e1.update(cx, |p, cx| p.stop(cx))),
-                            )
-                            .child(
-                                Button::new(
-                                    "goto-fetch-ok",
-                                    message(cx, "hv-goto-fetch-ok", vec![]),
-                                )
-                                .kind(ButtonKind::Primary)
-                                .on_raised(true)
-                                .focus_handle(self.primary.clone())
-                                .on_click(move |_, _, cx| {
-                                    e2.update(cx, |p, cx| p.fetch_and_go(cx))
-                                }),
-                            ),
-                    );
+                        Button::new("goto-fetch-ok", message(cx, "hv-goto-fetch-ok", vec![]))
+                            .kind(ButtonKind::Primary)
+                            .on_raised(true)
+                            .focus_handle(self.primary.clone())
+                            .on_click(move |_, _, cx| e2.update(cx, |p, cx| p.fetch_and_go(cx))),
+                    )
+                    .into_any_element();
             }
             GotoState::Fetching { row, more } => {
                 let done = self
@@ -862,45 +883,61 @@ impl Render for GotoPopover {
                             .items_start()
                             .gap(px(6.0))
                             .child(div().pt(px(4.0)).child(run_marker(&theme)))
+                            // ## m3c-shotfix F5: the line wraps in what the marker leaves it.
                             .child(
-                                paragraph(
-                                    message(
-                                        cx,
-                                        "hv-goto-fetching",
-                                        vec![
-                                            ("row", ArgValue::Count(row)),
-                                            ("done", ArgValue::Count(done.min(more))),
-                                            ("more", ArgValue::Count(more)),
-                                        ],
-                                    ),
-                                    TextSource::Fluent,
-                                    t.type_ramp.caption,
-                                    c.text.to_hsla(),
-                                )
-                                .id("goto-line"),
+                                div().flex_1().min_w(px(0.0)).child(
+                                    paragraph(
+                                        message(
+                                            cx,
+                                            "hv-goto-fetching",
+                                            vec![
+                                                ("row", ArgValue::Count(row)),
+                                                ("done", ArgValue::Count(done.min(more))),
+                                                ("more", ArgValue::Count(more)),
+                                            ],
+                                        ),
+                                        TextSource::Fluent,
+                                        t.type_ramp.caption,
+                                        c.text.to_hsla(),
+                                    )
+                                    .id("goto-line"),
+                                ),
                             ),
                     )
-                    .child(Label::new(
-                        message(cx, "hv-goto-fetching-note", vec![]),
-                        TextSource::Fluent,
-                        t.type_ramp.caption,
-                        c.text_2.to_hsla(),
-                    ))
+                    // ## m3c-shotfix F5: prose, so it wraps in the 300 px card.
                     .child(
-                        div().flex().flex_row().justify_end().child(
-                            Button::new("goto-stop", message(cx, "hv-goto-stop", vec![]))
-                                .kind(ButtonKind::Default)
-                                .on_raised(true)
-                                .focus_handle(self.primary.clone())
-                                .on_click(move |_, _, cx| e.update(cx, |p, cx| p.stop(cx))),
-                        ),
+                        paragraph(
+                            message(cx, "hv-goto-fetching-note", vec![]),
+                            TextSource::Fluent,
+                            t.type_ramp.caption,
+                            c.text_2.to_hsla(),
+                        )
+                        .id("goto-fetching-note"),
                     );
+                foot = div()
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .justify_end()
+                    .child(
+                        Button::new("goto-stop", message(cx, "hv-goto-stop", vec![]))
+                            .kind(ButtonKind::Default)
+                            .on_raised(true)
+                            .focus_handle(self.primary.clone())
+                            .on_click(move |_, _, cx| e.update(cx, |p, cx| p.stop(cx))),
+                    )
+                    .into_any_element();
             }
         }
         let panel = popover_surface(&theme)
             .id(("goto-popover", self.console.0))
             .debug_selector(|| "goto-popover".to_string())
             .w(px(300.0))
+            // ## m3c-shotfix F5: at most its room (the host gives it the grid's height).
+            .max_h_full()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
             .p(px(10.0))
             .on_mouse_down_out(cx.listener(|p, _, _, cx| {
                 if !matches!(p.state, GotoState::Ask { .. }) {
@@ -915,7 +952,9 @@ impl Render for GotoPopover {
                     }
                 },
             ))
-            .child(body);
+            .child(title)
+            .child(body)
+            .child(foot);
         A11yNode::new(
             "goto-popover-node",
             Role::Dialog,

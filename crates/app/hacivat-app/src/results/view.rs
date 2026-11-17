@@ -1007,11 +1007,17 @@ impl ResultsHost {
                     .child(area)
                     .children(inspector);
                 if let Some(popover) = super::goto::overlay(console, cx) {
+                    // ## m3c-shotfix F5: its room ends 4 px above the strip; the popover is at
+                    // most that tall.
                     body = body.child(
                         div()
                             .absolute()
                             .top(hacivat_ui_core::gpui_surface::px(4.0))
+                            .bottom(hacivat_ui_core::gpui_surface::px(4.0))
                             .left(hacivat_ui_core::gpui_surface::px(12.0))
+                            .flex()
+                            .flex_col()
+                            .items_start()
                             .child(popover),
                     );
                 }

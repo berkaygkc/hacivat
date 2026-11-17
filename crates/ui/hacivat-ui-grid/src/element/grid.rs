@@ -1067,6 +1067,8 @@ fn paint_header_segment(
     let (hx, hy) = (f32::from(header.left()), f32::from(header.top()));
     let hh = f32::from(header.size.height);
     let shift = seg.shift;
+    // ## m3c-shotfix F7: the Transposed view's name column is headed by a chrome word.
+    let transposed = v.config.transposed;
     let GridView {
         paint,
         layout,
@@ -1099,6 +1101,13 @@ fn paint_header_segment(
         let avail = (width - 2.0 * CELL_PAD_PX).max(0.0);
         let x0 = left + CELL_PAD_PX;
         let end_aligned = spec.align == Align::End;
+        // ## m3c-shotfix F7: a header title (chrome) is recorded as the Fluent word it is.
+        let (name_source, name_path) = if transposed && col == super::transpose::TRANSPOSED_NAME_COL
+        {
+            (TextSource::Fluent, layers::paths::HEADER_TITLE)
+        } else {
+            (TextSource::Catalog, layers::paths::HEADER)
+        };
         let mask = rect(left, hy, (width - 1.0).max(0.0), hh);
         // ## m3c-t36: a sorted column keeps room after its name for the arrow (and the level
         // number with two or more keys): the name gives way first.
@@ -1139,7 +1148,7 @@ fn paint_header_segment(
                     &roles.header_name,
                     name_y,
                     name_lh,
-                    layers::paths::HEADER,
+                    name_path,
                     true,
                 ),
                 (
@@ -1179,7 +1188,11 @@ fn paint_header_segment(
                             layers::record_text(
                                 cx,
                                 text.clone(),
-                                TextSource::Catalog,
+                                if is_name {
+                                    name_source
+                                } else {
+                                    TextSource::Catalog
+                                },
                                 role.nominal,
                                 s.width,
                                 s.truncated,

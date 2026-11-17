@@ -392,3 +392,42 @@ fn text_past_its_dialog_card_is_recorded_as_such(cx: &mut TestAppContext) {
     // The scope closes with the card: text after it is never measured against it.
     assert!(!outside("no-card"), "a label outside any card");
 }
+
+// ## m3c-shotfix F3/F5: a paragraph is measured with the line height its text is laid out
+// with. GPUI snaps a fractional line height (caption: 16.2 px) to the device pixel, so a
+// wrapped paragraph of n lines is n × 16 px tall here; measuring it at 16.2 px a line flagged
+// every paragraph of three lines or more as cut, though nothing was.
+struct ProseHost;
+
+impl Render for ProseHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let ink = DARK.colors.text.to_hsla();
+        div()
+            .w(px(120.0))
+            .child(paragraph(TOO_WIDE, TextSource::Data, DARK.type_ramp.caption, ink).id("prose"))
+    }
+}
+
+#[gpui::test]
+fn a_paragraph_of_many_lines_at_a_fractional_line_height_is_not_cut(cx: &mut TestAppContext) {
+    assert!(
+        DARK.type_ramp.caption.line_height.fract() != 0.0,
+        "the case needs a fractional line height"
+    );
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    let (_, vcx) = cx.add_window_view(|_, _| ProseHost);
+    vcx.run_until_parked();
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let r = frame
+        .iter()
+        .find(|r| r.path.ends_with("#prose"))
+        .unwrap_or_else(|| panic!("the paragraph was recorded: {frame:?}"));
+    assert!(r.painted_px <= 120.0, "it wraps in its box: {r:?}");
+    assert!(!r.clipped, "a wrapped paragraph that shows whole: {r:?}");
+}

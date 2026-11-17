@@ -875,14 +875,11 @@ impl Render for PopupMenu {
         } else {
             crate::text::card_scope(surface)
         };
-        let mut menu = surface
+        let menu = surface
             .id("popup-menu")
             .debug_selector(|| "popup-menu".to_string())
             .track_focus(&self.focus)
             .declare(Role::Menu, menu_name.clone(), None);
-        if let Some((left, top)) = position {
-            menu = menu.absolute().left(left).top(top);
-        }
         let mut menu = menu.min_w(self.min_width);
         // ## m3a-t35-shots (named exception)
         if let Some(max) = self.max_width {
@@ -972,7 +969,24 @@ impl Render for PopupMenu {
             column
         };
         let column = column.children(rows);
-        menu.children(title).child(column).children(footer)
+        let menu = menu.children(title).child(column).children(footer);
+        // ## m3c-shotfix F1: a menu wider than the room right of its anchor moves left until
+        // its right edge meets the window's (it is never cut there). The menu sits after a
+        // spacer as wide as its left that gives way, so one layout places it, whatever its
+        // width; a menu that fits keeps its left exactly.
+        match position {
+            Some((left, top)) => div()
+                .absolute()
+                .left_0()
+                .top(top)
+                .w(window.viewport_size().width)
+                .flex()
+                .flex_row()
+                .child(div().w(left).min_w(px(0.0)).flex_shrink(1.0))
+                .child(menu.flex_none())
+                .into_any_element(),
+            None => menu.into_any_element(),
+        }
     }
 }
 

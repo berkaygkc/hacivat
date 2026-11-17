@@ -34,6 +34,11 @@ use crate::source::{
 };
 use crate::view::{GridView, SortShown};
 
+// ## m3c-shotfix F7
+/// The name column: its header is the app's word for it ("Column"), chrome and not data, so
+/// the grid draws and records it as a header title (Fluent), not as a column name.
+pub const TRANSPOSED_NAME_COL: ColId = ColId(0);
+
 /// The name column's width (NOTES surface 21: 150 px).
 pub const TRANSPOSED_NAME_WIDTH: f32 = 150.0;
 
@@ -102,7 +107,7 @@ impl TransposedSource {
             .collect();
         let mut columns = Vec::with_capacity(rows.len() + 1);
         columns.push(ColumnSpec {
-            id: ColId(0),
+            id: TRANSPOSED_NAME_COL,
             name: name_title,
             type_label: SharedString::default(),
             kind: ColumnKind::Text,

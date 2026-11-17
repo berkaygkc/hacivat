@@ -966,8 +966,26 @@ pub(crate) fn toolbar(
         }),
         label,
     );
+    // ## m3c-shotfix F4: Select all occurrences and close are items of their own after the bar,
+    // so the Overflow Rule applies to the crowded bar (960 px, long locales): Select all moves
+    // into the overflow menu (after rows · timing; ⌃⌘G still selects), and when the row still
+    // does not fit it wraps onto a second line, so nothing is cut at the toolbar's edge.
+    let (b1, b2) = (bar.clone(), bar.clone());
+    let select_all_item = ToolbarItem::new(
+        1,
+        Rc::new(move |_, cx| GridFindBar::select_all_button(&b1, cx)),
+        Rc::new(|cx: &App| message(cx, "hv-gfind-select-all", vec![])),
+    )
+    .on_choose(move |_, cx| select_all(console, cx));
+    let close_item = ToolbarItem::pinned(
+        Rc::new(move |_, cx| GridFindBar::close_button(&b2, cx)),
+        Rc::new(|cx: &App| message(cx, "hv-gfind-close", vec![])),
+    );
     let bar = Toolbar::new("results-toolbar")
+        .wrap_row()
         .item(item)
+        .item(select_all_item)
+        .item(close_item)
         .trailing(rows_item);
     Some(
         trailing
@@ -2015,12 +2033,7 @@ impl Render for GridFindBar {
                 .disabled(disabled)
                 .focus_handle(handle.clone())
         };
-        let (e1, e2, e3, e4) = (
-            entity.clone(),
-            entity.clone(),
-            entity.clone(),
-            entity.clone(),
-        );
+        let (e1, e2) = (entity.clone(), entity.clone());
         let prev = icon_button(
             "grid-find-prev",
             "hv-find-prev",
@@ -2039,25 +2052,8 @@ impl Render for GridFindBar {
             cx,
         )
         .on_click(move |_, _, cx| e2.update(cx, |b, cx| b.step(false, cx)));
-        let all = Button::new(
-            "grid-find-select-all",
-            message(cx, "hv-gfind-select-all", vec![]),
-        )
-        .kind(ButtonKind::Ghost)
-        .compact(true)
-        .on_raised(true)
-        .disabled(!searchable)
-        .focus_handle(self.all.clone())
-        .on_click(move |_, _, cx| e3.update(cx, |b, cx| b.select_all(cx)));
-        let close = icon_button(
-            "grid-find-close",
-            "hv-gfind-close",
-            IconName::X,
-            &self.close,
-            false,
-            cx,
-        )
-        .on_click(move |_, window, cx| e4.update(cx, |b, cx| b.close(Some(window), cx)));
+        // ## m3c-shotfix F4: Select all occurrences and close are toolbar items of their own
+        // (`toolbar`, `select_all_button`, `close_button`).
         let row = div()
             .id(("grid-find-bar", self.console.0))
             .debug_selector(|| "grid-find-bar".to_string())
@@ -2072,9 +2068,7 @@ impl Render for GridFindBar {
             .child(count_el)
             .children(incomplete)
             .child(prev)
-            .child(next)
-            .child(all)
-            .child(close);
+            .child(next);
         A11yNode::new(
             "grid-find-bar-node",
             Role::Search,
@@ -2082,6 +2076,54 @@ impl Render for GridFindBar {
             false,
             row,
         )
+    }
+}
+
+// ## m3c-shotfix F4
+impl GridFindBar {
+    /// Escape in an item of the bar outside its row closes the bar, as in the row.
+    fn escape_closes(bar: &Entity<Self>, el: impl IntoElement) -> AnyElement {
+        let bar = bar.clone();
+        div()
+            .flex()
+            .items_center()
+            .on_key_down(move |ev: &KeyDownEvent, window, cx| {
+                bar.update(cx, |b, cx| b.on_bar_key(ev, window, cx));
+            })
+            .child(el)
+            .into_any_element()
+    }
+
+    /// Select all occurrences (ghost, ⌃⌘G), after the step buttons.
+    fn select_all_button(bar: &Entity<Self>, cx: &mut App) -> AnyElement {
+        let b = bar.read(cx);
+        let (searchable, handle) = (b.searchable(cx), b.all.clone());
+        let e = bar.clone();
+        let button = Button::new(
+            "grid-find-select-all",
+            message(cx, "hv-gfind-select-all", vec![]),
+        )
+        .kind(ButtonKind::Ghost)
+        .compact(true)
+        .on_raised(true)
+        .disabled(!searchable)
+        .focus_handle(handle)
+        .on_click(move |_, _, cx| e.update(cx, |b, cx| b.select_all(cx)));
+        Self::escape_closes(bar, button)
+    }
+
+    /// The bar's close (×).
+    fn close_button(bar: &Entity<Self>, cx: &mut App) -> AnyElement {
+        let handle = bar.read(cx).close.clone();
+        let e = bar.clone();
+        let button = Button::new("grid-find-close", message(cx, "hv-gfind-close", vec![]))
+            .kind(ButtonKind::Icon)
+            .icon(IconName::X)
+            .compact(true)
+            .on_raised(true)
+            .focus_handle(handle)
+            .on_click(move |_, window, cx| e.update(cx, |b, cx| b.close(Some(window), cx)));
+        Self::escape_closes(bar, button)
     }
 }
 

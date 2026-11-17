@@ -87,6 +87,13 @@ const POPOVER_PAD_X: f32 = 16.0;
 /// The rest of the popover around the well, for placing it (header, control row, notice,
 /// footer); the well takes what is left.
 const CHROME_PX: f32 = 170.0;
+// ## m3c-shotfix F8: the popover's rows around the well, for its room (header 12/18/17,
+// control 8/22, notice 8/16/6/28, footer 12/28/14).
+const HEADER_PX: f32 = 47.0;
+const CONTROL_PX: f32 = 30.0;
+const NOTICE_PX: f32 = 58.0;
+const FOOTER_PX: f32 = 54.0;
+
 /// The gap between the cell and the popover, and from the grid's edges.
 const GAP_PX: f32 = 4.0;
 
@@ -761,7 +768,7 @@ pub(crate) fn sync(console: ConsoleId, adapter: &Rc<GridAdapter>, cx: &mut App) 
 /// The open viewer of console `console`, placed in the grid's area (the tile's body).
 pub(crate) fn overlay(console: ConsoleId, cx: &App) -> Option<AnyElement> {
     let v = viewer(console, cx).filter(|v| v.read(cx).open)?;
-    let (top, bottom, left, _) = v.read(cx).placement(cx);
+    let (top, bottom, left, _, _) = v.read(cx).placement(cx);
     let mut place = div().absolute().left(px(left));
     place = match (top, bottom) {
         (Some(top), _) => place.top(px(top)),
@@ -977,19 +984,21 @@ impl ValueViewer {
         }
     }
 
-    /// Where the popover goes in the grid's area: `(top, bottom, left, well height)` in the
-    /// area's coordinates (module docs).
-    fn placement(&self, cx: &App) -> (Option<f32>, Option<f32>, f32, f32) {
+    /// Where the popover goes in the grid's area: `(top, bottom, left, well height, room)` in
+    /// the area's coordinates (module docs). ## m3c-shotfix F8: `room` is the tallest the
+    /// popover may be there (from its edge to the area's far edge, less the gap): its value
+    /// well gives way first, so its header and footer always show (NOTES cross-cutting 3).
+    fn placement(&self, cx: &App) -> (Option<f32>, Option<f32>, f32, f32, Option<f32>) {
         let Some((grid, cell)) = self
             .anchor
             .as_ref()
             .and_then(|(g, c)| Some((g.upgrade()?, *c)))
         else {
-            return (Some(GAP_PX), None, GAP_PX, WELL_MAX_PX);
+            return (Some(GAP_PX), None, GAP_PX, WELL_MAX_PX, None);
         };
         let g = grid.read(cx);
         let Some(geom) = g.geometry() else {
-            return (Some(GAP_PX), None, GAP_PX, WELL_MAX_PX);
+            return (Some(GAP_PX), None, GAP_PX, WELL_MAX_PX, None);
         };
         let area_w = f32::from(geom.bounds.size.width);
         let area_h = f32::from(geom.bounds.size.height);
@@ -1011,25 +1020,23 @@ impl ValueViewer {
         let below = area_h - row_bottom - 2.0 * GAP_PX;
         let above = row_top - 2.0 * GAP_PX;
         let need = CHROME_PX + WELL_MAX_PX;
+        // ## m3c-shotfix F8: the room below a top edge, or above a bottom one.
+        let room = |edge: f32| Some((area_h - edge - GAP_PX).max(0.0));
         if below >= need {
-            (Some(row_bottom + GAP_PX), None, left, WELL_MAX_PX)
+            let top = row_bottom + GAP_PX;
+            (Some(top), None, left, WELL_MAX_PX, room(top))
         } else if above >= need {
-            (None, Some(area_h - row_top + GAP_PX), left, WELL_MAX_PX)
+            let bottom = area_h - row_top + GAP_PX;
+            (None, Some(bottom), left, WELL_MAX_PX, room(bottom))
         } else if below >= above {
             let well = (below - CHROME_PX).clamp(WELL_MIN_PX, WELL_MAX_PX);
-            (
-                Some(
-                    (row_bottom + GAP_PX)
-                        .min(area_h - CHROME_PX - well)
-                        .max(GAP_PX),
-                ),
-                None,
-                left,
-                well,
-            )
+            let top = (row_bottom + GAP_PX)
+                .min(area_h - CHROME_PX - well)
+                .max(GAP_PX);
+            (Some(top), None, left, well, room(top))
         } else {
             let well = (above - CHROME_PX).clamp(WELL_MIN_PX, WELL_MAX_PX);
-            (Some(GAP_PX), None, left, well)
+            (Some(GAP_PX), None, left, well, room(GAP_PX))
         }
     }
 
@@ -1090,7 +1097,7 @@ impl Render for ValueViewer {
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let c = &t.colors;
-        let (_, _, _, well_h) = self.placement(cx);
+        let (_, _, _, well_h, room) = self.placement(cx);
         let advance = self.advance(window, cx);
         let inner_w = VIEWER_WIDTH_PX - 2.0 * POPOVER_PAD_X - 2.0 * WELL_PAD_X - 6.0;
         let cols = ((inner_w / advance).floor() as usize).max(8);
@@ -1101,7 +1108,7 @@ impl Render for ValueViewer {
         let entity = cx.entity();
         let view = self.view_of(false, cx);
         let view = &view;
-        let header = div()
+        let header_row = div()
             .flex()
             .flex_row()
             .items_start()
@@ -1133,18 +1140,18 @@ impl Render for ValueViewer {
                         )
                         .id("value-viewer-sub"),
                     ),
+            );
+        let close_button = {
+            let e = entity.clone();
+            Button::new(
+                "value-viewer-close",
+                message(cx, "hui-dialog-close", vec![]),
             )
-            .child({
-                let e = entity.clone();
-                Button::new(
-                    "value-viewer-close",
-                    message(cx, "hui-dialog-close", vec![]),
-                )
-                .kind(ButtonKind::Icon)
-                .icon(IconName::X)
-                .on_raised(true)
-                .on_click(move |_, _, cx| e.update(cx, |v, cx| v.close(cx)))
-            });
+            .kind(ButtonKind::Icon)
+            .icon(IconName::X)
+            .on_raised(true)
+            .on_click(move |_, _, cx| e.update(cx, |v, cx| v.close(cx)))
+        };
         let mut control = div()
             .flex()
             .flex_row()
@@ -1153,6 +1160,9 @@ impl Render for ValueViewer {
             .px(px(POPOVER_PAD_X))
             .pt(px(8.0));
         let mut has_control = false;
+        // ## m3c-shotfix F8: the form switch and its note, placed once the room is known.
+        let mut seg_el: Option<AnyElement> = None;
+        let mut note_el: Option<AnyElement> = None;
         match view.form {
             ValueForm::Json { .. } | ValueForm::Xml => {
                 has_control = true;
@@ -1178,29 +1188,67 @@ impl Render for ValueViewer {
                         }),
                     });
                 }
-                control = control.child(seg);
+                seg_el = Some(seg.into_any_element());
                 if disabled {
-                    control =
-                        control.child(div().flex_1().min_w_0().child(hacivat_ui::text::paragraph(
-                            message(cx, "hv-vv-not-json", vec![]),
-                            TextSource::Fluent,
-                            t.type_ramp.caption,
-                            c.text_2.to_hsla(),
-                        )));
+                    note_el = Some(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(hacivat_ui::text::paragraph(
+                                message(cx, "hv-vv-not-json", vec![]),
+                                TextSource::Fluent,
+                                t.type_ramp.caption,
+                                c.text_2.to_hsla(),
+                            ))
+                            .into_any_element(),
+                    );
                 }
             }
             ValueForm::Binary => {
                 has_control = true;
-                control = control.child(Segmented::new("value-viewer-form").item(SegmentItem {
-                    content: SegmentContent::Label(message(cx, "hv-vv-hex", vec![])),
-                    pressed: true,
-                    tooltip: message(cx, "hv-vv-hex", vec![]),
-                    a11y_name: None,
-                    on_click: Rc::new(|_, _, _| {}),
-                }));
+                seg_el = Some(
+                    Segmented::new("value-viewer-form")
+                        .item(SegmentItem {
+                            content: SegmentContent::Label(message(cx, "hv-vv-hex", vec![])),
+                            pressed: true,
+                            tooltip: message(cx, "hv-vv-hex", vec![]),
+                            a11y_name: None,
+                            on_click: Rc::new(|_, _, _| {}),
+                        })
+                        .into_any_element(),
+                );
             }
             ValueForm::Text => {}
         }
+        // ## m3c-shotfix F8: a room too short for the header, the control row, a one-line well,
+        // the notice and the footer: the form switch moves into the header row (before ×), so
+        // it shows whole while the rest scrolls between the header and the footer.
+        let needed = HEADER_PX
+            + if has_control { CONTROL_PX } else { 0.0 }
+            + 8.0
+            + LINE_PX
+            + 2.0 * WELL_PAD_Y
+            + 2.0
+            + if view.truncated.is_some() {
+                NOTICE_PX
+            } else {
+                0.0
+            }
+            + FOOTER_PX;
+        let compact = room.is_some_and(|r| r < needed);
+        let header = match (compact, seg_el.take()) {
+            (true, Some(seg)) => header_row.child(seg),
+            (_, seg) => {
+                seg_el = seg;
+                header_row
+            }
+        }
+        .child(close_button);
+        if let Some(seg) = seg_el {
+            control = control.child(seg);
+        }
+        let has_control = (has_control && !compact) || note_el.is_some();
+        control = control.children(note_el);
         let well_fill = match theme.mode {
             ThemeMode::Dark => c.panel,
             ThemeMode::Light => c.ground,
@@ -1215,6 +1263,9 @@ impl Render for ValueViewer {
             .mx(px(POPOVER_PAD_X))
             .mt(px(8.0))
             .h(px(height))
+            // ## m3c-shotfix F8: in a short room the well gives way first, down to one line.
+            .flex_shrink(1.0)
+            .min_h(px(LINE_PX + 2.0 * WELL_PAD_Y + 2.0))
             .px(px(WELL_PAD_X))
             .py(px(WELL_PAD_Y))
             .bg(well_fill.to_hsla())
@@ -1239,11 +1290,30 @@ impl Render for ValueViewer {
                 cx.stop_propagation();
             })
             .child(self.well.clone());
-        let mut body = div().flex().flex_col().w(px(VIEWER_WIDTH_PX)).child(header);
-        if has_control {
-            body = body.child(control);
+        // ## m3c-shotfix F8: the header and the footer (the size, Copy raw value) always show:
+        // in a room shorter than the popover the value well shrinks first, then what lies
+        // between them (the control row, the well, the truncation notice) scrolls.
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .w(px(VIEWER_WIDTH_PX))
+            .child(header.flex_none());
+        if let Some(room) = room {
+            // Less the surface's 1 px border on each side.
+            body = body.max_h(px((room - 2.0).max(0.0)));
         }
-        body = body.child(well);
+        let mut middle = div()
+            .id("value-viewer-middle")
+            .flex()
+            .flex_col()
+            .flex_shrink(1.0)
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .child(hacivat_ui::text::scroll_viewport());
+        if has_control {
+            middle = middle.child(control.flex_none());
+        }
+        middle = middle.child(well);
         if let Some(notice) = view.truncated.clone() {
             let mut row = div()
                 .flex()
@@ -1290,27 +1360,32 @@ impl Render for ValueViewer {
                     );
                 }
             }
-            body = body.child(row);
+            middle = middle.child(row.flex_none());
         }
+        body = body.child(middle);
         let e = entity.clone();
         body = body.child(
             div()
                 .flex()
                 .flex_row()
+                .flex_none()
                 .items_center()
                 .justify_between()
                 .gap(px(8.0))
                 .pt(px(12.0))
                 .pb(px(14.0))
                 .px(px(POPOVER_PAD_X))
+                // ## m3c-shotfix F8: the size wraps in the room Copy raw value leaves it.
                 .child(
-                    Label::new(
-                        view.footer.clone(),
-                        TextSource::Fluent,
-                        t.type_ramp.mono_data,
-                        c.text_2.to_hsla(),
-                    )
-                    .id("value-viewer-size"),
+                    div().flex_1().min_w_0().child(
+                        hacivat_ui::text::paragraph(
+                            view.footer.clone(),
+                            TextSource::Fluent,
+                            t.type_ramp.mono_data,
+                            c.text_2.to_hsla(),
+                        )
+                        .id("value-viewer-size"),
+                    ),
                 )
                 .child(
                     Button::new("value-viewer-copy", message(cx, "hv-vv-copy", vec![]))

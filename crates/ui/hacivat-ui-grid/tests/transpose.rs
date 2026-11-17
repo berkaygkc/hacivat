@@ -291,3 +291,40 @@ fn a_hidden_grid_has_no_accessibility_subtree_and_says_nothing(cx: &mut TestAppC
     vcx.run_until_parked();
     assert!(view.read_with(vcx, |v, _| v.a11y_builds()) > 0);
 }
+
+// ## m3c-shotfix F7: the name column's header is the app's word ("Column"), chrome: recorded as
+// a Fluent header title, never as a column name (data); the row numbers stay data headers.
+#[gpui::test]
+fn the_name_column_is_headed_by_a_chrome_title_and_the_rows_by_data(cx: &mut TestAppContext) {
+    use hacivat_ui::text::{TextRegistry, TextSource};
+    let inner: Rc<dyn GridDataSource> = Rc::new(table(2));
+    let t = TransposedSource::new(
+        inner,
+        &ViewMap::identity(2),
+        &[ColId(0), ColId(1)],
+        SharedString::from("Column"),
+    );
+    let (_view, vcx) = open(cx, Rc::new(t));
+    vcx.update(|window, cx| {
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+        window.refresh();
+    });
+    vcx.run_until_parked();
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let headed = |text: &str| {
+        frame
+            .iter()
+            .find(|r| r.text.as_ref() == text && r.path.contains("#header"))
+            .unwrap_or_else(|| panic!("{text} was drawn as a header: {frame:?}"))
+            .clone()
+    };
+    let title = headed("Column");
+    assert_eq!(title.source, TextSource::Fluent, "{title:?}");
+    assert!(title.path.ends_with("#header-title"), "{title:?}");
+    let row = headed("1");
+    assert_eq!(row.source, TextSource::Catalog, "{row:?}");
+    assert!(row.path.ends_with("#header"), "{row:?}");
+}
