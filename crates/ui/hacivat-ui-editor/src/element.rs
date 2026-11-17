@@ -1000,14 +1000,21 @@ pub(crate) fn paint_frame(
     gutter::paint(&g, window, cx);
     let mut failed = 0;
     if let Some(layout) = v.layout.as_ref() {
-        let marked = v.ime.marked(&v.model);
+        // ## m3c-t31-multi (named exception): the composition is underlined at every caret.
+        // Fix round 1 (M7): only the marked ranges on the painted rows (they are sorted).
+        let all = v.ime.marked_all(&v.model);
+        let rows = layout.rows();
+        let lo = layout.buffer.line_to_byte(rows.first_line as usize);
+        let hi = layout.buffer.line_to_byte(rows.last_line as usize + 1);
+        let from = all.partition_point(|r| r.end < lo);
+        let to = all.partition_point(|r| r.start <= hi).max(from);
         failed = paint::text_area(
             layout,
             &frame.snapshot,
             &v.band,
             &theme,
             frame.focused,
-            marked,
+            &all[from..to],
             window,
             cx,
         );

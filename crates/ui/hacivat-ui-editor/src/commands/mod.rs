@@ -14,7 +14,8 @@
 //! that edits refuses by itself ([`change`], undo, redo, cut, paste). Moving, selecting, copy
 //! and Run still work.
 //!
-//! **Single cursor (M3a).** Commands read the main range and leave one range.
+//! **Several carets (Task 31).** Moves, edits and the clipboard act at every range, as one
+//! transaction (one undo group); Run follows the main caret (controller ruling 2).
 //!
 //! What the host reads (Tasks 32 and 34), all from this module: [`CommandState`]
 //! (`tab_moves_focus`, [`CommandState::menu_open`]), [`status_message`] (the sentence of
@@ -111,6 +112,12 @@ pub struct CommandState {
     /// The string whose content the last double click selected (text version, content bytes):
     /// the next double click in it selects it with its quotes.
     pub(crate) string_content: Option<(u64, Range<usize>)>,
+    // ## m3c-t31-multi
+    /// The last sentence holds while the composition is open (the IME fallback).
+    pub(crate) said_composing: bool,
+    /// The model's commit count right after an occurrence search that began at a caret moved
+    /// the selection: while it is still the count, the search matches whole words (M10).
+    pub(crate) whole_word_at: Option<u64>,
 }
 
 impl CommandState {
@@ -131,15 +138,29 @@ pub fn overlay(v: &EditorView, window: &mut Window, cx: &mut App) -> Option<AnyE
 /// until the text or the selection changes. The host reads it on `EditorEvent::StatusChanged`.
 pub fn status_message(v: &EditorView) -> Option<SharedString> {
     let (at, text) = v.commands.said.as_ref()?;
-    (*at == Moment::of(v)).then(|| text.clone())
+    // ## m3c-t31-multi: the IME fallback's sentence holds while its composition is open.
+    let holds = *at == Moment::of(v) || (v.commands.said_composing && v.ime.is_composing());
+    holds.then(|| text.clone())
 }
 
 /// Says `text`: a polite announcement, and the status bar's transient message.
 pub(crate) fn say(v: &mut EditorView, text: SharedString, cx: &mut Context<EditorView>) {
     v.announce(text.clone(), cx); // ## m3a-t29-a11y-tiers: `announce` takes `cx`.
     v.commands.said = Some((Moment::of(v), text));
+    v.commands.said_composing = false;
     cx.emit(EditorEvent::StatusChanged);
     cx.notify();
+}
+
+// ## m3c-t31-multi
+/// [`say`], the sentence holding while the open composition lasts (the IME fallback, R-M3-64).
+pub(crate) fn say_while_composing(
+    v: &mut EditorView,
+    text: SharedString,
+    cx: &mut Context<EditorView>,
+) {
+    say(v, text, cx);
+    v.commands.said_composing = true;
 }
 
 /// The message `id` with `args` from the installed provider (`id` itself when there is none).
@@ -183,6 +204,42 @@ pub(crate) fn select(
         },
         cx,
     );
+}
+
+// ## m3c-t31-multi
+/// Makes `set` the selection, as `event`; nothing when it already is.
+pub(crate) fn select_set(
+    v: &mut EditorView,
+    set: SelectionSet,
+    event: UserEvent,
+    cx: &mut Context<EditorView>,
+) {
+    acted(v);
+    if *v.model.selection() == set {
+        return;
+    }
+    let len = v.model.buffer().len_bytes();
+    let ann = v.annotations(event, Origin::User, cx);
+    v.commit(
+        Transaction {
+            changes: ChangeSet::identity(len),
+            selection: Some(set),
+            ann,
+        },
+        cx,
+    );
+}
+
+/// Every range of the selection through `f`, the main one kept: a per-caret move.
+pub(crate) fn map_ranges(
+    v: &EditorView,
+    mut f: impl FnMut(&SelectionRange) -> SelectionRange,
+) -> SelectionSet {
+    let sel = v.model.selection();
+    if sel.ranges().len() == 1 {
+        return SelectionSet::single(f(sel.main()));
+    }
+    SelectionSet::normalized(sel.ranges().iter().map(&mut f), sel.main_index())
 }
 
 /// Applies `edits` as one transaction of `event`, with `selection` after it (`None`: the
@@ -298,13 +355,14 @@ static COMMANDS: [EditorCommand; 68] = [
     // `stub` rows are disabled in the app, out of the palette; none seals the history). The
     // filling task turns its rows into `command(..)` rows, a named exception.
     // Task 31: multi-cursor.
-    stub("editor.add_caret_above", "hv-cmd-editor-add-caret-above", multi::add_caret_above),
-    stub("editor.add_caret_below", "hv-cmd-editor-add-caret-below", multi::add_caret_below),
-    stub("editor.select_next_occurrence", "hv-cmd-editor-select-next-occurrence", multi::select_next_occurrence),
-    stub("editor.select_all_occurrences", "hv-cmd-editor-select-all-occurrences", multi::select_all_occurrences),
-    stub("editor.split_selection_into_lines", "hv-cmd-editor-split-selection-into-lines", multi::split_selection_into_lines),
-    stub("editor.undo_selection", "hv-cmd-editor-undo-selection", multi::undo_selection),
-    stub("editor.redo_selection", "hv-cmd-editor-redo-selection", multi::redo_selection),
+    // ## m3c-t31-multi (named exception): the Task 31 rows are commands now.
+    command("editor.add_caret_above", "hv-cmd-editor-add-caret-above", multi::add_caret_above, false),
+    command("editor.add_caret_below", "hv-cmd-editor-add-caret-below", multi::add_caret_below, false),
+    command("editor.select_next_occurrence", "hv-cmd-editor-select-next-occurrence", multi::select_next_occurrence, false),
+    command("editor.select_all_occurrences", "hv-cmd-editor-select-all-occurrences", multi::select_all_occurrences, false),
+    command("editor.split_selection_into_lines", "hv-cmd-editor-split-selection-into-lines", multi::split_selection_into_lines, false),
+    command("editor.undo_selection", "hv-cmd-editor-undo-selection", multi::undo_selection, false),
+    command("editor.redo_selection", "hv-cmd-editor-redo-selection", multi::redo_selection, false),
     // Task 32: folding.
     stub("editor.fold", "hv-cmd-editor-fold", crate::fold_gutter::fold),
     stub("editor.unfold", "hv-cmd-editor-unfold", crate::fold_gutter::unfold),

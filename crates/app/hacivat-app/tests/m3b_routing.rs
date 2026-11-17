@@ -578,7 +578,7 @@ fn primary_f_in_the_editor_still_reaches_the_explorer_filter(cx: &mut TestAppCon
 
 /// Fix round 2 (I3): every stub command that does nothing until its task lands is disabled, so
 /// no palette entry resolves to one; with an editor focused, M3a's editor commands are enabled
-/// and none of the 32 editor and grid stubs (nor the app-registered ones) is.
+/// and none of the editor and grid stubs (nor the app-registered ones) is.
 #[cfg(unix)]
 #[gpui::test]
 fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
@@ -603,9 +603,10 @@ fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
         .filter(|c| c.stub)
         .map(|c| c.id)
         .collect();
-    assert_eq!(stubs.len(), 23);
+    // ## m3c-t31-multi (named exception): Task 31's seven editor rows are commands now.
+    assert_eq!(stubs.len(), 16);
     stubs.extend(hacivat_ui_grid::commands::STUB_COMMANDS);
-    assert_eq!(stubs.len(), 32);
+    assert_eq!(stubs.len(), 25);
     // The app-registered stubs (disabled since Task 1b).
     // ## m3b-t27-history (named exception): `history.open` is no longer a stub; it is enabled
     // once the history store is open (`history_ui.rs` covers it).
@@ -747,6 +748,11 @@ fn new_icons_are_embedded() {
         IconName::Filter,
         IconName::ArrowUpDown,
         IconName::Snowflake,
+        // ## m3c-t31-multi (controller ruling 8, named exception): the M3c icons.
+        IconName::ArrowUp,
+        IconName::CaseSensitive,
+        IconName::WholeWord,
+        IconName::Regex,
     ] {
         assert!(asset_bytes(n.path()).is_some(), "{n:?}");
     }

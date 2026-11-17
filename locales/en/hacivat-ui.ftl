@@ -2635,3 +2635,12 @@ hv-history-console-gone = The console to insert into is closed.
 hv-history-insert-refused = The statement couldn't be inserted: the editor is read-only, composing text, or would get too large.
 hv-history-pin-failed = The pin couldn't be changed.
 hv-history-open-failed = The new console didn't open in time; nothing was inserted.
+
+## m3b-t31-multi
+
+# The status bar's count of carets in the console's editor, before the selected count (shown from two carets on; NOTES surface 14).
+# Variables:
+#   $n (Number) - the carets, e.g. 3.
+hv-editor-carets = { $n } carets
+# Said once, politely, when an input method composition goes to the main caret only (R-M3-64).
+hv-editor-ime-primary-only = Input method: typing at the main caret only, because another caret was inside a string or comment

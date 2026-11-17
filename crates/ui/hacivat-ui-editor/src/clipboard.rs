@@ -2,10 +2,10 @@
 //! selection), and a paste read asynchronously and applied to the selection current when it
 //! lands, as one `InputPaste` transaction.
 //!
-//! - **Copy** takes the main selection; without one (and with `copy_line_without_selection`)
+//! - **Copy** takes the selection; without one (and with `copy_line_without_selection`)
 //!   the caret's whole line with its break, a break of the dominant kind added to a last line
 //!   that has none. The clipboard string carries the piece metadata of UI-EDIT-14 step 1
-//!   (`{"v":1,"src":"hacivat-editor","pieces":[{"len":…,"line_wise":…}]}`, one piece in M3a),
+//!   (`{"v":1,"src":"hacivat-editor","pieces":[{"len":…,"line_wise":…}]}`, one piece per range),
 //!   so a line-wise copy pastes above the caret's line with the caret's column kept. Metadata
 //!   that does not describe the text exactly is ignored.
 //! - **Cut** copies, then deletes what it copied in one `DeleteCut` transaction; a line-wise
@@ -24,27 +24,48 @@
 //!   ends (`ime::defer_while_composing`, the corrected R-M3-7 ruling). Copy changes no text and
 //!   always runs.
 //! - A read-only editor copies, and neither cuts nor pastes.
+//!
+//! ## m3c-t31-multi: several carets (UI-EDIT-14 steps 1, 2, 4 and 6)
+//! - **Copy** takes every non-empty range as a piece, the pieces joined with the dominant line
+//!   ending; with no selection, each caret's line once, line-wise. The metadata lists every
+//!   piece. **Cut** deletes every copied range in one transaction.
+//! - **Paste** cuts the text into its pieces when the metadata describes it exactly, or, when
+//!   the platform dropped the metadata, when the text is the last copy this app made (its hash;
+//!   the copy record is app-wide, so a copy in one console pastes into another). N pieces into
+//!   N carets go one each; otherwise text of exactly N lines (a trailing break aside) goes one
+//!   line per caret; anything else goes whole to every caret. One `InputPaste` group.
+//! - **The primary selection (Linux):** 100 ms after a selection change, a non-empty main
+//!   selection is written to it; a middle click pastes it at the pointer, the selections staying
+//!   where they are (`mouse.rs`). Elsewhere neither happens.
 
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use hacivat_text::{ChangeSet, LineEnding, Origin, SelectionSet, Transaction, UserEvent};
+use hacivat_text::{
+    ChangeSet, LineEnding, Origin, SelectionRange, SelectionSet, Transaction, UserEvent,
+};
 use hacivat_ui::actions::ActionFn;
 use hacivat_ui::icon::IconName;
 use hacivat_ui::l10n::UiArg;
 use hacivat_ui::text::TextFn;
 use hacivat_ui::toast::{Toast, ToastAction, ToastKind, ToastQueue};
-use hacivat_ui_core::gpui_surface::{App, ClipboardEntry, ClipboardItem, Context, Window};
+use hacivat_ui_core::gpui_surface::{App, ClipboardEntry, ClipboardItem, Context, Global, Window};
+use twox_hash::XxHash3_128;
 
 use crate::commands::message;
 use crate::ime::{self, AppEdit};
 use crate::view::{EditorEvent, EditorView};
 
-/// The module-owned state (P11): the clipboard reads in flight.
+/// The module-owned state (P11): the clipboard reads in flight, and the primary selection's
+/// pending write (Linux).
 #[derive(Debug, Clone, Default)]
 pub struct PasteState {
     reads: u32,
+    // ## m3c-t31-multi
+    /// Bumped by every selection change: a pending primary-selection write runs only if it is
+    /// still the newest (the 100 ms debounce).
+    primary_generation: u64,
 }
 
 impl PasteState {
@@ -54,59 +75,191 @@ impl PasteState {
     }
 }
 
+// ## m3c-t31-multi
+/// One copied piece (UI-EDIT-14 step 1): its bytes in the clipboard text and whether it is a
+/// whole line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Piece {
+    len: usize,
+    line_wise: bool,
+}
+
+/// The last copy made in this app (any editor): the clipboard text's hash and its pieces. A
+/// platform that drops the metadata (UI-EDIT-14 verification: Windows and Linux clipboards
+/// may) still pastes N pieces into N carets while the clipboard holds exactly that text.
+/// The hash cannot tell who put the text there: the same bytes copied in another app are taken
+/// for this copy (accepted, fix round 1 review M9).
+#[derive(Debug, Clone, Default)]
+struct CopyRecord {
+    hash: u128,
+    pieces: Vec<Piece>,
+}
+
+impl Global for CopyRecord {}
+
+fn hash_of(text: &str) -> u128 {
+    let mut h = XxHash3_128::new();
+    h.write(text.as_bytes());
+    h.finish_128()
+}
+
 /// Normalised pasted text, ready to apply.
 #[derive(Debug)]
 pub(crate) struct Pasted {
     text: Arc<str>,
     nuls: usize,
-    line_wise: bool,
+    /// The pieces, normalised, when the clipboard described them (its metadata, or the copy
+    /// record): one per copied range, with whether it is line-wise. Empty for foreign text.
+    pieces: Vec<(Arc<str>, bool)>,
 }
 
-/// The piece metadata of one copied piece (UI-EDIT-14 step 1).
-fn metadata(len: usize, line_wise: bool) -> String {
+/// The piece metadata of the copied pieces (UI-EDIT-14 step 1).
+fn metadata(pieces: &[Piece]) -> String {
+    let list: Vec<String> = pieces
+        .iter()
+        .map(|p| format!(r#"{{"len":{},"line_wise":{}}}"#, p.len, p.line_wise))
+        .collect();
     format!(
-        r#"{{"v":1,"src":"hacivat-editor","pieces":[{{"len":{len},"line_wise":{line_wise}}}]}}"#
+        r#"{{"v":1,"src":"hacivat-editor","pieces":[{}]}}"#,
+        list.join(",")
     )
 }
 
-/// What Copy takes: the text, whether it is line-wise, and the bytes Cut deletes.
-fn copied(v: &EditorView) -> Option<(String, bool, Range<usize>)> {
+/// The pieces of `meta` when it is exactly the format [`metadata`] writes (another version or
+/// source is ignored).
+fn parse_metadata(meta: &str) -> Option<Vec<Piece>> {
+    let list = meta
+        .strip_prefix(r#"{"v":1,"src":"hacivat-editor","pieces":["#)?
+        .strip_suffix("]}")?;
+    list.strip_prefix('{')?
+        .strip_suffix('}')?
+        .split("},{")
+        .map(|p| {
+            let rest = p.strip_prefix(r#""len":"#)?;
+            let (len, lw) = rest.split_once(r#","line_wise":"#)?;
+            let line_wise = match lw {
+                "true" => true,
+                "false" => false,
+                _ => return None,
+            };
+            Some(Piece {
+                len: len.parse().ok()?,
+                line_wise,
+            })
+        })
+        .collect()
+}
+
+/// `text` cut into `pieces` (a line break between two pieces that are not line-wise, as Copy
+/// joins them); `None` when they do not describe the text exactly.
+fn split_pieces<'a>(text: &'a str, pieces: &[Piece]) -> Option<Vec<(&'a str, bool)>> {
+    let mut out = Vec::with_capacity(pieces.len());
+    let mut at = 0usize;
+    for (i, p) in pieces.iter().enumerate() {
+        let end = at.checked_add(p.len)?;
+        if end > text.len() || !text.is_char_boundary(end) {
+            return None;
+        }
+        out.push((&text[at..end], p.line_wise));
+        at = end;
+        if i + 1 < pieces.len() && !p.line_wise {
+            let rest = &text[at..];
+            at += if rest.starts_with("\r\n") {
+                2
+            } else if rest.starts_with(['\n', '\r']) {
+                1
+            } else {
+                return None;
+            };
+        }
+    }
+    (at == text.len()).then_some(out)
+}
+
+/// What Copy takes: the text, its pieces, and the bytes Cut deletes (sorted, merged). Every
+/// non-empty range is a piece (pieces joined with the dominant line ending); with none, each
+/// caret's line once, line-wise, with its break (a break of the dominant kind added to a last
+/// line that has none, whose cut takes the break before it).
+fn copied(v: &EditorView) -> Option<(String, Vec<Piece>, Vec<Range<usize>>)> {
     let buf = v.model.buffer();
-    let main = v.model.selection().main().range();
-    if !main.is_empty() {
-        return Some((buf.slice(main.clone()).into_owned(), false, main));
+    let sel = v.model.selection();
+    let nl = buf.dominant_line_ending().as_str();
+    let selected: Vec<Range<usize>> = sel
+        .ranges()
+        .iter()
+        .map(|r| r.range())
+        .filter(|r| !r.is_empty())
+        .collect();
+    if !selected.is_empty() {
+        let mut text = String::new();
+        let mut pieces = Vec::with_capacity(selected.len());
+        for (i, r) in selected.iter().enumerate() {
+            if i > 0 {
+                text.push_str(nl);
+            }
+            let piece = buf.slice(r.clone());
+            pieces.push(Piece {
+                len: piece.len(),
+                line_wise: false,
+            });
+            text.push_str(&piece);
+        }
+        return Some((text, pieces, selected));
     }
     if !v.config.copy_line_without_selection {
         return None;
     }
-    let line = buf.byte_to_line(main.start);
-    let whole = buf.line_range(line, true);
-    let content = buf.line_range(line, false);
-    let mut text = buf.slice(whole.clone()).into_owned();
-    let cut = if whole.end > content.end {
-        whole
-    } else {
-        // The last line has no break: copy it with one, and cut the break before it.
-        text.push_str(buf.dominant_line_ending().as_str());
-        let from = if line > 0 {
-            buf.line_range(line - 1, false).end
+    let mut lines: Vec<usize> = sel
+        .ranges()
+        .iter()
+        .map(|r| buf.byte_to_line(r.head))
+        .collect();
+    lines.dedup();
+    let mut text = String::new();
+    let mut pieces = Vec::with_capacity(lines.len());
+    let mut cuts: Vec<Range<usize>> = Vec::with_capacity(lines.len());
+    for line in lines {
+        let whole = buf.line_range(line, true);
+        let content = buf.line_range(line, false);
+        let mut piece = buf.slice(whole.clone()).into_owned();
+        let cut = if whole.end > content.end {
+            whole
         } else {
-            whole.start
+            // The last line has no break: copy it with one, and cut the break before it.
+            piece.push_str(nl);
+            let from = if line > 0 {
+                buf.line_range(line - 1, false).end
+            } else {
+                whole.start
+            };
+            from..whole.end
         };
-        from..whole.end
-    };
-    Some((text, true, cut))
+        pieces.push(Piece {
+            len: piece.len(),
+            line_wise: true,
+        });
+        text.push_str(&piece);
+        match cuts.last_mut() {
+            Some(prev) if cut.start <= prev.end => prev.end = prev.end.max(cut.end),
+            _ => cuts.push(cut),
+        }
+    }
+    Some((text, pieces, cuts))
 }
 
-fn write(text: String, line_wise: bool, cx: &mut App) {
-    let meta = metadata(text.len(), line_wise);
+fn write(text: String, pieces: Vec<Piece>, cx: &mut App) {
+    let meta = metadata(&pieces);
+    cx.set_global(CopyRecord {
+        hash: hash_of(&text),
+        pieces,
+    });
     cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, meta));
 }
 
 pub fn copy(v: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) {
     let _ = window;
-    if let Some((text, line_wise, _)) = copied(v) {
-        write(text, line_wise, cx);
+    if let Some((text, pieces, _)) = copied(v) {
+        write(text, pieces, cx);
     }
 }
 
@@ -115,19 +268,21 @@ pub fn cut(v: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>
     if v.config.read_only || v.ime.is_composing() {
         return;
     }
-    let Some((text, line_wise, range)) = copied(v) else {
+    let Some((text, pieces, ranges)) = copied(v) else {
         return;
     };
-    write(text, line_wise, cx);
+    write(text, pieces, cx);
     let len = v.model.buffer().len_bytes();
-    let Ok(changes) = ChangeSet::from_edits(len, [(range.clone(), Arc::from(""))]) else {
+    let Ok(changes) = ChangeSet::from_edits(len, ranges.into_iter().map(|r| (r, Arc::from(""))))
+    else {
         return;
     };
     let ann = v.annotations(UserEvent::DeleteCut, Origin::User, cx);
+    // Every caret inside a cut range maps to where that range was.
     v.commit(
         Transaction {
             changes,
-            selection: Some(SelectionSet::cursor(range.start)),
+            selection: None,
             ann,
         },
         cx,
@@ -180,18 +335,31 @@ pub(crate) enum Landing {
 
 /// Pastes `item` (a landed read, or the platform's own paste). Nothing the size of the text
 /// is touched on the UI thread (review I2): the item moves to the background executor, which
-/// takes its text, measures the normalised length without allocating, refuses a paste that is
-/// alone past the limit, and only then normalises.
+/// takes its text and its pieces (the metadata, else the copy record when the text is the one
+/// copied), measures the normalised length without allocating, refuses a paste that is alone
+/// past the limit, and only then normalises.
 pub(crate) fn paste_item(v: &mut EditorView, item: ClipboardItem, cx: &mut Context<EditorView>) {
     if v.config.read_only {
         return;
     }
     let ending = v.model.buffer().dominant_line_ending();
     let limit = v.config.tiers.reduced_max_bytes;
+    let record = cx.try_global::<CopyRecord>().cloned();
     v.paste.reads += 1;
     let work = cx.background_executor().spawn(async move {
-        let (text, line_wise) = text_of(item)?;
-        Some(prepare(text, ending, line_wise, limit))
+        let (text, meta) = text_of(item)?;
+        let pieces = meta
+            .as_deref()
+            .and_then(parse_metadata)
+            .filter(|p| split_pieces(&text, p).is_some())
+            .or_else(|| {
+                record
+                    .filter(|r| r.hash == hash_of(&text))
+                    .map(|r| r.pieces)
+                    .filter(|p| split_pieces(&text, p).is_some())
+            })
+            .unwrap_or_default();
+        Some(prepare(text, ending, &pieces, limit))
     });
     cx.spawn(async move |this, cx| {
         let landing = work.await;
@@ -208,9 +376,8 @@ pub(crate) fn paste_item(v: &mut EditorView, item: ClipboardItem, cx: &mut Conte
 }
 
 /// The text of `item`'s string entries (moved out when there is one, joined when there are
-/// several), and whether its metadata says line-wise for exactly that text; `None` when it
-/// holds no text.
-fn text_of(item: ClipboardItem) -> Option<(String, bool)> {
+/// several) and the metadata of a single one; `None` when it holds no text.
+fn text_of(item: ClipboardItem) -> Option<(String, Option<String>)> {
     let mut strings: Vec<_> = item
         .into_entries()
         .filter_map(|e| match e {
@@ -218,17 +385,16 @@ fn text_of(item: ClipboardItem) -> Option<(String, bool)> {
             _ => None,
         })
         .collect();
-    let (text, line_wise) = if strings.len() == 1 {
+    let (text, meta) = if strings.len() == 1 {
         let s = strings.pop()?;
-        let line_wise = s.metadata.as_deref() == Some(&*metadata(s.text.len(), true));
-        (s.text, line_wise)
+        (s.text, s.metadata)
     } else {
         (
             strings.into_iter().map(|s| s.text).collect::<String>(),
-            false,
+            None,
         )
     };
-    (!text.is_empty()).then_some((text, line_wise))
+    (!text.is_empty()).then_some((text, meta))
 }
 
 /// The length [`normalize`] gives `text`, counted without building anything.
@@ -247,13 +413,23 @@ fn normalized_len(text: &str, ending: LineEnding) -> usize {
 
 /// The background half of a paste: refused by its normalised length before anything is built
 /// when it alone is past `limit` (the document after it is at least that long), else
-/// normalised.
-fn prepare(text: String, ending: LineEnding, line_wise: bool, limit: u64) -> Landing {
+/// normalised, with its `pieces` (already checked against the text) normalised one by one.
+fn prepare(text: String, ending: LineEnding, pieces: &[Piece], limit: u64) -> Landing {
     let len = normalized_len(&text, ending) as u64;
     if len > limit {
         return Landing::TooBig(len);
     }
-    Landing::Text(normalize(&text, ending, line_wise))
+    let (whole, nuls) = normalize(&text, ending);
+    let pieces = split_pieces(&text, pieces)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(piece, line_wise)| (normalize(piece, ending).0, line_wise))
+        .collect();
+    Landing::Text(Pasted {
+        text: whole,
+        nuls,
+        pieces,
+    })
 }
 
 #[cfg(test)]
@@ -263,7 +439,7 @@ thread_local! {
 }
 
 /// UI-EDIT-14 step 3: one leading BOM stripped, endings converted to `ending`, NULs counted.
-fn normalize(text: &str, ending: LineEnding, line_wise: bool) -> Pasted {
+fn normalize(text: &str, ending: LineEnding) -> (Arc<str>, usize) {
     #[cfg(test)]
     NORMALIZED.with(|n| n.set(n.get() + 1));
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
@@ -278,11 +454,7 @@ fn normalize(text: &str, ending: LineEnding, line_wise: bool) -> Pasted {
     }
     out.push_str(rest);
     let nuls = out.bytes().filter(|&b| b == 0).count();
-    Pasted {
-        text: Arc::from(out),
-        nuls,
-        line_wise,
-    }
+    (Arc::from(out), nuls)
 }
 
 /// A paste past the limit: refused with `PasteRefused { bytes }` and the toast (R-M3-49).
@@ -292,10 +464,30 @@ fn refuse(v: &mut EditorView, bytes: u64, cx: &mut Context<EditorView>) {
     ToastQueue::push(cx, refused_toast(bytes, limit));
 }
 
-/// Applies normalised pasted text to the selection current now: above the caret's line when
-/// it is line-wise and nothing is selected, else over the main selection. Held while a
-/// composition is open (or held edits wait before it); refused past the size limit, with the
-/// selection it replaces counted out (R-M3-49).
+/// What each caret of `n` gets (UI-EDIT-14 step 4): piece `i` at caret `i` when there are `n`
+/// pieces; else, with several carets and text of exactly `n` lines (a trailing break aside),
+/// one line each; else the whole text at every caret.
+fn distribution(p: &Pasted, n: usize, nl: &str) -> Vec<(Arc<str>, bool)> {
+    if p.pieces.len() == n {
+        return p.pieces.clone();
+    }
+    if n > 1 && p.pieces.len() <= 1 {
+        let body = p.text.strip_suffix(nl).unwrap_or(&p.text);
+        let lines: Vec<&str> = body.split(nl).collect();
+        if lines.len() == n {
+            return lines.into_iter().map(|l| (Arc::from(l), false)).collect();
+        }
+    }
+    // ## m3c-t31-multi (fix round 1, I3): whole lines stay whole lines, whatever the count.
+    let line_wise = !p.pieces.is_empty() && p.pieces.iter().all(|x| x.1);
+    vec![(p.text.clone(), line_wise); n]
+}
+
+/// Applies normalised pasted text to the selection current now (## m3c-t31-multi: one piece,
+/// one line or the whole text per caret, [`distribution`]): a line-wise piece above its caret's
+/// line when the caret has no selection (its column kept), anything else over the range. Held
+/// while a composition is open (or held edits wait before it); refused past the size limit,
+/// with the selections it replaces counted out (R-M3-49). One `InputPaste` group.
 pub(crate) fn apply(v: &mut EditorView, p: Pasted, cx: &mut Context<EditorView>) {
     if v.config.read_only {
         return;
@@ -306,26 +498,186 @@ pub(crate) fn apply(v: &mut EditorView, p: Pasted, cx: &mut Context<EditorView>)
     }
     let buf = v.model.buffer();
     let len = buf.len_bytes();
-    let main = v.model.selection().main().range();
-    let (at, caret) = if p.line_wise && main.is_empty() {
-        let start = buf.line_to_byte(buf.byte_to_line(main.start));
-        (start..start, main.start + p.text.len())
-    } else {
-        (main.clone(), main.start + p.text.len())
-    };
-    let after = (len - at.len() + p.text.len()) as u64;
-    if after > v.config.tiers.reduced_max_bytes {
-        refuse(v, p.text.len() as u64, cx);
+    let sel = v.model.selection().clone();
+    let plan = distribution(&p, sel.ranges().len(), buf.dominant_line_ending().as_str());
+    // Each caret: its edit, and where its caret lands (after the edit's text, or its own
+    // position moved by the edits at or before it, for a line-wise piece).
+    let mut edits: Vec<(Range<usize>, Arc<str>)> = Vec::with_capacity(plan.len());
+    let mut after_edit: Vec<Option<usize>> = Vec::with_capacity(plan.len());
+    for (r, (text, line_wise)) in sel.ranges().iter().zip(plan) {
+        let range = r.range();
+        if line_wise && range.is_empty() {
+            let start = buf.line_to_byte(buf.byte_to_line(range.start));
+            edits.push((start..start, text));
+            after_edit.push(None);
+        } else {
+            edits.push((range, text));
+            after_edit.push(Some(edits.len() - 1));
+        }
+    }
+    let inserted: usize = edits.iter().map(|(_, t)| t.len()).sum();
+    let removed: usize = edits.iter().map(|(r, _)| r.len()).sum();
+    if (len - removed + inserted) as u64 > v.config.tiers.reduced_max_bytes {
+        refuse(v, inserted as u64, cx);
         return;
     }
-    let Ok(changes) = ChangeSet::from_edits(len, [(at, p.text.clone())]) else {
+    // Where each edit's text starts in the new text (in the order the change set applies them).
+    let mut order: Vec<usize> = (0..edits.len()).collect();
+    order.sort_by_key(|&i| (edits[i].0.start, edits[i].0.end));
+    let mut starts = vec![0; edits.len()];
+    // ## m3c-t31-multi (fix round 1, M7): each edit's old start with the length change of it
+    // and every edit before it, so a caret's shift is one binary search (O(N log N) in all).
+    let mut shifts: Vec<(usize, isize)> = Vec::with_capacity(edits.len());
+    let mut delta: isize = 0;
+    for &i in &order {
+        let (r, t) = &edits[i];
+        starts[i] = r.start.saturating_add_signed(delta);
+        delta += t.len() as isize - r.len() as isize;
+        shifts.push((r.start, delta));
+    }
+    let carets: Vec<SelectionRange> = sel
+        .ranges()
+        .iter()
+        .zip(&after_edit)
+        .map(|(r, e)| match e {
+            Some(i) => SelectionRange::caret(starts[*i] + edits[*i].1.len()),
+            None => {
+                let k = shifts.partition_point(|(start, _)| *start <= r.head);
+                let shift = k.checked_sub(1).map_or(0, |k| shifts[k].1);
+                SelectionRange::caret(r.head.saturating_add_signed(shift))
+            }
+        })
+        .collect();
+    let Ok(changes) = ChangeSet::from_edits(len, edits) else {
         return;
     };
     let ann = v.annotations(UserEvent::InputPaste, Origin::User, cx);
     let done = v.commit(
         Transaction {
             changes,
-            selection: Some(SelectionSet::cursor(caret)),
+            selection: Some(SelectionSet::normalized(carets, sel.main_index())),
+            ann,
+        },
+        cx,
+    );
+    if done.is_some() && p.nuls > 0 {
+        ToastQueue::push(cx, nul_toast(p.nuls));
+    }
+}
+
+// ## m3c-t31-multi: the Linux primary selection (UI-EDIT-14 step 6).
+/// The text the primary selection takes now: the main selection's, when it is not empty.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "the primary selection exists on Linux only")
+)]
+pub(crate) fn primary_text(v: &EditorView) -> Option<String> {
+    let main = v.model.selection().main().range();
+    (!main.is_empty()).then(|| v.model.buffer().slice(main).into_owned())
+}
+
+/// A selection change: on Linux, 100 ms after the last one, the main selection's text goes to
+/// the primary selection (nothing when it is empty). Elsewhere nothing happens.
+pub(crate) fn selection_changed(v: &mut EditorView, cx: &mut Context<EditorView>) {
+    v.paste.primary_generation = v.paste.primary_generation.wrapping_add(1);
+    #[cfg(target_os = "linux")]
+    {
+        // ## m3c-t31-multi (fix round 1, M4): nothing while composing; the commit writes.
+        if v.model.selection().main().is_empty() || v.ime.is_composing() {
+            return;
+        }
+        let generation = v.paste.primary_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(100))
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                if v.paste.primary_generation == generation
+                    && !v.ime.is_composing()
+                    && let Some(text) = primary_text(v)
+                {
+                    cx.write_to_primary(ClipboardItem::new_string(text));
+                }
+            });
+        })
+        .detach();
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = cx;
+}
+
+/// A middle click's paste of the primary selection at byte `at` (Linux): `text` goes through
+/// the paste's background half (fix round 1, I2: refused past the size limit before anything
+/// is built, then normalised, never on the UI thread) and lands at `at`, followed through
+/// whatever changed meanwhile.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "the middle click pastes the primary selection on Linux only"
+    )
+)]
+pub(crate) fn paste_text_at(
+    v: &mut EditorView,
+    at: usize,
+    text: String,
+    cx: &mut Context<EditorView>,
+) {
+    if v.config.read_only || text.is_empty() {
+        return;
+    }
+    let ending = v.model.buffer().dominant_line_ending();
+    let limit = v.config.tiers.reduced_max_bytes;
+    let version = v.model.version();
+    v.paste.reads += 1;
+    let work = cx
+        .background_executor()
+        .spawn(async move { prepare(text, ending, &[], limit) });
+    cx.spawn(async move |this, cx| {
+        let landing = work.await;
+        let _ = this.update(cx, |v, cx| {
+            v.paste.reads = v.paste.reads.saturating_sub(1);
+            match landing {
+                Landing::Text(p) => insert_at(v, version, at, p, cx),
+                Landing::TooBig(bytes) => refuse(v, bytes, cx),
+            }
+        });
+    })
+    .detach();
+}
+
+/// Inserts prepared text at byte `at` of version `version` (mapped to the current text; dropped
+/// when that text is gone) as one `InputPaste` group; the selections stay where they are
+/// (mapped). Refused on a read-only editor, while composing, or past the size limit.
+fn insert_at(v: &mut EditorView, version: u64, at: usize, p: Pasted, cx: &mut Context<EditorView>) {
+    if v.config.read_only || ime::must_hold(v) {
+        return;
+    }
+    let at = match v
+        .model
+        .changelog()
+        .rebase(version, at..at, hacivat_text::RangeKind::Content)
+    {
+        hacivat_text::Rebased::Mapped(r) => r.start,
+        hacivat_text::Rebased::Deleted | hacivat_text::Rebased::TooOld => return,
+    };
+    let len = v.model.buffer().len_bytes();
+    if (len + p.text.len()) as u64 > v.config.tiers.reduced_max_bytes {
+        refuse(v, p.text.len() as u64, cx);
+        return;
+    }
+    let at = v
+        .model
+        .buffer()
+        .snap(at.min(len), hacivat_text::Bias::Before);
+    let Ok(changes) = ChangeSet::from_edits(len, [(at..at, p.text.clone())]) else {
+        return;
+    };
+    let ann = v.annotations(UserEvent::InputPaste, Origin::User, cx);
+    let done = v.commit(
+        Transaction {
+            changes,
+            selection: None,
             ann,
         },
         cx,
@@ -353,15 +705,15 @@ impl EditorView {
         if self.config.read_only || ime::must_hold(self) {
             return None;
         }
-        let p = normalize(text, self.model.buffer().dominant_line_ending(), false);
+        let (text, _) = normalize(text, self.model.buffer().dominant_line_ending());
         let len = self.model.buffer().len_bytes();
         let main = self.model.selection().main().range();
-        let after = (len - main.len() + p.text.len()) as u64;
+        let after = (len - main.len() + text.len()) as u64;
         if after > self.config.tiers.reduced_max_bytes {
             return None;
         }
-        let end = main.start + p.text.len();
-        let changes = ChangeSet::from_edits(len, [(main.clone(), p.text)]).ok()?;
+        let end = main.start + text.len();
+        let changes = ChangeSet::from_edits(len, [(main.clone(), text)]).ok()?;
         let ann = self.annotations(UserEvent::Command("insert_text"), Origin::Program, cx);
         self.commit(
             Transaction {
@@ -460,14 +812,14 @@ mod t27_tests {
     #[test]
     fn normalisation_strips_one_leading_bom_and_converts_every_ending() {
         let crlf = TextBuffer::from_str("a\r\nb\r\n").dominant_line_ending();
-        let p = normalize("\u{FEFF}\u{FEFF}a\nb\r\nc\rd\u{2028}e\0", crlf, false);
-        assert_eq!(&*p.text, "\u{FEFF}a\r\nb\r\nc\r\nd\u{2028}e\0");
-        assert_eq!(p.nuls, 1);
+        let (text, nuls) = normalize("\u{FEFF}\u{FEFF}a\nb\r\nc\rd\u{2028}e\0", crlf);
+        assert_eq!(&*text, "\u{FEFF}a\r\nb\r\nc\r\nd\u{2028}e\0");
+        assert_eq!(nuls, 1);
         let cr = TextBuffer::from_str("a\rb\rc").dominant_line_ending();
-        assert_eq!(&*normalize("x\r\ny\nz", cr, false).text, "x\ry\rz");
+        assert_eq!(&*normalize("x\r\ny\nz", cr).0, "x\ry\rz");
         // A lone CR at the end and a CRLF split across nothing else.
         let lf = TextBuffer::from_str("").dominant_line_ending();
-        assert_eq!(&*normalize("\r\r\n\n", lf, false).text, "\n\n\n");
+        assert_eq!(&*normalize("\r\r\n\n", lf).0, "\n\n\n");
     }
 
     /// Review I2: the length scan allocates nothing and agrees with what `normalize` builds.
@@ -492,11 +844,7 @@ mod t27_tests {
         ];
         for s in samples {
             for e in endings {
-                assert_eq!(
-                    normalized_len(s, e),
-                    normalize(s, e, false).text.len(),
-                    "{s:?} {e:?}"
-                );
+                assert_eq!(normalized_len(s, e), normalize(s, e).0.len(), "{s:?} {e:?}");
             }
         }
     }
@@ -509,32 +857,102 @@ mod t27_tests {
         let crlf = TextBuffer::from_str("a\r\nb").dominant_line_ending();
         let before = NORMALIZED.with(|n| n.get());
         // 8 bytes, but 12 with CRLF endings: past a 10-byte limit.
-        let landing = prepare("a\nb\nc\nd\n".into(), crlf, false, 10);
+        let landing = prepare("a\nb\nc\nd\n".into(), crlf, &[], 10);
         assert!(matches!(landing, Landing::TooBig(12)), "{landing:?}");
         assert_eq!(NORMALIZED.with(|n| n.get()), before, "normalize never ran");
-        let landing = prepare("a\nb".into(), lf, false, 10);
+        let landing = prepare("a\nb".into(), lf, &[], 10);
         assert!(matches!(landing, Landing::Text(ref p) if &*p.text == "a\nb"));
         assert_eq!(NORMALIZED.with(|n| n.get()), before + 1);
     }
 
+    // ## m3c-t31-multi (named exception): metadata of N pieces; it counts only when it
+    // describes its own text exactly.
     #[test]
     fn metadata_marks_line_wise_only_for_its_own_text() {
+        let one = |len, line_wise| [Piece { len, line_wise }];
+        let pieces_of = |text: &str, meta: String| {
+            parse_metadata(&meta)
+                .and_then(|p| split_pieces(text, &p).map(|s| s.iter().map(|x| x.1).collect()))
+        };
+        assert_eq!(pieces_of("ab\n", metadata(&one(3, true))), Some(vec![true]));
+        assert_eq!(pieces_of("ab\n", metadata(&one(4, true))), None);
+        assert_eq!(pieces_of("ab", metadata(&one(2, false))), Some(vec![false]));
+        let three = [
+            Piece {
+                len: 1,
+                line_wise: false,
+            },
+            Piece {
+                len: 2,
+                line_wise: false,
+            },
+            Piece {
+                len: 0,
+                line_wise: false,
+            },
+        ];
+        assert_eq!(parse_metadata(&metadata(&three)), Some(three.to_vec()));
+        assert_eq!(
+            split_pieces("a\r\nbc\n", &three),
+            Some(vec![("a", false), ("bc", false), ("", false)])
+        );
+        assert_eq!(split_pieces("a bc\n", &three), None, "no break between");
+        assert_eq!(split_pieces("a\nbc\nx", &three), None, "text left over");
+        assert_eq!(
+            parse_metadata(r#"{"v":2,"src":"hacivat-editor","pieces":[]}"#),
+            None
+        );
         let item = |text: &str, meta: String| {
             ClipboardItem::new_string_with_metadata(text.to_string(), meta)
         };
         assert_eq!(
-            text_of(item("ab\n", metadata(3, true))),
-            Some(("ab\n".into(), true))
-        );
-        assert_eq!(
-            text_of(item("ab\n", metadata(4, true))),
-            Some(("ab\n".into(), false))
-        );
-        assert_eq!(
-            text_of(item("ab", metadata(2, false))),
-            Some(("ab".into(), false))
+            text_of(item("ab", metadata(&one(2, false)))),
+            Some(("ab".into(), Some(metadata(&one(2, false)))))
         );
         assert_eq!(text_of(ClipboardItem::new_string(String::new())), None);
+    }
+
+    /// Several carets: N pieces go one per caret, N lines one per caret, anything else whole.
+    #[test]
+    fn distribution_follows_pieces_then_lines_then_whole() {
+        let pasted = |text: &str, pieces: &[(&str, bool)]| Pasted {
+            text: Arc::from(text),
+            nuls: 0,
+            pieces: pieces.iter().map(|(p, l)| (Arc::from(*p), *l)).collect(),
+        };
+        let plan = |p: &Pasted, n| {
+            distribution(p, n, "\n")
+                .into_iter()
+                .map(|(t, l)| (t.to_string(), l))
+                .collect::<Vec<_>>()
+        };
+        let p = pasted("a\nb\nc", &[("a", false), ("b", false), ("c", false)]);
+        assert_eq!(
+            plan(&p, 3),
+            [
+                ("a".into(), false),
+                ("b".into(), false),
+                ("c".into(), false)
+            ]
+        );
+        // Three pieces, two carets: whole at each.
+        assert_eq!(plan(&p, 2), vec![("a\nb\nc".to_string(), false); 2]);
+        // Foreign text of three lines (a trailing break aside), three carets: a line each.
+        let p = pasted("x\ny\nz\n", &[]);
+        assert_eq!(
+            plan(&p, 3),
+            [
+                ("x".into(), false),
+                ("y".into(), false),
+                ("z".into(), false)
+            ]
+        );
+        // One caret, or a line count that does not fit: whole.
+        assert_eq!(plan(&p, 1), [("x\ny\nz\n".into(), false)]);
+        assert_eq!(plan(&p, 2), vec![("x\ny\nz\n".to_string(), false); 2]);
+        // One line-wise piece at three carets: whole, line-wise, at each.
+        let p = pasted("x\n", &[("x\n", true)]);
+        assert_eq!(plan(&p, 3), vec![("x\n".to_string(), true); 3]);
     }
 
     /// The toasts' texts come from `hui.ftl` (block `m3a-t27-clipboard`) with their sizes and
@@ -621,5 +1039,45 @@ mod t27_tests {
             "SELECT 1"
         );
         assert_eq!(vcx.read(|cx| e.read(cx).paste.reads_in_flight()), 0);
+    }
+
+    // ## m3c-t31-multi: the primary selection's text and the middle click's insert (the
+    // platform calls are Linux-only; these parts run everywhere).
+    #[gpui::test]
+    fn the_primary_selection_takes_the_main_selection_and_inserts_at_a_point(
+        cx: &mut TestAppContext,
+    ) {
+        let (e, vcx) = open(cx);
+        e.update(vcx, |v, cx| {
+            assert_eq!(primary_text(v), None, "a caret: nothing to write");
+            v.select_range(0..6, cx);
+            assert_eq!(primary_text(v).as_deref(), Some("SELECT"));
+            // Fix round 1 (I2): the text goes through the background half; byte 7 is followed
+            // through an edit made before it lands.
+            paste_text_at(v, 7, "a\r\nb ".to_string(), cx);
+            v.select_range(0..0, cx);
+            v.replace_selection("-- ", cx);
+            v.select_range(3..9, cx);
+        });
+        vcx.run_until_parked();
+        e.update(vcx, |v, _| {
+            // Inserted at byte 7 (now 10), normalised; the selection is mapped, not moved.
+            assert_eq!(v.snapshot().buffer.to_string(), "-- SELECT a\nb 1");
+            assert_eq!(v.snapshot().selection.main().range(), 3..9);
+            assert_eq!(v.model.undo_kind(), Some(UserEvent::InputPaste));
+            assert_eq!(v.paste.reads_in_flight(), 0);
+        });
+        // Past the limit: refused on the background executor, nothing inserted.
+        e.update(vcx, |v, cx| {
+            let mut cfg = v.config;
+            cfg.tiers.reduced_max_bytes = 16;
+            v.set_config(cfg, cx);
+            paste_text_at(v, 0, "x".repeat(64), cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            vcx.read(|cx| e.read(cx).snapshot().buffer.to_string()),
+            "-- SELECT a\nb 1"
+        );
     }
 }
