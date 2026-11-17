@@ -7,10 +7,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use proptest::prelude::*;
-use sql_dialect::{DialectCtx, DialectId, kw};
-use sql_lexer::{LexState, TokenKind, lex};
+use sql_dialect::{ClientFlavor, DialectCtx, DialectId, kw};
+use sql_lexer::{LexState, TokenFlags, TokenKind, lex};
 use sql_split::{
-    ParamDiag, ParamScan, ParamSettings, PlaceholderKind, StmtHead, TemplatePattern, scan_params,
+    ParamDiag, ParamScan, ParamSettings, PlaceholderKind, SplitMode, SplitStart, StmtHead,
+    TemplatePattern, scan_params, split_from,
 };
 use sql_text::TextRange;
 
@@ -1170,44 +1171,252 @@ const SQLITE_FRAGMENTS: &[&str] = &[
     ";", "::", "?01", "?1",
 ];
 
-/// A generated unit: the dialect (0 PG, 1 MySQL, 2 SQLite), whether PG `?` binds, the text.
-fn sql_with_params() -> impl Strategy<Value = (u8, bool, String)> {
+// ## m3b-params-proptest: every dialect (MariaDB and the generic dialect too), every placeholder
+// form and sigil in each, units that start with the statement words the scan treats specially,
+// every settings knob and several caller heads.
+
+/// The dialects the properties run on; a generated case's `d` indexes this.
+const DIALECTS: [DialectId; 5] = [
+    DialectId::Postgres,
+    DialectId::MySql,
+    DialectId::MariaDb,
+    DialectId::Sqlite,
+    DialectId::Generic,
+];
+
+/// Every placeholder form and sigil of every dialect, offered in each one: what one engine
+/// binds is code, data or an error to another, and each reading must keep the invariants.
+const SIGIL_FRAGMENTS: &[&str] = &[
+    ":name",
+    ":a",
+    "@name",
+    "@a",
+    "$name",
+    "$a",
+    "#name",
+    "#a",
+    "$1",
+    "$2",
+    "$0",
+    "$01",
+    "$65536",
+    "?",
+    "?",
+    "?1",
+    "?2",
+    "?01",
+    "?0",
+    "?65536",
+    ":'v'",
+    ":\"v\"",
+    ":{?v}",
+    "$q$",
+    "$q$ :a ? $1 $q$",
+    "$q$h$q$",
+    "$$",
+    "$$ :z ? $$",
+    "$a$",
+    "/*!",
+    "/*! :p ? $1 */",
+    "/*!50000 :p */",
+    "/*M! :p */",
+    "/*+ :h ? */",
+    "/*",
+    "*/",
+    "--",
+    "# :h\n",
+    "\\gset",
+    "\\set x :y\n",
+    ":a\\gset",
+    "\\",
+    "${t}",
+    "${",
+    "%t%",
+    "<t>",
+    "{{t}}",
+    "@@x",
+    "::",
+    ":=",
+    "?|",
+    "?-",
+    "=?",
+    "@?",
+    "`:b`",
+    "[:c]",
+    "\":g\"",
+    "'x:y'",
+    "E'\\' :e'",
+    "'",
+    "\"",
+    "`",
+    ";",
+    "CALL",
+    "EXEC",
+    "EXECUTE",
+    "PREPARE",
+    "COPY",
+    "EXPLAIN",
+    "CREATE",
+    "STDIN",
+    "USING",
+];
+
+/// Statement starts a unit may get: plain code, and the words after which the scan refuses
+/// (`CALL`/`EXEC`/`EXECUTE`, `PREPARE`, `COPY`, an `EXPLAIN` of DDL) or reads DDL.
+const HEADS: &[&str] = &[
+    "",
+    "SELECT ",
+    "CALL p(",
+    "call p(",
+    "CALL ",
+    "EXEC ",
+    "exec(",
+    "EXEC p ",
+    "EXECUTE s USING ",
+    "execute ",
+    "PREPARE s AS SELECT ",
+    "PREPARE s FROM ",
+    "prepare ",
+    "COPY t FROM STDIN;\n",
+    "COPY (SELECT ",
+    "copy t TO STDOUT ",
+    "EXPLAIN ",
+    "EXPLAIN ANALYZE SELECT ",
+    "explain CREATE TABLE t AS SELECT ",
+    "CREATE TABLE t AS SELECT ",
+    "INSERT INTO t VALUES (",
+];
+
+/// A generated case: a unit in a dialect, with settings and the caller's head.
+#[derive(Debug, Clone)]
+struct PropCase {
+    /// An index into [`DIALECTS`].
+    d: usize,
+    settings: ParamSettings,
+    head: StmtHead,
+    /// The index into [`HEADS`] the unit starts with.
+    start: usize,
+    sql: String,
+}
+
+impl PropCase {
+    fn ctx(&self) -> DialectCtx {
+        DialectCtx::new(DIALECTS[self.d], None)
+    }
+}
+
+/// The dialect's own fragments.
+fn fragments_of(d: DialectId) -> &'static [&'static str] {
+    match d {
+        DialectId::Postgres => PG_FRAGMENTS,
+        DialectId::MySql | DialectId::MariaDb => MYSQL_FRAGMENTS,
+        DialectId::Sqlite => SQLITE_FRAGMENTS,
+        _ => GENERIC_FRAGMENTS,
+    }
+}
+
+/// The generic dialect reads standard SQL only: `:name` and `?` bind, the sigils probe the rest.
+const GENERIC_FRAGMENTS: &[&str] = &[
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "t",
+    "a",
+    "1",
+    ",",
+    "(",
+    ")",
+    "=",
+    " ",
+    " ",
+    "\n",
+    ":p",
+    ":q",
+    ":p",
+    ":Id",
+    "?",
+    "'x:y'",
+    "'it''s :q'",
+    "-- :c ?\n",
+    "/* :d ? */",
+    "\"q:x\"",
+    "a::int",
+    "arr[1:2]",
+    "2",
+    "'",
+    ";",
+    "_",
+    "IN",
+];
+
+/// `frag` alone lexes cleanly in `d` and holds no `;`. A unit with a token the lexer cannot
+/// read cleanly (or of several statements) binds nothing, so half the units are built of clean
+/// fragments only: else almost every unit is refused and few rewrites are checked.
+fn clean_in(d: DialectId, frag: &str) -> bool {
+    let ctx = DialectCtx::new(d, None);
+    let profile = sql_dialect::lex_profile(&ctx).unwrap();
+    let l = lex(frag, profile, ctx.modes, &LexState::Initial);
+    (0..l.len()).all(|i| {
+        !matches!(l.kind(i), TokenKind::Unknown | TokenKind::Semicolon)
+            && !l
+                .flags(i)
+                .intersects(TokenFlags::ERROR | TokenFlags::JUNK | TokenFlags::UNTERMINATED)
+    })
+}
+
+/// A generated unit: an optional statement start, then fragments of its dialect and sigils
+/// (about one in seven; in half the units clean ones only), with every settings combination
+/// and a caller head (none, `SELECT`, `CALL`, `EXECUTE`).
+fn sql_with_params() -> impl Strategy<Value = PropCase> {
     (
-        0u8..3,
+        0..DIALECTS.len(),
+        0u8..8,
+        0u8..8,
+        (0..HEADS.len() * 3),
         any::<bool>(),
-        proptest::collection::vec(0usize..256, 0..24),
+        proptest::collection::vec(0usize..4096, 0..28),
     )
-        .prop_map(|(d, qm, picks)| {
-            let frags = match d {
-                0 => PG_FRAGMENTS,
-                1 => MYSQL_FRAGMENTS,
-                _ => SQLITE_FRAGMENTS,
-            };
-            let mut s = String::new();
+        .prop_map(|(d, knobs, head, start, clean, picks)| {
+            let own = fragments_of(DIALECTS[d]);
+            // A third of the units start with a statement word, the rest with a fragment.
+            let start = if start < HEADS.len() { start } else { 0 };
+            let picks = &picks[..picks.len().min(if start == 0 { 20 } else { 10 })];
+            let mut s = String::from(HEADS[start]);
             for (i, p) in picks.iter().enumerate() {
-                if i > 0 && p % 3 == 0 {
+                let frag = if p % 7 == 0 {
+                    SIGIL_FRAGMENTS[(p / 7) % SIGIL_FRAGMENTS.len()]
+                } else {
+                    own[(p / 7) % own.len()]
+                };
+                if clean && !clean_in(DIALECTS[d], frag) {
+                    continue;
+                }
+                if i > 0 && p % 4 == 1 {
                     s.push(' ');
                 }
-                s.push_str(frags[p % frags.len()]);
+                s.push_str(frag);
             }
-            (d, qm, s)
+            let settings = ParamSettings {
+                pg_question_marks: knobs & 1 != 0,
+                colon_params: knobs & 2 == 0,
+                in_ddl: knobs & 4 != 0,
+            };
+            let head = match head {
+                0..3 => StmtHead::default(),
+                3..6 => head_select(),
+                6 => head_of(kw::CALL),
+                _ => head_of(kw::EXECUTE),
+            };
+            PropCase {
+                d,
+                settings,
+                head,
+                start,
+                sql: s,
+            }
         })
 }
-
-fn ctx_for(d: u8) -> DialectCtx {
-    match d {
-        0 => pg(),
-        1 => mysql(),
-        _ => sqlite(),
-    }
-}
-
-fn settings_for(qm: bool) -> ParamSettings {
-    ParamSettings {
-        pg_question_marks: qm,
-        ..ParamSettings::default()
-    }
-}
+// ## m3b-params-proptest end
 
 /// The texts of the tokens of `text` that overlap none of `holes`.
 fn tokens_outside(ctx: &DialectCtx, text: &str, holes: &[TextRange]) -> Vec<String> {
@@ -1224,146 +1433,231 @@ fn tokens_outside(ctx: &DialectCtx, text: &str, holes: &[TextRange]) -> Vec<Stri
         .collect()
 }
 
+// ## m3b-params-proptest: `PROPTEST_CASES` raises the count (a local or nightly run).
+/// The proptest case count: `PROPTEST_CASES` when set, else 8,192 (PR).
+fn cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8192)
+}
+
+// ## m3b-params-proptest: the properties' checks, shared by the generated units and the
+// statements the execution split finds in them (each with its own head, as the fuzz target).
+
+/// The rewrite replaces only bindable placeholders, copies every other byte, and is final.
+fn check_rewrite(
+    sql: &str,
+    ctx: &DialectCtx,
+    head: &StmtHead,
+    settings: &ParamSettings,
+) -> Result<(), TestCaseError> {
+    let pg = ctx.id == DialectId::Postgres;
+    let p = scan_params(sql, ctx, head, settings);
+    if let Some(r) = &p.rewritten {
+        // Edits are ordered, disjoint, each one a bindable placeholder's range, and the
+        // bytes between them are copied unchanged.
+        let mut src_at = 0usize;
+        let mut dst_at = 0usize;
+        for (from, to) in &r.edits {
+            let (fs, fe) = (usize::from(from.start()), usize::from(from.end()));
+            let (ts, te) = (usize::from(to.start()), usize::from(to.end()));
+            prop_assert!(fs >= src_at && ts >= dst_at);
+            prop_assert_eq!(&sql[src_at..fs], &r.text[dst_at..ts]);
+            prop_assert!(
+                p.placeholders
+                    .iter()
+                    .any(|x| x.bindable && x.range == *from)
+            );
+            let rep = &r.text[ts..te];
+            if pg {
+                prop_assert!(
+                    rep.starts_with('$') && rep[1..].parse::<u32>().is_ok(),
+                    "{rep}"
+                );
+            } else {
+                prop_assert_eq!(rep, "?");
+            }
+            src_at = fe;
+            dst_at = te;
+        }
+        prop_assert_eq!(&sql[src_at..], &r.text[dst_at..]);
+        // Every token outside a placeholder lexes the same, byte for byte.
+        let from: Vec<TextRange> = r.edits.iter().map(|e| e.0).collect();
+        let to: Vec<TextRange> = r.edits.iter().map(|e| e.1).collect();
+        prop_assert_eq!(
+            tokens_outside(ctx, sql, &from),
+            tokens_outside(ctx, &r.text, &to)
+        );
+        // Every replacement lexes as one placeholder token of the engine.
+        let profile = sql_dialect::lex_profile(ctx).unwrap();
+        let l = lex(&r.text, profile, ctx.modes, &LexState::Initial);
+        for t in &to {
+            let i = l.token_at(t.start()).unwrap();
+            prop_assert_eq!(l.range(i), *t);
+            let want = if pg {
+                TokenKind::PositionalParam
+            } else {
+                TokenKind::QuestionParam
+            };
+            prop_assert_eq!(l.kind(i), want);
+        }
+        // Scanning the rewritten text again finds exactly the engine's placeholders, one per
+        // replaced or kept placeholder, all bindable, and rewrites nothing more.
+        let again = scan_params(&r.text, ctx, head, settings);
+        prop_assert_eq!(again.placeholders.len(), p.placeholders.len());
+        prop_assert!(again.placeholders.iter().all(|x| x.bindable));
+        prop_assert_eq!(again.rewritten.map(|x| x.text), Some(r.text.clone()));
+    } else {
+        // Nothing is rewritten: either there is nothing to bind or the unit is refused.
+        prop_assert!(p.placeholders.is_empty() || p.placeholders.iter().all(|x| !x.bindable));
+    }
+    // A refused unit says why.
+    if p.placeholders.iter().any(|x| !x.bindable) {
+        prop_assert!(!p.diags.is_empty());
+        prop_assert!(p.placeholders.iter().all(|x| !x.bindable));
+    }
+    Ok(())
+}
+
+/// The bind plan covers each bindable placeholder once.
+fn check_plan(
+    sql: &str,
+    ctx: &DialectCtx,
+    head: &StmtHead,
+    settings: &ParamSettings,
+) -> Result<(), TestCaseError> {
+    let pg = ctx.id == DialectId::Postgres;
+    let p = scan_params(sql, ctx, head, settings);
+    let Some(r) = &p.rewritten else {
+        return Ok(());
+    };
+    prop_assert_eq!(r.plan.names.len(), r.plan.slots.len());
+    // Names are distinct.
+    let distinct: BTreeSet<&str> = r.plan.names.iter().map(|n| &**n).collect();
+    prop_assert_eq!(distinct.len(), r.plan.names.len());
+    // Slots are distinct; without `$n`/`?NNN` they are dense, 0..n.
+    let mut all: Vec<u32> = r
+        .plan
+        .slots
+        .iter()
+        .flat_map(|s| s.iter().copied())
+        .collect();
+    all.sort_unstable();
+    let n = u32::try_from(all.len()).unwrap();
+    let mut dedup = all.clone();
+    dedup.dedup();
+    prop_assert_eq!(&dedup, &all);
+    let positional = p
+        .placeholders
+        .iter()
+        .any(|x| matches!(x.kind, PlaceholderKind::Positional(_)));
+    if !positional {
+        prop_assert_eq!(&all, &(0..n).collect::<Vec<_>>());
+    }
+    // Each bindable placeholder is covered by exactly one name, and its replacement (or its
+    // own `$n`/`?`) names a slot of that name.
+    for x in p.placeholders.iter().filter(|x| x.bindable) {
+        let name = match &x.kind {
+            PlaceholderKind::Named(n) => n.to_string(),
+            PlaceholderKind::Question(q) => format!("?{q}"),
+            PlaceholderKind::Positional(_) => text_of(sql, x.range).to_string(),
+        };
+        let owners: Vec<usize> = r
+            .plan
+            .names
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| ***n == *name)
+            .map(|(i, _)| i)
+            .collect();
+        prop_assert_eq!(owners.len(), 1, "{}", name);
+        let slots = &r.plan.slots[owners[0]];
+        match r.edits.iter().position(|(from, _)| *from == x.range) {
+            Some(e) => {
+                let rep = text_of(&r.text, r.edits[e].1);
+                if pg {
+                    let k: u32 = rep[1..].parse().unwrap();
+                    prop_assert!(slots.contains(&(k - 1)));
+                } else {
+                    prop_assert!(slots.contains(&u32::try_from(e).unwrap()));
+                }
+            }
+            None => match &x.kind {
+                PlaceholderKind::Positional(k) => prop_assert_eq!(&slots[..], &[k - 1]),
+                PlaceholderKind::Question(q) => prop_assert_eq!(&slots[..], &[q - 1]),
+                PlaceholderKind::Named(_) => prop_assert!(false, "a name is always replaced"),
+            },
+        }
+    }
+    // MySQL and SQLite: one slot per occurrence.
+    if !pg && !positional {
+        prop_assert_eq!(n as usize, p.placeholders.len());
+    }
+    Ok(())
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(8192))]
+    #![proptest_config(ProptestConfig { cases: cases(), ..ProptestConfig::default() })]
 
     #[test]
-    fn rewrite_preserves_every_other_byte((d, qm, sql) in sql_with_params()) {
-        let ctx = ctx_for(d);
-        let p = scan_params(&sql, &ctx, &head_select(), &settings_for(qm));
-        if let Some(r) = &p.rewritten {
-            // Edits are ordered, disjoint, each one a bindable placeholder's range, and the
-            // bytes between them are copied unchanged.
-            let mut src_at = 0usize;
-            let mut dst_at = 0usize;
-            for (from, to) in &r.edits {
-                let (fs, fe) = (usize::from(from.start()), usize::from(from.end()));
-                let (ts, te) = (usize::from(to.start()), usize::from(to.end()));
-                prop_assert!(fs >= src_at && ts >= dst_at);
-                prop_assert_eq!(&sql[src_at..fs], &r.text[dst_at..ts]);
-                prop_assert!(p.placeholders.iter().any(|x| x.bindable && x.range == *from));
-                let rep = &r.text[ts..te];
-                if d == 0 {
-                    prop_assert!(rep.starts_with('$') && rep[1..].parse::<u32>().is_ok(), "{rep}");
-                } else {
-                    prop_assert_eq!(rep, "?");
-                }
-                src_at = fe;
-                dst_at = te;
-            }
-            prop_assert_eq!(&sql[src_at..], &r.text[dst_at..]);
-            // Every token outside a placeholder lexes the same, byte for byte.
-            let from: Vec<TextRange> = r.edits.iter().map(|e| e.0).collect();
-            let to: Vec<TextRange> = r.edits.iter().map(|e| e.1).collect();
-            prop_assert_eq!(
-                tokens_outside(&ctx, &sql, &from),
-                tokens_outside(&ctx, &r.text, &to)
-            );
-            // Every replacement lexes as one placeholder token of the engine.
-            let profile = sql_dialect::lex_profile(&ctx).unwrap();
-            let l = lex(&r.text, profile, ctx.modes, &LexState::Initial);
-            for t in &to {
-                let i = l.token_at(t.start()).unwrap();
-                prop_assert_eq!(l.range(i), *t);
-                let want = if d == 0 { TokenKind::PositionalParam } else { TokenKind::QuestionParam };
-                prop_assert_eq!(l.kind(i), want);
-            }
-            // Scanning the rewritten text again finds exactly the engine's placeholders, one per
-            // replaced or kept placeholder, all bindable, and rewrites nothing more.
-            let again = scan_params(&r.text, &ctx, &head_select(), &settings_for(qm));
-            prop_assert_eq!(again.placeholders.len(), p.placeholders.len());
-            prop_assert!(again.placeholders.iter().all(|x| x.bindable));
-            prop_assert_eq!(again.rewritten.map(|x| x.text), Some(r.text.clone()));
-        } else {
-            // Nothing is rewritten: either there is nothing to bind or the unit is refused.
-            prop_assert!(
-                p.placeholders.is_empty() || p.placeholders.iter().all(|x| !x.bindable)
-            );
-        }
-        // A refused unit says why.
-        if p.placeholders.iter().any(|x| !x.bindable) {
-            prop_assert!(!p.diags.is_empty());
-            prop_assert!(p.placeholders.iter().all(|x| !x.bindable));
-        }
+    fn rewrite_preserves_every_other_byte(case in sql_with_params()) {
+        check_rewrite(&case.sql, &case.ctx(), &case.head, &case.settings)?;
     }
 
     #[test]
-    fn bind_plan_covers_each_placeholder_once((d, qm, sql) in sql_with_params()) {
-        let ctx = ctx_for(d);
-        let p = scan_params(&sql, &ctx, &head_select(), &settings_for(qm));
-        let Some(r) = &p.rewritten else { return Ok(()) };
-        prop_assert_eq!(r.plan.names.len(), r.plan.slots.len());
-        // Names are distinct.
-        let distinct: BTreeSet<&str> = r.plan.names.iter().map(|n| &**n).collect();
-        prop_assert_eq!(distinct.len(), r.plan.names.len());
-        // Slots are distinct; without `$n`/`?NNN` they are dense, 0..n.
-        let mut all: Vec<u32> = r.plan.slots.iter().flat_map(|s| s.iter().copied()).collect();
-        all.sort_unstable();
-        let n = u32::try_from(all.len()).unwrap();
-        let mut dedup = all.clone();
-        dedup.dedup();
-        prop_assert_eq!(&dedup, &all);
-        let positional = p.placeholders.iter().any(|x| matches!(x.kind, PlaceholderKind::Positional(_)));
-        if !positional {
-            prop_assert_eq!(&all, &(0..n).collect::<Vec<_>>());
-        }
-        // Each bindable placeholder is covered by exactly one name, and its replacement (or its
-        // own `$n`/`?`) names a slot of that name.
-        for x in p.placeholders.iter().filter(|x| x.bindable) {
-            let name = match &x.kind {
-                PlaceholderKind::Named(n) => n.to_string(),
-                PlaceholderKind::Question(q) => format!("?{q}"),
-                PlaceholderKind::Positional(_) => text_of(&sql, x.range).to_string(),
-            };
-            let owners: Vec<usize> = r.plan.names.iter().enumerate()
-                .filter(|(_, n)| ***n == *name).map(|(i, _)| i).collect();
-            prop_assert_eq!(owners.len(), 1, "{}", name);
-            let slots = &r.plan.slots[owners[0]];
-            match r.edits.iter().position(|(from, _)| *from == x.range) {
-                Some(e) => {
-                    let rep = text_of(&r.text, r.edits[e].1);
-                    if d == 0 {
-                        let k: u32 = rep[1..].parse().unwrap();
-                        prop_assert!(slots.contains(&(k - 1)));
-                    } else {
-                        prop_assert!(slots.contains(&u32::try_from(e).unwrap()));
-                    }
-                }
-                None => match &x.kind {
-                    PlaceholderKind::Positional(k) => prop_assert_eq!(&slots[..], &[k - 1]),
-                    PlaceholderKind::Question(q) => prop_assert_eq!(&slots[..], &[q - 1]),
-                    PlaceholderKind::Named(_) => prop_assert!(false, "a name is always replaced"),
-                },
-            }
-        }
-        // MySQL and SQLite: one slot per occurrence.
-        if d != 0 && !positional {
-            prop_assert_eq!(n as usize, p.placeholders.len());
+    fn bind_plan_covers_each_placeholder_once(case in sql_with_params()) {
+        check_plan(&case.sql, &case.ctx(), &case.head, &case.settings)?;
+    }
+
+    /// Each statement of the execution split, scanned with the head the splitter gives it.
+    #[test]
+    fn split_statements_keep_the_properties(case in sql_with_params()) {
+        let ctx = case.ctx();
+        let split = split_from(
+            &case.sql,
+            &ctx,
+            ClientFlavor::None,
+            SplitMode::Execution,
+            &SplitStart::default(),
+        );
+        for st in split.statements() {
+            let unit = &case.sql[st.strict];
+            check_rewrite(unit, &ctx, &st.head, &case.settings)?;
+            check_plan(unit, &ctx, &st.head, &case.settings)?;
         }
     }
 }
+// ## m3b-params-proptest end
 
 /// The properties are not vacuous: the generator yields rewritten units with edits in every
-/// dialect, refused units, and units with nothing to bind.
+/// dialect, refused units, and units with nothing to bind; every statement start is generated,
+/// and the starts the scan refuses under (`CALL`/`EXEC`/`EXECUTE`, `PREPARE`, `COPY`) carry
+/// placeholders.
 #[test]
 fn generator_reaches_every_outcome() {
     use proptest::strategy::ValueTree;
     use proptest::test_runner::TestRunner;
     let mut runner = TestRunner::deterministic();
     let strategy = sql_with_params();
-    let mut edited = [0u32; 3];
+    let mut edited = [0u32; DIALECTS.len()];
+    let mut starts = vec![0u32; HEADS.len()];
     let (mut refused, mut nothing) = (0u32, 0u32);
-    for _ in 0..16_384 {
-        let (d, qm, sql) = strategy.new_tree(&mut runner).unwrap().current();
-        let p = scan_params(&sql, &ctx_for(d), &head_select(), &settings_for(qm));
+    for _ in 0..32_768 {
+        let case = strategy.new_tree(&mut runner).unwrap().current();
+        let p = scan_params(&case.sql, &case.ctx(), &case.head, &case.settings);
+        if !p.placeholders.is_empty() {
+            starts[case.start] += 1;
+        }
         match &p.rewritten {
-            Some(r) if !r.edits.is_empty() => edited[usize::from(d)] += 1,
+            Some(r) if !r.edits.is_empty() => edited[case.d] += 1,
             Some(_) => {}
             None if p.placeholders.is_empty() => nothing += 1,
             None => refused += 1,
         }
     }
     assert!(edited.iter().all(|n| *n >= 100), "{edited:?}");
+    assert!(starts.iter().all(|n| *n >= 50), "{starts:?}");
     assert!(refused >= 100 && nothing >= 100, "{refused} {nothing}");
 }
 
