@@ -2369,3 +2369,10 @@ hv-history-insert-refused = İfade eklenemedi: düzenleyici salt okunur, metin o
 hv-history-pin-failed = Sabitleme değiştirilemedi.
 # Review: PO
 hv-history-open-failed = Yeni konsol zamanında açılmadı; hiçbir şey eklenmedi.
+
+## m3b-t31-multi
+
+# Review: PO
+hv-editor-carets = { $n } imleç
+# Review: PO
+hv-editor-ime-primary-only = Giriş yöntemi: başka bir imleç bir dizenin ya da yorumun içinde olduğu için yalnızca ana imleçte yazılıyor

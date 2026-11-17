@@ -10,6 +10,8 @@ mod scroll;
 pub use compose::{
     Fragment, VisualLine, compose_line, control_glyph, control_name, is_visible_control,
 };
+// ## m3b-t31-multi (named exception): column selection's cell widths.
+pub(crate) use compose::cluster_cells;
 pub use height::HeightMap;
 pub use rangeset::{QueryStats, RangeSet};
 pub use scroll::ScrollAnchor;

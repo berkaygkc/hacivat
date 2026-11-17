@@ -113,6 +113,12 @@ const ICONS: &[(&str, &[u8])] = lucide![
     "eye-off",
     "octagon-x",
     "clock",
+    // ## m3b-t31-multi (controller ruling 8, a named exception like RC-4): the M3c find
+    // toggles and the ascending sort (Tasks 33 and 36 draw them).
+    "arrow-up",
+    "case-sensitive",
+    "whole-word",
+    "regex",
 ];
 const HV_MARK: &[u8] = include_bytes!("../assets/icons/hacivat/hv-mark.svg");
 

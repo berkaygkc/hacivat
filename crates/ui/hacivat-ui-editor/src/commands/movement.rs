@@ -11,13 +11,14 @@
 //! - **Pages** are the viewport's height less one row; the view scrolls by the same rows, so
 //!   the caret keeps its place in it.
 //!
-//! Every move is a selection-only transaction (`UserEvent::Move`, or `Select` with Shift).
+//! Every move is a selection-only transaction (`UserEvent::Move`, or `Select` with Shift), and
+//! moves every range (## m3b-t31-multi); ranges that meet merge (the M3a rule).
 
 use hacivat_text::units::{grapheme_column, offset_at_column};
-use hacivat_text::{Dir, SelectionRange, Snapshot, Unit, UserEvent, move_offset};
+use hacivat_text::{Dir, Snapshot, Unit, UserEvent, move_offset};
 use hacivat_ui_core::gpui_surface::{Context, Window, point, px};
 
-use super::{select, words};
+use super::{map_ranges, select_set, words};
 use crate::element::FrameLayout;
 use crate::view::EditorView;
 
@@ -32,7 +33,7 @@ fn event(extend: bool) -> UserEvent {
     }
 }
 
-/// A move of `unit` in `dir` (never `Up` or `Down`).
+/// A move of `unit` in `dir` (never `Up` or `Down`), at every range (## m3b-t31-multi).
 fn horizontal(
     v: &mut EditorView,
     dir: Dir,
@@ -40,21 +41,26 @@ fn horizontal(
     extend: bool,
     cx: &mut Context<EditorView>,
 ) {
-    let now = *v.model.selection().main();
-    let head = if !extend && !now.is_empty() && unit == Unit::Grapheme {
-        // Left and Right leave a selection at its edge.
-        match dir {
-            Dir::Back => now.range().start,
-            _ => now.range().end,
-        }
-    } else {
-        move_offset(v.model.buffer(), now.head, dir, unit, words(v).as_ref())
-    };
-    select(v, now.moved_to(head, extend), event(extend), cx);
+    let tok = words(v);
+    let buf = v.model.buffer().clone();
+    let next = map_ranges(v, |now| {
+        let head = if !extend && !now.is_empty() && unit == Unit::Grapheme {
+            // Left and Right leave a selection at its edge.
+            match dir {
+                Dir::Back => now.range().start,
+                _ => now.range().end,
+            }
+        } else {
+            move_offset(&buf, now.head, dir, unit, tok.as_ref())
+        };
+        now.moved_to(head, extend)
+    });
+    select_set(v, next, event(extend), cx);
 }
 
 /// Where a line's x positions come from.
-struct Geometry<'a> {
+// ## m3b-t31-multi (named exception): shared with the add-caret commands.
+pub(super) struct Geometry<'a> {
     snap: &'a Snapshot,
     /// The last frame, when it painted this text.
     layout: Option<&'a FrameLayout>,
@@ -63,7 +69,7 @@ struct Geometry<'a> {
 }
 
 impl<'a> Geometry<'a> {
-    fn of(v: &'a EditorView, snap: &'a Snapshot) -> Self {
+    pub(super) fn of(v: &'a EditorView, snap: &'a Snapshot) -> Self {
         Geometry {
             snap,
             layout: v.layout.as_ref().filter(|l| l.version() == snap.version),
@@ -77,7 +83,7 @@ impl<'a> Geometry<'a> {
     }
 
     /// The x of `at` from its line's start.
-    fn x_of(&self, at: usize) -> f32 {
+    pub(super) fn x_of(&self, at: usize) -> f32 {
         self.layout
             .and_then(|l| {
                 let x = l.x_for_offset(at)?;
@@ -87,7 +93,7 @@ impl<'a> Geometry<'a> {
     }
 
     /// The offset on `line` nearest to `x` from its start.
-    fn offset_at(&self, line: usize, x: f32) -> usize {
+    pub(super) fn offset_at(&self, line: usize, x: f32) -> usize {
         let painted = self.layout.and_then(|l| {
             let row = l.row(u32::try_from(line).ok()?)?;
             let p = point(px((l.origin_x + f64::from(x)) as f32), row.top);
@@ -100,21 +106,22 @@ impl<'a> Geometry<'a> {
     }
 }
 
-/// A move of `lines` buffer lines (negative: up) at the goal column.
+/// A move of `lines` buffer lines (negative: up) at the goal column, at every range.
 fn vertical(v: &mut EditorView, lines: isize, extend: bool, cx: &mut Context<EditorView>) {
     let snap = v.model.snapshot();
-    let now = *snap.selection.main();
-    let next: SelectionRange = {
+    let next = {
         let geo = Geometry::of(v, &snap);
-        now.moved_vertically(
-            &snap.buffer,
-            lines,
-            extend,
-            |at| geo.x_of(at),
-            |line, x| geo.offset_at(line, x),
-        )
+        map_ranges(v, |now| {
+            now.moved_vertically(
+                &snap.buffer,
+                lines,
+                extend,
+                |at| geo.x_of(at),
+                |line, x| geo.offset_at(line, x),
+            )
+        })
     };
-    select(v, next, event(extend), cx);
+    select_set(v, next, event(extend), cx);
 }
 
 /// A page up or down: the viewport's rows less one, the view scrolled by the same.

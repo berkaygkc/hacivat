@@ -64,7 +64,8 @@ pub(crate) fn text_area(
     band: &BandState,
     theme: &EditorTheme,
     focused: bool,
-    marked: Option<Range<usize>>,
+    // ## m3b-t31-multi (named exception): every caret's marked text.
+    marked: &[Range<usize>],
     window: &mut Window,
     cx: &mut App,
 ) -> u64 {
@@ -74,8 +75,8 @@ pub(crate) fn text_area(
         preview::paint_band(band, layout.rows(), snapshot, window, cx);
         selections(layout, snapshot, theme, focused, window);
         let failed = text(layout, theme, window, cx);
-        if let Some(m) = marked {
-            ime_underline(layout, snapshot, m, theme, window);
+        for m in marked {
+            ime_underline(layout, snapshot, m.clone(), theme, window);
         }
         failed
     })
@@ -215,9 +216,13 @@ fn ime_underline(
     window: &mut Window,
 ) {
     let lh = layout.rows().line_height;
-    let main = snapshot.selection.main().range();
-    let clause =
-        (!main.is_empty() && main.start >= marked.start && main.end <= marked.end).then_some(main);
+    // ## m3b-t31-multi: the clause is the selection inside this marked range (each caret's).
+    let ranges = snapshot.selection.ranges();
+    let i = ranges.partition_point(|r| r.range().end < marked.start);
+    let clause = ranges
+        .get(i)
+        .map(|r| r.range())
+        .filter(|r| !r.is_empty() && r.start >= marked.start && r.end <= marked.end);
     for row in &layout.lines {
         let base = baseline(row, lh) + px(IME_UNDERLINE_GAP);
         if let Some((x0, x1)) = span_on_row(layout, row, &marked) {

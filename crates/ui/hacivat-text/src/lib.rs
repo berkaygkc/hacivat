@@ -40,6 +40,6 @@ pub use units::{Dir, TokenOracle, Unit, move_offset};
 // ## m3b-t01b-seams
 pub use fold::{FoldKind, FoldRange, FoldSet};
 pub use multi::{
-    MAX_OCCURRENCES, add_caret, add_caret_vertical, column_selection, select_all_occurrences,
-    select_next_occurrence, split_into_lines,
+    MAX_OCCURRENCES, add_caret, add_caret_vertical, add_caret_vertical_with, carets_in_plain_text,
+    column_selection, select_all_occurrences, select_next_occurrence, split_into_lines,
 };

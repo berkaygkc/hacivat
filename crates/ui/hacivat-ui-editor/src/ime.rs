@@ -33,6 +33,10 @@
 //!   platform, which resumes it on return (`ImeCore::blur`). A composition the platform
 //!   dropped without a blur (the focus moved while the window was inactive, or the editor
 //!   turned read-only) is ended locally by the next frame.
+//! - **Several carets** (## m3b-t31-multi, R-M3-64): typing goes to every caret and a
+//!   composition is mirrored to every caret by `ImeCore`, but only when the language service
+//!   puts no caret inside a string or a comment; otherwise the other carets collapse before the
+//!   first mark and the status bar says so once. The platform sees the main caret only.
 //! - **Geometry:** `bounds_for_range` and `character_index_for_point` read the last painted
 //!   frame. Between an edit and the next frame that frame is older than the text: a position
 //!   before every change since maps through it exactly (the start of a composition being
@@ -383,6 +387,38 @@ fn schedule_end_dropped(v: &mut EditorView, cx: &mut Context<EditorView>) {
     });
 }
 
+// ## m3b-t31-multi
+/// R-M3-64: before a composition opens at several carets, when the language service puts any
+/// of them inside a string or a comment, the selection collapses to the main range (a
+/// selection-only commit, the platform's own call: the main range it knows is unchanged) and
+/// the status bar says once (after the mark, [`say_primary_only`]) that typing goes to the main
+/// caret only. `true` when it collapsed.
+fn primary_only_unless_plain(v: &mut EditorView, cx: &mut Context<EditorView>) -> bool {
+    let tok = v.service.token_oracle(v.doc);
+    if hacivat_text::carets_in_plain_text(v.model.selection(), tok.as_ref()) {
+        return false;
+    }
+    let main = *v.model.selection().main();
+    let len = v.model.buffer().len_bytes();
+    let ann = v.annotations(UserEvent::Select, Origin::Ime, cx);
+    v.commit(
+        Transaction {
+            changes: hacivat_text::ChangeSet::identity(len),
+            selection: Some(SelectionSet::single(main)),
+            ann,
+        },
+        cx,
+    );
+    true
+}
+
+/// The fallback's sentence, a polite announcement and the status bar's transient message; it
+/// holds while the composition it is about is open (`commands::status_message`).
+fn say_primary_only(v: &mut EditorView, cx: &mut Context<EditorView>) {
+    let text = crate::commands::message(cx, "hv-editor-ime-primary-only", &[]);
+    crate::commands::say_while_composing(v, text, cx);
+}
+
 /// The current text's byte range of the platform's UTF-16 range.
 fn bytes_of(v: &EditorView, r16: Range<usize>) -> Range<usize> {
     utf16_to_bytes(v.model.buffer(), r16)
@@ -528,12 +564,20 @@ impl EntityInputHandler for EditorView {
         self.mark_input_at_entry(cx);
         let was = self.ime.is_composing();
         let now = cx.background_executor().now();
+        // ## m3b-t31-multi (R-M3-64): a composition opening at several carets is mirrored to
+        // all only when every caret is in plain text; otherwise the others collapse first.
+        let collapsed = !was
+            && self.model.selection().ranges().len() > 1
+            && ime_call(self, |v| primary_only_unless_plain(v, cx));
         ime_call(self, |v| {
             let marked = v
                 .ime
                 .mark(&mut v.model, range, new_text, new_selected_range, now);
             if let Ok(c) = marked {
                 v.apply_committed(c, UserEvent::InputTypeCompose, cx);
+            }
+            if collapsed && v.ime.is_composing() {
+                say_primary_only(v, cx);
             }
             let is = v.ime.is_composing();
             if is != was {

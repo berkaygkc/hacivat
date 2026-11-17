@@ -459,3 +459,61 @@ records which limit caused T1 (accumulated while in T1); back to T0 once each ca
 below 80 % of itself and the other is within itself (exact integer comparison), and the banner's
 copy follows the cause. Sizes in the banner come from the host's `large_file::SizeText` (format
 locale); the fallback is an unformatted decimal.
+
+## m3b-t31 — multi-cursor
+
+**One selection set, every edit per range.** The M3a `SelectionSet` already held many ranges;
+Task 31 makes every command act on all of them in one transaction (one undo group): typing
+(`ImeCore::commit` replaces every range outside a composition), Enter, Tab, the deletes, the
+moves and the clipboard. Edits that would overlap (two deletions reaching into each other)
+merge. Ranges merge by the M3a rule after every change. The main range is the last one added
+(a caret added, the next occurrence, the head's line of a box): Escape collapses to it, the
+platform's selection and the IME's marked range are its, and **Run follows it** (controller
+ruling 2): `preview::exec_at` asks for the main range only, so the band and Run agree.
+
+**Occurrences are byte-exact.** Case- and Turkish-exact matching needs no casing at all
+(INV-3): `İ`, `I`, `ı` and `i` are four letters. From a caret the word under it is selected
+first (the language service's words in the view); a range that is a whole word (identifier
+characters at both ends, none touching it) then matches whole words only, any other range as a
+substring. Stateless, so no `OccurrenceState` field: the range itself says whether it is a word.
+Select all occurrences stops at 10,000 ranges, the asked-from one always kept and main.
+
+**Column selection counts display cells.** `column_selection` uses the display model's widths
+(a tab to the next stop, wide characters and emoji 2, a visible control 1). A tab or a wide
+character the box cuts is taken whole; a line shorter than the box gets a caret at its end
+(NOTES surface 14; the spec's "skip short rows" is superseded by the approved mock). The mouse:
+Option-drag on macOS, Ctrl+Alt-drag elsewhere; Option/Alt-click adds a caret.
+
+**Selection history beside the text's.** `EditorModel` keeps the selection before every
+selection-only commit (at most 100 sets and 100,000 ranges), each with the version it is for;
+`undo_selection` restores the newest, mapped through the change log (an entry the log no longer
+reaches is dropped), as a selection-only commit that records nothing. Text commits add no
+entry, so typing is never many steps, and the stacks survive it.
+
+**IME: mirror only in plain text (R-M3-64).** A composition opened with several carets is
+mirrored: every update and the commit replace every marked range in one transaction, the
+platform's range moving the mirrors by the same distances (a mirror that would overlap another
+target, or that an outside edit deleted, leaves). The platform sees the main caret's marked
+text only; the underline is painted at every caret. Before the first mark the view asks the
+token oracle (`TokenOracle::in_string_or_comment`, a default method answering `None` = unknown
+= plain; the SQL adapter answers from its tokens: strictly inside a string or a comment, or at
+the end of a line comment or of an unterminated one); when any caret is inside one, the other
+carets collapse first and the composition goes to the main caret, said once as a transient
+status sentence that holds while the composition is open.
+
+**Clipboard pieces and the hash fallback.** Copy writes one metadata piece per range, the
+pieces joined with the dominant line ending (line-wise pieces carry their own break). Paste
+cuts the text into pieces only when the metadata describes it exactly; when the platform
+dropped the metadata, an app-wide copy record (the XXH3-128 of the text and its pieces) still
+applies while the clipboard holds exactly the copied text. N pieces into N carets go one each;
+otherwise text of exactly N lines (a trailing break aside) goes one line per caret; anything
+else goes whole to every caret.
+
+**Linux primary selection.** 100 ms after a selection change a non-empty main selection is
+written to the primary selection (a generation counter debounces); a middle click pastes it at
+the pointer without moving the selections. Both are `#[cfg(target_os = "linux")]` at the
+platform calls; the text and insertion functions compile everywhere.
+
+**Status.** `EditorStatus::carets` is new; `selected_chars` covers every range, counted with the
+rope's char index (O(k log n)) and cached by the model's commit count, so a frame reads it in
+O(1) (ledger 207).

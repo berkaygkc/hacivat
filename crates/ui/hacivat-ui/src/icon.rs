@@ -106,6 +106,11 @@ icon_names! {
     EyeOff => "icons/lucide/eye-off.svg",
     OctagonX => "icons/lucide/octagon-x.svg",
     Clock => "icons/lucide/clock.svg",
+    // ## m3b-t31-multi (controller ruling 8): the M3c icons (Tasks 33 and 36 draw them).
+    ArrowUp => "icons/lucide/arrow-up.svg",
+    CaseSensitive => "icons/lucide/case-sensitive.svg",
+    WholeWord => "icons/lucide/whole-word.svg",
+    Regex => "icons/lucide/regex.svg",
     /// The Hacivat mark (`icons/hacivat/hv-mark.svg`).
     HvMark => "icons/hacivat/hv-mark.svg",
 }
@@ -303,6 +308,7 @@ mod tests {
         for (i, n) in IconName::ALL.iter().enumerate() {
             assert_eq!(*n as usize, i, "{n:?}");
         }
-        assert_eq!(IconName::ALL.len(), 65);
+        // ## m3b-t31-multi (named exception): four more (controller ruling 8).
+        assert_eq!(IconName::ALL.len(), 69);
     }
 }

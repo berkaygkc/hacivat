@@ -28,27 +28,25 @@ fn chunked_height_map_stub_is_uniform() {
     assert_eq!(chunked.total_height(), 1800.0);
 }
 
+// ## m3b-t31-multi (named exception): Task 31 filled the text core's multi-cursor stubs; their
+// test moved to `hacivat-text/tests/multi.rs`. What stays here: the bodies never touch text a
+// selection does not ask for (a box past the last line clamps to it).
 #[test]
-fn text_core_stubs_keep_the_selection() {
+fn text_core_multi_cursor_bodies_clamp_to_the_text() {
     let buf = TextBuffer::from_str("SELECT a, a\nFROM t;\n");
-    let sel = SelectionSet::cursor(7);
-    assert_eq!(hacivat_text::add_caret(&sel, 10), sel);
-    assert_eq!(hacivat_text::add_caret_vertical(&buf, &sel, true, 4), sel);
-    assert_eq!(hacivat_text::select_next_occurrence(&buf, &sel), None);
+    let boxed = hacivat_text::column_selection(&buf, (0, 0), (99, 0), 4);
     assert_eq!(
-        hacivat_text::select_all_occurrences(&buf, &sel, hacivat_text::MAX_OCCURRENCES),
-        sel
+        boxed.ranges().len(),
+        3,
+        "one caret per line, the last one empty"
+    );
+    assert_eq!(boxed.main().head, buf.len_bytes());
+    let sel = SelectionSet::cursor(7);
+    assert_eq!(
+        hacivat_text::add_caret_vertical(&buf, &SelectionSet::cursor(0), false, 4),
+        SelectionSet::cursor(0)
     );
     assert_eq!(hacivat_text::split_into_lines(&buf, &sel), sel);
-    // The column-selection stub is one caret at the start of the head's line (clamped).
-    assert_eq!(
-        hacivat_text::column_selection(&buf, (0, 0), (1, 3), 4),
-        SelectionSet::cursor(12)
-    );
-    assert_eq!(
-        hacivat_text::column_selection(&buf, (0, 0), (99, 0), 4),
-        SelectionSet::cursor(buf.line_to_byte(buf.len_lines() - 1))
-    );
 }
 
 #[test]
@@ -66,6 +64,7 @@ fn fold_set_stub_folds_nothing() {
 #[test]
 fn m3b_editor_commands_are_in_the_table() {
     let ids: Vec<&str> = commands().iter().map(|c| c.id).collect();
+    // ## m3b-t31-multi (named exception): Task 31's rows are commands, no longer stubs.
     for id in [
         "editor.add_caret_above",
         "editor.add_caret_below",
@@ -74,6 +73,15 @@ fn m3b_editor_commands_are_in_the_table() {
         "editor.split_selection_into_lines",
         "editor.undo_selection",
         "editor.redo_selection",
+    ] {
+        let c = commands().iter().find(|c| c.id == id).unwrap();
+        assert_eq!(
+            c.title_id,
+            format!("hv-cmd-{}", id.replace(['.', '_'], "-"))
+        );
+        assert!(!c.stub && !c.seals_history, "{id}");
+    }
+    for id in [
         "editor.fold",
         "editor.unfold",
         "editor.fold_all",
@@ -100,7 +108,7 @@ fn m3b_editor_commands_are_in_the_table() {
         // Fix round 2 (I3): it is a stub, so the app keeps it disabled.
         assert!(c.stub, "{id}");
     }
-    assert_eq!(commands().iter().filter(|c| c.stub).count(), 23);
+    assert_eq!(commands().iter().filter(|c| c.stub).count(), 16);
     // M3a's commands are not stubs.
     for c in commands().iter().take(45) {
         assert!(!c.stub, "{}", c.id);
@@ -176,10 +184,8 @@ fn view_seams_change_nothing(cx: &mut TestAppContext) {
     );
     assert!(vcx.read(|cx| e.read(cx).folds().folded().is_empty()));
     // Every M3b command runs as a no-op: the text, the selection and the version stay.
+    // ## m3b-t31-multi (named exception): Task 31's commands are filled (tests `multi_view`).
     for id in [
-        "editor.add_caret_below",
-        "editor.select_all_occurrences",
-        "editor.undo_selection",
         "editor.fold_all",
         "editor.find",
         "editor.toggle_comment",

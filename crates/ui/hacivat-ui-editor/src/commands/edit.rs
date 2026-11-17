@@ -12,6 +12,9 @@
 //! - **Undo and redo** end an open composition first (`ImeCore::unmark`), then hand the
 //!   model's `Committed` to `EditorView::apply_committed`.
 //!
+//! ## m3b-t31-multi: Enter, Tab, Shift+Tab and the deletes act at every range in one
+//! transaction (`edit_each`); a multi-line indent or outdent takes each touched line once.
+//!
 //! Every edit refuses on a read-only editor (`super::change`; undo, redo, cut and paste check
 //! by themselves).
 
@@ -21,7 +24,7 @@ use std::sync::Arc;
 use hacivat_text::display::{Fragment, VisualLine};
 use hacivat_text::units::{SCAN_LIMIT, grapheme_column};
 use hacivat_text::{
-    Bias, Dir, SelectionSet, TextBuffer, TokenOracle, Unit, UserEvent, move_offset,
+    Bias, Dir, SelectionRange, SelectionSet, TextBuffer, TokenOracle, Unit, UserEvent, move_offset,
 };
 use hacivat_ui_core::gpui_surface::{Context, Window};
 use smallvec::smallvec;
@@ -68,11 +71,8 @@ fn display_column(buf: &TextBuffer, at: usize, tab: usize) -> usize {
     col + cells(buf, run..at)
 }
 
-/// The lines the main selection touches: a selection that ends at a line's start does not
-/// touch that line.
-fn selected_lines(v: &EditorView) -> Range<usize> {
-    let buf = v.model.buffer();
-    let r = v.model.selection().main().range();
+/// The lines a range touches: one that ends at a line's start does not touch that line.
+fn lines_of(buf: &TextBuffer, r: Range<usize>) -> Range<usize> {
     let first = buf.byte_to_line(r.start);
     let mut last = buf.byte_to_line(r.end);
     if last > first && buf.line_to_byte(last) == r.end {
@@ -81,24 +81,97 @@ fn selected_lines(v: &EditorView) -> Range<usize> {
     first..last + 1
 }
 
-pub(super) fn newline(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_>) {
+// ## m3b-t31-multi
+/// The lines every range touches, each once, in order.
+fn selected_lines(v: &EditorView) -> Vec<usize> {
     let buf = v.model.buffer();
-    let r = v.model.selection().main().range();
-    let line_start = buf.line_to_byte(buf.byte_to_line(r.start));
-    let scan_end = buf.snap(r.start.min(line_start + INDENT_SCAN), Bias::Before);
-    let before = buf.slice(line_start..scan_end.max(line_start));
-    let indent = before
-        .find(|c: char| c != ' ' && c != '\t')
-        .map_or(&*before, |i| &before[..i]);
-    let text = format!("{}{indent}", buf.dominant_line_ending().as_str());
-    let caret = r.start + text.len();
-    change(
-        v,
-        vec![(r, Arc::from(text))],
-        Some(SelectionSet::cursor(caret)),
-        UserEvent::InputType,
-        cx,
-    );
+    let mut out: Vec<usize> = Vec::new();
+    for r in v.model.selection().ranges() {
+        for l in lines_of(buf, r.range()) {
+            if out.last().is_none_or(|&last| last < l) {
+                out.push(l);
+            }
+        }
+    }
+    out
+}
+
+/// What one range's edit is: the bytes it replaces, the text, and where its caret lands inside
+/// the text.
+type RangeEdit = (Range<usize>, String, usize);
+
+/// One edit per range of the selection, from `f(buffer, range)` (`None`: that range has no
+/// edit and its caret stays where the others' edits put it). Edits that would overlap (two
+/// deletions reaching into each other) merge into one, their carets at its start. Applied as
+/// one transaction of `event` with a caret per range, the main one kept.
+fn edit_each(
+    v: &mut EditorView,
+    event: UserEvent,
+    cx: &mut Cx<'_>,
+    mut f: impl FnMut(&TextBuffer, &SelectionRange) -> Option<RangeEdit>,
+) {
+    let sel = v.model.selection().clone();
+    let buf = v.model.buffer().clone();
+    let mut edits: Vec<(Range<usize>, Arc<str>)> = Vec::new();
+    // Per range: the edit its caret follows and where inside its text.
+    let mut at: Vec<Option<(usize, usize)>> = Vec::with_capacity(sel.ranges().len());
+    for range in sel.ranges() {
+        let Some((r, text, caret)) = f(&buf, range) else {
+            at.push(None);
+            continue;
+        };
+        match edits.last_mut() {
+            Some((prev, _)) if r.start < prev.end => {
+                *prev = prev.start.min(r.start)..prev.end.max(r.end);
+                at.push(Some((edits.len() - 1, 0)));
+            }
+            _ => {
+                let caret = caret.min(text.len());
+                edits.push((r, Arc::from(text)));
+                at.push(Some((edits.len() - 1, caret)));
+            }
+        }
+    }
+    if edits.is_empty() {
+        return;
+    }
+    // Where each edit's text starts in the new text.
+    let mut starts = Vec::with_capacity(edits.len());
+    let mut delta: isize = 0;
+    for (r, ins) in &edits {
+        starts.push(r.start.saturating_add_signed(delta));
+        delta += ins.len() as isize - r.len() as isize;
+    }
+    // An unedited caret moves by the edits before it.
+    let shifted = |p: usize| -> usize {
+        let i = edits.partition_point(|(r, _)| r.end <= p);
+        let shift: isize = edits[..i]
+            .iter()
+            .map(|(r, ins)| ins.len() as isize - r.len() as isize)
+            .sum();
+        p.saturating_add_signed(shift)
+    };
+    let carets = sel.ranges().iter().zip(&at).map(|(r, a)| match a {
+        Some((i, inside)) => SelectionRange::caret(starts[*i] + inside),
+        None => SelectionRange::caret(shifted(r.head)),
+    });
+    let after = SelectionSet::normalized(carets, sel.main_index());
+    change(v, edits, Some(after), event, cx);
+}
+
+pub(super) fn newline(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_>) {
+    edit_each(v, UserEvent::InputType, cx, |buf, sel| {
+        let r = sel.range();
+        let line_start = buf.line_to_byte(buf.byte_to_line(r.start));
+        let scan_end = buf.snap(r.start.min(line_start + INDENT_SCAN), Bias::Before);
+        let before = buf.slice(line_start..scan_end.max(line_start));
+        let indent = before
+            .find(|c: char| c != ' ' && c != '\t')
+            .map_or(&*before, |i| &before[..i]);
+        let text = format!("{}{indent}", buf.dominant_line_ending().as_str());
+        let caret = text.len();
+        Some((r, text, caret))
+    });
 }
 
 /// One unit of indentation at a line's start.
@@ -116,13 +189,16 @@ pub(super) fn tab(v: &mut EditorView, window: &mut Window, cx: &mut Cx<'_>) {
         window.focus_next(cx);
         return;
     }
-    let lines = selected_lines(v);
     let buf = v.model.buffer();
-    let r = v.model.selection().main().range();
-    if buf.byte_to_line(r.start) != buf.byte_to_line(r.end) {
+    let multi_line = v.model.selection().ranges().iter().any(|r| {
+        let r = r.range();
+        buf.byte_to_line(r.start) != buf.byte_to_line(r.end)
+    });
+    if multi_line {
         // Several lines: indent each that has text.
         let unit: Arc<str> = Arc::from(indent_unit(v));
-        let edits = lines
+        let edits = selected_lines(v)
+            .into_iter()
             .map(|l| buf.line_range(l, false))
             .filter(|body| !body.is_empty())
             .map(|body| (body.start..body.start, unit.clone()))
@@ -130,20 +206,18 @@ pub(super) fn tab(v: &mut EditorView, window: &mut Window, cx: &mut Cx<'_>) {
         change(v, edits, None, UserEvent::Command("indent"), cx);
         return;
     }
-    let text = if v.config.insert_spaces {
-        let tab = usize::from(v.config.tab_size.max(1));
-        " ".repeat(tab - display_column(buf, r.start, tab) % tab)
-    } else {
-        "\t".to_string()
-    };
-    let caret = r.start + text.len();
-    change(
-        v,
-        vec![(r, Arc::from(text))],
-        Some(SelectionSet::cursor(caret)),
-        UserEvent::InputType,
-        cx,
-    );
+    let spaces = v.config.insert_spaces;
+    let size = usize::from(v.config.tab_size.max(1));
+    edit_each(v, UserEvent::InputType, cx, |buf, sel| {
+        let r = sel.range();
+        let text = if spaces {
+            " ".repeat(size - display_column(buf, r.start, size) % size)
+        } else {
+            "\t".to_string()
+        };
+        let caret = text.len();
+        Some((r, text, caret))
+    });
 }
 
 pub(super) fn outdent(v: &mut EditorView, window: &mut Window, cx: &mut Cx<'_>) {
@@ -155,6 +229,7 @@ pub(super) fn outdent(v: &mut EditorView, window: &mut Window, cx: &mut Cx<'_>) 
     let tab = usize::from(v.config.tab_size.max(1));
     let buf = v.model.buffer();
     let edits = selected_lines(v)
+        .into_iter()
         .filter_map(|l| {
             let body = buf.line_range(l, false);
             let end = buf.snap((body.start + tab).min(body.end), Bias::Before);
@@ -170,31 +245,30 @@ pub(super) fn outdent(v: &mut EditorView, window: &mut Window, cx: &mut Cx<'_>) 
     change(v, edits, None, UserEvent::Command("outdent"), cx);
 }
 
-/// Deletes the selection, or from the caret to where `target` puts it.
+/// Deletes each selection, or from each caret to where `target` puts it (## m3b-t31-multi: at
+/// every range, in one transaction).
 fn delete(
     v: &mut EditorView,
     target: impl Fn(&TextBuffer, usize, &dyn TokenOracle) -> usize,
     event: UserEvent,
     cx: &mut Cx<'_>,
 ) {
-    let now = *v.model.selection().main();
-    let (r, event) = if now.is_empty() {
-        let to = target(v.model.buffer(), now.head, words(v).as_ref());
-        (now.head.min(to)..now.head.max(to), event)
+    let tok = words(v);
+    let any_selected = v.model.selection().ranges().iter().any(|r| !r.is_empty());
+    let event = if any_selected {
+        UserEvent::DeleteSelection
     } else {
-        (now.range(), UserEvent::DeleteSelection)
+        event
     };
-    if r.is_empty() {
-        return;
-    }
-    let caret = r.start;
-    change(
-        v,
-        vec![(r, Arc::from(""))],
-        Some(SelectionSet::cursor(caret)),
-        event,
-        cx,
-    );
+    edit_each(v, event, cx, |buf, now| {
+        let r = if now.is_empty() {
+            let to = target(buf, now.head, tok.as_ref());
+            now.head.min(to)..now.head.max(to)
+        } else {
+            now.range()
+        };
+        (!r.is_empty()).then(|| (r, String::new(), 0))
+    });
 }
 
 pub(super) fn delete_backward(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_>) {

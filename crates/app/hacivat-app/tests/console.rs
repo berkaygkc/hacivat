@@ -1556,6 +1556,34 @@ fn typing_notifies_the_status_segment_but_not_the_grid(cx: &mut TestAppContext) 
     stop_core_runtime_test(cx);
 }
 
+// ## m3b-t31-multi (named exception, NOTES surface 14): "3 carets" in the editor segment,
+// before the selected count; one caret shows nothing new.
+#[gpui::test]
+fn the_status_segment_counts_carets(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    connect_and_wait(vcx, "orders-dev");
+    let id = wait_active_console(vcx);
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    in_window(vcx, |_, cx| {
+        editor.update(cx, |e, cx| e.set_text("ab\ncd\nef", cx));
+    });
+    vcx.run_until_parked();
+    assert!(!frame_text(vcx).contains("carets"));
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |e, cx| {
+            assert!(e.run_command("editor.add_caret_below", window, cx));
+            assert!(e.run_command("editor.add_caret_below", window, cx));
+            assert!(e.run_command("editor.select_right", window, cx));
+        });
+    });
+    vcx.run_until_parked();
+    let frame = frame_text(vcx);
+    assert!(frame.contains("3 carets | 3 selected"), "{frame}");
+    stop_core_runtime_test(cx);
+}
+
 #[gpui::test]
 fn a_large_console_opens_in_reduced_mode_with_its_size_in_the_regional_format(
     cx: &mut TestAppContext,

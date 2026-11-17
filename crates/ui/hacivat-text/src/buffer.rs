@@ -247,6 +247,16 @@ impl TextBuffer {
         self.rope.char_to_utf16_cu(char_idx)
     }
 
+    // ## m3b-t31-multi (named exception): the status bar's selected count over every range.
+    /// The characters (Unicode scalar values) in the byte range `r`, clamped: O(log n).
+    pub fn char_count(&self, r: Range<usize>) -> usize {
+        let len = self.rope.len_bytes();
+        let (s, e) = (r.start.min(len), r.end.min(len));
+        self.rope
+            .byte_to_char(e)
+            .saturating_sub(self.rope.byte_to_char(s))
+    }
+
     /// The byte offset of UTF-16 offset `u`; inside a surrogate pair, the pair's start.
     pub fn utf16_to_byte(&self, u: usize) -> usize {
         let char_idx = self.rope.utf16_cu_to_char(u.min(self.rope.len_utf16_cu()));

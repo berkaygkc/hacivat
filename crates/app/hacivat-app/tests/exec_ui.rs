@@ -1834,3 +1834,36 @@ fn a_call_with_three_result_sets_keeps_each_in_its_own_tab(cx: &mut TestAppConte
     wait_until(c.vcx, "a tab per result set", |_| tabs() == 3);
     stop_core_runtime_test(cx);
 }
+
+// ## m3b-t31-multi (named exception, controller ruling 2): with carets in several statements,
+// the preview band and Run follow the main caret (the last one added): only its statement runs.
+#[gpui::test]
+fn several_carets_run_only_the_main_carets_statement(cx: &mut TestAppContext) {
+    let mut c = pg_console(cx, pg());
+    c.set_text("SELECT 1;\nSELECT 2;\n");
+    c.select(3..3);
+    c.command("editor.add_caret_below");
+    let carets = c.vcx.cx.read(|cx| {
+        c.editor
+            .read(cx)
+            .snapshot()
+            .selection
+            .ranges()
+            .iter()
+            .map(|r| r.head)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(carets, [3, 13], "two carets, the main one in statement 2");
+    c.command("editor.run");
+    assert!(c.chooser_open(), "the main caret's statement or the script");
+    assert_eq!(c.band().expect("a band").units.to_vec(), vec![10..18_usize]);
+    c.keys("enter");
+    c.wait_queries(1);
+    c.barrier();
+    assert_eq!(
+        c.queries(),
+        ["SELECT 2"],
+        "the other caret's statement is not sent"
+    );
+    stop_core_runtime_test(cx);
+}

@@ -1000,14 +1000,15 @@ pub(crate) fn paint_frame(
     gutter::paint(&g, window, cx);
     let mut failed = 0;
     if let Some(layout) = v.layout.as_ref() {
-        let marked = v.ime.marked(&v.model);
+        // ## m3b-t31-multi (named exception): the composition is underlined at every caret.
+        let marked = v.ime.marked_all(&v.model);
         failed = paint::text_area(
             layout,
             &frame.snapshot,
             &v.band,
             &theme,
             frame.focused,
-            marked,
+            &marked,
             window,
             cx,
         );

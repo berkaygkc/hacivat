@@ -190,20 +190,17 @@ fn ask(v: &mut EditorView) {
     v.band.mapped = false;
 }
 
-/// Where Run is asked on `snap`: its non-empty selections, else its carets. `editor.run`
-/// (`commands/run.rs`) builds its request with this same function, so the band and Run never
-/// ask about different places (review round 1, Minor 9).
+/// Where Run is asked on `snap`: the main range only (## m3b-t31-multi, controller ruling 2:
+/// with several carets Run follows the main one, the last added): its selection, else its
+/// caret. `editor.run` (`commands/run.rs`) builds its request with this same function, so the
+/// band and Run never ask about different places (review round 1, Minor 9).
 pub(crate) fn exec_at(snap: &Snapshot) -> ExecAt {
-    let ranges = snap.selection.ranges();
-    let selected: SmallVec<[Range<usize>; 1]> = ranges
-        .iter()
-        .filter(|r| !r.is_empty())
-        .map(|r| r.range())
-        .collect();
-    if selected.is_empty() {
-        ExecAt::Carets(ranges.iter().map(|r| r.head).collect())
+    let main = snap.selection.main();
+    if main.is_empty() {
+        ExecAt::Carets(smallvec::smallvec![main.head])
     } else {
-        ExecAt::Selections(selected)
+        let r: Range<usize> = main.range();
+        ExecAt::Selections(smallvec::smallvec![r])
     }
 }
 
