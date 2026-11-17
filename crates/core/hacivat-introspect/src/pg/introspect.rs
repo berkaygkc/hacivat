@@ -122,9 +122,15 @@ where
     C: CatalogConn + ?Sized,
 {
     let t0 = Instant::now();
-    conn.control("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .await
-        .map_err(IntroError::Db)?;
+    // One simple-protocol message: the transaction, then a transaction-local `search_path`
+    // of `pg_catalog` alone, so `format_type`, `pg_get_*def` and `pg_get_expr` qualify every
+    // non-catalog name the same way whatever the session's path is (stable snapshots).
+    conn.control(
+        "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; \
+         SET LOCAL search_path = pg_catalog, pg_temp",
+    )
+    .await
+    .map_err(IntroError::Db)?;
     let mut r = Reader {
         conn: &mut *conn,
         stats: Vec::new(),
