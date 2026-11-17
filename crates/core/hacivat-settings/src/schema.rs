@@ -126,6 +126,10 @@ pub struct EditorSettings {
     pub copy_line_without_selection: bool,
     /// `editor.caret_blink`.
     pub caret_blink: CaretBlinkPref,
+    // ## m3c-t33-find (named exception): the find bar's remembered Turkish-tolerant toggle.
+    /// `editor.find_turkish_tolerant`: `"auto"` (on when the UI language or the regional
+    /// format is Turkish, D-074), or the user's last choice in the find bar.
+    pub find_turkish_tolerant: FindTolerancePref,
 }
 
 impl Default for EditorSettings {
@@ -135,6 +139,8 @@ impl Default for EditorSettings {
             insert_spaces: true,
             copy_line_without_selection: true,
             caret_blink: CaretBlinkPref::default(),
+            // ## m3c-t33-find
+            find_turkish_tolerant: FindTolerancePref::default(),
         }
     }
 }
@@ -168,6 +174,17 @@ impl Default for TabSize {
 pub enum CaretBlinkPref {
     #[default]
     System,
+    Off,
+}
+
+// ## m3c-t33-find
+/// `"auto"`, `"on"` or `"off"`: the find bar's Turkish-tolerant toggle (D-074, R-M3-10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FindTolerancePref {
+    /// On when the UI language or the regional format is Turkish.
+    #[default]
+    Auto,
+    On,
     Off,
 }
 

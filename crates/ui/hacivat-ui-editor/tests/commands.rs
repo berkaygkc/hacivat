@@ -444,10 +444,14 @@ const SPECIAL: &[(&str, &str)] = &[
     ("editor.unfold", "fold_commands_never_edit_the_text"),
     ("editor.fold_all", "fold_commands_never_edit_the_text"),
     ("editor.unfold_all", "fold_commands_never_edit_the_text"),
-    ("editor.find", "m3b_stub_commands_change_nothing"),
-    ("editor.find_next", "m3b_stub_commands_change_nothing"),
-    ("editor.find_prev", "m3b_stub_commands_change_nothing"),
-    ("editor.find_close", "m3b_stub_commands_change_nothing"),
+    // ## m3c-t33-find (named exception): Task 33's rows.
+    ("editor.find", "find_commands_ask_for_the_bar_and_step"),
+    ("editor.find_next", "find_commands_ask_for_the_bar_and_step"),
+    ("editor.find_prev", "find_commands_ask_for_the_bar_and_step"),
+    (
+        "editor.find_close",
+        "find_commands_ask_for_the_bar_and_step",
+    ),
     ("editor.toggle_comment", "m3b_stub_commands_change_nothing"),
     ("editor.duplicate_line", "m3b_stub_commands_change_nothing"),
     ("editor.delete_line", "m3b_stub_commands_change_nothing"),
@@ -507,11 +511,8 @@ fn every_command_has_a_test(cx: &mut TestAppContext) {
 fn m3b_stub_commands_change_nothing(cx: &mut TestAppContext) {
     // ## m3c-t31-multi (named exception): Task 31's rows moved to `multi_cursor_commands`.
     // ## m3c-t32-fold (named exception): Task 32's to `fold_commands_never_edit_the_text`.
+    // ## m3c-t33-find (named exception): Task 33's to `find_commands_ask_for_the_bar_and_step`.
     for id in [
-        "editor.find",
-        "editor.find_next",
-        "editor.find_prev",
-        "editor.find_close",
         "editor.toggle_comment",
         "editor.duplicate_line",
         "editor.delete_line",
@@ -547,6 +548,67 @@ fn fold_commands_never_edit_the_text(cx: &mut TestAppContext) {
             "{id}"
         );
     }
+}
+
+// ## m3c-t33-find
+/// A literal matcher.
+struct Lit(&'static str);
+
+impl hacivat_ui_editor::FindMatcher for Lit {
+    fn find(&self, hay: &str, from: usize) -> Option<Range<usize>> {
+        let i = hay.get(from..)?.find(self.0)?;
+        Some(from + i..from + i + self.0.len())
+    }
+    fn find_back(&self, hay: &str, before: usize) -> Option<Range<usize>> {
+        let i = hay.get(..before)?.rfind(self.0)?;
+        Some(i..i + self.0.len())
+    }
+}
+
+/// UI-EDIT-22 (Task 33): `editor.find` asks the host for its bar, seeded with a one-line
+/// selection; the steps ask for it too while no query is set, and step once one is;
+/// `editor.find_close` clears the query. None edits the text.
+#[gpui::test]
+fn find_commands_ask_for_the_bar_and_step(cx: &mut TestAppContext) {
+    let requested = |o: &Opened<'_>| -> Vec<Option<String>> {
+        o.events
+            .borrow()
+            .iter()
+            .filter_map(|e| match e {
+                EditorEvent::FindRequested { seed } => Some(seed.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut o = open(cx, "SELECT «a┃, b;\nFROM t, a;");
+    run(&mut o, "editor.find");
+    assert_eq!(requested(&o), [Some("a".to_string())]);
+    o.events.borrow_mut().clear();
+    run(&mut o, "editor.find_next");
+    run(&mut o, "editor.find_prev");
+    assert_eq!(
+        requested(&o),
+        [None, None],
+        "no query yet: the bar is asked for"
+    );
+    run(&mut o, "editor.find_close");
+    assert_eq!(state(&o), "SELECT «a┃, b;\nFROM t, a;");
+    o.editor.update(o.vcx, |v, cx| {
+        v.set_find(Some(std::sync::Arc::new(Lit("a"))), cx)
+    });
+    o.vcx.run_until_parked();
+    o.events.borrow_mut().clear();
+    run(&mut o, "editor.find_next");
+    assert_eq!(state(&o), "SELECT a, b;\nFROM t, «a┃;");
+    run(&mut o, "editor.find_prev");
+    assert_eq!(state(&o), "SELECT «a┃, b;\nFROM t, a;");
+    assert_eq!(requested(&o), Vec::<Option<String>>::new());
+    run(&mut o, "editor.find_close");
+    assert!(!o.vcx.read(|cx| o.editor.read(cx).find_status().active));
+    // A selection over two lines seeds nothing.
+    let mut o = open(cx, "SELECT «a,\nb┃;");
+    run(&mut o, "editor.find");
+    assert_eq!(requested(&o), [None]);
 }
 
 // ## m3c-t31-multi

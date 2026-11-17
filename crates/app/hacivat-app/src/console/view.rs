@@ -615,6 +615,10 @@ impl ConsoleHost {
         );
         if let Some(console) = registered {
             this.adopt(console, cx);
+            // ## m3c-t33-find (named exception): the registrant's editor gets its find bar.
+            if let Some(editor) = this.editor().cloned() {
+                crate::console::find_bar::attach(console, &editor, window, cx);
+            }
         } else if let Some(profile) = profile {
             this.set_binding(profile, cx);
             match take_fresh(cx, profile) {
@@ -912,6 +916,8 @@ impl ConsoleHost {
             },
         );
         exec_attach(console, &editor, window, cx);
+        // ## m3c-t33-find (named exception): the console's find bar.
+        crate::console::find_bar::attach(console, &editor, window, cx);
         let focus_handle = editor.focus_handle(cx);
         register_focus_context(cx, focus_handle.clone(), EDITOR_CONTEXT);
         let subscriptions = [
@@ -1456,6 +1462,8 @@ impl ConsoleHost {
         {
             abort.abort();
         }
+        // ## m3c-t33-find (named exception)
+        crate::console::find_bar::console_closed(console, cx);
         if owned {
             // The last edits are written now, on the closing thread (fix round 2, M16): a new
             // console that reuses this number starts after it, and its autosave takes the file
@@ -1512,6 +1520,12 @@ impl Render for ConsoleHost {
             .size_full()
             .bg(theme.tokens.colors.panel.to_hsla())
             .child(bar)
+            // ## m3c-t33-find (named exception): the find bar, a row under the toolbar
+            // (design/m3b-safe surface 16, M3c-9).
+            .children(
+                self.console()
+                    .and_then(|c| crate::console::find_bar::render(c, cx)),
+            )
             .child(
                 div()
                     .flex()

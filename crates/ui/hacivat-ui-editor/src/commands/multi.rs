@@ -94,22 +94,33 @@ pub(super) fn select_next_occurrence(v: &mut EditorView, _: &mut Window, cx: &mu
                 if whole {
                     v.commands.whole_word_at = Some(v.model.commit_count());
                 }
+            } else {
+                // ## m3c-t33-find (named exception, T31 ruling 7): every occurrence is selected
+                // already; said politely (UI-EDIT-05 step 5).
+                let text = super::message(cx, "hv-find-no-more", &[]);
+                super::say(v, text, cx);
             }
         }
     }
 }
 
 /// Fix round 1 (M2, M11): one selection change (one selection-history step), from the word of
-/// a caret (whole words) or the main range. The total count of occurrences is not said here:
-/// the "first 10,000 of N" sentence is Task 33's (`hv-find-capped`).
+/// a caret (whole words) or the main range. Past the cap it says "Selected the first 10,000 of
+/// N matches" (`hv-find-capped`; ## m3c-t33-find).
 pub(super) fn select_all_occurrences(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_>) {
     let (from, whole) = match main_widened_to_word(v) {
         Some(None) => return,
         Some(Some(word)) => (word, true),
         None => (v.model.selection().clone(), searching_whole_words(v)),
     };
-    let (all, _total) = all_occurrences_with(v.model.buffer(), &from, MAX_OCCURRENCES, whole);
+    let (all, total) = all_occurrences_with(v.model.buffer(), &from, MAX_OCCURRENCES, whole);
+    // ## m3c-t33-find (named exception, T31 ruling 7): past the cap the status bar and the live
+    // region say how many of how many (UI-EDIT-05 step 6, `hv-find-capped`).
+    let kept = all.ranges().len();
     select_set(v, all, UserEvent::Select, cx);
+    if total > kept {
+        crate::find::say_capped(v, kept as u64, total as u64, cx);
+    }
 }
 
 pub(super) fn split_selection_into_lines(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_>) {

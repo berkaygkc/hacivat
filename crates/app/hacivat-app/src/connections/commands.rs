@@ -168,6 +168,11 @@ pub fn register(cx: &mut App) {
             ids::hv::CMD_WORKSPACE_FOCUS_NOTIFICATION.id,
             WORKSPACE,
             Rc::new(|window, cx| {
+                // ## m3c-t33-find (named exception; NOTES M3c cross-cutting 7): an open find
+                // bar comes first (find bar → error bar → toasts → editor).
+                if crate::console::find_bar::focus_cycle(window, cx) {
+                    return;
+                }
                 // ## m3b-t23-escalation (named exception; design/m3b-safe M6): with an
                 // error-policy bar the first F6 enters the bar, the next the toasts.
                 if crate::exec_ui::error_bar::focus_cycle(window, cx) {

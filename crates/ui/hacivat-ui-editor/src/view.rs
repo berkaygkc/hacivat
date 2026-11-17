@@ -117,6 +117,9 @@ pub enum EditorEvent {
     LineEndingsChanged {
         mixed: bool,
     },
+    // ## m3c-t33-find (named exception): the find status may have changed (a count batch, a
+    // step, a new query, a commit while a query is set); the host's bar re-reads it.
+    FindChanged,
 }
 
 /// The focused editor, for the app's commands (`enabled` = an editor is focused).
@@ -149,6 +152,8 @@ pub struct EditorView {
     // ## m3b-t01b-seams: module-owned state of find (Task 33) and folding (Task 32).
     pub(crate) find: FindState,
     pub(crate) fold: FoldState,
+    // ## m3c-t33-find (named exception): the horizontal thumb's drag (`scrollbar.rs`).
+    pub(crate) hthumb: crate::scrollbar::ThumbDrag,
     _subscriptions: Vec<Subscription>,
     // ## m3a-t01b-seams (round 2): the label as last evaluated, with the UI-text generation it
     // was evaluated at (re-read only when the language changes).
@@ -287,6 +292,8 @@ impl EditorView {
             commands: CommandState::default(),
             find: FindState::default(),
             fold: FoldState::default(),
+            // ## m3c-t33-find (named exception)
+            hthumb: crate::scrollbar::ThumbDrag::default(),
             _subscriptions: subscriptions,
             a11y_label_cache: None,
             remeasure: None,
@@ -449,7 +456,8 @@ impl EditorView {
     // ## m3b-t01b-seams: find (Task 33) and folding (Task 32), each one line into its module.
 
     /// Sets (or clears, `None`) the find query the next steps use.
-    pub fn set_find(&mut self, m: Option<Rc<dyn FindMatcher>>, cx: &mut Context<Self>) {
+    // ## m3c-t33-find (named exception): an `Arc`, so the count runs off the UI thread.
+    pub fn set_find(&mut self, m: Option<Arc<dyn FindMatcher>>, cx: &mut Context<Self>) {
         find::set_find(self, m, cx);
     }
 
@@ -821,7 +829,8 @@ impl EditorView {
         // ## m3b-t01b-seams: folds follow the text; find matches go stale (Tasks 32, 33).
         // ## m3c-t32-fold (named exception, fix round 1 M2): only a text change maps them.
         fold_gutter::on_commit(self, &committed, text_changed);
-        find::on_commit(self, &committed);
+        // ## m3c-t33-find (named exception): a text change recounts (it spawns the count).
+        find::on_commit(self, &committed, text_changed, cx);
         if text_changed {
             self.service.change(self.doc, &snap, &committed.desc, cx);
             let text_len = snap.buffer.len_bytes() as u64;

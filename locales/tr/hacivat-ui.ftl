@@ -2399,3 +2399,42 @@ hv-editor-fold-hidden = { $n } satır katlandı
 hv-editor-fold-done = { $from }–{ $to }. satırlar katlandı
 # Review: PO
 hv-editor-unfold-done = { $from }–{ $to }. satırların katlaması açıldı
+
+## m3b-t33-find
+
+# Review: PO
+hv-find-placeholder = Bul
+# Review: PO
+hv-find-match-case = Büyük/küçük harf eşleşsin
+# Review: PO
+hv-find-words = Tam sözcük
+# Review: PO
+hv-find-regex = Düzenli ifade
+# Review: PO
+hv-find-tolerant = Türkçe esnek
+# Review: PO
+hv-find-tolerant-tip = Türkçe esnek: İ, I, ı ve i birbirini bulur, aksanlar yok sayılır.
+# Review: PO
+hv-find-count = { $i }/{ $n }
+# Review: PO
+hv-find-count-more = { $i }/{ $n }+
+# Review: PO
+hv-find-counting-tip = Sayım sürüyor; belgenin geri kalanı arandıkça sayı artar.
+# Review: PO
+hv-find-none = Eşleşme yok
+# Review: PO
+hv-find-invalid = Geçersiz desen
+# Review: PO
+hv-find-invalid-tip = Düzenli ifade okunamadığı için hiçbir şey aranmıyor: { $error }
+# Review: PO
+hv-find-prev = Önceki eşleşme
+# Review: PO
+hv-find-next = Sonraki eşleşme
+# Review: PO
+hv-find-capped = { $n } eşleşmenin ilk { $max } tanesi seçildi
+# Review: PO
+hv-find-total = { $n } eşleşme
+# Review: PO
+hv-find-total-more = { $n }+ eşleşme
+# Review: PO
+hv-find-no-more = Başka eşleşme yok

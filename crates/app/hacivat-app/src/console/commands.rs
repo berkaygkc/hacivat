@@ -37,6 +37,12 @@ fn editor_focused(cx: &App) -> bool {
     focused_editor(cx).is_some()
 }
 
+// ## m3c-t33-find
+/// A find command is enabled while an editor or a console's find field has the focus.
+fn editor_or_find_bar_focused(cx: &App) -> bool {
+    editor_focused(cx) || crate::console::find_bar::focused_bar(cx).is_some()
+}
+
 // ## m3b-t01b-seams (fix round 2, I3)
 /// A stub command is never enabled.
 fn disabled(_: &App) -> bool {
@@ -58,8 +64,11 @@ pub fn register(cx: &mut App) {
                 run_on_focused(id, window, cx);
             }),
             // ## m3b-t01b-seams (fix round 2, I3; named exception): a stub row stays disabled.
+            // ## m3c-t33-find (named exception): the find commands run in a focused find bar.
             enabled: if command.stub {
                 disabled
+            } else if crate::console::find_bar::ROUTED.contains(&id) {
+                editor_or_find_bar_focused
             } else {
                 editor_focused
             },
@@ -91,6 +100,10 @@ fn run_on_focused(id: &'static str, window: &mut Window, cx: &mut App) {
         editor.update(cx, |v, cx| {
             v.run_command(id, window, cx);
         });
+    } else {
+        // ## m3c-t33-find (named exception): else the focused find bar's (its field carries
+        // the Editor context).
+        crate::console::find_bar::run_in_bar(id, window, cx);
     }
 }
 

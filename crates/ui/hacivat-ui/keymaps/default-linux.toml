@@ -595,3 +595,12 @@ context = "Results"
 chord = "ctrl-shift-h"
 command = "history.open"
 context = "Workspace"
+
+## m3c-t33-find
+# M3c Task 33 (named exception; controller ruling R5): the find bar. The chord shadows the
+# Workspace explorer filter only while the editor (or its find bar) has the focus (P-M3b-21).
+
+[[binding]]
+chord = "ctrl-f"
+command = "editor.find"
+context = "Editor"

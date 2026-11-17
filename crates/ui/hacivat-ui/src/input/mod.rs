@@ -64,6 +64,9 @@ const CARET_WIDTH_PX: f32 = 1.0;
 const PLACEHOLDER_ELLIPSIS: &str = "…";
 /// The size of a mono field's value (mock `.in.mono input { font: 400 12px "Fragment Mono" }`).
 const MONO_FIELD_PX: f32 = 12.0;
+// ## m3c-t33-find
+/// A frameless input's height (the find field's `input { height: 22px }`).
+const FRAMELESS_HEIGHT_PX: f32 = 22.0;
 
 /// The text line as last painted: what `bounds_for_range` and hit-testing measure against.
 struct InputLayout {
@@ -137,6 +140,8 @@ pub struct TextInput {
     read_only: bool,
     /// The font family the value or placeholder was last shaped in.
     painted_family: SharedString,
+    // ## m3c-t33-find (named exception): drawn inside another field's well (the find field).
+    frameless: bool,
 }
 
 /// Sees a paste's clipboard text before a non-masked input inserts it; returning `true`
@@ -183,6 +188,8 @@ impl TextInput {
             mono: false,
             read_only: false,
             painted_family: SharedString::default(),
+            // ## m3c-t33-find
+            frameless: false,
         }
     }
 
@@ -261,6 +268,19 @@ impl TextInput {
 
     pub fn is_composing(&self) -> bool {
         self.ime.is_composing()
+    }
+
+    // ## m3c-t33-find (named exception)
+    /// Draws only the text, selection and caret: no border, padding, well or focus ring, 22 px
+    /// tall. The field around it draws those (the find field's well with its glyph and toggles).
+    pub fn set_frameless(&mut self, frameless: bool) {
+        self.frameless = frameless;
+    }
+
+    /// Selects the whole value (the find field, opened again over its last query). Call it
+    /// inside an `update` and `cx.notify()` to repaint.
+    pub fn select_all(&mut self) {
+        self.ime.select_all();
     }
 
     fn install_focus_listeners(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -598,18 +618,32 @@ impl Render for TextInput {
                 };
                 field.bg(fill.to_hsla())
             })
+            // ## m3c-t33-find (named exception): the frame is the enclosing field's.
+            .when(self.frameless, |field| {
+                field
+                    .h(px(FRAMELESS_HEIGHT_PX))
+                    .pl(px(0.0))
+                    .pr(px(0.0))
+                    .border_0()
+            })
             .child(InputText { input: cx.entity() });
         let role = if self.masked {
             Role::PasswordInput
         } else {
             Role::TextInput
         };
+        // ## m3c-t33-find (named exception): a frameless input's ring is its field's.
+        let field = if self.frameless {
+            field
+        } else {
+            focus_outline(field, &theme, focused)
+        };
         A11yNode::new(
             ("text-input-node", cx.entity_id()),
             role,
             placeholder,
             false,
-            focus_outline(field, &theme, focused),
+            field,
         )
         .value(value)
     }

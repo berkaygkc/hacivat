@@ -22,7 +22,7 @@ use hacivat_ui_core::gpui_surface::{
     App, Bounds, ContentMask, Corners, Pixels, Task, TextAlign, Window, fill, point, px, size,
 };
 
-use crate::element::{FrameLayout, PieceKind, RowLayout, TEXT_INSET, VisibleRows};
+use crate::element::{FrameLayout, PieceKind, RowLayout, VisibleRows};
 use crate::preview::{self, BandState};
 use crate::theme::EditorTheme;
 
@@ -35,9 +35,11 @@ const CHIP_RADIUS: f32 = 3.0;
 /// The caret: 2 px wide, the row's height less 2 px (16 px on 18 px rows), 1 px below its top.
 pub(crate) const CARET_WIDTH: f32 = 2.0;
 /// The horizontal thumb: 4 px tall, 2 px above the bottom, radius 3, at least 24 px wide.
-const THUMB_HEIGHT: f32 = 4.0;
-const THUMB_BOTTOM: f32 = 2.0;
-const THUMB_MIN: f32 = 24.0;
+// ## m3c-t33-find (named exception): its geometry moved to `scrollbar::h_thumb` (the drag
+// hit-tests the same box).
+pub(crate) const THUMB_HEIGHT: f32 = 4.0;
+pub(crate) const THUMB_BOTTOM: f32 = 2.0;
+pub(crate) const THUMB_MIN: f32 = 24.0;
 /// The IME underline sits this far under the baseline (NOTES surface 1).
 const IME_UNDERLINE_GAP: f32 = 3.0;
 
@@ -280,25 +282,11 @@ pub(crate) fn horizontal_thumb(
     theme: &EditorTheme,
     window: &mut Window,
 ) {
-    let track = rows.bounds;
-    let view_w = f64::from(f32::from(track.size.width) - TEXT_INSET);
-    if content_width <= view_w || view_w <= 0.0 {
+    // ## m3c-t33-find (named exception): one geometry for the paint and the drag.
+    let Some(thumb) = crate::scrollbar::h_thumb(rows.bounds, content_width, scroll_x) else {
         return;
-    }
-    let track_w = f32::from(track.size.width);
-    let thumb_w = ((view_w / content_width) as f32 * track_w)
-        .max(THUMB_MIN)
-        .min(track_w);
-    let t = (scroll_x / (content_width - view_w)).clamp(0.0, 1.0) as f32;
-    let x = f32::from(track.left()) + (track_w - thumb_w) * t;
-    let y = f32::from(track.bottom()) - THUMB_BOTTOM - THUMB_HEIGHT;
-    window.paint_quad(
-        fill(
-            Bounds::new(point(px(x), px(y)), size(px(thumb_w), px(THUMB_HEIGHT))),
-            theme.thumb,
-        )
-        .corner_radii(Corners::all(px(3.0))),
-    );
+    };
+    window.paint_quad(fill(thumb.bounds, theme.thumb).corner_radii(Corners::all(px(3.0))));
 }
 
 /// The blink's half-period: the platform's (macOS: 530 ms, also the fallback).

@@ -111,6 +111,8 @@ icon_names! {
     CaseSensitive => "icons/lucide/case-sensitive.svg",
     WholeWord => "icons/lucide/whole-word.svg",
     Regex => "icons/lucide/regex.svg",
+    // ## m3c-t33-find (named exception): the find bar's next match (already bundled).
+    ArrowDown => "icons/lucide/arrow-down.svg",
     /// The Hacivat mark (`icons/hacivat/hv-mark.svg`).
     HvMark => "icons/hacivat/hv-mark.svg",
 }
@@ -309,6 +311,7 @@ mod tests {
             assert_eq!(*n as usize, i, "{n:?}");
         }
         // ## m3c-t31-multi (named exception): four more (controller ruling 8).
-        assert_eq!(IconName::ALL.len(), 69);
+        // ## m3c-t33-find (named exception): and `ArrowDown`.
+        assert_eq!(IconName::ALL.len(), 70);
     }
 }

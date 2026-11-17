@@ -439,6 +439,8 @@ pub struct FramePrepaint {
     /// The widest painted row, for the horizontal thumb.
     pub(crate) content_width: f64,
     pub(crate) scroll_x: f64,
+    // ## m3c-t33-find (named exception): the horizontal thumb's hit target.
+    pub(crate) thumb_hit: Option<Hitbox>,
 }
 
 impl FramePrepaint {
@@ -1043,6 +1045,8 @@ pub(crate) fn prepaint_frame(
     // ## m3a-t28-gutter (named exception): the scrollbar track's own hit target over the text
     // area's right edge, and the frame's overlay (the band's rectangles, bars and hints).
     scrollbar::prepaint(track, window);
+    // ## m3c-t33-find (named exception): the horizontal thumb's own hit target, over the text's.
+    let thumb_hit = scrollbar::prepaint_thumb(text_area, content_width, v.scroll.scroll_x, window);
     // ## m3c-t32-fold (named exception): the fold column and the inlays, over the text's hit
     // target (an inlay takes its own clicks); each inlay's width goes into its row first.
     let folds = crate::fold_gutter::prepaint(v, gutter, window, cx);
@@ -1075,6 +1079,8 @@ pub(crate) fn prepaint_frame(
         scroll: v.scroll.anchor,
         content_width,
         scroll_x: v.scroll.scroll_x,
+        // ## m3c-t33-find (named exception)
+        thumb_hit,
     };
     frame.mark_hits = marks::prepaint(&v.marks, &frame.gutter(), window, cx);
     frame
@@ -1113,6 +1119,8 @@ pub(crate) fn paint_frame(
             window,
             cx,
         );
+        // ## m3c-t33-find (named exception): the other find matches' outlines.
+        crate::find::paint(v, layout, window, cx);
         // ## m3c-t32-fold (named exception): the folded headers' lines, inlays and chevrons.
         crate::fold_gutter::paint(&frame.folds, layout.rows().bounds, window, cx);
         marks::paint(&v.marks, &g, layout, &frame.mark_hits, window, cx);
@@ -1121,6 +1129,18 @@ pub(crate) fn paint_frame(
         }
     }
     v.cache.paint_failed(failed);
+    // ## m3c-t33-find (named exception): markers by visible row, and the find ticks.
+    let uniform;
+    let map = match v.layout.as_ref() {
+        Some(layout) => &layout.map,
+        None => {
+            uniform = HeightMap::uniform(
+                frame.total_lines,
+                f64::from(f32::from(frame.rows.line_height)),
+            );
+            &uniform
+        }
+    };
     scrollbar::paint(
         &ScrollbarCtx {
             track: frame.track,
@@ -1129,6 +1149,8 @@ pub(crate) fn paint_frame(
             visible_lines: frame.visible_lines,
             current_statement: frame.current_statement.clone(),
             snapshot: &frame.snapshot,
+            map,
+            find: crate::find::matches_in(v, 0..usize::MAX),
         },
         &v.marks,
         window,
@@ -1142,6 +1164,8 @@ pub(crate) fn paint_frame(
         window,
     );
     crate::mouse::listen(view, frame, window);
+    // ## m3c-t33-find (named exception): the horizontal thumb's drag (its press runs first).
+    scrollbar::listen_thumb(view, frame, window);
     // ## m3c-t32-fold (named exception)
     crate::fold_gutter::listen(view, frame, window);
     if let Some(probe) = v.probe.clone() {

@@ -371,10 +371,11 @@ static COMMANDS: [EditorCommand; 68] = [
     command("editor.fold_all", "hv-cmd-editor-fold-all", crate::fold_gutter::fold_all, false),
     command("editor.unfold_all", "hv-cmd-editor-unfold-all", crate::fold_gutter::unfold_all, false),
     // Task 33: find.
-    stub("editor.find", "hv-cmd-editor-find", find::find),
-    stub("editor.find_next", "hv-cmd-editor-find-next", find::find_next),
-    stub("editor.find_prev", "hv-cmd-editor-find-prev", find::find_prev),
-    stub("editor.find_close", "hv-cmd-editor-find-close", find::find_close),
+    // ## m3c-t33-find (named exception): the Task 33 rows are commands now.
+    command("editor.find", "hv-cmd-editor-find", find::find, false),
+    command("editor.find_next", "hv-cmd-editor-find-next", find::find_next, false),
+    command("editor.find_prev", "hv-cmd-editor-find-prev", find::find_prev, false),
+    command("editor.find_close", "hv-cmd-editor-find-close", find::find_close, false),
     // Task 34: lines and history recall.
     stub("editor.toggle_comment", "hv-cmd-editor-toggle-comment", lines::toggle_comment),
     stub("editor.duplicate_line", "hv-cmd-editor-duplicate-line", lines::duplicate_line),
