@@ -184,27 +184,15 @@ fn cell(row: u64, col: u32) -> ModelCell {
 }
 
 fn on_cell(row: u64, col: u32) -> MenuTarget {
-    MenuTarget {
-        kind: MenuKind::Cell,
-        col: ColId(col),
-        cell: Some(cell(row, col)),
-    }
+    MenuTarget::new(MenuKind::Cell, ColId(col), Some(cell(row, col)))
 }
 
 fn on_header(col: u32) -> MenuTarget {
-    MenuTarget {
-        kind: MenuKind::Header,
-        col: ColId(col),
-        cell: None,
-    }
+    MenuTarget::new(MenuKind::Header, ColId(col), None)
 }
 
 fn on_row(row: u64, col: u32) -> MenuTarget {
-    MenuTarget {
-        kind: MenuKind::RowNumber,
-        col: ColId(col),
-        cell: Some(cell(row, col)),
-    }
+    MenuTarget::new(MenuKind::RowNumber, ColId(col), Some(cell(row, col)))
 }
 
 /// `text` without the Unicode isolation marks Fluent puts around its arguments.
@@ -292,6 +280,25 @@ impl Tile {
         })
     }
 
+    // ## m3c-t39 fix round 1 (m4)
+    /// What the open grid menu is over, stamp included.
+    fn opened(&self) -> MenuTarget {
+        self.vcx
+            .cx
+            .read(context_menu::open_target)
+            .expect("a grid menu is open")
+    }
+
+    /// The open menu is over `want` (its stamp aside).
+    fn assert_opened(&self, want: &MenuTarget) {
+        let got = self.opened();
+        assert_eq!(
+            (got.kind, got.col, got.cell),
+            (want.kind, want.col, want.cell)
+        );
+        assert!(got.result.is_some(), "the menu is stamped with its result");
+    }
+
     fn menu_open(&self) -> bool {
         layer_ids(self.vcx).last() == Some(&"menu")
     }
@@ -373,6 +380,7 @@ fn menu_variants_and_disabled_reasons(cx: &mut TestAppContext) {
     let [cell_at, header_at, row_at, _] = t.points(&grid, 1, 1);
     press(&mut t, cell_at, gpui::MouseButton::Right, 1);
     assert!(t.menu_open(), "{:?}", layer_ids(t.vcx));
+    t.assert_opened(&on_cell(1, 1));
     let menu = t
         .vcx
         .cx
@@ -404,6 +412,7 @@ fn menu_variants_and_disabled_reasons(cx: &mut TestAppContext) {
     // The header menu.
     press(&mut t, header_at, gpui::MouseButton::Right, 1);
     assert!(t.menu_open());
+    t.assert_opened(&on_header(1));
     t.vcx.simulate_keystrokes("escape");
     t.redraw();
     let header = |frozen: &str, hide: &str, show: &str| {
@@ -433,6 +442,7 @@ fn menu_variants_and_disabled_reasons(cx: &mut TestAppContext) {
     // The row-number menu.
     press(&mut t, row_at, gpui::MouseButton::Right, 1);
     assert!(t.menu_open());
+    t.assert_opened(&on_row(1, 1));
     t.vcx.simulate_keystrokes("escape");
     t.redraw();
     assert_eq!(
@@ -644,17 +654,30 @@ fn raw_display_per_column_and_global(cx: &mut TestAppContext) {
     assert_eq!(t.shown(&grid, 0, 1), "1,234,567");
     let grid = t.show(five());
     assert_eq!(t.shown(&grid, 0, 1), "1,234,567");
-    // Off again: the column's choice equals the setting, so it follows it from now on.
+    // ## m3c-t39 fix round 1 (m2, controller ruling): the column's own choice keeps overriding
+    // the setting until the user clears it. Off and on again: still grouped.
+    let amount_raw = |t: &Tile| {
+        t.vcx
+            .cx
+            .read(|cx| context_menu::is_raw(t.console, "amount", cx))
+    };
+    for raw in [false, true] {
+        in_window(t.vcx, |_, cx| {
+            update_settings(cx, |s| s.grid.raw_display = raw);
+        });
+        t.redraw();
+        assert_eq!(t.shown(&grid, 0, 1), "1,234,567", "setting {raw}");
+        assert!(!amount_raw(&t));
+    }
+    // Choosing the setting's value clears the choice: the column follows the setting again.
+    t.choose(&grid, on_cell(0, 1), context_menu::RAW);
+    assert_eq!(t.shown(&grid, 0, 1), "1234567");
     in_window(t.vcx, |_, cx| {
         update_settings(cx, |s| s.grid.raw_display = false);
     });
     t.redraw();
     assert_eq!(t.shown(&grid, 0, 1), "1,234,567");
-    assert!(
-        !t.vcx
-            .cx
-            .read(|cx| context_menu::is_raw(t.console, "amount", cx))
-    );
+    assert!(!amount_raw(&t));
 }
 
 /// ⇧F10 in a focused grid opens the cell menu under the focus cell with its first item
@@ -718,5 +741,246 @@ fn menu_opens_from_the_keyboard_at_the_focus_cell(cx: &mut TestAppContext) {
             .and_then(|i| i.text())
             .as_deref(),
         Some("10\n")
+    );
+}
+
+// ---- fix round 1 ------------------------------------------------------------------------------
+
+/// `secret` (text), `pk` (int8), `x` (int8): another result for a re-run into the same tab.
+fn other_schema() -> Arc<ResultSchema> {
+    Arc::new(ResultSchema {
+        columns: Arc::from([
+            ColumnMeta {
+                name: "secret".into(),
+                logical: LogicalType::Text {
+                    max_chars: None,
+                    fixed: false,
+                },
+                native: NativeType::Pg {
+                    oid: 25,
+                    typmod: -1,
+                    name: "text".into(),
+                },
+                origin: None,
+            },
+            int8("pk"),
+            int8("x"),
+        ]),
+    })
+}
+
+fn rerun_source() -> Arc<dyn ResultSource> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1 << 45);
+    let id = ResultId(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let schema = other_schema();
+    let budget = MemoryBudget::new(u64::MAX, u64::MAX);
+    let (store, mut writer) = ResultStore::new(id, schema.clone(), budget, 1);
+    writer.append(Chunk::from_values(
+        &schema,
+        vec![vec![Value::Text("pw".into()), Value::Int(1), Value::Int(2)]],
+    ));
+    writer.set_state(Completeness::Complete);
+    StoreSource::new(store, Arc::new(NoControl), FetchPolicy::default())
+}
+
+fn clipboard(t: &Tile) -> String {
+    t.vcx
+        .cx
+        .read_from_clipboard()
+        .and_then(|i| i.text())
+        .unwrap_or_default()
+}
+
+/// I1 (review probe A): a menu opened over `amount` closes when a re-run's result lands in the
+/// same tab, and its rows never act on the new result (here `pk` would take `amount`'s place);
+/// nor once the console shows another tab.
+#[gpui::test]
+fn a_menu_over_an_old_result_closes_and_never_acts_on_the_new_one(cx: &mut TestAppContext) {
+    let mut t = tile(cx);
+    let grid = t.show(five());
+    let [_, header_at, ..] = t.points(&grid, 0, 1);
+    press(&mut t, header_at, gpui::MouseButton::Right, 1);
+    assert!(t.menu_open());
+    let stale = t.opened();
+    in_window(t.vcx, |_, cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()));
+        t.results
+            .update(cx, |r, cx| r.apply(&[tab(rerun_source())], cx));
+    });
+    t.redraw();
+    assert!(!t.menu_open(), "the re-run closed the menu");
+    let same_grid = t.vcx.cx.read(|cx| {
+        hosts(cx)
+            .into_iter()
+            .find_map(|h| h.read(cx).grid_of(t.console, 0, cx))
+    });
+    assert_eq!(same_grid.as_ref(), Some(&grid), "retargeted in place");
+    // Its rows, chosen anyway, do nothing.
+    for action in [
+        context_menu::COPY_NAME,
+        context_menu::HIDE,
+        context_menu::RAW,
+        context_menu::SORT_ASC,
+        context_menu::FREEZE,
+    ] {
+        t.choose(&grid, stale.clone(), action);
+    }
+    assert_eq!(clipboard(&t), "sentinel", "never the new result's `pk`");
+    t.vcx.cx.read(|cx| {
+        let g = grid.read(cx);
+        assert!(g.column_layout().hidden().is_empty());
+        assert_eq!(g.frozen(), 0);
+        assert!(g.sort().is_empty());
+        assert!(!context_menu::is_raw(t.console, "pk", cx));
+        assert!(!context_menu::is_raw(t.console, "amount", cx));
+    });
+    // A menu over the new result names its own column (`pk`, the second).
+    let [_, header_at, ..] = t.points(&grid, 0, 1);
+    press(&mut t, header_at, gpui::MouseButton::Right, 1);
+    assert!(t.menu_open());
+    t.choose(&grid, t.opened(), context_menu::COPY_NAME);
+    assert_eq!(clipboard(&t), "pk");
+    // Another tab shown (Output) closes an open menu too.
+    press(&mut t, header_at, gpui::MouseButton::Right, 1);
+    assert!(t.menu_open());
+    in_window(t.vcx, |_, cx| {
+        t.results
+            .update(cx, |r, cx| r.set_active(ActiveResult::Output, cx))
+    });
+    t.redraw();
+    assert!(!t.menu_open(), "showing another tab closed the menu");
+}
+
+/// m1: "Show as record" from a row number inside a wider row selection shows that row, not
+/// the selection's focus row.
+#[gpui::test]
+fn show_as_record_shows_the_row_the_menu_is_over(cx: &mut TestAppContext) {
+    let mut t = tile(cx);
+    let grid = t.show(five());
+    let [.., row1, _] = t.points(&grid, 1, 0);
+    let [.., row3, _] = t.points(&grid, 3, 0);
+    // Rows 3 up to 1 selected, the focus on row 1.
+    press(&mut t, row3, gpui::MouseButton::Left, 1);
+    t.vcx.simulate_event(gpui::MouseDownEvent {
+        button: gpui::MouseButton::Left,
+        position: row1,
+        modifiers: gpui::Modifiers::shift(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    t.vcx.simulate_event(gpui::MouseUpEvent {
+        button: gpui::MouseButton::Left,
+        position: row1,
+        modifiers: gpui::Modifiers::shift(),
+        click_count: 1,
+    });
+    t.redraw();
+    let focus_row = |t: &Tile| {
+        t.vcx
+            .cx
+            .read(|cx| grid.read(cx).selection().focus().map(|f| f.row))
+    };
+    assert_eq!(focus_row(&t), Some(ModelRow(1)));
+    press(&mut t, row3, gpui::MouseButton::Right, 1);
+    assert!(t.menu_open());
+    let target = t.opened();
+    assert_eq!(target.kind, MenuKind::RowNumber);
+    assert_eq!(target.cell.map(|c| c.row), Some(ModelRow(3)));
+    // "Show as record" is the fourth row.
+    click(t.vcx, "menu-item-3");
+    t.redraw();
+    let record = t
+        .vcx
+        .cx
+        .read(|cx| hacivat_app::results::views::record(t.console, cx))
+        .expect("the inspector shows a row");
+    assert_eq!(record.row, ModelRow(3));
+    assert_eq!(focus_row(&t), Some(ModelRow(3)));
+}
+
+/// m4: a right press under a sort and under a filter opens the menu over the model cell the
+/// view row shows; the Transposed view's grid opens a cell menu over the table cell, which
+/// stops after Raw display.
+#[gpui::test]
+fn right_press_under_sort_filter_and_transposed(cx: &mut TestAppContext) {
+    let mut t = tile(cx);
+    let grid = t.show(five());
+    // Sorted by `amount`, largest first: view row 1 shows model row 4 (1,000,000).
+    t.choose(&grid, on_header(1), context_menu::SORT_DESC);
+    let [at, ..] = t.points(&grid, 1, 1);
+    press(&mut t, at, gpui::MouseButton::Right, 1);
+    t.assert_opened(&on_cell(4, 1));
+    t.vcx.simulate_keystrokes("escape");
+    t.redraw();
+    t.choose(&grid, on_header(1), context_menu::CLEAR_SORT);
+    // Filtered to model rows 1 and 3: view row 1 shows model row 3.
+    in_window(t.vcx, |_, cx| {
+        grid.update(cx, |g, cx| {
+            g.set_view_map(
+                hacivat_ui_grid::model::ViewMap::filtered(Arc::from([1u64, 3]), 5),
+                cx,
+            )
+        })
+    });
+    t.redraw();
+    let [at, _, row_at, _] = t.points(&grid, 1, 2);
+    press(&mut t, at, gpui::MouseButton::Right, 1);
+    t.assert_opened(&on_cell(3, 2));
+    t.vcx.simulate_keystrokes("escape");
+    t.redraw();
+    press(&mut t, row_at, gpui::MouseButton::Right, 1);
+    assert_eq!(t.opened().cell.map(|c| c.row), Some(ModelRow(3)));
+    t.vcx.simulate_keystrokes("escape");
+    t.redraw();
+    in_window(t.vcx, |_, cx| {
+        grid.update(cx, |g, cx| {
+            g.set_view_map(hacivat_ui_grid::model::ViewMap::identity(0), cx)
+        })
+    });
+    t.redraw();
+
+    // The Transposed view.
+    in_window(t.vcx, |_, cx| {
+        hacivat_app::results::views::set_mode(
+            t.console,
+            hacivat_app::results::views::ViewMode::Transposed,
+            cx,
+        );
+    });
+    t.redraw();
+    let tgrid = t
+        .vcx
+        .cx
+        .read(|cx| hacivat_app::results::views::transposed_grid(t.console, cx))
+        .expect("the Transposed view's grid");
+    let [at, ..] = t.points(&tgrid, 1, 2);
+    press(&mut t, at, gpui::MouseButton::Right, 1);
+    assert!(t.menu_open());
+    let (pressed, table_cell) = t.vcx.cx.read(|cx| {
+        let pressed = tgrid
+            .read(cx)
+            .selection()
+            .focus()
+            .expect("the press focused a cell");
+        let source = hacivat_app::results::views::transposed_source(t.console, cx)
+            .expect("the Transposed source");
+        (pressed, source.table_cell(pressed))
+    });
+    let table_cell = table_cell.expect("a data cell");
+    assert_ne!(pressed, table_cell, "the axes are swapped");
+    let target = t.opened();
+    assert_eq!(
+        (target.kind, target.cell),
+        (MenuKind::Cell, Some(table_cell))
+    );
+    assert_eq!(
+        t.items(&tgrid, target),
+        strs(&[
+            "Copy",
+            "Copy with headers",
+            "|",
+            "Open value viewer",
+            "Raw display · this column",
+        ])
     );
 }

@@ -1699,6 +1699,9 @@ pub fn register_commands(cx: &mut App) {
             } else if super::find::ROUTED.contains(&id) {
                 // ## m3c-t38: find is the table's (off in the Transposed and Text views).
                 |cx| super::find::field_focused(cx) || super::views::table_shown(cx)
+            } else if id == "grid.context_menu" {
+                // ## m3c-t39 fix round 1 (m5): no menu in the Text view.
+                |cx| !super::find::field_focused(cx) && super::context_menu::command_enabled(cx)
             } else if id == "grid.goto_row" {
                 // ## m3c-t38: so is go to row.
                 |cx| !super::find::field_focused(cx) && super::views::table_shown(cx)

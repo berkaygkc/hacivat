@@ -29,17 +29,23 @@
 //!   hiding and showing columns, raw display, copying the column's name, the record inspector.
 //! - **Raw display** is per column here (by column name, for every result of the console) and
 //!   global in Settings (`grid.raw_display`); the column's choice wins. Copy is raw either way.
+//! - **Over one result** (fix round 1, I1). A menu is stamped with the result it opened over
+//!   (the tab's adapter, its generation and the column's name). A re-run into the tab or
+//!   another tab shown closes it, and a row chosen anyway does nothing.
 //! - **Keyboard-active row.** A menu opened from the keys starts on its first item with the
 //!   selection tint (`PopupMenu::set_active_tint`, the chooser's look until Task 41 gives every
 //!   menu its keyboard-active row).
 
 use std::rc::Rc;
+// ## m3c-t39 fix round 1
+use std::sync::Arc;
 
 use hacivat_l10n::{Count, MsgRef, NoArgs, ids};
 use hacivat_ui::menu::{MenuItemSpec, PopupMenu, PopupMenuEvent};
 use hacivat_ui::text::TextFn;
 use hacivat_ui_core::gpui_surface::{
-    App, ClipboardItem, Entity, Global, Pixels, Point, WeakEntity, Window,
+    AnyWindowHandle, App, ClipboardItem, Entity, Global, Pixels, Point, Subscription, WeakEntity,
+    Window,
 };
 use hacivat_ui_grid::model::{CopyRefusal, SortKey, SortSpec};
 use hacivat_ui_grid::{ColId, GridView, ModelCell};
@@ -61,11 +67,74 @@ pub enum MenuKind {
 
 /// What a menu is over: its kind, the column it names (a header's; a cell's; the focus column
 /// of a row number) and the cell (none for a header).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuTarget {
     pub kind: MenuKind,
     pub col: ColId,
     pub cell: Option<ModelCell>,
+    // ## m3c-t39 fix round 1 (I1)
+    /// The result the menu was opened over (`None`: whatever is shown when it acts).
+    pub result: Option<ResultStamp>,
+}
+
+// ## m3c-t39 fix round 1 (I1)
+/// The result a menu was opened over: its tab's adapter, the adapter's generation (a re-run
+/// into the same tab moves it) and the menu column's name then. The menu acts only while the
+/// console still shows that result, and it closes as soon as it does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultStamp {
+    /// The adapter's identity (`Rc::as_ptr`), never dereferenced.
+    adapter: usize,
+    generation: u64,
+    /// The column's name in that result (data).
+    pub name: Option<Arc<str>>,
+}
+
+impl MenuTarget {
+    /// A target over what console `console` shows when it acts (no stamp).
+    pub fn new(kind: MenuKind, col: ColId, cell: Option<ModelCell>) -> Self {
+        MenuTarget {
+            kind,
+            col,
+            cell,
+            result: None,
+        }
+    }
+
+    /// This target stamped with the result console `console` shows now.
+    pub fn stamped(mut self, console: ConsoleId, cx: &App) -> Self {
+        self.result = super::find::active_target(console, cx).map(|(_, adapter)| ResultStamp {
+            adapter: Rc::as_ptr(&adapter) as *const () as usize,
+            generation: adapter.generation(),
+            name: adapter
+                .snapshot()
+                .schema()
+                .columns
+                .get(self.col.0 as usize)
+                .map(|c| c.name.clone()),
+        });
+        self
+    }
+
+    /// Whether console `console` still shows the result the menu was opened over (an unstamped
+    /// target always does).
+    pub fn current(&self, console: ConsoleId, cx: &App) -> bool {
+        let Some(stamp) = &self.result else {
+            return true;
+        };
+        super::find::active_target(console, cx).is_some_and(|(_, adapter)| {
+            Rc::as_ptr(&adapter) as *const () as usize == stamp.adapter
+                && adapter.generation() == stamp.generation
+        })
+    }
+
+    /// The menu column's name: as stamped, else as shown now.
+    fn name(&self, console: ConsoleId, cx: &App) -> Option<Arc<str>> {
+        match &self.result {
+            Some(stamp) => stamp.name.clone(),
+            None => column_name(console, self.col, cx),
+        }
+    }
 }
 
 /// A grid's request for its menu (`GridEvent::ContextMenuRequested`).
@@ -84,20 +153,16 @@ impl MenuRequest {
     /// What the menu is over; `None` when the request names nothing.
     pub fn target(&self) -> Option<MenuTarget> {
         match (self.header, self.cell) {
-            (Some(col), _) => Some(MenuTarget {
-                kind: MenuKind::Header,
-                col,
-                cell: None,
-            }),
-            (None, Some(cell)) => Some(MenuTarget {
-                kind: if self.row_number {
+            (Some(col), _) => Some(MenuTarget::new(MenuKind::Header, col, None)),
+            (None, Some(cell)) => Some(MenuTarget::new(
+                if self.row_number {
                     MenuKind::RowNumber
                 } else {
                     MenuKind::Cell
                 },
-                col: cell.col,
-                cell: Some(cell),
-            }),
+                cell.col,
+                Some(cell),
+            )),
             (None, None) => None,
         }
     }
@@ -124,15 +189,37 @@ pub const RAW: &str = "results.grid_menu.raw";
 pub const COPY_NAME: &str = "results.grid_menu.copy_name";
 pub const RECORD: &str = "results.grid_menu.record";
 
-/// The menu last opened, while it is open.
+/// The menu last opened, while it is open: the menu, what it is over, and (## m3c-t39 fix
+/// round 1, I1) the watches that close each menu still open when its console stops showing
+/// its result (a menu opened over another one keeps the first one's watch).
 #[derive(Default)]
-struct OpenMenu(Option<WeakEntity<PopupMenu>>);
+struct OpenMenu {
+    menu: Option<WeakEntity<PopupMenu>>,
+    target: Option<MenuTarget>,
+    watches: Vec<(WeakEntity<PopupMenu>, Subscription)>,
+}
 
 impl Global for OpenMenu {}
 
 /// The grid menu that is open, if one is.
 pub fn open_menu(cx: &App) -> Option<Entity<PopupMenu>> {
-    cx.try_global::<OpenMenu>()?.0.as_ref()?.upgrade()
+    cx.try_global::<OpenMenu>()?.menu.as_ref()?.upgrade()
+}
+
+// ## m3c-t39 fix round 1 (m4)
+/// What the open grid menu is over, while one is open.
+pub fn open_target(cx: &App) -> Option<MenuTarget> {
+    open_menu(cx)?;
+    cx.try_global::<OpenMenu>()?.target.clone()
+}
+
+// ## m3c-t39 fix round 1 (m5)
+/// Whether `grid.context_menu` can open a menu: the shown console shows the table or the
+/// Transposed view (the Text view has no cells to open it over).
+pub(crate) fn command_enabled(cx: &App) -> bool {
+    super::view::active_entry(cx).is_some_and(|(console, _, _)| {
+        super::views::mode(console, cx) != super::views::ViewMode::Text
+    })
 }
 
 /// Opens the menu `request` asks for over console `console`'s grid `grid` (the tile calls it
@@ -147,17 +234,32 @@ pub fn open(console: ConsoleId, grid: &Entity<GridView>, request: MenuRequest, c
         let Some(grid) = grid.upgrade() else {
             return;
         };
-        let window = cx
-            .active_window()
-            .into_iter()
-            .chain(cx.windows())
-            .find(|w| w.downcast::<Workspace>().is_some());
-        if let Some(window) = window {
+        // ## m3c-t39 fix round 1 (I1): stamped with the result shown now.
+        let target = target.stamped(console, cx);
+        if let Some(window) = window_of(console, cx) {
             let _ = window.update(cx, |_, window, cx| {
                 show(console, &grid, target, request, window, cx);
             });
         }
     });
+}
+
+// ## m3c-t39 fix round 1 (m8)
+/// The window whose workspace holds console `console`'s tab (the grid's own window), else the
+/// active workspace window.
+fn window_of(console: ConsoleId, cx: &App) -> Option<AnyWindowHandle> {
+    let tab = Consoles::get(cx, console).map(|s| s.tab);
+    cx.windows()
+        .into_iter()
+        .find(|w| {
+            w.downcast::<Workspace>()
+                .and_then(|w| w.read(cx).ok())
+                .is_some_and(|ws| tab.is_some_and(|t| ws.tab_kind(t).is_some()))
+        })
+        .or_else(|| {
+            cx.active_window()
+                .filter(|w| w.downcast::<Workspace>().is_some())
+        })
 }
 
 /// Opens the menu in `window`'s workspace (a `menu` layer, which gives the focus back to the
@@ -173,7 +275,7 @@ fn show(
     let Some(ws) = window.root::<Workspace>().flatten() else {
         return;
     };
-    let items = menu_items(console, grid, target, cx);
+    let items = menu_items(console, grid, target.clone(), cx);
     let first = items
         .iter()
         .position(|i| !i.separator && !i.disabled && !i.note);
@@ -196,15 +298,43 @@ fn show(
         }
     });
     let weak = grid.downgrade();
+    let chosen = target.clone();
     cx.subscribe(&menu, move |_, event: &PopupMenuEvent, cx| {
         if let PopupMenuEvent::Chosen(action) = event
             && let Some(grid) = weak.upgrade()
         {
-            choose(console, &grid, target, action, cx);
+            choose(console, &grid, chosen.clone(), action, cx);
         }
     })
     .detach();
-    cx.set_global(OpenMenu(Some(menu.downgrade())));
+    // ## m3c-t39 fix round 1 (I1): a re-run into the tab, or another tab shown, closes it.
+    let watch = Consoles::get(cx, console)
+        .and_then(|s| s.results.clone())
+        .map(|results| {
+            let (weak_menu, watched) = (menu.downgrade(), target.clone());
+            cx.observe(&results, move |_, cx| {
+                if watched.current(console, cx) {
+                    return;
+                }
+                if let Some(menu) = weak_menu.upgrade() {
+                    cx.defer(move |cx| {
+                        menu.update(cx, |_, cx| cx.emit(PopupMenuEvent::Dismissed));
+                    });
+                }
+            })
+        });
+    let mut watches = if cx.has_global::<OpenMenu>() {
+        std::mem::take(&mut cx.global_mut::<OpenMenu>().watches)
+    } else {
+        Vec::new()
+    };
+    watches.retain(|(m, _)| m.upgrade().is_some());
+    watches.extend(watch.map(|w| (menu.downgrade(), w)));
+    cx.set_global(OpenMenu {
+        menu: Some(menu.downgrade()),
+        target: Some(target),
+        watches,
+    });
 }
 
 /// The rows of the menu over `target` of console `console`'s grid `grid`, as they stand now.
@@ -216,7 +346,7 @@ pub fn menu_items(
 ) -> Vec<MenuItemSpec> {
     let g = grid.read(cx);
     let table = super::views::table_shown(cx);
-    let name = column_name(console, target.col, cx);
+    let name = target.name(console, cx);
     let raw = name.as_deref().is_some_and(|n| is_raw(console, n, cx));
     let map = g.view_map();
     let visible = g.column_layout().visible();
@@ -362,6 +492,10 @@ pub fn choose(
     action: &str,
     cx: &mut App,
 ) {
+    // ## m3c-t39 fix round 1 (I1): only over the result the menu was opened over.
+    if !target.current(console, cx) {
+        return;
+    }
     let col = target.col;
     match action {
         SORT_ASC | SORT_DESC => {
@@ -389,25 +523,34 @@ pub fn choose(
             }
         }),
         RAW => {
-            if let Some(name) = column_name(console, col, cx) {
+            if let Some(name) = target.name(console, cx) {
                 let raw = is_raw(console, &name, cx);
                 set_raw(console, &name, !raw, cx);
             }
         }
         COPY_NAME => {
-            if let Some(name) = column_name(console, col, cx) {
+            if let Some(name) = target.name(console, cx) {
                 cx.write_to_clipboard(ClipboardItem::new_string(name.to_string()));
             }
         }
-        RECORD => cx.defer(|cx| {
-            if let Some(window) = cx.active_window() {
-                let _ = window.update(cx, |_, window, cx| {
-                    if !super::views::record_open(window, cx) {
-                        super::views::toggle_record(window, cx);
-                    }
-                });
+        RECORD => {
+            // ## m3c-t39 fix round 1 (m1): the row the menu is over, also inside a wider
+            // selection (the inspector shows the focus row).
+            if let (Some(cell), Some((table, _))) =
+                (target.cell, super::find::active_target(console, cx))
+            {
+                table.update(cx, |g, cx| g.focus_cell(cell, cx));
             }
-        }),
+            cx.defer(move |cx| {
+                if let Some(window) = window_of(console, cx) {
+                    let _ = window.update(cx, |_, window, cx| {
+                        if !super::views::record_open(window, cx) {
+                            super::views::toggle_record(window, cx);
+                        }
+                    });
+                }
+            });
+        }
         _ => {}
     }
 }
