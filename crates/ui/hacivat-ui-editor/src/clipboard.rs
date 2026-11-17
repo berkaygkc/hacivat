@@ -25,7 +25,7 @@
 //!   always runs.
 //! - A read-only editor copies, and neither cuts nor pastes.
 //!
-//! ## m3b-t31-multi: several carets (UI-EDIT-14 steps 1, 2, 4 and 6)
+//! ## m3c-t31-multi: several carets (UI-EDIT-14 steps 1, 2, 4 and 6)
 //! - **Copy** takes every non-empty range as a piece, the pieces joined with the dominant line
 //!   ending; with no selection, each caret's line once, line-wise. The metadata lists every
 //!   piece. **Cut** deletes every copied range in one transaction.
@@ -62,7 +62,7 @@ use crate::view::{EditorEvent, EditorView};
 #[derive(Debug, Clone, Default)]
 pub struct PasteState {
     reads: u32,
-    // ## m3b-t31-multi
+    // ## m3c-t31-multi
     /// Bumped by every selection change: a pending primary-selection write runs only if it is
     /// still the newest (the 100 ms debounce).
     primary_generation: u64,
@@ -75,7 +75,7 @@ impl PasteState {
     }
 }
 
-// ## m3b-t31-multi
+// ## m3c-t31-multi
 /// One copied piece (UI-EDIT-14 step 1): its bytes in the clipboard text and whether it is a
 /// whole line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +87,8 @@ pub(crate) struct Piece {
 /// The last copy made in this app (any editor): the clipboard text's hash and its pieces. A
 /// platform that drops the metadata (UI-EDIT-14 verification: Windows and Linux clipboards
 /// may) still pastes N pieces into N carets while the clipboard holds exactly that text.
+/// The hash cannot tell who put the text there: the same bytes copied in another app are taken
+/// for this copy (accepted, fix round 1 review M9).
 #[derive(Debug, Clone, Default)]
 struct CopyRecord {
     hash: u128,
@@ -476,11 +478,12 @@ fn distribution(p: &Pasted, n: usize, nl: &str) -> Vec<(Arc<str>, bool)> {
             return lines.into_iter().map(|l| (Arc::from(l), false)).collect();
         }
     }
-    let line_wise = p.pieces.len() == 1 && p.pieces[0].1;
+    // ## m3c-t31-multi (fix round 1, I3): whole lines stay whole lines, whatever the count.
+    let line_wise = !p.pieces.is_empty() && p.pieces.iter().all(|x| x.1);
     vec![(p.text.clone(), line_wise); n]
 }
 
-/// Applies normalised pasted text to the selection current now (## m3b-t31-multi: one piece,
+/// Applies normalised pasted text to the selection current now (## m3c-t31-multi: one piece,
 /// one line or the whole text per caret, [`distribution`]): a line-wise piece above its caret's
 /// line when the caret has no selection (its column kept), anything else over the range. Held
 /// while a composition is open (or held edits wait before it); refused past the size limit,
@@ -522,11 +525,15 @@ pub(crate) fn apply(v: &mut EditorView, p: Pasted, cx: &mut Context<EditorView>)
     let mut order: Vec<usize> = (0..edits.len()).collect();
     order.sort_by_key(|&i| (edits[i].0.start, edits[i].0.end));
     let mut starts = vec![0; edits.len()];
+    // ## m3c-t31-multi (fix round 1, M7): each edit's old start with the length change of it
+    // and every edit before it, so a caret's shift is one binary search (O(N log N) in all).
+    let mut shifts: Vec<(usize, isize)> = Vec::with_capacity(edits.len());
     let mut delta: isize = 0;
     for &i in &order {
         let (r, t) = &edits[i];
         starts[i] = r.start.saturating_add_signed(delta);
         delta += t.len() as isize - r.len() as isize;
+        shifts.push((r.start, delta));
     }
     let carets: Vec<SelectionRange> = sel
         .ranges()
@@ -535,11 +542,8 @@ pub(crate) fn apply(v: &mut EditorView, p: Pasted, cx: &mut Context<EditorView>)
         .map(|(r, e)| match e {
             Some(i) => SelectionRange::caret(starts[*i] + edits[*i].1.len()),
             None => {
-                let shift: isize = edits
-                    .iter()
-                    .filter(|(x, _)| x.start <= r.head)
-                    .map(|(x, t)| t.len() as isize - x.len() as isize)
-                    .sum();
+                let k = shifts.partition_point(|(start, _)| *start <= r.head);
+                let shift = k.checked_sub(1).map_or(0, |k| shifts[k].1);
                 SelectionRange::caret(r.head.saturating_add_signed(shift))
             }
         })
@@ -561,7 +565,7 @@ pub(crate) fn apply(v: &mut EditorView, p: Pasted, cx: &mut Context<EditorView>)
     }
 }
 
-// ## m3b-t31-multi: the Linux primary selection (UI-EDIT-14 step 6).
+// ## m3c-t31-multi: the Linux primary selection (UI-EDIT-14 step 6).
 /// The text the primary selection takes now: the main selection's, when it is not empty.
 #[cfg_attr(
     not(target_os = "linux"),
@@ -578,7 +582,8 @@ pub(crate) fn selection_changed(v: &mut EditorView, cx: &mut Context<EditorView>
     v.paste.primary_generation = v.paste.primary_generation.wrapping_add(1);
     #[cfg(target_os = "linux")]
     {
-        if v.model.selection().main().is_empty() {
+        // ## m3c-t31-multi (fix round 1, M4): nothing while composing; the commit writes.
+        if v.model.selection().main().is_empty() || v.ime.is_composing() {
             return;
         }
         let generation = v.paste.primary_generation;
@@ -588,6 +593,7 @@ pub(crate) fn selection_changed(v: &mut EditorView, cx: &mut Context<EditorView>
                 .await;
             let _ = this.update(cx, |v, cx| {
                 if v.paste.primary_generation == generation
+                    && !v.ime.is_composing()
                     && let Some(text) = primary_text(v)
                 {
                     cx.write_to_primary(ClipboardItem::new_string(text));
@@ -600,9 +606,10 @@ pub(crate) fn selection_changed(v: &mut EditorView, cx: &mut Context<EditorView>
     let _ = cx;
 }
 
-/// A middle click's paste of the primary selection at byte `at` (Linux): `text` normalised and
-/// inserted there as one `InputPaste` group; the selections stay where they are (mapped).
-/// Refused on a read-only editor, while composing, or past the size limit.
+/// A middle click's paste of the primary selection at byte `at` (Linux): `text` goes through
+/// the paste's background half (fix round 1, I2: refused past the size limit before anything
+/// is built, then normalised, never on the UI thread) and lands at `at`, followed through
+/// whatever changed meanwhile.
 #[cfg_attr(
     not(target_os = "linux"),
     allow(
@@ -610,21 +617,60 @@ pub(crate) fn selection_changed(v: &mut EditorView, cx: &mut Context<EditorView>
         reason = "the middle click pastes the primary selection on Linux only"
     )
 )]
-pub(crate) fn insert_at(v: &mut EditorView, at: usize, text: &str, cx: &mut Context<EditorView>) {
-    if v.config.read_only || ime::must_hold(v) || text.is_empty() {
+pub(crate) fn paste_text_at(
+    v: &mut EditorView,
+    at: usize,
+    text: String,
+    cx: &mut Context<EditorView>,
+) {
+    if v.config.read_only || text.is_empty() {
         return;
     }
-    let (text, nuls) = normalize(text, v.model.buffer().dominant_line_ending());
+    let ending = v.model.buffer().dominant_line_ending();
+    let limit = v.config.tiers.reduced_max_bytes;
+    let version = v.model.version();
+    v.paste.reads += 1;
+    let work = cx
+        .background_executor()
+        .spawn(async move { prepare(text, ending, &[], limit) });
+    cx.spawn(async move |this, cx| {
+        let landing = work.await;
+        let _ = this.update(cx, |v, cx| {
+            v.paste.reads = v.paste.reads.saturating_sub(1);
+            match landing {
+                Landing::Text(p) => insert_at(v, version, at, p, cx),
+                Landing::TooBig(bytes) => refuse(v, bytes, cx),
+            }
+        });
+    })
+    .detach();
+}
+
+/// Inserts prepared text at byte `at` of version `version` (mapped to the current text; dropped
+/// when that text is gone) as one `InputPaste` group; the selections stay where they are
+/// (mapped). Refused on a read-only editor, while composing, or past the size limit.
+fn insert_at(v: &mut EditorView, version: u64, at: usize, p: Pasted, cx: &mut Context<EditorView>) {
+    if v.config.read_only || ime::must_hold(v) {
+        return;
+    }
+    let at = match v
+        .model
+        .changelog()
+        .rebase(version, at..at, hacivat_text::RangeKind::Content)
+    {
+        hacivat_text::Rebased::Mapped(r) => r.start,
+        hacivat_text::Rebased::Deleted | hacivat_text::Rebased::TooOld => return,
+    };
     let len = v.model.buffer().len_bytes();
-    if (len + text.len()) as u64 > v.config.tiers.reduced_max_bytes {
-        refuse(v, text.len() as u64, cx);
+    if (len + p.text.len()) as u64 > v.config.tiers.reduced_max_bytes {
+        refuse(v, p.text.len() as u64, cx);
         return;
     }
     let at = v
         .model
         .buffer()
         .snap(at.min(len), hacivat_text::Bias::Before);
-    let Ok(changes) = ChangeSet::from_edits(len, [(at..at, text)]) else {
+    let Ok(changes) = ChangeSet::from_edits(len, [(at..at, p.text.clone())]) else {
         return;
     };
     let ann = v.annotations(UserEvent::InputPaste, Origin::User, cx);
@@ -636,8 +682,8 @@ pub(crate) fn insert_at(v: &mut EditorView, at: usize, text: &str, cx: &mut Cont
         },
         cx,
     );
-    if done.is_some() && nuls > 0 {
-        ToastQueue::push(cx, nul_toast(nuls));
+    if done.is_some() && p.nuls > 0 {
+        ToastQueue::push(cx, nul_toast(p.nuls));
     }
 }
 
@@ -819,7 +865,7 @@ mod t27_tests {
         assert_eq!(NORMALIZED.with(|n| n.get()), before + 1);
     }
 
-    // ## m3b-t31-multi (named exception): metadata of N pieces; it counts only when it
+    // ## m3c-t31-multi (named exception): metadata of N pieces; it counts only when it
     // describes its own text exactly.
     #[test]
     fn metadata_marks_line_wise_only_for_its_own_text() {
@@ -995,7 +1041,7 @@ mod t27_tests {
         assert_eq!(vcx.read(|cx| e.read(cx).paste.reads_in_flight()), 0);
     }
 
-    // ## m3b-t31-multi: the primary selection's text and the middle click's insert (the
+    // ## m3c-t31-multi: the primary selection's text and the middle click's insert (the
     // platform calls are Linux-only; these parts run everywhere).
     #[gpui::test]
     fn the_primary_selection_takes_the_main_selection_and_inserts_at_a_point(
@@ -1006,11 +1052,32 @@ mod t27_tests {
             assert_eq!(primary_text(v), None, "a caret: nothing to write");
             v.select_range(0..6, cx);
             assert_eq!(primary_text(v).as_deref(), Some("SELECT"));
-            // Inserted at byte 7, normalised; the selection is mapped, not moved there.
-            insert_at(v, 7, "a\r\nb ", cx);
-            assert_eq!(v.snapshot().buffer.to_string(), "SELECT a\nb 1");
-            assert_eq!(v.snapshot().selection.main().range(), 0..6);
-            assert_eq!(v.model.undo_kind(), Some(UserEvent::InputPaste));
+            // Fix round 1 (I2): the text goes through the background half; byte 7 is followed
+            // through an edit made before it lands.
+            paste_text_at(v, 7, "a\r\nb ".to_string(), cx);
+            v.select_range(0..0, cx);
+            v.replace_selection("-- ", cx);
+            v.select_range(3..9, cx);
         });
+        vcx.run_until_parked();
+        e.update(vcx, |v, _| {
+            // Inserted at byte 7 (now 10), normalised; the selection is mapped, not moved.
+            assert_eq!(v.snapshot().buffer.to_string(), "-- SELECT a\nb 1");
+            assert_eq!(v.snapshot().selection.main().range(), 3..9);
+            assert_eq!(v.model.undo_kind(), Some(UserEvent::InputPaste));
+            assert_eq!(v.paste.reads_in_flight(), 0);
+        });
+        // Past the limit: refused on the background executor, nothing inserted.
+        e.update(vcx, |v, cx| {
+            let mut cfg = v.config;
+            cfg.tiers.reduced_max_bytes = 16;
+            v.set_config(cfg, cx);
+            paste_text_at(v, 0, "x".repeat(64), cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            vcx.read(|cx| e.read(cx).snapshot().buffer.to_string()),
+            "-- SELECT a\nb 1"
+        );
     }
 }

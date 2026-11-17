@@ -112,9 +112,12 @@ pub struct CommandState {
     /// The string whose content the last double click selected (text version, content bytes):
     /// the next double click in it selects it with its quotes.
     pub(crate) string_content: Option<(u64, Range<usize>)>,
-    // ## m3b-t31-multi
+    // ## m3c-t31-multi
     /// The last sentence holds while the composition is open (the IME fallback).
     pub(crate) said_composing: bool,
+    /// The model's commit count right after an occurrence search that began at a caret moved
+    /// the selection: while it is still the count, the search matches whole words (M10).
+    pub(crate) whole_word_at: Option<u64>,
 }
 
 impl CommandState {
@@ -135,7 +138,7 @@ pub fn overlay(v: &EditorView, window: &mut Window, cx: &mut App) -> Option<AnyE
 /// until the text or the selection changes. The host reads it on `EditorEvent::StatusChanged`.
 pub fn status_message(v: &EditorView) -> Option<SharedString> {
     let (at, text) = v.commands.said.as_ref()?;
-    // ## m3b-t31-multi: the IME fallback's sentence holds while its composition is open.
+    // ## m3c-t31-multi: the IME fallback's sentence holds while its composition is open.
     let holds = *at == Moment::of(v) || (v.commands.said_composing && v.ime.is_composing());
     holds.then(|| text.clone())
 }
@@ -149,7 +152,7 @@ pub(crate) fn say(v: &mut EditorView, text: SharedString, cx: &mut Context<Edito
     cx.notify();
 }
 
-// ## m3b-t31-multi
+// ## m3c-t31-multi
 /// [`say`], the sentence holding while the open composition lasts (the IME fallback, R-M3-64).
 pub(crate) fn say_while_composing(
     v: &mut EditorView,
@@ -203,7 +206,7 @@ pub(crate) fn select(
     );
 }
 
-// ## m3b-t31-multi
+// ## m3c-t31-multi
 /// Makes `set` the selection, as `event`; nothing when it already is.
 pub(crate) fn select_set(
     v: &mut EditorView,
@@ -352,7 +355,7 @@ static COMMANDS: [EditorCommand; 68] = [
     // `stub` rows are disabled in the app, out of the palette; none seals the history). The
     // filling task turns its rows into `command(..)` rows, a named exception.
     // Task 31: multi-cursor.
-    // ## m3b-t31-multi (named exception): the Task 31 rows are commands now.
+    // ## m3c-t31-multi (named exception): the Task 31 rows are commands now.
     command("editor.add_caret_above", "hv-cmd-editor-add-caret-above", multi::add_caret_above, false),
     command("editor.add_caret_below", "hv-cmd-editor-add-caret-below", multi::add_caret_below, false),
     command("editor.select_next_occurrence", "hv-cmd-editor-select-next-occurrence", multi::select_next_occurrence, false),

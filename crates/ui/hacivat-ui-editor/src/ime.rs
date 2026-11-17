@@ -33,7 +33,7 @@
 //!   platform, which resumes it on return (`ImeCore::blur`). A composition the platform
 //!   dropped without a blur (the focus moved while the window was inactive, or the editor
 //!   turned read-only) is ended locally by the next frame.
-//! - **Several carets** (## m3b-t31-multi, R-M3-64): typing goes to every caret and a
+//! - **Several carets** (## m3c-t31-multi, R-M3-64): typing goes to every caret and a
 //!   composition is mirrored to every caret by `ImeCore`, but only when the language service
 //!   puts no caret inside a string or a comment; otherwise the other carets collapse before the
 //!   first mark and the status bar says so once. The platform sees the main caret only.
@@ -84,6 +84,10 @@ pub struct InputState {
     discard_owed: bool,
     /// Discards sent to the platform (`Window::discard_marked_text`).
     discards: u64,
+    // ## m3c-t31-multi (fix round 1, M8)
+    /// The carets the IME fallback collapsed, with the version they are for: a composition
+    /// cancelled without text gives them back.
+    collapsed: Option<(u64, SelectionSet)>,
 }
 
 /// An app edit that must wait for a composition to end.
@@ -387,7 +391,7 @@ fn schedule_end_dropped(v: &mut EditorView, cx: &mut Context<EditorView>) {
     });
 }
 
-// ## m3b-t31-multi
+// ## m3c-t31-multi
 /// R-M3-64: before a composition opens at several carets, when the language service puts any
 /// of them inside a string or a comment, the selection collapses to the main range (a
 /// selection-only commit, the platform's own call: the main range it knows is unchanged) and
@@ -399,6 +403,7 @@ fn primary_only_unless_plain(v: &mut EditorView, cx: &mut Context<EditorView>) -
         return false;
     }
     let main = *v.model.selection().main();
+    v.input.collapsed = Some((v.model.version(), v.model.selection().clone()));
     let len = v.model.buffer().len_bytes();
     let ann = v.annotations(UserEvent::Select, Origin::Ime, cx);
     v.commit(
@@ -410,6 +415,30 @@ fn primary_only_unless_plain(v: &mut EditorView, cx: &mut Context<EditorView>) -
         cx,
     );
     true
+}
+
+// ## m3c-t31-multi (fix round 1, M8)
+/// The carets the fallback collapsed, mapped through what the composition did (nothing, once
+/// it is cancelled), become the selection again: the platform's own call, a selection-only
+/// commit that keeps the main range it knows.
+fn restore_collapsed(v: &mut EditorView, cx: &mut Context<EditorView>) {
+    let Some((version, set)) = v.input.collapsed.take() else {
+        return;
+    };
+    let Some(descs) = v.model.changelog().descs_since(version) else {
+        return;
+    };
+    let set = descs.fold(set, |s, d| s.map(d));
+    let len = v.model.buffer().len_bytes();
+    let ann = v.annotations(UserEvent::Select, Origin::Ime, cx);
+    v.commit(
+        Transaction {
+            changes: hacivat_text::ChangeSet::identity(len),
+            selection: Some(set),
+            ann,
+        },
+        cx,
+    );
 }
 
 /// The fallback's sentence, a polite announcement and the status bar's transient message; it
@@ -495,6 +524,8 @@ impl EntityInputHandler for EditorView {
     }
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // ## m3c-t31-multi (fix round 1, M8): kept as it stands, so the carets stay collapsed.
+        self.input.collapsed = None;
         let was = self.ime.is_composing();
         ime_call(self, |v| {
             v.ime.unmark(&mut v.model);
@@ -527,6 +558,8 @@ impl EntityInputHandler for EditorView {
         }
         // ## m3a-t36-benches (fix round 1, named exception): B3's probe at handler entry.
         self.mark_input_at_entry(cx);
+        // ## m3c-t31-multi (fix round 1, M8): committed text keeps the carets collapsed.
+        self.input.collapsed = None;
         let was = self.ime.is_composing();
         let now = cx.background_executor().now();
         ime_call(self, |v| {
@@ -564,7 +597,7 @@ impl EntityInputHandler for EditorView {
         self.mark_input_at_entry(cx);
         let was = self.ime.is_composing();
         let now = cx.background_executor().now();
-        // ## m3b-t31-multi (R-M3-64): a composition opening at several carets is mirrored to
+        // ## m3c-t31-multi (R-M3-64): a composition opening at several carets is mirrored to
         // all only when every caret is in plain text; otherwise the others collapse first.
         let collapsed = !was
             && self.model.selection().ranges().len() > 1
@@ -578,6 +611,14 @@ impl EntityInputHandler for EditorView {
             }
             if collapsed && v.ime.is_composing() {
                 say_primary_only(v, cx);
+            }
+            // Fix round 1 (M8): a fallback composition cancelled without text gives the
+            // collapsed carets back.
+            if !v.ime.is_composing() && new_text.is_empty() {
+                restore_collapsed(v, cx);
+            }
+            if !v.ime.is_composing() {
+                v.input.collapsed = None;
             }
             let is = v.ime.is_composing();
             if is != was {

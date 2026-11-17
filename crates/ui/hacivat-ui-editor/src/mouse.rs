@@ -10,7 +10,7 @@
 //!   to drop its copy (`ime::send_owed_discard`, F4).
 //! - **A drag past the text's top or bottom** scrolls by the overshoot on each move, so the
 //!   selection can grow beyond the view.
-//! - **Several carets** (## m3b-t31-multi): a click with Option (macOS) or Alt adds a caret,
+//! - **Several carets** (## m3c-t31-multi): a click with Option (macOS) or Alt adds a caret,
 //!   the new main one; a drag with Option (macOS) or Ctrl+Alt selects a column, a box in
 //!   display columns (`hacivat_text::column_selection`), the main range on the pointer's line.
 //!   A middle click pastes the Linux primary selection at the pointer.
@@ -44,7 +44,7 @@ pub(crate) enum ClickUnit {
     Char,
     Word,
     Line,
-    // ## m3b-t31-multi: a column (box) drag.
+    // ## m3c-t31-multi: a column (box) drag.
     Column,
 }
 
@@ -53,12 +53,23 @@ pub(crate) enum ClickUnit {
 pub(crate) struct DragState {
     pub unit: ClickUnit,
     pub origin: Range<usize>,
-    // ## m3b-t31-multi
+    // ## m3c-t31-multi
     /// A column drag's anchor: (line, display column).
     pub column: Option<(u32, usize)>,
+    /// The column drag reached another cell (fix round 1, I1): only then does the box
+    /// replace the selection, so a press that jitters in place keeps every caret.
+    pub column_started: bool,
 }
 
-// ## m3b-t31-multi (UI-EDIT-05 steps 7 and 9; NOTES surface 14)
+// ## m3c-t31-multi (fix round 1, M2)
+/// The press's gesture ended (button up, a move without it, a blur): no drag, and the
+/// selection history's gesture closes.
+pub(crate) fn end_drag(v: &mut EditorView) {
+    v.drag = None;
+    v.model.end_selection_gesture();
+}
+
+// ## m3c-t31-multi (UI-EDIT-05 steps 7 and 9; NOTES surface 14)
 /// The column-drag modifier: Option on macOS, Ctrl+Alt elsewhere.
 fn column_drag(m: &Modifiers) -> bool {
     if cfg!(target_os = "macos") {
@@ -134,14 +145,14 @@ pub(crate) fn listen(view: &Entity<EditorView>, frame: &FramePrepaint, window: &
             if ev.pressed_button == Some(MouseButton::Left) {
                 drag(v, ev.position, cx);
             } else {
-                v.drag = None;
+                end_drag(v);
             }
         });
     });
     let v = view.clone();
     window.on_mouse_event(move |ev: &MouseUpEvent, phase, _window, cx| {
         if phase.bubble() && ev.button == MouseButton::Left {
-            v.update(cx, |v, _| v.drag = None);
+            v.update(cx, |v, _| end_drag(v));
         }
     });
     let v = view.clone();
@@ -211,7 +222,10 @@ pub(crate) fn down(
     cx.stop_propagation();
     match ev.button {
         MouseButton::Left => {
-            // ## m3b-t31-multi: a modifier-click adds a caret (the new main one); a
+            // ## m3c-t31-multi (fix round 1, M2): the press and its drag are one step of the
+            // selection history.
+            v.model.begin_selection_gesture();
+            // ## m3c-t31-multi: a modifier-click adds a caret (the new main one); a
             // modifier-drag selects a column from here.
             let column = column_drag(&ev.modifiers);
             if ev.click_count <= 1 && (column || adds_caret(&ev.modifiers)) {
@@ -227,6 +241,7 @@ pub(crate) fn down(
                         unit: ClickUnit::Column,
                         origin: at..at,
                         column: Some(anchor),
+                        column_started: false,
                     });
                 }
                 crate::ime::send_owed_discard(v, window);
@@ -243,6 +258,7 @@ pub(crate) fn down(
                     unit,
                     origin: anchor..anchor,
                     column: None,
+                    column_started: false,
                 });
                 select(v, anchor, at, cx);
                 // ## m3a-f4-ime: a composition the click committed is dropped on the platform.
@@ -261,6 +277,7 @@ pub(crate) fn down(
                 unit,
                 origin: origin.clone(),
                 column: None,
+                column_started: false,
             });
             select(v, origin.start, origin.end, cx);
             // ## m3a-f4-ime: a composition the click committed is dropped on the platform at
@@ -275,12 +292,15 @@ pub(crate) fn down(
             crate::ime::send_owed_discard(v, window);
             v.open_context_menu_at(ev.position, window, cx);
         }
-        // ## m3b-t31-multi (UI-EDIT-14 step 6): the primary selection pasted at the pointer,
+        // ## m3c-t31-multi (UI-EDIT-14 step 6): the primary selection pasted at the pointer,
         // the selections kept (Linux only).
         #[cfg(target_os = "linux")]
         MouseButton::Middle => {
+            // The fork has no asynchronous primary read (fork carry): the read is synchronous,
+            // the normalisation and the size check run on the background executor (fix round
+            // 1, I2).
             if let Some(text) = cx.read_from_primary().and_then(|i| i.text()) {
-                crate::clipboard::insert_at(v, at, &text, cx);
+                crate::clipboard::paste_text_at(v, at, text, cx);
             }
             crate::ime::send_owed_discard(v, window);
         }
@@ -312,9 +332,14 @@ pub(crate) fn drag(v: &mut EditorView, position: Point<Pixels>, cx: &mut Context
         let dy = over.clamp(-DRAG_SCROLL_ROWS * lh, DRAG_SCROLL_ROWS * lh);
         v.scroll_by(f64::from(dy));
     }
-    // ## m3b-t31-multi: a column drag selects the box to the pointer.
+    // ## m3c-t31-multi: a column drag selects the box to the pointer.
     if let Some(anchor) = state.column {
-        if let Some(head) = line_and_column(v, position) {
+        if let Some(head) = line_and_column(v, position)
+            && (state.column_started || head != anchor)
+        {
+            if let Some(d) = v.drag.as_mut() {
+                d.column_started = true;
+            }
             select_column(v, anchor, head, cx);
         }
         if over != 0.0 {

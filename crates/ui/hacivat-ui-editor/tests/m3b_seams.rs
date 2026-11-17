@@ -28,7 +28,7 @@ fn chunked_height_map_stub_is_uniform() {
     assert_eq!(chunked.total_height(), 1800.0);
 }
 
-// ## m3b-t31-multi (named exception): Task 31 filled the text core's multi-cursor stubs; their
+// ## m3c-t31-multi (named exception): Task 31 filled the text core's multi-cursor stubs; their
 // test moved to `hacivat-text/tests/multi.rs`. What stays here: the bodies never touch text a
 // selection does not ask for (a box past the last line clamps to it).
 #[test]
@@ -64,7 +64,7 @@ fn fold_set_stub_folds_nothing() {
 #[test]
 fn m3b_editor_commands_are_in_the_table() {
     let ids: Vec<&str> = commands().iter().map(|c| c.id).collect();
-    // ## m3b-t31-multi (named exception): Task 31's rows are commands, no longer stubs.
+    // ## m3c-t31-multi (named exception): Task 31's rows are commands, no longer stubs.
     for id in [
         "editor.add_caret_above",
         "editor.add_caret_below",
@@ -184,7 +184,7 @@ fn view_seams_change_nothing(cx: &mut TestAppContext) {
     );
     assert!(vcx.read(|cx| e.read(cx).folds().folded().is_empty()));
     // Every M3b command runs as a no-op: the text, the selection and the version stay.
-    // ## m3b-t31-multi (named exception): Task 31's commands are filled (tests `multi_view`).
+    // ## m3c-t31-multi (named exception): Task 31's commands are filled (tests `multi_view`).
     for id in [
         "editor.fold_all",
         "editor.find",

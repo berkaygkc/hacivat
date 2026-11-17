@@ -62,7 +62,7 @@ fn char_cells(c: char) -> u32 {
 
 /// The display width of one grapheme cluster: its widest character; a VS16 emoji sequence
 /// and a regional-indicator pair (a flag) are 2 (an emoji ZWJ sequence is one 2-cell glyph).
-// ## m3b-t31-multi (named exception): column selection counts cells with it.
+// ## m3c-t31-multi (named exception): column selection counts cells with it.
 pub(crate) fn cluster_cells(g: &str) -> u32 {
     let widest = g.chars().map(char_cells).max().unwrap_or(0);
     let flag = g

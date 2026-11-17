@@ -12,7 +12,7 @@
 //!   the caret keeps its place in it.
 //!
 //! Every move is a selection-only transaction (`UserEvent::Move`, or `Select` with Shift), and
-//! moves every range (## m3b-t31-multi); ranges that meet merge (the M3a rule).
+//! moves every range (## m3c-t31-multi); ranges that meet merge (the M3a rule).
 
 use hacivat_text::units::{grapheme_column, offset_at_column};
 use hacivat_text::{Dir, Snapshot, Unit, UserEvent, move_offset};
@@ -33,7 +33,7 @@ fn event(extend: bool) -> UserEvent {
     }
 }
 
-/// A move of `unit` in `dir` (never `Up` or `Down`), at every range (## m3b-t31-multi).
+/// A move of `unit` in `dir` (never `Up` or `Down`), at every range (## m3c-t31-multi).
 fn horizontal(
     v: &mut EditorView,
     dir: Dir,
@@ -59,7 +59,7 @@ fn horizontal(
 }
 
 /// Where a line's x positions come from.
-// ## m3b-t31-multi (named exception): shared with the add-caret commands.
+// ## m3c-t31-multi (named exception): shared with the add-caret commands.
 pub(super) struct Geometry<'a> {
     snap: &'a Snapshot,
     /// The last frame, when it painted this text.

@@ -12,7 +12,7 @@
 //! - **Undo and redo** end an open composition first (`ImeCore::unmark`), then hand the
 //!   model's `Committed` to `EditorView::apply_committed`.
 //!
-//! ## m3b-t31-multi: Enter, Tab, Shift+Tab and the deletes act at every range in one
+//! ## m3c-t31-multi: Enter, Tab, Shift+Tab and the deletes act at every range in one
 //! transaction (`edit_each`); a multi-line indent or outdent takes each touched line once.
 //!
 //! Every edit refuses on a read-only editor (`super::change`; undo, redo, cut and paste check
@@ -81,7 +81,7 @@ fn lines_of(buf: &TextBuffer, r: Range<usize>) -> Range<usize> {
     first..last + 1
 }
 
-// ## m3b-t31-multi
+// ## m3c-t31-multi
 /// The lines every range touches, each once, in order.
 fn selected_lines(v: &EditorView) -> Vec<usize> {
     let buf = v.model.buffer();
@@ -120,16 +120,31 @@ fn edit_each(
             at.push(None);
             continue;
         };
-        match edits.last_mut() {
-            Some((prev, _)) if r.start < prev.end => {
-                *prev = prev.start.min(r.start)..prev.end.max(r.end);
-                at.push(Some((edits.len() - 1, 0)));
+        // ## m3c-t31-multi (fix round 1, M1): an edit that reaches back over several earlier
+        // ones (a word deletion from a later caret) takes them all into one deletion; the
+        // carets that followed them land at its start.
+        let mut merged = r.clone();
+        let mut any = false;
+        while let Some((prev, _)) = edits.last()
+            && merged.start < prev.end
+        {
+            merged = prev.start.min(merged.start)..prev.end.max(merged.end);
+            edits.pop();
+            any = true;
+        }
+        let i = edits.len();
+        if any {
+            for a in at.iter_mut().flatten() {
+                if a.0 >= i {
+                    *a = (i, 0);
+                }
             }
-            _ => {
-                let caret = caret.min(text.len());
-                edits.push((r, Arc::from(text)));
-                at.push(Some((edits.len() - 1, caret)));
-            }
+            edits.push((merged, Arc::from("")));
+            at.push(Some((i, 0)));
+        } else {
+            let caret = caret.min(text.len());
+            edits.push((r, Arc::from(text)));
+            at.push(Some((i, caret)));
         }
     }
     if edits.is_empty() {
@@ -245,7 +260,7 @@ pub(super) fn outdent(v: &mut EditorView, window: &mut Window, cx: &mut Cx<'_>) 
     change(v, edits, None, UserEvent::Command("outdent"), cx);
 }
 
-/// Deletes each selection, or from each caret to where `target` puts it (## m3b-t31-multi: at
+/// Deletes each selection, or from each caret to where `target` puts it (## m3c-t31-multi: at
 /// every range, in one transaction).
 fn delete(
     v: &mut EditorView,

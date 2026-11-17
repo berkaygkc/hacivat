@@ -7,14 +7,15 @@
 //!   the new caret becomes the main one, so repeating walks on.
 //! - **Next occurrence** from a caret first selects the word under it with the language
 //!   service's words (a quoted identifier or a string is one word), then adds exact matches
-//!   (`hacivat_text::select_next_occurrence`; whole words when the range is one).
+//!   (`hacivat_text::select_next_occurrence_with`; whole words while the search that began at
+//!   a caret goes on, a substring for a range selected by hand: UI-EDIT-05 step 5).
 //! - **Undo/redo selection** hand the model's selection-only commit to `apply_committed`.
 
 use hacivat_text::units::word_at;
 use hacivat_text::{
-    MAX_OCCURRENCES, SelectionRange, UserEvent, add_caret_vertical_with,
-    select_all_occurrences as all_occurrences, select_next_occurrence as next_occurrence,
-    split_into_lines,
+    MAX_OCCURRENCES, SelectionRange, SelectionSet, UserEvent, add_caret_vertical_with,
+    select_all_occurrences_with as all_occurrences_with,
+    select_next_occurrence_with as next_occurrence_with, split_into_lines,
 };
 use hacivat_ui_core::gpui_surface::{Context, Window};
 
@@ -47,12 +48,13 @@ pub(super) fn add_caret_below(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_
     vertical(v, true, cx);
 }
 
-/// A caret's word, from the language service's words: the main caret becomes that selection.
-fn expand_main_to_word(v: &mut EditorView, cx: &mut Cx<'_>) -> bool {
-    let sel = v.model.selection().clone();
+/// The selection with the main caret widened to its word (the language service's words), or
+/// `None` when the main range is not a caret or the caret has no word (blank).
+fn main_widened_to_word(v: &EditorView) -> Option<Option<SelectionSet>> {
+    let sel = v.model.selection();
     let main = *sel.main();
     if !main.is_empty() {
-        return false;
+        return None;
     }
     let w = word_at(v.model.buffer(), main.head, words(v).as_ref());
     let blank = v
@@ -63,29 +65,50 @@ fn expand_main_to_word(v: &mut EditorView, cx: &mut Cx<'_>) -> bool {
         .next()
         .is_none_or(char::is_whitespace);
     if blank {
-        return true;
+        return Some(None);
     }
     let mut ranges: Vec<SelectionRange> = sel.ranges().to_vec();
     ranges[sel.main_index()] = SelectionRange::new(w.start, w.end);
-    let set = hacivat_text::SelectionSet::normalized(ranges, sel.main_index());
-    select_set(v, set, UserEvent::Select, cx);
-    true
+    Some(Some(SelectionSet::normalized(ranges, sel.main_index())))
+}
+
+// ## m3c-t31-multi (fix round 1, M10): whole words only while the search that began at a caret
+// goes on: `CommandState::whole_word_at` holds the model's commit count after the command's own
+// selection, so any other selection change ends it.
+/// The current search began at a caret and nothing else changed the selection since.
+fn searching_whole_words(v: &EditorView) -> bool {
+    v.commands.whole_word_at == Some(v.model.commit_count())
 }
 
 pub(super) fn select_next_occurrence(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_>) {
-    if expand_main_to_word(v, cx) {
-        return;
-    }
-    if let Some(next) = next_occurrence(v.model.buffer(), v.model.selection()) {
-        select_set(v, next, UserEvent::Select, cx);
+    match main_widened_to_word(v) {
+        Some(None) => {}
+        Some(Some(word)) => {
+            select_set(v, word, UserEvent::Select, cx);
+            v.commands.whole_word_at = Some(v.model.commit_count());
+        }
+        None => {
+            let whole = searching_whole_words(v);
+            if let Some(next) = next_occurrence_with(v.model.buffer(), v.model.selection(), whole) {
+                select_set(v, next, UserEvent::Select, cx);
+                if whole {
+                    v.commands.whole_word_at = Some(v.model.commit_count());
+                }
+            }
+        }
     }
 }
 
+/// Fix round 1 (M2, M11): one selection change (one selection-history step), from the word of
+/// a caret (whole words) or the main range. The total count of occurrences is not said here:
+/// the "first 10,000 of N" sentence is Task 33's (`hv-find-capped`).
 pub(super) fn select_all_occurrences(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_>) {
-    if v.model.selection().main().is_empty() {
-        expand_main_to_word(v, cx);
-    }
-    let all = all_occurrences(v.model.buffer(), v.model.selection(), MAX_OCCURRENCES);
+    let (from, whole) = match main_widened_to_word(v) {
+        Some(None) => return,
+        Some(Some(word)) => (word, true),
+        None => (v.model.selection().clone(), searching_whole_words(v)),
+    };
+    let (all, _total) = all_occurrences_with(v.model.buffer(), &from, MAX_OCCURRENCES, whole);
     select_set(v, all, UserEvent::Select, cx);
 }
 

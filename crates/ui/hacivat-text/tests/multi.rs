@@ -5,14 +5,14 @@
 //! (`undo_selection`).
 
 use std::ops::Range;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hacivat_text::{
     Annotations, ChangeSet, EditorModel, ImeCore, MAX_OCCURRENCES, ModelConfig, Origin,
     SelectionRange, SelectionSet, TextBuffer, TokenOracle, Transaction, UserEvent, add_caret,
     add_caret_vertical, carets_in_plain_text, column_selection, select_all_occurrences,
-    select_next_occurrence, split_into_lines,
+    select_all_occurrences_with, select_next_occurrence, select_next_occurrence_with,
+    split_into_lines,
 };
 use smallvec::SmallVec;
 
@@ -44,20 +44,31 @@ fn ui_edit_05_cases_3_and_5() {
     let buf = TextBuffer::from_str("SELECT id FROM t WHERE id = 1");
     let one = select_next_occurrence(&buf, &SelectionSet::cursor(8)).expect("the word");
     assert_eq!(ends(&one), [(7, 9)]);
-    let two = select_next_occurrence(&buf, &one).expect("the second id");
+    // The search started from a caret: whole words (the caller keeps that bit).
+    let two = select_next_occurrence_with(&buf, &one, true).expect("the second id");
     assert_eq!(ends(&two), [(7, 9), (23, 25)]);
     assert_eq!(two.main_index(), 1);
     // No third one: the search wraps and finds only what is selected.
-    assert_eq!(select_next_occurrence(&buf, &two), None);
+    assert_eq!(select_next_occurrence_with(&buf, &two, true), None);
     // Whole words from a caret: never the `id` inside `idx`, `id_x` or `xid`.
     let buf = TextBuffer::from_str("SELECT id, idx, id_x, xid FROM t WHERE id = 1");
     let word = select_next_occurrence(&buf, &SelectionSet::cursor(7)).unwrap();
-    let next = select_next_occurrence(&buf, &word).unwrap();
+    let next = select_next_occurrence_with(&buf, &word, true).unwrap();
     assert_eq!(ends(&next), [(7, 9), (39, 41)]);
     assert_eq!(
-        ends(&select_all_occurrences(&buf, &word, MAX_OCCURRENCES)),
+        ends(&select_all_occurrences(
+            &buf,
+            &SelectionSet::cursor(7),
+            MAX_OCCURRENCES
+        )),
         [(7, 9), (39, 41)]
     );
+    // Fix round 1 (M10): `id` selected by hand matches as a substring, `idx` and `xid` too.
+    let next = select_next_occurrence(&buf, &word).unwrap();
+    assert_eq!(ends(&next), [(7, 9), (11, 13)]);
+    let (all, total) = select_all_occurrences_with(&buf, &word, MAX_OCCURRENCES, false);
+    assert_eq!(ends(&all), [(7, 9), (11, 13), (16, 18), (23, 25), (39, 41)]);
+    assert_eq!(total, 5);
 
     // 5. A box over display columns [4, 8) of `a\tb` (tab width 4) and `abcdefgh`: the first
     //    line from the tab's end to `b`, the second `efgh`; the main range on the head's line.
@@ -92,9 +103,17 @@ fn select_next_occurrence_is_case_and_turkish_exact() {
     // Select all occurrences stops at the cap; the main range stays the one asked from.
     let buf = TextBuffer::from_str(&"ab ".repeat(50));
     let ab = SelectionSet::single(SelectionRange::new(9, 11));
-    let capped = select_all_occurrences(&buf, &ab, 10);
+    let (capped, total) = select_all_occurrences_with(&buf, &ab, 10, true);
     assert_eq!(capped.ranges().len(), 10);
     assert_eq!(capped.main().range(), 9..11);
+    // Fix round 1 (M11): every occurrence is counted, kept or not.
+    assert_eq!(total, 50);
+    // An occurrence across the 64 KB search windows is found (the rope is read in windows).
+    let far = format!("needle {}needle", "x ".repeat(40_000));
+    let buf = TextBuffer::from_str(&far);
+    let first = SelectionSet::single(SelectionRange::new(0, 6));
+    let next = select_next_occurrence(&buf, &first).unwrap();
+    assert_eq!(ends(&next), [(0, 6), (far.len() - 6, far.len())]);
 }
 
 #[test]
@@ -290,13 +309,98 @@ fn carets_in_plain_text_asks_the_token_oracle() {
     let tok = Quotes(text.to_string());
     assert!(carets_in_plain_text(&carets(&[0, 13], 0), &tok));
     assert!(!carets_in_plain_text(&carets(&[0, 9], 0), &tok));
-    // An oracle that does not know answers plain text.
+    // An oracle that does not know.
     struct Unknown;
     impl TokenOracle for Unknown {
         fn words_on_line(&self, _: Range<usize>) -> Option<SmallVec<[Range<usize>; 16]>> {
             None
         }
     }
-    assert!(carets_in_plain_text(&carets(&[0, 9], 0), &Unknown));
-    let _ = Arc::<str>::from("");
+    // Fix round 1 (M3): not knowing is not plain text (the fallback is the safe side).
+    assert!(!carets_in_plain_text(&carets(&[0, 9], 0), &Unknown));
+}
+
+// ## m3c-t31-multi (fix round 1, I4): the platform's range moves the mirrors.
+
+/// macOS press-and-hold: the platform replaces the character before the main caret; every
+/// mirror's character before it is replaced the same way, in one undo group.
+#[test]
+fn a_platform_range_moves_every_mirror_by_the_same_distances() {
+    let mut m = EditorModel::new("ae\nbe\nce\n", ModelConfig::default());
+    m.dispatch(select(&m, carets(&[2, 5, 8], 2))).unwrap();
+    let mut ime = ImeCore::default();
+    let now = Instant::now();
+    // The main caret is at 8 (UTF-16 8): the platform's range is the "e" before it, 7..8.
+    ime.mark(&mut m, Some(7..8), "é", None, now).unwrap();
+    assert_eq!(m.buffer().to_string(), "aé\nbé\ncé\n");
+    assert_eq!(ime.marked_all(&m).to_vec(), [1..3, 5..7, 9..11]);
+    ime.commit(&mut m, None, "é", now).unwrap();
+    assert_eq!(m.buffer().to_string(), "aé\nbé\ncé\n");
+    assert_eq!(ends(m.selection()), [(3, 3), (7, 7), (11, 11)]);
+    m.undo();
+    assert_eq!(m.buffer().to_string(), "ae\nbe\nce\n");
+    assert_eq!(m.undo_depth(), 0, "one undo group");
+}
+
+/// A mirror the platform's range would make overlap another target leaves the composition;
+/// the main caret always stays.
+#[test]
+fn a_mirror_that_would_overlap_leaves_the_composition() {
+    let mut m = EditorModel::new("abcdef", ModelConfig::default());
+    m.dispatch(select(&m, carets(&[2, 4], 1))).unwrap();
+    let mut ime = ImeCore::default();
+    // The main caret's range is 1..4 (3 back): the mirror at 2 would be 0..2, over it.
+    ime.mark(&mut m, Some(1..4), "X", None, Instant::now())
+        .unwrap();
+    assert_eq!(m.buffer().to_string(), "aXef");
+    assert_eq!(ime.marked_all(&m).len(), 1);
+    assert_eq!(ime.marked(&m), Some(1..2));
+}
+
+/// An edit outside the core that deletes a mirror's marked text: that mirror leaves, the
+/// composition goes on at the others.
+#[test]
+fn a_mirror_an_outside_edit_deleted_leaves_the_composition() {
+    let mut m = EditorModel::new("a\nb\nc\n", ModelConfig::default());
+    m.dispatch(select(&m, carets(&[1, 3, 5], 2))).unwrap();
+    let mut ime = ImeCore::default();
+    let now = Instant::now();
+    ime.mark(&mut m, None, "か", None, now).unwrap();
+    assert_eq!(ime.marked_all(&m).to_vec(), [1..4, 6..9, 11..14]);
+    // Not through the core: the first mirror's text goes.
+    let tr = Transaction {
+        changes: ChangeSet::from_edits(m.buffer().len_bytes(), [(1..4, "".into())]).unwrap(),
+        selection: None,
+        ann: Annotations {
+            user_event: UserEvent::DeleteBackward,
+            add_to_history: false,
+            time: now,
+            origin: Origin::Program,
+        },
+    };
+    m.dispatch(tr).unwrap();
+    assert_eq!(ime.marked_all(&m).to_vec(), [3..6, 8..11]);
+    ime.mark(&mut m, None, "かな", None, now).unwrap();
+    assert_eq!(m.buffer().to_string(), "a\nbかな\ncかな\n");
+    assert_eq!(ime.marked(&m), Some(11..17));
+    assert!(ime.is_composing());
+}
+
+/// Fix round 1 (M2): one gesture is one entry of the selection history.
+#[test]
+fn a_gesture_is_one_selection_history_entry() {
+    let mut m = EditorModel::new("abcdef", ModelConfig::default());
+    m.dispatch(select(&m, carets(&[1], 0))).unwrap();
+    m.begin_selection_gesture();
+    for head in 2..6 {
+        m.dispatch(select(
+            &m,
+            SelectionSet::single(SelectionRange::new(1, head)),
+        ))
+        .unwrap();
+    }
+    m.end_selection_gesture();
+    assert_eq!(ends(m.selection()), [(1, 5)]);
+    m.undo_selection().unwrap();
+    assert_eq!(ends(m.selection()), [(1, 1)], "the whole drag at once");
 }

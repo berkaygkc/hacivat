@@ -379,12 +379,107 @@ fn a_modifier_drag_selects_a_column(cx: &mut TestAppContext) {
 fn deletions_that_overlap_merge(cx: &mut TestAppContext) {
     let mut o = open(cx, "abcdef gh", 3);
     let p = at_point(&o, 6);
-    o.vcx.simulate_mouse_down(p, MouseButton::Left, Modifiers::alt());
-    o.vcx.simulate_mouse_up(p, MouseButton::Left, Modifiers::alt());
+    o.vcx
+        .simulate_mouse_down(p, MouseButton::Left, Modifiers::alt());
+    o.vcx
+        .simulate_mouse_up(p, MouseButton::Left, Modifiers::alt());
     o.vcx.run_until_parked();
     assert_eq!(states(&o), "abc┃def┃ gh");
     run(&mut o, "editor.delete_word_backward");
     assert_eq!(states(&o), "┃ gh");
     run(&mut o, "editor.undo");
     assert_eq!(states(&o), "abc┃def┃ gh");
+}
+
+// ## m3c-t31-multi (fix round 1)
+
+/// I1: an Option/Alt press adds a caret; a pointer that moves within the same cell before the
+/// release starts no box, so every caret stays.
+#[gpui::test]
+fn a_modifier_click_that_jitters_in_place_keeps_every_caret(cx: &mut TestAppContext) {
+    let mut o = open(cx, "abcdef\nabcdef\nabcdef", 0);
+    run(&mut o, "editor.add_caret_below");
+    let p = at_point(&o, 16);
+    let m = Modifiers::alt();
+    o.vcx.simulate_mouse_down(p, MouseButton::Left, m);
+    o.vcx.simulate_mouse_move(p, MouseButton::Left, m);
+    o.vcx
+        .simulate_mouse_move(point(p.x + px(1.0), p.y), MouseButton::Left, m);
+    o.vcx.simulate_mouse_up(p, MouseButton::Left, m);
+    o.vcx.run_until_parked();
+    assert_eq!(states(&o), "┃abcdef\n┃abcdef\nab┃cdef");
+}
+
+/// I3: whole lines copied at three carets stay whole lines when pasted at one caret: above its
+/// line, its column kept.
+#[gpui::test]
+fn lines_copied_at_several_carets_paste_as_lines_at_one(cx: &mut TestAppContext) {
+    let mut o = three(cx, "a;\nb;\nc;\n", 1);
+    run(&mut o, "editor.copy");
+    run(&mut o, "editor.escape");
+    assert_eq!(states(&o), "a;\nb;\nc┃;\n");
+    run(&mut o, "editor.paste");
+    assert_eq!(states(&o), "a;\nb;\na;\nb;\nc;\nc┃;\n");
+}
+
+/// M1: a word deletion from the last caret reaches back over two earlier edits (a caret's and
+/// a selection's): one deletion over all three, one caret, one undo.
+#[gpui::test]
+fn a_deletion_that_reaches_over_several_earlier_ones_merges_them(cx: &mut TestAppContext) {
+    let mut o = open(cx, "abcdefgh", 0);
+    o.editor.update(o.vcx, |v, cx| v.select_range(3..5, cx));
+    for at in [2, 7] {
+        let p = at_point(&o, at);
+        o.vcx
+            .simulate_mouse_down(p, MouseButton::Left, Modifiers::alt());
+        o.vcx
+            .simulate_mouse_up(p, MouseButton::Left, Modifiers::alt());
+    }
+    o.vcx.run_until_parked();
+    assert_eq!(states(&o), "ab┃c«de┃fg┃h");
+    run(&mut o, "editor.delete_word_backward");
+    assert_eq!(states(&o), "┃h");
+    run(&mut o, "editor.undo");
+    assert_eq!(text(&o), "abcdefgh");
+}
+
+/// M2: a drag is one step of the selection history, and so is select all occurrences.
+#[gpui::test]
+fn one_gesture_is_one_undo_selection_step(cx: &mut TestAppContext) {
+    let mut o = open(cx, "abc abc xyz", 9);
+    let none = Modifiers::none();
+    let start = at_point(&o, 1);
+    o.vcx.simulate_mouse_down(start, MouseButton::Left, none);
+    for at in [2, 3, 5] {
+        let p = at_point(&o, at);
+        o.vcx.simulate_mouse_move(p, MouseButton::Left, none);
+    }
+    let end = at_point(&o, 5);
+    o.vcx.simulate_mouse_up(end, MouseButton::Left, none);
+    o.vcx.run_until_parked();
+    assert_eq!(states(&o), "a«bc a┃bc xyz");
+    run(&mut o, "editor.undo_selection");
+    assert_eq!(states(&o), "abc abc x┃yz", "the whole drag at once");
+    o.editor.update(o.vcx, |v, cx| v.select_range(1..1, cx));
+    run(&mut o, "editor.select_all_occurrences");
+    assert_eq!(states(&o), "«abc┃ «abc┃ xyz");
+    run(&mut o, "editor.undo_selection");
+    assert_eq!(
+        states(&o),
+        "a┃bc abc xyz",
+        "the word and the matches at once"
+    );
+}
+
+/// M10: a search that began at a caret matches whole words; one from a range selected by hand
+/// matches substrings (UI-EDIT-05 step 5).
+#[gpui::test]
+fn whole_words_only_when_the_search_began_at_a_caret(cx: &mut TestAppContext) {
+    let mut o = open(cx, "id idx id", 1);
+    run(&mut o, "editor.select_next_occurrence");
+    run(&mut o, "editor.select_next_occurrence");
+    assert_eq!(states(&o), "«id┃ idx «id┃");
+    o.editor.update(o.vcx, |v, cx| v.select_range(0..2, cx));
+    run(&mut o, "editor.select_next_occurrence");
+    assert_eq!(states(&o), "«id┃ «id┃x id");
 }

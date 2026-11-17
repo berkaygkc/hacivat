@@ -1556,7 +1556,7 @@ fn typing_notifies_the_status_segment_but_not_the_grid(cx: &mut TestAppContext) 
     stop_core_runtime_test(cx);
 }
 
-// ## m3b-t31-multi (named exception, NOTES surface 14): "3 carets" in the editor segment,
+// ## m3c-t31-multi (named exception, NOTES surface 14): "3 carets" in the editor segment,
 // before the selected count; one caret shows nothing new.
 #[gpui::test]
 fn the_status_segment_counts_carets(cx: &mut TestAppContext) {

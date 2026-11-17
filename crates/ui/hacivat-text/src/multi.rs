@@ -6,12 +6,13 @@
 //! - **The main range is the last one added** (a caret added, the next occurrence, the head's
 //!   line of a box): the IME, the OS and Run follow it.
 //! - **Occurrences are byte-exact** (case- and Turkish-exact: `İ`, `I`, `ı` and `i` are four
-//!   different letters, INV-3). From a caret the search first selects the word under it; a
-//!   range that is a whole word (identifier characters, not touching another) matches whole
-//!   words only, so `id` never matches inside `idx`; any other range matches as a substring.
-//!   The search runs forward from the main range and wraps; occurrences already selected are
+//!   different letters, INV-3). From a caret the search first selects the word under it, and a
+//!   search that started that way matches whole words only, so `id` never matches inside
+//!   `idx` (UI-EDIT-05 step 5; the caller keeps that bit, `select_next_occurrence_with`); a
+//!   range selected by hand matches as a substring. The search reads the rope in 64 KB
+//!   windows, runs forward from the main range and wraps; occurrences already selected are
 //!   skipped. Select all occurrences replaces the selection with at most [`MAX_OCCURRENCES`]
-//!   ranges, the asked-from one always among them.
+//!   ranges, the asked-from one always among them, and counts them all.
 //! - **Column selection** is a box in display columns: a tab fills to the next stop, a wide
 //!   character or an emoji takes 2 cells, a visible control 1 (the display model's counting). A
 //!   tab or a wide character the box cuts is taken whole; a line shorter than the box gets a
@@ -98,7 +99,7 @@ pub fn add_caret_vertical_with(
 }
 
 /// The word a caret at `at` selects (identifier or punctuation, never a run of spaces).
-fn word_for_caret(buf: &TextBuffer, at: usize) -> Option<Range<usize>> {
+pub fn word_for_caret(buf: &TextBuffer, at: usize) -> Option<Range<usize>> {
     let w = word_at(buf, at, &Classes);
     let first = buf.slice(w.clone()).chars().next()?;
     matches!(char_class(first), CharClass::Ident | CharClass::Punct).then_some(w)
@@ -108,38 +109,64 @@ fn is_ident(c: Option<char>) -> bool {
     c.is_some_and(|c| char_class(c) == CharClass::Ident)
 }
 
-/// `text[r]` is a whole word: identifier characters at both ends, none touching it outside.
-fn is_whole_word(text: &str, r: &Range<usize>) -> bool {
-    let inner = &text[r.clone()];
-    is_ident(inner.chars().next())
-        && is_ident(inner.chars().next_back())
-        && !is_ident(text[..r.start].chars().next_back())
-        && !is_ident(text[r.end..].chars().next())
+/// The character that starts at byte `b` (a char boundary), if any.
+fn char_after(buf: &TextBuffer, b: usize) -> Option<char> {
+    if b >= buf.len_bytes() {
+        return None;
+    }
+    buf.char_before(buf.snap_to_char(b + 1, Bias::After))
 }
 
-/// No identifier character touches `text[r]` from outside.
-fn bounded(text: &str, r: &Range<usize>) -> bool {
-    !is_ident(text[..r.start].chars().next_back()) && !is_ident(text[r.end..].chars().next())
+/// No identifier character touches `r` from outside.
+fn bounded(buf: &TextBuffer, r: &Range<usize>) -> bool {
+    !is_ident(buf.char_before(r.start)) && !is_ident(char_after(buf, r.end))
 }
 
-/// The occurrences of `needle` in `text`, from `from` to the end, then from the start up to
-/// `from` (wrapping), whole words only when `whole`.
-fn occurrences<'a>(
-    text: &'a str,
-    needle: &'a str,
+// ## m3c-t31-multi (fix round 1, M7): the search reads the rope in windows, never the whole
+// document at once.
+/// How much of the text one search step reads.
+const SEARCH_WINDOW: usize = 64 * 1024;
+
+/// Calls `f` with each occurrence of `needle` that starts in `from..to`, in order and never
+/// overlapping, until `f` answers `false`; `false` when it was stopped. Reads at most
+/// [`SEARCH_WINDOW`] plus the needle's length per step.
+fn each_occurrence(
+    buf: &TextBuffer,
     from: usize,
-    whole: bool,
-) -> impl Iterator<Item = Range<usize>> + 'a {
-    let after = text[from..]
-        .match_indices(needle)
-        .map(move |(i, _)| from + i..from + i + needle.len());
-    let before = text
-        .match_indices(needle)
-        .map(|(i, _)| i..i + needle.len())
-        .take_while(move |r| r.start < from);
-    after
-        .chain(before)
-        .filter(move |r| !whole || bounded(text, r))
+    to: usize,
+    needle: &str,
+    mut f: impl FnMut(Range<usize>) -> bool,
+) -> bool {
+    let len = buf.len_bytes();
+    let n = needle.len();
+    if n == 0 {
+        return true;
+    }
+    let mut s = from;
+    let mut last_end = from;
+    while s < to {
+        let w_end = buf
+            .snap_to_char((s + SEARCH_WINDOW).min(to), Bias::Before)
+            .max(buf.snap_to_char(s + 1, Bias::After))
+            .min(to);
+        let hi = buf.snap_to_char((w_end + n).min(len), Bias::After);
+        let text = buf.slice(s..hi);
+        for (i, _) in text.match_indices(needle) {
+            let start = s + i;
+            if start >= w_end {
+                break;
+            }
+            if start < last_end {
+                continue;
+            }
+            last_end = start + n;
+            if !f(start..start + n) {
+                return false;
+            }
+        }
+        s = w_end;
+    }
+    true
 }
 
 /// Whether `r` overlaps a range of `sel` (sorted, never overlapping).
@@ -150,8 +177,22 @@ fn overlaps_any(sel: &SelectionSet, r: &Range<usize>) -> bool {
 }
 
 /// `sel` with the next occurrence of the main range's text added as the main range (module
-/// docs); from a caret, the word under it first. `None` when there is nothing to add.
+/// docs); from a caret, the word under it first. Matches are substrings, as for a selection
+/// made by hand; [`select_next_occurrence_with`] matches whole words when the search started
+/// from a caret. `None` when there is nothing to add.
 pub fn select_next_occurrence(buf: &TextBuffer, sel: &SelectionSet) -> Option<SelectionSet> {
+    select_next_occurrence_with(buf, sel, false)
+}
+
+// ## m3c-t31-multi (fix round 1, M10): whole words only when the search started from a caret
+// (UI-EDIT-05 step 5's `OccurrenceState`; the caller keeps that bit).
+/// [`select_next_occurrence`], matching whole words only when `whole_word` (the search began
+/// by expanding a caret to its word).
+pub fn select_next_occurrence_with(
+    buf: &TextBuffer,
+    sel: &SelectionSet,
+    whole_word: bool,
+) -> Option<SelectionSet> {
     let main = *sel.main();
     if main.is_empty() {
         let w = word_for_caret(buf, main.head)?;
@@ -159,46 +200,79 @@ pub fn select_next_occurrence(buf: &TextBuffer, sel: &SelectionSet) -> Option<Se
         r[sel.main_index()] = SelectionRange::new(w.start, w.end);
         return Some(SelectionSet::normalized(r, sel.main_index()));
     }
-    let text = buf.slice(0..buf.len_bytes());
     let range = main.range();
-    let needle = &text[range.clone()];
-    let whole = is_whole_word(&text, &range);
-    let found = occurrences(&text, needle, range.end, whole).find(|r| !overlaps_any(sel, r))?;
+    let needle = buf.slice(range.clone()).into_owned();
+    let len = buf.len_bytes();
+    let mut found = None;
+    let mut take = |r: Range<usize>| {
+        if (whole_word && !bounded(buf, &r)) || overlaps_any(sel, &r) {
+            return true;
+        }
+        found = Some(r);
+        false
+    };
+    // Forward from the main range, then from the start (wrapping).
+    if each_occurrence(buf, range.end, len, &needle, &mut take) {
+        each_occurrence(buf, 0, range.end, &needle, &mut take);
+    }
+    let found = found?;
     let mut r: Ranges = sel.ranges().iter().copied().collect();
     let at = r.len();
     r.push(SelectionRange::new(found.start, found.end));
     Some(SelectionSet::normalized(r, at))
 }
 
-/// Every occurrence of the main range's text (from a caret, the word under it), at most `cap`
-/// ranges ([`MAX_OCCURRENCES`]), replacing the selection; the asked-from range is the main one
-/// and is always kept. `sel` unchanged when there is nothing to search for.
+/// Every occurrence of the main range's text (from a caret, the word under it, matched as a
+/// whole word), at most `cap` ranges ([`MAX_OCCURRENCES`]), replacing the selection; the
+/// asked-from range is the main one and is always kept. `sel` unchanged when there is nothing
+/// to search for.
 pub fn select_all_occurrences(buf: &TextBuffer, sel: &SelectionSet, cap: usize) -> SelectionSet {
+    let whole = sel.main().is_empty();
+    select_all_occurrences_with(buf, sel, cap, whole).0
+}
+
+// ## m3c-t31-multi (fix round 1, M10, M11)
+/// [`select_all_occurrences`] with the whole-word bit given (it applies to a range; a caret
+/// always searches its word whole), and the total number of occurrences, kept or not (the
+/// "first 10,000 of N" sentence, Task 33).
+pub fn select_all_occurrences_with(
+    buf: &TextBuffer,
+    sel: &SelectionSet,
+    cap: usize,
+    whole_word: bool,
+) -> (SelectionSet, usize) {
     let main = *sel.main();
-    let range = if main.is_empty() {
+    let (range, whole) = if main.is_empty() {
         match word_for_caret(buf, main.head) {
-            Some(w) => w,
-            None => return sel.clone(),
+            Some(w) => (w, true),
+            None => return (sel.clone(), 0),
         }
     } else {
-        main.range()
+        (main.range(), whole_word)
     };
-    let text = buf.slice(0..buf.len_bytes());
-    let needle = &text[range.clone()];
-    let whole = is_whole_word(&text, &range);
+    let needle = buf.slice(range.clone()).into_owned();
     let cap = cap.max(1);
-    let mut found: Vec<Range<usize>> = occurrences(&text, needle, 0, whole)
-        .filter(|r| *r != range)
-        .take(cap - 1)
-        .collect();
+    let mut found: Vec<Range<usize>> = Vec::new();
+    let mut total = 0usize;
+    each_occurrence(buf, 0, buf.len_bytes(), &needle, |r| {
+        if whole && !bounded(buf, &r) {
+            return true;
+        }
+        total += 1;
+        if r != range && found.len() < cap - 1 {
+            found.push(r);
+        }
+        true
+    });
     let at = found.partition_point(|r| r.start < range.start);
     found.insert(at, range);
-    SelectionSet::normalized(
+    let set = SelectionSet::normalized(
         found
             .into_iter()
             .map(|r| SelectionRange::new(r.start, r.end)),
         at,
-    )
+    );
+    (set, total.max(1))
 }
 
 /// The cells of a grapheme cluster `g` that starts at display column `col`.
@@ -320,14 +394,16 @@ pub fn split_into_lines(buf: &TextBuffer, sel: &SelectionSet) -> SelectionSet {
     SelectionSet::normalized(out, main)
 }
 
-/// Every caret of `sel` is in plain text: the oracle puts neither end of any range inside a
-/// string or a comment (an oracle that does not know answers plain text). The IME mirrors a
-/// composition to every caret only then (R-M3-64).
+/// Every caret of `sel` is in plain text: the oracle says, for both ends of every range, that
+/// they are outside strings and comments. The IME mirrors a composition to every caret only
+/// then (R-M3-64).
+// ## m3c-t31-multi (fix round 1, M3): an oracle that does not know (no analysis at this
+// version, e.g. right after typing a quote) is not plain text: the fallback is the safe side.
 pub fn carets_in_plain_text(sel: &SelectionSet, tok: &dyn TokenOracle) -> bool {
     sel.ranges().iter().all(|r| {
         let range = r.range();
-        tok.in_string_or_comment(range.start) != Some(true)
-            && (range.is_empty() || tok.in_string_or_comment(range.end) != Some(true))
+        tok.in_string_or_comment(range.start) == Some(false)
+            && (range.is_empty() || tok.in_string_or_comment(range.end) == Some(false))
     })
 }
 

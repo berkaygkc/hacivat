@@ -1835,7 +1835,7 @@ fn a_call_with_three_result_sets_keeps_each_in_its_own_tab(cx: &mut TestAppConte
     stop_core_runtime_test(cx);
 }
 
-// ## m3b-t31-multi (named exception, controller ruling 2): with carets in several statements,
+// ## m3c-t31-multi (named exception, controller ruling 2): with carets in several statements,
 // the preview band and Run follow the main caret (the last one added): only its statement runs.
 #[gpui::test]
 fn several_carets_run_only_the_main_carets_statement(cx: &mut TestAppContext) {

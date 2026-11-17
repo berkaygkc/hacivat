@@ -247,7 +247,7 @@ impl TextBuffer {
         self.rope.char_to_utf16_cu(char_idx)
     }
 
-    // ## m3b-t31-multi (named exception): the status bar's selected count over every range.
+    // ## m3c-t31-multi (named exception): the status bar's selected count over every range.
     /// The characters (Unicode scalar values) in the byte range `r`, clamped: O(log n).
     pub fn char_count(&self, r: Range<usize>) -> usize {
         let len = self.rope.len_bytes();

@@ -108,14 +108,14 @@ impl TokenOracle for TokenWords {
         Some(on_line(&a, line))
     }
 
-    // ## m3b-t31-multi (named exception): the IME's plain-text check (R-M3-64).
+    // ## m3c-t31-multi (named exception): the IME's plain-text check (R-M3-64).
     fn in_string_or_comment(&self, at: usize) -> Option<bool> {
         let a = self.shared.current()?;
         Some(in_literal(&a, at))
     }
 }
 
-// ## m3b-t31-multi
+// ## m3c-t31-multi
 /// A string (of any kind) or a comment (an executable comment too: its body is not plain text
 /// to an input method's mirror).
 fn is_literal(kind: TokenKind) -> bool {

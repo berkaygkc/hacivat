@@ -205,3 +205,23 @@ fn ime_falls_back_to_the_primary_caret_inside_a_string(cx: &mut TestAppContext) 
     assert_eq!(text(&e, vcx), "SELECT xy;\nSELECT 'aüb';");
     assert_eq!(ranges(&e, vcx), [(22, 22)]);
 }
+
+// ## m3c-t31-multi (fix round 1, M8)
+/// The fallback composition, cancelled by the platform (an empty mark), gives the collapsed
+/// carets back; one that commits text keeps them collapsed.
+#[gpui::test]
+fn a_cancelled_fallback_composition_gives_the_carets_back(cx: &mut TestAppContext) {
+    let (e, vcx) = open(cx, "SELECT 'ab';\nSELECT xy;", 8, 1);
+    mark(&e, vcx, "ş", None);
+    assert_eq!(ranges(&e, vcx), [(23, 23)]);
+    mark(&e, vcx, "", None);
+    assert_eq!(text(&e, vcx), "SELECT 'ab';\nSELECT xy;");
+    assert_eq!(ranges(&e, vcx), [(8, 8), (21, 21)]);
+    assert_eq!(
+        vcx.read(|cx| e.read(cx).snapshot().selection.main_index()),
+        1
+    );
+    mark(&e, vcx, "ş", None);
+    commit(&e, vcx, "ş");
+    assert_eq!(ranges(&e, vcx), [(23, 23)]);
+}

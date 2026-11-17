@@ -431,7 +431,7 @@ const SPECIAL: &[(&str, &str)] = &[
     ),
     // ## m3b-t01b-seams (named exception): the M3b rows are stubs until Tasks 31-34; each
     // task moves its ids from `m3b_stub_commands_change_nothing` to a test of its own.
-    // ## m3b-t31-multi (named exception): Task 31's rows.
+    // ## m3c-t31-multi (named exception): Task 31's rows.
     ("editor.add_caret_above", "multi_cursor_commands"),
     ("editor.add_caret_below", "multi_cursor_commands"),
     ("editor.select_next_occurrence", "multi_cursor_commands"),
@@ -504,7 +504,7 @@ fn every_command_has_a_test(cx: &mut TestAppContext) {
 /// text nor the selection.
 #[gpui::test]
 fn m3b_stub_commands_change_nothing(cx: &mut TestAppContext) {
-    // ## m3b-t31-multi (named exception): Task 31's rows moved to `multi_cursor_commands`.
+    // ## m3c-t31-multi (named exception): Task 31's rows moved to `multi_cursor_commands`.
     for id in [
         "editor.fold",
         "editor.unfold",
@@ -531,7 +531,7 @@ fn m3b_stub_commands_change_nothing(cx: &mut TestAppContext) {
     }
 }
 
-// ## m3b-t31-multi
+// ## m3c-t31-multi
 /// The text with every range drawn (`┃` head, `«` anchor).
 fn states(o: &Opened<'_>) -> String {
     o.vcx.read(|cx| {

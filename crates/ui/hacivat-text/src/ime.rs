@@ -26,7 +26,7 @@
 //!   stamped with (the view passes its executor's clock, so a test on the fake clock drives
 //!   the 500 ms typing window). The core never reads the wall clock.
 //!
-//! ## m3b-t31-multi: several carets (D-072, UI-EDIT-12 step 5c and 6)
+//! ## m3c-t31-multi: several carets (D-072, UI-EDIT-12 step 5c and 6)
 //! - **Typing goes to every caret:** a commit outside a composition replaces every range of the
 //!   selection with the text, a caret after each, in one transaction (one undo group per
 //!   typing run, as for one caret).
@@ -228,7 +228,7 @@ impl ImeCore {
         follow(m, c.version, c.marked[c.main].clone())
     }
 
-    // ## m3b-t31-multi
+    // ## m3c-t31-multi
     /// Every marked range (the main caret's and its mirrors'), sorted and followed like
     /// [`ImeCore::marked`] (for the underline); empty when not composing.
     pub fn marked_all(&self, m: &EditorModel) -> SmallVec<[Range<usize>; 1]> {

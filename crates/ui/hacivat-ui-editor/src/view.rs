@@ -74,11 +74,11 @@ pub struct EditorStatus {
     pub line: u32,
     /// 1-based, in graphemes.
     pub column: u32,
-    /// Characters selected over every range (## m3b-t31-multi).
+    /// Characters selected over every range (## m3c-t31-multi).
     pub selected_chars: u64,
     pub tier: Tier,
     pub composing: bool,
-    // ## m3b-t31-multi (named exception): "3 carets" (NOTES surface 14).
+    // ## m3c-t31-multi (named exception): "3 carets" (NOTES surface 14).
     /// How many ranges the selection has (1: one caret or one selection).
     pub carets: u32,
 }
@@ -181,7 +181,7 @@ pub struct EditorView {
     /// The pointer of the right click whose `editor.context_menu` is running (`None` for the
     /// keyboard's Shift+F10 or the menu key): Task 25 opens the menu there, else at the caret.
     context_point: Option<Point<Pixels>>,
-    // ## m3b-t31-multi: the selected count, keyed by the model's commit count.
+    // ## m3c-t31-multi: the selected count, keyed by the model's commit count.
     selected_cache: std::cell::Cell<Option<(u64, u64)>>,
 }
 
@@ -326,7 +326,8 @@ impl EditorView {
         }
         self.has_focus = false;
         self.blink.stop();
-        self.drag = None;
+        // ## m3c-t31-multi (fix round 1, M2): the press's gesture ends with the focus.
+        crate::mouse::end_drag(self);
         ime::on_blur(self, window, cx);
     }
 
@@ -554,7 +555,7 @@ impl EditorView {
     }
 
     /// The status bar's editor segment.
-    // ## m3b-t31-multi (named exception, ledger 207): the selected count covers every range
+    // ## m3c-t31-multi (named exception, ledger 207): the selected count covers every range
     // and is cached by the model's commit count, so a frame reads it in O(1).
     pub fn status(&self) -> EditorStatus {
         let buf = self.model.buffer();
@@ -848,7 +849,7 @@ impl EditorView {
         };
         preview::on_update(self, why, cx);
         ime::after_commit(self, &committed, event, cx);
-        // ## m3b-t31-multi (named exception): the Linux primary selection follows the main
+        // ## m3c-t31-multi (named exception): the Linux primary selection follows the main
         // selection (`clipboard::selection_changed`; nothing elsewhere).
         crate::clipboard::selection_changed(self, cx);
         if self.has_focus {

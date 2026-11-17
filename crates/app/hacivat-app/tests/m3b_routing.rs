@@ -603,7 +603,7 @@ fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
         .filter(|c| c.stub)
         .map(|c| c.id)
         .collect();
-    // ## m3b-t31-multi (named exception): Task 31's seven editor rows are commands now.
+    // ## m3c-t31-multi (named exception): Task 31's seven editor rows are commands now.
     assert_eq!(stubs.len(), 16);
     stubs.extend(hacivat_ui_grid::commands::STUB_COMMANDS);
     assert_eq!(stubs.len(), 25);
@@ -748,7 +748,7 @@ fn new_icons_are_embedded() {
         IconName::Filter,
         IconName::ArrowUpDown,
         IconName::Snowflake,
-        // ## m3b-t31-multi (controller ruling 8, named exception): the M3c icons.
+        // ## m3c-t31-multi (controller ruling 8, named exception): the M3c icons.
         IconName::ArrowUp,
         IconName::CaseSensitive,
         IconName::WholeWord,

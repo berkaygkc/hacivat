@@ -190,7 +190,7 @@ fn ask(v: &mut EditorView) {
     v.band.mapped = false;
 }
 
-/// Where Run is asked on `snap`: the main range only (## m3b-t31-multi, controller ruling 2:
+/// Where Run is asked on `snap`: the main range only (## m3c-t31-multi, controller ruling 2:
 /// with several carets Run follows the main one, the last added): its selection, else its
 /// caret. `editor.run` (`commands/run.rs`) builds its request with this same function, so the
 /// band and Run never ask about different places (review round 1, Minor 9).

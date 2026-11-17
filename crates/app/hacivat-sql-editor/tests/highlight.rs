@@ -200,7 +200,7 @@ fn token_words_come_from_the_current_analysis(cx: &mut TestAppContext) {
     );
 }
 
-// ## m3b-t31-multi (named exception): the token oracle's plain-text check for the IME
+// ## m3c-t31-multi (named exception): the token oracle's plain-text check for the IME
 // (R-M3-64): inside a string or a comment, at the end of a line comment or of an unterminated
 // string; a quoted identifier is plain text; a stale analysis does not know.
 #[gpui::test]

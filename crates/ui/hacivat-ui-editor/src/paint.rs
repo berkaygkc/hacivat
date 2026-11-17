@@ -64,7 +64,7 @@ pub(crate) fn text_area(
     band: &BandState,
     theme: &EditorTheme,
     focused: bool,
-    // ## m3b-t31-multi (named exception): every caret's marked text.
+    // ## m3c-t31-multi (named exception): every caret's marked text.
     marked: &[Range<usize>],
     window: &mut Window,
     cx: &mut App,
@@ -216,7 +216,7 @@ fn ime_underline(
     window: &mut Window,
 ) {
     let lh = layout.rows().line_height;
-    // ## m3b-t31-multi: the clause is the selection inside this marked range (each caret's).
+    // ## m3c-t31-multi: the clause is the selection inside this marked range (each caret's).
     let ranges = snapshot.selection.ranges();
     let i = ranges.partition_point(|r| r.range().end < marked.start);
     let clause = ranges

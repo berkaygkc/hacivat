@@ -18,6 +18,6 @@ The M3a query icons (`design/m3a-query/NOTES.md`, "Icons"), from the same packag
 
 The M3b icons (P-M3b-37), from the same package with the same modifications: `pin` (pinned result tabs and history rows), `arrow-up-down` (sort) and `snowflake` (frozen columns). M3b also draws the already bundled `play`, `filter` and `sigma`. Controller ruling RC-4 adds, from the same package with the same modifications: `history`, `timer`, `hourglass`, `users`, `eye-off`, `octagon-x` and `clock`.
 
-## m3b-t31-multi
+## m3c-t31-multi
 
 The M3c icons (controller ruling 8, NOTES "Icons (RC-4 pattern)"), from the same package with the same modifications: `arrow-up` (ascending sort, previous match, previous record), `case-sensitive`, `whole-word` and `regex` (the find toggles). Tasks 33 and 36 draw them.

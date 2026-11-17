@@ -5,7 +5,7 @@
 //! `TierChanged`), and only when what it shows changed: typing re-renders this segment and the
 //! editor, never the results or the grid. `console::editor_segment` hands it to the status bar
 //! (Task 34 places it). Order, left to right (NOTES surface 6): Reduced mode · "186 selected" ·
-//! "Ln 14, Col 49" (## m3b-t31-multi: "3 carets" before the selected count from two carets on).
+//! "Ln 14, Col 49" (## m3c-t31-multi: "3 carets" before the selected count from two carets on).
 //! The line and column are raw numbers like the gutter's; the selected count
 //! uses the format locale. "Reduced mode" is a trust signal and never gives way (Task 34's row
 //! decides the giving-way order; [`EditorSegment::reduced`] tells it).
@@ -96,7 +96,7 @@ impl Render for EditorSegment {
                 .id("editor-segment-reduced"),
             );
         }
-        // ## m3b-t31-multi (named exception, NOTES surface 14): "3 carets" before the selected
+        // ## m3c-t31-multi (named exception, NOTES surface 14): "3 carets" before the selected
         // count, from two carets on; it gives way with it.
         if s.carets > 1 {
             row = row.child(

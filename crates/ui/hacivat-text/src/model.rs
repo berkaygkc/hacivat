@@ -159,12 +159,12 @@ pub struct EditorModel {
     observers: Vec<Box<dyn TransactionObserver>>,
     queue: ObserverQueue,
     next_bracket: u32,
-    // ## m3b-t31-multi: the selection-only history and the commit count.
+    // ## m3c-t31-multi: the selection-only history and the commit count.
     selections: SelectionHistory,
     commits: u64,
 }
 
-// ## m3b-t31-multi
+// ## m3c-t31-multi
 /// Selection changes kept for `undo_selection`.
 const SELECTION_HISTORY_LEN: usize = 100;
 /// The most ranges the kept selections hold together (100 sets of 1,000 carets).
@@ -180,6 +180,10 @@ struct SelectionHistory {
     redo: Vec<(u64, SelectionSet)>,
     /// A step is being applied: its own commit is not recorded.
     stepping: bool,
+    // ## m3c-t31-multi (fix round 1, M2)
+    /// A gesture is open (a pointer drag): `Some(true)` once its first change was recorded,
+    /// so the rest of the gesture adds nothing.
+    gesture: Option<bool>,
 }
 
 impl SelectionHistory {
@@ -384,10 +388,16 @@ impl EditorModel {
             &self.buffer,
         );
         let before = std::mem::replace(&mut self.selection, after);
-        // ## m3b-t31-multi: a selection-only change is a step of the selection history.
+        // ## m3c-t31-multi: a selection-only change is a step of the selection history.
         self.commits += 1;
         if !changed && !self.selections.stepping && before != self.selection {
-            self.selections.push_undo((self.version, before.clone()));
+            // One gesture is one entry (fix round 1, M2): its first change only.
+            if self.selections.gesture != Some(true) {
+                self.selections.push_undo((self.version, before.clone()));
+            }
+            if self.selections.gesture.is_some() {
+                self.selections.gesture = Some(true);
+            }
             self.selections.redo.clear();
         }
         match action {
@@ -564,7 +574,20 @@ impl EditorModel {
         self.observers.push(o);
     }
 
-    // ## m3b-t31-multi
+    // ## m3c-t31-multi (fix round 1, M2)
+    /// Opens a gesture (a pointer press and its drag): until [`EditorModel::end_selection_gesture`]
+    /// its selection changes are one entry of the selection history, the selection before the
+    /// first of them. Opening one ends any still open.
+    pub fn begin_selection_gesture(&mut self) {
+        self.selections.gesture = Some(false);
+    }
+
+    /// Ends the open gesture (nothing when none is open).
+    pub fn end_selection_gesture(&mut self) {
+        self.selections.gesture = None;
+    }
+
+    // ## m3c-t31-multi
     /// How many commits the model made (text or selection): a cheap key for state derived from
     /// the selection (the status bar's selected count).
     pub fn commit_count(&self) -> u64 {

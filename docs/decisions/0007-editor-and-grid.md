@@ -473,10 +473,13 @@ ruling 2): `preview::exec_at` asks for the main range only, so the band and Run 
 
 **Occurrences are byte-exact.** Case- and Turkish-exact matching needs no casing at all
 (INV-3): `İ`, `I`, `ı` and `i` are four letters. From a caret the word under it is selected
-first (the language service's words in the view); a range that is a whole word (identifier
-characters at both ends, none touching it) then matches whole words only, any other range as a
-substring. Stateless, so no `OccurrenceState` field: the range itself says whether it is a word.
-Select all occurrences stops at 10,000 ranges, the asked-from one always kept and main.
+first (the language service's words in the view), and a search that began that way matches
+whole words only (UI-EDIT-05 step 5); a range selected by hand matches as a substring. The bit
+is the view's (`CommandState::whole_word_at`, the model's commit count after the search's own
+selection: any other selection change ends it). The search reads the rope in 64 KB windows,
+never the whole document at once. Select all occurrences stops at 10,000 ranges, the asked-from
+one always kept and main, and counts every occurrence (`select_all_occurrences_with`) for Task
+33's "first 10,000 of N".
 
 **Column selection counts display cells.** `column_selection` uses the display model's widths
 (a tab to the next stop, wide characters and emoji 2, a visible control 1). A tab or a wide
@@ -488,31 +491,39 @@ Option-drag on macOS, Ctrl+Alt-drag elsewhere; Option/Alt-click adds a caret.
 selection-only commit (at most 100 sets and 100,000 ranges), each with the version it is for;
 `undo_selection` restores the newest, mapped through the change log (an entry the log no longer
 reaches is dropped), as a selection-only commit that records nothing. Text commits add no
-entry, so typing is never many steps, and the stacks survive it.
+entry, so typing is never many steps, and the stacks survive it. One gesture is one entry: a
+pointer press opens a gesture (`begin_selection_gesture`) that its drag's changes join, ended by
+the release, a move without the button or a blur; select all occurrences is one commit.
 
 **IME: mirror only in plain text (R-M3-64).** A composition opened with several carets is
 mirrored: every update and the commit replace every marked range in one transaction, the
 platform's range moving the mirrors by the same distances (a mirror that would overlap another
 target, or that an outside edit deleted, leaves). The platform sees the main caret's marked
 text only; the underline is painted at every caret. Before the first mark the view asks the
-token oracle (`TokenOracle::in_string_or_comment`, a default method answering `None` = unknown
-= plain; the SQL adapter answers from its tokens: strictly inside a string or a comment, or at
-the end of a line comment or of an unterminated one); when any caret is inside one, the other
+token oracle (`TokenOracle::in_string_or_comment`; the SQL adapter answers from its tokens:
+strictly inside a string or a comment, or at the end of a line comment or of an unterminated
+one). Only a known "outside" for every caret mirrors: when any caret is inside one, or the
+oracle does not know (no analysis at this version, as right after typing a quote), the other
 carets collapse first and the composition goes to the main caret, said once as a transient
-status sentence that holds while the composition is open.
+status sentence that holds while the composition is open. A fallback composition the platform
+cancels (an empty mark) gives the collapsed carets back.
 
 **Clipboard pieces and the hash fallback.** Copy writes one metadata piece per range, the
 pieces joined with the dominant line ending (line-wise pieces carry their own break). Paste
 cuts the text into pieces only when the metadata describes it exactly; when the platform
 dropped the metadata, an app-wide copy record (the XXH3-128 of the text and its pieces) still
-applies while the clipboard holds exactly the copied text. N pieces into N carets go one each;
-otherwise text of exactly N lines (a trailing break aside) goes one line per caret; anything
-else goes whole to every caret.
+applies while the clipboard holds exactly the copied text, whoever put it there: the same bytes
+copied in another app are taken for Hacivat's copy (accepted, review M9). N pieces into N carets
+go one each; otherwise text of exactly N lines (a trailing break aside) goes one line per caret;
+anything else goes whole to every caret, line-wise (above the caret's line) when every piece
+is a whole line.
 
 **Linux primary selection.** 100 ms after a selection change a non-empty main selection is
-written to the primary selection (a generation counter debounces); a middle click pastes it at
-the pointer without moving the selections. Both are `#[cfg(target_os = "linux")]` at the
-platform calls; the text and insertion functions compile everywhere.
+written to the primary selection (a generation counter debounces; nothing while composing); a
+middle click pastes it at the pointer without moving the selections, its text through the
+paste's background half (the size refusal before anything is built, then normalising). The
+primary read itself is synchronous: the fork has no asynchronous one (fork carry). Both are
+`#[cfg(target_os = "linux")]` at the platform calls; the rest compiles everywhere.
 
 **Status.** `EditorStatus::carets` is new; `selected_chars` covers every range, counted with the
 rope's char index (O(k log n)) and cached by the model's commit count, so a frame reads it in
