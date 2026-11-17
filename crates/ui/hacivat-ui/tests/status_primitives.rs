@@ -1623,3 +1623,180 @@ fn the_linux_close_button_calls_the_hosts_on_close(cx: &mut TestAppContext) {
         "the host decides"
     );
 }
+
+// ## m3b-capsule-fit (port of m3c-shotfix ccedf93): the capsule's fit is the same at a width
+// whatever was drawn before, and a read-write access word (a trust signal) stays while it fits:
+// the palette field gives way first, then the latency, the path and the engine. Before the port
+// a read-write word near its room flipped from one frame to the next (the tr 960x600 shots).
+
+/// A Turkish production capsule that writes (the tr 960x600 shots' title bar).
+fn read_write_tr() -> CapsuleModel {
+    CapsuleModel::Connection {
+        env: EnvKind::Production,
+        env_label: "PROD".into(),
+        name: "orders-prod".into(),
+        engine: "PostgreSQL 16".into(),
+        access: "okuma-yazma".into(),
+        read_only: false,
+        path: "Doğrudan".into(),
+        direct: true,
+        latency: Some("4 ms".into()),
+        unencrypted: None,
+        unsupported: None,
+    }
+}
+
+/// The capsule's texts these tests read, in its order.
+const RW_TEXTS: [&str; 6] = [
+    "PROD",
+    "orders-prod",
+    "PostgreSQL 16",
+    "okuma-yazma",
+    "Doğrudan",
+    "4 ms",
+];
+
+/// A title bar as the workspace builds it in Turkish (brand, capsule, palette field, the
+/// language and theme switches), `width` wide, recording its texts.
+fn mount_tr_bar(cx: &mut TestAppContext, width: f32) -> &mut VisualTestContext {
+    let vcx = host(cx, move |_, _| {
+        div()
+            .w_full()
+            .child(
+                TitleBar::new(ChromeKind::MacTrafficLights)
+                    .brand("HACİVAT".into())
+                    .capsule(Capsule::new(read_write_tr()))
+                    .palette_field("Ara veya komut çalıştır".into(), "⌘K".into(), |_, _, _| {})
+                    .right(vec![
+                        Button::new("language", "TR".into()).into_any_element(),
+                        Button::new("theme", "Koyu".into()).into_any_element(),
+                    ]),
+            )
+            .into_any_element()
+    });
+    enable_registry(vcx);
+    resize_and_settle(vcx, width);
+    vcx
+}
+
+/// Draws one more frame.
+fn next_frame(vcx: &mut VisualTestContext) {
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+}
+
+fn resize_and_settle(vcx: &mut VisualTestContext, width: f32) {
+    vcx.simulate_resize(gpui::size(px(width), px(300.0)));
+    vcx.run_until_parked();
+    for _ in 0..8 {
+        next_frame(vcx);
+    }
+}
+
+/// What a frame shows of the bar: the capsule's texts drawn, the capsule's and the palette
+/// field's widths.
+#[derive(Debug, Clone, PartialEq)]
+struct BarShot {
+    texts: Vec<&'static str>,
+    capsule: f32,
+    palette: f32,
+}
+
+fn bar_shot(vcx: &mut VisualTestContext) -> BarShot {
+    let drawn = texts(vcx);
+    BarShot {
+        texts: RW_TEXTS
+            .into_iter()
+            .filter(|t| drawn.contains(&(*t).into()))
+            .collect(),
+        capsule: f32::from(bounds_of(vcx, "capsule").size.width),
+        palette: f32::from(bounds_of(vcx, "palette-field").size.width),
+    }
+}
+
+/// The width of the access word's cell (its text, 9 px padding each side, the 1 px seam).
+fn access_cell_px(vcx: &mut VisualTestContext) -> f32 {
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let word = frame
+        .iter()
+        .find(|r| r.text.as_ref() == "okuma-yazma")
+        .expect("the access word is drawn in a wide bar");
+    word.painted_px + 2.0 * 9.0 + 1.0
+}
+
+#[gpui::test]
+fn the_capsule_fit_is_the_same_whatever_was_drawn_before(cx: &mut TestAppContext) {
+    // Wide: everything shows. `edge` is the width at which the palette field would reach its
+    // minimum with the capsule whole: below it the capsule gives way.
+    let wide = 1600.0;
+    let vcx = mount_tr_bar(cx, wide);
+    let whole = bar_shot(vcx);
+    assert_eq!(whole.texts, RW_TEXTS.to_vec(), "wide: {whole:?}");
+    let cell = access_cell_px(vcx);
+    let capsule = bounds_of(vcx, "capsule");
+    let palette = bounds_of(vcx, "palette-field");
+    let language = bounds_of(vcx, "button-language");
+    let margin = DARK.spacing.s_2xl;
+    let spare = f32::from(palette.left() - capsule.right())
+        + (f32::from(language.left() - palette.right()) - margin)
+        + (f32::from(palette.size.width) - 170.0);
+    let edge = (wide - spare).round() as i32;
+
+    // Every width from where the engine gives way to past the edge: the same frame after more
+    // frames, after a wider window and after a narrower one.
+    let mut kept = 0;
+    let mut gone = 0;
+    for width in (edge - 240)..=(edge + 8) {
+        let width = width as f32;
+        let vcx = mount_tr_bar(cx, width);
+        let first = bar_shot(vcx);
+        for n in 1..=3 {
+            next_frame(vcx);
+            assert_eq!(bar_shot(vcx), first, "{width}: frame +{n} differs");
+        }
+        for before in [wide, 700.0, width + 37.0, width - 23.0] {
+            resize_and_settle(vcx, before);
+            resize_and_settle(vcx, width);
+            assert_eq!(bar_shot(vcx), first, "{width} after {before}");
+        }
+        // Trust: the access word goes only when it cannot fit (the palette field at its
+        // minimum, with less than the word's cell left over, give or take the 2 px the fit
+        // keeps in hand against rounding and the half pixels of shaped widths) and only after
+        // the latency, the path and the engine.
+        if first.texts.contains(&"okuma-yazma") {
+            kept += 1;
+        } else {
+            gone += 1;
+            assert!(
+                first.palette - 170.0 < cell + 3.0,
+                "{width}: the access word went with room for it: {first:?} (cell {cell})"
+            );
+            for t in ["PostgreSQL 16", "Doğrudan", "4 ms"] {
+                assert!(
+                    !first.texts.contains(&t),
+                    "{width}: {t} outlived the access word"
+                );
+            }
+        }
+        assert!(first.palette >= 170.0 - 0.5, "{width}: {first:?}");
+    }
+    assert!(
+        kept > 0 && gone > 0,
+        "the sweep missed the edge: {kept} kept, {gone} gone"
+    );
+}
+
+/// At the 960 px minimum in Turkish the production capsule keeps "okuma-yazma" and its name,
+/// in every frame; the palette field gives way first and keeps its minimum.
+#[gpui::test]
+fn the_access_word_shows_at_960_in_turkish(cx: &mut TestAppContext) {
+    let vcx = mount_tr_bar(cx, 960.0);
+    let shot = bar_shot(vcx);
+    assert!(shot.texts.contains(&"okuma-yazma"), "{shot:?}");
+    assert!(shot.texts.contains(&"orders-prod"), "{shot:?}");
+    for _ in 0..3 {
+        next_frame(vcx);
+        assert_eq!(bar_shot(vcx), shot);
+    }
+    assert!(shot.palette >= 170.0 - 0.5, "{shot:?}");
+}

@@ -283,6 +283,10 @@ impl Capsule {
     }
 }
 
+// ## m3c-shotfix (capsule)
+/// A cell's padding on each side.
+const CELL_PAD_PX: f32 = 9.0;
+
 /// One cell after the environment block: 9 px padding, a `seam_strong` divider on its left.
 fn cell(t: &ThemeTokens) -> Div {
     let c = &t.colors;
@@ -291,7 +295,7 @@ fn cell(t: &ThemeTokens) -> Div {
         .flex_row()
         .items_center()
         .gap(px(t.spacing.sm))
-        .px(px(9.0))
+        .px(px(CELL_PAD_PX))
         .h_full()
         .flex_none()
         .border_l_1()
@@ -439,6 +443,12 @@ const FIT_SLACK_PX: f32 = 2.0;
 /// "Reconnecting · attempt n", idle, "Couldn't connect"), which keeps its glyph, and Retry's
 /// text, which keeps its icon; last the name. A collapsed segment keeps its whole text as its
 /// tooltip and accessible name.
+///
+/// ## m3c-shotfix (capsule): a read-write access word (a trust signal with no glyph to keep)
+/// is the last thing given up before the name: after the unencrypted text (which keeps its
+/// glyph) and the engine. It goes as a whole cell, and the plan counts the whole cell: counting
+/// only its text left the next frame's natural width a cell's padding short, so near its room
+/// the capsule flipped between showing and dropping it from one frame to the next.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct Fit {
     hide_latency: bool,
@@ -446,6 +456,8 @@ struct Fit {
     access_icon_only: bool,
     unencrypted_icon_only: bool,
     hide_engine: bool,
+    // ## m3c-shotfix (capsule)
+    hide_read_write: bool,
     hide_next: bool,
     // ## m2b-t22-live (fix round 2, R1-I1)
     state_icon_only: bool,
@@ -455,7 +467,7 @@ struct Fit {
 }
 
 /// The steps of [`Fit`], in order.
-const STEPS: usize = 8;
+const STEPS: usize = 9;
 
 impl Fit {
     /// The degradation that brings a capsule `full` px wide (nothing given up) within `max`:
@@ -478,8 +490,9 @@ impl Fit {
                 2 => fit.access_icon_only = true,
                 3 => fit.unencrypted_icon_only = true,
                 4 => fit.hide_engine = true,
-                5 => fit.hide_next = true,
-                6 => fit.state_icon_only = true,
+                5 => fit.hide_read_write = true,
+                6 => fit.hide_next = true,
+                7 => fit.state_icon_only = true,
                 _ => fit.retry_icon_only = true,
             }
             over -= step;
@@ -591,6 +604,7 @@ impl Capsule {
             CapsuleModel::Connection {
                 engine,
                 access,
+                read_only,
                 path,
                 latency,
                 unencrypted,
@@ -600,13 +614,24 @@ impl Capsule {
                     .as_ref()
                     .map_or(0.0, |l| gap + text_width(window, l, mono)),
                 gap + text_width(window, path, body),
-                // ## m3b-t29-shots (named exception; T29 review I2): a read-write access word
-                // gives way too (whole, before the name), now that production consoles write.
-                gap + text_width(window, access, body),
+                // A read-only access keeps its lock; its text goes.
+                if *read_only {
+                    gap + text_width(window, access, body)
+                } else {
+                    0.0
+                },
                 unencrypted
                     .as_ref()
                     .map_or(0.0, |u| gap + text_width(window, u, body)),
                 engine_w(engine),
+                // ## m3b-t29-shots (named exception; T29 review I2): a read-write access word
+                // gives way too (whole, before the name), now that production consoles write.
+                // ## m3c-shotfix (capsule): last before the name, counted as its whole cell.
+                if *read_only {
+                    0.0
+                } else {
+                    text_width(window, access, body) + 2.0 * CELL_PAD_PX + 1.0
+                },
                 0.0,
                 0.0,
                 0.0,
@@ -623,6 +648,7 @@ impl Capsule {
                 0.0,
                 0.0,
                 engine_w(engine),
+                0.0,
                 next.as_ref().map_or(0.0, |n| {
                     gap + text_width(window, n, mono).max(RUN_MONO_MIN_PX)
                 }),
@@ -637,11 +663,13 @@ impl Capsule {
                 0.0,
                 engine_w(engine),
                 0.0,
+                0.0,
                 gap + text_width(window, label, body),
                 0.0,
             ],
             // ## m2b-t22-live (fix round 2, R1-I1): "Couldn't connect", then Retry's text.
             CapsuleModel::Failed { label, retry, .. } => [
+                0.0,
                 0.0,
                 0.0,
                 0.0,
@@ -1034,7 +1062,7 @@ impl Capsule {
                         // ## m2b-t24-shots
                         expanded == Some(CapsuleSegment::Access),
                     ))
-                } else if fit.access_icon_only {
+                } else if fit.hide_read_write {
                     // ## m3b-t29-shots (named exception; T29 review I2): "read-write" yields
                     // before the connection's name: the segment goes (the capsule's accessible
                     // description and the status bar still say it).
@@ -1213,7 +1241,7 @@ mod fit_tests {
     use super::*;
 
     /// A failed capsule: "Couldn't connect" (60 px) goes first, then Retry's text (40 px).
-    const FAILED: [f32; STEPS] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 60.0, 40.0];
+    const FAILED: [f32; STEPS] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 60.0, 40.0];
 
     #[test]
     fn a_failed_capsule_gives_up_its_text_then_retry_then_the_name() {
@@ -1231,11 +1259,29 @@ mod fit_tests {
 
     #[test]
     fn a_reconnect_gives_up_the_engine_the_countdown_then_its_label() {
-        let steps = [0.0, 0.0, 0.0, 0.0, 30.0, 50.0, 120.0, 0.0];
+        let steps = [0.0, 0.0, 0.0, 0.0, 30.0, 0.0, 50.0, 120.0, 0.0];
         let (fit, _) = Fit::plan(600.0, 560.0, steps, 90.0);
         assert!(fit.hide_engine && fit.hide_next && !fit.state_icon_only);
         let (fit, _) = Fit::plan(600.0, 500.0, steps, 90.0);
         assert!(fit.state_icon_only);
         assert_eq!(fit.name_cut, 0.0);
+    }
+
+    // ## m3c-shotfix (capsule): a read-write word (80 px of text in its 99 px cell) gives way
+    // after the path text (50), the unencrypted text (90) and the engine (70), and before the
+    // name; a capsule the earlier steps fit keeps it.
+    const READ_WRITE: [f32; STEPS] = [0.0, 50.0, 0.0, 90.0, 70.0, 99.0, 0.0, 0.0, 0.0];
+
+    #[test]
+    fn a_read_write_word_gives_way_last_before_the_name() {
+        let (fit, saved) = Fit::plan(700.0, 600.0, READ_WRITE, 120.0);
+        assert!(fit.path_icon_only && fit.unencrypted_icon_only && !fit.hide_engine);
+        assert!(!fit.hide_read_write, "the access word stays: {fit:?}");
+        assert_eq!(saved, 140.0);
+        let (fit, _) = Fit::plan(700.0, 480.0, READ_WRITE, 120.0);
+        assert!(fit.hide_engine && fit.hide_read_write && fit.name_cut == 0.0);
+        // Every step spent: then the name.
+        let (fit, _) = Fit::plan(700.0, 300.0, READ_WRITE, 120.0);
+        assert!(fit.hide_read_write && fit.name_cut > 0.0);
     }
 }
