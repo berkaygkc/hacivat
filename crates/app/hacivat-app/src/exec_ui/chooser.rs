@@ -127,7 +127,9 @@ pub(crate) fn uncertain_rows(
     reasons: &[&'static str],
     as_one: Option<(usize, bool)>,
 ) -> Vec<MenuItemSpec> {
-    let row = |label: TextFn| MenuItemSpec::new(label, "").disabled(true);
+    // ## m3b-t29-shots (named exception; T29 review I1): each sentence wraps inside the
+    // chooser's 460 px (NOTES M3b ruling 19), never past its card.
+    let row = |label: TextFn| MenuItemSpec::new(label, "").wraps(true);
     let mut items = vec![row(crate::l10n_global::text_fn_id(
         "hv-chooser-uncertain-body",
     ))];

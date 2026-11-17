@@ -86,6 +86,9 @@ mod support;
 // ## m3a-t35-shots: the M3a surfaces live in their own file (NOTES surfaces 1–14).
 #[path = "shots/m3a.rs"]
 mod m3a;
+// ## m3b-t29-shots: and the M3b surfaces in theirs (`design/m3b-safe` surfaces 1–13).
+#[path = "shots/m3b.rs"]
+mod m3b;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -97,11 +100,8 @@ use hacivat_app::connections::{
     import, kbd_prompt, plaintext_prompt, prod_prompt, secret_prompt, test_strip, vault_dialog,
 };
 use hacivat_app::l10n_global::text_fn_id;
-// ## m3b-t21-confirm: the confirmation and confirm-in-transaction dialogs' fixtures.
-use hacivat_app::exec_ui::{commit_prompt, confirm};
-// ## m3b-t24-exec-ui (named exception): the parameter prompt's and the chooser additions'
-// fixtures (surfaces 8 and 9).
-use hacivat_app::exec_ui::{params_prompt, policy_popover};
+// ## m3b-t21-confirm, ## m3b-t24-exec-ui; ## m3b-t29-shots: their fixtures open from
+// `shots/m3b.rs`.
 use hacivat_app::menus;
 use hacivat_app::shell::DemoCapsule;
 use hacivat_app::shell::Workspace;
@@ -216,13 +216,9 @@ enum Surface {
     LiveVaultSecret,
     // ## m3a-t35-shots: every M3a state (`m3a::M3A`), at 1280x800 and 960x600.
     M3a(m3a::M3a),
-    // ## m3b-t21-confirm: the M3b dialogs of surfaces 1 and 2 (`design/m3b-safe`), at 1280x800
-    // and 960x600.
-    Confirm(confirm::fixtures::State),
-    Commit(commit_prompt::fixtures::State),
-    // ## m3b-t24-exec-ui (named exception): surfaces 8 and 9, at 1280x800 and 960x600.
-    Params(params_prompt::fixtures::State),
-    Chooser(policy_popover::fixtures::State),
+    // ## m3b-t21-confirm, ## m3b-t24-exec-ui; ## m3b-t29-shots: every M3b state (`m3b::all`:
+    // Tasks 21–27's and Task 29's), at 1280x800 and 960x600.
+    M3b(m3b::M3b),
 }
 
 const SURFACES: [Surface; 78] = [
@@ -400,12 +396,8 @@ impl Surface {
             Surface::LiveVaultSecret => "live-vault-secret",
             // ## m3a-t35-shots
             Surface::M3a(s) => s.name(),
-            // ## m3b-t21-confirm
-            Surface::Confirm(s) => s.name(),
-            Surface::Commit(s) => s.name(),
-            // ## m3b-t24-exec-ui (named exception)
-            Surface::Params(s) => s.name(),
-            Surface::Chooser(s) => s.name(),
+            // ## m3b-t29-shots
+            Surface::M3b(s) => s.name(),
         }
     }
 
@@ -433,13 +425,8 @@ impl Surface {
     fn sizes(self) -> &'static [(f32, f32)] {
         // ## m2b-t24-shots: every M2b surface, at the default window and the minimum one.
         // ## m3a-t35-shots: and every M3a state.
-        // ## m3b-t24-exec-ui (named exception): Task 24's states too.
-        if self.is_live()
-            || self.is_m2b()
-            || matches!(self, Surface::M3a(_))
-            || self.is_t21()
-            || self.is_t24()
-        {
+        // ## m3b-t29-shots: and every M3b state.
+        if self.is_live() || self.is_m2b() || matches!(self, Surface::M3a(_) | Surface::M3b(_)) {
             // ## m2b-t22-live: the default window and the minimum one (ruling I1).
             return &[(1280.0, 800.0), (960.0, 600.0)];
         }
@@ -461,16 +448,13 @@ impl Surface {
         self == Surface::ShellDemoProduction
     }
 
-    // ## m3b-t21-confirm
-    /// Whether the surface is one of Task 21's dialog states.
-    fn is_t21(self) -> bool {
-        matches!(self, Surface::Confirm(_) | Surface::Commit(_))
-    }
-
-    // ## m3b-t24-exec-ui (named exception)
-    /// Whether the surface is one of Task 24's states.
-    fn is_t24(self) -> bool {
-        matches!(self, Surface::Params(_) | Surface::Chooser(_))
+    // ## m3b-t29-shots
+    /// The M3b state, if the surface is one.
+    fn m3b(self) -> Option<m3b::M3b> {
+        match self {
+            Surface::M3b(s) => Some(s),
+            _ => None,
+        }
     }
 
     // ## m2b-t24-shots
@@ -488,6 +472,10 @@ impl Surface {
     fn shows_production(self) -> bool {
         // ## m3a-t35-shots
         if let Surface::M3a(s) = self {
+            return s.shows_production();
+        }
+        // ## m3b-t29-shots
+        if let Surface::M3b(s) = self {
             return s.shows_production();
         }
         matches!(
@@ -626,12 +614,8 @@ impl Surface {
             Surface::LiveVaultSecret => ("#sheet-secret-vault", None),
             // ## m3a-t35-shots
             Surface::M3a(s) => s.marker(),
-            // ## m3b-t21-confirm
-            Surface::Confirm(_) => ("hacivat-app/src/exec_ui/confirm.rs:", None),
-            Surface::Commit(_) => ("hacivat-app/src/exec_ui/commit_prompt.rs:", None),
-            // ## m3b-t24-exec-ui (named exception)
-            Surface::Params(_) => ("hacivat-app/src/exec_ui/params_prompt.rs:", None),
-            Surface::Chooser(_) => ("hacivat-ui/src/menu.rs:", None),
+            // ## m3b-t29-shots: each M3b state's own label.
+            Surface::M3b(s) => s.marker(),
         }
     }
 
@@ -651,6 +635,8 @@ impl Surface {
             // ## m3a-t35-shots: a grid state shows its grid (a header it drew), whatever its
             // own marker (the strip, the copy toast).
             Surface::M3a(s) if s.is_grid() => &["#header"],
+            // ## m3b-t29-shots: what tells an M3b state from one with the same marker.
+            Surface::M3b(s) => s.also_shown(),
             _ => &[],
         }
     }
@@ -698,19 +684,53 @@ impl Surface {
     /// visible and painted: production, read-only, the transaction and the cursor never
     /// collapse (NOTES cross-cutting #7).
     fn trust_missing(self, name: &str, frame: &[RenderedText]) -> Vec<String> {
-        let Surface::M3a(state) = self else {
-            return Vec::new();
+        // ## m3b-t29-shots: an M3b state's trust signals too.
+        let required = match self {
+            Surface::M3a(state) => state.required(),
+            Surface::M3b(state) => state.required(),
+            _ => return Vec::new(),
         };
-        state
-            .required()
+        // ## m3b-t29-shots (T29 review I2): a trust signal counts only drawn whole: never
+        // ellipsized nor clipped (NOTES cross-cutting #7, "never hidden or truncated").
+        let whole = |r: &RenderedText| drawn(r) && !r.truncated && !r.clipped;
+        let mut out: Vec<String> = required
             .iter()
             .filter(|group| {
                 !frame
                     .iter()
-                    .any(|r| drawn(r) && group.iter().any(|id| r.path.ends_with(*id)))
+                    .any(|r| whole(r) && group.iter().any(|id| r.path.ends_with(*id)))
             })
-            .map(|group| format!("{name}: (t) a trust signal is not shown: {group:?}"))
-            .collect()
+            .map(|group| format!("{name}: (t) a trust signal is not shown whole: {group:?}"))
+            .collect();
+        out.extend(
+            self.uncut_trust()
+                .into_iter()
+                .filter(|id| {
+                    frame
+                        .iter()
+                        .any(|r| r.visible && r.path.ends_with(id) && (r.truncated || r.clipped))
+                })
+                .map(|id| format!("{name}: (t) a trust label is cut short: {id}")),
+        );
+        out
+    }
+
+    // ## m3b-t29-shots (T29 review I2)
+    /// The labels of an M3a or M3b state that must never be ellipsized or clipped, in any locale:
+    /// every id of its trust groups, the title bar's connection name where the capsule shows
+    /// production, and a typed-name prompt's name.
+    fn uncut_trust(self) -> Vec<&'static str> {
+        let (required, production) = match self {
+            Surface::M3a(state) => (state.required(), state.shows_production()),
+            Surface::M3b(state) => (state.required(), state.shows_production()),
+            _ => return Vec::new(),
+        };
+        let mut ids: Vec<&'static str> = required.iter().flat_map(|g| g.iter().copied()).collect();
+        if production {
+            ids.push("#capsule-text-name");
+        }
+        ids.push("#confirm-type-name");
+        ids
     }
 
     // ## m2b-t24-shots (follow-up)
@@ -735,14 +755,10 @@ impl Surface {
         if let Surface::M3a(_) = self {
             return;
         }
-        // ## m3b-t21-confirm: the dialogs open through their fixtures.
-        match self {
-            Surface::Confirm(state) => return confirm::fixtures::open(state, window, cx),
-            Surface::Commit(state) => return commit_prompt::fixtures::open(state, window, cx),
-            // ## m3b-t24-exec-ui (named exception)
-            Surface::Params(state) => return params_prompt::fixtures::open(state, window, cx),
-            Surface::Chooser(state) => return policy_popover::fixtures::open(state, window, cx),
-            _ => {}
+        // ## m3b-t21-confirm, ## m3b-t24-exec-ui; ## m3b-t29-shots: an M3b dialog opens
+        // through its fixture, any other M3b state by its steps.
+        if let Surface::M3b(state) = self {
+            return state.open(window, cx);
         }
         if self.needs_connections() {
             open_m2a(self, window, cx);
@@ -1012,115 +1028,32 @@ fn shots() -> Vec<Shot> {
         }
     }
     // ## m3a-t35-shots: the M3a states, after every M1/M2 shot.
-    // ## m3b-t22-tx-ui (named exception): then Task 22's states (`m3a::M3B_T22`).
-    // ## m3b-t25-results (named exception): then Task 25's (`m3a::M3B_T25`).
-    for state in m3a::M3A.into_iter().chain(m3a::M3B_T22).chain(m3a::M3B_T25) {
-        let surface = Surface::M3a(state);
-        for &size in surface.sizes() {
-            for theme in THEMES {
-                for locale in LOCALES {
-                    out.push(Shot {
-                        surface,
-                        theme,
-                        locale,
-                        size,
-                    });
-                }
-            }
-        }
+    for state in m3a::M3A {
+        push_matrix(&mut out, Surface::M3a(state));
     }
-    // ## m3b-t21-confirm: the M3b dialog states, after every M3a shot.
-    for surface in t21_surfaces() {
-        for &size in surface.sizes() {
-            for theme in THEMES {
-                for locale in LOCALES {
-                    out.push(Shot {
-                        surface,
-                        theme,
-                        locale,
-                        size,
-                    });
-                }
-            }
-        }
-    }
-    // ## m3b-t23-escalation (named exception): then Task 23's states (`m3a::M3B_T23`).
-    for state in m3a::M3B_T23 {
-        let surface = Surface::M3a(state);
-        for &size in surface.sizes() {
-            for theme in THEMES {
-                for locale in LOCALES {
-                    out.push(Shot {
-                        surface,
-                        theme,
-                        locale,
-                        size,
-                    });
-                }
-            }
-        }
-    }
-    // ## m3b-t24-exec-ui (named exception): Task 24's states, after Task 23's.
-    for surface in t24_surfaces() {
-        for &size in surface.sizes() {
-            for theme in THEMES {
-                for locale in LOCALES {
-                    out.push(Shot {
-                        surface,
-                        theme,
-                        locale,
-                        size,
-                    });
-                }
-            }
-        }
-    }
-    // ## m3b-t27-history (named exception): then Task 27's states (`m3a::M3B_T27`).
-    // ## m3b-t26-prod-unlock (named exception): then Task 26's (`m3a::M3B_T26`), last.
-    for state in m3a::M3B_T27.into_iter().chain(m3a::M3B_T26) {
-        let surface = Surface::M3a(state);
-        for &size in surface.sizes() {
-            for theme in THEMES {
-                for locale in LOCALES {
-                    out.push(Shot {
-                        surface,
-                        theme,
-                        locale,
-                        size,
-                    });
-                }
-            }
-        }
+    // ## m3b-t29-shots: then every M3b state (`m3b::all`: Tasks 22, 25, 21, 23, 24, 27, 26 in
+    // the order they were added, then Task 29's).
+    for state in m3b::all() {
+        push_matrix(&mut out, Surface::M3b(state));
     }
     out
 }
 
-// ## m3b-t24-exec-ui (named exception)
-/// Task 24's surfaces: every parameter-prompt state, then every chooser-addition state.
-fn t24_surfaces() -> Vec<Surface> {
-    params_prompt::fixtures::STATES
-        .into_iter()
-        .map(Surface::Params)
-        .chain(
-            policy_popover::fixtures::STATES
-                .into_iter()
-                .map(Surface::Chooser),
-        )
-        .collect()
-}
-
-// ## m3b-t21-confirm
-/// Task 21's surfaces: every confirmation state, then every commit-prompt state.
-fn t21_surfaces() -> Vec<Surface> {
-    confirm::fixtures::STATES
-        .into_iter()
-        .map(Surface::Confirm)
-        .chain(
-            commit_prompt::fixtures::STATES
-                .into_iter()
-                .map(Surface::Commit),
-        )
-        .collect()
+// ## m3b-t29-shots
+/// Pushes `surface` at each of its sizes, in every theme and locale.
+fn push_matrix(out: &mut Vec<Shot>, surface: Surface) {
+    for &size in surface.sizes() {
+        for theme in THEMES {
+            for locale in LOCALES {
+                out.push(Shot {
+                    surface,
+                    theme,
+                    locale,
+                    size,
+                });
+            }
+        }
+    }
 }
 
 fn out_dir() -> PathBuf {
@@ -1354,9 +1287,16 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         Surface::M3a(s) => Some(s),
         _ => None,
     };
-    let mut connections = shot.surface.needs_connections().then(|| match m3a_state {
-        Some(_) => m3a::connections(&paths),
-        None => fake_connections(&paths),
+    // ## m3b-t29-shots: an M3b state reached by steps connects as an M3a one; an M3b dialog
+    // opens its fixture over the M2a fakes, as it did before it moved.
+    let m3b_state = shot.surface.m3b();
+    let stepped = m3a_state.is_some() || m3b_state.is_some_and(|s| !s.is_fixture());
+    let mut connections = shot.surface.needs_connections().then(|| {
+        if stepped {
+            m3a::connections(&paths)
+        } else {
+            fake_connections(&paths)
+        }
     });
     // ## m2b-t24-shots (follow-up): the vault shot runs on a machine without a keyring.
     if shot.surface == Surface::LiveVaultSecret
@@ -1380,10 +1320,14 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     })
     .expect("the window is open");
     cx.run_until_parked();
+    // ## m3b-t29-shots (fix round 1, I4): the accessibility declarations made from here to the
+    // frame, which an M3b state's check reads (a menu's highlighted row is its active
+    // descendant). A cached view declares when it renders, not on every frame.
+    hacivat_ui::popover::a11y_record();
     cx.update_window(handle, |_, window, cx| shot.surface.open(window, cx))
         .expect("the window is open");
     cx.run_until_parked();
-    if shot.surface.needs_connections() && m3a_state.is_none() {
+    if shot.surface.needs_connections() && !stepped {
         // Profile writes and the keyring probe run on the core runtime (P22); let them land.
         std::thread::sleep(std::time::Duration::from_millis(30));
         cx.run_until_parked();
@@ -1403,12 +1347,13 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         cx.run_until_parked();
     }
     // ## m3a-t35-shots: each step, then its condition (bounded, polled; never a fixed sleep).
-    for (at, step) in m3a_state
-        .map(m3a::M3a::steps)
-        .unwrap_or_default()
-        .into_iter()
-        .enumerate()
-    {
+    // ## m3b-t29-shots: an M3b state's steps too.
+    let steps = match (m3a_state, m3b_state) {
+        (Some(s), _) => s.steps(),
+        (_, Some(s)) => s.steps(),
+        _ => Vec::new(),
+    };
+    for (at, step) in steps.into_iter().enumerate() {
         cx.update_window(handle, |_, window, cx| (step.act)(window, cx))
             .expect("the window is open");
         cx.run_until_parked();
@@ -1443,6 +1388,7 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     cx.run_until_parked();
     cx.update(|cx| cx.refresh_windows());
     cx.run_until_parked();
+    let decls = hacivat_ui::popover::a11y_take();
 
     let scale = cx
         .update_window(handle, |_, window, _| window.scale_factor())
@@ -1468,6 +1414,16 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
             cx.update_window(handle, |_, window, cx| state.check(window, cx, &frame))
                 .expect("the window is open")
                 .map(|v| format!("{name}: {v}")),
+        );
+    }
+    // ## m3b-t29-shots: every M3b state's model check.
+    if let Some(state) = m3b_state {
+        failures.extend(
+            cx.update_window(handle, |_, window, cx| {
+                state.check(window, cx, &frame, &decls)
+            })
+            .expect("the window is open")
+            .map(|v| format!("{name}: {v}")),
         );
     }
     failures.extend(check_grid(&name, shot.locale, &frame));
@@ -1608,64 +1564,48 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
             + 10 * 8 * 2
             + 34 * 8 * 2
             + m3a::M3A.len() * 8 * 2
-            // ## m3b-t22-tx-ui (named exception)
-            + m3a::M3B_T22.len() * 8 * 2
-            // ## m3b-t25-results (named exception)
-            + m3a::M3B_T25.len() * 8 * 2
-            // ## m3b-t21-confirm (named exception): plus Task 21's dialog states.
-            + t21_surfaces().len() * 8 * 2
-            // ## m3b-t23-escalation (named exception)
-            + m3a::M3B_T23.len() * 8 * 2
-            // ## m3b-t24-exec-ui (named exception): plus Task 24's states.
-            + t24_surfaces().len() * 8 * 2
-            // ## m3b-t27-history (named exception)
-            + m3a::M3B_T27.len() * 8 * 2
-            // ## m3b-t26-prod-unlock (named exception)
-            + m3a::M3B_T26.len() * 8 * 2
+            // ## m3b-t29-shots: every M3b state (Tasks 21–27 and 29).
+            + m3b::all().len() * 8 * 2
     );
     // ## m3a-t35-shots: the 1,012 M1/M2 shots first, unchanged; then 68 M3a states x 16.
     // ## m3a-f5-demo (review m-5): plus the app menu at 960x600 (8).
-    // ## m3b-t22-tx-ui (named exception): plus Task 22's 7 states x 16.
-    // ## m3b-t21-confirm (named exception): plus 19 dialog states x 16, after Task 22's.
-    // ## m3b-t25-results (named exception): plus Task 25's 11 states x 16, before Task 21's.
-    // ## m3b-t23-escalation (named exception): plus Task 23's 9 states x 16, after Task 21's.
-    // ## m3b-t24-exec-ui (named exception): plus 12 states x 16, after Task 23's.
-    // ## m3b-t27-history (named exception): plus Task 27's 7 states x 16.
-    // ## m3b-t26-prod-unlock (named exception): plus Task 26's 1 state x 16, last.
-    assert_eq!(
-        all.len(),
-        1020 + 68 * 16 + 7 * 16 + 11 * 16 + 19 * 16 + 9 * 16 + 12 * 16 + 7 * 16 + 16
-    );
-    assert!(
-        all[1020 + 68 * 16 + 7 * 16 + 11 * 16..1020 + 68 * 16 + 7 * 16 + 11 * 16 + 19 * 16]
-            .iter()
-            .all(|s| s.surface.is_t21())
-    );
-    assert!(
-        // ## m3b-t27-history (named exception): Task 24's run up to Task 27's.
-        // ## m3b-t26-prod-unlock (named exception): Task 26's state after Task 27's.
-        all[1020 + 68 * 16 + 7 * 16 + 11 * 16 + 19 * 16 + 9 * 16..all.len() - 7 * 16 - 16]
-            .iter()
-            .all(|s| s.surface.is_t24())
-    );
+    // ## m3b-t29-shots: then the M3b states x 16: Task 22's 7, Task 25's 11, Task 21's 20
+    // (16 confirmations with Task 29's staging Execute all, 4 commit prompts), Task 23's 9,
+    // Task 24's 12, Task 27's 7, Task 26's 1, Task 29's 4.
+    assert_eq!(m3b::t21().len(), 20);
+    assert_eq!(m3b::t24().len(), 12);
+    assert_eq!(m3b::all().len(), 7 + 11 + 20 + 9 + 12 + 7 + 1 + 4);
+    assert_eq!(all.len(), 1020 + 68 * 16 + 71 * 16);
+    let m3b_from = 1020 + 68 * 16;
+    let order = [
+        m3b::T22.to_vec(),
+        m3b::T25.to_vec(),
+        m3b::t21(),
+        m3b::T23.to_vec(),
+        m3b::t24(),
+        m3b::T27.to_vec(),
+        m3b::T26.to_vec(),
+        m3b::T29.to_vec(),
+    ];
+    let mut at = m3b_from;
+    for group in order {
+        for state in group {
+            assert!(
+                all[at..at + 16]
+                    .iter()
+                    .all(|s| s.surface == Surface::M3b(state)),
+                "{state:?} at {at}"
+            );
+            at += 16;
+        }
+    }
+    assert_eq!(at, all.len());
     assert!(
         all[..1020]
             .iter()
-            .all(|s| !matches!(s.surface, Surface::M3a(_)))
+            .all(|s| !matches!(s.surface, Surface::M3a(_) | Surface::M3b(_)))
     );
-    // ## m3b-t22-tx-ui (named exception): Task 22's states too.
-    // ## m3b-t25-results (named exception): and Task 25's.
-    // ## m3b-t23-escalation (named exception): and Task 23's.
-    // ## m3b-t27-history (named exception): and Task 27's.
-    for state in m3a::M3A
-        .into_iter()
-        .chain(m3a::M3B_T22)
-        .chain(m3a::M3B_T25)
-        .chain(m3a::M3B_T23)
-        .chain(m3a::M3B_T27)
-        // ## m3b-t26-prod-unlock (named exception)
-        .chain(m3a::M3B_T26)
-    {
+    for state in m3a::M3A {
         let surface = Surface::M3a(state);
         assert_eq!(
             all.iter().filter(|s| s.surface == surface).count(),
@@ -1929,7 +1869,12 @@ fn main() {
         eprintln!("--shard {bad:?}: expected k/n with 1 <= k <= n");
         std::process::exit(2);
     }
-    let checks: [(&str, fn()); 8] = [
+    let checks: [(&str, fn()); 9] = [
+        // ## m3b-t29-shots
+        (
+            "every_m3b_state_has_its_own_marker",
+            every_m3b_state_has_its_own_marker,
+        ),
         // ## m3a-t35-shots (fix round 1, I2)
         ("trust_signals_must_be_drawn", trust_signals_must_be_drawn),
         // ## m3a-t35-shots
@@ -2250,7 +2195,29 @@ fn trust_signals_must_be_drawn() {
         at("tx-chip-mode", 0.0, true),
         at("status-env-label", 90.0, false),
     ];
-    assert_eq!(prod.trust_missing("s", &squeezed).len(), 2);
+    // ## m3b-t29-shots (fix round 1, I2): the squeezed chip is also a cut trust label.
+    assert_eq!(prod.trust_missing("s", &squeezed).len(), 3);
+    // A trust label ellipsized (it drew, but cut short) or clipped does not count as shown,
+    // and the production capsule's name must show whole.
+    let ellipsized = RenderedText {
+        truncated: true,
+        ..at("status-env-label", 30.0, true)
+    };
+    let found = prod.trust_missing("s", &[at("tx-chip-mode", 90.0, true), ellipsized]);
+    assert!(
+        found.iter().any(|v| v.contains("not shown whole"))
+            && found.iter().any(|v| v.contains("cut short")),
+        "{found:?}"
+    );
+    let clipped = RenderedText {
+        clipped: true,
+        ..at("capsule-text-name", 40.0, true)
+    };
+    let found = prod.trust_missing("s", &[full[0].clone(), full[1].clone(), clipped]);
+    assert!(
+        found.len() == 1 && found[0].contains("#capsule-text-name"),
+        "{found:?}"
+    );
     // Transaction and cursor.
     let everything = Surface::M3a(m3a::M3a::StatusEverything);
     let all = [
@@ -2273,10 +2240,31 @@ fn trust_signals_must_be_drawn() {
     let failed = Surface::M3a(m3a::M3a::PromptFailed);
     assert_eq!(failed.trust_missing("s", &all).len(), 1);
     // Every production state requires the production signals.
-    for state in m3a::M3A {
-        if state.shows_production() {
-            assert_eq!(state.required().len(), 2, "{state:?}");
-        }
+    // ## m3b-t29-shots: since Task 26 (R-M3-81) the read-only notice is no longer one of them,
+    // so a production state requires the environment (and, with a session, the mode chip): the
+    // count of two that Task 26 left here failed for the toolbar and marks states.
+    // ## m3b-t29-shots (fix round 1, m2): the exact groups per production state.
+    let env: &[&str] = &["#status-env-label"];
+    let chip: &[&str] = &["#tx-chip-mode"];
+    let production: Vec<m3a::M3a> = m3a::M3A
+        .into_iter()
+        .filter(|s| s.shows_production())
+        .collect();
+    assert_eq!(
+        production,
+        [
+            m3a::M3a::ConsoleProduction,
+            m3a::M3a::ToolbarProductionWaiting,
+            m3a::M3a::MarksDenied,
+            m3a::M3a::StatusProductionResult,
+        ]
+    );
+    for state in production {
+        let want: &[&[&str]] = match state {
+            m3a::M3a::StatusProductionResult => &[env],
+            _ => &[env, chip],
+        };
+        assert_eq!(state.required(), want, "{state:?}");
     }
     // An M1/M2 surface has none.
     assert!(Surface::Shell.trust_missing("s", &[]).is_empty());
@@ -2286,6 +2274,189 @@ fn trust_signals_must_be_drawn() {
         ..at("notice", 0.0, true)
     };
     assert!(drawn(&notice));
+}
+
+// ## m3b-t29-shots
+/// Every M3b state has a marker signature (its marker and the labels it must also show) no
+/// other M3b state has, except the groups `m3b::TOLD_APART_BY_CHECK` names (their model check
+/// tells them apart); a shell-only frame satisfies none of them; and every state that shows
+/// production requires its trust signals.
+fn every_m3b_state_has_its_own_marker() {
+    let mut by_signature: std::collections::BTreeMap<String, Vec<&'static str>> =
+        std::collections::BTreeMap::new();
+    for state in m3b::all() {
+        let (file, text) = state.marker();
+        let key = format!("{file} {text:?} {:?}", state.also_shown());
+        by_signature.entry(key).or_default().push(state.name());
+    }
+    let mut shared: Vec<Vec<&str>> = by_signature
+        .into_values()
+        .filter(|names| names.len() > 1)
+        .collect();
+    shared.sort();
+    let mut expected: Vec<Vec<&str>> = m3b::TOLD_APART_BY_CHECK
+        .iter()
+        .map(|g| g.to_vec())
+        .collect();
+    expected.sort();
+    assert_eq!(shared, expected, "only these share a marker signature");
+    // ## fix round 1 (I4): a real fresh shell's frame (the labels the shell under every
+    // fixture draws, as `SHOTS_DUMP=1` printed them for `confirm-typed-dark-en-1280x800`: the
+    // title bar, the explorer, the home pane's buttons, the status bar), and a live dev
+    // console's (the capsule, the toolbar with Run and the mode chip, the status bar; from
+    // `errbar-dark-en-1280x800`). No M3b marker is satisfied by the shell; no fixture state's
+    // (a dialog, a prompt, a menu) by a live console either.
+    let label = |path: &str, text: &str| RenderedText {
+        text: text.to_string().into(),
+        source: TextSource::Fluent,
+        size_px: 13.0,
+        painted_px: 10.0,
+        clipped: false,
+        truncated: false,
+        path: path.to_string().into(),
+        visible: true,
+        outside_card: false,
+    };
+    let shell: Vec<RenderedText> = [
+        (
+            "crates/ui/hacivat-ui/src/titlebar.rs:297:25#palette-placeholder",
+            "Search or run a command",
+        ),
+        ("crates/ui/hacivat-ui/src/segmented.rs:194:25", "EN"),
+        (
+            "crates/app/hacivat-app/src/shell/tiles.rs:156:5#panel-explorer-title",
+            "EXPLORER",
+        ),
+        (
+            "hacivat-ui/src/input/mod.rs#placeholder",
+            "Filter connections",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-explorer-new",
+            "New connection",
+        ),
+        ("crates/ui/hacivat-ui/src/button.rs:456:31", "⌘N"),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-explorer-paste",
+            "Paste URL",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-explorer-import",
+            "Import pg_service.conf…",
+        ),
+        (
+            "crates/app/hacivat-app/src/shell/tiles.rs:197:13#sheet-none",
+            "Select a connection to see its details.",
+        ),
+        (
+            "crates/app/hacivat-app/src/connections/home.rs:81:21#home-title",
+            "No query open",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-home-new",
+            "New connection",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-home-paste",
+            "New connection from a copied URL",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-home-connect",
+            "Connect to the selected connection",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-home-palette",
+            "Search or run a command",
+        ),
+        (
+            "crates/app/hacivat-app/src/shell/tiles.rs:175:13#results-empty",
+            "Run a query to see results here",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/statusbar.rs:17:5",
+            "No connection",
+        ),
+        (
+            "crates/app/hacivat-app/src/shell/workspace.rs:1618:13#status-language-0",
+            "EN",
+        ),
+    ]
+    .into_iter()
+    .map(|(p, t)| label(p, t))
+    .collect();
+    let console: Vec<RenderedText> = [
+        (
+            "crates/ui/hacivat-ui/src/capsule.rs:829:21#capsule-text-name",
+            "orders-dev",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/capsule.rs:1042:25#capsule-text-access",
+            "read-write",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-console-run",
+            "Run",
+        ),
+        (
+            "crates/app/hacivat-app/src/console/toolbar.rs:284:9#console-connection-name",
+            "orders-dev",
+        ),
+        (
+            "crates/app/hacivat-app/src/console/tx_chip.rs:170:17#tx-chip-mode",
+            "Auto-commit",
+        ),
+        (
+            "crates/app/hacivat-app/src/connections/status.rs:126:17#status-env-label",
+            "dev",
+        ),
+        (
+            "crates/app/hacivat-app/src/connections/status.rs:126:17#status-path",
+            "Direct",
+        ),
+        (
+            "crates/app/hacivat-app/src/console/status.rs:116:13#editor-segment-lncol",
+            "Ln 2, Col 38",
+        ),
+        ("crates/ui/hacivat-ui-editor/src/marks.rs:1:1", "1 of 3"),
+    ]
+    .into_iter()
+    .map(|(p, t)| label(p, t))
+    .collect();
+    for state in m3b::all() {
+        assert!(
+            Surface::M3b(state).missing_from("s", &shell).is_some(),
+            "{state:?}: a fresh shell satisfies its marker"
+        );
+        if state.is_fixture() {
+            let both: Vec<RenderedText> = shell.iter().chain(&console).cloned().collect();
+            assert!(
+                Surface::M3b(state).missing_from("s", &both).is_some(),
+                "{state:?}: a live console satisfies its marker"
+            );
+        }
+        if state.shows_production() {
+            assert!(!state.required().is_empty(), "{state:?}");
+        }
+    }
+    // A marker with data text needs that text: another statement's SQL line does not count.
+    let line = |text: &str| RenderedText {
+        text: text.to_string().into(),
+        path: "crates/app/hacivat-app/src/exec_ui/confirm.rs:1344:9#confirm-sql-line".into(),
+        ..label("", "")
+    };
+    let routine = Surface::M3b(m3b::M3b::Confirm(
+        hacivat_app::exec_ui::confirm::fixtures::State::Routine,
+    ));
+    assert!(
+        routine
+            .missing_from("s", &[line("CALL close_month('2026-10');")])
+            .is_none()
+    );
+    assert!(
+        routine
+            .missing_from("s", &[line("DROP SCHEMA reporting CASCADE;")])
+            .is_some()
+    );
 }
 
 fn a_missing_surface_fails_its_frame() {

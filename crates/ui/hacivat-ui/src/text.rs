@@ -168,6 +168,17 @@ impl Global for CardScopes {}
 /// nothing, opens the scope at prepaint; the card's children-prepainted hook closes it. Call it
 /// on the card before adding its children (`dialog_frame` does).
 pub fn card_scope(card: Div) -> Div {
+    card_scope_then(card, |_, _, _| {})
+}
+
+// ## m3b-t29-shots (named exception; T29 review I1)
+/// [`card_scope`], then `then` with the children's bounds once they prepainted (the scope's
+/// canvas is the first of them): a card that needs its own children-prepainted step (the
+/// popup menu's row layout) keeps it.
+pub fn card_scope_then(
+    card: Div,
+    then: impl Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static,
+) -> Div {
     card.relative()
         .child(
             canvas(
@@ -179,8 +190,9 @@ pub fn card_scope(card: Div) -> Div {
             .left_0()
             .size_full(),
         )
-        .on_children_prepainted(|_, _, cx| {
+        .on_children_prepainted(move |bounds, window, cx| {
             cx.default_global::<CardScopes>().0.pop();
+            then(bounds, window, cx);
         })
 }
 

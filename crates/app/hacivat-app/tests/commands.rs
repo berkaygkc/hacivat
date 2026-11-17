@@ -418,9 +418,27 @@ fn keymap_commands_are_registered(cx: &mut TestAppContext) {
         hacivat_app::init(cx);
         cx.global::<ActionRegistry>().clone()
     });
+    // ## m3b-ci (controller): a command `init` registers only on its own host (Edit > Emoji &
+    // Symbols is macOS-only, F4 6b) is checked against that platform's keymap only when the
+    // test runs on that host. CI's Linux and Windows runners load the macOS keymap too.
+    const HOST_ONLY: [(&str, KeymapPlatform); 1] =
+        [("app.character_palette", KeymapPlatform::MacOs)];
+    let host = if cfg!(target_os = "macos") {
+        KeymapPlatform::MacOs
+    } else if cfg!(target_os = "windows") {
+        KeymapPlatform::Windows
+    } else {
+        KeymapPlatform::Linux
+    };
     for p in ALL_PLATFORMS {
         for preset in PRESETS {
             for b in load(p, preset, None).0.bindings() {
+                let host_only = HOST_ONLY
+                    .iter()
+                    .any(|(id, only)| b.command == *id && *only == p && *only != host);
+                if host_only {
+                    continue;
+                }
                 assert!(reg.get(&b.command).is_some(), "{}", b.command);
             }
         }

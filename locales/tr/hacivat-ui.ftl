@@ -2376,3 +2376,7 @@ hv-history-open-failed = Yeni konsol zamanında açılmadı; hiçbir şey eklenm
 hv-editor-carets = { $n } imleç
 # Review: PO
 hv-editor-ime-primary-only = Giriş yöntemi: başka bir imleç bir dizenin ya da yorumun içinde olduğu için yalnızca ana imleçte yazılıyor
+
+## m3b-t29-shots
+# Review: PO
+hv-history-selection-a11y = { $sql }, { $n } kayıttan { $pos }.
