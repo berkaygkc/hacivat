@@ -147,6 +147,9 @@ pub(super) enum M3c {
     SortPartial,
     /// A sort job running past 200 ms (held): "Sorting n rows…" + Cancel.
     SortRunning,
+    // ## m3c-t43-shots (fix round 1, m3)
+    /// The sorted text column's header tooltip: code-point order (no mapped collation).
+    SortCodePoint,
     /// A partial result with rows after the sort: both facts, Re-sort and Clear sort.
     SortPartialTail,
     /// A complete result with rows after the sort: "n new rows at the end (not sorted)".
@@ -267,11 +270,12 @@ pub(super) const T34: [M3c; 10] = [
 ];
 
 /// Tasks 35 and 36's states.
-pub(super) const T35_36: [M3c; 9] = [
+pub(super) const T35_36: [M3c; 10] = [
     M3c::SortOne,
     M3c::SortTwo,
     M3c::SortPartial,
     M3c::SortRunning,
+    M3c::SortCodePoint,
     M3c::SortPartialTail,
     M3c::SortTail,
     M3c::GridFrozen,
@@ -566,15 +570,161 @@ pub(super) const KNOWN_FINDINGS: [Finding; 23] = [
     ),
 ];
 
-/// The known finding a violation of `state`'s shot in `locale` at `size` is, if any.
+// ## m3c-t43-shots (fix round 1, I1, I2, m1)
+
+/// The one violation kind a finding tolerates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Kind {
+    /// `(b) clipped: "…" (… px painted) at <path>#<id>`: the label is cut.
+    Clipped,
+    /// `(g) a grid header is data, never pseudo-localised: "…" at …#header`: allowed only for
+    /// the header text the shot passes (the Transposed name column's word, F7).
+    GridHeaderWord,
+}
+
+/// The marker of each kind in a violation line.
+const CLIPPED: &str = ": (b) clipped: ";
+const GRID_HEADER_WORD: &str = ": (g) a grid header is data, never pseudo-localised: ";
+
+/// What no finding may ever match: a trust line, a missing surface, a failed state check, and
+/// the other rules' kinds.
+const NEVER: [&str; 8] = [
+    ": (t) ",
+    "the surface is missing",
+    "the state check failed",
+    ": (a) ",
+    ": (c) ",
+    ": (d) ",
+    ": (e) ",
+    ": (m) ",
+];
+
+/// Every label id of `state` that is a trust signal: its trust groups and the labels the harness
+/// never lets be cut (`Surface::uncut_trust`).
+pub(super) fn trust_ids(state: M3c) -> Vec<&'static str> {
+    let mut ids: Vec<&'static str> = state
+        .required()
+        .iter()
+        .flat_map(|g| g.iter().copied())
+        .collect();
+    ids.extend(["#capsule-text-name", "#confirm-type-name"]);
+    ids
+}
+
+impl Finding {
+    /// The kind this finding tolerates (the label names it for the header-word finding).
+    pub(super) fn kind(&self) -> Kind {
+        if self.label == "a grid header is data" {
+            Kind::GridHeaderWord
+        } else {
+            Kind::Clipped
+        }
+    }
+
+    /// Whether `violation`, a line of `state`'s shot in `locale` at `size`, is this finding:
+    /// the finding's state and scope, its one kind, and its label at the end of the line's
+    /// `at <path>` part (an `#id` suffix, an id fragment, or a creation site without an id).
+    /// `header_word` is the Transposed name column's word in the shot's locale. A trust label,
+    /// a missing surface or any other rule's line is never a finding.
+    pub(super) fn matches(
+        &self,
+        state: M3c,
+        locale: &str,
+        size: (f32, f32),
+        violation: &str,
+        header_word: Option<&str>,
+    ) -> bool {
+        if self.state != state.name() || !self.at.holds(locale, size) {
+            return false;
+        }
+        if NEVER.iter().any(|n| violation.contains(n)) {
+            return false;
+        }
+        let Some(at) = violation.rsplit_once(" at ").map(|(_, at)| at) else {
+            return false;
+        };
+        let (site, id) = match at.rsplit_once('#') {
+            Some((site, id)) => (site, Some(format!("#{id}"))),
+            None => (at, None),
+        };
+        // A trust label is never tolerated, whatever the entry says.
+        if id
+            .as_deref()
+            .is_some_and(|id| trust_ids(state).contains(&id))
+        {
+            return false;
+        }
+        match self.kind() {
+            Kind::Clipped => {
+                violation.contains(CLIPPED)
+                    && match (&id, self.label.strip_prefix('#')) {
+                        // An `#id` label: the line's id is exactly it.
+                        (Some(id), Some(_)) => id == self.label,
+                        // A creation site: no id, the site holds it.
+                        (None, None) if self.label.contains(".rs:") => site.contains(self.label),
+                        // An id fragment (`value-viewer-`): inside the line's id.
+                        (Some(id), None) if !self.label.contains(".rs:") => id.contains(self.label),
+                        _ => false,
+                    }
+            }
+            Kind::GridHeaderWord => {
+                let Some((_, rest)) = violation.split_once(GRID_HEADER_WORD) else {
+                    return false;
+                };
+                let text = rest.rsplit_once(" at ").map_or(rest, |(t, _)| t);
+                id.as_deref() == Some("#header")
+                    && header_word
+                        .is_some_and(|w| super::strip(text.trim_matches('"')) == super::strip(w))
+            }
+        }
+    }
+}
+
+thread_local! {
+    /// The findings that matched a line in this process (`KNOWN_FINDINGS` indices).
+    static MATCHED: RefCell<std::collections::BTreeSet<usize>> = RefCell::default();
+}
+
+/// The known finding a violation of `state`'s shot in `locale` at `size` is, if any (recorded
+/// for [`stale_findings`]).
 pub(super) fn known_finding(
     state: M3c,
     locale: &str,
     size: (f32, f32),
     violation: &str,
+    header_word: Option<&str>,
 ) -> Option<&'static Finding> {
-    KNOWN_FINDINGS.iter().find(|f| {
-        f.state == state.name() && f.at.holds(locale, size) && violation.contains(f.label)
+    let (i, f) = KNOWN_FINDINGS
+        .iter()
+        .enumerate()
+        .find(|(_, f)| f.matches(state, locale, size, violation, header_word))?;
+    MATCHED.with(|m| m.borrow_mut().insert(i));
+    Some(f)
+}
+
+/// The Transposed name column's word in the shot's locale (F7's tolerated header text).
+pub(super) fn header_word(cx: &App) -> String {
+    message(cx, "hv-transposed-col", Vec::new())
+}
+
+/// The findings of a state whose 16 shots all rendered in this process that matched nothing:
+/// stale entries (the owner fixed the defect), which must go before they hide a regression.
+pub(super) fn stale_findings(
+    rendered: &std::collections::BTreeMap<&'static str, usize>,
+) -> Vec<String> {
+    MATCHED.with(|m| {
+        let m = m.borrow();
+        KNOWN_FINDINGS
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| rendered.get(f.state) == Some(&16) && !m.contains(i))
+            .map(|(_, f)| {
+                format!(
+                    "stale known finding ({}): {f:?} matched no line; remove it",
+                    f.owner
+                )
+            })
+            .collect()
     })
 }
 
@@ -639,6 +789,8 @@ const MENU: &str = "hacivat-ui/src/menu.rs:";
 const VIEWS: &str = "hacivat-app/src/results/views.rs:";
 /// The go-to popover's file.
 const GOTO: &str = "hacivat-app/src/results/goto.rs:";
+/// The grid view's file (its header tooltip).
+const GRID_VIEW: &str = "hacivat-ui-grid/src/view.rs:";
 
 impl M3c {
     pub(super) fn name(self) -> &'static str {
@@ -677,6 +829,7 @@ impl M3c {
             SortTwo => "sort-two-levels",
             SortPartial => "sort-partial",
             SortRunning => "sort-running",
+            SortCodePoint => "sort-code-point-tip",
             SortPartialTail => "sort-partial-tail",
             SortTail => "sort-tail",
             GridFrozen => "grid-frozen",
@@ -761,6 +914,8 @@ impl M3c {
             SortOne | SortTwo | GridFrozen | GridMultiRect => (HEADER, Some("şehir")),
             SortPartial | SortRunning | SortPartialTail | SortTail => ("#results-sort-note", None),
             GridResize => (HEADER, Some("müşteri")),
+            // The header tooltip (the grid's own view draws it).
+            SortCodePoint => (GRID_VIEW, None),
             // 19 · the grid find bar's count, the filter note, the incomplete mark.
             GfindCount | GfindSelectAll => ("#grid-find-count-text", None),
             GfindFilter => ("#results-filter-note", None),
@@ -807,7 +962,11 @@ impl M3c {
             GotoAsk => &["#header", "#goto-line"],
             GotoFetching => &["#header", "#goto-line"],
             ViewRecordMore => &["#header", "#button-label-record-show-more-0"],
-            ViewerTruncated => &["#value-viewer-size"],
+            // Fix round 1 (I1): the subtitle, which the viewer shows at every size; the footer's
+            // size runs out of the tile at 960 x 600 (F8), and a missing surface is never a known
+            // finding. The model check asks for the truncation notice. When F8 is fixed, ask for
+            // `#value-viewer-size` again.
+            ViewerTruncated => &["#value-viewer-sub"],
             // A grid state shows its grid (a header it drew), whatever its own marker.
             s if s.is_grid() => &["#header"],
             _ => &[],
@@ -1008,6 +1167,21 @@ impl M3c {
                 let mut s = live(DEV, FOLDS, 0..0, Expect::Any);
                 if self == GutterLastRuns {
                     s.push(show_marks(FOLDS, vec![(FOLD_2, succeeded(12, None))]));
+                    // ## fix round 1 (m9): the run's time, through the same message the live one
+                    // uses (`hv-history-time`, the format locale's medium time), at a fixed wall
+                    // clock (the live one reads the system clock; no zone conversion here).
+                    s.push(instant(|window, cx| {
+                        let editor = editor_in(window, cx).expect("a console");
+                        let when: hacivat_ui::text::TextFn = Rc::new(|cx: &App| {
+                            cx.global::<hacivat_app::l10n_global::L10nGlobal>()
+                                .l10n
+                                .t_dynamic("hv-history-time", vec![("t", run_time())])
+                                .into()
+                        });
+                        editor.update(cx, |e, cx| {
+                            e.set_exec_when(exec_ui::fixtures::fixture_key(0), Some(when), cx)
+                        });
+                    }));
                 }
                 s.push(hover_gutter(Gutter::Run, 6));
                 if self == GutterLastRuns {
@@ -1184,6 +1358,17 @@ impl M3c {
                         },
                     ));
                 }
+                s
+            }
+            // The text column sorted: its collation is not known here, so its header tooltip says
+            // text compares by code point (T36 ruling R1). The pointer rests on the header.
+            SortCodePoint => {
+                let mut s = tile(EnvTag::Dev, || vec![complete(orders(40))]);
+                s.push(sort_by(SortSpec::by(ColId(1), false)));
+                // Again once the tooltip's hover area is laid out: a tooltip starts on a move.
+                s.push(hover_header(1));
+                s.push(hover_header(1));
+                s.push(step(|_, _| {}, |_, cx| header_tip_open(cx)));
                 s
             }
             SortRunning => {
@@ -1561,7 +1746,16 @@ impl M3c {
             }
             FindCapped => carets == 10_000 && drawn(frame, "status-message"),
             GutterHover => plays() >= 1,
-            GutterLastRuns => plays() >= 1 && tooltip_open(cx),
+            // Fix round 1 (m9): with the run's fixed time in the tooltip's row.
+            GutterLastRuns => {
+                plays() >= 1
+                    && tooltip_open(cx)
+                    && shows_label(
+                        frame,
+                        "hacivat-ui-editor/src/gutter.rs:",
+                        &message(cx, "hv-history-time", vec![("t", run_time())]),
+                    )
+            }
             GutterFocused => {
                 plays() >= 1
                     && editor.as_ref().is_some_and(|e| {
@@ -1598,6 +1792,17 @@ impl M3c {
                     .state(exec_ui::fixtures::fixture_key(1))
                     .is_some_and(want)
             }),
+            // One key on the text column, its tooltip drawn, no job running.
+            SortCodePoint => {
+                header_tip_open(cx)
+                    && g.as_ref().is_some_and(|g| {
+                        sort::status(g, cx).is_some_and(|s| {
+                            s.shown.keys.len() == 1
+                                && s.shown.keys[0].col == ColId(1)
+                                && s.running.is_none()
+                        })
+                    })
+            }
             SortOne | SortTwo => g.as_ref().is_some_and(|g| {
                 let n = if self == SortOne { 1 } else { 2 };
                 sort::status(g, cx).is_some_and(|s| s.shown.keys.len() == n && s.running.is_none())
@@ -1794,6 +1999,58 @@ fn said_any(frame: &[RenderedText]) -> bool {
 /// Whether a mark's end-of-line status reads `sentence` ("failed inside the fold · line 7").
 fn said_in_marks(frame: &[RenderedText], sentence: &str) -> bool {
     shows_label(frame, MARKS_RS, sentence)
+}
+
+/// The fixed wall-clock time `gutter-last-runs` shows for its run (14:05:09).
+fn run_time() -> hacivat_l10n::ArgValue {
+    hacivat_l10n::ArgValue::When(hacivat_l10n::WhenValue::Local {
+        year: 2026,
+        month: 11,
+        day: 17,
+        hour: 14,
+        minute: 5,
+        second: 9,
+    })
+}
+
+/// Whether the grid's header tooltip is drawn (a label of the grid view's own file).
+fn header_tip_open(cx: &App) -> bool {
+    cx.global::<hacivat_ui::text::TextRegistry>()
+        .frame
+        .iter()
+        .any(|r| r.visible && r.painted_px > 0.0 && r.path.contains(GRID_VIEW))
+}
+
+/// Moves the pointer onto the middle of the shown grid's header for column `col` (its tooltip
+/// area: a sorted, frozen or ellipsized header has one).
+fn hover_header(col: u32) -> Step {
+    use gpui::InputEvent as _;
+    step(
+        move |window, cx| {
+            let Some(at) = grid(window, cx).and_then(|g| {
+                g.read(cx)
+                    .header_tips()
+                    .iter()
+                    .find(|t| t.col == ColId(col))
+                    .map(|t| t.bounds.center())
+            }) else {
+                return;
+            };
+            window.dispatch_event(
+                gpui::MouseMoveEvent {
+                    position: at,
+                    pressed_button: None,
+                    modifiers: gpui::Modifiers::none(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+        },
+        move |window, cx| {
+            grid(window, cx)
+                .is_some_and(|g| g.read(cx).header_tips().iter().any(|t| t.col == ColId(col)))
+        },
+    )
 }
 
 /// Whether the ▶ tooltip's "Last runs" caption is drawn.

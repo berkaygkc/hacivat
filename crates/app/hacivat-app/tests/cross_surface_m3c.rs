@@ -5,8 +5,8 @@
 //!
 //! - Several carets type as one edit, one undo takes it back, and Run runs the main caret's
 //!   statement only (Task 31, controller ruling 2).
-//! - Run at a caret inside a folded statement sends the whole statement and its mark lands on
-//!   the fold's header (Tasks 32, 34).
+//! - Run at a caret inside a folded statement sends the whole statement, its run ends with a
+//!   succeeded mark, and the fold stays (Tasks 32, 34).
 //! - The editor find bar's Select all occurrences, then typing, edits every match as one undo
 //!   group (Tasks 33, 31).
 //! - Sort, then copy: the copy follows the shown order (Task 36).
@@ -20,7 +20,6 @@
 //!
 //! **Part B** (after Tasks 39, 41 and 42 merge) adds: the grid menu's Sort / Freeze / Raw display
 //! into copy, the narrow pane at 120 px, and the settings rows.
-#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 mod support;
 
@@ -306,7 +305,7 @@ const FOLDS: &str =
     "SELECT o.id,\n       o.total\n  FROM orders o\n WHERE o.total > 100;\n\nSELECT 2;\n";
 
 /// A caret inside a folded statement (the fold keeps the caret on its header) runs the whole
-/// statement, the band covers it, and the outcome's mark is the fold header's: the fold stays.
+/// statement, the band covers it, the run ends with one succeeded mark, and the fold stays.
 #[gpui::test]
 fn run_at_a_caret_inside_a_fold_runs_the_whole_statement(cx: &mut TestAppContext) {
     let c = console(
