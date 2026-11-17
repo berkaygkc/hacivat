@@ -24,3 +24,14 @@ FLUSH PRIVILEGES;
 USE hv_test;
 CREATE TABLE IF NOT EXISTS hv_probe (a int);
 CREATE TABLE IF NOT EXISTS hv_probe_log (id int AUTO_INCREMENT PRIMARY KEY, v int);
+
+-- ## m4-spike-minicat
+-- `hv_catalog`: the system-catalog reader of `cargo xtask minicat collect` (HV-INTRO-16). It
+-- may read the structure of the system schemas (information_schema shows a table, a column or
+-- a routine only to an account with a privilege on it) and nothing else: no grant on any
+-- fixture database, no write anywhere. `hv_test`'s own grants stay as they are.
+CREATE USER 'hv_catalog'@'%' IDENTIFIED BY 'hv_test_pw';
+GRANT SELECT ON mysql.* TO 'hv_catalog'@'%';
+GRANT SELECT ON performance_schema.* TO 'hv_catalog'@'%';
+GRANT SELECT, SHOW VIEW, EXECUTE ON sys.* TO 'hv_catalog'@'%';
+FLUSH PRIVILEGES;

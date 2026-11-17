@@ -15,6 +15,8 @@ mod bench_sql;
 mod fetch_pg_regress;
 mod gen_fn_catalog;
 mod gen_pg_visitor;
+// ## m4-spike-minicat
+mod minicat;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -52,6 +54,8 @@ fn main() -> ExitCode {
         Some("gen-fn-catalog") => gen_fn_catalog::run(),
         Some("bench-sql") => bench_sql::run(),
         Some("fetch-pg-regress") => fetch_pg_regress::run(),
+        // ## m4-spike-minicat
+        Some("minicat") => minicat::run(),
         other => {
             eprintln!(
                 "unknown xtask command: {other:?}\navailable: bench-report, check-deps, check-update-key, docker, gen-sql, l10n, shot-diff, tokens, vf"
@@ -62,6 +66,8 @@ fn main() -> ExitCode {
             eprintln!(
                 "also available: bench-sql, fetch-pg-regress, gen-fn-catalog, gen-pg-visitor"
             );
+            // ## m4-spike-minicat
+            eprintln!("also available: minicat");
             ExitCode::from(2)
         }
     }

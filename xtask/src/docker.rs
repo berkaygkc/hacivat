@@ -273,17 +273,17 @@ fn git(args: &[&str]) -> Result<String> {
 }
 
 /// The checkout (or worktree) xtask runs in: its compose file and bind mounts.
-fn repo_root() -> Result<PathBuf> {
+pub(crate) fn repo_root() -> Result<PathBuf> {
     Ok(PathBuf::from(git(&["rev-parse", "--show-toplevel"])?))
 }
 
-fn main_checkout() -> Result<PathBuf> {
+pub(crate) fn main_checkout() -> Result<PathBuf> {
     let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
     let cwd = std::env::current_dir().context("reading the current directory")?;
     Ok(main_checkout_from(&common, &cwd))
 }
 
-fn selected_services(root: &Path, set: &str) -> Result<Vec<String>> {
+pub(crate) fn selected_services(root: &Path, set: &str) -> Result<Vec<String>> {
     let path = root.join(TARGETS_FILE);
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -312,7 +312,7 @@ pub fn engine_problem(info: Result<(bool, &str), std::io::ErrorKind>) -> Option<
 }
 
 /// Bails with [`engine_problem`]'s message unless the Docker engine answers `docker info`.
-fn ensure_engine() -> Result<()> {
+pub(crate) fn ensure_engine() -> Result<()> {
     let out = Command::new("docker")
         .args(["info", "--format", "{{.ServerVersion}}"])
         .output();
@@ -344,11 +344,11 @@ fn health_of(service: &str) -> Health {
     }
 }
 
-fn statuses(services: &[String]) -> Vec<(String, Health)> {
+pub(crate) fn statuses(services: &[String]) -> Vec<(String, Health)> {
     services.iter().map(|s| (s.clone(), health_of(s))).collect()
 }
 
-fn print_statuses(statuses: &[(String, Health)]) {
+pub(crate) fn print_statuses(statuses: &[(String, Health)]) {
     for (id, health) in statuses {
         let shown = match health {
             Health::Healthy => "healthy".to_string(),

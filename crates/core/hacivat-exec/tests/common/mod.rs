@@ -1465,6 +1465,36 @@ pub mod matrix {
             None => major == v.major.to_string(),
         }
     }
+
+    // ## m4-spike-minicat
+    /// What a statement answered: its column names and its rows (text, `None` for NULL).
+    pub type Table = (Vec<String>, Vec<Vec<Option<String>>>);
+
+    impl Side {
+        /// Every row of `sql` (simple protocol) with its column names, or the failure's code
+        /// (or kind). An answer cut at `max_rows` is a failure: a catalog read never keeps a
+        /// partial table.
+        pub async fn try_rows(&mut self, sql: &str, max_rows: usize) -> Result<Table, String> {
+            let answer = self
+                .live()
+                .raw()
+                .execute(
+                    sql,
+                    ExecOpts {
+                        max_rows,
+                        protocol: Protocol::Simple,
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    code_of(e.server.as_ref()).unwrap_or_else(|| format!("{:?}", e.kind))
+                })?;
+            if answer.truncated {
+                return Err(format!("more than {max_rows} rows"));
+            }
+            Ok((answer.columns, answer.rows))
+        }
+    }
 }
 
 // ## m3b-t16-run-service

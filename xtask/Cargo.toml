@@ -26,6 +26,10 @@ phf_codegen.workspace = true
 # `sql-safety/data/functions.digest` with the same XXH3-64 as `sql_safety::classified_hash`
 # (Task 3). `bench-sql` runs the perf tests as subprocesses, so xtask takes no SQL crate.
 twox-hash.workspace = true
+# ## m4-spike-minicat: the system-catalog snapshots (`xtask minicat`; HV-INTRO-16). `serde` is a
+# workspace dep already; `zstd` is new (flagged in the workspace manifest).
+serde.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

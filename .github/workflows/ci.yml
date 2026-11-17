@@ -695,6 +695,53 @@ jobs:
         if: always()
         run: cargo run --locked -p xtask -- docker down
 
+  # ## m4-spike-minicat
+  # The system-catalog snapshots (HV-INTRO-16, L7) regenerate byte for byte from fresh servers:
+  # two reads on one stack, then the stack is torn down with its volumes and started again
+  # from the pinned images, and a third read must match too. The regenerated files are
+  # uploaded either way, so a drift (or a first complete set) can be reviewed and committed by
+  # hand. No secrets: the reader `hv_catalog` uses the throwaway credentials of docker/m2a. The
+  # offline `minicat check` runs in build-test (an xtask unit test).
+  minicat-verify:
+    name: minicat-verify
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
+      - uses: Swatinem/rust-cache@v2
+      - name: Check image digest pins
+        run: cargo run --locked -p xtask -- docker check-pins
+      - name: Offline check of the committed snapshots
+        run: cargo run --locked -p xtask -- minicat --check
+      - name: Start every server
+        run: cargo run --locked -p xtask -- docker up --set full
+      - name: Regenerate twice and compare with the committed snapshots
+        run: cargo run --locked -p xtask -- minicat --verify --twice --work "$RUNNER_TEMP/minicat-1"
+      - name: Fresh servers (volumes removed)
+        run: |
+          cargo run --locked -p xtask -- docker down
+          cargo run --locked -p xtask -- docker up --set full
+      - name: Regenerate on the fresh servers and compare again
+        run: cargo run --locked -p xtask -- minicat --verify --work "$RUNNER_TEMP/minicat-2"
+      - name: Upload the regenerated snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: system-catalogs
+          path: ${{ runner.temp }}/minicat-1/verify
+          if-no-files-found: ignore
+      - name: Server logs
+        if: failure()
+        run: docker compose -f docker/m2a/compose.yml logs --no-color
+      - name: Stop the servers
+        if: always()
+        run: cargo run --locked -p xtask -- docker down
+
   # ## m2b-t16-keyring
   # The live OS keyring round trip (B15). A broken D-Bus setup fails the
   # round trip loudly (the Linux build has the Secret Service backend only).

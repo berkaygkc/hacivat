@@ -183,6 +183,10 @@ libc = "0.2"
 sqlparser = { version = "=0.64.0", default-features = false, features = ["std", "visitor", "recursive-protection"] }
 # Locale collation for the grid's local sort (`hacivat-values::valfmt::compare`, Task 36).
 icu_collator = "2.4.0"
+# ## m4-spike-minicat (FLAGGED: a new dependency, pending the PO/plan ruling). The
+# system-catalog snapshots (HV-INTRO-16) are zstd frames; `xtask minicat` writes them. Pinned
+# exactly: the committed bytes depend on the libzstd version (`minicat check` re-encodes).
+zstd = { version = "=0.13.3", default-features = false }
 
 # M2b secure network and sessions (Task 1). SSH uses ring, never aws-lc (Q28): no default
 # features, so russh's `aws-lc-rs` default is off.
@@ -227,3 +231,8 @@ debug = false
 # M3a (Task 1a): libpg_query's C code at -O1 in debug builds; tests parse a lot of SQL.
 [profile.dev.package.pg_query]
 opt-level = 1
+
+# ## m4-spike-minicat: libzstd at -O2 in debug builds; the offline `minicat check` unit test
+# re-encodes every committed snapshot at level 19 (15 s at -O0).
+[profile.dev.package.zstd-sys]
+opt-level = 2

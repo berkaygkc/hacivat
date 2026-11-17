@@ -49,6 +49,8 @@ proptest.workspace = true
 hacivat-guard.workspace = true
 toml.workspace = true
 serde.workspace = true
+# ## m4-spike-minicat: `minicat_read` writes the raw catalog tables as JSON (a workspace dep).
+serde_json.workspace = true
 
 [lints]
 workspace = true
