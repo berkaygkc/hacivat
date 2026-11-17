@@ -267,6 +267,9 @@ struct State {
     pending_choice: Option<RunEvent>,
     /// The form of each unit's confirm-in-transaction question (`NeedsCommit::savepoint`).
     commit_savepoint: HashMap<u32, bool>,
+    // ## m3b-t26-prod-unlock (fix round 1)
+    /// Units whose rollback the session reported not undone (`RunEvent::ConfirmNotUndone`).
+    not_undone: std::collections::HashSet<u32>,
     // Fix round 1 (review m9)
     /// The user's transaction status now: the session's at the run's start, then each
     /// `TxChanged`.
@@ -1165,6 +1168,10 @@ impl RunObserver for ExecObserver {
                 self.publish_choice(ev);
                 self.forward_commit(*unit, *question, *affected, *deadline, *savepoint);
             }
+            // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1)
+            RunEvent::ConfirmNotUndone { unit } => {
+                lock(&self.state).not_undone.insert(unit.ordinal);
+            }
             RunEvent::CommitDecided {
                 unit,
                 answer,
@@ -1172,11 +1179,16 @@ impl RunObserver for ExecObserver {
             } => {
                 self.clear_choice();
                 let u = self.unit(unit.ordinal).cloned();
-                let savepoint = lock(&self.state)
-                    .commit_savepoint
-                    .remove(&unit.ordinal)
-                    .unwrap_or(false);
+                let (savepoint, not_undone) = {
+                    let mut st = lock(&self.state);
+                    (
+                        st.commit_savepoint.remove(&unit.ordinal).unwrap_or(false),
+                        st.not_undone.remove(&unit.ordinal),
+                    )
+                };
                 let msg = match answer {
+                    // Never "undone" or "discarded" when the server said otherwise.
+                    CommitAnswer::RollBack if not_undone => LogMsg::ConfirmNotUndone,
                     CommitAnswer::Commit => LogMsg::ConfirmCommitted { rows: None },
                     CommitAnswer::RollBack => LogMsg::ConfirmRolledBack {
                         by_deadline: *by_deadline,

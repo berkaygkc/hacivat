@@ -1,26 +1,28 @@
 //! The console toolbar on the Overflow Rule `Toolbar` (Task 32): Run / Stop, the connection
-//! label, the read-only lock chip, the production read-only notice, the waiting state.
+//! label, the read-only lock chip, the waiting state.
 //!
 //! NOTES surface 2, left to right: Run (primary, its chord) or Stop (outline) in one slot; the
 //! run state (the amber run marker, "Running" and a mono clock repainted once a second, or the
 //! hollow marker and "Cancelling…"); the connection label (a seam, the environment mark, the
 //! connection's name in mono); the waiting state (a hollow marker, "Waiting for a free
 //! connection to orders-dev (4 of 4 in use)", Cancel). On the right: the lock chip of a
-//! read-only connection, or the production notice (a red lock and "Production is read-only in
-//! this version", a button that opens the explanation).
+//! read-only connection.
 //!
 //! Overflow (ruling 14): Run/Stop, the run state, the connection name, Cancel and the lock are
-//! pinned. The production notice collapses first to its lock chip "read-only" (still red, still
-//! a button) and puts "Why this console is read-only…" in the ⋯ menu; then the waiting
-//! sentence takes its short form. Nothing else moves.
+//! pinned. The waiting sentence takes its short form first. Nothing else moves.
+//!
+//! ## m3b-t26-prod-unlock (R-M3-6 REVISED ends, R-M3-81): the production read-only notice, its
+//! short lock chip and its explanation are gone: a production console writes behind the gate's
+//! confirmations. Its trust signals stay where they were: the environment swatch in the
+//! connection label, the hairline and the capsule (`console::decor`), and the lock chip when
+//! the profile itself is read-only.
 //!
 //! ## m3a-f2-visual (named exception, fix round 1): when even that does not fit (960 px in the
 //! long pseudo-locales), the short sentence wraps between its marker and Cancel and the bar
-//! grows; in a narrow pane the whole row wraps onto lines (`Toolbar::wrap_row`). So the
-//! production notice, the lock chip and the environment mark (trust signals) are never pushed
-//! off the bar, and the sentence never leaves it.
+//! grows; in a narrow pane the whole row wraps onto lines (`Toolbar::wrap_row`). So the lock
+//! chip and the environment mark (trust signals) are never pushed off the bar, and the
+//! sentence never leaves it.
 
-use std::cell::Cell;
 use std::rc::Rc;
 
 use hacivat_l10n::{Count, NoArgs, Text, ids};
@@ -31,8 +33,8 @@ use hacivat_ui::step_trail::run_marker;
 use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui::toolbar::{ItemFn, Toolbar, ToolbarItem, Wrap};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, Bounds, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    SharedString, Styled as _, Window, canvas, div, px,
+    AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    Styled as _, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, TypeStyle};
 
@@ -59,10 +61,8 @@ pub struct ToolbarModel {
     pub env: Option<EnvKind>,
     /// Waiting for a session: the connection's name and (in use, max).
     pub waiting: Option<(SharedString, u8, u8)>,
-    /// The access label of a read-only connection that is not production (the lock chip).
+    /// The access label of a read-only connection (the lock chip).
     pub read_only: Option<SharedString>,
-    /// The production notice (R-M3-6): shown only over a read-only session (or none yet).
-    pub production: bool,
     /// The connection must be read-only but this console's session is still read-write: its
     /// name. The pending chip says so in place of the notice (fix round 1, C1).
     pub pending_read_only: Option<SharedString>,
@@ -70,8 +70,6 @@ pub struct ToolbarModel {
 
 /// A toolbar button's action.
 pub type ActionFn = Rc<dyn Fn(&mut Window, &mut App)>;
-/// Opens the production explanation under the given bounds (the notice's).
-pub type ExplainFn = Rc<dyn Fn(Option<Bounds<Pixels>>, &mut Window, &mut App)>;
 
 /// What the toolbar's buttons do (the console host's methods).
 #[derive(Clone)]
@@ -79,7 +77,6 @@ pub struct ToolbarActions {
     pub run: ActionFn,
     pub stop: ActionFn,
     pub cancel_wait: ActionFn,
-    pub explain: ExplainFn,
 }
 
 fn item(f: impl Fn(&mut Window, &mut App) -> AnyElement + 'static) -> ItemFn {
@@ -111,7 +108,7 @@ pub fn build_for(
     let theme = *Theme::get(cx);
     let height = theme.tokens.spacing.editor_toolbar_height;
     // ## m3a-f2-visual (named exception, fix round 1, I2): in a narrow pane the row wraps, so
-    // no trust signal (the production lock, the read-only chip, the environment mark) is cut.
+    // no trust signal (the read-only chip, the environment mark) is cut.
     let mut bar = Toolbar::new("console-toolbar").height(height).wrap_row();
 
     // Run / Stop, one slot.
@@ -232,7 +229,7 @@ pub fn build_for(
     }
 
     // Right: what is true about writing. A pending read-only reconnect first (C1), then the
-    // production notice, then the lock chip.
+    // lock chip (## m3b-t26-prod-unlock: the production notice is gone).
     if let Some(name) = model.pending_read_only.clone() {
         let (long, short) = (name.clone(), name);
         let label: TextFn = Rc::new(move |cx| pending_text(cx, &long));
@@ -240,21 +237,6 @@ pub fn build_for(
             ToolbarItem::pinned(item(move |_, cx| pending_chip(&short, false, cx)), label)
                 .priority(15)
                 .compact(item(move |_, cx| pending_chip("", true, cx))),
-        );
-    } else if model.production {
-        let bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::default();
-        let (a, b) = (actions.clone(), bounds.clone());
-        let (a2, b2) = (actions.clone(), bounds.clone());
-        let (a3, b3) = (actions.clone(), bounds);
-        bar = bar.trailing(
-            ToolbarItem::pinned(
-                item(move |_, cx| prod_notice(false, &a, &b, cx)),
-                text_fn(ids::hv::CONSOLE_PROD_WHY),
-            )
-            .priority(10)
-            .compact(item(move |_, cx| prod_notice(true, &a2, &b2, cx)))
-            .compact_in_menu(true)
-            .on_choose(move |window, cx| (a3.explain)(b3.get(), window, cx)),
         );
     } else if let Some(access) = model.read_only.clone() {
         bar = bar.trailing(ToolbarItem::pinned(
@@ -604,58 +586,6 @@ fn lock_chip(access: SharedString, cx: &App) -> AnyElement {
             )
             // ## m3a-t35-shots (fix round 1, I1; named exception)
             .id("console-lock-label"),
-        )
-        .into_any_element()
-}
-
-/// The production notice (`short`: its lock chip "read-only"): a button with a red lock that
-/// opens the explanation under itself.
-fn prod_notice(
-    short: bool,
-    actions: &ToolbarActions,
-    bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
-    cx: &App,
-) -> AnyElement {
-    let theme = *Theme::get(cx);
-    let t = theme.tokens;
-    let c = &t.colors;
-    let text = if short {
-        tr(cx, ids::hv::CONSOLE_PROD_SHORT, NoArgs)
-    } else {
-        tr(cx, ids::hv::CONSOLE_PROD_NOTICE, NoArgs)
-    };
-    let explain = actions.explain.clone();
-    let at = bounds.clone();
-    let record = bounds.clone();
-    div()
-        .id("console-prod-notice")
-        .relative()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(t.spacing.xs))
-        .child(
-            Icon::new(IconName::Lock)
-                .size(IconSize::Chrome)
-                .color(c.red.to_hsla()),
-        )
-        .child(
-            Button::new(
-                if short {
-                    "console-prod-short"
-                } else {
-                    "console-prod-notice"
-                },
-                text,
-            )
-            .kind(ButtonKind::Ghost)
-            .on_raised(true)
-            .on_click(move |_, window, cx| explain(at.get(), window, cx)),
-        )
-        .child(
-            canvas(move |b, _, _| record.set(Some(b)), |_, _, _, _| {})
-                .absolute()
-                .size_full(),
         )
         .into_any_element()
 }

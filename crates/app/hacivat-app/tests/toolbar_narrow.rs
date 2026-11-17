@@ -1,7 +1,12 @@
 //! M3a follow-up F2, fix round 1 (I2): the console toolbar in a narrow pane. Trust signals
-//! (the production notice or its lock chip, the read-only lock chip, the environment mark)
-//! are never hidden or cut, at any width a split pane can have (each side keeps 120 px,
-//! `hacivat_ui::panes`): the toolbar's last stage wraps its row instead.
+//! (the read-only lock chip, the environment mark) are never hidden or cut, at any width a
+//! split pane can have (each side keeps 120 px, `hacivat_ui::panes`): the toolbar's last stage
+//! wraps its row instead.
+//!
+//! ## m3b-t26-prod-unlock: the production read-only notice (and its short lock chip) is gone
+//! (R-M3-6 REVISED ends). A production console's trust signal on the bar is its environment
+//! swatch (the hairline and the capsule are drawn outside it); a production profile that is
+//! read-only by its own flag also shows the lock chip, swept here like the staging one.
 
 mod support;
 
@@ -10,7 +15,7 @@ use std::rc::Rc;
 
 use gpui::{
     Bounds, Context, IntoElement, ParentElement as _, Pixels, Render, Styled as _, TestAppContext,
-    VisualTestContext, Window, div, px,
+    Window, div, px,
 };
 use hacivat_app::console::toolbar::{RunUx, ToolbarActions, ToolbarModel, build};
 use hacivat_ui::capsule::EnvKind;
@@ -19,9 +24,8 @@ use support::shell;
 
 /// The narrowest console pane is 120 px (a split keeps each side at least that). Below 126 px
 /// the English production chip ("read-only" with its red lock, 103.5 px, plus the bar's 22 px
-/// of padding) is wider than the row itself: one item, alone on its line, that no stage can
-/// make narrower (reported in F2 fix round 1, with a plan). Every other trust item and every
-/// other case holds down to 120.
+/// of padding) was wider than the row itself (F2 fix round 1). ## m3b-t26-prod-unlock: that
+/// chip is gone; the floors stay where they were (the lock chip is the widest trust item left).
 const MIN_EN_PX: f32 = 126.0;
 /// The same for Turkish ("salt okunur", about 119 px).
 const MIN_TR_PX: f32 = 141.0;
@@ -43,7 +47,6 @@ impl Render for Host {
             run: Rc::new(|_, _| {}),
             stop: Rc::new(|_, _| {}),
             cancel_wait: Rc::new(|_, _| {}),
-            explain: Rc::new(|_, _, _| {}),
         };
         // The pane clips what runs past it, as the pane does.
         div()
@@ -53,7 +56,7 @@ impl Render for Host {
     }
 }
 
-fn model(production: bool, waiting: bool) -> ToolbarModel {
+fn model(production: bool, read_only: bool, waiting: bool) -> ToolbarModel {
     ToolbarModel {
         run: RunUx::Idle,
         run_enabled: !waiting,
@@ -64,24 +67,15 @@ fn model(production: bool, waiting: bool) -> ToolbarModel {
             EnvKind::Staging
         }),
         waiting: waiting.then(|| ("orders-prod".into(), 4, 4)),
-        read_only: (!production).then(|| "read-only".into()),
-        production,
+        read_only: read_only.then(|| "read-only".into()),
         pending_read_only: None,
     }
 }
 
 /// The trust items the toolbar of `model` must draw whole, by debug selector.
-fn trust_ids(production: bool, vcx: &mut VisualTestContext) -> Vec<&'static str> {
+fn trust_ids(read_only: bool) -> Vec<&'static str> {
     let mut ids = vec!["console-env-swatch"];
-    if production {
-        ids.push(
-            if vcx.debug_bounds("button-console-prod-notice").is_some() {
-                "button-console-prod-notice"
-            } else {
-                "button-console-prod-short"
-            },
-        );
-    } else {
+    if read_only {
         ids.push("console-lock");
     }
     ids
@@ -99,12 +93,21 @@ fn inside(b: Bounds<Pixels>, bar: Bounds<Pixels>) -> bool {
 fn sweep(cx: &mut TestAppContext, lang: &str, floor: f32) -> Vec<String> {
     let _shell = shell(cx, lang);
     let mut failures = Vec::new();
-    for (production, waiting) in [(true, true), (true, false), (false, true), (false, false)] {
+    // ## m3b-t26-prod-unlock: production read-write, production read-only by its own flag,
+    // and staging read-only (the old non-production case), each with and without waiting.
+    for (production, read_only, waiting) in [
+        (true, false, true),
+        (true, false, false),
+        (true, true, true),
+        (true, true, false),
+        (false, true, true),
+        (false, true, false),
+    ] {
         let width = Rc::new(Cell::new(700.0_f32));
         let w = width.clone();
         let (_, vcx) = cx.add_window_view(move |_, _| Host {
             width: w,
-            model: model(production, waiting),
+            model: model(production, read_only, waiting),
         });
         let mut widths: Vec<f32> = (0..)
             .map(|k| 700.0 - 13.0 * k as f32)
@@ -118,25 +121,22 @@ fn sweep(cx: &mut TestAppContext, lang: &str, floor: f32) -> Vec<String> {
             let bar = vcx
                 .debug_bounds("toolbar-console-toolbar")
                 .expect("the console toolbar");
-            for id in trust_ids(production, vcx) {
+            for id in trust_ids(read_only) {
                 match vcx.debug_bounds(id) {
                     Some(b) if inside(b, bar) => {}
                     other => failures.push(format!(
-                        "{lang} prod={production} waiting={waiting} {px_now}: {id} {other:?} \
+                        "{lang} prod={production} ro={read_only} waiting={waiting} {px_now}: {id} {other:?} \
                          not inside {bar:?}"
                     )),
                 }
             }
             let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
             for r in frame.iter().filter(|r| {
-                r.path.ends_with("#button-label-console-prod-notice")
-                    || r.path.ends_with("#button-label-console-prod-short")
-                    || r.path.ends_with("#console-lock-label")
-                    || r.path.ends_with("#console-waiting-text")
+                r.path.ends_with("#console-lock-label") || r.path.ends_with("#console-waiting-text")
             }) {
                 if r.clipped || r.truncated || !r.visible || r.painted_px <= 0.0 {
                     failures.push(format!(
-                        "{lang} prod={production} waiting={waiting} {px_now}: {r:?} cut"
+                        "{lang} prod={production} ro={read_only} waiting={waiting} {px_now}: {r:?} cut"
                     ));
                 }
             }

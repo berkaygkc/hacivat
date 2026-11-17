@@ -180,6 +180,13 @@ pub(crate) fn exec_service(cx: &mut App) -> Arc<ExecService> {
     }
     let budget = MemoryBudget::from_ram(hacivat_ui_core::platform::physical_memory_bytes());
     let mut service = ExecService::new(budget);
+    // ## m3b-t26-prod-unlock (fix round 1, A-M2): the error bar's plan-less test seam
+    // (`error_bar::run_asking`) runs only in a `test-support` build; the product refuses any
+    // plan-less request.
+    #[cfg(feature = "test-support")]
+    {
+        service = service.with_plan_less_runs();
+    }
     if let Some(m) = cx.try_global::<crate::connections::ConnectionsModel>() {
         service = service.with_runtime(m.runtime());
     }
@@ -274,8 +281,9 @@ pub fn sql_context(console: ConsoleId, cx: &App) -> context::SqlContext {
 }
 
 // ## m3a-t33-exec-ui (fix round 1, Task 32 contract): pending read-only.
-/// The consoles Task 32 marked `pending_read_only`: a production-tagged console waiting for the
-/// user's open transaction to end before it reconnects read-only.
+/// The consoles Task 32 marked `pending_read_only`: a console whose profile was marked
+/// read-only, waiting for the user's open transaction to end before it reconnects read-only
+/// (## m3b-t26-prod-unlock: a production tag no longer does this, R-M3-78).
 #[derive(Default)]
 struct PendingReadOnly(std::collections::HashSet<ConsoleId>);
 

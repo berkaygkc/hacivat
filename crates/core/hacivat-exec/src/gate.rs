@@ -6,8 +6,9 @@
 //! (D-062), or deny it. Pure and synchronous: it never talks to a session.
 //!
 //! Since Task 15 ([`gate`] lists the rules). The app calls the gate only from Task 24 on
-//! (R-M3-52), and production stays read-only until Task 26: the gate unlocks nothing by
-//! itself (a read-only connection is gated as read-only whatever its environment).
+//! (R-M3-52). ## m3b-t26-prod-unlock: production sessions are read-write since Task 26, so the
+//! gate's production rows (rule 4 on) are what stands between a production console and its
+//! data; a read-only connection is still gated as read-only whatever its environment.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -192,14 +193,21 @@ impl GatePlan {
 /// 5. **D-062**: a lone `EXPLAIN ANALYZE` of a non-read runs wrapped in a rollback
 ///    (`ExplainAnalyzeRollback`), refused for `Routine`/`Admin` inner classes and, on
 ///    MySQL/MariaDB/TiDB, for DDL inners (their implicit commit escapes the rollback); one
-///    inside a unit of several statements is refused. On production an `Unknown` inner (or a
-///    unit the AND-check made `Unknown`), and every wrapped inner on MySQL/MariaDB/TiDB, asks
-///    first: `Confirm` with verdict `ExplainAnalyzeRollback`, naming what a rollback does not
-///    undo (`exec-explain-analyze-not-undone`; fix round 1, I2, M7).
+///    inside a unit of several statements is refused. On production every wrapped inner asks
+///    first (## m3b-t26-prod-unlock fix round 1, B-M2; before: an `Unknown` inner and every
+///    MySQL-family one): `Confirm` with verdict `ExplainAnalyzeRollback`, naming what a
+///    rollback does not undo (`exec-explain-analyze-not-undone`; fix round 1, I2, M7).
 /// 6. **The table**: production `Read`/`Session` → `Run`, `Lock` → `Warn`, `Dml` →
 ///    `RunInTxThenConfirm` (the session picks the form, P-M3b-1), every other class →
 ///    `Confirm`; off production `Run`, except a unit holding an unsafe-DML pattern, which asks
 ///    the calm `Confirm` while `confirm_unsafe_where` is on.
+///    ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1, D-043): on production
+///    MySQL/MariaDB/TiDB a `Dml` is a `Confirm` before it is sent (a MyISAM/MEMORY/Aria table
+///    keeps a write no rollback undoes); PostgreSQL and SQLite keep the savepoint form. A
+///    production `Session` statement that changes how later writes behave
+///    (`session_replication_role`, `sql_log_bin`, `foreign_key_checks`, `unique_checks`,
+///    `sql_safe_updates`, `gtid_next`, `pseudo_replica_mode`/`pseudo_slave_mode`,
+///    `synchronous_commit`, quoted or not) or a `NOTIFY` asks too (B-M1; fix round 2, R3).
 /// 7. **Stricter on top**: type-to-confirm on production (from the destructive kinds, not the
 ///    class: a DDL in the same unit hides `DmlUnsafe`; `DROP DATABASE/SCHEMA` also read from
 ///    the statement's words, I3), the MySQL/MariaDB/TiDB implicit commit of
@@ -208,8 +216,12 @@ impl GatePlan {
 ///    statements.
 /// 8. **Suppression**: a suppressible `Confirm`/`Warn` whose `(console, key)` the user turned
 ///    off runs (`Run`); the key mixes the fingerprint with the class (M4). Never suppressible:
-///    type-to-confirm, implicit commits, a unit of several statements with a write (M9), and on
-///    production `DdlDestructive`, `Admin`, `Routine` and `Unknown` (controller ruling).
+///    type-to-confirm, implicit commits, a unit of several statements with a write (M9), and
+///    **every production item** (T26 fix round 2, N1/R1: production never consults the set, so
+///    no "don't ask again" recorded anywhere applies there). Off production a code-like
+///    definition (`CREATE [OR REPLACE]`/`ALTER` of a `FUNCTION`, `PROCEDURE`, `TRIGGER`,
+///    `EVENT`, `RULE`, `POLICY` or `VIEW`; fix rounds 1 and 2) keys on a hash of its whole text
+///    too (a new body asks again).
 ///
 /// The verdict is `Read` only for a unit whose report reads only ([`reads_only`], R-M3-23);
 /// `Routine` and `Unknown` are `Unknown` with unknown session effects, never `Write`.
@@ -633,18 +645,28 @@ fn typed_name(
             if !dr.kind.is_unsafe_dml() && !schema_or_db {
                 continue;
             }
-            let Some(target) = dr.target.as_ref().or_else(|| s.touched.writes.first()) else {
+            // ## m3b-t26-prod-unlock (named exception, T26 carry MUST 1): a pattern without a
+            // target of its own names every object its statement writes, never only the first
+            // (`UPDATE a JOIN b … SET b.y = 2` writes `b`): typing one name must never approve
+            // another, so two are several targets.
+            let targets: Vec<&ObjectRef> = match dr.target.as_ref() {
+                Some(t) => vec![t],
+                None => s.touched.writes.iter().collect(),
+            };
+            if targets.is_empty() {
                 if schema_or_db && let Some(Some(n)) = &dropped_db {
                     push_name(&mut names, n.clone());
                     named = true;
                     continue;
                 }
                 return Err(GateReason::of(NO_TARGET));
-            };
-            push_name(
-                &mut names,
-                written_name(target, dr.range, s.range, text, report.dialect),
-            );
+            }
+            for target in targets {
+                push_name(
+                    &mut names,
+                    written_name(target, dr.range, s.range, text, report.dialect),
+                );
+            }
             named |= schema_or_db;
         }
         match dropped_db {
@@ -765,6 +787,62 @@ enum Row {
     Confirm,
 }
 
+// ## m3b-t26-prod-unlock (fix round 1, B-I2; fix round 2, R1)
+/// Whether `words` (a statement's atoms) define or change code-like objects whose body the
+/// fingerprint does not see: `CREATE [OR REPLACE] [DEFINER = …] … FUNCTION | PROCEDURE |
+/// TRIGGER | EVENT | RULE | POLICY | VIEW`, or `ALTER` of one. A word among the first dozen is
+/// enough (a column named `function` makes it stricter, never weaker).
+fn defines_routine(words: &[String]) -> bool {
+    matches!(words.first().map(String::as_str), Some("CREATE" | "ALTER"))
+        && words.iter().skip(1).take(12).any(|w| {
+            matches!(
+                w.as_str(),
+                "FUNCTION" | "PROCEDURE" | "TRIGGER" | "EVENT" | "RULE" | "POLICY" | "VIEW"
+            )
+        })
+}
+
+/// A hash of `text`, whole (the same text, the same value, in every run of the app).
+fn body_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
+
+// ## m3b-t26-prod-unlock (fix round 1, B-M1; fix round 2, R3)
+/// Whether a statement (its atoms `words`, and `raw`, every word of its text with quoted names,
+/// strings and comments read too) sets what makes later writes skip their checks, their
+/// durability or their replication, or is a `NOTIFY`. A variable is compared by its bare name:
+/// `@@`, a scope (`SESSION.`, `@@LOCAL.`, …) and its quotes (`"…"`, `` `…` ``) dropped, in any
+/// letter case. A string or comment naming one makes it stricter, never weaker.
+fn weakens_later_writes(words: &[String], raw: &[String]) -> bool {
+    const VARS: [&str; 9] = [
+        "SESSION_REPLICATION_ROLE",
+        "SQL_LOG_BIN",
+        "FOREIGN_KEY_CHECKS",
+        "UNIQUE_CHECKS",
+        "SQL_SAFE_UPDATES",
+        "GTID_NEXT",
+        "PSEUDO_REPLICA_MODE",
+        "PSEUDO_SLAVE_MODE",
+        "SYNCHRONOUS_COMMIT",
+    ];
+    // A raw word keeps `@` and `.`: `@@GLOBAL.FOREIGN_KEY_CHECKS` is one; its last part counts.
+    let bare = |w: &str| {
+        w.rsplit('.')
+            .next()
+            .unwrap_or(w)
+            .trim_start_matches('@')
+            .to_string()
+    };
+    match words.first().map(String::as_str) {
+        Some("NOTIFY") => true,
+        Some("SET") => raw.iter().any(|w| VARS.contains(&bare(w).as_str())),
+        _ => false,
+    }
+}
+
 /// The "don't ask again" key of a unit (fix round 1, M4): the classified text's fingerprint
 /// mixed with the unit's class, so a pair recorded for a statement of one class never silences
 /// a statement of the same shape and a higher class.
@@ -787,7 +865,21 @@ fn gate_unit(
         return denied(unit, GateClass::Unknown, SessionEffects::empty(), 0, reason);
     };
     let text = &*prepared.final_text;
-    let key = |c: GateClass| suppression_key(report.fingerprint.hash, c);
+    // ## m3b-t26-prod-unlock (fix round 1, B-I2): a routine definition's key also holds its
+    // whole text (the fingerprint drops constants, and a body is one).
+    let dialect = dialect_for(report, conn.engine);
+    let words: Vec<Vec<String>> = report
+        .items
+        .iter()
+        .map(|s| stmt_atoms(s, text, dialect))
+        .collect();
+    let routine = words.iter().any(|w| defines_routine(w));
+    let base = if routine {
+        report.fingerprint.hash ^ body_hash(text)
+    } else {
+        report.fingerprint.hash
+    };
+    let key = |c: GateClass| suppression_key(base, c);
     let facts = Facts::of(report, text, conn.engine);
     let effects = facts.effects;
     let deny = |class, reason| denied(unit, class, effects, key(class), reason);
@@ -878,6 +970,29 @@ fn gate_unit(
         };
     }
 
+    // ## m3b-t26-prod-unlock (fix round 1, B-M6): a plain `EXPLAIN` (no `ANALYZE`) of a data
+    // change plans it and runs nothing, so a read-write connection runs it as a read (no
+    // Keep/Undo prompt over a plan). Only a lone DML class qualifies: a destructive pattern, a
+    // call or anything the classifier doubts keeps its class (and asks). The read-only
+    // profile's own rule (above) is unchanged.
+    let plain_explain_of_dml = class == GateClass::Dml
+        && !report.items.is_empty()
+        && report.items.iter().all(|s| {
+            s.kind == (StmtKind::Explain { analyze: false })
+                && s.destructive.is_empty()
+                && s.touched.calls.is_empty()
+        });
+    if plain_explain_of_dml {
+        return GateItem {
+            unit,
+            decision: GateDecision::Run,
+            verdict: UnitVerdict::Read,
+            effects: SessionEffects::empty(),
+            class: GateClass::Read,
+            fingerprint: key(GateClass::Read),
+        };
+    }
+
     let mut extra = Vec::new();
     // 4. Production: `decide(Admin)` must not deny, and its confirmations count.
     if production {
@@ -911,8 +1026,9 @@ fn gate_unit(
         // Hacivat cannot classify (sequences, session advisory locks, dblink, file and network
         // I/O survive it), nor on MySQL/MariaDB/TiDB at all (non-transactional tables keep their
         // writes): it asks first, then runs wrapped. Never suppressible.
-        let asks =
-            production && (inner == GateClass::Unknown || class == GateClass::Unknown || mysql);
+        // ## m3b-t26-prod-unlock (fix round 1, B-M2): on production every wrapped inner asks
+        // first (row locks, bloat, triggers' side effects outlive the rollback).
+        let asks = production;
         let decision = if asks {
             let mut reasons = reasons_of(report, text);
             push_unique(&mut reasons, GateReason::of(EXPLAIN_NOT_UNDONE));
@@ -941,8 +1057,19 @@ fn gate_unit(
     // 6. The class's row.
     let mut row = if production {
         match class {
+            // ## m3b-t26-prod-unlock (fix round 1, B-M1)
+            GateClass::Read | GateClass::Session
+                if words.iter().zip(report.items.iter()).any(|(w, st)| {
+                    weakens_later_writes(w, &raw_words(slice(text, st.range).unwrap_or(text)))
+                }) =>
+            {
+                Row::Confirm
+            }
             GateClass::Read | GateClass::Session => Row::Run,
             GateClass::Lock => Row::Warn,
+            // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1): never run-then-ask on
+            // the MySQL family (a non-transactional table keeps the write).
+            GateClass::Dml if mysql => Row::Confirm,
             GateClass::Dml => Row::RunInTxThenConfirm,
             GateClass::DmlUnsafe
             | GateClass::DdlOther
@@ -970,14 +1097,11 @@ fn gate_unit(
     if type_to_confirm.is_some() || implicit_commit {
         row = Row::Confirm;
     }
-    // Fix round 1 (controller ruling, M9): on production "don't ask again" never covers a
-    // destructive, administrative, routine or unknown statement, and nowhere a unit of several
-    // statements with a write in it.
-    let never_suppressed = production
-        && matches!(
-            class,
-            GateClass::DdlDestructive | GateClass::Admin | GateClass::Routine | GateClass::Unknown
-        );
+    // Fix round 1 (controller ruling, M9): nowhere a unit of several statements with a write in
+    // it. ## m3b-t26-prod-unlock (fix round 2, N1/R1/A R1-m2): on production never, for any
+    // class: a production item never consults the set, so nothing recorded off production (or
+    // on it, before this round) applies there.
+    let never_suppressed = production;
     let suppressible =
         type_to_confirm.is_none() && !implicit_commit && !never_suppressed && !facts.mixed_write;
 

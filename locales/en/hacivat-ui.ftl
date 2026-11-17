@@ -1643,18 +1643,6 @@ hv-console-waiting = Waiting for a free connection to { $name } ({ $inUse } of {
 hv-console-waiting-short = Waiting for a connection ({ $inUse } of { $max } in use)
 # Stops waiting for a free connection.
 hv-console-waiting-cancel = Cancel
-# The console toolbar's notice on a production connection (a button that opens the explanation).
-hv-console-prod-notice = Production is read-only in this version
-# The notice's short form when the toolbar is narrow.
-hv-console-prod-short = read-only
-# The overflow menu row that opens the explanation when the notice is short.
-hv-console-prod-why = Why this console is read-only…
-# The explanation popover's title.
-hv-console-prod-pop-title = Why this console is read-only
-# The explanation popover's first paragraph.
-hv-console-prod-pop-body = Writing to production needs statement confirmations, and this version of { -brand-hacivat } doesn't have them yet. Until it does, every production console runs read-only, whatever the connection allows.
-# The explanation popover's second paragraph.
-hv-console-prod-pop-reads = Reads run as usual. A statement that would change data or schema isn't sent, and the Output tab says why.
 # The status bar's caret position in the console's editor (raw numbers, like the line numbers).
 # Variables:
 #   $line (Number) - the caret's line, from 1, e.g. 14.

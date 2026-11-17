@@ -53,8 +53,8 @@ use crate::session::{
 };
 use crate::test_conn::TestReport;
 // ## m3a-t01b-seams
-use crate::session::{SessionPolicy, effective_read_only};
-use crate::test_conn::test_connection_with_policy;
+use crate::session::effective_read_only;
+use crate::test_conn::test_connection_continuing;
 // ## m3b-t01c-core-seams
 use crate::session::StatementClassifier;
 
@@ -154,11 +154,6 @@ pub struct ManagerConfig {
     /// B19: a lost default session reconnects with backoff; without it (M2a, R12) the profile
     /// is `Lost`.
     pub reconnect: bool,
-    // ## m3a-t01b-seams
-    /// R-M3-6 REVISED, R-M3-29: production-tagged profiles get read-only sessions and Test
-    /// connections (`effective_read_only`). Off in `default()` and `m2b()`; the app's boot
-    /// turns it on. M3b removes it when confirmations land.
-    pub production_read_only: bool,
     // ## m3b-t01c-core-seams (R-M3-83, P-M3b-11)
     /// The classifier every read-only session's step 0b asks (`Core::step0b`, Task 18); the
     /// app's boot installs `hacivat-exec`'s `ClassifyPool` (Task 18). `None` (the default, and
@@ -178,7 +173,6 @@ type ConfigKey = (
     Duration,
     bool,
     bool,
-    bool,
     Option<*const ()>,
     // ## m3b-t12-session-carries
     hacivat_settings::TimeZonePref,
@@ -193,7 +187,6 @@ impl ManagerConfig {
             shutdown_budget,
             presets,
             reconnect,
-            production_read_only,
             classifier,
             time_zone,
         } = self;
@@ -202,7 +195,6 @@ impl ManagerConfig {
             *shutdown_budget,
             *presets,
             *reconnect,
-            *production_read_only,
             classifier.as_ref().map(|c| Arc::as_ptr(c).cast::<()>()),
             time_zone.clone(),
         )
@@ -241,7 +233,6 @@ impl Default for ManagerConfig {
             shutdown_budget: Duration::from_secs(2),
             presets: false,
             reconnect: false,
-            production_read_only: false,
             // ## m3b-t01c-core-seams
             classifier: None,
             // ## m3b-t12-session-carries
@@ -258,8 +249,6 @@ impl ManagerConfig {
         ManagerConfig {
             presets: true,
             reconnect: true,
-            // ## m3a-t01b-seams: unchanged for M2b callers; the app boot sets it.
-            production_read_only: false,
             ..ManagerConfig::default()
         }
     }
@@ -517,10 +506,6 @@ impl Shared {
             self.deps.clone(),
             budget.clone(),
         );
-        // ## m3a-t01b-seams: before any session exists (R-M3-29, P4).
-        sessions.set_policy(SessionPolicy {
-            production_read_only: self.config.production_read_only,
-        });
         // ## m3b-t01c-core-seams (P-M3b-11): the read-only guard's classifier, likewise.
         sessions.set_classifier(self.config.classifier.clone());
         // ## m3b-t12-session-carries (C11): the settings' time zone, likewise.
@@ -762,7 +747,7 @@ impl Shared {
         let (progress_tx, mut progress_rx) = watch::channel(fresh_progress());
         let req = ConnectRequest {
             // ## m3a-t01b-seams (R-M3-29)
-            read_only: effective_read_only(&profile, self.config.production_read_only),
+            read_only: effective_read_only(&profile),
             profile: profile.clone(),
             draft_password: draft,
             purpose: Purpose::Main,
@@ -1264,16 +1249,6 @@ impl ConnectionManager {
         self.shared.events.receiver_count()
     }
 
-    // ## m3a-t01b-seams (fix round 1)
-    /// The session policy every profile's sessions follow (R-M3-29): the app reads it instead
-    /// of repeating its boot configuration (the console's `effective_read_only`, the console
-    /// UX's forced read-only).
-    pub fn policy(&self) -> crate::session::SessionPolicy {
-        crate::session::SessionPolicy {
-            production_read_only: self.shared.config.production_read_only,
-        }
-    }
-
     // ## m3b-t22-tx-ui (named exception, T12 concern 2 / carry r1-m2)
     /// Changes the settings' time zone (`ui.time_zone`) at runtime: every session opened from
     /// now on, of every profile, sends `zone` on PostgreSQL (`System` sends nothing); sessions
@@ -1523,20 +1498,12 @@ impl ConnectionManager {
         let (result_tx, result) = oneshot::channel();
         let deps = self.shared.deps.clone();
         let cancel = token.clone();
-        // ## m3a-t01b-seams: a Test of a production profile runs read-only under the policy
-        // (R-M3-29), so it exercises the path its sessions take.
-        let production_read_only = self.shared.config.production_read_only;
+        // ## m3b-t26-prod-unlock: a Test runs read-only exactly when the profile is, as its
+        // sessions do (`effective_read_only`; the production policy is gone).
         self.shared.rt.spawn(async move {
-            let report = test_connection_with_policy(
-                &deps,
-                draft,
-                prior_rejections,
-                production_read_only,
-                ix,
-                cancel,
-                progress_tx,
-            )
-            .await;
+            let report =
+                test_connection_continuing(&deps, draft, prior_rejections, ix, cancel, progress_tx)
+                    .await;
             let _ = result_tx.send(report);
         });
         TestHandle::new(progress, result, token)

@@ -24,15 +24,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use common::matrix::*;
+// ## m3b-t26-prod-unlock
+use common::t28::{Con, Port, Spec};
 use hacivat_driver::{Protocol, TxStatus};
-use hacivat_exec::{LogMsg, UnitStatus, UnitSummary, console_ux};
+use hacivat_exec::classify_pool::ClassifyPool;
+use hacivat_exec::{ConfirmPort, LogMsg, UnitStatus, UnitSummary, console_ux};
 use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_results::{
     CloseReason, Completeness, FetchPolicy, MemoryBudget, ResultId, ResultStore, ResultWriter,
 };
 use hacivat_session::session::{
-    CancelOutcome, ClosePolicy, ErrorPolicy, ObserverRef, RowsOutcome, RunEvent, RunId,
-    RunObserver, RunSpec, RunUnit, SessionState, TxOwner, UnitId,
+    CancelOutcome, ClosePolicy, CommitAnswer, ErrorPolicy, ObserverRef, RowsOutcome, RunEvent,
+    RunId, RunObserver, RunSpec, RunUnit, SessionState, TxOwner, UnitId,
 };
 use hacivat_values::{
     DateVal, DecimalVal, LogicalType, ResultSchema, SpecialVal, TimeVal, TsVal, Value,
@@ -1559,7 +1562,11 @@ async fn read_only_bypass_rows_blocked_through_run_without_classifier() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "docker"]
-async fn production_console_rejects_insert_on_every_engine() {
+// ## m3b-t26-prod-unlock: was `production_console_rejects_insert_on_every_engine`. The
+// production console is read-write now (R-M3-6 REVISED ends); what refused the writes moves to
+// the gate's confirmations, proved with the same strength: every write asks before it is kept,
+// an unanswered confirmation sends nothing, an Undo keeps nothing, and nothing changes.
+async fn production_console_confirms_every_write_on_every_engine() {
     if !docker_enabled() {
         return;
     }
@@ -1576,36 +1583,80 @@ async fn production_console_rejects_insert_on_every_engine() {
 
         // The control: the same INSERT writes on a development console.
         let dev = Console::dev(line).await;
-        let ux = console_ux(Some(EnvTag::Dev), true, &dev.snap(), None, None);
-        assert!(!ux.read_only && !ux.forced_read_only, "{id}: {ux:?}");
+        let ux = console_ux(Some(EnvTag::Dev), &dev.snap(), None, None);
+        assert!(!ux.read_only, "{id}: {ux:?}");
         let ran = dev.ok(&insert).await;
         assert_eq!(rows_of(ran.unit(0)), Some(RowsOutcome::Affected(1)), "{id}");
         assert_eq!(a.count(&count).await, 1, "{id}: the control wrote");
         dev.shutdown().await;
 
-        // A production console under the app's policy: read-only, and every write refused.
+        // A production console under the app's configuration: read-write in Manual mode, and
+        // every write goes through the gate (`common::t28`).
         let prod = Console::open(
             line,
             Opts {
                 env: Some(EnvTag::Production),
-                production_policy: true,
                 ..Opts::default()
             },
         )
         .await;
-        let ux = console_ux(Some(EnvTag::Production), true, &prod.snap(), None, None);
-        assert!(
-            ux.production && ux.read_only && ux.forced_read_only,
-            "{id}: {ux:?}"
-        );
+        let ux = console_ux(Some(EnvTag::Production), &prod.snap(), None, None);
+        assert!(ux.production && !ux.read_only, "{id}: {ux:?}");
+        let pool = ClassifyPool::new(2);
+        let gated = Con::open(line, Spec::production(), &pool).await;
         let mut outcomes = Vec::new();
-        for sql in [
-            insert.clone(),
-            format!("DELETE FROM {t}"),
-            format!("UPDATE {t} SET a = 2"),
+        // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1): the MySQL family asks
+        // before it sends a DML; PostgreSQL and SQLite run it in a transaction, then ask.
+        let dml = if line.is_mysql_family() {
+            "confirm"
+        } else {
+            "tx-confirm"
+        };
+        for (sql, want) in [
+            (insert.clone(), dml),
+            (format!("DELETE FROM {t}"), "confirm+type"),
+            (format!("UPDATE {t} SET a = 2"), "confirm+type"),
         ] {
-            let ran = prod.run(&sql).await;
-            assert_eq!(ran.names(), ["Failed"], "{id} `{sql}`");
+            let planned = gated.plan(&sql, &[]).await;
+            assert_eq!(planned.shapes(), [want], "{id} `{sql}`: asked first");
+            // ## m3b-t26-prod-unlock (fix round 1, A-M6): the name asked is the table's.
+            if want == "confirm+type" {
+                let typed = match &planned.plan.items[0].decision {
+                    hacivat_exec::GateDecision::Confirm {
+                        type_to_confirm: Some(n),
+                        ..
+                    } => n.to_string(),
+                    other => panic!("{id} `{sql}`: {other:?}"),
+                };
+                assert_eq!(typed, t, "{id} `{sql}`: the typed name");
+            }
+            let ran = if want == "tx-confirm" {
+                // Run in the user's transaction, then asked: Undo keeps nothing.
+                let port = Port::new();
+                let run = gated.send(
+                    &planned,
+                    ErrorPolicy::StopOnError,
+                    Some(port.clone() as Arc<dyn ConfirmPort>),
+                );
+                port.question(id, 1).await;
+                assert_eq!(
+                    a.count(&count).await,
+                    1,
+                    "{id} `{sql}`: invisible while asked"
+                );
+                port.answer(CommitAnswer::RollBack);
+                ended(run).await
+            } else {
+                // A confirmation nobody answered: the service sends nothing.
+                let ran = ended(gated.send(&planned, ErrorPolicy::StopOnError, None)).await;
+                assert_eq!(
+                    ran.names(),
+                    ["Skipped"],
+                    "{id} `{sql}`: not sent unanswered"
+                );
+                ran
+            };
+            gated.settled().await;
             assert_eq!(a.count(&count).await, 1, "{id} `{sql}`: nothing changed");
             assert_eq!(
                 a.count(&format!("SELECT count(*) FROM {t} WHERE a = 1"))
@@ -1613,18 +1664,16 @@ async fn production_console_rejects_insert_on_every_engine() {
                 1,
                 "{id} `{sql}`"
             );
-            outcomes.push(ran.outcome());
+            outcomes.push(format!("{want}:{}", ran.outcome()));
         }
-        // ## m3a-f5-demo (DEMO-7): refused by the console, nothing sent (`input`), on
-        // every engine; not merely rejected by the server.
-        assert!(outcomes.iter().all(|o| o == INPUT), "{id}: {outcomes:?}");
+        gated.shutdown().await;
         // Reads still run on production.
         let ran = prod.ok(&count).await;
         assert_eq!(int(&cell(ran.tab(0), 0, 0)), 1, "{id}");
         record.add(
             line,
             prod.version.as_ref(),
-            "production INSERT/DELETE/UPDATE",
+            "production INSERT/DELETE/UPDATE (gated)",
             &outcomes.join(","),
         );
         prod.shutdown().await;

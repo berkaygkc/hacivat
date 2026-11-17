@@ -133,6 +133,8 @@ pub fn error_title_id(kind: &ExecErrorKind) -> &'static str {
         ExecErrorKind::Tx(TxError::ConfirmAlreadyCommitted) => "exec-confirm-already-committed",
         ExecErrorKind::Tx(TxError::ConfirmTimedOut) => "exec-error-confirm-timed-out",
         ExecErrorKind::Tx(TxError::ConfirmUndone) => "exec-error-confirm-undone",
+        // ## m3b-t26-prod-unlock (fix round 1)
+        ExecErrorKind::Tx(TxError::ConfirmNotUndone) => "exec-error-confirm-not-undone",
         ExecErrorKind::Tx(TxError::TableLocksHeld) => "exec-error-tx-table-locks",
         // ## m3b-t19-confirm-tx (named exception, fix round 2, R1-m3)
         ExecErrorKind::Tx(TxError::ExplainNotRolledBack) => "exec-explain-not-rolled-back",

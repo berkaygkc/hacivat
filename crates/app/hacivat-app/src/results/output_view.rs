@@ -138,6 +138,8 @@ fn glyph(msg: &LogMsg) -> (IconName, bool) {
         | LogMsg::ConfirmRolledBack { .. } => (IconName::GitCommit, false),
         LogMsg::SafetyDenied { .. } => (IconName::Lock, false),
         LogMsg::ConfirmStatementFailed => (IconName::TriangleAlert, true),
+        // ## m3b-t26-prod-unlock (named exception, fix round 1)
+        LogMsg::ConfirmNotUndone => (IconName::TriangleAlert, true),
         // ## m3b-t16-run-service (named exception): Task 25 owns their look.
         LogMsg::NoticesDropped { .. } => (IconName::Ellipsis, false),
         LogMsg::ClosedEarly { .. } => (IconName::Ban, false),

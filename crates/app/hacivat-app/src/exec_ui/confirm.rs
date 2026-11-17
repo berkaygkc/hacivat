@@ -51,7 +51,8 @@
 //! the port's book keyed by `RunId`; [`AppConfirmPort::connection_lost`] records a run's loss
 //! there. A confirm-in-transaction prompt attaches its own run's entries whenever they arrive
 //! (fix round 1, I2). An asker that goes away closes its prompt (m6). Nothing here runs a
-//! statement or unlocks production (R-M3-52).
+//! statement; it answers the questions that production writes wait for (R-M3-52; production
+//! writes since Task 26).
 //!
 //! **Fix round 1.** Run buttons (Execute, Execute all, "don't ask again") answer only
 //! [`ARM_DELAY`] after the dialog shows (executor clock), by click or by Enter, and never on the
@@ -170,28 +171,18 @@ impl ConfirmContext {
 
 /// Whether the dialog offers "Execute and don't ask again" for `q` of class `class` (module
 /// docs): never with a typed name, never for a statement Hacivat could not analyse or one that
-/// commits an open MySQL transaction, and on production never for `DdlDestructive`, `Admin`,
-/// `Unknown` or `Routine`, nor when the class is not known. The question's own flag (the gate's,
-/// which already refuses a multi-statement unit with a write) must allow it too.
-pub fn offers_suppress(q: &ConfirmQuestion, class: Option<GateClass>) -> bool {
+/// commits an open MySQL transaction, and never on production, whatever the class
+/// (## m3b-t26-prod-unlock, fix round 2; `_class` is kept for the callers). The question's own
+/// flag (the gate's, which already refuses a multi-statement unit with a write) must allow it
+/// too.
+pub fn offers_suppress(q: &ConfirmQuestion, _class: Option<GateClass>) -> bool {
     let unanalysed = q
         .reasons
         .iter()
         .any(|r| r.fluent_id == NOT_ANALYSED || r.fluent_id == IMPLICIT_COMMIT);
-    let production_forbids = q.production
-        && !matches!(
-            class,
-            Some(
-                GateClass::Read
-                    | GateClass::Session
-                    | GateClass::Tx
-                    | GateClass::Lock
-                    | GateClass::Dml
-                    | GateClass::DmlUnsafe
-                    | GateClass::DdlOther
-            )
-        );
-    q.suppressible && q.type_to_confirm.is_none() && !unanalysed && !production_forbids
+    // ## m3b-t26-prod-unlock (fix round 2, N1/R1/A R1-m2): never on production, for any class
+    // (the gate marks no production item suppressible either).
+    q.suppressible && q.type_to_confirm.is_none() && !unanalysed && !q.production
 }
 
 // ## m3b-t21-confirm (fix round 1, m8)
@@ -288,8 +279,21 @@ fn needs_name(item: &GateItem) -> bool {
 }
 
 /// The later units of `plan` after the item of unit `unit` that Execute all answers (they ask,
-/// without a typed name; RC-1), by unit.
+/// without a typed name; RC-1), by unit. Off production; [`execute_all_covers_on`] says it for
+/// either.
 pub fn execute_all_covers(plan: &GatePlan, unit: u32) -> Vec<u32> {
+    execute_all_covers_on(plan, unit, false)
+}
+
+// ## m3b-t26-prod-unlock (named exception, fix round 1, B-I3; fix round 2, R2)
+/// [`execute_all_covers`] on a connection that is (`production`) or is not production: on
+/// production Execute all covers nothing, so it is not offered and every later unit shows its
+/// own dialog (fix round 2, R2: the ruling allowed covering only byte-identical repeats or
+/// hiding it; hiding is the simpler of the two, and the repeats were its only use).
+pub fn execute_all_covers_on(plan: &GatePlan, unit: u32, production: bool) -> Vec<u32> {
+    if production {
+        return Vec::new();
+    }
     plan.items
         .iter()
         .filter(|i| i.unit > unit && asks(i) && !needs_name(i))
@@ -298,8 +302,13 @@ pub fn execute_all_covers(plan: &GatePlan, unit: u32) -> Vec<u32> {
 }
 
 /// What the dialog for the item of unit `unit` shows about the rest of the run.
-fn plan_context(plan: &GatePlan, unit: u32, base: &ConfirmContext) -> ConfirmContext {
-    let covered = execute_all_covers(plan, unit);
+fn plan_context(
+    plan: &GatePlan,
+    unit: u32,
+    base: &ConfirmContext,
+    production: bool,
+) -> ConfirmContext {
+    let covered = execute_all_covers_on(plan, unit, production);
     let later_asks = plan
         .items
         .iter()
@@ -345,6 +354,19 @@ pub fn answer_plan(
     answer: ConfirmAnswer,
     offered: bool,
 ) -> PlanFlow {
+    answer_plan_on(plan, unit, answer, offered, false)
+}
+
+// ## m3b-t26-prod-unlock (named exception, fix round 1, B-I3)
+/// [`answer_plan`] on a production (`production`) or other connection: Execute all answers
+/// [`execute_all_covers_on`].
+pub fn answer_plan_on(
+    plan: &mut GatePlan,
+    unit: u32,
+    answer: ConfirmAnswer,
+    offered: bool,
+    production: bool,
+) -> PlanFlow {
     let fingerprint = plan
         .items
         .iter()
@@ -360,7 +382,7 @@ pub fn answer_plan(
             return PlanFlow::Go(fingerprint.filter(|_| offered));
         }
         ConfirmAnswer::ExecuteAll => {
-            let covered = execute_all_covers(plan, unit);
+            let covered = execute_all_covers_on(plan, unit, production);
             apply_answer(plan, unit, ConfirmAnswer::Execute);
             for later in covered {
                 apply_answer(plan, later, ConfirmAnswer::ExecuteAll);
@@ -432,11 +454,11 @@ pub fn ask_plan_at(
             else {
                 continue;
             };
-            let ctx = plan_context(&plan, item.unit, &base);
+            let ctx = plan_context(&plan, item.unit, &base, production);
             let offered = offers_suppress(&q, ctx.class);
             let rx = cx.update(|cx| open_in(q, ctx, cx));
             let answer = rx.await.unwrap_or(ConfirmAnswer::Cancel);
-            match answer_plan(&mut plan, item.unit, answer, offered) {
+            match answer_plan_on(&mut plan, item.unit, answer, offered, production) {
                 PlanFlow::Cancelled => return Err(item.unit),
                 PlanFlow::Go(key) => suppress.extend(key),
             }
@@ -1097,6 +1119,7 @@ impl Render for ConfirmDialog {
                 &theme,
                 message(
                     cx,
+                    // ## m3b-t26-prod-unlock (fix round 2, R2): never shown on production.
                     "hv-confirm-execute-all-scope",
                     vec![("n", ArgValue::Count(u64::from(self.ctx.covered)))],
                 ),

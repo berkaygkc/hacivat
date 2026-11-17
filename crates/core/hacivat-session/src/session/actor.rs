@@ -328,6 +328,8 @@ pub(crate) fn spawn_supervised(
     };
     // ## m3b-t18-safe06 (named exception): the `sql_mode` this session pins (R-M3-57).
     let observed_sql_mode = crate::session::readonly::observed_sql_mode(read_only, live.raw());
+    // ## m3b-t26-prod-unlock (fix round 1, A-I1): the profile's live tag, for the startup check.
+    let live_env = activity.clone();
     let core = Core {
         kind,
         profile,
@@ -367,6 +369,8 @@ pub(crate) fn spawn_supervised(
         published_tx: None,
         // ## m3b-t12-session-carries
         time_zone,
+        // ## m3b-t26-prod-unlock (fix round 1, A-I1)
+        live_env,
     };
     let ctl = Ctl {
         id,
@@ -489,6 +493,11 @@ pub(crate) struct Core {
     /// The settings' time zone (C11; the plan sends it on PostgreSQL only), shared by the
     /// profile's sessions: one a server refused is sent by none (review m7).
     time_zone: Option<Arc<SessionZone>>,
+    // ## m3b-t26-prod-unlock (named exception, fix round 1, A-I1)
+    /// The profile's shared activity, read for its live environment tag (`startup_check`):
+    /// a session opened before its profile was tagged production checks its script from then
+    /// on. `None` (a session spawned outside a pool): its own profile's tag alone.
+    pub(crate) live_env: Option<Arc<crate::session::liveness::ProfileActivity>>,
 }
 
 fn not_connected() -> ExecError {
@@ -1132,6 +1141,23 @@ impl Core {
     ) -> Result<(), ExecError> {
         let mut script_ran = false;
         for step in plan.steps.iter().filter(|step| want(step)) {
+            // ## m3b-t26-prod-unlock (named exception, the T26 carry MUST 3): on a production
+            // profile the script runs only harmless statements (`startup_check`); otherwise
+            // none of it is sent and the session is refused (`config.invalid`), on connect,
+            // reset and reconnect alike. The warning names the statement's number, never its
+            // text.
+            if let EnvStep::StartupScript(statements) = step
+                && let Some(n) = self.refused_startup_statement(statements).await
+            {
+                tracing::warn!(
+                    statement = n,
+                    "statement {n} of the profile's startup script is not a harmless read or \
+                     session setting, which a production connection requires; none of the \
+                     script was sent and the session is closed"
+                );
+                self.last_class = Some(ErrClass::ConfigInvalid);
+                return Err(ExecError::of(ExecErrorKind::Internal));
+            }
             let config = matches!(step, EnvStep::TimeZone(_) | EnvStep::StartupScript(_));
             for statement in plan.step_statements(step) {
                 if let Err(e) = self.control(&statement).await {

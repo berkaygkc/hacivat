@@ -1356,6 +1356,12 @@ impl<'a, 's> Classifier<'a, 's> {
         match where_clause {
             None => self.destroy(DestructiveKind::NoWhere, target),
             Some(w) if always_true(w) => self.destroy(DestructiveKind::AlwaysTrue, target),
+            // ## m3b-t26-prod-unlock (fix round 2, A R1-m1: the fail-closed rule): a `WHERE`
+            // that reads no column of the target (and joins nothing) is constant for the
+            // statement, so it counts as keeping every row.
+            Some(w) if joined.is_empty() && !relation.is_some_and(|rv| references(w, rv)) => {
+                self.destroy(DestructiveKind::AlwaysTrue, target);
+            }
             Some(w) if !joined.is_empty() && !relation.is_some_and(|rv| references(w, rv)) => {
                 self.destroy(DestructiveKind::JoinWithoutOn, target);
             }
@@ -2045,8 +2051,71 @@ enum Val {
 
 /// Whether `w` is true for every row: it folds to the constant `true` (`1=1`, `TRUE`,
 /// `'a'='a'`, `NULL IS NULL`, `NOT FALSE`, `x OR 1=1`, …).
+///
+/// ## m3b-t26-prod-unlock (fix round 2, A R1-m1): also a column compared with itself (`a = a`,
+/// `t.id >= t.id`, `a IS NOT DISTINCT FROM a`) and `x IS NULL OR x IS NOT NULL` of one column,
+/// through `AND`/`OR`.
 fn always_true(w: &pb::Node) -> bool {
-    eval(w) == Some(Val::Bool(true))
+    eval(w) == Some(Val::Bool(true)) || keeps_every_row(w)
+}
+
+// ## m3b-t26-prod-unlock (fix round 2, A R1-m1)
+/// The column patterns [`always_true`] adds to the constant fold.
+fn keeps_every_row(w: &pb::Node) -> bool {
+    use pb::node::Node as N;
+    let column = |n: Option<&pb::Node>| -> Option<Vec<String>> {
+        match n?.node.as_ref()? {
+            N::ColumnRef(c) => c
+                .fields
+                .iter()
+                .map(|f| match &f.node {
+                    Some(N::String(s)) => Some(s.sval.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }
+    };
+    let null_test = |n: &pb::Node| match n.node.as_ref() {
+        Some(N::NullTest(t)) => Some((
+            column(t.arg.as_deref())?,
+            t.nulltesttype == pb::NullTestType::IsNotNull as i32,
+        )),
+        _ => None,
+    };
+    match w.node.as_ref() {
+        Some(N::AExpr(e)) => {
+            let same = matches!(
+                (column(e.lexpr.as_deref()), column(e.rexpr.as_deref())),
+                (Some(a), Some(b)) if a == b
+            );
+            if !same {
+                return false;
+            }
+            if e.kind == pb::AExprKind::AexprNotDistinct as i32 {
+                return true;
+            }
+            e.kind == pb::AExprKind::AexprOp as i32
+                && matches!(
+                    strings(&e.name).as_deref(),
+                    Some(["=" | ">=" | "<="] | ["pg_catalog", "=" | ">=" | "<="])
+                )
+        }
+        Some(N::BoolExpr(b)) => match pb::BoolExprType::try_from(b.boolop) {
+            Ok(pb::BoolExprType::OrExpr) => {
+                b.args.iter().any(always_true)
+                    || b.args.iter().filter_map(null_test).any(|(c, negated)| {
+                        b.args
+                            .iter()
+                            .filter_map(null_test)
+                            .any(|(d, other)| c == d && negated != other)
+                    })
+            }
+            Ok(pb::BoolExprType::AndExpr) => b.args.iter().all(always_true),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 fn eval(n: &pb::Node) -> Option<Val> {

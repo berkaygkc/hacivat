@@ -1534,18 +1534,6 @@ hv-console-waiting-short = Bağlantı bekleniyor (kullanımda: { $inUse }/{ $max
 # Review: PO
 hv-console-waiting-cancel = Vazgeç
 # Review: PO
-hv-console-prod-notice = Üretim bu sürümde salt okunur
-# Review: PO
-hv-console-prod-short = salt okunur
-# Review: PO
-hv-console-prod-why = Bu konsol neden salt okunur…
-# Review: PO
-hv-console-prod-pop-title = Bu konsol neden salt okunur
-# Review: PO
-hv-console-prod-pop-body = Üretimde yazmak ifade onayları gerektirir ve { -brand-hacivat } bu sürümünde bu onaylara henüz sahip değil. O zamana kadar her üretim konsolu, bağlantı neye izin verirse versin salt okunur çalışır.
-# Review: PO
-hv-console-prod-pop-reads = Okuma ifadeleri her zamanki gibi çalışır. Veriyi ya da şemayı değiştirecek bir ifade gönderilmez; nedenini Çıktı sekmesi söyler.
-# Review: PO
 hv-editor-lncol = Sat { NUMBER($line, useGrouping: "false") }, Süt { NUMBER($col, useGrouping: "false") }
 # Review: PO
 hv-editor-selected = { $n } seçili

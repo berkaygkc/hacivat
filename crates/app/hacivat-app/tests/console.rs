@@ -309,15 +309,23 @@ fn second_console_opens_its_own_session_and_waits_when_the_budget_is_full(cx: &m
 
 // ---- production ------------------------------------------------------------------------------
 
+// ## m3b-t26-prod-unlock: was `production_console_shows_the_notice_and_the_hairline`. The
+// production read-only notice and its explanation are gone (R-M3-6 REVISED ends, R-M3-81); the
+// hairline and the environment stay, and a write is confirmed before anything is sent.
 #[gpui::test]
-fn production_console_shows_the_notice_and_the_hairline(cx: &mut TestAppContext) {
+fn production_console_shows_the_hairline_and_confirms_a_write(cx: &mut TestAppContext) {
     let vcx = shell_with_profile(cx, "orders-prod", Some(EnvTag::Production), 4);
     connect_and_wait(vcx, "orders-prod");
     let id = wait_active_console(vcx);
     let session = wait_session(vcx, id);
     assert!(
-        session.state().borrow().read_only,
-        "a production console's session is read-only (R-M3-6)"
+        !session.state().borrow().read_only,
+        "a production console's session is read-write since Task 26"
+    );
+    assert_eq!(
+        session.state().borrow().tx.mode,
+        hacivat_session::session::TxMode::Manual,
+        "D-036"
     );
     let tab = with_ws(vcx, |ws, _, _| ws.active_tab()).expect("a tab");
     let decor = vcx.cx.read(|cx| {
@@ -328,19 +336,43 @@ fn production_console_shows_the_notice_and_the_hairline(cx: &mut TestAppContext)
     assert_eq!(decor.env, Some(hacivat_ui::capsule::EnvKind::Production));
     let frame = frame_text(vcx);
     assert!(
-        frame.contains("Production is read-only in this version"),
-        "{frame}"
+        !frame.contains("Production is read-only in this version"),
+        "no production read-only notice: {frame}"
     );
-    // The notice opens its explanation.
-    click(vcx, "button-console-prod-notice");
-    let frame = frame_text(vcx);
-    assert!(frame.contains("Why this console is read-only"), "{frame}");
-    assert!(layer_ids(vcx).contains(&"console-prod-popover"));
+    assert!(vcx.debug_bounds("button-console-prod-notice").is_none());
+    assert!(vcx.debug_bounds("console-lock").is_none(), "no lock chip");
+    // A write asks first (DmlUnsafe on production: the typed name), and nothing is sent
+    // before the answer; Escape cancels it.
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    vcx.simulate_input("DELETE FROM t;");
+    vcx.simulate_keystrokes(&primary("enter"));
+    wait_until(vcx, "the confirmation", |vcx| {
+        vcx.cx.read(hacivat_app::exec_ui::confirm::confirm_open)
+    });
+    let sent = format!("{:?}", fake(vcx).call_log());
+    assert!(
+        !sent.contains("DELETE"),
+        "nothing sent before the answer: {sent}"
+    );
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    wait_until(vcx, "the confirmation to close", |vcx| {
+        !vcx.cx.read(hacivat_app::exec_ui::confirm::confirm_open)
+    });
+    let sent = format!("{:?}", fake(vcx).call_log());
+    assert!(!sent.contains("DELETE"), "Cancel sent nothing: {sent}");
     stop_core_runtime_test(cx);
 }
 
+// ## m3b-t26-prod-unlock (R-M3-78): was `a_profile_tagged_production_while_its_console_is_open_
+// reconnects_read_only`. A retag to production reconnects nothing; the gate reads the live tag,
+// so the next Run asks before anything is sent. Marking the profile read-only still drops the
+// read-write session and reconnects read-only (the strength the old test had, on the path that
+// keeps it).
 #[gpui::test]
-fn a_profile_tagged_production_while_its_console_is_open_reconnects_read_only(
+fn a_profile_tagged_production_while_its_console_is_open_confirms_from_the_next_run(
     cx: &mut TestAppContext,
 ) {
     let vcx = shell_with_profile(cx, "orders", Some(EnvTag::Dev), 4);
@@ -354,11 +386,40 @@ fn a_profile_tagged_production_while_its_console_is_open_reconnects_read_only(
         .cx
         .read(|cx| (*cx.global::<ConnectionsModel>().get(pid).expect("saved")).clone());
     p.environment = Some(EnvTag::Production);
+    save_draft(vcx, hacivat_session::profile::ProfileDraft::edit(p.clone()));
+    // No forced reconnect: the console keeps its read-write session (and its mode).
+    assert_eq!(
+        session_of(vcx, id).map(|s| s.id()),
+        Some(rw.id()),
+        "the session survives the tag"
+    );
+    assert!(!rw.state().borrow().read_only);
+    // The next Run asks first: an unbounded DELETE on production needs the typed name.
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    vcx.simulate_input("DELETE FROM t;");
+    vcx.simulate_keystrokes(&primary("enter"));
+    wait_until(vcx, "the confirmation", |vcx| {
+        vcx.cx.read(hacivat_app::exec_ui::confirm::confirm_open)
+    });
+    let sent = format!("{:?}", fake(vcx).call_log());
+    assert!(
+        !sent.contains("DELETE"),
+        "nothing sent before the answer: {sent}"
+    );
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    wait_until(vcx, "the confirmation to close", |vcx| {
+        !vcx.cx.read(hacivat_app::exec_ui::confirm::confirm_open)
+    });
+    // Marking it read-only still moves it at once: the read-write session is gone from the
+    // console, and a read-only one replaces it.
+    p.read_only = true;
     save_draft(vcx, hacivat_session::profile::ProfileDraft::edit(p));
-    // At once: the read-write session is gone from the console.
     assert!(
         session_of(vcx, id).is_none_or(|s| s.id() != rw.id()),
-        "the read-write session does not survive the tag"
+        "the read-write session does not survive the read-only mark"
     );
     wait_until(vcx, "a read-only session", |vcx| {
         session_of(vcx, id).is_some_and(|s| s.state().borrow().read_only)
@@ -413,9 +474,12 @@ fn answer_prompt(vcx: &VisualTestContext, button: Option<usize>) {
 const ROLL_BACK: usize = 1;
 
 /// A console never lets go of a session holding the user's open transaction (no silent
-/// rollback). Tagging its profile production asks first (Task 33's prompt); on Cancel the
+/// rollback). Marking its profile read-only asks first (Task 33's prompt); on Cancel the
 /// console stays pending read-only (C1): nothing claims read-only, Run sends nothing; once the
-/// transaction ends the profile reconnects read-only and the notice is true again.
+/// transaction ends the profile reconnects read-only and the lock chip is true again.
+/// ## m3b-t26-prod-unlock: the release used to come from a production tag; a tag no longer
+/// releases anything (R-M3-78), so the read-only mark (the path that keeps the reconnect)
+/// drives it, with the same assertions.
 #[gpui::test]
 fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext) {
     let vcx = shell_with_fake(cx, "en", pg_fake());
@@ -431,7 +495,7 @@ fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext)
     let mut p = vcx
         .cx
         .read(|cx| (*cx.global::<ConnectionsModel>().get(pid).expect("saved")).clone());
-    p.environment = Some(EnvTag::Production);
+    p.read_only = true;
     save_draft(vcx, hacivat_session::profile::ProfileDraft::edit(p));
     // The prompt asks; nothing is released before an answer.
     wait_until(vcx, "the prompt", |vcx| prompt(vcx).is_some());
@@ -449,8 +513,8 @@ fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext)
     );
     let frame = frame_text(vcx);
     assert!(
-        !frame.contains("Production is read-only in this version"),
-        "no false read-only notice: {frame}"
+        vcx.debug_bounds("console-lock").is_none(),
+        "no false read-only lock chip: {frame}"
     );
     assert!(
         frame.contains(
@@ -470,7 +534,7 @@ fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext)
         !sent.contains("DELETE"),
         "Run sent nothing while pending: {sent}"
     );
-    // The user ends it: the profile reconnects read-only, and the notice is true again.
+    // The user ends it: the profile reconnects read-only, and the lock chip is true again.
     user_exec(&rw, "ROLLBACK");
     wait_until(vcx, "a read-only session", |vcx| {
         session_of(vcx, id).is_some_and(|s| s.state().borrow().read_only)
@@ -479,9 +543,10 @@ fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext)
         !vcx.cx
             .read(|cx| hacivat_app::exec_ui::pending_read_only(id, cx))
     });
-    wait_until(vcx, "the production notice", |vcx| {
-        frame_text(vcx).contains("Production is read-only in this version")
+    wait_until(vcx, "the lock chip", |vcx| {
+        frame_text(vcx).contains("read-only (guarded)")
     });
+    assert!(vcx.debug_bounds("console-lock").is_some(), "the lock chip");
     stop_core_runtime_test(cx);
 }
 

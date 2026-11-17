@@ -1677,7 +1677,7 @@ fn a_probe_without_a_value_leaves_the_context_unknown(cx: &mut TestAppContext) {
     stop_core_runtime_test(cx);
 }
 
-/// Task 32 contract: while a production-tagged console waits for its open transaction to end
+/// Task 32 contract: while a console marked read-only waits for its open transaction to end
 /// before reconnecting read-only (`pending_read_only`), Run sends nothing and says why; Commit
 /// and Roll back stay available; once the flag clears, Run runs again.
 #[gpui::test]
@@ -1756,7 +1756,7 @@ fn confirm_release_lets_a_disconnect_continue_after_the_rollback(cx: &mut TestAp
 }
 
 // ## m3a-f1-followups
-/// Follow-up F1-c: a read-only (production) console on a server the read-only guard cannot
+/// Follow-up F1-c: a read-only console on a server the read-only guard cannot
 /// verify (its canary answers nothing). Binding the console probes its SQL context at once;
 /// the probe keeps the session (it was guarded and broke it, so every connect of such a
 /// server ended `Lost { Internal }`). The guard stays fail-closed for the user's statements.

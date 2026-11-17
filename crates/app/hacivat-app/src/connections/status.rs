@@ -321,14 +321,14 @@ pub struct SessionView {
 /// The status bar's projection of a session snapshot (see [`TxSegment`], [`CursorSegment`]).
 ///
 /// The transaction, the cursor and the access are Task 23's `console_ux` table (the profile's
-/// environment, the policy, the run and the pool do not reach those fields, so they are not
+/// environment, the run and the pool do not reach those fields, so they are not
 /// passed). One rule more, the safer one where the two differ: a session that is
 /// `Disconnected` or `Broken` shows no transaction and no cursor (fix round 1, I3). Its close
 /// and its break roll the transaction back but leave the last `tx` in the snapshot, so the
 /// table alone would keep showing a transaction that is gone (session side: T18/M3b; the
 /// table's `tx_badge`: T33).
 pub fn session_view(snap: &SessionSnapshot) -> SessionView {
-    let ux = console_ux(None, false, snap, None, None);
+    let ux = console_ux(None, snap, None, None);
     let ended = matches!(
         snap.state,
         SessionState::Disconnected | SessionState::Broken(_)

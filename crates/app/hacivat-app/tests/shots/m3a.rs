@@ -162,7 +162,15 @@ pub(super) enum M3a {
     HistOther,
     HistEmpty,
     HistNoMatch,
+    // ## m3b-t26-prod-unlock (named exception; the T22 carry): a production console's
+    // transaction menu (Manual checked, the production note), rendered by the M3a machinery
+    // until Task 29 moves it to `shots/m3b.rs` ([`M3B_T26`]).
+    TxChipProduction,
 }
+
+// ## m3b-t26-prod-unlock (named exception)
+/// The Task 26 states (after every Task 27 state).
+pub(super) const M3B_T26: [M3a; 1] = [M3a::TxChipProduction];
 
 // ## m3b-t27-history (named exception)
 /// The Task 27 states (after every Task 23 state).
@@ -440,6 +448,8 @@ impl M3a {
             M3a::CopyTooMuch => "copy-too-much",
             // ## m3b-t22-tx-ui
             M3a::TxChipMenu => "tx-chip-menu",
+            // ## m3b-t26-prod-unlock
+            M3a::TxChipProduction => "tx-chip-production",
             M3a::TxIsolationMenu => "tx-isolation-menu",
             M3a::TxBadgeOpen => "tx-badge-open",
             M3a::TxBadgeFailed => "tx-badge-failed",
@@ -525,9 +535,11 @@ impl M3a {
             }
             M3a::CopyCopied | M3a::CopyCopying | M3a::CopyTooMuch => (TOAST, None),
             // ## m3b-t22-tx-ui: the menu's title row, the badge's own labels, the toast.
-            M3a::TxChipMenu | M3a::TxIsolationMenu | M3a::TxSegmentMenu => {
-                ("#popup-menu-title", None)
-            }
+            M3a::TxChipMenu
+            | M3a::TxIsolationMenu
+            | M3a::TxSegmentMenu
+            // ## m3b-t26-prod-unlock
+            | M3a::TxChipProduction => ("#popup-menu-title", None),
             M3a::TxBadgeOpen => ("#tx-badge-text", None),
             M3a::TxBadgeFailed => ("#tx-badge-failed", None),
             M3a::TxIdleToast => (TOAST, None),
@@ -560,10 +572,6 @@ impl M3a {
     /// transaction and cursor never collapse): each group lists the label ids (`#id`) of which
     /// one must be visible and painted.
     pub(super) fn required(self) -> &'static [&'static [&'static str]] {
-        const PROD_NOTICE: &[&str] = &[
-            "#button-label-console-prod-notice",
-            "#button-label-console-prod-short",
-        ];
         const ENV: &[&str] = &["#status-env-label"];
         const TX: &[&str] = &["#status-tx-open"];
         const TX_FAILED: &[&str] = &["#status-tx-failed"];
@@ -581,14 +589,18 @@ impl M3a {
         const CHIP: &[&str] = &["#tx-chip-mode"];
         match self {
             M3a::TxChipMenu | M3a::TxIsolationMenu => &[CHIP],
+            // ## m3b-t26-prod-unlock: production's own signals, the menu over its chip.
+            M3a::TxChipProduction => &[CHIP, ENV],
             M3a::TxBadgeOpen | M3a::TxShared => &[TX, BADGE, CHIP],
             M3a::TxBadgeFailed => &[TX_FAILED, BADGE_FAILED, CHIP],
             M3a::TxSegmentMenu | M3a::TxIdleToast => &[TX, BADGE],
             M3a::StatusTxOpen => &[TX, BADGE],
             M3a::StatusTxFailed => &[TX_FAILED, BADGE_FAILED],
-            M3a::ConsoleProduction | M3a::ToolbarProductionWaiting | M3a::MarksDenied => {
-                &[PROD_NOTICE, ENV]
-            }
+            // ## m3b-t26-prod-unlock (R-M3-81): the production read-only notice is gone; a
+            // production console's trust signals are its environment and, with a session, the
+            // transaction mode chip (Manual, D-036).
+            M3a::ConsoleProduction => &[ENV, CHIP],
+            M3a::ToolbarProductionWaiting | M3a::MarksDenied => &[ENV],
             M3a::StatusProductionResult => &[ENV],
             M3a::ToolbarRunning => &[CLOCK],
             // ## m3b-t22-tx-ui (named exception): `StatusTxOpen` / `StatusTxFailed` moved up,
@@ -610,6 +622,8 @@ impl M3a {
                 | M3a::MarksDenied
                 // ## m3b-t23-escalation (fix round 1, I2)
                 | M3a::EscDialogProduction
+                // ## m3b-t26-prod-unlock
+                | M3a::TxChipProduction
         )
     }
 
@@ -875,14 +889,15 @@ impl M3a {
                 s
             }
             MarksDenied => {
-                // A read-only console never starts a transaction: not sent (DenyLayer::
-                // Transaction). (An UPDATE is sent and refused by the server, 25006: a failure
-                // with its chip, as surface 5's Failed row shows.)
-                let text = "BEGIN;\nUPDATE orders SET status = 'shipped' WHERE id = 1042;\n";
+                // ## m3b-t26-prod-unlock (R-M3-81): a production console writes since Task 26,
+                // so its denial is the gate's: a `DROP SCHEMA` of two names asks for no single
+                // name to type (typing one must never approve the other), so it is not sent.
+                // (Before Task 26 a read-only production console refused a `BEGIN`.)
+                let text = "DROP SCHEMA staging, archive;\nSELECT 1;\n";
                 let mut s = live(PROD, text, 2..2, Expect::Band(BandStyle::Run));
                 // Run asks (the statement, or the whole script); Enter runs the statement.
                 s.push(run_to_chooser());
-                s.push(run_denied());
+                s.push(run_refused());
                 s
             }
             StatusTxOpen => {
@@ -1081,6 +1096,17 @@ impl M3a {
                 s
             }
             // ## m3b-t22-tx-ui
+            // ## m3b-t26-prod-unlock: the production console's menu.
+            TxChipProduction => {
+                let mut s = live(
+                    PROD,
+                    SCRIPT,
+                    caret(SCRIPT, "o.total"),
+                    Expect::Band(BandStyle::Run),
+                );
+                s.push(tx_menu(TxMenu::Chip));
+                s
+            }
             TxChipMenu | TxIsolationMenu => {
                 let mut s = live(
                     DEV,
@@ -1373,11 +1399,12 @@ impl M3a {
             ConsoleUnfocused => !focused && selected,
             ConsoleLongLine | ConsoleManyLines => focused && caret_on_screen,
             ConsoleEmpty => text().is_empty(),
+            // ## m3b-t26-prod-unlock: read-write in Manual mode (D-036), no read-only notice.
             ConsoleProduction => {
-                session
-                    .as_ref()
-                    .is_some_and(|s| s.state().borrow().read_only)
-                    && band().is_some_and(|b| b.style == BandStyle::Run)
+                session.as_ref().is_some_and(|s| {
+                    let snap = s.state().borrow().clone();
+                    !snap.read_only && snap.tx.mode == hacivat_session::session::TxMode::Manual
+                }) && band().is_some_and(|b| b.style == BandStyle::Run)
             }
             ConsoleMysql => text().contains("/*!40101"),
             ToolbarRunning => toolbar().is_some_and(|t| matches!(t.run, Some(RunUx::Running(3)))),
@@ -1469,6 +1496,14 @@ impl M3a {
                     && tx().is_none()
                     && console
                         .is_some_and(|c| hacivat_app::console::tx_badge::view(c, cx).is_some())
+            }
+            // ## m3b-t26-prod-unlock
+            TxChipProduction => {
+                menu_open(window, cx)
+                    && tx().is_none()
+                    && session.as_ref().is_some_and(|s| {
+                        s.state().borrow().tx.mode == hacivat_session::session::TxMode::Manual
+                    })
             }
             TxBadgeOpen => console.is_some_and(|c| {
                 hacivat_app::console::tx_badge::user_tx(c, cx)
@@ -1872,9 +1907,10 @@ fn run_to_chooser() -> Step {
     )
 }
 
-/// Enter in the open chooser runs the preselected `BEGIN` on a production console: nothing is
-/// sent; the mark says why.
-fn run_denied() -> Step {
+// ## m3b-t26-prod-unlock
+/// Enter in the open chooser runs the preselected statement, which the gate refuses on a
+/// production console: nothing is sent; the mark says why.
+fn run_refused() -> Step {
     step(
         |window, cx| {
             window.dispatch_keystroke(Keystroke::parse("enter").expect("a keystroke"), cx);

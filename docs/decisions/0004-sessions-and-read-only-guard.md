@@ -2521,3 +2521,158 @@ boot installs `hacivat_exec::classify_pool::ClassifyPool::new(2)` (`boot.rs`, on
     never read it. *m10.* `read_context_again`'s arms merged. *m11.* MySQL's connect read
     steps down from four values to T7's pair (keeping the zone), then to `net_write_timeout`.
   - *m12* (Count rows keeps the context-free check) is carried to T24.
+
+## m3b-t26 — production unlock
+
+**Decision (R-M3-6 REVISED ends; R-M3-29, R-M3-52, R-M3-78, R-M3-81; D-036).** A production tag
+no longer makes a session read-only. `effective_read_only(profile)` is the profile's own
+`read_only` flag; `ManagerConfig.production_read_only`, `SessionPolicy` (with
+`SessionManager::set_policy`/`policy` and `ConnectionManager::policy`), the Test connection's
+policy parameter (`test_connection_with_policy`, folded into `test_connection_continuing`), the
+console UX's `forced_read_only`, the app boot's `true`, the console toolbar's production
+read-only notice and its explanation popover (with their six Fluent ids) are deleted. A
+production console opens a read-write session in Manual mode (`default_mode`, D-036) and every
+unit that is not a read meets the exec gate's production rows (R-M3-55): `Confirm` (with the
+typed name for the destructive kinds) before anything is sent, `RunInTxThenConfirm` for a DML
+(the savepoint form in Manual, kept only on Keep), `Warn` for a lock, `Deny` for what has no
+single name to type or was not analysed. What used to keep production safe at the session (the
+read-only guard) is replaced by the gate before the send and the session's confirm-in-
+transaction after it (Task 19); the session itself runs no production policy.
+
+- **Retag (R-M3-78).** A profile tagged production while its console is open reconnects
+  nothing: the app's gate reads the live profile's environment on every Run
+  (`orchestrator::conn_safety`), so confirmations apply from the next Run; the open session
+  keeps its transaction mode (Manual applies to sessions opened after the tag). Count rows is
+  tag-independent: it is sent only when the read-only check allows it, on every session.
+  Marking a profile read-only keeps M3a's `pending_read_only` reconnect.
+- **No ungated send.** The app sends a user statement only through `ExecService::run` with a
+  checked plan (the orchestrator) or as Count rows (the read-only check); it has no
+  `Request::Exec` of the user's and builds no `RunSpec` of its own; the run service's plan-less
+  (M3a) path is reached only from the error bar's `test-support` seam. `prod_unlock`'s
+  `no_ungated_send_path_in_the_app` pins this over the app's sources.
+- **The context generation (carry MUST 2).** When Run's context read times out (no
+  generation), a production (live tag) or read-only session sends nothing
+  (`exec-run-context-unconfirmed`); Count rows carries the generation of the context it was
+  checked in (`SessionHandle::run_context`), so the session refuses it when the context moved
+  between the check and the send, and a session that gave no generation counts nothing.
+- **Startup scripts on production (carry MUST 3, the T12 ruling).** A production profile's
+  startup script runs only statements the classifier's read-only check allows (a read, a
+  harmless `SET`), checked statement by statement through the session's classifier
+  (`ManagerConfig::classifier`, the app's pool) in the context the session reads now; a
+  statement that may change the context leaves the later ones checked in an unknown context.
+  One refused statement (or no classifier at all) refuses the whole script and the session
+  (`config.invalid`), on connect, reset and reconnect; the warning names the statement's
+  number, never its text (`session/startup_check.rs`). The check applies when the tag the
+  session opened with **or the profile's live tag** is production (fix round 1, below).
+- **Run's context read on read-write sessions (carry MUST 4).** T24's rule stands: the read
+  is made inside an open transaction on PostgreSQL, Timescale, Yugabyte and the MySQL family
+  (the constant `current_setting`/`@@SESSION.sql_mode, DATABASE()` text cannot fail or abort a
+  transaction there), never on Redshift and CockroachDB (not in the Docker matrix; unknown
+  context instead). Proved on Docker (`docker_prod_unlock`): PostgreSQL 14–18 read-write, MySQL
+  and MariaDB with `DATABASE()` NULL (no search path, never a stale one), and a read inside the
+  user's open transaction that never aborts it.
+- **MySQL/MariaDB `UPDATE` targets (carry MUST 1; named exceptions in `sql-safety`'s
+  `interim.rs` and `hacivat-exec`'s `gate.rs`).** A joined or comma `UPDATE`'s targets are the
+  tables its `SET` names (by alias or name; an unqualified column, or a qualifier that names no
+  listed table, makes every listed table a target); two are several targets (denied on
+  production, as a multi-table `DELETE`). The comma form is read as `CROSS JOIN`s (its commas are
+  no missing `ON`). The `UPDATE`/`DELETE` modifiers (`LOW_PRIORITY`, `QUICK`, `IGNORE`) are read
+  as white space: `sqlparser` read a lone modifier as the table, so a production confirmation
+  asked to type "LOW_PRIORITY" (or "QUICK") while the real table changed. A destructive pattern
+  without a target of its own names every object its statement writes, never only the first.
+  Two `t10all` seeds moved from `admin = deny` (unparsed) to `allow` (named exception in
+  `classifier_seeds.toml`).
+- **The run service's deadline** is injectable (`ExecService::with_confirm_deadline`), so the
+  production deadline leg runs through the service.
+- **The transaction menu's production note** is a menu note (`MenuItemSpec::note`: 12 px
+  `text-2`, never selectable; named exception in `hacivat-ui`), not a disabled row in `text-3`
+  on the raised menu (T22 review m12).
+- **Shots (R-M3-81).** The M3a production states change on purpose (no notice; the Manual chip;
+  `marks-denied` now shows the gate's refusal of a `DROP SCHEMA` of two names); a new
+  `tx-chip-production` state shows the production menu. The task report lists every PNG.
+
+### m3b-t26 fix round 1 (the controller's rulings on reviews A and B)
+
+- **Typed names (A-C1, A-C2, B-C1, A-M1).** `update_targets` and the multi-table `DELETE`'s
+  targets walk nested and parenthesised joins; a reference that names no listed table (an
+  unknown alias or name) is never guessed: `TooComplex`, denied on production. A multi-table
+  `DELETE` resolves aliases (`DELETE x FROM t AS x`, `DELETE FROM x USING t AS x`): the name to
+  type is the table, never the alias; the same for `UPDATE … SET alias.col`. The modifiers
+  (`LOW_PRIORITY`, `QUICK`, `IGNORE`) are white space wherever the statement's `UPDATE`/`DELETE`
+  keyword stands, also after a `WITH` clause. Only the commas the comma form rewrites into
+  `CROSS JOIN`s skip the missing-`ON` check; a user's own `CROSS JOIN` keeps it. A form the
+  interim parser does not read (`JOIN (t AS q)`) is a parse error: denied on production.
+- **Always-true `WHERE` (review B).** `|| 1`, `OR 1`, `XOR` forms, `x <=> x`,
+  `x IS NULL OR x IS NOT NULL`, `ISNULL(NULL)`, `COALESCE`/`IFNULL` of constants, `1 IN (1)`,
+  `TRUE`, `NOT FALSE`, `EXISTS (SELECT 1)` and similar count as no `WHERE` (MySQL's `||` is OR
+  unless `PIPES_AS_CONCAT`).
+- **Non-transactional MySQL tables: D-043 closes this way (A-I2, B-I1).** On production,
+  MySQL, MariaDB and TiDB confirm every DML **before it is sent** (`Confirm`, never the
+  run-then-Keep/Undo form): a MyISAM, MEMORY or other non-transactional table keeps a write no
+  rollback undoes, so the confirmation must come first. PostgreSQL and SQLite keep the savepoint
+  form. Everywhere (development consoles included), when the rollback of a confirmed statement
+  is answered with warning 1196 (or 1751/1752), the log says "Not undone: the table doesn't
+  support transactions" (`exec-confirm-not-undone`, `exec-error-confirm-not-undone`), never
+  "undone" or "discarded", and the unit fails with `ConfirmNotUndone`. Proved on mysql84 with
+  MyISAM tables (`docker_prod_unlock`). No undo scripts are generated (D-043's other branch).
+- **Routine bodies (B-I2).** `CREATE [OR REPLACE] FUNCTION/PROCEDURE/TRIGGER/EVENT` and their
+  `ALTER` are never suppressible on production; elsewhere the suppression key also hashes the
+  whole statement text, so "don't ask again" for one body never covers another.
+- **Execute all on production (B-I3).** It covers only the later units of the same gate class
+  as the shown unit, never a unit that needs a typed name (a lock warning's Execute all does not
+  carry a `DROP TABLE`, a `GRANT`, a `CALL`, a `DO` or an unknown statement).
+- **The live tag reaches the sessions (A-I1).** `SessionManager::update_profile` records the
+  profile's live environment in the profile's shared activity, which every session reads; a
+  session's startup script is checked when its opening tag or the live tag is production, so a
+  session opened before a retag is checked on its reset or reconnect. A retag to production
+  closes the idle pooled sessions.
+- **The send re-reads the tag (B-M4, A-M4).** Right before the send the orchestrator reads the
+  live profile's tag and the session's read-only flag again (the session checks the context
+  generation): a plan gated under another tag or flag sends nothing
+  (`exec-run-connection-changed`). The confirmation dialogs show the tag the plan was gated
+  under (the live one), not the job's snapshot.
+- **Session settings that weaken later writes (B-M1).** On production, `SET
+  session_replication_role`, `sql_log_bin = 0`, `foreign_key_checks = 0`, `unique_checks = 0`
+  and `NOTIFY` ask (`Confirm`).
+- **`EXPLAIN` (B-M2, B-M6).** A production PostgreSQL `EXPLAIN ANALYZE` of any inner that is not
+  a read asks first, with the rollback note; a plain `EXPLAIN <dml>` (no `ANALYZE`) is a read
+  (no Keep/Undo), decided in the gate (the classifier's own verdict is unchanged).
+- **The plan-less run (A-M2, A-M3).** `ExecService` refuses a request with neither prepared
+  units nor a plan unless built `with_plan_less_runs` (a test seam); the app opts in only in a
+  `test-support` build, and `prod_unlock` checks that.
+- **To the PO:** B-M3 (a typed name for `TRUNCATE` and `DROP TABLE` on production too;
+  unchanged, per the plan and the controller's ruling); D-043 closed by confirm-first on the
+  MySQL family plus the "not undone" line; the Turkish wording of the new lines
+  (`exec-confirm-not-undone`, `exec-error-confirm-not-undone`,
+  `hv-confirm-execute-all-scope-production`).
+
+### m3b-t26 fix round 2 (the controller's rulings on the round-1 re-checks)
+
+This round simplifies production on purpose; it replaces the round-1 bullets on routine bodies
+(B-I2) and Execute all (B-I3) where they differ.
+
+- **No "don't ask again" on production (N1, R1, A R1-m2).** It is never offered on production,
+  for any class (`offers_suppress`), and the gate marks every production item unsuppressible;
+  a production item never consults the `SuppressSet`, so a pair recorded off production (or on
+  it, before this round) never silences a production statement. This closes N1: since round 1
+  a production MySQL-family DML is a `Confirm`, and one "don't ask again" on `DELETE … WHERE id >
+  1000000` had silenced `… WHERE id > 0` (the key is constant-blind).
+- **Bodies off production (R1).** `RULE`, `POLICY` and `VIEW` (`CREATE [OR REPLACE]`, `ALTER`)
+  join the code-like definitions whose suppression key also hashes the whole text.
+- **Execute all on production (R2).** Not offered: it covers nothing, so every unit shows its own
+  dialog. The ruling allowed covering only byte-identical repeats or hiding it; hiding is the
+  simpler, and repeats were its only use. Off production RC-1 stands.
+- **Session settings (R3).** Compared by bare name (quotes, `@@` and scope dropped, any case), and
+  the list grows: `sql_safe_updates`, `gtid_next`, `pseudo_replica_mode`/`pseudo_slave_mode` and
+  `synchronous_commit` join `session_replication_role`, `sql_log_bin`, `foreign_key_checks` and
+  `unique_checks` (any value: fail closed).
+- **Always-true `WHERE`, the fail-closed rule (A R1-m1).** On both backends a `WHERE` that reads no
+  column of the statement's tables (an unqualified column, or one qualified by a target's name or
+  alias, anywhere in it) is constant for the statement and counts as keeping every row
+  (`AlwaysTrue`: the typed name on production); so does an expression compared with itself
+  (`a = a`, `t.id >= t.id`, `a <=> a`, `a LIKE a`, `IS NOT DISTINCT FROM`), `X OR NOT X` (MySQL
+  backend) and `x IS NULL OR x IS NOT NULL`. MySQL's `||` precedence is read under `NOT` and
+  `IS [NOT] NULL` too (`NOT x = 3 || 1` is `(NOT x = 3) OR 1`). Statements that were bounded and
+  now ask for the name: `WHERE 1 = 0`, `NULL`, `NULL = NULL`, `id = id`, `now() < …`, `EXISTS
+  (SELECT 1 FROM u WHERE u.a = 1)`.
+- **To the PO (B-M3):** `TRUNCATE` and `DROP TABLE` keep no typed name, as R-M3-55 says.

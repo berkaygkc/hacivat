@@ -146,7 +146,16 @@ enum Undone {
     /// The server refused; the session is broken (nothing may run in a transaction Hacivat
     /// could not end), or, for a refused `COMMIT`, the server rolled back.
     Refused(ExecError),
+    // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1)
+    /// The rollback ran, but the server warned that a table does not support transactions
+    /// (MySQL/MariaDB 1196, 1751, 1752): the statement's changes stay.
+    ChangesStayed,
 }
+
+// ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1)
+/// The MySQL/MariaDB warnings a rollback raises when a table could not be rolled back:
+/// `ER_WARNING_NOT_COMPLETE_ROLLBACK` and its two temporary-table forms.
+const NOT_COMPLETE_ROLLBACK: [&str; 3] = ["1196", "1751", "1752"];
 
 impl Core {
     /// Whether a transaction is open now, for the form (P-M3b-1), Smart and the implicit-commit
@@ -365,6 +374,10 @@ impl Core {
                 self.publish_tx();
                 match undone {
                     Undone::Done => ended,
+                    // ## m3b-t26-prod-unlock (fix round 1)
+                    Undone::ChangesStayed => {
+                        UnitEnd::Failed(ExecError::of(ExecErrorKind::Tx(TxError::ConfirmNotUndone)))
+                    }
                     Undone::Lost(e) | Undone::Refused(e) | Undone::TxFailed(e) => {
                         UnitEnd::Failed(e)
                     }
@@ -428,6 +441,11 @@ impl Core {
         self.publish_tx();
         match undone {
             Undone::Done => ended,
+            // ## m3b-t26-prod-unlock (fix round 1): the failed statement's error stays first.
+            Undone::ChangesStayed => match ended {
+                UnitEnd::Failed(first) => UnitEnd::Failed(first),
+                _ => UnitEnd::Failed(ExecError::of(ExecErrorKind::Tx(TxError::ConfirmNotUndone))),
+            },
             Undone::Lost(e) | Undone::Refused(e) | Undone::TxFailed(e) => match ended {
                 UnitEnd::Failed(first) => UnitEnd::Failed(first),
                 _ => UnitEnd::Failed(e),
@@ -460,6 +478,10 @@ impl Core {
             self.publish_tx();
             return match undone {
                 Undone::Done => UnitEnd::Cancelled,
+                // ## m3b-t26-prod-unlock (fix round 1)
+                Undone::ChangesStayed => {
+                    UnitEnd::Failed(ExecError::of(ExecErrorKind::Tx(TxError::ConfirmNotUndone)))
+                }
                 Undone::Lost(e) | Undone::Refused(e) | Undone::TxFailed(e) => UnitEnd::Failed(e),
             };
         }
@@ -505,6 +527,19 @@ impl Core {
             CommitAnswer::RollBack => self.undo(wrap).await,
         };
         let outcome = match done {
+            // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1): the rollback left the
+            // changes (a table without transactions): said so, never "undone".
+            Undone::ChangesStayed => {
+                spec.observer
+                    .0
+                    .event(&RunEvent::ConfirmNotUndone { unit: unit.id });
+                spec.observer.0.event(&RunEvent::CommitDecided {
+                    unit: unit.id,
+                    answer,
+                    by_deadline,
+                });
+                UnitEnd::Failed(ExecError::of(ExecErrorKind::Tx(TxError::ConfirmNotUndone)))
+            }
             Undone::Done => {
                 match answer {
                     CommitAnswer::Commit => tracing::info!(
@@ -622,12 +657,22 @@ impl Core {
         match wrap.form {
             Form::Own => {
                 let rolled = self.control("ROLLBACK").await;
-                self.after_own(rolled)
+                let kept = rolled.is_ok() && self.rollback_left_changes().await;
+                match self.after_own(rolled) {
+                    Undone::Done if kept => Undone::ChangesStayed,
+                    other => other,
+                }
             }
             Form::Savepoint => match self.control(wrap.kind.rollback_to()).await {
                 Ok(()) => {
+                    // ## m3b-t26-prod-unlock (fix round 1): read before `RELEASE` replaces the
+                    // warnings.
+                    let kept = self.rollback_left_changes().await;
                     let released = self.control(wrap.kind.release()).await;
-                    self.after_release(released)
+                    match self.after_release(released) {
+                        Undone::Done if kept => Undone::ChangesStayed,
+                        other => other,
+                    }
                 }
                 // The statement may still be in the user's transaction: the session is not
                 // used again (the server rolls back; the loss is reported like any other).
@@ -674,6 +719,35 @@ impl Core {
     /// statement. Fix round 1 (m1): a release the server refused leaves at most an extra
     /// savepoint (or, on PostgreSQL, a failed transaction the snapshot shows as it is): it is
     /// logged and the session stays; only a lost connection is a loss.
+    // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1)
+    /// Whether the rollback just sent left changes behind: on MySQL/MariaDB the server warns
+    /// (`NOT_COMPLETE_ROLLBACK`) when a table does not support transactions. Never on other
+    /// engines; a warnings read that fails answers `false` (the rollback itself succeeded).
+    async fn rollback_left_changes(&mut self) -> bool {
+        if family(self.kind) != Family::MySql {
+            return false;
+        }
+        let Ok(conn) = self.conn() else {
+            return false;
+        };
+        let warnings = conn.warnings().await;
+        self.observe(false);
+        let kept = warnings.is_ok_and(|w| {
+            w.iter().any(|n| {
+                n.code
+                    .as_deref()
+                    .is_some_and(|c| NOT_COMPLETE_ROLLBACK.contains(&c))
+            })
+        });
+        if kept {
+            tracing::warn!(
+                notice = "exec-confirm-not-undone",
+                "the rollback ran, but a table does not support transactions: its changes stay"
+            );
+        }
+        kept
+    }
+
     fn after_release(&mut self, released: Result<(), ExecError>) -> Undone {
         match released {
             Ok(()) => Undone::Done,

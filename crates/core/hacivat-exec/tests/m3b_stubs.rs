@@ -237,6 +237,25 @@ async fn run_request_m3a_shape_still_builds() {
     assert!(!f.typed_log().is_empty());
 }
 
+// ## m3b-t26-prod-unlock (fix round 1, A-M2): without the test seam's opt-in, a plan-less
+// request is refused and sends nothing (no caller reaches a session around the gate).
+#[tokio::test]
+async fn a_plan_less_request_is_refused_without_the_test_seam() {
+    let (b, s, f) = service_over(fake_pg()).await;
+    let svc =
+        hacivat_exec::ExecService::new(hacivat_results::MemoryBudget::new(1 << 30, 256 << 20));
+    let calls = f.call_log().len();
+    let mut t = svc.run(&s, b.req(&["DELETE FROM t"]));
+    let summary = (&mut t.done).await.unwrap();
+    assert_eq!(summary.executed, 0, "{summary:?}");
+    assert_eq!(
+        f.call_log().len(),
+        calls,
+        "nothing sent: {:?}",
+        f.call_log()
+    );
+}
+
 #[tokio::test]
 // ## m3b-t16-run-service (fix round 1, review m14: renamed; each M3b field alone is refused)
 async fn a_request_with_only_one_m3b_field_sends_nothing() {

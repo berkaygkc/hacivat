@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use hacivat_net::ssh::HopSecrets;
-use hacivat_proto::{Department, ErrClass};
+use hacivat_proto::{Department, EnvTag, ErrClass};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -327,8 +327,6 @@ struct State {
     /// Where a session's loss of a user transaction goes (`relay_losses`).
     lost_sink: Option<LostSink>,
     // ## m3a-t01b-seams
-    /// The manager-wide session policy (`set_policy`).
-    policy: SessionPolicy,
     // ## m3b-t01c-core-seams
     /// The read-only guard's classifier every session started from now on gets (R-M3-83,
     /// P-M3b-11; `set_classifier`).
@@ -345,18 +343,10 @@ struct State {
 impl State {
     // ## m3a-t01b-seams
     /// Whether a session of the current profile is read-only (R-M3-29, P4).
+    // ## m3b-t26-prod-unlock: the profile's own flag alone (the production policy is gone).
     fn effective_read_only(&self) -> bool {
-        effective_read_only(&self.current(), self.policy.production_read_only)
+        effective_read_only(&self.current())
     }
-}
-
-// ## m3a-t01b-seams
-/// What every session of a profile follows besides the profile itself (R-M3-29, P4).
-/// `ConnectionManager` sets it right after `SessionManager::new`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct SessionPolicy {
-    /// Production-tagged profiles get read-only sessions (R-M3-6 REVISED; M3b removes it).
-    pub production_read_only: bool,
 }
 
 // ## m2b-t22-live
@@ -545,7 +535,8 @@ impl SessionManager {
         deps: Arc<ConnectDeps>,
         budget: Arc<Budget>,
     ) -> Arc<SessionManager> {
-        Arc::new_cyclic(|me| SessionManager {
+        let opening_production = profile.environment == Some(EnvTag::Production);
+        let manager = Arc::new_cyclic(|me| SessionManager {
             rt,
             deps,
             budget,
@@ -563,7 +554,6 @@ impl SessionManager {
                 consent_gen: 0,
                 gap_sink: None,
                 lost_sink: None,
-                policy: SessionPolicy::default(),
                 // ## m3b-t01c-core-seams
                 classifier: None,
                 // ## m3b-t12-session-carries
@@ -573,7 +563,10 @@ impl SessionManager {
             default_lock: tokio::sync::Mutex::new(()),
             me: me.clone(),
             activity: Arc::default(),
-        })
+        });
+        // ## m3b-t26-prod-unlock (fix round 1, A-I1): the live tag starts as the profile's.
+        manager.activity.set_production(opening_production);
+        manager
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -581,12 +574,6 @@ impl SessionManager {
     }
 
     // ## m3a-t01b-seams
-
-    /// Sets the policy every session opened from now on follows (R-M3-29, P4).
-    /// `ConnectionManager` calls it right after `new`, before any session exists.
-    pub fn set_policy(&self, p: SessionPolicy) {
-        self.lock().policy = p;
-    }
 
     // ## m3b-t01c-core-seams (P-M3b-11)
     /// Sets the classifier the read-only guard of every session opened from now on asks
@@ -637,19 +624,15 @@ impl SessionManager {
         open
     }
 
-    /// The policy this manager's sessions follow (fix round 1).
-    pub fn policy(&self) -> SessionPolicy {
-        self.lock().policy
-    }
-
     /// The connection budget: `(in use, max)` (R-M3-43: "Waiting for a free connection").
     pub fn budget_use(&self) -> (u8, u8) {
         (self.budget.in_use(), self.budget.max())
     }
 
-    /// Whether a session of `profile` is read-only under this manager's policy.
+    /// Whether a session of `profile` is read-only (## m3b-t26-prod-unlock: the profile's own
+    /// flag).
     fn read_only_for(&self, profile: &Profile) -> bool {
-        effective_read_only(profile, self.lock().policy.production_read_only)
+        effective_read_only(profile)
     }
 
     fn profile(&self) -> Arc<Profile> {
@@ -705,7 +688,7 @@ impl SessionManager {
         self: &Arc<Self>,
         kind: SessionKind,
     ) -> BoxFuture<'static, Result<PooledSession, ConnectError>> {
-        // ## m3a-t01b-seams: the effective flag, so a production borrow finds its parked
+        // ## m3a-t01b-seams: the effective flag, so a read-only borrow finds its parked
         // read-only session again (P4).
         let read_only = self.lock().effective_read_only();
         if self.single() {
@@ -873,6 +856,14 @@ impl SessionManager {
     /// Replaces the overlay's profile, keeping the consent and the secrets (Q17) while the
     /// profile still names the same destination.
     pub fn update_profile(&self, profile: Arc<Profile>) {
+        // ## m3b-t26-prod-unlock (fix round 1, A-I1): the live tag every session reads for its
+        // startup check; a retag to production closes the idle pooled sessions, so none opened
+        // under the old tag is handed out again (a borrowed one checks its script on its reset).
+        let production = profile.environment == Some(EnvTag::Production);
+        let was = self.activity.set_production(production);
+        if production && !was {
+            self.close_idle();
+        }
         let mut st = self.lock();
         // ## m2b-t17-liveness (T15 R1): connects in flight lose the consent too.
         if takes_consent_back(&st.profile, &profile) {
@@ -940,8 +931,7 @@ impl SessionManager {
         if let Some(handle) = self.default_session() {
             return Ok(serves(handle));
         }
-        // A new default is read-only exactly when the profile is (## m3a-t01b-seams: under the
-        // manager's policy, P4).
+        // A new default is read-only exactly when the profile is (## m3a-t01b-seams, P4).
         if read_only && !self.lock().effective_read_only() {
             return Ok(None);
         }

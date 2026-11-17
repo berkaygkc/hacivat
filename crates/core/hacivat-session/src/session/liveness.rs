@@ -47,6 +47,7 @@
 //! pinging.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -306,9 +307,14 @@ impl Supervisor {
 /// which of them hold a user transaction or run a user request now, and when the profile last
 /// had user activity. Every session the profile's `SessionManager` starts reports to it; a
 /// session that ends leaves it.
+///
+/// ## m3b-t26-prod-unlock (fix round 1, A-I1): it also carries the profile's live environment
+/// tag (`SessionManager::update_profile` sets it), which a session opened before a retag reads
+/// to check its startup script on a reset or reconnect (`startup_check`).
 #[derive(Debug, Default)]
 pub(crate) struct ProfileActivity {
     inner: Mutex<ProfileInner>,
+    production: AtomicBool,
 }
 
 #[derive(Debug, Default)]
@@ -331,6 +337,18 @@ impl ProfileActivity {
         } else {
             inner.held.remove(&id);
         }
+    }
+
+    // ## m3b-t26-prod-unlock (fix round 1, A-I1)
+    /// Records the profile's live tag: production or not. Returns whether it was production.
+    pub(crate) fn set_production(&self, production: bool) -> bool {
+        self.production.swap(production, Ordering::SeqCst)
+    }
+
+    /// Whether the profile is tagged production now (its live tag, not the one a session
+    /// opened with).
+    pub(crate) fn production(&self) -> bool {
+        self.production.load(Ordering::SeqCst)
     }
 
     /// Session `id` ended.

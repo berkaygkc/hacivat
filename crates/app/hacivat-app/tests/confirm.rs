@@ -450,17 +450,24 @@ fn the_question_carries_the_items_facts_unchanged() {
 fn dont_ask_again_is_never_offered_where_the_rules_forbid_it() {
     let mut q = question(true);
     q.suppressible = true;
+    // ## m3b-t26-prod-unlock (fix round 2, N1/R1): never on production, for any class (was:
+    // `DdlOther` and `Lock` offered it).
     for class in [
         GateClass::DdlDestructive,
         GateClass::Admin,
         GateClass::Unknown,
         GateClass::Routine,
+        GateClass::DdlOther,
+        GateClass::Lock,
+        GateClass::Dml,
+        GateClass::DmlUnsafe,
+        GateClass::Session,
+        GateClass::Tx,
+        GateClass::Read,
     ] {
         assert!(!offers_suppress(&q, Some(class)), "{class:?} on production");
     }
     assert!(!offers_suppress(&q, None), "an unknown class on production");
-    assert!(offers_suppress(&q, Some(GateClass::DdlOther)));
-    assert!(offers_suppress(&q, Some(GateClass::Lock)));
     // Off production the question's flag decides (the gate already refused multi-statement
     // writes and typed names).
     let mut calm = question(false);
@@ -669,6 +676,7 @@ fn cancel_has_initial_focus_and_execute_is_danger_except_lock(cx: &mut TestAppCo
     for (q, class, kind) in cases {
         let vcx = fresh(cx);
         let suppressible = q.suppressible;
+        let production = q.production;
         let a = ask(vcx, q, ctx(class));
         assert_eq!(focused_id(vcx), "confirm-cancel", "{class:?}");
         assert_eq!(
@@ -680,8 +688,11 @@ fn cancel_has_initial_focus_and_execute_is_danger_except_lock(cx: &mut TestAppCo
             Some(kind),
             "{class:?}"
         );
-        if suppressible {
+        // ## m3b-t26-prod-unlock (fix round 2): never drawn on production.
+        if suppressible && !production {
             assert_eq!(button(vcx, "confirm-suppress").map(|b| b.0), Some(kind));
+        } else {
+            assert_eq!(button(vcx, "confirm-suppress"), None, "{class:?}");
         }
         // Enter on the focused Cancel sends nothing.
         press(vcx, "enter");
@@ -704,18 +715,19 @@ fn no_suppress_button_with_type_to_confirm(cx: &mut TestAppContext) {
     q.suppressible = true;
     let _a = ask(vcx, q, ctx(GateClass::DdlDestructive));
     assert_eq!(button(vcx, "confirm-suppress"), None);
-    // Where it is offered on production, its label names the scope.
-    let vcx = fresh(cx);
-    let mut q = question(true);
-    q.suppressible = true;
-    let a = ask(vcx, q, ctx(GateClass::DdlOther));
-    assert!(button_labels(vcx).contains(&"Execute; don't ask again in this console".to_string()));
-    assert!(shows(
-        vcx,
-        "Not asked again for statements of the same shape in orders-prod until it closes."
-    ));
-    click_button(vcx, "confirm-suppress");
-    assert_eq!(a.get(), Some(ConfirmAnswer::ExecuteAndSuppress));
+    // ## m3b-t26-prod-unlock (fix round 2, N1/R1): on production it is never offered, for any
+    // class (was: offered for `DdlOther`, its label naming the console's scope).
+    for class in [GateClass::DdlOther, GateClass::Lock, GateClass::Dml] {
+        let vcx = fresh(cx);
+        let mut q = question(true);
+        q.suppressible = true;
+        let _a = ask(vcx, q, ctx(class));
+        assert_eq!(button(vcx, "confirm-suppress"), None, "{class:?}");
+        assert!(
+            !button_labels(vcx).iter().any(|l| l.contains("ask again")),
+            "{class:?}"
+        );
+    }
 }
 
 #[gpui::test]
@@ -811,12 +823,14 @@ fn ask_plan_asks_in_order_and_execute_all_still_asks_for_a_typed_name(cx: &mut T
     let vcx = fresh(cx);
     let plan = mixed_plan();
     let sql: Vec<Arc<str>> = (0..5).map(|i| Arc::from(format!("S{i}"))).collect();
+    // ## m3b-t26-prod-unlock (fix round 2, R2): off production (Execute all is not offered on
+    // production; `execute_all_is_not_offered_on_production` covers that).
     let task = vcx.cx.update(|cx| {
         ask_plan(
             RunId(9),
             plan,
             sql,
-            true,
+            false,
             Arc::from("orders-prod"),
             ConfirmContext::default(),
             cx,
@@ -1500,5 +1514,116 @@ fn an_untypeable_name_says_why_and_stays_closed(cx: &mut TestAppContext) {
     assert_eq!(
         button(vcx, "confirm-execute"),
         Some((ButtonKind::Danger, false))
+    );
+}
+
+// ## m3b-t26-prod-unlock (fix round 1, B-I3; fix round 2, R2)
+/// On production Execute all covers nothing (it is not offered): an `Unknown` after an
+/// `Unknown`, an `Admin` after an `Admin`, a MySQL DML after a MySQL DML, a destructive DDL
+/// after another each show their own dialog, and an Execute all answer (were one sent) answers
+/// only its own unit. Off production RC-1 stands (every later unit that asks, but a typed name).
+#[test]
+fn execute_all_covers_nothing_on_production() {
+    let plan = || GatePlan {
+        items: vec![
+            warn_item(0),
+            confirm_item(1, None, GateClass::DdlDestructive),
+            confirm_item(2, None, GateClass::DdlDestructive),
+            confirm_item(3, None, GateClass::Admin),
+            confirm_item(4, None, GateClass::Admin),
+            confirm_item(5, None, GateClass::Unknown),
+            confirm_item(6, None, GateClass::Unknown),
+            confirm_item(7, None, GateClass::Dml),
+            confirm_item(8, None, GateClass::Dml),
+            warn_item(9),
+            confirm_item(10, Some(NAME), GateClass::DmlUnsafe),
+        ],
+    };
+    for unit in 0..10 {
+        assert!(
+            hacivat_app::exec_ui::confirm::execute_all_covers_on(&plan(), unit, true).is_empty(),
+            "unit {unit}"
+        );
+    }
+    for shown in [1, 3, 5, 7] {
+        let mut p = plan();
+        assert_eq!(
+            hacivat_app::exec_ui::confirm::answer_plan_on(
+                &mut p,
+                shown,
+                ConfirmAnswer::ExecuteAll,
+                false,
+                true
+            ),
+            PlanFlow::Go(None)
+        );
+        assert_eq!(p.items[shown as usize].decision, GateDecision::Run);
+        for i in (shown as usize + 1)..p.items.len() {
+            assert!(
+                matches!(
+                    p.items[i].decision,
+                    GateDecision::Confirm { .. } | GateDecision::Warn(_)
+                ),
+                "after unit {shown}, unit {i} still asks: {:?}",
+                p.items[i].decision
+            );
+        }
+    }
+    // Off production (RC-1): every later unit that asks, but the typed name.
+    assert_eq!(
+        hacivat_app::exec_ui::confirm::execute_all_covers_on(&plan(), 0, false),
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
+    );
+}
+
+/// The production dialog draws no Execute all and no "don't ask again", and each unit of a
+/// plan shows its own dialog (fix round 2, R2).
+#[gpui::test]
+fn execute_all_is_not_offered_on_production(cx: &mut TestAppContext) {
+    let vcx = fresh(cx);
+    let plan = GatePlan {
+        items: vec![
+            confirm_item(0, None, GateClass::Unknown),
+            confirm_item(1, None, GateClass::Unknown),
+        ],
+    };
+    let sql: Vec<Arc<str>> = (0..2).map(|i| Arc::from(format!("S{i}"))).collect();
+    let task = vcx.cx.update(|cx| {
+        ask_plan(
+            RunId(9),
+            plan,
+            sql,
+            true,
+            Arc::from("orders-prod"),
+            ConfirmContext::default(),
+            cx,
+        )
+    });
+    let out: std::rc::Rc<RefCell<Option<Option<PlanAnswers>>>> = Default::default();
+    let slot = out.clone();
+    vcx.cx.update(|cx| {
+        cx.spawn(async move |_| {
+            *slot.borrow_mut() = Some(task.await);
+        })
+        .detach();
+    });
+    vcx.run_until_parked();
+    for n in 1..=2 {
+        wait_until(vcx, "the dialog", |vcx| {
+            shows(vcx, &format!("statement {n} of 2"))
+        });
+        arm(vcx);
+        assert_eq!(button(vcx, "confirm-execute-all"), None, "statement {n}");
+        assert_eq!(button(vcx, "confirm-suppress"), None, "statement {n}");
+        click_button(vcx, "confirm-execute");
+    }
+    wait_until(vcx, "the plan", |_| out.borrow().is_some());
+    let answers = out.borrow_mut().take().flatten().expect("not cancelled");
+    assert!(
+        answers
+            .plan
+            .items
+            .iter()
+            .all(|i| i.decision == GateDecision::Run)
     );
 }

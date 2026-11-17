@@ -27,7 +27,9 @@ pub(crate) mod confirm;
 pub(crate) mod run_gate;
 // ## m3b-t24-exec-ui (named exception: the T24 I1 ruling)
 pub(crate) mod run_context;
+// ## m3b-t26-prod-unlock: a production profile's startup script runs only harmless statements.
 pub(crate) mod smart;
+pub(crate) mod startup_check;
 pub mod verdict;
 
 use std::sync::Arc;
@@ -44,7 +46,6 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use hacivat_driver::{Protocol, TxStatus};
-use hacivat_proto::EnvTag;
 use hacivat_results::{
     CloseReason, Completeness, FetchControl, FetchPolicy, ResultId, ResultWriter,
 };
@@ -69,7 +70,6 @@ pub use schema::{
 };
 pub use tx::{IsolationLevel, TxCommand, TxError, TxMode, TxState, begin_sql, default_mode};
 // ## m3a-t01b-seams
-pub use pool::SessionPolicy;
 pub use tx::TxOwner;
 // ## m3a-f1-followups
 pub use schema::context_probe_sql;
@@ -792,6 +792,12 @@ pub enum RunEvent {
         answer: CommitAnswer,
         by_deadline: bool,
     },
+    // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1)
+    /// Sent right before `CommitDecided` when the rollback of `unit` did not undo it: the server
+    /// warned that a table does not support transactions. The log never says "undone" then.
+    ConfirmNotUndone {
+        unit: UnitId,
+    },
     /// A server notice of the unit (R-M3-77; Tasks 11 and 13).
     Notice {
         unit: UnitId,
@@ -822,11 +828,14 @@ pub struct CursorBadge {
     pub holds_tx: bool,
 }
 
-/// Whether a session of `profile` is read-only (R-M3-29, P4): the profile says so, or the
-/// production policy is on and the profile is tagged production. Every site that decides a
-/// session's (or a Test connection's) read-only flag reads this.
-pub fn effective_read_only(profile: &Profile, production_read_only: bool) -> bool {
-    profile.read_only || (production_read_only && profile.environment == Some(EnvTag::Production))
+/// Whether a session of `profile` is read-only (R-M3-29, P4): the profile says so. Every site
+/// that decides a session's (or a Test connection's) read-only flag reads this.
+///
+/// ## m3b-t26-prod-unlock (R-M3-6 REVISED ends): a production tag no longer makes a session
+/// read-only; production consoles are read-write in Manual mode (D-036) and every unit that is
+/// not a read passes the exec gate and its confirmations (R-M3-55) before it is sent.
+pub fn effective_read_only(profile: &Profile) -> bool {
+    profile.read_only
 }
 
 impl SessionHandle {

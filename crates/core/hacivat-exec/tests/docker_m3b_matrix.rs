@@ -786,11 +786,26 @@ async fn error_policy_ask_ignore_stop_and_rollback_and_continue() {
 /// Plans `sql` on production; its last unit must be confirm-in-transaction; the others run or
 /// ask first (a `BEGIN` on production asks: transaction control is no Read or Session class), and
 /// every question is answered Execute.
+///
+/// ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1): on the MySQL family production
+/// asks before it sends (`confirm`; a non-transactional table keeps a write no rollback undoes),
+/// so the gate never plans the confirm-in-transaction form there. The session's form is still
+/// proved on those engines: the checked `confirm` item is turned into the form the session runs
+/// (`RunInTxThenConfirm`, verdict `TxThenConfirm`), the T19 mechanics this test pins.
 async fn tx_confirm_plan(c: &Con, sql: &str) -> Planned {
     let mut p = c.plan(sql, &[]).await;
     let shapes = p.shapes();
     let (last, rest) = shapes.split_last().expect("a unit");
-    assert_eq!(*last, "tx-confirm", "{}: `{sql}`: {shapes:?}", c.line.id);
+    if c.line.is_mysql_family() {
+        assert_eq!(*last, "confirm", "{}: `{sql}`: {shapes:?}", c.line.id);
+        let item = p.plan.items.last_mut().expect("a unit");
+        item.decision = hacivat_exec::GateDecision::RunInTxThenConfirm {
+            reasons: Vec::new(),
+        };
+        item.verdict = UnitVerdict::TxThenConfirm;
+    } else {
+        assert_eq!(*last, "tx-confirm", "{}: `{sql}`: {shapes:?}", c.line.id);
+    }
     assert!(
         rest.iter().all(|s| *s == "run" || *s == "confirm"),
         "{}: `{sql}`: {shapes:?}",
@@ -1869,11 +1884,17 @@ async fn type_goldens_match() {
 /// `(statement, production, development)`: the gate's decision on each kind of console of the
 /// line's engine, over the real classifier in the session's context (P-M3b-16).
 fn gate_rows(line: &Line) -> Vec<(&'static str, &'static str, &'static str)> {
+    // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1): the MySQL family asks first.
+    let dml = if line.is_mysql_family() {
+        "confirm"
+    } else {
+        "tx-confirm"
+    };
     let mut rows = vec![
         ("SELECT 1", "run", "run"),
-        ("UPDATE t SET a = 1 WHERE id = 3", "tx-confirm", "run"),
+        ("UPDATE t SET a = 1 WHERE id = 3", dml, "run"),
         ("DELETE FROM müşteri", "confirm+type", "confirm"),
-        ("INSERT INTO t VALUES (1)", "tx-confirm", "run"),
+        ("INSERT INTO t VALUES (1)", dml, "run"),
     ];
     match line.engine {
         DbmsKind::Postgres => rows.extend([

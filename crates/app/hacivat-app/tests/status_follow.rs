@@ -86,8 +86,9 @@ fn shell_two(cx: &mut TestAppContext) -> &'static mut VisualTestContext {
 }
 
 /// A console session of profile `id` over `fake` (as `test_session`, with a fake the test
-/// scripts). A production profile's session is read-only, as the product opens it
-/// (`effective_read_only` under the boot's production policy; fix round 1, I2).
+/// scripts), read-only as the product opens it (`effective_read_only`; fix round 1, I2).
+/// ## m3b-t26-prod-unlock: the profile's own flag (a production session is read-write); the
+/// production rows of this file now say "production · read-write".
 fn session_over(
     vcx: &VisualTestContext,
     id: ProfileId,
@@ -109,8 +110,7 @@ fn session_with(
         let profile = m.get(id).expect("a saved profile");
         (m.core_runtime().handle(), (*profile).clone())
     });
-    profile.read_only =
-        read_only.unwrap_or(profile.read_only || profile.environment == Some(EnvTag::Production));
+    profile.read_only = read_only.unwrap_or(profile.read_only);
     futures::executor::block_on(hacivat_session::testing::fake_session(rt, fake, profile))
 }
 
@@ -410,7 +410,7 @@ fn focusing_a_production_or_staging_console_swaps_the_capsule(cx: &mut TestAppCo
     focus_console(vcx, prod);
     assert_eq!(capsule_name(vcx), (PROD.to_string(), EnvKind::Production));
     let s = status(vcx);
-    assert!(s.contains("production · read-only (guarded)"), "{s}");
+    assert!(s.contains("production · read-write"), "{s}");
     assert!(!s.contains("staging"), "{s}");
 
     focus_console(vcx, staging);
@@ -447,7 +447,7 @@ fn switching_result_tabs_swaps_the_env_segment(cx: &mut TestAppContext) {
 
     focus_console(vcx, prod);
     let s = status(vcx);
-    assert!(s.contains("production · read-only (guarded)"), "{s}");
+    assert!(s.contains("production · read-write"), "{s}");
     assert!(s.contains("3 rows · 131 ms"), "{s}");
 
     // Switching to the staging console's result swaps the environment and the rows together.
@@ -816,7 +816,7 @@ fn a_tab_switch_without_focus_follows_the_active_console(cx: &mut TestAppContext
     activate_tab(vcx, tab_of(vcx, prod));
     assert_eq!(capsule_name(vcx), (PROD.to_string(), EnvKind::Production));
     let s = status(vcx);
-    assert!(s.contains("production · read-only (guarded)"), "{s}");
+    assert!(s.contains("production · read-write"), "{s}");
     assert!(!s.contains("staging"), "{s}");
 
     // And back, still without moving the focus.
@@ -836,11 +836,22 @@ fn a_tab_switch_without_focus_follows_the_active_console(cx: &mut TestAppContext
 
 #[gpui::test]
 fn the_console_session_access_wins_when_it_protects_less(cx: &mut TestAppContext) {
-    // I2: the profile's default connection reads read-only (the production policy), but this
-    // console's own session is read-write (opened before the profile changed, say). The bar
-    // and the capsule must never claim the protection the session does not enforce.
+    // I2: the profile's default connection reads read-only, but this console's own session is
+    // read-write (opened before the profile changed, say). The bar and the capsule must never
+    // claim the protection the session does not enforce.
+    // ## m3b-t26-prod-unlock: the production policy no longer makes the default connection
+    // read-only; the test sets that premise on the live state, as the next test does.
     let vcx = shell_two(cx);
     let prod_id = profile_id(vcx, PROD);
+    vcx.cx.update(|cx| {
+        let m = cx.global_mut::<ConnectionsModel>();
+        let LiveState::Connected(mut info) = m.live(prod_id) else {
+            panic!("production is connected");
+        };
+        std::sync::Arc::make_mut(&mut info).access = AccessLabel::ReadOnlyGuarded;
+        m.set_live(prod_id, LiveState::Connected(info));
+    });
+    vcx.run_until_parked();
     let (h, _) = session_with(vcx, prod_id, pg(), Some(false));
     assert!(!snapshot(&h).read_only);
     let console = register_test_console(vcx, prod_id, h);
@@ -890,7 +901,9 @@ fn a_guarded_session_is_never_explained_as_enforced(cx: &mut TestAppContext) {
         m.set_live(prod_id, LiveState::Connected(info));
     });
     vcx.run_until_parked();
-    let (h, _) = session_over(vcx, prod_id, pg());
+    // ## m3b-t26-prod-unlock: a guarded console session by its own flag (the production policy
+    // that made it so is gone).
+    let (h, _) = session_with(vcx, prod_id, pg(), Some(true));
     assert_eq!(snapshot(&h).access, AccessLabel::ReadOnlyGuarded);
     let console = register_test_console(vcx, prod_id, h);
     focus_console(vcx, console);
@@ -1053,7 +1066,7 @@ fn without_a_console_the_m2_behaviour_is_unchanged(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     assert_eq!(capsule_name(vcx), (PROD.to_string(), EnvKind::Production));
     assert!(
-        status(vcx).contains("production · read-only (guarded)"),
+        status(vcx).contains("production · read-write"),
         "{}",
         status(vcx)
     );
@@ -1063,7 +1076,7 @@ fn without_a_console_the_m2_behaviour_is_unchanged(cx: &mut TestAppContext) {
     activate_tab(vcx, UNBOUND_TAB);
     assert_eq!(capsule_name(vcx), (PROD.to_string(), EnvKind::Production));
     assert!(
-        status(vcx).contains("production · read-only (guarded)"),
+        status(vcx).contains("production · read-write"),
         "{}",
         status(vcx)
     );

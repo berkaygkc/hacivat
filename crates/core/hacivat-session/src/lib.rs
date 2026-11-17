@@ -34,5 +34,6 @@ pub use test_conn::{TestReport, TestWarning, test_connection, test_connection_co
 // ## m2b-t01-interfaces: the guard's names the app needs, so the app never depends on the
 // guard crate itself (Q5).
 pub use hacivat_guard::{GapReason, RoleWarning, remediation};
-// ## m3a-t01b-seams: production consoles are read-only (R-M3-6 REVISED, R-M3-29).
-pub use session::{SessionPolicy, effective_read_only};
+// ## m3a-t01b-seams: whether a profile's sessions are read-only (R-M3-29); since
+// m3b-t26-prod-unlock the profile's own flag alone.
+pub use session::effective_read_only;

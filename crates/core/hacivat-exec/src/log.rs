@@ -125,6 +125,10 @@ pub enum LogMsg {
     /// The confirmed statement failed in the savepoint form: only it was rolled back, the
     /// user's transaction is intact (P-M3b-5).
     ConfirmStatementFailed,
+    // ## m3b-t26-prod-unlock (fix round 1, ruling on A-I2/B-I1)
+    /// The confirmed statement's rollback ran, but a table does not support transactions: its
+    /// changes stay (never logged as undone or discarded).
+    ConfirmNotUndone,
     /// The user skipped `n` statements at the confirmation (R-M3-84).
     SkippedByUser {
         n: u32,
@@ -261,6 +265,8 @@ impl LogMsg {
             } => "exec-confirm-rolled-back-deadline",
             LogMsg::ConfirmRolledBack { .. } => "exec-confirm-rolled-back",
             LogMsg::ConfirmStatementFailed => "exec-confirm-statement-failed",
+            // ## m3b-t26-prod-unlock (fix round 1)
+            LogMsg::ConfirmNotUndone => "exec-confirm-not-undone",
             LogMsg::SkippedByUser { .. } => "exec-skipped-by-user",
             LogMsg::Retried { .. } => "exec-retried",
             LogMsg::Evicted { .. } => "cursor-closed-evicted",
@@ -366,7 +372,8 @@ impl LogMsg {
             LogMsg::ImplicitCommit
             | LogMsg::SafetyDenied { .. }
             | LogMsg::ConfirmRolledBack { .. }
-            | LogMsg::ConfirmStatementFailed => Vec::new(),
+            | LogMsg::ConfirmStatementFailed
+            | LogMsg::ConfirmNotUndone => Vec::new(),
             // ## m3b-t16-run-service
             LogMsg::NoticesDropped { n } => vec![("n", LogArg::U64(u64::from(*n)))],
             LogMsg::ClosedEarly { ran, .. } => vec![("n", LogArg::U64(u64::from(*ran)))],
@@ -400,7 +407,9 @@ impl LogMsg {
             LogMsg::Cancelled { .. } | LogMsg::Dropped { .. } => Severity::Warning,
             LogMsg::CursorClosed { .. } | LogMsg::MoreResultSets { .. } => Severity::Notice,
             // ## m3b-t01c-core-seams
-            LogMsg::SafetyDenied { .. } | LogMsg::ConfirmStatementFailed => Severity::Error,
+            LogMsg::SafetyDenied { .. }
+            | LogMsg::ConfirmStatementFailed
+            | LogMsg::ConfirmNotUndone => Severity::Error,
             LogMsg::Notice { severity, .. } => match severity {
                 NoticeSeverity::Warning => Severity::Warning,
                 NoticeSeverity::Debug

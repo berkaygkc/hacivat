@@ -1075,8 +1075,9 @@ fn shots() -> Vec<Shot> {
             }
         }
     }
-    // ## m3b-t27-history (named exception): then Task 27's states (`m3a::M3B_T27`), last.
-    for state in m3a::M3B_T27 {
+    // ## m3b-t27-history (named exception): then Task 27's states (`m3a::M3B_T27`).
+    // ## m3b-t26-prod-unlock (named exception): then Task 26's (`m3a::M3B_T26`), last.
+    for state in m3a::M3B_T27.into_iter().chain(m3a::M3B_T26) {
         let surface = Surface::M3a(state);
         for &size in surface.sizes() {
             for theme in THEMES {
@@ -1619,6 +1620,8 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
             + t24_surfaces().len() * 8 * 2
             // ## m3b-t27-history (named exception)
             + m3a::M3B_T27.len() * 8 * 2
+            // ## m3b-t26-prod-unlock (named exception)
+            + m3a::M3B_T26.len() * 8 * 2
     );
     // ## m3a-t35-shots: the 1,012 M1/M2 shots first, unchanged; then 68 M3a states x 16.
     // ## m3a-f5-demo (review m-5): plus the app menu at 960x600 (8).
@@ -1627,10 +1630,11 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     // ## m3b-t25-results (named exception): plus Task 25's 11 states x 16, before Task 21's.
     // ## m3b-t23-escalation (named exception): plus Task 23's 9 states x 16, after Task 21's.
     // ## m3b-t24-exec-ui (named exception): plus 12 states x 16, after Task 23's.
-    // ## m3b-t27-history (named exception): plus Task 27's 7 states x 16, last.
+    // ## m3b-t27-history (named exception): plus Task 27's 7 states x 16.
+    // ## m3b-t26-prod-unlock (named exception): plus Task 26's 1 state x 16, last.
     assert_eq!(
         all.len(),
-        1020 + 68 * 16 + 7 * 16 + 11 * 16 + 19 * 16 + 9 * 16 + 12 * 16 + 7 * 16
+        1020 + 68 * 16 + 7 * 16 + 11 * 16 + 19 * 16 + 9 * 16 + 12 * 16 + 7 * 16 + 16
     );
     assert!(
         all[1020 + 68 * 16 + 7 * 16 + 11 * 16..1020 + 68 * 16 + 7 * 16 + 11 * 16 + 19 * 16]
@@ -1639,7 +1643,8 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     );
     assert!(
         // ## m3b-t27-history (named exception): Task 24's run up to Task 27's.
-        all[1020 + 68 * 16 + 7 * 16 + 11 * 16 + 19 * 16 + 9 * 16..all.len() - 7 * 16]
+        // ## m3b-t26-prod-unlock (named exception): Task 26's state after Task 27's.
+        all[1020 + 68 * 16 + 7 * 16 + 11 * 16 + 19 * 16 + 9 * 16..all.len() - 7 * 16 - 16]
             .iter()
             .all(|s| s.surface.is_t24())
     );
@@ -1658,6 +1663,8 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
         .chain(m3a::M3B_T25)
         .chain(m3a::M3B_T23)
         .chain(m3a::M3B_T27)
+        // ## m3b-t26-prod-unlock (named exception)
+        .chain(m3a::M3B_T26)
     {
         let surface = Surface::M3a(state);
         assert_eq!(
@@ -2229,22 +2236,18 @@ fn trust_signals_must_be_drawn() {
             .missing_from("s", &[at("button-label-status-cursor", 40.0, false)])
             .is_some()
     );
-    // Production: the notice (either form) and the status bar's environment.
+    // Production: the status bar's environment and the transaction mode chip (## m3b-t26-
+    // prod-unlock: the production read-only notice is gone, R-M3-81; Manual, D-036).
     let prod = Surface::M3a(m3a::M3a::ConsoleProduction);
     let full = [
-        at("button-label-console-prod-notice", 90.0, true),
+        at("tx-chip-mode", 90.0, true),
         at("status-env-label", 90.0, true),
     ];
     assert!(prod.trust_missing("s", &full).is_empty());
-    let short = [
-        at("button-label-console-prod-short", 50.0, true),
-        at("status-env-label", 90.0, true),
-    ];
-    assert!(prod.trust_missing("s", &short).is_empty());
     let found = prod.trust_missing("s", &[at("status-env-label", 90.0, true)]);
     assert!(found.len() == 1 && found[0].contains("(t)"), "{found:?}");
     let squeezed = [
-        at("button-label-console-prod-notice", 0.0, true),
+        at("tx-chip-mode", 0.0, true),
         at("status-env-label", 90.0, false),
     ];
     assert_eq!(prod.trust_missing("s", &squeezed).len(), 2);
