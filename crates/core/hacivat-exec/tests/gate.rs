@@ -574,24 +574,26 @@ fn mysql_ddl_with_open_manual_tx_confirms_implicit_commit() {
     assert_eq!(idle.decision, GateDecision::Run);
     assert_eq!(idle.verdict, UnitVerdict::Write);
     // Production MySQL DDL on an idle Auto session: a normal DDL confirmation that says it
-    // cannot be rolled back, and may be suppressed.
+    // cannot be rolled back (## m3b-t26-prod-unlock, fix round 2: never suppressible on
+    // production).
     let prod = item_of("CREATE TABLE x (a int)", &mysql(EnvTag::Production));
     assert!(matches!(
         prod.decision,
         GateDecision::Confirm {
             irreversible: true,
-            suppressible: true,
+            suppressible: false,
             ..
         }
     ));
     assert_eq!(prod.verdict, UnitVerdict::Write);
-    // PostgreSQL DDL in a transaction: no implicit commit, nothing irreversible.
+    // PostgreSQL DDL in a transaction: no implicit commit, nothing irreversible (and, since
+    // T26 fix round 2, never suppressible on production).
     let pg = item_of("CREATE TABLE x (a int)", &conn_prod_user_tx());
     assert!(matches!(
         pg.decision,
         GateDecision::Confirm {
             irreversible: false,
-            suppressible: true,
+            suppressible: false,
             ..
         }
     ));
@@ -1125,26 +1127,34 @@ fn suppression_keyed_by_console_and_fingerprint() {
             ..
         }
     ));
-    // A suppressible production confirmation and warning ("don't ask again in this console").
+    // ## m3b-t26-prod-unlock (fix round 2, N1/R1/A R1-m2; was "a suppressible production
+    // confirmation and warning"): on production "don't ask again" is never offered, for any
+    // class, and a pair recorded anywhere (on production before, or off it) never silences it.
     for text in [
         "CREATE TABLE x (a int)",
         "SELECT * FROM t FOR UPDATE",
         "BEGIN",
     ] {
         let asked = run(text, &conn_prod(), &SuppressSet::default(), 7);
-        assert!(matches!(
-            asked.decision,
-            GateDecision::Confirm {
-                suppressible: true,
-                ..
-            } | GateDecision::Warn(_)
-        ));
+        assert!(
+            matches!(
+                asked.decision,
+                GateDecision::Confirm {
+                    suppressible: false,
+                    ..
+                } | GateDecision::Warn(_)
+            ),
+            "{text}: {:?}",
+            asked.decision
+        );
+        let off = run(text, &conn_dev(), &SuppressSet::default(), 7);
         let mut s = SuppressSet::default();
         s.insert(7, asked.fingerprint);
+        s.insert(7, off.fingerprint);
         assert_eq!(
             run(text, &conn_prod(), &s, 7).decision,
-            GateDecision::Run,
-            "{text}"
+            asked.decision,
+            "{text}: still asks"
         );
     }
     // Fix round 1 (controller ruling): on production "don't ask again" never covers a
@@ -1626,8 +1636,8 @@ fn oracle(
     if typed || implicit {
         shape = "confirm";
     }
-    let never_suppressed =
-        production && matches!(eff, G::DdlDestructive | G::Admin | G::Routine | G::Unknown);
+    // ## m3b-t26-prod-unlock (fix round 2, N1/R1): never on production, for any class.
+    let never_suppressed = production;
     let verdict = if shape == "tx-confirm" {
         UnitVerdict::TxThenConfirm
     } else if implicit {
@@ -2283,6 +2293,73 @@ fn production_session_settings_that_weaken_later_writes_ask() {
             mysql(EnvTag::Production),
             "SET @@session.unique_checks = 0",
         ),
+        // ## m3b-t26-prod-unlock (fix round 2, R3): quoted names, every spelling, and the
+        // replication/durability settings.
+        (
+            DbmsKind::Postgres,
+            conn_prod(),
+            "SET \"session_replication_role\" = replica",
+        ),
+        (
+            DbmsKind::Postgres,
+            conn_prod(),
+            "SET LOCAL session_replication_role = replica",
+        ),
+        (
+            DbmsKind::Postgres,
+            conn_prod(),
+            "SET synchronous_commit = off",
+        ),
+        (
+            DbmsKind::Postgres,
+            conn_prod(),
+            "SET SESSION synchronous_commit TO off",
+        ),
+        (
+            DbmsKind::MySql,
+            mysql(EnvTag::Production),
+            "SET `foreign_key_checks` = 0",
+        ),
+        (
+            DbmsKind::MySql,
+            mysql(EnvTag::Production),
+            "SET @@`foreign_key_checks` = 0",
+        ),
+        (
+            DbmsKind::MySql,
+            mysql(EnvTag::Production),
+            "SET foreign_key_checks = OFF",
+        ),
+        (
+            DbmsKind::MySql,
+            mysql(EnvTag::Production),
+            "SET @@GLOBAL.FOREIGN_KEY_CHECKS = 0",
+        ),
+        (
+            DbmsKind::MySql,
+            mysql(EnvTag::Production),
+            "SET sql_safe_updates = 0",
+        ),
+        (
+            DbmsKind::MySql,
+            mysql(EnvTag::Production),
+            "SET gtid_next = 'AUTOMATIC'",
+        ),
+        (
+            DbmsKind::MySql,
+            mysql(EnvTag::Production),
+            "SET pseudo_replica_mode = 1",
+        ),
+        (
+            DbmsKind::MySql,
+            mysql(EnvTag::Production),
+            "SET pseudo_slave_mode = 1",
+        ),
+        (
+            DbmsKind::MySql,
+            mysql(EnvTag::Production),
+            "SET a = 1, `unique_checks` = 0",
+        ),
     ] {
         let item = real_item(engine, text, &c, &none);
         assert!(
@@ -2337,4 +2414,128 @@ fn plain_explain_of_dml_is_a_read_and_explain_analyze_asks_on_production() {
         item.decision
     );
     assert_eq!(item.verdict, UnitVerdict::ExplainAnalyzeRollback);
+}
+
+// ## m3b-t26-prod-unlock (fix round 2, N1/R1/A R1-m2): on production "don't ask again" never
+// applies, whatever the class or engine. Review B's pairs: A answered "don't ask again" (its key
+// recorded), then B of the same shape in the same console still asks before anything is sent.
+#[test]
+fn production_never_suppresses_any_class_on_any_engine() {
+    let on = |engine, env| ConnSafety {
+        engine,
+        ..conn(engine, Some(env))
+    };
+    let pairs: &[(&str, &str)] = &[
+        (
+            "DELETE FROM orders WHERE id > 1000000",
+            "DELETE FROM orders WHERE id > 0",
+        ),
+        (
+            "DELETE FROM orders WHERE id IN (1)",
+            "DELETE FROM orders WHERE id IN (1, 2, 3, 4, 5)",
+        ),
+        (
+            "DELETE FROM orders WHERE id BETWEEN 1 AND 2",
+            "DELETE FROM orders WHERE id BETWEEN 0 AND 99999999999",
+        ),
+        (
+            "DELETE FROM orders WHERE created < '2020-01-01'",
+            "DELETE FROM orders WHERE created < '2099-01-01'",
+        ),
+        (
+            "UPDATE t SET a = 1 WHERE id = 3",
+            "UPDATE t SET a = 1 WHERE id = 4",
+        ),
+        ("INSERT INTO t VALUES (1)", "INSERT INTO t VALUES (2)"),
+        (
+            "CREATE OR REPLACE RULE r AS ON INSERT TO t DO ALSO DELETE FROM u WHERE false",
+            "CREATE OR REPLACE RULE r AS ON INSERT TO t DO ALSO DELETE FROM u WHERE true",
+        ),
+        (
+            "CREATE POLICY p ON t USING (false)",
+            "CREATE POLICY p ON t USING (true)",
+        ),
+        (
+            "ALTER POLICY p ON t USING (false)",
+            "ALTER POLICY p ON t USING (true)",
+        ),
+        (
+            "CREATE OR REPLACE VIEW v AS SELECT * FROM t WHERE tenant = 1",
+            "CREATE OR REPLACE VIEW v AS SELECT * FROM t WHERE tenant = 2",
+        ),
+        ("CREATE TABLE x (a int)", "CREATE TABLE y (a int)"),
+        (
+            "SELECT * FROM t FOR UPDATE",
+            "SELECT * FROM t WHERE id = 2 FOR UPDATE",
+        ),
+    ];
+    for engine in [DbmsKind::Postgres, DbmsKind::MySql, DbmsKind::MariaDb] {
+        for (a, b) in pairs {
+            let pg_only = a.contains("RULE") || a.contains("POLICY");
+            if pg_only && engine != DbmsKind::Postgres {
+                continue;
+            }
+            let item =
+                |text: &str, env, s: &SuppressSet| real_item(engine, text, &on(engine, env), s);
+            let asked = item(a, EnvTag::Production, &SuppressSet::default());
+            // Never offered on production.
+            assert!(
+                !matches!(
+                    asked.decision,
+                    GateDecision::Confirm {
+                        suppressible: true,
+                        ..
+                    }
+                ),
+                "{engine:?} `{a}`: {:?}",
+                asked.decision
+            );
+            // A key recorded for A (on production, or off it) never silences B, or A itself.
+            let off = item(a, EnvTag::Dev, &SuppressSet::default());
+            let mut s = SuppressSet::default();
+            s.insert(7, asked.fingerprint);
+            s.insert(7, off.fingerprint);
+            for text in [a, b] {
+                let later = item(text, EnvTag::Production, &s);
+                assert_ne!(
+                    later.decision,
+                    GateDecision::Run,
+                    "{engine:?} `{a}` then `{text}`: still asks"
+                );
+            }
+        }
+    }
+}
+
+// ## m3b-t26-prod-unlock (fix round 2, R1): off production a rule, policy or view keys on its
+// whole text, so "don't ask again" for one body never covers another.
+#[test]
+fn rules_policies_and_views_are_keyed_by_their_body_off_production() {
+    for (a, b) in [
+        (
+            "CREATE OR REPLACE RULE r AS ON INSERT TO t DO ALSO DELETE FROM u WHERE false",
+            "CREATE OR REPLACE RULE r AS ON INSERT TO t DO ALSO DELETE FROM u WHERE true",
+        ),
+        (
+            "CREATE POLICY p ON t USING (false)",
+            "CREATE POLICY p ON t USING (true)",
+        ),
+        (
+            "ALTER POLICY p ON t USING (false)",
+            "ALTER POLICY p ON t USING (true)",
+        ),
+        (
+            "CREATE OR REPLACE VIEW v AS SELECT * FROM t WHERE tenant = 1",
+            "CREATE OR REPLACE VIEW v AS SELECT * FROM t WHERE tenant = 2",
+        ),
+        (
+            "ALTER VIEW v AS SELECT * FROM t WHERE tenant = 1",
+            "ALTER VIEW v AS SELECT * FROM t WHERE tenant = 2",
+        ),
+    ] {
+        let none = SuppressSet::default();
+        let key = |t: &str| real_item(DbmsKind::Postgres, t, &conn_dev(), &none).fingerprint;
+        assert_ne!(key(a), key(b), "`{a}` / `{b}`: keyed by the body");
+        assert_eq!(key(a), key(a), "`{a}`: stable");
+    }
 }

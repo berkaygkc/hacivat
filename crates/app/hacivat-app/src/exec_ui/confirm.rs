@@ -171,28 +171,18 @@ impl ConfirmContext {
 
 /// Whether the dialog offers "Execute and don't ask again" for `q` of class `class` (module
 /// docs): never with a typed name, never for a statement Hacivat could not analyse or one that
-/// commits an open MySQL transaction, and on production never for `DdlDestructive`, `Admin`,
-/// `Unknown` or `Routine`, nor when the class is not known. The question's own flag (the gate's,
-/// which already refuses a multi-statement unit with a write) must allow it too.
-pub fn offers_suppress(q: &ConfirmQuestion, class: Option<GateClass>) -> bool {
+/// commits an open MySQL transaction, and never on production, whatever the class
+/// (## m3b-t26-prod-unlock, fix round 2; `_class` is kept for the callers). The question's own
+/// flag (the gate's, which already refuses a multi-statement unit with a write) must allow it
+/// too.
+pub fn offers_suppress(q: &ConfirmQuestion, _class: Option<GateClass>) -> bool {
     let unanalysed = q
         .reasons
         .iter()
         .any(|r| r.fluent_id == NOT_ANALYSED || r.fluent_id == IMPLICIT_COMMIT);
-    let production_forbids = q.production
-        && !matches!(
-            class,
-            Some(
-                GateClass::Read
-                    | GateClass::Session
-                    | GateClass::Tx
-                    | GateClass::Lock
-                    | GateClass::Dml
-                    | GateClass::DmlUnsafe
-                    | GateClass::DdlOther
-            )
-        );
-    q.suppressible && q.type_to_confirm.is_none() && !unanalysed && !production_forbids
+    // ## m3b-t26-prod-unlock (fix round 2, N1/R1/A R1-m2): never on production, for any class
+    // (the gate marks no production item suppressible either).
+    q.suppressible && q.type_to_confirm.is_none() && !unanalysed && !q.production
 }
 
 // ## m3b-t21-confirm (fix round 1, m8)
@@ -295,16 +285,18 @@ pub fn execute_all_covers(plan: &GatePlan, unit: u32) -> Vec<u32> {
     execute_all_covers_on(plan, unit, false)
 }
 
-// ## m3b-t26-prod-unlock (named exception, fix round 1, B-I3)
+// ## m3b-t26-prod-unlock (named exception, fix round 1, B-I3; fix round 2, R2)
 /// [`execute_all_covers`] on a connection that is (`production`) or is not production: on
-/// production Execute all covers only later units of the same `GateClass` as the unit shown
-/// (never a typed name, RC-1); a later unit of any other class still shows its own dialog.
+/// production Execute all covers nothing, so it is not offered and every later unit shows its
+/// own dialog (fix round 2, R2: the ruling allowed covering only byte-identical repeats or
+/// hiding it; hiding is the simpler of the two, and the repeats were its only use).
 pub fn execute_all_covers_on(plan: &GatePlan, unit: u32, production: bool) -> Vec<u32> {
-    let shown = plan.items.iter().find(|i| i.unit == unit).map(|i| i.class);
+    if production {
+        return Vec::new();
+    }
     plan.items
         .iter()
         .filter(|i| i.unit > unit && asks(i) && !needs_name(i))
-        .filter(|i| !production || shown == Some(i.class))
         .map(|i| i.unit)
         .collect()
 }
@@ -1127,13 +1119,8 @@ impl Render for ConfirmDialog {
                 &theme,
                 message(
                     cx,
-                    // ## m3b-t26-prod-unlock (fix round 1, B-I3): on production only statements
-                    // of the same kind are covered, and the note says so.
-                    if self.q.production {
-                        "hv-confirm-execute-all-scope-production"
-                    } else {
-                        "hv-confirm-execute-all-scope"
-                    },
+                    // ## m3b-t26-prod-unlock (fix round 2, R2): never shown on production.
+                    "hv-confirm-execute-all-scope",
                     vec![("n", ArgValue::Count(u64::from(self.ctx.covered)))],
                 ),
                 "confirm-execute-all-scope",

@@ -1368,11 +1368,19 @@ impl<'c, 'a> Walk<'c, 'a> {
                     }
                 };
                 let no_order = u.order_by.is_empty();
+                let mut names = qualifier_names(std::slice::from_ref(&u.table));
+                if let Some(
+                    sqlparser::ast::UpdateTableFromKind::BeforeSet(f)
+                    | sqlparser::ast::UpdateTableFromKind::AfterSet(f),
+                ) = &u.from
+                {
+                    names.extend(qualifier_names(f));
+                }
                 if targets.is_empty() {
-                    self.unbounded(u.selection.as_ref(), &u.limit, no_order, None);
+                    self.unbounded(u.selection.as_ref(), &u.limit, no_order, None, &names);
                 }
                 for t in &targets {
-                    self.unbounded(u.selection.as_ref(), &u.limit, no_order, Some(t));
+                    self.unbounded(u.selection.as_ref(), &u.limit, no_order, Some(t), &names);
                 }
                 let synthesized = std::mem::take(&mut self.comma_joins);
                 self.joins_without_on(std::slice::from_ref(&u.table), &synthesized);
@@ -1402,8 +1410,18 @@ impl<'c, 'a> Walk<'c, 'a> {
                         (Vec::new(), relations)
                     }
                 };
+                let mut names = qualifier_names(from);
+                if let Some(using) = &d.using {
+                    names.extend(qualifier_names(using));
+                }
                 if targets.is_empty() {
-                    self.unbounded(d.selection.as_ref(), &d.limit, d.order_by.is_empty(), None);
+                    self.unbounded(
+                        d.selection.as_ref(),
+                        &d.limit,
+                        d.order_by.is_empty(),
+                        None,
+                        &names,
+                    );
                 }
                 for t in &targets {
                     self.unbounded(
@@ -1411,6 +1429,7 @@ impl<'c, 'a> Walk<'c, 'a> {
                         &d.limit,
                         d.order_by.is_empty(),
                         Some(t),
+                        &names,
                     );
                 }
                 self.joins_without_on(relations, &[]);
@@ -1557,21 +1576,23 @@ impl<'c, 'a> Walk<'c, 'a> {
     }
 
     /// `UPDATE`/`DELETE` without a bounding `WHERE` (SAFE-07).
+    /// ## m3b-t26-prod-unlock (fix round 2, A R1-m1): `names` are what a column of the
+    /// statement's tables may be qualified with; a `WHERE` that reads none of their columns
+    /// counts as keeping every row (fail closed).
     fn unbounded(
         &mut self,
         selection: Option<&Expr>,
         limit: &Option<Expr>,
         no_order: bool,
         target: Option<&ObjectName>,
+        names: &[String],
     ) {
+        let ansi = self.ctx.dialect.modes.ansi_quotes;
         match selection {
             None => self.destructive(DestructiveKind::NoWhere, target),
             Some(e)
-                if always_true(
-                    e,
-                    self.ctx.dialect.modes.ansi_quotes,
-                    self.ctx.dialect.modes.pipes_as_concat,
-                ) =>
+                if always_true(e, ansi, self.ctx.dialect.modes.pipes_as_concat)
+                    || !reads_statement_columns(e, names, ansi) =>
             {
                 self.destructive(DestructiveKind::AlwaysTrue, target)
             }
@@ -1895,8 +1916,6 @@ fn always_true(e: &Expr, ansi_quotes: bool, pipes_as_concat: bool) -> bool {
 fn predicate(e: &Expr, ansi: bool, pipes: bool) -> Predicate {
     use sqlparser::ast::{BinaryOperator as B, UnaryOperator as U};
     let b = |x: &Expr| Box::new(predicate(x, ansi, pipes));
-    // The same expression on both sides (`id <=> id`): as written, after the parser.
-    let same = |x: &Expr, y: &Expr| strip(x).to_string() == strip(y).to_string();
     match e {
         Expr::Nested(inner) => predicate(inner, ansi, pipes),
         Expr::Value(v) => match &v.value {
@@ -1909,70 +1928,14 @@ fn predicate(e: &Expr, ansi: bool, pipes: bool) -> Predicate {
             Value::DoubleQuotedString(s) => Predicate::Text(s.clone()),
             _ => Predicate::Const,
         },
-        // `NOT a || b` is `(NOT a) OR b` to MySQL; `sqlparser` reads `NOT (a || b)`.
-        Expr::UnaryOp { op: U::Not, expr } => match &**expr {
-            Expr::BinaryOp {
-                left,
-                op: B::StringConcat,
-                right,
-            } if !pipes => Predicate::Or(Box::new(Predicate::Not(b(left))), b(right)),
-            _ => Predicate::Not(b(expr)),
-        },
-        // MySQL's `||` (OR) binds looser than every other operator, `sqlparser`'s (concat)
-        // tighter: `x = 3 || 1` is `(x = 3) OR 1` to the server. A direct `||` operand of another
-        // operator is lifted out (a parenthesised one is `Expr::Nested` and stays).
-        Expr::BinaryOp { left, op, right }
-            if !pipes
-                && !matches!(op, B::Or | B::StringConcat)
-                && matches!(
-                    &**right,
-                    Expr::BinaryOp {
-                        op: B::StringConcat,
-                        ..
-                    }
-                ) =>
-        {
-            let Expr::BinaryOp {
-                left: inner,
-                right: rest,
-                ..
-            } = &**right
-            else {
-                unreachable!("matched above")
-            };
-            let first = Expr::BinaryOp {
-                left: left.clone(),
-                op: op.clone(),
-                right: inner.clone(),
-            };
-            Predicate::Or(Box::new(predicate(&first, ansi, pipes)), b(rest))
+        // ## m3b-t26-prod-unlock (fix round 2, A R1-m1): MySQL's `||` (OR) binds looser than
+        // every other operator, `sqlparser`'s (concat) tighter, so `x = 3 || 1`,
+        // `NOT x = 3 || 1` and `x IS NULL || x IS NOT NULL` are an `OR` to the server
+        // (`mysql_or_parts`); a parenthesised `||` is `Expr::Nested` and stays.
+        _ if !pipes && let Some((first, rest)) = mysql_or_parts(e) => {
+            or(&first, &rest, ansi, pipes)
         }
-        Expr::BinaryOp { left, op, right }
-            if !pipes
-                && !matches!(op, B::Or | B::StringConcat)
-                && matches!(
-                    &**left,
-                    Expr::BinaryOp {
-                        op: B::StringConcat,
-                        ..
-                    }
-                ) =>
-        {
-            let Expr::BinaryOp {
-                left: first,
-                right: inner,
-                ..
-            } = &**left
-            else {
-                unreachable!("matched above")
-            };
-            let last = Expr::BinaryOp {
-                left: inner.clone(),
-                op: op.clone(),
-                right: right.clone(),
-            };
-            Predicate::Or(b(first), Box::new(predicate(&last, ansi, pipes)))
-        }
+        Expr::UnaryOp { op: U::Not, expr } => Predicate::Not(b(expr)),
         Expr::BinaryOp { left, op, right } => {
             let cmp = |c| Predicate::Cmp(c, b(left), b(right));
             match op {
@@ -1985,7 +1948,11 @@ fn predicate(e: &Expr, ansi: bool, pipes: bool) -> Predicate {
                     (Predicate::Row, _) | (_, Predicate::Row) => Predicate::Row,
                     _ => Predicate::Const,
                 },
-                B::Spaceship if same(left, right) => Predicate::Bool(true),
+                // Fix round 2 (A R1-m1): an expression compared with itself keeps every row
+                // (`a = a`, `t.id = t.id`; a NULL row aside, which fails closed).
+                B::Spaceship | B::Eq | B::GtEq | B::LtEq if self_compared(left, right) => {
+                    Predicate::Bool(true)
+                }
                 B::Eq => cmp(CmpOp::Eq),
                 B::NotEq => cmp(CmpOp::NotEq),
                 B::Lt => cmp(CmpOp::Lt),
@@ -2008,8 +1975,155 @@ fn predicate(e: &Expr, ansi: bool, pipes: bool) -> Predicate {
             Predicate::Bool(!*negated)
         }
         Expr::Function(f) => function(f, ansi, pipes).unwrap_or_else(|| constness(e, ansi)),
+        Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. }
+            if self_compared(expr, pattern) =>
+        {
+            Predicate::Bool(true)
+        }
         _ => constness(e, ansi),
     }
+}
+
+// ## m3b-t26-prod-unlock (fix round 2, A R1-m1)
+/// The same expression on both sides (`id <=> id`, `t.id = t.id`), as written after the parser;
+/// two literals are compared by value instead (`NULL = NULL` is not true).
+fn self_compared(x: &Expr, y: &Expr) -> bool {
+    let (x, y) = (strip(x), strip(y));
+    !matches!(x, Expr::Value(_)) && x.to_string() == y.to_string()
+}
+
+// ## m3b-t26-prod-unlock (fix round 2, A R1-m1)
+/// `e` as `first OR rest` under MySQL's precedence, when an unparenthesised `||` inside it is
+/// MySQL's `OR`: `sqlparser` binds `||` tighter than every operator, MySQL looser than all but
+/// `OR`. `a || b` itself, `x <op> (a || b)` → `(x <op> a) || b`, `(a || b) <op> x` →
+/// `a || (b <op> x)`, `NOT (a || b)` → `(NOT a) || b`, `(a || b) IS [NOT] NULL` →
+/// `a || (b IS [NOT] NULL)`; `None` when there is no such `||`.
+fn mysql_or_parts(e: &Expr) -> Option<(Expr, Expr)> {
+    use sqlparser::ast::{BinaryOperator as B, UnaryOperator as U};
+    match e {
+        Expr::BinaryOp {
+            left,
+            op: B::StringConcat,
+            right,
+        } => Some(((**left).clone(), (**right).clone())),
+        Expr::BinaryOp { left, op, right } if !matches!(op, B::Or) => {
+            if let Some((a, rest)) = mysql_or_parts(right) {
+                let first = Expr::BinaryOp {
+                    left: left.clone(),
+                    op: op.clone(),
+                    right: Box::new(a),
+                };
+                Some((first, rest))
+            } else {
+                let (first, b) = mysql_or_parts(left)?;
+                let rest = Expr::BinaryOp {
+                    left: Box::new(b),
+                    op: op.clone(),
+                    right: right.clone(),
+                };
+                Some((first, rest))
+            }
+        }
+        Expr::UnaryOp { op: U::Not, expr } => {
+            let (a, rest) = mysql_or_parts(expr)?;
+            Some((
+                Expr::UnaryOp {
+                    op: U::Not,
+                    expr: Box::new(a),
+                },
+                rest,
+            ))
+        }
+        Expr::IsNull(x) => {
+            let (first, b) = mysql_or_parts(x)?;
+            Some((first, Expr::IsNull(Box::new(b))))
+        }
+        Expr::IsNotNull(x) => {
+            let (first, b) = mysql_or_parts(x)?;
+            Some((first, Expr::IsNotNull(Box::new(b))))
+        }
+        _ => None,
+    }
+}
+
+// ## m3b-t26-prod-unlock (fix round 2, A R1-m1: the fail-closed rule)
+/// Whether `e` may read a column of the statement's tables: an unqualified column anywhere (it
+/// could be theirs, also inside a subquery), or one qualified by one of `names` (a table's
+/// name or alias). A `WHERE` that reads none is constant for the statement: it keeps every
+/// row or none, and counts as keeping every row.
+fn reads_statement_columns(e: &Expr, names: &[String], ansi: bool) -> bool {
+    struct Refs<'n> {
+        names: &'n [String],
+        ansi: bool,
+    }
+    impl Visitor for Refs<'_> {
+        type Break = ();
+        fn pre_visit_expr(&mut self, e: &Expr) -> ControlFlow<()> {
+            match e {
+                Expr::Identifier(i) if i.quote_style.is_none() && i.value.starts_with('@') => {
+                    ControlFlow::Continue(())
+                }
+                Expr::Identifier(_) => ControlFlow::Break(()),
+                Expr::CompoundIdentifier(parts) if parts.len() >= 2 => {
+                    let q = &parts[parts.len() - 2].value;
+                    if self.names.iter().any(|n| n.eq_ignore_ascii_case(q)) {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                }
+                _ => ControlFlow::Continue(()),
+            }
+        }
+        fn pre_visit_value(&mut self, v: &sqlparser::ast::ValueWithSpan) -> ControlFlow<()> {
+            // Under ANSI_QUOTES `"a"` is a column.
+            if self.ansi && matches!(v.value, Value::DoubleQuotedString(_)) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        }
+    }
+    e.visit(&mut Refs { names, ansi }).is_break()
+}
+
+/// The names a column of `tables` may be qualified with: each base table's name (its last
+/// part) and alias, and each derived table's alias.
+fn qualifier_names(tables: &[TableWithJoins]) -> Vec<String> {
+    fn factor(f: &TableFactor, out: &mut Vec<String>) {
+        match f {
+            TableFactor::Table { name, alias, .. } => {
+                if let Some(ObjectNamePart::Identifier(i)) = name.0.last() {
+                    out.push(i.value.clone());
+                }
+                if let Some(a) = alias {
+                    out.push(a.name.value.clone());
+                }
+            }
+            TableFactor::NestedJoin {
+                table_with_joins,
+                alias,
+            } => {
+                join(table_with_joins, out);
+                if let Some(a) = alias {
+                    out.push(a.name.value.clone());
+                }
+            }
+            TableFactor::Derived { alias: Some(a), .. } => out.push(a.name.value.clone()),
+            _ => {}
+        }
+    }
+    fn join(t: &TableWithJoins, out: &mut Vec<String>) {
+        factor(&t.relation, out);
+        for j in &t.joins {
+            factor(&j.relation, out);
+        }
+    }
+    let mut out = Vec::new();
+    for t in tables {
+        join(t, &mut out);
+    }
+    out
 }
 
 /// `left OR right`, true outright when the two sides are `x IS NULL` and `x IS NOT NULL` of
@@ -2023,6 +2137,19 @@ fn or(left: &Expr, right: &Expr, ansi: bool, pipes: bool) -> Predicate {
     if let (Some((a, na)), Some((b, nb))) = (null_test(left), null_test(right))
         && a == b
         && na != nb
+    {
+        return Predicate::Bool(true);
+    }
+    // ## m3b-t26-prod-unlock (fix round 2, A R1-m1): `X OR NOT X` of one expression.
+    let negation = |e: &Expr| match strip(e) {
+        Expr::UnaryOp {
+            op: sqlparser::ast::UnaryOperator::Not,
+            expr,
+        } => Some(strip(expr).to_string()),
+        _ => None,
+    };
+    if negation(right).is_some_and(|x| x == strip(left).to_string())
+        || negation(left).is_some_and(|x| x == strip(right).to_string())
     {
         return Predicate::Bool(true);
     }
@@ -2550,6 +2677,34 @@ mod tests {
                 ("DELETE FROM t WHERE EXISTS (SELECT 1)", &["t"]),
                 ("DELETE FROM t WHERE id IS NULL OR id IS NOT NULL", &["t"]),
                 ("UPDATE t SET a = 1 WHERE 1 XOR 0", &["t"]),
+                // ## m3b-t26-prod-unlock (fix round 2, A R1-m1): an expression compared with
+                // itself, `X OR NOT X`, the `||` precedence under `NOT`/`IS`, and the
+                // fail-closed rule (a WHERE that reads no column of the statement's tables).
+                ("DELETE FROM t WHERE id = id", &["t"]),
+                ("DELETE FROM t WHERE t.id = t.id", &["t"]),
+                ("DELETE FROM t WHERE id >= id", &["t"]),
+                ("DELETE FROM t WHERE id LIKE id", &["t"]),
+                ("DELETE FROM t WHERE ISNULL(id) OR NOT ISNULL(id)", &["t"]),
+                ("DELETE FROM t WHERE a > 1 OR NOT a > 1", &["t"]),
+                ("DELETE FROM t WHERE id IS NULL || id IS NOT NULL", &["t"]),
+                ("DELETE FROM t WHERE NOT id = 3 || 1", &["t"]),
+                ("DELETE FROM t WHERE id = 3 AND 1 || 1", &["t"]),
+                ("DELETE FROM t WHERE NOW()", &["t"]),
+                ("DELETE FROM t WHERE IF(1, 1, 0)", &["t"]),
+                ("DELETE FROM t WHERE NULLIF(1, 2)", &["t"]),
+                ("DELETE FROM t WHERE GREATEST(1, 0)", &["t"]),
+                ("DELETE FROM t WHERE CONCAT('1')", &["t"]),
+                ("DELETE FROM t WHERE (SELECT 1)", &["t"]),
+                ("DELETE FROM t WHERE EXISTS (SELECT 1 FROM DUAL)", &["t"]),
+                ("DELETE FROM t WHERE EXISTS (SELECT 1 WHERE 1)", &["t"]),
+                (
+                    "DELETE FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.a = 1)",
+                    &["t"],
+                ),
+                ("DELETE FROM t WHERE NOT EXISTS (SELECT 1)", &["t"]),
+                ("DELETE FROM t WHERE RAND() < 0.5", &["t"]),
+                ("DELETE FROM t WHERE @v = 1", &["t"]),
+                ("UPDATE t SET a = 1 WHERE u.id = 3", &["t"]),
             ] {
                 let (unbounded, writes, _, doubt) = read(sql);
                 assert_eq!(unbounded, want, "{d:?} {sql}: the unbounded targets");
@@ -2560,10 +2715,17 @@ mod tests {
             for sql in [
                 "DELETE FROM t WHERE id = 3",
                 "DELETE FROM t WHERE id <=> 3",
-                "DELETE FROM t WHERE id = id",
                 "DELETE FROM t WHERE ISNULL(id)",
                 "DELETE FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.id = t.id)",
-                "DELETE FROM t WHERE NOT EXISTS (SELECT 1)",
+                "DELETE FROM t WHERE id IN (SELECT id FROM u)",
+                "DELETE FROM t AS x WHERE x.id = 3",
+                "DELETE FROM t WHERE id = 1 || id = 2",
+                "DELETE FROM t WHERE `id` = 3",
+                "DELETE FROM t WHERE a = b",
+                "DELETE FROM t WHERE NOT id = 3",
+                "DELETE FROM t WHERE id > 1000000",
+                "UPDATE t JOIN u ON t.id = u.id SET t.a = 1 WHERE u.b = 2",
+                "DELETE t FROM t JOIN u ON t.id = u.id WHERE u.b = 2",
             ] {
                 let (unbounded, _, _, _) = read(sql);
                 assert!(unbounded.is_empty(), "{d:?} {sql}: {unbounded:?}");

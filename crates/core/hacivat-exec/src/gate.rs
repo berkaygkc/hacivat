@@ -205,8 +205,9 @@ impl GatePlan {
 ///    MySQL/MariaDB/TiDB a `Dml` is a `Confirm` before it is sent (a MyISAM/MEMORY/Aria table
 ///    keeps a write no rollback undoes); PostgreSQL and SQLite keep the savepoint form. A
 ///    production `Session` statement that changes how later writes behave
-///    (`session_replication_role`, `sql_log_bin`, `foreign_key_checks`, `unique_checks`) or a
-///    `NOTIFY` asks too (B-M1).
+///    (`session_replication_role`, `sql_log_bin`, `foreign_key_checks`, `unique_checks`,
+///    `sql_safe_updates`, `gtid_next`, `pseudo_replica_mode`/`pseudo_slave_mode`,
+///    `synchronous_commit`, quoted or not) or a `NOTIFY` asks too (B-M1; fix round 2, R3).
 /// 7. **Stricter on top**: type-to-confirm on production (from the destructive kinds, not the
 ///    class: a DDL in the same unit hides `DmlUnsafe`; `DROP DATABASE/SCHEMA` also read from
 ///    the statement's words, I3), the MySQL/MariaDB/TiDB implicit commit of
@@ -215,10 +216,12 @@ impl GatePlan {
 ///    statements.
 /// 8. **Suppression**: a suppressible `Confirm`/`Warn` whose `(console, key)` the user turned
 ///    off runs (`Run`); the key mixes the fingerprint with the class (M4). Never suppressible:
-///    type-to-confirm, implicit commits, a unit of several statements with a write (M9), and on
-///    production `DdlDestructive`, `Admin`, `Routine` and `Unknown` (controller ruling), and a
-///    routine definition (`CREATE`/`ALTER` `FUNCTION`/`PROCEDURE`/`TRIGGER`/`EVENT`; fix round 1,
-///    B-I2), whose key elsewhere also mixes a hash of its whole text (a new body asks again).
+///    type-to-confirm, implicit commits, a unit of several statements with a write (M9), and
+///    **every production item** (T26 fix round 2, N1/R1: production never consults the set, so
+///    no "don't ask again" recorded anywhere applies there). Off production a code-like
+///    definition (`CREATE [OR REPLACE]`/`ALTER` of a `FUNCTION`, `PROCEDURE`, `TRIGGER`,
+///    `EVENT`, `RULE`, `POLICY` or `VIEW`; fix rounds 1 and 2) keys on a hash of its whole text
+///    too (a new body asks again).
 ///
 /// The verdict is `Read` only for a unit whose report reads only ([`reads_only`], R-M3-23);
 /// `Routine` and `Unknown` are `Unknown` with unknown session effects, never `Write`.
@@ -784,17 +787,19 @@ enum Row {
     Confirm,
 }
 
-// ## m3b-t26-prod-unlock (fix round 1, B-I2)
-/// Whether `words` (a statement's atoms) define or change executable code: `CREATE [OR
-/// REPLACE] [DEFINER = …] … FUNCTION | PROCEDURE | TRIGGER | EVENT`, or `ALTER` of one. A word
-/// among the first dozen is enough (a column named `function` makes it stricter, never weaker).
+// ## m3b-t26-prod-unlock (fix round 1, B-I2; fix round 2, R1)
+/// Whether `words` (a statement's atoms) define or change code-like objects whose body the
+/// fingerprint does not see: `CREATE [OR REPLACE] [DEFINER = …] … FUNCTION | PROCEDURE |
+/// TRIGGER | EVENT | RULE | POLICY | VIEW`, or `ALTER` of one. A word among the first dozen is
+/// enough (a column named `function` makes it stricter, never weaker).
 fn defines_routine(words: &[String]) -> bool {
     matches!(words.first().map(String::as_str), Some("CREATE" | "ALTER"))
-        && words
-            .iter()
-            .skip(1)
-            .take(12)
-            .any(|w| matches!(w.as_str(), "FUNCTION" | "PROCEDURE" | "TRIGGER" | "EVENT"))
+        && words.iter().skip(1).take(12).any(|w| {
+            matches!(
+                w.as_str(),
+                "FUNCTION" | "PROCEDURE" | "TRIGGER" | "EVENT" | "RULE" | "POLICY" | "VIEW"
+            )
+        })
 }
 
 /// A hash of `text`, whole (the same text, the same value, in every run of the app).
@@ -805,27 +810,35 @@ fn body_hash(text: &str) -> u64 {
     h.finish()
 }
 
-// ## m3b-t26-prod-unlock (fix round 1, B-M1)
-/// Whether `words` (a statement's atoms) set what makes later writes skip their checks or
-/// their replication (`session_replication_role`, `sql_log_bin`, `foreign_key_checks`,
-/// `unique_checks`), or are a `NOTIFY`.
-fn weakens_later_writes(words: &[String]) -> bool {
-    const VARS: [&str; 4] = [
+// ## m3b-t26-prod-unlock (fix round 1, B-M1; fix round 2, R3)
+/// Whether a statement (its atoms `words`, and `raw`, every word of its text with quoted names,
+/// strings and comments read too) sets what makes later writes skip their checks, their
+/// durability or their replication, or is a `NOTIFY`. A variable is compared by its bare name:
+/// `@@`, a scope (`SESSION.`, `@@LOCAL.`, …) and its quotes (`"…"`, `` `…` ``) dropped, in any
+/// letter case. A string or comment naming one makes it stricter, never weaker.
+fn weakens_later_writes(words: &[String], raw: &[String]) -> bool {
+    const VARS: [&str; 9] = [
         "SESSION_REPLICATION_ROLE",
         "SQL_LOG_BIN",
         "FOREIGN_KEY_CHECKS",
         "UNIQUE_CHECKS",
+        "SQL_SAFE_UPDATES",
+        "GTID_NEXT",
+        "PSEUDO_REPLICA_MODE",
+        "PSEUDO_SLAVE_MODE",
+        "SYNCHRONOUS_COMMIT",
     ];
+    // A raw word keeps `@` and `.`: `@@GLOBAL.FOREIGN_KEY_CHECKS` is one; its last part counts.
+    let bare = |w: &str| {
+        w.rsplit('.')
+            .next()
+            .unwrap_or(w)
+            .trim_start_matches('@')
+            .to_string()
+    };
     match words.first().map(String::as_str) {
         Some("NOTIFY") => true,
-        Some("SET") => words.iter().skip(1).any(|w| {
-            let w = w.trim_start_matches("@@");
-            let w = ["SESSION.", "LOCAL.", "GLOBAL.", "PERSIST.", "PERSIST_ONLY."]
-                .iter()
-                .find_map(|p| w.strip_prefix(p))
-                .unwrap_or(w);
-            VARS.contains(&w)
-        }),
+        Some("SET") => raw.iter().any(|w| VARS.contains(&bare(w).as_str())),
         _ => false,
     }
 }
@@ -1046,7 +1059,9 @@ fn gate_unit(
         match class {
             // ## m3b-t26-prod-unlock (fix round 1, B-M1)
             GateClass::Read | GateClass::Session
-                if words.iter().any(|w| weakens_later_writes(w)) =>
+                if words.iter().zip(report.items.iter()).any(|(w, st)| {
+                    weakens_later_writes(w, &raw_words(slice(text, st.range).unwrap_or(text)))
+                }) =>
             {
                 Row::Confirm
             }
@@ -1082,18 +1097,11 @@ fn gate_unit(
     if type_to_confirm.is_some() || implicit_commit {
         row = Row::Confirm;
     }
-    // Fix round 1 (controller ruling, M9): on production "don't ask again" never covers a
-    // destructive, administrative, routine or unknown statement, and nowhere a unit of several
-    // statements with a write in it.
-    let never_suppressed = production
-        && (routine
-            || matches!(
-                class,
-                GateClass::DdlDestructive
-                    | GateClass::Admin
-                    | GateClass::Routine
-                    | GateClass::Unknown
-            ));
+    // Fix round 1 (controller ruling, M9): nowhere a unit of several statements with a write in
+    // it. ## m3b-t26-prod-unlock (fix round 2, N1/R1/A R1-m2): on production never, for any
+    // class: a production item never consults the set, so nothing recorded off production (or
+    // on it, before this round) applies there.
+    let never_suppressed = production;
     let suppressible =
         type_to_confirm.is_none() && !implicit_commit && !never_suppressed && !facts.mixed_write;
 

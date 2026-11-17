@@ -1295,6 +1295,13 @@ fn always_true_where_is_destructive() {
             "(TRUE)",
             "1",
             "2 > 1",
+            // ## m3b-t26-prod-unlock (fix round 2, A R1-m1: the fail-closed rule): a WHERE that
+            // reads no column of the statement's tables is constant, so it counts as keeping
+            // every row (these three were bounded before), as does `id = id`.
+            "1 = 0",
+            "NULL",
+            "NULL = NULL",
+            "id = id",
         ] {
             for s in [
                 format!("DELETE FROM audit_log WHERE {w}"),
@@ -1308,9 +1315,6 @@ fn always_true_where_is_destructive() {
         }
         for w in [
             "id = 1",
-            "1 = 0",
-            "NULL",
-            "NULL = NULL",
             "id = 1 AND TRUE",
             "id IS NULL",
             "FALSE OR id = 2",

@@ -2645,3 +2645,34 @@ transaction after it (Task 19); the session itself runs no production policy.
   MySQL family plus the "not undone" line; the Turkish wording of the new lines
   (`exec-confirm-not-undone`, `exec-error-confirm-not-undone`,
   `hv-confirm-execute-all-scope-production`).
+
+### m3b-t26 fix round 2 (the controller's rulings on the round-1 re-checks)
+
+This round simplifies production on purpose; it replaces the round-1 bullets on routine bodies
+(B-I2) and Execute all (B-I3) where they differ.
+
+- **No "don't ask again" on production (N1, R1, A R1-m2).** It is never offered on production,
+  for any class (`offers_suppress`), and the gate marks every production item unsuppressible;
+  a production item never consults the `SuppressSet`, so a pair recorded off production (or on
+  it, before this round) never silences a production statement. This closes N1: since round 1
+  a production MySQL-family DML is a `Confirm`, and one "don't ask again" on `DELETE … WHERE id >
+  1000000` had silenced `… WHERE id > 0` (the key is constant-blind).
+- **Bodies off production (R1).** `RULE`, `POLICY` and `VIEW` (`CREATE [OR REPLACE]`, `ALTER`)
+  join the code-like definitions whose suppression key also hashes the whole text.
+- **Execute all on production (R2).** Not offered: it covers nothing, so every unit shows its own
+  dialog. The ruling allowed covering only byte-identical repeats or hiding it; hiding is the
+  simpler, and repeats were its only use. Off production RC-1 stands.
+- **Session settings (R3).** Compared by bare name (quotes, `@@` and scope dropped, any case), and
+  the list grows: `sql_safe_updates`, `gtid_next`, `pseudo_replica_mode`/`pseudo_slave_mode` and
+  `synchronous_commit` join `session_replication_role`, `sql_log_bin`, `foreign_key_checks` and
+  `unique_checks` (any value: fail closed).
+- **Always-true `WHERE`, the fail-closed rule (A R1-m1).** On both backends a `WHERE` that reads no
+  column of the statement's tables (an unqualified column, or one qualified by a target's name or
+  alias, anywhere in it) is constant for the statement and counts as keeping every row
+  (`AlwaysTrue`: the typed name on production); so does an expression compared with itself
+  (`a = a`, `t.id >= t.id`, `a <=> a`, `a LIKE a`, `IS NOT DISTINCT FROM`), `X OR NOT X` (MySQL
+  backend) and `x IS NULL OR x IS NOT NULL`. MySQL's `||` precedence is read under `NOT` and
+  `IS [NOT] NULL` too (`NOT x = 3 || 1` is `(NOT x = 3) OR 1`). Statements that were bounded and
+  now ask for the name: `WHERE 1 = 0`, `NULL`, `NULL = NULL`, `id = id`, `now() < …`, `EXISTS
+  (SELECT 1 FROM u WHERE u.a = 1)`.
+- **To the PO (B-M3):** `TRUNCATE` and `DROP TABLE` keep no typed name, as R-M3-55 says.

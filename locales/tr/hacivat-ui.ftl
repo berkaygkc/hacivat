@@ -2369,11 +2369,3 @@ hv-history-insert-refused = İfade eklenemedi: düzenleyici salt okunur, metin o
 hv-history-pin-failed = Sabitleme değiştirilemedi.
 # Review: PO
 hv-history-open-failed = Yeni konsol zamanında açılmadı; hiçbir şey eklenmedi.
-
-## m3b-t26-prod-unlock
-
-# Review: PO
-hv-confirm-execute-all-scope-production = { $n ->
-        [one] Tümünü çalıştır, bu türden soracak olan kalan { $n } ifadeyi de sormadan çalıştırır. Başka türden bir ifade ya da adı yazılması gereken bir ifade yine sorar.
-       *[other] Tümünü çalıştır, bu türden soracak olan kalan { $n } ifadeyi de sormadan çalıştırır. Başka türden bir ifade ya da adı yazılması gereken bir ifade yine sorar.
-    }

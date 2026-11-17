@@ -490,6 +490,20 @@ fn unsafe_01_to_10() {
         "'t'::boolean",
         "TRUE IS TRUE",
         "2.5 >= 2",
+        // ## m3b-t26-prod-unlock (fix round 2, A R1-m1): a column compared with itself, one
+        // column's null tests, and the fail-closed rule (no column of the target read: the
+        // WHERE is constant, so it counts as keeping every row; was bounded before).
+        "id = id",
+        "audit_log.id = audit_log.id",
+        "id >= id",
+        "id IS NOT DISTINCT FROM id",
+        "id IS NULL OR id IS NOT NULL",
+        "x = 1 OR id = id",
+        "1 = 2",
+        "NULL = NULL",
+        "now() < '2030-01-01'",
+        "random() < 0.5",
+        "EXISTS (SELECT 1 FROM u WHERE u.a = 1)",
     ] {
         assert_eq!(
             destructive(&format!("DELETE FROM audit_log WHERE {w}")),
@@ -497,7 +511,15 @@ fn unsafe_01_to_10() {
             "{w}"
         );
     }
-    for w in ["id = id", "1 = 2", "NULL = NULL", "id = 5 AND 1 = 1", "x"] {
+    for w in [
+        "id = 5 AND 1 = 1",
+        "x",
+        "id = $1",
+        "id IN (SELECT id FROM u)",
+        "EXISTS (SELECT 1 FROM u WHERE u.id = audit_log.id)",
+        "a = b",
+        "id = id AND x = 1",
+    ] {
         assert!(
             destructive(&format!("DELETE FROM audit_log WHERE {w}")).is_empty(),
             "{w}"
