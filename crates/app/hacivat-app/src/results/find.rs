@@ -845,6 +845,22 @@ pub fn count_text(console: ConsoleId, cx: &App) -> Option<SharedString> {
     Some(text)
 }
 
+// ## m3c-t43b (named exception: Task 43's hold seam)
+/// Set by [`hold_scans`]: no scan ends from then on.
+#[cfg(feature = "test-support")]
+struct HeldScans;
+
+#[cfg(feature = "test-support")]
+impl hacivat_ui_core::gpui_surface::Global for HeldScans {}
+
+/// Holds every grid-find scan from now on before it ends (`test-support`): the hits found stay
+/// marked and counted, the total stays open ("3 of 41+") and the bar keeps its scanning marker.
+/// The shots use it for the scanning state.
+#[cfg(feature = "test-support")]
+pub fn hold_scans(cx: &mut App) {
+    cx.set_global(HeldScans);
+}
+
 /// "may be incomplete" after the count, while the scan met values cut at the value-size limit.
 pub fn incomplete_text(console: ConsoleId, cx: &App) -> Option<SharedString> {
     let b = bar(console, cx)?;
@@ -1543,6 +1559,12 @@ impl GridFindBar {
     /// past the end (wrapping) follow.
     fn on_done(&mut self, id: u64, run: ScanRun, rows: Arc<[u64]>, cx: &mut Context<Self>) {
         if id != self.scan.id {
+            return;
+        }
+        // ## m3c-t43b (named exception: Task 43's hold seam): a held scan never ends, so the
+        // bar stays at "k of n+" (the shots' scanning state).
+        #[cfg(feature = "test-support")]
+        if cx.has_global::<HeldScans>() {
             return;
         }
         self.scan.done = true;

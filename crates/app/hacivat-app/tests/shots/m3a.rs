@@ -1661,7 +1661,8 @@ impl FetchControl for Inert {
 
 /// Gives the active console a suspended 10,000-row result, timed 12 ms + 119 ms, active (the
 /// status bar's rows and timing).
-fn suspended_tab() -> Step {
+// ## m3c-t43b-fix (review I3): `pub(super)` for `narrow-strip`.
+pub(super) fn suspended_tab() -> Step {
     step(
         |window, cx| {
             let console = active_console(window, cx).expect("a console");

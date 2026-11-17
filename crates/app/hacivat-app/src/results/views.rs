@@ -842,6 +842,22 @@ impl SendableTranspose {
 
 // ---- the Text view -------------------------------------------------------------------------------
 
+// ## m3c-t43b (named exception: Task 43's hold seam)
+/// Set by [`hold_builds`]: text builds stop half done from then on.
+#[cfg(feature = "test-support")]
+struct HeldBuilds;
+
+#[cfg(feature = "test-support")]
+impl hacivat_ui_core::gpui_surface::Global for HeldBuilds {}
+
+/// Holds every text-view build from now on after its first pass (`test-support`): the view
+/// stays at "Building" with its progress half done and Cancel offered. The shots use it for the
+/// building state.
+#[cfg(feature = "test-support")]
+pub fn hold_builds(cx: &mut App) {
+    cx.set_global(HeldBuilds);
+}
+
 /// Where a text view is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextState {
@@ -1194,6 +1210,15 @@ impl TextView {
                 if this.update(cx, |t, cx| t.progress(done, rows, cx)).is_err() {
                     return;
                 }
+            }
+            // ## m3c-t43b (named exception: Task 43's hold seam): a held build stops after its
+            // first pass, half done (the shots' building state).
+            #[cfg(feature = "test-support")]
+            if this
+                .read_with(cx, |_, cx| cx.has_global::<HeldBuilds>())
+                .unwrap_or(false)
+            {
+                return;
             }
             // Pass 2: the lines.
             let mut lines = header_lines(&input, &widths);

@@ -264,6 +264,9 @@ fn on_batch(
     if v.find.generation != generation {
         return false;
     }
+    // ## m3c-t43b (named exception: Task 43's hold seam): a held count keeps its last batch
+    // open, so the bar stays at "k of n+" while counting (the shots' counting state).
+    let done = done && !cx.has_global::<HeldCounts>();
     let st = &mut v.find;
     st.status.counted = st
         .status
@@ -282,6 +285,21 @@ fn on_batch(
     cx.emit(EditorEvent::FindChanged);
     cx.notify();
     !done
+}
+
+// ## m3c-t43b (named exception: Task 43's hold seam)
+/// Set by [`hold_counts`]: every count from then on stops short of its end.
+struct HeldCounts;
+
+impl hacivat_ui_core::gpui_surface::Global for HeldCounts {}
+
+/// Holds every find count from now on before it ends (test seam, never set by the app): the
+/// matches found stay kept and counted, the total stays unknown ("3 of 41+"), and the bar keeps
+/// its counting marker. The shots use it for the counting state, whose picture would otherwise
+/// depend on how far a background count got.
+#[doc(hidden)]
+pub fn hold_counts(cx: &mut App) {
+    cx.set_global(HeldCounts);
 }
 
 /// Sets (or clears, `None`) the query and starts counting it. Clearing it drops the
