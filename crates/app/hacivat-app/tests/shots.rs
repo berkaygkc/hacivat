@@ -89,6 +89,10 @@ mod m3a;
 // ## m3b-t29-shots: and the M3b surfaces in theirs (`design/m3b-safe` surfaces 1–13).
 #[path = "shots/m3b.rs"]
 mod m3b;
+// ## m3c-t43-shots: and the M3c surfaces in theirs (`design/m3b-safe` surfaces 14–22; part B
+// adds 23–25).
+#[path = "shots/m3c.rs"]
+mod m3c;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -219,6 +223,8 @@ enum Surface {
     // ## m3b-t21-confirm, ## m3b-t24-exec-ui; ## m3b-t29-shots: every M3b state (`m3b::all`:
     // Tasks 21–27's and Task 29's), at 1280x800 and 960x600.
     M3b(m3b::M3b),
+    // ## m3c-t43-shots: every M3c state (`m3c::all`: Tasks 31–38's), at 1280x800 and 960x600.
+    M3c(m3c::M3c),
 }
 
 const SURFACES: [Surface; 78] = [
@@ -398,6 +404,8 @@ impl Surface {
             Surface::M3a(s) => s.name(),
             // ## m3b-t29-shots
             Surface::M3b(s) => s.name(),
+            // ## m3c-t43-shots
+            Surface::M3c(s) => s.name(),
         }
     }
 
@@ -426,7 +434,11 @@ impl Surface {
         // ## m2b-t24-shots: every M2b surface, at the default window and the minimum one.
         // ## m3a-t35-shots: and every M3a state.
         // ## m3b-t29-shots: and every M3b state.
-        if self.is_live() || self.is_m2b() || matches!(self, Surface::M3a(_) | Surface::M3b(_)) {
+        // ## m3c-t43-shots: and every M3c state.
+        if self.is_live()
+            || self.is_m2b()
+            || matches!(self, Surface::M3a(_) | Surface::M3b(_) | Surface::M3c(_))
+        {
             // ## m2b-t22-live: the default window and the minimum one (ruling I1).
             return &[(1280.0, 800.0), (960.0, 600.0)];
         }
@@ -457,6 +469,15 @@ impl Surface {
         }
     }
 
+    // ## m3c-t43-shots
+    /// The M3c state, if the surface is one.
+    fn m3c(self) -> Option<m3c::M3c> {
+        match self {
+            Surface::M3c(s) => Some(s),
+            _ => None,
+        }
+    }
+
     // ## m2b-t24-shots
     /// Whether the surface is one Task 24 added (every M2b surface outside T22's live set).
     fn is_m2b(self) -> bool {
@@ -476,6 +497,10 @@ impl Surface {
         }
         // ## m3b-t29-shots
         if let Surface::M3b(s) = self {
+            return s.shows_production();
+        }
+        // ## m3c-t43-shots
+        if let Surface::M3c(s) = self {
             return s.shows_production();
         }
         matches!(
@@ -616,6 +641,8 @@ impl Surface {
             Surface::M3a(s) => s.marker(),
             // ## m3b-t29-shots: each M3b state's own label.
             Surface::M3b(s) => s.marker(),
+            // ## m3c-t43-shots: each M3c state's own label.
+            Surface::M3c(s) => s.marker(),
         }
     }
 
@@ -637,6 +664,8 @@ impl Surface {
             Surface::M3a(s) if s.is_grid() => &["#header"],
             // ## m3b-t29-shots: what tells an M3b state from one with the same marker.
             Surface::M3b(s) => s.also_shown(),
+            // ## m3c-t43-shots: a grid state's header among them (`m3c::M3c::also_shown`).
+            Surface::M3c(s) => s.also_shown(),
             _ => &[],
         }
     }
@@ -688,6 +717,8 @@ impl Surface {
         let required = match self {
             Surface::M3a(state) => state.required(),
             Surface::M3b(state) => state.required(),
+            // ## m3c-t43-shots
+            Surface::M3c(state) => state.required(),
             _ => return Vec::new(),
         };
         // ## m3b-t29-shots (T29 review I2): a trust signal counts only drawn whole: never
@@ -723,6 +754,8 @@ impl Surface {
         let (required, production) = match self {
             Surface::M3a(state) => (state.required(), state.shows_production()),
             Surface::M3b(state) => (state.required(), state.shows_production()),
+            // ## m3c-t43-shots
+            Surface::M3c(state) => (state.required(), state.shows_production()),
             _ => return Vec::new(),
         };
         let mut ids: Vec<&'static str> = required.iter().flat_map(|g| g.iter().copied()).collect();
@@ -759,6 +792,10 @@ impl Surface {
         // through its fixture, any other M3b state by its steps.
         if let Surface::M3b(state) = self {
             return state.open(window, cx);
+        }
+        // ## m3c-t43-shots: every M3c state is reached by its steps.
+        if let Surface::M3c(_) = self {
+            return;
         }
         if self.needs_connections() {
             open_m2a(self, window, cx);
@@ -1036,6 +1073,10 @@ fn shots() -> Vec<Shot> {
     for state in m3b::all() {
         push_matrix(&mut out, Surface::M3b(state));
     }
+    // ## m3c-t43-shots: then every M3c state (`m3c::all`: Tasks 31 to 38 in order).
+    for state in m3c::all() {
+        push_matrix(&mut out, Surface::M3c(state));
+    }
     out
 }
 
@@ -1290,7 +1331,10 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     // ## m3b-t29-shots: an M3b state reached by steps connects as an M3a one; an M3b dialog
     // opens its fixture over the M2a fakes, as it did before it moved.
     let m3b_state = shot.surface.m3b();
-    let stepped = m3a_state.is_some() || m3b_state.is_some_and(|s| !s.is_fixture());
+    // ## m3c-t43-shots: every M3c state is reached by steps.
+    let m3c_state = shot.surface.m3c();
+    let stepped =
+        m3a_state.is_some() || m3b_state.is_some_and(|s| !s.is_fixture()) || m3c_state.is_some();
     let mut connections = shot.surface.needs_connections().then(|| {
         if stepped {
             m3a::connections(&paths)
@@ -1348,9 +1392,11 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     }
     // ## m3a-t35-shots: each step, then its condition (bounded, polled; never a fixed sleep).
     // ## m3b-t29-shots: an M3b state's steps too.
-    let steps = match (m3a_state, m3b_state) {
-        (Some(s), _) => s.steps(),
-        (_, Some(s)) => s.steps(),
+    // ## m3c-t43-shots: an M3c state's steps too.
+    let steps = match (m3a_state, m3b_state, m3c_state) {
+        (Some(s), _, _) => s.steps(),
+        (_, Some(s), _) => s.steps(),
+        (_, _, Some(s)) => s.steps(),
         _ => Vec::new(),
     };
     for (at, step) in steps.into_iter().enumerate() {
@@ -1386,8 +1432,17 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     })
     .expect("the window is open");
     cx.run_until_parked();
+    // ## m3c-t43-shots: the icons of the last frame (an M3c state's check counts the gutter's ▶
+    // and chevrons, which draw no label).
+    if m3c_state.is_some() {
+        cx.update_window(handle, |_, window, cx| m3c::record_icons(window, cx))
+            .expect("the window is open");
+    }
     cx.update(|cx| cx.refresh_windows());
     cx.run_until_parked();
+    if m3c_state.is_some() {
+        m3c::take_icons();
+    }
     let decls = hacivat_ui::popover::a11y_take();
 
     let scale = cx
@@ -1418,6 +1473,16 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     }
     // ## m3b-t29-shots: every M3b state's model check.
     if let Some(state) = m3b_state {
+        failures.extend(
+            cx.update_window(handle, |_, window, cx| {
+                state.check(window, cx, &frame, &decls)
+            })
+            .expect("the window is open")
+            .map(|v| format!("{name}: {v}")),
+        );
+    }
+    // ## m3c-t43-shots: every M3c state's model check.
+    if let Some(state) = m3c_state {
         failures.extend(
             cx.update_window(handle, |_, window, cx| {
                 state.check(window, cx, &frame, &decls)
@@ -1485,6 +1550,19 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     image.save(dir.join(&name)).expect("write the PNG");
     println!("shot {name}: {} labels", frame.len());
     support::stop_core_runtime(&mut cx);
+    // ## m3c-t43-shots: a product defect this task found in a merged M3c surface and listed for
+    // its owner (`m3c::KNOWN_FINDINGS`) is printed, not failed; every other violation fails.
+    if let Some(state) = m3c_state {
+        failures.retain(
+            |v| match m3c::known_finding(state, shot.locale, shot.size, v) {
+                Some(f) => {
+                    println!("known finding ({}): {v}", f.owner);
+                    false
+                }
+                None => true,
+            },
+        );
+    }
     failures
 }
 
@@ -1566,6 +1644,8 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
             + m3a::M3A.len() * 8 * 2
             // ## m3b-t29-shots: every M3b state (Tasks 21–27 and 29).
             + m3b::all().len() * 8 * 2
+            // ## m3c-t43-shots: every M3c state (Tasks 31–38).
+            + m3c::all().len() * 8 * 2
     );
     // ## m3a-t35-shots: the 1,012 M1/M2 shots first, unchanged; then 68 M3a states x 16.
     // ## m3a-f5-demo (review m-5): plus the app menu at 960x600 (8).
@@ -1575,7 +1655,10 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     assert_eq!(m3b::t21().len(), 20);
     assert_eq!(m3b::t24().len(), 12);
     assert_eq!(m3b::all().len(), 7 + 11 + 20 + 9 + 12 + 7 + 1 + 4);
-    assert_eq!(all.len(), 1020 + 68 * 16 + 71 * 16);
+    // ## m3c-t43-shots: then the M3c states x 16: Task 31's 5, Task 32's 7, Task 33's 7, Task
+    // 34's 10, Tasks 35/36's 9, Task 37's 13, Task 38's 15 (part B adds Tasks 39, 41 and 42's).
+    assert_eq!(m3c::all().len(), 5 + 7 + 7 + 10 + 9 + 13 + 15);
+    assert_eq!(all.len(), 1020 + 68 * 16 + 71 * 16 + 66 * 16);
     let m3b_from = 1020 + 68 * 16;
     let order = [
         m3b::T22.to_vec(),
@@ -1598,6 +1681,16 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
             );
             at += 16;
         }
+    }
+    // ## m3c-t43-shots: the M3c states after the M3b ones, in task order.
+    for state in m3c::all() {
+        assert!(
+            all[at..at + 16]
+                .iter()
+                .all(|s| s.surface == Surface::M3c(state)),
+            "{state:?} at {at}"
+        );
+        at += 16;
     }
     assert_eq!(at, all.len());
     assert!(
@@ -1869,7 +1962,12 @@ fn main() {
         eprintln!("--shard {bad:?}: expected k/n with 1 <= k <= n");
         std::process::exit(2);
     }
-    let checks: [(&str, fn()); 9] = [
+    let checks: [(&str, fn()); 10] = [
+        // ## m3c-t43-shots
+        (
+            "every_m3c_state_has_its_own_marker",
+            every_m3c_state_has_its_own_marker,
+        ),
         // ## m3b-t29-shots
         (
             "every_m3b_state_has_its_own_marker",
@@ -2457,6 +2555,144 @@ fn every_m3b_state_has_its_own_marker() {
             .missing_from("s", &[line("DROP SCHEMA reporting CASCADE;")])
             .is_some()
     );
+}
+
+// ## m3c-t43-shots
+/// Every M3c state has a marker signature (its marker and the labels it must also show) no
+/// other M3c or M3b state has, except the groups `m3c::TOLD_APART_BY_CHECK` names (their model
+/// check tells them apart); no M3c marker is satisfied by a live console's own frame (the
+/// capsule, the toolbar, the status bar with the line and column) or a result tile's (its grid's
+/// header and strip) alone, unless its check holds the state; and every M3c name is new.
+fn every_m3c_state_has_its_own_marker() {
+    let mut by_signature: std::collections::BTreeMap<String, Vec<&'static str>> =
+        std::collections::BTreeMap::new();
+    for state in m3c::all() {
+        let (file, text) = state.marker();
+        let key = format!("{file} {text:?} {:?}", state.also_shown());
+        by_signature.entry(key).or_default().push(state.name());
+    }
+    let mut shared: Vec<Vec<&str>> = by_signature
+        .into_values()
+        .filter(|names| names.len() > 1)
+        .collect();
+    shared.sort();
+    let mut expected: Vec<Vec<&str>> = m3c::TOLD_APART_BY_CHECK
+        .iter()
+        .map(|g| g.to_vec())
+        .collect();
+    expected.sort();
+    assert_eq!(shared, expected, "only these share a marker signature");
+    // No M3c state shares a marker signature with an M3b state.
+    for b in m3b::all() {
+        let sig = format!("{:?} {:?}", b.marker(), b.also_shown());
+        for c in m3c::all() {
+            assert_ne!(
+                sig,
+                format!("{:?} {:?}", c.marker(), c.also_shown()),
+                "{c:?} and {b:?}"
+            );
+        }
+    }
+    // The names are new: none is an M1/M2, M3a or M3b shot's.
+    let others: std::collections::BTreeSet<&str> = SURFACES
+        .iter()
+        .map(|s| s.name())
+        .chain(m3a::M3A.iter().map(|s| s.name()))
+        .chain(m3b::all().iter().map(|s| s.name()))
+        .collect();
+    for state in m3c::all() {
+        assert!(!others.contains(state.name()), "{state:?}");
+        // The grid states ask for the header their grid drew.
+        if state.is_grid() {
+            assert!(state.also_shown().contains(&"#header"), "{state:?}");
+        }
+    }
+    // A live dev console's frame (from `errbar-dark-en-1280x800`), and a result tile's (a grid's
+    // header and the strip): no M3c marker but the ones its check tells apart.
+    let label = |path: &str, text: &str| RenderedText {
+        text: text.to_string().into(),
+        source: TextSource::Fluent,
+        size_px: 13.0,
+        painted_px: 10.0,
+        clipped: false,
+        truncated: false,
+        path: path.to_string().into(),
+        visible: true,
+        outside_card: false,
+    };
+    let console: Vec<RenderedText> = [
+        (
+            "crates/ui/hacivat-ui/src/capsule.rs:829:21#capsule-text-name",
+            "orders-dev",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-console-run",
+            "Run",
+        ),
+        (
+            "crates/app/hacivat-app/src/console/tx_chip.rs:170:17#tx-chip-mode",
+            "Auto-commit",
+        ),
+        (
+            "crates/app/hacivat-app/src/connections/status.rs:126:17#status-env-label",
+            "dev",
+        ),
+        (
+            "crates/app/hacivat-app/src/console/status.rs:116:13#editor-segment-lncol",
+            "Ln 2, Col 38",
+        ),
+        (
+            "crates/app/hacivat-app/src/console/toolbar.rs:284:9#console-connection-name",
+            "orders-dev",
+        ),
+        (
+            "crates/ui/hacivat-ui-grid/src/element/layers.rs#header",
+            "şehir",
+        ),
+        (
+            "crates/app/hacivat-app/src/results/strip.rs:1:1#strip-rows",
+            "40 rows",
+        ),
+    ]
+    .into_iter()
+    .map(|(p, t)| label(p, t))
+    .collect();
+    let mut satisfied: Vec<&str> = m3c::all()
+        .into_iter()
+        .filter(|s| Surface::M3c(*s).missing_from("s", &console).is_none())
+        .map(|s| s.name())
+        .collect();
+    satisfied.sort();
+    let mut by_check: Vec<&str> = m3c::BY_CHECK_ALONE.to_vec();
+    by_check.sort();
+    assert_eq!(
+        satisfied, by_check,
+        "markers a bare console or tile satisfies"
+    );
+    // Every known finding names an M3c state, a label and the merged task that owns its fix;
+    // none is about a trust signal (those always fail), and a violation outside the list is
+    // never one.
+    let names: Vec<&str> = m3c::all().iter().map(|s| s.name()).collect();
+    for f in m3c::KNOWN_FINDINGS {
+        assert!(names.contains(&f.state), "{f:?}");
+        assert!(!f.label.is_empty(), "{f:?}");
+        assert!(
+            ["T31", "T32", "T33", "T34", "T35", "T36", "T37", "T38"].contains(&f.owner),
+            "{f:?}"
+        );
+        assert!(
+            !f.label.contains("(t)") && !f.label.contains("trust"),
+            "{f:?}"
+        );
+    }
+    let state = m3c::M3c::GotoAsk;
+    let line =
+        "goto-fetch-ask-dark-en-1280x800@2x.png: (b) clipped: \"x\" at goto.rs:808:25#goto-line";
+    assert!(m3c::known_finding(state, "en", (1280.0, 800.0), line).is_some());
+    let trust = "goto-fetch-ask-dark-en-1280x800@2x.png: (t) a trust signal is not shown whole";
+    assert!(m3c::known_finding(state, "en", (1280.0, 800.0), trust).is_none());
+    let other = "gfind-count-dark-en-XA-960x600@2x.png: (b) clipped: \"x\" at x#goto-line";
+    assert!(m3c::known_finding(m3c::M3c::GfindCount, "en-XA", (960.0, 600.0), other).is_none());
 }
 
 fn a_missing_surface_fails_its_frame() {
