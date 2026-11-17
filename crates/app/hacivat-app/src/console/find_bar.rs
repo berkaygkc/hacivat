@@ -49,6 +49,9 @@
 //!
 //! **macOS find pasteboard:** each query is written to it; a bar opened without a seed or an
 //! earlier query reads it. (`⌘E` "Use selection for find" has no Task 1b row; logged.)
+//! ## m3c-po (PO M3c-08): ⌘E (`editor.use_selection_for_find`, macOS; palette elsewhere) now
+//! makes the one-line selection the query and writes it to the pasteboard, the bar staying as
+//! it is (closed: the next find opens on it).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -823,6 +826,8 @@ impl FindBar {
     ) {
         match event {
             EditorEvent::FindRequested { seed } => self.open(editor, seed.clone(), window, cx),
+            // ## m3c-po (PO M3c-08)
+            EditorEvent::FindSeeded { seed } => self.use_seed(seed, window, cx),
             EditorEvent::FindChanged => {
                 // `editor.find_close` (or anyone) cleared the query: the bar closes in place.
                 if self.open && !editor.read(cx).find_status().active {
@@ -892,6 +897,25 @@ impl FindBar {
         let handle = self.input.focus_handle(cx);
         window.focus(&handle, cx);
         notify_host(self.console, cx);
+        cx.notify();
+    }
+
+    // ## m3c-po (PO M3c-08)
+    /// macOS's "Use Selection for Find" (⌘E): `seed` becomes the query (escaped while Regular
+    /// expression is on) and goes to the find pasteboard as text; a closed bar stays closed
+    /// (the next find opens on it), an open one searches it at once.
+    fn use_seed(&mut self, seed: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let query = if self.opts.regex {
+            regex::escape(seed)
+        } else {
+            seed.to_owned()
+        };
+        self.input.update(cx, |i, cx| {
+            i.set_value(query);
+            cx.notify();
+        });
+        write_find_pasteboard(seed, cx);
+        self.apply(window, cx);
         cx.notify();
     }
 

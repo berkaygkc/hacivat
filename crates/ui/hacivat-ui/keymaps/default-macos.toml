@@ -641,3 +641,30 @@ context = "Grid"
 chord = "ctrl-cmd-g"
 command = "grid.select_all_occurrences"
 context = "Grid"
+
+## m3c-po
+# PO decisions on M3c-08 and M3c-09 (2026-11-17; named exception to the append-only rule, Task
+# 1b's rows stay as they are). Fold and unfold take VS Code's chords (the PO's habit), remappable
+# like every row. Fold all and unfold all stay palette-only: VS Code's `cmd-k cmd-0` and
+# `cmd-k cmd-j` start with `cmd-k`, the command palette's chord here, which a two-key chord in
+# the editor would hold back. `cmd-e` is macOS's "Use Selection for Find" (it seeds the find
+# query and the find pasteboard; the bar stays closed); in the explorer `cmd-e` stays Edit
+# connection. `alt-shift-f` is VS Code's Format Document, reserved for M5's reformat (no other
+# row may take it; as an Option+Shift printable it needs M5's own ruling against the
+# `option_only_printables` check). Collision check: `tests/m3b_routing.rs`
+# (`m3c_po_chords_collide_with_nothing_in_any_preset`).
+
+[[binding]]
+chord = "alt-cmd-["
+command = "editor.fold"
+context = "Editor"
+
+[[binding]]
+chord = "alt-cmd-]"
+command = "editor.unfold"
+context = "Editor"
+
+[[binding]]
+chord = "cmd-e"
+command = "editor.use_selection_for_find"
+context = "Editor"

@@ -312,7 +312,7 @@ const fn stub(
 
 /// Every editor command, in palette order.
 #[rustfmt::skip]
-static COMMANDS: [EditorCommand; 68] = [
+static COMMANDS: [EditorCommand; 69] = [
     command("editor.move_left", "hv-cmd-editor-move-left", movement::move_left, false),
     command("editor.move_right", "hv-cmd-editor-move-right", movement::move_right, false),
     command("editor.move_up", "hv-cmd-editor-move-up", movement::move_up, false),
@@ -383,6 +383,8 @@ static COMMANDS: [EditorCommand; 68] = [
     command("editor.find_next", "hv-cmd-editor-find-next", find::find_next, false),
     command("editor.find_prev", "hv-cmd-editor-find-prev", find::find_prev, false),
     command("editor.find_close", "hv-cmd-editor-find-close", find::find_close, false),
+    // ## m3c-po (named exception; PO M3c-08): macOS ⌘E; palette-only elsewhere.
+    command("editor.use_selection_for_find", "hv-cmd-editor-use-selection-for-find", find::use_selection_for_find, false),
     // Task 34: lines and history recall.
     // ## m3c-t34-editor (named exception): the Task 34 rows are commands now.
     command("editor.toggle_comment", "hv-cmd-editor-toggle-comment", lines::toggle_comment, false),
