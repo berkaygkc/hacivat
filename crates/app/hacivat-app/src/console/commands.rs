@@ -278,9 +278,11 @@ pub fn run_would_be_enabled(console: ConsoleId, cx: &App) -> bool {
     if connected && crate::exec_ui::sql_context(console, cx) == SqlContext::Pending {
         return false;
     }
-    !crate::exec_ui::console_exec(cx, console)
-        .and_then(|e| e.run.as_ref())
-        .is_some_and(|r| !r.ended)
+    // ## m3c-int (M1): Run's whole gate: nor while a run is being prepared (classification, the
+    // parameter prompt, the confirmations, the "as one" chooser) or a read-only reconnect is
+    // pending.
+    !crate::exec_ui::orchestrator::run_busy(console, cx)
+        && !crate::exec_ui::pending_read_only(console, cx)
 }
 
 /// The most statements one recall reads from the history.

@@ -2729,3 +2729,8 @@ hv-settings-raw-display-note = Sayılar ve tarihler bölgesel biçim olmadan, su
 hv-settings-history = Sorgu geçmişini kaydet
 # Review: PO
 hv-settings-history-note = Bağlantı başına en çok 10.000 ifade 90 gün saklanır; tanınan parolalar ve gizli bilgiler maskelenir.
+
+## m3c-int-fixes
+
+# Review: PO
+hv-goto-fetch-rerun = Getirme durdu: sonuç yeniden çalıştırıldı.

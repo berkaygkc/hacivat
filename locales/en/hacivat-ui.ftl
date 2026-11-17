@@ -3204,3 +3204,9 @@ hv-settings-raw-display-note = Numbers and dates as the server sent them, withou
 # Setting title and note (the History section).
 hv-settings-history = Record query history
 hv-settings-history-note = Up to 10,000 statements per connection are kept for 90 days; recognised passwords and secrets are masked.
+
+## m3c-int-fixes
+
+# The go-to line when fetching toward a row (or its question before a large fetch) ended
+# because the result was run again: no row of the new result is fetched or gone to.
+hv-goto-fetch-rerun = Fetching stopped: the result was run again.

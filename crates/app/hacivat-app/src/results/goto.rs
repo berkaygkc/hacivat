@@ -87,6 +87,9 @@ pub struct GotoPopover {
     state: GotoState,
     /// The target being fetched toward, and the rows loaded when the fetching started.
     pending: Option<(GotoTarget, u64)>,
+    // ## m3c-int (I2)
+    /// The adapter generation the question or the fetching is for: a re-run ends either.
+    generation: u64,
     /// The error a submit found (past the end).
     error: Option<SharedString>,
     grid: Option<WeakEntity<GridView>>,
@@ -219,6 +222,14 @@ pub(crate) fn sync(
     let Some(p) = popover(console, cx) else {
         return;
     };
+    // ## m3c-int (I3): go to row is the table's: off while the tab shows another view, also on
+    // a tab switched to that already showed it (it never targets the hidden table grid).
+    if !super::views::shows_table(grid, cx) {
+        if p.read(cx).open || !matches!(p.read(cx).state, GotoState::Idle) {
+            cx.defer(move |cx| p.update(cx, |p, cx| p.dismiss(cx)));
+        }
+        return;
+    }
     // Only a new grid or a fetching needs anything (and nothing repaints otherwise: this runs
     // in every frame of the tile).
     let (same, fetching) = {
@@ -227,7 +238,10 @@ pub(crate) fn sync(
             p.grid
                 .as_ref()
                 .is_some_and(|g| g.entity_id() == grid.entity_id()),
-            matches!(p.state, GotoState::Fetching { .. }),
+            // ## m3c-int (I2): so does a question asked about an older generation.
+            matches!(p.state, GotoState::Fetching { .. })
+                || (matches!(p.state, GotoState::Ask { .. })
+                    && p.generation != adapter.generation()),
         )
     };
     if same && !fetching {
@@ -245,6 +259,10 @@ pub(crate) fn sync(
             }
             p.grid = Some(grid.downgrade());
             p.adapter = Some(Rc::downgrade(&adapter));
+            // ## m3c-int (I2)
+            if p.reran(cx) {
+                return;
+            }
             p.drive(cx);
         });
     });
@@ -317,6 +335,7 @@ impl GotoPopover {
             take_focus: false,
             state: GotoState::Idle,
             pending: None,
+            generation: 0,
             error: None,
             grid: None,
             adapter: None,
@@ -479,7 +498,8 @@ impl GotoPopover {
     /// Enter: the grid goes to the cell; past the fetched rows it fetches (asking above a
     /// million); an error stays on the line.
     fn submit(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.state, GotoState::Fetching { .. }) {
+        // ## m3c-int (I3): a hidden popover takes no Enter (it may target a grid not shown).
+        if matches!(self.state, GotoState::Fetching { .. }) || !self.open {
             return;
         }
         let Some((grid, adapter)) = self.target() else {
@@ -505,6 +525,8 @@ impl GotoPopover {
                     }
                 } else {
                     let more = target.row().saturating_sub(loaded);
+                    // ## m3c-int (I2)
+                    self.generation = adapter.generation();
                     if more > ASK_ABOVE {
                         self.state = GotoState::Ask {
                             row: target.row(),
@@ -544,8 +566,30 @@ impl GotoPopover {
 
     fn fetch_and_go(&mut self, cx: &mut Context<Self>) {
         if let (GotoState::Ask { .. }, Some((target, loaded))) = (self.state, self.pending) {
+            // ## m3c-int (I2): the answer is for the result it was asked about.
+            if self.reran(cx) {
+                return;
+            }
             self.start_fetch(target, loaded, cx);
         }
+    }
+
+    // ## m3c-int (I2)
+    /// The result was re-run since the question or the fetching started: it ends (no row of
+    /// the new result is fetched or gone to), and the line says why. Answers whether it ended.
+    fn reran(&mut self, cx: &mut Context<Self>) -> bool {
+        if matches!(self.state, GotoState::Idle)
+            || !self
+                .target()
+                .is_some_and(|(_, a)| a.generation() != self.generation)
+        {
+            return false;
+        }
+        self.state = GotoState::Idle;
+        self.pending = None;
+        self.error = Some(message(cx, "hv-goto-fetch-rerun", vec![]));
+        cx.notify();
+        true
     }
 
     fn start_fetch(&mut self, target: GotoTarget, loaded: u64, cx: &mut Context<Self>) {
@@ -568,6 +612,10 @@ impl GotoPopover {
         let Some((grid, adapter)) = self.target() else {
             return;
         };
+        // ## m3c-int (I2): never a row of a newer generation.
+        if self.reran(cx) {
+            return;
+        }
         let snapshot = adapter.snapshot();
         let loaded = snapshot.row_count();
         if loaded >= target.row() {
@@ -656,6 +704,17 @@ impl GotoPopover {
                 }
             });
         }
+        cx.defer(notify_hosts);
+        cx.notify();
+    }
+
+    // ## m3c-int (I3)
+    /// The tab shows a view other than the table: the popover hides and its question or
+    /// fetching ends (no focus move: the view shown keeps it).
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
+        self.state = GotoState::Idle;
+        self.pending = None;
+        self.open = false;
         cx.defer(notify_hosts);
         cx.notify();
     }
