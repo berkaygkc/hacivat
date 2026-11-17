@@ -2369,3 +2369,7 @@ hv-history-insert-refused = İfade eklenemedi: düzenleyici salt okunur, metin o
 hv-history-pin-failed = Sabitleme değiştirilemedi.
 # Review: PO
 hv-history-open-failed = Yeni konsol zamanında açılmadı; hiçbir şey eklenmedi.
+
+## m3b-t29-shots
+# Review: PO
+hv-history-selection-a11y = { $sql }, { $n } kayıttan { $pos }.

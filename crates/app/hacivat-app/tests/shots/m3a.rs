@@ -440,7 +440,8 @@ impl M3a {
             // production console's trust signals are its environment and, with a session, the
             // transaction mode chip (Manual, D-036).
             M3a::ConsoleProduction => &[ENV, CHIP],
-            M3a::ToolbarProductionWaiting | M3a::MarksDenied => &[ENV],
+            // ## m3b-t29-shots (fix round 1, m2): their live console draws the Manual chip.
+            M3a::ToolbarProductionWaiting | M3a::MarksDenied => &[ENV, CHIP],
             M3a::StatusProductionResult => &[ENV],
             M3a::ToolbarRunning => &[CLOCK],
             // ## m3b-t22-tx-ui (named exception): `StatusTxOpen` / `StatusTxFailed` moved up,
@@ -457,7 +458,11 @@ impl M3a {
     pub(super) fn shows_production(self) -> bool {
         matches!(
             self,
-            M3a::ConsoleProduction | M3a::ToolbarProductionWaiting | M3a::MarksDenied
+            M3a::ConsoleProduction
+                | M3a::ToolbarProductionWaiting
+                | M3a::MarksDenied
+                // ## m3b-t29-shots (fix round 1): connected, the capsule shows production.
+                | M3a::StatusProductionResult
         )
     }
 
@@ -776,7 +781,23 @@ impl M3a {
                 s.push(suspended_tab());
                 s
             }
-            StatusProductionResult => results(ResultsShot::Rows, Some(EnvTag::Production)),
+            // ## m3b-t29-shots (fix round 1, T29 review m1): the production connection is
+            // connected, as a console showing a result is: its status bar then says what the
+            // live connection is (read-write since Task 26). Never connected, a result's
+            // context fails closed to "read-only (guarded)" (`results::context`), which drew a
+            // pre-T26 picture.
+            StatusProductionResult => {
+                let mut s = vec![connect(PROD)];
+                s.push(step(
+                    |window, cx| {
+                        let id = profile_named(cx, PROD);
+                        open_results_shot(ResultsShot::Rows, id, window, cx)
+                            .expect("the results fixture opens");
+                    },
+                    |_, _| true,
+                ));
+                s
+            }
             NoticeReducedMode => vec![
                 save_only(DEV, EnvTag::Dev),
                 step(

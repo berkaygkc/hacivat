@@ -658,6 +658,17 @@ pub fn open_dialog_buttons(cx: &App) -> Vec<DrawnButton> {
         .collect()
 }
 
+// ## m3b-t29-shots (named exception; T29 review m3)
+/// The environment mark the topmost open confirmation dialog draws in its subtitle (tests and
+/// shots: the mark is a colour, not a label): `None` when no dialog is open.
+pub fn open_dialog_env(cx: &App) -> Option<Option<EnvTag>> {
+    let d = cx
+        .try_global::<OpenPrompts>()
+        .and_then(|o| o.confirms.iter().rev().find_map(WeakEntity::upgrade))?;
+    let d = d.read(cx);
+    Some(d.ctx.env_of(d.q.production))
+}
+
 // ---- the dialog ---------------------------------------------------------------------------------
 
 /// The confirmation dialog (module docs).
@@ -799,7 +810,9 @@ impl ConfirmDialog {
     }
 
     fn shows_execute_all(&self) -> bool {
-        self.ctx.covered > 0
+        // ## m3b-t29-shots (named exception; T29 review m4): never on production, whatever the
+        // context says (the port may raise `production` after the plan's context was made).
+        self.ctx.covered > 0 && !self.q.production
     }
 
     fn shows_skip_all(&self) -> bool {

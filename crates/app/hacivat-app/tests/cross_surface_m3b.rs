@@ -18,7 +18,7 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{Entity, Focusable as _, TestAppContext, VisualTestContext};
+use gpui::{Entity, Focusable as _, InputEvent as _, TestAppContext, VisualTestContext};
 use hacivat_app::connections::prompt_kit::parts;
 use hacivat_app::console::{ConsoleId, Consoles, idle_toast, tx_badge};
 use hacivat_app::exec_ui::context::SqlContext;
@@ -285,12 +285,6 @@ impl Console {
         self.vcx.run_until_parked();
     }
 
-    fn click(&mut self, id: &str) {
-        let selector: &'static str = Box::leak(format!("button-{id}").into_boxed_str());
-        click(self.vcx, selector);
-        self.vcx.run_until_parked();
-    }
-
     fn buttons(&self) -> Vec<&'static str> {
         self.vcx
             .cx
@@ -307,6 +301,65 @@ impl Console {
         });
     }
 
+    // ## T29 fix round 1 (I5, I6)
+
+    /// Everything the connection heard from `mark` on, without Hacivat's own reads (the SQL
+    /// context and schema reads, all `SELECT`/`SHOW` statements of its own).
+    fn heard_since(&self, mark: usize) -> Vec<FakeCall> {
+        self.fake.call_log()[mark..]
+            .iter()
+            .filter(|c| !matches!(c, FakeCall::Statement(s) if s.starts_with("SELECT ") || s.starts_with("SHOW ")))
+            .cloned()
+            .collect()
+    }
+
+    fn mark(&self) -> usize {
+        self.fake.call_log().len()
+    }
+
+    /// Presses and releases `key` on the focused element (GPUI's keyboard activation of a
+    /// focused control: its click fires on the key-up).
+    fn press(&mut self, key: &'static str) {
+        let keystroke = gpui::Keystroke::parse(key).expect("a keystroke");
+        in_window(self.vcx, |window, cx| {
+            window.dispatch_event(
+                gpui::KeyDownEvent {
+                    keystroke: keystroke.clone(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(gpui::KeyUpEvent { keystroke }.to_platform_input(), cx);
+        });
+        self.vcx.run_until_parked();
+    }
+
+    fn keys(&mut self, keys: &str) {
+        self.vcx.simulate_keystrokes(keys);
+        self.vcx.run_until_parked();
+    }
+
+    /// The name of the focused dialog part (`confirm-cancel`, `commit-keep`, …).
+    fn focused(&self) -> Option<String> {
+        in_window(self.vcx, |window, cx| parts::focused(window, cx))
+    }
+
+    /// Presses `key` (Tab or Shift-Tab) until `part` has the focus; the parts passed on the way.
+    fn tab_to(&mut self, key: &str, part: &str) -> Vec<String> {
+        let mut passed = Vec::new();
+        for _ in 0..12 {
+            let now = self.focused().unwrap_or_default();
+            if now == part {
+                return passed;
+            }
+            passed.push(now);
+            self.keys(key);
+        }
+        panic!("{key} never reached {part}: {passed:?}");
+    }
+
     fn end(self, cx: &mut TestAppContext) {
         self.fake.kill_connections();
         stop_core_runtime_test(cx);
@@ -321,12 +374,23 @@ fn prod_pg(cx: &mut TestAppContext) -> Console {
     )
 }
 
+fn typed(sql: &str) -> FakeCall {
+    FakeCall::Typed(FakeTypedCall::Query(sql.into()))
+}
+
+fn stmt(sql: &str) -> FakeCall {
+    FakeCall::Statement(sql.into())
+}
+
 // ---- production writes (surfaces 1, 2, 4, 13) -------------------------------------------------
 
-/// PostgreSQL production in Auto-commit: `UPDATE` runs in Hacivat's own transaction, the prompt
-/// asks Commit / Roll back, Commit sends `COMMIT`, then Output says it was committed and the
-/// gutter shows the statement succeeded. In Manual (the production default, D-036) the same
-/// statement asks Keep / Undo, and Keep leaves it in the user's transaction: the badge counts it.
+/// PostgreSQL production in Auto-commit: Hacivat's own `BEGIN`, then the `UPDATE`, nothing kept;
+/// the prompt asks Commit / Roll back with the focus on Roll back; from the keyboard (Shift-Tab
+/// to Commit, Enter) the answer sends `COMMIT`, Output says it was committed and the gutter that
+/// the statement succeeded. In Manual (the production default, D-036) the statement runs under
+/// `SAVEPOINT hv_confirm` in the user's transaction, the prompt asks Keep / Undo, and Keep (by
+/// key) releases the savepoint: the badge counts the statement. Fix round 1 (I5, I6): answered
+/// by keyboard, and the wrap is asserted on the driver's side.
 #[gpui::test]
 fn pg_production_update_asks_after_it_runs_then_commit_reaches_log_and_gutter(
     cx: &mut TestAppContext,
@@ -335,20 +399,22 @@ fn pg_production_update_asks_after_it_runs_then_commit_reaches_log_and_gutter(
     assert_eq!(c.session.state().borrow().tx.mode, TxMode::Manual, "D-036");
     c.set_mode(TxMode::Auto);
     c.set_text("UPDATE t SET a = 1 WHERE id = 3");
+    let mark = c.mark();
     c.run_at(0);
     c.wait_commit();
     assert!(!c.confirm_open(), "a DML on PostgreSQL asks after it ran");
-    assert_eq!(c.queries(), ["UPDATE t SET a = 1 WHERE id = 3"]);
-    assert!(
-        !c.statements().iter().any(|s| s.contains("COMMIT")),
-        "nothing committed before the answer: {:?}",
-        c.statements()
+    assert_eq!(
+        c.heard_since(mark),
+        [stmt("BEGIN"), typed("UPDATE t SET a = 1 WHERE id = 3")],
+        "Hacivat's own transaction holds the statement; nothing kept"
     );
-    assert!(
-        c.vcx.debug_bounds("button-commit-commit").is_some(),
-        "the own-transaction form"
+    assert_eq!(
+        c.focused().as_deref(),
+        Some("commit-safe"),
+        "Roll back first"
     );
-    c.click("commit-commit");
+    c.tab_to("shift-tab", "commit-keep");
+    c.keys("enter");
     wait_until(c.vcx, "the COMMIT", |_| {
         c.statements().iter().any(|s| s == "COMMIT")
     });
@@ -363,30 +429,47 @@ fn pg_production_update_asks_after_it_runs_then_commit_reaches_log_and_gutter(
 
     // Manual: the savepoint form; Keep joins the change to the user's transaction.
     c.set_mode(TxMode::Manual);
+    let mark = c.mark();
     c.run_at(0);
     c.wait_commit();
-    assert!(
-        c.vcx.debug_bounds("button-commit-keep").is_some(),
-        "the savepoint form"
+    assert_eq!(
+        c.heard_since(mark),
+        [
+            stmt("BEGIN"),
+            stmt("SAVEPOINT hv_confirm"),
+            typed("UPDATE t SET a = 1 WHERE id = 3"),
+        ],
+        "the user's transaction, then the savepoint, then the statement"
     );
-    c.click("commit-keep");
+    assert_eq!(c.focused().as_deref(), Some("commit-safe"), "Undo first");
+    c.tab_to("shift-tab", "commit-keep");
+    c.keys("enter");
     wait_until(c.vcx, "the badge to count the kept statement", |vcx| {
         vcx.cx
             .read(|cx| tx_badge::user_tx(c.id, cx))
             .is_some_and(|u| u.statements >= 1 && !u.failed)
     });
     c.wait_run_end();
+    let after = c.heard_since(mark);
+    assert_eq!(
+        after.last(),
+        Some(&stmt("RELEASE SAVEPOINT hv_confirm")),
+        "Keep releases the savepoint: {after:?}"
+    );
     assert!(
-        !c.statements().iter().any(|s| s.starts_with("ROLLBACK")),
-        "{:?}",
-        c.statements()
+        !after.iter().any(
+            |s| matches!(s, FakeCall::Statement(s) if s.starts_with("ROLLBACK") || s == "COMMIT")
+        ),
+        "{after:?}"
     );
     c.end(cx);
 }
 
 /// MySQL production (D-043, T26): a DML is confirmed before anything is sent (a table without
-/// transactions keeps a write no rollback undoes). The dialog offers neither "don't ask again"
-/// nor Execute all; Execute sends it, then the log and the gutter say it ran.
+/// transactions keeps a write no rollback undoes): until the answer the connection hears no
+/// call of any kind beyond Hacivat's own reads (no `UPDATE`, `SAVEPOINT`, `START TRANSACTION`).
+/// The dialog offers neither "don't ask again" nor Execute all; Execute, reached from the
+/// keyboard (Shift-Tab from Cancel, Enter), sends it, then the log and the gutter say it ran.
 #[gpui::test]
 fn mysql_production_update_is_confirmed_before_it_is_sent(cx: &mut TestAppContext) {
     let mut c = console(
@@ -395,14 +478,17 @@ fn mysql_production_update_is_confirmed_before_it_is_sent(cx: &mut TestAppContex
         mysql(),
     );
     c.set_text("UPDATE t SET a = 1 WHERE id = 3");
+    let mark = c.mark();
     c.run_at(0);
     c.wait_confirm();
-    assert!(c.queries().is_empty(), "nothing sent before the answer");
+    assert_eq!(c.heard_since(mark), [], "nothing before the answer");
     let buttons = c.buttons();
     assert!(buttons.contains(&"confirm-execute"), "{buttons:?}");
     assert!(!buttons.contains(&"confirm-suppress"), "{buttons:?}");
     assert!(!buttons.contains(&"confirm-execute-all"), "{buttons:?}");
-    c.click("confirm-execute");
+    assert_eq!(c.focused().as_deref(), Some("confirm-cancel"));
+    c.tab_to("shift-tab", "confirm-execute");
+    c.keys("enter");
     wait_until(c.vcx, "the UPDATE", |_| {
         c.queries() == ["UPDATE t SET a = 1 WHERE id = 3"]
     });
@@ -420,8 +506,9 @@ fn mysql_production_update_is_confirmed_before_it_is_sent(cx: &mut TestAppContex
     c.end(cx);
 }
 
-/// `DELETE FROM t` on production: its name must be typed (exact bytes), nothing is sent until
-/// Execute, and Execute is off until the name matches.
+/// `DELETE FROM t` on production, from the keyboard: its name must be typed (exact bytes) in
+/// the field; nothing is sent until Execute, Execute is off until the name matches, and Tab
+/// from the field reaches Execute, which Enter answers (Enter in the field never does).
 #[gpui::test]
 fn production_delete_from_t_needs_the_name_typed(cx: &mut TestAppContext) {
     let mut c = prod_pg(cx);
@@ -438,22 +525,22 @@ fn production_delete_from_t_needs_the_name_typed(cx: &mut TestAppContext) {
     };
     assert!(!execute(&c), "Execute waits for the name");
     assert!(!c.buttons().contains(&"confirm-suppress"));
-    let field = c
-        .vcx
-        .cx
-        .read(|cx| parts::focus(cx, "confirm-type"))
-        .expect("the typed-name field");
-    in_window(c.vcx, |window, cx| window.focus(&field, cx));
-    c.vcx.run_until_parked();
+    // From Cancel, Tab goes round to the field (the visual order: field, Copy, run, stop).
+    c.tab_to("tab", "confirm-type");
     c.vcx.simulate_input("T");
     c.vcx.run_until_parked();
     assert!(!execute(&c), "letter case counts");
-    c.vcx.simulate_keystrokes("backspace");
+    c.keys("backspace");
     c.vcx.simulate_input("t");
     c.vcx.run_until_parked();
     assert!(execute(&c));
+    c.keys("enter");
+    assert!(c.confirm_open(), "Enter in the field never executes");
     assert!(!c.ever_sent("DELETE"), "{:?}", c.fake.call_log());
-    c.click("confirm-execute");
+    let passed = c.tab_to("tab", "confirm-execute");
+    // A name the keyboard can type has no Copy button: the field, then Execute.
+    assert_eq!(passed, ["confirm-type"], "the field, then Execute");
+    c.keys("enter");
     wait_until(c.vcx, "the DELETE", |_| c.ever_sent("DELETE FROM t"));
     c.end(cx);
 }
@@ -629,7 +716,20 @@ fn error_policy_roll_back_and_continue(cx: &mut TestAppContext) {
         ]
     );
     assert!(!c.queries().iter().any(|q| q == "SELECT 3"), "paused");
-    c.click("errbar-rollback-continue");
+    // Fix round 1 (I5): from the keyboard: F6 moves the focus to the bar's first button (Roll
+    // back and continue), Enter answers it.
+    c.keys("f6");
+    assert!(
+        in_window(c.vcx, |window, cx| {
+            exec_ui::error_bar::button_focus(c.id, cx)
+                .first()
+                .is_some_and(|(_, h)| h.is_focused(window))
+        }),
+        "F6 enters the bar on its first button"
+    );
+    // A focused button answers a whole press: Enter down, then up (GPUI's keyboard activation
+    // fires on the key-up over the element that saw the key-down).
+    c.press("enter");
     wait_until(c.vcx, "the rollback and the rest", |_| {
         c.statements().iter().any(|s| s == "ROLLBACK")
             && c.queries().last().is_some_and(|q| q == "SELECT 3")
@@ -698,6 +798,19 @@ fn params_prompt_into_a_bound_run(cx: &mut TestAppContext) {
         "{:?}",
         c.marks()
     );
+    // Fix round 1 (I6): the next Run asks again, its field filled with the remembered 42.
+    c.run_at(0);
+    wait_until(c.vcx, "the prompt again", |vcx| {
+        vcx.cx.read(|cx| params_prompt::open_prompt(cx).is_some())
+            && layer_ids(vcx).contains(&params_prompt::PARAMS_LAYER_ID)
+    });
+    let again = c.vcx.cx.read(params_prompt::open_prompt).expect("open");
+    let (text, remembered) = c.vcx.cx.read(|cx| {
+        let p = again.read(cx);
+        (p.text(0, cx), p.prompts()[0].remembered.is_some())
+    });
+    assert_eq!(text.as_deref(), Some("42"));
+    assert!(remembered, "the value is marked remembered");
     c.end(cx);
 }
 
@@ -923,9 +1036,141 @@ fn history_insert_and_run_meets_the_gate(cx: &mut TestAppContext) {
     assert_eq!(editor_text(c.vcx, c.id), "DELETE FROM orders;");
     c.wait_confirm();
     assert!(!c.ever_sent("DELETE"), "{:?}", c.fake.call_log());
-    c.click("confirm-cancel");
+    // Fix round 1 (I5): Escape answers Cancel.
+    c.keys("escape");
     c.wait_log("exec-confirm-cancelled");
     assert!(!c.ever_sent("DELETE"), "{:?}", c.fake.call_log());
+    c.end(cx);
+}
+
+// ---- keyboard-only completion (fix round 1, I5) ---------------------------------------------
+
+/// The calm confirmation off production, from the keyboard: the focus starts on Cancel, Tab
+/// goes Execute → Execute and don't ask again → Cancel (the visual order), and Enter on Execute
+/// sends the statement.
+#[gpui::test]
+fn calm_confirmation_by_keyboard(cx: &mut TestAppContext) {
+    let mut c = console(
+        cx,
+        profile("orders-staging", DbmsKind::Postgres, EnvTag::Staging),
+        pg(),
+    );
+    c.set_text("UPDATE a SET x = 1;");
+    c.run_at(0);
+    c.wait_confirm();
+    assert_eq!(c.focused().as_deref(), Some("confirm-cancel"));
+    c.keys("tab");
+    let cycle = c.tab_to("tab", "confirm-cancel");
+    assert_eq!(cycle, ["confirm-execute", "confirm-suppress"]);
+    c.tab_to("tab", "confirm-execute");
+    assert!(!c.ever_sent("UPDATE a"));
+    c.keys("enter");
+    wait_until(c.vcx, "the UPDATE", |_| c.ever_sent("UPDATE a SET x = 1"));
+    c.end(cx);
+}
+
+/// A production script of two statements that each ask, from the keyboard: Tab to Skip and
+/// Enter skips the first (never sent); the second asks in turn, and Shift-Tab from Cancel to
+/// Execute and Enter sends only it.
+#[gpui::test]
+fn multi_unit_confirmation_by_keyboard(cx: &mut TestAppContext) {
+    let mut c = prod_pg(cx);
+    c.run_all("CREATE INDEX i_a ON a (x);\nCREATE INDEX i_b ON b (y);");
+    c.wait_confirm();
+    assert_eq!(c.focused().as_deref(), Some("confirm-cancel"));
+    c.tab_to("shift-tab", "confirm-skip");
+    c.keys("enter");
+    wait_until(c.vcx, "the second statement's question", |_| {
+        c.vcx
+            .cx
+            .read(confirm::open_dialog_buttons)
+            .iter()
+            .all(|b| b.id != "confirm-skip-all")
+            && c.confirm_open()
+    });
+    c.arm(confirm::ARM_DELAY);
+    c.tab_to("shift-tab", "confirm-execute");
+    c.keys("enter");
+    wait_until(c.vcx, "the second CREATE INDEX", |_| {
+        c.ever_sent("CREATE INDEX i_b")
+    });
+    c.wait_run_end();
+    assert!(
+        !c.ever_sent("CREATE INDEX i_a"),
+        "the skipped one is never sent"
+    );
+    c.end(cx);
+}
+
+/// The staging six-button footer at the 960 x 600 minimum, from the keyboard: the focus starts
+/// on Cancel and Tab follows the footer as drawn (Execute → Execute all → Execute and don't ask
+/// again → Skip → Skip all → Cancel); Execute all, by Enter, runs both statements without a
+/// second question.
+#[gpui::test]
+fn staging_footer_tab_order_is_visual(cx: &mut TestAppContext) {
+    let mut c = console(
+        cx,
+        profile("orders-staging", DbmsKind::Postgres, EnvTag::Staging),
+        pg(),
+    );
+    in_window(c.vcx, |window, cx| {
+        window.resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
+        window.bounds_changed(cx);
+    });
+    c.vcx.run_until_parked();
+    c.run_all("UPDATE a SET x = 1;\nUPDATE b SET y = 2;");
+    c.wait_confirm();
+    assert_eq!(c.focused().as_deref(), Some("confirm-cancel"));
+    c.keys("tab");
+    let cycle = c.tab_to("tab", "confirm-cancel");
+    assert_eq!(
+        cycle,
+        [
+            "confirm-execute",
+            "confirm-execute-all",
+            "confirm-suppress",
+            "confirm-skip",
+            "confirm-skip-all",
+        ]
+    );
+    c.tab_to("tab", "confirm-execute-all");
+    c.keys("enter");
+    wait_until(c.vcx, "both UPDATEs", |_| {
+        c.ever_sent("UPDATE a SET x = 1") && c.ever_sent("UPDATE b SET y = 2")
+    });
+    c.wait_run_end();
+    assert!(!c.confirm_open(), "Execute all answered the second too");
+    c.end(cx);
+}
+
+/// The chooser from the keyboard: Run between two statements asks; Enter runs the preselected
+/// statement only; Down then Enter runs the whole script.
+#[gpui::test]
+fn chooser_by_keyboard(cx: &mut TestAppContext) {
+    let mut c = console(
+        cx,
+        profile("orders-dev", DbmsKind::Postgres, EnvTag::Dev),
+        pg(),
+    );
+    c.set_text("SELECT 1;\nSELECT 2;");
+    c.run_at(9);
+    assert!(
+        c.vcx.cx.read(|cx| exec_ui::chooser::is_open(c.id, cx)),
+        "Run asks"
+    );
+    assert!(c.queries().is_empty());
+    // Enter runs the preselected statement only.
+    c.keys("enter");
+    wait_until(c.vcx, "one statement", |_| !c.queries().is_empty());
+    c.wait_run_end();
+    assert_eq!(c.queries(), ["SELECT 1"]);
+    // Down moves to the whole script; Enter runs both statements.
+    c.run_at(9);
+    c.keys("down");
+    c.keys("enter");
+    wait_until(c.vcx, "the whole script", |_| c.queries().len() == 3);
+    c.wait_run_end();
+    assert_eq!(c.queries()[1..], ["SELECT 1", "SELECT 2"]);
     c.end(cx);
 }
 

@@ -30,6 +30,7 @@ use hacivat_app::shell::Workspace;
 use hacivat_exec::UnitStatus;
 use hacivat_proto::EnvTag;
 use hacivat_session::session::{TxCommand, TxMode};
+use hacivat_ui::popover::A11yDecl;
 use hacivat_ui::text::RenderedText;
 use hacivat_ui::toast::ToastQueue;
 use hacivat_ui_core::gpui_surface::{App, Keystroke, Window};
@@ -330,7 +331,7 @@ impl M3b {
             // 3, 4, 5, 12
             M3b::TxChipMenu => ("#popup-menu-title", None),
             // The isolation levels are SQL (data, untranslated).
-            M3b::TxIsolationMenu => ("hacivat-ui/src/button.rs:", Some("SERIALIZABLE")),
+            M3b::TxIsolationMenu => ("#menu-item-label", Some("SERIALIZABLE")),
             M3b::TxBadgeOpen => ("#tx-badge-text", None),
             M3b::TxBadgeFailed => ("#tx-badge-failed", None),
             M3b::TxSegmentMenu => ("#popup-menu-title", None),
@@ -360,17 +361,18 @@ impl M3b {
                 ),
                 Pf::BadHex => ("#params-bad-hex", None),
             },
-            // 9 · the menu's rows are button labels.
+            // 9 · fix round 1 (I4): what only a menu draws: the uncertain chooser's wrapping
+            // sentences (`#menu-item-text`), the candidates' SQL hints (`#menu-item-hint`), the
+            // popover's title. No button of the shell under the fixture is one of them.
             M3b::Chooser(s) => match s {
-                Ch::Uncertain | Ch::Highlighted | Ch::ReadOnly | Ch::Customize => {
-                    ("hacivat-ui/src/button.rs:", None)
-                }
+                Ch::Uncertain | Ch::Highlighted | Ch::ReadOnly => ("#menu-item-text", None),
+                Ch::Customize => ("#menu-item-hint", None),
                 Ch::Popover => ("#popup-menu-title", None),
             },
             // 10
             M3b::Results(r) => results_marker(r),
-            // The menu's rows are button labels; `check` asks for the menu layer.
-            M3b::ResultsTabMenu => ("hacivat-ui/src/button.rs:", None),
+            // The menu's rows (`#menu-item-label`, fix round 1, I4); `check` asks for the layer.
+            M3b::ResultsTabMenu => ("#menu-item-label", None),
             // 11 · the selected entry's ISO time (data), the empty states their own sentence.
             M3b::HistList => ("#history-meta-time", Some("2026-11-16T11:21:00Z")),
             M3b::HistSearch => ("#history-meta-time", Some("2026-11-15T06:30:00Z")),
@@ -407,7 +409,7 @@ impl M3b {
             M3b::EscDialogProduction => &["#escalation-title"],
             M3b::ErrBar | M3b::ErrBarFocused => &["#errbar-title"],
             M3b::Params(Pf::Template | Pf::PgQuestionMark) => &["#params-notice"],
-            M3b::Chooser(Ch::Customize) => &["#popup-menu-title"],
+            M3b::Chooser(Ch::Customize) => &["#popup-menu-title", "#menu-item-label"],
             M3b::Results(ResultsShot::CountExact) => &["#strip-cursor"],
             M3b::Results(ResultsShot::FetchAll) => &["#results-count-state"],
             M3b::ResultsTabMenu => &["#results-tab-1-repeat"],
@@ -440,9 +442,9 @@ impl M3b {
             M3b::TxChipReadOnly => &[CHIP, LOCK],
             M3b::EscDialogProduction => &[ENV, DIALOG_CONN],
             M3b::Results(ResultsShot::CrowdedTabs) => &[ENV],
-            M3b::Confirm(s) if !matches!(s, Cf::Calm | Cf::NotAnalysed | Cf::MultiStaging) => {
-                &[DIALOG_CONN]
-            }
+            // Fix round 1 (m3): every confirmation, staging ones too (the check asks which
+            // environment the dialog's mark draws).
+            M3b::Confirm(_) => &[DIALOG_CONN],
             M3b::Commit(_) => &[DIALOG_CONN],
             _ => &[],
         }
@@ -764,6 +766,7 @@ impl M3b {
         window: &mut Window,
         cx: &App,
         frame: &[RenderedText],
+        decls: &[A11yDecl],
     ) -> Option<String> {
         use M3b::*;
         let editor = editor_in(window, cx);
@@ -783,7 +786,7 @@ impl M3b {
             Confirm(s) => check_confirm(s, cx, frame),
             Commit(s) => check_commit(s, window, cx, frame),
             Params(s) => check_params(s, cx, frame),
-            Chooser(s) => check_chooser(s, window, cx, frame),
+            Chooser(s) => check_chooser(s, window, cx, frame, decls),
             TxChipMenu | TxIsolationMenu => {
                 menu_open(window, cx)
                     && tx().is_none()
@@ -851,7 +854,15 @@ impl M3b {
                         _ => offered == 4 && !in_bar,
                     }
             }),
-            Results(_) => true,
+            // Fix round 1 (m5): what the tile holds.
+            Results(r) => {
+                console.is_some_and(|c| check_results(r, c, cx))
+                    // The fetch-all question is the window's top layer.
+                    && (!matches!(r, ResultsShot::FetchAll)
+                        || window.root::<Workspace>().flatten().is_some_and(|ws| {
+                            ws.read(cx).layer_ids().last() == Some(&"dialog")
+                        }))
+            }
             ResultsTabMenu => menu_open(window, cx),
             // What the dialog holds, and the part only this state draws.
             HistList | HistSearch | HistAllFailed | HistRedacted | HistOther | HistEmpty
@@ -874,14 +885,30 @@ impl M3b {
                 }
             }),
             // Task 29
+            // Fix round 1 (m6): the chip as drawn: its words, and the view it draws from.
             TxChipReadOnly => {
                 session
                     .as_ref()
                     .is_some_and(|s| s.state().borrow().read_only)
-                    && mode() == Some(TxMode::Auto)
-                    && drawn(frame, "tx-chip-mode")
+                    && console.is_some_and(|c| {
+                        hacivat_app::console::tx_badge::view(c, cx)
+                            .is_some_and(|v| v.read_only && v.mode == TxMode::Auto)
+                    })
+                    && m3a::shows_label(
+                        frame,
+                        "#tx-chip-mode",
+                        &super::strip(&hacivat_app::console::tx_chip::mode_text(cx, TxMode::Auto)),
+                    )
             }
-            TxChipSmart => mode() == Some(TxMode::Smart) && tx().is_none(),
+            TxChipSmart => {
+                mode() == Some(TxMode::Smart)
+                    && tx().is_none()
+                    && m3a::shows_label(
+                        frame,
+                        "#tx-chip-mode",
+                        &super::strip(&hacivat_app::console::tx_chip::mode_text(cx, TxMode::Smart)),
+                    )
+            }
             PreviewAsOne => {
                 band().is_some_and(|b| b.style == BandStyle::Run && b.units.len() == 1)
                     && console
@@ -914,8 +941,15 @@ fn check_confirm(s: Cf, cx: &App, frame: &[RenderedText]) -> bool {
     let has = |id: &str| buttons.iter().any(|b| b.id == id);
     let execute = buttons.iter().find(|b| b.id == "confirm-execute");
     let production = !matches!(s, Cf::Calm | Cf::NotAnalysed | Cf::MultiStaging);
+    // Fix round 1 (m3): the mark the subtitle draws is production's, or staging's.
+    let env = if production {
+        EnvTag::Production
+    } else {
+        EnvTag::Staging
+    };
     let rules = has("confirm-cancel")
         && execute.is_some()
+        && confirm::open_dialog_env(cx) == Some(Some(env))
         && (!production || !has("confirm-suppress") && !has("confirm-execute-all"));
     rules
         && match s {
@@ -923,12 +957,20 @@ fn check_confirm(s: Cf, cx: &App, frame: &[RenderedText]) -> bool {
             Cf::MultiStaging => {
                 has("confirm-execute-all") && has("confirm-skip-all") && has("confirm-suppress")
             }
-            Cf::MultiType | Cf::Type | Cf::DropSchema => execute.is_some_and(|b| !b.enabled),
-            Cf::Typed => execute.is_some_and(|b| b.enabled),
+            Cf::MultiType => execute.is_some_and(|b| !b.enabled) && has("confirm-skip-all"),
+            // Fix round 1 (I4): a lone statement: no "statement k of n" (a multi-unit frame
+            // fails these).
+            Cf::Type | Cf::DropSchema => {
+                execute.is_some_and(|b| !b.enabled) && !drawn(frame, "confirm-unit")
+            }
+            Cf::Typed => execute.is_some_and(|b| b.enabled) && !drawn(frame, "confirm-unit"),
             Cf::Mismatch => {
                 execute.is_some_and(|b| !b.enabled) && drawn(frame, "confirm-type-hint")
             }
-            Cf::Calm => has("confirm-suppress"),
+            // Fix round 1 (I4): one statement (the staging multi-unit frame fails it).
+            Cf::Calm => {
+                has("confirm-suppress") && !has("confirm-skip-all") && !has("confirm-execute-all")
+            }
             Cf::NotAnalysed => !has("confirm-suppress"),
             Cf::Warn => execute.is_some_and(|b| b.kind == ButtonKind::Default),
             Cf::MysqlDdl | Cf::ImplicitCommit => drawn(frame, "confirm-irreversible"),
@@ -997,7 +1039,13 @@ fn check_params(s: Pf, cx: &App, frame: &[RenderedText]) -> bool {
 /// Surface 9: the fixture's menu is the window's top layer and shows the row this state is
 /// about (its rows are button labels, in runs around an access key on Linux and
 /// Windows).
-fn check_chooser(s: Ch, window: &mut Window, cx: &App, frame: &[RenderedText]) -> bool {
+fn check_chooser(
+    s: Ch,
+    window: &mut Window,
+    cx: &App,
+    frame: &[RenderedText],
+    decls: &[A11yDecl],
+) -> bool {
     let shows = |id: &str| {
         let drawn: Vec<RenderedText> = frame
             .iter()
@@ -1013,10 +1061,35 @@ fn check_chooser(s: Ch, window: &mut Window, cx: &App, frame: &[RenderedText]) -
     // Task 24's fixture shows the chooser's rows, and the popover, on the popover's layer.
     top == Some(policy_popover::POLICY_LAYER)
         && match s {
-            Ch::Uncertain | Ch::Highlighted => {
-                shows("hv-chooser-run-as-one-hint") && !shows("hv-chooser-run-as-one-ro")
+            // Fix round 1 (I4): the highlighted row is the menu's active descendant (what a
+            // screen reader hears): "Run as one" in the highlighted state, none before it.
+            Ch::Uncertain => {
+                shows("hv-chooser-run-as-one-hint")
+                    && !shows("hv-chooser-run-as-one-ro")
+                    && !decls.iter().any(|d| d.active_descendant)
             }
-            Ch::ReadOnly => shows("hv-chooser-run-as-one-ro"),
+            Ch::Highlighted => {
+                let row = super::strip(&message(
+                    cx,
+                    "hv-chooser-row",
+                    vec![
+                        (
+                            "kind",
+                            hacivat_l10n::ArgValue::Text(
+                                message(cx, "hv-chooser-run-as-one", Vec::new()).to_string(),
+                            ),
+                        ),
+                        ("n", hacivat_l10n::ArgValue::Count(2)),
+                    ],
+                ));
+                shows("hv-chooser-run-as-one-hint")
+                    && decls
+                        .iter()
+                        .any(|d| d.active_descendant && super::strip(&d.name) == row)
+            }
+            Ch::ReadOnly => {
+                shows("hv-chooser-run-as-one-ro") && !decls.iter().any(|d| d.active_descendant)
+            }
             Ch::Customize => shows("hv-chooser-customize"),
             Ch::Popover => m3a::shows_label(
                 frame,
@@ -1027,6 +1100,50 @@ fn check_chooser(s: Ch, window: &mut Window, cx: &App, frame: &[RenderedText]) -
 }
 
 // ---- results --------------------------------------------------------------------------------
+
+// Fix round 1 (T29 review m5)
+/// What console `c`'s results hold in a Task 25 state.
+fn check_results(r: ResultsShot, c: hacivat_app::console::ConsoleId, cx: &App) -> bool {
+    use hacivat_app::results::ActiveResult;
+    use hacivat_app::results::tabs::CountState;
+    use hacivat_exec::LogMsg;
+    let Some(results) = Consoles::get(cx, c).and_then(|s| s.results.clone()) else {
+        return false;
+    };
+    let results = results.read(cx);
+    let active = results.active_tab();
+    let logged = |f: &dyn Fn(&LogMsg) -> bool| results.output().lines().iter().any(|l| f(&l.msg));
+    match r {
+        ResultsShot::TitledTabs => {
+            let titles = results.titles(cx);
+            titles.len() == 4
+                && titles.iter().filter(|t| t.repeat == Some(2)).count() == 1
+                && results.tabs()[0].comment().is_some()
+        }
+        ResultsShot::Untyped => active.is_some_and(|t| t.untyped()),
+        ResultsShot::SetLimit => logged(&|m| matches!(m, LogMsg::ResultSetLimit { .. })),
+        ResultsShot::Counting => {
+            active.is_some_and(|t| matches!(t.count(), CountState::Counting { .. }))
+        }
+        ResultsShot::CountExact => {
+            active.is_some_and(|t| t.count() == CountState::Exact(1_048_213))
+        }
+        ResultsShot::Evicted => active.is_some_and(|t| t.evicted()),
+        ResultsShot::FetchAll => active.is_some_and(|t| t.count() == CountState::Exact(40_000_000)),
+        ResultsShot::Notices => {
+            results.active() == ActiveResult::Output
+                && logged(&|m| matches!(m, LogMsg::Notice { .. }))
+        }
+        ResultsShot::MysqlWarnings => {
+            results.active() == ActiveResult::Output
+                && logged(&|m| matches!(m, LogMsg::Notice { code: Some(_), .. }))
+        }
+        ResultsShot::CrowdedTabs => {
+            results.tabs().len() == 30 && results.active() == ActiveResult::Tab(20)
+        }
+        _ => unreachable!("{r:?} is an M3a state"),
+    }
+}
 
 /// Task 25's results states' names (the M3a mapping delegates them here).
 pub(super) fn results_name(r: ResultsShot) -> &'static str {

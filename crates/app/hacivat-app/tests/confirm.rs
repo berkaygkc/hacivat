@@ -620,6 +620,9 @@ fn execute_all_disabled_until_exact_bytes(cx: &mut TestAppContext) {
     let mut q = typed_question();
     q.index = 2;
     q.total = 3;
+    // ## m3b-t29-shots (named exception; T29 review m4): off production, where Execute all is
+    // offered at all (the dialog never builds it on production).
+    q.production = false;
     let c = ConfirmContext {
         covered: 1,
         later_asks: 1,
@@ -881,7 +884,9 @@ fn ask_plan_asks_in_order_and_execute_all_still_asks_for_a_typed_name(cx: &mut T
 #[gpui::test]
 fn labels_found_with_access_key_runs(cx: &mut TestAppContext) {
     let vcx = fresh(cx);
-    let mut q = question(true);
+    // ## m3b-t29-shots (named exception; T29 review m4): off production, where Execute all is
+    // drawn (the dialog never builds it on production).
+    let mut q = question(false);
     q.index = 1;
     q.total = 3;
     let c = ConfirmContext {
@@ -1625,5 +1630,38 @@ fn execute_all_is_not_offered_on_production(cx: &mut TestAppContext) {
             .items
             .iter()
             .all(|i| i.decision == GateDecision::Run)
+    );
+}
+
+// ## m3b-t29-shots (named exception; T29 review m4)
+/// The dialog never builds Execute all on production, even when its context says later units
+/// would be covered (the port may raise `production` after the plan's context was made); off
+/// production the same context shows it.
+#[gpui::test]
+fn execute_all_is_never_built_on_production(cx: &mut TestAppContext) {
+    let vcx = fresh(cx);
+    let multi = |production: bool| ConfirmQuestion {
+        index: 2,
+        total: 3,
+        unit: 1,
+        ..question(production)
+    };
+    let covering = ConfirmContext {
+        covered: 1,
+        later_asks: 1,
+        ..ctx(GateClass::DdlDestructive)
+    };
+    let asked = ask(vcx, multi(true), covering.clone());
+    arm(vcx);
+    assert_eq!(button(vcx, "confirm-execute-all"), None, "production");
+    assert!(button(vcx, "confirm-skip-all").is_some());
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert_eq!(asked.get(), Some(ConfirmAnswer::Cancel));
+    let _asked = ask(vcx, multi(false), covering);
+    arm(vcx);
+    assert!(
+        button(vcx, "confirm-execute-all").is_some(),
+        "off production"
     );
 }

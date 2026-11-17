@@ -690,15 +690,47 @@ impl Surface {
             Surface::M3b(state) => state.required(),
             _ => return Vec::new(),
         };
-        required
+        // ## m3b-t29-shots (T29 review I2): a trust signal counts only drawn whole: never
+        // ellipsized nor clipped (NOTES cross-cutting #7, "never hidden or truncated").
+        let whole = |r: &RenderedText| drawn(r) && !r.truncated && !r.clipped;
+        let mut out: Vec<String> = required
             .iter()
             .filter(|group| {
                 !frame
                     .iter()
-                    .any(|r| drawn(r) && group.iter().any(|id| r.path.ends_with(*id)))
+                    .any(|r| whole(r) && group.iter().any(|id| r.path.ends_with(*id)))
             })
-            .map(|group| format!("{name}: (t) a trust signal is not shown: {group:?}"))
-            .collect()
+            .map(|group| format!("{name}: (t) a trust signal is not shown whole: {group:?}"))
+            .collect();
+        out.extend(
+            self.uncut_trust()
+                .into_iter()
+                .filter(|id| {
+                    frame
+                        .iter()
+                        .any(|r| r.visible && r.path.ends_with(id) && (r.truncated || r.clipped))
+                })
+                .map(|id| format!("{name}: (t) a trust label is cut short: {id}")),
+        );
+        out
+    }
+
+    // ## m3b-t29-shots (T29 review I2)
+    /// The labels of an M3a or M3b state that must never be ellipsized or clipped, in any locale:
+    /// every id of its trust groups, the title bar's connection name where the capsule shows
+    /// production, and a typed-name prompt's name.
+    fn uncut_trust(self) -> Vec<&'static str> {
+        let (required, production) = match self {
+            Surface::M3a(state) => (state.required(), state.shows_production()),
+            Surface::M3b(state) => (state.required(), state.shows_production()),
+            _ => return Vec::new(),
+        };
+        let mut ids: Vec<&'static str> = required.iter().flat_map(|g| g.iter().copied()).collect();
+        if production {
+            ids.push("#capsule-text-name");
+        }
+        ids.push("#confirm-type-name");
+        ids
     }
 
     // ## m2b-t24-shots (follow-up)
@@ -1288,6 +1320,10 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     })
     .expect("the window is open");
     cx.run_until_parked();
+    // ## m3b-t29-shots (fix round 1, I4): the accessibility declarations made from here to the
+    // frame, which an M3b state's check reads (a menu's highlighted row is its active
+    // descendant). A cached view declares when it renders, not on every frame.
+    hacivat_ui::popover::a11y_record();
     cx.update_window(handle, |_, window, cx| shot.surface.open(window, cx))
         .expect("the window is open");
     cx.run_until_parked();
@@ -1352,6 +1388,7 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     cx.run_until_parked();
     cx.update(|cx| cx.refresh_windows());
     cx.run_until_parked();
+    let decls = hacivat_ui::popover::a11y_take();
 
     let scale = cx
         .update_window(handle, |_, window, _| window.scale_factor())
@@ -1382,9 +1419,11 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     // ## m3b-t29-shots: every M3b state's model check.
     if let Some(state) = m3b_state {
         failures.extend(
-            cx.update_window(handle, |_, window, cx| state.check(window, cx, &frame))
-                .expect("the window is open")
-                .map(|v| format!("{name}: {v}")),
+            cx.update_window(handle, |_, window, cx| {
+                state.check(window, cx, &frame, &decls)
+            })
+            .expect("the window is open")
+            .map(|v| format!("{name}: {v}")),
         );
     }
     failures.extend(check_grid(&name, shot.locale, &frame));
@@ -2156,7 +2195,29 @@ fn trust_signals_must_be_drawn() {
         at("tx-chip-mode", 0.0, true),
         at("status-env-label", 90.0, false),
     ];
-    assert_eq!(prod.trust_missing("s", &squeezed).len(), 2);
+    // ## m3b-t29-shots (fix round 1, I2): the squeezed chip is also a cut trust label.
+    assert_eq!(prod.trust_missing("s", &squeezed).len(), 3);
+    // A trust label ellipsized (it drew, but cut short) or clipped does not count as shown,
+    // and the production capsule's name must show whole.
+    let ellipsized = RenderedText {
+        truncated: true,
+        ..at("status-env-label", 30.0, true)
+    };
+    let found = prod.trust_missing("s", &[at("tx-chip-mode", 90.0, true), ellipsized]);
+    assert!(
+        found.iter().any(|v| v.contains("not shown whole"))
+            && found.iter().any(|v| v.contains("cut short")),
+        "{found:?}"
+    );
+    let clipped = RenderedText {
+        clipped: true,
+        ..at("capsule-text-name", 40.0, true)
+    };
+    let found = prod.trust_missing("s", &[full[0].clone(), full[1].clone(), clipped]);
+    assert!(
+        found.len() == 1 && found[0].contains("#capsule-text-name"),
+        "{found:?}"
+    );
     // Transaction and cursor.
     let everything = Surface::M3a(m3a::M3a::StatusEverything);
     let all = [
@@ -2182,13 +2243,28 @@ fn trust_signals_must_be_drawn() {
     // ## m3b-t29-shots: since Task 26 (R-M3-81) the read-only notice is no longer one of them,
     // so a production state requires the environment (and, with a session, the mode chip): the
     // count of two that Task 26 left here failed for the toolbar and marks states.
-    for state in m3a::M3A {
-        if state.shows_production() {
-            assert!(
-                state.required().contains(&["#status-env-label"].as_slice()),
-                "{state:?}"
-            );
-        }
+    // ## m3b-t29-shots (fix round 1, m2): the exact groups per production state.
+    let env: &[&str] = &["#status-env-label"];
+    let chip: &[&str] = &["#tx-chip-mode"];
+    let production: Vec<m3a::M3a> = m3a::M3A
+        .into_iter()
+        .filter(|s| s.shows_production())
+        .collect();
+    assert_eq!(
+        production,
+        [
+            m3a::M3a::ConsoleProduction,
+            m3a::M3a::ToolbarProductionWaiting,
+            m3a::M3a::MarksDenied,
+            m3a::M3a::StatusProductionResult,
+        ]
+    );
+    for state in production {
+        let want: &[&[&str]] = match state {
+            m3a::M3a::StatusProductionResult => &[env],
+            _ => &[env, chip],
+        };
+        assert_eq!(state.required(), want, "{state:?}");
     }
     // An M1/M2 surface has none.
     assert!(Surface::Shell.trust_missing("s", &[]).is_empty());
@@ -2224,22 +2300,140 @@ fn every_m3b_state_has_its_own_marker() {
         .collect();
     expected.sort();
     assert_eq!(shared, expected, "only these share a marker signature");
-    let shell = [RenderedText {
-        text: "Search".into(),
+    // ## fix round 1 (I4): a real fresh shell's frame (the labels the shell under every
+    // fixture draws, as `SHOTS_DUMP=1` printed them for `confirm-typed-dark-en-1280x800`: the
+    // title bar, the explorer, the home pane's buttons, the status bar), and a live dev
+    // console's (the capsule, the toolbar with Run and the mode chip, the status bar; from
+    // `errbar-dark-en-1280x800`). No M3b marker is satisfied by the shell; no fixture state's
+    // (a dialog, a prompt, a menu) by a live console either.
+    let label = |path: &str, text: &str| RenderedText {
+        text: text.to_string().into(),
         source: TextSource::Fluent,
         size_px: 13.0,
         painted_px: 10.0,
         clipped: false,
         truncated: false,
-        path: "crates/ui/hacivat-ui/src/titlebar.rs:297:25#palette-placeholder".into(),
+        path: path.to_string().into(),
         visible: true,
         outside_card: false,
-    }];
+    };
+    let shell: Vec<RenderedText> = [
+        (
+            "crates/ui/hacivat-ui/src/titlebar.rs:297:25#palette-placeholder",
+            "Search or run a command",
+        ),
+        ("crates/ui/hacivat-ui/src/segmented.rs:194:25", "EN"),
+        (
+            "crates/app/hacivat-app/src/shell/tiles.rs:156:5#panel-explorer-title",
+            "EXPLORER",
+        ),
+        (
+            "hacivat-ui/src/input/mod.rs#placeholder",
+            "Filter connections",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-explorer-new",
+            "New connection",
+        ),
+        ("crates/ui/hacivat-ui/src/button.rs:456:31", "⌘N"),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-explorer-paste",
+            "Paste URL",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-explorer-import",
+            "Import pg_service.conf…",
+        ),
+        (
+            "crates/app/hacivat-app/src/shell/tiles.rs:197:13#sheet-none",
+            "Select a connection to see its details.",
+        ),
+        (
+            "crates/app/hacivat-app/src/connections/home.rs:81:21#home-title",
+            "No query open",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-home-new",
+            "New connection",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-home-paste",
+            "New connection from a copied URL",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-home-connect",
+            "Connect to the selected connection",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-home-palette",
+            "Search or run a command",
+        ),
+        (
+            "crates/app/hacivat-app/src/shell/tiles.rs:175:13#results-empty",
+            "Run a query to see results here",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/statusbar.rs:17:5",
+            "No connection",
+        ),
+        (
+            "crates/app/hacivat-app/src/shell/workspace.rs:1618:13#status-language-0",
+            "EN",
+        ),
+    ]
+    .into_iter()
+    .map(|(p, t)| label(p, t))
+    .collect();
+    let console: Vec<RenderedText> = [
+        (
+            "crates/ui/hacivat-ui/src/capsule.rs:829:21#capsule-text-name",
+            "orders-dev",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/capsule.rs:1042:25#capsule-text-access",
+            "read-write",
+        ),
+        (
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-console-run",
+            "Run",
+        ),
+        (
+            "crates/app/hacivat-app/src/console/toolbar.rs:284:9#console-connection-name",
+            "orders-dev",
+        ),
+        (
+            "crates/app/hacivat-app/src/console/tx_chip.rs:170:17#tx-chip-mode",
+            "Auto-commit",
+        ),
+        (
+            "crates/app/hacivat-app/src/connections/status.rs:126:17#status-env-label",
+            "dev",
+        ),
+        (
+            "crates/app/hacivat-app/src/connections/status.rs:126:17#status-path",
+            "Direct",
+        ),
+        (
+            "crates/app/hacivat-app/src/console/status.rs:116:13#editor-segment-lncol",
+            "Ln 2, Col 38",
+        ),
+        ("crates/ui/hacivat-ui-editor/src/marks.rs:1:1", "1 of 3"),
+    ]
+    .into_iter()
+    .map(|(p, t)| label(p, t))
+    .collect();
     for state in m3b::all() {
         assert!(
             Surface::M3b(state).missing_from("s", &shell).is_some(),
-            "{state:?}"
+            "{state:?}: a fresh shell satisfies its marker"
         );
+        if state.is_fixture() {
+            let both: Vec<RenderedText> = shell.iter().chain(&console).cloned().collect();
+            assert!(
+                Surface::M3b(state).missing_from("s", &both).is_some(),
+                "{state:?}: a live console satisfies its marker"
+            );
+        }
         if state.shows_production() {
             assert!(!state.required().is_empty(), "{state:?}");
         }
@@ -2248,7 +2442,7 @@ fn every_m3b_state_has_its_own_marker() {
     let line = |text: &str| RenderedText {
         text: text.to_string().into(),
         path: "crates/app/hacivat-app/src/exec_ui/confirm.rs:1344:9#confirm-sql-line".into(),
-        ..shell[0].clone()
+        ..label("", "")
     };
     let routine = Surface::M3b(m3b::M3b::Confirm(
         hacivat_app::exec_ui::confirm::fixtures::State::Routine,

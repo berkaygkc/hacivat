@@ -2635,3 +2635,12 @@ hv-history-console-gone = The console to insert into is closed.
 hv-history-insert-refused = The statement couldn't be inserted: the editor is read-only, composing text, or would get too large.
 hv-history-pin-failed = The pin couldn't be changed.
 hv-history-open-failed = The new console didn't open in time; nothing was inserted.
+
+## m3b-t29-shots
+# The history list's selected entry, announced to assistive technology when ↑/↓ moves it:
+# its first SQL line (data) and its place in the list.
+# Variables:
+#   $sql (String) - the entry's first SQL line, e.g. SELECT 1.
+#   $pos (Number) - its place in the list, e.g. 3.
+#   $n (Number) - the entries the list shows, e.g. 5.
+hv-history-selection-a11y = { $sql }, { $pos } of { $n }
