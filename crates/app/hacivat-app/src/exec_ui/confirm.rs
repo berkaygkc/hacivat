@@ -1128,13 +1128,19 @@ impl Render for ConfirmDialog {
             body = body.child(block);
         }
         if self.shows_execute_all() {
+            // ## m3b-po-env (PO M3b-26): the line names the connection's real environment
+            // (`staging`, …, `no environment`), never "production".
+            let env = crate::connections::capsule::env_word(cx, self.ctx.env_of(q.production));
             body = body.child(note(
                 &theme,
                 message(
                     cx,
                     // ## m3b-t26-prod-unlock (fix round 2, R2): never shown on production.
                     "hv-confirm-execute-all-scope",
-                    vec![("n", ArgValue::Count(u64::from(self.ctx.covered)))],
+                    vec![
+                        ("n", ArgValue::Count(u64::from(self.ctx.covered))),
+                        ("env", ArgValue::Text(env.to_string())),
+                    ],
                 ),
                 "confirm-execute-all-scope",
             ));
@@ -2120,6 +2126,11 @@ pub mod fixtures {
                     EnvTag::Staging
                 };
                 let mut c = ctx(GateClass::DdlDestructive, env, pg);
+                // ## m3b-po-typed-name (named exception, PO M3b-04): a production DROP TABLE
+                // asks for the table's name typed, as the gate does now.
+                if state == State::Multi {
+                    q.type_to_confirm = Some(Arc::from("order_archive_2019"));
+                }
                 if state == State::MultiType {
                     q.sql_masked = Arc::from("DELETE FROM müşteriler;");
                     q.reasons = vec![reason(

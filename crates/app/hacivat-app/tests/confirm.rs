@@ -849,10 +849,16 @@ fn ask_plan_asks_in_order_and_execute_all_still_asks_for_a_typed_name(cx: &mut T
     });
     vcx.run_until_parked();
     assert!(shows(vcx, "statement 1 of 5"));
-    assert!(shows(
-        vcx,
-        "Execute all also runs the remaining 2 statements that would ask, without asking. A statement that needs its name typed still asks, and a production change still waits for your answer after it runs."
-    ));
+    // ## m3b-po-env (named exception, PO M3b-26): the line names the real environment (none
+    // here) and no longer speaks of production.
+    assert_eq!(
+        text_of(vcx, "confirm-execute-all-scope")
+            .map(|t| t.replace(['\u{2068}', '\u{2069}'], ""))
+            .as_deref(),
+        Some(
+            "Execute all also runs, without asking, the remaining 2 statements that would ask on this connection (no environment). A statement that needs its name typed still asks."
+        )
+    );
     arm(vcx);
     click_button(vcx, "confirm-execute-all");
     // Unit 1 still asks for its name.
@@ -1664,4 +1670,41 @@ fn execute_all_is_never_built_on_production(cx: &mut TestAppContext) {
         button(vcx, "confirm-execute-all").is_some(),
         "off production"
     );
+}
+
+// ## m3b-po-env (PO M3b-26): the Execute all scope line names the connection's own
+// environment ("staging", "hazırlık", "no environment"), never "production"/"üretim".
+#[gpui::test]
+fn execute_all_scope_names_the_real_environment(cx: &mut TestAppContext) {
+    let multi = || ConfirmQuestion {
+        index: 2,
+        total: 3,
+        unit: 1,
+        ..question(false)
+    };
+    let covering = |env: Option<EnvTag>| ConfirmContext {
+        covered: 1,
+        later_asks: 1,
+        env,
+        ..ctx(GateClass::DdlDestructive)
+    };
+    for (locale, env, word, never) in [
+        ("en", Some(EnvTag::Staging), "(staging)", "production"),
+        ("en", Some(EnvTag::Dev), "(dev)", "production"),
+        ("en", None, "(no environment)", "production"),
+        ("tr", Some(EnvTag::Staging), "(hazırlık)", "üretim"),
+    ] {
+        let vcx = shell(cx, locale);
+        in_window(vcx, |window, _| window.activate_window());
+        vcx.run_until_parked();
+        let asked = ask(vcx, multi(), covering(env));
+        let line = text_of(vcx, "confirm-execute-all-scope")
+            .expect("the scope line")
+            .replace(['\u{2068}', '\u{2069}'], "");
+        assert!(line.contains(word), "{locale} {env:?}: {line}");
+        assert!(!line.contains(never), "{locale} {env:?}: {line}");
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        assert_eq!(asked.get(), Some(ConfirmAnswer::Cancel));
+    }
 }

@@ -1222,3 +1222,29 @@ case.
   a confirmation cancels the run (nothing sent): otherwise a failed `USE app` would run
   `SELECT * FROM session` against the old database although it was classified as a read of
   `app.session`.
+
+## m3b-po — PO answers to the M3 decision list (M3b-04, M3b-23, M3b-26)
+
+- **`TRUNCATE` and `DROP TABLE` type the table's name on production (PO M3b-04; R-M3-55
+  amended).** The gate's typed name (`typed_name`) now also takes the target of every
+  `Truncate` pattern and of every `Drop` of a table: the pattern's target is a table, or the
+  statement's own leading words read `DROP [TEMPORARY|TEMP|FOREIGN] TABLE` (so a backend that
+  names the kind wrongly cannot drop the typed name, as for `DROP DATABASE`/`SCHEMA`);
+  `ALTER TABLE … DROP PARTITION` keeps its row. It fails closed like the unsafe-DML rule: no
+  table to name is `exec-unsafe-no-target`, and more than one name in one unit
+  (`TRUNCATE a, b`, `DROP TABLE a, b`, `DELETE FROM a; TRUNCATE b`) is
+  `exec-unsafe-several-targets` (typing one name must never approve another). Off production
+  nothing changes. Views, indexes, functions, sequences and column drops keep a plain
+  confirmation.
+- **More secret forms are masked in history (PO M3b-23).** A `TOKEN` part and a last `KEY`
+  part after another one (`API_KEY`, `private_key`; not `PRIMARY_KEY`/`FOREIGN_KEY`/
+  `UNIQUE_KEY`…) are secret parts like `PASSWORD`, in words, quoted names, `set_config` names
+  and `token=`/`…_key=` pairs inside strings; SQLCipher's `PRAGMA key|rekey|hexkey|hexrekey|
+  textkey` and `ATTACH … KEY` take a value; a MySQL user variable named like a secret (`@pw`,
+  `@db_pass`, `@key`, never `@@…`) takes a value after `=` or `:=`. The probe table's four m3
+  gap rows are caught now (plus ten new caught rows); the m4/m5 gaps stand. The bare word
+  `KEY` (`PRIMARY KEY`, `ON DUPLICATE KEY`) arms nothing.
+- **The Execute all scope line names the real environment (PO M3b-26).** Execute all is never
+  offered on production, so the line's old "a production change still waits for your answer"
+  clause could never apply; it is gone, and the line says which environment the connection is
+  (`hv-conn-env-*`, "no environment" untagged).

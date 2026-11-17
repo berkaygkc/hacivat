@@ -1890,6 +1890,8 @@ fn gate_rows(line: &Line) -> Vec<(&'static str, &'static str, &'static str)> {
     } else {
         "tx-confirm"
     };
+    // ## m3b-po-typed-name (named exception, PO M3b-04): production types the table's name for
+    // `DROP TABLE` and `TRUNCATE` too.
     let mut rows = vec![
         ("SELECT 1", "run", "run"),
         ("UPDATE t SET a = 1 WHERE id = 3", dml, "run"),
@@ -1899,19 +1901,19 @@ fn gate_rows(line: &Line) -> Vec<(&'static str, &'static str, &'static str)> {
     match line.engine {
         DbmsKind::Postgres => rows.extend([
             ("DROP SCHEMA s CASCADE", "confirm+type", "run"),
-            ("DROP TABLE t", "confirm", "run"),
+            ("DROP TABLE t", "confirm+type", "run"),
             ("CALL p()", "confirm", "run"),
             ("SELECT * FROM t FOR UPDATE", "warn", "run"),
-            ("TRUNCATE t", "confirm", "run"),
+            ("TRUNCATE t", "confirm+type", "run"),
         ]),
         DbmsKind::MySql | DbmsKind::MariaDb => rows.extend([
             ("DROP DATABASE d", "confirm+type", "run"),
-            ("DROP TABLE t", "confirm", "run"),
+            ("DROP TABLE t", "confirm+type", "run"),
             ("CALL p()", "confirm", "run"),
             ("SELECT * FROM t FOR UPDATE", "warn", "run"),
-            ("TRUNCATE TABLE t", "confirm", "run"),
+            ("TRUNCATE TABLE t", "confirm+type", "run"),
         ]),
-        _ => rows.extend([("DROP TABLE t", "confirm", "run")]),
+        _ => rows.extend([("DROP TABLE t", "confirm+type", "run")]),
     }
     rows
 }
@@ -1933,6 +1935,8 @@ fn expected_typed_name(sql: &str) -> Option<&'static str> {
         "DELETE FROM müşteri" => Some("müşteri"),
         "DROP SCHEMA s CASCADE" => Some("s"),
         "DROP DATABASE d" => Some("d"),
+        // ## m3b-po-typed-name (named exception, PO M3b-04)
+        "DROP TABLE t" | "TRUNCATE t" | "TRUNCATE TABLE t" => Some("t"),
         _ => None,
     }
 }

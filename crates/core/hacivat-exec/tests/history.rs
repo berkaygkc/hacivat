@@ -867,20 +867,55 @@ const PROBE_TABLE: &[(&str, Option<&str>, Option<&str>, Probe)] = {
             None,
             C,
         ),
-        // m3: other secret words (documented gaps, PO list).
-        ("SET @pw = '{P}'", None, None, G("MySQL user variables")),
-        ("PRAGMA key = '{P}'", None, None, G("PRAGMA key")),
-        (
-            "ATTACH DATABASE 'x.db' AS x KEY '{P}'",
-            None,
-            None,
-            G("ATTACH … KEY"),
-        ),
+        // m3: other secret words. ## m3b-po-redact (named exception, PO M3b-23): caught.
+        ("SET @pw = '{P}'", None, None, C),
+        ("PRAGMA key = '{P}'", None, None, C),
+        ("ATTACH DATABASE 'x.db' AS x KEY '{P}'", None, None, C),
         (
             "CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (token '{P}')",
             None,
             None,
-            G("TOKEN"),
+            C,
+        ),
+        (
+            "SET @pw := '{P}'; CREATE USER u IDENTIFIED BY @pw",
+            None,
+            None,
+            C,
+        ),
+        ("SELECT @db_pass := '{P}'", None, None, C),
+        ("PRAGMA main.rekey = \"{P}\"", None, None, C),
+        ("PRAGMA hexkey = \"x'{P}'\"", None, None, C),
+        ("PRAGMA key = {P}", None, None, C),
+        (
+            "UPDATE settings SET api_key = '{P}' WHERE id = 1",
+            None,
+            None,
+            C,
+        ),
+        (
+            "ALTER SERVER s OPTIONS (SET ACCESS_TOKEN '{P}')",
+            None,
+            None,
+            C,
+        ),
+        (
+            "SELECT set_config('app.private_key', '{P}', false)",
+            None,
+            None,
+            C,
+        ),
+        (
+            "SELECT dblink_connect('host=h auth_token={P}')",
+            None,
+            None,
+            C,
+        ),
+        (
+            "SET @pw = '{P}'",
+            Some("Unknown error near '{P}' at line 1"),
+            None,
+            C,
         ),
         // m4: URI edge cases and COPY PROGRAM (documented gaps).
         (

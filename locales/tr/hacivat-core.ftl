@@ -214,7 +214,7 @@ error-conn-auth-insecure-method-body = { error-conn-auth-insecure-method-body-pl
 ## m3a-t15-sqlite-typed
 
 # Review: PO
-error-exec-sqlite-busy-hint = Bu veritabanı dosyası başka bir program tarafından kilitlenmiş. O program dosyayla işini bitirince deyimi yeniden çalıştırın.
+error-exec-sqlite-busy-hint = Bu veritabanı dosyası başka bir program tarafından kilitlenmiş. O program dosyayla işini bitirince ifadeyi yeniden çalıştırın.
 
 ## m3a-t23-exec
 
@@ -241,9 +241,9 @@ exec-rows-affected = { $rows } satır etkilendi ({ $duration })
 # Review: PO
 exec-completed = Tamamlandı ({ $duration })
 # Review: PO
-exec-tx-committed = İşlem commit edildi
+exec-tx-committed = Transaction commit edildi
 # Review: PO
-exec-tx-rolled-back = İşlem geri alındı
+exec-tx-rolled-back = Transaction rollback yapıldı
 # Review: PO
 exec-summary = { $total } ifadeden { $executed } tanesi çalıştı, { $failed } tanesi başarısız oldu ({ $duration })
 # Review: PO
@@ -255,13 +255,13 @@ exec-more-result-sets = { $skipped } sonuç kümesi daha okundu ve gösterilmedi
 # Review: PO
 exec-deny-read-only-input = Gönderilmedi: bu konsol salt okunur ve ifade veriyi ya da şemayı değiştirebilir.
 # Review: PO
-exec-deny-read-only-transaction = Gönderilmedi: salt okunur bir konsol işlem başlatamaz ya da bitiremez.
+exec-deny-read-only-transaction = Gönderilmedi: salt okunur bir konsol transaction başlatamaz ya da bitiremez.
 # Review: PO
-exec-deny-read-only-protocol = Durduruldu: sunucu, salt okunur işlemin içinde bir yazma bildirdi.
+exec-deny-read-only-protocol = Durduruldu: sunucu, salt okunur transaction'ın içinde bir yazma bildirdi.
 # Review: PO
-exec-deny-read-only-engine = Sunucu, işlem salt okunur olduğu için ifadeyi reddetti.
+exec-deny-read-only-engine = Sunucu, transaction salt okunur olduğu için ifadeyi reddetti.
 # Review: PO
-exec-deny-read-only-function = Gönderilmedi: ifade, etkileri geri alınamayan bir fonksiyon çağırıyor.
+exec-deny-read-only-function = Gönderilmedi: ifade, etkileri rollback ile geri alınamayan bir fonksiyon çağırıyor.
 # Review: PO
 exec-events-dropped = { $n } olay gösterilmedi
 # Review: PO
@@ -275,7 +275,7 @@ cursor-closed-idle-timeout = { $rows } satırdan sonra imleç kapandı: { $durat
 # Review: PO
 cursor-closed-tab-closed = { $rows } satırdan sonra imleç kapandı: sekmesi kapatıldı.
 # Review: PO
-cursor-closed-tx-ended = { $rows } satırdan sonra imleç kapandı: ait olduğu işlem sona erdi.
+cursor-closed-tx-ended = { $rows } satırdan sonra imleç kapandı: ait olduğu transaction sona erdi.
 # Review: PO
 cursor-closed-user-closed = { $rows } satırdan sonra imleç kapatıldı.
 # Review: PO
@@ -289,7 +289,7 @@ cursor-closed-cancelled = { $rows } satırdan sonra imleç kapandı: getirme dur
 # Review: PO
 cursor-closed-enforcement-gap = { $rows } satırdan sonra imleç kapandı: salt okunur koruma oturumu kapattı.
 # Review: PO
-cursor-closed-rolled-back = Hacivat'ın işlemi geri alındı.
+cursor-closed-rolled-back = Hacivat'ın transaction'ı rollback yapıldı.
 # Review: PO
 cursor-closed-session-needed-rolled-back = { $rows } satırdan sonra imleç kapandı: oturum başka bir ifade için gerekiyordu. { cursor-closed-rolled-back }
 # Review: PO
@@ -297,7 +297,7 @@ cursor-closed-idle-timeout-rolled-back = { $rows } satırdan sonra imleç kapand
 # Review: PO
 cursor-closed-tab-closed-rolled-back = { $rows } satırdan sonra imleç kapandı: sekmesi kapatıldı. { cursor-closed-rolled-back }
 # Review: PO
-cursor-closed-tx-ended-rolled-back = { $rows } satırdan sonra imleç kapandı: ait olduğu işlem sona erdi. { cursor-closed-rolled-back }
+cursor-closed-tx-ended-rolled-back = { $rows } satırdan sonra imleç kapandı: ait olduğu transaction sona erdi. { cursor-closed-rolled-back }
 # Review: PO
 cursor-closed-user-closed-rolled-back = { $rows } satırdan sonra imleç kapatıldı. { cursor-closed-rolled-back }
 # Review: PO
@@ -319,11 +319,11 @@ exec-error-connection-lost-unknown = İfade çalışırken bağlantı koptu. Etk
 # Review: PO
 exec-error-cancelled = İfade iptal edildi.
 # Review: PO
-exec-error-tx-failed = Gönderilmedi: işlem başarısız oldu; sunucu artık yalnızca geri almayı kabul eder.
+exec-error-tx-failed = Gönderilmedi: transaction başarısız oldu; sunucu artık yalnızca rollback kabul eder.
 # Review: PO
-exec-error-tx-in-progress = Gönderilmedi: zaten açık bir işlem var.
+exec-error-tx-in-progress = Gönderilmedi: zaten açık bir transaction var.
 # Review: PO
-exec-error-tx-unsupported = Gönderilmedi: bu bağlantı o işlem komutunu çalıştıramaz.
+exec-error-tx-unsupported = Gönderilmedi: bu bağlantı o transaction komutunu çalıştıramaz.
 # Review: PO
 exec-error-enforcement-gap = Salt okunur koruma hiçbir şeyin yazılmadığını doğrulayamadı; bu yüzden oturumu kapattı.
 # Review: PO
@@ -411,7 +411,7 @@ safety-reason-dynamic-sql = İfade, metinden oluşturulan SQL'i çalıştırıyo
 # Review: PO
 safety-reason-procedural-code = İfade yordamsal kod çalıştırıyor.
 # Review: PO
-safety-reason-txn-control = İfade işlemi denetliyor.
+safety-reason-txn-control = İfade transaction'ı denetliyor.
 # Review: PO
 safety-reason-session-state = İfade oturumun ayarlarını değiştiriyor.
 # Review: PO
@@ -423,7 +423,7 @@ safety-reason-process-exec = İfade sunucuda bir program çalıştırıyor.
 # Review: PO
 safety-reason-admin-control = İfade sunucuyu yönetiyor.
 # Review: PO
-safety-reason-xid-consume = İfade bir işlem kimliği (XID) tüketiyor.
+safety-reason-xid-consume = İfade bir transaction kimliği (XID) tüketiyor.
 # Review: PO
 safety-reason-sequence-advance = İfade bir diziyi (sequence) ilerletiyor.
 # Review: PO
@@ -499,21 +499,21 @@ exec-notice-warning = Sunucu uyarısı
 # Review: PO
 exec-notices-dropped = { $n } sunucu bildirimi daha gösterilmedi.
 # Review: PO
-exec-result-set-limit = Deyim { $total } sonuç kümesi döndürdü; ilk { $limit } tanesi gösteriliyor.
+exec-result-set-limit = İfade { $total } sonuç kümesi döndürdü; ilk { $limit } tanesi gösteriliyor.
 # Review: PO
-exec-skipped-by-user = İsteğiniz üzerine { $n } deyim atlandı.
+exec-skipped-by-user = İsteğiniz üzerine { $n } ifade atlandı.
 # Review: PO
-exec-retried = { $n }. deyim yeniden çalıştırılıyor
+exec-retried = { $n }. ifade yeniden çalıştırılıyor
 # Review: PO
 cursor-closed-evicted = Bellek açmak için kapatıldı; { $rows } satır tutuldu.
 # Review: PO
-exec-run-as-one-closed-early = Durduruldu. { $n } deyim daha çalıştı; sonuçları gösterilmiyor.
+exec-run-as-one-closed-early = Durduruldu. { $n } ifade daha çalıştı; sonuçları gösterilmiyor.
 # Review: PO
-exec-run-as-one-closed-early-rest = Durduruldu. { $n } deyim daha çalıştı (sonuçları gösterilmiyor); geri kalanı çalışmadı.
+exec-run-as-one-closed-early-rest = Durduruldu. { $n } ifade daha çalıştı (sonuçları gösterilmiyor); geri kalanı çalışmadı.
 # Review: PO
-exec-run-as-one-rolled-back = PostgreSQL metni tek bir işlem olarak çalıştırdı; metin kendisi commit etmediyse, hatalı deyimden önceki deyimler de geri alındı.
+exec-run-as-one-rolled-back = PostgreSQL metni tek bir transaction olarak çalıştırdı; metin kendisi commit etmediyse, hatalı ifadeden önceki ifadeler de rollback yapıldı.
 # Review: PO
-exec-run-as-one-tx-failed = İşlem başarısız oldu: geri alana kadar içinde başka bir şey çalışmaz.
+exec-run-as-one-tx-failed = Transaction başarısız oldu: rollback yapana kadar içinde başka bir şey çalışmaz.
 
 ## m3b-t15-gate
 
@@ -524,7 +524,7 @@ exec-gate-not-classified = Gönderilmedi: Hacivat bu ifadeyi denetleyemedi.
 # Review: PO
 exec-gate-read-only = { $class ->
         [session] Gönderilmedi: bu bağlantı salt okunur ve ifade oturumun ayarlarını değiştiriyor.
-        [tx] Gönderilmedi: bu bağlantı salt okunur ve ifade işlemi yönetiyor.
+        [tx] Gönderilmedi: bu bağlantı salt okunur ve ifade transaction'ı yönetiyor.
         [lock] Gönderilmedi: bu bağlantı salt okunur ve ifade veriyi kilitliyor.
         [routine] Gönderilmedi: bu bağlantı salt okunur ve çağrılan yordam veriyi değiştirebilir.
         [dml] Gönderilmedi: bu bağlantı salt okunur ve ifade veriyi değiştiriyor.
@@ -535,13 +535,13 @@ exec-gate-read-only = { $class ->
 # Review: PO
 exec-gate-policy-denied = Gönderilmedi: Hacivat bu ifadeyi üretim bağlantısında çalıştırmaz.
 # Review: PO
-exec-gate-implicit-commit = Sunucu bu ifadeyi çalıştırmadan önce açık işleminizi commit eder; önceki değişiklikleriniz de commit edilir.
+exec-gate-implicit-commit = Sunucu bu ifadeyi çalıştırmadan önce açık transaction'ınızı commit eder; önceki değişiklikleriniz de commit edilir.
 # Review: PO
 exec-gate-not-analysed = Hacivat bu ifadeyi çözümleyemedi ve ifade veriyi değiştirebilir. Çalıştırmadan önce denetleyin.
 # Review: PO
-exec-explain-analyze-not-undone = EXPLAIN ANALYZE ifadeyi çalıştırıp geri alır; ancak geri alma, dizi (sequence) ilerlemelerini, danışma kilitlerini, dblink ya da dosya ve ağ üzerinden yapılan değişiklikleri ve işlem desteklemeyen (MyISAM) tablolara yazılanları geri almaz.
+exec-explain-analyze-not-undone = EXPLAIN ANALYZE ifadeyi çalıştırıp rollback yapar; ancak rollback, dizi (sequence) ilerlemelerini, danışma kilitlerini, dblink ya da dosya ve ağ üzerinden yapılan değişiklikleri ve transaction desteklemeyen (MyISAM) tablolara yazılanları geri almaz.
 # Review: PO
-exec-explain-analyze-refused = Gönderilmedi: EXPLAIN ANALYZE, geri almanın düzeltemeyeceği bir ifadeyi çalıştırır.
+exec-explain-analyze-refused = Gönderilmedi: EXPLAIN ANALYZE, rollback'in geri alamayacağı bir ifadeyi çalıştırır.
 # Review: PO
 exec-unsafe-no-target = Gönderilmedi: ifade her satırı değiştirebilir ve Hacivat onaylamanızı isteyeceği tabloyu belirleyemiyor.
 # Review: PO
@@ -568,31 +568,31 @@ exec-param-unbindable = Gönderilmedi: ifadede Hacivat'ın dolduramadığı bir 
 # Review: PO
 exec-confirm-committed = Commit edildi: onaylanan ifadenin değişiklikleri kaydedildi.
 # Review: PO
-exec-confirm-undone = Geri alındı: onaylanan ifade geri alındı; işleminiz hâlâ açık.
+exec-confirm-undone = Geri alındı: onaylanan ifade rollback yapıldı; transaction'ınız hâlâ açık.
 # Review: PO
-exec-confirm-rolled-back = Geri alındı: onaylanan ifadenin değişiklikleri atıldı.
+exec-confirm-rolled-back = Rollback yapıldı: onaylanan ifadenin değişiklikleri atıldı.
 # Review: PO
-exec-confirm-rolled-back-deadline = Geri alındı: zamanında yanıt gelmedi, bu yüzden onaylanan ifadenin değişiklikleri atıldı.
+exec-confirm-rolled-back-deadline = Rollback yapıldı: zamanında yanıt gelmedi, bu yüzden onaylanan ifadenin değişiklikleri atıldı.
 # Review: PO
-exec-confirm-statement-failed = Onaylanan ifade başarısız oldu. Yalnızca o geri alındı; işleminiz sağlam.
+exec-confirm-statement-failed = Onaylanan ifade başarısız oldu. Yalnızca o rollback yapıldı; transaction'ınız sağlam.
 # Review: PO
-exec-implicit-commit = Sunucu bu ifadeyi çalıştırmadan önce açık işleminizi commit etti.
+exec-implicit-commit = Sunucu bu ifadeyi çalıştırmadan önce açık transaction'ınızı commit etti.
 # Review: PO
-exec-error-tx-implicit-commit = Gönderilmedi: bu ifade, bu çalıştırmada daha önceki bir ifadenin açtığı ve sizin onaylamadığınız işlemi commit ederdi. Tek başına çalıştırın.
+exec-error-tx-implicit-commit = Gönderilmedi: bu ifade, bu çalıştırmada daha önceki bir ifadenin açtığı ve sizin onaylamadığınız transaction'ı commit ederdi. Tek başına çalıştırın.
 # Review: PO
 exec-confirm-already-committed = Zaten commit edildi: sunucu bu ifadeyi kendiliğinden commit etti, bu yüzden Hacivat önce soramadı. Çalıştırmanın geri kalanı gönderilmedi.
 # Review: PO
-exec-error-confirm-timed-out = Geri alındı: zamanında yanıt gelmedi, ifade geri alındı ve çalıştırmanın geri kalanı gönderilmedi.
+exec-error-confirm-timed-out = Rollback yapıldı: zamanında yanıt gelmedi, ifade geri alındı ve çalıştırmanın geri kalanı gönderilmedi.
 # Review: PO
-exec-error-confirm-undone = İsteğiniz üzerine geri alındı: ifadenin değişiklikleri atıldı.
+exec-error-confirm-undone = İsteğiniz üzerine rollback yapıldı: ifadenin değişiklikleri atıldı.
 # Review: PO
-exec-error-tx-table-locks = Gönderilmedi: LOCK TABLES kilitleriniz tutuluyor ve bir işlem başlatmak onları bırakırdı. Önce UNLOCK TABLES çalıştırın.
+exec-error-tx-table-locks = Gönderilmedi: LOCK TABLES kilitleriniz tutuluyor ve bir transaction başlatmak onları bırakırdı. Önce UNLOCK TABLES çalıştırın.
 # Review: PO
-exec-tx-rolled-back-by-server = Sunucu işleminizin tamamını geri aldı: işlem başladığından beri yapılan her değişiklik kayboldu.
+exec-tx-rolled-back-by-server = Sunucu transaction'ınızın tamamını rollback yaptı: transaction başladığından beri yapılan her değişiklik kayboldu.
 # Review: PO
-exec-tx-ended-by-statement = İşleminiz bu ifadeyle sona erdi. Önceki değişikliklerinizin commit edilip edilmediğini denetleyin.
+exec-tx-ended-by-statement = Transaction'ınız bu ifadeyle sona erdi. Önceki değişikliklerinizin commit edilip edilmediğini denetleyin.
 # Review: PO
-exec-explain-not-rolled-back = EXPLAIN ANALYZE bir işlemin dışında çalıştı, bu yüzden değişiklikleri geri alınamadı. Çalıştırmanın geri kalanı gönderilmedi.
+exec-explain-not-rolled-back = EXPLAIN ANALYZE bir transaction'ın dışında çalıştı, bu yüzden değişiklikleri için rollback yapılamadı. Çalıştırmanın geri kalanı gönderilmedi.
 
 ## m3b-t22-tx-ui
 
@@ -609,7 +609,7 @@ exec-deny-classifier = Gönderilmedi: bu konsol salt okunur ve Hacivat ifadenin 
 ## m3b-t23-escalation
 
 # Review: PO
-exec-terminated = Oturum sunucuda sonlandırıldı; açık işlemi ({ $n } ifade) geri alındı.
+exec-terminated = Oturum sunucuda sonlandırıldı; açık transaction'ı ({ $n } ifade) rollback yapıldı.
 # Review: PO
 exec-terminated-no-tx = Oturum sunucuda sonlandırıldı.
 # Review: PO
@@ -621,7 +621,7 @@ exec-disconnected-local = { $name } bağlantısı kesildi. SQLite, bağlantı ka
 # Review: PO
 exec-run-stopped = { $i }. ifadede durduruldu: Durdur'u seçtiniz.
 # Review: PO
-exec-run-rolled-back-continue = İşlem geri alındı; { $i }. ifadeden devam ediliyor.
+exec-run-rolled-back-continue = Transaction rollback yapıldı; { $i }. ifadeden devam ediliyor.
 
 ## m3b-t24-exec-ui
 
@@ -653,6 +653,6 @@ exec-gate-run-as-one-read-only = Gönderilmedi: tek parça çalıştırma salt o
 # Review: PO
 exec-run-context-unconfirmed = Gönderilmedi: Hacivat bu bağlantının ayarlarını zamanında doğrulayamadı. Yeniden çalıştırın.
 # Review: PO
-exec-confirm-not-undone = Geri alınmadı: tablo işlemleri desteklemiyor; ifadenin yaptığı değişiklikler kalıyor.
+exec-confirm-not-undone = Geri alınmadı: tablo transaction desteklemiyor; ifadenin yaptığı değişiklikler kalıyor.
 # Review: PO
-exec-error-confirm-not-undone = Geri alınmadı: tablo işlemleri desteklemiyor; bu ifadenin yaptığı değişiklikler kalıyor.
+exec-error-confirm-not-undone = Geri alınmadı: tablo transaction desteklemiyor; bu ifadenin yaptığı değişiklikler kalıyor.
