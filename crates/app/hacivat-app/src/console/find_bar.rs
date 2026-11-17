@@ -1031,54 +1031,20 @@ impl FindBar {
     }
 
     /// What the count shows: (text, tooltip, counting, invalid).
+    // ## m3c-t37 (named exception): the body is `count_parts`, shared with the grid bar.
     fn count(
         &self,
         status: FindStatus,
         cx: &App,
     ) -> Option<(SharedString, Option<SharedString>, bool, bool)> {
-        if let Some(e) = &self.error {
-            let tip = message(
-                cx,
-                "hv-find-invalid-tip",
-                vec![("error", ArgValue::Text(e.to_string()))],
-            );
-            return Some((
-                message(cx, "hv-find-invalid", vec![]),
-                Some(tip),
-                false,
-                true,
-            ));
-        }
-        if self.input.read(cx).value().is_empty() {
-            return None;
-        }
-        let counting = status.total.is_none();
-        let n = u64::from(status.total.unwrap_or(status.counted));
-        if !counting && n == 0 {
-            return Some((message(cx, "hv-find-none", vec![]), None, false, false));
-        }
-        let text = match (status.current, counting) {
-            (Some(i), false) => message(
-                cx,
-                "hv-find-count",
-                vec![
-                    ("i", ArgValue::Count(u64::from(i))),
-                    ("n", ArgValue::Count(n)),
-                ],
-            ),
-            (Some(i), true) => message(
-                cx,
-                "hv-find-count-more",
-                vec![
-                    ("i", ArgValue::Count(u64::from(i))),
-                    ("n", ArgValue::Count(n)),
-                ],
-            ),
-            (None, false) => message(cx, "hv-find-total", vec![("n", ArgValue::Count(n))]),
-            (None, true) => message(cx, "hv-find-total-more", vec![("n", ArgValue::Count(n))]),
-        };
-        let tip = counting.then(|| message(cx, "hv-find-counting-tip", vec![]));
-        Some((text, tip, counting, false))
+        count_parts(
+            self.error.as_ref(),
+            self.input.read(cx).value().is_empty(),
+            status.total.map(u64::from),
+            u64::from(status.counted),
+            status.current.map(u64::from),
+            cx,
+        )
     }
 }
 
@@ -1120,12 +1086,13 @@ pub fn install_system_find_pasteboard(cx: &mut App) {
 }
 
 /// The find pasteboard's query (one line, not empty).
-fn find_pasteboard(cx: &App) -> Option<String> {
+// ## m3c-t37 (named exception): crate-visible for the grid find bar.
+pub(crate) fn find_pasteboard(cx: &App) -> Option<String> {
     let pb = cx.try_global::<FindPasteboard>()?;
     (pb.read)(cx).filter(|t| !t.is_empty() && !t.contains(['\n', '\r']))
 }
 
-fn write_find_pasteboard(query: &str, cx: &App) {
+pub(crate) fn write_find_pasteboard(query: &str, cx: &App) {
     if let Some(pb) = cx.try_global::<FindPasteboard>() {
         (pb.write)(query, cx);
     }
@@ -1159,44 +1126,15 @@ impl Render for FindBar {
             && !self.input.read(cx).value().is_empty()
             && status.total.is_none_or(|n| n > 0)
             && (status.total.is_some() || status.counted > 0);
-        let well = match theme.mode {
-            ThemeMode::Dark => c.panel,
-            ThemeMode::Light => c.ground,
-        };
         let field_focused = self.input.focus_handle(cx).is_focused(window);
         let field_handle = self.input.focus_handle(cx).tab_stop(true);
-        let mut field = div()
-            .id("find-field")
-            .debug_selector(|| "find-field".to_string())
-            .flex()
-            .flex_row()
-            .items_center()
-            .h(px(24.0))
+        // ## m3c-t37 (named exception): the well is shared with the grid find bar.
+        let mut field = field_well("find-field", self.error.is_some(), cx)
             .flex_grow(1.0)
             .flex_shrink(1.0)
             .flex_basis(px(300.0))
             .min_w(px(150.0))
             .max_w(px(380.0))
-            .gap(px(2.0))
-            .pl(px(7.0))
-            .pr(px(2.0))
-            .rounded(px(t.radii.sm))
-            .border_1()
-            // An invalid pattern: the border in ink (`text-2`), never red (M3c-11).
-            .border_color(if self.error.is_some() {
-                c.text_2.to_hsla()
-            } else {
-                c.seam_strong.to_hsla()
-            })
-            .bg(well.to_hsla())
-            .child(
-                div().mr(px(4.0)).flex_none().child(
-                    // Inside the well its fill restores text-3 (NOTES cross-cutting #4).
-                    Icon::new(IconName::Search)
-                        .size(IconSize::Chrome)
-                        .color(c.text_3.to_hsla()),
-                ),
-            )
             .child(
                 div()
                     .id("find-query")
@@ -1350,54 +1288,192 @@ impl Render for FindBar {
 impl FindBar {
     /// One toggle inside the field (NOTES "Find toggle"): 20 × 18, pressed in the selection
     /// tint with a blue border; its name in its tooltip and accessible name.
+    // ## m3c-t37 (named exception): drawn by `toggle_element`, shared with the grid bar.
     fn toggle(&self, t: Toggle, i: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = *Theme::get(cx);
-        let c = &theme.tokens.colors;
-        let on = t.get(&self.opts);
-        let handle = self.toggles[i].clone();
-        let focused = handle.is_focused(window);
         let name = message(cx, t.name_id(), vec![]);
-        let tip = if t == Toggle::Tolerant {
-            message(cx, "hv-find-tolerant-tip", vec![])
-        } else {
-            name.clone()
-        };
+        let tolerant = (t == Toggle::Tolerant).then(|| message(cx, "hv-find-tolerant-tip", vec![]));
         let entity = cx.entity();
-        let body = div()
-            .id(t.element_id())
-            .debug_selector(move || t.element_id().to_string())
-            .track_focus(&handle)
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .w(px(20.0))
-            .h(px(18.0))
-            .rounded(px(3.0))
-            .border_1()
-            .border_color(if on {
-                c.blue.to_hsla()
-            } else {
-                hacivat_ui_core::gpui_surface::hsla(0.0, 0.0, 0.0, 0.0)
-            })
-            .when_some_bg(on.then(|| c.blue_tint_strong.to_hsla()))
-            .hover(|s| s.bg(c.hover.to_hsla()))
-            .cursor_pointer()
-            .child(Icon::new(t.icon()).size(IconSize::Chrome).color(if on {
-                c.text.to_hsla()
-            } else {
-                c.text_2.to_hsla()
-            }))
-            .on_click(move |_, window, cx| entity.update(cx, |b, cx| b.flip(t, window, cx)))
-            .tooltip(move |_, cx| Tip::view(tip.clone(), cx));
-        let body = focus_outline(body, &theme, focused);
-        let mut node =
-            A11yNode::new(("find-toggle-node", i), Role::Button, name, false, body).toggled(on);
-        if t == Toggle::Tolerant {
-            node = node.description(message(cx, "hv-find-tolerant-tip", vec![]));
-        }
-        node.into_any_element()
+        toggle_element(
+            ToggleSpec {
+                id: t.element_id(),
+                node: ("find-toggle-node", i),
+                icon: t.icon(),
+                tip: tolerant.clone().unwrap_or_else(|| name.clone()),
+                name,
+                description: tolerant,
+                on: t.get(&self.opts),
+                handle: self.toggles[i].clone(),
+            },
+            window,
+            move |window, cx| entity.update(cx, |b, cx| b.flip(t, window, cx)),
+            cx,
+        )
     }
+}
+
+// ## m3c-t37 (named exception: factored out for the grid find bar, carries-w10 T37)
+
+/// The find field's well (NOTES "Find field"): 24 px, the field well's fill, a 1 px
+/// `seam-strong` border (`text-2` when `invalid`, never red: M3c-11), radius 4, the search
+/// glyph. The caller sizes it and adds the query and the toggles.
+pub(crate) fn field_well(
+    id: &'static str,
+    invalid: bool,
+    cx: &App,
+) -> hacivat_ui_core::gpui_surface::Stateful<hacivat_ui_core::gpui_surface::Div> {
+    let theme = *Theme::get(cx);
+    let t = theme.tokens;
+    let c = &t.colors;
+    let well = match theme.mode {
+        ThemeMode::Dark => c.panel,
+        ThemeMode::Light => c.ground,
+    };
+    div()
+        .id(id)
+        .debug_selector(move || id.to_string())
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(24.0))
+        .gap(px(2.0))
+        .pl(px(7.0))
+        .pr(px(2.0))
+        .rounded(px(t.radii.sm))
+        .border_1()
+        // An invalid pattern: the border in ink (`text-2`), never red (M3c-11).
+        .border_color(if invalid {
+            c.text_2.to_hsla()
+        } else {
+            c.seam_strong.to_hsla()
+        })
+        .bg(well.to_hsla())
+        .child(
+            div().mr(px(4.0)).flex_none().child(
+                // Inside the well its fill restores text-3 (NOTES cross-cutting #4).
+                Icon::new(IconName::Search)
+                    .size(IconSize::Chrome)
+                    .color(c.text_3.to_hsla()),
+            ),
+        )
+}
+
+/// One toggle inside a find field (NOTES "Find toggle"): 20 × 18, pressed in the selection
+/// tint with a blue border; `name` is its accessible name, `tip` its tooltip, `description`
+/// its accessible description.
+pub(crate) struct ToggleSpec {
+    pub id: &'static str,
+    pub node: (&'static str, usize),
+    pub icon: IconName,
+    pub name: SharedString,
+    pub tip: SharedString,
+    pub description: Option<SharedString>,
+    pub on: bool,
+    pub handle: FocusHandle,
+}
+
+/// Draws `spec`; a click runs `on_click`.
+pub(crate) fn toggle_element(
+    spec: ToggleSpec,
+    window: &Window,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+    cx: &App,
+) -> AnyElement {
+    let theme = *Theme::get(cx);
+    let c = &theme.tokens.colors;
+    let ToggleSpec {
+        id,
+        node,
+        icon,
+        name,
+        tip,
+        description,
+        on,
+        handle,
+    } = spec;
+    let focused = handle.is_focused(window);
+    let body = div()
+        .id(id)
+        .debug_selector(move || id.to_string())
+        .track_focus(&handle)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .w(px(20.0))
+        .h(px(18.0))
+        .rounded(px(3.0))
+        .border_1()
+        .border_color(if on {
+            c.blue.to_hsla()
+        } else {
+            hacivat_ui_core::gpui_surface::hsla(0.0, 0.0, 0.0, 0.0)
+        })
+        .when_some_bg(on.then(|| c.blue_tint_strong.to_hsla()))
+        .hover(|s| s.bg(c.hover.to_hsla()))
+        .cursor_pointer()
+        .child(Icon::new(icon).size(IconSize::Chrome).color(if on {
+            c.text.to_hsla()
+        } else {
+            c.text_2.to_hsla()
+        }))
+        .on_click(move |_, window, cx| on_click(window, cx))
+        .tooltip(move |_, cx| Tip::view(tip.clone(), cx));
+    let body = focus_outline(body, &theme, focused);
+    let mut node = A11yNode::new(node, Role::Button, name, false, body).toggled(on);
+    if let Some(d) = description {
+        node = node.description(d);
+    }
+    node.into_any_element()
+}
+
+/// What a find count shows (text, tooltip, counting, invalid): an invalid pattern's ink
+/// message, nothing for an empty query, "No matches", or "k of N" / "N matches" with "+"
+/// while counting.
+pub(crate) fn count_parts(
+    error: Option<&SharedString>,
+    empty_query: bool,
+    total: Option<u64>,
+    counted: u64,
+    current: Option<u64>,
+    cx: &App,
+) -> Option<(SharedString, Option<SharedString>, bool, bool)> {
+    if let Some(e) = error {
+        let tip = message(
+            cx,
+            "hv-find-invalid-tip",
+            vec![("error", ArgValue::Text(e.to_string()))],
+        );
+        return Some((
+            message(cx, "hv-find-invalid", vec![]),
+            Some(tip),
+            false,
+            true,
+        ));
+    }
+    if empty_query {
+        return None;
+    }
+    let counting = total.is_none();
+    let n = total.unwrap_or(counted);
+    if !counting && n == 0 {
+        return Some((message(cx, "hv-find-none", vec![]), None, false, false));
+    }
+    let text = match (current, counting) {
+        (Some(i), false) => message(
+            cx,
+            "hv-find-count",
+            vec![("i", ArgValue::Count(i)), ("n", ArgValue::Count(n))],
+        ),
+        (Some(i), true) => message(
+            cx,
+            "hv-find-count-more",
+            vec![("i", ArgValue::Count(i)), ("n", ArgValue::Count(n))],
+        ),
+        (None, false) => message(cx, "hv-find-total", vec![("n", ArgValue::Count(n))]),
+        (None, true) => message(cx, "hv-find-total-more", vec![("n", ArgValue::Count(n))]),
+    };
+    let tip = counting.then(|| message(cx, "hv-find-counting-tip", vec![]));
+    Some((text, tip, counting, false))
 }
 
 /// `bg` when `Some`.

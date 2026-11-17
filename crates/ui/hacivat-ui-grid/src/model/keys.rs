@@ -281,6 +281,8 @@ impl Grid {
             | GridCommand::AutoFit
             | GridCommand::Freeze
             | GridCommand::Unfreeze => return None,
+            // ## m3c-t37
+            GridCommand::SelectAllOccurrences => return None,
         })
     }
 }

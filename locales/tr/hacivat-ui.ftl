@@ -2484,3 +2484,68 @@ hv-find-total = { $n } eşleşme
 hv-find-total-more = { $n }+ eşleşme
 # Review: PO
 hv-find-no-more = Başka eşleşme yok
+
+## m3b-t37-find-goto
+
+# Review: PO
+hv-gfind-placeholder = Görünen değerlerde bul
+# Review: PO
+hv-gfind-filter = Satırları süz
+# Review: PO
+hv-gfind-filter-tip = Satırları süz: yalnızca eşleşen satırları göster
+# Review: PO
+hv-gfind-incomplete = eksik olabilir
+# Review: PO
+hv-gfind-incomplete-tip = { $n } değer { $size } sınırında kesildi; kesilen kısım aranmaz.
+# Review: PO
+hv-gfind-filter-note = Getirilen { $rows } satırdan eşleşen { $shown } satır gösteriliyor. Henüz getirilmeyen satırlar süzülmez.
+# Review: PO
+hv-gfind-show-all = Tüm satırları göster
+# Review: PO
+hv-gfind-null-tip = Tablonun gösterdiği değerlerde, odaktaki hücreden başlayarak arar. NULL hiçbir zaman eşleşmez.
+# Review: PO
+hv-gfind-close = Bulmayı kapat
+# Review: PO
+hv-gfind-select-all = Tüm eşleşmeleri seç
+# Review: PO
+hv-cmd-grid-select-all-occurrences = Tablo: tüm eşleşmeleri seç
+# Review: PO
+hv-goto-title = Satıra git
+# Review: PO
+hv-goto-placeholder = satır ya da satır:sütun
+# Review: PO
+hv-goto-hint = Satır numarası, ardından isteğe bağlı sütun adı ya da sırası: 1500:city ya da 1500:3
+# Review: PO
+hv-goto-target = { $row }. satır, { $col } sütunu
+# Review: PO
+hv-goto-target-row = { $row }. satır
+# Review: PO
+hv-goto-past-end = { $row }. satır yok: sonuçta { $total } satır var.
+# Review: PO
+hv-goto-unknown-col = { $name } adında bir sütun yok.
+# Review: PO
+hv-goto-hidden-col = { $name } sütunu gizli.
+# Review: PO
+hv-goto-show-col = Gösterip git
+# Review: PO
+hv-goto-fetch = { $row }. satır henüz getirilmedi. { $more } satır daha getirmek zaman alır; sonucun bellek sınırı yine geçerlidir.
+# Review: PO
+hv-goto-fetching = { $row }. satıra kadar getiriliyor: { $more } satırın { $done } tanesi
+# Review: PO
+hv-goto-fetching-note = Esc bunu gizler; getirme şeritte sürer.
+# Review: PO
+hv-goto-stop = Getirmeyi durdur
+# Review: PO
+hv-goto-fetch-ok = Getir ve git
+# Review: PO
+hv-goto-cancel = Vazgeç
+# Review: PO
+hv-goto-key-go = Git
+# Review: PO
+hv-goto-not-a-row = Bu bir satır numarası değil.
+# Review: PO
+hv-goto-past-end-filter = { $row }. satır yok: süzgeç { $total } satır gösteriyor.
+# Review: PO
+hv-goto-fetch-closed = Getirme { $row }. satırda durdu: imleç kapalı.
+# Review: PO
+hv-goto-fetch-paused = Getirme { $row }. satırda durdu: sonuç bellek sınırına ulaştı.

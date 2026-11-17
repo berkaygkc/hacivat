@@ -432,10 +432,10 @@ fn publish(done: Finished, cx: &mut App) {
         state.running = None;
         state.shown = Some((spec.clone(), rows));
     }
-    grid.update(cx, |g, cx| {
-        g.set_view_map(map, cx);
-        g.set_sort(spec, tips, cx);
-    });
+    // ## m3c-t37 (named exception; Task 36 review m6): the order goes through the grid's view
+    // owner, which keeps a filter over it.
+    super::find::show_base(&grid, Some(map), cx);
+    grid.update(cx, |g, cx| g.set_sort(spec, tips, cx));
     on_change(cx);
 }
 
@@ -551,10 +551,10 @@ pub fn cancel(grid: &Entity<GridView>, cx: &mut App) {
 pub fn clear(grid: &Entity<GridView>, cx: &mut App) {
     // Dropping the state raises its job's flag.
     let state = cx.default_global::<Sorts>().0.remove(&grid.entity_id());
-    grid.update(cx, |g, cx| {
-        g.set_view_map(ViewMap::identity(0), cx);
-        g.set_sort(SortSpec::default(), Vec::new(), cx);
-    });
+    // ## m3c-t37 (named exception; Task 36 review m6): back to the source order, under the
+    // filter when one is on.
+    super::find::show_base(grid, None, cx);
+    grid.update(cx, |g, cx| g.set_sort(SortSpec::default(), Vec::new(), cx));
     if let Some(state) = state {
         (state.on_change)(cx);
     }

@@ -604,3 +604,20 @@ context = "Workspace"
 chord = "ctrl-f"
 command = "editor.find"
 context = "Editor"
+
+## m3b-t37-find-goto
+# M3c Task 37 (named exception; controller ruling R5, NOTES Plan notes Task 37): the grid find
+# bar and its own Select all occurrences row. ctrl-f shadows the Workspace explorer filter only while a
+# grid (or its find field) has the focus (P-M3b-21), as the editor's does. Note on the Task 1b
+# comment above ("`editor.find` and `grid.find` stay unbound…"): both are bound now (Tasks 33
+# and 37); this file is append-only, so the note lives here.
+
+[[binding]]
+chord = "ctrl-f"
+command = "grid.find"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-shift-l"
+command = "grid.select_all_occurrences"
+context = "Grid"

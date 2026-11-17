@@ -31,6 +31,8 @@ use hacivat_ui_core::theme::{Theme, popover_surface};
 
 use crate::element::{self, FrameLog, FrameStats, Geometry, PaintState};
 use crate::model::{self, ColumnLayout, KeyCtx, KeyOutcome, ScrollState, SortSpec, ViewMap};
+// ## m3c-t37
+use crate::model::{GotoError, GotoPlace, GotoTarget};
 use crate::source::{
     ColId, ColumnSpec, GRID_CONTEXT, GridDataSource, ModelCell, ModelRow, RowCount,
 };
@@ -53,6 +55,18 @@ pub struct GridLabels {
     /// A column width in the resize tag: "136 px" (a Fluent number with its unit).
     pub width: WidthFn,
 }
+
+// ## m3c-t37
+/// What a find marks in one cell: the matched byte ranges of the cell's display text, in order,
+/// and the index of the current match among them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CellMarks {
+    pub ranges: smallvec::SmallVec<[Range<u32>; 2]>,
+    pub current: Option<usize>,
+}
+
+/// A find's marks: each painted cell's [`CellMarks`] (`None`: nothing in it).
+pub type Highlights = Rc<dyn Fn(ModelRow, ColId) -> Option<CellMarks>>;
 
 // ## m3c-t35
 /// Text for a width in logical px (the resize tag's "136 px").
@@ -148,6 +162,9 @@ pub enum GridCommand {
     /// less than `MIN_WIDTH` of the body to scroll).
     Freeze,
     Unfreeze,
+    // ## m3c-t37
+    /// Selects the find's matches (`grid.select_all_occurrences`; the host answers).
+    SelectAllOccurrences,
 }
 
 /// What a grid tells its host.
@@ -194,6 +211,9 @@ pub enum GridEvent {
     /// `grid.freeze` was refused: the columns up to the focus would leave less than
     /// `MIN_WIDTH` of the body to scroll (the host says so).
     FreezeRefused,
+    // ## m3c-t37
+    /// `grid.select_all_occurrences` (the host's find selects its matches).
+    SelectAllOccurrencesRequested,
 }
 
 // ## m3c-t35
@@ -268,7 +288,8 @@ pub struct GridView {
     /// The identity over the loaded rows, kept for [`GridView::view_map`] while no map is set.
     identity_map: ViewMap,
     /// The cells a find marks (Task 37), as model row and column.
-    pub(crate) highlights: Option<Rc<dyn Fn(ModelRow, ColId) -> bool>>,
+    /// ## m3c-t37 (named exception, Task 1b seam): what each cell marks ([`CellMarks`]).
+    pub(crate) highlights: Option<Highlights>,
     // ## m3c-t35
     /// The edge autoscroll's timer while a drag rests past the body's edge.
     pub(crate) autoscroll: Option<Task<()>>,
@@ -427,6 +448,8 @@ impl GridView {
     fn dispatch_m3b(&mut self, cmd: GridCommand, cx: &mut Context<Self>) -> bool {
         match cmd {
             GridCommand::Find => cx.emit(GridEvent::FindRequested),
+            // ## m3c-t37
+            GridCommand::SelectAllOccurrences => cx.emit(GridEvent::SelectAllOccurrencesRequested),
             GridCommand::GotoRow => cx.emit(GridEvent::GotoRequested),
             GridCommand::OpenValue => {
                 if let Some(cell) = self.selection.focus() {
@@ -736,19 +759,103 @@ impl GridView {
     }
 
     /// Marks the cells `cells` answers `true` for (a find's matches, Task 37); `None` clears.
-    /// Stored only: no frame paints them yet (the painting task is open, Task 1b report R3).
-    pub fn set_highlights(
-        &mut self,
-        cells: Option<Rc<dyn Fn(ModelRow, ColId) -> bool>>,
-        cx: &mut Context<Self>,
-    ) {
+    ///
+    /// ## m3c-t37 (named exception, Task 1b seam R3): `cells` answers each painted cell's
+    /// [`CellMarks`] (the matched byte ranges of its display text, and the current one), and
+    /// layer 5 paints them: a 1 px `text-3` outline around each matching text, the current one
+    /// filled `blue-tint-strong` inside a blue outline (NOTES surface 19, M3c-25). The grid
+    /// asks only for the cells it paints.
+    pub fn set_highlights(&mut self, cells: Option<Highlights>, cx: &mut Context<Self>) {
         self.highlights = cells;
         cx.notify();
     }
 
     /// The cells a find marks, as last set.
-    pub fn highlights(&self) -> Option<&Rc<dyn Fn(ModelRow, ColId) -> bool>> {
+    pub fn highlights(&self) -> Option<&Highlights> {
         self.highlights.as_ref()
+    }
+
+    // ## m3c-t37 (named exception: the public "focus this cell", carries-w10 T37)
+    /// Focuses `cell` alone (a click's selection): it scrolls into view, and the host hears
+    /// [`GridEvent::FocusChanged`]. Go to row and the find's steps come through here.
+    pub fn focus_cell(&mut self, cell: ModelCell, cx: &mut Context<Self>) {
+        let map = self.view_map().clone();
+        self.selection.select_cell(cell, &map);
+        self.reveal(cell);
+        self.selection_dirty = true;
+        cx.emit(GridEvent::FocusChanged(Some(cell)));
+        cx.notify();
+    }
+
+    /// Goes to `target` (1-based **view** rows: a filter's rows count 1…n): the cell in its
+    /// column (else the focus column, else the first visible one) takes the focus
+    /// ([`focus_cell`](Self::focus_cell)). A hidden column is refused; past the fetched rows of
+    /// a result that may have more answers [`GotoPlace::NotFetched`] and moves nothing (the
+    /// host fetches, then asks again); past a known total names the last row.
+    pub fn go_to(
+        &mut self,
+        target: GotoTarget,
+        cx: &mut Context<Self>,
+    ) -> Result<GotoPlace, GotoError> {
+        if let Some(col) = target.col()
+            && self.layout.index_of(col).is_none()
+        {
+            return Err(GotoError::HiddenColumn(col));
+        }
+        let map = self.view_map().clone();
+        let (shown, total) = match &map {
+            ViewMap::Filtered { .. } => (map.len(), Some(map.len())),
+            _ => (self.data.count.loaded, self.data.known_total()),
+        };
+        let place = model::place_row(target.row(), shown, total)?;
+        if let GotoPlace::Shown(view) = place {
+            let col = target
+                .col()
+                .or_else(|| self.selection.focus().map(|f| f.col))
+                .filter(|c| self.layout.index_of(*c).is_some())
+                .or_else(|| self.layout.visible().first().copied());
+            if let (Some(row), Some(col)) = (map.view_to_model(view), col) {
+                self.focus_cell(ModelCell { row, col }, cx);
+            }
+        }
+        Ok(place)
+    }
+
+    /// Selects each of `cells` as its own range (Select all occurrences), `cells[focus]` the
+    /// focus, in one selection change.
+    pub fn select_cells(&mut self, cells: &[ModelCell], focus: usize, cx: &mut Context<Self>) {
+        if cells.is_empty() {
+            return;
+        }
+        let map = self.view_map().clone();
+        self.selection.select_cells(cells, focus, &map);
+        if let Some(f) = self.selection.focus() {
+            self.reveal(f);
+            cx.emit(GridEvent::FocusChanged(Some(f)));
+        }
+        self.selection_dirty = true;
+        cx.notify();
+    }
+
+    /// Hides or shows column `col` ("Show it and go"; Task 39's menu hides). The scroll keeps
+    /// its place.
+    pub fn set_column_hidden(&mut self, col: ColId, hidden: bool, cx: &mut Context<Self>) {
+        let body_w = self
+            .geometry
+            .as_ref()
+            .map_or(0.0, |g| f32::from(g.body.size.width));
+        let is_hidden = self.layout.hidden().contains(&col);
+        if is_hidden == hidden {
+            return;
+        }
+        let left = if hidden {
+            self.layout.hide(col, self.scroll.left_x, body_w)
+        } else {
+            self.layout.show(col, self.scroll.left_x, body_w)
+        };
+        self.scroll.set_content_width(self.layout.scroll_width());
+        self.scroll.set_left_x(left);
+        cx.notify();
     }
 
     /// Scrolls `cell` into view, both ways: its view row (## m3c-t35), and its column unless it

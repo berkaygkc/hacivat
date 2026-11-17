@@ -2851,3 +2851,110 @@ hv-find-total = { $n ->
 hv-find-total-more = { $n }+ matches
 # Said politely when Select next occurrence finds nothing more (every occurrence is selected).
 hv-find-no-more = No further occurrence
+
+## m3b-t37-find-goto
+
+# The grid find bar's query field: placeholder and accessible name, also the bar's (role=search) name (NOTES surface 19).
+hv-gfind-placeholder = Find in the shown values
+# The grid find field's toggle: show only the rows with a match (tooltip and accessible name).
+hv-gfind-filter = Filter rows
+# The Filter rows toggle's longer tooltip and accessible description.
+hv-gfind-filter-tip = Filter rows: show only the rows with a match
+# After the grid find count when some searched values were cut at the value-size limit.
+hv-gfind-incomplete = may be incomplete
+# The tooltip of "may be incomplete".
+# Variables:
+#   $n (Number) - the values that were cut, e.g. 1.
+#   $size (String) - the value-size limit, already formatted with its unit, e.g. 1 MB.
+hv-gfind-incomplete-tip = { $n ->
+        [one] { $n } value was cut at { $size }; text past the cut isn't searched.
+       *[other] { $n } values were cut at { $size }; text past the cut isn't searched.
+    }
+# The note row under the result toolbar while Filter rows is on (NOTES M3c-26).
+# Variables:
+#   $shown (Number) - the rows with a match, e.g. 41.
+#   $rows (Number) - the rows fetched, e.g. 10,000.
+hv-gfind-filter-note = Showing the { $shown } rows that match, of the { $rows } fetched. Rows not fetched yet aren't filtered.
+# The filter note's button: turns Filter rows off.
+hv-gfind-show-all = Show all rows
+# The grid find field's tooltip: what it searches.
+hv-gfind-null-tip = Searches what the grid shows, row by row from the focused cell. NULL never matches.
+# The grid find bar's close button (tooltip and accessible name).
+hv-gfind-close = Close find
+# The grid find bar's Select all occurrences button (the command's words without "Grid:").
+hv-gfind-select-all = Select all occurrences
+# The command palette's title of the grid's Select all occurrences (⌃⌘G in a grid).
+hv-cmd-grid-select-all-occurrences = Grid: select all occurrences
+# The go-to popover's title (NOTES surface 20).
+hv-goto-title = Go to row
+# The go-to field's placeholder.
+hv-goto-placeholder = row or row:column
+# The line under the go-to field before anything is typed.
+hv-goto-hint = A row number, then an optional column by name or position: 1500:city or 1500:3
+# The line under the go-to field: where Enter goes, with a column.
+# Variables:
+#   $row (Number) - the row, e.g. 1,000.
+#   $col (String) - the column's name (catalog text), e.g. city.
+hv-goto-target = Row { $row }, column { $col }
+# The line under the go-to field: where Enter goes, a row only.
+# Variables:
+#   $row (Number) - the row, e.g. 1,000.
+hv-goto-target-row = Row { $row }
+# The go-to error past the last row.
+# Variables:
+#   $row (Number) - the row asked for, e.g. 40.
+#   $total (Number) - the result's rows, e.g. 12.
+hv-goto-past-end = { $total ->
+        [one] There's no row { $row }: the result has { $total } row.
+       *[other] There's no row { $row }: the result has { $total } rows.
+    }
+# The go-to error for a column name no column has.
+# Variables:
+#   $name (String) - what was typed (data), e.g. ilce.
+hv-goto-unknown-col = No column is named { $name }.
+# The go-to error for a hidden column.
+# Variables:
+#   $name (String) - the column's name (catalog text), e.g. meta.
+hv-goto-hidden-col = Column { $name } is hidden.
+# The button after the hidden-column error: shows the column and goes.
+hv-goto-show-col = Show it and go
+# The go-to question above a million rows to fetch.
+# Variables:
+#   $row (Number) - the row asked for, e.g. 1,500,000.
+#   $more (Number) - the rows still to fetch, e.g. 1,490,000.
+hv-goto-fetch = Row { $row } isn't fetched yet. Fetching { $more } more rows takes a while, and the result's memory limit still applies.
+# While go to row fetches toward its row.
+# Variables:
+#   $row (Number) - the row asked for, e.g. 1,500,000.
+#   $done (Number) - the rows fetched so far, e.g. 214,000.
+#   $more (Number) - the rows to fetch, e.g. 1,490,000.
+hv-goto-fetching = Fetching to row { $row }: { $done } of { $more } rows
+# Under the fetching line: Escape hides the popover, the fetch goes on.
+hv-goto-fetching-note = Escape hides this; fetching goes on in the strip.
+# The go-to fetching's button: ends the fetching, the cursor stays open.
+hv-goto-stop = Stop fetching
+# The go-to question's primary button.
+hv-goto-fetch-ok = Fetch and go
+# The go-to question's cancel button.
+hv-goto-cancel = Cancel
+# The go-to key hint's word after the return glyph ("↵ Go").
+hv-goto-key-go = Go
+# The go-to error when the row part is not a row number (or too large for one).
+hv-goto-not-a-row = That isn't a row number.
+# The go-to error past the last row while Filter rows shows only the matching rows.
+# Variables:
+#   $row (Number) - the row asked for, e.g. 40.
+#   $total (Number) - the rows the filter shows, e.g. 12.
+hv-goto-past-end-filter = { $total ->
+        [one] There's no row { $row }: the filter shows { $total } row.
+       *[other] There's no row { $row }: the filter shows { $total } rows.
+    }
+# The go-to line when fetching toward a row ended because the cursor closed (an error, a
+# cancel, a lost connection).
+# Variables:
+#   $row (Number) - the rows fetched, e.g. 214,000.
+hv-goto-fetch-closed = Fetching stopped at row { $row }: the cursor is closed.
+# The go-to line when fetching toward a row ended at the result's memory limit.
+# Variables:
+#   $row (Number) - the rows fetched, e.g. 214,000.
+hv-goto-fetch-paused = Fetching stopped at row { $row }: the result reached its memory limit.

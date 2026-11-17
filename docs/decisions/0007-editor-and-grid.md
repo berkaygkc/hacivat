@@ -812,3 +812,32 @@ back (palette-only; Task 39's menus add "Add as sort level N" through
 - *Memory.* Key extraction holds one `ValueRef` (32 B) per row and key: about 32 MB per key at
   one million rows, freed when the job ends. No budget check (accepted at review).
 - *Copy.* Every copy entry point (`copy_region`, `tsv`, `estimated_bytes`) takes the `ViewMap`.
+
+## m3b-t37 — grid find and go to row
+
+- *What is searched.* The grid find runs Task 33's matcher (`console::find_bar::build_matcher`)
+  over each visible column's **display string** (`valfmt::format_cell`, `Purpose::Cell`), the
+  text the grid paints: grouped numbers, the display zone, the grapheme cap. NULL and a decode
+  error never match. A value the store cut at its cell cap is searched up to the cut and the
+  count says "may be incomplete". A match is a **cell**; every matching range in it is marked.
+- *Off the UI thread.* The scan runs on the background executor in batches of 1,000 view rows
+  from the focus row (to the end, then from the top), in slices of about 8 ms that each report
+  to the bar; a generation number and a stop flag drop a stale scan. The UI thread merges a
+  slice's hits (at most 100,000 kept; the count goes on) and moves the focus once. The rows with
+  a match are concatenated, and the filter's maps built, on the background executor too.
+- *Marks.* `GridView::set_highlights` takes a closure that answers each painted cell's
+  `CellMarks` (byte ranges of its display text, the current one); layer 5 outlines each range's
+  glyphs (`text-3`), the current one filled (`blue-tint-strong`, blue outline). A text shown
+  with control chips is marked whole (its display bytes are not the value's).
+- *One owner of the view map.* `results::find::show_base` composes the sort's order with the
+  filter: the sort publishes its `Permuted` map there, Clear sort hands it `None`; with a filter
+  on, the grid shows the filter in the sort's order (composed on the background executor), the
+  filter in the source order after Clear sort, and the sort again once the filter is off.
+  (Task 36 review m6.) The sort still sorts every fetched row, so turning the filter off needs
+  no new sort.
+- *Go to row.* `parse_goto` reads the format locale's digits and grouping (the separators are
+  read from how the result's display writes a number) and a column by position, exact name,
+  ASCII case-insensitive name, then a tolerant key (ASCII case, Turkish i, Latin accents).
+  `GridView::go_to` takes **view** rows and focuses the cell (`focus_cell`, the public "focus
+  this cell"); past the fetched rows of an open cursor the app fetches in steps of 100,000 rows
+  (so Stop fetching can stop between them), asking first above a million rows to fetch.

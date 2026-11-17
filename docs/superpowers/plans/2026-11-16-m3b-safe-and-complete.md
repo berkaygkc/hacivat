@@ -84,7 +84,7 @@ Every task's requirements include this section. `<main>` is `/Users/berkaygokce/
   HACIVAT_PERF=1 cargo test --release -p sql-safety --test classify --test read_corpus -- --ignored
   HACIVAT_PERF=1 cargo test --release -p hacivat-exec --test classify_pool --test audit --test service_m3b -- --ignored
   HACIVAT_PERF=1 cargo test --release -p hacivat-driver-sqlite --test typed -- --ignored
-  HACIVAT_PERF=1 cargo test --release -p hacivat-app --test results_model --test results_sort -- --ignored
+  HACIVAT_PERF=1 cargo test --release -p hacivat-app --test results_model --test results_sort --test results_find -- --ignored
   ```
   A task that adds a perf test outside these crates adds its `-p`/`--test` to the perf lines and says so. **A crate that holds Docker tests (`hacivat-exec`, `hacivat-session`, the drivers, `sql-safety`'s callers) appears in a perf line only through `--test <target>`** (P-M3b-14; the M3a P9 lesson: `-- --ignored` on such a crate runs `#[ignore = "docker"]` tests outside the wrapper's lock). `cargo test --workspace` already runs `sql-safety`'s `bypass_run_a` (P-M3b-28). Every new test file compiles under plain `cargo test --workspace` (feature-only asserts behind `#[cfg(feature = …)]`, Unix-only cases with the file-top `cfg_attr`), and each task runs `cargo test -p <crate> --no-run` without features.
 - **Test values are fixed in the plan** (P18 lesson): where a test below writes a value (an offset, a count, an id), the implementer makes the code produce it; a value the implementer believes wrong is reported (NEEDS_CONTEXT), never silently changed.

@@ -260,6 +260,19 @@ pub struct PaintedSortMark {
     pub number: Option<SharedString>,
 }
 
+// ## m3c-t37
+/// A find mark a recorded frame painted (`test-support`): the view row and column, the
+/// outline's window x span, and whether it is the current match (filled).
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaintedFindMark {
+    pub row: u64,
+    pub col: ColId,
+    pub x0: f32,
+    pub x1: f32,
+    pub current: bool,
+}
+
 /// The rows the grid scrolls over for `count`: the exact total when known, the skeleton rows
 /// while the first rows are arriving, the loaded rows otherwise. (## m3c-t35: moved from
 /// `grid.rs`; `GridView::scroll_rows` gives a filter's kept rows instead.)
@@ -322,6 +335,10 @@ pub(crate) struct PaintState {
     /// The unsorted tail's boundary line the last recorded frame drew (window y).
     #[cfg(feature = "test-support")]
     pub recorded_tail_y: Option<f32>,
+    // ## m3c-t37
+    /// The find marks the last frame painted.
+    #[cfg(feature = "test-support")]
+    pub recorded_find_marks: Vec<PaintedFindMark>,
 }
 
 impl PaintState {
@@ -347,6 +364,8 @@ impl PaintState {
             recorded_sort_marks: Vec::new(),
             #[cfg(feature = "test-support")]
             recorded_tail_y: None,
+            #[cfg(feature = "test-support")]
+            recorded_find_marks: Vec::new(),
         }
     }
 
@@ -387,6 +406,13 @@ impl crate::view::GridView {
     #[cfg(feature = "test-support")]
     pub fn painted_tail_y(&self) -> Option<f32> {
         self.paint.recorded_tail_y
+    }
+
+    // ## m3c-t37
+    /// The find marks the last frame painted (`test-support`).
+    #[cfg(feature = "test-support")]
+    pub fn painted_find_marks(&self) -> &[PaintedFindMark] {
+        &self.paint.recorded_find_marks
     }
 
     /// The hovered body cell (view row, visible column index) and whether a pointer drag is in

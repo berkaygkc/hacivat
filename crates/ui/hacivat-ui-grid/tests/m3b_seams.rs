@@ -56,7 +56,12 @@ fn filtered_view_map_shows_only_its_rows() {
 
 #[test]
 fn goto_stub_fails_closed_and_frozen_columns_freeze() {
-    assert_eq!(parse_goto("12", &[], '.', ','), Err(GotoError::Empty));
+    // ## m3c-t37 (named exception): Task 37 filled `parse_goto` (`tests/goto.rs`).
+    assert_eq!(
+        parse_goto("12", &[], '.', ','),
+        Ok(hacivat_ui_grid::model::GotoTarget::Row(12))
+    );
+    assert_eq!(parse_goto("", &[], '.', ','), Err(GotoError::Empty));
     let mut layout = ColumnLayout::new([(ColId(0), 80.0), (ColId(1), 80.0)]);
     layout.set_frozen(1);
     // ## m3c-t35: frozen columns are Task 35's (`tests/model_frozen.rs`).
@@ -74,6 +79,9 @@ fn m3b_grid_commands_are_in_the_table() {
         "grid.auto_fit",
         "grid.freeze",
         "grid.unfreeze",
+        // ## m3c-t37 (named exception): Task 37 filled find and go to row.
+        "grid.find",
+        "grid.goto_row",
     ];
     for (id, cmd) in [
         ("grid.grow_selection", GridCommand::GrowSelection),
@@ -94,7 +102,8 @@ fn m3b_grid_commands_are_in_the_table() {
             "{id}"
         );
     }
-    assert_eq!(hacivat_ui_grid::commands::STUB_COMMANDS.len(), 4);
+    // ## m3c-t37 (named exception): 4 → 2.
+    assert_eq!(hacivat_ui_grid::commands::STUB_COMMANDS.len(), 2);
     // M3a's commands are not.
     for (id, _) in hacivat_ui_grid::GRID_COMMANDS.iter().take(26) {
         assert!(!hacivat_ui_grid::commands::is_stub(id), "{id}");
@@ -244,13 +253,22 @@ mod view {
         vcx.run_until_parked();
         assert!(view.read_with(vcx, |v, _| v.transposed()));
         assert!(view.read_with(vcx, |v, _| v.highlights().is_none()));
+        // ## m3c-t37 (named exception): the marks are each cell's `CellMarks` now.
         view.update(vcx, |v, cx| {
-            v.set_highlights(Some(Rc::new(|row: ModelRow, _| row.0 == 1)), cx)
+            v.set_highlights(
+                Some(Rc::new(|row: ModelRow, _| {
+                    (row.0 == 1).then(hacivat_ui_grid::CellMarks::default)
+                })),
+                cx,
+            )
         });
         vcx.run_until_parked();
         let marked = view.read_with(vcx, |v, _| {
             let h = v.highlights().expect("stored");
-            (h(ModelRow(1), ColId(0)), h(ModelRow(2), ColId(0)))
+            (
+                h(ModelRow(1), ColId(0)).is_some(),
+                h(ModelRow(2), ColId(0)).is_some(),
+            )
         });
         assert_eq!(marked, (true, false));
         view.update(vcx, |v, cx| v.set_highlights(None, cx));

@@ -30,6 +30,8 @@ pub use selection::{
 };
 // ## m3b-t01b-seams
 pub use goto::{GotoError, GotoTarget, parse_goto};
+// ## m3c-t37: where a go-to row lands, and the column names' tolerant key.
+pub use goto::{GotoPlace, place_row, tolerant_key};
 pub use sort::{SortKey, SortSpec};
 // ## m3c-t36: the local sort's stable, cancellable order.
 pub use sort::{CANCEL_EVERY, Cancelled, PARALLEL_ABOVE, stable_order, stable_order_on};

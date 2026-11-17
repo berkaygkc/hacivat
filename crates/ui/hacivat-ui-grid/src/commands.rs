@@ -8,7 +8,7 @@ use crate::model::Dir;
 use crate::view::GridCommand;
 
 /// Every grid command id, in palette order, and its command.
-pub static GRID_COMMANDS: [(&str, GridCommand); 35] = [
+pub static GRID_COMMANDS: [(&str, GridCommand); 36] = [
     ("grid.move_left", mv(Dir::Left, false)),
     ("grid.move_right", mv(Dir::Right, false)),
     ("grid.move_up", mv(Dir::Up, false)),
@@ -63,6 +63,12 @@ pub static GRID_COMMANDS: [(&str, GridCommand); 35] = [
     ("grid.auto_fit", GridCommand::AutoFit),
     ("grid.freeze", GridCommand::Freeze),
     ("grid.unfreeze", GridCommand::Unfreeze),
+    // ## m3c-t37 (named exception; NOTES Plan notes, Task 37): the grid's own Select all
+    // occurrences row (⌃⌘G in `Grid`), one chord with the editor's, its own id.
+    (
+        "grid.select_all_occurrences",
+        GridCommand::SelectAllOccurrences,
+    ),
 ];
 
 // ## m3b-t01b-seams (fix round 2, I3)
@@ -72,12 +78,8 @@ pub static GRID_COMMANDS: [(&str, GridCommand); 35] = [
 ///
 /// ## m3c-t35 (named exception): Task 35 removed `grid.grow_selection`,
 /// `grid.shrink_selection`, `grid.auto_fit`, `grid.freeze` and `grid.unfreeze`.
-pub static STUB_COMMANDS: [&str; 4] = [
-    "grid.find",
-    "grid.goto_row",
-    "grid.open_value",
-    "grid.context_menu",
-];
+/// ## m3c-t37 (named exception): Task 37 removed `grid.find` and `grid.goto_row`.
+pub static STUB_COMMANDS: [&str; 2] = ["grid.open_value", "grid.context_menu"];
 
 /// Whether grid command `id` is a stub ([`STUB_COMMANDS`]).
 pub fn is_stub(id: &str) -> bool {
