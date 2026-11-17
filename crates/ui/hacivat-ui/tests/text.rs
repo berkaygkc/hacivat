@@ -431,3 +431,39 @@ fn a_paragraph_of_many_lines_at_a_fractional_line_height_is_not_cut(cx: &mut Tes
     assert!(r.painted_px <= 120.0, "it wraps in its box: {r:?}");
     assert!(!r.clipped, "a wrapped paragraph that shows whole: {r:?}");
 }
+
+// ## m3c-shotfix F3 (fix round 1, m5): the snap hides no real cut. The same paragraph in a
+// container that clips it at least one snapped line short of its lines is still flagged (a box
+// too short for its lines is `paragraph_fit`'s unit test).
+struct ShortProseHost;
+
+impl Render for ShortProseHost {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let ink = DARK.colors.text.to_hsla();
+        let style = DARK.type_ramp.caption;
+        let line = f32::from(window.pixel_snap(px(style.line_height)));
+        // TOO_WIDE wraps into at least three lines at 120 px: two lines of room is one short.
+        let room = div().w(px(120.0)).h(px(2.0 * line));
+        room.overflow_hidden()
+            .child(paragraph(TOO_WIDE, TextSource::Data, style, ink).id("prose"))
+    }
+}
+
+#[gpui::test]
+fn a_paragraph_one_snapped_line_short_is_still_cut(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    let (_, vcx) = cx.add_window_view(|_, _| ShortProseHost);
+    vcx.run_until_parked();
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let r = frame
+        .iter()
+        .find(|r| r.path.ends_with("#prose"))
+        .unwrap_or_else(|| panic!("the paragraph was recorded: {frame:?}"));
+    assert!(r.clipped, "a paragraph cut by a line is cut: {r:?}");
+}

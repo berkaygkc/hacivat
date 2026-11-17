@@ -327,4 +327,24 @@ fn the_name_column_is_headed_by_a_chrome_title_and_the_rows_by_data(cx: &mut Tes
     let row = headed("1");
     assert_eq!(row.source, TextSource::Catalog, "{row:?}");
     assert!(row.path.ends_with("#header"), "{row:?}");
+    // ## fix round 1 (m6): for assistive technology it is the name column's header: a
+    // `ColumnHeader` node named "Column" in the header row.
+    let view = _view;
+    vcx.update(|_, cx| view.update(cx, |v, cx| v.assume_a11y_active(true, cx)));
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    let nodes = view.read_with(vcx, |v, _| v.a11y_nodes());
+    let header = nodes
+        .iter()
+        .find(|r| r.is_header())
+        .expect("the header row");
+    let name_col = header
+        .cells
+        .iter()
+        .find(|c| c.col == hacivat_ui_grid::ColId(0))
+        .expect("the name column's header cell");
+    assert_eq!(name_col.name.as_ref(), "Column");
+    let node = name_col.node(header.index, true);
+    assert_eq!(node.role(), gpui::accesskit::Role::ColumnHeader);
+    assert_eq!(node.label(), Some("Column"));
 }

@@ -1026,8 +1026,8 @@ impl ResultsHost {
                     body = body.child(
                         div()
                             .absolute()
-                            .top(hacivat_ui_core::gpui_surface::px(4.0))
-                            .bottom(hacivat_ui_core::gpui_surface::px(4.0))
+                            .top(hacivat_ui_core::gpui_surface::px(super::goto::HOST_GAP_PX))
+                            .bottom(hacivat_ui_core::gpui_surface::px(super::goto::HOST_GAP_PX))
                             .left(hacivat_ui_core::gpui_surface::px(12.0))
                             .flex()
                             .flex_col()

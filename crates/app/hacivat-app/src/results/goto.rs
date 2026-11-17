@@ -37,8 +37,9 @@ use hacivat_ui::step_trail::run_marker;
 use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, Global,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, Role, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, Role, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window,
+    div, point, px,
 };
 use hacivat_ui_core::keymap::{KeymapPlatform, display_chord, parse_chord};
 use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline, popover_surface};
@@ -95,6 +96,9 @@ pub struct GotoPopover {
     grid: Option<WeakEntity<GridView>>,
     adapter: Option<Weak<GridAdapter>>,
     primary: FocusHandle,
+    // ## m3c-shotfix F5 (fix round 1, I1)
+    /// The scroll of the lines between the title and the buttons (a short room).
+    body_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -340,6 +344,7 @@ impl GotoPopover {
             grid: None,
             adapter: None,
             primary: cx.focus_handle().tab_stop(true),
+            body_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -367,12 +372,13 @@ impl GotoPopover {
     }
 
     // ## m3c-shotfix F5
-    /// Whether the grid's area (the popover's room, less its 4 px gaps) is too short for the
-    /// title, the field, a three-line question and the buttons.
-    fn short_room(&self, cx: &App) -> bool {
+    /// Whether the grid's area (the popover's room, as the last frame laid it out) is too short
+    /// for the title, the field, a three-line question and the buttons ([`short_room_px`]).
+    fn short_room(&self, window: &Window, cx: &App) -> bool {
+        let need = short_room_px(window, cx);
         self.target()
             .and_then(|(grid, _)| grid.read(cx).geometry().map(|g| g.bounds.size.height))
-            .is_some_and(|h| f32::from(h) < SHORT_ROOM_PX)
+            .is_some_and(|h| f32::from(h) < need)
     }
 
     /// The field's text, parsed against the grid's columns in the format locale.
@@ -737,9 +743,35 @@ impl GotoPopover {
     }
 }
 
-// ## m3c-shotfix F5: padding 20, title 16, field 26, three lines 48, buttons 28, gaps 32, the
-// popover's 4 px gaps 8.
-const SHORT_ROOM_PX: f32 = 186.0;
+// ## m3c-shotfix F5 (fix round 1, m10): the numbers the popover is laid out with; the
+// short-room threshold adds them up ([`short_room_px`]), and a test pins it to the drawn popover.
+/// The popover's padding and the gap between its rows.
+const PAD_PX: f32 = 10.0;
+const ROW_GAP_PX: f32 = 8.0;
+/// The field's height.
+const FIELD_PX: f32 = 26.0;
+/// The popover surface's border.
+const SURFACE_BORDER_PX: f32 = 1.0;
+/// The host's gap above and below the popover (`view.rs`).
+pub const HOST_GAP_PX: f32 = 4.0;
+
+/// The height of the grid's area under which the asking popover gives up its title and its
+/// field to the question: the padding, the title, the field, a three-line question, the
+/// buttons and the gaps between them, and the host's gaps.
+pub fn short_room_px(window: &Window, cx: &App) -> f32 {
+    let t = Theme::get(cx).tokens;
+    let line = f32::from(window.pixel_snap(px(t.type_ramp.caption.line_height)));
+    2.0 * PAD_PX
+        + line
+        + ROW_GAP_PX
+        + FIELD_PX
+        + ROW_GAP_PX
+        + 3.0 * line
+        + ROW_GAP_PX
+        + t.spacing.control_height
+        + 2.0 * SURFACE_BORDER_PX
+        + 2.0 * HOST_GAP_PX
+}
 
 impl Render for GotoPopover {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -760,7 +792,12 @@ impl Render for GotoPopover {
         let t = theme.tokens;
         let c = &t.colors;
         let entity = cx.entity();
+        // ## m3c-shotfix F5 (fix round 1, I1): asking or fetching in a short room, the title
+        // and then the field give way to the question (the title only names what was opened;
+        // the question names the row the field holds).
+        let short = asking && self.short_room(window, cx);
         let title = div()
+            .debug_selector(|| "goto-title".to_string())
             .flex()
             .flex_row()
             .flex_none()
@@ -787,7 +824,7 @@ impl Render for GotoPopover {
         let field = div()
             .id("goto-field")
             .debug_selector(|| "goto-field".to_string())
-            .h(px(26.0))
+            .h(px(FIELD_PX))
             .flex()
             .items_center()
             .px(px(6.0))
@@ -806,16 +843,16 @@ impl Render for GotoPopover {
         // a short room what lies between them (the field and the lines) scrolls.
         let mut body = div()
             .id("goto-body")
+            .debug_selector(|| "goto-body".to_string())
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(ROW_GAP_PX))
             .flex_shrink(1.0)
             .min_h(px(0.0))
             .overflow_y_scroll()
+            .track_scroll(&self.body_scroll)
             .child(hacivat_ui::text::scroll_viewport());
-        // While it asks or fetches in a short room, the question takes the field's place (it
-        // names the row the field holds); with room, the field stays above it.
-        if !(asking && self.short_room(cx)) {
+        if !short {
             body = body.child(field);
         }
         let foot: AnyElement;
@@ -890,20 +927,25 @@ impl Render for GotoPopover {
             GotoState::Ask { row, more } => {
                 let (e1, e2) = (entity.clone(), entity.clone());
                 body = body.child(
-                    paragraph(
-                        message(
-                            cx,
-                            "hv-goto-fetch",
-                            vec![
-                                ("row", ArgValue::Count(row)),
-                                ("more", ArgValue::Count(more)),
-                            ],
+                    div()
+                        .debug_selector(|| "goto-question".to_string())
+                        .flex_none()
+                        .child(
+                            paragraph(
+                                message(
+                                    cx,
+                                    "hv-goto-fetch",
+                                    vec![
+                                        ("row", ArgValue::Count(row)),
+                                        ("more", ArgValue::Count(more)),
+                                    ],
+                                ),
+                                TextSource::Fluent,
+                                t.type_ramp.caption,
+                                c.text.to_hsla(),
+                            )
+                            .id("goto-line"),
                         ),
-                        TextSource::Fluent,
-                        t.type_ramp.caption,
-                        c.text.to_hsla(),
-                    )
-                    .id("goto-line"),
                 );
                 foot = div()
                     .flex()
@@ -996,8 +1038,8 @@ impl Render for GotoPopover {
             .max_h_full()
             .flex()
             .flex_col()
-            .gap(px(8.0))
-            .p(px(10.0))
+            .gap(px(ROW_GAP_PX))
+            .p(px(PAD_PX))
             .on_mouse_down_out(cx.listener(|p, _, _, cx| {
                 if !matches!(p.state, GotoState::Ask { .. }) {
                     p.hide(cx);
@@ -1005,13 +1047,38 @@ impl Render for GotoPopover {
             }))
             .on_key_down(cx.listener(
                 |p, ev: &hacivat_ui_core::gpui_surface::KeyDownEvent, _, cx| {
-                    if ev.keystroke.key == "escape" && !ev.keystroke.modifiers.modified() {
+                    let k = &ev.keystroke;
+                    if k.modifiers.modified() {
+                        return;
+                    }
+                    if k.key == "escape" {
                         cx.stop_propagation();
                         p.hide(cx);
+                        return;
                     }
+                    // ## m3c-shotfix F5 (fix round 1, I1): while it asks or fetches, the arrows
+                    // and the page keys scroll the question from its buttons, so all of it is
+                    // read without a pointer (the buttons take no arrows).
+                    if !matches!(p.state, GotoState::Ask { .. } | GotoState::Fetching { .. }) {
+                        return;
+                    }
+                    let line = Theme::get(cx).tokens.type_ramp.caption.line_height;
+                    let dy = match k.key.as_str() {
+                        "up" => -line,
+                        "down" => line,
+                        "pageup" => -3.0 * line,
+                        "pagedown" => 3.0 * line,
+                        _ => return,
+                    };
+                    let o = p.body_scroll.offset();
+                    let max = p.body_scroll.max_offset();
+                    let y = (o.y - px(dy)).clamp(-max.y.max(px(0.0)), px(0.0));
+                    p.body_scroll.set_offset(point(o.x, y));
+                    cx.stop_propagation();
+                    cx.notify();
                 },
             ))
-            .child(title)
+            .children((!short).then_some(title))
             .child(body)
             .child(foot);
         A11yNode::new(

@@ -55,8 +55,8 @@ use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable as _,
     Global, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent,
-    ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledText, Task, WeakEntity, Window, div, px,
+    ParentElement as _, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, StyledText, Task, WeakEntity, Window, div, point, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, popover_surface};
 use hacivat_ui_grid::{
@@ -87,12 +87,82 @@ const POPOVER_PAD_X: f32 = 16.0;
 /// The rest of the popover around the well, for placing it (header, control row, notice,
 /// footer); the well takes what is left.
 const CHROME_PX: f32 = 170.0;
-// ## m3c-shotfix F8: the popover's rows around the well, for its room (header 12/18/17,
-// control 8/22, notice 8/16/6/28, footer 12/28/14).
-const HEADER_PX: f32 = 47.0;
-const CONTROL_PX: f32 = 30.0;
-const NOTICE_PX: f32 = 58.0;
-const FOOTER_PX: f32 = 54.0;
+// ## m3c-shotfix F8 (fix round 1, m10): the paddings the popover's rows are laid out with.
+// The room check adds them to the type ramp's line heights and the control heights
+// ([`Rows`]), so a token change moves the layout and the check together; a test pins the
+// check to the drawn rows (`results_views.rs`).
+const HEADER_PAD_TOP: f32 = 12.0;
+const FOOTER_PAD_TOP: f32 = 12.0;
+const FOOTER_PAD_BOTTOM: f32 = 14.0;
+/// Above the control row, the well and the notice.
+const ROW_GAP: f32 = 8.0;
+/// Between the notice and Re-run.
+const NOTICE_GAP: f32 = 6.0;
+/// The short layout's header and footer padding, and its gap above the well.
+const SHORT_PAD: f32 = 6.0;
+const SHORT_WELL_GAP: f32 = 4.0;
+
+/// The heights of the popover's rows in one layout (fix round 1, I1, m10).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rows {
+    pub header: f32,
+    pub control: f32,
+    /// The well at one line, with its gap above.
+    pub well_min: f32,
+    pub notice: f32,
+    pub footer: f32,
+}
+
+impl Rows {
+    /// The rows of the roomy layout (`short: false`) or the short one, from the tokens;
+    /// `form`: the value has a form switch (JSON, XML, binary).
+    fn of(
+        t: &hacivat_ui_core::theme::ThemeTokens,
+        short: bool,
+        form: bool,
+        window: &Window,
+    ) -> Rows {
+        let lh = |style: hacivat_ui_core::theme::TypeStyle| {
+            f32::from(window.pixel_snap(px(style.line_height)))
+        };
+        let control = t.spacing.control_height;
+        let field = t.spacing.field_height;
+        let compact = hacivat_ui::metrics::COMPACT_HEIGHT_PX;
+        let well = LINE_PX + 2.0 * WELL_PAD_Y + 2.0;
+        if short {
+            Rows {
+                // The column name, the form switch and the compact ×, on one row.
+                header: SHORT_PAD
+                    + lh(t.type_ramp.code)
+                        .max(if form { field } else { 0.0 })
+                        .max(compact),
+                control: 0.0,
+                well_min: SHORT_WELL_GAP + well,
+                notice: ROW_GAP + lh(t.type_ramp.caption) + NOTICE_GAP + control,
+                // The size and the compact Copy raw value (its glyph).
+                footer: SHORT_PAD + lh(t.type_ramp.mono_data).max(compact) + SHORT_PAD,
+            }
+        } else {
+            Rows {
+                header: HEADER_PAD_TOP
+                    + (lh(t.type_ramp.code) + lh(t.type_ramp.body_sm)).max(control),
+                control: ROW_GAP + field,
+                well_min: ROW_GAP + well,
+                notice: ROW_GAP + lh(t.type_ramp.caption) + NOTICE_GAP + control,
+                footer: FOOTER_PAD_TOP + lh(t.type_ramp.mono_data).max(control) + FOOTER_PAD_BOTTOM,
+            }
+        }
+    }
+
+    /// The popover's height with a one-line well.
+    fn total(&self, has_control: bool, notice: bool) -> f32 {
+        self.header
+            + if has_control { self.control } else { 0.0 }
+            + self.well_min
+            + if notice { self.notice } else { 0.0 }
+            + self.footer
+    }
+}
 
 /// The gap between the cell and the popover, and from the grid's edges.
 const GAP_PX: f32 = 4.0;
@@ -478,6 +548,15 @@ pub struct ValueViewer {
     focus: FocusHandle,
     /// The char advance of the well's font, measured once.
     advance: Cell<Option<f32>>,
+    // ## m3c-shotfix F8 (fix round 1, I1)
+    /// The scroll of what lies between the header and the footer (a short room).
+    middle_scroll: ScrollHandle,
+    /// Re-run's focus, so a focused Re-run is scrolled into view.
+    rerun_focus: FocusHandle,
+    /// What had the focus at the last frame: 0 nothing here, 1 the well, 2 Re-run.
+    seen_focus: Cell<u8>,
+    /// The layout the last frame drew: short, and its rows (for tests).
+    drawn_rows: Cell<Option<(bool, Rows)>>,
 }
 
 #[derive(Default)]
@@ -691,6 +770,13 @@ fn subtitle_of(
 }
 
 /// Whether console `console`'s viewer is open.
+// ## m3c-shotfix F8 (fix round 1, m10)
+/// The layout the open viewer of `console` drew last: whether it is the short one, and the
+/// heights of its rows as the room check reckons them.
+pub fn drawn_rows(console: ConsoleId, cx: &App) -> Option<(bool, Rows)> {
+    viewer(console, cx).and_then(|v| v.read(cx).drawn_rows.get())
+}
+
 pub fn is_open(console: ConsoleId, cx: &App) -> bool {
     viewer(console, cx).is_some_and(|v| v.read(cx).open)
 }
@@ -817,8 +903,14 @@ impl ValueViewer {
             well: cx.new(|_| VirtualList::new(WellLines::default(), LINE_PX)),
             cut_for: None,
             loading: None,
-            focus: cx.focus_handle(),
+            // ## m3c-shotfix F8 (fix round 1, I1): a Tab stop (NOTES 22: Raw / Pretty → well →
+            // Re-run → Copy raw value).
+            focus: cx.focus_handle().tab_stop(true),
             advance: Cell::new(None),
+            middle_scroll: ScrollHandle::new(),
+            rerun_focus: cx.focus_handle().tab_stop(true),
+            seen_focus: Cell::new(0),
+            drawn_rows: Cell::new(None),
         }
     }
 
@@ -1129,39 +1221,58 @@ impl Render for ValueViewer {
         let entity = cx.entity();
         let view = self.view_of(false, cx);
         let view = &view;
+        // ## m3c-shotfix F8 (fix round 1, I1): the short layout. When the roomy rows with a
+        // one-line well do not fit, the header loses its subtitle line (it stays the column's
+        // tooltip) and takes the form switch, × and Copy raw value turn compact, so one full line
+        // of the value always shows between the header and the footer.
+        let has_form = !matches!(view.form, ValueForm::Text);
+        let roomy = Rows::of(t, false, has_form, window);
+        let short = room.is_some_and(|r| r < roomy.total(has_form, view.truncated.is_some()));
+        let rows = if short {
+            Rows::of(t, true, has_form, window)
+        } else {
+            roomy
+        };
+        self.drawn_rows.set(Some((short, rows)));
+        let mut title = div()
+            .id("value-viewer-title")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .child(
+                Label::new(
+                    view.column.clone(),
+                    TextSource::Catalog,
+                    t.type_ramp.code,
+                    c.text.to_hsla(),
+                )
+                .truncate(true)
+                .id("value-viewer-column"),
+            );
+        if short {
+            let tip = view.subtitle.clone();
+            title = title.tooltip(move |_, cx| Tip::view(tip.clone(), cx));
+        } else {
+            title = title.child(
+                Label::new(
+                    view.subtitle.clone(),
+                    TextSource::Fluent,
+                    t.type_ramp.body_sm,
+                    c.text_2.to_hsla(),
+                )
+                .id("value-viewer-sub"),
+            );
+        }
         let header_row = div()
+            .debug_selector(|| "value-viewer-header".to_string())
             .flex()
             .flex_row()
             .items_start()
             .gap(px(8.0))
-            .pt(px(12.0))
+            .pt(px(if short { SHORT_PAD } else { HEADER_PAD_TOP }))
             .px(px(POPOVER_PAD_X))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        Label::new(
-                            view.column.clone(),
-                            TextSource::Catalog,
-                            t.type_ramp.code,
-                            c.text.to_hsla(),
-                        )
-                        .truncate(true)
-                        .id("value-viewer-column"),
-                    )
-                    .child(
-                        Label::new(
-                            view.subtitle.clone(),
-                            TextSource::Fluent,
-                            t.type_ramp.body_sm,
-                            c.text_2.to_hsla(),
-                        )
-                        .id("value-viewer-sub"),
-                    ),
-            );
+            .child(title);
         let close_button = {
             let e = entity.clone();
             Button::new(
@@ -1170,6 +1281,7 @@ impl Render for ValueViewer {
             )
             .kind(ButtonKind::Icon)
             .icon(IconName::X)
+            .compact(short)
             .on_raised(true)
             .on_click(move |_, _, cx| e.update(cx, |v, cx| v.close(cx)))
         };
@@ -1178,8 +1290,9 @@ impl Render for ValueViewer {
             .flex_row()
             .items_center()
             .gap(px(8.0))
+            .debug_selector(|| "value-viewer-control".to_string())
             .px(px(POPOVER_PAD_X))
-            .pt(px(8.0));
+            .pt(px(ROW_GAP));
         let mut has_control = false;
         // ## m3c-shotfix F8: the form switch and its note, placed once the room is known.
         let mut seg_el: Option<AnyElement> = None;
@@ -1241,22 +1354,9 @@ impl Render for ValueViewer {
             }
             ValueForm::Text => {}
         }
-        // ## m3c-shotfix F8: a room too short for the header, the control row, a one-line well,
-        // the notice and the footer: the form switch moves into the header row (before ×), so
-        // it shows whole while the rest scrolls between the header and the footer.
-        let needed = HEADER_PX
-            + if has_control { CONTROL_PX } else { 0.0 }
-            + 8.0
-            + LINE_PX
-            + 2.0 * WELL_PAD_Y
-            + 2.0
-            + if view.truncated.is_some() {
-                NOTICE_PX
-            } else {
-                0.0
-            }
-            + FOOTER_PX;
-        let compact = room.is_some_and(|r| r < needed);
+        // ## m3c-shotfix F8: in the short layout the form switch sits in the header row (before
+        // ×), so it shows whole.
+        let compact = short;
         let header = match (compact, seg_el.take()) {
             (true, Some(seg)) => header_row.child(seg),
             (_, seg) => {
@@ -1277,12 +1377,13 @@ impl Render for ValueViewer {
         let lines = self.well.read(cx).rows().len() as f32;
         let height = (lines * LINE_PX).clamp(LINE_PX, well_h) + 2.0 * WELL_PAD_Y;
         let e_keys = entity.clone();
+        let middle_keys = self.middle_scroll.clone();
         let well = div()
             .id("value-viewer-well")
             .debug_selector(|| "value-viewer-well".to_string())
             .track_focus(&self.focus)
             .mx(px(POPOVER_PAD_X))
-            .mt(px(8.0))
+            .mt(px(if short { SHORT_WELL_GAP } else { ROW_GAP }))
             .h(px(height))
             // ## m3c-shotfix F8: in a short room the well gives way first, down to one line.
             .flex_shrink(1.0)
@@ -1307,7 +1408,25 @@ impl Render for ValueViewer {
                     return;
                 }
                 let well = e_keys.read(cx).well.clone();
-                well.update(cx, |w, cx| w.scroll_px(f64::from(dy), cx));
+                // ## m3c-shotfix F8 (fix round 1, I1): at its own end the well hands the key to
+                // what lies around it, so the notice and Re-run are reached from the keyboard.
+                let s = well.read(cx).scroll_state();
+                let at_end = if dy > 0.0 {
+                    s.row_top(s.row_count()) <= f64::from(s.viewport().1) + 0.5
+                } else {
+                    s.row_top(0) >= -0.5
+                };
+                if at_end {
+                    let o = middle_keys.offset();
+                    let max = middle_keys.max_offset();
+                    let y = (o.y - px(dy)).clamp(-max.y.max(px(0.0)), px(0.0));
+                    if y != o.y {
+                        middle_keys.set_offset(point(o.x, y));
+                        e_keys.update(cx, |_, cx| cx.notify());
+                    }
+                } else {
+                    well.update(cx, |w, cx| w.scroll_px(f64::from(dy), cx));
+                }
                 cx.stop_propagation();
             })
             .child(self.well.clone());
@@ -1323,25 +1442,56 @@ impl Render for ValueViewer {
             // Less the surface's 1 px border on each side.
             body = body.max_h(px((room - 2.0).max(0.0)));
         }
+        // ## m3c-shotfix F8 (fix round 1, I1): the middle never goes under one full line of the
+        // value, and what takes the focus in it (the well, Re-run) is scrolled into view.
         let mut middle = div()
             .id("value-viewer-middle")
+            .debug_selector(|| "value-viewer-middle".to_string())
             .flex()
             .flex_col()
             .flex_shrink(1.0)
-            .min_h(px(0.0))
+            .min_h(px(rows.well_min))
             .overflow_y_scroll()
+            .track_scroll(&self.middle_scroll)
             .child(hacivat_ui::text::scroll_viewport());
-        if has_control {
-            middle = middle.child(control.flex_none());
+        // In the short layout the well comes first (what is left of the control row, the "not
+        // valid JSON" line, follows it), so the value is what shows.
+        let (well_ix, rerun_ix) = match (has_control, short) {
+            (true, false) => {
+                middle = middle.child(control.flex_none()).child(well);
+                (2, 4)
+            }
+            (true, true) => {
+                middle = middle.child(well).child(control.flex_none());
+                (1, 4)
+            }
+            (false, _) => {
+                middle = middle.child(well);
+                (1, 3)
+            }
+        };
+        let focused = if self.focus.is_focused(window) {
+            1
+        } else if self.rerun_focus.is_focused(window) {
+            2
+        } else {
+            0
+        };
+        if focused != self.seen_focus.replace(focused) && focused != 0 {
+            // The well, or Re-run (after the notice).
+            self.middle_scroll
+                .scroll_to_item(if focused == 2 { rerun_ix } else { well_ix });
         }
-        middle = middle.child(well);
         if let Some(notice) = view.truncated.clone() {
-            let mut row = div()
+            let mut rerun_row = None;
+            let mut refused_row = None;
+            let row = div()
+                .debug_selector(|| "value-viewer-notice".to_string())
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
+                .gap(px(NOTICE_GAP))
                 .px(px(POPOVER_PAD_X))
-                .pt(px(8.0))
+                .pt(px(ROW_GAP))
                 .child(hacivat_ui::text::paragraph(
                     notice,
                     TextSource::Fluent,
@@ -1356,45 +1506,83 @@ impl Render for ValueViewer {
                 let tip = off
                     .clone()
                     .unwrap_or_else(|| message(cx, "hv-vv-rerun-tip", vec![]));
-                row = row.child(
+                // ## m3c-shotfix F8 (fix round 1, I1): Re-run is a row of the middle of its own,
+                // so focusing it scrolls it (not the whole notice) into view.
+                rerun_row = Some(
                     div()
-                        .id("value-viewer-rerun-tip")
-                        .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+                        .flex_none()
+                        .px(px(POPOVER_PAD_X))
+                        .pt(px(NOTICE_GAP))
                         .child(
-                            Button::new("value-viewer-rerun", words)
-                                .kind(ButtonKind::Default)
-                                .icon(IconName::RotateCw)
-                                .on_raised(true)
-                                .disabled(off.is_some())
-                                .on_click(move |_, _, cx| e.update(cx, |v, cx| v.rerun(cx))),
+                            div()
+                                .id("value-viewer-rerun-tip")
+                                .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+                                .child(
+                                    Button::new("value-viewer-rerun", words)
+                                        .kind(ButtonKind::Default)
+                                        .icon(IconName::RotateCw)
+                                        .on_raised(true)
+                                        .focus_handle(self.rerun_focus.clone())
+                                        .disabled(off.is_some())
+                                        .on_click(move |_, _, cx| {
+                                            e.update(cx, |v, cx| v.rerun(cx))
+                                        }),
+                                ),
                         ),
                 );
                 if let Some(refused) = self.refused.clone() {
-                    row = row.child(
-                        hacivat_ui::text::paragraph(
-                            refused,
-                            TextSource::Fluent,
-                            t.type_ramp.caption,
-                            c.text.to_hsla(),
-                        )
-                        .id("value-viewer-refused"),
+                    refused_row = Some(
+                        div()
+                            .flex_none()
+                            .px(px(POPOVER_PAD_X))
+                            .pt(px(NOTICE_GAP))
+                            .child(
+                                hacivat_ui::text::paragraph(
+                                    refused,
+                                    TextSource::Fluent,
+                                    t.type_ramp.caption,
+                                    c.text.to_hsla(),
+                                )
+                                .id("value-viewer-refused"),
+                            ),
                     );
                 }
             }
-            middle = middle.child(row.flex_none());
+            middle = middle
+                .child(row.flex_none())
+                .children(rerun_row)
+                .children(refused_row);
         }
         body = body.child(middle);
         let e = entity.clone();
+        let (pad_top, pad_bottom) = if short {
+            (SHORT_PAD, SHORT_PAD)
+        } else {
+            (FOOTER_PAD_TOP, FOOTER_PAD_BOTTOM)
+        };
+        // In the short layout Copy raw value is its glyph (its words the tooltip and name).
+        let copy = Button::new("value-viewer-copy", message(cx, "hv-vv-copy", vec![]))
+            .kind(if short {
+                ButtonKind::Icon
+            } else {
+                ButtonKind::Default
+            })
+            .icon(IconName::Copy)
+            .compact(short)
+            .on_raised(true)
+            .disabled(!view.can_copy)
+            .on_click(move |_, _, cx| e.update(cx, |v, cx| v.copy_raw(cx)));
         body = body.child(
             div()
+                .debug_selector(|| "value-viewer-footer".to_string())
                 .flex()
                 .flex_row()
                 .flex_none()
                 .items_center()
                 .justify_between()
                 .gap(px(8.0))
-                .pt(px(12.0))
-                .pb(px(14.0))
+                .pt(px(pad_top))
+                .pb(px(pad_bottom))
                 .px(px(POPOVER_PAD_X))
                 // ## m3c-shotfix F8: the size wraps in the room Copy raw value leaves it.
                 .child(
@@ -1408,14 +1596,7 @@ impl Render for ValueViewer {
                         .id("value-viewer-size"),
                     ),
                 )
-                .child(
-                    Button::new("value-viewer-copy", message(cx, "hv-vv-copy", vec![]))
-                        .kind(ButtonKind::Default)
-                        .icon(IconName::Copy)
-                        .on_raised(true)
-                        .disabled(!view.can_copy)
-                        .on_click(move |_, _, cx| e.update(cx, |v, cx| v.copy_raw(cx))),
-                ),
+                .child(copy),
         );
         let panel = popover_surface(&theme)
             .id(("value-viewer", self.console.0))
