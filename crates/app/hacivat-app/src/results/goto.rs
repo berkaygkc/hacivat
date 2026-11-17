@@ -99,6 +99,9 @@ pub struct GotoPopover {
     // ## m3c-shotfix F5 (fix round 1, I1)
     /// The scroll of the lines between the title and the buttons (a short room).
     body_scroll: ScrollHandle,
+    // ## m3c-shotfix F5 (fix round 2, m-i): the room the host gives the popover, as the current
+    // layout measures it (`room_probe`); a change draws the popover again.
+    room: Rc<std::cell::Cell<Option<f32>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -137,6 +140,8 @@ pub fn open(console: ConsoleId, cx: &mut App) {
         }
         p.open = true;
         p.take_focus = true;
+        // ## m3c-shotfix F5 (fix round 2, m-i): every opening starts at the top.
+        p.body_scroll.set_offset(point(px(0.0), px(0.0)));
         if !matches!(p.state, GotoState::Fetching { .. }) {
             p.state = GotoState::Idle;
             p.error = None;
@@ -278,6 +283,31 @@ pub(crate) fn overlay(console: ConsoleId, cx: &App) -> Option<AnyElement> {
     Some(p.into_any_element())
 }
 
+// ## m3c-shotfix F5 (fix round 2, m-i)
+/// Measures, in the host's current layout, the room it gives console `console`'s popover (the
+/// host's absolutely placed wrapper); a change draws again, so the frame shown is planned on
+/// the layout it shows.
+pub(crate) fn room_probe(console: ConsoleId, cx: &App) -> Option<AnyElement> {
+    let room = popover(console, cx)?.read(cx).room.clone();
+    Some(
+        hacivat_ui_core::gpui_surface::canvas(
+            move |bounds, window, _| {
+                let h = f32::from(bounds.size.height);
+                if room.get().is_none_or(|r| (r - h).abs() > 0.5) {
+                    room.set(Some(h));
+                    window.refresh();
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .into_any_element(),
+    )
+}
+
 fn notify_hosts(cx: &mut App) {
     for host in super::view::hosts(cx) {
         host.update(cx, |_, cx| cx.notify());
@@ -345,6 +375,7 @@ impl GotoPopover {
             adapter: None,
             primary: cx.focus_handle().tab_stop(true),
             body_scroll: ScrollHandle::new(),
+            room: Rc::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -376,9 +407,15 @@ impl GotoPopover {
     /// for the title, the field, a three-line question and the buttons ([`short_room_px`]).
     fn short_room(&self, window: &Window, cx: &App) -> bool {
         let need = short_room_px(window, cx);
-        self.target()
-            .and_then(|(grid, _)| grid.read(cx).geometry().map(|g| g.bounds.size.height))
-            .is_some_and(|h| f32::from(h) < need)
+        // ## fix round 2 (m-i): the room the host's layout gives (its probe redraws when it
+        // changes, so the frame shown decides on its own layout); the grid's last frame only
+        // before the first measure.
+        let room = self.room.get().map(|r| r + 2.0 * HOST_GAP_PX).or_else(|| {
+            self.target()
+                .and_then(|(grid, _)| grid.read(cx).geometry().map(|g| g.bounds.size.height))
+                .map(f32::from)
+        });
+        room.is_some_and(|h| h < need)
     }
 
     /// The field's text, parsed against the grid's columns in the format locale.
@@ -549,6 +586,8 @@ impl GotoPopover {
                         };
                         self.pending = Some((target, loaded));
                         self.take_focus = true;
+                        // A new question starts at its first line (fix round 2, m-i).
+                        self.body_scroll.set_offset(point(px(0.0), px(0.0)));
                     } else {
                         self.start_fetch(target, loaded, cx);
                     }
@@ -614,6 +653,7 @@ impl GotoPopover {
         };
         self.pending = Some((target, loaded));
         self.take_focus = true;
+        self.body_scroll.set_offset(point(px(0.0), px(0.0)));
         self.drive(cx);
         notify_hosts(cx);
     }

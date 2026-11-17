@@ -1010,7 +1010,7 @@ fn ask(t: &Tile) -> Entity<GridView> {
     grid
 }
 
-fn goto_asks_in_a_short_room(cx: &mut TestAppContext, lang: &str) {
+fn goto_asks_in_a_short_room(cx: &mut TestAppContext, lang: &str, must_overflow: bool) {
     let t = tile_in(cx, lang, "en-US");
     t.vcx
         .simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
@@ -1035,6 +1035,15 @@ fn goto_asks_in_a_short_room(cx: &mut TestAppContext, lang: &str) {
         primary.bottom() <= popover.bottom() + slack,
         "{lang}: {primary:?}"
     );
+    // Fix round 2 (m-i): where the question is longer than the room (en-XA), it overflowed
+    // first, so the keys have something to scroll.
+    if must_overflow {
+        let (body, question) = (bounds(t.vcx, "goto-body"), bounds(t.vcx, "goto-question"));
+        assert!(
+            question.bottom() > body.bottom() + slack,
+            "{lang}: the question {question:?} overflows {body:?}"
+        );
+    }
     // The page keys, from the focused Fetch and go, bring the question's end into view.
     for _ in 0..8 {
         t.vcx.simulate_keystrokes("pagedown");
@@ -1059,13 +1068,13 @@ fn goto_asks_in_a_short_room(cx: &mut TestAppContext, lang: &str) {
 
 #[gpui::test]
 fn goto_asks_in_a_short_room_with_the_question_first(cx: &mut TestAppContext) {
-    goto_asks_in_a_short_room(cx, "en");
+    goto_asks_in_a_short_room(cx, "en", false);
 }
 
 #[cfg(feature = "pseudo")]
 #[gpui::test]
 fn goto_asks_in_a_short_room_with_the_question_first_in_en_xa(cx: &mut TestAppContext) {
-    goto_asks_in_a_short_room(cx, "en-XA");
+    goto_asks_in_a_short_room(cx, "en-XA", true);
 }
 
 /// m10: with room, the asking popover draws its title, field, question and buttons; its height
@@ -1111,11 +1120,17 @@ fn select_all_stays_in_the_search_group_and_its_focus_is_kept(cx: &mut TestAppCo
     hacivat_ui::popover::a11y_record();
     t.redraw();
     let decls = hacivat_ui::popover::a11y_take();
-    // Each of the two is declared next to a search node named as the bar's (the wrapper notes
-    // as it lays out, around its button).
+    // Fix round 2 (m-i): one search group spans the whole find toolbar. Its node notes as it
+    // lays out, before the toolbar lays its items out inside it, so every Select all and close
+    // declaration comes after a search declaration; and no search node sits right around either
+    // button (round 1's per-item landmarks did).
     let search = |d: &hacivat_ui::popover::A11yDecl| {
         d.role == Some(gpui::Role::Search) && plain(&d.name) == "Find in the shown values"
     };
+    let first_search = decls
+        .iter()
+        .position(search)
+        .expect("the find's search group");
     for name in ["Select all occurrences", "Close find"] {
         let at: Vec<usize> = decls
             .iter()
@@ -1125,10 +1140,17 @@ fn select_all_stays_in_the_search_group_and_its_focus_is_kept(cx: &mut TestAppCo
             .collect();
         assert!(!at.is_empty(), "{name} is declared: {decls:?}");
         for i in at {
-            let near = decls[i.saturating_sub(1)..(i + 2).min(decls.len())]
+            assert!(
+                i > first_search,
+                "{name} at {i} lies in the search group: {decls:?}"
+            );
+            let around = decls[i.saturating_sub(1)..(i + 2).min(decls.len())]
                 .iter()
                 .any(search);
-            assert!(near, "{name} at {i} sits in the search group: {decls:?}");
+            assert!(
+                !around,
+                "{name} at {i} has no search node of its own: {decls:?}"
+            );
         }
     }
     assert!(t.vcx.debug_bounds("button-grid-find-select-all").is_some());

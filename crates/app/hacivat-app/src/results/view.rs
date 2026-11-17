@@ -1032,6 +1032,7 @@ impl ResultsHost {
                             .flex()
                             .flex_col()
                             .items_start()
+                            .children(super::goto::room_probe(console, cx))
                             .child(popover),
                     );
                 }

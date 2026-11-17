@@ -1338,112 +1338,177 @@ fn value_viewer_open_cost_perf(cx: &mut TestAppContext) {
     }
 }
 
-// ## m3c-shotfix F8 (fix round 1, I1, m10): at the 960 x 600 minimum the value viewer's room is
-// short. Its short layout keeps the header, one whole line of the value and the footer (the
-// size, Copy raw value) inside the grid's area; the room check reckons the rows as they draw;
-// and what lies past the room is reached from the keyboard: a key past the well's end scrolls
-// the notice in, and Tab to Re-run (and back to the well) scrolls the focused one into view.
-fn viewer_in_a_short_room(cx: &mut TestAppContext, lang: &str) {
-    let t = tile_in(cx, lang);
-    t.vcx
-        .simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
-    let cut = Value::Truncated(Box::new(TruncatedVal {
-        prefix: Value::Text("ek dosya".into()),
+// ## m3c-shotfix F8 (fix rounds 1 and 2: I1/I-1, m10, m-c): at the 960 x 600 minimum the value
+// viewer's room is short. Its short layout keeps the header, one whole line of the value and
+// the footer inside the grid's area, and the truncation fact in the footer (it never scrolls);
+// the room check reckons the rows as they draw (short and roomy, with and without a form
+// switch); and what lies past the room is reached from the keyboard in a bounded number of
+// presses, for a value of many lines too: the keys walk the well to its end and then the
+// middle to Re-run; ↑ scrolls the middle back first; a refusal takes the focus and shows.
+fn bounds_of(vcx: &mut VisualTestContext, sel: &'static str) -> gpui::Bounds<gpui::Pixels> {
+    vcx.debug_bounds(sel)
+        .unwrap_or_else(|| panic!("{sel} drew"))
+}
+
+/// A truncated text value whose kept part is `text`.
+fn cut_text(text: &str) -> Value {
+    Value::Truncated(Box::new(TruncatedVal {
+        prefix: Value::Text(text.into()),
         total_len: Some(5 << 20),
         unit: LenUnit::Bytes,
-    }));
-    let grid = t.show(store(
-        one("ek", text(), pg(25, "text")),
-        vec![vec![cut], vec![Value::Text("whole".into())]],
-    ));
+    }))
+}
+
+/// The tile at `size`, showing one `ek` column of `rows`, with the viewer open on row 0.
+fn viewer_over(
+    cx: &mut TestAppContext,
+    lang: &str,
+    size: Option<(f32, f32)>,
+    column: (&str, LogicalType, NativeType),
+    rows: Vec<Vec<Value>>,
+) -> (Tile, Entity<GridView>) {
+    let t = tile_in(cx, lang);
+    if let Some(size) = size {
+        t.vcx
+            .simulate_resize(gpui::size(gpui::px(size.0), gpui::px(size.1)));
+    }
+    let grid = t.show(store(one(column.0, column.1, column.2), rows));
     in_window(t.vcx, |_, cx| value_viewer::open(t.console, cell(0, 0), cx));
     t.redraw();
     t.redraw();
-    let (short, rows) = t
-        .vcx
+    (t, grid)
+}
+
+/// One full line of the value shows: the well's border, its top padding and a line.
+fn whole_line(well: gpui::Bounds<gpui::Pixels>, middle: gpui::Bounds<gpui::Pixels>) -> bool {
+    let line = 1.0 + 7.0 + 17.0;
+    well.top() >= middle.top() - gpui::px(0.5)
+        && f32::from(well.top()) + line <= f32::from(middle.bottom()) + 0.5
+}
+
+fn inside(a: gpui::Bounds<gpui::Pixels>, b: gpui::Bounds<gpui::Pixels>) -> bool {
+    let slack = gpui::px(0.5);
+    a.top() >= b.top() - slack && a.bottom() <= b.bottom() + slack
+}
+
+fn reckoned(t: &Tile) -> (bool, value_viewer::Rows) {
+    t.vcx
         .cx
         .read(|cx| value_viewer::drawn_rows(t.console, cx))
-        .expect("the viewer drew");
+        .expect("the viewer drew")
+}
+
+fn pin(name: &str, reckoned: f32, drawn: gpui::Pixels) {
+    assert!(
+        (reckoned - f32::from(drawn)).abs() <= 1.0,
+        "the {name} is reckoned {reckoned}, drawn {drawn:?}"
+    );
+}
+
+fn viewer_in_a_short_room(cx: &mut TestAppContext, lang: &str) {
+    // A value of many lines (the well wraps it to dozens).
+    let long = "ek dosya içeriği · ".repeat(120);
+    let (t, grid) = viewer_over(
+        cx,
+        lang,
+        Some((960.0, 600.0)),
+        ("ek", text(), pg(25, "text")),
+        vec![vec![cut_text(&long)], vec![Value::Text("whole".into())]],
+    );
+    let (short, rows) = reckoned(&t);
     assert!(short, "{lang}: the room at 960 x 600 is short: {rows:?}");
     let area = t
         .vcx
         .cx
         .read(|cx| grid.read(cx).geometry().map(|g| g.bounds))
         .expect("the grid drew");
-    fn b(vcx: &mut VisualTestContext, sel: &'static str) -> gpui::Bounds<gpui::Pixels> {
-        vcx.debug_bounds(sel)
-            .unwrap_or_else(|| panic!("{sel} drew"))
-    }
+    let viewer = bounds_of(t.vcx, "value-viewer");
+    let header = bounds_of(t.vcx, "value-viewer-header");
+    let middle = bounds_of(t.vcx, "value-viewer-middle");
+    let footer = bounds_of(t.vcx, "value-viewer-footer");
+    let well = bounds_of(t.vcx, "value-viewer-well");
+    assert!(inside(viewer, area), "{lang}: {viewer:?} in {area:?}");
     let slack = gpui::px(0.5);
-    let viewer = b(t.vcx, "value-viewer");
-    let header = b(t.vcx, "value-viewer-header");
-    let middle = b(t.vcx, "value-viewer-middle");
-    let footer = b(t.vcx, "value-viewer-footer");
-    let well = b(t.vcx, "value-viewer-well");
-    assert!(
-        viewer.top() >= area.top() - slack && viewer.bottom() <= area.bottom() + slack,
-        "{lang}: the viewer {viewer:?} stays in the grid's area {area:?}"
-    );
     assert!(
         header.bottom() <= middle.top() + slack && middle.bottom() <= footer.top() + slack,
         "{lang}: header {header:?}, middle {middle:?}, footer {footer:?}"
     );
+    assert!(inside(footer, viewer), "{lang}: {footer:?}");
+    assert!(whole_line(well, middle), "{lang}: {well:?} in {middle:?}");
+    pin("short header", rows.header, header.size.height);
+    pin("short footer", rows.footer, footer.size.height);
+    // The truncation fact is said in the footer, whole as its name and tooltip.
+    let fact = registry_frame(t.vcx)
+        .into_iter()
+        .find(|r| r.path.ends_with("#value-viewer-size"))
+        .expect("the size slot drew");
     assert!(
-        footer.bottom() <= viewer.bottom() + slack,
-        "{lang}: {footer:?}"
+        plain(&fact.text).contains("704") || plain(&fact.text).contains("5"),
+        "{lang}: the size slot says the cut: {fact:?}"
     );
-    // One whole line of the value: the well's padding and a line show in the middle.
-    let line = 17.0 + 7.0;
-    let whole_line = |well: gpui::Bounds<gpui::Pixels>, middle: gpui::Bounds<gpui::Pixels>| {
-        well.top() >= middle.top() - slack
-            && f32::from(well.top()) + line <= f32::from(middle.bottom()) + 0.5
-    };
+    assert_eq!(
+        t.vcx
+            .cx
+            .read(|cx| value_viewer::focused_part(t.console, cx)),
+        1,
+        "{lang}: the well has the focus"
+    );
+    // Down from the well: its end, then the middle, until Re-run shows whole; bounded.
+    let mut presses = 0;
+    loop {
+        let (middle, rerun) = (
+            bounds_of(t.vcx, "value-viewer-middle"),
+            bounds_of(t.vcx, "value-viewer-rerun-row"),
+        );
+        if inside(rerun, middle) {
+            break;
+        }
+        assert!(
+            presses < 60,
+            "{lang}: Re-run is reached by PgDn in under 60 presses"
+        );
+        t.vcx.simulate_keystrokes("pagedown");
+        t.redraw();
+        presses += 1;
+    }
+    // ↑ scrolls the middle back first: the well is whole again before it scrolls itself.
+    t.vcx.simulate_keystrokes("pageup");
+    t.redraw();
+    let (middle, well) = (
+        bounds_of(t.vcx, "value-viewer-middle"),
+        bounds_of(t.vcx, "value-viewer-well"),
+    );
     assert!(
         whole_line(well, middle),
-        "{lang}: one line of the value shows: well {well:?} in {middle:?}"
+        "{lang}: one ↑ brings the well back first: {well:?} in {middle:?}"
     );
-    // m10: the room check reckons the rows as they draw.
-    for (name, reckoned, drawn) in [
-        ("header", rows.header, header.size.height),
-        ("footer", rows.footer, footer.size.height),
-    ] {
-        assert!(
-            (reckoned - f32::from(drawn)).abs() <= 1.0,
-            "{lang}: the {name} is reckoned {reckoned}, drawn {drawn:?}"
-        );
-    }
-    assert!(t.vcx.debug_bounds("button-value-viewer-copy").is_some());
-    // The well has the focus; keys past its end scroll the notice in.
-    let notice_top = b(t.vcx, "value-viewer-notice").top();
-    for _ in 0..8 {
-        t.vcx.simulate_keystrokes("down");
-    }
+    // A refusal appears: it takes the focus and shows whole in the middle.
+    in_window(t.vcx, |_, cx| value_viewer::rerun_refused(t.console, cx));
     t.redraw();
-    let notice = b(t.vcx, "value-viewer-notice");
-    assert!(
-        notice.top() < notice_top,
-        "{lang}: the notice scrolled in: {notice_top:?} -> {notice:?}"
-    );
-    // Tab to Re-run: it is scrolled into view.
-    t.vcx.simulate_keystrokes("tab");
     t.redraw();
-    let middle = b(t.vcx, "value-viewer-middle");
-    let rerun = b(t.vcx, "button-value-viewer-rerun");
-    assert!(
-        rerun.top() >= middle.top() - slack && rerun.bottom() <= middle.bottom() + slack,
-        "{lang}: the focused Re-run {rerun:?} shows in {middle:?}"
+    assert_eq!(
+        t.vcx
+            .cx
+            .read(|cx| value_viewer::focused_part(t.console, cx)),
+        3,
+        "{lang}: the refusal has the focus"
     );
-    // Back to the well: scrolled into view again.
+    let (middle, refused) = (
+        bounds_of(t.vcx, "value-viewer-middle"),
+        bounds_of(t.vcx, "value-viewer-refused-row"),
+    );
+    assert!(
+        inside(refused, middle),
+        "{lang}: the refusal {refused:?} shows in {middle:?}"
+    );
+    // Shift-Tab back to the well (Re-run is off): it shows again.
     t.vcx.simulate_keystrokes("shift-tab");
     t.redraw();
     let (middle, well) = (
-        b(t.vcx, "value-viewer-middle"),
-        b(t.vcx, "value-viewer-well"),
+        bounds_of(t.vcx, "value-viewer-middle"),
+        bounds_of(t.vcx, "value-viewer-well"),
     );
-    assert!(
-        whole_line(well, middle),
-        "{lang}: the focused well {well:?} shows in {middle:?}"
-    );
+    assert!(whole_line(well, middle), "{lang}: {well:?} in {middle:?}");
 }
 
 #[gpui::test]
@@ -1455,4 +1520,95 @@ fn the_value_viewer_keeps_a_value_line_in_a_short_room(cx: &mut TestAppContext) 
 #[gpui::test]
 fn the_value_viewer_keeps_a_value_line_in_a_short_room_in_en_xa(cx: &mut TestAppContext) {
     viewer_in_a_short_room(cx, "en-XA");
+}
+
+/// m-c: the roomy rows the short decision is made with, pinned to the drawn ones (the test
+/// window's own size, where the viewer is roomy): header, well at one line, notice with
+/// Re-run, footer.
+#[gpui::test]
+fn the_value_viewer_rows_are_reckoned_as_they_draw(cx: &mut TestAppContext) {
+    let (t, _) = viewer_over(
+        cx,
+        "en",
+        None,
+        ("ek", text(), pg(25, "text")),
+        vec![
+            vec![cut_text("ek dosya")],
+            vec![Value::Text("whole".into())],
+        ],
+    );
+    let (short, rows) = reckoned(&t);
+    assert!(!short, "{rows:?}");
+    let middle = bounds_of(t.vcx, "value-viewer-middle");
+    let well = bounds_of(t.vcx, "value-viewer-well");
+    let rerun = bounds_of(t.vcx, "value-viewer-rerun-row");
+    pin(
+        "header",
+        rows.header,
+        bounds_of(t.vcx, "value-viewer-header").size.height,
+    );
+    pin(
+        "well at one line",
+        rows.well_min,
+        well.bottom() - middle.top(),
+    );
+    pin("notice", rows.notice, rerun.bottom() - well.bottom());
+    pin(
+        "footer",
+        rows.footer,
+        bounds_of(t.vcx, "value-viewer-footer").size.height,
+    );
+}
+
+fn json() -> (&'static str, LogicalType, NativeType) {
+    (
+        "belge",
+        LogicalType::Json { binary: true },
+        pg(3802, "jsonb"),
+    )
+}
+
+/// m-c: the control row of a JSON value (Raw / Pretty), pinned.
+#[gpui::test]
+fn the_value_viewer_control_row_is_reckoned_as_it_draws(cx: &mut TestAppContext) {
+    let (t, _) = viewer_over(
+        cx,
+        "en",
+        None,
+        json(),
+        vec![
+            vec![Value::Text("{\"a\": 1}".into())],
+            vec![Value::Text("{}".into())],
+        ],
+    );
+    let (short, rows) = reckoned(&t);
+    assert!(!short);
+    pin(
+        "control",
+        rows.control,
+        bounds_of(t.vcx, "value-viewer-control").size.height,
+    );
+}
+
+/// m-c: the short header with the form switch in it (JSON at 960 x 600), pinned.
+#[gpui::test]
+fn the_value_viewer_short_header_with_a_switch_is_reckoned_as_it_draws(cx: &mut TestAppContext) {
+    let (t, _) = viewer_over(
+        cx,
+        "en",
+        Some((960.0, 600.0)),
+        json(),
+        vec![
+            vec![Value::Text("{\"a\": 1}".into())],
+            vec![Value::Text("{}".into())],
+        ],
+    );
+    let (short, rows) = reckoned(&t);
+    if short {
+        pin(
+            "short header with the form switch",
+            rows.header,
+            bounds_of(t.vcx, "value-viewer-header").size.height,
+        );
+    }
 }

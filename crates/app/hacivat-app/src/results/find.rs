@@ -1025,11 +1025,19 @@ pub(crate) fn toolbar(
         .item(select_all_item)
         .item(close_item)
         .trailing(rows_item);
+    // ## m3c-shotfix F4 (fix round 2, m-i): one search group spans the whole find toolbar, so the
+    // bar, Select all occurrences and close are announced in it (one landmark).
     Some(
-        trailing
-            .into_iter()
-            .fold(bar, |bar, item| bar.trailing(item))
-            .into_any_element(),
+        A11yNode::new(
+            ("grid-find-bar-node", console.0),
+            Role::Search,
+            message(cx, "hv-gfind-placeholder", vec![]),
+            false,
+            trailing
+                .into_iter()
+                .fold(bar, |bar, item| bar.trailing(item)),
+        )
+        .into_any_element(),
     )
 }
 
@@ -2108,44 +2116,26 @@ impl Render for GridFindBar {
             .children(incomplete)
             .child(prev)
             .child(next);
-        A11yNode::new(
-            "grid-find-bar-node",
-            Role::Search,
-            message(cx, "hv-gfind-placeholder", vec![]),
-            false,
-            row,
-        )
+        // ## m3c-shotfix F4 (fix round 2, m-i): the find's one search group is the toolbar
+        // around the bar, Select all and close (`toolbar`), not this row.
+        row
     }
 }
 
 // ## m3c-shotfix F4
 impl GridFindBar {
-    /// Escape in an item of the bar outside its row closes the bar, as in the row. ## fix
-    /// round 1 (m2): the item is announced inside the find's search group, as the bar's own
-    /// controls are (a search node of the same name around it).
-    fn escape_closes(
-        bar: &Entity<Self>,
-        id: &'static str,
-        el: impl IntoElement,
-        cx: &App,
-    ) -> AnyElement {
-        let console = bar.read(cx).console.0;
+    /// Escape in an item of the bar outside its row closes the bar, as in the row. (Fix
+    /// round 2, m-i: the item lies inside the find's one search group, the toolbar's node.)
+    fn escape_closes(bar: &Entity<Self>, el: impl IntoElement) -> AnyElement {
         let bar = bar.clone();
-        let item = div()
+        div()
             .flex()
             .items_center()
             .on_key_down(move |ev: &KeyDownEvent, window, cx| {
                 bar.update(cx, |b, cx| b.on_bar_key(ev, window, cx));
             })
-            .child(el);
-        A11yNode::new(
-            (id, console),
-            Role::Search,
-            message(cx, "hv-gfind-placeholder", vec![]),
-            false,
-            item,
-        )
-        .into_any_element()
+            .child(el)
+            .into_any_element()
     }
 
     /// Select all occurrences (ghost, ⌃⌘G), after the step buttons.
@@ -2168,12 +2158,7 @@ impl GridFindBar {
         let mark = canvas(move |_, _, _| shown.set(true), |_, (), _, _| {})
             .absolute()
             .size_0();
-        Self::escape_closes(
-            bar,
-            "grid-find-select-all-node",
-            div().relative().child(button).child(mark),
-            cx,
-        )
+        Self::escape_closes(bar, div().relative().child(button).child(mark))
     }
 
     /// The bar's close (×).
@@ -2203,12 +2188,7 @@ impl GridFindBar {
             .on_raised(true)
             .focus_handle(handle)
             .on_click(move |_, window, cx| e.update(cx, |b, cx| b.close(Some(window), cx)));
-        Self::escape_closes(
-            bar,
-            "grid-find-close-node",
-            div().relative().child(button).child(keep_focus),
-            cx,
-        )
+        Self::escape_closes(bar, div().relative().child(button).child(keep_focus))
     }
 }
 
