@@ -362,6 +362,98 @@ fn production_delete_without_where_needs_the_typed_name(cx: &mut TestAppContext)
     stop_core_runtime_test(cx);
 }
 
+// ## m3b-po-typed-name (PO M3b-04): `TRUNCATE` and `DROP TABLE` on production ask for the
+// table's name typed, as `DELETE` without a `WHERE` does: Execute stays off (Enter on it sends
+// nothing) until the exact name is typed, and only then is the statement sent.
+#[gpui::test]
+fn production_truncate_needs_the_typed_name(cx: &mut TestAppContext) {
+    typed_name_before_anything_is_sent(cx, "TRUNCATE orders;", "TRUNCATE");
+}
+
+#[gpui::test]
+fn production_drop_table_needs_the_typed_name(cx: &mut TestAppContext) {
+    typed_name_before_anything_is_sent(cx, "DROP TABLE orders;", "DROP");
+}
+
+fn typed_name_before_anything_is_sent(cx: &mut TestAppContext, text: &str, verb: &str) {
+    {
+        let (vcx, f) = prod_console(cx, text);
+        run_at(vcx, 0);
+        wait_until(vcx, "the confirmation", confirm_dialog_open);
+        arm(vcx);
+        let texts: Vec<String> = drawn(vcx).iter().map(|t| plain(t)).collect();
+        assert!(
+            texts
+                .windows(3)
+                .any(|w| w == ["Type ", "orders", " to run it"]),
+            "{text}: the typed name: {texts:?}"
+        );
+        let buttons = vcx.cx.read(confirm::open_dialog_buttons);
+        assert!(
+            buttons
+                .iter()
+                .any(|b| b.answer == hacivat_exec::ConfirmAnswer::Execute && !b.enabled),
+            "{text}: {buttons:?}"
+        );
+        assert!(
+            buttons
+                .iter()
+                .all(|b| b.answer != hacivat_exec::ConfirmAnswer::ExecuteAndSuppress),
+            "{text}: never suppressible with a typed name: {buttons:?}"
+        );
+        // Enter on the disabled Execute sends nothing.
+        let execute = vcx
+            .cx
+            .read(|cx| parts::focus(cx, "confirm-execute"))
+            .expect("the Execute button");
+        in_window(vcx, |window, cx| window.focus(&execute, cx));
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert!(confirm_dialog_open(vcx), "{text}: still asking");
+        assert!(
+            !ever_sent(&f, verb),
+            "{text}: nothing sent before the name is typed: {:?}",
+            f.call_log()
+        );
+        // A near miss keeps it off; the exact name turns it on, and Execute sends.
+        let field = vcx
+            .cx
+            .read(|cx| parts::focus(cx, "confirm-type"))
+            .expect("the typed-name field");
+        in_window(vcx, |window, cx| window.focus(&field, cx));
+        vcx.run_until_parked();
+        vcx.simulate_input("Orders");
+        vcx.run_until_parked();
+        assert!(
+            vcx.cx
+                .read(confirm::open_dialog_buttons)
+                .iter()
+                .any(|b| b.answer == hacivat_exec::ConfirmAnswer::Execute && !b.enabled),
+            "{text}: letter case counts"
+        );
+        assert!(!ever_sent(&f, verb), "{text}: {:?}", f.call_log());
+        for _ in 0.."Orders".len() {
+            vcx.simulate_keystrokes("backspace");
+        }
+        vcx.simulate_input("orders");
+        vcx.run_until_parked();
+        assert!(
+            vcx.cx
+                .read(confirm::open_dialog_buttons)
+                .iter()
+                .any(|b| b.answer == hacivat_exec::ConfirmAnswer::Execute && b.enabled),
+            "{text}: the exact name"
+        );
+        assert!(!ever_sent(&f, verb), "{text}: {:?}", f.call_log());
+        in_window(vcx, |window, cx| window.focus(&execute, cx));
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("enter");
+        wait_until(vcx, "the statement is sent", |_| ever_sent(&f, verb));
+        stop_core_runtime_test(cx);
+    }
+}
+
 /// No dialog close sends or keeps anything: Escape on a confirmation cancels the run before it
 /// is sent; Escape on the Keep/Undo prompt undoes the statement (never `RELEASE`, never
 /// `COMMIT`).

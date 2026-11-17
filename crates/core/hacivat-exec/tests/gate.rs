@@ -101,7 +101,8 @@ fn hv_exec_04_table_per_level() {
             "UPDATE orders SET a = 1",
             ["confirm", "confirm", "confirm+type"],
         ),
-        ("DROP TABLE orders", ["run", "run", "confirm"]),
+        // ## m3b-po-typed-name (named exception, PO M3b-04): production types the name.
+        ("DROP TABLE orders", ["run", "run", "confirm+type"]),
         ("DROP SCHEMA sales CASCADE", ["run", "run", "confirm+type"]),
         ("CREATE TABLE x (a int)", ["run", "run", "confirm"]),
         ("CALL p()", ["run", "run", "confirm"]),
@@ -324,10 +325,12 @@ fn drop_database_asks_for_the_name_from_the_words() {
 
 #[test]
 fn ddl_does_not_hide_an_unsafe_dml_name() {
-    let text = "DELETE FROM orders; DROP TABLE logs";
+    // ## m3b-po-typed-name (named exception, PO M3b-04): `DROP TABLE` now types its own name,
+    // so the DDL here drops the same table; a different one is two names (below).
+    let text = "DELETE FROM orders; DROP TABLE orders";
     let items = vec![
         fake_stmt("DELETE FROM orders"),
-        fake_stmt("DROP TABLE logs"),
+        fake_stmt("DROP TABLE orders"),
     ];
     let item = gated(text, items, &conn_prod());
     assert_eq!(item.class, GateClass::DdlDestructive);
@@ -335,6 +338,12 @@ fn ddl_does_not_hide_an_unsafe_dml_name() {
         item.decision,
         GateDecision::Confirm { type_to_confirm: Some(ref t), suppressible: false, .. } if &**t == "orders"
     ));
+    let items = vec![
+        fake_stmt("DELETE FROM orders"),
+        fake_stmt("DROP TABLE logs"),
+    ];
+    let item = gated("DELETE FROM orders; DROP TABLE logs", items, &conn_prod());
+    assert_eq!(deny_id(&item.decision), "exec-unsafe-several-targets");
     // Two unsafe tables in one unit: typing one name must not approve the other.
     let items = vec![fake_stmt("DELETE FROM a"), fake_stmt("DELETE FROM b")];
     let item = gated("DELETE FROM a; DELETE FROM b", items, &conn_prod());
@@ -1611,11 +1620,20 @@ fn oracle(
     } else {
         eff
     };
+    // ## m3b-po-typed-name (named exception, PO M3b-04): `TRUNCATE` and `DROP TABLE` (the
+    // `DdlDestructive` representative's own words, or a `Drop` of a table) type the name too.
     let typed = production
         && (unsafe_dml
-            || extra.is_some_and(|(k, o)| {
-                matches!(k, DestructiveKind::Drop { .. })
-                    && matches!(o, ObjectKind::Schema | ObjectKind::Database)
+            || class == G::DdlDestructive
+            || extra.is_some_and(|(k, o)| match k {
+                DestructiveKind::Truncate => true,
+                DestructiveKind::Drop { .. } => {
+                    matches!(
+                        o,
+                        ObjectKind::Schema | ObjectKind::Database | ObjectKind::Table
+                    )
+                }
+                _ => false,
             }));
     let implicit = commits && tx_open;
     let mut shape = if production {
@@ -1846,17 +1864,18 @@ fn mysql_rows_over_the_real_backend() {
             }
         }
         // DROP TABLE: a confirmation that says it cannot be undone; never suppressible on
-        // production (DdlDestructive), no typed name.
+        // production (DdlDestructive); ## m3b-po-typed-name (named exception, PO M3b-04): the
+        // table's name typed.
         let item = run("DROP TABLE orders", &prod);
         assert!(
             matches!(
-                item.decision,
+                &item.decision,
                 GateDecision::Confirm {
-                    type_to_confirm: None,
+                    type_to_confirm: Some(t),
                     irreversible: true,
                     suppressible: false,
                     ..
-                }
+                } if &**t == "orders"
             ),
             "{engine:?}: {:?}",
             item.decision
@@ -1956,7 +1975,8 @@ fn gate_end_to_end_over_real_classify() {
         ("SELECT 1", "run"),
         ("UPDATE t SET a = 1 WHERE id = 3", "tx-confirm"),
         ("DELETE FROM müşteri", "confirm+type"),
-        ("DROP TABLE t", "confirm"),
+        // ## m3b-po-typed-name (named exception, PO M3b-04)
+        ("DROP TABLE t", "confirm+type"),
         ("CALL p()", "confirm"),
         ("SELECT * FROM t FOR UPDATE", "warn"),
     ];
@@ -2537,5 +2557,176 @@ fn rules_policies_and_views_are_keyed_by_their_body_off_production() {
         let key = |t: &str| real_item(DbmsKind::Postgres, t, &conn_dev(), &none).fingerprint;
         assert_ne!(key(a), key(b), "`{a}` / `{b}`: keyed by the body");
         assert_eq!(key(a), key(a), "`{a}`: stable");
+    }
+}
+
+// ## m3b-po-typed-name (PO M3b-04): on production `TRUNCATE` and `DROP TABLE` ask for the
+// table's name typed, as an unbounded `DELETE` does; several tables are the multi-target rule
+// (denied: typing one name must never approve another); no table to name is denied.
+
+/// `text` classified for `engine` (SQLite included) and gated on `c`.
+fn po_item(engine: DbmsKind, text: &str, expect: sql_safety::Expect, c: &ConnSafety) -> GateItem {
+    let ctx = sql_safety::ClassifyCtx::new(
+        sql_dialect::DialectCtx::new(dialect_of(engine), None),
+        sql_dialect::ClientFlavor::None,
+        expect,
+    );
+    let unit = prepared_on(engine, text, &[]);
+    let report = sql_safety::classify(&unit.final_text, &ctx);
+    one(unit, report, c)
+}
+
+#[test]
+fn production_truncate_and_drop_table_ask_for_the_typed_name() {
+    let rows: &[(DbmsKind, &str, &str)] = &[
+        (DbmsKind::Postgres, "TRUNCATE orders", "orders"),
+        (DbmsKind::Postgres, "TRUNCATE TABLE ONLY Orders", "Orders"),
+        (
+            DbmsKind::Postgres,
+            "TRUNCATE public.orders CASCADE",
+            "public.orders",
+        ),
+        (DbmsKind::Postgres, "DROP TABLE orders", "orders"),
+        (
+            DbmsKind::Postgres,
+            "DROP TABLE IF EXISTS \"Siparişler\"",
+            "Siparişler",
+        ),
+        (
+            DbmsKind::Postgres,
+            "DROP TABLE müşteriler CASCADE",
+            "müşteriler",
+        ),
+        (
+            DbmsKind::Postgres,
+            "DROP FOREIGN TABLE remote_orders",
+            "remote_orders",
+        ),
+        (DbmsKind::MySql, "TRUNCATE TABLE orders", "orders"),
+        (DbmsKind::MySql, "TRUNCATE orders", "orders"),
+        (DbmsKind::MySql, "DROP TABLE `my orders`", "my orders"),
+        (
+            DbmsKind::MySql,
+            "DROP TABLE IF EXISTS shop.orders",
+            "shop.orders",
+        ),
+        (DbmsKind::MySql, "DROP TEMPORARY TABLE scratch", "scratch"),
+        (DbmsKind::MariaDb, "TRUNCATE TABLE Orders", "Orders"),
+        (DbmsKind::MariaDb, "DROP TABLE orders", "orders"),
+        (DbmsKind::Sqlite, "DROP TABLE orders", "orders"),
+        (
+            DbmsKind::Sqlite,
+            "DROP TABLE IF EXISTS main.orders",
+            "main.orders",
+        ),
+    ];
+    let single = sql_safety::Expect::SingleStatement;
+    for &(engine, text, name) in rows {
+        let prod = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, single, &prod);
+        match &item.decision {
+            GateDecision::Confirm {
+                type_to_confirm: Some(t),
+                suppressible: false,
+                ..
+            } => assert_eq!(&**t, name, "{engine:?} `{text}`"),
+            other => panic!("{engine:?} `{text}`: {other:?}"),
+        }
+        // Off production nobody types (the class's own row stands).
+        for env in [EnvTag::Staging, EnvTag::Dev] {
+            let item = po_item(engine, text, single, &conn(engine, Some(env)));
+            assert!(
+                !matches!(
+                    item.decision,
+                    GateDecision::Confirm {
+                        type_to_confirm: Some(_),
+                        ..
+                    }
+                ),
+                "{engine:?} {env:?} `{text}`: {:?}",
+                item.decision
+            );
+        }
+    }
+}
+
+#[test]
+fn production_truncate_or_drop_of_several_tables_is_denied() {
+    for (engine, text) in [
+        (DbmsKind::Postgres, "TRUNCATE a, b"),
+        (DbmsKind::Postgres, "DROP TABLE a, b"),
+        (DbmsKind::Postgres, "TRUNCATE a; DROP TABLE b"),
+        (DbmsKind::Postgres, "DELETE FROM a; TRUNCATE b"),
+        (DbmsKind::MySql, "DROP TABLE a, b"),
+        (DbmsKind::MariaDb, "DROP TABLE IF EXISTS a, b"),
+    ] {
+        let prod = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, sql_safety::Expect::Script, &prod);
+        assert_eq!(
+            deny_id(&item.decision),
+            "exec-unsafe-several-targets",
+            "{engine:?} `{text}`"
+        );
+    }
+}
+
+#[test]
+fn production_drop_table_or_truncate_without_a_name_is_denied() {
+    let mut s = stmt(StmtKind::Drop, EffectSet::DDL);
+    s.destructive.push(DestructiveReason {
+        kind: DestructiveKind::Drop { cascade: false },
+        range: TextRange::default(),
+        target: None,
+    });
+    let item = gated("DROP TABLE", vec![s], &conn_prod());
+    assert_eq!(deny_id(&item.decision), "exec-unsafe-no-target");
+    let mut s = stmt(StmtKind::Truncate, EffectSet::WRITE_DATA);
+    s.destructive.push(DestructiveReason {
+        kind: DestructiveKind::Truncate,
+        range: TextRange::default(),
+        target: None,
+    });
+    let item = gated("TRUNCATE", vec![s], &conn_prod());
+    assert_eq!(deny_id(&item.decision), "exec-unsafe-no-target");
+    // A backend that names a dropped table's kind wrongly cannot drop the typed name: the
+    // statement's own words say DROP TABLE.
+    let mut s = stmt(StmtKind::Drop, EffectSet::DDL);
+    s.destructive.push(DestructiveReason {
+        kind: DestructiveKind::Drop { cascade: false },
+        range: TextRange::default(),
+        target: Some(object("orders", ObjectKind::Other)),
+    });
+    let item = gated("DROP TABLE orders", vec![s], &conn_prod());
+    assert!(
+        matches!(&item.decision, GateDecision::Confirm { type_to_confirm: Some(t), .. } if &**t == "orders"),
+        "{:?}",
+        item.decision
+    );
+}
+
+#[test]
+fn production_drops_of_other_objects_keep_their_row() {
+    for (engine, text) in [
+        (DbmsKind::Postgres, "DROP VIEW v"),
+        (DbmsKind::Postgres, "DROP INDEX i"),
+        (DbmsKind::Postgres, "DROP FUNCTION f()"),
+        (DbmsKind::Postgres, "DROP SEQUENCE s"),
+        (DbmsKind::Postgres, "ALTER TABLE t DROP COLUMN c"),
+        (DbmsKind::MySql, "DROP VIEW v"),
+        (DbmsKind::MySql, "ALTER TABLE t DROP COLUMN c"),
+    ] {
+        let prod = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, sql_safety::Expect::SingleStatement, &prod);
+        assert!(
+            matches!(
+                item.decision,
+                GateDecision::Confirm {
+                    type_to_confirm: None,
+                    ..
+                }
+            ),
+            "{engine:?} `{text}`: {:?}",
+            item.decision
+        );
     }
 }

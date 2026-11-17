@@ -621,7 +621,8 @@ fn written_name(
 }
 
 /// The name a production confirmation asks to type (R-M3-55): the target of every unsafe-DML
-/// pattern and of a `DROP DATABASE`/`DROP SCHEMA`, as written. From the destructive kinds, not
+/// pattern, of a `DROP DATABASE`/`DROP SCHEMA` and (## m3b-po-typed-name, PO M3b-04) of a
+/// `TRUNCATE` or `DROP TABLE`, as written. From the destructive kinds, not
 /// the class. `Err` when one has no target (nothing to type) or two name different objects
 /// (typing one name must not approve another).
 fn typed_name(
@@ -635,6 +636,15 @@ fn typed_name(
         // Fix round 1 (I3): the statement's own words say `DROP DATABASE`/`DROP SCHEMA`, so a
         // backend that names the target's kind wrongly cannot drop the typed name.
         let dropped_db = drop_database_name(slice(text, s.range).unwrap_or(text), d);
+        // ## m3b-po-typed-name (PO M3b-04): the statement's own leading words, so a backend
+        // that names a dropped table's kind wrongly cannot drop the typed name either.
+        let lead = leading_words(slice(text, s.range).unwrap_or(text), d, 3);
+        let word = |k: usize, w: &str| lead.get(k).is_some_and(|x| x == w);
+        let drops_table = word(0, "DROP")
+            && (word(1, "TABLE")
+                || (["TEMPORARY", "TEMP", "FOREIGN"].iter().any(|w| word(1, w))
+                    && word(2, "TABLE")));
+        let alters = word(0, "ALTER");
         let mut named = false;
         for dr in &s.destructive {
             let schema_or_db = matches!(dr.kind, DestructiveKind::Drop { .. })
@@ -642,7 +652,23 @@ fn typed_name(
                     || dr.target.as_ref().is_some_and(|t| {
                         matches!(t.kind, ObjectKind::Schema | ObjectKind::Database)
                     }));
-            if !dr.kind.is_unsafe_dml() && !schema_or_db {
+            // ## m3b-po-typed-name (PO M3b-04): `TRUNCATE` and `DROP TABLE` name the table
+            // that loses its rows, as an unbounded `DELETE` does (fail closed: no table to
+            // name is denied, two are several targets). `ALTER TABLE … DROP PARTITION` keeps
+            // its row.
+            let table_gone = match dr.kind {
+                DestructiveKind::Truncate => true,
+                DestructiveKind::Drop { .. } if !schema_or_db => {
+                    drops_table
+                        || (!alters
+                            && dr
+                                .target
+                                .as_ref()
+                                .is_some_and(|t| t.kind == ObjectKind::Table))
+                }
+                _ => false,
+            };
+            if !dr.kind.is_unsafe_dml() && !schema_or_db && !table_gone {
                 continue;
             }
             // ## m3b-t26-prod-unlock (named exception, T26 carry MUST 1): a pattern without a
@@ -746,6 +772,36 @@ fn drop_database_name(stmt: &str, d: DialectId) -> Option<Option<Arc<str>>> {
             .and_then(|s| parse_qualified(d, s))
             .map(|q| dotted(q.parts.iter().map(|p| &*p.text))),
     )
+}
+
+// ## m3b-po-typed-name (PO M3b-04)
+/// The first `n` words of `stmt`'s code (comments and trivia skipped), ASCII-uppercased; it
+/// stops at the first token that is not a word.
+fn leading_words(stmt: &str, d: DialectId, n: usize) -> Vec<String> {
+    let ctx = DialectCtx::new(d, None);
+    let Ok(profile) = lex_profile(&ctx) else {
+        return Vec::new();
+    };
+    let lexed = lex(stmt, profile, ctx.modes, &LexState::Initial);
+    let mut out = Vec::new();
+    for i in 0..lexed.len() {
+        if out.len() == n {
+            break;
+        }
+        if lexed.is_trivia(i)
+            || matches!(
+                lexed.kind(i),
+                TokenKind::LineComment | TokenKind::BlockComment | TokenKind::HintComment
+            )
+        {
+            continue;
+        }
+        match (lexed.kind(i), slice(stmt, lexed.range(i))) {
+            (TokenKind::Word, Some(w)) => out.push(w.to_ascii_uppercase()),
+            _ => break,
+        }
+    }
+    out
 }
 
 /// The reasons a dialog lists: one per destructive pattern (its target as written), then the
