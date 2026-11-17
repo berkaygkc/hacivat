@@ -740,6 +740,9 @@ const FOLDS: &str = "-- region Raporlar\nSELECT o.id,\n       o.total\n  FROM or
 const FOLD_1: &str = "SELECT o.id,\n       o.total\n  FROM orders o\n WHERE o.total > 100;";
 /// The second (line 6).
 const FOLD_2: &str = "UPDATE orders\n   SET status = 'shipped'\n WHERE id = 1042;";
+// ## m3c-gutter-no-run
+/// The gutter states' row (0-based): `FOLD_2`'s first line.
+const GUTTER_LINE: u32 = 6;
 /// The third (line 10).
 const FOLD_3: &str = "SELECT c.\"müşteri adı\",\n       count(*)\n  FROM customers c\n GROUP BY 1;";
 /// Line endings of both kinds (surface 17).
@@ -1183,10 +1186,10 @@ impl M3c {
                         });
                     }));
                 }
-                s.push(hover_gutter(Gutter::Run, 6));
+                s.push(hover_gutter(Gutter::Run, GUTTER_LINE));
                 if self == GutterLastRuns {
                     // Again over the ▶ the first move showed: its tooltip starts on a move over it.
-                    s.push(hover_gutter(Gutter::Run, 6));
+                    s.push(hover_gutter(Gutter::Run, GUTTER_LINE));
                 }
                 if self == GutterLastRuns {
                     s.push(step(|_, _| {}, |_, cx| tooltip_open(cx)));
@@ -1217,7 +1220,7 @@ impl M3c {
                         cx,
                     );
                 }));
-                s.push(hover_gutter(Gutter::Run, 6));
+                s.push(hover_gutter(Gutter::Run, GUTTER_LINE));
                 s
             }
             EolMixed | EolMenu => {
@@ -1646,6 +1649,17 @@ impl M3c {
                 .map_or(0, |e| e.read(cx).folds().folded().len())
         };
         let plays = || PLAYS.with(|p| *p.borrow());
+        // ## m3c-gutter-no-run: the gutter's own ▶ rows (the editor's last frame). The frame's
+        // play icons also count the toolbar's Run glyph (T41), so they cannot say whether the
+        // gutter drew one; each ▶ row is still one of the icons the frame drew.
+        let gutter_plays = || {
+            let rows = editor
+                .as_ref()
+                .map(|e| e.read(cx).gutter_play_rows().to_vec())
+                .unwrap_or_default();
+            (rows.len() <= plays()).then_some(rows)
+        };
+        let gutter_hovered = |line: u32| gutter_plays().is_some_and(|r| r == [line]);
         let ok = match self {
             MultiNext => carets == 3 && selected_words(&editor, cx) == 3,
             UndoSelection => carets == 2 && selected_words(&editor, cx) == 2,
@@ -1745,10 +1759,11 @@ impl M3c {
                     )
             }
             FindCapped => carets == 10_000 && drawn(frame, "status-message"),
-            GutterHover => plays() >= 1,
+            // ## m3c-gutter-no-run: the ▶ on the hovered row (line 7), and only there.
+            GutterHover => gutter_hovered(GUTTER_LINE),
             // Fix round 1 (m9): with the run's fixed time in the tooltip's row.
             GutterLastRuns => {
-                plays() >= 1
+                gutter_hovered(GUTTER_LINE)
                     && tooltip_open(cx)
                     && shows_label(
                         frame,
@@ -1757,7 +1772,7 @@ impl M3c {
                     )
             }
             GutterFocused => {
-                plays() >= 1
+                gutter_plays().is_some_and(|r| !r.is_empty())
                     && editor.as_ref().is_some_and(|e| {
                         matches!(
                             e.read(cx).gutter_focus(window),
@@ -1772,7 +1787,13 @@ impl M3c {
                         Some(ExecMarkState::Escalated { .. })
                     )
                 }) && HOVERED.with(|h| *h.borrow())
-                    && plays() == 0
+                    // ## m3c-gutter-no-run: no ▶ in the gutter (the toolbar's Run keeps its
+                    // glyph); Run itself would be enabled, so only the escalated mark under the
+                    // pointer keeps it away (DESIGN.md, the gutter ▶ row).
+                    && gutter_plays().is_some_and(|r| r.is_empty())
+                    && console.is_some_and(|c| {
+                        hacivat_app::console::commands::run_would_be_enabled(c, cx)
+                    })
             }
             EolMixed => status.is_some_and(|s| s.mixed_line_endings) && !menu_open(window, cx),
             EolMenu => status.is_some_and(|s| s.mixed_line_endings) && menu_open(window, cx),
@@ -1914,9 +1935,14 @@ impl M3c {
         };
         (!ok).then(|| {
             format!(
-                "{}: the state check failed (carets {carets}, ▶ {}, chevrons {}, folded {})",
+                // ## m3c-gutter-no-run: the gutter's ▶ rows next to the frame's play icons.
+                "{}: the state check failed (carets {carets}, ▶ {}, gutter ▶ rows {:?}, chevrons {}, folded {})",
                 self.name(),
                 plays(),
+                editor
+                    .as_ref()
+                    .map(|e| e.read(cx).gutter_play_rows().to_vec())
+                    .unwrap_or_default(),
                 CHEVRONS.with(|c| *c.borrow()),
                 folded()
             )

@@ -777,3 +777,50 @@ fn each_gutter_column_is_one_tab_stop_walked_with_the_arrows(cx: &mut TestAppCon
     );
     assert_eq!(selection(&o), caret..caret);
 }
+
+// ## m3c-gutter-no-run
+/// The rows whose ▶ the last frame drew, read from the editor itself: a host frame that also
+/// draws a play glyph elsewhere (the console toolbar's Run) cannot be told apart by its icons.
+#[gpui::test]
+fn the_editor_says_which_rows_its_last_frame_gave_a_play(cx: &mut TestAppContext) {
+    let mut o = open(
+        cx,
+        SQL,
+        Svc {
+            statements: spans(),
+            ..Svc::default()
+        },
+    );
+    let rows = |o: &mut Opened<'_>| {
+        o.vcx
+            .read(|cx| o.editor.read(cx).gutter_play_rows().to_vec())
+    };
+    draw(o.vcx);
+    assert_eq!(rows(&mut o), Vec::<u32>::new(), "no pointer, no ▶");
+    hover(&mut o, 2);
+    assert_eq!(rows(&mut o), vec![2]);
+    // Run off: the ▶ goes, and so does its row.
+    o.gate.set(false);
+    hover(&mut o, 2);
+    assert_eq!(rows(&mut o), Vec::<u32>::new());
+    o.gate.set(true);
+    // Over an escalated mark: no ▶, no row (DESIGN.md, the gutter ▶ row).
+    let v0 = version(&o);
+    let since = o.vcx.executor().now();
+    o.editor.update(o.vcx, |v, cx| {
+        v.add_exec_marks(v0, vec![(MarkKey(2), 11..SQL.len() - 1)], cx);
+        v.set_exec_state(
+            MarkKey(2),
+            ExecMarkState::Escalated { since },
+            None,
+            None,
+            cx,
+        );
+    });
+    let icons = hover(&mut o, 2);
+    assert_eq!(plays(&icons), 0);
+    assert_eq!(rows(&mut o), Vec::<u32>::new());
+    // The other statement's row still gets one.
+    hover(&mut o, 0);
+    assert_eq!(rows(&mut o), vec![0]);
+}
