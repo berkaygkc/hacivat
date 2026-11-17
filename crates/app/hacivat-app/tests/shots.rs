@@ -28,6 +28,8 @@
 //!
 //! Every frame is checked before it is written:
 //! - (a) in the pseudo locales (`en-XA`, `tr-XT`) every `TextSource::Fluent` label is bracketed;
+//!   (## m3b-ci) a label drawn as access-key runs (Linux, Windows) is checked joined
+//!   (`is_key_run`), and so is a surface marker drawn that way;
 //! - (b) no label is clipped: wider than its box, or cut at its container's clip (a control
 //!   row running past its card, a tile cutting its last row), wrapping paragraphs included;
 //!   text partly scrolled out of a marked scroll viewport is not clipped (`text.rs`,
@@ -663,7 +665,16 @@ impl Surface {
         // ## m3a-t35-shots (fix round 1, I2): a label counts only when it drew something.
         let shown = frame
             .iter()
-            .any(|r| drawn(r) && r.path.contains(file) && text.is_none_or(|t| strip(&r.text) == t));
+            .any(|r| drawn(r) && r.path.contains(file) && text.is_none_or(|t| strip(&r.text) == t))
+            // ## m3b-ci (controller fix): or drawn as access-key runs (`b` + `astion` on Linux).
+            || text.is_some_and(|t| {
+                (0..frame.len()).any(|i| {
+                    is_key_run(frame, i)
+                        && frame[i].path.contains(file)
+                        && frame[i..i + 3].iter().all(drawn)
+                        && key_run_text(frame, i) == t
+                })
+            });
         if !shown {
             return Some(format!(
                 "{name}: the surface is missing: no visible label from {file} {text:?}"
@@ -1090,12 +1101,15 @@ fn check_labels(name: &str, locale: &str, frame: &[RenderedText]) -> Vec<String>
     let mut out = Vec::new();
     // ## m2b-t24-shots
     let split = split_pieces(frame);
+    // ## m3b-ci (controller fix): a label drawn as access-key runs is checked whole.
+    let key_runs = key_run_pieces(frame);
     for (i, r) in frame.iter().enumerate() {
         let text = strip(&r.text);
         if PSEUDO.contains(&locale)
             && r.source == TextSource::Fluent
             && !bracketed(&text)
             && !split.contains(&i)
+            && !key_runs.contains(&i)
         {
             out.push(format!(
                 "{name}: (a) Fluent label not bracketed: {:?} at {}",
@@ -1161,6 +1175,53 @@ fn check_grid(name: &str, locale: &str, frame: &[RenderedText]) -> Vec<String> {
 // ## m2b-t24-shots
 fn bracketed(text: &str) -> bool {
     text.starts_with('[') && text.ends_with(']')
+}
+
+// ## m3b-ci (controller fix): access-key runs are one label (CI run 44051024805, Linux: 876 of
+// its 960 violations were (a) on these runs, and the 16 `ssh-import-menu` "missing" its
+// `bastion` marker).
+/// Whether `frame[i..i + 3]` is one label drawn as access-key runs. Where access keys show
+/// (Linux and Windows; macOS hides them, so a macOS render never draws these) a button's or a
+/// menu row's label is drawn as three runs around its key letter (`hacivat-ui/src/button.rs`,
+/// `key_label_from`): `[` `Ƈ` `ŀǿǿşḗ]` in a pseudo locale, `""` `b` `astion` in English. The
+/// shape is the one that split draws, and the one `tests/support/mod.rs` `button_labels`
+/// joins: three consecutive records from `button.rs` with one `#id` (the label's own, so the
+/// labels of two different controls never join), one source, and the middle run one character
+/// (the key letter). This changes no other check: each run is still checked on its own by (b),
+/// (c) and (f) (a clipped key letter is a clipped label), and the trust checks are unchanged.
+fn is_key_run(frame: &[RenderedText], i: usize) -> bool {
+    let Some([before, key, after]) = frame.get(i..i + 3) else {
+        return false;
+    };
+    let one_label = |r: &RenderedText| r.path == before.path && r.source == before.source;
+    before.path.contains("hacivat-ui/src/button.rs:")
+        && before.path.contains('#')
+        && one_label(key)
+        && one_label(after)
+        && strip(&key.text).chars().count() == 1
+}
+
+/// The joined text of the access-key runs at `frame[i..i + 3]` ([`is_key_run`]).
+fn key_run_text(frame: &[RenderedText], i: usize) -> String {
+    frame[i..i + 3].iter().map(|r| strip(&r.text)).collect()
+}
+
+/// (a)'s second exception: the frame indices of every access-key label ([`is_key_run`]) whose
+/// joined text is bracketed, so its runs pass (a) as the one label they are. Runs that join
+/// into an unbracketed text stay checked run by run: (a) never passes a label that is not
+/// bracketed whole.
+fn key_run_pieces(frame: &[RenderedText]) -> std::collections::BTreeSet<usize> {
+    let mut pieces = std::collections::BTreeSet::new();
+    let mut i = 0;
+    while i < frame.len() {
+        if is_key_run(frame, i) && bracketed(&key_run_text(frame, i)) {
+            pieces.extend(i..i + 3);
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    pieces
 }
 
 /// (a)'s one exception (Task 24; fix round 1, M2): a Fluent message drawn in pieces around a
@@ -1719,6 +1780,51 @@ fn pseudo_labels_must_be_bracketed_and_unclipped_and_at_least_11_px() {
         at(" ŧö çöƞƒıřḿ]", "w.rs:1:1"),
     ];
     assert_eq!(check_labels("s", "en-XA", &elsewhere).len(), 2);
+    // ## m3b-ci (controller fix): a label drawn as access-key runs (Linux, Windows) passes (a)
+    // whole: three runs from `button.rs` with one `#id`, the middle one the key letter, that
+    // join into a bracketed text. A row without a key before it does not take its runs.
+    let key = |text: &str| {
+        at(
+            text,
+            "crates/ui/hacivat-ui/src/button.rs:272:21#menu-item-label",
+        )
+    };
+    let close = [key("["), key("Ƈ"), key("ŀǿǿşḗ]")];
+    assert!(check_labels("s", "en-XA", &close).is_empty());
+    let after_a_plain_row = [key("[Ŏƥḗƞ]"), key("["), key("Ƈ"), key("ŀǿǿşḗ]")];
+    assert!(check_labels("s", "en-XA", &after_a_plain_row).is_empty());
+    // Runs that join into an unbracketed text, runs of two controls (two ids), runs whose
+    // middle is not one letter, and runs from elsewhere than `button.rs` stay checked one by one.
+    let unclosed = [key("["), key("Ƈ"), key("ŀǿǿşḗ")];
+    assert_eq!(check_labels("s", "en-XA", &unclosed).len(), 3);
+    let two_ids = [
+        key("["),
+        at(
+            "Ƈ",
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-dialog-button-1",
+        ),
+        key("ŀǿǿşḗ]"),
+    ];
+    assert_eq!(check_labels("s", "en-XA", &two_ids).len(), 3);
+    let wide_middle = [key("["), key("Ƈŀ"), key("ǿǿşḗ]")];
+    assert_eq!(check_labels("s", "en-XA", &wide_middle).len(), 3);
+    let not_a_key_label = [
+        at("[", "w.rs:1:1#x"),
+        at("Ƈ", "w.rs:1:1#x"),
+        at("ŀǿǿşḗ]", "w.rs:1:1#x"),
+    ];
+    assert_eq!(check_labels("s", "en-XA", &not_a_key_label).len(), 3);
+    // A clipped run is still a clipped label.
+    let clipped_key = [
+        key("["),
+        RenderedText {
+            clipped: true,
+            ..key("Ƈ")
+        },
+        key("ŀǿǿşḗ]"),
+    ];
+    let found = check_labels("s", "en-XA", &clipped_key);
+    assert!(found.len() == 1 && found[0].contains("(b)"), "{found:?}");
     // (f) A label that runs past its dialog card, in any locale.
     let past = RenderedText {
         outside_card: true,
@@ -2661,6 +2767,33 @@ fn a_missing_surface_fails_its_frame() {
         Surface::SshImportMenu
             .missing_from("s", &menu("bastion"))
             .is_none()
+    );
+    // ## m3b-ci (controller fix): on Linux and Windows the row is drawn as access-key runs
+    // (`""`, `b`, `astion`); the marker counts them joined, and only joined into its text.
+    let runs = |texts: [&str; 3]| {
+        let mut frame: Vec<RenderedText> = texts
+            .map(|t| {
+                at(
+                    "crates/ui/hacivat-ui/src/button.rs:272:21#menu-item-label",
+                    t,
+                )
+            })
+            .into();
+        frame.push(at(
+            "crates/ui/hacivat-ui/src/menu.rs:560:21#popup-menu-title",
+            "Hosts",
+        ));
+        frame
+    };
+    assert!(
+        Surface::SshImportMenu
+            .missing_from("s", &runs(["", "b", "astion"]))
+            .is_none()
+    );
+    assert!(
+        Surface::SshImportMenu
+            .missing_from("s", &runs(["", "b", "astions"]))
+            .is_some()
     );
     let explorer = [at(
         "crates/app/hacivat-app/src/connections/explorer.rs:420:17",
