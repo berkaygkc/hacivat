@@ -126,6 +126,8 @@ pub fn command_entries(cx: &App) -> Vec<CommandEntry> {
     reg.all()
         .iter()
         .filter(|d| (d.enabled)(cx))
+        // ## m3c-t40 fix round 1 (m6): Tab's grid commands keep their keys, not a palette row.
+        .filter(|d| !hacivat_ui_grid::commands::hidden_in_palette(d.id))
         .map(|d| CommandEntry {
             id: d.id,
             title: global.l10n.t_dynamic(d.title_id, Vec::new()).into(),

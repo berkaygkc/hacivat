@@ -1975,3 +1975,84 @@ fn cell_through_the_adapter_hit_under_200_ns(cx: &mut TestAppContext) {
     println!("adapter cell hit: p50 {p50:.1} ns, p99 {p99:.1} ns");
     assert!(p50 < 200.0, "p50 {p50:.1} ns per cell");
 }
+
+// ## m3c-t40 (named exception): what a screen reader reads for a cell (`GridFrame::a11y_cell`,
+// `Purpose::A11y`): controls spoken as spaces, a truncated value's whole size alone as its chip
+// (the grid words it, "…, truncated, 5.2 MB"); every other cell as painted.
+#[gpui::test]
+fn a_cell_reads_to_a_screen_reader_with_controls_as_spaces_and_its_whole_size(
+    cx: &mut TestAppContext,
+) {
+    install_l10n(cx);
+    let truncated = Value::Truncated(Box::new(TruncatedVal {
+        prefix: t("the kept prefix"),
+        total_len: Some(5_452_595),
+        unit: LenUnit::Bytes,
+    }));
+    let adapter = adapter_over(
+        schema(vec![
+            pg("a", text(), "text"),
+            pg("b", text(), "text"),
+            pg("c", text(), "text"),
+        ]),
+        vec![
+            vec![t("one\ntwo\tthree"), truncated, t("plain")],
+            vec![Value::Null, t("x"), t("y")],
+        ],
+    );
+    let read = adapter.clone();
+    let (spoken, painted) = cx.update(|cx| {
+        let frame = read.begin_frame(cx);
+        let at = [(0, 0), (0, 1), (0, 2), (1, 0)];
+        (
+            at.map(|(r, c)| frame.a11y_cell(ModelRow(r), ColId(c))),
+            at.map(|(r, c)| frame.cell(ModelRow(r), ColId(c))),
+        )
+    });
+    assert_eq!(spoken[0].text.as_ref(), "one two three");
+    assert_eq!(
+        painted[0].text.as_ref(),
+        "one\ntwo\tthree",
+        "the cell keeps its controls"
+    );
+    assert_eq!(spoken[1].text.as_ref(), "the kept prefix");
+    assert!(spoken[1].flags.contains(GridCellFlags::TRUNCATED));
+    assert_eq!(plain(spoken[1].chip.as_ref().expect("a size")), "5.2 MB");
+    assert_eq!(spoken[2], painted[2]);
+    assert_eq!(spoken[3], painted[3]);
+    assert_eq!(spoken[3].kind, CellKind::Null);
+}
+
+// ## m3c-t40 fix round 1 (m4): a cell's screen-reader text is formatted once per data and
+// display settings, not once per frame.
+#[gpui::test]
+fn a_cells_screen_reader_text_is_formatted_once(cx: &mut TestAppContext) {
+    install_l10n(cx);
+    let adapter = adapter_over(
+        schema(vec![pg("a", text(), "text"), pg("b", text(), "text")]),
+        vec![vec![t("one\ntwo"), t("plain")], vec![t("x\ty"), t("z")]],
+    );
+    let read = |cx: &mut TestAppContext, adapter: &Rc<GridAdapter>| {
+        let adapter = adapter.clone();
+        cx.update(|cx| {
+            let frame = adapter.begin_frame(cx);
+            [(0, 0), (0, 1), (1, 0), (1, 1)].map(|(r, c)| frame.a11y_cell(ModelRow(r), ColId(c)))
+        })
+    };
+    let first = read(cx, &adapter);
+    assert_eq!(first[0].text.as_ref(), "one two");
+    // Two cells carry controls: two formats; plain cells read the display cache.
+    assert_eq!(adapter.a11y_format_calls(), 2);
+    for _ in 0..3 {
+        assert_eq!(read(cx, &adapter), first);
+    }
+    assert_eq!(
+        adapter.a11y_format_calls(),
+        2,
+        "later frames read the cache"
+    );
+    // New display settings format again.
+    cx.update(|cx| adapter.set_display(tr_istanbul(), cx));
+    read(cx, &adapter);
+    assert_eq!(adapter.a11y_format_calls(), 4);
+}

@@ -130,3 +130,32 @@ hui-editor-t1-line-size = { $n } KB
 #   $size (String) - the size reduced mode ends below (an hui-editor-t1-size message), e.g. "3.2 MB".
 #   $line (String) - the line length it ends below (an hui-editor-t1-line-size message), e.g. "51 KB".
 hui-editor-t1-both-body = Reduced mode keeps typing fast. It ends when the document is smaller than { $size } and every line is shorter than { $line }.
+
+## m3b-t40-grid-a11y
+
+# What a screen reader reads for a NULL cell in a result grid.
+hui-grid-a11y-null = null
+# What a screen reader reads for a cell whose value was cut at the value-size limit.
+# Variables:
+#   $value (String) - the part of the value that was read, e.g. "Lorem ipsum".
+#   $size (String) - the whole value's size, with its unit, e.g. "5 MB".
+hui-grid-a11y-truncated = { $value }, truncated, { $size }
+# Announced when the grid's focus has settled on a cell in another row (the cell itself is read as the focus).
+# Variables:
+#   $row (Number) - the row's position as shown, from 1, e.g. 1234.
+#   $total (Number) - the rows shown, e.g. 10000.
+hui-grid-a11y-row-of = Row { $row } of { $total }
+# As hui-grid-a11y-row-of, while the result may have more rows than were fetched.
+# Variables:
+#   $row (Number) - the row's position as shown, from 1, e.g. 1234.
+#   $total (Number) - the rows fetched (or kept by a filter) so far, e.g. 10000.
+hui-grid-a11y-row-of-more = Row { $row } of { $total } or more
+# Announced when a grid selection holding more than one cell has settled.
+# Variables:
+#   $cells (Number) - the selected cells, e.g. 160.
+hui-grid-selection-summary = { $cells ->
+        [one] { $cells } cell selected
+       *[other] { $cells } cells selected
+    }
+# The grid's accessible description while the result may have more rows than were fetched.
+hui-grid-a11y-more-rows = More rows are available

@@ -846,3 +846,33 @@ fn every_icon_name_resolves_to_an_asset() {
         assert!(bytes.starts_with(b"<svg"), "{n:?}");
     }
 }
+
+// ## m3c-t40 fix round 1 (m6, named exception): Tab and Shift+Tab leave the grid from any cell
+// (R-M3-69), so `grid.next_cell` / `grid.prev_cell` keep their keys (enabled) but are no
+// palette rows ("Grid: next cell" no longer says what they do).
+#[gpui::test]
+fn the_tab_grid_commands_are_enabled_but_not_in_the_palette(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections(cx, "en");
+    let (enabled, listed) = vcx.cx.read(|cx| {
+        let reg = cx.global::<ActionRegistry>();
+        let enabled: Vec<&'static str> = reg
+            .all()
+            .iter()
+            .filter(|d| (d.enabled)(cx))
+            .map(|d| d.id)
+            .collect();
+        let listed: Vec<&'static str> = hacivat_app::commands::palette::command_entries(cx)
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        (enabled, listed)
+    });
+    for id in ["grid.next_cell", "grid.prev_cell"] {
+        assert!(enabled.contains(&id), "{id} keeps its key");
+        assert!(!listed.contains(&id), "{id} is in the palette");
+    }
+    assert!(
+        listed.contains(&"grid.move_down"),
+        "the other grid commands stay"
+    );
+}
