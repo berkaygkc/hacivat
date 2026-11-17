@@ -16,10 +16,10 @@
 
 use hacivat_ui_core::gpui_surface::Entity;
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, AppContext, Bounds, Context, EventEmitter, FocusHandle, Focusable, Global,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Point,
-    Render, Role, ScrollEvent, SharedString, StatefulInteractiveElement, Styled, Window, accesskit,
-    div, px,
+    AnyElement, App, AppContext, Bounds, Context, ElementId, EventEmitter, FocusHandle, Focusable,
+    Global, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
+    Point, Render, Role, ScrollEvent, SharedString, StatefulInteractiveElement, Styled, Window,
+    accesskit, div, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
@@ -66,6 +66,10 @@ pub struct MenuItemSpec {
     /// An informational note (the mock's `.mnote`: 12 px `text-2`), never selectable: not a
     /// disabled command, so the Raised Ink Rule's `text-2` applies, never disabled `text-3`.
     pub note: bool,
+    // ## m3b-t29-shots (named exception; T29 review I1)
+    /// An inert sentence that wraps inside the menu's width (the chooser's explanations,
+    /// NOTES M3b ruling 19: "on its own wrapping line"): the row grows to its lines.
+    pub wraps: bool,
 }
 
 impl MenuItemSpec {
@@ -84,6 +88,8 @@ impl MenuItemSpec {
             hint_source: TextSource::Fluent,
             // ## m3b-t26-prod-unlock
             note: false,
+            // ## m3b-t29-shots
+            wraps: false,
         }
     }
 
@@ -102,6 +108,8 @@ impl MenuItemSpec {
             hint_source: TextSource::Fluent,
             // ## m3b-t26-prod-unlock
             note: false,
+            // ## m3b-t29-shots
+            wraps: false,
         }
     }
 
@@ -146,6 +154,14 @@ impl MenuItemSpec {
     // ## m3b-t26-prod-unlock (named exception: the T22 review m12 carry)
     /// Makes the row an informational note: 12 px `text-2` (the Raised Ink Rule), never
     /// selectable, never chosen.
+    // ## m3b-t29-shots (named exception; T29 review I1)
+    /// A sentence that wraps inside the menu (never actionable, as a note).
+    pub fn wraps(mut self, wraps: bool) -> Self {
+        self.wraps = wraps;
+        self.disabled |= wraps;
+        self
+    }
+
     pub fn note(mut self, note: bool) -> Self {
         self.note = note;
         // Never actionable: every path that skips a disabled row skips a note.
@@ -450,6 +466,10 @@ impl PopupMenu {
     fn entry_height(item: &MenuItemSpec, xs: f32) -> f32 {
         if item.separator {
             1.0 + 2.0 * xs
+        } else if item.wraps {
+            // ## m3b-t29-shots: a wrapping sentence is budgeted two lines (its height is known
+            // only once laid out; check (m) sees a menu that runs past its room).
+            2.0 * MENU_ROW_PX
         } else {
             MENU_ROW_PX
         }
@@ -661,6 +681,29 @@ impl Render for PopupMenu {
                 let selected = self.selected == Some(i);
                 let ink = item.label_ink(c);
                 let text = (item.label)(cx);
+                // ## m3b-t29-shots (named exception; T29 review I1): a wrapping sentence takes the
+                // menu's width and as many lines as it needs, inside the card.
+                if item.wraps {
+                    let row = div()
+                        .id(("menu-item", i))
+                        .debug_selector(move || format!("menu-item-{i}"))
+                        .w_full()
+                        .min_h(px(MENU_ROW_PX))
+                        .py(px(t.spacing.xs))
+                        .px(px(t.spacing.lg))
+                        .child(
+                            crate::text::paragraph(
+                                text.clone(),
+                                TextSource::Fluent,
+                                t.type_ramp.body,
+                                ink,
+                            )
+                            .id("menu-item-text"),
+                        );
+                    return A11yNode::new(("menu-item-node", i), Role::MenuItem, text, false, row)
+                        .disabled(true)
+                        .into_any_element();
+                }
                 // The check column (12 px, `blue` check) sits before the label on every row of a
                 // menu that has one.
                 // ## m3a-t35-shots (named exception): the label never gives way to the hint.
@@ -694,13 +737,15 @@ impl Render for PopupMenu {
                 } else {
                     (t.type_ramp.body, TextSource::Fluent)
                 };
+                // ## m3b-t29-shots (named exception; T29 review I4): the row's label says it is a
+                // menu row (`#menu-item-label`), which no button outside a menu draws.
                 lead = lead.child(key_label_from(
                     &text,
                     source,
                     Some(keys[i]),
                     style,
                     ink,
-                    None,
+                    Some(&ElementId::from("menu-item-label")),
                 ));
                 let mut row = div()
                     .id(("menu-item", i))
@@ -738,7 +783,9 @@ impl Render for PopupMenu {
                         // whole text in its tooltip; one that fits draws as before.
                         trail = trail.child(
                             Label::new(hint(cx), item.hint_source, t.type_ramp.caption, hint_ink)
-                                .truncate(true),
+                                .truncate(true)
+                                // ## m3b-t29-shots (named exception)
+                                .id("menu-item-hint"),
                         );
                     }
                     if let Some(shortcut) = &item.keys {
@@ -808,12 +855,15 @@ impl Render for PopupMenu {
         let drawn_rows: std::rc::Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>> = Default::default();
         let has_title = self.title.is_some();
         let statusbar = t.spacing.statusbar_height;
+        // ## m3b-t29-shots (named exception; T29 review I1): the menu is a card: text that runs
+        // past its sides is recorded so (`RenderedText::outside_card`), as a dialog's is. Its
+        // scope's canvas is the surface's first child, so the rows' column comes one later.
         let surface = popover_surface(&theme);
         let surface = if self.anchor.is_some() {
             let drawn_rows = drawn_rows.clone();
             let first = shown.start;
-            surface.on_children_prepainted(move |bounds, window, cx| {
-                let column = bounds.get(usize::from(has_title)).copied();
+            crate::text::card_scope_then(surface, move |bounds, window, cx| {
+                let column = bounds.get(1 + usize::from(has_title)).copied();
                 let rows = drawn_rows
                     .borrow()
                     .iter()
@@ -823,7 +873,7 @@ impl Render for PopupMenu {
                 note_menu_rows(cx, window, statusbar, column, rows);
             })
         } else {
-            surface
+            crate::text::card_scope(surface)
         };
         let mut menu = surface
             .id("popup-menu")

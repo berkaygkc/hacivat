@@ -591,7 +591,6 @@ impl Capsule {
             CapsuleModel::Connection {
                 engine,
                 access,
-                read_only,
                 path,
                 latency,
                 unencrypted,
@@ -601,11 +600,9 @@ impl Capsule {
                     .as_ref()
                     .map_or(0.0, |l| gap + text_width(window, l, mono)),
                 gap + text_width(window, path, body),
-                if *read_only {
-                    gap + text_width(window, access, body)
-                } else {
-                    0.0
-                },
+                // ## m3b-t29-shots (named exception; T29 review I2): a read-write access word
+                // gives way too (whole, before the name), now that production consoles write.
+                gap + text_width(window, access, body),
                 unencrypted
                     .as_ref()
                     .map_or(0.0, |u| gap + text_width(window, u, body)),
@@ -1024,7 +1021,7 @@ impl Capsule {
                         );
                         self.access_hint.clone()
                     };
-                    access_segment(
+                    Some(access_segment(
                         t,
                         window,
                         cx,
@@ -1036,11 +1033,18 @@ impl Capsule {
                         self.access_hint.clone(),
                         // ## m2b-t24-shots
                         expanded == Some(CapsuleSegment::Access),
-                    )
+                    ))
+                } else if fit.access_icon_only {
+                    // ## m3b-t29-shots (named exception; T29 review I2): "read-write" yields
+                    // before the connection's name: the segment goes (the capsule's accessible
+                    // description and the status bar still say it).
+                    None
                 } else {
-                    cell(t)
-                        .child(text(access, body, c.text_2.to_hsla()).id("capsule-text-access"))
-                        .into_any_element()
+                    Some(
+                        cell(t)
+                            .child(text(access, body, c.text_2.to_hsla()).id("capsule-text-access"))
+                            .into_any_element(),
+                    )
                 };
                 let (path_icon, path_ink) = if *direct {
                     (IconName::ArrowLeftRight, c.green)
@@ -1065,7 +1069,7 @@ impl Capsule {
                         .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
                         .declare(Role::Label, path.clone(), None);
                 }
-                row = row.child(access_cell).child(path_cell);
+                row = row.children(access_cell).child(path_cell);
                 if let Some(label) = unencrypted {
                     let mut content =
                         vec![icon(IconName::LockOpen, c.text_2.to_hsla()).into_any_element()];

@@ -25,11 +25,13 @@ use hacivat_proto::EnvTag;
 use hacivat_ui::capsule::env_swatch;
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::popover::Tip;
+// ## m3b-t29-shots (named exception)
+use hacivat_ui::popover::{A11yDecl, Declare as _};
 use hacivat_ui::text::{Label, TextSource};
 use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
-    App, Div, FluentBuilder as _, Hsla, InteractiveElement, ParentElement, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, TextRun, Window, div, hsla, px,
+    App, Div, FluentBuilder as _, Hsla, InteractiveElement, ParentElement, Role, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, TextRun, Window, div, hsla, px,
 };
 use hacivat_ui_core::theme::{Theme, TypeStyle};
 
@@ -251,11 +253,12 @@ pub(crate) fn widths(hits: &[HistoryHit], theme: &Theme, window: &mut Window, cx
     w
 }
 
-/// Row `index` of the list for `hit`: its connection `conn` (`None`: the connection is gone),
-/// selected or not.
+/// Row `index` of the list's `total` for `hit`: its connection `conn` (`None`: the connection
+/// is gone), selected or not.
 pub(crate) fn row(
     theme: &Theme,
-    index: usize,
+    // ## m3b-t29-shots (named exception): the list's size too, for the option's position.
+    (index, total): (usize, usize),
     hit: &HistoryHit,
     conn: Option<&Conn>,
     selected: bool,
@@ -347,9 +350,18 @@ pub(crate) fn row(
     } else {
         hsla(0.0, 0.0, 0.0, 0.0)
     };
+    // ## m3b-t29-shots (named exception; the T27 review's m6): each row is a list option whose
+    // accessible name is its first SQL line (data) and which says whether it is selected, as
+    // the palette's rows do; the move itself is announced by the dialog's live node.
+    let option = A11yDecl {
+        position: Some((index + 1, total)),
+        ..A11yDecl::new(Role::ListBoxOption, first_line(&r.statement_masked).into())
+            .selected(Some(selected))
+    };
     div()
         .id(("history-row", index))
         .debug_selector(move || format!("history-row-{index}"))
+        .declare_full(option)
         .flex()
         .flex_row()
         .flex_none()

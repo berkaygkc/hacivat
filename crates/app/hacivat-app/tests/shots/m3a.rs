@@ -129,104 +129,10 @@ pub(super) enum M3a {
     CopyCopied,
     CopyCopying,
     CopyTooMuch,
-    // ## m3b-t22-tx-ui (named exception): design/m3b-safe surfaces 3, 4, 5 and 12, rendered
-    // by the M3a machinery until Task 29 moves them to `shots/m3b.rs` ([`M3B_T22`]).
-    TxChipMenu,
-    TxIsolationMenu,
-    TxBadgeOpen,
-    TxBadgeFailed,
-    TxSegmentMenu,
-    TxIdleToast,
-    TxShared,
-    // ## m3b-t25-results (named exception): design/m3b-safe surface 10's tab menu (the other
-    // states are `Results(..)` fixtures, [`M3B_T25`]).
-    ResultsTabMenu,
-    // ## m3b-t23-escalation (named exception): design/m3b-safe surfaces 6 and 7, rendered by
-    // the M3a machinery until Task 29 moves them to `shots/m3b.rs` ([`M3B_T23`]).
-    EscSlowToast,
-    EscDialog,
-    EscDialogFailed,
-    EscDialogLocal,
-    // ## m3b-t23-escalation (fix round 1, I2): the subtitle's production mark.
-    EscDialogProduction,
-    EscKeptWaiting,
-    ErrBar,
-    ErrBarFailedTx,
-    ErrBarFocused,
-    // ## m3b-t27-history (named exception): design/m3b-safe surface 11, rendered by the M3a
-    // machinery until Task 29 moves it to `shots/m3b.rs` ([`M3B_T27`]).
-    HistList,
-    HistSearch,
-    HistAllFailed,
-    HistRedacted,
-    HistOther,
-    HistEmpty,
-    HistNoMatch,
-    // ## m3b-t26-prod-unlock (named exception; the T22 carry): a production console's
-    // transaction menu (Manual checked, the production note), rendered by the M3a machinery
-    // until Task 29 moves it to `shots/m3b.rs` ([`M3B_T26`]).
-    TxChipProduction,
+    // ## m3b-t29-shots: the M3b states that Tasks 21–27 parked here moved to `shots/m3b.rs`.
 }
 
-// ## m3b-t26-prod-unlock (named exception)
-/// The Task 26 states (after every Task 27 state).
-pub(super) const M3B_T26: [M3a; 1] = [M3a::TxChipProduction];
-
-// ## m3b-t27-history (named exception)
-/// The Task 27 states (after every Task 23 state).
-pub(super) const M3B_T27: [M3a; 7] = [
-    M3a::HistList,
-    M3a::HistSearch,
-    M3a::HistAllFailed,
-    M3a::HistRedacted,
-    M3a::HistOther,
-    M3a::HistEmpty,
-    M3a::HistNoMatch,
-];
-
-// ## m3b-t25-results (named exception)
-/// The Task 25 states (after Task 22's).
-pub(super) const M3B_T25: [M3a; 11] = [
-    M3a::Results(ResultsShot::TitledTabs),
-    M3a::ResultsTabMenu,
-    M3a::Results(ResultsShot::Untyped),
-    M3a::Results(ResultsShot::SetLimit),
-    M3a::Results(ResultsShot::Counting),
-    M3a::Results(ResultsShot::CountExact),
-    M3a::Results(ResultsShot::Evicted),
-    M3a::Results(ResultsShot::FetchAll),
-    M3a::Results(ResultsShot::Notices),
-    M3a::Results(ResultsShot::MysqlWarnings),
-    // ## m3b-t25-results (fix round 1, I1)
-    M3a::Results(ResultsShot::CrowdedTabs),
-];
-
-// ## m3b-t23-escalation (named exception)
-/// The Task 23 states (after every Task 21 state).
-pub(super) const M3B_T23: [M3a; 9] = [
-    M3a::EscSlowToast,
-    M3a::EscDialog,
-    M3a::EscDialogFailed,
-    M3a::EscDialogLocal,
-    M3a::EscDialogProduction,
-    M3a::EscKeptWaiting,
-    M3a::ErrBar,
-    M3a::ErrBarFailedTx,
-    M3a::ErrBarFocused,
-];
-
-// ## m3b-t22-tx-ui (named exception)
-/// The Task 22 states (after every M3a state).
-pub(super) const M3B_T22: [M3a; 7] = [
-    M3a::TxChipMenu,
-    M3a::TxIsolationMenu,
-    M3a::TxBadgeOpen,
-    M3a::TxBadgeFailed,
-    M3a::TxSegmentMenu,
-    M3a::TxIdleToast,
-    M3a::TxShared,
-];
-
+// ## m3b-t22-tx-ui (named exception); ## m3b-t29-shots: the M3b states are `m3b::M3B`.
 /// The single-session connection (surface 12).
 pub(super) const SHARED: &str = "orders-shared";
 
@@ -309,7 +215,7 @@ pub(super) const PROD: &str = "orders-prod";
 pub(super) const SHOP: &str = "shop-dev";
 
 /// A three-statement script with Turkish identifiers and strings (INV-3: lexed as written).
-const SCRIPT: &str = "-- Siparişler, İzmir şubesi\nSELECT o.id, c.\"müşteri adı\", o.total\n  FROM orders o\n  JOIN customers c ON c.id = o.customer_id\n WHERE c.city = 'İzmir'\n ORDER BY o.created_at DESC;\n\nUPDATE orders SET status = 'shipped' WHERE id = 1042;\n\nSELECT count(*) FROM order_lines WHERE note = 'Şanlıurfa';\n";
+pub(super) const SCRIPT: &str = "-- Siparişler, İzmir şubesi\nSELECT o.id, c.\"müşteri adı\", o.total\n  FROM orders o\n  JOIN customers c ON c.id = o.customer_id\n WHERE c.city = 'İzmir'\n ORDER BY o.created_at DESC;\n\nUPDATE orders SET status = 'shipped' WHERE id = 1042;\n\nSELECT count(*) FROM order_lines WHERE note = 'Şanlıurfa';\n";
 
 /// Two statements on one line.
 const TWO_ON_LINE: &str = "SELECT 1; SELECT o.id FROM orders o WHERE o.total > 100;\n";
@@ -325,7 +231,7 @@ const UNCERTAIN: &str = "SELECT 1 /*! ; */ ;\nSELECT 2;\n";
 const MYSQL: &str = "/*!40101 SET NAMES utf8mb4 */;\nSELECT p.sku, p.`ürün adı` FROM products p WHERE p.city = 'İzmir';\n";
 
 /// Four statements, one per line, for the marks.
-const MARKS: &str = "SELECT o.id, o.total FROM orders o;\nUPDATE orders SET status = 'shipped' WHERE id = 1042;\nSELECT count(*) FROM order_lines;\nSELECT c.\"müşteri adı\" FROM customers c;\n";
+pub(super) const MARKS: &str = "SELECT o.id, o.total FROM orders o;\nUPDATE orders SET status = 'shipped' WHERE id = 1042;\nSELECT count(*) FROM order_lines;\nSELECT c.\"müşteri adı\" FROM customers c;\n";
 
 /// Two statements on one row, for "two marks on one row".
 const MARKS_ROW: &str = "SELECT 1; SELECT * FROM order_lines_archive;\n";
@@ -365,12 +271,12 @@ fn large() -> &'static str {
 }
 
 /// The byte offset just after the first `needle` in `text`.
-fn after(text: &str, needle: &str) -> usize {
+pub(super) fn after(text: &str, needle: &str) -> usize {
     text.find(needle).expect("the needle is in the text") + needle.len()
 }
 
 /// The byte offset of the first `needle` in `text`.
-fn at(text: &str, needle: &str) -> usize {
+pub(super) fn at(text: &str, needle: &str) -> usize {
     text.find(needle).expect("the needle is in the text")
 }
 
@@ -383,11 +289,11 @@ fn range_of(text: &str, stmt: &str) -> std::ops::Range<usize> {
 // ---- markers and checks ---------------------------------------------------------------------
 
 const TOOLBAR: &str = "hacivat-app/src/console/toolbar.rs:";
-const MARKS_RS: &str = "hacivat-ui-editor/src/marks.rs:";
+pub(super) const MARKS_RS: &str = "hacivat-ui-editor/src/marks.rs:";
 const MENU: &str = "hacivat-ui/src/menu.rs:";
-const DIALOG: &str = "hacivat-ui/src/dialog.rs:";
-const TOAST: &str = "hacivat-ui/src/toast.rs:";
-const STRIP: &str = "hacivat-app/src/results/strip.rs:";
+pub(super) const DIALOG: &str = "hacivat-ui/src/dialog.rs:";
+pub(super) const TOAST: &str = "hacivat-ui/src/toast.rs:";
+pub(super) const STRIP: &str = "hacivat-app/src/results/strip.rs:";
 const OUTPUT: &str = "hacivat-app/src/results/output_view.rs:";
 /// A grid header's record path (data, the same in every locale).
 pub(super) const GRID_HEADER: &str = "hacivat-ui-grid/src/element/layers.rs#header";
@@ -446,36 +352,6 @@ impl M3a {
             M3a::CopyCopied => "copy-copied",
             M3a::CopyCopying => "copy-copying",
             M3a::CopyTooMuch => "copy-too-much",
-            // ## m3b-t22-tx-ui
-            M3a::TxChipMenu => "tx-chip-menu",
-            // ## m3b-t26-prod-unlock
-            M3a::TxChipProduction => "tx-chip-production",
-            M3a::TxIsolationMenu => "tx-isolation-menu",
-            M3a::TxBadgeOpen => "tx-badge-open",
-            M3a::TxBadgeFailed => "tx-badge-failed",
-            M3a::TxSegmentMenu => "tx-segment-menu",
-            M3a::TxIdleToast => "tx-idle-toast",
-            M3a::TxShared => "tx-shared",
-            // ## m3b-t25-results (named exception)
-            M3a::ResultsTabMenu => "results-tab-menu",
-            // ## m3b-t23-escalation
-            M3a::EscSlowToast => "esc-slow-toast",
-            M3a::EscDialog => "esc-dialog",
-            M3a::EscDialogFailed => "esc-dialog-failed",
-            M3a::EscDialogLocal => "esc-dialog-local",
-            M3a::EscDialogProduction => "esc-dialog-production",
-            M3a::EscKeptWaiting => "esc-kept-waiting",
-            M3a::ErrBar => "errbar",
-            M3a::ErrBarFailedTx => "errbar-failed-tx",
-            M3a::ErrBarFocused => "errbar-focused",
-            // ## m3b-t27-history
-            M3a::HistList => "history-list",
-            M3a::HistSearch => "history-search",
-            M3a::HistAllFailed => "history-all-failed",
-            M3a::HistRedacted => "history-redacted",
-            M3a::HistOther => "history-other",
-            M3a::HistEmpty => "history-empty",
-            M3a::HistNoMatch => "history-nomatch",
         }
     }
 
@@ -534,36 +410,6 @@ impl M3a {
                 (DIALOG, None)
             }
             M3a::CopyCopied | M3a::CopyCopying | M3a::CopyTooMuch => (TOAST, None),
-            // ## m3b-t22-tx-ui: the menu's title row, the badge's own labels, the toast.
-            M3a::TxChipMenu
-            | M3a::TxIsolationMenu
-            | M3a::TxSegmentMenu
-            // ## m3b-t26-prod-unlock
-            | M3a::TxChipProduction => ("#popup-menu-title", None),
-            M3a::TxBadgeOpen => ("#tx-badge-text", None),
-            M3a::TxBadgeFailed => ("#tx-badge-failed", None),
-            M3a::TxIdleToast => (TOAST, None),
-            M3a::TxShared => ("#tx-chip-mode", None),
-            // ## m3b-t25-results (named exception)
-            // The menu's rows are button labels; `check` asks for the menu layer.
-            M3a::ResultsTabMenu => ("hacivat-ui/src/button.rs:", None),
-            // ## m3b-t23-escalation: the toast, the dialog's own labels, the gutter, the bar.
-            M3a::EscSlowToast => (TOAST, None),
-            M3a::EscDialog | M3a::EscDialogLocal | M3a::EscDialogProduction => {
-                ("#escalation-title", None)
-            }
-            M3a::EscDialogFailed => ("#escalation-server-text", None),
-            M3a::EscKeptWaiting => (MARKS_RS, None),
-            M3a::ErrBar | M3a::ErrBarFailedTx | M3a::ErrBarFocused => ("#errbar-title", None),
-            // ## m3b-t27-history (fix round 1, m9): a label only this state draws: the
-            // selected entry's ISO time (data), the empty states their own sentence.
-            M3a::HistList => ("#history-meta-time", Some("2026-11-16T11:21:00Z")),
-            M3a::HistSearch => ("#history-meta-time", Some("2026-11-15T06:30:00Z")),
-            M3a::HistAllFailed => ("#history-meta-time", Some("2026-11-16T08:04:00Z")),
-            M3a::HistRedacted => ("#history-meta-time", Some("2026-11-16T07:47:00Z")),
-            M3a::HistOther => ("#history-meta-time", Some("2026-11-16T11:32:00Z")),
-            M3a::HistEmpty => ("#history-empty", None),
-            M3a::HistNoMatch => ("#history-nomatch", None),
         }
     }
 
@@ -582,25 +428,20 @@ impl M3a {
         // has no room (960 px in the pseudo-locales) the result tile's toolbar, which says the
         // same, must still show it: the surface never loses the count.
         const ROWS: &[&str] = &["#status-rows", "#results-rows-timing"];
-        // ## m3b-t22-tx-ui (named exception): the transaction badge and the mode chip are
-        // trust signals too (NOTES M3b cross-cutting #7).
+        // ## m3b-t22-tx-ui (named exception): the transaction badge is a trust signal too
+        // (NOTES M3b cross-cutting #7); ## m3b-t29-shots: the chip's states moved to `m3b.rs`.
         const BADGE: &[&str] = &["#tx-badge-text"];
         const BADGE_FAILED: &[&str] = &["#tx-badge-failed"];
         const CHIP: &[&str] = &["#tx-chip-mode"];
         match self {
-            M3a::TxChipMenu | M3a::TxIsolationMenu => &[CHIP],
-            // ## m3b-t26-prod-unlock: production's own signals, the menu over its chip.
-            M3a::TxChipProduction => &[CHIP, ENV],
-            M3a::TxBadgeOpen | M3a::TxShared => &[TX, BADGE, CHIP],
-            M3a::TxBadgeFailed => &[TX_FAILED, BADGE_FAILED, CHIP],
-            M3a::TxSegmentMenu | M3a::TxIdleToast => &[TX, BADGE],
             M3a::StatusTxOpen => &[TX, BADGE],
             M3a::StatusTxFailed => &[TX_FAILED, BADGE_FAILED],
             // ## m3b-t26-prod-unlock (R-M3-81): the production read-only notice is gone; a
             // production console's trust signals are its environment and, with a session, the
             // transaction mode chip (Manual, D-036).
             M3a::ConsoleProduction => &[ENV, CHIP],
-            M3a::ToolbarProductionWaiting | M3a::MarksDenied => &[ENV],
+            // ## m3b-t29-shots (fix round 1, m2): their live console draws the Manual chip.
+            M3a::ToolbarProductionWaiting | M3a::MarksDenied => &[ENV, CHIP],
             M3a::StatusProductionResult => &[ENV],
             M3a::ToolbarRunning => &[CLOCK],
             // ## m3b-t22-tx-ui (named exception): `StatusTxOpen` / `StatusTxFailed` moved up,
@@ -620,10 +461,8 @@ impl M3a {
             M3a::ConsoleProduction
                 | M3a::ToolbarProductionWaiting
                 | M3a::MarksDenied
-                // ## m3b-t23-escalation (fix round 1, I2)
-                | M3a::EscDialogProduction
-                // ## m3b-t26-prod-unlock
-                | M3a::TxChipProduction
+                // ## m3b-t29-shots (fix round 1): connected, the capsule shows production.
+                | M3a::StatusProductionResult
         )
     }
 
@@ -942,7 +781,23 @@ impl M3a {
                 s.push(suspended_tab());
                 s
             }
-            StatusProductionResult => results(ResultsShot::Rows, Some(EnvTag::Production)),
+            // ## m3b-t29-shots (fix round 1, T29 review m1): the production connection is
+            // connected, as a console showing a result is: its status bar then says what the
+            // live connection is (read-write since Task 26). Never connected, a result's
+            // context fails closed to "read-only (guarded)" (`results::context`), which drew a
+            // pre-T26 picture.
+            StatusProductionResult => {
+                let mut s = vec![connect(PROD)];
+                s.push(step(
+                    |window, cx| {
+                        let id = profile_named(cx, PROD);
+                        open_results_shot(ResultsShot::Rows, id, window, cx)
+                            .expect("the results fixture opens");
+                    },
+                    |_, _| true,
+                ));
+                s
+            }
             NoticeReducedMode => vec![
                 save_only(DEV, EnvTag::Dev),
                 step(
@@ -1015,10 +870,6 @@ impl M3a {
                 );
                 s.push(editor_command("editor.describe_exec_range"));
                 s
-            }
-            // ## m3b-t25-results (fix round 1, I1): the crowded strip on production.
-            Results(ResultsShot::CrowdedTabs) => {
-                results(ResultsShot::CrowdedTabs, Some(EnvTag::Production))
             }
             Results(r) => results(r, Some(EnvTag::Dev)),
             GridRange => {
@@ -1093,254 +944,6 @@ impl M3a {
                         cx,
                     )
                 }));
-                s
-            }
-            // ## m3b-t22-tx-ui
-            // ## m3b-t26-prod-unlock: the production console's menu.
-            TxChipProduction => {
-                let mut s = live(
-                    PROD,
-                    SCRIPT,
-                    caret(SCRIPT, "o.total"),
-                    Expect::Band(BandStyle::Run),
-                );
-                s.push(tx_menu(TxMenu::Chip));
-                s
-            }
-            TxChipMenu | TxIsolationMenu => {
-                let mut s = live(
-                    DEV,
-                    SCRIPT,
-                    caret(SCRIPT, "o.total"),
-                    Expect::Band(BandStyle::Run),
-                );
-                s.push(tx_menu(if self == TxChipMenu {
-                    TxMenu::Chip
-                } else {
-                    TxMenu::Isolation
-                }));
-                s
-            }
-            TxBadgeOpen | TxIdleToast | TxSegmentMenu => {
-                let mut s = live(
-                    DEV,
-                    SCRIPT,
-                    caret(SCRIPT, "o.total"),
-                    Expect::Band(BandStyle::Run),
-                );
-                s.push(user_tx(&["BEGIN", UPD1, UPD2, UPD3], Some(3), false));
-                if self == TxSegmentMenu {
-                    s.push(tx_menu(TxMenu::Segment));
-                }
-                if self == TxIdleToast {
-                    s.push(step(
-                        |window, cx| {
-                            let session = session_in(window, cx).expect("the console's session");
-                            hacivat_app::console::idle_toast::show(session.id(), 10, cx);
-                        },
-                        |_, cx| !ToastQueue::visible_ids(cx).is_empty(),
-                    ));
-                }
-                s
-            }
-            TxBadgeFailed => {
-                let mut s = live(
-                    DEV,
-                    SCRIPT,
-                    caret(SCRIPT, "o.total"),
-                    Expect::Band(BandStyle::Run),
-                );
-                s.push(user_tx(&["BEGIN", UPD1, UPD2, FAILS], None, true));
-                s
-            }
-            TxShared => {
-                let mut s = live(
-                    SHARED,
-                    SCRIPT,
-                    caret(SCRIPT, "o.total"),
-                    Expect::Band(BandStyle::Run),
-                );
-                s.push(user_tx(&["BEGIN", UPD1], Some(1), false));
-                s
-            }
-            // ## m3b-t25-results (named exception): the titled tabs, then the first tab's menu
-            // under it.
-            ResultsTabMenu => {
-                let mut s = results(ResultsShot::TitledTabs, Some(EnvTag::Dev));
-                s.push(step(
-                    |window, cx| {
-                        let console = active_console(window, cx).expect("a console");
-                        hacivat_app::results::view::open_tab_menu_for(console, 3, window, cx);
-                    },
-                    |window, cx| menu_open(window, cx),
-                ));
-                s
-            }
-            // ## m3b-t23-escalation: the fixtures with fixed clocks (no server that ignores a
-            // cancel on cue).
-            EscSlowToast => {
-                let mut s = live(
-                    DEV,
-                    SCRIPT,
-                    caret(SCRIPT, "o.total"),
-                    Expect::Band(BandStyle::Run),
-                );
-                s.push(step(
-                    |window, cx| {
-                        let c = active_console(window, cx).expect("a console");
-                        exec_ui::escalation::fixtures::show_toast(c, 11, cx);
-                    },
-                    |_, cx| !ToastQueue::visible_ids(cx).is_empty(),
-                ));
-                s
-            }
-            EscDialog | EscDialogFailed | EscDialogLocal | EscDialogProduction => {
-                use exec_ui::escalation::{OtherTx, OwnTx, Reach, fixtures};
-                let mut s = live(
-                    if self == EscDialogProduction {
-                        PROD
-                    } else {
-                        DEV
-                    },
-                    SCRIPT,
-                    caret(SCRIPT, "o.total"),
-                    Expect::Band(BandStyle::Run),
-                );
-                s.push(step(
-                    move |window, cx| {
-                        let c = active_console(window, cx).expect("a console");
-                        let (own, reach, others) = match self {
-                            EscDialog => (
-                                OwnTx::Open(3),
-                                Reach::Profile,
-                                vec![(format!("{DEV} (2)"), OtherTx::Open(3))],
-                            ),
-                            EscDialogFailed | EscDialogProduction => {
-                                (OwnTx::Open(3), Reach::Profile, Vec::new())
-                            }
-                            _ => (OwnTx::None, Reach::File("app.db".into()), Vec::new()),
-                        };
-                        let mut facts =
-                            fixtures::facts(c, own, reach, others, cx).expect("the facts");
-                        if self == EscDialogLocal {
-                            // SQLite: nothing can be terminated "on the server".
-                            facts.terminate = None;
-                        }
-                        let refused = (self == EscDialogFailed).then_some((
-                            "42501",
-                            "must be a superuser to terminate superuser process",
-                        ));
-                        fixtures::open(c, facts, 14, refused, window, cx);
-                    },
-                    |window, cx| {
-                        window.root::<Workspace>().flatten().is_some_and(|ws| {
-                            ws.read(cx)
-                                .layer_ids()
-                                .contains(&exec_ui::escalation::ESCALATION_LAYER_ID)
-                        })
-                    },
-                ));
-                s
-            }
-            EscKeptWaiting => {
-                let mut s = marks(
-                    MARKS,
-                    vec![
-                        (
-                            "SELECT o.id, o.total FROM orders o",
-                            succeeded(42, Some(rows(100))),
-                        ),
-                        (
-                            "UPDATE orders SET status = 'shipped' WHERE id = 1042",
-                            (UnitStatus::Cancelling, Duration::from_secs(14)),
-                        ),
-                        (
-                            "SELECT count(*) FROM order_lines",
-                            (UnitStatus::Queued { position: 1 }, Duration::ZERO),
-                        ),
-                    ],
-                );
-                s.push(instant(|window, cx| {
-                    let c = active_console(window, cx).expect("a console");
-                    exec_ui::escalation::fixtures::escalate_mark(
-                        c,
-                        exec_ui::fixtures::fixture_key(1),
-                        14,
-                        cx,
-                    );
-                }));
-                s
-            }
-            ErrBar | ErrBarFailedTx | ErrBarFocused => {
-                let mut s = live(
-                    DEV,
-                    SCRIPT,
-                    caret(SCRIPT, "o.total"),
-                    Expect::Band(BandStyle::Run),
-                );
-                s.push(instant(move |window, cx| {
-                    let c = active_console(window, cx).expect("a console");
-                    // Fix round 1 (m6): the run waits on the bar, so the toolbar shows it
-                    // running (Stop), never an idle Run.
-                    if let Some(tab) = Consoles::get(cx, c).map(|s| s.tab) {
-                        console_fixtures::show_run(tab, RunUx::Running(3), cx);
-                    }
-                    match self {
-                        ErrBarFailedTx => exec_ui::error_bar::fixtures::show(
-                            c,
-                            (3, 6),
-                            "25P02",
-                            Some((2, false)),
-                            cx,
-                        ),
-                        _ => exec_ui::error_bar::fixtures::show(c, (2, 5), "42P01", None, cx),
-                    }
-                }));
-                if self == ErrBarFocused {
-                    s.push(step(
-                        |window, cx| {
-                            exec_ui::error_bar::fixtures::focus(window, cx);
-                        },
-                        |window, cx| {
-                            active_console(window, cx).is_some_and(|c| {
-                                exec_ui::error_bar::button_focus(c, cx)
-                                    .first()
-                                    .is_some_and(|(_, h)| h.is_focused(window))
-                            })
-                        },
-                    ));
-                }
-                s
-            }
-            // ## m3b-t27-history: the dialog over a live console, from its fixture (the mock's
-            // entries at a fixed "now"; no store).
-            HistList | HistSearch | HistAllFailed | HistRedacted | HistOther | HistEmpty
-            | HistNoMatch => {
-                use hacivat_app::history::dialog::fixtures::{self, Scenario};
-                let scenario = match self {
-                    HistList => Scenario::List,
-                    HistSearch => Scenario::Search,
-                    HistAllFailed => Scenario::AllFailed,
-                    HistRedacted => Scenario::Redacted,
-                    HistOther => Scenario::Other,
-                    HistEmpty => Scenario::Empty,
-                    _ => Scenario::NoMatch,
-                };
-                let mut s = live(DEV, "", 0..0, Expect::Any);
-                s.push(step(
-                    move |window, cx| {
-                        let c = active_console(window, cx).expect("a console");
-                        let f = fixtures::scenario(scenario, c, cx);
-                        fixtures::open(c, f, window, cx);
-                    },
-                    |window, cx| {
-                        window.root::<Workspace>().flatten().is_some_and(|ws| {
-                            ws.read(cx)
-                                .layer_ids()
-                                .contains(&hacivat_app::history::dialog::HISTORY_LAYER_ID)
-                        })
-                    },
-                ));
                 s
             }
         }
@@ -1461,8 +1064,6 @@ impl M3a {
                         }))
             }
             StatusProductionResult | Results(_) | GridRange | NoticeReducedMode => true,
-            // ## m3b-t25-results (named exception)
-            ResultsTabMenu => menu_open(window, cx),
             NoticePasteRefused => toast("hui-editor-paste-refused-title"),
             NoticeNul => text().contains('\0') && toast("hui-editor-nul-title"),
             NoticeClipboard => toast("hui-editor-clipboard-title"),
@@ -1490,108 +1091,17 @@ impl M3a {
                 ),
             ),
             CopyTooMuch => toast("hv-copy-refused-title"),
-            // ## m3b-t22-tx-ui
-            TxChipMenu | TxIsolationMenu => {
-                menu_open(window, cx)
-                    && tx().is_none()
-                    && console
-                        .is_some_and(|c| hacivat_app::console::tx_badge::view(c, cx).is_some())
-            }
-            // ## m3b-t26-prod-unlock
-            TxChipProduction => {
-                menu_open(window, cx)
-                    && tx().is_none()
-                    && session.as_ref().is_some_and(|s| {
-                        s.state().borrow().tx.mode == hacivat_session::session::TxMode::Manual
-                    })
-            }
-            TxBadgeOpen => console.is_some_and(|c| {
-                hacivat_app::console::tx_badge::user_tx(c, cx)
-                    .is_some_and(|u| !u.failed && u.statements == 3)
-            }),
-            TxShared => console.is_some_and(|c| {
-                hacivat_app::console::tx_badge::user_tx(c, cx).is_some_and(|u| !u.failed)
-                    && hacivat_app::console::tx_chip::render_shared(c, false, cx).is_some()
-                    // Fix round 1 (I2): the chip (its words or its icon) is painted inside the
-                    // window.
-                    && hacivat_app::console::tx_badge::bounds_of(
-                        c,
-                        hacivat_app::console::tx_badge::Focus::Shared,
-                        cx,
-                    )
-                    .is_some_and(|b| {
-                        b.size.width > hacivat_ui_core::gpui_surface::px(0.0)
-                            && b.right() <= viewport.width
-                            && b.bottom() <= viewport.height
-                    })
-            }),
-            TxBadgeFailed => console.is_some_and(|c| {
-                hacivat_app::console::tx_badge::user_tx(c, cx).is_some_and(|u| u.failed)
-            }),
-            TxSegmentMenu => menu_open(window, cx) && tx().is_some_and(|t| t.statements == 3),
-            TxIdleToast => toast("hv-tx-idle-body"),
-            // ## m3b-t23-escalation
-            EscSlowToast => toast("hv-cancel-slow-title"),
-            EscDialog => drawn(frame, "escalation-title") && drawn(frame, "escalation-other-tx"),
-            EscDialogFailed => {
-                drawn(frame, "escalation-terminate-failed")
-                    && drawn(frame, "escalation-server-text")
-            }
-            EscDialogLocal => {
-                drawn(frame, "escalation-title")
-                    && !drawn(frame, "button-label-escalation-terminate")
-            }
-            // Fix round 1 (I2): the subtitle's connection, on production.
-            EscDialogProduction => {
-                drawn(frame, "escalation-title") && drawn(frame, "confirm-connection")
-            }
-            EscKeptWaiting => editor.as_ref().is_some_and(|e| {
-                matches!(
-                    e.read(cx).marks().state(exec_ui::fixtures::fixture_key(1)),
-                    Some(ExecMarkState::Escalated { .. })
-                )
-            }),
-            ErrBar | ErrBarFailedTx | ErrBarFocused => console.is_some_and(|c| {
-                let offered =
-                    exec_ui::error_bar::open_question(c, cx).map_or(0, |(_, _, o)| o.len());
-                let focus = exec_ui::error_bar::button_focus(c, cx);
-                let in_bar = focus.first().is_some_and(|(_, h)| h.is_focused(window));
-                drawn(frame, "errbar-title")
-                    // Fix round 1 (m6): the run that waits shows Stop.
-                    && toolbar().is_some_and(|t| matches!(t.run, Some(RunUx::Running(3))))
-                    && match self {
-                        ErrBarFailedTx => offered == 3 && !in_bar,
-                        ErrBarFocused => offered == 4 && in_bar,
-                        _ => offered == 4 && !in_bar,
-                    }
-            }),
-            // ## m3b-t27-history: what the dialog holds, and the part only this state draws.
-            HistList | HistSearch | HistAllFailed | HistRedacted | HistOther | HistEmpty
-            | HistNoMatch => hacivat_app::history::dialog::shown(cx).is_some_and(|d| {
-                let n = d.statements.len();
-                match self {
-                    HistList => n == 5 && !d.all && drawn(frame, "history-row-sql"),
-                    HistSearch => n == 2 && d.query == "musteri" && d.selected == Some(1),
-                    HistAllFailed => n == 1 && drawn(frame, "history-server-text"),
-                    // Fix round 1 (I1): a masked entry is never offered to run.
-                    HistRedacted => {
-                        d.selected == Some(2)
-                            && drawn(frame, "history-redacted-line")
-                            && drawn(frame, "history-masked-line")
-                            && !d.can_run
-                    }
-                    HistOther => n == 8 && drawn(frame, "history-target"),
-                    HistEmpty => n == 0 && d.query.is_empty(),
-                    _ => n == 0 && d.query == "faturalar",
-                }
-            }),
         };
         (!ok).then(|| format!("{}: the state check failed", self.name()))
     }
 }
 
 /// The message `id` with `args`, as the app renders it in the shot's locale.
-fn message(cx: &App, id: &str, args: Vec<(&'static str, hacivat_l10n::ArgValue)>) -> String {
+pub(super) fn message(
+    cx: &App,
+    id: &str,
+    args: Vec<(&'static str, hacivat_l10n::ArgValue)>,
+) -> String {
     let text = cx
         .global::<hacivat_app::l10n_global::L10nGlobal>()
         .l10n
@@ -1600,20 +1110,20 @@ fn message(cx: &App, id: &str, args: Vec<(&'static str, hacivat_l10n::ArgValue)>
 }
 
 /// Whether the frame shows (visible and painted) a label of `file` reading exactly `text`.
-fn shows_label(frame: &[RenderedText], file: &str, text: &str) -> bool {
+pub(super) fn shows_label(frame: &[RenderedText], file: &str, text: &str) -> bool {
     frame.iter().any(|r| {
         r.visible && r.painted_px > 0.0 && r.path.contains(file) && super::strip(&r.text) == text
     })
 }
 
 /// Whether a toast shows `text` (its title or body).
-fn shows_toast(frame: &[RenderedText], text: &str) -> bool {
+pub(super) fn shows_toast(frame: &[RenderedText], text: &str) -> bool {
     shows_label(frame, TOAST, text)
 }
 
 // ## m3b-t23-escalation (named exception)
 /// Whether the frame shows (visible and painted) the label with element ID `id`.
-fn drawn(frame: &[RenderedText], id: &str) -> bool {
+pub(super) fn drawn(frame: &[RenderedText], id: &str) -> bool {
     let needle = format!("#{id}");
     frame
         .iter()
@@ -1623,7 +1133,7 @@ fn drawn(frame: &[RenderedText], id: &str) -> bool {
 // ## m3b-t22-tx-ui (named exception)
 /// Which transaction menu a state opens.
 #[derive(Debug, Clone, Copy)]
-enum TxMenu {
+pub(super) enum TxMenu {
     Chip,
     Isolation,
     Segment,
@@ -1631,7 +1141,7 @@ enum TxMenu {
 
 /// Opens the active console's transaction menu (from its chip or its status segment) or its
 /// isolation menu, and waits for the menu layer.
-fn tx_menu(which: TxMenu) -> Step {
+pub(super) fn tx_menu(which: TxMenu) -> Step {
     step(
         move |window, cx| {
             let console = active_console(window, cx).expect("a console");
@@ -1650,7 +1160,7 @@ fn tx_menu(which: TxMenu) -> Step {
 }
 
 /// Whether a popup menu is the window's top layer.
-fn menu_open(window: &mut Window, cx: &App) -> bool {
+pub(super) fn menu_open(window: &mut Window, cx: &App) -> bool {
     window
         .root::<Workspace>()
         .flatten()
@@ -1667,7 +1177,7 @@ fn stale_first(editor: Option<&Entity<EditorView>>, cx: &App) -> bool {
     })
 }
 
-fn results_name(r: ResultsShot) -> &'static str {
+pub(super) fn results_name(r: ResultsShot) -> &'static str {
     match r {
         ResultsShot::FirstRows => "results-first-rows",
         ResultsShot::Rows => "results-rows",
@@ -1688,21 +1198,12 @@ fn results_name(r: ResultsShot) -> &'static str {
         ResultsShot::MoreResultSets => "strip-more-result-sets",
         ResultsShot::RunLog => "output-run-log",
         ResultsShot::EventsDropped => "output-events-dropped",
-        // ## m3b-t25-results (named exception)
-        ResultsShot::TitledTabs => "results-titled-tabs",
-        ResultsShot::Untyped => "results-untyped",
-        ResultsShot::SetLimit => "results-set-limit",
-        ResultsShot::Counting => "results-counting",
-        ResultsShot::CountExact => "results-count-exact",
-        ResultsShot::Evicted => "strip-evicted",
-        ResultsShot::FetchAll => "results-fetch-all",
-        ResultsShot::Notices => "output-notices",
-        ResultsShot::MysqlWarnings => "output-mysql-warnings",
-        ResultsShot::CrowdedTabs => "results-crowded-tabs",
+        // ## m3b-t25-results (named exception); ## m3b-t29-shots: Task 25's states are M3b's.
+        r => super::m3b::results_name(r),
     }
 }
 
-fn results_marker(r: ResultsShot) -> (&'static str, Option<&'static str>) {
+pub(super) fn results_marker(r: ResultsShot) -> (&'static str, Option<&'static str>) {
     match r {
         // Surface 10's grid: a header it drew (data).
         ResultsShot::Rows | ResultsShot::TwoResults => (GRID_HEADER, Some("customer")),
@@ -1720,16 +1221,8 @@ fn results_marker(r: ResultsShot) -> (&'static str, Option<&'static str>) {
         | ResultsShot::Error
         | ResultsShot::RunLog
         | ResultsShot::EventsDropped => (OUTPUT, None),
-        // ## m3b-t25-results (named exception)
-        ResultsShot::TitledTabs => ("#results-tab-0", None),
-        ResultsShot::Untyped => ("#results-tab-0-untyped", None),
-        ResultsShot::SetLimit => ("#results-set-limit", None),
-        ResultsShot::Counting | ResultsShot::CountExact => ("#results-count-state", None),
-        ResultsShot::Evicted => (STRIP, None),
-        ResultsShot::FetchAll => (DIALOG, None),
-        ResultsShot::Notices => ("#log-notice-0", None),
-        ResultsShot::MysqlWarnings => ("#log-code-2", None),
-        ResultsShot::CrowdedTabs => ("#results-tabs-more", None),
+        // ## m3b-t25-results (named exception); ## m3b-t29-shots: Task 25's states are M3b's.
+        r => super::m3b::results_marker(r),
     }
 }
 
@@ -1746,7 +1239,7 @@ pub(super) struct Step {
     pub(super) ready: Ready,
 }
 
-fn step(
+pub(super) fn step(
     act: impl Fn(&mut Window, &mut App) + 'static,
     ready: impl Fn(&mut Window, &mut App) -> bool + 'static,
 ) -> Step {
@@ -1757,13 +1250,13 @@ fn step(
 }
 
 /// A step that is done once the app is parked.
-fn instant(act: impl Fn(&mut Window, &mut App) + 'static) -> Step {
+pub(super) fn instant(act: impl Fn(&mut Window, &mut App) + 'static) -> Step {
     step(act, |_, _| true)
 }
 
 /// What the band must show before the shot is taken.
 #[derive(Debug, Clone, Copy)]
-enum Expect {
+pub(super) enum Expect {
     /// Nothing to wait for (an empty console has no band and no sentence).
     Any,
     Band(BandStyle),
@@ -1777,7 +1270,7 @@ enum Expect {
 
 /// A live console of `name` over `text`, the selection `sel`, the editor focused; the band as
 /// `expect` says.
-fn live(
+pub(super) fn live(
     name: &'static str,
     text: &'static str,
     sel: std::ops::Range<usize>,
@@ -1968,7 +1461,10 @@ fn toast(push: fn(&mut App)) -> Step {
 }
 
 /// A live console over `text` with marks over each `(statement, status)`.
-fn marks(text: &'static str, units: Vec<(&'static str, (UnitStatus, Duration))>) -> Vec<Step> {
+pub(super) fn marks(
+    text: &'static str,
+    units: Vec<(&'static str, (UnitStatus, Duration))>,
+) -> Vec<Step> {
     let mut s = live(DEV, text, text.len()..text.len(), Expect::Nothing);
     s.push(show_marks(
         units
@@ -1999,14 +1495,14 @@ fn show_marks(units: Vec<(std::ops::Range<usize>, (UnitStatus, Duration))>) -> S
     )
 }
 
-fn rows(n: u64) -> RowsOutcome {
+pub(super) fn rows(n: u64) -> RowsOutcome {
     RowsOutcome::Fetched {
         rows: n,
         more: false,
     }
 }
 
-fn succeeded(ms: u64, rows: Option<RowsOutcome>) -> (UnitStatus, Duration) {
+pub(super) fn succeeded(ms: u64, rows: Option<RowsOutcome>) -> (UnitStatus, Duration) {
     (
         UnitStatus::Succeeded(UnitSummary {
             rows,
@@ -2043,15 +1539,19 @@ fn failed(code: &str, server: &str) -> (UnitStatus, Duration) {
 
 // ---- transactions, cursors and prompts ------------------------------------------------------
 
-const UPD1: &str = "UPDATE orders SET status = 'shipped' WHERE id = 1042";
-const UPD2: &str = "UPDATE orders SET status = 'shipped' WHERE id = 1043";
-const UPD3: &str = "UPDATE order_lines SET qty = qty - 1 WHERE order_id = 1042";
+pub(super) const UPD1: &str = "UPDATE orders SET status = 'shipped' WHERE id = 1042";
+pub(super) const UPD2: &str = "UPDATE orders SET status = 'shipped' WHERE id = 1043";
+pub(super) const UPD3: &str = "UPDATE order_lines SET qty = qty - 1 WHERE order_id = 1042";
 /// A statement the fake fails, leaving the transaction failed (as PostgreSQL does).
-const FAILS: &str = "UPDATE inventory SET qty = qty - 1 WHERE sku = 'TR-1042'";
+pub(super) const FAILS: &str = "UPDATE inventory SET qty = qty - 1 WHERE sku = 'TR-1042'";
 
 /// Sends `sqls` on the active console's session as the user's statements, in order; waits for
 /// its user transaction (`statements`, or failed).
-fn user_tx(sqls: &'static [&'static str], statements: Option<u32>, failed: bool) -> Step {
+pub(super) fn user_tx(
+    sqls: &'static [&'static str],
+    statements: Option<u32>,
+    failed: bool,
+) -> Step {
     step(
         move |window, cx| {
             let session = session_in(window, cx).expect("the console's session");
@@ -2208,7 +1708,7 @@ fn suspended_tab() -> Step {
 // ---- results --------------------------------------------------------------------------------
 
 /// Task 30's results fixture `shot`, on a console of a saved profile in `env`.
-fn results(shot: ResultsShot, env: Option<EnvTag>) -> Vec<Step> {
+pub(super) fn results(shot: ResultsShot, env: Option<EnvTag>) -> Vec<Step> {
     let name = match env {
         Some(EnvTag::Production) => PROD,
         _ => DEV,
@@ -2359,7 +1859,7 @@ pub(super) fn connections(paths: &LocalPaths) -> ConnectionsBoot {
 
 /// The profile `name`: `orders-dev` (dev), `orders-prod` (production) on PostgreSQL,
 /// `shop-dev` (dev) on MySQL; IP literals, so nothing resolves.
-fn profile(name: &str) -> Profile {
+pub(super) fn profile(name: &str) -> Profile {
     let (env, engine) = match name {
         PROD => (EnvTag::Production, DbmsKind::Postgres),
         SHOP => (EnvTag::Dev, DbmsKind::MySql),
@@ -2371,6 +1871,8 @@ fn profile(name: &str) -> Profile {
         environment: Some(env),
         // ## m3b-t22-tx-ui (named exception): the single-session connection.
         single_session: name == SHARED,
+        // ## m3b-t29-shots: the read-only connection (its chip is Auto-commit, disabled).
+        read_only: name == super::m3b::READ_ONLY,
         endpoint: ProfileEndpoint::Server {
             host: "10.0.4.12".to_string(),
             port: None,
@@ -2411,21 +1913,21 @@ fn profile_named(cx: &App, name: &str) -> Option<ProfileId> {
 }
 
 /// The console of the focused pane's active tab.
-fn active_console(window: &mut Window, cx: &App) -> Option<ConsoleId> {
+pub(super) fn active_console(window: &mut Window, cx: &App) -> Option<ConsoleId> {
     let ws = window.root::<Workspace>().flatten()?;
     let tab = ws.read(cx).active_tab()?;
     Consoles::by_tab(cx, tab)
 }
 
 /// The active console's editor.
-fn editor_in(window: &mut Window, cx: &App) -> Option<Entity<EditorView>> {
+pub(super) fn editor_in(window: &mut Window, cx: &App) -> Option<Entity<EditorView>> {
     Consoles::get(cx, active_console(window, cx)?)?
         .editor
         .clone()
 }
 
 /// The active console's session.
-fn session_in(window: &mut Window, cx: &App) -> Option<SessionHandle> {
+pub(super) fn session_in(window: &mut Window, cx: &App) -> Option<SessionHandle> {
     Consoles::get(cx, active_console(window, cx)?)?
         .session
         .clone()

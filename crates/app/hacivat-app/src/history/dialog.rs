@@ -462,6 +462,34 @@ impl HistoryDialog {
         self.hits.get(self.selected)
     }
 
+    // ## m3b-t29-shots (named exception; the T27 review's m6)
+    /// A polite live node naming the selected entry (its first SQL line, data) and its place
+    /// in the list in words ("…, 3 of 5", `hv-history-selection-a11y`): the search field keeps
+    /// the focus while ↑/↓ move the selection, so the move is announced from here, even between
+    /// two entries with the same first line. It also speaks when a search answer changes the
+    /// selected entry. Fix round 1 (T29 review I3): it sits in the dialog card, outside the
+    /// list box (a list box owns only its options), absolutely placed and of no size.
+    fn selection_live(&self, cx: &App) -> Option<impl IntoElement> {
+        let hit = self.selected_hit()?;
+        let sql = rows::first_line(&hit.record.statement_masked);
+        let name = message(
+            cx,
+            "hv-history-selection-a11y",
+            vec![
+                ("sql", ArgValue::Text(sql)),
+                ("pos", ArgValue::Count((self.selected + 1) as u64)),
+                ("n", ArgValue::Count(self.hits.len() as u64)),
+            ],
+        );
+        Some(
+            div().absolute().top_0().left_0().size_0().child(
+                A11yNode::new("history-selection-live", Role::Status, name, false, div())
+                    .live(hacivat_ui_core::gpui_surface::accesskit::Live::Polite)
+                    .position(self.selected + 1, self.hits.len()),
+            ),
+        )
+    }
+
     // ---- actions -------------------------------------------------------------------------------
 
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -874,7 +902,8 @@ impl HistoryDialog {
             children.push(
                 rows::row(
                     &theme,
-                    i,
+                    // ## m3b-t29-shots (named exception)
+                    (i, self.hits.len()),
                     hit,
                     self.conn(hit.record.profile),
                     selected,
@@ -1338,6 +1367,9 @@ impl Render for HistoryDialog {
             .child(self.list(window, cx))
             .children(self.preview(cx));
         let card = card(&theme, DialogSize::Form, HISTORY_LAYER_ID)
+            // ## m3b-t29-shots (named exception; T29 review I3): the announcement, outside
+            // the list box.
+            .children(self.selection_live(cx))
             .track_focus(&self.root)
             .capture_key_down(cx.listener(Self::on_capture_key))
             .on_key_down(cx.listener(Self::on_key))

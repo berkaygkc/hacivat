@@ -630,3 +630,97 @@ fn a_stale_answer_is_dropped(cx: &mut TestAppContext) {
     assert!(s.stale >= 1, "the older answer was dropped");
     stop_core_runtime_test(cx);
 }
+
+// ## m3b-t29-shots (named exception; the T27 review's m6)
+/// The declarations one fresh frame of the window makes.
+fn declared(vcx: &VisualTestContext) -> Vec<hacivat_ui::popover::A11yDecl> {
+    hacivat_ui::popover::a11y_record();
+    in_window(vcx, |window, _| window.refresh());
+    vcx.run_until_parked();
+    hacivat_ui::popover::a11y_take()
+}
+
+/// One list option: its name, whether it is selected, its place in the list.
+type OptionDecl = (String, Option<bool>, Option<(usize, usize)>);
+
+fn options(decls: &[hacivat_ui::popover::A11yDecl]) -> Vec<OptionDecl> {
+    decls
+        .iter()
+        .filter(|d| d.role == Some(hacivat_ui_core::gpui_surface::Role::ListBoxOption))
+        .map(|d| (d.name.to_string(), d.selected, d.position))
+        .collect()
+}
+
+/// What assistive technology reads from the polite live status node: the AccessKit node its
+/// element writes, built by the element's own writer (`popover::node_of`) from the recorded
+/// declaration, since the test platforms build no AccessKit tree: (label, position and size).
+/// T29 fix round 1 (I3).
+fn announced(decls: &[hacivat_ui::popover::A11yDecl]) -> Vec<(String, Option<(usize, usize)>)> {
+    use hacivat_ui_core::gpui_surface::{Role, accesskit};
+    decls
+        .iter()
+        .filter(|d| d.role == Some(Role::Status) && d.position.is_some())
+        .map(hacivat_ui::popover::node_of)
+        .filter(|n| n.live() == Some(accesskit::Live::Polite))
+        .map(|n| {
+            let label: String = n
+                .label()
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| !matches!(c, '\u{2068}' | '\u{2069}'))
+                .collect();
+            (label, n.position_in_set().zip(n.size_of_set()))
+        })
+        .collect()
+}
+
+/// Every row is a list option (its first SQL line its name, its place in the list, whether it
+/// is selected), and a move with ↑/↓, while the search field keeps the focus, is announced by
+/// a polite live node naming the newly selected entry and its place in words. Two entries with
+/// the same first line still announce a move (fix round 1, I3).
+#[cfg(unix)]
+#[gpui::test]
+fn rows_are_list_options_and_a_move_is_announced(cx: &mut TestAppContext) {
+    // The first one is the newest, shown first; the last two differ (the store keeps one entry
+    // per statement) but share their first line.
+    let mut h = history(
+        cx,
+        &["SELECT 1 AS first;", "SELECT 2;\n-- a", "SELECT 2;\n-- b"],
+    );
+    h.open();
+    let before = declared(h.vcx);
+    assert_eq!(
+        options(&before),
+        [
+            ("SELECT 1 AS first;".to_string(), Some(true), Some((1, 3))),
+            ("SELECT 2;".to_string(), Some(false), Some((2, 3))),
+            ("SELECT 2;".to_string(), Some(false), Some((3, 3))),
+        ]
+    );
+    assert_eq!(
+        announced(&before),
+        [("SELECT 1 AS first;, 1 of 3".to_string(), Some((1, 3)))]
+    );
+    h.keys("down");
+    assert_eq!(h.shown().selected, Some(1));
+    assert_eq!(
+        announced(&declared(h.vcx)),
+        [("SELECT 2;, 2 of 3".to_string(), Some((2, 3)))]
+    );
+    h.keys("down");
+    assert_eq!(h.shown().selected, Some(2));
+    let after = declared(h.vcx);
+    assert_eq!(
+        options(&after)
+            .iter()
+            .map(|(_, selected, _)| *selected)
+            .collect::<Vec<_>>(),
+        [Some(false), Some(false), Some(true)]
+    );
+    assert_eq!(
+        announced(&after),
+        [("SELECT 2;, 3 of 3".to_string(), Some((3, 3)))],
+        "a move between identical first lines is announced by its place"
+    );
+    stop_core_runtime_test(cx);
+}
