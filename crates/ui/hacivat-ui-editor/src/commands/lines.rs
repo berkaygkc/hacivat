@@ -216,6 +216,13 @@ fn block_comment(
     tok: CommentTokens,
     cx: &mut Cx<'_>,
 ) {
+    // ## fix round 1 (M12): the ranges are the selection's own (they stay selected, inside the
+    // comment), or lines wrapped for a dialect without line comments (the selection maps).
+    let own = ranges.len() == v.model.selection().ranges().len()
+        && ranges
+            .iter()
+            .zip(v.model.selection().ranges())
+            .all(|(a, b)| *a == b.range());
     let (open, close) = tok.block;
     let wrapped = |r: &Range<usize>| -> Option<(Range<usize>, Range<usize>)> {
         let s = buf.slice(r.clone());
@@ -263,31 +270,50 @@ fn block_comment(
         }
     }
     let sel = v.model.selection();
-    let after = SelectionSet::normalized(
-        sel.ranges().iter().zip(&placed).map(|(r, &(s, e))| {
-            if r.is_reversed() {
-                SelectionRange::new(e, s)
-            } else {
-                SelectionRange::new(s, e)
-            }
-        }),
-        sel.main_index(),
-    );
-    change(
-        v,
-        edits,
-        Some(after),
-        UserEvent::Command("toggle_comment"),
-        cx,
-    );
+    let after = own.then(|| {
+        SelectionSet::normalized(
+            sel.ranges().iter().zip(&placed).map(|(r, &(s, e))| {
+                if r.is_reversed() {
+                    SelectionRange::new(e, s)
+                } else {
+                    SelectionRange::new(s, e)
+                }
+            }),
+            sel.main_index(),
+        )
+    });
+    change(v, edits, after, UserEvent::Command("toggle_comment"), cx);
 }
 
 /// Comments the touched lines at their least indentation, or uncomments them.
 fn line_comment(v: &mut EditorView, buf: &TextBuffer, tok: CommentTokens, cx: &mut Cx<'_>) {
+    // ## fix round 1 (I2): a folded header takes its fold's lines, as duplicate and move do,
+    // so the folded row never looks commented while its hidden lines stay code.
+    let hidden = Hidden::of(v);
+    let count = buf.len_lines();
+    let blocks = blocks(v, false, |a, b| (a, hidden.row_end(b, count)));
+    let Some(token) = tok.line else {
+        // ## fix round 1 (M12): no line comment: each block of lines in the block comment, from
+        // its first line's text to its last line's end.
+        let spans: Vec<Range<usize>> = blocks
+            .iter()
+            .filter_map(|b| {
+                let start = buf.line_to_byte(b.first);
+                let end = content_end(buf, b.last);
+                let text = buf.slice(start..end);
+                let lead = text.len() - text.trim_start().len();
+                let trail = text.len() - text.trim_end().len();
+                (lead < text.len()).then(|| start + lead..end - trail)
+            })
+            .collect();
+        if !spans.is_empty() {
+            block_comment(v, buf, &spans, tok, cx);
+        }
+        return;
+    };
     let mut lines: Vec<usize> = Vec::new();
-    for r in v.model.selection().ranges() {
-        let (first, last) = lines_of(buf, r.range());
-        for l in first..=last {
+    for b in &blocks {
+        for l in b.first..=b.last {
             if lines.last().is_none_or(|&p| p < l) {
                 lines.push(l);
             }
@@ -306,7 +332,17 @@ fn line_comment(v: &mut EditorView, buf: &TextBuffer, tok: CommentTokens, cx: &m
     if texts.is_empty() {
         return;
     }
-    let commented = |t: &str, lead: usize| t[lead..].starts_with(tok.line);
+    // ## fix round 1 (M9): where the dialect needs it (MySQL), the token is a comment only
+    // when white space or the line's end follows it.
+    let commented = |t: &str, lead: usize| {
+        let rest = &t[lead..];
+        rest.starts_with(token)
+            && (!tok.line_needs_space
+                || rest[token.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace))
+    };
     let uncomment = texts.iter().all(|(_, lead, t)| commented(t, *lead));
     // The positions each edit inserts at or deletes, to map the selection through.
     let edits: Vec<(Range<usize>, Arc<str>)> = if uncomment {
@@ -314,7 +350,7 @@ fn line_comment(v: &mut EditorView, buf: &TextBuffer, tok: CommentTokens, cx: &m
             .iter()
             .map(|(start, lead, t)| {
                 let at = start + lead;
-                let mut n = tok.line.len();
+                let mut n = token.len();
                 if t[lead + n..].starts_with(' ') {
                     n += 1;
                 }
@@ -323,7 +359,7 @@ fn line_comment(v: &mut EditorView, buf: &TextBuffer, tok: CommentTokens, cx: &m
             .collect()
     } else {
         let indent = texts.iter().map(|(_, lead, _)| *lead).min().unwrap_or(0);
-        let ins: Arc<str> = Arc::from(format!("{} ", tok.line));
+        let ins: Arc<str> = Arc::from(format!("{token} "));
         texts
             .iter()
             .map(|(start, _, _)| (start + indent..start + indent, ins.clone()))
@@ -406,6 +442,7 @@ fn same_column(buf: &TextBuffer, at: usize, l: usize) -> usize {
 }
 
 pub(super) fn delete_line(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_>) {
+    let hidden = Hidden::of(v);
     let buf = v.model.buffer().clone();
     let lines = buf.len_lines();
     let blocks = blocks(v, true, |a, b| (a, b));
@@ -420,9 +457,11 @@ pub(super) fn delete_line(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_>) {
                 Some(b.last + 1),
             )
         } else if b.first > 0 {
+            // ## fix round 1 (M6): the line above may be hidden (the last line under a folded
+            // statement): the caret goes to its fold's header, which stays folded.
             (
                 content_end(&buf, b.first - 1)..buf.len_bytes(),
-                Some(b.first - 1),
+                Some(hidden.header(b.first - 1)),
             )
         } else {
             (0..buf.len_bytes(), None)

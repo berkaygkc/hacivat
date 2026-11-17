@@ -2498,7 +2498,7 @@ hv-gutter-same-path = Çalıştır ile aynı denetimlerden geçer.
 # Review: PO
 hv-eol-mixed = Karışık satır sonları
 # Review: PO
-hv-eol-mixed-tip = Satırlar hem LF hem CRLF ile bitiyor. Eşitlemek için tıklayın.
+hv-eol-mixed-tip = Satırlar birden çok biçimde bitiyor ({ $mix }). Eşitlemek için tıklayın.
 # Review: PO
 hv-eol-counts = Satır sonları: LF { $lf }, CRLF { $crlf }
 # Review: PO
@@ -2511,3 +2511,7 @@ hv-history-recall = Geçmişten: ifade { $i }/{ $n } · { $older } daha eski · 
 hv-editor-mark-rolled-back = geri alındı
 # Review: PO
 hv-editor-preview-as-one = tek parça · { $n } ifade
+# Review: PO
+hv-eol-counts-cr = Satır sonları: LF { $lf }, CRLF { $crlf }, CR { $cr }
+# Review: PO
+hv-gutter-run-line = { $line }. satırdaki ifadeyi çalıştır

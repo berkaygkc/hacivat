@@ -18,16 +18,29 @@ use crate::config::{DocContext, DocId};
 /// comment's opening and closing tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommentTokens {
-    pub line: &'static str,
+    /// The line comment (`None`: the dialect has none, and lines are wrapped in the block
+    /// comment instead; ## m3c-t34-editor fix round 1, M12).
+    pub line: Option<&'static str>,
     pub block: (&'static str, &'static str),
+    /// The line comment needs white space (or the line's end) after it to be one: MySQL's
+    /// `-- ` (`--1` is an expression there; fix round 1, M9).
+    pub line_needs_space: bool,
 }
 
 impl CommentTokens {
     /// Standard SQL's, which every supported dialect reads: `--` and `/* */` (MySQL needs a
     /// space after `--`, and the command always writes one).
     pub const SQL: CommentTokens = CommentTokens {
-        line: "--",
+        line: Some("--"),
         block: ("/*", "*/"),
+        line_needs_space: false,
+    };
+
+    /// MySQL's and MariaDB's: `-- ` with its space (`#` also comments there, but `--` is what
+    /// the command writes).
+    pub const MYSQL: CommentTokens = CommentTokens {
+        line_needs_space: true,
+        ..CommentTokens::SQL
     };
 }
 

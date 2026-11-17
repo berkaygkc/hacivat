@@ -256,13 +256,26 @@ pub fn edit_menu_history_titles(cx: &App) -> (SharedString, SharedString) {
 /// and its SQL context is read. The gutter ▶ shows only then (M3c-15); its click still goes
 /// through Run's whole path, which decides again.
 pub fn run_would_be_enabled(console: ConsoleId, cx: &App) -> bool {
-    let Some(session) = Consoles::get(cx, console).and_then(|s| s.session.clone()) else {
+    let Some(state) = Consoles::get(cx, console) else {
         return false;
     };
-    if !matches!(session.state().borrow().state, SessionState::Idle) {
+    // An unbound console has nothing to run on.
+    if state.profile.is_none() {
         return false;
     }
-    if crate::exec_ui::sql_context(console, cx) == SqlContext::Pending {
+    // ## fix round 1 (M1): a disconnected (or broken, or not yet opened) session: Run connects
+    // first, so it is enabled; while connecting, running or cancelling it is not.
+    let connected = match state
+        .session
+        .as_ref()
+        .map(|s| s.state().borrow().state.clone())
+    {
+        None | Some(SessionState::Disconnected | SessionState::Broken(_)) => false,
+        Some(SessionState::Idle) => true,
+        Some(_) => return false,
+    };
+    // Connected, Run waits for the SQL context until it is read.
+    if connected && crate::exec_ui::sql_context(console, cx) == SqlContext::Pending {
         return false;
     }
     !crate::exec_ui::console_exec(cx, console)
@@ -367,8 +380,20 @@ fn show_recalled(editor: &Entity<EditorView>, list: Arc<[Arc<str>]>, index: usiz
             ("newer", ArgValue::Text(key("editor.history_next"))),
         ],
     );
-    cx.default_global::<Recalls>()
+    let id = editor.entity_id();
+    let first = cx
+        .default_global::<Recalls>()
         .0
-        .insert(editor.entity_id(), Recall { list, index });
+        .insert(id, Recall { list, index })
+        .is_none();
+    // ## fix round 1 (M4): the entry goes with its editor (a closed console).
+    if first {
+        cx.observe_release(editor, move |_, cx| {
+            if cx.has_global::<Recalls>() {
+                cx.global_mut::<Recalls>().0.remove(&id);
+            }
+        })
+        .detach();
+    }
     editor.update(cx, |e, cx| e.show_recalled(&text, sentence, cx));
 }

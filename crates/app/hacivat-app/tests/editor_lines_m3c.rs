@@ -90,6 +90,7 @@ fn gate(vcx: &VisualTestContext, id: ConsoleId) -> bool {
 
 /// The gutter ▶ shows only while Run would be enabled: not while a statement runs, then again
 /// once the run ended and the session is idle.
+#[cfg(unix)]
 #[gpui::test]
 fn the_gutter_run_gate_follows_run(cx: &mut TestAppContext) {
     let slow = FakeQuery {
@@ -133,6 +134,21 @@ fn the_gutter_run_gate_follows_run(cx: &mut TestAppContext) {
             .read(|cx| hacivat_app::exec_ui::last_run_ended(id, cx))
             && gate(vcx, id)
     });
+    // ## fix round 1 (M1): a closed (disconnected) session: Run connects first, so the ▶
+    // shows, as Run is enabled.
+    let session = vcx
+        .cx
+        .read(|cx| Consoles::get(cx, id).and_then(|s| s.session.clone()))
+        .expect("a session");
+    futures::executor::block_on(session.close(hacivat_session::session::ClosePolicy::RollBack))
+        .expect("the session closes");
+    wait_until(vcx, "the session to be closed", |_| {
+        matches!(
+            session.state().borrow().state,
+            hacivat_session::session::SessionState::Disconnected
+        )
+    });
+    assert!(gate(vcx, id), "Run is enabled on a disconnected console");
     stop_core_runtime_test(cx);
 }
 
@@ -185,6 +201,7 @@ fn said(vcx: &VisualTestContext, editor: &Entity<EditorView>) -> String {
 /// ⌃⌥↑ at the last line of an empty console puts the profile's newest statement in the
 /// editor and says "From history: statement 1 of 2"; again, the older one; ⌃⌥↓ comes back.
 /// Typing into the recalled text ends the recall.
+#[cfg(unix)]
 #[gpui::test]
 fn history_recall_at_the_last_line(cx: &mut TestAppContext) {
     let (vcx, id, profile, editor) = console(cx, Vec::new());
@@ -243,6 +260,7 @@ fn history_recall_at_the_last_line(cx: &mut TestAppContext) {
 
 /// Mixed line endings: the editor says so, and the menu lists the counts, then the dominant
 /// ending first with "most lines"; its row normalises in one undo group.
+#[cfg(unix)]
 #[gpui::test]
 fn the_mixed_line_endings_menu_offers_the_dominant_ending_first(cx: &mut TestAppContext) {
     let (vcx, id, _, editor) = console(cx, Vec::new());
@@ -285,6 +303,53 @@ fn the_mixed_line_endings_menu_offers_the_dominant_ending_first(cx: &mut TestApp
     assert!(
         !vcx.cx
             .read(|cx| editor.read(cx).status().mixed_line_endings)
+    );
+    // ## fix round 1 (M3): CR endings are counted and offered; the dominant one (CR here)
+    // comes first with "most lines"; the tooltip names the actual mix.
+    set_text(vcx, &editor, "a\rb\rc\nd\r", 0);
+    let items = vcx
+        .cx
+        .read(|cx| hacivat_app::console::status::eol_menu_items(&editor, cx));
+    let labels: Vec<String> = vcx
+        .cx
+        .read(|cx| items.iter().map(|i| strip(&(i.label)(cx))).collect());
+    assert_eq!(
+        labels,
+        [
+            "Line endings: LF 1, CRLF 0, CR 3",
+            "Normalize to CR",
+            "Normalize to LF",
+            "Normalize to CRLF"
+        ]
+    );
+    let hint = vcx
+        .cx
+        .read(|cx| items[1].hint.as_ref().map(|h| strip(&h(cx))));
+    assert_eq!(hint.as_deref(), Some("most lines"));
+    let tip = vcx
+        .cx
+        .read(|cx| strip(&hacivat_app::console::status::eol_tip(&editor, cx)));
+    assert_eq!(
+        tip,
+        "Lines end in more than one way (LF, CR). Click to normalize them."
+    );
+    // A read-only editor is not offered the button (its rows would do nothing).
+    assert!(
+        vcx.cx
+            .read(|cx| hacivat_app::console::status::eol_offered(&editor, cx))
+    );
+    vcx.cx.update(|cx| {
+        editor.update(cx, |e, cx| {
+            let cfg = hacivat_ui_editor::EditorConfig {
+                read_only: true,
+                ..*e.config()
+            };
+            e.set_config(cfg, cx);
+        });
+    });
+    assert!(
+        !vcx.cx
+            .read(|cx| hacivat_app::console::status::eol_offered(&editor, cx))
     );
     stop_core_runtime_test(cx);
 }

@@ -535,7 +535,8 @@ fn gutter_buttons_are_keyboard_reachable_buttons(cx: &mut TestAppContext) {
         .map(|d| (d.name.to_string(), d.expanded))
         .collect();
     assert!(
-        buttons.iter().any(|(n, _)| n == "hv-gutter-run"),
+        // ## fix round 1 (M7): its name says the statement's line.
+        buttons.iter().any(|(n, _)| n == "hv-gutter-run-line"),
         "▶ is an AccessKit button: {buttons:?}"
     );
     assert!(
@@ -565,11 +566,23 @@ fn gutter_buttons_are_keyboard_reachable_buttons(cx: &mut TestAppContext) {
         matches!(at.as_slice(), [ExecAt::Carets(c)] if c.as_slice() == [0]),
         "{at:?}"
     );
+    // ## fix round 1 (I1): the run gives the focus back to the editor, so Stop and the editor's
+    // keys work while the ▶ is gone (the gate turns false while the statement runs).
+    let in_editor = |o: &mut Opened<'_>| {
+        o.vcx
+            .update(|window, cx| o.editor.read(cx).focus_handle(cx).is_focused(window))
+    };
+    assert!(in_editor(&mut o), "the focus is back in the editor");
+    o.gate.set(false);
+    draw(o.vcx);
+    assert!(in_editor(&mut o), "still in the editor while the ▶ is gone");
+    o.gate.set(true);
+    draw(o.vcx);
     // On to the chevron (after the ▶ column); Space folds.
-    o.vcx.update(|window, cx| window.focus_next(cx));
-    draw(o.vcx);
-    o.vcx.update(|window, cx| window.focus_next(cx));
-    draw(o.vcx);
+    for _ in 0..3 {
+        o.vcx.update(|window, cx| window.focus_next(cx));
+        draw(o.vcx);
+    }
     let focus = o
         .vcx
         .update(|window, cx| o.editor.read(cx).gutter_focus(window));

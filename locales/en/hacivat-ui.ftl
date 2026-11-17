@@ -2864,8 +2864,10 @@ hv-gutter-never-run = Not run yet.
 hv-gutter-same-path = Runs through the same checks as Run.
 # The status bar's button when the editor's lines end in more than one way.
 hv-eol-mixed = Mixed line endings
-# The tooltip of the mixed line endings button.
-hv-eol-mixed-tip = Lines end in both LF and CRLF. Click to normalize them.
+# The tooltip of the mixed line endings button: the endings the text has.
+# Variables:
+#   $mix (String) - the endings' names, data, e.g. LF, CRLF.
+hv-eol-mixed-tip = Lines end in more than one way ({ $mix }). Click to normalize them.
 # The header of the line endings menu: how many lines end each way.
 # Variables:
 #   $lf (Number) - the lines that end in LF, e.g. 214.
@@ -2893,3 +2895,13 @@ hv-editor-preview-as-one = { $n ->
         [one] as one · { $n } statement
        *[other] as one · { $n } statements
     }
+# The line endings menu's header when some lines end in CR (old Mac files).
+# Variables:
+#   $lf (Number) - the lines that end in LF, e.g. 214.
+#   $crlf (Number) - the lines that end in CRLF, e.g. 12.
+#   $cr (Number) - the lines that end in CR, e.g. 3.
+hv-eol-counts-cr = Line endings: LF { $lf }, CRLF { $crlf }, CR { $cr }
+# The gutter's ▶ button's accessible name: which statement it runs.
+# Variables:
+#   $line (Number) - the statement's first line, 1-based, e.g. 12.
+hv-gutter-run-line = Run the statement at line { $line }

@@ -29,6 +29,7 @@ use std::rc::Rc;
 use hacivat_text::Snapshot;
 use hacivat_text::display::{HeightMap, ScrollAnchor};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
+use hacivat_ui::l10n::UiArg;
 use hacivat_ui::popover::{A11yDecl, Declare as _};
 use hacivat_ui::text::{Label, TextFn, TextSource};
 use hacivat_ui_core::gpui_surface::{
@@ -407,7 +408,25 @@ impl std::fmt::Debug for ButtonFrame {
 
 /// Asks the host to run the statement whose header is `header` (Run's own path: the same
 /// resolve, preview and gate as ⌘↵; the history is sealed as Run seals it).
-fn run_row(v: &mut EditorView, header: usize, cx: &mut Context<EditorView>) {
+fn run_row(
+    v: &mut EditorView,
+    header: usize,
+    version: u64,
+    window: &mut Window,
+    cx: &mut Context<EditorView>,
+) {
+    // ## fix round 1 (I1): a ▶ run from the keyboard gives the focus back to the editor (as
+    // DataGrip does): the ▶ leaves while the statement runs, and Stop and the editor's keys
+    // must still have a focused path.
+    if focused_button(v, window).is_some() {
+        window.focus(&v.focus, cx);
+    }
+    // ## fix round 1 (M2): a ▶ painted over another text runs nothing (its caret would point
+    // into other text); the next frame paints the current one.
+    if v.model.version() != version {
+        cx.notify();
+        return;
+    }
     if v.ime.is_composing() || !run_allowed(v, cx) {
         return;
     }
@@ -493,8 +512,14 @@ pub(crate) fn prepaint_buttons(
         let tip = RunTip {
             runs: key.map(|k| v.marks.run_rows(k, cx)).unwrap_or_default(),
         };
-        let name = crate::commands::message(cx, "hv-gutter-run", &[]);
+        // ## fix round 1 (M7): the name says which statement ("Run the statement at line 12").
+        let name = crate::commands::message(
+            cx,
+            "hv-gutter-run-line",
+            &[("line", UiArg::Count(u64::from(line) + 1))],
+        );
         let header = span.header;
+        let version = snap.version;
         let target = view.clone();
         let mut el = div()
             .id(("hv-gutter-run", u64::from(line)))
@@ -506,8 +531,8 @@ pub(crate) fn prepaint_buttons(
             .rounded(px(3.0))
             .cursor(CursorStyle::PointingHand)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(move |_, _, cx| {
-                target.update(cx, |v, cx| run_row(v, header, cx));
+            .on_click(move |_, window, cx| {
+                target.update(cx, |v, cx| run_row(v, header, version, window, cx));
             });
         if tab {
             let handle = handle_of(v, button, cx);

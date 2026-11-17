@@ -37,7 +37,7 @@ use smallvec::SmallVec;
 /// A service with the dialect's comment tokens and the foldable ranges it is given.
 #[derive(Default)]
 struct Svc {
-    line_comment: Option<&'static str>,
+    tokens: Option<CommentTokens>,
     folds: Vec<FoldRange>,
 }
 
@@ -63,13 +63,7 @@ impl LanguageService for Svc {
         self.folds.clone().into()
     }
     fn comment_tokens(&self, _: DocId) -> CommentTokens {
-        match self.line_comment {
-            Some(line) => CommentTokens {
-                line,
-                ..CommentTokens::SQL
-            },
-            None => CommentTokens::SQL,
-        }
+        self.tokens.unwrap_or(CommentTokens::SQL)
     }
 }
 
@@ -276,7 +270,10 @@ fn toggle_comment_uses_the_dialect_line_comment(cx: &mut TestAppContext) {
         cx,
         "SELECT┃ 1;\n",
         Svc {
-            line_comment: Some("#"),
+            tokens: Some(CommentTokens {
+                line: Some("#"),
+                ..CommentTokens::SQL
+            }),
             ..Svc::default()
         },
     );
@@ -368,9 +365,11 @@ fn move_line_moves_a_fold_with_it(cx: &mut TestAppContext) {
             o.state().find('┃'),
             Some("SELECT a,\n  b,\n  c\nFROM t;\ntop".len())
         );
-        // One undo puts both back, the fold folded where it was.
+        // One undo puts both lines back. The undo is one replace over the span, which drops the
+        // moved fold (`FoldSet::map`): the statement is open again, never wrongly folded.
         o.undo();
         assert_eq!(o.text(), FOLD_TEXT);
+        assert!(folded_lines(&o).is_empty(), "{:?}", folded_lines(&o));
     }
     // The fold's header moves up: its lines go with it, folded.
     let state = FOLD_TEXT.replacen("SELECT", "┃SELECT", 1);
@@ -388,6 +387,86 @@ fn move_line_moves_a_fold_with_it(cx: &mut TestAppContext) {
         Some(0),
         "the caret stays on the header"
     );
+}
+
+// ## m3c-t34-editor fix round 1
+/// I2: comment on a folded header comments the fold's hidden lines too (the folded row is one
+/// unit, as duplicate and move treat it); again, all of them are uncommented.
+#[gpui::test]
+fn toggle_comment_on_a_folded_header_takes_the_whole_fold(cx: &mut TestAppContext) {
+    let state = FOLD_TEXT.replacen("SELECT", "┃SELECT", 1);
+    let mut o = open_with(cx, &state, fold_svc());
+    fold_all(&mut o);
+    o.run("editor.toggle_comment");
+    assert_eq!(
+        o.text(),
+        "top\n-- SELECT a,\n--   b,\n--   c\n-- FROM t;\nend\n"
+    );
+    o.run("editor.toggle_comment");
+    assert_eq!(o.text(), FOLD_TEXT);
+    o.undo();
+    o.undo();
+    assert_eq!(o.text(), FOLD_TEXT);
+}
+
+/// M6: deleting the last line under a folded statement keeps the caret visible, on the
+/// fold's header; the fold stays folded.
+#[gpui::test]
+fn delete_last_line_below_a_fold_keeps_the_caret_visible(cx: &mut TestAppContext) {
+    let text = "top\nSELECT a,\n  b,\n  c\nFROM t;\nend";
+    let start = text.find("SELECT").unwrap();
+    let svc = Svc {
+        folds: vec![FoldRange {
+            range: start..text.find("t;").unwrap() + 2,
+            kind: FoldKind::Statement,
+        }],
+        ..Svc::default()
+    };
+    let mut o = open_with(cx, &text.replacen("end", "e┃nd", 1), svc);
+    fold_all(&mut o);
+    o.run("editor.delete_line");
+    assert_eq!(o.text(), "top\nSELECT a,\n  b,\n  c\nFROM t;");
+    assert_eq!(folded_lines(&o), vec![(1, 4)], "the fold stays folded");
+    let head = o.state().find('┃').unwrap();
+    assert_eq!(head, start + 1, "on the header, at the caret's column");
+}
+
+/// M9: where `--` needs a space after it (MySQL), `--x` is code, not a comment: toggling
+/// comments it instead of deleting its dashes.
+#[gpui::test]
+fn mysql_needs_a_space_after_the_dashes(cx: &mut TestAppContext) {
+    let mut o = open_with(
+        cx,
+        "SELECT 1\n--1┃\n",
+        Svc {
+            tokens: Some(CommentTokens::MYSQL),
+            ..Svc::default()
+        },
+    );
+    o.run("editor.toggle_comment");
+    assert_eq!(o.state(), "SELECT 1\n-- --1┃\n");
+    o.run("editor.toggle_comment");
+    assert_eq!(o.state(), "SELECT 1\n--1┃\n");
+}
+
+/// M12: a dialect without line comments wraps the touched lines in its block comment.
+#[gpui::test]
+fn without_line_comments_the_block_comment_wraps_the_lines(cx: &mut TestAppContext) {
+    let mut o = open_with(
+        cx,
+        "  SELECT┃ 1\n",
+        Svc {
+            tokens: Some(CommentTokens {
+                line: None,
+                ..CommentTokens::SQL
+            }),
+            ..Svc::default()
+        },
+    );
+    o.run("editor.toggle_comment");
+    assert_eq!(o.text(), "  /* SELECT 1 */\n");
+    o.run("editor.toggle_comment");
+    assert_eq!(o.text(), "  SELECT 1\n");
 }
 
 #[gpui::test]
