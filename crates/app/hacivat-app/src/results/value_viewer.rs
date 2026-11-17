@@ -676,7 +676,7 @@ pub fn is_open(console: ConsoleId, cx: &App) -> bool {
 /// What console `console`'s open viewer shows.
 pub fn view(console: ConsoleId, cx: &App) -> Option<ViewerView> {
     let v = viewer(console, cx).filter(|v| v.read(cx).open)?;
-    Some(v.read(cx).view_of(cx))
+    Some(v.read(cx).view_of(true, cx))
 }
 
 /// The cell the open viewer reads.
@@ -801,7 +801,7 @@ impl ValueViewer {
     }
 
     /// What the viewer shows now.
-    fn view_of(&self, cx: &App) -> ViewerView {
+    fn view_of(&self, with_body: bool, cx: &App) -> ViewerView {
         let meta = self.meta.as_ref();
         let body = self.body.as_ref();
         let can_copy = meta.is_some_and(|m| !matches!(m.shape, Shape::Null | Shape::Error));
@@ -837,7 +837,12 @@ impl ValueViewer {
                 |b| b.form,
             ),
             pretty: body.is_some_and(|b| b.pretty),
-            body: self.well.read(cx).rows().full_text(),
+            // ## fix round 1 (I2): the whole text only for `view` (tests), never per frame.
+            body: if with_body {
+                self.well.read(cx).rows().full_text()
+            } else {
+                String::new()
+            },
             footer,
             truncated: meta.and_then(|m| m.truncated.clone()),
             rerun: meta.and_then(|m| m.rerun.clone()),
@@ -1094,7 +1099,7 @@ impl Render for ValueViewer {
             return div().into_any_element();
         }
         let entity = cx.entity();
-        let view = self.view_of(cx);
+        let view = self.view_of(false, cx);
         let view = &view;
         let header = div()
             .flex()
