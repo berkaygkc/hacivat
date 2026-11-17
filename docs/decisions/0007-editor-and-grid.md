@@ -459,3 +459,89 @@ records which limit caused T1 (accumulated while in T1); back to T0 once each ca
 below 80 % of itself and the other is within itself (exact integer comparison), and the banner's
 copy follows the cause. Sizes in the banner come from the host's `large_file::SizeText` (format
 locale); the fallback is an unformatted decimal.
+
+## m3b-t35 — grid model
+
+M3c Task 35 (HV-GRID-02 frozen, -05 multi-rect, -06): the view map the grid paints, keys and
+hit-tests through; frozen columns; grow and shrink; edge autoscroll; auto-fit and per-type
+widths.
+
+**`ViewMap` (the API Task 36 sorts through).** The three variants of Task 1b stay; `Permuted`
+and `Filtered` gain an `index: ViewIndex` field, the inverse (model row → view row) that makes
+`model_to_view` O(1) (1M-row permutation: model→view→model under 50 ns, the perf line). Build
+the maps with `ViewMap::permuted(order, tail_from, loaded)` and `ViewMap::filtered(rows,
+source_loaded)`: they build the index (O(n), so Task 36 calls `permuted` on the background
+executor with its sort and publishes the result with `GridView::set_view_map`). Match variants
+with `..`. The index is a cache: it never decides `==` or `Hash`; a bare variant builds it on
+its first lookup; every hit is checked against the order, and a miss is trusted only when the
+index was built from the same `Arc` (it keeps a `Weak` to it, so the allocation cannot be
+reused), so an index from another map scans, never answers wrong. A sparse filter (few kept
+rows of a huge source) gets a sorted `(model, view)` table instead (O(log n)). Other helpers:
+`ViewMap::with_loaded` (rows appended after a sort join its unsorted tail), `is_identity`,
+`shows`.
+
+**Selection under a map (digest 04 R15).** The focus, the anchor and the row set are model
+rows; rectangles are view rows. `Selection::on_view_map_changed` (called by `set_view_map`)
+clears the rectangles, keeps the focus and the row and column sets, and selects the focus cell
+alone where the new map shows it when nothing else is left (a focus a filter hides selects
+nothing and stays for the next key). Copy (`normalize_for_copy`) and the count
+(`cell_count_in`, the map-aware `cell_count`) take a row set as the view rows that show it
+(rows a filter hides drop out); the copy region is in view rows, which Task 36's copy
+translates back. Shift-extending rows under a sort or a filter (`extend_rows_to_in`, used by
+the gutter, the row drag and Select row) takes the rows **as shown**: a whole-width rectangle
+of view rows (`cols: 0..u32::MAX`), because a model row range would select other rows than the
+user dragged over; one row stays a model row piece.
+
+**The grid and the map.** `GridView::set_view_map` stores the map (a sort's follows the loaded
+rows), updates the selection and asks for a frame. **A re-run drops the map** (new rows have no
+order); Task 36 publishes a new one. The frame paints view row `r` with the cells of
+`view_to_model(r)`; the gutter numbers view rows; a filter's kept rows are all the grid
+scrolls over; clicks, drags and keys turn view rows into model rows through the map; the
+selection boxes of a row set under a map are the runs of view rows near the view that hold it.
+
+**Frozen columns.** `ColumnLayout` keeps the count the user set (`frozen`) and the count the
+frame shows (`frozen_shown`: at most those leaving `MIN_WIDTH` of the body to scroll,
+`fit_frozen` per frame), so a narrow pane keeps scrolling columns and widening it brings the
+frozen ones back. `left_x` keeps its meaning, but `ScrollState` gets a viewport of the body less
+the frozen width and a content of `scroll_width()` (the columns after the frozen ones), so a
+column scrolled into view comes out from under the frozen ones and a frozen column never
+scrolls. The element paints the body and the header in two segments, each with the same layers
+and its own (disjoint) clip: the frozen columns (unshifted, clipped to the frozen width), then
+the scrolling ones (shifted by `left_x`, clipped right of it), with a 1 px `seam-strong` edge on
+the last frozen column (NOTES M3c-21: no glyph). Nothing frozen is one segment, pixel for pixel
+M3a's frame. Both segments share the fast-scroll budget, frozen cells first (the columns kept in
+view are the last to fall back to skeleton bars), and the kept column buffer, so a frame of
+cache hits still allocates nothing.
+`grid.freeze` freezes up to the focus column (refused when that would leave less than
+`MIN_WIDTH` to scroll) and emits `FrozenChanged`; `grid.unfreeze` unfreezes; the host sets a
+count with `GridView::set_frozen` (no event). A re-run with the same columns keeps the count.
+
+**Grow and shrink.** Cell → row segment → row → all, and back, at the focus. The row segment is
+the focus row across the on-screen run of columns holding the focus (the frozen columns, or the
+scrolling ones the frame shows), skipped when it is the cell or the whole row (NOTES M3c-23 reads
+the plan's "row segment" this way; ruling request). The row step is a model row piece, so it
+follows the data through a re-sort. Any other shape grows to everything and shrinks to the focus
+cell.
+
+**Multi-rect.** ⌘/Ctrl-click and -drag add a range (M3a's pieces); the Excel copy rule and its
+refusal are unchanged. `Selection::ranges` counts pieces; the app's strip says "Selection 2
+ranges · 10 cells" (`hv-strip-ranges`) for more than one.
+
+**Edge autoscroll while still (ledger 213).** While a cell or row drag rests past the body's
+edge, a 16 ms timer on the GPUI executor does what a move to the resting pointer would (scroll
+by the distance, capped at 40 rows or 120 px sideways, then extend); it stops when the pointer
+comes back inside or the drag ends (including a missed mouse-up).
+
+**Auto-size.** The initial size bounds a column's data width by its kind (`width_bounds`: flags
+≤ 96 px, numbers ≤ 240, timestamps, UUIDs and binary ≤ 320, text and JSON ≤ 480; the header
+still widens past them, up to 320). `grid.auto_fit` (selected whole columns, else the focus
+column) and a double-click on a header's right edge queue an auto-fit: measured from the same
+samples inside the same 240-cell frame budget, up to 2,000 px, outliers trimmed as M3a's
+`fit_width` does; the width counts as the user's and is reported as `ColumnResized`. The
+fast-scroll thresholds are unchanged.
+
+**Resize.** The hovered header edge shows a 1 px `text-2` handle; while dragging, the guide is
+dashed; the view draws the width tag under the header ("136 px · Drag to resize ·
+double-click to fit", `hv-grid-width` + `hv-grid-resize-tip`) while hovering or dragging an
+edge. Frozen headers carry the tooltip `hv-grid-frozen-tip`. The labels are `GridLabels`'
+`frozen_tip`, `resize_tip` and `width`.

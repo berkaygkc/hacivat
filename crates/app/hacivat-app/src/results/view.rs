@@ -208,6 +208,18 @@ fn grid_config(number: u32, adapter: &Rc<GridAdapter>) -> GridConfig {
             loading: text_fn(ids::hv::GRID_LOADING),
             too_many_columns: too_many,
             no_rows: text_fn(ids::hv::GRID_NO_ROWS),
+            // ## m3c-t35 (named exception): Task 35's frozen tooltip and resize tag.
+            frozen_tip: text_fn(ids::hv::GRID_FROZEN_TIP),
+            resize_tip: text_fn(ids::hv::GRID_RESIZE_TIP),
+            width: Rc::new(|width: f32, cx: &App| {
+                tr(
+                    cx,
+                    ids::hv::GRID_WIDTH,
+                    ids::hv::HvGridWidth {
+                        px: Count(width.max(0.0).round() as u64),
+                    },
+                )
+            }),
         },
         a11y_label: Rc::new(move |cx: &App| result_title(number, cx)),
         // ## m3b-t01b-seams: a table until Task 38's views.
@@ -290,16 +302,31 @@ fn banner_of(entry: &ResultEntry, snapshot: &StoreSnapshot) -> Option<MemoryBann
     })
 }
 
-/// The size (`rows × cols`) of `grid`'s selection over `loaded` rows, when it has one block.
-fn selection_dims(grid: &GridView, loaded: u64) -> Option<(u64, u64)> {
+/// The size of `grid`'s selection over `loaded` rows: `rows × cols` when it has one block;
+/// ## m3c-t35 (named exception): "2 ranges · 10 cells" when it holds several ranges (NOTES
+/// M3c-22), counted through the grid's view map.
+fn selection_dims(grid: &GridView, loaded: u64) -> Option<strip::StripSelection> {
     let selection = grid.selection();
     if selection.is_empty() {
         return None;
     }
-    let region = selection
-        .normalize_for_copy(&ViewMap::identity(loaded), grid.column_layout().visible())
-        .ok()?;
-    Some((region.row_count(), region.cols.len() as u64))
+    let map = match grid.view_map() {
+        ViewMap::Identity { .. } => ViewMap::identity(loaded),
+        other => other.clone(),
+    };
+    let order = grid.column_layout().visible();
+    if selection.ranges() > 1 {
+        let cells = selection.cell_count_in(&map, order);
+        return Some(strip::StripSelection::Ranges {
+            n: selection.ranges() as u64,
+            cells: u64::try_from(cells).unwrap_or(u64::MAX),
+        });
+    }
+    let region = selection.normalize_for_copy(&map, order).ok()?;
+    Some(strip::StripSelection::Dims {
+        rows: region.row_count(),
+        cols: region.cols.len() as u64,
+    })
 }
 
 impl ResultsHost {

@@ -10,7 +10,24 @@
 //!    rows × columns; at most one `ensure_rows`; the hitbox; the frame's events.
 //! 3. `paint` ([`paint_frame`]): the regions body → header → gutter → corner → scrollbars, each
 //!    in its content mask, the layers of [`super::layers`] inside each; the pointer listeners.
+//!
+//! ## m3b-t35 (M3c Task 35)
+//! - **The view map.** Rows are painted in view order: view row `r` shows model row
+//!   `GridView::view_map().view_to_model(r)`; the gutter numbers view rows; a filter's kept rows
+//!   are all the grid scrolls over. A re-run drops the map; rows appended after a sort join its
+//!   unsorted tail.
+//! - **The frozen layer.** The body and the header are painted in two segments with disjoint
+//!   clips: the frozen columns (never scrolled, clipped to the frozen width), then the scrolling
+//!   columns (scrolled by `left_x`, clipped right of the frozen width), with a 1 px
+//!   `seam-strong` edge on the last frozen column (header and rows). Each segment runs the same
+//!   layers; with nothing frozen there is one segment and the frame is M3a's. The fast-scroll
+//!   budget is shared (frozen cells are body cells), the frozen ones first, so the columns kept
+//!   in view are the last to fall back to skeleton bars; both segments reuse the same kept
+//!   column buffer, so a frame of cache hits still allocates nothing.
+//! - **Resize.** The hovered header edge shows a 1 px `text-2` handle; while dragging, the
+//!   guide is dashed `text-2` down the header and the body (the view adds the width tag).
 
+use std::ops::Range;
 use std::panic::Location;
 use std::rc::Rc;
 
@@ -32,9 +49,9 @@ use super::{
     FAST_SCROLL_ROWS_PER_FRAME, FAST_SHAPES_PER_FRAME, FrameStats, Geometry, ROW_NUMBER_MIN_DIGITS,
     ROW_NUMBER_MIN_PX, SCROLLBAR_PX,
 };
-use crate::model::ViewMap;
-use crate::source::{Align, CellKind, ColumnKind, GridFrame, ModelRow, ViewRow};
-use crate::view::{GridEvent, GridView, SKELETON_ROWS};
+use crate::model::{ColumnLayout, ScrollState, ViewMap};
+use crate::source::{Align, CellKind, ColumnKind, GridFrame, ViewRow};
+use crate::view::{GridEvent, GridView};
 
 /// The grid's element. Its accessibility node is not here: the view's root, the element that
 /// tracks the focus, declares it (`GridView::a11y_node`; ## m3a-t30-results-view).
@@ -128,16 +145,6 @@ impl Element for GridElement {
     }
 }
 
-/// The rows the grid scrolls over for `count`: the exact total when known, the skeleton rows
-/// while the first rows are arriving, the loaded rows otherwise.
-fn scroll_rows(count: &crate::source::RowCount) -> u64 {
-    match count.exact_total {
-        Some(total) => total.max(count.loaded),
-        None if count.loaded == 0 && count.more => SKELETON_ROWS,
-        None => count.loaded,
-    }
-}
-
 /// Generation and row-count changes (HV-GRID-05 lifecycle).
 fn sync_data(v: &mut GridView, frame: &dyn GridFrame, cx: &mut Context<GridView>) {
     let (generation, _version) = frame.generation();
@@ -149,6 +156,8 @@ fn sync_data(v: &mut GridView, frame: &dyn GridFrame, cx: &mut Context<GridView>
         v.adopt_columns(columns, true);
         if !first {
             // A re-run: both models start over; a focus is kept pending until rows arrive.
+            // ## m3b-t35: the new rows have no order yet; the host sorts them again.
+            v.drop_view_map();
             v.scroll.on_generation_changed();
             let map = ViewMap::identity(count.loaded);
             v.selection.on_generation_changed(&map, v.layout.visible());
@@ -160,8 +169,10 @@ fn sync_data(v: &mut GridView, frame: &dyn GridFrame, cx: &mut Context<GridView>
         v.data.generation = Some(generation);
         v.data.replaced = false;
     } else if count.loaded > v.data.count.loaded {
-        // An append keeps the selection and places a pending focus.
-        let map = ViewMap::identity(count.loaded);
+        // An append keeps the selection and places a pending focus (## m3b-t35: through the
+        // view map, which takes the new rows into a sort's unsorted tail).
+        v.note_loaded(count.loaded);
+        let map = v.view_map().clone();
         if v.selection.on_rows_loaded(&map, v.layout.visible()) {
             v.selection_dirty = true;
             cx.emit(GridEvent::FocusChanged(v.selection.focus()));
@@ -173,7 +184,8 @@ fn sync_data(v: &mut GridView, frame: &dyn GridFrame, cx: &mut Context<GridView>
     v.data.count = count;
     // ## m3b-t01b-seams: `GridView::view_map` answers the identity over the loaded rows.
     v.note_loaded(count.loaded);
-    v.data.rows = scroll_rows(&count);
+    // ## m3b-t35: a filter scrolls over its kept rows only.
+    v.data.rows = v.scroll_rows();
     if v.shows_no_rows() != showed_no_rows {
         cx.notify();
     }
@@ -225,11 +237,20 @@ pub(crate) fn prepaint_frame(
     let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     let body_w = (w - gutter_w - SCROLLBAR_PX).max(0.0);
     // The column auto-size takes its share of the frame before the columns are laid out.
-    let autosize_measures = super::autosize::step(v, &*frame, body_w, window, cx);
-    if v.autosize.pending() && autosize_measures > 0 {
+    let autosize = super::autosize::step(v, &*frame, body_w, window, cx);
+    let autosize_measures = autosize.measured;
+    if (v.autosize.pending() || v.autosize.fits_pending()) && autosize_measures > 0 {
         let view = cx.entity();
         window.on_next_frame(move |_, cx| view.update(cx, |_, cx| cx.notify()));
     }
+    // ## m3b-t35: an auto-fit's width is the user's; the host keeps it like a dragged one.
+    for (col, width) in autosize.fitted {
+        cx.emit(GridEvent::ColumnResized { col, width });
+    }
+    // ## m3b-t35: the frozen columns that fit this body, then the scroll over the rest.
+    v.layout.fit_frozen(body_w);
+    let frozen = v.layout.frozen_shown();
+    let frozen_w = (v.layout.frozen_width() as f32).min(body_w);
     let content_w = v.layout.total_width();
     let htrack_h = if content_w > f64::from(body_w) {
         SCROLLBAR_PX
@@ -239,16 +260,17 @@ pub(crate) fn prepaint_frame(
     let body_h = (h - header_h - htrack_h).max(0.0);
     let body_x = x0 + gutter_w;
     let body_y = y0 + header_h;
+    let scroll_w = (body_w - frozen_w).max(0.0);
 
-    v.scroll.set_viewport(body_w, body_h);
+    v.scroll.set_viewport(scroll_w, body_h);
     v.scroll.on_row_count(v.data.rows);
-    v.scroll.set_content_width(content_w);
+    v.scroll.set_content_width(v.layout.scroll_width());
     v.scroll.apply_pending();
     let velocity = v.scroll.velocity_rows_per_frame();
     let fast = velocity > FAST_SCROLL_ROWS_PER_FRAME;
 
     let rows = v.scroll.visible_rows();
-    let cols = v.layout.visible_range(v.scroll.left_x, body_w);
+    let cols = v.layout.scrolling_range(v.scroll.left_x, scroll_w);
     let geom = Geometry {
         bounds,
         corner: rect(x0, y0, gutter_w, header_h),
@@ -261,6 +283,8 @@ pub(crate) fn prepaint_frame(
         rows: rows.clone(),
         cols: cols.clone(),
         scale,
+        frozen,
+        frozen_w,
     };
 
     // Rows past the loaded ones are placeholders: ask for them, once per frame.
@@ -417,8 +441,46 @@ pub(crate) fn paint_frame(
     degraded
 }
 
-/// The body region: background, selection and hover fills, content, hairlines, outlines and
-/// the resize guide.
+// ## m3b-t35
+/// A run of visible columns painted with one horizontal offset inside one clip: the scrolling
+/// columns (scrolled by `left_x`, right of the frozen layer) or the frozen ones (never
+/// scrolled).
+#[derive(Debug, Clone)]
+struct Segment {
+    cols: Range<usize>,
+    /// Subtracted from a column's content x (`left_x`, or 0 for the frozen columns).
+    shift: f64,
+    /// The clip's left and right, window x.
+    x0: f32,
+    x1: f32,
+    frozen: bool,
+}
+
+/// The frame's segments, in paint order: the frozen columns (none with nothing frozen), then
+/// the scrolling ones. Their clips are disjoint, so the order only decides which spends the
+/// fast-scroll budget first.
+fn segments(v: &GridView, g: &Geometry) -> [Option<Segment>; 2] {
+    let (left, right) = (f32::from(g.body.left()), f32::from(g.body.right()));
+    let pane = (left + g.frozen_w).min(right);
+    [
+        (g.frozen > 0).then_some(Segment {
+            cols: 0..g.frozen,
+            shift: 0.0,
+            x0: left,
+            x1: pane,
+            frozen: true,
+        }),
+        Some(Segment {
+            cols: g.cols.clone(),
+            shift: v.scroll.left_x,
+            x0: pane,
+            x1: right,
+            frozen: false,
+        }),
+    ]
+}
+
+/// The body region: the zebra, each segment's layers, the frozen edge and the resize guide.
 #[allow(clippy::too_many_arguments)]
 fn paint_body(
     v: &mut GridView,
@@ -434,19 +496,13 @@ fn paint_body(
     let g = &f.geom;
     let (body_x, body_y) = (f32::from(g.body.left()), f32::from(g.body.top()));
     let body_right = f32::from(g.body.right());
+    let (top, bottom) = (body_y, f32::from(g.body.bottom()));
     let row_h = g.row_h;
-    let left_x = v.scroll.left_x;
-    let col_left =
-        |layout: &crate::model::ColumnLayout, ix: usize| body_x + (layout.x_of(ix) - left_x) as f32;
-    let row_top = |scroll: &crate::model::ScrollState, r: u64| body_y + scroll.row_top(r) as f32;
-    let loaded = v.data.count.loaded;
-    let map = ViewMap::identity(loaded);
-    let focused = v.selection.focus();
 
     // Layer 2: zebra (a setting, off in M3a).
     if v.config.zebra {
         for r in g.rows.clone().filter(|r| r % 2 == 1) {
-            let y = row_top(&v.scroll, r);
+            let y = body_y + v.scroll.row_top(r) as f32;
             window.paint_quad(fill(
                 rect(body_x, y, body_right - body_x, row_h),
                 palette.hover,
@@ -454,23 +510,83 @@ fn paint_body(
         }
     }
 
+    // ## m3b-t35: the view map (an `Arc` clone) and the segments.
+    let map = v.view_map().clone();
+    for seg in segments(v, g).into_iter().flatten() {
+        let clip = rect(seg.x0, top, seg.x1 - seg.x0, bottom - top);
+        masked(clip, window, |window| {
+            paint_body_segment(
+                v, f, &seg, &map, palette, snap, recording, budget, stats, window, cx,
+            )
+        });
+    }
+    if g.frozen > 0 {
+        // The frozen layer's edge: 1 px `seam-strong` on the last frozen column.
+        let rows_end = (body_y + v.scroll.row_top(g.rows.end) as f32).min(bottom);
+        window.paint_quad(fill(
+            snap.vline(body_x + g.frozen_w, top, rows_end),
+            palette.seam_strong,
+        ));
+    }
+
+    // Layer 10: the resize guide (dashed, ## m3b-t35).
+    if let Some(ix) = v.pointer.resize_guide(&v.layout) {
+        dashed_vline(snap, v.col_right(g, ix), top, bottom, palette.text2, window);
+    }
+}
+
+/// One segment of the body: selection and hover fills, content, hairlines, outlines.
+#[allow(clippy::too_many_arguments)]
+fn paint_body_segment(
+    v: &mut GridView,
+    f: &FramePrepaint,
+    seg: &Segment,
+    map: &ViewMap,
+    palette: &Palette,
+    snap: Snap,
+    recording: bool,
+    budget: &mut Budget,
+    stats: &mut FrameStats,
+    window: &mut Window,
+    cx: &mut Context<GridView>,
+) {
+    let g = &f.geom;
+    let (body_x, body_y) = (f32::from(g.body.left()), f32::from(g.body.top()));
+    let row_h = g.row_h;
+    let shift = seg.shift;
+    let col_left = |layout: &ColumnLayout, ix: usize| body_x + (layout.x_of(ix) - shift) as f32;
+    let row_top = |scroll: &ScrollState, r: u64| body_y + scroll.row_top(r) as f32;
+    let loaded = v.data.count.loaded;
+    // The rows the view shows, and the loaded model row view row `r` shows (`None` past them:
+    // a placeholder).
+    let shown = map.len();
+    let model_of = |r: u64| {
+        if r < shown {
+            map.view_to_model(ViewRow(r)).filter(|m| m.0 < loaded)
+        } else {
+            None
+        }
+    };
+    let focused = v.selection.focus();
+
     // Layer 6: selection fills (the focus cell stronger) and the hovered row, merged per row.
     let hover_row = v.pointer.hover.map(|(r, _)| r);
     if !v.selection.is_empty() || hover_row.is_some() {
         for r in g.rows.clone() {
             let y = row_top(&v.scroll, r);
+            let model = model_of(r);
             let mut run: Option<(f32, f32, Hsla)> = None;
-            for ix in g.cols.clone() {
+            for ix in seg.cols.clone() {
                 let col = v.layout.visible()[ix];
-                let selected = r < loaded && v.selection.contains(ViewRow(r), col, &map);
+                let selected = r < shown && v.selection.contains(ViewRow(r), col, map);
                 let color = if selected {
-                    let is_focus = focused.is_some_and(|c| c.row == ModelRow(r) && c.col == col);
+                    let is_focus = focused.is_some_and(|c| Some(c.row) == model && c.col == col);
                     Some(if is_focus {
                         palette.blue_tint_strong
                     } else {
                         palette.blue_tint
                     })
-                } else if hover_row == Some(r) && r < loaded {
+                } else if hover_row == Some(r) && r < shown {
                     Some(palette.hover)
                 } else {
                     None
@@ -503,14 +619,14 @@ fn paint_body(
     } = &mut *v;
     let mut col_info = std::mem::take(&mut paint.col_scratch);
     col_info.clear();
-    for ix in g.cols.clone() {
+    for ix in seg.cols.clone() {
         let col = layout.visible()[ix];
         let kind = columns
             .get(col.0 as usize)
             .filter(|s| s.id == col)
             .or_else(|| columns.iter().find(|s| s.id == col))
             .map_or(ColumnKind::Other, |s| s.kind);
-        let left = body_x + (layout.x_of(ix) - left_x) as f32;
+        let left = body_x + (layout.x_of(ix) - shift) as f32;
         col_info.push(super::ColPaint {
             ix,
             col,
@@ -530,11 +646,12 @@ fn paint_body(
     let body_h = f32::from(g.body.size.height);
     for r in g.rows.clone() {
         let y = body_y + scroll.row_top(r) as f32;
+        let model = model_of(r);
         for c in &col_info {
             let (col, ix, left, width) = (c.col, c.ix, c.left, c.width);
             let mask = rect(left, body_y, (width - 1.0).max(0.0), body_h);
             stats.cells += 1;
-            let cell = (r < loaded).then(|| f.frame.cell(ModelRow(r), col));
+            let cell = model.map(|m| f.frame.cell(m, col));
             let kind = cell.as_ref().map_or(CellKind::Placeholder, |c| c.kind);
             let Some(cell) = cell.filter(|_| kind != CellKind::Placeholder) else {
                 masked(mask, window, |window| {
@@ -542,7 +659,7 @@ fn paint_body(
                 });
                 #[cfg(feature = "test-support")]
                 if let Some(cells) = paint.recorded.as_mut() {
-                    cells.push(super::PaintedCell::skeleton(r, col));
+                    cells.push(super::PaintedCell::skeleton(r, col, left));
                 }
                 continue;
             };
@@ -580,8 +697,8 @@ fn paint_body(
                         if let Some(cells) = paint.recorded.as_mut() {
                             records += 1;
                             cells.push(match s {
-                                Some(s) => super::PaintedCell::of(r, col, s),
-                                None => super::PaintedCell::skeleton(r, col),
+                                Some(s) => super::PaintedCell::of(r, col, left, s),
+                                None => super::PaintedCell::skeleton(r, col, left),
                             });
                         }
                         if recording && let Some(s) = s {
@@ -626,23 +743,23 @@ fn paint_body(
     paint.col_scratch = col_info;
 
     // Layer 8: hairlines under each row and at each column's right edge.
-    let x_end = col_left(&v.layout, g.cols.end).min(body_right);
+    let x_end = col_left(&v.layout, seg.cols.end).min(seg.x1);
     for r in g.rows.clone() {
         let bottom = row_top(&v.scroll, r) + row_h;
-        window.paint_quad(fill(snap.hline(body_x, x_end, bottom), palette.seam_soft));
+        window.paint_quad(fill(snap.hline(seg.x0, x_end, bottom), palette.seam_soft));
     }
     let (top, bottom) = (body_y, f32::from(g.body.bottom()));
     let rows_end = row_top(&v.scroll, g.rows.end).min(bottom);
-    for ix in g.cols.clone() {
+    for ix in seg.cols.clone() {
         let right = col_left(&v.layout, ix + 1);
         window.paint_quad(fill(snap.vline(right, top, rows_end), palette.seam_soft));
     }
 
     // Layer 9: the hover outline and the selection boxes with the focus handle.
     if let Some((r, ix)) = v.pointer.hover
-        && r < loaded
+        && r < shown
         && g.rows.contains(&r)
-        && g.cols.contains(&ix)
+        && seg.cols.contains(&ix)
     {
         let (x, x1) = (col_left(&v.layout, ix), col_left(&v.layout, ix + 1));
         let y = row_top(&v.scroll, r);
@@ -652,12 +769,17 @@ fn paint_body(
             window,
         );
     }
-    paint_selection_boxes(v, g, palette, snap, window);
+    paint_selection_boxes(v, g, seg, map, palette, snap, window);
+}
 
-    // Layer 10: the resize guide.
-    if let Some(x) = v.pointer.resize_guide(&v.layout) {
-        let gx = body_x + (x - left_x) as f32;
-        window.paint_quad(fill(snap.vline(gx, top, bottom), palette.text2));
+/// A dashed vertical 1 px line at `right` (exclusive) from `y0` to `y1`: 3 px dashes, 3 px
+/// gaps.
+fn dashed_vline(snap: Snap, right: f32, y0: f32, y1: f32, color: Hsla, window: &mut Window) {
+    const DASH: f32 = 3.0;
+    let mut y = y0;
+    while y < y1 {
+        window.paint_quad(fill(snap.vline(right, y, (y + DASH).min(y1)), color));
+        y += 2.0 * DASH;
     }
 }
 
@@ -667,21 +789,17 @@ fn box_rows(rows: std::ops::Range<u64>, visible: &std::ops::Range<u64>) -> std::
     rows.start.max(visible.start.saturating_sub(1))..rows.end.min(visible.end.saturating_add(1))
 }
 
-/// The 1 px `blue` boxes of the selection's pieces, the 5 px handle (in a 1 px `panel` ring) at
-/// the bottom right of the box holding the focus.
-fn paint_selection_boxes(
+/// Calls `f(r0, r1, c0, c1)` for each box of the selection's pieces, in view rows and visible
+/// column indices: select-all, the row pieces, the column pieces, the rectangles. Under a sort
+/// or a filter (## m3b-t35) a row piece (model rows) shows as the runs of view rows near the
+/// view that hold its rows.
+fn for_each_box(
     v: &GridView,
     g: &Geometry,
-    palette: &Palette,
-    snap: Snap,
-    window: &mut Window,
+    map: &ViewMap,
+    mut f: impl FnMut(u64, u64, usize, usize),
 ) {
-    let loaded = v.data.count.loaded;
-    if v.selection.is_empty() || loaded == 0 || g.cols.is_empty() || g.rows.is_empty() {
-        return;
-    }
-    let (body_x, body_y) = (f32::from(g.body.left()), f32::from(g.body.top()));
-    let left_x = v.scroll.left_x;
+    let shown = map.len();
     let order = v.layout.visible();
     // Column positions (ordinals) to visible indices: [first visible ≥ start, last < end].
     let col_span = |cols: &std::ops::Range<u32>| -> Option<(usize, usize)> {
@@ -689,55 +807,110 @@ fn paint_selection_boxes(
         let b = order.iter().rposition(|c| c.0 < cols.end)?;
         (a <= b).then_some((a, b + 1))
     };
-    let visible_rows = g.rows.start..g.rows.end.min(loaded);
-    let all_cols = (0, order.len());
-    let mut boxes: smallvec::SmallVec<[(u64, u64, usize, usize); 4]> = smallvec::SmallVec::new();
+    let visible_rows = g.rows.start..g.rows.end.min(shown);
+    let all = order.len();
     if v.selection.is_all() {
-        boxes.push((visible_rows.start, visible_rows.end, all_cols.0, all_cols.1));
-    } else {
+        f(visible_rows.start, visible_rows.end, 0, all);
+        return;
+    }
+    if map.is_identity() {
         for rows in v.selection.rows() {
-            boxes.push((rows.start, rows.end.min(loaded), all_cols.0, all_cols.1));
+            f(rows.start, rows.end.min(shown), 0, all);
         }
-        for cols in v.selection.cols() {
-            if let Some((a, b)) = col_span(cols) {
-                boxes.push((visible_rows.start, visible_rows.end, a, b));
+    } else if !v.selection.rows().is_empty() {
+        let near = g.rows.start.saturating_sub(1)..g.rows.end.saturating_add(1).min(shown);
+        let mut run: Option<u64> = None;
+        for r in near.clone() {
+            let held = map
+                .view_to_model(ViewRow(r))
+                .is_some_and(|m| v.selection.row_selected(m));
+            match (run, held) {
+                (None, true) => run = Some(r),
+                (Some(start), false) => {
+                    f(start, r, 0, all);
+                    run = None;
+                }
+                _ => {}
             }
         }
-        for r in v.selection.rects() {
-            if let Some((a, b)) = col_span(&r.cols) {
-                boxes.push((r.rows.start, r.rows.end.min(loaded), a, b));
-            }
+        if let Some(start) = run {
+            f(start, near.end, 0, all);
         }
     }
-    let focus = v.selection.focus();
-    let mut handle: Option<(f32, f32)> = None;
-    for (r0, r1, c0, c1) in boxes {
-        if r0 >= r1
-            || r1 <= g.rows.start
-            || r0 >= g.rows.end
-            || c1 <= g.cols.start
-            || c0 >= g.cols.end
-        {
-            continue;
+    for cols in v.selection.cols() {
+        if let Some((a, b)) = col_span(cols) {
+            f(visible_rows.start, visible_rows.end, a, b);
         }
-        let x = snap.v(body_x + (v.layout.x_of(c0) - left_x) as f32);
-        let x1 = snap.v(body_x + (v.layout.x_of(c1) - left_x) as f32);
+    }
+    for r in v.selection.rects() {
+        if let Some((a, b)) = col_span(&r.cols) {
+            f(r.rows.start, r.rows.end.min(shown), a, b);
+        }
+    }
+}
+
+/// The 1 px `blue` boxes of the selection's pieces in segment `seg`, and the 5 px handle (in a
+/// 1 px `panel` ring) at the bottom right of the box holding the focus (else the first box on
+/// screen), drawn by the segment holding that box's last column.
+fn paint_selection_boxes(
+    v: &GridView,
+    g: &Geometry,
+    seg: &Segment,
+    map: &ViewMap,
+    palette: &Palette,
+    snap: Snap,
+    window: &mut Window,
+) {
+    if v.selection.is_empty() || map.is_empty() || g.rows.is_empty() {
+        return;
+    }
+    if seg.cols.is_empty() && !seg.frozen {
+        return;
+    }
+    let (body_x, body_y) = (f32::from(g.body.left()), f32::from(g.body.top()));
+    let on_rows = |r0: u64, r1: u64| r0 < r1 && r1 > g.rows.start && r0 < g.rows.end;
+    let on_screen = |c0: usize, c1: usize| {
+        (g.frozen > 0 && c0 < g.frozen) || (c1 > g.cols.start && c0 < g.cols.end)
+    };
+    let focus = v
+        .selection
+        .focus()
+        .map(|f| (v.view_row_of(f.row), v.layout.index_of(f.col)));
+    let mut handle: Option<(u64, u64, usize, usize)> = None;
+    for_each_box(v, g, map, |r0, r1, c0, c1| {
+        if !on_rows(r0, r1) || !on_screen(c0, c1) {
+            return;
+        }
+        let holds_focus = focus.is_some_and(|(row, ix)| {
+            (r0..r1).contains(&row) && ix.is_some_and(|ix| (c0..c1).contains(&ix))
+        });
+        if holds_focus || handle.is_none() {
+            handle = Some((r0, r1, c0, c1));
+        }
+    });
+    let corners = |r0: u64, r1: u64, c0: usize, c1: usize| {
+        let x = snap.v(body_x + (v.layout.x_of(c0) - seg.shift) as f32);
+        let x1 = snap.v(body_x + (v.layout.x_of(c1) - seg.shift) as f32);
         // Rows far off screen would put an edge ~10⁸ px away, where an `f32` step is several
         // px and the visible edge drifts: draw the box's rows within the visible ones ± 1 (the
         // clamped edges stay outside the body's mask).
         let drawn = box_rows(r0..r1, &g.rows);
         let y = snap.v(body_y + v.scroll.row_top(drawn.start) as f32);
         let y1 = snap.v(body_y + v.scroll.row_top(drawn.end) as f32);
-        outline(rect(x, y, x1 - x, y1 - y), palette.blue, window);
-        let holds_focus = focus.is_some_and(|f| {
-            let ix = v.layout.index_of(f.col);
-            (r0..r1).contains(&f.row.0) && ix.is_some_and(|ix| (c0..c1).contains(&ix))
-        });
-        if holds_focus || handle.is_none() {
-            handle = Some((x1, y1));
+        (x, y, x1, y1)
+    };
+    for_each_box(v, g, map, |r0, r1, c0, c1| {
+        if !on_rows(r0, r1) || c1 <= seg.cols.start || c0 >= seg.cols.end {
+            return;
         }
-    }
-    if let Some((x1, y1)) = handle {
+        let (x, y, x1, y1) = corners(r0, r1, c0, c1);
+        outline(rect(x, y, x1 - x, y1 - y), palette.blue, window);
+    });
+    if let Some((r0, r1, c0, c1)) = handle
+        && c1 > 0
+        && (c1 - 1 < g.frozen) == seg.frozen
+    {
+        let (_, _, x1, y1) = corners(r0, r1, c0, c1);
         // The 5 px square in its 1 px panel ring, centred a px inside the box's corner.
         layers::bordered(
             rect(x1 - 4.0, y1 - 4.0, 7.0, 7.0),
@@ -749,8 +922,9 @@ fn paint_selection_boxes(
     }
 }
 
-/// The header region: background, the selected columns' tint, names over mono types, the
-/// column seams, the bottom border and the resize guide.
+/// The header region: background, each segment's headers (the selected columns' tint, names
+/// over mono types, the column seams), the bottom border, the frozen edge, the hovered edge's
+/// handle and the resize guide.
 #[allow(clippy::too_many_arguments)]
 fn paint_header(
     v: &mut GridView,
@@ -767,13 +941,63 @@ fn paint_header(
     window.paint_quad(fill(header, palette.head));
     let (hx, hy) = (f32::from(header.left()), f32::from(header.top()));
     let hh = f32::from(header.size.height);
-    let left_x = v.scroll.left_x;
+    for seg in segments(v, g).into_iter().flatten() {
+        let clip = rect(seg.x0, hy, seg.x1 - seg.x0, hh);
+        masked(clip, window, |window| {
+            paint_header_segment(
+                v, f, &seg, clip, palette, snap, recording, budget, window, cx,
+            )
+        });
+    }
+    // The bottom border.
+    window.paint_quad(fill(
+        snap.hline(hx, f32::from(header.right()), hy + hh),
+        palette.seam_strong,
+    ));
+    // ## m3b-t35: the frozen edge, the hovered edge's handle, the dashed guide.
+    if g.frozen > 0 {
+        window.paint_quad(fill(
+            snap.vline(hx + g.frozen_w, hy, hy + hh),
+            palette.seam_strong,
+        ));
+    }
+    if v.pointer.drag.is_none()
+        && let Some(ix) = v.pointer.border
+    {
+        window.paint_quad(fill(
+            snap.vline(v.col_right(g, ix), hy, hy + hh),
+            palette.text2,
+        ));
+    }
+    if let Some(ix) = v.pointer.resize_guide(&v.layout) {
+        dashed_vline(snap, v.col_right(g, ix), hy, hy + hh, palette.text2, window);
+    }
+}
+
+/// One segment of the header.
+#[allow(clippy::too_many_arguments)]
+fn paint_header_segment(
+    v: &mut GridView,
+    f: &FramePrepaint,
+    seg: &Segment,
+    clip: Bounds<Pixels>,
+    palette: &Palette,
+    snap: Snap,
+    recording: bool,
+    budget: &mut Budget,
+    window: &mut Window,
+    cx: &mut Context<GridView>,
+) {
+    let g = &f.geom;
+    let header = g.header;
+    let (hx, hy) = (f32::from(header.left()), f32::from(header.top()));
+    let hh = f32::from(header.size.height);
+    let shift = seg.shift;
     let GridView {
         paint,
         layout,
         columns,
         selection,
-        pointer: ptr,
         ..
     } = &mut *v;
     let roles = paint.roles.as_ref().expect("roles are built in prepaint");
@@ -781,9 +1005,9 @@ fn paint_header(
     let type_lh = 13.0;
     let name_y = hy + ((hh - 1.0 - name_lh - 1.0 - type_lh) / 2.0).max(0.0);
     let type_y = name_y + name_lh + 1.0;
-    for ix in g.cols.clone() {
+    for ix in seg.cols.clone() {
         let col = layout.visible()[ix];
-        let left = hx + (layout.x_of(ix) - left_x) as f32;
+        let left = hx + (layout.x_of(ix) - shift) as f32;
         let width = layout.width_at(ix);
         // A column selection tints its headers; select-all tints the corner instead (the mock's
         // `colsel` and `allon`).
@@ -861,12 +1085,15 @@ fn paint_header(
                 );
                 if let Some((recorded, truncated, _degraded)) = recorded {
                     budget.allocs += u32::from(recorded);
-                    if truncated && is_name {
-                        // An ellipsized name: the whole name is its tooltip (NOTES rule 7).
+                    if is_name && (truncated || seg.frozen) {
+                        // An ellipsized name: the whole name is its tooltip (NOTES rule 7);
+                        // ## m3b-t35: a frozen column's header says it is frozen.
                         paint.header_tips.push(super::HeaderTip {
                             col,
                             name: text.clone(),
-                            bounds: mask.intersect(&header),
+                            bounds: mask.intersect(&header).intersect(&clip),
+                            ellipsized: truncated,
+                            frozen: seg.frozen,
                         });
                     }
                     #[cfg(feature = "test-support")]
@@ -885,19 +1112,12 @@ fn paint_header(
         // The seam between columns.
         window.paint_quad(fill(snap.vline(left + width, hy, hy + hh), palette.seam));
     }
-    // The bottom border.
-    window.paint_quad(fill(
-        snap.hline(hx, f32::from(header.right()), hy + hh),
-        palette.seam_strong,
-    ));
-    if let Some(x) = ptr.resize_guide(layout) {
-        let gx = hx + (x - left_x) as f32;
-        window.paint_quad(fill(snap.vline(gx, hy, hy + hh), palette.text2));
-    }
 }
 
 /// The row-number gutter: background, row numbers (raw digits; `blue` for selected rows,
-/// `text-2` on the hovered row), the row hairlines and the `seam` edge.
+/// `text-2` on the hovered row), the row hairlines and the `seam` edge. ## m3b-t35: the numbers
+/// are view rows (a sorted grid numbers its rows 1…n as shown); a row is selected by its model
+/// row.
 fn paint_gutter(
     v: &mut GridView,
     f: &FramePrepaint,
@@ -913,7 +1133,11 @@ fn paint_gutter(
     let (gx, gy) = (f32::from(gutter.left()), f32::from(gutter.top()));
     let right = f32::from(gutter.right());
     let row_h = g.row_h;
-    let numbered = v.data.known_total().unwrap_or(v.data.count.loaded);
+    let map = v.view_map().clone();
+    let numbered = match map {
+        ViewMap::Filtered { .. } => map.len(),
+        _ => v.data.known_total().unwrap_or(v.data.count.loaded),
+    };
     let hover_row = v.pointer.hover.map(|(r, _)| r);
     let selection = &v.selection;
     let roles = v.paint.roles.as_ref().expect("roles are built in prepaint");
@@ -922,7 +1146,9 @@ fn paint_gutter(
         let y = gy + v.scroll.row_top(r) as f32;
         if r < numbered {
             let selected = all
-                || selection.row_selected(ModelRow(r))
+                || map
+                    .view_to_model(ViewRow(r))
+                    .is_some_and(|m| selection.row_selected(m))
                 || selection.rects().iter().any(|rc| rc.rows.contains(&r));
             let color = if selected {
                 palette.blue
@@ -982,7 +1208,9 @@ fn paint_corner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::scroll_rows;
     use crate::source::RowCount;
+    use crate::view::SKELETON_ROWS;
 
     #[test]
     fn scroll_rows_follow_the_total_then_the_loaded_rows() {

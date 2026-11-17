@@ -1318,3 +1318,50 @@ fn rerun_from_a_result_tab_resends_that_tabs_unit(cx: &mut TestAppContext) {
     );
     stop_core_runtime_test(cx);
 }
+
+// ## m3c-t35 (named exception): the strip counts a selection of several ranges (NOTES M3c-22).
+#[gpui::test]
+fn the_strip_counts_the_ranges_of_a_multi_range_selection(cx: &mut TestAppContext) {
+    use hacivat_ui_grid::GridCommand;
+    use hacivat_ui_grid::model::Dir;
+
+    let t = tile(cx, "en", None);
+    t.apply(&[tab(
+        1,
+        source(store_of(20, 4, Completeness::Complete), Arc::default()),
+    )]);
+    let host = t.host();
+    let grid = t
+        .vcx
+        .read(|cx| host.read(cx).grid_of(t.console, 0, cx))
+        .expect("the tab's grid");
+    // One block: rows × columns. (The first key focuses the first cell.)
+    in_window(t.vcx, |window, cx| {
+        grid.update(cx, |g, cx| {
+            for (dir, extend) in [(Dir::Down, false), (Dir::Down, true)] {
+                g.dispatch(GridCommand::Move { dir, extend }, window, cx);
+            }
+        })
+    });
+    t.redraw();
+    assert_eq!(t.text("strip-dims").as_deref(), Some("2 × 1"));
+    // Ctrl/Cmd-click on another cell adds a range: "2 ranges · 3 cells".
+    let at = t.vcx.read(|cx| {
+        let g = grid.read(cx);
+        let geom = g.geometry().expect("painted");
+        let l = g.column_layout();
+        gpui::point(
+            geom.body.left() + gpui::px(l.x_of(2) as f32 + 10.0),
+            geom.body.top() + gpui::px(g.scroll_state().row_top(5) as f32 + 10.0),
+        )
+    });
+    let add = t.vcx.update(|_, cx| gpui::Modifiers::secondary_key(cx));
+    t.vcx.simulate_click(at, add);
+    t.redraw();
+    assert_eq!(
+        t.vcx.read(|cx| grid.read(cx).selection().ranges()),
+        2,
+        "the click added a range"
+    );
+    assert_eq!(t.text("strip-dims").as_deref(), Some("2 ranges · 3 cells"));
+}

@@ -2635,3 +2635,25 @@ hv-history-console-gone = The console to insert into is closed.
 hv-history-insert-refused = The statement couldn't be inserted: the editor is read-only, composing text, or would get too large.
 hv-history-pin-failed = The pin couldn't be changed.
 hv-history-open-failed = The new console didn't open in time; nothing was inserted.
+
+## m3b-t35-grid
+
+# The header tooltip of a frozen column (frozen columns keep their place when the grid scrolls
+# sideways).
+hv-grid-frozen-tip = Frozen: stays in place when you scroll sideways
+# The column-resize tag's hint, after the width (hv-grid-width), while the pointer is on or
+# drags a column header's edge.
+hv-grid-resize-tip = Drag to resize · double-click to fit
+# A column's width in the column-resize tag.
+# Variables:
+#   $px (Number) - the width in logical pixels, e.g. 136.
+hv-grid-width = { $px } px
+# The selection's size on the right of the cursor strip when it holds several ranges
+# (Ctrl/Cmd-click adds one).
+# Variables:
+#   $n (Number) - the ranges, e.g. 2.
+#   $cells (Number) - the cells they cover together, e.g. 10.
+hv-strip-ranges = { $n } ranges · { $cells ->
+        [one] { $cells } cell
+       *[other] { $cells } cells
+    }

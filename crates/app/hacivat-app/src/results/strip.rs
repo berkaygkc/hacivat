@@ -351,10 +351,21 @@ pub const STRIP_ID: &str = "results-strip";
 // ## m3a-f2-visual: the wrapped reason's line pitch (NOTES surface 11).
 const WRAP_LINE_PX: f32 = 16.0;
 
-/// The cursor strip of `model`, with the selection's size (`rows × cols`) on the right.
+// ## m3c-t35 (named exception): a selection of several ranges (NOTES M3c-22).
+/// The selection's size the strip shows on its right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StripSelection {
+    /// One block: "Selection 3 × 2".
+    Dims { rows: u64, cols: u64 },
+    /// Several ranges (⌘/Ctrl-click): "Selection 2 ranges · 10 cells".
+    Ranges { n: u64, cells: u64 },
+}
+
+/// The cursor strip of `model`, with the selection's size (`rows × cols`, or its ranges and
+/// cells) on the right.
 pub fn render(
     model: StripModel,
-    selection: Option<(u64, u64)>,
+    selection: Option<StripSelection>,
     actions: StripActions,
     cx: &App,
 ) -> AnyElement {
@@ -579,16 +590,26 @@ pub fn render(
             label,
         ));
     }
-    if let Some((rows, cols)) = selection {
+    if let Some(selection) = selection {
         let word = tr(cx, ids::hv::STRIP_SELECTION, NoArgs);
-        let dims = tr(
-            cx,
-            ids::hv::STRIP_DIMS,
-            ids::hv::HvStripDims {
-                rows: Count(rows),
-                cols: Count(cols),
-            },
-        );
+        let dims = match selection {
+            StripSelection::Dims { rows, cols } => tr(
+                cx,
+                ids::hv::STRIP_DIMS,
+                ids::hv::HvStripDims {
+                    rows: Count(rows),
+                    cols: Count(cols),
+                },
+            ),
+            StripSelection::Ranges { n, cells } => tr(
+                cx,
+                ids::hv::STRIP_RANGES,
+                ids::hv::HvStripRanges {
+                    n: Count(n),
+                    cells: Count(cells),
+                },
+            ),
+        };
         let label: TextFn = {
             let dims = dims.clone();
             Rc::new(move |_| dims.clone())

@@ -2369,3 +2369,14 @@ hv-history-insert-refused = İfade eklenemedi: düzenleyici salt okunur, metin o
 hv-history-pin-failed = Sabitleme değiştirilemedi.
 # Review: PO
 hv-history-open-failed = Yeni konsol zamanında açılmadı; hiçbir şey eklenmedi.
+
+## m3b-t35-grid
+
+# Review: PO
+hv-grid-frozen-tip = Donduruldu: yana kaydırınca yerinde kalır
+# Review: PO
+hv-grid-resize-tip = Boyutlandırmak için sürükleyin · sığdırmak için çift tıklayın
+# Review: PO
+hv-grid-width = { $px } px
+# Review: PO
+hv-strip-ranges = { $n } aralık · { $cells } hücre

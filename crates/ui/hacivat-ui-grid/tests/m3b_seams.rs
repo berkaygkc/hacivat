@@ -1,6 +1,10 @@
 //! M3b Task 1b: the grid's M3b seams. The view maps work (Tasks 35–37 build on them); the go-to
 //! parser and frozen columns are fail-closed stubs; the new commands either tell the host or do
 //! nothing; `set_transposed` stores the flag. The `#[gpui::test]`s need `test-support`.
+//!
+//! ## m3c-t35 (named exception): Task 35 filled frozen columns, grow/shrink, auto-fit and
+//! freeze; the maps are built with `ViewMap::permuted`/`filtered` (they carry an index), and
+//! the stub checks below keep only the stubs still open (Tasks 37–39).
 
 use std::sync::Arc;
 
@@ -19,11 +23,7 @@ fn identity_view_map_is_unchanged() {
 
 #[test]
 fn permuted_view_map_round_trips() {
-    let m = ViewMap::Permuted {
-        order: Arc::from([2u64, 0, 1]),
-        tail_from: 3,
-        loaded: 3,
-    };
+    let m = ViewMap::permuted(Arc::from([2u64, 0, 1]), 3, 3);
     assert_eq!(m.view_to_model(ViewRow(0)), Some(ModelRow(2)));
     assert_eq!(m.model_to_view(ModelRow(2)), Some(ViewRow(0)));
     for v in 0..3 {
@@ -36,11 +36,7 @@ fn permuted_view_map_round_trips() {
 #[test]
 fn permuted_view_map_keeps_the_unsorted_tail_in_source_order() {
     // Rows 0..3 were sorted; rows 3 and 4 arrived after the sort.
-    let m = ViewMap::Permuted {
-        order: Arc::from([1u64, 2, 0]),
-        tail_from: 3,
-        loaded: 5,
-    };
+    let m = ViewMap::permuted(Arc::from([1u64, 2, 0]), 3, 5);
     assert_eq!(m.view_to_model(ViewRow(3)), Some(ModelRow(3)));
     assert_eq!(m.view_to_model(ViewRow(4)), Some(ModelRow(4)));
     assert_eq!(m.model_to_view(ModelRow(4)), Some(ViewRow(4)));
@@ -50,10 +46,7 @@ fn permuted_view_map_keeps_the_unsorted_tail_in_source_order() {
 
 #[test]
 fn filtered_view_map_shows_only_its_rows() {
-    let m = ViewMap::Filtered {
-        rows: Arc::from([4u64, 7, 9]),
-        source_loaded: 10,
-    };
+    let m = ViewMap::filtered(Arc::from([4u64, 7, 9]), 10);
     assert_eq!(m.len(), 3);
     assert_eq!(m.view_to_model(ViewRow(1)), Some(ModelRow(7)));
     assert_eq!(m.view_to_model(ViewRow(3)), None);
@@ -62,17 +55,26 @@ fn filtered_view_map_shows_only_its_rows() {
 }
 
 #[test]
-fn goto_and_frozen_stubs_fail_closed() {
+fn goto_stub_fails_closed_and_frozen_columns_freeze() {
     assert_eq!(parse_goto("12", &[], '.', ','), Err(GotoError::Empty));
     let mut layout = ColumnLayout::new([(ColId(0), 80.0), (ColId(1), 80.0)]);
     layout.set_frozen(1);
-    assert_eq!(layout.frozen(), 0);
+    // ## m3c-t35: frozen columns are Task 35's (`tests/model_frozen.rs`).
+    assert_eq!(layout.frozen(), 1);
     // An empty sort is the source order.
     assert!(SortSpec::default().keys.is_empty());
 }
 
 #[test]
 fn m3b_grid_commands_are_in_the_table() {
+    // ## m3c-t35: Task 35 filled grow/shrink, auto-fit and freeze/unfreeze.
+    let filled = [
+        "grid.grow_selection",
+        "grid.shrink_selection",
+        "grid.auto_fit",
+        "grid.freeze",
+        "grid.unfreeze",
+    ];
     for (id, cmd) in [
         ("grid.grow_selection", GridCommand::GrowSelection),
         ("grid.shrink_selection", GridCommand::ShrinkSelection),
@@ -86,15 +88,22 @@ fn m3b_grid_commands_are_in_the_table() {
     ] {
         assert_eq!(grid_command(id), Some(cmd), "{id}");
         // Fix round 2 (I3): every new grid command is a stub until its task fills it.
-        assert!(hacivat_ui_grid::commands::is_stub(id), "{id}");
+        assert_eq!(
+            hacivat_ui_grid::commands::is_stub(id),
+            !filled.contains(&id),
+            "{id}"
+        );
     }
-    assert_eq!(hacivat_ui_grid::commands::STUB_COMMANDS.len(), 9);
+    assert_eq!(hacivat_ui_grid::commands::STUB_COMMANDS.len(), 4);
     // M3a's commands are not.
     for (id, _) in hacivat_ui_grid::GRID_COMMANDS.iter().take(26) {
         assert!(!hacivat_ui_grid::commands::is_stub(id), "{id}");
     }
 }
 
+/// The key model leaves the M3b commands to `GridView::dispatch` (## m3c-t35: grow and shrink
+/// need the on-screen columns, freeze and auto-fit the layout), so `apply_command` changes
+/// nothing for them.
 #[test]
 fn the_key_model_ignores_the_m3b_commands() {
     let map = ViewMap::identity(5);
@@ -188,18 +197,8 @@ mod view {
         );
         let focus = view.read_with(vcx, |v, _| v.selection().focus()).unwrap();
         events.borrow_mut().clear();
-        let selection = view.read_with(vcx, |v, _| v.selection().clone());
-        for cmd in [
-            GridCommand::GrowSelection,
-            GridCommand::ShrinkSelection,
-            GridCommand::AutoFit,
-            GridCommand::Freeze,
-            GridCommand::Unfreeze,
-        ] {
-            run(&view, vcx, cmd);
-        }
-        assert!(events.borrow().is_empty(), "{:?}", events.borrow());
-        assert_eq!(view.read_with(vcx, |v, _| v.selection().clone()), selection);
+        // ## m3c-t35: grow/shrink, auto-fit and freeze/unfreeze are no longer no-ops (Task 35's
+        // `tests/element_frozen.rs`); the commands below still only tell the host.
         run(&view, vcx, GridCommand::Find);
         run(&view, vcx, GridCommand::GotoRow);
         run(&view, vcx, GridCommand::OpenValue);
@@ -232,11 +231,7 @@ mod view {
             view.read_with(vcx, |v, _| v.view_map().clone()),
             ViewMap::identity(20)
         );
-        let sorted = ViewMap::Permuted {
-            order: Arc::from((0..20u64).rev().collect::<Vec<_>>()),
-            tail_from: 20,
-            loaded: 20,
-        };
+        let sorted = ViewMap::permuted(Arc::from((0..20u64).rev().collect::<Vec<_>>()), 20, 20);
         view.update(vcx, |v, cx| v.set_view_map(sorted.clone(), cx));
         assert_eq!(view.read_with(vcx, |v, _| v.view_map().clone()), sorted);
         view.update(vcx, |v, cx| v.set_view_map(ViewMap::identity(0), cx));

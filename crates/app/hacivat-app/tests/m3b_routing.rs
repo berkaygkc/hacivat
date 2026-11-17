@@ -605,7 +605,9 @@ fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
         .collect();
     assert_eq!(stubs.len(), 23);
     stubs.extend(hacivat_ui_grid::commands::STUB_COMMANDS);
-    assert_eq!(stubs.len(), 32);
+    // ## m3c-t35 (named exception): Task 35 filled five grid commands (grow/shrink, auto-fit,
+    // freeze/unfreeze); four grid stubs remain.
+    assert_eq!(stubs.len(), 27);
     // The app-registered stubs (disabled since Task 1b).
     // ## m3b-t27-history (named exception): `history.open` is no longer a stub; it is enabled
     // once the history store is open (`history_ui.rs` covers it).
