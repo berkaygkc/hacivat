@@ -127,8 +127,8 @@ use hacivat_ui::titlebar::{PALETTE_MIN_PX, TitleBarProbe};
 use hacivat_ui_core::app::{TextRendering, bootstrap};
 use hacivat_ui_core::assets::BundledAssets;
 use hacivat_ui_core::gpui_surface::{
-    AnyWindowHandle, App, Bounds, HeadlessAppContext, Pixels, Window, current_headless_renderer,
-    current_platform, point, px, size,
+    AnyWindowHandle, App, Bounds, HeadlessAppContext, Pixels, PlatformTextSystem, Window,
+    current_headless_renderer, current_platform, point, px, size,
 };
 use hacivat_ui_core::named_rules::assert_one_filled_badge_in;
 use hacivat_ui_core::platform::apply_text_rendering;
@@ -1360,11 +1360,24 @@ fn check_title_bar(width: f32, bar: TitleBarProbe, capsule: Option<Bounds<Pixels
     out
 }
 
+// ## m3c-threads
+/// The platform text system every shot's app shapes with: one per process (the render runs on
+/// `main`), built from the one platform made for it. A platform made per shot only to take its
+/// text system is never freed on Linux (its event loop's foreground source holds a clone of
+/// the loop's own handle, an `Rc` cycle), and with it its dispatcher's worker and timer
+/// threads stayed alive: about five threads per shot on a 4-CPU runner, until the full matrix
+/// ran out of threads (CI run 44152258028, after 3,314 shots).
+fn shot_text_system() -> Arc<dyn PlatformTextSystem> {
+    thread_local! {
+        static TEXT_SYSTEM: Arc<dyn PlatformTextSystem> = current_platform(true).text_system();
+    }
+    TEXT_SYSTEM.with(Arc::clone)
+}
+
 /// Renders `shot` in a fresh app, checks the frame and writes the PNG. Returns the violations.
 fn render(shot: Shot, dir: &Path) -> Vec<String> {
-    let platform = current_platform(true);
     let mut cx = HeadlessAppContext::with_platform(
-        platform.text_system(),
+        shot_text_system(),
         Arc::new(BundledAssets),
         current_headless_renderer,
     );
@@ -1672,6 +1685,9 @@ fn render_all_surfaces(names: &[String], all: bool) {
     let mut slowest = std::time::Duration::ZERO;
     // ## m3c-t43-shots (fix round 1, m1): the M3c shots rendered, per state.
     let mut m3c_rendered: std::collections::BTreeMap<&'static str, usize> = Default::default();
+    // ## m3c-threads: the live threads after the first shot and after the last.
+    let mut first_threads: Option<Option<usize>> = None;
+    let mut threads = None;
     for shot in shots() {
         if !names.contains(&shot.file_name(2.0)) {
             continue;
@@ -1683,6 +1699,15 @@ fn render_all_surfaces(names: &[String], all: bool) {
         slowest = slowest.max(took);
         println!("shot time {}: {} ms", shot.file_name(2.0), took.as_millis());
         rendered += 1;
+        // ## m3c-threads: the live threads stay near the first shot's count; a run that keeps
+        // growing stops here, before the OS refuses a thread (whose panics name a bystander).
+        threads = live_threads();
+        let first = *first_threads.get_or_insert(threads);
+        if let (Some(first), Some(now)) = (first, threads)
+            && let Some(leak) = thread_leak(first, now, rendered)
+        {
+            panic!("{leak}");
+        }
         // ## m3c-t43-shots (fix round 1, m1)
         if let Surface::M3c(state) = shot.surface {
             *m3c_rendered.entry(state.name()).or_insert(0) += 1;
@@ -1699,6 +1724,13 @@ fn render_all_surfaces(names: &[String], all: bool) {
         total.as_millis() / rendered.max(1) as u128,
         slowest.as_millis()
     );
+    // ## m3c-threads
+    let shown = |n: Option<usize>| n.map_or_else(|| "?".to_string(), |n| n.to_string());
+    println!(
+        "shots: {} live threads after the first shot, {} after the last",
+        shown(first_threads.flatten()),
+        shown(threads),
+    );
     assert!(rendered > 0, "no shot selected");
     assert!(
         failures.is_empty(),
@@ -1706,6 +1738,75 @@ fn render_all_surfaces(names: &[String], all: bool) {
         failures.len(),
         failures.join("\n")
     );
+}
+
+// ## m3c-threads
+/// How many more live threads than after the first shot the run may have at any later shot:
+/// room for the threads a process starts once, on the first shot that needs them, and for a
+/// shot's own threads that are still ending. A shot that leaks threads crosses it within a
+/// few dozen shots (five a shot, the Linux platform's leak, by the eighth).
+const THREAD_SLACK: usize = 32;
+
+/// The violation when `now` live threads after `rendered` shots exceed the `first` shot's
+/// count by more than [`THREAD_SLACK`].
+fn thread_leak(first: usize, now: usize, rendered: usize) -> Option<String> {
+    (now > first + THREAD_SLACK).then(|| {
+        format!(
+            "shots: {now} live threads after {rendered} shots, {first} after the first: a shot \
+             leaves threads running (more than {THREAD_SLACK} more)"
+        )
+    })
+}
+
+/// This process's live OS threads: `Threads:` in `/proc/self/status` on Linux, `ps -M` on
+/// macOS (no `unsafe`); `None` elsewhere or when the OS does not say.
+fn live_threads() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("Threads:"))?
+            .trim()
+            .parse()
+            .ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-M", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()?;
+        out.status.success().then_some(())?;
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .count()
+            .checked_sub(1)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+// ## m3c-threads
+fn a_run_whose_threads_keep_growing_fails() {
+    assert_eq!(thread_leak(40, 40, 2), None);
+    assert_eq!(thread_leak(40, 40 + THREAD_SLACK, 500), None);
+    // Fewer threads than after the first shot is no leak.
+    assert_eq!(thread_leak(40, 12, 9), None);
+    let leak = thread_leak(40, 41 + THREAD_SLACK, 8).expect("a leak");
+    assert!(
+        leak.contains("73 live threads after 8 shots") && leak.contains("40 after the first"),
+        "{leak}"
+    );
+    // The live count, where the OS says it, counts this thread at least.
+    assert!(live_threads().is_none_or(|n| n >= 1));
+}
+
+// ## m3c-threads
+fn every_shot_shares_one_platform_text_system() {
+    assert!(Arc::ptr_eq(&shot_text_system(), &shot_text_system()));
 }
 
 fn the_matrix_covers_every_surface_locale_and_theme() {
@@ -2093,7 +2194,17 @@ fn main() {
         eprintln!("--shard {bad:?}: expected k/n with 1 <= k <= n");
         std::process::exit(2);
     }
-    let checks: [(&str, fn()); 11] = [
+    let checks: [(&str, fn()); 13] = [
+        // ## m3c-threads
+        (
+            "a_run_whose_threads_keep_growing_fails",
+            a_run_whose_threads_keep_growing_fails,
+        ),
+        // ## m3c-threads
+        (
+            "every_shot_shares_one_platform_text_system",
+            every_shot_shares_one_platform_text_system,
+        ),
         // ## m3c-t43-shots
         (
             "every_m3c_state_has_its_own_marker",
