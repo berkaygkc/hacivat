@@ -311,6 +311,8 @@ pub fn build_for(
         );
     } else if let Some(access) = model.read_only.clone() {
         let narrow_access = access.clone();
+        // ## m3c-t41-chrome (fix round 1, m4): the lock is red on production.
+        let production = model.env == Some(EnvKind::Production);
         bar = bar.trailing(
             ToolbarItem::pinned(
                 item(move |_, cx| lock_chip(access.clone(), cx)),
@@ -319,7 +321,7 @@ pub fn build_for(
             // ## m3c-t41-chrome: the whole label ("read-only (guarded)"), wrapping inside the
             // chip.
             .narrow(item(move |_, cx| {
-                lock_chip_narrow(narrow_access.clone(), cx)
+                lock_chip_narrow(narrow_access.clone(), production, cx)
             }))
             .narrow_wraps(
                 model.read_only.clone().unwrap_or_default(),
@@ -532,6 +534,8 @@ fn waiting_narrow(
     }
     div()
         .id("console-waiting")
+        // ## m3c-t41-chrome (fix round 1, m1): its selector, for the narrow sweep.
+        .debug_selector(|| "console-waiting".to_string())
         .flex()
         .flex_col()
         .items_start()
@@ -644,20 +648,24 @@ fn pending_chip_narrow(cx: &App) -> AnyElement {
     )
 }
 
-/// The lock chip's narrow form: the lock and the whole access label, wrapping inside the chip.
-fn lock_chip_narrow(access: SharedString, cx: &App) -> AnyElement {
+/// The lock chip's narrow form: the lock (red on production, NOTES surface 24) and the whole
+/// access label, wrapping inside the chip.
+fn lock_chip_narrow(access: SharedString, production: bool, cx: &App) -> AnyElement {
     let t = Theme::get(cx).tokens;
     let c = &t.colors;
     let glyph = IconSize::Chrome.px();
+    // ## m3c-t41-chrome (fix round 1, m4): Hue Is Meaning: red marks production.
+    let lock = if production { c.red } else { c.text_2 };
     narrow_chip(
         "console-lock",
         div()
+            .debug_selector(|| "console-lock-glyph".to_string())
             .flex_none()
             .mt(px(first_line_top(cx, glyph)))
             .child(
                 Icon::new(IconName::Lock)
                     .size(IconSize::Chrome)
-                    .color(c.text_2.to_hsla()),
+                    .color(lock.to_hsla()),
             )
             .into_any_element(),
         paragraph(

@@ -1360,3 +1360,64 @@ pub fn answers_probe_with(
         .exec(exec)
         .queries(queries.into_iter().chain(extra).collect())
 }
+
+// ## m3c-t41-chrome (fix round 1, m8)
+
+/// As [`register_test_console`], but the console's tab is opened and the Settings tab shown
+/// again in the same update, so the console is attached (its results take the display of the
+/// moment) while its host has not drawn a frame yet.
+pub fn register_test_console_unseen(
+    vcx: &VisualTestContext,
+    profile: hacivat_proto::ProfileId,
+    session: hacivat_session::session::SessionHandle,
+) -> hacivat_app::console::ConsoleId {
+    use hacivat_app::console::{ConsoleId, ConsoleState, Consoles};
+    use hacivat_app::shell::TabKind;
+    let ws = workspace(vcx);
+    let id = in_window(vcx, |window, cx| {
+        let tab = ws
+            .update(cx, |ws, cx| ws.open_console_tab(Some(profile), window, cx))
+            .expect("a console tab opens");
+        let Some(TabKind::Console { n, .. }) = ws.read(cx).tab_kind(tab) else {
+            panic!("the new tab is a console");
+        };
+        let sql_service = hacivat_sql_editor::SqlLanguageService::new();
+        let service: Rc<dyn hacivat_ui_editor::LanguageService> = sql_service.clone();
+        // Test data, not a product label.
+        let label: hacivat_ui::text::TextFn = Rc::new(|_: &App| gpui::SharedString::from("SQL"));
+        let editor = cx.new(|cx| {
+            hacivat_ui_editor::EditorView::new(
+                hacivat_ui_editor::DocId(u64::from(tab.0)),
+                "",
+                hacivat_ui_editor::EditorConfig::default(),
+                service,
+                label,
+                window,
+                cx,
+            )
+        });
+        let log = hacivat_exec::SessionLog::new();
+        let results = cx.new(|_| hacivat_app::results::ConsoleResults::new(log.clone()));
+        let id = Consoles::register(
+            cx,
+            ConsoleState {
+                id: ConsoleId(0),
+                tab,
+                n,
+                profile: Some(profile),
+                client: hacivat_session::session::ClientId::DEFAULT,
+                session: Some(session),
+                editor: Some(editor.clone()),
+                results: Some(results),
+                sql: None,
+                log,
+                service: Some(sql_service),
+            },
+        );
+        hacivat_app::exec_ui::attach(id, &editor, window, cx);
+        ws.update(cx, |ws, cx| ws.open_registered_tab("settings", window, cx));
+        id
+    });
+    vcx.run_until_parked();
+    id
+}

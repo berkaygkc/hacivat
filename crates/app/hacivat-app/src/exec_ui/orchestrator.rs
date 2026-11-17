@@ -235,6 +235,11 @@ fn set_display(console: ConsoleId, cx: &mut App) {
         Some(f) => (f.format_locale, Some(f.time_zone)),
         None => ("und".to_string(), None),
     };
+    // ## m3c-t41-chrome (fix round 1, m8): what the console's results were given, so its host
+    // re-applies a change made before its first frame too.
+    cx.default_global::<DisplayApplied>()
+        .0
+        .insert(console, (locale.clone(), zone.clone().unwrap_or_default()));
     let load = cx
         .background_executor()
         .spawn(async move { DisplayZone::load(zone.as_deref()) });
@@ -601,6 +606,19 @@ fn say_in_status(console: ConsoleId, id: &'static str, cx: &mut App) {
 /// console host calls it when the regional settings changed).
 pub fn refresh_display(console: ConsoleId, cx: &mut App) {
     set_display(console, cx);
+}
+
+// ## m3c-t41-chrome (fix round 1, m8)
+/// The format locale and time zone each console's results were last given.
+#[derive(Default)]
+struct DisplayApplied(std::collections::HashMap<ConsoleId, (String, String)>);
+
+impl Global for DisplayApplied {}
+
+/// The format locale and time zone console `console`'s results were last given (`None` before
+/// its attach).
+pub fn display_applied(console: ConsoleId, cx: &App) -> Option<(String, String)> {
+    cx.try_global::<DisplayApplied>()?.0.get(&console).cloned()
 }
 
 /// Run on a console without a connection: the profile's connect starts, nothing runs

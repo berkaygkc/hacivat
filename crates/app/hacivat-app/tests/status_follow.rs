@@ -1315,7 +1315,9 @@ fn nothing_to_run_is_a_status_sentence(cx: &mut TestAppContext) {
     in_window(vcx, |window, cx| {
         editor.update(cx, |e, cx| assert!(e.run_command("editor.run", window, cx)));
     });
-    settle(vcx, Duration::from_millis(500));
+    // ## fix round 1 (m3): no fixed sleep. Run's resolution runs on the test executor (the
+    // GPUI background executor), so once the executor is parked it has been decided and said.
+    vcx.run_until_parked();
     assert!(
         !toast_ids(vcx).iter().any(|t| t.contains("nothing-to-run")),
         "{:?}",
@@ -1420,5 +1422,44 @@ fn a_click_on_the_active_console_tab_follows_it_again(cx: &mut TestAppContext) {
     vcx.simulate_click(at, gpui::Modifiers::none());
     vcx.run_until_parked();
     assert_eq!(capsule_name(vcx), (PROD.to_string(), EnvKind::Production));
+    stop_core_runtime_test(cx);
+}
+
+// ## m3c-t41-chrome (fix round 1, m8): a regional change made after the console's attach but
+// before its host's first frame still reaches its results.
+#[gpui::test]
+fn display_settings_changed_before_the_first_frame_are_followed(cx: &mut TestAppContext) {
+    let vcx = shell_two(cx);
+    let id = profile_id(vcx, STAGING);
+    let (session, _) = session_over(vcx, id, pg());
+    let staging = register_test_console_unseen(vcx, id, session);
+    let results = vcx
+        .cx
+        .read(|cx| Consoles::get(cx, staging).and_then(|s| s.results.clone()))
+        .expect("the console's results");
+    let locale = |vcx: &VisualTestContext| {
+        vcx.cx.read(|cx| {
+            results
+                .read(cx)
+                .display()
+                .settings()
+                .format_locale
+                .to_string()
+        })
+    };
+    wait_until(vcx, "the attach's display", |vcx| locale(vcx) != "und");
+    assert_ne!(locale(vcx), "tr-TR");
+    vcx.cx.update(|cx| {
+        let settings = hacivat_app::shell::update_settings(cx, |s| {
+            s.ui.regional_format = hacivat_settings::LanguagePref::Tag("tr-TR".to_string());
+        });
+        hacivat_app::l10n_global::switch_locale(cx, &settings).detach();
+    });
+    vcx.run_until_parked();
+    // The console's tab was not drawn since its attach; now it is.
+    focus_console(vcx, staging);
+    wait_until(vcx, "the results to take the new region", |vcx| {
+        locale(vcx) == "tr-TR"
+    });
     stop_core_runtime_test(cx);
 }

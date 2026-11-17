@@ -228,6 +228,11 @@ struct Case {
     pending: bool,
     read_only: Option<&'static str>,
     console: Option<hacivat_app::console::ConsoleId>,
+    // ## m3c-t41-chrome (fix round 1, m2)
+    /// The console is in a user transaction (the badge and its Commit and Roll back).
+    tx: bool,
+    /// The console shares its session (the "Shared session" chip).
+    shared: bool,
 }
 
 struct CaseHost {
@@ -257,6 +262,32 @@ impl Render for CaseHost {
             .overflow_hidden()
             .child(build_for(&model, &actions, c.console, cx))
     }
+}
+
+// ## m3c-t41-chrome (fix round 1, m1)
+/// The width of Cancel's word as its button draws it (the control style).
+fn cancel_word_px(cx: &mut gpui::VisualTestContext) -> f32 {
+    cx.update(|window, cx| {
+        let word = hacivat_app::l10n_global::tr_id(cx, "hv-console-waiting-cancel");
+        let style = hacivat_ui_core::theme::Theme::get(cx)
+            .tokens
+            .type_ramp
+            .control;
+        let run = gpui::TextRun {
+            len: word.len(),
+            font: hacivat_ui_core::fonts::font_for(&style),
+            color: gpui::Hsla::default(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        f32::from(
+            window
+                .text_system()
+                .shape_line(word, px(style.size_px), &[run], None)
+                .width,
+        )
+    })
 }
 
 /// The run states the sweep shows.
@@ -322,8 +353,17 @@ fn sweep_case(cx: &mut TestAppContext, label: &str, case: Case) -> Vec<String> {
         if case.console.is_some() {
             boxes.push("tx-chip");
         }
-        if case.console.is_some() && case.read_only.is_none() {
-            boxes.push("tx-badge");
+        // ## m3c-t41-chrome (fix round 1, m2): the badge keeps Commit and Roll back (N3), and
+        // the shared-session chip (a trust item, T22 fix round 1 I2) stays whole.
+        if case.tx {
+            boxes.extend([
+                "tx-badge",
+                "button-tx-badge-commit",
+                "button-tx-badge-rollback",
+            ]);
+        }
+        if case.shared {
+            boxes.push("tx-shared");
         }
         for id in boxes {
             match vcx.debug_bounds(id) {
@@ -348,11 +388,13 @@ fn sweep_case(cx: &mut TestAppContext, label: &str, case: Case) -> Vec<String> {
                 Some(b) if inside(b) => {}
                 other => failures.push(format!("{at}: Cancel {other:?} not inside {bar:?}")),
             }
-            let pseudo = label.ends_with("-XA") || label.ends_with("-XT");
-            let worded = frame
-                .iter()
-                .any(|r| r.path.ends_with("#button-label-console-waiting-cancel"));
-            if worded || !pseudo {
+            // ## m3c-t41-chrome (fix round 1, m1): the glyph only where the measured word (with
+            // the button's 9 px padding a side and its border) does not fit the waiting item.
+            let slot = vcx.debug_bounds("console-waiting");
+            let word = cancel_word_px(vcx);
+            let fits =
+                !narrow || slot.is_some_and(|slot| word + 20.0 <= f32::from(slot.size.width));
+            if fits {
                 texts.push("#button-label-console-waiting-cancel");
             }
         }
@@ -363,7 +405,7 @@ fn sweep_case(cx: &mut TestAppContext, label: &str, case: Case) -> Vec<String> {
         }
         if case.console.is_some() {
             texts.push("#tx-chip-mode");
-            if case.read_only.is_none() {
+            if case.tx {
                 texts.push("#tx-badge-text");
             }
         }
@@ -427,11 +469,16 @@ fn sweep_locales(cx: &mut TestAppContext, langs: &[&str]) -> Vec<String> {
         .0
     };
     let rw = session(profile.clone());
+    let rw_profile = profile.clone();
     let mut ro_profile = profile;
     ro_profile.read_only = true;
     let ro = session(ro_profile);
     let rw_console = register_test_console(vcx, id, rw.clone());
     let ro_console = register_test_console(vcx, id, ro);
+    // ## m3c-t41-chrome (fix round 1, m2): two consoles over one session share it.
+    let shared_session = session(rw_profile.clone());
+    let shared_console = register_test_console(vcx, id, shared_session.clone());
+    let _twin = register_test_console(vcx, id, shared_session);
     // The shell draws its Settings tab, so the sweep's window is the only console toolbar.
     with_ws(vcx, |ws, window, cx| {
         ws.open_registered_tab("settings", window, cx)
@@ -444,7 +491,9 @@ fn sweep_locales(cx: &mut TestAppContext, langs: &[&str]) -> Vec<String> {
     let _ = futures::executor::block_on(ticket.reply).expect("the actor replies");
     wait_until(vcx, "the mirrors", |vcx| {
         vcx.cx.read(|cx| {
-            tx_badge::user_tx(rw_console, cx).is_some() && tx_badge::view(ro_console, cx).is_some()
+            tx_badge::user_tx(rw_console, cx).is_some()
+                && tx_badge::view(ro_console, cx).is_some()
+                && tx_badge::shares_session(shared_console, cx)
         })
     });
     let mut failures = Vec::new();
@@ -463,6 +512,8 @@ fn sweep_locales(cx: &mut TestAppContext, langs: &[&str]) -> Vec<String> {
                     pending,
                     read_only: None,
                     console: Some(rw_console),
+                    tx: true,
+                    shared: false,
                 };
                 failures.extend(sweep_case(cx, lang, case));
             }
@@ -472,6 +523,19 @@ fn sweep_locales(cx: &mut TestAppContext, langs: &[&str]) -> Vec<String> {
                 pending: false,
                 read_only: Some(guarded),
                 console: Some(ro_console),
+                tx: false,
+                shared: false,
+            };
+            failures.extend(sweep_case(cx, lang, case));
+            // ## m3c-t41-chrome (fix round 1, m2)
+            let case = Case {
+                run,
+                waiting: true,
+                pending: false,
+                read_only: None,
+                console: Some(shared_console),
+                tx: false,
+                shared: true,
             };
             failures.extend(sweep_case(cx, lang, case));
         }
@@ -563,4 +627,132 @@ fn the_strips_cursor_open_stays_whole_in_a_narrow_pane(cx: &mut TestAppContext) 
         failures.extend(sweep_strip(cx, "tr-XT"));
     }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+// ## m3c-t41-chrome (fix round 1; PO M3c-18): in a narrowing result toolbar the view items
+// (Task 38's view switch and record toggle, here a pinned stand-in with a compact form at their
+// priority) take their compact forms first; Count rows (priority 1) moves before Copy; Copy
+// gives way last.
+
+struct ResultBarHost {
+    width: Rc<Cell<f32>>,
+}
+
+impl Render for ResultBarHost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use hacivat_app::results::toolbar::{VIEW_ITEMS_PRIORITY, result_toolbar};
+        use hacivat_ui::toolbar::ToolbarItem;
+        let none: hacivat_app::results::toolbar::Action = Rc::new(|_, _| {});
+        let word = |text: &'static str| -> hacivat_ui::toolbar::ItemFn {
+            Rc::new(move |_, cx| {
+                let t = hacivat_ui_core::theme::Theme::get(cx).tokens;
+                hacivat_ui::text::Label::new(
+                    text,
+                    hacivat_ui::text::TextSource::Fluent,
+                    t.type_ramp.body,
+                    t.colors.text_2.to_hsla(),
+                )
+                .into_any_element()
+            })
+        };
+        let count = ToolbarItem::new(1, word("Count rows"), Rc::new(|_| "Count rows".into()))
+            .on_choose(|_, _| {});
+        let view = ToolbarItem::pinned(
+            word("Table · Transposed · Text"),
+            Rc::new(|_| "View".into()),
+        )
+        .priority(VIEW_ITEMS_PRIORITY)
+        .compact(word("▦"));
+        div()
+            .w(px(self.width.get()))
+            .overflow_hidden()
+            .child(result_toolbar(
+                "10,000+ rows · 131 ms".into(),
+                none,
+                vec![count, view],
+                cx,
+            ))
+    }
+}
+
+#[gpui::test]
+fn copy_gives_way_last_in_a_narrow_result_toolbar(cx: &mut TestAppContext) {
+    use hacivat_ui::toolbar::ToolbarProbe;
+    let _shell = shell(cx, "en");
+    let width = Rc::new(Cell::new(900.0_f32));
+    let w = width.clone();
+    let (_, vcx) = cx.add_window_view(move |_, _| ResultBarHost { width: w });
+    vcx.update(|_, cx| cx.set_global(ToolbarProbe::default()));
+    // Items: Copy 0, Count rows 1, the view items 2, rows · timing 3.
+    let (mut count_moved, mut view_compact, mut copy_moved) = (false, false, false);
+    for px_now in (180..=900).rev().step_by(4) {
+        width.set(px_now as f32);
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        let staged = vcx
+            .read(|cx| cx.global::<ToolbarProbe>().staged.clone())
+            .expect("a frame");
+        let (count, view, copy) = (
+            staged.fit.overflow.contains(&1),
+            staged.compact.contains(&2),
+            staged.fit.overflow.contains(&0),
+        );
+        assert!(
+            !view || count,
+            "{px_now}: the view items compacted before Count rows moved"
+        );
+        assert!(
+            !copy || view,
+            "{px_now}: Copy moved before the view items compacted"
+        );
+        count_moved |= count;
+        view_compact |= view;
+        copy_moved |= copy;
+    }
+    assert!(
+        count_moved && view_compact && copy_moved,
+        "the sweep reached every stage"
+    );
+}
+
+// ## m3c-t41-chrome (fix round 1, m4): the narrow lock chip's lock is red on production (NOTES
+// surface 24, Hue Is Meaning), `text-2` elsewhere.
+#[gpui::test]
+fn the_narrow_lock_is_red_on_production(cx: &mut TestAppContext) {
+    use hacivat_ui::icon::IconName;
+    let _shell = shell(cx, "en");
+    for production in [true, false] {
+        let width = Rc::new(Cell::new(SPLIT_FLOOR_PX));
+        let w = width.clone();
+        // The guarded label is wider than a 120 px pane's row: the chip takes its narrow form.
+        let mut m = model(production, true, false);
+        m.read_only = Some("read-only (guarded)".into());
+        let (_, vcx) = cx.add_window_view(move |_, _| Host { width: w, model: m });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("console-lock-glyph").is_some(),
+            "the narrow lock chip draws its glyph"
+        );
+        hacivat_ui::icon::icon_record();
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        let locks: Vec<gpui::Hsla> = hacivat_ui::icon::icon_take()
+            .into_iter()
+            .filter(|i| i.name == IconName::Lock)
+            .map(|i| i.color)
+            .collect();
+        let (red, text_2) = vcx.read(|cx| {
+            let c = hacivat_ui_core::theme::Theme::get(cx).tokens.colors;
+            (c.red.to_hsla(), c.text_2.to_hsla())
+        });
+        // The bar also lays out the chip's full form (its `text-2` lock) to measure it; the
+        // narrow form drawn in the pane is the red one on production, and only there.
+        assert!(locks.contains(&text_2), "{locks:?}");
+        assert_eq!(
+            locks.contains(&red),
+            production,
+            "production={production}: {locks:?}"
+        );
+        drop(width);
+    }
 }

@@ -217,9 +217,6 @@ pub struct PopupMenu {
     // ## m3a-t35-shots (named exception): at most this wide (the chooser's 460 px, NOTES
     // surface 4); a row's data hint ellipsizes to fit.
     max_width: Option<Pixels>,
-    // ## m3c-t41-chrome: the width the menu last drew, so a menu wider than its minimum stays
-    // inside the window too (a chip that moved right, e.g. after Run gained its glyph).
-    drawn_width: std::rc::Rc<std::cell::Cell<f32>>,
     items: Vec<MenuItemSpec>,
     selected: Option<usize>,
     focus: FocusHandle,
@@ -287,7 +284,6 @@ impl PopupMenu {
                 anchor,
                 min_width: px(MENU_MIN_WIDTH_PX),
                 max_width: None,
-                drawn_width: Default::default(),
                 selected,
                 items,
                 focus,
@@ -645,10 +641,8 @@ impl Render for PopupMenu {
                 };
             let height = chrome + rows_height;
             let floor = f32::from(viewport.height) - t.spacing.statusbar_height - t.spacing.xs;
-            // ## m3c-t41-chrome: the width it drew, when wider than its minimum.
-            let width = self.min_width.max(px(self.drawn_width.get()));
-            let left = if anchor.x + width > viewport.width {
-                (viewport.width - width).max(px(0.0))
+            let left = if anchor.x + self.min_width > viewport.width {
+                (viewport.width - self.min_width).max(px(0.0))
             } else {
                 anchor.x
             };
@@ -899,19 +893,8 @@ impl Render for PopupMenu {
         let surface = if self.anchor.is_some() {
             let drawn_rows = drawn_rows.clone();
             let first = shown.start;
-            // ## m3c-t41-chrome
-            let (drawn_width, me) = (self.drawn_width.clone(), cx.entity().downgrade());
-            let pad = 2.0 * t.spacing.xs + 2.0;
             crate::text::card_scope_then(surface, move |bounds, window, cx| {
                 let column = bounds.get(1 + usize::from(has_title)).copied();
-                // ## m3c-t41-chrome: a new width places the menu again on the next frame.
-                if let Some(c) = column {
-                    let width = f32::from(c.size.width) + pad;
-                    if (width - drawn_width.get()).abs() > 0.5 {
-                        drawn_width.set(width);
-                        let _ = me.update(cx, |_, cx| cx.notify());
-                    }
-                }
                 let rows = drawn_rows
                     .borrow()
                     .iter()
@@ -923,14 +906,14 @@ impl Render for PopupMenu {
         } else {
             crate::text::card_scope(surface)
         };
-        let mut menu = surface
+        let menu = surface
             .id("popup-menu")
             .debug_selector(|| "popup-menu".to_string())
             .track_focus(&self.focus)
             .declare(Role::Menu, menu_name.clone(), None);
-        if let Some((left, top)) = position {
-            menu = menu.absolute().left(left).top(top);
-        }
+        // ## m3c-t41-chrome (fix round 1, m5): an anchored menu is placed by GPUI's `anchored`,
+        // which measures it before it paints: one wider than its minimum near the window's right
+        // edge moves inside the window on its first frame (below).
         let mut menu = menu.min_w(self.min_width);
         // ## m3a-t35-shots (named exception)
         if let Some(max) = self.max_width {
@@ -1021,7 +1004,16 @@ impl Render for PopupMenu {
             column
         };
         let column = column.children(rows);
-        menu.children(title).child(column).children(footer)
+        let menu = menu.children(title).child(column).children(footer);
+        // ## m3c-t41-chrome (fix round 1, m5)
+        match position {
+            Some((left, top)) => hacivat_ui_core::gpui_surface::anchored()
+                .position(hacivat_ui_core::gpui_surface::point(left, top))
+                .snap_to_window()
+                .child(menu)
+                .into_any_element(),
+            None => menu.into_any_element(),
+        }
     }
 }
 

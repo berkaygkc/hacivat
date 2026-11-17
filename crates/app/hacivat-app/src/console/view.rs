@@ -532,8 +532,6 @@ pub struct ConsoleHost {
     segment: Option<Entity<EditorSegment>>,
     // ## m3c-t41-chrome: one status bar cell per part of the segment.
     segment_cells: Vec<Entity<SegmentCell>>,
-    /// The format locale and time zone the console's results were last given.
-    display_key: Option<(String, String)>,
     autosave: Option<Autosave>,
     autosave_task: Option<Task<()>>,
     /// The console's session is its own (not the profile's default session): only such a
@@ -594,7 +592,6 @@ impl ConsoleHost {
             clock_task: None,
             segment: None,
             segment_cells: Vec::new(),
-            display_key: None,
             autosave: None,
             autosave_task: None,
             paint_errors: 0,
@@ -694,7 +691,8 @@ impl ConsoleHost {
 
     // ## m3c-t41-chrome
     /// Gives the console's results the format locale and time zone again when they changed
-    /// since the last frame (a settings change refreshes the windows).
+    /// from what the attach or the last refresh applied (a settings change refreshes the
+    /// windows).
     fn follow_display(&mut self, cx: &mut Context<Self>) {
         let Some(console) = self.console() else {
             return;
@@ -706,13 +704,13 @@ impl ConsoleHost {
             return;
         };
         let key = (format.format_locale.clone(), format.time_zone.clone());
-        match &self.display_key {
-            Some(old) if *old == key => {}
-            Some(_) => {
-                self.display_key = Some(key);
+        // ## fix round 1 (m8): against what the attach (or the last refresh) applied, so a
+        // change made before this console's first frame is followed too.
+        match crate::exec_ui::orchestrator::display_applied(console, cx) {
+            Some(applied) if applied != key => {
                 cx.defer(move |cx| crate::exec_ui::orchestrator::refresh_display(console, cx));
             }
-            None => self.display_key = Some(key),
+            _ => {}
         }
     }
 
