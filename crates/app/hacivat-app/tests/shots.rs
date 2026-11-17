@@ -2983,7 +2983,9 @@ fn known_findings_match_only_their_own_clip() {
     }
     // ## m3c-t43b-fix (review m2, m3): part B's entries against the real lines the full render
     // printed, each only in its own scope (F11's body in English and Turkish, not pseudo; F12's
-    // tab title, a creation site, in the pseudo-locales only).
+    // tab title, a creation site, in the pseudo-locales only). ## m3c-narrow: dormant while
+    // `KNOWN_FINDINGS_B` is empty (F10–F12 fixed); it applies again should an entry for
+    // `narrow-reduced` come back.
     let reduced = M3c::NarrowReduced;
     let body = "narrow-reduced-dark-en-1280x800@2x.png: (b) clipped: \"Reduced mode keeps typing \
                 fast. It ends when the document is smaller than 3.2 MB.\" (57.0 px painted) at \

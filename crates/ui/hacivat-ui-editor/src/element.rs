@@ -151,6 +151,10 @@ pub struct FrameLayout {
     pub(crate) advance: f32,
     // ## m3c-t32-fold (named exception): the frame's height map (folds hide lines).
     pub(crate) map: HeightMap,
+    // ## m3c-narrow
+    /// The whole element (the gutter and the text area), in window coordinates: the narrow
+    /// forms of the placeholder and the banner read its width.
+    pub(crate) bounds: Bounds<Pixels>,
 }
 
 impl FrameLayout {
@@ -997,6 +1001,8 @@ pub(crate) fn prepaint_frame(
         origin_x,
         advance,
         map: map.clone(),
+        // ## m3c-narrow
+        bounds,
     };
     let text_left = f64::from(f32::from(text_area.left()) + TEXT_INSET);
     if reveal {
@@ -1040,7 +1046,14 @@ pub(crate) fn prepaint_frame(
         origin_x: text_left - v.scroll.scroll_x,
         advance,
         map: map.clone(),
+        // ## m3c-narrow
+        bounds,
     });
+    // ## m3c-narrow: the banner's form follows the width this frame gave the editor; a frame
+    // whose width crossed the narrow line draws once more with the other form.
+    if crate::large_file::narrow(bounds.size.width) != v.banner_narrow {
+        cx.on_next_frame(window, |_, _, cx| cx.notify());
+    }
 
     let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
     let text_hitbox = window.insert_hitbox(text_area, HitboxBehavior::Normal);
@@ -1190,6 +1203,10 @@ pub(crate) fn paint_frame(
 // ## m3a-t29-a11y-tiers: the element's accessibility hooks moved to the view's focusable
 // column (`a11y::declare`), the element GPUI gives the platform focus.
 /// The editor's element: the text area and its input handler.
+// ## m3c-narrow (F11)
+/// The lines the text area keeps beside the banner's narrow form, however short the pane.
+const NARROW_TEXT_MIN_LINES: f32 = 2.0;
+
 pub(crate) struct EditorElement {
     view: Entity<EditorView>,
     focus: FocusHandle,
@@ -1229,6 +1246,12 @@ impl Element for EditorElement {
             ..Style::default()
         };
         style.size.width = relative(1.0).into();
+        // ## m3c-narrow (F11): beside the banner's narrow form the text keeps
+        // `NARROW_TEXT_MIN_LINES` lines: the banner's body scrolls first.
+        if self.view.read(cx).banner_narrow {
+            let lh = f32::from(EditorTheme::get(cx).line_height);
+            style.min_size.height = px(lh * NARROW_TEXT_MIN_LINES).into();
+        }
         (window.request_layout(style, [], cx), ())
     }
 

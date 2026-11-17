@@ -26,10 +26,10 @@ use std::rc::Rc;
 use hacivat_text::TextBuffer;
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::l10n::UiArg;
-use hacivat_ui::text::{TextSource, paragraph};
+use hacivat_ui::text::{TextSource, paragraph, scroll_viewport};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, Context, Global, InteractiveElement, IntoElement, ParentElement, SharedString,
-    Styled, Window, div, px,
+    AnyElement, App, Context, Global, InteractiveElement, IntoElement, ParentElement, Pixels,
+    SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 
@@ -49,6 +49,16 @@ pub const REMEASURE_AFTER: std::time::Duration = std::time::Duration::from_milli
 const ICON_GAP_PX: f32 = 9.0;
 /// Drops the icon onto the first line's cap height (the inline notice's 1 px).
 const ICON_NUDGE_PX: f32 = 1.0;
+// ## m3c-narrow (F11; design/m3b-safe surface 24)
+/// An editor narrower than this draws the banner's narrow form ([`banner`]): below it the
+/// wide form's margins, padding and icon column would leave its text under 120 px.
+pub const NARROW_BELOW_PX: f32 = 180.0;
+
+// ## m3c-narrow
+/// Whether an editor `width` wide draws the banner's narrow form.
+pub fn narrow(width: Pixels) -> bool {
+    f32::from(width) < NARROW_BELOW_PX
+}
 
 /// The module-owned state (P11): the tier, and what the banner says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -260,7 +270,18 @@ pub fn description(s: &TierState, cx: &App) -> Option<SharedString> {
 /// notice, padding 6/10, radius 4, 1 px `seam-strong`, a `panel` / `ground` well, the 12 px
 /// info glyph in `text-2`; the title in `text`, the body in `text-2`; 8/10/2/10 around it);
 /// `None` in T0.
-pub fn banner(s: &TierState, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+///
+/// ## m3c-narrow (F11; design/m3b-safe surface 24): `narrow` (an editor narrower than
+/// [`NARROW_BELOW_PX`], `narrow`) draws the narrow form: 4 px beside the well, padding 6, no
+/// icon, the title whole (a trust signal: it never shrinks) and the body below it in a scroll
+/// viewport that gives up its height first when the pane is too short for the whole banner (the
+/// text below keeps two lines, `element::NARROW_TEXT_MIN_LINES`).
+pub fn banner(
+    s: &TierState,
+    narrow: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<AnyElement> {
     let _ = window;
     let (title, body) = lines(s, cx)?;
     let theme = *Theme::get(cx);
@@ -271,6 +292,48 @@ pub fn banner(s: &TierState, window: &mut Window, cx: &mut App) -> Option<AnyEle
         ThemeMode::Light => c.ground,
     };
     let style = t.type_ramp.body_sm;
+    // ## m3c-narrow
+    if narrow {
+        let notice = div()
+            .flex()
+            .flex_col()
+            .flex_shrink(1.0)
+            .min_h(px(0.0))
+            .px(px(t.spacing.sm))
+            .py(px(t.spacing.sm))
+            .rounded(px(t.radii.sm))
+            .border_1()
+            .border_color(c.seam_strong.to_hsla())
+            .bg(well.to_hsla())
+            .child(div().flex_none().child(
+                paragraph(title, TextSource::Fluent, style, c.text.to_hsla()).id("editor-t1-title"),
+            ))
+            .child(
+                div()
+                    .id("editor-t1-body-scroll")
+                    .flex_shrink(1.0)
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .child(scroll_viewport())
+                    .child(
+                        paragraph(body, TextSource::Fluent, style, c.text_2.to_hsla())
+                            .id("editor-t1-body"),
+                    ),
+            );
+        return Some(
+            div()
+                .debug_selector(|| "editor-t1-banner".to_string())
+                .flex()
+                .flex_col()
+                .flex_shrink(1.0)
+                .min_h(px(0.0))
+                .mt(px(t.spacing.md))
+                .mx(px(t.spacing.xs))
+                .mb(px(t.spacing.s_2xs))
+                .child(notice)
+                .into_any_element(),
+        );
+    }
     let text = div()
         .flex()
         .flex_col()

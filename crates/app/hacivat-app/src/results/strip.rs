@@ -32,6 +32,8 @@ use hacivat_results::{CloseReason, Completeness, StoreSnapshot, TruncReason};
 use hacivat_session::session::UnitId;
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
+// ## m3c-narrow (T43b review m9)
+use hacivat_ui::metrics::{STRIP_GAP_PX, WRAP_LINE_PX};
 use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui::toolbar::{ItemFn, Toolbar, ToolbarItem, Wrap};
 use hacivat_ui_core::gpui_surface::{
@@ -349,7 +351,9 @@ pub struct StripActions {
 pub const STRIP_ID: &str = "results-strip";
 
 // ## m3a-f2-visual: the wrapped reason's line pitch (NOTES surface 11).
-const WRAP_LINE_PX: f32 = 16.0;
+// ## m3c-narrow (T43b review m9): it, and the 6 px between the strip's sentence and its glyph
+// or buttons, are the chrome metrics' names now (`hacivat_ui::metrics::{WRAP_LINE_PX,
+// STRIP_GAP_PX}`, imported above), not the strip's own copies of their numbers.
 
 // ## m3c-t35 (named exception): a selection of several ranges (NOTES M3c-22).
 /// The selection's size the strip shows on its right.
@@ -406,7 +410,8 @@ pub fn render(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(t.spacing.sm))
+                    // ## m3c-narrow (m9): the same 6 px, by its name.
+                    .gap(px(STRIP_GAP_PX))
                     .flex_1()
                     .min_w(px(0.0))
                     .children(lead.map(|g| g.element(cx)))
@@ -442,7 +447,7 @@ pub fn render(
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(STRIP_GAP_PX))
                 .children(lead.map(|g| g.element(cx)))
                 .child(
                     Label::new(
@@ -570,7 +575,7 @@ pub fn render(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(STRIP_GAP_PX))
                     .child(
                         Icon::new(IconName::Layers)
                             .size(IconSize::Chrome)
@@ -725,7 +730,7 @@ fn selection_item(word: Option<SharedString>, dims: SharedString) -> ItemFn {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(STRIP_GAP_PX))
             .children(word.clone().map(|w| {
                 Label::new(w, TextSource::Fluent, t.type_ramp.caption, ink).id("strip-selection")
             }))

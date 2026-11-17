@@ -384,6 +384,13 @@ impl IntoElement for TabStrip {
     }
 }
 
+// ## m3c-narrow (F12)
+/// A tab title's id (`#tab-title` in the text registry's paths).
+pub const TAB_TITLE_ID: &str = "tab-title";
+/// An inactive tab's flex shrink against the active tab's 1: in a strip too narrow for its tabs
+/// the inactive tabs give their width first.
+const INACTIVE_TAB_SHRINK: f32 = 1000.0;
+
 impl TabStrip {
     fn build(self, window: &mut Window, cx: &mut App) -> AnyElement {
         let theme = *Theme::get(cx);
@@ -403,7 +410,10 @@ impl TabStrip {
             .flex_row()
             .items_start()
             .h(height)
-            .flex_none()
+            // ## m3c-narrow (F12): was `flex_none`; a strip wider than its pane shrinks to it,
+            // so its tabs give way (below).
+            .flex_shrink(1.0)
+            .min_w(px(0.0))
             .bg(c.head.to_hsla());
         for (index, tab) in self.tabs.into_iter().enumerate() {
             let active = index == self.active;
@@ -429,7 +439,8 @@ impl TabStrip {
                 .flex_row()
                 .items_center()
                 .h(height)
-                .flex_none()
+                // ## m3c-narrow (F12): was `flex_none`: the tab gives way (below).
+                .min_w(px(0.0))
                 .px(px(12.0))
                 .gap(px(7.0))
                 .border_r_1()
@@ -440,7 +451,23 @@ impl TabStrip {
                         .size(IconSize::Chrome)
                         .color(ink),
                 )
-                .child(Label::new(tab.title, tab.title_source, style, ink));
+                // ## m3c-narrow (F12): the title ellipsizes (its tooltip and the tab's
+                // accessible name keep it whole) under a stable id.
+                .child(
+                    Label::new(tab.title, tab.title_source, style, ink)
+                        .truncate(true)
+                        .id(TAB_TITLE_ID),
+                );
+            // ## m3c-narrow (F12; design/m3b-safe surface 24): a strip narrower than its tabs
+            // (a pane at the split floor) is a declared give-way: the inactive tabs shrink first,
+            // their titles ellipsizing, down to nothing (each clips what it no longer has room
+            // for; Ctrl+Tab still reaches them), then the active tab's title ellipsizes. A strip
+            // with room draws every tab at its natural width.
+            el = if active {
+                el.flex_shrink(1.0)
+            } else {
+                el.flex_shrink(INACTIVE_TAB_SHRINK).overflow_hidden()
+            };
             // No left border on the first tab: the strip starts at a tile seam (or the window
             // edge), and a second line there would make a 2 px seam (Task 18 review).
             if active {

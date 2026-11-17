@@ -805,24 +805,11 @@ impl Finding {
 // notes) matched no line once the shot fixes landed (the paragraph probe's snapped line height,
 // the popovers' rooms), so they are gone. What is left is a real product defect with its owner,
 // each scoped to the locales and sizes where it was seen (review m2).
-pub(super) const KNOWN_FINDINGS_B: [Finding; 4] = [
-    // F10 · An empty console's placeholder is cut in a 120 px pane in the pseudo-locales (NOTES
-    // surface 24: it wraps in a narrow pane).
-    finding("narrow-empty", Where::Pseudo, "#editor-placeholder", "T41"),
-    // F11 · The T1 reduced-mode banner is cut in a 120 px pane (it neither wraps into the tile
-    // nor scrolls): its title in the pseudo-locales, its body in English and Turkish. The status
-    // bar's "Reduced mode" stays whole (the state's trust group).
-    finding("narrow-reduced", Where::Pseudo, "#editor-t1-title", "T41"),
-    finding("narrow-reduced", Where::Plain, "#editor-t1-body", "T41"),
-    // F12 · A pane tab's Fluent title ("Console 2") is cut, not ellipsized, in a 120 px pane in
-    // the pseudo-locales (the tab strip's title label has no id: its creation site).
-    finding(
-        "narrow-reduced",
-        Where::Pseudo,
-        "hacivat-ui/src/panes.rs:443",
-        "T41",
-    ),
-];
+// ## m3c-narrow: F10 (the empty console's placeholder), F11 (the reduced-mode banner) and F12
+// (a pane tab's title) were fixed in the product (`hacivat-ui-editor` `view.rs` and
+// `large_file.rs`, `hacivat-ui` `panes.rs`; `tests/narrow_panes.rs` holds their scene checks),
+// so the list is empty for the T45 gate.
+pub(super) const KNOWN_FINDINGS_B: [Finding; 0] = [];
 
 /// Every known finding: part A's list, then part B's.
 pub(super) fn all_findings() -> impl Iterator<Item = &'static Finding> {
@@ -1148,7 +1135,8 @@ impl M3c {
             NarrowStrip => ("#button-label-status-cursor", None),
             NarrowEmpty => ("#editor-placeholder", None),
             NarrowNothing => ("#status-message", None),
-            // ## m3c-t43b-fix (review I1): the status bar's cell (the T1 banner is cut, F11).
+            // ## m3c-t43b-fix (review I1): the status bar's cell. ## m3c-narrow: the T1 banner
+            // is no longer cut (F11 fixed); its title is a required trust label ([`required`]).
             NarrowReduced => ("#editor-segment-reduced", None),
             // 25 · the section's title, the clamp note, a search result's section.
             SettingsEditor | SettingsExecution | SettingsResults | SettingsKb => {
@@ -1222,6 +1210,8 @@ impl M3c {
         // ## m3c-t43b-fix (review I1): "Reduced mode" never gives way (T41's
         // `reduced_mode_never_gives_way`).
         const REDUCED: &[&str] = &["#editor-segment-reduced"];
+        // ## m3c-narrow (F11): and the banner's own title, whole in the narrow form.
+        const T1_TITLE: &[&str] = &["#editor-t1-title"];
         match self {
             // The go-to popover and the value viewer over a production result.
             M3c::GotoAsk | M3c::ViewerTruncated => &[ENV],
@@ -1238,8 +1228,8 @@ impl M3c {
             M3c::NarrowPending => &[ENV, CHIP, TX, BADGE, PENDING],
             // ## m3c-t43b-fix (review I3)
             M3c::NarrowStrip => &[ENV, CURSOR, STRIP_CURSOR],
-            // ## m3c-t43b-fix (review I1)
-            M3c::NarrowReduced => &[REDUCED],
+            // ## m3c-t43b-fix (review I1); ## m3c-narrow (F11): and the banner's title.
+            M3c::NarrowReduced => &[REDUCED, T1_TITLE],
             _ => &[],
         }
     }
