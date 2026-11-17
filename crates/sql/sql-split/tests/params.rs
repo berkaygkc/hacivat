@@ -972,6 +972,90 @@ fn rewrite_is_deterministic() {
     );
 }
 
+// ## m3b-fuzz (controller fix): the nightly `params_rewrite` crash — a rewrite must be a
+// fixpoint, so a name the rewrite turns into `?` under `CALL`/`EXEC`/`EXECUTE` (where a `?`
+// never binds) is refused like the `?` itself.
+
+/// A rewrite is final: scanning its text again binds every placeholder and changes nothing.
+fn assert_rewrite_is_a_fixpoint(unit: &str, ctx: &DialectCtx, head: &StmtHead, s: &ParamSettings) {
+    let p = scan_params(unit, ctx, head, s);
+    let Some(r) = &p.rewritten else {
+        return;
+    };
+    let again = scan_params(&r.text, ctx, head, s);
+    assert_eq!(
+        again.rewritten.map(|x| x.text),
+        Some(r.text.clone()),
+        "{:?} {unit:?}: the rewritten text rewrites again",
+        ctx.id
+    );
+}
+
+#[test]
+fn fuzz_params_rewrite_names_under_exec_rewrite_to_a_refused_question_mark() {
+    // The crash input (knob byte `U`: `?` binds on PG, `:name` on, DDL binds), every dialect.
+    let knobs = ParamSettings {
+        pg_question_marks: true,
+        colon_params: true,
+        in_ddl: true,
+    };
+    let crash = "exec($q$h$q$, $q$D1 */";
+    for ctx in [pg(), mysql(), mariadb(), sqlite()] {
+        assert_rewrite_is_a_fixpoint(crash, &ctx, &StmtHead::default(), &knobs);
+    }
+    // SQLite: `$q$h$q$` and `$q$D1` are two variables; under `exec` their `?` would not bind.
+    let p = scan_params(crash, &sqlite(), &StmtHead::default(), &knobs);
+    assert_eq!(unbindable_texts(crash, &p), ["$q$h$q$", "$q$D1"]);
+    assert!(p.rewritten.is_none());
+    assert!(diag_names(&p).contains(&"Unbindable".to_string()));
+
+    // Close variants: names under `CALL`/`EXEC`/`EXECUTE` (head from the unit or the caller),
+    // `$name$`-style SQLite variables, a stray `*/`, a `?` already present.
+    let refused = [
+        ("exec($q$h$q$, $q$D1 */", sqlite(), StmtHead::default()),
+        ("EXEC p(:a)", sqlite(), StmtHead::default()),
+        ("exec p(@a, #b, $c$)", sqlite(), StmtHead::default()),
+        ("exec($a$) */", sqlite(), StmtHead::default()),
+        ("exec(?, $a$)", sqlite(), StmtHead::default()),
+        ("exec(?, ? */", sqlite(), StmtHead::default()),
+        ("CALL p(:a)", mysql(), head_of(kw::CALL)),
+        ("call p(:a, :b) */", mysql(), StmtHead::default()),
+        ("EXEC p(:a)", mysql(), StmtHead::default()),
+        ("EXECUTE s USING :a", mysql(), StmtHead::default()),
+        ("CALL p(:a)", mariadb(), StmtHead::default()),
+        ("p(:a)", mysql(), head_of(kw::CALL)),
+    ];
+    for (s, ctx, head) in &refused {
+        for knobs in [knobs, ParamSettings::default()] {
+            let p = scan_params(s, ctx, head, &knobs);
+            assert!(!p.placeholders.is_empty(), "{:?} {s}", ctx.id);
+            assert!(
+                p.placeholders.iter().all(|x| !x.bindable),
+                "{:?} {s}",
+                ctx.id
+            );
+            assert!(p.rewritten.is_none(), "{:?} {s}", ctx.id);
+            assert_rewrite_is_a_fixpoint(s, ctx, head, &knobs);
+        }
+    }
+    // Outside `CALL`/`EXEC` the same variables bind, and the rewrite is final.
+    let binds = [
+        ("SELECT $q$h$q$, $q$D1 */", sqlite(), "SELECT ?, ? */"),
+        ("SELECT $a$ */", sqlite(), "SELECT ? */"),
+        ("SELECT :a, :b */", mysql(), "SELECT ?, ? */"),
+        ("SELECT ?, ? */", sqlite(), "SELECT ?, ? */"),
+        // PostgreSQL rewrites names to `$k`, which bind under `CALL`: nothing to refuse.
+        ("CALL p(:a, :b, :a)", pg(), "CALL p($1, $2, $1)"),
+        ("exec(:a) */", pg(), "exec($1) */"),
+    ];
+    for (s, ctx, want) in &binds {
+        let p = scan_params(s, ctx, &StmtHead::default(), &knobs);
+        assert_eq!(final_text(&p), Some(*want), "{:?} {s}", ctx.id);
+        assert_rewrite_is_a_fixpoint(s, ctx, &StmtHead::default(), &knobs);
+    }
+}
+// ## m3b-fuzz (controller fix) end
+
 // ---------------------------------------------------------------------------------------------
 // Properties
 
