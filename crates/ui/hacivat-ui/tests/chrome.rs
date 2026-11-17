@@ -721,6 +721,105 @@ fn a_menu_that_fits_the_room_moves_up_rather_than_scroll(cx: &mut TestAppContext
     );
 }
 
+// ## m3b-ci (controller fix): CI run 44051024805 (Linux, wider fonts) drew the transaction
+// menu past the window's right side at 960x600, so its hints were cut there. A menu wider than
+// the room right of its anchor moves left and shows whole; one wider than the window is held
+// inside it and ellipsizes its hints, never its label; the frame check sees a row past a side.
+fn hinted(hint: &'static str) -> Vec<hacivat_ui::menu::MenuItemSpec> {
+    use hacivat_ui::menu::MenuItemSpec;
+    let text = |s: &'static str| -> hacivat_ui::text::TextFn { Rc::new(move |_| s.into()) };
+    vec![
+        MenuItemSpec::new(text("Manual"), "tx.manual").hint(text(hint)),
+        MenuItemSpec::new(text("Auto-commit"), "tx.auto"),
+    ]
+}
+
+fn open_menu_at(
+    cx: &mut TestAppContext,
+    anchor_x: f32,
+    window_w: f32,
+    list: Vec<hacivat_ui::menu::MenuItemSpec>,
+) -> &mut VisualTestContext {
+    let (_host, vcx) = cx.add_window_view(move |window, cx| {
+        MenuHost(hacivat_ui::menu::PopupMenu::new(
+            point(px(anchor_x), px(40.)),
+            list,
+            window,
+            cx,
+        ))
+    });
+    vcx.simulate_resize(gpui::size(px(window_w), px(800.)));
+    vcx
+}
+
+fn drawn(vcx: &mut VisualTestContext, text: &str) -> RenderedText {
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    vcx.read(|cx| cx.global::<TextRegistry>().frame.clone())
+        .into_iter()
+        .find(|r| r.text.as_ref() == text)
+        .unwrap_or_else(|| panic!("{text:?} is not drawn"))
+}
+
+#[gpui::test]
+fn a_menu_wider_than_the_room_right_of_its_anchor_moves_left(cx: &mut TestAppContext) {
+    registry_on(cx);
+    let hint = "Changes wait for Commit · Server default · READ COMMITTED";
+    let vcx = open_menu_at(cx, 1180.0, 1280.0, hinted(hint));
+    let layout = layout_of(vcx);
+    let column = layout.viewport.expect("the column");
+    assert!(
+        f32::from(column.size.width) > 100.0,
+        "wider than the 100 px right of the anchor: {column:?}"
+    );
+    assert!(f32::from(column.right()) <= 1280.0, "{column:?}");
+    assert!(f32::from(column.left()) < 1180.0, "moved left: {column:?}");
+    assert!(
+        menu_violations(vcx).is_empty(),
+        "{:?}",
+        menu_violations(vcx)
+    );
+    let hint = drawn(vcx, hint);
+    assert!(!hint.clipped && !hint.truncated, "shown whole: {hint:?}");
+}
+
+#[gpui::test]
+fn a_menu_wider_than_the_window_stays_inside_and_ellipsizes_its_hint(cx: &mut TestAppContext) {
+    registry_on(cx);
+    let hint = "SELECT o.id, o.total, o.status FROM orders o JOIN customers c ON c.id = \
+                o.customer_id WHERE o.status = 'open' ORDER BY o.total DESC";
+    let vcx = open_menu_at(cx, 20.0, 320.0, hinted(hint));
+    let layout = layout_of(vcx);
+    let column = layout.viewport.expect("the column");
+    assert!(f32::from(column.right()) <= 320.0, "{column:?}");
+    assert!(
+        menu_violations(vcx).is_empty(),
+        "{:?}",
+        menu_violations(vcx)
+    );
+    let shown = drawn(vcx, hint);
+    assert!(shown.truncated && !shown.clipped, "{shown:?}");
+    let label = drawn(vcx, "Manual");
+    assert!(!label.truncated && !label.clipped, "{label:?}");
+}
+
+#[gpui::test]
+fn the_menu_check_sees_a_row_past_the_windows_side(cx: &mut TestAppContext) {
+    use gpui::{Bounds, size};
+    let row = |x: f32, w: f32| Bounds::new(point(px(x), px(40.)), size(px(w), px(24.)));
+    let layout = hacivat_ui::menu::MenuLayout {
+        viewport: None,
+        rows: vec![(0, row(700.0, 300.0)), (1, row(-4.0, 100.0))],
+        window_height: 600.0,
+        statusbar_height: 22.0,
+        window_width: 960.0,
+    };
+    cx.update(|cx| cx.set_global(layout));
+    let found = cx.read(hacivat_ui::menu::MenuLayout::violations);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found.iter().all(|v| v.contains("past the window's side")));
+}
+
 struct MenuHost(gpui::Entity<hacivat_ui::menu::PopupMenu>);
 
 impl gpui::Render for MenuHost {

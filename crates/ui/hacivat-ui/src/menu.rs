@@ -19,7 +19,7 @@ use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AppContext, Bounds, Context, ElementId, EventEmitter, FocusHandle, Focusable,
     Global, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
     Point, Render, Role, ScrollEvent, SharedString, StatefulInteractiveElement, Styled, Window,
-    accesskit, div, px,
+    accesskit, anchored, div, point, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
@@ -544,13 +544,17 @@ pub struct MenuLayout {
     pub rows: Vec<(usize, Bounds<Pixels>)>,
     pub window_height: f32,
     pub statusbar_height: f32,
+    // ## m3b-ci (controller fix)
+    /// The window's width: a row must end inside it.
+    pub window_width: f32,
 }
 
 impl Global for MenuLayout {}
 
 impl MenuLayout {
     /// What is wrong with the last anchored menu: a row shown only in part (cut at its
-    /// column's edge), or one drawn over the status bar or past the window's bottom.
+    /// column's edge), or one drawn over the status bar or past the window's bottom, or
+    /// (## m3b-ci) past the window's left or right side.
     pub fn violations(cx: &App) -> Vec<String> {
         let Some(layout) = cx.try_global::<MenuLayout>() else {
             return Vec::new();
@@ -574,6 +578,15 @@ impl MenuLayout {
                      ({bottom} > {floor})"
                 ));
             }
+            // ## m3b-ci (controller fix): nothing clips a row at the window's sides but the
+            // window itself, so its hint would be cut there (CI run 44051024805, Linux).
+            let (left, right) = (f32::from(row.left()), f32::from(row.right()));
+            if layout.window_width > 0.0 && (left < -slack || right > layout.window_width + slack) {
+                out.push(format!(
+                    "menu row {i} runs past the window's side ({left}..{right} in {})",
+                    layout.window_width
+                ));
+            }
         }
         out
     }
@@ -595,6 +608,7 @@ fn note_menu_rows(
         rows,
         window_height: f32::from(window.viewport_size().height),
         statusbar_height: statusbar,
+        window_width: f32::from(window.viewport_size().width),
     });
 }
 
@@ -875,17 +889,22 @@ impl Render for PopupMenu {
         } else {
             crate::text::card_scope(surface)
         };
-        let mut menu = surface
+        let menu = surface
             .id("popup-menu")
             .debug_selector(|| "popup-menu".to_string())
             .track_focus(&self.focus)
             .declare(Role::Menu, menu_name.clone(), None);
-        if let Some((left, top)) = position {
-            menu = menu.absolute().left(left).top(top);
-        }
         let mut menu = menu.min_w(self.min_width);
         // ## m3a-t35-shots (named exception)
-        if let Some(max) = self.max_width {
+        // ## m3b-ci (controller fix): an anchored menu is also never wider than the window
+        // less its margins; past that its hints ellipsize (the label never gives way).
+        let window_room = (position.is_some())
+            .then(|| (window.viewport_size().width - px(2.0 * t.spacing.xs)).max(px(0.0)));
+        let max = match (self.max_width, window_room) {
+            (Some(max), Some(room)) => Some(max.min(room)),
+            (max, room) => max.or(room),
+        };
+        if let Some(max) = max {
             menu = menu.max_w(max.max(self.min_width));
         }
         let menu = menu
@@ -972,7 +991,20 @@ impl Render for PopupMenu {
             column
         };
         let column = column.children(rows);
-        menu.children(title).child(column).children(footer)
+        let menu = menu.children(title).child(column).children(footer);
+        // ## m3b-ci (controller fix): an anchored menu wider than the room right of its anchor
+        // moves left until it ends inside the window (CI run 44051024805: with Linux's wider
+        // fonts the transaction menu ran past the right edge at 960x600 and its hints were cut
+        // there). Placing from `min_width` alone cannot see the menu's real width; `anchored`
+        // shifts it once laid out. A menu that fits stays where it was placed.
+        match position {
+            Some((left, top)) => anchored()
+                .position(point(left, top))
+                .snap_to_window_with_margin(px(t.spacing.xs))
+                .child(menu)
+                .into_any_element(),
+            None => menu.into_any_element(),
+        }
     }
 }
 
