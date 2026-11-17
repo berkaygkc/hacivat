@@ -796,8 +796,12 @@ fn the_classifier_stub_is_denied_everywhere() {
 /// denied on production and read-only, and asks off production when its words may write.
 #[test]
 fn no_path_turns_deny_into_run() {
+    // ## m3b-gate-explain: `PROPTEST_CASES` raises the count for a soak run.
     let cfg = ProptestConfig {
-        cases: 6_000,
+        cases: std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6_000),
         ..ProptestConfig::default()
     };
     let texts = [
@@ -882,7 +886,8 @@ fn no_path_turns_deny_into_run() {
                 prop_assert!(denied, "{:?}", item);
             }
             if item.decision == GateDecision::Run {
-                prop_assert!(max <= GateClass::Session, "{:?}", item);
+                // ## m3b-gate-explain: above `Session`, only the B-M6 read runs unasked.
+                prop_assert!(max <= GateClass::Session || b_m6_read(&report), "{:?}", item);
                 prop_assert!(!matches!(admin.verdict, sql_safety::Verdict::Deny(_)));
             }
             if matches!(max, GateClass::Routine | GateClass::Admin | GateClass::Unknown) {
@@ -907,9 +912,417 @@ fn no_path_turns_deny_into_run() {
                 prop_assert_ne!(&item.decision, &GateDecision::Run);
             }
         }
-        // A `Read` verdict always reads only (R-M3-23).
+        // A `Read` verdict always reads only (R-M3-23), or is the B-M6 read of a plan.
         if item.verdict == UnitVerdict::Read {
-            prop_assert!(reads_only(&report));
+            prop_assert!(reads_only(&report) || b_m6_read(&report));
+        }
+    });
+}
+
+// ## m3b-gate-explain
+/// The B-M6 ruling as the property states it: every statement a plain `EXPLAIN` of a data
+/// change (gate class exactly `Dml`) with no evidence of code or of `ANALYZE` (no
+/// `ROUTINE_CALL` bit on a statement or the request, no touched call, no destructive pattern,
+/// no `EXPLAIN ANALYZE` kind, flag or reason), and `decide(.., Admin, Human)` allows it. The
+/// class is the unit's, as the gate reads it: the statements' and the request-level floor's
+/// (its class, effects and flags; review M-3), exactly `Dml`.
+fn b_m6_read(report: &SafetyReport) -> bool {
+    let analyzed = |s: &StmtReport| {
+        s.flags.contains(RiskFlags::EXPLAIN_ANALYZE)
+            || s.reasons
+                .iter()
+                .any(|r| r.code == ReasonCode::ExplainAnalyze)
+    };
+    // The request-level floor, read as one statement of kind `Other` (as the gate does).
+    let mut request = stmt(StmtKind::Other, report.request_effects);
+    request.flags = report.flags;
+    request.class = report.request_class;
+    let class = report
+        .items
+        .iter()
+        .map(gate_class)
+        .max()
+        .map(|c| c.max(gate_class(&request)));
+    report.pre_decision.is_none()
+        && !report.items.is_empty()
+        && class == Some(GateClass::Dml)
+        && !report.request_effects.contains(EffectSet::ROUTINE_CALL)
+        && !report.flags.contains(RiskFlags::EXPLAIN_ANALYZE)
+        && report.items.iter().all(|s| {
+            s.kind == (StmtKind::Explain { analyze: false })
+                && !analyzed(s)
+                && !s.effects.contains(EffectSet::ROUTINE_CALL)
+                && s.touched.calls.is_empty()
+                && s.destructive.is_empty()
+        })
+        && decide(report, Profile::Admin, Actor::Human).allows()
+}
+
+/// Review M-2: the production connections the routine pins run on.
+fn production_conns() -> [ConnSafety; 6] {
+    [
+        conn_prod_auto(),
+        conn_prod_manual_idle(),
+        conn_prod_user_tx(),
+        mysql(EnvTag::Production),
+        ConnSafety {
+            tx_mode: TxMode::Manual,
+            ..mysql(EnvTag::Production)
+        },
+        conn(DbmsKind::Sqlite, Some(EnvTag::Production)),
+    ]
+}
+
+/// Review M-2: routine evidence (the `ROUTINE_CALL` bit, a `RoutineCall` or `ProceduralCode`
+/// reason) under a data change, a read or a plan asks before anything is sent on production:
+/// `Confirm` (or `Deny`), never `Run`, `Warn` or the run-then-ask `RunInTxThenConfirm`. The
+/// routine class sits below `Dml` in the order (unchanged); what raises the unit is the policy
+/// (`profiles.toml` `[routine] admin = "confirm"`), which step 4 turns into `Unknown`. This test
+/// pins that dependency.
+#[test]
+fn dml_with_routine_evidence_asks_before_sending_on_production() {
+    let none = SuppressSet::default();
+    // The policy dependency itself.
+    let bit = over(
+        "UPDATE t SET a = f(1) WHERE id = 1",
+        DialectId::Postgres,
+        vec![stmt(
+            StmtKind::Update,
+            EffectSet::READ | EffectSet::WRITE_DATA | EffectSet::ROUTINE_CALL,
+        )],
+    );
+    assert!(
+        matches!(
+            decide(&bit, Profile::Admin, Actor::Human).verdict,
+            sql_safety::Verdict::Confirm(_)
+        ),
+        "`[routine] admin` must stay `confirm`"
+    );
+    let evidence: [fn(&mut StmtReport); 4] = [
+        |s| s.effects |= EffectSet::ROUTINE_CALL,
+        |s| s.reasons.push(reason(ReasonCode::RoutineCall, Some("f"))),
+        |s| {
+            s.reasons
+                .push(reason(ReasonCode::ProceduralCode, Some("f")))
+        },
+        |s| {
+            s.effects |= EffectSet::ROUTINE_CALL;
+            s.touched.calls.push(object("f", ObjectKind::Function));
+        },
+    ];
+    for (kind, effects) in [
+        (StmtKind::Update, EffectSet::READ | EffectSet::WRITE_DATA),
+        (StmtKind::Insert, EffectSet::WRITE_DATA),
+        (StmtKind::Delete, EffectSet::READ | EffectSet::WRITE_DATA),
+        (StmtKind::Merge, EffectSet::READ | EffectSet::WRITE_DATA),
+        (StmtKind::Select, EffectSet::READ),
+        (StmtKind::Select, EffectSet::READ | EffectSet::SEQUENCE),
+        (
+            StmtKind::Explain { analyze: false },
+            EffectSet::READ | EffectSet::WRITE_DATA,
+        ),
+    ] {
+        for (i, add) in evidence.iter().enumerate() {
+            let mut s = stmt(kind, effects);
+            add(&mut s);
+            for c in production_conns() {
+                let text = "UPDATE t SET a = f(1) WHERE id = 1";
+                let unit = prepared_on(c.engine, text, &[]);
+                let report = over(&unit.final_text, dialect_of(c.engine), vec![s.clone()]);
+                let item = gate(&[unit], &[report], &c, &none, 1).items.remove(0);
+                assert!(
+                    matches!(
+                        item.decision,
+                        GateDecision::Confirm { .. } | GateDecision::Deny(_)
+                    ),
+                    "{kind:?} {effects:?} evidence {i} on {:?} {:?} {:?}: {:?}",
+                    c.engine,
+                    c.tx_mode,
+                    c.tx_owner,
+                    item.decision
+                );
+                assert_ne!(item.verdict, UnitVerdict::Read);
+            }
+        }
+    }
+}
+
+/// Review M-2, as a property: any data-change, read or plan kind, any effects at or below
+/// `Dml`, touched calls or not, with routine evidence, on any production connection: asked
+/// before anything is sent (or denied).
+#[test]
+fn routine_evidence_never_runs_unasked_on_production() {
+    let bits = [
+        EffectSet::READ,
+        EffectSet::WRITE_DATA,
+        EffectSet::WRITE_TEMP,
+        EffectSet::SEQUENCE,
+        EffectSet::XID_CONSUME,
+        EffectSet::LOCK_ROW,
+        EffectSet::LOCK_TABLE,
+        EffectSet::ADVISORY_LOCK,
+        EffectSet::SESSION_STATE,
+        EffectSet::NOTIFY,
+    ];
+    let kinds = vec![
+        StmtKind::Update,
+        StmtKind::Insert,
+        StmtKind::Delete,
+        StmtKind::Merge,
+        StmtKind::Select,
+        StmtKind::Explain { analyze: false },
+        StmtKind::Other,
+    ];
+    let cfg = ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4_000),
+        ..ProptestConfig::default()
+    };
+    let shape = (
+        prop::sample::select(kinds),
+        prop::collection::vec(any::<bool>(), bits.len()),
+        any::<bool>(),
+        0u8..3,
+    );
+    proptest!(cfg, |(
+        shapes in prop::collection::vec(shape, 1..3),
+        routine_at in 0usize..2,
+        ci in 0usize..6,
+    )| {
+        let c = production_conns()[ci];
+        let n = shapes.len();
+        let items: Vec<StmtReport> = shapes
+            .iter()
+            .enumerate()
+            .map(|(i, (kind, on, call, evidence))| {
+                let mut effects = EffectSet::empty();
+                for (b, on) in bits.iter().zip(on) {
+                    if *on {
+                        effects |= *b;
+                    }
+                }
+                let mut s = stmt(*kind, effects);
+                if *call {
+                    s.touched.calls.push(object("f", ObjectKind::Function));
+                }
+                // At least one statement carries routine evidence.
+                if i == routine_at % n {
+                    match evidence {
+                        0 => s.effects |= EffectSet::ROUTINE_CALL,
+                        1 => s.reasons.push(reason(ReasonCode::RoutineCall, Some("f"))),
+                        _ => s.reasons.push(reason(ReasonCode::ProceduralCode, Some("f"))),
+                    }
+                }
+                s
+            })
+            .collect();
+        let text = "UPDATE t SET a = f(1) WHERE id = 1";
+        let unit = prepared_on(c.engine, text, &[]);
+        let report = over(&unit.final_text, dialect_of(c.engine), items);
+        let item = one(unit, report, &c);
+        prop_assert!(
+            matches!(item.decision, GateDecision::Confirm { .. } | GateDecision::Deny(_)),
+            "{:?}",
+            item
+        );
+        prop_assert_ne!(item.verdict, UnitVerdict::Read);
+    });
+}
+
+/// Review M-3: a plain `EXPLAIN` of a data change whose request-level fields say more than its
+/// statements (a class, effects or flags above `Dml`) is not the B-M6 read.
+#[test]
+fn plain_explain_with_a_request_floor_above_dml_is_not_the_read() {
+    let base = || {
+        over(
+            "EXPLAIN UPDATE t SET a = 1 WHERE id = 1",
+            DialectId::Postgres,
+            vec![stmt(
+                StmtKind::Explain { analyze: false },
+                EffectSet::READ | EffectSet::WRITE_DATA,
+            )],
+        )
+    };
+    let unit = prepared_on(
+        DbmsKind::Postgres,
+        "EXPLAIN UPDATE t SET a = 1 WHERE id = 1",
+        &[],
+    );
+    assert!(b_m6_read(&base()));
+    assert_eq!(
+        one(unit.clone(), base(), &conn_prod()).verdict,
+        UnitVerdict::Read
+    );
+    let raised: [fn(&mut SafetyReport); 4] = [
+        |r| r.request_class = CoarseClass::Ddl,
+        |r| r.request_class = CoarseClass::Admin,
+        |r| r.request_effects |= EffectSet::DDL,
+        |r| r.flags |= RiskFlags::DYNAMIC_SQL,
+    ];
+    for (i, raise) in raised.iter().enumerate() {
+        let mut r = base();
+        raise(&mut r);
+        assert!(!b_m6_read(&r), "raise {i}");
+        for c in [conn_prod(), conn_prod_user_tx(), mysql(EnvTag::Production)] {
+            let unit = prepared_on(c.engine, "EXPLAIN UPDATE t SET a = 1 WHERE id = 1", &[]);
+            let item = one(unit, r.clone(), &c);
+            assert!(
+                matches!(
+                    item.decision,
+                    GateDecision::Confirm { .. } | GateDecision::Deny(_)
+                ),
+                "raise {i} on {:?}: {:?}",
+                c.engine,
+                item.decision
+            );
+            assert_ne!(item.verdict, UnitVerdict::Read, "raise {i}");
+        }
+    }
+}
+
+/// Plain `EXPLAIN` shapes × every read-write connection: the B-M6 read runs only a plan of
+/// code-free statements; a routine bit, a touched call, a destructive pattern, `ANALYZE`
+/// evidence or a session-group effect (the policy confirms it under `Admin`) keeps the class,
+/// so production asks (or denies) and the verdict is never `Read`.
+#[test]
+fn plain_explain_runs_as_a_read_only_when_code_free() {
+    let bits = [
+        EffectSet::READ,
+        EffectSet::WRITE_DATA,
+        EffectSet::WRITE_TEMP,
+        EffectSet::SEQUENCE,
+        EffectSet::XID_CONSUME,
+        EffectSet::LOCK_ROW,
+        EffectSet::LOCK_TABLE,
+        EffectSet::ADVISORY_LOCK,
+        EffectSet::SESSION_STATE,
+        EffectSet::TXN_CONTROL,
+        EffectSet::PREPARE,
+        EffectSet::NOTIFY,
+        EffectSet::ROUTINE_CALL,
+    ];
+    let code_free = EffectSet::READ
+        | EffectSet::WRITE_DATA
+        | EffectSet::WRITE_TEMP
+        | EffectSet::SEQUENCE
+        | EffectSet::XID_CONSUME
+        | EffectSet::LOCK_ROW
+        | EffectSet::LOCK_TABLE
+        | EffectSet::ADVISORY_LOCK;
+    let cfg = ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4_000),
+        ..ProptestConfig::default()
+    };
+    let shape = (
+        prop::collection::vec(any::<bool>(), bits.len()),
+        any::<bool>(),
+        any::<bool>(),
+        0u8..3,
+        prop::option::of(prop::sample::select(vec![
+            ReasonCode::RoutineCall,
+            ReasonCode::ProceduralCode,
+            ReasonCode::FnUnknown,
+            ReasonCode::SessionState,
+        ])),
+    );
+    proptest!(cfg, |(
+        shapes in prop::collection::vec(shape, 1..3),
+        ci in 0usize..6,
+    )| {
+        let conns = [
+            conn_prod_auto(),
+            conn_prod_manual_idle(),
+            conn_prod_user_tx(),
+            mysql(EnvTag::Production),
+            conn_dev(),
+            mysql(EnvTag::Dev),
+        ];
+        let c = conns[ci];
+        let items: Vec<StmtReport> = shapes
+            .iter()
+            .map(|(on, call, destroy, analyze, code)| {
+                let mut effects = EffectSet::empty();
+                for (b, on) in bits.iter().zip(on) {
+                    if *on {
+                        effects |= *b;
+                    }
+                }
+                let mut s = stmt(StmtKind::Explain { analyze: false }, effects);
+                if *call {
+                    s.touched.calls.push(object("f", ObjectKind::Function));
+                }
+                if *destroy {
+                    s.destructive.push(DestructiveReason {
+                        kind: DestructiveKind::NoWhere,
+                        range: TextRange::default(),
+                        target: Some(object("t", ObjectKind::Table)),
+                    });
+                }
+                match analyze {
+                    1 => s.flags |= RiskFlags::EXPLAIN_ANALYZE,
+                    2 => s.reasons.push(reason(ReasonCode::ExplainAnalyze, None)),
+                    _ => {}
+                }
+                if let Some(code) = code {
+                    s.reasons.push(reason(*code, Some("f")));
+                }
+                s
+            })
+            .collect();
+        let text = "EXPLAIN UPDATE t SET a = f(1)";
+        let unit = prepared_on(c.engine, text, &[]);
+        let report = over(&unit.final_text, dialect_of(c.engine), items.clone());
+        let item = one(unit, report.clone(), &c);
+        let as_read = item.verdict == UnitVerdict::Read;
+        // A plan of a pure read is a read by R-M3-23; anything else read is the B-M6 read.
+        if as_read && !reads_only(&report) {
+            prop_assert!(b_m6_read(&report), "{:?}", item);
+            for s in &items {
+                prop_assert!(code_free.contains(s.effects), "{s:?}");
+                prop_assert!(s.touched.calls.is_empty() && s.destructive.is_empty());
+                prop_assert!(s.flags.is_empty() && s.reasons.is_empty(), "{s:?}");
+            }
+        }
+        let calls_code = items.iter().any(|s| {
+            s.effects.contains(EffectSet::ROUTINE_CALL)
+                || !s.touched.calls.is_empty()
+                || s.reasons.iter().any(|r| {
+                    matches!(r.code, ReasonCode::RoutineCall | ReasonCode::ProceduralCode)
+                })
+        });
+        let routine = items.iter().any(|s| {
+            s.effects.contains(EffectSet::ROUTINE_CALL)
+                || s.reasons.iter().any(|r| {
+                    matches!(r.code, ReasonCode::RoutineCall | ReasonCode::ProceduralCode)
+                })
+        });
+        if c.env == Some(EnvTag::Production) {
+            // A plan of a data change that calls code never runs unasked on production (the
+            // B-M6 domain; at or below `Lock` the table's own row decides); one of a routine
+            // asks first.
+            let max = items.iter().map(gate_class).max().unwrap_or(GateClass::Unknown);
+            if calls_code && max >= GateClass::Dml {
+                prop_assert!(
+                    !matches!(item.decision, GateDecision::Run | GateDecision::Warn(_)),
+                    "a plan of code asks on production: {:?}",
+                    item
+                );
+            }
+            if routine {
+                prop_assert!(
+                    matches!(item.decision, GateDecision::Confirm { .. } | GateDecision::Deny(_)),
+                    "a plan of a routine asks first on production: {:?}",
+                    item
+                );
+            }
+        }
+        if routine {
+            prop_assert!(!as_read, "{:?}", item);
         }
     });
 }
@@ -2728,5 +3141,158 @@ fn production_drops_of_other_objects_keep_their_row() {
             "{engine:?} `{text}`: {:?}",
             item.decision
         );
+    }
+}
+
+// ## m3b-gate-explain: the B-M6 shortcut (a plain `EXPLAIN` of a data change is a read) never
+// covers a statement that calls a routine, whatever evidence of the call the report carries:
+// the `ROUTINE_CALL` effect bit, a routine reason or a touched call. The seed class
+// `no_path_turns_deny_into_run` once found (its seed lost): a lone plain `EXPLAIN` item with a
+// DML bit and `ROUTINE_CALL` (gate class `Dml`, the routine hidden under it), no touched call,
+// on production → `Run`.
+
+/// The lost seed's class, by hand, on every production shape.
+#[test]
+fn plain_explain_with_a_routine_call_effect_asks_on_production() {
+    let none = SuppressSet::default();
+    let text = "EXPLAIN UPDATE t SET a = f(1)";
+    for dml in [
+        EffectSet::WRITE_DATA,
+        EffectSet::WRITE_TEMP,
+        EffectSet::SEQUENCE,
+        EffectSet::XID_CONSUME,
+    ] {
+        for extra in [EffectSet::empty(), EffectSet::READ, EffectSet::LOCK_ROW] {
+            let effects = dml | extra | EffectSet::ROUTINE_CALL;
+            let s = stmt(StmtKind::Explain { analyze: false }, effects);
+            assert!(s.touched.calls.is_empty());
+            for c in [
+                conn_prod_auto(),
+                conn_prod_manual_idle(),
+                conn_prod_user_tx(),
+                ConnSafety {
+                    tx_mode: TxMode::Manual,
+                    ..mysql(EnvTag::Production)
+                },
+                mysql(EnvTag::Production),
+            ] {
+                let unit = prepared_on(c.engine, text, &[]);
+                let report = over(&unit.final_text, dialect_of(c.engine), vec![s.clone()]);
+                let item = gate(&[unit], &[report], &c, &none, 1).items.remove(0);
+                assert!(
+                    matches!(
+                        item.decision,
+                        GateDecision::Confirm { .. } | GateDecision::Deny(_)
+                    ),
+                    "{effects:?} on {:?} {:?}: {:?}",
+                    c.engine,
+                    c.tx_mode,
+                    item.decision
+                );
+                assert_ne!(item.verdict, UnitVerdict::Read, "{effects:?}");
+            }
+        }
+    }
+}
+
+/// The seed a 30M-case soak of `no_path_turns_deny_into_run` shrank to before the fix (the
+/// shortcut ran ahead of the production AND-check): a plain `EXPLAIN` whose effects
+/// `decide(Admin)` confirms (session state, NOTIFY, transaction control), on production MySQL
+/// in manual mode, ran as a read.
+#[test]
+fn soaked_seed_plain_explain_with_session_effects_asks_on_production() {
+    let s = stmt(
+        StmtKind::Explain { analyze: false },
+        EffectSet::TXN_CONTROL
+            | EffectSet::SESSION_STATE
+            | EffectSet::LOCK_ROW
+            | EffectSet::SEQUENCE
+            | EffectSet::NOTIFY,
+    );
+    let c = ConnSafety {
+        tx_mode: TxMode::Manual,
+        ..mysql(EnvTag::Production)
+    };
+    let item = gated("SELECT 1", vec![s], &c);
+    assert!(
+        matches!(item.decision, GateDecision::Confirm { .. }),
+        "{:?}",
+        item.decision
+    );
+    assert_ne!(item.verdict, UnitVerdict::Read);
+}
+
+/// The same class named only by a routine reason (a producer that names the call but sets no
+/// bit and touches nothing) keeps its class too.
+#[test]
+fn plain_explain_with_a_routine_reason_keeps_its_class() {
+    for code in [ReasonCode::RoutineCall, ReasonCode::ProceduralCode] {
+        let mut s = stmt(StmtKind::Explain { analyze: false }, EffectSet::WRITE_DATA);
+        s.reasons.push(reason(code, Some("f")));
+        let item = gated("EXPLAIN UPDATE t SET a = f(1)", vec![s], &conn_prod());
+        assert_ne!(item.decision, GateDecision::Run, "{code:?}");
+        assert_ne!(item.verdict, UnitVerdict::Read, "{code:?}");
+    }
+}
+
+/// A statement whose kind says plain `EXPLAIN` but whose flag or reason says `ANALYZE` is an
+/// `EXPLAIN ANALYZE` (it runs its inner statement): D-062 decides it, never the B-M6 read.
+#[test]
+fn plain_explain_kind_with_analyze_evidence_is_never_the_read() {
+    for analyzed in [
+        |s: &mut StmtReport| s.flags |= RiskFlags::EXPLAIN_ANALYZE,
+        |s: &mut StmtReport| s.reasons.push(reason(ReasonCode::ExplainAnalyze, None)),
+    ] {
+        let mut s = stmt(StmtKind::Explain { analyze: false }, EffectSet::WRITE_DATA);
+        analyzed(&mut s);
+        let text = "EXPLAIN UPDATE t SET a = 1 WHERE id = 1";
+        let prod = gated(text, vec![s.clone()], &conn_prod());
+        assert!(
+            matches!(prod.decision, GateDecision::Confirm { .. }),
+            "{:?}",
+            prod.decision
+        );
+        assert_eq!(prod.verdict, UnitVerdict::ExplainAnalyzeRollback);
+        let dev = gated(text, vec![s], &conn_dev());
+        assert_eq!(dev.decision, GateDecision::ExplainAnalyzeRollback);
+    }
+}
+
+/// Over the real classifier: a plain `EXPLAIN` of a statement that calls a function (a
+/// builtin, a user function, a stored function) is never the B-M6 read on production; a plain
+/// `EXPLAIN` of a pure data change, or of a pure read, still runs as a read.
+#[test]
+fn plain_explain_calling_code_asks_on_production_over_the_real_classifier() {
+    let none = SuppressSet::default();
+    for (engine, c) in [
+        (DbmsKind::Postgres, conn_prod()),
+        (DbmsKind::MySql, mysql(EnvTag::Production)),
+    ] {
+        for text in [
+            "EXPLAIN SELECT f_write()",
+            "EXPLAIN SELECT * FROM t WHERE a = f_write(1)",
+            "EXPLAIN SELECT * FROM (SELECT f_write() AS x) d",
+            "EXPLAIN UPDATE t SET a = f_write(1)",
+            "EXPLAIN UPDATE t SET a = lower('x') WHERE id = 1",
+            "EXPLAIN DELETE FROM t WHERE id = f_write(1)",
+            "EXPLAIN INSERT INTO t SELECT f_write()",
+        ] {
+            let item = real_item(engine, text, &c, &none);
+            assert!(
+                !matches!(item.decision, GateDecision::Run | GateDecision::Warn(_)),
+                "{engine:?} `{text}`: {:?}",
+                item.decision
+            );
+            assert_ne!(item.verdict, UnitVerdict::Read, "{engine:?} `{text}`");
+        }
+        for text in [
+            "EXPLAIN SELECT * FROM t WHERE id = 1",
+            "EXPLAIN UPDATE t SET a = 1 WHERE id = 1",
+            "EXPLAIN DELETE FROM t WHERE id = 1",
+        ] {
+            let item = real_item(engine, text, &c, &none);
+            assert_eq!(item.decision, GateDecision::Run, "{engine:?} `{text}`");
+            assert_eq!(item.verdict, UnitVerdict::Read, "{engine:?} `{text}`");
+        }
     }
 }
