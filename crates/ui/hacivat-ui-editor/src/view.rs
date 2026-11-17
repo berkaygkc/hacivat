@@ -66,6 +66,11 @@ use crate::probe::FrameProbe;
 use crate::scroll::ScrollState;
 use crate::service::{DecorationSource, LanguageService};
 
+// ## m3c-narrow (F10)
+/// The least room beside the gutter the placeholder takes on the first line; with less (a pane
+/// at the split floor) it wraps under that line across the editor's width.
+pub const PLACEHOLDER_MIN_PX: f32 = 120.0;
+
 /// What the status bar's editor segment shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EditorStatus {
@@ -165,6 +170,9 @@ pub struct EditorView {
     // document shows on its first line, and the text area it was last placed in.
     pub(crate) placeholder: Option<TextFn>,
     pub(crate) placeholder_at: Option<Bounds<Pixels>>,
+    // ## m3c-narrow
+    /// Whether the last render drew the banner's narrow form (`large_file::narrow`).
+    pub(crate) banner_narrow: bool,
     // ## m3a-t01b-seams (fix round 1): module-owned state of the input handler (Task 27) and
     // the commands (Task 25), and the focus subscriptions.
     pub(crate) input: InputState,
@@ -316,6 +324,8 @@ impl EditorView {
             // ## m3c-t41
             placeholder: None,
             placeholder_at: None,
+            // ## m3c-narrow
+            banner_narrow: false,
             input: InputState::default(),
             commands: CommandState::default(),
             find: FindState::default(),
@@ -720,6 +730,7 @@ impl EditorView {
 
     /// The placeholder over the first line of an empty document, placed by the last painted
     /// frame (a frame is asked for while it has none, or when the text area moved).
+    /// ## m3c-narrow: in a narrow editor, under the first line (`PLACEHOLDER_MIN_PX`).
     fn placeholder_element(
         &mut self,
         window: &mut Window,
@@ -743,13 +754,28 @@ impl EditorView {
         let t = hacivat_ui_core::theme::Theme::get(cx).tokens;
         let x = layout.origin_x as f32;
         let width = (f32::from(rows.bounds.right()) - x - t.spacing.md).max(0.0);
+        // ## m3c-narrow (F10; design/m3b-safe surface 24): where the text area leaves the
+        // sentence less than `PLACEHOLDER_MIN_PX` (a pane at the split floor), it wraps under
+        // the first line across the editor's whole width instead, so it never runs past the
+        // pane's bottom.
+        let (x, y, width) = if width < PLACEHOLDER_MIN_PX {
+            let left = f32::from(layout.bounds.left()) + t.spacing.md;
+            let right = f32::from(rows.bounds.right()) - t.spacing.md;
+            (
+                left,
+                rows.first_y + rows.line_height,
+                (right - left).max(0.0),
+            )
+        } else {
+            (x, rows.first_y, width)
+        };
         let style = hacivat_ui_core::theme::TypeStyle {
             line_height: f32::from(rows.line_height),
             ..t.type_ramp.body
         };
         Some(
             anchored()
-                .position(point(px(x), rows.first_y))
+                .position(point(px(x), y))
                 .snap_to_window()
                 .child(
                     div().w(px(width)).child(
@@ -1034,7 +1060,13 @@ impl Render for EditorView {
     /// ## m3a-t29-a11y-tiers: the column itself is the editor's accessibility node
     /// (`a11y::declare`).
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let banner = large_file::banner(&self.tier, window, cx);
+        // ## m3c-narrow: the banner's form follows the width the last frame gave the editor
+        // (`prepaint_frame` asks for one more frame when it crossed the narrow line).
+        self.banner_narrow = self
+            .layout
+            .as_ref()
+            .is_some_and(|l| large_file::narrow(l.bounds.size.width));
+        let banner = large_file::banner(&self.tier, self.banner_narrow, window, cx);
         let overlay = commands::overlay(self, window, cx);
         // ## m3c-t41
         let placeholder = self.placeholder_element(window, cx);

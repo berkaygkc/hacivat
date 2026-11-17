@@ -207,10 +207,14 @@ fn render_form(console: ConsoleId, narrow: bool, cx: &App) -> Option<AnyElement>
     // chip should a long locale's word not fit the pane (chips never clip, NOTES surface 24).
     let mut chip = if narrow {
         let style = tx_badge::narrow_style(cx);
+        // ## m3c-narrow (T43b review m9): the narrow chips' metrics by name, as the lock and
+        // pending chips read them: 7 px at the sides (was `spacing.sm`, 6 px) and at least
+        // 22 px tall (was a literal).
         chip.flex_1()
             .min_w(px(0.0))
             .items_center()
-            .min_h(px(22.0))
+            .min_h(px(hacivat_ui::metrics::NARROW_CHIP_MIN_PX))
+            .px(px(hacivat_ui::metrics::NARROW_CHIP_PAD_X_PX))
             .py(px(hacivat_ui::metrics::NARROW_CHIP_PAD_Y_PX))
             .child(
                 div().flex_1().min_w(px(0.0)).child(
