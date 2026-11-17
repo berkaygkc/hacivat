@@ -20,7 +20,7 @@
 //!   the node ids come from `(grid, model row, column)`, so they stay put across a scroll and a
 //!   sort.
 //! - **Names.** A cell reads its source's screen-reader text ([`GridFrame::a11y_cell`]: the
-//!   app's `Purpose::A11y`), at most [`A11Y_NAME_MAX_CHARS`] characters (then `…`); NULL reads
+//!   app's `Purpose::A11y`), at most [`A11Y_NAME_MAX_GRAPHEMES`] graphemes (then `…`); NULL reads
 //!   `hui-grid-a11y-null`, a truncated value `hui-grid-a11y-truncated` with its full size, a
 //!   placeholder the grid's "loading" label. A header cell reads its column's name and carries
 //!   its sort direction, with the sort tooltip (level, direction, collation) as its description.
@@ -29,11 +29,16 @@
 //!   leaves with their bounds; the grid's node (the view's focused root) names the focus cell its
 //!   **active descendant** and holds the polite live region. A canvas registers the cells'
 //!   actions (Focus, ScrollIntoView, ShowContextMenu) once the leaves have their ids.
-//! - **Announcements** (polite, a `Status` leaf, dropped after [`A11Y_LIVE_HOLD`]): a focus that
-//!   changes row says "Row 3 of 1,000, email: alice@example.com"; one that stays in its row says
-//!   "email: alice@example.com"; a selection of more than one cell says its size instead
-//!   (`hui-grid-selection-summary`). The find's count and the go-to dialog keep their own nodes
-//!   (Task 37): a find step or a go-to moves the focus, and the grid says only the cell.
+//! - **Announcements** (## m3c-t40 fix round 1, I1 and I2): polite, a `Status` leaf of the
+//!   grid's node. Only what the focused cell's own node does not say, and only once the
+//!   selection has been still for [`A11Y_SETTLE`] (a held arrow key says one thing, after its
+//!   last move): a focus that moved to another row says "Row 3 of 1,000"; a move within the
+//!   row, or the same cell moved by a re-sort, says nothing; a selection of more than one cell
+//!   says its size (`hui-grid-selection-summary`). An announcement is dropped after
+//!   [`A11Y_LIVE_HOLD`] by a timer, and once delivered it is never declared again after a pause
+//!   of [`A11Y_LIVE_GAP`] in the grid's painting ([`LiveRegion`]): a grid shown again does not
+//!   read it twice. The find's count and the go-to dialog keep their own nodes (Task 37): a find
+//!   step or a go-to moves the focus, and the grid says at most the row.
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -41,11 +46,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use hacivat_ui::l10n::{UiArg, UiText, UiTextProvider};
 use hacivat_ui_core::gpui_surface::{
     A11ySubtreeBuilder, AnyElement, App, Context, Div, ElementId, FluentBuilder as _,
     InteractiveElement as _, IntoElement as _, Role, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Window, accesskit, canvas, div, px,
+    StatefulInteractiveElement as _, Styled as _, Task, Window, accesskit, canvas, div, px,
 };
 
 use super::Geometry;
@@ -58,12 +65,23 @@ use crate::view::{GridCommand, GridView};
 /// Rows built above and below the ones on screen (HV-GRID-16: overscan of 5).
 pub const A11Y_OVERSCAN_ROWS: u64 = 5;
 
-/// The most characters a cell's name keeps (then `…`).
-pub const A11Y_NAME_MAX_CHARS: usize = 1_000;
+/// The most graphemes a cell's name keeps (then `…`; ## m3c-t40 fix round 1, m2: never a
+/// split grapheme).
+pub const A11Y_NAME_MAX_GRAPHEMES: usize = 1_000;
 
-/// How long an announcement stays in the tree: long enough for every platform to read it,
-/// short enough that the grid shown again (a tab switch) does not read it twice.
+/// How long an announcement stays in the tree at most: long enough for every platform to read
+/// it (Windows and Linux readers fetch the node after the event). A timer drops it then.
 pub const A11Y_LIVE_HOLD: Duration = Duration::from_secs(3);
+
+// ## m3c-t40 fix round 1 (I1, I2)
+/// A selection is announced once it has been still this long: a held arrow key says one thing,
+/// after its last move.
+pub const A11Y_SETTLE: Duration = Duration::from_millis(200);
+
+/// A delivered announcement (declared to a painted frame) is dropped by the first render after
+/// a pause of this long in the grid's painting: a grid shown again after a tab switch never
+/// reads it twice.
+pub const A11Y_LIVE_GAP: Duration = Duration::from_millis(250);
 
 /// The actions a data cell answers.
 const CELL_ACTIONS: [accesskit::Action; 3] = [
@@ -317,12 +335,13 @@ pub fn cell_name(cell: &CellContent, words: &A11yWords) -> SharedString {
     }
 }
 
-/// `text` cut after [`A11Y_NAME_MAX_CHARS`] characters, with `…`.
+/// `text` cut after [`A11Y_NAME_MAX_GRAPHEMES`] graphemes, with `…` (## m3c-t40 fix round 1,
+/// m2: a flag or a joined emoji is never split). A text of at most that many bytes is whole.
 fn capped(text: &SharedString) -> SharedString {
-    if text.len() <= A11Y_NAME_MAX_CHARS {
+    if text.len() <= A11Y_NAME_MAX_GRAPHEMES {
         return text.clone();
     }
-    match text.char_indices().nth(A11Y_NAME_MAX_CHARS) {
+    match text.grapheme_indices(true).nth(A11Y_NAME_MAX_GRAPHEMES) {
         None => text.clone(),
         Some((cut, _)) => {
             let mut s = String::with_capacity(cut + '…'.len_utf8());
@@ -333,18 +352,18 @@ fn capped(text: &SharedString) -> SharedString {
     }
 }
 
-/// What a selection change says (before the words are filled in).
+/// What a settled selection change says (before the words are filled in). ## m3c-t40 fix
+/// round 1 (I2): only what the focused cell's own node does not say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Said {
-    /// The focus moved to another row: its row and the cell.
+    /// The focus moved to another row: "Row 3 of 1,000" (the cell itself is read as the
+    /// focus).
     Row(ModelCell),
-    /// The focus moved within its row: the cell.
-    Cell(ModelCell),
     /// More than one cell is selected: how many.
     Selection(u128),
 }
 
-/// The selection as the last announcement left it.
+/// The selection as an announcement sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Seen {
     pub focus: Option<ModelCell>,
@@ -354,9 +373,11 @@ pub struct Seen {
     pub cells: u128,
 }
 
-/// What to say when the selection goes from `before` to `now` (pure): the summary once more
-/// than one cell is selected (each time the count changes), else the focus cell when it moved
-/// (with its row when the row changed); nothing when the focus went away or nothing changed.
+/// What to say when the selection settles at `now` after the last announcement left it at
+/// `before` (pure): the summary once more than one cell is selected (each time the count
+/// changes); else the row when the focus moved to another cell in another row. Nothing for a
+/// move within the row (the focused cell is read), for the same focus cell in a new place (a
+/// re-sort: the active descendant is unchanged), or for no focus.
 pub fn said(before: &Seen, now: &Seen) -> Option<Said> {
     if before == now {
         return None;
@@ -365,37 +386,129 @@ pub fn said(before: &Seen, now: &Seen) -> Option<Said> {
         return (now.cells != before.cells).then_some(Said::Selection(now.cells));
     }
     let focus = now.focus?;
-    if now.focus == before.focus && before.cells <= 1 {
+    if Some(focus) == before.focus || now.view_row == before.view_row {
         return None;
     }
-    if now.view_row != before.view_row {
-        Some(Said::Row(focus))
-    } else {
-        Some(Said::Cell(focus))
-    }
+    Some(Said::Row(focus))
 }
 
-/// The live region's announcement.
+/// One announcement.
 #[derive(Debug, Clone, PartialEq)]
 struct Live {
     seq: u64,
     text: SharedString,
     since: Instant,
+    /// A render declared it.
+    declared: bool,
+    /// A painted frame carried it to the platform.
+    delivered: bool,
+}
+
+/// The polite live region's state (## m3c-t40 fix round 1, I1): an announcement is declared
+/// until [`A11Y_LIVE_HOLD`] after it was said, and, once a painted frame has carried it, never
+/// again after the grid stopped being painted for [`A11Y_LIVE_GAP`] (a tab switch and back).
+#[derive(Debug, Clone, Default)]
+pub struct LiveRegion {
+    live: Option<Live>,
+    said: u64,
+    painted_at: Option<Instant>,
+}
+
+impl LiveRegion {
+    /// Announces `text` from `now`; answers its sequence number (its node's key).
+    pub fn say(&mut self, text: SharedString, now: Instant) -> u64 {
+        self.said += 1;
+        self.live = Some(Live {
+            seq: self.said,
+            text,
+            since: now,
+            declared: false,
+            delivered: false,
+        });
+        self.said
+    }
+
+    /// A frame painted the grid at `now`: an announcement a render declared is delivered.
+    pub fn painted(&mut self, now: Instant) {
+        self.painted_at = Some(now);
+        if let Some(l) = self.live.as_mut()
+            && l.declared
+        {
+            l.delivered = true;
+        }
+    }
+
+    /// What a render at `now` declares, if anything: drops an announcement past its hold, and a
+    /// delivered one after a pause in the grid's painting.
+    pub fn declare(&mut self, now: Instant) -> Option<(u64, SharedString)> {
+        let l = self.live.as_mut()?;
+        let held_out = now >= l.since + A11Y_LIVE_HOLD;
+        let paused = l.delivered
+            && self
+                .painted_at
+                .is_none_or(|p| now.saturating_duration_since(p) >= A11Y_LIVE_GAP);
+        if held_out || paused {
+            self.live = None;
+            return None;
+        }
+        l.declared = true;
+        Some((l.seq, l.text.clone()))
+    }
+
+    /// The hold of announcement `seq` ended: drops it if it is still the one held.
+    pub fn expire(&mut self, seq: u64) -> bool {
+        if self.live.as_ref().is_some_and(|l| l.seq == seq) {
+            self.live = None;
+            return true;
+        }
+        false
+    }
+
+    /// The announcement held now.
+    pub fn text(&self) -> Option<SharedString> {
+        self.live.as_ref().map(|l| l.text.clone())
+    }
+
+    /// Announcements made so far.
+    pub fn count(&self) -> u64 {
+        self.said
+    }
+
+    fn clear(&mut self) {
+        self.live = None;
+        self.painted_at = None;
+    }
 }
 
 /// The subtree's state on the view (empty while no assistive technology is active).
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct A11yState {
     /// The last frame's nodes; the render after it declares them.
     nodes: Rc<Vec<RowNode>>,
     /// Frames that built the subtree.
     builds: u64,
-    /// The selection as last announced; `None` until the first active frame.
+    /// The selection as the last frame left it; `None` until the first active frame.
     seen: Option<Seen>,
-    live: Option<Live>,
-    last_live: u64,
+    /// The selection as the last settled announcement left it.
+    announced: Option<Seen>,
+    live: LiveRegion,
+    /// Says the selection once it has been still for [`A11Y_SETTLE`].
+    settle: Option<Task<()>>,
+    /// Drops the announcement after [`A11Y_LIVE_HOLD`].
+    hold: Option<Task<()>>,
     /// Tests stand in for an attached screen reader (`test-support`).
     forced: bool,
+}
+
+impl std::fmt::Debug for A11yState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("A11yState")
+            .field("rows", &self.nodes.len())
+            .field("builds", &self.builds)
+            .field("seen", &self.seen)
+            .field("live", &self.live)
+            .finish_non_exhaustive()
+    }
 }
 
 impl A11yState {
@@ -404,7 +517,10 @@ impl A11yState {
             self.nodes = Rc::default();
         }
         self.seen = None;
-        self.live = None;
+        self.announced = None;
+        self.live.clear();
+        self.settle = None;
+        self.hold = None;
     }
 }
 
@@ -481,8 +597,9 @@ fn columns(v: &GridView, geom: &Geometry, cx: &App) -> Vec<A11yColumn> {
         .collect()
 }
 
-/// The frame's accessibility children for `v`: the nodes, the announcement, and a render of
-/// the view when they changed (module docs). Nothing while no assistive technology is active.
+/// The frame's accessibility children for `v`: the nodes, the selection's settle timer, and a
+/// render of the view when the nodes changed (module docs). Nothing while no assistive
+/// technology is active.
 pub(crate) fn prepaint(
     v: &mut GridView,
     frame: &dyn GridFrame,
@@ -495,6 +612,8 @@ pub(crate) fn prepaint(
         return;
     }
     v.a11y.builds += 1;
+    let now = cx.background_executor().now();
+    v.a11y.live.painted(now);
     let words = A11yWords::of(v, cx);
     let cols = columns(v, geom, cx);
     let map = v.view_map().clone();
@@ -510,22 +629,13 @@ pub(crate) fn prepaint(
         &cols,
         &words,
     );
-    let mut changed = false;
     if *v.a11y.nodes != nodes {
         v.a11y.nodes = Rc::new(nodes);
-        changed = true;
-    }
-    let now = cx.background_executor().now();
-    if v.a11y
-        .live
-        .as_ref()
-        .is_some_and(|l| now >= l.since + A11Y_LIVE_HOLD)
-    {
-        v.a11y.live = None;
-        changed = true;
+        let view = cx.entity();
+        window.on_next_frame(move |_, cx| view.update(cx, |_, cx| cx.notify()));
     }
     // A selection change is pending its event this frame (`flush_frame_events` runs after
-    // this hook): count it once, and say what changed.
+    // this hook): count it once, and say it once it settles (## m3c-t40 fix round 1, I2).
     if v.selection_dirty || v.a11y.seen.is_none() {
         let focus = v.selection.focus();
         let seen = Seen {
@@ -533,76 +643,69 @@ pub(crate) fn prepaint(
             view_row: focus.and_then(|f| map.model_to_view(f.row)).map(|r| r.0),
             cells: v.selection.cell_count_in(&map, v.layout.visible()),
         };
-        let before = v.a11y.seen.replace(seen);
-        let text = before
-            .and_then(|before| said(&before, &seen))
-            .map(|s| announcement(v, frame, &map, s, &words, cx));
-        if let Some(text) = text {
-            v.a11y.last_live += 1;
-            v.a11y.live = Some(Live {
-                seq: v.a11y.last_live,
-                text,
-                since: now,
-            });
-            changed = true;
+        if v.a11y.seen.replace(seen).is_none() {
+            // Attaching says nothing.
+            v.a11y.announced = Some(seen);
+        } else {
+            let timer = cx.background_executor().timer(A11Y_SETTLE);
+            v.a11y.settle = Some(cx.spawn(async move |this, cx| {
+                timer.await;
+                let _ = this.update(cx, settled);
+            }));
         }
-    }
-    if changed {
-        let view = cx.entity();
-        window.on_next_frame(move |_, cx| view.update(cx, |_, cx| cx.notify()));
     }
 }
 
+/// The selection has been still for [`A11Y_SETTLE`]: says what changed since the last
+/// announcement, and drops it again after [`A11Y_LIVE_HOLD`].
+fn settled(v: &mut GridView, cx: &mut Context<GridView>) {
+    v.a11y.settle = None;
+    let (Some(before), Some(now)) = (v.a11y.announced, v.a11y.seen) else {
+        return;
+    };
+    v.a11y.announced = Some(now);
+    let Some(s) = said(&before, &now) else {
+        return;
+    };
+    let text = announcement(v, s, cx);
+    let seq = v.a11y.live.say(text, cx.background_executor().now());
+    let timer = cx.background_executor().timer(A11Y_LIVE_HOLD);
+    v.a11y.hold = Some(cx.spawn(async move |this, cx| {
+        timer.await;
+        let _ = this.update(cx, |v, cx| {
+            if v.a11y.live.expire(seq) {
+                cx.notify();
+            }
+        });
+    }));
+    cx.notify();
+}
+
 /// The words of `s`.
-fn announcement(
-    v: &GridView,
-    frame: &dyn GridFrame,
-    map: &ViewMap,
-    s: Said,
-    words: &A11yWords,
-    cx: &App,
-) -> SharedString {
-    let (focus, with_row) = match s {
+fn announcement(v: &GridView, s: Said, cx: &App) -> SharedString {
+    match s {
         Said::Selection(cells) => {
             let cells = u64::try_from(cells).unwrap_or(u64::MAX);
-            return message(
+            message(
                 cx,
                 "hui-grid-selection-summary",
                 &[("cells", UiArg::Count(cells))],
-            );
+            )
         }
-        Said::Row(f) => (f, true),
-        Said::Cell(f) => (f, false),
-    };
-    let column = v
-        .columns
-        .iter()
-        .find(|c| c.id == focus.col)
-        .map(|c| c.name.clone())
-        .unwrap_or_default();
-    let value = cell_name(&frame.a11y_cell(focus.row, focus.col), words);
-    let cell = message(
-        cx,
-        "hui-grid-a11y-cell",
-        &[
-            ("column", UiArg::Text(column)),
-            ("value", UiArg::Text(value)),
-        ],
-    );
-    if !with_row {
-        return cell;
-    }
-    let row = map.model_to_view(focus.row).map_or(focus.row.0, |r| r.0) + 1;
-    let (total, more) = row_total(v);
-    let args = [
-        ("row", UiArg::Count(row)),
-        ("total", UiArg::Count(total)),
-        ("cell", UiArg::Text(cell)),
-    ];
-    if more {
-        message(cx, "hui-grid-a11y-row-of-more", &args)
-    } else {
-        message(cx, "hui-grid-a11y-row-of", &args)
+        Said::Row(focus) => {
+            let row = v
+                .view_map()
+                .model_to_view(focus.row)
+                .map_or(focus.row.0, |r| r.0)
+                + 1;
+            let (total, more) = row_total(v);
+            let args = [("row", UiArg::Count(row)), ("total", UiArg::Count(total))];
+            if more {
+                message(cx, "hui-grid-a11y-row-of-more", &args)
+            } else {
+                message(cx, "hui-grid-a11y-row-of", &args)
+            }
+        }
     }
 }
 
@@ -612,10 +715,12 @@ pub(crate) fn more_rows(cx: &App) -> SharedString {
 }
 
 /// The data rows the grid announces, and whether more may come: a filter's kept rows; else the
-/// exact total when known, the loaded rows otherwise.
+/// exact total when known, the loaded rows otherwise. ## m3c-t40 fix round 1 (m5): a filter
+/// over an open result ran over the fetched rows only, so more may still match.
 pub(crate) fn row_total(v: &GridView) -> (u64, bool) {
+    let open = v.data.known_total().is_none();
     match v.view_map() {
-        map @ ViewMap::Filtered { .. } => (map.len(), false),
+        map @ ViewMap::Filtered { .. } => (map.len(), open),
         _ => match v.data.known_total() {
             Some(total) => (total, false),
             None => (v.data.count.loaded, true),
@@ -642,11 +747,15 @@ impl Columns {
         Columns { edges }
     }
 
+    /// ## m3c-t40 fix round 1 (m3): the indices ascend (frozen, then scrolling): a binary
+    /// search per cell.
     fn edges(&self, index: usize) -> Option<(f32, f32)> {
-        self.edges
-            .iter()
-            .find(|(ix, ..)| *ix == index)
-            .map(|(_, a, b)| (*a, *b))
+        let at = self
+            .edges
+            .binary_search_by_key(&index, |(ix, ..)| *ix)
+            .ok()?;
+        let (_, a, b) = self.edges[at];
+        Some((a, b))
     }
 }
 
@@ -733,20 +842,21 @@ pub(crate) fn subtree(
         .size_0()
         .into_any_element(),
     );
-    let live = v.a11y.live.clone();
+    // ## m3c-t40 fix round 1 (I1): never past its hold, never again after a pause.
+    let live = v.a11y.live.declare(cx.background_executor().now());
     let root = root.a11y_synthetic_children(move |b| {
         // The rows declared their cells before the root closes: the focus cell is known.
         if let Some(id) = focus_id.get() {
             b.parent_node().set_active_descendant(id);
         }
-        if let Some(l) = live {
+        if let Some((seq, text)) = live {
             let mut node = accesskit::Node::new(Role::Status);
             node.set_live(accesskit::Live::Polite);
             // The Windows and Linux adapters announce a live region by its name, macOS by its
             // value (as the editor's, Task 29).
-            node.set_label(l.text.to_string());
-            node.set_value(l.text.to_string());
-            let id = b.synthetic_node_id(("hv-grid-a11y-live", l.seq));
+            node.set_label(text.to_string());
+            node.set_value(text.to_string());
+            let id = b.synthetic_node_id(("hv-grid-a11y-live", seq));
             b.push_child(id, node);
         }
     });
@@ -807,7 +917,13 @@ impl GridView {
 
     /// The live region's announcement, while it is held.
     pub fn a11y_announcement(&self) -> Option<SharedString> {
-        self.a11y.live.as_ref().map(|l| l.text.clone())
+        self.a11y.live.text()
+    }
+
+    // ## m3c-t40 fix round 1 (I2)
+    /// Announcements made since the view was built.
+    pub fn a11y_announcements(&self) -> u64 {
+        self.a11y.live.count()
     }
 
     /// Runs an assistive technology's `action` on `cell`: Focus focuses the grid and the cell,

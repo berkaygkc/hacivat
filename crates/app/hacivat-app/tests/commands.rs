@@ -94,6 +94,9 @@ fn enabled_action_count(vcx: &VisualTestContext) -> usize {
             .all()
             .iter()
             .filter(|d| (d.enabled)(cx))
+            // ## m3c-t40 fix round 1 (m6, named exception): Tab's grid commands keep their
+            // keys but are no palette rows.
+            .filter(|d| !hacivat_ui_grid::commands::hidden_in_palette(d.id))
             .count()
     })
 }

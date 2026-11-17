@@ -86,6 +86,17 @@ pub fn is_stub(id: &str) -> bool {
     STUB_COMMANDS.contains(&id)
 }
 
+// ## m3c-t40 fix round 1 (m6)
+/// Grid commands that keep their keys but stay out of the command palette: Tab and Shift+Tab
+/// leave the grid from any cell since R-M3-69, so their titles ("Grid: next cell") no longer
+/// say what they do. A later task may retitle them in its own block.
+pub static PALETTE_HIDDEN: [&str; 2] = ["grid.next_cell", "grid.prev_cell"];
+
+/// Whether grid command `id` stays out of the palette ([`PALETTE_HIDDEN`]).
+pub fn hidden_in_palette(id: &str) -> bool {
+    PALETTE_HIDDEN.contains(&id)
+}
+
 const fn mv(dir: Dir, extend: bool) -> GridCommand {
     GridCommand::Move { dir, extend }
 }

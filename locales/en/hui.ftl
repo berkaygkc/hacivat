@@ -140,24 +140,17 @@ hui-grid-a11y-null = null
 #   $value (String) - the part of the value that was read, e.g. "Lorem ipsum".
 #   $size (String) - the whole value's size, with its unit, e.g. "5 MB".
 hui-grid-a11y-truncated = { $value }, truncated, { $size }
-# Announced when the focus moves to another cell of the same grid row.
-# Variables:
-#   $column (String) - the column's name (data, never translated), e.g. "email".
-#   $value (String) - what the cell reads, e.g. "alice@example.com".
-hui-grid-a11y-cell = { $column }: { $value }
-# Announced when the focus moves to a cell in another grid row.
+# Announced when the grid's focus has settled on a cell in another row (the cell itself is read as the focus).
 # Variables:
 #   $row (Number) - the row's position as shown, from 1, e.g. 1234.
 #   $total (Number) - the rows shown, e.g. 10000.
-#   $cell (String) - the cell (an hui-grid-a11y-cell message), e.g. "email: alice@example.com".
-hui-grid-a11y-row-of = Row { $row } of { $total }, { $cell }
+hui-grid-a11y-row-of = Row { $row } of { $total }
 # As hui-grid-a11y-row-of, while the result may have more rows than were fetched.
 # Variables:
 #   $row (Number) - the row's position as shown, from 1, e.g. 1234.
-#   $total (Number) - the rows fetched so far, e.g. 10000.
-#   $cell (String) - the cell (an hui-grid-a11y-cell message), e.g. "email: alice@example.com".
-hui-grid-a11y-row-of-more = Row { $row } of { $total } or more, { $cell }
-# Announced instead of a cell when a grid selection holds more than one cell.
+#   $total (Number) - the rows fetched (or kept by a filter) so far, e.g. 10000.
+hui-grid-a11y-row-of-more = Row { $row } of { $total } or more
+# Announced when a grid selection holding more than one cell has settled.
 # Variables:
 #   $cells (Number) - the selected cells, e.g. 160.
 hui-grid-selection-summary = { $cells ->

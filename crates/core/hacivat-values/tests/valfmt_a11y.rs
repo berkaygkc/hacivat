@@ -82,3 +82,12 @@ fn numbers_null_and_plain_text_read_as_the_cell_shows_them() {
     let (cell, spoken) = both(&Value::Text("İstanbul".into()), &text_col());
     assert_eq!(spoken, cell);
 }
+
+// ## m3c-t40 fix round 1 (m2): a control run just before the cap leaves no space before `…`.
+#[test]
+fn a_cut_never_ends_in_a_space() {
+    let t = text_col();
+    let text = format!("{}\n{}", "x".repeat(999), "y".repeat(10));
+    let (_, spoken) = both(&Value::Text(text.into()), &t);
+    assert_eq!(spoken.text, format!("{}…", "x".repeat(999)));
+}

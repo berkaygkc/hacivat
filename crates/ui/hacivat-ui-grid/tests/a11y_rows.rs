@@ -20,8 +20,9 @@ use gpui::accesskit;
 use hacivat_ui::l10n::{EnglishDefaults, UiArg, UiTextProvider};
 use hacivat_ui_core::gpui_surface::SharedString;
 use hacivat_ui_grid::element::a11y_rows::{
-    A11Y_NAME_MAX_CHARS, A11Y_OVERSCAN_ROWS, A11yColumn, A11yRows, A11yWords, RowKey, RowNode,
-    Said, Seen, cell_name, count_nodes, said, visible_nodes,
+    A11Y_LIVE_GAP, A11Y_LIVE_HOLD, A11Y_NAME_MAX_GRAPHEMES, A11Y_OVERSCAN_ROWS, A11yColumn,
+    A11yRows, A11yWords, LiveRegion, RowKey, RowNode, Said, Seen, cell_name, count_nodes, said,
+    visible_nodes,
 };
 use hacivat_ui_grid::model::{KeyCtx, KeyOutcome, Selection, ViewMap, apply_command};
 use hacivat_ui_grid::{
@@ -258,7 +259,7 @@ fn null_and_truncated_names() {
     let names: Vec<_> = nodes[1].cells.iter().map(|c| c.name.to_string()).collect();
     assert_eq!(names[0], "null");
     assert_eq!(names[1], "abc, truncated, 5 MB");
-    assert_eq!(names[2].chars().count(), A11Y_NAME_MAX_CHARS + 1);
+    assert_eq!(names[2].chars().count(), A11Y_NAME_MAX_GRAPHEMES + 1);
     assert!(names[2].ends_with('…'));
     assert!(long.starts_with(names[2].trim_end_matches('…')));
     assert_eq!(names[3], "Loading");
@@ -278,6 +279,20 @@ fn null_and_truncated_names() {
     assert_eq!(cell_name(&flagged, &words()), "abc");
     let whole = cell("x".repeat(1_000), CellKind::Text, Align::Start);
     assert_eq!(cell_name(&whole, &words()).len(), 1_000);
+    // ## m3c-t40 fix round 1 (m2): the cap counts graphemes and never splits one: a flag is two
+    // regional indicators, a family emoji several code points joined.
+    let flags = format!("a{}", "🇹🇷".repeat(1_200));
+    let cut = cell_name(&cell(flags.clone(), CellKind::Text, Align::Start), &words());
+    assert!(cut.ends_with("🇹🇷…"), "whole flags only");
+    assert_eq!(cut.trim_end_matches('…'), format!("a{}", "🇹🇷".repeat(999)));
+    let family = "👨‍👩‍👧";
+    let families = cell(family.repeat(1_001), CellKind::Text, Align::Start);
+    assert_eq!(
+        cell_name(&families, &words()).as_ref(),
+        format!("{}…", family.repeat(1_000))
+    );
+    let exact = cell(family.repeat(1_000), CellKind::Text, Align::Start);
+    assert_eq!(cell_name(&exact, &words()).as_ref(), family.repeat(1_000));
     // The English words (hui.ftl).
     let en = EnglishDefaults::new();
     assert_eq!(bare(&en.text("hui-grid-a11y-null", &[])), "null");
@@ -387,8 +402,15 @@ fn node_build_under_1ms_per_frame() {
         &map,
     );
     let cols = columns(COLS);
+    // What one active frame's hook does with them: build, compare with the frame before (the
+    // render is asked again only on a change), and the AccessKit nodes the render's elements
+    // write (## m3c-t40 fix round 1, m3). Not timed: the Fluent words and columns of the frame
+    // (a few lookups), and GPUI's own half (the row elements' layout, the leaves' pushes, the
+    // action listeners), which runs only with a screen reader attached (Task 45).
+    let previous = nodes_in(&frame, top..top + 40, 5, &map, &sel, &cols);
     let build = || {
         let nodes = nodes_in(&frame, top..top + 40, 5, &map, &sel, &cols);
+        assert!(nodes == previous, "an unchanged frame compares equal");
         // And the AccessKit nodes GPUI takes from them.
         let mut n = 0usize;
         for row in nodes.iter() {
@@ -411,7 +433,9 @@ fn node_build_under_1ms_per_frame() {
         sum = sum.wrapping_add(build().1);
     }
     let per = started.elapsed().as_secs_f64() * 1_000.0 / f64::from(iterations);
-    println!("grid a11y node build: {per:.3} ms per frame for {count} nodes (sum {sum})");
+    println!(
+        "grid a11y node build + compare + AccessKit nodes: {per:.3} ms per frame for {count} nodes (sum {sum})"
+    );
     assert!(per < 1.0, "{per:.3} ms per frame");
 }
 
@@ -498,7 +522,9 @@ fn what_a_selection_change_says() {
     let right = seen(Some(at(0, 1)), Some(0), 1);
     let down = seen(Some(at(1, 1)), Some(1), 1);
     assert_eq!(said(&none, &a), Some(Said::Row(at(0, 0))));
-    assert_eq!(said(&a, &right), Some(Said::Cell(at(0, 1))));
+    // ## m3c-t40 fix round 1 (I2): a move within the row says nothing (the focused cell is
+    // read); a move to another row says only the row.
+    assert_eq!(said(&a, &right), None);
     assert_eq!(said(&right, &down), Some(Said::Row(at(1, 1))));
     assert_eq!(said(&down, &down), None);
     let wide = seen(Some(at(2, 1)), Some(2), 4);
@@ -509,12 +535,56 @@ fn what_a_selection_change_says() {
         said(&wide, &seen(Some(at(3, 1)), Some(3), 6)),
         Some(Said::Selection(6))
     );
-    // Back to one cell (Escape) says the cell; no focus says nothing.
-    assert_eq!(
-        said(&wide, &seen(Some(at(2, 1)), Some(2), 1)),
-        Some(Said::Cell(at(2, 1)))
-    );
+    // Back to one cell (Escape) on the focus says nothing; no focus says nothing.
+    assert_eq!(said(&wide, &seen(Some(at(2, 1)), Some(2), 1)), None);
     assert_eq!(said(&a, &none), None);
+    // ## m3c-t40 fix round 1 (m1): a re-sort that moves the focus cell's row says nothing (the
+    // active descendant stays on the same cell).
+    assert_eq!(said(&down, &seen(Some(at(1, 1)), Some(57), 1)), None);
+}
+
+// ## m3c-t40 fix round 1 (I1): the live region is never read twice.
+#[test]
+fn an_announcement_is_held_then_dropped_and_never_reread_after_a_gap() {
+    let t0 = std::time::Instant::now();
+    let ms = std::time::Duration::from_millis;
+    let mut live = LiveRegion::default();
+    assert_eq!(live.declare(t0), None);
+    let seq = live.say("Row 2 of 40".into(), t0);
+    assert_eq!(live.count(), 1);
+    // Declared by the render after it, painted by that frame: delivered.
+    assert_eq!(live.declare(t0).map(|(n, _)| n), Some(seq));
+    live.painted(t0);
+    // A grid painted on and on keeps it within the hold.
+    live.painted(t0 + ms(100));
+    assert!(live.declare(t0 + ms(120)).is_some());
+    live.painted(t0 + ms(120));
+    // The hold ends it.
+    assert_eq!(live.declare(t0 + A11Y_LIVE_HOLD), None);
+    assert_eq!(live.text(), None);
+
+    // Delivered, then the grid stops being painted (a tab switch): shown again, it is gone.
+    let mut live = LiveRegion::default();
+    live.say("Row 3 of 40".into(), t0);
+    assert!(live.declare(t0).is_some());
+    live.painted(t0);
+    assert_eq!(live.declare(t0 + A11Y_LIVE_GAP + ms(1)), None);
+    assert_eq!(live.text(), None);
+
+    // Not yet declared: a quiet grid (the settle timer fires with no frame since the last
+    // move) still declares it.
+    let mut live = LiveRegion::default();
+    live.painted(t0);
+    live.say("Row 4 of 40".into(), t0 + ms(400));
+    assert!(live.declare(t0 + ms(401)).is_some());
+
+    // The hold's timer drops only its own announcement.
+    let mut live = LiveRegion::default();
+    let first = live.say("Row 5 of 40".into(), t0);
+    let second = live.say("Row 6 of 40".into(), t0 + ms(10));
+    assert!(!live.expire(first));
+    assert!(live.expire(second));
+    assert_eq!(live.text(), None);
 }
 
 // ---- the view with a screen reader --------------------------------------------------------
@@ -531,7 +601,11 @@ mod with_a_view {
     use hacivat_ui::l10n::{EnglishDefaults, UiText};
     use hacivat_ui_core::gpui_surface::SharedString;
     use hacivat_ui_core::theme::{Theme, ThemeMode};
-    use hacivat_ui_grid::element::a11y_rows::{A11Y_OVERSCAN_ROWS, RowKey};
+    use std::time::Duration;
+
+    use hacivat_ui_grid::element::a11y_rows::{
+        A11Y_LIVE_HOLD, A11Y_OVERSCAN_ROWS, A11Y_SETTLE, RowKey,
+    };
     use hacivat_ui_grid::model::{Dir, SortKey, SortSpec, ViewMap};
     use hacivat_ui_grid::testing::{FixtureSource, cell, grid_config};
     use hacivat_ui_grid::{
@@ -621,6 +695,17 @@ mod with_a_view {
         view.read_with(vcx, |v, _| v.a11y_announcement().map(|s| bare(&s)))
     }
 
+    /// Lets the announcement settle (## m3c-t40 fix round 1, I2).
+    fn settle(vcx: &mut VisualTestContext) {
+        vcx.executor()
+            .advance_clock(A11Y_SETTLE + Duration::from_millis(10));
+        vcx.run_until_parked();
+    }
+
+    fn said_count(view: &Entity<GridView>, vcx: &mut VisualTestContext) -> u64 {
+        view.read_with(vcx, |v, _| v.a11y_announcements())
+    }
+
     fn generated(cols: u32, loaded: u64, total: Option<u64>, more: bool) -> FixtureSource {
         FixtureSource::generated(cols, loaded, total, more, |r, c| {
             cell(format!("r{r}c{}", c.0), CellKind::Text, Align::Start)
@@ -632,19 +717,20 @@ mod with_a_view {
         let (view, vcx, _) = open(cx, Rc::new(generated(4, 40, Some(40), false)), 600.0, 300.0);
         view.update(vcx, |v, cx| v.assume_a11y_active(true, cx));
         vcx.run_until_parked();
+        settle(vcx);
         assert_eq!(said_now(&view, vcx), None, "attaching says nothing");
         run(&view, vcx, mv(Dir::Down));
-        assert_eq!(
-            said_now(&view, vcx).as_deref(),
-            Some("Row 1 of 40, c0: r0c0")
-        );
+        // ## m3c-t40 fix round 1 (I2): nothing before the selection settles.
+        assert_eq!(said_now(&view, vcx), None);
+        settle(vcx);
+        assert_eq!(said_now(&view, vcx).as_deref(), Some("Row 1 of 40"));
+        // Within the row the focused cell is read; the live region adds nothing.
         run(&view, vcx, mv(Dir::Right));
-        assert_eq!(said_now(&view, vcx).as_deref(), Some("c1: r0c1"));
+        settle(vcx);
+        assert_eq!(said_count(&view, vcx), 1);
         run(&view, vcx, mv(Dir::Down));
-        assert_eq!(
-            said_now(&view, vcx).as_deref(),
-            Some("Row 2 of 40, c1: r1c1")
-        );
+        settle(vcx);
+        assert_eq!(said_now(&view, vcx).as_deref(), Some("Row 2 of 40"));
         run(
             &view,
             vcx,
@@ -653,9 +739,16 @@ mod with_a_view {
                 extend: true,
             },
         );
+        settle(vcx);
         assert_eq!(said_now(&view, vcx).as_deref(), Some("2 cells selected"));
         run(&view, vcx, GridCommand::SelectAll);
+        settle(vcx);
         assert_eq!(said_now(&view, vcx).as_deref(), Some("160 cells selected"));
+        assert_eq!(said_count(&view, vcx), 4);
+        // The hold's timer drops it, with no frame painted in between.
+        vcx.executor().advance_clock(A11Y_LIVE_HOLD);
+        vcx.run_until_parked();
+        assert_eq!(said_now(&view, vcx), None);
         // The focus cell is the one focused node of the frame (the grid's active descendant).
         let focused = view.read_with(vcx, |v, _| {
             v.a11y_nodes()
@@ -685,12 +778,11 @@ mod with_a_view {
             row: ModelRow(r),
             col: ColId(2),
         };
+        settle(vcx);
         view.update(vcx, |v, cx| v.focus_cell(at(7), cx));
         vcx.run_until_parked();
-        assert_eq!(
-            said_now(&view, vcx).as_deref(),
-            Some("Row 8 of 40 or more, c2: r7c2")
-        );
+        settle(vcx);
+        assert_eq!(said_now(&view, vcx).as_deref(), Some("Row 8 of 40 or more"));
         // A filter keeping rows 5, 7 and 30: the rows count as shown (1…3 of 3).
         view.update(vcx, |v, cx| {
             v.set_view_map(ViewMap::filtered(Arc::from([5u64, 7, 30]), 40), cx)
@@ -698,14 +790,66 @@ mod with_a_view {
         vcx.run_until_parked();
         view.update(vcx, |v, cx| v.focus_cell(at(30), cx));
         vcx.run_until_parked();
-        assert_eq!(
-            said_now(&view, vcx).as_deref(),
-            Some("Row 3 of 3, c2: r30c2")
-        );
+        settle(vcx);
+        // ## m3c-t40 fix round 1 (m5): the filter ran over the fetched rows of an open result,
+        // so more may still match.
+        assert_eq!(said_now(&view, vcx).as_deref(), Some("Row 3 of 3 or more"));
         let nodes = view.read_with(vcx, |v, _| v.a11y_nodes());
         let rows: Vec<_> = nodes[1..].iter().filter_map(model_row).collect();
         assert_eq!(rows, vec![5, 7, 30]);
         assert_eq!(nodes[3].index, 3);
+    }
+
+    // ## m3c-t40 fix round 1 (I2): a held arrow key says one thing, once the focus settles.
+    #[gpui::test]
+    fn held_arrows_announce_once_after_the_last_move(cx: &mut TestAppContext) {
+        let (view, vcx, _) = open(
+            cx,
+            Rc::new(generated(4, 500, Some(500), false)),
+            600.0,
+            300.0,
+        );
+        view.update(vcx, |v, cx| v.assume_a11y_active(true, cx));
+        vcx.run_until_parked();
+        settle(vcx);
+        for _ in 0..30 {
+            run(&view, vcx, mv(Dir::Down));
+            vcx.executor().advance_clock(Duration::from_millis(33));
+            vcx.run_until_parked();
+        }
+        assert_eq!(said_count(&view, vcx), 0, "nothing while the key repeats");
+        settle(vcx);
+        assert_eq!(said_count(&view, vcx), 1);
+        assert_eq!(said_now(&view, vcx).as_deref(), Some("Row 30 of 500"));
+        // Away and back before it settles says nothing.
+        run(&view, vcx, mv(Dir::Down));
+        run(&view, vcx, mv(Dir::Up));
+        settle(vcx);
+        assert_eq!(said_count(&view, vcx), 1);
+    }
+
+    // ## m3c-t40 fix round 1 (m5): a filter over an open result says more rows may come.
+    #[gpui::test]
+    fn a_filter_over_an_open_result_says_more_rows_may_come(cx: &mut TestAppContext) {
+        use gpui::{Element as _, InteractiveElement as _, div};
+        let (view, vcx, _) = open(cx, Rc::new(generated(3, 40, None, true)), 600.0, 300.0);
+        view.update(vcx, |v, cx| {
+            v.set_view_map(ViewMap::filtered(Arc::from([5u64, 7, 30]), 40), cx)
+        });
+        vcx.run_until_parked();
+        let node = vcx.update(|_, cx| {
+            view.update(cx, |v, cx| {
+                let el = v.a11y_node(div().id("grid-root"), true, cx);
+                let mut node = accesskit::Node::new(accesskit::Role::Unknown);
+                el.write_a11y_info(&mut node);
+                node
+            })
+        });
+        assert_eq!(node.row_count(), Some(4), "3 kept rows and the header row");
+        assert_eq!(
+            node.description().map(bare).as_deref(),
+            Some("More rows are available")
+        );
     }
 
     #[gpui::test]

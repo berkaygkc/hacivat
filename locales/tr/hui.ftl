@@ -90,11 +90,9 @@ hui-grid-a11y-null = boş değer (NULL)
 # Review: PO
 hui-grid-a11y-truncated = { $value }, kısaltıldı, { $size }
 # Review: PO
-hui-grid-a11y-cell = { $column }: { $value }
+hui-grid-a11y-row-of = Satır { $row } / { $total }
 # Review: PO
-hui-grid-a11y-row-of = Satır { $row } / { $total }, { $cell }
-# Review: PO
-hui-grid-a11y-row-of-more = Satır { $row } / { $total } veya daha fazla, { $cell }
+hui-grid-a11y-row-of-more = Satır { $row } / { $total } veya daha fazla
 # Review: PO
 hui-grid-selection-summary = { $cells } hücre seçili
 # Review: PO

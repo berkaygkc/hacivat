@@ -2022,3 +2022,37 @@ fn a_cell_reads_to_a_screen_reader_with_controls_as_spaces_and_its_whole_size(
     assert_eq!(spoken[3], painted[3]);
     assert_eq!(spoken[3].kind, CellKind::Null);
 }
+
+// ## m3c-t40 fix round 1 (m4): a cell's screen-reader text is formatted once per data and
+// display settings, not once per frame.
+#[gpui::test]
+fn a_cells_screen_reader_text_is_formatted_once(cx: &mut TestAppContext) {
+    install_l10n(cx);
+    let adapter = adapter_over(
+        schema(vec![pg("a", text(), "text"), pg("b", text(), "text")]),
+        vec![vec![t("one\ntwo"), t("plain")], vec![t("x\ty"), t("z")]],
+    );
+    let read = |cx: &mut TestAppContext, adapter: &Rc<GridAdapter>| {
+        let adapter = adapter.clone();
+        cx.update(|cx| {
+            let frame = adapter.begin_frame(cx);
+            [(0, 0), (0, 1), (1, 0), (1, 1)].map(|(r, c)| frame.a11y_cell(ModelRow(r), ColId(c)))
+        })
+    };
+    let first = read(cx, &adapter);
+    assert_eq!(first[0].text.as_ref(), "one two");
+    // Two cells carry controls: two formats; plain cells read the display cache.
+    assert_eq!(adapter.a11y_format_calls(), 2);
+    for _ in 0..3 {
+        assert_eq!(read(cx, &adapter), first);
+    }
+    assert_eq!(
+        adapter.a11y_format_calls(),
+        2,
+        "later frames read the cache"
+    );
+    // New display settings format again.
+    cx.update(|cx| adapter.set_display(tr_istanbul(), cx));
+    read(cx, &adapter);
+    assert_eq!(adapter.a11y_format_calls(), 4);
+}

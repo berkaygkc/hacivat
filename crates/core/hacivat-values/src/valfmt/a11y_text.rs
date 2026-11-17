@@ -44,13 +44,14 @@ fn spoken(text: &str) -> String {
             return out;
         }
         if gap {
-            out.push(' ');
-            kept += 1;
-            gap = false;
-            if kept == A11Y_MAX_GRAPHEMES {
+            // ## m3c-t40 fix round 1 (m2): a space the cap would end on is not kept.
+            if kept + 1 == A11Y_MAX_GRAPHEMES {
                 out.push('…');
                 return out;
             }
+            out.push(' ');
+            kept += 1;
+            gap = false;
         }
         out.push_str(g);
         kept += 1;
