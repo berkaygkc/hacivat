@@ -1,0 +1,13 @@
+CREATE TABLE a (
+    id INTEGER NOT NULL,
+    b_id INTEGER,
+    PRIMARY KEY (id),
+    FOREIGN KEY (b_id) REFERENCES b (id) DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE TABLE b (
+    id INTEGER NOT NULL,
+    a_id INTEGER,
+    PRIMARY KEY (id),
+    FOREIGN KEY (a_id) REFERENCES a (id)
+);

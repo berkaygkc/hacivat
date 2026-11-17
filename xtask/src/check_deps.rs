@@ -71,6 +71,11 @@ pub enum Rule {
     /// and the declaration check matches the crate name (another ropey major with its defaults
     /// is flagged too: fail closed).
     RopeLineBreaks,
+    // ## m4-spike-ddl
+    /// `hacivat-ddl` reaches an async runtime, a session, a driver, the introspector or Fluent
+    /// through its normal dependencies (plan-m4 `DdlIsPure`: the agent links it; every
+    /// producer is a pure function over a snapshot).
+    DdlIsPure,
 }
 
 // ## m2b-t01-interfaces
@@ -127,6 +132,28 @@ fn normal_path_to(
         }
     }
     None
+}
+
+// ## m4-spike-ddl
+/// The DDL generator crate (`DdlIsPure`).
+const DDL: &str = "hacivat-ddl";
+
+/// Whether `p` may not be in `hacivat-ddl`'s normal-dependency closure: a runtime, Fluent, the
+/// session or execution layer, a driver or the introspector.
+fn ddl_forbidden(p: &Package) -> bool {
+    const NAMES: [&str; 10] = [
+        "tokio",
+        "futures",
+        "async-std",
+        "smol",
+        "gpui",
+        "hacivat-l10n",
+        "hacivat-session",
+        "hacivat-exec",
+        "hacivat-introspect",
+        "hacivat-net",
+    ];
+    NAMES.contains(&p.name.as_str()) || p.name.starts_with("hacivat-driver")
 }
 
 // ## m3a-t01b-seams
@@ -301,6 +328,13 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
             && let Some(via) = guard_violation(&root.id, &edges, &pkgs)
         {
             add(name, Rule::GuardNotRuntimeFree, via);
+        }
+
+        // ## m4-spike-ddl
+        if name == DDL
+            && let Some(via) = normal_path_to(&root.id, &edges, &pkgs, ddl_forbidden)
+        {
+            add(name, Rule::DdlIsPure, via);
         }
 
         // ## m3a-t01b-seams
@@ -941,6 +975,53 @@ mod tests {
             assert_eq!(rule_of(&md, "owner-x"), Rule::ZedOutsideAdapter, "{dir}");
             assert_eq!(rule_of(&md, "root-x"), Rule::ZedOutsideAdapter, "{dir}");
         }
+    }
+
+    // ## m4-spike-ddl
+    #[test]
+    fn ddl_reaching_tokio_is_refused() {
+        let md = fx_at(&[
+            ("hacivat-ddl", "crates/core", &["hacivat-meta"]),
+            ("hacivat-meta", "crates/core", &["tokio"]),
+        ]);
+        let v: Vec<_> = violations(&md, &lints_ok)
+            .into_iter()
+            .filter(|v| v.krate == "hacivat-ddl")
+            .collect();
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].rule, Rule::DdlIsPure);
+        assert_eq!(v[0].via, ["hacivat-meta", "tokio"]);
+    }
+
+    #[test]
+    fn ddl_reaching_a_driver_or_session_is_refused() {
+        for bad in [
+            "hacivat-driver-pg",
+            "hacivat-session",
+            "hacivat-introspect",
+            "hacivat-l10n",
+        ] {
+            let md = fx_at(&[("hacivat-ddl", "crates/core", &[bad])]);
+            assert_eq!(rule_of(&md, "hacivat-ddl"), Rule::DdlIsPure, "{bad}");
+        }
+    }
+
+    #[test]
+    fn ddl_pure_edges_and_dev_dependencies_pass() {
+        let md = fx_at(&[(
+            "hacivat-ddl",
+            "crates/core",
+            &["hacivat-meta", "hacivat-proto", "sql-dialect", "rusqlite"],
+        )]);
+        assert!(violations(&md, &lints_ok).is_empty());
+        let dev = fx_kind_at(
+            "hacivat-ddl",
+            "crates/core",
+            "tokio",
+            DepKind::Development,
+            &[],
+        );
+        assert!(violations(&dev, &lints_ok).is_empty());
     }
 
     /// M2b Task 1 (§5.1 rule 3, Q23): `hacivat-guard` stays sans-I/O and runtime-free.

@@ -10,3 +10,7 @@
 *.mp4 binary
 *.icc binary
 *.dmg binary
+
+# ## m4-spike-ddl: generated-DDL goldens are compared byte for byte (R-M4-16, G5); git never
+# converts their line endings, so a Windows checkout keeps LF.
+crates/core/hacivat-ddl/tests/golden/** -text

@@ -3311,6 +3311,18 @@ name = "hacivat-bench"
 version = "0.0.0"
 
 [[package]]
+name = "hacivat-ddl"
+version = "0.0.0"
+dependencies = [
+ "hacivat-meta",
+ "hacivat-proto",
+ "rusqlite",
+ "smallvec",
+ "sql-dialect",
+ "sql-oracle-pg",
+]
+
+[[package]]
 name = "hacivat-driver"
 version = "0.0.0"
 dependencies = [

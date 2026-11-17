@@ -74,6 +74,8 @@ sql-ident = { path = "crates/sql/sql-ident" }
 sql-safety = { path = "crates/sql/sql-safety" }
 # ## m4-spike-model: the metadata model, snapshots and catalog cache (HV-MODEL-01..03).
 hacivat-meta = { path = "crates/core/hacivat-meta" }
+# ## m4-spike-ddl: view-only DDL producers, typed IR and renderers (HV-DDL-07, -09..-11).
+hacivat-ddl = { path = "crates/core/hacivat-ddl" }
 
 # Localization (Fluent + ICU4X 2.4).
 fluent-bundle = "0.16.0"
