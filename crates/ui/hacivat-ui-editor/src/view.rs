@@ -35,7 +35,6 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use hacivat_text::display::HeightMap;
 use hacivat_text::{
     Annotations, Bias, ChangeSet, Committed, EditorModel, FoldSet, ImeCore, MapMode, ModelConfig,
     Origin, SelectionRange, SelectionSet, Snapshot, TextBuffer, Transaction, UserEvent,
@@ -255,6 +254,9 @@ impl EditorView {
             doc,
             Rc::new(move |cx: &mut App| {
                 let _ = weak.update(cx, |v, cx| {
+                    // ## m3c-t32-fold (named exception, fix round 1 I1): the foldable ranges
+                    // are asked again.
+                    fold_gutter::on_analysis(v);
                     preview::on_update(v, Refresh::AnalysisLanded, cx);
                     cx.notify();
                 });
@@ -421,6 +423,10 @@ impl EditorView {
             config: self.config,
             tier: self.tier.tier,
             focused,
+            // ## m3c-t32-fold (named exception): folded lines leave the runs; a folded
+            // header says how many (fix round 1, M9).
+            hidden: fold_gutter::hidden(self),
+            fold_notes: fold_gutter::a11y_notes(self, cx),
         }
     }
 
@@ -741,8 +747,10 @@ impl EditorView {
         };
         let rows = layout.rows();
         let lines = u32::try_from(self.model.buffer().len_lines()).unwrap_or(u32::MAX);
-        let map = HeightMap::uniform(lines, f64::from(f32::from(rows.line_height)));
+        // ## m3c-t32-fold (named exception): folded lines take no height.
+        let lh = f64::from(f32::from(rows.line_height));
         let view_h = f64::from(f32::from(rows.bounds.size.height));
+        let map = fold_gutter::height_map(self, lines, lh);
         self.scroll.scroll_by(&map, dy, view_h);
     }
 
@@ -811,7 +819,8 @@ impl EditorView {
         }
         marks::on_commit(&mut self.marks, &committed, self.model.changelog(), &snap);
         // ## m3b-t01b-seams: folds follow the text; find matches go stale (Tasks 32, 33).
-        fold_gutter::on_commit(self, &committed);
+        // ## m3c-t32-fold (named exception, fix round 1 M2): only a text change maps them.
+        fold_gutter::on_commit(self, &committed, text_changed);
         find::on_commit(self, &committed);
         if text_changed {
             self.service.change(self.doc, &snap, &committed.desc, cx);

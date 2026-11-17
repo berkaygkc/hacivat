@@ -556,6 +556,30 @@ impl Glyph {
     }
 }
 
+// ## m3c-t32-fold
+/// Which mark a folded header's row shows (NOTES M3c-7, controller carry): the one that most
+/// needs the user. The editor's states in that order: a cancel not answered (`Escalated`) >
+/// failed > running > cancelling > queued > cancelled > skipped > done > stale. The app shows
+/// "awaiting an answer" as a running mark and "rolled back" through its label (NOTES ruling
+/// 31), so they rank as those states here. Task 34 adds the two arms at their NOTES places:
+/// awaiting above escalated, rolled back between cancelled and skipped.
+fn fold_rank(m: &Mark, glyph: Glyph) -> u8 {
+    if m.stale && !glyph.live() {
+        return 0;
+    }
+    match m.state {
+        Some(ExecMarkState::Escalated { .. }) => 9,
+        Some(ExecMarkState::Failed { .. }) => 8,
+        Some(ExecMarkState::Running { .. }) => 7,
+        Some(ExecMarkState::Cancelling { .. }) => 6,
+        Some(ExecMarkState::Queued) => 5,
+        Some(ExecMarkState::Cancelled) => 4,
+        Some(ExecMarkState::Skipped) => 3,
+        Some(ExecMarkState::Succeeded { .. }) => 2,
+        None => 1,
+    }
+}
+
 /// The glyph of `m` at `now` (`None`: no state yet, or running for less than 50 ms).
 fn glyph_of(m: &Mark, now: Instant) -> Option<Glyph> {
     Some(match m.state.as_ref()? {
@@ -811,10 +835,10 @@ pub fn prepaint(
 ) -> MarkHitboxes {
     let mut out = MarkHitboxes::default();
     let ov = g.overlay;
-    let (Some(first), Some(last)) = (ov.rows.first(), ov.rows.last()) else {
+    // ## m3c-t32-fold (named exception): the painted rows and the lines their folds hide.
+    let Some((first, last)) = ov.covered() else {
         return out;
     };
-    let (first, last) = (first.line, last.line);
     let buf = &g.snapshot.buffer;
     let now = cx.background_executor().now();
     let theme = cx
@@ -829,8 +853,9 @@ pub fn prepaint(
     };
     let inks = st.inks;
     let vis = buf.line_to_byte(first as usize)..buf.line_range(last as usize, true).end;
-    // The marks by their header's row.
-    let mut rows: Vec<(u32, Vec<(&Mark, Glyph)>)> = Vec::new();
+    // The marks by their header's row (## m3c-t32-fold: a mark on a hidden line is on its
+    // fold's header row, `true` for "inside").
+    let mut rows: Vec<(u32, Vec<_>)> = Vec::new();
     for mk in &m.marks {
         if mk.header < vis.start || mk.header > vis.end {
             continue;
@@ -838,20 +863,40 @@ pub fn prepaint(
         let Some(glyph) = glyph_of(mk, now) else {
             continue;
         };
-        let line = u32::try_from(buf.byte_to_line(mk.header)).unwrap_or(u32::MAX);
-        if line < first || line > last {
+        let own = u32::try_from(buf.byte_to_line(mk.header)).unwrap_or(u32::MAX);
+        if own < first || own > last {
             continue;
         }
+        // ## m3c-t32-fold (named exception)
+        let Some(line) = ov.row_showing(own).map(|r| r.line) else {
+            continue;
+        };
+        let inside = line != own;
         match rows.iter_mut().find(|(l, _)| *l == line) {
-            Some((_, v)) => v.push((mk, glyph)),
-            None => rows.push((line, vec![(mk, glyph)])),
+            Some((_, v)) => v.push((mk, glyph, inside)),
+            None => rows.push((line, vec![(mk, glyph, inside)])),
         }
     }
     let mut eols: Vec<(u32, Vec<Part>, Vec<Part>)> = Vec::new();
-    for (line, marks) in &rows {
-        let Some(&(worst, glyph)) = marks.iter().max_by_key(|(_, g)| g.severity()) else {
+    for (line, all) in &rows {
+        // ## m3c-t32-fold (named exception): a folded header's row shows the one mark that
+        // most needs the user (NOTES M3c-7), saying where it is; other rows list theirs.
+        let folded = all.iter().any(|m| m.2);
+        // ## fix round 1 (M11): of equal ranks, the first in the text (the root cause).
+        let winner = if folded {
+            all.iter().rev().max_by_key(|m| fold_rank(m.0, m.1))
+        } else {
+            all.iter().max_by_key(|m| m.1.severity())
+        };
+        let Some(&(worst, glyph, worst_inside)) = winner else {
             continue;
         };
+        let shown: Vec<(&Mark, Glyph)> = if folded {
+            vec![(worst, glyph)]
+        } else {
+            all.iter().map(|&(m, g, _)| (m, g)).collect()
+        };
+        let marks = &shown;
         let slot = Bounds::new(
             point(g.bounds.left() + px(GLYPH_X), g.top_of(*line)),
             size(px(GLYPH_W), g.line_height),
@@ -881,7 +926,7 @@ pub fn prepaint(
             .items_center()
             .justify_center()
             .child(glyph_element(glyph, worst.stale, &inks));
-        if marks.len() > 1 {
+        if all.len() > 1 {
             el = el.child(
                 div()
                     .absolute()
@@ -916,7 +961,27 @@ pub fn prepaint(
         ));
         // The row's status: each mark's, divided.
         let (mut full, mut short) = (Vec::new(), Vec::new());
-        for &(mk, gl) in marks {
+        // ## m3c-t32-fold (named exception): a failure inside a fold names its line.
+        if worst_inside
+            && let Some(ExecMarkState::Failed { sqlstate }) = &worst.state
+            && !worst.stale
+        {
+            let at = buf.byte_to_line(worst.header) as u64 + 1;
+            full.push(Part::Text(
+                crate::commands::message(
+                    cx,
+                    "hv-editor-fold-failed",
+                    &[("line", UiArg::Count(at))],
+                ),
+                inks.text,
+            ));
+            if let Some(code) = sqlstate {
+                full.push(Part::Chip(code.clone()));
+                short.push(Part::Chip(code.clone()));
+            }
+        }
+        let named = !full.is_empty();
+        for &(mk, gl) in marks.iter().filter(|_| !named) {
             for (list, is_short) in [(&mut full, false), (&mut short, true)] {
                 let parts = status_parts(mk, gl, is_short, &inks, cx);
                 if !parts.is_empty() {
@@ -1003,16 +1068,18 @@ pub fn paint(
     let inks = Inks::of(cx);
     let buf = &g.snapshot.buffer;
     let area = layout.rows().bounds;
-    if let (Some(first), Some(last)) = (g.overlay.rows.first(), g.overlay.rows.last()) {
-        let vis =
-            buf.line_to_byte(first.line as usize)..buf.line_range(last.line as usize, true).end;
+    // ## m3c-t32-fold (named exception): the lines the painted rows' folds hide included.
+    if let Some((first, last)) = g.overlay.covered() {
+        let vis = buf.line_to_byte(first as usize)..buf.line_range(last as usize, true).end;
         for mk in m.marks.iter().filter(|mk| has_bar(mk)) {
             if mk.range.end < vis.start || mk.range.start > vis.end {
                 continue;
             }
             let (a, b) = crate::preview::unit_lines(buf, mk.range.clone());
+            // ## m3c-t32-fold (named exception): a bar over folded lines collapses onto the
+            // header's row.
             let y0 = (g.top_of(a) + px(1.0)).max(g.bounds.top());
-            let y1 = (g.top_of(b + 1) - px(1.0)).min(g.bounds.bottom());
+            let y1 = (g.bottom_of(b) - px(1.0)).min(g.bounds.bottom());
             if y1 > y0 {
                 window.paint_quad(fill(
                     Bounds::new(

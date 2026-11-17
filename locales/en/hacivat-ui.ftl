@@ -2653,3 +2653,49 @@ hv-editor-ime-primary-only = Input method: typing at the main caret only, becaus
 #   $pos (Number) - its place in the list, e.g. 3.
 #   $n (Number) - the entries the list shows, e.g. 5.
 hv-history-selection-a11y = { $sql }, { $pos } of { $n }
+
+## m3b-t32-fold
+
+# A folded range's inlay after its header line, behind an ellipsis glyph (NOTES surface 15).
+# Variables:
+#   $n (Number) - the lines the fold hides, e.g. 5.
+hv-editor-fold-lines = { $n ->
+        [one] { $n } line
+       *[other] { $n } lines
+    }
+# The folded inlay's tooltip.
+# Variables:
+#   $from (Number) - the fold's first line, e.g. 2.
+#   $to (Number) - its last line, e.g. 7.
+hv-editor-fold-tip = Lines { $from }–{ $to } are folded. Click to unfold.
+# The gutter's chevron on an open range (its name and tooltip).
+# Variables:
+#   $from (Number) - the range's first line, e.g. 2.
+#   $to (Number) - its last line, e.g. 7.
+hv-editor-fold-name = Fold lines { $from }–{ $to }
+# The gutter's chevron on a folded range (its name and tooltip).
+# Variables:
+#   $from (Number) - the fold's first line, e.g. 2.
+#   $to (Number) - its last line, e.g. 7.
+hv-editor-unfold-name = Unfold lines { $from }–{ $to }
+# A folded header's end-of-line status when a statement inside the fold failed (the SQLSTATE chip follows).
+# Variables:
+#   $line (Number) - the failed statement's first line, e.g. 9.
+hv-editor-fold-failed = failed inside the fold · line { $line }
+# A folded header's accessible description (screen readers), after its text.
+# Variables:
+#   $n (Number) - the lines the fold hides, e.g. 5.
+hv-editor-fold-hidden = { $n ->
+        [one] { $n } line folded
+       *[other] { $n } lines folded
+    }
+# Said politely after a fold (the gutter, the inlay or the palette).
+# Variables:
+#   $from (Number) - the fold's first line, e.g. 2.
+#   $to (Number) - its last line, e.g. 7.
+hv-editor-fold-done = Folded lines { $from }–{ $to }
+# Said politely after an unfold.
+# Variables:
+#   $from (Number) - the fold's first line, e.g. 2.
+#   $to (Number) - its last line, e.g. 7.
+hv-editor-unfold-done = Unfolded lines { $from }–{ $to }

@@ -673,6 +673,23 @@ impl ChangeDesc {
         }
     }
 
+    // ## m3c-t32-fold (named exception)
+    /// The bytes of the old text the change touched: from its first edit's start to its last
+    /// edit's end (a pure insertion is an empty range where it went). `None` for the identity.
+    pub(crate) fn changed_old_range(&self) -> Option<Range<usize>> {
+        let mut old = 0;
+        let mut first = None;
+        let mut last = 0;
+        for &(del, _, replaced) in &self.parts {
+            if replaced {
+                first.get_or_insert(old);
+                last = old + del;
+            }
+            old += del;
+        }
+        first.map(|f| f..last)
+    }
+
     /// The bytes of the new text the change touched: one range from its first edit to the end
     /// of its last (a pure deletion is an empty range where it was). `None` for the identity.
     pub fn changed_range(&self) -> Option<Range<usize>> {

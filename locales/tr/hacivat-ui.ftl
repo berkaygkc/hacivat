@@ -2380,3 +2380,22 @@ hv-editor-ime-primary-only = Giriş yöntemi: başka bir imleç bir dizenin ya d
 ## m3b-t29-shots
 # Review: PO
 hv-history-selection-a11y = { $sql }, { $n } kayıttan { $pos }.
+
+## m3b-t32-fold
+
+# Review: PO
+hv-editor-fold-lines = { $n } satır
+# Review: PO
+hv-editor-fold-tip = { $from }–{ $to }. satırlar katlandı. Açmak için tıklayın.
+# Review: PO
+hv-editor-fold-name = { $from }–{ $to }. satırları katla
+# Review: PO
+hv-editor-unfold-name = { $from }–{ $to }. satırların katlamasını aç
+# Review: PO
+hv-editor-fold-failed = katlanmış bölümde başarısız · satır { $line }
+# Review: PO
+hv-editor-fold-hidden = { $n } satır katlandı
+# Review: PO
+hv-editor-fold-done = { $from }–{ $to }. satırlar katlandı
+# Review: PO
+hv-editor-unfold-done = { $from }–{ $to }. satırların katlaması açıldı

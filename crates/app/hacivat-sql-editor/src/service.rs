@@ -597,6 +597,14 @@ impl LanguageService for SqlLanguageService {
         }
     }
 
+    // ## m3c-t32-fold (named exception)
+    fn folding_ranges(&self, doc: DocId, version: u64) -> Arc<[hacivat_text::FoldRange]> {
+        match self.docs.borrow().get(&doc) {
+            Some(e) => crate::folds::at(&e.shared, version),
+            None => Arc::from([]),
+        }
+    }
+
     fn decoration_sources(&self, doc: DocId) -> SmallVec<[Rc<dyn DecorationSource>; 2]> {
         let mut out: SmallVec<[Rc<dyn DecorationSource>; 2]> = SmallVec::new();
         if let Some(e) = self.docs.borrow().get(&doc) {

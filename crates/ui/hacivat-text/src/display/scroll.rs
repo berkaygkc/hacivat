@@ -23,6 +23,16 @@ impl ScrollAnchor {
         }
     }
 
+    // ## m3c-t32-fold
+    /// Re-pins the anchor onto a visible row when a fold hid its line: onto the fold's header,
+    /// the offset into the row kept (the view stays where the fold's header is).
+    pub fn snap_visible(&mut self, map: &HeightMap) {
+        if map.is_hidden(self.line) {
+            self.line = map.visible_line(self.line);
+            self.wrap_index = 0;
+        }
+    }
+
     /// The absolute y of the view's top, for the scrollbar only.
     pub fn y(&self, map: &HeightMap) -> f64 {
         map.y_of(self.line) + f64::from(self.offset_in_row)

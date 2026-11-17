@@ -47,6 +47,8 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::rc::Rc;
+// ## m3c-t32-fold (named exception)
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hacivat_text::units::snap_to_grapheme;
@@ -127,6 +129,8 @@ struct WindowKey {
     version: u64,
     lines: Range<usize>,
     long_from: Option<usize>,
+    // ## m3c-t32-fold (named exception)
+    hidden: Arc<[Range<u32>]>,
 }
 
 impl A11yState {
@@ -174,6 +178,12 @@ pub struct A11yFrame {
     /// T1 ("Reduced mode") disables the optimised window growth.
     pub tier: Tier,
     pub focused: bool,
+    // ## m3c-t32-fold (named exception)
+    /// The lines folds hide (sorted, merged): they leave the window's runs.
+    pub hidden: Arc<[Range<u32>]>,
+    /// Each folded header's line and its description ("5 lines folded"), sorted by line: the
+    /// header's last run carries it (fix round 1, M9).
+    pub fold_notes: Arc<[(u32, SharedString)]>,
 }
 
 /// One text run: at most [`RUN_MAX_CHARS`] characters of one line.
@@ -379,7 +389,15 @@ pub fn keyed_window(
         caret_line,
         WINDOW_MAX_BYTES,
     );
-    keyed(a, snap, log, range, snap.buffer.line_to_byte(caret_line)).lines
+    keyed(
+        a,
+        snap,
+        log,
+        range,
+        snap.buffer.line_to_byte(caret_line),
+        &Arc::from([]),
+    )
+    .lines
 }
 
 /// A built window and its AccessKit run nodes (built together, reused together).
@@ -395,6 +413,7 @@ fn keyed(
     log: &ChangeLog,
     lines: Range<usize>,
     caret: usize,
+    hidden: &Arc<[Range<u32>]>,
 ) -> Built {
     let buf = &snap.buffer;
     let caret_line = buf.line_range(buf.byte_to_line(caret), true);
@@ -404,6 +423,7 @@ fn keyed(
         version: snap.version,
         lines,
         long_from,
+        hidden: hidden.clone(),
     };
     let mut n = a.nodes();
     if let Some((at, w)) = &n.window
@@ -413,6 +433,15 @@ fn keyed(
     }
     n.rebase(log, snap.version);
     let mut lines = build(buf, key.lines.clone(), caret);
+    // ## m3c-t32-fold (named exception): folded lines leave the runs (a screen reader reads
+    // the header, as the view shows it).
+    if !hidden.is_empty() {
+        lines.retain(|n| {
+            let l = u32::try_from(n.line).unwrap_or(u32::MAX);
+            let i = hidden.partition_point(|r| r.end <= l);
+            !hidden.get(i).is_some_and(|r| r.start <= l)
+        });
+    }
     n.assign_keys(&mut lines, buf.len_bytes());
     // ## m3a-t29 fix round 1 (M2): the run nodes are built with the window, not per frame.
     let mut nodes = Vec::with_capacity(lines.iter().map(|l| l.runs.len()).sum());
@@ -574,10 +603,23 @@ pub fn declaration(
         caret_line,
         budget,
     );
-    let built = keyed(a, snap, log, lines, main.head);
+    let built = keyed(a, snap, log, lines, main.head, &frame.hidden);
     let w = &built.lines;
     let mut children: Vec<(ChildKey, accesskit::Node)> = Vec::with_capacity(built.nodes.len() + 1);
     children.extend(built.nodes.iter().cloned());
+    // ## m3c-t32-fold (named exception, fix round 1 M9): a folded header says what it hides.
+    for (line, note) in frame.fold_notes.iter() {
+        let Ok(i) = w.binary_search_by_key(&(*line as usize), |n| n.line) else {
+            continue;
+        };
+        let key = ChildKey::Run {
+            line: w[i].key,
+            run: u32::try_from(w[i].runs.len().saturating_sub(1)).unwrap_or(u32::MAX),
+        };
+        if let Some((_, node)) = children.iter_mut().find(|(k, _)| *k == key) {
+            node.set_description(note.to_string());
+        }
+    }
     let selection = (!w.is_empty()).then(|| (position(w, main.anchor), position(w, main.head)));
     let mut nodes = a.nodes();
     // ## m3a-t29 fix round 1 (I2): a live region leaves the tree once held for `LIVE_HOLD`,
