@@ -990,6 +990,9 @@ fn whole_in_the_narrow_pane(vcx: &mut VisualTestContext, when: &str) {
 /// (Task 24): a production console in the focused 120 px pane, in Turkish, connects, runs a
 /// statement to a succeeded mark, and before and after the run its environment mark and mode
 /// chip stay whole inside the pane.
+// ## m3c-t43b-fix (review m6): shown RED against the product, not the geometry: with N1
+// reverted (the console toolbar's Run button never icon-only) it fails "connected: Run draws its
+// icon only (N1)".
 #[gpui::test]
 fn a_production_console_in_a_120px_pane_runs_with_its_trust_signals_whole(cx: &mut TestAppContext) {
     let vcx = shell_with_fake_prepared(cx, "tr", pg(), |paths| split_layout(paths, 120.0));

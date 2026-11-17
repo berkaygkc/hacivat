@@ -36,8 +36,9 @@
 //!   which closes the menu Task 39 opens for its probe.
 //! - **The settings rows** are driven through `settings_ui::fixtures` (no element bounds to aim
 //!   at): the section, the search and the largest-value field.
-//! - The title-bar capsule gets one history before every capture (`shots.rs`,
-//!   `settle_capsule`).
+//! - ## m3c-t43b-fix (review I2): the title-bar capsule is captured as the steps left it; no
+//!   resize settles it. Its fit no longer depends on the frames before (the shot fixes'
+//!   capsule change), and repeated renders of the formerly flaky shots are byte-identical.
 #![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
 
 use std::cell::RefCell;
@@ -83,8 +84,9 @@ use hacivat_ui::toast::ToastQueue;
 use hacivat_ui_core::gpui_surface::{
     App, Entity, EntityInputHandler as _, Focusable as _, Window, point, px,
 };
+use hacivat_ui_core::theme::Theme;
 use hacivat_ui_editor::preview::{self, BandStyle};
-use hacivat_ui_editor::{EditorView, ExecMarkState};
+use hacivat_ui_editor::{EditorView, ExecMarkState, Tier};
 use hacivat_ui_grid::model::{SortKey, SortSpec};
 use hacivat_ui_grid::{ColId, GridView, ModelCell, ModelRow};
 use hacivat_values::valfmt::DisplayZone;
@@ -290,6 +292,9 @@ pub(super) enum M3c {
     NarrowEmpty,
     /// "Nothing to run here" as a status sentence.
     NarrowNothing,
+    // ## m3c-t43b-fix (review I1)
+    /// A large script in reduced mode: the status bar's "Reduced mode" never gives way.
+    NarrowReduced,
     /// The pseudo-locales' minimum pane, 219 px.
     Narrow219,
     // 25 · Settings rows (Task 42)
@@ -432,7 +437,8 @@ pub(super) const T39: [M3c; 9] = [
 ];
 
 /// Task 41's states (surface 24).
-pub(super) const T41: [M3c; 11] = [
+// ## m3c-t43b-fix (review I1): and `narrow-reduced`.
+pub(super) const T41: [M3c; 12] = [
     M3c::NarrowIdle,
     M3c::NarrowProductionRo,
     M3c::NarrowRunning,
@@ -443,6 +449,7 @@ pub(super) const T41: [M3c; 11] = [
     M3c::NarrowStrip,
     M3c::NarrowEmpty,
     M3c::NarrowNothing,
+    M3c::NarrowReduced,
     M3c::Narrow219,
 ];
 
@@ -620,6 +627,9 @@ pub(super) enum Where {
     // ## m3c-t43b
     /// Any locale at the 960x600 minimum.
     Min,
+    // ## m3c-t43b-fix (review m2)
+    /// English and Turkish (not the pseudo-locales), at either size.
+    Plain,
 }
 
 impl Where {
@@ -632,6 +642,8 @@ impl Where {
             Where::PseudoOrMin => pseudo || min,
             // ## m3c-t43b
             Where::Min => min,
+            // ## m3c-t43b-fix (review m2)
+            Where::Plain => !pseudo,
             Where::All => true,
         }
     }
@@ -788,94 +800,28 @@ impl Finding {
 /// Part B's findings (the Task 43 part B report, "Product findings"), kept apart from
 /// [`KNOWN_FINDINGS`] so that the F1–F8 fixes empty that list without touching this one; the
 /// stale tripwire says when an entry's fix landed.
-pub(super) const KNOWN_FINDINGS_B: [Finding; 15] = [
-    // F5 and F8 again (no new defect), over a live production console (part A's m4): the go-to
-    // ask paragraph and its footer buttons, the value viewer's footer size.
-    finding("goto-fetch-ask-live", Where::All, "#goto-line", "T37"),
-    finding(
-        "goto-fetch-ask-live",
-        Where::PseudoMin,
-        "#button-label-goto-cancel",
-        "T37",
-    ),
-    finding(
-        "goto-fetch-ask-live",
-        Where::PseudoMin,
-        "#button-label-goto-fetch-ok",
-        "T37",
-    ),
-    finding(
-        "viewer-truncated-live",
-        Where::Pseudo,
-        "#value-viewer-size",
-        "T38",
-    ),
-    // F9 · A settings row's note is flagged cut at 960 px in Turkish and the pseudo-locales
-    // (its paragraph's box is shorter than its wrapped lines; the PNG reads whole, as F5's ask
-    // paragraph does: the row's measure or the harness's paragraph check needs the owner's look).
-    finding(
-        "settings-editor",
-        Where::PseudoMin,
-        "#settings-row-note-editor.find_turkish_tolerant",
-        "T42",
-    ),
-    finding(
-        "settings-results",
-        Where::Min,
-        "#settings-row-note-results.max_value_bytes",
-        "T42",
-    ),
-    finding(
-        "settings-results",
-        Where::Min,
-        "#settings-row-note-grid.raw_display",
-        "T42",
-    ),
-    finding(
-        "settings-value-clamped",
-        Where::Min,
-        "#settings-row-note-results.max_value_bytes",
-        "T42",
-    ),
-    finding(
-        "settings-value-clamped",
-        Where::Min,
-        "#settings-row-note-grid.raw_display",
-        "T42",
-    ),
-    finding(
-        "settings-value-clamped-low",
-        Where::Min,
-        "#settings-row-note-results.max_value_bytes",
-        "T42",
-    ),
-    finding(
-        "settings-value-clamped-low",
-        Where::Min,
-        "#settings-row-note-grid.raw_display",
-        "T42",
-    ),
-    finding(
-        "settings-value-kb",
-        Where::Min,
-        "#settings-row-note-results.max_value_bytes",
-        "T42",
-    ),
-    finding(
-        "settings-value-kb",
-        Where::Min,
-        "#settings-row-note-grid.raw_display",
-        "T42",
-    ),
-    finding(
-        "settings-search",
-        Where::Min,
-        "#settings-row-note-results.max_value_bytes",
-        "T42",
-    ),
+// ## m3c-t43b-fix (review m3): pruned after one unsharded render of every M3c state (16 shots
+// each, so the stale tripwire applied). F5′/F8′ (the live go-to and viewer) and F9 (the settings
+// notes) matched no line once the shot fixes landed (the paragraph probe's snapped line height,
+// the popovers' rooms), so they are gone. What is left is a real product defect with its owner,
+// each scoped to the locales and sizes where it was seen (review m2).
+pub(super) const KNOWN_FINDINGS_B: [Finding; 4] = [
     // F10 · An empty console's placeholder is cut in a 120 px pane in the pseudo-locales (NOTES
     // surface 24: it wraps in a narrow pane).
     finding("narrow-empty", Where::Pseudo, "#editor-placeholder", "T41"),
+    // F11 · The T1 reduced-mode banner is cut in a 120 px pane (it neither wraps into the tile
+    // nor scrolls): its title in the pseudo-locales, its body in English and Turkish. The status
+    // bar's "Reduced mode" stays whole (the state's trust group).
+    finding("narrow-reduced", Where::Pseudo, "#editor-t1-title", "T41"),
+    finding("narrow-reduced", Where::Plain, "#editor-t1-body", "T41"),
+    // F12 · A pane tab's Fluent title ("Console 2") is cut, not ellipsized, in a 120 px pane in
+    // the pseudo-locales (the tab strip's title label has no id: its creation site).
+    finding(
+        "narrow-reduced",
+        Where::Pseudo,
+        "hacivat-ui/src/panes.rs:443",
+        "T41",
+    ),
 ];
 
 /// Every known finding: part A's list, then part B's.
@@ -1087,6 +1033,8 @@ impl M3c {
             NarrowStrip => "narrow-strip",
             NarrowEmpty => "narrow-empty",
             NarrowNothing => "narrow-nothing-to-run",
+            // ## m3c-t43b-fix (review I1)
+            NarrowReduced => "narrow-reduced",
             Narrow219 => "narrow-pseudo-floor",
             SettingsEditor => "settings-editor",
             SettingsExecution => "settings-execution",
@@ -1200,6 +1148,8 @@ impl M3c {
             NarrowStrip => ("#button-label-status-cursor", None),
             NarrowEmpty => ("#editor-placeholder", None),
             NarrowNothing => ("#status-message", None),
+            // ## m3c-t43b-fix (review I1): the status bar's cell (the T1 banner is cut, F11).
+            NarrowReduced => ("#editor-segment-reduced", None),
             // 25 · the section's title, the clamp note, a search result's section.
             SettingsEditor | SettingsExecution | SettingsResults | SettingsKb => {
                 ("#settings-section-title", None)
@@ -1242,6 +1192,8 @@ impl M3c {
             NarrowIdle | Narrow219 | NarrowNothing => &["#tx-chip-mode"],
             NarrowProductionRo | NarrowRunning | NarrowCancelling | NarrowBadge | NarrowStrip
             | NarrowEmpty => &["#console-connection-name"],
+            // ## m3c-t43b-fix (review I1)
+            NarrowReduced => &["#console-connection-name"],
             NarrowWaiting => &["#console-waiting-text"],
             NarrowPending => &["#tx-badge-text"],
             // A grid state shows its grid (a header it drew), whatever its own marker.
@@ -1265,6 +1217,11 @@ impl M3c {
         const BADGE: &[&str] = &["#tx-badge-text"];
         const PENDING: &[&str] = &["#console-ro-pending-text"];
         const CURSOR: &[&str] = &["#button-label-status-cursor"];
+        // ## m3c-t43b-fix (review I3): the strip's own "Cursor open", in the narrow pane.
+        const STRIP_CURSOR: &[&str] = &["#strip-cursor"];
+        // ## m3c-t43b-fix (review I1): "Reduced mode" never gives way (T41's
+        // `reduced_mode_never_gives_way`).
+        const REDUCED: &[&str] = &["#editor-segment-reduced"];
         match self {
             // The go-to popover and the value viewer over a production result.
             M3c::GotoAsk | M3c::ViewerTruncated => &[ENV],
@@ -1279,7 +1236,10 @@ impl M3c {
             M3c::NarrowWaiting => &[ENV, CHIP, WAITING, WAITING_COUNT],
             M3c::NarrowBadge => &[ENV, CHIP, TX, BADGE],
             M3c::NarrowPending => &[ENV, CHIP, TX, BADGE, PENDING],
-            M3c::NarrowStrip => &[ENV, CURSOR],
+            // ## m3c-t43b-fix (review I3)
+            M3c::NarrowStrip => &[ENV, CURSOR, STRIP_CURSOR],
+            // ## m3c-t43b-fix (review I1)
+            M3c::NarrowReduced => &[REDUCED],
             _ => &[],
         }
     }
@@ -2020,9 +1980,17 @@ impl M3c {
                 s.extend(mark_read_only_pending());
                 s
             }
-            NarrowStrip => m3a::M3a::StatusCursorOpen.steps(),
+            // ## m3c-t43b-fix (review I3): and a suspended result, so the cursor strip draws its
+            // own "Cursor open" (the results tile follows the focused narrow pane's console).
+            NarrowStrip => {
+                let mut s = m3a::M3a::StatusCursorOpen.steps();
+                s.push(m3a::suspended_tab());
+                s
+            }
             NarrowEmpty => m3a::M3a::ConsoleEmpty.steps(),
             NarrowNothing => m3a::M3a::PreviewNothing.steps(),
+            // ## m3c-t43b-fix (review I1): a large script in the narrow pane.
+            NarrowReduced => m3a::M3a::NoticeReducedMode.steps(),
             // ---- 25
             SettingsEditor | SettingsExecution | SettingsResults => {
                 let section = match self {
@@ -2541,10 +2509,12 @@ impl M3c {
             // 24 · the focused pane is the narrow one, at its floor, and shows the state.
             NarrowIdle | NarrowProductionRo | NarrowRunning | NarrowCancelling | NarrowWaiting
             | NarrowBadge | NarrowPending | NarrowStrip | NarrowEmpty | NarrowNothing
-            | Narrow219 => {
+            | NarrowReduced | Narrow219 => {
                 let tab = active_tab(window, cx);
                 let shown = tab.and_then(|t| console_fixtures::shown(t, cx));
+                // ## m3c-t43b-fix (review m1): the pane as drawn, not the stored ratio alone.
                 narrow_layout(self, window, cx)
+                    && narrow_drawn(self, window, cx)
                     && match self {
                         NarrowProductionRo => shown.is_some_and(|s| s.read_only.is_some()),
                         NarrowRunning => {
@@ -2553,17 +2523,41 @@ impl M3c {
                                 && !drawn(frame, "console-running")
                         }
                         NarrowCancelling => shown.is_some_and(|s| s.run == Some(RunUx::Cancelling)),
-                        NarrowWaiting => shown.is_some_and(|s| s.waiting.is_some()),
+                        // ## m3c-t43b-fix (review m1): and Cancel is drawn, as its word or its
+                        // ✕ glyph (N1′/N2).
+                        NarrowWaiting => {
+                            shown.is_some_and(|s| s.waiting.is_some())
+                                && (drawn(frame, "button-label-console-waiting-cancel")
+                                    || CROSSES.with(|c| *c.borrow()) >= 1)
+                        }
                         NarrowBadge => console
                             .and_then(|c| exec_ui::tx::user_tx(c, cx))
                             .is_some_and(|t| t.statements == 3),
                         NarrowPending => console.is_some_and(|c| exec_ui::pending_read_only(c, cx)),
-                        NarrowStrip => drawn(frame, "button-label-status-cursor"),
+                        // ## m3c-t43b-fix (review I3): the strip's own label and the status
+                        // bar's.
+                        NarrowStrip => {
+                            drawn(frame, "strip-cursor")
+                                && drawn(frame, "button-label-status-cursor")
+                        }
                         NarrowEmpty => editor
                             .as_ref()
                             .is_some_and(|e| e.read(cx).snapshot().buffer.len_bytes() == 0),
-                        NarrowNothing => said_any(frame),
-                        // Idle: Run is its icon (N1), so the narrow toolbar draws no Run word.
+                        // ## m3c-t43b-fix (review m1): the sentence itself.
+                        NarrowNothing => said("hv-editor-nothing-to-run", Vec::new()),
+                        // ## m3c-t43b-fix (review I1)
+                        NarrowReduced => {
+                            status.is_some_and(|s| s.tier == Tier::Reduced)
+                                && drawn(frame, "editor-segment-reduced")
+                        }
+                        // ## m3c-t43b-fix (review m1): idle at 120 px, Run is its icon (N1): no
+                        // Run word, and a ▶ besides the gutter's. At 219 px English and Turkish
+                        // are above their minimum, so the word is right there.
+                        NarrowIdle => {
+                            band().is_some_and(|b| b.style == BandStyle::Run)
+                                && !drawn(frame, "button-label-console-run")
+                                && gutter_plays().is_some_and(|r| plays() > r.len())
+                        }
                         _ => band().is_some_and(|b| b.style == BandStyle::Run),
                     }
             }
@@ -2598,7 +2592,22 @@ impl M3c {
                             && settings_fixtures::clamped(cx)
                             && saved == Some(64 << 10)
                     }
-                    _ => shown.as_ref().is_some_and(|(_, q)| q == SEARCH),
+                    // ## m3c-t43b-fix (review m1): and rows of several sections, each naming
+                    // its section.
+                    _ => {
+                        shown.as_ref().is_some_and(|(_, q)| q == SEARCH)
+                            && frame
+                                .iter()
+                                .filter(|r| {
+                                    r.visible
+                                        && r.painted_px > 0.0
+                                        && r.path.contains("#settings-row-section-")
+                                })
+                                .map(|r| r.text.to_string())
+                                .collect::<std::collections::BTreeSet<_>>()
+                                .len()
+                                >= 2
+                    }
                 }
             }
             // The states part A left.
@@ -2616,8 +2625,10 @@ impl M3c {
                         Some(TextState::Building { done, rows }) if done > 0 && done < rows
                     )
             }),
+            // ## m3c-t43b-fix (review m1): the gutter's own ▶ rows, not the frame's play icons
+            // (the toolbar's Run glyph is one too).
             GutterFocusMoved => {
-                plays() >= 1
+                gutter_plays().is_some_and(|r| r.contains(&GUTTER_LINE))
                     && editor.as_ref().is_some_and(|e| {
                         e.read(cx).gutter_focus(window)
                             == Some(hacivat_ui_editor::gutter::GutterButton::Run(6))
@@ -2660,6 +2671,9 @@ thread_local! {
     static PLAYS: RefCell<usize> = const { RefCell::new(0) };
     /// The fold chevrons the last frame drew.
     static CHEVRONS: RefCell<usize> = const { RefCell::new(0) };
+    // ## m3c-t43b-fix (review m1)
+    /// The ✕ glyphs the last frame drew (a Cancel drawn as its glyph, N1′).
+    static CROSSES: RefCell<usize> = const { RefCell::new(0) };
     /// The pointer was moved over the gutter.
     static HOVERED: RefCell<bool> = const { RefCell::new(false) };
     /// The writer of the last live fixture store (rows that arrive after a sort).
@@ -2695,6 +2709,8 @@ pub(super) fn take_icons() {
             .filter(|i| matches!(i.name, IconName::ChevronDown | IconName::ChevronRight))
             .count()
     });
+    // ## m3c-t43b-fix (review m1)
+    CROSSES.with(|p| *p.borrow_mut() = icons.iter().filter(|i| i.name == IconName::X).count());
 }
 
 /// Resets the per-shot state (every shot starts clean).
@@ -2705,6 +2721,8 @@ pub(super) fn reset() {
     PROBE.with(|p| *p.borrow_mut() = None);
     PLAYS.with(|p| *p.borrow_mut() = 0);
     CHEVRONS.with(|p| *p.borrow_mut() = 0);
+    // ## m3c-t43b-fix (review m1)
+    CROSSES.with(|p| *p.borrow_mut() = 0);
 }
 
 /// How many selection ranges of the active editor are not empty.
@@ -3165,6 +3183,47 @@ fn narrow_layout(state: M3c, window: &mut Window, cx: &App) -> bool {
     let want = narrow_ratio(width, tiles.explorer_w, narrow_px(state));
     panes.focused == PaneId(1)
         && matches!(panes.root, PaneNode::Split { ratio, .. } if (ratio - want).abs() < 1e-4)
+}
+
+// ## m3c-t43b-fix (review m1)
+/// The focused narrow pane is drawn [`narrow_px`] wide: measured on the frame's scene (its tab
+/// strip, the `head` band at the top of the pane that ends at the window's right edge), so a
+/// render-time clamp or a miscounted seam fails where the stored ratio alone would pass.
+fn narrow_drawn(state: M3c, window: &mut Window, cx: &App) -> bool {
+    narrow_drawn_px(window, cx).is_some_and(|w| (w - narrow_px(state)).abs() <= 0.5)
+}
+
+/// The width of the rightmost pane's tab strip as the last frame drew it, if one was drawn.
+fn narrow_drawn_px(window: &Window, cx: &App) -> Option<f32> {
+    let t = Theme::get(cx).tokens;
+    let head = gpui::Rgba::from(t.colors.head.to_hsla());
+    let strip_h = t.spacing.panel_header_height;
+    let scale = window.scale_factor();
+    let width = f32::from(window.viewport_size().width);
+    let same = |a: gpui::Rgba| {
+        [(a.r, head.r), (a.g, head.g), (a.b, head.b), (a.a, head.a)]
+            .iter()
+            .all(|(x, y)| (x - y).abs() <= 1.0 / 255.0)
+    };
+    window
+        .rendered_scene()
+        .quads
+        .iter()
+        .filter(|q| q.background.as_solid().is_some_and(|f| same(f.into())))
+        .map(|q| {
+            let b = q.bounds;
+            (
+                b.origin.y.0 / scale,
+                b.origin.x.0 / scale,
+                b.size.width.0 / scale,
+                b.size.height.0 / scale,
+            )
+        })
+        .filter(|&(_, x, w, h)| {
+            (h - strip_h).abs() <= 0.5 && (x + w - width).abs() <= 0.5 && w < width / 2.0
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, _, w, _)| w)
 }
 
 /// The connection is marked read-only while the console's transaction is open: the prompt asks

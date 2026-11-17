@@ -1360,120 +1360,6 @@ fn check_title_bar(width: f32, bar: TitleBarProbe, capsule: Option<Bounds<Pixels
     out
 }
 
-// ## m3c-t43b
-/// Gives the title-bar capsule one history before the capture: the window is drawn 400 px
-/// narrower, then at the shot's width again, each until the capsule's labels stop changing.
-///
-/// The capsule plans its fit from the width its row drew in the frame before
-/// (`Capsule::max_width`'s memo), and a segment collapsed to its icon still adds the icon to
-/// that width. Near the edge both plans are then stable (the access word shown, its row
-/// narrower; or collapsed, its row wider), and which one a shot got depended on the frames its
-/// steps happened to draw on the way (a connecting capsule, a run, the probe's timing): the
-/// "okuma-yazma" race of the Turkish 960 px shots. From one narrower width the plan is always the
-/// same one. (A product note for the capsule's owner: its fit is history-dependent.)
-///
-/// Narrower, not wider: no scroll position is clamped on the way. What the resize closes (a
-/// hover, a tooltip) is brought back: the pointer moves again where a step left it, and if a
-/// label of the frame before is still missing (a tooltip) the simulated clock runs until it is
-/// drawn again (whole caret blink periods, at most 2.1 s).
-fn settle_capsule(cx: &mut HeadlessAppContext, handle: AnyWindowHandle, (w, h): (f32, f32)) {
-    let others = |cx: &mut HeadlessAppContext| {
-        cx.update(|cx| {
-            cx.global::<TextRegistry>()
-                .frame
-                .iter()
-                .filter(|r| r.visible && !r.path.contains("hacivat-ui/src/capsule.rs"))
-                .map(|r| (r.path.to_string(), r.text.to_string()))
-                .collect::<std::collections::BTreeSet<_>>()
-        })
-    };
-    cx.update(|cx| cx.refresh_windows());
-    cx.run_until_parked();
-    let before = others(cx);
-    let pointer = cx
-        .update_window(handle, |_, window, _| window.mouse_position())
-        .expect("the window is open");
-    for width in [w - 400.0, w] {
-        cx.update_window(handle, |_, window, cx| {
-            window.resize(size(px(width), px(h)));
-            window.bounds_changed(cx);
-        })
-        .expect("the window is open");
-        settle_capsule_frames(cx);
-    }
-    // The pointer moves again where a step left it (its hover fills come back too).
-    let moved = pointer != point(px(0.0), px(0.0));
-    for at in [pointer + point(px(1.0), px(0.0)), pointer]
-        .into_iter()
-        .filter(|_| moved)
-    {
-        cx.update_window(handle, |_, window, cx| {
-            use gpui::InputEvent as _;
-            window.dispatch_event(
-                gpui::MouseMoveEvent {
-                    position: at,
-                    pressed_button: None,
-                    modifiers: gpui::Modifiers::none(),
-                }
-                .to_platform_input(),
-                cx,
-            );
-        })
-        .expect("the window is open");
-        cx.run_until_parked();
-    }
-    cx.update(|cx| cx.refresh_windows());
-    cx.run_until_parked();
-    if before.is_subset(&others(cx)) {
-        settle_capsule_frames(cx);
-        return;
-    }
-    // In 20 ms steps, and on to a whole caret blink period (2 x 530 ms), so a blinking caret is
-    // in the phase it had.
-    let mut ms = 0u64;
-    while ms < 2_120 {
-        cx.advance_clock(std::time::Duration::from_millis(20));
-        ms += 20;
-        cx.update(|cx| cx.refresh_windows());
-        cx.run_until_parked();
-        if ms.is_multiple_of(1_060) && before.is_subset(&others(cx)) {
-            break;
-        }
-    }
-    settle_capsule_frames(cx);
-}
-
-/// Draws frames until the capsule shows the same labels at the same width twice in a row (at
-/// most 8 more).
-fn settle_capsule_frames(cx: &mut HeadlessAppContext) {
-    let capsule = |cx: &mut HeadlessAppContext| {
-        cx.update(|cx| {
-            let labels: Vec<(String, String, bool)> = cx
-                .global::<TextRegistry>()
-                .frame
-                .iter()
-                .filter(|r| r.path.contains("hacivat-ui/src/capsule.rs"))
-                .map(|r| (r.path.to_string(), r.text.to_string(), r.visible))
-                .collect();
-            let width = cx
-                .global::<CapsuleProbe>()
-                .bounds
-                .map(|b| (f32::from(b.size.width) * 4.0).round() as i64);
-            (labels, width)
-        })
-    };
-    let mut last = capsule(cx);
-    for _ in 0..8 {
-        cx.update(|cx| cx.refresh_windows());
-        cx.run_until_parked();
-        let now = capsule(cx);
-        if now == last {
-            return;
-        }
-        last = now;
-    }
-}
-
 /// Renders `shot` in a fresh app, checks the frame and writes the PNG. Returns the violations.
 fn render(shot: Shot, dir: &Path) -> Vec<String> {
     let platform = current_platform(true);
@@ -1604,8 +1490,8 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
-    // ## m3c-t43b: the title-bar capsule settles before the capture.
-    settle_capsule(&mut cx, handle, shot.size);
+    // ## m3c-t43b-fix (review I2): no capsule settle any more; the capsule's own fit (ccedf93)
+    // no longer depends on the frames before, so the capture is the frame the steps reached.
     cx.update(|cx| cx.refresh_windows());
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| {
@@ -1853,11 +1739,12 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     // 34's 10, Tasks 35/36's 10, Task 37's 13, Task 38's 15 (part B adds Tasks 39, 41 and 42's).
     // ## m3c-t43b: part B adds Task 39's 9, Task 41's 11, Task 42's 7 and the 6 states part A
     // left.
+    // ## m3c-t43b-fix (review I1): Task 41's 12 with `narrow-reduced`.
     assert_eq!(
         m3c::all().len(),
-        5 + 7 + 7 + 10 + 10 + 13 + 15 + 9 + 11 + 7 + 6
+        5 + 7 + 7 + 10 + 10 + 13 + 15 + 9 + 12 + 7 + 6
     );
-    assert_eq!(all.len(), 1020 + 68 * 16 + 71 * 16 + 100 * 16);
+    assert_eq!(all.len(), 1020 + 68 * 16 + 71 * 16 + 101 * 16);
     let m3b_from = 1020 + 68 * 16;
     let order = [
         m3b::T22.to_vec(),
@@ -3093,6 +2980,32 @@ fn known_findings_match_only_their_own_clip() {
                 "{line}"
             );
         }
+    }
+    // ## m3c-t43b-fix (review m2, m3): part B's entries against the real lines the full render
+    // printed, each only in its own scope (F11's body in English and Turkish, not pseudo; F12's
+    // tab title, a creation site, in the pseudo-locales only).
+    let reduced = M3c::NarrowReduced;
+    let body = "narrow-reduced-dark-en-1280x800@2x.png: (b) clipped: \"Reduced mode keeps typing \
+                fast. It ends when the document is smaller than 3.2 MB.\" (57.0 px painted) at \
+                crates/ui/hacivat-ui-editor/src/large_file.rs:280:16#editor-t1-body";
+    let tab = "narrow-reduced-dark-tr-XT-960x600@2x.png: (b) clipped: \"[Çööööƞşööööŀḗḗḗ 2]\" \
+               (117.3 px painted) at crates/ui/hacivat-ui/src/panes.rs:443:24";
+    let part_b = |line: &str, locale: &str, size| {
+        m3c::KNOWN_FINDINGS_B
+            .iter()
+            .any(|f| f.matches(reduced, locale, size, line, None))
+    };
+    if m3c::KNOWN_FINDINGS_B
+        .iter()
+        .any(|f| f.state == reduced.name())
+    {
+        assert!(part_b(body, en, big), "{body}");
+        assert!(part_b(body, "tr", min), "{body}");
+        assert!(!part_b(body, "en-XA", big), "out of its scope: {body}");
+        assert!(part_b(tab, tr_xt, min), "{tab}");
+        assert!(!part_b(tab, en, min), "out of its scope: {tab}");
+        let with_id = format!("{tab}#tab-title");
+        assert!(!part_b(&with_id, tr_xt, min), "{with_id}");
     }
 }
 
