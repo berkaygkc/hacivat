@@ -1985,9 +1985,13 @@ pub mod fixtures {
         SuppressProd,
         /// Off production, a statement Hacivat couldn't analyse (calm, never suppressible).
         NotAnalysed,
+        // ## m3b-t29-shots (named exception): Execute all, which production never offers (T26).
+        /// Off production, statement 2 of 3 (an `UPDATE` with no `WHERE`, calm): Execute all and
+        /// its scope line, "don't ask again", Skip all.
+        MultiStaging,
     }
 
-    pub const STATES: [State; 15] = [
+    pub const STATES: [State; 16] = [
         State::Unknown,
         State::Multi,
         State::MultiType,
@@ -2003,6 +2007,8 @@ pub mod fixtures {
         State::Explain,
         State::SuppressProd,
         State::NotAnalysed,
+        // ## m3b-t29-shots (named exception)
+        State::MultiStaging,
     ];
 
     impl State {
@@ -2023,6 +2029,8 @@ pub mod fixtures {
                 State::Explain => "confirm-explain",
                 State::SuppressProd => "confirm-suppress-prod",
                 State::NotAnalysed => "confirm-not-analysed",
+                // ## m3b-t29-shots (named exception)
+                State::MultiStaging => "confirm-multi-staging",
             }
         }
     }
@@ -2080,16 +2088,25 @@ pub mod fixtures {
                 ctx(GateClass::Unknown, EnvTag::Production, pg),
                 None,
             ),
-            State::Multi | State::MultiType => {
+            // ## m3b-t29-shots (named exception): Multi and MultiType are production, where
+            // Execute all covers nothing since Task 26 (fix round 2, R2: `plan_context` over
+            // `execute_all_covers_on(.., true)`), so it is not drawn; MultiStaging shows it.
+            State::Multi | State::MultiType | State::MultiStaging => {
+                let production = state != State::MultiStaging;
                 let mut q = question(
                     "DROP TABLE order_archive_2019;",
                     vec![reason(
                         "safety-destructive-drop",
                         &[("table", "order_archive_2019")],
                     )],
-                    true,
+                    production,
                 );
-                let mut c = ctx(GateClass::DdlDestructive, EnvTag::Production, pg);
+                let env = if production {
+                    EnvTag::Production
+                } else {
+                    EnvTag::Staging
+                };
+                let mut c = ctx(GateClass::DdlDestructive, env, pg);
                 if state == State::MultiType {
                     q.sql_masked = Arc::from("DELETE FROM müşteriler;");
                     q.reasons = vec![reason(
@@ -2099,10 +2116,23 @@ pub mod fixtures {
                     q.type_to_confirm = Some(Arc::from("müşteriler"));
                     c.class = Some(GateClass::DmlUnsafe);
                 }
+                // ## m3b-t29-shots (named exception): off production only an unsafe WHERE asks
+                // (the calm confirmation), so the staging script's statement 2 is one; it may
+                // offer "don't ask again" too: the six-button footer of surface 1.
+                if state == State::MultiStaging {
+                    q.sql_masked = Arc::from("UPDATE customers SET newsletter = false;");
+                    q.reasons = vec![reason(
+                        "safety-destructive-no-where",
+                        &[("table", "customers")],
+                    )];
+                    q.suppressible = true;
+                    c.class = Some(GateClass::DmlUnsafe);
+                }
                 q.unit = 1;
                 q.index = 2;
                 q.total = 3;
-                c.covered = 1;
+                // ## m3b-t29-shots (named exception)
+                c.covered = u32::from(!production);
                 c.later_asks = 1;
                 (q, c, None)
             }

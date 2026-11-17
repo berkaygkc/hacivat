@@ -462,6 +462,20 @@ impl HistoryDialog {
         self.hits.get(self.selected)
     }
 
+    // ## m3b-t29-shots (named exception; the T27 review's m6)
+    /// A polite live node naming the selected entry (its first SQL line, data) and its place
+    /// in the list ("3 of 5"): the search field keeps the focus while ↑/↓ move the selection,
+    /// so the move is announced from here.
+    fn selection_live(&self) -> Option<A11yNode> {
+        let hit = self.selected_hit()?;
+        let name: SharedString = rows::first_line(&hit.record.statement_masked).into();
+        Some(
+            A11yNode::new("history-selection-live", Role::Status, name, false, div())
+                .live(hacivat_ui_core::gpui_surface::accesskit::Live::Polite)
+                .position(self.selected + 1, self.hits.len()),
+        )
+    }
+
     // ---- actions -------------------------------------------------------------------------------
 
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -874,7 +888,8 @@ impl HistoryDialog {
             children.push(
                 rows::row(
                     &theme,
-                    i,
+                    // ## m3b-t29-shots (named exception)
+                    (i, self.hits.len()),
                     hit,
                     self.conn(hit.record.profile),
                     selected,
@@ -889,6 +904,11 @@ impl HistoryDialog {
             && let Some(child) = selected_child
         {
             self.list.scroll_to_item(child);
+        }
+        // ## m3b-t29-shots (named exception): the announcement, last in the list (it draws
+        // nothing and takes no room: the dialog's layout is unchanged).
+        if let Some(live) = self.selection_live() {
+            children.push(live.into_any_element());
         }
         let name = message(cx, "hv-history-title", vec![]);
         div()

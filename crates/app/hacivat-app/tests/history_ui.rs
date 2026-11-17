@@ -630,3 +630,83 @@ fn a_stale_answer_is_dropped(cx: &mut TestAppContext) {
     assert!(s.stale >= 1, "the older answer was dropped");
     stop_core_runtime_test(cx);
 }
+
+// ## m3b-t29-shots (named exception; the T27 review's m6)
+/// The declarations one fresh frame of the window makes.
+fn declared(vcx: &VisualTestContext) -> Vec<hacivat_ui::popover::A11yDecl> {
+    hacivat_ui::popover::a11y_record();
+    in_window(vcx, |window, _| window.refresh());
+    vcx.run_until_parked();
+    hacivat_ui::popover::a11y_take()
+}
+
+/// One list option: its name, whether it is selected, its place in the list.
+type OptionDecl = (String, Option<bool>, Option<(usize, usize)>);
+
+fn options(decls: &[hacivat_ui::popover::A11yDecl]) -> Vec<OptionDecl> {
+    decls
+        .iter()
+        .filter(|d| d.role == Some(hacivat_ui_core::gpui_surface::Role::ListBoxOption))
+        .map(|d| (d.name.to_string(), d.selected, d.position))
+        .collect()
+}
+
+/// The polite live nodes that name an entry and its place.
+fn announced(decls: &[hacivat_ui::popover::A11yDecl]) -> Vec<(String, Option<(usize, usize)>)> {
+    decls
+        .iter()
+        .filter(|d| {
+            d.live == Some(hacivat_ui_core::gpui_surface::accesskit::Live::Polite)
+                && d.role == Some(hacivat_ui_core::gpui_surface::Role::Status)
+                && d.position.is_some()
+        })
+        .map(|d| (d.name.to_string(), d.position))
+        .collect()
+}
+
+/// Every row is a list option (its first SQL line its name, its place in the list, whether it
+/// is selected), and a move with ↑/↓, while the search field keeps the focus, is announced by
+/// a polite live node naming the newly selected entry and its place.
+#[cfg(unix)]
+#[gpui::test]
+fn rows_are_list_options_and_a_move_is_announced(cx: &mut TestAppContext) {
+    // The first one is the newest, shown first.
+    let mut h = history(
+        cx,
+        &[
+            "SELECT 1 AS first;",
+            "SELECT 2 AS second;",
+            "SELECT 3 AS third;",
+        ],
+    );
+    h.open();
+    let before = declared(h.vcx);
+    assert_eq!(
+        options(&before),
+        [
+            ("SELECT 1 AS first;".to_string(), Some(true), Some((1, 3))),
+            ("SELECT 2 AS second;".to_string(), Some(false), Some((2, 3))),
+            ("SELECT 3 AS third;".to_string(), Some(false), Some((3, 3))),
+        ]
+    );
+    assert_eq!(
+        announced(&before),
+        [("SELECT 1 AS first;".to_string(), Some((1, 3)))]
+    );
+    h.keys("down");
+    assert_eq!(h.shown().selected, Some(1));
+    let after = declared(h.vcx);
+    assert_eq!(
+        options(&after)
+            .iter()
+            .map(|(_, selected, _)| *selected)
+            .collect::<Vec<_>>(),
+        [Some(false), Some(true), Some(false)]
+    );
+    assert_eq!(
+        announced(&after),
+        [("SELECT 2 AS second;".to_string(), Some((2, 3)))],
+        "the move is announced"
+    );
+    stop_core_runtime_test(cx);
+}
