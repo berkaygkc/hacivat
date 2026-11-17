@@ -84,6 +84,8 @@ fn m3b_grid_commands_are_in_the_table() {
         "grid.goto_row",
         // ## m3c-t38 (named exception): Task 38 filled the value viewer.
         "grid.open_value",
+        // ## m3c-t39 (named exception): Task 39 filled the context menu.
+        "grid.context_menu",
     ];
     for (id, cmd) in [
         ("grid.grow_selection", GridCommand::GrowSelection),
@@ -106,7 +108,8 @@ fn m3b_grid_commands_are_in_the_table() {
     }
     // ## m3c-t37 (named exception): 4 → 2.
     // ## m3c-t38 (named exception): 2 → 1.
-    assert_eq!(hacivat_ui_grid::commands::STUB_COMMANDS.len(), 1);
+    // ## m3c-t39 (named exception): 1 → 0.
+    assert_eq!(hacivat_ui_grid::commands::STUB_COMMANDS.len(), 0);
     // M3a's commands are not.
     for (id, _) in hacivat_ui_grid::GRID_COMMANDS.iter().take(26) {
         assert!(!hacivat_ui_grid::commands::is_stub(id), "{id}");
@@ -220,10 +223,19 @@ mod view {
         assert_eq!(got[0], GridEvent::FindRequested);
         assert_eq!(got[1], GridEvent::GotoRequested);
         assert_eq!(got[2], GridEvent::ValueRequested(focus));
-        let GridEvent::ContextMenuRequested { at, cell, header } = &got[3] else {
+        // ## m3c-t39 (named exception): the request says it came from the keys, not a press.
+        let GridEvent::ContextMenuRequested {
+            at,
+            cell,
+            header,
+            row_number,
+            pointer,
+        } = &got[3]
+        else {
             panic!("{:?}", got[3]);
         };
         assert_eq!((*cell, *header), (Some(focus), None));
+        assert!(!*row_number && !*pointer);
         // Under the focus cell (row 0 of a 21 px body under the 36 px header), inside the body.
         assert!(f32::from(at.y) > 36.0 && f32::from(at.y) < 400.0, "{at:?}");
         assert_eq!(
@@ -276,5 +288,171 @@ mod view {
         assert_eq!(marked, (true, false));
         view.update(vcx, |v, cx| v.set_highlights(None, cx));
         assert!(view.read_with(vcx, |v, _| v.highlights().is_none()));
+    }
+
+    // ## m3c-t39 (named exception): the right press and the header's freeze.
+
+    fn press(
+        vcx: &mut VisualTestContext,
+        at: gpui::Point<gpui::Pixels>,
+        button: gpui::MouseButton,
+    ) {
+        vcx.simulate_event(gpui::MouseDownEvent {
+            button,
+            position: at,
+            modifiers: gpui::Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        vcx.simulate_event(gpui::MouseUpEvent {
+            button,
+            position: at,
+            modifiers: gpui::Modifiers::none(),
+            click_count: 1,
+        });
+        vcx.run_until_parked();
+    }
+
+    /// Window points of the last frame: the middle of view row `row`'s cell in visible column
+    /// `ix`, of column `ix`'s header, of row `row`'s number, and the corner.
+    fn points(
+        view: &Entity<GridView>,
+        vcx: &mut VisualTestContext,
+        row: u64,
+        ix: usize,
+    ) -> [gpui::Point<gpui::Pixels>; 4] {
+        view.read_with(vcx, |v, _| {
+            let g = v.geometry().expect("a frame").clone();
+            let layout = v.column_layout();
+            let x =
+                f32::from(g.body.left()) + ((layout.x_of(ix) + layout.x_of(ix + 1)) / 2.0) as f32;
+            let y = f32::from(g.body.top()) + g.row_h * (row as f32 + 0.5);
+            [
+                gpui::point(px(x), px(y)),
+                gpui::point(px(x), g.header.center().y),
+                gpui::point(g.gutter.center().x, px(y)),
+                g.corner.center(),
+            ]
+        })
+    }
+
+    fn menu_requests(events: &Events) -> Vec<GridEvent> {
+        events
+            .borrow()
+            .iter()
+            .filter(|e| matches!(e, GridEvent::ContextMenuRequested { .. }))
+            .cloned()
+            .collect()
+    }
+
+    /// A right press asks the host for the menu over what it hits (a cell, a header, a row
+    /// number) at the pointer. Outside the selection it first selects what it hits, as a left
+    /// click would; inside it the selection stays (the menu acts on it). The corner and a left
+    /// press ask for nothing.
+    #[gpui::test]
+    fn a_right_press_asks_for_the_menu_over_what_it_hits(cx: &mut TestAppContext) {
+        let (view, vcx, events) = open(cx);
+        let [cell_at, header_at, row_at, corner_at] = points(&view, vcx, 2, 1);
+        let right = gpui::MouseButton::Right;
+
+        press(vcx, cell_at, right);
+        let r2c1 = ModelCell {
+            row: ModelRow(2),
+            col: ColId(1),
+        };
+        assert_eq!(
+            menu_requests(&events),
+            [GridEvent::ContextMenuRequested {
+                at: cell_at,
+                cell: Some(r2c1),
+                header: None,
+                row_number: false,
+                pointer: true,
+            }]
+        );
+        assert_eq!(
+            view.read_with(vcx, |v, _| v.selection().focus()),
+            Some(r2c1)
+        );
+
+        // Inside a selection (everything), the selection stays.
+        run(&view, vcx, GridCommand::SelectAll);
+        events.borrow_mut().clear();
+        let [other_cell, ..] = points(&view, vcx, 4, 2);
+        press(vcx, other_cell, right);
+        assert!(view.read_with(vcx, |v, _| v.selection().is_all()));
+        assert_eq!(menu_requests(&events).len(), 1);
+
+        // A header: its column is selected, and the request names it.
+        run(&view, vcx, GridCommand::Escape);
+        run(
+            &view,
+            vcx,
+            GridCommand::Move {
+                dir: Dir::Down,
+                extend: false,
+            },
+        );
+        events.borrow_mut().clear();
+        press(vcx, header_at, right);
+        assert_eq!(
+            menu_requests(&events),
+            [GridEvent::ContextMenuRequested {
+                at: header_at,
+                cell: None,
+                header: Some(ColId(1)),
+                row_number: false,
+                pointer: true,
+            }]
+        );
+        assert!(view.read_with(vcx, |v, _| v.selection().col_selected(ColId(1))));
+
+        // A row number: its row is selected; the request carries the row (focus column kept).
+        events.borrow_mut().clear();
+        press(vcx, row_at, right);
+        let got = menu_requests(&events);
+        let [
+            GridEvent::ContextMenuRequested {
+                cell,
+                header,
+                row_number,
+                pointer,
+                ..
+            },
+        ] = got.as_slice()
+        else {
+            panic!("{got:?}");
+        };
+        assert_eq!(cell.map(|c| c.row), Some(ModelRow(2)));
+        assert_eq!((*header, *row_number, *pointer), (None, true, true));
+        assert!(view.read_with(vcx, |v, _| v.selection().row_selected(ModelRow(2))));
+
+        // The corner, and a left press, ask for nothing.
+        events.borrow_mut().clear();
+        press(vcx, corner_at, right);
+        press(vcx, cell_at, gpui::MouseButton::Left);
+        assert!(menu_requests(&events).is_empty());
+    }
+
+    /// "Freeze up to here" on a header freezes through that column whatever the focus; a
+    /// freeze that would leave less than 48 px of the body to scroll is refused, and says so.
+    #[gpui::test]
+    fn freeze_through_a_column(cx: &mut TestAppContext) {
+        let (view, vcx, events) = open(cx);
+        view.update(vcx, |v, cx| v.freeze_through(ColId(1), cx));
+        vcx.run_until_parked();
+        assert_eq!(view.read_with(vcx, |v, _| v.frozen()), 2);
+        assert_eq!(events.borrow().last(), Some(&GridEvent::FrozenChanged(2)));
+        // Three wide columns in a narrow pane: freezing all of them is refused.
+        view.update(vcx, |v, cx| {
+            for c in 0..3 {
+                v.set_column_width(ColId(c), 260.0, cx);
+            }
+        });
+        vcx.run_until_parked();
+        view.update(vcx, |v, cx| v.freeze_through(ColId(2), cx));
+        vcx.run_until_parked();
+        assert_eq!(events.borrow().last(), Some(&GridEvent::FreezeRefused));
+        assert_eq!(view.read_with(vcx, |v, _| v.frozen()), 2);
     }
 }

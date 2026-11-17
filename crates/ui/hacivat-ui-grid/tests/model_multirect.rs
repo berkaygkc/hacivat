@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use hacivat_ui_grid::model::{CellRect, CopyRefusal, GrowStep, Selection, ViewMap};
-use hacivat_ui_grid::{ColId, ModelCell, ModelRow};
+use hacivat_ui_grid::{ColId, ModelCell, ModelRow, ViewRow};
 
 fn c(row: u64, col: u32) -> ModelCell {
     ModelCell {
@@ -236,4 +236,139 @@ fn grow_follows_the_focus_through_a_sort() {
             cols: 0..3
         }]
     );
+}
+
+// ## m3c-int (I4): the rectangles are indexed by row, so a cell test reads only the rectangles
+// over its row (Select all occurrences makes up to 10,000).
+
+/// A deterministic pseudo-random sequence (no `rand` in the tests).
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self, below: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 33) % below
+    }
+}
+
+/// What `contains` answers, read the slow way from the public pieces.
+fn contains_by_hand(s: &Selection, row: u64, col: u32, map: &ViewMap) -> bool {
+    s.is_all()
+        || s.cols().iter().any(|c| c.contains(&col))
+        || map
+            .view_to_model(ViewRow(row))
+            .is_some_and(|m| s.rows().iter().any(|r| r.contains(&m.0)))
+        || s.rects().iter().any(|r| r.contains(row, col))
+}
+
+#[test]
+fn contains_with_many_rectangles_matches_every_rectangle() {
+    let m = ViewMap::identity(400);
+    for seed in 1..=12u64 {
+        let mut rng = Lcg(seed);
+        let mut s = Selection::default();
+        // Overlapping, nested and long rectangles, with a row and a column piece among them.
+        for i in 0..(10 + seed * 15) {
+            let (r0, c0) = (rng.next(400), rng.next(12) as u32);
+            let tall = if i % 7 == 0 { 120 } else { 6 };
+            let (r1, c1) = (
+                (r0 + rng.next(tall)).min(399),
+                (c0 + rng.next(4) as u32).min(11),
+            );
+            s.add_cell(c(r0, c0), &m);
+            s.extend_to(c(r1, c1), &m);
+        }
+        if seed % 3 == 0 {
+            s.add_row(ModelRow(rng.next(400)), ColId(0));
+            s.add_column(ColId(rng.next(12) as u32), ModelRow(0));
+        }
+        for row in 0..400u64 {
+            let any = s.rects().iter().any(|r| r.rows.contains(&row));
+            assert_eq!(s.row_in_rects(row), any, "seed {seed}, row {row}");
+            for col in 0..12u32 {
+                assert_eq!(
+                    s.contains(ViewRow(row), ColId(col), &m),
+                    contains_by_hand(&s, row, col, &m),
+                    "seed {seed}, cell ({row}, {col})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn contains_follows_every_edit_of_the_rectangles() {
+    let m = ViewMap::identity(100);
+    let mut s = Selection::default();
+    s.select_cell(c(50, 2), &m);
+    s.add_cell(c(10, 1), &m);
+    s.extend_to(c(20, 3), &m);
+    assert!(s.contains(ViewRow(15), ColId(2), &m));
+    assert!(s.contains(ViewRow(50), ColId(2), &m));
+    // Extending the active rectangle again shrinks it: its old rows are no longer selected.
+    s.extend_to(c(12, 1), &m);
+    assert!(!s.contains(ViewRow(15), ColId(1), &m));
+    assert!(s.contains(ViewRow(11), ColId(1), &m));
+    assert!(!s.row_in_rects(15));
+    // Escape: only the focus stays.
+    assert!(s.collapse(&m));
+    assert!(!s.contains(ViewRow(50), ColId(2), &m));
+    assert!(s.contains(ViewRow(12), ColId(1), &m));
+    // A re-sort clears the rectangles (view rows of the old order) but the focus's.
+    let sorted = ViewMap::permuted(Arc::from((0..100u64).rev().collect::<Vec<_>>()), 100, 100);
+    s.on_view_map_changed(&sorted);
+    assert!(s.contains(ViewRow(87), ColId(1), &sorted));
+    assert!(!s.contains(ViewRow(12), ColId(1), &sorted));
+    // Select all occurrences: one-cell rectangles, two on one row.
+    let cells = [c(3, 0), c(3, 4), c(90, 2), c(40, 1)];
+    s.select_cells(&cells, 2, &m);
+    for row in 0..100u64 {
+        for col in 0..5u32 {
+            let want = cells.contains(&c(row, col));
+            assert_eq!(
+                s.contains(ViewRow(row), ColId(col), &m),
+                want,
+                "({row}, {col})"
+            );
+        }
+    }
+    assert!(s.row_in_rects(3) && s.row_in_rects(90) && !s.row_in_rects(4));
+}
+
+#[test]
+#[ignore = "perf"]
+fn contains_with_10000_rectangles_under_1ms_per_viewport() {
+    if std::env::var_os("HACIVAT_PERF").is_none_or(|v| v != "1") {
+        return;
+    }
+    let map = ViewMap::identity(1_000_000);
+    let cells: Vec<ModelCell> = (0..10_000u64).map(|i| c(i * 37, (i % 20) as u32)).collect();
+    let mut s = Selection::default();
+    s.select_cells(&cells, 0, &map);
+    // A 60 × 20 viewport (its cells and its gutter), at bands over and past the rectangles.
+    let bands = [
+        0u64, 400_000, 369_960, 999_940, 185_000, 12_345, 250_000, 333_333,
+    ];
+    let started = std::time::Instant::now();
+    let mut hits = 0u32;
+    for (frame, top) in bands.iter().cycle().take(40).enumerate() {
+        for r in 0..60u64 {
+            let row = top + r + frame as u64 % 3;
+            if s.row_in_rects(row) {
+                hits += 1;
+            }
+            for col in 0..20u32 {
+                if s.contains(ViewRow(row), ColId(col), &map) {
+                    hits += 1;
+                }
+            }
+        }
+    }
+    let per = started.elapsed().as_secs_f64() * 1000.0 / 40.0;
+    println!("contains over a 60 x 20 viewport with 10,000 rectangles: {per:.4} ms ({hits})");
+    assert!(hits > 0);
+    assert!(per < 1.0, "{per:.4} ms per viewport");
 }

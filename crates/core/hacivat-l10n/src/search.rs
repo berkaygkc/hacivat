@@ -501,11 +501,24 @@ fn fuzzy_score(raw: i64, m: usize) -> u32 {
 /// Whether Turkish-tolerant folding is on: the UI language or the effective format locale (the
 /// negotiated one, after the regional policy maps `en-TR` to `tr-TR`) is Turkish (D-074; the
 /// search box toggle overrides it).
+///
+/// ## m3c-po (PO M3c-05): "UI language or region" — a Turkey region with another language
+/// (`en-TR`, `en_TR.UTF-8`) counts too, wherever it reaches here unmapped.
 pub fn turkish_tolerant_for(ui_lang: &str, format_locale: &str) -> bool {
     let is_tr = |tag: &str| {
-        tag.split(['-', '_', '.', '@'])
+        // The POSIX codeset and modifier (`.UTF-8`, `@euro`) are not subtags.
+        let tag = tag.split(['.', '@']).next().unwrap_or_default();
+        let mut subtags = tag.split(['-', '_']);
+        if subtags
             .next()
             .is_some_and(|lang| lang.eq_ignore_ascii_case("tr"))
+        {
+            return true;
+        }
+        // The region: a two-letter subtag before any singleton (`-u-…`, `-x-…`).
+        subtags
+            .take_while(|s| s.len() > 1)
+            .any(|s| s.len() == 2 && s.eq_ignore_ascii_case("tr"))
     };
     is_tr(ui_lang) || is_tr(format_locale)
 }

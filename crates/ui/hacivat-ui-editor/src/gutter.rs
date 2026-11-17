@@ -34,9 +34,10 @@ use hacivat_ui::popover::{A11yDecl, Declare as _};
 use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, AvailableSpace, BorderStyle, Bounds, Context,
-    Corners, CursorStyle, Edges, FocusHandle, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, Pixels, Point, Render, Role, StatefulInteractiveElement as _,
-    Styled as _, Window, div, fill, point, px, quad, size,
+    Corners, CursorStyle, Div, Edges, Entity, FocusHandle, Hsla, InteractiveElement as _,
+    IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Pixels, Point, Render, Role,
+    Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, fill, point, px, quad,
+    size,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, popover_surface};
 use smallvec::SmallVec;
@@ -353,6 +354,11 @@ pub enum GutterButton {
 pub struct GutterUi {
     pub(crate) gate: Option<RunGate>,
     handles: RefCell<HashMap<GutterButton, FocusHandle>>,
+    // ## m3c-po (PO M3c-04)
+    /// The line of the button last focused in the ▶ column and in the chevron column: each
+    /// column's one tab stop goes back to it while it is painted.
+    last_run: std::cell::Cell<Option<u32>>,
+    last_fold: std::cell::Cell<Option<u32>>,
 }
 
 impl std::fmt::Debug for GutterUi {
@@ -388,6 +394,148 @@ pub(crate) fn focused_button(v: &EditorView, window: &Window) -> Option<GutterBu
         .iter()
         .find(|(_, h)| h.is_focused(window))
         .map(|(b, _)| *b)
+}
+
+// ## m3c-po (PO M3c-04): each gutter column is ONE tab stop ("Tab moves focus" mode), a
+// roving one: ↑/↓ move the focus along the column, Escape gives it back to the editor.
+
+impl GutterButton {
+    /// The button's line.
+    pub fn line(self) -> u32 {
+        match self {
+            GutterButton::Run(l) | GutterButton::Fold(l) => l,
+        }
+    }
+
+    /// The button of the same column on `line`.
+    fn on_line(self, line: u32) -> Self {
+        match self {
+            GutterButton::Run(_) => GutterButton::Run(line),
+            GutterButton::Fold(_) => GutterButton::Fold(line),
+        }
+    }
+
+    fn same_column(self, other: GutterButton) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
+}
+
+/// The line a column's one tab stop sits on, among its painted `lines` (top to bottom): the
+/// focused button, else the one last focused, else the last one on or above the caret's line,
+/// else the first.
+pub(crate) fn tab_stop_line(
+    lines: &[u32],
+    focused: Option<u32>,
+    remembered: Option<u32>,
+    caret_line: u32,
+) -> Option<u32> {
+    let painted = |l: &u32| lines.contains(l);
+    focused
+        .filter(painted)
+        .or(remembered.filter(painted))
+        .or_else(|| lines.iter().copied().rfind(|l| *l <= caret_line))
+        .or_else(|| lines.first().copied())
+}
+
+fn last_cell(v: &EditorView, column: GutterButton) -> &std::cell::Cell<Option<u32>> {
+    match column {
+        GutterButton::Run(_) => &v.gutter_ui.last_run,
+        GutterButton::Fold(_) => &v.gutter_ui.last_fold,
+    }
+}
+
+/// The tab stop of `column`'s painted `lines` this frame (see [`tab_stop_line`]); a focused
+/// button of the column is remembered as its last.
+pub(crate) fn column_stop(
+    v: &EditorView,
+    column: GutterButton,
+    lines: &[u32],
+    window: &Window,
+) -> Option<u32> {
+    let focused = focused_button(v, window)
+        .filter(|b| b.same_column(column))
+        .map(GutterButton::line);
+    let last = last_cell(v, column);
+    if focused.is_some() {
+        last.set(focused);
+    }
+    let buf = v.model.buffer();
+    let caret = v
+        .model
+        .selection()
+        .main()
+        .range()
+        .start
+        .min(buf.len_bytes());
+    let caret_line = u32::try_from(buf.byte_to_line(caret)).unwrap_or(u32::MAX);
+    tab_stop_line(lines, focused, last.get(), caret_line)
+}
+
+/// A key on the focused gutter button `button`: ↑/↓ focus the previous / next button of its
+/// column (none past an end), Escape gives the focus back to the editor. `true` when it took
+/// the key (the caller stops it there, so the arrows never reach the editor).
+pub(crate) fn on_button_key(
+    v: &mut EditorView,
+    button: GutterButton,
+    ev: &KeyDownEvent,
+    window: &mut Window,
+    cx: &mut Context<EditorView>,
+) -> bool {
+    let k = &ev.keystroke;
+    if k.modifiers.modified() {
+        return false;
+    }
+    let up = match k.key.as_str() {
+        "escape" => {
+            last_cell(v, button).set(Some(button.line()));
+            window.focus(&v.focus, cx);
+            cx.notify();
+            return true;
+        }
+        "up" => true,
+        "down" => false,
+        _ => return false,
+    };
+    let mut lines: Vec<u32> = v
+        .gutter_ui
+        .handles
+        .borrow()
+        .keys()
+        .filter(|b| b.same_column(button))
+        .map(|b| b.line())
+        .collect();
+    lines.sort_unstable();
+    let at = lines.binary_search(&button.line()).ok();
+    let target = at
+        .and_then(|i| {
+            if up {
+                i.checked_sub(1)
+            } else {
+                i.checked_add(1)
+            }
+        })
+        .and_then(|i| lines.get(i).copied());
+    if let Some(line) = target {
+        let to = button.on_line(line);
+        let handle = handle_of(v, to, cx);
+        last_cell(v, button).set(Some(line));
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+    true
+}
+
+/// Adds the column keys ([`on_button_key`]) to gutter button `button`'s element.
+pub(crate) fn with_column_keys(
+    el: Stateful<Div>,
+    view: Entity<EditorView>,
+    button: GutterButton,
+) -> Stateful<Div> {
+    el.on_key_down(move |ev: &KeyDownEvent, window, cx| {
+        if view.update(cx, |v, cx| on_button_key(v, button, ev, window, cx)) {
+            cx.stop_propagation();
+        }
+    })
 }
 
 /// What one frame paints of the ▶ buttons (laid out in [`prepaint_buttons`]).
@@ -448,7 +596,9 @@ fn run_allowed(v: &EditorView, cx: &App) -> bool {
 /// Lays out the frame's ▶ buttons (prepaint): on the first row of each statement in view,
 /// while Run would be enabled, never over a mark that needs the user or is still going. One
 /// shows on the row under the pointer, or on every such row while a gutter button has the
-/// focus; in "Tab moves focus" mode the hidden ones are still there, as tab stops (ruling 3).
+/// focus; in "Tab moves focus" mode the hidden ones are still there, as focusable buttons
+/// (ruling 3). ## m3c-po (PO M3c-04): the column is one tab stop ([`column_stop`]); ↑/↓ move
+/// along it and Escape returns to the editor ([`on_button_key`]).
 pub(crate) fn prepaint_buttons(
     v: &mut EditorView,
     gutter: Bounds<Pixels>,
@@ -494,21 +644,34 @@ pub(crate) fn prepaint_buttons(
     let hover_fill = theme.tokens.colors.hover.to_hsla();
     let view = cx.entity();
     let mut painted = Vec::new();
+    // ## m3c-po (PO M3c-04): the rows that get a ▶ first (one per line), so the column's one
+    // tab stop is known before the buttons are laid out.
+    let mut cands: Vec<(usize, u32, Pixels)> = Vec::new();
     for span in spans.iter() {
         let line =
             u32::try_from(buf.byte_to_line(span.header.min(buf.len_bytes()))).unwrap_or(u32::MAX);
         let Some(&(_, top)) = rows.iter().find(|(l, _)| *l == line) else {
             continue;
         };
-        if v.marks.busy_on(buf, line) || out.rows.contains(&line) {
+        if v.marks.busy_on(buf, line) || cands.iter().any(|c| c.1 == line) {
             continue;
         }
         let shown = focused || hover == Some(line);
         if !shown && !tab {
             continue;
         }
+        cands.push((span.header, line, top));
+    }
+    let stop = if tab {
+        let lines: Vec<u32> = cands.iter().map(|c| c.1).collect();
+        column_stop(v, GutterButton::Run(0), &lines, window)
+    } else {
+        None
+    };
+    for (header, line, top) in cands {
+        let shown = focused || hover == Some(line);
         let button = GutterButton::Run(line);
-        let key = v.marks.at_header(span.header);
+        let key = v.marks.at_header(header);
         let tip = RunTip {
             runs: key.map(|k| v.marks.run_rows(k, cx)).unwrap_or_default(),
         };
@@ -518,7 +681,6 @@ pub(crate) fn prepaint_buttons(
             "hv-gutter-run-line",
             &[("line", UiArg::Count(u64::from(line) + 1))],
         );
-        let header = span.header;
         let version = snap.version;
         let target = view.clone();
         let mut el = div()
@@ -535,9 +697,11 @@ pub(crate) fn prepaint_buttons(
                 target.update(cx, |v, cx| run_row(v, header, version, window, cx));
             });
         if tab {
-            let handle = handle_of(v, button, cx);
+            // ## m3c-po (PO M3c-04): one tab stop for the column; ↑/↓ and Escape here.
+            let handle = handle_of(v, button, cx).tab_stop(stop == Some(line));
             let has_focus = handle.is_focused(window);
             el = el.track_focus(&handle);
+            el = with_column_keys(el, view.clone(), button);
             if has_focus {
                 el = el.border_1().border_color(inks.blue);
             }
@@ -782,5 +946,20 @@ mod tests {
             ..ov.clone()
         };
         assert_eq!(flat.top_of(2), Some(px(136.0)));
+    }
+
+    // ## m3c-po (PO M3c-04)
+    /// A column's one tab stop: the focused button, else the last focused while it is still
+    /// painted, else the caret's (on or above its line), else the first; none without buttons.
+    #[test]
+    fn a_columns_tab_stop() {
+        let lines = [2, 5, 9];
+        assert_eq!(tab_stop_line(&lines, Some(9), Some(2), 0), Some(9));
+        assert_eq!(tab_stop_line(&lines, None, Some(2), 7), Some(2));
+        assert_eq!(tab_stop_line(&lines, None, Some(4), 7), Some(5));
+        assert_eq!(tab_stop_line(&lines, None, None, 5), Some(5));
+        assert_eq!(tab_stop_line(&lines, None, None, 1), Some(2));
+        assert_eq!(tab_stop_line(&lines, None, None, 100), Some(9));
+        assert_eq!(tab_stop_line(&[], None, Some(2), 3), None);
     }
 }

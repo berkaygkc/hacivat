@@ -3204,3 +3204,89 @@ hv-settings-raw-display-note = Numbers and dates as the server sent them, withou
 # Setting title and note (the History section).
 hv-settings-history = Record query history
 hv-settings-history-note = Up to 10,000 statements per connection are kept for 90 days; recognised passwords and secrets are masked.
+
+## m3c-int-fixes
+
+# The go-to line when fetching toward a row (or its question before a large fetch) ended
+# because the result was run again: no row of the new result is fetched or gone to.
+hv-goto-fetch-rerun = Fetching stopped: the result was run again.
+
+## m3b-t41-chrome
+
+# The transaction mode chip's word for Auto-commit in a narrow pane (design/m3b-safe surface 24, N4): the chip keeps its mode word.
+hv-tx-chip-auto-short = Auto
+# The waiting item's first line in a narrow pane (NOTES surface 24): the sentence keeps all its words on two lines.
+hv-console-waiting-l1 = Waiting for a connection
+# The waiting item's second line in a narrow pane.
+# Variables:
+#   $inUse (Number) - connections in use, e.g. 4.
+#   $max (Number) - connections the profile allows, e.g. 4.
+hv-console-waiting-l2 = { $inUse } of { $max } in use
+# The tooltip and accessible name of an icon-only toolbar button in a narrow pane (N1): its word and its keys, e.g. "Run · ⌘↵".
+# Variables:
+#   $label (String) - the button's word, e.g. Run.
+#   $keys (String) - its shortcut, e.g. ⌘↵.
+hv-console-button-keys = { $label } · { $keys }
+# The first line of an empty console, in text-3 (design/m3a-query surface 1; m3b-safe surface 24: it wraps in a narrow pane).
+# Variables:
+#   $key (String) - the Run shortcut, e.g. ⌘↵.
+hv-editor-placeholder = Write SQL here. { $key } runs the statement at the caret.
+
+## m3b-t39-grid-menu
+
+# The grid's context menu (right press on a cell, a column header or a row number; Shift+F10).
+# Copies the selected cells.
+hv-gmenu-copy = Copy
+# Copies the selected cells with the column names as the first line.
+hv-gmenu-copy-headers = Copy with headers
+# The row-number menu's Copy: copies the selected rows.
+hv-gmenu-copy-rows = Copy rows
+# The header menu: copies the column's name.
+hv-gmenu-copy-name = Copy column name
+# Opens the value viewer on the cell.
+hv-gmenu-open-value = Open value viewer
+# Sorts the rows by the column, smallest first.
+hv-gmenu-sort-asc = Sort ascending
+# Sorts the rows by the column, largest first.
+hv-gmenu-sort-desc = Sort descending
+# The header menu, while another column is sorted: sorts by this column too, after the others.
+# Variables:
+#   $lvl (Number) - the level this column would take, e.g. 2.
+hv-gmenu-add-sort = Add as sort level { $lvl }
+# The header menu: keeps the columns up to this one in place when the grid scrolls sideways.
+hv-gmenu-freeze = Freeze up to here
+# The header menu while columns are frozen.
+hv-gmenu-unfreeze = Unfreeze columns
+# The header menu: hides the column from the grid (Show all columns brings it back).
+hv-gmenu-hide = Hide column
+# The header menu: shows every hidden column again.
+hv-gmenu-show-all = Show all columns
+# The header menu: sizes the column to its values.
+hv-gmenu-autofit = Fit width
+# A check item: shows the column's values as the server sent them (no digit grouping).
+hv-gmenu-raw = Raw display
+# The hint after hv-gmenu-raw: the item applies to this column only (the setting applies to
+# every grid).
+hv-gmenu-raw-hint = this column
+# Opens the go-to-row field.
+hv-gmenu-goto = Go to row…
+# The row-number menu: opens the record inspector on the row.
+hv-gmenu-record = Show as record
+# Why Open value viewer is unavailable: several cells are selected.
+hv-gmenu-why-one-cell = Select one cell
+# Why Clear sort is unavailable.
+hv-gmenu-why-not-sorted = Not sorted
+# Why Show all columns is unavailable: no column is hidden.
+hv-gmenu-why-no-hidden = None hidden
+# Why Copy is unavailable: the selected ranges share neither their rows nor their columns.
+hv-gmenu-why-ranges = Ranges don't line up
+# Why Hide column is unavailable: it is the only column still shown.
+hv-gmenu-why-last = Last shown column
+# The menu's name for screen readers.
+hv-gmenu-label = Grid menu
+
+## m3c-po
+
+# The command (palette; macOS ⌘E) that makes the selection the find query without opening the
+# find bar (PO M3c-08; macOS "Use Selection for Find").
+hv-cmd-editor-use-selection-for-find = Use selection for find

@@ -158,6 +158,9 @@ struct Meta {
     shape: Shape,
     column: SharedString,
     subtitle: SharedString,
+    // ## m3c-int (M3)
+    /// The column's type label: the subtitle is made again where the table shows the row now.
+    type_label: SharedString,
     truncated: Option<SharedString>,
     rerun: Option<SharedString>,
     /// The kept part's bytes, when the store cut the value.
@@ -648,31 +651,43 @@ fn read_meta(
         .get(col)
         .map(|c| (c.name.clone(), c.type_label.clone()))
         .unwrap_or_default();
-    let row = table
-        .read(cx)
-        .view_map()
-        .model_to_view(cell.row)
-        .map_or(cell.row.0, |v: ViewRow| v.0)
-        + 1;
-    let subtitle = message(
-        cx,
-        "hv-vv-sub",
-        vec![
-            ("type", ArgValue::Text(type_label.to_string())),
-            ("row", ArgValue::Count(row)),
-        ],
-    );
+    let subtitle = subtitle_of(&type_label, cell, table, cx);
     Some(Meta {
         view,
         cell,
         shape,
         column,
         subtitle,
+        type_label,
         truncated,
         rerun,
         kept: cut.map(|_| kept),
         unit_ordinal,
     })
+}
+
+// ## m3c-int (M3)
+/// "jsonb · row 4": `cell`'s row where `table` shows it now (1-based).
+fn subtitle_of(
+    type_label: &SharedString,
+    cell: ModelCell,
+    table: &Entity<GridView>,
+    cx: &App,
+) -> SharedString {
+    let row = table
+        .read(cx)
+        .view_map()
+        .model_to_view(cell.row)
+        .map_or(cell.row.0, |v: ViewRow| v.0)
+        + 1;
+    message(
+        cx,
+        "hv-vv-sub",
+        vec![
+            ("type", ArgValue::Text(type_label.to_string())),
+            ("row", ArgValue::Count(row)),
+        ],
+    )
 }
 
 /// Whether console `console`'s viewer is open.
@@ -833,7 +848,13 @@ impl ValueViewer {
         });
         ViewerView {
             column: meta.map(|m| m.column.clone()).unwrap_or_default(),
-            subtitle: meta.map(|m| m.subtitle.clone()).unwrap_or_default(),
+            // ## m3c-int (M3): "row N" follows a sort or a filter while the viewer is open.
+            subtitle: meta
+                .map(|m| match super::find::active_target(self.console, cx) {
+                    Some((table, _)) => subtitle_of(&m.type_label, m.cell, &table, cx),
+                    None => m.subtitle.clone(),
+                })
+                .unwrap_or_default(),
             form: body.map_or(
                 match meta.map(|m| m.shape) {
                     Some(Shape::Bytes) => ValueForm::Binary,

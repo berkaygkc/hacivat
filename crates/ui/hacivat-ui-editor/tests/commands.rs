@@ -452,6 +452,11 @@ const SPECIAL: &[(&str, &str)] = &[
         "editor.find_close",
         "find_commands_ask_for_the_bar_and_step",
     ),
+    // ## m3c-po (named exception; PO M3c-08).
+    (
+        "editor.use_selection_for_find",
+        "use_selection_for_find_seeds_the_query_only",
+    ),
     // ## m3c-t34-editor (named exception): Task 34's rows (and `tests/lines.rs`).
     ("editor.toggle_comment", "line_commands_edit_lines"),
     ("editor.duplicate_line", "line_commands_edit_lines"),
@@ -602,6 +607,39 @@ fn find_commands_ask_for_the_bar_and_step(cx: &mut TestAppContext) {
     let mut o = open(cx, "SELECT «a,\nb┃;");
     run(&mut o, "editor.find");
     assert_eq!(requested(&o), [None]);
+}
+
+// ## m3c-po (PO M3c-08)
+/// macOS's "Use Selection for Find" (⌘E): a one-line selection seeds the host's find query
+/// (`EditorEvent::FindSeeded`) without asking for the bar; a caret or a selection over two
+/// lines seeds nothing. Neither the text nor the selection changes.
+#[gpui::test]
+fn use_selection_for_find_seeds_the_query_only(cx: &mut TestAppContext) {
+    let events = |o: &Opened<'_>| -> (Vec<String>, usize) {
+        let e = o.events.borrow();
+        let seeded = e
+            .iter()
+            .filter_map(|e| match e {
+                EditorEvent::FindSeeded { seed } => Some(seed.clone()),
+                _ => None,
+            })
+            .collect();
+        let asked = e
+            .iter()
+            .filter(|e| matches!(e, EditorEvent::FindRequested { .. }))
+            .count();
+        (seeded, asked)
+    };
+    let mut o = open(cx, "SELECT «a┃, b;\nFROM t, a;");
+    run(&mut o, "editor.use_selection_for_find");
+    assert_eq!(events(&o), (vec!["a".to_string()], 0));
+    assert_eq!(state(&o), "SELECT «a┃, b;\nFROM t, a;");
+    let mut o = open(cx, "SELECT a┃, b;");
+    run(&mut o, "editor.use_selection_for_find");
+    assert_eq!(events(&o), (Vec::new(), 0));
+    let mut o = open(cx, "SELECT «a,\nb┃;");
+    run(&mut o, "editor.use_selection_for_find");
+    assert_eq!(events(&o), (Vec::new(), 0));
 }
 
 // ## m3c-t31-multi

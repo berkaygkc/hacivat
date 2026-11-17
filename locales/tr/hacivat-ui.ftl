@@ -2729,3 +2729,75 @@ hv-settings-raw-display-note = Sayılar ve tarihler bölgesel biçim olmadan, su
 hv-settings-history = Sorgu geçmişini kaydet
 # Review: PO
 hv-settings-history-note = Bağlantı başına en çok 10.000 ifade 90 gün saklanır; tanınan parolalar ve gizli bilgiler maskelenir.
+
+## m3c-int-fixes
+
+# Review: PO
+hv-goto-fetch-rerun = Getirme durdu: sonuç yeniden çalıştırıldı.
+
+## m3b-t41-chrome
+
+# Review: PO
+hv-tx-chip-auto-short = Otomatik
+# Review: PO
+hv-console-waiting-l1 = Bağlantı bekleniyor
+# Review: PO
+hv-console-waiting-l2 = kullanımda: { $inUse }/{ $max }
+# Review: PO
+hv-console-button-keys = { $label } · { $keys }
+# Review: PO
+hv-editor-placeholder = SQL'i buraya yazın. { $key }, imlecin bulunduğu ifadeyi çalıştırır.
+
+## m3b-t39-grid-menu
+
+# Review: PO
+hv-gmenu-copy = Kopyala
+# Review: PO
+hv-gmenu-copy-headers = Başlıklarla kopyala
+# Review: PO
+hv-gmenu-copy-rows = Satırları kopyala
+# Review: PO
+hv-gmenu-copy-name = Sütun adını kopyala
+# Review: PO
+hv-gmenu-open-value = Değer görüntüleyiciyi aç
+# Review: PO
+hv-gmenu-sort-asc = Artan sırala
+# Review: PO
+hv-gmenu-sort-desc = Azalan sırala
+# Review: PO
+hv-gmenu-add-sort = { $lvl }. sıralama düzeyi olarak ekle
+# Review: PO
+hv-gmenu-freeze = Buraya kadar dondur
+# Review: PO
+hv-gmenu-unfreeze = Dondurmayı kaldır
+# Review: PO
+hv-gmenu-hide = Sütunu gizle
+# Review: PO
+hv-gmenu-show-all = Tüm sütunları göster
+# Review: PO
+hv-gmenu-autofit = Genişliği sığdır
+# Review: PO
+hv-gmenu-raw = Ham görünüm
+# Review: PO
+hv-gmenu-raw-hint = bu sütun
+# Review: PO
+hv-gmenu-goto = Satıra git…
+# Review: PO
+hv-gmenu-record = Kayıt olarak göster
+# Review: PO
+hv-gmenu-why-one-cell = Tek hücre seçin
+# Review: PO
+hv-gmenu-why-not-sorted = Sıralı değil
+# Review: PO
+hv-gmenu-why-no-hidden = Gizli sütun yok
+# Review: PO
+hv-gmenu-why-ranges = Aralıklar hizalı değil
+# Review: PO
+hv-gmenu-why-last = Görünen son sütun
+# Review: PO
+hv-gmenu-label = Tablo menüsü
+
+## m3c-po
+
+# Review: PO
+hv-cmd-editor-use-selection-for-find = Seçimi bulmada kullan

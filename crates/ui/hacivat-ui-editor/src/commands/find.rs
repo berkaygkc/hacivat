@@ -11,6 +11,11 @@
 //!   bar (unseeded), as `editor.find` would.
 //! - `editor.find_close` clears the query (the host's bar closes on the `FindChanged` that
 //!   follows, `FindStatus::active` false).
+//!
+//! ## m3c-po
+//!
+//! - `editor.use_selection_for_find` (macOS ⌘E, PO M3c-08) hands the one-line selection to the
+//!   host as its query (`EditorEvent::FindSeeded`) without asking for the bar.
 
 use hacivat_ui_core::gpui_surface::{Context, Window};
 
@@ -55,5 +60,15 @@ pub(super) fn find_prev(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_>) {
 pub(super) fn find_close(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_>) {
     if v.find_status().active {
         v.set_find(None, cx);
+    }
+}
+
+// ## m3c-po (PO M3c-08)
+/// macOS's "Use Selection for Find" (⌘E): the one-line selection becomes the host's find query
+/// (`EditorEvent::FindSeeded`); the bar is not asked for. A caret or a longer selection seeds
+/// nothing.
+pub(super) fn use_selection_for_find(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_>) {
+    if let Some(seed) = seed(v) {
+        cx.emit(EditorEvent::FindSeeded { seed });
     }
 }

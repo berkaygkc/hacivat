@@ -954,6 +954,9 @@ impl GridView {
                 cx.notify();
             }
             accesskit::Action::ShowContextMenu => {
+                // ## m3c-t39 fix round 1 (m3, named exception): as Shift+F10 does, from a
+                // focused grid (the menu gives the focus back to it).
+                window.focus(&self.focus, cx);
                 self.focus_cell(cell, cx);
                 self.dispatch(GridCommand::ContextMenu, window, cx);
             }

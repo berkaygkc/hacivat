@@ -213,11 +213,20 @@ fn scan_slice(
     cancel: &AtomicBool,
 ) -> SliceOut {
     let engine = input.display.engine();
-    let settings = input.display.settings();
     let facts: Vec<_> = input
         .cols
         .iter()
         .map(|c| input.facts.get(*c as usize).map(|f| f.view(engine)))
+        .collect();
+    // ## m3c-t39 (named exception): a raw column is searched as its cells show it.
+    let schema = input.snapshot.schema();
+    let settings: Vec<_> = input
+        .cols
+        .iter()
+        .map(|c| match schema.columns.get(*c as usize) {
+            Some(meta) => input.display.settings_for(&meta.name),
+            None => input.display.settings(),
+        })
         .collect();
     let loaded = input.snapshot.row_count();
     let mut out = SliceOut::default();
@@ -248,7 +257,7 @@ fn scan_slice(
             for (ix, (col, f)) in input.cols.iter().zip(&facts).enumerate() {
                 let Some(f) = f else { continue };
                 let value = input.snapshot.cell(model.0, *col);
-                let shown = format_cell(value, f, settings, Purpose::Cell);
+                let shown = format_cell(value, f, settings[ix], Purpose::Cell);
                 // NULL never matches; a decode error's text is chrome, not the value.
                 if matches!(shown.kind, DisplayKind::Null | DisplayKind::Error) {
                     continue;
@@ -486,17 +495,7 @@ fn refresh_view(grid: &Entity<GridView>, cx: &mut App) {
     let (Some(f), Some(base)) = compose else {
         return;
     };
-    let job = cx.background_spawn(async move {
-        let mut rows = Vec::with_capacity(f.sorted.len());
-        for v in 0..base.len() {
-            if let Some(m) = base.view_to_model(ViewRow(v))
-                && f.sorted.binary_search(&m.0).is_ok()
-            {
-                rows.push(m.0);
-            }
-        }
-        ViewMap::filtered(Arc::from(rows), f.rows)
-    });
+    let job = cx.background_spawn(async move { filter_in_order(&f.sorted, f.rows, &base) });
     let weak = grid.downgrade();
     let task = cx.spawn(async move |cx| {
         let map = job.await;
@@ -518,6 +517,23 @@ fn refresh_view(grid: &Entity<GridView>, cx: &mut App) {
     if let Some(e) = cx.default_global::<Views>().0.get_mut(&key) {
         e.job = Some(task);
     }
+}
+
+// ## m3c-int (M2)
+/// The filter's kept rows `sorted` (model rows, ascending; scanned over `fetched` rows) in
+/// `base`'s order. A sort's base holds the rows of its snapshot: rows fetched while it ran join
+/// its unsorted tail, so the kept ones among them stay shown (no gap until the rescan lands).
+pub fn filter_in_order(sorted: &[u64], fetched: u64, base: &ViewMap) -> ViewMap {
+    let base = base.with_loaded(fetched.max(base.len()));
+    let mut rows = Vec::with_capacity(sorted.len());
+    for v in 0..base.len() {
+        if let Some(m) = base.view_to_model(ViewRow(v))
+            && sorted.binary_search(&m.0).is_ok()
+        {
+            rows.push(m.0);
+        }
+    }
+    ViewMap::filtered(Arc::from(rows), fetched)
 }
 
 /// `grid` is gone (its tab or console closed): its view state goes.
@@ -924,6 +940,13 @@ pub(crate) fn sync(
     let Some(bar) = bar(console, cx).filter(|b| b.read(cx).open) else {
         return;
     };
+    // ## m3c-int (I3): find and Filter rows are the table's: the bar closes while the tab shows
+    // another view, also on a tab switched to that already showed it (it never scans, marks or
+    // filters the hidden table grid; the bar's own grid loses its marks and filter).
+    if !super::views::shows_table(grid, cx) {
+        cx.defer(move |cx| bar.update(cx, |b, cx| b.close(None, cx)));
+        return;
+    }
     let (grid, adapter) = (grid.clone(), adapter.clone());
     // After this frame: the bar starts work and repaints the grid.
     cx.defer(move |cx| {

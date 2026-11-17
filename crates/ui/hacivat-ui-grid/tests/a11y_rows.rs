@@ -950,12 +950,20 @@ mod with_a_view {
             );
         });
         events.borrow_mut().clear();
+        // ## m3c-t39 fix round 1 (m3, named exception): from a grid without the keyboard
+        // focus, Show menu focuses it first (as Shift+F10 starts from a focused grid).
+        vcx.update(|window, cx| window.blur(cx));
         act(vcx, at(600, 3), accesskit::Action::ShowContextMenu);
         let menu = events.borrow().iter().find_map(|e| match e {
             GridEvent::ContextMenuRequested { cell, header, .. } => Some((*cell, *header)),
             _ => None,
         });
         assert_eq!(menu, Some((Some(at(600, 3)), None)));
+        let focused = vcx.update(|window, cx| {
+            hacivat_ui_core::gpui_surface::Focusable::focus_handle(view.read(cx), cx)
+                .is_focused(window)
+        });
+        assert!(focused, "Show menu focuses the grid");
         // A row that is not loaded does nothing.
         events.borrow_mut().clear();
         act(vcx, at(5_000, 0), accesskit::Action::Focus);

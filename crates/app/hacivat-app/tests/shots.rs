@@ -2256,8 +2256,9 @@ fn an_m3a_grid_state_without_its_grid_fails() {
         );
     }
     // Describe and "Nothing to run" need the status message, not the editor segment.
+    // ## m3c-t41-chrome (named exception): the Ln/Col label moved (one cell per part).
     let segment = [at(
-        "crates/app/hacivat-app/src/console/status.rs:116:13#editor-segment-lncol",
+        "crates/app/hacivat-app/src/console/status.rs:290:13#editor-segment-lncol",
         "Ln 2, Col 38",
     )];
     let describe = Surface::M3a(m3a::M3a::ContextDescribe);
@@ -2375,9 +2376,13 @@ fn trust_signals_must_be_drawn() {
             m3a::M3a::StatusProductionResult,
         ]
     );
+    // ## m3c-t41-chrome (named exception; F2 review N2): the production waiting state also
+    // requires the wait's Cancel.
+    let cancel: &[&str] = &["#button-label-console-waiting-cancel"];
     for state in production {
         let want: &[&[&str]] = match state {
             m3a::M3a::StatusProductionResult => &[env],
+            m3a::M3a::ToolbarProductionWaiting => &[env, chip, cancel],
             _ => &[env, chip],
         };
         assert_eq!(state.required(), want, "{state:?}");
@@ -2530,7 +2535,7 @@ fn every_m3b_state_has_its_own_marker() {
             "Direct",
         ),
         (
-            "crates/app/hacivat-app/src/console/status.rs:116:13#editor-segment-lncol",
+            "crates/app/hacivat-app/src/console/status.rs:290:13#editor-segment-lncol",
             "Ln 2, Col 38",
         ),
         ("crates/ui/hacivat-ui-editor/src/marks.rs:1:1", "1 of 3"),

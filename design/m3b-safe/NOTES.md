@@ -1061,3 +1061,10 @@ Placeholders, plurals and isolation follow the M3b table's rules. The `i18n-app`
 | `hv-settings-raw-display-note` | Numbers and dates as the server sent them, without regional formatting. Copy is always raw. | Sayılar ve tarihler bölgesel biçim olmadan, sunucunun gönderdiği gibi. Kopyalama her zaman hamdır. | Review: PO |
 | `hv-settings-history` | Record query history | Sorgu geçmişini kaydet | Review: PO |
 | `hv-settings-history-note` | Up to 10,000 statements per connection are kept for 90 days; recognised passwords and secrets are masked. | Bağlantı başına en çok 10.000 ifade 90 gün saklanır; tanınan parolalar ve gizli bilgiler maskelenir. | Review: PO |
+
+### Surface 24 · named exceptions added by Task 41 (controller ruling on R1/R2, T41 review)
+
+Appended (the sections above stay as they were). Below the per-locale minimum only, beside N1–N4:
+- **N1′ · Cancel as its glyph where its word cannot fit.** The waiting item's Cancel keeps its word wherever the word (with the button's padding) fits the pane, which every shipping locale does at the 120 px floor; only where it does not (a pseudo-locale's bracketed word at the split floor) Cancel is its × glyph, the word its tooltip and accessible name, as N1 draws Run and Stop. The waiting sentence, the trust signal, stays whole on two lines.
+- **N5 · The narrow Running state is the run marker and the clock** (the mock's `narrowQbarHTML`); "Running" is its tooltip and its status name. Stop stays as its icon (N1); "Cancelling…" keeps its word.
+- **M3c-18 (PO, approved):** in a narrow result toolbar the view switch and the record toggle take their compact forms first, Count rows moves into ⋯ before Copy, and Copy gives way last.

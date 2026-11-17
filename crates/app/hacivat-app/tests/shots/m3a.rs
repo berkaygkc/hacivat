@@ -433,6 +433,8 @@ impl M3a {
         const BADGE: &[&str] = &["#tx-badge-text"];
         const BADGE_FAILED: &[&str] = &["#tx-badge-failed"];
         const CHIP: &[&str] = &["#tx-chip-mode"];
+        // ## m3c-t41-chrome (F2 review N2): the wait's Cancel never hides (NOTES surface 2).
+        const CANCEL: &[&str] = &["#button-label-console-waiting-cancel"];
         match self {
             M3a::StatusTxOpen => &[TX, BADGE],
             M3a::StatusTxFailed => &[TX_FAILED, BADGE_FAILED],
@@ -441,7 +443,10 @@ impl M3a {
             // transaction mode chip (Manual, D-036).
             M3a::ConsoleProduction => &[ENV, CHIP],
             // ## m3b-t29-shots (fix round 1, m2): their live console draws the Manual chip.
-            M3a::ToolbarProductionWaiting | M3a::MarksDenied => &[ENV, CHIP],
+            // ## m3c-t41-chrome (F2 review N2): and the wait's Cancel.
+            M3a::ToolbarProductionWaiting => &[ENV, CHIP, CANCEL],
+            M3a::ToolbarWaiting => &[CANCEL],
+            M3a::MarksDenied => &[ENV, CHIP],
             M3a::StatusProductionResult => &[ENV],
             M3a::ToolbarRunning => &[CLOCK],
             // ## m3b-t22-tx-ui (named exception): `StatusTxOpen` / `StatusTxFailed` moved up,
@@ -1058,7 +1063,9 @@ impl M3a {
                     // ## m3a-f2-visual (fix round 1, M2): at 1280 the bar has room for its own
                     // rows · timing cell; only at 960 (in the pseudo-locales) may the tile's
                     // count stand in for it (`required`).
-                    && (f32::from(viewport.width) < 1280.0
+                    // ## m3c-t41-chrome (F2 review N1): only in the pseudo-locales, as the
+                    // comment says; at 960 in English and Turkish the bar draws its own.
+                    && ((f32::from(viewport.width) < 1280.0 && pseudo_locale(cx))
                         || frame.iter().any(|r| {
                             r.visible && r.painted_px > 0.0 && r.path.ends_with("#status-rows")
                         }))
@@ -1094,6 +1101,14 @@ impl M3a {
         };
         (!ok).then(|| format!("{}: the state check failed", self.name()))
     }
+}
+
+// ## m3c-t41-chrome (F2 review N1)
+/// Whether the shot's UI language is a pseudo-locale (en-XA, tr-XT).
+fn pseudo_locale(cx: &App) -> bool {
+    cx.try_global::<hacivat_app::l10n_global::L10nGlobal>()
+        .and_then(|g| g.l10n.snapshot().ui_chain.first().map(|l| l.to_string()))
+        .is_some_and(|l| l.ends_with("-XA") || l.ends_with("-XT"))
 }
 
 /// The message `id` with `args`, as the app renders it in the shot's locale.

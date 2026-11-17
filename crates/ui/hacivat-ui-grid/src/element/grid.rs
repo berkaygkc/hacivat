@@ -1329,7 +1329,8 @@ fn paint_gutter(
                 || map
                     .view_to_model(ViewRow(r))
                     .is_some_and(|m| selection.row_selected(m))
-                || selection.rects().iter().any(|rc| rc.rows.contains(&r));
+                // ## m3c-int (I4): the rectangles by row.
+                || selection.row_in_rects(r);
             let color = if selected {
                 palette.blue
             } else if hover_row == Some(r) {

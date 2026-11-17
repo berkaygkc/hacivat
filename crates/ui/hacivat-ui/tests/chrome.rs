@@ -843,3 +843,100 @@ fn pseudo_locale_brackets_fluent_segments_but_not_verbatim_ones_or_the_capsule_n
     // Nothing is flagged: every Fluent text is bracketed, user data and verbatim text is not.
     assert_eq!(unbracketed_fluent(&frame), Vec::<String>::new());
 }
+
+// ## m3c-t41-chrome (fix round 1, m5): a menu wider than its minimum, anchored near the
+// window's right edge, is placed inside the window by the frame that first draws it: it is
+// not drawn past the edge and then placed again.
+#[gpui::test]
+fn a_wide_menu_near_the_right_edge_fits_on_its_first_frame(cx: &mut TestAppContext) {
+    use hacivat_ui::menu::{MenuItemSpec, PopupMenu};
+    use hacivat_ui_core::theme::{Theme, ThemeMode};
+    cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
+    let label = |s: &'static str| -> hacivat_ui::text::TextFn { Rc::new(move |_| s.into()) };
+    let (host_view, vcx) = cx.add_window_view(|window, cx| {
+        let width = window.viewport_size().width;
+        let menu = PopupMenu::new(
+            point(width - px(60.), px(20.)),
+            vec![
+                MenuItemSpec::new(label("Auto-commit"), "mode.auto").hint(label(
+                    "Each statement commits as it runs, with nothing to commit by hand",
+                )),
+                MenuItemSpec::new(label("Manual"), "mode.manual")
+                    .hint(label("Changes wait for Commit or Roll back")),
+            ],
+            window,
+            cx,
+        );
+        MenuHost(menu)
+    });
+    let menu = host_view.read_with(vcx, |h, _| h.0.clone());
+    let renders = Rc::new(std::cell::Cell::new(0u32));
+    let seen = renders.clone();
+    vcx.update(|_, cx| {
+        cx.observe(&menu, move |_, _| seen.set(seen.get() + 1))
+            .detach()
+    });
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    let bounds = vcx.debug_bounds("popup-menu").expect("the menu");
+    let width = vcx.update(|window, _| window.viewport_size().width);
+    assert!(
+        bounds.size.width > px(MENU_WIDE_PX),
+        "the menu is wider than its minimum: {bounds:?}"
+    );
+    assert!(
+        bounds.left() >= px(0.) && bounds.right() <= width,
+        "{bounds:?} past the window's edge ({width:?})"
+    );
+    assert_eq!(renders.get(), 0, "the menu was placed again after it drew");
+}
+
+/// Wider than the menu's 200 px minimum.
+const MENU_WIDE_PX: f32 = 240.0;
+
+// ## m3c-shotfix F1 (fix round 1, controller ruling): a menu wider than the window is capped at
+// the window less its 4 px margins and snapped inside them; its hint ellipsizes, its label
+// shows whole, and the menu's own frame checks find nothing.
+#[gpui::test]
+fn a_menu_wider_than_the_window_is_capped_and_its_hint_gives_way(cx: &mut TestAppContext) {
+    use hacivat_ui::menu::{MenuItemSpec, PopupMenu};
+    registry_on(cx);
+    let label = |s: &'static str| -> hacivat_ui::text::TextFn { Rc::new(move |_| s.into()) };
+    let hint = "A hint far longer than any window could hold, so the menu that carries it would \
+                be wider than the whole window if nothing capped it at the window's width, which \
+                is exactly what this case needs to show";
+    let (_host, vcx) = cx.add_window_view(|window, cx| {
+        let menu = PopupMenu::new(
+            point(px(440.), px(40.)),
+            vec![MenuItemSpec::new(label("Normalize to LF"), "eol.lf").hint(label(hint))],
+            window,
+            cx,
+        );
+        MenuHost(menu)
+    });
+    vcx.simulate_resize(gpui::size(px(500.), px(400.)));
+    let layout = layout_of(vcx);
+    assert!(
+        menu_violations(vcx).is_empty(),
+        "{:?}",
+        menu_violations(vcx)
+    );
+    let bounds = vcx.debug_bounds("popup-menu").expect("the menu");
+    assert!(
+        bounds.left() >= px(4.) - px(0.5) && bounds.right() <= px(496.) + px(0.5),
+        "inside the 4 px margins: {bounds:?}"
+    );
+    assert!(layout.viewport.is_some());
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let find = |id: &str| {
+        frame
+            .iter()
+            .find(|r| r.path.ends_with(id))
+            .unwrap_or_else(|| panic!("{id}: {frame:?}"))
+            .clone()
+    };
+    let label = find("#menu-item-label");
+    assert!(!label.truncated && !label.clipped, "{label:?}");
+    let hint = find("#menu-item-hint");
+    assert!(hint.truncated && !hint.clipped, "{hint:?}");
+}

@@ -13,7 +13,9 @@
 //! as a tooltip and as the accessible name); if it can move, it then leaves the row for the
 //! menu. A pinned item never collapses. The menu lists, in priority order, every item that left
 //! the row and every compacted item that asked for a menu row, and its button (a 24 px ghost
-//! icon, "More") exists only while the menu has a row.
+//! icon, "More") exists only while the menu has a row that can be chosen (## m3c-t41-chrome,
+//! F2 review N3: a row with neither a command nor an action is dropped, and the fit reserves
+//! no room for a button that is not drawn).
 //!
 //! Keyboard: the button is a Tab stop; Enter, Space or a click opens the menu, arrows move,
 //! Enter chooses, Escape closes and returns the focus to the button.
@@ -24,6 +26,14 @@
 //! reason, NOTES surface 11: padding 4, line height 16). Such a bar measures its items in
 //! `request_layout` too, so its height is known before it is laid out (GPUI's measured layout,
 //! as its `List` does); a bar without a wrapping item is laid out exactly as before.
+//!
+//! ## m3c-t41-chrome (R-M3-75): the narrow stage. Below the width where a row-wrapping bar
+//! can hold every item whole on a line (a split pane down to its 120 px floor, design/m3b-safe
+//! surface 24), every item with a [`ToolbarItem::narrow`] form takes it, and the bar takes the
+//! narrow anatomy: padding 4/8 (`spacing.xs` / `spacing.md`), 6 px between items
+//! (`spacing.sm`), 4 px between lines. A narrow form fills the slot it is given; its sentence
+//! ([`ToolbarItem::narrow_wraps`]) wraps inside it and the line grows to hold it. Nothing is
+//! cut by the bar's edge, and nothing chrome ends in "…".
 
 use std::rc::Rc;
 
@@ -54,6 +64,9 @@ const MENU_GAP_PX: f32 = 4.0;
 pub type ItemFn = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 /// What choosing an overflow row does when it has no registered command.
 pub type ChooseFn = Rc<dyn Fn(&mut Window, &mut App)>;
+// ## m3c-t41-chrome
+/// Builds a narrow form for the width (px) its slot gets.
+pub type SizedItemFn = Rc<dyn Fn(f32, &mut Window, &mut App) -> AnyElement>;
 
 /// One toolbar item.
 #[derive(Clone)]
@@ -72,17 +85,26 @@ pub struct ToolbarItem {
     /// Never leaves the row (Run/Stop, the lock, trust signals); it may still take its compact
     /// form, and only after every item that can move has moved.
     pub pinned: bool,
-    /// What choosing the menu row does when `action` is none. A row with neither is shown
-    /// disabled: it only keeps the collapsed text readable.
+    /// What choosing the menu row does when `action` is none. ## m3c-t41-chrome (F2 review
+    /// N3): a row with neither is not offered (no ⋯ menu of rows that cannot be chosen); the
+    /// item's compact form keeps its text as the tooltip and the accessible name.
     pub on_choose: Option<ChooseFn>,
     // ## m3a-f2-visual (named exception)
     /// The last stage: when the row still does not fit once every other item collapsed, this
     /// item's sentence wraps and the bar grows (the cursor strip, NOTES surface 11).
     pub wrap: Option<Wrap>,
     // ## m3b-t01b-seams
-    /// The narrowest form (R-M3-75): what a pinned trust item shows below the per-locale
-    /// minimum pane width. Stored only; Task 41 lays it out (until then the bar never reads it).
+    /// The narrowest form (R-M3-75): what the item shows below the width where every item fits
+    /// whole on a line (## m3c-t41-chrome: the narrow stage, see the module docs). It fills the
+    /// slot it is given.
     pub narrow: Option<ItemFn>,
+    // ## m3c-t41-chrome
+    /// The narrow form's sentence when it wraps inside the form (a chip's label): the bar
+    /// measures the lines it takes at the width the form gets.
+    pub narrow_text: Option<(SharedString, TypeStyle)>,
+    /// The narrow form built for the width its slot gets (a button whose word is wider than
+    /// the pane takes its icon); `narrow` is still its form at its natural width, measured.
+    pub narrow_sized: Option<SizedItemFn>,
 }
 
 // ## m3a-f2-visual (named exception): the toolbar's wrapping stage.
@@ -98,8 +120,9 @@ pub struct Wrap {
     pub element: ItemFn,
 }
 
-/// A wrapped bar's padding above and below its lines.
-pub const WRAP_PAD_PX: f32 = 4.0;
+/// A wrapped bar's padding above and below its lines (## m3c-t41-chrome, F2 review M9: named
+/// in `metrics`).
+pub use crate::metrics::WRAP_PAD_PX;
 
 impl ToolbarItem {
     pub fn new(priority: u8, element: ItemFn, overflow_label: TextFn) -> Self {
@@ -114,6 +137,8 @@ impl ToolbarItem {
             on_choose: None,
             wrap: None,
             narrow: None,
+            narrow_text: None,
+            narrow_sized: None,
         }
     }
 
@@ -158,10 +183,36 @@ impl ToolbarItem {
     }
 
     // ## m3b-t01b-seams
-    /// Gives this item its narrowest form (stored; Task 41 lays it out, R-M3-75).
+    /// Gives this item its narrowest form (R-M3-75; ## m3c-t41-chrome: the narrow stage).
     pub fn narrow(mut self, element: ItemFn) -> Self {
         self.narrow = Some(element);
         self
+    }
+
+    // ## m3c-t41-chrome
+    /// The narrow form's `text` wraps inside it in `style` (its `line_height` is the lines'
+    /// pitch); everything else the form draws keeps its natural size.
+    pub fn narrow_wraps(mut self, text: SharedString, style: TypeStyle) -> Self {
+        self.narrow_text = Some((text, style));
+        self
+    }
+
+    // ## m3c-t41-chrome
+    /// The narrow form, built for the width its slot gets (see [`SizedItemFn`]); `element`
+    /// builds it at its natural width (`f32::INFINITY`), which the bar measures.
+    pub fn narrow_sized(mut self, element: SizedItemFn) -> Self {
+        let natural = element.clone();
+        self.narrow = Some(Rc::new(move |window, cx| {
+            natural(f32::INFINITY, window, cx)
+        }));
+        self.narrow_sized = Some(element);
+        self
+    }
+
+    // ## m3c-t41-chrome (F2 review N3)
+    /// Whether its menu row can be chosen.
+    fn choosable(&self) -> bool {
+        self.action.is_some() || self.on_choose.is_some()
     }
 }
 
@@ -220,6 +271,18 @@ pub fn fit(items: &[(f32, u8)], available: f32) -> Fit {
 /// The Overflow Rule: collapses candidates lowest priority first until the row, with `gap`
 /// between its children and the overflow `button` once the menu has a row, fits `available`.
 pub fn stage_fit(items: &[FitItem], available: f32, gap: f32, button: f32) -> Staged {
+    stage_fit_with(items, &vec![true; items.len()], available, gap, button)
+}
+
+// ## m3c-t41-chrome (F2 review N3): the button counts only while a row in the menu can be
+// chosen (`choosable[i]`); no button is drawn otherwise (M7).
+fn stage_fit_with(
+    items: &[FitItem],
+    choosable: &[bool],
+    available: f32,
+    gap: f32,
+    button: f32,
+) -> Staged {
     #[derive(Clone, Copy, PartialEq)]
     enum Stage {
         Full,
@@ -241,7 +304,7 @@ pub fn stage_fit(items: &[FitItem], available: f32, gap: f32, button: f32) -> St
             }
             children += 1;
         }
-        if (0..items.len()).any(|i| in_menu(stage, i)) {
+        if (0..items.len()).any(|i| in_menu(stage, i) && choosable[i]) {
             sum += button;
             children += 1;
         }
@@ -294,6 +357,9 @@ pub struct ToolbarProbe {
     pub staged: Option<Staged>,
     /// The width the row had.
     pub available: f32,
+    // ## m3c-t41-chrome
+    /// The bar took the narrow stage (R-M3-75).
+    pub narrow: bool,
 }
 
 impl Global for ToolbarProbe {}
@@ -570,6 +636,17 @@ fn spacer(gap: f32) -> Div {
 /// Half a pixel of slack: a row that fits within it does not wrap.
 const WRAP_SLACK_PX: f32 = 0.5;
 
+/// What [`measure_items`] measured: the fit's inputs, the full widths (for the probe), and
+/// (## m3c-t41-chrome) every form's natural height and the narrow forms' natural sizes.
+struct Measured {
+    items: Vec<FitItem>,
+    full: Vec<f32>,
+    /// The full and the compact form's height.
+    heights: Vec<(f32, Option<f32>)>,
+    /// The narrow form's natural width and height.
+    narrow: Vec<Option<(f32, f32)>>,
+}
+
 /// Every item's form at its natural width, through the same slot as the paint pass (`height`:
 /// the row's height when known); also the full widths, for the probe.
 fn measure_items(
@@ -577,39 +654,52 @@ fn measure_items(
     height: AvailableSpace,
     window: &mut Window,
     cx: &mut App,
-) -> (Vec<FitItem>, Vec<f32>) {
+) -> Measured {
     let id = toolbar.id.clone();
-    let space = size(AvailableSpace::MaxContent, height);
     let measure = |build: &ItemFn,
                    index: usize,
                    compact: Option<SharedString>,
+                   height: AvailableSpace,
                    window: &mut Window,
                    cx: &mut App| {
         let mut s = slot(&id, index, build(window, cx), compact);
-        f32::from(s.layout_as_root(space, window, cx).width)
+        let size = s.layout_as_root(size(AvailableSpace::MaxContent, height), window, cx);
+        (f32::from(size.width), f32::from(size.height))
     };
     let all = toolbar.items.iter().chain(toolbar.trailing.iter());
-    let mut fit_items = Vec::new();
-    let mut measured = Vec::new();
+    let mut out = Measured {
+        items: Vec::new(),
+        full: Vec::new(),
+        heights: Vec::new(),
+        narrow: Vec::new(),
+    };
     for (i, item) in all.enumerate() {
-        let full = measure(&item.element, i, None, window, cx);
+        let (full, full_h) = measure(&item.element, i, None, height, window, cx);
         let compact = match &item.compact {
             Some(f) => {
                 let label = (item.overflow_label)(cx);
-                Some(measure(f, i, Some(label), window, cx))
+                Some(measure(f, i, Some(label), height, window, cx))
             }
             None => None,
         };
-        measured.push(full);
-        fit_items.push(FitItem {
+        // ## m3c-t41-chrome: the narrow form at its natural size (its height too: it may be
+        // taller than the bar, two lines of a waiting sentence).
+        let narrow = item
+            .narrow
+            .as_ref()
+            .map(|f| measure(f, i, None, AvailableSpace::MaxContent, window, cx));
+        out.full.push(full);
+        out.heights.push((full_h, compact.map(|(_, h)| h)));
+        out.narrow.push(narrow);
+        out.items.push(FitItem {
             width: full,
             priority: item.priority,
-            compact,
+            compact: compact.map(|(w, _)| w),
             movable: !item.pinned,
             compact_in_menu: item.compact_in_menu,
         });
     }
-    (fit_items, measured)
+    out
 }
 
 /// Item `i`'s width in `staged`'s form.
@@ -624,6 +714,17 @@ fn own_width(items: &[FitItem], staged: &Staged, i: usize) -> f32 {
 /// The width the row takes in `staged`'s forms, with `gap` between its children and the
 /// overflow `button` once the menu has a row (what [`stage_fit`] compares to the room).
 pub fn staged_width(items: &[FitItem], staged: &Staged, gap: f32, button: f32) -> f32 {
+    staged_width_with(items, &vec![true; items.len()], staged, gap, button)
+}
+
+// ## m3c-t41-chrome (F2 review N3): the button counts only for a row that can be chosen.
+fn staged_width_with(
+    items: &[FitItem],
+    choosable: &[bool],
+    staged: &Staged,
+    gap: f32,
+    button: f32,
+) -> f32 {
     let mut sum: f32 = staged
         .fit
         .shown
@@ -631,7 +732,7 @@ pub fn staged_width(items: &[FitItem], staged: &Staged, gap: f32, button: f32) -
         .map(|&i| own_width(items, staged, i))
         .sum();
     let mut children = staged.fit.shown.len();
-    if !staged.menu.is_empty() {
+    if staged.menu.iter().any(|&i| choosable[i]) {
         sum += button;
         children += 1;
     }
@@ -648,6 +749,22 @@ fn text_run(text: &SharedString, style: &TypeStyle) -> TextRun {
         underline: None,
         strikethrough: None,
     }
+}
+
+/// The height of `text`'s lines in `style`, wrapped at `width` px (`None`: its own lines).
+fn text_height(text: &SharedString, style: &TypeStyle, width: Option<f32>, window: &Window) -> f32 {
+    let pitch = px(style.line_height);
+    window
+        .text_system()
+        .shape_text(
+            text.clone(),
+            px(style.size_px),
+            &[text_run(text, style)],
+            width.map(|w| px(w.max(1.0))),
+            None,
+        )
+        .map(|lines| lines.iter().map(|l| f32::from(l.size(pitch).height)).sum())
+        .unwrap_or(style.line_height)
 }
 
 /// The least room a wrapping sentence keeps before a row-wrapping bar puts its items on
@@ -668,6 +785,19 @@ enum Plan {
     /// [`BUTTON_SLOT`]) with their widths. An item wider than the bar gets the bar's width;
     /// the wrapping item then wraps its sentence in it.
     Lines(Vec<Vec<(usize, f32)>>),
+    // ## m3c-t41-chrome
+    /// The narrow stage (R-M3-75): the lines of a bar whose items take their narrow forms, at
+    /// the narrow anatomy's width and gaps.
+    Narrow(Vec<Vec<(usize, f32)>>),
+}
+
+// ## m3c-t41-chrome
+/// A narrow form's natural size, and its wrapping sentence's natural width and height.
+#[derive(Clone)]
+struct NarrowForm {
+    width: f32,
+    height: f32,
+    text: Option<(f32, f32, SharedString, TypeStyle)>,
 }
 
 /// The measured inputs of a bar's last stages, shared by `request_layout` and `prepaint`.
@@ -680,15 +810,38 @@ struct Measure {
     wrap_row: bool,
     gap: f32,
     bar: f32,
+    // ## m3c-t41-chrome
+    /// Each item's full and compact height.
+    heights: Vec<(f32, Option<f32>)>,
+    narrow: Vec<Option<NarrowForm>>,
+    /// Whether each item's menu row can be chosen (F2 review N3).
+    choosable: Vec<bool>,
+    /// What a narrow bar gains on its left and right: its padding is `spacing.md`.
+    narrow_left: f32,
+    narrow_right: f32,
+    /// The narrow anatomy: between items, between lines, above and below.
+    narrow_gap: f32,
+    narrow_line_gap: f32,
+    narrow_pad: f32,
 }
 
 impl Measure {
-    fn of(toolbar: &Toolbar, items: Vec<FitItem>, window: &mut Window, cx: &App) -> Measure {
+    fn of(toolbar: &Toolbar, measured: Measured, window: &mut Window, cx: &App) -> Measure {
         let theme = *Theme::get(cx);
-        let wrap = toolbar
+        let sp = theme.tokens.spacing;
+        let Measured {
+            items,
+            heights,
+            narrow,
+            ..
+        } = measured;
+        let all: Vec<&ToolbarItem> = toolbar
             .items
             .iter()
             .chain(toolbar.trailing.iter())
+            .collect();
+        let wrap = all
+            .iter()
             .enumerate()
             .find_map(|(i, item)| item.wrap.clone().map(|w| (i, w)))
             .map(|(i, wrap)| {
@@ -707,26 +860,104 @@ impl Measure {
                 let form = items[i].compact.unwrap_or(items[i].width);
                 (i, (form - text).max(0.0), wrap)
             });
+        // ## m3c-t41-chrome: the narrow forms, with their sentence's own size.
+        let narrow = narrow
+            .into_iter()
+            .zip(all.iter())
+            .map(|(size, item)| {
+                let (width, height) = size?;
+                let text = item.narrow_text.as_ref().map(|(text, style)| {
+                    // Its widest line (a sentence may hold a line break: two lines).
+                    let w = text
+                        .split('\n')
+                        .map(|line| {
+                            let line = SharedString::from(line.to_string());
+                            f32::from(
+                                window
+                                    .text_system()
+                                    .shape_line(
+                                        line.clone(),
+                                        px(style.size_px),
+                                        &[text_run(&line, style)],
+                                        None,
+                                    )
+                                    .width,
+                            )
+                        })
+                        .fold(0.0_f32, f32::max);
+                    let h = text_height(text, style, None, window);
+                    (w, h, text.clone(), *style)
+                });
+                Some(NarrowForm {
+                    width,
+                    height,
+                    text,
+                })
+            })
+            .collect();
         Measure {
             items,
             wrap,
             wrap_row: toolbar.wrap_row,
-            gap: theme.tokens.spacing.md,
-            bar: toolbar
-                .height
-                .unwrap_or(theme.tokens.spacing.result_toolbar_height),
+            gap: sp.md,
+            bar: toolbar.height.unwrap_or(sp.result_toolbar_height),
+            heights,
+            narrow,
+            choosable: all.iter().map(|i| i.choosable()).collect(),
+            narrow_left: (sp.xl - sp.md).max(0.0),
+            narrow_right: (sp.lg - sp.md).max(0.0),
+            narrow_gap: sp.sm,
+            narrow_line_gap: sp.xs,
+            narrow_pad: sp.xs,
         }
     }
 
     fn staged(&self, width: f32) -> Staged {
-        stage_fit(&self.items, width, self.gap, OVERFLOW_BUTTON_PX)
+        stage_fit_with(
+            &self.items,
+            &self.choosable,
+            width,
+            self.gap,
+            OVERFLOW_BUTTON_PX,
+        )
+    }
+
+    /// Whether `staged`'s menu has a row that can be chosen (its button is drawn).
+    fn has_button(&self, staged: &Staged) -> bool {
+        staged.menu.iter().any(|&i| self.choosable[i])
+    }
+
+    /// `seq`'s items on lines of `width` px with `gap` between them.
+    fn pack(seq: Vec<(usize, f32)>, width: f32, gap: f32) -> Vec<Vec<(usize, f32)>> {
+        let mut lines: Vec<Vec<(usize, f32)>> = Vec::new();
+        let mut used = 0.0;
+        for (i, w) in seq {
+            match lines.last_mut() {
+                Some(line) if used + gap + w <= width + WRAP_SLACK_PX => {
+                    line.push((i, w));
+                    used += gap + w;
+                }
+                _ => {
+                    lines.push(vec![(i, w)]);
+                    used = w;
+                }
+            }
+        }
+        lines
     }
 
     /// The last stages at `width`, once `staged`: the wrapping item's sentence wraps while it
     /// keeps [`MIN_WRAP_TEXT_PX`] (at any room, in a bar that cannot wrap its row); then a
-    /// row-wrapping bar puts its items on lines, so no item is cut by the bar's edge.
+    /// row-wrapping bar puts its items on lines, so no item is cut by the bar's edge; then
+    /// (## m3c-t41-chrome) the narrow stage, once an item no longer fits whole on a line.
     fn plan(&self, staged: &Staged, width: f32) -> Plan {
-        let total = staged_width(&self.items, staged, self.gap, OVERFLOW_BUTTON_PX);
+        let total = staged_width_with(
+            &self.items,
+            &self.choosable,
+            staged,
+            self.gap,
+            OVERFLOW_BUTTON_PX,
+        );
         if total <= width + WRAP_SLACK_PX {
             return Plan::Fits;
         }
@@ -747,24 +978,78 @@ impl Measure {
             .iter()
             .map(|&i| (i, own_width(&self.items, staged, i).min(width)))
             .collect();
-        if !staged.menu.is_empty() {
+        if self.has_button(staged) {
             seq.push((BUTTON_SLOT, OVERFLOW_BUTTON_PX));
         }
-        let mut lines: Vec<Vec<(usize, f32)>> = Vec::new();
-        let mut used = 0.0;
-        for (i, w) in seq {
-            match lines.last_mut() {
-                Some(line) if used + self.gap + w <= width + WRAP_SLACK_PX => {
-                    line.push((i, w));
-                    used += self.gap + w;
-                }
-                _ => {
-                    lines.push(vec![(i, w)]);
-                    used = w;
-                }
-            }
+        let lines = Self::pack(seq, width, self.gap);
+        // ## m3c-t41-chrome: an item cut by the bar's edge (a wrapping sentence left less than
+        // its least room) sends the bar to the narrow stage, when it has narrow forms.
+        let cut = |&(i, w): &(usize, f32)| {
+            i != BUTTON_SLOT
+                && w + WRAP_SLACK_PX < own_width(&self.items, staged, i)
+                && !self
+                    .wrap
+                    .as_ref()
+                    .is_some_and(|(wi, overhead, _)| *wi == i && w - overhead >= MIN_WRAP_TEXT_PX)
+        };
+        if self.narrow.iter().any(Option::is_some) && lines.iter().flatten().any(cut) {
+            return Plan::Narrow(self.narrow_lines(staged, width));
         }
         Plan::Lines(lines)
+    }
+
+    // ## m3c-t41-chrome
+    /// The narrow stage's lines: each item in its narrow form (else its staged one), at most
+    /// as wide as the narrow bar's row.
+    fn narrow_lines(&self, staged: &Staged, width: f32) -> Vec<Vec<(usize, f32)>> {
+        let room = self.narrow_width(width);
+        let mut seq: Vec<(usize, f32)> = staged
+            .fit
+            .shown
+            .iter()
+            .map(|&i| {
+                let form = match &self.narrow[i] {
+                    Some(n) => n.width,
+                    None => own_width(&self.items, staged, i),
+                };
+                (i, form.min(room))
+            })
+            .collect();
+        if self.has_button(staged) {
+            seq.push((BUTTON_SLOT, OVERFLOW_BUTTON_PX));
+        }
+        Self::pack(seq, room, self.narrow_gap)
+    }
+
+    /// The narrow row's width in a bar whose row is `width` px.
+    fn narrow_width(&self, width: f32) -> f32 {
+        width + self.narrow_left + self.narrow_right
+    }
+
+    /// Item `i`'s height in the narrow stage at `width` px: its narrow form's (its sentence
+    /// wrapped in the room the rest of the form leaves), else its staged form's.
+    fn narrow_height(&self, staged: &Staged, i: usize, width: f32, window: &mut Window) -> f32 {
+        if i == BUTTON_SLOT {
+            return OVERFLOW_BUTTON_PX;
+        }
+        if let Some(n) = &self.narrow[i] {
+            return match &n.text {
+                Some((text_w, text_h, text, style)) if width + WRAP_SLACK_PX < n.width => {
+                    let room = width - (n.width - text_w) - WRAP_SLACK_PX;
+                    n.height - text_h + text_height(text, style, Some(room), window)
+                }
+                _ => n.height,
+            };
+        }
+        if self.squeezed(staged, i, width) {
+            return self.wrapped(width, window) - 2.0 * WRAP_PAD_PX;
+        }
+        let (full, compact) = self.heights[i];
+        if staged.compact.contains(&i) {
+            compact.unwrap_or(full)
+        } else {
+            full
+        }
     }
 
     /// The height of the wrapping item's sentence in `room` px of slot, with its padding.
@@ -774,18 +1059,7 @@ impl Measure {
         };
         // Half a pixel narrower than the paragraph gets: never fewer lines than it paints.
         let text = (room - overhead - WRAP_SLACK_PX).max(1.0);
-        let pitch = px(wrap.style.line_height);
-        let lines: f32 = window
-            .text_system()
-            .shape_text(
-                wrap.text.clone(),
-                px(wrap.style.size_px),
-                &[text_run(&wrap.text, &wrap.style)],
-                Some(px(text)),
-                None,
-            )
-            .map(|lines| lines.iter().map(|l| f32::from(l.size(pitch).height)).sum())
-            .unwrap_or(wrap.style.line_height);
+        let lines = text_height(&wrap.text, &wrap.style, Some(text), window);
         (lines + 2.0 * WRAP_PAD_PX).max(self.bar)
     }
 
@@ -795,7 +1069,8 @@ impl Measure {
             && width + WRAP_SLACK_PX < own_width(&self.items, staged, i)
     }
 
-    /// Each line's height in `plan`: the bar's, or the wrapped sentence's when taller.
+    /// Each line's height in `plan`: the bar's, or the wrapped sentence's when taller; in the
+    /// narrow stage, its tallest item's.
     fn line_heights(&self, plan: &Plan, staged: &Staged, window: &mut Window) -> Vec<f32> {
         match plan {
             Plan::Fits => vec![self.bar],
@@ -812,6 +1087,29 @@ impl Measure {
                     })
                 })
                 .collect(),
+            // ## m3c-t41-chrome
+            Plan::Narrow(lines) => lines
+                .iter()
+                .map(|line| {
+                    line.iter().fold(0.0_f32, |h, &(i, w)| {
+                        h.max(self.narrow_height(staged, i, w, window))
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    /// The bar's height in `plan`.
+    fn height(&self, plan: &Plan, staged: &Staged, window: &mut Window) -> f32 {
+        let lines = self.line_heights(plan, staged, window);
+        match plan {
+            // ## m3c-t41-chrome: the narrow anatomy's padding and line gaps, at least the bar.
+            Plan::Narrow(_) => {
+                let sum: f32 = lines.iter().sum();
+                let gaps = self.narrow_line_gap * lines.len().saturating_sub(1) as f32;
+                (sum + gaps + 2.0 * self.narrow_pad).max(self.bar)
+            }
+            _ => lines.iter().sum(),
         }
     }
 }
@@ -835,10 +1133,11 @@ fn wrap_measure(
     if !toolbar.measured() {
         return None;
     }
-    let (items, _) = measure_items(toolbar, AvailableSpace::MaxContent, window, cx);
-    let m = Measure::of(toolbar, items, window, cx);
-    let natural = staged_width(
+    let measured = measure_items(toolbar, AvailableSpace::MaxContent, window, cx);
+    let m = Measure::of(toolbar, measured, window, cx);
+    let natural = staged_width_with(
         &m.items,
+        &m.choosable,
         &m.staged(f32::INFINITY),
         m.gap,
         OVERFLOW_BUTTON_PX,
@@ -856,7 +1155,7 @@ fn wrap_measure(
                 Some(w) => {
                     let staged = m.staged(f32::from(w));
                     let plan = m.plan(&staged, f32::from(w));
-                    let h: f32 = m.line_heights(&plan, &staged, window).iter().sum();
+                    let h = m.height(&plan, &staged, window);
                     size(w, px(h))
                 }
                 None => size(px(natural), px(m.bar)),
@@ -936,24 +1235,18 @@ impl Element for Row {
         // Pass one: every form at its natural width, through the same slot as the paint pass.
         // ## m3a-f2-visual (named exception): the measuring moved into `measure_items`, which
         // a wrapping bar's `request_layout` shares.
-        let (fit_items, measured) = measure_items(
+        let measured = measure_items(
             &toolbar,
             AvailableSpace::Definite(bounds.size.height),
             window,
             cx,
         );
-        let staged = stage_fit(
-            &fit_items,
-            f32::from(bounds.size.width),
-            gap,
-            OVERFLOW_BUTTON_PX,
-        );
-        if cx.has_global::<ToolbarProbe>() {
-            let probe = cx.global_mut::<ToolbarProbe>();
-            probe.measured = measured;
-            probe.staged = Some(staged.clone());
-            probe.available = f32::from(bounds.size.width);
-        }
+        let full = measured.full.clone();
+        // ## m3c-t41-chrome (F2 review N3): the fit counts the ⋯ button only for a row that
+        // can be chosen.
+        let width = f32::from(bounds.size.width);
+        let m = Measure::of(&toolbar, measured, window, cx);
+        let staged = m.staged(width);
 
         // The menu's rows for the overflow button.
         let entries: Vec<MenuEntry> = staged
@@ -975,13 +1268,79 @@ impl Element for Row {
         // ## m3a-f2-visual (named exception): the last stages: the wrapping item's sentence
         // wraps (its slot takes the room the others leave), then a row-wrapping bar puts its
         // items on lines.
-        let width = f32::from(bounds.size.width);
-        let m = Measure::of(&toolbar, fit_items, window, cx);
         let plan = if m.wrap.is_some() || m.wrap_row {
             m.plan(&staged, width)
         } else {
             Plan::Fits
         };
+        if cx.has_global::<ToolbarProbe>() {
+            let probe = cx.global_mut::<ToolbarProbe>();
+            probe.measured = full;
+            probe.staged = Some(staged.clone());
+            probe.available = width;
+            // ## m3c-t41-chrome
+            probe.narrow = matches!(plan, Plan::Narrow(_));
+        }
+        // ## m3c-t41-chrome (R-M3-75): the narrow stage. The lines sit on the narrow anatomy:
+        // the row reaches into the bar's own padding so 8 px (`spacing.md`) are left on each
+        // side, 4 px above, below and between lines; each item takes its narrow form.
+        if let Plan::Narrow(lines) = &plan {
+            let heights = m.line_heights(&plan, &staged, window);
+            let row_width = px(m.narrow_width(width));
+            let mut column = div()
+                .flex()
+                .flex_col()
+                .w(row_width)
+                .py(px(m.narrow_pad))
+                .gap(px(m.narrow_line_gap));
+            for (line, h) in lines.iter().zip(heights) {
+                let mut row = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(m.narrow_gap))
+                    .h(px(h));
+                for &(i, w) in line {
+                    if i == BUTTON_SLOT {
+                        if has_menu {
+                            row = row.child(overflow_button(&id, state, window, cx));
+                        }
+                        continue;
+                    }
+                    let item = all[i];
+                    let compact = staged.compact.contains(&i);
+                    let (element, tip) = match (&item.narrow, &item.wrap) {
+                        (Some(_), _) if item.narrow_sized.is_some() => {
+                            let sized = item.narrow_sized.as_ref().expect("checked");
+                            (sized(w, window, cx), None)
+                        }
+                        (Some(narrow), _) => (narrow(window, cx), None),
+                        (None, Some(wrap)) if m.squeezed(&staged, i, w) => (
+                            (wrap.element)(window, cx),
+                            compact.then(|| (item.overflow_label)(cx)),
+                        ),
+                        _ if compact => {
+                            let form = item.compact.as_ref().expect("a compact item has its form");
+                            (form(window, cx), Some((item.overflow_label)(cx)))
+                        }
+                        _ => ((item.element)(window, cx), None),
+                    };
+                    row = row.child(slot_sized(&id, i, element, tip, Some(w)));
+                }
+                column = column.child(row);
+            }
+            let mut column = column.into_any_element();
+            column.prepaint_as_root(
+                point(bounds.origin.x - px(m.narrow_left), bounds.origin.y),
+                size(
+                    AvailableSpace::Definite(row_width),
+                    AvailableSpace::Definite(bounds.size.height),
+                ),
+                window,
+                cx,
+            );
+            return Some(RowPrepaint { row: column });
+        }
         if let Plan::Lines(lines) = &plan {
             let heights = m.line_heights(&plan, &staged, window);
             let mut column = div().flex().flex_col().w(bounds.size.width);
