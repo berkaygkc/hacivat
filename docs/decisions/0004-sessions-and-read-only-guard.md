@@ -2637,6 +2637,13 @@ transaction after it (Task 19); the session itself runs no production policy.
 - **`EXPLAIN` (B-M2, B-M6).** A production PostgreSQL `EXPLAIN ANALYZE` of any inner that is not
   a read asks first, with the rollback note; a plain `EXPLAIN <dml>` (no `ANALYZE`) is a read
   (no Keep/Undo), decided in the gate (the classifier's own verdict is unchanged).
+  Since `m3b-gate-explain` (fenced `// ## m3b-gate-explain`) the read is decided after the
+  production AND-check and D-062, never before them, and only for a plan of code-free statements: a `ROUTINE_CALL` bit (statement or
+  request), a touched call, a destructive pattern, any `ANALYZE` evidence (kind, flag or
+  reason) or a policy that does not simply allow it under `Admin` (a routine reason, session
+  effects) keeps the class, so production asks. Planning runs code: PostgreSQL pre-evaluates
+  IMMUTABLE functions with constant arguments while planning, and MySQL through 8.0.21 ran a
+  stored function in a derived table under a plain `EXPLAIN` (MySQL bug #31468).
 - **The plan-less run (A-M2, A-M3).** `ExecService` refuses a request with neither prepared
   units nor a plan unless built `with_plan_less_runs` (a test seam); the app opts in only in a
   `test-support` build, and `prod_unlock` checks that.
