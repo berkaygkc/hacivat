@@ -17,6 +17,9 @@
 //!   pointer is over the gutter, a folded header always. A click toggles. Its tooltip names
 //!   the lines ("Fold lines 2–7"). Keyboard focus on the chevrons and their AccessKit buttons
 //!   are Task 34's (gutter focus).
+//!   ## m3c-t34-editor: in "Tab moves focus" mode every chevron of the painted rows is a tab
+//!   stop (a 1 px blue ring when focused; Enter or Space toggles), and each is an AccessKit
+//!   button named for what it does, expanded while open.
 //! - **The folded header** keeps its text; after it, 8 px on, the inlay "⋯ n lines" (the
 //!   `inlay` type style, `text_2`, on `seam_soft`, light `seam`, radius 3, 14 px high, 5 px
 //!   padding; a click unfolds; its tooltip "Lines 2–7 are folded. Click to unfold."), and a
@@ -36,12 +39,14 @@ use hacivat_text::{Committed, FoldRange, FoldSet, SelectionRange, SelectionSet, 
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::l10n::UiArg;
 use hacivat_ui::popover::Tip;
+// ## m3c-t34-editor (named exception): the chevrons are AccessKit buttons.
+use hacivat_ui::popover::{A11yDecl, Declare as _};
 use hacivat_ui::text::{Label, TextSource};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, CursorStyle, Entity, Hitbox,
-    HitboxBehavior, InteractiveElement as _, IntoElement, MouseButton, MouseMoveEvent,
-    ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, fill, point, px, size,
+    AnyElement, App, AvailableSpace, Bounds, ClickEvent, ContentMask, Context, CursorStyle, Entity,
+    Hitbox, HitboxBehavior, InteractiveElement as _, IntoElement, MouseButton, MouseMoveEvent,
+    ParentElement as _, Pixels, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Window, div, fill, point, px, size,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 
@@ -470,6 +475,13 @@ pub(crate) fn prepaint(
     let hovered = v.fold.gutter_hovered;
     let hover_line = v.fold.hover_line;
     let hover_inlay = v.fold.hover_inlay;
+    // ## m3c-t34-editor (named exception): gutter focus (NOTES 15 and 17, controller ruling 3).
+    // A focused gutter button shows the open chevrons as the pointer does; in "Tab moves focus"
+    // mode every chevron of the painted rows is a tab stop (hidden until shown) and an
+    // AccessKit button, Enter or Space toggling it.
+    let tab = v.commands.tab_moves_focus;
+    let show_open = hovered || crate::gutter::focused_button(v, window).is_some();
+    let mut painted: Vec<crate::gutter::GutterButton> = Vec::new();
     let chevron_x = gutter.right() - px(NUMBER_PAD) + px(1.0);
     let mut widths: Vec<(u32, f32)> = Vec::new();
     for (line, top, fold) in rows {
@@ -479,9 +491,12 @@ pub(crate) fn prepaint(
             .map(|i| headers[i].1);
         let (name, tip_id, last) = match (fold, open) {
             (Some((last, _)), _) => (IconName::ChevronRight, "hv-editor-unfold-name", last),
-            (None, Some(last)) if hovered => (IconName::ChevronDown, "hv-editor-fold-name", last),
+            (None, Some(last)) if show_open || tab => {
+                (IconName::ChevronDown, "hv-editor-fold-name", last)
+            }
             (None, _) => continue,
         };
+        let shown = fold.is_some() || show_open;
         let color = if hover_line == Some(line) {
             inks.text
         } else {
@@ -489,6 +504,7 @@ pub(crate) fn prepaint(
         };
         let tip: SharedString = message(cx, tip_id, &line_args(line, last));
         let target = view.clone();
+        let keyed = view.clone();
         let mut el = div()
             .id(("hv-fold-chevron", u64::from(line)))
             .w(px(CHEVRON_W))
@@ -497,14 +513,38 @@ pub(crate) fn prepaint(
             .items_center()
             .justify_center()
             .cursor(CursorStyle::PointingHand)
-            .child(Icon::new(name).size(IconSize::Chrome).color(color))
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 target.update(cx, |v, cx| {
                     toggle_fold_at(v, line, cx);
                 });
                 cx.stop_propagation();
             })
-            .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+            // ## m3c-t34-editor: Enter, Space or an assistive technology's click (the mouse's
+            // press toggles above).
+            .on_click(move |ev, _, cx| {
+                if matches!(ev, ClickEvent::Keyboard(_)) {
+                    keyed.update(cx, |v, cx| {
+                        toggle_fold_at(v, line, cx);
+                    });
+                }
+            });
+        if shown {
+            el = el
+                .child(Icon::new(name).size(IconSize::Chrome).color(color))
+                .tooltip(move |_, cx| Tip::view(tip.clone(), cx));
+        }
+        if tab {
+            let button = crate::gutter::GutterButton::Fold(line);
+            let handle = crate::gutter::handle_of(v, button, cx);
+            if handle.is_focused(window) {
+                el = el.border_1().border_color(inks.blue);
+            }
+            el = el.track_focus(&handle);
+            painted.push(button);
+        }
+        let name = message(cx, tip_id, &line_args(line, last));
+        let mut el = el
+            .declare_full(A11yDecl::new(Role::Button, name).expanded(fold.is_none()))
             .into_any_element();
         el.prepaint_as_root(
             point(chevron_x, top),
@@ -592,6 +632,8 @@ pub(crate) fn prepaint(
             }
         }
     }
+    // ## m3c-t34-editor (named exception)
+    crate::gutter::prune_folds(v, &painted, window);
     out
 }
 

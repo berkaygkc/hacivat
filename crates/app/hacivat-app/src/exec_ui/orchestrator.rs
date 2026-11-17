@@ -83,6 +83,12 @@ pub fn attach(console: ConsoleId, editor: &Entity<EditorView>, window: &mut Wind
         },
     )
     .detach();
+    // ## m3c-t34-editor (named exception): the gutter ▶ shows only while Run would be enabled
+    // (NOTES M3c-15), and its click comes back as this Run request.
+    let gate: hacivat_ui_editor::gutter::RunGate = std::rc::Rc::new(move |cx: &App| {
+        crate::console::commands::run_would_be_enabled(console, cx)
+    });
+    editor.update(cx, |e, cx| e.set_gutter_run(Some(gate), cx));
     follow_session(console, cx);
     set_display(console, cx);
 }
@@ -2199,11 +2205,12 @@ fn mark_awaiting(console: ConsoleId, unit: UnitId, savepoint: bool, cx: &mut App
     };
     let label: hacivat_ui::text::TextFn =
         std::rc::Rc::new(move |cx: &App| marks::message(cx, id, Vec::new()));
-    let since = cx.background_executor().now();
     editor.update(cx, |e, cx| {
+        // ## m3c-t34-editor (named exception; T32 ruling 5): its own state, the amber stamp,
+        // which the fold header ranks first and the gutter ▶ never covers.
         e.set_exec_state(
             key,
-            ExecMarkState::Running { started: since },
+            ExecMarkState::Awaiting,
             Some(label.clone()),
             Some(label),
             cx,

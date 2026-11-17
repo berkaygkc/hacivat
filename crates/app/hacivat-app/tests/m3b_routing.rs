@@ -218,6 +218,13 @@ const DATAGRIP: &[(&str, &str, KeymapPlatform, &str)] = &[
         KeymapPlatform::Linux,
         "ctrl-alt-shift-j",
     ),
+    // ## m3c-t34-editor (named exception): DataGrip's Delete line on macOS.
+    (
+        "editor.delete_line",
+        "Editor",
+        KeymapPlatform::MacOs,
+        "cmd-backspace",
+    ),
     // ## m3c-t35 (named exception): DataGrip's grid Extend / Shrink selection.
     (
         "grid.grow_selection",
@@ -303,15 +310,13 @@ fn every_m3b_command_id_is_registered_and_bound_as_listed(cx: &mut TestAppContex
     // Fix round 2 (I1, I2): datagrip binds neither Delete line nor grid grow/shrink before
     // Tasks 34 and 35. ## m3c-t35 (named exception): Task 35 binds grid grow/shrink on Windows
     // and Linux (the `DATAGRIP` rows above); macOS keeps the default's chords.
+    // ## m3c-t34-editor (named exception): Task 34 binds Delete line on macOS (the `DATAGRIP`
+    // row above); Windows and Linux keep the default's ctrl-y, DataGrip's own.
     for (id, context, platforms) in [
         (
             "editor.delete_line",
             "Editor",
-            &[
-                KeymapPlatform::MacOs,
-                KeymapPlatform::Windows,
-                KeymapPlatform::Linux,
-            ][..],
+            &[KeymapPlatform::Windows, KeymapPlatform::Linux][..],
         ),
         ("grid.grow_selection", "Grid", &[KeymapPlatform::MacOs][..]),
         (
@@ -652,14 +657,16 @@ fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
     // ## m3c-t31-multi (named exception): Task 31's seven editor rows are commands now.
     // ## m3c-t32-fold (named exception): and Task 32's four folding rows.
     // ## m3c-t33-find (named exception): and Task 33's four find rows.
-    assert_eq!(stubs.len(), 8);
+    // ## m3c-t34-editor (named exception): and Task 34's eight line rows: no editor stub.
+    assert_eq!(stubs.len(), 0);
     stubs.extend(hacivat_ui_grid::commands::STUB_COMMANDS);
     // ## m3c-t35 (named exception): Task 35 filled five grid commands (grow/shrink, auto-fit,
     // freeze/unfreeze); four grid stubs remain.
     // ## m3c-t33 merge: 8 editor stubs (after T31, T32, T33) + 4 grid stubs.
     // ## m3c-t37 (named exception): Task 37 filled `grid.find` and `grid.goto_row`: 8 + 2.
-    // ## m3c-t38 (named exception): Task 38 filled `grid.open_value`: 8 + 1.
-    assert_eq!(stubs.len(), 9);
+    // ## m3c-t34 merge: 0 editor stubs (after T34) + 2 grid stubs (after T37).
+    // ## m3c-t38 (named exception): Task 38 filled `grid.open_value`: 0 + 1.
+    assert_eq!(stubs.len(), 1);
     // The app-registered stubs (disabled since Task 1b).
     // ## m3b-t27-history (named exception): `history.open` is no longer a stub; it is enabled
     // once the history store is open (`history_ui.rs` covers it).
@@ -742,14 +749,22 @@ fn resolve(
 
 /// Fix round 2 (I1): under datagrip on macOS, cmd-backspace in the editor still deletes to the
 /// line start (M3a), not the Delete line stub.
+/// ## m3c-t34-editor (named exception): Delete line is filled, so under datagrip cmd-backspace
+/// deletes the line (DataGrip's chord); the default preset keeps deleting to the line start.
 #[test]
-fn datagrip_cmd_backspace_still_deletes_to_line_start() {
+fn datagrip_cmd_backspace_deletes_the_line() {
+    let editor = vec!["Workspace", "Console", "Editor"];
     let got = resolve(
         KeymapPlatform::MacOs,
         "datagrip",
-        vec!["Workspace", "Console", "Editor"],
+        editor.clone(),
         "cmd-backspace",
     );
+    assert!(
+        matches!(&got, Resolution::Command(c) if c == "editor.delete_line"),
+        "{got:?}"
+    );
+    let got = resolve(KeymapPlatform::MacOs, "hacivat", editor, "cmd-backspace");
     assert!(
         matches!(&got, Resolution::Command(c) if c == "editor.delete_to_line_start"),
         "{got:?}"
@@ -826,4 +841,34 @@ fn every_icon_name_resolves_to_an_asset() {
         let bytes = asset_bytes(n.path()).unwrap_or_else(|| panic!("{n:?}: no asset"));
         assert!(bytes.starts_with(b"<svg"), "{n:?}");
     }
+}
+
+// ## m3c-t40 fix round 1 (m6, named exception): Tab and Shift+Tab leave the grid from any cell
+// (R-M3-69), so `grid.next_cell` / `grid.prev_cell` keep their keys (enabled) but are no
+// palette rows ("Grid: next cell" no longer says what they do).
+#[gpui::test]
+fn the_tab_grid_commands_are_enabled_but_not_in_the_palette(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections(cx, "en");
+    let (enabled, listed) = vcx.cx.read(|cx| {
+        let reg = cx.global::<ActionRegistry>();
+        let enabled: Vec<&'static str> = reg
+            .all()
+            .iter()
+            .filter(|d| (d.enabled)(cx))
+            .map(|d| d.id)
+            .collect();
+        let listed: Vec<&'static str> = hacivat_app::commands::palette::command_entries(cx)
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        (enabled, listed)
+    });
+    for id in ["grid.next_cell", "grid.prev_cell"] {
+        assert!(enabled.contains(&id), "{id} keeps its key");
+        assert!(!listed.contains(&id), "{id} is in the palette");
+    }
+    assert!(
+        listed.contains(&"grid.move_down"),
+        "the other grid commands stay"
+    );
 }

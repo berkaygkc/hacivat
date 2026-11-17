@@ -132,6 +132,9 @@ pub struct BandPlan {
     /// Run would open the chooser on these units, offering this many candidates (0: it would
     /// not, or this is the chooser's own hover).
     pub choices: u32,
+    // ## m3c-t34-editor (named exception)
+    /// Run sends the selection as one unit of this many statements (`ExecPreview::as_one`).
+    pub as_one: u32,
 }
 
 /// Called by the view after every commit, analysis and context change: restarts the 50 ms
@@ -306,6 +309,7 @@ pub fn plan(s: &BandState, snap: &Snapshot) -> Option<BandPlan> {
             units,
             from_override: true,
             choices: 0,
+            as_one: 0,
         });
     }
     let p = answer(s, snap)?;
@@ -323,6 +327,12 @@ pub fn plan(s: &BandState, snap: &Snapshot) -> Option<BandPlan> {
         from_override: false,
         choices: if p.state == PreviewState::AskPreselected {
             p.choices
+        } else {
+            0
+        },
+        // ## m3c-t34-editor (named exception)
+        as_one: if p.state == PreviewState::Units {
+            p.as_one
         } else {
             0
         },
@@ -395,6 +405,9 @@ pub enum PreviewHint {
     // ## m3a-t33-exec-ui (named exception)
     /// "2 choices", with the chevrons-up-down glyph: Run would open the chooser.
     Choices { n: u32 },
+    // ## m3c-t34-editor
+    /// "as one · 2 statements", with the layers glyph: Run sends the selection as one unit.
+    AsOne { n: u32 },
 }
 
 /// One rectangle of the band, in window coordinates.
@@ -498,6 +511,10 @@ pub(crate) fn layout(
             // ## m3a-t33-exec-ui (named exception): the chooser's count on the first unit.
             BandStyle::Run if ui == 0 && plan.choices > 1 => {
                 Some(PreviewHint::Choices { n: plan.choices })
+            }
+            // ## m3c-t34-editor (named exception): "as one · 2 statements" on its first line.
+            BandStyle::Run if ui == 0 && plan.as_one > 1 => {
+                Some(PreviewHint::AsOne { n: plan.as_one })
             }
             BandStyle::Run if multi => Some(PreviewHint::Unit { i: ui + 1, n }),
             BandStyle::Run => None,
@@ -659,6 +676,7 @@ mod tests {
                 ranges: smallvec![0..8],
                 state: PreviewState::Units,
                 choices: 0,
+                as_one: 0,
             })
         }
         fn token_oracle(&self, _: DocId) -> Rc<dyn TokenOracle> {
@@ -781,6 +799,7 @@ mod tests {
                 ranges: smallvec![0..11],
                 state: PreviewState::Units,
                 choices: 0,
+                as_one: 0,
             }),
             last_version: 4,
             asked_at: Some(ExecAt::Carets(smallvec![1])),

@@ -387,3 +387,26 @@ fn an_editor_view_gets_its_analysis_off_thread(cx: &mut TestAppContext) {
     assert_eq!(s.editor_split().statements().count(), 2);
     assert!(svc.analyses() > before);
 }
+
+// ## m3c-t34-editor (named exception, fix round 1 M9)
+/// The comment tokens follow the console's dialect: MySQL needs the space after `--`.
+#[gpui::test]
+fn comment_tokens_follow_the_dialect(cx: &mut TestAppContext) {
+    let d = Doc::open(cx, "SELECT 1;", None);
+    assert_eq!(
+        d.svc.comment_tokens(DOC),
+        hacivat_ui_editor::CommentTokens::SQL
+    );
+    let (my, my_flavor) = mysql();
+    cx.update(|cx| d.svc.set_sql_context(DOC, my, my_flavor, cx));
+    assert_eq!(
+        d.svc.comment_tokens(DOC),
+        hacivat_ui_editor::CommentTokens::MYSQL
+    );
+    let (p, f) = pg();
+    cx.update(|cx| d.svc.set_sql_context(DOC, p, f, cx));
+    assert_eq!(
+        d.svc.comment_tokens(DOC),
+        hacivat_ui_editor::CommentTokens::SQL
+    );
+}

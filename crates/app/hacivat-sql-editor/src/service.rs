@@ -597,6 +597,21 @@ impl LanguageService for SqlLanguageService {
         }
     }
 
+    // ## m3c-t34-editor (named exception, fix round 1 M9): MySQL and MariaDB need the space
+    // after `--`; every other dialect reads SQL's `--` and `/* */`.
+    fn comment_tokens(&self, doc: DocId) -> hacivat_ui_editor::CommentTokens {
+        let mysql = self
+            .docs
+            .borrow()
+            .get(&doc)
+            .is_some_and(|e| matches!(e.ctx.id, DialectId::MySql | DialectId::MariaDb));
+        if mysql {
+            hacivat_ui_editor::CommentTokens::MYSQL
+        } else {
+            hacivat_ui_editor::CommentTokens::SQL
+        }
+    }
+
     // ## m3c-t32-fold (named exception)
     fn folding_ranges(&self, doc: DocId, version: u64) -> Arc<[hacivat_text::FoldRange]> {
         match self.docs.borrow().get(&doc) {

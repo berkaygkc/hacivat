@@ -94,3 +94,15 @@ chord = "ctrl-shift-w"
 command = "grid.shrink_selection"
 context = "Grid"
 platforms = ["windows", "linux"]
+
+## m3b-t34-editor
+# Named exception (Task 34, as the Task 1b note above asks): DataGrip's Delete line on macOS,
+# cmd-backspace. Under this preset it replaces `editor.delete_to_line_start` on that chord in the
+# editor; the default preset keeps it. Windows and Linux keep the default's ctrl-y (DataGrip's
+# own). A cmd chord: no AltGr collision on any CI layout.
+
+[[binding]]
+chord = "cmd-backspace"
+command = "editor.delete_line"
+context = "Editor"
+platforms = ["macos"]

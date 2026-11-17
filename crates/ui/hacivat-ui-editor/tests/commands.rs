@@ -452,17 +452,15 @@ const SPECIAL: &[(&str, &str)] = &[
         "editor.find_close",
         "find_commands_ask_for_the_bar_and_step",
     ),
-    ("editor.toggle_comment", "m3b_stub_commands_change_nothing"),
-    ("editor.duplicate_line", "m3b_stub_commands_change_nothing"),
-    ("editor.delete_line", "m3b_stub_commands_change_nothing"),
-    ("editor.move_line_up", "m3b_stub_commands_change_nothing"),
-    ("editor.move_line_down", "m3b_stub_commands_change_nothing"),
-    (
-        "editor.normalize_line_endings",
-        "m3b_stub_commands_change_nothing",
-    ),
-    ("editor.history_prev", "m3b_stub_commands_change_nothing"),
-    ("editor.history_next", "m3b_stub_commands_change_nothing"),
+    // ## m3c-t34-editor (named exception): Task 34's rows (and `tests/lines.rs`).
+    ("editor.toggle_comment", "line_commands_edit_lines"),
+    ("editor.duplicate_line", "line_commands_edit_lines"),
+    ("editor.delete_line", "line_commands_edit_lines"),
+    ("editor.move_line_up", "line_commands_edit_lines"),
+    ("editor.move_line_down", "line_commands_edit_lines"),
+    ("editor.normalize_line_endings", "line_commands_edit_lines"),
+    ("editor.history_prev", "line_commands_edit_lines"),
+    ("editor.history_next", "line_commands_edit_lines"),
 ];
 
 fn untested_commands() -> Vec<&'static str> {
@@ -505,28 +503,23 @@ fn every_command_has_a_test(cx: &mut TestAppContext) {
 }
 
 // ## m3b-t01b-seams (named exception)
-/// The M3b commands are registered with stub bodies (Task 1b): each runs and changes neither the
-/// text nor the selection.
+// ## m3c-t34-editor (named exception): the stubs' test became the line commands' (Task 34
+// filled the last stubs); `tests/lines.rs` tests them in depth.
+/// The line commands edit the caret's line; recall at the last line of an empty editor only asks
+/// the host; normalising uniform endings changes nothing.
 #[gpui::test]
-fn m3b_stub_commands_change_nothing(cx: &mut TestAppContext) {
-    // ## m3c-t31-multi (named exception): Task 31's rows moved to `multi_cursor_commands`.
-    // ## m3c-t32-fold (named exception): Task 32's to `fold_commands_never_edit_the_text`.
-    // ## m3c-t33-find (named exception): Task 33's to `find_commands_ask_for_the_bar_and_step`.
-    for id in [
-        "editor.toggle_comment",
-        "editor.duplicate_line",
-        "editor.delete_line",
-        "editor.move_line_up",
-        "editor.move_line_down",
-        "editor.normalize_line_endings",
-        "editor.history_prev",
-        "editor.history_next",
+fn line_commands_edit_lines(cx: &mut TestAppContext) {
+    for (id, before, want) in [
+        ("editor.toggle_comment", "a\nb┃\nc", "a\n-- b┃\nc"),
+        ("editor.duplicate_line", "a\nb┃\nc", "a\nb\nb┃\nc"),
+        ("editor.delete_line", "a\nb┃\nc", "a\nc┃"),
+        ("editor.move_line_up", "a\nb┃\nc", "b┃\na\nc"),
+        ("editor.move_line_down", "a\nb┃\nc", "a\nc\nb┃"),
+        ("editor.normalize_line_endings", "a\nb┃\nc", "a\nb┃\nc"),
+        ("editor.history_prev", "a\nb┃\nc", "a\nb┃\nc"),
+        ("editor.history_next", "a\nb┃\nc", "a\nb┃\nc"),
     ] {
-        assert_eq!(
-            after(cx, "SELECT «a┃», b;\nFROM t;", id),
-            "SELECT «a┃», b;\nFROM t;",
-            "{id}"
-        );
+        assert_eq!(after(cx, before, id), want, "{id}");
     }
 }
 
@@ -1219,6 +1212,7 @@ fn describe_says_what_run_would_execute(cx: &mut TestAppContext) {
             ranges: ranges.iter().map(|&(a, b)| a..b).collect(),
             state,
             choices: 0,
+            as_one: 0, // ## m3c-t34-editor (named exception)
         })
     };
     // One statement on one line, with its text.
@@ -1328,6 +1322,17 @@ fn the_context_menu_opens_at_the_caret_and_runs_its_entries(cx: &mut TestAppCont
             "",
             "editor.run",
             "editor.describe_exec_range",
+            // ## m3c-t34-editor (named exception, NOTES 17): the line commands, then Select
+            // all occurrences and Undo the selection change.
+            "",
+            "editor.toggle_comment",
+            "editor.duplicate_line",
+            "editor.delete_line",
+            "editor.move_line_up",
+            "editor.move_line_down",
+            "",
+            "editor.select_all_occurrences",
+            "editor.undo_selection",
         ]
     );
     assert!(entries[4].separator);
@@ -1354,7 +1359,8 @@ fn the_context_menu_opens_at_the_caret_and_runs_its_entries(cx: &mut TestAppCont
     // Run from the menu asks for an execution.
     run(&mut o, "editor.context_menu");
     draw(o.vcx);
-    o.vcx.simulate_keystrokes("end up enter");
+    // ## m3c-t34-editor (named exception): Run is the fifth entry since the menu grew.
+    o.vcx.simulate_keystrokes("home down down down down enter");
     assert_eq!(requests(&o).len(), 1);
     assert!(!menu_open(&o));
 }
@@ -1456,7 +1462,19 @@ fn a_right_click_opens_the_menu_at_the_pointer(cx: &mut TestAppContext) {
         .filter(|e| e.disabled && !e.separator)
         .map(|e| e.action.as_ref())
         .collect();
-    assert_eq!(disabled, ["editor.cut", "editor.paste"]);
+    // ## m3c-t34-editor (named exception): the line commands edit too.
+    assert_eq!(
+        disabled,
+        [
+            "editor.cut",
+            "editor.paste",
+            "editor.toggle_comment",
+            "editor.duplicate_line",
+            "editor.delete_line",
+            "editor.move_line_up",
+            "editor.move_line_down",
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

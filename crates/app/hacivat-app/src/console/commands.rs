@@ -13,14 +13,25 @@
 //!   only this function, and `console/mod.rs` stays Task 1b's (P12).
 
 use std::rc::Rc;
+// ## m3c-t34-editor
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use hacivat_l10n::ids;
+// ## m3c-t34-editor
+use hacivat_l10n::ArgValue;
+use hacivat_session::session::SessionState;
 use hacivat_text::UserEvent;
 use hacivat_ui::actions::{ActionDef, ActionRegistry};
 use hacivat_ui_core::gpui_surface::{App, Entity, Global, SharedString, Subscription, Window};
+// ## m3c-t34-editor
+use hacivat_ui_core::gpui_surface::EntityId;
 use hacivat_ui_editor::commands::{ShortcutHints, can_redo, can_undo, redo_kind, undo_kind};
 use hacivat_ui_editor::{EDITOR_CONTEXT, EditorEvent, EditorView, FocusedEditor};
 
+// ## m3c-t34-editor
+use crate::console::{ConsoleId, Consoles};
+use crate::exec_ui::context::SqlContext;
 use crate::shell::keymap_state::shortcut_label;
 
 // ## m3a-f4-ime
@@ -191,12 +202,16 @@ fn install_menu_follow(cx: &mut App) {
             == editor.as_ref().map(Entity::entity_id);
         if !same {
             let follow = editor.map(|editor| {
-                let sub = cx.subscribe(&editor, |_, event: &EditorEvent, cx| {
+                let sub = cx.subscribe(&editor, |editor, event: &EditorEvent, cx| {
                     if matches!(
                         event,
                         EditorEvent::Changed { .. } | EditorEvent::StatusChanged
                     ) {
                         refresh_menu(cx);
+                    }
+                    // ## m3c-t34-editor: history recall comes from the focused editor's keys.
+                    if let EditorEvent::HistoryRecall { older } = event {
+                        recall(editor, *older, cx);
                     }
                 });
                 (editor, sub)
@@ -231,4 +246,154 @@ pub fn edit_menu_history_titles(cx: &App) -> (SharedString, SharedString) {
         crate::l10n_global::tr_id(cx, message)
     };
     (title("editor.undo"), title("editor.redo"))
+}
+
+// ## m3c-t34-editor
+// ---- the gutter ▶'s gate and history recall (NOTES surface 17) ------------------------------
+
+/// Whether Run would be enabled on console `console` now: its session is idle (not running, not
+/// waiting for Commit or Roll back, not cancelling, connected), no run of it is still going,
+/// and its SQL context is read. The gutter ▶ shows only then (M3c-15); its click still goes
+/// through Run's whole path, which decides again.
+pub fn run_would_be_enabled(console: ConsoleId, cx: &App) -> bool {
+    let Some(state) = Consoles::get(cx, console) else {
+        return false;
+    };
+    // An unbound console has nothing to run on.
+    if state.profile.is_none() {
+        return false;
+    }
+    // ## fix round 1 (M1): a disconnected (or broken, or not yet opened) session: Run connects
+    // first, so it is enabled; while connecting, running or cancelling it is not.
+    let connected = match state
+        .session
+        .as_ref()
+        .map(|s| s.state().borrow().state.clone())
+    {
+        None | Some(SessionState::Disconnected | SessionState::Broken(_)) => false,
+        Some(SessionState::Idle) => true,
+        Some(_) => return false,
+    };
+    // Connected, Run waits for the SQL context until it is read.
+    if connected && crate::exec_ui::sql_context(console, cx) == SqlContext::Pending {
+        return false;
+    }
+    !crate::exec_ui::console_exec(cx, console)
+        .and_then(|e| e.run.as_ref())
+        .is_some_and(|r| !r.ended)
+}
+
+/// The most statements one recall reads from the history.
+pub const RECALL_LIMIT: u32 = 500;
+
+/// One editor's recall: the statements read (newest first) and the one it shows.
+struct Recall {
+    list: Arc<[Arc<str>]>,
+    index: usize,
+}
+
+/// The recalls of the editors, by editor.
+#[derive(Default)]
+struct Recalls(HashMap<EntityId, Recall>);
+
+impl Global for Recalls {}
+
+/// The console whose editor is `editor`.
+fn console_of(editor: &Entity<EditorView>, cx: &App) -> Option<ConsoleId> {
+    Consoles::ids(cx).into_iter().find(|id| {
+        Consoles::get(cx, *id)
+            .and_then(|s| s.editor.as_ref())
+            .is_some_and(|e| e.entity_id() == editor.entity_id())
+    })
+}
+
+/// `editor.history_prev` (`older`) or `_next` at the last line of an empty or recalled console
+/// (the editor asked, `EditorEvent::HistoryRecall`): an empty console reads its profile's
+/// newest statements from the history (off the UI thread) and shows the newest; a recalled one
+/// steps older or newer. Nothing without a history, a profile, or a statement to show.
+fn recall(editor: Entity<EditorView>, older: bool, cx: &mut App) {
+    let id = editor.entity_id();
+    let empty = editor.read(cx).snapshot().buffer.len_bytes() == 0;
+    if !empty {
+        let Some(r) = cx.try_global::<Recalls>().and_then(|r| r.0.get(&id)) else {
+            return;
+        };
+        let next = if older {
+            r.index + 1
+        } else {
+            match r.index.checked_sub(1) {
+                Some(i) => i,
+                None => return,
+            }
+        };
+        if next < r.list.len() {
+            let list = r.list.clone();
+            show_recalled(&editor, list, next, cx);
+        }
+        return;
+    }
+    if !older {
+        return;
+    }
+    let Some(console) = console_of(&editor, cx) else {
+        return;
+    };
+    let (Some(profile), Some(store)) = (
+        Consoles::get(cx, console).and_then(|s| s.profile),
+        crate::history::store(cx),
+    ) else {
+        return;
+    };
+    let read = crate::history::recall(&store, profile, RECALL_LIMIT, cx);
+    cx.spawn(async move |cx| {
+        let Ok(list) = read.await else {
+            return;
+        };
+        if list.is_empty() {
+            return;
+        }
+        let list: Arc<[Arc<str>]> = list.into();
+        cx.update(|cx| {
+            // Typed into meanwhile: the recall is dropped.
+            if editor.read(cx).snapshot().buffer.len_bytes() == 0 {
+                show_recalled(&editor, list, 0, cx);
+            }
+        });
+    })
+    .detach();
+}
+
+/// Puts statement `index` of `list` in `editor`, saying where it is ("From history: statement
+/// 2 of 48 · ⌃⌥↑ older · ⌃⌥↓ newer").
+fn show_recalled(editor: &Entity<EditorView>, list: Arc<[Arc<str>]>, index: usize, cx: &mut App) {
+    let Some(text) = list.get(index).cloned() else {
+        return;
+    };
+    let key = |id: &str| shortcut_label(cx, id).unwrap_or_default();
+    let sentence = crate::exec_ui::marks::message(
+        cx,
+        "hv-history-recall",
+        vec![
+            ("i", ArgValue::Count(index as u64 + 1)),
+            ("n", ArgValue::Count(list.len() as u64)),
+            ("older", ArgValue::Text(key("editor.history_prev"))),
+            ("newer", ArgValue::Text(key("editor.history_next"))),
+        ],
+    );
+    let id = editor.entity_id();
+    let first = cx
+        .default_global::<Recalls>()
+        .0
+        .insert(id, Recall { list, index })
+        .is_none();
+    // ## fix round 1 (M4): the entry goes with its editor (a closed console).
+    if first {
+        cx.observe_release(editor, move |_, cx| {
+            if cx.has_global::<Recalls>() {
+                cx.global_mut::<Recalls>().0.remove(&id);
+            }
+        })
+        .detach();
+    }
+    editor.update(cx, |e, cx| e.show_recalled(&text, sentence, cx));
 }

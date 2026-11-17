@@ -299,6 +299,10 @@ pub struct GridView {
     // ## m3c-t36
     /// The sort the header shows (`set_sort`).
     pub(crate) sort: SortShown,
+    // ## m3c-t40
+    /// The AccessKit rows and cells of the last frame, and the live announcement (only while
+    /// assistive technology is active; `element::a11y_rows`).
+    pub(crate) a11y: element::a11y_rows::A11yState,
 }
 
 // ## m3c-t36
@@ -349,6 +353,8 @@ impl GridView {
             autoscroll: None,
             drag_hooks: None,
             sort: SortShown::default(),
+            // ## m3c-t40
+            a11y: Default::default(),
         }
     }
 
@@ -973,14 +979,19 @@ impl GridView {
         }
         let (role, label) = self.a11y_declaration(cx);
         // ## m3c-t35 fix round 1 (M7): a filter announces the rows it keeps.
-        let rows = match self.view_map.as_ref() {
-            Some(map @ ViewMap::Filtered { .. }) => map.len(),
-            _ => self.data.known_total().unwrap_or(self.data.count.loaded),
-        };
-        el.role(role)
+        // ## m3c-t40: the header row counts (it is row 0, view row `v` is row `v + 1`); a
+        // result that may have more rows counts the loaded ones and says more are available.
+        let (rows, more) = element::a11y_rows::row_total(self);
+        let el = el
+            .role(role)
             .aria_label(label)
-            .aria_row_count(usize::try_from(rows).unwrap_or(usize::MAX))
-            .aria_column_count(self.layout.len())
+            .aria_row_count(usize::try_from(rows.saturating_add(1)).unwrap_or(usize::MAX))
+            .aria_column_count(self.layout.len());
+        if more {
+            el.aria_description(element::a11y_rows::more_rows(cx))
+        } else {
+            el
+        }
     }
 
     /// Whether the last frame showed a result known to have no rows (its header stays): an exact
@@ -1133,6 +1144,9 @@ impl Render for GridView {
             .track_focus(&self.focus);
         // ## m3a-t30-results-view: the accessibility node is the element that tracks the focus.
         let root = self.a11y_node(root, window.is_a11y_active(), cx);
+        // ## m3c-t40: the rows and cells, the active descendant and the live region (only
+        // while assistive technology is active).
+        let (root, a11y_rows) = element::a11y_rows::subtree(self, root, window, cx);
         let no_rows = self.no_rows_label(cx);
         root.size_full()
             .relative()
@@ -1142,6 +1156,7 @@ impl Render for GridView {
             .children(tips)
             .children(no_rows)
             .children(resize_tag)
+            .children(a11y_rows)
     }
 }
 

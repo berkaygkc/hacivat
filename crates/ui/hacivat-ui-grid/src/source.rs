@@ -127,6 +127,15 @@ pub trait GridFrame {
     fn generation(&self) -> (u64, u64);
     fn row_count(&self) -> RowCount;
     fn cell(&self, row: ModelRow, col: ColId) -> CellContent;
+
+    // ## m3c-t40 (named exception: the screen-reader text, HV-GRID-16 step 2)
+    /// What a screen reader reads for a cell (read only while one is attached): the app gives
+    /// `Purpose::A11y`'s text (control characters spoken as spaces, at most 1,000 graphemes)
+    /// and, for a truncated value, its full size alone as the chip ("5 MB"). Default: the
+    /// cell as painted.
+    fn a11y_cell(&self, row: ModelRow, col: ColId) -> CellContent {
+        self.cell(row, col)
+    }
 }
 
 /// A grid's data (the app's result adapter; the synthetic source in tests).

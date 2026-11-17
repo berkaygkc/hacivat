@@ -270,9 +270,24 @@ fn apply(t: &mut Tracker, st: &RunStatus, cx: &mut App) {
         };
         let short = short_of(&entry.status, started, elapsed, cancelling);
         let announce = a11y::exec_announcement(cx, n, &state);
+        // ## m3c-t34-editor (named exception): an outcome keeps the wall-clock time it ended
+        // at, for the gutter ▶'s "Last runs" (the format locale's medium time).
+        let when = ended_at(&state);
+        // A statement waiting for Commit or Roll back keeps its stamp while the unit still
+        // reads as running (the question's follower set it; `orchestrator::mark_awaiting`).
+        let awaiting = matches!(
+            editor.read(cx).marks().state(key),
+            Some(ExecMarkState::Awaiting)
+        );
+        if awaiting && matches!(state, ExecMarkState::Running { .. }) {
+            continue;
+        }
         editor.update(cx, |e, cx| {
             e.set_exec_state(key, state, Some(label), Some(eol), cx);
             e.set_exec_short(key, short, cx);
+            if when.is_some() {
+                e.set_exec_when(key, when, cx);
+            }
             if let Some(text) = announce {
                 e.announce(text, cx);
             }
@@ -510,6 +525,22 @@ pub(crate) fn mark_of(
                 eol,
             )
         }
+        // ## m3c-t34-editor (named exception; the T24/T29 carry): a confirmed statement the user
+        // (Roll back, Undo), a close or the deadline rolled back: the undo glyph, "rolled back";
+        // the tooltip says which.
+        UnitStatus::Failed(view)
+            if matches!(
+                view.title_id,
+                "exec-error-confirm-undone" | "exec-error-confirm-timed-out"
+            ) =>
+        {
+            let title = view.title_id;
+            (
+                ExecMarkState::RolledBack,
+                fixed(title),
+                fixed("hv-editor-mark-rolled-back"),
+            )
+        }
         UnitStatus::Failed(view) if view.title_id.starts_with("exec-deny-") => {
             // A read-only denial: nothing was sent; the tooltip says why.
             let title = view.title_id;
@@ -545,6 +576,29 @@ pub(crate) fn mark_of(
             (ExecMarkState::Skipped, eol.clone(), eol)
         }
     }
+}
+
+// ## m3c-t34-editor
+/// For an outcome, the time it ended at as the gutter ▶'s "Last runs" shows it (the history
+/// dialog's time format); `None` while the unit is still going.
+fn ended_at(state: &ExecMarkState) -> Option<TextFn> {
+    let ended = matches!(
+        state,
+        ExecMarkState::Succeeded { .. }
+            | ExecMarkState::Failed { .. }
+            | ExecMarkState::Cancelled
+            | ExecMarkState::Skipped
+            | ExecMarkState::RolledBack
+    );
+    if !ended {
+        return None;
+    }
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    Some(Rc::new(move |cx: &App| {
+        crate::history::rows::time_text(cx, ms)
+    }))
 }
 
 // ## m3a-f2-visual: the running clock in whole seconds (NOTES surface 5, "running · 3 s").

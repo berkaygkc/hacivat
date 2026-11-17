@@ -167,6 +167,10 @@ pub struct GridAdapter {
     target: RefCell<Target>,
     display: RefCell<Arc<ResultDisplay>>,
     cache: Rc<RefCell<DisplayCache>>,
+    // ## m3c-t40 fix round 1 (m4)
+    /// The screen-reader texts formatted apart from the display (cells with controls, a cut
+    /// value, a long text), under the display cache's keys.
+    a11y_cache: Rc<RefCell<DisplayCache>>,
     /// The listener was called and no frame has read the adapter since.
     notified: Rc<Cell<bool>>,
     listener: RefCell<Option<Listener>>,
@@ -195,6 +199,10 @@ impl GridAdapter {
             target: RefCell::new(target),
             display: RefCell::new(Arc::new(display)),
             cache: Rc::new(RefCell::new(DisplayCache::new())),
+            // ## m3c-t40 fix round 1 (m4)
+            a11y_cache: Rc::new(RefCell::new(DisplayCache::with_capacity(
+                A11Y_CACHE_CAPACITY,
+            ))),
             notified: Rc::new(Cell::new(false)),
             listener: RefCell::new(None),
             watch: RefCell::new(None),
@@ -266,6 +274,12 @@ impl GridAdapter {
         self.cache.borrow().formats()
     }
 
+    // ## m3c-t40 fix round 1 (m4)
+    /// Screen-reader texts formatted so far (their cache's misses).
+    pub fn a11y_format_calls(&self) -> u64 {
+        self.a11y_cache.borrow().formats()
+    }
+
     /// Cells the display cache holds.
     pub fn cached_cells(&self) -> usize {
         self.cache.borrow().len()
@@ -319,6 +333,8 @@ struct AdapterFrame {
     facts: Arc<[ColFacts]>,
     display: Arc<ResultDisplay>,
     cache: Rc<RefCell<DisplayCache>>,
+    // ## m3c-t40 fix round 1 (m4)
+    a11y_cache: Rc<RefCell<DisplayCache>>,
     generation: u64,
     texts: Texts,
 }
@@ -369,7 +385,60 @@ impl GridFrame for AdapterFrame {
             cell_content(shown, facts, &self.texts)
         })
     }
+
+    // ## m3c-t40 (named exception): what a screen reader reads (HV-GRID-16 step 2).
+    /// `Purpose::A11y`: control characters spoken as spaces and at most 1,000 graphemes; a
+    /// truncated value's chip is its whole size alone ("5.2 MB": the grid words it). A cell of
+    /// plain characters within that cap reads as the cached cell (no second format).
+    fn a11y_cell(&self, row: ModelRow, col: ColId) -> CellContent {
+        let painted = self.cell(row, col);
+        let plain = !painted
+            .flags
+            .intersects(GridCellFlags::HAS_CONTROLS | GridCellFlags::TRUNCATED);
+        let settled = matches!(
+            painted.kind,
+            CellKind::Placeholder | CellKind::Null | CellKind::Error
+        );
+        if settled || (plain && painted.text.len() <= A11Y_PLAIN_BYTES) {
+            return painted;
+        }
+        let Some(facts) = self.facts.get(col.0 as usize) else {
+            return painted;
+        };
+        // ## m3c-t40 fix round 1 (m4): once per data generation and display settings.
+        let key = DisplayKey {
+            generation: self.generation,
+            row: row.0,
+            col: col.0,
+            settings_version: self.display.settings.version,
+        };
+        self.a11y_cache.borrow_mut().get_or_format(key, || {
+            let value = self.snapshot.cell(row.0, col.0);
+            let spoken = format_cell(
+                value,
+                &facts.view(self.display.engine),
+                &self.display.settings,
+                Purpose::A11y,
+            );
+            let size = spoken.chip.map(|chip| match chip {
+                ChipKind::Truncated { total, unit } => self.texts.length(total, unit),
+            });
+            let mut content = cell_content(spoken, facts, &self.texts);
+            content.chip = size.map(SharedString::from);
+            content
+        })
+    }
 }
+
+// ## m3c-t40
+/// A cell text of at most this many bytes has at most as many graphemes: within the screen
+/// reader's 1,000-grapheme cap.
+const A11Y_PLAIN_BYTES: usize = 1_000;
+
+// ## m3c-t40 fix round 1 (m4)
+/// The screen-reader texts kept: a screenful many times over (most cells read the display
+/// cache and never land here).
+const A11Y_CACHE_CAPACITY: usize = 4_096;
 
 impl GridDataSource for GridAdapter {
     fn begin_frame(&self, cx: &App) -> Rc<dyn GridFrame> {
@@ -381,6 +450,8 @@ impl GridDataSource for GridAdapter {
         if self.l10n_generation.replace(generation) != generation {
             // The chips and decode-error texts in the cache are in the old language.
             cache.clear();
+            // ## m3c-t40 fix round 1 (m4): and the screen reader's sizes.
+            self.a11y_cache.borrow_mut().clear();
             // ## m3b-t07-types: so are Fluent header labels (only rebuilt when there is one).
             let mut target = self.target.borrow_mut();
             if target.localized {
@@ -389,12 +460,16 @@ impl GridDataSource for GridAdapter {
             }
         }
         cache.begin_frame();
+        // ## m3c-t40 fix round 1 (m4)
+        self.a11y_cache.borrow_mut().begin_frame();
         let target = self.target.borrow();
         Rc::new(AdapterFrame {
             snapshot: target.source.snapshot(),
             facts: target.facts.clone(),
             display: self.display.borrow().clone(),
             cache: self.cache.clone(),
+            // ## m3c-t40 fix round 1 (m4)
+            a11y_cache: self.a11y_cache.clone(),
             generation: target.generation,
             texts: Texts(l10n),
         })
@@ -480,15 +555,21 @@ impl Texts {
         }
     }
 
-    /// The chip after a truncated cell: the value's whole size.
-    fn truncated(&self, total: u64, unit: LenUnit) -> SharedString {
-        let size = match unit {
+    // ## m3c-t40 (named exception): the size alone, for the screen reader's chip.
+    /// A value's whole size with its unit (`5.2 MB`, `1,200 characters`).
+    fn length(&self, total: u64, unit: LenUnit) -> String {
+        match unit {
             LenUnit::Bytes => self.size(total),
             LenUnit::Chars => self.tr(
                 ids::hv::GRID_SIZE_CHARS,
                 ids::hv::HvGridSizeChars { n: Count(total) },
             ),
-        };
+        }
+    }
+
+    /// The chip after a truncated cell: the value's whole size.
+    fn truncated(&self, total: u64, unit: LenUnit) -> SharedString {
+        let size = self.length(total, unit);
         self.tr(
             ids::hv::GRID_TRUNCATED,
             ids::hv::HvGridTruncated { size: Text(size) },

@@ -429,6 +429,8 @@ pub struct FramePrepaint {
     pub overlay: gutter::Overlay,
     // ## m3c-t32-fold (named exception): the fold column and the inlays.
     pub(crate) folds: crate::fold_gutter::FoldFrame,
+    // ## m3c-t34-editor (named exception): the gutter ▶ buttons.
+    pub(crate) buttons: gutter::ButtonFrame,
     /// The whole element (wheel scrolling).
     pub(crate) hitbox: Hitbox,
     /// The text area (the I-beam, clicks and drags).
@@ -1050,12 +1052,16 @@ pub(crate) fn prepaint_frame(
     // ## m3c-t32-fold (named exception): the fold column and the inlays, over the text's hit
     // target (an inlay takes its own clicks); each inlay's width goes into its row first.
     let folds = crate::fold_gutter::prepaint(v, gutter, window, cx);
-    let overlay = v
+    let mut overlay = v
         .layout
         .as_ref()
         .map_or_else(gutter::Overlay::default, |layout| {
             gutter::prepaint(&mut v.band, &v.marks, layout, &snapshot)
         });
+    // ## m3c-t34-editor (named exception): the gutter ▶ buttons; a finished mark leaves its
+    // glyph slot to a shown one.
+    let buttons = gutter::prepaint_buttons(v, gutter, window, cx);
+    overlay.play_rows = buttons.rows.clone();
     let current_statement = preview::current_statement(&v.band, &snapshot);
     let visible_lines = (view_h / f64::from(lh)).ceil().max(1.0) as u32;
     let mut frame = FramePrepaint {
@@ -1073,6 +1079,8 @@ pub(crate) fn prepaint_frame(
         overlay,
         // ## m3c-t32-fold (named exception)
         folds,
+        // ## m3c-t34-editor (named exception)
+        buttons,
         hitbox,
         text_hitbox,
         focused,
@@ -1121,6 +1129,9 @@ pub(crate) fn paint_frame(
         );
         // ## m3c-t33-find (named exception): the other find matches' outlines.
         crate::find::paint(v, layout, window, cx);
+        // ## m3c-t34-editor (named exception): the ▶ buttons first (the tab order runs down the
+        // ▶ column, then the fold column).
+        gutter::paint_buttons(&frame.buttons, window, cx);
         // ## m3c-t32-fold (named exception): the folded headers' lines, inlays and chevrons.
         crate::fold_gutter::paint(&frame.folds, layout.rows().bounds, window, cx);
         marks::paint(&v.marks, &g, layout, &frame.mark_hits, window, cx);

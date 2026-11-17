@@ -121,13 +121,14 @@ fn m3b_editor_commands_are_in_the_table() {
         let title = format!("hv-cmd-{}", id.replace(['.', '_'], "-"));
         let c = commands().iter().find(|c| c.id == id).unwrap();
         assert_eq!(c.title_id, title);
-        // A stub never seals the history: it changes nothing at all.
+        // ## m3c-t34-editor (named exception): Task 34's rows are commands (tests `lines`),
+        // none sealing the history.
         assert!(!c.seals_history, "{id}");
-        // Fix round 2 (I3): it is a stub, so the app keeps it disabled.
-        assert!(c.stub, "{id}");
+        assert!(!c.stub, "{id}");
     }
     // ## m3c-t33-find (named exception): 12 less Task 33's four.
-    assert_eq!(commands().iter().filter(|c| c.stub).count(), 8);
+    // ## m3c-t34-editor (named exception): 8 less Task 34's eight: no editor stub is left.
+    assert_eq!(commands().iter().filter(|c| c.stub).count(), 0);
     // M3a's commands are not stubs.
     for c in commands().iter().take(45) {
         assert!(!c.stub, "{}", c.id);
@@ -204,14 +205,9 @@ fn view_seams_change_nothing(cx: &mut TestAppContext) {
     // Every M3b command runs as a no-op: the text, the selection and the version stay.
     // ## m3c-t31-multi (named exception): Task 31's commands are filled (tests `multi_view`).
     // ## m3c-t33-find (named exception): `editor.find` emits `FindRequested` (tests `find`).
-    for id in [
-        "editor.fold_all",
-        "editor.toggle_comment",
-        "editor.duplicate_line",
-        "editor.delete_line",
-        "editor.move_line_down",
-        "editor.history_prev",
-    ] {
+    // ## m3c-t34-editor (named exception): Task 34's line commands edit (tests `lines`); recall
+    // only asks the host, and not on this non-empty text.
+    for id in ["editor.fold_all", "editor.history_prev"] {
         let ran = e.update_in(vcx, |v, window, cx| v.run_command(id, window, cx));
         assert!(ran, "{id}");
     }
@@ -219,7 +215,7 @@ fn view_seams_change_nothing(cx: &mut TestAppContext) {
     assert_eq!(after.buffer.to_string(), before.buffer.to_string());
     assert_eq!(after.selection, before.selection);
     assert_eq!(after.version, before.version);
-    // An escalated mark is kept and painted like a cancelling one until Task 34's badge.
+    // An escalated mark is kept (## m3c-t34-editor: its badge is tested in `gutter_m3b`).
     let since = std::time::Instant::now();
     e.update(vcx, |v, cx| {
         v.add_exec_marks(0, vec![(MarkKey(1), 0..8)], cx);
