@@ -155,6 +155,7 @@ pub struct Args {
 
 pub const USAGE: &str = "usage: HACIVAT_DOCKER_SET=pr b1_real [--engine pg|sqlite] [--size 1440x900|2560x1440] [--mode full|streaming|sorted] [--sorted] [--lang tr] [--format tr-TR] [--any-display] [--allow-inactive]\n\
   1440x900 needs the built-in panel (2x, >= 118 Hz); 2560x1440 needs a 1x display; otherwise the run is INVALID (exit 3, no JSON) unless --any-display (ungraded label).\n\
+  A window that cannot become frontmost, or fling steps to an inactive window, is INVALID (PENDING-PO); --allow-inactive (the CI harness check) goes on, always ungraded (b1-offpanel-real-*).\n\
   --sorted (= --mode sorted): the full result sorted locally by c01 (Turkish text) before the fling; not gating (label b1-sorted-real-*).\n\
   The last line is `RESULT: PASS|FAIL|INVALID|n/a <label>`; exit 0 = PASS or ungraded, 1 = FAIL or aborted, 3 = INVALID (exit 0 is never a PASS by itself: read RESULT).";
 
@@ -272,7 +273,9 @@ impl Args {
         } else if self.mode == Mode::Sorted {
             // ## m3c-t44: not gating (no `b1-fling` prefix).
             "b1-sorted-real"
-        } else if self.any_display {
+        } else if self.any_display || self.allow_inactive {
+            // ## m3c-t44 (fix round 2, I1): `--allow-inactive` (the harness check) is ungraded
+            // whatever the display.
             "b1-offpanel-real"
         } else if format != GRADED_FORMAT {
             "b1-offlocale-real"
@@ -490,7 +493,8 @@ async fn script<C: AppContext>(
     // ## m3c-t44: a window that cannot become key (asleep, locked) refuses the run: PENDING-PO.
     if let Some(why) = activate_or_refuse(cx, ws, sleep, args.allow_inactive).await? {
         println!("INVALID: {why}; no JSON written. {PENDING_PO}");
-        print_result(Outcome::Invalid, "b1_real");
+        // Fix round 2 (M8): the run's label, at the requested size (no viewport measured yet).
+        print_result(Outcome::Invalid, &args.label(args.size, &format));
         return Ok(Outcome::Invalid);
     }
     // The resize lands through the platform: wait (briefly) for the viewport to take it.
@@ -887,6 +891,15 @@ fn report<C: AppContext>(
         super::mib(loaded.bytes),
         rss.map_or("unknown".into(), super::mib),
     );
+    // ## m3c-t44 (fix round 2, M2): focus lost mid-fling cannot measure: INVALID, PENDING-PO.
+    if o.inactive > 0 && !args.allow_inactive {
+        println!(
+            "INVALID: {} fling steps ran while the window was inactive (focus lost or the display slept mid-run); no JSON written. {PENDING_PO}",
+            o.inactive
+        );
+        print_result(Outcome::Invalid, label);
+        return Ok(Outcome::Invalid);
+    }
     if o.inactive > 0 {
         eprintln!(
             "warning: {} fling steps ran while the window was inactive; GPUI throttles inactive windows, so this run is not representative",
@@ -897,7 +910,7 @@ fn report<C: AppContext>(
     if !args.any_display
         && let Err(why) = display_ok(args.size, viewport, run.display_hz, run.display_scale)
     {
-        println!("INVALID display at the end of the run: {why}; no JSON written");
+        println!("INVALID display at the end of the run: {why}; no JSON written. {PENDING_PO}");
         print_result(Outcome::Invalid, label);
         return Ok(Outcome::Invalid);
     }
@@ -1072,6 +1085,22 @@ mod tests {
         assert!(err.contains("of the requested"), "{err}");
         let panel = (1440.0, 900.0);
         assert!(display_ok(panel, (1200.0, 700.0), Some(120.0), Some(2.0)).is_err());
+    }
+
+    // ## m3c-t44 (fix round 2, I1)
+    #[test]
+    fn allow_inactive_is_never_graded() {
+        let harness = parse_args(&a(&["--allow-inactive"])).unwrap();
+        // On the panel, in tr-TR, at the graded size: still the ungraded off-panel label.
+        let label = harness.label((1440.0, 900.0), "tr-TR");
+        assert_eq!(label, "b1-offpanel-real-pg-1440x900");
+        assert!(!label.starts_with("b1-fling"));
+        let wide = parse_args(&a(&["--allow-inactive", "--size", "2560x1440"])).unwrap();
+        assert!(
+            !wide
+                .label((2560.0, 1440.0), "tr-TR")
+                .starts_with("b1-fling")
+        );
     }
 
     // ## m3c-t44

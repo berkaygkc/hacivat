@@ -302,10 +302,15 @@ fn write_dump(
     run: &RunInfo,
 ) -> io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let ts = SystemTime::now()
+    // ## m3c-t44 (named exception, fix round 2 M6): seconds, then the sub-second nanos and a
+    // per-process sequence number, so two dumps of one label never share a name.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let path = dir.join(format!("{label}-{os}-{ts}.json"));
+        .unwrap_or_default();
+    let (ts, nanos) = (now.as_secs(), now.subsec_nanos());
+    let path = dir.join(format!("{label}-{os}-{ts}-{nanos:09}-{seq}.json"));
     let values: Vec<String> = values_ms.iter().map(|v| format!("{v}")).collect();
     let num_or_unknown = |v: Option<f64>| match v {
         Some(v) if v.is_finite() => format!("{v}"),
@@ -614,6 +619,10 @@ mod tests {
         ] {
             assert!(body.contains(field), "{field} missing in {body}");
         }
+        // ## m3c-t44: two dumps of one label in the same second keep both files.
+        let again = r.dump_json(&dir, "macos", &run).unwrap();
+        assert_ne!(again, path);
+        assert!(path.exists() && again.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

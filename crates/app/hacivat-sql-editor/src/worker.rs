@@ -74,6 +74,8 @@ pub(crate) fn analyse_from(kept: Option<Kept>, job: &Job) -> (Analysis, Kept) {
     // ## m3c-t44: the worker's relex timer (feature `bench` only).
     #[cfg(feature = "bench")]
     let started = std::time::Instant::now();
+    #[cfg(feature = "bench")]
+    crate::bench::note_diff(std::time::Duration::ZERO);
     #[cfg_attr(not(feature = "bench"), allow(unused_variables))]
     let (doc, built) = document(kept, job);
     #[cfg(feature = "bench")]
@@ -94,15 +96,19 @@ pub(crate) fn analyse_from(kept: Option<Kept>, job: &Job) -> (Analysis, Kept) {
     };
     // ## m3c-t44: the worker's relex timer (feature `bench` only).
     #[cfg(feature = "bench")]
-    crate::bench::record(crate::bench::WorkerSample {
-        kind: match built {
-            Built::Applied => crate::bench::Built::Incremental,
-            Built::Unchanged => crate::bench::Built::Unchanged,
-            Built::Fresh => crate::bench::Built::Fresh,
-        },
-        relex,
-        analysis: started.elapsed(),
-    });
+    {
+        let diff = crate::bench::noted_diff().min(relex);
+        crate::bench::record(crate::bench::WorkerSample {
+            kind: match built {
+                Built::Applied => crate::bench::Built::Incremental,
+                Built::Unchanged => crate::bench::Built::Unchanged,
+                Built::Fresh => crate::bench::Built::Fresh,
+            },
+            diff,
+            apply: relex - diff,
+            analysis: started.elapsed(),
+        });
+    }
     (
         analysis,
         Kept {
@@ -124,7 +130,13 @@ fn document(kept: Option<Kept>, job: &Job) -> (SqlDocument, Built) {
         && *doc.snapshot().ctx() == job.ctx
         && doc.snapshot().flavor() == job.flavor
     {
-        let built = match change_between(doc.text(), &job.buffer) {
+        // ## m3c-t44 (fix round 2, M1): the scan for the one edit is timed on its own.
+        #[cfg(feature = "bench")]
+        let scan = std::time::Instant::now();
+        let change = change_between(doc.text(), &job.buffer);
+        #[cfg(feature = "bench")]
+        crate::bench::note_diff(scan.elapsed());
+        let built = match change {
             None => Some(Built::Unchanged),
             Some(edit) => doc
                 .apply(std::slice::from_ref(&edit))

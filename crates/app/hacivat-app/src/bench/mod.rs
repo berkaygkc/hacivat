@@ -364,19 +364,51 @@ pub const PENDING_PO: &str = "PENDING-PO: run it on the PO's Mac with the displa
 /// locked, another window frontmost) refuses the run instead of aborting it: `Some(reason)`,
 /// and the caller reports INVALID with [`PENDING_PO`] (M3a T36: no figure exists then, GPUI
 /// throttles or stops an inactive window's frames). Under `--allow-inactive` (a harness check)
-/// the run goes on as before, ungraded.
+/// the run goes on as before, ungraded. Fix round 2 (M8): only the wait for the key window
+/// running out refuses; any other error (the window gone) stays an error, as in [`activate`].
 pub async fn activate_or_refuse<C: AppContext>(
     cx: &mut C,
     ws: WindowHandle<Workspace>,
     sleep: &impl Sleep,
     allow_inactive: bool,
 ) -> anyhow::Result<Option<String>> {
-    match activate(cx, ws, sleep, allow_inactive).await {
-        Ok(()) => Ok(None),
-        Err(e) if !allow_inactive => Ok(Some(format!(
-            "the bench window cannot become frontmost ({e:#}); the display may be asleep or the session locked"
-        ))),
-        Err(e) => Err(e),
+    ws.update(cx, |_, window, cx| {
+        window.activate_window();
+        cx.activate(true);
+    })?;
+    let started = Instant::now();
+    loop {
+        let key = ws
+            .update(cx, |_, window, _| window.is_window_active())
+            .context("waiting for the window to be frontmost: the window is gone")?;
+        if key {
+            return Ok(None);
+        }
+        if let Some(why) = activation_timed_out(started.elapsed(), allow_inactive) {
+            return Ok(why);
+        }
+        sleep(POLL).await;
+    }
+}
+
+/// How long a bench waits for its window to become key.
+pub const ACTIVATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The activation wait's verdict after `waited`: `None` while it may still wait;
+/// `Some(Some(reason))` once it ran out (the run is refused); `Some(None)` once it ran out under
+/// `--allow-inactive` (the harness check goes on, with a warning).
+pub fn activation_timed_out(waited: Duration, allow_inactive: bool) -> Option<Option<String>> {
+    if waited <= ACTIVATE_TIMEOUT {
+        return None;
+    }
+    let why = format!(
+        "the bench window did not become frontmost within {ACTIVATE_TIMEOUT:?}; the display may be asleep or the session locked"
+    );
+    if allow_inactive {
+        eprintln!("warning: {why}; going on (--allow-inactive): NOT a valid measurement, ungraded");
+        Some(None)
+    } else {
+        Some(Some(why))
     }
 }
 
@@ -842,6 +874,20 @@ mod tests {
         assert_eq!(percentiles(&[]), (0, 0.0, 0.0, 0.0, 0.0));
     }
 
+    // ## m3c-t44 (fix round 2, M8): only the key-window wait running out refuses a run.
+    #[test]
+    fn only_the_activation_timeout_refuses() {
+        let short = ACTIVATE_TIMEOUT / 2;
+        let past = ACTIVATE_TIMEOUT + Duration::from_millis(1);
+        assert_eq!(activation_timed_out(short, false), None, "still waiting");
+        assert_eq!(activation_timed_out(short, true), None);
+        let refused = activation_timed_out(past, false).expect("ran out");
+        let why = refused.expect("refused without --allow-inactive");
+        assert!(why.contains("did not become frontmost"), "{why}");
+        // The harness check goes on.
+        assert_eq!(activation_timed_out(past, true), Some(None));
+    }
+
     // ## m3c-t44
     #[test]
     fn roots_made_at_once_never_share_a_folder() {
@@ -1271,7 +1317,7 @@ mod tests {
             editor.update(cx, |e, cx| e.select_range(text.len()..text.len(), cx));
         })
         .unwrap();
-        worker::arm(true);
+        let armed = worker::armed_until_dropped();
         assert!(worker::armed());
         type_keys(&mut h, &editor, &b3::typing_script(6));
         let mut samples = Vec::new();
@@ -1284,10 +1330,11 @@ mod tests {
                 samples.iter().any(|s| s.kind == Built::Incremental)
             },
         );
-        worker::arm(false);
+        drop(armed);
         let report = b3::RelexReport::of(&samples);
         assert!(report.incremental >= 1, "{report:?}");
         assert!(report.relex.max <= report.analysis.max, "{report:?}");
+        assert!(!worker::armed(), "the guard disarmed the timer");
         h.stop();
     }
 
