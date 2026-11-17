@@ -1000,6 +1000,9 @@ const AS_ONE_READ_ONLY: &str = "exec-gate-run-as-one-read-only";
 /// any other refusal.
 const DENIED_RO: &str = "hv-editor-mark-denied";
 const NOT_SENT: &str = "hv-editor-mark-not-sent";
+// ## m3c-t38 fix round 1 (I1, controller ruling: fail closed)
+/// A re-run with a raised value limit of a statement that is not a read: refused.
+const RERUN_NOT_READ: &str = "hv-vv-rerun-not-read";
 /// How long Run waits for the session's context before it classifies without it (fail-closed:
 /// unknown modes, and an unqualified builtin is then `Unknown`).
 const CONTEXT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -1052,6 +1055,13 @@ impl Global for RunPrep {}
 /// setting's, or the value viewer's raised one.
 pub fn last_run_cell_cap(console: ConsoleId, cx: &App) -> Option<u32> {
     cx.try_global::<RunPrep>()?.cell_caps.get(&console).copied()
+}
+
+// ## m3c-t38 fix round 1 (m7)
+/// Whether console `console` is running or preparing a run (Re-run waits for it).
+pub fn run_busy(console: ConsoleId, cx: &App) -> bool {
+    preparing(console, cx)
+        || console_exec(cx, console).is_some_and(|e| e.run.as_ref().is_some_and(|r| !r.ended))
 }
 
 fn preparing(console: ConsoleId, cx: &App) -> bool {
@@ -1753,6 +1763,24 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
             })
             .await
     };
+    // ## m3c-t38 fix round 1 (I1, controller ruling: fail closed): the value viewer's re-run
+    // with a raised limit fetches a value again; it never runs anything but a read. A write, DDL,
+    // a routine call, a session or transaction statement, or one the classifier does not know
+    // is refused before anything is sent, and the viewer says why.
+    if job.cell_cap.is_some() && plan.items.iter().any(|i| i.class != hacivat_exec::GateClass::Read) {
+        cx.update(|cx: &mut App| {
+            refuse(
+                console,
+                job.version,
+                ranges(&job.units),
+                (RERUN_NOT_READ, Vec::new()),
+                NOT_SENT,
+                cx,
+            );
+            crate::results::value_viewer::rerun_refused(console, cx);
+        });
+        return;
+    }
     if changes {
         cx.update(|cx: &mut App| {
             cx.default_global::<RunPrep>().reread.insert(console);

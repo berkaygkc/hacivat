@@ -47,7 +47,7 @@ use hacivat_results::Completeness;
 use hacivat_ui::actions::{ActionDef, ActionRegistry};
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
-use hacivat_ui::popover::{A11yNode, Tip};
+use hacivat_ui::popover::{A11yNode, Declare as _, Tip};
 use hacivat_ui::step_trail::run_marker;
 use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
@@ -58,9 +58,9 @@ use hacivat_ui_core::gpui_surface::{
     FocusHandle, Focusable as _, Global, InteractiveElement as _, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, ParentElement as _, Render, Role, ScrollEvent, SharedString,
     StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Task, WeakEntity,
-    Window, canvas, div, hsla, px,
+    Window, accesskit, canvas, div, hsla, px,
 };
-use hacivat_ui_core::theme::{Theme, ThemeMode};
+use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
 use hacivat_ui_grid::model::{CopyRegion, ViewMap};
 use hacivat_ui_grid::{
     ColId, ColumnKind, GRID_CONTEXT, GridCommand, GridDataSource as _, GridEvent, GridView,
@@ -151,6 +151,25 @@ struct Views {
     records: HashMap<ConsoleId, Entity<VirtualList<FieldRows>>>,
     /// Each console's record inspector focus (its keys).
     record_focus: HashMap<ConsoleId, FocusHandle>,
+    // ## m3c-t38 fix round 1
+    /// Each console's view switch segments and record toggle (m5).
+    switch_focus: HashMap<ConsoleId, [FocusHandle; 4]>,
+    /// Each console's last record, by what it was read from (m2).
+    record_cache: HashMap<ConsoleId, (RecordKey, RecordView)>,
+}
+
+/// What a record was read from (fix round 1, m2): the same key reads the same fields.
+#[derive(Clone, PartialEq)]
+struct RecordKey {
+    grid: EntityId,
+    generation: Option<u64>,
+    adapter_generation: u64,
+    row: ModelRow,
+    view_row: u64,
+    rows: u64,
+    cols: Vec<ColId>,
+    display: u32,
+    l10n: Option<u64>,
 }
 
 impl Global for Views {}
@@ -177,6 +196,81 @@ fn focus_later(handle: FocusHandle, cx: &mut App) {
             let _ = window.update(cx, |_, window, cx| window.focus(&handle, cx));
         }
     });
+}
+
+// ## m3c-t38 fix round 1 (I3): the focus follows the view shown.
+
+/// The focus handle of the view `table`'s tab shows: the Transposed view's grid, the text
+/// view, or the table grid.
+pub(crate) fn shown_focus(table: &Entity<GridView>, cx: &App) -> FocusHandle {
+    let shown = tab_of(table.entity_id(), cx).and_then(|t| match t.mode {
+        ViewMode::Table => None,
+        ViewMode::Transposed => t
+            .transposed
+            .as_ref()
+            .map(|tr| tr.grid.read(cx).focus_handle(cx)),
+        ViewMode::Text => t.text.as_ref().map(|x| x.read(cx).focus.clone()),
+    });
+    shown.unwrap_or_else(|| table.read(cx).focus_handle(cx))
+}
+
+/// Whether a view that is not shown holds the focus: a Transposed view's grid or a text view
+/// other than the one `shown`'s tab shows, or `shown` (the table grid) while another of its
+/// views is shown.
+pub(crate) fn hidden_view_focused(
+    shown: Option<&Entity<GridView>>,
+    window: &Window,
+    cx: &App,
+) -> bool {
+    let target = shown.map(|g| shown_focus(g, cx));
+    let Some(views) = cx.try_global::<Views>() else {
+        return false;
+    };
+    for tab in views.tabs.values() {
+        let handles = tab
+            .transposed
+            .as_ref()
+            .map(|t| t.grid.read(cx).focus_handle(cx))
+            .into_iter()
+            .chain(tab.text.as_ref().map(|t| t.read(cx).focus.clone()));
+        for h in handles {
+            if Some(&h) != target.as_ref() && h.contains_focused(window, cx) {
+                return true;
+            }
+        }
+    }
+    shown.is_some_and(|g| {
+        let table = g.read(cx).focus_handle(cx);
+        Some(&table) != target.as_ref() && table.contains_focused(window, cx)
+    })
+}
+
+/// Where the value viewer anchors for table cell `cell` of console `console`, and where the
+/// focus goes back when it closes: the view shown (the table grid and the cell; the Transposed
+/// grid and its cell; the text view, which has no cells).
+pub(crate) fn anchor_for(
+    console: ConsoleId,
+    cell: ModelCell,
+    cx: &App,
+) -> (
+    Option<(WeakEntity<GridView>, ModelCell)>,
+    Option<FocusHandle>,
+) {
+    let Some((grid, _)) = active(console, cx) else {
+        return (None, None);
+    };
+    let back = Some(shown_focus(&grid, cx));
+    let mode = tab_of(grid.entity_id(), cx)
+        .map(|t| t.mode)
+        .unwrap_or_default();
+    let anchor = match mode {
+        ViewMode::Table => Some((grid.downgrade(), cell)),
+        ViewMode::Transposed => tab_of(grid.entity_id(), cx)
+            .and_then(|t| t.transposed.as_ref())
+            .and_then(|t| Some((t.grid.downgrade(), t.source.transposed_cell(cell)?))),
+        ViewMode::Text => None,
+    };
+    (anchor, back)
 }
 
 // ---- the mode ------------------------------------------------------------------------------------
@@ -402,9 +496,15 @@ fn ensure_transposed(
         .unwrap_or(1);
     let dyn_source: Rc<dyn hacivat_ui_grid::GridDataSource> = source.clone();
     if let Some((_, grid)) = current {
+        // ## m3c-t38 fix round 1 (m3): the record it was on (a table cell), wherever the new
+        // order puts it.
+        let kept = transposed_focus(table, cx).and_then(|c| source.transposed_cell(c));
         grid.update(cx, |g, cx| {
             g.set_source(dyn_source, false, cx);
             g.set_frozen(1, cx);
+            if let Some(cell) = kept {
+                g.focus_cell(cell, cx);
+            }
         });
         if let Some(t) = cx
             .default_global::<Views>()
@@ -459,10 +559,12 @@ fn on_transposed_event(console: ConsoleId, grid: &Entity<GridView>, e: &GridEven
         GridEvent::CopyRefused(refusal) => copy::copy_refused(*refusal, cx),
         GridEvent::ValueRequested(cell) => {
             if let Some(table_cell) = source.table_cell(*cell) {
+                let back = Some(grid.read(cx).focus_handle(cx));
                 super::value_viewer::open_anchored(
                     console,
                     table_cell,
                     Some((grid.downgrade(), *cell)),
+                    back,
                     cx,
                 );
             }
@@ -1419,6 +1521,11 @@ fn text_view(console: ConsoleId, cx: &App) -> Option<Entity<TextView>> {
     tab_of(grid.entity_id(), cx)?.text.clone()
 }
 
+/// The text view's focus handle (tests).
+pub fn text_focus(console: ConsoleId, cx: &App) -> Option<FocusHandle> {
+    Some(text_view(console, cx)?.read(cx).focus.clone())
+}
+
 /// The text view's state (`None` before it was shown).
 pub fn text_state(console: ConsoleId, cx: &App) -> Option<TextState> {
     Some(text_view(console, cx)?.read(cx).state)
@@ -1636,6 +1743,7 @@ fn record_of(
     cx: &App,
 ) -> Option<RecordView> {
     let row = record_row(console, grid, cx)?;
+    RECORD_READS.with(|r| r.set(r.get() + 1));
     let g = grid.read(cx);
     let map = g.view_map();
     let view_row = map.model_to_view(row)?.0;
@@ -1695,6 +1803,57 @@ fn record_of(
         position,
         fields,
     })
+}
+
+// ## m3c-t38 fix round 1 (m2)
+/// [`record_of`], read again only when what it reads changed (the row, the columns shown, the
+/// rows, the display settings, the language): a tile frame formats no field otherwise.
+fn record_cached(
+    console: ConsoleId,
+    grid: &Entity<GridView>,
+    adapter: &Rc<GridAdapter>,
+    cx: &mut App,
+) -> Option<RecordView> {
+    let row = record_row(console, grid, cx)?;
+    let key = {
+        let g = grid.read(cx);
+        RecordKey {
+            grid: grid.entity_id(),
+            generation: g.generation(),
+            adapter_generation: adapter.generation(),
+            row,
+            view_row: g.view_map().model_to_view(row).map_or(u64::MAX, |v| v.0),
+            rows: g.view_map().len(),
+            cols: g.column_layout().visible().to_vec(),
+            display: adapter.display().settings().version,
+            l10n: cx
+                .try_global::<crate::l10n_global::L10nGlobal>()
+                .map(|l| l.l10n.generation()),
+        }
+    };
+    if let Some((k, r)) = cx
+        .try_global::<Views>()
+        .and_then(|v| v.record_cache.get(&console))
+        && *k == key
+    {
+        return Some(r.clone());
+    }
+    let record = record_of(console, grid, adapter, cx)?;
+    cx.default_global::<Views>()
+        .record_cache
+        .insert(console, (key, record.clone()));
+    Some(record)
+}
+
+/// How many records the inspector has read since the app started (tests: a frame with the same
+/// record reads none).
+pub fn record_reads(cx: &App) -> u64 {
+    let _ = cx;
+    RECORD_READS.with(Cell::get)
+}
+
+thread_local! {
+    static RECORD_READS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// `text` clamped to [`RECORD_LINES`] lines of about [`RECORD_LINE_CHARS`] characters (with
@@ -1930,7 +2089,7 @@ pub(crate) fn inspector(
     let theme = *Theme::get(cx);
     let t = theme.tokens;
     let c = &t.colors;
-    let record = record_of(console, grid, adapter, cx);
+    let record = record_cached(console, grid, adapter, cx);
     let focus = cx
         .default_global::<Views>()
         .record_focus
@@ -2084,21 +2243,56 @@ pub(crate) fn inspector(
 
 // ---- the toolbar's right group -------------------------------------------------------------------
 
+/// The view switch's three segments and the record toggle, in that order.
+const SWITCH_MODES: [ViewMode; 3] = [ViewMode::Table, ViewMode::Transposed, ViewMode::Text];
+
+/// Console `console`'s switch and toggle focus handles (fix round 1, m5: keyboard reachable;
+/// one tab stop for the switch, its pressed segment; one for the toggle).
+fn switch_handles(console: ConsoleId, cx: &mut App) -> [FocusHandle; 4] {
+    if let Some(h) = cx
+        .try_global::<Views>()
+        .and_then(|v| v.switch_focus.get(&console))
+    {
+        return h.clone();
+    }
+    let h = std::array::from_fn(|_| cx.focus_handle());
+    cx.default_global::<Views>()
+        .switch_focus
+        .insert(console, h.clone());
+    h
+}
+
+/// The focus handle of the view switch's pressed segment for console `console` (tests; the
+/// keyboard reaches it with Tab).
+pub fn view_switch_focus(console: ConsoleId, cx: &mut App) -> FocusHandle {
+    let shown = mode(console, cx);
+    let ix = SWITCH_MODES.iter().position(|m| *m == shown).unwrap_or(0);
+    switch_handles(console, cx)[ix].clone()
+}
+
+/// The record toggle's focus handle for console `console` (tests).
+pub fn record_toggle_focus(console: ConsoleId, cx: &mut App) -> FocusHandle {
+    switch_handles(console, cx)[3].clone()
+}
+
 /// One segment of the view switch.
 #[allow(clippy::too_many_arguments)]
 fn segment(
     console: ConsoleId,
-    mode: ViewMode,
+    ix: usize,
     shown: ViewMode,
     icon: IconName,
     words: Option<SharedString>,
     name: SharedString,
     reason: Option<SharedString>,
+    handles: &[FocusHandle; 4],
+    window: &Window,
     cx: &App,
 ) -> AnyElement {
     let theme = *Theme::get(cx);
     let t = theme.tokens;
     let c = &t.colors;
+    let mode = SWITCH_MODES[ix];
     let pressed = mode == shown;
     let disabled = reason.is_some();
     let ink = if disabled {
@@ -2118,9 +2312,14 @@ fn segment(
         ViewMode::Transposed => "view-transposed",
         ViewMode::Text => "view-text",
     };
+    let stop = SWITCH_MODES.iter().position(|m| *m == shown).unwrap_or(0);
+    let handle = handles[ix].clone().tab_stop(ix == stop);
+    let focused = handle.is_focused(window) && window.last_input_was_keyboard();
+    let roving: Vec<FocusHandle> = handles[..3].to_vec();
     let mut seg = div()
         .id(id)
         .debug_selector(move || format!("segment-{id}"))
+        .track_focus(&handle)
         .flex()
         .flex_row()
         .items_center()
@@ -2128,6 +2327,27 @@ fn segment(
         .h_full()
         .px(px(7.0))
         .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+        .on_key_down(move |ev: &KeyDownEvent, window, cx| {
+            let k = &ev.keystroke;
+            if k.modifiers.modified() {
+                return;
+            }
+            let next = match k.key.as_str() {
+                "enter" | "space" => {
+                    if !disabled {
+                        set_mode(console, mode, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                "right" => (ix + 1) % 3,
+                "left" => (ix + 2) % 3,
+                _ => return,
+            };
+            cx.stop_propagation();
+            window.focus(&roving[next], cx);
+            set_mode(console, SWITCH_MODES[next], cx);
+        })
         .child(Icon::new(icon).size(IconSize::Chrome).color(ink.to_hsla()));
     if let Some(words) = words {
         seg = seg.child(Label::new(
@@ -2148,10 +2368,13 @@ fn segment(
                 set_mode(console, mode, cx);
             });
     }
-    seg.role(Role::RadioButton)
-        .aria_label(name)
-        .aria_selected(pressed)
-        .into_any_element()
+    focus_outline(
+        seg.declare(Role::Button, name, None)
+            .aria_toggled(accesskit::Toggled::from(pressed)),
+        &theme,
+        focused,
+    )
+    .into_any_element()
 }
 
 /// The view switch (`words`: with the segments' words) showing `shown`, Transposed disabled
@@ -2161,8 +2384,10 @@ fn view_switch(
     shown: ViewMode,
     refused: Option<u64>,
     words: bool,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
+    let handles = switch_handles(console, cx);
     let theme = *Theme::get(cx);
     let c = &theme.tokens.colors;
     let reason = refused.map(|rows| {
@@ -2175,18 +2400,10 @@ fn view_switch(
             ],
         )
     });
-    let item = |mode, icon, id: &str| {
-        let name = message(cx, id, vec![]);
-        (mode, icon, name)
-    };
     let segments = [
-        item(ViewMode::Table, IconName::Table2, "hv-view-table"),
-        item(
-            ViewMode::Transposed,
-            IconName::TableProperties,
-            "hv-view-transposed",
-        ),
-        item(ViewMode::Text, IconName::AlignLeft, "hv-view-text"),
+        (IconName::Table2, "hv-view-table"),
+        (IconName::TableProperties, "hv-view-transposed"),
+        (IconName::AlignLeft, "hv-view-text"),
     ];
     let mut group = div()
         .id("view-switch")
@@ -2200,21 +2417,24 @@ fn view_switch(
         .border_color(c.seam_strong.to_hsla())
         .rounded(px(theme.tokens.radii.sm))
         .overflow_hidden();
-    for (i, (mode, icon, name)) in segments.into_iter().enumerate() {
+    for (i, (icon, msg)) in segments.into_iter().enumerate() {
         if i > 0 {
             group = group.child(div().w(px(1.0)).h_full().bg(c.seam_strong.to_hsla()));
         }
-        let why = (mode == ViewMode::Transposed)
+        let name = message(cx, msg, vec![]);
+        let why = (SWITCH_MODES[i] == ViewMode::Transposed)
             .then(|| reason.clone())
             .flatten();
         group = group.child(segment(
             console,
-            mode,
+            i,
             shown,
             icon,
             words.then(|| name.clone()),
             name,
             why,
+            &handles,
+            window,
             cx,
         ));
     }
@@ -2229,16 +2449,25 @@ fn view_switch(
 }
 
 /// The record toggle (`word`: with "Record", a one-row result).
-fn record_toggle(open: bool, word: bool, cx: &App) -> AnyElement {
+fn record_toggle(
+    console: ConsoleId,
+    open: bool,
+    word: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let handle = switch_handles(console, cx)[3].clone().tab_stop(true);
     let theme = *Theme::get(cx);
     let t = theme.tokens;
     let c = &t.colors;
     let name = message(cx, "hv-record-tip", vec![]);
     let tip = name.clone();
     let ink = if open { c.text } else { c.text_2 };
+    let focused = handle.is_focused(window) && window.last_input_was_keyboard();
     let mut b = div()
         .id("record-toggle")
         .debug_selector(|| "record-toggle".to_string())
+        .track_focus(&handle)
         .flex()
         .flex_row()
         .items_center()
@@ -2255,6 +2484,13 @@ fn record_toggle(open: bool, word: bool, cx: &App) -> AnyElement {
         .cursor_pointer()
         .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
         .on_click(|_, window, cx| toggle_record(window, cx))
+        .on_key_down(|ev: &KeyDownEvent, window, cx| {
+            let k = &ev.keystroke;
+            if !k.modifiers.modified() && matches!(k.key.as_str(), "enter" | "space") {
+                cx.stop_propagation();
+                toggle_record(window, cx);
+            }
+        })
         .child(
             Icon::new(IconName::PanelRight)
                 .size(IconSize::Chrome)
@@ -2273,10 +2509,13 @@ fn record_toggle(open: bool, word: bool, cx: &App) -> AnyElement {
             ink.to_hsla(),
         ));
     }
-    b.role(Role::Button)
-        .aria_label(name)
-        .aria_selected(open)
-        .into_any_element()
+    focus_outline(
+        b.declare(Role::Button, name, None)
+            .aria_toggled(accesskit::Toggled::from(open)),
+        &theme,
+        focused,
+    )
+    .into_any_element()
 }
 
 /// The result toolbar's right-group items after rows · timing: the view switch (its words go
@@ -2293,17 +2532,17 @@ pub(crate) fn toolbar_items(
         .unwrap_or_default();
     let refused = transposed_refused(grid, cx);
     let switch = ToolbarItem::pinned(
-        Rc::new(move |_, cx| view_switch(console, shown, refused, true, cx)),
+        Rc::new(move |window, cx| view_switch(console, shown, refused, true, window, cx)),
         label,
     )
-    .compact(Rc::new(move |_, cx| {
-        view_switch(console, shown, refused, false, cx)
+    .compact(Rc::new(move |window, cx| {
+        view_switch(console, shown, refused, false, window, cx)
     }));
     let open = record_open(window, cx);
     let one_row = shown_rows(grid, cx) == 1;
     let record_label: TextFn = Rc::new(|cx: &App| message(cx, "hv-record-tip", vec![]));
     let record = ToolbarItem::pinned(
-        Rc::new(move |_, cx| record_toggle(open, one_row, cx)),
+        Rc::new(move |window, cx| record_toggle(console, open, one_row, window, cx)),
         record_label,
     );
     vec![switch, record]

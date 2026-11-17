@@ -21,7 +21,7 @@ mod support;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext};
 use hacivat_app::console::{ConsoleId, ConsoleState, Consoles};
 use hacivat_app::exec_ui::{confirm, orchestrator};
 use hacivat_app::results::adapter::ResultDisplay;
@@ -368,6 +368,12 @@ fn transposed_disabled_above_100k_rows(cx: &mut TestAppContext) {
     // Find and go to row are the table's: off while transposed.
     assert!(!t.command_enabled("grid.find"));
     assert!(!t.command_enabled("grid.goto_row"));
+    // ## m3c-t38 fix round 1 (m1, m9): so is sorting (sorting by a row is not offered); the
+    // transposed grid shows no sort indicator although the table is sorted.
+    for id in ["grid.sort_asc", "grid.sort_desc", "grid.clear_sort"] {
+        assert!(!t.command_enabled(id), "{id}");
+    }
+    assert!(t.vcx.cx.read(|cx| tgrid.read(cx).sort().is_empty()));
     // Copy copies what is shown, raw: the `name` row of the first two columns.
     in_window(t.vcx, |window, cx| {
         tgrid.update(cx, |g, cx| {
@@ -610,6 +616,8 @@ fn value_viewer_pretty_json_is_display_only(cx: &mut TestAppContext) {
         "{\n  \"b\": 1,\n  \"a\": [\n    true,\n    null,\n    \"x, y\"\n  ]\n}"
     );
     in_window(t.vcx, |_, cx| value_viewer::copy_raw(t.console, cx));
+    // Built off the UI thread (fix round 1, I2).
+    t.redraw();
     assert_eq!(t.clipboard().as_deref(), Some(json), "the server's text");
     let drawn = t.drawn();
     assert!(drawn.iter().any(|d| d == "Copy raw value"), "{drawn:?}");
@@ -674,6 +682,8 @@ fn value_viewer_pretty_json_is_display_only(cx: &mut TestAppContext) {
     );
     assert_eq!(plain(&v.footer), "10 bytes");
     in_window(t.vcx, |_, cx| value_viewer::copy_raw(t.console, cx));
+    // Built off the UI thread (fix round 1, I2).
+    t.redraw();
     assert_eq!(t.clipboard().as_deref(), Some("\\x00014861636976617421"));
 }
 
@@ -730,10 +740,9 @@ fn truncated_value_offers_a_rerun_with_the_raised_limit(cx: &mut TestAppContext)
             cell_cap: hacivat_results::window::MAX_CELL_CAP,
         }]
     );
-    assert!(
-        !t.vcx.cx.read(|cx| value_viewer::is_open(t.console, cx)),
-        "the viewer closes for the re-run"
-    );
+    // ## m3c-t38 fix round 1 (I1): the viewer stays open (the new result closes it, a
+    // refusal is said in it).
+    assert!(t.vcx.cx.read(|cx| value_viewer::is_open(t.console, cx)));
     // A whole value: no notice, no re-run.
     in_window(t.vcx, |_, cx| value_viewer::open(t.console, cell(1, 0), cx));
     t.redraw();
@@ -994,10 +1003,10 @@ fn rerun_with_raised_limit_goes_through_the_gate(cx: &mut TestAppContext) {
     stop_core_runtime_test(cx);
 }
 
-/// On production the re-run asks as Run does: a write is held in Hacivat's savepoint and the
-/// Keep / Undo prompt opens before anything is kept, for the re-run too.
+/// On production a write ran behind its Keep / Undo prompt; its viewer's re-run is refused
+/// like any write (fix round 1, I1): nothing is sent again, no second savepoint.
 #[gpui::test]
-fn rerun_with_raised_limit_asks_on_production(cx: &mut TestAppContext) {
+fn rerun_with_raised_limit_refuses_a_write_on_production(cx: &mut TestAppContext) {
     let c = console(cx, EnvTag::Production, pg_with_note("UPDATE"), None);
     let text = "UPDATE t SET a = 1 WHERE id = 1 RETURNING note";
     c.run(text);
@@ -1015,22 +1024,308 @@ fn rerun_with_raised_limit_asks_on_production(cx: &mut TestAppContext) {
     c.open_viewer();
     let id = c.id;
     in_window(c.vcx, |_, cx| value_viewer::rerun(id, cx));
-    wait_until(c.vcx, "the re-run's Keep/Undo prompt", |vcx| {
-        commit_open(vcx)
+    wait_until(c.vcx, "the refusal in the viewer", |vcx| {
+        vcx.cx
+            .read(|cx| value_viewer::view(id, cx))
+            .and_then(|v| v.rerun_off)
+            .is_some_and(|off| off.starts_with("Only a query"))
     });
-    assert_eq!(c.queries(), [text, text]);
+    c.redraw();
+    assert!(!commit_open(c.vcx));
+    assert_eq!(c.queries(), [text]);
     let savepoints = c
         .fake
         .call_log()
         .iter()
         .filter(|call| matches!(call, FakeCall::Statement(s) if s == "SAVEPOINT hv_confirm"))
         .count();
-    assert_eq!(savepoints, 2, "{:?}", c.fake.call_log());
+    assert_eq!(savepoints, 1, "{:?}", c.fake.call_log());
+    stop_core_runtime_test(cx);
+}
+
+// ---- fix round 1 ----------------------------------------------------------------------------------
+
+fn focused(vcx: &VisualTestContext, handle: &gpui::FocusHandle) -> bool {
+    in_window(vcx, |window, _| handle.is_focused(window))
+}
+
+/// I3: the focus follows the view shown. Escape in the value viewer gives it back to the view
+/// it was opened over (the table, the Transposed view's grid, the text view), and switching
+/// result tabs puts it on the view the other tab shows, never on a hidden grid.
+#[gpui::test]
+fn escape_and_tab_switches_put_the_focus_on_the_view_shown(cx: &mut TestAppContext) {
+    let t = tile(cx);
+    let tab_of = |unit: u32, source: Arc<dyn ResultSource>| ResultTab {
+        key: TabKey {
+            console: 1,
+            unit_ordinal: unit,
+            result_ordinal: 0,
+        },
+        title: "".into(),
+        unit: UnitId {
+            run: RunId(1),
+            ordinal: unit,
+        },
+        source,
+    };
+    in_window(t.vcx, |_, cx| {
+        t.results.update(cx, |r, cx| {
+            r.apply(
+                &[
+                    tab_of(1, store(schema(), numbered(3))),
+                    tab_of(2, store(schema(), numbered(4))),
+                ],
+                cx,
+            );
+            r.set_active(ActiveResult::Tab(0), cx);
+        })
+    });
+    t.redraw();
+    let grid0 = t
+        .vcx
+        .cx
+        .read(|cx| {
+            hosts(cx)
+                .into_iter()
+                .find_map(|h| h.read(cx).grid_of(t.console, 0, cx))
+        })
+        .expect("tab 0's grid");
+    let handle0 = t.vcx.cx.read(|cx| grid0.read(cx).focus_handle(cx));
+    // Table: Escape gives the focus back to the table grid.
+    t.focus(&grid0, 1, 1);
+    in_window(t.vcx, |window, cx| window.focus(&handle0, cx));
+    in_window(t.vcx, |_, cx| value_viewer::open(t.console, cell(1, 1), cx));
+    t.redraw();
+    assert!(!focused(t.vcx, &handle0), "the viewer took the focus");
+    t.vcx.simulate_keystrokes("escape");
+    t.redraw();
+    assert!(focused(t.vcx, &handle0));
+
+    // Transposed: the viewer anchors to the transposed grid and Escape returns there.
+    assert!(t.set_mode(ViewMode::Transposed));
+    let tgrid = t
+        .vcx
+        .cx
+        .read(|cx| views::transposed_grid(t.console, cx))
+        .unwrap();
+    let thandle = t.vcx.cx.read(|cx| tgrid.read(cx).focus_handle(cx));
+    assert!(focused(t.vcx, &thandle), "entering the view focuses it");
+    in_window(t.vcx, |_, cx| value_viewer::open(t.console, cell(1, 1), cx));
+    t.redraw();
+    let anchor = t.vcx.cx.read(|cx| value_viewer::anchor(t.console, cx));
     assert_eq!(
+        anchor.map(|(g, c)| (g.entity_id(), c)),
+        Some((tgrid.entity_id(), cell(1, 2))),
+        "the transposed cell that shows table cell (1, 1)"
+    );
+    t.vcx.simulate_keystrokes("escape");
+    t.redraw();
+    assert!(focused(t.vcx, &thandle));
+
+    // A round trip through the other tab: there the table grid, back here the transposed one.
+    in_window(t.vcx, |_, cx| {
+        t.results
+            .update(cx, |r, cx| r.set_active(ActiveResult::Tab(1), cx))
+    });
+    t.redraw();
+    t.redraw();
+    let grid1 = t
+        .vcx
+        .cx
+        .read(|cx| {
+            hosts(cx)
+                .into_iter()
+                .find_map(|h| h.read(cx).grid_of(t.console, 1, cx))
+        })
+        .unwrap();
+    let handle1 = t.vcx.cx.read(|cx| grid1.read(cx).focus_handle(cx));
+    assert!(focused(t.vcx, &handle1), "tab 1's table");
+    in_window(t.vcx, |_, cx| {
+        t.results
+            .update(cx, |r, cx| r.set_active(ActiveResult::Tab(0), cx))
+    });
+    t.redraw();
+    t.redraw();
+    assert!(
+        focused(t.vcx, &thandle),
+        "tab 0's Transposed view, not its hidden table"
+    );
+    assert!(!focused(t.vcx, &handle0));
+
+    // Text: Escape returns to the text view.
+    assert!(t.set_mode(ViewMode::Text));
+    let text = t
+        .vcx
+        .cx
+        .read(|cx| views::text_focus(t.console, cx))
+        .unwrap();
+    assert!(focused(t.vcx, &text));
+    in_window(t.vcx, |_, cx| value_viewer::open(t.console, cell(0, 1), cx));
+    t.redraw();
+    assert!(!focused(t.vcx, &text));
+    t.vcx.simulate_keystrokes("escape");
+    t.redraw();
+    assert!(focused(t.vcx, &text));
+}
+
+/// m3: a Transposed view rebuilt for a new order stays on the record it was on; m2: a frame
+/// that shows the same record reads no field again.
+#[gpui::test]
+fn a_rebuilt_transposed_view_keeps_its_record_and_frames_read_no_fields(cx: &mut TestAppContext) {
+    let t = tile(cx);
+    let grid = t.show(store(schema(), numbered(4)));
+    t.focus(&grid, 2, 1);
+    assert!(t.set_mode(ViewMode::Transposed));
+    let tgrid = t
+        .vcx
+        .cx
+        .read(|cx| views::transposed_grid(t.console, cx))
+        .unwrap();
+    let table_focus = |t: &Tile| {
+        t.vcx.cx.read(|cx| {
+            let f = tgrid.read(cx).selection().focus()?;
+            views::transposed_source(t.console, cx)?.table_cell(f)
+        })
+    };
+    assert_eq!(table_focus(&t), Some(cell(2, 1)));
+    // The table's order changes (descending): the view is rebuilt, the record stays.
+    in_window(t.vcx, |_, cx| {
+        grid.update(cx, |g, cx| g.request_sort(SortSpec::by(ColId(0), true), cx))
+    });
+    t.redraw();
+    t.redraw();
+    t.redraw();
+    let rows = t.vcx.cx.read(|cx| {
+        views::transposed_source(t.console, cx)
+            .unwrap()
+            .table_rows()
+            .to_vec()
+    });
+    assert_eq!(rows, [ModelRow(3), ModelRow(2), ModelRow(1), ModelRow(0)]);
+    assert_eq!(table_focus(&t), Some(cell(2, 1)), "the same record");
+    // The inspector reads the record once; later frames read nothing.
+    in_window(t.vcx, views::toggle_record);
+    t.redraw();
+    let reads = t.vcx.cx.read(views::record_reads);
+    t.redraw();
+    t.redraw();
+    assert_eq!(t.vcx.cx.read(views::record_reads), reads);
+}
+
+/// m5: the view switch and the record toggle are reachable by keyboard: ←/→ move between the
+/// segments and show the view, Enter or Space presses the toggle.
+#[gpui::test]
+fn the_view_switch_and_the_record_toggle_work_from_the_keyboard(cx: &mut TestAppContext) {
+    let t = tile(cx);
+    let _grid = t.show(store(schema(), numbered(3)));
+    let handle = in_window(t.vcx, |_, cx| views::view_switch_focus(t.console, cx));
+    in_window(t.vcx, |window, cx| window.focus(&handle, cx));
+    t.redraw();
+    t.vcx.simulate_keystrokes("right");
+    t.redraw();
+    assert_eq!(t.mode(), ViewMode::Transposed);
+    let handle = in_window(t.vcx, |_, cx| views::view_switch_focus(t.console, cx));
+    in_window(t.vcx, |window, cx| window.focus(&handle, cx));
+    t.redraw();
+    t.vcx.simulate_keystrokes("left");
+    t.redraw();
+    assert_eq!(t.mode(), ViewMode::Table);
+    let toggle = in_window(t.vcx, |_, cx| views::record_toggle_focus(t.console, cx));
+    in_window(t.vcx, |window, cx| window.focus(&toggle, cx));
+    t.redraw();
+    t.vcx.simulate_keystrokes("enter");
+    t.redraw();
+    assert!(in_window(t.vcx, |window, cx| views::record_open(
+        window, cx
+    )));
+}
+
+/// A FakeDriver whose `INSERT` returns one row with a cut `body`.
+fn pg_insert_returning() -> FakeDriver {
+    pg_with_note("INSERT")
+}
+
+/// I1 (controller ruling, fail closed): Re-run with a raised limit runs only a read. An
+/// `INSERT … RETURNING` whose returned value was cut is never run again from the viewer:
+/// nothing is sent, and the viewer says why.
+#[gpui::test]
+fn rerun_with_raised_limit_runs_only_a_read(cx: &mut TestAppContext) {
+    let c = console(cx, EnvTag::Dev, pg_insert_returning(), None);
+    let text = "INSERT INTO docs(body) VALUES ('x') RETURNING note";
+    c.run(text);
+    wait_until(c.vcx, "the insert", |_| c.queries().len() == 1);
+    c.open_viewer();
+    let id = c.id;
+    assert!(
         c.vcx
             .cx
-            .read(|cx| orchestrator::last_run_cell_cap(c.id, cx)),
-        Some(hacivat_results::window::MAX_CELL_CAP)
+            .read(|cx| value_viewer::view(id, cx))
+            .is_some_and(|v| v.rerun.is_some())
+    );
+    in_window(c.vcx, |_, cx| value_viewer::rerun(id, cx));
+    wait_until(c.vcx, "the refusal in the viewer", |vcx| {
+        vcx.cx
+            .read(|cx| value_viewer::view(id, cx))
+            .and_then(|v| v.rerun_off)
+            .is_some_and(|off| off.starts_with("Only a query"))
+    });
+    c.redraw();
+    assert_eq!(c.queries(), [text], "nothing sent again");
+    let v = c.vcx.cx.read(|cx| value_viewer::view(id, cx)).unwrap();
+    assert_eq!(
+        v.rerun_off.as_deref(),
+        Some(
+            "Only a query that reads data is run again with a larger value limit. Run this \
+             statement again from the editor."
+        )
     );
     stop_core_runtime_test(cx);
+}
+
+/// Fix round 1 (I2): what opening the value viewer costs the UI thread at the default value
+/// limit (1 MiB) and at the largest (64 MiB), for text and for bytes: the open itself and a
+/// frame with the viewer up must each stay under a 60 Hz frame (16 ms). The load (the form, the
+/// line cuts, the count) runs on the background executor; it is reported, not budgeted. Run
+/// with `HACIVAT_PERF=1 cargo test --release … --test results_views -- --ignored`.
+#[gpui::test]
+#[ignore = "perf"]
+fn value_viewer_open_cost_perf(cx: &mut TestAppContext) {
+    if std::env::var_os("HACIVAT_PERF").is_none() {
+        return;
+    }
+    let t = tile(cx);
+    for (label, size) in [("1 MiB", 1usize << 20), ("64 MiB", 64 << 20)] {
+        for binary in [false, true] {
+            let (schema, value) = if binary {
+                (
+                    one("blob", LogicalType::Bytes { max: None }, pg(17, "bytea")),
+                    Value::Bytes(Arc::from(vec![0x5au8; size])),
+                )
+            } else {
+                (
+                    one("doc", text(), pg(25, "text")),
+                    Value::Text("y".repeat(size).into()),
+                )
+            };
+            let _grid = t.show(store(schema, vec![vec![value]]));
+            let started = std::time::Instant::now();
+            in_window(t.vcx, |_, cx| value_viewer::open(t.console, cell(0, 0), cx));
+            let open = started.elapsed();
+            let started = std::time::Instant::now();
+            t.redraw();
+            let first = started.elapsed();
+            let started = std::time::Instant::now();
+            t.redraw();
+            let frame = started.elapsed();
+            let kind = if binary { "bytea" } else { "text" };
+            eprintln!(
+                "value viewer {label} {kind}: open {open:?}, a frame {frame:?} (first frame with \
+                 the background load, test executor: {first:?})"
+            );
+            assert!(open.as_millis() < 16, "open {open:?}");
+            assert!(frame.as_millis() < 16, "frame {frame:?}");
+            in_window(t.vcx, |_, cx| value_viewer::close(t.console, cx));
+            t.redraw();
+        }
+    }
 }

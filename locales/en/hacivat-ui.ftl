@@ -3089,3 +3089,8 @@ hv-vv-copied = Copied the value
 # Variables:
 #   $shown (String) - what was copied (an hv-grid-size-* message), e.g. "1 MB".
 hv-vv-copied-cut = Copied the first { $shown } of the value: the rest wasn't fetched.
+# The value viewer's line (and the console's log line and gutter) when its re-run was refused:
+# only a read runs again with a raised value limit (fix round 1, controller ruling).
+hv-vv-rerun-not-read = Only a query that reads data is run again with a larger value limit. Run this statement again from the editor.
+# The re-run button's tooltip while the console runs a statement.
+hv-vv-rerun-busy = A statement is running in this console. Re-run once it ends.

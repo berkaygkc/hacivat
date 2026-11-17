@@ -543,10 +543,13 @@ impl ResultsHost {
                         .contains_focused(window, cx)
             })
         });
+        // ## m3c-t38 fix round 1 (I3): a Transposed view's grid or a text view that is not
+        // shown counts too, and the focus goes to the view shown (not its hidden table grid).
+        let hidden_focused = hidden_focused || super::views::hidden_view_focused(shown, window, cx);
         if !hidden_focused {
             return;
         }
-        let target = shown.map(|g| g.read(cx).focus_handle(cx));
+        let target = shown.map(|g| super::views::shown_focus(g, cx));
         window.defer(cx, move |window, cx| match target {
             Some(handle) => window.focus(&handle, cx),
             None => window.blur(cx),

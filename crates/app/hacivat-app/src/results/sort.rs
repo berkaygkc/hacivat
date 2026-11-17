@@ -901,13 +901,29 @@ pub fn register(cx: &mut App) {
     let reg = cx.default_global::<ActionRegistry>();
     for (id, title_id) in COMMANDS {
         let (run, enabled): (hacivat_ui::actions::ActionFn, fn(&App) -> bool) = match id {
+            // ## m3c-t38 fix round 1 (m1, named exception): sorting is the table's; off while
+            // the Transposed or Text view is shown (sorting by a row is not offered).
             "grid.sort_asc" => (
-                Rc::new(|window, cx| sort_focus_column(false, window, cx)),
-                |cx| shown_grid(cx).is_some_and(|g| g.read(cx).selection().focus().is_some()),
+                Rc::new(|window, cx| {
+                    if super::views::table_shown(cx) {
+                        sort_focus_column(false, window, cx)
+                    }
+                }),
+                |cx| {
+                    super::views::table_shown(cx)
+                        && shown_grid(cx).is_some_and(|g| g.read(cx).selection().focus().is_some())
+                },
             ),
             "grid.sort_desc" => (
-                Rc::new(|window, cx| sort_focus_column(true, window, cx)),
-                |cx| shown_grid(cx).is_some_and(|g| g.read(cx).selection().focus().is_some()),
+                Rc::new(|window, cx| {
+                    if super::views::table_shown(cx) {
+                        sort_focus_column(true, window, cx)
+                    }
+                }),
+                |cx| {
+                    super::views::table_shown(cx)
+                        && shown_grid(cx).is_some_and(|g| g.read(cx).selection().focus().is_some())
+                },
             ),
             _ => (
                 Rc::new(|window, cx| {
@@ -916,10 +932,11 @@ pub fn register(cx: &mut App) {
                     }
                 }),
                 |cx| {
-                    shown_grid(cx).is_some_and(|g| {
-                        !g.read(cx).sort().is_empty()
-                            || status(&g, cx).is_some_and(|s| s.running.is_some())
-                    })
+                    super::views::table_shown(cx)
+                        && shown_grid(cx).is_some_and(|g| {
+                            !g.read(cx).sort().is_empty()
+                                || status(&g, cx).is_some_and(|s| s.running.is_some())
+                        })
                 },
             ),
         };

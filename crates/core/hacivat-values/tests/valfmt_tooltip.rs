@@ -138,3 +138,39 @@ fn bytes_are_hex_and_a_timestamptz_reads_in_the_display_zone() {
     assert_eq!(tip.text, cell.text);
     assert!(tip.text.ends_with("+03"), "{}", tip.text);
 }
+
+/// Fix round 1 (I2): a large value costs the tooltip only what it shows: bytes are hex up to
+/// the cap (never the whole value), and a long text's chip names its bytes instead of counting
+/// every character.
+#[test]
+fn a_large_value_is_formatted_only_up_to_the_cap() {
+    let bytea = LogicalType::Bytes { max: None };
+    let big: std::sync::Arc<[u8]> = std::sync::Arc::from(vec![0xabu8; 1 << 20]);
+    let tip = format_cell(
+        Value::Bytes(big).view(),
+        &facts(&bytea),
+        &tr(),
+        Purpose::Tooltip,
+    );
+    assert!(tip.text.len() <= 256, "{}", tip.text.len());
+    assert!(tip.text.starts_with("\\xabab"));
+    assert_ne!(tip.flags & CellFlags::TRUNCATED.bits(), 0);
+    assert_eq!(
+        tip.chip,
+        Some(ChipKind::Truncated {
+            total: 1 << 20,
+            unit: LenUnit::Bytes
+        })
+    );
+    let t = text_type();
+    let long = Value::Text("x".repeat(1 << 20).into());
+    let tip = format_cell(long.view(), &facts(&t), &tr(), Purpose::Tooltip);
+    assert_eq!(tip.text.len(), 256);
+    assert_eq!(
+        tip.chip,
+        Some(ChipKind::Truncated {
+            total: 1 << 20,
+            unit: LenUnit::Bytes
+        })
+    );
+}

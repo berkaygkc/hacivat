@@ -47,6 +47,31 @@ pub(super) fn text(v: ValueRef<'_>, col: &ColumnFacts<'_>, s: &DisplaySettings) 
             unit: t.unit,
         });
     }
+    // ## m3c-t38 fix round 1 (I2): bytes are hex for at most what the cap shows, never the
+    // whole value (a 64 MiB bytea would be 128 MB of hex per call).
+    let bytes = match v {
+        ValueRef::Bytes(b) => Some(b),
+        ValueRef::Truncated(t) => match t.prefix.view() {
+            ValueRef::Bytes(b) => Some(b),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(b) = bytes {
+        // `\x` and two digits per byte.
+        let shown = cap.saturating_sub(2) / 2;
+        super::raw::push_hex(&mut d.text, b, shown);
+        if b.len() > shown {
+            d.flags |= CellFlags::TRUNCATED.bits();
+            if d.chip.is_none() {
+                d.chip = Some(ChipKind::Truncated {
+                    total: b.len() as u64,
+                    unit: LenUnit::Bytes,
+                });
+            }
+        }
+        return d;
+    }
     let zone = DisplayZone(s.tz.clone());
     match raw_text_in(v, col, &zone) {
         RawText::Null => d.text.push_str("NULL"),
@@ -56,9 +81,18 @@ pub(super) fn text(v: ValueRef<'_>, col: &ColumnFacts<'_>, s: &DisplaySettings) 
             if cut < text.len() {
                 d.flags |= CellFlags::TRUNCATED.bits();
                 if d.chip.is_none() {
-                    d.chip = Some(ChipKind::Truncated {
-                        total: text.chars().count() as u64,
-                        unit: LenUnit::Chars,
+                    // ## m3c-t38 fix round 1 (I2): characters are counted only up to
+                    // `COUNT_CHARS_UP_TO` bytes; past it the chip names the bytes.
+                    d.chip = Some(if text.len() <= COUNT_CHARS_UP_TO {
+                        ChipKind::Truncated {
+                            total: text.chars().count() as u64,
+                            unit: LenUnit::Chars,
+                        }
+                    } else {
+                        ChipKind::Truncated {
+                            total: text.len() as u64,
+                            unit: LenUnit::Bytes,
+                        }
                     });
                 }
             }
@@ -66,6 +100,10 @@ pub(super) fn text(v: ValueRef<'_>, col: &ColumnFacts<'_>, s: &DisplaySettings) 
     }
     d
 }
+
+/// Up to this many bytes a cut tooltip counts its value's characters (one pass at most this
+/// long); a longer value's chip names its bytes.
+pub const COUNT_CHARS_UP_TO: usize = 64 << 10;
 
 /// The kind a cell of `v` has (as the cell's display).
 fn kind_of(v: ValueRef<'_>, logical: &LogicalType) -> DisplayKind {

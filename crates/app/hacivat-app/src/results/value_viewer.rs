@@ -8,9 +8,11 @@
 //! - **One value, read whole, from the model.** The viewer opens on a **model** cell (the grid's
 //!   focus is a model cell, so a sort or a filter never changes which value it reads) of the
 //!   console's active result, from the snapshot the adapter holds, and closes when the result
-//!   moves on (a re-run, another tab, another view). It is non-modal: anchored under its cell
-//!   (above when there is no room), clamped inside the grid's area, never over the console
-//!   toolbar; Escape, × or a click outside closes it and gives the focus back to the grid.
+//!   moves on (a re-run, another tab, another view). It is non-modal: anchored under its cell in
+//!   **the view shown** (the table, the Transposed view's grid; the text view has no cells, so
+//!   the viewer sits at the top of its area), above when there is no room, clamped inside the
+//!   grid's area, never over the console toolbar; Escape, × or a click outside closes it and
+//!   gives the focus back to the view shown.
 //! - **Raw bytes are copied, never the display.** The well shows the value's raw channel
 //!   (`valfmt::raw_text_in`: the server's text, ungrouped numbers, bytes as hex). **Pretty**
 //!   (JSON and XML) re-indents for display only: JSON keeps its key order and every token as the
@@ -20,15 +22,21 @@
 //!   copy.
 //! - **Hex** for binary: the offset (`text-3`), 8 bytes per row in 2-byte groups (the popover is
 //!   under 560 px), then the ASCII column (`text-2`).
-//! - **Large values.** The well wraps the text itself (Fragment Mono has one advance) and builds
-//!   only the lines it shows (`VirtualList`): a 64 MiB value costs what its visible lines cost.
-//!   The lines are cut on the background executor.
+//! - **Nothing heavy on the UI thread** (fix round 1, I2). Opening reads only the cell's shape
+//!   (its kind and lengths). The form (JSON validity), the line cuts, the pretty text, the
+//!   colour runs and the character count are made on the background executor; the text is read
+//!   in place from the result's snapshot (one copy of the value: the store's), a pretty form is
+//!   the one owned copy, and hex rows are formatted only when the well shows them. Copy raw
+//!   value builds its text off the UI thread too.
 //! - **Truncated** (the store cut the value at the console's value limit): "Showing the first
 //!   1 MB of 5.2 MB." and **Re-run with a 64 MB value limit**, offered while the kept part is
 //!   under the largest limit. It emits `ResultsEvent::RerunWithLimit`, which the run UI handles
-//!   exactly like Re-run (`orchestrator::rerun`): only the text that ran, still in the editor,
-//!   through Run's pipeline (parameters, classification of the bytes sent, the gate, the
-//!   confirmations; production asks as Run does); only the run's fetch policy differs.
+//!   like Re-run (`orchestrator::rerun`): only the text that ran, still in the editor, through
+//!   Run's pipeline (parameters, classification of the bytes sent, the gate, the
+//!   confirmations). **Fix round 1 (I1, controller ruling, fail closed):** only a read is run
+//!   again; anything else is refused before it is sent and the viewer says why
+//!   (`hv-vv-rerun-not-read`). While the console runs a statement the button is disabled, with
+//!   the reason in its tooltip (m7). The viewer stays open; the new result closes it.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -59,7 +67,7 @@ use hacivat_values::{LenUnit, LogicalType, ValueRef};
 
 use crate::console::ConsoleId;
 use crate::exec_ui::marks::message;
-use crate::results::adapter::{GridAdapter, Texts};
+use crate::results::adapter::{GridAdapter, RawView, Texts};
 use crate::results::view::ResultsEvent;
 
 /// The popover's width (NOTES surface 22).
@@ -105,28 +113,59 @@ pub struct ViewerView {
     pub form: ValueForm,
     /// Pretty is pressed.
     pub pretty: bool,
-    /// The well's text, as shown (pretty or raw; hex rows for bytes).
+    /// The well's text, as shown (pretty or raw; hex rows for bytes), once the background
+    /// load landed (empty before).
     pub body: String,
-    /// "48 KB · 48,213 characters", "512 bytes".
+    /// "48 KB · 48,213 characters", "512 bytes" (empty before the load landed).
     pub footer: SharedString,
     /// The truncation notice.
     pub truncated: Option<SharedString>,
     /// The re-run button's words when it is offered.
     pub rerun: Option<SharedString>,
+    /// Why the re-run is off now (a run is busy, or it was refused).
+    pub rerun_off: Option<SharedString>,
     /// Copy raw value is enabled (not for NULL or a decode error).
     pub can_copy: bool,
 }
 
-/// The value the viewer reads, once per open (and per Raw / Pretty).
+/// The kind of value, read from its variant (no pass over its bytes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// Text read in place (`Text`, `Json`, `Xml`, a cut prefix of one).
+    Borrowed {
+        json: bool,
+        xml: bool,
+    },
+    Bytes,
+    Null,
+    Error,
+    /// A number, date, UUID…: a short raw text.
+    Scalar,
+}
+
+/// What the viewer reads once per open: the cell's shape and the header's facts.
 #[derive(Clone)]
-struct Loaded {
-    view: ViewerView,
-    /// What Copy raw value copies.
-    raw: Option<Arc<str>>,
+struct Meta {
+    view: RawView,
+    cell: ModelCell,
+    shape: Shape,
+    column: SharedString,
+    subtitle: SharedString,
+    truncated: Option<SharedString>,
+    rerun: Option<SharedString>,
     /// The kept part's bytes, when the store cut the value.
     kept: Option<u64>,
-    /// The result tab's unit (Re-run).
     unit_ordinal: u32,
+}
+
+/// What the background load made.
+#[derive(Clone)]
+struct Body {
+    form: ValueForm,
+    pretty: bool,
+    /// Characters (text) or bytes (binary) of what the result holds.
+    count: u64,
+    bytes: u64,
 }
 
 /// The token kinds the well colours.
@@ -144,46 +183,127 @@ enum Tok {
     Soft,
 }
 
-/// The well's lines: the text, each wrapped line's byte range, and the coloured runs.
+/// Where the well's text lives.
+#[derive(Clone, Default)]
+enum WellSrc {
+    #[default]
+    Empty,
+    /// The cell's text, read in place from the snapshot.
+    Cell(RawView, ModelCell),
+    /// A text the load made (a pretty form, a scalar, a decode error's message).
+    Owned(Arc<str>),
+    /// The cell's bytes, a hex row formatted when shown.
+    Hex(RawView, ModelCell),
+}
+
+/// The text of `cell` read in place: a text value (or the kept prefix of one).
+fn cell_str(view: &RawView, cell: ModelCell) -> &str {
+    match view.snapshot.cell(cell.row.0, cell.col.0) {
+        ValueRef::Text(t) | ValueRef::Json(t) | ValueRef::Xml(t) => t,
+        ValueRef::Truncated(t) => match t.prefix.view() {
+            ValueRef::Text(t) | ValueRef::Json(t) | ValueRef::Xml(t) => t,
+            _ => "",
+        },
+        _ => "",
+    }
+}
+
+/// The bytes of `cell` read in place (or the kept prefix).
+fn cell_bytes(view: &RawView, cell: ModelCell) -> &[u8] {
+    match view.snapshot.cell(cell.row.0, cell.col.0) {
+        ValueRef::Bytes(b) => b,
+        ValueRef::Truncated(t) => match t.prefix.view() {
+            ValueRef::Bytes(b) => b,
+            _ => &[],
+        },
+        _ => &[],
+    }
+}
+
+/// The well's lines: where the text lives, each wrapped line's byte range (or the hex rows),
+/// and the coloured runs.
 #[derive(Clone, Default)]
 struct WellLines {
-    text: Arc<str>,
+    src: WellSrc,
     lines: Arc<[Range<usize>]>,
     tokens: Arc<[(Range<usize>, Tok)]>,
 }
 
+impl WellLines {
+    /// The whole text as shown (tests; small values).
+    fn full_text(&self) -> String {
+        match &self.src {
+            WellSrc::Empty => String::new(),
+            WellSrc::Cell(view, cell) => cell_str(view, *cell).to_string(),
+            WellSrc::Owned(t) => t.to_string(),
+            WellSrc::Hex(view, cell) => {
+                hex_lines(cell_bytes(view, *cell), HEX_BYTES_PER_ROW).join("\n")
+            }
+        }
+    }
+}
+
 impl RowRenderer for WellLines {
     fn len(&self) -> u64 {
-        self.lines.len() as u64
+        match &self.src {
+            WellSrc::Hex(view, cell) => {
+                cell_bytes(view, *cell).len().div_ceil(HEX_BYTES_PER_ROW) as u64
+            }
+            WellSrc::Empty => 0,
+            _ => self.lines.len() as u64,
+        }
     }
 
     fn row(&self, ix: u64, _window: &mut Window, cx: &mut App) -> AnyElement {
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let c = &t.colors;
-        let Some(range) = self.lines.get(ix as usize).cloned() else {
-            return div().into_any_element();
+        let (text, highlights): (String, Vec<(Range<usize>, HighlightStyle)>) = match &self.src {
+            WellSrc::Empty => return div().into_any_element(),
+            WellSrc::Hex(view, cell) => {
+                let line = hex_row(cell_bytes(view, *cell), ix as usize, HEX_BYTES_PER_ROW);
+                let style = |tok| HighlightStyle {
+                    color: Some(token_color(tok, &theme)),
+                    ..HighlightStyle::default()
+                };
+                let ascii = hex_ascii_at(HEX_BYTES_PER_ROW);
+                let h = vec![
+                    (0..8, style(Tok::Dim)),
+                    (ascii.min(line.len())..line.len(), style(Tok::Soft)),
+                ];
+                (line, h)
+            }
+            src => {
+                let Some(range) = self.lines.get(ix as usize).cloned() else {
+                    return div().into_any_element();
+                };
+                let whole: &str = match src {
+                    WellSrc::Cell(view, cell) => cell_str(view, *cell),
+                    WellSrc::Owned(s) => s,
+                    _ => "",
+                };
+                let text = whole.get(range.clone()).unwrap_or_default().to_string();
+                // The coloured runs inside this line (tokens are sorted and do not overlap).
+                let first = self.tokens.partition_point(|(r, _)| r.end <= range.start);
+                let mut highlights = Vec::new();
+                for (r, tok) in self.tokens[first..].iter() {
+                    if r.start >= range.end {
+                        break;
+                    }
+                    let (s, e) = (r.start.max(range.start), r.end.min(range.end));
+                    if s < e {
+                        highlights.push((
+                            s - range.start..e - range.start,
+                            HighlightStyle {
+                                color: Some(token_color(*tok, &theme)),
+                                ..HighlightStyle::default()
+                            },
+                        ));
+                    }
+                }
+                (text, highlights)
+            }
         };
-        let text = SharedString::from(self.text[range.clone()].to_string());
-        // The coloured runs inside this line (tokens are sorted and do not overlap).
-        let first = self.tokens.partition_point(|(r, _)| r.end <= range.start);
-        let mut highlights = Vec::new();
-        for (r, tok) in self.tokens[first..].iter() {
-            if r.start >= range.end {
-                break;
-            }
-            let (s, e) = (r.start.max(range.start), r.end.min(range.end));
-            if s < e {
-                let color = token_color(*tok, &theme);
-                highlights.push((
-                    s - range.start..e - range.start,
-                    HighlightStyle {
-                        color: Some(color),
-                        ..HighlightStyle::default()
-                    },
-                ));
-            }
-        }
         let style = t.type_ramp.mono_data;
         div()
             .h(px(LINE_PX))
@@ -192,7 +312,7 @@ impl RowRenderer for WellLines {
             .text_size(px(style.size_px))
             .line_height(px(LINE_PX))
             .text_color(c.text.to_hsla())
-            .child(StyledText::new(text).with_highlights(highlights))
+            .child(StyledText::new(SharedString::from(text)).with_highlights(highlights))
             .into_any_element()
     }
 }
@@ -210,6 +330,117 @@ fn token_color(tok: Tok, theme: &Theme) -> Hsla {
     .to_hsla()
 }
 
+/// The background load (pure; any thread): the form, the well's source and cuts, the colour
+/// runs and the count.
+fn load_body(
+    meta_view: RawView,
+    cell: ModelCell,
+    shape: Shape,
+    pretty: bool,
+    cols: usize,
+) -> (Body, WellLines) {
+    let view = meta_view;
+    match shape {
+        Shape::Bytes => {
+            let n = cell_bytes(&view, cell).len() as u64;
+            (
+                Body {
+                    form: ValueForm::Binary,
+                    pretty: false,
+                    count: n,
+                    bytes: n,
+                },
+                WellLines {
+                    src: WellSrc::Hex(view, cell),
+                    lines: Arc::from([]),
+                    tokens: Arc::from([]),
+                },
+            )
+        }
+        Shape::Borrowed { json, xml } => {
+            let text = cell_str(&view, cell);
+            let cut = matches!(
+                view.snapshot.cell(cell.row.0, cell.col.0),
+                ValueRef::Truncated(_)
+            );
+            let form = if json {
+                // A cut JSON value never parses: it stays Raw.
+                ValueForm::Json {
+                    valid: !cut && is_json(text),
+                }
+            } else if xml {
+                ValueForm::Xml
+            } else {
+                ValueForm::Text
+            };
+            let count = text.chars().count() as u64;
+            let bytes = text.len() as u64;
+            let pretty_text = match (pretty, form) {
+                (true, ValueForm::Json { valid: true }) => pretty_json(text).map(Arc::<str>::from),
+                (true, ValueForm::Xml) => Some(Arc::<str>::from(pretty_xml(text))),
+                _ => None,
+            };
+            let shown = pretty_text.as_deref().unwrap_or(text);
+            let lines = wrap_lines(shown, cols);
+            let tokens = match form {
+                ValueForm::Json { .. } => json_tokens(shown),
+                ValueForm::Xml => xml_tokens(shown),
+                _ => Vec::new(),
+            };
+            let is_pretty = pretty_text.is_some();
+            let src = match pretty_text {
+                Some(p) => WellSrc::Owned(p),
+                None => WellSrc::Cell(view.clone(), cell),
+            };
+            (
+                Body {
+                    form,
+                    pretty: is_pretty,
+                    count,
+                    bytes,
+                },
+                WellLines {
+                    src,
+                    lines: lines.into(),
+                    tokens: tokens.into(),
+                },
+            )
+        }
+        Shape::Null | Shape::Error | Shape::Scalar => {
+            let value = view.snapshot.cell(cell.row.0, cell.col.0);
+            let text: String = match value {
+                ValueRef::Null => hacivat_ui_grid::NULL_MARKER.to_string(),
+                ValueRef::Error(e) => e.message.to_string(),
+                v => {
+                    let facts = view.facts.get(cell.col.0 as usize);
+                    match facts.map(|f| {
+                        raw_text_in(v, &f.view(view.display.engine()), view.display.zone())
+                    }) {
+                        Some(RawText::Text(t)) => t.into_owned(),
+                        _ => String::new(),
+                    }
+                }
+            };
+            let count = text.chars().count() as u64;
+            let bytes = text.len() as u64;
+            let lines = wrap_lines(&text, cols);
+            (
+                Body {
+                    form: ValueForm::Text,
+                    pretty: false,
+                    count,
+                    bytes,
+                },
+                WellLines {
+                    src: WellSrc::Owned(Arc::from(text)),
+                    lines: lines.into(),
+                    tokens: Arc::from([]),
+                },
+            )
+        }
+    }
+}
+
 /// One console's value viewer.
 pub struct ValueViewer {
     console: ConsoleId,
@@ -219,17 +450,21 @@ pub struct ValueViewer {
     adapter: Option<Weak<GridAdapter>>,
     /// The adapter generation the cell was read from: a re-run closes the viewer.
     generation: u64,
-    /// The grid the viewer is anchored to (the table's, or the Transposed view's) and the cell
-    /// there; the focus goes back to it.
+    /// The grid the viewer is anchored to (the view shown: the table's, or the Transposed
+    /// view's) and the cell there.
     anchor: Option<(WeakEntity<GridView>, ModelCell)>,
-    /// The table grid (row numbers through its view map).
-    table: Option<WeakEntity<GridView>>,
+    /// Where the focus goes back to when the viewer closes (the view shown).
+    back: Option<FocusHandle>,
+    meta: Option<Meta>,
+    body: Option<Body>,
+    /// Pretty asked (the load answers whether it applies).
     pretty: bool,
-    loaded: Option<Loaded>,
+    /// The re-run was refused: why (fix round 1, I1).
+    refused: Option<SharedString>,
     well: Entity<VirtualList<WellLines>>,
-    /// The width the well's lines were cut for (characters per line), and the form.
+    /// The width the well's lines were cut for (characters per line), and Pretty.
     cut_for: Option<(usize, bool)>,
-    cutting: Option<Task<()>>,
+    loading: Option<Task<()>>,
     focus: FocusHandle,
     /// The char advance of the well's font, measured once.
     advance: Cell<Option<f32>>,
@@ -254,17 +489,20 @@ fn ensure(console: ConsoleId, cx: &mut App) -> Entity<ValueViewer> {
 }
 
 /// Opens the viewer on `cell` of console `console`'s active result (the tile calls it on
-/// `GridEvent::ValueRequested`), anchored to that cell in the table grid.
+/// `GridEvent::ValueRequested`, the record inspector's Show more), anchored to that cell in
+/// the view shown (fix round 1, I3).
 pub fn open(console: ConsoleId, cell: ModelCell, cx: &mut App) {
-    let anchor = super::find::active_target(console, cx).map(|(g, _)| (g.downgrade(), cell));
-    open_anchored(console, cell, anchor, cx);
+    let (anchor, back) = super::views::anchor_for(console, cell, cx);
+    open_anchored(console, cell, anchor, back, cx);
 }
 
-/// [`open`] anchored to `anchor` (a grid and its cell that shows `cell`: the Transposed view's).
+/// [`open`] anchored to `anchor` (a grid and its cell that shows `cell`), the focus going back
+/// to `back` when it closes.
 pub(crate) fn open_anchored(
     console: ConsoleId,
     cell: ModelCell,
     anchor: Option<(WeakEntity<GridView>, ModelCell)>,
+    back: Option<FocusHandle>,
     cx: &mut App,
 ) {
     let Some((table, adapter)) = super::find::active_target(console, cx) else {
@@ -274,6 +512,9 @@ pub(crate) fn open_anchored(
         .and_then(|s| s.results.clone())
         .and_then(|r| r.read(cx).active_tab().map(|t| t.key().unit_ordinal))
         .unwrap_or(0);
+    let Some(meta) = read_meta(&adapter, &table, cell, unit_ordinal, cx) else {
+        return;
+    };
     let v = ensure(console, cx);
     v.update(cx, |v, cx| {
         v.open = true;
@@ -282,14 +523,149 @@ pub(crate) fn open_anchored(
         v.adapter = Some(Rc::downgrade(&adapter));
         v.generation = adapter.generation();
         v.anchor = anchor;
-        v.table = Some(table.downgrade());
+        v.back = back;
         v.pretty = false;
-        v.loaded = None;
+        v.refused = None;
+        v.meta = Some(meta);
+        v.body = None;
         v.cut_for = None;
-        v.load(&adapter, &table, unit_ordinal, cx);
+        v.loading = None;
+        v.well
+            .update(cx, |w, cx| *w.rows_mut(cx) = WellLines::default());
         cx.notify();
     });
     notify_hosts(cx);
+}
+
+/// The cell's shape and the header's facts: O(1) reads of the value (its variant and lengths).
+fn read_meta(
+    adapter: &Rc<GridAdapter>,
+    table: &Entity<GridView>,
+    cell: ModelCell,
+    unit_ordinal: u32,
+    cx: &App,
+) -> Option<Meta> {
+    let view = adapter.raw_view();
+    let col = cell.col.0 as usize;
+    if cell.row.0 >= view.snapshot.row_count() || col >= view.facts.len() {
+        return None;
+    }
+    let logical = view.facts[col].logical.clone();
+    let value = view.snapshot.cell(cell.row.0, cell.col.0);
+    let (inner, cut) = match value {
+        ValueRef::Truncated(t) => (t.prefix.view(), Some((t.total_len, t.unit))),
+        v => (v, None),
+    };
+    let (shape, kept) = match (inner, &logical) {
+        (ValueRef::Bytes(b), _) => (Shape::Bytes, b.len() as u64),
+        (ValueRef::Null, _) => (Shape::Null, 0),
+        (ValueRef::Error(_), _) => (Shape::Error, 0),
+        (ValueRef::Json(t), _) => (
+            Shape::Borrowed {
+                json: true,
+                xml: false,
+            },
+            t.len() as u64,
+        ),
+        (ValueRef::Xml(t), _) => (
+            Shape::Borrowed {
+                json: false,
+                xml: true,
+            },
+            t.len() as u64,
+        ),
+        (ValueRef::Text(t), LogicalType::Json { .. }) => (
+            Shape::Borrowed {
+                json: true,
+                xml: false,
+            },
+            t.len() as u64,
+        ),
+        (ValueRef::Text(t), LogicalType::Xml) => (
+            Shape::Borrowed {
+                json: false,
+                xml: true,
+            },
+            t.len() as u64,
+        ),
+        (ValueRef::Text(t), _) => (
+            Shape::Borrowed {
+                json: false,
+                xml: false,
+            },
+            t.len() as u64,
+        ),
+        _ => (Shape::Scalar, 0),
+    };
+    let texts = Texts::of(cx);
+    let cap = u64::from(hacivat_results::window::MAX_CELL_CAP);
+    let truncated = cut.map(|(total, unit)| {
+        let shown = texts.size(kept);
+        match total {
+            Some(total) => {
+                let size = match unit {
+                    LenUnit::Bytes => texts.size(total),
+                    LenUnit::Chars => texts.tr(
+                        hacivat_l10n::ids::hv::GRID_SIZE_CHARS,
+                        hacivat_l10n::ids::hv::HvGridSizeChars {
+                            n: hacivat_l10n::Count(total),
+                        },
+                    ),
+                };
+                message(
+                    cx,
+                    "hv-vv-truncated",
+                    vec![
+                        ("shown", ArgValue::Text(shown)),
+                        ("size", ArgValue::Text(size)),
+                    ],
+                )
+            }
+            None => message(
+                cx,
+                "hv-vv-truncated-unknown",
+                vec![("shown", ArgValue::Text(shown))],
+            ),
+        }
+    });
+    // Re-run helps while the kept part is under the largest limit.
+    let rerun = (cut.is_some() && kept < cap).then(|| {
+        message(
+            cx,
+            "hv-vv-rerun",
+            vec![("limit", ArgValue::Text(texts.size(cap)))],
+        )
+    });
+    let (column, type_label) = adapter
+        .columns()
+        .get(col)
+        .map(|c| (c.name.clone(), c.type_label.clone()))
+        .unwrap_or_default();
+    let row = table
+        .read(cx)
+        .view_map()
+        .model_to_view(cell.row)
+        .map_or(cell.row.0, |v: ViewRow| v.0)
+        + 1;
+    let subtitle = message(
+        cx,
+        "hv-vv-sub",
+        vec![
+            ("type", ArgValue::Text(type_label.to_string())),
+            ("row", ArgValue::Count(row)),
+        ],
+    );
+    Some(Meta {
+        view,
+        cell,
+        shape,
+        column,
+        subtitle,
+        truncated,
+        rerun,
+        kept: cut.map(|_| kept),
+        unit_ordinal,
+    })
 }
 
 /// Whether console `console`'s viewer is open.
@@ -300,13 +676,20 @@ pub fn is_open(console: ConsoleId, cx: &App) -> bool {
 /// What console `console`'s open viewer shows.
 pub fn view(console: ConsoleId, cx: &App) -> Option<ViewerView> {
     let v = viewer(console, cx).filter(|v| v.read(cx).open)?;
-    v.read(cx).loaded.as_ref().map(|l| l.view.clone())
+    Some(v.read(cx).view_of(cx))
 }
 
 /// The cell the open viewer reads.
 pub fn cell(console: ConsoleId, cx: &App) -> Option<ModelCell> {
     let v = viewer(console, cx).filter(|v| v.read(cx).open)?;
     v.read(cx).cell
+}
+
+/// The grid the open viewer is anchored to, and the cell there.
+pub fn anchor(console: ConsoleId, cx: &App) -> Option<(Entity<GridView>, ModelCell)> {
+    let v = viewer(console, cx).filter(|v| v.read(cx).open)?;
+    let (g, c) = v.read(cx).anchor.clone()?;
+    Some((g.upgrade()?, c))
 }
 
 /// Presses Raw (`false`) or Pretty (`true`), as the switch does (refused for invalid JSON).
@@ -330,7 +713,18 @@ pub fn rerun(console: ConsoleId, cx: &mut App) {
     }
 }
 
-/// Closes the viewer and gives the focus back to its grid.
+/// The run UI refused the viewer's re-run (not a read; fix round 1, I1): the viewer says why.
+pub(crate) fn rerun_refused(console: ConsoleId, cx: &mut App) {
+    if let Some(v) = viewer(console, cx).filter(|v| v.read(cx).open) {
+        v.update(cx, |v, cx| {
+            v.refused = Some(message(cx, "hv-vv-rerun-not-read", vec![]));
+            cx.notify();
+        });
+        notify_hosts(cx);
+    }
+}
+
+/// Closes the viewer and gives the focus back to the view shown.
 pub fn close(console: ConsoleId, cx: &mut App) {
     if let Some(v) = viewer(console, cx).filter(|v| v.read(cx).open) {
         v.update(cx, |v, cx| v.close(cx));
@@ -367,14 +761,13 @@ pub(crate) fn sync(console: ConsoleId, adapter: &Rc<GridAdapter>, cx: &mut App) 
 /// The open viewer of console `console`, placed in the grid's area (the tile's body).
 pub(crate) fn overlay(console: ConsoleId, cx: &App) -> Option<AnyElement> {
     let v = viewer(console, cx).filter(|v| v.read(cx).open)?;
-    let (top, bottom, left, well_h) = v.read(cx).placement(cx);
+    let (top, bottom, left, _) = v.read(cx).placement(cx);
     let mut place = div().absolute().left(px(left));
     place = match (top, bottom) {
         (Some(top), _) => place.top(px(top)),
         (None, Some(bottom)) => place.bottom(px(bottom)),
         (None, None) => place.top(px(GAP_PX)),
     };
-    let _ = well_h;
     Some(place.child(v).into_any_element())
 }
 
@@ -394,234 +787,143 @@ impl ValueViewer {
             adapter: None,
             generation: 0,
             anchor: None,
-            table: None,
+            back: None,
+            meta: None,
+            body: None,
             pretty: false,
-            loaded: None,
+            refused: None,
             well: cx.new(|_| VirtualList::new(WellLines::default(), LINE_PX)),
             cut_for: None,
-            cutting: None,
+            loading: None,
             focus: cx.focus_handle(),
             advance: Cell::new(None),
         }
     }
 
-    /// Reads the cell (module docs): the raw text, the form, the notice and the footer.
-    fn load(
-        &mut self,
-        adapter: &Rc<GridAdapter>,
-        table: &Entity<GridView>,
-        unit_ordinal: u32,
-        cx: &App,
-    ) {
-        let Some(cell) = self.cell else { return };
-        let raw = adapter.raw_view();
-        let snapshot = &raw.snapshot;
-        let col = cell.col.0 as usize;
-        if cell.row.0 >= snapshot.row_count() || col >= raw.facts.len() {
-            self.loaded = None;
-            return;
-        }
-        let facts = &raw.facts[col];
-        let value = snapshot.cell(cell.row.0, cell.col.0);
-        let (inner, cut) = match value {
-            ValueRef::Truncated(t) => (t.prefix.view(), Some((t.total_len, t.unit))),
-            v => (v, None),
-        };
-        let form = match (inner, &facts.logical) {
-            (ValueRef::Bytes(_), _) => ValueForm::Binary,
-            (ValueRef::Null | ValueRef::Error(_), _) => ValueForm::Text,
-            (ValueRef::Json(_), _) | (ValueRef::Text(_), LogicalType::Json { .. }) => {
-                ValueForm::Json { valid: false }
+    /// What the viewer shows now.
+    fn view_of(&self, cx: &App) -> ViewerView {
+        let meta = self.meta.as_ref();
+        let body = self.body.as_ref();
+        let can_copy = meta.is_some_and(|m| !matches!(m.shape, Shape::Null | Shape::Error));
+        let footer = match (meta.map(|m| m.shape), body) {
+            (Some(Shape::Null), _) | (_, None) => SharedString::default(),
+            (Some(Shape::Bytes), Some(b)) => {
+                message(cx, "hv-vv-bytes", vec![("n", ArgValue::Count(b.bytes))])
             }
-            (ValueRef::Xml(_), _) | (ValueRef::Text(_), LogicalType::Xml) => ValueForm::Xml,
-            _ => ValueForm::Text,
-        };
-        let texts = Texts::of(cx);
-        let (raw_text, can_copy): (Option<Arc<str>>, bool) = match inner {
-            ValueRef::Null => (None, false),
-            ValueRef::Error(e) => (Some(Arc::from(&*e.message)), false),
-            v => match raw_text_in(v, &facts.view(raw.display.engine()), raw.display.zone()) {
-                RawText::Null => (None, false),
-                RawText::Text(t) => (Some(Arc::from(t.as_ref())), true),
-            },
-        };
-        let form = match form {
-            ValueForm::Json { .. } => ValueForm::Json {
-                // A cut JSON value never parses: it stays Raw.
-                valid: cut.is_none() && raw_text.as_deref().is_some_and(is_json),
-            },
-            f => f,
-        };
-        let (body, footer, kept) = match inner {
-            ValueRef::Bytes(b) => (
-                hex_lines(b, HEX_BYTES_PER_ROW).join("\n"),
-                message(
-                    cx,
-                    "hv-vv-bytes",
-                    vec![("n", ArgValue::Count(b.len() as u64))],
-                ),
-                b.len() as u64,
-            ),
-            ValueRef::Null => (
-                hacivat_ui_grid::NULL_MARKER.to_string(),
-                SharedString::default(),
-                0,
-            ),
-            _ => {
-                let text = raw_text.as_deref().unwrap_or_default();
-                let n = text.chars().count() as u64;
-                (
-                    text.to_string(),
-                    message(
-                        cx,
-                        "hv-vv-chars",
-                        vec![
-                            ("size", ArgValue::Text(texts.size(text.len() as u64))),
-                            ("n", ArgValue::Count(n)),
-                        ],
-                    ),
-                    text.len() as u64,
-                )
-            }
-        };
-        let cap = u64::from(hacivat_results::window::MAX_CELL_CAP);
-        let truncated = cut.map(|(total, unit)| {
-            let shown = texts.size(kept);
-            match total {
-                Some(total) => {
-                    let size = match unit {
-                        LenUnit::Bytes => texts.size(total),
-                        LenUnit::Chars => texts.tr(
-                            hacivat_l10n::ids::hv::GRID_SIZE_CHARS,
-                            hacivat_l10n::ids::hv::HvGridSizeChars {
-                                n: hacivat_l10n::Count(total),
-                            },
-                        ),
-                    };
-                    message(
-                        cx,
-                        "hv-vv-truncated",
-                        vec![
-                            ("shown", ArgValue::Text(shown)),
-                            ("size", ArgValue::Text(size)),
-                        ],
-                    )
-                }
-                None => message(
-                    cx,
-                    "hv-vv-truncated-unknown",
-                    vec![("shown", ArgValue::Text(shown))],
-                ),
-            }
-        });
-        // Re-run helps while the kept part is under the largest limit.
-        let rerun = (cut.is_some() && kept < cap).then(|| {
-            message(
+            (_, Some(b)) => message(
                 cx,
-                "hv-vv-rerun",
-                vec![("limit", ArgValue::Text(texts.size(cap)))],
-            )
+                "hv-vv-chars",
+                vec![
+                    ("size", ArgValue::Text(Texts::of(cx).size(b.bytes))),
+                    ("n", ArgValue::Count(b.count)),
+                ],
+            ),
+        };
+        let busy = crate::exec_ui::orchestrator::run_busy(self.console, cx);
+        let rerun_off = self.refused.clone().or_else(|| {
+            (busy && meta.is_some_and(|m| m.rerun.is_some()))
+                .then(|| message(cx, "hv-vv-rerun-busy", vec![]))
         });
-        let column = adapter
-            .columns()
-            .get(col)
-            .map(|c| (c.name.clone(), c.type_label.clone()))
-            .unwrap_or_default();
-        let row = table
-            .read(cx)
-            .view_map()
-            .model_to_view(cell.row)
-            .map_or(cell.row.0, |v: ViewRow| v.0)
-            + 1;
-        let subtitle = message(
-            cx,
-            "hv-vv-sub",
-            vec![
-                ("type", ArgValue::Text(column.1.to_string())),
-                ("row", ArgValue::Count(row)),
-            ],
-        );
-        self.loaded = Some(Loaded {
-            view: ViewerView {
-                column: column.0,
-                subtitle,
-                form,
-                pretty: false,
-                body,
-                footer,
-                truncated,
-                rerun,
-                can_copy,
-            },
-            raw: raw_text.filter(|_| can_copy),
-            kept: cut.map(|_| kept),
-            unit_ordinal,
-        });
+        ViewerView {
+            column: meta.map(|m| m.column.clone()).unwrap_or_default(),
+            subtitle: meta.map(|m| m.subtitle.clone()).unwrap_or_default(),
+            form: body.map_or(
+                match meta.map(|m| m.shape) {
+                    Some(Shape::Bytes) => ValueForm::Binary,
+                    Some(Shape::Borrowed { json: true, .. }) => ValueForm::Json { valid: false },
+                    Some(Shape::Borrowed { xml: true, .. }) => ValueForm::Xml,
+                    _ => ValueForm::Text,
+                },
+                |b| b.form,
+            ),
+            pretty: body.is_some_and(|b| b.pretty),
+            body: self.well.read(cx).rows().full_text(),
+            footer,
+            truncated: meta.and_then(|m| m.truncated.clone()),
+            rerun: meta.and_then(|m| m.rerun.clone()),
+            rerun_off,
+            can_copy,
+        }
     }
 
     fn set_pretty(&mut self, pretty: bool, cx: &mut Context<Self>) {
-        let Some(l) = self.loaded.as_mut() else {
-            return;
-        };
         let can = matches!(
-            l.view.form,
-            ValueForm::Json { valid: true } | ValueForm::Xml
+            self.body.as_ref().map(|b| b.form),
+            Some(ValueForm::Json { valid: true } | ValueForm::Xml)
         );
         let pretty = pretty && can;
-        if l.view.pretty == pretty {
+        if self.pretty == pretty {
             return;
         }
-        let raw = l.raw.clone().unwrap_or_else(|| Arc::from(""));
-        l.view.pretty = pretty;
-        l.view.body = match (pretty, l.view.form) {
-            (true, ValueForm::Json { .. }) => pretty_json(&raw).unwrap_or_else(|| raw.to_string()),
-            (true, ValueForm::Xml) => pretty_xml(&raw),
-            _ => raw.to_string(),
-        };
         self.pretty = pretty;
-        self.cut_for = None;
+        // The next frame loads the other form (off the UI thread).
         cx.notify();
     }
 
     fn copy_raw(&mut self, cx: &mut Context<Self>) {
-        let Some(l) = self.loaded.as_ref() else {
+        let Some(meta) = self.meta.clone() else {
             return;
         };
-        let Some(raw) = l.raw.clone() else {
+        if matches!(meta.shape, Shape::Null | Shape::Error) {
             return;
-        };
-        cx.write_to_clipboard(ClipboardItem::new_string(raw.to_string()));
-        let toast = match l.kept {
-            Some(kept) => {
-                let shown = Texts::of(cx).size(kept);
-                let text = message(
-                    cx,
-                    "hv-vv-copied-cut",
-                    vec![("shown", ArgValue::Text(shown))],
-                );
-                let mut toast = Toast::new(ToastKind::Info, Rc::new(move |_: &App| text.clone()));
-                toast.icon = Some(IconName::TriangleAlert);
-                toast.wide = true;
-                toast
+        }
+        // The raw text is built off the UI thread (a 64 MiB bytea is 128 MB of hex).
+        let (view, cell) = (meta.view.clone(), meta.cell);
+        let job = cx.background_spawn(async move {
+            let value = view.snapshot.cell(cell.row.0, cell.col.0);
+            let facts = view.facts.get(cell.col.0 as usize)?;
+            match raw_text_in(
+                value,
+                &facts.view(view.display.engine()),
+                view.display.zone(),
+            ) {
+                RawText::Text(t) => Some(t.into_owned()),
+                RawText::Null => None,
             }
-            None => {
-                let mut toast = Toast::new(
-                    ToastKind::Info,
-                    Rc::new(|cx: &App| message(cx, "hv-vv-copied", vec![])),
-                );
-                toast.icon = Some(IconName::CopyCheck);
-                toast
-            }
-        };
-        ToastQueue::push(cx, toast);
+        });
+        let kept = meta.kept;
+        cx.spawn(async move |_, cx| {
+            let Some(text) = job.await else { return };
+            cx.update(|cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                let toast = match kept {
+                    Some(kept) => {
+                        let shown = Texts::of(cx).size(kept);
+                        let text = message(
+                            cx,
+                            "hv-vv-copied-cut",
+                            vec![("shown", ArgValue::Text(shown))],
+                        );
+                        let mut toast =
+                            Toast::new(ToastKind::Info, Rc::new(move |_: &App| text.clone()));
+                        toast.icon = Some(IconName::TriangleAlert);
+                        toast.wide = true;
+                        toast
+                    }
+                    None => {
+                        let mut toast = Toast::new(
+                            ToastKind::Info,
+                            Rc::new(|cx: &App| message(cx, "hv-vv-copied", vec![])),
+                        );
+                        toast.icon = Some(IconName::CopyCheck);
+                        toast
+                    }
+                };
+                ToastQueue::push(cx, toast);
+            });
+        })
+        .detach();
     }
 
     fn rerun(&mut self, cx: &mut Context<Self>) {
-        let Some(l) = self.loaded.as_ref().filter(|l| l.view.rerun.is_some()) else {
+        let Some(meta) = self.meta.as_ref().filter(|m| m.rerun.is_some()) else {
             return;
         };
-        let (console, unit_ordinal) = (self.console, l.unit_ordinal);
-        self.hide(cx);
+        // Off while a run is busy, or once refused (m7, I1): the button says why.
+        if self.refused.is_some() || crate::exec_ui::orchestrator::run_busy(self.console, cx) {
+            return;
+        }
+        let (console, unit_ordinal) = (self.console, meta.unit_ordinal);
         cx.defer(move |cx| {
             let Some(results) =
                 crate::console::Consoles::get(cx, console).and_then(|s| s.results.clone())
@@ -636,23 +938,32 @@ impl ValueViewer {
                 })
             });
         });
+        cx.notify();
     }
 
     /// Closes without moving the focus.
     fn hide(&mut self, cx: &mut Context<Self>) {
         self.open = false;
-        self.loaded = None;
-        self.cutting = None;
+        self.meta = None;
+        self.body = None;
+        self.loading = None;
+        self.refused = None;
+        self.well
+            .update(cx, |w, cx| *w.rows_mut(cx) = WellLines::default());
         cx.defer(notify_hosts);
         cx.notify();
     }
 
-    /// Closes and gives the focus back to the grid it is anchored to.
+    /// Closes and gives the focus back to the view shown.
     fn close(&mut self, cx: &mut Context<Self>) {
-        let grid = self.anchor.as_ref().and_then(|(g, _)| g.upgrade());
+        let back = self.back.clone().or_else(|| {
+            self.anchor
+                .as_ref()
+                .and_then(|(g, _)| g.upgrade())
+                .map(|g| g.read(cx).focus_handle(cx))
+        });
         self.hide(cx);
-        if let Some(grid) = grid {
-            let handle = grid.read(cx).focus_handle(cx);
+        if let Some(handle) = back {
             cx.defer(move |cx| {
                 if let Some(window) = cx.active_window() {
                     let _ = window.update(cx, |_, window, cx| window.focus(&handle, cx));
@@ -735,35 +1046,26 @@ impl ValueViewer {
         a
     }
 
-    /// Cuts the well's lines for `cols` characters per line (on the background executor).
-    fn cut_lines(&mut self, cols: usize, cx: &mut Context<Self>) {
-        let Some(l) = self.loaded.as_ref() else {
+    /// Loads the value for `cols` characters per line (the form, the lines, the colour runs, the
+    /// count) on the background executor.
+    fn load(&mut self, cols: usize, cx: &mut Context<Self>) {
+        let Some(meta) = self.meta.as_ref() else {
             return;
         };
-        let key = (cols, l.view.pretty);
+        let key = (cols, self.pretty);
         if self.cut_for == Some(key) {
             return;
         }
         self.cut_for = Some(key);
-        let text: Arc<str> = Arc::from(l.view.body.as_str());
-        let form = l.view.form;
-        let job = cx.background_spawn(async move {
-            let lines = wrap_lines(&text, cols);
-            let tokens = match form {
-                ValueForm::Json { .. } => json_tokens(&text),
-                ValueForm::Xml => xml_tokens(&text),
-                ValueForm::Binary => hex_tokens(&text),
-                ValueForm::Text => Vec::new(),
-            };
-            WellLines {
-                text,
-                lines: lines.into(),
-                tokens: tokens.into(),
-            }
-        });
+        let (view, cell, shape, pretty) = (meta.view.clone(), meta.cell, meta.shape, self.pretty);
+        let job = cx.background_spawn(async move { load_body(view, cell, shape, pretty, cols) });
         let well = self.well.clone();
-        self.cutting = Some(cx.spawn(async move |_, cx| {
-            let lines = job.await;
+        self.loading = Some(cx.spawn(async move |this, cx| {
+            let (body, lines) = job.await;
+            let _ = this.update(cx, |v, cx| {
+                v.body = Some(body);
+                cx.notify();
+            });
             cx.update(|cx| {
                 well.update(cx, |w, cx| {
                     *w.rows_mut(cx) = lines;
@@ -787,12 +1089,13 @@ impl Render for ValueViewer {
         let advance = self.advance(window, cx);
         let inner_w = VIEWER_WIDTH_PX - 2.0 * POPOVER_PAD_X - 2.0 * WELL_PAD_X - 6.0;
         let cols = ((inner_w / advance).floor() as usize).max(8);
-        self.cut_lines(cols, cx);
-        let Some(l) = self.loaded.as_ref() else {
+        self.load(cols, cx);
+        if self.meta.is_none() {
             return div().into_any_element();
-        };
+        }
         let entity = cx.entity();
-        let view = &l.view;
+        let view = self.view_of(cx);
+        let view = &view;
         let header = div()
             .flex()
             .flex_row()
@@ -951,7 +1254,12 @@ impl Render for ValueViewer {
                 ));
             if let Some(words) = view.rerun.clone() {
                 let e = entity.clone();
-                let tip = message(cx, "hv-vv-rerun-tip", vec![]);
+                // ## m3c-t38 fix round 1 (m7, I1): off while a run is busy or once refused,
+                // with the reason in its tooltip; a refusal is said under it too.
+                let off = view.rerun_off.clone();
+                let tip = off
+                    .clone()
+                    .unwrap_or_else(|| message(cx, "hv-vv-rerun-tip", vec![]));
                 row = row.child(
                     div()
                         .id("value-viewer-rerun-tip")
@@ -961,9 +1269,21 @@ impl Render for ValueViewer {
                                 .kind(ButtonKind::Default)
                                 .icon(IconName::RotateCw)
                                 .on_raised(true)
+                                .disabled(off.is_some())
                                 .on_click(move |_, _, cx| e.update(cx, |v, cx| v.rerun(cx))),
                         ),
                 );
+                if let Some(refused) = self.refused.clone() {
+                    row = row.child(
+                        hacivat_ui::text::paragraph(
+                            refused,
+                            TextSource::Fluent,
+                            t.type_ramp.caption,
+                            c.text.to_hsla(),
+                        )
+                        .id("value-viewer-refused"),
+                    );
+                }
             }
             body = body.child(row);
         }
@@ -1210,6 +1530,56 @@ pub fn pretty_xml(text: &str) -> String {
 /// `bytes` as hex rows: the offset, `per_row` bytes in 2-byte groups, the ASCII column (a
 /// printable ASCII byte as itself, any other as `.`).
 pub fn hex_lines(bytes: &[u8], per_row: usize) -> Vec<String> {
+    (0..bytes.len().div_ceil(per_row.max(2)))
+        .map(|row| hex_row(bytes, row, per_row))
+        .collect()
+}
+
+/// Lower-case hex digits.
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// Where a hex row's ASCII column starts (the offset, two spaces, the groups, two spaces).
+fn hex_ascii_at(per_row: usize) -> usize {
+    let per_row = per_row.max(2);
+    8 + 2 + per_row * 2 + per_row.div_ceil(2) - 1 + 2
+}
+
+/// Row `row` of `bytes` as hex ([`hex_lines`]), built straight into one `String`.
+fn hex_row(bytes: &[u8], row: usize, per_row: usize) -> String {
+    let per_row = per_row.max(2);
+    let start = row * per_row;
+    let chunk = bytes
+        .get(start..(start + per_row).min(bytes.len()))
+        .unwrap_or_default();
+    let ascii_at = hex_ascii_at(per_row);
+    let mut out = String::with_capacity(ascii_at + per_row);
+    for shift in (0..8).rev() {
+        out.push(char::from(HEX_DIGITS[(start >> (shift * 4)) & 15]));
+    }
+    out.push_str("  ");
+    for (j, b) in chunk.iter().enumerate() {
+        if j > 0 && j % 2 == 0 {
+            out.push(' ');
+        }
+        out.push(char::from(HEX_DIGITS[usize::from(b >> 4)]));
+        out.push(char::from(HEX_DIGITS[usize::from(b & 15)]));
+    }
+    while out.len() < ascii_at {
+        out.push(' ');
+    }
+    for b in chunk {
+        out.push(if (b' '..=b'~').contains(b) {
+            char::from(*b)
+        } else {
+            '.'
+        });
+    }
+    out
+}
+
+/// The former formatter, kept for its test's shape (unused).
+#[cfg(test)]
+fn hex_lines_old(bytes: &[u8], per_row: usize) -> Vec<String> {
     let per_row = per_row.max(2);
     // Two hex digits per byte, a space between groups of two bytes.
     let hex_w = per_row * 2 + per_row.div_ceil(2) - 1;
@@ -1361,20 +1731,6 @@ fn xml_tokens(text: &str) -> Vec<(Range<usize>, Tok)> {
     out
 }
 
-/// Hex rows' coloured parts: the offset dim, the ASCII column soft.
-fn hex_tokens(text: &str) -> Vec<(Range<usize>, Tok)> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    for line in text.split('\n') {
-        out.push((start..start + line.len().min(8), Tok::Dim));
-        if let Some(at) = line.rfind("  ") {
-            out.push((start + at + 2..start + line.len(), Tok::Soft));
-        }
-        start += line.len() + 1;
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1437,6 +1793,17 @@ mod tests {
                 "00000008  0809 417a            ..Az",
             ]
         );
+    }
+
+    #[test]
+    fn hex_rows_match_the_formatter_and_keep_the_ascii_column_fixed() {
+        // ## m3c-t38 fix round 1 (I2, m8): one String per row, no per-byte formatting.
+        let bytes: Vec<u8> = (0..=255u8).cycle().take(1_000).collect();
+        assert_eq!(hex_lines(&bytes, 8), hex_lines_old(&bytes, 8));
+        // Two spaces in the data never move the ASCII column.
+        let row = hex_row(b"  ab  cd", 0, 8);
+        assert_eq!(&row[hex_ascii_at(8)..], "  ab  cd");
+        assert_eq!(row, "00000000  2020 6162 2020 6364    ab  cd");
     }
 
     #[test]
