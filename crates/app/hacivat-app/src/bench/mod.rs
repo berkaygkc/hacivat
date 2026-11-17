@@ -349,6 +349,30 @@ pub async fn activate<C: AppContext>(
     }
 }
 
+// ## m3c-t44: a window that cannot become key refuses the run (PENDING-PO), never a FAIL.
+/// What a refused run prints: the measurement waits for the PO's Mac.
+pub const PENDING_PO: &str = "PENDING-PO: run it on the PO's Mac with the display awake, the session unlocked and the bench window frontmost";
+
+/// [`activate`], except that a window that cannot become key (the display asleep, the session
+/// locked, another window frontmost) refuses the run instead of aborting it: `Some(reason)`,
+/// and the caller reports INVALID with [`PENDING_PO`] (M3a T36: no figure exists then, GPUI
+/// throttles or stops an inactive window's frames). Under `--allow-inactive` (a harness check)
+/// the run goes on as before, ungraded.
+pub async fn activate_or_refuse<C: AppContext>(
+    cx: &mut C,
+    ws: WindowHandle<Workspace>,
+    sleep: &impl Sleep,
+    allow_inactive: bool,
+) -> anyhow::Result<Option<String>> {
+    match activate(cx, ws, sleep, allow_inactive).await {
+        Ok(()) => Ok(None),
+        Err(e) if !allow_inactive => Ok(Some(format!(
+            "the bench window cannot become frontmost ({e:#}); the display may be asleep or the session locked"
+        ))),
+        Err(e) => Err(e),
+    }
+}
+
 // ---- running a result --------------------------------------------------------------------------
 
 /// A result fetched in full: when its first rows and its end came (from Run), its rows and the
@@ -646,6 +670,67 @@ pub fn percentiles(samples: &[f64]) -> (usize, f64, f64, f64, f64) {
     )
 }
 
+// ## m3c-t44: one set of figures for every report (B3 latency, the worker's relex, B1 paint).
+/// A run's figures in milliseconds: nearest-rank p50/p95/p99/max over `n` samples and how many
+/// samples were over 3 ms (the 120 Hz half-frame) and over 6 ms (the ALG paint budget).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Figures {
+    pub n: usize,
+    pub p50: f64,
+    pub p95: f64,
+    pub p99: f64,
+    pub max: f64,
+    pub over_3ms: usize,
+    pub over_6ms: usize,
+}
+
+impl Figures {
+    pub fn of(samples_ms: &[f64]) -> Figures {
+        let (n, p50, p95, p99, max) = percentiles(samples_ms);
+        let over = |ms: f64| samples_ms.iter().filter(|v| **v > ms).count();
+        Figures {
+            n,
+            p50,
+            p95,
+            p99,
+            max,
+            over_3ms: over(3.0),
+            over_6ms: over(6.0),
+        }
+    }
+
+    /// `n=… p50=…ms p95=…ms p99=…ms max=…ms` with `decimals` places (the log's text).
+    pub fn text(&self, decimals: usize) -> String {
+        format!(
+            "n={} p50={:.d$}ms p95={:.d$}ms p99={:.d$}ms max={:.d$}ms",
+            self.n,
+            self.p50,
+            self.p95,
+            self.p99,
+            self.max,
+            d = decimals
+        )
+    }
+
+    /// [`Figures::text`] with the counts over 3 ms and 6 ms (the paint lines).
+    pub fn text_with_counts(&self) -> String {
+        format!(
+            "{} over-3ms={} over-6ms={}",
+            self.text(2),
+            self.over_3ms,
+            self.over_6ms
+        )
+    }
+
+    /// The figures as the sidecars write them.
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "n": self.n, "p50": self.p50, "p95": self.p95, "p99": self.p99, "max": self.max,
+            "over_3ms": self.over_3ms, "over_6ms": self.over_6ms,
+        })
+    }
+}
+
 pub fn verdict_text(v: Verdict) -> &'static str {
     match v {
         Verdict::Pass => "PASS",
@@ -748,6 +833,34 @@ mod tests {
         let v: Vec<f64> = (1..=100).map(f64::from).collect();
         assert_eq!(percentiles(&v), (100, 50.0, 95.0, 99.0, 100.0));
         assert_eq!(percentiles(&[]), (0, 0.0, 0.0, 0.0, 0.0));
+    }
+
+    // ## m3c-t44
+    #[test]
+    fn figures_give_p99_and_the_counts_over_3_and_6_ms() {
+        // 1..=100 ms: p99 is the 99th sample; 97 samples are over 3 ms, 94 over 6 ms.
+        let v: Vec<f64> = (1..=100).map(f64::from).collect();
+        let f = Figures::of(&v);
+        assert_eq!(
+            (f.n, f.p50, f.p95, f.p99, f.max),
+            (100, 50.0, 95.0, 99.0, 100.0)
+        );
+        assert_eq!((f.over_3ms, f.over_6ms), (97, 94));
+        // Exactly 3 or 6 ms is not over.
+        let edge = Figures::of(&[3.0, 6.0, 6.01]);
+        assert_eq!((edge.over_3ms, edge.over_6ms), (2, 1));
+        assert_eq!(
+            Figures::of(&[1.5, 2.25]).text_with_counts(),
+            "n=2 p50=1.50ms p95=2.25ms p99=2.25ms max=2.25ms over-3ms=0 over-6ms=0"
+        );
+        assert_eq!(
+            Figures::of(&[0.1234]).text(3),
+            "n=1 p50=0.123ms p95=0.123ms p99=0.123ms max=0.123ms"
+        );
+        let empty = Figures::of(&[]);
+        assert_eq!((empty.n, empty.p95, empty.over_6ms), (0, 0.0, 0));
+        assert_eq!(f.json()["p99"], 99.0);
+        assert_eq!(f.json()["over_6ms"], 94);
     }
 
     #[test]
@@ -989,6 +1102,203 @@ mod tests {
             .cx
             .read(|cx| editor.read(cx).snapshot().buffer.to_string());
         assert_eq!(typed, format!("{text} AND"));
+        h.stop();
+    }
+
+    // ---- ## m3c-t44: the M3c modes' pieces, headless (smoke; no frames, no figures) --------
+
+    /// Focuses the console's editor and draws.
+    fn focus_editor(h: &mut Headless, editor: &Entity<EditorView>) {
+        h.ws.update(h.vcx, |_, window, cx| {
+            let handle = editor.focus_handle(cx);
+            window.focus(&handle, cx);
+        })
+        .unwrap();
+        h.vcx.update(|window, _| window.refresh());
+        h.vcx.run_until_parked();
+    }
+
+    /// Types `keys` as the replay does, one dispatch per key. Backspace runs the command the
+    /// keymap binds it to (`editor.delete_backward`): on GPUI's test platform a dispatched
+    /// `backspace` reaches no binding (typed text goes through the input handler as on a real
+    /// window; the real run's Backspace is the keymap's, M3a T36).
+    fn type_keys(h: &mut Headless, editor: &Entity<EditorView>, keys: &[b3::Key]) {
+        for key in keys {
+            if *key == b3::Key::Backspace {
+                let ran =
+                    h.ws.update(h.vcx, |_, window, cx| {
+                        editor.update(cx, |e, cx| {
+                            e.run_command("editor.delete_backward", window, cx)
+                        })
+                    })
+                    .unwrap();
+                assert!(ran);
+            } else {
+                b3::send_key(h.vcx, h.ws, *key).unwrap();
+            }
+            h.vcx.update(|window, _| window.refresh());
+            h.vcx.run_until_parked();
+        }
+    }
+
+    fn text_of(h: &mut Headless, editor: &Entity<EditorView>) -> String {
+        h.vcx
+            .cx
+            .read(|cx| editor.read(cx).snapshot().buffer.to_string())
+    }
+
+    /// `typing-multi-caret` through the real console: ten carets at the end of line 25,000 and
+    /// the nine under it (the editor's own `add_caret_below`), each keystroke typed at every
+    /// caret, and the warm-up phrase typed and erased leaves the text as it was.
+    #[gpui::test]
+    fn b3_multi_caret_types_at_ten_carets(cx: &mut TestAppContext) {
+        let mut h = boot(cx, b3::profile(), fake_registry(fake_pg(Vec::new())));
+        let text: String = (0..25_020).map(|i| format!("SELECT {i};\n")).collect();
+        let (_, editor) = h.console(&text, None);
+        focus_editor(&mut h, &editor);
+        let (script, expected) =
+            b3::place_caret(h.vcx, h.ws, b3::Mode::TypingMultiCaret, &editor).unwrap();
+        assert_eq!(expected, 2_000);
+        assert_eq!(script.len(), 2_000);
+        let carets = h
+            .vcx
+            .cx
+            .read(|cx| editor.read(cx).snapshot().selection.ranges().len());
+        assert_eq!(carets, b3::MULTI_CARETS);
+        type_keys(
+            &mut h,
+            &editor,
+            &b3::warm_script(b3::Mode::TypingMultiCaret),
+        );
+        assert_eq!(text_of(&mut h, &editor), text, "the warm-up is balanced");
+        type_keys(&mut h, &editor, &b3::typing_script(4));
+        let typed = text_of(&mut h, &editor);
+        for line in 24_999..25_009 {
+            let want = format!("SELECT {line}; AND");
+            assert_eq!(typed.lines().nth(line), Some(want.as_str()), "line {line}");
+        }
+        assert_eq!(typed.lines().nth(25_009), Some("SELECT 25009;"));
+        let carets = h
+            .vcx
+            .cx
+            .read(|cx| editor.read(cx).snapshot().selection.ranges().len());
+        assert_eq!(
+            b3::kept_through_run(b3::Mode::TypingMultiCaret, carets, 0),
+            Ok(())
+        );
+        h.stop();
+    }
+
+    /// `typing-with-folds` through the real console: 1,000 folds made, the caret on line 25,000
+    /// outside them, and typing keeps every fold.
+    #[gpui::test]
+    fn b3_folds_mode_keeps_a_thousand_folds_while_typing(cx: &mut TestAppContext) {
+        let mut h = boot(cx, b3::profile(), fake_registry(fake_pg(Vec::new())));
+        let text = "SELECT a FROM t;\n".repeat(50_000);
+        let (_, editor) = h.console(&text, None);
+        focus_editor(&mut h, &editor);
+        b3::place_caret(h.vcx, h.ws, b3::Mode::TypingWithFolds, &editor).unwrap();
+        let folds = |h: &mut Headless| h.vcx.cx.read(|cx| editor.read(cx).folds().folded().len());
+        assert_eq!(folds(&mut h), b3::FOLDS);
+        type_keys(&mut h, &editor, &b3::typing_script(11));
+        let typed = text_of(&mut h, &editor);
+        assert_eq!(
+            typed.lines().nth(24_999),
+            Some("SELECT a FROM t; AND c.city")
+        );
+        assert_eq!(
+            folds(&mut h),
+            b3::FOLDS,
+            "typing outside the folds keeps them"
+        );
+        assert_eq!(
+            b3::kept_through_run(b3::Mode::TypingWithFolds, 1, folds(&mut h)),
+            Ok(())
+        );
+        h.stop();
+    }
+
+    /// `typing-19mb`'s caret goes to the middle line of a file over the full tier (Reduced).
+    #[gpui::test]
+    fn b3_large_mode_types_in_reduced_mode_at_the_middle_line(cx: &mut TestAppContext) {
+        use hacivat_ui_editor::Tier;
+        let mut h = boot(cx, b3::profile(), fake_registry(fake_pg(Vec::new())));
+        // Over the full tier's 4 MB (the real run is 19 MiB; smaller here for a debug build).
+        let text = "SELECT col FROM t;\n".repeat(225_000);
+        let (_, editor) = h.console(&text, None);
+        let tier = h.vcx.cx.read(|cx| editor.read(cx).status().tier);
+        assert_eq!(tier, Tier::Reduced);
+        assert!(b3::tier_ok(b3::Mode::Typing19Mb, tier).is_ok());
+        focus_editor(&mut h, &editor);
+        b3::place_caret(h.vcx, h.ws, b3::Mode::Typing19Mb, &editor).unwrap();
+        type_keys(&mut h, &editor, &b3::typing_script(4));
+        let typed = text_of(&mut h, &editor);
+        assert_eq!(typed.lines().nth(112_500), Some("SELECT col FROM t; AND"));
+        h.stop();
+    }
+
+    /// R-M3-9's probe: armed, the console's language worker records how long each analysis
+    /// took to bring its document up to the typed text, incrementally.
+    #[gpui::test]
+    fn the_language_worker_times_its_incremental_relex(cx: &mut TestAppContext) {
+        use hacivat_sql_editor::bench::{self as worker, Built};
+        let mut h = boot(cx, b3::profile(), fake_registry(fake_pg(Vec::new())));
+        let text = "SELECT 1;\nSELECT 2;\n";
+        let (_, editor) = h.console(text, None);
+        focus_editor(&mut h, &editor);
+        h.ws.update(h.vcx, |_, _, cx| {
+            editor.update(cx, |e, cx| e.select_range(text.len()..text.len(), cx));
+        })
+        .unwrap();
+        worker::arm(true);
+        assert!(worker::armed());
+        type_keys(&mut h, &editor, &b3::typing_script(6));
+        let mut samples = Vec::new();
+        settle(
+            h.vcx,
+            "the worker's samples",
+            Duration::from_secs(20),
+            |_| {
+                samples.extend(worker::take());
+                samples.iter().any(|s| s.kind == Built::Incremental)
+            },
+        );
+        worker::arm(false);
+        let report = b3::RelexReport::of(&samples);
+        assert!(report.incremental >= 1, "{report:?}");
+        assert!(report.relex.max <= report.analysis.max, "{report:?}");
+        h.stop();
+    }
+
+    /// `b1_real --sorted`'s step through the real app: the whole result sorted by `c01` through
+    /// the grid, done once the grid shows that sort over every row.
+    #[gpui::test]
+    fn the_sorted_run_sorts_the_whole_result_through_the_grid(cx: &mut TestAppContext) {
+        use hacivat_ui_grid::ColId;
+        use hacivat_ui_grid::model::SortSpec;
+        const ROWS: u64 = 20_000;
+        let fake = fake_registry(fake_pg(vec![b3::result_query(ROWS)]));
+        let mut h = boot(cx, b3::profile(), fake);
+        let text = "SELECT * FROM hv_bench_rows;\n";
+        let (console, editor) = h.console(text, None);
+        let run = 0.."SELECT * FROM hv_bench_rows".len();
+        let loaded = h.load(console, &editor, run, Duration::from_secs(30));
+        assert_eq!(loaded.rows, ROWS);
+        settle(h.vcx, "the result's grid", Duration::from_secs(20), |vcx| {
+            vcx.cx.read(|cx| result_grid(cx, console).is_some())
+        });
+        let grid = h.vcx.cx.read(|cx| result_grid(cx, console)).unwrap();
+        let spec = SortSpec::by(ColId(b1_real::SORT_COLUMN), false);
+        h.ws.update(h.vcx, |_, _, cx| {
+            grid.update(cx, |g, cx| g.request_sort(spec.clone(), cx));
+        })
+        .unwrap();
+        settle(h.vcx, "the sort", Duration::from_secs(60), |vcx| {
+            vcx.cx.read(|cx| {
+                crate::results::sort::status(&grid, cx)
+                    .is_some_and(|s| b1_real::sort_done(&s, &spec, ROWS))
+            })
+        });
         h.stop();
     }
 

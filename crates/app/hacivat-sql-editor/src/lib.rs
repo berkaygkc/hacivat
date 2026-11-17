@@ -11,6 +11,9 @@
 //! - [`effective_flavor`]: the client flavor a console's text is split with (never
 //!   `ClientFlavor::None` on PostgreSQL).
 
+// ## m3c-t44: the worker's relex timer for the real-app B3 bench (feature `bench` only).
+#[cfg(feature = "bench")]
+pub mod bench;
 mod chunks;
 // ## m3c-t32-fold
 mod folds;

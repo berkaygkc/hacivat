@@ -8,6 +8,11 @@ description = "The SQL language service of the console editor: off-thread analys
 
 # App layer: it joins the editor (Ui) and the SQL text crates (Core). The worker runs on the
 # GPUI background executor and hands results back over a `tokio::sync::watch` (P6).
+# ## m3c-t44: named exception (manifest): the worker's relex and analysis timer, read by the
+# real-app B3 bench (R-M3-9); never in a product build (`hacivat-app/bench` enables it).
+[features]
+bench = []
+
 [dependencies]
 hacivat-ui-editor.workspace = true
 hacivat-ui-core.workspace = true

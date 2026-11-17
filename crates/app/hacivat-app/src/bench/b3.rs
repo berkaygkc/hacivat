@@ -30,6 +30,28 @@
 //! - `ime-bounds`: the editor's `bounds_for_range` (the IME candidate window's question) at line
 //!   49,000, 200 times (UI-EDIT-12 test 8).
 //!
+//!
+//! M3c Task 44 adds three typing modes (graded against 16 ms p95 like `typing`):
+//! - `typing-multi-caret`: `typing` with [`MULTI_CARETS`] carets, at the end of line 25,000 and
+//!   the lines under it (`editor.add_caret_below`), every keystroke typed at each (T0 fixture);
+//! - `typing-with-folds`: `typing` with [`FOLDS`] folds of five hidden lines, one every fifty
+//!   lines ([`fold_plan`]; the caret's line is in none), kept through the run (T0 fixture);
+//! - `typing-19mb`: `typing` at the middle line of a ≥ 19 MiB file (Reduced mode, the
+//!   product's truth there; ledger 298): `gen-sql --lines 520000`.
+//!
+//! **R-M3-9 in the real app's worker.** Every typing mode also arms the language worker's own
+//! timer (`hacivat_sql_editor::bench`) for its measured keystrokes and prints the incremental
+//! relex figure (the one-edit diff and `SqlDocument::apply`, on the worker) with p50/p95/p99/max;
+//! `typing` grades it against 2 ms p95 (the 50k-line fixture R-M3-9 names). The figures go to
+//! `target/bench/relex/`.
+//!
+//! **Display (M3c Task 44).** A graded run needs the 120 Hz reference refresh (118–122 Hz, any
+//! scale: the PO's M3a B3 ran on a 120 Hz 1× display) and the `tr-TR` format; elsewhere the run
+//! is INVALID (exit 3, no JSON) with the `PENDING-PO` note, or ungraded with `--any-display`
+//! (label `b3-offpanel-…`; another format gives `b3-offlocale-…`).
+//! A window that cannot become key (the display asleep, the session locked) is INVALID too.
+//! Every result line gives p50/p95/p99/max.
+//!
 //! Keys pass the app's dispatcher (`Window::dispatch_keystroke`: the keymap, then the editor's
 //! input handler). The latency probe is the editor's `FrameProbe`: marked at the editor's handler
 //! entry, recorded once the frame that shows the input is presented ([`super::PresentProbe`]).
@@ -60,9 +82,10 @@ use hacivat_ui_editor::{EditorView, FrameProbe, Tier};
 use hacivat_values::{DecimalVal, LogicalType, TsVal, Value};
 
 use super::{
-    BenchRoot, EXIT_INVALID, EXIT_USAGE, Launch, Outcome, PresentProbe, Sleep, activate, connect,
-    connected, console_editor, console_ready, end_run, fake_registry, flag, open_console,
-    percentiles, print_result, save_profile, start_app, verdict_text, wait_until,
+    BenchRoot, EXIT_INVALID, EXIT_USAGE, Figures, Launch, Outcome, PENDING_PO, PresentProbe, Sleep,
+    activate_or_refuse, connect, connected, console_editor, console_ready, end_run, fake_registry,
+    flag, open_console, percentiles, print_result, save_profile, start_app, verdict_text,
+    wait_until,
 };
 use crate::console::{ConsoleId, Consoles};
 use crate::shell::workspace::Workspace;
@@ -94,6 +117,21 @@ pub const RESULT_COLS: usize = 50;
 const RESULT_SQL: &str = "SELECT * FROM hv_bench_rows";
 const PROFILE_NAME: &str = "b3-bench";
 const LOAD_TIMEOUT: Duration = Duration::from_secs(600);
+// ## m3c-t44: the M3c modes.
+/// The carets `typing-multi-caret` types at (line 25,000 and the lines under it).
+pub const MULTI_CARETS: usize = 10;
+/// The folds `typing-with-folds` keeps (the `hacivat-text` perf test's shape).
+pub const FOLDS: usize = 1_000;
+/// One fold every this many lines...
+const FOLD_EVERY: usize = 50;
+/// ...hiding this many lines under its header.
+const FOLD_HIDDEN: usize = 5;
+/// The smallest file `typing-19mb` measures (ledger 298: "19 MB", the editor's perf test).
+pub const LARGE_MIN_BYTES: usize = 19 << 20;
+/// R-M3-9: the worker's incremental relex, p95.
+pub const RELEX_BUDGET_MS: f64 = 2.0;
+/// The format a graded run needs.
+pub const GRADED_FORMAT: &str = "tr-TR";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -103,6 +141,10 @@ pub enum Mode {
     Scroll,
     Open,
     ImeBounds,
+    // ## m3c-t44
+    TypingMultiCaret,
+    TypingWithFolds,
+    Typing19Mb,
 }
 
 impl Mode {
@@ -114,8 +156,26 @@ impl Mode {
             "scroll" => Mode::Scroll,
             "open" => Mode::Open,
             "ime-bounds" => Mode::ImeBounds,
+            // ## m3c-t44
+            "typing-multi-caret" => Mode::TypingMultiCaret,
+            "typing-with-folds" => Mode::TypingWithFolds,
+            "typing-19mb" => Mode::Typing19Mb,
             _ => return None,
         })
+    }
+
+    // ## m3c-t44
+    /// The modes that type the phrase and are graded against 16 ms p95.
+    pub fn is_typing(self) -> bool {
+        matches!(
+            self,
+            Mode::Typing
+                | Mode::TypingLongLine
+                | Mode::TypingWithResults
+                | Mode::TypingMultiCaret
+                | Mode::TypingWithFolds
+                | Mode::Typing19Mb
+        )
     }
 
     /// The JSON label. The typing labels start with `b3-typing`, so `hacivat-bench` grades them
@@ -128,6 +188,10 @@ impl Mode {
             Mode::Scroll => "b3-scroll-pagedown-app",
             Mode::Open => "b3-open-app",
             Mode::ImeBounds => "b3-ime-bounds-app",
+            // ## m3c-t44
+            Mode::TypingMultiCaret => "b3-typing-multi-caret-app",
+            Mode::TypingWithFolds => "b3-typing-with-folds-app",
+            Mode::Typing19Mb => "b3-typing-19mb-app",
         }
     }
 
@@ -137,7 +201,111 @@ impl Mode {
         match self {
             Mode::Typing | Mode::TypingWithResults | Mode::Open => Some(Tier::Full),
             Mode::TypingLongLine | Mode::Scroll | Mode::ImeBounds => None,
+            // ## m3c-t44: the 19 MiB file is over the full tier's 4 MB: Reduced is its truth.
+            Mode::TypingMultiCaret | Mode::TypingWithFolds => Some(Tier::Full),
+            Mode::Typing19Mb => Some(Tier::Reduced),
         }
+    }
+}
+
+// ## m3c-t44
+/// Whether `typing-19mb` may judge a file of `bytes` (at least [`LARGE_MIN_BYTES`]).
+pub fn large_size_ok(bytes: usize) -> Result<(), String> {
+    if bytes >= LARGE_MIN_BYTES {
+        Ok(())
+    } else {
+        Err(format!(
+            "typing-19mb is judged on a file of at least {LARGE_MIN_BYTES} bytes (19 MiB); this one has {bytes} (gen-sql --lines 520000)"
+        ))
+    }
+}
+
+/// The folds of `typing-with-folds` in a file of `lines` lines: `(header, last hidden line)`,
+/// 0-based, one every [`FOLD_EVERY`] lines from line 1, each hiding [`FOLD_HIDDEN`] lines, at
+/// most [`FOLDS`]. None holds the typing line (index 24,999).
+pub fn fold_plan(lines: usize) -> Vec<(usize, usize)> {
+    (0..FOLDS)
+        .map(|i| {
+            let header = i * FOLD_EVERY + 1;
+            (header, header + FOLD_HIDDEN)
+        })
+        .take_while(|&(_, last)| last < lines)
+        .collect()
+}
+
+/// The highest refresh B3 is graded at: a faster display shortens the wait for the next frame
+/// and so lowers the figure (the M3b gate's 240 Hz run said so).
+pub const B3_MAX_HZ: f64 = 122.0;
+
+/// Whether the window's display runs at B3's reference refresh, 120 Hz (118–122 Hz reported).
+/// The scale does not matter to a latency figure: the PO's graded M3a B3 ran on a 120 Hz 1×
+/// display (`bench-po-20261116-0643/b3.log`). Unknown refresh (the display asleep) is refused.
+pub fn display_ok(hz: Option<f64>, scale: Option<f32>) -> Result<(), String> {
+    let min = super::b1_real::PANEL_MIN_HZ;
+    match hz {
+        Some(hz) if (min..=B3_MAX_HZ).contains(&hz) => Ok(()),
+        _ => Err(format!(
+            "B3 is graded at the 120 Hz reference refresh ({min}-{B3_MAX_HZ} Hz); the display reports {hz:?} at scale {scale:?}"
+        )),
+    }
+}
+
+/// The worker's relex samples of a run, as R-M3-9 reads them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelexReport {
+    /// Analyses that took one edit incrementally (the R-M3-9 case).
+    pub incremental: usize,
+    /// Analyses with nothing to relex, and fresh builds (not relex figures).
+    pub unchanged: usize,
+    pub fresh: usize,
+    /// The incremental analyses' diff + `SqlDocument::apply` (relex and resplit).
+    pub relex: super::Figures,
+    /// The incremental analyses' whole analysis (with split, highlight, statements, folds).
+    pub analysis: super::Figures,
+}
+
+impl RelexReport {
+    pub fn of(samples: &[hacivat_sql_editor::bench::WorkerSample]) -> RelexReport {
+        use hacivat_sql_editor::bench::Built;
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let inc: Vec<_> = samples
+            .iter()
+            .filter(|s| s.kind == Built::Incremental)
+            .collect();
+        let count = |k: Built| samples.iter().filter(|s| s.kind == k).count();
+        RelexReport {
+            incremental: inc.len(),
+            unchanged: count(Built::Unchanged),
+            fresh: count(Built::Fresh),
+            relex: super::Figures::of(&inc.iter().map(|s| ms(s.relex)).collect::<Vec<_>>()),
+            analysis: super::Figures::of(&inc.iter().map(|s| ms(s.analysis)).collect::<Vec<_>>()),
+        }
+    }
+
+    /// R-M3-9's outcome: graded only when `graded` (the `typing` run on the reference panel);
+    /// no incremental sample is a FAIL (nothing supports the figure).
+    pub fn outcome(&self, graded: bool) -> Outcome {
+        if !graded {
+            Outcome::NotGraded
+        } else if self.incremental == 0 || self.relex.p95 > RELEX_BUDGET_MS {
+            Outcome::Fail
+        } else {
+            Outcome::Pass
+        }
+    }
+
+    pub fn json(&self, label: &str, outcome: Outcome) -> serde_json::Value {
+        serde_json::json!({
+            "label": label,
+            "requirement": "R-M3-9",
+            "budget_p95_ms": RELEX_BUDGET_MS,
+            "outcome": outcome.text(),
+            "incremental": self.incremental,
+            "unchanged": self.unchanged,
+            "fresh": self.fresh,
+            "relex_ms": self.relex.json(),
+            "analysis_ms": self.analysis.json(),
+        })
     }
 }
 
@@ -175,11 +343,16 @@ pub struct Args {
     pub format: String,
     /// Go on when the window cannot become frontmost (a harness check; the verdict fails).
     pub allow_inactive: bool,
+    // ## m3c-t44
+    /// Run on whatever display the window is on, ungraded (`b3-offpanel-…`).
+    pub any_display: bool,
 }
 
-pub const USAGE: &str = "usage: b3 --file <fixture> --bench typing|typing-long-line|typing-with-results|scroll|open|ime-bounds [--lang tr] [--format tr-TR] [--allow-inactive]\n\
-  typing, typing-with-results, open, scroll: --file target/fixtures/b3-50k-t0.sql (gen-sql --lines 50000)\n\
+pub const USAGE: &str = "usage: b3 --file <fixture> --bench typing|typing-long-line|typing-with-results|typing-multi-caret|typing-with-folds|typing-19mb|scroll|open|ime-bounds [--lang tr] [--format tr-TR] [--any-display] [--allow-inactive]\n\
+  typing, typing-with-results, typing-multi-caret, typing-with-folds, open, scroll: --file target/fixtures/b3-50k-t0.sql (gen-sql --lines 50000)\n\
   typing-long-line, ime-bounds: --file target/fixtures/b3-50k.sql (gen-sql --lines 50000 --long-line 100000)\n\
+  typing-19mb: --file target/fixtures/b3-19mb.sql (gen-sql --lines 520000; at least 19 MiB, Reduced mode)\n\
+  Graded only at the 120 Hz reference refresh (118-122 Hz) in tr-TR: elsewhere INVALID (exit 3, no JSON) unless --any-display (ungraded b3-offpanel-* label).\n\
   The last line is `RESULT: PASS|FAIL|INVALID|n/a <label>`; exit 0 = PASS or ungraded, 1 = FAIL or aborted, 3 = INVALID (exit 0 is never a PASS by itself: read RESULT).";
 
 pub fn parse_args(args: &[String]) -> Result<Args, String> {
@@ -190,9 +363,57 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
         mode,
         file,
         lang: flag(args, "--lang").unwrap_or("tr").to_string(),
-        format: flag(args, "--format").unwrap_or("tr-TR").to_string(),
+        format: flag(args, "--format").unwrap_or(GRADED_FORMAT).to_string(),
         allow_inactive: args.iter().any(|a| a == "--allow-inactive"),
+        any_display: args.iter().any(|a| a == "--any-display"),
     })
+}
+
+// ## m3c-t44: graded only on the reference panel and locale (Task 44's review line).
+impl Args {
+    /// The run's label: the mode's own (graded) on the reference panel in `tr-TR`; with
+    /// `on_panel == false` `b3-offpanel-…`, with another format `b3-offlocale-…` (neither
+    /// starts with `b3-typing`, so `hacivat-bench` grades neither).
+    pub fn label(&self, on_panel: bool) -> String {
+        let base = self.mode.label();
+        let rest = base.strip_prefix("b3-").unwrap_or(base);
+        if !on_panel {
+            format!("b3-offpanel-{rest}")
+        } else if self.format != GRADED_FORMAT {
+            format!("b3-offlocale-{rest}")
+        } else {
+            base.to_string()
+        }
+    }
+
+    /// Whether a run with this label is graded.
+    pub fn graded(&self, on_panel: bool) -> bool {
+        on_panel && self.format == GRADED_FORMAT
+    }
+}
+
+/// The run's display decision: graded on the panel; ungraded with `--any-display` (or under
+/// `--allow-inactive`, a harness check, with a warning); otherwise refused (`Err`: INVALID).
+pub fn display_decision(args: &Args, display: Result<(), String>) -> Result<bool, String> {
+    if args.any_display {
+        return Ok(false);
+    }
+    match display {
+        Ok(()) => Ok(true),
+        Err(why) if args.allow_inactive => {
+            eprintln!("warning: {why}; going on ungraded (--allow-inactive: a harness check)");
+            Ok(false)
+        }
+        Err(why) => Err(why),
+    }
+}
+
+/// An ungraded run never claims PASS or FAIL (INVALID stays INVALID).
+pub fn ungraded(outcome: Outcome) -> Outcome {
+    match outcome {
+        Outcome::Pass | Outcome::Fail => Outcome::NotGraded,
+        other => other,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,9 +589,13 @@ pub fn run(args: Args) -> ExitCode {
             return ExitCode::from(EXIT_USAGE);
         }
     };
-    if args.mode == Mode::Open
-        && let Err(why) = open_size_ok(fixture.len())
-    {
+    // ## m3c-t44: `typing-19mb` checks its file's size as `open` does.
+    let size = match args.mode {
+        Mode::Open => open_size_ok(fixture.len()),
+        Mode::Typing19Mb => large_size_ok(fixture.len()),
+        _ => Ok(()),
+    };
+    if let Err(why) = size {
         println!("INVALID: {why}");
         print_result(Outcome::Invalid, args.mode.label());
         return ExitCode::from(EXIT_INVALID as u8);
@@ -416,8 +641,9 @@ pub fn run(args: Args) -> ExitCode {
         cx.spawn(async move |cx| {
             let sleep = move |d: Duration| exec.timer(d);
             let code = match script(cx, ws, &sleep, &args, &root, profile_id, &text).await {
-                Ok(outcome) => {
-                    print_result(outcome, args.mode.label());
+                // ## m3c-t44: the label the run was measured under (ungraded off the panel).
+                Ok((outcome, label)) => {
+                    print_result(outcome, &label);
                     outcome.exit_code(args.allow_inactive)
                 }
                 Err(e) => {
@@ -441,9 +667,42 @@ async fn script<C: AppContext>(
     root: &BenchRoot,
     profile: ProfileId,
     text: &str,
+) -> anyhow::Result<(Outcome, String)> {
+    // ## m3c-t44: a window that cannot become key (the display asleep, the session locked) and
+    // a display other than the reference panel refuse the run: INVALID, no JSON, PENDING-PO.
+    let refused = args.mode.label().to_string();
+    if let Some(why) = activate_or_refuse(cx, ws, sleep, args.allow_inactive).await? {
+        println!("INVALID: {why}; no JSON written. {PENDING_PO}");
+        return Ok((Outcome::Invalid, refused));
+    }
+    let (hz, scale) = print_display(cx, ws, args.mode.label())?;
+    let on_panel = match display_decision(args, display_ok(hz, scale)) {
+        Ok(on_panel) => on_panel,
+        Err(why) => {
+            println!(
+                "INVALID display: {why}; no JSON written (--any-display runs ungraded). {PENDING_PO}"
+            );
+            return Ok((Outcome::Invalid, refused));
+        }
+    };
+    let label = args.label(on_panel);
+    let graded = args.graded(on_panel);
+    let outcome = measure(cx, ws, sleep, args, &label, graded, root, profile, text).await?;
+    Ok((if graded { outcome } else { ungraded(outcome) }, label))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn measure<C: AppContext>(
+    cx: &mut C,
+    ws: WindowHandle<Workspace>,
+    sleep: &impl Sleep,
+    args: &Args,
+    label: &str,
+    graded: bool,
+    root: &BenchRoot,
+    profile: ProfileId,
+    text: &str,
 ) -> anyhow::Result<Outcome> {
-    activate(cx, ws, sleep, args.allow_inactive).await?;
-    print_display(cx, ws, args.mode.label())?;
     if args.mode == Mode::Open {
         return open_bench(cx, ws, sleep, root, profile, text).await;
     }
@@ -527,7 +786,7 @@ async fn script<C: AppContext>(
         |_, _, cx| editor.read(cx).caret_bounds().is_some(),
     )
     .await?;
-    let probe = PresentProbe::new(args.mode.label());
+    let probe = PresentProbe::new(label);
     ws.update(cx, |_, _, cx| {
         editor.update(cx, |e, _| e.set_probe(Some(probe.as_frame_probe())));
     })?;
@@ -537,11 +796,28 @@ async fn script<C: AppContext>(
     replay(cx, ws, sleep, &warm).await;
     sleep(WARMUP).await;
     let shapes_before = editor_shapes(cx, ws, &editor)?;
+    // ## m3c-t44: the language worker's own relex timer runs with the probe (R-M3-9).
+    hacivat_sql_editor::bench::arm(true);
     probe.arm(true);
     let (inactive, aborted) = replay(cx, ws, sleep, &script).await;
     sleep(SETTLE).await;
     probe.arm(false);
+    hacivat_sql_editor::bench::arm(false);
+    let worker = hacivat_sql_editor::bench::take();
     let shapes = editor_shapes(cx, ws, &editor)?.saturating_sub(shapes_before);
+    // ## m3c-t44: a multi-caret or folds run measured what it claims only if its carets and
+    // folds were there to the end.
+    let (carets, folds) = ws.update(cx, |_, _, cx| {
+        let e = editor.read(cx);
+        (
+            e.snapshot().selection.ranges().len(),
+            e.folds().folded().len(),
+        )
+    })?;
+    if let Err(why) = kept_through_run(args.mode, carets, folds) {
+        println!("INVALID: {why}; no JSON written");
+        return Ok(Outcome::Invalid);
+    }
     let (inputs, frames) = probe.counts();
     let mut run = ws.update(cx, |_, window, cx| stamp_run(window, cx))?;
     run.expected_samples = expected;
@@ -550,21 +826,20 @@ async fn script<C: AppContext>(
     let latency = probe.latency();
     let stats = latency.stats();
     let os = std::env::consts::OS;
-    let v = verdict(args.mode.label(), os, &stats, &run);
+    let v = verdict(label, os, &stats, &run);
     if args.mode == Mode::Scroll {
-        println!(
-            "{}: keyboard paging (PageDown/PageUp), not the wheel",
-            args.mode.label()
-        );
+        println!("{label}: keyboard paging (PageDown/PageUp), not the wheel");
     }
+    // ## m3c-t44: p99 next to p50/p95/max; the carets and folds the run kept.
+    let fig = Figures::of(latency.samples_ms());
     println!(
-        "{}: tier={tier:?} samples={}/{} p50={:.2}ms p95={:.2}ms max={:.2}ms verdict={} inputs_marked={inputs} frames_showing_input={frames} inactive_keys={} aborted={} lines_shaped={shapes} build={} display_hz={:?} display_scale={:?}",
-        args.mode.label(),
+        "{label}: tier={tier:?} samples={}/{} p50={:.2}ms p95={:.2}ms p99={:.2}ms max={:.2}ms verdict={} inputs_marked={inputs} frames_showing_input={frames} inactive_keys={} aborted={} lines_shaped={shapes} carets={carets} folds={folds} build={} display_hz={:?} display_scale={:?}",
         stats.samples,
         run.expected_samples,
-        stats.p50_ms,
-        stats.p95_ms,
-        stats.max_ms,
+        fig.p50,
+        fig.p95,
+        fig.p99,
+        fig.max,
         verdict_text(v),
         run.inactive_keys,
         run.aborted,
@@ -578,20 +853,72 @@ async fn script<C: AppContext>(
         );
     }
     let dumped = dump(&latency, &run);
-    Ok(if run.aborted || !dumped {
+    let b3 = if run.aborted || dumped.is_none() {
         Outcome::Fail
     } else {
         Outcome::of(v)
+    };
+    if !args.mode.is_typing() {
+        return Ok(b3);
+    }
+    // ## m3c-t44: R-M3-9 in the real app's worker; graded in `typing` on the panel only.
+    let relex_graded = graded && args.mode == Mode::Typing;
+    let relex = RelexReport::of(&worker);
+    let relex_outcome = relex.outcome(relex_graded);
+    println!(
+        "{label} R-M3-9 worker relex (one-edit diff + SqlDocument::apply, incremental analyses): {} (budget {RELEX_BUDGET_MS} ms p95: {}); whole analysis {}; unchanged={} fresh={}",
+        relex.relex.text(3),
+        relex_outcome.text(),
+        relex.analysis.text(3),
+        relex.unchanged,
+        relex.fresh,
+    );
+    if let Some(path) = &dumped {
+        write_relex(path, &relex.json(label, relex_outcome));
+    }
+    Ok(if relex_graded {
+        worse(b3, relex_outcome)
+    } else {
+        b3
     })
 }
 
-/// Prints the window's viewport, refresh and scale; warns (does not refuse) off the 120 Hz
-/// panel (review C1.6). The JSON records the display either way.
+// ## m3c-t44
+/// Whether a run kept what its mode measures: every caret of `typing-multi-caret` and every
+/// fold of `typing-with-folds` to the end.
+pub fn kept_through_run(mode: Mode, carets: usize, folds: usize) -> Result<(), String> {
+    match mode {
+        Mode::TypingMultiCaret if carets != MULTI_CARETS => Err(format!(
+            "{carets} of {MULTI_CARETS} carets were left at the end of the run"
+        )),
+        Mode::TypingWithFolds if folds != FOLDS => Err(format!(
+            "{folds} of {FOLDS} folds were left at the end of the run"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The R-M3-9 figures of a run: `target/bench/relex/<the latency dump's name>`, outside
+/// `target/bench/*.json` (which `bench-report` reads as frames or latency dumps).
+fn write_relex(dump: &std::path::Path, body: &serde_json::Value) {
+    let dir = bench_dir().join("relex");
+    let path = dir.join(dump.file_name().unwrap_or_default());
+    match serde_json::to_vec_pretty(body)
+        .map_err(std::io::Error::other)
+        .and_then(|b| std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, b)))
+    {
+        Ok(()) => println!("wrote {}", path.display()),
+        Err(e) => eprintln!("could not write {}: {e}", path.display()),
+    }
+}
+
+/// Prints the window's viewport, refresh and scale, and returns the refresh and the scale (the
+/// run's display decision reads them; the JSON records them either way).
 fn print_display<C: AppContext>(
     cx: &mut C,
     ws: WindowHandle<Workspace>,
     label: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(Option<f64>, Option<f32>)> {
     let (run, w, h) = ws.update(cx, |_, window, cx| {
         let v = window.viewport_size();
         (
@@ -604,13 +931,7 @@ fn print_display<C: AppContext>(
         "{label}: viewport={w}x{h} display_hz={:?} display_scale={:?}",
         run.display_hz, run.display_scale
     );
-    if run.display_hz.is_none_or(|hz| hz < 118.0) {
-        eprintln!(
-            "warning: the display is not the 120 Hz panel ({:?} Hz); the gate's B3 runs on it",
-            run.display_hz
-        );
-    }
-    Ok(())
+    Ok((run.display_hz, run.display_scale))
 }
 
 /// Waits for the console host to open `tab`'s editor.
@@ -641,18 +962,48 @@ fn editor_shapes<C: AppContext>(
     ws.update(cx, |_, _, cx| editor.read(cx).layout_stats().shapes)
 }
 
-/// Places the caret for `mode`; the measured script and its expected samples.
-fn place_caret<C: AppContext>(
+/// Places the caret for `mode` (and, for the M3c modes, the carets or the folds); the measured
+/// script and its expected samples.
+pub(crate) fn place_caret<C: AppContext>(
     cx: &mut C,
     ws: WindowHandle<Workspace>,
     mode: Mode,
     editor: &hacivat_ui_core::gpui_surface::Entity<EditorView>,
 ) -> anyhow::Result<(Vec<Key>, usize)> {
-    ws.update(cx, |_, _, cx| {
+    ws.update(cx, |_, window, cx| {
         let snap = editor.read(cx).snapshot();
         let buffer = &snap.buffer;
+        // ## m3c-t44: 1,000 folds before the caret is placed (none holds the typing line).
+        if mode == Mode::TypingWithFolds {
+            let plan = fold_plan(buffer.len_lines());
+            if plan.len() != FOLDS {
+                bail!(
+                    "the file has {} lines, too few for {FOLDS} folds",
+                    buffer.len_lines()
+                );
+            }
+            let ranges: Vec<std::ops::Range<usize>> = plan
+                .iter()
+                .map(|&(header, last)| {
+                    buffer.line_range(header, false).start..buffer.line_range(last, false).end
+                })
+                .collect();
+            editor.update(cx, |e, cx| {
+                for r in ranges {
+                    hacivat_ui_editor::fold_gutter::fold_range(e, r, cx);
+                }
+            });
+            let made = editor.read(cx).folds().folded().len();
+            if made != FOLDS {
+                bail!("{made} of {FOLDS} folds were made");
+            }
+        }
         let (at, script) = match mode {
-            Mode::Typing | Mode::TypingWithResults => {
+            // ## m3c-t44: the multi-caret and folds runs type where `typing` does.
+            Mode::Typing
+            | Mode::TypingWithResults
+            | Mode::TypingMultiCaret
+            | Mode::TypingWithFolds => {
                 // The fixture's line 25,000 (one line lower under the result's statement).
                 let line = TYPING_LINE - 1 + usize::from(mode == Mode::TypingWithResults);
                 if line >= buffer.len_lines() {
@@ -676,10 +1027,27 @@ fn place_caret<C: AppContext>(
                 let r = buffer.line_range(line, false);
                 (r.start + (r.end - r.start) / 2, typing_script(TYPING_KEYSTROKES))
             }
+            // ## m3c-t44: the end of the 19 MiB file's middle line.
+            Mode::Typing19Mb => (
+                buffer.line_range(buffer.len_lines() / 2, false).end,
+                typing_script(TYPING_KEYSTROKES),
+            ),
             Mode::Scroll => (0, scroll_script(SCROLL_KEYSTROKES)),
             Mode::Open | Mode::ImeBounds => bail!("{mode:?} places no caret for typing"),
         };
         editor.update(cx, |e, cx| e.select_range(at..at, cx));
+        // ## m3c-t44: the carets under the first one, through the editor's own command.
+        if mode == Mode::TypingMultiCaret {
+            editor.update(cx, |e, cx| {
+                for _ in 1..MULTI_CARETS {
+                    e.run_command("editor.add_caret_below", window, cx);
+                }
+            });
+            let carets = editor.read(cx).snapshot().selection.ranges().len();
+            if carets != MULTI_CARETS {
+                bail!("{carets} of {MULTI_CARETS} carets were placed");
+            }
+        }
         let expected = script.len();
         Ok((script, expected))
     })?
@@ -729,15 +1097,16 @@ pub(crate) fn send_key<C: AppContext>(
     })
 }
 
-fn dump(latency: &LatencyProbe, run: &RunInfo) -> bool {
+// ## m3c-t44 (named lines): the dump's path, for the relex sidecar.
+fn dump(latency: &LatencyProbe, run: &RunInfo) -> Option<PathBuf> {
     match latency.dump_json(&bench_dir(), std::env::consts::OS, run) {
         Ok(path) => {
             println!("wrote {}", path.display());
-            true
+            Some(path)
         }
         Err(e) => {
             eprintln!("could not write bench json: {e}");
-            false
+            None
         }
     }
 }
@@ -842,7 +1211,7 @@ async fn open_bench<C: AppContext>(
         run.display_hz,
         run.display_scale,
     );
-    let dumped = dump(&first_paint, &run) & dump(&analysis, &run);
+    let dumped = dump(&first_paint, &run).is_some() & dump(&analysis, &run).is_some();
     if !dumped {
         return Ok(Outcome::Fail);
     }
@@ -960,7 +1329,7 @@ async fn ime_bounds<C: AppContext>(
         run.display_hz,
         run.display_scale,
     );
-    Ok(if dump(&probe, &run) {
+    Ok(if dump(&probe, &run).is_some() {
         outcome
     } else {
         Outcome::Fail
@@ -1101,5 +1470,205 @@ mod tests {
             (ok.mode, ok.lang.as_str(), ok.format.as_str()),
             (Mode::Scroll, "tr", "tr-TR")
         );
+    }
+
+    // ---- ## m3c-t44 -------------------------------------------------------------------------
+
+    fn args(s: &[&str]) -> Args {
+        parse_args(&s.iter().map(|x| x.to_string()).collect::<Vec<_>>()).unwrap()
+    }
+
+    #[test]
+    fn the_m3c_modes_parse_and_are_graded_typing_modes() {
+        let cases = [
+            (
+                "typing-multi-caret",
+                Mode::TypingMultiCaret,
+                "b3-typing-multi-caret-app",
+            ),
+            (
+                "typing-with-folds",
+                Mode::TypingWithFolds,
+                "b3-typing-with-folds-app",
+            ),
+            ("typing-19mb", Mode::Typing19Mb, "b3-typing-19mb-app"),
+        ];
+        for (name, mode, label) in cases {
+            assert_eq!(Mode::parse(name), Some(mode), "{name}");
+            assert_eq!(mode.label(), label);
+            assert!(mode.is_typing(), "{name}");
+            // `hacivat-bench` keys the 16 ms p95 threshold on this prefix.
+            assert!(label.starts_with("b3-typing"), "{label}");
+            assert_eq!(args(&["--file", "f.sql", "--bench", name]).mode, mode);
+        }
+        for mode in [Mode::Scroll, Mode::Open, Mode::ImeBounds] {
+            assert!(!mode.is_typing(), "{mode:?}");
+        }
+        assert!(Mode::parse("typing-folds").is_none());
+    }
+
+    #[test]
+    fn the_m3c_modes_need_their_tier() {
+        for mode in [Mode::TypingMultiCaret, Mode::TypingWithFolds] {
+            assert_eq!(tier_ok(mode, Tier::Full), Ok(()), "{mode:?}");
+            assert!(tier_ok(mode, Tier::Reduced).is_err(), "{mode:?}");
+        }
+        // 19 MiB is over the full tier's 4 MB: Reduced mode is what the product does there.
+        assert_eq!(tier_ok(Mode::Typing19Mb, Tier::Reduced), Ok(()));
+        assert!(tier_ok(Mode::Typing19Mb, Tier::Full).is_err());
+    }
+
+    #[test]
+    fn typing_19mb_needs_at_least_19_mib() {
+        assert_eq!(LARGE_MIN_BYTES, 19_922_944);
+        assert!(large_size_ok(19_922_944).is_ok());
+        assert!(large_size_ok(20_700_000).is_ok());
+        let err = large_size_ok(19_922_943).unwrap_err();
+        assert!(err.contains("--lines 520000"), "{err}");
+        assert!(large_size_ok(2_000_000).is_err());
+    }
+
+    #[test]
+    fn the_fold_plan_is_a_thousand_five_line_folds_clear_of_the_typing_line() {
+        let plan = fold_plan(50_000);
+        assert_eq!(plan.len(), FOLDS);
+        assert_eq!(plan[0], (1, 6));
+        assert_eq!(plan[999], (49_951, 49_956));
+        let typing = TYPING_LINE - 1;
+        for w in plan.windows(2) {
+            assert!(w[0].1 < w[1].0, "{w:?} overlap");
+        }
+        for &(header, last) in &plan {
+            assert_eq!(last - header, FOLD_HIDDEN);
+            assert!(!(header..=last).contains(&typing), "{header}..={last}");
+        }
+        // A short file gets fewer folds (the run then refuses: fewer than FOLDS).
+        assert_eq!(fold_plan(1_000).len(), 20);
+        assert!(fold_plan(3).is_empty());
+    }
+
+    #[test]
+    fn b3_is_graded_only_at_the_reference_refresh() {
+        // The built-in panel, and the 120 Hz 1x external display of the PO's M3a run.
+        assert_eq!(display_ok(Some(120.0), Some(2.0)), Ok(()));
+        assert_eq!(display_ok(Some(119.88), Some(2.0)), Ok(()));
+        assert_eq!(display_ok(Some(120.000_004_8), Some(1.0)), Ok(()));
+        assert_eq!(display_ok(Some(120.0), None), Ok(()));
+        // A 60 Hz display, the 240 Hz external display, an unknown refresh (asleep).
+        assert!(display_ok(Some(60.0), Some(2.0)).is_err());
+        let fast = display_ok(Some(240.0), Some(1.0)).unwrap_err();
+        assert!(fast.contains("120 Hz reference"), "{fast}");
+        assert!(display_ok(Some(122.5), Some(2.0)).is_err());
+        assert!(display_ok(None, Some(2.0)).is_err());
+    }
+
+    #[test]
+    fn off_the_panel_a_run_is_refused_unless_any_display() {
+        let off = Err("not the panel".to_string());
+        let plain = args(&["--file", "f.sql", "--bench", "typing"]);
+        assert_eq!(display_decision(&plain, Ok(())), Ok(true));
+        assert!(display_decision(&plain, off.clone()).is_err());
+        let anywhere = args(&["--file", "f.sql", "--bench", "typing", "--any-display"]);
+        assert_eq!(display_decision(&anywhere, off.clone()), Ok(false));
+        // `--any-display` is ungraded even on the panel.
+        assert_eq!(display_decision(&anywhere, Ok(())), Ok(false));
+        // The CI harness check (xvfb) goes on ungraded.
+        let harness = args(&["--file", "f.sql", "--bench", "typing", "--allow-inactive"]);
+        assert_eq!(display_decision(&harness, off), Ok(false));
+    }
+
+    #[test]
+    fn only_a_panel_run_in_tr_tr_keeps_the_graded_label() {
+        let typing = args(&["--file", "f.sql", "--bench", "typing-with-folds"]);
+        assert_eq!(typing.label(true), "b3-typing-with-folds-app");
+        assert!(typing.graded(true));
+        assert_eq!(typing.label(false), "b3-offpanel-typing-with-folds-app");
+        assert!(!typing.graded(false));
+        let en = args(&["--file", "f.sql", "--bench", "typing", "--format", "en-US"]);
+        assert_eq!(en.label(true), "b3-offlocale-typing-app");
+        assert!(!en.graded(true));
+        for ungraded_label in [typing.label(false), en.label(true)] {
+            assert!(!ungraded_label.starts_with("b3-typing"), "{ungraded_label}");
+        }
+        assert_eq!(ungraded(Outcome::Pass), Outcome::NotGraded);
+        assert_eq!(ungraded(Outcome::Fail), Outcome::NotGraded);
+        assert_eq!(ungraded(Outcome::Invalid), Outcome::Invalid);
+    }
+
+    fn worker(
+        kind: hacivat_sql_editor::bench::Built,
+        relex_us: u64,
+    ) -> hacivat_sql_editor::bench::WorkerSample {
+        hacivat_sql_editor::bench::WorkerSample {
+            kind,
+            relex: Duration::from_micros(relex_us),
+            analysis: Duration::from_micros(relex_us * 3),
+        }
+    }
+
+    #[test]
+    fn r_m3_9_reads_the_incremental_analyses_only() {
+        use hacivat_sql_editor::bench::Built;
+        // 100 incremental relexes of 0.01..=1.00 ms, one fresh full lex of 50 ms, two unchanged.
+        let mut samples: Vec<_> = (1..=100)
+            .map(|i| worker(Built::Incremental, i * 10))
+            .collect();
+        samples.push(worker(Built::Fresh, 50_000));
+        samples.push(worker(Built::Unchanged, 5));
+        samples.push(worker(Built::Unchanged, 5));
+        let r = RelexReport::of(&samples);
+        assert_eq!((r.incremental, r.unchanged, r.fresh), (100, 2, 1));
+        assert!((r.relex.p95 - 0.95).abs() < 1e-9, "{}", r.relex.p95);
+        assert!((r.relex.p99 - 0.99).abs() < 1e-9, "{}", r.relex.p99);
+        assert!(
+            (r.relex.max - 1.0).abs() < 1e-9,
+            "the fresh build is not a relex"
+        );
+        assert!((r.analysis.max - 3.0).abs() < 1e-9);
+        assert_eq!(r.outcome(true), Outcome::Pass);
+        assert_eq!(r.outcome(false), Outcome::NotGraded);
+        let json = r.json("b3-typing-app", r.outcome(true));
+        assert_eq!(json["requirement"], "R-M3-9");
+        assert_eq!(json["outcome"], "PASS");
+        assert_eq!(json["incremental"], 100);
+    }
+
+    #[test]
+    fn r_m3_9_fails_over_2_ms_p95_or_without_a_relex() {
+        use hacivat_sql_editor::bench::Built;
+        // 95 of 100 at 1 ms and 5 at 3 ms: p95 is 1 ms (PASS); 6 at 3 ms: p95 is 3 ms (FAIL).
+        let at = |slow: usize| {
+            (0..100)
+                .map(|i| {
+                    worker(
+                        Built::Incremental,
+                        if i < 100 - slow { 1_000 } else { 3_000 },
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(RelexReport::of(&at(5)).outcome(true), Outcome::Pass);
+        assert_eq!(RelexReport::of(&at(6)).outcome(true), Outcome::Fail);
+        // Exactly 2 ms passes.
+        let edge: Vec<_> = (0..10).map(|_| worker(Built::Incremental, 2_000)).collect();
+        assert_eq!(RelexReport::of(&edge).outcome(true), Outcome::Pass);
+        // Nothing relexed incrementally: no figure supports R-M3-9.
+        let none = [worker(Built::Fresh, 10), worker(Built::Unchanged, 1)];
+        assert_eq!(RelexReport::of(&none).outcome(true), Outcome::Fail);
+        assert_eq!(RelexReport::of(&[]).outcome(true), Outcome::Fail);
+    }
+
+    #[test]
+    fn a_run_that_lost_its_carets_or_folds_is_refused() {
+        assert_eq!(
+            kept_through_run(Mode::TypingMultiCaret, MULTI_CARETS, 0),
+            Ok(())
+        );
+        assert!(kept_through_run(Mode::TypingMultiCaret, 1, 0).is_err());
+        assert_eq!(kept_through_run(Mode::TypingWithFolds, 1, FOLDS), Ok(()));
+        let err = kept_through_run(Mode::TypingWithFolds, 1, 999).unwrap_err();
+        assert!(err.contains("999 of 1000 folds"), "{err}");
+        // Other modes keep nothing in particular.
+        assert_eq!(kept_through_run(Mode::Typing, 1, 0), Ok(()));
     }
 }

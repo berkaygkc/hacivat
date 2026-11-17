@@ -31,6 +31,13 @@
 //!   ([`super::FrameCpu`]) is printed after it as an upper bound.
 //! - `--mode streaming`: a third, non-gating run that starts the fling once 10,000 rows are in
 //!   while the rest still streams (label `b1-streaming-real-*`, no threshold).
+//! - `--sorted` (M3c Task 44; also `--mode sorted`): a non-gating run that sorts the whole
+//!   result locally by `c01` (Turkish text, the M3c sort through `GridView::request_sort`) and
+//!   then flings over the sorted order (label `b1-sorted-real-*`, no threshold). It prints the
+//!   sort's time and the same paint figures.
+//! - **Refusals (M3c Task 44).** A window that cannot become key (the display asleep, the
+//!   session locked) refuses the run like a wrong display: INVALID, exit 3, no JSON, and the
+//!   `PENDING-PO` note.
 
 use std::cell::{Cell, RefCell};
 use std::process::ExitCode;
@@ -50,10 +57,10 @@ use hacivat_ui_grid::GridView;
 use secrecy::SecretString;
 
 use super::{
-    BenchRoot, EXIT_USAGE, FrameCpu, Launch, Outcome, Sleep, activate, connect, connected,
-    console_editor, console_ready, end_run, flag, format_locale, open_console, percentiles,
-    print_result, result_grid, save_layout, save_profile, start_app, verdict_text, wait_until,
-    wait_until_every,
+    BenchRoot, EXIT_USAGE, Figures, FrameCpu, Launch, Outcome, PENDING_PO, Sleep,
+    activate_or_refuse, connect, connected, console_editor, console_ready, end_run, flag,
+    format_locale, open_console, print_result, result_grid, save_layout, save_profile, start_app,
+    verdict_text, wait_until, wait_until_every,
 };
 use crate::console::ConsoleId;
 use crate::shell::TileLayout;
@@ -75,8 +82,6 @@ const WARMUP: Duration = Duration::from_millis(750);
 /// The streaming run starts its fling once this many rows are in.
 const STREAMING_START_ROWS: u64 = 10_000;
 const LOAD_TIMEOUT: Duration = Duration::from_secs(900);
-/// The paint budgets reported (not gating): the 6 ms ALG budget and the 120 Hz half-frame.
-const PAINT_BUDGETS_MS: [f64; 2] = [6.0, 3.0];
 /// How often the script looks for the fling's end while the fling is measured.
 const FLING_POLL: Duration = Duration::from_millis(100);
 /// The 16-word Turkish array the text columns mix in.
@@ -120,7 +125,18 @@ pub enum Mode {
     Full,
     /// Fling from the first 10,000 rows while the rest streams (not gating).
     Streaming,
+    // ## m3c-t44
+    /// Fetch everything, sort it locally by [`SORT_COLUMN`] (Turkish text, the M3c sort), then
+    /// fling over the sorted order (`--sorted`; not gating).
+    Sorted,
 }
+
+// ## m3c-t44
+/// The column `--sorted` sorts by: `c01`, text mixing the Turkish words with an md5, so the
+/// view order scatters the model rows the grid reads while it paints.
+pub const SORT_COLUMN: u32 = 1;
+/// How long the local sort of 1M rows may take before the run gives up.
+const SORT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `b1_real [--engine pg|sqlite] [--size WxH] [--mode full|streaming] [--lang tr]
 /// [--format tr-TR] [--any-display] [--allow-inactive]`.
@@ -137,8 +153,9 @@ pub struct Args {
     pub allow_inactive: bool,
 }
 
-pub const USAGE: &str = "usage: HACIVAT_DOCKER_SET=pr b1_real [--engine pg|sqlite] [--size 1440x900|2560x1440] [--mode full|streaming] [--lang tr] [--format tr-TR] [--any-display] [--allow-inactive]\n\
+pub const USAGE: &str = "usage: HACIVAT_DOCKER_SET=pr b1_real [--engine pg|sqlite] [--size 1440x900|2560x1440] [--mode full|streaming|sorted] [--sorted] [--lang tr] [--format tr-TR] [--any-display] [--allow-inactive]\n\
   1440x900 needs the built-in panel (2x, >= 118 Hz); 2560x1440 needs a 1x display; otherwise the run is INVALID (exit 3, no JSON) unless --any-display (ungraded label).\n\
+  --sorted (= --mode sorted): the full result sorted locally by c01 (Turkish text) before the fling; not gating (label b1-sorted-real-*).\n\
   The last line is `RESULT: PASS|FAIL|INVALID|n/a <label>`; exit 0 = PASS or ungraded, 1 = FAIL or aborted, 3 = INVALID (exit 0 is never a PASS by itself: read RESULT).";
 
 /// The format locale a graded run needs (gate E2).
@@ -146,7 +163,8 @@ pub const GRADED_FORMAT: &str = "tr-TR";
 /// The smallest share of the requested window area the measured viewport may cover.
 const MIN_AREA_SHARE: f32 = 0.9;
 /// The built-in panel's refresh, less a margin for the reported interval.
-const PANEL_MIN_HZ: f64 = 118.0;
+// ## m3c-t44 (named line): B3's display check reads it too.
+pub const PANEL_MIN_HZ: f64 = 118.0;
 
 /// Whether the window is where the gate measures B1-real (review C1): `1440x900` on the
 /// built-in panel (scale 2, at least 118 Hz), `2560x1440` on a 1× display, and in both the
@@ -218,7 +236,15 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
     let mode = match flag(args, "--mode").unwrap_or("full") {
         "full" => Mode::Full,
         "streaming" => Mode::Streaming,
+        // ## m3c-t44
+        "sorted" => Mode::Sorted,
         other => return Err(format!("unknown mode {other:?}")),
+    };
+    // ## m3c-t44: `--sorted` names the sorted run; it does not combine with another mode.
+    let mode = match (args.iter().any(|a| a == "--sorted"), mode) {
+        (false, mode) => mode,
+        (true, Mode::Full | Mode::Sorted) => Mode::Sorted,
+        (true, other) => return Err(format!("--sorted does not combine with --mode {other:?}")),
     };
     Ok(Args {
         engine,
@@ -243,6 +269,9 @@ impl Args {
         };
         let kind = if self.mode == Mode::Streaming {
             "b1-streaming-real"
+        } else if self.mode == Mode::Sorted {
+            // ## m3c-t44: not gating (no `b1-fling` prefix).
+            "b1-sorted-real"
         } else if self.any_display {
             "b1-offpanel-real"
         } else if format != GRADED_FORMAT {
@@ -458,7 +487,12 @@ async fn script<C: AppContext>(
     if format != args.format {
         bail!("the format locale is {format}, not {}", args.format);
     }
-    activate(cx, ws, sleep, args.allow_inactive).await?;
+    // ## m3c-t44: a window that cannot become key (asleep, locked) refuses the run: PENDING-PO.
+    if let Some(why) = activate_or_refuse(cx, ws, sleep, args.allow_inactive).await? {
+        println!("INVALID: {why}; no JSON written. {PENDING_PO}");
+        print_result(Outcome::Invalid, "b1_real");
+        return Ok(Outcome::Invalid);
+    }
     // The resize lands through the platform: wait (briefly) for the viewport to take it.
     let wanted = args.size.0 * args.size.1 * MIN_AREA_SHARE;
     let _ = wait_until(
@@ -483,7 +517,9 @@ async fn script<C: AppContext>(
     if !args.any_display
         && let Err(why) = display_ok(args.size, viewport, stamp.display_hz, stamp.display_scale)
     {
-        println!("INVALID display: {why}; no JSON written (--any-display runs ungraded)");
+        println!(
+            "INVALID display: {why}; no JSON written (--any-display runs ungraded). {PENDING_PO}"
+        );
         print_result(Outcome::Invalid, &label);
         return Ok(Outcome::Invalid);
     }
@@ -574,8 +610,12 @@ async fn script<C: AppContext>(
     }
     let done = match args.mode {
         Mode::Streaming => streaming,
-        Mode::Full => {
+        // ## m3c-t44: the sorted run sorts the whole result first.
+        Mode::Full | Mode::Sorted => {
             let grid = wait_grid(cx, ws, sleep, console).await?;
+            if args.mode == Mode::Sorted {
+                sort_all(cx, ws, sleep, &grid, &label).await?;
+            }
             let done = Rc::new(Cell::new(None::<FlingOutcome>));
             start_fling(cx, ws, grid, label.clone(), done.clone())?;
             done
@@ -599,6 +639,52 @@ async fn script<C: AppContext>(
     .await?;
     let outcome = done.take().context("no fling outcome")?;
     report(cx, ws, args, &label, &outcome, &loaded, rss_after, &format)
+}
+
+// ## m3c-t44
+/// Sorts the whole result by [`SORT_COLUMN`] through the grid (`request_sort`, as a header click
+/// does; the job runs off the UI thread with the column's collation) and waits until the grid
+/// shows that sort over all [`ROWS`] rows. Prints how long the sort took.
+async fn sort_all<C: AppContext>(
+    cx: &mut C,
+    ws: WindowHandle<Workspace>,
+    sleep: &impl Sleep,
+    grid: &Entity<GridView>,
+    label: &str,
+) -> anyhow::Result<()> {
+    use hacivat_ui_grid::ColId;
+    use hacivat_ui_grid::model::SortSpec;
+    let spec = SortSpec::by(ColId(SORT_COLUMN), false);
+    let asked = Instant::now();
+    ws.update(cx, |_, _, cx| {
+        grid.update(cx, |g, cx| g.request_sort(spec.clone(), cx));
+    })?;
+    let took = wait_until(
+        cx,
+        ws,
+        sleep,
+        "the local sort of the whole result",
+        SORT_TIMEOUT,
+        |_, _, cx| {
+            crate::results::sort::status(grid, cx).is_some_and(|s| sort_done(&s, &spec, ROWS))
+        },
+    )
+    .await?;
+    println!(
+        "{label} sort: c{SORT_COLUMN:02} ascending over {ROWS} rows shown after {:.0} ms (asked {:.0} ms ago)",
+        took.as_secs_f64() * 1000.0,
+        asked.elapsed().as_secs_f64() * 1000.0,
+    );
+    Ok(())
+}
+
+/// The grid shows `spec` over all `rows` rows and no job is running.
+pub fn sort_done(
+    s: &crate::results::sort::SortStatus,
+    spec: &hacivat_ui_grid::model::SortSpec,
+    rows: u64,
+) -> bool {
+    s.shown == *spec && s.sorted == Some(rows) && s.running.is_none()
 }
 
 async fn wait_grid<C: AppContext>(
@@ -735,24 +821,22 @@ fn drive(f: Fling, window: &mut Window, travelled: f64) {
     });
 }
 
-/// `n p50 p95 p99 max over-3ms over-6ms` of `samples`, for the log and the sidecar.
+// ## m3c-t44: the paint figures through `Figures` (p50/p95/p99/max, over 3 ms and 6 ms).
+/// `n p50 p95 p99 max over-3ms over-6ms` of `samples`, for the sidecar.
 fn paint_summary(samples: &[f64]) -> serde_json::Value {
-    let (n, p50, p95, p99, max) = percentiles(samples);
-    let over = |ms: f64| samples.iter().filter(|v| **v > ms).count();
-    serde_json::json!({
-        "n": n, "p50": p50, "p95": p95, "p99": p99, "max": max,
-        "over_3ms": over(PAINT_BUDGETS_MS[1]), "over_6ms": over(PAINT_BUDGETS_MS[0]),
-    })
+    Figures::of(samples).json()
+}
+
+/// The log line of one paint figure.
+pub fn paint_line(label: &str, what: &str, samples: &[f64]) -> String {
+    format!(
+        "{label} {what}: {}",
+        Figures::of(samples).text_with_counts()
+    )
 }
 
 fn print_paint(label: &str, what: &str, samples: &[f64]) {
-    let (n, p50, p95, p99, max) = percentiles(samples);
-    let over = |ms: f64| samples.iter().filter(|v| **v > ms).count();
-    println!(
-        "{label} {what}: n={n} p50={p50:.2}ms p95={p95:.2}ms p99={p99:.2}ms max={max:.2}ms over-3ms={} over-6ms={}",
-        over(PAINT_BUDGETS_MS[1]),
-        over(PAINT_BUDGETS_MS[0]),
-    );
+    println!("{}", paint_line(label, what, samples));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -850,6 +934,8 @@ fn write_sidecar(
 ) {
     let body = serde_json::json!({
         "label": label,
+        // ## m3c-t44
+        "mode": format!("{:?}", args.mode),
         "format_locale": format,
         "requested": [args.size.0, args.size.1],
         "viewport": [viewport.0, viewport.1],
@@ -986,6 +1072,80 @@ mod tests {
         assert!(err.contains("of the requested"), "{err}");
         let panel = (1440.0, 900.0);
         assert!(display_ok(panel, (1200.0, 700.0), Some(120.0), Some(2.0)).is_err());
+    }
+
+    // ## m3c-t44
+    #[test]
+    fn sorted_is_its_own_ungraded_run() {
+        let sorted = parse_args(&a(&["--sorted"])).unwrap();
+        assert_eq!(sorted.mode, Mode::Sorted);
+        assert_eq!(
+            parse_args(&a(&["--mode", "sorted"])).unwrap().mode,
+            Mode::Sorted
+        );
+        assert_eq!(
+            parse_args(&a(&["--sorted", "--mode", "full"]))
+                .unwrap()
+                .mode,
+            Mode::Sorted
+        );
+        assert!(parse_args(&a(&["--sorted", "--mode", "streaming"])).is_err());
+        assert_eq!(parse_args(&a(&[])).unwrap().mode, Mode::Full);
+        // Never graded: the label has no `b1-fling` prefix, on the panel and in tr-TR too.
+        let label = sorted.label((1440.0, 900.0), "tr-TR");
+        assert_eq!(label, "b1-sorted-real-pg-1440x900");
+        assert!(!label.starts_with("b1-fling"));
+        let wide = parse_args(&a(&["--sorted", "--size", "2560x1440"])).unwrap();
+        assert_eq!(
+            wide.label((2560.0, 1415.0), "tr-TR"),
+            "b1-sorted-real-pg-2560x1415"
+        );
+    }
+
+    #[test]
+    fn the_sort_is_done_only_when_every_row_is_ordered_and_no_job_runs() {
+        use crate::results::sort::SortStatus;
+        use hacivat_ui_grid::ColId;
+        use hacivat_ui_grid::model::SortSpec;
+        let spec = SortSpec::by(ColId(SORT_COLUMN), false);
+        let done = SortStatus {
+            shown: spec.clone(),
+            sorted: Some(ROWS),
+            running: None,
+            slow: false,
+        };
+        assert!(sort_done(&done, &spec, ROWS));
+        let partial = SortStatus {
+            sorted: Some(10_000),
+            ..done.clone()
+        };
+        assert!(!sort_done(&partial, &spec, ROWS));
+        let running = SortStatus {
+            running: Some(ROWS),
+            ..done.clone()
+        };
+        assert!(!sort_done(&running, &spec, ROWS));
+        let other = SortSpec::by(ColId(0), false);
+        assert!(!sort_done(&done, &other, ROWS));
+        assert!(!sort_done(
+            &done,
+            &SortSpec::by(ColId(SORT_COLUMN), true),
+            ROWS
+        ));
+    }
+
+    #[test]
+    fn the_paint_line_carries_p99_and_the_counts() {
+        let samples = [1.0, 2.0, 4.0, 7.0];
+        assert_eq!(
+            paint_line("b1-fling-real-pg-1440x900", "GRID PAINT", &samples),
+            "b1-fling-real-pg-1440x900 GRID PAINT: n=4 p50=2.00ms p95=7.00ms p99=7.00ms max=7.00ms over-3ms=2 over-6ms=1"
+        );
+        let json = paint_summary(&samples);
+        assert_eq!(
+            (json["n"].as_u64(), json["over_3ms"].as_u64()),
+            (Some(4), Some(2))
+        );
     }
 
     #[test]

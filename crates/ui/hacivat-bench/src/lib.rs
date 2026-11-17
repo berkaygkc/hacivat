@@ -415,6 +415,12 @@ impl LatencyProbe {
         latency_stats_of(&self.samples_ms)
     }
 
+    // ## m3c-t44 (named exception): the real-app B3 bench also reports p99 of the samples.
+    /// The recorded samples, in milliseconds, in the order they were taken.
+    pub fn samples_ms(&self) -> &[f64] {
+        &self.samples_ms
+    }
+
     pub fn dump_json(&self, dir: &Path, os: &str, run: &RunInfo) -> io::Result<PathBuf> {
         write_dump(dir, &self.label, os, "latency", &self.samples_ms, run)
     }
@@ -498,6 +504,24 @@ mod tests {
         let s = p.stats();
         assert_eq!(s.samples, 1);
         assert!((s.max_ms - 5.0).abs() < 0.01);
+    }
+
+    // ## m3c-t44
+    #[test]
+    fn latency_samples_are_readable_in_order() {
+        let t0 = Instant::now();
+        let mut p = LatencyProbe::new("b3-typing");
+        assert!(p.samples_ms().is_empty());
+        for ms in [7, 3] {
+            p.mark_input(t0);
+            p.on_frame(t0 + Duration::from_millis(ms));
+        }
+        let s = p.samples_ms();
+        assert_eq!(s.len(), 2);
+        assert!(
+            (s[0] - 7.0).abs() < 0.01 && (s[1] - 3.0).abs() < 0.01,
+            "{s:?}"
+        );
     }
 
     #[test]
