@@ -71,7 +71,15 @@ pub(crate) struct Kept {
 /// previous job (relexed and resplit incrementally when the context is the same), and returns
 /// the document to keep.
 pub(crate) fn analyse_from(kept: Option<Kept>, job: &Job) -> (Analysis, Kept) {
-    let doc = document(kept, job);
+    // ## m3c-t44: the worker's relex timer (feature `bench` only).
+    #[cfg(feature = "bench")]
+    let started = std::time::Instant::now();
+    #[cfg(feature = "bench")]
+    crate::bench::note_diff(std::time::Duration::ZERO);
+    #[cfg_attr(not(feature = "bench"), allow(unused_variables))]
+    let (doc, built) = document(kept, job);
+    #[cfg(feature = "bench")]
+    let relex = started.elapsed();
     let snap = doc.snapshot();
     // Computed here, once, for every reader: the preview and Run's reuse never build it on the
     // UI thread.
@@ -86,6 +94,21 @@ pub(crate) fn analyse_from(kept: Option<Kept>, job: &Job) -> (Analysis, Kept) {
         folds: crate::folds::folding_ranges(&snap).into(),
         doc: snap,
     };
+    // ## m3c-t44: the worker's relex timer (feature `bench` only).
+    #[cfg(feature = "bench")]
+    {
+        let diff = crate::bench::noted_diff().min(relex);
+        crate::bench::record(crate::bench::WorkerSample {
+            kind: match built {
+                Built::Applied => crate::bench::Built::Incremental,
+                Built::Unchanged => crate::bench::Built::Unchanged,
+                Built::Fresh => crate::bench::Built::Fresh,
+            },
+            diff,
+            apply: relex - diff,
+            analysis: started.elapsed(),
+        });
+    }
     (
         analysis,
         Kept {
@@ -97,7 +120,8 @@ pub(crate) fn analyse_from(kept: Option<Kept>, job: &Job) -> (Analysis, Kept) {
 
 /// `job`'s document: the kept one with the change to the job's text applied, or a fresh one
 /// (no document kept, another SQL context, or a change it cannot apply).
-fn document(kept: Option<Kept>, job: &Job) -> SqlDocument {
+// ## m3c-t44 (named lines): `document` also says how it was built (the bench's relex timer).
+fn document(kept: Option<Kept>, job: &Job) -> (SqlDocument, Built) {
     if let Some(Kept {
         mut doc,
         generation,
@@ -106,15 +130,39 @@ fn document(kept: Option<Kept>, job: &Job) -> SqlDocument {
         && *doc.snapshot().ctx() == job.ctx
         && doc.snapshot().flavor() == job.flavor
     {
-        let applied = match change_between(doc.text(), &job.buffer) {
-            None => true,
-            Some(edit) => doc.apply(std::slice::from_ref(&edit)).is_ok(),
+        // ## m3c-t44 (fix round 2, M1): the scan for the one edit is timed on its own.
+        #[cfg(feature = "bench")]
+        let scan = std::time::Instant::now();
+        let change = change_between(doc.text(), &job.buffer);
+        #[cfg(feature = "bench")]
+        crate::bench::note_diff(scan.elapsed());
+        let built = match change {
+            None => Some(Built::Unchanged),
+            Some(edit) => doc
+                .apply(std::slice::from_ref(&edit))
+                .is_ok()
+                .then_some(Built::Applied),
         };
-        if applied {
-            return doc;
+        if let Some(built) = built {
+            return (doc, built);
         }
     }
-    SqlDocument::from_chunks(&RopeChunks(job.buffer.clone()), job.ctx, job.flavor)
+    (
+        SqlDocument::from_chunks(&RopeChunks(job.buffer.clone()), job.ctx, job.flavor),
+        Built::Fresh,
+    )
+}
+
+// ## m3c-t44
+/// How [`document`] brought the document to the job's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Built {
+    /// The kept document took the one edit (the incremental relex and resplit).
+    Applied,
+    /// The kept document already had the job's text.
+    Unchanged,
+    /// A fresh document was built.
+    Fresh,
 }
 
 /// The one edit that turns `old` into `new`'s text: the bytes between their common prefix and

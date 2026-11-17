@@ -23,7 +23,9 @@ shots = [
 test-support = ["hacivat-session/test-support"]
 # ## m3a-t01b-seams: the B3 and B1-real benches (Tasks 20 and 36).
 # ## m3a-t36-bench: named exception (controller): the grid's own paint timer for B1-real.
-bench = ["hacivat-ui-core/bench", "hacivat-driver/fake", "hacivat-ui-grid/bench"]
+# ## m3c-t44 (named exception: feature-only, M3a T36 precedent): the language worker's relex
+# timer for R-M3-9 (`hacivat-sql-editor/bench`).
+bench = ["hacivat-ui-core/bench", "hacivat-driver/fake", "hacivat-ui-grid/bench", "hacivat-sql-editor/bench"]
 
 [dependencies]
 hacivat-ui-core.workspace = true
