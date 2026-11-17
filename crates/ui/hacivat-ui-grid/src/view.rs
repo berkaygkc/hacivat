@@ -275,6 +275,19 @@ pub struct GridView {
     // ## m3c-t35 fix round 1 (I3)
     /// Blur and window-deactivation subscriptions that end a drag (set by the first frame).
     pub(crate) drag_hooks: Option<(Subscription, Subscription)>,
+    // ## m3c-t36
+    /// The sort the header shows (`set_sort`).
+    pub(crate) sort: SortShown,
+}
+
+// ## m3c-t36
+/// The sort the header shows: the keys, each key's tooltip, and the level numbers (two or more
+/// keys only, NOTES M3c-19), shaped once per `set_sort`.
+#[derive(Clone, Default)]
+pub(crate) struct SortShown {
+    pub spec: SortSpec,
+    pub tips: Vec<TextFn>,
+    pub levels: Vec<SharedString>,
 }
 
 impl std::fmt::Debug for GridView {
@@ -314,6 +327,7 @@ impl GridView {
             highlights: None,
             autoscroll: None,
             drag_hooks: None,
+            sort: SortShown::default(),
         }
     }
 
@@ -634,6 +648,56 @@ impl GridView {
     /// A re-run's new rows have no order yet: back to the source order.
     pub(crate) fn drop_view_map(&mut self) {
         self.view_map = None;
+        // ## m3c-t36: and no sort indicator (the host sorts again only when asked).
+        self.sort = SortShown::default();
+    }
+
+    // ## m3c-t36
+    /// Shows `spec`'s indicators in the header (NOTES surface 18): a 12 px blue arrow after the
+    /// sorted columns' names (up ascending, down descending) and, with two or more keys, the
+    /// level number; `tips[i]` is key `i`'s tooltip ("Sort level 1, ascending. Text compares
+    /// by the column's collation, tr-x-icu."). The host calls it when it publishes the order
+    /// (`set_view_map`); an empty spec clears them. A re-run clears them with the map.
+    pub fn set_sort(&mut self, spec: SortSpec, tips: Vec<TextFn>, cx: &mut Context<Self>) {
+        let levels = if spec.keys.len() >= 2 {
+            (1..=spec.keys.len())
+                .map(|l| SharedString::from(l.to_string()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.sort = SortShown { spec, tips, levels };
+        cx.notify();
+    }
+
+    /// The sort the header shows.
+    pub fn sort(&self) -> &SortSpec {
+        &self.sort.spec
+    }
+
+    /// Each sort key's header tooltip, as the host set them.
+    pub fn sort_tips(&self) -> &[TextFn] {
+        &self.sort.tips
+    }
+
+    /// Asks the host to sort by `spec` (`GridEvent::SortRequested`; an empty spec clears the
+    /// sort): the sort commands and the context menu (Task 39) come through here.
+    pub fn request_sort(&mut self, spec: SortSpec, cx: &mut Context<Self>) {
+        cx.emit(GridEvent::SortRequested(spec));
+    }
+
+    /// The view row of the first row of a sort's unsorted tail (rows that arrived after the
+    /// sort), when it has one: the dashed boundary line sits above it.
+    pub fn tail_boundary(&self) -> Option<u64> {
+        match self.view_map.as_ref()? {
+            ViewMap::Permuted {
+                order,
+                tail_from,
+                loaded,
+                ..
+            } if loaded > tail_from => Some(order.len() as u64),
+            _ => None,
+        }
     }
 
     /// The rows the grid scrolls over: a filter's kept rows; else the exact total when known,
@@ -921,6 +985,8 @@ impl Render for GridView {
         // sideways"), after its whole name when that is ellipsized.
         let origin = self.geometry.as_ref().map(|g| g.bounds.origin);
         let frozen_tip = self.config.labels.frozen_tip.clone();
+        // ## m3c-t36: a sorted column's header names its level, direction and collation.
+        let sort_tips = self.sort.tips.clone();
         let tips: Vec<_> = self
             .paint
             .header_tips
@@ -929,6 +995,7 @@ impl Render for GridView {
                 let origin = origin?;
                 let name = tip.ellipsized.then(|| tip.name.clone());
                 let frozen = tip.frozen.then(|| frozen_tip.clone());
+                let sorted = tip.sort.and_then(|level| sort_tips.get(level).cloned());
                 Some(
                     div()
                         .id(("hv-grid-header-tip", tip.col.0 as usize))
@@ -939,7 +1006,8 @@ impl Render for GridView {
                         .h(tip.bounds.size.height)
                         .tooltip(move |_, cx| {
                             let frozen = frozen.as_ref().map(|f| f(cx));
-                            HeaderNameTip::view(name.clone(), frozen, cx)
+                            let sorted = sorted.as_ref().map(|f| f(cx));
+                            HeaderNameTip::view(name.clone(), frozen, sorted, cx)
                         }),
                 )
             })
@@ -1019,14 +1087,26 @@ const RESIZE_TAG_GAP_PX: f32 = 6.0;
 
 /// The tooltip of a header: the column's whole name when it is ellipsized (catalog text, never
 /// translated) and, for a frozen column (## m3c-t35), that it is frozen, on a popover surface.
+/// ## m3c-t36: a sorted column's tooltip names its sort level, direction and collation.
 struct HeaderNameTip {
     name: Option<SharedString>,
     frozen: Option<SharedString>,
+    sorted: Option<SharedString>,
 }
 
 impl HeaderNameTip {
-    fn view(name: Option<SharedString>, frozen: Option<SharedString>, cx: &mut App) -> AnyView {
-        cx.new(|_| HeaderNameTip { name, frozen }).into()
+    fn view(
+        name: Option<SharedString>,
+        frozen: Option<SharedString>,
+        sorted: Option<SharedString>,
+        cx: &mut App,
+    ) -> AnyView {
+        cx.new(|_| HeaderNameTip {
+            name,
+            frozen,
+            sorted,
+        })
+        .into()
     }
 }
 
@@ -1051,6 +1131,14 @@ impl Render for HeaderNameTip {
             .children(self.frozen.clone().map(|frozen| {
                 Label::new(
                     frozen,
+                    TextSource::Fluent,
+                    t.type_ramp.body_sm,
+                    t.colors.text_2.to_hsla(),
+                )
+            }))
+            .children(self.sorted.clone().map(|sorted| {
+                Label::new(
+                    sorted,
                     TextSource::Fluent,
                     t.type_ramp.body_sm,
                     t.colors.text_2.to_hsla(),

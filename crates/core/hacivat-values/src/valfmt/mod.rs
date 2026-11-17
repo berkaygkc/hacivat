@@ -26,6 +26,8 @@
 
 // ## m3b-t01c-core-seams (P-M3b-17): `Purpose::{Tooltip, A11y}` (Tasks 38, 40).
 mod a11y_text;
+// ## m3c-t36: the local sort's comparisons (HV-GRID-07, R-M3-70).
+pub mod compare;
 mod display;
 mod idlike;
 mod raw;

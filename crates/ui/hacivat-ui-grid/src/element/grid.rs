@@ -31,6 +31,8 @@ use std::ops::Range;
 use std::panic::Location;
 use std::rc::Rc;
 
+// ## m3c-t36: the sort arrows.
+use hacivat_ui::icon::IconName;
 use hacivat_ui::text::{TextRegistry, TextSource};
 use hacivat_ui_core::gpui_surface::{
     App, Bounds, Context, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior,
@@ -144,6 +146,12 @@ impl Element for GridElement {
         }
     }
 }
+
+// ## m3c-t36: the sort indicator (NOTES surface 18): the arrow's size, its gap after the name
+// (the mock's 6 px), and the gap between the arrow and the level number.
+const SORT_ARROW_PX: f32 = 12.0;
+const SORT_GAP_PX: f32 = 6.0;
+const SORT_NUMBER_GAP_PX: f32 = 1.0;
 
 /// Generation and row-count changes (HV-GRID-05 lifecycle).
 fn sync_data(v: &mut GridView, frame: &dyn GridFrame, cx: &mut Context<GridView>) {
@@ -362,6 +370,12 @@ pub(crate) fn paint_frame(
     if let Some(headers) = v.paint.recorded_headers.as_mut() {
         headers.clear();
     }
+    // ## m3c-t36
+    #[cfg(feature = "test-support")]
+    {
+        v.paint.recorded_sort_marks.clear();
+        v.paint.recorded_tail_y = None;
+    }
     // Keep the tips of the frame before (in the other kept buffer), to tell whether the
     // view's tooltip areas have to be rebuilt.
     std::mem::swap(&mut v.paint.header_tips, &mut v.paint.header_tips_before);
@@ -529,6 +543,25 @@ fn paint_body(
             snap.vline(body_x + g.frozen_w, top, rows_end),
             palette.seam_strong,
         ));
+    }
+
+    // ## m3c-t36: the unsorted tail's boundary, a 1 px dashed `text-3` line above its first
+    // row (NOTES surface 18), across the columns.
+    if let Some(row) = v.tail_boundary()
+        && row >= g.rows.start
+        && row <= g.rows.end
+    {
+        let y = body_y + v.scroll.row_top(row) as f32;
+        if y >= top && y <= bottom {
+            let x_end = (body_x + v.layout.total_width() as f32 - v.scroll.left_x as f32)
+                .max(body_x + g.frozen_w)
+                .min(body_right);
+            dashed_hline(snap, body_x, x_end, y, palette.text3, window);
+            #[cfg(feature = "test-support")]
+            {
+                v.paint.recorded_tail_y = Some(y);
+            }
+        }
     }
 
     // Layer 10: the resize guide (dashed, ## m3c-t35).
@@ -785,6 +818,18 @@ fn dashed_vline(snap: Snap, right: f32, y0: f32, y1: f32, color: Hsla, window: &
     }
 }
 
+// ## m3c-t36
+/// A dashed horizontal 1 px line from `x0` to `x1` whose bottom is `bottom` (exclusive): 3 px
+/// dashes, 3 px gaps.
+fn dashed_hline(snap: Snap, x0: f32, x1: f32, bottom: f32, color: Hsla, window: &mut Window) {
+    const DASH: f32 = 3.0;
+    let mut x = x0;
+    while x < x1 {
+        window.paint_quad(fill(snap.hline(x, (x + DASH).min(x1), bottom), color));
+        x += 2.0 * DASH;
+    }
+}
+
 /// The rows of a selection box `rows` to draw: within the `visible` rows ± 1, so every drawn
 /// edge is near the view (precise in `f32`) and a clamped edge falls outside the body.
 fn box_rows(rows: std::ops::Range<u64>, visible: &std::ops::Range<u64>) -> std::ops::Range<u64> {
@@ -1000,6 +1045,7 @@ fn paint_header_segment(
         layout,
         columns,
         selection,
+        sort,
         ..
     } = &mut *v;
     let roles = paint.roles.as_ref().expect("roles are built in prepaint");
@@ -1027,7 +1073,39 @@ fn paint_header_segment(
         let x0 = left + CELL_PAD_PX;
         let end_aligned = spec.align == Align::End;
         let mask = rect(left, hy, (width - 1.0).max(0.0), hh);
+        // ## m3c-t36: a sorted column keeps room after its name for the arrow (and the level
+        // number with two or more keys): the name gives way first.
+        let sorted = sort.spec.level_of(col);
+        let number = sorted.and_then(|(level, _)| sort.levels.get(level).cloned());
+        let number_w = number.as_ref().map_or(0.0, |n| {
+            with_shape(
+                &mut paint.cache,
+                n,
+                &roles.sort_level,
+                &roles.chip,
+                f32::MAX,
+                false,
+                budget,
+                &mut paint.scratch,
+                window,
+                cx,
+                |s, _, _| s.width,
+            )
+            .unwrap_or(0.0)
+        });
+        let mark_w = SORT_ARROW_PX
+            + if number.is_some() {
+                SORT_NUMBER_GAP_PX + number_w
+            } else {
+                0.0
+            };
+        let name_room = if sorted.is_some() {
+            (avail - SORT_GAP_PX - mark_w).max(0.0)
+        } else {
+            avail
+        };
         masked(mask, window, |window| {
+            let mut name_end = x0;
             for (text, role, y, lh, path, is_name) in [
                 (
                     &spec.name,
@@ -1051,23 +1129,24 @@ fn paint_header_segment(
                 }
                 // Never fast-scroll: a header always paints its full-quality shape (review
                 // round 1), on its own budget.
+                // ## m3c-t36: the name line ends where the sort indicator begins.
+                let line = if is_name { name_room } else { avail };
                 let recorded = with_shape(
                     &mut paint.cache,
                     text,
                     role,
                     &roles.chip,
-                    avail,
+                    line,
                     false,
                     budget,
                     &mut paint.scratch,
                     window,
                     cx,
                     |s, window, cx| {
-                        let x = if end_aligned {
-                            x0 + avail - s.width
-                        } else {
-                            x0
-                        };
+                        let x = if end_aligned { x0 + line - s.width } else { x0 };
+                        if is_name {
+                            name_end = x + s.width;
+                        }
                         layers::paint_shaped(s, x, y, lh, palette, true, window, cx);
                         if recording {
                             layers::record_text(
@@ -1078,7 +1157,7 @@ fn paint_header_segment(
                                 s.width,
                                 s.truncated,
                                 // ## m3a-t35-shots: wider than the header's room.
-                                s.width > avail + 0.5,
+                                s.width > line + 0.5,
                                 path,
                             );
                         }
@@ -1087,15 +1166,17 @@ fn paint_header_segment(
                 );
                 if let Some((recorded, truncated, _degraded)) = recorded {
                     budget.allocs += u32::from(recorded);
-                    if is_name && (truncated || seg.frozen) {
+                    if is_name && (truncated || seg.frozen || sorted.is_some()) {
                         // An ellipsized name: the whole name is its tooltip (NOTES rule 7);
                         // ## m3c-t35: a frozen column's header says it is frozen.
+                        // ## m3c-t36: a sorted one names its level and collation.
                         paint.header_tips.push(super::HeaderTip {
                             col,
                             name: text.clone(),
                             bounds: mask.intersect(&header).intersect(&clip),
                             ellipsized: truncated,
                             frozen: seg.frozen,
+                            sort: sorted.map(|(level, _)| level),
                         });
                     }
                     #[cfg(feature = "test-support")]
@@ -1109,6 +1190,63 @@ fn paint_header_segment(
                         });
                     }
                 }
+            }
+            // ## m3c-t36: the sort indicator after the name (at the end of an end-aligned
+            // header): a 12 px blue arrow, up ascending, down descending, and the level number
+            // in Fragment Mono 11 blue with two or more keys (NOTES surface 18, M3c-19).
+            if let Some((level, key)) = sorted {
+                let room_end = x0 + avail - mark_w;
+                let mark_x = if end_aligned {
+                    room_end
+                } else {
+                    (name_end + SORT_GAP_PX).min(room_end)
+                };
+                let arrow = if key.desc {
+                    IconName::ArrowDown
+                } else {
+                    IconName::ArrowUp
+                };
+                let _ = window.paint_svg(
+                    rect(
+                        mark_x,
+                        name_y + (name_lh - SORT_ARROW_PX) / 2.0,
+                        SORT_ARROW_PX,
+                        SORT_ARROW_PX,
+                    ),
+                    arrow.path().into(),
+                    None,
+                    Default::default(),
+                    palette.blue,
+                    cx,
+                );
+                if let Some(n) = number.as_ref() {
+                    let at = mark_x + SORT_ARROW_PX + SORT_NUMBER_GAP_PX;
+                    let _ = with_shape(
+                        &mut paint.cache,
+                        n,
+                        &roles.sort_level,
+                        &roles.chip,
+                        f32::MAX,
+                        false,
+                        budget,
+                        &mut paint.scratch,
+                        window,
+                        cx,
+                        |s, window, cx| {
+                            layers::paint_shaped(s, at, name_y, name_lh, palette, false, window, cx)
+                        },
+                    );
+                }
+                #[cfg(feature = "test-support")]
+                paint.recorded_sort_marks.push(super::PaintedSortMark {
+                    col,
+                    level,
+                    desc: key.desc,
+                    x: mark_x,
+                    number: number.clone(),
+                });
+                #[cfg(not(feature = "test-support"))]
+                let _ = level;
             }
         });
         // The seam between columns.

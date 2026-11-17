@@ -606,7 +606,16 @@ impl ResultsHost {
             let _ = host.update(cx, |_, cx| cx.notify());
         });
         let copied = adapter.clone();
-        let events = cx.subscribe(&view, move |_, _, e: &GridEvent, cx| match e {
+        // ## m3c-t36: the sort note repaints the tile.
+        let host = cx.entity().downgrade();
+        // Deferred: a request arrives while this tile is being updated (its subscription).
+        let repaint: super::sort::OnChange = Rc::new(move |cx: &mut App| {
+            let host = host.clone();
+            cx.defer(move |cx| {
+                let _ = host.update(cx, |_, cx| cx.notify());
+            });
+        });
+        let events = cx.subscribe(&view, move |_, grid, e: &GridEvent, cx| match e {
             GridEvent::CopyRequested {
                 region,
                 headers,
@@ -619,7 +628,11 @@ impl ResultsHost {
                     copy_past_kept_rows(cx);
                     return;
                 }
-                copy::copy_region(&copied, region.clone(), *headers, *generation, cx).detach();
+                // ## m3c-t36 (ledger 253 I5): the region is in view rows; the copy reads them
+                // through the grid's map, so it holds the rows the user sees.
+                let map = grid.read(cx).view_map().clone();
+                copy::copy_region_in(&copied, region.clone(), map, *headers, *generation, cx)
+                    .detach();
             }
             GridEvent::CopyRefused(refusal) => copy::copy_refused(*refusal, cx),
             GridEvent::ColumnResized { col, width } => {
@@ -639,7 +652,10 @@ impl ResultsHost {
             GridEvent::FocusChanged(_) | GridEvent::VisibleRegion { .. } => {}
             // ## m3b-t01b-seams: each M3b request goes to its module (stubs until Tasks 36–39
             // fill them); the frozen count needs nothing from the tile yet (Task 35).
-            GridEvent::SortRequested(spec) => super::sort::on_requested(console, spec.clone(), cx),
+            // ## m3c-t36: the local sort.
+            GridEvent::SortRequested(spec) => {
+                super::sort::on_requested(&grid, &copied, spec.clone(), repaint.clone(), cx);
+            }
             GridEvent::FindRequested => super::find::open(console, cx),
             GridEvent::GotoRequested => super::goto::open(console, cx),
             GridEvent::ValueRequested(cell) => super::value_viewer::open(console, *cell, cx),
@@ -877,6 +893,10 @@ impl ResultsHost {
                 // ## m3b-t25-results: the result-set limit (R-M3-66).
                 if let Some((total, limit)) = facts.set_limit {
                     column = column.child(toolbar::set_limit_row(limit, total - limit, cx));
+                }
+                // ## m3c-t36: the local sort's note (M3c-20).
+                if let Some(note) = super::sort::note_row(&grid, &adapter, &snapshot, cx) {
+                    column = column.child(note);
                 }
                 let mut style = StyleRefinement::default();
                 style.size.width = Some(hacivat_ui_core::gpui_surface::relative(1.0).into());
@@ -1455,7 +1475,8 @@ fn active_entry_in(
 }
 
 /// The grid of the active result tab of the console `window` shows.
-fn active_grid(window: &Window, cx: &App) -> Option<Entity<GridView>> {
+// ## m3c-t36: crate-visible for the sort commands.
+pub(crate) fn active_grid(window: &Window, cx: &App) -> Option<Entity<GridView>> {
     let (console, _, ix) = active_entry_in(window, cx)?;
     hosts(cx)
         .into_iter()
@@ -1472,7 +1493,8 @@ fn dispatch_grid(cmd: GridCommand, window: &mut Window, cx: &mut App) {
 /// The active result of the shown console, with its index (the `enabled` checks get no
 /// window: with several windows they read the first live tile; the run bodies use their own
 /// window's console).
-fn active_entry(cx: &App) -> Option<(ConsoleId, Entity<ConsoleResults>, usize)> {
+// ## m3c-t36: crate-visible for the sort commands.
+pub(crate) fn active_entry(cx: &App) -> Option<(ConsoleId, Entity<ConsoleResults>, usize)> {
     let (console, results) = shown_results(cx)?;
     let ActiveResult::Tab(ix) = results.read(cx).active() else {
         return None;
