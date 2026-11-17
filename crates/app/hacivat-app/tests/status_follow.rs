@@ -645,9 +645,10 @@ fn at_960_in_turkish_the_trust_segments_keep_their_place(cx: &mut TestAppContext
     poll_until("the cursor to open", || snapshot(&h).cursor.is_some());
     focus_console(vcx, console);
     vcx.simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
+    // ## m3b-po-copy (named exception, PO M3b-28): "transaction" stays English in Turkish.
     wait_until(vcx, "the transaction and cursor segments", |vcx| {
         let s = status(vcx);
-        s.contains("İşlem açık") && s.contains("İmleç açık")
+        s.contains("Transaction açık") && s.contains("İmleç açık")
     });
     let bar = vcx.debug_bounds("status-bar").expect("the status bar");
     let env = vcx.debug_bounds("status-env").expect("the environment");
@@ -676,7 +677,7 @@ fn at_960_in_turkish_the_trust_segments_keep_their_place(cx: &mut TestAppContext
         );
         let s = status(vcx);
         assert!(
-            s.contains("İşlem açık") && s.contains("İmleç açık"),
+            s.contains("Transaction açık") && s.contains("İmleç açık"),
             "{width}: {s}"
         );
     }

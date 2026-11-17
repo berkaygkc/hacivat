@@ -546,13 +546,17 @@ pub struct MenuLayout {
     pub rows: Vec<(usize, Bounds<Pixels>)>,
     pub window_height: f32,
     pub statusbar_height: f32,
+    // ## m3b-ci (controller fix)
+    /// The window's width: a row must end inside it.
+    pub window_width: f32,
 }
 
 impl Global for MenuLayout {}
 
 impl MenuLayout {
     /// What is wrong with the last anchored menu: a row shown only in part (cut at its
-    /// column's edge), or one drawn over the status bar or past the window's bottom.
+    /// column's edge), or one drawn over the status bar or past the window's bottom, or
+    /// (## m3b-ci) past the window's left or right side.
     pub fn violations(cx: &App) -> Vec<String> {
         let Some(layout) = cx.try_global::<MenuLayout>() else {
             return Vec::new();
@@ -576,6 +580,15 @@ impl MenuLayout {
                      ({bottom} > {floor})"
                 ));
             }
+            // ## m3b-ci (controller fix): nothing clips a row at the window's sides but the
+            // window itself, so its hint would be cut there (CI run 44051024805, Linux).
+            let (left, right) = (f32::from(row.left()), f32::from(row.right()));
+            if layout.window_width > 0.0 && (left < -slack || right > layout.window_width + slack) {
+                out.push(format!(
+                    "menu row {i} runs past the window's side ({left}..{right} in {})",
+                    layout.window_width
+                ));
+            }
         }
         out
     }
@@ -597,6 +610,7 @@ fn note_menu_rows(
         rows,
         window_height: f32::from(window.viewport_size().height),
         statusbar_height: statusbar,
+        window_width: f32::from(window.viewport_size().width),
     });
 }
 

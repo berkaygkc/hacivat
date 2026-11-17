@@ -825,3 +825,68 @@ fn open_restart_dialog(window: &mut Window, cx: &mut App) {
     })
     .detach();
 }
+
+// ## m3c-t43b (named exception: Task 43's shot seams)
+/// Shot fixtures for the settings rows (`design/m3b-safe` surface 25): what a click on a
+/// navigation item, typing in the search field and typing in the largest-value field do,
+/// without the pointer (the shots harness has no element bounds to aim at).
+#[cfg(feature = "test-support")]
+pub mod fixtures {
+    use super::*;
+
+    /// Shows `section`, as a click on its navigation item does (the search is cleared).
+    pub fn show_section(section: Section, cx: &mut App) {
+        if let Some(page) = open_page(cx) {
+            page.update(cx, |p, cx| {
+                p.section = section;
+                p.query.clear();
+                p.search.update(cx, |input, cx| {
+                    input.set_value("");
+                    cx.notify();
+                });
+                cx.notify();
+            });
+        }
+    }
+
+    /// Puts `query` in the search field, as typing it does.
+    pub fn search(query: &str, cx: &mut App) {
+        if let Some(page) = open_page(cx) {
+            let query = query.to_string();
+            page.update(cx, |p, cx| {
+                p.search.update(cx, |input, cx| {
+                    input.set_value(query.clone());
+                    cx.notify();
+                });
+                p.query = query;
+                cx.notify();
+            });
+        }
+    }
+
+    /// Replaces the largest-value field's text with `text` and presses Enter.
+    pub fn enter_value_limit(text: &str, cx: &mut App) {
+        if let Some(page) = open_page(cx) {
+            let text = text.to_string();
+            page.update(cx, |p, cx| {
+                p.limit_input.update(cx, |input, cx| {
+                    input.set_value(text);
+                    cx.notify();
+                });
+                p.commit_limit(cx);
+            });
+        }
+    }
+
+    /// The section shown and the search query.
+    pub fn shown(cx: &App) -> Option<(Section, String)> {
+        let page = open_page(cx)?;
+        let p = page.read(cx);
+        Some((p.section, p.query.clone()))
+    }
+
+    /// Whether the largest-value row shows its clamp note.
+    pub fn clamped(cx: &App) -> bool {
+        open_page(cx).is_some_and(|p| p.read(cx).limit_note.is_some())
+    }
+}

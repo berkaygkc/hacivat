@@ -746,3 +746,91 @@ async fn myisam_rollback_is_logged_as_not_undone() {
     a.batch(&format!("DROP TABLE {t}")).await;
     a.close().await;
 }
+
+// ## m3b-po-typed-name (PO M3b-04): on production `TRUNCATE` and `DROP TABLE` ask for the
+// table's name typed, as `DELETE` without a `WHERE` does; nothing is sent unanswered, and one
+// statement over two tables is denied (typing one name must never approve the other).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn production_truncate_and_drop_table_need_the_typed_name() {
+    if !docker_enabled() {
+        return;
+    }
+    let table = Table::new();
+    let lines = lines();
+    let pool = pool();
+    for line in &lines {
+        let id = &line.id;
+        let t = unique("hv_t31_po_truncate");
+        let u = unique("hv_t31_po_truncate_b");
+        let mut a = admin(line).await;
+        for name in [&t, &u] {
+            a.batch(&create(line, name, "id int PRIMARY KEY, a int"))
+                .await;
+            a.batch(&format!("INSERT INTO {name} VALUES (1, 1), (2, 1), (3, 1)"))
+                .await;
+        }
+        let c = production(line, &pool, Duration::from_secs(300)).await;
+        let mut sqls = vec![format!("DROP TABLE {t}")];
+        if !line.is_sqlite() {
+            sqls.push(format!("TRUNCATE TABLE {t}"));
+        }
+        if line.is_pg() {
+            sqls.push(format!("TRUNCATE {t}"));
+        }
+        for sql in &sqls {
+            let p = c.plan(sql, &[]).await;
+            assert_eq!(p.shapes(), ["confirm+type"], "{id}: {sql}");
+            assert_eq!(
+                typed(&p.plan.items[0].decision).as_deref(),
+                Some(&*t),
+                "{id}: `{sql}` asks for the table's exact bytes"
+            );
+            let mut cancelled = p.plan.clone();
+            assert!(
+                !apply_answer(&mut cancelled, 0, ConfirmAnswer::Cancel),
+                "{id}: Cancel tells the caller to send nothing"
+            );
+            let ran = ended(c.send(&p, ErrorPolicy::StopOnError, None)).await;
+            assert_eq!(
+                ran.names(),
+                ["Skipped"],
+                "{id}: `{sql}` not sent unanswered"
+            );
+            assert_eq!(
+                a.count(&format!("SELECT count(*) FROM {t}")).await,
+                3,
+                "{id}: `{sql}` left the table and its rows"
+            );
+        }
+        if !line.is_sqlite() {
+            let both = if line.is_pg() {
+                format!("TRUNCATE {t}, {u}")
+            } else {
+                format!("DROP TABLE {t}, {u}")
+            };
+            let p = c.plan(&both, &[]).await;
+            assert_eq!(p.shapes(), ["deny"], "{id}: {both}");
+            let ran = ended(c.send(&p, ErrorPolicy::StopOnError, None)).await;
+            assert_ne!(ran.outcome(), "ran", "{id}: `{both}` not sent");
+            for name in [&t, &u] {
+                assert_eq!(
+                    a.count(&format!("SELECT count(*) FROM {name}")).await,
+                    3,
+                    "{id}: `{both}` left {name}"
+                );
+            }
+        }
+        table.add(
+            line,
+            c.version.as_ref(),
+            "DROP TABLE / TRUNCATE unanswered; two tables",
+            "typed name = the table; nothing sent; two denied",
+        );
+        c.shutdown().await;
+        a.batch(&format!("DROP TABLE {t}")).await;
+        a.batch(&format!("DROP TABLE {u}")).await;
+        a.close().await;
+    }
+    table.finish("po-truncate-drop-typed", &lines);
+}

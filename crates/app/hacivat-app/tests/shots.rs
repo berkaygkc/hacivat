@@ -28,6 +28,8 @@
 //!
 //! Every frame is checked before it is written:
 //! - (a) in the pseudo locales (`en-XA`, `tr-XT`) every `TextSource::Fluent` label is bracketed;
+//!   (## m3b-ci) a label drawn as access-key runs (Linux, Windows) is checked joined
+//!   (`is_key_run`), and so is a surface marker drawn that way;
 //! - (b) no label is clipped: wider than its box, or cut at its container's clip (a control
 //!   row running past its card, a tile cutting its last row), wrapping paragraphs included;
 //!   text partly scrolled out of a marked scroll viewport is not clipped (`text.rs`,
@@ -692,7 +694,16 @@ impl Surface {
         // ## m3a-t35-shots (fix round 1, I2): a label counts only when it drew something.
         let shown = frame
             .iter()
-            .any(|r| drawn(r) && r.path.contains(file) && text.is_none_or(|t| strip(&r.text) == t));
+            .any(|r| drawn(r) && r.path.contains(file) && text.is_none_or(|t| strip(&r.text) == t))
+            // ## m3b-ci (controller fix): or drawn as access-key runs (`b` + `astion` on Linux).
+            || text.is_some_and(|t| {
+                (0..frame.len()).any(|i| {
+                    is_key_run(frame, i)
+                        && frame[i].path.contains(file)
+                        && frame[i..i + 3].iter().all(drawn)
+                        && key_run_text(frame, i) == t
+                })
+            });
         if !shown {
             return Some(format!(
                 "{name}: the surface is missing: no visible label from {file} {text:?}"
@@ -1131,12 +1142,15 @@ fn check_labels(name: &str, locale: &str, frame: &[RenderedText]) -> Vec<String>
     let mut out = Vec::new();
     // ## m2b-t24-shots
     let split = split_pieces(frame);
+    // ## m3b-ci (controller fix): a label drawn as access-key runs is checked whole.
+    let key_runs = key_run_pieces(frame);
     for (i, r) in frame.iter().enumerate() {
         let text = strip(&r.text);
         if PSEUDO.contains(&locale)
             && r.source == TextSource::Fluent
             && !bracketed(&text)
             && !split.contains(&i)
+            && !key_runs.contains(&i)
         {
             out.push(format!(
                 "{name}: (a) Fluent label not bracketed: {:?} at {}",
@@ -1202,6 +1216,53 @@ fn check_grid(name: &str, locale: &str, frame: &[RenderedText]) -> Vec<String> {
 // ## m2b-t24-shots
 fn bracketed(text: &str) -> bool {
     text.starts_with('[') && text.ends_with(']')
+}
+
+// ## m3b-ci (controller fix): access-key runs are one label (CI run 44051024805, Linux: 876 of
+// its 960 violations were (a) on these runs, and the 16 `ssh-import-menu` "missing" its
+// `bastion` marker).
+/// Whether `frame[i..i + 3]` is one label drawn as access-key runs. Where access keys show
+/// (Linux and Windows; macOS hides them, so a macOS render never draws these) a button's or a
+/// menu row's label is drawn as three runs around its key letter (`hacivat-ui/src/button.rs`,
+/// `key_label_from`): `[` `Ƈ` `ŀǿǿşḗ]` in a pseudo locale, `""` `b` `astion` in English. The
+/// shape is the one that split draws, and the one `tests/support/mod.rs` `button_labels`
+/// joins: three consecutive records from `button.rs` with one `#id` (the label's own, so the
+/// labels of two different controls never join), one source, and the middle run one character
+/// (the key letter). This changes no other check: each run is still checked on its own by (b),
+/// (c) and (f) (a clipped key letter is a clipped label), and the trust checks are unchanged.
+fn is_key_run(frame: &[RenderedText], i: usize) -> bool {
+    let Some([before, key, after]) = frame.get(i..i + 3) else {
+        return false;
+    };
+    let one_label = |r: &RenderedText| r.path == before.path && r.source == before.source;
+    before.path.contains("hacivat-ui/src/button.rs:")
+        && before.path.contains('#')
+        && one_label(key)
+        && one_label(after)
+        && strip(&key.text).chars().count() == 1
+}
+
+/// The joined text of the access-key runs at `frame[i..i + 3]` ([`is_key_run`]).
+fn key_run_text(frame: &[RenderedText], i: usize) -> String {
+    frame[i..i + 3].iter().map(|r| strip(&r.text)).collect()
+}
+
+/// (a)'s second exception: the frame indices of every access-key label ([`is_key_run`]) whose
+/// joined text is bracketed, so its runs pass (a) as the one label they are. Runs that join
+/// into an unbracketed text stay checked run by run: (a) never passes a label that is not
+/// bracketed whole.
+fn key_run_pieces(frame: &[RenderedText]) -> std::collections::BTreeSet<usize> {
+    let mut pieces = std::collections::BTreeSet::new();
+    let mut i = 0;
+    while i < frame.len() {
+        if is_key_run(frame, i) && bracketed(&key_run_text(frame, i)) {
+            pieces.extend(i..i + 3);
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    pieces
 }
 
 /// (a)'s one exception (Task 24; fix round 1, M2): a Fluent message drawn in pieces around a
@@ -1348,6 +1409,10 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     {
         boot.secrets = vault_store(&paths);
     }
+    // ## m3c-t43b: a narrow-pane state restores its split layout (`workspace.json`).
+    if let Some(state) = m3c_state {
+        m3c::before_start(state, &paths, shot.size);
+    }
     let mut startup = Startup::new(paths, outcome, OsLocale::default());
     startup.connections = connections;
     let demo = shot.surface.is_demo().then(DemoCapsule::harman);
@@ -1425,6 +1490,8 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
+    // ## m3c-t43b-fix (review I2): no capsule settle any more; the capsule's own fit (ccedf93)
+    // no longer depends on the frames before, so the capture is the frame the steps reached.
     cx.update(|cx| cx.refresh_windows());
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| {
@@ -1670,8 +1737,14 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     assert_eq!(m3b::all().len(), 7 + 11 + 20 + 9 + 12 + 7 + 1 + 4);
     // ## m3c-t43-shots: then the M3c states x 16: Task 31's 5, Task 32's 7, Task 33's 7, Task
     // 34's 10, Tasks 35/36's 10, Task 37's 13, Task 38's 15 (part B adds Tasks 39, 41 and 42's).
-    assert_eq!(m3c::all().len(), 5 + 7 + 7 + 10 + 10 + 13 + 15);
-    assert_eq!(all.len(), 1020 + 68 * 16 + 71 * 16 + 67 * 16);
+    // ## m3c-t43b: part B adds Task 39's 9, Task 41's 11, Task 42's 7 and the 6 states part A
+    // left.
+    // ## m3c-t43b-fix (review I1): Task 41's 12 with `narrow-reduced`.
+    assert_eq!(
+        m3c::all().len(),
+        5 + 7 + 7 + 10 + 10 + 13 + 15 + 9 + 12 + 7 + 6
+    );
+    assert_eq!(all.len(), 1020 + 68 * 16 + 71 * 16 + 101 * 16);
     let m3b_from = 1020 + 68 * 16;
     let order = [
         m3b::T22.to_vec(),
@@ -1825,6 +1898,51 @@ fn pseudo_labels_must_be_bracketed_and_unclipped_and_at_least_11_px() {
         at(" ŧö çöƞƒıřḿ]", "w.rs:1:1"),
     ];
     assert_eq!(check_labels("s", "en-XA", &elsewhere).len(), 2);
+    // ## m3b-ci (controller fix): a label drawn as access-key runs (Linux, Windows) passes (a)
+    // whole: three runs from `button.rs` with one `#id`, the middle one the key letter, that
+    // join into a bracketed text. A row without a key before it does not take its runs.
+    let key = |text: &str| {
+        at(
+            text,
+            "crates/ui/hacivat-ui/src/button.rs:272:21#menu-item-label",
+        )
+    };
+    let close = [key("["), key("Ƈ"), key("ŀǿǿşḗ]")];
+    assert!(check_labels("s", "en-XA", &close).is_empty());
+    let after_a_plain_row = [key("[Ŏƥḗƞ]"), key("["), key("Ƈ"), key("ŀǿǿşḗ]")];
+    assert!(check_labels("s", "en-XA", &after_a_plain_row).is_empty());
+    // Runs that join into an unbracketed text, runs of two controls (two ids), runs whose
+    // middle is not one letter, and runs from elsewhere than `button.rs` stay checked one by one.
+    let unclosed = [key("["), key("Ƈ"), key("ŀǿǿşḗ")];
+    assert_eq!(check_labels("s", "en-XA", &unclosed).len(), 3);
+    let two_ids = [
+        key("["),
+        at(
+            "Ƈ",
+            "crates/ui/hacivat-ui/src/button.rs:272:21#button-label-dialog-button-1",
+        ),
+        key("ŀǿǿşḗ]"),
+    ];
+    assert_eq!(check_labels("s", "en-XA", &two_ids).len(), 3);
+    let wide_middle = [key("["), key("Ƈŀ"), key("ǿǿşḗ]")];
+    assert_eq!(check_labels("s", "en-XA", &wide_middle).len(), 3);
+    let not_a_key_label = [
+        at("[", "w.rs:1:1#x"),
+        at("Ƈ", "w.rs:1:1#x"),
+        at("ŀǿǿşḗ]", "w.rs:1:1#x"),
+    ];
+    assert_eq!(check_labels("s", "en-XA", &not_a_key_label).len(), 3);
+    // A clipped run is still a clipped label.
+    let clipped_key = [
+        key("["),
+        RenderedText {
+            clipped: true,
+            ..key("Ƈ")
+        },
+        key("ŀǿǿşḗ]"),
+    ];
+    let found = check_labels("s", "en-XA", &clipped_key);
+    assert!(found.len() == 1 && found[0].contains("(b)"), "{found:?}");
     // (f) A label that runs past its dialog card, in any locale.
     let past = RenderedText {
         outside_card: true,
@@ -2696,11 +2814,16 @@ fn every_m3c_state_has_its_own_marker() {
     // none is about a trust signal (those always fail), and a violation outside the list is
     // never one.
     let names: Vec<&str> = m3c::all().iter().map(|s| s.name()).collect();
-    for f in m3c::KNOWN_FINDINGS {
+    // ## m3c-t43b: part B's list too.
+    for f in m3c::all_findings() {
         assert!(names.contains(&f.state), "{f:?}");
         assert!(!f.label.is_empty(), "{f:?}");
         assert!(
-            ["T31", "T32", "T33", "T34", "T35", "T36", "T37", "T38"].contains(&f.owner),
+            // ## m3c-t43b: and part B's owners.
+            [
+                "T31", "T32", "T33", "T34", "T35", "T36", "T37", "T38", "T41", "T42"
+            ]
+            .contains(&f.owner),
             "{f:?}"
         );
         assert!(
@@ -2712,7 +2835,7 @@ fn every_m3c_state_has_its_own_marker() {
     // id or by a fragment of one.
     for state in m3c::all() {
         for id in m3c::trust_ids(state) {
-            for f in m3c::KNOWN_FINDINGS {
+            for f in m3c::all_findings() {
                 assert!(
                     !id.contains(f.label) && !f.label.contains(id),
                     "{f:?} names the trust label {id}"
@@ -2858,6 +2981,32 @@ fn known_findings_match_only_their_own_clip() {
             );
         }
     }
+    // ## m3c-t43b-fix (review m2, m3): part B's entries against the real lines the full render
+    // printed, each only in its own scope (F11's body in English and Turkish, not pseudo; F12's
+    // tab title, a creation site, in the pseudo-locales only).
+    let reduced = M3c::NarrowReduced;
+    let body = "narrow-reduced-dark-en-1280x800@2x.png: (b) clipped: \"Reduced mode keeps typing \
+                fast. It ends when the document is smaller than 3.2 MB.\" (57.0 px painted) at \
+                crates/ui/hacivat-ui-editor/src/large_file.rs:280:16#editor-t1-body";
+    let tab = "narrow-reduced-dark-tr-XT-960x600@2x.png: (b) clipped: \"[Çööööƞşööööŀḗḗḗ 2]\" \
+               (117.3 px painted) at crates/ui/hacivat-ui/src/panes.rs:443:24";
+    let part_b = |line: &str, locale: &str, size| {
+        m3c::KNOWN_FINDINGS_B
+            .iter()
+            .any(|f| f.matches(reduced, locale, size, line, None))
+    };
+    if m3c::KNOWN_FINDINGS_B
+        .iter()
+        .any(|f| f.state == reduced.name())
+    {
+        assert!(part_b(body, en, big), "{body}");
+        assert!(part_b(body, "tr", min), "{body}");
+        assert!(!part_b(body, "en-XA", big), "out of its scope: {body}");
+        assert!(part_b(tab, tr_xt, min), "{tab}");
+        assert!(!part_b(tab, en, min), "out of its scope: {tab}");
+        let with_id = format!("{tab}#tab-title");
+        assert!(!part_b(&with_id, tr_xt, min), "{with_id}");
+    }
 }
 
 // ## m3c-t43-shots (fix round 1, m1)
@@ -2865,10 +3014,11 @@ fn known_findings_match_only_their_own_clip() {
 /// the list is temporary and empty at the M3c gate).
 fn known_findings_are_empty_at_the_t45_gate() {
     if std::env::var_os("HACIVAT_T45_GATE").is_some() {
+        // ## m3c-t43b: part B's list too.
+        let left: Vec<_> = m3c::all_findings().collect();
         assert!(
-            m3c::KNOWN_FINDINGS.is_empty(),
-            "the T45 gate: every known finding must be fixed first: {:?}",
-            m3c::KNOWN_FINDINGS
+            left.is_empty(),
+            "the T45 gate: every known finding must be fixed first: {left:?}"
         );
     }
 }
@@ -3075,6 +3225,33 @@ fn a_missing_surface_fails_its_frame() {
         Surface::SshImportMenu
             .missing_from("s", &menu("bastion"))
             .is_none()
+    );
+    // ## m3b-ci (controller fix): on Linux and Windows the row is drawn as access-key runs
+    // (`""`, `b`, `astion`); the marker counts them joined, and only joined into its text.
+    let runs = |texts: [&str; 3]| {
+        let mut frame: Vec<RenderedText> = texts
+            .map(|t| {
+                at(
+                    "crates/ui/hacivat-ui/src/button.rs:272:21#menu-item-label",
+                    t,
+                )
+            })
+            .into();
+        frame.push(at(
+            "crates/ui/hacivat-ui/src/menu.rs:560:21#popup-menu-title",
+            "Hosts",
+        ));
+        frame
+    };
+    assert!(
+        Surface::SshImportMenu
+            .missing_from("s", &runs(["", "b", "astion"]))
+            .is_none()
+    );
+    assert!(
+        Surface::SshImportMenu
+            .missing_from("s", &runs(["", "b", "astions"]))
+            .is_some()
     );
     let explorer = [at(
         "crates/app/hacivat-app/src/connections/explorer.rs:420:17",

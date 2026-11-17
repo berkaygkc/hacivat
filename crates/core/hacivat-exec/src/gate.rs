@@ -25,8 +25,8 @@ use sql_lexer::{LexState, TokenKind, lex};
 use sql_safety::effects::class_of;
 use sql_safety::{
     Actor, CoarseClass, Confidence, DestructiveKind, EffectSet, GateClass, ObjectKind, ObjectRef,
-    Profile, Reason, ReasonCode, SafetyReport, StmtKind, StmtReport, TouchedObjects, Verdict,
-    decide, gate_class, opens_write,
+    Profile, Reason, ReasonCode, RiskFlags, SafetyReport, StmtKind, StmtReport, TouchedObjects,
+    Verdict, decide, gate_class, opens_write,
 };
 use sql_text::TextRange;
 use tokio::sync::oneshot;
@@ -197,6 +197,8 @@ impl GatePlan {
 ///    first (## m3b-t26-prod-unlock fix round 1, B-M2; before: an `Unknown` inner and every
 ///    MySQL-family one): `Confirm` with verdict `ExplainAnalyzeRollback`, naming what a
 ///    rollback does not undo (`exec-explain-analyze-not-undone`; fix round 1, I2, M7).
+///    **B-M6** (## m3b-gate-explain: after 4 and 5): a plain `EXPLAIN` of a code-free data
+///    change runs as a read (`plain_explain_of_dml`).
 /// 6. **The table**: production `Read`/`Session` → `Run`, `Lock` → `Warn`, `Dml` →
 ///    `RunInTxThenConfirm` (the session picks the form, P-M3b-1), every other class →
 ///    `Confirm`; off production `Run`, except a unit holding an unsafe-DML pattern, which asks
@@ -306,6 +308,32 @@ fn stmt_atoms(s: &StmtReport, text: &str, d: DialectId) -> Vec<String> {
 /// Manual MySQL session runs with `autocommit = 0`, so it always counts as open; P-M3b-1).
 fn tx_open(conn: &ConnSafety) -> bool {
     conn.tx_status != TxStatus::Idle || conn.tx_mode == TxMode::Manual
+}
+
+// ## m3b-gate-explain
+/// Whether `report` (of gate class `class`) is the B-M6 read: every statement a plain `EXPLAIN`
+/// of a data change that calls no code. A plain `EXPLAIN` still plans, and planning runs code:
+/// PostgreSQL pre-evaluates IMMUTABLE functions with constant arguments while planning (and
+/// STABLE ones for estimates), and MySQL builds derived tables under a plain `EXPLAIN`, so a
+/// stored function in a `FROM` subquery runs (MySQL bug #31468, closed as documented; ADR 0004
+/// `m3b-gate-explain` has the sources). So the class must be exactly `Dml` (a routine class
+/// below it is hidden by the maximum, hence the explicit checks), and any evidence of a call
+/// or of `ANALYZE` keeps the class: a touched call, the `ROUTINE_CALL` bit on a statement or
+/// on the request, a destructive pattern, an `EXPLAIN_ANALYZE` flag or reason, or a policy
+/// that does not simply allow it under `Admin` (a routine reason, a session effect, doubt).
+fn plain_explain_of_dml(report: &SafetyReport, class: GateClass) -> bool {
+    class == GateClass::Dml
+        && !report.items.is_empty()
+        && !report.request_effects.contains(EffectSet::ROUTINE_CALL)
+        && !report.flags.contains(RiskFlags::EXPLAIN_ANALYZE)
+        && report.items.iter().all(|s| {
+            s.kind == (StmtKind::Explain { analyze: false })
+                && explain_analyze_inner(s).is_none()
+                && !s.effects.contains(EffectSet::ROUTINE_CALL)
+                && s.destructive.is_empty()
+                && s.touched.calls.is_empty()
+        })
+        && decide(report, Profile::Admin, Actor::Human).allows()
 }
 
 /// Whether the `admin` profile's row for `class` allows (`data/profiles.toml`): the classes
@@ -621,7 +649,8 @@ fn written_name(
 }
 
 /// The name a production confirmation asks to type (R-M3-55): the target of every unsafe-DML
-/// pattern and of a `DROP DATABASE`/`DROP SCHEMA`, as written. From the destructive kinds, not
+/// pattern, of a `DROP DATABASE`/`DROP SCHEMA` and (## m3b-po-typed-name, PO M3b-04) of a
+/// `TRUNCATE` or `DROP TABLE`, as written. From the destructive kinds, not
 /// the class. `Err` when one has no target (nothing to type) or two name different objects
 /// (typing one name must not approve another).
 fn typed_name(
@@ -635,6 +664,15 @@ fn typed_name(
         // Fix round 1 (I3): the statement's own words say `DROP DATABASE`/`DROP SCHEMA`, so a
         // backend that names the target's kind wrongly cannot drop the typed name.
         let dropped_db = drop_database_name(slice(text, s.range).unwrap_or(text), d);
+        // ## m3b-po-typed-name (PO M3b-04): the statement's own leading words, so a backend
+        // that names a dropped table's kind wrongly cannot drop the typed name either.
+        let lead = leading_words(slice(text, s.range).unwrap_or(text), d, 3);
+        let word = |k: usize, w: &str| lead.get(k).is_some_and(|x| x == w);
+        let drops_table = word(0, "DROP")
+            && (word(1, "TABLE")
+                || (["TEMPORARY", "TEMP", "FOREIGN"].iter().any(|w| word(1, w))
+                    && word(2, "TABLE")));
+        let alters = word(0, "ALTER");
         let mut named = false;
         for dr in &s.destructive {
             let schema_or_db = matches!(dr.kind, DestructiveKind::Drop { .. })
@@ -642,7 +680,23 @@ fn typed_name(
                     || dr.target.as_ref().is_some_and(|t| {
                         matches!(t.kind, ObjectKind::Schema | ObjectKind::Database)
                     }));
-            if !dr.kind.is_unsafe_dml() && !schema_or_db {
+            // ## m3b-po-typed-name (PO M3b-04): `TRUNCATE` and `DROP TABLE` name the table
+            // that loses its rows, as an unbounded `DELETE` does (fail closed: no table to
+            // name is denied, two are several targets). `ALTER TABLE … DROP PARTITION` keeps
+            // its row.
+            let table_gone = match dr.kind {
+                DestructiveKind::Truncate => true,
+                DestructiveKind::Drop { .. } if !schema_or_db => {
+                    drops_table
+                        || (!alters
+                            && dr
+                                .target
+                                .as_ref()
+                                .is_some_and(|t| t.kind == ObjectKind::Table))
+                }
+                _ => false,
+            };
+            if !dr.kind.is_unsafe_dml() && !schema_or_db && !table_gone {
                 continue;
             }
             // ## m3b-t26-prod-unlock (named exception, T26 carry MUST 1): a pattern without a
@@ -746,6 +800,36 @@ fn drop_database_name(stmt: &str, d: DialectId) -> Option<Option<Arc<str>>> {
             .and_then(|s| parse_qualified(d, s))
             .map(|q| dotted(q.parts.iter().map(|p| &*p.text))),
     )
+}
+
+// ## m3b-po-typed-name (PO M3b-04)
+/// The first `n` words of `stmt`'s code (comments and trivia skipped), ASCII-uppercased; it
+/// stops at the first token that is not a word.
+fn leading_words(stmt: &str, d: DialectId, n: usize) -> Vec<String> {
+    let ctx = DialectCtx::new(d, None);
+    let Ok(profile) = lex_profile(&ctx) else {
+        return Vec::new();
+    };
+    let lexed = lex(stmt, profile, ctx.modes, &LexState::Initial);
+    let mut out = Vec::new();
+    for i in 0..lexed.len() {
+        if out.len() == n {
+            break;
+        }
+        if lexed.is_trivia(i)
+            || matches!(
+                lexed.kind(i),
+                TokenKind::LineComment | TokenKind::BlockComment | TokenKind::HintComment
+            )
+        {
+            continue;
+        }
+        match (lexed.kind(i), slice(stmt, lexed.range(i))) {
+            (TokenKind::Word, Some(w)) => out.push(w.to_ascii_uppercase()),
+            _ => break,
+        }
+    }
+    out
 }
 
 /// The reasons a dialog lists: one per destructive pattern (its target as written), then the
@@ -970,29 +1054,6 @@ fn gate_unit(
         };
     }
 
-    // ## m3b-t26-prod-unlock (fix round 1, B-M6): a plain `EXPLAIN` (no `ANALYZE`) of a data
-    // change plans it and runs nothing, so a read-write connection runs it as a read (no
-    // Keep/Undo prompt over a plan). Only a lone DML class qualifies: a destructive pattern, a
-    // call or anything the classifier doubts keeps its class (and asks). The read-only
-    // profile's own rule (above) is unchanged.
-    let plain_explain_of_dml = class == GateClass::Dml
-        && !report.items.is_empty()
-        && report.items.iter().all(|s| {
-            s.kind == (StmtKind::Explain { analyze: false })
-                && s.destructive.is_empty()
-                && s.touched.calls.is_empty()
-        });
-    if plain_explain_of_dml {
-        return GateItem {
-            unit,
-            decision: GateDecision::Run,
-            verdict: UnitVerdict::Read,
-            effects: SessionEffects::empty(),
-            class: GateClass::Read,
-            fingerprint: key(GateClass::Read),
-        };
-    }
-
     let mut extra = Vec::new();
     // 4. Production: `decide(Admin)` must not deny, and its confirmations count.
     if production {
@@ -1051,6 +1112,24 @@ fn gate_unit(
             effects,
             class,
             fingerprint: key(class),
+        };
+    }
+
+    // ## m3b-t26-prod-unlock (fix round 1, B-M6): a plain `EXPLAIN` (no `ANALYZE`) of a data
+    // change plans it and runs nothing, so a read-write connection runs it as a read (no
+    // Keep/Undo prompt over a plan). Only a lone DML class qualifies: a destructive pattern, a
+    // call or anything the classifier doubts keeps its class (and asks). The read-only
+    // profile's own rule (above) is unchanged.
+    // ## m3b-gate-explain: after the production AND-check and D-062 (never before them), and
+    // only for a plan of code-free statements (`plain_explain_of_dml`).
+    if plain_explain_of_dml(report, class) {
+        return GateItem {
+            unit,
+            decision: GateDecision::Run,
+            verdict: UnitVerdict::Read,
+            effects: SessionEffects::empty(),
+            class: GateClass::Read,
+            fingerprint: key(GateClass::Read),
         };
     }
 
