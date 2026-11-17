@@ -217,6 +217,11 @@ impl GridView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // ## m3c-t39 (named exception): a right press asks for the context menu.
+        if e.button == MouseButton::Right && self.pointer.drag.is_none() {
+            self.context_press(e, window, cx);
+            return;
+        }
         if e.button != MouseButton::Left {
             return;
         }
@@ -324,6 +329,76 @@ impl GridView {
                 cx.emit(GridEvent::FocusChanged(self.selection.focus()));
             }
         }
+        cx.notify();
+    }
+
+    // ## m3c-t39 (named exception: Task 39's menu)
+    /// A right press: over a cell, a column header (or its edge) or a row number, the grid
+    /// takes the focus and asks the host for the menu there
+    /// ([`GridEvent::ContextMenuRequested`] at the pointer). What it hits outside the
+    /// selection is selected first, as a left click would select it; inside the selection
+    /// nothing changes, so the menu acts on the selection. The corner, the scrollbars and a
+    /// row past the shown rows ask for nothing.
+    fn context_press(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(g) = self.geometry.clone() else {
+            return;
+        };
+        let map = self.view_map().clone();
+        let shown = map.len();
+        let model = |row: u64| map.view_to_model(ViewRow(row)).unwrap_or(ModelRow(row));
+        let focus_row = self.selection.focus().map_or(ModelRow(0), |f| f.row);
+        let first_col = self.layout.visible().first().copied();
+        let focus_col = self.selection.focus().map(|f| f.col).or(first_col);
+        let before = self.selection.clone();
+        let (cell, header, row_number) = match self.hit_test(&g, e.position) {
+            Hit::Header(ix) | Hit::Border(ix) => {
+                let Some(col) = self.layout.visible().get(ix).copied() else {
+                    return;
+                };
+                if !self.selection.col_selected(col) {
+                    self.selection.select_column(col, focus_row);
+                }
+                (None, Some(col), false)
+            }
+            Hit::Gutter(row) if row < shown => {
+                let Some(col) = focus_col else {
+                    return;
+                };
+                let row = model(row);
+                if !self.selection.row_selected(row) {
+                    self.selection.select_row(row, col);
+                }
+                (Some(ModelCell { row, col }), None, true)
+            }
+            Hit::Cell(row, ix) if row < shown => {
+                let Some(col) = self.layout.visible().get(ix).copied() else {
+                    return;
+                };
+                let cell = ModelCell {
+                    row: model(row),
+                    col,
+                };
+                if !self.selection.contains(ViewRow(row), col, &map) {
+                    self.selection.select_cell(cell, &map);
+                }
+                (Some(cell), None, false)
+            }
+            _ => return,
+        };
+        window.focus(&self.focus, cx);
+        if self.selection != before {
+            self.mark_selection_changed();
+            if self.selection.focus() != before.focus() {
+                cx.emit(GridEvent::FocusChanged(self.selection.focus()));
+            }
+        }
+        cx.emit(GridEvent::ContextMenuRequested {
+            at: e.position,
+            cell,
+            header,
+            row_number,
+            pointer: true,
+        });
         cx.notify();
     }
 

@@ -575,9 +575,20 @@ fn on_transposed_event(console: ConsoleId, grid: &Entity<GridView>, e: &GridEven
                 );
             }
         }
-        GridEvent::ContextMenuRequested { at, cell, .. } => {
+        // ## m3c-t39 (named exception): a cell menu over the table cell (no header or row
+        // number menu here: their rows and columns are the table's).
+        GridEvent::ContextMenuRequested {
+            at, cell, pointer, ..
+        } => {
             let cell = cell.and_then(|c| source.table_cell(c));
-            super::context_menu::open(console, *at, cell, None, cx);
+            let request = super::context_menu::MenuRequest {
+                at: *at,
+                cell,
+                header: None,
+                row_number: false,
+                pointer: *pointer,
+            };
+            super::context_menu::open(console, grid, request, cx);
         }
         GridEvent::SelectionChanged | GridEvent::FocusChanged(_) => {
             let _ = table;
@@ -1784,7 +1795,8 @@ fn record_of(
         let total = seen.get(spec.name.as_ref()).copied().unwrap_or(1);
         let value = raw.snapshot.cell(row.0, col.0);
         let fv = facts.view(display.engine());
-        let shown = format_cell(value, &fv, display.settings(), Purpose::Cell);
+        // ## m3c-t39 (named exception): a raw column's value as its cell shows it.
+        let shown = format_cell(value, &fv, display.settings_for(&spec.name), Purpose::Cell);
         let tip = format_cell(value, &fv, display.settings(), Purpose::Tooltip);
         let (text, cut) = clamp_value(&shown.text);
         let cut = cut || shown.flags & CellFlags::TRUNCATED.bits() != 0;

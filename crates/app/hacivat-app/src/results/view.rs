@@ -696,8 +696,22 @@ impl ResultsHost {
                 let cell = *cell;
                 cx.defer(move |cx| super::value_viewer::open(console, cell, cx));
             }
-            GridEvent::ContextMenuRequested { at, cell, header } => {
-                super::context_menu::open(console, *at, *cell, *header, cx);
+            // ## m3c-t39 (named exception): the menu (the request carries its origin).
+            GridEvent::ContextMenuRequested {
+                at,
+                cell,
+                header,
+                row_number,
+                pointer,
+            } => {
+                let request = super::context_menu::MenuRequest {
+                    at: *at,
+                    cell: *cell,
+                    header: *header,
+                    row_number: *row_number,
+                    pointer: *pointer,
+                };
+                super::context_menu::open(console, &grid, request, cx);
             }
             GridEvent::FrozenChanged(_) => {}
             // ## m3c-t35 fix round 1 (M3): a refused freeze says why.

@@ -80,7 +80,8 @@ pub static GRID_COMMANDS: [(&str, GridCommand); 36] = [
 /// `grid.shrink_selection`, `grid.auto_fit`, `grid.freeze` and `grid.unfreeze`.
 /// ## m3c-t37 (named exception): Task 37 removed `grid.find` and `grid.goto_row`.
 /// ## m3c-t38 (named exception): Task 38 removed `grid.open_value` (the value viewer).
-pub static STUB_COMMANDS: [&str; 1] = ["grid.context_menu"];
+/// ## m3c-t39 (named exception): Task 39 removed `grid.context_menu` (the grid menu): none left.
+pub static STUB_COMMANDS: [&str; 0] = [];
 
 /// Whether grid command `id` is a stub ([`STUB_COMMANDS`]).
 pub fn is_stub(id: &str) -> bool {

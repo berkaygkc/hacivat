@@ -24,6 +24,8 @@
 //!   switch empties the cache.
 
 use std::cell::{Cell, RefCell};
+// ## m3c-t39
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -37,8 +39,8 @@ use hacivat_ui_grid::{
     GridFrame, ModelRow, NULL_MARKER, RowCount, SourceCaps,
 };
 use hacivat_values::valfmt::{
-    BinaryDisplay, ChipKind, ColumnFacts, Display, DisplayKind, DisplaySettings, DisplayZone,
-    Purpose, format_cell, id_like,
+    BinaryDisplay, ChipKind, ColumnFacts, Display, DisplayKind, DisplayMode, DisplaySettings,
+    DisplayZone, Purpose, format_cell, id_like,
 };
 use hacivat_values::{
     CellFlags, ColumnMeta, LenUnit, LogicalType, NativeType, NetKind, ResultSchema, SqliteAffinity,
@@ -56,6 +58,46 @@ pub struct ResultDisplay {
     settings: DisplaySettings,
     zone: DisplayZone,
     engine: DbmsKind,
+    // ## m3c-t39 (named exception: L3's raw setting)
+    /// `settings` in `DisplayMode::Raw`, at the same version: the raw columns' cells.
+    raw_settings: DisplaySettings,
+    /// Which columns show raw.
+    raw: RawColumns,
+}
+
+// ## m3c-t39 (named exception: L3's raw setting, HV-GRID-04 menu)
+/// Which columns show their values raw (`DisplayMode::Raw`: as the server sent them, no digit
+/// grouping): every column under the `grid.raw_display` setting, and a console's own choice
+/// per column (the grid menu's "Raw display · this column"), by column name, which wins over
+/// the setting. Copy is raw whatever this says.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RawColumns {
+    /// `grid.raw_display`.
+    pub all: bool,
+    /// Each named column's own choice.
+    pub columns: Arc<BTreeMap<Arc<str>, bool>>,
+}
+
+impl RawColumns {
+    /// Whether the column named `name` shows raw.
+    pub fn is_raw(&self, name: &str) -> bool {
+        self.columns.get(name).copied().unwrap_or(self.all)
+    }
+
+    /// The same, with the column named `name` raw or not; a choice equal to the setting is no
+    /// choice (the column follows the setting again).
+    pub fn with_column(&self, name: &str, raw: bool) -> RawColumns {
+        let mut columns = (*self.columns).clone();
+        if raw == self.all {
+            columns.remove(name);
+        } else {
+            columns.insert(Arc::from(name), raw);
+        }
+        RawColumns {
+            all: self.all,
+            columns: Arc::new(columns),
+        }
+    }
 }
 
 impl ResultDisplay {
@@ -63,15 +105,48 @@ impl ResultDisplay {
     /// region, `tr-TR`) and a zone already loaded. No I/O: load the zone off the UI thread
     /// (`DisplayZone::load`).
     pub fn new(region_bcp47: &str, zone: DisplayZone, engine: DbmsKind) -> Self {
+        let settings = DisplaySettings::with_zone(region_bcp47, zone.clone());
+        // ## m3c-t39
+        let mut raw_settings = settings.clone();
+        raw_settings.mode = DisplayMode::Raw;
         ResultDisplay {
-            settings: DisplaySettings::with_zone(region_bcp47, zone.clone()),
+            settings,
             zone,
             engine,
+            raw_settings,
+            raw: RawColumns::default(),
         }
     }
 
     pub fn settings(&self) -> &DisplaySettings {
         &self.settings
+    }
+
+    // ## m3c-t39
+    /// The settings column `name`'s cells are shown with: raw ones in `DisplayMode::Raw`.
+    pub fn settings_for(&self, name: &str) -> &DisplaySettings {
+        if self.raw.is_raw(name) {
+            &self.raw_settings
+        } else {
+            &self.settings
+        }
+    }
+
+    /// Which columns show raw.
+    pub fn raw(&self) -> &RawColumns {
+        &self.raw
+    }
+
+    /// The same display with `raw` columns.
+    pub fn with_raw(mut self, raw: RawColumns) -> Self {
+        self.raw = raw;
+        self
+    }
+
+    /// Moves both settings to `version` (the display caches key on it).
+    fn set_version(&mut self, version: u32) {
+        self.settings.version = version;
+        self.raw_settings.version = version;
     }
 
     /// The display zone, for the raw channel.
@@ -232,7 +307,10 @@ impl GridAdapter {
     /// which this bumps, so no cell formatted under the old settings is shown again.
     pub fn set_display(&self, mut display: ResultDisplay, cx: &mut App) {
         let old = self.display.borrow().settings.version;
-        display.settings.version = old.wrapping_add(1);
+        // ## m3c-t39: both settings, raw and not, move together.
+        display.set_version(old.wrapping_add(1));
+        // ## m3c-t39: the setting's raw flag is the adapter's own (`begin_frame` reads it).
+        display.raw.all = self.display.borrow().raw.all;
         let engine_changed = display.engine != self.display.borrow().engine;
         *self.display.borrow_mut() = Arc::new(display);
         if engine_changed {
@@ -339,6 +417,21 @@ struct AdapterFrame {
     texts: Texts,
 }
 
+// ## m3c-t39
+impl AdapterFrame {
+    /// The settings column `col`'s cells are shown with (a raw column's are raw).
+    fn settings_of(&self, col: ColId) -> &DisplaySettings {
+        let raw = self.display.raw();
+        if !raw.all && raw.columns.is_empty() {
+            return self.display.settings();
+        }
+        match self.snapshot.schema().columns.get(col.0 as usize) {
+            Some(meta) => self.display.settings_for(&meta.name),
+            None => self.display.settings(),
+        }
+    }
+}
+
 impl GridFrame for AdapterFrame {
     fn generation(&self) -> (u64, u64) {
         (self.generation, self.snapshot.version())
@@ -379,7 +472,7 @@ impl GridFrame for AdapterFrame {
             let shown = format_cell(
                 value,
                 &facts.view(self.display.engine),
-                &self.display.settings,
+                self.settings_of(col), // ## m3c-t39
                 Purpose::Cell,
             );
             cell_content(shown, facts, &self.texts)
@@ -417,7 +510,7 @@ impl GridFrame for AdapterFrame {
             let spoken = format_cell(
                 value,
                 &facts.view(self.display.engine),
-                &self.display.settings,
+                self.settings_of(col), // ## m3c-t39
                 Purpose::A11y,
             );
             let size = spoken.chip.map(|chip| match chip {
@@ -428,6 +521,13 @@ impl GridFrame for AdapterFrame {
             content
         })
     }
+}
+
+// ## m3c-t39
+/// The `grid.raw_display` setting in effect (off without settings).
+pub(crate) fn raw_display_setting(cx: &App) -> bool {
+    cx.try_global::<crate::AppState>()
+        .is_some_and(|s| s.settings.grid.raw_display)
 }
 
 // ## m3c-t40
@@ -462,6 +562,15 @@ impl GridDataSource for GridAdapter {
         cache.begin_frame();
         // ## m3c-t40 fix round 1 (m4)
         self.a11y_cache.borrow_mut().begin_frame();
+        // ## m3c-t39: `grid.raw_display` as the settings say now (a change is a new version,
+        // so no cell formatted the other way is shown again).
+        let raw_all = raw_display_setting(cx);
+        if self.display.borrow().raw.all != raw_all {
+            let mut display = (**self.display.borrow()).clone();
+            display.raw.all = raw_all;
+            display.set_version(display.settings.version.wrapping_add(1));
+            *self.display.borrow_mut() = Arc::new(display);
+        }
         let target = self.target.borrow();
         Rc::new(AdapterFrame {
             snapshot: target.source.snapshot(),

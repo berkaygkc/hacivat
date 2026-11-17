@@ -666,7 +666,8 @@ fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
     // ## m3c-t37 (named exception): Task 37 filled `grid.find` and `grid.goto_row`: 8 + 2.
     // ## m3c-t34 merge: 0 editor stubs (after T34) + 2 grid stubs (after T37).
     // ## m3c-t38 (named exception): Task 38 filled `grid.open_value`: 0 + 1.
-    assert_eq!(stubs.len(), 1);
+    // ## m3c-t39 (named exception): Task 39 filled `grid.context_menu`: 0 + 0.
+    assert_eq!(stubs.len(), 0);
     // The app-registered stubs (disabled since Task 1b).
     // ## m3b-t27-history (named exception): `history.open` is no longer a stub; it is enabled
     // once the history store is open (`history_ui.rs` covers it).

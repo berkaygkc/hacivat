@@ -213,11 +213,20 @@ fn scan_slice(
     cancel: &AtomicBool,
 ) -> SliceOut {
     let engine = input.display.engine();
-    let settings = input.display.settings();
     let facts: Vec<_> = input
         .cols
         .iter()
         .map(|c| input.facts.get(*c as usize).map(|f| f.view(engine)))
+        .collect();
+    // ## m3c-t39 (named exception): a raw column is searched as its cells show it.
+    let schema = input.snapshot.schema();
+    let settings: Vec<_> = input
+        .cols
+        .iter()
+        .map(|c| match schema.columns.get(*c as usize) {
+            Some(meta) => input.display.settings_for(&meta.name),
+            None => input.display.settings(),
+        })
         .collect();
     let loaded = input.snapshot.row_count();
     let mut out = SliceOut::default();
@@ -248,7 +257,7 @@ fn scan_slice(
             for (ix, (col, f)) in input.cols.iter().zip(&facts).enumerate() {
                 let Some(f) = f else { continue };
                 let value = input.snapshot.cell(model.0, *col);
-                let shown = format_cell(value, f, settings, Purpose::Cell);
+                let shown = format_cell(value, f, settings[ix], Purpose::Cell);
                 // NULL never matches; a decode error's text is chrome, not the value.
                 if matches!(shown.kind, DisplayKind::Null | DisplayKind::Error) {
                     continue;

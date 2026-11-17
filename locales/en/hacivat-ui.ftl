@@ -3148,3 +3148,56 @@ hv-vv-copied-cut = Copied the first { $shown } of the value: the rest wasn't fet
 hv-vv-rerun-not-read = Only a query that reads data is run again with a larger value limit. Run this statement again from the editor.
 # The re-run button's tooltip while the console runs a statement.
 hv-vv-rerun-busy = A statement is running in this console. Re-run once it ends.
+
+## m3b-t39-grid-menu
+
+# The grid's context menu (right press on a cell, a column header or a row number; Shift+F10).
+# Copies the selected cells.
+hv-gmenu-copy = Copy
+# Copies the selected cells with the column names as the first line.
+hv-gmenu-copy-headers = Copy with headers
+# The row-number menu's Copy: copies the selected rows.
+hv-gmenu-copy-rows = Copy rows
+# The header menu: copies the column's name.
+hv-gmenu-copy-name = Copy column name
+# Opens the value viewer on the cell.
+hv-gmenu-open-value = Open value viewer
+# Sorts the rows by the column, smallest first.
+hv-gmenu-sort-asc = Sort ascending
+# Sorts the rows by the column, largest first.
+hv-gmenu-sort-desc = Sort descending
+# The header menu, while another column is sorted: sorts by this column too, after the others.
+# Variables:
+#   $lvl (Number) - the level this column would take, e.g. 2.
+hv-gmenu-add-sort = Add as sort level { $lvl }
+# The header menu: keeps the columns up to this one in place when the grid scrolls sideways.
+hv-gmenu-freeze = Freeze up to here
+# The header menu while columns are frozen.
+hv-gmenu-unfreeze = Unfreeze columns
+# The header menu: hides the column from the grid (Show all columns brings it back).
+hv-gmenu-hide = Hide column
+# The header menu: shows every hidden column again.
+hv-gmenu-show-all = Show all columns
+# The header menu: sizes the column to its values.
+hv-gmenu-autofit = Fit width
+# A check item: shows the column's values as the server sent them (no digit grouping).
+hv-gmenu-raw = Raw display
+# The hint after hv-gmenu-raw: the item applies to this column only (the setting applies to
+# every grid).
+hv-gmenu-raw-hint = this column
+# Opens the go-to-row field.
+hv-gmenu-goto = Go to row…
+# The row-number menu: opens the record inspector on the row.
+hv-gmenu-record = Show as record
+# Why Open value viewer is unavailable: several cells are selected.
+hv-gmenu-why-one-cell = Select one cell
+# Why Clear sort is unavailable.
+hv-gmenu-why-not-sorted = Not sorted
+# Why Show all columns is unavailable: no column is hidden.
+hv-gmenu-why-no-hidden = None hidden
+# Why Copy is unavailable: the selected ranges share neither their rows nor their columns.
+hv-gmenu-why-ranges = Ranges don't line up
+# Why Hide column is unavailable: it is the only column still shown.
+hv-gmenu-why-last = Last shown column
+# The menu's name for screen readers.
+hv-gmenu-label = Grid menu
