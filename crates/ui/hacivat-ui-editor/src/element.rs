@@ -1062,6 +1062,8 @@ pub(crate) fn prepaint_frame(
     // glyph slot to a shown one.
     let buttons = gutter::prepaint_buttons(v, gutter, window, cx);
     overlay.play_rows = buttons.rows.clone();
+    // ## m3c-gutter-no-run (named exception): the host reads them back (`gutter_play_rows`).
+    v.gutter_ui.shown.clone_from(&buttons.rows);
     let current_statement = preview::current_statement(&v.band, &snapshot);
     let visible_lines = (view_h / f64::from(lh)).ceil().max(1.0) as u32;
     let mut frame = FramePrepaint {

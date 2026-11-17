@@ -359,6 +359,9 @@ pub struct GutterUi {
     /// column's one tab stop goes back to it while it is painted.
     last_run: std::cell::Cell<Option<u32>>,
     last_fold: std::cell::Cell<Option<u32>>,
+    // ## m3c-gutter-no-run
+    /// The rows whose ▶ the last frame drew (`ButtonFrame::rows`).
+    pub(crate) shown: Vec<u32>,
 }
 
 impl std::fmt::Debug for GutterUi {
@@ -899,6 +902,13 @@ impl EditorView {
     /// The gutter button that has the keyboard focus, if one has.
     pub fn gutter_focus(&self, window: &Window) -> Option<GutterButton> {
         focused_button(self, window)
+    }
+
+    // ## m3c-gutter-no-run (named exception)
+    /// The lines (0-based) whose ▶ the last painted frame drew, in order. A host's frame may
+    /// draw the play glyph elsewhere (the console toolbar's Run), so its icons cannot say this.
+    pub fn gutter_play_rows(&self) -> &[u32] {
+        &self.gutter_ui.shown
     }
 }
 
