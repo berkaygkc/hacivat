@@ -241,6 +241,8 @@ fn main_range(vcx: &VisualTestContext, editor: &Entity<EditorView>) -> std::ops:
         .read(|cx| editor.read(cx).snapshot().selection.main().range())
 }
 
+// ## m3c-t45 (controller fix, CI 44152258028 windows): used only by the unix tests.
+#[cfg(unix)]
 fn primary_f() -> &'static str {
     if cfg!(target_os = "macos") {
         "cmd-f"
@@ -335,6 +337,8 @@ fn escape_returns_the_caret(cx: &mut TestAppContext) {
     assert_eq!(main_range(vcx, &editor), 20..20);
 }
 
+// ## m3c-t45 (controller fix, CI 44152258028 windows): used only by the unix tests.
+#[cfg(unix)]
 fn vcx_order_first(id: ConsoleId, cx: &gpui::App) -> gpui::FocusHandle {
     find_bar::focus_order(id, cx)
         .first()
