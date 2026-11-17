@@ -203,6 +203,12 @@ pub enum GridEvent {
         at: Point<Pixels>,
         cell: Option<ModelCell>,
         header: Option<ColId>,
+        // ## m3c-t39 (named exception: Task 1b's event)
+        /// A right press on a row number (the gutter): `cell` is that row in the focus column.
+        row_number: bool,
+        /// A right press asked (`at` is the pointer); else the keys or a screen reader did
+        /// (`at` is under the focus cell), and the menu opens with its first item active.
+        pointer: bool,
     },
     /// The frozen column count changed (Task 35): `grid.freeze`, `grid.unfreeze`, never
     /// `GridView::set_frozen` (the host's own change).
@@ -474,6 +480,9 @@ impl GridView {
                     at: self.menu_point(cell),
                     cell,
                     header: None,
+                    // ## m3c-t39
+                    row_number: false,
+                    pointer: false,
                 });
             }
             // ## m3c-t35
@@ -562,11 +571,19 @@ impl GridView {
     /// ([`GridEvent::FreezeRefused`], ## m3c-t35 fix round 1, M3). Without a focus there is
     /// nothing to freeze up to.
     fn freeze_to_focus(&mut self, cx: &mut Context<Self>) {
-        let Some(ix) = self
-            .selection
-            .focus()
-            .and_then(|f| self.layout.index_of(f.col))
-        else {
+        // ## m3c-t39: the header menu freezes through its own column (`freeze_through`).
+        if let Some(focus) = self.selection.focus() {
+            self.freeze_through(focus.col, cx);
+        }
+    }
+
+    // ## m3c-t39 (named exception: Task 35's freeze, reached from the header menu)
+    /// Freezes the visible columns up to and including `col` ("Freeze up to here" on its
+    /// header), as `grid.freeze` does for the focus column: [`GridEvent::FrozenChanged`], or
+    /// [`GridEvent::FreezeRefused`] when they would leave less than `MIN_WIDTH` of the last
+    /// frame's body to scroll. A hidden column freezes nothing.
+    pub fn freeze_through(&mut self, col: ColId, cx: &mut Context<Self>) {
+        let Some(ix) = self.layout.index_of(col) else {
             return;
         };
         let n = ix + 1;

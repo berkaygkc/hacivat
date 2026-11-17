@@ -437,6 +437,24 @@ impl ConsoleResults {
     /// The console's format locale, display zone and engine, for the tabs it has and the ones
     /// to come.
     pub fn set_display(&mut self, display: ResultDisplay, cx: &mut Context<Self>) {
+        // ## m3c-t39 (named exception): the console's raw columns stay (a new session or a
+        // new format locale changes nothing about them).
+        let display = display.with_raw(self.display.raw().clone());
+        for tab in &self.tabs {
+            tab.adapter.set_display(display.clone(), cx);
+        }
+        self.display = display;
+        cx.notify();
+    }
+
+    // ## m3c-t39 (named exception: the grid menu's "Raw display · this column")
+    /// Shows the column named `name` raw (or not) in every result of this console, now and in
+    /// the runs to come, whatever `grid.raw_display` says.
+    pub fn set_raw_column(&mut self, name: &str, raw: bool, cx: &mut Context<Self>) {
+        let mut columns = self.display.raw().clone();
+        columns.all = super::adapter::raw_display_setting(cx);
+        let columns = columns.with_column(name, raw);
+        let display = self.display.clone().with_raw(columns);
         for tab in &self.tabs {
             tab.adapter.set_display(display.clone(), cx);
         }
