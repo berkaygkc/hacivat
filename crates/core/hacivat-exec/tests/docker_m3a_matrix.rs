@@ -255,6 +255,25 @@ async fn server_view(a: &mut Side, c: &Console, backend: Option<&str>) -> Server
     }
 }
 
+// ## m3b-ci (controller): the server's own view lags the client by a moment (MariaDB's
+// processlist can still show the thread as not sleeping right after the error reply reached
+// the client; CI run 44031973211). A condition wait, not a sleep: poll until the view is
+// clear, at most 5 s, and answer the last view.
+async fn server_view_settled(a: &mut Side, c: &Console, backend: Option<&str>) -> ServerView {
+    let clear = ServerView {
+        idle_in_tx: 0,
+        running: 0,
+    };
+    let deadline = tokio::time::Instant::now() + secs(5);
+    loop {
+        let view = server_view(a, c, backend).await;
+        if view == clear || tokio::time::Instant::now() >= deadline {
+            return view;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// After a cursor ended: the session is idle with no cursor and no transaction of anyone's,
 /// the server agrees, the connection is the same one, and the next statement runs.
 async fn assert_freed(c: &Console, a: &mut Side, backend: Option<&str>, what: &str) {
@@ -270,7 +289,7 @@ async fn assert_freed(c: &Console, a: &mut Side, backend: Option<&str>, what: &s
     let snap = c.snap();
     assert_eq!(snap.tx.status, TxStatus::Idle, "{id} {what}: {:?}", snap.tx);
     assert_eq!(
-        server_view(a, c, backend).await,
+        server_view_settled(a, c, backend).await,
         ServerView {
             idle_in_tx: 0,
             running: 0
@@ -1535,7 +1554,7 @@ async fn read_only_bypass_rows_blocked_through_run_without_classifier() {
             // Nothing is held after the row (review M3): the console's backend is idle out of
             // any transaction, and the fixture can be locked at once from the side channel.
             let backend = ro_mysql_backend(&c).await;
-            let view = server_view(&mut a, &c, backend.as_deref()).await;
+            let view = server_view_settled(&mut a, &c, backend.as_deref()).await;
             if view.idle_in_tx != 0 || view.running != 0 {
                 failures.push(format!(
                     "{id} {row} `{sql}`: the server still holds {view:?}"
