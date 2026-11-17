@@ -3421,6 +3421,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hacivat-introspect"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "hacivat-driver",
+ "hacivat-driver-pg",
+ "hacivat-net",
+ "hacivat-testkit",
+ "secrecy",
+ "tokio",
+]
+
+[[package]]
 name = "hacivat-l10n"
 version = "0.0.0"
 dependencies = [

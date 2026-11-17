@@ -72,6 +72,8 @@ hacivat-sql-editor = { path = "crates/app/hacivat-sql-editor" }
 # ## m3b-t01a-seams: identifiers and the classifier (Core layer, `crates/sql`).
 sql-ident = { path = "crates/sql/sql-ident" }
 sql-safety = { path = "crates/sql/sql-safety" }
+# ## m4-spike-pg-intro: the introspectors (HV-INTRO-*; PostgreSQL first).
+hacivat-introspect = { path = "crates/core/hacivat-introspect" }
 
 # Localization (Fluent + ICU4X 2.4).
 fluent-bundle = "0.16.0"
