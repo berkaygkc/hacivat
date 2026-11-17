@@ -18,8 +18,8 @@
 //!   and drops the sort with the old result (Tasks 38, 36, 24).
 //! - The grid's AccessKit rows follow a filter and a sort, VoiceOver-free (Tasks 40, 37, 36).
 //!
-//! **Part B** (after Tasks 39, 41 and 42 merge) adds: the grid menu's Sort / Freeze / Raw display
-//! into copy, the narrow pane at 120 px, and the settings rows.
+//! - **Part B** (## m3c-t43b): a production console in a 120 px pane connects and runs with its
+//!   environment mark and mode chip whole inside the pane (Tasks 41, 24).
 
 mod support;
 
@@ -918,4 +918,130 @@ fn grid_a11y_rows_follow_filter_and_sort(cx: &mut TestAppContext) {
         .map(|r| r.cells[0].sort)
         .expect("the header row");
     assert_eq!(header, Some(gpui::accesskit::SortDirection::Descending));
+}
+
+// ## m3c-t43b ---- part B ------------------------------------------------------------------------
+
+/// The window width the narrow-pane flow lays its split out for.
+const NARROW_WINDOW_PX: f32 = 1280.0;
+
+/// Writes a `workspace.json` whose centre column is split side by side, the second pane
+/// (focused) `want` px wide in a window [`NARROW_WINDOW_PX`] wide (the default explorer and the
+/// 1 px seams).
+fn split_layout(paths: &hacivat_settings::LocalPaths, want: f32) {
+    use hacivat_ui::panes::{Axis, PaneId, PaneTree, TabId};
+    let tiles = hacivat_app::shell::TileLayout::default();
+    let centre = NARROW_WINDOW_PX - tiles.explorer_w - 1.0;
+    let mut panes = PaneTree::new(TabId(0));
+    panes.split(PaneId(0), Axis::Horizontal, TabId(1));
+    panes.set_ratio(&[], 1.0 - (want + 1.0) / centre);
+    let value = serde_json::json!({
+        "tiles": serde_json::to_value(tiles).expect("the tiles"),
+        "panes": serde_json::to_value(&panes).expect("the panes"),
+        "tabs": [
+            {"id": 0, "kind": "console", "n": 1},
+            {"id": 1, "kind": "console", "n": 2},
+        ],
+    });
+    hacivat_settings::workspace_state::save(
+        &paths.workspace_json(),
+        hacivat_app::shell::workspace::WORKSPACE_STATE_VERSION,
+        &value,
+    )
+    .expect("workspace.json");
+}
+
+/// The visible label with `id` the last frame drew, if any.
+fn label(vcx: &VisualTestContext, id: &str) -> Option<hacivat_ui::text::RenderedText> {
+    let needle = format!("#{id}");
+    registry_frame(vcx)
+        .into_iter()
+        .find(|r| r.visible && r.path.ends_with(&needle))
+}
+
+/// Asserts that the focused narrow pane (the window's last 120 px) draws its environment mark
+/// and its mode chip inside it, the chip's word ("Manuel", N4) whole, and Run as its icon (N1).
+fn whole_in_the_narrow_pane(vcx: &mut VisualTestContext, when: &str) {
+    let pane = (NARROW_WINDOW_PX - 120.0 - 0.5)..=(NARROW_WINDOW_PX + 0.5);
+    in_window(vcx, |window, _| window.refresh());
+    vcx.run_until_parked();
+    for selector in ["console-env-swatch", "tx-chip"] {
+        let b = vcx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{when}: {selector} is not drawn"));
+        assert!(
+            pane.contains(&f32::from(b.left())) && pane.contains(&f32::from(b.right())),
+            "{when}: {selector} {b:?} is not inside the narrow pane {pane:?}"
+        );
+    }
+    let chip = label(vcx, "tx-chip-mode").unwrap_or_else(|| panic!("{when}: no mode word"));
+    assert!(
+        !chip.clipped && !chip.truncated && chip.painted_px > 0.0,
+        "{when}: the mode chip's word is cut: {chip:?}"
+    );
+    assert_eq!(chip.text.as_ref(), "Manuel", "{when}: the mode word (N4)");
+    assert!(
+        label(vcx, "button-label-console-run").is_none(),
+        "{when}: Run draws its icon only (N1)"
+    );
+}
+
+/// The narrow pane at 120 px (Task 41, `design/m3b-safe` surface 24) across a connect and a run
+/// (Task 24): a production console in the focused 120 px pane, in Turkish, connects, runs a
+/// statement to a succeeded mark, and before and after the run its environment mark and mode
+/// chip stay whole inside the pane.
+#[gpui::test]
+fn a_production_console_in_a_120px_pane_runs_with_its_trust_signals_whole(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake_prepared(cx, "tr", pg(), |paths| split_layout(paths, 120.0));
+    vcx.simulate_resize(gpui::size(gpui::px(NARROW_WINDOW_PX), gpui::px(800.0)));
+    in_window(vcx, |window, _| window.activate_window());
+    vcx.run_until_parked();
+    let focused = with_ws(vcx, |ws, _, _| ws.layout().0.focused);
+    assert_eq!(
+        focused,
+        hacivat_ui::panes::PaneId(1),
+        "the narrow pane has the focus"
+    );
+    let p = hacivat_session::profile::Profile {
+        engine: DbmsKind::Postgres,
+        ..test_profile("orders-prod", Some(EnvTag::Production), "127.0.0.1")
+    };
+    add_profile(vcx, p);
+    connect(vcx, "orders-prod");
+    let console = |vcx: &VisualTestContext| {
+        let tab = with_ws(vcx, |ws, _, _| ws.active_tab())?;
+        vcx.cx.read(|cx| Consoles::by_tab(cx, tab))
+    };
+    wait_until(vcx, "the narrow pane's console connected", |vcx| {
+        console(vcx).is_some_and(|c| vcx.cx.read(|cx| exec_ui::connected(c, cx)))
+    });
+    let id = console(vcx).expect("the narrow pane's console");
+    whole_in_the_narrow_pane(vcx, "connected");
+    let editor = vcx.cx.read(|cx| {
+        Consoles::get(cx, id)
+            .and_then(|s| s.editor.clone())
+            .expect("the console's editor")
+    });
+    vcx.cx.update(|cx| {
+        editor.update(cx, |e, cx| {
+            e.set_text("SELECT 1;", cx);
+            e.select_range(3..3, cx);
+        })
+    });
+    vcx.run_until_parked();
+    in_window(vcx, |window, cx| {
+        let handle = editor.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        editor.update(cx, |e, cx| assert!(e.run_command("editor.run", window, cx)));
+    });
+    wait_until(vcx, "the run's succeeded mark", |vcx| {
+        vcx.cx.read(|cx| {
+            let marks = exec_ui::last_run_marks(id, cx);
+            !marks.is_empty()
+                && marks
+                    .iter()
+                    .all(|m| matches!(m, Some(ExecMarkState::Succeeded { .. })))
+        })
+    });
+    whole_in_the_narrow_pane(vcx, "after the run");
 }

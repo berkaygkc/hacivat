@@ -1299,6 +1299,120 @@ fn check_title_bar(width: f32, bar: TitleBarProbe, capsule: Option<Bounds<Pixels
     out
 }
 
+// ## m3c-t43b
+/// Gives the title-bar capsule one history before the capture: the window is drawn 400 px
+/// narrower, then at the shot's width again, each until the capsule's labels stop changing.
+///
+/// The capsule plans its fit from the width its row drew in the frame before
+/// (`Capsule::max_width`'s memo), and a segment collapsed to its icon still adds the icon to
+/// that width. Near the edge both plans are then stable (the access word shown, its row
+/// narrower; or collapsed, its row wider), and which one a shot got depended on the frames its
+/// steps happened to draw on the way (a connecting capsule, a run, the probe's timing): the
+/// "okuma-yazma" race of the Turkish 960 px shots. From one narrower width the plan is always the
+/// same one. (A product note for the capsule's owner: its fit is history-dependent.)
+///
+/// Narrower, not wider: no scroll position is clamped on the way. What the resize closes (a
+/// hover, a tooltip) is brought back: the pointer moves again where a step left it, and if a
+/// label of the frame before is still missing (a tooltip) the simulated clock runs until it is
+/// drawn again (whole caret blink periods, at most 2.1 s).
+fn settle_capsule(cx: &mut HeadlessAppContext, handle: AnyWindowHandle, (w, h): (f32, f32)) {
+    let others = |cx: &mut HeadlessAppContext| {
+        cx.update(|cx| {
+            cx.global::<TextRegistry>()
+                .frame
+                .iter()
+                .filter(|r| r.visible && !r.path.contains("hacivat-ui/src/capsule.rs"))
+                .map(|r| (r.path.to_string(), r.text.to_string()))
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+    };
+    cx.update(|cx| cx.refresh_windows());
+    cx.run_until_parked();
+    let before = others(cx);
+    let pointer = cx
+        .update_window(handle, |_, window, _| window.mouse_position())
+        .expect("the window is open");
+    for width in [w - 400.0, w] {
+        cx.update_window(handle, |_, window, cx| {
+            window.resize(size(px(width), px(h)));
+            window.bounds_changed(cx);
+        })
+        .expect("the window is open");
+        settle_capsule_frames(cx);
+    }
+    // The pointer moves again where a step left it (its hover fills come back too).
+    let moved = pointer != point(px(0.0), px(0.0));
+    for at in [pointer + point(px(1.0), px(0.0)), pointer]
+        .into_iter()
+        .filter(|_| moved)
+    {
+        cx.update_window(handle, |_, window, cx| {
+            use gpui::InputEvent as _;
+            window.dispatch_event(
+                gpui::MouseMoveEvent {
+                    position: at,
+                    pressed_button: None,
+                    modifiers: gpui::Modifiers::none(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .expect("the window is open");
+        cx.run_until_parked();
+    }
+    cx.update(|cx| cx.refresh_windows());
+    cx.run_until_parked();
+    if before.is_subset(&others(cx)) {
+        settle_capsule_frames(cx);
+        return;
+    }
+    // In 20 ms steps, and on to a whole caret blink period (2 x 530 ms), so a blinking caret is
+    // in the phase it had.
+    let mut ms = 0u64;
+    while ms < 2_120 {
+        cx.advance_clock(std::time::Duration::from_millis(20));
+        ms += 20;
+        cx.update(|cx| cx.refresh_windows());
+        cx.run_until_parked();
+        if ms.is_multiple_of(1_060) && before.is_subset(&others(cx)) {
+            break;
+        }
+    }
+    settle_capsule_frames(cx);
+}
+
+/// Draws frames until the capsule shows the same labels at the same width twice in a row (at
+/// most 8 more).
+fn settle_capsule_frames(cx: &mut HeadlessAppContext) {
+    let capsule = |cx: &mut HeadlessAppContext| {
+        cx.update(|cx| {
+            let labels: Vec<(String, String, bool)> = cx
+                .global::<TextRegistry>()
+                .frame
+                .iter()
+                .filter(|r| r.path.contains("hacivat-ui/src/capsule.rs"))
+                .map(|r| (r.path.to_string(), r.text.to_string(), r.visible))
+                .collect();
+            let width = cx
+                .global::<CapsuleProbe>()
+                .bounds
+                .map(|b| (f32::from(b.size.width) * 4.0).round() as i64);
+            (labels, width)
+        })
+    };
+    let mut last = capsule(cx);
+    for _ in 0..8 {
+        cx.update(|cx| cx.refresh_windows());
+        cx.run_until_parked();
+        let now = capsule(cx);
+        if now == last {
+            return;
+        }
+        last = now;
+    }
+}
+
 /// Renders `shot` in a fresh app, checks the frame and writes the PNG. Returns the violations.
 fn render(shot: Shot, dir: &Path) -> Vec<String> {
     let platform = current_platform(true);
@@ -1347,6 +1461,10 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         && let Some(boot) = connections.as_mut()
     {
         boot.secrets = vault_store(&paths);
+    }
+    // ## m3c-t43b: a narrow-pane state restores its split layout (`workspace.json`).
+    if let Some(state) = m3c_state {
+        m3c::before_start(state, &paths, shot.size);
     }
     let mut startup = Startup::new(paths, outcome, OsLocale::default());
     startup.connections = connections;
@@ -1425,6 +1543,8 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
+    // ## m3c-t43b: the title-bar capsule settles before the capture.
+    settle_capsule(&mut cx, handle, shot.size);
     cx.update(|cx| cx.refresh_windows());
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| {
@@ -1670,8 +1790,13 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     assert_eq!(m3b::all().len(), 7 + 11 + 20 + 9 + 12 + 7 + 1 + 4);
     // ## m3c-t43-shots: then the M3c states x 16: Task 31's 5, Task 32's 7, Task 33's 7, Task
     // 34's 10, Tasks 35/36's 10, Task 37's 13, Task 38's 15 (part B adds Tasks 39, 41 and 42's).
-    assert_eq!(m3c::all().len(), 5 + 7 + 7 + 10 + 10 + 13 + 15);
-    assert_eq!(all.len(), 1020 + 68 * 16 + 71 * 16 + 67 * 16);
+    // ## m3c-t43b: part B adds Task 39's 9, Task 41's 11, Task 42's 7 and the 6 states part A
+    // left.
+    assert_eq!(
+        m3c::all().len(),
+        5 + 7 + 7 + 10 + 10 + 13 + 15 + 9 + 11 + 7 + 6
+    );
+    assert_eq!(all.len(), 1020 + 68 * 16 + 71 * 16 + 100 * 16);
     let m3b_from = 1020 + 68 * 16;
     let order = [
         m3b::T22.to_vec(),
@@ -2696,11 +2821,16 @@ fn every_m3c_state_has_its_own_marker() {
     // none is about a trust signal (those always fail), and a violation outside the list is
     // never one.
     let names: Vec<&str> = m3c::all().iter().map(|s| s.name()).collect();
-    for f in m3c::KNOWN_FINDINGS {
+    // ## m3c-t43b: part B's list too.
+    for f in m3c::all_findings() {
         assert!(names.contains(&f.state), "{f:?}");
         assert!(!f.label.is_empty(), "{f:?}");
         assert!(
-            ["T31", "T32", "T33", "T34", "T35", "T36", "T37", "T38"].contains(&f.owner),
+            // ## m3c-t43b: and part B's owners.
+            [
+                "T31", "T32", "T33", "T34", "T35", "T36", "T37", "T38", "T41", "T42"
+            ]
+            .contains(&f.owner),
             "{f:?}"
         );
         assert!(
@@ -2712,7 +2842,7 @@ fn every_m3c_state_has_its_own_marker() {
     // id or by a fragment of one.
     for state in m3c::all() {
         for id in m3c::trust_ids(state) {
-            for f in m3c::KNOWN_FINDINGS {
+            for f in m3c::all_findings() {
                 assert!(
                     !id.contains(f.label) && !f.label.contains(id),
                     "{f:?} names the trust label {id}"
@@ -2865,10 +2995,11 @@ fn known_findings_match_only_their_own_clip() {
 /// the list is temporary and empty at the M3c gate).
 fn known_findings_are_empty_at_the_t45_gate() {
     if std::env::var_os("HACIVAT_T45_GATE").is_some() {
+        // ## m3c-t43b: part B's list too.
+        let left: Vec<_> = m3c::all_findings().collect();
         assert!(
-            m3c::KNOWN_FINDINGS.is_empty(),
-            "the T45 gate: every known finding must be fixed first: {:?}",
-            m3c::KNOWN_FINDINGS
+            left.is_empty(),
+            "the T45 gate: every known finding must be fixed first: {left:?}"
         );
     }
 }

@@ -24,9 +24,20 @@
 //! - **No fetch ever runs:** the fixture stores' `FetchControl` ignores every request, so the
 //!   go-to "Fetching to row" state stays at its first line.
 //!
-//! States whose picture depends on how far a background job got (the editor find's and the grid
-//! find's "counting" lines, the text view's "Building" line) have no hold seam yet; they are left
-//! out and listed in the Task 43 report.
+//! ## m3c-t43b: part B (surfaces 23–25 and the states part A left):
+//! - **Background jobs are held** where their picture depends on how far they got: the editor
+//!   find's count (`hacivat_ui_editor::find::hold_counts`), the grid find's scan
+//!   (`results::find::hold_scans`) and the text view's build (`results::views::hold_builds`, half
+//!   done) stop short of their end.
+//! - **Narrow panes come from a restored layout:** [`before_start`] writes the split (the second,
+//!   focused pane 120 px, or 219 px) as `workspace.json` before the app starts; the M3a and M3b
+//!   steps then reach their states in that pane.
+//! - **Grid menus open by a real right press** (or `grid.context_menu`), after [`probe_grid`],
+//!   which closes the menu Task 39 opens for its probe.
+//! - **The settings rows** are driven through `settings_ui::fixtures` (no element bounds to aim
+//!   at): the section, the search and the largest-value field.
+//! - The title-bar capsule gets one history before every capture (`shots.rs`,
+//!   `settle_capsule`).
 #![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
 
 use std::cell::RefCell;
@@ -37,19 +48,35 @@ use std::time::{Duration, Instant};
 
 use hacivat_app::console::Consoles;
 use hacivat_app::console::find_bar;
+// ## m3c-t43b: part B uses ConnectionsModel, RunUx, console_fixtures, context_menu, SizeUnit,
+// settings_ui, Workspace, AccessLabel, ProfileDraft, LocalPaths, ActionRegistry, DialogEvent and
+// PopupMenuEvent (sorted in among the imports below).
+use hacivat_app::connections::ConnectionsModel;
+use hacivat_app::console::toolbar::RunUx;
+use hacivat_app::console::view::fixtures as console_fixtures;
 use hacivat_app::exec_ui;
 use hacivat_app::results::adapter::ResultDisplay;
+use hacivat_app::results::context_menu;
 use hacivat_app::results::view::{ResultsShot, hosts};
 use hacivat_app::results::views::{self, TextState, ViewMode};
 use hacivat_app::results::{ActiveResult, find, goto, sort, value_viewer};
+use hacivat_app::settings_ui::value_limit::SizeUnit;
+use hacivat_app::settings_ui::{self, Section, fixtures as settings_fixtures};
+use hacivat_app::shell::Workspace;
 use hacivat_exec::{ErrorView, ResultTab, TabKey, UnitStatus};
+use hacivat_proto::AccessLabel;
 use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_results::{
     CloseReason, Completeness, CursorInfo, FetchControl, FetchPolicy, MemoryBudget, ResultId,
     ResultSource, ResultStore, ResultWriter, StoreSource,
 };
+use hacivat_session::profile::ProfileDraft;
 use hacivat_session::session::{RunId, UnitId};
+use hacivat_settings::LocalPaths;
 use hacivat_text::{SelectionRange, SelectionSet};
+use hacivat_ui::actions::ActionRegistry;
+use hacivat_ui::dialog::DialogEvent;
+use hacivat_ui::menu::PopupMenuEvent;
 use hacivat_ui::popover::A11yDecl;
 use hacivat_ui::text::RenderedText;
 use hacivat_ui::toast::ToastQueue;
@@ -222,6 +249,77 @@ pub(super) enum M3c {
     ViewerTruncated,
     // ## m3c-t43-part-b: surface 23 (Task 39's grid menu), 24 (Task 41's narrow panes) and
     // 25 (Task 42's settings rows) join here, after their tasks merge.
+    // ## m3c-t43b: part B.
+    // 23 · The grid context menu (Task 39)
+    /// A right press on a cell: the cell menu at the pointer.
+    GmenuCell,
+    /// A right press on a column header: the header menu.
+    GmenuHeader,
+    /// The header menu of a grid with frozen columns: "Unfreeze columns".
+    GmenuHeaderFrozen,
+    /// The header menu of another column while one is sorted: "Add as sort level 2".
+    GmenuHeaderSortLevel,
+    /// A right press on a row number: the row-number menu.
+    GmenuRowNumber,
+    /// The cell menu over two ranges that do not line up: disabled rows with their reasons.
+    GmenuDisabled,
+    /// The header menu of the last shown column: Hide disabled ("Last shown column").
+    GmenuHeaderLast,
+    /// ⇧F10 (`grid.context_menu`): the menu under the focus cell, its first item active.
+    GmenuKeyboard,
+    /// A grouped number column shown raw: Raw display checked.
+    GmenuRaw,
+    // 24 · Narrow panes (Task 41): a console pane split down to the 120 px floor.
+    /// An idle console: Run as its icon (N1), the mode chip with its word (N4).
+    NarrowIdle,
+    /// A read-only production console: the lock (red) and its whole label.
+    NarrowProductionRo,
+    /// Running: the run marker and the clock (N5).
+    NarrowRunning,
+    /// "Cancelling…" wrapping.
+    NarrowCancelling,
+    /// Waiting for a connection on production: two lines, then Cancel (N1′).
+    NarrowWaiting,
+    /// A user transaction: the badge wrapping, Commit and Roll back as icons (N3).
+    NarrowBadge,
+    /// The badge and "Read-only after this transaction" (the profile marked read-only).
+    NarrowPending,
+    /// A cursor open: the strip's "Cursor open" and the status bar's.
+    NarrowStrip,
+    /// An empty console: the editor's placeholder, wrapping.
+    NarrowEmpty,
+    /// "Nothing to run here" as a status sentence.
+    NarrowNothing,
+    /// The pseudo-locales' minimum pane, 219 px.
+    Narrow219,
+    // 25 · Settings rows (Task 42)
+    /// The Editor section.
+    SettingsEditor,
+    /// The Execution section.
+    SettingsExecution,
+    /// The Results section.
+    SettingsResults,
+    /// 128 MB typed: set to 64 MB, said under the field.
+    SettingsClamped,
+    /// 16 KB typed: set to 64 KB, said under the field.
+    SettingsClampedLow,
+    /// A value limit in KB (512 KB).
+    SettingsKb,
+    /// A search: rows of several sections, each naming its section.
+    SettingsSearch,
+    // The states part A left for want of a hold seam or a live console.
+    /// The editor find counting (held): "k of n+" with the amber marker.
+    FindCounting,
+    /// The grid find scanning (held): "k of n+".
+    GfindScanning,
+    /// The text view building (held half way), Cancel offered.
+    ViewTextBuilding,
+    /// "Tab moves focus": ↓ moved the ▶ column's single stop to the next statement.
+    GutterFocusMoved,
+    /// The go-to fetch question over a live production console's result.
+    GotoAskLive,
+    /// The truncated value viewer over a live production console's result.
+    ViewerTruncatedLive,
 }
 
 /// Task 31's states.
@@ -319,7 +417,59 @@ pub(super) const T38: [M3c; 15] = [
     M3c::ViewerTruncated,
 ];
 
-/// Every M3c state in render order: by task (31–38).
+// ## m3c-t43b
+/// Task 39's states (surface 23).
+pub(super) const T39: [M3c; 9] = [
+    M3c::GmenuCell,
+    M3c::GmenuHeader,
+    M3c::GmenuHeaderFrozen,
+    M3c::GmenuHeaderSortLevel,
+    M3c::GmenuRowNumber,
+    M3c::GmenuDisabled,
+    M3c::GmenuHeaderLast,
+    M3c::GmenuKeyboard,
+    M3c::GmenuRaw,
+];
+
+/// Task 41's states (surface 24).
+pub(super) const T41: [M3c; 11] = [
+    M3c::NarrowIdle,
+    M3c::NarrowProductionRo,
+    M3c::NarrowRunning,
+    M3c::NarrowCancelling,
+    M3c::NarrowWaiting,
+    M3c::NarrowBadge,
+    M3c::NarrowPending,
+    M3c::NarrowStrip,
+    M3c::NarrowEmpty,
+    M3c::NarrowNothing,
+    M3c::Narrow219,
+];
+
+/// Task 42's states (surface 25).
+pub(super) const T42: [M3c; 7] = [
+    M3c::SettingsEditor,
+    M3c::SettingsExecution,
+    M3c::SettingsResults,
+    M3c::SettingsClamped,
+    M3c::SettingsClampedLow,
+    M3c::SettingsKb,
+    M3c::SettingsSearch,
+];
+
+/// The states part A left (Tasks 33, 34, 37, 38): the hold seams, the gutter's single stop and
+/// the popovers over a live production console.
+pub(super) const LEFT: [M3c; 6] = [
+    M3c::FindCounting,
+    M3c::GfindScanning,
+    M3c::ViewTextBuilding,
+    M3c::GutterFocusMoved,
+    M3c::GotoAskLive,
+    M3c::ViewerTruncatedLive,
+];
+
+/// Every M3c state in render order: by task (31–38), then part B's (39, 41, 42 and the
+/// states part A left).
 // ## m3c-t43-part-b: then Task 39's, Task 41's and Task 42's.
 pub(super) fn all() -> Vec<M3c> {
     T31.into_iter()
@@ -329,6 +479,11 @@ pub(super) fn all() -> Vec<M3c> {
         .chain(T35_36)
         .chain(T37)
         .chain(T38)
+        // ## m3c-t43b
+        .chain(T39)
+        .chain(T41)
+        .chain(T42)
+        .chain(LEFT)
         .collect()
 }
 
@@ -336,7 +491,7 @@ pub(super) fn all() -> Vec<M3c> {
 /// selection's shape, a fold's or a mark's state, an icon the frame drew, the find's options,
 /// the grid's sort, selection or view, the popover's line). Their checks read the models (and,
 /// where a Fluent sentence is the difference, the sentence the frame drew).
-pub(super) const TOLD_APART_BY_CHECK: [&[&str]; 12] = [
+pub(super) const TOLD_APART_BY_CHECK: [&[&str]; 18] = [
     &[
         "multi-next-occurrence",
         "multi-column",
@@ -351,6 +506,8 @@ pub(super) const TOLD_APART_BY_CHECK: [&[&str]; 12] = [
         "gutter-run-hover",
         "gutter-run-focused",
         "gutter-no-run",
+        // ## m3c-t43b
+        "gutter-run-focus-moved",
     ],
     &["fold-folded", "fold-run-caret"],
     &[
@@ -367,6 +524,8 @@ pub(super) const TOLD_APART_BY_CHECK: [&[&str]; 12] = [
         "find-invalid",
         "find-none",
         "find-select-all",
+        // ## m3c-t43b
+        "find-counting",
     ],
     &[
         "sort-one",
@@ -380,7 +539,13 @@ pub(super) const TOLD_APART_BY_CHECK: [&[&str]; 12] = [
         "sort-partial-tail",
         "sort-tail",
     ],
-    &["gfind-count", "gfind-invalid", "gfind-select-all"],
+    &[
+        "gfind-count",
+        "gfind-invalid",
+        "gfind-select-all",
+        // ## m3c-t43b
+        "gfind-scanning",
+    ],
     &[
         "goto-popover",
         "goto-turkish",
@@ -390,13 +555,37 @@ pub(super) const TOLD_APART_BY_CHECK: [&[&str]; 12] = [
     ],
     &["view-transposed", "view-text"],
     &["view-record", "view-record-duplicates"],
+    // ## m3c-t43b: the grid menus (what each is over and its rows), the narrow panes at the
+    // two floors, the settings sections (and the KB field), the clamp notes, and the popovers
+    // over a live production console.
+    &[
+        "gmenu-cell",
+        "gmenu-header",
+        "gmenu-header-frozen",
+        "gmenu-header-sort-level",
+        "gmenu-row-number",
+        "gmenu-disabled",
+        "gmenu-header-last-column",
+        "gmenu-keyboard",
+        "gmenu-raw",
+    ],
+    &["narrow-idle", "narrow-pseudo-floor"],
+    &[
+        "settings-editor",
+        "settings-execution",
+        "settings-results",
+        "settings-value-kb",
+    ],
+    &["settings-value-clamped", "settings-value-clamped-low"],
+    &["goto-fetch-ask", "goto-fetch-ask-live"],
+    &["viewer-truncated", "viewer-truncated-live"],
 ];
 
 /// The states whose marker a bare live console or result tile already shows (a gutter state's
 /// connection name, a grid state's header): what they are about draws no label of its own (an
 /// icon, a hover, a sort arrow, a selection box), so their model check and the icons the frame
 /// drew hold them.
-pub(super) const BY_CHECK_ALONE: [&str; 9] = [
+pub(super) const BY_CHECK_ALONE: [&str; 12] = [
     "fold-chevrons-hover",
     "fold-chevron-focused",
     "gutter-run-hover",
@@ -406,6 +595,11 @@ pub(super) const BY_CHECK_ALONE: [&str; 9] = [
     "sort-two-levels",
     "grid-frozen",
     "grid-multi-rect",
+    // ## m3c-t43b: the gutter's moved stop, and an idle narrow pane at either floor (its
+    // layout and its narrow forms are the check's).
+    "gutter-run-focus-moved",
+    "narrow-idle",
+    "narrow-pseudo-floor",
 ];
 
 // ---- known findings -------------------------------------------------------------------------
@@ -418,6 +612,9 @@ pub(super) enum Where {
     PseudoMin,
     PseudoOrMin,
     All,
+    // ## m3c-t43b
+    /// Any locale at the 960x600 minimum.
+    Min,
 }
 
 impl Where {
@@ -428,6 +625,8 @@ impl Where {
             Where::Pseudo => pseudo,
             Where::PseudoMin => pseudo && min,
             Where::PseudoOrMin => pseudo || min,
+            // ## m3c-t43b
+            Where::Min => min,
             Where::All => true,
         }
     }
@@ -680,8 +879,107 @@ impl Finding {
     }
 }
 
+// ## m3c-t43b
+/// Part B's findings (the Task 43 part B report, "Product findings"), kept apart from
+/// [`KNOWN_FINDINGS`] so that the F1–F8 fixes empty that list without touching this one; the
+/// stale tripwire says when an entry's fix landed.
+pub(super) const KNOWN_FINDINGS_B: [Finding; 15] = [
+    // F5 and F8 again (no new defect), over a live production console (part A's m4): the go-to
+    // ask paragraph and its footer buttons, the value viewer's footer size.
+    finding("goto-fetch-ask-live", Where::All, "#goto-line", "T37"),
+    finding(
+        "goto-fetch-ask-live",
+        Where::PseudoMin,
+        "#button-label-goto-cancel",
+        "T37",
+    ),
+    finding(
+        "goto-fetch-ask-live",
+        Where::PseudoMin,
+        "#button-label-goto-fetch-ok",
+        "T37",
+    ),
+    finding(
+        "viewer-truncated-live",
+        Where::Pseudo,
+        "#value-viewer-size",
+        "T38",
+    ),
+    // F9 · A settings row's note is flagged cut at 960 px in Turkish and the pseudo-locales
+    // (its paragraph's box is shorter than its wrapped lines; the PNG reads whole, as F5's ask
+    // paragraph does: the row's measure or the harness's paragraph check needs the owner's look).
+    finding(
+        "settings-editor",
+        Where::PseudoMin,
+        "#settings-row-note-editor.find_turkish_tolerant",
+        "T42",
+    ),
+    finding(
+        "settings-results",
+        Where::Min,
+        "#settings-row-note-results.max_value_bytes",
+        "T42",
+    ),
+    finding(
+        "settings-results",
+        Where::Min,
+        "#settings-row-note-grid.raw_display",
+        "T42",
+    ),
+    finding(
+        "settings-value-clamped",
+        Where::Min,
+        "#settings-row-note-results.max_value_bytes",
+        "T42",
+    ),
+    finding(
+        "settings-value-clamped",
+        Where::Min,
+        "#settings-row-note-grid.raw_display",
+        "T42",
+    ),
+    finding(
+        "settings-value-clamped-low",
+        Where::Min,
+        "#settings-row-note-results.max_value_bytes",
+        "T42",
+    ),
+    finding(
+        "settings-value-clamped-low",
+        Where::Min,
+        "#settings-row-note-grid.raw_display",
+        "T42",
+    ),
+    finding(
+        "settings-value-kb",
+        Where::Min,
+        "#settings-row-note-results.max_value_bytes",
+        "T42",
+    ),
+    finding(
+        "settings-value-kb",
+        Where::Min,
+        "#settings-row-note-grid.raw_display",
+        "T42",
+    ),
+    finding(
+        "settings-search",
+        Where::Min,
+        "#settings-row-note-results.max_value_bytes",
+        "T42",
+    ),
+    // F10 · An empty console's placeholder is cut in a 120 px pane in the pseudo-locales (NOTES
+    // surface 24: it wraps in a narrow pane).
+    finding("narrow-empty", Where::Pseudo, "#editor-placeholder", "T41"),
+];
+
+/// Every known finding: part A's list, then part B's.
+pub(super) fn all_findings() -> impl Iterator<Item = &'static Finding> {
+    KNOWN_FINDINGS.iter().chain(KNOWN_FINDINGS_B.iter())
+}
+
 thread_local! {
-    /// The findings that matched a line in this process (`KNOWN_FINDINGS` indices).
+    /// The findings that matched a line in this process ([`all_findings`] indices).
     static MATCHED: RefCell<std::collections::BTreeSet<usize>> = RefCell::default();
 }
 
@@ -694,8 +992,7 @@ pub(super) fn known_finding(
     violation: &str,
     header_word: Option<&str>,
 ) -> Option<&'static Finding> {
-    let (i, f) = KNOWN_FINDINGS
-        .iter()
+    let (i, f) = all_findings()
         .enumerate()
         .find(|(_, f)| f.matches(state, locale, size, violation, header_word))?;
     MATCHED.with(|m| m.borrow_mut().insert(i));
@@ -714,8 +1011,7 @@ pub(super) fn stale_findings(
 ) -> Vec<String> {
     MATCHED.with(|m| {
         let m = m.borrow();
-        KNOWN_FINDINGS
-            .iter()
+        all_findings()
             .enumerate()
             .filter(|(i, f)| rendered.get(f.state) == Some(&16) && !m.contains(i))
             .map(|(_, f)| {
@@ -863,6 +1159,40 @@ impl M3c {
             ViewerXml => "viewer-xml-pretty",
             ViewerJsonInvalid => "viewer-json-invalid",
             ViewerTruncated => "viewer-truncated",
+            // ## m3c-t43b
+            GmenuCell => "gmenu-cell",
+            GmenuHeader => "gmenu-header",
+            GmenuHeaderFrozen => "gmenu-header-frozen",
+            GmenuHeaderSortLevel => "gmenu-header-sort-level",
+            GmenuRowNumber => "gmenu-row-number",
+            GmenuDisabled => "gmenu-disabled",
+            GmenuHeaderLast => "gmenu-header-last-column",
+            GmenuKeyboard => "gmenu-keyboard",
+            GmenuRaw => "gmenu-raw",
+            NarrowIdle => "narrow-idle",
+            NarrowProductionRo => "narrow-production-read-only",
+            NarrowRunning => "narrow-running",
+            NarrowCancelling => "narrow-cancelling",
+            NarrowWaiting => "narrow-waiting",
+            NarrowBadge => "narrow-badge",
+            NarrowPending => "narrow-pending-read-only",
+            NarrowStrip => "narrow-strip",
+            NarrowEmpty => "narrow-empty",
+            NarrowNothing => "narrow-nothing-to-run",
+            Narrow219 => "narrow-pseudo-floor",
+            SettingsEditor => "settings-editor",
+            SettingsExecution => "settings-execution",
+            SettingsResults => "settings-results",
+            SettingsClamped => "settings-value-clamped",
+            SettingsClampedLow => "settings-value-clamped-low",
+            SettingsKb => "settings-value-kb",
+            SettingsSearch => "settings-search",
+            FindCounting => "find-counting",
+            GfindScanning => "gfind-scanning",
+            ViewTextBuilding => "view-text-building",
+            GutterFocusMoved => "gutter-run-focus-moved",
+            GotoAskLive => "goto-fetch-ask-live",
+            ViewerTruncatedLive => "viewer-truncated-live",
         }
     }
 
@@ -870,6 +1200,9 @@ impl M3c {
     pub(super) fn is_grid(self) -> bool {
         T35_36.contains(&self)
             || T37.contains(&self)
+            // ## m3c-t43b
+            || T39.contains(&self)
+            || matches!(self, M3c::GfindScanning | M3c::GotoAskLive)
             || matches!(
                 self,
                 M3c::ViewTransposedOff
@@ -944,6 +1277,34 @@ impl M3c {
             ViewerXml => ("#value-viewer-column", Some("fatura_xml")),
             ViewerJsonInvalid => ("#value-viewer-column", Some("bozuk_belge")),
             ViewerTruncated => ("#value-viewer-column", Some("ek")),
+            // ## m3c-t43b
+            // 23 · the menu (its rows are the check's).
+            GmenuCell | GmenuHeader | GmenuHeaderFrozen | GmenuHeaderSortLevel | GmenuRowNumber
+            | GmenuDisabled | GmenuHeaderLast | GmenuKeyboard | GmenuRaw => (MENU, None),
+            // 24 · the narrow pane's own toolbar labels (its layout is the check's).
+            NarrowIdle | Narrow219 => ("#console-connection-name", Some(DEV)),
+            NarrowProductionRo => ("#console-lock-label", None),
+            NarrowRunning => ("#console-clock", None),
+            NarrowCancelling => ("#console-cancelling", None),
+            NarrowWaiting => ("#console-waiting-count", None),
+            NarrowBadge => ("#tx-badge-text", None),
+            NarrowPending => ("#console-ro-pending-text", None),
+            NarrowStrip => ("#button-label-status-cursor", None),
+            NarrowEmpty => ("#editor-placeholder", None),
+            NarrowNothing => ("#status-message", None),
+            // 25 · the section's title, the clamp note, a search result's section.
+            SettingsEditor | SettingsExecution | SettingsResults | SettingsKb => {
+                ("#settings-section-title", None)
+            }
+            SettingsClamped | SettingsClampedLow => ("#settings-max-value-clamped", None),
+            SettingsSearch => ("#settings-row-section-", None),
+            // The states part A left.
+            FindCounting => ("#find-count-text", None),
+            GfindScanning => ("#grid-find-count-text", None),
+            ViewTextBuilding => ("#text-building", None),
+            GutterFocusMoved => ("#console-connection-name", Some(DEV)),
+            GotoAskLive => (GOTO, None),
+            ViewerTruncatedLive => ("#value-viewer-column", Some("ek")),
         }
     }
 
@@ -967,6 +1328,15 @@ impl M3c {
             // finding. The model check asks for the truncation notice. When F8 is fixed, ask for
             // `#value-viewer-size` again.
             ViewerTruncated => &["#value-viewer-sub"],
+            // ## m3c-t43b
+            GutterFocusMoved => &["#editor-segment-lncol"],
+            GotoAskLive => &["#header", "#goto-line"],
+            ViewerTruncatedLive => &["#value-viewer-sub"],
+            NarrowIdle | Narrow219 | NarrowNothing => &["#tx-chip-mode"],
+            NarrowProductionRo | NarrowRunning | NarrowCancelling | NarrowBadge | NarrowStrip
+            | NarrowEmpty => &["#console-connection-name"],
+            NarrowWaiting => &["#console-waiting-text"],
+            NarrowPending => &["#tx-badge-text"],
             // A grid state shows its grid (a header it drew), whatever its own marker.
             s if s.is_grid() => &["#header"],
             _ => &[],
@@ -977,16 +1347,46 @@ impl M3c {
     /// one): each group lists the label ids of which one must be visible and painted.
     pub(super) fn required(self) -> &'static [&'static [&'static str]] {
         const ENV: &[&str] = &["#status-env-label"];
+        // ## m3c-t43b: the console toolbar's and the status bar's trust items over a live
+        // console (NOTES cross-cutting 3; the narrow forms, surface 24).
+        const CHIP: &[&str] = &["#tx-chip-mode"];
+        const LOCK: &[&str] = &["#console-lock-label"];
+        const CLOCK: &[&str] = &["#console-clock"];
+        const WAITING: &[&str] = &["#console-waiting-text"];
+        const WAITING_COUNT: &[&str] = &["#console-waiting-count"];
+        const TX: &[&str] = &["#status-tx-open"];
+        const BADGE: &[&str] = &["#tx-badge-text"];
+        const PENDING: &[&str] = &["#console-ro-pending-text"];
+        const CURSOR: &[&str] = &["#button-label-status-cursor"];
         match self {
             // The go-to popover and the value viewer over a production result.
             M3c::GotoAsk | M3c::ViewerTruncated => &[ENV],
+            // ## m3c-t43b
+            M3c::GotoAskLive | M3c::ViewerTruncatedLive => &[ENV, CHIP],
+            M3c::NarrowIdle | M3c::Narrow219 | M3c::NarrowEmpty | M3c::NarrowNothing => {
+                &[ENV, CHIP]
+            }
+            M3c::NarrowProductionRo => &[ENV, CHIP, LOCK],
+            M3c::NarrowRunning => &[ENV, CLOCK],
+            M3c::NarrowCancelling => &[ENV],
+            M3c::NarrowWaiting => &[ENV, CHIP, WAITING, WAITING_COUNT],
+            M3c::NarrowBadge => &[ENV, CHIP, TX, BADGE],
+            M3c::NarrowPending => &[ENV, CHIP, TX, BADGE, PENDING],
+            M3c::NarrowStrip => &[ENV, CURSOR],
             _ => &[],
         }
     }
 
     /// Whether the title-bar capsule shows production (the one filled badge).
     pub(super) fn shows_production(self) -> bool {
-        false
+        // ## m3c-t43b: a live production console.
+        matches!(
+            self,
+            M3c::GotoAskLive
+                | M3c::ViewerTruncatedLive
+                | M3c::NarrowProductionRo
+                | M3c::NarrowWaiting
+        )
     }
 
     /// The steps after the shell opened.
@@ -1619,6 +2019,249 @@ impl M3c {
                 }
                 s
             }
+            // ## m3c-t43b
+            // ---- 23
+            GmenuCell | GmenuHeader | GmenuHeaderFrozen | GmenuHeaderSortLevel | GmenuRowNumber
+            | GmenuDisabled | GmenuHeaderLast | GmenuRaw => {
+                let mut s = tile(EnvTag::Dev, || vec![complete(orders(40))]);
+                s.push(probe_grid());
+                match self {
+                    GmenuHeaderFrozen => s.push(instant(|window, cx| {
+                        let g = grid(window, cx).expect("a grid");
+                        g.update(cx, |g, cx| g.set_frozen(2, cx));
+                    })),
+                    GmenuHeaderSortLevel => s.push(sort_by(SortSpec::by(ColId(1), false))),
+                    GmenuHeaderLast => s.push(instant(|window, cx| {
+                        let g = grid(window, cx).expect("a grid");
+                        g.update(cx, |g, cx| {
+                            for col in 1..5 {
+                                g.set_column_hidden(ColId(col), true, cx);
+                            }
+                        });
+                    })),
+                    GmenuRaw => s.push(instant(|window, cx| {
+                        let c = active_console(window, cx).expect("a console");
+                        context_menu::set_raw(c, "id", true, cx);
+                    })),
+                    GmenuDisabled => {
+                        // Two ranges that do not line up (as `grid-multi-rect`).
+                        s.push(step(
+                            |window, cx| drag_cells(window, cx, (0, 1), (1, 2), false),
+                            |window, cx| {
+                                grid(window, cx)
+                                    .is_some_and(|g| g.read(cx).selection().ranges() == 1)
+                            },
+                        ));
+                        s.push(step(
+                            |window, cx| drag_cells(window, cx, (3, 2), (4, 4), true),
+                            |window, cx| {
+                                grid(window, cx)
+                                    .is_some_and(|g| g.read(cx).selection().ranges() == 2)
+                            },
+                        ));
+                    }
+                    _ => {}
+                }
+                s.push(right_press(match self {
+                    GmenuCell => Press::Cell(2, 1),
+                    GmenuHeader | GmenuHeaderFrozen => Press::Header(1),
+                    GmenuHeaderSortLevel => Press::Header(3),
+                    GmenuRowNumber => Press::RowNumber(3),
+                    GmenuDisabled => Press::Cell(3, 3),
+                    GmenuHeaderLast => Press::Header(0),
+                    _ => Press::Cell(2, 0),
+                }));
+                s
+            }
+            GmenuKeyboard => {
+                let mut s = tile(EnvTag::Dev, || vec![complete(orders(40))]);
+                s.push(focus_cell(2, 1));
+                s.push(step(
+                    |window, cx| {
+                        let g = grid(window, cx).expect("a grid");
+                        g.update(cx, |g, cx| {
+                            g.dispatch(hacivat_ui_grid::GridCommand::ContextMenu, window, cx)
+                        });
+                    },
+                    |window, cx| context_menu::open_menu(cx).is_some() && menu_open(window, cx),
+                ));
+                s
+            }
+            // ---- 24: the layout (`workspace.json`) is written before the app starts
+            // ([`before_start`]); the focused narrow pane's console is connected by the steps.
+            NarrowIdle | Narrow219 => m3a::M3a::ConsoleEditor.steps(),
+            NarrowProductionRo => {
+                let caret = after(m3a::SCRIPT, "o.total");
+                let mut s = live(
+                    m3a::PROD,
+                    m3a::SCRIPT,
+                    caret..caret,
+                    Expect::Band(BandStyle::Run),
+                );
+                s.push(instant(|window, cx| {
+                    let tab = active_tab(window, cx).expect("an active tab");
+                    console_fixtures::show_lock(tab, AccessLabel::ReadOnlyGuarded, cx);
+                }));
+                s
+            }
+            NarrowRunning => m3a::M3a::ToolbarRunning.steps(),
+            NarrowCancelling => m3a::M3a::ToolbarCancelling.steps(),
+            NarrowWaiting => m3a::M3a::ToolbarProductionWaiting.steps(),
+            NarrowBadge => super::m3b::M3b::TxBadgeOpen.steps(),
+            NarrowPending => {
+                let mut s = super::m3b::M3b::TxBadgeOpen.steps();
+                s.extend(mark_read_only_pending());
+                s
+            }
+            NarrowStrip => m3a::M3a::StatusCursorOpen.steps(),
+            NarrowEmpty => m3a::M3a::ConsoleEmpty.steps(),
+            NarrowNothing => m3a::M3a::PreviewNothing.steps(),
+            // ---- 25
+            SettingsEditor | SettingsExecution | SettingsResults => {
+                let section = match self {
+                    SettingsEditor => Section::Editor,
+                    SettingsExecution => Section::Execution,
+                    _ => Section::Results,
+                };
+                vec![open_settings(), show_section(section)]
+            }
+            SettingsClamped => vec![
+                open_settings(),
+                show_section(Section::Results),
+                enter_value_limit("128", 64 << 20),
+            ],
+            SettingsKb | SettingsClampedLow => {
+                let mut s = vec![
+                    open_settings(),
+                    step(
+                        |_, cx| {
+                            hacivat_app::shell::update_settings(cx, |s| {
+                                s.results.max_value_bytes =
+                                    hacivat_settings::ValueLimit::new(512 << 10)
+                                        .expect("a value limit");
+                            });
+                            cx.refresh_windows();
+                        },
+                        |_, cx| {
+                            settings_ui::open_page(cx)
+                                .is_some_and(|p| p.read(cx).value_limit_unit() == SizeUnit::Kb)
+                        },
+                    ),
+                    show_section(Section::Results),
+                ];
+                if self == SettingsClampedLow {
+                    s.push(enter_value_limit("16", 64 << 10));
+                }
+                s
+            }
+            SettingsSearch => vec![
+                open_settings(),
+                step(
+                    |_, cx| settings_fixtures::search(SEARCH, cx),
+                    |_, cx| settings_fixtures::shown(cx).is_some_and(|(_, q)| q == SEARCH),
+                ),
+            ],
+            // ---- the states part A left
+            FindCounting => {
+                let mut s = live(DEV, find_script(), 0..0, Expect::Any);
+                s.push(instant(|_, cx| hacivat_ui_editor::find::hold_counts(cx)));
+                s.push(step(
+                    |window, cx| {
+                        let editor = editor_in(window, cx).expect("a console");
+                        editor.update(cx, |e, cx| {
+                            assert!(e.run_command("editor.find", window, cx))
+                        });
+                        let c = active_console(window, cx).expect("a console");
+                        find_bar::set_query(c, "sehir", window, cx);
+                    },
+                    |window, cx| {
+                        editor_in(window, cx).is_some_and(|e| {
+                            let st = e.read(cx).find_status();
+                            st.total.is_none() && st.counted > 0 && st.current.is_some()
+                        })
+                    },
+                ));
+                s
+            }
+            GfindScanning => {
+                let mut s = tile(EnvTag::Dev, || vec![complete(orders(40))]);
+                s.push(instant(|_, cx| find::hold_scans(cx)));
+                s.push(step(
+                    |window, cx| {
+                        let g = grid(window, cx).expect("a grid");
+                        let handle = g.read(cx).focus_handle(cx);
+                        window.focus(&handle, cx);
+                        let c = active_console(window, cx).expect("a console");
+                        find::open(c, cx);
+                        find::set_query(c, "Bursa", cx);
+                    },
+                    |window, cx| {
+                        active_console(window, cx)
+                            .and_then(|c| find::status(c, cx))
+                            .is_some_and(|v| {
+                                v.total.is_none() && v.counted > 0 && v.current.is_some()
+                            })
+                    },
+                ));
+                s
+            }
+            ViewTextBuilding => {
+                let mut s = tile(EnvTag::Dev, || vec![complete(orders(24))]);
+                s.push(instant(|_, cx| views::hold_builds(cx)));
+                s.push(view_mode(ViewMode::Text));
+                s.push(step(
+                    |_, _| {},
+                    |window, cx| {
+                        active_console(window, cx).is_some_and(|c| {
+                            matches!(
+                                views::text_state(c, cx),
+                                Some(TextState::Building { done, .. }) if done > 0
+                            )
+                        })
+                    },
+                ));
+                s
+            }
+            GutterFocusMoved => {
+                let mut s = live(DEV, FOLDS, 0..0, Expect::Any);
+                s.push(command("editor.toggle_tab_moves_focus"));
+                s.push(gutter_tab_to(GutterStop::Run));
+                s.push(step(
+                    |window, cx| {
+                        let down = gpui::Keystroke::parse("down").expect("a keystroke");
+                        window.dispatch_keystroke(down, cx);
+                    },
+                    |window, cx| {
+                        editor_in(window, cx).is_some_and(|e| {
+                            e.read(cx).gutter_focus(window)
+                                == Some(hacivat_ui_editor::gutter::GutterButton::Run(6))
+                        })
+                    },
+                ));
+                s
+            }
+            GotoAskLive => {
+                let mut s =
+                    live_tile(|| vec![live_source(orders(500), Completeness::Suspended(cursor()))]);
+                s.push(open_goto("1500000"));
+                s.push(step(
+                    |window, cx| {
+                        let c = active_console(window, cx).expect("a console");
+                        goto::submit(c, cx);
+                    },
+                    |window, cx| {
+                        active_console(window, cx).is_some_and(|c| {
+                            matches!(goto::state(c, cx), Some(goto::GotoState::Ask { .. }))
+                        })
+                    },
+                ));
+                s
+            }
+            ViewerTruncatedLive => {
+                let mut s = live_tile(|| vec![complete(viewer_values())]);
+                s.push(open_viewer(1, 7));
+                s
+            }
         }
     }
 
@@ -1911,6 +2554,162 @@ impl M3c {
                             _ => v.truncated.is_some(),
                         }
                 }),
+            // ## m3c-t43b
+            // 23 · the menu is open over what the press hit, with the rows that state is about.
+            GmenuCell | GmenuHeader | GmenuHeaderFrozen | GmenuHeaderSortLevel | GmenuRowNumber
+            | GmenuDisabled | GmenuHeaderLast | GmenuKeyboard | GmenuRaw => {
+                use context_menu::MenuKind;
+                let target = context_menu::open_target(cx);
+                let items = match (console, g.as_ref(), target.clone()) {
+                    (Some(c), Some(g), Some(t)) => context_menu::menu_items(c, g, t, cx),
+                    _ => Vec::new(),
+                };
+                let item = |action: &str| items.iter().find(|i| i.action.as_ref() == action);
+                let off = |action: &str| item(action).is_some_and(|i| i.disabled);
+                let on = |action: &str| item(action).is_some_and(|i| !i.disabled);
+                let over = |kind: MenuKind, col: u32, row: Option<u64>| {
+                    target.as_ref().is_some_and(|t| {
+                        t.kind == kind && t.col == ColId(col) && t.cell.map(|c| c.row.0) == row
+                    })
+                };
+                let selected = context_menu::open_menu(cx).and_then(|m| m.read(cx).selected());
+                menu_open(window, cx)
+                    && match self {
+                        GmenuCell => over(MenuKind::Cell, 1, Some(2)) && selected.is_none(),
+                        GmenuHeader => {
+                            over(MenuKind::Header, 1, None)
+                                && on(context_menu::FREEZE)
+                                && off(context_menu::SHOW_ALL)
+                        }
+                        GmenuHeaderFrozen => {
+                            over(MenuKind::Header, 1, None) && on(context_menu::UNFREEZE)
+                        }
+                        GmenuHeaderSortLevel => {
+                            over(MenuKind::Header, 3, None) && on(context_menu::ADD_SORT)
+                        }
+                        GmenuRowNumber => {
+                            target.as_ref().is_some_and(|t| {
+                                t.kind == MenuKind::RowNumber
+                                    && t.cell.is_some_and(|c| c.row == ModelRow(3))
+                            }) && on(context_menu::RECORD)
+                        }
+                        GmenuDisabled => {
+                            g.as_ref()
+                                .is_some_and(|g| g.read(cx).selection().ranges() == 2)
+                                && off(context_menu::COPY)
+                                && off(context_menu::COPY_HEADERS)
+                                && off(context_menu::OPEN_VALUE)
+                                && off(context_menu::CLEAR_SORT)
+                        }
+                        GmenuHeaderLast => {
+                            over(MenuKind::Header, 0, None)
+                                && off(context_menu::HIDE)
+                                && on(context_menu::SHOW_ALL)
+                        }
+                        GmenuKeyboard => over(MenuKind::Cell, 1, Some(2)) && selected == Some(0),
+                        _ => {
+                            over(MenuKind::Cell, 0, Some(2))
+                                && item(context_menu::RAW).is_some_and(|i| i.checked)
+                        }
+                    }
+            }
+            // 24 · the focused pane is the narrow one, at its floor, and shows the state.
+            NarrowIdle | NarrowProductionRo | NarrowRunning | NarrowCancelling | NarrowWaiting
+            | NarrowBadge | NarrowPending | NarrowStrip | NarrowEmpty | NarrowNothing
+            | Narrow219 => {
+                let tab = active_tab(window, cx);
+                let shown = tab.and_then(|t| console_fixtures::shown(t, cx));
+                narrow_layout(self, window, cx)
+                    && match self {
+                        NarrowProductionRo => shown.is_some_and(|s| s.read_only.is_some()),
+                        NarrowRunning => {
+                            shown.is_some_and(|s| matches!(s.run, Some(RunUx::Running(_))))
+                                // N5: the narrow Running state draws no word.
+                                && !drawn(frame, "console-running")
+                        }
+                        NarrowCancelling => shown.is_some_and(|s| s.run == Some(RunUx::Cancelling)),
+                        NarrowWaiting => shown.is_some_and(|s| s.waiting.is_some()),
+                        NarrowBadge => console
+                            .and_then(|c| exec_ui::tx::user_tx(c, cx))
+                            .is_some_and(|t| t.statements == 3),
+                        NarrowPending => console.is_some_and(|c| exec_ui::pending_read_only(c, cx)),
+                        NarrowStrip => drawn(frame, "button-label-status-cursor"),
+                        NarrowEmpty => editor
+                            .as_ref()
+                            .is_some_and(|e| e.read(cx).snapshot().buffer.len_bytes() == 0),
+                        NarrowNothing => said_any(frame),
+                        // Idle: Run is its icon (N1), so the narrow toolbar draws no Run word.
+                        _ => band().is_some_and(|b| b.style == BandStyle::Run),
+                    }
+            }
+            // 25 · the section (or the search) shown, and the field's value and note.
+            SettingsEditor | SettingsExecution | SettingsResults | SettingsClamped
+            | SettingsClampedLow | SettingsKb | SettingsSearch => {
+                let shown = settings_fixtures::shown(cx);
+                let saved = cx
+                    .try_global::<hacivat_app::AppState>()
+                    .map(|s| s.settings.results.max_value_bytes.get());
+                let section = |want: Section| {
+                    shown
+                        .as_ref()
+                        .is_some_and(|(s, q)| *s == want && q.is_empty())
+                };
+                match self {
+                    SettingsEditor => section(Section::Editor),
+                    SettingsExecution => section(Section::Execution),
+                    SettingsResults => section(Section::Results),
+                    SettingsKb => {
+                        section(Section::Results)
+                            && settings_ui::open_page(cx)
+                                .is_some_and(|p| p.read(cx).value_limit_unit() == SizeUnit::Kb)
+                    }
+                    SettingsClamped => {
+                        section(Section::Results)
+                            && settings_fixtures::clamped(cx)
+                            && saved == Some(64 << 20)
+                    }
+                    SettingsClampedLow => {
+                        section(Section::Results)
+                            && settings_fixtures::clamped(cx)
+                            && saved == Some(64 << 10)
+                    }
+                    _ => shown.as_ref().is_some_and(|(_, q)| q == SEARCH),
+                }
+            }
+            // The states part A left.
+            FindCounting => {
+                editor.as_ref().is_some_and(|e| {
+                    let st = e.read(cx).find_status();
+                    st.total.is_none() && st.counted > 0
+                }) && console.is_some_and(|c| find_bar::is_open(c, cx))
+            }
+            GfindScanning => find_view().is_some_and(|v| v.total.is_none() && v.counted > 0),
+            ViewTextBuilding => console.is_some_and(|c| {
+                views::mode(c, cx) == ViewMode::Text
+                    && matches!(
+                        views::text_state(c, cx),
+                        Some(TextState::Building { done, rows }) if done > 0 && done < rows
+                    )
+            }),
+            GutterFocusMoved => {
+                plays() >= 1
+                    && editor.as_ref().is_some_and(|e| {
+                        e.read(cx).gutter_focus(window)
+                            == Some(hacivat_ui_editor::gutter::GutterButton::Run(6))
+                    })
+            }
+            GotoAskLive => {
+                console.is_some_and(|c| exec_ui::connected(c, cx))
+                    && console.is_some_and(|c| {
+                        matches!(goto::state(c, cx), Some(goto::GotoState::Ask { .. }))
+                    })
+            }
+            ViewerTruncatedLive => {
+                console.is_some_and(|c| exec_ui::connected(c, cx))
+                    && console
+                        .and_then(|c| value_viewer::view(c, cx))
+                        .is_some_and(|v| !v.body.is_empty() && v.truncated.is_some())
+            }
         };
         (!ok).then(|| {
             format!(
@@ -2323,13 +3122,214 @@ fn run_in_find(id: &str, window: &mut Window, cx: &mut App) {
     }
 }
 
+// ## m3c-t43b ---- part B's steps --------------------------------------------------------------
+
+/// Where a right press lands on the shown grid (model row and column), after [`probe_grid`].
+#[derive(Debug, Clone, Copy)]
+enum Press {
+    Cell(u64, u32),
+    /// A column's header (just above the first row).
+    Header(u32),
+    /// A row's number (just left of the first column).
+    RowNumber(u64),
+}
+
+/// A right press on the shown grid at `at`, through the window's pointer events (no release: the
+/// menu opens on the press, at the pointer); waits for the grid's menu.
+fn right_press(at: Press) -> Step {
+    use gpui::InputEvent as _;
+    step(
+        move |window, cx| {
+            let (row, col) = match at {
+                Press::Cell(row, col) => (row, col),
+                Press::Header(col) => (0, col),
+                Press::RowNumber(row) => (row, 0),
+            };
+            let Some((x, y, w, h)) = cell_rect(window, cx, row, col) else {
+                return;
+            };
+            let (x, y) = match at {
+                Press::Cell(..) => (x + w / 2.0, y + h / 2.0),
+                Press::Header(_) => (x + w / 2.0, y - 10.0),
+                Press::RowNumber(_) => (x - 12.0, y + h / 2.0),
+            };
+            window.dispatch_event(
+                gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Right,
+                    position: point(px(x), px(y)),
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+        },
+        |window, cx| context_menu::open_menu(cx).is_some() && menu_open(window, cx),
+    )
+}
+
+/// The focused pane's active tab.
+fn active_tab(window: &mut Window, cx: &App) -> Option<hacivat_ui::panes::TabId> {
+    window.root::<Workspace>().flatten()?.read(cx).active_tab()
+}
+
+/// The narrow pane's width (`design/m3b-safe` surface 24): the split floor, or the
+/// pseudo-locales' minimum.
+fn narrow_px(state: M3c) -> f32 {
+    if state == M3c::Narrow219 {
+        219.0
+    } else {
+        120.0
+    }
+}
+
+/// The split ratio that leaves the second pane `want` px of a window `width` px wide: the centre
+/// column is the window less the explorer and its 1 px seam, and the panes share it less their
+/// own 1 px seam.
+fn narrow_ratio(width: f32, explorer: f32, want: f32) -> f32 {
+    let centre = width - explorer - 1.0;
+    1.0 - (want + 1.0) / centre
+}
+
+/// Writes the narrow states' layout before the app starts (a user's restored `workspace.json`,
+/// the bench's precedent): the centre column split side by side, the second pane (focused)
+/// [`narrow_px`] wide. Any other state: nothing.
+pub(super) fn before_start(state: M3c, paths: &LocalPaths, size: (f32, f32)) {
+    if !T41.contains(&state) {
+        return;
+    }
+    use hacivat_ui::panes::{Axis, PaneId, PaneTree, TabId};
+    let tiles = hacivat_app::shell::TileLayout::default();
+    let mut panes = PaneTree::new(TabId(0));
+    panes.split(PaneId(0), Axis::Horizontal, TabId(1));
+    panes.set_ratio(
+        &[],
+        narrow_ratio(size.0, tiles.explorer_w, narrow_px(state)),
+    );
+    let value = serde_json::json!({
+        "tiles": serde_json::to_value(tiles).expect("the tiles"),
+        "panes": serde_json::to_value(&panes).expect("the panes"),
+        "tabs": [
+            {"id": 0, "kind": "console", "n": 1},
+            {"id": 1, "kind": "console", "n": 2},
+        ],
+    });
+    hacivat_settings::workspace_state::save(
+        &paths.workspace_json(),
+        hacivat_app::shell::workspace::WORKSPACE_STATE_VERSION,
+        &value,
+    )
+    .expect("workspace.json");
+}
+
+/// The window shows the narrow state's split: two panes side by side, the second focused and
+/// [`narrow_px`] wide.
+fn narrow_layout(state: M3c, window: &mut Window, cx: &App) -> bool {
+    use hacivat_ui::panes::{PaneId, PaneNode};
+    let width = f32::from(window.viewport_size().width);
+    let Some(ws) = window.root::<Workspace>().flatten() else {
+        return false;
+    };
+    let (panes, tiles) = ws.read(cx).layout();
+    let want = narrow_ratio(width, tiles.explorer_w, narrow_px(state));
+    panes.focused == PaneId(1)
+        && matches!(panes.root, PaneNode::Split { ratio, .. } if (ratio - want).abs() < 1e-4)
+}
+
+/// The connection is marked read-only while the console's transaction is open: the prompt asks
+/// first, Cancel keeps the transaction, and the console is pending read-only (Task 33's C1).
+fn mark_read_only_pending() -> Vec<Step> {
+    vec![
+        instant(|_, cx| {
+            let p = cx
+                .global::<ConnectionsModel>()
+                .profiles()
+                .iter()
+                .find(|p| p.name == DEV)
+                .map(|p| (**p).clone());
+            let mut p = p.expect("the profile");
+            p.read_only = true;
+            ConnectionsModel::save(cx, ProfileDraft::edit(p)).detach();
+        }),
+        step(
+            |_, _| {},
+            |window, cx| {
+                if let Some(prompt) = exec_ui::close_prompt::open_prompt_dialog(cx) {
+                    prompt.update(cx, |_, cx| cx.emit(DialogEvent::Cancelled));
+                    return false;
+                }
+                active_console(window, cx).is_some_and(|c| exec_ui::pending_read_only(c, cx))
+            },
+        ),
+    ]
+}
+
+/// The settings search the shots type: rows of several sections in every locale (the English
+/// titles under the Turkish ones included).
+const SEARCH: &str = "ar";
+
+/// Opens the settings tab (the palette's "Open settings").
+fn open_settings() -> Step {
+    step(
+        |window, cx| {
+            assert!(ActionRegistry::run("workspace.open_settings", window, cx));
+        },
+        |_, cx| settings_ui::open_page(cx).is_some(),
+    )
+}
+
+/// Shows `section` on the settings page.
+fn show_section(section: Section) -> Step {
+    step(
+        move |_, cx| settings_fixtures::show_section(section, cx),
+        move |_, cx| {
+            settings_fixtures::shown(cx).is_some_and(|(s, q)| s == section && q.is_empty())
+        },
+    )
+}
+
+/// Types `text` in the largest-value field and presses Enter; waits for the saved size `saved`
+/// and the clamp note.
+fn enter_value_limit(text: &'static str, saved: u32) -> Step {
+    step(
+        move |_, cx| settings_fixtures::enter_value_limit(text, cx),
+        move |_, cx| {
+            cx.try_global::<hacivat_app::AppState>()
+                .is_some_and(|s| s.settings.results.max_value_bytes.get() == saved)
+                && settings_fixtures::clamped(cx)
+        },
+    )
+}
+
 // ---- the result tile ------------------------------------------------------------------------
 
 /// A result tile on a console of a saved profile in `env` (Task 30's fixture console), whose
 /// results then show `tabs()` (this task's stores), the first active.
 fn tile(env: EnvTag, tabs: impl Fn() -> Vec<Arc<dyn ResultSource>> + 'static) -> Vec<Step> {
     let mut s = m3a::results(ResultsShot::Rows, Some(env));
-    s.push(step(
+    s.push(show_tabs(tabs));
+    s
+}
+
+// ## m3c-t43b (part A, m4)
+/// A live production console (connected: its toolbar draws the mode chip and the environment),
+/// whose results then show `tabs()` (this task's stores), the first active.
+fn live_tile(tabs: impl Fn() -> Vec<Arc<dyn ResultSource>> + 'static) -> Vec<Step> {
+    let caret = after(m3a::SCRIPT, "o.total");
+    let mut s = live(
+        m3a::PROD,
+        m3a::SCRIPT,
+        caret..caret,
+        Expect::Band(BandStyle::Run),
+    );
+    s.push(show_tabs(tabs));
+    s
+}
+
+/// The active console's results show `tabs()`, the first active.
+fn show_tabs(tabs: impl Fn() -> Vec<Arc<dyn ResultSource>> + 'static) -> Step {
+    step(
         move |window, cx| {
             let c = active_console(window, cx).expect("a console");
             let results = Consoles::get(cx, c)
@@ -2346,8 +3346,7 @@ fn tile(env: EnvTag, tabs: impl Fn() -> Vec<Arc<dyn ResultSource>> + 'static) ->
             });
         },
         |window, cx| grid(window, cx).is_some(),
-    ));
-    s
+    )
 }
 
 /// Sets the result display's format locale (go to row reads its separators).
@@ -2506,12 +3505,18 @@ fn probe_grid() -> Step {
                 g.dispatch(hacivat_ui_grid::GridCommand::ContextMenu, window, cx);
             });
         },
-        |_, _| {
+        |window, cx| {
             let done = BODY.with(|b| b.borrow().is_some());
             if done {
                 PROBE.with(|p| p.borrow_mut().take());
             }
-            done
+            // ## m3c-t43b: Task 39 answers the probe with the grid's menu; it closes again
+            // before the state's own steps.
+            if let Some(menu) = context_menu::open_menu(cx) {
+                menu.update(cx, |_, cx| cx.emit(PopupMenuEvent::Dismissed));
+                return false;
+            }
+            done && !menu_open(window, cx)
         },
     )
 }
