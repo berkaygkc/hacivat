@@ -611,6 +611,19 @@ fn connect_first(profile: &Profile, cx: &mut App) {
 /// one `ExecService::run` ([`submit`]). Nothing is sent before every step agreed; a refusal at
 /// any step logs why, marks the gutter and says so (no silent path).
 pub(crate) fn start_run(console: ConsoleId, version: u64, units: Vec<ExecUnit>, cx: &mut App) {
+    start_run_capped(console, version, units, None, cx);
+}
+
+// ## m3c-t38 (named exception; R-M3-82)
+/// [`start_run`] with the run's value limit `cell_cap` (`None`: the setting's,
+/// `fetch_policy_for`): the value viewer's Re-run with a raised limit. Every step is Run's.
+pub(crate) fn start_run_capped(
+    console: ConsoleId,
+    version: u64,
+    units: Vec<ExecUnit>,
+    cell_cap: Option<u32>,
+    cx: &mut App,
+) {
     // ## m3a-t32-console (fix round 2, N1; named exception): the single submit point refuses a
     // console whose read-only reconnect is pending, whatever reached it (the chooser's confirm,
     // the dispatch after the background resolve, Re-run from a result tab). `on_execute`
@@ -654,6 +667,8 @@ pub(crate) fn start_run(console: ConsoleId, version: u64, units: Vec<ExecUnit>, 
         session,
         dialect,
         modes_known,
+        // ## m3c-t38
+        cell_cap,
     };
     let prepared = pipeline(job, cx);
     cx.spawn(async move |cx| {
@@ -718,6 +733,14 @@ fn submit(
     let history = history_meta(console, profile, cx);
     let port = crate::exec_ui::AppConfirmPort::for_console(console, cx);
     let fetch = crate::exec_ui::fetch_policy_for(console, cx);
+    // ## m3c-t38 (R-M3-82): a re-run with a raised value limit (clamped by the policy).
+    let fetch = match terms.cell_cap {
+        Some(cap) => fetch.with_cell_cap(cap),
+        None => fetch,
+    };
+    cx.default_global::<RunPrep>()
+        .cell_caps
+        .insert(console, fetch.cell_cap);
     let service = exec_service(cx);
     let ticket = service.run(
         &live,
@@ -868,11 +891,22 @@ pub fn handle_results_event(event: &ResultsEvent, window: &mut Window, cx: &mut 
         ResultsEvent::Rerun {
             console,
             unit_ordinal,
-        } => rerun(*console, *unit_ordinal, cx),
+        } => rerun(*console, *unit_ordinal, None, cx),
+        // ## m3c-t38 (named exception; R-M3-82): Re-run with a raised value limit takes the
+        // same path as Re-run (the text that ran, still in the editor, through `start_run`'s
+        // pipeline: parameters, classification, the gate, the confirmations); only the run's
+        // fetch policy differs.
+        ResultsEvent::RerunWithLimit {
+            console,
+            unit_ordinal,
+            cell_cap,
+        } => rerun(*console, *unit_ordinal, Some(*cell_cap), cx),
     }
 }
 
-fn rerun(console: ConsoleId, ordinal: u32, cx: &mut App) {
+// ## m3c-t38 (named exception): `cell_cap` (R-M3-82) is the value limit of the run (`None`:
+// the setting's).
+fn rerun(console: ConsoleId, ordinal: u32, cell_cap: Option<u32>, cx: &mut App) {
     let Some(exec) = console_exec(cx, console) else {
         return;
     };
@@ -919,7 +953,8 @@ fn rerun(console: ConsoleId, ordinal: u32, cx: &mut App) {
                 doc_range: range,
                 ..unit
             };
-            start_run(console, snap.version, vec![unit], cx);
+            // ## m3c-t38
+            start_run_capped(console, snap.version, vec![unit], cell_cap, cx);
         }
         _ => say(console, "hv-exec-rerun-edited", cx),
     }
@@ -982,6 +1017,9 @@ struct Job {
     /// The console's SQL context and whether its modes were read (`SqlContext::Known`).
     dialect: DialectCtx,
     modes_known: bool,
+    // ## m3c-t38 (named exception; R-M3-82)
+    /// The run's value limit (`None`: the setting's).
+    cell_cap: Option<u32>,
 }
 
 /// What the pipeline keeps per console (this module's global).
@@ -1002,9 +1040,19 @@ struct RunPrep {
     next_refusal: u64,
     /// The prepared unit behind each result tab, per console ([`prepared_unit`]).
     prepared: HashMap<ConsoleId, HashMap<UnitId, PreparedUnit>>,
+    // ## m3c-t38 (named exception)
+    /// Each console's last run's value limit (bytes kept per cell).
+    cell_caps: HashMap<ConsoleId, u32>,
 }
 
 impl Global for RunPrep {}
+
+// ## m3c-t38 (named exception; R-M3-82)
+/// The value limit console `console`'s last run was sent with (`FetchPolicy::cell_cap`): the
+/// setting's, or the value viewer's raised one.
+pub fn last_run_cell_cap(console: ConsoleId, cx: &App) -> Option<u32> {
+    cx.try_global::<RunPrep>()?.cell_caps.get(&console).copied()
+}
 
 fn preparing(console: ConsoleId, cx: &App) -> bool {
     cx.try_global::<RunPrep>()
@@ -1916,6 +1964,8 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
                 stop_on_error: !switches.is_empty(),
                 // The session refuses the run if its context moved since (fix round 2).
                 context_generation: generation,
+                // ## m3c-t38
+                cell_cap: job.cell_cap,
             },
             cx,
         );
@@ -1934,6 +1984,9 @@ struct RunTerms {
     stop_on_error: bool,
     /// The session's context generation the run was classified under.
     context_generation: Option<u64>,
+    // ## m3c-t38 (named exception; R-M3-82)
+    /// The run's value limit (`None`: the setting's).
+    cell_cap: Option<u32>,
 }
 
 // ---- the run's questions ------------------------------------------------------------------

@@ -841,3 +841,35 @@ back (palette-only; Task 39's menus add "Add as sort level N" through
   `GridView::go_to` takes **view** rows and focuses the cell (`focus_cell`, the public "focus
   this cell"); past the fetched rows of an open cursor the app fetches in steps of 100,000 rows
   (so Stop fetching can stop between them), asking first above a million rows to fetch.
+
+## m3b-t38 — result views and the value viewer
+
+- *The axis swap is a source.* A grid's columns, layout, selection and events all come from its
+  source, so the Transposed view is a grid of its own over
+  `hacivat_ui_grid::TransposedSource` (`element/transpose.rs`): the first column holds each
+  shown table column's name, then one column per table row in the order the table shows them
+  (the sort's and the filter's view map, read when the source is built), titled by its row
+  number; one row per shown table column. `TransposedSource::table_cell` maps a cell back. The
+  hook in `transpose.rs` keeps a transposed grid's name column frozen and shows no sort
+  indicator (sorting by a row is not offered, alg/22). The table grid keeps its own selection,
+  scroll, sort and frozen columns, and keeps taking its frames at no size while another view is
+  shown, so its state (a re-run's rows, the map that follows them) is the one every view is
+  built from. Transposed is disabled above 100,000 shown rows; find, Filter rows and go to row
+  are the table's and are off while transposed.
+- *The text view* is a Pretty ASCII table of the shown rows and columns in the raw channel
+  (control characters escaped, NULL as `NULL`, columns capped at 255 characters), built on the
+  background executor in batches (widths, then lines) with progress and Cancel; above 100,000
+  rows it asks first. Lines are what copy copies.
+- *Model cells.* The record inspector and the value viewer read the focused **model** cell, so a
+  sort or a filter never changes which value they show; the inspector steps through the rows as
+  shown.
+- *The value viewer copies raw bytes.* It shows the raw channel; JSON Pretty only re-indents
+  (key order and every token kept) and XML Pretty only breaks lines; Copy raw value copies the
+  raw text whatever is shown. Its well wraps the text itself (one mono advance) and builds only
+  its visible lines.
+- *Re-run with a 64 MiB value limit* is `ResultsEvent::RerunWithLimit`: the run UI handles it as
+  Re-run (the tab's unit, only while the editor still holds the text that ran, through Run's
+  pipeline: parameters, classification of the bytes sent, the gate, the confirmations); only the
+  run's `FetchPolicy::cell_cap` differs (`orchestrator::start_run_capped`).
+- *The tooltip* (`valfmt::tooltip`, `Purpose::Tooltip`) is the raw channel under a quarter of the
+  cell's grapheme cap (`TOOLTIP_FRACTION`), marked and chipped when cut.

@@ -2549,3 +2549,84 @@ hv-goto-past-end-filter = { $row }. satır yok: süzgeç { $total } satır göst
 hv-goto-fetch-closed = Getirme { $row }. satırda durdu: imleç kapalı.
 # Review: PO
 hv-goto-fetch-paused = Getirme { $row }. satırda durdu: sonuç bellek sınırına ulaştı.
+
+## m3b-t38-views
+
+# Review: PO
+hv-view-table = Tablo
+# Review: PO
+hv-view-transposed = Devrik
+# Review: PO
+hv-view-text = Metin
+# Review: PO
+hv-view-label = Görünüm
+# Review: PO
+hv-view-transposed-off = Devrik görünüm en çok { $max } satır gösterir; bu sonuçta { $rows } satır var.
+# Review: PO
+hv-transposed-col = Sütun
+# Review: PO
+hv-record = Kayıt
+# Review: PO
+hv-record-tip = Odaktaki satırı kayıt olarak göster
+# Review: PO
+hv-record-pos = Satır { $i }/{ $n }
+# Review: PO
+hv-record-prev = Önceki satır
+# Review: PO
+hv-record-next = Sonraki satır
+# Review: PO
+hv-record-show-more = Devamını göster
+# Review: PO
+hv-record-dup = ({ $i })
+# Review: PO
+hv-record-dup-tip = Sonuçta { $name } adında { $n } sütun var; bu { $i }. sütun.
+# Review: PO
+hv-record-label = Odaktaki satırın kaydı
+# Review: PO
+hv-text-big-title = { $rows } satır metin olarak gösterilsin mi?
+# Review: PO
+hv-text-big-body = Bu kadar satır için metin görünümünü oluşturmak zaman alır ve yaklaşık { $size } bellek kullanır.
+# Review: PO
+hv-text-building = Metin görünümü oluşturuluyor: { $rows } satırın { $done } tanesi
+# Review: PO
+hv-text-cancel = Vazgeç
+# Review: PO
+hv-text-big-ok = Metin olarak göster
+# Review: PO
+hv-text-big-back = Tabloya dön
+# Review: PO
+hv-text-label = Metin tablosu olarak sonuç
+# Review: PO
+hv-text-copied = { $n } satır kopyalandı
+# Review: PO
+hv-vv-sub = { $type } · { $row }. satır
+# Review: PO
+hv-vv-raw = Ham
+# Review: PO
+hv-vv-pretty = Biçimli
+# Review: PO
+hv-vv-hex = Onaltılık
+# Review: PO
+hv-vv-pretty-tip = Yalnızca görünüm: Ham değeri kopyala, sunucunun metnini değiştirmeden kopyalar.
+# Review: PO
+hv-vv-chars = { $size } · { $n } karakter
+# Review: PO
+hv-vv-bytes = { $n } bayt
+# Review: PO
+hv-vv-truncated = Değerin ilk { $shown } kısmı gösteriliyor (toplam { $size }).
+# Review: PO
+hv-vv-truncated-unknown = Değerin ilk { $shown } kısmı gösteriliyor.
+# Review: PO
+hv-vv-rerun = { $limit } değer sınırıyla yeniden çalıştır
+# Review: PO
+hv-vv-rerun-tip = Bu ifadeyi her değer için daha büyük bir sınırla yeniden çalıştırır. Çalıştır ile aynı denetimlerden geçer.
+# Review: PO
+hv-vv-copy = Ham değeri kopyala
+# Review: PO
+hv-vv-not-json = Geçerli JSON değil; Biçimli kapalı, değer sunucunun gönderdiği gibi gösteriliyor.
+# Review: PO
+hv-vv-label = Değer görüntüleyici
+# Review: PO
+hv-vv-copied = Değer kopyalandı
+# Review: PO
+hv-vv-copied-cut = Değerin ilk { $shown } kısmı kopyalandı: gerisi getirilmedi.

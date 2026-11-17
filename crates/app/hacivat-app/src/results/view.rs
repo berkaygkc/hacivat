@@ -98,6 +98,16 @@ pub enum ResultsEvent {
         console: ConsoleId,
         range: Range<usize>,
     },
+    // ## m3c-t38 (named exception; R-M3-82): the value viewer's "Re-run with a 64 MB value
+    // limit": the unit behind the result runs again, through the same pipeline as Run (the
+    // gate, the preview rule, production's confirmations), with every value kept up to
+    // `cell_cap` bytes.
+    /// Run the unit behind a result again with the value limit `cell_cap`.
+    RerunWithLimit {
+        console: ConsoleId,
+        unit_ordinal: u32,
+        cell_cap: u32,
+    },
 }
 
 // ## m3a-t30-results-view: the run UI subscribes to a console's results for these.
@@ -189,7 +199,8 @@ pub(crate) fn console_in(window: &Window, cx: &App) -> Option<(ConsoleId, Entity
 }
 
 /// The grid configuration of result `number` over `adapter`.
-fn grid_config(number: u32, adapter: &Rc<GridAdapter>) -> GridConfig {
+// ## m3c-t38 (named exception): crate-visible for the Transposed view's grid.
+pub(crate) fn grid_config(number: u32, adapter: &Rc<GridAdapter>) -> GridConfig {
     let wide = Rc::downgrade(adapter);
     let too_many: TextFn = Rc::new(move |cx: &App| {
         let n = wide.upgrade().map_or(0, |a| a.columns().len()) as u64;
@@ -578,6 +589,8 @@ impl ResultsHost {
             super::sort::grid_closed(grid, cx);
             // ## m3c-t37
             super::find::grid_closed(grid, cx);
+            // ## m3c-t38
+            super::views::grid_closed(grid, cx);
         }
     }
 
@@ -675,7 +688,11 @@ impl ResultsHost {
             // ## m3c-t37: deferred, as they read this tile (it is being updated here).
             GridEvent::FindRequested => cx.defer(move |cx| super::find::open(console, cx)),
             GridEvent::GotoRequested => cx.defer(move |cx| super::goto::open(console, cx)),
-            GridEvent::ValueRequested(cell) => super::value_viewer::open(console, *cell, cx),
+            // ## m3c-t38 (named exception): deferred, as the viewer reads this tile.
+            GridEvent::ValueRequested(cell) => {
+                let cell = *cell;
+                cx.defer(move |cx| super::value_viewer::open(console, cell, cx));
+            }
             GridEvent::ContextMenuRequested { at, cell, header } => {
                 super::context_menu::open(console, *at, *cell, *header, cx);
             }
@@ -878,6 +895,9 @@ impl ResultsHost {
                     // ## m3c-t37: the find bar and go to row follow the shown grid.
                     super::find::sync(console, &grid, &adapter, cx);
                     super::goto::sync(console, &grid, &adapter, cx);
+                    // ## m3c-t38: the Transposed and Text views follow the table; the value
+                    // viewer closes when the result moves on.
+                    super::views::sync(console, &grid, &adapter, cx);
                 }
                 self.guard_focus(Some(&grid), window, cx);
                 let (key, unit) = {
@@ -906,20 +926,33 @@ impl ResultsHost {
                 let copy_grid = grid.downgrade();
                 // ## m3b-t25-results: Σ Count rows after Copy.
                 let count = super::count::toolbar_items(console, ix, entry.count(), cx);
+                // ## m3c-t38: the view switch and the record toggle after rows · timing.
+                let views = super::views::toolbar_items(console, &grid, window, cx);
                 // ## m3c-t37: an open find bar takes the toolbar's left group.
-                column = column.child(match super::find::toolbar(console, rows.clone(), cx) {
-                    Some(bar) => bar,
-                    None => toolbar::result_toolbar(
-                        rows,
-                        Rc::new(move |window, cx| {
-                            let _ = copy_grid.update(cx, |g, cx| {
-                                g.dispatch(GridCommand::Copy { headers: false }, window, cx)
-                            });
-                        }),
-                        count,
-                        cx,
-                    ),
-                });
+                column = column.child(
+                    match super::find::toolbar(console, rows.clone(), views.clone(), cx) {
+                        Some(bar) => bar,
+                        None => toolbar::result_toolbar_with(
+                            rows,
+                            Rc::new(move |window, cx| {
+                                // ## m3c-t38: Copy copies what the view shown shows.
+                                if super::views::route(
+                                    GridCommand::Copy { headers: false },
+                                    window,
+                                    cx,
+                                ) {
+                                    return;
+                                }
+                                let _ = copy_grid.update(cx, |g, cx| {
+                                    g.dispatch(GridCommand::Copy { headers: false }, window, cx)
+                                });
+                            }),
+                            count,
+                            views,
+                            cx,
+                        ),
+                    },
+                );
                 if columns > WIDE_RESULT_COLUMNS {
                     column = column.child(toolbar::columns_hint(columns, cx));
                 }
@@ -939,12 +972,37 @@ impl ResultsHost {
                 style.size.width = Some(hacivat_ui_core::gpui_surface::relative(1.0).into());
                 style.size.height = Some(hacivat_ui_core::gpui_surface::relative(1.0).into());
                 // ## m3c-t37: the go-to popover lies over the grid, under the toolbar's left edge.
-                let mut body = div().flex_1().min_h_0().relative().child(
-                    div()
-                        .size_full()
-                        .overflow_hidden()
-                        .child(AnyView::from(grid).cached(style)),
+                // ## m3c-t38: the view shown (the table, the Transposed view, the text), the
+                // record inspector at its right, and the value viewer over the grid's area.
+                let width = window
+                    .root::<Workspace>()
+                    .flatten()
+                    .map_or(252.0, |ws| ws.read(cx).layout().1.inspector_w);
+                let inspector =
+                    super::views::inspector(console, &grid, &adapter, width, window, cx);
+                let shown = super::views::main_area(
+                    console,
+                    &grid,
+                    AnyView::from(grid.clone()).cached(style).into_any_element(),
+                    cx,
                 );
+                let mut area = div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .relative()
+                    .child(div().size_full().overflow_hidden().child(shown));
+                if let Some(viewer) = super::value_viewer::overlay(console, cx) {
+                    area = area.child(viewer);
+                }
+                let mut body = div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .flex()
+                    .flex_row()
+                    .child(area)
+                    .children(inspector);
                 if let Some(popover) = super::goto::overlay(console, cx) {
                     body = body.child(
                         div()
@@ -1537,6 +1595,10 @@ pub(crate) fn active_grid(window: &Window, cx: &App) -> Option<Entity<GridView>>
 
 /// Runs `cmd` on the grid `window` shows.
 fn dispatch_grid(cmd: GridCommand, window: &mut Window, cx: &mut App) {
+    // ## m3c-t38: the Transposed view's grid, or the text view, when one is shown.
+    if super::views::route(cmd, window, cx) {
+        return;
+    }
     if let Some(grid) = active_grid(window, cx) {
         grid.update(cx, |g, cx| g.dispatch(cmd, window, cx));
     }
@@ -1618,7 +1680,11 @@ pub fn register_commands(cx: &mut App) {
             enabled: if hacivat_ui_grid::commands::is_stub(id) {
                 |_| false
             } else if super::find::ROUTED.contains(&id) {
-                |_| true
+                // ## m3c-t38: find is the table's (off in the Transposed and Text views).
+                |cx| super::find::field_focused(cx) || super::views::table_shown(cx)
+            } else if id == "grid.goto_row" {
+                // ## m3c-t38: so is go to row.
+                |cx| !super::find::field_focused(cx) && super::views::table_shown(cx)
             } else {
                 |cx| !super::find::field_focused(cx)
             },

@@ -513,6 +513,15 @@ impl Workspace {
         self.layout_changed(cx);
     }
 
+    // ## m3c-t38 (named exception): the record inspector's visibility (`TileLayout`, saved).
+    /// Opens or closes the record inspector of the results tile (HV-GRID-12).
+    pub fn set_inspector_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.tiles.inspector_visible != visible {
+            self.tiles.inspector_visible = visible;
+            self.layout_changed(cx);
+        }
+    }
+
     /// Activates the tab of registered `kind`, or opens one in the focused pane. A kind nobody
     /// registered opens a tab that shows an empty state.
     pub fn open_registered_tab(
@@ -1888,6 +1897,8 @@ mod validate_tests {
             editor_h: -5.0,
             inspector_w: f32::INFINITY,
             explorer_visible: true,
+            // ## m3c-t38 (named exception): the new field.
+            inspector_visible: false,
         };
         let t = validate(saved, none, bounds()).unwrap().tiles;
         assert_eq!(t.explorer_w, 276.0);

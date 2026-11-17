@@ -2958,3 +2958,134 @@ hv-goto-fetch-closed = Fetching stopped at row { $row }: the cursor is closed.
 # Variables:
 #   $row (Number) - the rows fetched, e.g. 214,000.
 hv-goto-fetch-paused = Fetching stopped at row { $row }: the result reached its memory limit.
+
+## m3b-t38-views
+
+# The result view switch's segment: the grid as a table (NOTES surface 21).
+hv-view-table = Table
+# The result view switch's segment: rows as columns.
+hv-view-transposed = Transposed
+# The result view switch's segment: the result as a text table.
+hv-view-text = Text
+# The result view switch's accessible name.
+hv-view-label = View
+# The tooltip of the disabled Transposed segment.
+# Variables:
+#   $max (Number) - the most rows the Transposed view shows, e.g. 100,000.
+#   $rows (Number) - the rows the result has, e.g. 1,048,576.
+hv-view-transposed-off = Transposed shows up to { $max } rows; this result has { $rows }.
+# The Transposed view's first column: each column's name.
+hv-transposed-col = Column
+# The record toggle's word (a one-row result shows it) and the inspector's small-caps title.
+hv-record = Record
+# The record toggle's tooltip and accessible name.
+hv-record-tip = Show the focused row as a record
+# The record inspector's position.
+# Variables:
+#   $i (Number) - the row shown (as the grid numbers it), e.g. 4.
+#   $n (Number) - the rows the grid shows, e.g. 184.
+hv-record-pos = Row { $i } of { $n }
+# The record inspector's previous-row button (tooltip and accessible name).
+hv-record-prev = Previous row
+# The record inspector's next-row button (tooltip and accessible name).
+hv-record-next = Next row
+# Under a value the record inspector shows in part: opens the value viewer.
+hv-record-show-more = Show more
+# After a column name the result has more than once.
+# Variables:
+#   $i (Number) - which of the columns with that name this is, e.g. 2.
+hv-record-dup = ({ $i })
+# The tooltip of a duplicate column name's suffix.
+# Variables:
+#   $n (Number) - the columns with that name, e.g. 2.
+#   $name (String) - the column name, e.g. "id".
+#   $i (Number) - which of them this is, e.g. 2.
+hv-record-dup-tip = The result has { $n } columns named { $name }; this is number { $i }.
+# The record inspector's accessible name.
+hv-record-label = Record of the focused row
+# The text view's question above 100,000 rows.
+# Variables:
+#   $rows (Number) - the rows the result has, e.g. 1,048,576.
+hv-text-big-title = { $rows ->
+        [one] Show { $rows } row as text?
+       *[other] Show { $rows } rows as text?
+    }
+# Under the text view's question.
+# Variables:
+#   $size (String) - the memory the text takes (an hv-grid-size-* message), e.g. "180 MB".
+hv-text-big-body = Building the text view for this many rows takes a while and uses about { $size } of memory.
+# The text view's build in progress.
+# Variables:
+#   $done (Number) - the rows built so far, e.g. 412,000.
+#   $rows (Number) - the rows to build, e.g. 1,048,576.
+hv-text-building = Building the text view: { $done } of { $rows } rows
+# The text view build's cancel button (back to the table).
+hv-text-cancel = Cancel
+# The text view question's primary button.
+hv-text-big-ok = Show as text
+# The text view question's default button.
+hv-text-big-back = Back to the table
+# The text view's accessible name.
+hv-text-label = The result as a text table
+# The toast after copying lines of the text view.
+# Variables:
+#   $n (Number) - the lines copied, e.g. 3.
+hv-text-copied = { $n ->
+        [one] Copied { $n } line
+       *[other] Copied { $n } lines
+    }
+# The value viewer's subtitle: the column's type and the row.
+# Variables:
+#   $type (String) - the column's type, e.g. "jsonb".
+#   $row (Number) - the row (as the grid numbers it), e.g. 4.
+hv-vv-sub = { $type } · row { $row }
+# The value viewer's switch: the value as the server sent it.
+hv-vv-raw = Raw
+# The value viewer's switch: JSON or XML indented.
+hv-vv-pretty = Pretty
+# The value viewer's single segment for a binary value.
+hv-vv-hex = Hex
+# The Pretty segment's tooltip.
+hv-vv-pretty-tip = Display only: Copy raw value copies the server's text unchanged.
+# The value viewer's footer for a text value.
+# Variables:
+#   $size (String) - its size (an hv-grid-size-* message), e.g. "48 KB".
+#   $n (Number) - its characters, e.g. 48,213.
+hv-vv-chars = { $n ->
+        [one] { $size } · { $n } character
+       *[other] { $size } · { $n } characters
+    }
+# The value viewer's footer for a binary value.
+# Variables:
+#   $n (Number) - its bytes, e.g. 48,213.
+hv-vv-bytes = { $n ->
+        [one] { $n } byte
+       *[other] { $n } bytes
+    }
+# The value viewer's notice for a value cut at the value-size limit.
+# Variables:
+#   $shown (String) - what the result kept (an hv-grid-size-* message), e.g. "1 MB".
+#   $size (String) - the value's whole size, e.g. "5.2 MB".
+hv-vv-truncated = Showing the first { $shown } of { $size }.
+# The value viewer's notice for a value cut at the value-size limit whose whole size is unknown.
+# Variables:
+#   $shown (String) - what the result kept (an hv-grid-size-* message), e.g. "1 MB".
+hv-vv-truncated-unknown = Showing the first { $shown } of the value.
+# The value viewer's re-run button.
+# Variables:
+#   $limit (String) - the raised limit (an hv-grid-size-* message), e.g. "64 MB".
+hv-vv-rerun = Re-run with a { $limit } value limit
+# The re-run button's tooltip.
+hv-vv-rerun-tip = Runs this statement again with a larger limit for every value. It goes through the same checks as Run.
+# The value viewer's copy button.
+hv-vv-copy = Copy raw value
+# Beside the switch when a JSON value does not parse.
+hv-vv-not-json = Not valid JSON, so Pretty is off and the value shows as the server sent it.
+# The value viewer's accessible name.
+hv-vv-label = Value viewer
+# The toast after Copy raw value.
+hv-vv-copied = Copied the value
+# The toast after Copy raw value of a value cut at the value-size limit.
+# Variables:
+#   $shown (String) - what was copied (an hv-grid-size-* message), e.g. "1 MB".
+hv-vv-copied-cut = Copied the first { $shown } of the value: the rest wasn't fetched.

@@ -942,9 +942,9 @@ fn every_purpose_formats_alike_in_m3a() {
     let col = Col::of(&v);
     let s = settings("tr-TR");
     let cell = format_cell(v.view(), &col.facts(), &s, Purpose::Cell);
-    for p in [Purpose::Tooltip, Purpose::A11y] {
-        assert_eq!(format_cell(v.view(), &col.facts(), &s, p), cell);
-    }
+    // ## m3c-t38 (named exception): `Purpose::Tooltip` is the raw value under a fraction cap now
+    // (`valfmt_tooltip.rs`); the screen-reader text is still the cell's until Task 40.
+    assert_eq!(format_cell(v.view(), &col.facts(), &s, Purpose::A11y), cell);
 }
 
 // ---- hostile payloads ------------------------------------------------------------------

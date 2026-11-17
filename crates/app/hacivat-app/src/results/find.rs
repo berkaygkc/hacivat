@@ -933,7 +933,14 @@ pub(crate) fn sync(
 
 /// The bar's toolbar for console `console` over its active result: the bar in place of the left
 /// group, `rows` (rows · timing) on the right, the first to give way. `None` while closed.
-pub(crate) fn toolbar(console: ConsoleId, rows: SharedString, cx: &App) -> Option<AnyElement> {
+// ## m3c-t38 (named exception): `trailing` (the view switch and the record toggle) follows
+// rows · timing in the right group, which stays while the bar is open (NOTES surface 19).
+pub(crate) fn toolbar(
+    console: ConsoleId,
+    rows: SharedString,
+    trailing: Vec<ToolbarItem>,
+    cx: &App,
+) -> Option<AnyElement> {
     let bar = bar(console, cx).filter(|b| b.read(cx).open)?;
     let label: TextFn = {
         let rows = rows.clone();
@@ -959,10 +966,13 @@ pub(crate) fn toolbar(console: ConsoleId, rows: SharedString, cx: &App) -> Optio
         }),
         label,
     );
+    let bar = Toolbar::new("results-toolbar")
+        .item(item)
+        .trailing(rows_item);
     Some(
-        Toolbar::new("results-toolbar")
-            .item(item)
-            .trailing(rows_item)
+        trailing
+            .into_iter()
+            .fold(bar, |bar, item| bar.trailing(item))
             .into_any_element(),
     )
 }
