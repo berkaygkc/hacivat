@@ -2794,3 +2794,60 @@ hv-grid-sort-level = Sort level { $lvl }, { $dir }.
 # Fix round 1: the notice when a local sort stops on an internal error; the grid keeps the
 # order it showed.
 hv-grid-sort-failed = The sort stopped on an internal error. The grid keeps the order it showed.
+
+## m3b-t33-find
+
+# The editor find bar's query field: placeholder and accessible name, also the bar's (role=search) name (NOTES surface 16).
+hv-find-placeholder = Find
+# The find field's toggle: match upper and lower case exactly (tooltip and accessible name).
+hv-find-match-case = Match case
+# The find field's toggle: match whole words only (SQL word boundaries).
+hv-find-words = Whole words
+# The find field's toggle: the query is a regular expression.
+hv-find-regex = Regular expression
+# The find field's toggle: Turkish-tolerant matching (D-074).
+hv-find-tolerant = Turkish-tolerant
+# The Turkish-tolerant toggle's tooltip and accessible description.
+hv-find-tolerant-tip = Turkish-tolerant: İ, I, ı and i find each other, and accents are ignored.
+# The find count: the current match and the total.
+# Variables:
+#   $i (Number) - the current match, 1-based, e.g. 3.
+#   $n (Number) - the matches, e.g. 41.
+hv-find-count = { $i } of { $n }
+# The find count while counting goes on (the static amber marker beside it).
+# Variables:
+#   $i (Number) - the current match, 1-based, e.g. 3.
+#   $n (Number) - the matches counted so far, e.g. 1,240.
+hv-find-count-more = { $i } of { $n }+
+# The tooltip of a count still running.
+hv-find-counting-tip = Still counting; the number grows as the rest of the document is searched.
+# The find count when nothing matches.
+hv-find-none = No matches
+# The find count when the regular expression cannot be read (ink glyph, never red; NOTES M3c-11).
+hv-find-invalid = Invalid pattern
+# The tooltip of an invalid pattern, with the regular expression engine's message.
+# Variables:
+#   $error (String) - the engine's message (English, data), e.g. unclosed group.
+hv-find-invalid-tip = The regular expression can't be read, so nothing is searched: { $error }
+# The find bar's previous-match button (tooltip and accessible name).
+hv-find-prev = Previous match
+# The find bar's next-match button (tooltip and accessible name).
+hv-find-next = Next match
+# Said in the status bar and politely to assistive technology when Select all occurrences stops at its cap.
+# Variables:
+#   $max (Number) - the occurrences selected, e.g. 10,000.
+#   $n (Number) - every occurrence, e.g. 41,208.
+hv-find-capped = Selected the first { $max } of { $n } matches
+# The find count when the caret is not on a match (the total only).
+# Variables:
+#   $n (Number) - the matches, e.g. 41.
+hv-find-total = { $n ->
+        [one] { $n } match
+       *[other] { $n } matches
+    }
+# The find count when the caret is not on a match, while counting goes on.
+# Variables:
+#   $n (Number) - the matches counted so far, e.g. 1,240.
+hv-find-total-more = { $n }+ matches
+# Said politely when Select next occurrence finds nothing more (every occurrence is selected).
+hv-find-no-more = No further occurrence

@@ -9,8 +9,8 @@ use unic_langid::LanguageIdentifier;
 
 use crate::fsio;
 use crate::schema::{
-    CaretBlinkPref, EditorSettings, KeymapPreset, LanguagePref, SETTINGS_VERSION, Settings,
-    TabSize, TextRenderingPref, ThemePref, TimeZonePref,
+    CaretBlinkPref, EditorSettings, FindTolerancePref, KeymapPreset, LanguagePref,
+    SETTINGS_VERSION, Settings, TabSize, TextRenderingPref, ThemePref, TimeZonePref,
 };
 // ## m3b-t01c-core-seams
 use crate::schema::{ExecSettings, HistorySettings, ValueLimit};
@@ -87,6 +87,14 @@ pub fn load(path: &Path) -> LoadOutcome {
             d,
         );
         s.editor.caret_blink = read_key_or(ed, "editor", "caret_blink", def.caret_blink, d);
+        // ## m3c-t33-find
+        s.editor.find_turkish_tolerant = read_key_or(
+            ed,
+            "editor",
+            "find_turkish_tolerant",
+            def.find_turkish_tolerant,
+            d,
+        );
     }
     // ## m3b-t01c-core-seams (P-M3b-9): a missing table means its defaults.
     if let Some(ex) = section(root, "exec", d) {
@@ -182,6 +190,14 @@ pub fn save_changes(path: &Path, new: &Settings) -> io::Result<()> {
         "caret_blink",
         &ed.caret_blink,
         &def.caret_blink,
+    );
+    // ## m3c-t33-find
+    write_key_or(
+        &mut doc,
+        "editor",
+        "find_turkish_tolerant",
+        &ed.find_turkish_tolerant,
+        &def.find_turkish_tolerant,
     );
     // ## m3b-t01c-core-seams (P-M3b-9): each key written only when it changed; a key at its
     // default is never added.
@@ -478,6 +494,27 @@ impl Pref for CaretBlinkPref {
     }
 }
 
+// ## m3c-t33-find
+/// `editor.find_turkish_tolerant`: `"auto"`, `"on"` or `"off"`.
+impl Pref for FindTolerancePref {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "auto" => Some(Self::Auto),
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+    fn as_text(&self) -> String {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+        .to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,6 +752,30 @@ mod tests {
         );
         assert!(!t.contains("copy_line_without_selection"), "{t}");
         assert_eq!(load(&p).settings.editor, s.editor);
+    }
+
+    // ## m3c-t33-find
+    #[test]
+    fn find_tolerance_round_trips_and_auto_writes_nothing() {
+        let p = write_tmp("[editor]\nfind_turkish_tolerant = \"sometimes\"\n");
+        let o = load(&p);
+        assert_eq!(
+            o.settings.editor.find_turkish_tolerant,
+            FindTolerancePref::Auto
+        );
+        assert_eq!(o.diags.len(), 1, "{:?}", o.diags);
+        let p = write_tmp("[ui]\ntheme = \"light\"\n");
+        let mut s = load(&p).settings;
+        save_changes(&p, &s).unwrap();
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("find_"));
+        s.editor.find_turkish_tolerant = FindTolerancePref::Off;
+        save_changes(&p, &s).unwrap();
+        let t = std::fs::read_to_string(&p).unwrap();
+        assert!(t.contains("find_turkish_tolerant = \"off\""), "{t}");
+        assert_eq!(
+            load(&p).settings.editor.find_turkish_tolerant,
+            FindTolerancePref::Off
+        );
     }
 
     // ## m3b-t01c-core-seams (P-M3b-9)

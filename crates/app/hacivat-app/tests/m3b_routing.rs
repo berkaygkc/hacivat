@@ -172,8 +172,9 @@ const BOUND: &[(&str, &str, Option<&str>, Option<&str>)] = &[
         Some("cmd-shift-h"),
         Some("ctrl-shift-h"),
     ),
-    // Palette-only. `editor.find` stays unbound until Task 33 binds `cmd-f`/`ctrl-f` (ruling R5).
-    ("editor.find", "Editor", None, None),
+    // ## m3c-t33-find (named exception): Task 33 binds `editor.find` (ruling R5).
+    ("editor.find", "Editor", Some("cmd-f"), Some("ctrl-f")),
+    // Palette-only.
     // `grid.find` likewise until Task 37 (ruling R5).
     ("grid.find", "Grid", None, None),
     ("editor.split_selection_into_lines", "Editor", None, None),
@@ -564,9 +565,11 @@ fn results_context_is_active_on_the_results_root(cx: &mut TestAppContext) {
 
 /// Controller ruling R5: until Task 33 binds `editor.find`, ⌘F / Ctrl+F with the editor focused
 /// still reaches `explorer.focus_filter` (the Workspace binding), which shows the explorer.
+/// ## m3c-t33-find (named exception): Task 33 bound it: with the editor focused the chord opens
+/// the find bar and leaves the explorer as it was (the shadowing PO Q10 records).
 #[cfg(unix)]
 #[gpui::test]
-fn primary_f_in_the_editor_still_reaches_the_explorer_filter(cx: &mut TestAppContext) {
+fn primary_f_in_the_editor_opens_find_not_the_explorer_filter(cx: &mut TestAppContext) {
     let vcx = shell_with_connections(cx, "en");
     in_window(vcx, |window, _| window.activate_window());
     let p = test_profile("orders-dev", None, "10.0.0.5");
@@ -602,8 +605,13 @@ fn primary_f_in_the_editor_still_reaches_the_explorer_filter(cx: &mut TestAppCon
     vcx.simulate_keystrokes(key);
     vcx.run_until_parked();
     assert!(
-        layout(vcx).1.explorer_visible,
-        "{key} did not reach the explorer filter"
+        !layout(vcx).1.explorer_visible,
+        "{key} reached the explorer filter"
+    );
+    assert!(
+        vcx.cx
+            .read(|cx| hacivat_app::console::find_bar::is_open(id, cx)),
+        "{key} opened the find bar"
     );
 }
 
@@ -636,12 +644,13 @@ fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
         .collect();
     // ## m3c-t31-multi (named exception): Task 31's seven editor rows are commands now.
     // ## m3c-t32-fold (named exception): and Task 32's four folding rows.
-    assert_eq!(stubs.len(), 12);
+    // ## m3c-t33-find (named exception): and Task 33's four find rows.
+    assert_eq!(stubs.len(), 8);
     stubs.extend(hacivat_ui_grid::commands::STUB_COMMANDS);
     // ## m3c-t35 (named exception): Task 35 filled five grid commands (grow/shrink, auto-fit,
     // freeze/unfreeze); four grid stubs remain.
-    // ## m3c-t35 merge: 12 editor stubs (after T31, T32) + 4 grid stubs.
-    assert_eq!(stubs.len(), 16);
+    // ## m3c-t33 merge: 8 editor stubs (after T31, T32, T33) + 4 grid stubs.
+    assert_eq!(stubs.len(), 12);
     // The app-registered stubs (disabled since Task 1b).
     // ## m3b-t27-history (named exception): `history.open` is no longer a stub; it is enabled
     // once the history store is open (`history_ui.rs` covers it).
@@ -682,6 +691,8 @@ fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
 /// Ruling R5 at the keymap level: with the editor or a grid focused, the primary-F chord resolves
 /// to `explorer.focus_filter` until Tasks 33 and 37 bind their find commands (the app test above
 /// covers the editor end to end; the grid's key context reaches the stack with m3a's F5).
+/// ## m3c-t33-find (named exception): in the editor it is `editor.find` now; the grid keeps the
+/// explorer filter until Task 37; the Workspace alone keeps it everywhere.
 #[test]
 fn primary_f_resolves_to_the_explorer_filter_in_the_editor_and_the_grid() {
     for (platform, chord) in [
@@ -691,11 +702,15 @@ fn primary_f_resolves_to_the_explorer_filter_in_the_editor_and_the_grid() {
     ] {
         let km = load(platform, "hacivat", None).0;
         let press = normalize(&gpui::Keystroke::parse(chord).unwrap()).unwrap();
-        for inner in ["Editor", "Grid"] {
+        for (inner, want) in [
+            ("Editor", "editor.find"),
+            ("Grid", "explorer.focus_filter"),
+            ("Console", "explorer.focus_filter"),
+        ] {
             let stack = ContextStack(vec!["Workspace", "Console", inner]);
             let got = km.resolve(&stack, &[], &press, &KeyboardLayoutId("us".into()), false);
             assert!(
-                matches!(&got, Resolution::Command(c) if c == "explorer.focus_filter"),
+                matches!(&got, Resolution::Command(c) if c == want),
                 "{platform:?} {inner}: {got:?}"
             );
         }

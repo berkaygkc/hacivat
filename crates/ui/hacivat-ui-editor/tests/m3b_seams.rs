@@ -97,11 +97,17 @@ fn m3b_editor_commands_are_in_the_table() {
         let c = commands().iter().find(|c| c.id == id).unwrap();
         assert!(!c.stub && !c.seals_history, "{id}");
     }
+    // ## m3c-t33-find (named exception): Task 33's rows are commands (tests `find`).
     for id in [
         "editor.find",
         "editor.find_next",
         "editor.find_prev",
         "editor.find_close",
+    ] {
+        let c = commands().iter().find(|c| c.id == id).unwrap();
+        assert!(!c.stub && !c.seals_history, "{id}");
+    }
+    for id in [
         "editor.toggle_comment",
         "editor.duplicate_line",
         "editor.delete_line",
@@ -120,7 +126,8 @@ fn m3b_editor_commands_are_in_the_table() {
         // Fix round 2 (I3): it is a stub, so the app keeps it disabled.
         assert!(c.stub, "{id}");
     }
-    assert_eq!(commands().iter().filter(|c| c.stub).count(), 12);
+    // ## m3c-t33-find (named exception): 12 less Task 33's four.
+    assert_eq!(commands().iter().filter(|c| c.stub).count(), 8);
     // M3a's commands are not stubs.
     for c in commands().iter().take(45) {
         assert!(!c.stub, "{}", c.id);
@@ -162,7 +169,7 @@ fn editor<'a>(
     (editor, vcx)
 }
 
-/// A matcher that finds `SELECT`, to prove the stubs ignore it.
+/// A matcher that finds `SELECT` (the find seams; ## m3c-t33-find: no longer stubs).
 struct Select;
 
 impl FindMatcher for Select {
@@ -181,15 +188,14 @@ impl FindMatcher for Select {
 fn view_seams_change_nothing(cx: &mut TestAppContext) {
     let (e, vcx) = editor(cx, "SELECT 1;\nSELECT 2;");
     let before = vcx.read(|cx| e.read(cx).snapshot());
-    let (step, all, folded) = e.update(vcx, |v, cx| {
-        v.set_find(Some(Rc::new(Select)), cx);
-        (
-            v.find_step(false, cx),
-            v.select_all_matches(10, cx),
-            v.toggle_fold_at(0, cx),
-        )
+    // ## m3c-t33-find (named exception): find is filled (tests `find`); only the fold seam
+    // is checked here, and a cleared query leaves the status at its default.
+    let folded = e.update(vcx, |v, cx| {
+        v.set_find(Some(std::sync::Arc::new(Select)), cx);
+        v.set_find(None, cx);
+        v.toggle_fold_at(0, cx)
     });
-    assert_eq!((step, all, folded), (None, 0, false));
+    assert!(!folded);
     assert_eq!(
         vcx.read(|cx| e.read(cx).find_status()),
         FindStatus::default()
@@ -197,9 +203,9 @@ fn view_seams_change_nothing(cx: &mut TestAppContext) {
     assert!(vcx.read(|cx| e.read(cx).folds().folded().is_empty()));
     // Every M3b command runs as a no-op: the text, the selection and the version stay.
     // ## m3c-t31-multi (named exception): Task 31's commands are filled (tests `multi_view`).
+    // ## m3c-t33-find (named exception): `editor.find` emits `FindRequested` (tests `find`).
     for id in [
         "editor.fold_all",
-        "editor.find",
         "editor.toggle_comment",
         "editor.duplicate_line",
         "editor.delete_line",
