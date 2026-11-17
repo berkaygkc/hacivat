@@ -792,7 +792,10 @@ placeholder and every one binds. Every refusal carries a diagnostic:
 - `Unbindable`: a variant this task added, for a marker the server may read as a parameter
   that Hacivat cannot bind:
   - `?` or `:name` inside a MySQL/MariaDB executable comment;
-  - `?` under `CALL`/`EXEC`/`EXECUTE` (ODBC escape semantics);
+  - `?` under `CALL`/`EXEC`/`EXECUTE` (ODBC escape semantics). Outside PostgreSQL a name
+    there is refused too, because the rewrite would send it as that same `?`, and the
+    rewritten text would then refuse itself on a rescan (nightly fuzz `params_rewrite`,
+    m3b-fuzz controller fix). PostgreSQL names become `$k` and still bind;
   - psql `:"name"`, which substitutes an identifier: binding it would turn `WHERE :"col" = 1`
     into `WHERE $1 = 1`;
   - psql `:{?name}`;

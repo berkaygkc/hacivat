@@ -99,6 +99,7 @@ pub struct ParamScan {
 
 // ## m3b-t06-params
 
+// ## m3b-fuzz (controller fix): the doc below adds names sent as `?` under `CALL`/`EXEC`.
 /// The placeholders, templates and rewrite of `unit` (one statement) in `ctx`.
 ///
 /// Fail closed. Only code is read: a marker inside a string, quoted identifier, comment, dollar
@@ -107,8 +108,9 @@ pub struct ParamScan {
 /// holding any token the lexer could not read cleanly (an unknown character such as `\`, an
 /// error or junk, an unterminated string or comment) binds nothing: its placeholders are
 /// refused with [`ParamDiag::Unbindable`] at that token. So is a marker the server may read as
-/// a parameter but Hacivat cannot bind (inside an executable comment, `?` under `CALL`/`EXEC`,
-/// psql `:"name"`/`:{?name}`, `$0`, `$01` and other leading zeros, a malformed `$n`, any marker
+/// a parameter but Hacivat cannot bind (inside an executable comment, `?` under `CALL`/`EXEC`
+/// or, outside PostgreSQL, a name there that the rewrite would turn into `?`, psql
+/// `:"name"`/`:{?name}`, `$0`, `$01` and other leading zeros, a malformed `$n`, any marker
 /// in a dialect without a lexer profile, any placeholder of a `COPY`, a `PREPARE` or a unit of
 /// several statements (a `;` inside an executable comment counts), a placeholder whose
 /// replacement would merge with a neighbouring identifier byte, a PostgreSQL `?` whose reading
@@ -276,7 +278,9 @@ struct Scanner<'a> {
     lexed: &'a Lexed,
     pg: bool,
     ddl: bool,
-    /// `CALL`/`EXEC`/`EXECUTE`: `?` keeps ODBC escape semantics and never binds.
+    // ## m3b-fuzz (controller fix): names sent as `?` too.
+    /// `CALL`/`EXEC`/`EXECUTE`: `?` keeps ODBC escape semantics and never binds, nor does a
+    /// name the rewrite turns into `?` (every dialect but PostgreSQL).
     call: bool,
     /// `COPY`, `PREPARE`, a unit of several statements (a `;` inside an executable comment
     /// included) take no bind values.
@@ -400,7 +404,11 @@ impl<'a> Scanner<'a> {
         style: Style,
         reason: Option<ParamDiag>,
     ) {
-        let reason = if self.call && style == Style::Question {
+        // ## m3b-fuzz (controller fix): outside PostgreSQL a name is rewritten to `?`, so under
+        // `CALL`/`EXEC` the driver would receive the very `?` this rule refuses when written:
+        // refused alike, so a rewrite stays final (scanning its text again binds it unchanged).
+        let sent_as_question = style == Style::Question || (style == Style::Named && !self.pg);
+        let reason = if self.call && sent_as_question {
             reason.or(Some(ParamDiag::Unbindable))
         } else {
             reason
