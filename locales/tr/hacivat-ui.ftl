@@ -2665,3 +2665,67 @@ hv-vv-copied-cut = Değerin ilk { $shown } kısmı kopyalandı: gerisi getirilme
 hv-vv-rerun-not-read = Daha büyük bir değer sınırıyla yalnızca veri okuyan sorgular yeniden çalıştırılır. Bu ifadeyi düzenleyiciden yeniden çalıştırın.
 # Review: PO
 hv-vv-rerun-busy = Bu konsolda bir ifade çalışıyor. Bittiğinde yeniden çalıştırın.
+
+## m3b-t42-settings
+
+# Review: PO
+hv-settings-nav-editor = Düzenleyici
+# Review: PO
+hv-settings-nav-execution = Çalıştırma
+# Review: PO
+hv-settings-nav-results = Sonuçlar
+# Review: PO
+hv-settings-nav-history = Geçmiş
+# Review: PO
+hv-settings-section-editor = DÜZENLEYİCİ
+# Review: PO
+hv-settings-section-execution = ÇALIŞTIRMA
+# Review: PO
+hv-settings-section-results = SONUÇLAR
+# Review: PO
+hv-settings-section-history = GEÇMİŞ
+# Review: PO
+hv-settings-on = Açık
+# Review: PO
+hv-settings-off = Kapalı
+# Review: PO
+hv-settings-auto = Otomatik
+# Review: PO
+hv-settings-tab-size = Sekme genişliği
+# Review: PO
+hv-settings-insert-spaces = Boşlukla girintile
+# Review: PO
+hv-settings-copy-line = Seçim yokken satırı kopyala
+# Review: PO
+hv-settings-caret-blink = Yanıp sönen imleç
+# Review: PO
+hv-settings-find-tolerant = Türkçe esnek arama
+# Review: PO
+hv-settings-find-tolerant-note = Otomatik: dil ya da bölge biçimi Türkçe olduğunda açık. Bul çubuğundaki düğme de bu ayarı değiştirir.
+# Review: PO
+hv-settings-confirm-unsafe-where = Üretim dışında WHERE içermeyen UPDATE ya da DELETE için onay iste
+# Review: PO
+hv-settings-confirm-unsafe-where-note = Üretim her zaman sorar ve tablonun adını yazdırır.
+# Review: PO
+hv-settings-error-policy = Bir ifade başarısız olunca ne yapılacağını sor
+# Review: PO
+hv-settings-error-policy-note = Kapalı: birden çok ifadelik çalıştırma ilk hatada durur.
+# Review: PO
+hv-settings-max-value = Hücre başına saklanan en büyük değer
+# Review: PO
+hv-settings-max-value-note = 64 KB ile 64 MB arası. Daha büyük değerler kesilir; değer görüntüleyici en büyük sınırla yeniden çalıştırabilir.
+hv-settings-max-value-amount = { $n }
+# Review: PO
+hv-settings-max-value-clamped = { $typed } izin verilen en büyük değerin üstünde; { $max } yapıldı.
+# Review: PO
+hv-settings-max-value-clamped-low = { $typed } izin verilen en küçük değerin altında; { $min } yapıldı.
+hv-settings-unit-kb = KB
+hv-settings-unit-mb = MB
+# Review: PO
+hv-settings-raw-display = Tablo değerlerini ham göster
+# Review: PO
+hv-settings-raw-display-note = Sayılar ve tarihler bölgesel biçim olmadan, sunucunun gönderdiği gibi. Kopyalama her zaman hamdır.
+# Review: PO
+hv-settings-history = Sorgu geçmişini kaydet
+# Review: PO
+hv-settings-history-note = Bağlantı başına en çok 10.000 ifade 90 gün saklanır; tanınan parolalar ve gizli bilgiler maskelenir.

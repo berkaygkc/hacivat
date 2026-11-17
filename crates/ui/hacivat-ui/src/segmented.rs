@@ -6,6 +6,11 @@
 //! Keyboard (M2a, roving tab stop): the group is one tab stop, the pressed segment (the first when
 //! none is); ← and → move the focus to the neighbouring segment and press it, wrapping at the
 //! ends. Enter and Space press the focused segment.
+//!
+//! ## m3c-t42 (named exception, T42 review I1): a group built with
+//! [`Segmented::arrows_move_focus_only`] moves only the focus on ← and →; Enter, Space and a
+//! click press. Settings rows that turn a safety guard off use it, so a stray arrow key never
+//! flips one. Every other group keeps the roving press.
 
 use std::rc::Rc;
 
@@ -53,6 +58,8 @@ pub struct Segmented {
     mono: bool,
     inert: bool,
     in_well: bool,
+    // ## m3c-t42
+    arrows_focus_only: bool,
 }
 
 impl Segmented {
@@ -63,6 +70,8 @@ impl Segmented {
             mono: false,
             inert: false,
             in_well: false,
+            // ## m3c-t42
+            arrows_focus_only: false,
         }
     }
 
@@ -89,6 +98,14 @@ impl Segmented {
     /// `ground` in light) and the pressed label is weight 600.
     pub fn in_well(mut self, in_well: bool) -> Self {
         self.in_well = in_well;
+        self
+    }
+
+    // ## m3c-t42 (named exception, T42 review I1)
+    /// ← and → move the focus without pressing (Enter, Space and a click press): for a group
+    /// whose choice must never change by a stray key (a safety guard's On / Off).
+    pub fn arrows_move_focus_only(mut self, only: bool) -> Self {
+        self.arrows_focus_only = only;
         self
     }
 }
@@ -151,6 +168,8 @@ impl IntoElement for Segmented {
             );
             let clicks: Rc<Vec<ClickHandler>> =
                 Rc::new(self.items.iter().map(|i| i.on_click.clone()).collect());
+            // ## m3c-t42
+            let arrows_press = !self.arrows_focus_only;
             for ((i, item), (id, (hover, handle))) in self
                 .items
                 .into_iter()
@@ -275,7 +294,10 @@ impl IntoElement for Segmented {
                         };
                         cx.stop_propagation();
                         window.focus(&handles[next], cx);
-                        clicks[next](&ClickEvent::default(), window, cx);
+                        // ## m3c-t42
+                        if arrows_press {
+                            clicks[next](&ClickEvent::default(), window, cx);
+                        }
                     })
                     .tooltip(move |_, cx| Tip::view(tooltip.clone(), cx));
                 group = group.child(segment);
