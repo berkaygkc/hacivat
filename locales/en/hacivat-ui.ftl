@@ -3284,3 +3284,9 @@ hv-gmenu-why-ranges = Ranges don't line up
 hv-gmenu-why-last = Last shown column
 # The menu's name for screen readers.
 hv-gmenu-label = Grid menu
+
+## m3c-po
+
+# The command (palette; macOS ⌘E) that makes the selection the find query without opening the
+# find bar (PO M3c-08; macOS "Use Selection for Find").
+hv-cmd-editor-use-selection-for-find = Use selection for find

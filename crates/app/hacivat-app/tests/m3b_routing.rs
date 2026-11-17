@@ -183,11 +183,31 @@ const BOUND: &[(&str, &str, Option<&str>, Option<&str>)] = &[
         Some("ctrl-cmd-g"),
         Some("ctrl-shift-l"),
     ),
+    // ## m3c-po (named exception; PO M3c-09, M3c-08): fold and unfold take VS Code's chords
+    // (remappable); "Use selection for find" is macOS's ⌘E (no standard Windows/Linux chord).
+    (
+        "editor.fold",
+        "Editor",
+        Some("alt-cmd-["),
+        Some("ctrl-shift-["),
+    ),
+    (
+        "editor.unfold",
+        "Editor",
+        Some("alt-cmd-]"),
+        Some("ctrl-shift-]"),
+    ),
+    (
+        "editor.use_selection_for_find",
+        "Editor",
+        Some("cmd-e"),
+        None,
+    ),
     // Palette-only.
     ("editor.split_selection_into_lines", "Editor", None, None),
     ("editor.redo_selection", "Editor", None, None),
-    ("editor.fold", "Editor", None, None),
-    ("editor.unfold", "Editor", None, None),
+    // ## m3c-po: fold all / unfold all stay palette-only: VS Code's ⌘K ⌘0 / ⌘K ⌘J (Ctrl+K …)
+    // start with the default preset's command palette chord.
     ("editor.fold_all", "Editor", None, None),
     ("editor.unfold_all", "Editor", None, None),
     ("editor.find_close", "Editor", None, None),
@@ -249,6 +269,20 @@ const DATAGRIP: &[(&str, &str, KeymapPlatform, &str)] = &[
         "Grid",
         KeymapPlatform::Linux,
         "ctrl-shift-w",
+    ),
+    // ## m3c-po (named exception; PO M3c-10): the grid's Select all occurrences is DataGrip's
+    // own chord, as the editor's is.
+    (
+        "grid.select_all_occurrences",
+        "Grid",
+        KeymapPlatform::Windows,
+        "ctrl-alt-shift-j",
+    ),
+    (
+        "grid.select_all_occurrences",
+        "Grid",
+        KeymapPlatform::Linux,
+        "ctrl-alt-shift-j",
     ),
 ];
 
@@ -872,4 +906,79 @@ fn the_tab_grid_commands_are_enabled_but_not_in_the_palette(cx: &mut TestAppCont
         listed.contains(&"grid.move_down"),
         "the other grid commands stay"
     );
+}
+
+// ## m3c-po (PO M3c-08, M3c-09, M3c-10)
+/// The chords the PO items add collide with nothing in any preset on any platform: no other
+/// command on the same chord, or on a chord that starts with it (or that it starts with), in a
+/// context that is on the stack with theirs.
+#[test]
+fn m3c_po_chords_collide_with_nothing_in_any_preset() {
+    const EDITOR_STACK: &[&str] = &["Workspace", "Console", "Editor"];
+    const ADDED: [(&str, &[&str]); 4] = [
+        ("editor.fold", EDITOR_STACK),
+        ("editor.unfold", EDITOR_STACK),
+        ("editor.use_selection_for_find", EDITOR_STACK),
+        (
+            "grid.select_all_occurrences",
+            &["Workspace", "Console", "Results", "Grid"],
+        ),
+    ];
+    let mut checked = 0;
+    for preset in hacivat_ui::keymaps::PRESETS {
+        for platform in [
+            KeymapPlatform::MacOs,
+            KeymapPlatform::Windows,
+            KeymapPlatform::Linux,
+        ] {
+            let km = load(platform, preset, None).0;
+            for (id, stack) in ADDED {
+                for b in km.bindings().iter().filter(|b| b.command == id) {
+                    checked += 1;
+                    let clash: Vec<String> = km
+                        .bindings()
+                        .iter()
+                        .filter(|o| o.command != id && stack.contains(&o.context.as_str()))
+                        .filter(|o| o.when_layout.is_none() || o.when_layout == b.when_layout)
+                        .filter(|o| o.chord.starts_with(&b.chord) || b.chord.starts_with(&o.chord))
+                        .map(|o| {
+                            format!("{} {} ({})", chord_string(&o.chord), o.command, o.context)
+                        })
+                        .collect();
+                    assert!(
+                        clash.is_empty(),
+                        "{preset} {platform:?}: {} {id} clashes with {clash:?}",
+                        chord_string(&b.chord)
+                    );
+                }
+            }
+        }
+    }
+    // fold + unfold ×6, ⌘E ×2 (macOS), grid Select all ×6.
+    assert_eq!(checked, 20);
+}
+
+/// PO M3c-10: under the datagrip preset the editor's and the grid's Select all occurrences
+/// share one chord on every platform (DataGrip's ⌃⌘G on macOS, Ctrl+Alt+Shift+J elsewhere).
+#[test]
+fn datagrip_select_all_occurrences_is_one_chord_in_editor_and_grid() {
+    for platform in [
+        KeymapPlatform::MacOs,
+        KeymapPlatform::Windows,
+        KeymapPlatform::Linux,
+    ] {
+        let editor = chords(
+            platform,
+            "datagrip",
+            "editor.select_all_occurrences",
+            "Editor",
+        );
+        let grid = chords(platform, "datagrip", "grid.select_all_occurrences", "Grid");
+        assert_eq!(editor, grid, "{platform:?}");
+        let want = match platform {
+            KeymapPlatform::MacOs => "ctrl-cmd-g",
+            _ => "ctrl-alt-shift-j",
+        };
+        assert_eq!(grid, vec![canonical(platform, want)], "{platform:?}");
+    }
 }

@@ -792,3 +792,84 @@ fn typing_in_the_field_over_20_mb(cx: &mut TestAppContext) {
     println!("find perf: keystroke on the UI thread over 20 MB {took:?}, worst {worst:?}");
     assert!(worst.as_millis() < 16, "{worst:?}");
 }
+
+// ## m3c-po (PO M3c-08)
+/// macOS ⌘E "Use Selection for Find": the selection becomes the bar's query and goes to the find
+/// pasteboard (injected here; tests never touch the system's), while the bar stays closed and
+/// the editor keeps the focus and its selection. The next find step opens the bar on that
+/// query. Off macOS (no standard chord) the palette command does the same. With Regular
+/// expression on, the query is the escaped text; the pasteboard gets the text itself.
+#[gpui::test]
+fn use_selection_for_find_seeds_the_closed_bar(cx: &mut TestAppContext) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let text = "SELECT f(a) FROM t;\nSELECT f(a), t FROM t;\n";
+    let (vcx, id, editor) = console_with(cx, "en", text, 0);
+    let written: Rc<RefCell<Vec<String>>> = Rc::default();
+    let sink = written.clone();
+    vcx.cx.update(|cx| {
+        find_bar::install_find_pasteboard(
+            cx,
+            Rc::new(|_| None),
+            Rc::new(move |q: &str, _| sink.borrow_mut().push(q.to_string())),
+        );
+    });
+    let use_selection = |vcx: &mut VisualTestContext| {
+        if cfg!(target_os = "macos") {
+            vcx.simulate_keystrokes("cmd-e");
+        } else {
+            in_window(vcx, |window, cx| {
+                editor.update(cx, |v, cx| {
+                    v.run_command("editor.use_selection_for_find", window, cx)
+                });
+            });
+        }
+        vcx.run_until_parked();
+    };
+    in_window(vcx, |_, cx| {
+        editor.update(cx, |v, cx| v.select_range(17..18, cx))
+    });
+    use_selection(vcx);
+    assert!(!is_open(vcx, id), "the bar stays closed");
+    assert_eq!(
+        vcx.cx.read(|cx| find_bar::query(id, cx)).as_deref(),
+        Some("t")
+    );
+    assert_eq!(*written.borrow(), ["t"]);
+    assert!(editor_has_focus(vcx, &editor));
+    assert_eq!(main_range(vcx, &editor), 17..18);
+    // A caret seeds nothing.
+    in_window(vcx, |_, cx| {
+        editor.update(cx, |v, cx| v.select_range(3..3, cx))
+    });
+    use_selection(vcx);
+    assert_eq!(
+        vcx.cx.read(|cx| find_bar::query(id, cx)).as_deref(),
+        Some("t")
+    );
+    assert_eq!(written.borrow().len(), 1);
+    // The next find step opens the bar on the seeded query.
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |v, cx| v.run_command("editor.find_next", window, cx));
+    });
+    vcx.run_until_parked();
+    assert!(is_open(vcx, id));
+    assert_eq!(
+        vcx.cx.read(|cx| find_bar::query(id, cx)).as_deref(),
+        Some("t")
+    );
+    // Regular expression on (the bar is open): the query is escaped and the editor finds it.
+    in_window(vcx, |window, cx| find_bar::flip_toggle(id, 2, window, cx));
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |v, cx| v.select_range(7..11, cx));
+        let handle = editor.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+    });
+    use_selection(vcx);
+    assert_eq!(
+        vcx.cx.read(|cx| find_bar::query(id, cx)).as_deref(),
+        Some(r"f\(a\)")
+    );
+    assert!(vcx.cx.read(|cx| find_bar::error(id, cx)).is_none());
+    assert_eq!(written.borrow().last().map(String::as_str), Some("f(a)"));
+}

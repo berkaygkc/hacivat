@@ -477,13 +477,27 @@ pub(crate) fn prepaint(
     let hover_inlay = v.fold.hover_inlay;
     // ## m3c-t34-editor (named exception): gutter focus (NOTES 15 and 17, controller ruling 3).
     // A focused gutter button shows the open chevrons as the pointer does; in "Tab moves focus"
-    // mode every chevron of the painted rows is a tab stop (hidden until shown) and an
-    // AccessKit button, Enter or Space toggling it.
+    // mode every chevron of the painted rows is focusable (hidden until shown) and an
+    // AccessKit button, Enter or Space toggling it (## m3c-po: the column is one tab stop).
     let tab = v.commands.tab_moves_focus;
     let show_open = hovered || crate::gutter::focused_button(v, window).is_some();
     let mut painted: Vec<crate::gutter::GutterButton> = Vec::new();
     let chevron_x = gutter.right() - px(NUMBER_PAD) + px(1.0);
     let mut widths: Vec<(u32, f32)> = Vec::new();
+    // ## m3c-po (named exception; PO M3c-04): the chevron column is one tab stop (roving,
+    // `gutter::column_stop`); ↑/↓ walk it, Escape goes back to the editor.
+    let fold_stop = if tab {
+        let lines: Vec<u32> = rows
+            .iter()
+            .filter(|(line, _, fold)| {
+                fold.is_some() || headers.binary_search_by_key(line, |h| h.0).is_ok()
+            })
+            .map(|(line, _, _)| *line)
+            .collect();
+        crate::gutter::column_stop(v, crate::gutter::GutterButton::Fold(0), &lines, window)
+    } else {
+        None
+    };
     for (line, top, fold) in rows {
         let open = headers
             .binary_search_by_key(&line, |h| h.0)
@@ -535,11 +549,13 @@ pub(crate) fn prepaint(
         }
         if tab {
             let button = crate::gutter::GutterButton::Fold(line);
-            let handle = crate::gutter::handle_of(v, button, cx);
+            // ## m3c-po (named exception; PO M3c-04)
+            let handle = crate::gutter::handle_of(v, button, cx).tab_stop(fold_stop == Some(line));
             if handle.is_focused(window) {
                 el = el.border_1().border_color(inks.blue);
             }
             el = el.track_focus(&handle);
+            el = crate::gutter::with_column_keys(el, view.clone(), button);
             painted.push(button);
         }
         let name = message(cx, tip_id, &line_args(line, last));

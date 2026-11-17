@@ -371,3 +371,21 @@ fn prepared_query_equals_find_in_every_mode() {
     assert_eq!(p.matches(&k), p.matches(&k));
     assert!(p.matches(&k).is_some());
 }
+
+// ## m3c-po (PO M3c-05)
+/// Turkish-tolerant is on when the UI language OR the region is Turkish: a Turkey region with
+/// another language (`en-TR`, `en_TR.UTF-8`, `de-Latn-TR`) turns it on even where the format
+/// locale was not mapped to `tr-TR`; a `tr` that is not the region (a private-use or extension
+/// subtag, a POSIX codeset) does not, nor does another region.
+#[test]
+fn a_turkish_region_with_another_language_is_tolerant() {
+    assert!(turkish_tolerant_for("en", "en-TR"));
+    assert!(turkish_tolerant_for("en-TR", "en-US"));
+    assert!(turkish_tolerant_for("en", "en_TR.UTF-8"));
+    assert!(turkish_tolerant_for("en", "de-Latn-TR"));
+    assert!(turkish_tolerant_for("en", "en-tr"));
+    assert!(!turkish_tolerant_for("en", "en-US"));
+    assert!(!turkish_tolerant_for("en-GB", "en-x-tr"));
+    assert!(!turkish_tolerant_for("en", "en-u-nu-tr"));
+    assert!(!turkish_tolerant_for("en", "en-US.TR"));
+}

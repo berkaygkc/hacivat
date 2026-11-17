@@ -623,3 +623,23 @@ context = "Grid"
 chord = "ctrl-shift-l"
 command = "grid.select_all_occurrences"
 context = "Grid"
+
+## m3c-po
+# PO decision on M3c-09 (2026-11-17; named exception to the append-only rule, Task 1b's rows
+# stay as they are). Fold and unfold take VS Code's chords (the PO's habit), remappable like
+# every row; Ctrl+Shift only, so no AltGr collision. Fold all and unfold all stay palette-only:
+# VS Code's `ctrl-k ctrl-0` and `ctrl-k ctrl-j` start with `ctrl-k`, the command palette's chord
+# here, which a two-key chord in the editor would hold back. "Use selection for find" (macOS
+# `cmd-e`) has no standard chord on Windows: palette only. `alt-shift-f` is VS Code's Format
+# Document, reserved for M5's reformat (no other row may take it). Collision check:
+# `tests/m3b_routing.rs` (`m3c_po_chords_collide_with_nothing_in_any_preset`).
+
+[[binding]]
+chord = "ctrl-shift-["
+command = "editor.fold"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-shift-]"
+command = "editor.unfold"
+context = "Editor"

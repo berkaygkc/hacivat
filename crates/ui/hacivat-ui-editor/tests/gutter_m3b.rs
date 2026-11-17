@@ -578,15 +578,21 @@ fn gutter_buttons_are_keyboard_reachable_buttons(cx: &mut TestAppContext) {
     assert!(in_editor(&mut o), "still in the editor while the ▶ is gone");
     o.gate.set(true);
     draw(o.vcx);
-    // On to the chevron (after the ▶ column); Space folds.
-    for _ in 0..3 {
+    // ## m3c-po (named exception; PO M3c-04): the ▶ column is one tab stop (the ▶ last
+    // focused), then the chevron column's; Space folds.
+    let mut stops = Vec::new();
+    for _ in 0..2 {
         o.vcx.update(|window, cx| window.focus_next(cx));
         draw(o.vcx);
+        stops.push(
+            o.vcx
+                .update(|window, cx| o.editor.read(cx).gutter_focus(window)),
+        );
     }
-    let focus = o
-        .vcx
-        .update(|window, cx| o.editor.read(cx).gutter_focus(window));
-    assert_eq!(focus, Some(GutterButton::Fold(0)));
+    assert_eq!(
+        stops,
+        [Some(GutterButton::Run(0)), Some(GutterButton::Fold(0))]
+    );
     press(&mut o, "space");
     o.vcx.run_until_parked();
     let folded = o.vcx.read(|cx| o.editor.read(cx).folds().folded().len());
@@ -639,4 +645,135 @@ fn a_selection_run_as_one_says_so_on_its_first_line(cx: &mut TestAppContext) {
         .read(|cx| hacivat_ui_editor::preview::current(o.editor.read(cx)))
         .expect("a band");
     assert_eq!((plan.units.len(), plan.as_one), (1, 2));
+}
+
+// ## m3c-po (PO M3c-04)
+/// In "Tab moves focus" mode the ▶ column is ONE tab stop and the chevron column another (a
+/// long script is not a long Tab walk): Tab enters a column on the button last focused there,
+/// else on the caret's statement; ↑/↓ move along the column (stopping at its ends) without
+/// touching the caret; Escape gives the focus back to the editor; the names stay "Run the
+/// statement at line N".
+#[gpui::test]
+fn each_gutter_column_is_one_tab_stop_walked_with_the_arrows(cx: &mut TestAppContext) {
+    let text = "SELECT a,\n  b\nFROM t;\nSELECT c,\n  d\nFROM u;\nSELECT 3;\n";
+    let first = 0..text.find(';').unwrap() + 1;
+    let second = text.find("SELECT c").unwrap()..text.find("FROM u;").unwrap() + 7;
+    let third = text.find("SELECT 3").unwrap()..text.len() - 1;
+    let mut o = open(
+        cx,
+        text,
+        Svc {
+            statements: vec![first.clone(), second.clone(), third],
+            folds: vec![
+                FoldRange {
+                    range: first,
+                    kind: FoldKind::Statement,
+                },
+                FoldRange {
+                    range: second,
+                    kind: FoldKind::Statement,
+                },
+            ],
+            ..Svc::default()
+        },
+    );
+    o.editor.update_in(o.vcx, |v, window, cx| {
+        v.run_command("editor.toggle_tab_moves_focus", window, cx);
+    });
+    // The caret in the second statement (line 4).
+    let caret = text.find("  d").unwrap() + 2;
+    o.editor
+        .update(o.vcx, |v, cx| v.select_range(caret..caret, cx));
+    a11y_record();
+    draw(o.vcx);
+    let names: Vec<String> = a11y_take()
+        .iter()
+        .filter(|d| d.role == Some(Role::Button))
+        .map(|d| d.name.to_string())
+        .collect();
+    assert_eq!(
+        names.iter().filter(|n| *n == "hv-gutter-run-line").count(),
+        3,
+        "every ▶ is still an AccessKit button: {names:?}"
+    );
+    let focus = |o: &mut Opened<'_>| {
+        o.vcx
+            .update(|window, cx| o.editor.read(cx).gutter_focus(window))
+    };
+    let in_editor = |o: &mut Opened<'_>| {
+        o.vcx
+            .update(|window, cx| o.editor.read(cx).focus_handle(cx).is_focused(window))
+    };
+    let next = |o: &mut Opened<'_>| {
+        o.vcx.update(|window, cx| window.focus_next(cx));
+        draw(o.vcx);
+    };
+    let key = |o: &mut Opened<'_>, k: &'static str| {
+        press(o, k);
+        draw(o.vcx);
+    };
+    let selection = |o: &Opened<'_>| {
+        o.vcx
+            .read(|cx| o.editor.read(cx).snapshot().selection.main().range())
+    };
+    // Tab: the caret's statement's ▶, then the chevron column (the caret's fold), then round
+    // again (the window holds nothing else; the editor's own Tab is `editor.tab`): two stops
+    // for three ▶ and two chevrons.
+    let mut stops = Vec::new();
+    for _ in 0..3 {
+        next(&mut o);
+        stops.push(focus(&mut o));
+    }
+    assert_eq!(
+        stops,
+        [
+            Some(GutterButton::Run(3)),
+            Some(GutterButton::Fold(3)),
+            Some(GutterButton::Run(3))
+        ]
+    );
+    // ↑/↓ walk the ▶ column and stop at its ends; the caret stays.
+    key(&mut o, "down");
+    assert_eq!(focus(&mut o), Some(GutterButton::Run(6)));
+    key(&mut o, "down");
+    assert_eq!(focus(&mut o), Some(GutterButton::Run(6)), "the last ▶");
+    key(&mut o, "up");
+    key(&mut o, "up");
+    assert_eq!(focus(&mut o), Some(GutterButton::Run(0)));
+    key(&mut o, "up");
+    assert_eq!(focus(&mut o), Some(GutterButton::Run(0)), "the first ▶");
+    assert_eq!(
+        selection(&o),
+        caret..caret,
+        "the arrows never move the caret"
+    );
+    // Escape: back to the editor; Tab comes back to the ▶ last focused.
+    key(&mut o, "escape");
+    assert!(in_editor(&mut o));
+    assert_eq!(focus(&mut o), None);
+    next(&mut o);
+    assert_eq!(focus(&mut o), Some(GutterButton::Run(0)));
+    // The chevron column walks the same way, and Escape leaves it too.
+    next(&mut o);
+    assert_eq!(focus(&mut o), Some(GutterButton::Fold(3)));
+    key(&mut o, "up");
+    assert_eq!(focus(&mut o), Some(GutterButton::Fold(0)));
+    key(&mut o, "up");
+    assert_eq!(focus(&mut o), Some(GutterButton::Fold(0)));
+    key(&mut o, "escape");
+    assert!(in_editor(&mut o));
+    next(&mut o);
+    next(&mut o);
+    assert_eq!(focus(&mut o), Some(GutterButton::Fold(0)));
+    // Enter still runs the focused ▶ (the stop stays one per column).
+    o.vcx.update(|window, cx| window.focus_prev(cx));
+    draw(o.vcx);
+    assert_eq!(focus(&mut o), Some(GutterButton::Run(0)));
+    press(&mut o, "enter");
+    let at = requests(&o);
+    assert!(
+        matches!(at.as_slice(), [ExecAt::Carets(c)] if c.as_slice() == [0]),
+        "{at:?}"
+    );
+    assert_eq!(selection(&o), caret..caret);
 }

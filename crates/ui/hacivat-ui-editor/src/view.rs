@@ -130,6 +130,12 @@ pub enum EditorEvent {
     HistoryRecall {
         older: bool,
     },
+    // ## m3c-po (named exception; PO M3c-08)
+    /// `editor.use_selection_for_find` (macOS ⌘E "Use Selection for Find"): the host takes the
+    /// one-line selection as its find query (and its find pasteboard) without opening its bar.
+    FindSeeded {
+        seed: String,
+    },
 }
 
 /// The focused editor, for the app's commands (`enabled` = an editor is focused).

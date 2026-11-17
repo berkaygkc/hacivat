@@ -2796,3 +2796,8 @@ hv-gmenu-why-ranges = Aralıklar hizalı değil
 hv-gmenu-why-last = Görünen son sütun
 # Review: PO
 hv-gmenu-label = Tablo menüsü
+
+## m3c-po
+
+# Review: PO
+hv-cmd-editor-use-selection-for-find = Seçimi bulmada kullan
