@@ -79,13 +79,20 @@ pub struct BenchRoot {
 }
 
 impl BenchRoot {
-    /// A fresh root named after `tag`, the process and the time.
+    /// A fresh root named after `tag`, the process, the time and a per-process sequence number.
     pub fn new(tag: &str) -> anyhow::Result<BenchRoot> {
+        // ## m3c-t44 (fix of the M3a headless flake "timed out waiting for the connection"):
+        // the wall clock has microsecond resolution on macOS, so two tests booting in the same
+        // microsecond shared one root, and the later `connections.toml` dropped the earlier
+        // test's profile (its connect then never happened). The sequence number keeps every
+        // root of the process apart.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
         let dir = std::env::temp_dir().join(format!(
-            "hacivat-bench-{tag}-{}-{nanos}",
+            "hacivat-bench-{tag}-{}-{nanos}-{seq}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -836,6 +843,20 @@ mod tests {
     }
 
     // ## m3c-t44
+    #[test]
+    fn roots_made_at_once_never_share_a_folder() {
+        let roots: Vec<BenchRoot> = (0..64)
+            .map(|_| BenchRoot::new("t44-seq").unwrap())
+            .collect();
+        let mut dirs: Vec<&Path> = roots.iter().map(BenchRoot::dir).collect();
+        dirs.sort();
+        dirs.dedup();
+        assert_eq!(dirs.len(), 64);
+        for r in &roots {
+            r.remove();
+        }
+    }
+
     #[test]
     fn figures_give_p99_and_the_counts_over_3_and_6_ms() {
         // 1..=100 ms: p99 is the 99th sample; 97 samples are over 3 ms, 94 over 6 ms.
