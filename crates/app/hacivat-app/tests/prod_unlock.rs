@@ -375,6 +375,14 @@ fn production_drop_table_needs_the_typed_name(cx: &mut TestAppContext) {
     typed_name_before_anything_is_sent(cx, "DROP TABLE orders;", "DROP");
 }
 
+// ## m3c-p2-07 (PO P2-07): `DROP OWNED BY` on production asks for the role's name typed the
+// same way (the role here is named `orders`).
+#[gpui::test]
+fn production_drop_owned_needs_the_typed_name(cx: &mut TestAppContext) {
+    typed_name_before_anything_is_sent(cx, "DROP OWNED BY orders;", "DROP");
+}
+// ## m3c-p2-07
+
 fn typed_name_before_anything_is_sent(cx: &mut TestAppContext, text: &str, verb: &str) {
     {
         let (vcx, f) = prod_console(cx, text);

@@ -2048,6 +2048,20 @@ fn oracle(
                 }
                 _ => false,
             }));
+    // ## m3c-p2-07 (named exception, fix round 1, controller ruling): the representative's own
+    // table `orders` and a dropped schema or database `orders` are two objects; one typed name
+    // never approves both, so the unit is several targets.
+    let base_types_table = matches!(class, G::DmlUnsafe | G::DdlDestructive);
+    if production
+        && base_types_table
+        && extra.is_some_and(|(k, o)| {
+            matches!(k, DestructiveKind::Drop { .. })
+                && matches!(o, ObjectKind::Schema | ObjectKind::Database)
+        })
+    {
+        return deny;
+    }
+    // ## m3c-p2-07
     let implicit = commits && tx_open;
     let mut shape = if production {
         match eff {
@@ -3270,6 +3284,57 @@ fn production_drop_owned_of_several_roles_is_denied() {
                 "{env:?} `{text}`: {:?}",
                 item.decision
             );
+        }
+    }
+}
+
+// ## m3c-p2-07 (fix round 1, controller ruling): one typed name never approves two objects.
+// Each target is keyed the way its engine resolves it (PostgreSQL: unquoted folded to lower
+// case, quoted exact, a schema qualifier counts; SQLite: ASCII case-insensitive; MySQL, MariaDB
+// and the others: the exact text, quoting aside, as a case-sensitive file system may hold `a`
+// and `A`), with its kind (a table, a schema, a database, a role); more than one key in a unit
+// is the multi-target rule. One object written two ways asks once, for its first spelling.
+#[test]
+fn production_one_typed_name_never_approves_two_objects() {
+    let script = sql_safety::Expect::Script;
+    for (engine, text) in [
+        (DbmsKind::Postgres, "TRUNCATE \"A\", A"),
+        (DbmsKind::Postgres, "DELETE FROM \"A\"; DELETE FROM A"),
+        (DbmsKind::Postgres, "TRUNCATE \"A\"; DROP TABLE a"),
+        (DbmsKind::Postgres, "DELETE FROM app.a; DELETE FROM a"),
+        // A schema and a table written alike are two objects.
+        (DbmsKind::Postgres, "DROP SCHEMA a; TRUNCATE a"),
+        (DbmsKind::MySql, "DELETE FROM a; DELETE FROM A"),
+        (DbmsKind::MariaDb, "TRUNCATE TABLE a; DROP TABLE A"),
+    ] {
+        let prod = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, script, &prod);
+        assert_eq!(
+            deny_id(&item.decision),
+            "exec-unsafe-several-targets",
+            "{engine:?} `{text}`"
+        );
+    }
+    for (engine, text, name) in [
+        (DbmsKind::Postgres, "TRUNCATE a, A", "a"),
+        (DbmsKind::Postgres, "DELETE FROM A; DELETE FROM \"a\"", "A"),
+        (
+            DbmsKind::Postgres,
+            "TRUNCATE app.a; DELETE FROM APP.\"a\"",
+            "app.a",
+        ),
+        (DbmsKind::MySql, "DELETE FROM `a`; DELETE FROM a", "a"),
+        (DbmsKind::Sqlite, "DELETE FROM t; DELETE FROM T", "t"),
+    ] {
+        let prod = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, script, &prod);
+        match &item.decision {
+            GateDecision::Confirm {
+                type_to_confirm: Some(t),
+                suppressible: false,
+                ..
+            } => assert_eq!(&**t, name, "{engine:?} `{text}`"),
+            other => panic!("{engine:?} `{text}`: {other:?}"),
         }
     }
 }

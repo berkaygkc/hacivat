@@ -20,7 +20,7 @@ use hacivat_session::session::{
 };
 // ## m3b-t15-gate
 use sql_dialect::{DialectCtx, DialectId, lex_profile};
-use sql_ident::{QualifiedName, ident_eq, parse_qualified};
+use sql_ident::{QualifiedName, fold, ident_eq, parse_qualified};
 use sql_lexer::{LexState, TokenKind, lex};
 use sql_safety::effects::class_of;
 use sql_safety::{
@@ -658,7 +658,9 @@ fn written_name(
 /// pattern, of a `DROP DATABASE`/`DROP SCHEMA` and (## m3b-po-typed-name, PO M3b-04) of a
 /// `TRUNCATE` or `DROP TABLE`, and (## m3c-p2-07, PO P2-07) the role of a `DROP OWNED BY`, as
 /// written. From the destructive kinds, not the class. `Err` when one has no target (nothing to
-/// type) or two name different objects (typing one name must not approve another).
+/// type) or two name different objects (typing one name must not approve another): since
+/// m3c-p2-07 fix round 1 the objects are told apart by [`TypedKey`] (the engine's resolution of
+/// each target, with its kind), never by the written text alone.
 fn typed_name(
     report: &SafetyReport,
     text: &str,
@@ -681,6 +683,16 @@ fn typed_name(
         let alters = word(0, "ALTER");
         // ## m3c-p2-07 (PO P2-07): `DROP OWNED BY` names the roles whose objects go.
         let drops_owned = word(0, "DROP") && word(1, "OWNED");
+        // ## m3c-p2-07 (fix round 1): what a schema-or-database drop removes, by its words.
+        let db_group = |t: Option<&ObjectRef>| {
+            if word(1, "DATABASE")
+                || (!word(1, "SCHEMA") && t.is_some_and(|t| t.kind == ObjectKind::Database))
+            {
+                Group::Database
+            } else {
+                Group::Schema
+            }
+        };
         let mut named = false;
         for dr in &s.destructive {
             let schema_or_db = matches!(dr.kind, DestructiveKind::Drop { .. })
@@ -715,7 +727,7 @@ fn typed_name(
                     return Err(GateReason::of(DROP_OWNED_NO_TARGET));
                 };
                 let n = written_name(role, dr.range, s.range, text, report.dialect);
-                push_name(&mut names, n, Some(role.name.clone()));
+                push_name(&mut names, n, TypedKey::of(d, Group::Role, &role.name));
                 continue;
             }
             // ## m3c-p2-07
@@ -728,24 +740,33 @@ fn typed_name(
                 None => s.touched.writes.iter().collect(),
             };
             if targets.is_empty() {
-                if schema_or_db && let Some(Some(n)) = &dropped_db {
-                    push_name(&mut names, n.clone(), None);
+                if schema_or_db && let Some(Some(q)) = &dropped_db {
+                    push_name(&mut names, as_typed(q), TypedKey::of(d, db_group(None), q));
                     named = true;
                     continue;
                 }
                 return Err(GateReason::of(NO_TARGET));
             }
             for target in targets {
+                // ## m3c-p2-07 (fix round 1)
+                let group = if schema_or_db {
+                    db_group(Some(target))
+                } else {
+                    Group::Relation
+                };
                 push_name(
                     &mut names,
                     written_name(target, dr.range, s.range, text, report.dialect),
-                    None,
+                    TypedKey::of(d, group, &target.name),
                 );
             }
             named |= schema_or_db;
         }
         match dropped_db {
-            Some(Some(n)) if !named => push_name(&mut names, n, None),
+            Some(Some(q)) if !named => {
+                let group = db_group(None);
+                push_name(&mut names, as_typed(&q), TypedKey::of(d, group, &q));
+            }
             Some(None) if !named => return Err(GateReason::of(NO_TARGET)),
             _ => {}
         }
@@ -754,30 +775,78 @@ fn typed_name(
         0 => Ok(None),
         1 => Ok(names.pop().map(|(n, _)| n)),
         // ## m3c-p2-07 (PO P2-07)
-        _ if names.iter().any(|(_, role)| role.is_some()) => {
+        _ if names.iter().any(|(_, k)| k.group == Group::Role) => {
             Err(GateReason::of(DROP_OWNED_SEVERAL_TARGETS))
         }
         _ => Err(GateReason::of(SEVERAL_TARGETS)),
     }
 }
 
-// ## m3c-p2-07 (PO P2-07)
-/// A name to type, and the role it names when it is a `DROP OWNED` role (the classifier's
-/// reading of it): a role and a table, or the keyword `current_user` and the quoted role
-/// `"current_user"`, written alike are two objects, never one name.
-type Typed = (Arc<str>, Option<QualifiedName>);
+// ## m3c-p2-07 (PO P2-07; fix round 1, controller ruling)
+/// The kind of object a typed name approves: a table (or any relation a write names), a
+/// schema, a database, a role whose objects `DROP OWNED` drops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Group {
+    Relation,
+    Schema,
+    Database,
+    Role,
+}
 
-fn push_name(names: &mut Vec<Typed>, n: Arc<str>, role: Option<QualifiedName>) {
-    let typed = (n, role);
-    if !names.contains(&typed) {
-        names.push(typed);
+/// The object a typed name approves, as its engine resolves it: two targets with different
+/// keys are two objects (several targets), whatever their written text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypedKey {
+    group: Group,
+    parts: Vec<(Arc<str>, bool)>,
+}
+
+impl TypedKey {
+    /// `name`'s key in dialect `d`, part by part (a schema qualifier counts):
+    /// - PostgreSQL and the PG-wire dialects: [`fold`] (unquoted folded to lower case, quoted
+    ///   kept exactly);
+    /// - SQLite: ASCII case-insensitive, quoted or not (`t` and `"T"` are one table);
+    /// - MySQL, MariaDB and the others: the exact text, quoting aside (a MySQL table name on a
+    ///   case-sensitive file system is case-sensitive; `fold`'s docs), so `a` and `A` are two.
+    ///
+    /// A role keeps the classifier's reading whole, its `quoted` flag included: a quoted role
+    /// is its exact name, an unquoted one the keyword `CURRENT_USER` and the like, so
+    /// `"current_user"` and `current_user` are two.
+    fn of(d: DialectId, group: Group, name: &QualifiedName) -> TypedKey {
+        let parts = name
+            .parts
+            .iter()
+            .map(|p| match group {
+                Group::Role => (p.text.clone(), p.quoted),
+                _ if d == DialectId::Sqlite => (Arc::from(p.text.to_ascii_lowercase()), true),
+                _ => (fold(d, &p.text, p.quoted), true),
+            })
+            .collect();
+        TypedKey { group, parts }
     }
+}
+
+/// A name to type (as written) and the object it approves.
+type Typed = (Arc<str>, TypedKey);
+
+/// Adds `n` unless its object is already named: one object written two ways asks once, for its
+/// first spelling (the typed comparison stays byte for byte against that spelling).
+fn push_name(names: &mut Vec<Typed>, n: Arc<str>, key: TypedKey) {
+    if !names.iter().any(|(_, k)| *k == key) {
+        names.push((n, key));
+    }
+}
+
+/// `q`'s parts as written, quotes removed, joined with `.`.
+fn as_typed(q: &QualifiedName) -> Arc<str> {
+    dotted(q.parts.iter().map(|p| &*p.text))
 }
 // ## m3c-p2-07
 
 /// When `stmt` (in dialect `d`) reads `DROP DATABASE|SCHEMA [IF EXISTS] <name>`: the name as
 /// written (`Some(None)` when none can be read); `None` for any other statement.
-fn drop_database_name(stmt: &str, d: DialectId) -> Option<Option<Arc<str>>> {
+/// ## m3c-p2-07 (fix round 1): the parsed name, so its key keeps its quoting.
+fn drop_database_name(stmt: &str, d: DialectId) -> Option<Option<QualifiedName>> {
     let ctx = DialectCtx::new(d, None);
     let profile = lex_profile(&ctx).ok()?;
     let lexed = lex(stmt, profile, ctx.modes, &LexState::Initial);
@@ -828,11 +897,7 @@ fn drop_database_name(stmt: &str, d: DialectId) -> Option<Option<Arc<str>>> {
         return Some(None);
     }
     let range = TextRange::new(lexed.range(first).start(), lexed.range(end).end());
-    Some(
-        slice(stmt, range)
-            .and_then(|s| parse_qualified(d, s))
-            .map(|q| dotted(q.parts.iter().map(|p| &*p.text))),
-    )
+    Some(slice(stmt, range).and_then(|s| parse_qualified(d, s)))
 }
 
 // ## m3b-po-typed-name (PO M3b-04)

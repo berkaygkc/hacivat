@@ -1258,6 +1258,26 @@ case.
   the classifier could not name is denied, `exec-drop-owned-no-target`. The dialog's reason is
   `safety-destructive-drop-owned[-cascade]` ("Removes every object `r` owns in this database
   …"), never `safety-destructive-drop` ("Removes `r`.", which `DROP ROLE` keeps).
+- **One typed name never approves two objects (## m3c-p2-07 fix round 1, controller ruling).**
+  Before, the typed names of a unit were merged by their written text with the quotes removed.
+  So on PostgreSQL `TRUNCATE "A", A` and `DELETE FROM "A"; DELETE FROM A` asked once for `A`,
+  and that one answer approved two tables (`"A"` and `a`). `DROP SCHEMA a; TRUNCATE a` likewise
+  asked once for `a` and approved a schema and a table. Each target is now keyed by its kind
+  (a table or other written relation, a schema, a database, a `DROP OWNED` role) and by its
+  name as the engine resolves it, part by part, with a schema qualifier counting:
+  - **PostgreSQL and the PG-wire dialects:** `sql_ident::fold`. Unquoted names fold to lower
+    case and quoted names stay exact.
+  - **SQLite:** case is ignored for ASCII letters, quoted or not.
+  - **MySQL, MariaDB and the rest:** the exact text, quoting aside. A MySQL table name is
+    case-sensitive on a case-sensitive file system (`fold`'s docs), so `a` and `A` count as two
+    objects, which fails closed.
+  - **Roles:** the classifier's reading, with its quoted flag kept, so the keyword
+    `current_user` and the quoted role `"current_user"` stay two.
+
+  More than one key in a unit is denied as several targets (`exec-unsafe-several-targets`, or
+  `exec-drop-owned-several-targets` when a role is among them). One object written two ways
+  asks once, for its first spelling: `TRUNCATE a, A` asks for `a`. The typed comparison itself
+  is unchanged: byte for byte against that spelling.
 - **More secret forms are masked in history (PO M3b-23; narrowed in fix round 1).** Secret
   name parts are now also `BEARER`, a bare `TOKEN` or a `TOKEN` after a secret-ish qualifier
   (`access_token`, `refresh_token`, `api_token`, `auth_token`; never `token_type`,
