@@ -214,6 +214,16 @@ fn check_report(sql: &str, d: DialectId, r: &SafetyReport) -> Result<(), String>
         if usize::from(i.range.end()) > sql.len() {
             return Err(format!("item {:?} outside the text", i.range));
         }
+        // ## m3c-p2-07 (fix round 4, S6): a destructive pattern lies inside its statement, and
+        // one with a target has a range of its own (where the gate reads the typed name).
+        for d in &i.destructive {
+            if !i.range.contains_range(d.range) {
+                return Err(format!("{d:?} outside its item {:?}", i.range));
+            }
+            if d.target.is_some() && d.range.is_empty() {
+                return Err(format!("{d:?} has a target and an empty range"));
+            }
+        }
     }
     // A harmless `SET` (`SET SCHEMA 'x'`: P-M3b-T3-1) is a `Session` read-only allows.
     if ro(r) == Verdict::Allow && r.request_class > CoarseClass::Session {

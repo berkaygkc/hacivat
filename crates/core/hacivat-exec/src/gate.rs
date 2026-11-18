@@ -648,9 +648,8 @@ fn typed_name(
     text: &str,
     engine: DbmsKind,
 ) -> Result<Option<Arc<str>>, GateReason> {
-    // ## m3c-p2-07 (fix round 3): every occurrence, its spelling (`None`: unreadable at its
-    // own position) and whether it is a `DROP OWNED` role.
-    let mut found: Vec<(Option<Arc<str>>, bool)> = Vec::new();
+    // ## m3c-p2-07 (fix round 3; fix round 4, S1): every occurrence ([`Occurrence`]).
+    let mut found: Vec<Occurrence> = Vec::new();
     let d = dialect_for(report, engine);
     for s in &report.items {
         // Fix round 1 (I3): the statement's own words say `DROP DATABASE`/`DROP SCHEMA`, so a
@@ -684,7 +683,8 @@ fn typed_name(
             // name is denied, two are several targets). `ALTER TABLE … DROP PARTITION` keeps
             // its row.
             let table_gone = match dr.kind {
-                DestructiveKind::Truncate => true,
+                // ## m3c-p2-07 (fix round 4, S2): `TRUNCATE … CASCADE` too.
+                DestructiveKind::Truncate | DestructiveKind::TruncateCascade => true,
                 DestructiveKind::Drop { .. } if !schema_or_db => {
                     drops_table
                         || (!alters
@@ -703,9 +703,14 @@ fn typed_name(
             }
             // ## m3c-p2-07 (fix round 3): the occurrence's spelling at its own position.
             match dr.target.as_ref() {
-                Some(t) if owned_gone => {
-                    found.push((spelling_at(t, dr.range, text, report.dialect), true));
-                }
+                Some(t) if owned_gone => occur(
+                    &mut found,
+                    Occurrence {
+                        at: Some((t.clone(), dr.range)),
+                        spelling: spelling_at(t, dr.range, text, report.dialect),
+                        role: true,
+                    },
+                ),
                 None if owned_gone => return Err(GateReason::of(DROP_OWNED_NO_TARGET)),
                 Some(t) => {
                     // A dropped database or schema: its name read by position from the
@@ -717,12 +722,13 @@ fn typed_name(
                                 _ => None,
                             }
                         });
-                    found.push((spelling, false));
+                    let at = Some((t.clone(), dr.range));
+                    occur(&mut found, Occurrence::table(at, spelling));
                     named |= schema_or_db;
                 }
                 None if schema_or_db && matches!(dropped_db, Some(Some(_))) => {
                     if let Some(Some(q)) = &dropped_db {
-                        found.push((Some(as_typed(q)), false));
+                        occur(&mut found, Occurrence::table(None, Some(as_typed(q))));
                     }
                     named = true;
                 }
@@ -731,25 +737,60 @@ fn typed_name(
                 // first (`UPDATE a JOIN b … SET b.y = 2` writes `b`): each is one occurrence,
                 // with no position of its own.
                 None if s.touched.writes.is_empty() => return Err(GateReason::of(NO_TARGET)),
-                None => found.extend(s.touched.writes.iter().map(|_| (None, false))),
+                None => {
+                    for _ in &s.touched.writes {
+                        occur(&mut found, Occurrence::table(None, None));
+                    }
+                }
             }
         }
         match dropped_db {
-            Some(Some(q)) if !named => found.push((Some(as_typed(&q)), false)),
+            Some(Some(q)) if !named => {
+                occur(&mut found, Occurrence::table(None, Some(as_typed(&q))));
+            }
             Some(None) if !named => return Err(GateReason::of(NO_TARGET)),
             _ => {}
         }
     }
     match found.as_slice() {
         [] => Ok(None),
-        [(Some(n), _)] => Ok(Some(n.clone())),
-        [(None, true)] => Err(GateReason::of(DROP_OWNED_NO_TARGET)),
-        [(None, false)] => Err(GateReason::of(NO_TARGET)),
+        [one] => match (&one.spelling, one.role) {
+            (Some(n), _) => Ok(Some(n.clone())),
+            (None, true) => Err(GateReason::of(DROP_OWNED_NO_TARGET)),
+            (None, false) => Err(GateReason::of(NO_TARGET)),
+        },
         // ## m3c-p2-07 (PO P2-07)
-        many if many.iter().any(|(_, role)| *role) => {
-            Err(GateReason::of(DROP_OWNED_SEVERAL_TARGETS))
-        }
+        many if many.iter().any(|o| o.role) => Err(GateReason::of(DROP_OWNED_SEVERAL_TARGETS)),
         _ => Err(GateReason::of(SEVERAL_TARGETS)),
+    }
+}
+
+// ## m3c-p2-07 (fix round 4, S1)
+/// One typed-target occurrence: where it is written (its target and its own range; `None`: no
+/// position of its own), its spelling there (`None`: unreadable) and whether it is a
+/// `DROP OWNED` role.
+struct Occurrence {
+    at: Option<(ObjectRef, TextRange)>,
+    spelling: Option<Arc<str>>,
+    role: bool,
+}
+
+impl Occurrence {
+    fn table(at: Option<(ObjectRef, TextRange)>, spelling: Option<Arc<str>>) -> Occurrence {
+        Occurrence {
+            at,
+            spelling,
+            role: false,
+        }
+    }
+}
+
+/// Adds `o` unless the same target at the same position is already there: one written target
+/// with several patterns (`NoWhere` and `UpdateLimitNoOrder`, `NoWhere` and `JoinWithoutOn`) is
+/// one occurrence; two positions are always two.
+fn occur(found: &mut Vec<Occurrence>, o: Occurrence) {
+    if o.at.is_none() || !found.iter().any(|f| f.at == o.at) {
+        found.push(o);
     }
 }
 // ## m3c-p2-07

@@ -750,6 +750,10 @@ safety-destructive-drop-cascade = Removes { $table } and everything that depends
 # Variables:
 #   $table (String) - the table's name as written in the statement.
 safety-destructive-truncate = Removes every row of { $table }.
+# ## m3c-p2-07 (fix round 4, S2) Destructive pattern: PostgreSQL TRUNCATE … CASCADE.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-truncate-cascade = Removes every row of { $table } and of every table that references it (CASCADE).
 # Destructive pattern: ALTER … DROP COLUMN.
 # Variables:
 #   $table (String) - the table's name as written in the statement.

@@ -570,6 +570,12 @@ fn unsafe_01_to_10() {
         destructive("DROP DATABASE prod"),
         [D::Drop { cascade: false }]
     );
+    // ## m3c-p2-07 (fix round 4, S2): `TRUNCATE … CASCADE` says so.
+    assert_eq!(
+        destructive("TRUNCATE a, b CASCADE"),
+        [D::TruncateCascade; 2]
+    );
+    assert_eq!(destructive("TRUNCATE a RESTRICT"), [D::Truncate]);
     assert_eq!(destructive("ALTER TABLE t DROP COLUMN c"), [D::DropColumn]);
     assert_eq!(
         destructive("ALTER TABLE t DROP CONSTRAINT k"),

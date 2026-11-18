@@ -1239,9 +1239,10 @@ case.
   confirmation.
 - **Limit of the typed name (fix round 1, review m4; narrowed by m3c-p2-07).** The typed name
   needs a target the classifier can see. A `TRUNCATE` or `DROP TABLE` hidden from it — inside a
-  `DO` block, dynamic SQL (`EXECUTE '…'`), `dblink_exec(…)`, MySQL `PREPARE`/`EXECUTE`, or a
-  routine a `CALL` runs — gets the plain production confirmation instead: never suppressible,
-  nothing sent before the answer, but no name to type.
+  `DO` block, dynamic SQL (`EXECUTE '…'`), `dblink_exec(…)`, MySQL or PostgreSQL
+  `PREPARE`/`EXECUTE` (the prepared body is deferred; `EXECUTE p` is `Unknown`), or a routine a
+  `CALL` runs — gets the plain production confirmation instead: never suppressible, nothing sent
+  before the answer, but no name to type.
 - **`DROP OWNED BY` types the role's name on production (## m3c-p2-07, PO P2-07, approved
   2026-11-18).** PostgreSQL's `DROP OWNED BY <role> [, …] [CASCADE | RESTRICT]` (which drops
   every object the role owns in the database, every table included) now names each role as its
@@ -1266,9 +1267,12 @@ case.
   libpg_query cuts alike, MySQL `DROP TABLE a, A` found through a case-insensitive search, a
   `DROP` or a `set_config(…)` call that changes what the next name resolves to, a rename or a
   re-`ATTACH` under a qualified name. The rule is now counting, with no merging:
-  - **Every typed-target pattern of the unit is one occurrence:** `TRUNCATE a, b` is two,
-    `TRUNCATE a, A` is two, `DELETE FROM t; DELETE FROM t` is two, `DROP OWNED BY a, a` is two,
-    and a multi-table `UPDATE`/`DELETE` without a bounding `WHERE` is one per written table.
+  - **Every typed target at its own position is one occurrence** (fix round 4, S1: several
+    patterns of one written target, such as `NoWhere` and `UpdateLimitNoOrder` in
+    `DELETE FROM logs LIMIT 1000`, or `NoWhere` and `JoinWithoutOn` in
+    `UPDATE t JOIN u SET t.a = 1`, are one occurrence): `TRUNCATE a, b` is two, `TRUNCATE a, A`
+    is two, `DELETE FROM t; DELETE FROM t` is two, `DROP OWNED BY a, a` is two, and a
+    multi-table `UPDATE`/`DELETE` without a bounding `WHERE` is one per written table.
   - **More than one occurrence is denied**, `exec-unsafe-several-targets` (or
     `exec-drop-owned-several-targets` when a `DROP OWNED` role is among them), whatever their
     names. Run each destructive statement on its own.
@@ -1285,7 +1289,21 @@ case.
     session.** `SET search_path TO archive; DELETE FROM orders` asks for `orders`, and the
     server empties `archive.orders`. A single occurrence approves exactly the one statement the
     dialog shows, under whatever session state the unit itself sets up.
-  - The typed comparison is unchanged: byte for byte against that spelling.
+  - The typed comparison is unchanged: byte for byte against that spelling. A doubled quote
+    inside a quoted name is one quote, as the server reads it (fix round 4, S3): `` `a``b` ``
+    and `"a""b"` ask for ``a`b`` and `a"b`.
+  - **Implicit effects are neither counted nor typed (fix round 4, S2).** The typed name
+    confirms only the written target. What the server changes beyond it is not an occurrence:
+    `TRUNCATE … CASCADE` (every referencing table), inheritance and partition children (unless
+    `ONLY`), `ON DELETE CASCADE` foreign keys, and writes through views, rules and triggers.
+    Counting them is not feasible statically. `TRUNCATE … CASCADE` is at least named: the PG
+    backend reads its `CASCADE` (`DestructiveKind::TruncateCascade`), and the dialog says
+    "Removes every row of `orders` and of every table that references it (CASCADE)."
+    (`safety-destructive-truncate-cascade`).
+  - **Known denials (fix round 4, S4 and S5; rare, fail closed):** a comment inside a qualified
+    name (`app /*x*/ . orders`), a PostgreSQL `U&"…"` name, and a MySQL/SQLite statement whose
+    text has a lone `\r` line ending before the name cannot be read at their position, so they
+    are denied (`exec-unsafe-no-target`).
 - **Scope of the typed name (fix round 2, review M2):** only typed-target kinds compete for the
   one name. A `DROP OWNED`, `TRUNCATE` or `DROP TABLE` beside a `DROP VIEW`, a `DROP COLUMN` or
   another plain-confirmation drop still asks for its one name, and the dialog lists every

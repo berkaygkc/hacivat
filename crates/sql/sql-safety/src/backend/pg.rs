@@ -1277,10 +1277,16 @@ impl<'a, 's> Classifier<'a, 's> {
                 }
             }
             PgRef::TruncateStmt(s) => {
+                // ## m3c-p2-07 (fix round 4, S2): `CASCADE` empties every referencing table.
+                let kind = if s.behavior == pb::DropBehavior::DropCascade as i32 {
+                    DestructiveKind::TruncateCascade
+                } else {
+                    DestructiveKind::Truncate
+                };
                 for rel in &s.relations {
                     if let Some(pb::node::Node::RangeVar(rv)) = &rel.node {
                         let o = self.write_target(rv, ObjectKind::Table);
-                        self.destroy(DestructiveKind::Truncate, Some(o));
+                        self.destroy(kind, Some(o));
                     }
                 }
             }

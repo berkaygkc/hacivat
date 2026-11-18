@@ -1767,7 +1767,14 @@ fn qualified(n: &ObjectName) -> Option<QualifiedName> {
     for p in &n.0 {
         match p {
             ObjectNamePart::Identifier(i) => parts.push(Ident {
-                text: Arc::from(i.value.as_str()),
+                // ## m3c-p2-07 (fix round 4, S3): a doubled closing quote is one quote, as the
+                // server reads it (the tokenizer runs with unescaping off).
+                text: match i.quote_style {
+                    Some(q @ ('"' | '`')) => {
+                        Arc::from(i.value.replace(&format!("{q}{q}"), &q.to_string()))
+                    }
+                    _ => Arc::from(i.value.as_str()),
+                },
                 quoted: i.quote_style.is_some(),
             }),
             ObjectNamePart::Function(_) => return None,

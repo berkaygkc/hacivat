@@ -472,6 +472,8 @@ safety-destructive-drop-cascade = { $table } ve ona bağlı her şey kaldırıl�
 # Review: PO
 safety-destructive-truncate = { $table } içindeki bütün satırlar silinir.
 # Review: PO
+safety-destructive-truncate-cascade = { $table } içindeki ve ona başvuran her tablodaki bütün satırlar silinir (CASCADE).
+# Review: PO
 safety-destructive-drop-column = { $table } içindeki bir sütun, verisiyle birlikte kaldırılır.
 # Review: PO
 safety-destructive-drop-constraint = { $table } üzerindeki bir kısıt kaldırılır.

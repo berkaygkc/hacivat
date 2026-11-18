@@ -2055,7 +2055,7 @@ fn oracle(
         && (unsafe_dml
             || class == G::DdlDestructive
             || extra.is_some_and(|(k, o)| match k {
-                DestructiveKind::Truncate => true,
+                DestructiveKind::Truncate | DestructiveKind::TruncateCascade => true,
                 DestructiveKind::Drop { .. } => {
                     matches!(
                         o,
@@ -2064,13 +2064,15 @@ fn oracle(
                 }
                 _ => false,
             }));
-    // ## m3c-p2-07 (named exception, fix round 3, controller ruling): one typed name approves
-    // one occurrence. The representative's own typed target and a typed extra are two (several
-    // targets); a typed extra over a text that never writes `orders` has no position to read
-    // its spelling from. Both are denied.
+    // ## m3c-p2-07 (named exception, fix rounds 3 and 4, controller rulings): one typed name
+    // approves one occurrence, a target at its own position. The representative's table
+    // `orders` and a typed extra on the same table at the same place are one occurrence (S1);
+    // a dropped schema or database `orders` is another object (two, several targets); a typed
+    // extra over a text that never writes `orders` has no position to read its spelling from.
+    // Those two are denied.
     let base_typed = matches!(class, G::DmlUnsafe | G::DdlDestructive);
     let extra_typed = extra.is_some_and(|(k, o)| match k {
-        DestructiveKind::Truncate => true,
+        DestructiveKind::Truncate | DestructiveKind::TruncateCascade => true,
         DestructiveKind::Drop { .. } => matches!(
             o,
             ObjectKind::Schema | ObjectKind::Database | ObjectKind::Table
@@ -2078,7 +2080,9 @@ fn oracle(
         k => k.is_unsafe_dml(),
     });
     let writes_orders = matches!(class, G::Dml | G::DmlUnsafe | G::DdlDestructive);
-    if production && extra_typed && (base_typed || !writes_orders) {
+    let other_object =
+        extra.is_some_and(|(_, o)| matches!(o, ObjectKind::Schema | ObjectKind::Database));
+    if production && extra_typed && (!writes_orders || (base_typed && other_object)) {
         return deny;
     }
     // ## m3c-p2-07
@@ -2213,7 +2217,8 @@ fn verdict_table_matches_r_m3_55_for_every_combination() {
             }
         }
     }
-    assert_eq!(cases, 11 * 14 * 8 * 5 * 6 * 2);
+    // ## m3c-p2-07 (named exception, fix round 4, S2): `TruncateCascade` is one more kind.
+    assert_eq!(cases, 11 * 15 * 8 * 5 * 6 * 2);
 }
 
 /// Fix round 1 (M1): `EXPLAIN ANALYZE` of every class, at every level and engine, against the
@@ -3530,6 +3535,102 @@ fn production_one_typed_name_approves_one_occurrence() {
         );
     }
 }
+
+// ## m3c-p2-07 (fix round 4, re-review 2: S1, S2, S3)
+/// S1: an occurrence is a target at its own position, however many patterns the classifier
+/// gives it (`NoWhere` and `UpdateLimitNoOrder`, `NoWhere` and `JoinWithoutOn` on one table);
+/// two positions are still two occurrences.
+#[test]
+fn production_one_written_target_asks_once_whatever_its_patterns() {
+    for engine in [DbmsKind::MySql, DbmsKind::MariaDb] {
+        let c = conn(engine, Some(EnvTag::Production));
+        for (text, name) in [
+            ("DELETE FROM logs LIMIT 1000", "logs"),
+            ("UPDATE t SET x=0 LIMIT 10", "t"),
+            ("UPDATE t JOIN u SET t.a=1", "t"),
+            ("DELETE t FROM t JOIN u", "t"),
+        ] {
+            let item = po_item(engine, text, sql_safety::Expect::SingleStatement, &c);
+            assert_eq!(
+                asks_once(&item),
+                Some(name),
+                "{engine:?} `{text}`: {:?}",
+                item.decision
+            );
+        }
+        // Two positions are two occurrences.
+        let text = "DELETE FROM logs LIMIT 10; DELETE FROM logs LIMIT 10";
+        let item = po_item(engine, text, sql_safety::Expect::Script, &c);
+        assert_eq!(
+            deny_id(&item.decision),
+            "exec-unsafe-several-targets",
+            "{engine:?}"
+        );
+    }
+}
+
+/// S2(b): `TRUNCATE … CASCADE` asks for the written table and says that every referencing
+/// table is emptied too.
+#[test]
+fn production_truncate_cascade_names_the_written_table_and_says_cascade() {
+    let c = conn(DbmsKind::Postgres, Some(EnvTag::Production));
+    let item = po_item(
+        DbmsKind::Postgres,
+        "TRUNCATE orders CASCADE",
+        sql_safety::Expect::SingleStatement,
+        &c,
+    );
+    assert_eq!(asks_once(&item), Some("orders"), "{:?}", item.decision);
+    let GateDecision::Confirm { reasons, .. } = &item.decision else {
+        unreachable!()
+    };
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.fluent_id == "safety-destructive-truncate-cascade"
+                && r.args
+                    .iter()
+                    .any(|(k, v)| *k == "table" && &**v == "orders")),
+        "{reasons:?}"
+    );
+    // Without CASCADE the plain reason stays.
+    let item = po_item(
+        DbmsKind::Postgres,
+        "TRUNCATE orders",
+        sql_safety::Expect::SingleStatement,
+        &c,
+    );
+    let GateDecision::Confirm { reasons, .. } = &item.decision else {
+        panic!("{:?}", item.decision)
+    };
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.fluent_id == "safety-destructive-truncate"),
+        "{reasons:?}"
+    );
+}
+
+/// S3: a doubled quote inside a quoted name is one quote, as the server reads it.
+#[test]
+fn production_names_with_doubled_quotes_ask_for_the_servers_reading() {
+    for (engine, text, name) in [
+        (DbmsKind::MySql, "DROP TABLE `a``b`", "a`b"),
+        (DbmsKind::MariaDb, "DELETE FROM `x``y`", "x`y"),
+        (DbmsKind::Sqlite, "DELETE FROM \"a\"\"b\"", "a\"b"),
+        (DbmsKind::Postgres, "DELETE FROM \"a\"\"b\"", "a\"b"),
+    ] {
+        let c = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, sql_safety::Expect::SingleStatement, &c);
+        assert_eq!(
+            asks_once(&item),
+            Some(name),
+            "{engine:?} `{text}`: {:?}",
+            item.decision
+        );
+    }
+}
+// ## m3c-p2-07
 
 /// A typed target whose own position does not read as its name is denied (never looked up
 /// elsewhere in the statement).

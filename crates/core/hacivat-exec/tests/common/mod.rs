@@ -1665,22 +1665,33 @@ pub mod gate_fx {
     /// `classify` does (P-M3b-2); an item whose range is empty covers the whole text.
     pub fn over(text: &str, dialect: DialectId, mut items: Vec<StmtReport>) -> SafetyReport {
         let whole = TextRange::up_to(TextSize::from(u32::try_from(text.len()).unwrap()));
+        // ## m3c-p2-07 (fix rounds 3 and 4): a hand-built pattern with a target and no range of
+        // its own sits where its statement writes that name, as a classifier places it (the gate
+        // reads a typed name only at the pattern's own position). One statement's patterns of
+        // one name share its place; another statement takes the next place not yet given out.
+        let mut taken: Vec<TextRange> = Vec::new();
         for s in &mut items {
             if s.range.is_empty() {
                 s.range = whole;
             }
-            // ## m3c-p2-07 (fix round 3): a hand-built pattern with a target and no range of its
-            // own sits where its statement first writes that name, as a classifier places it
-            // (the gate reads a typed name only at the pattern's own position).
             let stmt_range = s.range;
+            let mut mine: Vec<(String, TextRange)> = Vec::new();
             for d in &mut s.destructive {
                 if let (true, Some(t)) = (d.range.is_empty(), &d.target) {
                     let name: Vec<&str> = t.name.parts.iter().map(|p| &*p.text).collect();
-                    if let Some(r) = written_at(text, stmt_range, &name.join(".")) {
+                    let name = name.join(".");
+                    let placed = mine
+                        .iter()
+                        .find(|(n, _)| *n == name)
+                        .map(|(_, r)| *r)
+                        .or_else(|| written_at(text, stmt_range, &name, &taken));
+                    if let Some(r) = placed {
                         d.range = r;
+                        mine.push((name, r));
                     }
                 }
             }
+            taken.extend(mine.into_iter().map(|(_, r)| r));
         }
         let ctx = DialectCtx::new(dialect, None);
         let mut r = SafetyReport::pre_decided(text, sql_split::hv_norm1(text, &ctx), Vec::new());
@@ -1695,8 +1706,14 @@ pub mod gate_fx {
     }
 
     // ## m3c-p2-07 (fix round 3)
-    /// Where `name` is first written in `text[within]` as a whole word (ASCII case ignored).
-    fn written_at(text: &str, within: TextRange, name: &str) -> Option<TextRange> {
+    /// Where `name` is first written in `text[within]` as a whole word (ASCII case ignored),
+    /// at a place not in `taken`.
+    fn written_at(
+        text: &str,
+        within: TextRange,
+        name: &str,
+        taken: &[TextRange],
+    ) -> Option<TextRange> {
         let start = usize::from(within.start());
         let body = text.get(start..usize::from(within.end()))?;
         let (hay, needle) = (body.to_ascii_lowercase(), name.to_ascii_lowercase());
@@ -1710,10 +1727,11 @@ pub mod gate_fx {
             // A quoted name keeps its quotes (the gate reads it as written).
             let quoted = before.is_some_and(|c| matches!(c, '"' | '`')) && before == after;
             let (i, end) = if quoted { (i - 1, end + 1) } else { (i, end) };
-            Some(TextRange::new(
+            let r = TextRange::new(
                 TextSize::from(u32::try_from(start + i).unwrap()),
                 TextSize::from(u32::try_from(start + end).unwrap()),
-            ))
+            );
+            (!taken.contains(&r)).then_some(r)
         })
     }
 
