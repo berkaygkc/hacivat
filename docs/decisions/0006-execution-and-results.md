@@ -1231,18 +1231,88 @@ case.
   statement's own leading words read `DROP [TEMPORARY|TEMP|FOREIGN] TABLE` (so a backend that
   names the kind wrongly cannot drop the typed name, as for `DROP DATABASE`/`SCHEMA`);
   `ALTER TABLE … DROP PARTITION` keeps its row. It fails closed like the unsafe-DML rule: no
-  table to name is `exec-unsafe-no-target`, and more than one name in one unit
-  (`TRUNCATE a, b`, `DROP TABLE a, b`, `DELETE FROM a; TRUNCATE b`) is
-  `exec-unsafe-several-targets` (typing one name must never approve another). Off production
+  table to name is `exec-unsafe-no-target`, and more than one typed target in one unit
+  (`TRUNCATE a, b`, `DROP TABLE a, b`, `DELETE FROM a; TRUNCATE b`; since m3c-p2-07 fix round 3
+  also the same name twice) is `exec-unsafe-several-targets` (typing one name must never approve
+  another). Off production
   nothing changes. Views, indexes, functions, sequences and column drops keep a plain
   confirmation.
-- **Limit of the typed name (fix round 1, review m4).** The typed name needs a target the
-  classifier can see. A `TRUNCATE` or `DROP TABLE` hidden from it — inside a `DO` block,
-  dynamic SQL (`EXECUTE '…'`), `dblink_exec(…)`, MySQL `PREPARE`/`EXECUTE`, or a routine a
-  `CALL` runs — and PostgreSQL's `DROP OWNED BY r CASCADE` (which drops every table the role
-  owns) get the plain production confirmation instead: never suppressible, nothing sent before
-  the answer, but no name to type. Open PO question: should `DROP OWNED` ask for the role's
-  name typed?
+- **Limit of the typed name (fix round 1, review m4; narrowed by m3c-p2-07).** The typed name
+  needs a target the classifier can see. A `TRUNCATE` or `DROP TABLE` hidden from it — inside a
+  `DO` block, dynamic SQL (`EXECUTE '…'`), `dblink_exec(…)`, MySQL or PostgreSQL
+  `PREPARE`/`EXECUTE` (the prepared body is deferred; `EXECUTE p` is `Unknown`), or a routine a
+  `CALL` runs — gets the plain production confirmation instead: never suppressible, nothing sent
+  before the answer, but no name to type.
+- **`DROP OWNED BY` types the role's name on production (## m3c-p2-07, PO P2-07, approved
+  2026-11-18).** PostgreSQL's `DROP OWNED BY <role> [, …] [CASCADE | RESTRICT]` (which drops
+  every object the role owns in the database, every table included) now names each role as its
+  `Drop` pattern's target (`ObjectKind::Role`, where the role is written), and the gate's typed
+  name takes it when the statement is a `DROP OWNED` (since fix round 2 by the classifier's
+  statement kind, which the statement's own words must confirm). The rules are the
+  `TRUNCATE`/`DROP TABLE` ones: production only (`EnvTag::Production`), never suppressible,
+  off production nothing changes; the name is typed as written (quotes removed, letter case
+  kept, compared byte for byte). `CURRENT_USER`, `CURRENT_ROLE`, `SESSION_USER` (and `PUBLIC`)
+  are not resolved to a role name — Hacivat has no way to — so the keyword is typed as written.
+  The multi-target rule is the one `DROP TABLE a, b` follows: one typed target per unit, so
+  `DROP OWNED BY a, b`, `DROP OWNED BY a, a` (since fix round 3), two `DROP OWNED` statements,
+  or a `DROP OWNED` beside a `TRUNCATE` or unbounded `DELETE` is denied,
+  `exec-drop-owned-several-targets`. A `DROP OWNED` whose role the classifier could not name is
+  denied, `exec-drop-owned-no-target`. The dialog's reason is
+  `safety-destructive-drop-owned[-cascade]` ("Removes every object `r` owns in this database
+  …"), never `safety-destructive-drop` ("Removes `r`.", which `DROP ROLE` keeps).
+- **One typed name approves exactly one destructive target occurrence (## m3c-p2-07 fix round
+  3, controller ruling; replaces the merging of fix rounds 1 and 2).** Fix rounds 1 and 2 merged
+  the typed names of a unit that named "the same object" (by an engine case rule, a 63-byte
+  rule and a cross-statement scope). Every such rule had holes: a list of two long names that
+  libpg_query cuts alike, MySQL `DROP TABLE a, A` found through a case-insensitive search, a
+  `DROP` or a `set_config(…)` call that changes what the next name resolves to, a rename or a
+  re-`ATTACH` under a qualified name. The rule is now counting, with no merging:
+  - **Every typed target at its own position is one occurrence** (fix round 4, S1: several
+    patterns of one written target, such as `NoWhere` and `UpdateLimitNoOrder` in
+    `DELETE FROM logs LIMIT 1000`, or `NoWhere` and `JoinWithoutOn` in
+    `UPDATE t JOIN u SET t.a = 1`, are one occurrence): `TRUNCATE a, b` is two, `TRUNCATE a, A`
+    is two, `DELETE FROM t; DELETE FROM t` is two, `DROP OWNED BY a, a` is two, and a
+    multi-table `UPDATE`/`DELETE` without a bounding `WHERE` is one per written table.
+  - **More than one occurrence is denied**, `exec-unsafe-several-targets` (or
+    `exec-drop-owned-several-targets` when a `DROP OWNED` role is among them), whatever their
+    names. Run each destructive statement on its own.
+  - **Exactly one occurrence asks for its own spelling**, read at its own position, the range
+    the classifier gives that one pattern: each part's bytes as written, quotes removed, never
+    case-folded or cut (`DELETE FROM "Ürün"` asks for `Ürün`, a 70-byte name for all 70 bytes,
+    `DROP OWNED BY CURRENT_USER` for `CURRENT_USER`). The spelling is never looked up elsewhere
+    by name: the PostgreSQL backend takes each target's span from its own parse location (for
+    `DROP TABLE|FOREIGN TABLE|SCHEMA` lists, by position in the list), the interim backend from
+    `sqlparser`'s span of that name, and `DROP DATABASE|SCHEMA` from the statement's own words.
+    A position that does not read as its name is denied (`exec-unsafe-no-target`, or
+    `exec-drop-owned-no-target`).
+  - **Accepted limit: the user types the name as written; what it resolves to follows the
+    session.** `SET search_path TO archive; DELETE FROM orders` asks for `orders`, and the
+    server empties `archive.orders`. A single occurrence approves exactly the one statement the
+    dialog shows, under whatever session state the unit itself sets up.
+  - The typed comparison is unchanged: byte for byte against that spelling. A doubled quote
+    inside a quoted name is one quote, as the server reads it (fix round 4, S3): `` `a``b` ``
+    and `"a""b"` ask for ``a`b`` and `a"b`.
+  - **Implicit effects are neither counted nor typed (fix round 4, S2).** The typed name
+    confirms only the written target. What the server changes beyond it is not an occurrence:
+    `TRUNCATE … CASCADE` (every referencing table), inheritance and partition children (unless
+    `ONLY`), `ON DELETE CASCADE` foreign keys, and writes through views, rules and triggers.
+    Counting them is not feasible statically. `TRUNCATE … CASCADE` is at least named: the PG
+    backend reads its `CASCADE` (`DestructiveKind::TruncateCascade`), and the dialog says
+    "Removes every row of `orders` and of every table that references it (CASCADE)."
+    (`safety-destructive-truncate-cascade`).
+  - **Known denials (fix round 4, S4 and S5; rare, fail closed):** a comment inside a qualified
+    name (`app /*x*/ . orders`), a PostgreSQL `U&"…"` name, and a MySQL/SQLite statement whose
+    text has a lone `\r` line ending before the name cannot be read at their position, so they
+    are denied (`exec-unsafe-no-target`).
+- **Scope of the typed name (fix round 2, review M2):** only typed-target kinds compete for the
+  one name. A `DROP OWNED`, `TRUNCATE` or `DROP TABLE` beside a `DROP VIEW`, a `DROP COLUMN` or
+  another plain-confirmation drop still asks for its one name, and the dialog lists every
+  destructive pattern of the unit.
+- **`DROP OWNED` is known by the classifier's statement kind (fix round 2, review M5).**
+  libpg_query's `DropOwnedStmt` is `StmtKind::DropOwned`. When that kind and the statement's
+  own words (`DROP OWNED`) disagree, the unit is denied (`exec-drop-owned-no-target`). The
+  reason text also says that `DROP OWNED` revokes the role's privileges on shared objects
+  (databases, tablespaces) and its default privileges.
 - **More secret forms are masked in history (PO M3b-23; narrowed in fix round 1).** Secret
   name parts are now also `BEARER`, a bare `TOKEN` or a `TOKEN` after a secret-ish qualifier
   (`access_token`, `refresh_token`, `api_token`, `auth_token`; never `token_type`,

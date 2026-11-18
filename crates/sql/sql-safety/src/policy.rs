@@ -408,7 +408,7 @@ pub(crate) fn kind_rule(k: StmtKind) -> KindRule {
         K::Insert | K::Update | K::Delete | K::Merge => {
             KindRule::Floor(Group::Write, G::Dml, R::WriteData)
         }
-        K::Drop | K::Truncate => {
+        K::Drop | K::DropOwned | K::Truncate => {
             KindRule::Floor(Group::DdlDestructive, G::DdlDestructive, R::Destructive)
         }
         K::CreateTable | K::CreateOther | K::Alter => {
@@ -993,6 +993,7 @@ mod tests {
             K::Delete,
             K::Merge,
             K::Drop,
+            K::DropOwned,
             K::Truncate,
             K::CreateTable,
             K::CreateOther,

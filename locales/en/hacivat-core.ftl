@@ -750,6 +750,10 @@ safety-destructive-drop-cascade = Removes { $table } and everything that depends
 # Variables:
 #   $table (String) - the table's name as written in the statement.
 safety-destructive-truncate = Removes every row of { $table }.
+# ## m3c-p2-07 (fix round 4, S2) Destructive pattern: PostgreSQL TRUNCATE … CASCADE.
+# Variables:
+#   $table (String) - the table's name as written in the statement.
+safety-destructive-truncate-cascade = Removes every row of { $table } and of every table that references it (CASCADE).
 # Destructive pattern: ALTER … DROP COLUMN.
 # Variables:
 #   $table (String) - the table's name as written in the statement.
@@ -879,8 +883,10 @@ exec-explain-analyze-not-undone = EXPLAIN ANALYZE runs the statement and then ro
 exec-explain-analyze-refused = Not sent: EXPLAIN ANALYZE would run a statement that a rollback can't undo.
 # On production, a statement that may change every row of a table Hacivat couldn't name.
 exec-unsafe-no-target = Not sent: the statement may change every row, and Hacivat can't tell which table to ask you to confirm.
-# On production, one statement that may change every row of more than one table.
-exec-unsafe-several-targets = Not sent: the statement may change every row of more than one table. Run each part on its own.
+# On production, a run with more than one destructive target that asks for a typed name (two
+# tables, the same table twice, a table and a schema): one typed name confirms exactly one
+# (m3c-p2-07 fix round 3).
+exec-unsafe-several-targets = Not sent: on production you type one name to confirm one destructive target, and this run has more than one. Run each destructive statement on its own.
 
 # Why a statement's parameters keep it from being sent (HV-EXEC-03).
 
@@ -1023,3 +1029,21 @@ exec-run-context-unconfirmed = Not sent: Hacivat couldn't confirm this connectio
 exec-confirm-not-undone = Not undone: the table doesn't support transactions, so the statement's changes stay.
 # The unit's error for the same case.
 exec-error-confirm-not-undone = Not undone: the table doesn't support transactions, so this statement's changes stay.
+
+## m3c-p2-07
+
+# PO P2-07, destructive pattern: PostgreSQL DROP OWNED BY (the role's objects go, not the role).
+# Variables:
+#   $role (String) - the role's name as written in the statement (CURRENT_USER and the like
+#                    as written too).
+safety-destructive-drop-owned = Removes every object { $role } owns in this database. It also revokes the role's privileges here and on shared objects such as databases and tablespaces, and its default privileges.
+# PO P2-07, destructive pattern: DROP OWNED BY … CASCADE.
+# Variables:
+#   $role (String) - the role's name as written in the statement.
+safety-destructive-drop-owned-cascade = Removes every object { $role } owns in this database and everything that depends on those objects. It also revokes the role's privileges here and on shared objects such as databases and tablespaces, and its default privileges.
+# PO P2-07: on production DROP OWNED asks for one role's name typed, and this run has more
+# than one destructive target (several roles, the same role twice, or a role beside another
+# statement that asks for a name).
+exec-drop-owned-several-targets = Not sent: on production you type one role's name to confirm DROP OWNED, and this run has more than one destructive target. Run DROP OWNED for one role at a time, on its own.
+# PO P2-07: on production, a DROP OWNED whose role Hacivat couldn't name.
+exec-drop-owned-no-target = Not sent: Hacivat can't tell whose objects this DROP OWNED removes, so it can't ask you to type the role's name.

@@ -145,6 +145,12 @@ const IMPLICIT_COMMIT: &str = "exec-gate-implicit-commit";
 const EXPLAIN_REFUSED: &str = "exec-explain-analyze-refused";
 const NO_TARGET: &str = "exec-unsafe-no-target";
 const SEVERAL_TARGETS: &str = "exec-unsafe-several-targets";
+// ## m3c-p2-07 (PO P2-07): `DROP OWNED BY` on production.
+const DROP_OWNED_NO_TARGET: &str = "exec-drop-owned-no-target";
+const DROP_OWNED_SEVERAL_TARGETS: &str = "exec-drop-owned-several-targets";
+const DROP_OWNED: &str = "safety-destructive-drop-owned";
+const DROP_OWNED_CASCADE: &str = "safety-destructive-drop-owned-cascade";
+// ## m3c-p2-07
 // ## m3b-t15-gate (fix round 1)
 /// I1: a statement Hacivat could not analyse that may change data (off production).
 const NOT_ANALYSED: &str = "exec-gate-not-analysed";
@@ -371,6 +377,7 @@ fn is_ddl(s: &StmtReport) -> bool {
                 | StmtKind::CreateOther
                 | StmtKind::Alter
                 | StmtKind::Drop
+                | StmtKind::DropOwned
                 | StmtKind::Truncate
         )
         || s.class == CoarseClass::Ddl
@@ -593,72 +600,56 @@ fn slice(text: &str, r: TextRange) -> Option<&str> {
     text.get(usize::from(r.start())..usize::from(r.end()))
 }
 
-/// `target`'s name as the user wrote it in `text` (each part's exact bytes, quotes removed,
-/// never case-folded): the destructive pattern's own range when it reads as that name, else
-/// the first dotted name in the statement's range that names it (`ident_eq` per part), else
-/// the classifier's spelling (a server-resolved name: still the object that changes).
+/// `target`'s name as the dialog shows it: its spelling at its own position `at`
+/// ([`spelling_at`]), else the classifier's spelling (display only: a typed name never falls
+/// back).
 fn written_name(
     target: &ObjectRef,
-    hint: TextRange,
-    stmt: TextRange,
+    at: TextRange,
     text: &str,
     dialect: Option<DialectId>,
 ) -> Arc<str> {
-    let fallback = || dotted(target.name.parts.iter().map(|p| &*p.text));
-    let Some(d) = dialect else {
-        return fallback();
-    };
-    let named = |s: &str| {
-        parse_qualified(d, s.trim())
-            .filter(|q| same_name(d, q, &target.name))
-            .map(|q| dotted(q.parts.iter().map(|p| &*p.text)))
-    };
-    if let Some(n) = slice(text, hint).and_then(named) {
-        return n;
-    }
-    let Some(body) = slice(text, stmt) else {
-        return fallback();
-    };
-    let ctx = DialectCtx::new(d, None);
-    let Ok(profile) = lex_profile(&ctx) else {
-        return fallback();
-    };
-    let lexed = lex(body, profile, ctx.modes, &LexState::Initial);
-    let ident = |i: usize| matches!(lexed.kind(i), TokenKind::Word | TokenKind::QuotedIdent);
-    let next = |mut i: usize| {
-        i += 1;
-        while i < lexed.len() && lexed.is_trivia(i) {
-            i += 1;
-        }
-        (i < lexed.len()).then_some(i)
-    };
-    for start in (0..lexed.len()).filter(|&i| ident(i)) {
-        let mut end = start;
-        while let Some(dot) = next(end).filter(|&k| lexed.kind(k) == TokenKind::Dot) {
-            match next(dot).filter(|&k| ident(k)) {
-                Some(k) => end = k,
-                None => break,
-            }
-        }
-        let range = TextRange::new(lexed.range(start).start(), lexed.range(end).end());
-        if let Some(n) = slice(body, range).and_then(named) {
-            return n;
-        }
-    }
-    fallback()
+    spelling_at(target, at, text, dialect).unwrap_or_else(|| as_typed(&target.name))
 }
+
+// ## m3c-p2-07 (fix round 3, controller ruling)
+/// `target`'s spelling at its own position `at` (the classifier's range for that one
+/// occurrence): each part's exact bytes, quotes removed, never case-folded or cut, when the
+/// text there reads as that name; `None` otherwise. Never looked up elsewhere by name.
+fn spelling_at(
+    target: &ObjectRef,
+    at: TextRange,
+    text: &str,
+    dialect: Option<DialectId>,
+) -> Option<Arc<str>> {
+    let d = dialect?;
+    let q = parse_qualified(d, slice(text, at)?.trim())?;
+    same_name(d, &q, &target.name).then(|| as_typed(&q))
+}
+
+/// `q`'s parts as written, quotes removed, joined with `.`.
+fn as_typed(q: &QualifiedName) -> Arc<str> {
+    dotted(q.parts.iter().map(|p| &*p.text))
+}
+// ## m3c-p2-07
 
 /// The name a production confirmation asks to type (R-M3-55): the target of every unsafe-DML
 /// pattern, of a `DROP DATABASE`/`DROP SCHEMA` and (## m3b-po-typed-name, PO M3b-04) of a
-/// `TRUNCATE` or `DROP TABLE`, as written. From the destructive kinds, not
-/// the class. `Err` when one has no target (nothing to type) or two name different objects
-/// (typing one name must not approve another).
+/// `TRUNCATE` or `DROP TABLE`, and (## m3c-p2-07, PO P2-07) the role of a `DROP OWNED BY`, as
+/// written. From the destructive kinds, not the class.
+///
+/// ## m3c-p2-07 (fix round 3, controller ruling): one typed name approves exactly one
+/// destructive target occurrence. Every typed-target pattern of the unit is one occurrence (a
+/// pattern without a target of its own: one per object its statement writes); more than one is
+/// `Err` (several targets), whatever their names. The one asks for its own spelling, read at
+/// its own position; a position that does not read as its name is `Err` (no target).
 fn typed_name(
     report: &SafetyReport,
     text: &str,
     engine: DbmsKind,
 ) -> Result<Option<Arc<str>>, GateReason> {
-    let mut names: Vec<Arc<str>> = Vec::new();
+    // ## m3c-p2-07 (fix round 3; fix round 4, S1): every occurrence ([`Occurrence`]).
+    let mut found: Vec<Occurrence> = Vec::new();
     let d = dialect_for(report, engine);
     for s in &report.items {
         // Fix round 1 (I3): the statement's own words say `DROP DATABASE`/`DROP SCHEMA`, so a
@@ -673,6 +664,13 @@ fn typed_name(
                 || (["TEMPORARY", "TEMP", "FOREIGN"].iter().any(|w| word(1, w))
                     && word(2, "TABLE")));
         let alters = word(0, "ALTER");
+        // ## m3c-p2-07 (PO P2-07; fix round 2, M5): `DROP OWNED BY` names the roles whose
+        // objects go. It is the classifier's own statement kind; when its words disagree, the
+        // unit is denied (fail closed).
+        let drops_owned = s.kind == StmtKind::DropOwned;
+        if drops_owned != (word(0, "DROP") && word(1, "OWNED")) {
+            return Err(GateReason::of(DROP_OWNED_NO_TARGET));
+        }
         let mut named = false;
         for dr in &s.destructive {
             let schema_or_db = matches!(dr.kind, DestructiveKind::Drop { .. })
@@ -685,7 +683,8 @@ fn typed_name(
             // name is denied, two are several targets). `ALTER TABLE … DROP PARTITION` keeps
             // its row.
             let table_gone = match dr.kind {
-                DestructiveKind::Truncate => true,
+                // ## m3c-p2-07 (fix round 4, S2): `TRUNCATE … CASCADE` too.
+                DestructiveKind::Truncate | DestructiveKind::TruncateCascade => true,
                 DestructiveKind::Drop { .. } if !schema_or_db => {
                     drops_table
                         || (!alters
@@ -696,55 +695,110 @@ fn typed_name(
                 }
                 _ => false,
             };
-            if !dr.kind.is_unsafe_dml() && !schema_or_db && !table_gone {
+            // ## m3c-p2-07 (PO P2-07): every `Drop` of a `DROP OWNED` names its role (fail
+            // closed: no role to name is denied, two are several targets).
+            let owned_gone = drops_owned && matches!(dr.kind, DestructiveKind::Drop { .. });
+            if !dr.kind.is_unsafe_dml() && !schema_or_db && !table_gone && !owned_gone {
                 continue;
             }
-            // ## m3b-t26-prod-unlock (named exception, T26 carry MUST 1): a pattern without a
-            // target of its own names every object its statement writes, never only the first
-            // (`UPDATE a JOIN b … SET b.y = 2` writes `b`): typing one name must never approve
-            // another, so two are several targets.
-            let targets: Vec<&ObjectRef> = match dr.target.as_ref() {
-                Some(t) => vec![t],
-                None => s.touched.writes.iter().collect(),
-            };
-            if targets.is_empty() {
-                if schema_or_db && let Some(Some(n)) = &dropped_db {
-                    push_name(&mut names, n.clone());
-                    named = true;
-                    continue;
+            // ## m3c-p2-07 (fix round 3): the occurrence's spelling at its own position.
+            match dr.target.as_ref() {
+                Some(t) if owned_gone => occur(
+                    &mut found,
+                    Occurrence {
+                        at: Some((t.clone(), dr.range)),
+                        spelling: spelling_at(t, dr.range, text, report.dialect),
+                        role: true,
+                    },
+                ),
+                None if owned_gone => return Err(GateReason::of(DROP_OWNED_NO_TARGET)),
+                Some(t) => {
+                    // A dropped database or schema: its name read by position from the
+                    // statement's own words when the pattern's position does not give it.
+                    let spelling =
+                        spelling_at(t, dr.range, text, report.dialect).or_else(|| {
+                            match (&dropped_db, schema_or_db) {
+                                (Some(Some(q)), true) => Some(as_typed(q)),
+                                _ => None,
+                            }
+                        });
+                    let at = Some((t.clone(), dr.range));
+                    occur(&mut found, Occurrence::table(at, spelling));
+                    named |= schema_or_db;
                 }
-                return Err(GateReason::of(NO_TARGET));
+                None if schema_or_db && matches!(dropped_db, Some(Some(_))) => {
+                    if let Some(Some(q)) = &dropped_db {
+                        occur(&mut found, Occurrence::table(None, Some(as_typed(q))));
+                    }
+                    named = true;
+                }
+                // ## m3b-t26-prod-unlock (named exception, T26 carry MUST 1): a pattern without
+                // a target of its own names every object its statement writes, never only the
+                // first (`UPDATE a JOIN b … SET b.y = 2` writes `b`): each is one occurrence,
+                // with no position of its own.
+                None if s.touched.writes.is_empty() => return Err(GateReason::of(NO_TARGET)),
+                None => {
+                    for _ in &s.touched.writes {
+                        occur(&mut found, Occurrence::table(None, None));
+                    }
+                }
             }
-            for target in targets {
-                push_name(
-                    &mut names,
-                    written_name(target, dr.range, s.range, text, report.dialect),
-                );
-            }
-            named |= schema_or_db;
         }
         match dropped_db {
-            Some(Some(n)) if !named => push_name(&mut names, n),
+            Some(Some(q)) if !named => {
+                occur(&mut found, Occurrence::table(None, Some(as_typed(&q))));
+            }
             Some(None) if !named => return Err(GateReason::of(NO_TARGET)),
             _ => {}
         }
     }
-    match names.len() {
-        0 => Ok(None),
-        1 => Ok(names.pop()),
+    match found.as_slice() {
+        [] => Ok(None),
+        [one] => match (&one.spelling, one.role) {
+            (Some(n), _) => Ok(Some(n.clone())),
+            (None, true) => Err(GateReason::of(DROP_OWNED_NO_TARGET)),
+            (None, false) => Err(GateReason::of(NO_TARGET)),
+        },
+        // ## m3c-p2-07 (PO P2-07)
+        many if many.iter().any(|o| o.role) => Err(GateReason::of(DROP_OWNED_SEVERAL_TARGETS)),
         _ => Err(GateReason::of(SEVERAL_TARGETS)),
     }
 }
 
-fn push_name(names: &mut Vec<Arc<str>>, n: Arc<str>) {
-    if !names.contains(&n) {
-        names.push(n);
+// ## m3c-p2-07 (fix round 4, S1)
+/// One typed-target occurrence: where it is written (its target and its own range; `None`: no
+/// position of its own), its spelling there (`None`: unreadable) and whether it is a
+/// `DROP OWNED` role.
+struct Occurrence {
+    at: Option<(ObjectRef, TextRange)>,
+    spelling: Option<Arc<str>>,
+    role: bool,
+}
+
+impl Occurrence {
+    fn table(at: Option<(ObjectRef, TextRange)>, spelling: Option<Arc<str>>) -> Occurrence {
+        Occurrence {
+            at,
+            spelling,
+            role: false,
+        }
     }
 }
 
+/// Adds `o` unless the same target at the same position is already there: one written target
+/// with several patterns (`NoWhere` and `UpdateLimitNoOrder`, `NoWhere` and `JoinWithoutOn`) is
+/// one occurrence; two positions are always two.
+fn occur(found: &mut Vec<Occurrence>, o: Occurrence) {
+    if o.at.is_none() || !found.iter().any(|f| f.at == o.at) {
+        found.push(o);
+    }
+}
+// ## m3c-p2-07
+
 /// When `stmt` (in dialect `d`) reads `DROP DATABASE|SCHEMA [IF EXISTS] <name>`: the name as
 /// written (`Some(None)` when none can be read); `None` for any other statement.
-fn drop_database_name(stmt: &str, d: DialectId) -> Option<Option<Arc<str>>> {
+/// ## m3c-p2-07 (fix round 2): the parsed name (the typed spelling is read from it).
+fn drop_database_name(stmt: &str, d: DialectId) -> Option<Option<QualifiedName>> {
     let ctx = DialectCtx::new(d, None);
     let profile = lex_profile(&ctx).ok()?;
     let lexed = lex(stmt, profile, ctx.modes, &LexState::Initial);
@@ -795,11 +849,7 @@ fn drop_database_name(stmt: &str, d: DialectId) -> Option<Option<Arc<str>>> {
         return Some(None);
     }
     let range = TextRange::new(lexed.range(first).start(), lexed.range(end).end());
-    Some(
-        slice(stmt, range)
-            .and_then(|s| parse_qualified(d, s))
-            .map(|q| dotted(q.parts.iter().map(|p| &*p.text))),
-    )
+    Some(slice(stmt, range).and_then(|s| parse_qualified(d, s)))
 }
 
 // ## m3b-po-typed-name (PO M3b-04)
@@ -837,16 +887,25 @@ fn leading_words(stmt: &str, d: DialectId, n: usize) -> Vec<String> {
 fn reasons_of(report: &SafetyReport, text: &str) -> Vec<GateReason> {
     let mut out = Vec::new();
     for s in &report.items {
+        // ## m3c-p2-07 (PO P2-07; fix round 2, M5): a `DROP OWNED` role loses what it owns,
+        // not itself; known by the classifier's statement kind.
+        let drops_owned = s.kind == StmtKind::DropOwned;
         for d in &s.destructive {
-            let reason = match &d.target {
-                Some(t) => GateReason {
-                    fluent_id: d.kind.fluent_id(),
-                    args: vec![(
-                        "table",
-                        written_name(t, d.range, s.range, text, report.dialect),
-                    )],
+            let reason = match (&d.target, d.kind) {
+                (Some(t), DestructiveKind::Drop { cascade }) if drops_owned => GateReason {
+                    fluent_id: if cascade {
+                        DROP_OWNED_CASCADE
+                    } else {
+                        DROP_OWNED
+                    },
+                    args: vec![("role", written_name(t, d.range, text, report.dialect))],
                 },
-                None => GateReason::of(DESTRUCTIVE),
+                // ## m3c-p2-07
+                (Some(t), _) => GateReason {
+                    fluent_id: d.kind.fluent_id(),
+                    args: vec![("table", written_name(t, d.range, text, report.dialect))],
+                },
+                (None, _) => GateReason::of(DESTRUCTIVE),
             };
             push_unique(&mut out, reason);
         }

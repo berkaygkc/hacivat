@@ -325,14 +325,30 @@ fn drop_database_asks_for_the_name_from_the_words() {
 
 #[test]
 fn ddl_does_not_hide_an_unsafe_dml_name() {
-    // ## m3b-po-typed-name (named exception, PO M3b-04): `DROP TABLE` now types its own name,
-    // so the DDL here drops the same table; a different one is two names (below).
+    // ## m3b-po-typed-name (named exception, PO M3b-04): `DROP TABLE` now types its own name.
+    // ## m3c-p2-07 (named exception, fix round 3): one typed name approves one occurrence, so
+    // the same table deleted and then dropped is two occurrences (denied); a DDL that types no
+    // name still does not hide the `DELETE`'s.
     let text = "DELETE FROM orders; DROP TABLE orders";
     let items = vec![
         fake_stmt("DELETE FROM orders"),
         fake_stmt("DROP TABLE orders"),
     ];
     let item = gated(text, items, &conn_prod());
+    assert_eq!(item.class, GateClass::DdlDestructive);
+    assert_eq!(deny_id(&item.decision), "exec-unsafe-several-targets");
+    let mut column = stmt(StmtKind::Alter, EffectSet::DDL);
+    column.destructive.push(DestructiveReason {
+        kind: DestructiveKind::DropColumn,
+        range: TextRange::default(),
+        target: Some(object("orders", ObjectKind::Table)),
+    });
+    let text = "DELETE FROM orders; ALTER TABLE orders DROP COLUMN c";
+    let item = gated(
+        text,
+        vec![fake_stmt("DELETE FROM orders"), column],
+        &conn_prod(),
+    );
     assert_eq!(item.class, GateClass::DdlDestructive);
     assert!(matches!(
         item.decision,
@@ -2039,7 +2055,7 @@ fn oracle(
         && (unsafe_dml
             || class == G::DdlDestructive
             || extra.is_some_and(|(k, o)| match k {
-                DestructiveKind::Truncate => true,
+                DestructiveKind::Truncate | DestructiveKind::TruncateCascade => true,
                 DestructiveKind::Drop { .. } => {
                     matches!(
                         o,
@@ -2048,6 +2064,28 @@ fn oracle(
                 }
                 _ => false,
             }));
+    // ## m3c-p2-07 (named exception, fix rounds 3 and 4, controller rulings): one typed name
+    // approves one occurrence, a target at its own position. The representative's table
+    // `orders` and a typed extra on the same table at the same place are one occurrence (S1);
+    // a dropped schema or database `orders` is another object (two, several targets); a typed
+    // extra over a text that never writes `orders` has no position to read its spelling from.
+    // Those two are denied.
+    let base_typed = matches!(class, G::DmlUnsafe | G::DdlDestructive);
+    let extra_typed = extra.is_some_and(|(k, o)| match k {
+        DestructiveKind::Truncate | DestructiveKind::TruncateCascade => true,
+        DestructiveKind::Drop { .. } => matches!(
+            o,
+            ObjectKind::Schema | ObjectKind::Database | ObjectKind::Table
+        ),
+        k => k.is_unsafe_dml(),
+    });
+    let writes_orders = matches!(class, G::Dml | G::DmlUnsafe | G::DdlDestructive);
+    let other_object =
+        extra.is_some_and(|(_, o)| matches!(o, ObjectKind::Schema | ObjectKind::Database));
+    if production && extra_typed && (!writes_orders || (base_typed && other_object)) {
+        return deny;
+    }
+    // ## m3c-p2-07
     let implicit = commits && tx_open;
     let mut shape = if production {
         match eff {
@@ -2179,7 +2217,8 @@ fn verdict_table_matches_r_m3_55_for_every_combination() {
             }
         }
     }
-    assert_eq!(cases, 11 * 14 * 8 * 5 * 6 * 2);
+    // ## m3c-p2-07 (named exception, fix round 4, S2): `TruncateCascade` is one more kind.
+    assert_eq!(cases, 11 * 15 * 8 * 5 * 6 * 2);
 }
 
 /// Fix round 1 (M1): `EXPLAIN ANALYZE` of every class, at every level and engine, against the
@@ -3142,6 +3181,537 @@ fn production_drops_of_other_objects_keep_their_row() {
             item.decision
         );
     }
+}
+
+// ## m3c-p2-07 (PO P2-07): on production `DROP OWNED BY <role>` asks for the role's name typed,
+// as `TRUNCATE` and `DROP TABLE` ask for the table's: as written (quotes removed, letter case
+// kept), never suppressible. `CURRENT_USER`, `CURRENT_ROLE`, `SESSION_USER` are typed as the
+// keyword is written (Hacivat does not resolve them). More than one role, or a role with any
+// other typed name in the unit, is the multi-target rule (denied: typing one name must never
+// approve another); no role to name is denied. Off production nothing changes.
+
+#[test]
+fn production_drop_owned_asks_for_the_role_name_typed() {
+    let rows: &[(&str, &str, &str)] = &[
+        ("DROP OWNED BY bob", "bob", "safety-destructive-drop-owned"),
+        (
+            "DROP OWNED BY bob CASCADE",
+            "bob",
+            "safety-destructive-drop-owned-cascade",
+        ),
+        (
+            "DROP OWNED BY \"Bob\" RESTRICT",
+            "Bob",
+            "safety-destructive-drop-owned",
+        ),
+        ("drop owned by Bob", "Bob", "safety-destructive-drop-owned"),
+        (
+            "DROP OWNED BY \"müşteri yönetici\"",
+            "müşteri yönetici",
+            "safety-destructive-drop-owned",
+        ),
+        (
+            "DROP OWNED BY owned",
+            "owned",
+            "safety-destructive-drop-owned",
+        ),
+        (
+            "DROP OWNED BY CURRENT_USER",
+            "CURRENT_USER",
+            "safety-destructive-drop-owned",
+        ),
+        (
+            "DROP OWNED BY current_role",
+            "current_role",
+            "safety-destructive-drop-owned",
+        ),
+        (
+            "DROP OWNED BY Session_User CASCADE",
+            "Session_User",
+            "safety-destructive-drop-owned-cascade",
+        ),
+    ];
+    let single = sql_safety::Expect::SingleStatement;
+    let engine = DbmsKind::Postgres;
+    for &(text, name, reason_id) in rows {
+        let prod = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, single, &prod);
+        match &item.decision {
+            GateDecision::Confirm {
+                type_to_confirm: Some(t),
+                suppressible: false,
+                reasons,
+                ..
+            } => {
+                assert_eq!(&**t, name, "`{text}`");
+                assert!(
+                    reasons.iter().any(|r| r.fluent_id == reason_id
+                        && r.args.iter().any(|(k, v)| *k == "role" && &**v == name)),
+                    "`{text}`: {reasons:?}"
+                );
+            }
+            other => panic!("`{text}`: {other:?}"),
+        }
+        // Off production nobody types (the class's own row stands).
+        for env in [EnvTag::Staging, EnvTag::Dev] {
+            let item = po_item(engine, text, single, &conn(engine, Some(env)));
+            assert!(
+                !matches!(
+                    item.decision,
+                    GateDecision::Confirm {
+                        type_to_confirm: Some(_),
+                        ..
+                    } | GateDecision::Deny(_)
+                ),
+                "{env:?} `{text}`: {:?}",
+                item.decision
+            );
+        }
+    }
+}
+
+#[test]
+fn production_drop_owned_of_several_roles_is_denied() {
+    for text in [
+        "DROP OWNED BY a, b",
+        "DROP OWNED BY a, b CASCADE",
+        "DROP OWNED BY CURRENT_USER, SESSION_USER",
+        // The keyword and a role spelled alike are two roles.
+        "DROP OWNED BY \"current_user\", current_user",
+        "DROP OWNED BY \"current_user\"; DROP OWNED BY current_user",
+        "DROP OWNED BY a; DROP OWNED BY b",
+        // A role and a table spelled alike are two objects.
+        "TRUNCATE a; DROP OWNED BY a",
+        "DELETE FROM a; DROP OWNED BY a",
+    ] {
+        let engine = DbmsKind::Postgres;
+        let prod = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, sql_safety::Expect::Script, &prod);
+        assert_eq!(
+            deny_id(&item.decision),
+            "exec-drop-owned-several-targets",
+            "`{text}`"
+        );
+        for env in [EnvTag::Staging, EnvTag::Dev] {
+            let item = po_item(
+                engine,
+                text,
+                sql_safety::Expect::Script,
+                &conn(engine, Some(env)),
+            );
+            assert!(
+                !matches!(item.decision, GateDecision::Deny(_)),
+                "{env:?} `{text}`: {:?}",
+                item.decision
+            );
+        }
+    }
+}
+
+// ## m3c-p2-07 (fix round 3, controller ruling): on production one typed name approves exactly
+// one destructive target occurrence. Every typed-target pattern of the unit counts (`TRUNCATE a,
+// b` is two, `TRUNCATE a, A` is two, `DELETE FROM t; DELETE FROM t` is two, `DROP OWNED BY a, a`
+// is two, a multi-table write without `WHERE` one per table); more than one is several targets.
+// The one asks for its own spelling, read at its own position (quotes removed, byte for byte);
+// a position that does not read as its name is denied. Replaces the fix round 1 and 2 merge
+// tests (`production_one_typed_name_never_approves_two_objects`,
+// `production_typed_names_never_merge_past_what_the_key_can_prove`).
+
+/// `text` classified in dialect `d` and gated on `c`.
+fn po_item_in(d: DialectId, text: &str, c: &ConnSafety) -> GateItem {
+    let ctx = sql_safety::ClassifyCtx::new(
+        sql_dialect::DialectCtx::new(d, None),
+        sql_dialect::ClientFlavor::None,
+        sql_safety::Expect::Script,
+    );
+    let unit = prepared_on(c.engine, text, &[]);
+    let report = sql_safety::classify(&unit.final_text, &ctx);
+    one(unit, report, c)
+}
+
+fn asks_once(item: &GateItem) -> Option<&str> {
+    match &item.decision {
+        GateDecision::Confirm {
+            type_to_confirm: Some(t),
+            suppressible: false,
+            ..
+        } => Some(&**t),
+        _ => None,
+    }
+}
+
+#[test]
+fn production_one_typed_name_approves_one_occurrence() {
+    let long = "a".repeat(63);
+    let redshift = DialectId::PgWire(sql_dialect::PgWireFlavor::Redshift);
+    // R1: two long names sharing their first 63 bytes, in one list and in two statements.
+    let rs = conn(DbmsKind::Redshift, Some(EnvTag::Production));
+    let pg = conn(DbmsKind::Postgres, Some(EnvTag::Production));
+    for (d, c) in [(redshift, &rs), (DialectId::Postgres, &pg)] {
+        for text in [
+            format!("TRUNCATE {long}x, {long}y"),
+            format!("DROP TABLE {long}x, {long}y"),
+            format!("TRUNCATE {long}x; TRUNCATE {long}y"),
+            format!("TRUNCATE {long}x; TRUNCATE {long}x"),
+        ] {
+            let item = po_item_in(d, &text, c);
+            assert_eq!(
+                deny_id(&item.decision),
+                "exec-unsafe-several-targets",
+                "{d:?} `{text}`"
+            );
+        }
+    }
+    let item = po_item_in(redshift, &format!("DROP OWNED BY {long}x, {long}y"), &rs);
+    assert_eq!(
+        deny_id(&item.decision),
+        "exec-drop-owned-several-targets",
+        "{:?}",
+        item.decision
+    );
+    let deny = [
+        // R2: one statement, two spellings.
+        (
+            DbmsKind::MySql,
+            "DROP TABLE a, A",
+            "exec-unsafe-several-targets",
+        ),
+        (
+            DbmsKind::MariaDb,
+            "DROP TABLE a, A",
+            "exec-unsafe-several-targets",
+        ),
+        (
+            DbmsKind::MySql,
+            "DROP TABLE `a`, A",
+            "exec-unsafe-several-targets",
+        ),
+        (
+            DbmsKind::MySql,
+            "UPDATE a JOIN A ON 1=1 SET a.x=1, A.y=2",
+            "exec-unsafe-several-targets",
+        ),
+        // R3: a DROP changes what the next name resolves to.
+        (
+            DbmsKind::Postgres,
+            "DROP TABLE t; DELETE FROM t",
+            "exec-unsafe-several-targets",
+        ),
+        (
+            DbmsKind::Postgres,
+            "DROP TABLE t; DROP TABLE t",
+            "exec-unsafe-several-targets",
+        ),
+        // R4: a call inside a typed statement changes the search path.
+        (
+            DbmsKind::Postgres,
+            "DELETE FROM t WHERE set_config('search_path','archive',false) IS NOT NULL; \
+             DELETE FROM t",
+            "exec-unsafe-several-targets",
+        ),
+        // R5: qualified names across a rename and a re-attach.
+        (
+            DbmsKind::Postgres,
+            "TRUNCATE s.t; ALTER TABLE s.t RENAME TO t_old; ALTER TABLE s.t_new RENAME TO t; \
+             TRUNCATE s.t",
+            "exec-unsafe-several-targets",
+        ),
+        // The same name twice is two occurrences.
+        (
+            DbmsKind::Postgres,
+            "DELETE FROM t; DELETE FROM t",
+            "exec-unsafe-several-targets",
+        ),
+        (
+            DbmsKind::Postgres,
+            "TRUNCATE a, A",
+            "exec-unsafe-several-targets",
+        ),
+        (
+            DbmsKind::Postgres,
+            "TRUNCATE \"A\", A",
+            "exec-unsafe-several-targets",
+        ),
+        (
+            DbmsKind::Postgres,
+            "DROP SCHEMA a; TRUNCATE a",
+            "exec-unsafe-several-targets",
+        ),
+        (
+            DbmsKind::Sqlite,
+            "DELETE FROM t; DELETE FROM \"T\"",
+            "exec-unsafe-several-targets",
+        ),
+        (
+            DbmsKind::Postgres,
+            "DROP OWNED BY a, a",
+            "exec-drop-owned-several-targets",
+        ),
+        (
+            DbmsKind::Postgres,
+            "DROP OWNED BY a, A",
+            "exec-drop-owned-several-targets",
+        ),
+    ];
+    for (engine, text, id) in deny {
+        let c = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, sql_safety::Expect::Script, &c);
+        assert_eq!(deny_id(&item.decision), id, "{engine:?} `{text}`");
+    }
+    // R5 (SQLite): denied, whichever rule denies it first.
+    let c = conn(DbmsKind::Sqlite, Some(EnvTag::Production));
+    let text = "DELETE FROM aux.t; DETACH aux; ATTACH 'b.db' AS aux; DELETE FROM aux.t";
+    let item = po_item(DbmsKind::Sqlite, text, sql_safety::Expect::Script, &c);
+    assert!(
+        matches!(item.decision, GateDecision::Deny(_)),
+        "`{text}`: {:?}",
+        item.decision
+    );
+
+    // One occurrence asks for its own spelling, exactly as written.
+    let once = [
+        (
+            DbmsKind::Postgres,
+            "BEGIN; DELETE FROM t; COMMIT",
+            "t".to_string(),
+        ),
+        (
+            DbmsKind::Postgres,
+            "DELETE FROM \"Orders\"",
+            "Orders".to_string(),
+        ),
+        (
+            DbmsKind::Postgres,
+            "TRUNCATE App.Orders",
+            "App.Orders".to_string(),
+        ),
+        (DbmsKind::Postgres, "DELETE FROM Ürün", "Ürün".to_string()),
+        (
+            DbmsKind::Postgres,
+            "DELETE FROM \"Ürün\"",
+            "Ürün".to_string(),
+        ),
+        (
+            DbmsKind::Postgres,
+            "DROP OWNED BY CURRENT_USER",
+            "CURRENT_USER".to_string(),
+        ),
+        (
+            DbmsKind::Postgres,
+            &*format!("TRUNCATE {long}xyz"),
+            format!("{long}xyz"),
+        ),
+        (
+            DbmsKind::Postgres,
+            "DROP SCHEMA IF EXISTS \"App\" CASCADE",
+            "App".to_string(),
+        ),
+        (
+            DbmsKind::MySql,
+            "DROP TABLE IF EXISTS `my orders`",
+            "my orders".to_string(),
+        ),
+        (
+            DbmsKind::MySql,
+            "DELETE FROM shop.Orders",
+            "shop.Orders".to_string(),
+        ),
+        (DbmsKind::Sqlite, "DELETE FROM [t]", "t".to_string()),
+        // Accepted limit: the name as written; what it resolves to follows the session.
+        (
+            DbmsKind::Postgres,
+            "SET search_path TO archive; DELETE FROM orders",
+            "orders".to_string(),
+        ),
+    ];
+    for (engine, text, name) in once {
+        let c = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, sql_safety::Expect::Script, &c);
+        assert_eq!(
+            asks_once(&item),
+            Some(&*name),
+            "{engine:?} `{text}`: {:?}",
+            item.decision
+        );
+    }
+}
+
+// ## m3c-p2-07 (fix round 4, re-review 2: S1, S2, S3)
+/// S1: an occurrence is a target at its own position, however many patterns the classifier
+/// gives it (`NoWhere` and `UpdateLimitNoOrder`, `NoWhere` and `JoinWithoutOn` on one table);
+/// two positions are still two occurrences.
+#[test]
+fn production_one_written_target_asks_once_whatever_its_patterns() {
+    for engine in [DbmsKind::MySql, DbmsKind::MariaDb] {
+        let c = conn(engine, Some(EnvTag::Production));
+        for (text, name) in [
+            ("DELETE FROM logs LIMIT 1000", "logs"),
+            ("UPDATE t SET x=0 LIMIT 10", "t"),
+            ("UPDATE t JOIN u SET t.a=1", "t"),
+            ("DELETE t FROM t JOIN u", "t"),
+        ] {
+            let item = po_item(engine, text, sql_safety::Expect::SingleStatement, &c);
+            assert_eq!(
+                asks_once(&item),
+                Some(name),
+                "{engine:?} `{text}`: {:?}",
+                item.decision
+            );
+        }
+        // Two positions are two occurrences.
+        let text = "DELETE FROM logs LIMIT 10; DELETE FROM logs LIMIT 10";
+        let item = po_item(engine, text, sql_safety::Expect::Script, &c);
+        assert_eq!(
+            deny_id(&item.decision),
+            "exec-unsafe-several-targets",
+            "{engine:?}"
+        );
+    }
+}
+
+/// S2(b): `TRUNCATE … CASCADE` asks for the written table and says that every referencing
+/// table is emptied too.
+#[test]
+fn production_truncate_cascade_names_the_written_table_and_says_cascade() {
+    let c = conn(DbmsKind::Postgres, Some(EnvTag::Production));
+    let item = po_item(
+        DbmsKind::Postgres,
+        "TRUNCATE orders CASCADE",
+        sql_safety::Expect::SingleStatement,
+        &c,
+    );
+    assert_eq!(asks_once(&item), Some("orders"), "{:?}", item.decision);
+    let GateDecision::Confirm { reasons, .. } = &item.decision else {
+        unreachable!()
+    };
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.fluent_id == "safety-destructive-truncate-cascade"
+                && r.args
+                    .iter()
+                    .any(|(k, v)| *k == "table" && &**v == "orders")),
+        "{reasons:?}"
+    );
+    // Without CASCADE the plain reason stays.
+    let item = po_item(
+        DbmsKind::Postgres,
+        "TRUNCATE orders",
+        sql_safety::Expect::SingleStatement,
+        &c,
+    );
+    let GateDecision::Confirm { reasons, .. } = &item.decision else {
+        panic!("{:?}", item.decision)
+    };
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.fluent_id == "safety-destructive-truncate"),
+        "{reasons:?}"
+    );
+}
+
+/// S3: a doubled quote inside a quoted name is one quote, as the server reads it.
+#[test]
+fn production_names_with_doubled_quotes_ask_for_the_servers_reading() {
+    for (engine, text, name) in [
+        (DbmsKind::MySql, "DROP TABLE `a``b`", "a`b"),
+        (DbmsKind::MariaDb, "DELETE FROM `x``y`", "x`y"),
+        (DbmsKind::Sqlite, "DELETE FROM \"a\"\"b\"", "a\"b"),
+        (DbmsKind::Postgres, "DELETE FROM \"a\"\"b\"", "a\"b"),
+    ] {
+        let c = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, sql_safety::Expect::SingleStatement, &c);
+        assert_eq!(
+            asks_once(&item),
+            Some(name),
+            "{engine:?} `{text}`: {:?}",
+            item.decision
+        );
+    }
+}
+// ## m3c-p2-07
+
+/// A typed target whose own position does not read as its name is denied (never looked up
+/// elsewhere in the statement).
+#[test]
+fn production_typed_name_unreadable_at_its_position_is_denied() {
+    let mut s = stmt(StmtKind::Truncate, EffectSet::WRITE_DATA);
+    s.destructive.push(DestructiveReason {
+        kind: DestructiveKind::Truncate,
+        // `TRUNCATE` itself, not where `orders` is written.
+        range: TextRange::new(0.into(), 8.into()),
+        target: Some(object("orders", ObjectKind::Table)),
+    });
+    let item = gated("TRUNCATE orders", vec![s], &conn_prod());
+    assert_eq!(deny_id(&item.decision), "exec-unsafe-no-target");
+}
+
+/// M2: a `DROP OWNED` beside drops that type no name asks for the role only, and the dialog
+/// still lists every destructive pattern of the unit.
+#[test]
+fn production_drop_owned_beside_untyped_drops_lists_them_all() {
+    let c = conn(DbmsKind::Postgres, Some(EnvTag::Production));
+    let text = "DROP OWNED BY app_rw; DROP VIEW reporting.v; ALTER TABLE t DROP COLUMN c";
+    let item = po_item(DbmsKind::Postgres, text, sql_safety::Expect::Script, &c);
+    assert_eq!(asks_once(&item), Some("app_rw"), "{:?}", item.decision);
+    let GateDecision::Confirm { reasons, .. } = &item.decision else {
+        unreachable!()
+    };
+    for (id, arg) in [
+        ("safety-destructive-drop-owned", "app_rw"),
+        ("safety-destructive-drop", "reporting.v"),
+        ("safety-destructive-drop-column", "t"),
+    ] {
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.fluent_id == id && r.args.iter().any(|(_, v)| &**v == arg)),
+            "{id} {arg}: {reasons:?}"
+        );
+    }
+}
+
+/// M5: `DROP OWNED` is known by the classifier's statement kind; when the kind and the
+/// statement's words disagree, it is denied.
+#[test]
+fn production_drop_owned_kind_and_words_must_agree() {
+    let role = || DestructiveReason {
+        kind: DestructiveKind::Drop { cascade: false },
+        range: TextRange::default(),
+        target: Some(object("r", ObjectKind::Role)),
+    };
+    // The words say DROP OWNED, the kind does not.
+    let mut s = stmt(StmtKind::Drop, EffectSet::DDL | EffectSet::PRIVILEGE);
+    s.destructive.push(role());
+    let item = gated("DROP OWNED BY r", vec![s], &conn_prod());
+    assert_eq!(deny_id(&item.decision), "exec-drop-owned-no-target");
+    // The kind says DROP OWNED, the words do not.
+    let mut s = stmt(StmtKind::DropOwned, EffectSet::DDL | EffectSet::PRIVILEGE);
+    s.destructive.push(role());
+    let item = gated("DROP ROLE r", vec![s], &conn_prod());
+    assert_eq!(deny_id(&item.decision), "exec-drop-owned-no-target");
+}
+// ## m3c-p2-07
+
+#[test]
+fn production_drop_owned_without_a_role_is_denied() {
+    // ## m3c-p2-07 (fix round 2, M5): the classifier's own kind.
+    let mut s = stmt(StmtKind::DropOwned, EffectSet::DDL | EffectSet::PRIVILEGE);
+    s.destructive.push(DestructiveReason {
+        kind: DestructiveKind::Drop { cascade: true },
+        range: TextRange::default(),
+        target: None,
+    });
+    let item = gated("DROP OWNED BY r CASCADE", vec![s.clone()], &conn_prod());
+    assert_eq!(deny_id(&item.decision), "exec-drop-owned-no-target");
+    // Off production the class's own row stands.
+    let item = gated("DROP OWNED BY r CASCADE", vec![s], &conn_dev());
+    assert!(
+        !matches!(item.decision, GateDecision::Deny(_)),
+        "{:?}",
+        item.decision
+    );
 }
 
 // ## m3b-gate-explain: the B-M6 shortcut (a plain `EXPLAIN` of a data change is a read) never

@@ -60,6 +60,9 @@ pub enum StmtKind {
     CreateOther,
     Alter,
     Drop,
+    // ## m3c-p2-07 (fix round 2, M5): PostgreSQL `DROP OWNED BY` (libpg_query's
+    // `DropOwnedStmt`), so the production gate knows it from the parse.
+    DropOwned,
     Truncate,
     Grant,
     Revoke,

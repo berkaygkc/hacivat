@@ -16,6 +16,9 @@ pub enum DestructiveKind {
     JoinWithoutOn,
     Drop { cascade: bool },
     Truncate,
+    // ## m3c-p2-07 (fix round 4, S2): PostgreSQL `TRUNCATE … CASCADE` (every referencing
+    // table is emptied too).
+    TruncateCascade,
     DropColumn,
     DropConstraint,
     AlterType,
@@ -25,13 +28,14 @@ pub enum DestructiveKind {
 
 impl DestructiveKind {
     /// Every kind (both `Drop` values), in declaration order.
-    pub const ALL: [DestructiveKind; 11] = [
+    pub const ALL: [DestructiveKind; 12] = [
         DestructiveKind::NoWhere,
         DestructiveKind::AlwaysTrue,
         DestructiveKind::JoinWithoutOn,
         DestructiveKind::Drop { cascade: false },
         DestructiveKind::Drop { cascade: true },
         DestructiveKind::Truncate,
+        DestructiveKind::TruncateCascade,
         DestructiveKind::DropColumn,
         DestructiveKind::DropConstraint,
         DestructiveKind::AlterType,
@@ -49,6 +53,7 @@ impl DestructiveKind {
             | DestructiveKind::MergeDelete => true,
             DestructiveKind::Drop { .. }
             | DestructiveKind::Truncate
+            | DestructiveKind::TruncateCascade
             | DestructiveKind::DropColumn
             | DestructiveKind::DropConstraint
             | DestructiveKind::AlterType => false,
@@ -79,6 +84,7 @@ impl DestructiveKind {
             DestructiveKind::Drop { cascade: false } => "safety-destructive-drop",
             DestructiveKind::Drop { cascade: true } => "safety-destructive-drop-cascade",
             DestructiveKind::Truncate => "safety-destructive-truncate",
+            DestructiveKind::TruncateCascade => "safety-destructive-truncate-cascade",
             DestructiveKind::DropColumn => "safety-destructive-drop-column",
             DestructiveKind::DropConstraint => "safety-destructive-drop-constraint",
             DestructiveKind::AlterType => "safety-destructive-alter-type",
@@ -336,11 +342,12 @@ mod tests {
             DestructiveKind::Drop { cascade: false } => 3,
             DestructiveKind::Drop { cascade: true } => 4,
             DestructiveKind::Truncate => 5,
-            DestructiveKind::DropColumn => 6,
-            DestructiveKind::DropConstraint => 7,
-            DestructiveKind::AlterType => 8,
-            DestructiveKind::MergeDelete => 9,
-            DestructiveKind::UpdateLimitNoOrder => 10,
+            DestructiveKind::TruncateCascade => 6,
+            DestructiveKind::DropColumn => 7,
+            DestructiveKind::DropConstraint => 8,
+            DestructiveKind::AlterType => 9,
+            DestructiveKind::MergeDelete => 10,
+            DestructiveKind::UpdateLimitNoOrder => 11,
         }
     }
 

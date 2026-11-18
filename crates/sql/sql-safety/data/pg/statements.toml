@@ -119,7 +119,8 @@ rows = [
   { node = "DropRoleStmt", kind = "Drop", effects = ["PRIVILEGE"] },
   { node = "AlterOwnerStmt", kind = "Alter", effects = ["PRIVILEGE"] },
   { node = "ReassignOwnedStmt", kind = "Alter", effects = ["PRIVILEGE"] },
-  { node = "DropOwnedStmt", kind = "Drop", effects = ["DDL", "PRIVILEGE"] },
+  # ## m3c-p2-07 (fix round 2, M5): its own kind, so the production gate knows it from the parse.
+  { node = "DropOwnedStmt", kind = "DropOwned", effects = ["DDL", "PRIVILEGE"] },
   # Transactions and session state
   { node = "TransactionStmt", kind = "Begin", effects = ["TXN_CONTROL"] },
   { node = "ConstraintsSetStmt", kind = "Other", effects = ["TXN_CONTROL"] },
