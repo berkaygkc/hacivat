@@ -564,15 +564,22 @@ jobs:
 
   # Task 18's pseudo-locale screen harness. Skips until tests/shots.rs exists.
   pseudo-screens:
-    name: pseudo-screens (${{ matrix.os }})
+    name: pseudo-screens (${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }})
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     # ## m3b-ci (controller): the M3b shot set (3,244 states) outgrew 60 min on hosted runners.
     timeout-minutes: 180
+    # ## m3c-t45 (controller): Linux renders ~2.5 s per shot on hosted runners, so the M3c set
+    # (4,860 states) needs ~3.4 h in one process, past the 180 min bound: Linux runs it in two
+    # shards (`--shard k/n`, every other state), each its own process with its own thread
+    # guard. macOS renders the whole set in one process (~2.1 h).
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, ubuntu-24.04]
+        include:
+          - { os: macos-15, part: 1, parts: 1 }
+          - { os: ubuntu-24.04, part: 1, parts: 2 }
+          - { os: ubuntu-24.04, part: 2, parts: 2 }
     steps:
       - uses: actions/checkout@v4
       - name: Detect the screen harness
@@ -615,16 +622,16 @@ jobs:
         if: steps.guard.outputs.present == 'true'
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a cargo test --locked -p hacivat-app --features scene-check,pseudo,shots --test shots -- --ignored --nocapture
+            xvfb-run -a cargo test --locked -p hacivat-app --features scene-check,pseudo,shots --test shots -- --ignored --nocapture --shard ${{ matrix.part }}/${{ matrix.parts }}
           else
-            cargo test --locked -p hacivat-app --features scene-check,pseudo,shots --test shots -- --ignored --nocapture
+            cargo test --locked -p hacivat-app --features scene-check,pseudo,shots --test shots -- --ignored --nocapture --shard ${{ matrix.part }}/${{ matrix.parts }}
           fi
       # A failing render still uploads what it wrote, so the violations can be looked at.
       - name: Upload screens
         if: always() && steps.guard.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: pseudo-screens-${{ runner.os }}
+          name: pseudo-screens-${{ runner.os }}-${{ matrix.part }}
           path: target/shots/**
           if-no-files-found: error
       # F17: pixel comparison (dE2000) against the committed macOS baselines. Skipped until

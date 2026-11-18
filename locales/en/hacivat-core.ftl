@@ -886,7 +886,7 @@ exec-unsafe-no-target = Not sent: the statement may change every row, and Haciva
 # On production, a run with more than one destructive target that asks for a typed name (two
 # tables, the same table twice, a table and a schema): one typed name confirms exactly one
 # (m3c-p2-07 fix round 3).
-exec-unsafe-several-targets = Not sent: on production you type one name to confirm one destructive target, and this run has more than one. Run each destructive statement on its own.
+exec-unsafe-several-targets = Not sent: a typed name confirms one destructive target; this run has several. Run each on its own.
 
 # Why a statement's parameters keep it from being sent (HV-EXEC-03).
 
@@ -1044,6 +1044,6 @@ safety-destructive-drop-owned-cascade = Removes every object { $role } owns in t
 # PO P2-07: on production DROP OWNED asks for one role's name typed, and this run has more
 # than one destructive target (several roles, the same role twice, or a role beside another
 # statement that asks for a name).
-exec-drop-owned-several-targets = Not sent: on production you type one role's name to confirm DROP OWNED, and this run has more than one destructive target. Run DROP OWNED for one role at a time, on its own.
+exec-drop-owned-several-targets = Not sent: a typed role name confirms one DROP OWNED; this run has other targets. Run it on its own.
 # PO P2-07: on production, a DROP OWNED whose role Hacivat couldn't name.
 exec-drop-owned-no-target = Not sent: Hacivat can't tell whose objects this DROP OWNED removes, so it can't ask you to type the role's name.
