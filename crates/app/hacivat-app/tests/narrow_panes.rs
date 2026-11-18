@@ -6,6 +6,10 @@
 //! side by side, the second pane focused and 120 px wide, written to `workspace.json` before
 //! the app starts. The window is the 960 x 600 minimum, where the console tile is the shortest.
 
+// ## m3c-t45 (controller fix, gate line 2): these are scene tests (`rendered_scene`, debug
+// bounds), so the file builds only with `scene-check`, like the other scene-test helpers.
+#![cfg(feature = "scene-check")]
+
 mod support;
 
 use gpui::{
