@@ -2983,32 +2983,52 @@ fn known_findings_match_only_their_own_clip() {
     }
     // ## m3c-t43b-fix (review m2, m3): part B's entries against the real lines the full render
     // printed, each only in its own scope (F11's body in English and Turkish, not pseudo; F12's
-    // tab title, a creation site, in the pseudo-locales only). ## m3c-narrow: dormant while
-    // `KNOWN_FINDINGS_B` is empty (F10–F12 fixed); it applies again should an entry for
-    // `narrow-reduced` come back.
+    // tab title, a creation site, in the pseudo-locales only). ## m3c-narrow (fix round 1, M9):
+    // `KNOWN_FINDINGS_B` is empty since F10–F12 were fixed, so the entries are planted here, as
+    // the I2 block above plants its own, and the scoping runs whatever the list holds.
     let reduced = M3c::NarrowReduced;
     let body = "narrow-reduced-dark-en-1280x800@2x.png: (b) clipped: \"Reduced mode keeps typing \
                 fast. It ends when the document is smaller than 3.2 MB.\" (57.0 px painted) at \
                 crates/ui/hacivat-ui-editor/src/large_file.rs:280:16#editor-t1-body";
     let tab = "narrow-reduced-dark-tr-XT-960x600@2x.png: (b) clipped: \"[Çööööƞşööööŀḗḗḗ 2]\" \
                (117.3 px painted) at crates/ui/hacivat-ui/src/panes.rs:443:24";
+    let planted_b = [
+        Finding {
+            state: reduced.name(),
+            at: Where::Pseudo,
+            label: "#editor-t1-title",
+            owner: "T41",
+        },
+        Finding {
+            state: reduced.name(),
+            at: Where::Plain,
+            label: "#editor-t1-body",
+            owner: "T41",
+        },
+        Finding {
+            state: reduced.name(),
+            at: Where::Pseudo,
+            label: "hacivat-ui/src/panes.rs:443",
+            owner: "T41",
+        },
+    ];
     let part_b = |line: &str, locale: &str, size| {
-        m3c::KNOWN_FINDINGS_B
+        planted_b
             .iter()
             .any(|f| f.matches(reduced, locale, size, line, None))
     };
-    if m3c::KNOWN_FINDINGS_B
-        .iter()
-        .any(|f| f.state == reduced.name())
-    {
-        assert!(part_b(body, en, big), "{body}");
-        assert!(part_b(body, "tr", min), "{body}");
-        assert!(!part_b(body, "en-XA", big), "out of its scope: {body}");
-        assert!(part_b(tab, tr_xt, min), "{tab}");
-        assert!(!part_b(tab, en, min), "out of its scope: {tab}");
-        let with_id = format!("{tab}#tab-title");
-        assert!(!part_b(&with_id, tr_xt, min), "{with_id}");
-    }
+    assert!(part_b(body, en, big), "{body}");
+    assert!(part_b(body, "tr", min), "{body}");
+    assert!(!part_b(body, "en-XA", big), "out of its scope: {body}");
+    assert!(part_b(tab, tr_xt, min), "{tab}");
+    assert!(!part_b(tab, en, min), "out of its scope: {tab}");
+    let with_id = format!("{tab}#tab-title");
+    assert!(!part_b(&with_id, tr_xt, min), "{with_id}");
+    // `#editor-t1-title` is a trust label of `narrow-reduced` now (fix round 1): no entry hides
+    // its clip, whatever its scope.
+    let title = "narrow-reduced-dark-tr-XT-960x600@2x.png: (b) clipped: \"[Ŧħıııış]\" (57.0 px \
+                 painted) at crates/ui/hacivat-ui-editor/src/large_file.rs:279:16#editor-t1-title";
+    assert!(!part_b(title, tr_xt, min), "a trust label: {title}");
 }
 
 // ## m3c-t43-shots (fix round 1, m1)

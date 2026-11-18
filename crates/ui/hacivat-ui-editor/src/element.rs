@@ -1051,7 +1051,10 @@ pub(crate) fn prepaint_frame(
     });
     // ## m3c-narrow: the banner's form follows the width this frame gave the editor; a frame
     // whose width crossed the narrow line draws once more with the other form.
-    if crate::large_file::narrow(bounds.size.width) != v.banner_narrow {
+    // ## m3c-narrow (fix round 1, M5): only while a banner shows.
+    let narrow_now =
+        crate::large_file::shows_banner(&v.tier) && crate::large_file::narrow(bounds.size.width);
+    if narrow_now != v.banner_narrow {
         cx.on_next_frame(window, |_, _, cx| cx.notify());
     }
 
@@ -1200,13 +1203,17 @@ pub(crate) fn paint_frame(
     }
 }
 
+// ## m3c-narrow (F11; fix round 1, review M1: moved above the element's own doc)
+/// The lines the text area keeps beside the banner's narrow form where the editor's column has
+/// room for them below the banner's title (fix round 1, I1: they give way before the title).
+const NARROW_TEXT_MIN_LINES: f32 = 2.0;
+/// The text's flex shrink beside the narrow banner (the banner's is 1): it gives its two lines
+/// up only after the banner reached its minimum.
+const NARROW_TEXT_SHRINK: f32 = 0.001;
+
 // ## m3a-t29-a11y-tiers: the element's accessibility hooks moved to the view's focusable
 // column (`a11y::declare`), the element GPUI gives the platform focus.
 /// The editor's element: the text area and its input handler.
-// ## m3c-narrow (F11)
-/// The lines the text area keeps beside the banner's narrow form, however short the pane.
-const NARROW_TEXT_MIN_LINES: f32 = 2.0;
-
 pub(crate) struct EditorElement {
     view: Entity<EditorView>,
     focus: FocusHandle,
@@ -1246,11 +1253,15 @@ impl Element for EditorElement {
             ..Style::default()
         };
         style.size.width = relative(1.0).into();
-        // ## m3c-narrow (F11): beside the banner's narrow form the text keeps
-        // `NARROW_TEXT_MIN_LINES` lines: the banner's body scrolls first.
+        // ## m3c-narrow (F11): beside the banner's narrow form the text starts from
+        // `NARROW_TEXT_MIN_LINES` lines: the banner's body scrolls first. Fix round 1 (I1): a
+        // basis, not a minimum, and a shrink far below the banner's, so the text gives those
+        // lines up only once the banner is down to its title (its own minimum).
         if self.view.read(cx).banner_narrow {
             let lh = f32::from(EditorTheme::get(cx).line_height);
-            style.min_size.height = px(lh * NARROW_TEXT_MIN_LINES).into();
+            style.flex_basis = px(lh * NARROW_TEXT_MIN_LINES).into();
+            style.flex_shrink = NARROW_TEXT_SHRINK;
+            style.min_size.height = px(0.0).into();
         }
         (window.request_layout(style, [], cx), ())
     }

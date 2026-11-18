@@ -28,8 +28,8 @@ use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::l10n::UiArg;
 use hacivat_ui::text::{TextSource, paragraph, scroll_viewport};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, Context, Global, InteractiveElement, IntoElement, ParentElement, Pixels,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, App, Context, Global, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels,
+    SharedString, StatefulInteractiveElement, Styled, TextRun, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 
@@ -50,14 +50,62 @@ const ICON_GAP_PX: f32 = 9.0;
 /// Drops the icon onto the first line's cap height (the inline notice's 1 px).
 const ICON_NUDGE_PX: f32 = 1.0;
 // ## m3c-narrow (F11; design/m3b-safe surface 24)
-/// An editor narrower than this draws the banner's narrow form ([`banner`]): below it the
-/// wide form's margins, padding and icon column would leave its text under 120 px.
+/// An editor narrower than this draws the banner's narrow form ([`banner`]). A rounded design
+/// line (fix round 1, review M4): at 180 px the wide form's margins (2 × 10), padding (2 × 10),
+/// border (2), icon (12) and its gap (9) leave its text 117 px.
 pub const NARROW_BELOW_PX: f32 = 180.0;
 
 // ## m3c-narrow
 /// Whether an editor `width` wide draws the banner's narrow form.
 pub fn narrow(width: Pixels) -> bool {
     f32::from(width) < NARROW_BELOW_PX
+}
+
+// ## m3c-narrow (fix round 1, review M5)
+/// Whether `s` shows the banner at all (T1): the narrow form, and the text's two-line minimum
+/// beside it, apply only then.
+pub fn shows_banner(s: &TierState) -> bool {
+    s.tier != Tier::Full
+}
+
+// ## m3c-narrow (fix round 1, I1)
+/// The narrow form's well around its title: padding 6 above and below, the 1 px border.
+fn narrow_well_px(t: &hacivat_ui_core::theme::ThemeTokens) -> f32 {
+    2.0 * t.spacing.sm + 2.0
+}
+
+/// The height the narrow form's title wraps to in an editor `width` wide (its text gets the
+/// width less 4 px margins, 6 px padding and the border on each side), measured as the
+/// paragraph lays it out (the line height snapped to the device pixel).
+fn narrow_title_px(
+    title: &SharedString,
+    width: Pixels,
+    style: &hacivat_ui_core::theme::TypeStyle,
+    t: &hacivat_ui_core::theme::ThemeTokens,
+    window: &Window,
+) -> f32 {
+    let room = f32::from(width) - 2.0 * t.spacing.xs - narrow_well_px(t);
+    let pitch = window.pixel_snap(px(style.line_height));
+    let run = TextRun {
+        len: title.len(),
+        font: hacivat_ui_core::fonts::font_for(style),
+        color: Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_text(
+            title.clone(),
+            px(style.size_px),
+            &[run],
+            Some(px(room.max(1.0))),
+            None,
+        )
+        .map(|lines| lines.iter().map(|l| f32::from(l.size(pitch).height)).sum())
+        .unwrap_or(style.line_height)
+        .ceil()
 }
 
 /// The module-owned state (P11): the tier, and what the banner says.
@@ -271,18 +319,19 @@ pub fn description(s: &TierState, cx: &App) -> Option<SharedString> {
 /// info glyph in `text-2`; the title in `text`, the body in `text-2`; 8/10/2/10 around it);
 /// `None` in T0.
 ///
-/// ## m3c-narrow (F11; design/m3b-safe surface 24): `narrow` (an editor narrower than
-/// [`NARROW_BELOW_PX`], `narrow`) draws the narrow form: 4 px beside the well, padding 6, no
-/// icon, the title whole (a trust signal: it never shrinks) and the body below it in a scroll
-/// viewport that gives up its height first when the pane is too short for the whole banner (the
-/// text below keeps two lines, `element::NARROW_TEXT_MIN_LINES`).
+/// ## m3c-narrow (F11; design/m3b-safe surface 24): `narrow` (the width of an editor narrower
+/// than [`NARROW_BELOW_PX`]) draws the narrow form: 4 px beside the well, padding 6, no icon,
+/// the title and the body below it in a scroll viewport that gives up its height first. Fix
+/// round 1 (I1): the well never gets shorter than its title and padding (measured at that
+/// width, [`narrow_title_px`]), so the title is whole wherever the editor's column holds it;
+/// the text's two-line minimum (`element::NARROW_TEXT_MIN_LINES`) gives way before it. The well
+/// clips, so a column too short for the title itself records the title as cut.
 pub fn banner(
     s: &TierState,
-    narrow: bool,
+    narrow: Option<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<AnyElement> {
-    let _ = window;
     let (title, body) = lines(s, cx)?;
     let theme = *Theme::get(cx);
     let t = theme.tokens;
@@ -293,21 +342,32 @@ pub fn banner(
     };
     let style = t.type_ramp.body_sm;
     // ## m3c-narrow
-    if narrow {
+    if let Some(width) = narrow {
+        // ## m3c-narrow (fix round 1, I1): the well keeps its title.
+        let keep = narrow_title_px(&title, width, &style, t, window) + narrow_well_px(t);
         let notice = div()
+            .debug_selector(|| "editor-t1-notice".to_string())
             .flex()
             .flex_col()
             .flex_shrink(1.0)
-            .min_h(px(0.0))
+            .min_h(px(keep))
+            .overflow_hidden()
             .px(px(t.spacing.sm))
             .py(px(t.spacing.sm))
             .rounded(px(t.radii.sm))
             .border_1()
             .border_color(c.seam_strong.to_hsla())
             .bg(well.to_hsla())
-            .child(div().flex_none().child(
-                paragraph(title, TextSource::Fluent, style, c.text.to_hsla()).id("editor-t1-title"),
-            ))
+            .child(
+                div()
+                    // ## m3c-narrow (fix round 1, I1): the title's box, for the scene checks.
+                    .debug_selector(|| "editor-t1-title-box".to_string())
+                    .flex_none()
+                    .child(
+                        paragraph(title, TextSource::Fluent, style, c.text.to_hsla())
+                            .id("editor-t1-title"),
+                    ),
+            )
             .child(
                 div()
                     .id("editor-t1-body-scroll")
@@ -326,7 +386,8 @@ pub fn banner(
                 .flex()
                 .flex_col()
                 .flex_shrink(1.0)
-                .min_h(px(0.0))
+                // ## m3c-narrow (fix round 1, I1): never shorter than the well's own minimum.
+                .min_h(px(keep))
                 .mt(px(t.spacing.md))
                 .mx(px(t.spacing.xs))
                 .mb(px(t.spacing.s_2xs))
