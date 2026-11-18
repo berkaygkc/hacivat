@@ -642,8 +642,9 @@ jobs:
       #   skipped or loosened there (access-key runs are joined into their label, see
       #   tests/shots.rs `is_key_run`; trust labels must stay whole).
       # - This step compares pixels only where a committed baseline is still meant to hold: the
-      #   44 M1 states nothing since M1 was meant to change. The 24 that M2a/M3a changed on
-      #   purpose (dialog-about, menu-app, toast-info) are listed in superseded.txt until the PO
+      #   36 M1 states nothing since M1 was meant to change. The 32 that M2a/M3a/M3c changed on
+      #   purpose (dialog-about, menu-app, toast-info, settings-general) are listed in
+      #   superseded.txt until the PO
       #   re-baselines them; a stale line fails the step. States without a committed baseline
       #   are listed as new and do not fail.
       # - The approved M2-M3b states are not committed (1.2 GB): the milestone gate compares the
