@@ -545,7 +545,7 @@ exec-explain-analyze-refused = Gönderilmedi: EXPLAIN ANALYZE, rollback'in geri 
 # Review: PO
 exec-unsafe-no-target = Gönderilmedi: ifade her satırı değiştirebilir ve Hacivat onaylamanızı isteyeceği tabloyu belirleyemiyor.
 # Review: PO
-exec-unsafe-several-targets = Gönderilmedi: ifade birden fazla tablonun her satırını değiştirebilir. Her bölümü ayrı çalıştırın.
+exec-unsafe-several-targets = Gönderilmedi: üretimde tek bir yıkıcı hedefi onaylamak için tek bir ad yazarsınız; bu çalıştırmada birden fazla hedef var. Her yıkıcı ifadeyi tek başına çalıştırın.
 
 # Review: PO
 exec-param-template-variable = Gönderilmedi: ifadede parametre olarak gönderilemeyen bir şablon değişkeni var.
@@ -664,6 +664,6 @@ safety-destructive-drop-owned = { $role } rolünün bu veritabanında sahip oldu
 # Review: PO
 safety-destructive-drop-owned-cascade = { $role } rolünün bu veritabanında sahip olduğu her nesne ve bu nesnelere bağlı her şey kaldırılır. Rolün bu veritabanındaki ve veritabanları, tablespace'ler gibi paylaşılan nesnelerdeki yetkileri ile varsayılan yetkileri de geri alınır.
 # Review: PO
-exec-drop-owned-several-targets = Gönderilmedi: üretimde DROP OWNED, rolün adını yazmanızı ister; bu ise birden fazla ad gerektirir. Her seferinde tek bir rol için, tek başına çalıştırın.
+exec-drop-owned-several-targets = Gönderilmedi: üretimde DROP OWNED'ı onaylamak için tek bir rolün adını yazarsınız; bu çalıştırmada birden fazla yıkıcı hedef var. DROP OWNED'ı her seferinde tek bir rol için, tek başına çalıştırın.
 # Review: PO
 exec-drop-owned-no-target = Gönderilmedi: Hacivat bu DROP OWNED ifadesinin kimin nesnelerini kaldırdığını belirleyemiyor; bu yüzden rolün adını yazmanızı isteyemiyor.

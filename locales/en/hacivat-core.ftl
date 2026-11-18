@@ -879,8 +879,10 @@ exec-explain-analyze-not-undone = EXPLAIN ANALYZE runs the statement and then ro
 exec-explain-analyze-refused = Not sent: EXPLAIN ANALYZE would run a statement that a rollback can't undo.
 # On production, a statement that may change every row of a table Hacivat couldn't name.
 exec-unsafe-no-target = Not sent: the statement may change every row, and Hacivat can't tell which table to ask you to confirm.
-# On production, one statement that may change every row of more than one table.
-exec-unsafe-several-targets = Not sent: the statement may change every row of more than one table. Run each part on its own.
+# On production, a run with more than one destructive target that asks for a typed name (two
+# tables, the same table twice, a table and a schema): one typed name confirms exactly one
+# (m3c-p2-07 fix round 3).
+exec-unsafe-several-targets = Not sent: on production you type one name to confirm one destructive target, and this run has more than one. Run each destructive statement on its own.
 
 # Why a statement's parameters keep it from being sent (HV-EXEC-03).
 
@@ -1035,8 +1037,9 @@ safety-destructive-drop-owned = Removes every object { $role } owns in this data
 # Variables:
 #   $role (String) - the role's name as written in the statement.
 safety-destructive-drop-owned-cascade = Removes every object { $role } owns in this database and everything that depends on those objects. It also revokes the role's privileges here and on shared objects such as databases and tablespaces, and its default privileges.
-# PO P2-07: on production DROP OWNED asks for one role's name typed, and this unit would need
-# more than one name (several roles, or a role beside another statement that asks for a name).
-exec-drop-owned-several-targets = Not sent: on production, DROP OWNED asks you to type the role's name, and this would need more than one name. Run it for one role at a time, on its own.
+# PO P2-07: on production DROP OWNED asks for one role's name typed, and this run has more
+# than one destructive target (several roles, the same role twice, or a role beside another
+# statement that asks for a name).
+exec-drop-owned-several-targets = Not sent: on production you type one role's name to confirm DROP OWNED, and this run has more than one destructive target. Run DROP OWNED for one role at a time, on its own.
 # PO P2-07: on production, a DROP OWNED whose role Hacivat couldn't name.
 exec-drop-owned-no-target = Not sent: Hacivat can't tell whose objects this DROP OWNED removes, so it can't ask you to type the role's name.

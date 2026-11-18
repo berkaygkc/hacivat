@@ -881,14 +881,12 @@ struct Classifier<'a, 's> {
     coldef: u32,
     /// Running this statement may change how later statements must be classified.
     changes_context: bool,
-    /// The relation of each enclosing `ALTER TABLE`.
-    alter: Vec<Option<ObjectRef>>,
+    /// The relation of each enclosing `ALTER TABLE`, with where it is written.
+    alter: Vec<Option<Located>>,
     /// The frames of entered messages (`F_*`), popped on `leave`.
     frames: Vec<u8>,
     /// Relations a statement writes (identity), so the walk does not count them as reads.
     write_targets: Vec<*const pb::RangeVar>,
-    /// Where each written relation's name is written.
-    target_spans: Vec<(ObjectRef, TextRange)>,
     _tree: std::marker::PhantomData<&'a ()>,
 }
 
@@ -924,7 +922,6 @@ impl<'a, 's> Classifier<'a, 's> {
             alter: Vec::new(),
             frames: Vec::new(),
             write_targets: Vec::new(),
-            target_spans: Vec::new(),
             _tree: std::marker::PhantomData,
         }
     }
@@ -1037,23 +1034,19 @@ impl<'a, 's> Classifier<'a, 's> {
         self.depth == 0
     }
 
-    /// Records `rv` as written (and where its name is written), and returns its object.
-    fn write_target(&mut self, rv: &pb::RangeVar, kind: ObjectKind) -> ObjectRef {
+    /// Records `rv` as written, and returns its object with where its name is written.
+    fn write_target(&mut self, rv: &pb::RangeVar, kind: ObjectKind) -> Located {
         self.write_targets.push(rv as *const pb::RangeVar);
         let o = object(range_var_name(rv), kind);
         self.touched.writes.push(o.clone());
-        if let Some(span) = self.span_at(rv.location) {
-            self.target_spans.push((o.clone(), span));
-        }
-        o
+        (o, self.span_at(rv.location))
     }
 
-    // ## m3c-p2-07 (PO P2-07)
-    /// The role a `RoleSpec` names, its span recorded where it is written: a name is the
-    /// server's reading of it (`quoted: true`, as every name here); `CURRENT_ROLE`,
-    /// `CURRENT_USER`, `SESSION_USER` and `PUBLIC` are the keyword itself, `quoted: false`
-    /// (Hacivat does not resolve them, and a quoted role spelled alike is another object).
-    fn role_target(&mut self, rs: &pb::RoleSpec) -> Option<ObjectRef> {
+    // ## m3c-p2-07 (PO P2-07; fix round 3: its own span, never looked up)
+    /// The role a `RoleSpec` names, with where it is written: a name is the server's reading of
+    /// it (`quoted: true`, as every name here); `CURRENT_ROLE`, `CURRENT_USER`, `SESSION_USER`
+    /// and `PUBLIC` are the keyword itself, `quoted: false` (Hacivat does not resolve them).
+    fn role_target(&self, rs: &pb::RoleSpec) -> Option<Located> {
         use pb::RoleSpecType as T;
         let keyword = match T::try_from(rs.roletype) {
             Ok(T::RolespecCstring) if !rs.rolename.is_empty() => None,
@@ -1075,33 +1068,92 @@ impl<'a, 's> Classifier<'a, 's> {
                 ),
             },
         };
-        let o = object(name, ObjectKind::Role);
-        if let Some(span) = self.span_at(rs.location) {
-            self.target_spans.push((o.clone(), span));
+        Some((object(name, ObjectKind::Role), self.span_at(rs.location)))
+    }
+
+    // ## m3c-p2-07 (fix round 3)
+    /// Where each name of `DROP TABLE | FOREIGN TABLE | SCHEMA [IF EXISTS] a, b, …` is written,
+    /// in order, read by position (the parse tree keeps no location for them): `None` for any
+    /// other object type, or when the statement's tokens do not read as its names.
+    fn drop_name_spans(&self, s: &pb::DropStmt) -> Option<Vec<TextRange>> {
+        use pb::ObjectType as O;
+        let words: &[&str] = match O::try_from(s.remove_type) {
+            Ok(O::ObjectTable) => &["drop", "table"],
+            Ok(O::ObjectForeignTable) => &["drop", "foreign", "table"],
+            Ok(O::ObjectSchema) => &["drop", "schema"],
+            _ => return None,
+        };
+        let tails = ["cascade", "restrict"];
+        self.name_spans(words, s.missing_ok, s.objects.len(), &tails)
+    }
+
+    /// The names of a statement that reads `words [IF EXISTS] name [, name …]` and then ends or
+    /// goes on with one of `tails`, where each is written, in order (by position).
+    fn name_spans(
+        &self,
+        words: &[&str],
+        missing_ok: bool,
+        count: usize,
+        tails: &[&str],
+    ) -> Option<Vec<TextRange>> {
+        let is_word = |i: usize, w: &str| {
+            matches!(self.tok(i), Some((t, ScanKind::Keyword | ScanKind::Ident, r))
+                if self.range.contains_range(r) && t.eq_ignore_ascii_case(w))
+        };
+        let mut i = self
+            .toks
+            .partition_point(|(r, _)| r.start() < self.range.start());
+        let missing_ok: &[&str] = if missing_ok { &["if", "exists"] } else { &[] };
+        for w in words.iter().chain(missing_ok) {
+            i = self.skip_comments(i);
+            if !is_word(i, w) {
+                return None;
+            }
+            i += 1;
         }
-        Some(o)
+        let mut spans = Vec::with_capacity(count);
+        for n in 0..count {
+            i = self.skip_comments(i);
+            if n > 0 {
+                if !matches!(self.tok(i), Some((",", ScanKind::Other, _))) {
+                    return None;
+                }
+                i = self.skip_comments(i + 1);
+            }
+            let span = self.name_span_from(i)?;
+            if !self.range.contains_range(span) {
+                return None;
+            }
+            spans.push(span);
+            while self.tok(i).is_some_and(|(_, _, r)| r.end() <= span.end()) {
+                i += 1;
+            }
+        }
+        i = self.skip_comments(i);
+        let ends = match self.tok(i) {
+            None => true,
+            Some((_, _, r)) if !self.range.contains_range(r) => true,
+            Some((";", ScanKind::Other, _)) => true,
+            Some((t, _, _)) => tails.iter().any(|w| t.eq_ignore_ascii_case(w)),
+        };
+        ends.then_some(spans)
     }
     // ## m3c-p2-07
 
-    /// A destructive pattern; its range is where the target's name is written (fix round 1,
-    /// M7: the type-to-confirm text is those bytes), else the statement's.
-    fn destroy(&mut self, kind: DestructiveKind, target: Option<ObjectRef>) {
+    /// A destructive pattern; its range is where its target's name is written (fix round 1,
+    /// M7: the type-to-confirm text is those bytes), else the statement's. ## m3c-p2-07 (fix
+    /// round 3): the target's own position, as its caller read it; never looked up by name.
+    fn destroy(&mut self, kind: DestructiveKind, target: Option<Located>) {
         if self.deferred > 0 {
             return;
         }
-        let range = target
-            .as_ref()
-            .and_then(|t| {
-                self.target_spans
-                    .iter()
-                    .find(|(o, _)| o == t)
-                    .map(|(_, r)| *r)
-                    .or_else(|| self.find_name(&t.name))
-            })
-            .unwrap_or(self.range);
+        let (target, at) = match target {
+            Some((t, at)) => (Some(t), at),
+            None => (None, None),
+        };
         self.destructive.push(DestructiveReason {
             kind,
-            range,
+            range: at.unwrap_or(self.range),
             target,
         });
     }
@@ -1149,44 +1201,6 @@ impl<'a, 's> Classifier<'a, 's> {
     fn span_at(&self, location: i32) -> Option<TextRange> {
         let at = usize::try_from(location).ok()?;
         self.name_span_from(self.token_index(at)?)
-    }
-
-    /// Where `name` is first written inside the statement: name tokens whose server reading
-    /// (unquoted folded to ASCII lower case, quoted taken exactly) are its parts.
-    fn find_name(&self, name: &QualifiedName) -> Option<TextRange> {
-        let read = |t: &str, k: ScanKind| -> Option<String> {
-            match k {
-                ScanKind::Ident if t.starts_with('"') => t
-                    .strip_prefix('"')
-                    .and_then(|s| s.strip_suffix('"'))
-                    .map(|s| s.replace("\"\"", "\"")),
-                ScanKind::Ident if t.starts_with("U&") || t.starts_with("u&") => None,
-                ScanKind::Ident | ScanKind::Keyword => Some(t.to_ascii_lowercase()),
-                _ => None,
-            }
-        };
-        let in_range = |r: TextRange| self.range.contains_range(r);
-        'start: for i in 0..self.toks.len() {
-            let mut j = i;
-            for (n, part) in name.parts.iter().enumerate() {
-                if n > 0 {
-                    let dot = self.skip_comments(j + 1);
-                    if !matches!(self.tok(dot), Some((".", ScanKind::Other, _))) {
-                        continue 'start;
-                    }
-                    j = self.skip_comments(dot + 1);
-                }
-                match self.tok(j) {
-                    Some((t, k, r))
-                        if in_range(r) && read(t, k).as_deref() == Some(&*part.text) => {}
-                    _ => continue 'start,
-                }
-            }
-            let start = self.toks[i].0.start();
-            let end = self.toks[j].0.end();
-            return Some(TextRange::new(start, end));
-        }
-        None
     }
 
     // -- statements -------------------------------------------------------------------------
@@ -1294,8 +1308,11 @@ impl<'a, 's> Classifier<'a, 's> {
                 if s.objects.is_empty() {
                     self.destroy(DestructiveKind::Drop { cascade }, None);
                 }
-                for o in &s.objects {
-                    let target = drop_object_name(o).map(|n| object(n, kind));
+                // ## m3c-p2-07 (fix round 3): each name where it is written, by position.
+                let spans = self.drop_name_spans(s);
+                for (n, o) in s.objects.iter().enumerate() {
+                    let at = spans.as_ref().and_then(|v| v.get(n).copied());
+                    let target = drop_object_name(o).map(|name| (object(name, kind), at));
                     self.destroy(DestructiveKind::Drop { cascade }, target);
                 }
             }
@@ -1317,7 +1334,11 @@ impl<'a, 's> Classifier<'a, 's> {
             }
             PgRef::DropdbStmt(s) => {
                 let target = object(simple_name(&s.dbname), ObjectKind::Database);
-                self.destroy(DestructiveKind::Drop { cascade: false }, Some(target));
+                // ## m3c-p2-07 (fix round 3): where the name is written, by position.
+                let at = self
+                    .name_spans(&["drop", "database"], s.missing_ok, 1, &["with", "("])
+                    .and_then(|v| v.first().copied());
+                self.destroy(DestructiveKind::Drop { cascade: false }, Some((target, at)));
             }
             PgRef::DropRoleStmt(s) => {
                 for role in &s.roles {
@@ -1327,6 +1348,7 @@ impl<'a, 's> Classifier<'a, 's> {
                         }
                         _ => None,
                     };
+                    let target = target.map(|t| (t, None));
                     self.destroy(DestructiveKind::Drop { cascade: false }, target);
                 }
             }
@@ -1378,7 +1400,7 @@ impl<'a, 's> Classifier<'a, 's> {
             PgRef::AlterDomainStmt(s) if s.subtype == "X" => {
                 // `ALTER DOMAIN … DROP CONSTRAINT` (fix round 1, M6).
                 let target =
-                    strings(&s.type_name).map(|p| object(qualified(&p), ObjectKind::Other));
+                    strings(&s.type_name).map(|p| (object(qualified(&p), ObjectKind::Other), None));
                 self.destroy(DestructiveKind::DropConstraint, target);
             }
             _ => {}
@@ -1387,7 +1409,7 @@ impl<'a, 's> Classifier<'a, 's> {
     }
 
     /// A data change's target: written; inside a CTE it is a data-modifying CTE.
-    fn dml(&mut self, relation: Option<&pb::RangeVar>) -> Option<ObjectRef> {
+    fn dml(&mut self, relation: Option<&pb::RangeVar>) -> Option<Located> {
         if self.cte > 0 {
             self.reason(ReasonCode::DataModifyingCte, None, None);
         }
@@ -1400,7 +1422,7 @@ impl<'a, 's> Classifier<'a, 's> {
         where_clause: Option<&pb::Node>,
         joined: &[pb::Node],
         relation: Option<&pb::RangeVar>,
-        target: Option<ObjectRef>,
+        target: Option<Located>,
     ) {
         match where_clause {
             None => self.destroy(DestructiveKind::NoWhere, target),
@@ -1970,6 +1992,10 @@ fn qualified(parts: &[&str]) -> QualifiedName {
 fn simple_name(name: &str) -> QualifiedName {
     qualified(&[name])
 }
+
+// ## m3c-p2-07 (fix round 3)
+/// An object and where its name is written (`None`: no position of its own).
+type Located = (ObjectRef, Option<TextRange>);
 
 fn object(name: QualifiedName, kind: ObjectKind) -> ObjectRef {
     ObjectRef { name, kind }

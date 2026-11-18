@@ -1669,6 +1669,18 @@ pub mod gate_fx {
             if s.range.is_empty() {
                 s.range = whole;
             }
+            // ## m3c-p2-07 (fix round 3): a hand-built pattern with a target and no range of its
+            // own sits where its statement first writes that name, as a classifier places it
+            // (the gate reads a typed name only at the pattern's own position).
+            let stmt_range = s.range;
+            for d in &mut s.destructive {
+                if let (true, Some(t)) = (d.range.is_empty(), &d.target) {
+                    let name: Vec<&str> = t.name.parts.iter().map(|p| &*p.text).collect();
+                    if let Some(r) = written_at(text, stmt_range, &name.join(".")) {
+                        d.range = r;
+                    }
+                }
+            }
         }
         let ctx = DialectCtx::new(dialect, None);
         let mut r = SafetyReport::pre_decided(text, sql_split::hv_norm1(text, &ctx), Vec::new());
@@ -1680,6 +1692,29 @@ pub mod gate_fx {
         r.pre_decision = None;
         r.dialect = Some(dialect);
         r
+    }
+
+    // ## m3c-p2-07 (fix round 3)
+    /// Where `name` is first written in `text[within]` as a whole word (ASCII case ignored).
+    fn written_at(text: &str, within: TextRange, name: &str) -> Option<TextRange> {
+        let start = usize::from(within.start());
+        let body = text.get(start..usize::from(within.end()))?;
+        let (hay, needle) = (body.to_ascii_lowercase(), name.to_ascii_lowercase());
+        let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        hay.match_indices(&needle).find_map(|(i, _)| {
+            let end = i + needle.len();
+            let (before, after) = (hay[..i].chars().next_back(), hay[end..].chars().next());
+            if word(before) || word(after) {
+                return None;
+            }
+            // A quoted name keeps its quotes (the gate reads it as written).
+            let quoted = before.is_some_and(|c| matches!(c, '"' | '`')) && before == after;
+            let (i, end) = if quoted { (i - 1, end + 1) } else { (i, end) };
+            Some(TextRange::new(
+                TextSize::from(u32::try_from(start + i).unwrap()),
+                TextSize::from(u32::try_from(start + end).unwrap()),
+            ))
+        })
     }
 
     /// The word after the first of `keys` in `text` (a table, schema or database name).

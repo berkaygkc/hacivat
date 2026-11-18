@@ -1231,9 +1231,10 @@ case.
   statement's own leading words read `DROP [TEMPORARY|TEMP|FOREIGN] TABLE` (so a backend that
   names the kind wrongly cannot drop the typed name, as for `DROP DATABASE`/`SCHEMA`);
   `ALTER TABLE … DROP PARTITION` keeps its row. It fails closed like the unsafe-DML rule: no
-  table to name is `exec-unsafe-no-target`, and more than one name in one unit
-  (`TRUNCATE a, b`, `DROP TABLE a, b`, `DELETE FROM a; TRUNCATE b`) is
-  `exec-unsafe-several-targets` (typing one name must never approve another). Off production
+  table to name is `exec-unsafe-no-target`, and more than one typed target in one unit
+  (`TRUNCATE a, b`, `DROP TABLE a, b`, `DELETE FROM a; TRUNCATE b`; since m3c-p2-07 fix round 3
+  also the same name twice) is `exec-unsafe-several-targets` (typing one name must never approve
+  another). Off production
   nothing changes. Views, indexes, functions, sequences and column drops keep a plain
   confirmation.
 - **Limit of the typed name (fix round 1, review m4; narrowed by m3c-p2-07).** The typed name
@@ -1251,54 +1252,40 @@ case.
   off production nothing changes; the name is typed as written (quotes removed, letter case
   kept, compared byte for byte). `CURRENT_USER`, `CURRENT_ROLE`, `SESSION_USER` (and `PUBLIC`)
   are not resolved to a role name — Hacivat has no way to — so the keyword is typed as written.
-  The multi-target rule is the one `DROP TABLE a, b` follows: one name per unit, so
-  `DROP OWNED BY a, b` (or two `DROP OWNED` statements, or a `DROP OWNED` beside a `TRUNCATE`
-  or unbounded `DELETE`) is denied, `exec-drop-owned-several-targets`; the same role twice is
-  one name. A role and a table written alike, or a keyword and a quoted role spelled alike
-  (`"current_user"`, `current_user`), are two objects, never one name. A `DROP OWNED` whose role
-  the classifier could not name is denied, `exec-drop-owned-no-target`. The dialog's reason is
+  The multi-target rule is the one `DROP TABLE a, b` follows: one typed target per unit, so
+  `DROP OWNED BY a, b`, `DROP OWNED BY a, a` (since fix round 3), two `DROP OWNED` statements,
+  or a `DROP OWNED` beside a `TRUNCATE` or unbounded `DELETE` is denied,
+  `exec-drop-owned-several-targets`. A `DROP OWNED` whose role the classifier could not name is
+  denied, `exec-drop-owned-no-target`. The dialog's reason is
   `safety-destructive-drop-owned[-cascade]` ("Removes every object `r` owns in this database
   …"), never `safety-destructive-drop` ("Removes `r`.", which `DROP ROLE` keeps).
-- **One typed name never approves two objects (## m3c-p2-07 fix rounds 1 and 2, controller
-  rulings).** Before, the typed names of a unit were merged by their written text with the
-  quotes removed. So on PostgreSQL `TRUNCATE "A", A` and `DELETE FROM "A"; DELETE FROM A` asked
-  once for `A`, and that one answer approved two tables (`"A"` and `a`). `DROP SCHEMA a;
-  TRUNCATE a` likewise asked once for `a` and approved a schema and a table. Each target is now
-  keyed by its kind (a table or other written relation, a schema, a database, a `DROP OWNED`
-  role) and by its name as written, part by part, with a schema qualifier counting. Each part
-  is read as follows:
-  - **ASCII parts fold by the engine's case rule:**
-    - PostgreSQL and the PG-wire dialects lower an unquoted part and keep a quoted one.
-    - SQLite lowers every part, quoted or not.
-    - MySQL, MariaDB and the rest keep the exact text, quoting aside. A MySQL table name is
-      case-sensitive on a case-sensitive file system (`sql_ident::fold`'s docs), so `a` and `A`
-      count as two objects, which fails closed.
-  - **No part is cut at 63 bytes (fix round 2).** PostgreSQL cuts longer names, but Redshift
-    keeps 127 bytes and CockroachDB does not cut, so on every PG-wire flavor two names that
-    share their first 63 bytes are two objects, PostgreSQL included (fail closed). The key comes
-    from the spelling as written, never from the classifier's possibly cut name. When the
-    written spelling cannot be found and a part is 63 bytes or longer, the key never merges.
-  - **A part with a non-ASCII byte is never case-folded, and its quoting counts (fix round 2).**
-    Cockroach lowers Unicode letters, and a single-byte PostgreSQL server encoding lowers its
-    high bytes, so `Ürün` and `"Ürün"` count as two objects.
-  - **Roles:** a `DROP OWNED` keyword (`CURRENT_USER` and the like) is the keyword, never the
-    quoted role spelled alike: `current_user` and `"current_user"` stay two.
-
-  The key describes the name within one fixed session state, so a unit cannot change what a
-  name resolves to between two of its uses (fix round 2):
-  - Unqualified names merge across statements only when every statement of the unit names a
-    typed target (`TRUNCATE`, an unbounded `DELETE`/`UPDATE`, the typed `DROP` kinds,
-    `DROP OWNED`).
-  - When any other statement is in the unit (`SET search_path`, `SELECT set_config(…)`, `USE`,
-    a rename, an `ALTER`, anything), an unqualified name merges only within its own statement.
-    `DELETE FROM orders; SET search_path TO archive; DELETE FROM orders` is denied, while
-    `DELETE FROM orders; DELETE FROM orders` asks once.
-  - Qualified names may merge across any statement.
-
-  More than one key in a unit is denied as several targets (`exec-unsafe-several-targets`, or
-  `exec-drop-owned-several-targets` when a role is among them). One object written two ways
-  asks once, for its first spelling: `TRUNCATE a, A` asks for `a`. The typed comparison itself
-  is unchanged: byte for byte against that spelling.
+- **One typed name approves exactly one destructive target occurrence (## m3c-p2-07 fix round
+  3, controller ruling; replaces the merging of fix rounds 1 and 2).** Fix rounds 1 and 2 merged
+  the typed names of a unit that named "the same object" (by an engine case rule, a 63-byte
+  rule and a cross-statement scope). Every such rule had holes: a list of two long names that
+  libpg_query cuts alike, MySQL `DROP TABLE a, A` found through a case-insensitive search, a
+  `DROP` or a `set_config(…)` call that changes what the next name resolves to, a rename or a
+  re-`ATTACH` under a qualified name. The rule is now counting, with no merging:
+  - **Every typed-target pattern of the unit is one occurrence:** `TRUNCATE a, b` is two,
+    `TRUNCATE a, A` is two, `DELETE FROM t; DELETE FROM t` is two, `DROP OWNED BY a, a` is two,
+    and a multi-table `UPDATE`/`DELETE` without a bounding `WHERE` is one per written table.
+  - **More than one occurrence is denied**, `exec-unsafe-several-targets` (or
+    `exec-drop-owned-several-targets` when a `DROP OWNED` role is among them), whatever their
+    names. Run each destructive statement on its own.
+  - **Exactly one occurrence asks for its own spelling**, read at its own position, the range
+    the classifier gives that one pattern: each part's bytes as written, quotes removed, never
+    case-folded or cut (`DELETE FROM "Ürün"` asks for `Ürün`, a 70-byte name for all 70 bytes,
+    `DROP OWNED BY CURRENT_USER` for `CURRENT_USER`). The spelling is never looked up elsewhere
+    by name: the PostgreSQL backend takes each target's span from its own parse location (for
+    `DROP TABLE|FOREIGN TABLE|SCHEMA` lists, by position in the list), the interim backend from
+    `sqlparser`'s span of that name, and `DROP DATABASE|SCHEMA` from the statement's own words.
+    A position that does not read as its name is denied (`exec-unsafe-no-target`, or
+    `exec-drop-owned-no-target`).
+  - **Accepted limit: the user types the name as written; what it resolves to follows the
+    session.** `SET search_path TO archive; DELETE FROM orders` asks for `orders`, and the
+    server empties `archive.orders`. A single occurrence approves exactly the one statement the
+    dialog shows, under whatever session state the unit itself sets up.
+  - The typed comparison is unchanged: byte for byte against that spelling.
 - **Scope of the typed name (fix round 2, review M2):** only typed-target kinds compete for the
   one name. A `DROP OWNED`, `TRUNCATE` or `DROP TABLE` beside a `DROP VIEW`, a `DROP COLUMN` or
   another plain-confirmation drop still asks for its one name, and the dialog lists every

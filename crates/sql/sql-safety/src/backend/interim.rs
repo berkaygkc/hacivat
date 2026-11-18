@@ -43,7 +43,7 @@ use sql_dialect::{DialectCtx, DialectId, lex_profile};
 use sql_ident::{Ident, QualifiedName, ident_eq};
 use sql_lexer::{LexErrorCode, LexState, Lexed, TokenKind, exec_comment, lex};
 use sql_split::SplitMode;
-use sql_text::{LineCol, LineIndex, TextRange};
+use sql_text::{LineCol, LineIndex, TextRange, TextSize};
 use sqlparser::ast::{
     Expr, FunctionArguments, ObjectName, ObjectNamePart, Query, Select, SetExpr, Statement,
     TableFactor, TableObject, TableWithJoins, Value, Visit, Visitor,
@@ -666,6 +666,8 @@ fn analyse_view(view: &str, ctx: &ClassifyCtx, depth: u8, pre: Option<&Lexed>) -
             }
             let mut walk = Walk::new(ctx, whole, &mut acc);
             walk.comma_joins = comma_joins;
+            // ## m3c-p2-07 (fix round 3)
+            walk.view = Some((view, LineIndex::new(view)));
             for s in &stmts {
                 let _ = s.visit(&mut walk);
             }
@@ -1271,6 +1273,9 @@ struct Walk<'c, 'a> {
     /// `DELETE` is not one either). Fix round 1 (A-M1): only those joins, never an explicit
     /// `CROSS JOIN` beside them.
     comma_joins: Vec<bool>,
+    // ## m3c-p2-07 (fix round 3, controller ruling)
+    /// The view and its line index: where each destructive target is written.
+    view: Option<(&'a str, LineIndex)>,
 }
 
 impl<'c, 'a> Walk<'c, 'a> {
@@ -1282,7 +1287,27 @@ impl<'c, 'a> Walk<'c, 'a> {
             top: None,
             plain_explain: 0,
             comma_joins: Vec::new(),
+            view: None,
         }
+    }
+
+    // ## m3c-p2-07 (fix round 3, controller ruling)
+    /// Where `n` is written in the view: its first part's start to its last part's end, from
+    /// `sqlparser`'s own spans for this occurrence (`None` when it gave none).
+    fn name_range(&self, n: &ObjectName) -> Option<TextRange> {
+        let (view, index) = self.view.as_ref()?;
+        let idents =
+            n.0.iter()
+                .map(|p| match p {
+                    ObjectNamePart::Identifier(i) => Some(i),
+                    ObjectNamePart::Function(_) => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+        let mut map = PosMap::new(view, index);
+        let start = map.at(idents.first()?.span.start)?;
+        let end = map.at(idents.last()?.span.end)?;
+        let size = |b: usize| u32::try_from(b).ok().map(TextSize::from);
+        (start < end).then_some(TextRange::new(size(start)?, size(end)?))
     }
 
     fn destructive(&mut self, kind: DestructiveKind, target: Option<&ObjectName>) {
@@ -1304,6 +1329,8 @@ impl<'c, 'a> Walk<'c, 'a> {
         let Some(range) = self.range else {
             return;
         };
+        // ## m3c-p2-07 (fix round 3): the target's own position, else the statement's.
+        let range = target.and_then(|n| self.name_range(n)).unwrap_or(range);
         let target = target
             .and_then(qualified)
             .map(|name| ObjectRef { name, kind: object });
@@ -1385,7 +1412,9 @@ impl<'c, 'a> Walk<'c, 'a> {
                     self.unbounded(u.selection.as_ref(), &u.limit, no_order, Some(t), &names);
                 }
                 let synthesized = std::mem::take(&mut self.comma_joins);
-                self.joins_without_on(std::slice::from_ref(&u.table), &synthesized);
+                if join_without_on(std::slice::from_ref(&u.table), &synthesized) {
+                    self.joined_without_on(&targets);
+                }
                 for t in &targets {
                     self.write_target(t);
                 }
@@ -1434,7 +1463,9 @@ impl<'c, 'a> Walk<'c, 'a> {
                         &names,
                     );
                 }
-                self.joins_without_on(relations, &[]);
+                if join_without_on(relations, &[]) {
+                    self.joined_without_on(&targets);
+                }
                 for t in &targets {
                     self.write_target(t);
                 }
@@ -1605,36 +1636,40 @@ impl<'c, 'a> Walk<'c, 'a> {
         }
     }
 
-    /// A join without a condition in an `UPDATE`/`DELETE` target list (SAFE-07).
-    /// ## m3b-t26-prod-unlock (named exception; fix round 1, A-C1, A-M1): through nested joins;
-    /// `synthesized` marks the top-level joins the comma rewrite made (never a missing `ON`).
-    fn joins_without_on(&mut self, tables: &[TableWithJoins], synthesized: &[bool]) {
-        for t in tables {
-            if let TableFactor::NestedJoin {
-                table_with_joins, ..
-            } = &t.relation
-            {
-                self.joins_without_on(std::slice::from_ref(table_with_joins), &[]);
-            }
-            // The markers count the top-level joins; when they do not, none is skipped.
-            let marked = synthesized.len() == t.joins.len();
-            for (i, j) in t.joins.iter().enumerate() {
-                if let TableFactor::NestedJoin {
-                    table_with_joins, ..
-                } = &j.relation
-                {
-                    self.joins_without_on(std::slice::from_ref(table_with_joins), &[]);
-                }
-                let op = format!("{:?}", j.join_operator);
-                if marked && synthesized[i] && op.starts_with("CrossJoin") {
-                    continue;
-                }
-                if op.starts_with("CrossJoin") || op.ends_with("(None)") {
-                    self.destructive(DestructiveKind::JoinWithoutOn, None);
-                }
-            }
+    // ## m3c-p2-07 (fix round 3, controller ruling)
+    /// A join without a condition lets every row of each written table change: one pattern per
+    /// target, at that target's own position (none: one pattern without a target).
+    fn joined_without_on(&mut self, targets: &[ObjectName]) {
+        if targets.is_empty() {
+            self.destructive(DestructiveKind::JoinWithoutOn, None);
+        }
+        for t in targets {
+            self.destructive(DestructiveKind::JoinWithoutOn, Some(t));
         }
     }
+}
+
+/// Whether an `UPDATE`/`DELETE` target list has a join without a condition (SAFE-07).
+/// ## m3b-t26-prod-unlock (named exception; fix round 1, A-C1, A-M1): through nested joins;
+/// `synthesized` marks the top-level joins the comma rewrite made (never a missing `ON`).
+fn join_without_on(tables: &[TableWithJoins], synthesized: &[bool]) -> bool {
+    tables.iter().any(|t| {
+        let nested = |f: &TableFactor| match f {
+            TableFactor::NestedJoin {
+                table_with_joins, ..
+            } => join_without_on(std::slice::from_ref(table_with_joins), &[]),
+            _ => false,
+        };
+        // The markers count the top-level joins; when they do not, none is skipped.
+        let marked = synthesized.len() == t.joins.len();
+        nested(&t.relation)
+            || t.joins.iter().enumerate().any(|(i, j)| {
+                let op = format!("{:?}", j.join_operator);
+                let skipped = marked && synthesized[i] && op.starts_with("CrossJoin");
+                nested(&j.relation)
+                    || (!skipped && (op.starts_with("CrossJoin") || op.ends_with("(None)")))
+            })
+    })
 }
 
 impl Visitor for Walk<'_, '_> {
