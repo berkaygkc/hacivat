@@ -513,33 +513,57 @@ fn read_only_denial_marks_the_gutter_failed_with_its_reason(cx: &mut TestAppCont
 
 #[gpui::test]
 fn cancel_reaches_the_session_and_stop_fetching_keeps_rows(cx: &mut TestAppContext) {
+    // ## m3c-t45 (flake 544): `FOR UPDATE` is a Lock, not a Read, so the unit never suspends
+    // (`hacivat_exec::units::suspendable_for`): the run streams its whole result. It used to be
+    // 1,000,000 rows at 20 ms a chunk, about 5 s in all, and the test needed it still streaming
+    // when it read `before` after Escape. On a slow CI runner (debug, `turkey-test`) the
+    // stream could end first (a `run_until_parked` that handles a chunk more slowly than the
+    // next one comes keeps running until it does), so every row was in and none could follow.
+    // Now the result has no end the test can reach (rows are generated as they are sent) and
+    // the chunks come at 200 ms, far slower than the UI handles one, so the run is streaming
+    // whenever the test looks: Escape, "more rows" and the chord no longer race its end.
+    const TOTAL: u64 = 1_000_000_000;
     let slow = FakeQuery {
         prefix: "SELECT n",
-        sets: vec![rows(1_000_000)],
-        chunk_delay: std::time::Duration::from_millis(20),
+        sets: vec![rows(TOTAL)],
+        chunk_delay: std::time::Duration::from_millis(200),
         ..Default::default()
     };
-    let mut c = pg_console(cx, pg().tracks_transactions().queries(vec![slow]));
-    c.set_text("SELECT n FROM generate_series(1, 1000000) n FOR UPDATE");
+    let (mut c, side) = console_with_side(
+        cx,
+        profile("orders-dev", DbmsKind::Postgres),
+        pg().tracks_transactions().queries(vec![slow]),
+        FakeDriver::new(DbmsKind::Postgres),
+    );
+    c.set_text("SELECT n FROM generate_series(1, 1000000000) n FOR UPDATE");
     c.run_at(0);
     c.wait_queries(1);
-    let result_rows = |c: &Console| {
+    let result = |c: &Console| {
         c.vcx.cx.read(|cx| {
             Consoles::get(cx, c.id)
                 .and_then(|s| s.results.clone())
                 .and_then(|r| {
-                    r.read(cx)
-                        .tabs()
-                        .first()
-                        .map(|t| t.source().snapshot().row_count())
+                    r.read(cx).tabs().first().map(|t| {
+                        let snap = t.source().snapshot();
+                        (snap.row_count(), *snap.completeness())
+                    })
                 })
-                .unwrap_or(0)
         })
     };
+    let result_rows = |c: &Console| result(c).map_or(0, |(rows, _)| rows);
     wait_until(c.vcx, "rows to stream in", |_| result_rows(&c) > 0);
     // Escape never cancels (R-M3-38): the run keeps streaming.
     c.focus_editor();
     c.keys("escape");
+    // ## m3c-t45 (flake 544): nothing asked for a cancel: no "cancelling" mark, no cancel on
+    // the session's connection or a side one, and the result is still streaming.
+    assert!(
+        matches!(c.mark_states().as_slice(), [ExecMarkState::Running { .. }]),
+        "{:?}",
+        c.mark_states()
+    );
+    assert_eq!(c.fake.cancel_calls(), 0, "Escape sent no cancel");
+    assert_eq!(side.cancel_calls(), 0, "nor on a side connection");
     let before = result_rows(&c);
     wait_until(c.vcx, "more rows after Escape", |_| {
         result_rows(&c) > before
@@ -548,6 +572,15 @@ fn cancel_reaches_the_session_and_stop_fetching_keeps_rows(cx: &mut TestAppConte
         c.mark_states().as_slice(),
         [ExecMarkState::Running { .. }]
     ));
+    assert!(
+        matches!(
+            result(&c),
+            Some((_, hacivat_results::Completeness::Streaming))
+        ),
+        "{:?}",
+        result(&c)
+    );
+    assert_eq!(c.fake.cancel_calls() + side.cancel_calls(), 0);
     // The chord, through the keymap and the Console context (Fix round 1, Minor 15).
     c.keys(CANCEL_CHORD);
     wait_until(c.vcx, "the run to end", |_| {
@@ -560,9 +593,25 @@ fn cancel_reaches_the_session_and_stop_fetching_keeps_rows(cx: &mut TestAppConte
                     | ExecMarkState::Queued
             )
     });
+    // ## m3c-t45 (flake 544): the stop reached the session: it ended the result as cancelled
+    // (not complete: the result has no end the test could reach).
+    assert!(
+        matches!(
+            result(&c),
+            Some((_, hacivat_results::Completeness::Cancelled))
+        ),
+        "{:?}",
+        result(&c)
+    );
     let kept = result_rows(&c);
     assert!(kept > 0, "stopping keeps the rows fetched");
-    assert!(kept < 1_000_000, "and stops fetching");
+    assert!(kept < TOTAL, "and stops fetching");
+    // ## m3c-t45 (flake 544): and no chunk comes after the stop: the session answers a later
+    // request only once the run is over, and the rows and the driver's chunks stay put.
+    let chunks = c.fake.chunks_sent();
+    c.barrier();
+    assert_eq!(result_rows(&c), kept, "no row after the stop");
+    assert_eq!(c.fake.chunks_sent(), chunks, "no chunk after the stop");
     stop_core_runtime_test(cx);
 }
 
