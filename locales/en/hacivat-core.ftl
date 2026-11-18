@@ -1023,3 +1023,20 @@ exec-run-context-unconfirmed = Not sent: Hacivat couldn't confirm this connectio
 exec-confirm-not-undone = Not undone: the table doesn't support transactions, so the statement's changes stay.
 # The unit's error for the same case.
 exec-error-confirm-not-undone = Not undone: the table doesn't support transactions, so this statement's changes stay.
+
+## m3c-p2-07
+
+# PO P2-07, destructive pattern: PostgreSQL DROP OWNED BY (the role's objects go, not the role).
+# Variables:
+#   $role (String) - the role's name as written in the statement (CURRENT_USER and the like
+#                    as written too).
+safety-destructive-drop-owned = Removes every object { $role } owns in this database and revokes the privileges it was granted here.
+# PO P2-07, destructive pattern: DROP OWNED BY … CASCADE.
+# Variables:
+#   $role (String) - the role's name as written in the statement.
+safety-destructive-drop-owned-cascade = Removes every object { $role } owns in this database and everything that depends on those objects, and revokes the privileges it was granted here.
+# PO P2-07: on production DROP OWNED asks for one role's name typed, and this unit would need
+# more than one name (several roles, or a role beside another statement that asks for a name).
+exec-drop-owned-several-targets = Not sent: on production, DROP OWNED asks you to type the role's name, and this would need more than one name. Run it for one role at a time, on its own.
+# PO P2-07: on production, a DROP OWNED whose role Hacivat couldn't name.
+exec-drop-owned-no-target = Not sent: Hacivat can't tell whose objects this DROP OWNED removes, so it can't ask you to type the role's name.

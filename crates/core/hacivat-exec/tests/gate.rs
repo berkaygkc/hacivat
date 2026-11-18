@@ -3144,6 +3144,155 @@ fn production_drops_of_other_objects_keep_their_row() {
     }
 }
 
+// ## m3c-p2-07 (PO P2-07): on production `DROP OWNED BY <role>` asks for the role's name typed,
+// as `TRUNCATE` and `DROP TABLE` ask for the table's: as written (quotes removed, letter case
+// kept), never suppressible. `CURRENT_USER`, `CURRENT_ROLE`, `SESSION_USER` are typed as the
+// keyword is written (Hacivat does not resolve them). More than one role, or a role with any
+// other typed name in the unit, is the multi-target rule (denied: typing one name must never
+// approve another); no role to name is denied. Off production nothing changes.
+
+#[test]
+fn production_drop_owned_asks_for_the_role_name_typed() {
+    let rows: &[(&str, &str, &str)] = &[
+        ("DROP OWNED BY bob", "bob", "safety-destructive-drop-owned"),
+        (
+            "DROP OWNED BY bob CASCADE",
+            "bob",
+            "safety-destructive-drop-owned-cascade",
+        ),
+        (
+            "DROP OWNED BY \"Bob\" RESTRICT",
+            "Bob",
+            "safety-destructive-drop-owned",
+        ),
+        ("drop owned by Bob", "Bob", "safety-destructive-drop-owned"),
+        (
+            "DROP OWNED BY \"müşteri yönetici\"",
+            "müşteri yönetici",
+            "safety-destructive-drop-owned",
+        ),
+        (
+            "DROP OWNED BY owned",
+            "owned",
+            "safety-destructive-drop-owned",
+        ),
+        (
+            "DROP OWNED BY bob, bob",
+            "bob",
+            "safety-destructive-drop-owned",
+        ),
+        (
+            "DROP OWNED BY CURRENT_USER",
+            "CURRENT_USER",
+            "safety-destructive-drop-owned",
+        ),
+        (
+            "DROP OWNED BY current_role",
+            "current_role",
+            "safety-destructive-drop-owned",
+        ),
+        (
+            "DROP OWNED BY Session_User CASCADE",
+            "Session_User",
+            "safety-destructive-drop-owned-cascade",
+        ),
+    ];
+    let single = sql_safety::Expect::SingleStatement;
+    let engine = DbmsKind::Postgres;
+    for &(text, name, reason_id) in rows {
+        let prod = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, single, &prod);
+        match &item.decision {
+            GateDecision::Confirm {
+                type_to_confirm: Some(t),
+                suppressible: false,
+                reasons,
+                ..
+            } => {
+                assert_eq!(&**t, name, "`{text}`");
+                assert!(
+                    reasons.iter().any(|r| r.fluent_id == reason_id
+                        && r.args.iter().any(|(k, v)| *k == "role" && &**v == name)),
+                    "`{text}`: {reasons:?}"
+                );
+            }
+            other => panic!("`{text}`: {other:?}"),
+        }
+        // Off production nobody types (the class's own row stands).
+        for env in [EnvTag::Staging, EnvTag::Dev] {
+            let item = po_item(engine, text, single, &conn(engine, Some(env)));
+            assert!(
+                !matches!(
+                    item.decision,
+                    GateDecision::Confirm {
+                        type_to_confirm: Some(_),
+                        ..
+                    } | GateDecision::Deny(_)
+                ),
+                "{env:?} `{text}`: {:?}",
+                item.decision
+            );
+        }
+    }
+}
+
+#[test]
+fn production_drop_owned_of_several_roles_is_denied() {
+    for text in [
+        "DROP OWNED BY a, b",
+        "DROP OWNED BY a, b CASCADE",
+        "DROP OWNED BY CURRENT_USER, SESSION_USER",
+        // The keyword and a role spelled alike are two roles.
+        "DROP OWNED BY \"current_user\", current_user",
+        "DROP OWNED BY \"current_user\"; DROP OWNED BY current_user",
+        "DROP OWNED BY a; DROP OWNED BY b",
+        // A role and a table spelled alike are two objects.
+        "TRUNCATE a; DROP OWNED BY a",
+        "DELETE FROM a; DROP OWNED BY a",
+    ] {
+        let engine = DbmsKind::Postgres;
+        let prod = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, sql_safety::Expect::Script, &prod);
+        assert_eq!(
+            deny_id(&item.decision),
+            "exec-drop-owned-several-targets",
+            "`{text}`"
+        );
+        for env in [EnvTag::Staging, EnvTag::Dev] {
+            let item = po_item(
+                engine,
+                text,
+                sql_safety::Expect::Script,
+                &conn(engine, Some(env)),
+            );
+            assert!(
+                !matches!(item.decision, GateDecision::Deny(_)),
+                "{env:?} `{text}`: {:?}",
+                item.decision
+            );
+        }
+    }
+}
+
+#[test]
+fn production_drop_owned_without_a_role_is_denied() {
+    let mut s = stmt(StmtKind::Drop, EffectSet::DDL | EffectSet::PRIVILEGE);
+    s.destructive.push(DestructiveReason {
+        kind: DestructiveKind::Drop { cascade: true },
+        range: TextRange::default(),
+        target: None,
+    });
+    let item = gated("DROP OWNED BY r CASCADE", vec![s.clone()], &conn_prod());
+    assert_eq!(deny_id(&item.decision), "exec-drop-owned-no-target");
+    // Off production the class's own row stands.
+    let item = gated("DROP OWNED BY r CASCADE", vec![s], &conn_dev());
+    assert!(
+        !matches!(item.decision, GateDecision::Deny(_)),
+        "{:?}",
+        item.decision
+    );
+}
+
 // ## m3b-gate-explain: the B-M6 shortcut (a plain `EXPLAIN` of a data change is a read) never
 // covers a statement that calls a routine, whatever evidence of the call the report carries:
 // the `ROUTINE_CALL` effect bit, a routine reason or a touched call. The seed class

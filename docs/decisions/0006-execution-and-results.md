@@ -1236,13 +1236,28 @@ case.
   `exec-unsafe-several-targets` (typing one name must never approve another). Off production
   nothing changes. Views, indexes, functions, sequences and column drops keep a plain
   confirmation.
-- **Limit of the typed name (fix round 1, review m4).** The typed name needs a target the
-  classifier can see. A `TRUNCATE` or `DROP TABLE` hidden from it — inside a `DO` block,
-  dynamic SQL (`EXECUTE '…'`), `dblink_exec(…)`, MySQL `PREPARE`/`EXECUTE`, or a routine a
-  `CALL` runs — and PostgreSQL's `DROP OWNED BY r CASCADE` (which drops every table the role
-  owns) get the plain production confirmation instead: never suppressible, nothing sent before
-  the answer, but no name to type. Open PO question: should `DROP OWNED` ask for the role's
-  name typed?
+- **Limit of the typed name (fix round 1, review m4; narrowed by m3c-p2-07).** The typed name
+  needs a target the classifier can see. A `TRUNCATE` or `DROP TABLE` hidden from it — inside a
+  `DO` block, dynamic SQL (`EXECUTE '…'`), `dblink_exec(…)`, MySQL `PREPARE`/`EXECUTE`, or a
+  routine a `CALL` runs — gets the plain production confirmation instead: never suppressible,
+  nothing sent before the answer, but no name to type.
+- **`DROP OWNED BY` types the role's name on production (## m3c-p2-07, PO P2-07, approved
+  2026-11-18).** PostgreSQL's `DROP OWNED BY <role> [, …] [CASCADE | RESTRICT]` (which drops
+  every object the role owns in the database, every table included) now names each role as its
+  `Drop` pattern's target (`ObjectKind::Role`, where the role is written), and the gate's typed
+  name takes it when the statement's own leading words read `DROP OWNED`. The rules are the
+  `TRUNCATE`/`DROP TABLE` ones: production only (`EnvTag::Production`), never suppressible,
+  off production nothing changes; the name is typed as written (quotes removed, letter case
+  kept, compared byte for byte). `CURRENT_USER`, `CURRENT_ROLE`, `SESSION_USER` (and `PUBLIC`)
+  are not resolved to a role name — Hacivat has no way to — so the keyword is typed as written.
+  The multi-target rule is the one `DROP TABLE a, b` follows: one name per unit, so
+  `DROP OWNED BY a, b` (or two `DROP OWNED` statements, or a `DROP OWNED` beside a `TRUNCATE`
+  or unbounded `DELETE`) is denied, `exec-drop-owned-several-targets`; the same role twice is
+  one name. A role and a table written alike, or a keyword and a quoted role spelled alike
+  (`"current_user"`, `current_user`), are two objects, never one name. A `DROP OWNED` whose role
+  the classifier could not name is denied, `exec-drop-owned-no-target`. The dialog's reason is
+  `safety-destructive-drop-owned[-cascade]` ("Removes every object `r` owns in this database
+  …"), never `safety-destructive-drop` ("Removes `r`.", which `DROP ROLE` keeps).
 - **More secret forms are masked in history (PO M3b-23; narrowed in fix round 1).** Secret
   name parts are now also `BEARER`, a bare `TOKEN` or a `TOKEN` after a secret-ish qualifier
   (`access_token`, `refresh_token`, `api_token`, `auth_token`; never `token_type`,

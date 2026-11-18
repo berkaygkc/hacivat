@@ -1569,3 +1569,82 @@ fn other_sessions_activity_is_unknown() {
         CoarseClass::Read
     );
 }
+
+// ## m3c-p2-07 (PO P2-07): `DROP OWNED BY` names each role whose objects it drops, so the
+// production gate can ask for the role's name typed. A role written as a name is the server's
+// reading of it (unquoted folded, quoted exact; `quoted: true`, as every name the backend
+// reports); `CURRENT_USER`, `CURRENT_ROLE`, `SESSION_USER` and `PUBLIC` are the keyword itself
+// (`quoted: false`, never the same object as a quoted role spelled alike). Each pattern's range is
+// where its role is written.
+#[test]
+fn drop_owned_names_each_role() {
+    use sql_safety::ObjectKind;
+    let roles = |sql: &str| -> Vec<(DestructiveKind, String, bool, String)> {
+        one(sql)
+            .destructive
+            .iter()
+            .map(|d| {
+                let t = d.target.as_ref().unwrap_or_else(|| panic!("{sql}: {d:?}"));
+                assert_eq!(t.kind, ObjectKind::Role, "{sql}");
+                assert_eq!(t.name.parts.len(), 1, "{sql}");
+                let part = &t.name.parts[0];
+                let written = &sql[usize::from(d.range.start())..usize::from(d.range.end())];
+                (
+                    d.kind,
+                    part.text.to_string(),
+                    part.quoted,
+                    written.to_string(),
+                )
+            })
+            .collect()
+    };
+    let keep = DestructiveKind::Drop { cascade: false };
+    let cascade = DestructiveKind::Drop { cascade: true };
+    let r = |k: DestructiveKind, name: &str, quoted: bool, written: &str| {
+        (k, name.to_string(), quoted, written.to_string())
+    };
+    assert_eq!(roles("DROP OWNED BY bob"), [r(keep, "bob", true, "bob")]);
+    assert_eq!(
+        roles("DROP OWNED BY bob, alice CASCADE"),
+        [
+            r(cascade, "bob", true, "bob"),
+            r(cascade, "alice", true, "alice")
+        ]
+    );
+    assert_eq!(
+        roles("DROP OWNED BY bob RESTRICT"),
+        [r(keep, "bob", true, "bob")]
+    );
+    assert_eq!(
+        roles("DROP OWNED BY \"Bob\""),
+        [r(keep, "Bob", true, "\"Bob\"")]
+    );
+    assert_eq!(roles("drop owned by Bob"), [r(keep, "bob", true, "Bob")]);
+    // A role named like a word of the statement: its own place, not the keyword's.
+    assert_eq!(
+        roles("DROP OWNED BY owned"),
+        [r(keep, "owned", true, "owned")]
+    );
+    assert_eq!(
+        roles("DROP OWNED BY CURRENT_USER"),
+        [r(keep, "current_user", false, "CURRENT_USER")]
+    );
+    assert_eq!(
+        roles("DROP OWNED BY current_role CASCADE"),
+        [r(cascade, "current_role", false, "current_role")]
+    );
+    assert_eq!(
+        roles("DROP OWNED BY Session_User, \"current_user\""),
+        [
+            r(keep, "session_user", false, "Session_User"),
+            r(keep, "current_user", true, "\"current_user\"")
+        ]
+    );
+    // Still DDL plus a privilege change, gated at least as a destructive drop.
+    let s = one("DROP OWNED BY bob");
+    assert!(
+        s.effects.contains(EffectSet::DDL | EffectSet::PRIVILEGE),
+        "{s:?}"
+    );
+    assert!(gate_class(&s) >= GateClass::DdlDestructive, "{s:?}");
+}

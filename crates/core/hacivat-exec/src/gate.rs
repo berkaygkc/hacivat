@@ -145,6 +145,12 @@ const IMPLICIT_COMMIT: &str = "exec-gate-implicit-commit";
 const EXPLAIN_REFUSED: &str = "exec-explain-analyze-refused";
 const NO_TARGET: &str = "exec-unsafe-no-target";
 const SEVERAL_TARGETS: &str = "exec-unsafe-several-targets";
+// ## m3c-p2-07 (PO P2-07): `DROP OWNED BY` on production.
+const DROP_OWNED_NO_TARGET: &str = "exec-drop-owned-no-target";
+const DROP_OWNED_SEVERAL_TARGETS: &str = "exec-drop-owned-several-targets";
+const DROP_OWNED: &str = "safety-destructive-drop-owned";
+const DROP_OWNED_CASCADE: &str = "safety-destructive-drop-owned-cascade";
+// ## m3c-p2-07
 // ## m3b-t15-gate (fix round 1)
 /// I1: a statement Hacivat could not analyse that may change data (off production).
 const NOT_ANALYSED: &str = "exec-gate-not-analysed";
@@ -650,15 +656,15 @@ fn written_name(
 
 /// The name a production confirmation asks to type (R-M3-55): the target of every unsafe-DML
 /// pattern, of a `DROP DATABASE`/`DROP SCHEMA` and (## m3b-po-typed-name, PO M3b-04) of a
-/// `TRUNCATE` or `DROP TABLE`, as written. From the destructive kinds, not
-/// the class. `Err` when one has no target (nothing to type) or two name different objects
-/// (typing one name must not approve another).
+/// `TRUNCATE` or `DROP TABLE`, and (## m3c-p2-07, PO P2-07) the role of a `DROP OWNED BY`, as
+/// written. From the destructive kinds, not the class. `Err` when one has no target (nothing to
+/// type) or two name different objects (typing one name must not approve another).
 fn typed_name(
     report: &SafetyReport,
     text: &str,
     engine: DbmsKind,
 ) -> Result<Option<Arc<str>>, GateReason> {
-    let mut names: Vec<Arc<str>> = Vec::new();
+    let mut names: Vec<Typed> = Vec::new();
     let d = dialect_for(report, engine);
     for s in &report.items {
         // Fix round 1 (I3): the statement's own words say `DROP DATABASE`/`DROP SCHEMA`, so a
@@ -673,6 +679,8 @@ fn typed_name(
                 || (["TEMPORARY", "TEMP", "FOREIGN"].iter().any(|w| word(1, w))
                     && word(2, "TABLE")));
         let alters = word(0, "ALTER");
+        // ## m3c-p2-07 (PO P2-07): `DROP OWNED BY` names the roles whose objects go.
+        let drops_owned = word(0, "DROP") && word(1, "OWNED");
         let mut named = false;
         for dr in &s.destructive {
             let schema_or_db = matches!(dr.kind, DestructiveKind::Drop { .. })
@@ -696,9 +704,21 @@ fn typed_name(
                 }
                 _ => false,
             };
-            if !dr.kind.is_unsafe_dml() && !schema_or_db && !table_gone {
+            // ## m3c-p2-07 (PO P2-07): every `Drop` of a `DROP OWNED` names its role (fail
+            // closed: no role to name is denied, two are several targets).
+            let owned_gone = drops_owned && matches!(dr.kind, DestructiveKind::Drop { .. });
+            if !dr.kind.is_unsafe_dml() && !schema_or_db && !table_gone && !owned_gone {
                 continue;
             }
+            if owned_gone {
+                let Some(role) = dr.target.as_ref() else {
+                    return Err(GateReason::of(DROP_OWNED_NO_TARGET));
+                };
+                let n = written_name(role, dr.range, s.range, text, report.dialect);
+                push_name(&mut names, n, Some(role.name.clone()));
+                continue;
+            }
+            // ## m3c-p2-07
             // ## m3b-t26-prod-unlock (named exception, T26 carry MUST 1): a pattern without a
             // target of its own names every object its statement writes, never only the first
             // (`UPDATE a JOIN b … SET b.y = 2` writes `b`): typing one name must never approve
@@ -709,7 +729,7 @@ fn typed_name(
             };
             if targets.is_empty() {
                 if schema_or_db && let Some(Some(n)) = &dropped_db {
-                    push_name(&mut names, n.clone());
+                    push_name(&mut names, n.clone(), None);
                     named = true;
                     continue;
                 }
@@ -719,28 +739,41 @@ fn typed_name(
                 push_name(
                     &mut names,
                     written_name(target, dr.range, s.range, text, report.dialect),
+                    None,
                 );
             }
             named |= schema_or_db;
         }
         match dropped_db {
-            Some(Some(n)) if !named => push_name(&mut names, n),
+            Some(Some(n)) if !named => push_name(&mut names, n, None),
             Some(None) if !named => return Err(GateReason::of(NO_TARGET)),
             _ => {}
         }
     }
     match names.len() {
         0 => Ok(None),
-        1 => Ok(names.pop()),
+        1 => Ok(names.pop().map(|(n, _)| n)),
+        // ## m3c-p2-07 (PO P2-07)
+        _ if names.iter().any(|(_, role)| role.is_some()) => {
+            Err(GateReason::of(DROP_OWNED_SEVERAL_TARGETS))
+        }
         _ => Err(GateReason::of(SEVERAL_TARGETS)),
     }
 }
 
-fn push_name(names: &mut Vec<Arc<str>>, n: Arc<str>) {
-    if !names.contains(&n) {
-        names.push(n);
+// ## m3c-p2-07 (PO P2-07)
+/// A name to type, and the role it names when it is a `DROP OWNED` role (the classifier's
+/// reading of it): a role and a table, or the keyword `current_user` and the quoted role
+/// `"current_user"`, written alike are two objects, never one name.
+type Typed = (Arc<str>, Option<QualifiedName>);
+
+fn push_name(names: &mut Vec<Typed>, n: Arc<str>, role: Option<QualifiedName>) {
+    let typed = (n, role);
+    if !names.contains(&typed) {
+        names.push(typed);
     }
 }
+// ## m3c-p2-07
 
 /// When `stmt` (in dialect `d`) reads `DROP DATABASE|SCHEMA [IF EXISTS] <name>`: the name as
 /// written (`Some(None)` when none can be read); `None` for any other statement.
@@ -834,19 +867,35 @@ fn leading_words(stmt: &str, d: DialectId, n: usize) -> Vec<String> {
 
 /// The reasons a dialog lists: one per destructive pattern (its target as written), then the
 /// classifier's reasons, in order, without repeats.
-fn reasons_of(report: &SafetyReport, text: &str) -> Vec<GateReason> {
+fn reasons_of(report: &SafetyReport, text: &str, engine: DbmsKind) -> Vec<GateReason> {
     let mut out = Vec::new();
+    let dialect = dialect_for(report, engine);
     for s in &report.items {
+        // ## m3c-p2-07 (PO P2-07): a `DROP OWNED` role loses what it owns, not itself.
+        let lead = leading_words(slice(text, s.range).unwrap_or(text), dialect, 2);
+        let drops_owned = lead.len() == 2 && lead[0] == "DROP" && lead[1] == "OWNED";
         for d in &s.destructive {
-            let reason = match &d.target {
-                Some(t) => GateReason {
+            let reason = match (&d.target, d.kind) {
+                (Some(t), DestructiveKind::Drop { cascade }) if drops_owned => GateReason {
+                    fluent_id: if cascade {
+                        DROP_OWNED_CASCADE
+                    } else {
+                        DROP_OWNED
+                    },
+                    args: vec![(
+                        "role",
+                        written_name(t, d.range, s.range, text, report.dialect),
+                    )],
+                },
+                // ## m3c-p2-07
+                (Some(t), _) => GateReason {
                     fluent_id: d.kind.fluent_id(),
                     args: vec![(
                         "table",
                         written_name(t, d.range, s.range, text, report.dialect),
                     )],
                 },
-                None => GateReason::of(DESTRUCTIVE),
+                (None, _) => GateReason::of(DESTRUCTIVE),
             };
             push_unique(&mut out, reason);
         }
@@ -1091,7 +1140,7 @@ fn gate_unit(
         // first (row locks, bloat, triggers' side effects outlive the rollback).
         let asks = production;
         let decision = if asks {
-            let mut reasons = reasons_of(report, text);
+            let mut reasons = reasons_of(report, text, conn.engine);
             push_unique(&mut reasons, GateReason::of(EXPLAIN_NOT_UNDONE));
             for r in extra {
                 push_unique(&mut reasons, r);
@@ -1184,7 +1233,7 @@ fn gate_unit(
     let suppressible =
         type_to_confirm.is_none() && !implicit_commit && !never_suppressed && !facts.mixed_write;
 
-    let mut reasons = reasons_of(report, text);
+    let mut reasons = reasons_of(report, text, conn.engine);
     if implicit_commit {
         push_unique(&mut reasons, GateReason::of(IMPLICIT_COMMIT));
     }

@@ -1046,6 +1046,41 @@ impl<'a, 's> Classifier<'a, 's> {
         o
     }
 
+    // ## m3c-p2-07 (PO P2-07)
+    /// The role a `RoleSpec` names, its span recorded where it is written: a name is the
+    /// server's reading of it (`quoted: true`, as every name here); `CURRENT_ROLE`,
+    /// `CURRENT_USER`, `SESSION_USER` and `PUBLIC` are the keyword itself, `quoted: false`
+    /// (Hacivat does not resolve them, and a quoted role spelled alike is another object).
+    fn role_target(&mut self, rs: &pb::RoleSpec) -> Option<ObjectRef> {
+        use pb::RoleSpecType as T;
+        let keyword = match T::try_from(rs.roletype) {
+            Ok(T::RolespecCstring) if !rs.rolename.is_empty() => None,
+            Ok(T::RolespecCurrentRole) => Some("current_role"),
+            Ok(T::RolespecCurrentUser) => Some("current_user"),
+            Ok(T::RolespecSessionUser) => Some("session_user"),
+            Ok(T::RolespecPublic) => Some("public"),
+            _ => return None,
+        };
+        let name = match keyword {
+            None => simple_name(&rs.rolename),
+            Some(k) => QualifiedName {
+                parts: SmallVec::from_elem(
+                    Ident {
+                        text: Arc::from(k),
+                        quoted: false,
+                    },
+                    1,
+                ),
+            },
+        };
+        let o = object(name, ObjectKind::Role);
+        if let Some(span) = self.span_at(rs.location) {
+            self.target_spans.push((o.clone(), span));
+        }
+        Some(o)
+    }
+    // ## m3c-p2-07
+
     /// A destructive pattern; its range is where the target's name is written (fix round 1,
     /// M7: the type-to-confirm text is those bytes), else the statement's.
     fn destroy(&mut self, kind: DestructiveKind, target: Option<ObjectRef>) {
@@ -1264,7 +1299,19 @@ impl<'a, 's> Classifier<'a, 's> {
             }
             PgRef::DropOwnedStmt(s) => {
                 let cascade = s.behavior == pb::DropBehavior::DropCascade as i32;
-                self.destroy(DestructiveKind::Drop { cascade }, None);
+                // ## m3c-p2-07 (PO P2-07): one pattern per role whose objects go, its target
+                // that role (the production gate asks for its name typed).
+                if s.roles.is_empty() {
+                    self.destroy(DestructiveKind::Drop { cascade }, None);
+                }
+                for role in &s.roles {
+                    let target = match &role.node {
+                        Some(pb::node::Node::RoleSpec(rs)) => self.role_target(rs),
+                        _ => None,
+                    };
+                    self.destroy(DestructiveKind::Drop { cascade }, target);
+                }
+                // ## m3c-p2-07
             }
             PgRef::DropdbStmt(s) => {
                 let target = object(simple_name(&s.dbname), ObjectKind::Database);
