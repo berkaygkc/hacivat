@@ -1062,11 +1062,14 @@ impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // ## m3c-narrow: the banner's form follows the width the last frame gave the editor
         // (`prepaint_frame` asks for one more frame when it crossed the narrow line).
-        self.banner_narrow = self
+        // ## m3c-narrow (fix round 1, M5): only while a banner shows.
+        let narrow = self
             .layout
             .as_ref()
-            .is_some_and(|l| large_file::narrow(l.bounds.size.width));
-        let banner = large_file::banner(&self.tier, self.banner_narrow, window, cx);
+            .map(|l| l.bounds.size.width)
+            .filter(|w| large_file::shows_banner(&self.tier) && large_file::narrow(*w));
+        self.banner_narrow = narrow.is_some();
+        let banner = large_file::banner(&self.tier, narrow, window, cx);
         let overlay = commands::overlay(self, window, cx);
         // ## m3c-t41
         let placeholder = self.placeholder_element(window, cx);
@@ -1077,6 +1080,8 @@ impl Render for EditorView {
         );
         let column = div()
             .id(("editor", self.doc.0))
+            // ## m3c-narrow (fix round 1, I1): the column's box, for the scene checks.
+            .debug_selector(|| "editor-column".to_string())
             .track_focus(&self.focus)
             .size_full()
             .flex()
