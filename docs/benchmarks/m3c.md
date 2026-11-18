@@ -41,8 +41,9 @@ with the PO at the Mac, display awake and session unlocked:
 4. **PNG sign-off** (E6): the changed approved shots in section 5, and PO page 2
    (https://claude.ai/artifact/R7xAfM1fWxoFe34aZuaAUD). P2-01..P2-13 were answered on
    2026-11-18 (P2-13, the earlier shot sets, approved). **Still open:** P2-14 (zero-width
-   inactive tabs at 120 px), P2-15 (the narrow placeholder crosses the gutter) and P2-16 (the
-   176 new `narrow-*` PNGs). Also the DESIGN.md "Query, Results and Grid" section.
+   inactive tabs at 120 px), P2-15 (the narrow placeholder crosses the gutter), P2-16 (the
+   176 new `narrow-*` PNGs) and P2-17 (the 16 `marks-denied` PNGs: the shorter several-targets
+   denial, section 3). Also the DESIGN.md "Query, Results and Grid" section.
 5. **Rulings confirmation**: section 7 (the "PO confirm" column), plus the open questions in
    section 8.
 6. **Merge to `main`**: after 1–5, the controller opens the `m3c` → `main` PR (which also runs
@@ -96,23 +97,44 @@ After it, only `ff7e4fe` (P2-07: the gate and classifier, no rendered state) and
 
 | Field | Value |
 |---|---|
-| Run | **44152258028** (`workflow_dispatch` on `m3c` at `b540c4c`) |
-| Status | **PENDING (controller)** |
-| build-test ×3 | PENDING |
-| turkey-test | PENDING |
-| tokens, check-deps, l10n-check, deny | PENDING |
-| switch, launch-smoke | PENDING |
-| release-tests | PENDING |
-| bench | PENDING |
-| nightly-package | PENDING |
-| pseudo-screens ×2 (incl. Linux on the 101 M3c states, T43a I3 prerequisite) | PENDING |
-| docker-full | PENDING |
-| keyring-linux, keyring-windows, vault-linux | PENDING |
-| fuzz-sql, sql-differential | PENDING |
-| docker-pr | not in this run (runs with the `m3c` → `main` PR) — PENDING (controller) |
+| Run | **44333377438** (`workflow_dispatch` on `m3c` at `5535724`: the gate tip `83edd55` plus the three CI fixes below) |
+| Status | **success** (every job green). `launch-smoke (macos-15)` and `switch (macos-15)` were first not picked up by a hosted macOS runner (GitHub capacity, "not acquired") and passed on the re-run of the same run |
+| build-test ×3 (macOS, Ubuntu, Windows) | success |
+| turkey-test | success (flake `exec_ui.rs:544` fixed, see below) |
+| tokens, check-deps, l10n-check, cargo-deny | success |
+| switch (ubuntu), launch-smoke (ubuntu, windows) | success |
+| switch (macos), launch-smoke (macos) | success (re-run attempt 2 of the same run, same commit) |
+| release-tests | success |
+| bench (regression signal only) | success |
+| nightly-package ×3 | success |
+| pseudo-screens macOS (one process) | success: 4,860 states, 0 violations; live threads 4 after the first shot, 6 after the last; M1 shot-diff 36 compared, 0 breached, 32 superseded |
+| pseudo-screens Linux (2 shards) | success: 1/2 and 2/2 (the first full Linux render of the M3c set) |
+| docker-full | success |
+| keyring-linux, keyring-windows, vault-linux | success |
+| fuzz-sql, sql-differential | success |
+| docker-pr | not in this run (runs with the `m3c` → `main` PR) |
 
-Note: `b540c4c` does not contain T44 or the narrow fixes. If either changes product code, CI runs
-again on the gate tip (PENDING (controller): run id).
+Earlier runs, superseded:
+- **44152258028** (`b540c4c`): before T44 and the narrow fixes.
+- **44274413727** (`83edd55`): three reds, all fixed on `m3c`:
+  1. **pseudo-screens macOS**, 12 violations in `marks-denied`. The P2-07 several-targets denial
+     had grown to 152 characters, and an output-log sentence stays on one line. The sentence
+     is back to the old length (98 characters, same meaning); fix `feca818`. The 16
+     `marks-denied` PNGs change in text only (PO item P2-17).
+     - This corrects the ledger note that P2-07 changes no shot: the local full render ran
+       at `100e4e6`, before P2-07.
+  2. **pseudo-screens Linux** cancelled at the 180-minute bound (about 2.5 s per shot). Linux
+     now renders in two shards (`--shard k/n`); fix `feca818`.
+  3. **turkey-test**, `exec_ui.rs:544`, the second gate failure, so no longer a flake:
+     - `FOR UPDATE` is a lock, so the unit never suspends, and the 5 s fake stream could end
+       before Escape on a slow runner.
+     - The test-only fix (`0f963f5`, merged `c9e9c30`) uses a stream with no reachable end
+       and asserts no cancel on Escape and no rows after the stop.
+- **44306265834** (`c9e9c30`): all of the above green. The macOS render passed for the first time
+  and reached the M1 pixel comparison:
+  - 8 `settings-general` breaches, which T42 changed on purpose (PO P2-13). They were added to
+    `superseded.txt` (`5535724`).
+  - launch-smoke macOS was not acquired by a runner.
 
 ## 4. What the user sees that the plan wording does not say
 
@@ -182,6 +204,7 @@ in the SDD folder.
 | tx-chip menus | **6** (`tx-chip-menu` en-XA ×2, `tx-chip-production` en-XA/tr-XT ×4, 960) | the transaction menu now ends 4 px inside the window (it was cut at the edge) | `m3b.md` section 12.4; `m3c-shot-fixes-report.md` |
 | vs `baseline-m2b` | the known 24 + 12 rw capsules at 960 (M3b) | as M3b | `task-m3b-29-shot-diff.md` |
 | Narrow fixes (new, P2-16) | **176** new PNGs (the 11 `narrow-*` states at 120 px × 16) | ellipsized active tab title, the mode chip's +1 px sides, the placeholder under line 1, the Reduced-mode banner's narrow form; `narrow-pseudo-floor` and settings unchanged | `m3c-narrow-fixes-report.md` |
+| P2-07 denial (new, P2-17) | **16** (`marks-denied-*`, found by CI 44274413727) | the several-targets denial sentence: P2-07's one-name-one-target wording, cut back to the old length (`feca818`); text only; 0 violations | section 3 |
 | Full diffs at the gate tip (default thresholds, max dE 2, share 0.001) | vs `baseline-m3b`: 3,244 compared, **1,883** breached, 1,616 new (the M3c states). vs `baseline-m3a`: 2,108 compared, 1,161 breached. vs `baseline-m2b`: 1,012 compared, 85 breached | vs m3b: 1,837 in the T41/capsule/shot-fix lists, the other 46 are 38 m3b-PO-fix and 8 T42 `settings-general` PNGs: **0 unattributed**; the narrow fixes' render showed the same 1,883 dE-0 identical to `b540c4c`. The 20 (m3a) and 12 (m2b) breaches not breached vs m3b are M3b changes attributed at the M3b gate | `t45-gate-shot-diff-vs-m3b.txt`, `-vs-m3a.txt`, `-vs-m2b.txt`, `t45-gate-m3b-breaches-outside-shot-lists.txt` |
 
 The sets overlap (a capsule PNG can also carry the T41 glyph). The controller's full diff at the
@@ -299,7 +322,8 @@ https://claude.ai/artifact/R7xAfM1fWxoFe34aZuaAUD, `po-items-m3-2.json`. Answere
 P2-01 capsule order, P2-02 (M9), P2-03, P2-04 (small job after M3c), P2-05, P2-06, P2-07 (shipped,
 C-46), P2-09, P2-10, P2-11, P2-12 (container recreate before M4 W3), P2-13 (shot sets) **Onay**;
 P2-08 fold-all chords **Ret** (C-47). Awaiting: **P2-14** zero-width inactive tabs, **P2-15** the
-narrow placeholder crossing the gutter, **P2-16** the 176 `narrow-*` PNGs.
+narrow placeholder crossing the gutter, **P2-16** the 176 `narrow-*` PNGs, **P2-17** the 16
+`marks-denied` PNGs.
 
 ## 8. Deferred
 
