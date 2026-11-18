@@ -660,9 +660,9 @@ exec-error-confirm-not-undone = Geri alınmadı: tablo transaction desteklemiyor
 ## m3c-p2-07
 
 # Review: PO
-safety-destructive-drop-owned = { $role } rolünün bu veritabanında sahip olduğu her nesne kaldırılır ve burada ona verilmiş yetkiler geri alınır.
+safety-destructive-drop-owned = { $role } rolünün bu veritabanında sahip olduğu her nesne kaldırılır. Rolün bu veritabanındaki ve veritabanları, tablespace'ler gibi paylaşılan nesnelerdeki yetkileri ile varsayılan yetkileri de geri alınır.
 # Review: PO
-safety-destructive-drop-owned-cascade = { $role } rolünün bu veritabanında sahip olduğu her nesne ve bu nesnelere bağlı her şey kaldırılır; burada ona verilmiş yetkiler de geri alınır.
+safety-destructive-drop-owned-cascade = { $role } rolünün bu veritabanında sahip olduğu her nesne ve bu nesnelere bağlı her şey kaldırılır. Rolün bu veritabanındaki ve veritabanları, tablespace'ler gibi paylaşılan nesnelerdeki yetkileri ile varsayılan yetkileri de geri alınır.
 # Review: PO
 exec-drop-owned-several-targets = Gönderilmedi: üretimde DROP OWNED, rolün adını yazmanızı ister; bu ise birden fazla ad gerektirir. Her seferinde tek bir rol için, tek başına çalıştırın.
 # Review: PO

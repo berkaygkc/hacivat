@@ -3339,9 +3339,188 @@ fn production_one_typed_name_never_approves_two_objects() {
     }
 }
 
+// ## m3c-p2-07 (fix round 2, controller rulings on the security review I1, I2, M1, M2, M4, M5).
+
+/// `text` classified in dialect `d` and gated on `c`.
+fn po_item_in(d: DialectId, text: &str, c: &ConnSafety) -> GateItem {
+    let ctx = sql_safety::ClassifyCtx::new(
+        sql_dialect::DialectCtx::new(d, None),
+        sql_dialect::ClientFlavor::None,
+        sql_safety::Expect::Script,
+    );
+    let unit = prepared_on(c.engine, text, &[]);
+    let report = sql_safety::classify(&unit.final_text, &ctx);
+    one(unit, report, c)
+}
+
+fn asks_once(item: &GateItem) -> Option<&str> {
+    match &item.decision {
+        GateDecision::Confirm {
+            type_to_confirm: Some(t),
+            suppressible: false,
+            ..
+        } => Some(&**t),
+        _ => None,
+    }
+}
+
+#[test]
+fn production_typed_names_never_merge_past_what_the_key_can_prove() {
+    // I1: two names that share their first 63 bytes are two objects (Redshift keeps 127 bytes;
+    // PostgreSQL cuts them, but the key never relies on the cut: fail closed).
+    let long = "a".repeat(63);
+    let twins = format!("TRUNCATE {long}x; TRUNCATE {long}y");
+    let pg = conn(DbmsKind::Postgres, Some(EnvTag::Production));
+    let rs = conn(DbmsKind::Redshift, Some(EnvTag::Production));
+    let redshift = DialectId::PgWire(sql_dialect::PgWireFlavor::Redshift);
+    for (d, c) in [(DialectId::Postgres, &pg), (redshift, &rs)] {
+        let item = po_item_in(d, &twins, c);
+        assert_eq!(
+            deny_id(&item.decision),
+            "exec-unsafe-several-targets",
+            "{d:?}"
+        );
+    }
+    // A long name written twice is still one object.
+    let item = po_item_in(
+        redshift,
+        &format!("TRUNCATE {long}x; TRUNCATE {long}x"),
+        &rs,
+    );
+    assert_eq!(
+        asks_once(&item),
+        Some(&*format!("{long}x")),
+        "{:?}",
+        item.decision
+    );
+
+    let deny = [
+        // I2: a statement in between may change what an unqualified name resolves to.
+        (
+            DbmsKind::Postgres,
+            "DELETE FROM orders; SET search_path TO archive; DELETE FROM orders",
+            "exec-unsafe-several-targets",
+        ),
+        (
+            DbmsKind::Postgres,
+            "TRUNCATE t; ALTER TABLE t RENAME TO t_old; TRUNCATE t",
+            "exec-unsafe-several-targets",
+        ),
+        (
+            DbmsKind::MySql,
+            "DELETE FROM t; USE other; DELETE FROM t",
+            "exec-unsafe-several-targets",
+        ),
+        // M1: a non-ASCII part is never case-folded, and its quoting counts.
+        (
+            DbmsKind::Postgres,
+            "DELETE FROM Ürün; DELETE FROM \"Ürün\"",
+            "exec-unsafe-several-targets",
+        ),
+        // M4: a database and a schema are two objects; `a` and `"A"` are two roles.
+        (
+            DbmsKind::MySql,
+            "DROP DATABASE x; DROP SCHEMA x",
+            "exec-unsafe-several-targets",
+        ),
+        (
+            DbmsKind::Postgres,
+            "DROP OWNED BY a, \"A\"",
+            "exec-drop-owned-several-targets",
+        ),
+    ];
+    for (engine, text, id) in deny {
+        let c = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, sql_safety::Expect::Script, &c);
+        assert_eq!(deny_id(&item.decision), id, "{engine:?} `{text}`");
+    }
+    let once = [
+        // I2: only destructive-target statements, so an unqualified name may merge.
+        (
+            DbmsKind::Postgres,
+            "DELETE FROM orders; DELETE FROM orders",
+            "orders",
+        ),
+        // A qualified name may merge across any statement.
+        (
+            DbmsKind::Postgres,
+            "DELETE FROM app.orders; SET search_path TO archive; DELETE FROM app.orders",
+            "app.orders",
+        ),
+        // M4: the PG fold, pinned on written spellings (mixed case, qualified).
+        (
+            DbmsKind::Postgres,
+            "TRUNCATE App.Orders, app.ORDERS",
+            "App.Orders",
+        ),
+        (DbmsKind::Postgres, "DROP OWNED BY a, A", "a"),
+        // M4: SQLite's quotes and ASCII case.
+        (DbmsKind::Sqlite, "DELETE FROM t; DELETE FROM \"T\"", "t"),
+        (DbmsKind::Sqlite, "DELETE FROM t; DELETE FROM [t]", "t"),
+    ];
+    for (engine, text, name) in once {
+        let c = conn(engine, Some(EnvTag::Production));
+        let item = po_item(engine, text, sql_safety::Expect::Script, &c);
+        assert_eq!(
+            asks_once(&item),
+            Some(name),
+            "{engine:?} `{text}`: {:?}",
+            item.decision
+        );
+    }
+}
+
+/// M2: a `DROP OWNED` beside drops that type no name asks for the role only, and the dialog
+/// still lists every destructive pattern of the unit.
+#[test]
+fn production_drop_owned_beside_untyped_drops_lists_them_all() {
+    let c = conn(DbmsKind::Postgres, Some(EnvTag::Production));
+    let text = "DROP OWNED BY app_rw; DROP VIEW reporting.v; ALTER TABLE t DROP COLUMN c";
+    let item = po_item(DbmsKind::Postgres, text, sql_safety::Expect::Script, &c);
+    assert_eq!(asks_once(&item), Some("app_rw"), "{:?}", item.decision);
+    let GateDecision::Confirm { reasons, .. } = &item.decision else {
+        unreachable!()
+    };
+    for (id, arg) in [
+        ("safety-destructive-drop-owned", "app_rw"),
+        ("safety-destructive-drop", "reporting.v"),
+        ("safety-destructive-drop-column", "t"),
+    ] {
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.fluent_id == id && r.args.iter().any(|(_, v)| &**v == arg)),
+            "{id} {arg}: {reasons:?}"
+        );
+    }
+}
+
+/// M5: `DROP OWNED` is known by the classifier's statement kind; when the kind and the
+/// statement's words disagree, it is denied.
+#[test]
+fn production_drop_owned_kind_and_words_must_agree() {
+    let role = || DestructiveReason {
+        kind: DestructiveKind::Drop { cascade: false },
+        range: TextRange::default(),
+        target: Some(object("r", ObjectKind::Role)),
+    };
+    // The words say DROP OWNED, the kind does not.
+    let mut s = stmt(StmtKind::Drop, EffectSet::DDL | EffectSet::PRIVILEGE);
+    s.destructive.push(role());
+    let item = gated("DROP OWNED BY r", vec![s], &conn_prod());
+    assert_eq!(deny_id(&item.decision), "exec-drop-owned-no-target");
+    // The kind says DROP OWNED, the words do not.
+    let mut s = stmt(StmtKind::DropOwned, EffectSet::DDL | EffectSet::PRIVILEGE);
+    s.destructive.push(role());
+    let item = gated("DROP ROLE r", vec![s], &conn_prod());
+    assert_eq!(deny_id(&item.decision), "exec-drop-owned-no-target");
+}
+// ## m3c-p2-07
+
 #[test]
 fn production_drop_owned_without_a_role_is_denied() {
-    let mut s = stmt(StmtKind::Drop, EffectSet::DDL | EffectSet::PRIVILEGE);
+    // ## m3c-p2-07 (fix round 2, M5): the classifier's own kind.
+    let mut s = stmt(StmtKind::DropOwned, EffectSet::DDL | EffectSet::PRIVILEGE);
     s.destructive.push(DestructiveReason {
         kind: DestructiveKind::Drop { cascade: true },
         range: TextRange::default(),

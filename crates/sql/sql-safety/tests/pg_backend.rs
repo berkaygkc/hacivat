@@ -1640,6 +1640,10 @@ fn drop_owned_names_each_role() {
             r(keep, "current_user", true, "\"current_user\"")
         ]
     );
+    // ## m3c-p2-07 (fix round 2, M5): its own statement kind, so the gate knows it from the
+    // parse, not from its first words; `DROP ROLE` stays `Drop`.
+    assert_eq!(one("DROP OWNED BY bob CASCADE").kind, StmtKind::DropOwned);
+    assert_eq!(one("DROP ROLE bob").kind, StmtKind::Drop);
     // Still DDL plus a privilege change, gated at least as a destructive drop.
     let s = one("DROP OWNED BY bob");
     assert!(

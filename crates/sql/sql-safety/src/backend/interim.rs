@@ -1135,6 +1135,8 @@ fn kind_named(name: &str) -> Option<StmtKind> {
         "CreateOther" => K::CreateOther,
         "Alter" => K::Alter,
         "Drop" => K::Drop,
+        // ## m3c-p2-07 (fix round 2, M5)
+        "DropOwned" => K::DropOwned,
         "Truncate" => K::Truncate,
         "Grant" => K::Grant,
         "Revoke" => K::Revoke,

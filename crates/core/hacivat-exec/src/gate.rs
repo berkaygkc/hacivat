@@ -20,7 +20,7 @@ use hacivat_session::session::{
 };
 // ## m3b-t15-gate
 use sql_dialect::{DialectCtx, DialectId, lex_profile};
-use sql_ident::{QualifiedName, fold, ident_eq, parse_qualified};
+use sql_ident::{PG_MAX_IDENT_BYTES, QualifiedName, ident_eq, parse_qualified};
 use sql_lexer::{LexState, TokenKind, lex};
 use sql_safety::effects::class_of;
 use sql_safety::{
@@ -377,6 +377,7 @@ fn is_ddl(s: &StmtReport) -> bool {
                 | StmtKind::CreateOther
                 | StmtKind::Alter
                 | StmtKind::Drop
+                | StmtKind::DropOwned
                 | StmtKind::Truncate
         )
         || s.class == CoarseClass::Ddl
@@ -600,9 +601,8 @@ fn slice(text: &str, r: TextRange) -> Option<&str> {
 }
 
 /// `target`'s name as the user wrote it in `text` (each part's exact bytes, quotes removed,
-/// never case-folded): the destructive pattern's own range when it reads as that name, else
-/// the first dotted name in the statement's range that names it (`ident_eq` per part), else
-/// the classifier's spelling (a server-resolved name: still the object that changes).
+/// never case-folded): [`written_qualified`]'s reading, else the classifier's spelling (a
+/// server-resolved name: still the object that changes).
 fn written_name(
     target: &ObjectRef,
     hint: TextRange,
@@ -610,25 +610,30 @@ fn written_name(
     text: &str,
     dialect: Option<DialectId>,
 ) -> Arc<str> {
-    let fallback = || dotted(target.name.parts.iter().map(|p| &*p.text));
-    let Some(d) = dialect else {
-        return fallback();
-    };
-    let named = |s: &str| {
-        parse_qualified(d, s.trim())
-            .filter(|q| same_name(d, q, &target.name))
-            .map(|q| dotted(q.parts.iter().map(|p| &*p.text)))
-    };
-    if let Some(n) = slice(text, hint).and_then(named) {
-        return n;
+    written_qualified(target, hint, stmt, text, dialect)
+        .map_or_else(|| as_typed(&target.name), |q| as_typed(&q))
+}
+
+// ## m3c-p2-07 (fix round 2, I1, M1)
+/// `target`'s name as the user wrote it in `text`, each part's text and quoting exactly as
+/// written (quotes removed; never case-folded, never cut at 63 bytes): the destructive pattern's
+/// own range when it reads as that name, else the first dotted name in the statement's range
+/// that names it (`ident_eq` per part); `None` when neither does.
+fn written_qualified(
+    target: &ObjectRef,
+    hint: TextRange,
+    stmt: TextRange,
+    text: &str,
+    dialect: Option<DialectId>,
+) -> Option<QualifiedName> {
+    let d = dialect?;
+    let named = |s: &str| parse_qualified(d, s.trim()).filter(|q| same_name(d, q, &target.name));
+    if let Some(q) = slice(text, hint).and_then(named) {
+        return Some(q);
     }
-    let Some(body) = slice(text, stmt) else {
-        return fallback();
-    };
+    let body = slice(text, stmt)?;
     let ctx = DialectCtx::new(d, None);
-    let Ok(profile) = lex_profile(&ctx) else {
-        return fallback();
-    };
+    let profile = lex_profile(&ctx).ok()?;
     let lexed = lex(body, profile, ctx.modes, &LexState::Initial);
     let ident = |i: usize| matches!(lexed.kind(i), TokenKind::Word | TokenKind::QuotedIdent);
     let next = |mut i: usize| {
@@ -647,12 +652,13 @@ fn written_name(
             }
         }
         let range = TextRange::new(lexed.range(start).start(), lexed.range(end).end());
-        if let Some(n) = slice(body, range).and_then(named) {
-            return n;
+        if let Some(q) = slice(body, range).and_then(named) {
+            return Some(q);
         }
     }
-    fallback()
+    None
 }
+// ## m3c-p2-07
 
 /// The name a production confirmation asks to type (R-M3-55): the target of every unsafe-DML
 /// pattern, of a `DROP DATABASE`/`DROP SCHEMA` and (## m3b-po-typed-name, PO M3b-04) of a
@@ -666,9 +672,12 @@ fn typed_name(
     text: &str,
     engine: DbmsKind,
 ) -> Result<Option<Arc<str>>, GateReason> {
-    let mut names: Vec<Typed> = Vec::new();
+    // ## m3c-p2-07 (fix round 2, I2): every name with its statement, before any merges.
+    let mut found: Vec<(usize, Arc<str>, TypedKey)> = Vec::new();
+    let mut every_stmt_names = true;
     let d = dialect_for(report, engine);
-    for s in &report.items {
+    for (si, s) in report.items.iter().enumerate() {
+        let before = found.len();
         // Fix round 1 (I3): the statement's own words say `DROP DATABASE`/`DROP SCHEMA`, so a
         // backend that names the target's kind wrongly cannot drop the typed name.
         let dropped_db = drop_database_name(slice(text, s.range).unwrap_or(text), d);
@@ -681,8 +690,13 @@ fn typed_name(
                 || (["TEMPORARY", "TEMP", "FOREIGN"].iter().any(|w| word(1, w))
                     && word(2, "TABLE")));
         let alters = word(0, "ALTER");
-        // ## m3c-p2-07 (PO P2-07): `DROP OWNED BY` names the roles whose objects go.
-        let drops_owned = word(0, "DROP") && word(1, "OWNED");
+        // ## m3c-p2-07 (PO P2-07; fix round 2, M5): `DROP OWNED BY` names the roles whose
+        // objects go. It is the classifier's own statement kind; when its words disagree, the
+        // unit is denied (fail closed).
+        let drops_owned = s.kind == StmtKind::DropOwned;
+        if drops_owned != (word(0, "DROP") && word(1, "OWNED")) {
+            return Err(GateReason::of(DROP_OWNED_NO_TARGET));
+        }
         // ## m3c-p2-07 (fix round 1): what a schema-or-database drop removes, by its words.
         let db_group = |t: Option<&ObjectRef>| {
             if word(1, "DATABASE")
@@ -726,8 +740,10 @@ fn typed_name(
                 let Some(role) = dr.target.as_ref() else {
                     return Err(GateReason::of(DROP_OWNED_NO_TARGET));
                 };
-                let n = written_name(role, dr.range, s.range, text, report.dialect);
-                push_name(&mut names, n, TypedKey::of(d, Group::Role, &role.name));
+                let w = written_qualified(role, dr.range, s.range, text, report.dialect);
+                let n = w.as_ref().map_or_else(|| as_typed(&role.name), as_typed);
+                let key = TypedKey::of(d, Group::Role, &role.name, w.as_ref(), found.len());
+                found.push((si, n, key));
                 continue;
             }
             // ## m3c-p2-07
@@ -741,35 +757,46 @@ fn typed_name(
             };
             if targets.is_empty() {
                 if schema_or_db && let Some(Some(q)) = &dropped_db {
-                    push_name(&mut names, as_typed(q), TypedKey::of(d, db_group(None), q));
+                    let key = TypedKey::of(d, db_group(None), q, Some(q), found.len());
+                    found.push((si, as_typed(q), key));
                     named = true;
                     continue;
                 }
                 return Err(GateReason::of(NO_TARGET));
             }
             for target in targets {
-                // ## m3c-p2-07 (fix round 1)
+                // ## m3c-p2-07 (fix round 1; fix round 2, I1, M1: keyed on the written name)
                 let group = if schema_or_db {
                     db_group(Some(target))
                 } else {
                     Group::Relation
                 };
-                push_name(
-                    &mut names,
-                    written_name(target, dr.range, s.range, text, report.dialect),
-                    TypedKey::of(d, group, &target.name),
-                );
+                let w = written_qualified(target, dr.range, s.range, text, report.dialect);
+                let n = w.as_ref().map_or_else(|| as_typed(&target.name), as_typed);
+                let key = TypedKey::of(d, group, &target.name, w.as_ref(), found.len());
+                found.push((si, n, key));
             }
             named |= schema_or_db;
         }
         match dropped_db {
             Some(Some(q)) if !named => {
-                let group = db_group(None);
-                push_name(&mut names, as_typed(&q), TypedKey::of(d, group, &q));
+                let key = TypedKey::of(d, db_group(None), &q, Some(&q), found.len());
+                found.push((si, as_typed(&q), key));
             }
             Some(None) if !named => return Err(GateReason::of(NO_TARGET)),
             _ => {}
         }
+        every_stmt_names &= found.len() > before;
+    }
+    // ## m3c-p2-07 (fix round 2, I2): a statement that names no typed target may change what
+    // an unqualified name resolves to (`SET search_path`, `USE`, a rename, `set_config`, …), so
+    // unless every statement names one, an unqualified name merges only within its statement.
+    let mut names: Vec<Typed> = Vec::new();
+    for (si, n, mut key) in found {
+        if !every_stmt_names && key.parts.len() == 1 {
+            key.scope = Some(si);
+        }
+        push_name(&mut names, n, key);
     }
     match names.len() {
         0 => Ok(None),
@@ -782,7 +809,7 @@ fn typed_name(
     }
 }
 
-// ## m3c-p2-07 (PO P2-07; fix round 1, controller ruling)
+// ## m3c-p2-07 (PO P2-07; fix round 1, controller ruling; fix round 2, I1, I2, M1)
 /// The kind of object a typed name approves: a table (or any relation a write names), a
 /// schema, a database, a role whose objects `DROP OWNED` drops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -793,36 +820,91 @@ enum Group {
     Role,
 }
 
-/// The object a typed name approves, as its engine resolves it: two targets with different
-/// keys are two objects (several targets), whatever their written text.
+/// How a key part was read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartKind {
+    /// ASCII, folded by the engine's case rule.
+    Folded,
+    /// Non-ASCII, written bare: never case-folded.
+    BareNonAscii,
+    /// Non-ASCII, written quoted.
+    QuotedNonAscii,
+    /// `CURRENT_USER`, `CURRENT_ROLE`, `SESSION_USER` or `PUBLIC` (a `DROP OWNED` role).
+    Keyword,
+}
+
+/// The object a typed name approves, as far as the key can prove it: two targets with
+/// different keys are two objects (several targets), whatever their written text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TypedKey {
     group: Group,
-    parts: Vec<(Arc<str>, bool)>,
+    parts: Vec<(Arc<str>, PartKind)>,
+    /// I2: the statement an unqualified name is resolved in, when another statement of the
+    /// unit may change that resolution.
+    scope: Option<usize>,
+    /// I1: a classifier name that may be cut at 63 bytes and whose written spelling was not
+    /// found: it never merges.
+    unique: Option<usize>,
 }
 
 impl TypedKey {
-    /// `name`'s key in dialect `d`, part by part (a schema qualifier counts):
-    /// - PostgreSQL and the PG-wire dialects: [`fold`] (unquoted folded to lower case, quoted
-    ///   kept exactly);
-    /// - SQLite: ASCII case-insensitive, quoted or not (`t` and `"T"` are one table);
-    /// - MySQL, MariaDB and the others: the exact text, quoting aside (a MySQL table name on a
-    ///   case-sensitive file system is case-sensitive; `fold`'s docs), so `a` and `A` are two.
+    /// The key of the name the user wrote (`written`; else the classifier's `name`), part by
+    /// part (a schema qualifier counts), in dialect `d`:
+    /// - an ASCII part folds by the engine's case rule, never cut at 63 bytes (I1): PostgreSQL
+    ///   and the PG-wire dialects lower an unquoted part and keep a quoted one; SQLite lowers
+    ///   every part; MySQL, MariaDB and the others keep the exact text (a MySQL table name on
+    ///   a case-sensitive file system is case-sensitive; `fold`'s docs), quoting aside;
+    /// - a part with a non-ASCII byte is never folded, and its quoting counts (M1);
+    /// - a `DROP OWNED` keyword role (the classifier's unquoted reading) is the keyword, never
+    ///   the quoted role spelled alike.
     ///
-    /// A role keeps the classifier's reading whole, its `quoted` flag included: a quoted role
-    /// is its exact name, an unquoted one the keyword `CURRENT_USER` and the like, so
-    /// `"current_user"` and `current_user` are two.
-    fn of(d: DialectId, group: Group, name: &QualifiedName) -> TypedKey {
-        let parts = name
+    /// Without a written spelling, a part of 63 bytes or more may have been cut, so the key is
+    /// unique (`seq`).
+    fn of(
+        d: DialectId,
+        group: Group,
+        name: &QualifiedName,
+        written: Option<&QualifiedName>,
+        seq: usize,
+    ) -> TypedKey {
+        let keyword = group == Group::Role && name.parts.iter().any(|p| !p.quoted);
+        let (src, unique) = match written {
+            Some(w) => (w, None),
+            None => (
+                name,
+                name.parts
+                    .iter()
+                    .any(|p| p.text.len() >= PG_MAX_IDENT_BYTES)
+                    .then_some(seq),
+            ),
+        };
+        let pg = matches!(d, DialectId::Postgres | DialectId::PgWire(_));
+        let parts = src
             .parts
             .iter()
-            .map(|p| match group {
-                Group::Role => (p.text.clone(), p.quoted),
-                _ if d == DialectId::Sqlite => (Arc::from(p.text.to_ascii_lowercase()), true),
-                _ => (fold(d, &p.text, p.quoted), true),
+            .map(|p| {
+                if keyword {
+                    (Arc::from(p.text.to_ascii_lowercase()), PartKind::Keyword)
+                } else if !p.text.is_ascii() {
+                    let kind = if p.quoted {
+                        PartKind::QuotedNonAscii
+                    } else {
+                        PartKind::BareNonAscii
+                    };
+                    (p.text.clone(), kind)
+                } else if d == DialectId::Sqlite || (pg && !p.quoted) {
+                    (Arc::from(p.text.to_ascii_lowercase()), PartKind::Folded)
+                } else {
+                    (p.text.clone(), PartKind::Folded)
+                }
             })
             .collect();
-        TypedKey { group, parts }
+        TypedKey {
+            group,
+            parts,
+            scope: None,
+            unique,
+        }
     }
 }
 
@@ -932,13 +1014,12 @@ fn leading_words(stmt: &str, d: DialectId, n: usize) -> Vec<String> {
 
 /// The reasons a dialog lists: one per destructive pattern (its target as written), then the
 /// classifier's reasons, in order, without repeats.
-fn reasons_of(report: &SafetyReport, text: &str, engine: DbmsKind) -> Vec<GateReason> {
+fn reasons_of(report: &SafetyReport, text: &str) -> Vec<GateReason> {
     let mut out = Vec::new();
-    let dialect = dialect_for(report, engine);
     for s in &report.items {
-        // ## m3c-p2-07 (PO P2-07): a `DROP OWNED` role loses what it owns, not itself.
-        let lead = leading_words(slice(text, s.range).unwrap_or(text), dialect, 2);
-        let drops_owned = lead.len() == 2 && lead[0] == "DROP" && lead[1] == "OWNED";
+        // ## m3c-p2-07 (PO P2-07; fix round 2, M5): a `DROP OWNED` role loses what it owns,
+        // not itself; known by the classifier's statement kind.
+        let drops_owned = s.kind == StmtKind::DropOwned;
         for d in &s.destructive {
             let reason = match (&d.target, d.kind) {
                 (Some(t), DestructiveKind::Drop { cascade }) if drops_owned => GateReason {
@@ -1205,7 +1286,7 @@ fn gate_unit(
         // first (row locks, bloat, triggers' side effects outlive the rollback).
         let asks = production;
         let decision = if asks {
-            let mut reasons = reasons_of(report, text, conn.engine);
+            let mut reasons = reasons_of(report, text);
             push_unique(&mut reasons, GateReason::of(EXPLAIN_NOT_UNDONE));
             for r in extra {
                 push_unique(&mut reasons, r);
@@ -1298,7 +1379,7 @@ fn gate_unit(
     let suppressible =
         type_to_confirm.is_none() && !implicit_commit && !never_suppressed && !facts.mixed_write;
 
-    let mut reasons = reasons_of(report, text, conn.engine);
+    let mut reasons = reasons_of(report, text);
     if implicit_commit {
         push_unique(&mut reasons, GateReason::of(IMPLICIT_COMMIT));
     }

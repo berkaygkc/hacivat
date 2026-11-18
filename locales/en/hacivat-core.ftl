@@ -1030,11 +1030,11 @@ exec-error-confirm-not-undone = Not undone: the table doesn't support transactio
 # Variables:
 #   $role (String) - the role's name as written in the statement (CURRENT_USER and the like
 #                    as written too).
-safety-destructive-drop-owned = Removes every object { $role } owns in this database and revokes the privileges it was granted here.
+safety-destructive-drop-owned = Removes every object { $role } owns in this database. It also revokes the role's privileges here and on shared objects such as databases and tablespaces, and its default privileges.
 # PO P2-07, destructive pattern: DROP OWNED BY … CASCADE.
 # Variables:
 #   $role (String) - the role's name as written in the statement.
-safety-destructive-drop-owned-cascade = Removes every object { $role } owns in this database and everything that depends on those objects, and revokes the privileges it was granted here.
+safety-destructive-drop-owned-cascade = Removes every object { $role } owns in this database and everything that depends on those objects. It also revokes the role's privileges here and on shared objects such as databases and tablespaces, and its default privileges.
 # PO P2-07: on production DROP OWNED asks for one role's name typed, and this unit would need
 # more than one name (several roles, or a role beside another statement that asks for a name).
 exec-drop-owned-several-targets = Not sent: on production, DROP OWNED asks you to type the role's name, and this would need more than one name. Run it for one role at a time, on its own.

@@ -1245,7 +1245,8 @@ case.
   2026-11-18).** PostgreSQL's `DROP OWNED BY <role> [, …] [CASCADE | RESTRICT]` (which drops
   every object the role owns in the database, every table included) now names each role as its
   `Drop` pattern's target (`ObjectKind::Role`, where the role is written), and the gate's typed
-  name takes it when the statement's own leading words read `DROP OWNED`. The rules are the
+  name takes it when the statement is a `DROP OWNED` (since fix round 2 by the classifier's
+  statement kind, which the statement's own words must confirm). The rules are the
   `TRUNCATE`/`DROP TABLE` ones: production only (`EnvTag::Production`), never suppressible,
   off production nothing changes; the name is typed as written (quotes removed, letter case
   kept, compared byte for byte). `CURRENT_USER`, `CURRENT_ROLE`, `SESSION_USER` (and `PUBLIC`)
@@ -1258,26 +1259,55 @@ case.
   the classifier could not name is denied, `exec-drop-owned-no-target`. The dialog's reason is
   `safety-destructive-drop-owned[-cascade]` ("Removes every object `r` owns in this database
   …"), never `safety-destructive-drop` ("Removes `r`.", which `DROP ROLE` keeps).
-- **One typed name never approves two objects (## m3c-p2-07 fix round 1, controller ruling).**
-  Before, the typed names of a unit were merged by their written text with the quotes removed.
-  So on PostgreSQL `TRUNCATE "A", A` and `DELETE FROM "A"; DELETE FROM A` asked once for `A`,
-  and that one answer approved two tables (`"A"` and `a`). `DROP SCHEMA a; TRUNCATE a` likewise
-  asked once for `a` and approved a schema and a table. Each target is now keyed by its kind
-  (a table or other written relation, a schema, a database, a `DROP OWNED` role) and by its
-  name as the engine resolves it, part by part, with a schema qualifier counting:
-  - **PostgreSQL and the PG-wire dialects:** `sql_ident::fold`. Unquoted names fold to lower
-    case and quoted names stay exact.
-  - **SQLite:** case is ignored for ASCII letters, quoted or not.
-  - **MySQL, MariaDB and the rest:** the exact text, quoting aside. A MySQL table name is
-    case-sensitive on a case-sensitive file system (`fold`'s docs), so `a` and `A` count as two
-    objects, which fails closed.
-  - **Roles:** the classifier's reading, with its quoted flag kept, so the keyword
-    `current_user` and the quoted role `"current_user"` stay two.
+- **One typed name never approves two objects (## m3c-p2-07 fix rounds 1 and 2, controller
+  rulings).** Before, the typed names of a unit were merged by their written text with the
+  quotes removed. So on PostgreSQL `TRUNCATE "A", A` and `DELETE FROM "A"; DELETE FROM A` asked
+  once for `A`, and that one answer approved two tables (`"A"` and `a`). `DROP SCHEMA a;
+  TRUNCATE a` likewise asked once for `a` and approved a schema and a table. Each target is now
+  keyed by its kind (a table or other written relation, a schema, a database, a `DROP OWNED`
+  role) and by its name as written, part by part, with a schema qualifier counting. Each part
+  is read as follows:
+  - **ASCII parts fold by the engine's case rule:**
+    - PostgreSQL and the PG-wire dialects lower an unquoted part and keep a quoted one.
+    - SQLite lowers every part, quoted or not.
+    - MySQL, MariaDB and the rest keep the exact text, quoting aside. A MySQL table name is
+      case-sensitive on a case-sensitive file system (`sql_ident::fold`'s docs), so `a` and `A`
+      count as two objects, which fails closed.
+  - **No part is cut at 63 bytes (fix round 2).** PostgreSQL cuts longer names, but Redshift
+    keeps 127 bytes and CockroachDB does not cut, so on every PG-wire flavor two names that
+    share their first 63 bytes are two objects, PostgreSQL included (fail closed). The key comes
+    from the spelling as written, never from the classifier's possibly cut name. When the
+    written spelling cannot be found and a part is 63 bytes or longer, the key never merges.
+  - **A part with a non-ASCII byte is never case-folded, and its quoting counts (fix round 2).**
+    Cockroach lowers Unicode letters, and a single-byte PostgreSQL server encoding lowers its
+    high bytes, so `Ürün` and `"Ürün"` count as two objects.
+  - **Roles:** a `DROP OWNED` keyword (`CURRENT_USER` and the like) is the keyword, never the
+    quoted role spelled alike: `current_user` and `"current_user"` stay two.
+
+  The key describes the name within one fixed session state, so a unit cannot change what a
+  name resolves to between two of its uses (fix round 2):
+  - Unqualified names merge across statements only when every statement of the unit names a
+    typed target (`TRUNCATE`, an unbounded `DELETE`/`UPDATE`, the typed `DROP` kinds,
+    `DROP OWNED`).
+  - When any other statement is in the unit (`SET search_path`, `SELECT set_config(…)`, `USE`,
+    a rename, an `ALTER`, anything), an unqualified name merges only within its own statement.
+    `DELETE FROM orders; SET search_path TO archive; DELETE FROM orders` is denied, while
+    `DELETE FROM orders; DELETE FROM orders` asks once.
+  - Qualified names may merge across any statement.
 
   More than one key in a unit is denied as several targets (`exec-unsafe-several-targets`, or
   `exec-drop-owned-several-targets` when a role is among them). One object written two ways
   asks once, for its first spelling: `TRUNCATE a, A` asks for `a`. The typed comparison itself
   is unchanged: byte for byte against that spelling.
+- **Scope of the typed name (fix round 2, review M2):** only typed-target kinds compete for the
+  one name. A `DROP OWNED`, `TRUNCATE` or `DROP TABLE` beside a `DROP VIEW`, a `DROP COLUMN` or
+  another plain-confirmation drop still asks for its one name, and the dialog lists every
+  destructive pattern of the unit.
+- **`DROP OWNED` is known by the classifier's statement kind (fix round 2, review M5).**
+  libpg_query's `DropOwnedStmt` is `StmtKind::DropOwned`. When that kind and the statement's
+  own words (`DROP OWNED`) disagree, the unit is denied (`exec-drop-owned-no-target`). The
+  reason text also says that `DROP OWNED` revokes the role's privileges on shared objects
+  (databases, tablespaces) and its default privileges.
 - **More secret forms are masked in history (PO M3b-23; narrowed in fix round 1).** Secret
   name parts are now also `BEARER`, a bare `TOKEN` or a `TOKEN` after a secret-ish qualifier
   (`access_token`, `refresh_token`, `api_token`, `auth_token`; never `token_type`,
