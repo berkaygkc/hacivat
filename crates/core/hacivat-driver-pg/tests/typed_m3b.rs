@@ -1341,3 +1341,54 @@ async fn a_closed_run_as_one_that_failed_answers_after_its_cancel_settled() {
 async fn a_closed_run_as_one_that_completed_answers_after_its_cancel_settled() {
     a_close_waits_for_its_cancel(false).await;
 }
+
+/// Fix round 1 (review R7, M1): the statement ends on its own, but the server never closes the
+/// cancel connection. The close answers its outcome once the session's 2 s bound has passed
+/// after the rest (real time: the bound is what is tested), and the connection is broken: the
+/// cancel may still land, so the next query is refused before anything is sent.
+#[tokio::test]
+async fn a_close_whose_cancel_never_settles_breaks_the_connection() {
+    let (mut conn, mut srv, mut cancels) = session_with_cancels().await;
+    let (keep_tx, keep_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        srv.query_text().await;
+        srv.send(&row_description(&[("n", INT4)])).await;
+        let mut c = tokio::time::timeout(READ_GUARD, cancels.recv())
+            .await
+            .expect("a cancel connection, at once")
+            .unwrap();
+        cancel_request(&mut c).await;
+        srv.send(
+            &[
+                data_row(&[Some(b"1")]),
+                command_complete("SELECT 1"),
+                ready(b'I'),
+            ]
+            .concat(),
+        )
+        .await;
+        // The cancel connection stays open until the test ends.
+        let _ = keep_rx.await;
+        (srv, c)
+    });
+    conn.query(simple("SELECT n FROM t", 100)).await.unwrap();
+    assert!(matches!(
+        conn.next_event().await.unwrap(),
+        QueryEvent::ResultStart(_)
+    ));
+    let started = std::time::Instant::now();
+    let closed = tokio::time::timeout(READ_GUARD, conn.close_query(CloseHow::Now))
+        .await
+        .expect("the close ends at the bound");
+    assert_eq!(closed.unwrap(), Closed::Completed { rows: 1 });
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_secs(2) && waited < Duration::from_secs(10),
+        "{waited:?}"
+    );
+    assert_eq!(conn.tx_status(), TxStatus::Failed);
+    let e = conn.query(simple("SELECT 2", 100)).await.unwrap_err();
+    assert_eq!(e.kind, RawErrorKind::Io(io::ErrorKind::NotConnected));
+    let _ = keep_tx.send(());
+    let _ = server.await.unwrap();
+}

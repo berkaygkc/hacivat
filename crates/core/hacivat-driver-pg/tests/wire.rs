@@ -1255,3 +1255,34 @@ async fn a_cancel_ends_only_once_the_server_closed_the_cancel_connection() {
     assert_eq!((word(0), word(4), word(8)), (CANCEL_REQUEST, 77, 5));
     assert!(rest.is_empty(), "{rest:?}");
 }
+
+/// Fix round 1 (review R2): a server that takes the request and never closes the cancel
+/// connection. The cancel ends at its bound (10 s, real time: the bound is what is tested) with
+/// `Timeout`, which its callers treat as unsettled, never as done.
+#[tokio::test]
+async fn a_cancel_whose_connection_never_closes_times_out() {
+    let (factory, mut streams) = pipes();
+    let (keep_tx, keep_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let mut s = streams.recv().await.unwrap();
+        sign_in(&mut s, 77, 5).await;
+        let mut cancel = streams.recv().await.unwrap();
+        read_untyped(&mut cancel).await;
+        // Both connections stay open until the test ends.
+        let _ = keep_rx.await;
+        (s, cancel)
+    });
+    let conn = connect_conn(req(factory, None, InsecureAuth::Allow))
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let e = conn.cancel_handle().unwrap().cancel().await.unwrap_err();
+    assert_eq!(e.kind, RawErrorKind::Timeout);
+    assert!(
+        started.elapsed() >= Duration::from_secs(9),
+        "{:?}",
+        started.elapsed()
+    );
+    let _ = keep_tx.send(());
+    drop(server.await.unwrap());
+}

@@ -128,6 +128,8 @@ use crate::session::env::{
 use crate::session::liveness::LivenessRole;
 // ## m3a-t18-session-run
 use crate::session::cursor::{OpenCursor, StopSignal};
+// ## m4-pgcancel (named exception)
+use crate::session::cursor::cancel_may_still_land;
 use crate::session::{RunSpec, TxOwner};
 // ## m3b-t01c-core-seams
 use crate::session::run_gate::RunGate;
@@ -2773,6 +2775,11 @@ struct Ladder {
     /// The sequence numbers of the fetches merged into the request: a cancel that names one
     /// stops it too; any other number is stale (Q18).
     aliases: Vec<u64>,
+    // ## m4-pgcancel (named exception, ruling I1: fail closed)
+    /// A cancel or kill failed in a way that may still reach the server (it timed out,
+    /// `cursor::cancel_may_still_land`): `settle` answers false, so the connection is never
+    /// used again.
+    unsettled: bool,
 }
 
 impl Ladder {
@@ -2799,6 +2806,8 @@ impl Ladder {
             stop: None,
             typed: false,
             aliases: Vec::new(),
+            // ## m4-pgcancel
+            unsettled: false,
         }
     }
 
@@ -2958,6 +2967,8 @@ impl Ladder {
             Err(_) => (ErrClass::Internal, None),
         };
         let (class, server) = failed;
+        // ## m4-pgcancel (named exception, ruling I1): a cancel that timed out may still land.
+        self.unsettled |= cancel_may_still_land(class);
         ctl.emit(SessionEvent::CancelFailed {
             req: self.seq,
             server,
@@ -3014,12 +3025,17 @@ impl Ladder {
     /// Waits up to [`CANCEL_WAIT`] for the cancel in flight. False when it did not end: it is
     /// then aborted (and awaited, so nothing more of it runs), but what it already sent may
     /// still land, so the caller must not reuse the connection (review C1).
+    /// ## m4-pgcancel (named exception, ruling I1): false too when it ended, now or before, in
+    /// a failure that may still land (`cursor::cancel_may_still_land`).
     async fn settle(&mut self) -> bool {
         let Some(mut task) = self.mechanism.take() else {
-            return true;
+            return !self.unsettled;
         };
-        if tokio::time::timeout(CANCEL_WAIT, &mut task).await.is_ok() {
-            return true;
+        if let Ok(joined) = tokio::time::timeout(CANCEL_WAIT, &mut task).await {
+            if let Ok(Err((class, _))) = joined {
+                self.unsettled |= cancel_may_still_land(class);
+            }
+            return !self.unsettled;
         }
         task.abort();
         let _ = task.await;
