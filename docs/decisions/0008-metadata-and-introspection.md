@@ -1592,3 +1592,24 @@ M4 Task 20 (gpui) fills `connections/dialog/schemas.rs`, `explorer/level_pill.rs
   connection) → T17/T24 seam. `hold_pending` on a `Partial` namespace sets no stale mark (it
   has none to set). The fakes stay compiled under `session` (gating them needs a manifest
   feature, T1a's). `tests/assemble*.rs` do not build with `--no-default-features` (T13).
+
+### m4-t15 fix round 2 (verification RR-1..RR-3)
+
+- **A guard decision survives coalescing** (RR-1): a confirmation's re-planned pass that
+  coalesces with a queued pass of the namespace carries the decision onto it (the latest
+  answer wins).
+- **Unlistable databases** (RR-2): a database the scope refresh cannot connect to or list does
+  not fail the refresh. It is reported as unlisted (`EngineEvent::DatabaseUnlisted`), its
+  known schemas keep their states, it gets no schema list, and its schemas are not in scope
+  (so never `Missing`, and an expansion answers `Cancelled`) until a later refresh lists it.
+  Only a failure of the profile's own listing fails the refresh.
+- **One connection at a time** (RR-3): the scope refresh closes its own connection before it
+  lists the other databases, each on its own connection, one after the other; no budget
+  slot is held idle. `MetaSource::released` (default no-op) is called after each close.
+- **Filters changed under a running pass** (m-rr1): its result is read again under the
+  current filters, so a filter-excluded object is never published, then dropped as a
+  server deletion.
+- **Carried:** the merges of `set_filters` and of the identity step still run on the engine's
+  task, not the blocking pool (user actions and connects, O(arena size)) → T22 (which owns
+  the identity behaviour) or a later engine touch; the `Partial` stale mark (m12) stays as
+  noted; gating the fakes is R-W3-7 (T33).
