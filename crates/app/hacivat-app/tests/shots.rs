@@ -1371,6 +1371,27 @@ fn check_title_bar(width: f32, bar: TitleBarProbe, capsule: Option<Bounds<Pixels
     out
 }
 
+// ## m4-m3carry (fix round 1, m1)
+thread_local! {
+    /// Shots whose capsule showed a trust word when (e) checked them (non-empty trust rooms
+    /// and a room), and of those, shots whose palette field was collapsed. The run prints both,
+    /// so a run where (e) checked nothing real is visible.
+    static TRUST_COVERAGE: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+fn note_trust_coverage(bar: TitleBarProbe, capsule: CapsuleProbe) {
+    let real = capsule.bounds.is_some()
+        && capsule.max_width.is_some()
+        && bar.palette.is_some()
+        && capsule.trust_rooms.0.iter().any(Option::is_some);
+    if real {
+        TRUST_COVERAGE.with(|c| {
+            let (n, collapsed) = c.get();
+            c.set((n + 1, collapsed + usize::from(bar.palette_collapsed)));
+        });
+    }
+}
+
 // ## m4-m3carry (U-6 c; M3 PO item P2-04)
 /// (e) The capsule gives up no trust word (an access word, the unencrypted word) that the
 /// palette field's icon would keep: beside a whole field, the room the icon frees would keep
@@ -1651,6 +1672,8 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     let (bar, capsule_probe) =
         cx.update(|cx| (*cx.global::<TitleBarProbe>(), *cx.global::<CapsuleProbe>()));
     let capsule = capsule_probe.bounds;
+    // ## m4-m3carry (fix round 1, m1): how many shots (e) checked with real trust data.
+    note_trust_coverage(bar, capsule_probe);
     failures.extend(
         check_title_bar(w, bar, capsule)
             .into_iter()
@@ -1762,6 +1785,12 @@ fn render_all_surfaces(names: &[String], all: bool) {
         total.as_secs_f64(),
         total.as_millis() / rendered.max(1) as u128,
         slowest.as_millis()
+    );
+    // ## m4-m3carry (fix round 1, m1)
+    let (with_trust, collapsed) = TRUST_COVERAGE.with(|c| c.get());
+    println!(
+        "shots: (e) trust check on {with_trust} shots with a capsule trust word, {collapsed} with \
+         the palette field collapsed"
     );
     // ## m3c-threads
     let shown = |n: Option<usize>| n.map_or_else(|| "?".to_string(), |n| n.to_string());

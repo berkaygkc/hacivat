@@ -696,6 +696,33 @@ fn sweep_fetch_more(cx: &mut TestAppContext, lang: &str) -> (Vec<String>, bool) 
             }
         }
     }
+    // ## m4-m3carry (fix round 1, m6): at the floor the icon's tooltip says its word. Hover it
+    // and let the tooltip's delay run on the executor clock.
+    if iconified && label(vcx).is_none() {
+        let at = vcx
+            .debug_bounds("button-strip-fetch-more")
+            .expect("drawn")
+            .center();
+        vcx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+        let mut tip = false;
+        for _ in 0..40 {
+            vcx.executor()
+                .advance_clock(std::time::Duration::from_millis(50));
+            vcx.update(|window, _| window.refresh());
+            vcx.run_until_parked();
+            let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+            if frame
+                .iter()
+                .any(|r| r.path.contains("hacivat-ui/src/popover.rs") && r.text == word)
+            {
+                tip = true;
+                break;
+            }
+        }
+        if !tip {
+            failures.push(format!("{lang}: the icon's tooltip does not say {word:?}"));
+        }
+    }
     (failures, iconified)
 }
 

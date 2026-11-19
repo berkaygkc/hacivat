@@ -82,8 +82,6 @@ struct PaletteField {
     placeholder: SharedString,
     keys: SharedString,
     on_click: ClickHandler,
-    // ## m4-m3carry (U-6 c)
-    tip: Option<SharedString>,
 }
 
 /// What the Overflow Rule needs to know (the bar cannot measure its own children).
@@ -106,6 +104,8 @@ pub struct TitleBar {
     inert: bool,
     // ## m3a-t01b-seams (fix round 1)
     on_close: Option<CloseHandler>,
+    // ## m4-m3carry (U-6 c; fix round 1, m7: kept on the bar, so the call order is free)
+    palette_tip: Option<SharedString>,
 }
 
 /// What the client-side close button does (`TitleBar::on_close`).
@@ -123,6 +123,7 @@ impl TitleBar {
             fit: None,
             inert: false,
             on_close: None,
+            palette_tip: None,
         }
     }
 
@@ -167,7 +168,6 @@ impl TitleBar {
             placeholder,
             keys,
             on_click: Rc::new(on_click),
-            tip: None,
         });
         self
     }
@@ -175,11 +175,9 @@ impl TitleBar {
     // ## m4-m3carry (U-6 c, P2-04)
     /// The collapsed palette field's tooltip and accessible name: its words and keys, as the
     /// host's Fluent joins them ("Search or run a command · ⌘K"). Without it the icon is named
-    /// by the placeholder alone. Call it after [`palette_field`](Self::palette_field).
+    /// by the placeholder alone. Before or after [`palette_field`](Self::palette_field), alike.
     pub fn palette_tip(mut self, tip: SharedString) -> Self {
-        if let Some(palette) = self.palette.as_mut() {
-            palette.tip = Some(tip);
-        }
+        self.palette_tip = Some(tip);
         self
     }
 
@@ -451,7 +449,7 @@ impl TitleBar {
             let name = palette.placeholder.clone();
             // ## m4-m3carry (U-6 c, P2-04): collapsed, the field is its magnifier in the
             // field's frame, named (and its tooltip) by its words and keys.
-            let name = match (&palette.tip, collapsed) {
+            let name = match (&self.palette_tip, collapsed) {
                 (Some(tip), true) => tip.clone(),
                 _ => name,
             };

@@ -1714,6 +1714,16 @@ fn bar_shot(vcx: &mut VisualTestContext) -> BarShot {
     }
 }
 
+/// The width of the access word's cell (its text, 9 px padding each side, the 1 px seam).
+fn access_cell_px(vcx: &mut VisualTestContext) -> f32 {
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let word = frame
+        .iter()
+        .find(|r| r.text.as_ref() == "okuma-yazma")
+        .expect("the access word is drawn in a wide bar");
+    word.painted_px + 2.0 * 9.0 + 1.0
+}
+
 #[gpui::test]
 fn the_capsule_fit_is_the_same_whatever_was_drawn_before(cx: &mut TestAppContext) {
     // Wide: everything shows. `edge` is the width at which the palette field would reach its
@@ -1722,6 +1732,7 @@ fn the_capsule_fit_is_the_same_whatever_was_drawn_before(cx: &mut TestAppContext
     let vcx = mount_tr_bar(cx, wide);
     let whole = bar_shot(vcx);
     assert_eq!(whole.texts, RW_TEXTS.to_vec(), "wide: {whole:?}");
+    let cell = access_cell_px(vcx);
     let capsule = bounds_of(vcx, "capsule");
     let palette = bounds_of(vcx, "palette-field");
     let language = bounds_of(vcx, "button-language");
@@ -1733,12 +1744,15 @@ fn the_capsule_fit_is_the_same_whatever_was_drawn_before(cx: &mut TestAppContext
 
     // Every width from where the engine gives way to past the edge: the same frame after more
     // frames, after a wider window and after a narrower one.
+    // ## m4-m3carry (fix round 1, I1): from 420 px below the edge, past the band (about 144 px
+    // wide) where the collapsed field keeps the access word, so the sweep reaches the widths
+    // where the word goes beside a whole field again.
     let mut kept = 0;
     let mut gone = 0;
     // ## m4-m3carry (U-6 c, P2-04)
     let mut collapsed_n = 0;
     let mut prev_collapsed = false;
-    for width in (edge - 240)..=(edge + 8) {
+    for width in (edge - 420)..=(edge + 8) {
         let width = width as f32;
         let vcx = mount_tr_bar(cx, width);
         let first = bar_shot(vcx);
@@ -1767,6 +1781,12 @@ fn the_capsule_fit_is_the_same_whatever_was_drawn_before(cx: &mut TestAppContext
                 (first.palette - PALETTE_ICON_PX).abs() <= 0.5,
                 "{width}: {first:?}"
             );
+            // ## m4-m3carry (fix round 1, I1): the access word is this capsule's only trust
+            // word, so a collapse that does not keep it is a collapse for nothing.
+            assert!(
+                first.texts.contains(&"okuma-yazma"),
+                "{width}: the field collapsed and the access word still went: {first:?}"
+            );
         } else {
             assert!(first.palette >= 170.0 - 0.5, "{width}: {first:?}");
             if prev_collapsed {
@@ -1783,6 +1803,13 @@ fn the_capsule_fit_is_the_same_whatever_was_drawn_before(cx: &mut TestAppContext
             kept += 1;
         } else {
             gone += 1;
+            // ## m4-m3carry (fix round 1, I1, restored M3c bound): the word goes only beside a
+            // whole field at its minimum, with less than the word's cell left over (give or
+            // take the 2 px the fit keeps in hand and the half pixels of shaped widths).
+            assert!(
+                first.palette - 170.0 < cell + 3.0,
+                "{width}: the access word went with room for it: {first:?} (cell {cell})"
+            );
             for t in ["PostgreSQL 16", "Doğrudan", "4 ms"] {
                 assert!(
                     !first.texts.contains(&t),
@@ -1792,7 +1819,7 @@ fn the_capsule_fit_is_the_same_whatever_was_drawn_before(cx: &mut TestAppContext
         }
     }
     assert!(
-        kept > 0 && collapsed_n > 0 && !prev_collapsed,
+        kept > 0 && gone > 0 && collapsed_n > 0 && !prev_collapsed,
         "the sweep missed the edge: {kept} kept, {gone} gone, {collapsed_n} collapsed"
     );
 }
@@ -1850,10 +1877,12 @@ fn mount_trust_bar<'a>(
                 TitleBar::new(ChromeKind::MacTrafficLights)
                     .brand("HACIVAT".into())
                     .capsule(Capsule::new(model.clone()))
+                    // ## m4-m3carry (fix round 1, m7): before the field, on purpose: the
+                    // order does not matter.
+                    .palette_tip(format!("{placeholder} · ⌘K").into())
                     .palette_field(placeholder.into(), "⌘K".into(), move |_, _, _| {
                         clicks.set(clicks.get() + 1)
                     })
-                    .palette_tip(format!("{placeholder} · ⌘K").into())
                     .right(vec![
                         Button::new("language", "EN".into()).into_any_element(),
                         Button::new("theme", "Dark".into()).into_any_element(),
