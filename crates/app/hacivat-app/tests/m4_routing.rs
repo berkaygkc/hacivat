@@ -25,7 +25,7 @@ use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::keymaps::{PRESETS, load};
 use hacivat_ui::tree::{TreeKey, TreeModel as _};
 use hacivat_ui_core::gpui_surface::App;
-use hacivat_ui_core::keymap::{Keymap, KeymapPlatform, chord_string};
+use hacivat_ui_core::keymap::{Keymap, KeymapPlatform, Resolution, chord_string, normalize};
 use support::*;
 
 const ALL_PLATFORMS: [KeymapPlatform; 3] = [
@@ -83,13 +83,10 @@ const M4_ROWS: &[Row] = &[
         Some("f5"),
         Some("f5"),
     ),
-    (
-        "ddl_view.copy",
-        "DdlView",
-        "DdlView",
-        Some("cmd-c"),
-        Some("ctrl-c"),
-    ),
+    // Fix round 1 (review I1): palette and the DDL view toolbar only. The `DdlView` tab context
+    // is on the stack whatever has the focus, so a copy chord there would take the standard
+    // copy from every text field; inside the DDL text, `editor.copy` is the copy.
+    ("ddl_view.copy", "DdlView", "DdlView", None, None),
     // Palette only. Enter on a table or view row is the tree's own activate (Open data); on a
     // profile row it stays `connection.toggle_connect`.
     ("explorer.open_data", "Explorer", "Explorer", None, None),
@@ -277,13 +274,6 @@ const VSCODE: &[VsCode] = &[
             (KeymapPlatform::Linux, None),
         ],
     },
-    // Copy.
-    VsCode {
-        id: "ddl_view.copy",
-        context: "DdlView",
-        vscode: [Some("cmd-c"), Some("ctrl-c"), Some("ctrl-c")],
-        differs: &[],
-    },
     // VS Code has no refresh default; F5 is the file-manager and browser convention.
     VsCode {
         id: "explorer.refresh",
@@ -372,8 +362,9 @@ fn keymap_commands_are_registered_including_host_only(cx: &mut TestAppContext) {
             }
         }
     }
-    // macOS has six M4 rows, Windows and Linux five each (no filter row), in both presets.
-    assert_eq!(seen, (6 + 5 + 5) * PRESETS.len());
+    // macOS has five M4 rows, Windows and Linux four each (no filter row), in both presets
+    // (fix round 1, I1: no `ddl_view.copy` row).
+    assert_eq!(seen, (5 + 4 + 4) * PRESETS.len());
     // The one host-only row is a keymap row, not a registration: `cmd-alt-f` exists only in the
     // macOS keymap, and its command is registered everywhere.
     for platform in [KeymapPlatform::Windows, KeymapPlatform::Linux] {
@@ -559,7 +550,8 @@ fn ddl_view_tabs_are_one_per_object(cx: &mut TestAppContext) {
     let orders = open(vcx, table("public", "orders"));
     vcx.run_until_parked();
     assert_eq!(tab_title(vcx), "orders · DDL");
-    assert_eq!(context_stack(vcx).0.last(), Some(&DDL_VIEW_CONTEXT));
+    // The tab adds its context whatever has the focus (no row is bound in it: review I1).
+    assert!(context_stack(vcx).0.contains(&DDL_VIEW_CONTEXT));
     let users = open(vcx, table("public", "users"));
     vcx.run_until_parked();
     assert_ne!(orders, users);
@@ -580,13 +572,125 @@ fn ddl_view_tabs_are_one_per_object(cx: &mut TestAppContext) {
         object != mine
     });
     assert!(other);
+    // Fix round 1 (m2): a split whose new pane ends up holding only a DDL view tab. Saving
+    // drops that pane with its tab, and the rest restores as it was.
+    ws.update_in(vcx, |w, window, cx| {
+        w.split_focused(gpui::Axis::Horizontal, window, cx)
+    });
+    vcx.run_until_parked();
+    assert_eq!(layout(vcx).0.panes.len(), 2);
+    let alone = open(vcx, table("public", "alone"));
+    vcx.run_until_parked();
+    assert!(
+        run(vcx, "workspace.prev_tab"),
+        "the split's console is active"
+    );
+    assert!(run(vcx, "workspace.close_tab"));
+    vcx.run_until_parked();
+    let (panes, _) = layout(vcx);
+    let holder = panes
+        .panes
+        .values()
+        .find(|p| p.tabs.contains(&alone))
+        .expect("the DDL tab's pane");
+    assert_eq!(holder.tabs, [alone], "a pane holds only the DDL view tab");
+    // The tabs that are not DDL views, by id and kind.
+    let kept = |vcx: &VisualTestContext| {
+        let ws = workspace(vcx);
+        let (panes, _) = layout(vcx);
+        vcx.cx.read(|cx| {
+            let mut tabs: Vec<_> = panes
+                .panes
+                .values()
+                .flat_map(|p| p.tabs.clone())
+                .filter_map(|t| ws.read(cx).tab_kind(t).map(|k| (t, k)))
+                .filter(|(_, k)| !matches!(k, TabKind::DdlView { .. }))
+                .collect();
+            tabs.sort_by_key(|(t, _)| *t);
+            tabs
+        })
+    };
+    let originals = kept(vcx);
+    assert_eq!(originals.len(), before);
     // Not saved: after the debounce, `workspace.json` holds no DDL view tab, and a restart
-    // restores only the other tabs.
+    // restores exactly the other tabs (ids and kinds) from it, not a fallback layout.
     vcx.executor().advance_clock(Duration::from_millis(600));
     vcx.run_until_parked();
-    let saved = std::fs::read_to_string(root.path().join("data/workspace.json")).unwrap();
+    let data = root.path().join("data");
+    let saved = std::fs::read_to_string(data.join("workspace.json")).unwrap();
     assert!(!saved.to_ascii_lowercase().contains("ddl"), "{saved}");
     close_all_windows(vcx);
     let vcx2 = shell_at(cx, root.path(), "en");
+    let set_aside: Vec<String> = std::fs::read_dir(&data)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.contains("corrupt"))
+        .collect();
+    assert!(set_aside.is_empty(), "{set_aside:?}");
+    assert_eq!(kept(vcx2), originals);
     assert_eq!(tab_count(vcx2), before);
+    assert_eq!(layout(vcx2).0.panes.len(), 1, "the DDL-only pane is gone");
+}
+
+/// Fix round 1 (review I1): with a DDL view tab active and the explorer's filter field or list
+/// focused, the platform copy chord is not taken by any M4 row: it passes through to the
+/// focused element (the filter's own copy), and nothing binds it in the `DdlView` context.
+#[gpui::test]
+fn copy_chord_passes_through_outside_the_ddl_text(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections(cx, "en");
+    in_window(vcx, |window, _| window.activate_window());
+    let profile = ProfileId::new();
+    let ws = workspace(vcx);
+    in_window(vcx, |_, cx| {
+        let object = ddl_view::object_id(profile, &table("public", "orders"), cx);
+        ws.update(cx, |w, cx| w.open_ddl_view_tab(profile, object, cx))
+    })
+    .expect("a tab");
+    vcx.run_until_parked();
+    let copy = if cfg!(target_os = "macos") {
+        "cmd-c"
+    } else {
+        "ctrl-c"
+    };
+    let press = normalize(&gpui::Keystroke::parse(copy).unwrap()).unwrap();
+    for (focus, list) in [
+        (
+            hacivat_app::connections::explorer::focus_filter
+                as fn(&mut gpui::Window, &mut gpui::App),
+            false,
+        ),
+        (hacivat_app::connections::explorer::focus_list, true),
+    ] {
+        in_window(vcx, focus);
+        in_window(vcx, |window, _| window.refresh());
+        vcx.run_until_parked();
+        let stack = context_stack(vcx);
+        assert!(stack.0.contains(&DDL_VIEW_CONTEXT), "{stack:?}");
+        // The focus really is where the case says: the list adds `Explorer`, the filter is the
+        // focused text input.
+        assert_eq!(stack.0.contains(&"Explorer"), list, "{stack:?}");
+        let input = vcx.cx.read(|cx| {
+            cx.try_global::<hacivat_ui::input::FocusedInput>()
+                .is_some_and(|f| f.entity.is_some())
+        });
+        assert_eq!(input, !list);
+        let active = active_keymap(vcx);
+        let got = active
+            .keymap
+            .resolve(&stack, &[], &press, &active.layout, false);
+        assert_eq!(got, Resolution::PassThrough, "{stack:?}");
+    }
+    // No preset binds anything in the `DdlView` context on any platform.
+    for platform in ALL_PLATFORMS {
+        for preset in PRESETS {
+            let rows: Vec<String> = load(platform, preset, None)
+                .0
+                .bindings()
+                .iter()
+                .filter(|b| b.context == DDL_VIEW_CONTEXT)
+                .map(|b| b.command.clone())
+                .collect();
+            assert!(rows.is_empty(), "{platform:?} {preset}: {rows:?}");
+        }
+    }
 }

@@ -35,7 +35,9 @@ pub use view::TreeView;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TreeKey(pub u128);
 
-/// A set of keys (expansion, selection). Task 8 swaps the hasher (keys are already hashes).
+/// A set of keys (expansion, selection). Task 8 swaps the hasher (keys are already hashes, the
+/// spike's `BuildHasherDefault<KeyHasher>`), so build one with `KeySet::default()` (or
+/// `collect`), never `KeySet::new()`, which exists only for the std hasher.
 pub type KeySet = HashSet<TreeKey>;
 
 /// What a node's children are.

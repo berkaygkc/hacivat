@@ -655,11 +655,13 @@ context = "Editor"
 #   own focus, so the chord never reaches the filter field or the editor.
 # - `explorer.refresh` F5, in the `Explorer` context only (the file-manager and browser
 #   convention; VS Code has no default).
-# - `ddl_view.copy`: the standard copy, in the DDL view tab (`DdlView`); the read-only editor's
-#   own copy still wins while the editor has the focus.
+# - `ddl_view.copy` has no row (review I1): the `DdlView` tab context stays on the stack whatever
+#   has the focus, so a copy chord there would take the standard copy from the explorer filter,
+#   the list and every text field. Inside the DDL text the read-only editor's `editor.copy` is
+#   the copy; the command is the toolbar's Copy button and a palette entry.
 # - Palette only: `explorer.open_data` (Enter on a table or view row is the tree's own activate;
 #   on a profile row Enter stays `connection.toggle_connect`), `explorer.expand_all_children`,
-#   `explorer.edit_scope`, `explorer.set_level.*`, `metadata.clear_cache`.
+#   `explorer.edit_scope`, `explorer.set_level.*`, `metadata.clear_cache`, `ddl_view.copy`.
 # - No `explorer.focus_filter` row: VS Code's `ctrl-alt-f` is AltGr+F, which types `@` on
 #   Turkish-F (`altgr/tr-f.toml`); the Workspace `ctrl-f` row stays (P-M4-9).
 # No row takes `alt-shift-f` (M5's reformat) or starts with the command palette's chord.
@@ -685,8 +687,3 @@ context = "Explorer"
 chord = "f5"
 command = "explorer.refresh"
 context = "Explorer"
-
-[[binding]]
-chord = "ctrl-c"
-command = "ddl_view.copy"
-context = "DdlView"
