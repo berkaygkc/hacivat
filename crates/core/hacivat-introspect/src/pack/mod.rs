@@ -595,7 +595,8 @@ mod tests {
 
     #[test]
     fn every_pack_file_is_a_header_with_no_section_yet() {
-        for d in [DialectId::Postgres, DialectId::MySql, DialectId::Sqlite] {
+        // ## m4-t18-sqlite (named exception): the SQLite pack has its sections (Task 18).
+        for d in [DialectId::Postgres, DialectId::MySql] {
             for (name, text) in files_of(d).unwrap() {
                 assert!(!text.is_empty(), "{d:?} {name}");
                 assert!(
@@ -609,15 +610,17 @@ mod tests {
 
     #[test]
     fn the_builtin_packs_parse_to_no_section_until_tasks_16_to_18() {
-        for d in [
-            DialectId::Postgres,
-            DialectId::MySql,
-            DialectId::MariaDb,
-            DialectId::Sqlite,
-        ] {
+        for d in [DialectId::Postgres, DialectId::MySql, DialectId::MariaDb] {
             let p = Pack::builtin(d).unwrap();
             assert!(p.sections().is_empty(), "{d:?}");
         }
+        // ## m4-t18-sqlite (named exception): Task 18 wrote the SQLite sections.
+        assert!(
+            !Pack::builtin(DialectId::Sqlite)
+                .unwrap()
+                .sections()
+                .is_empty()
+        );
         assert_eq!(
             Pack::builtin(DialectId::Oracle).unwrap_err().kind,
             PackErrorKind::UnsupportedDialect
