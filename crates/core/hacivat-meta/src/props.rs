@@ -1,5 +1,6 @@
 //! Per-kind properties with per-engine extensions (HV-MODEL-01 `KindProps`; field lists A-2,
-//! facets A-3). M4 Task 1a seam (spike origin `d86313b`, declarations only).
+//! facets A-3). Declarations from M4 Task 1a; the `Props` accessors and `RoutineProps`'s
+//! default are Task 3's (spike origin `d86313b`).
 //!
 //! Every variant holds an `Arc`, so [`Props`] is two words and cloning an object bumps a
 //! reference count instead of deep-copying. Expressions and type texts are kept **raw**,
@@ -40,6 +41,56 @@ pub enum Props {
     /// Kinds with only common properties (extensions, collations, roles, events, …) and
     /// [`crate::kind::ObjectKind::Unknown`] objects (their raw server kind in `raw_kind`).
     Generic(Arc<GenericProps>),
+}
+
+impl Props {
+    /// The object's comment, whatever its kind (keys, checks and triggers have none).
+    pub fn comment(&self) -> Option<&Name> {
+        match self {
+            Props::None => None,
+            Props::Database(p) => p.comment.as_ref(),
+            Props::Schema(p) => p.comment.as_ref(),
+            Props::Table(p) => p.comment.as_ref(),
+            Props::View(p) => p.comment.as_ref(),
+            Props::Column(p) => p.comment.as_ref(),
+            Props::Index(p) => p.comment.as_ref(),
+            Props::Key(_) | Props::ForeignKey(_) | Props::Check(_) | Props::Trigger(_) => None,
+            Props::Routine(p) => p.comment.as_ref(),
+            Props::Sequence(p) => p.comment.as_ref(),
+            Props::Type(p) => p.comment.as_ref(),
+            Props::Generic(p) => p.comment.as_ref(),
+        }
+    }
+
+    /// The overload signature of a routine (part of its identity, `ObjectKey::overload_sig`).
+    pub fn overload_sig(&self) -> Option<&Name> {
+        match self {
+            Props::Routine(p) => p.overload_sig.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The raw server kind of an unknown object (`ObjectKey::raw_kind`).
+    pub fn raw_kind(&self) -> Option<&Name> {
+        match self {
+            Props::Generic(p) => p.raw_kind.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn as_column(&self) -> Option<&ColumnProps> {
+        match self {
+            Props::Column(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn as_table(&self) -> Option<&TableProps> {
+        match self {
+            Props::Table(p) => Some(p),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -169,18 +220,49 @@ pub struct ColumnProps {
     pub raw_type: Name,
     pub type_ref: Option<TypeRef>,
     pub nullable: bool,
-    /// PostgreSQL 18 named `NOT NULL` constraint.
-    pub not_null_constraint: Option<Name>,
     pub default_raw: Option<Name>,
-    pub identity: Option<Identity>,
-    pub generated: Option<Generated>,
-    pub collation: Option<Name>,
     pub comment: Option<Name>,
     /// SQLite hidden column, MySQL `INVISIBLE`.
     pub hidden: bool,
+    /// The fields most columns lack, behind one pointer (R-W1-2: ≤ 250 B per column).
+    pub rare: Option<Arc<ColumnRare>>,
+    /// The per-engine extras, behind one pointer (R-W1-2); `None` when the engine has none.
+    pub ext: Option<Arc<ColumnExt>>,
+}
+
+/// The column fields most columns lack (R-W1-2, ruled before Task 11 freezes the cache
+/// format): kept out of [`ColumnProps`] so the common column stays small.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ColumnRare {
+    /// PostgreSQL 18 named `NOT NULL` constraint.
+    pub not_null_constraint: Option<Name>,
+    pub identity: Option<Identity>,
+    pub generated: Option<Generated>,
+    pub collation: Option<Name>,
     /// MySQL `ENUM`/`SET` labels, in declaration order.
     pub enum_labels: Option<Arc<[Name]>>,
-    pub ext: ColumnExt,
+}
+
+impl ColumnProps {
+    /// The column's identity kind, if any.
+    pub fn identity(&self) -> Option<Identity> {
+        self.rare.as_ref().and_then(|r| r.identity)
+    }
+
+    /// The column's generation, if it is generated.
+    pub fn generated(&self) -> Option<&Generated> {
+        self.rare.as_ref().and_then(|r| r.generated.as_ref())
+    }
+
+    /// The column's collation, if declared.
+    pub fn collation(&self) -> Option<&Name> {
+        self.rare.as_ref().and_then(|r| r.collation.as_ref())
+    }
+
+    /// The per-engine extras ([`ColumnExt::None`] when absent).
+    pub fn ext(&self) -> &ColumnExt {
+        self.ext.as_deref().unwrap_or(&ColumnExt::None)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -309,6 +391,28 @@ pub struct RoutineProps {
     pub overload_sig: Option<Name>,
     pub source: Option<SourceRef>,
     pub comment: Option<Name>,
+}
+
+impl Default for RoutineProps {
+    /// A function with unknown arguments (`args = None`, name only), unknown volatility and
+    /// nothing else known.
+    fn default() -> Self {
+        RoutineProps {
+            args: None,
+            returns: None,
+            returns_set: false,
+            kind: FnKind::Function,
+            volatility: Volatility::Unknown,
+            language: None,
+            owner: None,
+            definer: None,
+            specific_name: None,
+            security_definer: false,
+            overload_sig: None,
+            source: None,
+            comment: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

@@ -483,6 +483,7 @@ fn table(schema: &str, name: &str) -> ObjectKey {
         path: [schema, name].into_iter().map(Into::into).collect(),
         server_id: None,
         overload_sig: None,
+        raw_kind: None,
     }
 }
 

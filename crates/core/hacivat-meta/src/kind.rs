@@ -6,11 +6,14 @@
 //! bump). A code this build does not know decodes as [`ObjectKind::Unknown`]; the raw server
 //! kind text then lives in `Props::Generic`. Spec §5.7's `Other(u16)` is this `Unknown` seam.
 //!
-//! M4 Task 1a seam (spike origin `d86313b`, declarations only): the codes and ids are the
-//! declaration; the kind schema ([`ObjectKind::group`], [`ObjectKind::allows_child`],
-//! [`ObjectKind::exists_in`]) fails closed until Task 3.
+//! The kind schema ([`ObjectKind::group`], [`ObjectKind::allows_child`],
+//! [`ObjectKind::exists_in`], [`ObjectKind::name_class`]) is M4 Task 3's (spike origin
+//! `d86313b`; PostgreSQL composite types in `Relations`, SQLite virtual tables and the
+//! per-engine kind lists added).
 
 use hacivat_proto::DbmsKind;
+
+use crate::name::NameClass;
 
 macro_rules! object_kinds {
     ($($(#[$m:meta])* $v:ident = $code:literal => $id:literal),* $(,)?) => {
@@ -143,11 +146,25 @@ pub enum KindGroup {
     Triggers,
     /// Every other schema-scoped kind (collations, operators, events, extensions, …).
     Other,
+    /// Account names: roles, users, logins (MySQL/MariaDB compare them case-sensitively,
+    /// unlike their other names; T3 fix round 1, I2).
+    Accounts,
 }
 
 impl KindGroup {
     /// The number of groups.
-    pub const COUNT: usize = 6;
+    pub const COUNT: usize = 7;
+
+    /// Every group, in [`KindGroup::index`] order.
+    pub const ALL: [KindGroup; KindGroup::COUNT] = [
+        KindGroup::Relations,
+        KindGroup::Routines,
+        KindGroup::Procedures,
+        KindGroup::Types,
+        KindGroup::Triggers,
+        KindGroup::Other,
+        KindGroup::Accounts,
+    ];
 
     /// A dense index in `0..COUNT`.
     pub const fn index(self) -> usize {
@@ -158,6 +175,7 @@ impl KindGroup {
             KindGroup::Types => 3,
             KindGroup::Triggers => 4,
             KindGroup::Other => 5,
+            KindGroup::Accounts => 6,
         }
     }
 }
@@ -183,32 +201,349 @@ pub fn database_level(dbms: DbmsKind) -> DbLevel {
     }
 }
 
+/// PostgreSQL and its wire-compatible forks.
+pub(crate) fn pg_family(d: DbmsKind) -> bool {
+    matches!(
+        d,
+        DbmsKind::Postgres
+            | DbmsKind::Redshift
+            | DbmsKind::Cockroach
+            | DbmsKind::Yugabyte
+            | DbmsKind::Timescale
+    )
+}
+
+/// MySQL and its wire-compatible forks.
+pub(crate) fn mysql_family(d: DbmsKind) -> bool {
+    matches!(d, DbmsKind::MySql | DbmsKind::MariaDb | DbmsKind::TiDb)
+}
+
 impl ObjectKind {
     /// The name group of this kind in `dbms`, or `None` when its names are scoped to the parent
-    /// object (columns, constraints; PostgreSQL triggers; MySQL indexes).
-    ///
-    /// Task 1a stub: `None` for every kind (no namespace-level name index is built until
-    /// Task 3; lookups answer `Unknown` meanwhile). Not a fact (fix round 1, m9): nothing may
-    /// hide or merge a kind group from it before Task 3.
+    /// object (columns, constraints; PostgreSQL triggers; MySQL indexes). Only grouped kinds
+    /// enter a namespace's name index, wherever they sit in the arena (a PostgreSQL index under
+    /// its table is still a `Relations` name); the others are found under their parent.
     pub fn group(self, dbms: DbmsKind) -> Option<KindGroup> {
-        let _ = dbms;
-        None
+        use ObjectKind::*;
+        if dbms == DbmsKind::Sqlite {
+            // One `sqlite_schema` name space for tables, views, indexes and triggers.
+            return match self {
+                Table | View | VirtualTable | Index | Trigger => Some(KindGroup::Relations),
+                Routine | Aggregate => Some(KindGroup::Routines),
+                Collation | VirtualTableModule => Some(KindGroup::Other),
+                _ => None,
+            };
+        }
+        let pg = pg_family(dbms);
+        let my = mysql_family(dbms);
+        match self {
+            Table | View | MaterializedView | ForeignTable | VirtualTable => {
+                Some(KindGroup::Relations)
+            }
+            // `pg_class` holds sequences, indexes and composite types too.
+            Sequence | Index | CompositeType if pg => Some(KindGroup::Relations),
+            // A MariaDB sequence is a table.
+            Sequence if my => Some(KindGroup::Relations),
+            Sequence => Some(KindGroup::Other),
+            Routine | Aggregate => Some(KindGroup::Routines),
+            // MySQL keeps functions and procedures in separate name spaces; `pg_proc` does not.
+            Procedure if my => Some(KindGroup::Procedures),
+            Procedure => Some(KindGroup::Routines),
+            Domain | EnumType | CompositeType | RangeType | AliasType | TableType | ObjectType => {
+                Some(KindGroup::Types)
+            }
+            // MySQL trigger names are unique per schema; PostgreSQL's per table.
+            Trigger if my => Some(KindGroup::Triggers),
+            Role | User | Login => Some(KindGroup::Accounts),
+            Synonym | Extension | Collation | Operator | OperatorClass | OperatorFamily
+            | Language | AccessMethod | ForeignDataWrapper | ForeignServer | EventTrigger
+            | Event | Dictionary | Package | PackageBody | DbLink | Collection | MongoView
+            | TimeSeries | Tablespace | Cast | VirtualTableModule => Some(KindGroup::Other),
+            _ => None,
+        }
     }
 
-    /// Whether `child` may sit directly under `self` in `dbms` (the kind schema).
-    ///
-    /// Task 1a stub: `false` (no arena can be built until Task 3).
-    pub fn allows_child(self, child: ObjectKind, dbms: DbmsKind) -> bool {
-        let _ = (child, dbms);
-        false
+    /// The name class `sql_ident::key::match_key` matches this kind's names under in `dbms`
+    /// (HV-INTRO-14). On MySQL/MariaDB, views and (MariaDB) sequences are tables; trigger names
+    /// follow the file system, not `lower_case_table_names` (MySQL 8.4 §11.2.3: the variable
+    /// "does not affect case sensitivity of trigger identifiers"); account names are always
+    /// case-sensitive (§8.2.3); stored routine, event and index names are case-insensitive
+    /// everywhere.
+    pub fn name_class(self, dbms: DbmsKind) -> NameClass {
+        use ObjectKind::*;
+        let my = mysql_family(dbms);
+        match self {
+            Database => NameClass::Database,
+            Schema => NameClass::Schema,
+            Table | View | MaterializedView | ForeignTable | VirtualTable => NameClass::Table,
+            Sequence if my => NameClass::Table,
+            Trigger => NameClass::Trigger,
+            Role | User | Login => NameClass::Account,
+            Column => NameClass::Column,
+            Routine | Procedure | Aggregate => NameClass::Routine,
+            _ => NameClass::Other,
+        }
     }
 
-    /// Whether this kind exists in `dbms` at all.
-    ///
-    /// Task 1a stub: `false` (nothing is asserted to exist until Task 3). Not a fact (fix
-    /// round 1, m9): nothing may hide a kind from it before Task 3.
+    /// The kind of a namespace's root object.
+    pub fn is_namespace_root(self) -> bool {
+        matches!(
+            self,
+            ObjectKind::Root | ObjectKind::Database | ObjectKind::Schema
+        )
+    }
+
+    /// Whether this kind exists in `dbms` at all. Exact for the four M4 engines (alg/02
+    /// HV-MODEL-01 per-DBMS matrix rows 1, 2 and 4); for the later engines only the M4
+    /// engines' specific kinds are excluded until their own kind schema lands (v1.x).
+    /// [`ObjectKind::Unknown`] exists everywhere (edge 11: a newer server's kind is kept).
     pub fn exists_in(self, dbms: DbmsKind) -> bool {
-        let _ = dbms;
-        false
+        use ObjectKind::*;
+        if self == Unknown {
+            return true;
+        }
+        if pg_family(dbms) {
+            return matches!(
+                self,
+                Root | Database
+                    | Schema
+                    | Table
+                    | View
+                    | MaterializedView
+                    | ForeignTable
+                    | Column
+                    | Index
+                    | PrimaryKey
+                    | UniqueKey
+                    | ForeignKey
+                    | Check
+                    | Exclusion
+                    | Default
+                    | Trigger
+                    | Rule
+                    | Policy
+                    | Partition
+                    | Routine
+                    | Procedure
+                    | Aggregate
+                    | Argument
+                    | Sequence
+                    | Domain
+                    | EnumType
+                    | CompositeType
+                    | RangeType
+                    | Extension
+                    | Collation
+                    | Operator
+                    | OperatorClass
+                    | OperatorFamily
+                    | Cast
+                    | Language
+                    | AccessMethod
+                    | ForeignDataWrapper
+                    | ForeignServer
+                    | UserMapping
+                    | EventTrigger
+                    | Role
+                    | Tablespace
+            );
+        }
+        if mysql_family(dbms) {
+            let maria_like = matches!(dbms, DbmsKind::MariaDb | DbmsKind::TiDb);
+            return match self {
+                // MariaDB 10.3+: `CREATE SEQUENCE`, `CREATE AGGREGATE FUNCTION`.
+                Sequence | Aggregate => maria_like,
+                _ => matches!(
+                    self,
+                    Root | Schema
+                        | Table
+                        | View
+                        | Column
+                        | Index
+                        | PrimaryKey
+                        | UniqueKey
+                        | ForeignKey
+                        | Check
+                        | Trigger
+                        | Partition
+                        | Subpartition
+                        | Routine
+                        | Procedure
+                        | Argument
+                        | Event
+                        | User
+                        | Role
+                ),
+            };
+        }
+        if dbms == DbmsKind::Sqlite {
+            return matches!(
+                self,
+                Root | Schema
+                    | Table
+                    | View
+                    | VirtualTable
+                    | Column
+                    | Index
+                    | PrimaryKey
+                    | UniqueKey
+                    | ForeignKey
+                    | Check
+                    | Trigger
+                    | Routine
+                    | Aggregate
+                    | Collation
+                    | VirtualTableModule
+            );
+        }
+        match self {
+            Exclusion | Rule | Policy | Domain | RangeType | Operator | OperatorClass
+            | OperatorFamily | Cast | Language | AccessMethod | ForeignDataWrapper
+            | ForeignServer | UserMapping | EventTrigger | MaterializedView | ForeignTable
+            | Aggregate | Extension | CompositeType | EnumType => dbms == DbmsKind::Unknown,
+            Event => false,
+            VirtualTable | VirtualTableModule => false,
+            _ => true,
+        }
+    }
+
+    /// Whether `child` may sit directly under `self` in `dbms` (the kind schema): both kinds
+    /// exist there and the edge is one the server's hierarchy has. An
+    /// [`ObjectKind::Unknown`] child is accepted under any parent, and anything under an
+    /// unknown parent (edge 11).
+    pub fn allows_child(self, child: ObjectKind, dbms: DbmsKind) -> bool {
+        use ObjectKind::*;
+        if !self.exists_in(dbms) || !child.exists_in(dbms) {
+            return false;
+        }
+        if self == Unknown || child == Unknown {
+            return true;
+        }
+        match self {
+            Root => matches!(child, Role | User | Login | Tablespace),
+            // PostgreSQL roles are cluster-wide (the server namespace); database-level roles and
+            // users are SQL Server's.
+            Database if pg_family(dbms) => matches!(
+                child,
+                Extension | Language | Cast | EventTrigger | ForeignDataWrapper | AccessMethod
+            ),
+            Database => matches!(
+                child,
+                Extension
+                    | Language
+                    | Cast
+                    | EventTrigger
+                    | ForeignDataWrapper
+                    | AccessMethod
+                    | Role
+                    | User
+            ),
+            Schema => matches!(
+                child,
+                Table
+                    | View
+                    | MaterializedView
+                    | ForeignTable
+                    | VirtualTable
+                    | Routine
+                    | Procedure
+                    | Aggregate
+                    | Sequence
+                    | Domain
+                    | EnumType
+                    | CompositeType
+                    | RangeType
+                    | AliasType
+                    | TableType
+                    | Synonym
+                    | Collation
+                    | Operator
+                    | OperatorClass
+                    | OperatorFamily
+                    | Event
+                    | VirtualTableModule
+                    | Dictionary
+                    | Package
+                    | PackageBody
+                    | ObjectType
+                    | Collection
+                    | MongoView
+                    | TimeSeries
+                    | Extension
+            ),
+            Table | ForeignTable => matches!(
+                child,
+                Column
+                    | Index
+                    | PrimaryKey
+                    | UniqueKey
+                    | ForeignKey
+                    | Check
+                    | Exclusion
+                    | Default
+                    | Trigger
+                    | Rule
+                    | Policy
+                    | Partition
+                    | Projection
+            ),
+            VirtualTable => matches!(child, Column),
+            // MySQL/MariaDB have no view triggers (and no rules).
+            View if mysql_family(dbms) => matches!(child, Column),
+            View => matches!(child, Column | Trigger | Rule),
+            MaterializedView => matches!(child, Column | Index),
+            Partition => matches!(child, Subpartition),
+            CompositeType | TableType | ObjectType => {
+                matches!(child, Column | Index | PrimaryKey | UniqueKey | Check)
+            }
+            Routine | Procedure | Aggregate => matches!(child, Argument),
+            ForeignDataWrapper => matches!(child, ForeignServer),
+            ForeignServer => matches!(child, UserMapping),
+            Collection | TimeSeries => matches!(child, Index | InferredField),
+            InferredField => matches!(child, InferredField),
+            Package => matches!(child, Routine | Procedure),
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The spike's unit check: engine-specific kinds are refused on other engines.
+    #[test]
+    fn kind_schema_rejects_engine_specific_kinds_elsewhere() {
+        use ObjectKind::*;
+        assert!(Table.allows_child(Exclusion, DbmsKind::Postgres));
+        assert!(!Table.allows_child(Exclusion, DbmsKind::MySql));
+        assert!(Schema.allows_child(Event, DbmsKind::MariaDb));
+        assert!(!Schema.allows_child(Event, DbmsKind::Postgres));
+        assert!(!Column.allows_child(Column, DbmsKind::Postgres));
+    }
+
+    /// Every kind that exists on an M4 engine can be placed: it is a namespace root or some
+    /// parent kind accepts it there.
+    #[test]
+    fn every_existing_kind_has_a_parent() {
+        for dbms in [
+            DbmsKind::Postgres,
+            DbmsKind::MySql,
+            DbmsKind::MariaDb,
+            DbmsKind::Sqlite,
+        ] {
+            for &k in ObjectKind::ALL {
+                if k.exists_in(dbms) && k != ObjectKind::Root {
+                    let parents = ObjectKind::ALL
+                        .iter()
+                        .filter(|p| p.allows_child(k, dbms))
+                        .count();
+                    assert!(
+                        parents > 0 || k.is_namespace_root(),
+                        "{k:?} exists in {dbms:?} but has no parent"
+                    );
+                }
+            }
+        }
     }
 }

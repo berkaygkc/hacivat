@@ -111,6 +111,7 @@ fn table(schema: &str, t: &str) -> ObjectKey {
         path: ["db", schema, t].into_iter().map(name).collect(),
         server_id: None,
         overload_sig: None,
+        raw_kind: None,
     }
 }
 

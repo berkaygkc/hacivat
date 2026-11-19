@@ -23,24 +23,32 @@ const CLASSES: [NameClass; 6] = [
     NameClass::Other,
 ];
 
-/// Every probe is `ServerDependent` until Task 3: no key, so every lookup is `Unknown`, never a
-/// wrong `Found` or `Missing`.
+/// Task 3 filled the seam (it answered `ServerDependent` for every probe until then): ASCII
+/// names key on every M4 dialect and class, and an unquoted non-ASCII cased probe stays
+/// `ServerDependent` where the server's rule is not pinned (R-M4-41; PostgreSQL with an
+/// unknown server encoding, HV-INTRO-14 rule 3). The full suite is `tests/key.rs`.
 #[test]
-fn stub_match_key_is_server_dependent() {
+fn match_key_keys_ascii_and_stays_server_dependent_where_unpinned() {
     for d in DIALECTS {
         let ctx = IdentCtx::new(d);
         for class in CLASSES {
-            for (text, quoted) in [
-                ("users", false),
-                ("Users", true),
-                ("MÜŞTERİ", false),
-                ("", false),
-            ] {
-                assert_eq!(
-                    match_key(d, &ctx, text, quoted, class),
-                    Err(ServerDependent),
+            for (text, quoted) in [("users", false), ("Users", true), ("", false)] {
+                assert!(
+                    match_key(d, &ctx, text, quoted, class).is_ok(),
                     "{d:?} {class:?} {text:?}"
                 );
+            }
+            let non_ascii = match_key(d, &ctx, "MÜŞTERİ", false, class);
+            let pinned = d == DialectId::Sqlite
+                || (matches!(d, DialectId::MySql | DialectId::MariaDb)
+                    && matches!(
+                        class,
+                        NameClass::Database | NameClass::Schema | NameClass::Table
+                    ));
+            if pinned {
+                assert!(non_ascii.is_ok(), "{d:?} {class:?}");
+            } else {
+                assert_eq!(non_ascii, Err(ServerDependent), "{d:?} {class:?}");
             }
         }
     }

@@ -148,6 +148,7 @@ fn stub_create_script_refuses() {
         path: smallvec::smallvec![Arc::from("db"), Arc::from("public"), Arc::from("t")],
         server_id: None,
         overload_sig: None,
+        raw_kind: None,
     };
     let target = DdlTarget::new(DialectId::Postgres, ServerVersion::new(17, 0, 0));
     assert!(matches!(
