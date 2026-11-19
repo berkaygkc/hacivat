@@ -260,6 +260,16 @@ fn ident_text(name: &Name, params: &Params) -> Result<String, RenderError> {
         QuoteError::Nul => RenderError::IdentNul,
         _ => RenderError::IdentUnquotable,
     })?;
+    // ## m4-t04 (controller merge fix, after T7): `quote` leaves a name bare when the dialect
+    // does not need quoting. A `show-create` name is always backticked here; a bare name has
+    // no backtick by construction (T7's `needs_quoting`), and the check below still runs.
+    let q = if q.starts_with('`') {
+        q
+    } else if *q == **text && !q.contains('`') {
+        format!("`{q}`")
+    } else {
+        return Err(RenderError::IdentUnquotable);
+    };
     let inner = q
         .strip_prefix('`')
         .and_then(|s| s.strip_suffix('`'))
