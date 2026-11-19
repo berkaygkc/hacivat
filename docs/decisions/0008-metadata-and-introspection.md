@@ -250,3 +250,12 @@ update` is never run plain); `minicat check` re-encodes, so a different libzstd 
   `#[path]` target (followed, and refused when it leaves `src/`).
 - *m-R2-1.* `IntrospectNotExec` also refuses any declared `hacivat-results` or `hacivat-exec`
   dependency of `hacivat-introspect` (any kind, optional or not).
+
+**Fix round 4 (re-review 3, I-R5).** `MetaQueryOnlyFromPacks` also refuses `MetaQuery` anywhere
+inside the `<…>` of a qualified path that is followed by `::`, whatever wraps it there
+(parentheses, tuples, `&`/`&mut`, `dyn`, its own generic arguments): `<(MetaQuery)>::new`,
+`<((MetaQuery<'_>))>::new`, `<(MetaQuery,)>::default`, `<&MetaQuery>::clone`, also after `=>`.
+A `<` opens a qualified path when it follows no identifier, no `::` and no closing `>` of
+generic arguments (after `->`/`=>` it is qualified). In doubt it refuses: `<Vec<MetaQuery>>::new`
+is refused too, and `Vec::<MetaQuery>::new()` is the legal spelling. The runtime guard (T5's
+`join` allowlist) stays the primary defence; this rule is defence in depth.

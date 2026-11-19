@@ -1102,28 +1102,26 @@ fn skip_angle(t: &[SrcTok], open: usize) -> usize {
     t.len()
 }
 
-/// The `<` that the `>` at `close` closes, walking back (a `>` of `->`/`=>` is not a bracket).
-fn matching_open_angle(t: &[SrcTok], close: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    for k in (0..=close).rev() {
-        if tok_punct(t, k, '>')
-            && !(k > 0 && (tok_punct(t, k - 1, '-') || tok_punct(t, k - 1, '=')))
-        {
-            depth += 1;
-        } else if tok_punct(t, k, '<') {
-            depth = depth.saturating_sub(1);
-            if depth == 0 {
-                return Some(k);
-            }
-        }
-    }
-    None
+/// Whether the `<` at `open` opens a qualified path (`<T>::item`, `<T as Tr>::item`), not
+/// generic arguments: it follows no path segment (an identifier, `::`) and no closing `>` of
+/// generic arguments. After `->` or `=>` (a return type, a match arm) it is qualified.
+fn qualified_open(t: &[SrcTok], open: usize) -> bool {
+    open == 0
+        || !(matches!(t.get(open - 1), Some(SrcTok::Ident(_)))
+            || tok_punct(t, open - 1, ':')
+            || (tok_punct(t, open - 1, '>')
+                && !(open >= 2 && (tok_punct(t, open - 2, '-') || tok_punct(t, open - 2, '=')))))
 }
 
-/// Whether the `MetaQuery` segment at `i` is followed by an associated-item access: optional
-/// generic arguments (`<…>` or `::<…>`), then optionally the `>` that closes a **qualified**
-/// path (`<…MetaQuery<…>>`; not the `>` of generic arguments such as `Vec<MetaQuery>`), then
-/// `::` (fix round 3, I-R4: any `::item`, not only `new`).
+/// Whether the `MetaQuery` segment at `i` is followed by an associated-item access (fix rounds
+/// 3 and 4, I-R4/I-R5):
+/// - directly: `MetaQuery`, optional generic arguments (`<…>` or `::<…>`), then `::`;
+/// - through a qualified path: `MetaQuery` anywhere inside the `<…>` of a qualified path that
+///   is followed by `::` — whatever wraps it there (parentheses, a tuple, `&`, `&mut`, `dyn`,
+///   its own generic arguments): `<(MetaQuery)>::new`, `<((MetaQuery<'_>))>::new`,
+///   `<(MetaQuery,)>::default`, `<&MetaQuery>::clone`. In doubt this refuses: an access that
+///   resolves on a type merely containing `MetaQuery` (`<Vec<MetaQuery>>::new`) is refused too;
+///   `Vec::<MetaQuery>::new()` is the spelling that stays legal.
 fn meta_query_item_access(t: &[SrcTok], i: usize) -> bool {
     let mut j = i + 1;
     if tok_punct(t, j, ':') && tok_punct(t, j + 1, ':') && tok_punct(t, j + 2, '<') {
@@ -1131,20 +1129,26 @@ fn meta_query_item_access(t: &[SrcTok], i: usize) -> bool {
     } else if tok_punct(t, j, '<') {
         j = skip_angle(t, j);
     }
-    if tok_punct(t, j, '>') {
-        // A qualified path's `<` follows no path segment: not an identifier, not `::`, not `>`.
-        let qualified = matching_open_angle(t, j).is_some_and(|open| {
-            open == 0
-                || !(matches!(t.get(open - 1), Some(SrcTok::Ident(_)))
-                    || tok_punct(t, open - 1, ':')
-                    || tok_punct(t, open - 1, '>'))
-        });
-        if !qualified {
-            return false;
-        }
-        j += 1;
+    if tok_punct(t, j, ':') && tok_punct(t, j + 1, ':') {
+        return true;
     }
-    tok_punct(t, j, ':') && tok_punct(t, j + 1, ':')
+    // Every qualified path whose `<…>` holds this `MetaQuery` and is followed by `::`.
+    let mut k = i;
+    while k > 0 {
+        k -= 1;
+        // A path expression never spans a statement or block boundary.
+        if tok_punct(t, k, ';') || tok_punct(t, k, '{') || tok_punct(t, k, '}') {
+            break;
+        }
+        if !tok_punct(t, k, '<') || !qualified_open(t, k) {
+            continue;
+        }
+        let end = skip_angle(t, k);
+        if end > i && tok_punct(t, end, ':') && tok_punct(t, end + 1, ':') {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether the `impl` at `i` starts an impl block (an item), not `impl Trait` in a type
@@ -3267,5 +3271,40 @@ mod tests {
             assert_eq!(v[0].rule, Rule::IntrospectNotExec);
             assert_eq!(v[0].via, [bad]);
         }
+    }
+
+    // ## m4-t01a-model (fix round 4): re-review 3, I-R5.
+
+    /// I-R5: `MetaQuery` wrapped inside a qualified path's `<…>` (parentheses, a tuple, a
+    /// reference, its own generic arguments; after `=>` too) before `::`.
+    #[test]
+    fn meta_query_wrapped_in_a_qualified_path_is_refused() {
+        for form in [
+            "fn f(s: &str) { let _ = <(hacivat_session::meta::MetaQuery)>::new(&s, &[], true); }\n",
+            "fn f(s: &str) { let _ = <(hacivat_session::meta::MetaQuery<'_>)>::new(&s, &[], true); }\n",
+            "fn f(s: &str) { let _ = <((MetaQuery))>::new(&s, &[], true); }\n",
+            "fn f() { let _ = <(MetaQuery,)>::default(); }\n",
+            "fn f(q: &MetaQuery) { let _ = <&MetaQuery>::clone(&q); }\n",
+            "fn f(q: &MetaQuery) { let _ = <&mut dyn Into<MetaQuery>>::into(q); }\n",
+            "fn f(x: u8, s: &str) { match x { _ => <(MetaQuery)>::new(s, &[], true) }; }\n",
+            "fn f() -> u8 { let _ = <Vec<MetaQuery>>::new(); 0 }\n",
+        ] {
+            let v = meta_query_findings(&[(ENGINE, form)]);
+            assert_eq!(names(&v), ["hacivat-introspect"], "{form}");
+        }
+    }
+
+    /// I-R5: qualified paths that do not hold `MetaQuery`, and tuples of it in type positions,
+    /// stay legal.
+    #[test]
+    fn qualified_paths_without_meta_query_and_tuple_types_are_allowed() {
+        let v = meta_query_findings(&[(
+            ENGINE,
+            "fn a(p: (MetaQuery, u8)) -> (MetaQuery,) { (p.0,) }\n\
+             fn b() -> Vec<(MetaQuery, String)> { <Vec<(u8, u8)>>::new(); Vec::new() }\n\
+             fn c(x: u8) -> u8 { match x { _ => <u8>::default() } }\n\
+             fn d(q: &MetaQuery) -> &MetaQuery { q }\n",
+        )]);
+        assert!(v.is_empty(), "{v:?}");
     }
 }
