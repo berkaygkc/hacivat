@@ -11,7 +11,7 @@ use gpui::TestAppContext;
 use hacivat_app::ddl_view::{self, DDL_VIEW_CONTEXT, DDL_VIEW_KIND};
 use hacivat_app::explorer::{
     self, ActionSlot, ActionSurface, ExplorerActionProvider, ExplorerModel, NodeRef,
-    ProvidedAction, contributors, provided_actions, register_action_provider,
+    ProvidedAction, contributors, database_rows, provided_actions, register_action_provider,
 };
 use hacivat_app::shell::TabContentRegistry;
 use hacivat_proto::ProfileId;
@@ -455,6 +455,8 @@ fn action_provider_stub_contributes_nothing(cx: &mut TestAppContext) {
             assert!(provided_actions(&node, surface, cx).is_empty());
         }
         assert!(contributors(cx).is_empty());
+        // `database_rows` (M5, M4b) lists nothing until Task 24.
+        assert!(database_rows(node.profile, cx).is_empty());
         // The explorer model stub shows nothing and claims nothing about a key.
         let model = ExplorerModel::default();
         assert!(model.roots().is_empty());

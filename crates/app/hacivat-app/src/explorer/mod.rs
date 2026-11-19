@@ -45,6 +45,7 @@ pub use adapter::ExplorerModel;
 pub use contrib::{
     ContributedChildren, ContributedNode, ExplorerContributor, contributors, register_contributor,
 };
+pub use live::{DatabaseRow, database_rows};
 
 /// The key context of the focused explorer (the M2a list's, kept by the tree, R20).
 pub const EXPLORER_CONTEXT: &str = crate::connections::explorer::EXPLORER_CONTEXT;
