@@ -52,6 +52,9 @@ tracing-subscriber.workspace = true
 tracing-log.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+# ## m4-t05 (controller manifest amendment, R-W1-15): the session's own test seams for its
+# tests only (the hacivat-app precedent), so `-p hacivat-session` alone builds `test-support`.
+hacivat-session = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true
