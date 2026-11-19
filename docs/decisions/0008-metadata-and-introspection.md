@@ -885,3 +885,60 @@ M4 Task 10 fills the existence-diff merge, the catalog delta and the mass-deleti
     cache the first fold twin takes the match and the others are dropped.
   - A dropped object is always named by its key in the previous generation, even under a
     parent renamed in the same delta.
+
+## m4-t13 — assembly
+
+- **Seam.** `hacivat_introspect::assemble` gains the row and result types: `TableId` (server id
+  and name), `ColRef` (an `(ordinal, name)` column reference), `ColumnIndex` (the namespace's
+  columns per table, built by the introspector), `KeyObj` (the owning table, the model `Obj`,
+  and two facts the model's props have no field for: an FK's `ref_constraint` and an exclusion
+  constraint's `operators`), and one adapter per dialect, `assemble::{pg, mysql,
+  sqlite}::assemble_keys(rows, &ColumnIndex) -> Vec<KeyObj>`. Assembly cannot fail, so the
+  T1c stub's `AssembleError` (referenced nowhere) is removed: a part that cannot be resolved
+  flags the object `BROKEN` instead.
+- **Column references** resolve by ordinal, then by name: exactly, then by a certain
+  ASCII-caseless key where the engine folds the class (MySQL/MariaDB columns, SQLite;
+  `match_key`, so a non-ASCII cased name stays exact, R-M4-41). An ordinal whose column has
+  another name than the row says is an inconsistent read and does not resolve. Key order is the
+  row order, never ordinal or name order. An unresolved reference keeps the row's text and the
+  object is kept with `ObjFlags::BROKEN` (alg/02 HV-INTRO-13 step 3).
+- **Expression parts** are `KeyColumn { ordinal: 0, name: None }` slots in `KeyProps::columns`
+  (PostgreSQL's `indkey` convention); their raw text is in `KeyProps::expressions` in slot
+  order: PG `pg_get_indexdef(oid, k, true)`, MySQL `EXPRESSION`, SQLite the part's text from
+  `sqlite_schema.sql` (a quote-, bracket- and comment-aware scan; the part's `COLLATE` and
+  `ASC`/`DESC` are not part of it, as in PostgreSQL's per-column form). A SQLite partial
+  index's predicate comes from the same scan; a partial index whose text yields none is broken.
+- **Implicit indexes (A-11).** The index behind a constraint is `ObjFlags::IMPLICIT` with
+  `IndexProps.key.implicit_for` pointing at it (kind, path `[…, table, constraint]`, server id),
+  and the constraint's `backing_index` names the index, also when the names agree (as the
+  T3/T9 fixture does): PostgreSQL PK/UNIQUE/EXCLUDE through `conindid` (an FK's `conindid`
+  names the referenced table's index and becomes `ref_constraint`, never an implicit link);
+  MySQL/MariaDB `PRIMARY` and every unique index (`TABLE_CONSTRAINTS` lists each as a `UNIQUE`
+  constraint of the same name, so both a key and its implicit index are emitted); SQLite
+  autoindexes of `origin` `pk` and `u`. The InnoDB FK-created index is implicit only under
+  `mysql::FkIndexRule::NamedAfterConstraint` (a non-unique index named like an FK of its table
+  whose leading columns are the FK's); the default `None` marks nothing, so DDL shows an
+  explicit index MySQL accepts. Task 17's probe picks the rule.
+- **PostgreSQL keys** take `INCLUDE`, `indnullsnotdistinct` and the per-part order from their
+  backing index. `NOT VALID` constraints and invalid indexes get `ObjFlags::INVALID`.
+  Exclusion constraints are `Props::Check` with the raw `pg_get_constraintdef` text (the
+  operators included, as the DDL IR's `ConstraintBody::Exclusion { raw }` wants); an operator
+  count that differs from the key's is broken. `contype` `t` and `n` are not assembled.
+- **MySQL/MariaDB.** Key parts arrive one row each and are grouped by `(table, index)` in
+  `SEQ_IN_INDEX` order; a gap or repeat is a missing part (broken). `COLLATION = 'D'` is
+  descending, as the server reports it (F9). FK columns group by `(table, constraint)` in
+  `ORDINAL_POSITION` order, referenced columns by position; `UNIQUE_CONSTRAINT_NAME` is the
+  `ref_constraint` (an index of the referenced table). CHECK clauses join by name on MySQL
+  (unique per schema) and by `(TABLE_NAME, CONSTRAINT_NAME)` on MariaDB; a check with no single
+  matching clause is kept, broken, with an empty expression. `PRIMARY` is flagged
+  `SERVER_GENERATED_NAME` (the server's own name).
+- **SQLite names.** The primary key is `<table>_pk` and each foreign key `<table>_fk<n>` (`n`
+  its declaration position: SQLite numbers `id` from the last declared, checked on SQLite
+  3.51), all flagged `SERVER_GENERATED_NAME`, so DDL never emits them. Deviation from the
+  plan's "FKs with no name": sibling FKs with one empty name share an identity, and a re-read
+  matched sibling by sibling keeps only the last (merge edge 12), dropping real FKs; a per-table
+  position number is the smallest distinct name. A `to` of NULL references the parent's primary
+  key and leaves `target_columns` empty (not broken).
+- **Existence and order.** An object exists when its own catalog row does; part rows without
+  one are ignored (the next pass reads both). Output is sorted by table, then name, kind and
+  server id, whatever the row order.
