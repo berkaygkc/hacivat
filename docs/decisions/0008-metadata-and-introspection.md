@@ -233,3 +233,20 @@ update` is never run plain); `minicat check` re-encodes, so a different libzstd 
   trait whose methods call `Self::new`), `MetaQuery` inside a macro invocation's brackets
   (`mk!(MetaQuery)` with `$t::new` in the macro), and the raw identifier `MetaQuery::r#new`
   (the tokenizer reads `r#ident` as `ident`, and `br#"…"#`/`cr"…"` as strings).
+
+**Fix round 3 (re-review 2).**
+
+- *I-R4.* `MetaQueryOnlyFromPacks` refuses **any associated-item access on `MetaQuery`** outside
+  `hacivat-session/src/meta.rs`, `hacivat-introspect/src/pack/**` and a crate's `tests/`: the
+  segment `MetaQuery`, then optional generic arguments (one balanced `<…>`, with or without a
+  leading `::`), then optionally the `>` that closes a qualified path (a `<` that follows no path
+  segment), then `::` and any item. `MetaQuery::<'_>::new`, the spaced turbofish,
+  `MetaQuery::<>::new`, `<MetaQuery<'_>>::new` and `MetaQuery::CONST` are refused; type
+  positions (`&MetaQuery`, `Vec<MetaQuery>`, `Vec::<MetaQuery>::new()`, `q: MetaQuery`,
+  `-> impl Iterator<Item = &MetaQuery>`, `impl Into<MetaQuery>`) stay legal.
+- *m-R2-2.* `impl` counts as an impl-block header only after none, `}`, `;`, `]`, `{`, `pub`,
+  `unsafe` or `default`; `impl Trait` in return or argument position is a type.
+- *I-R3.* `path = "…"` inside `#[cfg_attr(…)]` / `#![cfg_attr(…)]`, at any nesting, is a
+  `#[path]` target (followed, and refused when it leaves `src/`).
+- *m-R2-1.* `IntrospectNotExec` also refuses any declared `hacivat-results` or `hacivat-exec`
+  dependency of `hacivat-introspect` (any kind, optional or not).

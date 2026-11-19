@@ -784,6 +784,15 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
                     add(name, Rule::IntrospectNotExec, vec![RESULTS.into()]);
                 }
             }
+            // Fix round 3 (m-R2-1): any declared edge too, optional or not, of any kind, so a
+            // dependency behind a feature nothing turns on (no resolve edge) is seen.
+            for d in root
+                .dependencies
+                .iter()
+                .filter(|d| d.name == RESULTS || d.name == EXEC)
+            {
+                add(name, Rule::IntrospectNotExec, vec![d.name.clone()]);
+            }
         }
 
         if PRODUCT_CRATES.contains(&name)
@@ -1074,23 +1083,97 @@ fn tok_punct(t: &[SrcTok], i: usize, p: char) -> bool {
     t.get(i) == Some(&SrcTok::Punct(p))
 }
 
-/// Whether the tokens build a `MetaQuery` or open a way to: `MetaQuery::new` (also
-/// `MetaQuery::r#new`), `<…MetaQuery>::new`, an alias (`MetaQuery as X`, `type X =
-/// …MetaQuery…;`), any `impl` header naming `MetaQuery` (inherent, or a local trait whose
-/// methods may call `Self::new`), or `MetaQuery` inside a macro invocation's brackets
-/// (`mk!(MetaQuery)` with `$t::new` in the macro; fix round 2, I-R2).
+/// The index just past the balanced `<…>` group that opens at `open` (`t[open]` is `<`), or
+/// `t.len()` when it never closes. A `>` of `->` or `=>` is not a bracket.
+fn skip_angle(t: &[SrcTok], open: usize) -> usize {
+    let mut depth = 0usize;
+    for k in open..t.len() {
+        if tok_punct(t, k, '<') {
+            depth += 1;
+        } else if tok_punct(t, k, '>')
+            && !(k > 0 && (tok_punct(t, k - 1, '-') || tok_punct(t, k - 1, '=')))
+        {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return k + 1;
+            }
+        }
+    }
+    t.len()
+}
+
+/// The `<` that the `>` at `close` closes, walking back (a `>` of `->`/`=>` is not a bracket).
+fn matching_open_angle(t: &[SrcTok], close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for k in (0..=close).rev() {
+        if tok_punct(t, k, '>')
+            && !(k > 0 && (tok_punct(t, k - 1, '-') || tok_punct(t, k - 1, '=')))
+        {
+            depth += 1;
+        } else if tok_punct(t, k, '<') {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(k);
+            }
+        }
+    }
+    None
+}
+
+/// Whether the `MetaQuery` segment at `i` is followed by an associated-item access: optional
+/// generic arguments (`<…>` or `::<…>`), then optionally the `>` that closes a **qualified**
+/// path (`<…MetaQuery<…>>`; not the `>` of generic arguments such as `Vec<MetaQuery>`), then
+/// `::` (fix round 3, I-R4: any `::item`, not only `new`).
+fn meta_query_item_access(t: &[SrcTok], i: usize) -> bool {
+    let mut j = i + 1;
+    if tok_punct(t, j, ':') && tok_punct(t, j + 1, ':') && tok_punct(t, j + 2, '<') {
+        j = skip_angle(t, j + 2);
+    } else if tok_punct(t, j, '<') {
+        j = skip_angle(t, j);
+    }
+    if tok_punct(t, j, '>') {
+        // A qualified path's `<` follows no path segment: not an identifier, not `::`, not `>`.
+        let qualified = matching_open_angle(t, j).is_some_and(|open| {
+            open == 0
+                || !(matches!(t.get(open - 1), Some(SrcTok::Ident(_)))
+                    || tok_punct(t, open - 1, ':')
+                    || tok_punct(t, open - 1, '>'))
+        });
+        if !qualified {
+            return false;
+        }
+        j += 1;
+    }
+    tok_punct(t, j, ':') && tok_punct(t, j + 1, ':')
+}
+
+/// Whether the `impl` at `i` starts an impl block (an item), not `impl Trait` in a type
+/// position (`-> impl Iterator<…>`, `q: impl Into<…>`; fix round 3, m-R2-2): the previous
+/// token is none, `}`, `;`, `]`, `{` or `pub`/`unsafe`/`default`.
+fn impl_item_header(t: &[SrcTok], i: usize) -> bool {
+    i == 0
+        || ['}', ';', ']', '{'].iter().any(|p| tok_punct(t, i - 1, *p))
+        || ["pub", "unsafe", "default"]
+            .iter()
+            .any(|k| tok_ident(t, i - 1, k))
+}
+
+/// Whether the tokens build a `MetaQuery` or open a way to:
+/// - any associated-item access on `MetaQuery` (`MetaQuery::new`, `MetaQuery::r#new`,
+///   `MetaQuery::<'_>::new`, `<…MetaQuery<'_>>::new`, `MetaQuery::OTHER`; I-R4);
+/// - an alias (`MetaQuery as X`, `type X = …MetaQuery…;`);
+/// - an impl block whose header names `MetaQuery` (inherent, or a local trait whose methods may
+///   call `Self::new`; `impl Trait` in a type position is not a header, m-R2-2);
+/// - `MetaQuery` inside a macro invocation's brackets (`mk!(MetaQuery)` with `$t::new`).
+///
+/// Type positions stay legal: `&MetaQuery`, `Vec<MetaQuery>`, `q: MetaQuery`,
+/// `-> impl Iterator<Item = &MetaQuery>`, `impl Into<MetaQuery>`.
 fn builds_meta_query(t: &[SrcTok]) -> bool {
     let names_it = |range: &[SrcTok]| range.iter().any(|x| *x == SrcTok::Ident(META_QUERY.into()));
     (0..t.len()).any(|i| {
         if tok_ident(t, i, META_QUERY) {
-            let j = if tok_punct(t, i + 1, '>') {
-                i + 2
-            } else {
-                i + 1
-            };
-            (tok_punct(t, j, ':') && tok_punct(t, j + 1, ':') && tok_ident(t, j + 2, "new"))
-                || tok_ident(t, i + 1, "as")
-        } else if tok_ident(t, i, "type") || tok_ident(t, i, "impl") {
+            meta_query_item_access(t, i) || tok_ident(t, i + 1, "as")
+        } else if tok_ident(t, i, "type") || (tok_ident(t, i, "impl") && impl_item_header(t, i)) {
             let header: Vec<SrcTok> = t[i + 1..]
                 .iter()
                 .take_while(|x| **x != SrcTok::Punct(';') && **x != SrcTok::Punct('{'))
@@ -1131,7 +1214,8 @@ fn names_hold_counts(t: &[SrcTok]) -> bool {
     t.iter().any(|x| *x == SrcTok::Ident(HOLD_COUNTS.into()))
 }
 
-/// The `#[path = "…"]` and literal `include!("…")` targets of `t`.
+/// The `#[path = "…"]` targets (also `path = "…"` inside `#[cfg_attr(…)]` at any nesting, fix
+/// round 3, I-R3) and the literal `include!("…")` targets of `t`.
 fn module_targets(t: &[SrcTok]) -> (Vec<String>, Vec<String>) {
     let mut paths = Vec::new();
     let mut includes = Vec::new();
@@ -1143,6 +1227,34 @@ fn module_targets(t: &[SrcTok]) -> (Vec<String>, Vec<String>) {
             && let Some(SrcTok::Str(p)) = t.get(i + 4)
         {
             paths.push(p.clone());
+        }
+        // `#[cfg_attr(…)]` or `#![cfg_attr(…)]`: every `path = "…"` inside its parentheses.
+        let at = if tok_punct(t, i + 1, '!') {
+            i + 2
+        } else {
+            i + 1
+        };
+        if tok_punct(t, i, '#')
+            && tok_punct(t, at, '[')
+            && tok_ident(t, at + 1, "cfg_attr")
+            && tok_punct(t, at + 2, '(')
+        {
+            let mut depth = 0usize;
+            for k in at + 2..t.len() {
+                if tok_punct(t, k, '(') {
+                    depth += 1;
+                } else if tok_punct(t, k, ')') {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                } else if tok_ident(t, k, "path")
+                    && tok_punct(t, k + 1, '=')
+                    && let Some(SrcTok::Str(p)) = t.get(k + 2)
+                {
+                    paths.push(p.clone());
+                }
+            }
         }
         if tok_ident(t, i, "include")
             && tok_punct(t, i + 1, '!')
@@ -3070,5 +3182,90 @@ mod tests {
         };
         assert_eq!(walk(&[]), None);
         assert!(walk(&["default"]).is_some());
+    }
+
+    // ## m4-t01a-model (fix round 3): re-review 2 and its addendum.
+
+    /// I-R4: generic arguments between `MetaQuery` and `::new` (the turbofish and the
+    /// qualified-path forms), one finding each.
+    #[test]
+    fn meta_query_turbofish_and_generic_forms_are_refused() {
+        for form in [
+            "fn f(s: String) { let _ = MetaQuery::<'_>::new(s, vec![]); }\n",
+            "fn f(s: String) { let _ = MetaQuery :: < '_ > :: new(s, vec![]); }\n",
+            "fn f(s: String) { let _ = MetaQuery::<>::new(s, vec![]); }\n",
+            "fn f(s: String) { let _ = <MetaQuery<'_>>::new(s, vec![]); }\n",
+            "fn f(s: String) { let _ = <hacivat_session::meta::MetaQuery>::joinable(s); }\n",
+            "fn f() { let _ = MetaQuery::DEFAULT; }\n",
+        ] {
+            let v = meta_query_findings(&[(ENGINE, form)]);
+            assert_eq!(names(&v), ["hacivat-introspect"], "{form}");
+        }
+    }
+
+    /// I-R4 and m-R2-2: `MetaQuery` in type positions, and `impl Trait` in return and argument
+    /// position, are legal.
+    #[test]
+    fn meta_query_in_type_positions_is_allowed() {
+        let v = meta_query_findings(&[(
+            ENGINE,
+            "use hacivat_session::meta::MetaQuery;\n\
+             fn a(q: &MetaQuery) -> usize { 0 }\n\
+             fn b(v: Vec<MetaQuery>) -> Vec<MetaQuery> { v }\n\
+             fn c(q: MetaQuery) -> Option<MetaQuery> { Some(q) }\n\
+             fn qs(v: &[MetaQuery]) -> impl Iterator<Item = &MetaQuery> { v.iter() }\n\
+             fn one(q: impl Into<MetaQuery>) -> MetaQuery { q.into() }\n\
+             fn d() -> Vec<MetaQuery> { Vec::<MetaQuery>::new() }\n\
+             fn e() -> Vec<MetaQuery> { Vec::new() }\n\
+             struct S<'a> { q: &'a MetaQuery, m: std::collections::HashMap<String, Vec<MetaQuery>> }\n\
+             fn g(x: Box<dyn Fn(&MetaQuery) -> bool>) {}\n",
+        )]);
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    /// I-R3 / H13: `path = "…"` inside `#[cfg_attr(…)]` (nested too) is a `#[path]` target.
+    #[test]
+    fn meta_query_through_cfg_attr_path_into_tests_is_refused() {
+        for attr in [
+            "#[cfg_attr(feature = \"session\", path = \"../tests/evil_impl.rs\")]",
+            "#[cfg_attr(all(), cfg_attr(unix, path = \"../tests/evil_impl.rs\"))]",
+        ] {
+            let v = meta_query_findings(&[
+                (
+                    "crates/core/hacivat-introspect/src/filter.rs",
+                    &format!("{attr}\nmod evil;\n"),
+                ),
+                (
+                    "crates/core/hacivat-introspect/tests/evil_impl.rs",
+                    "pub fn q(s: String) -> MetaQuery { MetaQuery::new(s, vec![]) }\n",
+                ),
+            ]);
+            let via: Vec<&str> = v.iter().map(|x| x.via[0].as_str()).collect();
+            assert_eq!(
+                via,
+                [
+                    "crates/core/hacivat-introspect/src/filter.rs",
+                    "crates/core/hacivat-introspect/src/filter.rs: #[path] outside src/ crates/core/hacivat-introspect/tests/evil_impl.rs",
+                ],
+                "{attr}"
+            );
+        }
+    }
+
+    /// m-R2-1 / H12: an optional `hacivat-results` or `hacivat-exec` behind a feature nothing
+    /// turns on (no resolve edge).
+    #[test]
+    fn introspect_dormant_optional_results_or_exec_is_refused() {
+        for bad in ["hacivat-results", "hacivat-exec"] {
+            let item = format!("dep:{bad}");
+            let md = without_resolve_edges(metadata(vec![with_features(
+                member("hacivat-introspect", "crates/core", vec![optional(bad)]),
+                &[("exec", &[item.as_str()])],
+            )]));
+            let v = for_crate(&md, "hacivat-introspect");
+            assert_eq!(v.len(), 1, "{bad}: {v:?}");
+            assert_eq!(v[0].rule, Rule::IntrospectNotExec);
+            assert_eq!(v[0].via, [bad]);
+        }
     }
 }
