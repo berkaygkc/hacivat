@@ -1255,3 +1255,111 @@ new.
   `CatalogKey` can race (A-m9/B-M7) → Task 15 creates the key once, under the hub. Task 15
   never opens a sensitive profile with `Encryption::None` (now also refused by the store).
   The `model-cache-write-failed` message → Task 24.
+
+## m4-t15 — engine and hub
+
+- **One actor per profile** (`engine/scheduler.rs`), spawned on the runtime the config names
+  (the `CoreRuntime`), is the catalog's only writer: it takes the `Publisher`, so a second
+  writer cannot exist. Workers (`engine/work.rs`) do the I/O and the merge (on the blocking
+  pool) and send the answer back; only the actor publishes. Every `IntroHandle` method sends a
+  message (or reads the level policy's lock, which no I/O holds) and answers a
+  `RefreshTicket`: nothing of the engine runs on a GPUI thread.
+- **Tasks and keys.** `ScopeRefresh`; namespace passes (`Brief`, `Incremental`, `Full`; an
+  `Incremental` without a watermark or capability runs `Full`); `Fragment` (also `Elevate` and
+  the per-object children read); `CheckState`. One task per namespace at a time (and one scope
+  refresh), at most `EngineLimits::workers` (2) at once. Queued tasks of one namespace
+  coalesce: one pass with the stronger mode and the higher level, one fragment with the union
+  of the keys (fragments wait 50 ms for company, so a burst publishes once). A **load**
+  (expand, children, elevate, a lookup's request) joins a running task that already reads
+  what it wants; a **refresh** never does (it queues a new pass after the running one, so a
+  DDL that happened during the running pass is seen). Priorities: user > completion >
+  background > periodic.
+- **Tickets.** A ticket resolves with the generation of the publish that holds its result, or
+  the current generation when the catalog already held it (a satisfied load, nothing pending
+  to confirm). Dropping a ticket never cancels the task; `cancel(ns)` and `shutdown` do, and
+  then nothing of the task is published. An expansion of an out-of-scope namespace, and a
+  result for a namespace that left the scope meanwhile, answer `Cancelled`. A `check_state`
+  re-reads what changed or was dropped and resolves when those fragments are published
+  (recording freshness itself is Task 22's).
+- **Atomic publish and states.** A pass is merged whole and published with
+  `publish_with_delta` in one step: the arena (a unique `Arc`, moved, never copied), the
+  namespace's state, the `Children` states. A kind whose existence query failed makes the
+  namespace `Partial { reason }` (a lookup then answers `Unknown(Failed)` for a miss, never
+  `Missing`) and its `Children { root, kind }` container `Failed`; a kind that reads again is
+  marked `Loaded`. A failed task publishes nothing, except `Failed` for a namespace with no
+  previous state (no arena; `NotLoaded` or `Failed` before). A fragment never sets the
+  namespace's state, and keeps the namespace's watermark and load time (the merge takes both
+  from the result; a fragment read some objects, not the namespace).
+- **Levels.** `LevelPolicy` holds D-038's thresholds, the overrides (a pill on a database
+  reaches its schemas; a schema's own wins) and the back-pressure lowering: the second
+  timeout of a namespace lowers its auto level one step (`EngineEvent::LevelLowered`, the
+  `intro-hint-level-lowered` hint); an override is never lowered. The merge never lowers a
+  level, so the published `LoadState::Loaded.level` is the pass's level when the merge reports
+  objects re-read below the namespace's (`below_level`). `IntroHandle::level_for` gives the
+  pills (T20) the effective level and its source; a pill change re-reads every loaded
+  namespace below it that is now under its level.
+- **Bulk policy.** `load_children(key)` answers at once when the namespace holds `key` at
+  `Structure`; else one fragment of `key` at `Structure`, or one bulk pass (`Full` at
+  `max(Structure, auto)`) when the namespace has fewer than 2,000 relations or ≥ 3 distinct
+  objects were asked within 500 ms; the bulk pass absorbs a queued per-object read.
+- **On connect.** The cached namespaces are published stale when the engine starts (before
+  `ensure` answers). `on_connect` runs the scope refresh, then the current namespace's
+  `Incremental` pass if it is cached, else `Brief` then `Full` at its auto level (skipped when
+  the auto level is `Names`); other namespaces load on first expansion (`expand`: names first,
+  then the auto level; a stale cached one is validated incrementally).
+- **Scope refresh.** Every listed namespace in scope without a state gets `NotLoaded` (so a
+  lookup knows it exists), every one out of scope is removed and marked `OutOfScope`, a
+  namespace the server no longer lists is removed (`EngineEvent::NamespaceDropped`, not
+  guarded, R-M4-22), and `ContainerKey::schema_list` is set `Loaded` (PostgreSQL: per database
+  with listed schemas; elsewhere the server's) after each refresh (T9 carry). The current
+  namespace is what the empty pattern (`@:@`) selects.
+- **Follow-ups.** The merge's `report.fragments` (a child whose parent was not placed, edge 4;
+  an object only the existence set lists) and the parent of every identity rename (T10 M-2: a
+  half re-read name swap heals there; a top-level rename re-reads the namespace) are re-read
+  at background priority. A follow-up never schedules another.
+- **Retries.** A lost connection restarts the task once from the beginning (edge 5); a
+  `CatalogRace` is retried once (`EngineEvent::CatalogRaceRetried`, log only). Each attempt
+  takes its own `MetaConn` and drops it before the merge (it holds a budget slot; T5 concern
+  1). `Busy` (a single-connection profile in a user transaction) is asked again every
+  `busy_retry` until idle or cancelled (edge 10).
+- **Mass-deletion guard.** A guarded merge publishes nothing of the pass: the namespace is
+  marked stale (`Loaded { stale: true }`) and `Publisher::announce_pending_confirmation` is
+  called, for a user or a background trigger alike (the UI asks for a user refresh, shows the
+  badge for a background one). `confirm_pending(ns, true)` publishes the held merge; `false`
+  re-merges the kept result with `Deletions::Suppress`. A held merge whose namespace changed
+  since is dropped. The result is kept (cloned) only when the cached namespace holds at least
+  `guard_min_objects` top-level objects, the only case the guard can fire.
+- **Persistence.** Every namespace a publish puts is offered to Task 11's `SaveDebouncer`; due
+  saves and removals run on the blocking pool; `shutdown` writes the pending ones before
+  `closed()` resolves. A full disk raises `EngineEvent::CacheWriteFailed` once per store.
+- **Periodic validation** (R-M4-20): every `validate_every`, an incremental pass of each loaded
+  in-scope namespace at periodic priority, skipped while `MetaSource::user_in_transaction`
+  (a single-connection profile whose user holds a transaction). Task 22 replaces the body
+  (named lines `// ## m4-t15-engine (validation tasks)` in `engine/scheduler.rs`).
+- **Filters** (T12 carries). The introspector seam carries no filter, so the engine applies the
+  scope filter to every result on the client before the merge (changed objects and existence
+  identities alike, so the merge neither stores a filtered object nor asks for a fragment of
+  it); never inside a system namespace. `ScopeFilterAdapter` is the lookups' `ScopeFilter`.
+  `bounded_pushdown` caps a pushed predicate at 16 runs per section (one query per run): the
+  per-profile total of T12's per-call cap. The engine itself pushes nothing in M4.
+- **The hub.** `ensure` makes a profile's catalog once (a per-profile lock: concurrent callers
+  share one making). `catalog_sensitive`: `SecretStore::catalog_key(profile, true)` on the
+  blocking pool, here and only here (so two first-time creators never race, T11 carry); a
+  refused or unavailable keyring makes the profile memory-only (`CacheMode::MemoryOnly`,
+  `KeyringUnavailable`), never `Encryption::None`. Any cache open error is memory-only too.
+  `get` and `row_key` read a map only (no file, no keyring). Metadata connections come only
+  from `SessionManager::meta_conn` with a spec naming the hub's own profile, which `meta_conn`
+  refuses on another profile's manager (T1c review m-B2). Defaults until the app forwards the
+  profile's own: the R-M4-14 scope, the profile's database as current (PostgreSQL's current
+  schema comes from the session through `set_current`), D-038's levels, R-M4-20's interval.
+- **Seam changes.** `IntroHandle` gains `ready`, `load_children`, `set_current`, `level_for`,
+  `events`, `lookup_hooks`, `cancel`, `closed`; `CatalogHub` gains `new_on`, `with_limits`,
+  `system`; `ProfileCatalog` gains `cache: CacheMode`; `HubError` gains `NoRuntime` (a hub
+  made outside a runtime). `CatalogHub::new` keeps its signature and takes the current
+  runtime. `IntroHandle::detached` stays (a catalog with no engine, every request
+  `NotImplemented`). Named exception: `tests/seams.rs` (T1c), whose hub stubs expected
+  `NotImplemented` from requests that now reach the engine (fenced `// ## m4-t15-engine`).
+- **Test clock.** The workspace's `tokio` dev-dependency of this crate has no `test-util`
+  feature (manifests are Task 1a's), so the plan's `start_paused` tests wait on conditions
+  instead: counters of the fake metadata source (connection attempts, validation rounds) and
+  millisecond intervals.
