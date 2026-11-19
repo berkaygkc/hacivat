@@ -885,3 +885,60 @@ M4 Task 10 fills the existence-diff merge, the catalog delta and the mass-deleti
     cache the first fold twin takes the match and the others are dropped.
   - A dropped object is always named by its key in the previous generation, even under a
     parent renamed in the same delta.
+
+## m4-t12 — scope and filters
+
+M4 Task 12 fills `hacivat-introspect::{scope, filter, glob}` (alg/02 HV-INTRO-02, -03, -14;
+R-M4-3, -7, -14, -41; R-W1-7). The three modules build without the `session` feature; the
+`fuzz/meta` target `scope_pattern` fuzzes both grammars.
+
+- **Scope grammar** as alg/02 HV-INTRO-02, with these readings:
+  - a bare name may not hold `@` or `*` either (`app_*` is an error at the `*`, not a schema
+    literally named `app_*`; quote it). The scope grammar has no globs.
+  - `*` and `{regex}` never select a **system** namespace (`NsInfo::system`): the default
+    PostgreSQL scope `@:*` (R-M4-14) must not introspect `pg_catalog` live (R-M4-6). A name
+    or `@` selects one.
+  - A PostgreSQL database-only clause is `db:@`: the schema named like the current one.
+  - The implicit `@:@` is part of `select` only when the server lists it;
+    `select_explicit` is the pattern alone (edge 9: resolvable, not shown).
+  - Names compare through `match_key` and `FoldRule`; where `match_key` answers
+    `ServerDependent` (R-M4-41) only the exact text matches. `CurrentCtx` gains
+    `ident: Option<IdentCtx>` for `lower_case_table_names`.
+  - A misplaced `{` that never closes is `UnclosedBrace` at the brace (`db{1:x` → 3).
+    `ScopePattern` equality is dialect + syntax tree; parse warnings (edge 11
+    `DbTermIgnored`) are data for Task 20's editor, which adds their copy.
+- **Filter grammar** as alg/02 HV-INTRO-03. Kind tokens are `ObjectKind` ids (`_` for `-`)
+  plus `routine`/`function`/`procedure` (functions, procedures, aggregates), `mview`, and
+  `table` covering partitions; a token the dialect's kind schema lacks, or any `word:` prefix
+  that is not a kind, is `UnknownKind`. Items are trimmed. `routine:sig:` items match a
+  signature given to `matches_signature`; `matches` skips them. `excludes(kind, name)` is the
+  `ScopeFilter` answer (unsure → `true`; a view filter → `false`); `applies_to` keeps scope
+  filters off system namespaces (edge 10).
+- **Case.** Literals, globs and regexes follow `FoldRule::for_names` for the kind's name class
+  (`with_ident` sets `lower_case_table_names`): exact, or **ASCII**-caseless. Globs translate
+  ASCII letters to `[aA]`; a user regex is rewritten the same way (`glob::ascii_caseless`:
+  escapes, group heads, counted repetitions and ASCII classes untouched; class letters and
+  plain ranges gain their other case in a nested class). The `regex` crate's own `(?i)` folds
+  Unicode (`k` ↔ U+212A), which the server rule does not; it is only the fallback for text the
+  rewrite does not follow (a verbose-mode comment holding `[`). Class escapes (`\p{Lu}`) stay
+  case-sensitive (documented limit).
+- **Regexes** are compiled once, at parse, with 1 MiB size limits, after compiling the text
+  alone (balanced groups), as `\A(?:…)\z`; a verbose-mode comment that swallows the suffix is
+  retried with a newline.
+- **Pushdown: binds only.** `SqlPredicate.sql_fragment` is the fixed pack text
+  `LIKE :name_like ESCAPE :like_escape`; `binds` holds one `LIKE` pattern per distinct
+  positive glob. Task 4's lexer refuses a backslash inside a literal (and MySQL would read
+  `'\'` as an open literal), so the escape character `\` travels as the `like_escape` bind
+  (`SqlPredicate::escape()`). Positive items are OR'ed, which no pack construct expresses
+  (a list bind is `<col> IN :[x]` only, R-W1-7), so a section runs **once per pattern**
+  (`SqlPredicate::runs()`), unioned like list-bind chunks; the fragment sits beside a list
+  bind as another top-level `AND` conjunct (tested through `DraftPack`). Eligibility:
+  scope role only; PostgreSQL exact classes (a non-ASCII pattern only on a UTF-8 server);
+  MySQL/MariaDB table and database classes, no character outside the BMP; SQLite ASCII
+  patterns; nothing on another dialect. None when any applicable positive item is a regex, a
+  signature item or `*`, when more than 200 apply, or when a pattern holds NUL.
+- **Carried.** Task 17: confirm `LIKE ? ESCAPE ?` prepares on MySQL 8.0/8.4 and MariaDB
+  (Inferred; no Docker in W2) and that `INFORMATION_SCHEMA` table names compare as this rule
+  assumes under `lower_case_table_names` 0/1/2. Task 16: `relname LIKE $n ESCAPE $m` resolves
+  in the `C` collation. Task 15/24: the `ScopeFilter` adapter keyed by namespace, warnings
+  shown by Task 20.

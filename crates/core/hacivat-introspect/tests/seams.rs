@@ -94,6 +94,8 @@ fn ctx(db: &str, schema: &str) -> CurrentCtx {
     CurrentCtx {
         database: Some(name(db)),
         schema: Some(name(schema)),
+        // ## m4-t12-scope (named exception): `CurrentCtx` carries the server's identifier rule.
+        ident: None,
     }
 }
 
@@ -157,12 +159,15 @@ fn stub_plan_refresh_widens_any_ddl_to_the_current_namespace() {
 
 #[test]
 fn stub_scope_selects_only_current() {
-    assert_eq!(
-        parse_scope("*:*", DialectId::Postgres)
+    // ## m4-t12-scope (named exception): the matcher landed. The empty pattern still selects
+    // only `@:@`; `*:*` now selects every listed user schema, never the system one (R-M4-14).
+    let scope = |p: &str| {
+        parse_scope(p, DialectId::Postgres)
             .unwrap()
-            .select(&infos(), &ctx("db", "public")),
-        set(["db.public"])
-    );
+            .select(&infos(), &ctx("db", "public"))
+    };
+    assert_eq!(scope(""), set(["db.public"]));
+    assert_eq!(scope("*:*"), set(["db.public", "db.app"]));
 }
 
 #[test]

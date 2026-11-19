@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc de0b2d1a294b2d475224cbf496b9c34d7ee9bd28781d6205c88edb971f6ca840 # shrinks to p = (MySql, " @:@", "@:@")
