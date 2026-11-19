@@ -293,3 +293,64 @@ Constraints, "No silent weakening"). Session-side seams are in ADR 0004 `m4-t01c
   `## m4-t01c-core` holds the 27 introspection messages alg/02 names (HV-INTRO-01..03, -05,
   -11..13, -15, -16) plus `intro-catalog-race-retried`. `model-cache-disabled-by-policy` and
   `ddl-warn-executable-comment` are T1a's already.
+
+## m4-t04 — query packs
+
+M4 Task 4 fills `hacivat-introspect::pack` (`mod`, `parse`, `render`, `lint`; alg/02
+HV-INTRO-04, R-M4-3, -7, -29, -32, -37). The packs themselves stay header-only until Tasks
+16–18.
+
+- **Grammar.** Line-oriented, as alg/02 HV-INTRO-04: `--- name: <Section> ---`,
+  `--- returns: <col type, …> ---` (required; types `text bool i16 i32 i64 u32 u64 f64 bytes
+  timestamp`), the flags `--- joinable ---` and `--- show-create ---` (before the first SQL
+  line), `--# if/elif/else/end` nested at most 4 deep (a parse error, not only a lint, so the
+  tree a fuzzer builds stays shallow). Conditions are a closed language over `version` (an
+  integer: no `12.0` form), `mode` (`full incremental brief system`), `level`, `flavor` (a
+  `DbmsKind` id) and `flag(mariadb|joined)` with `and`/`or`/`not`/parentheses (at most 8 deep).
+  Files merge in byte order of their names, whatever order the caller passes.
+- **Fail-closed lexing, so the lexer and the server never disagree about what is code.**
+  Literals, quoted identifiers and block comments close on their own line; a backslash in a
+  literal, a nested `/*`, a raw placeholder (`$` on PostgreSQL and SQLite, `?` on MySQL and
+  SQLite, `@` and `[` on SQLite), a control character other than the tab (a bare `\r` ends a
+  PostgreSQL `--` comment), `;`, a MySQL `#` comment, a MySQL `--` not followed by a
+  space, and `#{` inside a literal or comment are parse errors. `::` is never a bind.
+- **List binds** (R-M4-3) render `(…)` after `IN`, written `<operand> IN :[name]` on one line;
+  `NOT IN :[name]` is refused (a chunked `NOT IN` matches what another chunk excludes), as is a
+  second list name in one section. Chunks hold at most `MAX_IN_LIST` = 1,000 items; an empty
+  list renders no query, but every scalar bind is still checked. Rows of chunks are
+  concatenated: a pack author keeps a list bind in a plain conjunctive filter (no aggregate over
+  it, no `OR` beside it); the lexer cannot prove that, the section's review does.
+- **Macros** are `Macro::{MaxInList, Ident}`. The plan's "catalog prefix" macro is **not**
+  written: no M4 dialect has a privilege-dependent catalog prefix (that is Oracle's
+  `ALL_`/`DBA_`), and PG packs must spell `pg_catalog.<name>` literally for the lint. It lands
+  with the first pack that needs one. `#{ident:<bind>}` (R-M4-37) renders only in a
+  `show-create` section, which only a MySQL/MariaDB pack may declare (elsewhere it is a lint
+  finding and the renderer refuses it), through `sql_ident::quote::quote(DialectId::MySql, …)`
+  with `QuoteCtx::default()` (MySQL identifiers are always backticked, T7); the renderer re-checks that the result is one backtick-quoted
+  identifier with every inner backtick doubled, and refuses NULL, empty and NUL names. A
+  `show-create` section holds no literal, comment, quoted identifier or bind, and each macro is
+  bounded by whitespace, `.`, `(`, `)` or `,` (two adjacent quoted names would read as one).
+- **No silent "no rows".** A context for which every SQL line is gated away answers
+  `RenderError::NoVariant`, never an empty `Vec` (alg/02 edge 8; F31).
+- **Joined connections** (R-M4-29): `PackFlags::JOINED` in the context refuses every section not
+  marked `joinable` (`RenderError::NotJoinable`); the `joinable` flag travels into
+  `RenderedQuery` and `MetaQuery`. T5's statement allowlist stays the primary runtime check.
+- **Feature split, refined.** Rendering is session-free (the `fuzz/meta` target `pack_parse`
+  parses, lints and renders without `hacivat-session`); only
+  `RenderedQuery::as_meta_query`, the single `MetaQuery::new` call outside `meta.rs`, is
+  `#[cfg(feature = "session")]` inside `pack::render`. `pack` re-exports `DialectId`,
+  `BindValue`, `LogicalType` and `Flavor` so the fuzz package needs no manifest change.
+- **Lint** (`lint(pack, dialect)`, every branch read): HV-INTRO-14 canonical spelling (PG
+  `pg_catalog`, `information_schema` and `pg_*` lower case and `pg_*` always qualified by
+  `pg_catalog.`; MySQL `INFORMATION_SCHEMA.<UPPER>` and lower-case `mysql.`,
+  `performance_schema.`, `sys.`; SQLite `sqlite_schema`, never `sqlite_master`); folding
+  (`lower(`, `upper(`, `lcase(`, `ucase(`, `ILIKE`, `COLLATE`, `~*`, `!~*`, `~~*`, `!~~*`
+  anywhere in code, not only on a name column: packs compare bound exact names); MySQL
+  `UPDATE_TIME`, `GROUP_CONCAT` and, added here, executable comments `/*!`, `/*M!`; PG
+  ordering comparisons on `age(…)` (R-M4-8); `txid_current` and `pg_current_xact_id` in every
+  dialect; `#{ident:…}` outside `show-create`; `--#`/`---` inside a literal.
+- **Variants.** `Pack::reachable_variants(section)` answers one context per distinct path
+  through the section's blocks (versions at every threshold and its neighbours, every mode and
+  level a condition names, the dialect's flavor plus every named one plus one unnamed family
+  member, `flag(mariadb)` tied to the flavor, `flag(joined)` only on joinable sections). A
+  property test checks it against a brute-force sweep.
