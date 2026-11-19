@@ -175,6 +175,26 @@ impl MetaConn {
         Err(MetaError::Unavailable)
     }
 
+    // ## m4-t01c-core (Part B)
+    /// A connection with no server behind it, for tests that must hand an introspector a
+    /// `MetaConn` (the seams test, Task 15's engine tests with `FakeIntrospector`). It can never
+    /// read: every snapshot answers [`MetaError::Unavailable`], and Task 5 must keep it inert
+    /// (no driver connection, no text accepted). Not for product code.
+    #[doc(hidden)]
+    pub fn offline(dbms: DbmsKind) -> MetaConn {
+        MetaConn {
+            dbms,
+            server: ServerInfo {
+                kind: dbms,
+                product: String::new(),
+                version: None,
+                raw_version: String::new(),
+                is_replica: None,
+            },
+            joined: false,
+        }
+    }
+
     /// Whether the connection's current transaction has an XID assigned
     /// (`pg_current_xact_id_if_assigned() IS NOT NULL`): the `#pg-canary` check of Task 5's
     /// tests.

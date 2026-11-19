@@ -1,0 +1,4 @@
+-- Hacivat query pack: SQLite, file 10-core (HV-INTRO-04, R-M4-32).
+-- Contents: schema list, sqlite_schema rows and the pragma passes (mode=ro, R-M4-38). Sections are written by Task 18 from the vendor documentation only
+-- (no third-party catalog SQL); the grammar is Task 4's (`--- name: <Section> ---`).
+-- M4 Task 1c: header only. This file defines no section yet.

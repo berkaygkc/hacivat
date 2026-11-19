@@ -192,9 +192,11 @@ pub fn is_valid_id(id: &str) -> bool {
     // patterns in `hacivat-core.ftl` (Task 4, P-M3b-T4-1).
     // ## m4-t01a-model: `model` (kind labels, cache notices) and `ddl` (generator options and
     // notices) in `hacivat-core.ftl` (M4 Task 1a; alg/02 HV-MODEL-01..03, alg/03 HV-DDL-07..11).
-    const PREFIXES: [&str; 15] = [
+    // ## m4-t01c-core: `intro` (introspection notices, alg/02 HV-INTRO-01..16) in
+    // `hacivat-core.ftl` (M4 Task 1c Part B; named exception).
+    const PREFIXES: [&str; 16] = [
         "cm", "hui", "hv", "hc", "kg", "ps", "pw", "pe", "db", "error", "exec", "cursor", "safety",
-        "model", "ddl",
+        "model", "ddl", "intro",
     ];
     let Some((prefix, rest)) = id.split_once('-') else {
         return false;
@@ -540,6 +542,8 @@ hv-ok = again
             // ## m4-t01a-model
             "model-kind-table",
             "ddl-opt-qualify-auto",
+            // ## m4-t01c-core
+            "intro-hint-level-lowered",
         ] {
             assert!(is_valid_id(ok), "{ok}");
         }

@@ -1597,3 +1597,126 @@ ddl-cat-drop = Drop
 ddl-cat-truncate = Truncate
 ddl-cat-server-definitions = Definitions provided by server
 ddl-cat-alter = Alter
+
+## m4-t01c-core
+
+# Introspection notices (alg/02 HV-INTRO-01..03, -05, -11..13, -15, -16). Codes travel from the
+# core; the text is chosen at the edge. Names are user data: the caller isolates them
+# (FSI/PDI) and never case-maps or translates them. Counts are Number arguments.
+
+# How long ago a namespace was read.
+# Variables:
+#   $ago (String) - the relative time, preformatted for the UI locale, e.g. "5 minutes ago".
+intro-freshness-loaded-ago = Loaded { $ago }
+# Why an object lookup has no answer: the namespace has not been read yet.
+intro-unknown-not-loaded = This object hasn't been read yet.
+# Why an object lookup has no answer: the namespace is outside the connection's scope.
+intro-unknown-out-of-scope = This object is outside the connection's scope, so it isn't read.
+# A lookup in loaded metadata found no object of that name.
+intro-missing-not-found = No object with this name is in the loaded metadata.
+# Back-pressure (HV-INTRO-01 step 7): reading a namespace timed out twice, so its automatic
+# level was lowered by one.
+# Variables:
+#   $name (String) - the namespace, e.g. "public".
+#   $level (String) - the new level, a selector: "names" or "structure".
+intro-hint-level-lowered = { $level ->
+        [names] Reading { $name } timed out twice, so it is now read by name only.
+       *[structure] Reading { $name } timed out twice, so it is now read without definitions.
+    }
+# The one-time prompt before a PostgreSQL scope that reads every database (HV-INTRO-02).
+# Variables:
+#   $count (Number) - how many databases the server lists, e.g. 12.
+intro-scope-all-databases-cost = { $count ->
+        [one] Reading { $count } database opens one more connection for it. Read it?
+       *[other] Reading all { $count } databases opens one more connection for each. Read them all?
+    }
+# A scope pattern that does not parse, at a character position (Unicode scalar values).
+# Variables:
+#   $column (Number) - the 1-based character position, e.g. 7.
+intro-scope-syntax-error = The pattern has an error at character { $column }.
+# Variables:
+#   $column (Number) - the 1-based character position, e.g. 7.
+intro-scope-err-unclosed-brace = The pattern has an error at character { $column }: a brace isn't closed.
+# Variables:
+#   $column (Number) - the 1-based character position, e.g. 7.
+intro-scope-err-bad-regex = The pattern has an error at character { $column }: the regular expression isn't valid.
+# `@` in a scope pattern when the current database or schema cannot be detected.
+intro-scope-current-unknown = The current database or schema couldn't be detected, so @ selects nothing.
+# Object filter errors (HV-INTRO-03). Kind words in the grammar are English tokens.
+# Variables:
+#   $item (String) - the filter item as typed, e.g. "tabel:orders".
+intro-filter-unknown-kind = { $item } doesn't name a kind of object.
+# Variables:
+#   $item (String) - the filter item as typed, e.g. "/a(/".
+intro-filter-bad-regex = { $item } isn't a valid regular expression.
+# Variables:
+#   $item (String) - the filter item as typed, e.g. "a[b".
+intro-filter-bad-glob = { $item } isn't a valid name pattern.
+# Why a namespace was read in full instead of only its changes (HV-INTRO-05, -07).
+# Variables:
+#   $reason (String) - the reason code, a selector: "no-watermark", "restart", "identity",
+#     "version", "standby", "wraparound", "mass-change" or "schema-rename".
+intro-full-reason = { $reason ->
+        [no-watermark] Read in full: there was no earlier read to compare with.
+        [restart] Read in full: the server restarted since the last read.
+        [identity] Read in full: this connection now reaches a different server or database.
+        [version] Read in full: the server's version changed.
+        [standby] Read in full: the server is a standby, where only full reads are reliable.
+        [wraparound] Read in full: too many transactions ran since the last read.
+        [mass-change] Read in full: a large part of the schema changed.
+       *[schema-rename] Read in full: a schema that other objects refer to was renamed.
+    }
+# Progress of an incremental read (determinate; repainted when the count changes).
+# Variables:
+#   $count (Number) - how many changed tables are being read, e.g. 3.
+intro-progress-tables-incremental = { $count ->
+        [one] Reading { $count } changed table…
+       *[other] Reading { $count } changed tables…
+    }
+# The mass-deletion guard (D-039, HV-INTRO-11).
+# Variables:
+#   $count (Number) - how many objects are no longer visible, e.g. 120.
+#   $schema (String) - the namespace, e.g. "public".
+intro-mass-drop-confirm = { $count ->
+        [one] { $count } object in { $schema } is no longer visible to this connection. Remove it from the cached metadata?
+       *[other] { $count } objects in { $schema } are no longer visible to this connection. Remove them from the cached metadata?
+    }
+# More than half of a namespace vanished in one pass: the login's privileges may have changed.
+# Variables:
+#   $schema (String) - the namespace, e.g. "public".
+intro-visibility-changed = Most objects in { $schema } are no longer visible to this connection. Its privileges may have changed.
+# Badge on a namespace the server changed after it was read.
+intro-stale-namespace-badge = out of date
+# Variables:
+#   $name (String) - the object, e.g. "orders".
+intro-stale-object = { $name } changed on the server since it was loaded.
+# Variables:
+#   $name (String) - the object, e.g. "orders".
+intro-dropped-object = { $name } no longer exists on the server.
+# An object whose definition refers to something that could not be resolved (kept, flagged).
+# Variables:
+#   $name (String) - the object, e.g. "orders_pk".
+intro-object-broken = { $name } refers to a column that couldn't be resolved.
+# Badge on the built-in objects read from a shipped system-catalog snapshot (HV-INTRO-16).
+# Variables:
+#   $version (String) - the server line the snapshot was made from, e.g. "17".
+intro-pre-introspected-badge = Built-in catalog (version { $version })
+# Refresh after DDL, "Ask" preference (HV-INTRO-12).
+# Variables:
+#   $count (Number) - how many objects changed, e.g. 3.
+intro-refresh-after-ddl-ask = { $count ->
+        [one] Refresh the database explorer to reflect { $count } changed object?
+       *[other] Refresh the database explorer to reflect { $count } changed objects?
+    }
+# A statement whose effects cannot be read in advance (dynamic SQL, DO, CALL, an executable
+# comment) refreshed the whole schema.
+intro-refresh-broad-dynamic-sql = The script ran SQL whose changes can't be read in advance, so the whole schema is being refreshed.
+# A list the server filtered with the object filter (HV-INTRO-03 pushdown).
+intro-remote-filtered-notice = The server filtered this list: objects that don't match the filter weren't read.
+# Debug-level: whether a non-ASCII name matches depends on the server (R-M4-41).
+intro-name-server-dependent = Whether this name matches depends on the server's settings.
+# Log only: a read failed because an object was dropped meanwhile, and was retried once
+# (PostgreSQL "cache lookup failed").
+# Variables:
+#   $schema (String) - the namespace, e.g. "public".
+intro-catalog-race-retried = An object in { $schema } was dropped while it was being read, so the read was retried.

@@ -1093,3 +1093,84 @@ ddl-cat-truncate = Boşalt
 ddl-cat-server-definitions = Sunucunun verdiği tanımlar
 # Review: PO
 ddl-cat-alter = Değiştir
+
+## m4-t01c-core
+
+# Review: PO
+intro-freshness-loaded-ago = { $ago } yüklendi
+# Review: PO
+intro-unknown-not-loaded = Bu nesne henüz okunmadı.
+# Review: PO
+intro-unknown-out-of-scope = Bu nesne bağlantının kapsamı dışında, bu yüzden okunmuyor.
+# Review: PO
+intro-missing-not-found = Yüklenen meta verilerde bu adda bir nesne yok.
+# Review: PO
+intro-hint-level-lowered = { $level ->
+        [names] { $name } okunurken zaman aşımı iki kez yaşandı; artık yalnızca adları okunuyor.
+       *[structure] { $name } okunurken zaman aşımı iki kez yaşandı; artık tanımları olmadan okunuyor.
+    }
+# Review: PO
+intro-scope-all-databases-cost = { $count ->
+        [one] { $count } veritabanını okumak onun için bir bağlantı daha açar. Okunsun mu?
+       *[other] { $count } veritabanının hepsini okumak her biri için bir bağlantı daha açar. Hepsi okunsun mu?
+    }
+# Review: PO
+intro-scope-syntax-error = Desende { $column }. karakterde bir hata var.
+# Review: PO
+intro-scope-err-unclosed-brace = Desende { $column }. karakterde bir hata var: bir süslü parantez kapatılmamış.
+# Review: PO
+intro-scope-err-bad-regex = Desende { $column }. karakterde bir hata var: düzenli ifade geçerli değil.
+# Review: PO
+intro-scope-current-unknown = Geçerli veritabanı ya da şema belirlenemedi, bu yüzden @ hiçbir şey seçmiyor.
+# Review: PO
+intro-filter-unknown-kind = { $item } bir nesne türü belirtmiyor.
+# Review: PO
+intro-filter-bad-regex = { $item } geçerli bir düzenli ifade değil.
+# Review: PO
+intro-filter-bad-glob = { $item } geçerli bir ad deseni değil.
+# Review: PO
+intro-full-reason = { $reason ->
+        [no-watermark] Tamamen okundu: karşılaştırılacak önceki bir okuma yoktu.
+        [restart] Tamamen okundu: sunucu son okumadan bu yana yeniden başladı.
+        [identity] Tamamen okundu: bu bağlantı artık başka bir sunucuya ya da veritabanına ulaşıyor.
+        [version] Tamamen okundu: sunucunun sürümü değişti.
+        [standby] Tamamen okundu: sunucu bir yedek sunucu; orada yalnızca tam okuma güvenilir.
+        [wraparound] Tamamen okundu: son okumadan bu yana çok fazla transaction çalıştı.
+        [mass-change] Tamamen okundu: şemanın büyük bir bölümü değişti.
+       *[schema-rename] Tamamen okundu: başka nesnelerin başvurduğu bir şemanın adı değişti.
+    }
+# Review: PO
+intro-progress-tables-incremental = { $count ->
+        [one] Değişen { $count } tablo okunuyor…
+       *[other] Değişen { $count } tablo okunuyor…
+    }
+# Review: PO
+intro-mass-drop-confirm = { $count ->
+        [one] { $schema } içindeki { $count } nesne artık bu bağlantıya görünmüyor. Önbellekteki meta verilerden kaldırılsın mı?
+       *[other] { $schema } içindeki { $count } nesne artık bu bağlantıya görünmüyor. Önbellekteki meta verilerden kaldırılsınlar mı?
+    }
+# Review: PO
+intro-visibility-changed = { $schema } içindeki nesnelerin çoğu artık bu bağlantıya görünmüyor. Bağlantının yetkileri değişmiş olabilir.
+# Review: PO
+intro-stale-namespace-badge = güncel değil
+# Review: PO
+intro-stale-object = { $name } yüklendiğinden beri sunucuda değişti.
+# Review: PO
+intro-dropped-object = { $name } artık sunucuda yok.
+# Review: PO
+intro-object-broken = { $name } çözümlenemeyen bir sütuna başvuruyor.
+# Review: PO
+intro-pre-introspected-badge = Yerleşik katalog (sürüm { $version })
+# Review: PO
+intro-refresh-after-ddl-ask = { $count ->
+        [one] Veritabanı gezgini değişen { $count } nesneyi gösterecek şekilde yenilensin mi?
+       *[other] Veritabanı gezgini değişen { $count } nesneyi gösterecek şekilde yenilensin mi?
+    }
+# Review: PO
+intro-refresh-broad-dynamic-sql = Betik, değişiklikleri önceden okunamayan SQL çalıştırdı; bu yüzden şemanın tamamı yenileniyor.
+# Review: PO
+intro-remote-filtered-notice = Bu listeyi sunucu süzdü: süzgeçle eşleşmeyen nesneler okunmadı.
+# Review: PO
+intro-name-server-dependent = Bu adın eşleşip eşleşmediği sunucunun ayarlarına bağlı.
+# Review: PO
+intro-catalog-race-retried = { $schema } içindeki bir nesne okunurken kaldırıldı; okuma yeniden denendi.

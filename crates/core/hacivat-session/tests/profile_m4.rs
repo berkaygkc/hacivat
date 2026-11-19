@@ -133,3 +133,12 @@ async fn meta_join_stub_is_unavailable() {
     // Joining sends nothing to the session's connection and opens no other.
     assert_eq!(fake.connect_calls(), connects);
 }
+
+// ## m4-t01c-core (Part B): the offline test connection can never read.
+#[tokio::test]
+async fn an_offline_meta_conn_reads_nothing() {
+    let mut c = MetaConn::offline(hacivat_proto::DbmsKind::Postgres);
+    assert_eq!(c.dbms(), hacivat_proto::DbmsKind::Postgres);
+    let got = c.begin_snapshot().await;
+    assert!(matches!(got, Err(MetaError::Unavailable)), "{got:?}");
+}
