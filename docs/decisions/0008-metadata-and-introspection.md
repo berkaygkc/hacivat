@@ -633,3 +633,153 @@ HV-INTRO-04, R-M4-3, -7, -29, -32, -37). The packs themselves stay header-only u
   - The re-review's probes R1–R9 are in `tests/hostile_t04_review.rs`, flipped to assert the
     fixes. **m11** (`Pack::parse` call sites in `pg/`, `mysql/`, `sqlite/` must take
     `include_str!` or a `const`) is carried to the T16–T18 reviews by the controller.
+
+## m4-t09 — snapshots and lookups
+
+M4 Task 9 fills the catalog, the tri-state `ModelView`, the resolver, the search paths, the
+negative cache and search (HV-MODEL-02). The bodies of `Catalog`, `publish` and
+`CatalogSnapshot` come from the model spike (`d86313b`), adapted to the T1a seam; its five
+catalog-level tests (deferred by Task 3) are in `tests/snapshot.rs`.
+
+- **Publish.** One writer (`Catalog::publisher` hands it out once). A publish clones the
+  current generation shallowly (`Arc::make_mut` on the namespace and state maps, only when a
+  change touches them), applies every change in order, stores once and then broadcasts. Any
+  error publishes and announces nothing. Untouched namespaces stay `Arc::ptr_eq`; so does the
+  states map when no state changes. An empty change list is a no-op that answers the current
+  generation. `Put` stamps the arena with the new generation: a unique `Arc` is moved, a
+  shared one is copied (by reference count for its objects) to be stamped, so the engine hands
+  over unique arenas. `Remove` also drops every state of the namespace's containers, and
+  accepts a namespace the catalog only lists by state. Publishes are serialized by a writer
+  mutex (never taken by readers); the store is a compare-and-swap whose failure is
+  `ModelError::NotTheWriter` (alg/02 edge 2's misuse guard).
+- **Events.** `publish` announces `Published` with an empty delta plus one `NamespaceReplaced`
+  per changed namespace; `publish_with_delta` announces the merge's delta (Task 10) alone.
+  `announce_pending_confirmation` sends R-M4-22's `PendingConfirmation` without a publish.
+  `pinned_generations` lists the generations still alive (alg/02 edge 1).
+- **Completeness.** A miss is a fact only in a namespace whose state is `Loaded` at
+  `Structure` or above with an arena. `Names` is never enough: which kinds a `Names` pass
+  reads completely (PostgreSQL indexes share the relations name space) is pinned by Tasks
+  16–18, so until then a miss at `Names` is `Unknown(NotLoaded)`. An arena without a state is
+  treated as not loaded. `Loading`, `Failed` and `Partial` answer hits from a cached arena and
+  `Unknown(Loading | Failed)` for misses. `OutOfScope` answers nothing, not even hits. Facet
+  states never affect object existence.
+- **Schema list.** `ContainerKey::schema_list(database)` (PostgreSQL: the database's schemas;
+  elsewhere the server's) marks the list of schemas as complete. With it `Loaded`, a schema
+  the catalog neither holds nor lists does not exist: a qualified name into it is `Missing`,
+  and a search-path entry naming it is skipped, as the server does (`$user` most often).
+  Without it both are `Unknown(NotLoaded)`. Task 15 sets it after each scope refresh.
+- **Lookups.** An unqualified name walks the search path; the first namespace with a hit is
+  `Found`, even when an earlier one is unknown (alg/02 step 5, "Found if any"). Until Task 26
+  serves `pg_catalog` from the system snapshot, a hit in `public` may in principle be shadowed
+  by a `pg_catalog` object of the same name; misses stay `Unknown(OutOfScope)` there. The
+  unknown reason is the first one along the path. A PostgreSQL `database.schema.name` naming
+  another database than the session's is `Unknown(NotLoaded)` (the server refuses
+  cross-database references). An empty path (MySQL with no current database) is
+  `Unknown(NotLoaded)`. Accounts are looked up in the server namespace.
+- **Search paths.** `SearchPath` gains `database` and `PathEntry { ns,
+  relations_and_types_only }`. `for_pg(database, setting, user, temp)` (the plan wrote
+  `for_pg(path, temp)`; the setting keeps `$user` and `pg_temp` as tokens, as
+  `SchemaCtx::search_path_setting` does): the temporary schema first unless the setting names
+  `pg_temp`, for relations and types only; `pg_catalog` first unless named; duplicates keep
+  their first place. `for_mysql(current)`, `for_sqlite(attached)` (`temp`, `main`, then the
+  attached in order), and `exact(database, entries)`.
+- **Hooks.** `LookupHooks` is shared by every view of a catalog. `on_unknown(ns)` fires once
+  per namespace per generation, only for a namespace the catalog lists (an arena or a state)
+  that is not loaded at a sufficient level; never for `Loading`, `Failed` or `OutOfScope`.
+  `on_missing_probe(ns, name)` fires at most once per namespace per 30 s, and only when the
+  lookup's answer is `Missing`. The callbacks run on the looking-up thread after the hooks'
+  lock is released; the lock is never taken on a hit.
+- **Scope filters.** `ScopeFilter::excludes(ns, kind, name)` lets the engine's adapter
+  (Task 24) say what the scope's object filters left unread; that turns a `Missing` (or a
+  complete children list) into `Unknown(OutOfScope)`. The view filter never reaches the view.
+- **No allocation on a hit.** A probe whose key is its own text (pinned rule, ASCII, nothing
+  to fold, within PostgreSQL's 63-byte cut) goes straight to the name index; the same family
+  and table-rule check as `match_named` is applied first. Both are checked against
+  `match_key`/`match_named` in debug builds and by a property test. `unsafe` is denied outside
+  the UI platform layer, so the perf test counts slow-path steps per thread
+  (`slow_lookups_on_this_thread`, `test-support`) instead of hooking the allocator.
+- **Resolver and reverse edges.** References resolve on demand: the longest listed namespace
+  prefix, then the kind's name index (or a walk of exact names for parent-scoped kinds), the
+  server id preferred among same-named hits. `fk_referencing` builds the reverse edges once per
+  generation; it needs the schema list and every in-scope schema at `Structure` (PostgreSQL:
+  only the target's database, as FKs never cross databases). Out-of-scope schemas are not part
+  of the answer (the plan's rule), and the snapshot cannot see object-level scope filters, so
+  M7's drop flows must combine it with the view's scope. `find_by_server_id` searches the
+  relation kinds of the database's schemas; `Missing` needs the schema list, every schema
+  complete and no scope filter.
+- **Generation-local ids.** `ObjId.ns` is the namespace's position in key order, from an
+  index built once per generation. The per-generation caches are ignored on a clone whose
+  public `namespaces` field was replaced.
+- **Search.** ASCII-caseless and locale-free; exact matches first, then prefix, then
+  substring; within each, namespace key order and arena order; at most `limit` hits kept while
+  scanning.
+- **Named exception.** `tests/seams.rs` `stub_merge_publishes_nothing` (T1a): its publish
+  assertion now uses a refused change list (an empty list is a no-op), fenced
+  `// ## m4-t09-snapshots`.
+- **Perf** (Apple silicon, release): a publish of one prebuilt namespace into 5,000 has a p95
+  of 0.10 ms (max 0.9 ms) over 200 publishes, so R-M4-2's trigger does not fire; a lookup hit
+  takes about 0.18 µs and leaves the allocation-free path zero times in 200,000 lookups.
+
+### m4-t09 fix round 1 (review: 1 Critical, 5 Important)
+
+- **C1. A miss is judged in the target's own schema.** `resolve`, `children` and
+  `fk_referencing` look in the longest *listed* prefix of a path, which can be the database
+  or server namespace when the target's schema is not listed. A miss there is now `Missing`
+  only when that namespace is the path's own schema namespace (PostgreSQL `[db, schema]`,
+  elsewhere `[schema]`), or when the schema list is `Loaded` and does not hold the schema.
+  Otherwise it is `Unknown(NotLoaded)`. A PostgreSQL path that only the server namespace
+  holds (another database) is never a fact. So an FK into a schema not yet cached (the state
+  every connect passes through, cached namespaces being published before the scope refresh)
+  never shows as broken.
+- **R-W2-6 (controller ruling; amends alg/02 HV-MODEL-02 step 5 "Found if any").** A walk
+  answers `Found` from a namespace only when every earlier entry for the group was a certain
+  miss. The first entry that cannot answer (out of scope, not listed while the list is
+  unknown, not loaded at `Structure`, loading, failed, a server-dependent probe, an unnamed
+  entry) stops the walk with its `Unknown` reason: the server could resolve the name there,
+  and a later hit may be the wrong object (then a wrong "unknown column" one level down).
+  **Cost:** more `Unknown` answers until the scopes load. On PostgreSQL every unqualified
+  lookup is `Unknown` until `pg_catalog` is complete, which Task 26's system layer provides
+  (or "Introspect live"). Qualified names are unaffected. Unqualified lookups have no M4
+  consumer.
+- **I2. Unknown session facts stay unknown.** `PathEntry.ns` is an `Option`; `None` is an
+  entry the session could not name, and a walk reaching it answers `Unknown(NotLoaded)`.
+  `for_pg` makes one for `$user` when the user is unknown, and for an empty setting
+  (`SchemaCtx::search_path_setting` is empty when unknown). A mapper that knows nothing
+  passes `SearchPath::default()`.
+- **I3. What exists is never skipped.** `PathEntry.must_exist` is set for `pg_catalog` (every
+  server has it) and for a temporary schema the caller reports. Unlisted, such an entry is
+  `Unknown(NotLoaded)` whatever the schema list says, so system lookups stay `Unknown` until
+  Task 26 (F31) without relying on Task 15 listing system schemas.
+- **I4. R-M4-41 at schema level.** Under MySQL/MariaDB `lower_case_table_names` 1 or 2, a
+  qualifier with no caseless match among the listed schemas is `Unknown(ServerDependent)`
+  when any listed sibling's name holds a non-ASCII cased letter. This is the schema-level
+  twin of the table-level `uncertain` rule.
+- **I5. The schema list is its own container.** `ContainerKey::SchemaList { ns }` replaces the
+  `Children { kind: Schema }` key `schema_list` used to build, so "the list is loaded" never
+  reads as "this database has no schema children". `children(database, Schema)` (MySQL and
+  SQLite: `children(root, Schema)`) answers from the listed schema namespaces, in key order:
+  `Found` only when the list is loaded and every listed schema has an arena to hand out (its
+  root), else `Unknown(NotLoaded)`.
+- **M1. `layers`.** `SnapshotView` gains the plan's `layers` field (`Arc<Overlays>`, the
+  generation's own unless `with_layers` sets others) and `layers()`. No lookup reads it
+  before Task 26, which fills it in `view.rs`.
+- **Minor.**
+  - The publish perf line now times the real shape, `Put` plus `SetState(Loaded)`, so both
+    5,000-entry maps are copied. Its p95 is 0.24 ms (max 0.73 ms), still under R-M4-2's
+    1 ms.
+  - The allocation test documents its limit and names the functions on the hit path that
+    must stay allocation-free.
+  - `publish` documents that a shared `Arc` in `Put` copies the arena.
+  - `search` answers nothing for empty text and skips namespaces whose state is
+    `OutOfScope`.
+- **Carries.**
+  - Task 15: set the schema list after each scope refresh; hand over unique arenas; call
+    `announce_pending_confirmation`.
+  - Task 24 and M5: map an unknown user or setting to an unnamed entry or
+    `SearchPath::default()`.
+  - Task 26: the `layers` seam, then re-check R-W2-6's cost for `pg_catalog`.
+  - M5: the probe TTL is per namespace, so a second missing name in the same namespace within
+    30 s is not probed (the plan's rule).
+  - M7: `fk_referencing` answers within the scope.
+  - Task 18 and M5: SQLite `temp` is per connection, so the metadata connection never marks
+    a console's `temp` loaded; the session overlay owns it.

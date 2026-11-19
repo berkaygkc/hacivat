@@ -102,7 +102,16 @@ fn stub_merge_publishes_nothing() {
     let before = catalog.current();
     assert!(merge(None, NamespaceResult::empty_full(), &MergePolicy::default()).is_err());
     let publisher = catalog.publisher().expect("the first publisher");
-    assert!(publisher.publish(Vec::new()).is_err());
+    // ## m4-t09-snapshots (named exception): the publish body landed; a refused change list
+    // publishes nothing (an empty list is a no-op that also leaves the generation).
+    assert!(
+        publisher
+            .publish(vec![hacivat_meta::snapshot::CatalogChange::Remove(
+                NsKey::schema(["db", "missing"])
+            )])
+            .is_err()
+    );
+    assert!(publisher.publish(Vec::new()).is_ok());
     let after = catalog.current();
     assert_eq!(after.generation, before.generation);
     assert!(after.namespaces.is_empty());
