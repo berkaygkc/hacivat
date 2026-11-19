@@ -1448,6 +1448,25 @@ documentation; `pg/**` runs them on Task 5's `MetaConn` (one `SnapshotTxn` per p
   `hacivat-net` and `hacivat-driver` (the Docker tests build `ConnectDeps`; the hacivat-exec
   precedent; `Cargo.lock` gains edges only). `hacivat-net` is the controller's R-W3-4; `hacivat-driver` still needs a controller
   ruling.
+- **Fix round 1 (security review, I-1..I-6):**
+  - *Schema rename (I-1).* The `schema-rename` branch of `ChangedDependents` now sees every
+    depender class: relations, routines and types, constraints (`connamespace`), triggers,
+    column defaults and view rules (through their relation); and referenced relations of the
+    renamed schema as well as its types and routines. A hit runs a full pass of the namespace
+    (the fail-safe: a renamed schema is two hops away and rare). Enum value, collation,
+    operator and operator-class renames are sources of the dependency hop too (m-1).
+  - *Stamps (I-2).* Every dependency hop of the `StateOf*` sections reads the referenced
+    column's `pg_attribute` row (a column rename touches nothing else) and the referenced
+    type's `pg_type` row.
+  - *Validation (I-3).* `check_namespace`'s digest covers each object's `sub` (a domain's
+    constraint count) and the comment keys (`ListExistentComments`).
+  - *Search-path immunity (I-4).* The joinable `StateOf*` text writes every operator as
+    `OPERATOR(pg_catalog.op)`, every cast to a `pg_catalog` type, every function qualified;
+    `tests/pg_rows.rs` refuses any bare operator, `::`, unqualified cast or function in a
+    joinable section (named exception: T4's `SYNTAX` words gain `operator`). The list bind's
+    `IN` stays (the pack grammar fixes it; oid against oid parameters): a joined read must
+    refuse a session whose `search_path` does not start with `pg_catalog` (carry to T15b
+    and M7). `hv_m4_big` as a schema of `hv_test` is ruling R-W3-8.
 
 ## m4-t20 — scope editor, encrypted cache option, level pills
 

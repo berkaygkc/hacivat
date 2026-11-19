@@ -369,6 +369,75 @@ fn version_gates_pick_the_right_columns() {
     assert!(src(Level::Sources, name::RETRIEVE_ROUTINES).contains("pg_get_functiondef"));
 }
 
+/// Review I-4 (fix round 1): a joinable section runs where Hacivat cannot pin the
+/// `search_path` (R-M4-46), so nothing in it may resolve through the path: every operator is
+/// `OPERATOR(pg_catalog.op)`, every cast names a `pg_catalog` type (no `::`), every function
+/// is `pg_catalog`-qualified. The list bind's `IN` is the one fixed by the pack grammar
+/// (oid against oid parameters); a joined read must refuse a session whose path does not
+/// start with `pg_catalog` (carried to T15b and M7).
+#[test]
+fn joinable_sections_resolve_no_operator_cast_or_function_through_the_path() {
+    let p = pack().unwrap();
+    let literal = regex::Regex::new(r"'[^']*'").unwrap();
+    let operator = regex::Regex::new(r"OPERATOR\(pg_catalog\.[^)\s]+\)").unwrap();
+    let bare_cast = regex::Regex::new(r"(?i)\bAS\s+(\w+)\s*\)").unwrap();
+    let call = regex::Regex::new(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(").unwrap();
+    const SYNTAX: [&str; 13] = [
+        "cast", "coalesce", "in", "operator", "exists", "array", "nullif", "from", "join", "on",
+        "and", "where", "not",
+    ];
+    let mut bad = Vec::new();
+    for section in p.sections() {
+        if !p.section(section).unwrap().joinable() {
+            continue;
+        }
+        for sql in rendered(&p, section) {
+            let code: String = sql
+                .lines()
+                .map(|l| l.split("--").next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let code = literal.replace_all(&code, "''");
+            let code = operator.replace_all(&code, " OPQ ");
+            for op in ["=", "<", ">", "!", "|", "+", "*", "/", "::"] {
+                if code.contains(op) {
+                    bad.push(format!("{section}: a bare operator {op:?}"));
+                }
+            }
+            for c in bare_cast.captures_iter(&code) {
+                bad.push(format!("{section}: an unqualified cast to {}", &c[1]));
+            }
+            for c in call.captures_iter(&code) {
+                let word = c[1].to_ascii_lowercase();
+                let at = c.get(1).unwrap().start();
+                if SYNTAX.contains(&word.as_str()) || code[..at].ends_with("pg_catalog.") {
+                    continue;
+                }
+                bad.push(format!("{section}: an unqualified function {word}"));
+            }
+        }
+    }
+    bad.sort();
+    bad.dedup();
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// Review m-6: the canary relies on being the first reader of the backend status in its
+/// transaction (the status snapshot is taken once per transaction), so no other section reads
+/// a `pg_stat_*` view or function.
+#[test]
+fn only_the_canary_reads_the_backend_status() {
+    let p = pack().unwrap();
+    for section in p.sections() {
+        if &**section == name::CANARY {
+            continue;
+        }
+        for sql in rendered(&p, section) {
+            assert!(!sql.contains("pg_catalog.pg_stat_"), "{section}");
+        }
+    }
+}
+
 #[test]
 fn state_sections_are_joinable() {
     let p = pack().unwrap();

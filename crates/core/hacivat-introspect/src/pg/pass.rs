@@ -1383,10 +1383,11 @@ pub async fn server_identity(
 }
 
 /// The cheap validation of a cached namespace (HV-INTRO-15): the existing objects (count and
-/// an XXH3-64 of the sorted `tag:oid` keys) and `max_mark` = `StateMark::Xmin` of the cached
-/// watermark's low 32 bits when nothing changed since it (no young row, no dependency hop, an
-/// incremental plan), else of the server's current snapshot xmin. Only `Identity`,
-/// `ListExistent`, the two change queries and the canary run.
+/// an XXH3-64 of the sorted `tag:oid:sub` keys and the comment keys) and `max_mark` =
+/// `StateMark::Xmin` of the cached watermark's low 32 bits when nothing changed since it (no
+/// young row, no dependency hop, an incremental plan), else of the server's current snapshot
+/// xmin. Only `Identity`, `ListExistent`, `ListExistentComments`, the two change queries and
+/// the canary run.
 pub async fn check_namespace(
     c: &mut MetaConn,
     ns: &NsKey,
@@ -1414,9 +1415,26 @@ pub async fn check_namespace(
                     decode::existent,
                 )
                 .await?;
+            // The digest also covers what leaves no young row behind (review I-3): each
+            // object's `sub` (a domain's constraint count moves on `ALTER DOMAIN … DROP
+            // CONSTRAINT`), and every comment key (`COMMENT … IS NULL` deletes its row).
+            let comments = r
+                .read(
+                    name::LIST_EXISTENT_COMMENTS,
+                    Mode::Full,
+                    Level::Structure,
+                    &b,
+                    decode::comment_key,
+                )
+                .await?;
             let mut keys: Vec<String> = rows
                 .iter()
-                .map(|e| format!("{}:{}", e.tag, e.oid))
+                .map(|e| format!("{}:{}:{}", e.tag, e.oid, e.sub.as_deref().unwrap_or("")))
+                .chain(
+                    comments
+                        .iter()
+                        .map(|(t, o, s)| format!("comment:{t}:{o}:{s}")),
+                )
                 .collect();
             keys.sort();
             let digest = twox_hash::XxHash3_64::oneshot(keys.join("\n").as_bytes());

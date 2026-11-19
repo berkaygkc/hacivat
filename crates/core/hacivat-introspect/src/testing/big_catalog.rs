@@ -66,14 +66,39 @@ pub fn create_batch(first: u32, last: u32, tables: u32, columns: u32) -> String 
     format!("DO $hv_big$ BEGIN\n{body}END $hv_big$")
 }
 
-/// The `DO` block that drops tables `first..=last`.
-pub fn drop_batch(first: u32, last: u32) -> String {
+/// The `DO` block that drops tables `t<first>..=t<last>` of `schema` (a test schema name:
+/// ASCII letters, digits and `_` only, checked by [`drop_schema_tables`]).
+pub fn drop_batch(schema: &str, first: u32, last: u32) -> String {
     let mut body = String::new();
     // In reverse, so a table's referencing neighbour goes first.
     for i in (first..=last).rev() {
-        body.push_str(&format!("DROP TABLE IF EXISTS {SCHEMA}.t{i} CASCADE;\n"));
+        body.push_str(&format!("DROP TABLE IF EXISTS {schema}.t{i} CASCADE;\n"));
     }
     format!("DO $hv_big$ BEGIN\n{body}END $hv_big$")
+}
+
+/// Drops the tables `t1..=t<tables>` of `schema` in batches of [`BATCH`] (the highest first),
+/// then the schema: never one `DROP SCHEMA … CASCADE` over thousands of tables, which runs
+/// out of lock-table slots (PG spike section 5; review I-5). `schema` must be a plain
+/// lower-case ASCII identifier (the test schemas' `hvm4_*` names).
+pub fn drop_schema_tables<'a>(
+    conn: &'a mut LiveConnection,
+    schema: &'a str,
+    tables: u32,
+) -> BoxFuture<'a, Result<(), BigCatalogError>> {
+    Box::pin(async move {
+        let plain = !schema.is_empty()
+            && schema
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        if !plain {
+            return Err(BigCatalogError::BadShape);
+        }
+        for (first, last) in batches(tables).into_iter().rev() {
+            run(conn, &drop_batch(schema, first, last), first).await?;
+        }
+        run(conn, &format!("DROP SCHEMA IF EXISTS {schema} CASCADE"), 0).await
+    })
 }
 
 /// The batches `[(first, last)]` of `tables` tables.
@@ -126,12 +151,7 @@ pub fn drop_pg(
     conn: &mut LiveConnection,
     tables: u32,
 ) -> BoxFuture<'_, Result<(), BigCatalogError>> {
-    Box::pin(async move {
-        for (first, last) in batches(tables).into_iter().rev() {
-            run(conn, &drop_batch(first, last), first).await?;
-        }
-        run(conn, &format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"), 0).await
-    })
+    drop_schema_tables(conn, SCHEMA, tables)
 }
 
 #[cfg(test)]
@@ -150,7 +170,7 @@ mod tests {
         assert_eq!(sql.matches("CREATE TABLE IF NOT EXISTS").count(), 250);
         assert!(sql.contains("REFERENCES hv_m4_big.t9 (id)"));
         assert!(
-            drop_batch(1, 250)
+            drop_batch(SCHEMA, 1, 250)
                 .starts_with("DO $hv_big$ BEGIN\nDROP TABLE IF EXISTS hv_m4_big.t250")
         );
     }

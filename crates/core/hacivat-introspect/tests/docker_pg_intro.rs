@@ -892,7 +892,15 @@ async fn validation_with_unchanged_server_runs_state_queries_only() {
         return;
     }
     for t in targets() {
-        let (s, _g) = schema_with(&t, "valid", X).await;
+        let (s, _g) = schema_with(
+            &t,
+            "valid",
+            &format!(
+                "{X}; COMMENT ON TABLE {{s}}.x IS 'c'; \
+                 CREATE DOMAIN {{s}}.d AS int CONSTRAINT d_pos CHECK (VALUE > 0)"
+            ),
+        )
+        .await;
         let pg = Pg::connect(&t).await;
         let mut c = pg.meta().await;
         let ns = ns_of(&t, &s);
@@ -901,6 +909,19 @@ async fn validation_with_unchanged_server_runs_state_queries_only() {
         let (check, report) = pass::check_namespace(&mut c, &ns, &n, &cancel)
             .await
             .unwrap();
+        // Changes that leave no young row still move the digest (review I-3).
+        let mut last = check.existence_digest;
+        for step in [
+            format!("COMMENT ON TABLE {s}.x IS NULL"),
+            format!("ALTER DOMAIN {s}.d DROP CONSTRAINT d_pos"),
+        ] {
+            run(&t, &step).await;
+            let (again, _) = pass::check_namespace(&mut c, &ns, &n, &cancel)
+                .await
+                .unwrap();
+            assert_ne!(again.existence_digest, last, "{}: {step}", t.id);
+            last = again.existence_digest;
+        }
         let Watermark::PgXid { w, .. } = n.meta().watermark else {
             panic!()
         };
@@ -915,6 +936,7 @@ async fn validation_with_unchanged_server_runs_state_queries_only() {
                 [
                     name::IDENTITY,
                     name::LIST_EXISTENT,
+                    name::LIST_EXISTENT_COMMENTS,
                     name::CHANGED_PARENTS,
                     name::CHANGED_DEPENDENTS,
                     name::CANARY
@@ -965,6 +987,36 @@ async fn stamp_moves_on_comment_removal_second_trigger_and_dependency_rename() {
             assert_ne!(now, last, "{}: {step}", t.id);
             last = now;
         }
+        // A column rename touches pg_attribute only (review I-2): the stamp of a view that
+        // selects the column, and of a table whose FK names the referenced column, moves.
+        run(
+            &t,
+            &format!(
+                "CREATE TABLE {s}.p (id int PRIMARY KEY); \
+                 ALTER TABLE {s}.x ADD COLUMN pid int REFERENCES {s}.p (id); \
+                 CREATE VIEW {s}.vw AS SELECT a FROM {s}.x"
+            ),
+        )
+        .await;
+        let n = load(&mut c, &ns_of(&t, &s), Level::Structure).await;
+        let view = key_of(&n, ObjectKind::View, &["vw"]);
+        let table = key_of(&n, ObjectKind::Table, &["x"]);
+        let (v0, t0) = (
+            stamp_of(&mut c, &view).await,
+            stamp_of(&mut c, &table).await,
+        );
+        run(&t, &format!("ALTER TABLE {s}.x RENAME COLUMN a TO a2")).await;
+        let v1 = stamp_of(&mut c, &view).await;
+        assert_ne!(v1, v0, "{}: a view's renamed column", t.id);
+        let t1 = stamp_of(&mut c, &table).await;
+        run(&t, &format!("ALTER TABLE {s}.p RENAME COLUMN id TO id2")).await;
+        assert_ne!(
+            stamp_of(&mut c, &table).await,
+            t1,
+            "{}: an FK's renamed column",
+            t.id
+        );
+        assert!(t0.is_some() && v1.is_some());
         drop(c);
         pg.shutdown().await;
     }
@@ -991,8 +1043,14 @@ async fn every_pg_section_prepares_and_returns_its_declared_columns() {
             panic!()
         };
         let p = pack().unwrap();
+        // Every variant is rendered at the server's own `server_version_num` (review I-6): a
+        // variant gated above it (an 18+ column on pg17) is the other branch there.
+        let cancel = CancellationToken::new();
+        let version = pass::server_identity(&mut c, &cancel)
+            .await
+            .unwrap()
+            .version;
         let mut snap = c.begin_snapshot().await.unwrap();
-        let mut checked = 0;
         for section in p.sections() {
             let decl: Vec<String> = p
                 .section(section)
@@ -1001,28 +1059,32 @@ async fn every_pg_section_prepares_and_returns_its_declared_columns() {
                 .iter()
                 .map(|c| c.name.to_string())
                 .collect();
+            let mut ran = 0;
+            let mut seen = std::collections::BTreeSet::new();
             for v in p.reachable_variants(section) {
-                let version = major(&t) * 10_000;
                 let binds = Binds {
                     ns: Some(if v.mode == Mode::System { 11 } else { ns_oid }),
                     w: Some(3),
                     schema: Some(s.clone().into()),
                     oids: Some(vec![x]),
                 };
-                let cx = ctx(version.max(v.version), v.mode, v.level, &binds);
+                let cx = ctx(version, v.mode, v.level, &binds);
                 for q in p.render(section, &cx).unwrap() {
+                    if !seen.insert(q.sql().to_string()) {
+                        continue;
+                    }
                     let rows = snap
                         .rows(q.as_meta_query())
                         .await
                         .unwrap_or_else(|e| panic!("{} {section} {:?}: {e:?}", t.id, v.mode));
                     let got: Vec<String> = rows.columns.iter().map(|c| c.to_string()).collect();
                     assert_eq!(got, decl, "{} {section}", t.id);
-                    checked += 1;
+                    ran += 1;
                 }
             }
+            assert!(ran >= 1, "{} {section}: never ran", t.id);
         }
         snap.commit().await.unwrap();
-        assert!(checked >= p.sections().len(), "{}", t.id);
         drop(c);
         pg.shutdown().await;
     }
@@ -1093,6 +1155,54 @@ async fn rename_of_a_referenced_object_rereads_dependent_text() {
             );
             prev = next;
         }
+        // A renamed *schema* is two hops away (review I-1): an FK onto its table, a trigger
+        // calling its function, a default calling its sequence and a view selecting its table
+        // are re-read through a full pass (reason `schema-rename`).
+        let o = format!("{s}_o");
+        let _go = DropSchemas {
+            t: t.clone(),
+            names: vec![o.clone(), format!("{o}2")],
+        };
+        run(
+            &t,
+            &format!(
+                "CREATE SCHEMA {o}; CREATE TABLE {o}.ot (id int PRIMARY KEY); \
+                 CREATE SEQUENCE {o}.os; \
+                 CREATE FUNCTION {o}.ofn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; \
+                 CREATE TABLE {s}.dep (oid_ref int REFERENCES {o}.ot (id), n bigint DEFAULT nextval('{o}.os')); \
+                 CREATE TRIGGER dt BEFORE INSERT ON {s}.dep FOR EACH ROW EXECUTE FUNCTION {o}.ofn(); \
+                 CREATE VIEW {s}.dv AS SELECT id FROM {o}.ot"
+            ),
+        )
+        .await;
+        let (next, _, _) = refresh(&mut c, &ns, &prev).await;
+        prev = next;
+        run(&t, &format!("ALTER SCHEMA {o} RENAME TO {o}2")).await;
+        let p = pass_at(&mut c, &ns, Mode::Incremental, Level::Sources, Some(&prev)).await;
+        assert_eq!(
+            p.report.full_reason,
+            Some(FullReason::SchemaRename),
+            "{}",
+            t.id
+        );
+        let (next, _) = apply(&prev, p.result);
+        assert_same(
+            &format!("{} schema rename", t.id),
+            &next,
+            &load(&mut c, &ns, Level::Sources).await,
+        );
+        let Props::ForeignKey(fk) = get(
+            &next,
+            ObjectKind::ForeignKey,
+            &[
+                "dep",
+                &children_of(&next, ObjectKind::Table, &["dep"], ObjectKind::ForeignKey)[0],
+            ],
+        )
+        .props() else {
+            panic!()
+        };
+        assert_eq!(fk.target.path[1].as_ref(), format!("{o}2"), "{}", t.id);
         drop(c);
         pg.shutdown().await;
     }
@@ -1577,20 +1687,29 @@ async fn no_catalog_query_seq_scans_user_sized_structures_without_a_namespace_pr
                 a.batch("BEGIN").await;
                 let plan = a.scalar(&format!("EXPLAIN (FORMAT JSON) {sql}")).await;
                 a.batch("ROLLBACK").await;
-                // A query is bounded when its plan applies a namespace predicate, the
-                // young-row predicate (xmin; the whole-database scans of R-M4-48 are by
-                // design), or the oid list; a sequential scan of a user-sized catalog in a
-                // query with none of them reads the database whole.
-                let bounded = plan.contains("namespace")
-                    || plan.contains("xmin")
-                    || plan.contains(&format!("'{t1}'"))
-                    || plan.contains(&format!("{t1}::oid"));
+                // Per scan node (review m-3): a sequential scan of a user-sized catalog must
+                // filter on the namespace, on xmin (the young-row scans; the whole-database
+                // ones are R-M4-48's design), or on the oid list. The one exception is a
+                // whole-namespace read (a full-mode section whose plan filters the namespace
+                // on its driving relation), whose hash-joined child scans are the cheapest
+                // plan when the namespace is most of the database, as `hv_m4_big` is; and the
+                // dependency CTE of `ChangedDependents`, which reads `pg_depend` whole by
+                // design.
+                let whole_ns = v.mode != Mode::Incremental
+                    && !section.starts_with("StateOf")
+                    && &**section != name::COMMENTS
+                    && plan.contains("namespace");
                 for catalog in BIG {
                     let needle = format!("\"Relation Name\": \"{catalog}\"");
                     for (i, _) in plan.match_indices(&needle) {
                         let node = &plan[plan[..i].rfind('{').unwrap_or(0)..];
                         let node = &node[..node.find('}').unwrap_or(node.len())];
-                        if node.contains("\"Seq Scan\"") && !bounded {
+                        let filtered = node.contains("namespace")
+                            || node.contains("xmin")
+                            || node.contains(&t1);
+                        let by_design =
+                            &**section == name::CHANGED_DEPENDENTS && catalog == "pg_depend";
+                        if node.contains("\"Seq Scan\"") && !filtered && !whole_ns && !by_design {
                             violations.push(format!("{section} {:?}: {catalog}", v.mode));
                         }
                     }
@@ -1650,9 +1769,16 @@ async fn twenty_thousand_and_one_tables_auto_level_names_and_source_fragment_onl
     let Some(t) = require_target("pg17") else {
         return;
     };
-    // A 20,001-table scratch schema (one column each), built in 250-table DO blocks.
-    let (s, _g) = schema_with(&t, "k20", "").await;
+    // A 20,001-table scratch schema (one column each), built in 250-table DO blocks and
+    // dropped the same way by its guard (review I-5).
+    let s = unique("hvm4_t16_k20");
+    let _g = common::pg::DropBatchedSchema {
+        t: t.clone(),
+        schema: s.clone(),
+        tables: 20_001,
+    };
     let mut a = admin(&t).await;
+    a.batch(&format!("CREATE SCHEMA {s}")).await;
     let mut first = 1;
     while first <= 20_001 {
         let last = (first + 249).min(20_001);

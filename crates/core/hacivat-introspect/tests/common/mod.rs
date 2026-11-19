@@ -292,6 +292,37 @@ pub mod pg {
         )
     }
 
+    /// Drops a schema of `t` holding `tables` tables `t1..` when it goes, also on panic: in
+    /// 250-table `DO` blocks first, then the schema (review I-5: one `DROP SCHEMA … CASCADE`
+    /// over thousands of tables runs out of lock-table slots).
+    pub struct DropBatchedSchema {
+        pub t: DockerTarget,
+        pub schema: String,
+        pub tables: u32,
+    }
+
+    impl Drop for DropBatchedSchema {
+        fn drop(&mut self) {
+            let (t, schema, tables) = (self.t.clone(), self.schema.clone(), self.tables);
+            let rt = tokio::runtime::Handle::current();
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    rt.block_on(async {
+                        let mut a = admin(&t).await;
+                        hacivat_introspect::testing::big_catalog::drop_schema_tables(
+                            a.live(),
+                            &schema,
+                            tables,
+                        )
+                        .await
+                        .unwrap_or_else(|e| panic!("{}: batched drop of {schema}: {e:?}", t.id));
+                        a.close().await;
+                    });
+                });
+            });
+        }
+    }
+
     /// Drops schemas of `t` when it goes, also on panic.
     pub struct DropSchemas {
         pub t: DockerTarget,

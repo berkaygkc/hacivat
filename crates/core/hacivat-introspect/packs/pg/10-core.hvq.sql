@@ -54,6 +54,7 @@ ORDER BY n.nspname
 SELECT d.datname::text AS name
 FROM pg_catalog.pg_database d
 WHERE d.datallowconn AND NOT d.datistemplate
+  AND pg_catalog.has_database_privilege(d.oid, 'CONNECT')
 ORDER BY d.datname
 
 --- name: RetrieveNamespace ---
@@ -101,7 +102,7 @@ FROM pg_catalog.pg_proc p
 WHERE p.pronamespace = :ns
 UNION ALL
 SELECT 'typ', t.oid, NULL::text, t.typname::text,
-  t.typtype::text || ':' || (SELECT count(*) FROM pg_catalog.pg_constraint dk WHERE dk.contypid = t.oid)::text
+  t.typtype::text || ':' || (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint dk WHERE dk.contypid = t.oid)::text
 FROM pg_catalog.pg_type t
 WHERE t.typnamespace = :ns AND t.typtype IN ('b', 'c', 'd', 'e', 'r')
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_type e WHERE e.typarray = t.oid)
@@ -236,10 +237,13 @@ SELECT DISTINCT y.f AS facet, y.o AS oid FROM (
 
 -- The dependency half of the change query (finding 4, R-M4-48): deparsed text names other
 -- objects, whose renames leave the dependent's own rows untouched. Every young pg_class,
--- pg_attribute, pg_type or pg_proc row of the whole database is a source, and the
+-- pg_attribute, pg_type or pg_proc row of the whole database is a source (and, for renames of
+-- an enum value, a collation, an operator or an operator class, young pg_enum, pg_collation,
+-- pg_operator and pg_opclass rows: review m-1), and the
 -- namespace's objects that depend on a source through one pg_depend hop (deptype not e, x,
--- p) are re-read. A young pg_namespace row of another schema whose types or routines the
--- namespace's objects depend on is reported as schema-rename (a two-hop change, PG spike
+-- p) are re-read. A young pg_namespace row of another schema whose relations, types or
+-- routines the namespace's objects (relations, routines, types, constraints, triggers, column
+-- defaults, view rules) depend on is reported as schema-rename (a two-hop change, PG spike
 -- section 7 Q3): the pass then runs full.
 --- name: ChangedDependents ---
 --- returns: facet text, oid u32 ---
@@ -252,6 +256,14 @@ WITH src AS MATERIALIZED (
   WHERE pg_catalog.age(t.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION SELECT 'pg_catalog.pg_proc'::pg_catalog.regclass, p.oid FROM pg_catalog.pg_proc p
   WHERE pg_catalog.age(p.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
+  UNION SELECT 'pg_catalog.pg_type'::pg_catalog.regclass, e.enumtypid FROM pg_catalog.pg_enum e
+  WHERE pg_catalog.age(e.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
+  UNION SELECT 'pg_catalog.pg_collation'::pg_catalog.regclass, co.oid FROM pg_catalog.pg_collation co
+  WHERE pg_catalog.age(co.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
+  UNION SELECT 'pg_catalog.pg_operator'::pg_catalog.regclass, o.oid FROM pg_catalog.pg_operator o
+  WHERE pg_catalog.age(o.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
+  UNION SELECT 'pg_catalog.pg_opclass'::pg_catalog.regclass, oc.oid FROM pg_catalog.pg_opclass oc
+  WHERE pg_catalog.age(oc.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
 ), dep AS MATERIALIZED (
   SELECT DISTINCT d.classid, d.objid, d.objsubid
   FROM pg_catalog.pg_depend d JOIN src ON d.refclassid = src.cls AND d.refobjid = src.oid
@@ -288,12 +300,19 @@ SELECT DISTINCT z.f AS facet, z.o AS oid FROM (
     AND EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
       LEFT JOIN pg_catalog.pg_type rt ON d.refclassid = 'pg_catalog.pg_type'::pg_catalog.regclass AND rt.oid = d.refobjid
       LEFT JOIN pg_catalog.pg_proc rp ON d.refclassid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND rp.oid = d.refobjid
+      LEFT JOIN pg_catalog.pg_class rc ON d.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass AND rc.oid = d.refobjid
       LEFT JOIN pg_catalog.pg_class oc ON d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND oc.oid = d.objid
       LEFT JOIN pg_catalog.pg_proc op ON d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND op.oid = d.objid
       LEFT JOIN pg_catalog.pg_type ot ON d.classid = 'pg_catalog.pg_type'::pg_catalog.regclass AND ot.oid = d.objid
+      LEFT JOIN pg_catalog.pg_constraint ok ON d.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass AND ok.oid = d.objid
+      LEFT JOIN pg_catalog.pg_trigger otg ON d.classid = 'pg_catalog.pg_trigger'::pg_catalog.regclass AND otg.oid = d.objid
+      LEFT JOIN pg_catalog.pg_attrdef oad ON d.classid = 'pg_catalog.pg_attrdef'::pg_catalog.regclass AND oad.oid = d.objid
+      LEFT JOIN pg_catalog.pg_rewrite orw ON d.classid = 'pg_catalog.pg_rewrite'::pg_catalog.regclass AND orw.oid = d.objid
+      LEFT JOIN pg_catalog.pg_class oo ON oo.oid = COALESCE(otg.tgrelid, oad.adrelid, orw.ev_class)
       WHERE d.deptype NOT IN ('e', 'x', 'p')
-        AND (rt.typnamespace = n.oid OR rp.pronamespace = n.oid)
-        AND (oc.relnamespace = :ns OR op.pronamespace = :ns OR ot.typnamespace = :ns))
+        AND (rt.typnamespace = n.oid OR rp.pronamespace = n.oid OR rc.relnamespace = n.oid)
+        AND (oc.relnamespace = :ns OR op.pronamespace = :ns OR ot.typnamespace = :ns
+          OR ok.connamespace = :ns OR oo.relnamespace = :ns))
 ) AS z
 WHERE z.o IS NOT NULL
 
