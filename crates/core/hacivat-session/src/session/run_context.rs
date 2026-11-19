@@ -58,6 +58,8 @@ pub(crate) fn changes_run_context(request: &Request) -> bool {
         | Request::FetchAll { .. }
         | Request::CloseCursor { .. }
         | Request::ReadContext => false,
+        // ## m4-t05-meta (named exception): Hacivat's own read in its own transaction (I4-A).
+        Request::MetaRead(_) => false,
     }
 }
 

@@ -90,6 +90,10 @@ fn code(e: &MetaError) -> Option<String> {
     }
 }
 
+/// The three character sets a metadata session must hold as `utf8mb4` (I3-A, the T4 carry).
+const CHARSETS: &str = "@@session.character_set_client, @@session.character_set_connection, \
+                        @@session.character_set_results";
+
 /// The session read-only variable of `t` (MariaDB before 11.1 has only `tx_read_only`).
 fn ro_var(t: &DockerTarget) -> &'static str {
     match t.id.as_str() {
@@ -298,6 +302,52 @@ async fn statement_timeout_applies() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn pg_single_session_read_runs_in_hacivats_read_only_transaction() {
+    // Ruling R-W1-9 on a real server: the read on the user's session runs inside Hacivat's own
+    // REPEATABLE READ READ ONLY transaction with the pinned path, and leaves the session idle.
+    if !docker_enabled() {
+        return;
+    }
+    for t in PG.into_iter().filter_map(require_target) {
+        let mut p = profile_for(&t, auto_or_require(&t));
+        p.allow_unsupported_server = true;
+        p.single_session = true;
+        let on = OnManager::connect(matrix_deps(), p).await;
+        let mut c = meta(&on, secs(60)).await;
+        let mut snap = c.begin_snapshot().await.unwrap();
+        let got = snap
+            .rows(q("SELECT current_setting('transaction_isolation'), \
+                 current_setting('transaction_read_only'), current_setting('search_path'), \
+                 current_setting('statement_timeout')"))
+            .await
+            .unwrap_or_else(|e| panic!("{}: {e:?}", t.id));
+        assert_eq!(
+            row(&got),
+            ["repeatable read", "on", "pg_catalog, pg_temp", "1min"],
+            "{}",
+            t.id
+        );
+        snap.commit().await.unwrap();
+        // The user's session is idle and outside any transaction afterwards.
+        let reply = run(
+            &on.s,
+            "SELECT pg_catalog.pg_current_xact_id_if_assigned() IS NULL",
+        )
+        .await;
+        assert!(reply.is_ok(), "{}: {:?}", t.id, reply.map_err(|e| e.kind));
+        assert_eq!(
+            on.s.state().borrow().tx.status,
+            hacivat_driver::TxStatus::Idle,
+            "{}",
+            t.id
+        );
+        drop(c);
+        on.shutdown().await;
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // MySQL and MariaDB
 
@@ -314,9 +364,14 @@ async fn mysql_snapshot_sets_utc_read_only_session_and_consistent_snapshot() {
             .begin_snapshot()
             .await
             .expect("the read-only session is confirmed");
-        let sql = format!("SELECT @@session.time_zone, {}", ro_var(&t));
+        let sql = format!("SELECT @@session.time_zone, {}, {CHARSETS}", ro_var(&t));
         let got = snap.rows(q(&sql)).await.unwrap();
-        assert_eq!(row(&got), ["+00:00", "1"], "{}", t.id);
+        assert_eq!(
+            row(&got),
+            ["+00:00", "1", "utf8mb4", "utf8mb4", "utf8mb4"],
+            "{}",
+            t.id
+        );
         snap.commit().await.unwrap();
         drop(c);
         on.shutdown().await;
@@ -435,25 +490,41 @@ async fn read_only_flag_is_restored_after_reconnect() {
         let before = first(&snap.rows(q("SELECT CONNECTION_ID()")).await.unwrap());
         snap.commit().await.unwrap();
         kill_backend(&t, &before).await;
-        // The loss is reported, never hidden: the first snapshot after the kill answers it
-        // (`ConnectionLost`, or a snapshot when the kill landed later); the next one runs on
-        // a new connection, set up again.
-        match c.begin_snapshot().await.map(drop) {
-            Ok(()) | Err(MetaError::ConnectionLost) => {}
-            Err(e) => panic!("{}: {e:?}", t.id),
-        }
-        let mut snap = c
-            .begin_snapshot()
-            .await
-            .unwrap_or_else(|e| panic!("{}: reconnect: {e:?}", t.id));
+        // The loss is reported, never hidden. Review A M6: the kill may land after the next
+        // snapshot began, so the loss can surface at `begin_snapshot` or at the first read;
+        // every `ConnectionLost` is allowed, until a snapshot reads on a new connection (at
+        // most three tries).
         let sql = format!(
-            "SELECT CONNECTION_ID(), {}, @@session.time_zone",
+            "SELECT CONNECTION_ID(), {}, @@session.time_zone, {CHARSETS}",
             ro_var(&t)
         );
-        let after = row(&snap.rows(q(&sql)).await.unwrap());
-        assert_ne!(after[0], before, "{}: a new connection", t.id);
-        assert_eq!(after[1..], ["1", "+00:00"], "{}: set up again", t.id);
-        snap.commit().await.unwrap();
+        let mut after = None;
+        for _ in 0..3 {
+            let mut snap = match c.begin_snapshot().await {
+                Ok(snap) => snap,
+                Err(MetaError::ConnectionLost) => continue,
+                Err(e) => panic!("{}: {e:?}", t.id),
+            };
+            match snap.rows(q(&sql)).await {
+                Ok(rows) => {
+                    let r = row(&rows);
+                    snap.commit().await.unwrap();
+                    if r[0] != before {
+                        after = Some(r);
+                        break;
+                    }
+                }
+                Err(MetaError::ConnectionLost) => {}
+                Err(e) => panic!("{}: {e:?}", t.id),
+            }
+        }
+        let after = after.unwrap_or_else(|| panic!("{}: never reconnected", t.id));
+        assert_eq!(
+            after[1..],
+            ["1", "+00:00", "utf8mb4", "utf8mb4", "utf8mb4"],
+            "{}: set up again",
+            t.id
+        );
         drop(c);
         on.shutdown().await;
     }

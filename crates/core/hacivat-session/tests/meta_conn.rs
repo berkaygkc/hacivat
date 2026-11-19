@@ -27,7 +27,8 @@ use hacivat_session::meta::{
 use hacivat_session::pipeline::{ConnectDeps, Interaction};
 use hacivat_session::profile::{Profile, ProfileEndpoint};
 use hacivat_session::session::{
-    ClientId, JobKind, SessionHandle, SessionKind, SessionManager, SessionSpec,
+    ClientId, ExecErrorKind, JobKind, SessionHandle, SessionKind, SessionManager, SessionSpec,
+    TxCommand, TxMode,
 };
 use hacivat_session::{Priority, budget_for};
 use hacivat_values::{BindValue, LogicalType, Value};
@@ -108,23 +109,65 @@ fn answers(prefix: &'static str, name: &'static str, values: &[&str]) -> FakeQue
     }
 }
 
-/// A typed query answering one integer.
-fn answers_int(prefix: &'static str, v: i64) -> FakeQuery {
+/// The MySQL/MariaDB session probe's answer: the read-only flag `ro` and the three character
+/// sets `charset`.
+fn session_probe(prefix: &'static str, ro: i64, charset: &str) -> FakeQuery {
+    let text = || LogicalType::Text {
+        max_chars: None,
+        fixed: false,
+    };
     FakeQuery {
         prefix,
         sets: vec![FakeResultSet {
-            columns: vec![(
-                "v",
-                LogicalType::Int {
-                    bits: 64,
-                    signed: true,
-                },
-            )],
-            rows: FakeRows::Literal(vec![vec![Value::Int(v)]]),
+            columns: vec![
+                (
+                    "ro",
+                    LogicalType::Int {
+                        bits: 64,
+                        signed: true,
+                    },
+                ),
+                ("client", text()),
+                ("connection", text()),
+                ("results", text()),
+            ],
+            rows: FakeRows::Literal(vec![vec![
+                Value::Int(ro),
+                Value::Text(Arc::from(charset)),
+                Value::Text(Arc::from(charset)),
+                Value::Text(Arc::from(charset)),
+            ]]),
         }],
         ..FakeQuery::default()
     }
 }
+
+/// The user-session MySQL character-set probe's answer.
+fn charset_probe(charset: &str) -> FakeQuery {
+    let text = || LogicalType::Text {
+        max_chars: None,
+        fixed: false,
+    };
+    FakeQuery {
+        prefix: "SELECT @@session.character_set_client",
+        sets: vec![FakeResultSet {
+            columns: vec![("c", text()), ("n", text()), ("r", text())],
+            rows: FakeRows::Literal(vec![vec![
+                Value::Text(Arc::from(charset)),
+                Value::Text(Arc::from(charset)),
+                Value::Text(Arc::from(charset)),
+            ]]),
+        }],
+        ..FakeQuery::default()
+    }
+}
+
+/// What a single-session PostgreSQL read sends around its statement (ruling R-W1-9).
+const PG_USER_READ: [&str; 3] = [
+    "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+    "SET LOCAL search_path = pg_catalog, pg_temp",
+    "SET LOCAL statement_timeout = 60000",
+];
 
 fn cells(rows: &Rows) -> Vec<Vec<Option<String>>> {
     rows.rows
@@ -355,7 +398,9 @@ async fn pg_snapshot_is_a_read_only_repeatable_read_with_the_path_pinned() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_dropped_snapshot_is_rolled_back_before_the_next() {
+async fn a_dropped_snapshot_is_rolled_back_at_once() {
+    // Review B I4: a snapshot dropped without its commit holds no transaction while the
+    // `MetaConn` lives on.
     let profile = pg_n(3);
     let (sm, fake) = manager(fake_pg().tracks_transactions(), profile.clone());
     let cancel = CancellationToken::new();
@@ -363,12 +408,83 @@ async fn a_dropped_snapshot_is_rolled_back_before_the_next() {
         .meta_conn(spec_of(&sm, &profile, None), &cancel)
         .await
         .unwrap();
+    let from = fake.call_log().len();
     let snap = c.begin_snapshot().await.unwrap();
     drop(snap);
+    settle_until("the dropped snapshot rolls back", || {
+        statements_since(&fake, from).last().map(String::as_str) == Some("ROLLBACK")
+    })
+    .await;
+    // The next snapshot starts clean: no second rollback.
     let from = fake.call_log().len();
     let snap = c.begin_snapshot().await.unwrap();
     snap.commit().await.unwrap();
-    assert_eq!(statements_since(&fake, from)[0], "ROLLBACK");
+    assert_eq!(
+        statements_since(&fake, from),
+        [
+            "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            "SET LOCAL search_path = pg_catalog, pg_temp",
+            "COMMIT"
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_own_snapshot_refuses_transaction_control_text() {
+    // Review B M1: a pack text that would end the snapshot never reaches the connection.
+    let profile = pg_n(3);
+    let (sm, fake) = manager(fake_pg().tracks_transactions(), profile.clone());
+    let cancel = CancellationToken::new();
+    let mut c = sm
+        .meta_conn(spec_of(&sm, &profile, None), &cancel)
+        .await
+        .unwrap();
+    let mut snap = c.begin_snapshot().await.unwrap();
+    let from = fake.call_log().len();
+    for t in [
+        "COMMIT",
+        "SET search_path = public",
+        "-- x\rCOMMIT\n",
+        "DISCARD ALL",
+    ] {
+        assert_eq!(
+            snap.rows(q(t)).await.map(drop),
+            Err(MetaError::RefusedText),
+            "{t:?}"
+        );
+    }
+    assert_eq!(fake.call_log().len(), from, "nothing was sent");
+    snap.commit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_snapshot_whose_transaction_ended_under_it_is_lost() {
+    // Review A M5: a MySQL deadlock (here, the fake's status) ends the transaction silently.
+    let profile = pg_n(3);
+    let (sm, fake) = manager(
+        fake_pg().tracks_transactions().queries(vec![FakeQuery {
+            tx_after: Some(TxStatus::Idle),
+            ..answers("SELECT relname", "relname", &["orders"])
+        }]),
+        profile.clone(),
+    );
+    let cancel = CancellationToken::new();
+    let mut c = sm
+        .meta_conn(spec_of(&sm, &profile, None), &cancel)
+        .await
+        .unwrap();
+    let connects = fake.connect_calls();
+    let mut snap = c.begin_snapshot().await.unwrap();
+    assert_eq!(
+        snap.rows(q("SELECT relname FROM pg_catalog.pg_class"))
+            .await
+            .map(drop),
+        Err(MetaError::ConnectionLost)
+    );
+    drop(snap);
+    // The next snapshot runs on a new connection.
+    c.begin_snapshot().await.unwrap().commit().await.unwrap();
+    assert_eq!(fake.connect_calls(), connects + 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -379,9 +495,11 @@ async fn mysql_session_is_read_only_and_asserted_before_every_snapshot() {
     };
     let (sm, fake) = manager(
         fake_mysql().tracks_transactions().queries(vec![
-            answers_int("SELECT @@session.transaction_read_only", 1),
+            session_probe("SELECT @@session.transaction_read_only", 1, "utf8mb4"),
             // The second snapshot finds the session read-write: refused.
-            answers_int("SELECT @@session.transaction_read_only", 0),
+            session_probe("SELECT @@session.transaction_read_only", 0, "utf8mb4"),
+            // The third finds `SET NAMES gbk` (an `init_connect`, say): refused (T4 carry).
+            session_probe("SELECT @@session.transaction_read_only", 1, "gbk"),
         ]),
         profile.clone(),
     );
@@ -395,6 +513,7 @@ async fn mysql_session_is_read_only_and_asserted_before_every_snapshot() {
     assert!(req.read_only);
     let setup: Vec<String> = fake.executed();
     for s in [
+        "SET NAMES utf8mb4",
         "SET SESSION TRANSACTION READ ONLY",
         "SET time_zone = '+00:00'",
         "SET SESSION max_execution_time = 60000",
@@ -413,7 +532,10 @@ async fn mysql_session_is_read_only_and_asserted_before_every_snapshot() {
     snap.commit().await.unwrap();
     assert_eq!(
         queries_since(&fake, from),
-        ["SELECT @@session.transaction_read_only"]
+        [
+            "SELECT @@session.transaction_read_only, @@session.character_set_client, \
+             @@session.character_set_connection, @@session.character_set_results"
+        ]
     );
     assert_eq!(
         statements_since(&fake, from),
@@ -422,15 +544,18 @@ async fn mysql_session_is_read_only_and_asserted_before_every_snapshot() {
             "COMMIT"
         ]
     );
-    let from = fake.call_log().len();
-    assert_eq!(
-        c.begin_snapshot().await.map(drop),
-        Err(MetaError::ReadOnlyNotEnforced)
-    );
-    assert!(
-        statements_since(&fake, from).is_empty(),
-        "no transaction starts on a session that is not read-only"
-    );
+    for why in ["not read-only", "not utf8mb4"] {
+        let from = fake.call_log().len();
+        assert_eq!(
+            c.begin_snapshot().await.map(drop),
+            Err(MetaError::ReadOnlyNotEnforced),
+            "{why}"
+        );
+        assert!(
+            statements_since(&fake, from).is_empty(),
+            "{why}: no transaction starts"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -530,10 +655,11 @@ async fn never_runs_inside_a_user_transaction() {
         .unwrap();
     assert_eq!(cells(&rows), vec![vec![Some("orders".to_string())]]);
     snap.commit().await.unwrap();
-    assert!(
-        statements_since(&fake, from).is_empty(),
-        "nothing begins or ends a transaction on the user's session"
-    );
+    // Hacivat's own read-only transaction around the read, rolled back (ruling R-W1-9).
+    let mut own = PG_USER_READ.to_vec();
+    own.push("ROLLBACK");
+    assert_eq!(statements_since(&fake, from), own);
+    assert_eq!(snap_tx(&user), TxStatus::Idle);
     // The user begins again: the next read is refused before anything is sent.
     run(&user, "BEGIN").await.unwrap();
     let from = fake.call_log().len();
@@ -542,10 +668,187 @@ async fn never_runs_inside_a_user_transaction() {
     // Only reads reach the user's session.
     run(&user, "COMMIT").await.unwrap();
     let mut snap = c.begin_snapshot().await.unwrap();
+    let from = fake.call_log().len();
     assert_eq!(
         snap.rows(q("DELETE FROM orders")).await.map(drop),
         Err(MetaError::RefusedText)
     );
+    assert_eq!(fake.call_log().len(), from, "refused text sends nothing");
+}
+
+/// A single-session PostgreSQL profile whose console runs in `mode`, with one read answered.
+async fn user_session_in(
+    mode: TxMode,
+) -> (Arc<SessionManager>, Arc<FakeDriver>, SessionHandle, Profile) {
+    let profile = single_pg();
+    let (sm, fake) = manager(
+        fake_pg().tracks_transactions().queries(vec![answers(
+            "SELECT relname",
+            "relname",
+            &["orders"],
+        )]),
+        profile.clone(),
+    );
+    let user = open(&sm, default_console()).await;
+    tx_cmd(&user, TxCommand::SetMode(mode)).await.unwrap();
+    assert_eq!(snap(&user).tx.mode, mode);
+    (sm, fake, user, profile)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_leaves_a_manual_or_smart_session_idle() {
+    // Review A C1, review B C1: the read never takes the user's run path, so Manual and Smart
+    // never begin a user transaction for it.
+    for mode in [TxMode::Manual, TxMode::Smart, TxMode::Auto] {
+        let (sm, fake, user, profile) = user_session_in(mode).await;
+        let cancel = CancellationToken::new();
+        let mut c = sm
+            .meta_conn(spec_of(&sm, &profile, None), &cancel)
+            .await
+            .unwrap();
+        let from = fake.call_log().len();
+        let mut s = c.begin_snapshot().await.unwrap();
+        let rows = s
+            .rows(q("SELECT relname FROM pg_catalog.pg_class"))
+            .await
+            .unwrap_or_else(|e| panic!("{mode:?}: {e:?}"));
+        assert_eq!(cells(&rows), vec![vec![Some("orders".to_string())]]);
+        s.commit().await.unwrap();
+        let mut own = PG_USER_READ.to_vec();
+        own.push("ROLLBACK");
+        assert_eq!(statements_since(&fake, from), own, "{mode:?}");
+        let after = snap(&user).tx;
+        assert_eq!(after.status, TxStatus::Idle, "{mode:?}");
+        assert_eq!(after.statements, 0, "{mode:?}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_read_queued_behind_a_user_begin_answers_busy_and_sends_nothing() {
+    // Review A I1, review B I1: the actor checks the session when it takes the read.
+    for mode in [TxMode::Manual, TxMode::Smart] {
+        let (sm, fake, user, profile) = user_session_in(mode).await;
+        let cancel = CancellationToken::new();
+        let mut c = sm
+            .meta_conn(spec_of(&sm, &profile, None), &cancel)
+            .await
+            .unwrap();
+        let mut s = c.begin_snapshot().await.unwrap();
+        let from = fake.call_log().len();
+        // Queued, not yet taken (a current-thread runtime runs nothing until the next await).
+        let begin = user.submit(exec("BEGIN"));
+        let got = s.rows(q("SELECT relname FROM pg_catalog.pg_class")).await;
+        begin.reply.await.unwrap().unwrap();
+        assert_eq!(got.map(drop), Err(MetaError::Busy), "{mode:?}");
+        // Only the user's BEGIN (and the session's own schema probe after it) ran: no query
+        // and no statement of the read.
+        let sent: Vec<FakeCall> = fake.call_log()[from..].to_vec();
+        assert_eq!(sent.first(), Some(&FakeCall::Statement("BEGIN".into())));
+        assert!(
+            sent.iter().all(|c| match c {
+                FakeCall::Typed(_) => false,
+                FakeCall::Statement(s) => !PG_USER_READ.contains(&s.as_str()) && s != "ROLLBACK",
+                FakeCall::Reset => true,
+            }),
+            "{mode:?}: {sent:?}"
+        );
+        assert_eq!(snap(&user).tx.status, TxStatus::InTx);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_moves_no_run_context() {
+    // Review A I4: a run the console classified before a metadata read is not refused.
+    let (sm, _fake, user, profile) = user_session_in(TxMode::Auto).await;
+    let (_, generation) = user.run_context().await;
+    let generation = generation.expect("a generation");
+    let cancel = CancellationToken::new();
+    let mut c = sm
+        .meta_conn(spec_of(&sm, &profile, None), &cancel)
+        .await
+        .unwrap();
+    let mut s = c.begin_snapshot().await.unwrap();
+    s.rows(q("SELECT relname FROM pg_catalog.pg_class"))
+        .await
+        .unwrap();
+    s.commit().await.unwrap();
+    let (_, now) = user.run_context().await;
+    assert_eq!(now, Some(generation), "the context generation did not move");
+    let o = common::runs::Recorder::new();
+    let mut run = common::runs::spec_of(&o, &["SELECT 1"]);
+    run.context_generation = Some(generation);
+    let reply = common::runs::run_spec(&user, run).await;
+    assert!(
+        !matches!(&reply, Err(e) if matches!(e.kind, ExecErrorKind::ContextChanged)),
+        "{:?}",
+        reply.map(drop).map_err(|e| e.kind)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mysql_user_session_read_needs_autocommit_and_utf8mb4() {
+    let profile = Profile {
+        single_session: true,
+        max_connections: 3,
+        ..mysql_profile(TlsMode::Disable)
+    };
+    let (sm, fake) = manager(
+        fake_mysql()
+            .tracks_transactions()
+            .autocommit_flag(vec![
+                ("SET autocommit = 0", false),
+                ("SET autocommit = 1", true),
+            ])
+            .queries(vec![
+                charset_probe("utf8mb4"),
+                answers("SELECT table_name", "table_name", &["orders"]),
+                charset_probe("gbk"),
+            ]),
+        profile.clone(),
+    );
+    let user = open(&sm, default_console()).await;
+    let cancel = CancellationToken::new();
+    let mut c = sm
+        .meta_conn(spec_of(&sm, &profile, None), &cancel)
+        .await
+        .unwrap();
+    let read = "SELECT table_name FROM information_schema.tables WHERE table_schema = ?";
+    let binds = [text("shop")];
+    // Idle, autocommit on, utf8mb4: Hacivat's own read-only transaction, rolled back.
+    let from = fake.call_log().len();
+    let mut s = c.begin_snapshot().await.unwrap();
+    let rows = s.rows(MetaQuery::new(read, &binds, false)).await.unwrap();
+    assert_eq!(cells(&rows), vec![vec![Some("orders".to_string())]]);
+    s.commit().await.unwrap();
+    assert_eq!(
+        statements_since(&fake, from),
+        [
+            "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
+            "ROLLBACK"
+        ]
+    );
+    // The user turned autocommit off: every SELECT would open a transaction. Refused, nothing
+    // sent.
+    run(&user, "SET autocommit = 0").await.unwrap();
+    let mut s = c.begin_snapshot().await.unwrap();
+    let from = fake.call_log().len();
+    assert_eq!(
+        s.rows(MetaQuery::new(read, &binds, false)).await.map(drop),
+        Err(MetaError::Busy)
+    );
+    assert_eq!(fake.call_log().len(), from);
+    drop(s);
+    // Autocommit back on, but the connection's character sets are not utf8mb4: refused before
+    // any transaction.
+    run(&user, "SET autocommit = 1").await.unwrap();
+    let mut s = c.begin_snapshot().await.unwrap();
+    let from = fake.call_log().len();
+    assert_eq!(
+        s.rows(MetaQuery::new(read, &binds, false)).await.map(drop),
+        Err(MetaError::ReadOnlyNotEnforced)
+    );
+    assert!(statements_since(&fake, from).is_empty());
+    assert_eq!(snap_tx(&user), TxStatus::Idle);
 }
 
 // ---------------------------------------------------------------------------------------------

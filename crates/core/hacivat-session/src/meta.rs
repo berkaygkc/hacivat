@@ -34,37 +34,48 @@
 //!     `default_transaction_read_only`; every snapshot is
 //!     `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` then
 //!     `SET LOCAL search_path = pg_catalog, pg_temp` (R-M4-46).
-//!   - MySQL and MariaDB: `SET SESSION TRANSACTION READ ONLY`, `SET time_zone = '+00:00'` and
-//!     the statement timeout (MySQL `max_execution_time`, SELECTs only; MariaDB
-//!     `max_statement_time`). Before every snapshot the session's read-only variable must read
-//!     1 (`@@session.transaction_read_only`; MariaDB before 11.1 `@@session.tx_read_only`), else
-//!     [`MetaError::ReadOnlyNotEnforced`]; then
-//!     `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY`.
+//!   - MySQL and MariaDB: `SET NAMES utf8mb4`, `SET SESSION TRANSACTION READ ONLY`,
+//!     `SET time_zone = '+00:00'` and the statement timeout (MySQL `max_execution_time`,
+//!     SELECTs only; MariaDB `max_statement_time`). Before every snapshot the session's
+//!     read-only variable must read 1 (`@@session.transaction_read_only`; MariaDB before 11.1
+//!     `@@session.tx_read_only`) and `character_set_client`, `character_set_connection` and
+//!     `character_set_results` must read `utf8mb4`, else [`MetaError::ReadOnlyNotEnforced`];
+//!     then `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY`.
 //!   - SQLite: the main file opened read-only (`SQLITE_OPEN_READ_ONLY`, the flag form of
 //!     `mode=ro`) straight through the driver, without the user-facing authorizer (R-M4-38);
 //!     every snapshot is a deferred `BEGIN`. Attached files go through
 //!     [`MetaConn::attach_read_only`]: SQLite opens them with the main file's flags.
 //!
-//!   A lost connection answers [`MetaError::ConnectionLost`] and is dropped; nothing is retried
-//!   inside a snapshot. The next [`MetaConn::begin_snapshot`] connects again and runs the
-//!   set-up (and the MySQL assertion) again. The connection closes when the `MetaConn` drops,
-//!   and when the profile disconnects (`close_all`), whichever comes first; its permit goes
-//!   back only after the close.
+//!   A text whose first keyword is transaction or session control never reaches the
+//!   connection ([`check_own_text`]). A lost connection answers [`MetaError::ConnectionLost`]
+//!   and is dropped; nothing is retried inside a snapshot. A snapshot whose transaction ended
+//!   under it (a MySQL deadlock) answers `ConnectionLost` too. The next
+//!   [`MetaConn::begin_snapshot`] connects again and runs the set-up (and the MySQL assertion)
+//!   again. A snapshot dropped without its commit is rolled back at once, on the runtime. The
+//!   connection closes when the `MetaConn` drops, and when the profile disconnects
+//!   (`close_all`), whichever comes first; its permit goes back only after the close.
 //! - **The user's session** (single-session profiles, SQLite `:memory:`, and SQLite's `temp`
-//!   schema, alg/02 HV-INTRO-08 step 4): the reads run on the default session, through its
-//!   queue, only while it is idle and outside a transaction. [`SessionManager::meta_conn`]
-//!   waits while the session runs a request and answers [`MetaError::Busy`] while it holds a
-//!   transaction or a cursor (alg/02 HV-INTRO-01 edge 10); every read checks again before and
-//!   after it runs.
-//! - **A joined session** ([`MetaConn::join`], R-M4-29).
+//!   schema, alg/02 HV-INTRO-08 step 4). [`SessionManager::meta_conn`] waits while the
+//!   default session runs a request and answers [`MetaError::Busy`] while it holds a
+//!   transaction or a cursor (alg/02 HV-INTRO-01 edge 10). Every read is a
+//!   `Request::MetaRead` (ruling R-W1-9): the actor checks the session when it takes the
+//!   request, in the same step that runs it, and refuses (`Busy`, nothing sent) unless the
+//!   transaction is idle with no cursor (MySQL: no `LOCK TABLES`, `autocommit` on, and the
+//!   connection's character sets `utf8mb4`). Otherwise it runs the read inside Hacivat's own
+//!   read-only transaction and rolls it back: PostgreSQL `BEGIN ISOLATION LEVEL REPEATABLE
+//!   READ READ ONLY`, `SET LOCAL search_path = pg_catalog, pg_temp`, `SET LOCAL
+//!   statement_timeout`; MySQL and MariaDB `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ
+//!   ONLY`; SQLite a deferred `BEGIN` (none on a read-only profile's connection, whose
+//!   authorizer refuses `BEGIN` and whose engine is read-only already). It never goes through
+//!   the user's run path, the transaction modes, the verdicts, the history or the activity,
+//!   and never moves the console's run context.
+//! - **A joined session** ([`MetaConn::join`], R-M4-29): a `Request::MetaRead` the actor runs
+//!   only while the `Job(DdlApply | DriftCheck)` session is inside its transaction; nothing but
+//!   the read is sent.
 //!
-//! On the last two the server enforces nothing, so every text must pass [`check_read_text`]
-//! (the carries' allowlist, the primary guard there; check-deps is defence in depth, R-W0-2):
-//! exactly one statement whose first keyword, after comments, is `SELECT`, `WITH`, `SHOW`,
-//! `TABLE` or `VALUES`; no MySQL executable comment (`/*!`, `/*M!`) anywhere; no nested block
-//! comment before the keyword; no `;` but one at the very end; and no `INSERT`, `UPDATE`,
-//! `DELETE`, `MERGE` or `INTO` word anywhere (a data-modifying `WITH`, `SELECT … INTO`,
-//! `FOR UPDATE`).
+//! On the last two the server enforces nothing for the joined path, and the user's session is
+//! shared, so every text must also pass [`check_read_text_for`] (the carries' allowlist on
+//! tokens of the project's lexer; check-deps is defence in depth, R-W0-2), in the actor.
 //!
 //! Every value comes back as text: text, JSON and XML as the server sent them, bytes as UTF-8
 //! when they are, any other value as `hacivat_values::valfmt::raw_text` writes it (packs that
@@ -74,19 +85,20 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
 use hacivat_driver::{
-    DriverConnect, Endpoint, InsecureAuth, Phase, Protocol, QueryEvent, QuerySpec, RawConn,
-    RawError, RawErrorKind, ServerInfo, ServerMessage, TxStatus, classify,
+    DriverConnect, Endpoint, ExecSummary, InsecureAuth, Phase, Protocol, QueryEvent, QuerySpec,
+    RawConn, RawError, RawErrorKind, ServerInfo, ServerMessage, TxStatus, classify,
 };
-use hacivat_proto::{DbmsKind, ProfileId};
-use hacivat_results::{Completeness, FetchPolicy, MemoryBudget, ResultId, ResultStore};
+use hacivat_proto::{DbmsKind, ErrClass, ProfileId};
 use hacivat_values::valfmt::{BinaryDisplay, ColumnFacts, RawText, raw_text};
 use hacivat_values::{BindValue, LogicalType, ResultSchema, ValueRef};
+use sql_dialect::{DialectCtx, DialectId, LexModes, ServerVersion, lex_profile};
+use sql_lexer::{LexState, Lexed, TokenKind, lex};
 use tokio::runtime::Handle;
 use tokio::sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -94,11 +106,12 @@ use tokio_util::sync::CancellationToken;
 use crate::budget::BudgetPermit;
 use crate::pipeline::LiveConnection;
 use crate::profile::ProfileEndpoint;
+use crate::session::actor::Core;
 use crate::session::recovery::connection_ending;
+use crate::session::schema::{Family, family};
 use crate::session::{
-    ErrorPolicy, ExecError, ExecErrorKind, JobKind, ObserverRef, RunEvent, RunId, RunObserver,
-    RunSpec, RunUnit, SessionEffects, SessionHandle, SessionKind, SessionManager, SessionState,
-    UnitId, UnitVerdict,
+    DenyLayer, ExecError, ExecErrorKind, JobKind, MetaRead, Reply, Request, SessionHandle,
+    SessionKind, SessionManager, SessionState, TxError,
 };
 
 /// What metadata connection to open.
@@ -208,9 +221,12 @@ pub const META_POOL_MAX: usize = 3;
 /// connection.
 pub const META_APPLICATION_NAME: &str = "Hacivat (metadata)";
 
+/// The statement timeout of a joined read (the job's transaction has its own deadline).
+const JOINED_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// The per-database cap of a profile's metadata connections (1 by default, at most
 /// [`META_POOL_MAX`]); a request over the cap waits for a connection of the same database to
-/// drop.
+/// drop. `None` is the profile's database (review A M3: one key for one database).
 pub struct MetaPools {
     size: AtomicUsize,
     slots: Mutex<HashMap<Option<String>, Arc<Semaphore>>>,
@@ -306,14 +322,18 @@ impl MetaConn {
     /// `Job(DdlApply | DriftCheck)` session (R-M4-29); refused on any other session.
     ///
     /// Accepted only for a usable `Job(_, DdlApply | DriftCheck)` session inside a transaction
-    /// (`TxStatus::InTx`): a job session has no user, so its transaction is Hacivat's. Every
-    /// other kind (`Console`, `Editor`, `Introspection`, `Service`, an export or import job)
-    /// and a job outside a transaction answer [`MetaError::NotJoinable`]. The SQLite writer
-    /// while an M7 apply holds it has no seam yet: it is refused too (M7 adds it).
+    /// (`TxStatus::InTx`): a job session has no user, so its transaction is Hacivat's (the
+    /// session's kind decides, not `TxState::owner`: a job begins its transaction with its own
+    /// statements). Every other kind (`Console`, `Editor`, `Introspection`, `Service`, an
+    /// export or import job) and a job outside a transaction answer
+    /// [`MetaError::NotJoinable`]; the actor checks again when it takes each read. The SQLite
+    /// writer while an M7 apply holds it has no seam yet: it is refused too (M7 adds it).
     pub fn join(session: &SessionHandle) -> Result<MetaConn, MetaError> {
         let on = OnSession {
             handle: session.clone(),
             joined: true,
+            timeout: JOINED_TIMEOUT,
+            dbms: DbmsKind::Unknown,
         };
         on.check_open()?;
         Ok(MetaConn {
@@ -360,7 +380,9 @@ impl MetaConn {
                 return Err(MetaError::Unavailable);
             };
             let binds = [text_bind(path), text_bind(schema)];
-            own.read("ATTACH DATABASE ? AS ?", &binds).await.map(drop)
+            own.read_outside("ATTACH DATABASE ? AS ?", &binds)
+                .await
+                .map(drop)
         })
     }
 
@@ -378,7 +400,7 @@ impl MetaConn {
                 return Err(MetaError::Unavailable);
             }
             let rows = own
-                .read("SELECT pg_current_xact_id_if_assigned() IS NOT NULL", &[])
+                .read_outside("SELECT pg_current_xact_id_if_assigned() IS NOT NULL", &[])
                 .await?;
             Ok(first_cell(&rows) == Some("true"))
         })
@@ -396,8 +418,8 @@ impl Drop for MetaConn {
 
 /// One snapshot of a [`MetaConn`]: every [`rows`](Self::rows) call reads the same catalog
 /// state; [`commit`](Self::commit) ends it (a read-only transaction's commit writes nothing).
-/// Dropped without a commit, the snapshot is rolled back before the connection reads again
-/// (or closes).
+/// Dropped without a commit, the snapshot is rolled back at once on the runtime (review B I4:
+/// no read transaction, and no lock, outlives it).
 pub struct SnapshotTxn<'c> {
     conn: Option<&'c mut MetaConn>,
 }
@@ -419,13 +441,14 @@ impl<'c> SnapshotTxn<'c> {
             };
             match &mut conn.via {
                 Via::Offline => Err(MetaError::Unavailable),
-                Via::Own(own) => own.read(q.sql(), q.binds()).await,
+                Via::Own(own) => own.read_in_snapshot(q.sql(), q.binds()).await,
                 Via::Session(s) => s.read(q).await,
             }
         })
     }
 
-    /// Ends the snapshot (a joined connection or the user's session sends nothing).
+    /// Ends the snapshot (a joined connection or the user's session sends nothing: each of
+    /// their reads was its own transaction step).
     pub fn commit(mut self) -> BoxFuture<'c, Result<(), MetaError>> {
         let conn = self.conn.take();
         Box::pin(async move {
@@ -435,7 +458,7 @@ impl<'c> SnapshotTxn<'c> {
             match &mut conn.via {
                 Via::Offline => Err(MetaError::Unavailable),
                 Via::Own(own) => own.commit().await,
-                Via::Session(s) => s.check_after(),
+                Via::Session(_) => Ok(()),
             }
         })
     }
@@ -446,7 +469,7 @@ impl Drop for SnapshotTxn<'_> {
         if let Some(conn) = self.conn.take()
             && let Via::Own(own) = &mut conn.via
         {
-            own.abandoned = true;
+            own.abandon();
         }
     }
 }
@@ -471,15 +494,22 @@ impl SessionManager {
                 &profile.endpoint,
                 ProfileEndpoint::File { path, .. } if path.as_os_str() == ":memory:"
             );
+            let timeout = spec.statement_timeout;
             match profile.engine {
                 DbmsKind::Sqlite if memory || spec.database.as_deref() == Some("temp") => {
-                    self.meta_on_user_session(profile.engine, cancel).await
+                    self.meta_on_user_session(profile.engine, timeout, cancel)
+                        .await
                 }
                 DbmsKind::Sqlite => self.meta_sqlite(spec, cancel).await,
                 DbmsKind::Postgres | DbmsKind::MySql | DbmsKind::MariaDb => {
                     if self.meta_single() {
-                        self.meta_on_user_session(profile.engine, cancel).await
+                        self.meta_on_user_session(profile.engine, timeout, cancel)
+                            .await
                     } else {
+                        let spec = MetaConnSpec {
+                            database: spec.database.or_else(|| profile.database.clone()),
+                            ..spec
+                        };
                         self.meta_network(spec, cancel).await
                     }
                 }
@@ -500,6 +530,7 @@ impl SessionManager {
     async fn meta_on_user_session(
         &self,
         engine: DbmsKind,
+        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<MetaConn, MetaError> {
         let Some(handle) = self.default_session() else {
@@ -508,6 +539,8 @@ impl SessionManager {
         let on = OnSession {
             handle,
             joined: false,
+            timeout,
+            dbms: engine,
         };
         on.wait_idle(cancel).await?;
         let version = cancellable(cancel, on.handle.classifier_context())
@@ -554,7 +587,7 @@ impl SessionManager {
         let manager = self.meta_manager();
         // The connect itself is bounded by the profile's timeout and never dropped half-way (a
         // dropped one could leave its cleanup guards behind); a `close_all` meanwhile fails the
-        // pipeline's connect, or the watcher closes the connection at once.
+        // pipeline's connect, or is seen right after it.
         let (conn, flavor, server) = connect_network(self, &target).await?;
         if closed.is_cancelled() {
             conn.close().await;
@@ -617,12 +650,16 @@ impl SessionManager {
         manager: Weak<SessionManager>,
     ) -> MetaConn {
         let rt = self.meta_runtime();
-        let cell = Arc::new(tokio::sync::Mutex::new(Some(conn)));
+        let cell = Arc::new(tokio::sync::Mutex::new(Slot {
+            conn: Some(conn),
+            snapshot: None,
+            in_flight: false,
+        }));
         let watched = cell.clone();
         let until = closed.clone();
         rt.spawn(async move {
             until.cancelled().await;
-            let taken = watched.lock().await.take();
+            let taken = watched.lock().await.conn.take();
             if let Some(conn) = taken {
                 conn.close().await;
             }
@@ -641,8 +678,8 @@ impl SessionManager {
                 target,
                 flavor,
                 rt,
-                abandoned: false,
-                in_flight: false,
+                next_snapshot: 0,
+                open: None,
             })),
         }
     }
@@ -689,35 +726,53 @@ impl Conn {
     }
 }
 
+/// The connection and its state, shared by the `MetaConn`, its watcher and a dropped
+/// snapshot's rollback.
+struct Slot {
+    /// `None` once lost (the next snapshot connects again) or closed.
+    conn: Option<Conn>,
+    /// The snapshot whose transaction is open on the connection.
+    snapshot: Option<u64>,
+    /// A statement's future was dropped before it ended: the connection's state is unknown.
+    in_flight: bool,
+}
+
+impl Slot {
+    /// Drops the connection (closed in the background) and what it held.
+    fn discard(&mut self, rt: &Handle) {
+        if let Some(conn) = self.conn.take() {
+            rt.spawn(conn.close());
+        }
+        self.snapshot = None;
+        self.in_flight = false;
+    }
+}
+
 struct Own {
-    /// The connection; `None` once lost (the next snapshot connects again) or closed.
-    cell: Arc<tokio::sync::Mutex<Option<Conn>>>,
+    cell: Arc<tokio::sync::Mutex<Slot>>,
     /// Cancelled by `close_all` (its parent) or by the `MetaConn`'s drop.
     closed: CancellationToken,
     manager: Weak<SessionManager>,
     target: Target,
     flavor: Flavor,
     rt: Handle,
-    /// A snapshot was dropped without its commit: roll back before the next read.
-    abandoned: bool,
-    /// A read's future was dropped before it ended: the connection's state is unknown.
-    in_flight: bool,
+    next_snapshot: u64,
+    /// The snapshot a live `SnapshotTxn` holds.
+    open: Option<u64>,
 }
 
 impl Own {
     /// The connection, locked; a lost one is connected again when `reconnect`.
-    async fn conn(&mut self, reconnect: bool) -> Result<OwnedMutexGuard<Option<Conn>>, MetaError> {
+    async fn conn(&mut self, reconnect: bool) -> Result<OwnedMutexGuard<Slot>, MetaError> {
         if self.closed.is_cancelled() {
             return Err(MetaError::Unavailable);
         }
-        let mut guard = self.cell.clone().lock_owned().await;
-        if std::mem::take(&mut self.in_flight)
-            && let Some(conn) = guard.take()
-        {
-            // A dropped query future leaves the connection mid-statement: never reused.
-            self.rt.spawn(conn.close());
+        let mut slot = self.cell.clone().lock_owned().await;
+        if slot.in_flight {
+            // A dropped statement future leaves the connection mid-statement: never reused.
+            slot.discard(&self.rt);
         }
-        if guard.is_none() {
+        if slot.conn.is_none() {
             if !reconnect {
                 return Err(MetaError::ConnectionLost);
             }
@@ -734,127 +789,176 @@ impl Own {
                 fresh.close().await;
                 return Err(MetaError::Unavailable);
             }
-            self.abandoned = false;
-            *guard = Some(fresh);
+            slot.conn = Some(fresh);
+            slot.snapshot = None;
         }
-        Ok(guard)
-    }
-
-    /// After an operation: a lost connection is dropped (closed in the background).
-    fn settle<T>(
-        &self,
-        guard: &mut OwnedMutexGuard<Option<Conn>>,
-        done: Result<T, MetaError>,
-    ) -> Result<T, MetaError> {
-        if matches!(done, Err(MetaError::ConnectionLost))
-            && let Some(conn) = guard.take()
-        {
-            self.rt.spawn(conn.close());
-        }
-        done
-    }
-
-    /// Trusted control text, unless the profile disconnects first.
-    async fn control(
-        &mut self,
-        guard: &mut OwnedMutexGuard<Option<Conn>>,
-        sql: &str,
-    ) -> Result<(), MetaError> {
-        let kind = self.kind();
-        let Some(conn) = guard.as_mut() else {
-            return Err(MetaError::ConnectionLost);
-        };
-        self.in_flight = true;
-        let done = guarded(&self.closed, conn.raw().batch(sql))
-            .await
-            .and_then(|r| r.map_err(|e| meta_error(kind, &e)));
-        self.in_flight = false;
-        self.settle(guard, done)
-    }
-
-    /// One typed read, unless the profile disconnects first.
-    async fn query(
-        &mut self,
-        guard: &mut OwnedMutexGuard<Option<Conn>>,
-        sql: &str,
-        binds: &[BindValue],
-    ) -> Result<Rows, MetaError> {
-        let kind = self.kind();
-        let Some(conn) = guard.as_mut() else {
-            return Err(MetaError::ConnectionLost);
-        };
-        self.in_flight = true;
-        let done = guarded(&self.closed, read_rows(conn.raw(), kind, sql, binds))
-            .await
-            .and_then(|r| r);
-        self.in_flight = false;
-        self.settle(guard, done)
+        Ok(slot)
     }
 
     fn kind(&self) -> DbmsKind {
         flavor_kind(self.flavor)
     }
 
+    /// After an operation: a lost connection is dropped (closed in the background).
+    fn settle<T>(&self, slot: &mut Slot, done: Result<T, MetaError>) -> Result<T, MetaError> {
+        if matches!(done, Err(MetaError::ConnectionLost)) {
+            slot.discard(&self.rt);
+        }
+        done
+    }
+
+    /// Trusted control text, unless the profile disconnects first.
+    async fn control(&self, slot: &mut Slot, sql: &str) -> Result<(), MetaError> {
+        let kind = self.kind();
+        let Some(conn) = slot.conn.as_mut() else {
+            return Err(MetaError::ConnectionLost);
+        };
+        slot.in_flight = true;
+        let done = guarded(&self.closed, conn.raw().batch(sql))
+            .await
+            .and_then(|r| r.map_err(|e| meta_error(kind, &e)));
+        slot.in_flight = false;
+        self.settle(slot, done)
+    }
+
+    /// One typed read, unless the profile disconnects first.
+    async fn query(
+        &self,
+        slot: &mut Slot,
+        sql: &str,
+        binds: &[BindValue],
+    ) -> Result<Rows, MetaError> {
+        let kind = self.kind();
+        let Some(conn) = slot.conn.as_mut() else {
+            return Err(MetaError::ConnectionLost);
+        };
+        slot.in_flight = true;
+        let done = guarded(&self.closed, read_rows(conn.raw(), kind, sql, binds))
+            .await
+            .and_then(|r| r.map_err(|e| e.meta(kind)));
+        slot.in_flight = false;
+        self.settle(slot, done)
+    }
+
     /// The transaction status the driver reports after the last round trip.
-    fn tx(guard: &mut OwnedMutexGuard<Option<Conn>>) -> TxStatus {
-        guard
+    fn tx(slot: &mut Slot) -> TxStatus {
+        slot.conn
             .as_mut()
             .map_or(TxStatus::Idle, |c| c.raw().tx_status())
     }
 
     async fn begin(&mut self) -> Result<(), MetaError> {
-        let mut guard = self.conn(true).await?;
-        // A snapshot dropped without its commit, or a begin cut short: never read on in it.
-        if std::mem::take(&mut self.abandoned) || Self::tx(&mut guard) != TxStatus::Idle {
-            self.control(&mut guard, "ROLLBACK").await?;
+        let mut slot = self.conn(true).await?;
+        // A snapshot left open (its rollback not run yet), or a begin cut short: never read on
+        // in it.
+        if slot.snapshot.is_some() || Self::tx(&mut slot) != TxStatus::Idle {
+            self.control(&mut slot, "ROLLBACK").await?;
+            slot.snapshot = None;
         }
         match self.flavor {
             Flavor::Pg => {
-                self.control(
-                    &mut guard,
-                    "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
-                )
-                .await?;
-                self.control(&mut guard, "SET LOCAL search_path = pg_catalog, pg_temp")
+                self.control(&mut slot, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                    .await?;
+                self.control(&mut slot, "SET LOCAL search_path = pg_catalog, pg_temp")
                     .await?;
             }
             Flavor::MySql | Flavor::MariaDb { .. } => {
                 let rows = self
-                    .query(&mut guard, read_only_probe(self.flavor), &[])
+                    .query(&mut slot, mysql_session_probe(self.flavor), &[])
                     .await?;
-                if first_cell(&rows) != Some("1") {
+                if !mysql_session_confirmed(&rows) {
                     return Err(MetaError::ReadOnlyNotEnforced);
                 }
                 self.control(
-                    &mut guard,
+                    &mut slot,
                     "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
                 )
                 .await?;
             }
-            Flavor::Sqlite => self.control(&mut guard, "BEGIN").await?,
+            Flavor::Sqlite => self.control(&mut slot, "BEGIN").await?,
         }
-        if Self::tx(&mut guard) != TxStatus::InTx {
+        if Self::tx(&mut slot) != TxStatus::InTx {
             // Whatever opened, it is not the read-only transaction this snapshot needs.
-            if let Some(conn) = guard.take() {
-                self.rt.spawn(conn.close());
-            }
+            slot.discard(&self.rt);
             return Err(MetaError::ReadOnlyNotEnforced);
         }
+        self.next_snapshot += 1;
+        slot.snapshot = Some(self.next_snapshot);
+        self.open = Some(self.next_snapshot);
         Ok(())
     }
 
-    async fn read(&mut self, sql: &str, binds: &[BindValue]) -> Result<Rows, MetaError> {
-        let mut guard = self.conn(false).await?;
-        self.query(&mut guard, sql, binds).await
+    /// A read of the open snapshot: refused when its text is transaction or session control,
+    /// and `ConnectionLost` (the connection dropped) when the transaction ended under it.
+    async fn read_in_snapshot(
+        &mut self,
+        sql: &str,
+        binds: &[BindValue],
+    ) -> Result<Rows, MetaError> {
+        check_own_text(sql, self.kind())?;
+        let mut slot = self.conn(false).await?;
+        if slot.snapshot.is_none() || slot.snapshot != self.open {
+            return Err(MetaError::ConnectionLost);
+        }
+        let rows = self.query(&mut slot, sql, binds).await?;
+        if Self::tx(&mut slot) != TxStatus::InTx {
+            // A MySQL deadlock or `innodb_rollback_on_timeout` ended it (review A M5).
+            slot.discard(&self.rt);
+            return Err(MetaError::ConnectionLost);
+        }
+        Ok(rows)
+    }
+
+    /// A read outside a snapshot (Hacivat's own text: `ATTACH`, the XID probe).
+    async fn read_outside(&mut self, sql: &str, binds: &[BindValue]) -> Result<Rows, MetaError> {
+        let mut slot = self.conn(false).await?;
+        self.query(&mut slot, sql, binds).await
     }
 
     async fn commit(&mut self) -> Result<(), MetaError> {
-        let mut guard = self.conn(false).await?;
-        self.control(&mut guard, "COMMIT").await?;
-        if Self::tx(&mut guard) != TxStatus::Idle {
+        let open = self.open.take();
+        let mut slot = self.conn(false).await?;
+        if slot.snapshot.is_none() || slot.snapshot != open {
+            return Err(MetaError::ConnectionLost);
+        }
+        slot.snapshot = None;
+        self.control(&mut slot, "COMMIT").await?;
+        if Self::tx(&mut slot) != TxStatus::Idle {
+            slot.discard(&self.rt);
             return Err(MetaError::ReadOnlyNotEnforced);
         }
         Ok(())
+    }
+
+    /// A snapshot dropped without its commit: rolled back at once on the runtime (or the
+    /// connection closed, when a statement of it was cut short or the rollback fails). A
+    /// later snapshot that took the connection first already rolled it back.
+    fn abandon(&mut self) {
+        let Some(id) = self.open.take() else {
+            return;
+        };
+        let cell = self.cell.clone();
+        let rt = self.rt.clone();
+        let closed = self.closed.clone();
+        self.rt.spawn(async move {
+            let mut slot = cell.lock().await;
+            if slot.snapshot != Some(id) {
+                return;
+            }
+            slot.snapshot = None;
+            if slot.in_flight || closed.is_cancelled() {
+                slot.discard(&rt);
+                return;
+            }
+            let Some(conn) = slot.conn.as_mut() else {
+                return;
+            };
+            let rolled = conn.raw().batch("ROLLBACK").await;
+            let idle = conn.raw().tx_status() == TxStatus::Idle;
+            if rolled.is_err() || !idle {
+                slot.discard(&rt);
+            }
+        });
     }
 }
 
@@ -868,14 +972,30 @@ fn flavor_kind(flavor: Flavor) -> DbmsKind {
     }
 }
 
-/// The MySQL/MariaDB statement that reads whether the session is read-only (1).
-fn read_only_probe(flavor: Flavor) -> &'static str {
+/// The MySQL/MariaDB statement that reads the session's read-only flag (1) and its three
+/// character sets (`utf8mb4`, the T4 carry).
+fn mysql_session_probe(flavor: Flavor) -> &'static str {
     match flavor {
         Flavor::MariaDb {
             transaction_read_only: false,
-        } => "SELECT @@session.tx_read_only",
-        _ => "SELECT @@session.transaction_read_only",
+        } => {
+            "SELECT @@session.tx_read_only, @@session.character_set_client, \
+             @@session.character_set_connection, @@session.character_set_results"
+        }
+        _ => {
+            "SELECT @@session.transaction_read_only, @@session.character_set_client, \
+             @@session.character_set_connection, @@session.character_set_results"
+        }
     }
+}
+
+/// The probe answered read-only and `utf8mb4` three times.
+fn mysql_session_confirmed(rows: &Rows) -> bool {
+    let Some(row) = rows.rows.first() else {
+        return false;
+    };
+    let cell = |i: usize| row.get(i).and_then(|c| c.as_deref());
+    cell(0) == Some("1") && (1..4).all(|i| cell(i) == Some("utf8mb4"))
 }
 
 /// Connects a network profile for metadata and runs the session set-up.
@@ -923,11 +1043,13 @@ async fn set_up(raw: &mut dyn RawConn, flavor: Flavor, timeout: Duration) -> Res
     let statements: Vec<String> = match flavor {
         Flavor::Pg => vec![format!("SET statement_timeout = {millis}")],
         Flavor::MySql => vec![
+            "SET NAMES utf8mb4".into(),
             "SET SESSION TRANSACTION READ ONLY".into(),
             "SET time_zone = '+00:00'".into(),
             format!("SET SESSION max_execution_time = {millis}"),
         ],
         Flavor::MariaDb { .. } => vec![
+            "SET NAMES utf8mb4".into(),
             "SET SESSION TRANSACTION READ ONLY".into(),
             "SET time_zone = '+00:00'".into(),
             format!(
@@ -986,13 +1108,29 @@ async fn connect_sqlite(manager: &SessionManager) -> Result<(Conn, ServerInfo), 
     Ok((Conn::Raw(raw), server))
 }
 
+/// Why a typed read failed.
+enum ReadFail {
+    Raw(RawError),
+    /// The answer had no shape a catalog read has (a suspension, a cut cell).
+    Shape,
+}
+
+impl ReadFail {
+    fn meta(self, kind: DbmsKind) -> MetaError {
+        match self {
+            ReadFail::Raw(e) => meta_error(kind, &e),
+            ReadFail::Shape => MetaError::Unavailable,
+        }
+    }
+}
+
 /// One typed query with binds, its rows as text (the cell cap off).
 async fn read_rows(
     raw: &mut dyn RawConn,
     kind: DbmsKind,
     sql: &str,
     binds: &[BindValue],
-) -> Result<Rows, MetaError> {
+) -> Result<Rows, ReadFail> {
     let spec = QuerySpec {
         sql,
         binds,
@@ -1004,11 +1142,11 @@ async fn read_rows(
         cell_cap: u32::MAX,
         max_result_sets: 1,
     };
-    raw.query(spec).await.map_err(|e| meta_error(kind, &e))?;
+    raw.query(spec).await.map_err(ReadFail::Raw)?;
     let mut out = Rows::default();
     let mut facts: Vec<Facts> = Vec::new();
     loop {
-        match raw.next_event().await.map_err(|e| meta_error(kind, &e))? {
+        match raw.next_event().await.map_err(ReadFail::Raw)? {
             QueryEvent::ResultStart(schema) => {
                 out.columns = schema.columns.iter().map(|c| c.name.clone()).collect();
                 facts = Facts::of(&schema);
@@ -1025,7 +1163,7 @@ async fn read_rows(
             QueryEvent::Done(_) => return Ok(out),
             QueryEvent::ResultEnd(_) | QueryEvent::Notice(_) => {}
             // A non-suspendable query never suspends; one that does is not a catalog read.
-            QueryEvent::Suspended => return Err(MetaError::Unavailable),
+            QueryEvent::Suspended => return Err(ReadFail::Shape),
         }
     }
 }
@@ -1048,11 +1186,11 @@ impl Facts {
 }
 
 /// A cell as text (module docs); `None` for SQL NULL.
-fn cell_text(v: ValueRef<'_>, f: &Facts, engine: DbmsKind) -> Result<Option<Arc<str>>, MetaError> {
+fn cell_text(v: ValueRef<'_>, f: &Facts, engine: DbmsKind) -> Result<Option<Arc<str>>, ReadFail> {
     let text = match v {
         ValueRef::Null => return Ok(None),
         // The cap is off: a cut value can only be one past 4 GiB, never a catalog fact.
-        ValueRef::Truncated(_) => return Err(MetaError::Unavailable),
+        ValueRef::Truncated(_) => return Err(ReadFail::Shape),
         ValueRef::Bytes(b) => match std::str::from_utf8(b) {
             Ok(s) => return Ok(Some(Arc::from(s))),
             Err(_) => v,
@@ -1085,13 +1223,7 @@ fn meta_error(kind: DbmsKind, e: &RawError) -> MetaError {
             let Some(message) = e.server.clone() else {
                 return MetaError::Unavailable;
             };
-            if is_statement_timeout(kind, &message) {
-                return MetaError::Timeout;
-            }
-            MetaError::Server {
-                sqlstate: message.sqlstate.as_deref().map(Arc::from),
-                message,
-            }
+            server_error(kind, message)
         }
         RawErrorKind::Io(_)
         | RawErrorKind::Protocol
@@ -1101,40 +1233,48 @@ fn meta_error(kind: DbmsKind, e: &RawError) -> MetaError {
     }
 }
 
-/// The server's statement-timeout error: PostgreSQL `57014` (no metadata connection is ever
+/// The server's refusal, or its statement timeout.
+fn server_error(kind: DbmsKind, message: ServerMessage) -> MetaError {
+    if is_statement_timeout(kind, &message) {
+        return MetaError::Timeout;
+    }
+    MetaError::Server {
+        sqlstate: message.sqlstate.as_deref().map(Arc::from),
+        message,
+    }
+}
+
+/// The server's statement-timeout error: PostgreSQL `57014` (no metadata read is ever
 /// cancelled otherwise), MySQL 3024 (`ER_QUERY_TIMEOUT`), MariaDB 1969
-/// (`ER_STATEMENT_TIMEOUT`).
+/// (`ER_STATEMENT_TIMEOUT`). An unknown engine (a joined read) takes any of them.
 fn is_statement_timeout(kind: DbmsKind, m: &ServerMessage) -> bool {
+    let pg = m.sqlstate.as_deref() == Some("57014");
+    let my = matches!(m.vendor_code, Some(3024 | 1969));
     match kind {
-        DbmsKind::Postgres => m.sqlstate.as_deref() == Some("57014"),
-        DbmsKind::MySql | DbmsKind::MariaDb => matches!(m.vendor_code, Some(3024 | 1969)),
+        DbmsKind::Postgres => pg,
+        DbmsKind::MySql | DbmsKind::MariaDb => my,
+        DbmsKind::Unknown => pg || my,
         _ => false,
     }
 }
 
 // ---------------------------------------------------------------------------------------------
-// Reads on a session (the user's idle one, or a joined job)
+// Reads on a session (the user's idle one, or a joined job): `Request::MetaRead`
 
 struct OnSession {
     handle: SessionHandle,
     /// A joined `Job(DdlApply | DriftCheck)` transaction (R-M4-29); else the user's session.
     joined: bool,
+    /// The user's path: the server-side limit of each read (PostgreSQL).
+    timeout: Duration,
+    /// The engine, when known (the user's path).
+    dbms: DbmsKind,
 }
 
 impl OnSession {
-    /// Whether the session may be read on now: a joined job inside its transaction, or the
-    /// user's session idle outside one.
+    /// Whether the session may be read on now (a fast answer; the actor decides when it takes
+    /// the read): a joined job inside its transaction, or the user's session idle outside one.
     fn check_open(&self) -> Result<(), MetaError> {
-        self.check(true)
-    }
-
-    /// After a read: a joined job still inside its transaction, the user's session still
-    /// outside one (it may have taken its next request meanwhile).
-    fn check_after(&self) -> Result<(), MetaError> {
-        self.check(false)
-    }
-
-    fn check(&self, idle: bool) -> Result<(), MetaError> {
         let s = self.handle.state.borrow();
         if !usable(&s.state) {
             return Err(if self.joined {
@@ -1153,10 +1293,7 @@ impl OnSession {
             }
             return Ok(());
         }
-        if (idle && s.state != SessionState::Idle)
-            || s.tx.status != TxStatus::Idle
-            || s.cursor.is_some()
-        {
+        if s.state != SessionState::Idle || s.tx.status != TxStatus::Idle || s.cursor.is_some() {
             return Err(MetaError::Busy);
         }
         Ok(())
@@ -1185,18 +1322,29 @@ impl OnSession {
         }
     }
 
+    /// One read as a `Request::MetaRead`: the actor checks the session and the text when it
+    /// takes it, and runs it in one step.
     async fn read(&mut self, q: MetaQuery<'_>) -> Result<Rows, MetaError> {
         if self.joined && !q.joinable() {
             return Err(MetaError::NotJoinable);
         }
-        check_read_text(q.sql())?;
         self.check_open()?;
-        let rows = run_on(&self.handle, q).await?;
-        // The user's session must still be outside a transaction (a request queued before this
-        // read may have opened one): else the rows are dropped, `Busy`. A joined one must still
-        // be inside its own.
-        self.check_after()?;
-        Ok(rows)
+        let read = MetaRead {
+            sql: Arc::from(q.sql()),
+            binds: Arc::from(q.binds().to_vec()),
+            joined: self.joined,
+            timeout: self.timeout,
+        };
+        let reply = self
+            .handle
+            .submit(Request::MetaRead(read))
+            .reply
+            .await
+            .map_err(|_| MetaError::ConnectionLost)?;
+        match reply {
+            Ok(summary) => Ok(rows_of(summary)),
+            Err(e) => Err(meta_read_error(e, self.joined, self.dbms)),
+        }
     }
 }
 
@@ -1204,196 +1352,470 @@ fn usable(state: &SessionState) -> bool {
     !matches!(state, SessionState::Disconnected | SessionState::Broken(_))
 }
 
-/// Run IDs of metadata reads: the top half of the range, never the run service's.
-static NEXT_RUN: AtomicU64 = AtomicU64::new(1 << 63);
-
-/// One statement as a one-unit run on `handle` (the only typed path a session's queue takes),
-/// its rows collected.
-async fn run_on(handle: &SessionHandle, q: MetaQuery<'_>) -> Result<Rows, MetaError> {
-    let run = RunId(NEXT_RUN.fetch_add(1, Ordering::Relaxed));
-    let sql: Arc<str> = Arc::from(q.sql());
-    let unit = RunUnit {
-        id: UnitId { run, ordinal: 0 },
-        sql: sql.clone(),
-        protocol: Protocol::Extended,
-        suspendable: false,
-        binds: Arc::from(q.binds().to_vec()),
-        verdict: UnitVerdict::Unknown,
-        effects: SessionEffects::empty(),
-        // Pack text: the binds travel apart and never appear in it.
-        masked: sql,
-        max_result_sets: 1,
-        cell_cap: Some(u32::MAX),
-    };
-    let collector = Arc::new(Collector::default());
-    let spec = RunSpec {
-        run,
-        units: Arc::from(vec![unit]),
-        policy: ErrorPolicy::StopOnError,
-        fetch: FetchPolicy {
-            cell_cap: u32::MAX,
-            ..FetchPolicy::default()
-        },
-        observer: ObserverRef(collector.clone()),
-        confirm_deadline: RunSpec::CONFIRM_DEADLINE,
-        context_generation: None,
-    };
-    match handle.run(spec).reply.await {
-        Err(_) => return Err(MetaError::ConnectionLost),
-        Ok(Err(e)) => return Err(exec_error(e)),
-        Ok(Ok(_)) => {}
-    }
-    collector.rows()
-}
-
-/// A failed run as a [`MetaError`].
-fn exec_error(e: ExecError) -> MetaError {
+/// What a refused or failed `Request::MetaRead` means (the actor's refusals use existing
+/// kinds: `Tx(InProgress)` busy, `Tx(Unsupported)` not joinable, `ReadOnlyDenied(Input)` the
+/// text, any other `ReadOnlyDenied` the read-only transaction or the character sets).
+fn meta_read_error(e: ExecError, joined: bool, dbms: DbmsKind) -> MetaError {
     match e.kind {
+        ExecErrorKind::Tx(TxError::InProgress) | ExecErrorKind::QueueFull => {
+            if joined {
+                MetaError::NotJoinable
+            } else {
+                MetaError::Busy
+            }
+        }
+        ExecErrorKind::Tx(_) => MetaError::NotJoinable,
+        ExecErrorKind::ReadOnlyDenied(DenyLayer::Input) => MetaError::RefusedText,
+        ExecErrorKind::ReadOnlyDenied(_) => MetaError::ReadOnlyNotEnforced,
         ExecErrorKind::ConnectionLost { .. } | ExecErrorKind::NotConnected => {
             MetaError::ConnectionLost
         }
         ExecErrorKind::Cancelled => MetaError::Cancelled,
         ExecErrorKind::Db => match e.server {
-            Some(message) => MetaError::Server {
-                sqlstate: message.sqlstate.as_deref().map(Arc::from),
-                message,
-            },
+            Some(message) => server_error(dbms, message),
             None => MetaError::Unavailable,
         },
-        ExecErrorKind::ReadOnlyDenied(_) | ExecErrorKind::SafetyDenied(_) => MetaError::RefusedText,
         _ => MetaError::Unavailable,
     }
 }
 
-/// Collects a metadata read's one result.
-#[derive(Default)]
-struct Collector {
-    store: Mutex<Option<Arc<ResultStore>>>,
+/// The text rows of a `MetaRead`'s reply.
+fn rows_of(s: ExecSummary) -> Rows {
+    Rows {
+        columns: s.columns.into_iter().map(Arc::from).collect(),
+        rows: s
+            .rows
+            .into_iter()
+            .map(|r| r.into_iter().map(|c| c.map(Arc::from)).collect())
+            .collect(),
+    }
 }
 
-impl RunObserver for Collector {
-    fn open_result(
-        &self,
-        _: UnitId,
-        ordinal: u32,
-        schema: Arc<ResultSchema>,
-    ) -> hacivat_results::ResultWriter {
-        // Its own budget, as large as a result may be (R-M3-19's per-result cap is the grid's).
-        let budget = MemoryBudget::new(4 << 30, 4 << 30);
-        let (store, writer) = ResultStore::new(ResultId(u64::from(ordinal)), schema, budget, 0);
-        *self.store.lock().unwrap_or_else(PoisonError::into_inner) = Some(store);
-        writer
+/// The reply of a `MetaRead`: its rows as text.
+fn summary_of(rows: Rows) -> ExecSummary {
+    let n = rows.rows.len() as u64;
+    ExecSummary {
+        columns: rows.columns.iter().map(|c| c.to_string()).collect(),
+        rows: rows
+            .rows
+            .into_iter()
+            .map(|r| r.into_iter().map(|c| c.map(|c| c.to_string())).collect())
+            .collect(),
+        row_count: n,
+        ..ExecSummary::default()
+    }
+}
+
+// ## m4-t05-meta (named exception, ruling R-W1-9): the actor's half of `Request::MetaRead`,
+// called by `Core::handle` when it takes the request.
+impl Core {
+    pub(crate) async fn meta_read(&mut self, r: &MetaRead) -> Reply {
+        // The text first, with the session's own engine: nothing is sent for refused text.
+        if check_read_text_for(&r.sql, self.kind).is_err() {
+            return Err(ExecError::of(ExecErrorKind::ReadOnlyDenied(
+                DenyLayer::Input,
+            )));
+        }
+        let raw_tx = self.conn()?.tx_status();
+        if r.joined {
+            let open = self.meta_joinable
+                && self.tx.status == TxStatus::InTx
+                && raw_tx == TxStatus::InTx
+                && self.cursor.is_none();
+            if !open {
+                return Err(ExecError::of(ExecErrorKind::Tx(TxError::Unsupported)));
+            }
+            let read = self.meta_select(r).await;
+            self.observe(false);
+            return read;
+        }
+        let fam = family(self.kind);
+        let autocommit = fam != Family::MySql
+            || (self.conn()?.autocommit() == Some(true) && !self.autocommit_off);
+        let idle = self.tx.status == TxStatus::Idle
+            && raw_tx == TxStatus::Idle
+            && self.cursor.is_none()
+            && !self.table_locks
+            && autocommit;
+        if !idle {
+            return Err(ExecError::of(ExecErrorKind::Tx(TxError::InProgress)));
+        }
+        if fam == Family::MySql {
+            // The character sets the `#{ident:…}` quoting relies on (the T4 carry).
+            let probe = "SELECT @@session.character_set_client, \
+                         @@session.character_set_connection, @@session.character_set_results";
+            let kind = self.kind;
+            let got = {
+                let raw = self.conn()?;
+                read_rows(raw, kind, probe, &[]).await
+            };
+            let rows = match got {
+                Ok(rows) => rows,
+                Err(ReadFail::Raw(e)) => return Err(self.raw_error(&e, true)),
+                Err(ReadFail::Shape) => return Err(ExecError::of(ExecErrorKind::Internal)),
+            };
+            let utf8mb4 = rows.rows.first().is_some_and(|row| {
+                row.len() == 3 && row.iter().all(|c| c.as_deref() == Some("utf8mb4"))
+            });
+            if !utf8mb4 {
+                return Err(ExecError::of(ExecErrorKind::ReadOnlyDenied(
+                    DenyLayer::Protocol,
+                )));
+            }
+        }
+        let millis = r.timeout.as_millis().clamp(1, u128::from(u32::MAX));
+        let timeout = format!("SET LOCAL statement_timeout = {millis}");
+        let begin: Vec<&str> = match fam {
+            Family::Postgres => vec![
+                "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+                "SET LOCAL search_path = pg_catalog, pg_temp",
+                &timeout,
+            ],
+            Family::MySql => vec!["START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY"],
+            // A read-only profile's connection refuses `BEGIN` (its authorizer) and its engine
+            // is read-only already (`SQLITE_OPEN_READ_ONLY`, `query_only`).
+            Family::Sqlite if self.read_only => Vec::new(),
+            Family::Sqlite => vec!["BEGIN"],
+            Family::Other => return Err(ExecError::of(ExecErrorKind::Internal)),
+        };
+        let began = !begin.is_empty();
+        for sql in begin {
+            let sent = self.conn()?.batch(sql).await;
+            if let Err(e) = sent {
+                let failed = self.raw_error(&e, true);
+                let _ = self.meta_end(began).await;
+                return Err(failed);
+            }
+        }
+        if began && self.conn()?.tx_status() != TxStatus::InTx {
+            let _ = self.meta_end(began).await;
+            return Err(ExecError::of(ExecErrorKind::ReadOnlyDenied(
+                DenyLayer::Transaction,
+            )));
+        }
+        let read = self.meta_select(r).await;
+        let ended = self.meta_end(began).await;
+        match (read, ended) {
+            (Ok(rows), Ok(())) => Ok(rows),
+            (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+        }
     }
 
-    fn event(&self, _ev: &RunEvent) {}
-}
+    /// Runs the read's statement, its rows as a text summary.
+    async fn meta_select(&mut self, r: &MetaRead) -> Reply {
+        let kind = self.kind;
+        let got = {
+            let raw = self.conn()?;
+            read_rows(raw, kind, &r.sql, &r.binds).await
+        };
+        match got {
+            Ok(rows) => Ok(summary_of(rows)),
+            Err(ReadFail::Raw(e)) => Err(self.raw_error(&e, true)),
+            Err(ReadFail::Shape) => Err(ExecError::of(ExecErrorKind::Internal)),
+        }
+    }
 
-impl Collector {
-    fn rows(&self) -> Result<Rows, MetaError> {
-        let store = self
-            .store
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        // A statement without columns opened no result.
-        let Some(store) = store else {
-            return Ok(Rows::default());
-        };
-        let snap = store.snapshot();
-        if *snap.completeness() != Completeness::Complete {
-            return Err(MetaError::Unavailable);
-        }
-        let schema = snap.schema().clone();
-        let facts = Facts::of(&schema);
-        let mut out = Rows {
-            columns: schema.columns.iter().map(|c| c.name.clone()).collect(),
-            rows: Vec::with_capacity(snap.row_count() as usize),
-        };
-        for r in 0..snap.row_count() {
-            let mut row = Vec::with_capacity(facts.len());
-            for (c, f) in facts.iter().enumerate() {
-                row.push(cell_text(snap.cell(r, c as u32), f, DbmsKind::Unknown)?);
+    /// Rolls Hacivat's read transaction back. The session must be idle afterwards: otherwise
+    /// it is broken (closed and recovered by the actor), so no user statement ever runs inside
+    /// a transaction of Hacivat's.
+    async fn meta_end(&mut self, began: bool) -> Result<(), ExecError> {
+        let rolled = if began && self.live.is_some() {
+            match self.conn()?.batch("ROLLBACK").await {
+                Ok(()) => Ok(()),
+                Err(e) => Err(self.raw_error(&e, true)),
             }
-            out.rows.push(row);
+        } else {
+            Ok(())
+        };
+        let idle = self
+            .live
+            .as_mut()
+            .is_some_and(|live| live.raw().tx_status() == TxStatus::Idle);
+        if began && !idle && self.broken.is_none() {
+            self.broken = Some(ErrClass::Internal);
         }
-        Ok(out)
+        self.observe(false);
+        rolled
     }
 }
 
 // ---------------------------------------------------------------------------------------------
-// The read-text allowlist
+// The text guards (tokens of the project's lexer, I2-A / I3-B)
 
 /// The first keywords a read on a session (joined or the user's) may have.
 const READ_KEYWORDS: [&str; 5] = ["SELECT", "WITH", "SHOW", "TABLE", "VALUES"];
 
-/// Words a read never holds anywhere (a data-modifying `WITH`, `SELECT … INTO`, `FOR UPDATE`).
-const WRITE_WORDS: [&str; 5] = ["INSERT", "UPDATE", "DELETE", "MERGE", "INTO"];
+/// Words a read never holds anywhere: writes (a data-modifying `WITH`, `MERGE`), `SELECT …
+/// INTO` (a table, an outfile, variables), and statements that run other statements.
+const DENY_WORDS: [&str; 10] = [
+    "INSERT", "UPDATE", "DELETE", "MERGE", "INTO", "COPY", "CALL", "PREPARE", "DECLARE", "EXECUTE",
+];
 
-/// The allowlist of text read on a session where the server enforces nothing (module docs):
-/// `Err(RefusedText)` unless `sql` is one statement whose first keyword, after comments, is a
-/// [`READ_KEYWORDS`] word; it never holds a MySQL executable comment, a nested block comment
-/// before that keyword, a `;` but at the very end, or a [`WRITE_WORDS`] word.
-pub fn check_read_text(sql: &str) -> Result<(), MetaError> {
-    let refused = Err(MetaError::RefusedText);
-    let upper = sql.to_ascii_uppercase();
-    if upper.contains("/*!") || upper.contains("/*M!") {
-        return refused;
-    }
-    // One statement: a `;` only as the last character that is not whitespace.
-    let trimmed = sql.trim_end();
-    let body = trimmed.strip_suffix(';').unwrap_or(trimmed);
-    if body.contains(';') {
-        return refused;
-    }
-    if words(&upper).any(|w| WRITE_WORDS.contains(&w)) {
-        return refused;
-    }
-    let Some(rest) = skip_leading_comments(body) else {
-        return refused;
-    };
-    let end = rest
-        .find(|c: char| !c.is_ascii_alphabetic())
-        .unwrap_or(rest.len());
-    let (keyword, after) = rest.split_at(end);
-    if after.starts_with(|c: char| c.is_ascii_digit() || c == '_' || c == '$') {
-        return refused;
-    }
-    if READ_KEYWORDS
-        .iter()
-        .any(|k| keyword.eq_ignore_ascii_case(k))
-    {
-        Ok(())
-    } else {
-        refused
-    }
-}
+/// Functions with side effects a read-only transaction does not stop (or does not see on a
+/// joined or shared session), by exact name.
+const DENY_FUNCTIONS: [&str; 11] = [
+    "SET_CONFIG",
+    "NEXTVAL",
+    "SETVAL",
+    "PG_NOTIFY",
+    "GET_LOCK",
+    "RELEASE_ALL_LOCKS",
+    "SLEEP",
+    "BENCHMARK",
+    "PG_TERMINATE_BACKEND",
+    "PG_CANCEL_BACKEND",
+    "PG_SLEEP",
+];
 
-/// `sql` after its leading whitespace and comments; `None` for an unterminated or nested block
-/// comment (PostgreSQL nests them, MySQL does not: either reading could hide a keyword).
-fn skip_leading_comments(sql: &str) -> Option<&str> {
-    let mut rest = sql.trim_start();
-    loop {
-        if let Some(line) = rest.strip_prefix("--") {
-            rest = line
-                .split_once('\n')
-                .map_or("", |(_, after)| after)
-                .trim_start();
-        } else if let Some(block) = rest.strip_prefix("/*") {
-            let (inside, after) = block.split_once("*/")?;
-            if inside.contains("/*") {
-                return None;
+/// The same, by name prefix.
+const DENY_PREFIXES: [&str; 7] = [
+    "PG_ADVISORY",
+    "PG_TRY_ADVISORY",
+    "LO_",
+    "DBLINK",
+    "TXID_CURRENT",
+    "PG_CURRENT_XACT_ID",
+    "RELEASE_LOCK",
+];
+
+/// First keywords an own connection's snapshot never runs: they would end, nest or change the
+/// read-only transaction or the session (review B M1).
+const OWN_DENY_FIRST: [&str; 20] = [
+    "BEGIN",
+    "START",
+    "COMMIT",
+    "ROLLBACK",
+    "END",
+    "ABORT",
+    "SAVEPOINT",
+    "RELEASE",
+    "SET",
+    "PREPARE",
+    "XA",
+    "DISCARD",
+    "RESET",
+    "LOCK",
+    "UNLOCK",
+    "USE",
+    "ATTACH",
+    "DETACH",
+    "VACUUM",
+    "DO",
+];
+
+/// The lexer contexts `kind`'s text is checked in. Every one must accept it: a text two
+/// readings of the same engine (a version's numbers, a session's quoting modes) could read
+/// differently is refused. `Unknown` (a joined read the caller cannot place) takes them all.
+fn guard_contexts(kind: DbmsKind) -> Vec<DialectCtx> {
+    let pg = || {
+        let mut out = Vec::new();
+        for major in [14, 15, 16] {
+            for scs in [true, false] {
+                out.push(DialectCtx {
+                    id: DialectId::Postgres,
+                    version: Some(ServerVersion::new(major, 0, 0)),
+                    modes: LexModes {
+                        standard_conforming_strings: scs,
+                        ..LexModes::default()
+                    },
+                });
             }
-            rest = after.trim_start();
-        } else {
-            return Some(rest);
+        }
+        out
+    };
+    let my = |id: DialectId| {
+        [
+            LexModes::default(),
+            LexModes {
+                no_backslash_escapes: true,
+                ..LexModes::default()
+            },
+            LexModes {
+                ansi_quotes: true,
+                ..LexModes::default()
+            },
+        ]
+        .into_iter()
+        .map(|modes| DialectCtx {
+            id,
+            version: None,
+            modes,
+        })
+        .collect::<Vec<_>>()
+    };
+    let sqlite = || vec![DialectCtx::new(DialectId::Sqlite, None)];
+    match kind {
+        DbmsKind::Postgres
+        | DbmsKind::Redshift
+        | DbmsKind::Cockroach
+        | DbmsKind::Yugabyte
+        | DbmsKind::Timescale => pg(),
+        DbmsKind::MySql | DbmsKind::TiDb => my(DialectId::MySql),
+        DbmsKind::MariaDb => my(DialectId::MariaDb),
+        DbmsKind::Sqlite => sqlite(),
+        _ => {
+            let mut all = pg();
+            all.extend(my(DialectId::MySql));
+            all.extend(my(DialectId::MariaDb));
+            all.extend(sqlite());
+            all
         }
     }
 }
 
-/// The words of `text`: runs of ASCII letters, digits, `_` and `$`.
-fn words(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
-        .filter(|w| !w.is_empty())
+/// [`check_read_text_for`] with every engine's lexer (the engine is not known).
+pub fn check_read_text(sql: &str) -> Result<(), MetaError> {
+    check_read_text_for(sql, DbmsKind::Unknown)
+}
+
+/// The allowlist of text read on a session where the server enforces nothing (the joined
+/// path) or that is shared with the user (the user's session): `Err(RefusedText)` unless, in
+/// every lexer context of `kind` ([`guard_contexts`]):
+/// - the text has no control character but `\n` and `\t`, no MySQL executable comment
+///   (`/*!`, `/*M!`) and no `;` but one at the very end;
+/// - it lexes without an error or an unknown token;
+/// - its first token is a word, `SELECT`, `WITH`, `SHOW`, `TABLE` or `VALUES`;
+/// - no word (or quoted name) is [`DENY_WORDS`], [`DENY_FUNCTIONS`] or starts with
+///   [`DENY_PREFIXES`]; no `FOR UPDATE`, `FOR SHARE`, `FOR KEY SHARE`, `FOR NO KEY UPDATE` or
+///   `LOCK IN SHARE MODE`; no `:=`.
+pub fn check_read_text_for(sql: &str, kind: DbmsKind) -> Result<(), MetaError> {
+    let refused = Err(MetaError::RefusedText);
+    if !plain_text(sql) {
+        return refused;
+    }
+    for ctx in guard_contexts(kind) {
+        let Ok(profile) = lex_profile(&ctx) else {
+            return refused;
+        };
+        let lexed = lex(sql, profile, ctx.modes, &LexState::Initial);
+        if !read_tokens_ok(sql, &lexed) {
+            return refused;
+        }
+    }
+    Ok(())
+}
+
+/// An own connection's snapshot text (review B M1, defence in depth: the server enforces
+/// read-only there): no control character but `\n` and `\t`, no `;` but a final one, and no
+/// first keyword that is transaction or session control ([`OWN_DENY_FIRST`]), in every lexer
+/// context of `kind`.
+pub fn check_own_text(sql: &str, kind: DbmsKind) -> Result<(), MetaError> {
+    let refused = Err(MetaError::RefusedText);
+    if !plain_text(sql) {
+        return refused;
+    }
+    for ctx in guard_contexts(kind) {
+        let Ok(profile) = lex_profile(&ctx) else {
+            return refused;
+        };
+        let lexed = lex(sql, profile, ctx.modes, &LexState::Initial);
+        let first = significant(&lexed).next();
+        let Some(i) = first else {
+            return refused;
+        };
+        if lexed.kind(i) == TokenKind::ExecutableComment {
+            return refused;
+        }
+        let word = token_text(sql, &lexed, i).to_ascii_uppercase();
+        if OWN_DENY_FIRST.contains(&word.as_str()) {
+            return refused;
+        }
+    }
+    Ok(())
+}
+
+/// No control character but `\n` and `\t`; no MySQL executable comment; no `;` but a final
+/// one.
+fn plain_text(sql: &str) -> bool {
+    if sql
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return false;
+    }
+    if sql.contains("/*!") || sql.contains("/*M!") || sql.contains("/*m!") {
+        return false;
+    }
+    let trimmed = sql.trim_end();
+    let body = trimmed.strip_suffix(';').unwrap_or(trimmed);
+    !body.contains(';')
+}
+
+/// The indices of `lexed`'s tokens that are not trivia.
+fn significant(lexed: &Lexed) -> impl Iterator<Item = usize> + '_ {
+    (0..lexed.len()).filter(|&i| !lexed.is_trivia(i))
+}
+
+fn token_text<'s>(sql: &'s str, lexed: &Lexed, i: usize) -> &'s str {
+    let r = lexed.range(i);
+    &sql[usize::from(r.start())..usize::from(r.end())]
+}
+
+/// A name's text without its quotes (`"nextval"`, `` `sleep` ``).
+fn unquoted(text: &str) -> &str {
+    text.trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']')
+}
+
+fn denied_name(upper: &str) -> bool {
+    DENY_WORDS.contains(&upper)
+        || DENY_FUNCTIONS.contains(&upper)
+        || DENY_PREFIXES.iter().any(|p| upper.starts_with(p))
+}
+
+/// One lexer context's reading of a read's text (see [`check_read_text_for`]).
+fn read_tokens_ok(sql: &str, lexed: &Lexed) -> bool {
+    if !lexed.errors().is_empty() {
+        return false;
+    }
+    let sig: Vec<usize> = significant(lexed).collect();
+    let Some(&first) = sig.first() else {
+        return false;
+    };
+    if lexed.kind(first) != TokenKind::Word {
+        return false;
+    }
+    let keyword = token_text(sql, lexed, first).to_ascii_uppercase();
+    if !READ_KEYWORDS.contains(&keyword.as_str()) {
+        return false;
+    }
+    let upper = |i: usize| token_text(sql, lexed, i).to_ascii_uppercase();
+    for (n, &i) in sig.iter().enumerate() {
+        let next = sig.get(n + 1).copied();
+        match lexed.kind(i) {
+            TokenKind::Unknown | TokenKind::ExecutableComment | TokenKind::ClientCommand => {
+                return false;
+            }
+            TokenKind::Semicolon if next.is_some() => return false,
+            TokenKind::Word => {
+                let word = upper(i);
+                if denied_name(&word) {
+                    return false;
+                }
+                let next_word = next.map(upper);
+                let after = next_word.as_deref();
+                if word == "FOR" && matches!(after, Some("UPDATE" | "SHARE" | "KEY" | "NO")) {
+                    return false;
+                }
+                if word == "LOCK" && after == Some("IN") {
+                    return false;
+                }
+            }
+            TokenKind::QuotedIdent | TokenKind::UnicodeQuotedIdent => {
+                if denied_name(&unquoted(token_text(sql, lexed, i)).to_ascii_uppercase()) {
+                    return false;
+                }
+            }
+            TokenKind::Op => {
+                let op = token_text(sql, lexed, i);
+                let glued = i + 1 < lexed.len() && token_text(sql, lexed, i + 1).starts_with('=');
+                if op.contains(":=") || (op.ends_with(':') && glued) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1422,6 +1844,7 @@ fn text_bind(s: &str) -> BindValue {
 }
 
 /// The first cell of the first row.
+#[cfg(any(test, feature = "test-support"))]
 fn first_cell(rows: &Rows) -> Option<&str> {
     rows.rows.first()?.first()?.as_deref()
 }
@@ -1466,21 +1889,44 @@ mod tests {
     // ## m4-t05-meta
     #[test]
     fn the_allowlist_takes_reads_only() {
-        for ok in [
-            "SELECT 1",
-            "  select relname FROM pg_catalog.pg_class",
-            "-- hv:pg/Identity\nSELECT 1",
-            "/* hv:pg/Identity */ SELECT 1",
-            "/* a */ -- b\n WITH x AS (SELECT 1) SELECT * FROM x",
-            "SHOW CREATE TABLE `t`",
-            "TABLE pg_catalog.pg_namespace",
-            "VALUES (1)",
-            "SELECT 1;",
-            "SELECT 1 ;  \n",
-            "SELECT update_rule, delete_rule FROM information_schema.referential_constraints",
-            "SELECT(1)",
+        for (ok, kind) in [
+            ("SELECT 1", DbmsKind::Unknown),
+            (
+                "  select relname FROM pg_catalog.pg_class",
+                DbmsKind::Unknown,
+            ),
+            ("-- hv:pg/Identity\nSELECT 1", DbmsKind::Unknown),
+            ("/* hv:pg/Identity */ SELECT 1", DbmsKind::Unknown),
+            (
+                "/* a */ -- b\n WITH x AS (SELECT 1) SELECT * FROM x",
+                DbmsKind::Unknown,
+            ),
+            ("TABLE pg_catalog.pg_namespace", DbmsKind::Unknown),
+            ("VALUES (1)", DbmsKind::Unknown),
+            ("SELECT 1;", DbmsKind::Unknown),
+            ("SELECT 1 ;  \n", DbmsKind::Unknown),
+            (
+                "SELECT update_rule, delete_rule FROM information_schema.referential_constraints",
+                DbmsKind::Unknown,
+            ),
+            ("SELECT(1)", DbmsKind::Unknown),
+            (
+                "SELECT c.relname FROM pg_catalog.pg_class c WHERE c.relnamespace = $1",
+                DbmsKind::Postgres,
+            ),
+            ("SHOW CREATE TABLE `orders`", DbmsKind::MySql),
+            (
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
+                DbmsKind::MariaDb,
+            ),
+            (
+                "SELECT name FROM pragma_table_xinfo(?, 'temp')",
+                DbmsKind::Sqlite,
+            ),
+            ("# hv:mysql/Tables\nSELECT 1", DbmsKind::MySql),
+            ("SELECT 'a\tb'", DbmsKind::Unknown),
         ] {
-            assert_eq!(check_read_text(ok), Ok(()), "{ok}");
+            assert_eq!(check_read_text_for(ok, kind), Ok(()), "{ok} ({kind:?})");
         }
     }
 
@@ -1522,12 +1968,88 @@ mod tests {
             "# SELECT\nDELETE FROM t",
             "UPDATE t SET a = 1",
             "MERGE INTO t USING s ON true WHEN MATCHED THEN DELETE",
+            // Review A I2 / review B I3: `\r` ends a PostgreSQL `--` comment.
+            "-- x\rCREATE TABLE evil AS\nSELECT 1",
+            "-- x\rCOPY (\nSELECT 1) TO '/tmp/hv_evil'",
+            "-- x\rPREPARE p AS\nSELECT 1",
+            "--\rDECLARE c CURSOR WITH HOLD FOR\nSELECT 1",
+            "-- x\rCREATE VIEW evil AS\nSELECT 1",
+            "SELECT 1\r",
+            "SELECT\u{0b}1",
+            // Glued tokens: the lexer, not word boundaries, finds them.
+            "SELECT $$x$$INTO evil",
+            "SELECT 1INTO evil",
+            // Row locks.
+            "SELECT * FROM t FOR SHARE",
+            "SELECT * FROM t FOR KEY SHARE",
+            "SELECT * FROM t FOR NO KEY UPDATE",
+            "SELECT * FROM t LOCK IN SHARE MODE",
+            // Assignments.
+            "SELECT @x := 1",
+            "SELECT @x:=1",
+            // Side-effect functions.
+            "SELECT pg_advisory_lock(1)",
+            "SELECT pg_try_advisory_xact_lock(1)",
+            "SELECT set_config('search_path', 'evil', false)",
+            "SELECT nextval('s')",
+            "SELECT \"nextval\"('s')",
+            "SELECT setval('s', 1)",
+            "VALUES (nextval('s'))",
+            "WITH x AS (SELECT setval('s', 1)) SELECT * FROM x",
+            "SELECT lo_create(0)",
+            "SELECT dblink_exec('dbname=x', 'DROP TABLE t')",
+            "SELECT txid_current()",
+            "SELECT pg_current_xact_id()",
+            "SELECT pg_notify('c', 'x')",
+            "SELECT GET_LOCK('x', 0)",
+            "SELECT RELEASE_LOCK('x')",
+            "SELECT RELEASE_ALL_LOCKS()",
+            "SELECT SLEEP(100)",
+            "SELECT BENCHMARK(1, 1)",
+            "SELECT pg_terminate_backend(1)",
+            "SELECT 1 FROM t WHERE EXECUTE",
+            "\u{00a0}SELECT 1",
+            "\u{FF33}ELECT 1",
         ] {
             assert_eq!(
                 check_read_text(refused),
                 Err(MetaError::RefusedText),
                 "{refused:?}"
             );
+        }
+    }
+
+    #[test]
+    fn an_own_snapshot_never_runs_transaction_or_session_control() {
+        for (sql, kind) in [
+            ("COMMIT", DbmsKind::Postgres),
+            ("rollback", DbmsKind::MySql),
+            ("BEGIN", DbmsKind::Sqlite),
+            ("SET search_path = x", DbmsKind::Postgres),
+            ("SET SESSION TRANSACTION READ WRITE", DbmsKind::MariaDb),
+            ("START TRANSACTION", DbmsKind::MySql),
+            ("XA START 'x'", DbmsKind::MySql),
+            ("DISCARD ALL", DbmsKind::Postgres),
+            ("SELECT 1; COMMIT", DbmsKind::Postgres),
+            ("/*!COMMIT*/", DbmsKind::MySql),
+            ("-- x\rCOMMIT\n", DbmsKind::Postgres),
+            ("ATTACH 'x' AS y", DbmsKind::Sqlite),
+            ("VACUUM", DbmsKind::Sqlite),
+        ] {
+            assert_eq!(
+                check_own_text(sql, kind),
+                Err(MetaError::RefusedText),
+                "{sql:?}"
+            );
+        }
+        for (sql, kind) in [
+            ("SELECT 1", DbmsKind::Postgres),
+            ("PRAGMA table_xinfo('t')", DbmsKind::Sqlite),
+            ("SHOW CREATE TABLE `t`", DbmsKind::MySql),
+            ("CREATE TABLE t (a int)", DbmsKind::Postgres),
+            ("INSERT INTO t VALUES (1)", DbmsKind::MySql),
+        ] {
+            assert_eq!(check_own_text(sql, kind), Ok(()), "{sql:?}");
         }
     }
 
@@ -1577,21 +2099,54 @@ mod tests {
 
     #[test]
     fn mariadb_reads_tx_read_only_before_11_1() {
-        assert_eq!(
-            read_only_probe(Flavor::MariaDb {
+        assert!(
+            mysql_session_probe(Flavor::MariaDb {
                 transaction_read_only: false
-            }),
-            "SELECT @@session.tx_read_only"
+            })
+            .starts_with("SELECT @@session.tx_read_only,")
         );
-        assert_eq!(
-            read_only_probe(Flavor::MariaDb {
+        assert!(
+            mysql_session_probe(Flavor::MariaDb {
                 transaction_read_only: true
+            })
+            .starts_with("SELECT @@session.transaction_read_only,")
+        );
+        assert!(
+            mysql_session_probe(Flavor::MySql)
+                .starts_with("SELECT @@session.transaction_read_only,")
+        );
+        for probe in [
+            mysql_session_probe(Flavor::MySql),
+            mysql_session_probe(Flavor::MariaDb {
+                transaction_read_only: false,
             }),
-            "SELECT @@session.transaction_read_only"
-        );
-        assert_eq!(
-            read_only_probe(Flavor::MySql),
-            "SELECT @@session.transaction_read_only"
-        );
+        ] {
+            for var in [
+                "character_set_client",
+                "character_set_connection",
+                "character_set_results",
+            ] {
+                assert!(probe.contains(var), "{probe}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_mysql_session_needs_read_only_and_utf8mb4() {
+        let rows = |cells: &[&str]| Rows {
+            columns: Vec::new(),
+            rows: vec![cells.iter().map(|c| Some(Arc::from(*c))).collect()],
+        };
+        assert!(mysql_session_confirmed(&rows(&[
+            "1", "utf8mb4", "utf8mb4", "utf8mb4"
+        ])));
+        assert!(!mysql_session_confirmed(&rows(&[
+            "0", "utf8mb4", "utf8mb4", "utf8mb4"
+        ])));
+        assert!(!mysql_session_confirmed(&rows(&[
+            "1", "gbk", "utf8mb4", "utf8mb4"
+        ])));
+        assert!(!mysql_session_confirmed(&rows(&["1"])));
+        assert!(!mysql_session_confirmed(&Rows::default()));
     }
 }
