@@ -730,6 +730,8 @@ fn sweep_fetch_more(cx: &mut TestAppContext, lang: &str) -> (Vec<String>, bool) 
 fn the_strips_fetch_more_takes_its_icon_and_is_never_cut(cx: &mut TestAppContext) {
     let mut failures = Vec::new();
     let mut reached = Vec::new();
+    // ## m4 (controller merge fix): `mut` is used only with the pseudo locales.
+    #[cfg_attr(not(feature = "pseudo"), allow(unused_mut))]
     let mut locales = vec!["en", "tr"];
     #[cfg(feature = "pseudo")]
     locales.extend(["en-XA", "tr-XT"]);
