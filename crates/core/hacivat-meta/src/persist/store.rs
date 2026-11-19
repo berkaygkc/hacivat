@@ -12,6 +12,17 @@
 //! `CREATE` text, the four primary-key autoindexes, no trigger, view or extra index) and every
 //! table's `pragma_table_info` must match. Anything else is `Corrupt`: the file is rotated and
 //! rebuilt. A `format_major` of the wrong type is `Corrupt` too.
+//!
+//! **And it stays checked** (fix round 2, N1): the check runs inside a read transaction that
+//! records `PRAGMA schema_version`. Every later transaction of the store — reads in a read
+//! transaction, writes under `BEGIN IMMEDIATE` — compares the cookie first, before any other
+//! statement. A schema changed while the store is open (a trigger planted mid-session) is never
+//! run: the transaction is abandoned, the file rotated and rebuilt, and the call answers
+//! [`CacheError::Corrupt`].
+//!
+//! **Columns are read bounded** (fix round 2, N2): every key, tag, watermark, header value and
+//! payload is fetched through `CASE WHEN length(x) <= cap THEN x END`, so an oversized cell is
+//! never materialized; rows are deleted by `rowid`.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -21,7 +32,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use hacivat_proto::ProfileId;
 use rusqlite::config::DbConfig;
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{
+    Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 
 use super::crypt::{CATALOG_DOMAIN, RowCipher, pad, unpad};
 use super::{
@@ -83,6 +96,14 @@ const TABLES: [Table; 4] = [
 /// The largest payload one row may have; a longer row is never read (B-M3). A real namespace of
 /// a million objects is about 40 MB.
 pub const MAX_ROW_BYTES: i64 = 256 << 20;
+
+/// The largest namespace-key or tag cell read (fix round 2, N2): a plaintext key is at most
+/// 16 path elements of [`codec::MAX_NAME_BYTES`] (64 KiB plus length prefixes); a sealed one
+/// is that, padded, plus the AEAD overhead.
+pub const MAX_KEY_BYTES: i64 = 128 << 10;
+
+/// The largest watermark, header value or source tag cell read (they are tens of bytes).
+pub const MAX_SMALL_BYTES: i64 = 64 << 10;
 
 // Padding floors of the sealed columns (fix round 1, I2/m2): a ciphertext length shows only its
 // Padmé bucket, and every namespace key below the floor seals to the same length.
@@ -178,9 +199,9 @@ pub struct Evicted {
     pub bytes_after: u64,
 }
 
-/// An eviction candidate: (key readable, last used, tag, key, bytes); sorted, unreadable rows
+/// An eviction candidate: (key readable, last used, rowid, key, bytes); sorted, unreadable rows
 /// and then the least recently used come first.
-type EvictRow = (bool, i64, Vec<u8>, Option<NsKey>, u64);
+type EvictRow = (bool, i64, i64, Option<NsKey>, u64);
 
 enum Fail {
     Corrupt,
@@ -220,6 +241,11 @@ fn int(v: ValueRef<'_>) -> Option<i64> {
         ValueRef::Integer(i) => Some(i),
         _ => None,
     }
+}
+
+/// The schema cookie of the database as the current transaction sees it.
+fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("PRAGMA schema_version", [], |r| r.get(0))
 }
 
 /// Whether a save with watermark `new` may replace another writer's row at `old` (HV-MODEL-03
@@ -270,6 +296,10 @@ pub struct CacheStore {
     /// The format minor this store reads and writes as (`FORMAT_MINOR`; tests simulate other
     /// builds).
     minor: u16,
+    /// `PRAGMA schema_version` when the schema was last checked exact (fix round 2, N1).
+    schema_version: i64,
+    /// A rebuild is under way: a schema change found during it is not rebuilt again.
+    rebuilding: bool,
     /// Namespaces read from a newer minor, by the metadata they were read with: a save of that
     /// same namespace is refused (a fresh introspection has new metadata and is saved).
     newer: HashMap<NsKey, NsMeta>,
@@ -294,6 +324,8 @@ enum WriteFail {
     Sql(rusqlite::Error),
     Superseded,
     Crypt(super::CryptError),
+    /// The schema changed under the store: it was rotated and rebuilt (this is the outcome).
+    Schema(CacheError),
 }
 
 impl From<rusqlite::Error> for WriteFail {
@@ -372,8 +404,11 @@ fn stored_watermark(
     cipher: Option<&RowCipher>,
     key_bytes: &[u8],
     generation: i64,
-    col: &[u8],
+    col: Option<&[u8]>,
 ) -> Watermark {
+    let Some(col) = col else {
+        return Watermark::None;
+    };
     let plain = match cipher {
         None => Some(col.to_vec()),
         Some(c) => c
@@ -386,17 +421,26 @@ fn stored_watermark(
         .unwrap_or_default()
 }
 
+/// Writes one row inside `tx` (a checked `BEGIN IMMEDIATE`; the caller commits).
 fn write_row(
-    conn: &mut Connection,
+    tx: &Transaction<'_>,
     cipher: Option<&RowCipher>,
     w: &RowWrite<'_>,
 ) -> Result<u64, WriteFail> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let existing: Option<(i64, i64, Vec<u8>)> = tx
+    type Existing = (i64, i64, Option<Vec<u8>>);
+    let existing: Option<Existing> = tx
         .query_row(
-            "SELECT writer_id, generation, watermark FROM namespace WHERE tag = ?1",
-            [w.tag],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            "SELECT writer_id, generation,
+                 CASE WHEN length(watermark) <= ?2 THEN watermark END
+             FROM namespace WHERE tag = ?1",
+            params![w.tag, MAX_SMALL_BYTES],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    blob(r.get_ref(2)?).map(<[u8]>::to_vec),
+                ))
+            },
         )
         .optional()?;
     let writer = w.writer.0 as i64;
@@ -406,7 +450,7 @@ fn write_row(
             if *stored_writer != writer
                 && !not_older(
                     w.watermark,
-                    &stored_watermark(cipher, w.key_bytes, *generation, wm),
+                    &stored_watermark(cipher, w.key_bytes, *generation, wm.as_deref()),
                 )
             {
                 return Err(WriteFail::Superseded);
@@ -414,7 +458,7 @@ fn write_row(
             generation.saturating_add(1)
         }
     };
-    let epoch = read_server(&tx, cipher)?.epoch();
+    let epoch = read_server(tx, cipher)?.epoch();
     let meta = RowMeta {
         minor: w.minor,
         generation,
@@ -451,7 +495,7 @@ fn write_row(
             w.tag, ns_key, w.minor, generation, writer, epoch, watermark, payload
         ],
     )?;
-    let seq = next_use(&tx)?;
+    let seq = next_use(tx)?;
     tx.execute(
         "INSERT INTO usage(tag, last_used) VALUES (?1, ?2)
          ON CONFLICT(tag) DO UPDATE SET last_used = excluded.last_used",
@@ -460,14 +504,24 @@ fn write_row(
     if w.abort_before_commit {
         std::process::abort();
     }
-    tx.commit()?;
     Ok(u64::try_from(generation).unwrap_or(0))
 }
 
-/// The objects of `sqlite_master`: `(type, name, tbl_name, sql)`, sorted.
+/// The objects of `sqlite_master`: `(type, name, tbl_name, sql)`, sorted; at most 64 rows (this
+/// build has 8) and every `sql` text bounded (a longer one reads as a marker that matches
+/// nothing).
 fn master(conn: &Connection) -> rusqlite::Result<Vec<MasterRow>> {
-    let mut stmt =
-        conn.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name")?;
+    let mut stmt = conn.prepare(
+        "SELECT type, name, tbl_name,
+             CASE WHEN sql IS NULL THEN NULL WHEN length(sql) <= 4096 THEN sql
+                  ELSE '<oversized>' END
+         FROM sqlite_master
+         WHERE length(name) <= 256 AND length(tbl_name) <= 256
+         UNION ALL
+         SELECT 'oversized', '', '', NULL FROM sqlite_master
+         WHERE length(name) > 256 OR length(tbl_name) > 256
+         ORDER BY 1, 2 LIMIT 64",
+    )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
     rows.collect()
 }
@@ -510,34 +564,12 @@ fn schema_is_exact(conn: &Connection, objects: &[MasterRow]) -> rusqlite::Result
     Ok(true)
 }
 
-/// Opens the file and checks it before any other read or write: the schema (B-I1), then the
-/// format major. A fresh (empty) file is given this build's schema.
-fn try_open(path: &Path) -> Result<Connection, Fail> {
-    // Not `SQLITE_OPEN_NOFOLLOW`: it refuses a link in any path component, and data
-    // directories legitimately sit behind one (macOS `/var` → `/private/var`, a moved home).
-    // `files::prepare_file` refuses a link as the file or a sidecar itself.
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
-        | OpenFlags::SQLITE_OPEN_CREATE
-        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = Connection::open_with_flags(path, flags).map_err(classify)?;
-    // The file's schema is untrusted: no function or virtual table may run from it, and no
-    // write may reach the schema or the file's pages behind SQLite's back.
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
-        .map_err(classify)?;
-    conn.execute_batch("PRAGMA trusted_schema = OFF")
-        .map_err(classify)?;
-    conn.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
-    let check: String = conn
-        .query_row("PRAGMA quick_check", [], |r| r.get(0))
-        .map_err(classify)?;
-    if check != "ok" {
-        return Err(Fail::Corrupt);
-    }
-    let mut objects = master(&conn).map_err(classify)?;
-    if objects.is_empty() {
-        create_schema(&conn).map_err(classify)?;
-        objects = master(&conn).map_err(classify)?;
-    }
+/// Checks the schema inside the current (read) transaction and answers its cookie.
+fn validate(conn: &Connection) -> Result<i64, Fail> {
+    // The first statement of the transaction: the cookie and the objects below are one
+    // snapshot.
+    let version = schema_version(conn).map_err(classify)?;
+    let objects = master(conn).map_err(classify)?;
     // The header table first, then its major, then the rest: a file of another major is
     // moved aside byte for byte (edge 6), never read further.
     let (header_name, header_sql, _) = TABLES[0];
@@ -561,10 +593,44 @@ fn try_open(path: &Path) -> Result<Connection, Fail> {
         // Missing, or of the wrong type: corrupt.
         _ => return Err(Fail::Corrupt),
     }
-    if !schema_is_exact(&conn, &objects).map_err(classify)? {
+    if !schema_is_exact(conn, &objects).map_err(classify)? {
         return Err(Fail::Corrupt);
     }
-    Ok(conn)
+    Ok(version)
+}
+
+/// Opens the file and checks it before any other read or write: the schema (B-I1), then the
+/// format major, in one read transaction whose schema cookie is answered (N1). A fresh (empty)
+/// file is given this build's schema first.
+fn try_open(path: &Path) -> Result<(Connection, i64), Fail> {
+    // Not `SQLITE_OPEN_NOFOLLOW`: it refuses a link in any path component, and data
+    // directories legitimately sit behind one (macOS `/var` → `/private/var`, a moved home).
+    // `files::prepare_file` refuses a link as the file or a sidecar itself.
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_CREATE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(path, flags).map_err(classify)?;
+    // The file's schema is untrusted: no function or virtual table may run from it, and no
+    // write may reach the schema or the file's pages behind SQLite's back.
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
+        .map_err(classify)?;
+    conn.execute_batch("PRAGMA trusted_schema = OFF")
+        .map_err(classify)?;
+    conn.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
+    let check: String = conn
+        .query_row("PRAGMA quick_check", [], |r| r.get(0))
+        .map_err(classify)?;
+    if check != "ok" {
+        return Err(Fail::Corrupt);
+    }
+    if master(&conn).map_err(classify)?.is_empty() {
+        create_schema(&conn).map_err(classify)?;
+    }
+    let version = {
+        let tx = conn.unchecked_transaction().map_err(classify)?;
+        validate(&tx)?
+    };
+    Ok((conn, version))
 }
 
 /// Gives an empty file this build's schema and header, in one transaction (another process
@@ -596,7 +662,7 @@ fn create_schema(conn: &Connection) -> rusqlite::Result<()> {
     }
 }
 
-/// The connection settings of a checked file.
+/// The connection settings of a checked file (no table is read or written).
 fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0))?;
     // `secure_delete`: a deleted or replaced row leaves zeros, not old names, in free pages.
@@ -606,7 +672,7 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 /// A file just created (or emptied) must open; if it does not, that is an I/O failure.
-fn fresh(path: &Path) -> Result<Connection, CacheError> {
+fn fresh(path: &Path) -> Result<(Connection, i64), CacheError> {
     try_open(path).map_err(|f| match f {
         Fail::Other(e) => e,
         Fail::Corrupt | Fail::Major => {
@@ -615,13 +681,18 @@ fn fresh(path: &Path) -> Result<Connection, CacheError> {
     })
 }
 
+/// A header value, bounded (an oversized value reads as empty, which matches nothing).
 fn header_blob(conn: &Connection, key: &str) -> rusqlite::Result<Option<Vec<u8>>> {
-    conn.query_row("SELECT value FROM header WHERE key = ?1", [key], |r| {
-        Ok(match r.get_ref(0)? {
-            ValueRef::Blob(b) | ValueRef::Text(b) => b.to_vec(),
-            _ => Vec::new(),
-        })
-    })
+    conn.query_row(
+        "SELECT CASE WHEN length(value) <= ?2 THEN value END FROM header WHERE key = ?1",
+        params![key, MAX_SMALL_BYTES],
+        |r| {
+            Ok(match r.get_ref(0)? {
+                ValueRef::Blob(b) | ValueRef::Text(b) => b.to_vec(),
+                _ => Vec::new(),
+            })
+        },
+    )
     .optional()
 }
 
@@ -668,30 +739,6 @@ fn mode_of(conn: &Connection, cipher: Option<&RowCipher>) -> rusqlite::Result<Mo
     })
 }
 
-/// Records the mode (and, encrypted, the key check) of a file that has none yet.
-fn init_mode(conn: &Connection, cipher: Option<&RowCipher>) -> Result<(), CacheError> {
-    if header_blob(conn, "encryption").map_err(sql_err)?.is_some() {
-        return Ok(());
-    }
-    match cipher {
-        None => conn.execute(
-            "INSERT INTO header(key, value) VALUES ('encryption', 'none')",
-            [],
-        ),
-        Some(c) => {
-            let check = c
-                .seal(&[AD_KEY_CHECK], KEY_CHECK)
-                .map_err(CacheError::Crypt)?;
-            conn.execute(
-                "INSERT INTO header(key, value) VALUES ('encryption', 'row'), ('key_check', ?1)",
-                [check],
-            )
-        }
-    }
-    .map_err(sql_err)?;
-    Ok(())
-}
-
 /// The columns of one stored namespace row, as read.
 struct RawRow<'r> {
     tag: &'r [u8],
@@ -735,8 +782,8 @@ impl CacheStore {
         files::prepare_file(path)?;
         let mut rebuilt = None;
         let mut moved_to = None;
-        let conn = match try_open(path) {
-            Ok(conn) => conn,
+        let (conn, version) = match try_open(path) {
+            Ok(opened) => opened,
             Err(Fail::Other(e)) => return Err(e),
             Err(fail) => {
                 rebuilt = Some(match fail {
@@ -748,10 +795,26 @@ impl CacheStore {
                 fresh(path)?
             }
         };
-        let conn = match mode_of(&conn, cipher.as_ref()).map_err(sql_err)? {
-            Mode::Matches => conn,
-            Mode::Refuse => return Err(CacheError::Disabled),
-            Mode::Rebuild => {
+        // The mode is read in a checked read transaction too.
+        let mode = {
+            let tx = conn.unchecked_transaction().map_err(sql_err)?;
+            if schema_version(&tx).map_err(sql_err)? == version {
+                Some(mode_of(&tx, cipher.as_ref()).map_err(sql_err)?)
+            } else {
+                None
+            }
+        };
+        let (conn, version) = match mode {
+            Some(Mode::Matches) => (conn, version),
+            Some(Mode::Refuse) => return Err(CacheError::Disabled),
+            None => {
+                drop(conn);
+                rebuilt = Some(RebuildReason::Corrupt);
+                moved_to = Some(files::rotate(path)?);
+                files::prepare_file(path)?;
+                fresh(path)?
+            }
+            Some(Mode::Rebuild) => {
                 drop(conn);
                 files::scrub_family(path)?;
                 files::scrub_rotations(path)?;
@@ -761,24 +824,152 @@ impl CacheStore {
             }
         };
         configure(&conn).map_err(sql_err)?;
-        init_mode(&conn, cipher.as_ref())?;
+        let mut store = CacheStore {
+            conn,
+            path: path.to_path_buf(),
+            cipher,
+            writer,
+            minor,
+            schema_version: version,
+            rebuilding: false,
+            newer: HashMap::new(),
+            full_warned: false,
+            caps: CacheCaps::DEFAULT,
+            #[cfg(feature = "test-support")]
+            fault: None,
+        };
+        match store.init_mode() {
+            Ok(()) => {}
+            Err(CacheError::Corrupt { renamed_to }) => {
+                rebuilt = Some(RebuildReason::Corrupt);
+                moved_to = Some(renamed_to);
+            }
+            Err(e) => return Err(e),
+        }
         files::tighten(path)?;
         Ok(Opened {
-            store: CacheStore {
-                conn,
-                path: path.to_path_buf(),
-                cipher,
-                writer,
-                minor,
-                newer: HashMap::new(),
-                full_warned: false,
-                caps: CacheCaps::DEFAULT,
-                #[cfg(feature = "test-support")]
-                fault: None,
-            },
+            store,
             rebuilt,
             moved_to,
         })
+    }
+
+    /// Records the mode (and, encrypted, the key check) of a file that has none yet.
+    fn init_mode(&mut self) -> Result<(), CacheError> {
+        self.write(|tx, cipher| {
+            if header_blob(tx, "encryption")?.is_some() {
+                return Ok(());
+            }
+            match cipher {
+                None => tx.execute(
+                    "INSERT INTO header(key, value) VALUES ('encryption', 'none')",
+                    [],
+                )?,
+                Some(c) => {
+                    let check = c
+                        .seal(&[AD_KEY_CHECK], KEY_CHECK)
+                        .map_err(WriteFail::Crypt)?;
+                    tx.execute(
+                        "INSERT INTO header(key, value) VALUES ('encryption', 'row'),
+                             ('key_check', ?1)",
+                        [check],
+                    )?
+                }
+            };
+            Ok(())
+        })
+        .map_err(|e| self.write_err(e))
+    }
+
+    /// Runs `f` in a read transaction whose first statement checks the schema cookie (N1). A
+    /// changed schema is never read: the file is rotated and rebuilt, and the answer is
+    /// [`CacheError::Corrupt`].
+    fn read<T>(
+        &mut self,
+        f: impl FnOnce(&Self, &Connection) -> Result<T, CacheError>,
+    ) -> Result<T, CacheError> {
+        let out = {
+            let tx = self.conn.unchecked_transaction().map_err(sql_err)?;
+            if schema_version(&tx).map_err(sql_err)? == self.schema_version {
+                Some(f(self, &tx))
+            } else {
+                None
+            }
+        };
+        match out {
+            Some(r) => r,
+            None => Err(self.schema_changed()),
+        }
+    }
+
+    /// Runs `f` under `BEGIN IMMEDIATE` (the write lock), checking the schema cookie before any
+    /// other statement (N1); commits when `f` succeeds.
+    fn write<T>(
+        &mut self,
+        f: impl FnOnce(&Transaction<'_>, Option<&RowCipher>) -> Result<T, WriteFail>,
+    ) -> Result<T, WriteFail> {
+        let out = {
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if schema_version(&tx)? == self.schema_version {
+                let v = f(&tx, self.cipher.as_ref())?;
+                tx.commit()?;
+                Some(v)
+            } else {
+                None
+            }
+        };
+        match out {
+            Some(v) => Ok(v),
+            None => Err(WriteFail::Schema(self.schema_changed())),
+        }
+    }
+
+    fn write_err(&mut self, e: WriteFail) -> CacheError {
+        match e {
+            WriteFail::Superseded => CacheError::Superseded,
+            WriteFail::Crypt(e) => CacheError::Crypt(e),
+            WriteFail::Schema(e) => e,
+            WriteFail::Sql(e) if e.sqlite_error_code() == Some(ErrorCode::DiskFull) => {
+                let warn = !self.full_warned;
+                self.full_warned = true;
+                CacheError::Full { warn }
+            }
+            WriteFail::Sql(e) => sql_err(e),
+        }
+    }
+
+    /// The schema changed under the open store: rotate the file and start an empty one. The
+    /// answer to the call that found it.
+    fn schema_changed(&mut self) -> CacheError {
+        if self.rebuilding {
+            return CacheError::Corrupt {
+                renamed_to: self.path.clone(),
+            };
+        }
+        self.rebuilding = true;
+        let out = self.rebuild();
+        self.rebuilding = false;
+        match out {
+            Ok(renamed_to) => CacheError::Corrupt { renamed_to },
+            Err(e) => e,
+        }
+    }
+
+    fn rebuild(&mut self) -> Result<PathBuf, CacheError> {
+        let placeholder = Connection::open_in_memory().map_err(sql_err)?;
+        drop(std::mem::replace(&mut self.conn, placeholder));
+        let renamed_to = files::rotate(&self.path)?;
+        files::prepare_file(&self.path)?;
+        let (conn, version) = fresh(&self.path)?;
+        configure(&conn).map_err(sql_err)?;
+        self.conn = conn;
+        self.schema_version = version;
+        self.newer.clear();
+        self.init_mode()?;
+        files::tighten(&self.path)?;
+        Ok(renamed_to)
     }
 
     pub fn path(&self) -> &Path {
@@ -812,6 +1003,27 @@ impl CacheStore {
         }
     }
 
+    /// The namespace key of a stored key cell: unsealed and unpadded in an encrypted store; in
+    /// a plaintext one the cell must equal its tag byte for byte before it is decoded (N2).
+    fn key_of(&self, tag: &[u8], cell: &[u8]) -> Result<(Vec<u8>, NsKey), RowError> {
+        let key_bytes = match &self.cipher {
+            None => {
+                if cell != tag {
+                    return Err(RowError::Mismatch);
+                }
+                cell.to_vec()
+            }
+            Some(c) => {
+                let padded = c
+                    .open(&ad(AD_NS_KEY, &[tag]), cell)
+                    .map_err(RowError::Crypt)?;
+                unpad(&padded).ok_or(RowError::Mismatch)?.to_vec()
+            }
+        };
+        let key = decode_ns_key(&key_bytes).map_err(RowError::Decode)?;
+        Ok((key_bytes, key))
+    }
+
     /// Compares `server` with the fingerprint the cache was filled from (alg/02 step 2). The
     /// first call records it. Another server starts a new epoch: every row saved under an
     /// earlier one is stale (it loads with `Watermark::None`, so its next pass is full); the
@@ -821,58 +1033,47 @@ impl CacheStore {
         &mut self,
         server: ServerFingerprint,
     ) -> Result<IdentityCheck, CacheError> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sql_err)?;
-        let state = read_server(&tx, self.cipher.as_ref()).map_err(sql_err)?;
-        let (epoch, result) = match state {
-            ServerState::Known { fp, .. } if fp == server.0 => return Ok(IdentityCheck::Same),
-            ServerState::None => (0, IdentityCheck::Same),
-            ServerState::Known { .. } | ServerState::Unreadable => {
-                // Past every epoch a row or the header carries: no row stays fresh.
-                let max_row: i64 = tx
-                    .query_row("SELECT COALESCE(MAX(epoch), 0) FROM namespace", [], |r| {
-                        r.get(0)
-                    })
-                    .map_err(sql_err)?;
-                let floor = max_row.max(state.epoch()).max(0);
-                (floor.saturating_add(1), IdentityCheck::Changed)
-            }
-        };
-        let mut plain = server.0.to_le_bytes().to_vec();
-        plain.extend_from_slice(&epoch.to_le_bytes());
-        let value = match &self.cipher {
-            None => plain,
-            Some(c) => c.seal(&[AD_SERVER], &plain).map_err(CacheError::Crypt)?,
-        };
-        tx.execute(
-            "INSERT INTO header(key, value) VALUES ('server', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [value],
-        )
-        .map_err(sql_err)?;
-        tx.commit().map_err(sql_err)?;
-        Ok(result)
+        self.write(|tx, cipher| {
+            let state = read_server(tx, cipher)?;
+            let (epoch, result) = match state {
+                ServerState::Known { fp, .. } if fp == server.0 => {
+                    return Ok(IdentityCheck::Same);
+                }
+                ServerState::None => (0, IdentityCheck::Same),
+                ServerState::Known { .. } | ServerState::Unreadable => {
+                    // Past every epoch a row or the header carries: no row stays fresh.
+                    let max_row: i64 =
+                        tx.query_row("SELECT COALESCE(MAX(epoch), 0) FROM namespace", [], |r| {
+                            r.get(0)
+                        })?;
+                    let floor = max_row.max(state.epoch()).max(0);
+                    (floor.saturating_add(1), IdentityCheck::Changed)
+                }
+            };
+            let mut plain = server.0.to_le_bytes().to_vec();
+            plain.extend_from_slice(&epoch.to_le_bytes());
+            let value = match cipher {
+                None => plain,
+                Some(c) => c.seal(&[AD_SERVER], &plain).map_err(WriteFail::Crypt)?,
+            };
+            tx.execute(
+                "INSERT INTO header(key, value) VALUES ('server', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [value],
+            )?;
+            Ok(result)
+        })
+        .map_err(|e| self.write_err(e))
     }
 
-    /// Reads one row: unseal and check the key, unseal the payload, decode (`migrate_minor`).
+    /// Reads one row: check and decode the key, unseal the payload, decode (`migrate_minor`).
     /// `epoch` is the header's current epoch: a row of another epoch is stale.
     fn read_row(
         &self,
         row: &RawRow<'_>,
         epoch: i64,
     ) -> Result<(NsKey, Decoded), (Option<NsKey>, RowError)> {
-        let key_bytes = match &self.cipher {
-            None => row.ns_key.to_vec(),
-            Some(c) => {
-                let padded = c
-                    .open(&ad(AD_NS_KEY, &[row.tag]), row.ns_key)
-                    .map_err(|e| (None, RowError::Crypt(e)))?;
-                unpad(&padded).ok_or((None, RowError::Mismatch))?.to_vec()
-            }
-        };
-        let key = decode_ns_key(&key_bytes).map_err(|e| (None, RowError::Decode(e)))?;
+        let (key_bytes, key) = self.key_of(row.tag, row.ns_key).map_err(|e| (None, e))?;
         let bad = |key: &NsKey, e: RowError| (Some(key.clone()), e);
         if self.tag_of(&key_bytes) != row.tag {
             return Err(bad(&key, RowError::Mismatch));
@@ -895,16 +1096,20 @@ impl CacheStore {
         Ok((key, decoded))
     }
 
-    /// Deletes unreadable rows and moves the LRU clock of `touched` (best effort: a cache that
-    /// cannot be written still loads).
-    fn after_load(&mut self, bad: &[Vec<u8>], touched: Option<&[u8]>) {
-        let run = |conn: &mut Connection| -> rusqlite::Result<()> {
-            let tx = conn.transaction()?;
-            for t in bad {
-                tx.execute("DELETE FROM namespace WHERE tag = ?1", [t])?;
-                tx.execute("DELETE FROM usage WHERE tag = ?1", [t])?;
+    /// Deletes unreadable rows (by `rowid`) and moves the LRU clock of `touched`, in a checked
+    /// write transaction (best effort: a cache that cannot be written still loads).
+    fn after_load(&mut self, bad: &[i64], touched: Option<&[u8]>) {
+        let out = self.write(|tx, _| {
+            for rowid in bad {
+                tx.execute(
+                    "DELETE FROM usage WHERE tag =
+                         (SELECT CASE WHEN length(tag) <= ?2 THEN tag END
+                          FROM namespace WHERE rowid = ?1)",
+                    params![rowid, MAX_KEY_BYTES],
+                )?;
+                tx.execute("DELETE FROM namespace WHERE rowid = ?1", [rowid])?;
             }
-            let seq = next_use(&tx)?;
+            let seq = next_use(tx)?;
             match touched {
                 Some(tag) => tx.execute(
                     "INSERT INTO usage(tag, last_used) VALUES (?1, ?2)
@@ -912,20 +1117,15 @@ impl CacheStore {
                     params![tag, seq],
                 )?,
                 None => tx.execute(
-                    "INSERT INTO usage(tag, last_used) SELECT tag, ?1 FROM namespace WHERE true
+                    "INSERT INTO usage(tag, last_used)
+                     SELECT tag, ?1 FROM namespace WHERE length(tag) <= ?2
                      ON CONFLICT(tag) DO UPDATE SET last_used = excluded.last_used",
-                    [seq],
+                    params![seq, MAX_KEY_BYTES],
                 )?,
             };
-            tx.commit()
-        };
-        let _ = run(&mut self.conn);
-    }
-
-    fn current_epoch(&self) -> Result<i64, CacheError> {
-        Ok(read_server(&self.conn, self.cipher.as_ref())
-            .map_err(sql_err)?
-            .epoch())
+            Ok(())
+        });
+        let _ = out;
     }
 
     /// Loads one namespace (alg/02 step 3: decrypt → decode → `migrate_minor`; publish it with
@@ -934,65 +1134,83 @@ impl CacheStore {
     /// namespace only).
     pub fn load_namespace(&mut self, key: &NsKey) -> Result<Option<NamespaceSnapshot>, CacheError> {
         let tag = self.tag_of(&encode_ns_key(key));
-        let epoch = self.current_epoch()?;
         let limit = MAX_ROW_BYTES.min(i64::try_from(self.caps.per_profile).unwrap_or(i64::MAX));
-        type Raw = (Option<Vec<u8>>, [Option<i64>; 5], Option<Vec<u8>>);
-        let row: Option<Raw> = self
-            .conn
-            .query_row(
-                "SELECT ns_key, minor, generation, writer_id, epoch, length(payload),
-                     CASE WHEN length(payload) <= ?2 THEN payload END
-                 FROM namespace WHERE tag = ?1",
-                params![&tag, limit],
-                |r| {
-                    Ok((
-                        blob(r.get_ref(0)?).map(<[u8]>::to_vec),
-                        [
-                            int(r.get_ref(1)?),
-                            int(r.get_ref(2)?),
-                            int(r.get_ref(3)?),
-                            int(r.get_ref(4)?),
-                            int(r.get_ref(5)?),
-                        ],
-                        blob(r.get_ref(6)?).map(<[u8]>::to_vec),
-                    ))
-                },
-            )
-            .optional()
-            .map_err(sql_err)?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let read = match row {
-            (_, [_, _, _, _, Some(len)], _) if len > limit => Err((None, RowError::TooLarge)),
-            (
-                Some(k),
-                [
-                    Some(minor),
-                    Some(generation),
-                    Some(writer),
-                    Some(row_epoch),
-                    _,
-                ],
-                Some(p),
-            ) => match u16::try_from(minor) {
-                Ok(minor) => self.read_row(
-                    &RawRow {
-                        tag: &tag,
-                        ns_key: &k,
-                        meta: RowMeta {
-                            minor,
-                            generation,
-                            writer,
-                            epoch: row_epoch,
-                        },
-                        payload: &p,
+        type Outcome = Option<(i64, Result<(NsKey, Decoded), RowError>)>;
+        let outcome: Outcome = self.read(|s, conn| {
+            let epoch = read_server(conn, s.cipher.as_ref())
+                .map_err(sql_err)?
+                .epoch();
+            type Raw = (i64, Option<Vec<u8>>, [Option<i64>; 6], Option<Vec<u8>>);
+            let row: Option<Raw> = conn
+                .query_row(
+                    "SELECT rowid, CASE WHEN length(ns_key) <= ?3 THEN ns_key END,
+                         minor, generation, writer_id, epoch, length(payload), length(ns_key),
+                         CASE WHEN length(payload) <= ?2 THEN payload END
+                     FROM namespace WHERE tag = ?1",
+                    params![&tag, limit, MAX_KEY_BYTES],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            blob(r.get_ref(1)?).map(<[u8]>::to_vec),
+                            [
+                                int(r.get_ref(2)?),
+                                int(r.get_ref(3)?),
+                                int(r.get_ref(4)?),
+                                int(r.get_ref(5)?),
+                                int(r.get_ref(6)?),
+                                int(r.get_ref(7)?),
+                            ],
+                            blob(r.get_ref(8)?).map(<[u8]>::to_vec),
+                        ))
                     },
-                    epoch,
-                ),
-                Err(_) => Err((None, RowError::Mismatch)),
-            },
-            _ => Err((None, RowError::Mismatch)),
+                )
+                .optional()
+                .map_err(sql_err)?;
+            let Some((rowid, k, ints, p)) = row else {
+                return Ok(None);
+            };
+            let read = match (k, ints, p) {
+                (_, [_, _, _, _, Some(len), Some(klen)], _)
+                    if len > limit || klen > MAX_KEY_BYTES =>
+                {
+                    Err(RowError::TooLarge)
+                }
+                (
+                    Some(k),
+                    [
+                        Some(minor),
+                        Some(generation),
+                        Some(writer),
+                        Some(row_epoch),
+                        _,
+                        _,
+                    ],
+                    Some(p),
+                ) => match u16::try_from(minor) {
+                    Ok(minor) => s
+                        .read_row(
+                            &RawRow {
+                                tag: &tag,
+                                ns_key: &k,
+                                meta: RowMeta {
+                                    minor,
+                                    generation,
+                                    writer,
+                                    epoch: row_epoch,
+                                },
+                                payload: &p,
+                            },
+                            epoch,
+                        )
+                        .map_err(|(_, e)| e),
+                    Err(_) => Err(RowError::Mismatch),
+                },
+                _ => Err(RowError::Mismatch),
+            };
+            Ok(Some((rowid, read)))
+        })?;
+        let Some((rowid, read)) = outcome else {
+            return Ok(None);
         };
         match read {
             Ok((got, _)) if &got != key => Ok(None),
@@ -1003,8 +1221,8 @@ impl CacheStore {
                 self.after_load(&[], Some(&tag));
                 Ok(Some(d.ns))
             }
-            Err((_, e)) => {
-                self.after_load(&[tag], None);
+            Err(e) => {
+                self.after_load(&[rowid], None);
                 Err(CacheError::Row(e))
             }
         }
@@ -1012,45 +1230,59 @@ impl CacheStore {
 
     /// Loads every namespace (the connect-time and offline load; the 300 ms budget), most
     /// recently used first, reading at most `caps.per_profile` payload bytes in all and no row
-    /// over [`MAX_ROW_BYTES`] (B-M3). Rows that cannot be read, or are past those limits, are
+    /// over [`MAX_ROW_BYTES`] (B-M3), and no key or tag over [`MAX_KEY_BYTES`] (N2): an
+    /// oversized cell is never fetched. Rows that cannot be read, or are past those limits, are
     /// deleted and listed in [`LoadAll::dropped`].
     pub fn load_all(&mut self) -> Result<LoadAll, CacheError> {
-        let mut out = LoadAll::default();
-        let mut bad: Vec<Vec<u8>> = Vec::new();
-        let mut newer: Vec<(NsKey, NsMeta)> = Vec::new();
-        let epoch = self.current_epoch()?;
         let total_limit = i64::try_from(self.caps.per_profile).unwrap_or(i64::MAX);
-        let mut read_bytes = 0i64;
-        {
-            let mut stmt = self
-                .conn
+        let row_limit = MAX_ROW_BYTES.min(total_limit);
+        type Read = (LoadAll, Vec<i64>, Vec<(NsKey, NsMeta)>);
+        let (out, bad, newer): Read = self.read(|s, conn| {
+            let mut out = LoadAll::default();
+            let mut bad: Vec<i64> = Vec::new();
+            let mut newer: Vec<(NsKey, NsMeta)> = Vec::new();
+            let epoch = read_server(conn, s.cipher.as_ref())
+                .map_err(sql_err)?
+                .epoch();
+            let mut read_bytes = 0i64;
+            let mut stmt = conn
                 .prepare(
-                    "SELECT n.tag, n.ns_key, n.minor, n.generation, n.writer_id, n.epoch,
-                         length(n.payload), n.payload
-                     FROM namespace n LEFT JOIN usage u ON u.tag = n.tag
-                     ORDER BY COALESCE(u.last_used, 0) DESC, n.tag",
+                    "SELECT n.rowid, CASE WHEN length(n.tag) <= ?1 THEN n.tag END,
+                         CASE WHEN length(n.ns_key) <= ?1 THEN n.ns_key END,
+                         n.minor, n.generation, n.writer_id, n.epoch,
+                         length(n.payload), length(n.ns_key),
+                         CASE WHEN length(n.payload) <= ?2 THEN n.payload END
+                     FROM namespace n
+                     ORDER BY COALESCE((SELECT u.last_used FROM usage u WHERE u.tag =
+                         CASE WHEN length(n.tag) <= ?1 THEN n.tag END), 0) DESC, n.rowid",
                 )
                 .map_err(sql_err)?;
-            let mut rows = stmt.query([]).map_err(sql_err)?;
+            let mut rows = stmt
+                .query(params![MAX_KEY_BYTES, row_limit])
+                .map_err(sql_err)?;
             while let Some(row) = rows.next().map_err(sql_err)? {
-                let tag = blob(row.get_ref(0).map_err(sql_err)?);
-                let len = int(row.get_ref(6).map_err(sql_err)?).unwrap_or(i64::MAX);
-                if len > MAX_ROW_BYTES || read_bytes.saturating_add(len) > total_limit {
-                    if let Some(tag) = tag {
-                        bad.push(tag.to_vec());
-                    }
+                let get = |i: usize| row.get_ref(i).map_err(sql_err);
+                let rowid = int(get(0)?).unwrap_or(-1);
+                let len = int(get(7)?).unwrap_or(i64::MAX);
+                let key_len = int(get(8)?).unwrap_or(i64::MAX);
+                let size = len.saturating_add(key_len);
+                if len > row_limit
+                    || key_len > MAX_KEY_BYTES
+                    || read_bytes.saturating_add(size) > total_limit
+                {
+                    bad.push(rowid);
                     out.dropped.push((None, RowError::TooLarge));
                     continue;
                 }
-                read_bytes = read_bytes.saturating_add(len);
+                read_bytes = read_bytes.saturating_add(size);
                 let cols = (
-                    tag,
-                    blob(row.get_ref(1).map_err(sql_err)?),
-                    int(row.get_ref(2).map_err(sql_err)?).and_then(|m| u16::try_from(m).ok()),
-                    int(row.get_ref(3).map_err(sql_err)?),
-                    int(row.get_ref(4).map_err(sql_err)?),
-                    int(row.get_ref(5).map_err(sql_err)?),
-                    blob(row.get_ref(7).map_err(sql_err)?),
+                    blob(get(1)?),
+                    blob(get(2)?),
+                    int(get(3)?).and_then(|m| u16::try_from(m).ok()),
+                    int(get(4)?),
+                    int(get(5)?),
+                    int(get(6)?),
+                    blob(get(9)?),
                 );
                 let (
                     Some(tag),
@@ -1062,9 +1294,7 @@ impl CacheStore {
                     Some(payload),
                 ) = cols
                 else {
-                    if let Some(tag) = cols.0 {
-                        bad.push(tag.to_vec());
-                    }
+                    bad.push(rowid);
                     out.dropped.push((None, RowError::Mismatch));
                     continue;
                 };
@@ -1079,7 +1309,7 @@ impl CacheStore {
                     },
                     payload,
                 };
-                match self.read_row(&raw, epoch) {
+                match s.read_row(&raw, epoch) {
                     Ok((key, d)) => {
                         if d.from_newer_minor {
                             out.from_newer_minor.push(key.clone());
@@ -1088,12 +1318,13 @@ impl CacheStore {
                         out.namespaces.push(d.ns);
                     }
                     Err((key, e)) => {
-                        bad.push(tag.to_vec());
+                        bad.push(rowid);
                         out.dropped.push((key, e));
                     }
                 }
             }
-        }
+            Ok((out, bad, newer))
+        })?;
         self.newer.extend(newer);
         self.after_load(&bad, None);
         Ok(out)
@@ -1128,42 +1359,37 @@ impl CacheStore {
             payload: &plain,
             abort_before_commit,
         };
-        match write_row(&mut self.conn, self.cipher.as_ref(), &w) {
+        match self.write(|tx, cipher| write_row(tx, cipher, &w)) {
             Ok(_) => {
                 self.newer.remove(ns.key());
                 Ok(())
             }
-            Err(WriteFail::Superseded) => Err(CacheError::Superseded),
-            Err(WriteFail::Crypt(e)) => Err(CacheError::Crypt(e)),
-            Err(WriteFail::Sql(e)) if e.sqlite_error_code() == Some(ErrorCode::DiskFull) => {
-                let warn = !self.full_warned;
-                self.full_warned = true;
-                Err(CacheError::Full { warn })
-            }
-            Err(WriteFail::Sql(e)) => Err(sql_err(e)),
+            Err(e) => Err(self.write_err(e)),
         }
     }
 
     /// Removes a namespace (a dropped schema). Whether a row was there.
     pub fn remove_namespace(&mut self, key: &NsKey) -> Result<bool, CacheError> {
         let tag = self.tag_of(&encode_ns_key(key));
-        let tx = self.conn.transaction().map_err(sql_err)?;
-        let n = tx
-            .execute("DELETE FROM namespace WHERE tag = ?1", [&tag])
-            .map_err(sql_err)?;
-        tx.execute("DELETE FROM usage WHERE tag = ?1", [&tag])
-            .map_err(sql_err)?;
-        tx.commit().map_err(sql_err)?;
+        let n = self
+            .write(|tx, _| {
+                let n = tx.execute("DELETE FROM namespace WHERE tag = ?1", [&tag])?;
+                tx.execute("DELETE FROM usage WHERE tag = ?1", [&tag])?;
+                Ok(n)
+            })
+            .map_err(|e| self.write_err(e))?;
         self.newer.remove(key);
         Ok(n > 0)
     }
 
     /// The bookkeeping of `key`'s row, if any.
-    pub fn row_info(&self, key: &NsKey) -> Result<Option<RowInfo>, CacheError> {
+    pub fn row_info(&mut self, key: &NsKey) -> Result<Option<RowInfo>, CacheError> {
         let tag = self.tag_of(&encode_ns_key(key));
-        let epoch = self.current_epoch()?;
-        self.conn
-            .query_row(
+        self.read(|s, conn| {
+            let epoch = read_server(conn, s.cipher.as_ref())
+                .map_err(sql_err)?
+                .epoch();
+            conn.query_row(
                 "SELECT generation, writer_id, minor, epoch FROM namespace WHERE tag = ?1",
                 [&tag],
                 |r| {
@@ -1177,6 +1403,7 @@ impl CacheStore {
             )
             .optional()
             .map_err(sql_err)
+        })
     }
 
     /// Stores source text under its content address (alg/02 step 6); returns the reference the
@@ -1194,27 +1421,29 @@ impl CacheStore {
                 )
                 .map_err(CacheError::Crypt)?,
         };
-        self.conn
-            .execute(
+        self.write(|tx, _| {
+            tx.execute(
                 "INSERT OR IGNORE INTO source(tag, text) VALUES (?1, ?2)",
                 params![tag, col],
-            )
-            .map_err(sql_err)?;
+            )?;
+            Ok(())
+        })
+        .map_err(|e| self.write_err(e))?;
         Ok(r)
     }
 
     /// The source text for `r`, if cached and intact.
-    pub fn source(&self, r: SourceRef) -> Result<Option<String>, CacheError> {
+    pub fn source(&mut self, r: SourceRef) -> Result<Option<String>, CacheError> {
         let tag = self.source_tag(r);
-        let col: Option<Option<Vec<u8>>> = self
-            .conn
-            .query_row(
+        let col: Option<Option<Vec<u8>>> = self.read(|_, conn| {
+            conn.query_row(
                 "SELECT CASE WHEN length(text) <= ?2 THEN text END FROM source WHERE tag = ?1",
                 params![&tag, MAX_ROW_BYTES],
                 |row| Ok(blob(row.get_ref(0)?).map(<[u8]>::to_vec)),
             )
             .optional()
-            .map_err(sql_err)?;
+            .map_err(sql_err)
+        })?;
         let Some(Some(col)) = col else {
             return Ok(None);
         };
@@ -1234,46 +1463,34 @@ impl CacheStore {
     /// [`super::source_refs`] over the catalog). How many were deleted.
     pub fn gc_sources(&mut self, live: &HashSet<SourceRef>) -> Result<usize, CacheError> {
         let keep: HashSet<Vec<u8>> = live.iter().map(|r| self.source_tag(*r)).collect();
-        let tags: Vec<Vec<u8>> = {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT tag FROM source")
-                .map_err(sql_err)?;
-            let rows = stmt
-                .query_map([], |r| Ok(blob(r.get_ref(0)?).map(<[u8]>::to_vec)))
-                .map_err(sql_err)?;
-            let mut v = Vec::new();
-            for t in rows {
-                if let Some(t) = t.map_err(sql_err)? {
-                    v.push(t);
+        self.write(|tx, _| {
+            let doomed: Vec<i64> = {
+                let mut stmt = tx.prepare(
+                    "SELECT rowid, CASE WHEN length(tag) <= ?1 THEN tag END FROM source",
+                )?;
+                let rows = stmt.query_map([MAX_SMALL_BYTES], |r| {
+                    Ok((r.get::<_, i64>(0)?, blob(r.get_ref(1)?).map(<[u8]>::to_vec)))
+                })?;
+                let mut v = Vec::new();
+                for row in rows {
+                    let (rowid, tag) = row?;
+                    if !tag.is_some_and(|t| keep.contains(&t)) {
+                        v.push(rowid);
+                    }
                 }
+                v
+            };
+            for rowid in &doomed {
+                tx.execute("DELETE FROM source WHERE rowid = ?1", [rowid])?;
             }
-            v
-        };
-        let tx = self.conn.transaction().map_err(sql_err)?;
-        let mut n = 0;
-        for t in tags.iter().filter(|t| !keep.contains(*t)) {
-            n += tx
-                .execute("DELETE FROM source WHERE tag = ?1", [t])
-                .map_err(sql_err)?;
-        }
-        tx.commit().map_err(sql_err)?;
-        Ok(n)
+            Ok(doomed.len())
+        })
+        .map_err(|e| self.write_err(e))
     }
 
     /// The bytes the cache's rows hold (namespace rows and sources).
-    pub fn total_bytes(&self) -> Result<u64, CacheError> {
-        let n: i64 = self
-            .conn
-            .query_row(
-                "SELECT COALESCE((SELECT SUM(length(tag) + length(ns_key) + length(watermark)
-                     + length(payload)) FROM namespace), 0)
-                 + COALESCE((SELECT SUM(length(tag) + length(text)) FROM source), 0)",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(sql_err)?;
-        Ok(u64::try_from(n).unwrap_or(0))
+    pub fn total_bytes(&mut self) -> Result<u64, CacheError> {
+        self.read(|_, conn| total_bytes_in(conn))
     }
 
     /// The per-profile cap (R-M4-25, alg/02 step 7): while the rows exceed `cap` bytes, deletes
@@ -1284,7 +1501,46 @@ impl CacheStore {
         cap: u64,
         protect: &dyn Fn(&NsKey) -> bool,
     ) -> Result<Evicted, CacheError> {
-        let before = self.total_bytes()?;
+        let (before, mut rows): (u64, Vec<EvictRow>) = self.read(|s, conn| {
+            let before = total_bytes_in(conn)?;
+            let mut rows: Vec<EvictRow> = Vec::new();
+            if before <= cap {
+                return Ok((before, rows));
+            }
+            let mut stmt = conn
+                .prepare(
+                    "SELECT n.rowid, CASE WHEN length(n.tag) <= ?1 THEN n.tag END,
+                         CASE WHEN length(n.ns_key) <= ?1 THEN n.ns_key END,
+                         length(n.tag) + length(n.ns_key) + length(n.watermark)
+                             + length(n.payload),
+                         COALESCE((SELECT u.last_used FROM usage u WHERE u.tag =
+                             CASE WHEN length(n.tag) <= ?1 THEN n.tag END), 0)
+                     FROM namespace n",
+                )
+                .map_err(sql_err)?;
+            let mut q = stmt.query([MAX_KEY_BYTES]).map_err(sql_err)?;
+            while let Some(r) = q.next().map_err(sql_err)? {
+                let get = |i: usize| r.get_ref(i).map_err(sql_err);
+                let rowid = int(get(0)?).unwrap_or(-1);
+                let key = match (blob(get(1)?), blob(get(2)?)) {
+                    (Some(tag), Some(cell)) => s.key_of(tag, cell).ok().map(|(_, k)| k),
+                    _ => None,
+                };
+                let size = int(get(3)?).unwrap_or(0);
+                let used = int(get(4)?).unwrap_or(0);
+                if key.as_ref().is_some_and(protect) {
+                    continue;
+                }
+                rows.push((
+                    key.is_some(),
+                    used,
+                    rowid,
+                    key,
+                    u64::try_from(size).unwrap_or(0),
+                ));
+            }
+            Ok((before, rows))
+        })?;
         let mut out = Evicted {
             evicted: Vec::new(),
             bytes_before: before,
@@ -1293,60 +1549,30 @@ impl CacheStore {
         if before <= cap {
             return Ok(out);
         }
-        let mut rows: Vec<EvictRow> = Vec::new();
-        {
-            let mut stmt = self
-                .conn
-                .prepare(
-                    "SELECT n.tag, n.ns_key, length(n.tag) + length(n.ns_key)
-                         + length(n.watermark) + length(n.payload), COALESCE(u.last_used, 0)
-                     FROM namespace n LEFT JOIN usage u ON u.tag = n.tag",
-                )
-                .map_err(sql_err)?;
-            let mut q = stmt.query([]).map_err(sql_err)?;
-            while let Some(r) = q.next().map_err(sql_err)? {
-                let Some(tag) = blob(r.get_ref(0).map_err(sql_err)?).map(<[u8]>::to_vec) else {
-                    continue;
-                };
-                let key = blob(r.get_ref(1).map_err(sql_err)?).and_then(|col| {
-                    let bytes = match &self.cipher {
-                        None => Some(col.to_vec()),
-                        Some(c) => c
-                            .open(&ad(AD_NS_KEY, &[&tag]), col)
-                            .ok()
-                            .and_then(|p| unpad(&p).map(<[u8]>::to_vec)),
-                    }?;
-                    decode_ns_key(&bytes).ok()
-                });
-                let size = int(r.get_ref(2).map_err(sql_err)?).unwrap_or(0);
-                let used = int(r.get_ref(3).map_err(sql_err)?).unwrap_or(0);
-                if key.as_ref().is_some_and(protect) {
-                    continue;
-                }
-                rows.push((
-                    key.is_some(),
-                    used,
-                    tag,
-                    key,
-                    u64::try_from(size).unwrap_or(0),
-                ));
-            }
-        }
-        rows.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
+        rows.sort_by_key(|r| (r.0, r.1, r.2));
         let mut total = before;
-        let tx = self.conn.transaction().map_err(sql_err)?;
-        for (_, _, tag, key, size) in rows {
+        let mut chosen: Vec<(i64, Option<NsKey>)> = Vec::new();
+        for (_, _, rowid, key, size) in rows {
             if total <= cap {
                 break;
             }
-            tx.execute("DELETE FROM namespace WHERE tag = ?1", [&tag])
-                .map_err(sql_err)?;
-            tx.execute("DELETE FROM usage WHERE tag = ?1", [&tag])
-                .map_err(sql_err)?;
             total = total.saturating_sub(size);
-            out.evicted.push(key);
+            chosen.push((rowid, key));
         }
-        tx.commit().map_err(sql_err)?;
+        self.write(|tx, _| {
+            for (rowid, _) in &chosen {
+                tx.execute(
+                    "DELETE FROM usage WHERE tag =
+                         (SELECT CASE WHEN length(tag) <= ?2 THEN tag END
+                          FROM namespace WHERE rowid = ?1)",
+                    params![rowid, MAX_KEY_BYTES],
+                )?;
+                tx.execute("DELETE FROM namespace WHERE rowid = ?1", [rowid])?;
+            }
+            Ok(())
+        })
+        .map_err(|e| self.write_err(e))?;
+        out.evicted = chosen.into_iter().map(|(_, k)| k).collect();
         for k in out.evicted.iter().flatten() {
             self.newer.remove(k);
         }
@@ -1360,6 +1586,20 @@ impl CacheStore {
     pub fn delete_profile_files(dir: &Path, profile: &ProfileId) -> Result<(), CacheError> {
         files::delete_profile(dir, profile).map_err(CacheError::Io)
     }
+}
+
+/// The bytes of every row, by length only (nothing is fetched).
+fn total_bytes_in(conn: &Connection) -> Result<u64, CacheError> {
+    let n: i64 = conn
+        .query_row(
+            "SELECT COALESCE((SELECT SUM(length(tag) + length(ns_key) + length(watermark)
+                 + length(payload)) FROM namespace), 0)
+             + COALESCE((SELECT SUM(length(tag) + length(text)) FROM source), 0)",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+    Ok(u64::try_from(n).unwrap_or(0))
 }
 
 #[cfg(feature = "test-support")]

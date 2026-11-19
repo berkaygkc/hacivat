@@ -140,7 +140,9 @@ pub enum CacheError {
     Disabled,
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
-    /// The file was corrupt and could not be moved aside.
+    /// The file's schema changed while the store was open (fix round 2, N1): the call was
+    /// abandoned before any statement ran on it, the file was moved to `renamed_to`, and the
+    /// store now holds an empty, valid file (re-introspect; nothing is lost but cache).
     Corrupt {
         renamed_to: PathBuf,
     },

@@ -685,9 +685,24 @@ new.
     `MajorChanged`, a missing or wrongly typed value `Corrupt`. Any other difference is
     `Corrupt`: the file is rotated and rebuilt, never read further. A planted trigger cannot
     pin a row or hang a load, and a wrong-shaped table cannot disable the cache.
-  - **Read limits (B-M3).** A load reads rows most recently used first, at most the
-    per-profile cap (`CacheStore::set_caps`, default 512 MiB) in all and no row over
-    `MAX_ROW_BYTES` (256 MiB); the rest are dropped as `RowError::TooLarge`.
+  - **And it stays checked (fix round 2, N1).** The check runs inside one read transaction
+    that records `PRAGMA schema_version`. Every later transaction of the store — reads in a
+    read transaction, writes under `BEGIN IMMEDIATE` — reads the cookie as its first
+    statement, before any DML or `SELECT`; within that transaction the snapshot (or the
+    write lock) holds it. A changed cookie (a trigger, view or table altered while the store
+    is open) abandons the transaction: the file is rotated and rebuilt and the call answers
+    `CacheError::Corrupt { renamed_to }`, so a planted trigger never runs. The SQLite
+    authorizer (`rusqlite` feature `hooks`) was not needed: the cookie check closes R1 (pinned
+    row) and R2 (hang) deterministically.
+  - **Read limits (B-M3; fix round 2, N2, r-m1).** A load reads rows most recently used
+    first, at most the per-profile cap (`CacheStore::set_caps`, default 512 MiB) in all and
+    no row over `MAX_ROW_BYTES` (256 MiB); the rest are dropped as `RowError::TooLarge`. Every
+    cell that can be large is selected through `CASE WHEN length(x) <= cap THEN x END`
+    (`load_all` and `load_namespace` payloads; keys and tags under `MAX_KEY_BYTES` = 128 KiB;
+    watermarks, header values and source tags under 64 KiB), so an oversized cell is never
+    materialized; rows are deleted by `rowid`. In a plaintext store the key cell must equal
+    its tag byte for byte before it is decoded, and `decode_ns_key` takes at most
+    `MAX_NS_PATH` = 16 path elements.
   - **Files (A-m3/B-M4, B-M5).** The leaf directory is tightened to 0700. Opening, preparing
     or scrubbing a file compares its device and inode before and after the open and requires
     one link; a hard-linked cache file is refused at open, and a hard-linked name is only
@@ -746,12 +761,16 @@ new.
     when the server changes; a row is stale when its epoch differs from the header's. The
     epoch is in the row's associated data, so a stale row cannot be made fresh by editing a
     column (the first version's clear `stale` flag is gone).
-  - **Rollback (accepted, documented).** Someone who can write the file can still put back a
-    complete older row of the same namespace (every column, as it was written), or an older
-    copy of the whole file; it authenticates and loads. Preventing that needs state outside
-    the file. It is mitigated by every cache load being published `Loaded { stale: true }`
-    and validated in the background (HV-INTRO-15) before anything trusts it as current. A
-    partial rollback (the sealed columns without their bookkeeping) fails authentication.
+  - **Rollback and replay (accepted, documented; R5).** Someone who can write the file can
+    still put back a complete older row of the same namespace (every column, as it was
+    written), an older sealed `server` header (an older fingerprint and epoch), or an older
+    copy of the whole file; each authenticates and loads. The file alone cannot tell old
+    from current: preventing that needs state outside the file. It is mitigated by every
+    cache load being published `Loaded { stale: true }` and validated in the background
+    (HV-INTRO-15) before anything trusts it as current; a replayed `server` header is caught
+    by the next `check_identity` against the live server, which starts an epoch past every
+    row's and the header's, so no row is made fresh by it (review A, H10). A partial rollback
+    (the sealed columns without their bookkeeping) fails authentication.
   - **Downgrade (fix round 1, A-I1).** An encrypted file opened without a key is refused
     (`CacheError::Disabled`, memory-only) and left untouched; only a plaintext file opened
     with a key, a wrong key, or a file of unrecorded mode with rows, is scrubbed and rebuilt,

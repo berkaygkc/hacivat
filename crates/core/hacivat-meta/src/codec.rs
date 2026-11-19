@@ -88,6 +88,9 @@ pub const MAX_NAME_BYTES: usize = 4096;
 /// headroom, while a crafted row that references one long string from many 8-byte records
 /// fails fast instead of costing O(objects × length).
 pub const EXPANSION_FACTOR: usize = 8;
+/// The most path elements a namespace key may have (fix round 2, N2): real keys have at most
+/// two (`[db, schema]`).
+pub const MAX_NS_PATH: usize = 16;
 /// The fixed part of the expansion budget (small payloads).
 pub const EXPANSION_SLACK: usize = 1 << 20;
 
@@ -930,6 +933,9 @@ pub fn decode_ns_key(bytes: &[u8]) -> Result<NsKey, DecodeError> {
     let kind = ns_kind(d.u8()?).ok_or(DecodeError::Malformed("namespace kind"))?;
     let mut path = SmallVec::new();
     while d.more() {
+        if path.len() == MAX_NS_PATH {
+            return Err(DecodeError::Malformed("namespace path too long"));
+        }
         path.push(d.name()?);
     }
     Ok(NsKey { kind, path })

@@ -489,3 +489,72 @@ fn h9_hostile_lengths_never_allocate_or_panic() {
     reseal_checksum(&mut good);
     let _ = decode(&good);
 }
+
+// Re-review of fix round 1 (`task-m4-11-review-a-hostile-rr1.rs`), committed in fix round 2.
+// Both probes confirmed a defence and are kept as written.
+
+/// H10. A replayed older sealed `server` header (fingerprint + epoch) after a server change:
+/// on the next identity check every row is stale. Replay itself stays possible (the file alone
+/// cannot detect it; ADR 0008 `m4-t11`), but it never makes a row fresh.
+#[test]
+fn h10_replayed_server_header_never_makes_rows_fresh_after_identity_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.v1.sqlite");
+    let mut s = CacheStore::open(&path, Encryption::Row(key(10)), W1)
+        .unwrap()
+        .store;
+    s.check_identity(ServerFingerprint(0xA)).unwrap();
+    s.save_namespace(&schema("gizli", "from_a", 5)).unwrap();
+    let old_header: Vec<u8> = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row("SELECT value FROM header WHERE key = 'server'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        s.check_identity(ServerFingerprint(0xB)).unwrap(),
+        IdentityCheck::Changed
+    );
+    s.save_namespace(&schema("other", "from_b", 6)).unwrap();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE header SET value = ?1 WHERE key = 'server'",
+            [old_header],
+        )
+        .unwrap();
+    // The identity check against the real server (B) starts an epoch past every row's.
+    assert_eq!(
+        s.check_identity(ServerFingerprint(0xB)).unwrap(),
+        IdentityCheck::Changed
+    );
+    let all = s.load_all().unwrap();
+    assert_eq!(all.namespaces.len(), 2);
+    assert!(
+        all.namespaces
+            .iter()
+            .all(|n| n.meta().watermark == Watermark::None)
+    );
+}
+
+/// H11. The tag and subkey construction match the documented HMAC-SHA256 layout, recomputed
+/// independently.
+#[test]
+fn h11_tag_is_documented_hmac_layout() {
+    use hmac::{Hmac, Mac};
+    type H = Hmac<sha2::Sha256>;
+    let master = [0x42u8; 32];
+    let d = CATALOG_DOMAIN.as_bytes();
+    let mut m = <H as Mac>::new_from_slice(&master).unwrap();
+    m.update(b"hv-rowcipher-v1");
+    m.update(&[0, 2]);
+    m.update(&(d.len() as u16).to_le_bytes());
+    m.update(d);
+    m.update(&[1]);
+    let lookup = m.finalize().into_bytes();
+    let mut t = <H as Mac>::new_from_slice(&lookup).unwrap();
+    t.update(b"public");
+    let want = t.finalize().into_bytes();
+    let c = RowCipher::new(RowKey::from_bytes(&master), CATALOG_DOMAIN).unwrap();
+    assert_eq!(c.tag(b"public"), want[..16]);
+}

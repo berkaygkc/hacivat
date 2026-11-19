@@ -443,3 +443,290 @@ fn rows_over_the_read_cap_are_not_read() {
     assert!(all.namespaces.is_empty());
     assert_eq!(all.dropped, vec![(None, RowError::TooLarge)]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Re-review of fix round 1 (`task-m4-11-review-b-rereview.rs`, R1–R7), committed in fix round
+// 2 with each finding flipped.
+
+fn rr_key() -> Encryption {
+    Encryption::Row(RowKey::from_bytes(&[9; 32]))
+}
+
+fn attacker(path: &Path, sql: &str) {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .execute_batch(sql)
+        .unwrap();
+}
+
+/// R1 (flipped, fix round 2 N1). A trigger planted while the store is open is never obeyed:
+/// the next transaction sees the schema cookie changed, rotates the file and rebuilds it; the
+/// old row is never served again.
+#[test]
+fn r1_trigger_planted_after_open_is_never_obeyed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.v1.sqlite");
+    let mut s = CacheStore::open(&path, rr_key(), W).unwrap().store;
+    s.save_namespace(&pg_ns("old_table", 1)).unwrap();
+    attacker(
+        &path,
+        "CREATE TRIGGER pin BEFORE UPDATE ON namespace BEGIN SELECT RAISE(IGNORE); END;",
+    );
+    let r = s.save_namespace(&pg_ns("new_table", 2));
+    let Err(CacheError::Corrupt { renamed_to }) = r else {
+        panic!("the planted trigger was not caught: {r:?}");
+    };
+    assert!(renamed_to.exists());
+    // The rebuilt store is empty (no pinned row) and works.
+    assert!(
+        s.load_namespace(&NsKey::schema([DB, "gizli"]))
+            .unwrap()
+            .is_none()
+    );
+    s.save_namespace(&pg_ns("new_table", 2)).unwrap();
+    let got = s
+        .load_namespace(&NsKey::schema([DB, "gizli"]))
+        .unwrap()
+        .unwrap();
+    assert!(names(&got).contains(&"new_table".to_string()));
+    // A fresh open sees an exact schema.
+    assert!(
+        CacheStore::open(&path, rr_key(), W)
+            .unwrap()
+            .rebuilt
+            .is_none()
+    );
+}
+
+/// R2 (flipped, fix round 2 N1). A hang trigger planted while the store is open: `load_all`
+/// returns (the file is rotated), well within the timeout.
+#[test]
+fn r2_hang_trigger_planted_after_open_cannot_hang_a_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.v1.sqlite");
+    let mut s = CacheStore::open(&path, Encryption::None, W).unwrap().store;
+    s.save_namespace(&pg_ns("t", 1)).unwrap();
+    attacker(
+        &path,
+        "CREATE TRIGGER spin AFTER UPDATE ON usage BEGIN
+           SELECT count(*) FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c)
+                                 SELECT x FROM c);
+         END;
+         CREATE TRIGGER spin2 AFTER INSERT ON usage BEGIN
+           SELECT count(*) FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c)
+                                 SELECT x FROM c);
+         END;",
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let first = s.load_all().map(|a| a.namespaces.len());
+        let second = s.load_all().map(|a| a.namespaces.len());
+        let saved = s.save_namespace(&pg_ns("t", 2)).is_ok();
+        let _ = tx.send((
+            matches!(first, Err(CacheError::Corrupt { .. })),
+            format!("{second:?}"),
+            saved,
+        ));
+    });
+    let got = rx.recv_timeout(Duration::from_secs(15));
+    assert_eq!(got.ok(), Some((true, "Ok(0)".to_string(), true)));
+}
+
+/// R3. The `usage` and `source` autoindexes swapped through `writable_schema` (the
+/// `sqlite_master` rows are unchanged): the file is rotated and rebuilt, and the rebuilt store
+/// works.
+#[test]
+fn r3_swapped_autoindex_roots_are_rebuilt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.v1.sqlite");
+    {
+        let mut s = CacheStore::open(&path, Encryption::None, W).unwrap().store;
+        s.save_namespace(&pg_ns("t", 1)).unwrap();
+        s.put_source("CREATE VIEW v AS SELECT 1").unwrap();
+        s.put_source("CREATE VIEW w AS SELECT 2").unwrap();
+    }
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
+            .unwrap();
+        let root = |name: &str| -> i64 {
+            c.query_row(
+                "SELECT rootpage FROM sqlite_master WHERE name = ?1",
+                [name],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let (ru, rs) = (
+            root("sqlite_autoindex_usage_1"),
+            root("sqlite_autoindex_source_1"),
+        );
+        c.execute_batch(&format!(
+            "PRAGMA writable_schema=ON;
+             UPDATE sqlite_master SET rootpage={rs} WHERE name='sqlite_autoindex_usage_1';
+             UPDATE sqlite_master SET rootpage={ru} WHERE name='sqlite_autoindex_source_1';
+             PRAGMA writable_schema=OFF;"
+        ))
+        .unwrap();
+    }
+    let o = CacheStore::open(&path, Encryption::None, W).unwrap();
+    assert_eq!(o.rebuilt, Some(RebuildReason::Corrupt));
+    let mut s = o.store;
+    s.save_namespace(&pg_ns("t2", 2)).unwrap();
+    s.put_source("CREATE VIEW z AS SELECT 3").unwrap();
+    assert_eq!(s.load_all().unwrap().namespaces.len(), 1);
+    drop(s);
+    assert!(
+        CacheStore::open(&path, Encryption::None, W)
+            .unwrap()
+            .rebuilt
+            .is_none()
+    );
+}
+
+/// R4 (flipped, fix round 2 N2). A 40 MB plaintext `ns_key` cell (and the same as a tag) is
+/// never fetched or decoded: the row is dropped as too large, fast. A key cell that differs
+/// from its tag is refused before it is decoded, and the key decoder caps the path.
+#[test]
+fn r4_huge_ns_key_cell_is_never_decoded() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.v1.sqlite");
+    drop(CacheStore::open(&path, Encryption::None, W).unwrap());
+    let mut k = encode_ns_key(&NsKey::schema([DB, "gizli"]));
+    k.resize(k.len() + 40_000_000, 0);
+    let c = rusqlite::Connection::open(&path).unwrap();
+    c.execute(
+        "INSERT INTO namespace(tag, ns_key, minor, generation, writer_id, epoch, watermark,
+             payload) VALUES (X'01', ?1, 0, 1, 1, 0, ?2, X'00')",
+        rusqlite::params![k, encode_watermark(&Watermark::None)],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO namespace(tag, ns_key, minor, generation, writer_id, epoch, watermark,
+             payload) VALUES (?1, ?1, 0, 1, 1, 0, ?2, X'00')",
+        rusqlite::params![k, encode_watermark(&Watermark::None)],
+    )
+    .unwrap();
+    drop(c);
+    let mut s = CacheStore::open(&path, Encryption::None, W).unwrap().store;
+    let t0 = Instant::now();
+    let all = s.load_all().unwrap();
+    let dt = t0.elapsed();
+    assert!(all.namespaces.is_empty());
+    assert_eq!(all.dropped, vec![(None, RowError::TooLarge); 2]);
+    assert!(dt < Duration::from_secs(2), "{dt:?}");
+    // The rows are gone; a second load and an eviction see nothing.
+    assert!(s.load_all().unwrap().dropped.is_empty());
+    assert!(s.evict(0, &|_: &NsKey| false).unwrap().evicted.is_empty());
+    // A key cell that differs from its tag is refused before it is decoded.
+    let mut long_path = vec![2u8];
+    long_path.resize(1_001, 0);
+    let c = rusqlite::Connection::open(&path).unwrap();
+    c.execute(
+        "INSERT INTO namespace(tag, ns_key, minor, generation, writer_id, epoch, watermark,
+             payload) VALUES (X'02', ?1, 0, 1, 1, 0, ?2, X'00')",
+        rusqlite::params![long_path, encode_watermark(&Watermark::None)],
+    )
+    .unwrap();
+    drop(c);
+    assert_eq!(
+        s.load_all().unwrap().dropped,
+        vec![(None, RowError::Mismatch)]
+    );
+    // The key decoder itself caps the path at 16 elements.
+    assert!(hacivat_meta::codec::decode_ns_key(&long_path).is_err());
+}
+
+/// R5 (documented limitation). A whole older row restored with its own bookkeeping, under the
+/// same server epoch, still loads: the file alone cannot tell it from the current row. ADR 0008
+/// `m4-t11` records it with the mitigation: every cache load is published stale and validated
+/// in the background.
+#[test]
+fn r5_whole_row_rollback_is_the_documented_limitation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.v1.sqlite");
+    let mut s = CacheStore::open(&path, rr_key(), W).unwrap().store;
+    s.save_namespace(&pg_ns("old_table", 1)).unwrap();
+    let snap = dir.path().join("snap.sqlite");
+    drop(s);
+    std::fs::copy(&path, &snap).unwrap();
+    let _ = std::fs::copy(
+        format!("{}-wal", path.display()),
+        format!("{}-wal", snap.display()),
+    );
+    let mut s = CacheStore::open(&path, rr_key(), W).unwrap().store;
+    s.save_namespace(&pg_ns("new_table", 2)).unwrap();
+    drop(s);
+    attacker(
+        &path,
+        &format!(
+            "ATTACH '{}' AS old; DELETE FROM namespace;
+             INSERT INTO namespace SELECT * FROM old.namespace;",
+            snap.display()
+        ),
+    );
+    let mut s = CacheStore::open(&path, rr_key(), W).unwrap().store;
+    let all = s.load_all().unwrap();
+    assert!(all.dropped.is_empty());
+    assert!(names(&all.namespaces[0]).contains(&"old_table".to_string()));
+    // Published stale, as every cache load is.
+    assert!(matches!(
+        hacivat_meta::persist::cached_state(&all.namespaces[0]),
+        hacivat_meta::snapshot::LoadState::Loaded { stale: true, .. }
+    ));
+}
+
+/// R6. Schema variants planted before open are each rotated.
+#[test]
+fn r6_schema_variants_are_rotated() {
+    let variants = [
+        ("view", "CREATE VIEW v AS SELECT * FROM namespace;"),
+        ("stat1", "ANALYZE;"),
+        ("index", "CREATE INDEX i ON namespace(minor);"),
+        (
+            "check",
+            "DROP TABLE usage; CREATE TABLE usage(tag BLOB PRIMARY KEY, last_used INTEGER NOT NULL \
+             CHECK (last_used > 0));",
+        ),
+        (
+            "collate",
+            "DROP TABLE header; CREATE TABLE header(key TEXT PRIMARY KEY COLLATE NOCASE, value \
+             BLOB NOT NULL); INSERT INTO header VALUES ('format_major', 1);",
+        ),
+        (
+            "generated",
+            "DROP TABLE usage; CREATE TABLE usage(tag BLOB PRIMARY KEY, last_used INTEGER NOT \
+             NULL, g AS (1/0));",
+        ),
+    ];
+    for (what, sql) in variants {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.v1.sqlite");
+        {
+            let mut s = CacheStore::open(&path, Encryption::None, W).unwrap().store;
+            s.save_namespace(&pg_ns("t", 1)).unwrap();
+        }
+        attacker(&path, sql);
+        let r = CacheStore::open(&path, Encryption::None, W).map(|o| o.rebuilt);
+        assert!(
+            matches!(r, Ok(Some(RebuildReason::Corrupt))),
+            "{what}: {r:?}"
+        );
+    }
+}
+
+/// R7. Names at the 4 KiB cap referenced by many objects, and 1 MiB names: both fail fast.
+/// (Smaller than the review's 100k and 4,000 objects, with lower-case names: building the
+/// fixture hashes, and for upper-case names folds, every name, which dominated the test.)
+#[test]
+fn r7_names_at_the_cap_fail_fast() {
+    for (n, len) in [(40_000usize, 4096usize), (250, 1 << 20)] {
+        let ns = many_big_names(n, len);
+        let bytes = encode_unchecked(&ns).unwrap();
+        drop(ns);
+        let t0 = Instant::now();
+        let r = decode_namespace(&bytes);
+        assert!(r.is_err(), "n={n} len={len}");
+        assert!(t0.elapsed() < Duration::from_secs(2), "n={n} len={len}");
+    }
+}

@@ -308,7 +308,7 @@ fn wrong_key_rebuilds_without_panic() {
     // The rebuilt file works under the new key.
     store.save_namespace(&catalog()[2]).unwrap();
     drop(store);
-    let opened = open_with(&path, sealed(2));
+    let mut opened = open_with(&path, sealed(2));
     assert!(opened.rebuilt.is_none());
     assert_eq!(
         opened
