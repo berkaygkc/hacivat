@@ -1,28 +1,59 @@
 //! The per-profile SQLite catalog cache (HV-MODEL-03, R-M4-15, R-M4-25, D-016): one file per
-//! profile (`<profile>.v<major>.sqlite`, mode 0600), one row per namespace, optional row
-//! encryption, a content-addressed source store and a server identity check.
+//! profile and format major (`<profile>.v<major>.sqlite`, mode 0600 with its `-wal`/`-shm`, in
+//! a 0700 directory), one row per namespace, optional row encryption, a content-addressed
+//! source store, a server identity check, compare-and-set saves and LRU eviction.
 //!
-//! M4 Task 1a seam (spike origin `d86313b`, declarations only): [`CacheStore::open`] answers
-//! `Err(CacheError::Disabled)`, so the cache is memory-only until Task 11. Nothing is written.
+//! M4 Task 11, spike origin `d86313b` (the spike's store: WAL, 0600, corrupt-file rotation
+//! copied from `hacivat-exec/src/history/schema.rs`, bad-row drop, content-addressed sources);
+//! encryption, identity, compare-and-set, debounce and eviction are new.
+//!
+//! - **Blocking.** Every method does file I/O; callers run them on the core runtime's blocking
+//!   pool, never on the UI thread (spec §5.4). A store is `Send`, one owner at a time.
+//! - **Memory-only.** Any `open` error means the profile's catalog stays in memory for the
+//!   session (a read-only directory, a refused keyring, a file another program holds). The
+//!   cache is disposable: nothing in it is user data.
+//! - **Secrets.** `hacivat-meta` never calls the secret store (`MetaBelowIntrospect`): the hub
+//!   (Task 15) fetches the `CatalogKey` on the blocking pool and passes
+//!   [`Encryption::Row`]. No password or key is ever written to the cache, a log or a `Debug`.
+//! - **Encrypted stores** (`catalog_sensitive`) hold no name in the clear: payloads, namespace
+//!   keys, watermarks, source texts and the server fingerprint are sealed
+//!   ([`crypt::RowCipher`], domain [`crypt::CATALOG_DOMAIN`]); rows are found by keyed lookup
+//!   tags. A key that does not open the file's key check, or a file of the other mode, is
+//!   scrubbed and rebuilt ([`RebuildReason::WrongKey`]). So a sensitive profile whose key
+//!   cannot be fetched is **memory-only** (no `open` at all): opening it with
+//!   [`Encryption::None`] would scrub its encrypted cache.
 
 pub mod crypt;
+mod debounce;
+mod files;
+mod store;
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use hacivat_proto::ProfileId;
 
 use crate::codec::{DecodeError, FORMAT_MAJOR};
 use crate::ids::{NsKey, SourceRef};
 use crate::namespace::NamespaceSnapshot;
+use crate::props::Props;
+use crate::snapshot::{CatalogChange, ContainerKey, LoadState};
 
-/// The cache file name of `profile` (under the settings `catalog/` directory).
+pub use crypt::{CATALOG_DOMAIN, CryptError, RowCipher};
+pub use debounce::{SAVE_DEBOUNCE, SaveDebouncer};
+pub use files::evict_global;
+#[cfg(feature = "test-support")]
+pub use store::Fault;
+pub use store::{CacheStore, Evicted, RowInfo};
+
+/// The cache file name of `profile` (under the data directory's `catalog/`), at this build's
+/// format major.
 pub fn cache_file_name(profile: &ProfileId) -> String {
     format!("{}.v{FORMAT_MAJOR}.sqlite", profile.0)
 }
 
-/// A 32-byte per-profile data key (secret store slot `CatalogKey`). Its `Debug` is redacted
-/// and it has no `PartialEq`: compare through the cipher, never by bytes.
+/// A 32-byte per-profile data key (secret store slot `CatalogKey`). Its `Debug` is redacted,
+/// it is wiped on drop, and it has no `PartialEq`: compare through the cipher, never by bytes.
 #[derive(Clone)]
 pub struct RowKey([u8; 32]);
 
@@ -63,29 +94,66 @@ pub enum Encryption {
     Row(RowKey),
 }
 
-/// Which process writes the file (one writer per file; another writer finds it `Locked`).
+/// Which process writes the file: a save loses to a newer row of another writer (the
+/// compare-and-set of HV-MODEL-03 step 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WriterId(pub u64);
 
-/// Why the cache cannot be used.
+/// Why a stored row could not be read (the row is deleted and its namespace re-introspected).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowError {
+    /// The payload does not decode (checksum, truncation, a malformed record, another major).
+    Decode(DecodeError),
+    /// A sealed column failed authentication (tampered, moved, or another key).
+    Crypt(CryptError),
+    /// The row's columns disagree (its key, lookup tag, minor or payload do not match).
+    Mismatch,
+}
+
+impl fmt::Display for RowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RowError::Decode(e) => write!(f, "{e}"),
+            RowError::Crypt(e) => write!(f, "{e}"),
+            RowError::Mismatch => write!(f, "inconsistent cache row"),
+        }
+    }
+}
+
+/// Why the cache cannot be used, or one operation failed.
 #[derive(Debug)]
 pub enum CacheError {
-    /// Persistence is off (memory-only): the M4 Task 1a stub, or no key for an encrypted
-    /// profile (the keyring is unavailable).
+    /// Persistence is off (memory-only), e.g. no key for an encrypted profile.
     Disabled,
     Io(std::io::Error),
-    /// The file was corrupt and was moved aside.
+    Sqlite(rusqlite::Error),
+    /// The file was corrupt and could not be moved aside.
     Corrupt {
         renamed_to: PathBuf,
     },
-    /// Another writer holds the file.
+    /// Another writer holds the file beyond the busy timeout.
     Locked,
     /// Another major format.
     Incompatible,
     /// A temp namespace is never persisted.
     TempNamespace,
-    /// The row comes from a newer minor: read, never rewritten.
+    /// The namespace was read from a newer minor and is not written back until a fresh
+    /// introspection replaces it (edge 4).
     NewerMinor,
+    /// Another writer stored a newer watermark for this namespace; its row is kept.
+    Superseded,
+    /// The disk (or the file's size limit) is full. `warn` is true for the first such failure
+    /// of this store only (`model-cache-write-failed` is shown once); the in-memory catalog is
+    /// unaffected and the previous row stays.
+    Full {
+        warn: bool,
+    },
+    /// A stored row could not be read; it was deleted (re-introspect the namespace).
+    Row(RowError),
+    /// Sealing failed (the random source).
+    Crypt(CryptError),
+    /// The namespace could not be encoded.
+    Encode(DecodeError),
 }
 
 impl fmt::Display for CacheError {
@@ -93,6 +161,7 @@ impl fmt::Display for CacheError {
         match self {
             CacheError::Disabled => write!(f, "the catalog cache is memory-only"),
             CacheError::Io(e) => write!(f, "cache i/o: {e}"),
+            CacheError::Sqlite(e) => write!(f, "cache database: {e}"),
             CacheError::Corrupt { renamed_to } => {
                 write!(f, "corrupt cache moved to {}", renamed_to.display())
             }
@@ -100,37 +169,104 @@ impl fmt::Display for CacheError {
             CacheError::Incompatible => write!(f, "incompatible cache format"),
             CacheError::TempNamespace => write!(f, "temp namespaces are not persisted"),
             CacheError::NewerMinor => write!(f, "row from a newer format minor"),
+            CacheError::Superseded => write!(f, "a newer row of another writer is kept"),
+            CacheError::Full { .. } => write!(f, "the cache disk is full"),
+            CacheError::Row(e) => write!(f, "unreadable cache row dropped: {e}"),
+            CacheError::Crypt(e) => write!(f, "cache encryption: {e}"),
+            CacheError::Encode(e) => write!(f, "cache encoding: {e}"),
         }
     }
 }
 
 impl std::error::Error for CacheError {}
 
-/// Why an opened cache was rebuilt empty.
+impl From<std::io::Error> for CacheError {
+    fn from(e: std::io::Error) -> Self {
+        CacheError::Io(e)
+    }
+}
+
+/// Why an opened cache was started empty (`model-cache-rebuilt`, `$reason`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebuildReason {
+    /// The file was not a database or failed `quick_check`; it was moved aside (`corrupt`).
     Corrupt,
+    /// The file's header names another format major (a hand-copied file; `incompatible`).
     MajorChanged,
+    /// The key does not open the file, or the file is of the other mode (plaintext versus
+    /// encrypted); it was scrubbed (`wrong-key`).
     WrongKey,
+    /// The server behind the profile changed (`server-changed`; rows are kept, all stale).
     ServerChanged,
 }
 
-/// An opened cache, and whether it had to be rebuilt.
+impl RebuildReason {
+    /// The `$reason` selector of `model-cache-rebuilt`.
+    pub fn ftl_reason(self) -> &'static str {
+        match self {
+            RebuildReason::Corrupt => "corrupt",
+            RebuildReason::MajorChanged => "incompatible",
+            RebuildReason::WrongKey => "wrong-key",
+            RebuildReason::ServerChanged => "server-changed",
+        }
+    }
+}
+
+/// An opened cache, and whether (and why) it had to be started empty.
 #[derive(Debug)]
 pub struct Opened {
     pub store: CacheStore,
     pub rebuilt: Option<RebuildReason>,
+    /// Where a corrupt or foreign-major file was moved (`*.corrupt-<secs>[-n]`).
+    pub moved_to: Option<PathBuf>,
 }
 
-/// Every namespace a cache holds, plus the rows that could not be decoded (dropped and
-/// re-introspected; only the affected row).
-#[derive(Debug)]
+/// Every namespace a cache holds, plus the rows that could not be read (deleted; only those
+/// namespaces are re-introspected).
+#[derive(Debug, Default)]
 pub struct LoadAll {
     pub namespaces: Vec<NamespaceSnapshot>,
-    pub dropped: Vec<(NsKey, DecodeError)>,
+    /// Unreadable rows: their namespace key when it could still be read.
+    pub dropped: Vec<(Option<NsKey>, RowError)>,
+    /// Namespaces written by a newer format minor: shown, loaded with `Watermark::None`, never
+    /// written back until a fresh introspection replaces them.
+    pub from_newer_minor: Vec<NsKey>,
 }
 
-/// The identity of the server a cache was filled from (a restore, a swapped host).
+impl LoadAll {
+    /// The publish of a cache load (HV-MODEL-03 step 3): each namespace put, and its state
+    /// `Loaded { stale: true }` until a background validation (HV-INTRO-15) clears it.
+    pub fn into_changes(self) -> Vec<CatalogChange> {
+        let mut out = Vec::with_capacity(self.namespaces.len() * 2);
+        for ns in self.namespaces {
+            let state = CatalogChange::SetState(
+                ContainerKey::Namespace(ns.key().clone()),
+                cached_state(&ns),
+            );
+            out.push(CatalogChange::Put(std::sync::Arc::new(ns)));
+            out.push(state);
+        }
+        out
+    }
+}
+
+/// The load state of a namespace read from the cache: `Loaded` at its level and watermark,
+/// `stale: true` (validated in the background before anything trusts it as current).
+pub fn cached_state(ns: &NamespaceSnapshot) -> LoadState {
+    let meta = ns.meta();
+    let at = std::time::UNIX_EPOCH
+        + std::time::Duration::from_millis(u64::try_from(meta.loaded_at_ms).unwrap_or(0));
+    LoadState::Loaded {
+        level: meta.level,
+        at,
+        watermark: meta.watermark.clone(),
+        stale: true,
+    }
+}
+
+/// The identity of the server a cache was filled from (a restore, a swapped host): an XXH3-128
+/// of the engine's identity facts (PG `system_identifier`, MySQL `@@server_uuid`, SQLite file
+/// identity), computed by the introspector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ServerFingerprint(pub u128);
 
@@ -138,84 +274,49 @@ pub struct ServerFingerprint(pub u128);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityCheck {
     Same,
-    /// Every namespace is marked stale; rows are kept for offline use.
+    /// Every namespace is marked stale (loaded with `Watermark::None`, so the next pass is
+    /// full); rows are kept for offline use until replaced.
     Changed,
 }
 
-/// One profile's catalog cache.
-#[derive(Debug)]
-pub struct CacheStore {
-    path: PathBuf,
+/// The cache size caps (R-M4-25), in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheCaps {
+    pub per_profile: u64,
+    pub global: u64,
 }
 
-impl CacheStore {
-    /// Opens (or creates) the cache at `path`.
-    ///
-    /// Task 1a stub: `Err(CacheError::Disabled)`; nothing is created.
-    pub fn open(
-        path: &Path,
-        encryption: Encryption,
-        writer: WriterId,
-    ) -> Result<Opened, CacheError> {
-        let _ = (path, encryption, writer);
-        Err(CacheError::Disabled)
-    }
+impl CacheCaps {
+    /// 512 MiB per profile, 4 GiB in all (R-M4-25; `metadata.cache_mb_*` defaults).
+    pub const DEFAULT: CacheCaps = CacheCaps {
+        per_profile: 512 << 20,
+        global: 4096 << 20,
+    };
 
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// The caps of the settings `metadata.cache_mb_per_profile` and `metadata.cache_mb_total`
+    /// (MiB). The total is clamped up to the per-profile cap (T1c concern 5): one profile's
+    /// cache may always fill its own cap.
+    pub fn from_mib(per_profile_mib: u32, total_mib: u32) -> Self {
+        let per_profile = u64::from(per_profile_mib) << 20;
+        CacheCaps {
+            per_profile,
+            global: (u64::from(total_mib) << 20).max(per_profile),
+        }
     }
+}
 
-    /// Compares `server` with the fingerprint the cache was filled from.
-    /// Task 1a stub: `Changed` (every namespace stale).
-    pub fn check_identity(
-        &mut self,
-        server: ServerFingerprint,
-    ) -> Result<IdentityCheck, CacheError> {
-        let _ = server;
-        Ok(IdentityCheck::Changed)
-    }
-
-    /// Task 1a stub: `Err(CacheError::Disabled)`.
-    pub fn load_namespace(&self, key: &NsKey) -> Result<Option<NamespaceSnapshot>, CacheError> {
-        let _ = key;
-        Err(CacheError::Disabled)
-    }
-
-    /// Task 1a stub: `Err(CacheError::Disabled)`.
-    pub fn load_all(&self) -> Result<LoadAll, CacheError> {
-        Err(CacheError::Disabled)
-    }
-
-    /// Task 1a stub: `Err(CacheError::Disabled)`.
-    pub fn save_namespace(&mut self, ns: &NamespaceSnapshot) -> Result<(), CacheError> {
-        let _ = ns;
-        Err(CacheError::Disabled)
-    }
-
-    /// Task 1a stub: `Err(CacheError::Disabled)`.
-    pub fn remove_namespace(&mut self, key: &NsKey) -> Result<bool, CacheError> {
-        let _ = key;
-        Err(CacheError::Disabled)
-    }
-
-    /// Task 1a stub: `Err(CacheError::Disabled)`.
-    pub fn put_source(&mut self, text: &str) -> Result<SourceRef, CacheError> {
-        let _ = text;
-        Err(CacheError::Disabled)
-    }
-
-    /// Task 1a stub: `Err(CacheError::Disabled)`.
-    pub fn source(&self, r: SourceRef) -> Result<Option<String>, CacheError> {
-        let _ = r;
-        Err(CacheError::Disabled)
-    }
-
-    /// Deletes every cache file of `profile` under `dir` ("Clear cached metadata").
-    /// Task 1a stub: `Err(CacheError::Disabled)`; nothing is deleted.
-    pub fn delete_profile_files(dir: &Path, profile: &ProfileId) -> Result<(), CacheError> {
-        let _ = (dir, profile);
-        Err(CacheError::Disabled)
-    }
+/// The source texts a namespace references (views, routines, triggers): the live set for
+/// [`CacheStore::gc_sources`].
+pub fn source_refs(ns: &NamespaceSnapshot) -> Vec<SourceRef> {
+    ns.objs()
+        .iter()
+        .filter_map(|o| match o.props() {
+            Props::View(p) => p.source,
+            Props::Routine(p) => p.source,
+            Props::Trigger(p) => p.source,
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -231,5 +332,13 @@ mod tests {
         on_drop(&key);
         zeroize::Zeroize::zeroize(&mut key);
         assert_eq!(key.0, [0; 32]);
+    }
+
+    #[test]
+    fn caps_clamp_the_total_up_to_one_profile() {
+        assert_eq!(CacheCaps::from_mib(512, 4096), CacheCaps::DEFAULT);
+        let c = CacheCaps::from_mib(1024, 100);
+        assert_eq!(c.global, c.per_profile);
+        assert_eq!(c.per_profile, 1024 << 20);
     }
 }

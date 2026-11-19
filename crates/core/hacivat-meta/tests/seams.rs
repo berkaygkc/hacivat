@@ -110,19 +110,23 @@ fn stub_merge_publishes_nothing() {
     assert!(catalog.publisher().is_none());
 }
 
-#[cfg(feature = "persist")]
+// ## m4-t11-codec (named exception: the cache stub is filled by Task 11; the seam now checks
+// that an open that cannot create its file stays memory-only and writes nothing)
+#[cfg(all(feature = "persist", unix))]
 #[test]
 fn stub_cache_is_memory_only() {
-    use hacivat_meta::persist::{CacheError, CacheStore, Encryption, WriterId};
+    use hacivat_meta::persist::{CacheStore, Encryption, WriterId};
+    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("c.v1.sqlite");
-    assert!(matches!(
-        CacheStore::open(&file, Encryption::None, WriterId(1)),
-        Err(CacheError::Disabled)
-    ));
+    let ro = dir.path().join("ro");
+    std::fs::create_dir(&ro).unwrap();
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let file = ro.join("c.v1.sqlite");
+    assert!(CacheStore::open(&file, Encryption::None, WriterId(1)).is_err());
     // Memory-only: nothing was written.
     assert!(!file.exists());
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&ro).unwrap().count(), 0);
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 #[test]

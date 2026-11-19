@@ -633,3 +633,119 @@ HV-INTRO-04, R-M4-3, -7, -29, -32, -37). The packs themselves stay header-only u
   - The re-review's probes R1–R9 are in `tests/hostile_t04_review.rs`, flipped to assert the
     fixes. **m11** (`Pack::parse` call sites in `pg/`, `mysql/`, `sqlite/` must take
     `include_str!` or a `const`) is carried to the T16–T18 reviews by the controller.
+
+## m4-t11 — catalog cache
+
+M4 Task 11 fills `codec`, `fingerprint` and `persist/**` (HV-MODEL-03, R-M4-15, R-M4-25,
+R-M4-26, D-016). The codec and the store's open, rotation and bad-row logic come from the model
+spike (`d86313b`); encryption, the identity check, compare-and-set, debounce and eviction are
+new.
+
+- **Codec.** The spike's envelope (`"HVNS" major minor compression checksum body`, XXH3-64
+  over the body, every record and union value length-prefixed, per-namespace string table),
+  extended to the M4 types. Choices beyond the spike:
+  - The namespace header lists the machine id of every kind code it uses. A code this build
+    does not know decodes as `Unknown` with that id as its raw kind, so it matches the
+    `ObjectKey::raw_kind` a newer build wrote into user data (T3 review m6). Our own `Unknown`
+    objects keep their server text.
+  - **Strictness:** a payload of this build's minor or an older one must use every byte of
+    every record and of the body; a newer minor's trailing fields, tags and sections are
+    skipped.
+  - A namespace read from a **newer minor** loads with `Watermark::None` (its next pass is
+    full, never incremental on top of fields this build dropped), is reported
+    (`Decoded::from_newer_minor`, `LoadAll::from_newer_minor`) and is never saved back:
+    `NamespaceSnapshot` has no flag for it (T3's file), so the store remembers the metadata it
+    read and refuses a save of a namespace with exactly that metadata. A fresh introspection
+    has new metadata and replaces the row with our minor (alg/02 edge 4).
+  - Untrusted input: no recursion on input depth, and every count is capped by the bytes left
+    divided by the smallest encoding of one element, so a corrupt count cannot allocate more
+    than a small constant times the input. Equal empty strings share one allocation.
+  - `ColumnProps::ext`: `Some(ColumnExt::None)` has its own tag, so the round trip is exact.
+  - `reseal_checksum` is public: tests and the fuzz target frame arbitrary bodies with it. The
+    checksum guards against accidents only; the header's version bytes are outside it by
+    format (a flipped minor reads as a newer minor and is never rewritten).
+  - `codec::testing` (feature `test-support`) encodes and decodes as another minor would, so
+    the forward and backward rules are tested while this build is at 1.0.
+- **Store.** One SQLite file per profile and major. Tables `header`, `namespace` (tag, key,
+  minor, generation, writer, watermark, stale flag, payload), `usage` (the LRU clock, kept
+  apart so a load never rewrites a payload row) and `source`.
+  - WAL, `synchronous=NORMAL`, `temp_store=MEMORY` (no temp file holds plaintext),
+    `secure_delete=ON` (a replaced or evicted row leaves zeros) and
+    `auto_vacuum=INCREMENTAL` (an eviction returns pages).
+  - Directory 0700 (the rule of `fsio::create_dir_all_private`, which this crate cannot call),
+    file and sidecars 0600.
+  - Symbolic links: a cache path, `-wal` or `-shm` that is a link is refused; a rotation
+    renames the link itself; a deletion removes the link only. Not `SQLITE_OPEN_NOFOLLOW`:
+    it refuses a link in any path component, and data directories sit behind one (macOS
+    `/var`).
+  - A file that is not a database, or fails `quick_check`, is rotated to
+    `*.corrupt-<secs>[-n]` (`Corrupt`). A file of another major is read for its major
+    **before** anything is changed and is rotated byte for byte (`MajorChanged`; FTL
+    `incompatible`). A file of the other encryption mode, or one the key's check value does
+    not open, is overwritten with zeros, deleted and rebuilt (`WrongKey`; changing "Encrypt
+    cached metadata" never leaves a plaintext cache's names behind).
+  - A row that does not decode, authenticate or agree with itself (key, tag, minor) is deleted
+    and reported (`LoadAll::dropped`, `CacheError::Row`); only that namespace is
+    re-introspected.
+- **Encryption (R-M4-15).** `RowCipher`: XChaCha20-Poly1305, a fresh 24-byte nonce from the
+  OS RNG per seal (an RNG failure is an error, never a fallback nonce), associated data
+  `len(domain) as u16le ‖ domain ‖ ad`. The profile key seals nothing itself: a sealing
+  subkey and a lookup subkey are derived per domain as XChaCha20 keystream blocks under fixed
+  labels (the cipher as a PRF). Lookup tags are `PRF(lookup key, XXH3-128(input))`: the
+  encrypted store finds rows without a name or content hash in the clear. XXH3 is not
+  collision-resistant, so crafted names can share a tag; their rows then collide and fail
+  authentication (re-introspected), and nothing about the input leaks without the key.
+  - Sealed: payloads (`ad = 1 ‖ ns_key ‖ minor`), namespace keys (`2 ‖ tag`), watermarks
+    (`3 ‖ ns_key`), source texts (`4 ‖ hash ‖ len`), the key check (`5`) and the server
+    fingerprint (`6`). A row cannot move between namespaces, row types or stores.
+  - In the clear: the minor, generation, writer id, stale flag, LRU counter, row and blob
+    sizes. They name nothing.
+  - **Key.** `SecretStore::catalog_key(profile, create)` (named lines in
+    `hacivat-secrets/src/store.rs`, block `m4-t11-catalog-key`): reads the slot; with
+    `create`, a missing or damaged key is replaced by 32 random bytes, stored hex-encoded in a
+    `SecretString` with retention `Forever`. A put the backend refuses (a fallback to the
+    process) is undone and returned as an error: a key that dies with the process would make
+    the next start's cache unreadable, so the hub runs that profile memory-only (edge 9).
+    Every buffer that holds the key is `Zeroizing`. `hacivat-meta` never calls it.
+- **Identity (step 2).** The first `check_identity` records the fingerprint. Another server
+  marks every row stale; a stale row loads with `Watermark::None` (its next pass is full), the
+  rows stay for offline use, and a fresh save clears the mark.
+- **Compare-and-set (step 5).** A save may replace another writer's row only with a watermark
+  that is not older for the same server: PostgreSQL by `system_identifier` then `w`, MySQL
+  by `server_uuid` then time, SQLite by file identity then `schema_version`. A watermark of
+  another server is not comparable and wins; a save without a watermark never replaces one
+  that has it (`CacheError::Superseded`). A writer always replaces its own row.
+- **Debounce (step 4).** `SaveDebouncer`: a namespace is due one second after its **first**
+  pending offer, with the latest snapshot offered by then, so a namespace that keeps changing
+  is still saved once a second. Pure logic over caller instants; the hub drives it.
+- **Eviction (R-M4-25).** `CacheStore::evict(cap, protect)`: by logical row bytes, unreadable
+  rows first, then least recently loaded; `protect` (the current database) is never evicted.
+  `evict_global`: whole caches of other profiles by newest file modification time (a load
+  writes the `usage` table, so it touches the `-wal`), never a profile in `keep`.
+  `CacheCaps::from_mib` clamps the total up to the per-profile cap (T1c concern 5).
+- **Disk full (edge 2).** `CacheError::Full { warn }`: `warn` is true for a store's first
+  such failure only; the previous row stays. The notice string `model-cache-write-failed`
+  (alg/02) is not in the FTL yet; the hub's task adds it.
+- **Fingerprints.** XXH3-128 Merkle hashes: a node's canonical record (the codec's encoding
+  with strings in place, no server ids — also inside references — and no state marks) plus
+  the sorted hashes of its children. The order a server lists children in does not matter;
+  a column's ordinal does. Statistics live in a facet, never in an `Obj`. Iterative, linear
+  in the subtree. The value is locale-free and pinned in `tests/fingerprint.rs`.
+- **Faults.** `Fault::AbortBeforeCommit` (feature `test-support`) aborts the process after
+  the row is written and before `COMMIT` returns; the test runs it in a child process. The
+  workspace's `rusqlite` has no `hooks` feature, so a hook inside `COMMIT` itself is not
+  available; in WAL mode the uncommitted frames are ignored either way. A full disk is
+  simulated with `PRAGMA max_page_count` (SQLite's own `SQLITE_FULL` path).
+- **Seam changes (T1a stubs filled).** `DecodeError::NotImplemented` is gone and
+  `DecodeError::Model` added; `CacheError` gains `Sqlite`, `Superseded`, `Full`, `Row`,
+  `Crypt`, `Encode`; `CryptError::NotImplemented` becomes `Rng` and `TooLong`;
+  `RowCipher::seal` returns a `Result`; `Opened` gains `moved_to`; `LoadAll::dropped` holds
+  `(Option<NsKey>, RowError)` (an encrypted row's key may be unreadable) and `LoadAll` gains
+  `from_newer_minor` and `into_changes` (each namespace put with `Loaded { stale: true }`);
+  `load_namespace`/`load_all` take `&mut self` (they move the LRU clock and delete bad rows).
+  Named exceptions: `tests/model.rs` (`props_round_trip…` becomes the round trip) and
+  `tests/seams.rs` (`stub_cache_is_memory_only` now checks that an open that cannot create
+  its file writes nothing).
+- **Not in this task.** Garbage collection of other majors' files after 30 days (alg/02
+  "Versioning") is not in the plan's list; cache rows stay uncompressed (the compression byte
+  is reserved, R-M4-26).
