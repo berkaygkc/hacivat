@@ -31,7 +31,7 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 1. **No new hue, no new filled block.** Red: production marks (the root's 7 px swatch and lock, the capsule, the status segment, the editor hairline) and Delete… only. Amber: a pass or a change that is running or pending (the static 7 px run marker, the "waits for COMMIT" stamp). Green: a check that something succeeded (the root's ✓ latency). Blue: selection, focus, the primary button, and a level **you** set (the explicit pill). Every failure, refusal, partial read or unresolved reference is an ink glyph and words. The capsule's cp-fill block stays the window's one filled badge (checked in every render). Badges and pills are outline-only.
 2. **No ambient motion.** Progress is a static phase label plus a determinate count, repainted only when the count changes (once a second at most in the mock); nothing spins, shimmers or slides. A collapsed node being read carries the run marker and a percent as its meta.
 3. **The Raised Ink Rule holds.** Menus, tooltips, toasts, dialogs and toolbars map text-3 to text-2; the explorer, the options strip and the code area sit on the panel/side tone where text-3 is allowed (group headers, meta, the grey pill). Field wells (the scope tree, the pattern field) restore text-3.
-4. **Names are user data.** Shown verbatim (never case-mapped or translated), bidi-isolated, with invisible characters badged; display order is the UI locale's collation (`users` before `Users`; `ı` before `i` in Turkish); a filter or type-ahead never changes identity. Counts and dates are preformatted by the format locale (`TABLES 1,204`, `TABLOLAR 1.204`).
+4. **Names are user data.** Shown verbatim (never case-mapped or translated), bidi-isolated, with invisible characters badged; display order is the UI locale's collation (`users` before `Users`; `ı` before `i` in Turkish); a filter or type-ahead never changes identity. Counts and dates are Number and DateTime arguments that `hacivat_l10n` formats in the format locale (`TABLES 1,204`, `TABLOLAR 1.204`; ruling 22).
 5. **Trust signals never shrink.** On a crowded root row the meta ellipsizes first, then badges collapse to their glyph, then the name (keeping about 7 characters); the environment mark and the lock never shrink or clip. The capsule, the status bar's environment segment and the DDL view's read-only chip stay whole at 960 in Turkish (checked in every render).
 6. **The Overflow Rule decides, not ellipsis.** Toolbars and strips hide low-priority items into ⋯ before any label truncates; only data (names, types, SQL, hosts) ellipsizes, with the whole value in a tooltip. Status rows (phase, waiting, failed) drop their label before their count in very deep rows, keeping it as the accessible name.
 7. **Server text is never inside a translated sentence.** A refused catalog query's message and SQLSTATE sit verbatim in their own mono box in the tooltip; sentences only interpolate names and counts Hacivat chose.
@@ -62,7 +62,22 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 
 **Keyboard.** ↑/↓ move (group headers included, status rows skipped), Home/End, PageUp/PageDown; → expands or moves to the first child; ← collapses or moves to the parent; ↵ activates (profile root: the M2a binding, connect or disconnect; table/view: Open data, R-M4-13; containers: toggle); F12 View DDL; ⌥⌘C Copy qualified name; F5 Refresh; ⌘← Collapse all; ⇧F10 or the menu key: the context menu; type-ahead on printable keys (a 1 s buffer, cycling, wraparound; Turkish-tolerant fold when the UI language or region is Turkish, otherwise exact, R-M4-50). ⌘F focuses the filter (shipped binding; ⌥⌘F joins it per PO-Q10). Expand all children has no default key (menu and palette). No binding fires during an IME composition. Every default follows VS Code where it has one and is remappable; nothing uses ⌘K, and fold-all chords stay unbound.
 
+**Keys, macOS and Windows/Linux** (Task 1b's keymap rows; checked against the AltGr layers in `crates/ui/hacivat-ui/keymaps/altgr/` for TR-Q, TR-F, DE, FR and PL: a Ctrl+Alt chord is AltGr on Windows):
+
+| Command | macOS | Windows / Linux | AltGr check |
+|---|---|---|---|
+| View DDL (`explorer.view_ddl`) | F12 | F12 | no modifier: passes |
+| Copy qualified name (`explorer.copy_qualified_name`) | ⌥⌘C | Shift+Alt+C (`shift-alt-c`, VS Code "Copy Path") | no Ctrl: passes. `ctrl-alt-c` would be AltGr+C = "ć" on PL and is not used |
+| Collapse all, tree-wide (`explorer.collapse_all`) | ⌘← | Ctrl+← | no Alt: passes |
+| Focus the filter (`explorer.focus_filter`) | ⌘F (shipped) | Ctrl+F (shipped) | passes |
+| Focus the filter, PO-Q10's extra chord | ⌥⌘F | none proposed | `ctrl-alt-f` is AltGr+F = "@" on TR-F: fails; the shipped Ctrl+F already does it (reported, not silently re-bound) |
+| Refresh (`explorer.refresh`, Explorer context) | F5 | F5 | passes |
+| Open data / activate | ↵ | Enter | passes |
+| Context menu | ⇧F10, menu key | Shift+F10, menu key | passes |
+| Expand all children, Edit scope, Set level, Clear cached metadata | palette only | palette only | — |
+
 **Copy.**
+
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
 | `hv-explorer-tree-label` | Database explorer | Veritabanı gezgini |
@@ -84,11 +99,11 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 | `hv-explorer-builtin-badge` | version {version} | sürüm {version} |
 | `hv-explorer-builtin-tip` | Built-in catalog (version {version}): the server's own objects, shipped with Hacivat and read without a connection. | Yerleşik katalog (sürüm {version}): sunucunun kendi nesneleri; Hacivat ile gelir, bağlantı olmadan okunur. |
 | `hv-explorer-scope-count` | {n} of {total} | {n} / {total} |
-| `hv-explorer-scope-count-tip` | {n} of {total} schemas are in scope. Edit scope… changes which ones are read. | {total} şemadan {n} tanesi kapsamda. Kapsamı düzenle… hangilerinin okunacağını değiştirir. |
+| `hv-explorer-scope-count-tip` | {n} of {total} schemas are in scope. Edit scope… changes which ones are read. · [one] {n} of {total} schema is in scope. Edit scope… changes which ones are read. | {total} şemadan {n} tanesi kapsamda. Kapsamı düzenle… hangilerinin okunacağını değiştirir. |
 | `hv-explorer-add-scope` | Add to scope | Kapsama ekle |
 | `hv-explorer-out-of-scope-tip` | {name} isn't in this connection's scope, so it isn't read. | {name} bu bağlantının kapsamında değil, bu yüzden okunmuyor. |
 | `hv-explorer-out-of-scope-db-tip` | {name} isn't in this connection's scope, so it isn't read. Reading it opens one more connection. | {name} bu bağlantının kapsamında değil, bu yüzden okunmuyor. Okumak bir bağlantı daha açar. |
-| `hv-explorer-row-estimate-tip` | About {rows} rows (the server's estimate) | Yaklaşık {rows} satır (sunucunun tahmini) |
+| `hv-explorer-row-estimate-tip` | About {rows} rows (the server's estimate) · [one] About {rows} row (the server's estimate) | Yaklaşık {rows} satır (sunucunun tahmini) |
 | `hv-explorer-loads-on-open` | Loads when you open it | Açtığınızda yüklenir |
 
 **Out of scope.** Multi-select and bulk actions (R-M4-50: single selection in M4); type-ahead for IME scripts; row estimates in rows (PO-Q14); drag and drop; virtual-FK editing (M7, PO-Q8); diagrams; the M4b Scripts node (the contributor seam exists, no node is drawn); the status slot (M4b git glyphs).
@@ -108,6 +123,7 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 **Keyboard.** Status rows are not cursor stops (the spike); Retry is reached through the namespace's menu (Refresh) or the pointer; the badge tooltip is the row's accessible description.
 
 **Copy.**
+
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
 | `hv-explorer-loading` | Loading… | Yükleniyor… |
@@ -119,7 +135,7 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 | `hv-explorer-waiting-pass` | Waiting for columns | Sütunlar bekleniyor |
 | `hv-explorer-partial` | partial | eksik |
 | `hv-explorer-partial-title` | Some objects could not be read | Bazı nesneler okunamadı |
-| `hv-explorer-partial-body` | This login can't read the definitions of {n} functions in {schema}. They are listed by name; their definitions are missing. | Bu kullanıcı {schema} içindeki {n} fonksiyonun tanımını okuyamıyor. Adlarıyla listelenirler; tanımları eksiktir. |
+| `hv-explorer-partial-body` | This login can't read the definitions of {n} functions in {schema}. They are listed by name; their definitions are missing. · [one] This login can't read the definition of {n} function in {schema}. It is listed by name; its definition is missing. | Bu kullanıcı {schema} içindeki {n} fonksiyonun tanımını okuyamıyor. Adlarıyla listelenirler; tanımları eksiktir. |
 | `hv-explorer-failed` | Couldn't read {name} | {name} okunamadı |
 | `hv-explorer-failed-body` | The server refused the catalog query. Retry reads it again. | Sunucu katalog sorgusunu reddetti. Yeniden dene ile tekrar okunur. |
 | `hv-explorer-retry` | Retry | Yeniden dene |
@@ -141,6 +157,7 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 **Keyboard.** Connect in the notice is a Tab stop after the filter; the tree's keys are unchanged offline (every node from the cache is browsable).
 
 **Copy.**
+
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
 | `hv-explorer-cached` | Showing cached metadata from {date} | {date} tarihli önbellekteki üst veri gösteriliyor |
@@ -168,12 +185,13 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 **Keyboard.** ⌘F focuses the field; typing filters live; ↓ moves into the tree; Escape clears the field, and on an empty field returns the focus to the tree. The toggle is a Tab stop inside the field (Space toggles).
 
 **Copy.**
+
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
 | `hv-explorer-filter-objects` | Filter objects | Nesnelerde ara |
-| `hv-explorer-filter-count` | {n} matches · one: {n} match | {n} eşleşme |
+| `hv-explorer-filter-count` | {n} matches · [one] {n} match | {n} eşleşme |
 | `hv-explorer-filter-group-count` | {n} of {total} | {n} / {total} |
-| `hv-explorer-filter-unloaded` | Searches loaded names only. The columns of {n} tables aren't loaded yet. | Yalnız yüklenmiş adlarda arar. {n} tablonun sütunları henüz yüklenmedi. |
+| `hv-explorer-filter-unloaded` | Searches loaded names only. The columns of {n} tables aren't loaded yet. · [one] Searches loaded names only. The columns of {n} table aren't loaded yet. | Yalnız yüklenmiş adlarda arar. {n} tablonun sütunları henüz yüklenmedi. |
 | `hv-explorer-filter-none` | No objects match | Eşleşen nesne yok |
 | `hv-explorer-filter-none-body` | Nothing loaded matches “{query}”. | Yüklenmiş adlardan hiçbiri “{query}” ile eşleşmiyor. |
 | `hv-explorer-filter-clear` | Clear filter | Filtreyi temizle |
@@ -184,10 +202,11 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 **Purpose.** A short menu per kind: the frequent action first, then copying, then refresh and scope; nothing that doesn't work yet except Modify (PO-Q13).
 
 **Anatomy.** The PopupMenu anatomy (raised, 6 px, popover shadow, 24 px rows, keys trailing at text-2, separators 1 px seam, the M3c keyboard-active row). Disabled rows keep their place in the disabled ink with their reason as the hint.
-- **Profile:** the M2a items (Connect/Disconnect ↵, Edit… ⌘E, Duplicate ⌘D, Copy as URL ⇧⌘C) | Refresh F5, Edit scope…, Introspection level ›, Clear cached metadata…, Collapse all ⌘← | Delete… ⌫ (red label).
-- **Database:** Refresh, Edit scope…, Introspection level › | Copy qualified name, Expand all children, Collapse all. Out of scope: Add to scope, Copy qualified name.
-- **Schema:** Refresh, Introspection level ›, Remove from scope | Copy qualified name, Expand all children, Collapse all.
-- **Kind group:** Refresh, (Show hidden objects, when a view filter hides some), Expand all children, Collapse all.
+- **Profile:** the M2a items (Connect/Disconnect ↵, Edit… ⌘E, Duplicate ⌘D, Copy as URL ⇧⌘C) | Refresh F5, Edit scope…, Introspection level ›, Clear cached metadata…, Collapse all children | Delete… ⌫ (red label).
+- **Database:** Refresh, Edit scope…, Introspection level › | Copy qualified name, Expand all children, Collapse all children. Out of scope: Add to scope, Copy qualified name.
+- **Schema:** Refresh, Introspection level ›, Remove from scope | Copy qualified name, Expand all children, Collapse all children.
+- **Kind group:** Refresh, (Show hidden objects, when a view filter hides some), Expand all children, Collapse all children.
+- **Collapse in a node menu acts on its node** (fix round 1): "Collapse all children" collapses everything below the row the menu belongs to, pairing with "Expand all children"; the tree-wide **Collapse all** (VS Code `list.collapseAll`) is the ⌘← key and the palette command (`hv-explorer-menu-collapse-all` is its title) and never sits in a node menu.
 - **Table / view / materialized view:** Open data ↵, View DDL F12 | Copy name, Copy qualified name ⌥⌘C, Copy DDL | Refresh F5, Hide objects like this | Modify table… / Modify view… (disabled: "Arrives in a later version").
 - **Column:** Copy name, Copy qualified name, View table DDL F12 | Modify column… (disabled).
 - **Copy qualified name** uses the dialect's quoting only where needed: `public."Users"`, `public.users`, ``api.`order` ``, `main."a b"`; a PostgreSQL name never carries its database.
@@ -199,6 +218,7 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 **Keyboard.** ⇧F10 / the menu key opens it under the row, starting on its first enabled row (a pointer opens with none active); ↑/↓ skip separators and disabled rows; → opens Introspection level, ← closes it; ↵ picks; Escape closes and returns the focus to the tree. No access keys (labels sit next to names).
 
 **Copy.**
+
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
 | `hv-explorer-menu-refresh` | Refresh | Yenile |
@@ -212,7 +232,7 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 | `hv-explorer-menu-copy-plain` | Copy name | Adı kopyala |
 | `hv-explorer-menu-hide-like` | Hide objects like this | Benzer nesneleri gizle |
 | `hv-explorer-menu-show-hidden` | Show hidden objects | Gizli nesneleri göster |
-| `hv-explorer-hidden-tip` | {n} hidden by a view filter ({pattern}). Show hidden objects, in this group's menu, removes it. | {n} nesne bir görünüm filtresiyle gizlendi ({pattern}). Bu grubun menüsündeki Gizli nesneleri göster filtreyi kaldırır. |
+| `hv-explorer-hidden-tip` | {n} objects are hidden by a view filter ({pattern}). Show hidden objects, in this group's menu, removes it. · [one] {n} object is hidden by a view filter ({pattern}). Show hidden objects, in this group's menu, removes it. | {n} nesne bir görünüm filtresiyle gizlendi ({pattern}). Bu grubun menüsündeki Gizli nesneleri göster filtreyi kaldırır. |
 | `hv-explorer-menu-copy-ddl` | Copy DDL | DDL'i kopyala |
 | `hv-explorer-menu-modify-table` | Modify table… | Tabloyu değiştir… |
 | `hv-explorer-menu-modify-view` | Modify view… | Görünümü değiştir… |
@@ -223,6 +243,7 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 | `hv-explorer-menu-collapse-all` | Collapse all | Tümünü kapat |
 | `hv-explorer-copied` | Copied {name} | {name} kopyalandı |
 | `hv-explorer-open-data-note` | Opens a console on {conn} and runs: | {conn} üzerinde bir konsol açar ve şunu çalıştırır: |
+| `hv-explorer-menu-collapse-children` | Collapse all children | Tüm alt öğeleri kapat |
 
 **Out of scope.** New object…, Drop…, Rename… (M7 with Modify); Diagrams; Compare; Export/Import (M6); Edit source (M7).
 
@@ -239,22 +260,23 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 **Keyboard.** The pill is not a separate Tab stop (the tree is one stop); the level list is reached with ⇧F10 › Introspection level ›, or the palette ("Set introspection level…", Task 1b). In the list: ↑/↓, ↵, Escape.
 
 **Copy.**
+
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
 | `hv-explorer-level-auto` | Automatic | Otomatik |
 | `hv-explorer-level-names` | Names only | Yalnız adlar |
 | `hv-explorer-level-structure` | Structure | Yapı |
 | `hv-explorer-level-sources` | Structure and sources | Yapı ve kaynaklar |
-| `hv-explorer-level-auto-hint` | now {level} | şu an {level} |
+| `hv-explorer-level-auto-hint` | now Structure · [names] now Names only · [sources] now Structure and sources | şu an Yapı · [names] şu an Yalnız adlar · [sources] şu an Yapı ve kaynaklar |
 | `hv-explorer-level-names-hint` | fastest, no columns | en hızlısı, sütunsuz |
 | `hv-explorer-level-structure-hint` | columns, keys, indexes | sütunlar, anahtarlar, indeksler |
 | `hv-explorer-level-sources-hint` | and view and function text | ve görünüm, fonksiyon metinleri |
 | `hv-explorer-pill-names` | Names | Adlar |
 | `hv-explorer-pill-structure` | Structure | Yapı |
 | `hv-explorer-pill-sources` | Sources | Kaynaklar |
-| `hv-explorer-pill-tip-explicit` | Introspection level: {level}, set here. Schemas below inherit it. | Okuma düzeyi: {level}, burada ayarlandı. Alttaki şemalar bunu devralır. |
-| `hv-explorer-pill-tip-inherited` | Introspection level: {level}, inherited from {parent}. | Okuma düzeyi: {level}, {parent} öğesinden devralındı. |
-| `hv-explorer-pill-tip-auto` | Introspection level: {level}, chosen automatically for {n} objects. | Okuma düzeyi: {level}, {n} nesne için otomatik seçildi. |
+| `hv-explorer-pill-tip-explicit` | Introspection level: Structure, set here. Schemas below inherit it. · [names] Introspection level: Names only, set here. Schemas below inherit it. · [sources] Introspection level: Structure and sources, set here. Schemas below inherit it. | Okuma düzeyi: Yapı, burada ayarlandı. Alttaki şemalar bunu devralır. · [names] Okuma düzeyi: Yalnız adlar, burada ayarlandı. Alttaki şemalar bunu devralır. · [sources] Okuma düzeyi: Yapı ve kaynaklar, burada ayarlandı. Alttaki şemalar bunu devralır. |
+| `hv-explorer-pill-tip-inherited` | Introspection level: Structure, inherited from {parent}. · [names] Introspection level: Names only, inherited from {parent}. · [sources] Introspection level: Structure and sources, inherited from {parent}. | Okuma düzeyi: Yapı; {parent} öğesinden devralındı. · [names] Okuma düzeyi: Yalnız adlar; {parent} öğesinden devralındı. · [sources] Okuma düzeyi: Yapı ve kaynaklar; {parent} öğesinden devralındı. |
+| `hv-explorer-pill-tip-auto` | Introspection level: Structure, chosen automatically for {n} objects. · [names] Introspection level: Names only, chosen automatically for {n} objects. · [sources] Introspection level: Structure and sources, chosen automatically for {n} objects. | Okuma düzeyi: Yapı; {n} nesne için otomatik seçildi. · [names] Okuma düzeyi: Yalnız adlar; {n} nesne için otomatik seçildi. · [sources] Okuma düzeyi: Yapı ve kaynaklar; {n} nesne için otomatik seçildi. |
 
 **Out of scope.** Levels per object kind; a setting to hide the pills (DataGrip's registry key) unless the PO asks; level on MySQL server roots (levels sit on databases and schemas only).
 
@@ -276,11 +298,12 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 **Keyboard.** Tab moves Disclosure → All databases → the tree (one stop; ↑/↓ move, Space toggles, → / ← expand/collapse a database) → Pattern → Encrypt → Advanced → footer. The inline questions take the focus on their safe answer. Escape cancels the dialog without saving (Task 20 `escape_cancels_without_saving`).
 
 **Copy.**
+
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
 | `hv-scope-section` | Schemas | Şemalar |
-| `hv-scope-summary` | {n} of {total} schemas | {total} şemadan {n} |
-| `hv-scope-summary-mysql` | All {total} databases | {total} veritabanının tümü |
+| `hv-scope-summary` | {n} of {total} schemas · [one] {n} of {total} schema | {total} şemadan {n} |
+| `hv-scope-summary-mysql` | All {total} databases · [one] {total} database | {total} veritabanının tümü |
 | `hv-scope-current-db` | current database | geçerli veritabanı |
 | `hv-scope-other-db-hint` | needs its own connection | ayrı bağlantı gerekir |
 | `hv-scope-pattern` | Pattern | Desen |
@@ -290,8 +313,8 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 | `hv-scope-mysql-note` | Every database you can see is listed. Each one loads the first time you open it. | Görebildiğiniz her veritabanı listelenir. Her biri ilk açtığınızda yüklenir. |
 | `hv-scope-all-dbs` | All databases | Tüm veritabanları |
 | `hv-scope-all-dbs-title` | Read every database on this server? | Bu sunucudaki tüm veritabanları okunsun mu? |
-| `hv-scope-all-dbs-body` | This server has {n} databases. Reading them opens one connection per database and can take a while on a large server. | Bu sunucuda {n} veritabanı var. Hepsini okumak her veritabanı için bir bağlantı açar ve büyük bir sunucuda zaman alabilir. |
-| `hv-scope-all-dbs-yes` | Read all {n} databases | {n} veritabanının tümünü oku |
+| `hv-scope-all-dbs-body` | This server has {n} databases. Reading them opens one connection per database and can take a while on a large server. · [one] This server has {n} database. Reading it opens one more connection. | Bu sunucuda {n} veritabanı var. Hepsini okumak her veritabanı için bir bağlantı açar ve büyük bir sunucuda zaman alabilir. |
+| `hv-scope-all-dbs-yes` | Read all {n} databases · [one] Read {n} database | {n} veritabanının tümünü oku |
 | `hv-scope-all-dbs-no` | Keep the current database | Geçerli veritabanında kal |
 | `hv-scope-encrypt` | Encrypt cached metadata | Önbellekteki üst veriyi şifrele |
 | `hv-scope-encrypt-sub` | The saved catalog is encrypted with a key kept in the Keychain. On by default for production. | Kaydedilen katalog, Anahtar Zinciri'nde tutulan bir anahtarla şifrelenir. Üretimde varsayılan olarak açıktır. |
@@ -318,14 +341,15 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 **Keyboard.** Initial focus Keep cached; Enter acts on the focused button (key-down, no repeat); Escape and the close icon answer Keep cached; Tab is trapped in the card.
 
 **Copy.**
+
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
-| `hv-metadata-mass-title` | {count} objects in {schema} are no longer visible | {schema} içindeki {count} nesne artık görünmüyor |
+| `hv-metadata-mass-title` | {count} objects in {schema} are no longer visible · [one] {count} object in {schema} is no longer visible | {schema} içindeki {count} nesne artık görünmüyor |
 | `hv-metadata-mass-body` | They may have been dropped, or this login may have lost access to them. Removing them from the cache changes nothing on the server. | Silinmiş olabilirler ya da bu kullanıcı onlara erişimini kaybetmiş olabilir. Önbellekten kaldırmak sunucuda hiçbir şeyi değiştirmez. |
 | `hv-metadata-mass-more` | and {n} more | ve {n} tane daha |
 | `hv-metadata-mass-keep` | Keep cached | Önbellekte tut |
 | `hv-metadata-mass-remove` | Remove from cache | Önbellekten kaldır |
-| `hv-metadata-mass-pending-tip` | {count} objects disappeared in the last background check. Refresh {schema} to review them; nothing was removed. | Son arka plan denetiminde {count} nesne kayboldu. İncelemek için {schema} şemasını yenileyin; hiçbir şey kaldırılmadı. |
+| `hv-metadata-mass-pending-tip` | {count} objects disappeared in the last background check. Refresh {schema} to review them; nothing was removed. · [one] {count} object disappeared in the last background check. Refresh {schema} to review it; nothing was removed. | Son arka plan denetiminde {count} nesne kayboldu. İncelemek için {schema} şemasını yenileyin; hiçbir şey kaldırılmadı. |
 | `hv-metadata-ns-dropped` | {schema} is no longer on the server, so it was removed from the explorer. | {schema} artık sunucuda yok, bu yüzden gezginden kaldırıldı. |
 
 **Out of scope.** Choosing objects one by one; restoring removed rows (the next refresh reads them again if they exist).
@@ -345,19 +369,20 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 **Keyboard.** The toast is reached with F6 (the M3b cycle); Escape there answers Not now. Nothing here blocks a run.
 
 **Copy.**
+
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
-| `hv-metadata-refresh-ask` | Refresh the database explorer to reflect {count} changed objects? | Gezgin, değişen {count} nesneyi gösterecek şekilde yenilensin mi? |
+| `hv-metadata-refresh-ask` | Refresh the database explorer to reflect {count} changed objects? · [one] Refresh the database explorer to reflect {count} changed object? | Gezgin, değişen {count} nesneyi gösterecek şekilde yenilensin mi? |
 | `hv-metadata-refresh-ask-body` | Your script in {console} changed them. | {console} içindeki betiğiniz bunları değiştirdi. |
 | `hv-metadata-refresh` | Refresh | Yenile |
 | `hv-metadata-refresh-always` | Always refresh | Her zaman yenile |
 | `hv-metadata-refresh-not-now` | Not now | Şimdi değil |
 | `hv-metadata-after-commit` | Refreshes after COMMIT | COMMIT sonrası yenilenir |
-| `hv-metadata-after-commit-tip` | {count} changes from this transaction wait for COMMIT. ROLLBACK discards them and the explorer stays as it is. | Bu transaction'daki {count} değişiklik COMMIT'i bekliyor. ROLLBACK bunları atar ve gezgin olduğu gibi kalır. |
+| `hv-metadata-after-commit-tip` | {count} changes from this transaction wait for COMMIT. ROLLBACK discards them and the explorer stays as it is. · [one] {count} change from this transaction waits for COMMIT. ROLLBACK discards it and the explorer stays as it is. | Bu transaction'daki {count} değişiklik COMMIT'i bekliyor. ROLLBACK bunları atar ve gezgin olduğu gibi kalır. |
 | `hv-metadata-broad` | Refreshing all of {schema} | {schema} tamamen yenileniyor |
 | `hv-metadata-broad-body` | The script ran dynamic SQL ({what}), so Hacivat can't tell which objects changed. | Betik dinamik SQL çalıştırdı ({what}); Hacivat hangi nesnelerin değiştiğini bilemiyor. |
-| `hv-metadata-refreshed` | Explorer refreshed {count} objects in {schema} | Gezgin {schema} içinde {count} nesneyi yeniledi |
-| `hv-metadata-log-pending` | Explorer refresh waits for COMMIT ({count} objects) | Gezgin yenilemesi COMMIT'i bekliyor ({count} nesne) |
+| `hv-metadata-refreshed` | Explorer refreshed {count} objects in {schema} · [one] Explorer refreshed {count} object in {schema} | Gezgin {schema} içinde {count} nesneyi yeniledi |
+| `hv-metadata-log-pending` | Explorer refresh waits for COMMIT ({count} objects) · [one] Explorer refresh waits for COMMIT ({count} object) | Gezgin yenilemesi COMMIT'i bekliyor ({count} nesne) |
 
 **Out of scope.** Session overlays (an uncommitted CREATE visible in completion, M5, R-M4-11); refreshing other connections to the same server.
 
@@ -372,13 +397,14 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 - **Notices** (inline-notice anatomy under the strip): MySQL executable comments (triangle-alert, ink): "This text contains MySQL executable comments (/*! … */). MySQL runs what is inside them as SQL." (`ddl-warn-executable-comment`); the comments themselves show verbatim on the inlay well (the M3a executable-comment look). Grants partial (alert, ink). Stale states: surface 11.
 - **Reading the definition** (an object below Sources is elevated first, Task 25): the run marker and "Reading the definition of müşteri…" where the code goes; Copy and Open in console wait.
 - **Unsupported kind:** an info notice "Hacivat can't show DDL for a type yet." / "sipariş_durum stays in the explorer, and Copy qualified name works."; no code; Copy and Open in console disabled.
-- **Overflow Rule:** the source caption hides first, then Owner, Grants and the server toggle move into ⋯ (the More menu keeps their checks), then Open in console and Refresh. Labels never truncate; the read-only chip never hides.
+- **Overflow Rule:** the source caption hides first, then Owner, Grants and the server toggle move into ⋯ (the More menu keeps their checks), then Open in console and Refresh. With PostgreSQL generated text the strip fits 960 in Turkish once the caption hides; with MySQL generated text (server toggle off, five options) it doesn't, and ⋯ appears: scenario "960 · TR · overflow ⋯" shows it open (Owner, Grants ✓, Definitions provided by server). Labels never truncate; the read-only chip never hides.
 
-**States.** Table (generated) · Options (Always, After table, Grants, Owner) · Reading the definition · Grants · partial · View (server text) · MySQL server text with `/*! */` · SQLite server text · Unsupported kind · 960 × 600 in Turkish (overflow, horizontal scroll).
+**States.** Table (generated) · Options (Always, After table, Grants, Owner) · Reading the definition · Grants · partial · View (server text) · MySQL server text with `/*! */` · SQLite server text · Unsupported kind · 960 · TR · overflow ⋯ (MySQL generated text, the More menu open) · 960 × 600 in Turkish (overflow, horizontal scroll).
 
 **Keyboard.** F12 opens it from the tree (or the palette); the toolbar and the strip are Tab stops in visual order; the code area takes the focus for selection and ⌘C (the standard copy, `ddl_view.copy`); ⌘A selects all; Escape returns to the editor's normal state; ⌘W closes the tab.
 
 **Copy.**
+
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
 | `hv-ddl-view-tab-title` | {name} · DDL | {name} · DDL |
@@ -400,7 +426,7 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 | `hv-ddl-view-source-generated` | Generated from the catalog | Katalogdan üretildi |
 | `hv-ddl-view-source-server` | Text from the server | Sunucudan gelen metin |
 | `hv-ddl-view-copied` | Copied the DDL of {name} | {name} DDL'i kopyalandı |
-| `hv-ddl-view-unsupported` | Hacivat can't show DDL for a {kind} yet. | Hacivat henüz bir {kind} için DDL gösteremiyor. |
+| `hv-ddl-view-unsupported` | Hacivat can't show DDL for this kind of object yet. · [type] Hacivat can't show DDL for a type yet. · [domain] Hacivat can't show DDL for a domain yet. · [policy] Hacivat can't show DDL for a row security policy yet. · [rule] Hacivat can't show DDL for a rule yet. · [extension] Hacivat can't show DDL for an extension yet. · [operator] Hacivat can't show DDL for an operator yet. | Hacivat bu tür nesnelerin DDL'ini henüz gösteremiyor. · [type] Hacivat tiplerin DDL'ini henüz gösteremiyor. · [domain] Hacivat domain'lerin DDL'ini henüz gösteremiyor. · [policy] Hacivat satır güvenliği ilkelerinin DDL'ini henüz gösteremiyor. · [rule] Hacivat kuralların DDL'ini henüz gösteremiyor. · [extension] Hacivat eklentilerin DDL'ini henüz gösteremiyor. · [operator] Hacivat işleçlerin DDL'ini henüz gösteremiyor. |
 | `hv-ddl-view-unsupported-body` | {name} stays in the explorer, and Copy qualified name works. | {name} gezginde kalır; Tam adı kopyala çalışır. |
 | `hv-ddl-view-loading` | Reading the definition of {name}… | {name} tanımı okunuyor… |
 | `hv-ddl-view-grants-partial` | Some grants could not be read, so the list may be incomplete. | Bazı yetkiler okunamadı; liste eksik olabilir. |
@@ -422,6 +448,7 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 **Keyboard.** The notice's button is the first Tab stop after the toolbar; Reload is also F5 in the DDL view.
 
 **Copy.**
+
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
 | `hv-ddl-view-stale` | {name} changed on the server since it was loaded | {name} yüklendikten sonra sunucuda değişti |
@@ -444,14 +471,12 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 **Keyboard.** The tooltip text is the row's accessible description; nothing else changes.
 
 **Copy.**
+
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
-| `hv-explorer-word-index` | Index | İndeks |
-| `hv-explorer-word-foreign-key` | Foreign key | Yabancı anahtar |
-| `hv-explorer-word-type` | type | tip |
 | `hv-explorer-invisible` | invisible characters | görünmez karakter |
 | `hv-explorer-invisible-tip` | This name contains an invisible character: {what}. Copy and DDL keep it exactly. | Bu ad görünmez bir karakter içeriyor: {what}. Kopyalama ve DDL onu aynen korur. |
-| `hv-explorer-broken` | {kind} {name} references a column that could not be resolved | {kind} {name}, çözümlenemeyen bir sütuna başvuruyor |
+| `hv-explorer-broken` | {name} references a column that could not be resolved · [index] Index {name} references a column that could not be resolved · [foreign-key] Foreign key {name} references a column that could not be resolved · [check] Check constraint {name} references a column that could not be resolved · [trigger] Trigger {name} references a column that could not be resolved | {name}, çözümlenemeyen bir sütuna başvuruyor · [index] {name} indeksi, çözümlenemeyen bir sütuna başvuruyor · [foreign-key] {name} yabancı anahtarı, çözümlenemeyen bir sütuna başvuruyor · [check] {name} denetim kısıtı, çözümlenemeyen bir sütuna başvuruyor · [trigger] {name} tetikleyicisi, çözümlenemeyen bir sütuna başvuruyor |
 | `hv-explorer-broken-body` | The column may have been dropped or renamed after the last read. Refresh the table to check. | Sütun son okumadan sonra silinmiş ya da yeniden adlandırılmış olabilir. Denetlemek için tabloyu yenileyin. |
 
 **Out of scope.** Renaming or repairing the object; listing every invisible code point type (bidi controls use the same badge, HV-MODEL-01 i18n notes).
@@ -471,6 +496,7 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 **Keyboard.** As the shipped page: Tab through rows, arrows in the Segmented, Space/↵/↓ open a Select. The dialog opens on Cancel; Escape cancels.
 
 **Copy.**
+
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
 | `hv-settings-nav-metadata` | Metadata | Üst veri |
@@ -516,10 +542,11 @@ Clickable mock: `design/m4-explorer/index.html` (one file, one app, a surface sw
 **Keyboard.** None new; the meta's tooltip is the row's accessible description.
 
 **Copy.**
+
 | Fluent id | EN (final) | TR (draft, `# Review: PO`) |
 |---|---|---|
 | `hv-explorer-progress-meta` | {percent} | {percent} |
-| `hv-explorer-progress-tip` | Reading {schema}: columns {n} of {total}. The explorer stays usable meanwhile. | {schema} okunuyor: sütunlar {n} / {total}. Bu sırada gezgin kullanılabilir. |
+| `hv-explorer-progress-tip` | Reading {schema}: the columns of {n} of {total} tables so far. The explorer stays usable meanwhile. · [one] Reading {schema}: the columns of {n} of {total} table so far. The explorer stays usable meanwhile. | {schema} okunuyor: şu ana dek {total} tablonun {n} tanesinin sütunları. Bu sırada gezgin kullanılabilir. |
 
 **Out of scope.** A global activity center; notifications when a pass ends (it ends quietly: the rows fill in).
 
@@ -565,6 +592,16 @@ Each is ruled so the build is not blocked; the PO can overrule any.
 18. **The DDL tab title** is "{name} · DDL" with the kind icon. *Cost if wrong:* copy.
 19. **Turkish words** (all `# Review: PO`): Gezgin (shipped), "üst veri" for metadata, "Okuma düzeyi" for introspection level, Adlar / Yapı / Kaynaklar, SOMUT GÖRÜNÜMLER, SEKANSLAR, İNDEKSLER, DENETİMLER (checks), TETİKLEYİCİLER, "Yerleşik" (built-in), "Benzer nesneleri gizle"; transaction, commit and rollback stay English.
 20. **`ddl-warn-executable-comment`** keeps the plan's id (R-M4-24) without the `hv-` prefix: it belongs to the core block that emits warnings (Task 1a's `## m4-t01a-model` in `hacivat-core.ftl`, or the DDL task that owns the warning), not Task 1b's UI block. The wording here is binding.
+21. **No sentence is assembled from fragments** (fix round 1). `hv-ddl-view-unsupported` and `hv-explorer-broken` are one message each with a `$kind` selector holding a whole sentence per kind (article and case right in both languages; Turkish puts the kind after the name: "ix indeksi, …"); the pill tooltips and the level hint use a `$level` selector instead of inserting a level word. The `hv-explorer-word-*` messages are gone. *Cost if wrong:* none; it is the Fluent rule.
+22. **Counts are Number arguments.** The shipped precedent (`hv-conn-import-done`, `hv-conn-file-entries-skipped`, `hv-history-count`) passes one Number that both selects the plural and is displayed; `hacivat_l10n`'s bundle formatter (`crates/core/hacivat-l10n/src/format.rs`) renders every Number, `NUMBER()` and `DATETIME()` in the format locale while plural rules follow the UI language. So no preformatted count and no second display variable: percents are `NUMBER($fraction, style: "percent")`, the cache date is `DATETIME($date, …)`, the error position `NUMBER($pos, useGrouping: "false")`. *Cost if wrong:* argument types in Task 1b's FTL.
+23. **Node menus collapse their node** ("Collapse all children"); the tree-wide Collapse all stays on ⌘← and the palette. *Cost if wrong:* one menu row.
+24. **No extra Windows/Linux chord for the filter**: PO-Q10's `ctrl-alt-f` fails the AltGr check on TR-F; the shipped Ctrl+F stays the binding there. *Cost if wrong:* a PO-chosen alternative.
+
+### For the controller (Task 1b / 1c pick-up)
+1. **`ddl-warn-executable-comment` needs an owning block** in `locales/{en,tr}/hacivat-core.ftl` (ruling 20): Task 1a's `## m4-t01a-model` or the DDL task that emits the warning; the wording here is binding.
+2. **Five new icons** for Task 1b's icon addendum (Lucide 0.460, ISC; SVGs, `assets.rs` rows, `IconName` variants): `columns-3` (column), `zap` (trigger), `type` (type), `folder-tree` (schema), `library` (Built-in). Also check `link`, `shield-check`, `server`, `cylinder`, `filter`, `history`, `eraser`, `key-round` against `crates/ui/hacivat-ui-core/assets/icons/lucide/`.
+3. `hv-explorer-memory-only` may be routed through Task 1c's `model-…` keyring message; the wording here is binding.
+4. The Windows/Linux key rows above (rulings 23, 24): `shift-alt-c` for Copy qualified name; no `ctrl-alt-f`.
 
 ### Open items for the PO
 1. **Turkish copy:** every TR string below is a draft (`# Review: PO`), in particular the words in ruling 19.
@@ -579,9 +616,9 @@ Each is ruled so the build is not blocked; the PO can overrule any.
 ## Verification
 
 Run on the committed file (the harness is the mock's own `?check=all` mode, driven by headless Chrome with `--dump-dom`; the driver scripts live in the session scratchpad and are not committed):
-- **596 renders, 0 findings:** 85 scenarios of the fourteen surfaces × EN/TR × dark/light × 1440 × 900 and 960 × 600 (the fourteen "960 · TR" scenarios render dark and light only).
+- **598 renders, 0 findings** (after fix round 1): 86 scenarios of the fourteen surfaces × EN/TR × dark/light × 1440 × 900 and 960 × 600 (the fifteen pinned "960 · TR" scenarios render dark and light only).
 - Each render was checked for: exceptions; the number of cp-fill blocks larger than a mark (exactly one when the capsule is production, else none); text below 11 px (small caps excepted); text-3 on raised (dark; disabled exempt); `undefined`, `NaN` or an unfilled `{placeholder}` in any drawn text; horizontal overflow in toolbars, the options strip, the status bar, the title bar, dialog heads and footers, menus, tooltips, toasts, settings rows, tree rows, notices, panel headers, the filter field, tabs, scope rows and the settings navigation; chrome text that ellipsizes (data exempt: names, types, meta, mono values, the crumb); trust flags on tree roots clipped or outside their row and the explorer; the capsule's production block and access, the DDL view's read-only chip and the status bar's environment segment hidden or outside the window; floating layers (menus, tooltips, toasts) outside the window or over the status bar; a modal without the focus inside it.
-- **21 behaviour probes, all PASS**, driven through real DOM events: ↓ moves the cursor; ← / → collapse and expand a kind-group header, which never takes the selection; type-ahead `ü` lands on `ürün`; ↵ on a table opens data with `SELECT * FROM public.müşteri`; F12 opens the DDL tab; ⌘← collapses all; right-click opens the table menu with Modify disabled and its reason; ↵ in the menu copies `public.müşteri`; `istanbul` finds nothing with Turkish-tolerant off and nine objects with it on; no match shows Clear filter, which restores the tree; Qualification Always and Owner change the generated text; checking a schema rewrites the pattern to `@:*`; All databases asks first, focused on the safe answer; mass deletion opens on Keep cached and Escape closes it; the pill opens the level list with Automatic checked.
+- **27 behaviour probes, all PASS** (21 from the first round, 6 added by fix round 1: a schema's Collapse all children collapses only below it; whole-sentence kind variants in EN and TR; EN singular variants; the level selector; the 960 · TR overflow ⋯ drawn and open with its checks), driven through real DOM events: ↓ moves the cursor; ← / → collapse and expand a kind-group header, which never takes the selection; type-ahead `ü` lands on `ürün`; ↵ on a table opens data with `SELECT * FROM public.müşteri`; F12 opens the DDL tab; ⌘← collapses all; right-click opens the table menu with Modify disabled and its reason; ↵ in the menu copies `public.müşteri`; `istanbul` finds nothing with Turkish-tolerant off and nine objects with it on; no match shows Clear filter, which restores the tree; Qualification Always and Owner change the generated text; checking a schema rewrites the pattern to `@:*`; All databases asks first, focused on the safe answer; mass deletion opens on Keep cached and Escape closes it; the pill opens the level list with Automatic checked.
 - The PNGs were looked at (every scenario at 1440 in dark or light, every "960 · TR" in light). That review caught what the checks did not, all fixed in the design, never by relaxing a check: the environment header colliding with the `.env` mark class; columns sorted by name instead of ordinal order; a label giving way before its type text; badges truncating instead of collapsing to their glyph; the progress meta ellipsizing its count (now a percent); the Constraints Select shrinking to an empty box at 960 instead of moving options into ⋯ (the strip's items no longer shrink); a long DDL line clipped without a scroll thumb; the settings note's mono name splitting across lines and the search highlight eating a space (flex children; now wrapped); a dialog cell picking up the tile grid's `.col` background; the light theme's mixed checkbox drawn empty; Qualification shown over server text; the console tab not following the capsule's connection on production; the waiting row's label ellipsized (now "Waiting for columns"); the phase label truncated in Turkish (the status row's marker now sits in the chevron column).
 - The copy tables below are generated from the mock's own `i18n` block, so the two cannot drift.
 
@@ -589,7 +626,7 @@ Run on the committed file (the harness is the mock's own `?check=all` mode, driv
 
 ## Copy strings (EN / TR)
 
-The id is the Fluent id. Variables are Fluent variables (`{ $count }`); counts, sizes, dates and percents arrive preformatted by the format locale (L3; P31). Names inside a message (`{ $name }`, `{ $schema }`, `{ $console }`, `{ $conn }`) are FSI/PDI-isolated by the caller. Every EN message with a count has a plural selector where the singular differs; Turkish needs none after a numeral and never puts a case suffix on one. Small-caps labels are pre-cased in the file, never cased in code (the shipped `hv-explorer-group-*` rule). Turkish keeps transaction, commit and rollback in English.
+The id is the Fluent id. Variables are Fluent variables (`{ $count }`). **Counts are Number arguments** (ruling 22): one Number both selects the plural and is shown, and `hacivat_l10n` formats it in the format locale (L3; P31) while plural rules follow the UI language, as the shipped `hv-conn-import-done` does; percents, the cache date and the error position use `NUMBER()` / `DATETIME()` the same way. **Every EN message with a count has a `[one]` / `*[other]` selector** (the shipped style at `locales/en/hacivat-ui.ftl:156, 171, 309`); Turkish needs none after a numeral and never puts a case suffix on one. **No sentence is assembled from fragments** (ruling 21): kinds and levels are `$kind` / `$level` selectors holding whole sentences. Names inside a message (`{ $name }`, `{ $schema }`, `{ $console }`, `{ $conn }`, `{ $parent }`) are FSI/PDI-isolated by the caller. Small-caps labels are pre-cased in the file, never cased in code (the shipped `hv-explorer-group-*` rule). Turkish keeps transaction, commit and rollback in English. In the tables, `· [one] …`, `· [index] …` and `· [names] …` list a message's other variants; the FTL below is the authoritative shape.
 
 | Prefix | File | Owner (own block) |
 |---|---|---|
@@ -606,54 +643,57 @@ Reused verbatim, not redefined: `hv-explorer-group-*`, `hv-conn-menu-*`, `hv-cap
 
 # Surface 1 (Explorer tree).
 hv-explorer-tree-label = Database explorer
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 hv-explorer-kind-tables = TABLES
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 hv-explorer-kind-views = VIEWS
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 hv-explorer-kind-matviews = MATERIALIZED VIEWS
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 hv-explorer-kind-functions = FUNCTIONS
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 hv-explorer-kind-procedures = PROCEDURES
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 hv-explorer-kind-sequences = SEQUENCES
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 hv-explorer-kind-types = TYPES
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 hv-explorer-kind-events = EVENTS
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 hv-explorer-kind-columns = COLUMNS
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 hv-explorer-kind-keys = KEYS
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 hv-explorer-kind-foreign-keys = FOREIGN KEYS
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 hv-explorer-kind-indexes = INDEXES
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 hv-explorer-kind-checks = CHECKS
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 hv-explorer-kind-triggers = TRIGGERS
-# Surface 1 (Explorer tree). The Built-in group of a database (system objects from the bundled catalog).
+# Surface 1 (Explorer tree). The Built-in group of a database.
 hv-explorer-builtin = Built-in
-# Surface 1 (Explorer tree). The Built-in group of a database (system objects from the bundled catalog).
+# Surface 1 (Explorer tree). The Built-in group of a database.
 # Variables:
 #   $version (String) - the bundled catalog's server version, e.g. "17".
 hv-explorer-builtin-badge = version { $version }
-# Surface 1 (Explorer tree). The Built-in group of a database (system objects from the bundled catalog).
+# Surface 1 (Explorer tree). The Built-in group of a database.
 # Variables:
 #   $version (String) - the bundled catalog's server version, e.g. "17".
 hv-explorer-builtin-tip = Built-in catalog (version { $version }): the server's own objects, shipped with Hacivat and read without a connection.
 # Surface 1 (Explorer tree). The database row's schema scope count (N of M).
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-#   $total (Number) - the total, formatted by the format locale, e.g. 15000.
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
 hv-explorer-scope-count = { $n } of { $total }
 # Surface 1 (Explorer tree). The database row's schema scope count (N of M).
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-#   $total (Number) - the total, formatted by the format locale, e.g. 15000.
-hv-explorer-scope-count-tip = { $n } of { $total } schemas are in scope. Edit scope… changes which ones are read.
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-explorer-scope-count-tip = { $total ->
+        [one] { $n } of { $total } schema is in scope. Edit scope… changes which ones are read.
+       *[other] { $n } of { $total } schemas are in scope. Edit scope… changes which ones are read.
+    }
 # Surface 1 (Explorer tree).
 hv-explorer-add-scope = Add to scope
 # Surface 1 (Explorer tree).
@@ -666,24 +706,27 @@ hv-explorer-out-of-scope-tip = { $name } isn't in this connection's scope, so it
 hv-explorer-out-of-scope-db-tip = { $name } isn't in this connection's scope, so it isn't read. Reading it opens one more connection.
 # Surface 1 (Explorer tree).
 # Variables:
-#   $rows (Number) - the server's row estimate, formatted by the format locale, e.g. 48213.
-hv-explorer-row-estimate-tip = About { $rows } rows (the server's estimate)
+#   $rows (Number) - the server's row estimate, e.g. 48213.
+hv-explorer-row-estimate-tip = { $rows ->
+        [one] About { $rows } row (the server's estimate)
+       *[other] About { $rows } rows (the server's estimate)
+    }
 # Surface 1 (Explorer tree).
 hv-explorer-loads-on-open = Loads when you open it
 # Surface 2 (Loading states).
 hv-explorer-loading = Loading…
-# Surface 2 (Loading states). A phase row's label while a pass reads the node; the count follows in mono (hv-explorer-progress-count).
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
 hv-explorer-phase-names = Reading names…
-# Surface 2 (Loading states). A phase row's label while a pass reads the node; the count follows in mono (hv-explorer-progress-count).
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
 hv-explorer-phase-columns = Reading columns…
-# Surface 2 (Loading states). A phase row's label while a pass reads the node; the count follows in mono (hv-explorer-progress-count).
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
 hv-explorer-phase-constraints = Reading keys and indexes…
-# Surface 2 (Loading states). A phase row's label while a pass reads the node; the count follows in mono (hv-explorer-progress-count).
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
 hv-explorer-phase-sources = Reading definitions…
 # Surface 2 (Loading states). Progress of a pass in the explorer (surface 14: explorer only).
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-#   $total (Number) - the total, formatted by the format locale, e.g. 15000.
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
 hv-explorer-progress-count = { $n }/{ $total }
 # Surface 2 (Loading states).
 hv-explorer-waiting-pass = Waiting for columns
@@ -693,9 +736,12 @@ hv-explorer-partial = partial
 hv-explorer-partial-title = Some objects could not be read
 # Surface 2 (Loading states). The partial-load badge and its tooltip.
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 #   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
-hv-explorer-partial-body = This login can't read the definitions of { $n } functions in { $schema }. They are listed by name; their definitions are missing.
+hv-explorer-partial-body = { $n ->
+        [one] This login can't read the definition of { $n } function in { $schema }. It is listed by name; its definition is missing.
+       *[other] This login can't read the definitions of { $n } functions in { $schema }. They are listed by name; their definitions are missing.
+    }
 # Surface 2 (Loading states). A namespace whose catalog query was refused.
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
@@ -706,14 +752,14 @@ hv-explorer-failed-body = The server refused the catalog query. Retry reads it a
 hv-explorer-retry = Retry
 # Surface 3 (Cached and offline). A profile shown from its cache while offline.
 # Variables:
-#   $date (String) - the cache date, preformatted by the format locale, e.g. "17 Kasım 2026 14:05".
-hv-explorer-cached = Showing cached metadata from { $date }
+#   $date (DateTime) - when the cache was saved, e.g. 2026-11-17 14:05.
+hv-explorer-cached = Showing cached metadata from { DATETIME($date, dateStyle: "medium", timeStyle: "short") }
 # Surface 3 (Cached and offline). A profile shown from its cache while offline.
 hv-explorer-cached-meta = cached
 # Surface 3 (Cached and offline). A profile shown from its cache while offline.
 # Variables:
-#   $date (String) - the cache date, preformatted by the format locale, e.g. "17 Kasım 2026 14:05".
-hv-explorer-cached-tip = Not connected. The tree is the copy saved on { $date }; connect to check it against the server.
+#   $date (DateTime) - when the cache was saved, e.g. 2026-11-17 14:05.
+hv-explorer-cached-tip = Not connected. The tree is the copy saved on { DATETIME($date, dateStyle: "medium", timeStyle: "short") }; connect to check it against the server.
 # Surface 3 (Cached and offline).
 hv-explorer-stale = out of date
 # Surface 3 (Cached and offline).
@@ -730,20 +776,23 @@ hv-explorer-memory-only = The Keychain isn't available, so { $name }'s metadata 
 hv-explorer-filter-objects = Filter objects
 # Surface 4 (Filter field). The explorer filter field.
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 hv-explorer-filter-count = { $n ->
         [one] { $n } match
        *[other] { $n } matches
     }
 # Surface 4 (Filter field). The explorer filter field.
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-#   $total (Number) - the total, formatted by the format locale, e.g. 15000.
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
 hv-explorer-filter-group-count = { $n } of { $total }
 # Surface 4 (Filter field). The explorer filter field.
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-hv-explorer-filter-unloaded = Searches loaded names only. The columns of { $n } tables aren't loaded yet.
+#   $n (Number) - a count, e.g. 3400.
+hv-explorer-filter-unloaded = { $n ->
+        [one] Searches loaded names only. The columns of { $n } table aren't loaded yet.
+       *[other] Searches loaded names only. The columns of { $n } tables aren't loaded yet.
+    }
 # Surface 4 (Filter field). The explorer filter field.
 hv-explorer-filter-none = No objects match
 # Surface 4 (Filter field). The explorer filter field.
@@ -776,9 +825,12 @@ hv-explorer-menu-hide-like = Hide objects like this
 hv-explorer-menu-show-hidden = Show hidden objects
 # Surface 5 (Context menus).
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 #   $pattern (String) - the view filter's pattern, e.g. "yedek_fatura_*".
-hv-explorer-hidden-tip = { $n } hidden by a view filter ({ $pattern }). Show hidden objects, in this group's menu, removes it.
+hv-explorer-hidden-tip = { $n ->
+        [one] { $n } object is hidden by a view filter ({ $pattern }). Show hidden objects, in this group's menu, removes it.
+       *[other] { $n } objects are hidden by a view filter ({ $pattern }). Show hidden objects, in this group's menu, removes it.
+    }
 # Surface 5 (Context menus). An explorer context-menu item.
 hv-explorer-menu-copy-ddl = Copy DDL
 # Surface 5 (Context menus). An explorer context-menu item.
@@ -793,7 +845,7 @@ hv-explorer-menu-modify-tip = Arrives in a later version
 hv-explorer-menu-remove-scope = Remove from scope
 # Surface 5 (Context menus). An explorer context-menu item.
 hv-explorer-menu-expand-all = Expand all children
-# Surface 5 (Context menus). An explorer context-menu item.
+# Surface 5 (Context menus). The tree-wide command (palette, ⌘←); node menus use hv-explorer-menu-collapse-children.
 hv-explorer-menu-collapse-all = Collapse all
 # Surface 5 (Context menus).
 # Variables:
@@ -803,6 +855,8 @@ hv-explorer-copied = Copied { $name }
 # Variables:
 #   $conn (String) - the connection name, e.g. "orders-dev".
 hv-explorer-open-data-note = Opens a console on { $conn } and runs:
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-collapse-children = Collapse all children
 # Surface 6 (Introspection level). The introspection level list (menu and pill).
 hv-explorer-level-auto = Automatic
 # Surface 6 (Introspection level). The introspection level list (menu and pill).
@@ -813,105 +867,145 @@ hv-explorer-level-structure = Structure
 hv-explorer-level-sources = Structure and sources
 # Surface 6 (Introspection level). The introspection level list (menu and pill).
 # Variables:
-#   $level (String) - a level name (an hv-explorer-level-* message), e.g. "Structure".
-hv-explorer-level-auto-hint = now { $level }
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+hv-explorer-level-auto-hint = { $level ->
+        [names] now Names only
+        [sources] now Structure and sources
+       *[structure] now Structure
+    }
 # Surface 6 (Introspection level). The introspection level list (menu and pill).
 hv-explorer-level-names-hint = fastest, no columns
 # Surface 6 (Introspection level). The introspection level list (menu and pill).
 hv-explorer-level-structure-hint = columns, keys, indexes
 # Surface 6 (Introspection level). The introspection level list (menu and pill).
 hv-explorer-level-sources-hint = and view and function text
-# Surface 6 (Introspection level). The level pill's word on a database or schema row.
+# Surface 6 (Introspection level). The level pill's word.
 hv-explorer-pill-names = Names
-# Surface 6 (Introspection level). The level pill's word on a database or schema row.
+# Surface 6 (Introspection level). The level pill's word.
 hv-explorer-pill-structure = Structure
-# Surface 6 (Introspection level). The level pill's word on a database or schema row.
+# Surface 6 (Introspection level). The level pill's word.
 hv-explorer-pill-sources = Sources
-# Surface 6 (Introspection level). The level pill's tooltip.
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
 # Variables:
-#   $level (String) - a level name (an hv-explorer-level-* message), e.g. "Structure".
-hv-explorer-pill-tip-explicit = Introspection level: { $level }, set here. Schemas below inherit it.
-# Surface 6 (Introspection level). The level pill's tooltip.
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+hv-explorer-pill-tip-explicit = { $level ->
+        [names] Introspection level: Names only, set here. Schemas below inherit it.
+        [sources] Introspection level: Structure and sources, set here. Schemas below inherit it.
+       *[structure] Introspection level: Structure, set here. Schemas below inherit it.
+    }
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
 # Variables:
-#   $level (String) - a level name (an hv-explorer-level-* message), e.g. "Structure".
 #   $parent (String) - the database or schema the level comes from, e.g. "orders".
-hv-explorer-pill-tip-inherited = Introspection level: { $level }, inherited from { $parent }.
-# Surface 6 (Introspection level). The level pill's tooltip.
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+hv-explorer-pill-tip-inherited = { $level ->
+        [names] Introspection level: Names only, inherited from { $parent }.
+        [sources] Introspection level: Structure and sources, inherited from { $parent }.
+       *[structure] Introspection level: Structure, inherited from { $parent }.
+    }
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
 # Variables:
-#   $level (String) - a level name (an hv-explorer-level-* message), e.g. "Structure".
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-hv-explorer-pill-tip-auto = Introspection level: { $level }, chosen automatically for { $n } objects.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+#   $n (Number) - a count, e.g. 3400.
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+hv-explorer-pill-tip-auto = { $level ->
+        [names] Introspection level: Names only, chosen automatically for { $n ->
+                [one] { $n } object
+               *[other] { $n } objects
+            }.
+        [sources] Introspection level: Structure and sources, chosen automatically for { $n ->
+                [one] { $n } object
+               *[other] { $n } objects
+            }.
+       *[structure] Introspection level: Structure, chosen automatically for { $n ->
+                [one] { $n } object
+               *[other] { $n } objects
+            }.
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-section = Schemas
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-#   $total (Number) - the total, formatted by the format locale, e.g. 15000.
-hv-scope-summary = { $n } of { $total } schemas
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-scope-summary = { $total ->
+        [one] { $n } of { $total } schema
+       *[other] { $n } of { $total } schemas
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Variables:
-#   $total (Number) - the total, formatted by the format locale, e.g. 15000.
-hv-scope-summary-mysql = All { $total } databases
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+#   $total (Number) - the total, e.g. 15000.
+hv-scope-summary-mysql = { $total ->
+        [one] { $total } database
+       *[other] All { $total } databases
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-current-db = current database
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-other-db-hint = needs its own connection
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-pattern = Pattern
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-pattern-hint = @ is the current database or schema, * is all, {"{"}…{"}"} holds a regular expression, | separates clauses.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Variables:
 #   $pos (Number) - the 1-based character position of the error, e.g. 20.
-hv-scope-pattern-error = Expected a schema name after “:” (character { $pos }).
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+hv-scope-pattern-error = Expected a schema name after “:” (character { NUMBER($pos, useGrouping: "false") }).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-builtin-note = Built-in schemas come from the bundled catalog and are not listed here.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-mysql-note = Every database you can see is listed. Each one loads the first time you open it.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-all-dbs = All databases
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-all-dbs-title = Read every database on this server?
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-hv-scope-all-dbs-body = This server has { $n } databases. Reading them opens one connection per database and can take a while on a large server.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+#   $n (Number) - a count, e.g. 3400.
+hv-scope-all-dbs-body = { $n ->
+        [one] This server has { $n } database. Reading it opens one more connection.
+       *[other] This server has { $n } databases. Reading them opens one connection per database and can take a while on a large server.
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-hv-scope-all-dbs-yes = Read all { $n } databases
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+#   $n (Number) - a count, e.g. 3400.
+hv-scope-all-dbs-yes = { $n ->
+        [one] Read { $n } database
+       *[other] Read all { $n } databases
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-all-dbs-no = Keep the current database
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-encrypt = Encrypt cached metadata
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-encrypt-sub = The saved catalog is encrypted with a key kept in the Keychain. On by default for production.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 hv-scope-encrypt-confirm-on = Turning this on deletes the cached metadata of { $name }. It is read again, encrypted, on the next connect.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 hv-scope-encrypt-confirm-off = Turning this off deletes the encrypted cache of { $name }. From the next connect it is saved as a plain file only your account can read.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-encrypt-apply = Delete the cache and encrypt
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-encrypt-apply-off = Delete the cache and stop encrypting
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-encrypt-keep = Keep it as it is
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 hv-scope-connect-to-list = Connect to list the schemas. The pattern below still decides what is read.
 # Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
 # Variables:
-#   $count (Number) - a count of objects, formatted by the format locale, e.g. 312.
+#   $count (Number) - a count of objects, e.g. 312.
 #   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
-hv-metadata-mass-title = { $count } objects in { $schema } are no longer visible
+hv-metadata-mass-title = { $count ->
+        [one] { $count } object in { $schema } is no longer visible
+       *[other] { $count } objects in { $schema } are no longer visible
+    }
 # Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
 hv-metadata-mass-body = They may have been dropped, or this login may have lost access to them. Removing them from the cache changes nothing on the server.
 # Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 hv-metadata-mass-more = and { $n } more
 # Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
 hv-metadata-mass-keep = Keep cached
@@ -919,69 +1013,84 @@ hv-metadata-mass-keep = Keep cached
 hv-metadata-mass-remove = Remove from cache
 # Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
 # Variables:
-#   $count (Number) - a count of objects, formatted by the format locale, e.g. 312.
+#   $count (Number) - a count of objects, e.g. 312.
 #   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
-hv-metadata-mass-pending-tip = { $count } objects disappeared in the last background check. Refresh { $schema } to review them; nothing was removed.
+hv-metadata-mass-pending-tip = { $count ->
+        [one] { $count } object disappeared in the last background check. Refresh { $schema } to review it; nothing was removed.
+       *[other] { $count } objects disappeared in the last background check. Refresh { $schema } to review them; nothing was removed.
+    }
 # Surface 8 (Mass-deletion confirmation).
 # Variables:
 #   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
 hv-metadata-ns-dropped = { $schema } is no longer on the server, so it was removed from the explorer.
-# Surface 9 (Refresh after DDL). Refresh after DDL: the Ask toast.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
 # Variables:
-#   $count (Number) - a count of objects, formatted by the format locale, e.g. 312.
-hv-metadata-refresh-ask = Refresh the database explorer to reflect { $count } changed objects?
-# Surface 9 (Refresh after DDL). Refresh after DDL: the Ask toast.
+#   $count (Number) - a count of objects, e.g. 312.
+hv-metadata-refresh-ask = { $count ->
+        [one] Refresh the database explorer to reflect { $count } changed object?
+       *[other] Refresh the database explorer to reflect { $count } changed objects?
+    }
+# Surface 9 (Refresh after DDL). Refresh after DDL.
 # Variables:
 #   $console (String) - the console's title, e.g. "orders-dev".
 hv-metadata-refresh-ask-body = Your script in { $console } changed them.
-# Surface 9 (Refresh after DDL). Refresh after DDL: the Ask toast.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
 hv-metadata-refresh = Refresh
-# Surface 9 (Refresh after DDL). Refresh after DDL: the Ask toast.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
 hv-metadata-refresh-always = Always refresh
-# Surface 9 (Refresh after DDL). Refresh after DDL: the Ask toast.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
 hv-metadata-refresh-not-now = Not now
 # Surface 9 (Refresh after DDL). Refresh after DDL inside a transaction (the pending stamp).
 hv-metadata-after-commit = Refreshes after COMMIT
 # Surface 9 (Refresh after DDL). Refresh after DDL inside a transaction (the pending stamp).
 # Variables:
-#   $count (Number) - a count of objects, formatted by the format locale, e.g. 312.
-hv-metadata-after-commit-tip = { $count } changes from this transaction wait for COMMIT. ROLLBACK discards them and the explorer stays as it is.
-# Surface 9 (Refresh after DDL). Refresh after DDL: the broad-refresh toast for dynamic SQL.
+#   $count (Number) - a count of objects, e.g. 312.
+hv-metadata-after-commit-tip = { $count ->
+        [one] { $count } change from this transaction waits for COMMIT. ROLLBACK discards it and the explorer stays as it is.
+       *[other] { $count } changes from this transaction wait for COMMIT. ROLLBACK discards them and the explorer stays as it is.
+    }
+# Surface 9 (Refresh after DDL). Refresh after DDL: dynamic SQL.
 # Variables:
 #   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
 hv-metadata-broad = Refreshing all of { $schema }
-# Surface 9 (Refresh after DDL). Refresh after DDL: the broad-refresh toast for dynamic SQL.
+# Surface 9 (Refresh after DDL). Refresh after DDL: dynamic SQL.
 # Variables:
 #   $what (String) - the SQL keyword that made the change opaque, e.g. "EXECUTE".
 hv-metadata-broad-body = The script ran dynamic SQL ({ $what }), so Hacivat can't tell which objects changed.
-# Surface 9 (Refresh after DDL). Refresh after DDL: the Ask toast.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
 # Variables:
-#   $count (Number) - a count of objects, formatted by the format locale, e.g. 312.
+#   $count (Number) - a count of objects, e.g. 312.
 #   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
-hv-metadata-refreshed = Explorer refreshed { $count } objects in { $schema }
+hv-metadata-refreshed = { $count ->
+        [one] Explorer refreshed { $count } object in { $schema }
+       *[other] Explorer refreshed { $count } objects in { $schema }
+    }
 # Surface 9 (Refresh after DDL).
 # Variables:
-#   $count (Number) - a count of objects, formatted by the format locale, e.g. 312.
-hv-metadata-log-pending = Explorer refresh waits for COMMIT ({ $count } objects)
+#   $count (Number) - a count of objects, e.g. 312.
+hv-metadata-log-pending = { $count ->
+        [one] Explorer refresh waits for COMMIT ({ $count } object)
+       *[other] Explorer refresh waits for COMMIT ({ $count } objects)
+    }
 # Surface 10 (DDL view). The DDL view tab.
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 hv-ddl-view-tab-title = { $name } · DDL
-# Surface 10 (DDL view). The DDL view's Qualification option.
+# Surface 10 (DDL view). The DDL view tab.
 hv-ddl-view-qualification = Qualification
-# Surface 10 (DDL view). The DDL view's Qualification option.
+# Surface 10 (DDL view). The DDL view tab.
 hv-ddl-view-qual-auto = Auto
-# Surface 10 (DDL view). The DDL view's Qualification option.
+# Surface 10 (DDL view). The DDL view tab.
 hv-ddl-view-qual-never = Never
-# Surface 10 (DDL view). The DDL view's Qualification option.
+# Surface 10 (DDL view). The DDL view tab.
 hv-ddl-view-qual-always = Always
-# Surface 10 (DDL view). The DDL view's Constraints placement option.
+# Surface 10 (DDL view). The DDL view tab.
 hv-ddl-view-constraints = Constraints
-# Surface 10 (DDL view). The DDL view's Constraints placement option.
+# Surface 10 (DDL view). The DDL view tab.
 hv-ddl-view-constraints-inside-column = Inside column
-# Surface 10 (DDL view). The DDL view's Constraints placement option.
+# Surface 10 (DDL view). The DDL view tab.
 hv-ddl-view-constraints-inside-table = Inside table
-# Surface 10 (DDL view). The DDL view's Constraints placement option.
+# Surface 10 (DDL view). The DDL view tab.
 hv-ddl-view-constraints-after-table = After table
 # Surface 10 (DDL view). The DDL view tab.
 hv-ddl-view-server = Definitions provided by server
@@ -1005,11 +1114,19 @@ hv-ddl-view-source-server = Text from the server
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 hv-ddl-view-copied = Copied the DDL of { $name }
-# Surface 10 (DDL view). The DDL view tab.
+# Surface 10 (DDL view). One whole sentence per kind ($kind selector); never a kind word inserted.
 # Variables:
-#   $kind (String) - a kind word (an hv-explorer-word-* message), e.g. "Index".
-hv-ddl-view-unsupported = Hacivat can't show DDL for a { $kind } yet.
-# Surface 10 (DDL view). The DDL view tab.
+#   $kind (String) - the object kind code, a selector, e.g. "index".
+hv-ddl-view-unsupported = { $kind ->
+        [domain] Hacivat can't show DDL for a domain yet.
+        [extension] Hacivat can't show DDL for an extension yet.
+        [operator] Hacivat can't show DDL for an operator yet.
+        [policy] Hacivat can't show DDL for a row security policy yet.
+        [rule] Hacivat can't show DDL for a rule yet.
+        [type] Hacivat can't show DDL for a type yet.
+       *[other] Hacivat can't show DDL for this kind of object yet.
+    }
+# Surface 10 (DDL view). One whole sentence per kind ($kind selector); never a kind word inserted.
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 hv-ddl-view-unsupported-body = { $name } stays in the explorer, and Copy qualified name works.
@@ -1035,24 +1152,24 @@ hv-ddl-view-gone-body = The text below is the last one loaded.
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 hv-ddl-view-unknown = Hacivat couldn't check whether { $name } changed on the server since it was loaded
-# Surface 12 (Invisible characters and broken objects). A kind word used inside other messages.
-hv-explorer-word-index = Index
-# Surface 12 (Invisible characters and broken objects). A kind word used inside other messages.
-hv-explorer-word-foreign-key = Foreign key
-# Surface 12 (Invisible characters and broken objects). A kind word used inside other messages.
-hv-explorer-word-type = type
 # Surface 12 (Invisible characters and broken objects). The invisible-characters badge and its tooltip.
 hv-explorer-invisible = invisible characters
 # Surface 12 (Invisible characters and broken objects). The invisible-characters badge and its tooltip.
 # Variables:
 #   $what (String) - the SQL keyword that made the change opaque, e.g. "EXECUTE".
 hv-explorer-invisible-tip = This name contains an invisible character: { $what }. Copy and DDL keep it exactly.
-# Surface 12 (Invisible characters and broken objects). An object whose reference cannot be resolved.
+# Surface 12 (Invisible characters and broken objects). One whole sentence per kind ($kind selector); the name stays an isolated argument.
 # Variables:
-#   $kind (String) - a kind word (an hv-explorer-word-* message), e.g. "Index".
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
-hv-explorer-broken = { $kind } { $name } references a column that could not be resolved
-# Surface 12 (Invisible characters and broken objects). An object whose reference cannot be resolved.
+#   $kind (String) - the object kind code, a selector, e.g. "index".
+hv-explorer-broken = { $kind ->
+        [check] Check constraint { $name } references a column that could not be resolved
+        [foreign-key] Foreign key { $name } references a column that could not be resolved
+        [index] Index { $name } references a column that could not be resolved
+        [trigger] Trigger { $name } references a column that could not be resolved
+       *[other] { $name } references a column that could not be resolved
+    }
+# Surface 12 (Invisible characters and broken objects). One whole sentence per kind ($kind selector); the name stays an isolated argument.
 hv-explorer-broken-body = The column may have been dropped or renamed after the last read. Refresh the table to check.
 # Surface 13 (Settings › Metadata).
 hv-settings-nav-metadata = Metadata
@@ -1076,7 +1193,7 @@ hv-metadata-check-auto = Automatic
 hv-metadata-set-check-note = Automatic checks local and dev connections every 10 minutes, and the others when you connect or press Refresh.
 # Surface 13 (Settings › Metadata).
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 hv-metadata-every-min = Every { $n } min
 # Surface 13 (Settings › Metadata). Settings › Metadata row.
 hv-metadata-set-cache-conn = Cache per connection
@@ -1111,18 +1228,21 @@ hv-metadata-clear-btn = Clear
 hv-metadata-cleared = Cleared the cached metadata of { $name }
 # Surface 13 (Settings › Metadata).
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 hv-metadata-size-mb = { $n } MB
 # Surface 14 (Long introspection). Progress of a pass in the explorer (surface 14: explorer only).
 # Variables:
-#   $percent (String) - a percent, preformatted by the format locale, e.g. "23%".
-hv-explorer-progress-meta = { $percent }
+#   $fraction (Number) - the share read so far, from 0 to 1, e.g. 0.23.
+hv-explorer-progress-meta = { NUMBER($fraction, style: "percent") }
 # Surface 14 (Long introspection). Progress of a pass in the explorer (surface 14: explorer only).
 # Variables:
 #   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-#   $total (Number) - the total, formatted by the format locale, e.g. 15000.
-hv-explorer-progress-tip = Reading { $schema }: columns { $n } of { $total }. The explorer stays usable meanwhile.
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-explorer-progress-tip = { $total ->
+        [one] Reading { $schema }: the columns of { $n } of { $total } table so far. The explorer stays usable meanwhile.
+       *[other] Reading { $schema }: the columns of { $n } of { $total } tables so far. The explorer stays usable meanwhile.
+    }
 
 ## m4-tNN-ddl-warnings (hacivat-core.ftl: the block of the task that emits DDL warnings, ruling 20)
 # Surface 10 (DDL view). Shown over MySQL server text that contains executable comments (R-M4-24).
@@ -1137,71 +1257,71 @@ ddl-warn-executable-comment = This text contains MySQL executable comments (/*! 
 # Surface 1 (Explorer tree).
 # Review: PO
 hv-explorer-tree-label = Veritabanı gezgini
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 # Review: PO
 hv-explorer-kind-tables = TABLOLAR
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 # Review: PO
 hv-explorer-kind-views = GÖRÜNÜMLER
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 # Review: PO
 hv-explorer-kind-matviews = SOMUT GÖRÜNÜMLER
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 # Review: PO
 hv-explorer-kind-functions = FONKSİYONLAR
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 # Review: PO
 hv-explorer-kind-procedures = PROSEDÜRLER
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 # Review: PO
 hv-explorer-kind-sequences = SEKANSLAR
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 # Review: PO
 hv-explorer-kind-types = TİPLER
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 # Review: PO
 hv-explorer-kind-events = OLAYLAR
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 # Review: PO
 hv-explorer-kind-columns = SÜTUNLAR
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 # Review: PO
 hv-explorer-kind-keys = ANAHTARLAR
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 # Review: PO
 hv-explorer-kind-foreign-keys = YABANCI ANAHTARLAR
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 # Review: PO
 hv-explorer-kind-indexes = İNDEKSLER
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 # Review: PO
 hv-explorer-kind-checks = DENETİMLER
-# Surface 1 (Explorer tree). A kind-group header in the tree: small caps, pre-cased here, never cased in code.
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
 # Review: PO
 hv-explorer-kind-triggers = TETİKLEYİCİLER
-# Surface 1 (Explorer tree). The Built-in group of a database (system objects from the bundled catalog).
+# Surface 1 (Explorer tree). The Built-in group of a database.
 # Review: PO
 hv-explorer-builtin = Yerleşik
-# Surface 1 (Explorer tree). The Built-in group of a database (system objects from the bundled catalog).
+# Surface 1 (Explorer tree). The Built-in group of a database.
 # Variables:
 #   $version (String) - the bundled catalog's server version, e.g. "17".
 # Review: PO
 hv-explorer-builtin-badge = sürüm { $version }
-# Surface 1 (Explorer tree). The Built-in group of a database (system objects from the bundled catalog).
+# Surface 1 (Explorer tree). The Built-in group of a database.
 # Variables:
 #   $version (String) - the bundled catalog's server version, e.g. "17".
 # Review: PO
 hv-explorer-builtin-tip = Yerleşik katalog (sürüm { $version }): sunucunun kendi nesneleri; Hacivat ile gelir, bağlantı olmadan okunur.
 # Surface 1 (Explorer tree). The database row's schema scope count (N of M).
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-#   $total (Number) - the total, formatted by the format locale, e.g. 15000.
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
 # Review: PO
 hv-explorer-scope-count = { $n } / { $total }
 # Surface 1 (Explorer tree). The database row's schema scope count (N of M).
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-#   $total (Number) - the total, formatted by the format locale, e.g. 15000.
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
 # Review: PO
 hv-explorer-scope-count-tip = { $total } şemadan { $n } tanesi kapsamda. Kapsamı düzenle… hangilerinin okunacağını değiştirir.
 # Surface 1 (Explorer tree).
@@ -1219,7 +1339,7 @@ hv-explorer-out-of-scope-tip = { $name } bu bağlantının kapsamında değil, b
 hv-explorer-out-of-scope-db-tip = { $name } bu bağlantının kapsamında değil, bu yüzden okunmuyor. Okumak bir bağlantı daha açar.
 # Surface 1 (Explorer tree).
 # Variables:
-#   $rows (Number) - the server's row estimate, formatted by the format locale, e.g. 48213.
+#   $rows (Number) - the server's row estimate, e.g. 48213.
 # Review: PO
 hv-explorer-row-estimate-tip = Yaklaşık { $rows } satır (sunucunun tahmini)
 # Surface 1 (Explorer tree).
@@ -1228,22 +1348,22 @@ hv-explorer-loads-on-open = Açtığınızda yüklenir
 # Surface 2 (Loading states).
 # Review: PO
 hv-explorer-loading = Yükleniyor…
-# Surface 2 (Loading states). A phase row's label while a pass reads the node; the count follows in mono (hv-explorer-progress-count).
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
 # Review: PO
 hv-explorer-phase-names = Adlar okunuyor…
-# Surface 2 (Loading states). A phase row's label while a pass reads the node; the count follows in mono (hv-explorer-progress-count).
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
 # Review: PO
 hv-explorer-phase-columns = Sütunlar okunuyor…
-# Surface 2 (Loading states). A phase row's label while a pass reads the node; the count follows in mono (hv-explorer-progress-count).
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
 # Review: PO
 hv-explorer-phase-constraints = Anahtarlar ve indeksler okunuyor…
-# Surface 2 (Loading states). A phase row's label while a pass reads the node; the count follows in mono (hv-explorer-progress-count).
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
 # Review: PO
 hv-explorer-phase-sources = Tanımlar okunuyor…
 # Surface 2 (Loading states). Progress of a pass in the explorer (surface 14: explorer only).
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-#   $total (Number) - the total, formatted by the format locale, e.g. 15000.
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
 # Review: PO
 hv-explorer-progress-count = { $n }/{ $total }
 # Surface 2 (Loading states).
@@ -1257,7 +1377,7 @@ hv-explorer-partial = eksik
 hv-explorer-partial-title = Bazı nesneler okunamadı
 # Surface 2 (Loading states). The partial-load badge and its tooltip.
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 #   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
 # Review: PO
 hv-explorer-partial-body = Bu kullanıcı { $schema } içindeki { $n } fonksiyonun tanımını okuyamıyor. Adlarıyla listelenirler; tanımları eksiktir.
@@ -1274,17 +1394,17 @@ hv-explorer-failed-body = Sunucu katalog sorgusunu reddetti. Yeniden dene ile te
 hv-explorer-retry = Yeniden dene
 # Surface 3 (Cached and offline). A profile shown from its cache while offline.
 # Variables:
-#   $date (String) - the cache date, preformatted by the format locale, e.g. "17 Kasım 2026 14:05".
+#   $date (DateTime) - when the cache was saved, e.g. 2026-11-17 14:05.
 # Review: PO
-hv-explorer-cached = { $date } tarihli önbellekteki üst veri gösteriliyor
+hv-explorer-cached = { DATETIME($date, dateStyle: "medium", timeStyle: "short") } tarihli önbellekteki üst veri gösteriliyor
 # Surface 3 (Cached and offline). A profile shown from its cache while offline.
 # Review: PO
 hv-explorer-cached-meta = önbellek
 # Surface 3 (Cached and offline). A profile shown from its cache while offline.
 # Variables:
-#   $date (String) - the cache date, preformatted by the format locale, e.g. "17 Kasım 2026 14:05".
+#   $date (DateTime) - when the cache was saved, e.g. 2026-11-17 14:05.
 # Review: PO
-hv-explorer-cached-tip = Bağlı değil. Ağaç, { $date } tarihinde kaydedilen kopyadır; sunucuyla karşılaştırmak için bağlanın.
+hv-explorer-cached-tip = Bağlı değil. Ağaç, { DATETIME($date, dateStyle: "medium", timeStyle: "short") } tarihinde kaydedilen kopyadır; sunucuyla karşılaştırmak için bağlanın.
 # Surface 3 (Cached and offline).
 # Review: PO
 hv-explorer-stale = güncel değil
@@ -1306,18 +1426,18 @@ hv-explorer-memory-only = Anahtar Zinciri kullanılamıyor; { $name } üst veris
 hv-explorer-filter-objects = Nesnelerde ara
 # Surface 4 (Filter field). The explorer filter field.
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 # Review: PO
 hv-explorer-filter-count = { $n } eşleşme
 # Surface 4 (Filter field). The explorer filter field.
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-#   $total (Number) - the total, formatted by the format locale, e.g. 15000.
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
 # Review: PO
 hv-explorer-filter-group-count = { $n } / { $total }
 # Surface 4 (Filter field). The explorer filter field.
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 # Review: PO
 hv-explorer-filter-unloaded = Yalnız yüklenmiş adlarda arar. { $n } tablonun sütunları henüz yüklenmedi.
 # Surface 4 (Filter field). The explorer filter field.
@@ -1366,7 +1486,7 @@ hv-explorer-menu-hide-like = Benzer nesneleri gizle
 hv-explorer-menu-show-hidden = Gizli nesneleri göster
 # Surface 5 (Context menus).
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 #   $pattern (String) - the view filter's pattern, e.g. "yedek_fatura_*".
 # Review: PO
 hv-explorer-hidden-tip = { $n } nesne bir görünüm filtresiyle gizlendi ({ $pattern }). Bu grubun menüsündeki Gizli nesneleri göster filtreyi kaldırır.
@@ -1391,7 +1511,7 @@ hv-explorer-menu-remove-scope = Kapsamdan çıkar
 # Surface 5 (Context menus). An explorer context-menu item.
 # Review: PO
 hv-explorer-menu-expand-all = Tüm alt öğeleri aç
-# Surface 5 (Context menus). An explorer context-menu item.
+# Surface 5 (Context menus). The tree-wide command (palette, ⌘←); node menus use hv-explorer-menu-collapse-children.
 # Review: PO
 hv-explorer-menu-collapse-all = Tümünü kapat
 # Surface 5 (Context menus).
@@ -1404,6 +1524,9 @@ hv-explorer-copied = { $name } kopyalandı
 #   $conn (String) - the connection name, e.g. "orders-dev".
 # Review: PO
 hv-explorer-open-data-note = { $conn } üzerinde bir konsol açar ve şunu çalıştırır:
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-collapse-children = Tüm alt öğeleri kapat
 # Surface 6 (Introspection level). The introspection level list (menu and pill).
 # Review: PO
 hv-explorer-level-auto = Otomatik
@@ -1418,9 +1541,13 @@ hv-explorer-level-structure = Yapı
 hv-explorer-level-sources = Yapı ve kaynaklar
 # Surface 6 (Introspection level). The introspection level list (menu and pill).
 # Variables:
-#   $level (String) - a level name (an hv-explorer-level-* message), e.g. "Structure".
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
 # Review: PO
-hv-explorer-level-auto-hint = şu an { $level }
+hv-explorer-level-auto-hint = { $level ->
+        [names] şu an Yalnız adlar
+        [sources] şu an Yapı ve kaynaklar
+       *[structure] şu an Yapı
+    }
 # Surface 6 (Introspection level). The introspection level list (menu and pill).
 # Review: PO
 hv-explorer-level-names-hint = en hızlısı, sütunsuz
@@ -1430,119 +1557,131 @@ hv-explorer-level-structure-hint = sütunlar, anahtarlar, indeksler
 # Surface 6 (Introspection level). The introspection level list (menu and pill).
 # Review: PO
 hv-explorer-level-sources-hint = ve görünüm, fonksiyon metinleri
-# Surface 6 (Introspection level). The level pill's word on a database or schema row.
+# Surface 6 (Introspection level). The level pill's word.
 # Review: PO
 hv-explorer-pill-names = Adlar
-# Surface 6 (Introspection level). The level pill's word on a database or schema row.
+# Surface 6 (Introspection level). The level pill's word.
 # Review: PO
 hv-explorer-pill-structure = Yapı
-# Surface 6 (Introspection level). The level pill's word on a database or schema row.
+# Surface 6 (Introspection level). The level pill's word.
 # Review: PO
 hv-explorer-pill-sources = Kaynaklar
-# Surface 6 (Introspection level). The level pill's tooltip.
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
 # Variables:
-#   $level (String) - a level name (an hv-explorer-level-* message), e.g. "Structure".
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
 # Review: PO
-hv-explorer-pill-tip-explicit = Okuma düzeyi: { $level }, burada ayarlandı. Alttaki şemalar bunu devralır.
-# Surface 6 (Introspection level). The level pill's tooltip.
+hv-explorer-pill-tip-explicit = { $level ->
+        [names] Okuma düzeyi: Yalnız adlar, burada ayarlandı. Alttaki şemalar bunu devralır.
+        [sources] Okuma düzeyi: Yapı ve kaynaklar, burada ayarlandı. Alttaki şemalar bunu devralır.
+       *[structure] Okuma düzeyi: Yapı, burada ayarlandı. Alttaki şemalar bunu devralır.
+    }
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
 # Variables:
-#   $level (String) - a level name (an hv-explorer-level-* message), e.g. "Structure".
 #   $parent (String) - the database or schema the level comes from, e.g. "orders".
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
 # Review: PO
-hv-explorer-pill-tip-inherited = Okuma düzeyi: { $level }, { $parent } öğesinden devralındı.
-# Surface 6 (Introspection level). The level pill's tooltip.
+hv-explorer-pill-tip-inherited = { $level ->
+        [names] Okuma düzeyi: Yalnız adlar; { $parent } öğesinden devralındı.
+        [sources] Okuma düzeyi: Yapı ve kaynaklar; { $parent } öğesinden devralındı.
+       *[structure] Okuma düzeyi: Yapı; { $parent } öğesinden devralındı.
+    }
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
 # Variables:
-#   $level (String) - a level name (an hv-explorer-level-* message), e.g. "Structure".
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
 # Review: PO
-hv-explorer-pill-tip-auto = Okuma düzeyi: { $level }, { $n } nesne için otomatik seçildi.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+hv-explorer-pill-tip-auto = { $level ->
+        [names] Okuma düzeyi: Yalnız adlar; { $n } nesne için otomatik seçildi.
+        [sources] Okuma düzeyi: Yapı ve kaynaklar; { $n } nesne için otomatik seçildi.
+       *[structure] Okuma düzeyi: Yapı; { $n } nesne için otomatik seçildi.
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-section = Şemalar
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-#   $total (Number) - the total, formatted by the format locale, e.g. 15000.
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
 # Review: PO
 hv-scope-summary = { $total } şemadan { $n }
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Variables:
-#   $total (Number) - the total, formatted by the format locale, e.g. 15000.
+#   $total (Number) - the total, e.g. 15000.
 # Review: PO
 hv-scope-summary-mysql = { $total } veritabanının tümü
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-current-db = geçerli veritabanı
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-other-db-hint = ayrı bağlantı gerekir
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-pattern = Desen
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-pattern-hint = @ geçerli veritabanı ya da şema, * tümü, {"{"}…{"}"} bir düzenli ifade içerir; | ifadeleri ayırır.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Variables:
 #   $pos (Number) - the 1-based character position of the error, e.g. 20.
 # Review: PO
-hv-scope-pattern-error = “:” işaretinden sonra bir şema adı bekleniyordu ({ $pos }. karakter).
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+hv-scope-pattern-error = “:” işaretinden sonra bir şema adı bekleniyordu ({ NUMBER($pos, useGrouping: "false") }. karakter).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-builtin-note = Yerleşik şemalar paketle gelen katalogdan okunur, burada listelenmez.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-mysql-note = Görebildiğiniz her veritabanı listelenir. Her biri ilk açtığınızda yüklenir.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-all-dbs = Tüm veritabanları
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-all-dbs-title = Bu sunucudaki tüm veritabanları okunsun mu?
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 # Review: PO
 hv-scope-all-dbs-body = Bu sunucuda { $n } veritabanı var. Hepsini okumak her veritabanı için bir bağlantı açar ve büyük bir sunucuda zaman alabilir.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 # Review: PO
 hv-scope-all-dbs-yes = { $n } veritabanının tümünü oku
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-all-dbs-no = Geçerli veritabanında kal
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-encrypt = Önbellekteki üst veriyi şifrele
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-encrypt-sub = Kaydedilen katalog, Anahtar Zinciri'nde tutulan bir anahtarla şifrelenir. Üretimde varsayılan olarak açıktır.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 # Review: PO
 hv-scope-encrypt-confirm-on = Bunu açmak { $name } için önbellekteki üst veriyi siler. Bir sonraki bağlanışta şifreli olarak yeniden okunur.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 # Review: PO
 hv-scope-encrypt-confirm-off = Bunu kapatmak { $name } için şifreli önbelleği siler. Bir sonraki bağlanıştan sonra yalnız hesabınızın okuyabildiği düz bir dosyaya kaydedilir.
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-encrypt-apply = Önbelleği sil ve şifrele
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-encrypt-apply-off = Önbelleği sil ve şifrelemeyi bırak
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-encrypt-keep = Olduğu gibi bırak
-# Surface 7 (Scope editor). The connection dialog's Schemas section (scope editor).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
 # Review: PO
 hv-scope-connect-to-list = Şemaları listelemek için bağlanın. Neyin okunacağına yine aşağıdaki desen karar verir.
 # Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
 # Variables:
-#   $count (Number) - a count of objects, formatted by the format locale, e.g. 312.
+#   $count (Number) - a count of objects, e.g. 312.
 #   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
 # Review: PO
 hv-metadata-mass-title = { $schema } içindeki { $count } nesne artık görünmüyor
@@ -1551,7 +1690,7 @@ hv-metadata-mass-title = { $schema } içindeki { $count } nesne artık görünm�
 hv-metadata-mass-body = Silinmiş olabilirler ya da bu kullanıcı onlara erişimini kaybetmiş olabilir. Önbellekten kaldırmak sunucuda hiçbir şeyi değiştirmez.
 # Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 # Review: PO
 hv-metadata-mass-more = ve { $n } tane daha
 # Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
@@ -1562,7 +1701,7 @@ hv-metadata-mass-keep = Önbellekte tut
 hv-metadata-mass-remove = Önbellekten kaldır
 # Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
 # Variables:
-#   $count (Number) - a count of objects, formatted by the format locale, e.g. 312.
+#   $count (Number) - a count of objects, e.g. 312.
 #   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
 # Review: PO
 hv-metadata-mass-pending-tip = Son arka plan denetiminde { $count } nesne kayboldu. İncelemek için { $schema } şemasını yenileyin; hiçbir şey kaldırılmadı.
@@ -1571,23 +1710,23 @@ hv-metadata-mass-pending-tip = Son arka plan denetiminde { $count } nesne kaybol
 #   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
 # Review: PO
 hv-metadata-ns-dropped = { $schema } artık sunucuda yok, bu yüzden gezginden kaldırıldı.
-# Surface 9 (Refresh after DDL). Refresh after DDL: the Ask toast.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
 # Variables:
-#   $count (Number) - a count of objects, formatted by the format locale, e.g. 312.
+#   $count (Number) - a count of objects, e.g. 312.
 # Review: PO
 hv-metadata-refresh-ask = Gezgin, değişen { $count } nesneyi gösterecek şekilde yenilensin mi?
-# Surface 9 (Refresh after DDL). Refresh after DDL: the Ask toast.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
 # Variables:
 #   $console (String) - the console's title, e.g. "orders-dev".
 # Review: PO
 hv-metadata-refresh-ask-body = { $console } içindeki betiğiniz bunları değiştirdi.
-# Surface 9 (Refresh after DDL). Refresh after DDL: the Ask toast.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
 # Review: PO
 hv-metadata-refresh = Yenile
-# Surface 9 (Refresh after DDL). Refresh after DDL: the Ask toast.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
 # Review: PO
 hv-metadata-refresh-always = Her zaman yenile
-# Surface 9 (Refresh after DDL). Refresh after DDL: the Ask toast.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
 # Review: PO
 hv-metadata-refresh-not-now = Şimdi değil
 # Surface 9 (Refresh after DDL). Refresh after DDL inside a transaction (the pending stamp).
@@ -1595,28 +1734,28 @@ hv-metadata-refresh-not-now = Şimdi değil
 hv-metadata-after-commit = COMMIT sonrası yenilenir
 # Surface 9 (Refresh after DDL). Refresh after DDL inside a transaction (the pending stamp).
 # Variables:
-#   $count (Number) - a count of objects, formatted by the format locale, e.g. 312.
+#   $count (Number) - a count of objects, e.g. 312.
 # Review: PO
 hv-metadata-after-commit-tip = Bu transaction'daki { $count } değişiklik COMMIT'i bekliyor. ROLLBACK bunları atar ve gezgin olduğu gibi kalır.
-# Surface 9 (Refresh after DDL). Refresh after DDL: the broad-refresh toast for dynamic SQL.
+# Surface 9 (Refresh after DDL). Refresh after DDL: dynamic SQL.
 # Variables:
 #   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
 # Review: PO
 hv-metadata-broad = { $schema } tamamen yenileniyor
-# Surface 9 (Refresh after DDL). Refresh after DDL: the broad-refresh toast for dynamic SQL.
+# Surface 9 (Refresh after DDL). Refresh after DDL: dynamic SQL.
 # Variables:
 #   $what (String) - the SQL keyword that made the change opaque, e.g. "EXECUTE".
 # Review: PO
 hv-metadata-broad-body = Betik dinamik SQL çalıştırdı ({ $what }); Hacivat hangi nesnelerin değiştiğini bilemiyor.
-# Surface 9 (Refresh after DDL). Refresh after DDL: the Ask toast.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
 # Variables:
-#   $count (Number) - a count of objects, formatted by the format locale, e.g. 312.
+#   $count (Number) - a count of objects, e.g. 312.
 #   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
 # Review: PO
 hv-metadata-refreshed = Gezgin { $schema } içinde { $count } nesneyi yeniledi
 # Surface 9 (Refresh after DDL).
 # Variables:
-#   $count (Number) - a count of objects, formatted by the format locale, e.g. 312.
+#   $count (Number) - a count of objects, e.g. 312.
 # Review: PO
 hv-metadata-log-pending = Gezgin yenilemesi COMMIT'i bekliyor ({ $count } nesne)
 # Surface 10 (DDL view). The DDL view tab.
@@ -1624,28 +1763,28 @@ hv-metadata-log-pending = Gezgin yenilemesi COMMIT'i bekliyor ({ $count } nesne)
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 # Review: PO
 hv-ddl-view-tab-title = { $name } · DDL
-# Surface 10 (DDL view). The DDL view's Qualification option.
+# Surface 10 (DDL view). The DDL view tab.
 # Review: PO
 hv-ddl-view-qualification = Nitelendirme
-# Surface 10 (DDL view). The DDL view's Qualification option.
+# Surface 10 (DDL view). The DDL view tab.
 # Review: PO
 hv-ddl-view-qual-auto = Otomatik
-# Surface 10 (DDL view). The DDL view's Qualification option.
+# Surface 10 (DDL view). The DDL view tab.
 # Review: PO
 hv-ddl-view-qual-never = Hiçbir zaman
-# Surface 10 (DDL view). The DDL view's Qualification option.
+# Surface 10 (DDL view). The DDL view tab.
 # Review: PO
 hv-ddl-view-qual-always = Her zaman
-# Surface 10 (DDL view). The DDL view's Constraints placement option.
+# Surface 10 (DDL view). The DDL view tab.
 # Review: PO
 hv-ddl-view-constraints = Kısıtlar
-# Surface 10 (DDL view). The DDL view's Constraints placement option.
+# Surface 10 (DDL view). The DDL view tab.
 # Review: PO
 hv-ddl-view-constraints-inside-column = Sütunun içinde
-# Surface 10 (DDL view). The DDL view's Constraints placement option.
+# Surface 10 (DDL view). The DDL view tab.
 # Review: PO
 hv-ddl-view-constraints-inside-table = Tablonun içinde
-# Surface 10 (DDL view). The DDL view's Constraints placement option.
+# Surface 10 (DDL view). The DDL view tab.
 # Review: PO
 hv-ddl-view-constraints-after-table = Tablodan sonra
 # Surface 10 (DDL view). The DDL view tab.
@@ -1680,12 +1819,20 @@ hv-ddl-view-source-server = Sunucudan gelen metin
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 # Review: PO
 hv-ddl-view-copied = { $name } DDL'i kopyalandı
-# Surface 10 (DDL view). The DDL view tab.
+# Surface 10 (DDL view). One whole sentence per kind ($kind selector); never a kind word inserted.
 # Variables:
-#   $kind (String) - a kind word (an hv-explorer-word-* message), e.g. "Index".
+#   $kind (String) - the object kind code, a selector, e.g. "index".
 # Review: PO
-hv-ddl-view-unsupported = Hacivat henüz bir { $kind } için DDL gösteremiyor.
-# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-unsupported = { $kind ->
+        [domain] Hacivat domain'lerin DDL'ini henüz gösteremiyor.
+        [extension] Hacivat eklentilerin DDL'ini henüz gösteremiyor.
+        [operator] Hacivat işleçlerin DDL'ini henüz gösteremiyor.
+        [policy] Hacivat satır güvenliği ilkelerinin DDL'ini henüz gösteremiyor.
+        [rule] Hacivat kuralların DDL'ini henüz gösteremiyor.
+        [type] Hacivat tiplerin DDL'ini henüz gösteremiyor.
+       *[other] Hacivat bu tür nesnelerin DDL'ini henüz gösteremiyor.
+    }
+# Surface 10 (DDL view). One whole sentence per kind ($kind selector); never a kind word inserted.
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 # Review: PO
@@ -1719,15 +1866,6 @@ hv-ddl-view-gone-body = Aşağıdaki metin en son yüklenen metindir.
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 # Review: PO
 hv-ddl-view-unknown = Hacivat, { $name } yüklendikten sonra sunucuda değişip değişmediğini denetleyemedi
-# Surface 12 (Invisible characters and broken objects). A kind word used inside other messages.
-# Review: PO
-hv-explorer-word-index = İndeks
-# Surface 12 (Invisible characters and broken objects). A kind word used inside other messages.
-# Review: PO
-hv-explorer-word-foreign-key = Yabancı anahtar
-# Surface 12 (Invisible characters and broken objects). A kind word used inside other messages.
-# Review: PO
-hv-explorer-word-type = tip
 # Surface 12 (Invisible characters and broken objects). The invisible-characters badge and its tooltip.
 # Review: PO
 hv-explorer-invisible = görünmez karakter
@@ -1736,13 +1874,19 @@ hv-explorer-invisible = görünmez karakter
 #   $what (String) - the SQL keyword that made the change opaque, e.g. "EXECUTE".
 # Review: PO
 hv-explorer-invisible-tip = Bu ad görünmez bir karakter içeriyor: { $what }. Kopyalama ve DDL onu aynen korur.
-# Surface 12 (Invisible characters and broken objects). An object whose reference cannot be resolved.
+# Surface 12 (Invisible characters and broken objects). One whole sentence per kind ($kind selector); the name stays an isolated argument.
 # Variables:
-#   $kind (String) - a kind word (an hv-explorer-word-* message), e.g. "Index".
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+#   $kind (String) - the object kind code, a selector, e.g. "index".
 # Review: PO
-hv-explorer-broken = { $kind } { $name }, çözümlenemeyen bir sütuna başvuruyor
-# Surface 12 (Invisible characters and broken objects). An object whose reference cannot be resolved.
+hv-explorer-broken = { $kind ->
+        [check] { $name } denetim kısıtı, çözümlenemeyen bir sütuna başvuruyor
+        [foreign-key] { $name } yabancı anahtarı, çözümlenemeyen bir sütuna başvuruyor
+        [index] { $name } indeksi, çözümlenemeyen bir sütuna başvuruyor
+        [trigger] { $name } tetikleyicisi, çözümlenemeyen bir sütuna başvuruyor
+       *[other] { $name }, çözümlenemeyen bir sütuna başvuruyor
+    }
+# Surface 12 (Invisible characters and broken objects). One whole sentence per kind ($kind selector); the name stays an isolated argument.
 # Review: PO
 hv-explorer-broken-body = Sütun son okumadan sonra silinmiş ya da yeniden adlandırılmış olabilir. Denetlemek için tabloyu yenileyin.
 # Surface 13 (Settings › Metadata).
@@ -1777,7 +1921,7 @@ hv-metadata-check-auto = Otomatik
 hv-metadata-set-check-note = Otomatik: yerel ve geliştirme bağlantıları 10 dakikada bir, diğerleri bağlandığınızda ya da Yenile'ye bastığınızda denetlenir.
 # Surface 13 (Settings › Metadata).
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 # Review: PO
 hv-metadata-every-min = { $n } dakikada bir
 # Surface 13 (Settings › Metadata). Settings › Metadata row.
@@ -1825,21 +1969,21 @@ hv-metadata-clear-btn = Temizle
 hv-metadata-cleared = { $name } için önbellekteki üst veri temizlendi
 # Surface 13 (Settings › Metadata).
 # Variables:
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
+#   $n (Number) - a count, e.g. 3400.
 # Review: PO
 hv-metadata-size-mb = { $n } MB
 # Surface 14 (Long introspection). Progress of a pass in the explorer (surface 14: explorer only).
 # Variables:
-#   $percent (String) - a percent, preformatted by the format locale, e.g. "23%".
+#   $fraction (Number) - the share read so far, from 0 to 1, e.g. 0.23.
 # Review: PO
-hv-explorer-progress-meta = { $percent }
+hv-explorer-progress-meta = { NUMBER($fraction, style: "percent") }
 # Surface 14 (Long introspection). Progress of a pass in the explorer (surface 14: explorer only).
 # Variables:
 #   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
-#   $n (Number) - a count, formatted by the format locale, e.g. 3400.
-#   $total (Number) - the total, formatted by the format locale, e.g. 15000.
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
 # Review: PO
-hv-explorer-progress-tip = { $schema } okunuyor: sütunlar { $n } / { $total }. Bu sırada gezgin kullanılabilir.
+hv-explorer-progress-tip = { $schema } okunuyor: şu ana dek { $total } tablonun { $n } tanesinin sütunları. Bu sırada gezgin kullanılabilir.
 
 ## m4-tNN-ddl-warnings (hacivat-core.ftl: the block of the task that emits DDL warnings, ruling 20)
 # Surface 10 (DDL view). Shown over MySQL server text that contains executable comments (R-M4-24).

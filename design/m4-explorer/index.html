@@ -1454,7 +1454,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
 /* ───────── DDL view tab (center column; read-only code) ───────── */
 .dtool .crumb { margin-left:0; padding-left:0; border-left:0; min-width:0; flex:0 1 auto; }
 .dtool .crumb .mono { overflow:hidden; text-overflow:ellipsis; min-width:0; }
-.dtool .src { color:var(--text-2); font-size:12px; flex:none; display:flex; align-items:center; gap:6px; }
+.dopts .src { color:var(--text-2); font-size:12px; flex:none; display:flex; align-items:center; gap:6px; border:0; margin:0; padding:0; }
 .dtool .btn { height:22px; }
 .dopts { height:34px; flex:none; display:flex; align-items:center; gap:8px; padding:0 10px 0 12px; border-bottom:1px solid var(--seam); background:var(--panel); white-space:nowrap; overflow:hidden; }
 .dopts > * { flex:none; }
@@ -1902,6 +1902,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-explorer-filter-count#one": "{n} match",
   "hv-explorer-filter-group-count": "{n} of {total}",
   "hv-explorer-filter-unloaded": "Searches loaded names only. The columns of {n} tables aren't loaded yet.",
+  "hv-explorer-filter-unloaded#one": "Searches loaded names only. The columns of {n} table aren't loaded yet.",
   "hv-explorer-filter-none": "No objects match",
   "hv-explorer-filter-none-body": "Nothing loaded matches “{query}”.",
   "hv-explorer-filter-clear": "Clear filter",
@@ -1919,18 +1920,17 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-explorer-kind-indexes": "INDEXES",
   "hv-explorer-kind-checks": "CHECKS",
   "hv-explorer-kind-triggers": "TRIGGERS",
-  "hv-explorer-word-index": "Index",
-  "hv-explorer-word-foreign-key": "Foreign key",
-  "hv-explorer-word-type": "type",
   "hv-explorer-builtin": "Built-in",
   "hv-explorer-builtin-badge": "version {version}",
   "hv-explorer-builtin-tip": "Built-in catalog (version {version}): the server's own objects, shipped with Hacivat and read without a connection.",
   "hv-explorer-scope-count": "{n} of {total}",
   "hv-explorer-scope-count-tip": "{n} of {total} schemas are in scope. Edit scope… changes which ones are read.",
+  "hv-explorer-scope-count-tip#one": "{n} of {total} schema is in scope. Edit scope… changes which ones are read.",
   "hv-explorer-add-scope": "Add to scope",
   "hv-explorer-out-of-scope-tip": "{name} isn't in this connection's scope, so it isn't read.",
   "hv-explorer-out-of-scope-db-tip": "{name} isn't in this connection's scope, so it isn't read. Reading it opens one more connection.",
   "hv-explorer-row-estimate-tip": "About {rows} rows (the server's estimate)",
+  "hv-explorer-row-estimate-tip#one": "About {rows} row (the server's estimate)",
   "hv-explorer-loads-on-open": "Loads when you open it",
   "hv-explorer-loading": "Loading…",
   "hv-explorer-phase-names": "Reading names…",
@@ -1939,11 +1939,13 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-explorer-phase-sources": "Reading definitions…",
   "hv-explorer-progress-count": "{n}/{total}",
   "hv-explorer-progress-meta": "{percent}",
-  "hv-explorer-progress-tip": "Reading {schema}: columns {n} of {total}. The explorer stays usable meanwhile.",
+  "hv-explorer-progress-tip": "Reading {schema}: the columns of {n} of {total} tables so far. The explorer stays usable meanwhile.",
+  "hv-explorer-progress-tip#one": "Reading {schema}: the columns of {n} of {total} table so far. The explorer stays usable meanwhile.",
   "hv-explorer-waiting-pass": "Waiting for columns",
   "hv-explorer-partial": "partial",
   "hv-explorer-partial-title": "Some objects could not be read",
   "hv-explorer-partial-body": "This login can't read the definitions of {n} functions in {schema}. They are listed by name; their definitions are missing.",
+  "hv-explorer-partial-body#one": "This login can't read the definition of {n} function in {schema}. It is listed by name; its definition is missing.",
   "hv-explorer-failed": "Couldn't read {name}",
   "hv-explorer-failed-body": "The server refused the catalog query. Retry reads it again.",
   "hv-explorer-retry": "Retry",
@@ -1956,7 +1958,11 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-explorer-memory-only": "The Keychain isn't available, so {name}'s metadata is kept in memory until you quit.",
   "hv-explorer-invisible": "invisible characters",
   "hv-explorer-invisible-tip": "This name contains an invisible character: {what}. Copy and DDL keep it exactly.",
-  "hv-explorer-broken": "{kind} {name} references a column that could not be resolved",
+  "hv-explorer-broken": "{name} references a column that could not be resolved",
+  "hv-explorer-broken#index": "Index {name} references a column that could not be resolved",
+  "hv-explorer-broken#foreign-key": "Foreign key {name} references a column that could not be resolved",
+  "hv-explorer-broken#check": "Check constraint {name} references a column that could not be resolved",
+  "hv-explorer-broken#trigger": "Trigger {name} references a column that could not be resolved",
   "hv-explorer-broken-body": "The column may have been dropped or renamed after the last read. Refresh the table to check.",
   "hv-explorer-menu-refresh": "Refresh",
   "hv-explorer-menu-edit-scope": "Edit scope…",
@@ -1969,7 +1975,8 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-explorer-menu-copy-plain": "Copy name",
   "hv-explorer-menu-hide-like": "Hide objects like this",
   "hv-explorer-menu-show-hidden": "Show hidden objects",
-  "hv-explorer-hidden-tip": "{n} hidden by a view filter ({pattern}). Show hidden objects, in this group's menu, removes it.",
+  "hv-explorer-hidden-tip": "{n} objects are hidden by a view filter ({pattern}). Show hidden objects, in this group's menu, removes it.",
+  "hv-explorer-hidden-tip#one": "{n} object is hidden by a view filter ({pattern}). Show hidden objects, in this group's menu, removes it.",
   "hv-explorer-menu-copy-ddl": "Copy DDL",
   "hv-explorer-menu-modify-table": "Modify table…",
   "hv-explorer-menu-modify-view": "Modify view…",
@@ -1984,19 +1991,29 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-explorer-level-names": "Names only",
   "hv-explorer-level-structure": "Structure",
   "hv-explorer-level-sources": "Structure and sources",
-  "hv-explorer-level-auto-hint": "now {level}",
+  "hv-explorer-level-auto-hint": "now Structure",
+  "hv-explorer-level-auto-hint#names": "now Names only",
+  "hv-explorer-level-auto-hint#sources": "now Structure and sources",
   "hv-explorer-level-names-hint": "fastest, no columns",
   "hv-explorer-level-structure-hint": "columns, keys, indexes",
   "hv-explorer-level-sources-hint": "and view and function text",
   "hv-explorer-pill-names": "Names",
   "hv-explorer-pill-structure": "Structure",
   "hv-explorer-pill-sources": "Sources",
-  "hv-explorer-pill-tip-explicit": "Introspection level: {level}, set here. Schemas below inherit it.",
-  "hv-explorer-pill-tip-inherited": "Introspection level: {level}, inherited from {parent}.",
-  "hv-explorer-pill-tip-auto": "Introspection level: {level}, chosen automatically for {n} objects.",
+  "hv-explorer-pill-tip-explicit": "Introspection level: Structure, set here. Schemas below inherit it.",
+  "hv-explorer-pill-tip-explicit#names": "Introspection level: Names only, set here. Schemas below inherit it.",
+  "hv-explorer-pill-tip-explicit#sources": "Introspection level: Structure and sources, set here. Schemas below inherit it.",
+  "hv-explorer-pill-tip-inherited": "Introspection level: Structure, inherited from {parent}.",
+  "hv-explorer-pill-tip-inherited#names": "Introspection level: Names only, inherited from {parent}.",
+  "hv-explorer-pill-tip-inherited#sources": "Introspection level: Structure and sources, inherited from {parent}.",
+  "hv-explorer-pill-tip-auto": "Introspection level: Structure, chosen automatically for {n} objects.",
+  "hv-explorer-pill-tip-auto#names": "Introspection level: Names only, chosen automatically for {n} objects.",
+  "hv-explorer-pill-tip-auto#sources": "Introspection level: Structure and sources, chosen automatically for {n} objects.",
   "hv-scope-section": "Schemas",
   "hv-scope-summary": "{n} of {total} schemas",
+  "hv-scope-summary#one": "{n} of {total} schema",
   "hv-scope-summary-mysql": "All {total} databases",
+  "hv-scope-summary-mysql#one": "{total} database",
   "hv-scope-current-db": "current database",
   "hv-scope-other-db-hint": "needs its own connection",
   "hv-scope-pattern": "Pattern",
@@ -2007,7 +2024,9 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-scope-all-dbs": "All databases",
   "hv-scope-all-dbs-title": "Read every database on this server?",
   "hv-scope-all-dbs-body": "This server has {n} databases. Reading them opens one connection per database and can take a while on a large server.",
+  "hv-scope-all-dbs-body#one": "This server has {n} database. Reading it opens one more connection.",
   "hv-scope-all-dbs-yes": "Read all {n} databases",
+  "hv-scope-all-dbs-yes#one": "Read {n} database",
   "hv-scope-all-dbs-no": "Keep the current database",
   "hv-scope-encrypt": "Encrypt cached metadata",
   "hv-scope-encrypt-sub": "The saved catalog is encrypted with a key kept in the Keychain. On by default for production.",
@@ -2018,23 +2037,29 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-scope-encrypt-keep": "Keep it as it is",
   "hv-scope-connect-to-list": "Connect to list the schemas. The pattern below still decides what is read.",
   "hv-metadata-mass-title": "{count} objects in {schema} are no longer visible",
+  "hv-metadata-mass-title#one": "{count} object in {schema} is no longer visible",
   "hv-metadata-mass-body": "They may have been dropped, or this login may have lost access to them. Removing them from the cache changes nothing on the server.",
   "hv-metadata-mass-more": "and {n} more",
   "hv-metadata-mass-keep": "Keep cached",
   "hv-metadata-mass-remove": "Remove from cache",
   "hv-metadata-mass-pending-tip": "{count} objects disappeared in the last background check. Refresh {schema} to review them; nothing was removed.",
+  "hv-metadata-mass-pending-tip#one": "{count} object disappeared in the last background check. Refresh {schema} to review it; nothing was removed.",
   "hv-metadata-ns-dropped": "{schema} is no longer on the server, so it was removed from the explorer.",
   "hv-metadata-refresh-ask": "Refresh the database explorer to reflect {count} changed objects?",
+  "hv-metadata-refresh-ask#one": "Refresh the database explorer to reflect {count} changed object?",
   "hv-metadata-refresh-ask-body": "Your script in {console} changed them.",
   "hv-metadata-refresh": "Refresh",
   "hv-metadata-refresh-always": "Always refresh",
   "hv-metadata-refresh-not-now": "Not now",
   "hv-metadata-after-commit": "Refreshes after COMMIT",
   "hv-metadata-after-commit-tip": "{count} changes from this transaction wait for COMMIT. ROLLBACK discards them and the explorer stays as it is.",
+  "hv-metadata-after-commit-tip#one": "{count} change from this transaction waits for COMMIT. ROLLBACK discards it and the explorer stays as it is.",
   "hv-metadata-broad": "Refreshing all of {schema}",
   "hv-metadata-broad-body": "The script ran dynamic SQL ({what}), so Hacivat can't tell which objects changed.",
   "hv-metadata-refreshed": "Explorer refreshed {count} objects in {schema}",
+  "hv-metadata-refreshed#one": "Explorer refreshed {count} object in {schema}",
   "hv-metadata-log-pending": "Explorer refresh waits for COMMIT ({count} objects)",
+  "hv-metadata-log-pending#one": "Explorer refresh waits for COMMIT ({count} object)",
   "hv-ddl-view-tab-title": "{name} · DDL",
   "hv-ddl-view-qualification": "Qualification",
   "hv-ddl-view-qual-auto": "Auto",
@@ -2054,7 +2079,13 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-ddl-view-source-generated": "Generated from the catalog",
   "hv-ddl-view-source-server": "Text from the server",
   "hv-ddl-view-copied": "Copied the DDL of {name}",
-  "hv-ddl-view-unsupported": "Hacivat can't show DDL for a {kind} yet.",
+  "hv-ddl-view-unsupported": "Hacivat can't show DDL for this kind of object yet.",
+  "hv-ddl-view-unsupported#type": "Hacivat can't show DDL for a type yet.",
+  "hv-ddl-view-unsupported#domain": "Hacivat can't show DDL for a domain yet.",
+  "hv-ddl-view-unsupported#policy": "Hacivat can't show DDL for a row security policy yet.",
+  "hv-ddl-view-unsupported#rule": "Hacivat can't show DDL for a rule yet.",
+  "hv-ddl-view-unsupported#extension": "Hacivat can't show DDL for an extension yet.",
+  "hv-ddl-view-unsupported#operator": "Hacivat can't show DDL for an operator yet.",
   "hv-ddl-view-unsupported-body": "{name} stays in the explorer, and Copy qualified name works.",
   "hv-ddl-view-stale": "{name} changed on the server since it was loaded",
   "hv-ddl-view-reload": "Reload",
@@ -2087,7 +2118,8 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-metadata-clear-body": "The explorer reads it again from the server on the next connect. Nothing on the server changes.",
   "hv-metadata-clear-btn": "Clear",
   "hv-metadata-cleared": "Cleared the cached metadata of {name}",
-  "hv-metadata-size-mb": "{n} MB"
+  "hv-metadata-size-mb": "{n} MB",
+  "hv-explorer-menu-collapse-children": "Collapse all children"
  },
  "tr": {
   "hv-explorer-tree-label": "Veritabanı gezgini",
@@ -2112,9 +2144,6 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-explorer-kind-indexes": "İNDEKSLER",
   "hv-explorer-kind-checks": "DENETİMLER",
   "hv-explorer-kind-triggers": "TETİKLEYİCİLER",
-  "hv-explorer-word-index": "İndeks",
-  "hv-explorer-word-foreign-key": "Yabancı anahtar",
-  "hv-explorer-word-type": "tip",
   "hv-explorer-builtin": "Yerleşik",
   "hv-explorer-builtin-badge": "sürüm {version}",
   "hv-explorer-builtin-tip": "Yerleşik katalog (sürüm {version}): sunucunun kendi nesneleri; Hacivat ile gelir, bağlantı olmadan okunur.",
@@ -2132,7 +2161,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-explorer-phase-sources": "Tanımlar okunuyor…",
   "hv-explorer-progress-count": "{n}/{total}",
   "hv-explorer-progress-meta": "{percent}",
-  "hv-explorer-progress-tip": "{schema} okunuyor: sütunlar {n} / {total}. Bu sırada gezgin kullanılabilir.",
+  "hv-explorer-progress-tip": "{schema} okunuyor: şu ana dek {total} tablonun {n} tanesinin sütunları. Bu sırada gezgin kullanılabilir.",
   "hv-explorer-waiting-pass": "Sütunlar bekleniyor",
   "hv-explorer-partial": "eksik",
   "hv-explorer-partial-title": "Bazı nesneler okunamadı",
@@ -2149,7 +2178,11 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-explorer-memory-only": "Anahtar Zinciri kullanılamıyor; {name} üst verisi uygulamadan çıkana dek yalnız bellekte tutulur.",
   "hv-explorer-invisible": "görünmez karakter",
   "hv-explorer-invisible-tip": "Bu ad görünmez bir karakter içeriyor: {what}. Kopyalama ve DDL onu aynen korur.",
-  "hv-explorer-broken": "{kind} {name}, çözümlenemeyen bir sütuna başvuruyor",
+  "hv-explorer-broken": "{name}, çözümlenemeyen bir sütuna başvuruyor",
+  "hv-explorer-broken#index": "{name} indeksi, çözümlenemeyen bir sütuna başvuruyor",
+  "hv-explorer-broken#foreign-key": "{name} yabancı anahtarı, çözümlenemeyen bir sütuna başvuruyor",
+  "hv-explorer-broken#check": "{name} denetim kısıtı, çözümlenemeyen bir sütuna başvuruyor",
+  "hv-explorer-broken#trigger": "{name} tetikleyicisi, çözümlenemeyen bir sütuna başvuruyor",
   "hv-explorer-broken-body": "Sütun son okumadan sonra silinmiş ya da yeniden adlandırılmış olabilir. Denetlemek için tabloyu yenileyin.",
   "hv-explorer-menu-refresh": "Yenile",
   "hv-explorer-menu-edit-scope": "Kapsamı düzenle…",
@@ -2177,16 +2210,24 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-explorer-level-names": "Yalnız adlar",
   "hv-explorer-level-structure": "Yapı",
   "hv-explorer-level-sources": "Yapı ve kaynaklar",
-  "hv-explorer-level-auto-hint": "şu an {level}",
+  "hv-explorer-level-auto-hint": "şu an Yapı",
+  "hv-explorer-level-auto-hint#names": "şu an Yalnız adlar",
+  "hv-explorer-level-auto-hint#sources": "şu an Yapı ve kaynaklar",
   "hv-explorer-level-names-hint": "en hızlısı, sütunsuz",
   "hv-explorer-level-structure-hint": "sütunlar, anahtarlar, indeksler",
   "hv-explorer-level-sources-hint": "ve görünüm, fonksiyon metinleri",
   "hv-explorer-pill-names": "Adlar",
   "hv-explorer-pill-structure": "Yapı",
   "hv-explorer-pill-sources": "Kaynaklar",
-  "hv-explorer-pill-tip-explicit": "Okuma düzeyi: {level}, burada ayarlandı. Alttaki şemalar bunu devralır.",
-  "hv-explorer-pill-tip-inherited": "Okuma düzeyi: {level}, {parent} öğesinden devralındı.",
-  "hv-explorer-pill-tip-auto": "Okuma düzeyi: {level}, {n} nesne için otomatik seçildi.",
+  "hv-explorer-pill-tip-explicit": "Okuma düzeyi: Yapı, burada ayarlandı. Alttaki şemalar bunu devralır.",
+  "hv-explorer-pill-tip-explicit#names": "Okuma düzeyi: Yalnız adlar, burada ayarlandı. Alttaki şemalar bunu devralır.",
+  "hv-explorer-pill-tip-explicit#sources": "Okuma düzeyi: Yapı ve kaynaklar, burada ayarlandı. Alttaki şemalar bunu devralır.",
+  "hv-explorer-pill-tip-inherited": "Okuma düzeyi: Yapı; {parent} öğesinden devralındı.",
+  "hv-explorer-pill-tip-inherited#names": "Okuma düzeyi: Yalnız adlar; {parent} öğesinden devralındı.",
+  "hv-explorer-pill-tip-inherited#sources": "Okuma düzeyi: Yapı ve kaynaklar; {parent} öğesinden devralındı.",
+  "hv-explorer-pill-tip-auto": "Okuma düzeyi: Yapı; {n} nesne için otomatik seçildi.",
+  "hv-explorer-pill-tip-auto#names": "Okuma düzeyi: Yalnız adlar; {n} nesne için otomatik seçildi.",
+  "hv-explorer-pill-tip-auto#sources": "Okuma düzeyi: Yapı ve kaynaklar; {n} nesne için otomatik seçildi.",
   "hv-scope-section": "Şemalar",
   "hv-scope-summary": "{total} şemadan {n}",
   "hv-scope-summary-mysql": "{total} veritabanının tümü",
@@ -2247,7 +2288,13 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-ddl-view-source-generated": "Katalogdan üretildi",
   "hv-ddl-view-source-server": "Sunucudan gelen metin",
   "hv-ddl-view-copied": "{name} DDL'i kopyalandı",
-  "hv-ddl-view-unsupported": "Hacivat henüz bir {kind} için DDL gösteremiyor.",
+  "hv-ddl-view-unsupported": "Hacivat bu tür nesnelerin DDL'ini henüz gösteremiyor.",
+  "hv-ddl-view-unsupported#type": "Hacivat tiplerin DDL'ini henüz gösteremiyor.",
+  "hv-ddl-view-unsupported#domain": "Hacivat domain'lerin DDL'ini henüz gösteremiyor.",
+  "hv-ddl-view-unsupported#policy": "Hacivat satır güvenliği ilkelerinin DDL'ini henüz gösteremiyor.",
+  "hv-ddl-view-unsupported#rule": "Hacivat kuralların DDL'ini henüz gösteremiyor.",
+  "hv-ddl-view-unsupported#extension": "Hacivat eklentilerin DDL'ini henüz gösteremiyor.",
+  "hv-ddl-view-unsupported#operator": "Hacivat işleçlerin DDL'ini henüz gösteremiyor.",
   "hv-ddl-view-unsupported-body": "{name} gezginde kalır; Tam adı kopyala çalışır.",
   "hv-ddl-view-stale": "{name} yüklendikten sonra sunucuda değişti",
   "hv-ddl-view-reload": "Yeniden yükle",
@@ -2280,7 +2327,8 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-metadata-clear-body": "Gezgin bunu bir sonraki bağlanışta sunucudan yeniden okur. Sunucuda hiçbir şey değişmez.",
   "hv-metadata-clear-btn": "Temizle",
   "hv-metadata-cleared": "{name} için önbellekteki üst veri temizlendi",
-  "hv-metadata-size-mb": "{n} MB"
+  "hv-metadata-size-mb": "{n} MB",
+  "hv-explorer-menu-collapse-children": "Tüm alt öğeleri kapat"
  }
 }
 </script>
@@ -2299,7 +2347,17 @@ let LANG = "en";
 /* EN counts take a Fluent plural selector; the mock picks "#one" when the count is 1 (Turkish has no plural after a numeral) */
 const ONE_VARS = ["n", "count"];
 const untag = s => String(s).replace(/<[^>]*>/g, "");
-const pk = (k, v) => LANG === "en" && v && I18N.en[k + "#one"] !== undefined && ONE_VARS.some(n => n in v && untag(v[n]) === "1") ? k + "#one" : k;
+/* Variants stand in for Fluent selectors: an enum selector ($kind, $level) picks "id#value", the default variant is "id";
+   an EN plural picks "id#one" from the message's count variable (SELV names it when it isn't $count or $n). */
+const ENUM_VARS = ["kind", "level"];
+const SELV = { "hv-explorer-scope-count-tip":"total", "hv-scope-summary":"total", "hv-scope-summary-mysql":"total", "hv-explorer-progress-tip":"total", "hv-explorer-row-estimate-tip":"rows" };
+const pk = (k, v) => {
+  if (!v) return k;
+  for (const e of ENUM_VARS) if (e in v && (I18N[LANG][k + "#" + v[e]] ?? I18N.en[k + "#" + v[e]]) !== undefined) return k + "#" + v[e];
+  if (LANG !== "en" || I18N.en[k + "#one"] === undefined) return k;
+  const sv = SELV[k] || ONE_VARS.find(n => n in v);
+  return sv && untag(v[sv]) === "1" ? k + "#one" : k;
+};
 const t = (k, v) => { k = pk(k, v); let s = I18N[LANG][k] ?? I18N.en[k] ?? k; if (v) s = s.replace(/\{(\w+)\}/g, (m, n) => v[n] ?? m); return s; };
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
 const te = (k, v) => esc(t(k, v));
@@ -2620,7 +2678,7 @@ function rowHTML(r, i) {
   }
   if (n.pill) {
     const p = n.pill;
-    h += `<button class="pill${p.how === "explicit" ? " ex" : ""}" data-act="pill" data-k="${esc(n.k)}" data-tip="pill" tabindex="-1" aria-label="${esc(t("hv-explorer-menu-level") + ": " + levelName(p.lvl))}">${esc(pillLabel(p.lvl))}</button>`;
+    h += `<button class="pill${p.how === "explicit" ? " ex" : ""}" data-act="pill" data-k="${esc(n.k)}" data-tip="pill" tabindex="-1" aria-label="${esc(pillTip(n))}">${esc(pillLabel(p.lvl))}</button>`;
   }
   h += `<span class="grow"></span>${metaHTML(n)}`;
   if (n.oos) h += `<button class="addsc" data-act="addScope" data-k="${esc(n.k)}" tabindex="-1">${te("hv-explorer-add-scope")}</button>`;
@@ -2844,7 +2902,7 @@ function ddlHTML() {
   if (D.stale === "changed") notes += `<div class="ddlnote"><div class="notice">${ic("history","i12")}<div class="nb"><div>${te("hv-ddl-view-stale", { name:D.name })}</div><div class="acts"><button class="btn" data-act="ddlReload" tabindex="-1">${ic("rotate-cw","i12")}<span>${te("hv-ddl-view-reload")}</span></button></div></div></div></div>`;
   if (D.stale === "gone") notes += `<div class="ddlnote"><div class="notice">${ic("circle-alert","i12")}<div class="nb"><div>${te("hv-ddl-view-gone", { name:D.name })}</div><div class="l2">${te("hv-ddl-view-gone-body")}</div><div class="acts"><button class="btn" data-act="closeDdl" tabindex="-1">${te("hui-tab-close")}</button></div></div></div></div>`;
   if (D.execWarn && (o.server || D.server)) notes += `<div class="ddlnote"><div class="notice">${ic("triangle-alert","i12")}<div class="nb">${te("ddl-warn-executable-comment")}</div></div></div>`;
-  if (D.unsupported) return tool + `<div class="ddlnote"><div class="notice">${ic("info","i12")}<div class="nb"><div>${te("hv-ddl-view-unsupported", { kind:t("hv-explorer-word-type") })}</div><div class="l2">${th("hv-ddl-view-unsupported-body", { name:mono(D.name) })}</div></div></div></div><div class="dempty"></div>`;
+  if (D.unsupported) return tool + `<div class="ddlnote"><div class="notice">${ic("info","i12")}<div class="nb"><div>${te("hv-ddl-view-unsupported", { kind:"type" })}</div><div class="l2">${th("hv-ddl-view-unsupported-body", { name:mono(D.name) })}</div></div></div></div><div class="dempty"></div>`;
   if (D.loading) return tool + opts + `<div class="dempty"><div class="xr st" style="position:static;padding-left:0"><i class="st-run" aria-hidden="true"></i><span class="lbl">${te("hv-ddl-view-loading", { name:D.name })}</span></div></div>`;
   return tool + opts + notes + codeHTML(D.lines(), { ro:true, gone:D.stale === "gone" });
 }
@@ -2892,7 +2950,8 @@ function menuItems(n) {
   const refresh = { lab:t("hv-explorer-menu-refresh"), k:KEY.refresh, act:"refresh", ic:"refresh-cw" };
   const copy = { lab:t("hv-explorer-menu-copy-name"), k:KEY.copyName, act:"copyName", ic:"copy" };
   const plain = { lab:t("hv-explorer-menu-copy-plain"), act:"copyPlain" };
-  const collapse = { lab:t("hv-explorer-menu-collapse-all"), k:KEY.collapse, act:"collapseAll" };
+  /* a node menu acts on its node: Collapse all children pairs with Expand all children; the tree-wide Collapse all (⌘←) is the palette's and the key's */
+  const collapse = { lab:t("hv-explorer-menu-collapse-children"), act:"collapseChildren" };
   const expand = { lab:t("hv-explorer-menu-expand-all"), act:"expandAll" };
   switch (n.kind) {
     case "profile": { const live = W.live[n.conn.id] === "connected";
@@ -2913,7 +2972,7 @@ function menuItems(n) {
 function levelItems(n) {
   const P = n.pill || { lvl:"structure", how:"auto" };
   return ["auto", "names", "structure", "sources"].map(l => ({ lab:levelName(l), act:"setLevel", v:l, ck:P.how === "explicit" ? P.lvl === l : l === "auto",
-    hint:l === "auto" ? t("hv-explorer-level-auto-hint", { level:levelName(P.how === "explicit" ? autoLevel(n) : P.lvl) }) : t("hv-explorer-level-" + l + "-hint") }));
+    hint:l === "auto" ? t("hv-explorer-level-auto-hint", { level:P.how === "explicit" ? autoLevel(n) : P.lvl }) : t("hv-explorer-level-" + l + "-hint") }));
 }
 const autoLevel = n => n.label === "telemetri" ? "names" : n.label === "public" ? "sources" : "structure";
 function openMenu(k, x, y, o = {}) {
@@ -2976,15 +3035,20 @@ function tipHTML(kind, n) {
     case "commit": return `<div class="th">${te("hv-metadata-after-commit")}</div>${te("hv-metadata-after-commit-tip", { count:nf(2) })}`;
     case "stale-obj": return `<div class="th">${ic("history","i12")}${te("hv-ddl-view-stale", { name:n.label })}</div>`;
     case "invis": return th("hv-explorer-invisible-tip", { what:`<span class="mono">U+200D ZERO WIDTH JOINER</span>` }) + `<div class="srvbox"><code>fatura⟨U+200D⟩lar</code></div>`;
-    case "broken": return `<div class="th">${ic("circle-alert","i12")}${te("hv-explorer-broken", { kind:t("hv-explorer-word-index"), name:n.label })}</div>${te("hv-explorer-broken-body")}<div class="srvbox"><code>eski_durum</code></div>`;
+    case "broken": return `<div class="th">${ic("circle-alert","i12")}${te("hv-explorer-broken", { kind:"index", name:n.label })}</div>${te("hv-explorer-broken-body")}<div class="srvbox"><code>eski_durum</code></div>`;
     case "oos": return te(n.oos === "db" ? "hv-explorer-out-of-scope-db-tip" : "hv-explorer-out-of-scope-tip", { name:n.label });
     case "hidden": return th("hv-explorer-hidden-tip", { n:esc(nf(n.hidden.n)), pattern:mono(n.hidden.pattern) });
     case "est": return n.est ? te("hv-explorer-row-estimate-tip", { rows:nf(n.est) }) : "";
-    case "pill": { const p = n.pill, lv = levelName(p.lvl);
-      return p.how === "explicit" ? te("hv-explorer-pill-tip-explicit", { level:lv }) : p.how === "inherited" ? te("hv-explorer-pill-tip-inherited", { level:lv, parent:n.parent.label }) : te("hv-explorer-pill-tip-auto", { level:lv, n:nf(p.n) }); }
+    case "pill": return esc(pillTip(n));
     case "modify": return te("hv-explorer-menu-modify-tip");
   }
   return "";
+}
+/* The pill's tooltip and accessible name: one whole message per source, the level chosen by its $level selector */
+function pillTip(n) {
+  const p = n.pill;
+  return p.how === "explicit" ? t("hv-explorer-pill-tip-explicit", { level:p.lvl }) : p.how === "inherited" ? t("hv-explorer-pill-tip-inherited", { level:p.lvl, parent:n.parent.label })
+    : t("hv-explorer-pill-tip-auto", { level:p.lvl, n:nf(p.n) });
 }
 function showTip(kind, k, sel) {
   const base = k ? k.replace(/#(st|ph)$/, "") : null;
@@ -3093,7 +3157,7 @@ const SURF = [
   { id:"scope", label:"Scope editor", sc:[["pg", "Schemas"], ["pattern", "Pattern error"], ["alldb", "All databases?"], ["mysql", "MySQL"], ["prod", "Production · encrypt"], ["encrypt", "Encrypt · confirm"], ["offline", "Not connected"], ["tr960", "960 · TR"]] },
   { id:"mass", label:"Mass deletion", sc:[["dialog", "Confirmation"], ["background", "Background pass"], ["dropped", "Schema dropped"], ["tr960", "960 · TR"]] },
   { id:"refresh", label:"Refresh after DDL", sc:[["ask", "Ask"], ["tx", "In a transaction"], ["broad", "Dynamic SQL"], ["done", "Refreshed"], ["never", "Never · out of date"], ["tr960", "960 · TR"]] },
-  { id:"ddl", label:"DDL view", sc:[["table", "Table (generated)"], ["options", "Options"], ["loading", "Reading the definition"], ["grants", "Grants · partial"], ["view", "View (server text)"], ["mysql", "MySQL /*! */"], ["sqlite", "SQLite"], ["unsupported", "Unsupported kind"], ["tr960", "960 · TR · overflow"]] },
+  { id:"ddl", label:"DDL view", sc:[["table", "Table (generated)"], ["options", "Options"], ["loading", "Reading the definition"], ["grants", "Grants · partial"], ["view", "View (server text)"], ["mysql", "MySQL /*! */"], ["sqlite", "SQLite"], ["unsupported", "Unsupported kind"], ["tr960", "960 · TR"], ["tr960o", "960 · TR · overflow ⋯"]] },
   { id:"stale", label:"Stale object", sc:[["ddl", "Changed (DDL view)"], ["tooltip", "Changed (explorer)"], ["unknown", "Couldn't check"], ["gone", "No longer exists"], ["tr960", "960 · TR"]] },
   { id:"names", label:"Invisible, broken", sc:[["invisible", "Invisible character"], ["broken", "Unresolved column"], ["tr960", "960 · TR"]] },
   { id:"settings", label:"Settings", sc:[["default", "Metadata"], ["ask", "Ask"], ["clear", "Clear cache"], ["search", "Search"], ["tr960", "960 · TR"]] },
@@ -3120,7 +3184,7 @@ const NOTES = {
   filter:{ intent:"Type to narrow the tree to loaded names; matches stay in context with their ancestors revealed.",
     points:["The 28 px field gains the count ('4 matches') and the Turkish-tolerant toggle inside its well (the M3c find toggle, the languages glyph). It is on by default when the UI language or region is Turkish (D-074, R-M4-50).", "Matches are highlighted with the selection tint; revealed ancestors are text-2; group counts read '2 of 1,204'.", "Only loaded names are searched; when some tables' columns aren't loaded the hint line under the field says how many.", "Tolerant off: ASCII case-insensitive only, so 'istanbul' does not find İSTANBUL_ŞUBE. Invisible characters are skipped in both modes.", "No match: 'No objects match', the query quoted, and Clear filter."] },
   menus:{ intent:"Each kind gets a short menu: the frequent action first, then copying, then refresh and scope; nothing that doesn't work yet except Modify (PO-Q13).",
-    points:["Profile: the M2a connection items, then Refresh F5, Edit scope…, Introspection level ›, Clear cached metadata…, Collapse all ⌘←, and Delete… (red, last).", "Database and schema: Refresh, Edit scope… (database), Introspection level ›, Remove from scope (schema), Copy qualified name ⌥⌘C, Expand all children, Collapse all.", "Kind group: Refresh, Show hidden objects (only while a view filter hides some), Expand all children, Collapse all.", "Table / view: Open data ↵ (R-M4-13: a console with SELECT * through the normal Run path), View DDL F12, Copy name, Copy qualified name, Copy DDL, Refresh, Hide objects like this, then Modify table… disabled in the disabled ink with its reason 'Arrives in a later version' as the hint.", "Column: Copy name, Copy qualified name, View table DDL, Modify column… (disabled).", "Copy qualified name quotes per dialect only where needed: public.\"Users\", public.users, api.`order`, main.\"a b\".", "Hide objects like this adds a view filter for the name's prefix (yedek_fatura_*): the group header gains a filter glyph and counts what is visible; its tooltip says how to show them again.", "Export, Import and Edit source are hidden until they work (PO-Q16). Keys follow VS Code where it has one (PO-Q10) and every row is remappable; nothing uses ⌘K."] },
+    points:["Profile: the M2a connection items, then Refresh F5, Edit scope…, Introspection level ›, Clear cached metadata…, Collapse all children, and Delete… (red, last). Node menus collapse their own node; the tree-wide Collapse all is ⌘← and the palette.", "Database and schema: Refresh, Edit scope… (database), Introspection level ›, Remove from scope (schema), Copy qualified name ⌥⌘C, Expand all children, Collapse all children.", "Kind group: Refresh, Show hidden objects (only while a view filter hides some), Expand all children, Collapse all children.", "Table / view: Open data ↵ (R-M4-13: a console with SELECT * through the normal Run path), View DDL F12, Copy name, Copy qualified name, Copy DDL, Refresh, Hide objects like this, then Modify table… disabled in the disabled ink with its reason 'Arrives in a later version' as the hint.", "Column: Copy name, Copy qualified name, View table DDL, Modify column… (disabled).", "Copy qualified name quotes per dialect only where needed: public.\"Users\", public.users, api.`order`, main.\"a b\".", "Hide objects like this adds a view filter for the name's prefix (yedek_fatura_*): the group header gains a filter glyph and counts what is visible; its tooltip says how to show them again.", "Export, Import and Edit source are hidden until they work (PO-Q16). Keys follow VS Code where it has one (PO-Q10) and every row is remappable; nothing uses ⌘K."] },
   level:{ intent:"How much Hacivat reads per database or schema, visible at a glance and changeable in two clicks.",
     points:["The pill sits after the name on database and schema rows: Names, Structure or Sources. Outline only (One Filled Badge). Blue = set on this node; grey (text-3) = inherited or chosen automatically.", "Tooltip: the level and where it comes from (set here, inherited from a parent, or automatic for n objects; D-038 thresholds).", "Introspection level › (menu) and a click on the pill open the same list: Automatic (with 'now Structure'), Names only, Structure, Structure and sources, each with a short hint; a blue check marks the current setting.", "Changing the level re-reads that namespace (the phase row shows)."] },
   scope:{ intent:"Which databases and schemas a connection reads, as a checkbox tree and as a pattern, in the connection dialog's new Schemas section.",
@@ -3251,6 +3315,8 @@ function setup(id, sc) {
     case "ddl":
       std(); sel(...tables, "müşteri");
       if (sc === "table" || tr960) setDdl("table");
+      /* MySQL generated text (server toggle off): the strip carries every option, so at 960 in Turkish the toggles move into ⋯, shown open */
+      if (sc === "tr960o") { defOpen = false; setDdl("mysql", { opt:{ server:false, grants:true } }); W.cap = "api-dev"; openPath("api-dev", "api", "tables"); sel("api-dev", "api", "tables", "users"); W.scrollTo = keyOf("api-dev"); W.scrollAt = 0; W.openOvf = true; }
       if (sc === "options") setDdl("table", { opt:{ qual:"always", cons:"after", grants:true, owner:true } });
       if (sc === "loading") setDdl("table", { loading:true });
       if (sc === "grants") setDdl("table", { opt:{ grants:true }, grantsPartial:true });
@@ -3300,6 +3366,7 @@ function afterRender() {
       if (P.fromPill) { const pb = r.querySelector(".pill").getBoundingClientRect(); x = pb.left - W0.left; y = pb.bottom - W0.top + 2; }
       openMenu(n.k, x, y, { level:P.level, sub:P.sub, active:P.sub ? 1 : undefined }); } }
   if (W.pinTip) { const [kind, k] = W.pinTip; W.pinTip = null; ensureVisible(k); showTip(kind, k); }
+  if (W.openOvf && $("ddlOvf") && !$("ddlOvf").hidden && !W.ddlMenu) ACT.ddlOvf($("ddlOvf"), { stopPropagation(){} });
   if (W.layers.length) focusInitial();
   renderMenus();
 }
@@ -3387,7 +3454,7 @@ function pickMenu(id, i) {
   if (it.act === "editScope") { W.layers = [{ type:"scope", conn:profileOf(n).label }]; renderLayers(); return; }
   if (it.act === "clearCache") return ACT.clearCache();
   if (it.act === "addScope") return ACT.addScope({ dataset:{ k:n.k } });
-  if (it.act === "collapseAll") { W.open.clear(); renderTree(); return; }
+  if (it.act === "collapseChildren") { for (const k of [...W.open]) if (k.startsWith(n.k + "/")) W.open.delete(k); renderTree(); return; }
   if (it.act === "expandAll") { for (const c of kidsOf(n) || []) W.open.add(c.k); W.open.add(n.k); renderTree(); return; }
   if (it.act === "copyPlain") return toast(`<div>${th("hv-explorer-copied", { name:mono(n.label) })}</div>`, { icon:"copy-check", ok:true });
   if (it.act === "hideLike") { const g = n.parent; if (g?.kind === "group") hideLike(g, n.label.replace(/_[^_]*$/, "_") + "*"); return; }
@@ -3490,7 +3557,7 @@ window.addEventListener("resize", () => { if (!W || S.check) return; renderAll()
 /* Every scenario named "960 · TR" pins Turkish at 960 × 600; an explicit lang or size in a deep link wins (noPin). */
 function go(surface, sc, noPin) {
   S.surface = surface; const s = SURF[surface]; S.sc[s.id] = sc || S.sc[s.id] || s.sc[0][0];
-  if (S.sc[s.id] === "tr960" && !noPin) { LANG = "tr"; S.size = "960"; }
+  if (S.sc[s.id].startsWith("tr960") && !noPin) { LANG = "tr"; S.size = "960"; }
   setup(s.id, S.sc[s.id]);
   renderAll(); afterRender(); syncUrl();
 }
@@ -3544,7 +3611,7 @@ async function runChecks() {
   if (document.fonts) await document.fonts.ready;
   const out = []; let renders = 0;
   for (let si = 0; si < SURF.length; si++) for (const [sc] of SURF[si].sc) for (const lang of ["en", "tr"]) for (const theme of ["dark", "light"]) for (const size of ["1440", "960"]) {
-    if (sc === "tr960" && (lang !== "tr" || size !== "960")) continue;
+    if (sc.startsWith("tr960") && (lang !== "tr" || size !== "960")) continue;
     LANG = lang; S.theme = theme; S.size = size;
     try { go(si, sc, true); } catch (err) { out.push({ s:SURF[si].id, sc, lang, theme, size, f:["exception: " + err.message] }); continue; }
     await new Promise(r => setTimeout(r, 0));
@@ -3592,6 +3659,18 @@ async function runProbes() {
   go(7, "dialog", true); await tick(); ok("mass deletion opens on Keep cached", document.activeElement?.dataset.act === "massKeep");
   key("Escape"); ok("Escape closes it (= Keep cached)", !W.layers.length);
   go(5, "pill", true); await tick(); ok("the pill opens the level list with Automatic checked", W.menu && W.menu.level && W.menu.items[0].ck);
+  /* fix round 1 */
+  go(0, "pg", true); await tick();
+  const sch = nodeAt(...OD("public")), devOpen = W.open.has(keyOf(DEV));
+  openMenu(sch.k, 100, 300); W.menu.active = W.menu.items.findIndex(i => i.act === "collapseChildren"); $("xtree").focus(); key("Enter");
+  ok("a schema's Collapse all children collapses only below it", !W.open.has(keyOf(...OD("public", "tables"))) && W.open.has(sch.k) && W.open.has(keyOf(DEV)) === devOpen);
+  ok("whole-sentence kind variants (EN)", t("hv-explorer-broken", { kind:"index", name:"ix" }).startsWith("Index ix ") && t("hv-ddl-view-unsupported", { kind:"type" }) === "Hacivat can't show DDL for a type yet.");
+  ok("EN plural variants pick the singular", t("hv-metadata-refresh-ask", { count:"1" }).endsWith("1 changed object?") && t("hv-scope-summary", { n:"1", total:"1" }) === "1 of 1 schema");
+  ok("level selector, no inserted fragment", t("hv-explorer-pill-tip-explicit", { level:"sources" }).startsWith("Introspection level: Structure and sources,"));
+  LANG = "tr"; ok("TR kind variant keeps the name first", t("hv-explorer-broken", { kind:"index", name:"ix" }).startsWith("ix indeksi,"));
+  S.size = "960"; go(9, "tr960o", true); await tick();
+  ok("960 · TR overflow: ⋯ is drawn and open with the hidden options, checks kept", !$("ddlOvf").hidden && W.ddlMenu && W.ddlMenu.items.some(i => i.ck === true));
+  LANG = "en"; S.size = "1440";
   return R;
 }
 window.addEventListener("error", e => { if (S.check) { const pre = document.createElement("pre"); pre.className = "jserr"; pre.textContent = "JSERR " + e.message + " @" + e.lineno; document.body.appendChild(pre); } });
@@ -3603,7 +3682,7 @@ window.addEventListener("error", e => { if (S.check) { const pre = document.crea
   S.shot = P.get("shot") === "1";
   if (P.get("check")) { runChecks(); return; }
   const s = Math.max(1, Math.min(SURF.length, +(P.get("s") || 1))) - 1;
-  const sc = P.get("sc") || undefined, pinned = sc === "tr960";
+  const sc = P.get("sc") || undefined, pinned = !!sc && sc.startsWith("tr960");
   if (pinned) { if (!P.get("lang")) LANG = "tr"; if (!P.get("size")) S.size = "960"; }
   go(s, sc, pinned);
   /* re-run the scenario once the fonts have loaded, so anchored popups sit on the real glyph metrics */
