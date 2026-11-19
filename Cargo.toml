@@ -72,6 +72,13 @@ hacivat-sql-editor = { path = "crates/app/hacivat-sql-editor" }
 # ## m3b-t01a-seams: identifiers and the classifier (Core layer, `crates/sql`).
 sql-ident = { path = "crates/sql/sql-ident" }
 sql-safety = { path = "crates/sql/sql-safety" }
+# ## m4-t01a-manifests: the metadata model and catalog cache (Core), introspection (Core), the
+# pure DDL generator (Core) and the SQL-facing catalog view M5 calls (`crates/sql`). Membership
+# comes from the `crates/core/*` and `crates/sql/*` globs (P-M4-20).
+hacivat-meta = { path = "crates/core/hacivat-meta", default-features = false }
+hacivat-introspect = { path = "crates/core/hacivat-introspect" }
+hacivat-ddl = { path = "crates/core/hacivat-ddl" }
+sql-catalog = { path = "crates/sql/sql-catalog" }
 
 # Localization (Fluent + ICU4X 2.4).
 fluent-bundle = "0.16.0"
@@ -183,6 +190,10 @@ libc = "0.2"
 sqlparser = { version = "=0.64.0", default-features = false, features = ["std", "visitor", "recursive-protection"] }
 # Locale collation for the grid's local sort (`hacivat-values::valfmt::compare`, Task 36).
 icu_collator = "2.4.0"
+# ## m4-t01a-manifests (the M4 manifest table, exhaustive). The shipped system-catalog snapshots
+# are zstd frames (R-M4-17, R-M4-33). Pinned exactly: the committed bytes depend on the libzstd
+# version. No default features (no `legacy`, no `arrays`, no `zdict_builder`).
+zstd = { version = "=0.13.3", default-features = false }
 
 # M2b secure network and sessions (Task 1). SSH uses ring, never aws-lc (Q28): no default
 # features, so russh's `aws-lc-rs` default is off.
@@ -227,3 +238,8 @@ debug = false
 # M3a (Task 1a): libpg_query's C code at -O1 in debug builds; tests parse a lot of SQL.
 [profile.dev.package.pg_query]
 opt-level = 1
+
+# ## m4-t01a-manifests: libzstd at -O2 in debug builds, so `xtask minicat --check` (level 19
+# re-encode of every committed snapshot) does not take 15 s at -O0 (minicat spike §6).
+[profile.dev.package.zstd-sys]
+opt-level = 2

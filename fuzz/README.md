@@ -34,3 +34,17 @@ cargo +nightly fuzz run <target> corpus/<target> -- -max_total_time=600
 Without nightly, `cargo build --release --locked --bins` here builds the same targets with
 libFuzzer's driver but no coverage instrumentation: a random-input smoke run only. Point
 `-artifact_prefix=` outside the repository.
+
+## The M4 metadata targets (`fuzz/meta`)
+
+`catalog_row_decode`, `system_snapshot_decode`, `scope_pattern` and `pack_parse` live in their
+own package `fuzz/meta` (own workspace and `Cargo.lock`, generated the same way from
+`../../Cargo.lock`), so this package's graph stays the SQL crates'. It takes
+`hacivat-introspect` without its default feature `session` (ADR 0008 `m4-t01a`): the session,
+network and SSH crates are never compiled for fuzzing. cargo-fuzz picks `fuzz/` from the
+repository root, so name the package explicitly:
+
+```sh
+cargo +nightly fuzz build --fuzz-dir fuzz/meta --release
+cargo +nightly fuzz run --fuzz-dir fuzz/meta --release pack_parse fuzz/meta/corpus/pack_parse -- -max_total_time=600
+```

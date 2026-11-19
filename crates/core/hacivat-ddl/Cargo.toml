@@ -1,0 +1,31 @@
+[package]
+name = "hacivat-ddl"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "DDL generation: the alg/03 IR, per-dialect renderers and view-only producers over catalog snapshots (HV-DDL-07, -09..11)"
+
+# `DdlIsPure`: on its default features this crate's resolved graph holds no `tokio`, `futures`,
+# `hacivat-session`, `hacivat-driver*`, `hacivat-introspect` or `hacivat-l10n` (Karagöz links
+# it: pure functions over snapshots). `hacivat-meta` comes without its default features.
+[features]
+# M7's session-bound apply, store and drift code (R-M4-35); empty in M4. Only `hacivat-app` and
+# this crate's own tests may enable it (`DdlApplyOnlyFromApp`).
+apply = []
+
+[dependencies]
+hacivat-meta.workspace = true
+hacivat-proto.workspace = true
+sql-ident.workspace = true
+sql-dialect.workspace = true
+sql-catalog.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+hacivat-meta = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

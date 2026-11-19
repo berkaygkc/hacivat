@@ -5,4 +5,7 @@
 # hv-cmd-*  command titles, `hv-cmd-<action id with . and _ as ->` (R5)
 # error-conn-*  connect-error headings and bodies, `ErrClass::fluent_stem()` plus `-title` or
 #           `-body` (M2a, HV-CONN-03)
-families = ["hui-*", "hv-cmd-*", "error-conn-*"]
+# ## m4-t01a-model
+# model-kind-*  object kind labels, `model-kind-<ObjectKind::id()>` plus dialect overrides
+#           (`model-kind-schema-mysql`; alg/02 HV-MODEL-01)
+families = ["hui-*", "hv-cmd-*", "error-conn-*", "model-kind-*"]

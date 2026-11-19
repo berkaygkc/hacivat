@@ -26,6 +26,9 @@ sql-safety.workspace = true
 sql-ident.workspace = true
 rusqlite.workspace = true
 sha2.workspace = true
+# ## m4-t01a-manifests: the refresh-after-DDL sink (Task 21). `hacivat-introspect` never depends
+# back on this crate (`IntrospectNotExec`).
+hacivat-introspect.workspace = true
 
 [dev-dependencies]
 hacivat-driver = { workspace = true, features = ["fake"] }

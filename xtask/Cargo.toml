@@ -8,7 +8,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 cargo_metadata.workspace = true
-serde_json = "1"
+serde_json.workspace = true
 yaml-rust2.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 hacivat-bench.workspace = true
@@ -26,6 +26,10 @@ phf_codegen.workspace = true
 # `sql-safety/data/functions.digest` with the same XXH3-64 as `sql_safety::classified_hash`
 # (Task 3). `bench-sql` runs the perf tests as subprocesses, so xtask takes no SQL crate.
 twox-hash.workspace = true
+# ## m4-t01a-manifests: `xtask minicat` collect/build/check/verify of the system-catalog snapshots
+# (Task 23; canonical JSON in zstd frames, R-M4-33).
+serde.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
