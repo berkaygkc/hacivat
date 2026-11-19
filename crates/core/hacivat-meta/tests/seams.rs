@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use hacivat_meta::ids::{NsKey, ObjectKey, ServerId};
 use hacivat_meta::kind::{KindGroup, ObjectKind};
-use hacivat_meta::merge::{MergePolicy, NamespaceResult, merge};
+use hacivat_meta::merge::{MergeError, MergePolicy, NamespaceResult, merge};
 use hacivat_meta::name::{DialectId, IdentCtx, NamePart};
 use hacivat_meta::snapshot::{Catalog, ServerFacts};
 use hacivat_meta::view::{Freshness, Lookup, ModelView, SnapshotView, UnknownReason};
@@ -96,13 +96,26 @@ fn stub_fk_referencing_is_unknown() {
     ));
 }
 
+// m4-t10 named exception (fix round 1, M-3): `merge` is filled; without a base it is refused.
 #[test]
-fn stub_merge_publishes_nothing() {
+fn merge_without_a_base_is_refused_and_publishes_nothing() {
     let catalog = empty_catalog();
     let before = catalog.current();
-    assert!(merge(None, NamespaceResult::empty_full(), &MergePolicy::default()).is_err());
+    assert!(matches!(
+        merge(None, NamespaceResult::empty_full(), &MergePolicy::default()),
+        Err(MergeError::NoBase)
+    ));
     let publisher = catalog.publisher().expect("the first publisher");
-    assert!(publisher.publish(Vec::new()).is_err());
+    // ## m4-t09-snapshots (named exception): the publish body landed; a refused change list
+    // publishes nothing (an empty list is a no-op that also leaves the generation).
+    assert!(
+        publisher
+            .publish(vec![hacivat_meta::snapshot::CatalogChange::Remove(
+                NsKey::schema(["db", "missing"])
+            )])
+            .is_err()
+    );
+    assert!(publisher.publish(Vec::new()).is_ok());
     let after = catalog.current();
     assert_eq!(after.generation, before.generation);
     assert!(after.namespaces.is_empty());

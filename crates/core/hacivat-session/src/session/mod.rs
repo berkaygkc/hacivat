@@ -197,6 +197,31 @@ pub enum Request {
     /// queue's order, so after every earlier request; read again first when a request may have
     /// changed it. [`SessionHandle::classifier_context`] sends it and reads the answer.
     ReadContext,
+    // ## m4-t05-meta (named exception, ruling R-W1-9)
+    /// A metadata read (`crate::meta`), checked and run in one actor step when it is taken.
+    /// Only `crate::meta` builds one ([`MetaRead`]'s fields are private).
+    MetaRead(MetaRead),
+}
+
+// ## m4-t05-meta (named exception, ruling R-W1-9)
+/// One metadata read on a session (`crate::meta`): trusted pack text with its binds. The actor
+/// checks its condition when it takes the request, in the same step that runs it, and answers
+/// a refusal without sending anything:
+/// - **On the user's session**: the transaction must be idle, with no cursor, no MySQL
+///   `LOCK TABLES` and MySQL `autocommit` on (`TxError::InProgress` otherwise). The read runs
+///   inside Hacivat's own read-only transaction, rolled back after it.
+/// - **Joined** (R-M4-29): a `Job(DdlApply | DriftCheck)` session inside its transaction
+///   (`TxError::Unsupported` otherwise); nothing but the read is sent.
+///
+/// It never goes through the user-run path, the transaction modes, the verdicts, the history
+/// or the activity, and never marks the run context stale.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MetaRead {
+    pub(crate) sql: Arc<str>,
+    pub(crate) binds: Arc<[BindValue]>,
+    pub(crate) joined: bool,
+    /// The server-side limit of the read (PostgreSQL `SET LOCAL statement_timeout`).
+    pub(crate) timeout: Duration,
 }
 
 /// Which read-only layer refused a statement (SQL-SAFE-05).

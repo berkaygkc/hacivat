@@ -633,3 +633,344 @@ HV-INTRO-04, R-M4-3, -7, -29, -32, -37). The packs themselves stay header-only u
   - The re-review's probes R1–R9 are in `tests/hostile_t04_review.rs`, flipped to assert the
     fixes. **m11** (`Pack::parse` call sites in `pg/`, `mysql/`, `sqlite/` must take
     `include_str!` or a `const`) is carried to the T16–T18 reviews by the controller.
+
+## m4-t09 — snapshots and lookups
+
+M4 Task 9 fills the catalog, the tri-state `ModelView`, the resolver, the search paths, the
+negative cache and search (HV-MODEL-02). The bodies of `Catalog`, `publish` and
+`CatalogSnapshot` come from the model spike (`d86313b`), adapted to the T1a seam; its five
+catalog-level tests (deferred by Task 3) are in `tests/snapshot.rs`.
+
+- **Publish.** One writer (`Catalog::publisher` hands it out once). A publish clones the
+  current generation shallowly (`Arc::make_mut` on the namespace and state maps, only when a
+  change touches them), applies every change in order, stores once and then broadcasts. Any
+  error publishes and announces nothing. Untouched namespaces stay `Arc::ptr_eq`; so does the
+  states map when no state changes. An empty change list is a no-op that answers the current
+  generation. `Put` stamps the arena with the new generation: a unique `Arc` is moved, a
+  shared one is copied (by reference count for its objects) to be stamped, so the engine hands
+  over unique arenas. `Remove` also drops every state of the namespace's containers, and
+  accepts a namespace the catalog only lists by state. Publishes are serialized by a writer
+  mutex (never taken by readers); the store is a compare-and-swap whose failure is
+  `ModelError::NotTheWriter` (alg/02 edge 2's misuse guard).
+- **Events.** `publish` announces `Published` with an empty delta plus one `NamespaceReplaced`
+  per changed namespace; `publish_with_delta` announces the merge's delta (Task 10) alone.
+  `announce_pending_confirmation` sends R-M4-22's `PendingConfirmation` without a publish.
+  `pinned_generations` lists the generations still alive (alg/02 edge 1).
+- **Completeness.** A miss is a fact only in a namespace whose state is `Loaded` at
+  `Structure` or above with an arena. `Names` is never enough: which kinds a `Names` pass
+  reads completely (PostgreSQL indexes share the relations name space) is pinned by Tasks
+  16–18, so until then a miss at `Names` is `Unknown(NotLoaded)`. An arena without a state is
+  treated as not loaded. `Loading`, `Failed` and `Partial` answer hits from a cached arena and
+  `Unknown(Loading | Failed)` for misses. `OutOfScope` answers nothing, not even hits. Facet
+  states never affect object existence.
+- **Schema list.** `ContainerKey::schema_list(database)` (PostgreSQL: the database's schemas;
+  elsewhere the server's) marks the list of schemas as complete. With it `Loaded`, a schema
+  the catalog neither holds nor lists does not exist: a qualified name into it is `Missing`,
+  and a search-path entry naming it is skipped, as the server does (`$user` most often).
+  Without it both are `Unknown(NotLoaded)`. Task 15 sets it after each scope refresh.
+- **Lookups.** An unqualified name walks the search path; the first namespace with a hit is
+  `Found`, even when an earlier one is unknown (alg/02 step 5, "Found if any"). Until Task 26
+  serves `pg_catalog` from the system snapshot, a hit in `public` may in principle be shadowed
+  by a `pg_catalog` object of the same name; misses stay `Unknown(OutOfScope)` there. The
+  unknown reason is the first one along the path. A PostgreSQL `database.schema.name` naming
+  another database than the session's is `Unknown(NotLoaded)` (the server refuses
+  cross-database references). An empty path (MySQL with no current database) is
+  `Unknown(NotLoaded)`. Accounts are looked up in the server namespace.
+- **Search paths.** `SearchPath` gains `database` and `PathEntry { ns,
+  relations_and_types_only }`. `for_pg(database, setting, user, temp)` (the plan wrote
+  `for_pg(path, temp)`; the setting keeps `$user` and `pg_temp` as tokens, as
+  `SchemaCtx::search_path_setting` does): the temporary schema first unless the setting names
+  `pg_temp`, for relations and types only; `pg_catalog` first unless named; duplicates keep
+  their first place. `for_mysql(current)`, `for_sqlite(attached)` (`temp`, `main`, then the
+  attached in order), and `exact(database, entries)`.
+- **Hooks.** `LookupHooks` is shared by every view of a catalog. `on_unknown(ns)` fires once
+  per namespace per generation, only for a namespace the catalog lists (an arena or a state)
+  that is not loaded at a sufficient level; never for `Loading`, `Failed` or `OutOfScope`.
+  `on_missing_probe(ns, name)` fires at most once per namespace per 30 s, and only when the
+  lookup's answer is `Missing`. The callbacks run on the looking-up thread after the hooks'
+  lock is released; the lock is never taken on a hit.
+- **Scope filters.** `ScopeFilter::excludes(ns, kind, name)` lets the engine's adapter
+  (Task 24) say what the scope's object filters left unread; that turns a `Missing` (or a
+  complete children list) into `Unknown(OutOfScope)`. The view filter never reaches the view.
+- **No allocation on a hit.** A probe whose key is its own text (pinned rule, ASCII, nothing
+  to fold, within PostgreSQL's 63-byte cut) goes straight to the name index; the same family
+  and table-rule check as `match_named` is applied first. Both are checked against
+  `match_key`/`match_named` in debug builds and by a property test. `unsafe` is denied outside
+  the UI platform layer, so the perf test counts slow-path steps per thread
+  (`slow_lookups_on_this_thread`, `test-support`) instead of hooking the allocator.
+- **Resolver and reverse edges.** References resolve on demand: the longest listed namespace
+  prefix, then the kind's name index (or a walk of exact names for parent-scoped kinds), the
+  server id preferred among same-named hits. `fk_referencing` builds the reverse edges once per
+  generation; it needs the schema list and every in-scope schema at `Structure` (PostgreSQL:
+  only the target's database, as FKs never cross databases). Out-of-scope schemas are not part
+  of the answer (the plan's rule), and the snapshot cannot see object-level scope filters, so
+  M7's drop flows must combine it with the view's scope. `find_by_server_id` searches the
+  relation kinds of the database's schemas; `Missing` needs the schema list, every schema
+  complete and no scope filter.
+- **Generation-local ids.** `ObjId.ns` is the namespace's position in key order, from an
+  index built once per generation. The per-generation caches are ignored on a clone whose
+  public `namespaces` field was replaced.
+- **Search.** ASCII-caseless and locale-free; exact matches first, then prefix, then
+  substring; within each, namespace key order and arena order; at most `limit` hits kept while
+  scanning.
+- **Named exception.** `tests/seams.rs` `stub_merge_publishes_nothing` (T1a): its publish
+  assertion now uses a refused change list (an empty list is a no-op), fenced
+  `// ## m4-t09-snapshots`.
+- **Perf** (Apple silicon, release): a publish of one prebuilt namespace into 5,000 has a p95
+  of 0.10 ms (max 0.9 ms) over 200 publishes, so R-M4-2's trigger does not fire; a lookup hit
+  takes about 0.18 µs and leaves the allocation-free path zero times in 200,000 lookups.
+
+### m4-t09 fix round 1 (review: 1 Critical, 5 Important)
+
+- **C1. A miss is judged in the target's own schema.** `resolve`, `children` and
+  `fk_referencing` look in the longest *listed* prefix of a path, which can be the database
+  or server namespace when the target's schema is not listed. A miss there is now `Missing`
+  only when that namespace is the path's own schema namespace (PostgreSQL `[db, schema]`,
+  elsewhere `[schema]`), or when the schema list is `Loaded` and does not hold the schema.
+  Otherwise it is `Unknown(NotLoaded)`. A PostgreSQL path that only the server namespace
+  holds (another database) is never a fact. So an FK into a schema not yet cached (the state
+  every connect passes through, cached namespaces being published before the scope refresh)
+  never shows as broken.
+- **R-W2-6 (controller ruling; amends alg/02 HV-MODEL-02 step 5 "Found if any").** A walk
+  answers `Found` from a namespace only when every earlier entry for the group was a certain
+  miss. The first entry that cannot answer (out of scope, not listed while the list is
+  unknown, not loaded at `Structure`, loading, failed, a server-dependent probe, an unnamed
+  entry) stops the walk with its `Unknown` reason: the server could resolve the name there,
+  and a later hit may be the wrong object (then a wrong "unknown column" one level down).
+  **Cost:** more `Unknown` answers until the scopes load. On PostgreSQL every unqualified
+  lookup is `Unknown` until `pg_catalog` is complete, which Task 26's system layer provides
+  (or "Introspect live"). Qualified names are unaffected. Unqualified lookups have no M4
+  consumer.
+- **I2. Unknown session facts stay unknown.** `PathEntry.ns` is an `Option`; `None` is an
+  entry the session could not name, and a walk reaching it answers `Unknown(NotLoaded)`.
+  `for_pg` makes one for `$user` when the user is unknown, and for an empty setting
+  (`SchemaCtx::search_path_setting` is empty when unknown). A mapper that knows nothing
+  passes `SearchPath::default()`.
+- **I3. What exists is never skipped.** `PathEntry.must_exist` is set for `pg_catalog` (every
+  server has it) and for a temporary schema the caller reports. Unlisted, such an entry is
+  `Unknown(NotLoaded)` whatever the schema list says, so system lookups stay `Unknown` until
+  Task 26 (F31) without relying on Task 15 listing system schemas.
+- **I4. R-M4-41 at schema level.** Under MySQL/MariaDB `lower_case_table_names` 1 or 2, a
+  qualifier with no caseless match among the listed schemas is `Unknown(ServerDependent)`
+  when any listed sibling's name holds a non-ASCII cased letter. This is the schema-level
+  twin of the table-level `uncertain` rule.
+- **I5. The schema list is its own container.** `ContainerKey::SchemaList { ns }` replaces the
+  `Children { kind: Schema }` key `schema_list` used to build, so "the list is loaded" never
+  reads as "this database has no schema children". `children(database, Schema)` (MySQL and
+  SQLite: `children(root, Schema)`) answers from the listed schema namespaces, in key order:
+  `Found` only when the list is loaded and every listed schema has an arena to hand out (its
+  root), else `Unknown(NotLoaded)`.
+- **M1. `layers`.** `SnapshotView` gains the plan's `layers` field (`Arc<Overlays>`, the
+  generation's own unless `with_layers` sets others) and `layers()`. No lookup reads it
+  before Task 26, which fills it in `view.rs`.
+- **Minor.**
+  - The publish perf line now times the real shape, `Put` plus `SetState(Loaded)`, so both
+    5,000-entry maps are copied. Its p95 is 0.24 ms (max 0.73 ms), still under R-M4-2's
+    1 ms.
+  - The allocation test documents its limit and names the functions on the hit path that
+    must stay allocation-free.
+  - `publish` documents that a shared `Arc` in `Put` copies the arena.
+  - `search` answers nothing for empty text and skips namespaces whose state is
+    `OutOfScope`.
+- **Carries.**
+  - Task 15: set the schema list after each scope refresh; hand over unique arenas; call
+    `announce_pending_confirmation`.
+  - Task 24 and M5: map an unknown user or setting to an unnamed entry or
+    `SearchPath::default()`.
+  - Task 26: the `layers` seam, then re-check R-W2-6's cost for `pg_catalog`.
+  - M5: the probe TTL is per namespace, so a second missing name in the same namespace within
+    30 s is not probed (the plan's rule).
+  - M7: `fk_referencing` answers within the scope.
+  - Task 18 and M5: SQLite `temp` is per connection, so the metadata connection never marks
+    a console's `temp` loaded; the session overlay owns it.
+
+## m4-t10 — merge
+
+M4 Task 10 fills the existence-diff merge, the catalog delta and the mass-deletion guard
+(HV-INTRO-11, D-039, R-M4-22). The model spike has no merge, so nothing is copied.
+
+- **Pure.** `merge(prev, result, policy)` reads no clock, does no I/O and never changes `prev`.
+  `prev = None` is refused (`MergeError::NoBase`): a result carries no engine or fold rule, so
+  a first load merges into `merge::base(key, dbms, fold)`, the namespace root alone.
+- **Identity** is `ObjectKey::same_object`: the server id when both sides have one, else kind,
+  exact path, overload signature and an unknown kind's raw kind. **R-W2-4 (fix round 1):** exact
+  identity stays primary; on a miss, a folded fallback through `sql_ident::key::match_key`
+  applies only when the name class is caseless for that engine and configuration (MySQL/MariaDB
+  table and database names under `lower_case_table_names` 1/2 — the namespace's stored table
+  rule — and their column, routine and event names; SQLite), the key is certain (never
+  `ServerDependent`, so no non-ASCII cased letter on MySQL), and no server ids conflict. The
+  server forbids case twins there, so the fallback only keeps an object whose spelling drifted;
+  PostgreSQL never folds (`"Users"` and `users` are two objects). It runs in existence lookups,
+  edge-10 admission and sibling matching; ancestors of a nested identity fold by the table rule.
+  A `(kind, server id)` the cache holds twice (T3 m9) matches only by id **and** path, so a
+  stale twin is dropped and never resurrected.
+- **Deletions (C-1, I-1, R-W2-5).** Only a successful existence set of the object's own
+  `ObjectKind`, for the scope it covers, deletes, at any depth and in full and incremental
+  passes alike. `ExistSet::Ok(ids)` is namespace-complete for its kind; `ExistSet::Scoped {
+  scope, ids }` decides a cached object only when its namespace-relative path, or an
+  ancestor's, is in `scope` (a fragment of `t` reports `Table: Scoped { scope: [["t"]] }`; the
+  columns of re-read `a` and `b` are `Column: Scoped { scope: [["a"], ["b"]] }`). A kind whose
+  set is `Failed`, absent, or out of scope is never deleted: its cached objects are carried
+  over, under re-read parents too, and a failed kind is in `MergeReport::stale_kinds`. Paths are
+  those of the **next** namespace (a parent renamed by OID has its children looked up under the
+  new name). Every deletion is in `delta.dropped`. **Contract for T15–T18:** a re-read that
+  should remove a dropped child (column, index, constraint, trigger) reports a set of that child
+  kind scoped to the re-read parents; without one, the cached children stay.
+- **Changed objects** replace their cached counterpart's own properties; their children merge
+  the same way: re-read children replace their cached twins (positionally when the pass returns
+  them in cached order, else by identity), new ones are created, cached ones the pass did not
+  return stay unless decided gone. Re-read parents keep the pass's child order, then the
+  carried children; kept parents keep the cached order, then creations. Facets the pass did not
+  re-read in its own props (a view's source) are invalidated; kept objects keep theirs, shared
+  by reference count. An object identical but for its state mark is not altered; it takes the
+  new mark. A changed child whose parent is cached is matched among that parent's children;
+  one whose parent is neither cached nor re-read asks for a fragment of the parent (edge 9).
+  `NamespaceResult::categories_to_reload` is not read by the merge.
+- **Level (I-2).** No pass lowers a namespace's level: a full pass raises it to the pass's level
+  (`max`), an incremental pass leaves it. A pass below the namespace's level erases nothing it
+  did not read (its children are carried); the namespace keeps its level, and the top-level
+  objects that pass created or re-read are listed in `MergeReport::below_level` (they hold only
+  the pass's level; T15 elevates them, and lowering a namespace is T15's job).
+- **Report.** `MergeOutcome` variants carry a `MergeReport`: stale kinds, fragments to read
+  (edges 9 and 11, and a cached object the existence set lists under a new name that the pass
+  did not re-read; an unknown kind keeps its raw kind), ignored changed objects (edge 10),
+  duplicates (edge 12: the last wins; counted, not a debug assertion), the guard's counts
+  (`checked`, `vanished`, `by_kind`), `suppressed`, `below_level`, and `steps`, a linearity
+  witness.
+- **Guard (I-4).** It counts **top-level** objects only (nested children never dilute it), per
+  kind and over the whole top level: more than `guard_ratio_pct` % (50) of at least
+  `guard_min_objects` (20) decided objects vanishing — in any one top-level kind or in all of
+  them together — is `PendingConfirmation`, for both triggers; `vanished` is the top-level
+  total. It is per pass, as D-039 says ("in one pass"); counting since a confirmed baseline is
+  carried to T15/T22 (M-1).
+- **Keep cached (I-5).** `MergePolicy::deletions` is `Apply` (default) or `Suppress`. On "Remove
+  from cache" the engine publishes the pending `next`; on "Keep cached" it re-merges a clone of
+  the same result with `Suppress`: the pass's creations and alterations apply, every object an
+  existence set says is gone stays and is listed in `MergeReport::suppressed`, and the guard
+  does not fire. The whole pass is never discarded.
+- **Seam additions.** `NamespaceResult` gains `level` and `read_at_ms` (the merge reads no
+  clock); both land in `NsMeta` with the new watermark. `Identity` gains `raw_kind` and
+  `Identity::of`. `ExistSet::Scoped`, `MergePolicy::deletions`/`Deletions`, `KindCount`.
+  `MergeError::NotImplemented` (the T1a stub variant) is removed.
+- **Delta.** `created` and `dropped` name subtree roots; a child created, dropped or altered
+  under an existing parent is listed itself and the parent is altered with `children`. Renames
+  carry `Confidence { per_mille, identity }`: `Confidence::IDENTITY` for a rename that kept the
+  object (server id, or the fold-aware fallback: a case-only rename on a caseless engine), so
+  `CatalogDelta::is_hint(entry)` reads the merge's own decision instead of re-deriving it from
+  the keys. Hints pair dropped and created top-level objects of one kind without server ids whose
+  column signatures (name, raw type, nullability) are ≥ 90 % shared as multisets: identical
+  lists are `Confidence::ONE`, others at most 999‰; above 4,096 candidate pairs per kind only
+  identical lists are paired (a hash match), so a mass rename stays linear. A hint's pair is
+  also in `dropped`/`created`. `CatalogDelta::combine` turns a drop and a create of the same
+  kind and server id in two namespaces of one publish into one `moved` entry. A delta of more
+  than 10,000 entries is coarse: `delta::event` gives `NamespaceReplaced`. `apply_delta`
+  applies a delta to a namespace's top-level keys and refuses one that does not fit.
+- **Cost.** O(|M| + |C| + |E|) with hash maps; no `find` per column. Two fast paths are dry
+  walks of the same algorithm that fall back to the general walk when they do not apply: a full
+  pass that leaves no cached object standing on its own reuses the changed arena (pass order);
+  a pass with no changed object that deletes nothing reuses the cached arena with the new
+  metadata (M-6). Measured on 15,000 tables / 160,000 columns in one schema (release, load ~6):
+  full pass p50 28 ms / p95 31 ms, incremental (1 %) 24 / 26 ms, nothing changed 17 / 22 ms. The
+  local gate is the median (R-W2-3); T33 records p95 on a quiet machine.
+- **Fix round 2.**
+  - **RR-1 (a):** a cached object that the same result re-reads under the same unambiguous
+    server id is a rename (Present), whatever a path-scoped set says.
+  - **RR-1 (b), the contract for T15b, T16 and T21:** on server-id engines a scoped set
+    resolves its keys by server id, so a renamed object is reported under its current name. A
+    scoped key that lists nothing is that key's drop.
+  - **RR-m1:** a kept object that the existence set found under a new name, but that was not
+    re-read, has its children looked up under the new name.
+  - **RR-m2:** a re-read that only reorders children marks the parent `altered { children }`.
+  - **RR-m3:** one existence identity vouches for one cached object. In a corrupt caseless
+    cache the first fold twin takes the match and the others are dropped.
+  - A dropped object is always named by its key in the previous generation, even under a
+    parent renamed in the same delta.
+
+## m4-t12 — scope and filters
+
+M4 Task 12 fills `hacivat-introspect::{scope, filter, glob}` (alg/02 HV-INTRO-02, -03, -14;
+R-M4-3, -7, -14, -41; R-W1-7). The three modules build without the `session` feature; the
+`fuzz/meta` target `scope_pattern` fuzzes both grammars.
+
+- **Scope grammar** as alg/02 HV-INTRO-02, with these readings:
+  - a bare name may not hold `@` or `*` either (`app_*` is an error at the `*`, not a schema
+    literally named `app_*`; quote it). The scope grammar has no globs.
+  - `*` and `{regex}` never select a **system** namespace (`NsInfo::system`): the default
+    PostgreSQL scope `@:*` (R-M4-14) must not introspect `pg_catalog` live (R-M4-6). A name
+    or `@` selects one.
+  - A PostgreSQL database-only clause is `db:@`: the schema named like the current one.
+  - The implicit `@:@` is part of `select` only when the server lists it;
+    `select_explicit` is the pattern alone (edge 9: resolvable, not shown).
+  - Names compare through `match_key` and `FoldRule`; where `match_key` answers
+    `ServerDependent` (R-M4-41) only the exact text matches. `CurrentCtx` gains
+    `ident: Option<IdentCtx>` for `lower_case_table_names`.
+  - A misplaced `{` that never closes is `UnclosedBrace` at the brace (`db{1:x` → 3).
+    `ScopePattern` equality is dialect + syntax tree; parse warnings (edge 11
+    `DbTermIgnored`) are data for Task 20's editor, which adds their copy.
+- **Filter grammar** as alg/02 HV-INTRO-03. Kind tokens are `ObjectKind` ids (`_` for `-`)
+  plus `routine`/`function`/`procedure` (functions, procedures, aggregates), `mview`, and
+  `table` covering partitions; a token the dialect's kind schema lacks, or any `word:` prefix
+  that is not a kind, is `UnknownKind`. Items are trimmed. `routine:sig:` items match a
+  signature given to `matches_signature`; `matches` skips them. `excludes(kind, name)` is the
+  `ScopeFilter` answer (unsure → `true`; a view filter → `false`); `applies_to` keeps scope
+  filters off system namespaces (edge 10).
+- **Case.** Literals, globs and regexes follow `FoldRule::for_names` for the kind's name class
+  (`with_ident` sets `lower_case_table_names`): exact, or **ASCII**-caseless. Globs translate
+  ASCII letters to `[aA]`; a user regex is rewritten the same way (`glob::ascii_caseless`:
+  escapes, group heads, counted repetitions and ASCII classes untouched; class letters and
+  plain ranges gain their other case in a nested class). The `regex` crate's own `(?i)` folds
+  Unicode (`k` ↔ U+212A), which the server rule does not; it is only the fallback for text the
+  rewrite does not follow (a verbose-mode comment holding `[`). Class escapes (`\p{Lu}`) stay
+  case-sensitive (documented limit).
+- **Regexes** are compiled once, at parse, with 1 MiB size limits, after compiling the text
+  alone (balanced groups), as `\A(?:…)\z`; a verbose-mode comment that swallows the suffix is
+  retried with a newline.
+- **Pushdown: binds only.** `SqlPredicate.sql_fragment` is the fixed pack text
+  `LIKE :name_like ESCAPE :like_escape`; `binds` holds one `LIKE` pattern per distinct
+  positive glob. Task 4's lexer refuses a backslash inside a literal (and MySQL would read
+  `'\'` as an open literal), so the escape character `\` travels as the `like_escape` bind
+  (`SqlPredicate::escape()`). Positive items are OR'ed, which no pack construct expresses
+  (a list bind is `<col> IN :[x]` only, R-W1-7), so a section runs **once per pattern**
+  (`SqlPredicate::runs()`), unioned like list-bind chunks; the fragment sits beside a list
+  bind as another top-level `AND` conjunct (tested through `DraftPack`). Eligibility:
+  scope role only; PostgreSQL exact classes (a non-ASCII pattern only on a UTF-8 server);
+  MySQL/MariaDB table and database classes, no character outside the BMP; SQLite ASCII
+  patterns; nothing on another dialect. None when any applicable positive item is a regex, a
+  signature item or `*`, when more than 200 apply, or when a pattern holds NUL.
+- **Carried.** Task 17: confirm `LIKE ? ESCAPE ?` prepares on MySQL 8.0/8.4 and MariaDB
+  (Inferred; no Docker in W2) and that `INFORMATION_SCHEMA` table names compare as this rule
+  assumes under `lower_case_table_names` 0/1/2. Task 16: `relname LIKE $n ESCAPE $m` resolves
+  in the `C` collation. Task 15/24: the `ScopeFilter` adapter keyed by namespace, warnings
+  shown by Task 20.
+- **Fix round 1 (security review: 3 Important, 8 Minor).** The rule behind each fix: **the
+  server never returns fewer objects than the client filter keeps.**
+  - **I1:** on PostgreSQL, unless `IdentCtx.encoding` is known to be UTF-8 (`SQL_ASCII`,
+    single-byte or unknown), `?` and `[…]` push as `%`, not `_` (`Glob::like_pattern_with`):
+    a byte-wise server's `_` is one byte, and a UTF-8 name stored there can take several.
+  - **I2:** `CompiledFilter::pushdown_kinds(&[ObjectKind], …)` returns the union of the
+    patterns only when **every** kind in the set has its own pushable positive item.
+    `pushdown(kind)` is the one-kind case. **A catalog section whose rows can be of several
+    kinds (PostgreSQL `pg_class`: tables, partitions, views, materialized views, sequences,
+    foreign tables; MySQL `TABLES`: tables and views) must call `pushdown_kinds` with all of
+    them** (carry to T16–T18). The 200-pattern cap counts the union.
+  - **I3:** `@` and the implicit `@:@` compare with the listed names through `FoldRule` (MySQL
+    and MariaDB `lower_case_table_names` 1 and 2, SQLite), exactly where no rule is pinned, and
+    the **listed** key is selected, never the session text. T17 confirms on Docker what
+    `DATABASE()` returns under lctn 2.
+  - **M1:** untyped items never apply to `Root`, `Database` or `Schema`; MySQL pushdown covers
+    the table name class only.
+  - **M2:** pushdown refuses an `ident` whose fold rule for the kind differs from the filter's
+    own (`with_ident`).
+  - **M3:** a pattern over `MAX_PUSHDOWN_PATTERN_BYTES` (4,096; SQLite's limit is 50,000) is not
+    pushed.
+  - **M4:** in a negative clause `*` and a regex reach system namespaces (removing is safe).
+  - **M5:** the 200-run cap is per call (one section, one namespace); the total per profile is
+    the engine's (T15) to bound.
+  - **M6 (carry to T18):** the SQLite reader must not run pushed sections on a connection with
+    `PRAGMA case_sensitive_like` on.
+  - **M7:** under MySQL/MariaDB `lower_case_table_names = 1` the pattern is sent
+    ASCII-lowercased (names are stored lower-case).
+  - **M8:** an explicit `(?-i)` / `(?-i:…)` in a user regex keeps its letters exact on
+    caseless engines (`ascii_caseless` follows the flag per group). The seams test is renamed
+    `scope_selects_the_current_and_every_user_schema`. The reviewer's hostile tests are
+    `tests/scope_hostile.rs`.

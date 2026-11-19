@@ -511,6 +511,8 @@ pub struct SessionManager {
     // ## m3a-f1-followups
     /// What every session of the profile reports, for the default's idle disconnect (F1-b).
     activity: Arc<ProfileActivity>,
+    // ## m4-t05-meta (named exception): the metadata connections' per-database cap.
+    meta: crate::meta::MetaPools,
 }
 
 impl fmt::Debug for SessionManager {
@@ -563,6 +565,8 @@ impl SessionManager {
             default_lock: tokio::sync::Mutex::new(()),
             me: me.clone(),
             activity: Arc::default(),
+            // ## m4-t05-meta (named exception)
+            meta: crate::meta::MetaPools::default(),
         });
         // ## m3b-t26-prod-unlock (fix round 1, A-I1): the live tag starts as the profile's.
         manager.activity.set_production(opening_production);
@@ -1012,13 +1016,31 @@ impl SessionManager {
         ix: Interaction,
         purpose: Purpose,
     ) -> Result<(LiveConnection, Arc<Profile>, u64), ConnectError> {
+        // ## m4-t05-meta (named exception): the body moved to `connect_live_as`.
+        self.connect_live_as(department, read_only, ix, purpose, &|_| {})
+            .await
+    }
+
+    // ## m4-t05-meta (named exception): `connect_live` with the profile adjusted before the
+    // connect (a metadata connection's `application_name` and database; neither changes the
+    // destination its secrets go to, `same_destination`).
+    async fn connect_live_as(
+        &self,
+        department: Department,
+        read_only: bool,
+        ix: Interaction,
+        purpose: Purpose,
+        adjust: &(dyn Fn(&mut Profile) + Send + Sync),
+    ) -> Result<(LiveConnection, Arc<Profile>, u64), ConnectError> {
         let (profile, secrets, consent, epoch, token, consent_gen) = {
             let st = self.lock();
             let (secrets, consent) = st.overlay.as_ref().map_or((None, false), |o| {
                 (Some(copy_secrets(&o.secrets)), o.plaintext_consent)
             });
+            let mut profile = (*st.current()).clone();
+            adjust(&mut profile);
             (
-                st.current(),
+                Arc::new(profile),
                 secrets,
                 consent,
                 st.epoch,
@@ -1518,6 +1540,77 @@ impl SessionManager {
             )
             .await?;
         Ok((live, profile))
+    }
+}
+
+// ## m4-t05-meta (named exception, M4 Task 5): what the metadata connections (`crate::meta`)
+// take from the manager. A metadata connection is a lease: a permit of the profile's budget at
+// `Priority::Introspection` (none for SQLite's separate `mode=ro` reader, U-6(e)), a headless
+// `Purpose::Probe` connect with `Department::Introspection`, and a token that `close_all`
+// cancels, so no metadata connection outlives the profile's connection.
+impl SessionManager {
+    /// The runtime the manager's tasks run on.
+    pub(crate) fn meta_runtime(&self) -> Handle {
+        self.rt.clone()
+    }
+
+    /// The profile every connect uses now (the overlay's, else the saved one).
+    pub(crate) fn meta_profile(&self) -> Arc<Profile> {
+        self.lock().current()
+    }
+
+    /// This manager, weakly (a metadata connection reconnects through it).
+    pub(crate) fn meta_manager(&self) -> Weak<SessionManager> {
+        self.me.clone()
+    }
+
+    /// The per-database cap of the metadata connections.
+    pub(crate) fn meta_pools(&self) -> &crate::meta::MetaPools {
+        &self.meta
+    }
+
+    /// Single-session mode (`Profile::single_session`, SQLite).
+    pub(crate) fn meta_single(&self) -> bool {
+        self.single()
+    }
+
+    /// A token the next `close_all` cancels (a child of the current epoch's).
+    pub(crate) fn meta_closed_token(&self) -> CancellationToken {
+        self.lock().cancel.child_token()
+    }
+
+    /// A permit at `Priority::Introspection`, unless `close_all` comes first (`None`).
+    pub(crate) async fn meta_permit(&self) -> Option<BudgetPermit> {
+        let gate = self.gate();
+        gate.wait(self.permit(Priority::Introspection)).await.ok()
+    }
+
+    /// A headless `Purpose::Probe` connect for `Department::Introspection`, read-only, with
+    /// `adjust` applied to the profile; the overlay's part is taken as for any connect.
+    pub(crate) async fn meta_connect(
+        &self,
+        adjust: &(dyn Fn(&mut Profile) + Send + Sync),
+    ) -> Result<LiveConnection, ConnectError> {
+        let (live, _, _) = self
+            .connect_live_as(
+                Department::Introspection,
+                true,
+                Interaction::Headless,
+                Purpose::Probe,
+                adjust,
+            )
+            .await?;
+        Ok(live)
+    }
+
+    /// The registered driver of `kind` (SQLite's separate reader connects through it directly:
+    /// the pipeline would harden a read-only connect with the user-facing authorizer,
+    /// R-M4-38).
+    pub(crate) fn meta_driver(
+        &self,
+        kind: hacivat_proto::DbmsKind,
+    ) -> Option<Arc<dyn hacivat_driver::Driver>> {
+        self.deps.drivers.resolve(kind)
     }
 }
 

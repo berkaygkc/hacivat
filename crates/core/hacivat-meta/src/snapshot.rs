@@ -1,28 +1,40 @@
 //! Catalog snapshots (HV-MODEL-02; R-M4-2): an immutable map of namespace arenas published
 //! through `arc-swap` with a monotonically increasing generation. Readers call
-//! [`Catalog::current`] and may keep the `Arc` as long as they like; a publish shares every
-//! untouched namespace by `Arc`.
+//! [`Catalog::current`] (one atomic load, no lock) and may keep the `Arc` as long as they like;
+//! a publish shares every untouched namespace by `Arc` (`Arc::ptr_eq` holds across
+//! generations), so its cost is O(namespaces) pointer copies plus the rebuilt namespaces.
 //!
-//! M4 Task 1a seam (spike origin `d86313b`, declarations only): [`Publisher::publish`] refuses
-//! (nothing is published), [`CatalogSnapshot::fk_referencing`] and
-//! [`CatalogSnapshot::resolve`] answer `Unknown`, until Task 9.
+//! M4 Task 9 (spike origin `d86313b`): [`Publisher::publish`] applies a change list all or
+//! nothing (alg/02 HV-MODEL-02 steps 1, 3, 4); references resolve on demand
+//! ([`CatalogSnapshot::resolve`], [`crate::resolve`]); reverse FK edges are built lazily once
+//! per generation ([`CatalogSnapshot::fk_referencing`]). alg/02's publish-time reverse-index
+//! re-resolution (step 2) is not built (R-M4-26).
+//!
+//! **Completeness.** A miss is a fact only where the catalog holds the whole container: a
+//! namespace whose [`LoadState`] is `Loaded` at [`Level::Structure`] or above, and, for "no
+//! such namespace", a loaded schema list ([`ContainerKey::schema_list`]). Everything else
+//! answers `Unknown` (Global Constraints, "No silent weakening").
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, SystemTime};
 
 use arc_swap::ArcSwap;
 use hacivat_proto::DbmsKind;
 
 use crate::delta::CatalogDelta;
-use crate::ids::{NsKey, ObjId, ObjectKey, Ref};
-use crate::kind::ObjectKind;
+use crate::ids::{NsKey, NsKind, ObjId, ObjectKey, Ref};
+use crate::kind::{ObjectKind, pg_family};
 use crate::name::{IdentCtx, Name};
 use crate::namespace::{Level, ModelError, NamespaceSnapshot, Obj, Subtree, Watermark};
 use crate::overlay::Overlays;
-use crate::props::FacetKind;
-use crate::view::{Lookup, UnknownReason};
+use crate::props::{FacetKind, Props};
+use crate::resolve::{
+    NsStatus, locate_ns_of, locate_ref, miss_is_fact, ns_status, schema_list_loaded,
+};
+use crate::view::{Lookup, MissingReason, UnknownReason, note_slow_path};
 
 /// The precise engine a catalog was read from (MySQL vs MariaDB, PostgreSQL vs its wire
 /// forks): renderers need it where texts differ per flavor (F9, X-10).
@@ -140,6 +152,42 @@ pub enum ContainerKey {
         object: ObjectKey,
         facet: FacetKind,
     },
+    /// The list of schemas of one database (`ns` = the database namespace) or of the server
+    /// (`ns` = the server namespace: MySQL/MariaDB databases, SQLite's attached files). Built by
+    /// [`ContainerKey::schema_list`]. Distinct from every `Children` key, so "the schema list
+    /// is loaded" never reads as "this database has no schema children" (T9 fix round 1, I5).
+    SchemaList { ns: NsKey },
+}
+
+impl ContainerKey {
+    /// The container of the schema list: the schemas of `database` (PostgreSQL), or of the
+    /// server where schemas are top level (MySQL/MariaDB databases, SQLite's attached files:
+    /// `None`).
+    ///
+    /// When it is `Loaded`, every schema the server has is in the catalog's namespaces or
+    /// states, so a schema that neither holds does not exist: a qualified name into it is
+    /// `Missing`, and a search-path entry naming it is skipped (PostgreSQL skips a `search_path`
+    /// schema that does not exist, `$user` most often). Otherwise such a lookup is
+    /// `Unknown(NotLoaded)`. `children(database, Schema)` answers from the listed schema
+    /// namespaces. The engine sets it after each scope refresh (Task 15).
+    pub fn schema_list(database: Option<&Name>) -> ContainerKey {
+        ContainerKey::SchemaList {
+            ns: match database {
+                Some(db) => NsKey::database(db.clone()),
+                None => NsKey::server(),
+            },
+        }
+    }
+
+    /// The namespace the container belongs to.
+    pub fn ns(&self) -> &NsKey {
+        match self {
+            ContainerKey::Namespace(ns)
+            | ContainerKey::Children { ns, .. }
+            | ContainerKey::Facet { ns, .. }
+            | ContainerKey::SchemaList { ns } => ns,
+        }
+    }
 }
 
 /// A handle to one object of one generation: the namespace it lives in and its arena index.
@@ -149,61 +197,285 @@ pub struct ObjHandle {
     pub id: ObjId,
 }
 
+impl ObjHandle {
+    /// The object. A handle is only made for an index inside its arena.
+    pub fn obj(&self) -> &Obj {
+        &self.ns.objs()[self.id.idx as usize]
+    }
+
+    /// The object's stable key.
+    pub fn key(&self) -> Option<ObjectKey> {
+        self.ns.object_key(self.id.idx)
+    }
+}
+
+/// The namespaces of one generation in key order, and each one's position (an [`ObjId`]'s
+/// `ns`). Built once per generation, on first use.
+#[derive(Debug)]
+struct NsIndex {
+    /// `Arc::as_ptr` of the map it was built from: a snapshot whose public `namespaces` field
+    /// was replaced after the index was built must not use it.
+    src: usize,
+    order: Vec<Arc<NamespaceSnapshot>>,
+    pos: HashMap<NsKey, u32>,
+}
+
+/// Reverse FK edges of one generation: target `(ns position, idx)` → the FK objects.
+#[derive(Debug)]
+struct FkIndex {
+    src: usize,
+    edges: HashMap<(u32, u32), Vec<(u32, u32)>>,
+}
+
 /// One immutable generation of a connection's catalog.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CatalogSnapshot {
     pub generation: u64,
     pub server: Arc<ServerFacts>,
     pub namespaces: Arc<BTreeMap<NsKey, Arc<NamespaceSnapshot>>>,
     pub states: Arc<BTreeMap<ContainerKey, LoadState>>,
     pub overlays: Arc<Overlays>,
+    index: OnceLock<Arc<NsIndex>>,
+    fks: OnceLock<Arc<FkIndex>>,
+}
+
+impl fmt::Debug for CatalogSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CatalogSnapshot")
+            .field("generation", &self.generation)
+            .field("dbms", &self.server.dbms)
+            .field("namespaces", &self.namespaces.len())
+            .field("states", &self.states.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl CatalogSnapshot {
     /// An empty generation 0 of `server`.
     pub fn empty(server: Arc<ServerFacts>) -> Self {
-        CatalogSnapshot {
-            generation: 0,
+        CatalogSnapshot::from_parts(
+            0,
             server,
-            namespaces: Arc::new(BTreeMap::new()),
-            states: Arc::new(BTreeMap::new()),
-            overlays: Arc::new(Overlays::default()),
+            Arc::new(BTreeMap::new()),
+            Arc::new(BTreeMap::new()),
+            Arc::new(Overlays::default()),
+        )
+    }
+
+    fn from_parts(
+        generation: u64,
+        server: Arc<ServerFacts>,
+        namespaces: Arc<BTreeMap<NsKey, Arc<NamespaceSnapshot>>>,
+        states: Arc<BTreeMap<ContainerKey, LoadState>>,
+        overlays: Arc<Overlays>,
+    ) -> Self {
+        CatalogSnapshot {
+            generation,
+            server,
+            namespaces,
+            states,
+            overlays,
+            index: OnceLock::new(),
+            fks: OnceLock::new(),
         }
     }
 
-    /// The object `key` denotes in this generation. Task 1a stub: none, which is
-    /// not a fact: the stub's `None` means "not loaded", never "absent" (fix round 1, m9); nothing may show it to a user before Task 9.
+    /// The load state of `key` (`NotLoaded` when the catalog holds none).
+    pub fn state(&self, key: &ContainerKey) -> &LoadState {
+        const NOT_LOADED: LoadState = LoadState::NotLoaded;
+        self.states.get(key).unwrap_or(&NOT_LOADED)
+    }
+
+    fn src(&self) -> usize {
+        Arc::as_ptr(&self.namespaces) as usize
+    }
+
+    /// This generation's namespace index, if it was built from the current `namespaces` map.
+    fn index(&self) -> Option<&NsIndex> {
+        let idx = self.index.get_or_init(|| {
+            note_slow_path();
+            let order: Vec<_> = self.namespaces.values().cloned().collect();
+            let pos = order
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.key().clone(), i as u32))
+                .collect();
+            Arc::new(NsIndex {
+                src: self.src(),
+                order,
+                pos,
+            })
+        });
+        (idx.src == self.src()).then_some(&**idx)
+    }
+
+    /// The position of namespace `key` in this generation (`u32::MAX` when it is not here).
+    fn position(&self, key: &NsKey) -> u32 {
+        match self.index() {
+            Some(idx) => idx.pos.get(key).copied().unwrap_or(u32::MAX),
+            None => self
+                .namespaces
+                .keys()
+                .position(|k| k == key)
+                .map_or(u32::MAX, |p| p as u32),
+        }
+    }
+
+    /// The namespace at `position`.
+    fn at(&self, position: u32) -> Option<&Arc<NamespaceSnapshot>> {
+        match self.index() {
+            Some(idx) => idx.order.get(position as usize),
+            None => self.namespaces.values().nth(position as usize),
+        }
+    }
+
+    /// A handle to object `idx` of `ns` (a namespace of this generation).
+    pub(crate) fn handle(&self, ns: &Arc<NamespaceSnapshot>, idx: u32) -> ObjHandle {
+        ObjHandle {
+            ns: Arc::clone(ns),
+            id: ObjId {
+                ns: self.position(ns.key()),
+                idx,
+            },
+        }
+    }
+
+    /// The object `key` denotes in this generation ([`ObjectKey::same_object`]: by server id,
+    /// else by exact path), searched in the namespace that holds its path. `None` says only
+    /// that no arena of this generation holds it — not that the server lacks it (the tri-state
+    /// answers are [`CatalogSnapshot::resolve`] and the [`crate::view::ModelView`]).
     pub fn find(&self, key: &ObjectKey) -> Option<ObjHandle> {
-        let _ = key;
+        for k in (0..=key.path.len()).rev() {
+            for kind in [NsKind::Schema, NsKind::Database, NsKind::Server] {
+                let ns_key = NsKey {
+                    kind,
+                    path: key.path[..k].iter().cloned().collect(),
+                };
+                if let Some(ns) = self.namespaces.get(&ns_key)
+                    && let Some(idx) = ns.find(key)
+                {
+                    return Some(self.handle(ns, idx));
+                }
+            }
+        }
         None
     }
 
-    /// Resolves a reference on demand. Task 1a stub: `Unknown(NotLoaded)`.
+    /// Resolves a reference on demand (R-M4-26): the target namespace by path, then the name
+    /// index of the target's kind (or the parent's children for a parent-scoped kind), the
+    /// server id preferred among same-named hits. `Found` when an arena holds it; `Missing`
+    /// only when the target namespace is complete; `Unknown` otherwise.
     pub fn resolve(&self, r: &Ref) -> Lookup<ObjHandle> {
         crate::resolve::resolve_ref(self, r)
     }
 
-    /// The object behind a generation-local id. Task 1a stub: none, which is
-    /// not a fact: the stub's `None` means "not loaded", never "absent" (fix round 1, m9); nothing may show it to a user before Task 9.
+    /// The object behind a generation-local id (`None` for an id of another generation that
+    /// points outside this one).
     pub fn obj(&self, id: ObjId) -> Option<&Obj> {
-        let _ = id;
-        None
+        self.at(id.ns)?.obj(id.idx)
     }
 
-    /// The foreign keys that reference `target` (reverse FK edges, A-13).
-    /// Task 1a stub: `Unknown(NotLoaded)`.
+    /// The foreign keys that reference `target` (reverse FK edges, A-13), across namespaces.
+    /// The edges are built once per generation, on first use. `Unknown` while the schema list
+    /// is not loaded or any in-scope namespace that could hold a referencing FK (PostgreSQL:
+    /// the target's database; elsewhere every schema) is below `Structure`, loading or failed;
+    /// out-of-scope namespaces are not part of the answer. `Missing` when the target itself is
+    /// absent from its complete namespace.
     pub fn fk_referencing(&self, target: &ObjectKey) -> Lookup<Vec<ObjHandle>> {
-        let _ = target;
-        Lookup::Unknown(UnknownReason::NotLoaded)
+        let database = if pg_family(self.server.dbms) {
+            match target.path.first() {
+                Some(db) => Some(db),
+                None => return Lookup::Unknown(UnknownReason::NotLoaded),
+            }
+        } else {
+            None
+        };
+        if !schema_list_loaded(self, database) {
+            return Lookup::Unknown(UnknownReason::NotLoaded);
+        }
+        let in_reach = |k: &NsKey| {
+            k.kind == NsKind::Schema && database.is_none_or(|db| k.path.first() == Some(db))
+        };
+        let listed = self
+            .namespaces
+            .keys()
+            .chain(self.states.keys().filter_map(|k| match k {
+                ContainerKey::Namespace(ns) => Some(ns),
+                _ => None,
+            }));
+        for k in listed.filter(|k| in_reach(k)) {
+            match ns_status(self, k).status {
+                NsStatus::Complete | NsStatus::OutOfScope => {}
+                NsStatus::Partial { reason, .. } => return Lookup::Unknown(reason),
+            }
+        }
+        let Some(hit) = self.find(target) else {
+            let Some(located) = locate_ns_of(self, &target.path) else {
+                return Lookup::Unknown(UnknownReason::NotLoaded);
+            };
+            return match ns_status(self, &located).status {
+                NsStatus::Complete if miss_is_fact(self, &located, &target.path) => {
+                    Lookup::Missing(MissingReason::NotFound)
+                }
+                NsStatus::Complete => Lookup::Unknown(UnknownReason::NotLoaded),
+                NsStatus::OutOfScope => Lookup::Unknown(UnknownReason::OutOfScope),
+                NsStatus::Partial { reason, .. } => Lookup::Unknown(reason),
+            };
+        };
+        let edges = self.fk_edges();
+        let from = edges
+            .as_deref()
+            .and_then(|e| e.edges.get(&(hit.id.ns, hit.id.idx)));
+        Lookup::Found(
+            from.into_iter()
+                .flatten()
+                .filter_map(|&(pos, idx)| self.at(pos).map(|ns| self.handle(ns, idx)))
+                .collect(),
+        )
+    }
+
+    /// This generation's reverse FK edges (`None` only if `namespaces` was replaced on a clone
+    /// after they were built; then they are rebuilt for the call).
+    fn fk_edges(&self) -> Option<Arc<FkIndex>> {
+        let cached = self.fks.get_or_init(|| Arc::new(self.build_fk_edges()));
+        if cached.src == self.src() {
+            Some(Arc::clone(cached))
+        } else {
+            Some(Arc::new(self.build_fk_edges()))
+        }
+    }
+
+    fn build_fk_edges(&self) -> FkIndex {
+        let mut edges: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
+        for (pos, ns) in self.namespaces.values().enumerate() {
+            for (idx, obj) in ns.iter_named(&[ObjectKind::ForeignKey]) {
+                let Props::ForeignKey(fk) = obj.props() else {
+                    continue;
+                };
+                if let Some((target_ns, target_idx)) = locate_ref(self, &fk.target).hit() {
+                    let tpos = self.position(target_ns.key());
+                    edges
+                        .entry((tpos, target_idx))
+                        .or_default()
+                        .push((pos as u32, idx));
+                }
+            }
+        }
+        FkIndex {
+            src: self.src(),
+            edges,
+        }
     }
 }
 
 /// An incremental update to the catalog; a publish applies a list all-or-nothing.
 #[derive(Debug, Clone)]
 pub enum CatalogChange {
-    /// Inserts or replaces a whole namespace (a full or incremental pass; a cache load).
+    /// Inserts or replaces a whole namespace (a full or incremental pass; a cache load). The
+    /// publisher stamps the arena with the new generation; hand it a unique `Arc` (a shared one
+    /// is copied — by reference count for its objects — to be stamped).
     Put(Arc<NamespaceSnapshot>),
-    /// Removes a namespace (a dropped schema).
+    /// Removes a namespace (a dropped schema) and every state of its containers.
     Remove(NsKey),
     /// Replaces the child of `parent` that is the same object as `subtree`'s root, or inserts
     /// it (a fragment refresh).
@@ -248,19 +520,42 @@ pub enum CatalogEvent {
 #[cfg(feature = "catalog")]
 const EVENT_CAPACITY: usize = 64;
 
-/// One connection profile's catalog: the current [`CatalogSnapshot`] behind an `ArcSwap`, a
-/// single writer, and (feature `catalog`) a broadcast of [`CatalogEvent`]s.
-pub struct Catalog {
-    current: Arc<ArcSwap<CatalogSnapshot>>,
-    writer_taken: AtomicBool,
+/// What a [`Catalog`] and its [`Publisher`] share.
+struct Shared {
+    current: ArcSwap<CatalogSnapshot>,
+    /// Every published generation, weakly: the ones still alive are pinned by a reader
+    /// (alg/02 edge 1). Touched only by the writer and by `pinned_generations`.
+    generations: Mutex<Vec<(u64, Weak<CatalogSnapshot>)>>,
+    /// Serializes publishes through a shared `&Publisher` (the HV-INTRO-01 scheduler is the
+    /// only writer; this guards misuse). Readers never take it.
+    writer: Mutex<()>,
     #[cfg(feature = "catalog")]
     events: tokio::sync::broadcast::Sender<CatalogEvent>,
 }
 
-impl std::fmt::Debug for Catalog {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Shared {
+    fn send(&self, event: CatalogEvent) {
+        #[cfg(feature = "catalog")]
+        {
+            // No subscriber is not an error: they re-read `current()` when they come.
+            let _ = self.events.send(event);
+        }
+        #[cfg(not(feature = "catalog"))]
+        let _ = event;
+    }
+}
+
+/// One connection profile's catalog: the current [`CatalogSnapshot`] behind an `ArcSwap`, a
+/// single writer, and (feature `catalog`) a broadcast of [`CatalogEvent`]s.
+pub struct Catalog {
+    shared: Arc<Shared>,
+    writer_taken: AtomicBool,
+}
+
+impl fmt::Debug for Catalog {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Catalog")
-            .field("generation", &self.current.load().generation)
+            .field("generation", &self.shared.current.load().generation)
             .finish_non_exhaustive()
     }
 }
@@ -268,17 +563,22 @@ impl std::fmt::Debug for Catalog {
 impl Catalog {
     /// An empty catalog of `server` at generation 0.
     pub fn new(server: Arc<ServerFacts>) -> Self {
+        let first = Arc::new(CatalogSnapshot::empty(server));
         Catalog {
-            current: Arc::new(ArcSwap::from_pointee(CatalogSnapshot::empty(server))),
+            shared: Arc::new(Shared {
+                generations: Mutex::new(vec![(0, Arc::downgrade(&first))]),
+                current: ArcSwap::new(first),
+                writer: Mutex::new(()),
+                #[cfg(feature = "catalog")]
+                events: tokio::sync::broadcast::channel(EVENT_CAPACITY).0,
+            }),
             writer_taken: AtomicBool::new(false),
-            #[cfg(feature = "catalog")]
-            events: tokio::sync::broadcast::channel(EVENT_CAPACITY).0,
         }
     }
 
     /// The current generation. Lock-free; keep the `Arc` to pin a generation.
     pub fn current(&self) -> Arc<CatalogSnapshot> {
-        self.current.load_full()
+        self.shared.current.load_full()
     }
 
     /// The catalog's single writer: `Some` the first time, `None` after.
@@ -287,42 +587,194 @@ impl Catalog {
             return None;
         }
         Some(Publisher {
-            current: Arc::clone(&self.current),
-            #[cfg(feature = "catalog")]
-            events: self.events.clone(),
+            shared: Arc::clone(&self.shared),
         })
     }
 
     /// Subscribes to the catalog's events.
     #[cfg(feature = "catalog")]
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<CatalogEvent> {
-        self.events.subscribe()
+        self.shared.events.subscribe()
+    }
+
+    /// The generations still alive, oldest first: the current one, and every older one a
+    /// reader still holds (alg/02 edge 1: a schema compare pinning generation N keeps the
+    /// namespaces N had until it lets go). A diagnostic; never on a read path.
+    pub fn pinned_generations(&self) -> Vec<u64> {
+        let mut gens = self
+            .shared
+            .generations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        gens.retain(|(_, w)| w.strong_count() > 0);
+        gens.iter().map(|(g, _)| *g).collect()
     }
 }
 
 /// The single writer of one [`Catalog`] (the HV-INTRO-01 scheduler). Not `Clone`.
 pub struct Publisher {
-    current: Arc<ArcSwap<CatalogSnapshot>>,
-    #[cfg(feature = "catalog")]
-    events: tokio::sync::broadcast::Sender<CatalogEvent>,
+    shared: Arc<Shared>,
 }
 
-impl std::fmt::Debug for Publisher {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Publisher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Publisher")
-            .field("generation", &self.current.load().generation)
+            .field("generation", &self.shared.current.load().generation)
             .finish_non_exhaustive()
     }
 }
 
 impl Publisher {
-    /// Applies `changes` atomically: on any error nothing is published.
+    /// Applies `changes` atomically (alg/02 HV-MODEL-02 steps 1, 3, 4): a shallow clone of the
+    /// current generation, every change applied in order, `generation + 1`, one store, then the
+    /// broadcast. On any error nothing is published and nothing is announced. Untouched
+    /// namespaces (and the states map, when no state changes) stay `Arc::ptr_eq`. An empty list
+    /// publishes nothing and answers the current generation.
     ///
-    /// Task 1a stub: `Err(ModelError::NotImplemented)`; the current generation stays.
+    /// Without a delta from the merge (Task 10), subscribers hear `Published` with an empty
+    /// delta and one `NamespaceReplaced` per changed namespace.
+    ///
+    /// **Cost of a shared arena:** `Put` stamps the arena with the new generation, so a `Put`
+    /// whose `Arc` the caller still shares copies the arena (its `Vec<Obj>` and name indexes;
+    /// the objects' props by reference count) under the writer lock. The engine hands over
+    /// unique arenas (a Task 15 carry); a unique `Arc` is moved, never copied.
     pub fn publish(&self, changes: Vec<CatalogChange>) -> Result<Published, ModelError> {
-        let _ = changes;
-        #[cfg(feature = "catalog")]
-        let _ = &self.events;
-        Err(ModelError::NotImplemented)
+        self.apply(changes, None)
+    }
+
+    /// As [`Publisher::publish`], announcing `delta` (the merge's, HV-INTRO-11) instead of
+    /// whole namespaces.
+    pub fn publish_with_delta(
+        &self,
+        changes: Vec<CatalogChange>,
+        delta: Arc<CatalogDelta>,
+    ) -> Result<Published, ModelError> {
+        self.apply(changes, Some(delta))
+    }
+
+    /// Announces a guarded merge kept pending (D-039, R-M4-22); publishes nothing.
+    pub fn announce_pending_confirmation(&self, ns: NsKey, count: u32) {
+        self.shared
+            .send(CatalogEvent::PendingConfirmation { ns, count });
+    }
+
+    fn apply(
+        &self,
+        changes: Vec<CatalogChange>,
+        delta: Option<Arc<CatalogDelta>>,
+    ) -> Result<Published, ModelError> {
+        let _writer = self
+            .shared
+            .writer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let old = self.shared.current.load_full();
+        if changes.is_empty() {
+            return Ok(Published {
+                generation: old.generation,
+                changed: Vec::new(),
+            });
+        }
+        let generation = old.generation + 1;
+        let mut namespaces = Arc::clone(&old.namespaces);
+        let mut states = Arc::clone(&old.states);
+        let mut changed = Vec::new();
+        let mut seen = HashSet::new();
+        let mut mark = |key: &NsKey, changed: &mut Vec<NsKey>| {
+            if seen.insert(key.clone()) {
+                changed.push(key.clone());
+            }
+        };
+        for change in changes {
+            match change {
+                CatalogChange::Put(ns) => {
+                    let ns = Arc::unwrap_or_clone(ns).with_generation(generation);
+                    mark(ns.key(), &mut changed);
+                    Arc::make_mut(&mut namespaces).insert(ns.key().clone(), Arc::new(ns));
+                }
+                CatalogChange::Remove(key) => {
+                    let had_arena = namespaces.contains_key(&key);
+                    let had_state = states.keys().any(|k| *k.ns() == key);
+                    if !had_arena && !had_state {
+                        return Err(ModelError::NoSuchNamespace(key));
+                    }
+                    if had_arena {
+                        Arc::make_mut(&mut namespaces).remove(&key);
+                    }
+                    if had_state {
+                        Arc::make_mut(&mut states).retain(|k, _| *k.ns() != key);
+                    }
+                    mark(&key, &mut changed);
+                }
+                CatalogChange::UpsertSubtree {
+                    ns,
+                    parent,
+                    subtree,
+                } => {
+                    let cur = namespaces
+                        .get(&ns)
+                        .ok_or_else(|| ModelError::NoSuchNamespace(ns.clone()))?;
+                    let at = cur.find(&parent).ok_or(ModelError::NoSuchObject)?;
+                    let next = cur.upsert_child(at, subtree)?.with_generation(generation);
+                    Arc::make_mut(&mut namespaces).insert(ns.clone(), Arc::new(next));
+                    mark(&ns, &mut changed);
+                }
+                CatalogChange::RemoveSubtree { ns, target } => {
+                    let cur = namespaces
+                        .get(&ns)
+                        .ok_or_else(|| ModelError::NoSuchNamespace(ns.clone()))?;
+                    let at = cur.find(&target).ok_or(ModelError::NoSuchObject)?;
+                    let next = cur.replace_subtree(at, None)?.with_generation(generation);
+                    Arc::make_mut(&mut namespaces).insert(ns.clone(), Arc::new(next));
+                    mark(&ns, &mut changed);
+                }
+                CatalogChange::SetState(key, state) => {
+                    Arc::make_mut(&mut states).insert(key, state);
+                }
+            }
+        }
+        let next = Arc::new(CatalogSnapshot::from_parts(
+            generation,
+            Arc::clone(&old.server),
+            namespaces,
+            states,
+            Arc::clone(&old.overlays),
+        ));
+        // The writer lock makes this a plain store; the compare-and-swap is the misuse guard
+        // alg/02 edge 2 asks for (a second writer would have moved `current`).
+        let prev = self
+            .shared
+            .current
+            .compare_and_swap(&old, Arc::clone(&next));
+        if !Arc::ptr_eq(&prev, &old) {
+            return Err(ModelError::NotTheWriter);
+        }
+        drop(prev);
+        {
+            let mut gens = self
+                .shared
+                .generations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            gens.retain(|(_, w)| w.strong_count() > 0);
+            gens.push((generation, Arc::downgrade(&next)));
+        }
+        let whole = delta.is_none();
+        self.shared.send(CatalogEvent::Published {
+            generation,
+            delta: delta.unwrap_or_default(),
+        });
+        if whole {
+            for ns in &changed {
+                self.shared.send(CatalogEvent::NamespaceReplaced {
+                    generation,
+                    ns: ns.clone(),
+                });
+            }
+        }
+        Ok(Published {
+            generation,
+            changed,
+        })
     }
 }
