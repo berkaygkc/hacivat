@@ -8,10 +8,10 @@ use hacivat_meta::delta::{
     COARSE_DELTA_OBJECTS, CatalogDelta, ChangedFacets, Confidence, apply_delta, event,
     top_level_keys,
 };
-use hacivat_meta::fixture::{ns_mysql, ns_pg, table_subtree};
+use hacivat_meta::fixture::{ns_mysql, ns_pg, ns_sqlite, table_subtree};
 use hacivat_meta::merge::{
-    ChangedObject, ExistSet, Identity, MergeError, MergeOutcome, MergePolicy, NamespaceResult,
-    Trigger, base, merge,
+    ChangedObject, Deletions, ExistSet, Identity, MergeError, MergeOutcome, MergePolicy,
+    NamespaceResult, Trigger, base, merge,
 };
 use hacivat_meta::name::{FoldRule, Name};
 use hacivat_meta::namespace::{Level, NamespaceSnapshot, NsMeta, Obj, Subtree, Watermark};
@@ -68,11 +68,17 @@ fn table_typed(name: &str, sid: Option<u32>, cols: &[&str], raw_type: &str) -> S
 }
 
 fn ident(path: &[&str], sid: Option<u32>) -> Identity {
-    Identity {
-        path: path.iter().map(|s| n(s)).collect(),
-        server_id: sid.map(ServerId::Oid),
+    Identity::of(path.iter().map(|s| n(s)).collect(), sid.map(ServerId::Oid))
+}
+
+/// The key of index `name` (OID `oid`) of PostgreSQL table `table` in `public`.
+fn index_key(table: &str, name: &str, oid: u32) -> ObjectKey {
+    ObjectKey {
+        kind: ObjectKind::Index,
+        path: [DB, "public", table, name].into_iter().map(n).collect(),
+        server_id: Some(ServerId::Oid(oid)),
         overload_sig: None,
-        state: StateMark::None,
+        raw_kind: None,
     }
 }
 
@@ -351,10 +357,10 @@ fn rename_via_oid_keeps_children() {
         .unwrap();
     assert_eq!(
         o.delta.renamed,
-        vec![(before.clone(), after.clone(), Confidence::ONE)]
+        vec![(before.clone(), after.clone(), Confidence::IDENTITY)]
     );
     assert!(before.same_object(&after));
-    assert!(!CatalogDelta::is_hint(&before, &after));
+    assert!(!CatalogDelta::is_hint(&o.delta.renamed[0]));
     assert!(o.delta.created.is_empty() && o.delta.dropped.is_empty());
     assert!(o.delta.altered.is_empty(), "only the name changed");
     assert_eq!(
@@ -407,10 +413,8 @@ fn mysql_rename_hint_confidence_one() {
     assert_eq!(o.delta.renamed.len(), 1);
     assert_eq!(o.delta.renamed[0].0, my_key("a"));
     assert_eq!(o.delta.renamed[0].1, my_key("b"));
-    assert!(CatalogDelta::is_hint(
-        &o.delta.renamed[0].0,
-        &o.delta.renamed[0].1
-    ));
+    assert!(CatalogDelta::is_hint(&o.delta.renamed[0]));
+    assert!(!o.delta.renamed[0].2.is_identity());
     assert_eq!(o.delta.dropped, vec![my_key("a")]);
     assert_eq!(o.delta.created, vec![my_key("b")]);
 }
@@ -605,7 +609,8 @@ fn index_missing_from_a_successful_index_set_is_dropped_from_its_kept_table() {
         o.delta.altered,
         vec![(pg_key_in("public", "a").with_oid(100), facets)]
     );
-    assert_eq!((o.report.checked, o.report.vanished), (2, 1));
+    // The guard counts the top level only (I-4): the table was checked, the index is nested.
+    assert_eq!((o.report.checked, o.report.vanished), (1, 0));
 }
 
 trait WithOid {
@@ -731,17 +736,27 @@ fn changed_child_without_parent_row_replaces_all_children() {
     let mut old = table("t", Some(700), &["a", "b"]);
     old.add(old.root(), index("i1", 701));
     let prev = ns_pg(DB, "public").subtree(old).finish();
-    let mut new = table("t", Some(700), &["a", "b"]);
-    new.add(new.root(), index("i2", 702));
-    let r = result(
-        vec![(
+    let new = || {
+        let mut new = table("t", Some(700), &["a", "b"]);
+        new.add(new.root(), index("i2", 702));
+        new
+    };
+    let tables = || {
+        (
             ObjectKind::Table,
             ExistSet::Ok(vec![ident(&["t"], Some(700))]),
-        )],
-        vec![top(&prev, new)],
-        false,
+        )
+    };
+    // With the index set scoped to the re-read table, the old index is gone.
+    let indexes = (
+        ObjectKind::Index,
+        ExistSet::Scoped {
+            scope: vec![vec![n("t")]],
+            ids: vec![ident(&["t", "i2"], Some(702))],
+        },
     );
-    let o = run(prev, r, &MergePolicy::default());
+    let r = result(vec![tables(), indexes], vec![top(&prev, new())], false);
+    let o = run(prev.clone(), r, &MergePolicy::default());
     let t = idx_of(&o.next, ObjectKind::Table, "t");
     assert_eq!(child_names(&o.next, t), ["a", "b", "i2"]);
     let facets = ChangedFacets {
@@ -749,7 +764,16 @@ fn changed_child_without_parent_row_replaces_all_children() {
         ..Default::default()
     };
     assert_eq!(o.delta.altered, vec![(pg_key("t").with_oid(700), facets)]);
-    assert!(o.delta.created.is_empty() && o.delta.dropped.is_empty());
+    assert_eq!(o.delta.created, vec![index_key("t", "i2", 702)]);
+    assert_eq!(o.delta.dropped, vec![index_key("t", "i1", 701)]);
+
+    // Without an index set nothing decides the old index: it is carried over (C-1).
+    let r = result(vec![tables()], vec![top(&prev, new())], false);
+    let o = run(prev, r, &MergePolicy::default());
+    let t = idx_of(&o.next, ObjectKind::Table, "t");
+    assert_eq!(child_names(&o.next, t), ["a", "b", "i2", "i1"]);
+    assert!(o.delta.dropped.is_empty());
+    assert_eq!(o.delta.created, vec![index_key("t", "i2", 702)]);
 }
 
 /// Edge 10: an object in the changed set that the existence query does not list is ignored.
@@ -797,13 +821,22 @@ fn renamed_in_e_but_not_in_c_is_kept_and_re_read() {
 fn duplicate_identity_in_c_last_wins() {
     let prev = pg_prev(&m(&["a"]));
     let r = result(
-        vec![(
-            ObjectKind::Table,
-            ExistSet::Ok(vec![
-                ident(&["a"], Some(oid("a"))),
-                ident(&["t"], Some(oid("t"))),
-            ]),
-        )],
+        vec![
+            (
+                ObjectKind::Table,
+                ExistSet::Ok(vec![
+                    ident(&["a"], Some(oid("a"))),
+                    ident(&["t"], Some(oid("t"))),
+                ]),
+            ),
+            (
+                ObjectKind::Column,
+                ExistSet::Ok(vec![
+                    ident(&["a", "y"], None),
+                    ident(&["t", "second"], None),
+                ]),
+            ),
+        ],
         vec![
             top(&prev, table("t", Some(oid("t")), &["first"])),
             top(&prev, table("t", Some(oid("t")), &["second"])),
@@ -822,7 +855,14 @@ fn duplicate_identity_in_c_last_wins() {
         child_names(&o.next, idx_of(&o.next, ObjectKind::Table, "a")),
         ["y"]
     );
-    assert_eq!(o.delta.created, keys(&["t"]));
+    let tables: Vec<ObjectKey> = o
+        .delta
+        .created
+        .iter()
+        .filter(|k| k.kind == ObjectKind::Table)
+        .cloned()
+        .collect();
+    assert_eq!(tables, keys(&["t"]));
     assert_eq!(o.report.duplicates, 2);
 }
 
@@ -951,19 +991,24 @@ fn wide_table_merge_is_linear() {
         let mut renamed = refs.clone();
         let last = format!("renamed_{cols}");
         *renamed.last_mut().unwrap() = &last;
+        let mut sets = vec![(
+            ObjectKind::Table,
+            ExistSet::Ok(vec![ident(&["wide"], Some(9))]),
+        )];
         let c = if changed {
+            // The re-read reports its columns, so the renamed-away one is decided gone.
+            sets.push((
+                ObjectKind::Column,
+                ExistSet::Scoped {
+                    scope: vec![vec![n("wide")]],
+                    ids: renamed.iter().map(|c| ident(&["wide", c], None)).collect(),
+                },
+            ));
             vec![top(&prev, table("wide", Some(9), &renamed))]
         } else {
             Vec::new()
         };
-        let r = result(
-            vec![(
-                ObjectKind::Table,
-                ExistSet::Ok(vec![ident(&["wide"], Some(9))]),
-            )],
-            c,
-            false,
-        );
+        let r = result(sets, c, false);
         let o = run(prev, r, &MergePolicy::default());
         let t = idx_of(&o.next, ObjectKind::Table, "wide");
         assert_eq!(o.next.children(t).count(), cols);
@@ -1064,27 +1109,61 @@ fn no_previous_namespace_is_an_error_and_base_is_a_first_load() {
     );
 }
 
-/// A full pass sets the namespace's level; an incremental pass keeps or lowers it.
+/// A full pass raises the namespace's level; no pass lowers it (I-2). Objects a lower-level pass
+/// created or re-read are reported, and the cached structure it did not read stays.
 #[test]
-fn incremental_pass_keeps_or_lowers_the_level() {
+fn no_pass_lowers_the_level() {
     let empty = base(
         NsKey::schema([DB, "public"]),
         DbmsKind::Postgres,
         FoldRule::Exact,
     )
     .unwrap();
-    let mut full = result(Vec::new(), Vec::new(), true);
-    full.level = Level::Sources;
+    let mut full = result(
+        Vec::new(),
+        vec![top(&empty, table("a", Some(1), &["x", "y"]))],
+        true,
+    );
+    full.level = Level::Structure;
     let o = run(empty, full, &MergePolicy::default());
-    assert_eq!(o.next.meta().level, Level::Sources);
-    let mut inc = result(Vec::new(), Vec::new(), false);
-    inc.level = Level::Names;
-    let o = run(o.next, inc, &MergePolicy::default());
-    assert_eq!(o.next.meta().level, Level::Names);
+    assert_eq!(o.next.meta().level, Level::Structure);
+    assert!(o.report.below_level.is_empty());
+
+    // A Names pass (full or incremental) re-reads `a` without columns and creates `b`.
+    for full in [true, false] {
+        let mut low = result(
+            vec![(
+                ObjectKind::Table,
+                ExistSet::Ok(vec![ident(&["a"], Some(1)), ident(&["b"], Some(2))]),
+            )],
+            vec![
+                top(&o.next, table("a", Some(1), &[])),
+                top(&o.next, table("b", Some(2), &[])),
+            ],
+            full,
+        );
+        low.level = Level::Names;
+        let l = run(o.next.clone(), low, &MergePolicy::default());
+        assert_eq!(l.next.meta().level, Level::Structure, "full = {full}");
+        let a = idx_of(&l.next, ObjectKind::Table, "a");
+        assert_eq!(child_names(&l.next, a), ["x", "y"]);
+        assert!(l.delta.dropped.is_empty());
+        let mut a_key = pg_key("a");
+        a_key.server_id = Some(ServerId::Oid(1));
+        let mut b_key = pg_key("b");
+        b_key.server_id = Some(ServerId::Oid(2));
+        assert_eq!(l.report.below_level, vec![a_key, b_key]);
+    }
+
+    // A higher incremental pass does not raise it (objects it did not re-read stay as they were).
     let mut inc = result(Vec::new(), Vec::new(), false);
     inc.level = Level::Sources;
-    let o = run(o.next, inc, &MergePolicy::default());
-    assert_eq!(o.next.meta().level, Level::Names);
+    let i = run(o.next.clone(), inc, &MergePolicy::default());
+    assert_eq!(i.next.meta().level, Level::Structure);
+    let mut full = result(Vec::new(), Vec::new(), true);
+    full.level = Level::Sources;
+    let f = run(o.next, full, &MergePolicy::default());
+    assert_eq!(f.next.meta().level, Level::Sources);
 }
 
 /// A changed child whose parent is cached (a fragment of one index) replaces the same child
@@ -1128,7 +1207,7 @@ fn changed_child_under_a_kept_parent_is_upserted() {
     };
     assert_eq!(
         o.delta.renamed,
-        vec![(ikey("i1", 701), ikey("i1x", 701), Confidence::ONE)]
+        vec![(ikey("i1", 701), ikey("i1x", 701), Confidence::IDENTITY)]
     );
     assert_eq!(o.delta.created, vec![ikey("i2", 702)]);
     let facets = ChangedFacets {
@@ -1200,9 +1279,10 @@ fn root_update_replaces_the_root_props() {
         o.delta.altered,
         vec![(pg_key("a"), children), (root_key, comment)]
     );
+    // No column set: the re-read's new column joins, the cached ones stay (C-1).
     assert_eq!(
         child_names(&o.next, idx_of(&o.next, ObjectKind::Table, "a")),
-        ["only"]
+        ["only", "id", "v"]
     );
 }
 
@@ -1265,4 +1345,228 @@ fn delta_round_trips_through_serde_and_applies() {
     assert_eq!(applied, top_level_keys(&o.next));
     // A lost delta does not apply twice.
     assert!(apply_delta(o.prev.key(), &applied, &back).is_err());
+}
+
+// ---- fix round 1: Keep cached, caseless identity, the unchanged fast path, raw kinds ----------
+
+/// I-5: "Keep cached" re-merges the same result with `Deletions::Suppress`: the pass's creations
+/// apply, the vanished objects stay (listed as suppressed), and the guard does not fire.
+#[test]
+fn keep_cached_suppresses_deletions_and_applies_the_rest() {
+    let prev = pg_prev(&m_n(40));
+    let mut names: Vec<String> = (0..5).map(|i| format!("t{i:03}")).collect();
+    names.push("fresh".to_string());
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let r = pg_result(&prev, e(&refs), c(&["fresh"]));
+    let guarded = merge(Some(&prev), r.clone(), &MergePolicy::default()).unwrap();
+    assert!(matches!(
+        guarded,
+        MergeOutcome::PendingConfirmation { vanished: 35, .. }
+    ));
+    let keep = MergePolicy {
+        deletions: Deletions::Suppress,
+        ..MergePolicy::default()
+    };
+    let o = run(prev, r, &keep);
+    assert_eq!(o.pending, None);
+    assert_eq!(o.next.children(0).count(), 41);
+    assert_eq!(o.delta.created, keys(&["fresh"]));
+    assert!(o.delta.dropped.is_empty());
+    assert_eq!(o.report.suppressed.len(), 35);
+    assert_eq!(o.report.suppressed[0], pg_key("t005"));
+    assert!(children_ptr_eq(&o, "t039"));
+}
+
+fn caseless_table(name: &str, cols: &[&str], raw_type: &str) -> Subtree {
+    table_typed(name, None, cols, raw_type)
+}
+
+/// I-6 (R-W2-4): on a caseless engine a case-only spelling change keeps the object (an identity
+/// rename that keeps its children), whether the existence set, the re-read or both spell it anew.
+#[test]
+fn case_only_rename_is_an_identity_on_caseless_engines() {
+    for (label, prev, ty) in [
+        (
+            "mysql lctn 2",
+            ns_mysql("shop", 2).table("Orders", &["id", "v"]).finish(),
+            "int",
+        ),
+        (
+            "sqlite",
+            ns_sqlite("main").table("Orders", &["id", "v"]).finish(),
+            "INTEGER",
+        ),
+    ] {
+        let r = result(
+            vec![(
+                ObjectKind::Table,
+                ExistSet::Ok(vec![ident(&["orders"], None)]),
+            )],
+            vec![top(&prev, caseless_table("orders", &["id", "v"], ty))],
+            false,
+        );
+        let o = run(prev.clone(), r, &MergePolicy::default());
+        assert_eq!(top_names(&o.next), ["orders"], "{label}");
+        assert!(
+            o.delta.created.is_empty() && o.delta.dropped.is_empty(),
+            "{label}"
+        );
+        assert_eq!(o.delta.renamed.len(), 1, "{label}");
+        assert!(o.delta.renamed[0].2.is_identity(), "{label}");
+        assert!(!CatalogDelta::is_hint(&o.delta.renamed[0]), "{label}");
+        assert_eq!(child_names(&o.next, 1), ["id", "v"], "{label}");
+
+        // The existence query and the re-read spell it differently (two catalog sources).
+        let r = result(
+            vec![(
+                ObjectKind::Table,
+                ExistSet::Ok(vec![ident(&["orders"], None)]),
+            )],
+            vec![top(&prev, caseless_table("Orders", &["id", "v", "w"], ty))],
+            false,
+        );
+        let o = run(prev.clone(), r, &MergePolicy::default());
+        assert_eq!(top_names(&o.next), ["Orders"], "{label}");
+        assert_eq!(o.report.ignored, 0, "{label}");
+        assert!(o.report.fragments.is_empty(), "{label}");
+
+        // Not re-read: the existence query's new spelling keeps it and asks for a fragment.
+        let r = result(
+            vec![(
+                ObjectKind::Table,
+                ExistSet::Ok(vec![ident(&["ORDERS"], None)]),
+            )],
+            Vec::new(),
+            false,
+        );
+        let o = run(prev, r, &MergePolicy::default());
+        assert_eq!(top_names(&o.next), ["Orders"], "{label}");
+        assert!(o.delta.is_empty(), "{label}");
+        assert_eq!(o.report.fragments.len(), 1, "{label}");
+    }
+}
+
+/// The folded fallback never applies where case twins exist or the rule is not pinned:
+/// PostgreSQL, MySQL table names under `lower_case_table_names = 0`, and non-ASCII cased letters
+/// on MySQL (`ServerDependent`).
+#[test]
+fn folding_never_applies_to_exact_or_unpinned_names() {
+    // PostgreSQL: "Users" and users are two objects.
+    let prev = ns_pg(DB, "public").table_oid("Users", 1, COLS).finish();
+    let r = result(
+        vec![(
+            ObjectKind::Table,
+            ExistSet::Ok(vec![ident(&["users"], Some(2))]),
+        )],
+        vec![top(&prev, table("users", Some(2), COLS))],
+        false,
+    );
+    let o = run(prev, r, &MergePolicy::default());
+    assert_eq!(top_names(&o.next), ["users"]);
+    assert_eq!(o.delta.dropped.len(), 1);
+    assert_eq!(o.delta.created.len(), 1);
+
+    // MySQL lctn = 0 and a non-ASCII cased name under lctn = 2: a drop and a create (a hint).
+    for (prev, old, new) in [
+        (
+            ns_mysql("shop", 0).table("Orders", COLS).finish(),
+            "Orders",
+            "orders",
+        ),
+        (ns_mysql("shop", 2).table("Äb", COLS).finish(), "Äb", "äb"),
+    ] {
+        let r = result(
+            vec![(ObjectKind::Table, ExistSet::Ok(vec![ident(&[new], None)]))],
+            vec![top(&prev, caseless_table(new, COLS, "int"))],
+            false,
+        );
+        let o = run(prev, r, &MergePolicy::default());
+        assert_eq!(top_names(&o.next), [new], "{old}");
+        assert_eq!(o.delta.dropped, vec![my_key(old)]);
+        assert_eq!(o.delta.created, vec![my_key(new)]);
+        assert!(CatalogDelta::is_hint(&o.delta.renamed[0]));
+    }
+}
+
+/// M-6: a pass that changed and deleted nothing reuses the cached arena with the new metadata.
+#[test]
+fn nothing_changed_keeps_the_arena_and_takes_the_new_metadata() {
+    let prev = ns_pg(DB, "public")
+        .subtree(table_subtree("public", "a", 4, 100, None))
+        .subtree(table_subtree("public", "b", 4, 200, None))
+        .finish();
+    let mut r = result(
+        vec![(
+            ObjectKind::Table,
+            ExistSet::Ok(vec![ident(&["a"], Some(100)), ident(&["b"], Some(200))]),
+        )],
+        Vec::new(),
+        false,
+    );
+    r.new_watermark = Watermark::Sqlite {
+        schema_version: 9,
+        file_identity: None,
+        digest: 1,
+    };
+    let o = run(prev, r, &MergePolicy::default());
+    assert!(o.delta.is_empty());
+    assert_eq!(o.next.objs(), o.prev.objs());
+    assert!(children_ptr_eq(&o, "a") && children_ptr_eq(&o, "b"));
+    assert_eq!(o.next.meta().loaded_at_ms, 1_700_000_000_000);
+    assert!(matches!(
+        o.next.meta().watermark,
+        Watermark::Sqlite {
+            schema_version: 9,
+            ..
+        }
+    ));
+    assert_eq!((o.report.checked, o.report.vanished), (2, 0));
+}
+
+/// A parent renamed by OID: its children's existence identities carry the new name, and the
+/// merge looks them up there (never under the cached name, which would drop them all).
+#[test]
+fn renamed_parent_children_are_looked_up_under_the_new_name() {
+    let prev = ns_pg(DB, "public")
+        .table_oid("t", 16400, &["a", "b"])
+        .finish();
+    let r = result(
+        vec![
+            (
+                ObjectKind::Table,
+                ExistSet::Ok(vec![ident(&["u"], Some(16400))]),
+            ),
+            (
+                ObjectKind::Column,
+                ExistSet::Ok(vec![ident(&["u", "a"], None), ident(&["u", "b"], None)]),
+            ),
+        ],
+        vec![top(&prev, table("u", Some(16400), &["a", "b"]))],
+        false,
+    );
+    let o = run(prev, r, &MergePolicy::default());
+    assert_eq!(top_names(&o.next), ["u"]);
+    assert_eq!(child_names(&o.next, 1), ["a", "b"]);
+    assert!(o.delta.dropped.is_empty() && o.delta.created.is_empty());
+    assert!(o.report.fragments.is_empty());
+}
+
+/// M-7: a fragment requested for an unknown-kind identity keeps its raw kind.
+#[test]
+fn unknown_kind_fragment_keeps_its_raw_kind() {
+    let prev = pg_prev(&m(&["a"]));
+    let mut id = ident(&["thing"], Some(77));
+    id.raw_kind = Some(n("q"));
+    let r = result(
+        vec![(ObjectKind::Unknown, ExistSet::Ok(vec![id]))],
+        Vec::new(),
+        false,
+    );
+    let o = run(prev, r, &MergePolicy::default());
+    let expected = ObjectKey::unknown(
+        [DB, "public", "thing"].into_iter().map(n).collect(),
+        Some(ServerId::Oid(77)),
+        Some(n("q")),
+    );
+    assert_eq!(o.report.fragments, vec![expected]);
 }

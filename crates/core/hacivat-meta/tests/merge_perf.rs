@@ -42,6 +42,7 @@ fn existence(ns: &NamespaceSnapshot) -> Vec<(ObjectKind, ExistSet)> {
                 path: key.path[ns_len..].to_vec(),
                 server_id: o.server_id(),
                 overload_sig: o.props().overload_sig().cloned(),
+                raw_kind: o.raw_kind().cloned(),
                 state: StateMark::None,
             });
         }

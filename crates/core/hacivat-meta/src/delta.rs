@@ -4,15 +4,17 @@
 //! by Task 10's [`crate::merge::merge`].
 //!
 //! **Granularity.** `created` and `dropped` name the roots of whole subtrees: a created table's
-//! columns come with it and are not listed, a dropped table's go with it. A child that changes
-//! under a kept parent (an index dropped by the existence diff, a fragment-refreshed index) is
-//! listed itself, and its parent is listed in `altered` with [`ChangedFacets::children`].
+//! columns come with it and are not listed, a dropped table's go with it. A child created,
+//! dropped or altered under an existing parent (a re-read or a kept one) is listed itself, and
+//! its parent is listed in `altered` with [`ChangedFacets::children`].
 //!
-//! **Renames.** A rename whose two keys are [`ObjectKey::same_object`] (one server id) is an
-//! identity: the object kept its children, facets and tree state. Any other rename is a
-//! **hint** from the structural heuristic of name-only engines (MySQL, MariaDB, SQLite): the
-//! model holds a new object, its pair is also listed in `dropped` and `created`, and the UI may
-//! use the hint only to keep expansion state ([`CatalogDelta::is_hint`]).
+//! **Renames.** An **identity** rename ([`Confidence::is_identity`]) kept the object, its
+//! children, facets and tree state: by server id, or by the folded name of a caseless engine (a
+//! case-only rename on MySQL `lower_case_table_names` 1/2 or SQLite; the merge decided it with
+//! the engine's fold rule, so the delta records it rather than re-deriving it from the keys).
+//! Any other rename is a **hint** from the structural heuristic of name-only engines: the model
+//! holds a new object, its pair is also listed in `dropped` and `created`, and the UI may use the
+//! hint only to keep expansion state ([`CatalogDelta::is_hint`]).
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
@@ -51,25 +53,45 @@ impl ChangedFacets {
     }
 }
 
-/// How sure a rename is, in thousandths: [`Confidence::ONE`] for a server-id rename and for a
-/// hint whose column signatures are identical; a hint from ≥ 90 % similar signatures is below
-/// one (alg/02 HV-INTRO-11 step 6).
+/// How sure a rename is, and what kind it is: [`Confidence::IDENTITY`] for a rename that kept
+/// the object (server id, or a caseless engine's folded name); for a hint, thousandths:
+/// [`Confidence::ONE`] when the column signatures are identical, below one from ≥ 90 % similar
+/// signatures (alg/02 HV-INTRO-11 step 6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Confidence(u16);
+pub struct Confidence {
+    per_mille: u16,
+    identity: bool,
+}
 
 impl Confidence {
-    /// Certain.
-    pub const ONE: Confidence = Confidence(1000);
+    /// A hint with identical column signatures.
+    pub const ONE: Confidence = Confidence {
+        per_mille: 1000,
+        identity: false,
+    };
 
-    /// A confidence of `per_mille` thousandths (saturated at one).
+    /// An identity rename (certain, and the model kept the object).
+    pub const IDENTITY: Confidence = Confidence {
+        per_mille: 1000,
+        identity: true,
+    };
+
+    /// A hint of `per_mille` thousandths (saturated at one).
     pub const fn from_per_mille(per_mille: u16) -> Self {
-        Confidence(if per_mille > 1000 { 1000 } else { per_mille })
+        Confidence {
+            per_mille: if per_mille > 1000 { 1000 } else { per_mille },
+            identity: false,
+        }
     }
 
     /// The confidence in thousandths.
     pub const fn per_mille(self) -> u16 {
-        self.0
+        self.per_mille
+    }
+
+    /// Whether the rename kept the object (not a hint).
+    pub const fn is_identity(self) -> bool {
+        self.identity
     }
 }
 
@@ -110,10 +132,10 @@ impl CatalogDelta {
         self.len() > COARSE_DELTA_OBJECTS
     }
 
-    /// Whether a rename entry is a structural hint (its keys are two objects of the model),
-    /// not a server-id identity.
-    pub fn is_hint(before: &ObjectKey, after: &ObjectKey) -> bool {
-        !before.same_object(after)
+    /// Whether a rename entry is a structural hint (its keys are two objects of the model), not
+    /// an identity rename (by server id, or fold-aware by a caseless engine's name rule).
+    pub fn is_hint(entry: &(ObjectKey, ObjectKey, Confidence)) -> bool {
+        !entry.2.is_identity()
     }
 
     /// The deltas of the namespaces merged for one publish, as one delta: an object dropped from
@@ -235,8 +257,8 @@ pub fn apply_delta(
             return Err(DeltaError::Missing(Box::new(k.clone())));
         }
     }
-    for (before, after, _) in &delta.renamed {
-        if CatalogDelta::is_hint(before, after) || !top(before) {
+    for entry @ (before, after, _) in &delta.renamed {
+        if CatalogDelta::is_hint(entry) || !top(before) {
             continue;
         }
         if !out.remove(before) {

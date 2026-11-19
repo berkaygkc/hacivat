@@ -1,103 +1,155 @@
-//! Properties of the existence-diff merge (HV-INTRO-11; M4 Task 10): the merge is pure and
-//! leaves `prev` untouched; an incremental merge and the merge of a full result built from the
-//! same final state give the same namespace (and both equal that state built directly); the
-//! delta, after a serde round trip, turns the previous top-level keys into the next ones.
+//! Properties of the existence-diff merge (HV-INTRO-11; M4 Task 10, fix round 1 M-5):
+//!
+//! - the merge is pure and leaves `prev` untouched;
+//! - an incremental merge and the merge of a full result of the same final state agree, and
+//!   both equal that state built directly; the delta (after a serde round trip) turns the
+//!   previous top-level keys into the next ones;
+//! - a chain of two incremental passes equals one full pass to the final state;
+//! - with a failed existence set nothing of that kind is deleted, and a pass below the cached
+//!   level deletes no child and keeps the level — while incremental and full still agree.
+//!
+//! The generator covers PostgreSQL (server ids, OID reuse), MySQL under
+//! `lower_case_table_names` 0 and 2 and SQLite (names only), case-only respelling, renames,
+//! failed sets, a lower pass level, and child sets scoped to the re-read objects or
+//! namespace-wide.
 
 use std::sync::Arc;
 
 use hacivat_meta::delta::{CatalogDelta, apply_delta, top_level_keys};
-use hacivat_meta::fixture::{ns_mysql, ns_pg};
-use hacivat_meta::merge::{ChangedObject, ExistSet, Identity, MergePolicy, NamespaceResult, merge};
-use hacivat_meta::name::Name;
-use hacivat_meta::namespace::{Level, NamespaceSnapshot, Obj, Subtree, Watermark};
+use hacivat_meta::merge::{
+    ChangedObject, ExistSet, Identity, MergeOutcome, MergePolicy, NamespaceResult, merge,
+};
+use hacivat_meta::name::{DialectId, FoldRule, IdentCtx, Name, NameClass};
+use hacivat_meta::namespace::{Level, NamespaceSnapshot, NsMeta, Obj, Subtree, Watermark};
 use hacivat_meta::props::{ColumnProps, IndexProps, Props, TableProps, ViewProps};
-use hacivat_meta::{ObjectKey, ObjectKind, ServerId, StateMark};
+use hacivat_meta::snapshot::IntroErrorCode;
+use hacivat_meta::{NsKey, ObjectKey, ObjectKind, ServerId};
+use hacivat_proto::DbmsKind;
 use proptest::prelude::*;
 
 const TYPES: [&str; 8] = [
     "integer", "text", "bigint", "date", "uuid", "jsonb", "boolean", "numeric",
 ];
 
-/// One object's life across the two states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Engine {
+    Pg,
+    MySql0,
+    MySql2,
+    Sqlite,
+}
+
+/// One version of an object.
+#[derive(Debug, Clone, PartialEq)]
+struct Ver {
+    renamed: bool,
+    /// Case-only respelling (`E3` for `e3`).
+    upper: bool,
+    /// PostgreSQL: which OID generation (a new one is a drop + create under one name).
+    generation: u8,
+    cols: Vec<u8>,
+    comment: Option<u8>,
+    /// PostgreSQL tables: an index child.
+    index: bool,
+}
+
+/// One object's life across three states.
 #[derive(Debug, Clone)]
 struct Ent {
-    before: bool,
-    after: bool,
     view: bool,
-    renamed: bool,
-    /// PostgreSQL: dropped and created again under the same name (a new OID).
-    recreated: bool,
-    cols0: Vec<u8>,
-    cols1: Vec<u8>,
-    comment0: Option<u8>,
-    comment1: Option<u8>,
-    /// PostgreSQL tables: an index child before and after.
-    idx0: bool,
-    idx1: bool,
+    vers: [Option<Ver>; 3],
 }
 
 #[derive(Debug, Clone)]
 struct Case {
-    pg: bool,
+    engine: Engine,
     ents: Vec<Ent>,
-    /// Whether the full result also carries existence sets (a full pass may leave them implied).
-    full_with_sets: bool,
+    /// A kind whose existence query fails in every pass.
+    failed: Option<ObjectKind>,
+    /// The pass reads `Names` over a `Structure` cache.
+    names_level: bool,
+    /// Incremental column sets scoped to the re-read objects (else namespace-wide).
+    scoped: bool,
 }
 
-fn cols() -> impl Strategy<Value = Vec<u8>> {
-    prop::sample::subsequence((0u8..8).collect::<Vec<_>>(), 1..5)
+fn ver() -> impl Strategy<Value = Ver> {
+    (
+        prop::bool::weighted(0.25),
+        prop::bool::weighted(0.2),
+        prop::sample::select(vec![0u8, 0, 0, 1, 2]),
+        prop::sample::subsequence((0u8..8).collect::<Vec<_>>(), 1..5),
+        prop::option::of(0u8..3),
+        any::<bool>(),
+    )
+        .prop_map(|(renamed, upper, generation, cols, comment, index)| Ver {
+            renamed,
+            upper,
+            generation,
+            cols,
+            comment,
+            index,
+        })
 }
 
 fn ent() -> impl Strategy<Value = Ent> {
     (
-        (any::<bool>(), any::<bool>(), any::<bool>()),
-        (prop::bool::weighted(0.25), prop::bool::weighted(0.15)),
-        (cols(), cols(), prop::bool::weighted(0.6)),
-        (
-            prop::option::of(0u8..3),
-            prop::option::of(0u8..3),
-            any::<bool>(),
-            any::<bool>(),
-        ),
+        any::<bool>(),
+        [any::<bool>(), any::<bool>(), any::<bool>()],
+        [ver(), ver(), ver()],
+        [prop::bool::weighted(0.5), prop::bool::weighted(0.5)],
     )
-        .prop_map(
-            |(
-                (before, after, view),
-                (renamed, recreated),
-                (cols0, cols1, same),
-                (c0, c1, i0, i1),
-            )| {
-                Ent {
-                    before,
-                    after,
-                    view,
-                    renamed,
-                    recreated,
-                    cols1: if same { cols0.clone() } else { cols1 },
-                    cols0,
-                    comment0: c0,
-                    comment1: c1,
-                    idx0: i0,
-                    idx1: i1,
-                }
-            },
-        )
+        .prop_map(|(view, present, mut vs, same)| {
+            // Often an object does not change between two states.
+            if same[0] {
+                vs[1] = vs[0].clone();
+            }
+            if same[1] {
+                vs[2] = vs[1].clone();
+            }
+            let [v0, v1, v2] = vs;
+            Ent {
+                view,
+                vers: [
+                    present[0].then_some(v0),
+                    present[1].then_some(v1),
+                    present[2].then_some(v2),
+                ],
+            }
+        })
 }
 
 fn merge_case() -> impl Strategy<Value = Case> {
     (
-        any::<bool>(),
-        prop::collection::vec(ent(), 0..24),
+        prop::sample::select(vec![
+            Engine::Pg,
+            Engine::MySql0,
+            Engine::MySql2,
+            Engine::Sqlite,
+        ]),
+        prop::collection::vec(ent(), 0..20),
+        prop::option::weighted(
+            0.3,
+            prop::sample::select(vec![
+                ObjectKind::Table,
+                ObjectKind::View,
+                ObjectKind::Index,
+                ObjectKind::Column,
+            ]),
+        ),
+        prop::bool::weighted(0.2),
         any::<bool>(),
     )
-        .prop_map(|(pg, ents, full_with_sets)| Case {
-            pg,
+        .prop_map(|(engine, ents, failed, names_level, scoped)| Case {
+            engine,
             ents,
-            full_with_sets,
+            failed,
+            names_level,
+            scoped,
         })
 }
 
-/// One entity in one state.
+/// One object in one state.
+#[derive(Debug, Clone, PartialEq)]
 struct Shape {
     kind: ObjectKind,
     name: String,
@@ -108,38 +160,42 @@ struct Shape {
 }
 
 impl Case {
-    fn shape(&self, i: usize, after: bool) -> Option<Shape> {
+    fn pg(&self) -> bool {
+        self.engine == Engine::Pg
+    }
+
+    fn shape(&self, i: usize, state: usize) -> Option<Shape> {
         let e = &self.ents[i];
-        if !(if after { e.after } else { e.before }) {
-            return None;
-        }
+        let v = e.vers[state].as_ref()?;
         let base = 100 + 10 * i as u32;
-        let recreated = after && e.recreated;
-        let sid = self.pg.then_some(base + if recreated { 5 } else { 0 });
-        let has_index = self.pg && !e.view && if after { e.idx1 } else { e.idx0 };
+        let stem = match (v.renamed, v.upper) {
+            (false, false) => "e",
+            (false, true) => "E",
+            (true, false) => "r",
+            (true, true) => "R",
+        };
         Some(Shape {
             kind: if e.view {
                 ObjectKind::View
             } else {
                 ObjectKind::Table
             },
-            name: if after && e.renamed {
-                format!("r{i}")
-            } else {
-                format!("e{i}")
-            },
-            sid,
-            cols: if after {
-                e.cols1.clone()
-            } else {
-                e.cols0.clone()
-            },
-            comment: if after { e.comment1 } else { e.comment0 },
-            index: has_index.then(|| (format!("x{i}"), base + if recreated { 6 } else { 1 })),
+            name: format!("{stem}{i}"),
+            sid: self.pg().then_some(base + u32::from(v.generation)),
+            cols: v.cols.clone(),
+            comment: v.comment,
+            index: (self.pg() && !e.view && v.index)
+                .then(|| (format!("x{i}"), base + 5 + u32::from(v.generation))),
         })
     }
 
-    fn subtree(s: &Shape) -> Subtree {
+    fn shapes(&self, state: usize) -> Vec<Shape> {
+        (0..self.ents.len())
+            .filter_map(|i| self.shape(i, state))
+            .collect()
+    }
+
+    fn object(s: &Shape) -> Obj {
         let comment = s.comment.map(|c| Name::from(format!("note {c}").as_str()));
         let props = match s.kind {
             ObjectKind::View => Props::View(Arc::new(ViewProps {
@@ -151,11 +207,19 @@ impl Case {
                 ..Default::default()
             })),
         };
-        let mut root = Obj::new(s.kind, s.name.as_str()).with_props(props);
-        if let Some(sid) = s.sid {
-            root = root.with_server_id(ServerId::Oid(sid));
+        let o = Obj::new(s.kind, s.name.as_str()).with_props(props);
+        match s.sid {
+            Some(sid) => o.with_server_id(ServerId::Oid(sid)),
+            None => o,
         }
-        let mut t = Subtree::new(root);
+    }
+
+    /// The object with its children (`children = false`: a `Names` read).
+    fn subtree(s: &Shape, children: bool) -> Subtree {
+        let mut t = Subtree::new(Case::object(s));
+        if !children {
+            return t;
+        }
         for (k, &c) in s.cols.iter().enumerate() {
             t.add(
                 t.root(),
@@ -180,94 +244,173 @@ impl Case {
         t
     }
 
-    /// The namespace in one state, built directly.
-    fn ns(&self, after: bool) -> NamespaceSnapshot {
-        let mut b = if self.pg {
-            ns_pg("db", "public")
-        } else {
-            ns_mysql("shop", 0)
+    fn key(&self) -> NsKey {
+        match self.engine {
+            Engine::Pg => NsKey::schema(["db", "public"]),
+            Engine::Sqlite => NsKey::schema(["main"]),
+            Engine::MySql0 | Engine::MySql2 => NsKey::schema(["shop"]),
+        }
+    }
+
+    fn dbms_fold(&self) -> (DbmsKind, FoldRule) {
+        let mysql = |lctn| {
+            let ctx = IdentCtx {
+                lower_case_table_names: lctn,
+                ..IdentCtx::new(DialectId::MySql)
+            };
+            FoldRule::for_names(DialectId::MySql, &ctx, NameClass::Table).expect("pinned")
         };
-        for i in 0..self.ents.len() {
-            if let Some(s) = self.shape(i, after) {
-                b = b.subtree(Case::subtree(&s));
-            }
+        match self.engine {
+            Engine::Pg => (DbmsKind::Postgres, FoldRule::Exact),
+            Engine::Sqlite => (DbmsKind::Sqlite, FoldRule::AsciiCaseless),
+            Engine::MySql0 => (DbmsKind::MySql, mysql(0)),
+            Engine::MySql2 => (DbmsKind::MySql, mysql(2)),
         }
-        b.finish()
     }
 
-    fn sets(&self) -> Vec<(ObjectKind, ExistSet)> {
-        let mut tables = Vec::new();
-        let mut views = Vec::new();
-        let mut indexes = Vec::new();
-        for i in 0..self.ents.len() {
-            let Some(s) = self.shape(i, true) else {
-                continue;
-            };
-            let id = Identity {
-                path: vec![Name::from(s.name.as_str())],
-                server_id: s.sid.map(ServerId::Oid),
-                overload_sig: None,
-                state: StateMark::None,
-            };
-            if let Some((name, sid)) = &s.index {
-                indexes.push(Identity {
-                    path: vec![Name::from(s.name.as_str()), Name::from(name.as_str())],
-                    server_id: Some(ServerId::Oid(*sid)),
-                    overload_sig: None,
-                    state: StateMark::None,
-                });
-            }
-            match s.kind {
-                ObjectKind::View => views.push(id),
-                _ => tables.push(id),
-            }
+    /// The namespace in one state, built directly, at `Structure`.
+    fn ns(&self, state: usize) -> NamespaceSnapshot {
+        let key = self.key();
+        let mut t = Subtree::new(Obj::new(ObjectKind::Schema, key.root_name()));
+        for s in self.shapes(state) {
+            t.graft_under(t.root(), Case::subtree(&s, true));
         }
-        let mut out = vec![
-            (ObjectKind::Table, ExistSet::Ok(tables)),
-            (ObjectKind::View, ExistSet::Ok(views)),
-        ];
-        if self.pg {
-            out.push((ObjectKind::Index, ExistSet::Ok(indexes)));
-        }
-        out
+        let (dbms, fold) = self.dbms_fold();
+        let meta = NsMeta {
+            level: Level::Structure,
+            ..NsMeta::default()
+        };
+        NamespaceSnapshot::build(key, dbms, fold, meta, t).expect("a valid namespace")
     }
 
-    fn result(&self, prev: &NamespaceSnapshot, full: bool) -> NamespaceResult {
+    /// Whether a pass at this case's level sees no change between two versions (so an
+    /// incremental pass need not re-read it). A dropped index is the index set's job.
+    fn same(&self, a: &Shape, b: &Shape) -> bool {
+        let names = a.name == b.name && a.sid == b.sid && a.comment == b.comment;
+        if self.names_level {
+            return names;
+        }
+        names && a.cols == b.cols && (a.index == b.index || b.index.is_none())
+    }
+
+    /// The pass from `from` to `to`, incremental or full.
+    fn result(
+        &self,
+        prev: &NamespaceSnapshot,
+        from: usize,
+        to: usize,
+        full: bool,
+    ) -> NamespaceResult {
         let root = prev.object_key(0).expect("root");
+        let children = !self.names_level;
         let mut changed = Vec::new();
+        let mut reread = Vec::new();
         for i in 0..self.ents.len() {
-            let Some(after) = self.shape(i, true) else {
+            let Some(cur) = self.shape(i, to) else {
                 continue;
             };
-            let same = self.shape(i, false).is_some_and(|before| {
-                before.name == after.name
-                    && before.sid == after.sid
-                    && before.cols == after.cols
-                    && before.comment == after.comment
-                    // An index dropped from an unchanged table is the index existence set's job;
-                    // any other child change re-reads the table (edge 8).
-                    && (before.index == after.index || after.index.is_none())
-            });
+            let same = self.shape(i, from).is_some_and(|old| self.same(&old, &cur));
             if full || !same {
                 changed.push(ChangedObject {
                     parent: root.clone(),
-                    subtree: Case::subtree(&after),
+                    subtree: Case::subtree(&cur, children),
                 });
+                reread.push(cur);
             }
         }
+        let id = |path: Vec<&str>, sid: Option<u32>| {
+            Identity::of(
+                path.into_iter().map(Name::from).collect(),
+                sid.map(ServerId::Oid),
+            )
+        };
+        let all = self.shapes(to);
+        let mut existent: Vec<(ObjectKind, ExistSet)> = vec![
+            (
+                ObjectKind::Table,
+                ExistSet::Ok(
+                    all.iter()
+                        .filter(|s| s.kind == ObjectKind::Table)
+                        .map(|s| id(vec![&s.name], s.sid))
+                        .collect(),
+                ),
+            ),
+            (
+                ObjectKind::View,
+                ExistSet::Ok(
+                    all.iter()
+                        .filter(|s| s.kind == ObjectKind::View)
+                        .map(|s| id(vec![&s.name], s.sid))
+                        .collect(),
+                ),
+            ),
+        ];
+        if children {
+            if self.pg() {
+                existent.push((
+                    ObjectKind::Index,
+                    ExistSet::Ok(
+                        all.iter()
+                            .filter_map(|s| {
+                                s.index
+                                    .as_ref()
+                                    .map(|(x, sid)| id(vec![&s.name, x], Some(*sid)))
+                            })
+                            .collect(),
+                    ),
+                ));
+            }
+            let cols = |shapes: &[Shape]| -> Vec<Identity> {
+                shapes
+                    .iter()
+                    .flat_map(|s| {
+                        s.cols
+                            .iter()
+                            .map(|c| id(vec![&s.name, &format!("c{c}")], None))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            };
+            // A full pass's column set covers the objects it re-read (all of them); it claims
+            // the whole namespace only when no section failed (a pass whose table query failed
+            // cannot know the columns of tables it could not list).
+            existent.push((
+                ObjectKind::Column,
+                if self.scoped || self.failed.is_some() {
+                    ExistSet::Scoped {
+                        scope: reread
+                            .iter()
+                            .map(|s| vec![Name::from(s.name.as_str())])
+                            .collect(),
+                        ids: cols(&reread),
+                    }
+                } else {
+                    ExistSet::Ok(cols(&all))
+                },
+            ));
+        }
+        if let Some(k) = self.failed {
+            existent.retain(|(kind, _)| *kind != k);
+            existent.push((k, ExistSet::Failed(IntroErrorCode::PermissionDenied)));
+        }
         NamespaceResult {
-            existent: if full && !self.full_with_sets {
-                Default::default()
-            } else {
-                self.sets().into_iter().collect()
-            },
+            existent: existent.into_iter().collect(),
             changed,
             categories_to_reload: Default::default(),
             new_watermark: Watermark::None,
             full,
-            level: Level::Structure,
+            level: if self.names_level {
+                Level::Names
+            } else {
+                Level::Structure
+            },
             read_at_ms: 1,
         }
+    }
+
+    /// Whether the final state is what every pass should reproduce exactly.
+    fn clean(&self) -> bool {
+        self.failed.is_none() && !self.names_level
     }
 }
 
@@ -302,7 +445,7 @@ fn canon(ns: &NamespaceSnapshot) -> Canon {
             )
         })
         .collect();
-    v.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    v.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
     v
 }
 
@@ -326,17 +469,21 @@ fn round_trip(d: &CatalogDelta) -> CatalogDelta {
     d.clone()
 }
 
+fn run(prev: &NamespaceSnapshot, r: NamespaceResult) -> MergeOutcome {
+    merge(Some(prev), r, &MergePolicy::default()).expect("merge")
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     /// The merge is a pure function of its inputs: two runs agree, and `prev` is unchanged.
     #[test]
     fn merge_is_pure_and_prev_untouched(case in merge_case()) {
-        let prev = case.ns(false);
+        let prev = case.ns(0);
         let before = prev.objs().to_vec();
-        let r = case.result(&prev, false);
-        let a = merge(Some(&prev), r.clone(), &MergePolicy::default()).expect("merge");
-        let b = merge(Some(&prev), r, &MergePolicy::default()).expect("merge");
+        let r = case.result(&prev, 0, 1, false);
+        let a = run(&prev, r.clone());
+        let b = run(&prev, r);
         prop_assert_eq!(prev.objs(), &before[..]);
         prop_assert_eq!(a.next().objs(), b.next().objs());
         prop_assert_eq!(a.delta(), b.delta());
@@ -345,23 +492,34 @@ proptest! {
     }
 
     /// An incremental merge equals the merge of a full result built from the same final state,
-    /// and both equal that state; the delta (after a serde round trip) maps the previous
-    /// top-level keys to the next ones, and both paths name the same top-level changes.
+    /// and (for a clean pass) both equal that state; the delta maps the previous top-level keys
+    /// to the next ones; a failed kind loses nothing; a lower pass deletes no child.
     #[test]
     fn merge_then_full_equals_full(case in merge_case()) {
-        let prev = case.ns(false);
-        let expected = canon(&case.ns(true));
-        let inc = merge(Some(&prev), case.result(&prev, false), &MergePolicy::default())
-            .expect("incremental merge");
-        let full = merge(Some(&prev), case.result(&prev, true), &MergePolicy::default())
-            .expect("full merge");
-        prop_assert_eq!(&canon(inc.next()), &expected);
-        prop_assert_eq!(&canon(full.next()), &expected);
+        let prev = case.ns(0);
+        let inc = run(&prev, case.result(&prev, 0, 1, false));
+        let full = run(&prev, case.result(&prev, 0, 1, true));
+        prop_assert_eq!(&canon(inc.next()), &canon(full.next()));
+        if case.clean() {
+            prop_assert_eq!(&canon(inc.next()), &canon(&case.ns(1)));
+        }
         for o in [&inc, &full] {
             let keys = apply_delta(prev.key(), &top_level_keys(&prev), &round_trip(o.delta()))
                 .expect("the delta applies");
             prop_assert_eq!(keys, top_level_keys(o.next()));
             prop_assert!(o.report().fragments.is_empty(), "{:?}", o.report().fragments);
+            if let Some(k) = case.failed {
+                prop_assert!(o.delta().dropped.iter().all(|d| d.kind != k));
+                prop_assert!(o.report().stale_kinds.contains_key(&k));
+            }
+            if case.names_level {
+                prop_assert_eq!(o.next().meta().level, Level::Structure);
+                prop_assert!(o
+                    .delta()
+                    .dropped
+                    .iter()
+                    .all(|d| d.kind != ObjectKind::Column && d.kind != ObjectKind::Index));
+            }
         }
         let depth = prev.key().path.len() + 1;
         prop_assert_eq!(
@@ -373,5 +531,18 @@ proptest! {
             top_keys(&full.delta().dropped, depth)
         );
         prop_assert_eq!(&inc.delta().renamed, &full.delta().renamed);
+    }
+
+    /// Two incremental passes (S0 → S1 → S2) equal one full pass S0 → S2, and the final state.
+    #[test]
+    fn incremental_chain_equals_one_full_pass(case in merge_case()) {
+        let case = Case { failed: None, names_level: false, ..case };
+        let s0 = case.ns(0);
+        let s1 = run(&s0, case.result(&s0, 0, 1, false)).into_parts().0;
+        let s2 = run(&s1, case.result(&s1, 1, 2, false)).into_parts().0;
+        let direct = run(&s0, case.result(&s0, 0, 2, true)).into_parts().0;
+        let expected = canon(&case.ns(2));
+        prop_assert_eq!(&canon(&s2), &expected);
+        prop_assert_eq!(&canon(&direct), &expected);
     }
 }
