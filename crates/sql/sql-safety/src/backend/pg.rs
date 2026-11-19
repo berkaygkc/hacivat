@@ -700,6 +700,8 @@ fn unknown_report(range: TextRange, codes: &[ReasonCode]) -> StmtReport {
         destructive: Vec::new(),
         confidence: Confidence::Conservative,
         set_targets: Vec::new(),
+        // ## m4-t01c-core: `Other` with no flags, so none (the stub's scope).
+        ddl: crate::ddl_effects::stub_effects(StmtKind::Other, RiskFlags::empty()),
     }
 }
 
@@ -940,9 +942,10 @@ impl<'a, 's> Classifier<'a, 's> {
         dedup(&mut self.touched.reads);
         dedup(&mut self.touched.writes);
         dedup(&mut self.touched.calls);
+        let kind = self.kind.unwrap_or(StmtKind::Other);
         StmtReport {
             range: self.range,
-            kind: self.kind.unwrap_or(StmtKind::Other),
+            kind,
             effects: self.effects,
             flags: self.flags,
             class: class_of(self.effects),
@@ -955,6 +958,8 @@ impl<'a, 's> Classifier<'a, 's> {
                 Confidence::Exact
             },
             set_targets: self.set_targets,
+            // ## m4-t01c-core (fail-closed stub until Task 6)
+            ddl: crate::ddl_effects::stub_effects(kind, self.flags),
         }
     }
 

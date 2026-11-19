@@ -1061,6 +1061,8 @@ mod tests {
                     value: v.map(Arc::from),
                 })
                 .collect(),
+            // ## m4-t01c-core
+            ddl: Vec::new(),
         };
         let items = vec![s];
         let (request_class, request_effects, flags) = merge(&items);

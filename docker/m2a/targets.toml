@@ -188,3 +188,17 @@ port = 33094
 internal_port = 3306
 tls_default = "self_signed"
 sets = ["full"]
+
+# ## m4-t01c-fixtures
+# pg17 past 2^31 transaction ids (R-M4-43, pg-wrap/): the wraparound fixture of the
+# incremental-introspection tests. Full set only; built and started by controller step C-6.
+
+[[target]]
+id = "pg17wrap"
+service = "pg17wrap"
+engine = "postgres"
+major = "17"
+port = 54357
+internal_port = 5432
+tls_default = "none"
+sets = ["full"]

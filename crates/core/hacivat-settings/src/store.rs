@@ -14,6 +14,8 @@ use crate::schema::{
 };
 // ## m3b-t01c-core-seams
 use crate::schema::{ExecSettings, HistorySettings, ValueLimit};
+// ## m4-t01c-core
+use crate::schema::{CacheMb, MetadataSettings, RefreshAfterDdl, ValidateInterval};
 
 /// A problem found while loading; Task 13 shows each code as a toast.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +120,22 @@ pub fn load(path: &Path) -> LoadOutcome {
     }
     if let Some(gr) = section(root, "grid", d) {
         s.grid.raw_display = read_key(gr, "grid", "raw_display", d);
+    }
+    // ## m4-t01c-core: a missing table means its defaults; a bad value is its default, with a
+    // diagnostic.
+    if let Some(md) = section(root, "metadata", d) {
+        let def = MetadataSettings::default();
+        s.metadata.refresh_after_ddl = read_key(md, "metadata", "refresh_after_ddl", d);
+        s.metadata.validate_interval_min = read_key(md, "metadata", "validate_interval_min", d);
+        s.metadata.cache_mb_per_profile = read_key_or(
+            md,
+            "metadata",
+            "cache_mb_per_profile",
+            def.cache_mb_per_profile,
+            d,
+        );
+        s.metadata.cache_mb_total =
+            read_key_or(md, "metadata", "cache_mb_total", def.cache_mb_total, d);
     }
     out
 }
@@ -230,6 +248,36 @@ pub fn save_changes(path: &Path, new: &Settings) -> io::Result<()> {
         &HistorySettings::default().enabled,
     );
     write_key(&mut doc, "grid", "raw_display", &new.grid.raw_display);
+    // ## m4-t01c-core: each key written only when it changed; a key at its default is never
+    // added.
+    let def = MetadataSettings::default();
+    let md = &new.metadata;
+    write_key(
+        &mut doc,
+        "metadata",
+        "refresh_after_ddl",
+        &md.refresh_after_ddl,
+    );
+    write_key(
+        &mut doc,
+        "metadata",
+        "validate_interval_min",
+        &md.validate_interval_min,
+    );
+    write_key_or(
+        &mut doc,
+        "metadata",
+        "cache_mb_per_profile",
+        &md.cache_mb_per_profile,
+        &def.cache_mb_per_profile,
+    );
+    write_key_or(
+        &mut doc,
+        "metadata",
+        "cache_mb_total",
+        &md.cache_mb_total,
+        &def.cache_mb_total,
+    );
     fsio::atomic_write(path, doc.to_string().as_bytes())
 }
 
@@ -512,6 +560,76 @@ impl Pref for FindTolerancePref {
             Self::Off => "off",
         }
         .to_owned()
+    }
+}
+
+// ## m4-t01c-core
+/// `metadata.refresh_after_ddl`: `"always"`, `"ask"` or `"never"`.
+impl Pref for RefreshAfterDdl {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "always" => Some(Self::Always),
+            "ask" => Some(Self::Ask),
+            "never" => Some(Self::Never),
+            _ => None,
+        }
+    }
+    fn as_text(&self) -> String {
+        match self {
+            Self::Always => "always",
+            Self::Ask => "ask",
+            Self::Never => "never",
+        }
+        .to_owned()
+    }
+}
+
+/// `metadata.validate_interval_min`: the string `"auto"` or a TOML integer `0`, `5`, `10`,
+/// `30`.
+impl Pref for ValidateInterval {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+    fn as_text(&self) -> String {
+        match self {
+            Self::Auto => "auto".to_owned(),
+            Self::Off => "0".to_owned(),
+            Self::Minutes(m) => m.get().to_string(),
+        }
+    }
+    fn from_item(item: &Item) -> Option<Self> {
+        match item.as_integer() {
+            Some(n) => ValidateInterval::from_minutes(n),
+            None => item.as_str().and_then(Self::parse),
+        }
+    }
+    fn to_value(&self) -> Value {
+        match self {
+            Self::Auto => Value::from("auto"),
+            Self::Off => Value::from(0_i64),
+            Self::Minutes(m) => Value::from(i64::from(m.get())),
+        }
+    }
+}
+
+/// `metadata.cache_mb_*`: a TOML integer in `CacheMb`'s range.
+impl Pref for CacheMb {
+    fn parse(text: &str) -> Option<Self> {
+        text.parse::<u32>().ok().and_then(CacheMb::new)
+    }
+    fn as_text(&self) -> String {
+        self.get().to_string()
+    }
+    fn from_item(item: &Item) -> Option<Self> {
+        item.as_integer()
+            .and_then(|v| u32::try_from(v).ok())
+            .and_then(CacheMb::new)
+    }
+    fn to_value(&self) -> Value {
+        Value::from(i64::from(self.get()))
     }
 }
 
@@ -845,5 +963,68 @@ mod tests {
         assert!(o.settings.exec.confirm_unsafe_where);
         assert!(!o.settings.exec.error_policy_ask);
         assert_eq!(o.diags[0].key, "exec.confirm_unsafe_where");
+    }
+
+    // ## m4-t01c-core
+    #[test]
+    fn metadata_keys_load_save_and_validate() {
+        use crate::schema::ValidateMinutes;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        // Missing table: the defaults; saving the defaults adds no table.
+        save_changes(&path, &Settings::default()).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("metadata"));
+        let mut s = Settings::default();
+        s.metadata.refresh_after_ddl = RefreshAfterDdl::Ask;
+        s.metadata.validate_interval_min = ValidateInterval::Minutes(ValidateMinutes::Thirty);
+        s.metadata.cache_mb_per_profile = CacheMb::new(256).unwrap();
+        s.metadata.cache_mb_total = CacheMb::new(1024).unwrap();
+        save_changes(&path, &s).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for line in [
+            "refresh_after_ddl = \"ask\"",
+            "validate_interval_min = 30",
+            "cache_mb_per_profile = 256",
+            "cache_mb_total = 1024",
+        ] {
+            assert!(text.contains(line), "{line} in:\n{text}");
+        }
+        let o = load(&path);
+        assert!(o.diags.is_empty(), "{:?}", o.diags);
+        assert_eq!(o.settings.metadata, s.metadata);
+        // `0` is off, `"auto"` is auto; anything else is the default with a diagnostic.
+        std::fs::write(
+            &path,
+            "[metadata]\nvalidate_interval_min = 0\nrefresh_after_ddl = \"sometimes\"\n\
+             cache_mb_total = 0\ncache_mb_per_profile = \"512\"\n",
+        )
+        .unwrap();
+        let o = load(&path);
+        assert_eq!(
+            o.settings.metadata.validate_interval_min,
+            ValidateInterval::Off
+        );
+        assert_eq!(
+            o.settings.metadata.refresh_after_ddl,
+            RefreshAfterDdl::Always
+        );
+        assert_eq!(o.settings.metadata.cache_mb_total.get(), 4096);
+        assert_eq!(o.settings.metadata.cache_mb_per_profile.get(), 512);
+        let keys: Vec<&str> = o.diags.iter().map(|d| d.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "metadata.refresh_after_ddl",
+                "metadata.cache_mb_per_profile",
+                "metadata.cache_mb_total"
+            ]
+        );
+        std::fs::write(&path, "[metadata]\nvalidate_interval_min = \"auto\"\n").unwrap();
+        assert_eq!(
+            load(&path).settings.metadata.validate_interval_min,
+            ValidateInterval::Auto
+        );
+        std::fs::write(&path, "[metadata]\nvalidate_interval_min = 15\n").unwrap();
+        assert_eq!(load(&path).diags[0].key, "metadata.validate_interval_min");
     }
 }

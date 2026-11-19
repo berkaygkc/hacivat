@@ -2692,3 +2692,50 @@ This round simplifies production on purpose; it replaces the round-1 bullets on 
   now ask for the name: `WHERE 1 = 0`, `NULL`, `NULL = NULL`, `id = id`, `now() < …`, `EXISTS
   (SELECT 1 FROM u WHERE u.a = 1)`.
 - **To the PO (B-M3):** `TRUNCATE` and `DROP TABLE` keep no typed name, as R-M3-55 says.
+
+## m4-t01c — metadata session seams
+
+M4 Task 1c (W0). Seams only; every body is a fail-closed stub until its filling task.
+
+- **`hacivat_session::meta` (bodies Task 5).** `MetaConnSpec`, `SessionManager::meta_conn`,
+  `MetaConn` (`dbms`, `server`, `begin_snapshot`, `join`, `debug_xid_assigned` under
+  `test-support`), `SnapshotTxn` (`rows`, `commit`), `Rows` and `MetaError`. Acquisition and
+  `MetaConn::join` answer `MetaError::Unavailable` and open nothing, so a namespace stays
+  `Failed` ("Not loaded"), never empty-and-loaded (F31).
+- **`MetaQuery` is the only door (R-M4-7).** Its fields are private and `MetaQuery::new`
+  (`#[doc(hidden)]`) is its only constructor: no `Default`, `From`, `Deserialize` or builder, so a
+  struct literal cannot bypass check-deps `MetaQueryOnlyFromPacks`. A `compile_fail` doctest
+  (E0451) pins it. A `joinable` flag travels with the text, for R-M4-29's joined connections.
+- **`SessionEvent::TxEnded { outcome: TxOutcome }` was added.** `TxChanged(TxState)` cannot
+  express how a transaction ended: its `status` goes `InTx` → `Idle` after both `COMMIT` and
+  `ROLLBACK`, stays `InTx` across `ROLLBACK TO SAVEPOINT`, and `TxState` names no savepoint.
+  Refresh after DDL (R-M4-42) needs all three (`Committed`, `RolledBack`, `RolledBackTo(name)`).
+  No session emits it until Task 21; every existing match on `SessionEvent` has a wildcard arm.
+- **`Profile.catalog_sensitive` (R-M4-15)** is a `connections.toml` key left out at `false`, so
+  M2a, M2b and M3 files round-trip byte for byte (P-M3b-10); a non-boolean value makes the entry
+  invalid (kept on disk, shown), like every M3b key.
+- **`SecretSlot::CatalogKey`** (`catalog-key`) holds the profile's 32-byte catalog data key
+  (Task 11 creates it). It is one of `backend_slots`, so deleting a profile removes it from the
+  keyring.
+- **Per-profile data (`hacivat_settings::profile_data`).** The only reader and writer of
+  `profiles/<uuid>.toml`: one top-level table per owner (`[metadata]`: M4). A save re-reads the
+  file under a process-wide lock, replaces only its own table and writes atomically with mode
+  `0600`; every other byte stays. A file that is not TOML is never overwritten, and only a
+  canonical UUID names a file.
+- **Fixture logins (R-M4-43, carry R-C1-1).** In `docker/m2a/init/mysql.sql`, from the MySQL
+  8.0/8.4 and MariaDB manuals:
+  - `hv_catalog` reads the system schemas (`SELECT` on `mysql.*`, `performance_schema.*`;
+    `SELECT, SHOW VIEW, EXECUTE` on `sys.*`) and holds `EXECUTE` on the empty database
+    `hv_catalog_probe`, its probe's default database. An unqualified name that is not a built-in
+    names a stored function of the default database, and the server checks `EXECUTE` before it
+    looks the function up. Without the privilege a missing function answered 1370 (C-1, run
+    44505051940), indistinguishable from a present one; with it, 1305. `sys` is not used as the
+    probe's database: its stored functions (`format_bytes`, `ps_thread_id`, ...) carry names that
+    are built-ins on some servers only, so they would read as built-ins where they are not.
+  - `hv_fixture` holds `CREATE USER` (global; it cannot be limited to a name pattern), `ALL ...
+    WITH GRANT OPTION` on `hvm4\_%` databases only (a grantor must hold what it grants), and the
+    global-variable privilege: `SYSTEM_VARIABLES_ADMIN` on MySQL, `SUPER` on MariaDB, which has
+    no narrower one. The grant is chosen by `VERSION()` and run through `PREPARE`, since neither
+    server parses the other's privilege name.
+  - Tests: `crates/core/hacivat-driver-mysql/tests/docker_m4_fixtures.rs` (CI's fresh stack;
+    locally after C-2).

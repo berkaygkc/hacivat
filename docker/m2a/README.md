@@ -22,6 +22,7 @@ every container is named `m2a-<id>`. Every port binds to `127.0.0.1` only.
 | `sshd-a` | Alpine OpenSSH bastion (`sshd/`), networks `default` + `ssh-inner` | 2222 | n/a | pr, full |
 | `sshd-b` | the same image, **no published port**: reached only through `sshd-a` | none | n/a | pr, full |
 | `mysql84-x509` | `mysql:8.4`, `ssl_ca` = a generated test CA, `hv_x509 REQUIRE X509` (`mysql-x509/`) | 33094 | self_signed | full |
+| `pg17wrap` | `postgres:17` whose cluster jumps past 2^31 transaction ids at first start (`pg-wrap/`; m4-t01c) | 54357 | none | full |
 
 `ssh-client-keys` is a helper service (no target): it writes the client key pairs once and
 stays up so the bastions can wait for it. `mysql-x509-certs` is another (m2b-fix-f2, T13
@@ -56,6 +57,10 @@ The test credentials are throwaway values. Never copy them into a non-test file.
   keys are 0644 so the Linux CI runner user can read them.
 - On MySQL and MariaDB only:
   - `hv_locked`, an account created with `ACCOUNT LOCK`;
+  - (m4-t01c, R-M4-43) `hv_test` owns every `hvm4_*` database; `hv_catalog` reads the system
+    schemas and holds EXECUTE on the empty `hv_catalog_probe` only; `hv_fixture` (test set-up
+    only) may `SET GLOBAL time_zone` and manage `hvm4_*` accounts. `mysql80`, `mysql84` and
+    `mysql84-x509` run with `--log-bin-trust-function-creators=1`;
 - `mysql84`'s auto-generated CA certificate is copied to
   `<main checkout>/target/docker/mysql84-ca.pem`. Tests reach it only through
   `hacivat_testkit::artifact("mysql84-ca.pem")`.

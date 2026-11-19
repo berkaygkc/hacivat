@@ -312,6 +312,25 @@ pub enum SessionEvent {
         req: u64,
         server: Option<ServerMessage>,
     },
+    // ## m4-t01c-core (named): how a transaction ended, for refresh after DDL (HV-INTRO-12,
+    // R-M4-42: pending targets apply on COMMIT, are dropped on ROLLBACK, and a ROLLBACK TO drops
+    // those after the savepoint). `TxChanged(TxState)` cannot say it: its `status` reads
+    // `InTx` → `Idle` after both COMMIT and ROLLBACK, and stays `InTx` across `ROLLBACK TO
+    // SAVEPOINT`, and `TxState` names no savepoint. No session emits it until Task 21.
+    TxEnded {
+        outcome: TxOutcome,
+    },
+}
+
+// ## m4-t01c-core
+/// How a transaction (or part of one) ended ([`SessionEvent::TxEnded`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TxOutcome {
+    Committed,
+    RolledBack,
+    /// `ROLLBACK TO SAVEPOINT <name>`: the transaction stays open; what ran after the
+    /// savepoint is undone. The name exactly as the server knows it.
+    RolledBackTo(Arc<str>),
 }
 
 /// What a handle sends its actor.

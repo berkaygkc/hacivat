@@ -13,6 +13,8 @@
 
 pub mod budget;
 pub mod manager;
+// ## m4-t01c-core: metadata connections (fail-closed stubs; bodies Task 5).
+pub mod meta;
 pub mod pipeline;
 pub mod profile;
 pub mod registry;

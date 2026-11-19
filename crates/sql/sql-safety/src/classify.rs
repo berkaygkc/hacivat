@@ -511,6 +511,9 @@ fn union_readings(mut a: SafetyReport, b: SafetyReport) -> SafetyReport {
         extend_unique(&mut x.touched.writes, y.touched.writes);
         extend_unique(&mut x.touched.calls, y.touched.calls);
         extend_unique(&mut x.set_targets, y.set_targets);
+        // ## m4-t01c-core (named exception): the union of both readings' catalog effects, so a
+        // reading's DDL is never lost to the other's kind (refresh more, never less).
+        extend_unique(&mut x.ddl, y.ddl);
         x.class = class_of(x.effects);
     }
     let (class, effects, flags) = merge(&a.items);
@@ -1357,6 +1360,8 @@ mod tests {
             destructive: Vec::new(),
             confidence: Confidence::Exact,
             set_targets: Vec::new(),
+            // ## m4-t01c-core
+            ddl: Vec::new(),
         }
     }
 

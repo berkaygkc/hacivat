@@ -96,6 +96,8 @@ pub fn stmt_full(
             .collect(),
         confidence: Confidence::Exact,
         set_targets: Vec::new(),
+        // ## m4-t01c-core
+        ddl: Vec::new(),
     }
 }
 

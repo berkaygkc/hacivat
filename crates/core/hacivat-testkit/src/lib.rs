@@ -21,6 +21,14 @@ const HOST: &str = "127.0.0.1";
 const USER: &str = "hv_test";
 const PASSWORD: &str = "hv_test_pw";
 const DATABASE: &str = "hv_test";
+// ## m4-t01c-fixtures (named): the M4 MySQL/MariaDB accounts of `docker/m2a/init/mysql.sql`
+// (R-M4-43), with the same throwaway password; reached only through
+// [`DockerTarget::as_fixture`] and [`DockerTarget::as_catalog`].
+const FIXTURE_USER: &str = "hv_fixture";
+const CATALOG_USER: &str = "hv_catalog";
+/// The empty database where `hv_catalog` holds EXECUTE only: the default database of the
+/// built-in-function probe (carry R-C1-1).
+pub const CATALOG_PROBE_DATABASE: &str = "hv_catalog_probe";
 
 /// How a target's server is set up for TLS (R17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -176,6 +184,35 @@ pub fn targets(engine: Option<DbmsKind>) -> Vec<DockerTarget> {
 /// The target `id`, when it is in the `HACIVAT_DOCKER_SET` set (see [`targets`]).
 pub fn target(id: &str) -> Option<DockerTarget> {
     targets(None).into_iter().find(|t| t.id == id)
+}
+
+// ## m4-t01c-fixtures
+
+impl DockerTarget {
+    /// This MySQL or MariaDB target signed in as `hv_fixture`, the fixture-only account: test
+    /// set-up code may run `SET GLOBAL time_zone` and create, grant to, revoke from and drop
+    /// `hvm4_*` accounts with it (R-M4-43). Product code never uses it (this crate is only
+    /// ever a dev-dependency). `None` for another engine, which has no such account.
+    pub fn as_fixture(&self) -> Option<DockerTarget> {
+        self.mysql_family().then(|| DockerTarget {
+            user: FIXTURE_USER.to_string(),
+            ..self.clone()
+        })
+    }
+
+    /// This MySQL or MariaDB target signed in as `hv_catalog`, the system-catalog reader,
+    /// on [`CATALOG_PROBE_DATABASE`]. `None` for another engine.
+    pub fn as_catalog(&self) -> Option<DockerTarget> {
+        self.mysql_family().then(|| DockerTarget {
+            user: CATALOG_USER.to_string(),
+            database: CATALOG_PROBE_DATABASE.to_string(),
+            ..self.clone()
+        })
+    }
+
+    fn mysql_family(&self) -> bool {
+        matches!(self.engine, DbmsKind::MySql | DbmsKind::MariaDb)
+    }
 }
 
 // ## m2b-t01-interfaces

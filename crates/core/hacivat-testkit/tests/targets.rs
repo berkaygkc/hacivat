@@ -187,7 +187,8 @@ fn full_set_is_every_target() {
     sorted.sort();
     assert_eq!(ids_in_set("full"), sorted);
     // ## m2b-fix-f2-x509: mysql84-x509 is the fifteenth.
-    assert_eq!(all.len(), 15);
+    // ## m4-t01c-fixtures (named exception): pg17wrap is the sixteenth.
+    assert_eq!(all.len(), 16);
 }
 
 #[test]
@@ -203,7 +204,8 @@ fn set_filter_and_engine_filter_combine() {
         .collect();
     assert_eq!(full_maria, ["mariadb106", "mariadb1011", "mariadb114"]);
     // No set selected: every target.
-    assert_eq!(targets_in_set(None, None).len(), 15);
+    // ## m4-t01c-fixtures (named exception): 16 with pg17wrap.
+    assert_eq!(targets_in_set(None, None).len(), 16);
     assert!(targets_in_set(Some("nightly"), None).is_empty());
 }
 
@@ -248,4 +250,36 @@ fn artifact_is_under_the_artifacts_dir() {
 #[should_panic(expected = "HACIVAT_DOCKER_ARTIFACTS")]
 fn artifact_without_the_dir_panics_clearly() {
     let _ = artifact_in(None, "mysql84-ca.pem");
+}
+
+// ## m4-t01c-fixtures
+#[test]
+fn m4_logins_are_mysql_family_only() {
+    for t in all_targets_unfiltered() {
+        let family = matches!(t.engine, My | Maria);
+        assert_eq!(t.as_fixture().is_some(), family, "{}", t.id);
+        assert_eq!(t.as_catalog().is_some(), family, "{}", t.id);
+        if let Some(f) = t.as_fixture() {
+            assert_eq!(
+                (f.user.as_str(), f.database.as_str()),
+                ("hv_fixture", "hv_test")
+            );
+            assert_eq!((f.port, &f.password), (t.port, &t.password));
+        }
+        if let Some(c) = t.as_catalog() {
+            assert_eq!(
+                (c.user.as_str(), c.database.as_str()),
+                ("hv_catalog", hacivat_testkit::CATALOG_PROBE_DATABASE)
+            );
+        }
+    }
+    let wrap = all_targets_unfiltered()
+        .into_iter()
+        .find(|t| t.id == "pg17wrap")
+        .expect("pg17wrap");
+    assert_eq!(
+        (wrap.engine, wrap.major.as_str(), wrap.port),
+        (Pg, "17", 54357)
+    );
+    assert_eq!(wrap.sets, ["full"]);
 }

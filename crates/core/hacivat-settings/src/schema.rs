@@ -4,7 +4,9 @@
 //! `ui.text_rendering`, `keymap.preset`; since M3a (Task 1b, R-M3-44) `editor.tab_size`,
 //! `editor.insert_spaces`, `editor.copy_line_without_selection`, `editor.caret_blink`; since M3b
 //! (Task 1c, P-M3b-9) `exec.confirm_unsafe_where`, `exec.error_policy_ask`,
-//! `results.max_value_bytes`, `history.enabled`, `grid.raw_display`. Values: `"system"`,
+//! `results.max_value_bytes`, `history.enabled`, `grid.raw_display`; since M4 (Task 1c)
+//! `metadata.refresh_after_ddl`, `metadata.validate_interval_min`,
+//! `metadata.cache_mb_per_profile`, `metadata.cache_mb_total`. Values: `"system"`,
 //! `"dark"`, `"light"`, `"crisp"`, `"standard"`, `"hacivat"`, `"datagrip"`, or a BCP-47 tag or IANA zone. Reading and writing
 //! (with per-key validation) land in Task 7.
 
@@ -29,6 +31,9 @@ pub struct Settings {
     pub history: HistorySettings,
     /// `[grid]`.
     pub grid: GridSettings,
+    // ## m4-t01c-core: hand-loaded like `[exec]`; Settings-UI rows in Task 27.
+    /// `[metadata]`.
+    pub metadata: MetadataSettings,
 }
 
 impl Default for Settings {
@@ -43,6 +48,8 @@ impl Default for Settings {
             results: ResultsSettings::default(),
             history: HistorySettings::default(),
             grid: GridSettings::default(),
+            // ## m4-t01c-core
+            metadata: MetadataSettings::default(),
         }
     }
 }
@@ -269,6 +276,116 @@ pub struct GridSettings {
     pub raw_display: bool,
 }
 
+// ## m4-t01c-core
+
+/// `metadata.refresh_after_ddl` (HV-INTRO-12): what happens after a script the user runs
+/// changed the catalog. `"always"` (default, R-M4-20 / PO-Q6), `"ask"` or `"never"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RefreshAfterDdl {
+    #[default]
+    Always,
+    Ask,
+    Never,
+}
+
+/// `metadata.validate_interval_min` (HV-INTRO-15): the background check of loaded namespaces.
+/// `"auto"` (default, R-M4-20: every 10 minutes for profiles tagged `local` or `dev`, off
+/// otherwise), or a TOML integer `0` (off), `5`, `10` or `30` minutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ValidateInterval {
+    #[default]
+    Auto,
+    Off,
+    Minutes(ValidateMinutes),
+}
+
+/// The intervals the setting offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ValidateMinutes {
+    Five,
+    Ten,
+    Thirty,
+}
+
+impl ValidateMinutes {
+    pub fn get(self) -> u32 {
+        match self {
+            Self::Five => 5,
+            Self::Ten => 10,
+            Self::Thirty => 30,
+        }
+    }
+}
+
+impl ValidateInterval {
+    /// The interval for `n` minutes: `0` is off; `5`, `10`, `30`; anything else is `None`.
+    pub fn from_minutes(n: i64) -> Option<Self> {
+        match n {
+            0 => Some(Self::Off),
+            5 => Some(Self::Minutes(ValidateMinutes::Five)),
+            10 => Some(Self::Minutes(ValidateMinutes::Ten)),
+            30 => Some(Self::Minutes(ValidateMinutes::Thirty)),
+            _ => None,
+        }
+    }
+}
+
+/// A cache size in MiB (`metadata.cache_mb_per_profile`, `metadata.cache_mb_total`): a TOML
+/// integer from 1 to 1,048,576 (1 TiB).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CacheMb(u32);
+
+impl CacheMb {
+    pub const MIN: u32 = 1;
+    pub const MAX: u32 = 1 << 20;
+
+    /// `n` MiB when it is in range.
+    pub fn new(n: u32) -> Option<Self> {
+        (Self::MIN..=Self::MAX).contains(&n).then_some(Self(n))
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// The `[metadata]` table (R-M4-20, R-M4-25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MetadataSettings {
+    /// `metadata.refresh_after_ddl`.
+    pub refresh_after_ddl: RefreshAfterDdl,
+    /// `metadata.validate_interval_min`.
+    pub validate_interval_min: ValidateInterval,
+    /// `metadata.cache_mb_per_profile` (default 512).
+    pub cache_mb_per_profile: CacheMb,
+    /// `metadata.cache_mb_total` (default 4096).
+    pub cache_mb_total: CacheMb,
+}
+
+/// The per-profile default (512 MiB). `metadata.cache_mb_total` has its own (4096 MiB): its
+/// readers and writers pass that one explicitly.
+impl Default for CacheMb {
+    fn default() -> Self {
+        Self(MetadataSettings::DEFAULT_CACHE_MB_PER_PROFILE)
+    }
+}
+
+impl MetadataSettings {
+    pub const DEFAULT_CACHE_MB_PER_PROFILE: u32 = 512;
+    pub const DEFAULT_CACHE_MB_TOTAL: u32 = 4096;
+}
+
+impl Default for MetadataSettings {
+    fn default() -> Self {
+        Self {
+            refresh_after_ddl: RefreshAfterDdl::default(),
+            validate_interval_min: ValidateInterval::default(),
+            cache_mb_per_profile: CacheMb(Self::DEFAULT_CACHE_MB_PER_PROFILE),
+            cache_mb_total: CacheMb(Self::DEFAULT_CACHE_MB_TOTAL),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +422,26 @@ mod tests {
         assert_eq!(TabSize::new(0), None);
         assert_eq!(TabSize::new(17), None);
         assert_eq!(TabSize::new(16).map(TabSize::get), Some(16));
+    }
+
+    // ## m4-t01c-core
+    #[test]
+    fn metadata_defaults_match_the_rulings() {
+        let m = Settings::default().metadata;
+        assert_eq!(m.refresh_after_ddl, RefreshAfterDdl::Always);
+        assert_eq!(m.validate_interval_min, ValidateInterval::Auto);
+        assert_eq!(m.cache_mb_per_profile.get(), 512);
+        assert_eq!(m.cache_mb_total.get(), 4096);
+        assert_eq!(
+            ValidateInterval::from_minutes(0),
+            Some(ValidateInterval::Off)
+        );
+        assert_eq!(
+            ValidateInterval::from_minutes(30),
+            Some(ValidateInterval::Minutes(ValidateMinutes::Thirty))
+        );
+        assert_eq!(ValidateInterval::from_minutes(15), None);
+        assert_eq!(CacheMb::new(0), None);
+        assert_eq!(CacheMb::new((1 << 20) + 1), None);
     }
 }

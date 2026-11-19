@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 use sql_dialect::DialectId;
-use sql_ident::QualifiedName;
+use sql_ident::{Ident, QualifiedName};
 use sql_split::Fingerprint;
 use sql_text::TextRange;
 
@@ -104,6 +104,85 @@ pub struct StmtReport {
     // ## m3b-t04-safety (fix round 1): the targets of a `SET`/`RESET`, with their values, for
     // the harmless-SET check (P-M3b-6, P-M3b-T3-1). Empty for every other statement.
     pub set_targets: Vec<SetTarget>,
+    // ## m4-t01c-core: what the statement does to the catalog, for refresh after DDL
+    // (HV-INTRO-12; Task 6 fills it). Until Task 6, every statement in its scope carries one
+    // opaque effect (refresh more, never less) and every other statement none. Nothing in
+    // `decide`, `gate_class` or the exec gate reads it: no verdict depends on it.
+    pub ddl: Vec<DdlEffect>,
+}
+
+// ## m4-t01c-core
+/// One catalog effect of a statement (HV-INTRO-12; the input of `plan_refresh`). `opaque`:
+/// the statement may change any object of the session's current namespace and names none for
+/// certain (dynamic SQL, `DO`, `CALL`, an executable comment, or a DDL statement Task 6 does
+/// not read yet).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DdlEffect {
+    pub action: DdlAction,
+    pub kind: DdlKind,
+    /// The object the statement creates, alters or drops, as written.
+    pub name: Option<QualifiedName>,
+    /// The object it is attached to (an index's or a trigger's table, a policy's table).
+    pub on: Option<QualifiedName>,
+    /// Other objects whose catalog rows it changes (a `CASCADE` drop, a foreign key's
+    /// referenced table).
+    pub referenced: Vec<QualifiedName>,
+    pub temp: bool,
+    pub concurrently: bool,
+    pub opaque: bool,
+}
+
+impl DdlEffect {
+    /// An effect that names nothing: the consumer refreshes the session's whole current
+    /// namespace (`Target::Namespace(current)`).
+    pub fn opaque() -> Self {
+        DdlEffect {
+            action: DdlAction::Other,
+            kind: DdlKind::Other,
+            name: None,
+            on: None,
+            referenced: Vec::new(),
+            temp: false,
+            concurrently: false,
+            opaque: true,
+        }
+    }
+}
+
+/// What a DDL statement does to its object.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DdlAction {
+    Create,
+    Alter,
+    Drop { cascade: bool },
+    Rename { to: Ident },
+    SetSchema { to: Ident },
+    Comment,
+    Grant,
+    Revoke,
+    Other,
+}
+
+/// The kind of object a DDL statement touches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DdlKind {
+    Database,
+    Schema,
+    Table,
+    View,
+    MaterializedView,
+    Index,
+    Sequence,
+    Routine,
+    Trigger,
+    Type,
+    Domain,
+    Extension,
+    Policy,
+    Rule,
+    Event,
+    Role,
+    Other,
 }
 
 /// One target of a `SET` (`SET a = 1, b TO 'x'`, `RESET a`, `SET LOCAL a …`), as the
@@ -220,6 +299,8 @@ mod tests {
             destructive: Vec::new(),
             confidence: Confidence::Exact,
             set_targets: Vec::new(),
+            // ## m4-t01c-core
+            ddl: Vec::new(),
         }
     }
 
