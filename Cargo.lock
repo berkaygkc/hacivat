@@ -3447,6 +3447,7 @@ dependencies = [
  "futures",
  "hacivat-ddl",
  "hacivat-meta",
+ "hacivat-net",
  "hacivat-proto",
  "hacivat-secrets",
  "hacivat-session",
