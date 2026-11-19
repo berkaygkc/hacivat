@@ -918,3 +918,112 @@ back (palette-only; Task 39's menus add "Add as sort level N" through
   run's `FetchPolicy::cell_cap` differs (`orchestrator::start_run_capped`).
 - *The tooltip* (`valfmt::tooltip`, `Purpose::Tooltip`) is the raw channel under a quarter of the
   cell's grapheme cap (`TOOLTIP_FRACTION`), marked and chipped when cut.
+
+## m4-t08 — tree widget
+
+`hacivat_ui::tree` (plan-m4 Task 8): the explorer's virtualized tree, with no database
+knowledge. Bodies from `m4-spike-tree` @ `2a31b8b` (R-M4-40) on Task 1b's seam; the spike's view
+is split into `view/{mod,anchor,keyboard,pointer,element}.rs`.
+
+- *Flat-vector model.* The expanded tree is one `Vec<FlatRow>` (32 bytes a row: key, depth,
+  kind, position and set size; about 5 MB at 160,000 rows), built by an iterative DFS (no
+  recursion limit; a 50,000-deep tree is tested) on a model generation change, and spliced on
+  expand/collapse (`expand_at`/`collapse_at` cost the subtree, not the tree). A frame reads only
+  the rows on screen ± `TREE_OVERSCAN_ROWS` (2). Measured (release, this Mac, 162,041 rows): the
+  full flatten 1.8 ms (gate 50 ms), row build p95 0.37 ms, 0.36 ms with assistive technology
+  (gate 2 ms). `index_of` stays linear (about 0.1 ms at 160,000 rows per key press); a key →
+  index map would cost about 5 ms per rebuild.
+- *Fibonacci key hasher.* `KeySet` (expansion, selection) hashes a `TreeKey`, already a stable
+  128-bit hash, with one fold and multiply instead of SipHash: the expanded-set lookup is the
+  flattening's hot loop. The high half is spread before the fold (keys whose halves are swapped
+  or equal stay apart) and the product's high bits are folded into the low ones the table
+  indexes by.
+- *Anchoring by key.* Expansion is a set of keys owned by the view, so it survives generations,
+  and a key that disappears and returns comes back expanded. On a generation change the first
+  visible node keeps its screen position (relocated by key after the rebuild); expand/collapse
+  above the viewport shifts the offset by the spliced rows; collapsing the subtree that holds the
+  top row makes the collapsed node the top row.
+- *Lazy children.* `NotLoaded` draws a chevron and emits `Expand(key)` once per expansion: also
+  for a node restored expanded, a node revealed by an ancestor's expansion (collapsing an
+  ancestor forgets the announcement of every expanded node it hides), and a node whose children
+  the host drops back to `NotLoaded` while it is expanded, so a cancelled load never strands a
+  node. `Loading`/`Failed` draw one child row with the model's label at `text-2` (`Failed` adds
+  `CircleAlert` in the chevron column, never red; no motion); neither takes the cursor.
+- *R-M4-49: group headers take the cursor, never the selection.* A group header that can expand
+  (a kind group) is a cursor stop for ↑/↓/Home/End/Page keys, and ← / → / Enter / a click
+  collapse or expand it; Enter never activates it; `SelectionChanged` never names it; type-ahead
+  skips it. The cursor (`TreeView::cursor`) may therefore be a header while the selection
+  (`TreeView::selection`) stays on the last row. **Ruling (fix round 1, C1):** row-scoped host
+  commands (View DDL, Copy qualified name, Delete…, Open data) act on the selection only while
+  the cursor is not a group header; with the cursor on a header they do nothing, except Refresh
+  and Expand/Collapse all children, which act on the header. A header that cannot expand (the
+  M2a environment labels, NOTES M4 surface 1) is a label the keys and the pointer pass over.
+  **Ruling (accepted in review):** a header still asks for its menu (right click, Shift-F10, the
+  menu key: `ContextMenu` with the header's key), because the mocks give kind groups a menu
+  (NOTES M4 surface 5); the selection does not move, and the menu acts on the event's key.
+- *R-M4-50: defaults the host sets.* The type-ahead fold defaults to `Locale { turkic: false }`
+  (the access-key fold); the explorer sets `Fold::Tolerant` for Turkish users (Task 14, D-074).
+  Neither fold calls a casing function: the tolerant fold is `I i İ ı` as one letter plus the
+  access-key fold's table. The buffer resets after 1 s of the GPUI executor's clock. Single
+  selection by default (M4's explorer); with single selection a collapse (by the user, or the
+  host's `set_expanded`/`set_expanded_keys`) that hides the selected row clears the selection
+  (`SelectionChanged(None)`). A row that leaves the model in a new generation stays selected by
+  key (a refresh that drops and brings back a namespace keeps it), so "never a hidden row" holds
+  after a collapse, not across generations. Whether a multi-select keeps hidden rows is left to
+  the milestone that adds a bulk action (multi-select keeps them today).
+- *Lag-free accessibility hand-off.* While `Window::is_a11y_active()`, the root declares `Tree`
+  (named by `set_a11y_label`) and its synthetic children are one `TreeItem` per row on screen
+  ± 5: level, expanded state, position and size in set, selected (never on a header), bounds,
+  and a description joined from the status text, the host's `a11y_description` (the
+  environment, read-only, the badge: the marks carry no words of their own), the row tooltip
+  and the pill's tooltip; a loading row's description is its count, a failed row's its retry
+  word. The element computes the items in its prepaint and hands
+  them to the root's synthetic-children callback through a shared `Rc`; GPUI runs that callback
+  after the children's prepaint, so the items describe the frame being drawn (no one-frame lag,
+  unlike the grid's T40 subtree). Ids derive from `(key, row kind)`. The cursor item is the
+  active descendant (a header too). Items that take the cursor answer Focus, Click (activate a
+  row, toggle a header), Expand, Collapse (no-ops on a leaf), ScrollIntoView and
+  ShowContextMenu. Inactive: no role, no item, no string.
+- *The border-strip finding.* GPUI paints a border-only quad as four strips, so the selection's
+  1 px blue left edge is a child fill, and the keyboard-focus ring is an absolutely placed
+  overlay (no layout shift), drawn only after keyboard input.
+- *Row order and give-way* (fix round 1, I2; NOTES M4 surface 1 and cross-cutting #5): chevron ·
+  kind icon · name · type text · badge · flags · status · pill · spacer · meta mark + meta ·
+  row action. The row is laid out by the `give_way` primitive over the shaped widths of its
+  texts: the meta ellipsizes and then its mark leaves, the pill leaves whole, the badge
+  collapses to its glyph (the text becomes the glyph's tooltip; a badge without a glyph leaves
+  whole), the type text ellipsizes, and the name ellipsizes down to about **seven** characters
+  (the mock's number, ruled over M2a's six) with its full text as the tooltip. The chevron, the
+  icon, the flags, the status glyph and the row action never give way. Group headers draw no
+  flags: their one glyph is the filter glyph (`filter_glyph`, NOTES M4 surface 5).
+- *Seam fields (fix round 1, R-W1-1, additive).* `ChildState::Loading { label, running, count }`
+  (the static amber run marker in the chevron column only while running; the label at 12 px
+  `caption`, `text-2`; the count in mono), `ChildState::Failed { label, retry }` (the alert glyph
+  and the label in `text` ink: **ruling**, the reviewed mock supersedes the plan's `text-2`
+  because the user must read the error; a ghost retry button emits `TreeEvent::Retry(parent)`),
+  and on `TreeRowData`: `meta_mark` (`Running`, `Ok`, `Glyph`), `type_text` (mono 11 px
+  `text-2`), `strong` (`body_strong`), `pill` (16 px, outlined, `inlay`; blue when explicit;
+  emits `TreeEvent::Pill(key, its bottom-left)`), `badge_glyph`, `tooltip`, `row_action`
+  (drawn while the row is hovered or selected; emits `TreeEvent::RowAction`), `filter_glyph`
+  and `a11y_description`. The pill and the buttons are pointer only and change neither the
+  cursor nor the selection.
+- *Events resolve rows by key* (fix round 1, I1). A frame's pointer listeners capture the row's
+  key, not its index, and find its row when the event arrives: GPUI dispatches input to the
+  last drawn frame's listeners, and a publish re-flattens before the next frame, so an index
+  would name another node. A key that is gone does nothing.
+- *The cursor never strands* (fix round 1, M3). When the cursor's row leaves the shown rows (a
+  new generation, the host's expansion), the nearest row above it that is still shown takes it
+  (a hidden row's nearest shown ancestor, a dropped row's neighbour; the rebuild remembers up to
+  256 rows above), without touching the selection. PageUp/PageDown move a viewport less one
+  *row* and snap to the nearest cursor stop between (M6).
+- *Defensive flattening* (fix round 1, M5, M7). Each `FlatRow` carries its header, selectable
+  and focusable bits, read from the model once per flatten (the generation contract re-flattens
+  when they change), so key presses and type-ahead scan bits and ask the model only for the
+  text they read. A node already on the walk's path is shown but not expanded again, and
+  nothing is expanded past depth `u16::MAX`, so a host cycle cannot loop the UI thread. A
+  chevron double click toggles once, like a header's.
+- *Named exceptions.* `tests/tree_seam.rs` (T1b's) checks the seam against the widget
+  (ratified by the controller in fix round 1); `hacivat-ui/src/lib.rs` line 38 (the module
+  line's comment).
+- *Keys.* The widget reads key-downs while focused and binds nothing; every chord with ⌘, Ctrl,
+  Alt or fn is left to the host's keymap; nothing fires during an IME composition.

@@ -1,6 +1,13 @@
-//! M4 Task 1b: the tree seam. Until Task 8 lands, `TreeView` is a flat, non-expandable list of
-//! the model's roots (Global Constraints, "No silent weakening": a stub never shows a subtree as
-//! loaded); it still selects, activates and names each row's status for assistive technology.
+//! M4 Task 1b: the tree seam, written against Task 1b's flat stub (the first test keeps its
+//! name from then).
+//!
+//! ## m4-t08-tree (named exception, ratified in fix round 1): Task 8 replaced the stub with the
+//! widget, and this file now checks the seam's contract against it: a collapsed tree shows
+//! only its roots, an unloaded node is asked for when it expands, the status text reaches
+//! assistive technology only while it is attached (no role and no item otherwise). The items
+//! are read from `TreeView::a11y_items` (the view's copy), because synthetic AccessKit children
+//! never reach `popover::a11y_record` (the grid's T40 subtree has the same limit); the root's
+//! `Tree` role is a recorded declaration. The widget's full behaviour is `tests/tree.rs`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -131,24 +138,18 @@ fn flat_stub_renders_roots_and_emits_activate(cx: &mut TestAppContext) {
     assert!(texts.contains(&"orders".to_string()), "{texts:?}");
     assert!(texts.contains(&"audit".to_string()), "{texts:?}");
     assert!(!texts.contains(&"id_column".to_string()), "{texts:?}");
-    // Nothing expands in the stub: no chevron to open, and a host request is ignored.
-    tree.update(vcx, |t, cx| {
-        t.set_expanded(ORDERS, true, cx);
-        t.set_expanded_keys([ORDERS, AUDIT], cx);
-    });
+    // ## m4-t08-tree: nothing was announced for a collapsed tree; expanding shows the loaded
+    // child and asks the host for the unloaded node's children, once.
+    assert!(events.borrow().is_empty(), "{:?}", events.borrow());
+    tree.update(vcx, |t, cx| t.set_expanded_keys([ORDERS, AUDIT], cx));
     draw(vcx);
-    assert!(!tree.read_with(vcx, |t, _| t.is_expanded(ORDERS)));
-    assert!(tree.read_with(vcx, |t, _| t.expanded().is_empty()));
+    assert!(tree.read_with(vcx, |t, _| t.is_expanded(ORDERS)));
+    assert!(drawn(vcx).contains(&"id_column".to_string()));
+    assert_eq!(events.borrow().as_slice(), [TreeEvent::Expand(AUDIT)]);
+    tree.update(vcx, |t, cx| t.set_expanded_keys([], cx));
+    draw(vcx);
     assert!(!drawn(vcx).contains(&"id_column".to_string()));
-    // No expand event was announced for the unloaded node.
-    assert!(
-        !events
-            .borrow()
-            .iter()
-            .any(|e| matches!(e, TreeEvent::Expand(_))),
-        "{:?}",
-        events.borrow()
-    );
+    events.borrow_mut().clear();
 
     // A click selects; a double click activates.
     mouse_down(vcx, 1, MouseButton::Left, 1);
@@ -199,24 +200,34 @@ fn status_slot_requires_a_text_alternative(cx: &mut TestAppContext) {
     };
     model.rows.get_mut(&AUDIT).unwrap().0.status = Some(status);
     a11y_record();
-    let (_tree, vcx, _) = open(cx, model);
-    let decls = a11y_take();
+    let (tree, vcx, _) = open(cx, model);
+    // ## m4-t08-tree: no assistive technology, no role and no item.
+    assert!(
+        !a11y_take()
+            .iter()
+            .any(|d| matches!(d.role, Some(Role::Tree | Role::TreeItem)))
+    );
     // The glyph is drawn after the label...
     let texts = drawn(vcx);
     assert!(texts.contains(&"M".to_string()), "{texts:?}");
-    // ...and the row's tree item carries the text alternative as its description, while a row
-    // without a status carries none.
+    // ...and, with assistive technology attached, the row's tree item carries the text
+    // alternative as its description, while a row without a status carries none.
+    a11y_record();
+    tree.update(vcx, |t, cx| t.assume_a11y_active(true, cx));
+    draw(vcx);
+    let decls = a11y_take();
+    let items = tree.read_with(vcx, |t, _| t.a11y_items());
     let item = |name: &str| {
-        decls
+        items
             .iter()
-            .rev()
-            .find(|d| d.role == Some(Role::TreeItem) && d.name.as_ref() == name)
+            .find(|i| i.name.as_ref() == name)
             .cloned()
-            .unwrap_or_else(|| panic!("no tree item {name}: {decls:?}"))
+            .unwrap_or_else(|| panic!("no tree item {name}: {items:?}"))
     };
     let audit = item("audit");
     assert_eq!(audit.description.as_deref(), Some("Modified"));
-    assert_eq!(audit.position, Some((2, 2)));
+    assert_eq!((audit.position, audit.set_size), (2, 2));
+    assert_eq!(audit.node().role(), Role::TreeItem);
     assert_eq!(item("orders").description, None);
     // The list itself is a tree.
     assert!(
