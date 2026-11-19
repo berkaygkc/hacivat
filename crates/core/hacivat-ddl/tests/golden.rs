@@ -317,6 +317,27 @@ fn golden_pg_not_enforced_on_18() {
     );
 }
 
+// ## m4-t13-assemble (R-W2-8) ------------------------------------------------------------------
+
+#[test]
+fn golden_pg_index_part_options_exclusion_and_no_inherit() {
+    let text = golden("pg/index_part_options");
+    // `COLLATE` then the operator class, before the direction; only a null ordering that
+    // differs from the direction's default is written.
+    assert!(text.contains(
+        "CREATE INDEX rare_opts_ab_idx ON rare_opts (a COLLATE \"C\" text_pattern_ops, b DESC NULLS LAST);"
+    ));
+    assert!(text.contains(
+        "CREATE INDEX rare_opts_a_trgm ON rare_opts USING gin (a public.gin_trgm_ops(siglen=32));"
+    ));
+    assert!(text.contains("CREATE INDEX rare_opts_b_nulls_first ON rare_opts (b NULLS FIRST);"));
+    assert!(text.contains(
+        "CONSTRAINT rare_opts_room_excl EXCLUDE USING gist (room WITH =, during WITH &&) DEFERRABLE INITIALLY DEFERRED"
+    ));
+    assert!(text.contains("CONSTRAINT rare_opts_b_check CHECK (b > 0) NO INHERIT"));
+}
+// ## end m4-t13-assemble
+
 #[test]
 fn golden_mysql_unique_key_keeps_index_options() {
     let text = golden("mysql/unique_key_index_options");

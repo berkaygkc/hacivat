@@ -318,6 +318,8 @@ pub struct KeyProps {
     pub backing_index: Option<Name>,
     /// The constraint an implicit index exists for.
     pub implicit_for: Option<Ref>,
+    /// The per-part options most keys lack (R-W2-8; m4-t13-assemble named exception).
+    pub rare: Option<Arc<KeyRare>>,
 }
 
 /// Index properties: the key fields plus the access method.
@@ -362,23 +364,29 @@ pub struct FkProps {
     pub initially_deferred: bool,
     pub not_valid: bool,
     pub enforced: bool,
+    /// The fields most foreign keys lack (R-W2-8; m4-t13-assemble named exception).
+    pub rare: Option<Arc<FkRare>>,
 }
 
 /// `Default` is an **enforced** check (m4-t19 named exception below).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckProps {
-    /// The check (or exclusion) expression, raw.
+    /// The bare check expression, raw (the DDL producer writes `CHECK (expr)`): PostgreSQL
+    /// `pg_get_expr(conbin, conrelid, true)`, MySQL/MariaDB `CHECK_CLAUSE`. For a PostgreSQL
+    /// exclusion constraint, the text after `EXCLUDE` without the deferral words (the producer
+    /// writes `EXCLUDE expr` and then the deferral from [`CheckRare`]).
     pub expr: Name,
     pub not_valid: bool,
     pub enforced: bool,
+    /// The fields most checks lack (R-W2-8; m4-t13-assemble named exception).
+    pub rare: Option<Arc<CheckRare>>,
 }
 
 // ## m4-t19-produce (named exception in Task 1a/3's file; T19 review I2): a default key or
 // check is **enforced**. A derived `Default` made `enforced = false`, so every constraint built
 // with `..Default::default()` read as NOT ENFORCED, a wrong fact for the DDL producer. The
 // field name and its meaning are unchanged, so the cache codec (T11: one bool,
-// `put_bool(p.enforced)`) needs nothing; when T13 adds `rare` to these structs, these impls
-// gain `rare: None`.
+// `put_bool(p.enforced)`) needs nothing; T13's `rare` (R-W2-8) is `None` by default.
 
 impl Default for KeyProps {
     fn default() -> Self {
@@ -397,6 +405,7 @@ impl Default for KeyProps {
             invisible: false,
             backing_index: None,
             implicit_for: None,
+            rare: None,
         }
     }
 }
@@ -407,6 +416,7 @@ impl Default for CheckProps {
             expr: Name::from(""),
             not_valid: false,
             enforced: true,
+            rare: None,
         }
     }
 }
@@ -638,4 +648,88 @@ pub struct StatsFacet {
     /// PostgreSQL `reltuples` (`-1` → `None`), MySQL `TABLE_ROWS`; display only.
     pub row_estimate: Option<u64>,
     pub at: SystemTime,
+}
+
+// ## m4-t13-assemble (R-W2-8): the rare parts of keys, foreign keys and checks. Named exception
+// in Task 1a/3's file; the cache codec encodes them from Task 11's merge on (format minor bump).
+
+/// The per-part options of a key or index that most lack (R-W2-8). Each vector runs parallel
+/// to [`KeyProps::desc`], in key order, and is **empty** when no part has the option.
+/// `with_options` (PostgreSQL index `reloptions`, MySQL `WITH PARSER`) is deferred.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KeyRare {
+    /// PostgreSQL `indoption` bit 1, raw (a `DESC` part is `NULLS FIRST` by default).
+    pub nulls_first: Vec<bool>,
+    /// PostgreSQL `indclass` when not the type's default operator class, schema-qualified
+    /// outside `pg_catalog`, with its parameters (`gist_trgm_ops(siglen=32)`).
+    pub opclass: Vec<Option<Name>>,
+    /// PostgreSQL `indcollation` when it differs from the column's collation; SQLite
+    /// `index_xinfo.coll` when it differs from the column's declared one. The collation's name
+    /// as the server stores it, unquoted (`C`, `tr-TR-x-icu`; DDL quotes it, like a column's).
+    pub collation: Vec<Option<Name>>,
+}
+
+impl KeyRare {
+    /// Whether no option is set (the key then stores no rare part).
+    pub fn is_empty(&self) -> bool {
+        self.nulls_first.is_empty() && self.opclass.is_empty() && self.collation.is_empty()
+    }
+}
+
+impl KeyProps {
+    /// Per part, raw `NULLS FIRST` (empty when no part has it).
+    pub fn nulls_first(&self) -> &[bool] {
+        self.rare.as_deref().map_or(&[], |r| &r.nulls_first)
+    }
+
+    /// Per part, a non-default operator class (empty when no part has one).
+    pub fn opclass(&self) -> &[Option<Name>] {
+        self.rare.as_deref().map_or(&[], |r| &r.opclass)
+    }
+
+    /// Per part, a collation other than the column's (empty when no part has one).
+    pub fn collation(&self) -> &[Option<Name>] {
+        self.rare.as_deref().map_or(&[], |r| &r.collation)
+    }
+}
+
+/// The fields of a foreign key that most lack (R-W2-8).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FkRare {
+    /// The referenced table's index the FK relies on: PostgreSQL `conindid` (a unique index or
+    /// a key's backing index), MySQL `UNIQUE_CONSTRAINT_NAME` (which names an index).
+    pub fk_ref_index: Option<Ref>,
+}
+
+impl FkProps {
+    /// The referenced table's index the FK relies on, when the server says.
+    pub fn fk_ref_index(&self) -> Option<&Ref> {
+        self.rare.as_deref().and_then(|r| r.fk_ref_index.as_ref())
+    }
+}
+
+/// The fields of a check or exclusion constraint that most lack (R-W2-8).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CheckRare {
+    /// PostgreSQL `connoinherit` (`CHECK (…) NO INHERIT`).
+    pub no_inherit: bool,
+    /// A PostgreSQL exclusion constraint's operators (`conexclop`), per key part, in key order,
+    /// schema-qualified outside `pg_catalog`.
+    pub excl_ops: Vec<Name>,
+    /// A PostgreSQL exclusion constraint's `condeferrable`.
+    pub excl_deferrable: bool,
+    /// A PostgreSQL exclusion constraint's `condeferred`.
+    pub excl_initially_deferred: bool,
+}
+
+impl CheckProps {
+    /// `NO INHERIT` (PostgreSQL).
+    pub fn no_inherit(&self) -> bool {
+        self.rare.as_deref().is_some_and(|r| r.no_inherit)
+    }
+
+    /// An exclusion constraint's operators, per key part.
+    pub fn excl_ops(&self) -> &[Name] {
+        self.rare.as_deref().map_or(&[], |r| &r.excl_ops)
+    }
 }

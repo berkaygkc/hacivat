@@ -1255,3 +1255,128 @@ new.
   `CatalogKey` can race (A-m9/B-M7) → Task 15 creates the key once, under the hub. Task 15
   never opens a sensitive profile with `Encryption::None` (now also refused by the store).
   The `model-cache-write-failed` message → Task 24.
+
+## m4-t13 — assembly
+
+- **Seam.** `hacivat_introspect::assemble` gains the row and result types: `TableId` (server id
+  and name), `ColRef` (an `(ordinal, name)` column reference), `ColumnIndex` (the namespace's
+  columns per table, built by the introspector; `resolve`, `resolve_table`, `set_complete`),
+  `KeyObj` (the owning table and the model `Obj`), and one adapter per dialect,
+  `assemble::{pg, mysql, sqlite}::assemble_keys(rows, &ColumnIndex) -> Vec<KeyObj>`. Assembly
+  cannot fail, so the T1c stub's `AssembleError` (referenced nowhere) is removed: a part that
+  cannot be resolved flags the object `BROKEN` instead.
+- **Column references** resolve by ordinal, then by name: exactly, then by a certain
+  ASCII-caseless key where the engine folds the class (MySQL/MariaDB columns, SQLite;
+  `match_key`, so a non-ASCII cased name stays exact, R-M4-41). An ordinal whose column has
+  another name than the row says is an inconsistent read and does not resolve. Key order is the
+  row order, never ordinal or name order. An unresolved reference keeps the row's text and the
+  object is kept with `ObjFlags::BROKEN` (alg/02 HV-INTRO-13 step 3).
+- **FK targets (fix round 1, I3, m6).** A target that resolves in this namespace is named by the
+  table it resolved to (stored spelling and server id; `ColumnIndex::resolve_table`), never by
+  the `REFERENCES` spelling: SQLite `REFERENCES P` against table `p`, MySQL under
+  `lower_case_table_names` ≥ 1. `locate_ref` and `fk_referencing` match names exactly, so the
+  spelling would read as a dangling FK. A target outside the namespace keeps the row's names and
+  is resolved on demand. A target inside the namespace that the index does not hold is broken
+  when the index is complete (`set_complete(true)`, a full pass) and only unknown otherwise (a
+  fragment).
+- **Expression parts** are `KeyColumn { ordinal: 0, name: None }` slots in `KeyProps::columns`
+  (PostgreSQL's `indkey` convention); their raw text is in `KeyProps::expressions` in slot
+  order: PG `pg_get_indexdef(oid, k, true)`, MySQL `EXPRESSION`, SQLite the part's text from
+  `sqlite_schema.sql` (a quote-, bracket- and comment-aware scan; the part's `COLLATE` and
+  `ASC`/`DESC` are not part of it, as in PostgreSQL's per-column form). The scan is used only
+  when its part count equals the index's key count (m2). A SQLite partial index's predicate
+  comes from the same scan; a partial index whose text yields none is broken.
+- **R-W2-8: rare parts (named exception in `hacivat-meta/src/props.rs`, fenced
+  `// ## m4-t13-assemble`).** `KeyProps.rare: Option<Arc<KeyRare>>` with per-part vectors
+  parallel to `desc`, each empty when no part has the option: `nulls_first` (PG `indoption`
+  bit 1, raw), `opclass` (PG `indclass` when not the type's default, schema-qualified outside
+  `pg_catalog`, with parameters), `collation` (PG `indcollation` when it differs from the
+  column's; SQLite `index_xinfo.coll` when it differs from the column's declared one, the
+  comparison Task 18's). `FkProps.rare: Option<Arc<FkRare>>` with `fk_ref_index` (PG `conindid`,
+  MySQL `UNIQUE_CONSTRAINT_NAME`, an `Index` ref on the referenced table). `CheckProps.rare:
+  Option<Arc<CheckRare>>` with `no_inherit` (PG `connoinherit`), `excl_ops` (PG `conexclop`),
+  `excl_deferrable` and `excl_initially_deferred`. The rare part is `None` when nothing is set.
+  Accessors: `KeyProps::{nulls_first, opclass, collation}`, `FkProps::fk_ref_index`,
+  `CheckProps::{no_inherit, excl_ops}`. `with_options` (index `reloptions`, MySQL `WITH PARSER`)
+  is deferred; T19 lists it as not reproduced. The four `FkProps` literals of other tasks
+  (`fixture.rs`, `tests/model.rs` ×2, `tests/snapshot.rs`) gain `rare: None` (named
+  exceptions). The cache codec encodes the rare parts after Task 11 merges (format minor bump,
+  a named exception in `codec.rs`).
+- **Implicit indexes (A-11).** The index behind a constraint is `ObjFlags::IMPLICIT` with
+  `IndexProps.key.implicit_for` pointing at it (kind, path `[…, table, constraint]`, server id),
+  and the constraint's `backing_index` names the index, also when the names agree (as the
+  T3/T9 fixture does): PostgreSQL PK/UNIQUE/EXCLUDE through `conindid` (an FK's `conindid`
+  names the referenced table's index and becomes `fk_ref_index`, never an implicit link);
+  MySQL/MariaDB `PRIMARY` and every unique index (`TABLE_CONSTRAINTS` lists each as a `UNIQUE`
+  constraint of the same name, so both a key and its implicit index are emitted); SQLite
+  autoindexes of `origin` `pk` and `u`. The InnoDB FK-created index is implicit only under
+  `mysql::FkIndexRule::NamedAfterConstraint` (a non-unique index named like an FK of its table
+  whose leading columns are the FK's); the default `None` marks nothing, so DDL shows an
+  explicit index MySQL accepts. Task 17's probe picks the rule.
+- **PostgreSQL keys** take `INCLUDE`, `indnullsnotdistinct` and the per-part options from their
+  backing index. A PK or UNIQUE whose backing index row is not in the pass is incomplete and
+  `BROKEN` (m1): Task 16 reads a constraint's index in the same pass. `NOT VALID` constraints
+  and invalid indexes get `ObjFlags::INVALID`. A constraint that is not local (`conislocal`) or
+  was cloned from a partitioned parent (`conparentid`) gets `ObjFlags::INHERITED` (DDL does not
+  repeat it). `contype` `t` and `n` are not assembled. Carry to T16: the attached partition
+  index (`pg_inherits` of an index) has no row field yet.
+- **PostgreSQL CHECK and EXCLUDE text (fix round 1, I2).** `CheckProps.expr` is the bare
+  expression the DDL producer wraps (`CHECK (expr)`, `EXCLUDE expr`): a CHECK stores
+  `pg_get_expr(conbin, conrelid, true)` (`ConstraintRow.check_expr`; none → broken, empty
+  text); an EXCLUDE stores the `pg_get_constraintdef` text after `EXCLUDE `, without the
+  `DEFERRABLE` / `INITIALLY DEFERRED` words the server appends after the last `)`, its deferral
+  and operators in `CheckRare`; an operator count that differs from the key's, or a text that
+  does not start with `EXCLUDE `, is broken. Carry to T19: `ir.rs`'s `ConstraintBody::Exclusion
+  { raw }` comment should say "the text after `EXCLUDE`".
+- **MySQL/MariaDB.** Key parts arrive one row each and are grouped by `(table, index)` in
+  `SEQ_IN_INDEX` order; a gap or repeat is a missing part (broken). `COLLATION = 'D'` is
+  descending, as the server reports it (F9). FK columns group by `(table, constraint)` in
+  `ORDINAL_POSITION` order, referenced columns by position. CHECK clauses join by name on MySQL
+  (unique per schema) and by `(TABLE_NAME, CONSTRAINT_NAME)` on MariaDB; a check with no single
+  matching clause is kept, broken, with an empty expression. `PRIMARY` is flagged
+  `SERVER_GENERATED_NAME` (the server's own name). Carry to T19 (m4): `KeyProps` has no prefix
+  lengths, so a MySQL key renders its parts through its backing index
+  (`IndexProps::prefix_len`); a `UNIQUE KEY (body(32))` from the key alone is invalid DDL.
+- **SQLite names (fix round 1, I1).** The primary key is `<table>_pk`. Each foreign key's
+  display name is derived from its **content**, never its position, so dropping or adding one FK
+  (a table rebuild) leaves the other FKs' identities alone:
+  `<table>_<from columns>_<parent>_fkey`, the parent being the stored table it resolved to; when
+  two FKs of the table share that name (same columns and parent), both take
+  `<table>_<from columns>_<parent>_<to columns, or pk>_fkey`; a name still taken (exact
+  duplicates, which SQLite allows) gets `_2`, `_3`, … in declaration order (SQLite numbers `id`
+  from the last declared FK; checked on SQLite 3.51); a name over 128 bytes is
+  `<table>_fk_<xxh3-64 of from, parent and to, 16 hex>`. All are `SERVER_GENERATED_NAME`, so DDL
+  never emits them. Residual: adding a second FK with the same columns and parent renames the
+  first (it gains its `to` columns). Deviation from the plan's "FKs with no name": siblings with
+  one empty name share an identity, and a re-read matched sibling by sibling keeps only the last
+  (merge edge 12). A `to` of NULL references the parent's primary key and leaves
+  `target_columns` empty (not broken). FK deferral (`FkRow.deferrable`, `initially_deferred`)
+  is not in `foreign_key_list`: Task 18 parses it from `sqlite_schema.sql` (m3).
+- **SQLite autoindex names are positional (m5).** `sqlite_autoindex_<table>_<N>` is the server's
+  own name, numbered by position, so a rebuild that drops an earlier UNIQUE renames the later
+  autoindexes and their unique keys. It is kept as the server reports it.
+- **Existence and order.** An object exists when its own catalog row does; part rows without
+  one are ignored (the next pass reads both). Output is sorted by table, then name, kind and
+  server id, whatever the row order.
+- **Cache format minor 1 (codec round, after T11; named exception in `codec.rs`).**
+  `FORMAT_MINOR` is 1. The rare parts are one optional record appended at the end of the key,
+  foreign-key and check records, written **only when set**, so an object without one encodes to
+  the same bytes, and the same fingerprint, as in minor 0. A record that ends before the field
+  (a minor-0 payload) reads `rare: None`; no migration step is needed. The new names keep
+  T11's caps: operator classes, collations and exclusion operators are names (at most
+  `MAX_NAME_BYTES`, refused by the encoder and the decoder); every string counts against the
+  expansion budget; `fk_ref_index` is an ordinary reference. The encoder knows the minor it
+  writes (`Enc::minor`), so the test hook writes a genuine minor-0 payload. Tests:
+  `tests/codec_rare.rs` (round trip, an older-minor payload, unchanged bytes without rare
+  parts, an older build reading minor 1, the name cap). `persist_crypt`'s "minor column edited"
+  probe now writes `FORMAT_MINOR + 1` (it wrote `1`, which became the current minor). The
+  `catalog_row_decode` fuzz seed carries a key and an FK rare part; built and run locally for
+  90 s (2.5M runs, no crash).
+- **DDL (named exceptions in T7's IR and T19's producer, renderers and goldens).**
+  `IndexPartDef` gains `opclass` (raw server text) and `collation` (a name, quoted on output);
+  the PG part renders as `column COLLATE "C" opclass [DESC] [NULLS FIRST|LAST]`, a collation
+  is refused on MySQL and an operator class outside PostgreSQL. `ConstraintBody::Check` gains
+  `no_inherit` (`CHECK (…) NO INHERIT` on PostgreSQL, refused elsewhere). The producer fills
+  `nulls_first` (only when the model has the vector), `opclass` and `collation` per part on
+  PostgreSQL, `no_inherit` on PostgreSQL checks, and an exclusion's deferral from `CheckRare`
+  (rendered after the text, which no longer carries it). Golden `pg/index_part_options`.

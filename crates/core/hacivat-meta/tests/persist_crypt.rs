@@ -434,9 +434,10 @@ fn row_moved_to_another_ns_key_fails_authentication() {
     // A minor column edited under a sealed payload fails too.
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
+        // M4 Task 13 (format minor 1): edit the column to a minor other than the current one.
         conn.execute(
-            "UPDATE namespace SET minor = 1 WHERE tag = ?1",
-            [tag(&gizli)],
+            "UPDATE namespace SET minor = ?1 WHERE tag = ?2",
+            rusqlite::params![hacivat_meta::codec::FORMAT_MINOR + 1, tag(&gizli)],
         )
         .unwrap();
     }

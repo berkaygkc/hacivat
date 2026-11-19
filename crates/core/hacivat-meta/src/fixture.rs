@@ -352,6 +352,7 @@ pub fn table_subtree(
                 initially_deferred: false,
                 not_valid: false,
                 enforced: true,
+                rare: None,
             }))),
         );
     }

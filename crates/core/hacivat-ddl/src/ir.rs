@@ -125,8 +125,11 @@ pub enum ConstraintBody {
     },
     Check {
         expr: Name,
+        /// PostgreSQL `NO INHERIT` (m4-t13-assemble named exception, R-W2-8).
+        no_inherit: bool,
     },
-    /// PostgreSQL `EXCLUDE …`, raw (`pg_get_constraintdef`).
+    /// PostgreSQL `EXCLUDE …`: the text after `EXCLUDE` (from `pg_get_constraintdef`, without
+    /// its deferral words; the deferral is the constraint's `deferrable`).
     Exclusion {
         raw: Name,
     },
@@ -222,6 +225,13 @@ pub struct IndexPartDef {
     pub nulls_first: Option<bool>,
     /// MySQL prefix length.
     pub prefix_len: Option<u32>,
+    // ## m4-t13-assemble (named exception in Task 7's IR, R-W2-8)
+    /// PostgreSQL operator class, raw server text (schema-qualified outside `pg_catalog`, with
+    /// its parameters): written after the part and its collation.
+    pub opclass: Option<Name>,
+    /// The part's collation (PostgreSQL, SQLite), a name written `COLLATE <quoted name>`.
+    pub collation: Option<Name>,
+    // ## end m4-t13-assemble
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -639,6 +649,7 @@ impl AlterAction {
                 name: Some(name("t_name_check")),
                 body: ConstraintBody::Check {
                     expr: name("(name <> '')"),
+                    no_inherit: false,
                 },
                 deferrable: Deferrable::No,
                 not_valid: true,
