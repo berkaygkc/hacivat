@@ -293,3 +293,60 @@ Constraints, "No silent weakening"). Session-side seams are in ADR 0004 `m4-t01c
   `## m4-t01c-core` holds the 27 introspection messages alg/02 names (HV-INTRO-01..03, -05,
   -11..13, -15, -16) plus `intro-catalog-race-retried`. `model-cache-disabled-by-policy` and
   `ddl-warn-executable-comment` are T1a's already.
+
+## m4-t03 — model and identifier keys
+
+M4 Task 3 fills the arena, the kind schema and the identifier keys (HV-MODEL-01, HV-INTRO-14).
+The bodies of `kind`, `name`, `ids`, `props`, `namespace` and `fixture` come from the model
+spike (`d86313b`), adapted to the T1a seam.
+
+- **Arena.** The layout is breadth-first: index 0 is the root, a parent precedes its children,
+  and children are contiguous and in insertion order. It is computed in O(n) by a counting
+  sort. Every build re-validates the root, the layout and the kind schema. The crate-private
+  `from_arena` (for Task 11's decoder) refuses a parent after its child, non-contiguous
+  children, a root with a parent and an empty arena. A `NodeId` of another subtree is a bad
+  layout, never a panic. `INVISIBLE_CHARS` is derived on every build; a NUL name gets
+  `LOSSY_NAME`. `Obj::with_flags` now adds flags instead of replacing them.
+- **Identity.** `ObjectKey` keeps a structural `Eq`/`Hash`/`Ord`; `same_object` compares the
+  server id first. `ObjectKey` gains `raw_kind: Option<Name>` (T1a review m10): an unknown
+  kind's raw id survives a serde round trip, so two newer kinds stay two user-data keys. The
+  raw id is written as the kind id. A raw text that equals a known id is written as
+  `"unknown"` plus a `raw_kind` field. `find` matches a server id only within the
+  namespace's database (PostgreSQL OIDs are per database). Otherwise it walks the exact path,
+  taking the first step through the name indexes.
+- **Kind schema.** `exists_in` is exact for PostgreSQL, MySQL, MariaDB and SQLite (alg/02
+  matrix rows 1, 2 and 4); later engines keep the spike's permissive rule until v1.x.
+  PostgreSQL composite types sit in `Relations` (they share `pg_class`). MariaDB sequences
+  are tables. SQLite `VirtualTable` (code 14) has columns only.
+- **Identifier keys (`sql_ident::key`).** `match_key` builds keys by these rules:
+  - PostgreSQL: folds unquoted ASCII and cuts at 63 bytes. With a non-UTF-8 or unknown
+    `server_encoding`, unquoted non-ASCII input is `ServerDependent` (rule 3), and so is a
+    quoted non-ASCII name longer than the cut.
+  - MySQL/MariaDB: names of the `lower_case_table_names` classes (database, schema, table)
+    are exact under 0, ASCII-caseless under 1 and 2, and `ServerDependent` for any other value.
+    Every other class is ASCII-caseless. A caseless text with a non-ASCII **cased** letter
+    (`Lowercase`, `Uppercase`, `Lt`) is `ServerDependent`.
+  - SQLite: ASCII-caseless.
+  - Other dialects: always `ServerDependent`.
+
+  `FoldRule::for_names` gives the stored rule, and `FoldRule::key` keys a stored name; a test
+  shows the two agree with `match_key` on every text it keys. No Unicode or locale case
+  mapping runs anywhere.
+- **Deviations from the plan text, recorded.**
+  - MySQL/MariaDB **triggers** use the table class (`lower_case_table_names`), not
+    ASCII-caseless. The vendor manuals name "database, table, and trigger names" as the ones
+    that depend on the file system; MariaDB says the same.
+  - `ServerDependent` covers every caseless MySQL class (routines, events, indexes as well as
+    columns). In addition, a namespace whose stored names in a class contain a non-ASCII cased
+    letter answers `Unknown(ServerDependent)` instead of `Missing` for any miss: the server
+    may fold `İD` or the Kelvin sign to ASCII.
+  - Only where the server compares case-insensitively (MySQL/MariaDB) does an exact stored
+    name turn a `ServerDependent` probe into `Found`. For PostgreSQL the server may fold the
+    probe itself, so the answer is `Unknown`.
+  - A probe whose `IdentCtx` disagrees with the namespace's stored rule (another engine, or
+    another `lower_case_table_names`) is `Unknown`.
+- **Memory (recorded, not gating).** The 160k-column fixture measures 336 B per column (a
+  104 B `Obj`, a 216 B `ColumnProps` and a 16 B `Arc` header) and 414 B per table. The alg/02
+  targets are 250 B and 600 B. The T1a field lists (`ColumnProps` grew from the spike's
+  144 B) and `StateMark::MyTable` (`Obj` grew from 96 B) account for the gap. The gate
+  decides; the spike's open question 2 lists the options.

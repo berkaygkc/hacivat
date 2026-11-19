@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 pub use sql_ident::key::{
-    DialectId, FoldRule, IdentCtx, IdentKey, NameClass, ServerDependent, match_key,
+    DialectId, FoldRule, IdentCtx, IdentKey, NameClass, ServerDependent, has_non_ascii_cased,
+    match_key,
 };
 
 /// An object name exactly as the server reported it. `Arc<str>`: the cache decoder interns the
@@ -61,16 +62,68 @@ const FILLERS: [(u32, u32); 8] = [
 ];
 
 /// Whether `name` holds a character a reader cannot see: the explorer shows a badge
-/// (`model-name-has-invisible-chars`).
+/// (`model-name-has-invisible-chars`); the arena sets `ObjFlags::INVISIBLE_CHARS` from it on
+/// every build.
 ///
-/// M4 Task 1a seam (fix round 1, m1): flags C0/C1 controls, every
-/// [`DEFAULT_IGNORABLE`] code point and the [`FILLERS`] above. That is the list, not a claim
-/// of completeness: a visible look-alike (a Cyrillic `а`, a no-break space) is not flagged.
-/// Task 3 owns the final table and its test.
+/// Flags C0/C1 controls, every [`DEFAULT_IGNORABLE`] code point and the [`FILLERS`] above (the
+/// T1a fix round 1 table, final in Task 3). That is the list, not a claim of completeness: a
+/// visible look-alike (a Cyrillic `а`, a no-break space) is not flagged. An ASCII name is
+/// checked bytewise.
 pub fn has_invisible_chars(name: &str) -> bool {
+    if name.is_ascii() {
+        return name.bytes().any(|b| b.is_ascii_control());
+    }
     let within = |c: u32, ranges: &[(u32, u32)]| ranges.iter().any(|&(a, b)| (a..=b).contains(&c));
     name.chars().any(|ch| {
         let c = u32::from(ch);
         ch.is_control() || within(c, &DEFAULT_IGNORABLE) || within(c, &FILLERS)
     })
+}
+
+/// The [`Name`] of server bytes that should be UTF-8, and whether it is **lossy** (alg/02
+/// HV-MODEL-01 edge 12): invalid UTF-8 is replaced by U+FFFD, and a NUL is kept but marks the
+/// name lossy too (no DDL can carry it). A lossy name gets `ObjFlags::LOSSY_NAME` and is never
+/// used to generate DDL.
+pub fn lossy_name(bytes: &[u8]) -> (Name, bool) {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => (Name::from(text), text.contains('\0')),
+        Err(_) => (Name::from(String::from_utf8_lossy(bytes).as_ref()), true),
+    }
+}
+
+/// [`lossy_name`] for UTF-16 server text (a lone surrogate is replaced by U+FFFD).
+pub fn lossy_name_utf16(units: &[u16]) -> (Name, bool) {
+    match String::from_utf16(units) {
+        Ok(text) => {
+            let nul = text.contains('\0');
+            (Name::from(text), nul)
+        }
+        Err(_) => (Name::from(String::from_utf16_lossy(units)), true),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The spike's check, now through `sql_ident::key`: the stored ASCII-caseless key never
+    /// touches a non-ASCII letter, and an unchanged name shares its allocation.
+    #[test]
+    fn ascii_caseless_never_touches_non_ascii() {
+        let n: Name = Arc::from("MÜŞTERİ_Id");
+        assert_eq!(FoldRule::AsciiCaseless.key(&n).as_str(), "mÜŞterİ_id");
+        assert_eq!(FoldRule::Exact.key(&n).as_str(), "MÜŞTERİ_Id");
+        assert!(FoldRule::AsciiCaseless.matches("Iı", "iı"));
+        assert!(!FoldRule::AsciiCaseless.matches("İ", "i"));
+        let plain: Name = Arc::from("users");
+        let k = FoldRule::AsciiCaseless.key(&plain);
+        assert!(std::ptr::eq(k.as_str().as_ptr(), plain.as_ptr()));
+    }
+
+    #[test]
+    fn ascii_names_are_checked_bytewise() {
+        assert!(has_invisible_chars("a\u{7}b"));
+        assert!(has_invisible_chars("a\tb"));
+        assert!(!has_invisible_chars("order_items"));
+    }
 }

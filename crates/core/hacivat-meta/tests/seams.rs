@@ -40,6 +40,7 @@ fn table_key() -> ObjectKey {
         path: smallvec![Arc::from("db"), Arc::from("public"), Arc::from("t")],
         server_id: Some(ServerId::Oid(16400)),
         overload_sig: None,
+        raw_kind: None,
     }
 }
 
