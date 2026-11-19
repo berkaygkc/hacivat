@@ -3446,6 +3446,7 @@ dependencies = [
  "bitflags 2.13.2",
  "futures",
  "hacivat-ddl",
+ "hacivat-driver",
  "hacivat-meta",
  "hacivat-net",
  "hacivat-proto",
