@@ -983,6 +983,53 @@ pub fn pg_with(overlays: Overlays) -> Fx {
     add(&mut secrets, column("id", not_null("integer")));
     shop.push(secrets);
 
+    // A disabled trigger (`tgenabled = 'D'`; T19 review I3).
+    let mut paused = table("paused", pg_table(None, None));
+    add(&mut paused, column("id", not_null("integer")));
+    let paused_audit = src.add(
+        "CREATE TRIGGER paused_audit AFTER UPDATE ON shop.paused FOR EACH ROW EXECUTE FUNCTION shop.audit_row()",
+    );
+    add(
+        &mut paused,
+        obj(
+            ObjectKind::Trigger,
+            "paused_audit",
+            Props::Trigger(Arc::new(TriggerProps {
+                source: Some(paused_audit),
+                enabled: false,
+                ..TriggerProps::default()
+            })),
+        ),
+    );
+    shop.push(paused);
+
+    // PostgreSQL 18 NOT ENFORCED: a check and a foreign key (I2).
+    let mut loose = table("loose", pg_table(None, None));
+    add(&mut loose, column("customer_id", col("", "bigint", true)));
+    add(
+        &mut loose,
+        obj(
+            ObjectKind::Check,
+            "loose_customer_check",
+            Props::Check(Arc::new(CheckProps {
+                expr: n("(customer_id > 0)"),
+                not_valid: false,
+                enforced: false,
+            })),
+        ),
+    );
+    add(
+        &mut loose,
+        fk_obj(
+            "loose_customer_fk",
+            FkProps {
+                enforced: false,
+                ..fk(&["customer_id"], shop_ref("customers"), &["id"])
+            },
+        ),
+    );
+    shop.push(loose);
+
     // An object of a kind this build does not know (a newer relkind).
     shop.push(leaf(obj(
         ObjectKind::Unknown,
@@ -1284,16 +1331,19 @@ pub fn mysql(dbms: DbmsKind) -> Fx {
             },
         ),
     );
-    add(
-        &mut orders,
-        index(
-            "idx_lower_code",
-            IndexProps {
-                method: Some(n("BTREE")),
-                ..ix_expr("lower(`code`)")
-            },
-        ),
-    );
+    if !maria {
+        // MySQL 8.0.13+ functional key part; MariaDB has none (and never reports one).
+        add(
+            &mut orders,
+            index(
+                "idx_lower_code",
+                IndexProps {
+                    method: Some(n("BTREE")),
+                    ..ix_expr("lower(`code`)")
+                },
+            ),
+        );
+    }
     let mut hidden = ix(&["amount"], &[]);
     hidden.method = Some(n("BTREE"));
     hidden.key.invisible = true;
@@ -1341,6 +1391,117 @@ pub fn mysql(dbms: DbmsKind) -> Fx {
     );
     add(&mut audit, trigger("audit_bi", audit_bi));
     shop.push(audit);
+
+    // A unique key whose index is descending, invisible, commented and hashed (T19 review I1).
+    let mut ranked = table("ranked", TableProps::default());
+    add(&mut ranked, column("id", my_col("int", "int", None, false)));
+    add(
+        &mut ranked,
+        column("score", my_col("int", "int", None, false)),
+    );
+    add(
+        &mut ranked,
+        key(ObjectKind::UniqueKey, "uq_score", &["score"], false),
+    );
+    let mut uq = ix(&["score"], &[true]);
+    uq.key.unique = true;
+    uq.key.invisible = true;
+    uq.method = Some(n("HASH"));
+    uq.comment = Some(n("Leaderboard order"));
+    add(
+        &mut ranked,
+        index("uq_score", uq).add_flags(ObjFlags::IMPLICIT),
+    );
+    shop.push(ranked);
+
+    // A primary key whose index has a descending part and a comment (no AUTO_INCREMENT).
+    let mut daily = table("daily", TableProps::default());
+    add(
+        &mut daily,
+        column("region", my_col("char", "char(2)", None, false)),
+    );
+    add(
+        &mut daily,
+        column("day", my_col("date", "date", None, false)),
+    );
+    add(
+        &mut daily,
+        key(ObjectKind::PrimaryKey, "PRIMARY", &["region", "day"], false),
+    );
+    let mut pk = ix(&["region", "day"], &[false, true]);
+    pk.key.unique = true;
+    pk.comment = Some(n("Newest day first"));
+    add(
+        &mut daily,
+        index("PRIMARY", pk).add_flags(ObjFlags::IMPLICIT),
+    );
+    shop.push(daily);
+
+    // An invisible generated column and an invisible auto-updated timestamp (I4): EXTRA as
+    // MySQL 8.0.23+ prints it, with `INVISIBLE` after the other words.
+    let mut hidden_gen = table("hidden_gen", TableProps::default());
+    add(
+        &mut hidden_gen,
+        column("a", my_col("int", "int", None, true)),
+    );
+    add(
+        &mut hidden_gen,
+        column(
+            "g",
+            ColumnProps {
+                hidden: true,
+                rare: rare(ColumnRare {
+                    generated: Some(Generated {
+                        kind: GeneratedKind::Virtual,
+                        expr: n("(`a` + 1)"),
+                    }),
+                    collation: None,
+                    ..ColumnRare::default()
+                }),
+                ..my_col("int", "int", Some("VIRTUAL GENERATED INVISIBLE"), true)
+            },
+        ),
+    );
+    shop.push(hidden_gen);
+    let stamp_extra = format!("DEFAULT_GENERATED on update {now} INVISIBLE");
+    let mut hidden_stamp = table("hidden_stamp", TableProps::default());
+    add(
+        &mut hidden_stamp,
+        column("id", my_col("int", "int", None, false)),
+    );
+    add(
+        &mut hidden_stamp,
+        column(
+            "u",
+            ColumnProps {
+                hidden: true,
+                default_raw: Some(n(now)),
+                ..my_col("timestamp", "timestamp", Some(&stamp_extra), true)
+            },
+        ),
+    );
+    shop.push(hidden_stamp);
+
+    // A check the server does not enforce (MySQL 8.0.16+ `ENFORCED = 'NO'`, I2).
+    let mut loose = table("loose", TableProps::default());
+    add(&mut loose, column("a", my_col("int", "int", None, true)));
+    add(
+        &mut loose,
+        obj(
+            ObjectKind::Check,
+            "loose_chk_1",
+            Props::Check(Arc::new(CheckProps {
+                expr: n("(`a` > 0)"),
+                not_valid: false,
+                enforced: false,
+            })),
+        ),
+    );
+    add(
+        &mut loose,
+        check(ObjectKind::Check, "loose_chk_2", "(`a` < 100)"),
+    );
+    shop.push(loose);
 
     // A view and routines (`SHOW CREATE` texts).
     let v = src.add(if maria {
@@ -1729,6 +1890,85 @@ pub const CASES: &[Case] = &[
     Case {
         rel: "pg/row_security",
         make: || pg_text(&[(K::Table, &["shop", "secrets"])], no_grants()),
+    },
+    Case {
+        rel: "pg/disabled_trigger",
+        make: || pg_text(&[(K::Table, &["shop", "paused"])], no_grants()),
+    },
+    Case {
+        rel: "pg/not_enforced_pg18",
+        make: || {
+            let fx = pg();
+            let mut t = pg_target();
+            t.version = ServerVersion::new(18, 0, 0);
+            fx.text(&[fx.key(K::Table, &["shop", "loose"])], &t, &no_grants())
+        },
+    },
+    Case {
+        rel: "mysql/unique_key_index_options",
+        make: || {
+            my_text(
+                DbmsKind::MySql,
+                &[(K::Table, &["shop", "ranked"])],
+                no_grants(),
+                DelimStyle::Semicolon,
+            )
+        },
+    },
+    Case {
+        rel: "mysql/primary_key_index_options",
+        make: || {
+            my_text(
+                DbmsKind::MySql,
+                &[(K::Table, &["shop", "daily"])],
+                no_grants(),
+                DelimStyle::Semicolon,
+            )
+        },
+    },
+    Case {
+        rel: "mysql/invisible_generated_column",
+        make: || {
+            my_text(
+                DbmsKind::MySql,
+                &[(K::Table, &["shop", "hidden_gen"])],
+                no_grants(),
+                DelimStyle::Semicolon,
+            )
+        },
+    },
+    Case {
+        rel: "mysql/invisible_on_update_column",
+        make: || {
+            my_text(
+                DbmsKind::MySql,
+                &[(K::Table, &["shop", "hidden_stamp"])],
+                no_grants(),
+                DelimStyle::Semicolon,
+            )
+        },
+    },
+    Case {
+        rel: "mysql/not_enforced_check",
+        make: || {
+            my_text(
+                DbmsKind::MySql,
+                &[(K::Table, &["shop", "loose"])],
+                no_grants(),
+                DelimStyle::Semicolon,
+            )
+        },
+    },
+    Case {
+        rel: "mariadb/not_enforced_check_left_out",
+        make: || {
+            my_text(
+                DbmsKind::MariaDb,
+                &[(K::Table, &["shop", "loose"])],
+                no_grants(),
+                DelimStyle::Semicolon,
+            )
+        },
     },
     Case {
         rel: "mysql/table_full",

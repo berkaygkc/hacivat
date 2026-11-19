@@ -6,9 +6,10 @@
 //! Pure on its default features (`DdlIsPure`): no async runtime, no session, no driver, no
 //! introspection, no l10n. The non-default feature `apply` is M7's (R-M4-35).
 //!
-//! M4 Task 1a seams: the IR is declared in full; every renderer answers
-//! `RenderError::Unsupported` until Task 7 and the producer `DdlError::NotImplemented` until
-//! Task 19.
+//! M4: the IR is declared in full (Task 1a); the renderers render the view-only variants and
+//! answer `RenderError::Unsupported` for the rest (Task 7; M7 fills them); the producers build
+//! view-only scripts from the model (Task 19). `DdlError::NotImplemented` is no longer
+//! produced. (## m4-t19-produce, named exception: this paragraph.)
 
 pub mod ir;
 pub mod options;

@@ -290,8 +290,9 @@ pub struct KeyColumn {
     pub name: Option<Name>,
 }
 
-/// The shared fields of keys and indexes.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// The shared fields of keys and indexes. `Default` is an **enforced** key with nothing else
+/// set (m4-t19 named exception below).
+#[derive(Debug, Clone, PartialEq)]
 pub struct KeyProps {
     /// Key columns in key order.
     pub columns: Vec<KeyColumn>,
@@ -363,13 +364,53 @@ pub struct FkProps {
     pub enforced: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+/// `Default` is an **enforced** check (m4-t19 named exception below).
+#[derive(Debug, Clone, PartialEq)]
 pub struct CheckProps {
     /// The check (or exclusion) expression, raw.
     pub expr: Name,
     pub not_valid: bool,
     pub enforced: bool,
 }
+
+// ## m4-t19-produce (named exception in Task 1a/3's file; T19 review I2): a default key or
+// check is **enforced**. A derived `Default` made `enforced = false`, so every constraint built
+// with `..Default::default()` read as NOT ENFORCED, a wrong fact for the DDL producer. The
+// field name and its meaning are unchanged, so the cache codec (T11: one bool,
+// `put_bool(p.enforced)`) needs nothing; when T13 adds `rare` to these structs, these impls
+// gain `rare: None`.
+
+impl Default for KeyProps {
+    fn default() -> Self {
+        KeyProps {
+            columns: Vec::new(),
+            expressions: Vec::new(),
+            include: Vec::new(),
+            predicate: None,
+            desc: Vec::new(),
+            unique: false,
+            nulls_not_distinct: false,
+            deferrable: false,
+            initially_deferred: false,
+            not_valid: false,
+            enforced: true,
+            invisible: false,
+            backing_index: None,
+            implicit_for: None,
+        }
+    }
+}
+
+impl Default for CheckProps {
+    fn default() -> Self {
+        CheckProps {
+            expr: Name::from(""),
+            not_valid: false,
+            enforced: true,
+        }
+    }
+}
+// ## end m4-t19-produce
 
 /// Routine properties: the `sql_catalog::FnSig` fields (schema and name are the object's) plus
 /// the owner, MySQL's definer and specific name (MySQL routine identity is `(ROUTINE_TYPE,

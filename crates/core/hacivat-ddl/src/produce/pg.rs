@@ -30,6 +30,23 @@ pub(crate) fn owned_by(
     ))
 }
 
+/// `ALTER TABLE table DISABLE TRIGGER name`: `pg_get_triggerdef` prints a trigger as if it
+/// were enabled (pg_dump writes the same statement after it).
+pub(crate) fn disable_trigger(
+    ctx: &RenderCtx,
+    table: &QualifiedName,
+    name: &Name,
+) -> Result<Stmt, RenderError> {
+    Ok(stmt(
+        format!(
+            "ALTER TABLE {} DISABLE TRIGGER {}",
+            ctx.qname(table)?,
+            ctx.ident(name)?
+        ),
+        TxnClass::Transactional,
+    ))
+}
+
 /// The table clauses of `tp`: persistence, `PARTITION OF … FOR VALUES`, `PARTITION BY`,
 /// access method, storage parameters and tablespace, all raw. `INHERITS` needs a parent list
 /// the model does not hold yet (the producer refuses an inheritance child instead).

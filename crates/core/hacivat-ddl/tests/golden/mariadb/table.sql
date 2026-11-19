@@ -24,8 +24,6 @@ CREATE INDEX idx_note_prefix ON orders (note(10));
 
 CREATE FULLTEXT INDEX ft_note ON orders (note);
 
-CREATE INDEX idx_lower_code ON orders ((lower(`code`)));
-
 CREATE INDEX idx_amount_hidden ON orders (amount) IGNORED;
 
 CREATE DEFINER=`root`@`%` TRIGGER `orders_bi` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.code = UPPER(NEW.code);

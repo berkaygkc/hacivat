@@ -1022,7 +1022,38 @@ merged model, `ModelView` and the T7 renderers, and reviewed as new code.
   materialized views, standalone indexes, triggers and constraints.
 - **Gaps recorded, not hidden:** an `INHERITS` child is `NotLoaded` (the model holds no parent
   list, and dropping inherited columns without `INHERITS` would describe another table);
-  MySQL partitioning (`CREATE_OPTIONS partitioned`) raises `ddl-unsupported-kind`; NOT
-  ENFORCED constraints, PG 18 named NOT NULL constraints, MySQL table charset and per-part
+  MySQL partitioning (`CREATE_OPTIONS partitioned`) raises `ddl-unsupported-kind`; (NOT
+  ENFORCED: see fix round 1 below) PG 18 named NOT NULL constraints, MySQL table charset and per-part
   `NULLS FIRST`/operator class/collation and exclusion deferral (T13's R-W2-8 fields) are not
   written yet; `with_options` is unsupported (T13 carry).
+- **Fix round 1 (opus review: a script never states a wrong fact silently; it is exact, carries
+  a notice, or answers `NotLoaded`):**
+  - **I1:** a MySQL/MariaDB unique key whose backing index has prefixes, descending parts,
+    `INVISIBLE`, a comment or a method other than `BTREE` is `CREATE UNIQUE INDEX` from that
+    index; such a primary key is `ALTER TABLE … ADD PRIMARY KEY (…) [USING HASH] [COMMENT …]`
+    after the table. If an `AUTO_INCREMENT` column's only key needs that route, the script is
+    refused (`Render(Invalid)`), since MySQL wants the key at `CREATE TABLE`.
+  - **I2:** `KeyProps`/`CheckProps` `Default` is now **enforced** (named exception in
+    `hacivat-meta/src/props.rs`, fenced `m4-t19-produce`; field name and codec unchanged, T11
+    needs nothing; T13 adds `rare: None` to the two impls). A constraint the server does not
+    enforce is `ALTER TABLE … ADD … NOT ENFORCED` where the target has it (MySQL 8.0.16+
+    checks; PostgreSQL 18+ checks and foreign keys), else left out with
+    `ddl-warn-not-enforced`. Introspector contract (T16/T17): `enforced` is `false` only for
+    a constraint the server reports as not enforced.
+  - **I3:** a disabled PostgreSQL trigger (`TriggerProps.enabled = false`) is followed by
+    `ALTER TABLE … DISABLE TRIGGER …`, on PostgreSQL only. T16 must fill `enabled` from
+    `tgenabled` (the derived default is `false`). `ENABLE REPLICA`/`ALWAYS` have no field yet.
+  - **I4:** `ColumnDef.invisible` (named exception in T7's `ir.rs`, `render/{mysql,pg,sqlite}.rs`
+    and `tests/render_ir.rs`, fenced): MySQL writes `INVISIBLE` after the type, any generated
+    clause, `ON UPDATE` and `AUTO_INCREMENT`; PostgreSQL and SQLite refuse it. `on_update_of`
+    keeps one token, so a trailing `INVISIBLE` in `EXTRA` is not swallowed.
+  - **I5:** `ddl-warn-unknown-type` (named exception in m4-t01a's FTL DDL block, fenced
+    `## m4-t19-produce`, TR `# Review: PO`): a PostgreSQL column whose `type_ref` is outside
+    `pg_catalog`/`information_schema` and is neither a type nor a relation the view holds.
+  - **Minors:** a `sqlite_autoindex_*` name is implicit on SQLite only; a PG/MySQL table with
+    `Props::None`, or a partitioned parent without its key, is `NotLoaded`; MariaDB has no
+    functional key parts (such an index is left out with `ddl-unsupported-kind`).
+  - **Recorded gaps (carries):** identity sequence options and name, PG column storage and
+    compression, view `security_invoker`/`security_barrier` (M7); dependency order for
+    whole-schema scripts (T31, M7); `server_text` has no load state (T25, T22); revoked
+    default privileges (M7); per-part opclass/collation/NULLS FIRST (T13).

@@ -8,7 +8,7 @@ mod fixtures;
 use fixtures::*;
 use hacivat_ddl::produce::{
     GRANTS_NOT_LOADED, GRANTS_PARTIAL, POLICIES_NOT_LOADED, SQLITE_PLACEMENT_FORCED,
-    UNSUPPORTED_KIND, WARN_EXECUTABLE_COMMENT,
+    UNSUPPORTED_KIND, WARN_EXECUTABLE_COMMENT, WARN_NOT_ENFORCED,
 };
 use hacivat_ddl::script::DelimStyle;
 use hacivat_ddl::{DdlError, GenOptions};
@@ -288,6 +288,95 @@ fn golden_sqlite_comments_never_emitted() {
         },
     );
     assert!(s.has_notice(SQLITE_PLACEMENT_FORCED));
+}
+
+// ---- fix round 1: no wrong fact stated silently ---------------------------------------------
+
+#[test]
+fn golden_pg_disabled_trigger() {
+    let text = golden("pg/disabled_trigger");
+    let create = text.find("CREATE TRIGGER paused_audit").expect("trigger");
+    let disable = text
+        .find("ALTER TABLE paused DISABLE TRIGGER paused_audit;")
+        .expect("disabled");
+    assert!(create < disable);
+}
+
+#[test]
+fn golden_pg_not_enforced_on_18() {
+    let text = golden("pg/not_enforced_pg18");
+    assert!(text.contains(
+        "ALTER TABLE loose ADD CONSTRAINT loose_customer_check CHECK ((customer_id > 0)) NOT ENFORCED;"
+    ));
+    assert!(
+        text.contains("FOREIGN KEY (customer_id) REFERENCES shop.customers (id) NOT ENFORCED;")
+    );
+    assert!(
+        !text.contains("    CONSTRAINT"),
+        "never inside the table as enforced"
+    );
+}
+
+#[test]
+fn golden_mysql_unique_key_keeps_index_options() {
+    let text = golden("mysql/unique_key_index_options");
+    assert!(
+        !text.contains("UNIQUE KEY"),
+        "the constraint form would drop them"
+    );
+    assert!(text.contains(
+        "CREATE UNIQUE INDEX uq_score ON ranked (score DESC) USING HASH COMMENT 'Leaderboard order' INVISIBLE;"
+    ));
+}
+
+#[test]
+fn golden_mysql_primary_key_keeps_index_options() {
+    let text = golden("mysql/primary_key_index_options");
+    assert!(!text.contains("    PRIMARY KEY"));
+    assert!(text.contains(
+        "ALTER TABLE daily ADD PRIMARY KEY (region, day DESC) COMMENT 'Newest day first';"
+    ));
+}
+
+#[test]
+fn golden_mysql_invisible_generated_column() {
+    let text = golden("mysql/invisible_generated_column");
+    assert!(text.contains("g int GENERATED ALWAYS AS ((`a` + 1)) VIRTUAL INVISIBLE"));
+}
+
+#[test]
+fn golden_mysql_invisible_on_update_column() {
+    let text = golden("mysql/invisible_on_update_column");
+    assert!(text.contains(
+        "u timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP INVISIBLE"
+    ));
+    assert!(!text.contains("CURRENT_TIMESTAMP INVISIBLE INVISIBLE"));
+}
+
+#[test]
+fn golden_mysql_not_enforced_check() {
+    let text = golden("mysql/not_enforced_check");
+    assert!(
+        text.contains(
+            "ALTER TABLE loose ADD CONSTRAINT loose_chk_1 CHECK ((`a` > 0)) NOT ENFORCED;"
+        )
+    );
+    assert!(text.contains("    CONSTRAINT loose_chk_2 CHECK ((`a` < 100))"));
+}
+
+#[test]
+fn golden_mariadb_not_enforced_check_left_out() {
+    let text = golden("mariadb/not_enforced_check_left_out");
+    assert!(!text.contains("loose_chk_1") && !text.contains("NOT ENFORCED"));
+    let fx = mysql(DbmsKind::MariaDb);
+    let s = fx.script(
+        &[fx.key(K::Table, &["shop", "loose"])],
+        &mysql_target(DialectId::MariaDb),
+        &no_grants(),
+    );
+    assert!(s.notices.iter().any(
+        |n| n.id == WARN_NOT_ENFORCED && n.args.contains(&("name", "loose_chk_1".to_string()))
+    ));
 }
 
 // ---- every golden ------------------------------------------------------------------------------

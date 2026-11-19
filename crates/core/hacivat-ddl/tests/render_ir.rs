@@ -61,6 +61,7 @@ fn col(name: &str, ty: &str) -> ColumnDef {
         identity: None,
         on_update: None,
         comment: None,
+        invisible: false, // ## m4-t19-produce
     }
 }
 

@@ -7,15 +7,19 @@ use std::sync::Arc;
 
 use fixtures::*;
 use hacivat_ddl::produce::{
-    GRANTS_NOT_LOADED, GRANTS_PARTIAL, UNSUPPORTED_KIND, create_script, create_script_with,
+    GRANTS_NOT_LOADED, GRANTS_PARTIAL, UNSUPPORTED_KIND, WARN_NOT_ENFORCED, WARN_UNKNOWN_TYPE,
+    create_script, create_script_with,
 };
 use hacivat_ddl::render::RenderError;
-use hacivat_ddl::script::DelimStyle;
+use hacivat_ddl::script::{DelimStyle, Notice};
 use hacivat_ddl::{DdlError, DdlTarget, GenOptions};
 use hacivat_meta::ids::ObjectKey;
 use hacivat_meta::namespace::{Level, Obj, ObjFlags, Subtree, Watermark};
 use hacivat_meta::overlay::{Overlays, VirtualFk};
-use hacivat_meta::props::{ColumnProps, Props, TableProps, ViewProps};
+use hacivat_meta::props::{
+    CheckProps, ColumnProps, IndexProps, KeyProps, Props, TableProps, TypeBody, TypeProps, TypeRef,
+    ViewProps,
+};
 use hacivat_meta::snapshot::LoadState;
 use hacivat_proto::DbmsKind;
 use sql_dialect::{DialectId, ServerVersion};
@@ -75,22 +79,115 @@ fn unnamed_constraints_get_no_synthetic_names() {
     assert!(!my.contains("orders_chk_1") && !my.contains("PRIMARY`"));
 }
 
+fn typed(ty: &str, schema: &str, name: &str) -> ColumnProps {
+    ColumnProps {
+        type_ref: Some(TypeRef {
+            schema: Some(n(schema)),
+            name: n(name),
+        }),
+        ..col("", ty, true)
+    }
+}
+
 #[test]
 fn unknown_type_emitted_as_is_with_a_warning() {
-    // A type the model does not know (an extension's) is the server's spelling, verbatim.
+    // A type the loaded catalog does not hold (an extension's) is the server's spelling,
+    // verbatim, with `ddl-warn-unknown-type`; built-in and known user types raise nothing.
     let mut t = table("tags", TableProps::default());
-    add(&mut t, column("label", col("", "public.citext", true)));
-    add(&mut t, column("n", col("", "\"Weird Type\"[]", true)));
-    let fx = tiny_pg(vec![t], loaded());
-    let text = fx.text(
+    add(
+        &mut t,
+        column("label", typed("public.citext", "public", "citext")),
+    );
+    add(&mut t, column("n", typed("integer", "pg_catalog", "int4")));
+    add(&mut t, column("m", typed("mood", "shop", "mood")));
+    let mood = leaf(
+        Obj::new(K::EnumType, "mood").with_props(Props::Type(Arc::new(TypeProps {
+            body: TypeBody::Enum {
+                labels: vec![n("a")].into(),
+            },
+            ..TypeProps::default()
+        }))),
+    );
+    let fx = tiny_pg(vec![t, mood], loaded());
+    let s = fx.script(
         &[fx.key(K::Table, &["shop", "tags"])],
         &pg_target(),
         &no_grants(),
     );
     assert_eq!(
-        text,
-        "CREATE TABLE tags (\n    label public.citext,\n    n \"Weird Type\"[]\n);\n"
+        s.text(DelimStyle::Semicolon),
+        "CREATE TABLE tags (\n    label public.citext,\n    n integer,\n    m mood\n);\n"
     );
+    assert_eq!(
+        s.notices,
+        vec![Notice {
+            id: WARN_UNKNOWN_TYPE,
+            args: vec![("type", "public.citext".to_string())],
+        }]
+    );
+}
+
+#[test]
+fn constraints_default_to_enforced() {
+    assert!(KeyProps::default().enforced && CheckProps::default().enforced);
+    assert!(IndexProps::default().key.enforced);
+}
+
+#[test]
+fn not_enforced_before_pg18_is_left_out_with_a_notice() {
+    let fx = pg();
+    let k = [fx.key(K::Table, &["shop", "loose"])];
+    let s = fx.script(&k, &pg_target(), &no_grants());
+    let text = s.text(DelimStyle::Semicolon);
+    assert_eq!(text, "CREATE TABLE loose (\n    customer_id bigint\n);\n");
+    let ids: Vec<_> = s
+        .notices
+        .iter()
+        .filter(|n| n.id == WARN_NOT_ENFORCED)
+        .flat_map(|n| n.args.iter().map(|(_, v)| v.clone()))
+        .collect();
+    assert_eq!(ids, ["loose_customer_check", "loose_customer_fk"]);
+    // A selected constraint alone follows the same rule.
+    let c = fx.key(K::Check, &["shop", "loose", "loose_customer_check"]);
+    let s = fx.script(std::slice::from_ref(&c), &pg_target(), &opts());
+    assert!(s.stmts.is_empty() && s.has_notice(WARN_NOT_ENFORCED));
+    let mut t18 = pg_target();
+    t18.version = ServerVersion::new(18, 0, 0);
+    assert_eq!(
+        fx.text(&[c], &t18, &opts()),
+        "ALTER TABLE loose ADD CONSTRAINT loose_customer_check CHECK ((customer_id > 0)) NOT ENFORCED;\n"
+    );
+    // MySQL before 8.0.16 has no NOT ENFORCED either.
+    let my = mysql(DbmsKind::MySql);
+    let mut old = mysql_target(DialectId::MySql);
+    old.version = ServerVersion::new(8, 0, 15);
+    let s = my.script(&[my.key(K::Table, &["shop", "loose"])], &old, &no_grants());
+    assert!(s.has_notice(WARN_NOT_ENFORCED));
+    assert!(!s.text(DelimStyle::Semicolon).contains("loose_chk_1"));
+}
+
+#[test]
+fn a_table_without_props_or_a_partition_key_is_not_loaded() {
+    let none = leaf(Obj::new(K::Table, "bare"));
+    let parted = table(
+        "parted",
+        TableProps {
+            partitioned: true,
+            ..TableProps::default()
+        },
+    );
+    let fx = tiny_pg(vec![none, parted], loaded());
+    for t in ["bare", "parted"] {
+        assert_eq!(
+            fx.try_script(
+                &[fx.key(K::Table, &["shop", t])],
+                &pg_target(),
+                &no_grants()
+            ),
+            Err(DdlError::NotLoaded),
+            "{t}"
+        );
+    }
 }
 
 #[test]

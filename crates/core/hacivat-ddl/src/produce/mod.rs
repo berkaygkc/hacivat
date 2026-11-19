@@ -21,6 +21,12 @@
 //!   facet that is not loaded gives `ddl-grants-not-loaded`, never a script that silently lacks
 //!   grants; a kind with no producer is left out with `ddl-unsupported-kind`; a NUL anywhere in
 //!   the output is refused.
+//! - **No wrong fact stated silently** (T19 review): a constraint the server does not enforce
+//!   is written `NOT ENFORCED` where the target can say so (MySQL 8.0.16+ checks, PostgreSQL
+//!   18+ checks and foreign keys), else left out with `ddl-warn-not-enforced`; a disabled
+//!   PostgreSQL trigger is followed by `ALTER TABLE … DISABLE TRIGGER`; a MySQL key whose index
+//!   options have no constraint form goes through its index; a PostgreSQL column type the
+//!   loaded catalog does not hold raises `ddl-warn-unknown-type`.
 //! - **Virtual objects are never emitted**: virtual foreign keys live in the view's overlays,
 //!   never in the arenas this module reads.
 //!
@@ -42,7 +48,7 @@ use std::sync::Arc;
 
 use hacivat_meta::ids::{NsKey, NsKind, ObjectKey, Ref, SourceRef};
 use hacivat_meta::kind::{KindGroup, ObjectKind};
-use hacivat_meta::name::Name;
+use hacivat_meta::name::{Name, NamePart};
 use hacivat_meta::namespace::{NamespaceSnapshot, Obj, ObjFlags};
 use hacivat_meta::props::{
     CheckProps, ColumnExt, ColumnProps, Facet, FkProps, GrantsFacet, Identity, IndexProps,
@@ -53,7 +59,7 @@ use hacivat_meta::view::{Lookup, ModelView};
 use hacivat_proto::DbmsKind;
 use smallvec::SmallVec;
 use sql_catalog::types::{ArgMode, FnKind};
-use sql_dialect::DialectId;
+use sql_dialect::{DialectId, ServerVersion};
 use sql_ident::QualifiedName;
 use sql_ident::ident::Ident;
 use sql_ident::quote::QuoteError;
@@ -78,6 +84,21 @@ pub const POLICIES_NOT_LOADED: &str = "ddl-policies-not-loaded";
 /// `ddl-warn-executable-comment`: MySQL/MariaDB text holding `/*!` (it runs as SQL).
 pub const WARN_EXECUTABLE_COMMENT: &str = "ddl-warn-executable-comment";
 pub use placement::SQLITE_PLACEMENT_FORCED;
+/// `ddl-warn-unknown-type` (arg `type`): a column type the loaded catalog does not hold.
+pub const WARN_UNKNOWN_TYPE: &str = "ddl-warn-unknown-type";
+/// `ddl-warn-not-enforced` (arg `name`): a constraint the server does not enforce, left out
+/// because the target cannot write `NOT ENFORCED`.
+pub const WARN_NOT_ENFORCED: &str = "ddl-warn-not-enforced";
+
+/// How a constraint's enforcement can be written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Enforcement {
+    Enforced,
+    /// Written with `NOT ENFORCED`.
+    NotEnforced,
+    /// Not enforced, and the target has no way to say so: left out with a notice.
+    Unwritable,
+}
 
 /// What the model keeps outside the arenas: source texts and facets (R-M4-30). The caller
 /// (the DDL view, Task 25) backs it with the cache's content-addressed source store and the
@@ -174,13 +195,31 @@ pub fn create_script_with(
             Step::OwnedBy { seq, table, column } => {
                 stmts.push(pg::owned_by(&ctx, &seq, &table, &column).map_err(DdlError::Render)?);
             }
-            Step::IndexOption { op, word } => {
+            Step::Suffixed { op, word } => {
                 let mut v = r.render(&op, &ctx).map_err(DdlError::Render)?;
                 if let Some(first) = v.first_mut() {
                     first.text.push(' ');
                     first.text.push_str(word);
                 }
                 stmts.extend(v);
+            }
+            Step::DisableTrigger { table, name } => {
+                stmts.push(pg::disable_trigger(&ctx, &table, &name).map_err(DdlError::Render)?);
+            }
+            Step::MySqlPrimaryKey {
+                table,
+                parts,
+                method,
+                comment,
+            } => {
+                let pk = mysql::add_primary_key(
+                    &ctx,
+                    &table,
+                    &parts,
+                    method.as_deref(),
+                    comment.as_deref(),
+                );
+                stmts.push(pk.map_err(DdlError::Render)?);
             }
         }
     }
@@ -200,7 +239,8 @@ pub fn create_script_with(
 }
 
 /// One step of a script: an IR op, or a statement the IR has no variant for yet (T7 carry:
-/// `ALTER SEQUENCE … OWNED BY`; a MySQL index visibility option).
+/// `ALTER SEQUENCE … OWNED BY`; a MySQL index visibility option; `NOT ENFORCED`; a disabled
+/// PostgreSQL trigger; a MySQL primary key with index options).
 #[derive(Debug, Clone)]
 enum Step {
     Op(DdlOp),
@@ -210,11 +250,25 @@ enum Step {
         table: QualifiedName,
         column: Name,
     },
-    /// A MySQL `CREATE INDEX` followed by an index option keyword (`INVISIBLE`, MariaDB
-    /// `IGNORED`).
-    IndexOption {
+    /// An op whose first statement ends with one more keyword: a MySQL index option
+    /// (`INVISIBLE`, MariaDB `IGNORED`), or `NOT ENFORCED` after `ALTER TABLE … ADD`.
+    Suffixed {
         op: DdlOp,
         word: &'static str,
+    },
+    /// PostgreSQL `ALTER TABLE table DISABLE TRIGGER name` (`pg_get_triggerdef` does not carry
+    /// `tgenabled`).
+    DisableTrigger {
+        table: QualifiedName,
+        name: Name,
+    },
+    /// MySQL/MariaDB `ALTER TABLE table ADD PRIMARY KEY (parts) [USING m] [COMMENT '…']`: a
+    /// primary key whose index has descending parts, prefixes, a method or a comment.
+    MySqlPrimaryKey {
+        table: QualifiedName,
+        parts: Vec<IndexPartDef>,
+        method: Option<Name>,
+        comment: Option<Name>,
     },
 }
 
@@ -855,13 +909,99 @@ impl<'a> Gen<'a> {
             }
             if let Some(table) = self.parent_qname(it)? {
                 let def = self.lower_constraint(it)?;
-                self.op(DdlOp::AlterTable {
-                    table,
-                    actions: vec![AlterAction::AddConstraint(def)],
-                });
+                match self.enforcement(it) {
+                    Enforcement::Enforced => self.op(DdlOp::AlterTable {
+                        table,
+                        actions: vec![AlterAction::AddConstraint(def)],
+                    }),
+                    Enforcement::NotEnforced => {
+                        let step = Self::not_enforced_step(table, def);
+                        self.steps.push(step);
+                    }
+                    Enforcement::Unwritable => self.not_enforced_omitted(it),
+                }
             }
         }
         Ok(())
+    }
+
+    /// Whether `it` (a constraint) is enforced, and if not, whether the target can say so:
+    /// MySQL 8.0.16+ checks; PostgreSQL 18+ checks and foreign keys. Anything else that the
+    /// server does not enforce cannot be written as a fact.
+    fn enforcement(&self, it: &Item) -> Enforcement {
+        let enforced = match it.obj().props() {
+            Props::Key(k) => k.enforced,
+            Props::ForeignKey(f) => f.enforced,
+            Props::Check(c) => c.enforced,
+            _ => true,
+        };
+        if enforced {
+            return Enforcement::Enforced;
+        }
+        let v = self.target.version;
+        let writable = match (self.d(), it.kind()) {
+            (DialectId::MySql, ObjectKind::Check) => v >= ServerVersion::new(8, 0, 16),
+            (DialectId::Postgres, ObjectKind::Check | ObjectKind::ForeignKey) => {
+                v >= ServerVersion::new(18, 0, 0)
+            }
+            _ => false,
+        };
+        if writable {
+            Enforcement::NotEnforced
+        } else {
+            Enforcement::Unwritable
+        }
+    }
+
+    /// `ALTER TABLE … ADD <constraint> NOT ENFORCED` (a not-enforced constraint is never
+    /// validated, so `NOT VALID` is not written).
+    fn not_enforced_step(table: QualifiedName, mut def: ConstraintDef) -> Step {
+        def.not_valid = false;
+        Step::Suffixed {
+            op: DdlOp::AlterTable {
+                table,
+                actions: vec![AlterAction::AddConstraint(def)],
+            },
+            word: "NOT ENFORCED",
+        }
+    }
+
+    /// A constraint the server does not enforce, on a target that cannot write `NOT
+    /// ENFORCED`: left out, with `ddl-warn-not-enforced`, never shown as enforced.
+    fn not_enforced_omitted(&mut self, it: &Item) {
+        self.notices.push(Notice {
+            id: WARN_NOT_ENFORCED,
+            args: vec![("name", it.name().to_string())],
+        });
+    }
+
+    /// `ddl-warn-unknown-type` for a PostgreSQL column whose type (`type_ref`) is outside
+    /// `pg_catalog` and `information_schema` and is not a type or relation the view holds: the
+    /// server's spelling is written, and the user must make sure the type exists.
+    fn warn_unknown_type(&mut self, db: Option<&Name>, cp: &ColumnProps) {
+        if !self.pg() {
+            return;
+        }
+        let Some(t) = &cp.type_ref else { return };
+        let Some(schema) = &t.schema else { return };
+        if matches!(&**schema, "pg_catalog" | "information_schema") {
+            return;
+        }
+        let part = |text: &Name| NamePart {
+            text: text.clone(),
+            quoted: true,
+        };
+        // `database.schema.name`: exact, whatever the view's search path.
+        let path: Vec<NamePart> = db.into_iter().chain([schema, &t.name]).map(part).collect();
+        let known = [KindGroup::Types, KindGroup::Relations]
+            .iter()
+            .any(|g| matches!(self.view.lookup(&path, *g), Lookup::Found(_)));
+        if !known {
+            self.notices.push(Notice {
+                id: WARN_UNKNOWN_TYPE,
+                args: vec![("type", cp.raw_type.to_string())],
+            });
+        }
     }
 
     fn emit_schema(&mut self, it: &Item) -> Result<(), DdlError> {
@@ -1174,13 +1314,13 @@ impl<'a> Gen<'a> {
 
     /// Whether `ix` is created by something else: an index backing a key (it carries
     /// `IMPLICIT` / `implicit_for`, or a key of its table names it), an inherited partition
-    /// index, or a SQLite autoindex.
-    fn index_is_implicit(ix: &Item, ip: &IndexProps) -> bool {
+    /// index, or (on SQLite only) an autoindex.
+    fn index_is_implicit(ix: &Item, ip: &IndexProps, sqlite: bool) -> bool {
         if ix
             .flags()
             .intersects(ObjFlags::IMPLICIT | ObjFlags::INHERITED)
             || ip.key.implicit_for.is_some()
-            || sqlite::is_autoindex(&ix.name())
+            || (sqlite && sqlite::is_autoindex(&ix.name()))
         {
             return true;
         }
@@ -1236,13 +1376,18 @@ impl<'a> Gen<'a> {
         let Props::Index(ip) = ix.props() else {
             return Err(DdlError::NotLoaded);
         };
-        if Self::index_is_implicit(ix, &ip) {
+        if Self::index_is_implicit(ix, &ip, self.sqlite()) {
             return Ok(None);
         }
         let name = Self::checked_name(ix)?;
         if self.sqlite() {
             let text = self.source(ix, None)?;
             return Ok(Some(Step::Op(raw(text))));
+        }
+        if self.d() == DialectId::MariaDb && !ip.key.expressions.is_empty() {
+            // MariaDB has no functional key parts: such an index is not one it reports.
+            self.unsupported(ObjectKind::Index);
+            return Ok(None);
         }
         let pg = self.pg();
         if pg
@@ -1271,13 +1416,19 @@ impl<'a> Gen<'a> {
             return Ok(Some(Step::Op(raw(text))));
         }
         let op = self.index_op(&ip, name, table, ip.key.unique)?;
+        Ok(Some(self.with_visibility(op, &ip)))
+    }
+
+    /// `op` with the MySQL `INVISIBLE` / MariaDB `IGNORED` index option when `ip` has it.
+    fn with_visibility(&self, op: DdlOp, ip: &IndexProps) -> Step {
         if self.mysql() && ip.key.invisible {
-            return Ok(Some(Step::IndexOption {
+            Step::Suffixed {
                 op,
                 word: mysql::invisible_word(self.d()),
-            }));
+            }
+        } else {
+            Step::Op(op)
         }
-        Ok(Some(Step::Op(op)))
     }
 
     fn index_op(
@@ -1322,14 +1473,10 @@ impl<'a> Gen<'a> {
         let (raw_type, on_update) = match cp.ext() {
             ColumnExt::MySql {
                 column_type, extra, ..
-            } if self.mysql() => {
-                let mut t = column_type.clone().unwrap_or_else(|| raw_type.clone());
-                if *hidden {
-                    // `INVISIBLE` is a column attribute (MySQL 8.0.23+, MariaDB 10.3+).
-                    t = Name::from(format!("{t} INVISIBLE"));
-                }
-                (t, extra.as_deref().and_then(mysql::on_update_of))
-            }
+            } if self.mysql() => (
+                column_type.clone().unwrap_or_else(|| raw_type.clone()),
+                extra.as_deref().and_then(mysql::on_update_of),
+            ),
             _ => (raw_type.clone(), None),
         };
         Ok(ColumnDef {
@@ -1345,6 +1492,9 @@ impl<'a> Gen<'a> {
             identity: cp.identity(),
             on_update,
             comment: self.comment(comment.as_ref()),
+            // `INVISIBLE` is a column attribute (MySQL 8.0.23+, MariaDB 10.3+), written by the
+            // renderer after the type and any generated clause.
+            invisible: *hidden && self.mysql(),
         })
     }
 
@@ -1358,7 +1508,9 @@ impl<'a> Gen<'a> {
     ) -> Result<(), DdlError> {
         let tp: Arc<TableProps> = match it.props() {
             Props::Table(p) => p,
-            Props::None => Arc::new(TableProps::default()),
+            // SQLite reads only the server text; elsewhere a table without its props would
+            // lose its owner, comment, persistence, partitioning and options silently.
+            _ if self.sqlite() => Arc::new(TableProps::default()),
             _ => return Err(DdlError::NotLoaded),
         };
         let name = self.table_qname(it)?;
@@ -1411,6 +1563,9 @@ impl<'a> Gen<'a> {
                         continue;
                     }
                     columns.push(self.lower_column(c)?);
+                    if let Props::Column(cp) = c.obj().props() {
+                        self.warn_unknown_type(it.database().as_ref(), cp);
+                    }
                 }
                 k if is_constraint(k) => {
                     if !c.flags().contains(ObjFlags::INHERITED) {
@@ -1422,26 +1577,38 @@ impl<'a> Gen<'a> {
                 k => self.unsupported(k),
             }
         }
+        if pg && tp.partitioned && tp.partition_key.is_none() {
+            // A partitioned parent without its key would read as a plain table.
+            return Err(DdlError::NotLoaded);
+        }
         // Constraints: inside the table (the renderer places them), postponed past later
-        // tables, or (MySQL) after an index of the same name.
+        // tables, (MySQL) after an index of the same name, or with `NOT ENFORCED` after the
+        // table; MySQL keys whose index options have no constraint form go through their index.
         let mut constraints = Vec::new();
         let mut postponed = Vec::new();
         let mut after_indexes = Vec::new();
         let mut index_steps = Vec::new();
+        let mut not_enforced = Vec::new();
+        let mut moved_first_columns: Vec<Name> = Vec::new();
+        let sqlite = self.sqlite();
         let separate_index_names: BTreeSet<Name> = indexes
             .iter()
             .filter(|ix| match ix.props() {
-                Props::Index(ip) => !Self::index_is_implicit(ix, &ip),
+                Props::Index(ip) => !Self::index_is_implicit(ix, &ip, sqlite),
                 _ => false,
             })
             .map(Item::name)
             .collect();
         for k in &keys {
             if mysql
-                && k.kind() == ObjectKind::UniqueKey
-                && let Some(step) = self.mysql_prefix_unique(k, &indexes, &name)?
+                && matches!(k.kind(), ObjectKind::UniqueKey | ObjectKind::PrimaryKey)
+                && let Some(step) = self.mysql_key_as_index(k, &indexes, &name)?
             {
-                // A unique key on column prefixes: the prefixes live on its index.
+                if let Props::Key(kp) = k.obj().props()
+                    && let Some(Some(first)) = kp.columns.first().map(|c| c.name.clone())
+                {
+                    moved_first_columns.push(first);
+                }
                 index_steps.push(step);
                 continue;
             }
@@ -1452,6 +1619,22 @@ impl<'a> Gen<'a> {
                 }),
                 _ => false,
             };
+            match self.enforcement(k) {
+                Enforcement::Enforced => {}
+                Enforcement::NotEnforced => {
+                    let step = Self::not_enforced_step(name.clone(), def);
+                    if target_later {
+                        after.push(step);
+                    } else {
+                        not_enforced.push(step);
+                    }
+                    continue;
+                }
+                Enforcement::Unwritable => {
+                    self.not_enforced_omitted(k);
+                    continue;
+                }
+            }
             if target_later {
                 postponed.push(def);
             } else if mysql
@@ -1467,8 +1650,24 @@ impl<'a> Gen<'a> {
                 constraints.push(def);
             }
         }
-        if mysql && keys.iter().any(|k| k.kind() == ObjectKind::PrimaryKey) {
-            self.check_mysql_pk_prefix(&keys, &indexes)?;
+        if let Some(auto) = columns
+            .iter()
+            .find(|c| c.identity == Some(Identity::AutoIncrement))
+            .map(|c| c.name.clone())
+            && moved_first_columns.contains(&auto)
+            && !constraints.iter().any(|k| {
+                matches!(
+                    &k.body,
+                    ConstraintBody::PrimaryKey { columns } | ConstraintBody::Unique { columns, .. }
+                        if columns.first() == Some(&auto)
+                )
+            })
+        {
+            // MySQL wants an AUTO_INCREMENT column's key at CREATE TABLE, where these index
+            // options have no form.
+            return Err(DdlError::Render(RenderError::Invalid(
+                "an AUTO_INCREMENT column whose key needs index options",
+            )));
         }
         let partition_of = match &tp.partition_of {
             Some(r) if pg => Some((
@@ -1518,6 +1717,7 @@ impl<'a> Gen<'a> {
                     .collect(),
             });
         }
+        self.steps.append(&mut not_enforced);
         self.steps.extend(owned_by);
         for t in &triggers {
             self.emit_trigger(t)?;
@@ -1536,9 +1736,12 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
-    /// A MySQL unique key whose backing index has column prefixes, as `CREATE UNIQUE INDEX`
-    /// from that index (the constraint form has no prefix lengths; T13 carry m4).
-    fn mysql_prefix_unique(
+    /// A MySQL unique or primary key whose backing index has options the constraint form
+    /// cannot carry (column prefixes, descending parts, `INVISIBLE`, a comment, a method other
+    /// than `BTREE`; T13 carry m4, T19 review I1), written from that index: a unique key as
+    /// `CREATE UNIQUE INDEX …`, a primary key as `ALTER TABLE … ADD PRIMARY KEY …`. `None`
+    /// when the plain constraint is exact.
+    fn mysql_key_as_index(
         &mut self,
         k: &Item,
         indexes: &[Item],
@@ -1547,19 +1750,30 @@ impl<'a> Gen<'a> {
         let Some((ix, ip)) = Self::backing_index(k, indexes) else {
             return Ok(None);
         };
-        if ip.prefix_len.iter().all(Option::is_none) {
+        let options = ip.prefix_len.iter().any(Option::is_some)
+            || ip.key.desc.iter().any(|&d| d)
+            || ip.key.invisible
+            || ip.comment.is_some()
+            || mysql::non_default_method(ip.method.as_deref());
+        if !options {
             return Ok(None);
+        }
+        if k.kind() == ObjectKind::PrimaryKey {
+            if ip.key.invisible {
+                return Err(DdlError::Render(RenderError::Invalid(
+                    "an invisible MySQL primary key",
+                )));
+            }
+            return Ok(Some(Step::MySqlPrimaryKey {
+                table: table.clone(),
+                parts: self.index_parts(&ip)?,
+                method: ip.method.clone(),
+                comment: ip.comment.clone(),
+            }));
         }
         let name = Self::checked_name(&ix)?;
         let op = self.index_op(&ip, name, table, true)?;
-        Ok(Some(if ip.key.invisible {
-            Step::IndexOption {
-                op,
-                word: mysql::invisible_word(self.d()),
-            }
-        } else {
-            Step::Op(op)
-        }))
+        Ok(Some(self.with_visibility(op, &ip)))
     }
 
     /// The index backing key `k`: named by its `backing_index`, else by the key's own name.
@@ -1572,20 +1786,6 @@ impl<'a> Gen<'a> {
             Props::Index(ip) if ix.name() == want => Some((ix.clone(), ip)),
             _ => None,
         })
-    }
-
-    /// A MySQL primary key on column prefixes cannot be written as a constraint.
-    fn check_mysql_pk_prefix(&self, keys: &[Item], indexes: &[Item]) -> Result<(), DdlError> {
-        for k in keys.iter().filter(|k| k.kind() == ObjectKind::PrimaryKey) {
-            if let Some((_, ip)) = Self::backing_index(k, indexes)
-                && ip.prefix_len.iter().any(Option::is_some)
-            {
-                return Err(DdlError::Render(RenderError::Invalid(
-                    "a MySQL primary key on column prefixes",
-                )));
-            }
-        }
-        Ok(())
     }
 
     fn emit_view(&mut self, it: &Item) -> Result<(), DdlError> {
@@ -1650,12 +1850,20 @@ impl<'a> Gen<'a> {
         let name = Self::checked_name(it)?;
         let text = self.source(it, tp.source.as_ref())?;
         match self.parent_qname(it)? {
-            Some(table) if !self.sqlite() => self.op(DdlOp::CreateTrigger(TriggerDef {
-                name,
-                table,
-                text,
-                comment: None,
-            })),
+            Some(table) if !self.sqlite() => {
+                self.op(DdlOp::CreateTrigger(TriggerDef {
+                    name: name.clone(),
+                    table: table.clone(),
+                    text,
+                    comment: None,
+                }));
+                // `pg_get_triggerdef` prints a disabled trigger as enabled (PostgreSQL only:
+                // the other engines have no disabled state in the model's sense).
+                // `ENABLE REPLICA` / `ENABLE ALWAYS` have no field in the model yet.
+                if self.pg() && !tp.enabled {
+                    self.steps.push(Step::DisableTrigger { table, name });
+                }
+            }
             _ => self.op(raw(text)),
         }
         Ok(())

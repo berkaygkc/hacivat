@@ -184,6 +184,12 @@ fn column(
         Some(_) => return Err(RenderError::Invalid("an identity clause on MySQL")),
         None => {}
     }
+    // ## m4-t19-produce: a column attribute, after the type and any generated clause (MySQL
+    // 8.0.23+, MariaDB 10.3+).
+    if c.invisible {
+        s.push_str(" INVISIBLE");
+    }
+    // ## end m4-t19-produce
     for k in inline {
         match &k.body {
             ConstraintBody::PrimaryKey { .. } => s.push_str(" PRIMARY KEY"),
