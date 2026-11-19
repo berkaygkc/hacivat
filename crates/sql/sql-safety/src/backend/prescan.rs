@@ -58,6 +58,10 @@ pub(crate) struct Acc {
     pub(crate) set_targets: Vec<(SetTarget, TextRange)>,
     /// A catalog, an allowlist or an exec-comment reading was relied on.
     pub(crate) conservative: bool,
+    // ## m4-t06-ddl-effects
+    /// The catalog effects the parse of this reading names (`backend::ddl_effects::interim`);
+    /// read by no verdict path.
+    pub(crate) ddl: Vec<crate::report::DdlEffect>,
 }
 
 impl Acc {
@@ -94,6 +98,8 @@ impl Acc {
         self.touched.calls.extend(other.touched.calls);
         self.set_targets.extend(other.set_targets);
         self.conservative |= other.conservative;
+        // ## m4-t06-ddl-effects
+        self.ddl.extend(other.ddl);
     }
 }
 

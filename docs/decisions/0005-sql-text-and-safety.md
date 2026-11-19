@@ -1916,3 +1916,56 @@ Accepted false positive (fix round 1, m3): the match takes any standalone word, 
 current, `SESSION` as a keyword (`SET SESSION sql_mode = …`, `SET SESSION TRANSACTION …`,
 `SHOW SESSION STATUS`) also makes the statement `Unknown`. It fails closed and needs `sys` as
 the current database.
+
+## m4-t06 — DDL effects
+
+**What.** `StmtReport.ddl` (M4 Task 1c's seam) holds the catalog effects of each statement, the
+input of refresh after DDL (HV-INTRO-12 step 2, M4 Task 21): `CREATE/ALTER/DROP/RENAME/SET
+SCHEMA/COMMENT/GRANT/REVOKE` on a named object, with the table an index, trigger, policy, rule,
+column or constraint belongs to (`on`), the tables a foreign key, partition or parent names
+(`referenced`), `temp`, `concurrently` and `Drop { cascade }`. Each backend reads them from its
+own parse (`backend/ddl_effects/{pg,interim}.rs`; parser types stay in `backend/`, R-M3-54);
+`crate::ddl_effects::finish` adds the opaque effect.
+
+**Opaque rule.** An opaque effect (refresh the session's current namespace) leads the list when
+the statement may change what it does not name: kinds `Do`, `Call`, `Execute`, `Prepare`,
+`DropOwned` (M3c P2-07: `DROP OWNED` names a role, not its objects), `Other` (MySQL `CREATE
+EVENT`, `ALTER USER`, `RENAME USER`, SQLite `ATTACH`/`DETACH`, …) and `Explain { analyze: true
+}`; flags `EXEC_COMMENT`, `DYNAMIC_SQL`, `EXPLAIN_ANALYZE`; effects `UNKNOWN` (every statement
+the backend could not read, and every later statement of a script after one that may change
+what names mean), `ROUTINE_CALL`, `PREPARE`, or none; and every statement of the T1c scope
+that yielded no named effect (`REASSIGN OWNED`, `ALTER DEFAULT PRIVILEGES`, `CREATE CAST`,
+`CREATE SCHEMA AUTHORIZATION r`, …). Named effects stay beside it (refresh more, never less).
+`CREATE/ALTER/DROP EXTENSION` are opaque too: member objects land in a schema the statement may
+not name. **Named exception (U-3):** `TRUNCATE`, plain or `CASCADE`, has no effect (no catalog
+object changes; the Statistics facet reloads on demand).
+
+**Names as written.** Every name keeps its parts' text and quoting, never folded (consumers
+fold with `sql_ident::fold`). `sqlparser` keeps both. libpg_query's tree holds the server's
+reading (folded, cut to 63 bytes), so the PG backend finds the spelling in the statement's
+tokens: at the node's own location (`RangeVar`, `TypeName`, `RoleSpec`), else the first name
+in the statement that `fold` reads as the tree's text (the last one for a `RENAME TO` or `SET
+SCHEMA` target). Any spelling so found is the same object. When none is found (`U&"…"`, a
+comment between the parts) the tree's text is the name with every part quoted: the exact
+identity, never folded twice.
+
+**Engine choices.** A MySQL/MariaDB database is the model's schema (`NsKind::Schema`): `CREATE/
+DROP DATABASE|SCHEMA`, `GRANT … ON db.*` are `DdlKind::Schema` there (`ON *.*` is opaque).
+MySQL `RENAME TABLE a TO db2.b` (or `ALTER TABLE … RENAME TO db2.b`) is a rename of `a` plus a
+create of `db2.b`, so both schemas refresh. SQLite's `temp` schema (any ASCII case) makes an
+object `temp`; PostgreSQL's `pg_temp`/`pg_temp_N` too. A column or table-constraint comment is
+`DdlKind::Other` named by the column/constraint with `on` its table.
+
+**Never a verdict.** `ddl` is computed after the report's other fields and read by no verdict
+path (`decide`, `gate_class`, the policy, the exec gate). `classify`'s union of two lexing
+readings compares the readings with `ddl` left out, as before, and unites their effects.
+`ddl_effects_never_change_the_verdict` compares every statement of the existing corpora (read
+corpus, escaped literals, the SQL-SAFE-06 bypass catalogue, the classifier seeds, T10's run-A
+rows, this task's corpus: 3,360 statements) against a golden of their reports, `ddl` left out,
+written at the `m4` tip `f52034b` before this task changed `src/` (the T1c stub changed no other
+field since `fb98cf1`).
+
+**Not detected.** DDL run by a function that a plain `SELECT f()` calls when the classifier
+reads `f` as a read (a reviewed builtin, the profile's allowlist, the function catalog): the
+statement has no effect (an unknown `f` is `UNKNOWN`, so opaque). Only background validation
+(M4 Task 22) sees it.

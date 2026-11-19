@@ -369,7 +369,7 @@ ddl = ["opaque", "create extension hstore"]
 
 [[case]]
 sql = "drop extension hstore"
-ddl = ["drop extension hstore"]
+ddl = ["opaque", "drop extension hstore"]
 
 [[case]]
 sql = "create role r"

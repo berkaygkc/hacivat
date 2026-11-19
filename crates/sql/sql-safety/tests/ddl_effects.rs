@@ -67,7 +67,11 @@ fn eff(action: DdlAction, kind: DdlKind, name: &str) -> DdlEffect {
 /// A name as written: parts joined by `.`, a quoted part in `"…"` with `"` doubled (the
 /// corpus notation; the plan's `to_string()`: `QualifiedName` has no `Display`).
 fn show(name: &QualifiedName) -> String {
-    name.parts.iter().map(show_ident).collect::<Vec<_>>().join(".")
+    name.parts
+        .iter()
+        .map(show_ident)
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn show_ident(i: &Ident) -> String {
@@ -248,7 +252,10 @@ fn create_database() {
 
 #[test]
 fn alter_type_targets_the_type() {
-    for s in ["alter type s.mood add value 'x'", "alter type s.mood owner to r"] {
+    for s in [
+        "alter type s.mood add value 'x'",
+        "alter type s.mood owner to r",
+    ] {
         assert_eq!(
             pg(s).ddl,
             [eff(DdlAction::Alter, DdlKind::Type, "s.mood")],
@@ -274,7 +281,10 @@ fn set_schema_carries_the_new_schema() {
 
 #[test]
 fn temp_objects_flagged_temp() {
-    for s in ["create temp table t(a int)", "create temporary table t(a int)"] {
+    for s in [
+        "create temp table t(a int)",
+        "create temporary table t(a int)",
+    ] {
         assert!(pg(s).ddl[0].temp, "{s}");
     }
     assert!(sqlite("create table temp.t(a)").ddl[0].temp);
@@ -320,7 +330,10 @@ fn mysql_executable_comment_ddl_is_opaque() {
 fn unparseable_ddl_is_opaque() {
     assert_eq!(pg("create table t (a int,,)").ddl, [DdlEffect::opaque()]);
     assert_eq!(my("CREATE TABLE t (a int,,)").ddl, [DdlEffect::opaque()]);
-    assert_eq!(sqlite("CREATE TABLE t (a int,,)").ddl, [DdlEffect::opaque()]);
+    assert_eq!(
+        sqlite("CREATE TABLE t (a int,,)").ddl,
+        [DdlEffect::opaque()]
+    );
 }
 
 #[test]
@@ -361,7 +374,11 @@ fn quoted_mixed_case_names_kept_exact() {
 /// statement yields an effect or is opaque".
 #[test]
 fn truncate_and_truncate_cascade_have_no_ddl_effect() {
-    for s in ["truncate t", "truncate table a, b cascade", "truncate t restart identity"] {
+    for s in [
+        "truncate t",
+        "truncate table a, b cascade",
+        "truncate t restart identity",
+    ] {
         assert!(pg(s).ddl.is_empty(), "{s}");
     }
     for s in ["TRUNCATE TABLE t", "TRUNCATE t"] {
@@ -381,14 +398,21 @@ fn review_h1_statements_are_never_empty() {
         (DialectId::MySql, "ALTER USER 'u'@'%' ACCOUNT LOCK"),
         (DialectId::MySql, "RENAME USER 'a'@'%' TO 'b'@'%'"),
         (DialectId::MariaDb, "ALTER USER 'u'@'%' ACCOUNT LOCK"),
-        (DialectId::Postgres, "EXPLAIN ANALYZE CREATE TABLE t3 AS SELECT 1"),
+        (
+            DialectId::Postgres,
+            "EXPLAIN ANALYZE CREATE TABLE t3 AS SELECT 1",
+        ),
         (DialectId::Postgres, "EXPLAIN (ANALYZE) SELECT 1 INTO t4"),
         (DialectId::Sqlite, "ATTACH DATABASE 'other.db' AS other"),
         (DialectId::Sqlite, "DETACH DATABASE other"),
     ];
     for (d, sql) in cases {
         let r = one(d, sql);
-        assert!(r.ddl.first().is_some_and(|e| e.opaque), "{d:?}: {sql}: {:?}", r.ddl);
+        assert!(
+            r.ddl.first().is_some_and(|e| e.opaque),
+            "{d:?}: {sql}: {:?}",
+            r.ddl
+        );
     }
 }
 
@@ -418,6 +442,63 @@ fn long_names_are_kept_as_written() {
 fn unicode_escaped_names_are_the_servers_reading() {
     let e = &pg(r#"create table U&"d\0061t" (x int)"#).ddl[0];
     assert_eq!(show(e.name.as_ref().unwrap()), r#""dat""#);
+}
+
+/// A `RENAME TO` target is the last spelling of its name in the statement, so a quoted target
+/// stays quoted even when an unquoted name earlier reads the same.
+#[test]
+fn rename_target_keeps_its_own_quoting() {
+    let e = &pg(r#"alter table T rename to "t""#).ddl[0];
+    assert_eq!(show(e.name.as_ref().unwrap()), "T");
+    assert_eq!(
+        e.action,
+        DdlAction::Rename {
+            to: Ident {
+                text: "t".into(),
+                quoted: true
+            }
+        }
+    );
+}
+
+/// A name the text does not write as a plain name (a comment between its parts) is the
+/// server's reading of it, quoted: never another object, never folded twice.
+#[test]
+fn a_name_split_by_a_comment_is_the_servers_reading() {
+    let e = &pg("create table S /* x */ . T (a int)").ddl[0];
+    assert_eq!(show(e.name.as_ref().unwrap()), r#""s"."t""#);
+}
+
+/// Names inside a body or a string are never taken for the statement's own.
+#[test]
+fn bodies_and_strings_name_nothing() {
+    assert_eq!(
+        pg("do $$ begin create table x(a int); end $$").ddl,
+        [DdlEffect::opaque()]
+    );
+    let r = pg("comment on table t is 'drop table u'");
+    assert_eq!(rendered(&r), ["comment table t"]);
+}
+
+#[test]
+fn quoted_names_of_triggers_and_their_tables_are_kept() {
+    let r = pg(r#"drop trigger "Trg" on "S"."T""#);
+    assert_eq!(rendered(&r), [r#"drop trigger "Trg" on="S"."T""#]);
+    let r = sqlite("CREATE TABLE [My T](a)");
+    assert_eq!(rendered(&r), [r#"create table "My T""#]);
+}
+
+/// MySQL `GRANT … ON db.*` targets the schema; `ON *.*` names nothing.
+#[test]
+fn mysql_grant_on_a_database_wildcard() {
+    assert_eq!(
+        rendered(&my("GRANT SELECT ON db.* TO 'u'@'%'")),
+        ["grant schema db"]
+    );
+    assert_eq!(
+        my("GRANT SELECT ON *.* TO 'u'@'%'").ddl,
+        [DdlEffect::opaque()]
+    );
 }
 
 // -- the corpus ----------------------------------------------------------------------------------
@@ -715,8 +796,9 @@ fn ddl_effects_never_change_the_verdict() {
     }
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
         let mut text = String::from(
-            "# owner: Task 6 (M4). Golden of `classify`'s reports, `ddl` left out, over the existing\n\
-             # corpora (`sql-safety/tests/ddl_effects.rs`, `ddl_effects_never_change_the_verdict`),\n\
+            "# owner: Task 6 (M4). Golden of `classify`'s reports, `ddl` left out, over the\n\
+             # existing corpora (`sql-safety/tests/ddl_effects.rs`,\n\
+             # `ddl_effects_never_change_the_verdict`),\n\
              # written at the `m4` base before Task 6 changed `src/`. Columns: source, dialect,\n\
              # XXH3-64 of the statement, XXH3-64 of the report's projection.\n",
         );

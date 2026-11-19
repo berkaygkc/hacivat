@@ -496,13 +496,20 @@ fn union_readings(mut a: SafetyReport, b: SafetyReport) -> SafetyReport {
         a.pre_decision = Some(reasons);
         return a;
     }
-    for (x, y) in a.items.iter_mut().zip(b.items) {
+    for (x, mut y) in a.items.iter_mut().zip(b.items) {
         if class_of(y.effects) > class_of(x.effects) {
             x.kind = y.kind;
         }
+        // ## m4-t06-ddl-effects (named exception): the readings are compared as before Task 6,
+        // `ddl` left out (it never changes the report's other fields); their effects are
+        // united below.
+        let y_ddl = std::mem::take(&mut y.ddl);
+        let x_ddl = std::mem::take(&mut x.ddl);
         if y.confidence != x.confidence || y != *x {
             x.confidence = crate::report::Confidence::Conservative;
         }
+        x.ddl = x_ddl;
+        extend_unique(&mut x.ddl, y_ddl);
         x.effects |= y.effects;
         x.flags |= y.flags;
         extend_unique(&mut x.reasons, y.reasons);
