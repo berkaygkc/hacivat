@@ -104,15 +104,16 @@ fn run(ops: Vec<Op>) -> Result<(), String> {
         .build()
         .expect("a runtime");
     rt.block_on(async move {
-        let spaces: Vec<NsKey> = (0..NAMESPACES).map(|i| pg_ns("db", &format!("s{i}"))).collect();
+        let spaces: Vec<NsKey> = (0..NAMESPACES)
+            .map(|i| pg_ns("db", &format!("s{i}")))
+            .collect();
         let fake = FakeIntrospector::default();
         for n in &spaces {
             fake.put_ns(
                 n.clone(),
                 (0..TABLES)
                     .map(|t| {
-                        FakeObject::table(&format!("t{t}"), &["a", "b"])
-                            .with_oid(30_000 + t as u32)
+                        FakeObject::table(&format!("t{t}"), &["a", "b"]).with_oid(30_000 + t as u32)
                     })
                     .collect(),
             );
@@ -157,11 +158,16 @@ fn run(ops: Vec<Op>) -> Result<(), String> {
                 Op::Children(n, t) => tickets.push(r.handle.load_children(key(&spaces[n], t))),
                 Op::Refresh(n, user) => tickets.push(r.handle.refresh(
                     Target::Namespace(spaces[n].clone()),
-                    if user { Trigger::User } else { Trigger::Background },
+                    if user {
+                        Trigger::User
+                    } else {
+                        Trigger::Background
+                    },
                 )),
-                Op::Fragment(n, t) => {
-                    tickets.push(r.handle.fragment(spaces[n].clone(), vec![key(&spaces[n], t)]))
-                }
+                Op::Fragment(n, t) => tickets.push(
+                    r.handle
+                        .fragment(spaces[n].clone(), vec![key(&spaces[n], t)]),
+                ),
                 Op::Elevate(n, t) => {
                     tickets.push(r.handle.elevate(key(&spaces[n], t), Level::Sources))
                 }

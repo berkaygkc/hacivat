@@ -45,7 +45,7 @@ fn hub_with(secrets: Arc<SecretStore>) -> (Arc<CatalogHub>, tempfile::TempDir) {
 
 fn sensitive(engine: DbmsKind) -> Arc<Profile> {
     Arc::new(Profile {
-        catalog_sensitive: true,
+        catalog_sensitive_set: Some(true),
         ..(*profile(engine)).clone()
     })
 }
@@ -135,6 +135,35 @@ async fn sensitive_profile_without_keyring_is_memory_only() {
     );
     assert!(!cache_path(&dir, &p).exists(), "no cache file was made");
     assert!(hub.row_key(p.id).is_none());
+    // T20 carry: a production profile with no explicit choice is sensitive (derived), so it is
+    // memory-only too, never a plaintext cache; an explicit "off" is plaintext.
+    let prod = Arc::new(Profile {
+        environment: Some(hacivat_proto::EnvTag::Production),
+        catalog_sensitive_set: None,
+        ..(*profile(DbmsKind::Postgres)).clone()
+    });
+    let pc = bounded(hub.ensure(prod.clone())).await.unwrap();
+    assert_eq!(
+        pc.cache,
+        CacheMode::MemoryOnly(MemoryOnlyReason::KeyringUnavailable)
+    );
+    assert!(!cache_path(&dir, &prod).exists());
+    let off = Arc::new(Profile {
+        catalog_sensitive_set: Some(false),
+        ..(*prod).clone()
+    });
+    let off = Arc::new(Profile {
+        id: ProfileId::new(),
+        ..(*off).clone()
+    });
+    let pc = bounded(hub.ensure(off.clone())).await.unwrap();
+    assert!(matches!(
+        pc.cache,
+        CacheMode::Persistent {
+            encrypted: false,
+            ..
+        }
+    ));
     // With a keyring the same profile is encrypted at rest, its key made once.
     let backend = Arc::new(MemoryBackend::new());
     let (hub, dir) = hub_with(Arc::new(SecretStore::new(Some(
@@ -177,5 +206,9 @@ async fn get_never_fetches_a_key() {
         assert!(hub.get(p.id).is_some());
         assert!(hub.row_key(p.id).is_some());
     }
-    assert_eq!(backend.calls(), after_ensure, "get never touches the keyring");
+    assert_eq!(
+        backend.calls(),
+        after_ensure,
+        "get never touches the keyring"
+    );
 }

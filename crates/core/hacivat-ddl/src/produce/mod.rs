@@ -1289,7 +1289,11 @@ impl<'a> Gen<'a> {
                     expr, not_valid, ..
                 } = &*c;
                 (
-                    ConstraintBody::Check { expr: expr.clone() },
+                    ConstraintBody::Check {
+                        expr: expr.clone(),
+                        // ## m4-t13-assemble (R-W2-8)
+                        no_inherit: pg && c.no_inherit(),
+                    },
                     Deferrable::No,
                     pg && *not_valid,
                 )
@@ -1298,8 +1302,10 @@ impl<'a> Gen<'a> {
                 ConstraintBody::Exclusion {
                     raw: c.expr.clone(),
                 },
-                // Exclusion deferral is a T13 field (R-W2-8, `CheckRare`).
-                Deferrable::No,
+                // ## m4-t13-assemble (R-W2-8): the deferral from `CheckRare`.
+                c.rare.as_deref().map_or(Deferrable::No, |r| {
+                    deferrable(r.excl_deferrable, r.excl_initially_deferred)
+                }),
                 false,
             ),
             _ => return Err(DdlError::NotLoaded),
@@ -1355,14 +1361,31 @@ impl<'a> Gen<'a> {
                         Some(exprs.next().cloned().ok_or(DdlError::NotLoaded)?),
                     ),
                 };
+                // ## m4-t13-assemble (R-W2-8): the per-part options of `KeyRare`, each vector
+                // empty when no part has the option (PostgreSQL; SQLite indexes are server text).
+                let pg = self.pg();
+                let nulls_first = ip.key.nulls_first();
                 Ok(IndexPartDef {
                     column,
                     expr,
                     desc: ip.key.desc.get(i).copied().unwrap_or(false),
-                    // `NULLS FIRST/LAST` per part is a T13 field (R-W2-8, `KeyRare`).
-                    nulls_first: None,
+                    nulls_first: if pg && !nulls_first.is_empty() {
+                        nulls_first.get(i).copied()
+                    } else {
+                        None
+                    },
                     prefix_len: if mysql {
                         ip.prefix_len.get(i).copied().flatten()
+                    } else {
+                        None
+                    },
+                    opclass: if pg {
+                        ip.key.opclass().get(i).cloned().flatten()
+                    } else {
+                        None
+                    },
+                    collation: if pg {
+                        ip.key.collation().get(i).cloned().flatten()
                     } else {
                         None
                     },

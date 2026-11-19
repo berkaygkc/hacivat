@@ -7,7 +7,7 @@
 //! - [`CatalogHub::ensure`] makes a profile's catalog once (concurrent callers share one
 //!   making: a per-profile lock), in this order, every blocking step on the runtime's blocking
 //!   pool:
-//!   1. **The key** (`catalog_sensitive` only): `SecretStore::catalog_key(profile, true)`,
+//!   1. **The key** (`Profile::catalog_sensitive()`: the explicit choice, else production; never the raw field): `SecretStore::catalog_key(profile, true)`,
 //!      which reads the key or creates it on the first encrypted use. It is created here and
 //!      only here, under the per-profile lock, so two first-time creators never race (T11
 //!      carry). A refused or unavailable keyring makes the profile **memory-only** for the
@@ -240,7 +240,7 @@ impl CatalogHub {
         self.lock().get(&profile).map(|e| e.catalog.clone())
     }
 
-    /// The catalog of `profile`, made on first use: the `CatalogKey` when `catalog_sensitive`
+    /// The catalog of `profile`, made on first use: the `CatalogKey` when `Profile::catalog_sensitive()`
     /// (blocking pool; created here once), the cache, the engine (its cached namespaces are
     /// published before this answers). Never called at app start for a profile the UI did not
     /// ask for (R-M4-15).
@@ -321,7 +321,7 @@ impl CatalogHub {
         Option<crate::engine::CacheHandle>,
         CacheMode,
     ) {
-        let encryption = if profile.catalog_sensitive {
+        let encryption = if profile.catalog_sensitive() {
             let secrets = self.secrets.clone();
             let id = profile.id;
             let fetched = rt

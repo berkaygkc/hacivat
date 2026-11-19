@@ -42,6 +42,15 @@
 //!   rejects any other value.
 //! - The arena is stored in its breadth-first order with parent indexes; children ranges and
 //!   name indexes are rebuilt and the layout re-validated on load.
+//! - **Minor 1** (M4 Task 13, R-W2-8; a named exception in Task 11's file): the rare parts of
+//!   keys, foreign keys and checks are appended as one optional record at the end of the key,
+//!   foreign-key and check records (`KeyRare`: `nulls_first`, `opclass`, `collation`;
+//!   `FkRare`: `fk_ref_index`; `CheckRare`: `no_inherit`, `excl_ops`, the exclusion deferral),
+//!   written only when the rare part is set. A record that ends before it (a minor-0 payload,
+//!   or no rare part) reads `rare: None`, so the payload and the fingerprint of an object
+//!   without a rare part are the same as in minor 0. Operator classes,
+//!   collations and operators are names (capped at [`MAX_NAME_BYTES`]); every string counts
+//!   against the expansion budget; `fk_ref_index` is a reference like any other.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -63,7 +72,10 @@ use crate::props::*;
 /// The format's major version: a reader refuses another major (the cache is rebuilt).
 pub const FORMAT_MAJOR: u16 = 1;
 /// The format's minor version: a reader reads newer minors and never rewrites them.
-pub const FORMAT_MINOR: u16 = 0;
+pub const FORMAT_MINOR: u16 = 1;
+
+/// The first minor that writes the R-W2-8 rare parts (M4 Task 13).
+const MINOR_RARE: u16 = 1;
 
 const MAGIC: &[u8; 4] = b"HVNS";
 /// Bytes before the body: magic, major, minor, compression, checksum.
@@ -222,6 +234,9 @@ pub(crate) struct Enc<'a> {
     long_name: bool,
     /// String bytes the table references expand to (the decoder's budget, B-I3).
     expanded: usize,
+    /// The format minor being written: fields added after it are left out (tests write older
+    /// minors; M4 Task 13).
+    minor: u16,
 }
 
 impl<'a> Enc<'a> {
@@ -234,6 +249,7 @@ impl<'a> Enc<'a> {
             remap: None,
             long_name: false,
             expanded: 0,
+            minor: FORMAT_MINOR,
         }
     }
 
@@ -468,6 +484,30 @@ impl<'a> Enc<'a> {
         put_bool(o, p.invisible);
         self.opt_str(o, p.backing_index.as_ref());
         self.opt_ref(o, p.implicit_for.as_ref());
+        if self.minor >= MINOR_RARE && p.rare.is_some() {
+            self.opt_record(o, p.rare.as_deref(), |e, o, r| {
+                put_var(o, r.nulls_first.len() as u64);
+                for b in &r.nulls_first {
+                    put_bool(o, *b);
+                }
+                e.opt_names(o, &r.opclass);
+                e.opt_names(o, &r.collation);
+            });
+        }
+    }
+
+    /// Optional names (per key part): `0`, or `1` and a capped name, each.
+    fn opt_names(&mut self, out: &mut Vec<u8>, v: &'a [Option<Name>]) {
+        put_var(out, v.len() as u64);
+        for s in v {
+            match s {
+                None => out.push(0),
+                Some(s) => {
+                    out.push(1);
+                    self.name(out, s);
+                }
+            }
+        }
     }
 
     fn props(&mut self, out: &mut Vec<u8>, p: &'a Props) {
@@ -619,11 +659,24 @@ impl<'a> Enc<'a> {
                 put_bool(o, p.initially_deferred);
                 put_bool(o, p.not_valid);
                 put_bool(o, p.enforced);
+                if e.minor >= MINOR_RARE && p.rare.is_some() {
+                    e.opt_record(o, p.rare.as_deref(), |e, o, r| {
+                        e.opt_ref(o, r.fk_ref_index.as_ref());
+                    });
+                }
             }),
             Props::Check(p) => self.tagged(out, 9, |e, o| {
                 e.str(o, &p.expr);
                 put_bool(o, p.not_valid);
                 put_bool(o, p.enforced);
+                if e.minor >= MINOR_RARE && p.rare.is_some() {
+                    e.opt_record(o, p.rare.as_deref(), |e, o, r| {
+                        put_bool(o, r.no_inherit);
+                        e.names(o, &r.excl_ops);
+                        put_bool(o, r.excl_deferrable);
+                        put_bool(o, r.excl_initially_deferred);
+                    });
+                }
             }),
             Props::Routine(p) => self.tagged(out, 10, |e, o| {
                 match &p.args {
@@ -847,6 +900,7 @@ fn encode_full<'a>(
     }
     let mut e = Enc {
         remap,
+        minor,
         ..Enc::table()
     };
     let mut tail = Vec::with_capacity(ns.len() * 24);
@@ -1334,7 +1388,46 @@ impl<'a> Dec<'a> {
             invisible: self.bool()?,
             backing_index: self.opt_str()?,
             implicit_for: self.opt_ref()?,
+            // Minor 1: read only when the record still has bytes (a minor-0 record ends here).
+            rare: self.trailing(|r| {
+                let n = r.count(1)?;
+                let mut nulls_first = Vec::with_capacity(n);
+                for _ in 0..n {
+                    nulls_first.push(r.bool()?);
+                }
+                Ok(KeyRare {
+                    nulls_first,
+                    opclass: r.opt_names()?,
+                    collation: r.opt_names()?,
+                })
+            })?,
         })
+    }
+
+    /// A field appended in a later minor at the end of a record: an optional record when the
+    /// record still has bytes, `None` when it ends (an older minor's payload).
+    fn trailing<T>(
+        &mut self,
+        f: impl FnOnce(&mut Dec<'a>) -> DResult<T>,
+    ) -> DResult<Option<Arc<T>>> {
+        if !self.more() {
+            return Ok(None);
+        }
+        Ok(self.opt_rec(f)?.map(Arc::new))
+    }
+
+    /// Optional names (per key part), each capped.
+    fn opt_names(&mut self) -> DResult<Vec<Option<Name>>> {
+        let n = self.count(1)?;
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n {
+            v.push(match self.u8()? {
+                0 => None,
+                1 => Some(self.name()?),
+                _ => return Err(DecodeError::Malformed("optional name marker")),
+            });
+        }
+        Ok(v)
     }
 
     fn column(&mut self) -> DResult<ColumnProps> {
@@ -1596,11 +1689,24 @@ impl<'a> Dec<'a> {
                         initially_deferred: r.bool()?,
                         not_valid: r.bool()?,
                         enforced: r.bool()?,
+                        rare: r.trailing(|f| {
+                            Ok(FkRare {
+                                fk_ref_index: f.opt_ref()?,
+                            })
+                        })?,
                     })),
                     9 => Props::Check(Arc::new(CheckProps {
                         expr: r.str()?,
                         not_valid: r.bool()?,
                         enforced: r.bool()?,
+                        rare: r.trailing(|c| {
+                            Ok(CheckRare {
+                                no_inherit: c.bool()?,
+                                excl_ops: c.names()?,
+                                excl_deferrable: c.bool()?,
+                                excl_initially_deferred: c.bool()?,
+                            })
+                        })?,
                     })),
                     10 => Props::Routine(Arc::new(r.routine()?)),
                     11 => Props::Sequence(Arc::new(SeqProps {
@@ -1855,8 +1961,9 @@ pub(crate) fn decode_with(
 }
 
 /// The minor-version migration chain (HV-MODEL-03 step 3): each step is pure and tested.
-/// Format 1.0 is the first minor, so there is nothing to migrate yet; a 1.1 step will read
-/// `if from < 1 && to >= 1 { … }`. A payload from a newer minor is never migrated.
+/// 1.0 → 1.1 (M4 Task 13) needs no step: a 1.0 record has no rare part, which reads as
+/// `rare: None`, the value a 1.1 writer stores when nothing is set. A later step reads
+/// `if from < 2 && to >= 2 { … }`. A payload from a newer minor is never migrated.
 fn migrate_minor(_ns: &mut NamespaceSnapshot, _from: u16, _to: u16) {}
 
 /// Test hooks (feature `test-support`): encode and decode as another format minor would, to

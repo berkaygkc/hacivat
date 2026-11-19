@@ -83,6 +83,7 @@ fn fk(n: &str, target: &[&str], target_oid: Option<u32>) -> Obj {
         initially_deferred: false,
         not_valid: false,
         enforced: true,
+        rare: None,
     })))
 }
 

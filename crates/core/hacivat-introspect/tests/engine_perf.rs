@@ -34,9 +34,12 @@ fn scheduler_overhead_per_task_under_1ms() {
         let mut times = Vec::with_capacity(TASKS as usize);
         for _ in 0..TASKS {
             let start = Instant::now();
-            bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-                .await
-                .unwrap();
+            bounded(
+                r.handle
+                    .refresh(Target::Namespace(n.clone()), Trigger::User),
+            )
+            .await
+            .unwrap();
             times.push(start.elapsed());
         }
         // A load the catalog already answers never leaves the actor.

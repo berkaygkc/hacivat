@@ -227,6 +227,7 @@ fn fk_out_of_scope_stays_unresolved() {
                 initially_deferred: false,
                 not_valid: false,
                 enforced: true,
+                rare: None,
             },
         ))),
     );
@@ -590,6 +591,7 @@ fn every_props_variant() -> NamespaceSnapshot {
             initially_deferred: false,
             not_valid: false,
             enforced: true,
+            rare: None,
         }))),
     );
     t.add(

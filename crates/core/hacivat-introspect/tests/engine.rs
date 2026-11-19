@@ -117,7 +117,14 @@ async fn bulk_upgrade_after_third_request_total_queries_le_4() {
     assert_eq!(
         after
             .iter()
-            .filter(|c| matches!(c, FakeCall::Introspect { mode: Mode::Full, level: Level::Structure, .. }))
+            .filter(|c| matches!(
+                c,
+                FakeCall::Introspect {
+                    mode: Mode::Full,
+                    level: Level::Structure,
+                    ..
+                }
+            ))
             .count(),
         1,
         "{after:?}"
@@ -152,9 +159,12 @@ async fn small_namespace_goes_bulk_immediately() {
     );
     bounded(r.handle.expand(small.clone())).await.unwrap();
     let calls_before = r.fake.calls().len();
-    bounded(r.handle.load_children(table_key(&small, "t7", Some(20_007))))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .load_children(table_key(&small, "t7", Some(20_007))),
+    )
+    .await
+    .unwrap();
     let after = r.fake.calls()[calls_before..].to_vec();
     assert_eq!(
         after,
@@ -192,15 +202,20 @@ async fn cancel_between_batches_publishes_nothing() {
     let fake = FakeIntrospector::default();
     fake.put_ns(n.clone(), FakeIntrospector::tables(10));
     let r = rig_with(fake, RigOpts::default());
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     let before = r.catalog.current();
     let state_before = state(&r, &n);
     r.fake.touch(&n, "t1");
     let gate = r.fake.gate(is_introspect_of(&n, Mode::Full));
     let queries = r.fake.queries();
-    let t = r.handle.refresh(Target::Namespace(n.clone()), Trigger::User);
+    let t = r
+        .handle
+        .refresh(Target::Namespace(n.clone()), Trigger::User);
     bounded(gate.entered()).await;
     // The first batch ran; cancel before the second.
     assert_eq!(r.fake.queries(), queries + 1);
@@ -222,15 +237,22 @@ async fn empty_namespace_completes_with_zero_objects() {
     let fake = FakeIntrospector::default();
     fake.put_ns(n.clone(), Vec::new());
     let r = rig_with(fake, RigOpts::default());
-    let g = bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    let g = bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     let snap = r.catalog.current();
     assert_eq!(snap.generation, g);
     assert_eq!(snap.namespaces[&n].len(), 1, "the root only");
     assert!(matches!(
         state(&r, &n),
-        LoadState::Loaded { level: Level::Structure, stale: false, .. }
+        LoadState::Loaded {
+            level: Level::Structure,
+            stale: false,
+            ..
+        }
     ));
     // A complete empty namespace: its table children are a fact (no table).
     let root = snap.namespaces[&n].object_key(0).unwrap();
@@ -247,9 +269,12 @@ async fn child_row_with_missing_parent_schedules_a_follow_up() {
     fake.put_ns(n.clone(), FakeIntrospector::tables(3));
     fake.edit_ns(&n, |s| s.orphan = Some((name("ghost"), name("c"))));
     let r = rig_with(fake, RigOpts::default());
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     assert_eq!(tables_in(&r, &n).len(), 3);
     let ghost = table_key(&n, "ghost", None);
     bounded(wait_until(Duration::from_secs(60), || {
@@ -278,9 +303,12 @@ async fn connection_lost_restarts_the_task_once() {
         1,
     );
     let r = rig_with(fake, RigOpts::default());
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     assert_eq!(introspects(&r).len(), 2, "restarted once");
     assert_eq!(r.meta.acquired.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_eq!(tables_in(&r, &n).len(), 5);
@@ -293,7 +321,11 @@ async fn connection_lost_restarts_the_task_once() {
     );
     let generation = r.catalog.current().generation;
     assert_eq!(
-        bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User)).await,
+        bounded(
+            r.handle
+                .refresh(Target::Namespace(n.clone()), Trigger::User)
+        )
+        .await,
         Err(IntroError::Meta(MetaError::ConnectionLost))
     );
     assert_eq!(r.catalog.current().generation, generation);
@@ -318,9 +350,12 @@ async fn permission_denied_kind_fails_only_that_kind() {
             .insert(ObjectKind::View, IntroErrorCode::PermissionDenied);
     });
     let r = rig_with(fake, RigOpts::default());
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     assert_eq!(tables_in(&r, &n), vec!["a", "b"]);
     assert_eq!(
         state(&r, &n),
@@ -348,9 +383,12 @@ async fn permission_denied_kind_fails_only_that_kind() {
     );
     // Once the kind reads again, its container is no longer failed.
     r.fake.edit_ns(&n, |s| s.failed.clear());
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     assert!(matches!(state(&r, &n), LoadState::Loaded { .. }));
     let snap = r.catalog.current();
     assert!(matches!(
@@ -371,16 +409,23 @@ async fn timeout_twice_lowers_the_level_and_hints() {
     let fake = FakeIntrospector::default();
     fake.put_ns(n.clone(), FakeIntrospector::tables(10));
     let r = rig_with(fake, RigOpts::default());
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     assert_eq!(loaded_level(&state(&r, &n)), Some(Level::Structure));
     let mut events = r.handle.events();
     r.fake
         .fail(is_introspect_of(&n, Mode::Full), IntroError::Timeout, 2);
     for _ in 0..2 {
         assert_eq!(
-            bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User)).await,
+            bounded(
+                r.handle
+                    .refresh(Target::Namespace(n.clone()), Trigger::User)
+            )
+            .await,
             Err(IntroError::Timeout)
         );
     }
@@ -393,9 +438,12 @@ async fn timeout_twice_lowers_the_level_and_hints() {
     );
     let choice = r.handle.level_for(&n, NsRole::Other, 10);
     assert_eq!((choice.level, choice.lowered), (Level::Names, 1));
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         introspects(&r).last(),
         Some(&(n.clone(), Mode::Full, Level::Names))
@@ -459,7 +507,10 @@ async fn single_connection_profile_waits_for_user_idle() {
         },
     );
     r.meta.busy.store(true, SeqCst);
-    let t = tokio::spawn(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User));
+    let t = tokio::spawn(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    );
     // Asked three times and refused each time: nothing was read.
     bounded(wait_until(Duration::from_secs(60), || {
         r.meta.attempts.load(SeqCst) >= 3
@@ -500,7 +551,9 @@ async fn elevation_waits_for_the_running_namespace_task() {
     fake.put_ns(n.clone(), FakeIntrospector::tables(10));
     let gate = fake.gate(is_introspect_of(&n, Mode::Full));
     let r = rig_with(fake, RigOpts::default());
-    let pass = r.handle.refresh(Target::Namespace(n.clone()), Trigger::User);
+    let pass = r
+        .handle
+        .refresh(Target::Namespace(n.clone()), Trigger::User);
     bounded(gate.entered()).await;
     let t1 = table_key(&n, "t1", Some(20_001));
     let t2 = table_key(&n, "t2", Some(20_002));
@@ -690,20 +743,29 @@ async fn pending_confirmation_changes_nothing_until_confirmed() {
     let fake = FakeIntrospector::default();
     fake.put_ns(n.clone(), FakeIntrospector::tables(30));
     let r = rig_with(fake, RigOpts::default());
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     assert_eq!(tables_in(&r, &n).len(), 30);
     let mut events = r.catalog.subscribe();
     // 25 of 30 vanish (> 50 % of ≥ 20): a background pass holds it.
     r.fake.put_ns(n.clone(), FakeIntrospector::tables(5));
     let arena = r.catalog.current().namespaces[&n].clone();
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::Background))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::Background),
+    )
+    .await
+    .unwrap();
     let snap = r.catalog.current();
     assert!(Arc::ptr_eq(&snap.namespaces[&n], &arena), "nothing applied");
-    assert!(matches!(state(&r, &n), LoadState::Loaded { stale: true, .. }));
+    assert!(matches!(
+        state(&r, &n),
+        LoadState::Loaded { stale: true, .. }
+    ));
     let mut announced = None;
     while let Ok(ev) = events.try_recv() {
         if let CatalogEvent::PendingConfirmation { ns, count } = ev {
@@ -716,11 +778,17 @@ async fn pending_confirmation_changes_nothing_until_confirmed() {
         .await
         .unwrap();
     assert_eq!(tables_in(&r, &n).len(), 30);
-    assert!(matches!(state(&r, &n), LoadState::Loaded { stale: false, .. }));
+    assert!(matches!(
+        state(&r, &n),
+        LoadState::Loaded { stale: false, .. }
+    ));
     // Held again, then "Remove from cache".
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::Background))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::Background),
+    )
+    .await
+    .unwrap();
     assert_eq!(tables_in(&r, &n).len(), 30);
     bounded(r.handle.confirm_pending(n.clone(), true))
         .await
@@ -750,9 +818,12 @@ async fn periodic_validation_skips_during_user_tx_on_single_connection() {
         },
     );
     r.meta.in_tx.store(true, SeqCst);
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     let passes = || introspects(&r).len();
     let before = passes();
     // Three validation rounds came due inside the user's transaction: none read anything.
@@ -761,7 +832,11 @@ async fn periodic_validation_skips_during_user_tx_on_single_connection() {
         r.meta.tx_checks.load(SeqCst) >= checks + 3
     }))
     .await;
-    assert_eq!(passes(), before, "no validation inside the user's transaction");
+    assert_eq!(
+        passes(),
+        before,
+        "no validation inside the user's transaction"
+    );
     r.meta.in_tx.store(false, SeqCst);
     bounded(wait_until(Duration::from_secs(60), || passes() > before)).await;
     let (_, mode, level) = introspects(&r).pop().unwrap();
@@ -806,7 +881,9 @@ fn progress_phases_are_a_closed_enum_with_counts() {
         let pass_gate = fake.gate(is_introspect_of(&n, Mode::Full));
         let r = rig_with(fake, RigOpts::default());
         let mut progress = r.handle.progress();
-        let pass = r.handle.refresh(Target::Namespace(n.clone()), Trigger::User);
+        let pass = r
+            .handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User);
         bounded(pass_gate.entered()).await;
         let p: Progress = progress.borrow_and_update().clone();
         assert_eq!(
@@ -821,9 +898,7 @@ fn progress_phases_are_a_closed_enum_with_counts() {
         pass_gate.release();
         bounded(pass).await.unwrap();
         // A fragment has a determinate count: its objects.
-        let frag_gate = r
-            .fake
-            .gate(|c| matches!(c, FakeCall::Fragment { .. }));
+        let frag_gate = r.fake.gate(|c| matches!(c, FakeCall::Fragment { .. }));
         let keys = vec![key("public", "t0"), key("public", "t1")];
         let frag = r.handle.fragment(n.clone(), keys);
         bounded(frag_gate.entered()).await;
@@ -845,9 +920,12 @@ async fn ticket_resolves_with_the_publishing_generation() {
     let fake = FakeIntrospector::default();
     fake.put_ns(n.clone(), FakeIntrospector::tables(3));
     let r = rig_with(fake, RigOpts::default());
-    let g = bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    let g = bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     let snap = r.catalog.current();
     assert_eq!(snap.generation, g);
     assert_eq!(snap.namespaces[&n].generation(), g, "the result is in it");
@@ -893,13 +971,19 @@ async fn fragment_burst_publishes_once_per_window() {
     let fake = FakeIntrospector::default();
     fake.put_ns(n.clone(), FakeIntrospector::tables(20));
     let r = rig_with(fake, RigOpts::default());
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     let mut events = r.catalog.subscribe();
     let generation = r.catalog.current().generation;
     let tickets: Vec<_> = (0..20)
-        .map(|i| r.handle.fragment(n.clone(), vec![key("public", &format!("t{i}"))]))
+        .map(|i| {
+            r.handle
+                .fragment(n.clone(), vec![key("public", &format!("t{i}"))])
+        })
         .collect();
     let got = bounded(join_all(tickets)).await;
     let g = got[0].clone().unwrap();
@@ -925,16 +1009,22 @@ async fn catalog_race_is_retried_once_then_fails_without_publishing() {
     let fake = FakeIntrospector::default();
     fake.put_ns(n.clone(), FakeIntrospector::tables(3));
     let r = rig_with(fake, RigOpts::default());
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     let mut events = r.handle.events();
     // Once: retried, and it succeeds.
     r.fake
         .fail(is_introspect_of(&n, Mode::Full), IntroError::CatalogRace, 1);
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         events.try_recv().unwrap(),
         EngineEvent::CatalogRaceRetried { ns: n.clone() }
@@ -945,7 +1035,11 @@ async fn catalog_race_is_retried_once_then_fails_without_publishing() {
     let before = r.catalog.current();
     let calls = introspects(&r).len();
     assert_eq!(
-        bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User)).await,
+        bounded(
+            r.handle
+                .refresh(Target::Namespace(n.clone()), Trigger::User)
+        )
+        .await,
         Err(IntroError::CatalogRace)
     );
     assert_eq!(introspects(&r).len(), calls + 2);
@@ -968,11 +1062,22 @@ async fn failure_marks_failed_only_without_previous_state() {
     let n = ns("public");
     let fake = FakeIntrospector::default();
     fake.put_ns(n.clone(), FakeIntrospector::tables(3));
-    fake.fail(is_introspect_of(&n, Mode::Full), IntroError::Permission { kind: ObjectKind::Table }, 1);
+    fake.fail(
+        is_introspect_of(&n, Mode::Full),
+        IntroError::Permission {
+            kind: ObjectKind::Table,
+        },
+        1,
+    );
     let r = rig_with(fake, RigOpts::default());
-    assert!(bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
+    assert!(
+        bounded(
+            r.handle
+                .refresh(Target::Namespace(n.clone()), Trigger::User)
+        )
         .await
-        .is_err());
+        .is_err()
+    );
     assert!(matches!(
         state(&r, &n),
         LoadState::Failed {
@@ -980,18 +1085,26 @@ async fn failure_marks_failed_only_without_previous_state() {
             ..
         }
     ));
-    bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
-        .await
-        .unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
     let loaded = state(&r, &n);
     r.fake.fail(
         is_introspect_of(&n, Mode::Full),
         IntroError::Meta(MetaError::Unavailable),
         1,
     );
-    assert!(bounded(r.handle.refresh(Target::Namespace(n.clone()), Trigger::User))
+    assert!(
+        bounded(
+            r.handle
+                .refresh(Target::Namespace(n.clone()), Trigger::User)
+        )
         .await
-        .is_err());
+        .is_err()
+    );
     assert_eq!(state(&r, &n), loaded);
 }
 

@@ -146,7 +146,10 @@ pub fn table_key(ns: &NsKey, t: &str, oid: Option<u32>) -> ObjectKey {
 pub async fn wait_until(limit: Duration, mut cond: impl FnMut() -> bool) {
     let start = tokio::time::Instant::now();
     while !cond() {
-        assert!(start.elapsed() < limit, "condition not met within {limit:?}");
+        assert!(
+            start.elapsed() < limit,
+            "condition not met within {limit:?}"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
@@ -154,9 +157,12 @@ pub async fn wait_until(limit: Duration, mut cond: impl FnMut() -> bool) {
 /// Waits until the engine runs nothing.
 pub async fn idle(h: &IntroHandle) {
     let mut rx = h.progress();
-    let _ = tokio::time::timeout(Duration::from_secs(120), rx.wait_for(|p| p.tasks.is_empty()))
-        .await
-        .expect("the engine went idle");
+    let _ = tokio::time::timeout(
+        Duration::from_secs(120),
+        rx.wait_for(|p| p.tasks.is_empty()),
+    )
+    .await
+    .expect("the engine went idle");
 }
 
 /// Runs `f` with a bound, so a hang fails the test instead of blocking it.

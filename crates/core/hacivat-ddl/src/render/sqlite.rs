@@ -117,7 +117,11 @@ fn constraint(
             s.push_str(fk_match(*match_kind));
             s.push_str(deferrable_tail(k.deferrable));
         }
-        ConstraintBody::Check { expr } => s.push_str(&format!("CHECK ({expr})")),
+        // ## m4-t13-assemble (R-W2-8)
+        ConstraintBody::Check {
+            no_inherit: true, ..
+        } => return Err(RenderError::Invalid("NO INHERIT on SQLite")),
+        ConstraintBody::Check { expr, .. } => s.push_str(&format!("CHECK ({expr})")),
         ConstraintBody::Exclusion { .. } => return Err(RenderError::Invalid("EXCLUDE on SQLite")),
     }
     Ok(s)

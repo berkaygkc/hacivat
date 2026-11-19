@@ -1181,3 +1181,10 @@ intro-remote-filtered-notice = Bu listeyi sunucu süzdü: süzgeçle eşleşmeye
 intro-name-server-dependent = Bu adın eşleşip eşleşmediği sunucunun ayarlarına bağlı.
 # Review: PO
 intro-catalog-race-retried = { $schema } içindeki bir nesne okunurken kaldırıldı; okuma yeniden denendi.
+
+## m4-t20-scope
+
+# Review: PO
+intro-scope-warn-db-term-ignored = { NUMBER($column, useGrouping: "false") }. karakterdeki veritabanı kısmı yok sayılır: bu motorda şemaların üstünde veritabanı yoktur.
+# Review: PO
+intro-filter-warn-empty-item = { NUMBER($column, useGrouping: "false") }. karakterdeki boş kısım yok sayılır.
