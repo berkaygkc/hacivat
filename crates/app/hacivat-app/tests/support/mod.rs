@@ -1545,13 +1545,16 @@ pub mod catalogs {
             .into_iter()
             .map(|(k, s)| (ContainerKey::Namespace(k), s))
             .collect();
-        Arc::new(CatalogSnapshot {
-            generation,
-            server: Arc::new(ServerFacts::new(dbms, IdentCtx::new(dialect(dbms)))),
-            namespaces: Arc::new(ns),
-            states: Arc::new(states),
-            overlays: Arc::default(),
-        })
+        // T9's snapshot keeps lazy indexes of its own: start from an empty one and set the
+        // data fields (none of the indexes is built before they are set).
+        let mut snapshot = CatalogSnapshot::empty(Arc::new(ServerFacts::new(
+            dbms,
+            IdentCtx::new(dialect(dbms)),
+        )));
+        snapshot.generation = generation;
+        snapshot.namespaces = Arc::new(ns);
+        snapshot.states = Arc::new(states);
+        Arc::new(snapshot)
     }
 
     /// Generation 1 of a `dbms` catalog with `namespaces`.

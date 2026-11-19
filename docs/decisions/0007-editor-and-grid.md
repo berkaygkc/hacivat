@@ -1102,3 +1102,16 @@ The M2a connection list became the database explorer tree in place (R-M4-18): `h
   - *Named exceptions (accepted).* The M2a profile-root debug selectors are replaced by the
     tree's own; `connections/explorer.rs` is a near-rewrite; `tests/m4_routing.rs`'s copy-chord
     test gets a profile so the list has a root for its cursor.
+- *Fix round 2.*
+  - *Ruling R-W2-12b (key contexts split).* The focused tree carries `ExplorerTree` on every
+    row and adds `Explorer` after it while its cursor is on a profile root
+    (`shell::hooks::add_focus_context` / `remove_focus_context`: one handle, several contexts,
+    a named exception in `shell/hooks.rs`). `Explorer` keeps the connection rows (Enter,
+    Shift-F10, Backspace/Delete, ⌘E, ⌘D, ⌘⇧C); `ExplorerTree` takes T1b's M4 rows (F12 View
+    DDL, F5 Refresh, ⌘←/Ctrl+← Collapse all, ⌥⌘C/Shift+Alt+C Copy qualified name, ⌥⌘F the
+    filter) in all three default keymaps, chords unchanged (named exception in Task 1b's rows),
+    and the M4 explorer commands are registered in it. Each command decides whether it applies
+    to the cursor's row (R-W1-5).
+  - *Ruling R-W2-13 (I3 accepted).* A broad filter expands the ancestors of its first 200
+    matches only; the others are kept behind their groups' "n of total" counts. The mock
+    (surface 4) shows no "N more matches" hint, so none is drawn: a T32 item.

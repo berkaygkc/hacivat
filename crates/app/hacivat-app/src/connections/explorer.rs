@@ -66,13 +66,18 @@ use crate::explorer::adapter::{
 };
 use crate::explorer::contrib::{ContributedChildren, contributors};
 use crate::l10n_global::{L10nGlobal, is_turkic, text_fn, tr, tr_id, ui_language};
+use crate::shell::Workspace;
 use crate::shell::hooks::ShellHooks;
+use crate::shell::hooks::{add_focus_context, remove_focus_context};
 use crate::shell::keymap_state::shortcut_label;
 use crate::shell::tiles::{self, panel_header, panel_title};
-use crate::shell::{Workspace, register_focus_context, unregister_focus_context};
 
-/// The key context of the focused tree (R20).
+/// The key context of the connection rows (R20): pushed while the focused tree's cursor is on a
+/// profile root (ruling R-W2-12b).
 pub const EXPLORER_CONTEXT: &str = "Explorer";
+/// The key context of the M4 object-level rows (F12, F5, ⌘←, ⌥⌘C, ⌥⌘F): pushed whenever the
+/// tree has the focus, on every row (ruling R-W2-12b).
+pub const EXPLORER_TREE_CONTEXT: &str = "ExplorerTree";
 
 /// The explorer the shell built, for the focus commands.
 struct ExplorerHandle(WeakEntity<ExplorerView>);
@@ -120,11 +125,14 @@ pub struct ExplorerView {
     _subscriptions: Vec<Subscription>,
 }
 
-/// The `explorer` hook: builds the view; the tree's `Explorer` key context (P4) is registered
-/// while its cursor is on a profile root (ruling R-W2-12, [`ExplorerView::on_tree_changed`]).
+/// The `explorer` hook: builds the view. The tree's focus carries `ExplorerTree` on every row
+/// and `Explorer` (P4) while its cursor is on a profile root (rulings R-W2-12, R-W2-12b,
+/// [`ExplorerView::on_tree_changed`]).
 pub fn build(window: &mut Window, cx: &mut App) -> AnyView {
     let view = cx.new(|cx| ExplorerView::new(window, cx));
     cx.set_global(ExplorerHandle(view.downgrade()));
+    let list = view.read(cx).list_focus(cx);
+    add_focus_context(cx, list, EXPLORER_TREE_CONTEXT);
     view.update(cx, |v, cx| v.on_tree_changed(cx));
     view.into()
 }
@@ -642,9 +650,9 @@ impl ExplorerView {
             self.context_on = on_root;
             let handle = self.list_focus(cx);
             if on_root {
-                register_focus_context(cx, handle, EXPLORER_CONTEXT);
+                add_focus_context(cx, handle, EXPLORER_CONTEXT);
             } else {
-                unregister_focus_context(cx, &handle);
+                remove_focus_context(cx, &handle, EXPLORER_CONTEXT);
             }
         }
         if let Some(owner) = owner

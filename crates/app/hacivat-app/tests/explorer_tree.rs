@@ -531,7 +531,7 @@ fn mysql_rename_hint_keeps_expansion(cx: &mut TestAppContext) {
         raw_kind: None,
     };
     let delta = CatalogDelta {
-        renamed: vec![(object("items"), object("articles"), Confidence::Heuristic)],
+        renamed: vec![(object("items"), object("articles"), Confidence::ONE)],
         ..CatalogDelta::default()
     };
     let next = generation(2, "articles");
@@ -1516,4 +1516,71 @@ fn escape_clears_the_filter_and_down_enters_the_tree(cx: &mut TestAppContext) {
     vcx.simulate_keystrokes("down");
     vcx.run_until_parked();
     assert!(tree_focused(vcx), "↓ moves into the tree");
+}
+
+// ---- fix round 2 ------------------------------------------------------------------------------
+
+/// What the active keymap runs for `chord` with the current key context stack.
+fn resolves(vcx: &VisualTestContext, chord: &'static str) -> hacivat_ui_core::keymap::Resolution {
+    let press = hacivat_ui_core::keymap::normalize(&gpui::Keystroke::parse(chord).unwrap())
+        .expect("a chord");
+    in_window(vcx, |window, _| window.refresh());
+    vcx.run_until_parked();
+    let stack = context_stack(vcx);
+    let active = active_keymap(vcx);
+    active
+        .keymap
+        .resolve(&stack, &[], &press, &active.layout, false)
+}
+
+/// Ruling R-W2-12b: the focused tree carries `ExplorerTree` on every row, so the M4
+/// object-level rows reach their commands on a table or a database row; `Explorer` (the
+/// connection rows) only on a profile root, so Enter on a table never toggles the connection.
+#[gpui::test]
+fn object_rows_resolve_on_catalog_rows_and_connection_rows_only_on_roots(cx: &mut TestAppContext) {
+    use hacivat_ui_core::keymap::Resolution;
+    let vcx = connected_prod(cx, "orders-prod");
+    let id = profile_id(vcx, "orders-prod");
+    show(vcx, id, Some(pg_shop()));
+    in_window(vcx, explorer::focus_list);
+    vcx.run_until_parked();
+    let copy = if cfg!(target_os = "macos") {
+        "cmd-alt-c"
+    } else {
+        "shift-alt-c"
+    };
+    let run = |c: &str| Resolution::Command(c.to_string());
+    // The root: both contexts.
+    let stack = context_stack(vcx);
+    assert!(
+        stack.0.ends_with(&["ExplorerTree", "Explorer"]),
+        "{stack:?}"
+    );
+    assert_eq!(resolves(vcx, "enter"), run("connection.toggle_connect"));
+    assert_eq!(resolves(vcx, "f5"), run("explorer.refresh"));
+    // A table row: the object rows, no connection row.
+    open(vcx, &["orders-prod", "app", "public", "TABLES"]);
+    put_cursor(vcx, key_of(vcx, "orders"));
+    let stack = context_stack(vcx);
+    assert!(
+        stack.0.contains(&"ExplorerTree") && !stack.0.contains(&"Explorer"),
+        "{stack:?}"
+    );
+    assert_eq!(resolves(vcx, "f12"), run("explorer.view_ddl"));
+    assert_eq!(resolves(vcx, copy), run("explorer.copy_qualified_name"));
+    assert_eq!(resolves(vcx, "enter"), Resolution::PassThrough);
+    assert_eq!(resolves(vcx, "backspace"), Resolution::PassThrough);
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(
+        matches!(
+            live(vcx, "orders-prod"),
+            hacivat_session::LiveState::Connected(_)
+        ),
+        "Enter on a table row never toggles the connection"
+    );
+    // A database row: F5 is the object row's refresh.
+    put_cursor(vcx, key_of(vcx, "app"));
+    assert_eq!(resolves(vcx, "f5"), run("explorer.refresh"));
+    assert_eq!(resolves(vcx, "shift-f10"), Resolution::PassThrough);
 }

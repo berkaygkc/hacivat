@@ -667,23 +667,27 @@ context = "Editor"
 # No row takes `alt-shift-f` (M5's reformat) or starts with the command palette's chord.
 # Checks: `crates/app/hacivat-app/tests/m4_routing.rs` and the AltGr CI
 # (`crates/ui/hacivat-ui/tests/keymap_collisions.rs`).
+# ## m4-t14-explorer (fix round 2, ruling R-W2-12b; named exception in Task 1b's rows): the
+# rows below are in the `ExplorerTree` context, which the tree's focus carries on every row;
+# `Explorer` (the connection rows above) is pushed only while the cursor is on a profile root.
+# Chords unchanged; each command decides whether it applies to the cursor's row (R-W1-5).
 
 [[binding]]
 chord = "f12"
 command = "explorer.view_ddl"
-context = "Explorer"
+context = "ExplorerTree"
 
 [[binding]]
 chord = "shift-alt-c"
 command = "explorer.copy_qualified_name"
-context = "Explorer"
+context = "ExplorerTree"
 
 [[binding]]
 chord = "ctrl-left"
 command = "explorer.collapse_all"
-context = "Explorer"
+context = "ExplorerTree"
 
 [[binding]]
 chord = "f5"
 command = "explorer.refresh"
-context = "Explorer"
+context = "ExplorerTree"
