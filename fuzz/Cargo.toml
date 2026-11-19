@@ -33,6 +33,10 @@ sql-safety = { path = "../crates/sql/sql-safety" }
 # needs `TextSize`/`TextRange`.
 sql-dialect = { path = "../crates/sql/sql-dialect" }
 sql-text = { path = "../crates/sql/sql-text" }
+# ## m4-t01a-manifests: the M4 targets decode cache rows and system snapshots (`hacivat-meta`)
+# and parse scope patterns and query packs (`hacivat-introspect`).
+hacivat-meta = { path = "../crates/core/hacivat-meta" }
+hacivat-introspect = { path = "../crates/core/hacivat-introspect" }
 
 # ## m3b-t01a-seams (fix round 1, I4): the five targets of Task 20, declared here so Task 20
 # fills only their bodies (cargo-fuzz targets are not auto-discovered).
@@ -67,6 +71,36 @@ bench = false
 [[bin]]
 name = "classify_no_panic"
 path = "fuzz_targets/classify_no_panic.rs"
+test = false
+doc = false
+bench = false
+
+# ## m4-t01a-manifests: the four M4 targets (bodies: Task 11 `catalog_row_decode`, Task 23
+# `system_snapshot_decode`, Task 12 `scope_pattern`, Task 4 `pack_parse`).
+[[bin]]
+name = "catalog_row_decode"
+path = "fuzz_targets/catalog_row_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "system_snapshot_decode"
+path = "fuzz_targets/system_snapshot_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scope_pattern"
+path = "fuzz_targets/scope_pattern.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pack_parse"
+path = "fuzz_targets/pack_parse.rs"
 test = false
 doc = false
 bench = false

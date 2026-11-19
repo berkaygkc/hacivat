@@ -1,0 +1,51 @@
+[package]
+name = "hacivat-meta"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "The metadata model: object arenas, stable identity, catalog snapshots, the catalog cache and the system-catalog layer (HV-MODEL-01..03, HV-INTRO-11, -14, -16)"
+
+# Core layer (`MetaBelowIntrospect`): never `hacivat-introspect`, `hacivat-session`,
+# `hacivat-driver*`, `hacivat-exec` or `hacivat-l10n`, not even as a dev-dependency. The model,
+# `IdentKey`, `ModelView`, `SnapshotView`, `merge`, `fingerprint` and `search` build with no
+# feature (`hacivat-ddl` takes this crate without its default features, `DdlIsPure`).
+[features]
+default = ["catalog", "persist", "system"]
+# `Catalog::subscribe`: a `tokio::sync::broadcast` of `CatalogEvent`s, never a runtime type.
+catalog = ["dep:tokio"]
+# The per-profile SQLite catalog cache and its row AEAD (HV-MODEL-03, R-M4-15).
+persist = ["dep:rusqlite", "dep:chacha20poly1305"]
+# Decoding the shipped system-catalog snapshots (canonical JSON in zstd frames, R-M4-33).
+system = ["dep:zstd", "dep:serde_json"]
+# The `include_bytes!` table of `assets/system-catalogs/`: only `hacivat-app` and this crate's
+# own tests enable it (`EmbeddedSystemOnlyFromApp`).
+embedded-system = ["system"]
+# `fixture`: synthetic catalogs for tests and benches; enabled only by test dev-dependencies.
+test-support = []
+
+[dependencies]
+hacivat-proto.workspace = true
+sql-ident.workspace = true
+sql-catalog.workspace = true
+# XXH3-64 row checksums; XXH3-128 `SourceRef`s, schema digests and fingerprints (R-M4-26).
+twox-hash.workspace = true
+bitflags.workspace = true
+arc-swap.workspace = true
+smallvec.workspace = true
+# `CatalogDelta` and `ProfileUserData` are serde types under every feature set.
+serde.workspace = true
+tokio = { workspace = true, optional = true, features = ["sync"] }
+rusqlite = { workspace = true, optional = true }
+chacha20poly1305 = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+hacivat-meta = { workspace = true, features = ["test-support"] }
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

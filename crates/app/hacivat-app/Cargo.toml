@@ -63,6 +63,14 @@ smallvec.workspace = true
 # ## m3b-t01a-seams: the editor find panel and the grid find build their matchers here; the Ui
 # crates take compiled matchers (R-M3-10; Tasks 33, 37).
 regex.workspace = true
+# ## m4-t01a-manifests: the explorer tree, the DDL view, the scope editor and `TreeKey` (XXH3).
+# The shipped system-catalog snapshots are embedded in this binary only
+# (`EmbeddedSystemOnlyFromApp`).
+hacivat-meta = { workspace = true, features = ["catalog", "persist", "system", "embedded-system"] }
+hacivat-introspect.workspace = true
+hacivat-ddl.workspace = true
+sql-catalog.workspace = true
+twox-hash.workspace = true
 
 [dev-dependencies]
 hacivat-driver = { workspace = true, features = ["fake"] }
@@ -92,6 +100,12 @@ required-features = ["bench"]
 
 [[example]]
 name = "b1_real"
+required-features = ["bench"]
+
+# ## m4-t01a-manifests: the G1 bench (cached catalog on screen in < 300 ms at 160k columns), an
+# app example like `b3`/`b1_real` (P-M4-19); a fail-closed stub until Task 29.
+[[example]]
+name = "catalog_cold"
 required-features = ["bench"]
 
 [lints]

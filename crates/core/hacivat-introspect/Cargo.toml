@@ -1,0 +1,43 @@
+[package]
+name = "hacivat-introspect"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "Introspection: catalog query packs, scope and filters, the scheduler and CatalogHub, the PG/MySQL/SQLite introspectors, freshness, refresh after DDL and the minicat generator (HV-INTRO-01..16)"
+
+# Core layer (`IntrospectNotExec`): never `hacivat-exec` or `hacivat-results`; catalog SQL never
+# travels the execution path (R-M4-7). `hacivat-exec` may depend on this crate (Task 21).
+[dependencies]
+hacivat-meta = { workspace = true, features = ["catalog", "persist", "system"] }
+hacivat-session.workspace = true
+hacivat-proto.workspace = true
+hacivat-values.workspace = true
+hacivat-secrets.workspace = true
+hacivat-settings.workspace = true
+sql-ident.workspace = true
+sql-safety.workspace = true
+sql-dialect.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio-util.workspace = true
+futures.workspace = true
+twox-hash.workspace = true
+smallvec.workspace = true
+regex.workspace = true
+serde.workspace = true
+bitflags.workspace = true
+
+[dev-dependencies]
+# Docker targets (`require_target`, `targets`, `artifact`).
+hacivat-testkit.workspace = true
+# Task 31's DDL round trip.
+hacivat-ddl.workspace = true
+proptest.workspace = true
+# Task 23's minicat raw files.
+serde_json.workspace = true
+tempfile.workspace = true
+hacivat-meta = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true
