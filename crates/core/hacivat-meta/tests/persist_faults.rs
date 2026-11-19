@@ -3,7 +3,7 @@
 
 #![cfg(feature = "persist")]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use hacivat_meta::codec::{DecodeError, encode_ns_key};
 use hacivat_meta::fixture::{DB, pg_catalog};
@@ -196,7 +196,7 @@ fn read_only_directory_runs_memory_only() {
     let ro = dir.path().join("catalog");
     std::fs::create_dir(&ro).unwrap();
     std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let path: PathBuf = ro.join("p.v1.sqlite");
+    let path: std::path::PathBuf = ro.join("p.v1.sqlite");
     let opened = CacheStore::open(&path, Encryption::None, W1);
     assert!(matches!(opened, Err(CacheError::Io(_))), "{opened:?}");
     assert_eq!(std::fs::read_dir(&ro).unwrap().count(), 0);

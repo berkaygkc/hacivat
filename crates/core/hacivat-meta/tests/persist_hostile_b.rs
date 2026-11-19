@@ -11,6 +11,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+// ## m4-t11 (controller fix, CI 44600951505): wall-clock bounds are perf assertions, so they
+// self-gate on HACIVAT_PERF=1 (test-timing rule); the structural checks (refused, TooLarge,
+// nothing decoded) always run. CI debug runners took 4.4 s for a bound of 2 s.
+fn perf_bound(elapsed: Duration, limit: Duration, what: &str) {
+    if std::env::var_os("HACIVAT_PERF").is_some() {
+        assert!(elapsed < limit, "{what}: {elapsed:?}");
+    }
+}
+
 use hacivat_meta::codec::testing::encode_unchecked;
 use hacivat_meta::codec::{
     DecodeError, EXPANSION_FACTOR, EXPANSION_SLACK, HEADER_LEN, MAX_NAME_BYTES, decode_namespace,
@@ -93,7 +102,7 @@ fn h1_an_interned_big_name_fails_fast() {
         "{:?}",
         all.dropped
     );
-    assert!(dt < Duration::from_secs(2), "load took {dt:?}");
+    perf_bound(dt, Duration::from_secs(2), "load");
     // At the cap a name still round-trips; one byte over is refused both ways.
     let at_cap = many_big_names(2, MAX_NAME_BYTES);
     assert!(decode_namespace(&encode_namespace(&at_cap).unwrap()).is_ok());
@@ -116,7 +125,7 @@ fn h1b_total_string_expansion_is_capped() {
         decode_namespace(&bytes).unwrap_err(),
         DecodeError::Malformed("strings expand past the budget")
     );
-    assert!(t0.elapsed() < Duration::from_secs(2));
+    perf_bound(t0.elapsed(), Duration::from_secs(2), "load");
 }
 
 /// H2 (flipped). The decoder's allocation stays linear: a 200k-minimal-object payload (the
@@ -614,7 +623,7 @@ fn r4_huge_ns_key_cell_is_never_decoded() {
     let dt = t0.elapsed();
     assert!(all.namespaces.is_empty());
     assert_eq!(all.dropped, vec![(None, RowError::TooLarge); 2]);
-    assert!(dt < Duration::from_secs(2), "{dt:?}");
+    perf_bound(dt, Duration::from_secs(2), "r4");
     // The rows are gone; a second load and an eviction see nothing.
     assert!(s.load_all().unwrap().dropped.is_empty());
     assert!(s.evict(0, &|_: &NsKey| false).unwrap().evicted.is_empty());
@@ -727,6 +736,6 @@ fn r7_names_at_the_cap_fail_fast() {
         let t0 = Instant::now();
         let r = decode_namespace(&bytes);
         assert!(r.is_err(), "n={n} len={len}");
-        assert!(t0.elapsed() < Duration::from_secs(2), "n={n} len={len}");
+        perf_bound(t0.elapsed(), Duration::from_secs(2), &format!("n={n} len={len}"));
     }
 }
