@@ -31,7 +31,7 @@
 use hacivat_meta::Name;
 use sql_dialect::DialectId;
 
-use super::parse::{Family, Piece, Tok, scan_line, tokenize, walk_lines};
+use super::parse::{Family, Piece, SYNTAX, Tok, scan_line, tokenize, walk_lines};
 use super::{DraftPack, Section};
 
 /// One lint finding.
@@ -117,64 +117,6 @@ const PG_UNPREFIXED: [&str; 22] = [
     "unnest",
 ];
 
-/// Words followed by `(` that are SQL syntax, not a function call (`joinable` rule).
-const SYNTAX: [&str; 54] = [
-    "in",
-    "exists",
-    "any",
-    "all",
-    "some",
-    "array",
-    "values",
-    "as",
-    "cast",
-    "coalesce",
-    "nullif",
-    "greatest",
-    "least",
-    "row",
-    "over",
-    "filter",
-    "join",
-    "from",
-    "using",
-    "on",
-    "and",
-    "or",
-    "not",
-    "where",
-    "select",
-    "when",
-    "then",
-    "else",
-    "between",
-    "is",
-    "case",
-    "lateral",
-    "by",
-    "with",
-    "recursive",
-    "partition",
-    "extract",
-    "position",
-    "substring",
-    "trim",
-    "overlay",
-    "collation",
-    "interval",
-    "within",
-    "table",
-    "into",
-    "returning",
-    "union",
-    "intersect",
-    "except",
-    "like",
-    "distinct",
-    "end",
-    "having",
-];
-
 /// Lints every section of `pack` with `dialect`'s rules.
 pub fn lint<P: AsRef<DraftPack>>(pack: &P, dialect: DialectId) -> Vec<LintError> {
     let pack = pack.as_ref();
@@ -246,6 +188,7 @@ fn lint_section(sec: &Section, lexer: Family, rules: Family, out: &mut Vec<LintE
         }
     };
 
+    let valid_ages = between_age_calls(&toks);
     for (k, &(line, tok)) in toks.iter().enumerate() {
         match tok {
             Tok::Op(o @ ("~*" | "!~*" | "~~*" | "!~~*")) => {
@@ -286,7 +229,7 @@ fn lint_section(sec: &Section, lexer: Family, rules: Family, out: &mut Vec<LintE
                                 push(line, LintKind::UnqualifiedPgCatalog(w.to_string()));
                             }
                         }
-                        if eq(w, "age") && call && !age_in_between_shape(&toks, k, q.is_some()) {
+                        if eq(w, "age") && call && !valid_ages.contains(&k) {
                             push(line, LintKind::OrderingOnAge);
                         }
                     }
@@ -328,22 +271,9 @@ fn lint_section(sec: &Section, lexer: Family, rules: Family, out: &mut Vec<LintE
     }
 }
 
-/// Whether the `age(` call at `k` is one side of `age(x) BETWEEN 0 AND age(y)` (R-M4-8):
-/// followed — after its arguments and any `::type` casts — by `BETWEEN`, or the upper bound
-/// right after `BETWEEN 0 AND`. Any other position (a comparison, parentheses around it,
-/// arithmetic, a cast then a comparison) is not.
-fn age_in_between_shape(toks: &[(u32, Tok<'_>)], k: usize, qualified: bool) -> bool {
-    let is = |j: Option<usize>, w: &str| matches!(j.and_then(|j| toks.get(j)), Some((_, Tok::Word(x))) if x.eq_ignore_ascii_case(w));
-    // The upper bound: `BETWEEN 0 AND [pg_catalog.]age(`.
-    let start = if qualified { k.checked_sub(2) } else { Some(k) };
-    if let Some(s) = start
-        && is(s.checked_sub(1), "and")
-        && is(s.checked_sub(2), "0")
-        && is(s.checked_sub(3), "between")
-    {
-        return true;
-    }
-    // The lower operand: `age(…)` [`::` type …] `BETWEEN`.
+/// The index just past the call whose name is at `k` (`name(` … `)`) and any `::type`
+/// casts after it.
+fn past_call(toks: &[(u32, Tok<'_>)], k: usize) -> usize {
     let mut depth = 0usize;
     let mut j = k + 1;
     while let Some((_, t)) = toks.get(j) {
@@ -368,16 +298,66 @@ fn age_in_between_shape(toks: &[(u32, Tok<'_>)], k: usize, qualified: bool) -> b
             j += 2;
         }
     }
-    // … `BETWEEN 0 AND [pg_catalog.]age(`: the upper bound is itself an `age(` call.
-    let upper =
-        if is(Some(j + 3), "pg_catalog") && matches!(toks.get(j + 4), Some((_, Tok::Op(".")))) {
-            j + 5
+    j
+}
+
+/// The `age(` calls (indices of the name token) that form `age(x) BETWEEN 0 AND age(y)`
+/// exactly (R-M4-8; fix round 2, m9): the lower operand is an `age(` call (casts allowed) with
+/// a boolean boundary before it (`WHERE`, `AND`, `OR`, `NOT`, `ON`, `WHEN`, `(`, `,`, …), the
+/// bounds are `BETWEEN 0 AND` and an `age(` call, and a boundary follows the upper bound
+/// (`AND`, `OR`, `)`, `,`, a clause word or the end). So no arithmetic, comparison,
+/// `NOT BETWEEN`, `SYMMETRIC`, other lower bound or non-`age` lower operand passes.
+fn between_age_calls(toks: &[(u32, Tok<'_>)]) -> std::collections::HashSet<usize> {
+    let is = |j: usize, w: &str| matches!(toks.get(j), Some((_, Tok::Word(x))) if x.eq_ignore_ascii_case(w));
+    // `age(` at `j`, possibly `pg_catalog.`-qualified; answers (first token, name token).
+    let age_at = |j: usize| -> Option<(usize, usize)> {
+        let name = if is(j, "pg_catalog") && matches!(toks.get(j + 1), Some((_, Tok::Op(".")))) {
+            j + 2
         } else {
-            j + 3
+            j
         };
-    is(Some(j), "between")
-        && is(Some(j + 1), "0")
-        && is(Some(j + 2), "and")
-        && is(Some(upper), "age")
-        && matches!(toks.get(upper + 1), Some((_, Tok::Op("("))))
+        (is(name, "age") && matches!(toks.get(name + 1), Some((_, Tok::Op("(")))))
+            .then_some((j, name))
+    };
+    let before_ok = |first: usize| match first.checked_sub(1).and_then(|b| toks.get(b)) {
+        None => true,
+        Some((_, Tok::Op("(" | ","))) => true,
+        Some((_, Tok::Word(w))) => [
+            "where", "and", "or", "not", "on", "when", "then", "else", "select",
+        ]
+        .iter()
+        .any(|b| w.eq_ignore_ascii_case(b)),
+        Some(_) => false,
+    };
+    let after_ok = |j: usize| match toks.get(j) {
+        None => true,
+        Some((_, Tok::Op(")" | ","))) => true,
+        Some((_, Tok::Word(w))) => [
+            "and", "or", "then", "else", "end", "order", "group", "limit", "having", "union",
+            "from", "as",
+        ]
+        .iter()
+        .any(|b| w.eq_ignore_ascii_case(b)),
+        Some(_) => false,
+    };
+    let mut out = std::collections::HashSet::new();
+    for first in 0..toks.len() {
+        let Some((first, lower)) = age_at(first) else {
+            continue;
+        };
+        // A qualified call matches at its `pg_catalog` token; seen from the bare `age` token it
+        // has `.` before it, which is no boundary.
+        let b = past_call(toks, lower);
+        if !(before_ok(first) && is(b, "between") && is(b + 1, "0") && is(b + 2, "and")) {
+            continue;
+        }
+        let Some((_, upper)) = age_at(b + 3) else {
+            continue;
+        };
+        if after_ok(past_call(toks, upper)) {
+            out.insert(lower);
+            out.insert(upper);
+        }
+    }
+    out
 }

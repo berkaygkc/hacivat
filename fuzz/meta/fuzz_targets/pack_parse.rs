@@ -163,7 +163,13 @@ fuzz_target!(|data: &[u8]| {
         let show_create = pack.section(s).is_some_and(|x| x.show_create());
         for version in [0, 150_000, u32::MAX] {
             for mode in [Mode::Full, Mode::Incremental, Mode::Brief, Mode::System] {
-                for flags in [PackFlags::empty(), PackFlags::JOINED | PackFlags::MARIADB] {
+                // `render` refuses a MARIADB flag that disagrees with the flavor.
+                let maria = if flavor == Flavor::MariaDb {
+                    PackFlags::MARIADB
+                } else {
+                    PackFlags::empty()
+                };
+                for flags in [maria, PackFlags::JOINED | maria] {
                     let ctx = PackCtx {
                         dialect,
                         version,

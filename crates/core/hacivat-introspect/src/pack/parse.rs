@@ -756,6 +756,7 @@ fn finish(
         return Err(err(file, line, kind));
     }
     check_session_words(&sec, family).map_err(|(line, k)| err(file, line, k))?;
+    check_joinable_calls(&sec, family).map_err(|(line, k)| err(file, line, k))?;
     if lists.is_some() {
         check_list_variants(&sec, dialect, family).map_err(|(line, k)| err(file, line, k))?;
     }
@@ -866,7 +867,7 @@ pub(crate) fn line_tokens<'a>(f: Family, l: &'a LineNode, out: &mut Vec<(u32, To
 /// A list-bind section is checked in at most this many `--# if` variants.
 const LIST_VARIANT_CAP: usize = 4096;
 
-/// Words that are never the column of `<column> IN :[name]`.
+/// Words that are never part of the column of `<column> IN :[name]`.
 const NOT_A_COLUMN: [&str; 22] = [
     "not", "and", "or", "xor", "where", "select", "on", "when", "then", "else", "case", "end",
     "exists", "is", "null", "true", "false", "all", "any", "some", "in", "between",
@@ -895,10 +896,13 @@ const CLAUSES: [&str; 19] = [
     "with",
 ];
 
-/// Words that change a result under chunking when they stand at the list's level.
-const UNCHUNKABLE: [&str; 13] = [
-    "or",
-    "xor",
+/// Words that turn a list-bind conjunct into something else when they stand beside it, at
+/// expression depth 0 of the `WHERE` clause.
+const SIBLING_REFUSED: [&str; 2] = ["or", "xor"];
+
+/// Words that change a result under chunking anywhere in the list's query (query level 0):
+/// grouping, paging, distinctness, windows and aggregate markers, set operations.
+const QUERY_REFUSED: [&str; 13] = [
     "group",
     "having",
     "limit",
@@ -906,54 +910,226 @@ const UNCHUNKABLE: [&str; 13] = [
     "fetch",
     "distinct",
     "over",
+    "window",
+    "filter",
+    "within",
     "union",
     "intersect",
     "except",
-    "window",
 ];
 
-/// Aggregate functions (PostgreSQL, MySQL/MariaDB, SQLite): a call at the list's level
-/// aggregates one chunk only.
-const AGGREGATES: [&str; 32] = [
-    "count",
-    "sum",
-    "avg",
-    "min",
-    "max",
-    "array_agg",
-    "string_agg",
-    "json_agg",
-    "jsonb_agg",
-    "json_object_agg",
-    "jsonb_object_agg",
-    "xmlagg",
-    "bool_and",
-    "bool_or",
-    "every",
-    "bit_and",
-    "bit_or",
-    "bit_xor",
-    "group_concat",
-    "json_arrayagg",
-    "json_objectagg",
-    "json_group_array",
-    "json_group_object",
-    "std",
-    "stddev",
-    "stddev_pop",
-    "stddev_samp",
-    "variance",
-    "var_pop",
-    "var_samp",
-    "percentile_cont",
-    "percentile_disc",
+/// Words followed by `(` that are SQL syntax, not a function call.
+pub(crate) const SYNTAX: [&str; 55] = [
+    "in",
+    "exists",
+    "any",
+    "all",
+    "some",
+    "array",
+    "values",
+    "as",
+    "cast",
+    "coalesce",
+    "nullif",
+    "greatest",
+    "least",
+    "row",
+    "over",
+    "filter",
+    "join",
+    "from",
+    "using",
+    "on",
+    "and",
+    "or",
+    "not",
+    "where",
+    "select",
+    "when",
+    "then",
+    "else",
+    "between",
+    "is",
+    "case",
+    "lateral",
+    "by",
+    "with",
+    "recursive",
+    "partition",
+    "extract",
+    "position",
+    "substring",
+    "trim",
+    "overlay",
+    "collation",
+    "interval",
+    "within",
+    "table",
+    "into",
+    "returning",
+    "union",
+    "intersect",
+    "except",
+    "like",
+    "distinct",
+    "end",
+    "having",
+    "group",
 ];
+
+/// The function called at `toks[j]`, if `j` is a call: a word (or quoted name) followed by
+/// `(` that is not SQL syntax and not a type name (after `::` or `AS`).
+pub(crate) fn call_name<'a>(toks: &[(u32, Tok<'a>)], j: usize) -> Option<&'a str> {
+    let Tok::Word(w) = toks.get(j)?.1 else {
+        return None;
+    };
+    if toks.get(j + 1).map(|t| t.1) != Some(Tok::Op("("))
+        || SYNTAX.iter().any(|s| w.eq_ignore_ascii_case(s))
+    {
+        return None;
+    }
+    if j >= 1 && (toks[j - 1].1 == Tok::Op("::") || is_word(toks.get(j - 1), &["as"])) {
+        return None;
+    }
+    Some(w)
+}
+
+fn starts_with_ci(w: &str, prefix: &str) -> bool {
+    w.len() >= prefix.len()
+        && w.is_char_boundary(prefix.len())
+        && w[..prefix.len()].eq_ignore_ascii_case(prefix)
+}
+
+fn ends_with_ci(w: &str, suffix: &str) -> bool {
+    w.len() >= suffix.len()
+        && w.is_char_boundary(w.len() - suffix.len())
+        && w[w.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+}
+
+/// Row-by-row functions every read section may call where a stricter rule applies (a
+/// list-bind query, a `joinable` section): they compute one value per row, so chunking
+/// cannot change them, and none writes, locks, sleeps or assigns an XID (fix round 2, I5 and
+/// m8: an allowlist, not a denylist of aggregates and side effects). Later tasks extend it by
+/// named exception.
+const ROW_FUNCTIONS: [&str; 52] = [
+    // PostgreSQL
+    "age",
+    "array_to_string",
+    "string_to_array",
+    "array_length",
+    "array_position",
+    "cardinality",
+    "unnest",
+    "pg_encoding_to_char",
+    "pg_relation_size",
+    "pg_total_relation_size",
+    "pg_table_size",
+    "pg_indexes_size",
+    "pg_column_size",
+    "pg_tablespace_location",
+    "current_database",
+    "current_schema",
+    "pg_current_snapshot",
+    "pg_snapshot_xmin",
+    "pg_snapshot_xmax",
+    "pg_current_xact_id_if_assigned",
+    "txid_current_if_assigned",
+    "encode",
+    "md5",
+    "sha256",
+    "split_part",
+    "starts_with",
+    // Shared
+    "length",
+    "char_length",
+    "octet_length",
+    "replace",
+    "concat",
+    "concat_ws",
+    "abs",
+    "round",
+    "floor",
+    "ceil",
+    "ceiling",
+    "mod",
+    // MySQL / MariaDB
+    "if",
+    "ifnull",
+    "isnull",
+    "substring_index",
+    "hex",
+    "find_in_set",
+    "utc_timestamp",
+    "unix_timestamp",
+    "crc32",
+    "sha2",
+    // SQLite
+    "iif",
+    "substr",
+    "instr",
+    "typeof",
+];
+
+/// PostgreSQL catalog deparsers and lookups: row by row, but their text depends on the
+/// `search_path`, which a joined connection does not pin (R-M4-46). Allowed in a list-bind
+/// query, not in a `joinable` section.
+const DEPARSERS: [&str; 7] = [
+    "format_type",
+    "obj_description",
+    "col_description",
+    "shobj_description",
+    "quote_ident",
+    "to_regclass",
+    "to_regtype",
+];
+
+/// Whether `f` may be called in a list-bind query (at its level) or, with `joinable`, in a
+/// `joinable` section. A `joinable` section may also aggregate (its rows are read whole).
+fn function_allowed(f: &str, joinable: bool) -> bool {
+    let eq = |s: &&str| f.eq_ignore_ascii_case(s);
+    if ROW_FUNCTIONS.iter().any(eq) || starts_with_ci(f, "pragma_") {
+        return true;
+    }
+    if joinable {
+        ["count", "max", "min", "sum", "bool_and", "bool_or", "every"]
+            .iter()
+            .any(eq)
+    } else {
+        DEPARSERS.iter().any(eq)
+            || starts_with_ci(f, "pg_get_")
+            || starts_with_ci(f, "pg_identify_object")
+            || starts_with_ci(f, "pg_describe_object")
+            || (starts_with_ci(f, "has_") && ends_with_ci(f, "_privilege"))
+            || (starts_with_ci(f, "pg_") && ends_with_ci(f, "_is_visible"))
+    }
+}
+
+/// A `joinable` section calls only allowlisted functions (fix round 2, m8): no
+/// `set_config`, `nextval`/`setval`, advisory locks, large objects, `dblink`, `pg_notify`,
+/// XID-assigning calls, MySQL `GET_LOCK`/`RELEASE_LOCK`/`SLEEP`/`BENCHMARK` — nothing outside
+/// the list.
+fn check_joinable_calls(sec: &Section, family: Family) -> Result<(), (u32, PackErrorKind)> {
+    if !sec.joinable {
+        return Ok(());
+    }
+    let mut toks = Vec::new();
+    walk_lines(&sec.body, &mut |l| line_tokens(family, l, &mut toks));
+    for j in 0..toks.len() {
+        if let Some(f) = call_name(&toks, j)
+            && !function_allowed(f, true)
+        {
+            return Err((toks[j].0, PackErrorKind::JoinableFunction(f.to_string())));
+        }
+    }
+    Ok(())
+}
 
 fn is_word(t: Option<&(u32, Tok<'_>)>, any: &[&str]) -> bool {
     matches!(t, Some((_, Tok::Word(w))) if any.iter().any(|a| w.eq_ignore_ascii_case(a)))
 }
 
-/// Checks the list-bind placement rule (fix round 1, I3) in every variant of `sec`.
+/// Checks the list-bind placement rule (fix rounds 1 and 2, I3 and I5) in every variant of
+/// `sec`.
 fn check_list_variants(
     sec: &Section,
     dialect: sql_dialect::DialectId,
@@ -973,47 +1149,100 @@ fn check_list_variants(
     Ok(())
 }
 
-/// A list bind is legal only as a top-level `AND` conjunct of the `WHERE` clause, written
-/// `<column> IN :[name]` (the column optionally qualified), outside every parenthesis, with
-/// nothing but `AND`, `ORDER` or the end after it; and the statement holds no aggregate,
-/// `GROUP BY`, `HAVING`, `LIMIT`, `OFFSET`, `FETCH`, `DISTINCT`, window, `OR`, `XOR`, MySQL
-/// `||` or set operation at that level. Then every chunk selects a disjoint part of the
-/// answer, and the union of the chunks is the answer; an empty list selects nothing.
+/// A list bind is legal only when the top-level `AND` conjunct of the `WHERE` clause that
+/// holds it is **exactly** `<column-ref> IN :[name]` (`<column-ref>` one or more `.`-joined
+/// identifiers), and its query holds nothing whose result chunking changes. In detail:
+/// - expression depth counts `(…)`, `[…]` and `CASE … END`, so a list under a `CASE`, an
+///   array constructor or a parenthesis (`NOT (…)`, `(…) IS NOT TRUE`, `EXISTS (…)`) is not
+///   at depth 0 and is refused;
+/// - the conjunct is preceded by `WHERE` or a conjunction `AND` (not the `AND` of
+///   `BETWEEN`) and followed by nothing, `AND` or `ORDER`; the nearest clause keyword before
+///   it is `WHERE`;
+/// - no `OR`/`XOR` (MySQL `||`) stands at expression depth 0 of the query;
+/// - at query level 0 (outside subqueries, inside expressions too) there is no grouping,
+///   paging, `DISTINCT` (but `IS [NOT] DISTINCT FROM`), window, `FILTER`, `WITHIN GROUP` or
+///   set operation, and every function call is on the row-by-row allowlist (so no aggregate
+///   of any family, PostgreSQL, MySQL or SQLite).
+///
+/// Then every chunk selects a disjoint part of the answer, the union of the chunks is the
+/// answer, and an empty list selects nothing.
 fn check_list_tokens(toks: &[(u32, Tok<'_>)], family: Family) -> Result<(), (u32, PackErrorKind)> {
     use PackErrorKind as K;
     let Some(li) = toks.iter().position(|t| t.1 == Tok::List) else {
         return Ok(());
     };
     let line = toks[li].0;
-    let mut depths = Vec::with_capacity(toks.len());
-    let mut depth = 0usize;
-    for (_, t) in toks {
+    let n = toks.len();
+    let mut depths = Vec::with_capacity(n);
+    let mut levels = Vec::with_capacity(n);
+    let (mut depth, mut level) = (0usize, 0usize);
+    let mut parens: Vec<bool> = Vec::new();
+    for (j, (_, t)) in toks.iter().enumerate() {
         match t {
             Tok::Op("(") => {
                 depths.push(depth);
+                levels.push(level);
                 depth += 1;
+                let sub = is_word(toks.get(j + 1), &["select", "with", "values"]);
+                parens.push(sub);
+                level += usize::from(sub);
             }
             Tok::Op(")") => {
                 depth = depth.saturating_sub(1);
+                if parens.pop() == Some(true) {
+                    level = level.saturating_sub(1);
+                }
                 depths.push(depth);
+                levels.push(level);
             }
-            _ => depths.push(depth),
+            Tok::Op("[") => {
+                depths.push(depth);
+                levels.push(level);
+                depth += 1;
+            }
+            Tok::Op("]") => {
+                depth = depth.saturating_sub(1);
+                depths.push(depth);
+                levels.push(level);
+            }
+            Tok::Word(w) if w.eq_ignore_ascii_case("case") => {
+                depths.push(depth);
+                levels.push(level);
+                depth += 1;
+            }
+            Tok::Word(w) if w.eq_ignore_ascii_case("end") => {
+                depth = depth.saturating_sub(1);
+                depths.push(depth);
+                levels.push(level);
+            }
+            _ => {
+                depths.push(depth);
+                levels.push(level);
+            }
         }
     }
     let not_conjunct = Err((line, K::ListBindNotConjunct));
-    if depths[li] != 0 || !is_word(li.checked_sub(1).and_then(|k| toks.get(k)), &["in"]) {
+    if depths[li] != 0
+        || levels[li] != 0
+        || !is_word(li.checked_sub(1).and_then(|k| toks.get(k)), &["in"])
+    {
         return not_conjunct;
     }
-    // The column: a word that is not a keyword, optionally `qualifier.`.
+    // The column reference: identifiers joined by `.`, nothing else.
     let Some(mut k) = li.checked_sub(2) else {
         return not_conjunct;
     };
-    if !matches!(toks[k].1, Tok::Word(_)) || is_word(toks.get(k), &NOT_A_COLUMN) {
-        return not_conjunct;
+    loop {
+        if !matches!(toks[k].1, Tok::Word(_)) || is_word(toks.get(k), &NOT_A_COLUMN) {
+            return not_conjunct;
+        }
+        if k >= 2 && toks[k - 1].1 == Tok::Op(".") {
+            k -= 2;
+        } else {
+            break;
+        }
     }
-    if k >= 2 && toks[k - 1].1 == Tok::Op(".") && matches!(toks[k - 2].1, Tok::Word(_)) {
-        k -= 2;
-    }
+    // Exactly the conjunct: `WHERE`/`AND` before, `AND`/`ORDER`/the end after.
     if !is_word(
         k.checked_sub(1).and_then(|j| toks.get(j)),
         &["where", "and"],
@@ -1033,30 +1262,39 @@ fn check_list_tokens(toks: &[(u32, Tok<'_>)], family: Family) -> Result<(), (u32
         Some(t) if is_word(Some(t), &["and", "order"]) => {}
         Some(_) => return not_conjunct,
     }
-    let clause = (0..li)
-        .rev()
-        .find(|&j| depths[j] == 0 && is_word(toks.get(j), &CLAUSES));
+    // (`IS [NOT] DISTINCT FROM` holds a `FROM` that opens no clause.)
+    let clause = (0..li).rev().find(|&j| {
+        depths[j] == 0
+            && is_word(toks.get(j), &CLAUSES)
+            && !(is_word(toks.get(j), &["from"])
+                && is_word(j.checked_sub(1).and_then(|p| toks.get(p)), &["distinct"]))
+    });
     if !clause.is_some_and(|j| is_word(toks.get(j), &["where"])) {
         return not_conjunct;
     }
     for (j, (l, t)) in toks.iter().enumerate() {
-        if depths[j] != 0 {
+        if levels[j] != 0 {
             continue;
         }
-        let unchunkable = match t {
-            Tok::Word(w) => {
-                UNCHUNKABLE.iter().any(|u| w.eq_ignore_ascii_case(u))
-                    || (AGGREGATES.iter().any(|a| w.eq_ignore_ascii_case(a))
-                        && toks.get(j + 1).is_some_and(|n| n.1 == Tok::Op("(")))
+        let refused: Option<String> = match t {
+            Tok::Word(w)
+                if depths[j] == 0 && SIBLING_REFUSED.iter().any(|u| w.eq_ignore_ascii_case(u)) =>
+            {
+                Some((*w).to_string())
             }
-            Tok::Op("||") => family == Family::MySql,
-            _ => false,
+            Tok::Op("||") if depths[j] == 0 && family == Family::MySql => Some("||".to_string()),
+            Tok::Word(w) if QUERY_REFUSED.iter().any(|u| w.eq_ignore_ascii_case(u)) => {
+                let is_distinct_from = w.eq_ignore_ascii_case("distinct")
+                    && j >= 1
+                    && is_word(toks.get(j - 1), &["is", "not"]);
+                (!is_distinct_from).then(|| (*w).to_string())
+            }
+            Tok::Word(_) => call_name(toks, j)
+                .filter(|f| !function_allowed(f, false))
+                .map(str::to_string),
+            _ => None,
         };
-        if unchunkable {
-            let word = match t {
-                Tok::Word(w) | Tok::Op(w) => (*w).to_string(),
-                _ => String::new(),
-            };
+        if let Some(word) = refused {
             return Err((*l, K::ListBindUnchunkable(word)));
         }
     }

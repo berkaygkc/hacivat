@@ -1,11 +1,13 @@
-//! T4 security review: the reviewer's hostile probes (H1–H10), committed in fix round 1 and
-//! flipped so each finding test asserts the fix (refused, not accepted). H10 held already.
+//! T4 security review: the reviewer's hostile probes, flipped so each finding test asserts the
+//! fix (refused, not accepted). H1–H10 come from the first review (fix round 1; H10 held
+//! already), R1–R9 from the re-review (fix round 2; R4 and R6 held already, R9 documents the
+//! `Box::leak` case that check-deps `PackParseOnlyFromPacks` covers).
 
 use std::sync::Arc;
 
 use hacivat_introspect::pack::{
-    BindValue, DialectId, DraftPack, Flavor, LintKind, LogicalType, Mode, PackCtx, PackErrorKind,
-    PackFlags, Params, RenderError, lint,
+    BindValue, DialectId, DraftPack, Flavor, LintKind, LogicalType, Mode, Pack, PackCtx,
+    PackErrorKind, PackFlags, Params, RenderError, lint,
 };
 use hacivat_meta::Level;
 
@@ -31,7 +33,11 @@ fn ctx(d: DialectId) -> PackCtx {
         },
         mode: Mode::Full,
         level: Level::Structure,
-        flags: PackFlags::empty(),
+        flags: if d == DialectId::MariaDb {
+            PackFlags::MARIADB
+        } else {
+            PackFlags::empty()
+        },
         params: Params::default(),
     }
 }
@@ -340,4 +346,336 @@ fn h10_show_create_ident_hostile_values_stay_one_identifier() {
             "{hdr}"
         );
     }
+}
+
+// ---------------------------------------------------------------- re-review probes (round 2)
+
+fn parses(d: DialectId, body: &str) -> bool {
+    DraftPack::parse(d, &sec(body)).is_ok()
+}
+
+fn kind(d: DialectId, body: &str) -> PackErrorKind {
+    DraftPack::parse(d, &sec(body)).expect_err(body).kind
+}
+
+// R1. A list bind under `CASE … END` (negated by the comparison) is refused: `CASE` counts as
+// depth.
+#[test]
+fn r1_list_inside_case_is_refused() {
+    assert_eq!(
+        kind(
+            DialectId::Postgres,
+            "SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE CASE WHEN c.relkind = 'r' AND c.oid IN :[ids] AND true THEN 1 ELSE 0 END = 0"
+        ),
+        PackErrorKind::ListBindNotConjunct
+    );
+    assert_eq!(
+        kind(
+            DialectId::MySql,
+            "SELECT TABLE_NAME AS x FROM INFORMATION_SCHEMA.TABLES WHERE CASE WHEN TABLE_SCHEMA = :s AND TABLE_NAME IN :[ids] AND 1 THEN 0 ELSE 1 END = 1"
+        ),
+        PackErrorKind::ListBindNotConjunct
+    );
+}
+
+// R2. A list bind inside PG array brackets is refused: `[…]` counts as depth.
+#[test]
+fn r2_list_inside_pg_array_brackets_is_refused() {
+    assert_eq!(
+        kind(
+            DialectId::Postgres,
+            "SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE ARRAY[true AND c.oid IN :[ids] AND true] = ARRAY[false]"
+        ),
+        PackErrorKind::ListBindNotConjunct
+    );
+}
+
+// R3. Every aggregate family is refused in a list-bind query: only allowlisted row-by-row
+// functions may be called at its level.
+#[test]
+fn r3_aggregates_outside_any_list_are_refused() {
+    for (d, body) in [
+        (
+            DialectId::Postgres,
+            "SELECT pg_catalog.any_value(c.relname) AS x FROM pg_catalog.pg_class c WHERE c.oid IN :[ids]",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT pg_catalog.range_agg(pg_catalog.int8range(c.oid::int8, c.oid::int8)) AS x FROM pg_catalog.pg_class c WHERE c.oid IN :[ids]",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT pg_catalog.corr(c.relpages, c.reltuples) AS x FROM pg_catalog.pg_class c WHERE c.oid IN :[ids]",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT pg_catalog.regr_slope(c.relpages, c.reltuples) AS x FROM pg_catalog.pg_class c WHERE c.oid IN :[ids]",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT pg_catalog.mode() WITHIN GROUP (ORDER BY c.relkind) AS x FROM pg_catalog.pg_class c WHERE c.oid IN :[ids]",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT coalesce(pg_catalog.max(c.relpages), 0) AS x FROM pg_catalog.pg_class c WHERE c.oid IN :[ids]",
+        ),
+        (
+            DialectId::Sqlite,
+            "SELECT total(m.rootpage) AS x FROM sqlite_schema m WHERE m.name IN :[ids]",
+        ),
+        (
+            DialectId::MySql,
+            "SELECT ANY_VALUE(TABLE_NAME) AS x FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME IN :[ids]",
+        ),
+    ] {
+        assert!(
+            matches!(kind(d, body), PackErrorKind::ListBindUnchunkable(_)),
+            "{body}"
+        );
+    }
+}
+
+// R4. Placement rules that held already, kept as regressions.
+#[test]
+fn r4_placement_holds() {
+    for body in [
+        "WITH t AS (SELECT c.oid FROM pg_catalog.pg_class c WHERE c.oid IN :[ids]) SELECT t.oid AS x FROM t",
+        "SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE c.relnamespace IN (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.oid IN :[ids])",
+        "SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.objid IN :[ids])",
+        "SELECT c.relname AS x FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace AND c.oid IN :[ids]",
+        "SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE CASE WHEN c.oid IN :[ids] THEN true END",
+        "SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE true = c.oid IN :[ids]",
+        "SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE c.relpages BETWEEN 0 AND c.oid IN :[ids]",
+        "SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE c.oid IN :[ids] = false",
+        "SELECT pg_catalog.row_number() OVER () AS x FROM pg_catalog.pg_class c WHERE c.oid IN :[ids]",
+        "SELECT DISTINCT c.relkind AS x FROM pg_catalog.pg_class c WHERE c.oid IN :[ids]",
+        "SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE c.oid IN :[ids] UNION ALL SELECT 'a'",
+        "SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE c.oid IN :[ids] FETCH FIRST 1 ROWS ONLY",
+    ] {
+        assert!(!parses(DialectId::Postgres, body), "accepted: {body}");
+    }
+    assert!(parses(
+        DialectId::Postgres,
+        "WITH t AS (SELECT d.objid, count(*) AS n FROM pg_catalog.pg_depend d GROUP BY d.objid) SELECT c.relname AS x FROM pg_catalog.pg_class c JOIN t ON t.objid = c.oid WHERE c.oid IN :[ids] AND t.n > 0 ORDER BY c.relname"
+    ));
+    assert!(!parses(
+        DialectId::MySql,
+        "SELECT TABLE_NAME AS x FROM INFORMATION_SCHEMA.TABLES WHERE 1 && TABLE_NAME IN :[ids]"
+    ));
+    assert!(!parses(
+        DialectId::MySql,
+        "SELECT TABLE_NAME AS x FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME IN :[ids] || 1"
+    ));
+}
+
+// R5. A context whose MariaDB flag disagrees with its flavor is refused by `render`, so a
+// branch no parse-time check has read never renders.
+#[test]
+fn r5_inconsistent_ctx_is_refused() {
+    let pack = "--- name: S ---\n--- returns: x text ---\n\
+--# if flag(mariadb) and flavor == mysql\n\
+SELECT TABLE_NAME AS x FROM INFORMATION_SCHEMA.TABLES WHERE CASE WHEN TABLE_NAME IN :[ids] THEN 0 ELSE 1 END = 1\n\
+--# else\n\
+SELECT TABLE_NAME AS x FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = :s\n\
+--# end\n";
+    let p = DraftPack::parse(DialectId::MySql, pack)
+        .expect("parses: no consistent context reaches the bad arm");
+    let mut c = ctx(DialectId::MySql);
+    c.flags = PackFlags::MARIADB; // flavor stays MySql
+    c.params.lists.push((Arc::from("ids"), vec![text("a")]));
+    assert_eq!(p.render("S", &c), Err(RenderError::FlavorFlagMismatch));
+    let mut c = ctx(DialectId::MariaDb);
+    c.flags = PackFlags::empty(); // flavor MariaDb, flag off
+    assert_eq!(p.render("S", &c), Err(RenderError::FlavorFlagMismatch));
+}
+
+// R6. Lexer rules hold.
+#[test]
+fn r6_lexer_holds() {
+    use PackErrorKind as K;
+    for (d, body, k) in [
+        (
+            DialectId::Postgres,
+            "SELECT 1 AS x /*/**/",
+            K::NestedComment,
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT 1 AS x /* a /*/ */",
+            K::NestedComment,
+        ),
+        (
+            DialectId::MySql,
+            "SELECT 1 AS x /*!50001 , 2 */",
+            K::ExecutableComment,
+        ),
+        (
+            DialectId::MariaDb,
+            "SELECT 1 AS x /*M! , 2 */",
+            K::ExecutableComment,
+        ),
+        (
+            DialectId::Sqlite,
+            "SELECT 1 AS x WHERE :$a IS NULL",
+            K::RawPlaceholder,
+        ),
+        (
+            DialectId::Sqlite,
+            "SELECT 1 AS x WHERE ?NNN IS NULL",
+            K::RawPlaceholder,
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT 1 AS x WHERE :1 IS NULL",
+            K::RawPlaceholder,
+        ),
+        (
+            DialectId::MySql,
+            "SELECT 1 AS x WHERE :\u{130} IS NULL",
+            K::RawPlaceholder,
+        ),
+        (DialectId::Postgres, "SELECT `a` AS x", K::Backtick),
+    ] {
+        assert_eq!(kind(d, body), k, "{body}");
+    }
+}
+
+// R7. Joinable sections call only allowlisted functions: state-changing, locking, sleeping,
+// XID-assigning and search_path-dependent calls are refused.
+#[test]
+fn r7_joinable_writing_functions_are_refused() {
+    let j = |d: DialectId, body: &str| {
+        DraftPack::parse(
+            d,
+            &format!("--- name: S ---\n--- returns: x text ---\n--- joinable ---\n{body}\n"),
+        )
+    };
+    for (d, body, f) in [
+        (
+            DialectId::Postgres,
+            "SELECT pg_catalog.set_config('search_path', 'evil', true) AS x",
+            "set_config",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT pg_catalog.nextval('s'::pg_catalog.regclass) AS x",
+            "nextval",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT pg_catalog.setval('s'::pg_catalog.regclass, 1) AS x",
+            "setval",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT pg_catalog.pg_advisory_xact_lock(1) AS x",
+            "pg_advisory_xact_lock",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT pg_catalog.lo_import('/etc/passwd') AS x",
+            "lo_import",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT pg_catalog.pg_notify('c', 'p') AS x",
+            "pg_notify",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT dblink_exec('x') AS x",
+            "dblink_exec",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT pg_catalog.txid_current() AS x",
+            "txid_current",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT pg_catalog.pg_current_xact_id() AS x",
+            "pg_current_xact_id",
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT pg_catalog.pg_get_viewdef(1) AS x",
+            "pg_get_viewdef",
+        ),
+        (DialectId::MySql, "SELECT GET_LOCK('a', 1) AS x", "GET_LOCK"),
+        (
+            DialectId::MySql,
+            "SELECT RELEASE_LOCK('a') AS x",
+            "RELEASE_LOCK",
+        ),
+        (DialectId::MySql, "SELECT SLEEP(1) AS x", "SLEEP"),
+        (DialectId::MySql, "SELECT BENCHMARK(1, 1) AS x", "BENCHMARK"),
+    ] {
+        assert_eq!(
+            j(d, body).unwrap_err().kind,
+            PackErrorKind::JoinableFunction(f.into()),
+            "{body}"
+        );
+    }
+    for body in [
+        "SELECT 1 AS x FROM pg_catalog.pg_class c FOR UPDATE",
+        "SELECT 1 AS x INTO t",
+        "SELECT 'delete' AS x",
+    ] {
+        assert!(j(DialectId::Postgres, body).is_err(), "{body}");
+    }
+    // Read-only stamps and aggregates stay legal there.
+    j(
+        DialectId::Postgres,
+        "SELECT pg_catalog.max(pg_catalog.age(c.xmin)) AS x, pg_catalog.count(*) AS n FROM pg_catalog.pg_class c WHERE c.oid = :oid",
+    )
+    .unwrap();
+}
+
+// R8. The age() lint refuses arithmetic around the BETWEEN form and a non-`age` lower operand.
+#[test]
+fn r8_age_shape_residuals_are_flagged() {
+    let flagged = |body: &str| {
+        let p = DraftPack::parse(DialectId::Postgres, &sec(body)).unwrap();
+        lint(&p, DialectId::Postgres)
+            .iter()
+            .any(|e| e.kind == LintKind::OrderingOnAge)
+    };
+    assert!(!flagged(
+        "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE pg_catalog.age(c.xmin) BETWEEN 0 AND pg_catalog.age(:w::xid)"
+    ));
+    for body in [
+        "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE 5 - pg_catalog.age(c.xmin) BETWEEN 0 AND pg_catalog.age(:w::xid)",
+        "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE pg_catalog.age(c.xmin) BETWEEN 0 AND pg_catalog.age(:w::xid) + 1000",
+        "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.relpages BETWEEN 0 AND pg_catalog.age(:w::xid)",
+        "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE pg_catalog.age(c.xmin) NOT BETWEEN 0 AND pg_catalog.age(:w::xid)",
+        "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE pg_catalog.age(c.xmin) BETWEEN SYMMETRIC 0 AND pg_catalog.age(:w::xid)",
+        "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE pg_catalog.age(c.xmin) BETWEEN 1 AND pg_catalog.age(:w::xid)",
+    ] {
+        assert!(flagged(body), "missed: {body}");
+    }
+}
+
+// R9. Provenance: `Box::leak` satisfies `&'static` here (a test file may name `Pack::parse`);
+// outside `pack/**`, the introspector modules, `tests/` and `fuzz/meta/` check-deps
+// `PackParseOnlyFromPacks` refuses the call. Positive controls for the two `compile_fail`
+// doctests.
+#[test]
+fn r9_box_leak_satisfies_static_and_doctest_controls() {
+    let runtime: String = [
+        "--- name: S ---\n--- returns: x text ---\n",
+        "SELECT 1 AS x\n",
+    ]
+    .concat();
+    let leaked: &'static str = Box::leak(runtime.into_boxed_str());
+    let p = Pack::parse(DialectId::Postgres, leaked).expect("a leaked runtime text makes a Pack");
+    let q = p.render("S", &ctx(DialectId::Postgres)).unwrap();
+    assert_eq!(q[0].sql(), "SELECT 1 AS x");
+    let d = DraftPack::parse(
+        DialectId::Postgres,
+        "--- name: S ---\n--- returns: x text ---\nSELECT 1 AS x\n",
+    )
+    .unwrap();
+    let dq = d.render("S", &ctx(DialectId::Postgres)).unwrap();
+    assert_eq!(dq[0].sql(), "SELECT 1 AS x");
+    assert!(Pack::parse(DialectId::Postgres, "--- name: S ---").is_err());
 }

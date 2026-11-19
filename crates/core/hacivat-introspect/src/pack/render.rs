@@ -3,16 +3,22 @@
 //! (`&'static` pack text) renders [`RenderedQuery`]s, and [`RenderedQuery::as_meta_query`]
 //! (feature `session`) is the **only** caller of `MetaQuery::new` (R-M4-7; check-deps
 //! `MetaQueryOnlyFromPacks`). A [`DraftPack`] (runtime text) renders [`DraftQuery`]s, which
-//! have no way to a `MetaQuery` (fix round 1, I2):
+//! have no way to a `MetaQuery` (fix round 1, I2). The two doctests below pin their error
+//! codes (fix round 2, m10): stable rustdoc does not check a `compile_fail` code, so each is
+//! also written in a comment, as observed by compiling the snippet (it is the only error);
+//! the positive controls (a `DraftQuery`'s `sql()`, `Pack::parse` with a literal) are in
+//! `tests/hostile_t04_review.rs` R9.
 //!
-//! ```compile_fail
+//! ```compile_fail,E0599
+//! // E0599 (observed): no method `as_meta_query` on `DraftQuery`.
 //! use hacivat_introspect::pack::{DialectId, DraftPack};
 //! let p = DraftPack::parse(DialectId::Postgres, "").unwrap();
 //! let q = p.render("S", todo!()).unwrap();
 //! let _ = q[0].as_meta_query(); // a DraftQuery is not a MetaQuery source
 //! ```
 //!
-//! ```compile_fail
+//! ```compile_fail,E0597
+//! // E0597 (observed): `runtime` does not live long enough (`Pack::parse` needs `'static`).
 //! use hacivat_introspect::pack::{DialectId, Pack};
 //! let runtime = String::from("--- name: S ---");
 //! let _ = Pack::parse(DialectId::Postgres, &runtime); // runtime text never makes a Pack
@@ -101,6 +107,9 @@ pub enum RenderError {
     NotJoinable,
     /// The context's dialect is not the pack's (MySQL and MariaDB share one pack).
     DialectMismatch,
+    /// `PackFlags::MARIADB` disagrees with `flavor == MariaDb`: the parse-time checks assume
+    /// they agree, so such a context could reach a branch no check has read (fix round 2, m7).
+    FlavorFlagMismatch,
     /// Every SQL line is gated away for this context: no statement exists, which must never
     /// read as "no rows" (alg/02 HV-INTRO-04 edge 8: absence is deliberate, not silent).
     NoVariant,
@@ -344,6 +353,9 @@ impl DraftPack {
         let family = self.inner.family;
         if Family::of(ctx.dialect) != Some(family) {
             return Err(RenderError::DialectMismatch);
+        }
+        if ctx.flags.contains(PackFlags::MARIADB) != (ctx.flavor == DbmsKind::MariaDb) {
+            return Err(RenderError::FlavorFlagMismatch);
         }
         let idx = *self
             .inner

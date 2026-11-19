@@ -42,7 +42,12 @@ fn ctx(d: DialectId, version: u32) -> PackCtx {
         flavor: flavor_of(d),
         mode: Mode::Full,
         level: Level::Structure,
-        flags: PackFlags::empty(),
+        // A MariaDB context says so in its flags too (`render` refuses a mismatch).
+        flags: if d == DialectId::MariaDb {
+            PackFlags::MARIADB
+        } else {
+            PackFlags::empty()
+        },
         params: Params::default(),
     }
 }
@@ -808,7 +813,7 @@ fn list_bind_is_only_a_top_level_where_conjunct() {
         (
             "c.relname AS x, pg_catalog.row_number() OVER () AS n",
             "c.oid IN :[ids]",
-            K::ListBindUnchunkable("OVER".into()),
+            K::ListBindUnchunkable("row_number".into()),
         ),
         (
             "c.relname AS x",
@@ -863,6 +868,79 @@ fn list_bind_is_only_a_top_level_where_conjunct() {
         DraftPack::parse(DialectId::Postgres, &section(body))
             .unwrap_or_else(|e| panic!("{body}: {e:?}"));
     }
+}
+
+#[test]
+fn list_query_functions_and_grouping_constructs() {
+    use PackErrorKind as K;
+    // Fix round 2, I5: `CASE … END` and `[…]` are depth; a call at the list's query level
+    // must be a row-by-row allowlisted function, also inside an expression.
+    for (sel, wh, kind) in [
+        (
+            "c.relname AS x",
+            "CASE WHEN c.oid IN :[ids] THEN true ELSE false END",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "c.relname AS x",
+            "ARRAY[c.oid IN :[ids]] = ARRAY[true]",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "coalesce(pg_catalog.sum(c.relpages), 0) AS x",
+            "c.oid IN :[ids]",
+            K::ListBindUnchunkable("sum".into()),
+        ),
+        (
+            "pg_catalog.my_agg(c.relpages) AS x",
+            "c.oid IN :[ids]",
+            K::ListBindUnchunkable("my_agg".into()),
+        ),
+    ] {
+        assert_eq!(
+            parse_err(DialectId::Postgres, &list_section(sel, wh)).kind,
+            kind,
+            "{sel} {wh}"
+        );
+    }
+    // Row-by-row deparsers and accessors, `IS DISTINCT FROM`, a nested qualified column, a
+    // subquery aggregate and `CASE` outside the list's conjunct all stay legal.
+    for (sel, wh) in [
+        (
+            "pg_catalog.pg_get_userbyid(c.relowner) AS x, pg_catalog.format_type(c.reltype, NULL) AS t, pg_catalog.obj_description(c.oid, 'pg_class') AS d",
+            "c.oid IN :[ids]",
+        ),
+        (
+            "c.relname AS x",
+            "c.reloftype IS DISTINCT FROM 0 AND c.oid IN :[ids]",
+        ),
+        ("c.relname AS x", "pg_catalog.pg_class.oid IN :[ids]"),
+        (
+            "CASE WHEN c.relkind = 'r' THEN 'table' END AS x, (SELECT pg_catalog.count(*) FROM pg_catalog.pg_index i WHERE i.indrelid = c.oid) AS n",
+            "c.oid IN :[ids]",
+        ),
+    ] {
+        DraftPack::parse(DialectId::Postgres, &list_section(sel, wh))
+            .unwrap_or_else(|e| panic!("{sel} {wh}: {e:?}"));
+    }
+    // SQLite's table-valued pragma functions are allowed.
+    DraftPack::parse(
+        DialectId::Sqlite,
+        &section("SELECT p.name AS x FROM pragma_table_xinfo(:t) p WHERE p.name IN :[ids]"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn render_refuses_a_flavor_that_disagrees_with_the_mariadb_flag() {
+    let p = parse(DialectId::MySql, &section("SELECT 1 AS x"));
+    let mut c = ctx(DialectId::MySql, 80046);
+    c.flags = PackFlags::MARIADB;
+    assert_eq!(p.render("S", &c), Err(RenderError::FlavorFlagMismatch));
+    let mut c = ctx(DialectId::MariaDb, 110402);
+    c.flags = PackFlags::empty();
+    assert_eq!(p.render("S", &c), Err(RenderError::FlavorFlagMismatch));
+    assert!(p.render("S", &ctx(DialectId::MariaDb, 110402)).is_ok());
 }
 
 #[test]
@@ -1569,13 +1647,24 @@ fn pg_catalog_functions_are_qualified() {
             &format!("--- name: S ---\n--- returns: x text ---\n--- joinable ---\n{body}\n"),
         )
     };
+    // (A function off the joinable allowlist does not even parse, fix round 2; the lint
+    // still asks for `pg_catalog.` on the allowlisted ones.)
     assert_eq!(
-        joinable("SELECT myfunc(c.oid) AS x FROM pg_catalog.pg_class c"),
-        [L::UnqualifiedPgCatalog("myfunc".into())]
+        DraftPack::parse(
+            DialectId::Postgres,
+            "--- name: S ---\n--- returns: x text ---\n--- joinable ---\nSELECT myfunc(c.oid) AS x FROM pg_catalog.pg_class c\n"
+        )
+        .unwrap_err()
+        .kind,
+        PackErrorKind::JoinableFunction("myfunc".into())
     );
     assert_eq!(
-        joinable("SELECT public.myfunc(c.oid) AS x FROM pg_catalog.pg_class c"),
-        [L::UnqualifiedPgCatalog("myfunc".into())]
+        joinable("SELECT length(c.relname) AS x FROM pg_catalog.pg_class c"),
+        [L::UnqualifiedPgCatalog("length".into())]
+    );
+    assert_eq!(
+        joinable("SELECT public.length(c.relname) AS x FROM pg_catalog.pg_class c"),
+        [L::UnqualifiedPgCatalog("length".into())]
     );
     assert_eq!(
         joinable(

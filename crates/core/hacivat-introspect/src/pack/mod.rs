@@ -30,12 +30,13 @@
 //!   `and`, `or`, `not` and parentheses.
 //! - **Binds** (R-M4-3): `:name` is one bind; `:[name]` is a list bind and renders as `(…)`
 //!   with one bind per item, duplicates removed, chunked at [`MAX_IN_LIST`] items (one query
-//!   per chunk; an empty list renders no query). A list bind is legal only as a top-level
-//!   `AND` conjunct of the `WHERE` clause written `<column> IN :[name]` — outside every
-//!   parenthesis, with no `NOT`, `!`, `IS …`, `OR`, `CASE` or `BETWEEN … AND` around it, used
-//!   once per section, in a statement with no aggregate, `GROUP BY`, `HAVING`, `LIMIT`,
-//!   `OFFSET`, `FETCH`, `DISTINCT`, window or set operation at its level (checked in every
-//!   `--# if` variant; fix round 1, I3). Then each chunk selects a disjoint part of the
+//!   per chunk; an empty list renders no query). A list bind is legal only when the
+//!   top-level `AND` conjunct of the `WHERE` clause that holds it is exactly
+//!   `<column-ref> IN :[name]` — outside every `(…)`, `[…]` and `CASE … END`, with no `NOT`,
+//!   `!`, `IS …`, `OR` or `BETWEEN … AND` around it — used once per section, in a query whose
+//!   own level has no grouping, paging, `DISTINCT`, window, `FILTER`/`WITHIN GROUP` or set
+//!   operation and calls only allowlisted row-by-row functions (checked in every `--# if`
+//!   variant; fix rounds 1 and 2, I3 and I5). Then each chunk selects a disjoint part of the
 //!   answer and the chunks' union is the answer. PostgreSQL gets `$n`, every other dialect
 //!   `?`. `::` (a PostgreSQL cast) is never a bind.
 //! - **Macros** are a closed enum ([`Macro`]): `#{max_in_list}` (the chunk size) and
@@ -548,6 +549,10 @@ pub enum PackErrorKind {
     /// (literals and comments included): a joined `MetaConn` refuses the text (T5 carry).
     /// Holds the word as written.
     JoinableWriteWord(String),
+    /// A function call in a `joinable` section that is not on its allowlist (no session or
+    /// server state change, no lock, no XID, no `search_path`-dependent text; fix round 2).
+    /// Holds the name as written.
+    JoinableFunction(String),
 }
 
 bitflags::bitflags! {

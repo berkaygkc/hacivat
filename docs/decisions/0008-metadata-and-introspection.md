@@ -410,3 +410,48 @@ HV-INTRO-04, R-M4-3, -7, -29, -32, -37). The packs themselves stay header-only u
     charset; under GBK-family charsets a name can break out. `SET NAMES utf8mb4` at connect
     and after every reconnect, assert `@@character_set_client`/`_connection`, refuse
     otherwise.
+- **Fix round 2 (re-review: 1 Important, I5; minors m7–m10).**
+  - **I5, a general rule (controller ruling).** In a list-bind query, expression depth counts
+    `(…)`, `[…]` and `CASE … END`, and the top-level `AND` conjunct of the `WHERE` clause that
+    holds the list must be **exactly** `<column-ref> IN :[name]` (`<column-ref>` one or more
+    `.`-joined identifiers): so `CASE WHEN a AND x IN :[ids] … END = 0` and
+    `ARRAY[… x IN :[ids] …] = …` are refused. A separate *query level* counts only subquery
+    parentheses (`(SELECT`, `(WITH`, `(VALUES`), so a scalar subquery, `EXISTS` or CTE body
+    may aggregate freely while the list's own query may not.
+  - **Function calls: an allowlist, not an aggregate denylist (the choice asked for).** At the
+    list's query level (inside expressions too, so `coalesce(max(x), 0)` is caught) every
+    function call must be a row-by-row function on `ROW_FUNCTIONS` (PostgreSQL accessors and
+    snapshot readers, shared string and number functions, MySQL `IF`/`IFNULL`/…, SQLite
+    `iif`/`substr`/…, every SQLite `pragma_*` table-valued function) or a PostgreSQL deparser
+    (`pg_get_*`, `format_type`, `*_description`, `has_*_privilege`, `pg_*_is_visible`,
+    `pg_identify_object*`, `pg_describe_object`). `GROUP`, `HAVING`, `LIMIT`, `OFFSET`,
+    `FETCH`, `DISTINCT` (but `IS [NOT] DISTINCT FROM`), `OVER`, `WINDOW`, `FILTER`, `WITHIN`
+    and set operations are refused at that level; `OR`/`XOR`/MySQL `||` at its expression depth
+    0. Workable for Tasks 16–18: their retrieve sections call deparsers and accessors row by
+    row; a function they need that is not listed is added to `ROW_FUNCTIONS` in
+    `pack/parse.rs` by a named exception, reviewed as such. Every aggregate family (`any_value`,
+    `range_agg`, `corr`, `regr_*`, SQLite `total`, user aggregates, …) is refused without being
+    named.
+  - **m8, joinable sections: the same allowlist.** A `joinable` section may call only
+    `ROW_FUNCTIONS` plus the read-only aggregates `count`, `max`, `min`, `sum`, `bool_and`,
+    `bool_or`, `every` (`PackErrorKind::JoinableFunction`), anywhere in its text. So
+    `set_config`, `nextval`/`setval`, `pg_advisory*`, `lo_*`, `dblink*`, `pg_notify`,
+    `txid_current`/`pg_current_xact_id`, MySQL `GET_LOCK`/`RELEASE_LOCK`/`SLEEP`/`BENCHMARK`
+    and the `search_path`-dependent deparsers (R-M4-46) are refused without a denylist. T5's
+    runtime allowlist stays the primary check.
+  - **m7.** `render` refuses a context whose `PackFlags::MARIADB` disagrees with
+    `flavor == MariaDb` (`RenderError::FlavorFlagMismatch`), so no context reaches a branch the
+    parse-time checks (which assume they agree) never read.
+  - **m9, `age()`.** The lint accepts an `age(` call only inside
+    `age(x) BETWEEN 0 AND age(y)` with a boolean boundary before the lower operand (`WHERE`,
+    `AND`, `OR`, `NOT`, `ON`, `WHEN`, `THEN`, `ELSE`, `SELECT`, `(`, `,`) and one after the
+    upper bound's arguments and casts (`AND`, `OR`, `)`, `,`, a clause word, the end): no
+    arithmetic around the form, no lower operand other than an `age(` call, no lower bound but
+    `0`.
+  - **m10.** The `compile_fail` doctests carry `E0599` and `E0597` in their fence and in a
+    comment; both codes were observed by compiling the snippets (each is the only error).
+    Stable rustdoc does not check the fence code, so the comment and the positive controls
+    in `tests/hostile_t04_review.rs` R9 are what pin it.
+  - The re-review's probes R1–R9 are in `tests/hostile_t04_review.rs`, flipped to assert the
+    fixes. **m11** (`Pack::parse` call sites in `pg/`, `mysql/`, `sqlite/` must take
+    `include_str!` or a `const`) is carried to the T16–T18 reviews by the controller.
