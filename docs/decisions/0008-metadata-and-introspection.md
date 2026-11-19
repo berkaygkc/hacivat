@@ -1508,6 +1508,36 @@ the refresh decision, rebuilt on the pack and the model.
   `main`'s `application_id` and the file's canonical path (stable across DDL and `VACUUM`;
   the inode is left out so a save-by-rename keeps the database); unknown for an in-memory
   database.
+- **After T15 (resume).** `introspect`/`fragment` take R-W3-2's scope filter and apply it on
+  the client (a relation it does not keep is neither built nor listed as existing; nothing is
+  pushed down: the read is local). `identity` (R-W3-3) is `file_fingerprint`.
+  `SqliteIntrospector::with_progress` reports `Tables`, `Columns`, `Indexes` and `Constraints`
+  counts per pass (the seam has no progress parameter, so the engine hands the sink to the
+  introspector it builds). Every rendered section, in every copy, passes T5's guards
+  (R-W3-9, `every_rendered_sqlite_section_passes_the_metadata_guard`).
+- **Fix round 1 (opus review).**
+  - **`temp` is read whole on every pass** (I-1): a temp view or trigger may depend on `main`
+    or an attached schema, which leaves `temp.sqlite_schema` and its digest unchanged.
+  - **`temp` is never decided off its connection** (I-2): `check_state` answers `Unknown` for
+    `temp` keys, `stamps` and `check_namespace` answer `Meta(Unavailable)` when asked about
+    `temp`. The engine-side split of a state check by connection is T22's.
+  - **One reader per attached schema** (I-3, ruling R-W3-10): with
+    `SqliteIntrospector::with_readers(source)` (the engine's `MetaSource`), each attached
+    schema is read on a reader of its own (pool slot keyed by the schema's name), which
+    attaches exactly that file under the alias and is closed, and reported released, as soon
+    as the read ends. A call over several attached schemas works, and a user schema named
+    `hacivat_attached` is an ordinary namespace. Without a source the connection handed in
+    holds the alias for one file (fail-closed `Unavailable` for a second). No T5 detach seam.
+  - **FK deferral** follows SQLite's `sqlite3DeferForeignKey` (m1): a `DEFERRABLE` clause
+    applies to the table's most recent foreign key, also when it stands alone in a later
+    column. A trigger's `WHEN` ends at the body's `BEGIN` only: a bare top-level word followed
+    by a statement keyword, never a `begin` identifier or name part (m2).
+  - **Bounded fallback** (m3): after `MAX_FALLBACK_FAILURES` (64) relations of one kind fail
+    one by one, the rest of that kind is kept `BROKEN` unread (children undecided), so a
+    crafted file of views at SQLite's reference cap cannot keep the reader busy for minutes.
+  - **`check_namespace` counts what the cache could hold** (m5): its relation count and
+    existence digest cover the server relations the cached namespace has (already cut by the
+    scope filter); a newly kept relation moves the mark instead.
 
 ## m4-t15 — engine and hub
 

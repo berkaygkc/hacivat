@@ -14,7 +14,7 @@ use hacivat_proto::DbmsKind;
 use hacivat_session::meta::{MetaError, SnapshotTxn};
 use tokio_util::sync::CancellationToken;
 
-use super::{ATTACH_ALIAS, ProgressSink, SectionTrace};
+use super::{ATTACH_ALIAS, MAX_FALLBACK_FAILURES, ProgressSink, SectionTrace};
 use crate::engine::Phase;
 use crate::introspector::IntroError;
 use crate::pack::{BindValue, DialectId, LogicalType, Mode, Pack, PackCtx, PackFlags, Params};
@@ -416,9 +416,16 @@ pub(crate) async fn read_schema(
                     .map(|o| o.name.clone())
                     .collect();
                 let n = rels.len() as u64;
+                let mut failures = 0usize;
                 for (k, rel) in rels.into_iter().enumerate() {
                     // The fallback counts its own relations, one query each.
                     cx.report(Phase::Columns, k as u64, Some(n));
+                    if failures >= MAX_FALLBACK_FAILURES {
+                        // Bounded work against a crafted file (review m3): the rest stays
+                        // broken, unread, its children undecided.
+                        out.broken.insert(rel, String::new());
+                        continue;
+                    }
                     match rows(
                         cx,
                         snap,
@@ -431,6 +438,7 @@ pub(crate) async fn read_schema(
                             .columns
                             .extend(rs.iter().map(|r| col_row(rel.clone(), r, 0))),
                         Err(e) if refused(&e) => {
+                            failures += 1;
                             out.broken.insert(rel, message(&e));
                         }
                         Err(e) => return Err(e),

@@ -75,7 +75,7 @@ use tokio_util::sync::CancellationToken;
 
 use hacivat_meta::persist::ServerFingerprint;
 
-use crate::engine::Phase;
+use crate::engine::{MetaSource, Phase};
 use crate::filter::CompiledFilter;
 use crate::freshness::NsCheck;
 use crate::introspector::{
@@ -112,6 +112,7 @@ pub struct SqliteIntrospector {
     pub digest_every_pass: bool,
     trace: Option<SectionTrace>,
     progress: Option<ProgressSink>,
+    readers: Option<Arc<dyn MetaSource>>,
 }
 
 impl std::fmt::Debug for SqliteIntrospector {
@@ -120,6 +121,7 @@ impl std::fmt::Debug for SqliteIntrospector {
             .field("digest_every_pass", &self.digest_every_pass)
             .field("trace", &self.trace.is_some())
             .field("progress", &self.progress.is_some())
+            .field("readers", &self.readers.is_some())
             .finish()
     }
 }
@@ -304,7 +306,40 @@ fn listed(list: &[DbEntry]) -> Vec<&DbEntry> {
 struct Place {
     variant: Variant,
     file: Option<PathBuf>,
+    /// The reader of one attached schema (ruling R-W3-10), closed when the place drops.
+    fresh: Option<Fresh>,
 }
+
+impl Place {
+    /// The connection the schema is read on: its own reader, or `c`.
+    fn conn<'c>(&'c mut self, c: &'c mut MetaConn) -> &'c mut MetaConn {
+        match &mut self.fresh {
+            Some(f) => f.conn.as_mut().unwrap_or(c),
+            None => c,
+        }
+    }
+}
+
+/// A reader opened for one attached schema (R-W3-10): closed, and handed back to its source,
+/// as soon as the read ends, whatever the outcome.
+struct Fresh {
+    conn: Option<MetaConn>,
+    source: Arc<dyn MetaSource>,
+}
+
+impl Drop for Fresh {
+    fn drop(&mut self) {
+        // Closed first (its watcher frees the slot), then reported.
+        drop(self.conn.take());
+        self.source.released();
+    }
+}
+
+/// The most relations of one kind the per-relation fallback (F10) queries after the bulk query
+/// failed **and that still fail one by one**: a crafted file of thousands of views that each
+/// take SQLite's reference cap would keep the reader busy for minutes. Past the cap, the rest
+/// of that kind is kept `BROKEN` unread (review m3; ADR 0008 `## m4-t18`).
+pub const MAX_FALLBACK_FAILURES: usize = 64;
 
 /// What a pass decided before reading the schema's objects.
 enum Decide {
@@ -326,6 +361,16 @@ impl SqliteIntrospector {
     /// columns are read (`Columns`), indexes (`Indexes`) and foreign keys (`Constraints`).
     pub fn with_progress(mut self, sink: ProgressSink) -> Self {
         self.progress = Some(sink);
+        self
+    }
+
+    /// Reads every attached schema on a reader of its own from `source` (ruling R-W3-10): one
+    /// read-only connection per attached schema, which attaches exactly that file under
+    /// [`ATTACH_ALIAS`] and is closed after the read; results keep the user's schema name.
+    /// Without a source an attached schema is read on the connection handed in, which can hold
+    /// one attached file under the alias (a second answers `Meta(Unavailable)`).
+    pub fn with_readers(mut self, source: Arc<dyn MetaSource>) -> Self {
+        self.readers = Some(source);
         self
     }
 
@@ -356,23 +401,42 @@ impl SqliteIntrospector {
 
     /// Where schema `name` is read on `c`, attaching an attached file under [`ATTACH_ALIAS`]
     /// first when the reader has not yet (module docs).
-    async fn place(cx: &Cx<'_>, c: &mut MetaConn, name: &str) -> Result<Place, IntroError> {
+    async fn place(&self, cx: &Cx<'_>, c: &mut MetaConn, name: &str) -> Result<Place, IntroError> {
         let list = Self::databases(cx, c).await?;
         if name.eq_ignore_ascii_case("main") {
             return Ok(Place {
                 variant: Variant::Main,
                 file: entry(&list, "main").and_then(|e| nonempty(&e.file)),
+                fresh: None,
             });
         }
         if name.eq_ignore_ascii_case("temp") {
             return Ok(Place {
                 variant: Variant::Temp,
                 file: None,
+                fresh: None,
             });
         }
         let unavailable = || IntroError::Meta(MetaError::Unavailable);
         let e = entry(&list, name).ok_or_else(unavailable)?;
         let file = nonempty(&e.file).ok_or_else(unavailable)?;
+        if let Some(source) = &self.readers {
+            // R-W3-10: a reader of its own (its pool slot is the schema's), with exactly this
+            // file under the alias, whatever the schema is called (`hacivat_attached` too).
+            let conn = source.acquire(Some(Name::from(name)), cx.cancel).await?;
+            let mut fresh = Fresh {
+                conn: Some(conn),
+                source: source.clone(),
+            };
+            if let Some(conn) = fresh.conn.as_mut() {
+                conn.attach_read_only(ATTACH_ALIAS, &file).await?;
+            }
+            return Ok(Place {
+                variant: Variant::Attached,
+                file: Some(file),
+                fresh: Some(fresh),
+            });
+        }
         if !name.eq_ignore_ascii_case(ATTACH_ALIAS) {
             match entry(&list, ATTACH_ALIAS) {
                 Some(a) if a.file == e.file => {}
@@ -383,6 +447,7 @@ impl SqliteIntrospector {
         Ok(Place {
             variant: Variant::Attached,
             file: Some(file),
+            fresh: None,
         })
     }
 
@@ -440,17 +505,25 @@ impl SqliteIntrospector {
         let pack = pack()?;
         let mut cx = self.cx(&pack, c, level, cancel);
         cx.progress = self.progress.as_ref().map(|p| (ns, p));
-        let place = Self::place(&cx, c, name).await?;
+        let mut place = self.place(&cx, c, name).await?;
         let identity = match place.file.clone() {
             Some(f) => file_identity(f).await,
             None => None,
         };
+        let variant = place.variant;
+        let c = place.conn(c);
         let mut snap = c.begin_snapshot().await?;
-        let version = match place.variant {
+        let version = match variant {
             Variant::Main => Some(read::schema_version(&cx, &mut snap).await?),
             _ => None,
         };
-        let decide = self.decide(prev, mode, level, version, identity, on);
+        // `temp` is read whole on every pass (review I-1): a temp view or trigger may depend
+        // on `main` or an attached schema, whose changes leave `temp.sqlite_schema` alone.
+        let decide = if variant == Variant::Temp {
+            Decide::Reread
+        } else {
+            self.decide(prev, mode, level, version, identity, on)
+        };
         let wm = |digest| Watermark::Sqlite {
             schema_version: version.unwrap_or(0),
             file_identity: identity,
@@ -467,7 +540,7 @@ impl SqliteIntrospector {
             snap.commit().await?;
             return Ok(unchanged(d));
         }
-        let objects = read::objects(&cx, &mut snap, place.variant).await?;
+        let objects = read::objects(&cx, &mut snap, variant).await?;
         let relations = objects
             .iter()
             .filter(|o| relation_kind(o).is_some())
@@ -483,14 +556,14 @@ impl SqliteIntrospector {
         let rows = read::read_schema(
             &cx,
             &mut snap,
-            place.variant,
+            variant,
             level,
             objects,
-            place.variant != Variant::Temp,
+            variant != Variant::Temp,
         )
         .await?;
         snap.commit().await?;
-        let temp = place.variant == Variant::Temp;
+        let temp = variant == Variant::Temp;
         let mark = schema_mark(version.unwrap_or(0), digest);
         let built = build::build(ns, &rows, level, temp, mark, None, Some(filter));
         let parent = root_key(ns);
@@ -688,10 +761,13 @@ impl SqliteIntrospector {
         let pack = pack()?;
         let cancel = CancellationToken::new();
         let cx = self.cx(&pack, c, level, &cancel);
-        let place = Self::place(&cx, c, name).await?;
+        let mut place = self.place(&cx, c, name).await?;
+        let variant = place.variant;
+        let c = place.conn(c);
         let mut snap = c.begin_snapshot().await?;
-        let (objects, mark, rows) = read_all(&cx, &mut snap, place.variant, level).await?;
+        let (objects, mark, rows) = read_all(&cx, &mut snap, variant, level).await?;
         snap.commit().await?;
+        drop(place);
         let mut present = BTreeSet::new();
         if level >= Level::Structure {
             present = build::build(ns, &rows, level, false, mark, None, None).paths;
@@ -718,11 +794,14 @@ impl SqliteIntrospector {
         let pack = pack()?;
         let mut cx = self.cx(&pack, c, level, cancel);
         cx.progress = self.progress.as_ref().map(|p| (ns, p));
-        let place = Self::place(&cx, c, name).await?;
+        let mut place = self.place(&cx, c, name).await?;
+        let variant = place.variant;
+        let c = place.conn(c);
         let mut snap = c.begin_snapshot().await?;
-        let (_, mark, rows) = read_all(&cx, &mut snap, place.variant, level).await?;
+        let (_, mark, rows) = read_all(&cx, &mut snap, variant, level).await?;
         snap.commit().await?;
-        let temp = place.variant == Variant::Temp;
+        drop(place);
+        let temp = variant == Variant::Temp;
         let built = build::build(ns, &rows, level, temp, mark, Some(names), Some(filter));
         let parent = root_key(ns);
         Ok(NamespaceResult {
@@ -767,6 +846,13 @@ async fn read_all(
 fn rel_path(ns_name: &str, key: &ObjectKey) -> Option<Vec<Name>> {
     let (first, rest) = key.path.split_first()?;
     (first.eq_ignore_ascii_case(ns_name)).then(|| rest.to_vec())
+}
+
+/// Whether `key` names an object of the `temp` schema.
+fn is_temp_key(key: &ObjectKey) -> bool {
+    key.path
+        .first()
+        .is_some_and(|s| s.eq_ignore_ascii_case("temp"))
 }
 
 /// Groups `keys` by their schema (the first path element), keeping their positions.
@@ -858,6 +944,11 @@ impl Introspector for SqliteIntrospector {
         keys: &'a [ObjectKey],
     ) -> BoxFuture<'a, Result<Vec<Option<StateMark>>, IntroError>> {
         Box::pin(async move {
+            // `temp` is per connection (review I-2): whatever connection this is, it cannot
+            // vouch that the user's `temp` objects are there or gone.
+            if keys.iter().any(is_temp_key) {
+                return Err(IntroError::Meta(MetaError::Unavailable));
+            }
             let mut out = vec![None; keys.len()];
             for (schema, at) in by_schema(keys) {
                 let ns = NsKey::schema([schema.clone()]);
@@ -955,13 +1046,20 @@ impl Introspector for SqliteIntrospector {
         keys: &'a [ObjectKey],
     ) -> BoxFuture<'a, Result<Vec<Staleness>, IntroError>> {
         Box::pin(async move {
-            Ok(self
-                .stamps(c, keys)
-                .await?
-                .into_iter()
-                .map(|m| match m {
-                    None => Staleness::Dropped,
-                    Some(_) => Staleness::Unknown,
+            // `temp` keys are never decided here (review I-2): `Unknown`, the others by
+            // their stamps.
+            let others: Vec<ObjectKey> = keys.iter().filter(|k| !is_temp_key(k)).cloned().collect();
+            let mut stamps = self.stamps(c, &others).await?.into_iter();
+            Ok(keys
+                .iter()
+                .map(|k| {
+                    if is_temp_key(k) {
+                        return Staleness::Unknown;
+                    }
+                    match stamps.next().flatten() {
+                        None => Staleness::Dropped,
+                        Some(_) => Staleness::Unknown,
+                    }
                 })
                 .collect())
         })
@@ -971,13 +1069,26 @@ impl Introspector for SqliteIntrospector {
         &'a self,
         c: &'a mut MetaConn,
         ns: &'a NsKey,
-        _snap: &'a NamespaceSnapshot,
+        snap: &'a NamespaceSnapshot,
     ) -> BoxFuture<'a, Result<NsCheck, IntroError>> {
         Box::pin(async move {
+            if ns_name(ns)?.eq_ignore_ascii_case("temp") {
+                // Per connection (review I-2): never checked from here.
+                return Err(IntroError::Meta(MetaError::Unavailable));
+            }
             let (objects, mark, _) = self.state_of(c, ns, Level::Names).await?;
+            // The count and the existence digest cover what the cache could hold (review m5):
+            // the relations the cached namespace has, which the scope filter already cut. A
+            // relation the filter now keeps that the cache lacks moves the mark (any DDL
+            // changes the digest), and a dropped one lowers the count.
+            let cached: std::collections::HashSet<(ObjectKind, &str)> = snap
+                .children(0)
+                .map(|(_, o)| (o.kind(), &**o.name()))
+                .collect();
             let rels: Vec<(ObjectKind, Name)> = objects
                 .iter()
                 .filter_map(|o| relation_kind(o).map(|k| (k, o.name.clone())))
+                .filter(|(k, n)| cached.contains(&(*k, &**n)))
                 .collect();
             Ok(NsCheck {
                 objects: rels.len() as u64,

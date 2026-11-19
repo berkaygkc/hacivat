@@ -386,27 +386,26 @@ pub(crate) fn table_def(sql: &str) -> TableDef {
     def
 }
 
-/// Every `REFERENCES` clause among `top` (one element's depth-0 tokens) with its deferral:
-/// `[NOT] DEFERRABLE [INITIALLY DEFERRED | INITIALLY IMMEDIATE]`, read up to the next
-/// `REFERENCES`.
+/// Every `REFERENCES` clause among `top` (one element's depth-0 tokens) with its deferral.
+/// SQLite applies a `[NOT] DEFERRABLE [INITIALLY DEFERRED | INITIALLY IMMEDIATE]` clause to the
+/// most recent foreign key of the table, wherever it stands — after its `REFERENCES`, or alone
+/// in a later column (`sqlite3DeferForeignKey`; review m1) — so the scan walks the elements in
+/// order and updates the last clause pushed. The element's first token (a column's name) is
+/// never a clause word.
 fn fk_clauses(t: &Toks<'_>, top: &[usize], out: &mut Vec<FkClause>) {
-    let starts: Vec<usize> = (0..top.len())
-        .filter(|&k| t.is(top[k], "REFERENCES"))
-        .collect();
-    for (n, &k) in starts.iter().enumerate() {
-        let end = starts.get(n + 1).copied().unwrap_or(top.len());
-        let mut fk = FkClause::default();
-        for j in k + 1..end {
-            if t.is(top[j], "DEFERRABLE") {
-                let negated = j > k + 1 && t.is(top[j - 1], "NOT");
-                fk.deferrable = !negated;
-                fk.initially_deferred = !negated
-                    && j + 2 < end
-                    && t.is(top[j + 1], "INITIALLY")
-                    && t.is(top[j + 2], "DEFERRED");
-            }
+    for (k, &i) in top.iter().enumerate().skip(1) {
+        if t.is(i, "REFERENCES") {
+            out.push(FkClause::default());
+        } else if t.is(i, "DEFERRABLE")
+            && let Some(fk) = out.last_mut()
+        {
+            let negated = k > 1 && t.is(top[k - 1], "NOT");
+            fk.deferrable = !negated;
+            fk.initially_deferred = !negated
+                && top
+                    .get(k + 2)
+                    .is_some_and(|&d| t.is(top[k + 1], "INITIALLY") && t.is(d, "DEFERRED"));
         }
-        out.push(fk);
     }
 }
 
@@ -435,6 +434,9 @@ pub(crate) struct TriggerDef {
     /// The `WHEN` expression, as written.
     pub when: Option<String>,
 }
+
+/// The words a trigger body's statement starts with.
+const BODY_STARTS: [&str; 6] = ["SELECT", "INSERT", "UPDATE", "DELETE", "REPLACE", "WITH"];
 
 /// `CREATE [TEMP] TRIGGER [IF NOT EXISTS] [schema.]name [BEFORE|AFTER|INSTEAD OF]
 /// DELETE|INSERT|UPDATE [OF cols] ON table [FOR EACH ROW] [WHEN expr] BEGIN …`; `None` for
@@ -485,7 +487,22 @@ pub(crate) fn trigger_def(sql: &str) -> Option<TriggerDef> {
         return None;
     };
     let on = (i + 1..t.len()).find(|&k| t.is(k, "ON"))?;
-    let begin = (on + 1..t.len()).find(|&k| t.is(k, "BEGIN"))?;
+    // The body's `BEGIN`: a bare word at the top level, not a qualified name's part, and
+    // followed by a statement (`BEGIN` is also a fallback identifier, so `WHEN new.begin > 0`
+    // or a column named `begin` must not end the `WHEN` text; review m2).
+    let mut depth = 0usize;
+    let begin = (on + 1..t.len()).find(|&k| {
+        match t.kind(k) {
+            Some(Tok::LParen) => depth += 1,
+            Some(Tok::RParen) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        depth == 0
+            && t.is(k, "BEGIN")
+            && t.kind(k - 1) != Some(Tok::Dot)
+            && t.kind(k + 1) != Some(Tok::Dot)
+            && BODY_STARTS.iter().any(|w| t.is(k + 1, w))
+    })?;
     let when = (on + 1..begin)
         .find(|&k| t.is(k, "WHEN"))
         .filter(|&k| k + 1 < begin)
@@ -600,6 +617,39 @@ mod tests {
                     initially_deferred: false
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_stray_deferrable_applies_to_the_previous_fk() {
+        let d = table_def(
+            "CREATE TABLE c(a REFERENCES p(id), b DEFERRABLE INITIALLY DEFERRED, \
+             e REFERENCES q, f NOT DEFERRABLE, deferrable INT)",
+        );
+        assert_eq!(
+            d.fks,
+            vec![
+                FkClause {
+                    deferrable: true,
+                    initially_deferred: true
+                },
+                FkClause::default(),
+            ]
+        );
+        // Before any FK, a stray clause has nothing to apply to.
+        assert!(table_def("CREATE TABLE c(a DEFERRABLE, b)").fks.is_empty());
+    }
+
+    #[test]
+    fn trigger_when_is_not_cut_at_a_begin_identifier() {
+        let t = trigger_def(
+            "CREATE TRIGGER t1 AFTER INSERT ON t WHEN new.begin > 0 AND (begin + 1) > begin \
+             BEGIN UPDATE t SET a = 1; END",
+        )
+        .unwrap();
+        assert_eq!(
+            t.when.as_deref(),
+            Some("new.begin > 0 AND (begin + 1) > begin")
         );
     }
 
