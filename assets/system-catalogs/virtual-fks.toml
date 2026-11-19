@@ -1,0 +1,3 @@
+# Shipped virtual foreign keys of the system catalogs (R-M4-12), e.g.
+# `pg_class.relnamespace -> pg_namespace.oid`. Hand-authored from vendor documentation and
+# reviewed row by row; never copied from another tool. Rows: M4 Task 26.

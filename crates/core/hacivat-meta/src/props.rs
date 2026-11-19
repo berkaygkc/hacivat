@@ -1,0 +1,478 @@
+//! Per-kind properties with per-engine extensions (HV-MODEL-01 `KindProps`; field lists A-2,
+//! facets A-3). M4 Task 1a seam (spike origin `d86313b`, declarations only).
+//!
+//! Every variant holds an `Arc`, so [`Props`] is two words and cloning an object bumps a
+//! reference count instead of deep-copying. Expressions and type texts are kept **raw**,
+//! exactly as the server printed them: never re-quoted, never normalized.
+
+use std::sync::Arc;
+use std::time::SystemTime;
+
+use bitflags::bitflags;
+use sql_catalog::types::{FnArg, FnKind, Volatility};
+
+use crate::ids::{Ref, SourceRef};
+use crate::name::Name;
+use crate::snapshot::LoadState;
+
+/// The typed properties of one object.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum Props {
+    /// No typed properties (the kind has none, or the cache held a props tag this build does
+    /// not know).
+    #[default]
+    None,
+    Database(Arc<DatabaseProps>),
+    Schema(Arc<SchemaProps>),
+    Table(Arc<TableProps>),
+    View(Arc<ViewProps>),
+    Column(Arc<ColumnProps>),
+    Index(Arc<IndexProps>),
+    /// Primary and unique keys.
+    Key(Arc<KeyProps>),
+    ForeignKey(Arc<FkProps>),
+    /// Check and exclusion constraints.
+    Check(Arc<CheckProps>),
+    Routine(Arc<RoutineProps>),
+    Sequence(Arc<SeqProps>),
+    Trigger(Arc<TriggerProps>),
+    Type(Arc<TypeProps>),
+    /// Kinds with only common properties (extensions, collations, roles, events, …) and
+    /// [`crate::kind::ObjectKind::Unknown`] objects (their raw server kind in `raw_kind`).
+    Generic(Arc<GenericProps>),
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DatabaseProps {
+    pub owner: Option<Name>,
+    pub encoding: Option<Name>,
+    pub collation: Option<Name>,
+    pub ctype: Option<Name>,
+    pub comment: Option<Name>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SchemaProps {
+    pub owner: Option<Name>,
+    pub comment: Option<Name>,
+}
+
+/// PostgreSQL `relpersistence`; MySQL and SQLite temporary tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Persistence {
+    #[default]
+    Permanent,
+    Unlogged,
+    Temporary,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TableProps {
+    pub comment: Option<Name>,
+    pub owner: Option<Name>,
+    pub persistence: Persistence,
+    /// A partitioned parent (PostgreSQL `relkind = 'p'`).
+    pub partitioned: bool,
+    /// The partitioned parent of a partition.
+    pub partition_of: Option<Ref>,
+    /// The partition key, raw (`RANGE (created_at)`).
+    pub partition_key: Option<Name>,
+    /// The partition bound, raw (`FOR VALUES FROM (…) TO (…)`).
+    pub partition_bound: Option<Name>,
+    /// PostgreSQL `relrowsecurity` (Task 19 emits `ENABLE ROW LEVEL SECURITY` and the notice
+    /// `ddl-policies-not-loaded`).
+    pub row_security: bool,
+    pub ext: TableExt,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum TableExt {
+    #[default]
+    None,
+    Pg(PgTableExt),
+    MySql {
+        engine: Option<Name>,
+        collation: Option<Name>,
+        /// `CREATE_OPTIONS`, raw.
+        options: Option<Name>,
+    },
+    Sqlite {
+        without_rowid: bool,
+        strict: bool,
+        /// The module of a virtual table (`fts5`).
+        module: Option<Name>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PgTableExt {
+    /// `pg_class.relkind` as a byte.
+    pub relkind: u8,
+    pub tablespace: Option<Name>,
+    pub access_method: Option<Name>,
+    /// `reloptions`, each `name=value` raw.
+    pub options: Vec<Name>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ViewProps {
+    pub owner: Option<Name>,
+    pub comment: Option<Name>,
+    pub source: Option<SourceRef>,
+    /// `CASCADED` / `LOCAL`, raw.
+    pub check_option: Option<Name>,
+    pub updatable: Option<bool>,
+    /// MySQL `ALGORITHM`, `DEFINER`, `SQL SECURITY`, raw.
+    pub algorithm: Option<Name>,
+    pub definer: Option<Name>,
+    pub sql_security: Option<Name>,
+}
+
+/// A column's type as a reference to its type object (PostgreSQL), beside the raw text.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TypeRef {
+    pub schema: Option<Name>,
+    pub name: Name,
+}
+
+/// A column's identity kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Identity {
+    Always,
+    ByDefault,
+    /// MySQL `AUTO_INCREMENT`, SQLite `AUTOINCREMENT`.
+    AutoIncrement,
+    /// SQLite `INTEGER PRIMARY KEY` (an alias of the rowid).
+    RowidAlias,
+}
+
+/// A generated column's storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneratedKind {
+    Stored,
+    Virtual,
+}
+
+/// A generated column: its storage and its expression, raw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Generated {
+    pub kind: GeneratedKind,
+    pub expr: Name,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ColumnProps {
+    /// The server's position number: PostgreSQL `attnum` (with gaps after `DROP COLUMN`),
+    /// MySQL `ORDINAL_POSITION`, SQLite `cid + 1`.
+    pub ordinal: u32,
+    /// The declared type, raw (`character varying(64)`, `int unsigned`).
+    pub raw_type: Name,
+    pub type_ref: Option<TypeRef>,
+    pub nullable: bool,
+    /// PostgreSQL 18 named `NOT NULL` constraint.
+    pub not_null_constraint: Option<Name>,
+    pub default_raw: Option<Name>,
+    pub identity: Option<Identity>,
+    pub generated: Option<Generated>,
+    pub collation: Option<Name>,
+    pub comment: Option<Name>,
+    /// SQLite hidden column, MySQL `INVISIBLE`.
+    pub hidden: bool,
+    /// MySQL `ENUM`/`SET` labels, in declaration order.
+    pub enum_labels: Option<Arc<[Name]>>,
+    pub ext: ColumnExt,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum ColumnExt {
+    #[default]
+    None,
+    MySql {
+        /// `COLUMN_TYPE`, raw (`enum('a','b')`, `int(10) unsigned zerofill`).
+        column_type: Option<Name>,
+        /// `EXTRA`, raw (`on update CURRENT_TIMESTAMP`; MySQL and MariaDB texts differ, F9).
+        extra: Option<Name>,
+        charset: Option<Name>,
+    },
+    Pg {
+        /// `attstorage` when not the type default.
+        storage: Option<u8>,
+        compression: Option<Name>,
+    },
+}
+
+/// One column of a key or index, by the server's ordinal and (when a plain column) its name.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KeyColumn {
+    pub ordinal: u32,
+    pub name: Option<Name>,
+}
+
+/// The shared fields of keys and indexes.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct KeyProps {
+    /// Key columns in key order.
+    pub columns: Vec<KeyColumn>,
+    /// Expression parts, raw, in key order.
+    pub expressions: Vec<Name>,
+    /// PostgreSQL `INCLUDE` columns.
+    pub include: Vec<Name>,
+    /// Partial-index predicate, raw.
+    pub predicate: Option<Name>,
+    /// Per part, in key order: descending.
+    pub desc: Vec<bool>,
+    pub unique: bool,
+    /// PostgreSQL ≥ 15 `indnullsnotdistinct`; `false` below 15 and on other engines.
+    pub nulls_not_distinct: bool,
+    pub deferrable: bool,
+    pub initially_deferred: bool,
+    pub not_valid: bool,
+    /// PostgreSQL 18 `conenforced`; `true` otherwise.
+    pub enforced: bool,
+    /// MySQL `IS_VISIBLE = NO`, MariaDB `IGNORED`.
+    pub invisible: bool,
+    /// The index backing a key, when it has its own name.
+    pub backing_index: Option<Name>,
+    /// The constraint an implicit index exists for.
+    pub implicit_for: Option<Ref>,
+}
+
+/// Index properties: the key fields plus the access method.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct IndexProps {
+    pub key: KeyProps,
+    /// Access method, raw (`btree`, `gin`, `BTREE`, `FULLTEXT`).
+    pub method: Option<Name>,
+    /// MySQL prefix lengths per part, in key order (`None` = whole column).
+    pub prefix_len: Vec<Option<u32>>,
+    pub comment: Option<Name>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FkAction {
+    #[default]
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FkMatch {
+    #[default]
+    Simple,
+    Full,
+    Partial,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FkProps {
+    /// Columns in FK order.
+    pub columns: Vec<Name>,
+    pub target: Ref,
+    pub target_columns: Vec<Name>,
+    pub on_update: FkAction,
+    pub on_delete: FkAction,
+    pub match_kind: FkMatch,
+    pub deferrable: bool,
+    pub initially_deferred: bool,
+    pub not_valid: bool,
+    pub enforced: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CheckProps {
+    /// The check (or exclusion) expression, raw.
+    pub expr: Name,
+    pub not_valid: bool,
+    pub enforced: bool,
+}
+
+/// Routine properties: the `sql_catalog::FnSig` fields (schema and name are the object's) plus
+/// the owner, MySQL's definer and specific name (MySQL routine identity is `(ROUTINE_TYPE,
+/// SPECIFIC_NAME)`, F9).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoutineProps {
+    /// `None` = name only (MySQL/MariaDB built-ins from the snapshots).
+    pub args: Option<Vec<FnArg>>,
+    pub returns: Option<Name>,
+    pub returns_set: bool,
+    pub kind: FnKind,
+    pub volatility: Volatility,
+    pub language: Option<Name>,
+    pub owner: Option<Name>,
+    pub definer: Option<Name>,
+    pub specific_name: Option<Name>,
+    pub security_definer: bool,
+    /// Normalized argument type list; part of the identity of overloads.
+    pub overload_sig: Option<Name>,
+    pub source: Option<SourceRef>,
+    pub comment: Option<Name>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SeqProps {
+    pub owner: Option<Name>,
+    pub data_type: Option<Name>,
+    pub start: Option<i64>,
+    pub increment: Option<i64>,
+    pub min: Option<i64>,
+    pub max: Option<i64>,
+    pub cache: Option<i64>,
+    pub cycle: bool,
+    /// The owning column (`OWNED BY`): its table and the column name.
+    pub owned_by: Option<(Ref, Name)>,
+    pub comment: Option<Name>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TriggerTiming {
+    #[default]
+    Before,
+    After,
+    InsteadOf,
+}
+
+bitflags! {
+    /// The events a trigger fires on.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct TriggerEvents: u8 {
+        const INSERT = 1;
+        const UPDATE = 2;
+        const DELETE = 4;
+        const TRUNCATE = 8;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TriggerProps {
+    pub timing: TriggerTiming,
+    pub events: TriggerEvents,
+    pub for_each_row: bool,
+    /// The trigger function (PostgreSQL).
+    pub function: Option<Ref>,
+    pub when_expr: Option<Name>,
+    pub source: Option<SourceRef>,
+    pub enabled: bool,
+    /// MySQL `DEFINER`, raw.
+    pub definer: Option<Name>,
+}
+
+/// One attribute of a composite type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeAttr {
+    pub name: Name,
+    pub raw_type: Name,
+}
+
+/// The body of a type.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum TypeBody {
+    /// Labels in sort order.
+    Enum {
+        labels: Arc<[Name]>,
+    },
+    Domain {
+        base: Name,
+        not_null: bool,
+        /// PostgreSQL 17+ named domain `NOT NULL` (`contype = 'n'`).
+        not_null_constraint: Option<Name>,
+        default_raw: Option<Name>,
+        /// Check expressions, raw.
+        checks: Vec<Name>,
+    },
+    Composite {
+        attrs: Vec<TypeAttr>,
+    },
+    Range {
+        subtype: Name,
+    },
+    #[default]
+    Base,
+}
+
+/// Type properties: the owner, the comment and the body.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TypeProps {
+    pub owner: Option<Name>,
+    pub comment: Option<Name>,
+    pub body: TypeBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GenericProps {
+    pub owner: Option<Name>,
+    /// Extension version, raw.
+    pub version: Option<Name>,
+    pub comment: Option<Name>,
+    /// The server's own kind text of an `ObjectKind::Unknown` object (a newer relkind).
+    pub raw_kind: Option<Name>,
+}
+
+// Facets (A-3, R-M4-30): side tables with their own load state, loaded on demand.
+
+/// The facets an object may have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FacetKind {
+    Sources,
+    Grants,
+    Dependencies,
+    Statistics,
+}
+
+/// One facet: its load state and, once loaded (or partial), its value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Facet<T> {
+    pub state: LoadState,
+    pub value: Option<Arc<T>>,
+}
+
+impl<T> Facet<T> {
+    /// A facet that has not been loaded.
+    pub fn not_loaded() -> Self {
+        Facet {
+            state: LoadState::NotLoaded,
+            value: None,
+        }
+    }
+}
+
+/// One privilege grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grant {
+    pub grantee: Name,
+    /// The privilege, raw (`SELECT`, `USAGE`).
+    pub privilege: Name,
+    /// Column-level grants: the columns; empty for an object-level grant.
+    pub columns: Vec<Name>,
+    pub grantable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GrantsFacet {
+    pub entries: Vec<Grant>,
+}
+
+/// Where a dependency list comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DepsKind {
+    /// The server's dependency catalog (PostgreSQL `pg_depend`/`pg_rewrite`).
+    #[default]
+    Catalog,
+    /// Usage views (MySQL `VIEW_TABLE_USAGE`/`VIEW_ROUTINE_USAGE`).
+    Usage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DepsFacet {
+    pub depends_on: Vec<Ref>,
+    pub kind: DepsKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatsFacet {
+    /// PostgreSQL `reltuples` (`-1` → `None`), MySQL `TABLE_ROWS`; display only.
+    pub row_estimate: Option<u64>,
+    pub at: SystemTime,
+}

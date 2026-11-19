@@ -17,7 +17,7 @@ const ADAPTER: &str = "hacivat-ui-core";
 const GUARDED: [&str; 2] = ["gpui", "gpui_platform"];
 /// Adapter features that must never be enabled by a product build (F33, R12).
 const ADAPTER_ONLY_FEATURES: [&str; 4] = ["spike-support", "bench", "scene-check", "test-support"];
-const PRODUCT_CRATES: [&str; 7] = [
+const PRODUCT_CRATES: [&str; 11] = [
     "hacivat",
     "hacivat-app",
     // ## m3a-t01b-seams (P22): the new Ui and App crates ship in the product too.
@@ -26,6 +26,11 @@ const PRODUCT_CRATES: [&str; 7] = [
     "hacivat-sql-editor",
     "hacivat-text",
     "hacivat-ui",
+    // ## m4-t01a-model: the M4 core and SQL crates.
+    "hacivat-meta",
+    "hacivat-introspect",
+    "hacivat-ddl",
+    "sql-catalog",
 ];
 
 /// Sources of the zed workspace; any crate fetched from one counts as zed-sourced.
@@ -71,6 +76,31 @@ pub enum Rule {
     /// and the declaration check matches the crate name (another ropey major with its defaults
     /// is flagged too: fail closed).
     RopeLineBreaks,
+    // ## m4-t01a-model
+    /// `hacivat-ddl`'s graph on its **default features** (feature-resolved from the manifests,
+    /// not the workspace's unified resolve) reaches a runtime, a session, a driver,
+    /// introspection or l10n (Karagöz links it; alg/03 "pure functions over snapshots").
+    DdlIsPure,
+    /// A member other than `hacivat-app` (and `hacivat-ddl` itself) enables `hacivat-ddl/apply`
+    /// through a dependency of any kind or one of its `[features]` (R-M4-35).
+    DdlApplyOnlyFromApp,
+    /// `hacivat-meta` depends on introspection, a session, a driver, exec or l10n: directly
+    /// through any edge kind (dev and build included), or transitively through normal edges.
+    MetaBelowIntrospect,
+    /// A member other than `hacivat-app` (and `hacivat-meta` itself) enables
+    /// `hacivat-meta/embedded-system` (the ~0.7 MB of snapshots lands in the app only).
+    EmbeddedSystemOnlyFromApp,
+    /// `hacivat-introspect` depends on `hacivat-exec` (any edge kind directly, or transitively
+    /// through normal edges) or directly on `hacivat-results`: catalog SQL never travels the
+    /// execution path (R-M4-7). `hacivat-session`'s own result store is not an edge of
+    /// introspection's.
+    IntrospectNotExec,
+    /// A source line names `MetaQuery::new` outside `hacivat-introspect/src/pack/**` and
+    /// `hacivat-session/src/meta.rs` (tests under a crate's `tests/` are exempt; R-M4-7, I13).
+    MetaQueryOnlyFromPacks,
+    /// A `src/` file other than its definition (`hacivat-ui-editor/src/find.rs`) names
+    /// `hold_counts(`: the find counter hold is a shots-harness seam (M3c carry, P-M4-17).
+    HoldCountsTestOnly,
 }
 
 // ## m2b-t01-interfaces
@@ -153,6 +183,204 @@ const TEXT_CORE: &str = "hacivat-text";
 /// The rope under `hacivat-text`, and the features that change its line breaks.
 const ROPE: &str = "ropey";
 const ROPE_LINE_FEATURES: [&str; 2] = ["unicode_lines", "default"];
+
+// ## m4-t01a-model
+/// The pure DDL crate and what its default-feature graph may not contain (`DdlIsPure`).
+const DDL: &str = "hacivat-ddl";
+const DDL_FORBIDDEN: [&str; 5] = [
+    "tokio",
+    "futures",
+    "hacivat-session",
+    "hacivat-introspect",
+    "hacivat-l10n",
+];
+/// The metadata model and what it may never depend on (`MetaBelowIntrospect`).
+const META: &str = "hacivat-meta";
+const META_FORBIDDEN: [&str; 4] = [
+    "hacivat-introspect",
+    "hacivat-session",
+    "hacivat-exec",
+    "hacivat-l10n",
+];
+/// Introspection and the execution crates it never depends on (`IntrospectNotExec`).
+const INTROSPECT: &str = "hacivat-introspect";
+const EXEC: &str = "hacivat-exec";
+const RESULTS: &str = "hacivat-results";
+/// The one crate (besides the feature's owner) that may enable `apply` / `embedded-system`.
+const APP: &str = "hacivat-app";
+
+/// Whether `name` is a driver crate (`hacivat-driver`, `hacivat-driver-pg`, …).
+fn is_driver(name: &str) -> bool {
+    name == "hacivat-driver" || name.starts_with("hacivat-driver-")
+}
+
+/// Whether `owner`'s feature `feature` is enabled by `m`: through a declared dependency on
+/// `owner` (any kind) listing it, or through one of `m`'s own `[features]` (`owner/feature`,
+/// `owner?/feature`).
+fn enables_feature(m: &Package, owner: &str, feature: &str) -> bool {
+    m.dependencies
+        .iter()
+        .any(|d| d.name == owner && d.features.iter().any(|f| f == feature))
+        || m.features
+            .values()
+            .flatten()
+            .any(|f| *f == format!("{owner}/{feature}") || *f == format!("{owner}?/{feature}"))
+}
+
+/// A breadth-first walk that follows every edge kind out of `root` and only normal edges
+/// beyond it: the path to the first package `bad` accepts (excluding `root`), if any.
+fn any_then_normal_path_to(
+    root: &PackageId,
+    edges: &Edges<'_>,
+    pkgs: &HashMap<&PackageId, &Package>,
+    bad: impl Fn(&Package) -> bool,
+) -> Option<Vec<String>> {
+    let mut seen: BTreeSet<&PackageId> = BTreeSet::from([root]);
+    let mut queue: VecDeque<(&PackageId, Vec<String>)> = VecDeque::from([(root, vec![])]);
+    while let Some((id, path)) = queue.pop_front() {
+        for (dep_id, kinds) in edges.get(id).into_iter().flatten() {
+            if id != root && !kinds.contains(&DependencyKind::Normal) {
+                continue;
+            }
+            let Some(dep) = pkgs.get(dep_id) else {
+                continue;
+            };
+            let mut via = path.clone();
+            via.push(dep.name.to_string());
+            if bad(dep) {
+                return Some(via);
+            }
+            if seen.insert(dep_id) {
+                queue.push_back((dep_id, via));
+            }
+        }
+    }
+    None
+}
+
+/// `DdlIsPure`'s walk: `root`'s graph when `root` is built alone on its default features.
+///
+/// The workspace resolve unifies features across members (`hacivat-introspect` turns on
+/// `hacivat-meta`'s defaults, so the resolved `hacivat-meta` node has its `tokio` edge), so
+/// this walk resolves features itself from the manifests: a dependency is followed when it
+/// is not optional or a feature enabled on its owner activates it (`dep:x`, `x`, `x/f`),
+/// with the features its edge and the enabling features give it (plus `default` unless the
+/// edge turns default features off). Normal edges only; target-specific edges count (fail
+/// closed). Returns the path to the first package `bad` accepts.
+fn default_feature_path_to(
+    root: &PackageId,
+    edges: &Edges<'_>,
+    pkgs: &HashMap<&PackageId, &Package>,
+    bad: impl Fn(&Package) -> bool,
+) -> Option<Vec<String>> {
+    let mut enabled: HashMap<&PackageId, BTreeSet<String>> = HashMap::new();
+    let mut paths: HashMap<&PackageId, Vec<String>> = HashMap::new();
+    enabled.insert(root, BTreeSet::from(["default".to_string()]));
+    paths.insert(root, Vec::new());
+    let mut queue: VecDeque<&PackageId> = VecDeque::from([root]);
+    while let Some(id) = queue.pop_front() {
+        let Some(pkg) = pkgs.get(id) else {
+            continue;
+        };
+        // The feature closure of `pkg`, the optional dependencies it activates and the
+        // features it asks of each dependency.
+        let mut on: BTreeSet<String> = enabled.get(id).cloned().unwrap_or_default();
+        let mut todo: Vec<String> = on.iter().cloned().collect();
+        let mut active: BTreeSet<String> = BTreeSet::new();
+        let mut asked: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let mut weak: Vec<(String, String)> = Vec::new();
+        let is_optional_dep = |n: &str| {
+            pkg.dependencies
+                .iter()
+                .any(|d| d.optional && dep_key(d) == n)
+        };
+        while let Some(f) = todo.pop() {
+            let Some(items) = pkg.features.get(&f) else {
+                if is_optional_dep(&f) {
+                    active.insert(f);
+                }
+                continue;
+            };
+            for item in items {
+                if let Some(d) = item.strip_prefix("dep:") {
+                    active.insert(d.to_string());
+                } else if let Some((d, feat)) = item.split_once('/') {
+                    if let Some(d) = d.strip_suffix('?') {
+                        weak.push((d.to_string(), feat.to_string()));
+                    } else {
+                        active.insert(d.to_string());
+                        asked
+                            .entry(d.to_string())
+                            .or_default()
+                            .insert(feat.to_string());
+                    }
+                } else if pkg.features.contains_key(item) {
+                    if on.insert(item.clone()) {
+                        todo.push(item.clone());
+                    }
+                } else if is_optional_dep(item) {
+                    active.insert(item.clone());
+                }
+            }
+        }
+        for (d, feat) in weak {
+            if active.contains(&d)
+                || pkg
+                    .dependencies
+                    .iter()
+                    .any(|x| !x.optional && dep_key(x) == d)
+            {
+                asked.entry(d).or_default().insert(feat);
+            }
+        }
+        let path = paths.get(id).cloned().unwrap_or_default();
+        for d in &pkg.dependencies {
+            if d.kind != DependencyKind::Normal || (d.optional && !active.contains(dep_key(d))) {
+                continue;
+            }
+            let Some(dep_id) = edges
+                .get(id)
+                .into_iter()
+                .flatten()
+                .map(|(dep_id, _)| *dep_id)
+                .find(|dep_id| pkgs.get(dep_id).is_some_and(|p| p.name.as_str() == d.name))
+            else {
+                continue;
+            };
+            let Some(dep) = pkgs.get(dep_id) else {
+                continue;
+            };
+            let mut via = path.clone();
+            via.push(dep.name.to_string());
+            if bad(dep) {
+                return Some(via);
+            }
+            let mut want: BTreeSet<String> = d.features.iter().cloned().collect();
+            if d.uses_default_features {
+                want.insert("default".into());
+            }
+            if let Some(extra) = asked.get(dep_key(d)) {
+                want.extend(extra.iter().cloned());
+            }
+            let have = enabled.entry(dep_id).or_default();
+            let before = have.len();
+            have.extend(want);
+            let first = !paths.contains_key(dep_id);
+            if first {
+                paths.insert(dep_id, via);
+            }
+            if first || have.len() != before {
+                queue.push_back(dep_id);
+            }
+        }
+    }
+    None
+}
+
+/// The name a dependency is known by inside its owner's `[features]` (its rename, if any).
+fn dep_key(d: &cargo_metadata::Dependency) -> &str {
+    d.rename.as_deref().unwrap_or(&d.name)
+}
 
 /// The workspace-relative directory of `p`'s manifest, with `/` separators.
 fn rel_dir(md: &Metadata, p: &Package) -> String {
@@ -367,6 +595,48 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
             );
         }
 
+        // ## m4-t01a-model
+        if name == DDL
+            && let Some(via) = default_feature_path_to(&root.id, &edges, &pkgs, |p| {
+                DDL_FORBIDDEN.contains(&p.name.as_str()) || is_driver(&p.name)
+            })
+        {
+            add(name, Rule::DdlIsPure, via);
+        }
+        if name != APP && name != DDL && enables_feature(root, DDL, "apply") {
+            add(
+                name,
+                Rule::DdlApplyOnlyFromApp,
+                vec![format!("{DDL}/apply")],
+            );
+        }
+        if name == META
+            && let Some(via) = any_then_normal_path_to(&root.id, &edges, &pkgs, |p| {
+                META_FORBIDDEN.contains(&p.name.as_str()) || is_driver(&p.name)
+            })
+        {
+            add(name, Rule::MetaBelowIntrospect, via);
+        }
+        if name != APP && name != META && enables_feature(root, META, "embedded-system") {
+            add(
+                name,
+                Rule::EmbeddedSystemOnlyFromApp,
+                vec![format!("{META}/embedded-system")],
+            );
+        }
+        if name == INTROSPECT {
+            if let Some(via) =
+                any_then_normal_path_to(&root.id, &edges, &pkgs, |p| p.name.as_str() == EXEC)
+            {
+                add(name, Rule::IntrospectNotExec, via);
+            }
+            for (dep_id, _) in edges.get(&root.id).into_iter().flatten() {
+                if pkgs.get(dep_id).is_some_and(|d| d.name.as_str() == RESULTS) {
+                    add(name, Rule::IntrospectNotExec, vec![RESULTS.into()]);
+                }
+            }
+        }
+
         if PRODUCT_CRATES.contains(&name)
             && let Some(bad) = root.dependencies.iter().find(|d| {
                 d.name == ADAPTER
@@ -459,19 +729,7 @@ const TREE_OWNERS: [&str; 2] = ["sql-oracle-pg", "sql-safety"];
 /// `tree` in any `crates/<layer>/<crate>/` outside [`TREE_OWNERS`] (tests included), because
 /// `tree::pb` is reachable through every crate that depends on the oracle.
 pub fn tree_violations(workspace: &Path) -> Vec<Violation> {
-    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                walk(&p, out);
-            } else if p.extension().is_some_and(|x| x == "rs") {
-                out.push(p);
-            }
-        }
-    }
+    let walk = rs_files;
     let mut found = BTreeSet::new();
     let Ok(layers) = std::fs::read_dir(workspace.join("crates")) else {
         return Vec::new();
@@ -510,6 +768,91 @@ pub fn tree_violations(workspace: &Path) -> Vec<Violation> {
         .collect()
 }
 
+/// Every `.rs` file under `dir`, recursively (the source rules' walker).
+fn rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            rs_files(&p, out);
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p);
+        }
+    }
+}
+
+// ## m4-t01a-model
+/// The token only the query packs may name (`MetaQueryOnlyFromPacks`), and where.
+const META_QUERY_NEW: &str = "MetaQuery::new";
+const META_QUERY_DIR: &str = "crates/core/hacivat-introspect/src/pack/";
+const META_QUERY_DEF: &str = "crates/core/hacivat-session/src/meta.rs";
+/// The shots-only find hold (`HoldCountsTestOnly`) and its definition.
+const HOLD_COUNTS: &str = "hold_counts(";
+const HOLD_COUNTS_DEF: &str = "crates/ui/hacivat-ui-editor/src/find.rs";
+
+/// The M4 source rules over every `crates/<layer>/<crate>/` (the `tree_violations` walker):
+/// `MetaQueryOnlyFromPacks` (tests under a crate's `tests/` exempt) and `HoldCountsTestOnly`
+/// (only `src/` files). Comment lines (`//`, `///`, `//!`) are not code and are skipped. One
+/// violation per offending file, `via` its workspace-relative path.
+pub fn source_violations(workspace: &Path) -> Vec<Violation> {
+    let mut found: BTreeSet<(String, Rule, String)> = BTreeSet::new();
+    let Ok(layers) = std::fs::read_dir(workspace.join("crates")) else {
+        return Vec::new();
+    };
+    for layer in layers.flatten() {
+        let Ok(crates) = std::fs::read_dir(layer.path()) else {
+            continue;
+        };
+        for krate in crates.flatten() {
+            let name = krate.file_name().to_string_lossy().into_owned();
+            let mut files = Vec::new();
+            rs_files(&krate.path(), &mut files);
+            for f in files {
+                let rel = f
+                    .strip_prefix(workspace)
+                    .unwrap_or(&f)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let in_crate = rel
+                    .strip_prefix(&format!(
+                        "crates/{}/{name}/",
+                        layer.file_name().to_string_lossy()
+                    ))
+                    .unwrap_or("")
+                    .to_string();
+                let Ok(src) = std::fs::read_to_string(&f) else {
+                    continue;
+                };
+                let names = |token: &str| {
+                    src.lines().any(|l| {
+                        let l = l.trim_start();
+                        !l.starts_with("//") && l.contains(token)
+                    })
+                };
+                let meta_query_ok = rel.starts_with(META_QUERY_DIR)
+                    || rel == META_QUERY_DEF
+                    || in_crate.starts_with("tests/");
+                if !meta_query_ok && names(META_QUERY_NEW) {
+                    found.insert((name.clone(), Rule::MetaQueryOnlyFromPacks, rel.clone()));
+                }
+                if in_crate.starts_with("src/") && rel != HOLD_COUNTS_DEF && names(HOLD_COUNTS) {
+                    found.insert((name.clone(), Rule::HoldCountsTestOnly, rel.clone()));
+                }
+            }
+        }
+    }
+    found
+        .into_iter()
+        .map(|(krate, rule, path)| Violation {
+            krate,
+            rule,
+            via: vec![path],
+        })
+        .collect()
+}
+
 pub fn run() -> ExitCode {
     let metadata = match MetadataCommand::new().exec() {
         Ok(m) => m,
@@ -523,6 +866,8 @@ pub fn run() -> ExitCode {
     });
     // ## m3b-t01a-seams (fix round 1, M2)
     found.extend(tree_violations(metadata.workspace_root.as_std_path()));
+    // ## m4-t01a-model
+    found.extend(source_violations(metadata.workspace_root.as_std_path()));
     if found.is_empty() {
         println!("check-deps: ok");
         return ExitCode::SUCCESS;
@@ -549,6 +894,8 @@ mod tests {
         name: String,
         dir: String,
         deps: Vec<Dep>,
+        // ## m4-t01a-model: the member's `[features]` table (DdlIsPure fixtures).
+        features: Vec<(String, Vec<String>)>,
     }
 
     struct Dep {
@@ -558,6 +905,8 @@ mod tests {
         source: Option<String>,
         /// `default-features` (true unless a fixture turns it off, as the workspace's `ropey`).
         default_features: bool,
+        // ## m4-t01a-model
+        optional: bool,
     }
 
     fn dep(name: &str, kind: DepKind, features: &[&str], source: Option<&str>) -> Dep {
@@ -567,6 +916,7 @@ mod tests {
             features: features.iter().map(|f| (*f).into()).collect(),
             source: source.map(|s| format!("git+{s}?rev=abc#abc")),
             default_features: true,
+            optional: false,
         }
     }
 
@@ -597,15 +947,23 @@ mod tests {
         let dependency = |d: &Dep| {
             json!({
                 "name": d.name, "source": d.source, "req": "*", "kind": kind_json(&d.kind),
-                "rename": null, "optional": false, "uses_default_features": d.default_features,
+                "rename": null, "optional": d.optional, "uses_default_features": d.default_features,
                 "features": d.features, "target": null, "registry": null
             })
         };
-        let package = |name: &str, source: Option<String>, dir: String, deps: &[Dep]| {
+        let package = |name: &str,
+                       source: Option<String>,
+                       dir: String,
+                       deps: &[Dep],
+                       features: &[(String, Vec<String>)]| {
+            let features: serde_json::Map<String, serde_json::Value> = features
+                .iter()
+                .map(|(f, list)| (f.clone(), json!(list)))
+                .collect();
             json!({
                 "name": name, "version": "0.0.0", "id": pkg_id(name), "source": source,
                 "dependencies": deps.iter().map(dependency).collect::<Vec<_>>(),
-                "targets": [], "features": {},
+                "targets": [], "features": features,
                 "manifest_path": format!("/ws/{dir}/Cargo.toml"),
                 "metadata": null, "publish": null, "authors": [], "categories": [],
                 "keywords": [], "readme": null, "repository": null, "homepage": null,
@@ -615,7 +973,15 @@ mod tests {
         };
         let mut packages: Vec<_> = members
             .iter()
-            .map(|m| package(&m.name, None, format!("{}/{}", m.dir, m.name), &m.deps))
+            .map(|m| {
+                package(
+                    &m.name,
+                    None,
+                    format!("{}/{}", m.dir, m.name),
+                    &m.deps,
+                    &m.features,
+                )
+            })
             .collect();
         let mut externals: Vec<(String, Option<String>)> = Vec::new();
         for d in members.iter().flat_map(|m| &m.deps) {
@@ -624,7 +990,7 @@ mod tests {
             }
         }
         for (name, source) in externals {
-            packages.push(package(&name, source, format!("ext/{name}"), &[]));
+            packages.push(package(&name, source, format!("ext/{name}"), &[], &[]));
         }
         let nodes: Vec<_> = members
             .iter()
@@ -659,6 +1025,7 @@ mod tests {
             name: name.into(),
             dir: dir.into(),
             deps,
+            features: Vec::new(),
         }
     }
 
@@ -1354,5 +1721,407 @@ mod tests {
         ] {
             assert!(t.contains(m), "{m}");
         }
+    }
+
+    // ## m4-t01a-model: the M4 layering rules (Global Constraints "Layering").
+
+    fn optional(name: &str) -> Dep {
+        Dep {
+            optional: true,
+            ..dep(name, DepKind::Normal, &[], None)
+        }
+    }
+
+    fn no_defaults(name: &str, features: &[&str]) -> Dep {
+        Dep {
+            default_features: false,
+            ..dep(name, DepKind::Normal, features, None)
+        }
+    }
+
+    fn feats(list: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+        list.iter()
+            .map(|(f, items)| ((*f).into(), items.iter().map(|i| (*i).into()).collect()))
+            .collect()
+    }
+
+    fn with_features(mut m: Member, list: &[(&str, &[&str])]) -> Member {
+        m.features = feats(list);
+        m
+    }
+
+    /// `hacivat-meta` as M4 declares it: `tokio` behind the default feature `catalog`.
+    fn meta_member() -> Member {
+        with_features(
+            member(
+                "hacivat-meta",
+                "crates/core",
+                vec![
+                    optional("tokio"),
+                    dep("smallvec", DepKind::Normal, &[], None),
+                ],
+            ),
+            &[("default", &["catalog"]), ("catalog", &["dep:tokio"])],
+        )
+    }
+
+    fn for_crate(md: &Metadata, krate: &str) -> Vec<Violation> {
+        violations(md, &lints_ok)
+            .into_iter()
+            .filter(|v| v.krate == krate)
+            .collect()
+    }
+
+    /// `DdlIsPure` reads `hacivat-ddl`'s default-feature graph: `hacivat-meta` with its
+    /// defaults reaches `tokio`, without them it does not, although the workspace's unified
+    /// resolve keeps the `hacivat-meta -> tokio` edge either way.
+    #[test]
+    fn ddl_reaching_tokio_is_refused() {
+        let md = metadata(vec![
+            member(
+                "hacivat-ddl",
+                "crates/core",
+                vec![dep("hacivat-meta", DepKind::Normal, &[], None)],
+            ),
+            meta_member(),
+        ]);
+        let v = for_crate(&md, "hacivat-ddl");
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].rule, Rule::DdlIsPure);
+        assert_eq!(v[0].via, ["hacivat-meta", "tokio"]);
+
+        let pure = metadata(vec![
+            member(
+                "hacivat-ddl",
+                "crates/core",
+                vec![no_defaults("hacivat-meta", &[])],
+            ),
+            meta_member(),
+        ]);
+        assert!(violations(&pure, &lints_ok).is_empty());
+
+        // Turning `catalog` back on by name is the same edge.
+        let named = metadata(vec![
+            member(
+                "hacivat-ddl",
+                "crates/core",
+                vec![no_defaults("hacivat-meta", &["catalog"])],
+            ),
+            meta_member(),
+        ]);
+        assert_eq!(rule_of(&named, "hacivat-ddl"), Rule::DdlIsPure);
+
+        for bad in [
+            "tokio",
+            "futures",
+            "hacivat-session",
+            "hacivat-driver",
+            "hacivat-driver-pg",
+            "hacivat-introspect",
+            "hacivat-l10n",
+        ] {
+            let md = fx_at(&[("hacivat-ddl", "crates/core", &[bad])]);
+            assert_eq!(rule_of(&md, "hacivat-ddl"), Rule::DdlIsPure, "{bad}");
+        }
+    }
+
+    #[test]
+    fn ddl_apply_feature_outside_app_is_refused() {
+        let md = metadata(vec![
+            member(
+                "hacivat-introspect",
+                "crates/core",
+                vec![dep("hacivat-ddl", DepKind::Normal, &["apply"], None)],
+            ),
+            member(
+                "hacivat-app",
+                "crates/app",
+                vec![dep("hacivat-ddl", DepKind::Normal, &["apply"], None)],
+            ),
+            member("hacivat-ddl", "crates/core", vec![]),
+        ]);
+        assert_eq!(
+            rule_of(&md, "hacivat-introspect"),
+            Rule::DdlApplyOnlyFromApp
+        );
+        assert!(for_crate(&md, "hacivat-app").is_empty());
+
+        // A dev-dependency counts, and so does a member feature that turns it on.
+        let dev = fx_kind_at(
+            "hacivat-session",
+            "crates/core",
+            "hacivat-ddl",
+            DepKind::Development,
+            &["apply"],
+        );
+        assert_eq!(rule_of(&dev, "hacivat-session"), Rule::DdlApplyOnlyFromApp);
+        let feature = metadata(vec![with_features(
+            member(
+                "hacivat-exec",
+                "crates/core",
+                vec![dep("hacivat-ddl", DepKind::Normal, &[], None)],
+            ),
+            &[("full", &["hacivat-ddl/apply"])],
+        )]);
+        assert_eq!(rule_of(&feature, "hacivat-exec"), Rule::DdlApplyOnlyFromApp);
+    }
+
+    #[test]
+    fn meta_reaching_session_is_refused() {
+        for bad in [
+            "hacivat-session",
+            "hacivat-introspect",
+            "hacivat-driver",
+            "hacivat-driver-mysql",
+            "hacivat-exec",
+            "hacivat-l10n",
+        ] {
+            let md = fx_at(&[("hacivat-meta", "crates/core", &[bad])]);
+            assert_eq!(
+                rule_of(&md, "hacivat-meta"),
+                Rule::MetaBelowIntrospect,
+                "{bad}"
+            );
+        }
+        // Transitively, through a helper member.
+        let md = fx_at(&[
+            ("hacivat-meta", "crates/core", &["helper"]),
+            ("helper", "crates/core", &["hacivat-session"]),
+        ]);
+        let v = for_crate(&md, "hacivat-meta");
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].rule, Rule::MetaBelowIntrospect);
+        assert_eq!(v[0].via, ["helper", "hacivat-session"]);
+        // Core to SQL is allowed.
+        let ok = fx_at(&[(
+            "hacivat-meta",
+            "crates/core",
+            &["sql-catalog", "sql-ident", "hacivat-proto"],
+        )]);
+        assert!(violations(&ok, &lints_ok).is_empty());
+    }
+
+    #[test]
+    fn meta_dev_dependency_on_introspect_is_refused() {
+        for kind in [DepKind::Development, DepKind::Build] {
+            let md = fx_kind_at(
+                "hacivat-meta",
+                "crates/core",
+                "hacivat-introspect",
+                kind,
+                &[],
+            );
+            assert_eq!(
+                rule_of(&md, "hacivat-meta"),
+                Rule::MetaBelowIntrospect,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_system_outside_app_is_refused() {
+        let md = metadata(vec![
+            member(
+                "hacivat-introspect",
+                "crates/core",
+                vec![dep(
+                    "hacivat-meta",
+                    DepKind::Normal,
+                    &["embedded-system"],
+                    None,
+                )],
+            ),
+            member(
+                "hacivat-app",
+                "crates/app",
+                vec![dep(
+                    "hacivat-meta",
+                    DepKind::Normal,
+                    &["embedded-system"],
+                    None,
+                )],
+            ),
+        ]);
+        assert_eq!(
+            rule_of(&md, "hacivat-introspect"),
+            Rule::EmbeddedSystemOnlyFromApp
+        );
+        assert!(for_crate(&md, "hacivat-app").is_empty());
+        let feature = metadata(vec![with_features(
+            member(
+                "hacivat-ddl",
+                "crates/core",
+                vec![no_defaults("hacivat-meta", &[])],
+            ),
+            &[("snapshots", &["hacivat-meta?/embedded-system"])],
+        )]);
+        assert_eq!(
+            rule_of(&feature, "hacivat-ddl"),
+            Rule::EmbeddedSystemOnlyFromApp
+        );
+    }
+
+    /// `hacivat-exec` is refused at any depth; `hacivat-results` as a direct edge (any kind):
+    /// `hacivat-session`, which introspection needs, keeps its result store on it.
+    #[test]
+    fn introspect_reaching_exec_is_refused() {
+        for bad in ["hacivat-exec", "hacivat-results"] {
+            let md = fx_at(&[("hacivat-introspect", "crates/core", &[bad])]);
+            assert_eq!(
+                rule_of(&md, "hacivat-introspect"),
+                Rule::IntrospectNotExec,
+                "{bad}"
+            );
+            let dev = fx_kind_at(
+                "hacivat-introspect",
+                "crates/core",
+                bad,
+                DepKind::Development,
+                &[],
+            );
+            assert_eq!(
+                rule_of(&dev, "hacivat-introspect"),
+                Rule::IntrospectNotExec,
+                "{bad}"
+            );
+        }
+        let deep = fx_at(&[
+            ("hacivat-introspect", "crates/core", &["helper"]),
+            ("helper", "crates/core", &["hacivat-exec"]),
+        ]);
+        assert_eq!(
+            rule_of(&deep, "hacivat-introspect"),
+            Rule::IntrospectNotExec
+        );
+        let through_session = fx_at(&[
+            ("hacivat-introspect", "crates/core", &["hacivat-session"]),
+            ("hacivat-session", "crates/core", &["hacivat-results"]),
+        ]);
+        assert!(violations(&through_session, &lints_ok).is_empty());
+        // The other direction is the refresh sink (Task 21).
+        let sink = fx_at(&[("hacivat-exec", "crates/core", &["hacivat-introspect"])]);
+        assert!(violations(&sink, &lints_ok).is_empty());
+    }
+
+    #[test]
+    fn sql_catalog_reaching_core_is_refused() {
+        let md = fx_at(&[
+            ("sql-catalog", "crates/sql", &["hacivat-meta"]),
+            ("hacivat-meta", "crates/core", &[]),
+        ]);
+        assert_eq!(rule_of(&md, "sql-catalog"), Rule::SqlReachesCore);
+        let runtime = fx_at(&[("sql-catalog", "crates/sql", &["tokio"])]);
+        assert_eq!(rule_of(&runtime, "sql-catalog"), Rule::SqlNotRuntimeFree);
+        let ok = fx_at(&[("sql-catalog", "crates/sql", &["sql-ident", "smallvec"])]);
+        assert!(violations(&ok, &lints_ok).is_empty());
+    }
+
+    fn source_tree(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (rel, src) in files {
+            let p = dir.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, src).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn meta_query_new_outside_packs_is_refused() {
+        let dir = source_tree(&[
+            (
+                "crates/core/hacivat-introspect/src/pack/render.rs",
+                "let q = MetaQuery::new(text, binds);\n",
+            ),
+            (
+                "crates/core/hacivat-session/src/meta.rs",
+                "pub fn x() { MetaQuery::new(t, b) }\n",
+            ),
+            (
+                "crates/core/hacivat-introspect/tests/pack.rs",
+                "let q = MetaQuery::new(t, b);\n",
+            ),
+            (
+                "crates/core/hacivat-introspect/src/engine/mod.rs",
+                "// MetaQuery::new is the packs' only\n",
+            ),
+            (
+                "crates/core/hacivat-introspect/src/pg/mod.rs",
+                "    let q = MetaQuery::new(sql, vec![]);\n",
+            ),
+            (
+                "crates/app/hacivat-app/src/explorer/live.rs",
+                "MetaQuery::new(user_text, vec![])\n",
+            ),
+        ]);
+        let v: Vec<_> = source_violations(dir.path())
+            .into_iter()
+            .filter(|v| v.rule == Rule::MetaQueryOnlyFromPacks)
+            .collect();
+        assert_eq!(names(&v), ["hacivat-app", "hacivat-introspect"]);
+        assert_eq!(v[0].via, ["crates/app/hacivat-app/src/explorer/live.rs"]);
+        assert_eq!(v[1].via, ["crates/core/hacivat-introspect/src/pg/mod.rs"]);
+    }
+
+    /// The M3c carry (m3c.md §8.1, P-M4-17): `hold_counts(` is named by no `src/` file except
+    /// its definition; its one caller is the shots harness under `tests/`.
+    #[test]
+    fn hold_counts_called_from_src_is_refused() {
+        let dir = source_tree(&[
+            (
+                "crates/ui/hacivat-ui-editor/src/find.rs",
+                "pub fn hold_counts(cx: &mut App) {}\n",
+            ),
+            (
+                "crates/app/hacivat-app/tests/shots/m3c.rs",
+                "hacivat_ui_editor::find::hold_counts(cx);\n",
+            ),
+            (
+                "crates/app/hacivat-app/src/console/mod.rs",
+                "/// Never call [`hold_counts`] here.\n",
+            ),
+            (
+                "crates/app/hacivat-app/src/exec_ui/run.rs",
+                "        hacivat_ui_editor::find::hold_counts(cx);\n",
+            ),
+        ]);
+        let v: Vec<_> = source_violations(dir.path())
+            .into_iter()
+            .filter(|v| v.rule == Rule::HoldCountsTestOnly)
+            .collect();
+        assert_eq!(names(&v), ["hacivat-app"]);
+        assert_eq!(v[0].via, ["crates/app/hacivat-app/src/exec_ui/run.rs"]);
+    }
+
+    /// The M4 crates are members in their layers and product crates, with no violation; the
+    /// workspace passes the M4 source rules.
+    #[test]
+    fn m4_crates_sit_in_their_layers_and_are_clean() {
+        let md = cargo_metadata::MetadataCommand::new()
+            .current_dir(crate::workspace_root())
+            .exec()
+            .unwrap();
+        let v = violations(&md, &|p| std::fs::read_to_string(p).unwrap_or_default());
+        for c in [
+            "hacivat-meta",
+            "hacivat-introspect",
+            "hacivat-ddl",
+            "sql-catalog",
+        ] {
+            let member = md
+                .workspace_packages()
+                .into_iter()
+                .find(|p| p.name.as_str() == c)
+                .unwrap_or_else(|| panic!("{c} is not a workspace member"));
+            assert_eq!(layer_of(&md, member), Some(Layer::Core), "{c}");
+            assert!(PRODUCT_CRATES.contains(&c), "{c}");
+            assert!(v.iter().all(|x| x.krate != c), "{c}: {v:?}");
+        }
+        assert!(
+            source_violations(&workspace_root()).is_empty(),
+            "{:?}",
+            source_violations(&workspace_root())
+        );
     }
 }

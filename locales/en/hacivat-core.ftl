@@ -1047,3 +1047,552 @@ safety-destructive-drop-owned-cascade = Removes every object { $role } owns in t
 exec-drop-owned-several-targets = Not sent: a typed role name confirms one DROP OWNED; this run has other targets. Run it on its own.
 # PO P2-07: on production, a DROP OWNED whose role Hacivat couldn't name.
 exec-drop-owned-no-target = Not sent: Hacivat can't tell whose objects this DROP OWNED removes, so it can't ask you to type the role's name.
+
+## m4-t01a-model
+
+# Object kind labels of the metadata model (alg/02 HV-MODEL-01): one whole-phrase message
+# per kind, `model-kind-<id>` with `<id>` the kind's stable machine id, overridable per
+# dialect (`model-kind-schema-mysql`). The label alone, never joined to a number in code;
+# the count only selects the form.
+
+# Kind label (root).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-root = { $count ->
+        [one] server
+       *[other] servers
+    }
+# Kind label (database).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-database = { $count ->
+        [one] database
+       *[other] databases
+    }
+# Kind label (schema).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-schema = { $count ->
+        [one] schema
+       *[other] schemas
+    }
+# Kind label (table).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-table = { $count ->
+        [one] table
+       *[other] tables
+    }
+# Kind label (view).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-view = { $count ->
+        [one] view
+       *[other] views
+    }
+# Kind label (materialized-view).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-materialized-view = { $count ->
+        [one] materialized view
+       *[other] materialized views
+    }
+# Kind label (foreign-table).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-foreign-table = { $count ->
+        [one] foreign table
+       *[other] foreign tables
+    }
+# Kind label (virtual-table).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-virtual-table = { $count ->
+        [one] virtual table
+       *[other] virtual tables
+    }
+# Kind label (column).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-column = { $count ->
+        [one] column
+       *[other] columns
+    }
+# Kind label (index).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-index = { $count ->
+        [one] index
+       *[other] indexes
+    }
+# Kind label (primary-key).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-primary-key = { $count ->
+        [one] primary key
+       *[other] primary keys
+    }
+# Kind label (unique-key).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-unique-key = { $count ->
+        [one] unique key
+       *[other] unique keys
+    }
+# Kind label (foreign-key).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-foreign-key = { $count ->
+        [one] foreign key
+       *[other] foreign keys
+    }
+# Kind label (check).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-check = { $count ->
+        [one] check constraint
+       *[other] check constraints
+    }
+# Kind label (exclusion).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-exclusion = { $count ->
+        [one] exclusion constraint
+       *[other] exclusion constraints
+    }
+# Kind label (default).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-default = { $count ->
+        [one] default
+       *[other] defaults
+    }
+# Kind label (trigger).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-trigger = { $count ->
+        [one] trigger
+       *[other] triggers
+    }
+# Kind label (rule).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-rule = { $count ->
+        [one] rule
+       *[other] rules
+    }
+# Kind label (policy).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-policy = { $count ->
+        [one] policy
+       *[other] policies
+    }
+# Kind label (partition).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-partition = { $count ->
+        [one] partition
+       *[other] partitions
+    }
+# Kind label (subpartition).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-subpartition = { $count ->
+        [one] subpartition
+       *[other] subpartitions
+    }
+# Kind label (routine).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-routine = { $count ->
+        [one] function
+       *[other] functions
+    }
+# Kind label (procedure).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-procedure = { $count ->
+        [one] procedure
+       *[other] procedures
+    }
+# Kind label (aggregate).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-aggregate = { $count ->
+        [one] aggregate function
+       *[other] aggregate functions
+    }
+# Kind label (argument).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-argument = { $count ->
+        [one] argument
+       *[other] arguments
+    }
+# Kind label (sequence).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-sequence = { $count ->
+        [one] sequence
+       *[other] sequences
+    }
+# Kind label (domain).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-domain = { $count ->
+        [one] domain
+       *[other] domains
+    }
+# Kind label (enum-type).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-enum-type = { $count ->
+        [one] enum type
+       *[other] enum types
+    }
+# Kind label (composite-type).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-composite-type = { $count ->
+        [one] composite type
+       *[other] composite types
+    }
+# Kind label (range-type).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-range-type = { $count ->
+        [one] range type
+       *[other] range types
+    }
+# Kind label (alias-type).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-alias-type = { $count ->
+        [one] alias type
+       *[other] alias types
+    }
+# Kind label (table-type).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-table-type = { $count ->
+        [one] table type
+       *[other] table types
+    }
+# Kind label (synonym).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-synonym = { $count ->
+        [one] synonym
+       *[other] synonyms
+    }
+# Kind label (extension).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-extension = { $count ->
+        [one] extension
+       *[other] extensions
+    }
+# Kind label (collation).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-collation = { $count ->
+        [one] collation
+       *[other] collations
+    }
+# Kind label (operator).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-operator = { $count ->
+        [one] operator
+       *[other] operators
+    }
+# Kind label (operator-class).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-operator-class = { $count ->
+        [one] operator class
+       *[other] operator classes
+    }
+# Kind label (operator-family).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-operator-family = { $count ->
+        [one] operator family
+       *[other] operator families
+    }
+# Kind label (cast).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-cast = { $count ->
+        [one] cast
+       *[other] casts
+    }
+# Kind label (language).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-language = { $count ->
+        [one] language
+       *[other] languages
+    }
+# Kind label (access-method).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-access-method = { $count ->
+        [one] access method
+       *[other] access methods
+    }
+# Kind label (foreign-data-wrapper).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-foreign-data-wrapper = { $count ->
+        [one] foreign-data wrapper
+       *[other] foreign-data wrappers
+    }
+# Kind label (foreign-server).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-foreign-server = { $count ->
+        [one] foreign server
+       *[other] foreign servers
+    }
+# Kind label (user-mapping).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-user-mapping = { $count ->
+        [one] user mapping
+       *[other] user mappings
+    }
+# Kind label (event-trigger).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-event-trigger = { $count ->
+        [one] event trigger
+       *[other] event triggers
+    }
+# Kind label (role).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-role = { $count ->
+        [one] role
+       *[other] roles
+    }
+# Kind label (user).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-user = { $count ->
+        [one] user
+       *[other] users
+    }
+# Kind label (login).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-login = { $count ->
+        [one] login
+       *[other] logins
+    }
+# Kind label (tablespace).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-tablespace = { $count ->
+        [one] tablespace
+       *[other] tablespaces
+    }
+# Kind label (event).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-event = { $count ->
+        [one] event
+       *[other] events
+    }
+# Kind label (virtual-table-module).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-virtual-table-module = { $count ->
+        [one] virtual table module
+       *[other] virtual table modules
+    }
+# Kind label (dictionary).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-dictionary = { $count ->
+        [one] dictionary
+       *[other] dictionaries
+    }
+# Kind label (row-policy).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-row-policy = { $count ->
+        [one] row policy
+       *[other] row policies
+    }
+# Kind label (settings-profile).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-settings-profile = { $count ->
+        [one] settings profile
+       *[other] settings profiles
+    }
+# Kind label (quota).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-quota = { $count ->
+        [one] quota
+       *[other] quotas
+    }
+# Kind label (projection).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-projection = { $count ->
+        [one] projection
+       *[other] projections
+    }
+# Kind label (package).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-package = { $count ->
+        [one] package
+       *[other] packages
+    }
+# Kind label (package-body).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-package-body = { $count ->
+        [one] package body
+       *[other] package bodies
+    }
+# Kind label (object-type).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-object-type = { $count ->
+        [one] object type
+       *[other] object types
+    }
+# Kind label (db-link).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-db-link = { $count ->
+        [one] database link
+       *[other] database links
+    }
+# Kind label (collection).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-collection = { $count ->
+        [one] collection
+       *[other] collections
+    }
+# Kind label (mongo-view).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-mongo-view = { $count ->
+        [one] view
+       *[other] views
+    }
+# Kind label (time-series).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-time-series = { $count ->
+        [one] time series collection
+       *[other] time series collections
+    }
+# Kind label (inferred-field).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-inferred-field = { $count ->
+        [one] inferred field
+       *[other] inferred fields
+    }
+# Kind label (redis-database).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-redis-database = { $count ->
+        [one] database
+       *[other] databases
+    }
+# Kind label (redis-module).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-redis-module = { $count ->
+        [one] module
+       *[other] modules
+    }
+# Kind label (unknown).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-unknown = { $count ->
+        [one] object of an unknown kind
+       *[other] objects of an unknown kind
+    }
+# Kind label (schema-mysql).
+# Variables:
+#   $count (Number) - how many objects the label names, e.g. 2.
+model-kind-schema-mysql = { $count ->
+        [one] database
+       *[other] databases
+    }
+# The explorer badge on an object name that holds characters a reader cannot see (bidi
+# controls, zero-width characters); the name itself is shown verbatim.
+model-name-has-invisible-chars = This name contains characters that can't be seen.
+# Notice when a connection's cached metadata could not be used and the cache was started again.
+# Variables:
+#   $reason (String) - why: "corrupt", "server-changed" or "incompatible".
+model-cache-rebuilt = { $reason ->
+        [corrupt] The cached metadata was damaged, so it was cleared and is being read again.
+        [server-changed] This connection now reaches a different server, so its cached metadata is being read again.
+       *[incompatible] The cached metadata was written by a different version, so it is being read again.
+    }
+# Strip above the explorer while the connection is offline or not yet connected.
+# Variables:
+#   $date (String) - when the metadata was read, preformatted for the UI locale, e.g. "17 November 2026 14:05".
+model-cache-offline = Showing cached metadata from { $date }
+# Notice when a policy keeps this connection's metadata out of the cache (memory only).
+model-cache-disabled-by-policy = Metadata for this connection isn't cached on disk.
+
+# DDL generation (alg/03 HV-DDL-07, -09, -10, -11). Generated SQL itself is never translated.
+# Variables:
+#   $dbms (String) - the engine's product name, e.g. "PostgreSQL".
+#   $kind (String) - the object kind's label, e.g. "table".
+ddl-unsupported-kind = { $dbms } doesn't support generating DDL for this kind of object ({ $kind }).
+# Warning on server text that holds MySQL executable comments (`/*! … */`): they run as SQL.
+ddl-warn-executable-comment = This definition contains MySQL executable comments (/*! … */). They run as SQL when the script runs.
+# Notice when a SQLite change needs the table to be rebuilt (create, copy, drop, rename).
+ddl-sqlite-rebuild-notice = SQLite can't change this in place, so the script rebuilds the table and copies its rows.
+# Notice when SQLite forces constraints inside the table although another placement was chosen.
+ddl-sqlite-placement-forced = SQLite keeps constraints inside the table, so they're placed there.
+# Notice when the grants of an object have not been read: the script has no GRANT statements.
+ddl-grants-not-loaded = Grants haven't been read for this object, so the script has no GRANT statements.
+# Notice when only some grants could be read (the login can't see them all).
+ddl-grants-partial = Only the grants this login can see are included; others may exist.
+# Notice when a PostgreSQL table has row-level security: its policies are not read in this version.
+ddl-policies-not-loaded = Row-level security policies aren't read yet, so the script doesn't include them.
+
+# Generator option labels (HV-DDL-09, -10, -11).
+ddl-opt-placement = Constraints
+ddl-opt-placement-inside-column = Inside column
+ddl-opt-placement-inside-table = Inside table
+ddl-opt-placement-after-table = After table
+ddl-opt-qualify = Qualification
+ddl-opt-qualify-auto = Auto
+ddl-opt-qualify-never = Never
+ddl-opt-qualify-always = Always
+ddl-opt-or-replace = Use OR REPLACE
+ddl-opt-or-replace-tooltip = Write CREATE OR REPLACE where the database supports it.
+ddl-opt-if-not-exists = Use IF NOT EXISTS
+ddl-opt-if-not-exists-tooltip = Write IF NOT EXISTS where the database supports it.
+ddl-opt-skip-grants = Skip grants
+ddl-opt-skip-grants-tooltip = Leave out GRANT statements.
+ddl-opt-skip-owner = Skip owner
+ddl-opt-skip-owner-tooltip = Leave out ownership statements.
+ddl-opt-skip-definer = Skip DEFINER
+ddl-opt-skip-definer-tooltip = Leave out the DEFINER clause of MySQL and MariaDB views, routines, triggers and events.
+ddl-opt-surrogate-names = Name unnamed constraints
+ddl-opt-surrogate-names-tooltip = Write the names the database generated for unnamed constraints.
+ddl-opt-server-definitions = Definitions provided by server
+ddl-opt-server-definitions-tooltip = Show the definition text the database reports instead of generated DDL.
+# Generator categories (HV-DDL-11).
+ddl-cat-create = Create
+ddl-cat-drop = Drop
+ddl-cat-truncate = Truncate
+ddl-cat-server-definitions = Definitions provided by server
+ddl-cat-alter = Alter
