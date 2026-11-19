@@ -1393,7 +1393,7 @@ async fn sqlite_meta_conn_has_no_authorizer_and_refuses_writes() {
 async fn sqlite_attached_files_are_read_only_too() {
     let dir = tempfile::tempdir().unwrap();
     let path = sqlite_file(dir.path(), "main.db").await;
-    let aux = sqlite_file(dir.path(), "aux.db").await;
+    let aux = sqlite_file(dir.path(), "arsiv.db").await;
     let profile = sqlite_on(&path);
     let sm = real_manager(profile.clone());
     let cancel = CancellationToken::new();

@@ -377,7 +377,7 @@ async fn sqlite_file(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
 async fn h6_sqlite_reader_write_surfaces() {
     let dir = tempfile::tempdir().unwrap();
     let path = sqlite_file(dir.path(), "main.db").await;
-    let aux = sqlite_file(dir.path(), "aux.db").await;
+    let aux = sqlite_file(dir.path(), "arsiv.db").await;
     let profile = Profile {
         engine: hacivat_proto::DbmsKind::Sqlite,
         endpoint: ProfileEndpoint::File {
