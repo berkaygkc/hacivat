@@ -898,6 +898,9 @@ impl ConnectionDialog {
         // ## m2a-dialog-retries: the destination's attempts are used up; the Password field's
         // hint says why (P8). Save alone stays.
         let used_up = self.attempts_used_up();
+        // ## m4-t20-scope (named lines): a scope pattern that does not parse, or an open
+        // all-databases question, disables Save and Save and connect (mock 7).
+        let scope_blocks = super::schemas::blocks_save(cx.entity_id(), cx);
         let mut test = if running {
             Button::new("conn-test", tr(cx, ids::hv::CONN_DLG_TEST_STOP, NoArgs))
                 .icon(IconName::Square)
@@ -919,7 +922,7 @@ impl ConnectionDialog {
         let mut save = Button::new("conn-save", tr(cx, ids::hv::CONN_DLG_SAVE, NoArgs))
             .focus_handle(self.focus.save.clone())
             .on_raised(true)
-            .disabled(read_only)
+            .disabled(read_only || scope_blocks)
             .on_click(cx.listener(|this, _, window, cx| this.save(false, window, cx)));
         if let Some(h) = hint(cx, "connection_dialog.save") {
             save = save.key_hint(h);
@@ -931,7 +934,7 @@ impl ConnectionDialog {
         .kind(ButtonKind::Primary)
         .focus_handle(self.focus.save_connect.clone())
         .on_raised(true)
-        .disabled(read_only || used_up)
+        .disabled(read_only || used_up || scope_blocks)
         .on_click(cx.listener(|this, _, window, cx| this.save(true, window, cx)));
         if let Some(h) = hint(cx, "connection_dialog.save_and_connect") {
             save_connect = save_connect.key_hint(h);
@@ -1340,6 +1343,12 @@ impl ConnectionDialog {
         );
         if p.engine == DbmsKind::Sqlite {
             self.render_sqlite(&mut rows, &p, theme, window, cx);
+            // ## m4-t20-scope (named lines): the Schemas section and "Encrypt cached
+            // metadata" (mock 7), after the file rows.
+            rows.push(
+                Kind::Disclosure,
+                super::schemas::section(&self.draft, window, cx),
+            );
         } else {
             self.render_server(&mut rows, theme, window, cx);
             self.render_auth(&mut rows, &p, theme, window, cx);
@@ -1356,6 +1365,12 @@ impl ConnectionDialog {
                     window,
                     cx,
                 ),
+            );
+            // ## m4-t20-scope (named lines): the Schemas section and "Encrypt cached
+            // metadata", between SSH and Advanced (mock 7).
+            rows.push(
+                Kind::Disclosure,
+                super::schemas::section(&self.draft, window, cx),
             );
             self.render_advanced(&mut rows, &p, theme, window, cx);
         }

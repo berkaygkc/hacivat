@@ -855,6 +855,10 @@ impl ConnectionDialog {
         if ssh::contains_focus(window, cx) {
             return Some("ssh");
         }
+        // ## m4-t20-scope (named lines): the Schemas section.
+        if schemas::contains_focus(window, cx) {
+            return Some("scope");
+        }
         let groups = [
             ("engine", &f.engine),
             ("environment", &f.environment),
@@ -1005,6 +1009,9 @@ impl ConnectionDialog {
             self.consent_endpoint = None;
         }
         self.apply_env_rule();
+        // ## m4-t20-scope (named line): a new profile's "Encrypt cached metadata" follows its
+        // environment until the box is clicked (R-M4-15).
+        schemas::follow_environment(self, cx.entity_id(), cx);
         self.sync_env_select(cx);
         self.sync_url(window, cx);
         self.refresh_pgpass(cx);
@@ -1809,6 +1816,12 @@ impl ConnectionDialog {
             cx.notify();
             return;
         }
+        // ## m4-t20-scope (named lines): a scope pattern that does not parse, or an open
+        // all-databases question, is never saved (Save is disabled; this stops the command too).
+        if schemas::blocks_save(cx.entity_id(), cx) {
+            cx.notify();
+            return;
+        }
         let Some(model) = cx.try_global::<ConnectionsModel>() else {
             return;
         };
@@ -1958,7 +1971,9 @@ impl ConnectionDialog {
         let draft = self.draft_of(profile);
         let password = draft.password.clone();
         let name = draft.profile.name.clone();
-        let saved = ConnectionsModel::save(cx, draft);
+        // ## m4-t20-scope (named line): the cache files first when "Encrypt cached metadata"
+        // changed, then the scope pattern, then the profile through `ConnectionsModel`.
+        let saved = schemas::save_profile(self, draft, cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = saved.await;
             let _ = this.update_in(cx, |d, _window, cx| {
