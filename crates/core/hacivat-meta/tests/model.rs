@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use hacivat_meta::codec::{DecodeError, encode_namespace};
+use hacivat_meta::codec::{decode_namespace, encode_namespace};
 use hacivat_meta::fixture::{ns_mysql, ns_pg, ns_sqlite, table_subtree};
 use hacivat_meta::ids::{NsKey, ObjectKey, Ref, ServerId, SourceRef};
 use hacivat_meta::kind::{KindGroup, ObjectKind};
@@ -534,16 +534,21 @@ fn invisible_chars_detected() {
     assert_eq!(flagged, [true, false]);
 }
 
-/// Task 11 owns the codec body; until it lands, encoding any namespace — here one with every
-/// `Props` variant — answers the stub error (reported). Task 11 turns this into the round trip.
+// ## m4-t11-codec (named exception: Task 11 turns the stub check into the round trip)
+/// Every `Props` variant survives the codec exactly, and the unknown object keeps its raw kind.
 #[test]
 fn props_round_trip_through_the_codec_for_every_variant() {
     let n = every_props_variant();
     assert_eq!(n.len(), 15);
-    assert!(matches!(
-        encode_namespace(&n),
-        Err(DecodeError::NotImplemented)
-    ));
+    let back = decode_namespace(&encode_namespace(&n).unwrap()).unwrap();
+    assert_eq!(back.objs(), n.objs());
+    assert_eq!(back.meta(), n.meta());
+    let unknown = back
+        .objs()
+        .iter()
+        .find(|o| o.kind() == ObjectKind::Unknown)
+        .unwrap();
+    assert_eq!(unknown.raw_kind().map(|r| &**r), Some("relkind-q"));
 }
 
 fn every_props_variant() -> NamespaceSnapshot {

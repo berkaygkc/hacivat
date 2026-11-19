@@ -1039,6 +1039,13 @@ ddl-grants-not-loaded = Bu nesnenin yetkileri okunmadı; betikte GRANT ifadesi y
 ddl-grants-partial = Yalnızca bu oturumun görebildiği yetkiler dahil; başkaları da olabilir.
 # Review: PO
 ddl-policies-not-loaded = Satır düzeyi güvenlik politikaları henüz okunmuyor; betik bunları içermiyor.
+
+## m4-t19-produce (named exception inside m4-t01a-model's DDL block)
+# Review: PO
+ddl-warn-unknown-type = { $type } türü yüklenen katalogda yok. Sunucunun bildirdiği biçimde yazıldı; betiği çalıştırmadan önce türün var olduğundan emin olun.
+# Review: PO
+ddl-warn-not-enforced = { $name } kısıtı sunucuda zorlanmıyor ve bu sürüm NOT ENFORCED yazamıyor; betik bu kısıtı içermiyor.
+## m4-t01a-model
 # Review: PO
 ddl-opt-placement = Kısıtlar
 # Review: PO

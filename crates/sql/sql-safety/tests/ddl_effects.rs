@@ -635,7 +635,10 @@ fn projection(r: &SafetyReport) -> String {
             r.request_class,
             r.request_effects,
             r.flags,
-            &r.fingerprint,
+            // ## m4 (controller fix, Windows CI): pg_query's fingerprint *hash* differs by platform
+            // (`FETCH ALL` encodes LONG_MAX, and `long` is 32-bit on Windows); the algo and the
+            // normalized text stay in the projection. Golden re-cut at T6's base `8b6796b`.
+            (r.fingerprint.algo, &r.fingerprint.normalized),
             &r.backends,
             &r.pre_decision,
             r.classified_len,

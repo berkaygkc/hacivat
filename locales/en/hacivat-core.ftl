@@ -1568,6 +1568,17 @@ ddl-grants-partial = Only the grants this login can see are included; others may
 # Notice when a PostgreSQL table has row-level security: its policies are not read in this version.
 ddl-policies-not-loaded = Row-level security policies aren't read yet, so the script doesn't include them.
 
+## m4-t19-produce (named exception inside m4-t01a-model's DDL block)
+# Warning when a column's type is not in the loaded catalog: the script writes it as the server reported it.
+# Variables:
+#   $type (String) - the type's name as the server spells it, e.g. "public.citext".
+ddl-warn-unknown-type = The type { $type } isn't in the loaded catalog. It's written as the server reported it, so make sure it exists before you run the script.
+# Notice when the server doesn't enforce a constraint and this database version can't say so in DDL: the constraint is left out.
+# Variables:
+#   $name (String) - the constraint's name, or its kind when it has none, e.g. "orders_chk_1".
+ddl-warn-not-enforced = The constraint { $name } isn't enforced on the server, and this version can't write NOT ENFORCED, so the script leaves it out.
+## m4-t01a-model
+
 # Generator option labels (HV-DDL-09, -10, -11).
 ddl-opt-placement = Constraints
 ddl-opt-placement-inside-column = Inside column

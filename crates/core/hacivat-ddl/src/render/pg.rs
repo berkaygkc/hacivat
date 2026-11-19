@@ -91,6 +91,11 @@ fn column(
     c: &ColumnDef,
     inline: &[&ConstraintDef],
 ) -> Result<String, RenderError> {
+    // ## m4-t19-produce
+    if c.invisible {
+        return Err(RenderError::Invalid("an invisible column on PostgreSQL"));
+    }
+    // ## end m4-t19-produce
     let mut s = format!("{} {}", ctx.ident(&c.name)?, c.raw_type);
     if let Some(coll) = &c.collation {
         s.push_str(" COLLATE ");

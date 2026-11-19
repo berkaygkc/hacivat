@@ -1,0 +1,5 @@
+CREATE TABLE secrets (
+    id integer NOT NULL
+);
+
+ALTER TABLE secrets ENABLE ROW LEVEL SECURITY;

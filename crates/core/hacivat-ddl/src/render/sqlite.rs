@@ -142,6 +142,11 @@ fn table(ctx: &RenderCtx, t: &TableDef) -> Result<String, RenderError> {
     let placed = ctx.place(&t.constraints, auto);
     let mut items = Vec::new();
     for c in &t.columns {
+        // ## m4-t19-produce
+        if c.invisible {
+            return Err(RenderError::Invalid("an invisible column on SQLite"));
+        }
+        // ## end m4-t19-produce
         let mut s = ctx.ident(&c.name)?;
         if !c.raw_type.is_empty() {
             s.push(' ');
