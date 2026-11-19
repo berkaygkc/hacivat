@@ -220,18 +220,49 @@ pub struct ColumnProps {
     pub raw_type: Name,
     pub type_ref: Option<TypeRef>,
     pub nullable: bool,
-    /// PostgreSQL 18 named `NOT NULL` constraint.
-    pub not_null_constraint: Option<Name>,
     pub default_raw: Option<Name>,
-    pub identity: Option<Identity>,
-    pub generated: Option<Generated>,
-    pub collation: Option<Name>,
     pub comment: Option<Name>,
     /// SQLite hidden column, MySQL `INVISIBLE`.
     pub hidden: bool,
+    /// The fields most columns lack, behind one pointer (R-W1-2: ≤ 250 B per column).
+    pub rare: Option<Arc<ColumnRare>>,
+    /// The per-engine extras, behind one pointer (R-W1-2); `None` when the engine has none.
+    pub ext: Option<Arc<ColumnExt>>,
+}
+
+/// The column fields most columns lack (R-W1-2, ruled before Task 11 freezes the cache
+/// format): kept out of [`ColumnProps`] so the common column stays small.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ColumnRare {
+    /// PostgreSQL 18 named `NOT NULL` constraint.
+    pub not_null_constraint: Option<Name>,
+    pub identity: Option<Identity>,
+    pub generated: Option<Generated>,
+    pub collation: Option<Name>,
     /// MySQL `ENUM`/`SET` labels, in declaration order.
     pub enum_labels: Option<Arc<[Name]>>,
-    pub ext: ColumnExt,
+}
+
+impl ColumnProps {
+    /// The column's identity kind, if any.
+    pub fn identity(&self) -> Option<Identity> {
+        self.rare.as_ref().and_then(|r| r.identity)
+    }
+
+    /// The column's generation, if it is generated.
+    pub fn generated(&self) -> Option<&Generated> {
+        self.rare.as_ref().and_then(|r| r.generated.as_ref())
+    }
+
+    /// The column's collation, if declared.
+    pub fn collation(&self) -> Option<&Name> {
+        self.rare.as_ref().and_then(|r| r.collation.as_ref())
+    }
+
+    /// The per-engine extras ([`ColumnExt::None`] when absent).
+    pub fn ext(&self) -> &ColumnExt {
+        self.ext.as_deref().unwrap_or(&ColumnExt::None)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

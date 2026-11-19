@@ -5,17 +5,20 @@
 
 use std::sync::Arc;
 
+use sql_dialect::PgWireFlavor;
 use sql_ident::key::{
     DialectId, FoldRule, IdentCtx, IdentKey, NameClass, ServerDependent, has_non_ascii_cased,
     match_key,
 };
 
-const CLASSES: [NameClass; 6] = [
+const CLASSES: [NameClass; 8] = [
     NameClass::Database,
     NameClass::Schema,
     NameClass::Table,
     NameClass::Column,
     NameClass::Routine,
+    NameClass::Trigger,
+    NameClass::Account,
     NameClass::Other,
 ];
 
@@ -286,17 +289,113 @@ fn unpinned_dialects_are_server_dependent() {
             );
         }
     }
-    // The PostgreSQL wire forks share PostgreSQL's fold.
-    let fork = DialectId::PgWire(sql_dialect::PgWireFlavor::Cockroach);
-    let ctx = IdentCtx {
-        encoding: Some(Arc::from("UTF8")),
-        ..IdentCtx::new(fork)
-    };
-    assert_eq!(
-        match_key(fork, &ctx, "Users", false, NameClass::Table)
-            .unwrap()
-            .as_str(),
-        "users"
+    // The forks that run PostgreSQL's parser share its fold; Redshift (quoted ASCII folded,
+    // 127 bytes), CockroachDB (Unicode lowercasing) and unnamed forks are not pinned (I1).
+    for (flavor, pinned) in [
+        (PgWireFlavor::Timescale, true),
+        (PgWireFlavor::Yugabyte, true),
+        (PgWireFlavor::Redshift, false),
+        (PgWireFlavor::Cockroach, false),
+        (PgWireFlavor::Other, false),
+    ] {
+        let fork = DialectId::PgWire(flavor);
+        let ctx = IdentCtx {
+            encoding: Some(Arc::from("UTF8")),
+            ..IdentCtx::new(fork)
+        };
+        for class in CLASSES {
+            for quoted in [false, true] {
+                let k = match_key(fork, &ctx, "Users", quoted, class);
+                if pinned {
+                    let want = if quoted { "Users" } else { "users" };
+                    assert_eq!(k.unwrap().as_str(), want, "{flavor:?} {class:?}");
+                } else {
+                    assert_eq!(k, Err(ServerDependent), "{flavor:?} {class:?} {quoted}");
+                }
+            }
+        }
+    }
+}
+
+/// MySQL 8.4 §8.2.3: `User` (and role) comparisons are case-sensitive, whatever
+/// `lower_case_table_names` says (I2).
+#[test]
+fn mysql_account_names_are_exact() {
+    for d in [DialectId::MySql, DialectId::MariaDb] {
+        for n in [0, 1, 2] {
+            let ctx = IdentCtx {
+                dialect: d,
+                ..lctn(n)
+            };
+            let key = |t: &str| match_key(d, &ctx, t, false, NameClass::Account);
+            assert_ne!(key("Bob").unwrap(), key("bob").unwrap(), "{d:?} {n}");
+            assert_eq!(key("Bob").unwrap().as_str(), "Bob");
+            assert_eq!(
+                key("Müşteri").unwrap().as_str(),
+                "Müşteri",
+                "exact: never unpinned"
+            );
+        }
+    }
+    assert_eq!(ik_pg("Bob", false).as_str(), "bob");
+    let pg = match_key(
+        DialectId::Postgres,
+        &pg_ctx(Some("UTF8")),
+        "Bob",
+        true,
+        NameClass::Account,
+    );
+    assert_eq!(pg.unwrap().as_str(), "Bob");
+}
+
+/// MySQL 8.4 §11.2.3: `lower_case_table_names` "does not affect case sensitivity of trigger
+/// identifiers"; they follow the file system. Exact under 0 (Linux), unpinned above (I3).
+#[test]
+fn mysql_trigger_names_exact_under_lctn0_unpinned_above() {
+    for d in [DialectId::MySql, DialectId::MariaDb] {
+        let ctx0 = IdentCtx {
+            dialect: d,
+            ..lctn(0)
+        };
+        assert_eq!(
+            match_key(d, &ctx0, "Trg", false, NameClass::Trigger)
+                .unwrap()
+                .as_str(),
+            "Trg"
+        );
+        for n in [1, 2] {
+            let ctx = IdentCtx {
+                dialect: d,
+                ..lctn(n)
+            };
+            assert_eq!(
+                match_key(d, &ctx, "trg", false, NameClass::Trigger),
+                Err(ServerDependent),
+                "{d:?} {n}"
+            );
+        }
+    }
+}
+
+/// HV-INTRO-14 rule 3, cut side: on a non-UTF-8 server a quoted non-ASCII name is certain only
+/// when it fits 63 bytes at 4 bytes per non-ASCII character (`EUC_TW`, `MULE_INTERNAL`).
+#[test]
+fn pg_non_utf8_quoted_names_fit_the_cut_at_four_bytes_a_character() {
+    let ctx = pg_ctx(Some("EUC_TW"));
+    let key = |t: &str| match_key(DialectId::Postgres, &ctx, t, true, NameClass::Table);
+    let fits = format!("abc{}", "\u{4E2D}".repeat(15)); // 3 + 60 = 63
+    assert_eq!(key(&fits).unwrap().as_str(), fits);
+    let over = format!("abcd{}", "\u{4E2D}".repeat(15)); // 4 + 60 = 64 (49 UTF-8 bytes)
+    assert_eq!(key(&over), Err(ServerDependent));
+    assert!(
+        match_key(
+            DialectId::Postgres,
+            &pg_ctx(Some("UTF8")),
+            &over,
+            true,
+            NameClass::Table
+        )
+        .is_ok()
     );
 }
 
@@ -335,7 +434,13 @@ fn stored_rule_agrees_with_match_key() {
     ];
     for (d, ctx) in &ctxs {
         for class in CLASSES {
-            let rule = FoldRule::for_names(*d, ctx, class).expect("a pinned dialect");
+            let Some(rule) = FoldRule::for_names(*d, ctx, class) else {
+                // Unpinned (MySQL triggers under lctn >= 1): `match_key` never keys.
+                for text in corpus {
+                    assert_eq!(match_key(*d, ctx, text, true, class), Err(ServerDependent));
+                }
+                continue;
+            };
             for text in corpus {
                 if let Ok(k) = match_key(*d, ctx, text, true, class) {
                     let name: Arc<str> = Arc::from(text);

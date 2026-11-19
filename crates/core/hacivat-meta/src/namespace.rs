@@ -17,6 +17,7 @@
 //! `Unknown(ServerDependent)` — never `Missing` where the server's rule is not pinned.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
 
 use bitflags::bitflags;
@@ -104,7 +105,7 @@ impl Obj {
         let (name, lossy) = lossy_name(bytes);
         let obj = Obj::new(kind, name);
         if lossy {
-            obj.with_flags(ObjFlags::LOSSY_NAME)
+            obj.add_flags(ObjFlags::LOSSY_NAME)
         } else {
             obj
         }
@@ -121,7 +122,7 @@ impl Obj {
     }
 
     /// Adds `flags` to the object's flags (a flag set earlier, such as `LOSSY_NAME`, stays).
-    pub fn with_flags(mut self, flags: ObjFlags) -> Self {
+    pub fn add_flags(mut self, flags: ObjFlags) -> Self {
         self.flags |= flags;
         self
     }
@@ -413,7 +414,9 @@ pub struct NamespaceSnapshot {
     /// Per group: a stored name holds a non-ASCII cased letter under a rule the server may
     /// extend beyond ASCII (MySQL/MariaDB caseless names, R-M4-41), so a miss is not a fact.
     uncertain: [bool; KindGroup::COUNT],
+    /// `(kind, server id)` to index; [`NO_PARENT`] marks a duplicated id.
     by_server_id: HashMap<(ObjectKind, ServerId), u32>,
+    duplicate_server_ids: usize,
 }
 
 impl NamespaceSnapshot {
@@ -502,6 +505,7 @@ impl NamespaceSnapshot {
             names: Default::default(),
             uncertain: [false; KindGroup::COUNT],
             by_server_id: HashMap::new(),
+            duplicate_server_ids: 0,
         };
         ns.index();
         Ok(ns)
@@ -513,6 +517,7 @@ impl NamespaceSnapshot {
             Default::default();
         let mut uncertain = [false; KindGroup::COUNT];
         let mut by_sid = HashMap::new();
+        let mut duplicates = 0usize;
         let rules = KindGroup::ALL.map(|g| self.class_rule(group_class(g)));
         let unpinned = KindGroup::ALL.map(|g| self.unpinned(group_class(g)));
         for (i, o) in self.objs.iter_mut().enumerate() {
@@ -533,25 +538,41 @@ impl NamespaceSnapshot {
                 }
             }
             if let Some(sid) = o.server_id {
-                by_sid.insert((o.kind, sid), i);
+                // A duplicate `(kind, server id)` is ambiguous: neither object is found by the
+                // id (the path walk still checks it), and the namespace reports the count.
+                match by_sid.entry((o.kind, sid)) {
+                    Entry::Vacant(slot) => {
+                        slot.insert(i);
+                    }
+                    Entry::Occupied(mut slot) => {
+                        if *slot.get() != NO_PARENT {
+                            slot.insert(NO_PARENT);
+                            duplicates += 1;
+                        }
+                        duplicates += 1;
+                    }
+                }
             }
         }
         self.names = names;
         self.uncertain = uncertain;
         self.by_server_id = by_sid;
+        self.duplicate_server_ids = duplicates;
     }
 
     /// The stored rule of names of `class` in this namespace: the namespace's rule, except that
     /// MySQL/MariaDB names outside the `lower_case_table_names` classes are ASCII-caseless.
     fn class_rule(&self, class: NameClass) -> FoldRule {
-        let lctn_class = matches!(
-            class,
-            NameClass::Database | NameClass::Schema | NameClass::Table
-        );
-        if mysql_family(self.dbms) && !lctn_class {
-            FoldRule::AsciiCaseless
-        } else {
-            self.fold
+        if !mysql_family(self.dbms) {
+            return self.fold;
+        }
+        match class {
+            NameClass::Database | NameClass::Schema | NameClass::Table => self.fold,
+            // Exact keys: account names always compare case-sensitively; trigger names do under
+            // `lower_case_table_names = 0` and are unpinned above it, where `match_key` never
+            // keys them and only a byte-exact stored name is `Found`.
+            NameClass::Trigger | NameClass::Account => FoldRule::Exact,
+            NameClass::Column | NameClass::Routine | NameClass::Other => FoldRule::AsciiCaseless,
         }
     }
 
@@ -562,15 +583,16 @@ impl NamespaceSnapshot {
     }
 
     /// Whether a probe context can be matched against this namespace's stored keys: the same
-    /// engine family and the same stored rule for `class`.
-    fn agrees_with(&self, ctx: &IdentCtx, class: NameClass) -> bool {
+    /// engine family, and a pinned table rule equal to the namespace's (the same
+    /// `lower_case_table_names`; never an unpinned PostgreSQL fork).
+    fn agrees_with(&self, ctx: &IdentCtx) -> bool {
         let family = match ctx.dialect {
             DialectId::Postgres | DialectId::PgWire(_) => pg_family(self.dbms),
             DialectId::MySql | DialectId::MariaDb => mysql_family(self.dbms),
             DialectId::Sqlite => self.dbms == DbmsKind::Sqlite,
             _ => false,
         };
-        family && FoldRule::for_names(ctx.dialect, ctx, class) == Some(self.class_rule(class))
+        family && FoldRule::for_names(ctx.dialect, ctx, NameClass::Table) == Some(self.fold)
     }
 
     pub fn key(&self) -> &NsKey {
@@ -628,6 +650,12 @@ impl NamespaceSnapshot {
     /// persisted (alg/02 edge 8).
     pub fn is_temp(&self) -> bool {
         self.root().flags.contains(ObjFlags::TEMP)
+    }
+
+    /// How many objects share a `(kind, server id)` with another object of this namespace (a
+    /// corrupt or wrapped catalog). Such ids find nothing; their objects are found by path.
+    pub fn duplicate_server_ids(&self) -> usize {
+        self.duplicate_server_ids
     }
 
     /// The number of columns in the namespace.
@@ -708,7 +736,7 @@ impl NamespaceSnapshot {
         ctx: &IdentCtx,
     ) -> Lookup<SmallVec<[u32; 2]>> {
         let class = group_class(group);
-        if !self.agrees_with(ctx, class) {
+        if !self.agrees_with(ctx) {
             return Lookup::Unknown(UnknownReason::ServerDependent);
         }
         match match_key(ctx.dialect, ctx, probe, quoted, class) {
@@ -758,7 +786,7 @@ impl NamespaceSnapshot {
             return Lookup::Unknown(UnknownReason::NotLoaded);
         }
         let class = kind.name_class(self.dbms);
-        if !self.agrees_with(ctx, class) {
+        if !self.agrees_with(ctx) {
             return Lookup::Unknown(UnknownReason::ServerDependent);
         }
         let rule = self.class_rule(class);
@@ -822,6 +850,7 @@ impl NamespaceSnapshot {
         if let Some(sid) = key.server_id
             && key.path.starts_with(self.id_scope())
             && let Some(&i) = self.by_server_id.get(&(key.kind, sid))
+            && i != NO_PARENT
             && self.objs[i as usize].is_keyed_by(key)
         {
             return Some(i);
@@ -978,8 +1007,10 @@ impl NamespaceSnapshot {
 /// `lower_case_table_names` like tables; `ObjectKind::name_class`).
 fn group_class(group: KindGroup) -> NameClass {
     match group {
-        KindGroup::Relations | KindGroup::Triggers => NameClass::Table,
+        KindGroup::Relations => NameClass::Table,
+        KindGroup::Triggers => NameClass::Trigger,
         KindGroup::Routines | KindGroup::Procedures => NameClass::Routine,
+        KindGroup::Accounts => NameClass::Account,
         KindGroup::Types | KindGroup::Other => NameClass::Other,
     }
 }

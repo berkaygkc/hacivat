@@ -298,7 +298,7 @@ pub fn table_subtree(
         root,
         Obj::new(ObjectKind::PrimaryKey, pkey.clone())
             .with_server_id(ServerId::Oid(oid + 1))
-            .with_flags(ObjFlags::SERVER_GENERATED_NAME)
+            .add_flags(ObjFlags::SERVER_GENERATED_NAME)
             .with_props(Props::Key(Arc::new(KeyProps {
                 columns: vec![KeyColumn {
                     ordinal: 1,

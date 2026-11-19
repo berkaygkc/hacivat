@@ -326,9 +326,9 @@ fn children_contiguous_in_ordinal_order() {
 }
 
 /// edge 14: a 1,600-column table (PostgreSQL's limit) builds, keeps order and finds its last
-/// column by a scan of contiguous children.
+/// column (one scan of the contiguous children; linearity is by construction, not timed).
 #[test]
-fn a_1600_column_table_builds_and_scans_linearly() {
+fn a_1600_column_table_builds_and_finds_its_last_column() {
     let cols: Vec<String> = (1..=1600).map(|i| format!("c{i}")).collect();
     let cols: Vec<&str> = cols.iter().map(String::as_str).collect();
     let n = ns_pg("db", "public").table_oid("wide", 1, &cols).finish();
@@ -482,7 +482,7 @@ fn inherited_columns_flagged() {
     let mut t = table("child", 2, &["own"]);
     t.add(
         t.root(),
-        col("from_parent", 2).with_flags(ObjFlags::INHERITED),
+        col("from_parent", 2).add_flags(ObjFlags::INHERITED),
     );
     let n = pg_schema("public", vec![t]);
     let child = find_table(&n, "child");
@@ -497,10 +497,10 @@ fn inherited_columns_flagged() {
 /// edge 8: a temp namespace (root flagged `TEMP`) says so; its objects keep their flag.
 #[test]
 fn temp_objects_flagged_temp() {
-    let mut t = Subtree::new(Obj::new(ObjectKind::Schema, "pg_temp_3").with_flags(ObjFlags::TEMP));
+    let mut t = Subtree::new(Obj::new(ObjectKind::Schema, "pg_temp_3").add_flags(ObjFlags::TEMP));
     t.add(
         t.root(),
-        Obj::new(ObjectKind::Table, "scratch").with_flags(ObjFlags::TEMP),
+        Obj::new(ObjectKind::Table, "scratch").add_flags(ObjFlags::TEMP),
     );
     let n = NamespaceSnapshot::build(
         NsKey::schema(["db", "pg_temp_3"]),
@@ -986,4 +986,159 @@ fn snapshots_cross_threads() {
     send_sync::<NamespaceSnapshot>();
     send_sync::<Subtree>();
     send_sync::<ObjectKey>();
+}
+
+fn ns_with(dbms: DbmsKind, key: NsKey, fold: FoldRule, tree: Subtree) -> NamespaceSnapshot {
+    NamespaceSnapshot::build(key, dbms, fold, NsMeta::default(), tree).unwrap()
+}
+
+/// Fix round 1, I2 (MySQL 8.4 §8.2.3: `User` comparisons are case-sensitive): account case
+/// twins are two objects, and a probe differing only by case is `Missing`, never `Found`.
+#[test]
+fn mysql_account_case_twins_are_two_objects() {
+    let mut t = Subtree::new(Obj::new(ObjectKind::Root, ""));
+    t.add(t.root(), Obj::new(ObjectKind::User, "Bob"));
+    t.add(t.root(), Obj::new(ObjectKind::User, "bob"));
+    t.add(t.root(), Obj::new(ObjectKind::Role, "Admins"));
+    for lctn in [0, 1] {
+        let fold = if lctn == 0 {
+            FoldRule::Exact
+        } else {
+            FoldRule::AsciiCaseless
+        };
+        let n = ns_with(DbmsKind::MySql, NsKey::server(), fold, t.clone());
+        let ctx = my_ctx(lctn);
+        let found = |probe: &str| -> Vec<String> {
+            match n.match_named(KindGroup::Accounts, probe, false, &ctx) {
+                Lookup::Found(hits) => hits
+                    .iter()
+                    .map(|&i| n.obj(i).unwrap().name().to_string())
+                    .collect(),
+                other => panic!("{probe}: {other:?}"),
+            }
+        };
+        assert_eq!(found("bob"), ["bob"]);
+        assert_eq!(found("Bob"), ["Bob"]);
+        for probe in ["BOB", "admins"] {
+            assert!(
+                matches!(
+                    n.match_named(KindGroup::Accounts, probe, false, &ctx),
+                    Lookup::Missing(MissingReason::NotFound)
+                ),
+                "{probe}"
+            );
+        }
+        assert_eq!(n.lookup(KindGroup::Other, "bob").len(), 0);
+    }
+}
+
+/// Fix round 1, I3 (MySQL 8.4 §11.2.3: `lower_case_table_names` "does not affect case
+/// sensitivity of trigger identifiers"): exact under 0; under 1 only a byte-exact stored name
+/// is `Found`, and every other probe is `Unknown`.
+#[test]
+fn mysql_trigger_names_exact_under_lctn0_unpinned_above() {
+    let tree = || {
+        let mut t = Subtree::new(Obj::new(ObjectKind::Table, "t"));
+        t.add(t.root(), Obj::new(ObjectKind::Trigger, "Trg"));
+        t
+    };
+    let n0 = ns_mysql("shop", 0).subtree(tree()).finish();
+    let ctx0 = my_ctx(0);
+    assert!(matches!(
+        n0.match_named(KindGroup::Triggers, "Trg", false, &ctx0),
+        Lookup::Found(_)
+    ));
+    assert!(matches!(
+        n0.match_named(KindGroup::Triggers, "trg", false, &ctx0),
+        Lookup::Missing(MissingReason::NotFound)
+    ));
+    let n1 = ns_mysql("shop", 1).subtree(tree()).finish();
+    let ctx1 = my_ctx(1);
+    assert!(matches!(
+        n1.match_named(KindGroup::Triggers, "Trg", false, &ctx1),
+        Lookup::Found(_)
+    ));
+    for probe in ["trg", "TRG", "other"] {
+        assert!(
+            matches!(
+                n1.match_named(KindGroup::Triggers, probe, false, &ctx1),
+                Lookup::Unknown(UnknownReason::ServerDependent)
+            ),
+            "{probe}"
+        );
+    }
+    let t1 = find_table(&n1, "t");
+    assert!(matches!(
+        n1.match_child(t1, ObjectKind::Trigger, "trg", false, &ctx1),
+        Lookup::Unknown(UnknownReason::ServerDependent)
+    ));
+}
+
+/// Fix round 1 (m9): a duplicated `(kind, server id)` is reported, and neither object is found
+/// by that id alone; the exact path still finds each one, checking its id.
+#[test]
+fn duplicate_server_ids_are_reported_not_overwritten() {
+    let n = ns_pg("db", "public")
+        .table_oid("a", 7, &[])
+        .table_oid("b", 7, &[])
+        .table_oid("c", 8, &[])
+        .finish();
+    assert_eq!(n.duplicate_server_ids(), 2);
+    let (ka, kb) = (key_of(&n, "a"), key_of(&n, "b"));
+    assert_eq!(n.find(&ka), Some(find_table(&n, "a")));
+    assert_eq!(n.find(&kb), Some(find_table(&n, "b")));
+    let mut moved = ka.clone();
+    *moved.path.last_mut().unwrap() = Name::from("renamed");
+    assert_eq!(
+        n.find(&moved),
+        None,
+        "an ambiguous id never picks one object"
+    );
+    let mut renamed_c = key_of(&n, "c");
+    *renamed_c.path.last_mut().unwrap() = Name::from("old_c");
+    assert_eq!(
+        n.find(&renamed_c),
+        Some(find_table(&n, "c")),
+        "a unique id still follows a rename"
+    );
+    assert_eq!(pg_schema("public", vec![]).duplicate_server_ids(), 0);
+}
+
+/// Ruling R-W1-2: a column object stays within alg/02's 250-byte target (arena slot, props,
+/// and the props' `Arc` header): the rare fields and the engine extras sit behind pointers.
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn a_column_stays_within_the_memory_target() {
+    let arc_header = 2 * std::mem::size_of::<usize>();
+    let column = std::mem::size_of::<Obj>() + std::mem::size_of::<ColumnProps>() + arc_header;
+    assert!(column <= 250, "{column} bytes per column");
+    assert_eq!(std::mem::size_of::<Option<Arc<ColumnRare>>>(), 8);
+    assert_eq!(std::mem::size_of::<Option<Arc<ColumnExt>>>(), 8);
+    let rare = ColumnProps {
+        rare: Some(Arc::new(ColumnRare {
+            identity: Some(Identity::Always),
+            collation: Some(Arc::from("tr-x-icu")),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    assert_eq!(rare.identity(), Some(Identity::Always));
+    assert_eq!(rare.collation().map(|c| &**c), Some("tr-x-icu"));
+    assert_eq!(rare.generated(), None);
+    assert_eq!(*rare.ext(), ColumnExt::None);
+}
+
+/// Fix round 1 (m5): only an unknown kind carries a raw kind.
+#[test]
+fn object_key_raw_kind_only_on_unknown_kinds() {
+    let path: smallvec::SmallVec<[Name; 4]> =
+        ["db", "public", "x"].into_iter().map(Name::from).collect();
+    let k = ObjectKey::unknown(path, None, Some(Name::from("relkind-q")));
+    assert!(k.is_well_formed());
+    assert_eq!(k.kind, ObjectKind::Unknown);
+    let mut bad = k.clone();
+    bad.kind = ObjectKind::Table;
+    assert!(!bad.is_well_formed());
+    let t = ns_pg("db", "public").table_oid("t", 1, &[]).finish();
+    assert!(key_of(&t, "t").is_well_formed());
 }

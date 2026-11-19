@@ -306,7 +306,7 @@ spike (`d86313b`), adapted to the T1a seam.
   `from_arena` (for Task 11's decoder) refuses a parent after its child, non-contiguous
   children, a root with a parent and an empty arena. A `NodeId` of another subtree is a bad
   layout, never a panic. `INVISIBLE_CHARS` is derived on every build; a NUL name gets
-  `LOSSY_NAME`. `Obj::with_flags` now adds flags instead of replacing them.
+  `LOSSY_NAME`. `Obj::add_flags` adds flags (it never replaces them).
 - **Identity.** `ObjectKey` keeps a structural `Eq`/`Hash`/`Ord`; `same_object` compares the
   server id first. `ObjectKey` gains `raw_kind: Option<Name>` (T1a review m10): an unknown
   kind's raw id survives a serde round trip, so two newer kinds stay two user-data keys. The
@@ -319,23 +319,46 @@ spike (`d86313b`), adapted to the T1a seam.
   PostgreSQL composite types sit in `Relations` (they share `pg_class`). MariaDB sequences
   are tables. SQLite `VirtualTable` (code 14) has columns only.
 - **Identifier keys (`sql_ident::key`).** `match_key` builds keys by these rules:
-  - PostgreSQL: folds unquoted ASCII and cuts at 63 bytes. With a non-UTF-8 or unknown
-    `server_encoding`, unquoted non-ASCII input is `ServerDependent` (rule 3), and so is a
-    quoted non-ASCII name longer than the cut.
-  - MySQL/MariaDB: names of the `lower_case_table_names` classes (database, schema, table)
-    are exact under 0, ASCII-caseless under 1 and 2, and `ServerDependent` for any other value.
-    Every other class is ASCII-caseless. A caseless text with a non-ASCII **cased** letter
-    (`Lowercase`, `Uppercase`, `Lt`) is `ServerDependent`.
-  - SQLite: ASCII-caseless.
+  - PostgreSQL, and the forks that run PostgreSQL's parser (Timescale, Yugabyte YSQL): folds
+    unquoted ASCII and cuts at 63 bytes. With a non-UTF-8 or unknown `server_encoding`,
+    unquoted non-ASCII input is `ServerDependent` (rule 3), and so is a quoted non-ASCII name
+    that the cut might reach in the server's encoding, counted at 4 bytes per non-ASCII
+    character (the longest of any server encoding, `EUC_TW` and `MULE_INTERNAL`).
+  - Redshift, CockroachDB and unnamed PostgreSQL forks: `ServerDependent` (fix round 1, I1).
+    AWS "Names and identifiers" says Redshift folds ASCII letters of delimited identifiers to
+    lowercase and allows 127 bytes; CockroachDB lowercases unquoted names with Unicode rules
+    (Inferred from its `lexbase.NormalizeName`). `sql_ident::fold`/`ident_eq` (M3) still treat
+    every PG-wire fork like PostgreSQL; that is M3's code, carried to the next owner.
+  - MySQL/MariaDB:
+    - database, schema and table (view) names are exact under `lower_case_table_names = 0`,
+      ASCII-caseless under 1 and 2, and `ServerDependent` for any other value;
+    - trigger names (`NameClass::Trigger`) are exact under 0 and `ServerDependent` under 1 and
+      2, where only a byte-exact stored name is `Found` (fix round 1, I3);
+    - account names, users and roles (`NameClass::Account`, `KindGroup::Accounts`), are
+      always exact (fix round 1, I2): MySQL 8.4 §8.2.3 says comparisons of `User` values are
+      case-sensitive, and roles are accounts;
+    - every other class is ASCII-caseless, and a caseless text with a non-ASCII **cased**
+      letter (`Lowercase`, `Uppercase`, `Lt`) is `ServerDependent`.
+  - SQLite: ASCII-caseless (accounts included; SQLite has none).
   - Other dialects: always `ServerDependent`.
 
   `FoldRule::for_names` gives the stored rule, and `FoldRule::key` keys a stored name; a test
   shows the two agree with `match_key` on every text it keys. No Unicode or locale case
-  mapping runs anywhere.
-- **Deviations from the plan text, recorded.**
-  - MySQL/MariaDB **triggers** use the table class (`lower_case_table_names`), not
-    ASCII-caseless. The vendor manuals name "database, table, and trigger names" as the ones
-    that depend on the file system; MariaDB says the same.
+  mapping runs anywhere. The reviewer's whole-Unicode test
+  (`hacivat-meta/tests/review_hostile.rs`, ignored by default, about 50 s in debug) gives the
+  same key digest under `LC_ALL=C` and `LC_ALL=tr_TR.UTF-8`.
+- **MySQL/MariaDB trigger names, the sources.**
+  - MySQL 8.4 §11.2.3: "the case sensitivity of the underlying operating system plays a part
+    in the case sensitivity of database, table, and trigger names".
+  - The same section, on `lower_case_table_names`: "This variable does not affect case
+    sensitivity of trigger identifiers."
+  - MariaDB "Identifier Case-sensitivity": "Database, table, table aliases, and trigger names
+    are affected by the system's case sensitivity, while index, column, column aliases, stored
+    routine, and event names are never case sensitive."
+  - Hence: exact on the M4 matrix (Linux, `lower_case_table_names = 0`); under 1 and 2 the
+    file system decides, which Hacivat does not know, so the rule stays unpinned (Inferred).
+    The plan's "triggers ASCII-caseless" is superseded.
+- **Deviations from the plan text, recorded** (the review accepted 2–5):
   - `ServerDependent` covers every caseless MySQL class (routines, events, indexes as well as
     columns). In addition, a namespace whose stored names in a class contain a non-ASCII cased
     letter answers `Unknown(ServerDependent)` instead of `Missing` for any miss: the server
@@ -343,10 +366,21 @@ spike (`d86313b`), adapted to the T1a seam.
   - Only where the server compares case-insensitively (MySQL/MariaDB) does an exact stored
     name turn a `ServerDependent` probe into `Found`. For PostgreSQL the server may fold the
     probe itself, so the answer is `Unknown`.
-  - A probe whose `IdentCtx` disagrees with the namespace's stored rule (another engine, or
-    another `lower_case_table_names`) is `Unknown`.
-- **Memory (recorded, not gating).** The 160k-column fixture measures 336 B per column (a
-  104 B `Obj`, a 216 B `ColumnProps` and a 16 B `Arc` header) and 414 B per table. The alg/02
-  targets are 250 B and 600 B. The T1a field lists (`ColumnProps` grew from the spike's
-  144 B) and `StateMark::MyTable` (`Obj` grew from 96 B) account for the gap. The gate
-  decides; the spike's open question 2 lists the options.
+  - A probe whose `IdentCtx` disagrees with the namespace (another engine family, another
+    `lower_case_table_names`, or an unpinned fork) is `Unknown`.
+- **Kind schema, fix round 1.** MySQL/MariaDB views take no `Trigger` (or `Rule`) children.
+  PostgreSQL domain constraints and defaults stay in `TypeBody::Domain` (`checks`,
+  `default_raw`, `not_null_constraint`): alg/02's matrix lists no domain child kinds, so
+  `Domain` has none; T16 asks here if it needs them as objects.
+- **Arena, fix round 1.** A duplicated `(kind, server id)` in one namespace is counted
+  (`NamespaceSnapshot::duplicate_server_ids`) and finds nothing by id; each object is still
+  found by its path, which checks the id. `Obj::with_flags` is renamed `Obj::add_flags` (it
+  adds). `ObjectKey::unknown` builds a key with a raw kind; `ObjectKey::is_well_formed`
+  (asserted on serialization in debug builds) says a known kind carries none.
+- **Memory (ruling R-W1-2, fix round 1).** `ColumnProps.ext` became `Option<Arc<ColumnExt>>`,
+  and the rare fields (the named `NOT NULL` constraint, identity, generated, collation, enum
+  labels) moved into one `rare: Option<Arc<ColumnRare>>`, before Task 11's codec freezes the
+  cache format. `ColumnProps` went from 216 B to 104 B; the 160k-column fixture measures
+  **224 B per column** (a 104 B `Obj`, 104 B `ColumnProps`, a 16 B `Arc` header) and 414 B per
+  table, within alg/02's 250 B and 600 B. `model_perf` asserts both, and
+  `a_column_stays_within_the_memory_target` checks the sizes on every 64-bit test run.

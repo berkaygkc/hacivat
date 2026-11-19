@@ -184,6 +184,15 @@ fn kind_schema_rejects_disallowed_child() {
     assert!(Schema.allows_child(VirtualTable, LITE));
     assert!(VirtualTable.allows_child(Column, LITE));
     assert!(Table.allows_child(Trigger, LITE));
+    // Views have triggers on PostgreSQL (INSTEAD OF) and SQLite, never on MySQL/MariaDB.
+    assert!(View.allows_child(Trigger, PG));
+    assert!(View.allows_child(Trigger, LITE));
+    assert!(!View.allows_child(Trigger, MY));
+    assert!(!View.allows_child(Trigger, MARIA));
+    assert!(!View.allows_child(Rule, MY));
+    // PostgreSQL domain constraints and defaults live in `TypeBody::Domain`, not as children
+    // (alg/02 lists no domain child kinds).
+    assert!(!Domain.allows_child(Check, PG));
     assert!(!Schema.allows_child(VirtualTable, PG));
     // FDW chain (PostgreSQL).
     assert!(ForeignDataWrapper.allows_child(ForeignServer, PG));
@@ -233,11 +242,39 @@ fn name_classes_follow_the_server_rules() {
         assert_eq!(Schema.name_class(d), NameClass::Schema, "{d:?}");
         assert_eq!(Index.name_class(d), NameClass::Other, "{d:?}");
     }
-    assert_eq!(Trigger.name_class(MY), NameClass::Table);
-    assert_eq!(Trigger.name_class(MARIA), NameClass::Table);
-    assert_eq!(Trigger.name_class(PG), NameClass::Other);
+    // Triggers have their own class (MySQL: by the file system, not by
+    // `lower_case_table_names`); accounts are case-sensitive on MySQL (fix round 1, I2/I3).
+    for d in M4 {
+        assert_eq!(Trigger.name_class(d), NameClass::Trigger, "{d:?}");
+    }
+    for d in [PG, MY, MARIA] {
+        for k in [Role, User, Login] {
+            assert_eq!(k.name_class(d), NameClass::Account, "{k:?} {d:?}");
+        }
+    }
+    assert_eq!(
+        Sequence.name_class(MARIA),
+        NameClass::Table,
+        "a MariaDB sequence is a table"
+    );
     assert_eq!(Event.name_class(MY), NameClass::Other);
     assert_eq!(Database.name_class(PG), NameClass::Database);
+}
+
+/// Account names have their own name space (fix round 1, I2): MySQL/MariaDB compare them
+/// case-sensitively, unlike their events and other names.
+#[test]
+fn accounts_have_their_own_group() {
+    for d in [PG, MY, MARIA] {
+        for k in [Role, User, Login] {
+            assert_eq!(k.group(d), Some(KindGroup::Accounts), "{k:?} {d:?}");
+        }
+        assert_eq!(Tablespace.group(d), Some(KindGroup::Other));
+    }
+    assert_eq!(KindGroup::ALL.len(), KindGroup::COUNT);
+    for (i, g) in KindGroup::ALL.iter().enumerate() {
+        assert_eq!(g.index(), i);
+    }
 }
 
 /// The spike's code table check, kept with the kinds (T1a's seam test pins the full table).

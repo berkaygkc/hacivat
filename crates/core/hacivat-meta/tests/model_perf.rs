@@ -1,6 +1,7 @@
 //! HV-MODEL-01 memory (alg/02 "Complexity / performance notes": ≤ 250 bytes per column object
-//! and ≤ 600 bytes per table object, excluding facets; Inferred). Recorded, not gating: the gate
-//! decides memory (M4 Task 3 Step 4).
+//! and ≤ 600 bytes per table object, excluding facets; Inferred). Recorded, and asserted since
+//! ruling R-W1-2 (T3 fix round 1); the gate still decides memory (M4 Task 3 Step 4). The
+//! always-on `size_of` check is `model.rs` `a_column_stays_within_the_memory_target`.
 //!
 //! `HACIVAT_PERF=1 cargo test --release -p hacivat-meta --test model_perf -- --ignored
 //! --nocapture`. The count is structural (no allocator hook: `unsafe` is confined to the UI
@@ -82,4 +83,7 @@ fn memory_per_column_and_table_recorded() {
         "  unshared column text, upper bound: {:.1} B per column",
         column_text as f64 / columns as f64
     );
+    // Ruling R-W1-2 (T3 fix round 1): rare fields and engine extras behind pointers.
+    assert!(column <= 250, "{column} B per column");
+    assert!(table <= 600, "{table} B per table");
 }

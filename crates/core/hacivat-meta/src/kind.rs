@@ -146,11 +146,14 @@ pub enum KindGroup {
     Triggers,
     /// Every other schema-scoped kind (collations, operators, events, extensions, …).
     Other,
+    /// Account names: roles, users, logins (MySQL/MariaDB compare them case-sensitively,
+    /// unlike their other names; T3 fix round 1, I2).
+    Accounts,
 }
 
 impl KindGroup {
     /// The number of groups.
-    pub const COUNT: usize = 6;
+    pub const COUNT: usize = 7;
 
     /// Every group, in [`KindGroup::index`] order.
     pub const ALL: [KindGroup; KindGroup::COUNT] = [
@@ -160,6 +163,7 @@ impl KindGroup {
         KindGroup::Types,
         KindGroup::Triggers,
         KindGroup::Other,
+        KindGroup::Accounts,
     ];
 
     /// A dense index in `0..COUNT`.
@@ -171,6 +175,7 @@ impl KindGroup {
             KindGroup::Types => 3,
             KindGroup::Triggers => 4,
             KindGroup::Other => 5,
+            KindGroup::Accounts => 6,
         }
     }
 }
@@ -249,21 +254,21 @@ impl ObjectKind {
             }
             // MySQL trigger names are unique per schema; PostgreSQL's per table.
             Trigger if my => Some(KindGroup::Triggers),
+            Role | User | Login => Some(KindGroup::Accounts),
             Synonym | Extension | Collation | Operator | OperatorClass | OperatorFamily
             | Language | AccessMethod | ForeignDataWrapper | ForeignServer | EventTrigger
             | Event | Dictionary | Package | PackageBody | DbLink | Collection | MongoView
-            | TimeSeries | Role | User | Login | Tablespace | Cast | VirtualTableModule => {
-                Some(KindGroup::Other)
-            }
+            | TimeSeries | Tablespace | Cast | VirtualTableModule => Some(KindGroup::Other),
             _ => None,
         }
     }
 
     /// The name class `sql_ident::key::match_key` matches this kind's names under in `dbms`
-    /// (HV-INTRO-14). MySQL/MariaDB views, triggers and (MariaDB) sequences follow
-    /// `lower_case_table_names` like tables: the vendor manuals name "database, table, and
-    /// trigger names" as the file-system-dependent ones, and stored routine, event and index
-    /// names as case-insensitive everywhere.
+    /// (HV-INTRO-14). On MySQL/MariaDB, views and (MariaDB) sequences are tables; trigger names
+    /// follow the file system, not `lower_case_table_names` (MySQL 8.4 §11.2.3: the variable
+    /// "does not affect case sensitivity of trigger identifiers"); account names are always
+    /// case-sensitive (§8.2.3); stored routine, event and index names are case-insensitive
+    /// everywhere.
     pub fn name_class(self, dbms: DbmsKind) -> NameClass {
         use ObjectKind::*;
         let my = mysql_family(dbms);
@@ -271,7 +276,9 @@ impl ObjectKind {
             Database => NameClass::Database,
             Schema => NameClass::Schema,
             Table | View | MaterializedView | ForeignTable | VirtualTable => NameClass::Table,
-            Trigger | Sequence if my => NameClass::Table,
+            Sequence if my => NameClass::Table,
+            Trigger => NameClass::Trigger,
+            Role | User | Login => NameClass::Account,
             Column => NameClass::Column,
             Routine | Procedure | Aggregate => NameClass::Routine,
             _ => NameClass::Other,
@@ -481,6 +488,8 @@ impl ObjectKind {
                     | Projection
             ),
             VirtualTable => matches!(child, Column),
+            // MySQL/MariaDB have no view triggers (and no rules).
+            View if mysql_family(dbms) => matches!(child, Column),
             View => matches!(child, Column | Trigger | Rule),
             MaterializedView => matches!(child, Column | Index),
             Partition => matches!(child, Subpartition),

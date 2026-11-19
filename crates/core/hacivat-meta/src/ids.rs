@@ -157,6 +157,29 @@ impl ObjectKey {
     pub fn name(&self) -> &str {
         self.path.last().map_or("", |n| n)
     }
+
+    /// The key of an [`ObjectKind::Unknown`] object whose raw kind is `raw_kind`: the only way
+    /// to build a key that carries a raw kind.
+    pub fn unknown(
+        path: SmallVec<[Name; 4]>,
+        server_id: Option<ServerId>,
+        raw_kind: Option<Name>,
+    ) -> Self {
+        ObjectKey {
+            kind: ObjectKind::Unknown,
+            path,
+            server_id,
+            overload_sig: None,
+            raw_kind,
+        }
+    }
+
+    /// Whether the key is in a valid state: `raw_kind` is `None` for every known kind (a known
+    /// kind with a raw kind would lose it through serde and change its structural identity).
+    /// Serialization asserts it in debug builds.
+    pub fn is_well_formed(&self) -> bool {
+        self.raw_kind.is_none() || self.kind == ObjectKind::Unknown
+    }
 }
 
 /// A reference to another object (FK target, partition parent, sequence owner, trigger
@@ -257,6 +280,12 @@ impl From<ObjectKeyRepr> for ObjectKey {
 
 impl From<ObjectKey> for ObjectKeyRepr {
     fn from(k: ObjectKey) -> Self {
+        debug_assert!(
+            k.is_well_formed(),
+            "a known kind carries no raw kind: {:?} {:?}",
+            k.kind,
+            k.raw_kind
+        );
         // The raw id stands in for an unknown kind (a newer build reads its own id back); a raw
         // text that collides with a known id goes in `raw_kind` beside `"unknown"`. A known kind
         // always writes its own id.

@@ -7,16 +7,23 @@
 //! server's own rule, never the process locale (ASCII-only casing, INV-3).
 //!
 //! The rules (HV-INTRO-14 rule 4, R-M4-41; M4 Task 3):
-//! - **PostgreSQL** and its wire forks: unquoted ASCII letters are lowered and the text is cut to
-//!   63 bytes ([`crate::fold`]); non-ASCII letters are never folded on a UTF-8 server. On another
-//!   (or an unknown) server encoding the server lowers high-bit letters by its own locale, so
-//!   unquoted non-ASCII input is [`ServerDependent`] (rule 3), and so is a quoted non-ASCII text
-//!   longer than the cut (the cut counts server-encoding bytes).
-//! - **MySQL/MariaDB**: database and table names (views and triggers too, which the manuals group
-//!   with tables) compare exactly under `lower_case_table_names = 0` and ASCII-caselessly under 1
-//!   and 2; every other name compares ASCII-caselessly. A caseless text holding a non-ASCII
-//!   **cased** letter is [`ServerDependent`]: the server's Unicode-aware comparison is not pinned
-//!   until Task 17's probe (`// ## m4-t17-mysql-fold`). Backticks never change the comparison.
+//! - **PostgreSQL**, and the forks that run PostgreSQL's own parser (Timescale, an extension;
+//!   Yugabyte YSQL): unquoted ASCII letters are lowered and the text is cut to 63 bytes
+//!   ([`crate::fold`]); non-ASCII letters are never folded on a UTF-8 server. On another (or an
+//!   unknown) server encoding the server lowers high-bit letters by its own locale, so unquoted
+//!   non-ASCII input is [`ServerDependent`] (rule 3), and so is a quoted non-ASCII text that the
+//!   63-byte cut might reach in the server's encoding (counting 4 bytes per non-ASCII
+//!   character, the longest of any server encoding: `EUC_TW`, `MULE_INTERNAL`). Redshift (it
+//!   folds quoted ASCII letters too and allows 127 bytes), CockroachDB (Unicode lowercasing of
+//!   unquoted names) and unnamed forks have no pinned rule: [`ServerDependent`].
+//! - **MySQL/MariaDB**: database and table names (and views) compare exactly under
+//!   `lower_case_table_names = 0` and ASCII-caselessly under 1 and 2. Trigger names are exact
+//!   under 0 and unpinned above it: the manual says the variable "does not affect case
+//!   sensitivity of trigger identifiers", which follow the file system. Account names (users,
+//!   roles) are always exact (MySQL 8.4 §8.2.3: `User` comparisons are case-sensitive). Every
+//!   other name compares ASCII-caselessly, and a caseless text holding a non-ASCII **cased**
+//!   letter is [`ServerDependent`]: the server's Unicode-aware comparison is not pinned until
+//!   Task 17's probe (`// ## m4-t17-mysql-fold`). Backticks never change the comparison.
 //! - **SQLite**: ASCII-caseless, never more (ver/01 `#sqlite-case`).
 //! - Every other dialect: no rule is pinned, so every text is [`ServerDependent`].
 //!
@@ -28,6 +35,7 @@ use crate::fold::{PG_MAX_IDENT_BYTES, fold};
 
 /// The dialect a key belongs to (re-exported: [`IdentCtx`] names it).
 pub use sql_dialect::DialectId;
+use sql_dialect::PgWireFlavor;
 
 /// A lookup key: a name folded by its dialect's rule for its [`NameClass`]. Built only by
 /// [`match_key`] and [`FoldRule::key`]; never displayed, never persisted.
@@ -71,14 +79,20 @@ impl IdentCtx {
 }
 
 /// The class of the name being matched: MySQL folds database and table names by
-/// `lower_case_table_names` and everything else ASCII-caselessly.
+/// `lower_case_table_names`, keeps triggers and accounts exact, and folds everything else
+/// ASCII-caselessly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NameClass {
     Database,
     Schema,
+    /// Tables and views (and MariaDB sequences, which are tables).
     Table,
     Column,
     Routine,
+    /// Trigger names (MySQL/MariaDB: by the file system, not by `lower_case_table_names`).
+    Trigger,
+    /// Account names: users and roles (MySQL/MariaDB: always case-sensitive).
+    Account,
     Other,
 }
 
@@ -92,26 +106,33 @@ pub enum FoldRule {
 }
 
 impl FoldRule {
-    /// The stored rule of catalog names of `class` (R-M4-41): PostgreSQL exact (catalog names
-    /// are already folded); MySQL/MariaDB database and table names exact under
-    /// `lower_case_table_names = 0` and ASCII-caseless under 1 and 2, every other class
-    /// ASCII-caseless; SQLite ASCII-caseless. `None` where no rule is pinned (another dialect, an
-    /// unknown `lower_case_table_names`).
+    /// The stored rule of catalog names of `class` (R-M4-41): PostgreSQL (and the forks with its
+    /// parser) exact, catalog names being already folded; MySQL/MariaDB database and table
+    /// names exact under `lower_case_table_names = 0` and ASCII-caseless under 1 and 2, trigger
+    /// names exact under 0, account names always exact, every other class ASCII-caseless;
+    /// SQLite ASCII-caseless. `None` where no rule is pinned (another dialect or fork, an unknown
+    /// `lower_case_table_names`, MySQL trigger names under 1 or 2).
     pub fn for_names(d: DialectId, ctx: &IdentCtx, class: NameClass) -> Option<FoldRule> {
         match d {
-            DialectId::Postgres | DialectId::PgWire(_) => Some(FoldRule::Exact),
+            _ if has_pg_rule(d) => Some(FoldRule::Exact),
             DialectId::Sqlite => Some(FoldRule::AsciiCaseless),
-            DialectId::MySql | DialectId::MariaDb => {
-                if !follows_lctn(class) {
-                    return Some(FoldRule::AsciiCaseless);
+            DialectId::MySql | DialectId::MariaDb => match (class, ctx.lower_case_table_names) {
+                (NameClass::Account, _) => Some(FoldRule::Exact),
+                (NameClass::Trigger, 0) => Some(FoldRule::Exact),
+                (NameClass::Trigger, _) => None,
+                (NameClass::Database | NameClass::Schema | NameClass::Table, 0) => {
+                    Some(FoldRule::Exact)
                 }
-                match ctx.lower_case_table_names {
-                    0 => Some(FoldRule::Exact),
-                    1 | 2 => Some(FoldRule::AsciiCaseless),
-                    _ => None,
+                (NameClass::Database | NameClass::Schema | NameClass::Table, 1 | 2) => {
+                    Some(FoldRule::AsciiCaseless)
                 }
-            }
-            // Generic, SQL Server, ClickHouse, Oracle and any later dialect: not pinned in M4.
+                (NameClass::Database | NameClass::Schema | NameClass::Table, _) => None,
+                (NameClass::Column | NameClass::Routine | NameClass::Other, _) => {
+                    Some(FoldRule::AsciiCaseless)
+                }
+            },
+            // Redshift, CockroachDB, other PostgreSQL forks, Generic, SQL Server, ClickHouse,
+            // Oracle and any later dialect: not pinned in M4.
             _ => None,
         }
     }
@@ -187,11 +208,11 @@ pub fn match_key(
 ) -> Result<IdentKey, ServerDependent> {
     let rule = FoldRule::for_names(d, ctx, class).ok_or(ServerDependent)?;
     match d {
-        DialectId::Postgres | DialectId::PgWire(_) => {
+        _ if has_pg_rule(d) => {
             if !text.is_ascii() && !is_utf8_encoding(ctx.encoding.as_deref()) {
                 // The server lowers unquoted high-bit letters by its own locale, and cuts at 63
                 // bytes of its own encoding.
-                if !quoted || text.len() > PG_MAX_IDENT_BYTES {
+                if !quoted || server_len_bound(text) > PG_MAX_IDENT_BYTES {
                     return Err(ServerDependent);
                 }
             }
@@ -207,14 +228,23 @@ pub fn match_key(
     }
 }
 
-/// MySQL/MariaDB name classes whose comparison follows `lower_case_table_names`: databases
-/// (schemas) and tables. Callers pass [`NameClass::Table`] for views and triggers too (the
-/// manuals: "database, table, and trigger names" depend on the file system's case rule).
-fn follows_lctn(class: NameClass) -> bool {
+/// Whether `d` parses identifiers with PostgreSQL's own rule: PostgreSQL itself, Timescale (an
+/// extension inside PostgreSQL) and Yugabyte YSQL (PostgreSQL's parser). Redshift folds quoted
+/// ASCII letters too and allows 127 bytes (AWS "Names and identifiers"); CockroachDB lowercases
+/// unquoted names with Unicode rules (Inferred from its `lexbase.NormalizeName`); an unnamed
+/// fork is unknown. Those have no pinned rule.
+fn has_pg_rule(d: DialectId) -> bool {
     matches!(
-        class,
-        NameClass::Database | NameClass::Schema | NameClass::Table
+        d,
+        DialectId::Postgres | DialectId::PgWire(PgWireFlavor::Timescale | PgWireFlavor::Yugabyte)
     )
+}
+
+/// An upper bound of `text`'s length in a PostgreSQL server encoding: one byte per ASCII
+/// character, four per other character (the longest character of any server encoding:
+/// `EUC_TW` and `MULE_INTERNAL`). At or under the 63-byte cut, no encoding can cut the name.
+fn server_len_bound(text: &str) -> usize {
+    text.chars().map(|c| if c.is_ascii() { 1 } else { 4 }).sum()
 }
 
 /// Whether a PostgreSQL `server_encoding` is UTF-8 (`UTF8`, also accepted as `UTF-8`). An
