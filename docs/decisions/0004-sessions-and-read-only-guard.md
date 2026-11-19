@@ -2792,3 +2792,133 @@ M4 Task 1c (W0). Seams only; every body is a fail-closed stub until its filling 
     checked from that account's side (`SHOW GRANTS` for the current user needs no privilege).
   - Tests: `crates/core/hacivat-driver-mysql/tests/docker_m4_fixtures.rs` (CI's fresh stack;
     locally after C-2).
+
+## m4-t05 — metadata sessions
+
+M4 Task 5 (W1; R-M4-7, R-M4-29, R-M4-38, R-M4-46, U-6(e)). The bodies of T1c's
+`hacivat_session::meta` seam. Security-sensitive; two independent reviews.
+
+- **Three ways to read.** A `MetaConn` reads on its own connection, on the user's idle default
+  session, or on a joined job session. `SessionManager::meta_conn` picks the way:
+  - PostgreSQL, MySQL and MariaDB in multiple-session mode, and SQLite files, get their own
+    connection.
+  - Single-session profiles, SQLite `:memory:` and SQLite's `temp` schema
+    (`MetaConnSpec.database == Some("temp")`, alg/02 HV-INTRO-08 step 4) read on the user's
+    session. A separate connection would see another server session, another in-memory
+    database or another `temp`.
+  - Any other engine is `Unavailable`, and so is a spec that names another profile.
+- **The lease of an own connection.**
+  1. A token the next `close_all` cancels, taken first.
+  2. A slot of the per-database cap (`MetaPools`: 1 by default, `set_meta_pool_size` up to
+     `META_POOL_MAX` = 3).
+  3. A budget permit at `Priority::Introspection` through the manager's gate, so `close_all`
+     ends the wait. SQLite's reader takes none: it is a separate read-only reader and does not
+     count against SQLite's budget of 1 (U-6(e)).
+  4. A headless `Purpose::Probe` connect for `Department::Introspection` with
+     `application_name = "Hacivat (metadata)"` and the spec's database. The connect is
+     read-only and goes through the manager's overlay. It is never dropped half-way.
+
+  A watcher task closes the connection when the `MetaConn` drops or the profile disconnects,
+  and only then gives back the permit and the slot. A connection opened after the token was
+  cancelled is closed at once (`Unavailable`). The pool has no idle parking: a `MetaConn` holds
+  its slot for its lifetime, so the engine (Task 15) drops it between tasks.
+- **Named exception in `session/pool.rs` (block `// ## m4-t05-meta`).**
+  - `connect_live` became a wrapper of `connect_live_as`, which applies a profile adjustment
+    before the connect. `same_destination` ignores the database and `application_name`, so the
+    overlay's secrets still apply.
+  - New `pub(crate)` accessors: `meta_runtime`, `meta_profile`, `meta_manager`, `meta_pools`,
+    `meta_single`, `meta_closed_token`, `meta_permit`, `meta_connect`, `meta_driver`.
+  - One new field, `meta: MetaPools`.
+- **Server enforcement per engine.** The set-up runs at connect and after every reconnect.
+  - PostgreSQL: `SET statement_timeout = <ms>`; the read-only connect already sets
+    `default_transaction_read_only`. A snapshot is `BEGIN ISOLATION LEVEL REPEATABLE READ
+    READ ONLY`, then `SET LOCAL search_path = pg_catalog, pg_temp` (R-M4-46).
+  - MySQL: `SET SESSION TRANSACTION READ ONLY`, `SET time_zone = '+00:00'`,
+    `SET SESSION max_execution_time = <ms>` (SELECTs only).
+  - MariaDB: the same, with `SET SESSION max_statement_time = <s.mmm>`.
+  - MySQL and MariaDB, before every snapshot: the session's read-only variable must read `1`,
+    else `ReadOnlyNotEnforced` and nothing starts. Then `START TRANSACTION WITH CONSISTENT
+    SNAPSHOT, READ ONLY`. The variable is `@@session.transaction_read_only`; MariaDB before 11.1
+    has only `@@session.tx_read_only`. MariaDB documents `transaction_read_only` as "Introduced:
+    MariaDB 11.1", renamed from `tx_read_only`. The gate reads the version the server reported
+    at connect.
+  - No `group_concat_max_len`.
+  - SQLite: the main file is opened `SQLITE_OPEN_READ_ONLY` (the flag form of `mode=ro`)
+    straight through the registered driver, with `DriverConnect.read_only = false`. So there is
+    no user-facing authorizer (R-M4-38), and `BEGIN` and `pragma_table_list` work. A snapshot is
+    a deferred `BEGIN`. `MetaConn::attach_read_only(schema, file)` runs `ATTACH DATABASE ? AS ?`
+    with binds, outside a snapshot. SQLite opens an attached file with the main file's flags,
+    so it is read-only too; the driver does not set `SQLITE_OPEN_URI`, so a `file:…?mode=rw`
+    name is a plain path. Tested: `CREATE TABLE aux.u` and `INSERT INTO aux.t` answer
+    `SQLITE_READONLY`.
+  - Every `BEGIN` must leave the connection `InTx`, and every `COMMIT` must leave it `Idle`;
+    otherwise `ReadOnlyNotEnforced`, and the connection is dropped.
+- **Reads.**
+  - A read is one typed query with binds (`Protocol::Extended`, not suspendable, the cell cap
+    off). One result set is kept; the extended protocol and the SQLite driver refuse a second
+    statement.
+  - Values come back as text: text, JSON and XML as sent; bytes as UTF-8 when they are; any
+    other value as `valfmt::raw_text` writes it. A cut value is `Unavailable` (it cannot happen
+    with the cap off).
+  - Errors map to:
+    - `ConnectionLost`: an I/O, protocol, TLS or timeout error, or a server error that ends the
+      connection (`recovery::connection_ending`);
+    - `Timeout`: PostgreSQL `57014` (a metadata connection is never cancelled otherwise),
+      MySQL 3024, MariaDB 1969;
+    - `Server` with the server's message: any other server error.
+  - A lost connection is dropped. Nothing is retried inside a snapshot. The next
+    `begin_snapshot` connects again and runs the set-up and the MySQL assertion again.
+  - A snapshot dropped without a commit is rolled back before the next one. So is a begin that
+    was cut short (the driver reports a transaction). A read whose future was dropped
+    mid-statement discards the connection.
+- **The user's session** (single-session profiles, SQLite `:memory:` and `temp`).
+  - Acquisition waits while the default session runs a request. It answers `Busy` while the
+    session holds a transaction or a cursor (alg/02 HV-INTRO-01 edge 10), and `Unavailable`
+    when there is no default session.
+  - Every read checks again before it runs: the session must be idle, outside a transaction,
+    with no cursor.
+  - A read runs as a one-unit `Request::Run` through the session's queue. It has its own
+    observer and result store (`ObserverRef`), so nothing reaches the output log or the history.
+  - After the read, the transaction state is checked again. A request queued before the read
+    may have opened a transaction; then the rows are dropped and the answer is `Busy`.
+  - Residual: such a request can open a transaction just before a queued read runs, so the read
+    can run inside that transaction (the after-check reports it). The read is allowlisted text;
+    on a read-only profile it also passes the session's guard.
+- **Joined connections (R-M4-29).**
+  - `MetaConn::join(&SessionHandle)` accepts only a usable `Job(_, DdlApply | DriftCheck)`
+    session inside a transaction (`TxStatus::InTx`). A job has no user, so its transaction is
+    Hacivat's.
+  - It refuses `Console`, `Editor`, `Introspection`, `Service`, `Job(Export | Import)` and a job
+    outside a transaction with `NotJoinable`.
+  - The SQLite writer under an M7 apply has no seam yet, so it is refused too. M7 adds it.
+  - `begin_snapshot` and `commit` send nothing; they only check that the job is still inside
+    its transaction.
+  - `rows` refuses a query that is not `joinable` (`NotJoinable`), then applies the allowlist
+    below (`RefusedText`), all before anything is sent.
+  - A joined `MetaConn` reports `DbmsKind::Unknown`: a `SessionHandle` does not carry its
+    engine, and the caller (Task 15b) knows the profile's.
+- **The read allowlist (`meta::check_read_text`).** It is the carries' primary guard on the two
+  ways where the server enforces nothing; the check-deps token rule is defence in depth (R-W0-2).
+  A text is accepted only when all of these hold:
+  - it is exactly one statement, with no `;` but one at the very end;
+  - its first keyword after `--` and `/* */` comments is `SELECT`, `WITH`, `SHOW`, `TABLE` or
+    `VALUES`;
+  - it has no MySQL executable comment (`/*!`, `/*M!`) anywhere;
+  - no block comment before that keyword is nested (PostgreSQL nests block comments and MySQL
+    does not, so either reading could hide a keyword) or unterminated;
+  - no `INSERT`, `UPDATE`, `DELETE`, `MERGE` or `INTO` word appears anywhere, even in a literal.
+    This blocks a data-modifying `WITH`, `SELECT … INTO`, `FOR UPDATE` and `INTO OUTFILE`;
+    joinable sections bind such literals instead.
+
+  A denylist would miss PostgreSQL `END`/`ABORT`, MySQL `XA` and `PREPARE TRANSACTION`. SQLite
+  `PRAGMA` statements are refused here, so `temp` and `:memory:` sections use the table-valued
+  `pragma_*` forms.
+- **`MetaConn::offline`** stays inert: `Via::Offline` holds no connection, and every read,
+  snapshot and attach answers `Unavailable`.
+- **Tests.**
+  - `crates/core/hacivat-session/tests/meta_conn.rs`: fakes, plus SQLite on real files.
+  - `crates/core/hacivat-session/tests/docker_meta_conn.rs`: `#[ignore = "docker"]`, run on
+    CI's fresh stack. It covers no XID (`#pg-canary`), DML and DDL refused per engine, and the
+    MySQL/MariaDB read-only session restored after a reconnect.
+  - The MariaDB DDL code per server comes from that run (`mariadb_meta_session_refuses_ddl`
+    prints it); ver/01 never ran it on MariaDB.
