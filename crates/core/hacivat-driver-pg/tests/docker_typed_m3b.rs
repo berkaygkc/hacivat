@@ -481,3 +481,93 @@ async fn stop_during_run_as_one_never_runs_the_rest() {
         assert_eq!(sets[0].rows, vec![vec![Value::Int(3)]], "{}", t.id);
     }
 }
+
+// ## m4-pgcancel
+
+/// Drops table `name` on `t` when it goes, also on panic, over a connection of its own (the
+/// test's may be mid-statement). Needs the multi-thread runtime: it blocks on a scoped thread.
+struct DropTable {
+    t: DockerTarget,
+    name: String,
+}
+
+impl Drop for DropTable {
+    fn drop(&mut self) {
+        let t = self.t.clone();
+        let sql = format!("DROP TABLE IF EXISTS {}", self.name);
+        let rt = tokio::runtime::Handle::current();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                rt.block_on(async {
+                    if let Ok(mut c) = connect_conn(request(&t)).await {
+                        let _ = c.batch(&sql).await;
+                        Box::new(c).close().await;
+                    }
+                });
+            });
+        });
+    }
+}
+
+/// [`stop_during_sleep`] whose Run as one would delete from `table`.
+async fn stop_during_sleep_on(t: &DockerTarget, c: &mut PgConn, table: &str) {
+    let sql = format!(
+        "DO $$ BEGIN RAISE NOTICE 'hv sleeping'; PERFORM pg_sleep(30); END $$; \
+         DELETE FROM {table}"
+    );
+    let mut s = spec(&sql, &[]);
+    s.protocol = Protocol::Simple;
+    s.max_result_sets = 100;
+    c.query(s)
+        .await
+        .unwrap_or_else(|e| panic!("{}: {:?}", t.id, e.kind));
+    match c.next_event().await {
+        Ok(QueryEvent::Notice(n)) if &*n.text == "hv sleeping" => {}
+        other => panic!("{}: {other:?}", t.id),
+    }
+    let e = c.close_query(CloseHow::Now).await.unwrap_err();
+    assert_eq!(sqlstate(&e), Some("57014"), "{}: {e:?}", t.id);
+    assert_eq!(
+        c.take_close_report(),
+        Some(CloseReport {
+            statements_ran: 0,
+            rest_not_run: true
+        }),
+        "{}",
+        t.id
+    );
+}
+
+/// CI run 44595239297 (pg15): the statement right after a Stop of a Run as one failed with
+/// 57014, a cancel of the Stop landing late. The close answers only once its cancel ended (the
+/// server acted on it), so the next statement, run at once and long enough (100 ms) for a late
+/// cancel to land in, always completes. Several rounds per server. A probabilistic reproducer
+/// (a late signal needs the canceller preempted between its two kills); the deterministic
+/// proof is `typed_m3b.rs`'s scripted close tests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "docker"]
+async fn a_stop_never_cancels_the_next_statement() {
+    let name = format!("hvm4_pgcancel_stop_{}", std::process::id());
+    for t in version_targets() {
+        // Before the connection, so it drops after it: a lock the test's connection holds
+        // goes with it first.
+        let _drop = DropTable {
+            t: t.clone(),
+            name: name.clone(),
+        };
+        let mut c = connect(&t).await;
+        c.batch(&format!(
+            "CREATE TABLE {name} (n int4); INSERT INTO {name} VALUES (1), (2), (3)"
+        ))
+        .await
+        .unwrap_or_else(|e| panic!("{}: {:?}", t.id, e.kind));
+        let count = format!("SELECT count(*) FROM {name}, pg_sleep(0.1) AS s");
+        for _ in 0..5 {
+            stop_during_sleep_on(&t, &mut c, &name).await;
+            let (sets, _, _) = ok_run(&t, &mut c, spec(&count, &[])).await;
+            assert_eq!(sets[0].rows, vec![vec![Value::Int(3)]], "{}", t.id);
+        }
+        assert_eq!(c.tx_status(), TxStatus::Idle, "{}", t.id);
+        Box::new(c).close().await;
+    }
+}

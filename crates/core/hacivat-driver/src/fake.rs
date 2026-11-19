@@ -628,6 +628,9 @@ pub struct FakeDriver {
     // ## m3b-t18-safe06 (named exception)
     /// What every connection's `RawConn::session_settings` answers (`session_settings`).
     session_settings: crate::driver::SessionSettings,
+    // ## m4-pgcancel (named exception)
+    /// Every cancel answers `Err(Timeout)` and ends nothing (`cancel_times_out`).
+    cancel_times_out: bool,
 }
 
 impl FakeDriver {
@@ -681,6 +684,8 @@ impl FakeDriver {
             notices_dropped: 0,
             // ## m3b-t18-safe06
             session_settings: crate::driver::SessionSettings::default(),
+            // ## m4-pgcancel
+            cancel_times_out: false,
         }
     }
 
@@ -893,6 +898,14 @@ impl FakeDriver {
         self
     }
 
+    // ## m4-pgcancel (named exception)
+    /// Every cancel answers `Err(Timeout)` at once and ends nothing: a protocol cancel whose
+    /// bound ran out before the server was seen to act on it, so it may still land later.
+    pub fn cancel_times_out(mut self) -> Self {
+        self.cancel_times_out = true;
+        self
+    }
+
     // ## m3b-t18-safe06 (named exception)
     /// What every connection's `RawConn::session_settings` answers: the settings a real
     /// driver reads at connect (the lexing modes, PostgreSQL's `search_path`).
@@ -970,6 +983,8 @@ impl Driver for FakeDriver {
             notices_dropped: self.notices_dropped,
             // ## m3b-t18-safe06
             session_settings: self.session_settings.clone(),
+            // ## m4-pgcancel
+            cancel_times_out: self.cancel_times_out,
         };
         self.counters.alive.fetch_add(1, Ordering::SeqCst);
         let delay = self.delay;
@@ -1078,6 +1093,9 @@ struct FakeConn {
     // ## m3b-t18-safe06 (named exception)
     /// What `session_settings` answers (`FakeDriver::session_settings`).
     session_settings: crate::driver::SessionSettings,
+    // ## m4-pgcancel (named exception)
+    /// `FakeDriver::cancel_times_out`.
+    cancel_times_out: bool,
 }
 
 impl FakeConn {
@@ -1272,11 +1290,22 @@ impl CancelLatch {
 struct FakeCancel {
     latch: Arc<CancelLatch>,
     counters: Arc<Counters>,
+    // ## m4-pgcancel
+    times_out: bool,
 }
 
 impl CancelHandle for FakeCancel {
     fn cancel(&self) -> BoxFuture<'static, Result<(), RawError>> {
         self.counters.cancel.fetch_add(1, Ordering::SeqCst);
+        // ## m4-pgcancel: a cancel that timed out ends nothing here.
+        if self.times_out {
+            return Box::pin(async {
+                Err(RawError {
+                    kind: RawErrorKind::Timeout,
+                    server: None,
+                })
+            });
+        }
         if self.latch.running.load(Ordering::SeqCst) {
             self.latch.latched.store(true, Ordering::SeqCst);
         }
@@ -1343,6 +1372,8 @@ impl RawConn for FakeConn {
         Some(Arc::new(FakeCancel {
             latch: self.cancel.clone(),
             counters: self.counters.clone(),
+            // ## m4-pgcancel
+            times_out: self.cancel_times_out,
         }))
     }
 

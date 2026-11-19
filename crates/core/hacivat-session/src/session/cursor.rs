@@ -312,14 +312,19 @@ impl Watch {
                     self.cancel = None;
                     if let Err(class) = sent {
                         tracing::debug!(class = class.id(), "the server cancel failed");
+                        // ## m4-pgcancel (named exception, ruling I1)
+                        self.unsettled |= cancel_may_still_land(class);
                     }
                 }
             }
         };
-        if let Some(cancel) = self.cancel.take()
-            && tokio::time::timeout(CANCEL_WAIT, cancel).await.is_err()
-        {
-            self.unsettled = true;
+        if let Some(cancel) = self.cancel.take() {
+            match tokio::time::timeout(CANCEL_WAIT, cancel).await {
+                Err(_) => self.unsettled = true,
+                // ## m4-pgcancel (named exception, ruling I1)
+                Ok(Err(class)) => self.unsettled |= cancel_may_still_land(class),
+                Ok(Ok(())) => {}
+            }
         }
         out
     }
@@ -337,6 +342,15 @@ async fn poll_opt<T>(f: &mut Option<BoxFuture<'static, T>>) -> T {
         Some(f) => f.await,
         None => std::future::pending().await,
     }
+}
+
+// ## m4-pgcancel (named exception, ruling I1: fail closed)
+/// Whether a cancel or kill that failed with `class` may still reach the server: one that
+/// timed out (`CancelHandle`'s contract: an `Err(Timeout)` may still land; a kill whose
+/// statement timed out alike). Its connection is then never used again, like one that did not
+/// end within [`CANCEL_WAIT`]. Any other failure sent nothing that can land.
+pub(crate) fn cancel_may_still_land(class: ErrClass) -> bool {
+    class == ErrClass::NetworkTimeout
 }
 
 // ---------------------------------------------------------------------------------------------

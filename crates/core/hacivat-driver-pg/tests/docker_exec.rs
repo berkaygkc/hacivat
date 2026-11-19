@@ -482,3 +482,33 @@ async fn internal_value_reads_decode_through_the_values_path() {
     assert_eq!(c.tx_status(), TxStatus::Idle);
     Box::new(c).close().await;
 }
+
+// ## m4-pgcancel
+
+/// A protocol cancel has ended only once the server acted on it (CI run 44595239297): sent
+/// while the session is idle, PostgreSQL drops it, and the statement run right after it is
+/// never cancelled. A cancel that ended when its request was written was acted on a few
+/// milliseconds later, inside the next statement's 200 ms, which then failed with 57014. TLS
+/// too: the wait for the server's close sits below TLS.
+#[tokio::test]
+#[ignore = "docker"]
+async fn an_ended_cancel_never_reaches_the_next_statement() {
+    let ids = ["pg13", "pg14", "pg15", "pg16", "pg17", "pg18", "pg17-tls"];
+    for t in ids.into_iter().filter_map(require_target) {
+        let mut c = pg_on(&t).await;
+        let h = c.cancel_handle().unwrap();
+        for round in 0..5 {
+            let cancelled = h.cancel().await;
+            assert!(cancelled.is_ok(), "{} #{round}: {cancelled:?}", t.id);
+            let r = c.execute("SELECT pg_sleep(0.2)", simple()).await;
+            assert!(
+                r.is_ok(),
+                "{} #{round}: {:?}",
+                t.id,
+                r.err().and_then(|e| e.server).and_then(|s| s.sqlstate)
+            );
+        }
+        assert_eq!(c.tx_status(), TxStatus::Idle, "{}", t.id);
+        Box::new(c).close().await;
+    }
+}
