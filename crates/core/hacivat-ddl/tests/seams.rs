@@ -14,8 +14,21 @@ fn ctx(d: DialectId) -> RenderCtx {
     )
 }
 
+// ## m4-t07-render (named exception): Task 7 filled the renderers. The variants M4 does not
+// render still refuse on every dialect (M7 fills them); the sample table now renders. Full
+// tests: `tests/render_ir.rs`.
 #[test]
 fn stub_renderers_refuse() {
+    const M7_ONLY: [&str; 8] = [
+        "AlterTable",
+        "DropObject",
+        "Rename",
+        "SetSchema",
+        "Revoke",
+        "TableRebuild",
+        "Exchange",
+        "Data",
+    ];
     for d in [
         DialectId::Postgres,
         DialectId::MySql,
@@ -23,21 +36,32 @@ fn stub_renderers_refuse() {
         DialectId::Sqlite,
     ] {
         for op in DdlOp::samples() {
-            assert!(
-                matches!(
-                    renderer(d).render(&op, &ctx(d)),
-                    Err(RenderError::Unsupported { .. })
-                ),
-                "{d:?} {}",
-                op.variant()
-            );
+            if M7_ONLY.contains(&op.variant()) {
+                assert!(
+                    matches!(
+                        renderer(d).render(&op, &ctx(d)),
+                        Err(RenderError::Unsupported { .. })
+                    ),
+                    "{d:?} {}",
+                    op.variant()
+                );
+            }
         }
-        assert!(matches!(
-            renderer(d).render(&DdlOp::sample_create_table(), &ctx(d)),
-            Err(RenderError::Unsupported { .. })
-        ));
+        assert!(
+            renderer(d)
+                .render(&DdlOp::sample_create_table(), &ctx(d))
+                .is_ok_and(|stmts| stmts[0].text.starts_with("CREATE TABLE app.t (")),
+            "{d:?}"
+        );
     }
+    // A dialect without an M4 renderer still refuses everything.
+    assert!(matches!(
+        renderer(DialectId::SqlServer)
+            .render(&DdlOp::sample_create_table(), &ctx(DialectId::SqlServer)),
+        Err(RenderError::Unsupported { .. })
+    ));
 }
+// ## end m4-t07-render
 
 /// Every alg/03 HV-DDL-07 `DdlOp` variant is declared: the exhaustive `match` below fails to
 /// compile when one is missing or renamed, and `samples()` builds each one once.
