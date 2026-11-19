@@ -1,6 +1,12 @@
 //! The DDL IR (alg/03 HV-DDL-07 "IR", HV-DDL-05 alter actions): declared in full by M4 Task 1a
 //! (X-6: M7 consumes the variants M4 does not render). Producers build it; renderers turn it
 //! into text. Expressions, types and server texts are raw `Name`s, emitted verbatim.
+//!
+//! Names are [`QualifiedName`]s and are printed with exactly the parts they hold: the producer
+//! decides which parts to keep ([`crate::produce::qualify`], HV-DDL-10). Constraints carry no
+//! position: the renderer places them with [`crate::produce::placement`] (HV-DDL-09) under
+//! `GenOptions::placement`; a constraint postponed past other tables (a cycle, a later table)
+//! is an [`AlterAction::AddConstraint`] op of its own.
 
 use hacivat_meta::kind::ObjectKind;
 use hacivat_meta::name::Name;
@@ -119,6 +125,22 @@ pub enum ConstraintBody {
     Exclusion {
         raw: Name,
     },
+}
+
+impl ConstraintBody {
+    /// The key's single column, when it is a primary, unique or foreign key on exactly one
+    /// column (HV-DDL-09 `InsideColumn`).
+    pub fn single_column(&self) -> Option<&Name> {
+        match self {
+            ConstraintBody::PrimaryKey { columns }
+            | ConstraintBody::Unique { columns, .. }
+            | ConstraintBody::ForeignKey { columns, .. } => match columns.as_slice() {
+                [c] => Some(c),
+                _ => None,
+            },
+            ConstraintBody::Check { .. } | ConstraintBody::Exclusion { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,6 +312,9 @@ pub struct CommentTarget {
 pub struct GrantDef {
     pub kind: ObjectKind,
     pub object: QualifiedName,
+    /// A routine's argument types (`integer, text`; `""` for none). Required for routines: a
+    /// name alone could mean another overload (M4 Task 7 addition).
+    pub sig: Option<Name>,
     /// Privileges, raw (`SELECT`, `USAGE`).
     pub privileges: Vec<Name>,
     /// Column-level grants: the columns; empty for an object-level grant.
@@ -370,6 +395,8 @@ pub enum DdlOp {
     Owner {
         kind: ObjectKind,
         name: QualifiedName,
+        /// A routine's argument types, as [`GrantDef::sig`] (M4 Task 7 addition).
+        sig: Option<Name>,
         owner: Name,
     },
     /// PostgreSQL `ALTER TABLE … ENABLE|DISABLE ROW LEVEL SECURITY`.
@@ -431,6 +458,7 @@ impl DdlOp {
         let grant = GrantDef {
             kind: ObjectKind::Table,
             object: t.clone(),
+            sig: None,
             privileges: vec![name("SELECT")],
             columns: Vec::new(),
             grantee: name("reader"),
@@ -540,6 +568,7 @@ impl DdlOp {
             DdlOp::Owner {
                 kind: ObjectKind::Table,
                 name: t.clone(),
+                sig: None,
                 owner: name("app_owner"),
             },
             DdlOp::RowSecurity {

@@ -293,3 +293,73 @@ Constraints, "No silent weakening"). Session-side seams are in ADR 0004 `m4-t01c
   `## m4-t01c-core` holds the 27 introspection messages alg/02 names (HV-INTRO-01..03, -05,
   -11..13, -15, -16) plus `intro-catalog-race-retried`. `model-cache-disabled-by-policy` and
   `ddl-warn-executable-comment` are T1a's already.
+
+## m4-t07 — DDL IR, renderers and quoting
+
+M4 Task 7 fills `sql_ident::quote` (R-M4-28) and `hacivat-ddl`'s renderers, placement,
+qualification and option applicability (alg/03 HV-DDL-07 renderer layer, -09, -10, -11 v1
+subset). The bodies are copied from the DDL spike (`da358e4`, R-M4-40, U-1) onto Task 1a's
+seams and reviewed as new code.
+
+- **Quoting lives in `sql-ident`, once.** `needs_quoting`/`quote` follow each server's own rule
+  (PostgreSQL `quote_identifier`: bare only `[a-z_][a-z0-9_]*` and not a non-unreserved
+  keyword; MySQL/MariaDB/SQLite bare only `[A-Za-z_][A-Za-z0-9_]*` and not a reserved word;
+  every other dialect always quoted). With no server version in the signature, a word that is
+  reserved on **any** line of the keyword tables is quoted (probing the newest and the oldest
+  rows covers every one-sided gate). MariaDB's table has no reserved flag, so every MariaDB
+  keyword is quoted (`id`, `name`, `status`): safe and noisy, as the spike reported. Renderers
+  call only `RenderCtx::ident`/`qname`, which call `quote`; there is no other quoting function.
+- **MySQL and MariaDB always backtick** (T1a review m2). `QuoteCtx::ansi_quotes` is carried but
+  never trusted: backticks quote identifiers in every `sql_mode`, while `"` under a wrong
+  `ANSI_QUOTES` would make a name a string literal.
+- **`QuoteCtx` holds `Option<bool>`** (seam change, T1a review m2): it mirrors `ServerFacts`,
+  and `Default` is "unknown". `string_literal` picks a form that reads the same under either
+  value of an unknown setting: PostgreSQL with a backslash and `standard_conforming_strings`
+  not known on → a dollar-quoted string (`$hv$…$hv$`, the tag chosen so `$tag` does not occur
+  in the text); `E'…'` is never produced. MySQL/MariaDB with `NO_BACKSLASH_ESCAPES` not known
+  on → the backslash doubled: exact under the server default and, otherwise, an extra
+  backslash that can never end the literal early. NUL is refused everywhere.
+  `QuoteError::NotImplemented` is kept (never produced) so callers' matches stay valid.
+- **Qualification is the producer's.** IR names are `QualifiedName`s printed with exactly the
+  parts they hold; `produce::qualify::qualify(name, &QualifyCtx) -> QualifiedRef` decides
+  which parts a producer keeps. `Auto` is per name: bare when its schema is the current schema
+  (the target's current schema, else the first `search_path` entry) and the name is not
+  ambiguous in the scope; SQLite keeps `main` bare. The plan's sentence "unqualified only when
+  every object is in one schema" is read through its own test (`app.t1` + `sales.t2`, current
+  `app` → `t1`, `sales.t2`), which is per name. Server text is never re-qualified.
+- **Placement is the renderer's within a table.** `ConstraintDef` has no position:
+  `produce::placement::place(constraints, mode, dialect, &PlacePlan) -> Vec<Placed>` decides
+  `InColumn`/`InTable`/`After` under `GenOptions::placement` with the dialect overrides (MySQL
+  FK never inline, an inline MySQL unique key only when named after its column, an
+  `AUTO_INCREMENT` key stays in the table, SQLite always inside with
+  `ddl-sqlite-placement-forced`, PG `NOT VALID` after). A renderer places a table's own
+  constraints (`After` → `ALTER TABLE … ADD` statements of the same op); a constraint
+  postponed past *later* tables (`PlacePlan::later`, cycles) is the producer's separate
+  `AlterTable { AddConstraint }` op, which M4 renders (only that action; any other is
+  `Unsupported`).
+- **Options the renderers honour.** `OR REPLACE` and `IF NOT EXISTS` come from the op's flag
+  or `GenOptions`, each only where `options::or_replace_supported`/`if_not_exists_supported`
+  say the dialect has it for the kind (`OR REPLACE` wins); `skip_definer` and `or_replace` edit
+  only the head of MySQL/MariaDB `SHOW CREATE` text, token by token
+  (`render::mysql::edit_head`, moved here from the spike's producer so T7's test can pin it);
+  a head of any other shape stays verbatim (producers notice `ddl-head-not-edited`). PG 14+
+  turns a plain `CREATE TRIGGER` into `CREATE OR REPLACE TRIGGER`. `ServerDefinitions` applies
+  to MySQL/MariaDB **and SQLite** (R-M4-24), not only MySQL as in the spike.
+- **IR additions** (`ir.rs` is T7's): `sig: Option<Name>` on `DdlOp::Owner` and `GrantDef`
+  (a routine is never named without its argument types: `None` on a routine is
+  `RenderError::Invalid`, never an ambiguous `ALTER FUNCTION f`), and
+  `ConstraintBody::single_column`. `RenderError::Invalid(&'static str)` is new for malformed
+  ops (an index part with neither column nor expression, `AUTOINCREMENT` without its key).
+- **Keyword slots are never free text**: privileges (`[A-Z_ ]`), `WITH LOCAL|CASCADED CHECK
+  OPTION`, MySQL `ROW_FORMAT` and index methods (`HASH` stays an unquoted keyword) are
+  validated; MySQL grantees must be the server's `'user'@'host'` form. Expressions, types,
+  defaults (verbatim per flavor, F9) and server text stay raw, as the IR defines them.
+- **Output.** Never from Fluent or the process locale (a child-process test renders under
+  `en_US` and `tr_TR` and compares bytes); `\n` only; four-space indentation; `render_text`
+  ends each statement with `;\n` and separates statements by one empty line. IR goldens:
+  `tests/golden/ir/{pg,mysql,mariadb,sqlite}/create_table.sql` (`UPDATE_GOLDEN=1`, R-M4-16).
+- **Not in M4's IR (for T19 and M7):** `ALTER SEQUENCE … OWNED BY` after the table (a serial's
+  sequence must exist before the table's `DEFAULT nextval(…)`; `SeqDef::owned_by` renders the
+  clause inside `CREATE SEQUENCE` only); MySQL secondary indexes as `KEY` table elements (the
+  spike's round-trip choice; M4 renders `CREATE INDEX`); a standalone comment on a trigger or
+  constraint (`CommentTarget` has no table; the trigger def renders its own).

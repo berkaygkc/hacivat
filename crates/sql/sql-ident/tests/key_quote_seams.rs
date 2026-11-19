@@ -46,19 +46,23 @@ fn stub_match_key_is_server_dependent() {
     }
 }
 
-/// The stub quotes every name (over-quoting is never wrong) with the dialect's quote character,
-/// doubled inside; NUL is refused; string literals are not produced until Task 7.
+// ## m4-t07-quote (named exception): Task 7 filled the quoting bodies, so the stub's
+// "always quote, no literal" answers became the real contract (full tests: `tests/quote.rs`).
+/// A name is bare where the dialect allows it, else quoted with the dialect's quote character
+/// doubled inside (MySQL and MariaDB always backtick, T1a review m2); NUL is refused; string
+/// literals are produced.
 #[test]
 fn stub_quote_always_quotes_and_doubles_the_quote_char() {
     let plain = QuoteCtx::default();
     let ansi = QuoteCtx {
-        ansi_quotes: true,
+        ansi_quotes: Some(true),
         ..QuoteCtx::default()
     };
     for d in DIALECTS {
-        for name in ["users", "select", "a b", "İ"] {
+        for name in ["select", "a b", "İ"] {
             assert!(needs_quoting(d, name, &plain), "{d:?} {name}");
         }
+        assert!(!needs_quoting(d, "users", &plain), "{d:?}");
     }
     assert_eq!(
         quote(DialectId::Postgres, "a\"b", &plain).as_deref(),
@@ -66,7 +70,7 @@ fn stub_quote_always_quotes_and_doubles_the_quote_char() {
     );
     assert_eq!(
         quote(DialectId::Sqlite, "users", &plain).as_deref(),
-        Ok("\"users\"")
+        Ok("users")
     );
     assert_eq!(
         quote(DialectId::MySql, "a`b", &plain).as_deref(),
@@ -76,29 +80,30 @@ fn stub_quote_always_quotes_and_doubles_the_quote_char() {
         quote(DialectId::MariaDb, "İ ", &plain).as_deref(),
         Ok("`İ `")
     );
-    // `ANSI_QUOTES` makes `"` an identifier quote on MySQL and MariaDB.
+    // `ANSI_QUOTES` is never trusted: the backtick quotes identifiers in every `sql_mode`.
     assert_eq!(
         quote(DialectId::MySql, "a\"b", &ansi).as_deref(),
-        Ok("\"a\"\"b\"")
+        Ok("`a\"b`")
     );
     for d in DIALECTS {
         assert_eq!(quote(d, "a\0b", &plain), Err(QuoteError::Nul), "{d:?}");
         assert_eq!(
-            string_literal(d, "it's", &plain),
-            Err(QuoteError::NotImplemented),
+            string_literal(d, "it's", &plain).as_deref(),
+            Ok("'it''s'"),
             "{d:?}"
         );
     }
     assert_eq!(
         quote_qualified(DialectId::Postgres, &["public", "T"], &plain).as_deref(),
-        Ok("\"public\".\"T\"")
+        Ok("public.\"T\"")
     );
     assert_eq!(
         quote_qualified(DialectId::MySql, &["shop", "a`b"], &plain).as_deref(),
-        Ok("`shop`.`a``b`")
+        Ok("shop.`a``b`")
     );
     assert_eq!(
         quote_qualified(DialectId::Sqlite, &["main", "x\0"], &plain),
         Err(QuoteError::Nul)
     );
 }
+// ## end m4-t07-quote
