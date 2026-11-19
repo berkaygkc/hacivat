@@ -19,7 +19,10 @@ use std::time::Duration;
 use hacivat_driver::{
     Driver, DriverConnect, DriverRegistry, Endpoint, EngineCatalog, InsecureAuth,
 };
-use hacivat_introspect::introspector::{FacetRows, IntroError, Introspector, Staleness};
+use hacivat_introspect::filter::{CompiledFilter, FilterRole, parse_filter};
+use hacivat_introspect::introspector::{
+    FacetRows, IntroError, Introspector, ServerIdentity, Staleness,
+};
 use hacivat_introspect::pack::{DialectId, Mode, Pack, lint};
 use hacivat_introspect::sqlite::{ATTACH_ALIAS, PassConn, SqliteIntrospector, ns_check_of};
 use hacivat_meta::merge::{ExistSet, MergePolicy, NamespaceResult, base, merge};
@@ -247,6 +250,14 @@ fn intro() -> SqliteIntrospector {
     SqliteIntrospector::default()
 }
 
+/// The filter that keeps everything (the engine's for a namespace with no scope filter).
+fn all() -> &'static CompiledFilter {
+    static ALL: std::sync::LazyLock<CompiledFilter> = std::sync::LazyLock::new(|| {
+        parse_filter("", DialectId::Sqlite, FilterRole::Introspect).expect("the empty filter")
+    });
+    &ALL
+}
+
 type Trace = Arc<Mutex<Vec<Name>>>;
 
 fn traced() -> (SqliteIntrospector, Trace) {
@@ -266,7 +277,7 @@ async fn pass(
     level: Level,
     prev: Option<&NamespaceSnapshot>,
 ) -> NamespaceResult {
-    i.introspect(c, ns, mode, level, prev, &CancellationToken::new())
+    i.introspect(c, ns, mode, level, all(), prev, &CancellationToken::new())
         .await
         .unwrap_or_else(|e| panic!("{ns:?} {mode:?}: {e:?}"))
 }
@@ -558,6 +569,7 @@ async fn same_schema_version_replaced_file_detected_on_reconnect_by_digest() {
             &main_ns(),
             Mode::Incremental,
             Level::Structure,
+            all(),
             Some(&s1),
             PassConn::Reused,
             &CancellationToken::new(),
@@ -979,6 +991,7 @@ async fn locked_database_retries_then_fails_softly() {
             &main_ns(),
             Mode::Full,
             Level::Structure,
+            all(),
             None,
             &CancellationToken::new(),
         )
@@ -1386,6 +1399,7 @@ async fn ten_thousand_tables_structure_recorded() {
             &main_ns(),
             Mode::Incremental,
             Level::Structure,
+            all(),
             Some(&s),
             PassConn::Reused,
             &CancellationToken::new(),
@@ -1593,6 +1607,7 @@ async fn fragment_rereads_the_requested_relations_scoped() {
             &main_ns(),
             &[key("a")],
             Level::Structure,
+            all(),
             &CancellationToken::new(),
         )
         .await
@@ -1621,6 +1636,7 @@ async fn fragment_rereads_the_requested_relations_scoped() {
             &main_ns(),
             &[key("b")],
             Level::Structure,
+            all(),
             &CancellationToken::new(),
         )
         .await
@@ -1766,6 +1782,7 @@ async fn an_attached_namespace_the_connection_lacks_fails_closed() {
             &NsKey::schema(["nowhere"]),
             Mode::Full,
             Level::Structure,
+            all(),
             None,
             &CancellationToken::new(),
         )
@@ -1788,6 +1805,7 @@ async fn an_attached_namespace_the_connection_lacks_fails_closed() {
             &NsKey::schema(["xa"]),
             Mode::Full,
             Level::Structure,
+            all(),
             None,
             &CancellationToken::new(),
         )
@@ -1916,4 +1934,236 @@ async fn the_file_fingerprint_survives_ddl_and_vacuum_and_tells_files_apart() {
     );
     let mut off = MetaConn::offline(DbmsKind::Sqlite);
     assert!(i.file_fingerprint(&mut off).await.is_err(), "fails closed");
+}
+
+// ## m4-t18 (resume after T15: R-W3-2, R-W3-3, the progress sink, R-W3-9)
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn identity_is_the_file_fingerprint_and_unknown_in_memory() {
+    let l = lite("CREATE TABLE t(a)").await;
+    let i = intro();
+    let mut c = l.reader().await;
+    let f = i.file_fingerprint(&mut c).await.unwrap().expect("a file");
+    assert_eq!(
+        i.identity(&mut c).await.unwrap(),
+        ServerIdentity::Known(hacivat_meta::persist::ServerFingerprint(f))
+    );
+    let mut off = MetaConn::offline(DbmsKind::Sqlite);
+    assert!(
+        i.identity(&mut off).await.is_err(),
+        "no read: an error, never a fact"
+    );
+    // In memory: no file, so no identity.
+    let profile = Profile {
+        id: pid(),
+        name: "mem".into(),
+        engine: DbmsKind::Sqlite,
+        endpoint: ProfileEndpoint::File {
+            path: PathBuf::from(":memory:"),
+            create_if_missing: false,
+        },
+        user: None,
+        auth: AuthProviderId::None,
+        retention: Retention::Never,
+        ..Profile::default()
+    };
+    let sm = SessionManager::new(
+        tokio::runtime::Handle::current(),
+        Arc::new(profile.clone()),
+        Arc::new(deps()),
+        Arc::new(budget_for(&profile)),
+    );
+    let _user = open(&sm, SessionKind::Console(ClientId::DEFAULT)).await;
+    let mut c = sm
+        .meta_conn(
+            MetaConnSpec {
+                profile: profile.id,
+                database: None,
+                statement_timeout: Duration::from_secs(60),
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(i.identity(&mut c).await.unwrap(), ServerIdentity::Unknown);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_scope_filter_is_applied_on_the_client() {
+    let l = lite(
+        "CREATE TABLE keep_a(x); CREATE TABLE drop_b(y); CREATE INDEX drop_b_y ON drop_b(y); \
+         CREATE VIEW v AS SELECT x FROM keep_a",
+    )
+    .await;
+    let f = parse_filter("table:keep*", DialectId::Sqlite, FilterRole::Introspect).unwrap();
+    let mut c = l.reader().await;
+    let r = intro()
+        .introspect(
+            &mut c,
+            &main_ns(),
+            Mode::Full,
+            Level::Structure,
+            &f,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let tables = match r.existent.get(&ObjectKind::Table) {
+        Some(ExistSet::Ok(ids)) => ids.iter().map(|i| i.path.clone()).collect::<Vec<_>>(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        tables,
+        vec![vec![Name::from("keep_a")]],
+        "drop_b is never listed"
+    );
+    let ns = merged(&main_ns(), None, r.clone());
+    assert!(ns.lookup(KindGroup::Relations, "drop_b").is_empty());
+    assert_eq!(ns.lookup(KindGroup::Relations, "keep_a").len(), 1);
+    assert_eq!(
+        ns.lookup(KindGroup::Relations, "v").len(),
+        1,
+        "no item applies to views"
+    );
+    for (kind, set) in &r.existent {
+        if let ExistSet::Ok(ids) | ExistSet::Scoped { ids, .. } = set {
+            assert!(
+                ids.iter().all(|i| &*i.path[0] != "drop_b"),
+                "{kind:?}: nothing of drop_b"
+            );
+        }
+    }
+    // A fragment of a filtered-out table reads nothing of it either.
+    let key = ObjectKey {
+        kind: ObjectKind::Table,
+        path: [Name::from("main"), Name::from("drop_b")]
+            .into_iter()
+            .collect(),
+        server_id: None,
+        overload_sig: None,
+        raw_kind: None,
+    };
+    let r = intro()
+        .fragment(
+            &mut c,
+            &main_ns(),
+            &[key],
+            Level::Structure,
+            &f,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(r.changed.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pass_reports_its_counts_to_the_progress_sink() {
+    let l = lite(
+        "CREATE TABLE a(x); CREATE TABLE b(y REFERENCES a(x)); CREATE INDEX bi ON b(y); \
+         CREATE VIEW v AS SELECT x FROM a",
+    )
+    .await;
+    type Seen = Arc<Mutex<Vec<(NsKey, hacivat_introspect::Phase, u64, Option<u64>)>>>;
+    let seen: Seen = Arc::default();
+    let sink_seen = seen.clone();
+    let i = SqliteIntrospector::default().with_progress(Arc::new(move |ns, phase, done, total| {
+        sink_seen
+            .lock()
+            .unwrap()
+            .push((ns.clone(), phase, done, total));
+    }));
+    let mut c = l.reader().await;
+    pass(&i, &mut c, &main_ns(), Mode::Full, Level::Structure, None).await;
+    let seen = seen.lock().unwrap().clone();
+    use hacivat_introspect::Phase as P;
+    let last = |p: P| {
+        seen.iter()
+            .rev()
+            .find(|s| s.1 == p)
+            .map(|s| (s.2, s.3))
+            .unwrap_or_else(|| panic!("{p:?} reported: {seen:?}"))
+    };
+    assert!(seen.iter().all(|s| s.0 == main_ns()));
+    assert_eq!(last(P::Tables), (3, Some(3)), "a, b and v");
+    assert_eq!(last(P::Columns), (3, Some(3)));
+    assert_eq!(last(P::Indexes), (1, Some(1)));
+    assert_eq!(last(P::Constraints), (1, Some(1)));
+    // Counts never go backwards within a phase.
+    for p in [P::Tables, P::Columns, P::Indexes, P::Constraints] {
+        let done: Vec<u64> = seen.iter().filter(|s| s.1 == p).map(|s| s.2).collect();
+        assert!(done.windows(2).all(|w| w[0] <= w[1]), "{p:?}: {done:?}");
+    }
+}
+
+#[test]
+fn every_rendered_sqlite_section_passes_the_metadata_guard() {
+    // R-W3-9: every section, in every copy (Main, Temp, Attached), rendered as the
+    // introspector renders it, passes T5's guard for the reader (`check_own_text`) and for the
+    // user's or a joined session (`check_read_text_for`), so nothing reaches a connection
+    // that the guard would refuse at run time.
+    use hacivat_introspect::pack::{BindValue, LogicalType, PackCtx, PackFlags, Params};
+    use hacivat_session::meta::{check_own_text, check_read_text_for};
+    let pack = Pack::builtin(DialectId::Sqlite).unwrap();
+    let text = |s: &str| BindValue::Typed {
+        hint: LogicalType::Text {
+            max_chars: None,
+            fixed: false,
+        },
+        text: Arc::from(s),
+    };
+    let mut copies = std::collections::BTreeMap::<&str, usize>::new();
+    for name in pack.sections() {
+        for suffix in ["Main", "Temp", "Attached"] {
+            if name.ends_with(suffix) {
+                *copies.entry(suffix).or_default() += 1;
+            }
+        }
+        for flags in [PackFlags::empty(), PackFlags::JOINED] {
+            for level in [Level::Names, Level::Structure, Level::Sources] {
+                let ctx = PackCtx {
+                    dialect: DialectId::Sqlite,
+                    version: 0,
+                    flavor: DbmsKind::Sqlite,
+                    mode: Mode::Full,
+                    level,
+                    flags,
+                    params: Params {
+                        scalars: vec![
+                            (Name::from("schema"), text("main")),
+                            (Name::from("rel"), text("t")),
+                        ],
+                        lists: Vec::new(),
+                    },
+                };
+                let qs = pack
+                    .render(name, &ctx)
+                    .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                assert_eq!(qs.len(), 1, "{name}");
+                let sql = qs[0].sql();
+                assert_eq!(
+                    check_own_text(sql, DbmsKind::Sqlite),
+                    Ok(()),
+                    "{name}: {sql}"
+                );
+                assert_eq!(
+                    check_read_text_for(sql, DbmsKind::Sqlite),
+                    Ok(()),
+                    "{name}: {sql}"
+                );
+                assert_eq!(
+                    check_read_text_for(sql, DbmsKind::Unknown),
+                    Ok(()),
+                    "{name} (every engine's lexer): {sql}"
+                );
+            }
+        }
+    }
+    // Six sections read `sqlite_schema`, each in three copies (`SchemaVersionMain` and
+    // `ApplicationIdMain` are `main`-only and have none).
+    assert_eq!(
+        copies.into_iter().collect::<Vec<_>>(),
+        vec![("Attached", 6), ("Main", 8), ("Temp", 6)]
+    );
 }

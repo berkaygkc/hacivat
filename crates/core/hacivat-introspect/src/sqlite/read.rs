@@ -9,12 +9,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use hacivat_meta::snapshot::IntroErrorCode;
-use hacivat_meta::{Level, Name};
+use hacivat_meta::{Level, Name, NsKey};
 use hacivat_proto::DbmsKind;
 use hacivat_session::meta::{MetaError, SnapshotTxn};
 use tokio_util::sync::CancellationToken;
 
-use super::{ATTACH_ALIAS, SectionTrace};
+use super::{ATTACH_ALIAS, ProgressSink, SectionTrace};
+use crate::engine::Phase;
 use crate::introspector::IntroError;
 use crate::pack::{BindValue, DialectId, LogicalType, Mode, Pack, PackCtx, PackFlags, Params};
 
@@ -52,6 +53,8 @@ pub(crate) struct Cx<'a> {
     pub ctx: PackCtx,
     pub trace: Option<&'a SectionTrace>,
     pub cancel: &'a CancellationToken,
+    /// Where the pass's counts go (`SqliteIntrospector::with_progress`), with its namespace.
+    pub progress: Option<(&'a NsKey, &'a ProgressSink)>,
 }
 
 impl<'a> Cx<'a> {
@@ -79,6 +82,14 @@ impl<'a> Cx<'a> {
             },
             trace,
             cancel,
+            progress: None,
+        }
+    }
+
+    /// Reports `done` of `total` in `phase` to the progress sink, if any.
+    pub(crate) fn report(&self, phase: Phase, done: u64, total: Option<u64>) {
+        if let Some((ns, sink)) = self.progress {
+            sink(ns, phase, done, total);
         }
     }
 }
@@ -381,6 +392,12 @@ pub(crate) async fn read_schema(
         return Ok(out);
     }
     out.structure = true;
+    let relations = out
+        .objects
+        .iter()
+        .filter(|o| matches!(&*o.ty, "table" | "view"))
+        .count() as u64;
+    cx.report(Phase::Columns, 0, Some(relations));
 
     // Columns: one query for tables and one for views. When one fails (a view over a dropped
     // table, a virtual table whose module is missing), only that kind goes per relation, and a
@@ -398,7 +415,10 @@ pub(crate) async fn read_schema(
                     .filter(|o| &*o.ty == ty)
                     .map(|o| o.name.clone())
                     .collect();
-                for rel in rels {
+                let n = rels.len() as u64;
+                for (k, rel) in rels.into_iter().enumerate() {
+                    // The fallback counts its own relations, one query each.
+                    cx.report(Phase::Columns, k as u64, Some(n));
                     match rows(
                         cx,
                         snap,
@@ -421,6 +441,8 @@ pub(crate) async fn read_schema(
         }
     }
 
+    cx.report(Phase::Columns, relations, Some(relations));
+    cx.report(Phase::Indexes, 0, None);
     let indexes = rows(
         cx,
         snap,
@@ -476,6 +498,12 @@ pub(crate) async fn read_schema(
         (Ok(_), None) => unreachable!("the parts are read whenever the list is"),
     }
 
+    cx.report(
+        Phase::Indexes,
+        out.indexes.len() as u64,
+        Some(out.indexes.len() as u64),
+    );
+    cx.report(Phase::Constraints, 0, None);
     match rows(
         cx,
         snap,
@@ -503,5 +531,10 @@ pub(crate) async fn read_schema(
         Err(e) if refused(&e) => out.fk_failed = Some(e.code()),
         Err(e) => return Err(e),
     }
+    cx.report(
+        Phase::Constraints,
+        out.fks.len() as u64,
+        Some(out.fks.len() as u64),
+    );
     Ok(out)
 }

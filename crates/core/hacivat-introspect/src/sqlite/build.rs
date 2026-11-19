@@ -46,6 +46,7 @@ use crate::assemble::sqlite::{
     FkRow as AFkRow, IndexPartRow, IndexRow, KeyRows, PkColumnRow, assemble_keys,
 };
 use crate::assemble::{ColumnIndex, TableId};
+use crate::filter::CompiledFilter;
 
 /// The relation kinds, in the order their existence sets are reported.
 pub(crate) const RELATION_KINDS: [ObjectKind; 3] = [
@@ -76,7 +77,13 @@ pub(crate) struct Built {
 }
 
 /// Builds the objects of `rows` read at `level`. `only`: a fragment's relations (by exact
-/// name); `None`: every relation (a full read).
+/// name); `None`: every relation (a full read). `filter` (R-W3-2, client-side; SQLite pushes
+/// nothing down): a relation it does not keep is neither built nor listed as existing, as the
+/// engine's own client filter does.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the read's facts, its scope and its filter"
+)]
 pub(crate) fn build(
     ns: &NsKey,
     rows: &SchemaRows,
@@ -84,6 +91,7 @@ pub(crate) fn build(
     temp: bool,
     mark: StateMark,
     only: Option<&BTreeSet<Name>>,
+    filter: Option<&CompiledFilter>,
 ) -> Built {
     let extra = if temp {
         ObjFlags::TEMP
@@ -96,6 +104,7 @@ pub(crate) fn build(
         .iter()
         .filter_map(|o| relation_kind(o).map(|k| (o, k)))
         .filter(|(o, _)| wanted(&o.name))
+        .filter(|(o, k)| filter.is_none_or(|f| f.matches(*k, &o.name)))
         .collect();
     rels.sort_by(|a, b| a.0.name.cmp(&b.0.name));
 

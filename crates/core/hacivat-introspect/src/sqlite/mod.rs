@@ -73,8 +73,14 @@ use hacivat_proto::DbmsKind;
 use hacivat_session::meta::{MetaConn, MetaError, SnapshotTxn};
 use tokio_util::sync::CancellationToken;
 
+use hacivat_meta::persist::ServerFingerprint;
+
+use crate::engine::Phase;
+use crate::filter::CompiledFilter;
 use crate::freshness::NsCheck;
-use crate::introspector::{FacetRows, IntroCaps, IntroError, Introspector, Staleness};
+use crate::introspector::{
+    FacetRows, IntroCaps, IntroError, Introspector, ServerIdentity, Staleness,
+};
 use crate::pack::{DialectId, Mode, Pack};
 use crate::scope::NsInfo;
 
@@ -92,13 +98,30 @@ pub const BUSY_ATTEMPTS: u32 = 2;
 /// The pack sections a pass ran, in order (a diagnostics hook; tests read it).
 pub type SectionTrace = Arc<Mutex<Vec<Name>>>;
 
+/// Where a pass reports its counts: the namespace, the phase, how many are done and of how
+/// many (`None` until known). The trait has no progress parameter (T15's scheduler counts
+/// tasks; a count inside one pass was carried to Tasks 16–18), so the engine hands the sink to
+/// the introspector it builds ([`SqliteIntrospector::with_progress`]).
+pub type ProgressSink = Arc<dyn Fn(&NsKey, Phase, u64, Option<u64>) + Send + Sync>;
+
 /// The SQLite introspector.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SqliteIntrospector {
     /// Edge 5 (a file on a network share, whose inode is not stable): check the digest on
     /// every pass, also on a reused connection whose version and identity match.
     pub digest_every_pass: bool,
     trace: Option<SectionTrace>,
+    progress: Option<ProgressSink>,
+}
+
+impl std::fmt::Debug for SqliteIntrospector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteIntrospector")
+            .field("digest_every_pass", &self.digest_every_pass)
+            .field("trace", &self.trace.is_some())
+            .field("progress", &self.progress.is_some())
+            .finish()
+    }
 }
 
 /// Whether the connection is new to the namespace (module docs, "Change detection").
@@ -299,6 +322,13 @@ impl SqliteIntrospector {
         self
     }
 
+    /// Reports each pass's counts to `sink`: relations read (`Tables`), relations whose
+    /// columns are read (`Columns`), indexes (`Indexes`) and foreign keys (`Constraints`).
+    pub fn with_progress(mut self, sink: ProgressSink) -> Self {
+        self.progress = Some(sink);
+        self
+    }
+
     fn cx<'a>(
         &'a self,
         pack: &'a Pack,
@@ -365,6 +395,7 @@ impl SqliteIntrospector {
         ns: &'a NsKey,
         mode: Mode,
         level: Level,
+        filter: &'a CompiledFilter,
         prev: Option<&'a NamespaceSnapshot>,
         on: PassConn,
         cancel: &'a CancellationToken,
@@ -382,7 +413,10 @@ impl SqliteIntrospector {
             let mut attempt = 0;
             loop {
                 attempt += 1;
-                match self.pass_once(c, ns, mode, level, prev, on, cancel).await {
+                match self
+                    .pass_once(c, ns, mode, level, filter, prev, on, cancel)
+                    .await
+                {
                     Err(e) if read::is_busy(&e) && attempt < BUSY_ATTEMPTS => {}
                     other => return other,
                 }
@@ -397,13 +431,15 @@ impl SqliteIntrospector {
         ns: &NsKey,
         mode: Mode,
         level: Level,
+        filter: &CompiledFilter,
         prev: Option<&NamespaceSnapshot>,
         on: PassConn,
         cancel: &CancellationToken,
     ) -> Result<NamespaceResult, IntroError> {
         let name = ns_name(ns)?;
         let pack = pack()?;
-        let cx = self.cx(&pack, c, level, cancel);
+        let mut cx = self.cx(&pack, c, level, cancel);
+        cx.progress = self.progress.as_ref().map(|p| (ns, p));
         let place = Self::place(&cx, c, name).await?;
         let identity = match place.file.clone() {
             Some(f) => file_identity(f).await,
@@ -432,6 +468,11 @@ impl SqliteIntrospector {
             return Ok(unchanged(d));
         }
         let objects = read::objects(&cx, &mut snap, place.variant).await?;
+        let relations = objects
+            .iter()
+            .filter(|o| relation_kind(o).is_some())
+            .count() as u64;
+        cx.report(Phase::Tables, relations, Some(relations));
         let digest = schema_digest(&objects);
         if let Decide::Digest(d) = decide
             && d == digest
@@ -451,7 +492,7 @@ impl SqliteIntrospector {
         snap.commit().await?;
         let temp = place.variant == Variant::Temp;
         let mark = schema_mark(version.unwrap_or(0), digest);
-        let built = build::build(ns, &rows, level, temp, mark, None);
+        let built = build::build(ns, &rows, level, temp, mark, None, Some(filter));
         let parent = root_key(ns);
         let mut changed = Vec::with_capacity(built.relations.len() + 1);
         if temp {
@@ -653,7 +694,7 @@ impl SqliteIntrospector {
         snap.commit().await?;
         let mut present = BTreeSet::new();
         if level >= Level::Structure {
-            present = build::build(ns, &rows, level, false, mark, None).paths;
+            present = build::build(ns, &rows, level, false, mark, None, None).paths;
         } else {
             for o in &objects {
                 if let Some(k) = relation_kind(o) {
@@ -670,17 +711,19 @@ impl SqliteIntrospector {
         ns: &NsKey,
         names: &BTreeSet<Name>,
         level: Level,
+        filter: &CompiledFilter,
         cancel: &CancellationToken,
     ) -> Result<NamespaceResult, IntroError> {
         let name = ns_name(ns)?;
         let pack = pack()?;
-        let cx = self.cx(&pack, c, level, cancel);
+        let mut cx = self.cx(&pack, c, level, cancel);
+        cx.progress = self.progress.as_ref().map(|p| (ns, p));
         let place = Self::place(&cx, c, name).await?;
         let mut snap = c.begin_snapshot().await?;
         let (_, mark, rows) = read_all(&cx, &mut snap, place.variant, level).await?;
         snap.commit().await?;
         let temp = place.variant == Variant::Temp;
-        let built = build::build(ns, &rows, level, temp, mark, Some(names));
+        let built = build::build(ns, &rows, level, temp, mark, Some(names), Some(filter));
         let parent = root_key(ns);
         Ok(NamespaceResult {
             existent: built.existent,
@@ -771,11 +814,12 @@ impl Introspector for SqliteIntrospector {
         ns: &'a NsKey,
         mode: Mode,
         level: Level,
+        filter: &'a CompiledFilter,
         prev: Option<&'a NamespaceSnapshot>,
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>> {
         // The engine opens one reader per task: every pass is a connection's first.
-        self.pass(c, ns, mode, level, prev, PassConn::Fresh, cancel)
+        self.pass(c, ns, mode, level, filter, prev, PassConn::Fresh, cancel)
     }
 
     fn fragment<'a>(
@@ -784,6 +828,7 @@ impl Introspector for SqliteIntrospector {
         ns: &'a NsKey,
         keys: &'a [ObjectKey],
         level: Level,
+        filter: &'a CompiledFilter,
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>> {
         Box::pin(async move {
@@ -796,7 +841,10 @@ impl Introspector for SqliteIntrospector {
             let mut attempt = 0;
             loop {
                 attempt += 1;
-                match self.fragment_once(c, ns, &names, level, cancel).await {
+                match self
+                    .fragment_once(c, ns, &names, level, filter, cancel)
+                    .await
+                {
                     Err(e) if read::is_busy(&e) && attempt < BUSY_ATTEMPTS => {}
                     other => return other,
                 }
@@ -935,6 +983,20 @@ impl Introspector for SqliteIntrospector {
                 objects: rels.len() as u64,
                 max_mark: mark,
                 existence_digest: existence_digest(rels),
+            })
+        })
+    }
+
+    /// R-W3-3: the file's identity ([`SqliteIntrospector::file_fingerprint`]); `Unknown` for an
+    /// in-memory database or a path that does not resolve.
+    fn identity<'a>(
+        &'a self,
+        c: &'a mut MetaConn,
+    ) -> BoxFuture<'a, Result<ServerIdentity, IntroError>> {
+        Box::pin(async move {
+            Ok(match self.file_fingerprint(c).await? {
+                Some(f) => ServerIdentity::Known(ServerFingerprint(f)),
+                None => ServerIdentity::Unknown,
             })
         })
     }
