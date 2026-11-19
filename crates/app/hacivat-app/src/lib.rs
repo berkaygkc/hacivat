@@ -5,6 +5,9 @@
 pub mod bench;
 pub mod commands;
 pub mod connections;
+// ## m4-t01b-seams: the M4 explorer tree and the DDL view tab.
+pub mod ddl_view;
+pub mod explorer;
 // ## m3a-t01b-seams
 pub mod console;
 pub mod exec_ui;
@@ -44,6 +47,9 @@ pub fn init(cx: &mut App) {
     exec_ui::install(cx);
     // ## m3b-t01b-seams
     history::install(cx);
+    // ## m4-t01b-seams
+    explorer::install(cx);
+    ddl_view::install(cx);
 }
 
 #[cfg(test)]

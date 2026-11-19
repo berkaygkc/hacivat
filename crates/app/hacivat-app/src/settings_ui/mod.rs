@@ -9,6 +9,8 @@ pub mod rows;
 pub mod search;
 // ## m3b-t42-settings
 pub mod value_limit;
+// ## m4-t01b-seams: Settings › Metadata (M4 Task 27).
+pub mod metadata;
 
 use std::rc::Rc;
 

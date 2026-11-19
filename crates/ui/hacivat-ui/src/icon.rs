@@ -119,6 +119,25 @@ icon_names! {
     TableProperties => "icons/lucide/table-properties.svg",
     AlignLeft => "icons/lucide/align-left.svg",
     PanelRight => "icons/lucide/panel-right.svg",
+    // ## m4-t01b-seams: the M4 explorer's object kinds, the Built-in group, the DDL view's
+    // source caption and Open in console, and Refresh (design/m4-explorer/NOTES.md "New
+    // primitives"; Tasks 14, 24, 25 and 27 draw them). Six SVGs already ship (`cylinder`, `eye`,
+    // `list-tree`, `shield-check`, `square-function`, `list-ordered`); nine are new.
+    Cylinder => "icons/lucide/cylinder.svg",
+    FolderTree => "icons/lucide/folder-tree.svg",
+    Eye => "icons/lucide/eye.svg",
+    Columns3 => "icons/lucide/columns-3.svg",
+    Link => "icons/lucide/link.svg",
+    ListTree => "icons/lucide/list-tree.svg",
+    ShieldCheck => "icons/lucide/shield-check.svg",
+    Zap => "icons/lucide/zap.svg",
+    SquareFunction => "icons/lucide/square-function.svg",
+    ListOrdered => "icons/lucide/list-ordered.svg",
+    Type => "icons/lucide/type.svg",
+    Library => "icons/lucide/library.svg",
+    Server => "icons/lucide/server.svg",
+    Terminal => "icons/lucide/terminal.svg",
+    RefreshCw => "icons/lucide/refresh-cw.svg",
     /// The Hacivat mark (`icons/hacivat/hv-mark.svg`).
     HvMark => "icons/hacivat/hv-mark.svg",
 }
@@ -320,6 +339,7 @@ mod tests {
         // ## m3c-t36 (named exception): and `ArrowDown`, the descending sort arrow.
         // ## m3c-t33-find (named exception): the find bar uses the same `ArrowDown` (one variant).
         // ## m3c-t38 (named exception): the view switch's two and the record toggle's.
-        assert_eq!(IconName::ALL.len(), 73);
+        // ## m4-t01b-seams (named exception): the fifteen M4 icons.
+        assert_eq!(IconName::ALL.len(), 88);
     }
 }

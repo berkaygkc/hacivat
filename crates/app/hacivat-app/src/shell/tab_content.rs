@@ -19,6 +19,9 @@ pub enum TabKind {
     Registered(&'static str),
 }
 
+// ## m4-t01b-seams: the DDL view's tab kind (`ddl_view`; Task 25 registers its view).
+pub const DDL_VIEW_KIND: &str = "ddl_view";
+
 /// Builds a registered tab's view (once per tab).
 pub type BuildFn = Rc<dyn Fn(&mut Window, &mut App) -> AnyView>;
 

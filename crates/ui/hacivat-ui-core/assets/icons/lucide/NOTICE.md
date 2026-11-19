@@ -21,3 +21,7 @@ The M3b icons (P-M3b-37), from the same package with the same modifications: `pi
 ## m3c-t31-multi
 
 The M3c icons (controller ruling 8, NOTES "Icons (RC-4 pattern)"), from the same package with the same modifications: `arrow-up` (ascending sort, previous match, previous record), `case-sensitive`, `whole-word` and `regex` (the find toggles). Tasks 33 and 36 draw them.
+
+## m4-t01b-seams
+
+The M4 icons (`design/m4-explorer/NOTES.md`, "New primitives" and "For the controller"), from the same package with the same modifications: `columns-3` (column), `link` (foreign key), `zap` (trigger), `type` (type), `folder-tree` (schema), `library` (the Built-in group), `server` (the DDL view's "Definitions provided by server" caption), `terminal` (Open in console) and `refresh-cw` (Refresh). M4 also draws the already bundled `cylinder`, `eye`, `list-tree`, `shield-check`, `square-function` and `list-ordered`.

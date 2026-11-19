@@ -641,3 +641,50 @@ context = "Editor"
 chord = "ctrl-shift-]"
 command = "editor.unfold"
 context = "Editor"
+
+## m4-t01b-seams
+# M4 (plan-m4 Task 1b, PO-Q10): the explorer tree and the DDL view. Defaults follow VS Code where
+# VS Code has an equivalent, and every row is remappable. The commands are registered disabled
+# until their tasks land (Tasks 24, 25, 27), so until then the chord passes through.
+# - `explorer.view_ddl` F12: VS Code's Go to Definition.
+# - `explorer.copy_qualified_name`: VS Code's Copy Path (`shift-alt-c`, not `ctrl-alt-c`,
+#   which is AltGr+C: `ć` on Polish).
+# - `explorer.collapse_all`: VS Code's `list.collapseAll`. The `Explorer` context is the tree's
+#   own focus, so the chord never reaches the filter field or the editor.
+# - `explorer.refresh` F5, in the `Explorer` context only (the file-manager and browser
+#   convention; VS Code has no default).
+# - `ddl_view.copy`: the standard copy, in the DDL view tab (`DdlView`); the read-only editor's
+#   own copy still wins while the editor has the focus.
+# - Palette only: `explorer.open_data` (Enter on a table or view row is the tree's own activate;
+#   on a profile row Enter stays `connection.toggle_connect`), `explorer.expand_all_children`,
+#   `explorer.edit_scope`, `explorer.set_level.*`, `metadata.clear_cache`.
+# - No `explorer.focus_filter` row: VS Code's `ctrl-alt-f` is AltGr+F, which types `@` on
+#   Turkish-F (`altgr/tr-f.toml`); the Workspace `ctrl-f` row stays (P-M4-9).
+# No row takes `alt-shift-f` (M5's reformat) or starts with the command palette's chord.
+# Checks: `crates/app/hacivat-app/tests/m4_routing.rs` and the AltGr CI
+# (`crates/ui/hacivat-ui/tests/keymap_collisions.rs`).
+
+[[binding]]
+chord = "f12"
+command = "explorer.view_ddl"
+context = "Explorer"
+
+[[binding]]
+chord = "shift-alt-c"
+command = "explorer.copy_qualified_name"
+context = "Explorer"
+
+[[binding]]
+chord = "ctrl-left"
+command = "explorer.collapse_all"
+context = "Explorer"
+
+[[binding]]
+chord = "f5"
+command = "explorer.refresh"
+context = "Explorer"
+
+[[binding]]
+chord = "ctrl-c"
+command = "ddl_view.copy"
+context = "DdlView"
