@@ -71,6 +71,7 @@ fn shop(
                 initially_deferred: false,
                 not_valid: false,
                 enforced: true,
+                rare: None,
             }))),
     );
     let il = t.add(

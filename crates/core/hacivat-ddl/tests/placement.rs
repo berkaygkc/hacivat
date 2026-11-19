@@ -71,7 +71,13 @@ fn fk(target: &[&str]) -> ConstraintDef {
 }
 
 fn check() -> ConstraintDef {
-    c(Some("ck"), ConstraintBody::Check { expr: n("a > 0") })
+    c(
+        Some("ck"),
+        ConstraintBody::Check {
+            expr: n("a > 0"),
+            no_inherit: false,
+        },
+    )
 }
 
 fn one(k: ConstraintDef, mode: Placement, d: DialectId, plan: &PlacePlan<'_>) -> Placed {

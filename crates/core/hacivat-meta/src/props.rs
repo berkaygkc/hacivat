@@ -386,8 +386,7 @@ pub struct CheckProps {
 // check is **enforced**. A derived `Default` made `enforced = false`, so every constraint built
 // with `..Default::default()` read as NOT ENFORCED, a wrong fact for the DDL producer. The
 // field name and its meaning are unchanged, so the cache codec (T11: one bool,
-// `put_bool(p.enforced)`) needs nothing; when T13 adds `rare` to these structs, these impls
-// gain `rare: None`.
+// `put_bool(p.enforced)`) needs nothing; T13's `rare` (R-W2-8) is `None` by default.
 
 impl Default for KeyProps {
     fn default() -> Self {
@@ -406,6 +405,7 @@ impl Default for KeyProps {
             invisible: false,
             backing_index: None,
             implicit_for: None,
+            rare: None,
         }
     }
 }
@@ -416,6 +416,7 @@ impl Default for CheckProps {
             expr: Name::from(""),
             not_valid: false,
             enforced: true,
+            rare: None,
         }
     }
 }
@@ -663,7 +664,8 @@ pub struct KeyRare {
     /// outside `pg_catalog`, with its parameters (`gist_trgm_ops(siglen=32)`).
     pub opclass: Vec<Option<Name>>,
     /// PostgreSQL `indcollation` when it differs from the column's collation; SQLite
-    /// `index_xinfo.coll` when it differs from the column's declared one.
+    /// `index_xinfo.coll` when it differs from the column's declared one. The collation's name
+    /// as the server stores it, unquoted (`C`, `tr-TR-x-icu`; DDL quotes it, like a column's).
     pub collation: Vec<Option<Name>>,
 }
 

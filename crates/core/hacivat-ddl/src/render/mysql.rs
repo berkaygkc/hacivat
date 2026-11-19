@@ -259,7 +259,11 @@ fn constraint(ctx: &RenderCtx, k: &ConstraintDef) -> Result<String, RenderError>
                 s.push_str(a);
             }
         }
-        ConstraintBody::Check { expr } => {
+        ConstraintBody::Check { expr, no_inherit } => {
+            // ## m4-t13-assemble (R-W2-8)
+            if *no_inherit {
+                return Err(RenderError::Invalid("NO INHERIT on MySQL"));
+            }
             named(&mut s)?;
             s.push_str(&format!("CHECK ({expr})"));
         }

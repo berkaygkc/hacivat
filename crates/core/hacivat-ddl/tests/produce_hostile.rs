@@ -288,6 +288,7 @@ fn not_enforced_check_written_as_not_enforced() {
                 expr: n("(`a` > 0)"),
                 not_valid: false,
                 enforced: false,
+                rare: None,
             })),
         ),
     );

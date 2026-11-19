@@ -33,8 +33,8 @@ use hacivat_meta::namespace::{
 use hacivat_meta::persist::crypt::unpad;
 use hacivat_meta::persist::{CATALOG_DOMAIN, RowCipher, RowKey};
 use hacivat_meta::props::{
-    ColumnExt, ColumnProps, ColumnRare, FkAction, FkMatch, FkProps, GenericProps, Identity,
-    IndexProps, KeyColumn, KeyProps, PgTableExt, Props, TableExt, TableProps, ViewProps,
+    ColumnExt, ColumnProps, ColumnRare, FkAction, FkMatch, FkProps, FkRare, GenericProps, Identity,
+    IndexProps, KeyColumn, KeyProps, KeyRare, PgTableExt, Props, TableExt, TableProps, ViewProps,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -100,7 +100,10 @@ fn pg_schema() -> NamespaceSnapshot {
                 }))),
         );
         t.add(tab, column("id", 1, "bigint", false));
-        t.add(tab, column("created_at", 2, "timestamp with time zone", i == 1));
+        t.add(
+            tab,
+            column("created_at", 2, "timestamp with time zone", i == 1),
+        );
         t.add(tab, column("ılık", 3, "text", i == 2));
         t.add(
             tab,
@@ -114,6 +117,12 @@ fn pg_schema() -> NamespaceSnapshot {
                     desc: vec![false],
                     unique: true,
                     enforced: true,
+                    // ## m4-t13-assemble: seed the format-minor-1 rare part (R-W2-8).
+                    rare: Some(Arc::new(KeyRare {
+                        nulls_first: vec![true],
+                        opclass: vec![Some(Name::from("public.int4_ops"))],
+                        collation: vec![None],
+                    })),
                     ..Default::default()
                 }))),
         );
@@ -149,6 +158,17 @@ fn pg_schema() -> NamespaceSnapshot {
                         initially_deferred: false,
                         not_valid: false,
                         enforced: true,
+                        // ## m4-t13-assemble: seed the format-minor-1 rare part (R-W2-8).
+                        rare: Some(Arc::new(FkRare {
+                            fk_ref_index: Some(Ref {
+                                kind: ObjectKind::Index,
+                                path: ["app", "public", "siparis", "siparis_pkey"]
+                                    .into_iter()
+                                    .map(Name::from)
+                                    .collect(),
+                                server_id: Some(ServerId::Oid(16_401)),
+                            }),
+                        })),
                     })),
                 ),
             );

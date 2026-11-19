@@ -1322,7 +1322,7 @@ fn pg_part_options_ride_in_the_rare_part() {
     let mut b = pg_part(2, "b");
     b.desc = true;
     b.nulls_first = true;
-    b.collation = Some(n("\"C\""));
+    b.collation = Some(n("C"));
     let mut i = pg_index(260, "t_opts_idx", vec![name, b]);
     i.method = Some(n("gin"));
     let mut uk = pg_con(
@@ -1333,7 +1333,7 @@ fn pg_part_options_ride_in_the_rare_part() {
     );
     uk.index = Some(261);
     let mut ub = pg_part(2, "b");
-    ub.collation = Some(n("\"C\""));
+    ub.collation = Some(n("C"));
     let mut ui = pg_index(261, "t_ab_key", vec![pg_part(1, "a"), ub]);
     ui.unique = true;
     let plain = pg_index(262, "t_plain_idx", vec![pg_part(1, "a")]);
@@ -1351,12 +1351,12 @@ fn pg_part_options_ride_in_the_rare_part() {
     assert_eq!(k.desc, vec![false, true]);
     assert_eq!(k.nulls_first(), &[false, true][..]);
     assert_eq!(k.opclass(), &[Some(n("public.gin_trgm_ops")), None][..]);
-    assert_eq!(k.collation(), &[None, Some(n("\"C\""))][..]);
+    assert_eq!(k.collation(), &[None, Some(n("C"))][..]);
     let key = find(&out, ObjectKind::UniqueKey, "t_ab_key")
         .key()
         .unwrap()
         .clone();
-    assert_eq!(key.collation(), &[None, Some(n("\"C\""))][..]);
+    assert_eq!(key.collation(), &[None, Some(n("C"))][..]);
     assert!(key.nulls_first().is_empty() && key.opclass().is_empty());
     assert_eq!(
         find(&out, ObjectKind::Index, "t_plain_idx")

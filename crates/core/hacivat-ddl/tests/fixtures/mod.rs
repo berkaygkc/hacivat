@@ -197,6 +197,7 @@ pub fn fk(cols: &[&str], to: Ref, to_cols: &[&str]) -> FkProps {
         initially_deferred: false,
         not_valid: false,
         enforced: true,
+        rare: None,
     }
 }
 
@@ -212,6 +213,7 @@ pub fn check(kind: ObjectKind, name: &str, expr: &str) -> Obj {
             expr: n(expr),
             not_valid: false,
             enforced: true,
+            rare: None,
         })),
     )
 }
@@ -1015,6 +1017,7 @@ pub fn pg_with(overlays: Overlays) -> Fx {
                 expr: n("(customer_id > 0)"),
                 not_valid: false,
                 enforced: false,
+                rare: None,
             })),
         ),
     );
@@ -1029,6 +1032,72 @@ pub fn pg_with(overlays: Overlays) -> Fx {
         ),
     );
     shop.push(loose);
+
+    // ## m4-t13-assemble (R-W2-8): per-part NULLS FIRST, operator classes and collations; an
+    // exclusion constraint with its operators and deferral; a CHECK … NO INHERIT.
+    let mut rare_opts = table("rare_opts", pg_table(None, None));
+    for (c, ty) in [
+        ("a", "text"),
+        ("b", "integer"),
+        ("room", "integer"),
+        ("during", "tsrange"),
+    ] {
+        add(&mut rare_opts, column(c, col("", ty, true)));
+    }
+    let mut ab = ix(&["a", "b"], &[false, true]);
+    ab.key.rare = Some(Arc::new(hacivat_meta::props::KeyRare {
+        nulls_first: vec![false, false],
+        opclass: vec![Some(n("text_pattern_ops")), None],
+        collation: vec![Some(n("C")), None],
+    }));
+    add(&mut rare_opts, index("rare_opts_ab_idx", ab));
+    let mut trgm = ix(&["a"], &[]);
+    trgm.method = Some(n("gin"));
+    trgm.key.rare = Some(Arc::new(hacivat_meta::props::KeyRare {
+        opclass: vec![Some(n("public.gin_trgm_ops(siglen=32)"))],
+        ..Default::default()
+    }));
+    add(&mut rare_opts, index("rare_opts_a_trgm", trgm));
+    let mut first = ix(&["b"], &[]);
+    first.key.rare = Some(Arc::new(hacivat_meta::props::KeyRare {
+        nulls_first: vec![true],
+        ..Default::default()
+    }));
+    add(&mut rare_opts, index("rare_opts_b_nulls_first", first));
+    add(
+        &mut rare_opts,
+        obj(
+            ObjectKind::Exclusion,
+            "rare_opts_room_excl",
+            Props::Check(Arc::new(CheckProps {
+                expr: n("USING gist (room WITH =, during WITH &&)"),
+                rare: Some(Arc::new(hacivat_meta::props::CheckRare {
+                    excl_ops: vec![n("="), n("&&")],
+                    excl_deferrable: true,
+                    excl_initially_deferred: true,
+                    ..Default::default()
+                })),
+                ..CheckProps::default()
+            })),
+        ),
+    );
+    add(
+        &mut rare_opts,
+        obj(
+            ObjectKind::Check,
+            "rare_opts_b_check",
+            Props::Check(Arc::new(CheckProps {
+                expr: n("b > 0"),
+                rare: Some(Arc::new(hacivat_meta::props::CheckRare {
+                    no_inherit: true,
+                    ..Default::default()
+                })),
+                ..CheckProps::default()
+            })),
+        ),
+    );
+    shop.push(rare_opts);
+    // ## end m4-t13-assemble
 
     // An object of a kind this build does not know (a newer relkind).
     shop.push(leaf(obj(
@@ -1494,6 +1563,7 @@ pub fn mysql(dbms: DbmsKind) -> Fx {
                 expr: n("(`a` > 0)"),
                 not_valid: false,
                 enforced: false,
+                rare: None,
             })),
         ),
     );
@@ -1904,6 +1974,12 @@ pub const CASES: &[Case] = &[
             fx.text(&[fx.key(K::Table, &["shop", "loose"])], &t, &no_grants())
         },
     },
+    // ## m4-t13-assemble
+    Case {
+        rel: "pg/index_part_options",
+        make: || pg_text(&[(K::Table, &["shop", "rare_opts"])], no_grants()),
+    },
+    // ## end m4-t13-assemble
     Case {
         rel: "mysql/unique_key_index_options",
         make: || {

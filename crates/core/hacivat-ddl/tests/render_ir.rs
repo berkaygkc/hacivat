@@ -345,6 +345,7 @@ fn after_table_placement_renders_alter_table_add() {
         Some("amount_ck"),
         ConstraintBody::Check {
             expr: n("amount > 0"),
+            no_inherit: false,
         },
     );
     check.not_valid = true;
@@ -979,6 +980,7 @@ fn ir_table(d: DialectId) -> Vec<DdlOp> {
             Some("people_name_ck"),
             ConstraintBody::Check {
                 expr: n("name <> ''"),
+                no_inherit: false,
             },
         ),
     ];

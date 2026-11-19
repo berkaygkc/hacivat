@@ -194,7 +194,13 @@ fn constraint(ctx: &RenderCtx, k: &ConstraintDef, inline: bool) -> Result<String
                 s.push_str(a);
             }
         }
-        ConstraintBody::Check { expr } => s.push_str(&format!("CHECK ({expr})")),
+        ConstraintBody::Check { expr, no_inherit } => {
+            s.push_str(&format!("CHECK ({expr})"));
+            // ## m4-t13-assemble (R-W2-8)
+            if *no_inherit {
+                s.push_str(" NO INHERIT");
+            }
+        }
         ConstraintBody::Exclusion { raw } => {
             if inline {
                 return Err(RenderError::Invalid("EXCLUDE inside a column"));

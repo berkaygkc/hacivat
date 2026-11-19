@@ -312,6 +312,23 @@ pub(crate) fn index_part(ctx: &RenderCtx, p: &IndexPartDef) -> Result<String, Re
         Some(_) => return Err(RenderError::Invalid("a prefix length outside MySQL")),
         None => {}
     }
+    // ## m4-t13-assemble (R-W2-8): `COLLATE` then the operator class, before the direction
+    // (PostgreSQL `CREATE INDEX` grammar; SQLite has the collation only).
+    if let Some(coll) = &p.collation {
+        if mysql {
+            return Err(RenderError::Invalid("an index part collation on MySQL"));
+        }
+        s.push_str(" COLLATE ");
+        s.push_str(&ctx.ident(coll)?);
+    }
+    if let Some(op) = &p.opclass {
+        if d != DialectId::Postgres {
+            return Err(RenderError::Invalid("an operator class outside PostgreSQL"));
+        }
+        s.push(' ');
+        s.push_str(op);
+    }
+    // ## end m4-t13-assemble
     if p.desc {
         s.push_str(" DESC");
     }
