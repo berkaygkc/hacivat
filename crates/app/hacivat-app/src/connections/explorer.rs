@@ -1,48 +1,56 @@
-//! The explorer list of profiles, by environment, with filter and keyboard (NOTES surface 8, Task 18).
+//! The explorer: the profile list of M2a became the database explorer tree (NOTES surface 8,
+//! Task 18; M4 Task 14, R-M4-18, design/m4-explorer surfaces 1, 2, 4).
 //!
-//! - **Filter.** A `TextInput` matched through `PreparedQuery` (Turkish-tolerant for Turkish
-//!   users, D-074) against each profile's name and host. Its `InputEvent::Cancelled` (Escape
-//!   in the field) runs the shell's Escape hook (P16).
-//! - **Groups** follow `EnvTag::severity_rank`, then "No environment" last (R31), each with a
-//!   small-caps header and its count.
-//! - **Rows** (23 px): the engine glyph, the name, the environment mark, flags (a read-only lock,
-//!   red only on production; the route through an SSH tunnel; lock-open while the live
-//!   connection is plaintext), then the live state (✓ and latency, the run marker, ⚠, or the
-//!   unplug glyph after an idle disconnect) and the engine on the right.
-//! - **Selection** is `blue-tint` with a 1 px blue edge. The list registers the key context
-//!   `Explorer` (R20, P4): its bindings (Enter, ⌘E, ⌘D, ⌘⇧C, ⌫, Shift-F10) act on the
-//!   selection; ↑/↓ move it here. Focusing the list with nothing selected selects the first
-//!   row. Right-click opens the connection menu, double-click connects.
+//! - **Filter.** A `TextInput` ("Filter objects") matched through `PreparedQuery` against each
+//!   profile's name and host (M2a) and every loaded catalog name (Task 14, D-074): Contains,
+//!   Turkish-tolerant while the toggle in the field is on (its default is on for a Turkish UI
+//!   language or region). Matches reveal their ancestors; the match count sits in the field;
+//!   "No objects match" with Clear filter when nothing does. More than
+//!   [`SYNC_FILTER_NAMES`] names are matched off the UI thread, latest wins. Its
+//!   `InputEvent::Cancelled` (Escape in the field) runs the shell's Escape hook (P16).
+//! - **Tree** (`hacivat_ui::tree`, Task 8) over [`ExplorerModel`] (Task 14): the environment
+//!   headers of M2a (labels: by `EnvTag::severity_rank`, then "No environment" last, R31; with
+//!   a count) and the profile rows as roots, each with its catalog below (R-M4-18). A profile
+//!   row keeps its M2a content: the engine glyph, the name (strong while connected), the
+//!   environment mark, the read-only lock (red only on production), the SSH route and the
+//!   plaintext lock-open flags, and the live mark and meta (✓ and latency, the run marker, ⚠,
+//!   the unplug glyph after an idle disconnect; otherwise the engine).
+//! - **Selection and keys.** The tree's focus registers the key context `Explorer` (R20, P4).
+//!   Selecting any row selects its profile in [`ConnectionsModel`] (the sheet follows it); the
+//!   profile commands (Enter, ⌘E, ⌘D, ⌘⇧C, ⌫, Shift-F10) act only while the keyboard's row is a
+//!   profile root ([`is_visible`]): elsewhere their chords pass through to the tree (Enter
+//!   opens or toggles, Shift-F10 asks for the row's menu). Focusing the tree with nothing
+//!   selected selects the first profile. Right-click on a profile row opens the connection menu
+//!   of that row (the event's key, never the selection); a double-click connects.
 //! - **Empty state** (NOTES §8): the title, one sentence, New connection, Paste URL and a ghost
 //!   Import pg_service.conf…
 //!
-//! Debug selectors: `explorer-list`, `explorer-row-<i>` (the visible rows, top down); label IDs
-//! `explorer-group-<i>`, `explorer-group-count-<i>` and `explorer-row-name-<i>`.
+//! Debug selectors: `explorer-list` (the tree's frame) and the tree's own (`hv-tree-name-<key>`,
+//! `hv-tree-flag-<key>-<i>`, `hv-tree-mark-<key>`); [`shown_rows`] lists what the tree shows.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::Location;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use hacivat_l10n::{MatchMode, NoArgs, PreparedQuery, SearchOpts, build_key, ids};
-use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
+use hacivat_l10n::{Count, NoArgs, Text, ids};
+use hacivat_proto::{EnvTag, ProfileId};
 use hacivat_session::LiveState;
 use hacivat_session::profile::{Profile, ProfileEndpoint, TransportSpec};
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::button::{Button, ButtonKind};
-use hacivat_ui::capsule::env_swatch;
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::input::{InputEvent, TextInput};
 use hacivat_ui::menu::MenuItemSpec;
-use hacivat_ui::step_trail::run_marker;
 use hacivat_ui::text::{Label, RenderedText, TextFn, TextRegistry, TextSource};
+use hacivat_ui::tree::{
+    ChildState, KeySet, MetaMark, RowFlag, TreeEvent, TreeKey, TreeModel, TreeRowData, TreeView,
+};
 use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, AnyView, App, AppContext as _, Bounds, Context, Entity, FocusHandle, Global, Hsla,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement,
-    Pixels, Point, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    WeakEntity, Window, canvas, div, px,
+    AnyElement, AnyView, App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
+    Global, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Point, Render,
+    SharedString, Styled, Subscription, Task, WeakEntity, Window, canvas, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, TypeStyle};
 
@@ -50,37 +58,65 @@ use crate::commands::palette::search_opts;
 use crate::connections::capsule::{engine_label, env_kind, is_unencrypted, latency_label};
 use crate::connections::model::ConnectionsModel;
 use crate::connections::session_toasts;
-use crate::l10n_global::{text_fn, tr};
+use crate::console::find_bar::{ToggleSpec, toggle_element};
+use crate::explorer::adapter::{
+    self, ContributedLoad, ContributedPlace, ExplorerCache, ExplorerInputs, ExplorerModel,
+    FilterResult, NodeInfo, ProfileInput, SYNC_FILTER_NAMES, profile_key,
+};
+use crate::explorer::contrib::{ContributedChildren, contributors};
+use crate::l10n_global::{L10nGlobal, is_turkic, text_fn, tr, tr_id, ui_language};
 use crate::shell::hooks::ShellHooks;
 use crate::shell::keymap_state::shortcut_label;
 use crate::shell::tiles::{self, panel_header, panel_title};
 use crate::shell::{Workspace, register_focus_context};
 
-/// The key context of the focused list (R20).
+/// The key context of the focused tree (R20).
 pub const EXPLORER_CONTEXT: &str = "Explorer";
-/// A row's height (NOTES §8).
-const ROW_PX: f32 = 23.0;
-/// A group header's height.
-const GROUP_PX: f32 = 26.0;
 
 /// The explorer the shell built, for the focus commands.
 struct ExplorerHandle(WeakEntity<ExplorerView>);
 
 impl Global for ExplorerHandle {}
 
+// ## m4-t14-explorer: the tree in place of the M2a list (R-M4-18).
+
+/// What the model was last built from (a rebuild is skipped when nothing changed).
+#[derive(Clone, PartialEq)]
+struct Stamp {
+    profiles: Vec<(usize, LiveState, bool)>,
+    catalogs: u64,
+    l10n: u64,
+    contributors: u64,
+    filter: Option<usize>,
+    loads: usize,
+}
+
 /// The explorer view (the `explorer` hook).
 pub struct ExplorerView {
     filter: Entity<TextInput>,
-    list_focus: FocusHandle,
-    /// Each visible row's bounds, from its last frame (the keyboard menu's anchor).
-    row_bounds: Rc<RefCell<HashMap<ProfileId, Bounds<Pixels>>>>,
+    tree: Entity<TreeView<ExplorerModel>>,
+    /// The filter's Turkish-tolerant toggle; `None` follows the default (D-074).
+    tolerant: Option<bool>,
+    tolerant_focus: FocusHandle,
+    cache: Rc<ExplorerCache>,
+    stamp: Option<Stamp>,
+    generation: u64,
+    /// The filter's result for the current query (`None`: no filter).
+    result: Option<Arc<FilterResult>>,
+    /// The expansion before the filter revealed its matches (restored when it clears).
+    saved_expansion: Option<KeySet>,
+    /// The newest filter job; a result of an older one is dropped (latest wins).
+    filter_seq: u64,
+    filter_task: Option<Task<()>>,
+    /// The children of contributed nodes expanded so far.
+    loads: HashMap<TreeKey, ContributedLoad>,
     _subscriptions: Vec<Subscription>,
 }
 
-/// The `explorer` hook: builds the view, registers the list's `Explorer` key context (P4).
+/// The `explorer` hook: builds the view, registers the tree's `Explorer` key context (P4).
 pub fn build(window: &mut Window, cx: &mut App) -> AnyView {
     let view = cx.new(|cx| ExplorerView::new(window, cx));
-    let list = view.read(cx).list_focus.clone();
+    let list = view.read(cx).list_focus(cx);
     register_focus_context(cx, list, EXPLORER_CONTEXT);
     cx.set_global(ExplorerHandle(view.downgrade()));
     view.into()
@@ -88,6 +124,11 @@ pub fn build(window: &mut Window, cx: &mut App) -> AnyView {
 
 fn explorer(cx: &App) -> Option<Entity<ExplorerView>> {
     cx.try_global::<ExplorerHandle>()?.0.upgrade()
+}
+
+/// The explorer's tree (tests, Task 24).
+pub fn tree(cx: &App) -> Option<Entity<TreeView<ExplorerModel>>> {
+    Some(explorer(cx)?.read(cx).tree.clone())
 }
 
 /// Focuses the filter field (`explorer.focus_filter`).
@@ -98,28 +139,27 @@ pub fn focus_filter(window: &mut Window, cx: &mut App) {
     }
 }
 
-/// Whether `id`'s row is visible under the current filter (true without an explorer view).
+/// Whether the explorer acts on profile `id` now: its root row is shown under the filter and
+/// is the tree's keyboard row (true without an explorer view). The profile commands are enabled
+/// only then, so their chords reach the tree on any other row (carries-w2 T14, R-W1-5).
 pub fn is_visible(cx: &App, id: ProfileId) -> bool {
     match explorer(cx) {
-        Some(view) => view.read(cx).visible_ids(cx).contains(&id),
+        Some(view) => view.read(cx).acts_on(id, cx),
         None => true,
     }
 }
 
-/// Focuses the list (its `Explorer` bindings then apply).
+/// Focuses the tree (its `Explorer` bindings then apply).
 pub fn focus_list(window: &mut Window, cx: &mut App) {
     if let Some(view) = explorer(cx) {
-        let handle = view.read(cx).list_focus.clone();
+        let handle = view.read(cx).list_focus(cx);
         window.focus(&handle, cx);
     }
 }
 
 /// The search options of the filter: contains, Turkish-tolerant for Turkish users.
-fn filter_opts(cx: &App) -> SearchOpts {
-    SearchOpts {
-        mode: MatchMode::Contains,
-        ..search_opts(cx)
-    }
+fn default_tolerant(cx: &App) -> bool {
+    search_opts(cx).turkish_tolerant
 }
 
 /// A profile's host or file, as the filter and the sheet see it.
@@ -132,95 +172,68 @@ pub fn endpoint_text(p: &Profile) -> String {
     }
 }
 
-/// The visible groups for `query`: by severity, then "No environment" (R31); file order inside
-/// a group.
-pub fn visible_groups(cx: &App, query: &str) -> Vec<(Option<EnvTag>, Vec<Arc<Profile>>)> {
-    let Some(m) = cx.try_global::<ConnectionsModel>() else {
+/// One row the tree shows (for tests and later tasks): its key, depth and row data.
+#[derive(Debug, Clone)]
+pub struct ShownRow {
+    pub key: TreeKey,
+    pub depth: u16,
+    pub data: TreeRowData,
+    /// The status text of a loading or failed child row (`None` for a node).
+    pub status: Option<SharedString>,
+}
+
+/// The rows the tree shows, top down (as of its last flatten).
+pub fn shown_rows(cx: &App) -> Vec<ShownRow> {
+    let Some(tree) = tree(cx) else {
         return Vec::new();
     };
-    let opts = filter_opts(cx);
-    let prepared = PreparedQuery::new(query, &opts);
-    let shown = |p: &Profile| {
-        prepared.matches(&build_key(&p.name, &opts)).is_some()
-            || prepared
-                .matches(&build_key(&endpoint_text(p), &opts))
-                .is_some()
-    };
-    let mut order: Vec<Option<EnvTag>> = EnvTag::ALL.iter().copied().map(Some).collect();
-    order.sort_by_key(|t| t.map(EnvTag::severity_rank));
-    order.push(None);
-    order
-        .into_iter()
-        .filter_map(|tag| {
-            let rows: Vec<Arc<Profile>> = m
-                .profiles()
-                .iter()
-                .filter(|p| p.environment == tag && shown(p))
-                .cloned()
-                .collect();
-            (!rows.is_empty()).then_some((tag, rows))
+    let tree = tree.read(cx);
+    let model = tree.model();
+    tree.flat()
+        .rows()
+        .iter()
+        .filter_map(|r| {
+            use hacivat_ui::tree::flat::RowKind;
+            match r.kind {
+                RowKind::Node => Some(ShownRow {
+                    key: r.key,
+                    depth: r.depth,
+                    data: model.row(r.key)?,
+                    status: None,
+                }),
+                RowKind::Loading | RowKind::Failed => {
+                    let label = match model.children(r.key) {
+                        ChildState::Loading { label, .. } | ChildState::Failed { label, .. } => {
+                            label
+                        }
+                        _ => return None,
+                    };
+                    Some(ShownRow {
+                        key: r.key,
+                        depth: r.depth,
+                        data: TreeRowData::new(label.clone(), TextSource::Fluent),
+                        status: Some(label),
+                    })
+                }
+            }
         })
         .collect()
 }
 
-fn group_title(cx: &App, tag: Option<EnvTag>) -> SharedString {
-    let id = match tag {
-        Some(EnvTag::Production) => ids::hv::EXPLORER_GROUP_PRODUCTION,
-        Some(EnvTag::Staging) => ids::hv::EXPLORER_GROUP_STAGING,
-        Some(EnvTag::Test) => ids::hv::EXPLORER_GROUP_TEST,
-        Some(EnvTag::Dev) => ids::hv::EXPLORER_GROUP_DEV,
-        Some(EnvTag::Local) => ids::hv::EXPLORER_GROUP_LOCAL,
-        None => ids::hv::EXPLORER_GROUP_UNSET,
+/// The profile root rows shown (in order), as `(profile, bounds of the row)`.
+pub fn profile_rows(cx: &App) -> Vec<(ProfileId, Option<Bounds<Pixels>>)> {
+    let Some(tree) = tree(cx) else {
+        return Vec::new();
     };
-    tr(cx, id, NoArgs)
-}
-
-// ## m2a-t21-shots
-/// How readily a row's name shrinks against its meta (flex weights): the meta gives way first.
-const NAME_SHRINK: f32 = 0.01;
-/// How much of a name a row keeps at the least: about six characters (and the ellipsis).
-const NAME_MIN_CHARS: usize = 6;
-
-/// The narrowest a row's name gets: its first [`NAME_MIN_CHARS`] characters and the ellipsis,
-/// or the whole name when it is that short.
-fn name_min_width(name: &str, style: TypeStyle, window: &mut Window) -> Pixels {
-    let mut chars = name.chars();
-    let head: String = chars.by_ref().take(NAME_MIN_CHARS).collect();
-    let text: SharedString = if chars.next().is_some() {
-        format!("{head}…").into()
-    } else {
-        head.into()
-    };
-    let run = hacivat_ui_core::gpui_surface::TextRun {
-        len: text.len(),
-        font: font_for(&style),
-        color: hacivat_ui_core::gpui_surface::hsla(0.0, 0.0, 0.0, 1.0),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    window
-        .text_system()
-        .shape_line(text, px(style.size_px), &[run], None)
-        .width
-}
-
-// ## m2b-t22-live
-/// The laid-out width of `text` in `style` (a whole name, for the SSH flag's room).
-fn text_width(text: &str, style: TypeStyle, window: &mut Window) -> Pixels {
-    let text: SharedString = text.to_string().into();
-    let run = hacivat_ui_core::gpui_surface::TextRun {
-        len: text.len(),
-        font: font_for(&style),
-        color: hacivat_ui_core::gpui_surface::hsla(0.0, 0.0, 0.0, 1.0),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    window
-        .text_system()
-        .shape_line(text, px(style.size_px), &[run], None)
-        .width
+    let tree = tree.read(cx);
+    tree.flat()
+        .rows()
+        .iter()
+        .filter_map(|r| {
+            let id = tree.model().profile_root(r.key)?;
+            Some((id, tree.row_bounds(r.key)))
+        })
+        .collect()
 }
 
 /// A wrapping paragraph recorded in the text registry like a label (`Label` draws one line),
@@ -272,23 +285,6 @@ pub(crate) fn paragraph(
         .into_any_element()
 }
 
-/// Records its parent's bounds while it is prepainted (the keyboard menu's anchor).
-fn bounds_probe(
-    slot: Rc<RefCell<HashMap<ProfileId, Bounds<Pixels>>>>,
-    id: ProfileId,
-) -> impl IntoElement {
-    canvas(
-        move |bounds, _, _| {
-            slot.borrow_mut().insert(id, bounds);
-        },
-        |_, _, _, _| {},
-    )
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
-}
-
 /// The connection menu's items for `id` (NOTES §8): Connect or Disconnect, Edit…,
 /// Duplicate, Copy as URL, a separator, Delete…. They run on the selection.
 pub fn menu_items(cx: &App, id: ProfileId) -> Vec<MenuItemSpec> {
@@ -338,11 +334,15 @@ pub fn open_context_menu(anchor: Option<Point<Pixels>>, window: &mut Window, cx:
     else {
         return;
     };
+    open_menu_for(id, anchor, window, cx);
+}
+
+/// Opens profile `id`'s connection menu at `anchor` (or under its row).
+fn open_menu_for(id: ProfileId, anchor: Option<Point<Pixels>>, window: &mut Window, cx: &mut App) {
     let anchor = anchor
         .or_else(|| {
-            let view = explorer(cx)?;
-            let bounds = view.read(cx).row_bounds.borrow().get(&id).copied()?;
-            Some(bounds.bottom_left())
+            let tree = tree(cx)?;
+            Some(tree.read(cx).row_bounds(profile_key(id))?.bottom_left())
         })
         .unwrap_or_default();
     let items = menu_items(cx, id);
@@ -354,19 +354,170 @@ pub fn open_context_menu(anchor: Option<Point<Pixels>>, window: &mut Window, cx:
     });
 }
 
+/// What profile `p`'s root row shows besides its name (M2a content, mock root meta).
+fn profile_input(p: &Arc<Profile>, cx: &App) -> ProfileInput {
+    let m = cx.global::<ConnectionsModel>();
+    let live = m.live(p.id);
+    let production = p.environment == Some(EnvTag::Production);
+    let mut flags = vec![RowFlag::Env(env_kind(p.environment))];
+    let mut words: Vec<SharedString> = Vec::new();
+    if let Some(tag) = p.environment {
+        words.push(tr_id(
+            cx,
+            match tag {
+                EnvTag::Production => "hv-conn-env-production",
+                EnvTag::Staging => "hv-conn-env-staging",
+                EnvTag::Test => "hv-conn-env-test",
+                EnvTag::Dev => "hv-conn-env-dev",
+                EnvTag::Local => "hv-conn-env-local",
+            },
+        ));
+    }
+    // Read-only: red only on production (DESIGN.md).
+    if p.read_only {
+        flags.push(RowFlag::Lock { production });
+        words.push(tr(cx, ids::hv::CAPSULE_ACCESS_READ_ONLY, NoArgs));
+    }
+    if matches!(p.transport, TransportSpec::SshTunnel(_)) {
+        let text = tr_id(cx, "hv-conn-section-ssh");
+        words.push(text.clone());
+        flags.push(RowFlag::Icon {
+            icon: IconName::Route,
+            text,
+        });
+    }
+    let info = match &live {
+        LiveState::Connected(info) => Some(info.clone()),
+        _ => None,
+    };
+    if let Some(info) = &info
+        && is_unencrypted(p, info)
+    {
+        let text = tr_id(cx, "hv-conn-enc-unencrypted");
+        words.push(text.clone());
+        flags.push(RowFlag::Icon {
+            icon: IconName::LockOpen,
+            text,
+        });
+    }
+    let engine = || Some(engine_label(p, None));
+    let mut tooltip = None;
+    let (mark, meta) = match &live {
+        LiveState::Connected(info) => (Some(MetaMark::Ok), Some(latency_label(cx, info))),
+        // ## m2b-t01-interfaces: a reconnect runs like a connect.
+        LiveState::Connecting(_) | LiveState::Reconnecting { .. } => {
+            (Some(MetaMark::Running), engine())
+        }
+        LiveState::Failed(_) | LiveState::Lost { .. } => {
+            (Some(MetaMark::Glyph(IconName::TriangleAlert)), engine())
+        }
+        // ## m2b-t22-live: disconnected while idle (B18).
+        LiveState::Disconnected if session_toasts::is_idle(cx, p.id) => {
+            tooltip = Some(tr_id(cx, "hv-conn-idle-cap"));
+            (Some(MetaMark::Glyph(IconName::Unplug)), engine())
+        }
+        LiveState::Disconnected => (None, engine()),
+    };
+    let a11y = (!words.is_empty()).then(|| {
+        words
+            .iter()
+            .map(|w| w.as_ref())
+            .collect::<Vec<_>>()
+            .join(", ")
+            .into()
+    });
+    ProfileInput {
+        profile: p.clone(),
+        connected: info.is_some(),
+        mark,
+        meta,
+        flags,
+        a11y,
+        tooltip,
+        catalog: adapter::catalog_of(p.id, cx),
+    }
+}
+
+/// The contributed nodes of every database a profile shows (R-M4-19).
+fn contributed_places(profiles: &[ProfileInput], cx: &App) -> Vec<ContributedPlace> {
+    let list = contributors(cx);
+    if list.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for p in profiles {
+        let Some(cat) = p.catalog.as_ref().filter(|c| c.generation > 0) else {
+            continue;
+        };
+        let mut dbs: Vec<String> = Vec::new();
+        match hacivat_meta::kind::database_level(p.profile.engine) {
+            hacivat_meta::kind::DbLevel::File => dbs.push("main".to_string()),
+            level => {
+                for k in cat
+                    .namespaces
+                    .keys()
+                    .chain(cat.states.keys().filter_map(|c| match c {
+                        hacivat_meta::snapshot::ContainerKey::Namespace(k) => Some(k),
+                        _ => None,
+                    }))
+                {
+                    let name = match (level, k.kind) {
+                        (hacivat_meta::kind::DbLevel::Database, _) => k.path.first(),
+                        (_, hacivat_meta::NsKind::Schema) => k.path.last(),
+                        _ => None,
+                    };
+                    if let Some(n) = name
+                        && !dbs.iter().any(|d| d == n.as_ref())
+                    {
+                        dbs.push(n.to_string());
+                    }
+                }
+                if let Some(db) = &p.profile.database
+                    && level == hacivat_meta::kind::DbLevel::Database
+                    && !dbs.contains(db)
+                {
+                    dbs.push(db.clone());
+                }
+            }
+        }
+        for db in dbs {
+            let nodes: Vec<_> = list
+                .iter()
+                .flat_map(|c| c.database_children(p.profile.id, &db, cx))
+                .collect();
+            if !nodes.is_empty() {
+                out.push(ContributedPlace {
+                    profile: p.profile.id,
+                    database: db,
+                    nodes,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn contributors_generation(cx: &App) -> u64 {
+    contributors(cx).iter().fold(0u64, |acc, c| {
+        acc.wrapping_mul(31).wrapping_add(c.generation())
+    })
+}
+
 impl ExplorerView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let filter = cx.new(|cx| TextInput::new(cx, text_fn(ids::hv::EXPLORER_FILTER)));
-        let list_focus = cx.focus_handle().tab_stop(true);
+        let filter = cx.new(|cx| TextInput::new(cx, text_fn(ids::hv::EXPLORER_FILTER_OBJECTS)));
+        let tree = cx.new(|cx| {
+            let mut t = TreeView::new(ExplorerModel::default(), cx);
+            t.set_a11y_label(text_fn(ids::hv::EXPLORER_TREE_LABEL));
+            t
+        });
+        let tolerant_focus = cx.focus_handle().tab_stop(true);
         let subscriptions = vec![
             cx.subscribe_in(
                 &filter,
                 window,
                 |this, _, event: &InputEvent, window, cx| match event {
-                    InputEvent::Changed => {
-                        this.keep_selection_visible(cx);
-                        cx.notify();
-                    }
+                    InputEvent::Changed => this.query_changed(cx),
                     // P16: Escape in the field is the shell's Escape (cancel a connect).
                     InputEvent::Cancelled => {
                         let escape = cx.global::<ShellHooks>().escape.clone();
@@ -375,77 +526,414 @@ impl ExplorerView {
                         }
                     }
                     InputEvent::Submitted => {
-                        let handle = this.list_focus.clone();
+                        let handle = this.list_focus(cx);
                         window.focus(&handle, cx);
                     }
                     _ => {}
                 },
             ),
-            cx.observe_global::<ConnectionsModel>(|_, cx| cx.notify()),
+            cx.subscribe_in(&tree, window, |this, _, event: &TreeEvent, window, cx| {
+                this.on_tree_event(event, window, cx)
+            }),
+            cx.observe_global::<ConnectionsModel>(|this, cx| {
+                this.refresh(cx);
+                this.sync_selection(cx);
+                cx.notify();
+            }),
+            cx.observe_global::<adapter::ExplorerCatalogs>(|this, cx| {
+                let renames = adapter::take_renames(cx);
+                this.refresh(cx);
+                if !renames.is_empty() {
+                    this.apply_renames(&renames, cx);
+                }
+                // The filter's keys belong to the snapshots it ran over.
+                if this.result.is_some() {
+                    this.query_changed(cx);
+                }
+                cx.notify();
+            }),
         ];
-        ExplorerView {
+        let mut view = ExplorerView {
             filter,
-            list_focus,
-            row_bounds: Rc::default(),
+            tree,
+            tolerant: None,
+            tolerant_focus,
+            cache: Rc::default(),
+            stamp: None,
+            generation: 0,
+            result: None,
+            saved_expansion: None,
+            filter_seq: 0,
+            filter_task: None,
+            loads: HashMap::new(),
             _subscriptions: subscriptions,
-        }
+        };
+        view.refresh(cx);
+        view.sync_fold(cx);
+        view.sync_selection(cx);
+        view
     }
 
-    /// A selection the filter hides moves to the first visible row, or is cleared when no
-    /// row is visible: the `Explorer` commands never act on a hidden row.
-    fn keep_selection_visible(&self, cx: &mut Context<Self>) {
-        let ids = self.visible_ids(cx);
-        let selected = cx.global::<ConnectionsModel>().selected();
-        if selected.is_some_and(|s| !ids.contains(&s)) {
-            ConnectionsModel::select(cx, ids.first().copied());
-        }
+    fn list_focus(&self, cx: &App) -> FocusHandle {
+        self.tree.read(cx).focus_handle(cx)
     }
 
     fn filter_focus(&self, cx: &App) -> FocusHandle {
-        use hacivat_ui_core::gpui_surface::Focusable as _;
-        self.filter.focus_handle(cx)
+        self.filter.read(cx).focus_handle(cx)
     }
 
     fn query(&self, cx: &App) -> String {
-        self.filter.read(cx).value().to_string()
+        self.filter.read(cx).value().trim().to_string()
     }
 
-    /// The visible profiles, top down.
+    /// The filter's Turkish-tolerant toggle (D-074).
+    fn tolerant(&self, cx: &App) -> bool {
+        self.tolerant.unwrap_or_else(|| default_tolerant(cx))
+    }
+
+    /// Whether the profile commands act on `id` now (see [`is_visible`]).
+    fn acts_on(&self, id: ProfileId, cx: &App) -> bool {
+        let key = profile_key(id);
+        let tree = self.tree.read(cx);
+        tree.model().roots().contains(&key) && tree.cursor() == Some(key)
+    }
+
+    // ---- the model --------------------------------------------------------------------------
+
+    fn stamp(&self, cx: &App) -> Stamp {
+        let profiles = cx
+            .try_global::<ConnectionsModel>()
+            .map(|m| {
+                m.profiles()
+                    .iter()
+                    .map(|p| {
+                        (
+                            Arc::as_ptr(p) as usize,
+                            m.live(p.id),
+                            session_toasts::is_idle(cx, p.id),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Stamp {
+            profiles,
+            catalogs: adapter::catalogs_generation(cx),
+            l10n: cx
+                .try_global::<L10nGlobal>()
+                .map_or(0, |g| g.l10n.generation()),
+            contributors: contributors_generation(cx),
+            filter: self.result.as_ref().map(|r| Arc::as_ptr(r) as usize),
+            loads: self.loads.len(),
+        }
+    }
+
+    /// Rebuilds the model when anything it shows changed.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        let stamp = self.stamp(cx);
+        if self.stamp.as_ref() == Some(&stamp) {
+            return;
+        }
+        if self
+            .stamp
+            .as_ref()
+            .is_some_and(|s| s.contributors != stamp.contributors)
+        {
+            // A contributor changed: its expanded nodes are asked again.
+            self.loads.clear();
+        }
+        self.stamp = Some(self.stamp(cx));
+        let profiles: Vec<ProfileInput> = cx
+            .try_global::<ConnectionsModel>()
+            .map(|m| m.profiles().to_vec())
+            .unwrap_or_default()
+            .iter()
+            .map(|p| profile_input(p, cx))
+            .collect();
+        let contributed = contributed_places(&profiles, cx);
+        let inputs = ExplorerInputs {
+            contributed,
+            profiles,
+            l10n: cx.try_global::<L10nGlobal>().map(|g| g.l10n.clone()),
+            lang: ui_language(cx).map(|l| l.to_string()).unwrap_or_default(),
+            contributed_children: self.loads.clone(),
+            filter: self.result.clone(),
+        };
+        self.generation += 1;
+        let model = ExplorerModel::build(inputs, self.cache.clone(), self.generation);
+        self.tree.update(cx, |t, cx| t.set_model(model, cx));
+    }
+
+    /// The tree's type-ahead fold follows the filter's toggle (R-M4-50).
+    fn sync_fold(&mut self, cx: &mut Context<Self>) {
+        let turkic = ui_language(cx).is_some_and(|l| is_turkic(&l));
+        let fold = adapter::typeahead_fold(self.tolerant(cx), turkic);
+        self.tree.update(cx, |t, _| t.set_typeahead_fold(fold));
+    }
+
+    /// The tree's selection follows [`ConnectionsModel::selected`] when it names another
+    /// profile (a row selected below a profile keeps it).
+    fn sync_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(selected) = cx
+            .try_global::<ConnectionsModel>()
+            .and_then(|m| m.selected())
+        else {
+            return;
+        };
+        let owner = {
+            let tree = self.tree.read(cx);
+            let lead = tree.selection().iter().next().copied();
+            lead.and_then(|k| tree.model().profile_of(k))
+        };
+        if owner != Some(selected) {
+            let key = profile_key(selected);
+            self.tree.update(cx, |t, cx| t.select(key, cx));
+        }
+    }
+
+    /// The profiles whose roots are shown, top down.
     fn visible_ids(&self, cx: &App) -> Vec<ProfileId> {
-        visible_groups(cx, &self.query(cx))
-            .into_iter()
-            .flat_map(|(_, rows)| rows.into_iter().map(|p| p.id))
+        let tree = self.tree.read(cx);
+        let model = tree.model();
+        model
+            .roots()
+            .iter()
+            .filter_map(|k| model.profile_root(*k))
             .collect()
     }
 
-    /// ↑/↓ move the selection among the visible rows.
-    fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let stroke = &event.keystroke;
-        if stroke.modifiers.modified() {
-            return;
-        }
-        let forward = match stroke.key.as_str() {
-            "down" => true,
-            "up" => false,
-            _ => return,
-        };
+    /// A selection the filter hides moves to the first visible profile, or is cleared when
+    /// none is visible: the `Explorer` commands never act on a hidden row.
+    fn keep_selection_visible(&mut self, cx: &mut Context<Self>) {
         let ids = self.visible_ids(cx);
-        if ids.is_empty() {
-            return;
-        }
         let selected = cx.global::<ConnectionsModel>().selected();
-        let at = selected.and_then(|s| ids.iter().position(|id| *id == s));
-        let next = match (at, forward) {
-            (None, true) => 0,
-            (None, false) => ids.len() - 1,
-            (Some(i), true) => (i + 1).min(ids.len() - 1),
-            (Some(i), false) => i.saturating_sub(1),
-        };
-        ConnectionsModel::select(cx, Some(ids[next]));
-        cx.stop_propagation();
+        let shown = selected.is_some_and(|s| {
+            let tree = self.tree.read(cx);
+            ids.contains(&s)
+                && tree
+                    .selection()
+                    .iter()
+                    .all(|k| tree.flat().index_of(*k).is_some())
+        });
+        if selected.is_some() && !shown {
+            let first = ids.first().copied();
+            ConnectionsModel::select(cx, first);
+            if let Some(first) = first {
+                let key = profile_key(first);
+                self.tree.update(cx, |t, cx| t.select(key, cx));
+            }
+        }
     }
 
-    fn filter_row(&self, theme: &Theme, cx: &App) -> AnyElement {
+    // ---- tree events ------------------------------------------------------------------------
+
+    fn on_tree_event(&mut self, event: &TreeEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            TreeEvent::SelectionChanged(key) => {
+                let owner = key.and_then(|k| self.tree.read(cx).model().profile_of(k));
+                if cx.global::<ConnectionsModel>().selected() != owner {
+                    ConnectionsModel::select(cx, owner);
+                }
+            }
+            TreeEvent::Activate(key) => self.activate(*key, window, cx),
+            TreeEvent::ContextMenu(key, at) => {
+                // The menu of the row the event names, never the selection's (carries-w2).
+                let model = self.tree.read(cx).model().clone();
+                if let Some(id) = model.profile_root(*key) {
+                    ConnectionsModel::select(cx, Some(id));
+                    let at = *at;
+                    window.defer(cx, move |window, cx| {
+                        open_menu_for(id, Some(at), window, cx)
+                    });
+                }
+                // Every other node's menu is Task 24's (mock 5); a header's commands act on
+                // the header's own key (R-W1-5).
+            }
+            TreeEvent::Expand(key) => self.load_contributed(*key, cx),
+            // Retry, the level pill and "Add to scope" are Tasks 24 and 20.
+            TreeEvent::Collapse(_)
+            | TreeEvent::Retry(_)
+            | TreeEvent::Pill(..)
+            | TreeEvent::RowAction(_) => {}
+        }
+    }
+
+    /// Enter or a double click: a profile connects or disconnects (M2a), a table or view
+    /// opens its data (R-M4-13, the handler Task 24 installs), a container toggles.
+    fn activate(&mut self, key: TreeKey, window: &mut Window, cx: &mut Context<Self>) {
+        let model = self.tree.read(cx).model().clone();
+        match model.info(key) {
+            Some(NodeInfo::Profile(id)) => {
+                ConnectionsModel::select(cx, Some(id));
+                // Deferred: the action reads this view (the visible-row check), which is
+                // leased to this listener until it returns.
+                window.defer(cx, |window, cx| {
+                    ActionRegistry::run("connection.toggle_connect", window, cx);
+                });
+            }
+            Some(NodeInfo::Object {
+                profile,
+                key: object,
+            }) if matches!(
+                object.kind,
+                hacivat_meta::ObjectKind::Table
+                    | hacivat_meta::ObjectKind::View
+                    | hacivat_meta::ObjectKind::MaterializedView
+                    | hacivat_meta::ObjectKind::ForeignTable
+            ) =>
+            {
+                window.defer(cx, move |window, cx| {
+                    crate::explorer::actions::open_data(profile, object, window, cx);
+                });
+            }
+            Some(_) if model.children(key).expandable() => {
+                self.tree.update(cx, |t, cx| {
+                    let open = t.is_expanded(key);
+                    t.set_expanded(key, !open, cx);
+                });
+            }
+            Some(_) | None => {}
+        }
+    }
+
+    /// An expanded contributed node with lazy children asks its contributor (UI thread).
+    fn load_contributed(&mut self, key: TreeKey, cx: &mut Context<Self>) {
+        let model = self.tree.read(cx).model().clone();
+        if !matches!(model.info(key), Some(NodeInfo::Contributed { .. }))
+            || self.loads.contains_key(&key)
+        {
+            return;
+        }
+        let top = model
+            .inputs()
+            .contributed
+            .iter()
+            .flat_map(|p| p.nodes.iter())
+            .chain(self.loads.values().flat_map(|l| l.nodes.iter()))
+            .find(|n| n.key == key)
+            .cloned();
+        let Some(node) = top else {
+            return;
+        };
+        let list = contributors(cx);
+        let state = match &node.children {
+            ContributedChildren::Lazy(f) => f(cx),
+            ContributedChildren::Leaf => return,
+        };
+        let nodes = match &state {
+            ChildState::Loaded(keys) => keys
+                .iter()
+                .filter_map(|k| list.iter().find_map(|c| c.child_node(*k, cx)))
+                .collect(),
+            _ => Vec::new(),
+        };
+        self.loads.insert(key, ContributedLoad { state, nodes });
+        self.refresh(cx);
+        if self.result.is_some() {
+            self.query_changed(cx);
+        }
+    }
+
+    /// Applies rename hints to the tree's expansion (T10's `CatalogDelta::renamed`).
+    fn apply_renames(&mut self, renames: &[(TreeKey, TreeKey)], cx: &mut Context<Self>) {
+        self.tree.update(cx, |t, cx| {
+            let mut keys = t.expanded().clone();
+            let mut moved = false;
+            for (from, to) in renames {
+                if keys.remove(from) {
+                    keys.insert(*to);
+                    moved = true;
+                }
+            }
+            if moved {
+                t.set_expanded_keys(keys, cx);
+            }
+        });
+        if let Some(saved) = self.saved_expansion.as_mut() {
+            for (from, to) in renames {
+                if saved.remove(from) {
+                    saved.insert(*to);
+                }
+            }
+        }
+    }
+
+    // ---- the filter -------------------------------------------------------------------------
+
+    /// The query or the toggle changed: match again (latest wins).
+    fn query_changed(&mut self, cx: &mut Context<Self>) {
+        let query = self.query(cx);
+        self.filter_seq += 1;
+        self.filter_task = None;
+        if query.is_empty() {
+            if self.result.take().is_some() {
+                self.refresh(cx);
+                if let Some(saved) = self.saved_expansion.take() {
+                    self.tree.update(cx, |t, cx| t.set_expanded_keys(saved, cx));
+                }
+            }
+            self.keep_selection_visible(cx);
+            cx.notify();
+            return;
+        }
+        let job = self
+            .tree
+            .read(cx)
+            .model()
+            .filter_job(&query, self.tolerant(cx));
+        if job.names() <= SYNC_FILTER_NAMES {
+            let result = job.run();
+            self.apply_filter(result, cx);
+            return;
+        }
+        let seq = self.filter_seq;
+        let run = cx.background_spawn(async move { job.run() });
+        self.filter_task = Some(cx.spawn(async move |this, cx| {
+            let result = run.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.filter_seq == seq {
+                    this.apply_filter(result, cx);
+                }
+            });
+        }));
+    }
+
+    fn apply_filter(&mut self, result: FilterResult, cx: &mut Context<Self>) {
+        if self.saved_expansion.is_none() {
+            self.saved_expansion = Some(self.tree.read(cx).expanded().clone());
+        }
+        let ancestors = result.ancestors.clone();
+        self.result = Some(Arc::new(result));
+        self.refresh(cx);
+        // Matches reveal their ancestors.
+        self.tree
+            .update(cx, |t, cx| t.set_expanded_keys(ancestors, cx));
+        self.keep_selection_visible(cx);
+        cx.notify();
+    }
+
+    fn clear_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter.update(cx, |f, cx| {
+            f.set_value("");
+            cx.notify();
+        });
+        self.query_changed(cx);
+        let handle = self.filter_focus(cx);
+        window.focus(&handle, cx);
+    }
+
+    fn flip_tolerant(&mut self, cx: &mut Context<Self>) {
+        self.tolerant = Some(!self.tolerant(cx));
+        self.sync_fold(cx);
+        if !self.query(cx).is_empty() {
+            self.query_changed(cx);
+        }
+        cx.notify();
+    }
+
+    // ---- rendering --------------------------------------------------------------------------
+
+    fn filter_row(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme.tokens;
         let c = &t.colors;
         let handle = self.filter_focus(cx).tab_stop(true);
@@ -471,10 +959,84 @@ impl ExplorerView {
                     .track_focus(&handle)
                     .child(self.filter.clone()),
             );
+        if let Some(result) = &self.result {
+            row = row.child(
+                div().flex_none().child(
+                    Label::new(
+                        tr(
+                            cx,
+                            ids::hv::EXPLORER_FILTER_COUNT,
+                            ids::hv::HvExplorerFilterCount {
+                                n: Count(result.count as u64),
+                            },
+                        ),
+                        TextSource::Fluent,
+                        t.type_ramp.mono_micro,
+                        c.text_3.to_hsla(),
+                    )
+                    .id("explorer-filter-count"),
+                ),
+            );
+        }
+        // The Turkish-tolerant toggle (D-074; the find bar's, surface 4).
+        let name = tr_id(cx, "hv-find-tolerant");
+        let tip = tr_id(cx, "hv-find-tolerant-tip");
+        let entity = cx.entity();
+        row = row.child(toggle_element(
+            ToggleSpec {
+                id: "explorer-tolerant",
+                node: ("explorer-tolerant-node", 0),
+                icon: IconName::Languages,
+                name,
+                tip: tip.clone(),
+                description: Some(tip),
+                on: self.tolerant(cx),
+                handle: self.tolerant_focus.clone(),
+            },
+            window,
+            move |_, cx| entity.update(cx, |v, cx| v.flip_tolerant(cx)),
+            cx,
+        ));
         if theme.mode == ThemeMode::Light {
             row = row.bg(c.panel.to_hsla());
         }
         row.into_any_element()
+    }
+
+    /// "Searches loaded names only…" under the field, when tables' columns are not loaded.
+    fn filter_hint(&self, theme: &Theme, cx: &App) -> Option<AnyElement> {
+        let result = self.result.as_ref().filter(|r| r.unloaded > 0)?;
+        let t = theme.tokens;
+        let c = &t.colors;
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .gap(px(t.spacing.sm))
+                .mx(px(t.spacing.md))
+                .mb(px(t.spacing.xs))
+                .child(
+                    div().flex_none().pt(px(2.0)).child(
+                        Icon::new(IconName::Info)
+                            .size(IconSize::Chrome)
+                            .color(c.text_2.to_hsla()),
+                    ),
+                )
+                .child(paragraph(
+                    tr(
+                        cx,
+                        ids::hv::EXPLORER_FILTER_UNLOADED,
+                        ids::hv::HvExplorerFilterUnloaded {
+                            n: Count(result.unloaded as u64),
+                        },
+                    ),
+                    t.type_ramp.body_sm,
+                    c.text_2.to_hsla(),
+                    "explorer-filter-unloaded",
+                ))
+                .into_any_element(),
+        )
     }
 
     fn empty(&self, theme: &Theme, cx: &mut App) -> AnyElement {
@@ -549,296 +1111,119 @@ impl ExplorerView {
             .into_any_element()
     }
 
-    fn row(
-        &self,
-        index: usize,
-        p: &Profile,
-        theme: &Theme,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// "No objects match" (surface 4): the query quoted, and Clear filter.
+    fn no_match(&self, theme: &Theme, query: &str, cx: &mut Context<Self>) -> AnyElement {
         let t = theme.tokens;
         let c = &t.colors;
-        let m = cx.global::<ConnectionsModel>();
-        let selected = m.selected() == Some(p.id);
-        let live = m.live(p.id);
-        let id = p.id;
-        let production = p.environment == Some(EnvTag::Production);
-        let glyph = if p.engine == DbmsKind::Sqlite {
-            IconName::FileCode
-        } else {
-            IconName::Database
-        };
-        let info = match &live {
-            LiveState::Connected(info) => Some(info.clone()),
-            _ => None,
-        };
-        let mut row = div()
-            .id(("explorer-row", index))
-            .debug_selector(move || format!("explorer-row-{index}"))
-            .relative()
+        let entity = cx.entity();
+        div()
             .flex()
-            .flex_row()
-            .items_center()
-            .flex_none()
-            .h(px(ROW_PX))
-            .pl(px(t.spacing.lg))
-            .pr(px(t.spacing.md))
-            .gap(px(t.spacing.sm))
-            .border_l_1()
-            .border_color(if selected { c.blue } else { c.side }.to_hsla())
-            .child(bounds_probe(self.row_bounds.clone(), id))
+            .flex_col()
+            .flex_1()
+            .px(px(t.spacing.s_3xl))
+            .pt(px(t.spacing.s_2xl))
+            .gap(px(t.spacing.md))
             .child(
-                Icon::new(glyph)
-                    .size(IconSize::Chrome)
-                    .color(c.text_2.to_hsla()),
-            )
-            .child({
-                // ## m2a-t21-shots: the name gives way last (the meta ellipsizes first)
-                // and never below about six characters.
-                let name = Label::new(
-                    p.name.clone(),
-                    TextSource::Data,
-                    t.type_ramp.body,
+                Label::new(
+                    tr(cx, ids::hv::EXPLORER_FILTER_NONE, NoArgs),
+                    TextSource::Fluent,
+                    TypeStyle {
+                        weight: 600,
+                        ..t.type_ramp.body
+                    },
                     c.text.to_hsla(),
                 )
-                .truncate(true)
-                .id(SharedString::from(format!("explorer-row-name-{index}")));
-                let cell = div()
-                    .min_w(name_min_width(&p.name, t.type_ramp.body, window))
-                    .flex_shrink(NAME_SHRINK);
-                if matches!(p.transport, TransportSpec::SshTunnel(_)) {
-                    // ## m2b-t22-live (fix round 1, ruling I2): the SSH route flag sits in the
-                    // name's column, right after the name. The column keeps the name's own
-                    // width as its basis and grows into free room for the flag, so in a tight
-                    // row the name ellipsizes and the meta keeps its M2a widths.
-                    let name_w = text_width(&p.name, t.type_ramp.body, window);
-                    let flag = px(IconSize::Chrome.px() + t.spacing.sm);
-                    cell.flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(t.spacing.sm))
-                        .flex_basis(name_w)
-                        .flex_grow(1.0)
-                        .max_w(name_w + flag)
-                        .child(div().min_w(px(0.0)).flex_shrink(1.0).child(name))
-                        .child(
-                            div()
-                                .debug_selector(move || format!("explorer-row-route-{index}"))
-                                .flex_none()
-                                .child(
-                                    Icon::new(IconName::Route)
-                                        .size(IconSize::Chrome)
-                                        .color(c.text_2.to_hsla()),
-                                ),
-                        )
-                } else {
-                    cell.child(name)
-                }
-            })
-            .child(env_swatch(env_kind(p.environment), theme));
-        if selected {
-            row = row.bg(c.blue_tint.to_hsla());
-        } else {
-            row = row.hover(|s| s.bg(c.hover.to_hsla()));
-        }
-        // Flags: read-only (red only on production, DESIGN.md), plaintext while live.
-        if p.read_only {
-            let ink = if production { c.red } else { c.text_2 };
-            row = row.child(
-                Icon::new(IconName::Lock)
-                    .size(IconSize::Chrome)
-                    .color(ink.to_hsla()),
-            );
-        }
-        if let Some(info) = &info
-            && is_unencrypted(p, info)
-        {
-            row = row.child(
-                Icon::new(IconName::LockOpen)
-                    .size(IconSize::Chrome)
-                    .color(c.text_2.to_hsla()),
-            );
-        }
-        row = row.child(div().flex_1());
-        // ## m2a-t21-shots: the meta (live mark, latency, engine) shrinks first: its labels
-        // ellipsize (tooltip: the whole text) before the name does.
-        let mut meta = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(t.spacing.sm))
-            .min_w(px(0.0))
-            .flex_shrink(1.0);
-        match &live {
-            LiveState::Connected(info) => {
-                meta = meta
-                    .child(
-                        div().flex_none().child(
-                            Icon::new(IconName::Check)
-                                .size(IconSize::Chrome)
-                                .color(c.green.to_hsla()),
-                        ),
-                    )
-                    .child(
-                        Label::new(
-                            latency_label(cx, info),
-                            TextSource::Fluent,
-                            t.type_ramp.mono_data,
-                            c.text_2.to_hsla(),
-                        )
-                        .truncate(true)
-                        .id(SharedString::from(format!("explorer-row-latency-{index}"))),
-                    );
-            }
-            // ## m2b-t01-interfaces: a reconnect runs like a connect (Task 22 refines it).
-            LiveState::Connecting(_) | LiveState::Reconnecting { .. } => {
-                meta = meta.child(div().flex_none().child(run_marker(theme)));
-            }
-            LiveState::Failed(_) | LiveState::Lost { .. } => {
-                meta = meta.child(
-                    div().flex_none().child(
-                        Icon::new(IconName::TriangleAlert)
-                            .size(IconSize::Chrome)
-                            .color(c.text.to_hsla()),
-                    ),
-                );
-            }
-            // ## m2b-t22-live: disconnected while idle (B18).
-            LiveState::Disconnected if session_toasts::is_idle(cx, id) => {
-                meta = meta.child(
-                    div()
-                        .debug_selector(move || format!("explorer-row-idle-{index}"))
-                        .flex_none()
-                        .child(
-                            Icon::new(IconName::Unplug)
-                                .size(IconSize::Chrome)
-                                .color(c.text_3.to_hsla()),
-                        ),
-                );
-            }
-            LiveState::Disconnected => {}
-        }
-        meta = meta.child(
-            Label::new(
-                engine_label(p, info.as_deref()),
-                TextSource::Data,
-                t.type_ramp.caption,
-                c.text_2.to_hsla(),
+                .id("explorer-filter-none"),
             )
-            .truncate(true)
-            .id(SharedString::from(format!("explorer-row-engine-{index}"))),
-        );
-        row = row.child(meta);
-        let list = self.list_focus.clone();
-        let list_right = list.clone();
-        row.on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |_, event: &MouseDownEvent, window, cx| {
-                ConnectionsModel::select(cx, Some(id));
-                window.focus(&list, cx);
-                if event.click_count == 2 {
-                    // Deferred: the action reads this view (the visible-row check), which is
-                    // leased to this listener until it returns.
-                    window.defer(cx, |window, cx| {
-                        ActionRegistry::run("connection.toggle_connect", window, cx);
-                    });
-                }
-            }),
-        )
-        .on_mouse_down(
-            MouseButton::Right,
-            cx.listener(move |_, event: &MouseDownEvent, window, cx| {
-                ConnectionsModel::select(cx, Some(id));
-                window.focus(&list_right, cx);
-                let position = event.position;
-                window.defer(cx, move |window, cx| {
-                    open_context_menu(Some(position), window, cx);
-                });
-            }),
-        )
-        .into_any_element()
+            .child(paragraph(
+                tr(
+                    cx,
+                    ids::hv::EXPLORER_FILTER_NONE_BODY,
+                    ids::hv::HvExplorerFilterNoneBody {
+                        query: Text(query.to_string()),
+                    },
+                ),
+                t.type_ramp.body_sm,
+                c.text_2.to_hsla(),
+                "explorer-filter-none-body",
+            ))
+            .child(
+                div().flex().flex_row().child(
+                    Button::new(
+                        "explorer-filter-clear",
+                        tr(cx, ids::hv::EXPLORER_FILTER_CLEAR, NoArgs),
+                    )
+                    .kind(ButtonKind::Default)
+                    .on_click(move |_, window, cx| {
+                        entity.update(cx, |v, cx| v.clear_filter(window, cx));
+                    }),
+                ),
+            )
+            .into_any_element()
     }
 
-    fn list(&self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn list(&self, theme: &Theme) -> AnyElement {
         let t = theme.tokens;
-        let c = &t.colors;
-        let mut list = div()
+        div()
             .id("explorer-list")
             .debug_selector(|| "explorer-list".to_string())
-            .track_focus(&self.list_focus)
-            .on_key_down(cx.listener(Self::on_key))
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .overflow_y_scroll()
+            .overflow_hidden()
             .pb(px(t.spacing.md))
             // ## m2a-t21-shots: the frame checks treat this clip as a scroll viewport.
-            .child(hacivat_ui::text::scroll_viewport());
-        let mut index = 0;
-        for (g, (tag, rows)) in visible_groups(cx, &self.query(cx)).into_iter().enumerate() {
-            let header = div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .flex_none()
-                .h(px(GROUP_PX))
-                .px(px(t.spacing.lg))
-                .gap(px(t.spacing.sm))
-                .child(
-                    Label::new(
-                        group_title(cx, tag),
-                        TextSource::Fluent,
-                        t.type_ramp.panel_title,
-                        c.text_2.to_hsla(),
-                    )
-                    .id(SharedString::from(format!("explorer-group-{g}"))),
-                )
-                .child(div().flex_1().h(px(1.0)).bg(c.seam.to_hsla()))
-                .child(
-                    Label::new(
-                        rows.len().to_string(),
-                        TextSource::Data,
-                        t.type_ramp.caption,
-                        c.text_2.to_hsla(),
-                    )
-                    .id(SharedString::from(format!("explorer-group-count-{g}"))),
-                );
-            list = list.child(header);
-            for p in rows {
-                let row = self.row(index, &p, theme, window, cx);
-                list = list.child(row);
-                index += 1;
-            }
-        }
-        list.into_any_element()
+            .child(hacivat_ui::text::scroll_viewport())
+            .child(self.tree.clone())
+            .into_any_element()
     }
 }
 
 impl Render for ExplorerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
-        let Some(m) = cx.try_global::<ConnectionsModel>() else {
+        if cx.try_global::<ConnectionsModel>().is_none() {
             // P17: no model, the M1 explorer.
             return tiles::explorer(&theme, cx).into_any_element();
-        };
-        // The focused list with nothing selected selects its first row (after this frame), so
-        // Enter and the other `Explorer` bindings have a target.
-        if self.list_focus.is_focused(window)
-            && m.selected().is_none()
+        }
+        // A language switch or a contributor's change shows on the next frame.
+        let stamp = self.stamp(cx);
+        if self.stamp.as_ref() != Some(&stamp) {
+            let relang = self.stamp.as_ref().is_some_and(|s| s.l10n != stamp.l10n);
+            self.refresh(cx);
+            if relang {
+                self.sync_fold(cx);
+            }
+        }
+        // The focused tree with nothing selected selects its first profile (after this
+        // frame), so Enter and the other `Explorer` bindings have a target.
+        if self.list_focus(cx).is_focused(window)
+            && cx.global::<ConnectionsModel>().selected().is_none()
             && let Some(first) = self.visible_ids(cx).first().copied()
         {
-            window.defer(cx, move |_, cx| ConnectionsModel::select(cx, Some(first)));
+            let tree = self.tree.downgrade();
+            window.defer(cx, move |_, cx| {
+                ConnectionsModel::select(cx, Some(first));
+                if let Some(tree) = tree.upgrade() {
+                    tree.update(cx, |t, cx| t.select(profile_key(first), cx));
+                }
+            });
         }
         let m = cx.global::<ConnectionsModel>();
         let empty = m.profiles().is_empty();
         let c = &theme.tokens.colors;
+        let query = self.query(cx);
         let body = if empty {
             self.empty(&theme, cx)
+        } else if self.result.as_ref().is_some_and(|r| r.count == 0) {
+            self.no_match(&theme, &query, cx)
         } else {
-            self.list(&theme, window, cx)
+            self.list(&theme)
         };
+        let filter_row = self.filter_row(&theme, window, cx);
+        let hint = self.filter_hint(&theme, cx);
         div()
             .flex()
             .flex_col()
@@ -849,7 +1234,8 @@ impl Render for ExplorerView {
                 tr(cx, ids::hv::PANEL_EXPLORER, NoArgs),
                 "panel-explorer-title",
             )))
-            .child(self.filter_row(&theme, cx))
+            .child(filter_row)
+            .children(hint)
             .child(body)
             .into_any_element()
     }

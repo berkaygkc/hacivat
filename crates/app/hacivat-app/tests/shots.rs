@@ -568,10 +568,11 @@ impl Surface {
                 ("hacivat-app/src/connections/prod_prompt.rs:", None)
             }
             Surface::ExplorerEmpty => ("hacivat-app/src/connections/explorer.rs:", None),
-            Surface::ExplorerList | Surface::ShellMinimum => (
-                "hacivat-app/src/connections/explorer.rs:",
-                Some("orders-prod"),
-            ),
+            // ## m4-t14-explorer (named exception): the profile rows are the explorer tree's
+            // roots (R-M4-18), drawn by the tree widget.
+            Surface::ExplorerList | Surface::ShellMinimum => {
+                ("hacivat-ui/src/tree/view/row.rs:", Some("orders-prod"))
+            }
             Surface::ExplorerMenu => ("hacivat-ui/src/menu.rs:", None),
             Surface::ConnDeleteConfirm => ("hacivat-ui/src/dialog.rs:", None),
             Surface::ConnImportPgService => ("hacivat-app/src/connections/import.rs:", None),
@@ -3500,8 +3501,9 @@ fn a_missing_surface_fails_its_frame() {
             .missing_from("s", &runs(["", "b", "astions"]))
             .is_some()
     );
+    // ## m4-t14-explorer (named exception): the tree draws the profile rows.
     let explorer = [at(
-        "crates/app/hacivat-app/src/connections/explorer.rs:420:17",
+        "crates/ui/hacivat-ui/src/tree/view/row.rs:442:21#hv-tree-label",
         "orders-prod",
     )];
     assert!(Surface::ExplorerList.missing_from("s", &explorer).is_none());

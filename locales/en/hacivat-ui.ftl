@@ -3912,3 +3912,13 @@ hv-cmd-explorer-set-level-structure = Introspection level: Structure
 hv-cmd-explorer-set-level-sources = Introspection level: Structure and sources
 hv-cmd-metadata-clear-cache = Clear cached metadata
 hv-cmd-ddl-view-copy = Copy DDL
+
+## m4-t14-explorer
+
+# Surface 1 (Explorer tree). The child row of a node whose catalog has not been read yet (no
+# cached or live catalog): never an empty database.
+hv-explorer-not-loaded = Not loaded
+# Surface 1 (Explorer tree). A count shown alone: a kind group's or an environment group's.
+# Variables:
+#   $n (Number) - a count, e.g. 1204.
+hv-explorer-count = { $n }
