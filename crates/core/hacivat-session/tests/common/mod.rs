@@ -2796,3 +2796,32 @@ pub mod confirm {
         }
     }
 }
+
+// ## m4-sessflake
+// `logged_manager` over a driver the test builds (e.g. `FakeDriver::gated()`), so a test can
+// hold a connect at the driver and still read the connection log.
+
+/// A manager over a logging driver around `fake`, with `fake` kept for its gate and counters.
+pub fn logged_manager_over(
+    fake: FakeDriver,
+    close_delay: Duration,
+    hang_pings: bool,
+    config: ManagerConfig,
+) -> (Arc<ConnectionManager>, Log, Arc<FakeDriver>) {
+    let fake = Arc::new(fake);
+    let log: Log = Arc::default();
+    let mut drivers = DriverRegistry::new();
+    drivers.register(Arc::new(LoggedDriver {
+        fake: fake.clone(),
+        log: log.clone(),
+        close_delay,
+        hang_pings,
+    }));
+    let mut deps = deps_over(fake.clone(), thread_store());
+    deps.drivers = Arc::new(drivers);
+    (
+        ConnectionManager::new(tokio::runtime::Handle::current(), Arc::new(deps), config),
+        log,
+        fake,
+    )
+}
