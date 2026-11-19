@@ -84,7 +84,9 @@ pub async fn stamps(
     let mut out: Vec<Option<StateMark>> = vec![None; keys.len()];
     let mut by_schema: BTreeMap<Name, Vec<(usize, Probe)>> = BTreeMap::new();
     for (i, k) in keys.iter().enumerate() {
-        let Some(schema) = k.path.first() else { continue };
+        let Some(schema) = k.path.first() else {
+            continue;
+        };
         by_schema
             .entry(schema.clone())
             .or_default()
@@ -166,7 +168,8 @@ pub async fn stamps(
                 Probe::Relation(n, want) => relations.get(&n).and_then(|(ty, ct, hash, trg)| {
                     let kind = relation_kind(ty, srv.is_mariadb());
                     if let Some((wk, wraw)) = &want
-                        && (*wk != kind || (kind == ObjectKind::Unknown && *wraw != raw_kind(kind, ty)))
+                        && (*wk != kind
+                            || (kind == ObjectKind::Unknown && *wraw != raw_kind(kind, ty)))
                     {
                         // The name now holds another kind of relation: this object is gone.
                         return None;
@@ -263,9 +266,8 @@ pub async fn server_top_marks(
     let views: HashMap<Name, Option<u64>> = rows::view_marks(&r.read("ViewMarks", ctx()).await?)?
         .into_iter()
         .collect();
-    let tstats = super::build::trigger_stats(&rows::trigger_marks(
-        &r.read("TriggerMarks", ctx()).await?,
-    )?);
+    let tstats =
+        super::build::trigger_stats(&rows::trigger_marks(&r.read("TriggerMarks", ctx()).await?)?);
     let routines = rows::routine_marks(&r.read("RoutineMarks", ctx()).await?)?;
     let events = rows::event_marks(&r.read("EventMarks", ctx()).await?)?;
     let mut out = Vec::new();

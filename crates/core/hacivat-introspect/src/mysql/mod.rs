@@ -191,6 +191,23 @@ impl MySqlIntrospector {
         })
     }
 
+    /// The server's identity for the cache (ruling R-W3-3; [`server::fingerprint`]): `None`
+    /// when a fact it needs could not be read (the seam's `Unknown`). T15's
+    /// `Introspector::identity` wraps it once that seam merges.
+    pub async fn server_fingerprint(
+        &self,
+        c: &mut MetaConn,
+    ) -> Result<Option<hacivat_meta::persist::ServerFingerprint>, IntroError> {
+        with_snapshot!(c, self.flavor, None, |r, srv| {
+            let host = if srv.is_mariadb() {
+                pass::read_host_facts(r, &srv).await?
+            } else {
+                server::HostFacts::default()
+            };
+            server::fingerprint(&srv, &host).map(hacivat_meta::persist::ServerFingerprint)
+        })
+    }
+
     /// The server's variable names (R-M4-44; `ListSettings`).
     pub async fn list_settings(&self, c: &mut MetaConn) -> Result<Vec<Setting>, IntroError> {
         with_snapshot!(c, self.flavor, None, |r, srv| {

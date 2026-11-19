@@ -166,7 +166,12 @@ fn the_sections_t17_owns_are_declared_with_their_widths() {
         assert_eq!(sec.returns().len(), w, "{s}");
         assert_eq!(&*sec.returns()[at].name, "create_statement", "{s}");
     }
-    for s in ["StateOfRelation", "StateOfRoutine", "StateOfTrigger", "StateOfEvent"] {
+    for s in [
+        "StateOfRelation",
+        "StateOfRoutine",
+        "StateOfTrigger",
+        "StateOfEvent",
+    ] {
         assert!(p.section(s).expect(s).joinable(), "{s}");
     }
 }
@@ -194,7 +199,11 @@ fn show_create_sections_quote_hostile_names_and_pass_the_guard() {
             };
             let q = p.render(s, &ctx).expect("renders").remove(0);
             let quoted = format!("`{}`", name.replace('`', "``"));
-            assert!(q.sql().ends_with(&format!("`hvm4_db`.{quoted}")), "{}", q.sql());
+            assert!(
+                q.sql().ends_with(&format!("`hvm4_db`.{quoted}")),
+                "{}",
+                q.sql()
+            );
             assert!(q.binds().is_empty());
             check_own_text(q.sql(), DbmsKind::MySql)
                 .unwrap_or_else(|e| panic!("{name:?}: {e:?} {}", q.sql()));
@@ -244,8 +253,16 @@ fn the_show_create_guard_exception_is_narrow() {
         "SHOW CREATE TRIGGER `db`.`update`",
         "SHOW CREATE VIEW `ş`.`ıd`",
     ] {
-        assert_eq!(check_own_text(allowed, DbmsKind::MySql), Ok(()), "{allowed}");
-        assert_eq!(check_own_text(allowed, DbmsKind::MariaDb), Ok(()), "{allowed}");
+        assert_eq!(
+            check_own_text(allowed, DbmsKind::MySql),
+            Ok(()),
+            "{allowed}"
+        );
+        assert_eq!(
+            check_own_text(allowed, DbmsKind::MariaDb),
+            Ok(()),
+            "{allowed}"
+        );
     }
 }
 
@@ -267,12 +284,18 @@ fn mysql_enum_labels_parse_doubled_quotes_and_backslashes_per_sql_mode() {
         enum_labels(r"enum('a\\b','c\'d')", true),
         Some(vec![n(r"a\b"), n("c'd")])
     );
+    assert_eq!(enum_labels(r"enum('a\\b')", false), Some(vec![n(r"a\\b")]));
     assert_eq!(
-        enum_labels(r"enum('a\\b')", false),
-        Some(vec![n(r"a\\b")])
+        enum_labels("ENUM('İ','ı')", true),
+        Some(vec![n("İ"), n("ı")])
     );
-    assert_eq!(enum_labels("ENUM('İ','ı')", true), Some(vec![n("İ"), n("ı")]));
-    for bad in ["int(11)", "enum(a)", "enum('a'", "enum('a') x", "varchar(10)"] {
+    for bad in [
+        "int(11)",
+        "enum(a)",
+        "enum('a'",
+        "enum('a') x",
+        "varchar(10)",
+    ] {
         assert_eq!(enum_labels(bad, true), None, "{bad}");
     }
 }
@@ -286,8 +309,14 @@ fn defaults_arrive_pre_quoted_and_keep_each_flavors_spelling() {
     let none = parse_extra("");
     let gen_ = parse_extra("DEFAULT_GENERATED");
     // F9: MySQL `eu` vs MariaDB `'eu'`; both arrive as SQL text `'eu'`.
-    assert_eq!(default_sql(false, Some("eu"), "varchar", &none, &q), Some(n("'eu'")));
-    assert_eq!(default_sql(true, Some("'eu'"), "varchar", &none, &q), Some(n("'eu'")));
+    assert_eq!(
+        default_sql(false, Some("eu"), "varchar", &none, &q),
+        Some(n("'eu'"))
+    );
+    assert_eq!(
+        default_sql(true, Some("'eu'"), "varchar", &none, &q),
+        Some(n("'eu'"))
+    );
     // `CURRENT_TIMESTAMP` (MySQL) vs `current_timestamp()` (MariaDB), verbatim.
     assert_eq!(
         default_sql(false, Some("CURRENT_TIMESTAMP"), "timestamp", &gen_, &q),
@@ -302,9 +331,18 @@ fn defaults_arrive_pre_quoted_and_keep_each_flavors_spelling() {
         default_sql(false, Some("rand()"), "double", &gen_, &q),
         Some(n("(rand())"))
     );
-    assert_eq!(default_sql(false, Some("0"), "int", &none, &q), Some(n("'0'")));
-    assert_eq!(default_sql(false, Some("b'101'"), "bit", &none, &q), Some(n("b'101'")));
-    assert_eq!(default_sql(false, Some(""), "char", &none, &q), Some(n("''")));
+    assert_eq!(
+        default_sql(false, Some("0"), "int", &none, &q),
+        Some(n("'0'"))
+    );
+    assert_eq!(
+        default_sql(false, Some("b'101'"), "bit", &none, &q),
+        Some(n("b'101'"))
+    );
+    assert_eq!(
+        default_sql(false, Some(""), "char", &none, &q),
+        Some(n("''"))
+    );
     assert_eq!(default_sql(false, None, "int", &none, &q), None);
     // A quote is doubled and a backslash doubled unless NO_BACKSLASH_ESCAPES is on.
     assert_eq!(
@@ -390,6 +428,9 @@ struct Rel {
     view: Option<(u64, Vec<String>)>,
 }
 
+/// `(specific name, type, last altered, params)`.
+type FakeRoutine = (String, &'static str, String, Vec<(String, String)>);
+
 #[derive(Clone, Debug)]
 struct Fake {
     flavor: DbmsKind,
@@ -402,7 +443,7 @@ struct Fake {
     /// `(trigger, table, created)`.
     triggers: Vec<(String, String, String)>,
     /// `(specific name, type, last altered, params)`.
-    routines: Vec<(String, &'static str, String, Vec<(String, String)>)>,
+    routines: Vec<FakeRoutine>,
     events: Vec<(String, String)>,
     /// `(section, list length)` of every read.
     log: Vec<(String, Option<usize>)>,
@@ -488,9 +529,7 @@ impl Fake {
             target: "customers".into(),
             target_col: "id".into(),
         });
-        orders
-            .checks
-            .push(("chk_id".into(), "(`id` > 0)".into()));
+        orders.checks.push(("chk_id".into(), "(`id` > 0)".into()));
         rels.insert("orders".to_string(), orders);
         rels.insert(
             "v_orders".to_string(),
@@ -523,7 +562,12 @@ impl Fake {
                     "2026-11-20 09:00:03".into(),
                     vec![("x".into(), "int".into())],
                 ),
-                ("add_one".into(), "PROCEDURE", "2026-11-20 09:00:03".into(), Vec::new()),
+                (
+                    "add_one".into(),
+                    "PROCEDURE",
+                    "2026-11-20 09:00:03".into(),
+                    Vec::new(),
+                ),
             ],
             events: vec![("nightly".into(), "2026-11-20 09:00:04".into())],
             log: Vec::new(),
@@ -596,17 +640,16 @@ impl Fake {
                 c("NONE"),
             ]),
             "ServerUuid" => out.push(vec![c(self.uuid)]),
+            "ServerIdentity" => out.push(vec![c("1"), c("db"), c("3306")]),
             "Watermark" => out.push(vec![c(&self.now)]),
             "Privileges" => {
                 for p in &self.privs {
                     out.push(p.iter().map(|s| c(s)).collect());
                 }
             }
-            "ListNamespaces" => out.push(vec![
-                c(&self.schema),
-                c("utf8mb4"),
-                c("utf8mb4_0900_ai_ci"),
-            ]),
+            "ListNamespaces" => {
+                out.push(vec![c(&self.schema), c("utf8mb4"), c("utf8mb4_0900_ai_ci")])
+            }
             "TableMarks" | "Tables" => {
                 for (name, r) in &self.rels {
                     if !keep(name) {
@@ -621,7 +664,11 @@ impl Fake {
                             c(name),
                             c(r.ty),
                             if is_view { None } else { c("InnoDB") },
-                            if is_view { None } else { c("utf8mb4_0900_ai_ci") },
+                            if is_view {
+                                None
+                            } else {
+                                c("utf8mb4_0900_ai_ci")
+                            },
                             c(""),
                             c(&r.comment),
                             created,
@@ -717,7 +764,11 @@ impl Fake {
                     }
                     for (ix, _, unique) in &r.idx {
                         if *unique {
-                            let ty = if ix == "PRIMARY" { "PRIMARY KEY" } else { "UNIQUE" };
+                            let ty = if ix == "PRIMARY" {
+                                "PRIMARY KEY"
+                            } else {
+                                "UNIQUE"
+                            };
                             out.push(vec![c(name), c(ix), c(ty), c("YES")]);
                         }
                     }
@@ -976,7 +1027,12 @@ fn canon(s: &NamespaceSnapshot) -> Vec<(ObjectKey, StateMark, ObjFlags, Props)> 
     let mut v: Vec<_> = (0..s.len() as u32)
         .map(|i| {
             let o = s.obj(i).unwrap();
-            (s.object_key(i).unwrap(), o.state(), o.flags(), o.props().clone())
+            (
+                s.object_key(i).unwrap(),
+                o.state(),
+                o.flags(),
+                o.props().clone(),
+            )
         })
         .collect();
     v.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1062,7 +1118,10 @@ async fn a_full_pass_builds_every_kind_with_its_marks() {
     else {
         panic!("a MySQL watermark");
     };
-    assert_eq!(Some(*at_utc_micros), parse_time_micros("2026-11-20 10:00:00"));
+    assert_eq!(
+        Some(*at_utc_micros),
+        parse_time_micros("2026-11-20 10:00:00")
+    );
     assert_eq!((&**server_uuid, &**version), ("uuid-1", "8.4.3"));
     let key = |kind, path: &[&str]| ObjectKey {
         kind,
@@ -1071,7 +1130,9 @@ async fn a_full_pass_builds_every_kind_with_its_marks() {
         overload_sig: None,
         raw_kind: None,
     };
-    let orders = snap.find(&key(ObjectKind::Table, &["shop", "orders"])).unwrap();
+    let orders = snap
+        .find(&key(ObjectKind::Table, &["shop", "orders"]))
+        .unwrap();
     assert_eq!(
         snap.obj(orders).unwrap().state(),
         StateMark::MyTable {
@@ -1095,7 +1156,9 @@ async fn a_full_pass_builds_every_kind_with_its_marks() {
         .collect()
     );
     // ENUM labels, pre-quoted default, verbatim EXTRA.
-    let status = snap.find(&key(ObjectKind::Column, &["shop", "orders", "status"])).unwrap();
+    let status = snap
+        .find(&key(ObjectKind::Column, &["shop", "orders", "status"]))
+        .unwrap();
     let Props::Column(cp) = snap.obj(status).unwrap().props() else {
         panic!()
     };
@@ -1104,7 +1167,9 @@ async fn a_full_pass_builds_every_kind_with_its_marks() {
         cp.rare.as_ref().and_then(|r| r.enum_labels.as_deref()),
         Some(&[n("new"), n("done")][..])
     );
-    let at = snap.find(&key(ObjectKind::Column, &["shop", "orders", "at"])).unwrap();
+    let at = snap
+        .find(&key(ObjectKind::Column, &["shop", "orders", "at"]))
+        .unwrap();
     let Props::Column(cp) = snap.obj(at).unwrap().props() else {
         panic!()
     };
@@ -1114,18 +1179,34 @@ async fn a_full_pass_builds_every_kind_with_its_marks() {
         Some(ColumnExt::MySql { extra: Some(e), .. }) if &**e == "DEFAULT_GENERATED on update CURRENT_TIMESTAMP"
     ));
     // A function and a procedure share a name (identity `(ROUTINE_TYPE, SPECIFIC_NAME)`).
-    assert!(snap.find(&key(ObjectKind::Routine, &["shop", "add_one"])).is_some());
-    assert!(snap.find(&key(ObjectKind::Procedure, &["shop", "add_one"])).is_some());
-    assert!(snap.find(&key(ObjectKind::Argument, &["shop", "add_one", "x"])).is_some());
-    let v = snap.find(&key(ObjectKind::View, &["shop", "v_orders"])).unwrap();
+    assert!(
+        snap.find(&key(ObjectKind::Routine, &["shop", "add_one"]))
+            .is_some()
+    );
+    assert!(
+        snap.find(&key(ObjectKind::Procedure, &["shop", "add_one"]))
+            .is_some()
+    );
+    assert!(
+        snap.find(&key(ObjectKind::Argument, &["shop", "add_one", "x"]))
+            .is_some()
+    );
+    let v = snap
+        .find(&key(ObjectKind::View, &["shop", "v_orders"]))
+        .unwrap();
     assert_eq!(snap.obj(v).unwrap().state(), StateMark::Hash(7));
-    assert!(snap.find(&key(ObjectKind::Event, &["shop", "nightly"])).is_some());
+    assert!(
+        snap.find(&key(ObjectKind::Event, &["shop", "nightly"]))
+            .is_some()
+    );
     // The FK points at the stored table.
-    let fk = snap.find(&key(ObjectKind::ForeignKey, &["shop", "orders", "fk_cust"])).unwrap();
+    let fk = snap
+        .find(&key(ObjectKind::ForeignKey, &["shop", "orders", "fk_cust"]))
+        .unwrap();
     let Props::ForeignKey(fp) = snap.obj(fk).unwrap().props() else {
         panic!()
     };
-    assert_eq!(names(&fp.target.path.to_vec()), ["shop", "customers"]);
+    assert_eq!(names(&fp.target.path), ["shop", "customers"]);
     assert!(!snap.obj(fk).unwrap().flags().contains(ObjFlags::BROKEN));
 }
 
@@ -1167,8 +1248,11 @@ async fn create_trigger_found_although_create_time_unchanged() {
     let mut f = Fake::mysql();
     let (s0, _, _) = pass_on(&mut f, Mode::Full, None).await;
     f.at("2026-11-20 10:01:00.000000");
-    f.triggers
-        .push(("trg_c".into(), "customers".into(), "2026-11-20 10:00:30.00".into()));
+    f.triggers.push((
+        "trg_c".into(),
+        "customers".into(),
+        "2026-11-20 10:00:30.00".into(),
+    ));
     let (s1, stats) = incremental_equals_full(&mut f, &s0).await;
     assert!(stats.relations.contains(&n("customers")));
     // A dropped trigger moves the count: the table is re-read and the trigger is gone.
@@ -1271,12 +1355,20 @@ async fn mariadb_full_per_namespace_after_each_alter() {
     assert_eq!(res.new_watermark, Watermark::None);
     // R-M4-10: an incremental request is a full pass on MariaDB.
     f.at("2026-11-20 10:00:10.000000");
-    f.rels.get_mut("customers").unwrap().cols.push(col("z", "int(11)"));
+    f.rels
+        .get_mut("customers")
+        .unwrap()
+        .cols
+        .push(col("z", "int(11)"));
     let (s1, res, stats) = pass_on(&mut f, Mode::Incremental, Some(&s0)).await;
     assert!(res.full);
     assert_eq!(stats.full_reason, Some("flavor"));
     // No ServerUuid, no privilege hash on MariaDB.
-    assert!(!f.sections_read().iter().any(|s| s == "ServerUuid" || s == "Privileges"));
+    assert!(
+        !f.sections_read()
+            .iter()
+            .any(|s| s == "ServerUuid" || s == "Privileges")
+    );
     // The sequence is a Sequence with no children; the FK rule is kept as MariaDB reports it.
     let seq = s1
         .find(&ObjectKey {
@@ -1363,7 +1455,11 @@ async fn a_fragment_rereads_the_named_objects_with_scoped_existence() {
         other => panic!("{other:?}"),
     }
     let next = merge(Some(&s0), res, &MergePolicy::default()).unwrap();
-    assert_eq!(next.next().len() + 1, s0.len(), "the dropped column is gone");
+    assert_eq!(
+        next.next().len() + 1,
+        s0.len(),
+        "the dropped column is gone"
+    );
 }
 
 #[tokio::test]
@@ -1414,7 +1510,10 @@ async fn stamps_answer_raw_marks_and_none_for_gone_objects() {
     // One list query per kind and schema, never one per key: four kinds in `shop`, the
     // relation of `other`.
     assert_eq!(
-        f.log.iter().filter(|(s, _)| s.starts_with("StateOf")).count(),
+        f.log
+            .iter()
+            .filter(|(s, _)| s.starts_with("StateOf"))
+            .count(),
         5
     );
 }
@@ -1424,11 +1523,19 @@ async fn the_namespace_check_agrees_with_the_cached_namespace() {
     let mut f = Fake::mysql();
     let (s0, _, _) = pass_on(&mut f, Mode::Full, None).await;
     let srv = read_server(&mut f, DbmsKind::MySql).await.unwrap();
-    let server = ns_check(&state::server_top_marks(&mut f, &srv, &n("shop")).await.unwrap());
+    let server = ns_check(
+        &state::server_top_marks(&mut f, &srv, &n("shop"))
+            .await
+            .unwrap(),
+    );
     assert_eq!(server, ns_check(&top_marks_of(&s0)));
     assert_eq!(server.objects, 6);
     f.triggers.clear();
-    let after = ns_check(&state::server_top_marks(&mut f, &srv, &n("shop")).await.unwrap());
+    let after = ns_check(
+        &state::server_top_marks(&mut f, &srv, &n("shop"))
+            .await
+            .unwrap(),
+    );
     assert_ne!(after.existence_digest, server.existence_digest);
 }
 
@@ -1460,10 +1567,15 @@ async fn the_server_context_takes_the_flavor_from_version() {
     assert_eq!(srv.version_num, 110_405);
     assert!(srv.utf8mb4 && srv.utc_session);
     assert_eq!(srv.server_uuid, None);
-    let my = read_server(&mut Fake::mysql(), DbmsKind::MariaDb).await.unwrap();
+    let my = read_server(&mut Fake::mysql(), DbmsKind::MariaDb)
+        .await
+        .unwrap();
     assert_eq!(my.flavor, DbmsKind::MySql);
     assert_eq!(my.server_uuid.as_deref(), Some("uuid-1"));
-    assert_eq!(ServerCtx::assumed(DbmsKind::MySql, "8.4.3").version_num, 80_403);
+    assert_eq!(
+        ServerCtx::assumed(DbmsKind::MySql, "8.4.3").version_num,
+        80_403
+    );
 }
 
 #[test]
@@ -1479,7 +1591,10 @@ fn capabilities_follow_r_m4_10() {
 async fn filter_pushdown_reads_matching_relation_names_through_like_escape() {
     use hacivat_introspect::filter::{FilterRole, parse_filter};
     let mut f = Fake::mysql();
-    f.rels.insert("ord_x".into(), table("2026-11-20 09:00:00", vec![col("id", "int")]));
+    f.rels.insert(
+        "ord_x".into(),
+        table("2026-11-20 09:00:00", vec![col("id", "int")]),
+    );
     let srv = read_server(&mut f, DbmsKind::MySql).await.unwrap();
     let filter = parse_filter("ord*||v_*", DialectId::MySql, FilterRole::Introspect)
         .unwrap()
@@ -1505,4 +1620,18 @@ async fn filter_pushdown_reads_matching_relation_names_through_like_escape() {
             .unwrap(),
         None
     );
+}
+
+#[tokio::test]
+async fn the_mariadb_fingerprint_reads_its_host_facts() {
+    use hacivat_introspect::mysql::server::fingerprint;
+    let mut f = Fake::mariadb();
+    let srv = read_server(&mut f, DbmsKind::MariaDb).await.unwrap();
+    let host = pass::read_host_facts(&mut f, &srv).await.unwrap();
+    assert_eq!(host.port.as_deref(), Some("3306"));
+    let a = fingerprint(&srv, &host).expect("MariaDB host facts");
+    let mut my = Fake::mysql();
+    let srv = read_server(&mut my, DbmsKind::MySql).await.unwrap();
+    let b = fingerprint(&srv, &Default::default()).expect("MySQL server_uuid");
+    assert_ne!(a, b);
 }

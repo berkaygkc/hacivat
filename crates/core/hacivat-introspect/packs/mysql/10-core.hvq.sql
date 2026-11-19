@@ -40,6 +40,10 @@ SELECT VERSION() AS version,
 SELECT @@server_uuid AS server_uuid
 --# end
 
+--- name: ServerIdentity ---
+--- returns: server_id text, host_name text, port_number text ---
+SELECT @@server_id AS server_id, @@hostname AS host_name, @@port AS port_number
+
 --- name: Watermark ---
 --- returns: at_utc text ---
 SELECT CAST(UTC_TIMESTAMP(6) AS CHAR) AS at_utc

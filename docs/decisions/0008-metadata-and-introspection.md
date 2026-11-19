@@ -1380,3 +1380,75 @@ new.
   `nulls_first` (only when the model has the vector), `opclass` and `collation` per part on
   PostgreSQL, `no_inherit` on PostgreSQL checks, and an exclusion's deferral from `CheckRare`
   (rendered after the text, which no longer carries it). Golden `pg/index_part_options`.
+
+## m4-t17 — MySQL and MariaDB introspection
+
+Spike origin `f690f45` (`m4-spike-mysql-sqlite-intro`), adopted by copy and reworked onto packs
+and `MetaConn` (R-M4-40). Code: `hacivat-introspect/src/mysql/{mod,server,rows,build,pass,state,
+show_create}.rs`, `packs/mysql/{10-core,30-state,40-system}.hvq.sql`.
+
+- **Packs.** Written from the MySQL 8.0/8.4 Reference Manual (INFORMATION_SCHEMA tables, SHOW
+  CREATE, FOREIGN KEY constraints, system variables) and the MariaDB Knowledge Base. Every column
+  is aliased to its declared name. Version gates are MySQL-style numbers (`80046`); MariaDB
+  versions are larger than every MySQL 8 one, so each MySQL gate also reads `not flag(mariadb)`.
+  `mode == incremental` adds the one list bind `… IN :[names]` (a re-read or a fragment). No
+  `UPDATE_TIME`, `GROUP_CONCAT`, case folding or SQL-side marker comparison; the view marker is
+  `SHA2(CONCAT_WS('|', VIEW_DEFINITION, CHECK_OPTION, IS_UPDATABLE, SECURITY_TYPE, DEFINER))`.
+- **The flavor is the server's.** Each snapshot reads `Identity` (version, `lower_case_table_names`,
+  `sql_mode`, character sets, session time zone, login and role); `VERSION()` decides MySQL vs
+  MariaDB, whatever the profile says.
+- **R-M4-39 as built.** `W = UTC_TIMESTAMP(6)` inside the snapshot. An incremental pass reads every
+  relation's, trigger's, routine's and event's marker; an object is re-read when new, when its
+  marker differs from the stored one, or when a time in it is `>= W_prev − 1 s`; a missing time
+  is always re-read. Also re-read: views over a changed or dropped relation (transitively through
+  `VIEW_TABLE_USAGE`; every view before 8.0.13) and tables whose FKs reference one. The pass is
+  `Full` when the server UUID, version, privilege hash (XXH3-64 of the login's `*_PRIVILEGES` rows
+  for the schema, `CURRENT_USER()`, `CURRENT_ROLE()`), level or UTC session differs, or above
+  2,000 changed objects. A fragment carries `Watermark::None`: it never covers the namespace, and
+  advancing `W` would hide same-second changes of objects it did not read (the engine keeps the
+  stored watermark, or the next pass is `Full`).
+- **MariaDB** is `Full` per namespace (R-M4-10), `Watermark::None`; a child row whose relation the
+  `Tables` read did not list is skipped (F2, edge 4).
+- **Model mapping.** `BASE TABLE`/`SYSTEM VERSIONED` → Table, `VIEW`/`SYSTEM VIEW` → View, MariaDB
+  `SEQUENCE` → Sequence (no children), anything else `Unknown` with its raw type. Routine identity
+  is `(ROUTINE_TYPE, SPECIFIC_NAME)`; `PARAMETERS` rows (`ORDINAL_POSITION > 0`) become
+  `Argument` children with `Props::Column` (position, `DTD_IDENTIFIER` as raw type) and the
+  parameter mode in `ColumnExt::MySql.extra`: `hacivat-introspect` cannot name
+  `sql_catalog::types::{FnArg, FnKind}` (not a dependency, not re-exported), so `RoutineProps.args`
+  stays `None` ("name only", never "no arguments") and `kind` stays the default; T26/M5 derive
+  signatures from the arguments. Events are `Props::Generic` (definer as owner).
+- **Defaults arrive pre-quoted** (T7/T19 carry) and keep each flavor's spelling (F9): MariaDB's
+  `COLUMN_DEFAULT` is already SQL text and is kept; MySQL's literal is quoted with
+  `sql_ident::quote::string_literal` under the session's `NO_BACKSLASH_ESCAPES` (as `SHOW CREATE
+  TABLE` writes every literal default), a `BIT` literal kept, a `DEFAULT_GENERATED` expression kept
+  when it is a `CURRENT_TIMESTAMP` form or parenthesized, else parenthesized.
+- **Sources.** `ViewProps/RoutineProps/TriggerProps.source` stay `None` on MySQL: the DDL contract
+  (T19) is the `SHOW CREATE` statement, which only `show_create` (and T17b's `Sources` facet)
+  reads, one object at a time; hashing an `INFORMATION_SCHEMA` body would name a text the DDL view
+  cannot use.
+- **R-M4-37 and the guard.** `show_create` refuses unless `character_set_client`, `_connection`
+  and `_results` read `utf8mb4` (the T4 carry). Named exception in Task 5's
+  `hacivat-session/src/meta.rs` (`read_tokens_ok`): in a text whose first two words are `SHOW
+  CREATE`, a quoted identifier not followed by `(` is a name and skips the ASCII and deny-word
+  checks (so `` `İ` `` and `` `update` `` can be shown); words are still checked, and a `;` or
+  control character anywhere is still refused (a name holding `;` has no server text: fail
+  closed). mysql_async 0.37 / mysql_common 0.37.3 `ParsedNamedParams::parse` tracks backtick
+  identifiers (doubled backticks re-enter the identifier state), so `:x` and `?` inside a quoted
+  name are never parameters.
+- **Stamps.** A relation answers its table stamp (view: hash), a routine/event `LAST_ALTERED`, a
+  trigger `CREATED`; a child key answers its parent's mark (the re-read unit); a kind a MySQL
+  schema cannot hold answers `None`. `check_state` without stored marks answers `Dropped` for a
+  `None` stamp and `Unknown` otherwise. `NsCheck` is computed by one function from the server's
+  marker rows and from a cached namespace (`state::{server_top_marks, top_marks_of, ns_check}`).
+- **Pushdown (R-W3-2).** `pass::pushdown_relations` runs `TableNamesLike` (`LIKE ? ESCAPE ?`, one
+  query per pattern) with `pushdown_kinds` over Table and View (and Sequence on MariaDB): the other
+  `TABLE_TYPE` values never reach a metadata session.
+- **Identity (R-W3-3).** `server_fingerprint`: XXH3-128 of flavor, version and `@@server_uuid`
+  (MySQL); MariaDB has none, so `@@server_id`, `@@hostname` and `@@port`; `None` when a fact is
+  missing.
+- **Not pinned yet (Docker on CI, R-W2-14).** The R-M4-41 column-fold probe
+  (`t17-mysql-column-fold.tsv`) and the FK-created index (`t17-fk-auto-index.tsv`) are recorded by
+  `docker_mysql_intro`; until a ruling reads them, `sql_ident::key` keeps every caseless MySQL
+  class `ServerDependent` for non-ASCII cased text (no `m4-t17-mysql-fold` block is written) and
+  `FkIndexRule` stays `None` (every index is shown; DDL stays valid). `SHOW CREATE TRIGGER` on the
+  prepared path is [Inferred] until `every_mysql_section_prepares…` runs.

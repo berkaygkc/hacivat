@@ -182,9 +182,74 @@ impl ServerCtx {
     }
 }
 
+/// What `ServerIdentity` read (`@@server_id`, `@@hostname`, `@@port`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostFacts {
+    pub server_id: Option<Name>,
+    pub host_name: Option<Name>,
+    pub port: Option<Name>,
+}
+
+/// The server's identity for the cache (ruling R-W3-3; `ServerFingerprint`, XXH3-128):
+///
+/// - **MySQL**: `@@server_uuid` (generated once per data directory and kept in `auto.cnf`;
+///   MySQL 8.4 manual, "Replication and Binary Logging Options and Variables") and the version.
+///   A restore into another data directory, or a swapped server, changes it.
+/// - **MariaDB** has no server UUID: `@@server_id` (an administrator's number, 1 by default,
+///   so not unique alone), `@@hostname` and `@@port` together with the version (MariaDB
+///   Knowledge Base, "Server System Variables").
+///
+/// `None` (the seam's `Unknown`) when a fact it needs could not be read: never a guess.
+pub fn fingerprint(srv: &ServerCtx, host: &HostFacts) -> Option<u128> {
+    let mut facts: Vec<&str> = vec![srv.flavor.id(), &srv.version_text];
+    if srv.version_text.is_empty() {
+        return None;
+    }
+    if srv.is_mariadb() {
+        facts.push(host.server_id.as_deref()?);
+        facts.push(host.host_name.as_deref()?);
+        facts.push(host.port.as_deref()?);
+    } else {
+        facts.push(srv.server_uuid.as_deref().filter(|u| !u.is_empty())?);
+    }
+    Some(twox_hash::XxHash3_128::oneshot(facts.join("\n").as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fingerprint_uses_the_server_uuid_or_mariadbs_host_facts_and_never_guesses() {
+        let mut my = ServerCtx::assumed(DbmsKind::MySql, "8.4.3");
+        assert_eq!(fingerprint(&my, &HostFacts::default()), None);
+        my.server_uuid = Some(Name::from("u-1"));
+        let a = fingerprint(&my, &HostFacts::default()).expect("uuid and version");
+        my.server_uuid = Some(Name::from("u-2"));
+        assert_ne!(Some(a), fingerprint(&my, &HostFacts::default()));
+        let maria = ServerCtx::assumed(DbmsKind::MariaDb, "11.4.5-MariaDB");
+        let host = HostFacts {
+            server_id: Some(Name::from("1")),
+            host_name: Some(Name::from("db")),
+            port: Some(Name::from("3306")),
+        };
+        let b = fingerprint(&maria, &host).expect("host facts");
+        let other_port = HostFacts {
+            port: Some(Name::from("3307")),
+            ..host.clone()
+        };
+        assert_ne!(Some(b), fingerprint(&maria, &other_port));
+        assert_eq!(
+            fingerprint(
+                &maria,
+                &HostFacts {
+                    host_name: None,
+                    ..host
+                }
+            ),
+            None
+        );
+    }
 
     #[test]
     fn versions_and_flavors_parse() {

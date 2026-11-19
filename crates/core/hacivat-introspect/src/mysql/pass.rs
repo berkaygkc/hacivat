@@ -36,8 +36,8 @@ use hacivat_values::{BindValue, LogicalType};
 use smallvec::smallvec;
 
 use super::build::{
-    RelationParts, Tree, event_tree, micros, raw_kind, relation_kind, relation_mark,
-    relation_tree, routine_kind, routine_tree, trigger_stats,
+    RelationParts, Tree, event_tree, micros, raw_kind, relation_kind, relation_mark, relation_tree,
+    routine_kind, routine_tree, trigger_stats,
 };
 use super::rows::{
     self, ColumnRow, EventRow, ParamRow, RoutineRow, TableRow, TriggerRow, ViewRow, cell, name,
@@ -174,6 +174,25 @@ pub async fn read_server(
             .and_then(|r| opt_name(r, 0));
     }
     Ok(srv)
+}
+
+/// `@@server_id`, `@@hostname` and `@@port` (MariaDB's part of the server fingerprint).
+pub async fn read_host_facts(
+    r: &mut dyn SectionReader,
+    srv: &ServerCtx,
+) -> Result<super::server::HostFacts, IntroError> {
+    let rows = r
+        .read(
+            "ServerIdentity",
+            srv.pack_ctx(Mode::Full, Level::Structure, Params::default()),
+        )
+        .await?;
+    let row = rows::checked("ServerIdentity", &rows, 3)?.first();
+    Ok(super::server::HostFacts {
+        server_id: row.and_then(|r| opt_name(r, 0)),
+        host_name: row.and_then(|r| opt_name(r, 1)),
+        port: row.and_then(|r| opt_name(r, 2)),
+    })
 }
 
 /// `W`: `UTC_TIMESTAMP(6)` read inside the pass's snapshot (R-M4-39), microseconds.
@@ -653,11 +672,18 @@ pub async fn run_pass(
         Some("requested")
     };
     match (blocker, prev) {
-        (None, Some(prev)) => {
-            incremental_pass(r, srv, &schema, level, prev, w, watermark).await
-        }
+        (None, Some(prev)) => incremental_pass(r, srv, &schema, level, prev, w, watermark).await,
         (reason, _) => {
-            full_pass(r, srv, &schema, level, w, watermark, reason.unwrap_or("requested")).await
+            full_pass(
+                r,
+                srv,
+                &schema,
+                level,
+                w,
+                watermark,
+                reason.unwrap_or("requested"),
+            )
+            .await
         }
     }
 }
@@ -686,7 +712,11 @@ async fn full_pass(
     let stats = PassStats {
         full_reason: Some(reason),
         relations: set.tables.iter().map(|t| t.name.clone()).collect(),
-        routines: set.routines.iter().map(|t| t.specific_name.clone()).collect(),
+        routines: set
+            .routines
+            .iter()
+            .map(|t| t.specific_name.clone())
+            .collect(),
         events: set.events.iter().map(|t| t.name.clone()).collect(),
     };
     let built = build(set, srv, level, &index);
@@ -779,7 +809,9 @@ async fn incremental_pass(
         } else {
             micros(t.create_time.as_ref()).is_some()
         };
-        let stored = top.get(&(kind, raw.clone(), t.name.clone())).map(|(_, m)| m);
+        let stored = top
+            .get(&(kind, raw.clone(), t.name.clone()))
+            .map(|(_, m)| m);
         if reread(stored, &mark, has_time, w_prev) {
             want.relations.insert(t.name.clone());
             definition_changed.insert(t.name.clone());
@@ -795,8 +827,10 @@ async fn incremental_pass(
     }
     // Relations the cache holds that the server no longer lists.
     for (kind, _, n) in top.keys() {
-        if matches!(kind, ObjectKind::Table | ObjectKind::View | ObjectKind::Sequence)
-            && !listed.contains(n)
+        if matches!(
+            kind,
+            ObjectKind::Table | ObjectKind::View | ObjectKind::Sequence
+        ) && !listed.contains(n)
         {
             definition_changed.insert(n.clone());
         }
@@ -866,7 +900,12 @@ async fn incremental_pass(
         let stored = top
             .get(&(ObjectKind::Event, None, e.name.clone()))
             .map(|(_, m)| m);
-        if reread(stored, &mark, micros(e.last_altered.as_ref()).is_some(), w_prev) {
+        if reread(
+            stored,
+            &mark,
+            micros(e.last_altered.as_ref()).is_some(),
+            w_prev,
+        ) {
             want.events.insert(e.name.clone());
         }
         ids.entry(ObjectKind::Event).or_default().push(Identity {
@@ -907,7 +946,11 @@ async fn incremental_pass(
     let stats = PassStats {
         full_reason: None,
         relations: set.tables.iter().map(|t| t.name.clone()).collect(),
-        routines: set.routines.iter().map(|t| t.specific_name.clone()).collect(),
+        routines: set
+            .routines
+            .iter()
+            .map(|t| t.specific_name.clone())
+            .collect(),
         events: set.events.iter().map(|t| t.name.clone()).collect(),
     };
     let built = build(set, srv, level, &index);
@@ -972,7 +1015,10 @@ fn changed_result(
                 &[ObjectKind::Table, ObjectKind::View, ObjectKind::Sequence][..],
                 &want.relations,
             ),
-            (&[ObjectKind::Routine, ObjectKind::Procedure][..], &want.routines),
+            (
+                &[ObjectKind::Routine, ObjectKind::Procedure][..],
+                &want.routines,
+            ),
             (&[ObjectKind::Event][..], &want.events),
         ] {
             if asked.is_empty() {
@@ -1068,7 +1114,11 @@ pub async fn run_fragment(
     let stats = PassStats {
         full_reason: None,
         relations: set.tables.iter().map(|t| t.name.clone()).collect(),
-        routines: set.routines.iter().map(|t| t.specific_name.clone()).collect(),
+        routines: set
+            .routines
+            .iter()
+            .map(|t| t.specific_name.clone())
+            .collect(),
         events: set.events.iter().map(|t| t.name.clone()).collect(),
     };
     let built = build(set, srv, level, &index);
@@ -1190,7 +1240,11 @@ async fn system_pass(
     let stats = PassStats {
         full_reason: Some("system"),
         relations: set.tables.iter().map(|t| t.name.clone()).collect(),
-        routines: set.routines.iter().map(|t| t.specific_name.clone()).collect(),
+        routines: set
+            .routines
+            .iter()
+            .map(|t| t.specific_name.clone())
+            .collect(),
         events: Vec::new(),
     };
     let mut result = full_result(built, schema, srv, Level::Structure, Watermark::None, 0);

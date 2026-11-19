@@ -15,8 +15,8 @@ use std::sync::Arc;
 use hacivat_meta::merge::Identity;
 use hacivat_meta::props::{
     ColumnExt, ColumnProps, ColumnRare, Generated, GenericProps, Identity as ColIdentity,
-    Persistence, Props, RoutineProps, SeqProps, TableExt, TableProps, TriggerEvents,
-    TriggerProps, TriggerTiming, ViewProps,
+    Persistence, Props, RoutineProps, SeqProps, TableExt, TableProps, TriggerEvents, TriggerProps,
+    TriggerTiming, ViewProps,
 };
 use hacivat_meta::{Name, Obj, ObjFlags, ObjectKind, StateMark, Subtree};
 
@@ -407,7 +407,9 @@ pub fn event_tree(e: &EventRow) -> Tree {
     Tree::new(
         Obj::new(ObjectKind::Event, e.name.clone())
             .with_props(Props::Generic(Arc::new(props)))
-            .with_state(micros(e.last_altered.as_ref()).map_or(StateMark::None, StateMark::Modified)),
+            .with_state(
+                micros(e.last_altered.as_ref()).map_or(StateMark::None, StateMark::Modified),
+            ),
     )
 }
 

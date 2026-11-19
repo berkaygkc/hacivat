@@ -45,9 +45,7 @@ pub fn name(r: &Row, i: usize) -> Name {
 
 /// Cell `i` as a name, `None` for NULL or an empty string (comments, options).
 pub fn opt_name(r: &Row, i: usize) -> Option<Name> {
-    r.get(i)
-        .and_then(Clone::clone)
-        .filter(|s| !s.is_empty())
+    r.get(i).and_then(Clone::clone).filter(|s| !s.is_empty())
 }
 
 /// Cell `i` as a number (`None` for NULL or text that is not one).
@@ -548,7 +546,10 @@ mod tests {
             parse_time_micros("2026-11-20 10:11:12.000001"),
             Some(1_795_169_472_000_001)
         );
-        assert_eq!(parse_time_micros("2000-02-29 00:00:00"), Some(951_782_400_000_000));
+        assert_eq!(
+            parse_time_micros("2000-02-29 00:00:00"),
+            Some(951_782_400_000_000)
+        );
         for bad in [
             "",
             "0000-00-00 00:00:00",

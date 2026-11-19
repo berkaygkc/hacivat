@@ -205,13 +205,18 @@ async fn stub_stamps_and_facet_not_implemented() {
             if written {
                 matches!(
                     e,
-                    Err(IntroError::Meta(hacivat_session::meta::MetaError::Unavailable))
+                    Err(IntroError::Meta(
+                        hacivat_session::meta::MetaError::Unavailable
+                    ))
                 )
             } else {
                 matches!(e, Err(IntroError::NotImplemented))
             }
         };
-        assert!(not_written(&intro.stamps(&mut c, &keys).await.map(drop)), "{dbms:?}");
+        assert!(
+            not_written(&intro.stamps(&mut c, &keys).await.map(drop)),
+            "{dbms:?}"
+        );
         for kind in [
             FacetKind::Sources,
             FacetKind::Grants,
@@ -226,7 +231,11 @@ async fn stub_stamps_and_facet_not_implemented() {
         }
         assert!(not_written(&intro.list_namespaces(&mut c).await.map(drop)));
         // `ns("public")` is a PostgreSQL-shaped key; a MySQL namespace is `[schema]`.
-        let n_any = if written { NsKey::schema(["public"]) } else { n.clone() };
+        let n_any = if written {
+            NsKey::schema(["public"])
+        } else {
+            n.clone()
+        };
         assert!(not_written(
             &intro
                 .introspect(&mut c, &n_any, Mode::Full, Level::Structure, None, &cancel)
@@ -239,7 +248,9 @@ async fn stub_stamps_and_facet_not_implemented() {
                 .await
                 .map(drop)
         ));
-        assert!(not_written(&intro.check_state(&mut c, &keys).await.map(drop)));
+        assert!(not_written(
+            &intro.check_state(&mut c, &keys).await.map(drop)
+        ));
     }
 }
 
