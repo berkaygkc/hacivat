@@ -974,3 +974,55 @@ R-M4-3, -7, -14, -41; R-W1-7). The three modules build without the `session` fea
     caseless engines (`ascii_caseless` follows the flag per group). The seams test is renamed
     `scope_selects_the_current_and_every_user_schema`. The reviewer's hostile tests are
     `tests/scope_hostile.rs`.
+
+## m4-t19 — DDL producers
+
+M4 Task 19 fills `hacivat-ddl`'s view-only producers (alg/03 HV-DDL-07 producers) and the
+script text form. The bodies are adapted from the DDL spike (`da358e4`, R-M4-40, U-1) to the
+merged model, `ModelView` and the T7 renderers, and reviewed as new code.
+
+- **A sources seam beside the view.** The model keeps only `SourceRef`s; the text lives in the
+  cache's content-addressed store, and grants are a facet (R-M4-30). Neither is reachable
+  through `ModelView`, so the producer takes a `DdlSources` (`text(SourceRef)`, the `Sources`
+  facet `server_text(ObjectKey)`, the `Grants` facet `grants(ObjectKey) -> Facet<GrantsFacet>`,
+  each defaulting to "not loaded"). `create_script` keeps Task 1a's signature and runs with
+  `NoSources`; `create_script_with` is the DDL view's entry point (Task 25).
+- **Only what the view vouches for.** An object is located through `ModelView::children`
+  (the schema list for a schema) and used only when the answer is `Found`, i.e. from a
+  namespace loaded at `Structure` or above. Everything else, a missing definition text, a
+  `LOSSY_NAME`, or props of the wrong shape, is `DdlError::NotLoaded`, never an empty or
+  partial `CREATE`. `ObjectKind::Unknown` named directly is `DdlError::UnsupportedKind`; inside
+  an expanded schema it is left out with `ddl-unsupported-kind`. A NUL anywhere in the output
+  is refused. A dialect with no renderer (SQL Server, ClickHouse, Oracle, the PG-wire forks)
+  is `UnsupportedKind`.
+- **Server text, verbatim** (R-M4-24): views, materialized views, routines and triggers; a
+  PostgreSQL index with an expression, a predicate or `INCLUDE` when the `Sources` facet holds
+  `pg_get_indexdef` (else synthesized; operator classes and collations are T13 fields);
+  MySQL/MariaDB tables under `server_definitions` (`SHOW CREATE TABLE`, `NotLoaded` without
+  it). **SQLite tables, indexes, views, triggers and virtual tables are always their
+  `sqlite_schema.sql` text** (T7 carry M8 settled per dialect: `server_definitions` is on for
+  SQLite whatever `GenOptions` says; placement other than `InsideTable` raises
+  `ddl-sqlite-placement-forced`).
+- **IR gaps handled in the producer** (T7 carries; the IR is Task 1a/7's):
+  `ALTER SEQUENCE … OWNED BY` is a producer-rendered statement after the owning table; MySQL
+  secondary indexes are `CREATE INDEX` after the table (no `KEY` element in the IR), with an
+  FK moved to `ALTER TABLE … ADD` after an explicit index of the same name (MySQL would create
+  the FK's own index under that name); a MySQL unique key on column prefixes is
+  `CREATE UNIQUE INDEX` from its backing index (T13 m4); a MySQL `INVISIBLE` (MariaDB
+  `IGNORED`) index gets the option word after the rendered statement; a MySQL `INVISIBLE`
+  column carries the attribute after its type. The script's MySQL file form uses the custom
+  delimiter the renderer chose (`DelimStyle::MySqlDelimiter`, T7 carry M3).
+- **Names.** A server-generated constraint name (`SERVER_GENERATED_NAME`) is omitted unless
+  `surrogate_names`; MySQL's `PRIMARY` never. `Auto` qualification asks the view's schema list
+  whether a name exists in more than one schema of its database; when the list is not known
+  the name is qualified (the safe side). A PostgreSQL temporary table is never qualified.
+- **Order** is deterministic (BTree maps, arena order, name bytes): schemas, types (enum,
+  range, domain, composite), sequences, routines, tables in FK and partition-parent order
+  (a cycle broken at the smallest remaining table, its FK postponed past both tables), views,
+  materialized views, standalone indexes, triggers and constraints.
+- **Gaps recorded, not hidden:** an `INHERITS` child is `NotLoaded` (the model holds no parent
+  list, and dropping inherited columns without `INHERITS` would describe another table);
+  MySQL partitioning (`CREATE_OPTIONS partitioned`) raises `ddl-unsupported-kind`; NOT
+  ENFORCED constraints, PG 18 named NOT NULL constraints, MySQL table charset and per-part
+  `NULLS FIRST`/operator class/collation and exclusion deferral (T13's R-W2-8 fields) are not
+  written yet; `with_options` is unsupported (T13 carry).
