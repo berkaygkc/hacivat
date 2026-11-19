@@ -974,3 +974,86 @@ R-M4-3, -7, -14, -41; R-W1-7). The three modules build without the `session` fea
     caseless engines (`ascii_caseless` follows the flag per group). The seams test is renamed
     `scope_selects_the_current_and_every_user_schema`. The reviewer's hostile tests are
     `tests/scope_hostile.rs`.
+
+## m4-t19 — DDL producers
+
+M4 Task 19 fills `hacivat-ddl`'s view-only producers (alg/03 HV-DDL-07 producers) and the
+script text form. The bodies are adapted from the DDL spike (`da358e4`, R-M4-40, U-1) to the
+merged model, `ModelView` and the T7 renderers, and reviewed as new code.
+
+- **A sources seam beside the view.** The model keeps only `SourceRef`s; the text lives in the
+  cache's content-addressed store, and grants are a facet (R-M4-30). Neither is reachable
+  through `ModelView`, so the producer takes a `DdlSources` (`text(SourceRef)`, the `Sources`
+  facet `server_text(ObjectKey)`, the `Grants` facet `grants(ObjectKey) -> Facet<GrantsFacet>`,
+  each defaulting to "not loaded"). `create_script` keeps Task 1a's signature and runs with
+  `NoSources`; `create_script_with` is the DDL view's entry point (Task 25).
+- **Only what the view vouches for.** An object is located through `ModelView::children`
+  (the schema list for a schema) and used only when the answer is `Found`, i.e. from a
+  namespace loaded at `Structure` or above. Everything else, a missing definition text, a
+  `LOSSY_NAME`, or props of the wrong shape, is `DdlError::NotLoaded`, never an empty or
+  partial `CREATE`. `ObjectKind::Unknown` named directly is `DdlError::UnsupportedKind`; inside
+  an expanded schema it is left out with `ddl-unsupported-kind`. A NUL anywhere in the output
+  is refused. A dialect with no renderer (SQL Server, ClickHouse, Oracle, the PG-wire forks)
+  is `UnsupportedKind`.
+- **Server text, verbatim** (R-M4-24): views, materialized views, routines and triggers; a
+  PostgreSQL index with an expression, a predicate or `INCLUDE` when the `Sources` facet holds
+  `pg_get_indexdef` (else synthesized; operator classes and collations are T13 fields);
+  MySQL/MariaDB tables under `server_definitions` (`SHOW CREATE TABLE`, `NotLoaded` without
+  it). **SQLite tables, indexes, views, triggers and virtual tables are always their
+  `sqlite_schema.sql` text** (T7 carry M8 settled per dialect: `server_definitions` is on for
+  SQLite whatever `GenOptions` says; placement other than `InsideTable` raises
+  `ddl-sqlite-placement-forced`).
+- **IR gaps handled in the producer** (T7 carries; the IR is Task 1a/7's):
+  `ALTER SEQUENCE … OWNED BY` is a producer-rendered statement after the owning table; MySQL
+  secondary indexes are `CREATE INDEX` after the table (no `KEY` element in the IR), with an
+  FK moved to `ALTER TABLE … ADD` after an explicit index of the same name (MySQL would create
+  the FK's own index under that name); a MySQL unique key on column prefixes is
+  `CREATE UNIQUE INDEX` from its backing index (T13 m4); a MySQL `INVISIBLE` (MariaDB
+  `IGNORED`) index gets the option word after the rendered statement; a MySQL `INVISIBLE`
+  column carries the attribute after its type. The script's MySQL file form uses the custom
+  delimiter the renderer chose (`DelimStyle::MySqlDelimiter`, T7 carry M3).
+- **Names.** A server-generated constraint name (`SERVER_GENERATED_NAME`) is omitted unless
+  `surrogate_names`; MySQL's `PRIMARY` never. `Auto` qualification asks the view's schema list
+  whether a name exists in more than one schema of its database; when the list is not known
+  the name is qualified (the safe side). A PostgreSQL temporary table is never qualified.
+- **Order** is deterministic (BTree maps, arena order, name bytes): schemas, types (enum,
+  range, domain, composite), sequences, routines, tables in FK and partition-parent order
+  (a cycle broken at the smallest remaining table, its FK postponed past both tables), views,
+  materialized views, standalone indexes, triggers and constraints.
+- **Gaps recorded, not hidden:** an `INHERITS` child is `NotLoaded` (the model holds no parent
+  list, and dropping inherited columns without `INHERITS` would describe another table);
+  MySQL partitioning (`CREATE_OPTIONS partitioned`) raises `ddl-unsupported-kind`; (NOT
+  ENFORCED: see fix round 1 below) PG 18 named NOT NULL constraints, MySQL table charset and per-part
+  `NULLS FIRST`/operator class/collation and exclusion deferral (T13's R-W2-8 fields) are not
+  written yet; `with_options` is unsupported (T13 carry).
+- **Fix round 1 (opus review: a script never states a wrong fact silently; it is exact, carries
+  a notice, or answers `NotLoaded`):**
+  - **I1:** a MySQL/MariaDB unique key whose backing index has prefixes, descending parts,
+    `INVISIBLE`, a comment or a method other than `BTREE` is `CREATE UNIQUE INDEX` from that
+    index; such a primary key is `ALTER TABLE … ADD PRIMARY KEY (…) [USING HASH] [COMMENT …]`
+    after the table. If an `AUTO_INCREMENT` column's only key needs that route, the script is
+    refused (`Render(Invalid)`), since MySQL wants the key at `CREATE TABLE`.
+  - **I2:** `KeyProps`/`CheckProps` `Default` is now **enforced** (named exception in
+    `hacivat-meta/src/props.rs`, fenced `m4-t19-produce`; field name and codec unchanged, T11
+    needs nothing; T13 adds `rare: None` to the two impls). A constraint the server does not
+    enforce is `ALTER TABLE … ADD … NOT ENFORCED` where the target has it (MySQL 8.0.16+
+    checks; PostgreSQL 18+ checks and foreign keys), else left out with
+    `ddl-warn-not-enforced`. Introspector contract (T16/T17): `enforced` is `false` only for
+    a constraint the server reports as not enforced.
+  - **I3:** a disabled PostgreSQL trigger (`TriggerProps.enabled = false`) is followed by
+    `ALTER TABLE … DISABLE TRIGGER …`, on PostgreSQL only. T16 must fill `enabled` from
+    `tgenabled` (the derived default is `false`). `ENABLE REPLICA`/`ALWAYS` have no field yet.
+  - **I4:** `ColumnDef.invisible` (named exception in T7's `ir.rs`, `render/{mysql,pg,sqlite}.rs`
+    and `tests/render_ir.rs`, fenced): MySQL writes `INVISIBLE` after the type, any generated
+    clause, `ON UPDATE` and `AUTO_INCREMENT`; PostgreSQL and SQLite refuse it. `on_update_of`
+    keeps one token, so a trailing `INVISIBLE` in `EXTRA` is not swallowed.
+  - **I5:** `ddl-warn-unknown-type` (named exception in m4-t01a's FTL DDL block, fenced
+    `## m4-t19-produce`, TR `# Review: PO`): a PostgreSQL column whose `type_ref` is outside
+    `pg_catalog`/`information_schema` and is neither a type nor a relation the view holds.
+  - **Minors:** a `sqlite_autoindex_*` name is implicit on SQLite only; a PG/MySQL table with
+    `Props::None`, or a partitioned parent without its key, is `NotLoaded`; MariaDB has no
+    functional key parts (such an index is left out with `ddl-unsupported-kind`).
+  - **Recorded gaps (carries):** identity sequence options and name, PG column storage and
+    compression, view `security_invoker`/`security_barrier` (M7); dependency order for
+    whole-schema scripts (T31, M7); `server_text` has no load state (T25, T22); revoked
+    default privileges (M7); per-part opclass/collation/NULLS FIRST (T13).

@@ -88,6 +88,11 @@ pub struct ColumnDef {
     /// MySQL `ON UPDATE`, raw (texts differ per flavor, F9).
     pub on_update: Option<Name>,
     pub comment: Option<Name>,
+    // ## m4-t19-produce (named exception, T19 review I4)
+    /// MySQL/MariaDB `INVISIBLE` column, written after the type and any generated clause;
+    /// the other dialects refuse it.
+    pub invisible: bool,
+    // ## end m4-t19-produce
 }
 
 /// Constraint deferrability.
@@ -677,6 +682,7 @@ fn column(n: &str, ty: &str, nullable: bool) -> ColumnDef {
         identity: None,
         on_update: None,
         comment: None,
+        invisible: false, // ## m4-t19-produce
     }
 }
 
