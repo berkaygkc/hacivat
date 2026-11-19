@@ -45,25 +45,28 @@ type Row = (
     Option<&'static str>,
 );
 
+// ## m4-t14-explorer (fix round 2, ruling R-W2-12b; named exception): the M4 rows and their
+// commands are in `ExplorerTree`, which the focused tree carries on every row; `Explorer`
+// keeps the connection rows and is pushed only while the cursor is on a profile root.
 const M4_ROWS: &[Row] = &[
     (
         "explorer.view_ddl",
-        "Explorer",
-        "Explorer",
+        "ExplorerTree",
+        "ExplorerTree",
         Some("f12"),
         Some("f12"),
     ),
     (
         "explorer.copy_qualified_name",
-        "Explorer",
-        "Explorer",
+        "ExplorerTree",
+        "ExplorerTree",
         Some("cmd-alt-c"),
         Some("shift-alt-c"),
     ),
     (
         "explorer.collapse_all",
-        "Explorer",
-        "Explorer",
+        "ExplorerTree",
+        "ExplorerTree",
         Some("cmd-left"),
         Some("ctrl-left"),
     ),
@@ -72,14 +75,14 @@ const M4_ROWS: &[Row] = &[
     (
         "explorer.focus_filter",
         "Workspace",
-        "Explorer",
+        "ExplorerTree",
         Some("cmd-alt-f"),
         None,
     ),
     (
         "explorer.refresh",
-        "Explorer",
-        "Explorer",
+        "ExplorerTree",
+        "ExplorerTree",
         Some("f5"),
         Some("f5"),
     ),
@@ -89,44 +92,62 @@ const M4_ROWS: &[Row] = &[
     ("ddl_view.copy", "DdlView", "DdlView", None, None),
     // Palette only. Enter on a table or view row is the tree's own activate (Open data); on a
     // profile row it stays `connection.toggle_connect`.
-    ("explorer.open_data", "Explorer", "Explorer", None, None),
     (
-        "explorer.expand_all_children",
-        "Explorer",
-        "Explorer",
+        "explorer.open_data",
+        "ExplorerTree",
+        "ExplorerTree",
         None,
         None,
     ),
-    ("explorer.edit_scope", "Explorer", "Explorer", None, None),
+    (
+        "explorer.expand_all_children",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
+    (
+        "explorer.edit_scope",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
     (
         "explorer.set_level.auto",
-        "Explorer",
-        "Explorer",
+        "ExplorerTree",
+        "ExplorerTree",
         None,
         None,
     ),
     (
         "explorer.set_level.names",
-        "Explorer",
-        "Explorer",
+        "ExplorerTree",
+        "ExplorerTree",
         None,
         None,
     ),
     (
         "explorer.set_level.structure",
-        "Explorer",
-        "Explorer",
+        "ExplorerTree",
+        "ExplorerTree",
         None,
         None,
     ),
     (
         "explorer.set_level.sources",
-        "Explorer",
-        "Explorer",
+        "ExplorerTree",
+        "ExplorerTree",
         None,
         None,
     ),
-    ("metadata.clear_cache", "Explorer", "Explorer", None, None),
+    (
+        "metadata.clear_cache",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
 ];
 
 /// The command ids M4 registers (every M4 row except the M2a command it adds a chord to).
@@ -241,7 +262,7 @@ const VSCODE: &[VsCode] = &[
     // Go to Definition.
     VsCode {
         id: "explorer.view_ddl",
-        context: "Explorer",
+        context: "ExplorerTree",
         vscode: [Some("f12"), Some("f12"), Some("f12")],
         differs: &[],
     },
@@ -249,7 +270,7 @@ const VSCODE: &[VsCode] = &[
     // takes VS Code's Windows chord there (the T2 review, carries-w0).
     VsCode {
         id: "explorer.copy_qualified_name",
-        context: "Explorer",
+        context: "ExplorerTree",
         vscode: [
             Some("cmd-alt-c"),
             Some("shift-alt-c"),
@@ -260,14 +281,14 @@ const VSCODE: &[VsCode] = &[
     // `list.collapseAll`.
     VsCode {
         id: "explorer.collapse_all",
-        context: "Explorer",
+        context: "ExplorerTree",
         vscode: [Some("cmd-left"), Some("ctrl-left"), Some("ctrl-left")],
         differs: &[],
     },
     // `list.find`: Ctrl+Alt+F is AltGr+F on Windows and Linux (P-M4-9): no row there.
     VsCode {
         id: "explorer.focus_filter",
-        context: "Explorer",
+        context: "ExplorerTree",
         vscode: [Some("cmd-alt-f"), Some("ctrl-alt-f"), Some("ctrl-alt-f")],
         differs: &[
             (KeymapPlatform::Windows, None),
@@ -277,7 +298,7 @@ const VSCODE: &[VsCode] = &[
     // VS Code has no refresh default; F5 is the file-manager and browser convention.
     VsCode {
         id: "explorer.refresh",
-        context: "Explorer",
+        context: "ExplorerTree",
         vscode: [None, None, None],
         differs: &[
             (KeymapPlatform::MacOs, Some("f5")),
@@ -368,7 +389,7 @@ fn keymap_commands_are_registered_including_host_only(cx: &mut TestAppContext) {
     // The one host-only row is a keymap row, not a registration: `cmd-alt-f` exists only in the
     // macOS keymap, and its command is registered everywhere.
     for platform in [KeymapPlatform::Windows, KeymapPlatform::Linux] {
-        assert!(chords(platform, "hacivat", "explorer.focus_filter", "Explorer").is_empty());
+        assert!(chords(platform, "hacivat", "explorer.focus_filter", "ExplorerTree").is_empty());
     }
     assert!(reg.get("explorer.focus_filter").is_some());
 }
@@ -639,6 +660,9 @@ fn ddl_view_tabs_are_one_per_object(cx: &mut TestAppContext) {
 #[gpui::test]
 fn copy_chord_passes_through_outside_the_ddl_text(cx: &mut TestAppContext) {
     let vcx = shell_with_connections(cx, "en");
+    // ## m4-t14-explorer (fix round 1, ruling R-W2-12; named exception): the tree adds
+    // `Explorer` only while its cursor is on a profile root, so the list has one to land on.
+    add_profile(vcx, test_profile("a", None, "127.0.0.1"));
     in_window(vcx, |window, _| window.activate_window());
     let profile = ProfileId::new();
     let ws = workspace(vcx);

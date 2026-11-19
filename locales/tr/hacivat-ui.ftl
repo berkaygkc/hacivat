@@ -3562,3 +3562,15 @@ hv-cmd-explorer-set-level-sources = Okuma düzeyi: Yapı ve kaynaklar
 hv-cmd-metadata-clear-cache = Önbellekteki üst veriyi temizle
 # Review: PO
 hv-cmd-ddl-view-copy = DDL'i kopyala
+
+## m4-t14-explorer
+
+# Review: PO
+hv-explorer-not-loaded = Yüklenmedi
+hv-explorer-count = { $n }
+# Review: PO
+hv-explorer-fk-target = → { $target } ({ $columns })
+# Review: PO
+hv-explorer-out-of-scope = kapsam dışı
+# Review: PO
+hv-explorer-filter-not-loaded = Yalnız yüklenmiş adlarda arar. { $n } bağlantı ya da şema henüz yüklenmedi.

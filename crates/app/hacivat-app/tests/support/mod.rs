@@ -1421,3 +1421,197 @@ pub fn register_test_console_unseen(
     vcx.run_until_parked();
     id
 }
+
+// ## m4-t14-explorer
+/// Catalog snapshots for the explorer tests (`hacivat-meta`'s `fixture` is behind its
+/// `test-support` feature, which this crate's tests do not enable): namespaces built through
+/// the model's public API, published as data (Task 1a's `CatalogSnapshot` fields).
+pub mod catalogs {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use hacivat_meta::name::{DialectId, FoldRule, IdentCtx, NameClass};
+    use hacivat_meta::namespace::{NsMeta, Subtree};
+    use hacivat_meta::props::{ColumnProps, GenericProps, Props, TableProps};
+    use hacivat_meta::snapshot::ContainerKey;
+    use hacivat_meta::{
+        CatalogSnapshot, Level, LoadState, NamespaceSnapshot, NsKey, Obj, ObjFlags, ObjectKind,
+        ServerFacts, ServerId,
+    };
+    use hacivat_proto::DbmsKind;
+
+    fn dialect(d: DbmsKind) -> DialectId {
+        match d {
+            DbmsKind::MySql => DialectId::MySql,
+            DbmsKind::MariaDb => DialectId::MariaDb,
+            DbmsKind::Sqlite => DialectId::Sqlite,
+            _ => DialectId::Postgres,
+        }
+    }
+
+    /// Table `name` (server id `oid`) with `columns` `(name, type)`, ordinals from 1.
+    pub fn table(name: &str, oid: Option<u32>, columns: &[(&str, &str)]) -> Subtree {
+        let mut root = Obj::new(ObjectKind::Table, name)
+            .with_props(Props::Table(Arc::new(TableProps::default())));
+        if let Some(oid) = oid {
+            root = root.with_server_id(ServerId::Oid(oid));
+        }
+        let mut t = Subtree::with_capacity(root, columns.len() + 1);
+        for (i, (c, ty)) in columns.iter().enumerate() {
+            t.add(
+                t.root(),
+                Obj::new(ObjectKind::Column, *c).with_props(Props::Column(Arc::new(ColumnProps {
+                    ordinal: i as u32 + 1,
+                    raw_type: Arc::from(*ty),
+                    nullable: true,
+                    ..Default::default()
+                }))),
+            );
+        }
+        t
+    }
+
+    /// A leaf object of `kind`.
+    pub fn leaf(kind: ObjectKind, name: &str) -> Subtree {
+        Subtree::new(Obj::new(kind, name))
+    }
+
+    /// An object of a kind this build does not know, with the server's raw kind text.
+    pub fn unknown(name: &str, raw_kind: &str) -> Subtree {
+        Subtree::new(
+            Obj::new(ObjectKind::Unknown, name).with_props(Props::Generic(Arc::new(
+                GenericProps {
+                    raw_kind: Some(Arc::from(raw_kind)),
+                    ..Default::default()
+                },
+            ))),
+        )
+    }
+
+    /// Schema namespace `path` of `dbms` read at `Structure`, holding `objects`; `system` marks
+    /// a built-in schema.
+    pub fn schema(
+        dbms: DbmsKind,
+        path: &[&str],
+        system: bool,
+        objects: Vec<Subtree>,
+    ) -> Arc<NamespaceSnapshot> {
+        schema_at(dbms, path, system, Level::Structure, objects)
+    }
+
+    /// [`schema`] read at `level`.
+    pub fn schema_at(
+        dbms: DbmsKind,
+        path: &[&str],
+        system: bool,
+        level: Level,
+        objects: Vec<Subtree>,
+    ) -> Arc<NamespaceSnapshot> {
+        let name = path.last().copied().unwrap_or_default();
+        let mut root = Obj::new(ObjectKind::Schema, name);
+        if system {
+            root = root.add_flags(ObjFlags::SYSTEM);
+        }
+        let mut tree = Subtree::new(root);
+        for o in objects {
+            let r = tree.root();
+            tree.graft_under(r, o);
+        }
+        let d = dialect(dbms);
+        let fold =
+            FoldRule::for_names(d, &IdentCtx::new(d), NameClass::Table).unwrap_or(FoldRule::Exact);
+        let meta = NsMeta {
+            level,
+            ..NsMeta::default()
+        };
+        Arc::new(
+            NamespaceSnapshot::build(NsKey::schema(path.iter().copied()), dbms, fold, meta, tree)
+                .expect("a valid test namespace"),
+        )
+    }
+
+    /// Generation `generation` of a `dbms` catalog with `namespaces` and namespace `states`.
+    pub fn catalog_gen(
+        dbms: DbmsKind,
+        generation: u64,
+        namespaces: Vec<Arc<NamespaceSnapshot>>,
+        states: Vec<(NsKey, LoadState)>,
+    ) -> Arc<CatalogSnapshot> {
+        let ns: BTreeMap<NsKey, Arc<NamespaceSnapshot>> = namespaces
+            .into_iter()
+            .map(|n| (n.key().clone(), n))
+            .collect();
+        let states: BTreeMap<ContainerKey, LoadState> = states
+            .into_iter()
+            .map(|(k, s)| (ContainerKey::Namespace(k), s))
+            .collect();
+        // T9's snapshot keeps lazy indexes of its own: start from an empty one and set the
+        // data fields (none of the indexes is built before they are set).
+        let mut snapshot = CatalogSnapshot::empty(Arc::new(ServerFacts::new(
+            dbms,
+            IdentCtx::new(dialect(dbms)),
+        )));
+        snapshot.generation = generation;
+        snapshot.namespaces = Arc::new(ns);
+        snapshot.states = Arc::new(states);
+        Arc::new(snapshot)
+    }
+
+    /// Generation 1 of a `dbms` catalog with `namespaces`.
+    pub fn catalog(
+        dbms: DbmsKind,
+        namespaces: Vec<Arc<NamespaceSnapshot>>,
+    ) -> Arc<CatalogSnapshot> {
+        catalog_gen(dbms, 1, namespaces, Vec::new())
+    }
+
+    /// One PostgreSQL schema `db.schema` with `tables` tables of `columns` columns each
+    /// (`t00000`…, columns `c00`…), the explorer perf scale.
+    pub fn wide_pg_schema(
+        db: &str,
+        schema_name: &str,
+        tables: usize,
+        columns: usize,
+    ) -> Arc<NamespaceSnapshot> {
+        let mut root = Subtree::with_capacity(
+            Obj::new(ObjectKind::Schema, schema_name),
+            tables * (columns + 1) + 1,
+        );
+        for t in 0..tables {
+            let name = format!("t{t:05}");
+            let tid = root.add(
+                root.root(),
+                Obj::new(ObjectKind::Table, name.as_str())
+                    .with_server_id(ServerId::Oid(16_384 + t as u32))
+                    .with_props(Props::Table(Arc::new(TableProps::default()))),
+            );
+            for c in 0..columns {
+                root.add(
+                    tid,
+                    Obj::new(ObjectKind::Column, format!("c{c:02}").as_str()).with_props(
+                        Props::Column(Arc::new(ColumnProps {
+                            ordinal: c as u32 + 1,
+                            raw_type: Arc::from("integer"),
+                            nullable: true,
+                            ..Default::default()
+                        })),
+                    ),
+                );
+            }
+        }
+        let meta = NsMeta {
+            level: Level::Structure,
+            ..NsMeta::default()
+        };
+        Arc::new(
+            NamespaceSnapshot::build(
+                NsKey::schema([db, schema_name]),
+                DbmsKind::Postgres,
+                FoldRule::Exact,
+                meta,
+                root,
+            )
+            .expect("a valid perf namespace"),
+        )
+    }
+}

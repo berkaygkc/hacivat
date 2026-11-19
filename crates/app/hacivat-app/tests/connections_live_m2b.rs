@@ -736,14 +736,44 @@ fn an_idle_connection_says_so_everywhere_and_reconnects_from_the_capsule(cx: &mu
         "{}",
         status_bar_text(vcx)
     );
-    assert!(vcx.debug_bounds("explorer-row-idle-0").is_some());
+    // ## m4-t14-explorer (named exception): the explorer row is the tree's root; its idle
+    // mark is the unplug glyph in the meta-mark slot (`hv-tree-mark-<key>`).
+    let mark = |vcx: &VisualTestContext| root_row(vcx, id).and_then(|r| r.meta_mark);
+    assert_eq!(
+        mark(vcx),
+        Some(hacivat_ui::tree::MetaMark::Glyph(
+            hacivat_ui::icon::IconName::Unplug
+        ))
+    );
+    assert!(
+        vcx.debug_bounds(tree_selector("hv-tree-mark", id))
+            .is_some()
+    );
     // B18: it reconnects when used; the capsule's body does it.
     click(vcx, "capsule-body");
     wait_until(vcx, "the reconnect", |vcx| {
         matches!(live(vcx, "orders-dev"), LiveState::Connected(_))
     });
     assert!(!vcx.cx.read(|cx| session_toasts::is_idle(cx, id)));
-    assert!(vcx.debug_bounds("explorer-row-idle-0").is_none());
+    assert_eq!(mark(vcx), Some(hacivat_ui::tree::MetaMark::Ok));
+}
+
+// ## m4-t14-explorer (named exception)
+/// The explorer tree's root row of profile `id`, as the tree shows it.
+fn root_row(vcx: &VisualTestContext, id: ProfileId) -> Option<hacivat_ui::tree::TreeRowData> {
+    vcx.run_until_parked();
+    let key = hacivat_app::explorer::adapter::profile_key(id);
+    vcx.cx
+        .read(hacivat_app::connections::explorer::shown_rows)
+        .into_iter()
+        .find(|r| r.key == key)
+        .map(|r| r.data)
+}
+
+/// The tree's debug selector `prefix-<key>` of profile `id`'s root row.
+fn tree_selector(prefix: &str, id: ProfileId) -> &'static str {
+    let key = hacivat_app::explorer::adapter::profile_key(id);
+    Box::leak(format!("{prefix}-{}", key.0).into_boxed_str())
 }
 
 /// An idle production capsule keeps its PRODUCTION block first, and it stays the one filled
@@ -1221,7 +1251,25 @@ fn ssh_path_segment_and_explorer_flag(cx: &mut TestAppContext) {
     set_state(vcx, id, LiveState::Connected(Arc::new(live)));
     assert!(capsule_text(vcx, "path").contains("bastion.acme.io"));
     assert_eq!(capsule_text(vcx, "path"), "SSH via bastion.acme.io");
-    assert!(vcx.debug_bounds("explorer-row-route-0").is_some());
+    // ## m4-t14-explorer (named exception): the route flag is one of the tree root's flags.
+    let flags = root_row(vcx, id).expect("the root row").flags;
+    let at = flags
+        .iter()
+        .position(|f| {
+            matches!(
+                f,
+                hacivat_ui::tree::RowFlag::Icon {
+                    icon: hacivat_ui::icon::IconName::Route,
+                    ..
+                }
+            )
+        })
+        .expect("the SSH route flag");
+    let sel = tree_selector("hv-tree-flag", id);
+    assert!(
+        vcx.debug_bounds(Box::leak(format!("{sel}-{at}").into_boxed_str()))
+            .is_some()
+    );
     assert_eq!(status_text(vcx, "path"), capsule_text(vcx, "path"));
     // The status bar mirrors the rest too: the latency and the encryption.
     let status = plain(&status_bar_text(vcx));
@@ -1383,26 +1431,27 @@ fn the_ssh_flag_never_squeezes_the_explorer_meta(cx: &mut TestAppContext) {
         ))),
     );
     set_state(vcx, a, LiveState::Connected(Arc::new(through_ssh)));
+    // ## m4-t14-explorer (named exception): the rows are the tree's roots (R-M4-18). The route
+    // flag follows the name (mock M4 surface 1: flags after the name); a connected root's meta
+    // is its latency alone, and both rows draw it whole and alike.
+    let sel = tree_selector("hv-tree-flag", a);
     let route = vcx
-        .debug_bounds("explorer-row-route-0")
-        .expect("the route flag");
-    let row = vcx.debug_bounds("explorer-row-0").expect("the row");
-    assert!(route.left() > row.left());
+        .debug_bounds(Box::leak(format!("{sel}-2").into_boxed_str()))
+        .expect("the route flag (after the mark and the lock)");
+    let name = vcx
+        .debug_bounds(tree_selector("hv-tree-name", a))
+        .expect("the name");
+    assert!(route.left() >= name.right(), "{route:?} after {name:?}");
     let latency = |i: usize| {
         registry_frame(vcx)
             .into_iter()
-            .find(|r| r.path.ends_with(&format!("#explorer-row-latency-{i}")))
+            .filter(|r| r.path.ends_with("#hv-tree-meta"))
+            .nth(i)
             .unwrap_or_else(|| panic!("row {i} draws its latency"))
     };
-    let engine = |i: usize| {
-        registry_frame(vcx)
-            .into_iter()
-            .find(|r| r.path.ends_with(&format!("#explorer-row-engine-{i}")))
-            .unwrap_or_else(|| panic!("row {i} draws its engine"))
-    };
     assert_eq!(latency(0).painted_px, latency(1).painted_px);
-    assert_eq!(latency(0).truncated, latency(1).truncated);
-    assert_eq!(engine(0).painted_px, engine(1).painted_px);
+    assert!(!latency(0).truncated && !latency(1).truncated);
+    assert_eq!(latency(0).text, latency(1).text);
 }
 
 /// M4: a connect that starts while a countdown sleeps gets its 50 ms clock at once.
