@@ -2769,9 +2769,12 @@ M4 Task 1c (W0). Seams only; every body is a fail-closed stub until its filling 
     Each procedure refuses anything else with `SIGNAL SQLSTATE '45000'` (error 1644) before it
     builds a statement; it quotes values with `QUOTE()` and accepts identifiers of `[a-z0-9_]`
     only; its parameters are `ascii` with `ascii_bin`, so `IN` and `REGEXP` are exact and
-    case-sensitive. The statements are prepared: `CREATE USER`, `GRANT`, `REVOKE`, `DROP USER`
-    and `SET` can be (MySQL 8.4 "SQL Syntax Permitted in Prepared Statements"; MariaDB ≥ 10.6.2
-    "all statements"), and a stored procedure may use `PREPARE`.
+    case-sensitive. A name is also refused when it holds any character outside `[a-z0-9_]`
+    (fix round 2: the pattern's `$` matches before a final newline). `CREATE USER`, `DROP USER`,
+    `GRANT` and `REVOKE` are prepared (MySQL 8.4 "SQL Syntax Permitted in Prepared Statements";
+    MariaDB ≥ 10.6.2 "all statements"; a stored procedure may use `PREPARE`). `set_global` runs
+    a static `SET GLOBAL time_zone = p_value`: that MySQL list names `SET ROLE` only (fix round
+    2).
   - The definer `hv_fixture_definer@localhost` is created `ACCOUNT LOCK` and can never sign in.
     Locking does not affect running stored programs that name it as `DEFINER` (MySQL 8.4
     "Account Locking"); MariaDB's lock refuses new client connections only ("Account
@@ -2779,7 +2782,11 @@ M4 Task 1c (W0). Seams only; every body is a fail-closed stub until its filling 
     OPTION` (a grantor must hold what it grants), and the global-variable privilege
     (`SYSTEM_VARIABLES_ADMIN` on MySQL, `SUPER` on MariaDB, which has no narrower one; chosen by
     `VERSION()` and prepared, since neither server parses the other's name). The procedures are
-    the only way to use them.
+    the only way to use them. It also holds `EXECUTE` on `hv_fixture_admin` (fix round 2): a
+    definer-context routine runs with its `DEFINER`'s privileges, and that account "must have
+    the EXECUTE privilege" for the routine (MySQL 8.4 "Stored Object Access Control"). Root
+    created the procedures, so `automatic_sp_privileges` gave `EXECUTE` to root, not to the
+    definer, and every call failed with 1370 (CI run 44524750230, mysql80).
   - `hacivat_testkit::fixture_sql` spells the `CALL`s and refuses the same inputs first;
     `DockerTarget::as_test_account` signs in as a created `hvm4_*` account, so a grant is
     checked from that account's side (`SHOW GRANTS` for the current user needs no privilege).

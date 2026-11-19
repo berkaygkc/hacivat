@@ -65,10 +65,14 @@ GRANT EXECUTE ON hv_catalog_probe.* TO 'hv_catalog'@'%';
 #     change_grant.
 #   The procedures are SQL SECURITY DEFINER; they refuse any other name, database, table,
 #   privilege or variable before they build a statement, and they quote with QUOTE() (strings)
-#   or accept only [a-z0-9_] (identifiers). CREATE USER, GRANT, REVOKE, DROP USER and SET can
-#   be prepared (MySQL 8.4 manual, SQL Syntax Permitted in Prepared Statements; MariaDB from
-#   10.6.2, PREPARE Statement: all statements), and a stored procedure may use PREPARE.
-#   Parameters are ascii with ascii_bin, so comparisons and REGEXP are exact and case-sensitive.
+#   or accept only [a-z0-9_] (identifiers). CREATE USER, DROP USER, GRANT and REVOKE are
+#   prepared (MySQL 8.4 manual, SQL Syntax Permitted in Prepared Statements: CREATE, DROP and
+#   RENAME USER, GRANT, REVOKE; MariaDB from 10.6.2, PREPARE Statement: all statements; the
+#   prepared GRANT of this file runs on all six servers), and a stored procedure may use
+#   PREPARE. SET is not prepared: that list names SET ROLE only, so set_global runs a static
+#   SET GLOBAL time_zone. Parameters are ascii with ascii_bin, so comparisons and REGEXP are
+#   exact and case-sensitive; every name is also refused when it holds any character outside
+#   [a-z0-9_], because the anchor at the end of a pattern also matches before a final newline.
 #
 # - hv_fixture_definer (localhost, ACCOUNT LOCK): the procedures run with its privileges. It can
 #   never sign in: MySQL 8.4 manual, Account Locking: locking does not affect the ability to
@@ -103,14 +107,10 @@ PROCEDURE hv_fixture_admin.set_global(
     IN p_value VARCHAR(64))
 SQL SECURITY DEFINER
 BEGIN
-    IF p_name IS NULL OR p_value IS NULL OR p_name NOT IN ('time_zone') THEN
+    IF p_name IS NULL OR p_value IS NULL OR p_name <> 'time_zone' THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'hv_fixture_admin: variable refused';
     END IF;
-    SET @hv_fixture_sql := CONCAT('SET GLOBAL ', p_name, ' = ', QUOTE(p_value));
-    PREPARE hv_fixture_stmt FROM @hv_fixture_sql;
-    SET @hv_fixture_sql := NULL;
-    EXECUTE hv_fixture_stmt;
-    DEALLOCATE PREPARE hv_fixture_stmt;
+    SET GLOBAL time_zone = p_value;
 END//
 
 CREATE DEFINER = 'hv_fixture_definer'@'localhost'
@@ -119,7 +119,8 @@ PROCEDURE hv_fixture_admin.create_user(
     IN p_password VARCHAR(64))
 SQL SECURITY DEFINER
 BEGIN
-    IF p_user IS NULL OR p_password IS NULL OR p_user NOT REGEXP '^hvm4_[a-z0-9_]{1,27}$' THEN
+    IF p_user IS NULL OR p_password IS NULL OR p_user NOT REGEXP '^hvm4_[a-z0-9_]{1,27}$'
+        OR p_user REGEXP '[^a-z0-9_]' THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'hv_fixture_admin: account refused';
     END IF;
     SET @hv_fixture_sql := CONCAT('CREATE USER ', QUOTE(p_user), '@''%'' IDENTIFIED BY ',
@@ -135,7 +136,8 @@ PROCEDURE hv_fixture_admin.drop_user(
     IN p_user VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin)
 SQL SECURITY DEFINER
 BEGIN
-    IF p_user IS NULL OR p_user NOT REGEXP '^hvm4_[a-z0-9_]{1,27}$' THEN
+    IF p_user IS NULL OR p_user NOT REGEXP '^hvm4_[a-z0-9_]{1,27}$'
+        OR p_user REGEXP '[^a-z0-9_]' THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'hv_fixture_admin: account refused';
     END IF;
     SET @hv_fixture_sql := CONCAT('DROP USER IF EXISTS ', QUOTE(p_user), '@''%''');
@@ -158,8 +160,11 @@ SQL SECURITY DEFINER
 BEGIN
     IF p_grant IS NULL
         OR p_user IS NULL OR p_user NOT REGEXP '^hvm4_[a-z0-9_]{1,27}$'
+        OR p_user REGEXP '[^a-z0-9_]'
         OR p_db IS NULL OR p_db NOT REGEXP '^hvm4_[a-z0-9_]{1,59}$'
-        OR (p_table IS NOT NULL AND p_table NOT REGEXP '^[a-z0-9_]{1,64}$')
+        OR p_db REGEXP '[^a-z0-9_]'
+        OR (p_table IS NOT NULL AND (p_table NOT REGEXP '^[a-z0-9_]{1,64}$'
+            OR p_table REGEXP '[^a-z0-9_]'))
         OR p_privilege IS NULL OR p_privilege NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE',
             'EXECUTE', 'SHOW VIEW', 'TRIGGER', 'REFERENCES', 'CREATE', 'DROP', 'ALTER',
             'INDEX', 'CREATE VIEW', 'CREATE ROUTINE', 'ALTER ROUTINE', 'EVENT') THEN
@@ -176,6 +181,14 @@ BEGIN
 END//
 
 DELIMITER ;
+
+# The definer itself needs EXECUTE on the procedures: a DEFINER-context routine runs with the
+# privileges of the DEFINER account, which must have the EXECUTE privilege for the routine
+# (MySQL 8.4 manual, Stored Object Access Control: this account must have the EXECUTE
+# privilege for p1, otherwise the procedure fails). Root created them, so the automatic
+# EXECUTE of automatic_sp_privileges went to root, not to the definer: without this grant a
+# call failed with 1370 (CI run 44524750230, mysql80). MariaDB checks the definer the same way.
+GRANT EXECUTE ON hv_fixture_admin.* TO 'hv_fixture_definer'@'localhost';
 
 CREATE USER 'hv_fixture'@'%' IDENTIFIED BY 'hv_test_pw';
 GRANT EXECUTE ON hv_fixture_admin.* TO 'hv_fixture'@'%';
