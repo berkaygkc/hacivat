@@ -858,8 +858,10 @@ const NOT_IN_M4: [&str; 8] = [
 /// The M4 variants each dialect cannot express at all.
 fn not_on(d: DialectId) -> &'static [&'static str] {
     match d {
+        // SQLite has no stored routines either.
         DialectId::Sqlite => &[
             "CreateSchema",
+            "CreateRoutine",
             "CreateSequence",
             "CreateType",
             "Comment",
@@ -896,7 +898,15 @@ fn every_alg03_variant_is_declared_and_non_m4_ones_refuse() {
                     matches!(res, Err(RenderError::Unsupported { dialect, .. }) if dialect == d),
                     "{d:?} {v}: {res:?}"
                 );
-            } else if d == DialectId::Postgres {
+            } else if matches!(d, DialectId::MySql | DialectId::MariaDb) && v == "Grant" {
+                // Supported, but the sample's grantee `reader` is not the server's
+                // `'user'@'host'` form (`grants_and_owners` renders a valid one).
+                assert!(
+                    matches!(res, Err(RenderError::Invalid(_))),
+                    "{d:?} {v}: {res:?}"
+                );
+            } else {
+                // Every other M4 variant the dialect has renders (review M6: all four).
                 assert!(res.is_ok(), "{d:?} {v}: {res:?}");
             }
         }
@@ -1150,4 +1160,79 @@ fn keyword_slots_are_never_free_text_or_quoted() {
         ),
         Err(RenderError::Invalid(_))
     ));
+}
+
+/// Review M4: server text ending in a line comment gets its `;` on a line of its own, so the
+/// comment cannot swallow the terminator.
+#[test]
+fn terminator_follows_a_trailing_line_comment_on_its_own_line() {
+    let raw = |sql: &str| DdlOp::Raw {
+        sql: sql.to_string(),
+        origin: RawOrigin::ServerText,
+    };
+    for d in DIALECTS {
+        assert_eq!(
+            render(d, &[raw("CREATE VIEW v AS SELECT 1 -- note\n")]),
+            "CREATE VIEW v AS SELECT 1 -- note\n;\n",
+            "{d:?}"
+        );
+        // A comment on an earlier line does not move it.
+        assert_eq!(
+            render(d, &[raw("CREATE VIEW v AS -- note\nSELECT 1")]),
+            "CREATE VIEW v AS -- note\nSELECT 1;\n",
+            "{d:?}"
+        );
+    }
+    assert_eq!(
+        render(DialectId::MySql, &[raw("CREATE VIEW v AS SELECT 1 # note")]),
+        "CREATE VIEW v AS SELECT 1 # note\n;\n"
+    );
+    assert_eq!(hacivat_ddl::render::terminator("SELECT 1"), ";\n");
+}
+
+/// Review M5: PostgreSQL has no `GRANT … ON EXTENSION` and no `ALTER EXTENSION … OWNER TO`;
+/// only `COMMENT ON EXTENSION` exists.
+#[test]
+fn pg_refuses_grant_and_owner_where_the_statement_does_not_exist() {
+    let ctx = ctx_with(DialectId::Postgres, GenOptions::default());
+    for kind in [ObjectKind::Extension, ObjectKind::Index] {
+        let grant = DdlOp::Grant(GrantDef {
+            kind,
+            object: qn(&["app", "x"]),
+            sig: None,
+            privileges: names(&["USAGE"]),
+            columns: Vec::new(),
+            grantee: n("r"),
+            grantable: false,
+        });
+        let owner = DdlOp::Owner {
+            kind,
+            name: qn(&["app", "x"]),
+            sig: None,
+            owner: n("o"),
+        };
+        for op in [grant, owner] {
+            assert!(
+                matches!(
+                    renderer(DialectId::Postgres).render(&op, &ctx),
+                    Err(RenderError::Unsupported { .. })
+                ),
+                "{kind:?} {}",
+                op.variant()
+            );
+        }
+    }
+    let comment = DdlOp::Comment {
+        target: CommentTarget {
+            kind: ObjectKind::Extension,
+            name: qn(&["pg_trgm"]),
+            column: None,
+            sig: None,
+        },
+        text: Some(n("trigrams")),
+    };
+    assert_eq!(
+        render_pg(&comment),
+        "COMMENT ON EXTENSION pg_trgm IS 'trigrams';\n"
+    );
 }

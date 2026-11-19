@@ -705,8 +705,9 @@ fn owner_stmt(
     sig: Option<&str>,
     owner: &Name,
 ) -> Result<Stmt, RenderError> {
-    // An index belongs to its table's owner.
-    if kind == ObjectKind::Index {
+    // An index belongs to its table's owner; an extension has no `ALTER EXTENSION … OWNER
+    // TO` (only `COMMENT ON EXTENSION` exists).
+    if matches!(kind, ObjectKind::Index | ObjectKind::Extension) {
         return Err(unsupported(op, ctx));
     }
     Ok(stmt(
@@ -727,7 +728,8 @@ fn grant(ctx: &RenderCtx, op: &DdlOp, g: &GrantDef) -> Result<Stmt, RenderError>
             ObjectKind::Table
         }
         ObjectKind::Aggregate => ObjectKind::Routine,
-        ObjectKind::Index => return Err(unsupported(op, ctx)),
+        // No `GRANT … ON INDEX` or `ON EXTENSION` exists.
+        ObjectKind::Index | ObjectKind::Extension => return Err(unsupported(op, ctx)),
         k => k,
     };
     if g.privileges.is_empty() {

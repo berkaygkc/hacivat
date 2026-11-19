@@ -6,9 +6,11 @@
 //! - `Never`: no name does.
 //! - `Auto`: a name stays bare when its schema is the current schema **and** the name is not
 //!   ambiguous in the scope (another schema of the scope has an object of that name);
-//!   otherwise it is qualified. With no current schema every name is qualified. SQLite is the
-//!   exception: `main` stays bare and `temp` and attached schemas are qualified, whatever the
-//!   current schema.
+//!   otherwise it is qualified. With no current schema every name is qualified. On SQLite the
+//!   current schema plays no part: `temp` and attached schemas are always qualified, and a
+//!   `main` name stays bare only when it is not ambiguous (the plan's rule "qualify names that
+//!   exist in more than one schema of the scope"; SQLite resolves a bare name in `temp` first,
+//!   so a bare `t` would name `temp.t` when both exist).
 //!
 //! Only names Hacivat writes are qualified; server text is never rewritten.
 
@@ -64,7 +66,9 @@ impl QualifyCtx {
         match self.mode {
             Qualify::Always => true,
             Qualify::Never => false,
-            Qualify::Auto if self.dialect == DialectId::Sqlite => &**schema != "main",
+            Qualify::Auto if self.dialect == DialectId::Sqlite => {
+                &**schema != "main" || self.ambiguous.contains(name)
+            }
             Qualify::Auto => {
                 self.current_schema.as_ref() != Some(schema) || self.ambiguous.contains(name)
             }

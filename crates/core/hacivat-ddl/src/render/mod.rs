@@ -210,9 +210,21 @@ pub fn join_semicolon(stmts: &[Stmt]) -> String {
             out.push('\n');
         }
         out.push_str(&s.text);
-        out.push_str(";\n");
+        out.push_str(terminator(&s.text));
     }
     out
+}
+
+/// The `;` that ends `text`: on a line of its own when the last line may end in a line
+/// comment (`--`, or MySQL `#`), which would otherwise swallow it. The check is conservative
+/// (a `--` or `#` inside a quoted string also moves it); that costs only a line break.
+pub fn terminator(text: &str) -> &'static str {
+    let last = text.rsplit('\n').next().unwrap_or("");
+    if last.contains("--") || last.contains('#') {
+        "\n;\n"
+    } else {
+        ";\n"
+    }
 }
 
 pub(crate) fn unsupported(op: &DdlOp, ctx: &RenderCtx) -> RenderError {

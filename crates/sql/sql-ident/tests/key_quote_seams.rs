@@ -48,11 +48,12 @@ fn stub_match_key_is_server_dependent() {
 
 // ## m4-t07-quote (named exception): Task 7 filled the quoting bodies, so the stub's
 // "always quote, no literal" answers became the real contract (full tests: `tests/quote.rs`).
+// Renamed from `stub_quote_always_quotes_and_doubles_the_quote_char` (T7 review M7).
 /// A name is bare where the dialect allows it, else quoted with the dialect's quote character
 /// doubled inside (MySQL and MariaDB always backtick, T1a review m2); NUL is refused; string
 /// literals are produced.
 #[test]
-fn stub_quote_always_quotes_and_doubles_the_quote_char() {
+fn quote_is_bare_where_allowed_and_doubles_the_quote_char() {
     let plain = QuoteCtx::default();
     let ansi = QuoteCtx {
         ansi_quotes: Some(true),

@@ -87,6 +87,11 @@ fn qualify_modes_and_dialects() {
     assert_eq!(shown(&lite, "main", "t"), ["t"]);
     assert_eq!(shown(&lite, "aux", "t"), ["aux", "t"]);
     assert_eq!(shown(&lite, "temp", "t"), ["temp", "t"]);
+    // Review M2: a `main` name that also exists in `temp` (or an attached schema) is
+    // qualified, since SQLite resolves a bare name in `temp` first.
+    let lite = lite.with_ambiguous([n("t")]);
+    assert_eq!(shown(&lite, "main", "t"), ["main", "t"]);
+    assert_eq!(shown(&lite, "main", "u"), ["u"]);
     // A bare name stays bare; a database part before the schema is never written.
     assert_eq!(
         qualify(

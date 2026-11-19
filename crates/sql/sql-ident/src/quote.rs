@@ -8,13 +8,21 @@
 //!   (`ruleutils.c`): a name stays bare only when it is `[a-z_][a-z0-9_]*` and not a keyword
 //!   other than an unreserved one. Upper case and every non-ASCII letter are quoted, so
 //!   `MÜŞTERİ` is `"MÜŞTERİ"` (unquoted it would fold ASCII-only to `mÜŞterİ`).
-//! - **MySQL / MariaDB** keep a name bare when it is `[A-Za-z_][A-Za-z0-9_]*` and not a
-//!   reserved word. MariaDB's keyword table has no reserved flag, so every MariaDB keyword is
+//! - **MySQL / MariaDB** keep a name bare when it is `[A-Za-z][A-Za-z0-9_]*` and not a
+//!   reserved word. A name starting with `_` is always quoted: MySQL's lexer reads a bare
+//!   `_<charset>` (`_binary`, `_utf8mb4`, `_latin1`, …) as a charset introducer, never as a
+//!   name. MariaDB's keyword table has no reserved flag, so every MariaDB keyword is
 //!   quoted. The quote character is **always the backtick** (T1a review m2): backticks quote
 //!   identifiers in every `sql_mode`, while `"` under a wrongly assumed `ANSI_QUOTES` would
 //!   turn a name into a string literal. `QuoteCtx::ansi_quotes` is never trusted for that.
 //! - **SQLite**: `[A-Za-z_][A-Za-z0-9_]*` and not a keyword.
-//! - Every other dialect: always quoted with `"`.
+//! - **Generic** (the ANSI dialect): always quoted with `"`; literals `'…'` with `'` doubled
+//!   (the generic lexer has no backslash escapes).
+//! - **Every other dialect** (SQL Server, ClickHouse, Oracle, and any later one) has no
+//!   verified rule yet, so [`quote`] and [`string_literal`] answer
+//!   [`QuoteError::NotImplemented`] (fail closed): ClickHouse reads `\` as an escape inside
+//!   every quote kind, and SQL Server's `"` is an identifier quote only under
+//!   `QUOTED_IDENTIFIER ON`, the same mode dependence carry m2 removed for MySQL.
 //!
 //! The quoting functions take no server version, so a word counts as a keyword when it is one
 //! on **any** server line the keyword tables know (over-quoting is never wrong: a quoted
@@ -44,7 +52,8 @@ pub struct QuoteCtx {
 pub enum QuoteError {
     /// The text holds a NUL character, which no dialect can quote.
     Nul,
-    /// Never produced since Task 7 filled the bodies; kept so existing `match`es stay valid.
+    /// The dialect has no verified quoting rule yet (SQL Server, ClickHouse, Oracle): no text
+    /// is produced rather than one whose escaping might be wrong.
     NotImplemented,
 }
 
@@ -54,6 +63,11 @@ fn is_pg(d: DialectId) -> bool {
 
 fn is_mysql(d: DialectId) -> bool {
     matches!(d, DialectId::MySql | DialectId::MariaDb)
+}
+
+/// Whether `d` has a verified quoting rule; [`quote`] and [`string_literal`] refuse the others.
+fn has_rule(d: DialectId) -> bool {
+    is_pg(d) || is_mysql(d) || matches!(d, DialectId::Sqlite | DialectId::Generic)
 }
 
 /// The identifier quote character of `d`: the backtick on MySQL and MariaDB whatever
@@ -95,6 +109,9 @@ pub fn needs_quoting(d: DialectId, text: &str, ctx: &QuoteCtx) -> bool {
     };
     let start_ok = if pg {
         first.is_ascii_lowercase() || first == b'_'
+    } else if is_mysql(d) {
+        // `_<charset>` is a charset introducer to MySQL's lexer.
+        first.is_ascii_alphabetic()
     } else {
         first.is_ascii_alphabetic() || first == b'_'
     };
@@ -109,8 +126,12 @@ pub fn needs_quoting(d: DialectId, text: &str, ctx: &QuoteCtx) -> bool {
 }
 
 /// `text` as an identifier of `d`: bare when [`needs_quoting`] allows it, else inside the
-/// dialect's quote character with that character doubled. A NUL is refused.
+/// dialect's quote character with that character doubled. A NUL is refused; a dialect without
+/// a verified rule answers [`QuoteError::NotImplemented`].
 pub fn quote(d: DialectId, text: &str, ctx: &QuoteCtx) -> Result<String, QuoteError> {
+    if !has_rule(d) {
+        return Err(QuoteError::NotImplemented);
+    }
     if text.contains('\0') {
         return Err(QuoteError::Nul);
     }
@@ -180,8 +201,12 @@ fn dollar_quoted(text: &str) -> String {
 ///   known to be on. Unknown is treated as off: doubling is exact under the server default
 ///   and, under `NO_BACKSLASH_ESCAPES`, keeps an extra backslash but can never end the literal
 ///   early.
-/// - SQLite and every other dialect: `'…'` with `'` doubled.
+/// - SQLite and Generic: `'…'` with `'` doubled.
+/// - Every other dialect: [`QuoteError::NotImplemented`].
 pub fn string_literal(d: DialectId, text: &str, ctx: &QuoteCtx) -> Result<String, QuoteError> {
+    if !has_rule(d) {
+        return Err(QuoteError::NotImplemented);
+    }
     if text.contains('\0') {
         return Err(QuoteError::Nul);
     }

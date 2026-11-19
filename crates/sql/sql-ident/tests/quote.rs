@@ -110,8 +110,10 @@ fn pg_literal_respects_standard_conforming_strings_and_never_uses_e_strings() {
     }
 }
 
+/// The plan's `mysql_backtick_doubled_and_ansi_quotes_respected`, renamed (review M7): carry
+/// m2 supersedes the plan text, so `ANSI_QUOTES` is deliberately not followed.
 #[test]
-fn mysql_backtick_doubled_and_ansi_quotes_respected() {
+fn mysql_backtick_doubled_and_ansi_quotes_never_trusted() {
     assert_eq!(quote(DialectId::MySql, "a`b", &qc()).unwrap(), "`a``b`");
     // `ANSI_QUOTES` is never trusted: the backtick quotes identifiers in every `sql_mode`, so
     // a name stays a name even when the setting reported for another session is wrong
@@ -203,7 +205,7 @@ fn reserved_words_per_dialect() {
         "name",
         "comment",
         "manual",
-        "_x",
+        "x_1",
     ] {
         assert!(!needs_quoting(DialectId::MySql, bare, &qc()), "{bare}");
     }
@@ -219,11 +221,66 @@ fn reserved_words_per_dialect() {
     assert!(!needs_quoting(DialectId::Sqlite, "Notes", &qc()));
     assert!(needs_quoting(DialectId::Sqlite, "order", &qc()));
     assert!(needs_quoting(DialectId::Sqlite, "a.b", &qc()));
-    // A dialect without rules quotes everything.
+    // Generic (ANSI) always quotes with `"`.
     assert!(needs_quoting(DialectId::SqlServer, "users", &qc()));
     assert_eq!(
         quote(DialectId::Generic, "users", &qc()).unwrap(),
         "\"users\""
+    );
+}
+
+/// Review M1: MySQL's lexer reads a bare `_<charset>` as a charset introducer, so every
+/// MySQL/MariaDB name starting with `_` is quoted (this also covers T4's `SHOW CREATE` macro).
+#[test]
+fn mysql_names_starting_with_an_underscore_are_quoted() {
+    for d in [DialectId::MySql, DialectId::MariaDb] {
+        for name in ["_binary", "_utf8mb4", "_latin1", "_x", "_"] {
+            assert!(needs_quoting(d, name, &qc()), "{d:?} {name}");
+            assert_eq!(quote(d, name, &qc()).unwrap(), format!("`{name}`"));
+        }
+    }
+    // PostgreSQL and SQLite have no introducers: `_x` stays bare there.
+    assert_eq!(quote(DialectId::Postgres, "_x", &qc()).unwrap(), "_x");
+    assert_eq!(quote(DialectId::Sqlite, "_x", &qc()).unwrap(), "_x");
+}
+
+/// Review I1: a dialect without a verified rule gets no text at all, never a plain `"…"` or
+/// `'…'` whose escaping its server reads differently (ClickHouse `\` escapes, SQL Server
+/// `QUOTED_IDENTIFIER`).
+#[test]
+fn unruled_dialects_are_refused() {
+    for d in [
+        DialectId::ClickHouse,
+        DialectId::SqlServer,
+        DialectId::Oracle,
+    ] {
+        for ctx in [qc(), known(true, true), known(false, false)] {
+            assert_eq!(
+                quote(d, "users", &ctx),
+                Err(QuoteError::NotImplemented),
+                "{d:?}"
+            );
+            assert_eq!(
+                quote(d, "x\\\" OR 1=1 --", &ctx),
+                Err(QuoteError::NotImplemented),
+                "{d:?}"
+            );
+            assert_eq!(
+                string_literal(d, "\\' OR 1=1 --", &ctx),
+                Err(QuoteError::NotImplemented),
+                "{d:?}"
+            );
+            assert_eq!(
+                quote_qualified(d, &["s", "t"], &ctx),
+                Err(QuoteError::NotImplemented),
+                "{d:?}"
+            );
+        }
+    }
+    // Generic keeps the ANSI form (its lexer has no backslash escapes).
+    assert_eq!(
+        string_literal(DialectId::Generic, "a'b\\", &qc()).unwrap(),
+        "'a''b\\'"
     );
 }
 

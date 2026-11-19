@@ -363,3 +363,20 @@ seams and reviewed as new code.
   clause inside `CREATE SEQUENCE` only); MySQL secondary indexes as `KEY` table elements (the
   spike's round-trip choice; M4 renders `CREATE INDEX`); a standalone comment on a trigger or
   constraint (`CommentTarget` has no table; the trigger def renders its own).
+- **Fix round 1 (review of `abb67e4`).**
+  - *I1:* `quote` and `string_literal` answer `QuoteError::NotImplemented` for every dialect
+    without a verified rule (SQL Server, ClickHouse, Oracle, and any later one); only PG and
+    PG-wire, MySQL/MariaDB, SQLite and Generic (ANSI) produce text. ClickHouse reads `\` as an
+    escape in every quote kind, and SQL Server's `"` depends on `QUOTED_IDENTIFIER`, so a plain
+    `"…"`/`'…'` there could break out.
+  - *M1:* on MySQL/MariaDB a name starting with `_` is always quoted (a bare `_<charset>` is a
+    charset introducer to MySQL's lexer). This also covers T4's `SHOW CREATE` macro.
+  - *M2:* SQLite `Auto` also qualifies an ambiguous `main` name (the plan's ambiguity rule;
+    SQLite resolves a bare name in `temp` first).
+  - *M4:* `render::terminator` puts `;` on its own line when the last line holds `--` or `#`.
+    Producers (T19 `Script::text`) end statements through it too.
+  - *M5:* PG refuses `GRANT … ON EXTENSION` and `ALTER EXTENSION … OWNER TO` (they do not
+    exist); `COMMENT ON EXTENSION` stays.
+  - The reviewer's lexer round-trip property is
+    `crates/sql/sql-safety/tests/quote_roundtrip.rs`: the only crate that reaches both
+    `sql-ident` and `sql-lexer` without a manifest edit.
