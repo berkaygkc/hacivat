@@ -736,6 +736,10 @@ fn r7_names_at_the_cap_fail_fast() {
         let t0 = Instant::now();
         let r = decode_namespace(&bytes);
         assert!(r.is_err(), "n={n} len={len}");
-        perf_bound(t0.elapsed(), Duration::from_secs(2), &format!("n={n} len={len}"));
+        perf_bound(
+            t0.elapsed(),
+            Duration::from_secs(2),
+            &format!("n={n} len={len}"),
+        );
     }
 }
