@@ -180,6 +180,9 @@ fn profile_of(
         origin: Origin::Imported {
             source: ImportSource::PgService,
         },
+        // ## m4-t20-scope (named exception, ruling R-W3-1): an import never chooses "Encrypt
+        // cached metadata"; it is derived from the environment the user gives the row.
+        catalog_sensitive_set: None,
         ..Profile::default()
     };
     // libpq keeps a repeated key's first value; the fold would keep the last one.

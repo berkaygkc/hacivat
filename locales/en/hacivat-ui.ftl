@@ -3939,3 +3939,33 @@ hv-explorer-filter-not-loaded = { $n ->
         [one] Searches loaded names only. { $n } connection or schema isn't loaded yet.
        *[other] Searches loaded names only. { $n } connections or schemas aren't loaded yet.
     }
+
+## m4-t20-scope
+
+# Surface 7 (Scope editor). The folded Schemas section's summary while no schema list was read
+# (not connected, nothing cached): the pattern that decides what is read.
+# Variables:
+#   $pattern (String) - the scope pattern as typed, e.g. "@:*".
+hv-scope-summary-pattern = Pattern { $pattern }
+# Surface 7 (Scope editor). Said by assistive technology for a database whose schemas are
+# partly checked (the box's mixed state).
+hv-scope-tree-mixed = partly selected
+# Surface 7 (Scope editor). Asked in place when a click in the list cannot be made without
+# writing the pattern again from the checked names (fix round 1, I-3).
+hv-scope-rewrite-title = Write the pattern again from the checked names?
+# Surface 7 (Scope editor).
+hv-scope-rewrite-body = Parts of it that the list can't show (a regular expression, an exclusion, a name that isn't listed) would be removed.
+# Surface 7 (Scope editor). The safe answer (focused).
+hv-scope-rewrite-keep = Keep the pattern
+# Surface 7 (Scope editor).
+hv-scope-rewrite-apply = Write it again
+# Surface 7 (Scope editor). The saved scope could not be read (the connection's data file).
+hv-scope-stored-unreadable = The saved schema scope couldn't be read. The pattern shown is the default, and it can't be saved until the file can be read.
+# Surface 7 (Scope editor). Save failed at the top of the form: nothing was saved.
+hv-scope-save-cache-failed = The cached metadata of this connection couldn't be deleted, so nothing was saved.
+# Surface 7 (Scope editor). Save failed at the top of the form: nothing was saved.
+hv-scope-save-data-unreadable = This connection's explorer settings file can't be read, so nothing was saved.
+# Surface 7 (Scope editor). Save failed at the top of the form: nothing was saved.
+hv-scope-save-data-failed = The schema scope couldn't be saved, so nothing was saved.
+# Surface 6 (Introspection level). A toast when a level could not be saved.
+hv-explorer-level-not-saved = The introspection level couldn't be saved.

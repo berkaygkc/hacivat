@@ -77,8 +77,11 @@ use hacivat_ui_core::gpui_surface::{App, Global, SharedString};
 use twox_hash::XxHash3_128;
 
 use super::badges::{self, Badge};
+// ## m4-t20-levels (named exception)
 use super::contrib::{ContributedChildren, ContributedNode};
+use super::level_pill;
 use super::rows::{self, DisplayGroup, NameOrder};
+use hacivat_meta::userdata::ProfileUserData;
 
 /// At most this many names are matched on the UI thread; more go to the background executor.
 pub const SYNC_FILTER_NAMES: usize = 2_000;
@@ -336,6 +339,9 @@ pub struct ProfileInput {
     pub tooltip: Option<SharedString>,
     /// The catalog the tree shows below the root (`None`: none loaded).
     pub catalog: Option<Arc<CatalogSnapshot>>,
+    // ## m4-t20-levels (named exception): the profile's user data, for the level pills
+    // (`None` until its file was read: no pill is drawn then).
+    pub userdata: Option<Arc<ProfileUserData>>,
 }
 
 impl fmt::Debug for ProfileInput {
@@ -360,6 +366,8 @@ impl ProfileInput {
             a11y: None,
             tooltip: None,
             catalog,
+            // ## m4-t20-levels (named exception)
+            userdata: None,
         }
     }
 }
@@ -1462,11 +1470,20 @@ impl ExplorerModel {
             });
             words.push(word);
         }
+        // ## m4-t20-levels (named exception): the level pill (set here, inherited from the
+        // database, or the level the schema was read at).
+        if !entry.out_of_scope()
+            && let Some(data) = &self.inner.inputs.profiles[p].userdata
+            && let Some((level, source)) =
+                level_pill::schema_level(data, &entry.key, entry.ns.as_deref())
+        {
+            row.pill = Some(self.pill(level, &source));
+        }
         row.a11y_description = join_words(&words);
         row
     }
 
-    fn database_row(&self, db: &DbEntry) -> TreeRowData {
+    fn database_row(&self, p: usize, db: &DbEntry) -> TreeRowData {
         let mut row = TreeRowData::new(rows::isolate(&db.name), TextSource::Catalog);
         row.icon = Some(rows::kind_icon(ObjectKind::Database));
         let mut words =
@@ -1492,8 +1509,21 @@ impl ExplorerModel {
             row.meta = Some(self.t_args("hv-explorer-scope-count", args()));
             row.tooltip = Some(self.t_args("hv-explorer-scope-count-tip", args()));
         }
+        // ## m4-t20-levels (named exception): the level pill, when set on the database.
+        if db.in_scope
+            && let Some(data) = &self.inner.inputs.profiles[p].userdata
+            && let Some((level, source)) = level_pill::database_level(data, &db.name)
+        {
+            row.pill = Some(self.pill(level, &source));
+        }
         row.a11y_description = join_words(&words);
         row
+    }
+
+    // ## m4-t20-levels (named exception)
+    /// A level pill, its words from Fluent.
+    fn pill(&self, level: Level, source: &level_pill::PillSource) -> hacivat_ui::tree::RowPill {
+        level_pill::row_pill(level, source, &|id, args| self.t_args(id, args))
     }
 
     fn group_row(&self, key: TreeKey, group: DisplayGroup, members: usize) -> TreeRowData {
@@ -1572,7 +1602,8 @@ impl TreeModel for ExplorerModel {
                 row
             }
             Node::Profile(p) => self.profile_row(p),
-            Node::Database { db, .. } => self.database_row(&db),
+            // ## m4-t20-levels (named exception): the profile, for the level pill.
+            Node::Database { p, db } => self.database_row(p, &db),
             Node::Schema { p, entry } => self.schema_row(p, &entry),
             Node::BuiltIn { .. } => {
                 let mut row = TreeRowData::new(self.t("hv-explorer-builtin"), TextSource::Fluent);

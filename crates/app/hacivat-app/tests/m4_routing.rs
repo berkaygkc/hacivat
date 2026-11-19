@@ -401,7 +401,9 @@ fn stub_count_is_n(cx: &mut TestAppContext) {
     let vcx = shell(cx, "en");
     let mut stubs: Vec<&str> = explorer::STUB_COMMANDS.to_vec();
     stubs.extend(ddl_view::STUB_COMMANDS);
-    assert_eq!(stubs.len(), 13);
+    // ## m4-t20-levels (named exception): Task 20 filled `explorer.edit_scope` and the four
+    // `explorer.set_level.*` commands.
+    assert_eq!(stubs.len(), 8);
     let (enabled, listed) = vcx.cx.read(|cx| {
         let reg = cx.global::<ActionRegistry>();
         let enabled: Vec<&'static str> = reg

@@ -64,10 +64,15 @@ fn profile_without_catalog_sensitive_round_trips_byte_for_byte() {
         let (profiles, saved) = load_and_resave(text);
         assert_eq!(saved, text, "{name}");
         assert!(!profiles.is_empty(), "{name}");
-        assert!(profiles.iter().all(|p| !p.catalog_sensitive), "{name}");
+        // ## m4-t20-scope (named exception, R-W3-1): unset, so derived.
+        assert!(
+            profiles.iter().all(|p| p.catalog_sensitive_set.is_none()),
+            "{name}"
+        );
         assert!(!saved.contains("catalog_sensitive"), "{name}");
     }
-    assert!(!Profile::default().catalog_sensitive);
+    assert_eq!(Profile::default().catalog_sensitive_set, None);
+    assert!(!Profile::default().catalog_sensitive());
 }
 
 #[test]
@@ -75,7 +80,7 @@ fn catalog_sensitive_true_is_written_and_read() {
     let (path, _dir) = tmp_file(M3B_FILE);
     let (store, loaded) = ProfileStore::open(path.clone());
     let mut p = loaded.profiles[0].clone();
-    p.catalog_sensitive = true;
+    p.catalog_sensitive_set = Some(true);
     store.save(std::slice::from_ref(&p)).expect("save");
     let text = read(&path);
     assert_eq!(text, format!("{M3B_FILE}catalog_sensitive = true\n"));
@@ -83,8 +88,19 @@ fn catalog_sensitive_true_is_written_and_read() {
     assert!(back.diags.is_empty(), "{:?}", back.diags);
     assert_eq!(back.profiles, vec![p.clone()]);
 
-    // Back to the default: the key goes, and the file is the M3b file again.
-    p.catalog_sensitive = false;
+    // ## m4-t20-scope (named exception, R-W3-1): an explicit `false` is kept, so a production
+    // profile can be told "off" apart from "never chosen".
+    p.catalog_sensitive_set = Some(false);
+    store.save(std::slice::from_ref(&p)).expect("save");
+    assert_eq!(
+        read(&path),
+        format!("{M3B_FILE}catalog_sensitive = false\n")
+    );
+    let (_, back) = ProfileStore::open(path.clone());
+    assert_eq!(back.profiles[0].catalog_sensitive_set, Some(false));
+
+    // Unset: the key goes, and the file is the M3b file again.
+    p.catalog_sensitive_set = None;
     store.save(std::slice::from_ref(&p)).expect("save");
     assert_eq!(read(&path), M3B_FILE);
 
@@ -97,6 +113,37 @@ fn catalog_sensitive_true_is_written_and_read() {
         "{:?}",
         bad.diags
     );
+}
+
+// ## m4-t20-scope (named exception, ruling R-W3-1)
+/// A profile file from before M4 has no `catalog_sensitive` key: its production profiles
+/// encrypt their cached metadata, every other one does not, and the file stays as it was.
+#[test]
+fn a_pre_m4_production_profile_is_sensitive() {
+    let text = include_str!("fixtures/m2a_connections.toml");
+    let (profiles, saved) = load_and_resave(text);
+    assert_eq!(saved, text);
+    let prod: Vec<&Profile> = profiles
+        .iter()
+        .filter(|p| p.environment == Some(hacivat_proto::EnvTag::Production))
+        .collect();
+    assert!(!prod.is_empty(), "the fixture has a production profile");
+    for p in &profiles {
+        assert_eq!(p.catalog_sensitive_set, None, "{}", p.name);
+        assert_eq!(
+            p.catalog_sensitive(),
+            p.environment == Some(hacivat_proto::EnvTag::Production),
+            "{}",
+            p.name
+        );
+    }
+    // An explicit choice wins over the environment, both ways.
+    let mut p = prod[0].clone();
+    p.catalog_sensitive_set = Some(false);
+    assert!(!p.catalog_sensitive());
+    p.environment = Some(hacivat_proto::EnvTag::Dev);
+    p.catalog_sensitive_set = Some(true);
+    assert!(p.catalog_sensitive());
 }
 
 fn spec(p: &Profile) -> MetaConnSpec {
