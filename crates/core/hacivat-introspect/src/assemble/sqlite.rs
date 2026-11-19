@@ -10,15 +10,23 @@
 //!   (`origin` `pk`), which is [`ObjFlags::IMPLICIT`] for it.
 //! - **Unique constraints** are their `sqlite_autoindex_*` (`origin` `u`): a unique key named
 //!   by the server's index name (flagged `SERVER_GENERATED_NAME`) plus that index, implicit for
-//!   it. A `CREATE [UNIQUE] INDEX` (`origin` `c`) is a plain index.
+//!   it. A `CREATE [UNIQUE] INDEX` (`origin` `c`) is a plain index. The server numbers
+//!   autoindexes by position, so a rebuild that drops an earlier one renames the later ones:
+//!   that is the server's own name, kept as reported.
 //! - **Index parts** are the key columns of `index_xinfo` (`key = 1`) in `seqno` order;
 //!   `cid = -2` is an expression whose text, like a partial index's predicate, comes from the
 //!   index's SQL (the scan below; `COLLATE` and `ASC`/`DESC` of a part are not part of its
-//!   text).
-//! - **Foreign keys** are unnamed: each gets the display name `<table>_fk<n>`, `n` its
-//!   position in declaration order (SQLite numbers `id` from the last declared one), flagged
-//!   `SERVER_GENERATED_NAME`, so sibling FKs keep distinct identities. A `to` column of NULL
-//!   references the parent's primary key: `target_columns` is then empty.
+//!   text). The scan is used only when its part count is the index's key count. A part's
+//!   collation (`coll`, as Task 18 passes it) rides in the key's rare part.
+//! - **Foreign keys** are unnamed. Each gets a display name derived from its **content**, never
+//!   its position, so dropping or adding one FK leaves the others' identities alone:
+//!   `<table>_<from columns>_<parent>_fkey`; when two FKs of the table share that, both take
+//!   `<table>_<from columns>_<parent>_<to columns or "pk">_fkey`; a name still taken (exact
+//!   duplicates, which SQLite allows) gets `_2`, `_3`, … in declaration order; a name over
+//!   [`MAX_FK_NAME`] bytes is `<table>_fk_<xxh3-64 of from, parent and to, hex>`. All are
+//!   flagged `SERVER_GENERATED_NAME`. A `to` column of NULL references the parent's primary
+//!   key: `target_columns` is then empty. A parent that resolves is named by its stored
+//!   spelling (`REFERENCES P` names table `p`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -27,9 +35,12 @@ use hacivat_meta::props::{FkProps, IndexProps, KeyProps, Props};
 use hacivat_meta::{Name, Obj, ObjFlags, ObjectKind, Ref};
 
 use super::{
-    ColRef, ColumnIndex, KeyObj, Parts, TableId, finish, fk_action_word, fk_match_word, flag_if,
-    index_obj, key_obj, key_props, mark_implicit,
+    ColRef, ColumnIndex, KeyObj, PartOpts, Parts, TableId, finish, fk_action_word, fk_match_word,
+    flag_if, index_obj, key_obj, key_props, mark_implicit,
 };
+
+/// The longest content-derived FK display name, in bytes; a longer one is hashed.
+pub const MAX_FK_NAME: usize = 128;
 
 /// One `table_xinfo` column with `pk > 0`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +74,9 @@ pub struct IndexPartRow {
     pub cid: i64,
     pub name: Option<Name>,
     pub desc: bool,
+    /// `coll` when it differs from the column's declared collation (`BINARY` when it declares
+    /// none; for an expression part, from `BINARY`). Task 18 compares; `None` otherwise.
+    pub coll: Option<Name>,
     /// A key column (`false`: an auxiliary column the index stores).
     pub key: bool,
 }
@@ -75,7 +89,7 @@ pub struct FkRow {
     pub id: u32,
     /// The column's position in the FK.
     pub seq: u32,
-    /// `table`: the parent table.
+    /// `table`: the parent table, as the `REFERENCES` clause spells it.
     pub ref_table: Name,
     pub from: Name,
     /// `to` (NULL: the parent's primary key).
@@ -84,6 +98,11 @@ pub struct FkRow {
     pub on_delete: Name,
     /// `match` (`NONE`).
     pub match_kind: Name,
+    /// `DEFERRABLE`, which `foreign_key_list` does not report: Task 18 parses it from the
+    /// table's `sqlite_schema.sql` (absent: SQLite's default, not deferrable).
+    pub deferrable: bool,
+    /// `INITIALLY DEFERRED`, parsed the same way.
+    pub initially_deferred: bool,
 }
 
 /// The SQLite rows of one schema (`main`, `temp` or an attached one).
@@ -93,6 +112,14 @@ pub struct KeyRows {
     pub indexes: Vec<IndexRow>,
     pub index_parts: Vec<IndexPartRow>,
     pub foreign_keys: Vec<FkRow>,
+}
+
+fn part_opts(p: &IndexPartRow) -> PartOpts {
+    PartOpts {
+        desc: p.desc,
+        collation: p.coll.clone(),
+        ..PartOpts::default()
+    }
 }
 
 /// Assembles primary keys, unique keys, indexes and foreign keys (module docs).
@@ -112,9 +139,21 @@ pub fn assemble_keys(rows: KeyRows, cols: &ColumnIndex) -> Vec<KeyObj> {
     for (table, mut cs) in pks {
         cs.sort_by_key(|c| c.pk);
         let tid = TableId::named(table);
+        let backing = rows
+            .indexes
+            .iter()
+            .find(|i| *i.table == *table && &*i.origin == "pk");
+        // The direction and collation per part come from the backing autoindex.
+        let ix_parts = backing
+            .and_then(|ix| parts_of.get(&*ix.name))
+            .map(|ps| key_parts(ps))
+            .filter(|ps| ps.len() == cs.len());
         let mut p = Parts::default();
-        for c in &cs {
+        for (i, c) in cs.iter().enumerate() {
             let ordinal = u32::try_from(c.cid).ok().and_then(|c| c.checked_add(1));
+            let o = ix_parts
+                .as_ref()
+                .map_or_else(PartOpts::default, |ps| part_opts(ps[i]));
             p.column(
                 cols,
                 &tid,
@@ -122,30 +161,14 @@ pub fn assemble_keys(rows: KeyRows, cols: &ColumnIndex) -> Vec<KeyObj> {
                     ordinal,
                     name: Some(c.name.clone()),
                 },
-                false,
+                o,
             );
         }
-        let backing = rows
-            .indexes
-            .iter()
-            .find(|i| *i.table == *table && &*i.origin == "pk");
-        let mut props = KeyProps {
+        let (props, broken) = p.into_key(KeyProps {
             unique: true,
+            backing_index: backing.map(|ix| ix.name.clone()),
             ..key_props()
-        };
-        if let Some(ix) = backing {
-            props.backing_index = Some(ix.name.clone());
-            let keys: Vec<bool> = parts_of
-                .get(&*ix.name)
-                .map(|ps| key_parts(ps).iter().map(|p| p.desc).collect())
-                .unwrap_or_default();
-            if keys.len() == p.columns.len() {
-                p.desc = keys;
-            }
-        }
-        let broken = p.broken;
-        props.columns = p.columns;
-        props.desc = p.desc;
+        });
         pk_at.insert(table, out.len());
         out.push(KeyObj::new(
             tid,
@@ -162,7 +185,12 @@ pub fn assemble_keys(rows: KeyRows, cols: &ColumnIndex) -> Vec<KeyObj> {
             .get(&*ix.name)
             .map(|ps| key_parts(ps))
             .unwrap_or_default();
-        let sql = ix.sql.as_deref().and_then(scan_index_sql);
+        // m2: the scan is trusted only when it found as many parts as the index has.
+        let sql = ix
+            .sql
+            .as_deref()
+            .and_then(scan_index_sql)
+            .filter(|s| s.parts.len() == parts.len());
         let mut p = Parts::default();
         let mut broken = parts.is_empty();
         for (i, part) in parts.iter().enumerate() {
@@ -173,7 +201,7 @@ pub fn assemble_keys(rows: KeyRows, cols: &ColumnIndex) -> Vec<KeyObj> {
                         .as_ref()
                         .and_then(|s| s.parts.get(i))
                         .map(|t| Name::from(*t));
-                    p.expression(text.as_ref(), part.desc);
+                    p.expression(text.as_ref(), part_opts(part));
                 }
                 cid => {
                     let ordinal = u32::try_from(cid).ok().and_then(|c| c.checked_add(1));
@@ -181,22 +209,20 @@ pub fn assemble_keys(rows: KeyRows, cols: &ColumnIndex) -> Vec<KeyObj> {
                         .name
                         .clone()
                         .or_else(|| (cid == -1).then(|| Name::from("rowid")));
-                    p.column(cols, &tid, &ColRef { ordinal, name }, part.desc);
+                    p.column(cols, &tid, &ColRef { ordinal, name }, part_opts(part));
                 }
             }
         }
         let predicate = sql.as_ref().and_then(|s| s.predicate).map(Name::from);
-        broken |= p.broken || (ix.partial && predicate.is_none());
+        broken |= ix.partial && predicate.is_none();
         let origin = &*ix.origin;
         let auto = origin == "u" || origin == "pk";
-        let key = KeyProps {
-            columns: p.columns,
-            expressions: p.expressions,
-            desc: p.desc,
+        let (key, parts_broken) = p.into_key(KeyProps {
             predicate,
             unique: ix.unique,
             ..key_props()
-        };
+        });
+        broken |= parts_broken;
         let flags =
             flag_if(broken, ObjFlags::BROKEN) | flag_if(auto, ObjFlags::SERVER_GENERATED_NAME);
         let index_at = out.len();
@@ -238,23 +264,33 @@ pub fn assemble_keys(rows: KeyRows, cols: &ColumnIndex) -> Vec<KeyObj> {
         }
     }
 
-    // Foreign keys by table and id.
-    let mut fks: BTreeMap<(&str, u32), Vec<&FkRow>> = BTreeMap::new();
+    // Foreign keys by table, in declaration order (the highest id was declared first).
+    let mut fks: BTreeMap<&str, BTreeMap<std::cmp::Reverse<u32>, Vec<&FkRow>>> = BTreeMap::new();
     for r in &rows.foreign_keys {
-        fks.entry((&r.table, r.id)).or_default().push(r);
+        fks.entry(&r.table)
+            .or_default()
+            .entry(std::cmp::Reverse(r.id))
+            .or_default()
+            .push(r);
     }
-    let mut ids: HashMap<&str, Vec<u32>> = HashMap::new();
-    for &(table, id) in fks.keys() {
-        ids.entry(table).or_default().push(id);
-    }
-    for ((table, id), mut fk) in fks {
-        fk.sort_by_key(|r| r.seq);
-        // Declaration order: the highest id was declared first.
-        let declared = ids
-            .get(table)
-            .map_or(0, |all| all.iter().filter(|&&other| other > id).count())
-            + 1;
-        out.push(foreign_key(table, declared, &fk, cols));
+    for (table, by_id) in fks {
+        let built: Vec<BuiltFk> = by_id
+            .into_values()
+            .map(|mut fk| {
+                fk.sort_by_key(|r| r.seq);
+                foreign_key(table, &fk, cols)
+            })
+            .collect();
+        for (fk, name) in built.iter().zip(fk_names(table, &built)) {
+            out.push(KeyObj::new(
+                TableId::named(table),
+                Obj::new(ObjectKind::ForeignKey, name)
+                    .with_props(Props::ForeignKey(Arc::new(fk.props.clone())))
+                    .add_flags(
+                        ObjFlags::SERVER_GENERATED_NAME | flag_if(fk.broken, ObjFlags::BROKEN),
+                    ),
+            ));
+        }
     }
 
     for (owner, idx) in links {
@@ -276,12 +312,79 @@ fn key_parts<'a>(parts: &[&'a IndexPartRow]) -> Vec<&'a IndexPartRow> {
     keys
 }
 
-fn foreign_key(table: &str, declared: usize, rows: &[&FkRow], cols: &ColumnIndex) -> KeyObj {
+/// One assembled FK before it is named.
+struct BuiltFk {
+    /// The parent's stored name (or its `REFERENCES` spelling when unknown).
+    parent: Name,
+    props: FkProps,
+    broken: bool,
+}
+
+/// The content-derived display names of a table's FKs, in the order given (declaration order;
+/// module docs).
+fn fk_names(table: &str, fks: &[BuiltFk]) -> Vec<Name> {
+    let join = |names: &[Name]| names.iter().map(|n| &**n).collect::<Vec<_>>().join("_");
+    let base = |fk: &BuiltFk| format!("{table}_{}_{}_fkey", join(&fk.props.columns), fk.parent);
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for fk in fks {
+        *counts.entry(base(fk)).or_default() += 1;
+    }
+    let mut taken: HashMap<String, usize> = HashMap::new();
+    fks.iter()
+        .map(|fk| {
+            let b = base(fk);
+            let mut name = if counts.get(&b).copied().unwrap_or(0) > 1 {
+                let to = if fk.props.target_columns.is_empty() {
+                    "pk".to_string()
+                } else {
+                    join(&fk.props.target_columns)
+                };
+                format!(
+                    "{table}_{}_{}_{to}_fkey",
+                    join(&fk.props.columns),
+                    fk.parent
+                )
+            } else {
+                b
+            };
+            if name.len() > MAX_FK_NAME {
+                let mut text = String::new();
+                for part in [
+                    &fk.props.columns[..],
+                    std::slice::from_ref(&fk.parent),
+                    &fk.props.target_columns[..],
+                ] {
+                    text.push_str(&join(part));
+                    text.push('\0');
+                }
+                let h = twox_hash::XxHash3_64::oneshot(text.as_bytes());
+                name = format!("{table}_fk_{h:016x}");
+            }
+            let seen = taken.entry(name.clone()).or_default();
+            *seen += 1;
+            if *seen > 1 {
+                let mut k = *seen;
+                loop {
+                    let candidate = format!("{name}_{k}");
+                    if !taken.contains_key(&candidate) {
+                        taken.insert(candidate.clone(), 1);
+                        name = candidate;
+                        break;
+                    }
+                    k += 1;
+                }
+            }
+            Name::from(name.as_str())
+        })
+        .collect()
+}
+
+fn foreign_key(table: &str, rows: &[&FkRow], cols: &ColumnIndex) -> BuiltFk {
     let tid = TableId::named(table);
     let first = rows[0];
-    let target = TableId::named(first.ref_table.clone());
-    let in_scope = cols.contains(&target);
-    let mut broken = false;
+    let target_id = TableId::named(first.ref_table.clone());
+    let target = cols.target(None, &target_id);
+    let mut broken = target.dangling;
     let mut columns = Vec::with_capacity(rows.len());
     let mut target_columns = Vec::with_capacity(rows.len());
     let named_targets = rows.iter().filter(|r| r.to.is_some()).count();
@@ -297,11 +400,14 @@ fn foreign_key(table: &str, declared: usize, rows: &[&FkRow], cols: &ColumnIndex
             }
         }
         if let Some(to) = &r.to {
-            match cols.resolve(&target, &ColRef::named(to.clone())) {
+            match cols
+                .resolve(&target_id, &ColRef::named(to.clone()))
+                .filter(|_| target.known)
+            {
                 Some(kc) => target_columns.extend(kc.name),
                 None => {
                     // An unknown parent keeps the text; a known parent without it is broken.
-                    broken |= in_scope;
+                    broken |= target.known;
                     target_columns.push(to.clone());
                 }
             }
@@ -311,31 +417,33 @@ fn foreign_key(table: &str, declared: usize, rows: &[&FkRow], cols: &ColumnIndex
     let on_delete = fk_action_word(&first.on_delete);
     let match_kind = fk_match_word(&first.match_kind);
     broken |= on_update.is_none() || on_delete.is_none() || match_kind.is_none();
+    let parent = target
+        .path
+        .last()
+        .cloned()
+        .unwrap_or_else(|| first.ref_table.clone());
     let props = FkProps {
         columns,
         target: Ref {
             kind: ObjectKind::Table,
-            path: cols.table_path(None, &first.ref_table),
-            server_id: None,
+            path: target.path,
+            server_id: target.server_id,
         },
         target_columns,
         on_update: on_update.unwrap_or_default(),
         on_delete: on_delete.unwrap_or_default(),
         match_kind: match_kind.unwrap_or_default(),
-        deferrable: false,
-        initially_deferred: false,
+        deferrable: first.deferrable,
+        initially_deferred: first.initially_deferred,
         not_valid: false,
         enforced: true,
+        rare: None,
     };
-    KeyObj::new(
-        tid,
-        Obj::new(
-            ObjectKind::ForeignKey,
-            Name::from(format!("{table}_fk{declared}").as_str()),
-        )
-        .with_props(Props::ForeignKey(Arc::new(props)))
-        .add_flags(ObjFlags::SERVER_GENERATED_NAME | flag_if(broken, ObjFlags::BROKEN)),
-    )
+    BuiltFk {
+        parent,
+        props,
+        broken,
+    }
 }
 
 /// The indexed parts and the predicate of a `CREATE INDEX` statement's text.

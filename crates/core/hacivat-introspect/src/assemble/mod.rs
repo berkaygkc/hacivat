@@ -17,14 +17,21 @@
 //!   [`ObjFlags::BROKEN`]: the object is **kept**, never dropped, so DDL tooling can warn.
 //! - **Expression parts** are slots `KeyColumn { ordinal: 0, name: None }` in
 //!   `KeyProps::columns`; their raw server text is in `KeyProps::expressions`, in slot order.
+//!   Per-part options most keys lack (PostgreSQL `NULLS FIRST`, operator classes, collations;
+//!   SQLite collations) ride in `KeyProps::rare` (R-W2-8), parallel to `desc`.
 //! - **Implicit indexes.** An index that exists for a constraint (a PostgreSQL PK/UNIQUE/EXCLUDE
 //!   backing index through `conindid`, MySQL `PRIMARY` and unique indexes, SQLite
 //!   `sqlite_autoindex_*` of `origin` `pk`/`u`, a MySQL FK-created index under
 //!   [`mysql::FkIndexRule`]) gets [`ObjFlags::IMPLICIT`] and `KeyProps::implicit_for` pointing
 //!   at the constraint; the constraint's `backing_index` names the index.
+//! - **FK targets** that resolve in this namespace are named by the stored table (its stored
+//!   spelling and server id), never by the `REFERENCES` spelling ([`ColumnIndex::resolve_table`]).
+//!   A target outside the namespace keeps the row's names, resolved on demand. A target inside
+//!   the namespace that is not there is broken when the index is complete (a full pass,
+//!   [`ColumnIndex::set_complete`]), and unknown otherwise (a fragment).
 //! - **Names.** Server names are kept verbatim. A name the server does not report (SQLite's
-//!   unnamed primary and foreign keys) is a display name flagged
-//!   [`ObjFlags::SERVER_GENERATED_NAME`], which DDL never emits as a real name.
+//!   unnamed primary and foreign keys) is a display name derived from the object's content,
+//!   flagged [`ObjFlags::SERVER_GENERATED_NAME`], which DDL never emits as a real name.
 //! - **Header rows decide existence.** An object exists when its own row does (`pg_index`,
 //!   `pg_constraint`, `STATISTICS`, `REFERENTIAL_CONSTRAINTS`, a `CHECK` row of
 //!   `TABLE_CONSTRAINTS`, `index_list`, `foreign_key_list`); a part row whose object row is
@@ -40,7 +47,7 @@ use smallvec::SmallVec;
 
 use hacivat_meta::name::{DialectId, FoldRule, IdentCtx, NameClass, match_key};
 use hacivat_meta::props::{
-    CheckProps, FkAction, FkMatch, FkProps, IndexProps, KeyColumn, KeyProps, Props,
+    CheckProps, FkAction, FkMatch, FkProps, IndexProps, KeyColumn, KeyProps, KeyRare, Props,
 };
 use hacivat_meta::{Name, NsKey, Obj, ObjFlags, ObjectKind, Ref, ServerId};
 
@@ -136,20 +143,33 @@ pub struct ColumnIndex {
     ns: NsKey,
     dialect: DialectId,
     ctx: IdentCtx,
+    complete: bool,
     tables: Vec<TableCols>,
     by_sid: HashMap<ServerId, usize>,
     by_name: HashMap<Name, usize>,
     by_folded: HashMap<Name, usize>,
 }
 
+/// Where an FK's target table is.
+struct Target {
+    path: SmallVec<[Name; 4]>,
+    server_id: Option<ServerId>,
+    /// In this namespace and in the index: its columns resolve.
+    known: bool,
+    /// In this namespace, absent from a complete index: the FK dangles.
+    dangling: bool,
+}
+
 impl ColumnIndex {
-    /// An empty index of namespace `ns` (PostgreSQL `[db, schema]`, MySQL `[schema]`, SQLite
-    /// `[main]`) under `dialect` and `ctx` (MySQL's `lower_case_table_names`).
+    /// An empty, incomplete index of namespace `ns` (PostgreSQL `[db, schema]`, MySQL
+    /// `[schema]`, SQLite `[main]`) under `dialect` and `ctx` (MySQL's
+    /// `lower_case_table_names`).
     pub fn new(ns: NsKey, dialect: DialectId, ctx: IdentCtx) -> Self {
         ColumnIndex {
             ns,
             dialect,
             ctx,
+            complete: false,
             tables: Vec::new(),
             by_sid: HashMap::new(),
             by_name: HashMap::new(),
@@ -160,6 +180,18 @@ impl ColumnIndex {
     /// The namespace the rows belong to.
     pub fn ns(&self) -> &NsKey {
         &self.ns
+    }
+
+    /// Declares whether the index holds **every** table of the namespace (a full pass) or only
+    /// some (a fragment, the default). In a complete index an FK whose target lies in this
+    /// namespace but is not in the index dangles, and is flagged broken.
+    pub fn set_complete(&mut self, complete: bool) {
+        self.complete = complete;
+    }
+
+    /// Whether the index holds every table of the namespace.
+    pub fn is_complete(&self) -> bool {
+        self.complete
     }
 
     /// Adds `table` with its `(ordinal, name)` columns (PostgreSQL `attnum`, MySQL
@@ -198,6 +230,13 @@ impl ColumnIndex {
     /// Whether `table` was added.
     pub fn contains(&self, table: &TableId) -> bool {
         self.table(table).is_some()
+    }
+
+    /// The stored identity (stored spelling and server id) of the table `table` names: by
+    /// server id, else by exact name, else by a certain caseless key where the engine folds
+    /// table names (SQLite; MySQL/MariaDB under `lower_case_table_names` ≥ 1).
+    pub fn resolve_table(&self, table: &TableId) -> Option<&TableId> {
+        self.table(table).map(|t| &t.id)
     }
 
     /// The column `col` of `table` refers to, by ordinal first, then by name (exact, then by a
@@ -272,10 +311,24 @@ impl ColumnIndex {
                 .is_some_and(|(a, b)| a == b)
     }
 
-    /// Whether the table `name` of schema `schema` (`None`: this namespace) is one this index
-    /// can resolve columns of.
-    fn knows(&self, schema: Option<&str>, table: &TableId) -> bool {
-        schema.is_none_or(|s| s == self.ns.root_name()) && self.contains(table)
+    /// Where the FK target `table` of schema `schema` (`None`: this namespace) is: a table this
+    /// index holds is named by its stored identity (I3); anything else keeps the row's names.
+    fn target(&self, schema: Option<&Name>, table: &TableId) -> Target {
+        let here = schema.is_none_or(|s| **s == *self.ns.root_name());
+        match self.resolve_table(table).filter(|_| here) {
+            Some(stored) => Target {
+                path: self.table_path(None, &stored.name),
+                server_id: stored.server_id,
+                known: true,
+                dangling: false,
+            },
+            None => Target {
+                path: self.table_path(schema.filter(|_| !here), &table.name),
+                server_id: table.server_id,
+                known: false,
+                dangling: here && self.complete,
+            },
+        }
     }
 
     /// The path of `table` in `schema` (`None`: this namespace).
@@ -311,30 +364,18 @@ impl ColumnIndex {
     }
 }
 
-/// One assembled object and the facts the model's props have no field for.
+/// One assembled object and the table it belongs to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyObj {
     /// The owning table (the introspector adds [`KeyObj::obj`] under it).
     pub table: TableId,
     /// The object: kind, name, server id, flags and props.
     pub obj: Obj,
-    /// A foreign key's parent key on the referenced table: the index it relies on (PostgreSQL
-    /// `conindid`, a unique index or a key's backing index; MySQL `UNIQUE_CONSTRAINT_NAME`,
-    /// which names an index). `None` elsewhere or when the server does not say.
-    pub ref_constraint: Option<Ref>,
-    /// A PostgreSQL exclusion constraint's operator per key part, in key order (the
-    /// definition in `CheckProps::expr` holds them too). Empty elsewhere.
-    pub operators: Vec<Name>,
 }
 
 impl KeyObj {
     fn new(table: TableId, obj: Obj) -> Self {
-        KeyObj {
-            table,
-            obj,
-            ref_constraint: None,
-            operators: Vec::new(),
-        }
+        KeyObj { table, obj }
     }
 
     /// The key fields of a primary or unique key, or of an index.
@@ -376,18 +417,39 @@ impl KeyObj {
     }
 }
 
+/// One key part's options beyond its direction (R-W2-8).
+#[derive(Debug, Clone, Default)]
+struct PartOpts {
+    desc: bool,
+    nulls_first: bool,
+    opclass: Option<Name>,
+    collation: Option<Name>,
+}
+
+impl PartOpts {
+    fn desc(desc: bool) -> Self {
+        PartOpts {
+            desc,
+            ..PartOpts::default()
+        }
+    }
+}
+
 /// Key parts in key order, and whether one did not resolve.
 #[derive(Debug, Default)]
 struct Parts {
     columns: Vec<KeyColumn>,
     expressions: Vec<Name>,
     desc: Vec<bool>,
+    nulls_first: Vec<bool>,
+    opclass: Vec<Option<Name>>,
+    collation: Vec<Option<Name>>,
     broken: bool,
 }
 
 impl Parts {
     /// A column part: resolved, or kept as the row gave it and marked broken.
-    fn column(&mut self, cols: &ColumnIndex, table: &TableId, col: &ColRef, desc: bool) {
+    fn column(&mut self, cols: &ColumnIndex, table: &TableId, col: &ColRef, opts: PartOpts) {
         let kc = match cols.resolve(table, col) {
             Some(kc) => kc,
             None => {
@@ -399,11 +461,11 @@ impl Parts {
             }
         };
         self.columns.push(kc);
-        self.desc.push(desc);
+        self.push_opts(opts);
     }
 
     /// An expression part: its slot and its text (a missing text is broken).
-    fn expression(&mut self, text: Option<&Name>, desc: bool) {
+    fn expression(&mut self, text: Option<&Name>, opts: PartOpts) {
         self.columns.push(KeyColumn {
             ordinal: 0,
             name: None,
@@ -415,7 +477,42 @@ impl Parts {
                 self.expressions.push(Name::from(""));
             }
         }
-        self.desc.push(desc);
+        self.push_opts(opts);
+    }
+
+    fn push_opts(&mut self, o: PartOpts) {
+        self.desc.push(o.desc);
+        self.nulls_first.push(o.nulls_first);
+        self.opclass.push(o.opclass);
+        self.collation.push(o.collation);
+    }
+
+    /// The rare part: each vector kept only when a part has the option (R-W2-8).
+    fn rare(&mut self) -> Option<Arc<KeyRare>> {
+        let mut r = KeyRare::default();
+        if self.nulls_first.iter().any(|&b| b) {
+            r.nulls_first = std::mem::take(&mut self.nulls_first);
+        }
+        if self.opclass.iter().any(Option::is_some) {
+            r.opclass = std::mem::take(&mut self.opclass);
+        }
+        if self.collation.iter().any(Option::is_some) {
+            r.collation = std::mem::take(&mut self.collation);
+        }
+        (!r.is_empty()).then(|| Arc::new(r))
+    }
+
+    /// Key props with the parts (columns, expressions, direction, rare part) filled in.
+    fn into_key(mut self, base: KeyProps) -> (KeyProps, bool) {
+        let rare = self.rare();
+        let key = KeyProps {
+            columns: self.columns,
+            expressions: self.expressions,
+            desc: self.desc,
+            rare,
+            ..base
+        };
+        (key, self.broken)
     }
 }
 
@@ -430,6 +527,30 @@ fn resolve_names(cols: &ColumnIndex, table: &TableId, refs: &[ColRef]) -> (Vec<N
                 broken = true;
                 r.name.clone().unwrap_or_else(|| Name::from(""))
             }
+        })
+        .collect();
+    (names, broken)
+}
+
+/// An FK's referenced columns: resolved against a known target, the row's names otherwise
+/// (a missing name is broken). The bool is "broken".
+fn target_names(
+    cols: &ColumnIndex,
+    target: &TableId,
+    t: &Target,
+    refs: &[ColRef],
+) -> (Vec<Name>, bool) {
+    if t.known {
+        return resolve_names(cols, target, refs);
+    }
+    let mut broken = false;
+    let names = refs
+        .iter()
+        .map(|c| {
+            c.name.clone().unwrap_or_else(|| {
+                broken = true;
+                Name::from("")
+            })
         })
         .collect();
     (names, broken)

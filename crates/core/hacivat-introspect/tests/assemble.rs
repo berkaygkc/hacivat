@@ -66,6 +66,7 @@ fn pg_part(attnum: i16, name: &str) -> pg::IndexPart {
         name: Some(n(name)),
         expression: None,
         desc: false,
+        ..Default::default()
     }
 }
 
@@ -93,10 +94,14 @@ fn pg_con(oid: u32, name: &str, contype: u8, columns: Vec<ColRef>) -> pg::Constr
         contype,
         columns,
         definition: n(""),
+        check_expr: None,
         deferrable: false,
         deferred: false,
         validated: true,
         enforced: true,
+        no_inherit: false,
+        local: true,
+        parent: None,
         index: None,
         foreign: None,
         operators: Vec::new(),
@@ -215,6 +220,7 @@ fn lite_part(
         cid,
         name: name.map(n),
         desc: false,
+        coll: None,
         key,
     }
 }
@@ -262,6 +268,8 @@ fn lite_fk(
         on_update: n("NO ACTION"),
         on_delete: n("CASCADE"),
         match_kind: n("NONE"),
+        deferrable: false,
+        initially_deferred: false,
     }
 }
 
@@ -324,7 +332,7 @@ fn expression_include_and_partial_index() {
             attnum: 0,
             name: None,
             expression: Some(n("lower(name)")),
-            desc: false,
+            ..Default::default()
         }],
     );
     i.include = vec![ColRef::at(4, "id")];
@@ -418,8 +426,8 @@ fn sqlite_autoindex_unique_has_server_generated_name() {
 
 /// A SQLite constraint the server leaves unnamed gets a display name flagged
 /// `SERVER_GENERATED_NAME` (DDL never emits it): the primary key `<table>_pk`, and each foreign
-/// key a distinct `<table>_fk<n>` in declaration order (SQLite numbers them from the last
-/// declared), so siblings never share an identity.
+/// key a distinct name derived from its content (`<table>_<from>_<parent>_fkey`), so siblings
+/// never share an identity.
 #[test]
 fn sqlite_unnamed_pk_gets_a_display_name_only() {
     let (mut rows, _) = lite_unique_and_pk();
@@ -437,8 +445,8 @@ fn sqlite_unnamed_pk_gets_a_display_name_only() {
             .any(|o| o.obj.kind() == ObjectKind::Index && &**o.obj.name() == "t_pk"),
         "the display name names no index"
     );
-    let first = find(&out, ObjectKind::ForeignKey, "t_fk1");
-    let second = find(&out, ObjectKind::ForeignKey, "t_fk2");
+    let first = find(&out, ObjectKind::ForeignKey, "t_a_q_fkey");
+    let second = find(&out, ObjectKind::ForeignKey, "t_b_p_fkey");
     assert_eq!(first.fk().unwrap().columns, vec![n("a")]);
     assert_eq!(second.fk().unwrap().columns, vec![n("b")]);
     for o in &out {
@@ -579,10 +587,10 @@ fn exclusion_constraint_keeps_operators() {
         &pg_cols(),
     );
     let x = find(&out, ObjectKind::Exclusion, "t_room_during_excl");
-    assert_eq!(x.operators, vec![n("="), n("&&")]);
+    assert_eq!(x.check().unwrap().excl_ops(), &[n("="), n("&&")][..]);
     assert_eq!(
         &*x.check().unwrap().expr,
-        "EXCLUDE USING gist (room WITH =, during WITH &&)"
+        "USING gist (room WITH =, during WITH &&)"
     );
     assert!(!x.obj.flags().contains(ObjFlags::BROKEN));
     let idx = find(&out, ObjectKind::Index, "t_room_during_excl");
@@ -754,7 +762,7 @@ fn pg_pk_backing_index_is_implicit_for_the_pk() {
     assert_eq!(plain.key().unwrap().implicit_for, None);
     let fk = find(&out, ObjectKind::ForeignKey, "t_b_fkey");
     assert_eq!(
-        fk.ref_constraint,
+        fk.fk().unwrap().fk_ref_index().cloned(),
         Some(Ref {
             kind: ObjectKind::Index,
             path: path(&["db", "s", "p", "b_idx"]).into_iter().collect(),
@@ -1040,7 +1048,7 @@ fn mysql_foreign_key_and_its_created_index() {
         (FkAction::Restrict, FkAction::SetNull)
     );
     assert_eq!(
-        fk.ref_constraint,
+        fk.fk().unwrap().fk_ref_index().cloned(),
         Some(Ref {
             kind: ObjectKind::Index,
             path: path(&["shop", "p", "PRIMARY"]).into_iter().collect(),
@@ -1099,10 +1107,10 @@ fn sqlite_expression_text_predicate_and_fk_targets() {
     assert_eq!(k.desc, vec![true, false, false]);
     assert_eq!(k.predicate.as_deref(), Some("c > 0 AND a <> ')'"));
 
-    let by_id = find(&out, ObjectKind::ForeignKey, "t_fk2");
+    let by_id = find(&out, ObjectKind::ForeignKey, "t_c_p_fkey");
     assert_eq!(by_id.fk().unwrap().target_columns, vec![n("id")]);
     assert_eq!(by_id.fk().unwrap().on_delete, FkAction::Cascade);
-    let to_pk = find(&out, ObjectKind::ForeignKey, "t_fk1");
+    let to_pk = find(&out, ObjectKind::ForeignKey, "t_a_p_fkey");
     assert!(to_pk.fk().unwrap().target_columns.is_empty());
     assert!(!to_pk.obj.flags().contains(ObjFlags::BROKEN));
 
@@ -1249,4 +1257,292 @@ fn assembled_keys_merge_into_a_namespace() {
     .expect("re-read");
     assert_eq!(again.report().duplicates, 0);
     assert_eq!(keys_of(again.next()), (expected, 3));
+}
+
+// ---- fix round 1 (R-W2-8, I2, I3, m1, m2, m6) ------------------------------------------------
+
+/// I2: a CHECK stores the bare `pg_get_expr` text (DDL writes `CHECK (expr)`); an EXCLUDE stores
+/// the text after `EXCLUDE` without the deferral words, which go into the rare part with its
+/// operators. `NO INHERIT` and a non-local constraint are carried.
+#[test]
+fn pg_check_and_exclusion_follow_the_ddl_contract() {
+    let mut ck = pg_con(400, "t_a_check", b'c', vec![ColRef::at(1, "a")]);
+    ck.definition = n("CHECK ((a > 0)) NO INHERIT NOT VALID");
+    ck.check_expr = Some(n("a > 0"));
+    ck.no_inherit = true;
+    ck.validated = false;
+    let mut inherited = pg_con(401, "t_b_check", b'c', vec![ColRef::at(2, "b")]);
+    inherited.check_expr = Some(n("b > 0"));
+    inherited.local = false;
+    let missing = pg_con(402, "t_x_check", b'c', Vec::new());
+    let mut x = pg_con(403, "t_excl", b'x', vec![ColRef::at(6, "room")]);
+    x.definition = n("EXCLUDE USING gist (room WITH =) DEFERRABLE INITIALLY DEFERRED");
+    x.operators = vec![n("=")];
+    x.deferrable = true;
+    x.deferred = true;
+    let out = pg::assemble_keys(
+        pg::KeyRows {
+            indexes: Vec::new(),
+            constraints: vec![ck, inherited, missing, x],
+        },
+        &pg_cols(),
+    );
+    let ck = find(&out, ObjectKind::Check, "t_a_check");
+    let p = ck.check().unwrap();
+    assert_eq!(&*p.expr, "a > 0");
+    assert!(p.no_inherit() && p.not_valid);
+    assert!(ck.obj.flags().contains(ObjFlags::INVALID));
+    assert!(!ck.is_broken());
+    assert!(
+        find(&out, ObjectKind::Check, "t_b_check")
+            .obj
+            .flags()
+            .contains(ObjFlags::INHERITED)
+    );
+    let missing = find(&out, ObjectKind::Check, "t_x_check");
+    assert!(missing.is_broken());
+    assert_eq!(&*missing.check().unwrap().expr, "");
+    let x = find(&out, ObjectKind::Exclusion, "t_excl")
+        .check()
+        .unwrap()
+        .clone();
+    assert_eq!(&*x.expr, "USING gist (room WITH =)");
+    let r = x.rare.as_deref().expect("exclusion rare part");
+    assert!(r.excl_deferrable && r.excl_initially_deferred && !r.no_inherit);
+    assert_eq!(r.excl_ops, vec![n("=")]);
+}
+
+/// R-W2-8: `NULLS FIRST`, a non-default operator class and a collation other than the column's
+/// ride in the key's rare part, one entry per part (empty vectors when no part has the option),
+/// and a key takes them from its backing index.
+#[test]
+fn pg_part_options_ride_in_the_rare_part() {
+    let mut name = pg_part(3, "name");
+    name.opclass = Some(n("public.gin_trgm_ops"));
+    let mut b = pg_part(2, "b");
+    b.desc = true;
+    b.nulls_first = true;
+    b.collation = Some(n("\"C\""));
+    let mut i = pg_index(260, "t_opts_idx", vec![name, b]);
+    i.method = Some(n("gin"));
+    let mut uk = pg_con(
+        360,
+        "t_ab_key",
+        b'u',
+        vec![ColRef::at(1, "a"), ColRef::at(2, "b")],
+    );
+    uk.index = Some(261);
+    let mut ub = pg_part(2, "b");
+    ub.collation = Some(n("\"C\""));
+    let mut ui = pg_index(261, "t_ab_key", vec![pg_part(1, "a"), ub]);
+    ui.unique = true;
+    let plain = pg_index(262, "t_plain_idx", vec![pg_part(1, "a")]);
+    let out = pg::assemble_keys(
+        pg::KeyRows {
+            indexes: vec![i, ui, plain],
+            constraints: vec![uk],
+        },
+        &pg_cols(),
+    );
+    let k = find(&out, ObjectKind::Index, "t_opts_idx")
+        .key()
+        .unwrap()
+        .clone();
+    assert_eq!(k.desc, vec![false, true]);
+    assert_eq!(k.nulls_first(), &[false, true][..]);
+    assert_eq!(k.opclass(), &[Some(n("public.gin_trgm_ops")), None][..]);
+    assert_eq!(k.collation(), &[None, Some(n("\"C\""))][..]);
+    let key = find(&out, ObjectKind::UniqueKey, "t_ab_key")
+        .key()
+        .unwrap()
+        .clone();
+    assert_eq!(key.collation(), &[None, Some(n("\"C\""))][..]);
+    assert!(key.nulls_first().is_empty() && key.opclass().is_empty());
+    assert_eq!(
+        find(&out, ObjectKind::Index, "t_plain_idx")
+            .key()
+            .unwrap()
+            .rare,
+        None
+    );
+}
+
+/// R-W2-8 on SQLite: a part's collation (`index_xinfo.coll`, as Task 18 passes it) rides in the
+/// rare part (a `UNIQUE (email COLLATE NOCASE)` is another constraint than a plain one); an FK
+/// carries its deferral.
+#[test]
+fn sqlite_collation_and_fk_deferral_are_carried() {
+    let cols = lite_cols(&[("t", &["email", "p_id"]), ("p", &["id"])]);
+    let mut part = lite_part("sqlite_autoindex_t_1", 0, 0, Some("email"), true);
+    part.coll = Some(n("NOCASE"));
+    let mut fk = lite_fk("t", 0, 0, "p", "p_id", Some("id"));
+    fk.deferrable = true;
+    fk.initially_deferred = true;
+    let out = sqlite::assemble_keys(
+        sqlite::KeyRows {
+            pk_columns: Vec::new(),
+            indexes: vec![lite_index("t", "sqlite_autoindex_t_1", "u", true)],
+            index_parts: vec![part],
+            foreign_keys: vec![fk],
+        },
+        &cols,
+    );
+    for kind in [ObjectKind::UniqueKey, ObjectKind::Index] {
+        let k = find(&out, kind, "sqlite_autoindex_t_1")
+            .key()
+            .unwrap()
+            .clone();
+        assert_eq!(k.collation(), &[Some(n("NOCASE"))][..], "{}", kind.id());
+    }
+    let f = find(&out, ObjectKind::ForeignKey, "t_p_id_p_fkey")
+        .fk()
+        .unwrap()
+        .clone();
+    assert!(f.deferrable && f.initially_deferred);
+}
+
+/// I1: FK display names come from content. Two FKs on the same columns to the same parent take
+/// their referenced columns too; exact duplicates are numbered in declaration order; a very
+/// long name is hashed, the same way every time.
+#[test]
+fn sqlite_fk_names_are_content_derived() {
+    let cols = lite_cols(&[("t", &["a", "b"]), ("p", &["id", "k"])]);
+    let rows = |fks: Vec<sqlite::FkRow>| sqlite::KeyRows {
+        foreign_keys: fks,
+        ..Default::default()
+    };
+    // id 3 is declared first.
+    let out = sqlite::assemble_keys(
+        rows(vec![
+            lite_fk("t", 3, 0, "p", "a", Some("id")),
+            lite_fk("t", 2, 0, "p", "a", Some("k")),
+            lite_fk("t", 1, 0, "p", "b", None),
+            lite_fk("t", 0, 0, "p", "b", None),
+        ]),
+        &cols,
+    );
+    let mut names: Vec<String> = out.iter().map(|o| o.obj.name().to_string()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "t_a_p_id_fkey",
+            "t_a_p_k_fkey",
+            "t_b_p_pk_fkey",
+            "t_b_p_pk_fkey_2"
+        ]
+    );
+    let long = "c".repeat(150);
+    let wide = lite_cols(&[("t", &[long.as_str()]), ("p", &["id"])]);
+    let a = sqlite::assemble_keys(
+        rows(vec![lite_fk("t", 0, 0, "p", &long, Some("id"))]),
+        &wide,
+    );
+    let b = sqlite::assemble_keys(
+        rows(vec![lite_fk("t", 4, 0, "p", &long, Some("id"))]),
+        &wide,
+    );
+    let name = a[0].obj.name().to_string();
+    assert!(
+        name.starts_with("t_fk_") && name.len() == "t_fk_".len() + 16,
+        "{name}"
+    );
+    assert_eq!(a[0].obj.name(), b[0].obj.name());
+}
+
+/// I3: an FK target that resolves is named by the stored table (MySQL with
+/// `lower_case_table_names = 1`: `REFERENCES P` names table `p`).
+#[test]
+fn mysql_fk_target_uses_the_stored_table_name() {
+    let mut cols = ColumnIndex::new(
+        NsKey::schema(["shop"]),
+        DialectId::MySql,
+        IdentCtx {
+            lower_case_table_names: 1,
+            ..IdentCtx::new(DialectId::MySql)
+        },
+    );
+    cols.add_table(TableId::named("t"), [(1, n("a"))]);
+    cols.add_table(TableId::named("p"), [(1, n("id"))]);
+    let mut r = mysql::KeyRows::new(mysql::Flavor::MySql);
+    r.foreign_keys = vec![mysql::FkRow {
+        table: n("t"),
+        name: n("fk"),
+        referenced_schema: n("shop"),
+        referenced_table: n("P"),
+        unique_constraint_name: Some(n("PRIMARY")),
+        update_rule: n("NO ACTION"),
+        delete_rule: n("NO ACTION"),
+        match_option: n("NONE"),
+    }];
+    r.fk_columns = vec![mysql::FkColumnRow {
+        table: n("t"),
+        constraint: n("fk"),
+        column: n("a"),
+        ordinal_position: 1,
+        referenced_column: Some(n("ID")),
+    }];
+    let out = mysql::assemble_keys(r, &cols);
+    let f = out[0].fk().unwrap();
+    assert!(!out[0].is_broken());
+    assert_eq!(f.target.path.to_vec(), path(&["shop", "p"]));
+    assert_eq!(f.target_columns, vec![n("id")]);
+    assert_eq!(
+        f.fk_ref_index().map(|r| r.path.to_vec()),
+        Some(path(&["shop", "p", "PRIMARY"]))
+    );
+}
+
+/// m6: in a complete index (a full pass) an FK whose target lies in this namespace but is not
+/// there dangles and is broken; in a fragment the target is only unknown. A target in another
+/// namespace is never broken for that.
+#[test]
+fn dangling_fk_in_a_complete_namespace_is_broken() {
+    let fk = || sqlite::KeyRows {
+        foreign_keys: vec![lite_fk("t", 0, 0, "gone", "a", Some("id"))],
+        ..Default::default()
+    };
+    let mut cols = lite_cols(&[("t", &["a"])]);
+    assert!(!sqlite::assemble_keys(fk(), &cols)[0].is_broken());
+    cols.set_complete(true);
+    assert!(sqlite::assemble_keys(fk(), &cols)[0].is_broken());
+
+    let mut pg_complete = pg_cols();
+    pg_complete.set_complete(true);
+    let rows = |schema: &str| pg::KeyRows {
+        indexes: Vec::new(),
+        constraints: vec![pg_fk(
+            500,
+            "t_a_fkey",
+            vec![ColRef::at(1, "a")],
+            TableId::with_oid(990, "gone"),
+            schema,
+            vec![ColRef::at(1, "id")],
+        )],
+    };
+    assert!(pg::assemble_keys(rows("s"), &pg_complete)[0].is_broken());
+    assert!(!pg::assemble_keys(rows("other"), &pg_complete)[0].is_broken());
+}
+
+/// m2: the scanned SQL is used only when it has as many parts as the index; otherwise an
+/// expression slot gets no text from another part and is broken.
+#[test]
+fn sqlite_scan_with_another_part_count_is_not_used() {
+    let cols = lite_cols(&[("t", &["a", "b"])]);
+    let mut ix = lite_index("t", "ix", "c", false);
+    ix.sql = Some(n("CREATE INDEX ix ON t(lower(a))"));
+    let out = sqlite::assemble_keys(
+        sqlite::KeyRows {
+            pk_columns: Vec::new(),
+            indexes: vec![ix],
+            index_parts: vec![
+                lite_part("ix", 0, 1, Some("b"), true),
+                lite_part("ix", 1, -2, None, true),
+            ],
+            foreign_keys: Vec::new(),
+        },
+        &cols,
+    );
+    assert!(out[0].is_broken());
+    assert_eq!(out[0].key().unwrap().expressions, vec![n("")]);
 }

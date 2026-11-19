@@ -10,10 +10,12 @@
 //! - **Keys.** `PRIMARY` and every unique index are keys (`TABLE_CONSTRAINTS` lists each unique
 //!   index as a `UNIQUE` constraint of the same name); the same-named index is
 //!   [`ObjFlags::IMPLICIT`] for the key. `PRIMARY` is the server's own name
-//!   ([`ObjFlags::SERVER_GENERATED_NAME`]).
+//!   ([`ObjFlags::SERVER_GENERATED_NAME`]). `KeyProps` has no prefix lengths: a key's DDL
+//!   renders its parts through its backing index (`IndexProps::prefix_len`; Task 19).
 //! - **Foreign keys** from `REFERENTIAL_CONSTRAINTS` with their `KEY_COLUMN_USAGE` rows grouped
 //!   by `(TABLE_NAME, CONSTRAINT_NAME)` in `ORDINAL_POSITION` order; the referenced columns by
-//!   position. The index InnoDB creates for an FK is implicit only under
+//!   position. A target in this schema is named by its stored table (`lower_case_table_names`
+//!   ≥ 1 folds the spelling). The index InnoDB creates for an FK is implicit only under
 //!   [`FkIndexRule::NamedAfterConstraint`], which Task 17's probe decides.
 //! - **Checks** (8.0.16+, MariaDB 10.2+): the `CHECK` rows of `TABLE_CONSTRAINTS` joined with
 //!   `CHECK_CONSTRAINTS` — by name on MySQL (check names are unique per schema), by
@@ -23,12 +25,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use hacivat_meta::props::{CheckProps, FkProps, IndexProps, Props};
+use hacivat_meta::props::{CheckProps, FkProps, FkRare, IndexProps, KeyProps, Props};
 use hacivat_meta::{Name, Obj, ObjFlags, ObjectKind, Ref};
 
 use super::{
-    ColRef, ColumnIndex, KeyObj, Parts, TableId, finish, fk_action_word, fk_match_word, flag_if,
-    index_obj, key_obj, key_props, mark_implicit,
+    ColRef, ColumnIndex, KeyObj, PartOpts, Parts, TableId, finish, fk_action_word, fk_match_word,
+    flag_if, index_obj, key_obj, key_props, mark_implicit,
 };
 
 /// The server family: how check clauses join.
@@ -186,22 +188,24 @@ pub fn assemble_keys(rows: KeyRows, cols: &ColumnIndex) -> Vec<KeyObj> {
             broken |= usize::try_from(r.seq_in_index).ok() != Some(i + 1);
             let desc = r.collation.as_deref() == Some("D");
             match &r.column {
-                Some(c) => p.column(cols, &table, &ColRef::named(c.clone()), desc),
-                None => p.expression(r.expression.as_ref(), desc),
+                Some(c) => p.column(
+                    cols,
+                    &table,
+                    &ColRef::named(c.clone()),
+                    PartOpts::desc(desc),
+                ),
+                None => p.expression(r.expression.as_ref(), PartOpts::desc(desc)),
             }
             prefix_len.push(r.sub_part);
         }
-        broken |= p.broken;
         let unique = !first.non_unique;
         let primary = unique && *name == *PRIMARY;
-        let key = hacivat_meta::props::KeyProps {
-            columns: p.columns,
-            expressions: p.expressions,
-            desc: p.desc,
+        let (key, parts_broken) = p.into_key(KeyProps {
             unique,
             invisible: !first.visible,
             ..key_props()
-        };
+        });
+        broken |= parts_broken;
         let flags =
             flag_if(broken, ObjFlags::BROKEN) | flag_if(primary, ObjFlags::SERVER_GENERATED_NAME);
         let index_at = out.len();
@@ -230,7 +234,7 @@ pub fn assemble_keys(rows: KeyRows, cols: &ColumnIndex) -> Vec<KeyObj> {
                 key_obj(
                     kind,
                     &name,
-                    hacivat_meta::props::KeyProps {
+                    KeyProps {
                         backing_index: Some(name.clone()),
                         ..key
                     },
@@ -291,6 +295,7 @@ pub fn assemble_keys(rows: KeyRows, cols: &ColumnIndex) -> Vec<KeyObj> {
             expr: clause.cloned().unwrap_or_else(|| Name::from("")),
             not_valid: false,
             enforced: chk.enforced,
+            rare: None,
         };
         out.push(KeyObj::new(
             TableId::named(chk.table.clone()),
@@ -310,8 +315,9 @@ pub fn assemble_keys(rows: KeyRows, cols: &ColumnIndex) -> Vec<KeyObj> {
 fn foreign_key(fk: &FkRow, parts: &[&FkColumnRow], cols: &ColumnIndex) -> KeyObj {
     let table = TableId::named(fk.table.clone());
     let target = TableId::named(fk.referenced_table.clone());
-    let in_scope = cols.knows(Some(&fk.referenced_schema), &target);
-    let mut broken = parts.is_empty();
+    let to = cols.target(Some(&fk.referenced_schema), &target);
+    let in_scope = to.known;
+    let mut broken = parts.is_empty() || to.dangling;
     let mut columns = Vec::with_capacity(parts.len());
     let mut target_columns = Vec::with_capacity(parts.len());
     for (i, r) in parts.iter().enumerate() {
@@ -342,13 +348,21 @@ fn foreign_key(fk: &FkRow, parts: &[&FkColumnRow], cols: &ColumnIndex) -> KeyObj
     let on_delete = fk_action_word(&fk.delete_rule);
     let match_kind = fk_match_word(&fk.match_option);
     broken |= on_update.is_none() || on_delete.is_none() || match_kind.is_none();
-    let target_path = cols.table_path(Some(&fk.referenced_schema), &fk.referenced_table);
+    let fk_ref_index = fk.unique_constraint_name.as_ref().map(|name| {
+        let mut path = to.path.clone();
+        path.push(name.clone());
+        Ref {
+            kind: ObjectKind::Index,
+            path,
+            server_id: None,
+        }
+    });
     let props = FkProps {
         columns,
         target: Ref {
             kind: ObjectKind::Table,
-            path: target_path.clone(),
-            server_id: None,
+            path: to.path,
+            server_id: to.server_id,
         },
         target_columns,
         on_update: on_update.unwrap_or_default(),
@@ -358,23 +372,18 @@ fn foreign_key(fk: &FkRow, parts: &[&FkColumnRow], cols: &ColumnIndex) -> KeyObj
         initially_deferred: false,
         not_valid: false,
         enforced: true,
+        rare: fk_ref_index.map(|r| {
+            Arc::new(FkRare {
+                fk_ref_index: Some(r),
+            })
+        }),
     };
-    let mut ko = KeyObj::new(
+    KeyObj::new(
         table,
         Obj::new(ObjectKind::ForeignKey, fk.name.clone())
             .with_props(Props::ForeignKey(Arc::new(props)))
             .add_flags(flag_if(broken, ObjFlags::BROKEN)),
-    );
-    ko.ref_constraint = fk.unique_constraint_name.as_ref().map(|name| {
-        let mut path = target_path;
-        path.push(name.clone());
-        Ref {
-            kind: ObjectKind::Index,
-            path,
-            server_id: None,
-        }
-    });
-    ko
+    )
 }
 
 /// Whether the plain index `idx` is the one InnoDB created for `fk`: its leading key columns
