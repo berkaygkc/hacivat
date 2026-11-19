@@ -16,7 +16,7 @@ default = ["catalog", "persist", "system"]
 # `Catalog::subscribe`: a `tokio::sync::broadcast` of `CatalogEvent`s, never a runtime type.
 catalog = ["dep:tokio"]
 # The per-profile SQLite catalog cache and its row AEAD (HV-MODEL-03, R-M4-15).
-persist = ["dep:rusqlite", "dep:chacha20poly1305", "dep:zeroize"]
+persist = ["dep:rusqlite", "dep:chacha20poly1305", "dep:zeroize", "dep:hmac", "dep:sha2"]
 # Decoding the shipped system-catalog snapshots (canonical JSON in zstd frames, R-M4-33).
 system = ["dep:zstd", "dep:serde_json"]
 # The `include_bytes!` table of `assets/system-catalogs/`: only `hacivat-app` and this crate's
@@ -41,6 +41,10 @@ rusqlite = { workspace = true, optional = true }
 chacha20poly1305 = { workspace = true, optional = true }
 # ## m4-t01a-model (fix round 1, m4; controller ruling): `RowKey` wipes itself on drop.
 zeroize = { workspace = true, optional = true }
+# ## m4-t11-catalog-cache (controller-granted named exception, ruling R-W2-7): lookup tags and
+# row-cipher subkeys are HMAC-SHA256 (the workspace versions; no new lock package).
+hmac = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
