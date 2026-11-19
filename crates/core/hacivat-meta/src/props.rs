@@ -490,7 +490,7 @@ bitflags! {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TriggerProps {
     pub timing: TriggerTiming,
     pub events: TriggerEvents,
@@ -502,6 +502,24 @@ pub struct TriggerProps {
     pub enabled: bool,
     /// MySQL `DEFINER`, raw.
     pub definer: Option<Name>,
+}
+
+// ## m4-t19 (controller fix): a trigger is enabled unless the catalog says otherwise. A derived
+// `Default` gave `enabled: false`, so any producer path that forgot the field would render a
+// disabled trigger (a wrong fact).
+impl Default for TriggerProps {
+    fn default() -> Self {
+        TriggerProps {
+            timing: TriggerTiming::default(),
+            events: TriggerEvents::default(),
+            for_each_row: false,
+            function: None,
+            when_expr: None,
+            source: None,
+            enabled: true,
+            definer: None,
+        }
+    }
 }
 
 /// One attribute of a composite type.
