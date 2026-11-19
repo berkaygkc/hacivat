@@ -1,6 +1,8 @@
 //! `CatalogHub` (M4 Task 15; R-M4-31, R-M4-15): one engine, catalog, cache and key per
 //! profile, usable without the UI; the key only on `ensure`, never on `get`.
 
+#![cfg(feature = "session")]
+
 mod common;
 
 use std::sync::Arc;
@@ -80,8 +82,26 @@ async fn ensure_starts_one_engine_per_profile() {
         bounded(a.handle.expand(pg_ns("db", "public"))).await,
         Err(IntroError::Cancelled)
     );
-    let again = bounded(hub.ensure(p)).await.unwrap();
+    let again = bounded(hub.ensure(p.clone())).await.unwrap();
     assert!(!Arc::ptr_eq(&again.catalog, &a.catalog));
+    // Fix round 1 (m3): a shutdown racing a first `ensure` never leaves an engine behind the
+    // hub's back, and the per-profile locks are pruned.
+    let r = profile(DbmsKind::Postgres);
+    let (made, ()) = bounded(futures::future::join(
+        hub.ensure(r.clone()),
+        hub.shutdown(r.id),
+    ))
+    .await;
+    let made = made.unwrap();
+    match hub.get(r.id) {
+        // The shutdown ran first: the engine `ensure` made is the hub's own.
+        Some(kept) => assert!(Arc::ptr_eq(&kept.catalog, &made.catalog)),
+        // The shutdown waited for the making and stopped it.
+        None => bounded(made.handle.closed()).await,
+    }
+    bounded(hub.shutdown(p.id)).await;
+    bounded(hub.shutdown(r.id)).await;
+    assert_eq!(hub.pending_locks(), 0);
 }
 
 /// A hub with no UI and no connection serves the cached catalog (stale) as soon as `ensure`

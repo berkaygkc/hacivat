@@ -218,18 +218,39 @@ async fn stub_stamps_and_facet_not_implemented() {
             intro.list_namespaces(&mut c).await,
             Err(IntroError::NotImplemented)
         );
+        // ## m4-t15-engine (named exception, ruling R-W3-2): the filter argument; and the
+        // identity default is `Unknown` (R-W3-3).
+        let all = hacivat_introspect::filter::parse_filter(
+            "",
+            sql_dialect::DialectId::Postgres,
+            hacivat_introspect::filter::FilterRole::Introspect,
+        )
+        .expect("the empty filter");
         assert!(matches!(
             intro
-                .introspect(&mut c, &n, Mode::Full, Level::Structure, None, &cancel)
+                .introspect(
+                    &mut c,
+                    &n,
+                    Mode::Full,
+                    Level::Structure,
+                    &all,
+                    None,
+                    &cancel
+                )
                 .await,
             Err(IntroError::NotImplemented)
         ));
         assert!(matches!(
             intro
-                .fragment(&mut c, &n, &keys, Level::Names, &cancel)
+                .fragment(&mut c, &n, &keys, Level::Names, &all, &cancel)
                 .await,
             Err(IntroError::NotImplemented)
         ));
+        assert_eq!(
+            intro.identity(&mut c).await,
+            Ok(hacivat_introspect::introspector::ServerIdentity::Unknown)
+        );
+        // ## m4-t15-engine
         assert_eq!(
             intro.check_state(&mut c, &keys).await,
             Err(IntroError::NotImplemented)

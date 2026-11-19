@@ -32,8 +32,9 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::TaskProgress;
+use super::filters::Filters;
 use super::levels::{LevelPolicy, NsRole};
-use super::work::{self, Merged, Output, Spec, Work, WorkerCtx};
+use super::work::{self, IdentityRead, Listing, Merged, Output, Spec, Work, WorkerCtx};
 use super::{CacheHandle, EngineConfig, EngineEvent, EngineLimits, Phase, Priority, Progress};
 use crate::ddl_effects::Target;
 use crate::introspector::{IntroCaps, IntroError, Staleness};
@@ -70,6 +71,7 @@ pub(crate) enum Cmd {
     },
     SetScope(ScopePattern),
     SetCurrent(CurrentCtx),
+    SetFilters(Filters),
     LevelChanged(ContainerKey),
     Cancel(NsKey),
     Shutdown,
@@ -151,6 +153,9 @@ struct Job {
     follow_up: bool,
     /// A load (not a refresh): skipped when the catalog already holds what it would read.
     load_only: bool,
+    /// A re-planned confirmation (review I-3): the user's answer to the guard, `true` "Remove
+    /// from cache", `false` "Keep cached".
+    decision: Option<bool>,
 }
 
 impl Job {
@@ -268,17 +273,38 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// What the engine shares with its handles.
+pub(crate) struct Shared {
+    pub progress: Arc<watch::Sender<Progress>>,
+    pub events: broadcast::Sender<EngineEvent>,
+    pub levels: Arc<Mutex<LevelPolicy>>,
+    pub roles: Arc<Mutex<Roles>>,
+    /// Cancelled when the actor has stopped (after the last cache write).
+    pub stopped: CancellationToken,
+}
+
+/// The current and the system namespaces, for `IntroHandle::level_of` (review m8).
+#[derive(Debug, Default)]
+pub(crate) struct Roles {
+    pub current: Option<NsKey>,
+    pub system: HashSet<NsKey>,
+}
+
 /// Starts the actor of `cfg` on its runtime.
-pub(super) fn spawn(
-    cfg: EngineConfig,
-    rx: mpsc::UnboundedReceiver<Cmd>,
-    progress: Arc<watch::Sender<Progress>>,
-    events: broadcast::Sender<EngineEvent>,
-    levels: Arc<Mutex<LevelPolicy>>,
-) {
+pub(super) fn spawn(cfg: EngineConfig, rx: mpsc::UnboundedReceiver<Cmd>, shared: Shared) {
     let rt = cfg.runtime.clone();
-    let actor = Actor::new(cfg, progress, events, levels);
-    rt.spawn(actor.run(rx));
+    let stopped = shared.stopped.clone();
+    let actor = Actor::new(cfg, shared);
+    rt.spawn(async move {
+        actor.run(rx).await;
+        stopped.cancel();
+    });
+}
+
+/// The progress of the tasks since the engine was last idle (review m11).
+#[derive(Debug, Default, Clone, Copy)]
+struct Batch {
+    done: u64,
 }
 
 struct Actor {
@@ -291,9 +317,18 @@ struct Actor {
     limits: EngineLimits,
     rt: tokio::runtime::Handle,
     levels: Arc<Mutex<LevelPolicy>>,
+    roles: Arc<Mutex<Roles>>,
     progress: Arc<watch::Sender<Progress>>,
     events: broadcast::Sender<EngineEvent>,
     scope: ScopePattern,
+    filters: Filters,
+    /// `on_connect` ran: a late current namespace gets its step 3 (review m6).
+    connected: bool,
+    /// The server identity of the last connect, when there is no cache to compare with.
+    last_identity: Option<u128>,
+    /// When each namespace was last probed for a missing name (review m7).
+    probed: HashMap<NsKey, Instant>,
+    batch: Batch,
     /// The empty pattern (`@:@`): what selects the current namespace.
     current_only: Option<ScopePattern>,
     current: CurrentCtx,
@@ -319,26 +354,24 @@ struct Actor {
 }
 
 impl Actor {
-    fn new(
-        cfg: EngineConfig,
-        progress: Arc<watch::Sender<Progress>>,
-        events: broadcast::Sender<EngineEvent>,
-        levels: Arc<Mutex<LevelPolicy>>,
-    ) -> Actor {
-        let server = cfg.catalog.current().server.clone();
+    fn new(cfg: EngineConfig, shared: Shared) -> Actor {
         let dialect = cfg.scope.dialect();
-        let fold = FoldRule::for_names(server.ident.dialect, &server.ident, NameClass::Table)
-            .unwrap_or(FoldRule::Exact);
         let caps = cfg.introspector.capabilities();
         let (done_tx, done_rx) = mpsc::unbounded_channel();
+        let Shared {
+            progress,
+            events,
+            levels,
+            roles,
+            stopped: _,
+        } = shared;
         let ctx = Arc::new(WorkerCtx {
             meta: cfg.meta.clone(),
             intro: cfg.introspector.clone(),
             dbms: cfg.dbms,
-            fold,
-            filters: cfg.filters.clone(),
             limits: cfg.limits,
             events: events.clone(),
+            cache: cfg.cache.clone(),
         });
         Actor {
             catalog: cfg.catalog,
@@ -350,10 +383,16 @@ impl Actor {
             limits: cfg.limits,
             rt: cfg.runtime,
             levels,
+            roles,
             progress,
             events,
             current_only: parse_scope("", dialect).ok(),
             scope: cfg.scope,
+            filters: cfg.filters,
+            connected: false,
+            last_identity: None,
+            probed: HashMap::new(),
+            batch: Batch::default(),
             current: cfg.current,
             listed: None,
             in_scope: None,
@@ -461,8 +500,14 @@ impl Actor {
             }
             Cmd::SetCurrent(c) => {
                 self.current = c;
+                let before = self.current_ns.clone();
                 self.rescope();
+                // A current namespace learned after `on_connect` gets its step 3 (review m6).
+                if self.connected && self.current_ns != before {
+                    self.connect_step(Vec::new(), Priority::User);
+                }
             }
+            Cmd::SetFilters(f) => self.set_filters(f),
             Cmd::LevelChanged(container) => self.level_changed(&container),
             Cmd::Cancel(ns) => self.cancel(&ns),
             Cmd::Shutdown => {}
@@ -482,6 +527,7 @@ impl Actor {
             then: Then::Nothing,
             follow_up: false,
             load_only: false,
+            decision: None,
         }
     }
 
@@ -614,11 +660,40 @@ impl Actor {
             _ => {}
         }
         let system = job.work.ns().is_some_and(|ns| self.system_ns.contains(ns));
+        // A re-planned confirmation carries the user's answer to the guard (review I-3).
+        let policy = match job.decision {
+            Some(true) => MergePolicy {
+                trigger: Trigger::User,
+                guard_min_objects: u32::MAX,
+                ..MergePolicy::default()
+            },
+            Some(false) => MergePolicy {
+                trigger: Trigger::User,
+                deletions: Deletions::Suppress,
+                ..MergePolicy::default()
+            },
+            None => MergePolicy {
+                trigger: job.trigger,
+                ..MergePolicy::default()
+            },
+        };
+        // The fold rule from the server facts as they are now (review m4).
+        let ident = &snap.server.ident;
+        let fold =
+            FoldRule::for_names(ident.dialect, ident, NameClass::Table).unwrap_or(FoldRule::Exact);
+        let listing = (job.work == Work::ScopeRefresh).then(|| Listing {
+            scope: self.scope.clone(),
+            current: self.current.clone(),
+            identity: job.then == Then::OnConnect,
+        });
         let spec = Spec {
             work: job.work.clone(),
             prev,
             system,
-            trigger: job.trigger,
+            policy,
+            filters: self.filters.clone(),
+            fold,
+            listing,
         };
         let cancel = self.root_cancel.child_token();
         let (id, ctx, done) = (job.id, self.ctx.clone(), self.done_tx.clone());
@@ -645,7 +720,16 @@ impl Actor {
                 .is_some_and(|a| keys.iter().all(|k| a.find(k).is_some()))
     }
 
-    fn update_progress(&self) {
+    /// The running tasks' progress. A pass or scope refresh counts the tasks of the current
+    /// batch (finished of finished + running + queued, since the engine was last idle); a
+    /// fragment or a state check counts its objects (review m11; a count inside one pass needs
+    /// a progress sink in the introspector seam, carried to Tasks 16–18).
+    fn update_progress(&mut self) {
+        if self.running.is_empty() && self.queue.is_empty() {
+            self.batch = Batch::default();
+        }
+        let done = self.batch.done;
+        let total = done + (self.running.len() + self.queue.len()) as u64;
         let mut tasks: Vec<TaskProgress> = self
             .running
             .values()
@@ -657,12 +741,15 @@ impl Actor {
                     Work::Fragment { .. } => Phase::Columns,
                     Work::CheckState { .. } => Phase::Validate,
                 },
-                done: 0,
+                done: match &r.job.work {
+                    Work::Fragment { .. } | Work::CheckState { .. } => 0,
+                    _ => done,
+                },
                 total: match &r.job.work {
                     Work::Fragment { keys, .. } | Work::CheckState { keys } => {
                         Some(keys.len() as u64)
                     }
-                    _ => None,
+                    _ => Some(total),
                 },
             })
             .collect();
@@ -687,6 +774,16 @@ impl Actor {
             }
             Request::Load(ns) => self.load(ns, prio, w),
             Request::Probe(ns) => {
+                // At most one probe per namespace per `probe_interval` (review m7).
+                let now = Instant::now();
+                if self
+                    .probed
+                    .get(&ns)
+                    .is_some_and(|t| now.duration_since(*t) < self.limits.probe_interval)
+                {
+                    return w.resolve(Ok(self.catalog.current().generation));
+                }
+                self.probed.insert(ns.clone(), now);
                 if self.catalog.current().namespaces.contains_key(&ns) && !self.out_of_scope(&ns) {
                     let level = self.level_of(&ns);
                     let job = self.pass(ns, Mode::Incremental, level, prio, Trigger::Background, w);
@@ -843,15 +940,21 @@ impl Actor {
         }
     }
 
+    /// Stops and drops the work tied to `ns`: its passes and fragments, and every state check
+    /// with a key in it (review m10). Nothing of it is published.
     fn cancel(&mut self, ns: &NsKey) {
+        let tied = |this: &Self, w: &Work| match w {
+            Work::CheckState { keys } => keys.iter().any(|k| this.ns_of(k) == *ns),
+            _ => w.ns() == Some(ns),
+        };
         for r in self.running.values() {
-            if r.job.work.ns() == Some(ns) {
+            if tied(self, &r.job.work) {
                 r.cancel.cancel();
             }
         }
-        let (gone, keep): (Vec<Job>, Vec<Job>) = std::mem::take(&mut self.queue)
-            .into_iter()
-            .partition(|j| j.work.ns() == Some(ns));
+        let queue = std::mem::take(&mut self.queue);
+        let (gone, keep): (Vec<Job>, Vec<Job>) =
+            queue.into_iter().partition(|j| tied(self, &j.work));
         self.queue = keep;
         for j in gone {
             j.resolve(Err(IntroError::Cancelled));
@@ -906,6 +1009,13 @@ impl Actor {
                 || ns == top
                 || (top.kind == NsKind::Database && ns.path.first() == top.path.first())
         };
+        {
+            // The user chose a level: back-pressure starts over (review m8).
+            let mut levels = lock(&self.levels);
+            for ns in snap.namespaces.keys().filter(|ns| below(ns)) {
+                levels.reset_lowering(ns);
+            }
+        }
         let stale: Vec<(NsKey, Level)> = snap
             .namespaces
             .keys()
@@ -969,8 +1079,8 @@ impl Actor {
             return;
         }
         let changes = self.scope_changes();
-        if let Err(e) = self.publish(changes, None) {
-            let _ = e;
+        if self.publish(changes, None).is_err() {
+            let _ = self.events.send(EngineEvent::PublishFailed);
         }
         // What left the scope: running results are discarded, queued work is dropped.
         let out: Vec<NsKey> = self
@@ -982,6 +1092,96 @@ impl Actor {
             .collect();
         for ns in out {
             self.cancel(&ns);
+        }
+    }
+
+    /// The filters changed (R-W3-2). What the new scope filter no longer keeps is removed from
+    /// every loaded namespace in one publish: a user scope change, so never guarded, and the
+    /// delta lists it in `out_of_scope` (not `dropped`). A filter that may keep more re-reads
+    /// every loaded namespace in scope.
+    fn set_filters(&mut self, filters: Filters) {
+        let before = std::mem::replace(&mut self.filters, filters);
+        if before == self.filters {
+            return;
+        }
+        let widen = self.filters.may_widen(&before);
+        let snap = self.catalog.current();
+        let mut changes = Vec::new();
+        let mut delta = CatalogDelta::default();
+        let mut narrowed = Vec::new();
+        for (key, arena) in snap.namespaces.iter() {
+            let gone = self.filters.excluded(arena, self.system_ns.contains(key));
+            if gone.is_empty() {
+                continue;
+            }
+            let mut existent: BTreeMap<hacivat_meta::ObjectKind, merge::ExistSet> = BTreeMap::new();
+            for k in &gone {
+                let set = existent.entry(k.kind).or_insert(merge::ExistSet::Scoped {
+                    scope: Vec::new(),
+                    ids: Vec::new(),
+                });
+                if let merge::ExistSet::Scoped { scope, .. } = set {
+                    scope.push(k.path[key.path.len()..].to_vec());
+                }
+            }
+            let r = NamespaceResult {
+                existent,
+                changed: Vec::new(),
+                categories_to_reload: Default::default(),
+                new_watermark: arena.meta().watermark.clone(),
+                full: false,
+                level: arena.meta().level,
+                read_at_ms: arena.meta().loaded_at_ms,
+            };
+            let policy = MergePolicy {
+                trigger: Trigger::User,
+                guard_min_objects: u32::MAX,
+                ..MergePolicy::default()
+            };
+            let Ok(outcome) = merge::merge(Some(arena), r, &policy) else {
+                let _ = self.events.send(EngineEvent::PublishFailed);
+                continue;
+            };
+            let (next, d, _) = outcome.into_parts();
+            narrowed.push((
+                key.clone(),
+                u32::try_from(d.dropped.len()).unwrap_or(u32::MAX),
+            ));
+            delta.out_of_scope.extend(d.dropped);
+            changes.push(CatalogChange::Put(Arc::new(next)));
+        }
+        if !changes.is_empty() {
+            match self.publish(changes, Some(delta)) {
+                Ok(_) => {
+                    for (ns, count) in narrowed {
+                        let _ = self.events.send(EngineEvent::ScopeNarrowed { ns, count });
+                    }
+                }
+                Err(_) => {
+                    let _ = self.events.send(EngineEvent::PublishFailed);
+                }
+            }
+        }
+        if widen {
+            let loaded: Vec<NsKey> = snap
+                .namespaces
+                .keys()
+                .filter(|ns| !self.out_of_scope(ns))
+                .cloned()
+                .collect();
+            for ns in loaded {
+                let level = self.level_of(&ns);
+                let job = self.new_job(
+                    Work::Pass {
+                        ns,
+                        mode: Mode::Full,
+                        level,
+                    },
+                    Priority::User,
+                    Trigger::Background,
+                );
+                self.enqueue(job, true);
+            }
         }
     }
 
@@ -1004,6 +1204,10 @@ impl Actor {
             .filter(|i| i.system)
             .map(|i| i.key.clone())
             .collect();
+        *lock(&self.roles) = Roles {
+            current: self.current_ns.clone(),
+            system: self.system_ns.clone(),
+        };
         let snap = self.catalog.current();
         let mut changes = Vec::new();
         for info in &infos {
@@ -1035,9 +1239,29 @@ impl Actor {
             }))
             .filter(|k| k.kind != NsKind::Server)
             .collect();
+        // PostgreSQL databases whose schemas this listing read (the others were not asked).
+        let read_dbs: HashSet<&Name> = infos
+            .iter()
+            .filter(|i| i.key.kind == NsKind::Schema && i.key.path.len() == 2)
+            .map(|i| &i.key.path[0])
+            .collect();
         for k in known {
-            if !listed.contains(&k) {
-                changes.push(CatalogChange::Remove(k.clone()));
+            if listed.contains(&k) {
+                continue;
+            }
+            let unread_db = two_level(self.dialect)
+                && k.kind == NsKind::Schema
+                && k.path.first().is_some_and(|db| !read_dbs.contains(db));
+            changes.push(CatalogChange::Remove(k.clone()));
+            if unread_db {
+                // A schema of a database the scope no longer selects: out of scope, not dropped.
+                changes.push(CatalogChange::SetState(
+                    ContainerKey::Namespace(k),
+                    LoadState::OutOfScope,
+                ));
+            } else if snap.namespaces.contains_key(&k) {
+                // Only a namespace that was loaded is announced (an unknown name someone
+                // expanded never existed; review m12).
                 let _ = self.events.send(EngineEvent::NamespaceDropped { ns: k });
             }
         }
@@ -1072,33 +1296,121 @@ impl Actor {
     // ---- answers ----------------------------------------------------------------------------
 
     fn on_done(&mut self, id: u64, out: Output) {
-        let Some(Running { job, .. }) = self.running.remove(&id) else {
+        let Some(Running { job, cancel }) = self.running.remove(&id) else {
             return;
         };
+        self.batch.done += 1;
         self.update_progress();
+        // A task cancelled after its read finished publishes nothing (review m2).
+        let out = if cancel.is_cancelled() {
+            Output::Failed(IntroError::Cancelled)
+        } else {
+            out
+        };
         match out {
-            Output::Namespaces(infos) => self.listed_done(job, infos),
+            Output::Namespaces(infos, identity) => self.listed_done(job, infos, identity),
             Output::Merged(m) => self.merged(job, *m),
             Output::Staleness(keys, st) => self.staleness(job, keys, st),
             Output::Failed(e) => self.failed(job, e),
         }
     }
 
-    fn listed_done(&mut self, job: Job, infos: Vec<NsInfo>) {
+    fn listed_done(&mut self, job: Job, infos: Vec<NsInfo>, identity: Option<IdentityRead>) {
         self.listed = Some(infos);
         let changes = self.scope_changes();
-        let generation = match self.publish(changes, None) {
+        let mut generation = match self.publish(changes, None) {
             Ok(g) => g,
             Err(e) => return job.resolve(Err(e)),
         };
         if job.then != Then::OnConnect {
             return job.resolve(Ok(generation));
         }
+        self.connected = true;
+        // R-W3-3: another (or an unknown) server behind the profile: no cached watermark is
+        // trusted, so the passes that follow are full.
+        if let Some(identity) = identity
+            && !self.same_server(identity)
+        {
+            match self.forget_watermarks() {
+                Ok(Some(g)) => generation = g,
+                Ok(None) => {}
+                Err(e) => return job.resolve(Err(e)),
+            }
+        }
         // On connect, steps 2–3: the current namespace (others load on first expansion).
         let (now, later): (Vec<_>, Vec<_>) = job.waiters.into_iter().partition(|(_, t)| !*t);
         resolve_all(now.into_iter().map(|(w, _)| w).collect(), Ok(generation));
         let waiters: Vec<Waiter> = later.into_iter().map(|(w, _)| w).collect();
+        self.connect_step(waiters, job.prio);
+    }
+
+    /// Whether the server behind the connection is the one the cache (or the last connect)
+    /// was filled from; an unknown identity is not (fail-closed, R-W3-3).
+    fn same_server(&mut self, identity: IdentityRead) -> bool {
+        match identity {
+            IdentityRead::Unknown => false,
+            IdentityRead::Known {
+                same_as_cache: Some(same),
+                fp,
+            } => {
+                self.last_identity = Some(fp);
+                same
+            }
+            IdentityRead::Known {
+                fp,
+                same_as_cache: None,
+            } => self.last_identity.replace(fp).is_none_or(|last| last == fp),
+        }
+    }
+
+    /// Re-publishes every namespace that has a watermark without it (stale), so its next pass
+    /// is full (R-W3-3). Answers the generation, when anything changed.
+    fn forget_watermarks(&mut self) -> Result<Option<u64>, IntroError> {
+        let snap = self.catalog.current();
+        let mut changes = Vec::new();
+        for (key, arena) in snap.namespaces.iter() {
+            if arena.meta().watermark == Watermark::None {
+                continue;
+            }
+            let r = NamespaceResult {
+                existent: BTreeMap::new(),
+                changed: Vec::new(),
+                categories_to_reload: Default::default(),
+                new_watermark: Watermark::None,
+                full: false,
+                level: arena.meta().level,
+                read_at_ms: arena.meta().loaded_at_ms,
+            };
+            let outcome = merge::merge(Some(arena), r, &MergePolicy::default())
+                .map_err(|_| IntroError::Protocol(Name::from("merge")))?;
+            let (next, _, _) = outcome.into_parts();
+            changes.push(CatalogChange::Put(Arc::new(next)));
+            if let LoadState::Loaded { level, at, .. } =
+                snap.state(&ContainerKey::Namespace(key.clone())).clone()
+            {
+                changes.push(CatalogChange::SetState(
+                    ContainerKey::Namespace(key.clone()),
+                    LoadState::Loaded {
+                        level,
+                        at,
+                        watermark: Watermark::None,
+                        stale: true,
+                    },
+                ));
+            }
+        }
+        if changes.is_empty() {
+            return Ok(None);
+        }
+        self.publish(changes, None).map(Some)
+    }
+
+    /// On-connect step 3 for the current namespace: `Incremental` if cached, else `Brief`
+    /// then the auto level. `waiters` wait for it (none when the current namespace arrived
+    /// late, review m6).
+    fn connect_step(&mut self, waiters: Vec<Waiter>, prio: Priority) {
         let Some(ns) = self.current_ns.clone().filter(|ns| !self.out_of_scope(ns)) else {
+            let generation = self.catalog.current().generation;
             return resolve_all(waiters, Ok(generation));
         };
         let cached = self.catalog.current().namespaces.contains_key(&ns);
@@ -1110,7 +1422,7 @@ impl Actor {
                     mode: Mode::Incremental,
                     level,
                 },
-                job.prio,
+                prio,
                 Trigger::Background,
             )
         } else {
@@ -1120,7 +1432,7 @@ impl Actor {
                     mode: Mode::Brief,
                     level: Level::Names,
                 },
-                job.prio,
+                prio,
                 Trigger::Background,
             );
             j.then = Then::FullAtAuto;
@@ -1159,7 +1471,13 @@ impl Actor {
             Err(e) => return job.resolve(Err(e)),
         };
         self.timeouts.remove(&ns);
-        self.pending.remove(&ns);
+        // A pass of the namespace replaces a held merge (review I-3): the prompt is withdrawn.
+        // A fragment keeps it: the user's answer then re-plans a pass (`confirm`).
+        if pass && self.pending.remove(&ns).is_some() && job.decision.is_none() {
+            let _ = self
+                .events
+                .send(EngineEvent::PendingWithdrawn { ns: ns.clone() });
+        }
         if !job.follow_up {
             self.follow_up(&ns, follow, follow_ns);
         }
@@ -1355,28 +1673,54 @@ impl Actor {
             if self.busy(&ns) {
                 self.deferred_confirms.push((ns, accept, w));
             } else {
-                let r = self.confirm(&ns, accept);
-                w.resolve(r);
+                self.confirm(&ns, accept, w);
             }
         }
     }
 
     /// "Remove from cache" publishes the held merge; "Keep cached" re-merges the pass with its
-    /// deletions suppressed (I-5). A held merge whose namespace changed since is dropped.
-    fn confirm(&mut self, ns: &NsKey, accept: bool) -> Result<u64, IntroError> {
+    /// deletions suppressed (I-5). When the namespace changed since (a fragment published),
+    /// the answer re-plans a full pass that carries it (review I-3); the ticket resolves with
+    /// that pass. Nothing held: `Cancelled` (nothing was applied).
+    fn confirm(&mut self, ns: &NsKey, accept: bool, w: Waiter) {
         let snap = self.catalog.current();
         let Some(p) = self.pending.remove(ns) else {
-            return Ok(snap.generation);
+            return w.resolve(Err(IntroError::Cancelled));
         };
         let prev = snap.namespaces.get(ns).cloned();
-        if prev.as_ref().map(|a| Arc::as_ptr(a) as usize) != p.prev_ptr {
-            return Ok(snap.generation);
+        if prev.as_ref().map(|a| Arc::as_ptr(a) as usize) != p.prev_ptr
+            || (!accept && p.keep.is_none())
+        {
+            let level = p.level.max(self.state_level(ns));
+            let mut job = self.new_job(
+                Work::Pass {
+                    ns: ns.clone(),
+                    mode: Mode::Full,
+                    level,
+                },
+                Priority::User,
+                Trigger::User,
+            );
+            job.decision = Some(accept);
+            job.add(w, false);
+            return self.enqueue(job, true);
         }
+        let r = self.apply_confirmed(ns, accept, p, prev);
+        w.resolve(r);
+    }
+
+    fn apply_confirmed(
+        &mut self,
+        ns: &NsKey,
+        accept: bool,
+        p: Pending,
+        prev: Option<Arc<NamespaceSnapshot>>,
+    ) -> Result<u64, IntroError> {
         let outcome = if accept {
             p.outcome
         } else {
             let (Some(r), Some(prev)) = (p.keep, prev) else {
-                return Ok(snap.generation);
+                return Err(IntroError::Cancelled);
             };
             let policy = MergePolicy {
                 trigger: Trigger::User,

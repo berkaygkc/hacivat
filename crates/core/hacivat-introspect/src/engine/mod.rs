@@ -158,6 +158,15 @@ pub enum EngineEvent {
     NamespaceDropped { ns: NsKey },
     /// A cache write failed for lack of space (`model-cache-write-failed`, shown once).
     CacheWriteFailed,
+    /// A mass deletion held for `ns` (D-039) no longer applies: a later pass of the namespace
+    /// replaced it. The UI withdraws its prompt (review I-3).
+    PendingWithdrawn { ns: NsKey },
+    /// A narrower scope filter removed `count` objects of `ns` (R-W3-2): a scope change, not a
+    /// server deletion; the delta lists them in `out_of_scope`.
+    ScopeNarrowed { ns: NsKey, count: u32 },
+    /// A publish the engine made on its own (a scope or filter change) failed; the catalog is
+    /// unchanged (review m9).
+    PublishFailed,
 }
 
 /// The engine's knobs; [`EngineLimits::default`] is alg/02's numbers.
@@ -173,6 +182,9 @@ pub struct EngineLimits {
     pub bulk_small_ns: u32,
     /// Fragments of one namespace requested within this window run (and publish) once (50 ms).
     pub fragment_window: Duration,
+    /// A lookup that answered `Missing` re-checks its namespace at most this often (30 s;
+    /// review m7).
+    pub probe_interval: Duration,
     /// How long to wait before asking a busy single-connection profile again.
     pub busy_retry: Duration,
     /// `LoadState::Failed::retry_after` of a namespace that failed with no previous state.
@@ -189,6 +201,7 @@ impl Default for EngineLimits {
             bulk_distinct: 3,
             bulk_small_ns: 2_000,
             fragment_window: Duration::from_millis(50),
+            probe_interval: Duration::from_secs(30),
             busy_retry: Duration::from_millis(250),
             failed_retry_after: Duration::from_secs(30),
             save_debounce: hacivat_meta::persist::SAVE_DEBOUNCE,
@@ -241,18 +254,26 @@ impl Engine {
         let (tx, rx) = mpsc::unbounded_channel();
         let progress = Arc::new(watch::Sender::new(Progress::default()));
         let (events, _) = broadcast::channel(64);
-        let levels = Arc::new(Mutex::new(cfg.levels.clone()));
+        let shared = scheduler::Shared {
+            progress,
+            events,
+            levels: Arc::new(Mutex::new(cfg.levels.clone())),
+            roles: Arc::new(Mutex::new(scheduler::Roles::default())),
+            stopped: CancellationToken::new(),
+        };
         let handle = IntroHandle {
             inner: Arc::new(Inner {
                 catalog: cfg.catalog.clone(),
-                progress: progress.clone(),
+                progress: shared.progress.clone(),
                 scope: Mutex::new(Some(cfg.scope.clone())),
-                levels: levels.clone(),
-                events: events.clone(),
+                levels: shared.levels.clone(),
+                roles: shared.roles.clone(),
+                events: shared.events.clone(),
+                stopped: shared.stopped.clone(),
                 tx: Some(tx),
             }),
         };
-        scheduler::spawn(cfg, rx, progress, events, levels);
+        scheduler::spawn(cfg, rx, shared);
         handle
     }
 }
@@ -269,7 +290,10 @@ struct Inner {
     progress: Arc<watch::Sender<Progress>>,
     scope: Mutex<Option<ScopePattern>>,
     levels: Arc<Mutex<LevelPolicy>>,
+    roles: Arc<Mutex<scheduler::Roles>>,
     events: broadcast::Sender<EngineEvent>,
+    /// Cancelled when the engine has stopped (review m1: `closed` holds no sender).
+    stopped: CancellationToken,
     /// `None` for a detached handle (no engine).
     tx: Option<mpsc::UnboundedSender<scheduler::Cmd>>,
 }
@@ -284,7 +308,13 @@ impl IntroHandle {
                 progress: Arc::new(watch::Sender::new(Progress::default())),
                 scope: Mutex::new(None),
                 levels: Arc::new(Mutex::new(LevelPolicy::default())),
+                roles: Arc::new(Mutex::new(scheduler::Roles::default())),
                 events: broadcast::channel(1).0,
+                stopped: {
+                    let t = CancellationToken::new();
+                    t.cancel();
+                    t
+                },
                 tx: None,
             }),
         }
@@ -463,14 +493,53 @@ impl IntroHandle {
         self.send(scheduler::Cmd::Shutdown);
     }
 
-    /// Resolves when the engine has stopped (at once for a detached handle).
+    /// Resolves when the engine has stopped (at once for a detached handle). It holds no
+    /// sender, so it never keeps an engine alive whose handles are all gone (review m1).
     pub fn closed(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
-        let tx = self.inner.tx.clone();
-        async move {
-            if let Some(tx) = tx {
-                tx.closed().await;
-            }
-        }
+        self.inner.stopped.clone().cancelled_owned()
+    }
+
+    /// Replaces the profile's filters (R-W3-2). A narrower scope filter removes the objects it
+    /// no longer keeps from every loaded namespace at once (a scope change: never guarded, the
+    /// delta lists them in `out_of_scope`); a filter that may keep more re-reads every loaded
+    /// namespace in scope.
+    pub fn set_filters(&self, filters: Filters) {
+        self.send(scheduler::Cmd::SetFilters(filters));
+    }
+
+    /// The level `ns` is read at and why, as the engine sees it (the pills; review m8): its
+    /// role (current, system, other) and its loaded object count. A database namespace answers
+    /// its own override, else the auto level of its loaded schemas' objects together. A lock no
+    /// I/O holds; safe on any thread.
+    pub fn level_of(&self, ns: &NsKey) -> LevelChoice {
+        let snap = self.inner.catalog.current();
+        let (role, count) = {
+            let roles = self
+                .inner
+                .roles
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let role = if roles.current.as_ref() == Some(ns) {
+                NsRole::Current
+            } else if roles.system.contains(ns) {
+                NsRole::System
+            } else {
+                NsRole::Other
+            };
+            let count: u32 = if ns.kind == hacivat_meta::NsKind::Database {
+                snap.namespaces
+                    .values()
+                    .filter(|a| a.key().path.len() == 2 && a.key().path.first() == ns.path.first())
+                    .map(|a| a.root().child_count())
+                    .fold(0u32, u32::saturating_add)
+            } else {
+                snap.namespaces
+                    .get(ns)
+                    .map_or(0, |a| a.root().child_count())
+            };
+            (role, count)
+        };
+        self.level_for(ns, role, count)
     }
 }
 // ## m4-t15-engine

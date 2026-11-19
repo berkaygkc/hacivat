@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use futures::future::BoxFuture;
 use hacivat_meta::merge::{self, ChangedObject, ExistSet, Identity, NamespaceResult};
 use hacivat_meta::name::FoldRule;
+use hacivat_meta::persist::ServerFingerprint;
 use hacivat_meta::props::{ColumnProps, FacetKind, Props, TableProps, ViewProps};
 use hacivat_meta::snapshot::IntroErrorCode;
 use hacivat_meta::{
@@ -43,8 +44,11 @@ use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::MetaSource;
+use crate::filter::CompiledFilter;
 use crate::freshness::NsCheck;
-use crate::introspector::{FacetRows, IntroCaps, IntroError, Introspector, Staleness};
+use crate::introspector::{
+    FacetRows, IntroCaps, IntroError, Introspector, ServerIdentity, Staleness,
+};
 use crate::pack::Mode;
 use crate::scope::NsInfo;
 
@@ -158,6 +162,13 @@ impl FakeGate {
 struct State {
     namespaces: BTreeMap<NsKey, FakeNs>,
     listing: Option<Vec<NsInfo>>,
+    /// Listings per database the connection is to (`set_listing_for`).
+    listing_for: BTreeMap<Option<Name>, Vec<NsInfo>>,
+    /// The filter text of every introspect and fragment call, in order.
+    filters: Vec<String>,
+    identity: Option<u128>,
+    /// The metadata source whose last connection names the database a listing is for.
+    meta: Option<Arc<FakeMetaSource>>,
     calls: Vec<FakeCall>,
     gates: Vec<Gate>,
     failures: Vec<Failure>,
@@ -197,7 +208,10 @@ impl FakeIntrospector {
             dbms,
             incremental: Arc::new(AtomicBool::new(false)),
             queries: Arc::new(AtomicU64::new(0)),
-            state: Arc::new(Mutex::new(State::default())),
+            state: Arc::new(Mutex::new(State {
+                identity: Some(1),
+                ..State::default()
+            })),
         }
     }
 
@@ -256,6 +270,30 @@ impl FakeIntrospector {
     /// The namespaces `list_namespaces` answers (default: every namespace set, as user ones).
     pub fn set_listing(&self, infos: Vec<NsInfo>) {
         self.lock().listing = Some(infos);
+    }
+
+    /// `list_namespaces` on a connection to `database` answers `infos` (PostgreSQL lists one
+    /// database per connection). Needs [`FakeIntrospector::link_meta`].
+    pub fn set_listing_for(&self, database: Option<&str>, infos: Vec<NsInfo>) {
+        self.lock()
+            .listing_for
+            .insert(database.map(Name::from), infos);
+    }
+
+    /// Tells the fake which metadata source hands out its connections (for
+    /// `set_listing_for`).
+    pub fn link_meta(&self, meta: Arc<FakeMetaSource>) {
+        self.lock().meta = Some(meta);
+    }
+
+    /// The server identity `identity` answers (`None`: `Unknown`). Default: a fixed one.
+    pub fn set_identity(&self, fp: Option<u128>) {
+        self.lock().identity = fp;
+    }
+
+    /// The filter text every introspect and fragment call got, in order.
+    pub fn filters(&self) -> Vec<String> {
+        self.lock().filters.clone()
     }
 
     /// The calls made so far, in order.
@@ -554,6 +592,20 @@ impl Introspector for FakeIntrospector {
         Box::pin(async move {
             self.enter(FakeCall::ListNamespaces, None).await?;
             let st = self.lock();
+            if !st.listing_for.is_empty() {
+                let db = st
+                    .meta
+                    .as_ref()
+                    .and_then(|m| {
+                        m.databases
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .last()
+                            .cloned()
+                    })
+                    .flatten();
+                return Ok(st.listing_for.get(&db).cloned().unwrap_or_default());
+            }
             Ok(st.listing.clone().unwrap_or_else(|| {
                 st.namespaces
                     .iter()
@@ -572,10 +624,12 @@ impl Introspector for FakeIntrospector {
         ns: &'a NsKey,
         mode: Mode,
         level: Level,
+        filter: &'a CompiledFilter,
         prev: Option<&'a NamespaceSnapshot>,
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>> {
         Box::pin(async move {
+            self.lock().filters.push(filter.text().to_owned());
             let call = FakeCall::Introspect {
                 ns: ns.clone(),
                 mode,
@@ -599,9 +653,11 @@ impl Introspector for FakeIntrospector {
         ns: &'a NsKey,
         keys: &'a [ObjectKey],
         level: Level,
+        filter: &'a CompiledFilter,
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>> {
         Box::pin(async move {
+            self.lock().filters.push(filter.text().to_owned());
             let call = FakeCall::Fragment {
                 ns: ns.clone(),
                 keys: keys.to_vec(),
@@ -672,6 +728,18 @@ impl Introspector for FakeIntrospector {
         _snap: &'a NamespaceSnapshot,
     ) -> BoxFuture<'a, Result<NsCheck, IntroError>> {
         Box::pin(async { Err(IntroError::NotImplemented) })
+    }
+
+    fn identity<'a>(
+        &'a self,
+        _c: &'a mut MetaConn,
+    ) -> BoxFuture<'a, Result<ServerIdentity, IntroError>> {
+        Box::pin(async move {
+            Ok(match self.lock().identity {
+                Some(fp) => ServerIdentity::Known(ServerFingerprint(fp)),
+                None => ServerIdentity::Unknown,
+            })
+        })
     }
 
     fn capabilities(&self) -> IntroCaps {

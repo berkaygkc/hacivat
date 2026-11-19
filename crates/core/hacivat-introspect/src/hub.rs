@@ -252,14 +252,52 @@ impl CatalogHub {
             let dialect =
                 dialect_of(profile.engine).ok_or(HubError::UnsupportedEngine(profile.engine))?;
             let rt = self.runtime.clone().ok_or(HubError::NoRuntime)?;
-            let gate = self
-                .making
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .entry(profile.id)
-                .or_default()
-                .clone();
-            let _making = gate.lock().await;
+            let gate = self.gate(profile.id);
+            let made = {
+                let _making = gate.lock().await;
+                self.make_locked(profile.clone(), dialect, rt).await
+            };
+            self.prune(profile.id, gate);
+            made
+        })
+    }
+
+    // ## m4-t15-hub (fix round 1, m3)
+    /// The per-profile lock of `ensure` and `shutdown` (one making or stopping at a time).
+    fn gate(&self, profile: ProfileId) -> Arc<tokio::sync::Mutex<()>> {
+        self.making
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(profile)
+            .or_default()
+            .clone()
+    }
+
+    /// Forgets the per-profile lock when nobody else holds it (the map and `gate` are the only
+    /// owners): the map stays as small as the set of profiles being made or stopped.
+    fn prune(&self, profile: ProfileId, gate: Arc<tokio::sync::Mutex<()>>) {
+        let mut making = self.making.lock().unwrap_or_else(PoisonError::into_inner);
+        if Arc::strong_count(&gate) == 2 {
+            making.remove(&profile);
+        }
+    }
+
+    /// The number of per-profile locks kept (tests: they are pruned).
+    pub fn pending_locks(&self) -> usize {
+        self.making
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    /// `ensure`'s making, under the profile's lock.
+    async fn make_locked(
+        &self,
+        profile: Arc<Profile>,
+        dialect: DialectId,
+        rt: tokio::runtime::Handle,
+    ) -> Result<ProfileCatalog, HubError> {
+        {
             if let Some(found) = self.get(profile.id) {
                 return Ok(found);
             }
@@ -279,6 +317,7 @@ impl CatalogHub {
                     profile: profile.id,
                     single_session: profile.single_session,
                     timeout: META_STATEMENT_TIMEOUT,
+                    verified: Mutex::new(std::sync::Weak::new()),
                 }),
                 introspector,
                 catalog: catalog.clone(),
@@ -307,7 +346,7 @@ impl CatalogHub {
                 },
             );
             Ok(made)
-        })
+        }
     }
 
     // ## m4-t15-hub
@@ -398,12 +437,19 @@ impl CatalogHub {
     /// Stops `profile`'s engine (pending cache saves are written) and forgets its catalog.
     pub fn shutdown(&self, profile: ProfileId) -> BoxFuture<'_, ()> {
         Box::pin(async move {
-            let gone = self.lock().remove(&profile);
-            if let Some(gone) = gone {
-                let handle = gone.catalog.handle;
-                handle.shutdown();
-                handle.closed().await;
+            // Under the profile's lock: a shutdown during a first `ensure` waits for it and then
+            // stops what it made (review m3).
+            let gate = self.gate(profile);
+            {
+                let _stopping = gate.lock().await;
+                let gone = self.lock().remove(&profile);
+                if let Some(gone) = gone {
+                    let handle = gone.catalog.handle;
+                    handle.shutdown();
+                    handle.closed().await;
+                }
             }
+            self.prune(profile, gate);
         })
     }
 }
@@ -418,6 +464,9 @@ pub struct HubMeta {
     profile: ProfileId,
     single_session: bool,
     timeout: Duration,
+    /// The manager a `meta_conn` last succeeded on: `meta_conn` checked that it is this
+    /// profile's (review m5).
+    verified: Mutex<std::sync::Weak<SessionManager>>,
 }
 
 impl HubMeta {
@@ -442,16 +491,28 @@ impl MetaSource for HubMeta {
             let Some(manager) = self.sessions.sessions(self.profile) else {
                 return Err(MetaError::Unavailable);
             };
-            manager.meta_conn(self.spec(database), cancel).await
+            let conn = manager.meta_conn(self.spec(database), cancel).await?;
+            *self.verified.lock().unwrap_or_else(PoisonError::into_inner) =
+                Arc::downgrade(&manager);
+            Ok(conn)
         })
     }
 
+    /// Asks only a manager `meta_conn` has accepted the hub's profile on (review m5); any
+    /// other answer on a single-connection profile is "yes" (validation waits: the safe side).
     fn user_in_transaction(&self) -> bool {
-        self.single_session
-            && self
-                .sessions
-                .sessions(self.profile)
-                .is_some_and(|m| !m.open_transactions().is_empty())
+        if !self.single_session {
+            return false;
+        }
+        let verified = self
+            .verified
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .upgrade();
+        match (self.sessions.sessions(self.profile), verified) {
+            (Some(m), Some(v)) if Arc::ptr_eq(&m, &v) => !m.open_transactions().is_empty(),
+            _ => true,
+        }
     }
 }
 
@@ -527,6 +588,7 @@ mod tests {
             profile,
             single_session: false,
             timeout: META_STATEMENT_TIMEOUT,
+            verified: Mutex::new(std::sync::Weak::new()),
         };
         let spec = meta.spec(Some(Name::from("app")));
         assert_eq!(spec.profile, profile);

@@ -8,6 +8,8 @@
 //! - a namespace whose state is `Loaded` holds exactly the server's tables (never some);
 //! - every table holds none of its columns (names level) or all of them, never some.
 
+#![cfg(feature = "session")]
+
 mod common;
 
 use std::collections::BTreeSet;

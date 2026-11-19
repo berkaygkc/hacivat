@@ -1,6 +1,8 @@
 //! The scheduler's own cost per task (M4 Task 15). `#[ignore = "perf"]`, run with
 //! `HACIVAT_PERF=1 cargo test --release -p hacivat-introspect --test engine_perf -- --ignored`.
 
+#![cfg(feature = "session")]
+
 mod common;
 
 use std::time::{Duration, Instant};

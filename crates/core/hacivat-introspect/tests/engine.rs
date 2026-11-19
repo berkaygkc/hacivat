@@ -1,6 +1,8 @@
 //! The introspection engine (M4 Task 15; alg/02 HV-INTRO-01 test cases 1–4 and edge cases
 //! 1–14 with fakes; the Docker cases 5–6 and 8 run in Tasks 16, 17 and 28).
 
+#![cfg(feature = "session")]
+
 mod common;
 
 use std::sync::Arc;
@@ -794,11 +796,10 @@ async fn pending_confirmation_changes_nothing_until_confirmed() {
         .await
         .unwrap();
     assert_eq!(tables_in(&r, &n).len(), 5);
-    // Nothing pending: answered with the current generation.
-    let generation = r.catalog.current().generation;
+    // Nothing pending: nothing applied, and the ticket says so (fix round 1, I-3).
     assert_eq!(
         bounded(r.handle.confirm_pending(n.clone(), true)).await,
-        Ok(generation)
+        Err(IntroError::Cancelled)
     );
 }
 
@@ -892,7 +893,7 @@ fn progress_phases_are_a_closed_enum_with_counts() {
                 ns: n.clone(),
                 phase: Phase::Tables,
                 done: 0,
-                total: None
+                total: Some(1) // one task in this batch (m11)
             }]
         );
         pass_gate.release();
@@ -963,32 +964,52 @@ async fn dropped_ticket_does_not_cancel_the_shared_task() {
     .await;
 }
 
-/// 20 fragments of one namespace sent at once (well within the 50 ms window) run and publish
-/// once.
+/// 20 fragments of one namespace run and publish once (fix round 1, I-5: no wall-clock
+/// window). The namespace is held busy by a gated pass while the fragments queue; queued
+/// fragments of one namespace coalesce whatever the window (here zero), so the burst is one
+/// read and one publish however the requests are scheduled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fragment_burst_publishes_once_per_window() {
     let n = ns("public");
     let fake = FakeIntrospector::default();
     fake.put_ns(n.clone(), FakeIntrospector::tables(20));
-    let r = rig_with(fake, RigOpts::default());
+    let r = rig_with(
+        fake,
+        RigOpts {
+            limits: EngineLimits {
+                fragment_window: Duration::ZERO,
+                ..EngineLimits::default()
+            },
+            ..RigOpts::default()
+        },
+    );
     bounded(
         r.handle
             .refresh(Target::Namespace(n.clone()), Trigger::User),
     )
     .await
     .unwrap();
-    let mut events = r.catalog.subscribe();
-    let generation = r.catalog.current().generation;
+    r.fake.touch(&n, "t0");
+    let gate = r.fake.gate(is_introspect_of(&n, Mode::Full));
+    let pass = r
+        .handle
+        .refresh(Target::Namespace(n.clone()), Trigger::User);
+    bounded(gate.entered()).await;
     let tickets: Vec<_> = (0..20)
         .map(|i| {
             r.handle
                 .fragment(n.clone(), vec![key("public", &format!("t{i}"))])
         })
         .collect();
+    // A barrier: requests are answered in order, so all 20 are queued now.
+    bounded(r.handle.ready()).await.unwrap();
+    let mut events = r.catalog.subscribe();
+    gate.release();
+    let pass_gen = bounded(pass).await.unwrap();
     let got = bounded(join_all(tickets)).await;
     let g = got[0].clone().unwrap();
     assert!(got.iter().all(|x| *x == Ok(g)));
-    assert_eq!(g, generation + 1, "one publish");
+    assert_eq!(g, pass_gen + 1, "one publish after the pass");
     let frags = fragments(&r);
     assert_eq!(frags.len(), 1);
     assert_eq!(frags[0].0.len(), 20);
@@ -998,7 +1019,7 @@ async fn fragment_burst_publishes_once_per_window() {
             published += 1;
         }
     }
-    assert_eq!(published, 1);
+    assert_eq!(published, 2, "the pass, then the one fragment");
 }
 
 /// PG spike finding 8: a concurrent drop (`XX000`) is retried once (logged), then the
@@ -1178,4 +1199,472 @@ async fn the_engine_is_the_only_writer() {
         bounded(r.handle.expand(ns("public"))).await,
         Err(IntroError::Cancelled)
     );
+}
+
+// ---- fix round 1 -----------------------------------------------------------------------------
+
+fn scope_filter(text: &str) -> hacivat_introspect::engine::Filters {
+    use hacivat_introspect::filter::{FilterRole, parse_filter};
+    hacivat_introspect::engine::Filters {
+        scope: Some(parse_filter(text, DialectId::Postgres, FilterRole::Introspect).unwrap()),
+    }
+}
+
+/// R-W3-2: every pass gets the namespace's filter: the scope filter in a user namespace,
+/// match-all in a system one and for a view filter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_scope_filter_reaches_the_introspector_and_system_gets_match_all() {
+    use hacivat_introspect::filter::{FilterRole, parse_filter};
+    let (public, cat) = (ns("public"), ns("pg_catalog"));
+    let fake = FakeIntrospector::default();
+    fake.put_ns(public.clone(), FakeIntrospector::tables(12));
+    fake.put_ns(cat.clone(), FakeIntrospector::tables(3));
+    fake.edit_ns(&cat, |s| s.system = true);
+    let r = rig_with(
+        fake,
+        RigOpts {
+            scope: "@:*|@:pg_catalog",
+            current: pg_current("db", "public"),
+            filters: scope_filter("t1*"),
+            ..RigOpts::default()
+        },
+    );
+    bounded(r.handle.on_connect()).await.unwrap();
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(cat.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
+    let calls = introspects(&r);
+    let filters = r.fake.filters();
+    for ((n, _, _), f) in calls.iter().zip(&filters) {
+        let want = if *n == cat { "" } else { "t1*" };
+        assert_eq!(f, want, "{n:?}");
+    }
+    assert_eq!(tables_in(&r, &public), vec!["t1", "t10", "t11"]);
+    assert_eq!(
+        tables_in(&r, &cat).len(),
+        3,
+        "a system namespace is never filtered"
+    );
+    // A view filter never reaches an introspector.
+    let view = hacivat_introspect::engine::Filters {
+        scope: Some(parse_filter("t1*", DialectId::Postgres, FilterRole::View).unwrap()),
+    };
+    assert_eq!(view.for_pass(&public, false).text(), "");
+}
+
+/// The per-section pushdown bound: 16 runs pass, 17 are not pushed (the client filters).
+#[test]
+fn bounded_pushdown_caps_the_runs_of_a_section() {
+    use hacivat_introspect::engine::{MAX_PUSHED_RUNS_PER_SECTION, bounded_pushdown};
+    use hacivat_introspect::filter::{FilterRole, parse_filter};
+    use hacivat_meta::name::IdentCtx;
+    let items = |n: usize| {
+        (0..n)
+            .map(|i| format!("table:p{i}*"))
+            .collect::<Vec<_>>()
+            .join("||")
+    };
+    let ident = IdentCtx::new(DialectId::Postgres);
+    for (n, pushed) in [
+        (MAX_PUSHED_RUNS_PER_SECTION, true),
+        (MAX_PUSHED_RUNS_PER_SECTION + 1, false),
+    ] {
+        let f = parse_filter(&items(n), DialectId::Postgres, FilterRole::Introspect)
+            .unwrap()
+            .with_ident(ident.clone());
+        let p = bounded_pushdown(&f, &[ObjectKind::Table], DialectId::Postgres, &ident);
+        assert_eq!(p.is_some(), pushed, "{n} items");
+        if let Some(p) = p {
+            assert_eq!(p.binds.len(), n);
+        }
+    }
+}
+
+/// R-W3-2: a narrower scope filter removes what it no longer keeps at once, without the
+/// mass-deletion guard, as a scope removal; a wider one reads the namespace again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_filters_narrows_without_the_guard_and_widening_rereads() {
+    let n = ns("public");
+    let fake = FakeIntrospector::default();
+    fake.put_ns(n.clone(), FakeIntrospector::tables(30));
+    let r = rig_with(fake, RigOpts::default());
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
+    let mut catalog_events = r.catalog.subscribe();
+    let mut events = r.handle.events();
+    r.handle.set_filters(scope_filter("t1*"));
+    bounded(wait_until(Duration::from_secs(60), || {
+        tables_in(&r, &n).len() == 11
+    }))
+    .await;
+    assert_eq!(
+        events.recv().await.unwrap(),
+        EngineEvent::ScopeNarrowed {
+            ns: n.clone(),
+            count: 19
+        }
+    );
+    let mut out_of_scope = 0;
+    while let Ok(ev) = catalog_events.try_recv() {
+        match ev {
+            CatalogEvent::PendingConfirmation { .. } => panic!("a scope change is not guarded"),
+            CatalogEvent::Published { delta, .. } => {
+                assert!(delta.dropped.is_empty(), "not a server deletion");
+                out_of_scope += delta.out_of_scope.len();
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(out_of_scope, 19);
+    // Widening: the namespace is read again with the wider filter.
+    let passes = introspects(&r).len();
+    r.handle
+        .set_filters(hacivat_introspect::engine::Filters::default());
+    bounded(wait_until(Duration::from_secs(60), || {
+        tables_in(&r, &n).len() == 30
+    }))
+    .await;
+    assert_eq!(introspects(&r).len(), passes + 1);
+}
+
+/// Review I-2: a PostgreSQL scope naming another database lists its schemas on a connection
+/// to it, and its schema loads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scope_naming_another_database_lists_and_loads_it() {
+    use hacivat_meta::name::Name;
+    let other = pg_ns("other", "public");
+    let fake = FakeIntrospector::default();
+    fake.put_ns(ns("public"), FakeIntrospector::tables(2));
+    fake.put_ns(other.clone(), FakeIntrospector::tables(3));
+    let info = |key: NsKey| NsInfo { key, system: false };
+    fake.set_listing_for(
+        None,
+        vec![
+            info(ns("public")),
+            info(NsKey::database(name("db"))),
+            info(NsKey::database(name("other"))),
+            info(NsKey::database(name("third"))),
+        ],
+    );
+    fake.set_listing_for(
+        Some("other"),
+        vec![info(other.clone()), info(pg_ns("other", "x"))],
+    );
+    let r = rig_with(
+        fake,
+        RigOpts {
+            scope: "@:*|other:public",
+            current: pg_current("db", "public"),
+            ..RigOpts::default()
+        },
+    );
+    bounded(r.handle.on_connect()).await.unwrap();
+    assert_eq!(state(&r, &other), LoadState::NotLoaded);
+    assert_eq!(state(&r, &pg_ns("other", "x")), LoadState::OutOfScope);
+    let asked = r.meta.databases.lock().unwrap().clone();
+    assert!(asked.contains(&Some(Name::from("other"))), "{asked:?}");
+    assert!(
+        !asked.contains(&Some(Name::from("third"))),
+        "not in the scope: {asked:?}"
+    );
+    bounded(r.handle.expand(other.clone())).await.unwrap();
+    assert_eq!(tables_in(&r, &other).len(), 3);
+}
+
+/// R-W3-3: another server behind the profile (or an unknown one) on connect: no watermark is
+/// trusted, so the current namespace's pass is full; the same server keeps it incremental.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_changed_or_unknown_server_identity_forces_a_full_pass() {
+    let n = ns("public");
+    let fake = FakeIntrospector::default();
+    fake.put_ns(n.clone(), FakeIntrospector::tables(3));
+    let r = rig_with(
+        fake,
+        RigOpts {
+            incremental: true,
+            current: pg_current("db", "public"),
+            ..RigOpts::default()
+        },
+    );
+    let last_mode = |r: &Rig| introspects(r).pop().map(|(_, m, _)| m);
+    bounded(r.handle.on_connect()).await.unwrap();
+    bounded(r.handle.on_connect()).await.unwrap();
+    assert_eq!(last_mode(&r), Some(Mode::Incremental), "same server");
+    r.fake.set_identity(Some(2));
+    bounded(r.handle.on_connect()).await.unwrap();
+    assert_eq!(last_mode(&r), Some(Mode::Full), "another server");
+    bounded(r.handle.on_connect()).await.unwrap();
+    assert_eq!(last_mode(&r), Some(Mode::Incremental));
+    r.fake.set_identity(None);
+    bounded(r.handle.on_connect()).await.unwrap();
+    assert_eq!(last_mode(&r), Some(Mode::Full), "unknown: fail-closed");
+}
+
+/// R-W2-1: a pass stamps the arena with its level and read time; a fragment keeps the
+/// namespace's watermark and load time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn level_and_read_time_are_set_and_a_fragment_keeps_the_watermark() {
+    let n = ns("public");
+    let fake = FakeIntrospector::default();
+    fake.put_ns(n.clone(), FakeIntrospector::tables(3));
+    let r = rig_with(
+        fake,
+        RigOpts {
+            incremental: true,
+            ..RigOpts::default()
+        },
+    );
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
+    let meta = r.catalog.current().namespaces[&n].meta().clone();
+    assert_eq!(meta.level, Level::Structure);
+    assert!(
+        meta.loaded_at_ms > 1_600_000_000_000,
+        "{}",
+        meta.loaded_at_ms
+    );
+    assert!(matches!(
+        meta.watermark,
+        hacivat_meta::Watermark::PgXid { .. }
+    ));
+    r.fake.touch(&n, "t1");
+    bounded(r.handle.fragment(n.clone(), vec![key("public", "t1")]))
+        .await
+        .unwrap();
+    let after = r.catalog.current().namespaces[&n].meta().clone();
+    assert_eq!(after.watermark, meta.watermark);
+    assert_eq!(after.loaded_at_ms, meta.loaded_at_ms);
+}
+
+/// A pill raised above a loaded namespace's level re-reads it at the new level, and
+/// `level_of` reports it (review I-4, m8).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pill_change_rereads_at_the_new_level() {
+    let n = ns("wide");
+    let fake = FakeIntrospector::default();
+    fake.put_ns(n.clone(), FakeIntrospector::tables(6_000));
+    let r = rig_with(fake, RigOpts::default());
+    bounded(r.handle.expand(n.clone())).await.unwrap();
+    assert_eq!(loaded_level(&state(&r, &n)), Some(Level::Names));
+    let auto = r.handle.level_of(&n);
+    assert_eq!((auto.level, auto.source), (Level::Names, LevelSource::Auto));
+    r.handle.set_level_override(
+        ContainerKey::Namespace(NsKey::database(name("db"))),
+        Some(Level::Structure),
+    );
+    bounded(wait_until(Duration::from_secs(60), || {
+        loaded_level(&state(&r, &n)) == Some(Level::Structure)
+    }))
+    .await;
+    assert_eq!(
+        introspects(&r).last(),
+        Some(&(n.clone(), Mode::Full, Level::Structure))
+    );
+    let pill = r.handle.level_of(&n);
+    assert_eq!(
+        (pill.level, pill.source),
+        (Level::Structure, LevelSource::Override)
+    );
+    let db = r.handle.level_of(&NsKey::database(name("db")));
+    assert_eq!(db.source, LevelSource::Override);
+}
+
+/// Lookup hooks: a lookup into a listed, unloaded namespace loads it at completion priority;
+/// a `Missing` answer re-checks the namespace, at most once per interval (review I-4, m7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lookup_hooks_load_and_probe_rate_limited() {
+    use hacivat_meta::name::NamePart;
+    let n = ns("public");
+    let fake = FakeIntrospector::default();
+    fake.put_ns(n.clone(), FakeIntrospector::tables(3));
+    // `@:*` with `db` as the current database lists `public` in scope.
+    let r = rig_with(
+        fake,
+        RigOpts {
+            current: pg_current("db", "public"),
+            ..RigOpts::default()
+        },
+    );
+    bounded(r.handle.refresh(Target::ScopeRefresh, Trigger::User))
+        .await
+        .unwrap();
+    let part = |s: &str| NamePart {
+        text: name(s),
+        quoted: false,
+    };
+    let lookup = |name: &str| {
+        let view =
+            SnapshotView::new(r.catalog.current()).with_hooks(Arc::new(r.handle.lookup_hooks()));
+        view.lookup(
+            &[part("db"), part("public"), part(name)],
+            hacivat_meta::KindGroup::Relations,
+        )
+    };
+    assert!(matches!(lookup("t1"), Lookup::Unknown(_)));
+    // Loaded by the hook: names first, then the current namespace's auto level (`Sources`),
+    // which makes it complete.
+    bounded(wait_until(Duration::from_secs(60), || {
+        loaded_level(&state(&r, &n)) == Some(Level::Sources)
+    }))
+    .await;
+    assert_eq!(
+        introspects(&r),
+        vec![
+            (n.clone(), Mode::Brief, Level::Names),
+            (n.clone(), Mode::Full, Level::Sources)
+        ]
+    );
+    idle(&r.handle).await;
+    let before = introspects(&r).len();
+    assert!(matches!(lookup("nope"), Lookup::Missing(_)));
+    bounded(wait_until(Duration::from_secs(60), || {
+        introspects(&r).len() == before + 1
+    }))
+    .await;
+    idle(&r.handle).await;
+    // A second miss within the interval (fresh hooks, so only the engine limits it).
+    assert!(matches!(lookup("nope"), Lookup::Missing(_)));
+    bounded(r.handle.ready()).await.unwrap();
+    idle(&r.handle).await;
+    assert_eq!(introspects(&r).len(), before + 1);
+}
+
+/// Review m6: a current namespace learned after `on_connect` gets step 3.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_current_schema_runs_step_3() {
+    let n = ns("public");
+    let fake = FakeIntrospector::default();
+    fake.put_ns(n.clone(), FakeIntrospector::tables(3));
+    let r = rig_with(
+        fake,
+        RigOpts {
+            current: hacivat_introspect::scope::CurrentCtx {
+                database: Some(name("db")),
+                schema: None,
+                ident: None,
+            },
+            ..RigOpts::default()
+        },
+    );
+    bounded(r.handle.on_connect()).await.unwrap();
+    assert!(introspects(&r).is_empty(), "no current schema yet");
+    r.handle.set_current(pg_current("db", "public"));
+    bounded(wait_until(Duration::from_secs(60), || {
+        loaded_level(&state(&r, &n)) == Some(Level::Sources)
+    }))
+    .await;
+    assert_eq!(
+        introspects(&r),
+        vec![
+            (n.clone(), Mode::Brief, Level::Names),
+            (n.clone(), Mode::Full, Level::Sources)
+        ]
+    );
+}
+
+/// The lookups' scope-filter adapter: what the filter may leave unread is out of scope, except
+/// in a system namespace.
+#[test]
+fn scope_filter_adapter_exempts_system_namespaces() {
+    use hacivat_introspect::engine::ScopeFilterAdapter;
+    use hacivat_meta::view::ScopeFilter;
+    let f = scope_filter("t1*").scope.unwrap();
+    let cat = ns("pg_catalog");
+    let a = ScopeFilterAdapter::new(f, [cat.clone()].into_iter().collect());
+    let public = ns("public");
+    assert!(a.excludes(&public, Some(ObjectKind::Table), Some("orders")));
+    assert!(!a.excludes(&public, Some(ObjectKind::Table), Some("t1x")));
+    assert!(!a.excludes(&cat, Some(ObjectKind::Table), Some("orders")));
+}
+
+/// MySQL through the fakes: one-level namespaces, the server's schema list, every
+/// connection to the profile's database.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mysql_path_through_the_fakes() {
+    use hacivat_introspect::scope::CurrentCtx;
+    let shop = NsKey::schema(["shop"]);
+    let fake = FakeIntrospector::new(hacivat_proto::DbmsKind::MySql);
+    fake.put_ns(shop.clone(), FakeIntrospector::tables(3));
+    fake.put_ns(NsKey::schema(["other"]), FakeIntrospector::tables(1));
+    let r = rig_with(
+        fake,
+        RigOpts {
+            dbms: hacivat_proto::DbmsKind::MySql,
+            scope: "*",
+            current: CurrentCtx {
+                database: Some(name("shop")),
+                schema: Some(name("shop")),
+                ident: None,
+            },
+            ..RigOpts::default()
+        },
+    );
+    bounded(r.handle.on_connect()).await.unwrap();
+    assert_eq!(loaded_level(&state(&r, &shop)), Some(Level::Sources));
+    assert_eq!(state(&r, &NsKey::schema(["other"])), LoadState::NotLoaded);
+    assert!(matches!(
+        r.catalog.current().state(&ContainerKey::schema_list(None)),
+        LoadState::Loaded { .. }
+    ));
+    // A children request of a loaded table answers at once (depth-1 namespace).
+    let calls = r.fake.calls().len();
+    bounded(r.handle.load_children(table_key(&shop, "t1", Some(20_001))))
+        .await
+        .unwrap();
+    assert_eq!(r.fake.calls().len(), calls);
+    assert!(r.meta.databases.lock().unwrap().iter().all(Option::is_none));
+}
+
+/// SQLite through the fakes: the `temp` schema is read on the user's connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_temp_goes_to_the_users_connection() {
+    use hacivat_meta::name::Name;
+    let (main, temp) = (NsKey::schema(["main"]), NsKey::schema(["temp"]));
+    let fake = FakeIntrospector::new(hacivat_proto::DbmsKind::Sqlite);
+    fake.put_ns(main.clone(), FakeIntrospector::tables(2));
+    fake.put_ns(temp.clone(), FakeIntrospector::tables(1));
+    let r = rig_with(
+        fake,
+        RigOpts {
+            dbms: hacivat_proto::DbmsKind::Sqlite,
+            scope: "*",
+            ..RigOpts::default()
+        },
+    );
+    bounded(r.handle.expand(temp.clone())).await.unwrap();
+    bounded(r.handle.expand(main.clone())).await.unwrap();
+    let asked = r.meta.databases.lock().unwrap().clone();
+    assert!(asked.contains(&Some(Name::from("temp"))));
+    assert!(asked.contains(&None));
+}
+
+/// Review m10: cancelling a namespace stops a state check of its objects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_stops_a_state_check_of_the_namespace() {
+    let n = ns("public");
+    let fake = FakeIntrospector::default();
+    fake.put_ns(n.clone(), FakeIntrospector::tables(3));
+    let r = rig_with(fake, RigOpts::default());
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
+    let gate = r.fake.gate(|c| matches!(c, FakeCall::CheckState { .. }));
+    let t = r.handle.check_state(vec![key("public", "t1")]);
+    bounded(gate.entered()).await;
+    r.handle.cancel(n.clone());
+    assert_eq!(bounded(t).await, Err(IntroError::Cancelled));
 }

@@ -45,17 +45,19 @@ pub const OTHER: Thresholds = Thresholds {
 
 /// The auto level of a namespace of `role` holding `count` major objects (D-038, R-M4-21).
 pub fn auto_level(role: NsRole, count: u32) -> Level {
-    let t = match role {
-        NsRole::Current => CURRENT,
-        NsRole::Other => OTHER,
-        NsRole::System => return Level::Names,
-    };
-    if t.sources_max.is_some_and(|max| count <= max) {
-        Level::Sources
-    } else if count <= t.structure_max {
-        Level::Structure
-    } else {
-        Level::Names
+    LevelPolicy::default().auto(role, count)
+}
+
+impl Thresholds {
+    /// The level of a namespace of `count` major objects under these thresholds.
+    pub fn level(self, count: u32) -> Level {
+        if self.sources_max.is_some_and(|max| count <= max) {
+            Level::Sources
+        } else if count <= self.structure_max {
+            Level::Structure
+        } else {
+            Level::Names
+        }
     }
 }
 
@@ -111,17 +113,10 @@ impl LevelPolicy {
     /// The auto level of a namespace of `role` with `count` major objects under this policy's
     /// thresholds.
     pub fn auto(&self, role: NsRole, count: u32) -> Level {
-        let t = match role {
-            NsRole::Current => self.current,
-            NsRole::Other => self.other,
-            NsRole::System => return self.system,
-        };
-        if t.sources_max.is_some_and(|max| count <= max) {
-            Level::Sources
-        } else if count <= t.structure_max {
-            Level::Structure
-        } else {
-            Level::Names
+        match role {
+            NsRole::Current => self.current.level(count),
+            NsRole::Other => self.other.level(count),
+            NsRole::System => self.system,
         }
     }
 

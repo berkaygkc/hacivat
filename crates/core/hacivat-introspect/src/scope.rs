@@ -258,6 +258,25 @@ impl ScopePattern {
         out
     }
 
+    // ## m4-t15-engine (named exception, review I-2)
+    /// Whether some positive clause may select a schema of PostgreSQL database `db` (its
+    /// database term matches `db`); negative clauses are ignored, so this is a superset. The
+    /// engine lists the schemas of every such database on a connection to it (one
+    /// `pg_namespace` per database, alg/02 HV-INTRO-02 edge 10). `false` on one-level dialects.
+    #[cfg(feature = "session")]
+    pub(crate) fn may_select_database(&self, db: &Name, system: bool, ctx: &CurrentCtx) -> bool {
+        if !two_level(self.dialect) {
+            return false;
+        }
+        let ident = self.ident_of(ctx);
+        let m = self.matcher(&ident, ctx);
+        self.clauses.iter().filter(|c| !c.negative).any(|c| {
+            c.db.as_ref()
+                .is_some_and(|t| m.term(t, db, Slot::Database, system))
+        })
+    }
+    // ## m4-t15-engine
+
     /// Whether a clause writes `@` (when the current namespace is unknown the caller shows
     /// `intro-scope-current-unknown`).
     pub fn mentions_current(&self) -> bool {

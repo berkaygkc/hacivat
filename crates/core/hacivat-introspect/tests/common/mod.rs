@@ -101,6 +101,7 @@ pub fn rig_with(fake: FakeIntrospector, opts: RigOpts) -> Rig {
     };
     let fake = fake.with_incremental(opts.incremental);
     let meta = FakeMetaSource::new(opts.dbms);
+    fake.link_meta(meta.clone());
     let catalog = Arc::new(Catalog::new(Arc::new(ServerFacts::new(
         opts.dbms,
         IdentCtx::new(dialect),

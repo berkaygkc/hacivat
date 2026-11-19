@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hacivat_meta::merge::{self, MergeOutcome, MergePolicy, NamespaceResult, Trigger};
+use hacivat_meta::merge::{self, MergeOutcome, MergePolicy, NamespaceResult};
 use hacivat_meta::name::FoldRule;
 use hacivat_meta::{Level, Name, NamespaceSnapshot, NsKey, NsKind, ObjectKey};
 use hacivat_proto::DbmsKind;
@@ -21,10 +21,10 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use super::filters::Filters;
-use super::{EngineEvent, EngineLimits, MetaSource};
-use crate::introspector::{IntroError, Introspector, Staleness};
+use super::{CacheHandle, EngineEvent, EngineLimits, MetaSource};
+use crate::introspector::{IntroError, Introspector, ServerIdentity, Staleness};
 use crate::pack::Mode;
-use crate::scope::NsInfo;
+use crate::scope::{CurrentCtx, NsInfo, ScopePattern};
 
 /// What a task does.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,10 +60,31 @@ pub(super) struct WorkerCtx {
     pub meta: Arc<dyn MetaSource>,
     pub intro: Arc<dyn Introspector>,
     pub dbms: DbmsKind,
-    pub fold: FoldRule,
-    pub filters: Filters,
     pub limits: EngineLimits,
     pub events: broadcast::Sender<EngineEvent>,
+    /// The cache, for the server identity check of `on_connect` (R-W3-3).
+    pub cache: Option<CacheHandle>,
+}
+
+/// What a scope refresh needs besides the listing of the profile's own database.
+pub(super) struct Listing {
+    /// The scope and `@`, to find the other PostgreSQL databases it may select (review I-2).
+    pub scope: ScopePattern,
+    pub current: CurrentCtx,
+    /// Read the server's identity too, and check it against the cache (R-W3-3).
+    pub identity: bool,
+}
+
+/// What the identity step found (R-W3-3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IdentityRead {
+    /// Not known (a stub, an error): no cached watermark is trusted.
+    Unknown,
+    /// Known; `cache` is the cache's verdict when there is a cache.
+    Known {
+        fp: u128,
+        same_as_cache: Option<bool>,
+    },
 }
 
 /// One task as the worker gets it.
@@ -73,7 +94,15 @@ pub(super) struct Spec {
     pub prev: Option<Arc<NamespaceSnapshot>>,
     /// The namespace is a system one (the scope filter never applies there).
     pub system: bool,
-    pub trigger: Trigger,
+    /// The merge policy (the trigger, and a user's guard decision on a re-planned
+    /// confirmation, I-3).
+    pub policy: MergePolicy,
+    /// The filters when the task started (R-W3-2).
+    pub filters: Filters,
+    /// The stored fold rule of table-class names, from the current server facts (m4).
+    pub fold: FoldRule,
+    /// A scope refresh's extras.
+    pub listing: Option<Listing>,
 }
 
 /// A merged pass or fragment, ready to publish.
@@ -96,7 +125,7 @@ pub(super) struct Merged {
 
 /// What a task answered.
 pub(super) enum Output {
-    Namespaces(Vec<NsInfo>),
+    Namespaces(Vec<NsInfo>, Option<IdentityRead>),
     Merged(Box<Merged>),
     Staleness(Vec<ObjectKey>, Vec<Staleness>),
     Failed(IntroError),
@@ -156,7 +185,9 @@ async fn run_inner(ctx: &Arc<WorkerCtx>, spec: Spec, cancel: &CancellationToken)
                 }
             }
             Err(e) => return Output::Failed(e),
-            Ok(Read::Namespaces(infos)) => return Output::Namespaces(infos),
+            Ok(Read::Namespaces(infos, identity)) => {
+                return Output::Namespaces(infos, identity);
+            }
             Ok(Read::Staleness(keys, st)) => return Output::Staleness(keys, st),
             Ok(Read::Result(r)) => return merge_result(ctx, &spec, r).await,
         }
@@ -183,7 +214,7 @@ async fn acquire(
 }
 
 enum Read {
-    Namespaces(Vec<NsInfo>),
+    Namespaces(Vec<NsInfo>, Option<IdentityRead>),
     Result(NamespaceResult),
     Staleness(Vec<ObjectKey>, Vec<Staleness>),
 }
@@ -195,15 +226,30 @@ async fn read(
     cancel: &CancellationToken,
 ) -> Result<Read, IntroError> {
     match &spec.work {
-        Work::ScopeRefresh => ctx.intro.list_namespaces(conn).await.map(Read::Namespaces),
+        Work::ScopeRefresh => list(ctx, spec, conn, cancel).await,
         Work::Pass { ns, mode, level } => ctx
             .intro
-            .introspect(conn, ns, *mode, *level, spec.prev.as_deref(), cancel)
+            .introspect(
+                conn,
+                ns,
+                *mode,
+                *level,
+                spec.filters.for_pass(ns, spec.system),
+                spec.prev.as_deref(),
+                cancel,
+            )
             .await
             .map(Read::Result),
         Work::Fragment { ns, keys, level } => ctx
             .intro
-            .fragment(conn, ns, keys, *level, cancel)
+            .fragment(
+                conn,
+                ns,
+                keys,
+                *level,
+                spec.filters.for_pass(ns, spec.system),
+                cancel,
+            )
             .await
             .map(Read::Result),
         Work::CheckState { keys } => {
@@ -216,6 +262,83 @@ async fn read(
     }
 }
 
+/// The scope refresh: the namespaces of the profile's database; on PostgreSQL, those of every
+/// other listed database the scope may select, each on a connection to it (`pg_namespace` is
+/// per database; review I-2); and, on connect, the server's identity checked against the
+/// cache (R-W3-3).
+async fn list(
+    ctx: &WorkerCtx,
+    spec: &Spec,
+    conn: &mut MetaConn,
+    cancel: &CancellationToken,
+) -> Result<Read, IntroError> {
+    let mut infos = ctx.intro.list_namespaces(conn).await?;
+    let Some(listing) = &spec.listing else {
+        return Ok(Read::Namespaces(infos, None));
+    };
+    let identity = if listing.identity {
+        Some(identity(ctx, conn).await)
+    } else {
+        None
+    };
+    let with_schemas: std::collections::BTreeSet<Name> = infos
+        .iter()
+        .filter(|i| i.key.kind == NsKind::Schema && i.key.path.len() == 2)
+        .map(|i| i.key.path[0].clone())
+        .collect();
+    let others: Vec<Name> = infos
+        .iter()
+        .filter(|i| i.key.kind == NsKind::Database && i.key.path.len() == 1)
+        .filter(|i| !with_schemas.contains(&i.key.path[0]))
+        .filter(|i| {
+            listing
+                .scope
+                .may_select_database(&i.key.path[0], i.system, &listing.current)
+        })
+        .map(|i| i.key.path[0].clone())
+        .collect();
+    for db in others {
+        let mut other = acquire(ctx, Some(db.clone()), cancel).await?;
+        let found = ctx.intro.list_namespaces(&mut other).await?;
+        drop(other);
+        infos.extend(
+            found
+                .into_iter()
+                .filter(|i| i.key.kind == NsKind::Schema && i.key.path.first() == Some(&db)),
+        );
+    }
+    Ok(Read::Namespaces(infos, identity))
+}
+
+/// The server's identity, checked against the cache when there is one (on the blocking pool).
+async fn identity(ctx: &WorkerCtx, conn: &mut MetaConn) -> IdentityRead {
+    let fp = match ctx.intro.identity(conn).await {
+        Ok(ServerIdentity::Known(fp)) => fp,
+        Ok(ServerIdentity::Unknown) | Err(_) => return IdentityRead::Unknown,
+    };
+    let Some(cache) = ctx.cache.clone() else {
+        return IdentityRead::Known {
+            fp: fp.0,
+            same_as_cache: None,
+        };
+    };
+    let checked = tokio::task::spawn_blocking(move || {
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .check_identity(fp)
+    })
+    .await;
+    match checked {
+        Ok(Ok(c)) => IdentityRead::Known {
+            fp: fp.0,
+            same_as_cache: Some(c == hacivat_meta::persist::IdentityCheck::Same),
+        },
+        // A cache that cannot answer is not trusted.
+        _ => IdentityRead::Unknown,
+    }
+}
+
 /// Filters `r`, fills the engine's fields and merges it into the task's `prev` (or the empty
 /// base of a first load), on the blocking pool (a 160k-column merge is tens of milliseconds).
 async fn merge_result(ctx: &Arc<WorkerCtx>, spec: &Spec, mut r: NamespaceResult) -> Output {
@@ -224,7 +347,7 @@ async fn merge_result(ctx: &Arc<WorkerCtx>, spec: &Spec, mut r: NamespaceResult)
         Work::Fragment { ns, level, .. } => (ns.clone(), *level, false),
         _ => return Output::Failed(IntroError::Protocol(Name::from("merge"))),
     };
-    ctx.filters.apply(&ns, spec.system, &mut r);
+    spec.filters.apply(&ns, spec.system, &mut r);
     // R-W2-1: the level the pass read and when (display only).
     r.level = level;
     if r.read_at_ms == 0 {
@@ -239,12 +362,9 @@ async fn merge_result(ctx: &Arc<WorkerCtx>, spec: &Spec, mut r: NamespaceResult)
         r.read_at_ms = p.meta().loaded_at_ms;
     }
     let prev_ptr = prev.as_ref().map(|p| Arc::as_ptr(p) as usize);
-    let policy = MergePolicy {
-        trigger: spec.trigger,
-        ..MergePolicy::default()
-    };
+    let policy = spec.policy;
     let dbms = ctx.dbms;
-    let fold = ctx.fold;
+    let fold = spec.fold;
     let joined = tokio::task::spawn_blocking(move || {
         let base;
         let into: &NamespaceSnapshot = match &prev {

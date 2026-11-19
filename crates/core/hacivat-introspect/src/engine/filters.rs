@@ -1,31 +1,33 @@
-//! The profile's object filters as the engine applies them (HV-INTRO-03; Task 12 carries).
+//! The profile's object filters as the engine applies them (HV-INTRO-03; Task 12 carries;
+//! ruling R-W3-2).
 //!
-//! - **Scope role** (objects never read): the introspectors take no filter (the Task 1c seam),
-//!   so the engine applies it to every pass result on the client before the merge
-//!   ([`Filters::apply`]): a top-level object the filter does not keep is dropped from the
-//!   changed set **and** from its kind's existence set, so the merge neither stores it nor asks
-//!   for a fragment of it (edge 11). It never applies inside a system namespace
-//!   ([`CompiledFilter::applies_to`]), whose objects resolve types and functions.
+//! - **Scope role** (objects never read). Every pass and fragment gets the namespace's filter
+//!   ([`Filters::for_pass`]: the scope filter, or a match-all filter in a system namespace or
+//!   when none is set; a view filter never reaches an introspector). The engine also applies
+//!   it to every result on the client before the merge ([`Filters::apply`]): a top-level
+//!   object the filter does not keep is dropped from the changed set **and** from its kind's
+//!   existence set, so the merge neither stores it nor asks for a fragment of it (edge 11).
+//!   It never applies inside a system namespace ([`CompiledFilter::applies_to`]), whose
+//!   objects resolve types and functions.
 //! - **Lookups** answer `Unknown(OutOfScope)` for what the scope filter may have left unread:
 //!   [`ScopeFilterAdapter`] is the `hacivat_meta::view::ScopeFilter` the explorer and M5 hand to
 //!   `SnapshotView::with_scope_filter`.
-//! - **Pushdown** (an optimisation only: the client filter decides): a section may push a
+//! - **Pushdown** (an optimisation only: the client filter decides): a section may push the
 //!   filter only through [`bounded_pushdown`], which refuses a predicate of more than
 //!   [`MAX_PUSHED_RUNS_PER_SECTION`] runs. Task 12 caps one call at 200 runs; one run is one
 //!   query, so the per-profile total is bounded here: at most 16 runs per section of one
-//!   namespace pass (T12 review M5). The engine itself pushes nothing in M4, because the
-//!   introspector seam carries no filter (ADR 0008 `m4-t15`).
+//!   namespace pass (T12 review M5).
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use hacivat_meta::merge::{ExistSet, NamespaceResult};
 use hacivat_meta::name::IdentCtx;
 use hacivat_meta::view::ScopeFilter;
-use hacivat_meta::{Name, NsKey, ObjectKind};
+use hacivat_meta::{Name, NamespaceSnapshot, NsKey, ObjectKey, ObjectKind};
 use sql_dialect::DialectId;
 
-use crate::filter::{CompiledFilter, FilterRole, SqlPredicate};
+use crate::filter::{CompiledFilter, FilterRole, SqlPredicate, parse_filter};
 use crate::scope::NsInfo;
 
 /// The most runs (queries) one section may issue for a pushed filter.
@@ -44,8 +46,14 @@ pub fn bounded_pushdown(
         .filter(|p| p.binds.len() <= MAX_PUSHED_RUNS_PER_SECTION)
 }
 
+/// The filter that keeps everything (an empty scope filter: it pushes nothing down and matches
+/// every object, whatever the dialect).
+static MATCH_ALL: LazyLock<CompiledFilter> = LazyLock::new(|| {
+    parse_filter("", DialectId::Postgres, FilterRole::Introspect).expect("the empty filter parses")
+});
+
 /// The profile's filters.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Filters {
     /// The scope filter (`FilterRole::Introspect`): objects it does not keep are never read.
     pub scope: Option<CompiledFilter>,
@@ -57,6 +65,39 @@ impl Filters {
         self.scope
             .as_ref()
             .filter(|f| f.role() == FilterRole::Introspect && !f.is_empty())
+    }
+
+    /// The filter a pass over `ns` gets (R-W3-2): the scope filter where it applies, else a
+    /// match-all filter (a system namespace, no scope filter, a view filter).
+    pub fn for_pass(&self, ns: &NsKey, system: bool) -> &CompiledFilter {
+        let info = NsInfo {
+            key: ns.clone(),
+            system,
+        };
+        match self.scope() {
+            Some(f) if f.applies_to(&info) => f,
+            _ => &MATCH_ALL,
+        }
+    }
+
+    /// Whether this filter may keep something `before` did not (a widening): then the loaded
+    /// namespaces are read again. Conservative: any change from a non-empty filter counts.
+    pub fn may_widen(&self, before: &Filters) -> bool {
+        before.scope().is_some() && self != before
+    }
+
+    /// The top-level objects of `arena` this filter does not keep (a narrowing removes them;
+    /// R-W3-2: a user scope change, never a server deletion, so not guarded).
+    pub fn excluded(&self, arena: &NamespaceSnapshot, system: bool) -> Vec<ObjectKey> {
+        let f = self.for_pass(arena.key(), system);
+        if f.is_empty() {
+            return Vec::new();
+        }
+        arena
+            .children(0)
+            .filter(|(_, o)| !f.matches(o.kind(), o.name()))
+            .filter_map(|(i, _)| arena.object_key(i))
+            .collect()
     }
 
     /// Drops from `r` every top-level object of `ns` the scope filter does not keep: from the
