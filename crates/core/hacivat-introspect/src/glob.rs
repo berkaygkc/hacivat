@@ -151,18 +151,36 @@ impl Glob {
     /// class → `_`, a literal `%`, `_` or `\` → `\%`, `\_`, `\\`. A superset of the glob's
     /// matches (a class becomes any one character); the case is the server column's.
     pub fn like_pattern(&self) -> String {
+        self.like_pattern_with(true)
+    }
+
+    /// [`Glob::like_pattern`]; with `one_char = false`, `?` and a class become `%` too: the
+    /// superset for a server whose `_` is one **byte** (a PostgreSQL `SQL_ASCII` or
+    /// single-byte database storing multi-byte names; fix round 1, I1). Runs of `%` collapse.
+    pub fn like_pattern_with(&self, one_char: bool) -> String {
         let mut out = String::with_capacity(self.pattern.len() + 4);
+        let mut last_many = false;
         for t in &self.tokens {
-            match t {
+            let many = match t {
                 Tok::Lit(c) => {
                     if matches!(c, '%' | '_' | '\\') {
                         out.push('\\');
                     }
                     out.push(*c);
+                    false
                 }
-                Tok::Many => out.push('%'),
-                Tok::One | Tok::Class { .. } => out.push('_'),
-            }
+                Tok::One | Tok::Class { .. } if one_char => {
+                    out.push('_');
+                    false
+                }
+                Tok::Many | Tok::One | Tok::Class { .. } => {
+                    if !last_many {
+                        out.push('%');
+                    }
+                    true
+                }
+            };
+            last_many = many;
         }
         out
     }
@@ -357,22 +375,55 @@ fn anchored(body: &str, unicode_caseless: bool) -> Result<Regex, regex::Error> {
 /// literal), group heads and names (`(?P<name>`, `(?i:`), counted repetitions (`{2,3}`),
 /// ASCII classes (`[[:alpha:]]`), and ranges with an escaped end. `None` when the text leaves
 /// what this reader follows (an unclosed class or brace).
+///
+/// The user's own `i` flag is followed (fix round 1, M8): letters under an explicit `(?-i)`
+/// (to the end of its group) or inside `(?-i:…)` stay exact.
 pub(crate) fn ascii_caseless(src: &str) -> Option<String> {
     let cs: Vec<char> = src.chars().collect();
     let mut out = String::with_capacity(src.len() * 2);
+    // `fold`: the case flag in the current group; `saved`: the enclosing groups' values.
+    let mut fold = true;
+    let mut saved: Vec<bool> = Vec::new();
     let mut i = 0;
     while i < cs.len() {
         let c = cs[i];
         match c {
             '\\' => i = copy_escape(&cs, i, &mut out)?,
-            '[' => i = class(&cs, i, &mut out)?,
-            '(' if cs.get(i + 1) == Some(&'?') => i = copy_group_head(&cs, i, &mut out)?,
+            '[' if fold => i = class(&cs, i, &mut out)?,
+            '[' => {
+                let end = class(&cs, i, &mut String::new())?;
+                out.extend(&cs[i..end]);
+                i = end;
+            }
+            '(' if cs.get(i + 1) == Some(&'?') => {
+                let (next, head) = copy_group_head(&cs, i, &mut out)?;
+                match head {
+                    GroupHead::Opens => saved.push(fold),
+                    GroupHead::Flags { flags, opens } => {
+                        if opens {
+                            saved.push(fold);
+                        }
+                        fold = flag_i(&flags, fold);
+                    }
+                }
+                i = next;
+            }
+            '(' => {
+                saved.push(fold);
+                out.push(c);
+                i += 1;
+            }
+            ')' => {
+                fold = saved.pop().unwrap_or(fold);
+                out.push(c);
+                i += 1;
+            }
             '{' => {
                 let j = find(&cs, i, '}')?;
                 out.extend(&cs[i..=j]);
                 i = j + 1;
             }
-            c if c.is_ascii_alphabetic() => {
+            c if fold && c.is_ascii_alphabetic() => {
                 push_both(&mut out, c);
                 i += 1;
             }
@@ -383,6 +434,28 @@ pub(crate) fn ascii_caseless(src: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// What a `(?…` head does to the case flag.
+enum GroupHead {
+    /// A named or non-capturing group: opens a group, flags unchanged.
+    Opens,
+    /// `(?flags)` (to the end of the enclosing group) or `(?flags:` (opens a group).
+    Flags { flags: String, opens: bool },
+}
+
+/// The `i` flag after `flags` (`i`, `-i`, `x-i`, …), starting from `fold`.
+fn flag_i(flags: &str, fold: bool) -> bool {
+    let mut on = true;
+    let mut out = fold;
+    for c in flags.chars() {
+        match c {
+            '-' => on = false,
+            'i' => out = on,
+            _ => {}
+        }
+    }
+    out
 }
 
 fn push_both(out: &mut String, c: char) {
@@ -429,9 +502,9 @@ fn copy_escape(cs: &[char], i: usize, out: &mut String) -> Option<usize> {
     Some(j)
 }
 
-/// Copies a group head `(?…` up to and including its `:`, `)` or `>` and returns the index
-/// after it.
-fn copy_group_head(cs: &[char], i: usize, out: &mut String) -> Option<usize> {
+/// Copies a group head `(?…` up to and including its `:`, `)` or `>`; returns the index after
+/// it and what it does to the case flag.
+fn copy_group_head(cs: &[char], i: usize, out: &mut String) -> Option<(usize, GroupHead)> {
     out.push_str("(?");
     let mut j = i + 2;
     let named = match cs.get(j) {
@@ -442,14 +515,24 @@ fn copy_group_head(cs: &[char], i: usize, out: &mut String) -> Option<usize> {
     if named {
         let end = find(cs, j, '>')?;
         out.extend(&cs[j..=end]);
-        return Some(end + 1);
+        return Some((end + 1, GroupHead::Opens));
     }
+    let mut flags = String::new();
     while let Some(&c) = cs.get(j) {
         out.push(c);
         j += 1;
         if c == ':' || c == ')' {
-            return Some(j);
+            let head = if flags.is_empty() && c == ':' {
+                GroupHead::Opens
+            } else {
+                GroupHead::Flags {
+                    flags,
+                    opens: c == ':',
+                }
+            };
+            return Some((j, head));
         }
+        flags.push(c);
     }
     None
 }
@@ -674,6 +757,9 @@ mod tests {
         assert_eq!(g(r"a\\b").like_pattern(), r"a\\b");
         assert_eq!(g("[ab]*").like_pattern(), "_%");
         assert_eq!(g(r"x\*").like_pattern(), "x*");
+        // A byte-wise server's `_` is one byte: `?` and classes widen to `%` (I1).
+        assert_eq!(g("a?[bc]*d_?").like_pattern_with(false), r"a%d\_%");
+        assert_eq!(g("?x").like_pattern_with(false), "%x");
     }
 
     #[test]
@@ -687,6 +773,13 @@ mod tests {
         assert_eq!(r("[[:alpha:]]"), "[[:alpha:]]");
         assert_eq!(r("[^a]"), "[^[aA]]");
         assert!(ascii_caseless("[ab").is_none());
+        // An explicit `(?-i)` keeps its letters exact (fix round 1, M8).
+        assert_eq!(r("a(?-i)b[c]"), "[aA](?-i)b[c]");
+        assert_eq!(r("(?-i:a)b"), "(?-i:a)[bB]");
+        assert_eq!(r("((?-i)a)b"), "((?-i)a)[bB]");
+        assert_eq!(r("(?x-i)a(?i)b"), "(?x-i)a(?i)[bB]");
+        let (_, ci) = full_match_pair("(?-i)ab").unwrap();
+        assert!(ci.is_match("ab") && !ci.is_match("AB"));
         let re = full_match("t[a-c]+_x", GlobCase::AsciiInsensitive).unwrap();
         assert!(re.is_match("TaBc_X"));
         assert!(!re.is_match("TaBc_X1"));

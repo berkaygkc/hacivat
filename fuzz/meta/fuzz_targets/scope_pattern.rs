@@ -115,7 +115,8 @@ fuzz_target!(|data: &[u8]| {
                 panic!("a pattern bind is text");
             };
             assert!(!like.contains('\0'));
-            // Every unescaped character is a wildcard or came from the input.
+            // Every unescaped character is a wildcard or came from the input (ASCII-lowercased
+            // under MySQL `lower_case_table_names = 1`).
             let mut it = like.chars();
             while let Some(c) = it.next() {
                 let c = if c == '\\' {
@@ -123,9 +124,25 @@ fuzz_target!(|data: &[u8]| {
                 } else {
                     c
                 };
-                assert!(matches!(c, '%' | '_') || text.contains(c), "{like:?}");
+                assert!(
+                    matches!(c, '%' | '_') || text.chars().any(|t| t.eq_ignore_ascii_case(&c)),
+                    "{like:?}"
+                );
             }
         }
         assert_eq!(p.runs().count(), p.binds.len());
+    }
+    // A multi-kind section gets a predicate only when every kind has one, and then every
+    // kind's own patterns are in it (never fewer rows than the client keeps).
+    let kinds = [ObjectKind::Table, ObjectKind::View];
+    if let Some(all) = f.pushdown_kinds(&kinds, dialect, &ident) {
+        for k in kinds {
+            let one = f.pushdown(k, dialect, &ident).expect("each kind pushes");
+            assert!(one.binds.iter().all(|b| all.binds.contains(b)));
+        }
+    }
+    for k in [ObjectKind::Schema, ObjectKind::Database] {
+        assert!(f.matches(k, &name));
+        assert!(f.pushdown(k, dialect, &ident).is_none());
     }
 });

@@ -158,8 +158,9 @@ fn stub_plan_refresh_widens_any_ddl_to_the_current_namespace() {
 }
 
 #[test]
-fn stub_scope_selects_only_current() {
-    // ## m4-t12-scope (named exception): the matcher landed. The empty pattern still selects
+fn scope_selects_the_current_and_every_user_schema() {
+    // ## m4-t12-scope (named exception; renamed from `stub_scope_selects_only_current` in fix
+    // round 1, M8): the matcher landed. The empty pattern still selects
     // only `@:@`; `*:*` now selects every listed user schema, never the system one (R-M4-14).
     let scope = |p: &str| {
         parse_scope(p, DialectId::Postgres)

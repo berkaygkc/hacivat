@@ -942,3 +942,35 @@ R-M4-3, -7, -14, -41; R-W1-7). The three modules build without the `session` fea
   assumes under `lower_case_table_names` 0/1/2. Task 16: `relname LIKE $n ESCAPE $m` resolves
   in the `C` collation. Task 15/24: the `ScopeFilter` adapter keyed by namespace, warnings
   shown by Task 20.
+- **Fix round 1 (security review: 3 Important, 8 Minor).** The rule behind each fix: **the
+  server never returns fewer objects than the client filter keeps.**
+  - **I1:** on PostgreSQL, unless `IdentCtx.encoding` is known to be UTF-8 (`SQL_ASCII`,
+    single-byte or unknown), `?` and `[…]` push as `%`, not `_` (`Glob::like_pattern_with`):
+    a byte-wise server's `_` is one byte, and a UTF-8 name stored there can take several.
+  - **I2:** `CompiledFilter::pushdown_kinds(&[ObjectKind], …)` returns the union of the
+    patterns only when **every** kind in the set has its own pushable positive item.
+    `pushdown(kind)` is the one-kind case. **A catalog section whose rows can be of several
+    kinds (PostgreSQL `pg_class`: tables, partitions, views, materialized views, sequences,
+    foreign tables; MySQL `TABLES`: tables and views) must call `pushdown_kinds` with all of
+    them** (carry to T16–T18). The 200-pattern cap counts the union.
+  - **I3:** `@` and the implicit `@:@` compare with the listed names through `FoldRule` (MySQL
+    and MariaDB `lower_case_table_names` 1 and 2, SQLite), exactly where no rule is pinned, and
+    the **listed** key is selected, never the session text. T17 confirms on Docker what
+    `DATABASE()` returns under lctn 2.
+  - **M1:** untyped items never apply to `Root`, `Database` or `Schema`; MySQL pushdown covers
+    the table name class only.
+  - **M2:** pushdown refuses an `ident` whose fold rule for the kind differs from the filter's
+    own (`with_ident`).
+  - **M3:** a pattern over `MAX_PUSHDOWN_PATTERN_BYTES` (4,096; SQLite's limit is 50,000) is not
+    pushed.
+  - **M4:** in a negative clause `*` and a regex reach system namespaces (removing is safe).
+  - **M5:** the 200-run cap is per call (one section, one namespace); the total per profile is
+    the engine's (T15) to bound.
+  - **M6 (carry to T18):** the SQLite reader must not run pushed sections on a connection with
+    `PRAGMA case_sensitive_like` on.
+  - **M7:** under MySQL/MariaDB `lower_case_table_names = 1` the pattern is sent
+    ASCII-lowercased (names are stored lower-case).
+  - **M8:** an explicit `(?-i)` / `(?-i:…)` in a user regex keeps its letters exact on
+    caseless engines (`ascii_caseless` follows the flag per group). The seams test is renamed
+    `scope_selects_the_current_and_every_user_schema`. The reviewer's hostile tests are
+    `tests/scope_hostile.rs`.

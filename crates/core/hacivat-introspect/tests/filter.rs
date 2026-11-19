@@ -602,6 +602,8 @@ fn mysql_lctn1_pushdown_allowed_for_table_names_only() {
         MY,
     );
     for lctn in [0, 1, 2] {
+        // The filter compares by the server's rule (`with_ident`); pushdown refuses another.
+        let f = f.clone().with_ident(my(lctn));
         assert!(
             f.pushdown(ObjectKind::Table, MY, &my(lctn)).is_some(),
             "lctn {lctn}"
@@ -629,6 +631,46 @@ fn mysql_lctn1_pushdown_allowed_for_table_names_only() {
         filter_on("table:ş*", MY)
             .pushdown(ObjectKind::Table, MY, &my(0))
             .is_some()
+    );
+}
+
+#[test]
+fn a_multi_kind_section_gets_the_union_only_when_every_kind_is_pushable() {
+    // Fix round 1, I2: a `pg_class` section returns tables and views together.
+    let relations = [ObjectKind::Table, ObjectKind::View];
+    let f = filter("table:ord*");
+    assert!(f.pushdown(ObjectKind::Table, PG, &ctx()).is_some());
+    assert!(f.pushdown_kinds(&relations, PG, &ctx()).is_none());
+    let f = filter("table:ord*||view:v_*||table:v_*||*_tmp");
+    assert_eq!(
+        f.pushdown_kinds(&relations, PG, &ctx()).unwrap().binds,
+        [text("ord%"), text(r"v\_%"), text(r"%\_tmp")]
+    );
+    // `table` covers partitions, so a section returning both may push.
+    assert!(
+        filter("table:ord*")
+            .pushdown_kinds(&[ObjectKind::Table, ObjectKind::Partition], PG, &ctx())
+            .is_some()
+    );
+    assert!(
+        filter("table:ord*")
+            .pushdown_kinds(&[], PG, &ctx())
+            .is_none()
+    );
+    // The 200-pattern cap counts the union.
+    let items = (0..150)
+        .map(|i| format!("table:t{i}_*||view:v{i}_*"))
+        .collect::<Vec<_>>()
+        .join("||");
+    assert!(
+        filter(&items)
+            .pushdown(ObjectKind::Table, PG, &ctx())
+            .is_some()
+    );
+    assert!(
+        filter(&items)
+            .pushdown_kinds(&relations, PG, &ctx())
+            .is_none()
     );
 }
 

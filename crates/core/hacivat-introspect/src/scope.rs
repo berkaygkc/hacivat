@@ -27,7 +27,11 @@
 //!   every database whose name fully matches `t.*`.
 //! - `*` is every namespace **except system namespaces** ([`NsInfo::system`]): those come from
 //!   the shipped snapshots and are never introspected live by default (R-M4-14, R-M4-6). A
-//!   regex skips them too; a name or `@` selects one.
+//!   regex skips them too; a name or `@` selects one. In a **negative** clause `*` and a regex
+//!   do reach them: removing is always safe (`@:pg_catalog|!*:*` selects nothing).
+//! - `@` and the implicit `@:@` compare with the listed names by the server's rule, like a
+//!   bare name (`DATABASE()` = `Shop` names the listed `shop` under MySQL
+//!   `lower_case_table_names` 2), and select the listed key.
 //! - A name compares by the dialect's identifier key ([`sql_ident::key::match_key`],
 //!   HV-INTRO-14): on PostgreSQL bare `Sales` is `sales` and `"Sales"` is `Sales`; on MySQL and
 //!   MariaDB under `lower_case_table_names` 1 or 2, and on SQLite, ASCII letters compare
@@ -188,29 +192,43 @@ impl ScopePattern {
     /// The namespaces of `infos` the scope covers: [`ScopePattern::select_explicit`] plus the
     /// current namespace when the server lists it (the implicit `@:@`, kept so the session's
     /// default schema resolves even when a negative clause removes it; edge 9).
+    ///
+    /// The current namespace is the **listed** key that names it under the server's rule
+    /// (MySQL/MariaDB `lower_case_table_names` 1 or 2, SQLite: ASCII-caseless), never the
+    /// session's text (fix round 1, I3).
     pub fn select(&self, infos: &[NsInfo], ctx: &CurrentCtx) -> BTreeSet<NsKey> {
         let mut out = self.select_explicit(infos, ctx);
-        if let Some(cur) = self.current_key(ctx)
-            && infos.iter().any(|i| i.key == cur)
-        {
-            out.insert(cur);
-        }
+        let ident = self.ident_of(ctx);
+        let m = self.matcher(&ident, ctx);
+        out.extend(
+            infos
+                .iter()
+                .filter(|i| m.is_current(i))
+                .map(|i| i.key.clone()),
+        );
         out
+    }
+
+    fn ident_of(&self, ctx: &CurrentCtx) -> IdentCtx {
+        ctx.ident
+            .clone()
+            .unwrap_or_else(|| IdentCtx::new(self.dialect))
+    }
+
+    fn matcher<'a>(&self, ident: &'a IdentCtx, ctx: &'a CurrentCtx) -> Matcher<'a> {
+        Matcher {
+            dialect: self.dialect,
+            ident,
+            ctx,
+        }
     }
 
     /// The namespaces of `infos` the pattern itself selects: the union of its positive clauses
     /// minus the union of its negative ones. On PostgreSQL a listed database namespace is
     /// selected with any of its schemas, or by a database-only clause.
     pub fn select_explicit(&self, infos: &[NsInfo], ctx: &CurrentCtx) -> BTreeSet<NsKey> {
-        let ident = ctx
-            .ident
-            .clone()
-            .unwrap_or_else(|| IdentCtx::new(self.dialect));
-        let m = Matcher {
-            dialect: self.dialect,
-            ident: &ident,
-            ctx,
-        };
+        let ident = self.ident_of(ctx);
+        let m = self.matcher(&ident, ctx);
         let mut out: BTreeSet<NsKey> = infos
             .iter()
             .filter(|i| {
@@ -238,19 +256,6 @@ impl ScopePattern {
             out.extend(dbs);
         }
         out
-    }
-
-    /// The current namespace `@:@` (one level: `[schema]`, or `[database]` when no schema is
-    /// known); `None` when the session's current namespace is unknown.
-    fn current_key(&self, ctx: &CurrentCtx) -> Option<NsKey> {
-        if two_level(self.dialect) {
-            Some(NsKey::schema([ctx.database.clone()?, ctx.schema.clone()?]))
-        } else {
-            Some(NsKey::schema([ctx
-                .schema
-                .clone()
-                .or_else(|| ctx.database.clone())?]))
-        }
     }
 
     /// Whether a clause writes `@` (when the current namespace is unknown the caller shows
@@ -303,6 +308,9 @@ struct Matcher<'a> {
 impl Matcher<'_> {
     fn clause(&self, c: &Clause, info: &NsInfo) -> bool {
         let path = &info.key.path;
+        // A wildcard never *selects* a system namespace, but a negative wildcard removes one
+        // (removing is always safe; fix round 1, M4).
+        let system = info.system && !c.negative;
         if two_level(self.dialect) {
             let Some(db_term) = &c.db else {
                 return false;
@@ -315,15 +323,14 @@ impl Matcher<'_> {
                         return false;
                     }
                     if c.schemas.is_empty() {
-                        return self.term(&Term::Current, s, Slot::Schema, info.system);
+                        return self.term(&Term::Current, s, Slot::Schema, system);
                     }
                     c.schemas
                         .iter()
-                        .any(|t| self.term(t, s, Slot::Schema, info.system))
+                        .any(|t| self.term(t, s, Slot::Schema, system))
                 }
                 (NsKind::Database, 1) => {
-                    c.schemas.is_empty()
-                        && self.term(db_term, &path[0], Slot::Database, info.system)
+                    c.schemas.is_empty() && self.term(db_term, &path[0], Slot::Database, system)
                 }
                 _ => false,
             }
@@ -332,9 +339,33 @@ impl Matcher<'_> {
                 (NsKind::Schema, 1) => c
                     .schemas
                     .iter()
-                    .any(|t| self.term(t, &path[0], Slot::Schema, info.system)),
+                    .any(|t| self.term(t, &path[0], Slot::Schema, system)),
                 _ => false,
             }
+        }
+    }
+
+    /// Whether `info` is the session's current namespace (`@:@`), compared by the server's rule
+    /// like any name (fix round 1, I3): `USE Shop` under MySQL `lower_case_table_names` 2
+    /// leaves `DATABASE()` = `Shop` while the server lists `shop`.
+    fn is_current(&self, info: &NsInfo) -> bool {
+        let path = &info.key.path;
+        match (info.key.kind, path.len(), two_level(self.dialect)) {
+            (NsKind::Schema, 2, true) => {
+                self.term(&Term::Current, &path[0], Slot::Database, false)
+                    && self.term(&Term::Current, &path[1], Slot::Schema, false)
+            }
+            (NsKind::Schema, 1, false) => self.term(&Term::Current, &path[0], Slot::Schema, false),
+            _ => false,
+        }
+    }
+
+    /// Whether the listed name `listed` and the session's `current` text name one namespace
+    /// under the server's rule for `class` (exact where no rule is pinned).
+    fn same_name(&self, listed: &str, current: &str, class: NameClass) -> bool {
+        match FoldRule::for_names(self.dialect, self.ident, class) {
+            Some(rule) => rule.matches(listed, current),
+            None => listed == current,
         }
     }
 
@@ -352,7 +383,7 @@ impl Matcher<'_> {
                     Slot::Schema if two_level(self.dialect) => self.ctx.schema.as_ref(),
                     Slot::Schema => self.ctx.schema.as_ref().or(self.ctx.database.as_ref()),
                 };
-                cur.is_some_and(|c| c == name)
+                cur.is_some_and(|c| self.same_name(name, c, class))
             }
             Term::All => !system,
             Term::Regex(r) => !system && r.is_match(name, self.case(class)),

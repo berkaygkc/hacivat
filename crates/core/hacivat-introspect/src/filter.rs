@@ -46,6 +46,10 @@
 //! match-everything glob; never `ILIKE`, `lower()` or `upper()`; nothing when an applicable
 //! positive item cannot be sent (the server must return a superset) or when more than
 //! [`MAX_PUSHDOWN_ITEMS`] apply. The client matcher always runs after it.
+//!
+//! The rule behind every refusal: **the server never returns fewer objects than the client
+//! filter keeps.** A catalog query whose rows can be of several kinds (PostgreSQL `pg_class`)
+//! must ask [`CompiledFilter::pushdown_kinds`] with every one of them (fix round 1, I2).
 
 use std::sync::Arc;
 
@@ -62,6 +66,11 @@ use crate::scope::NsInfo;
 /// Above this many applicable positive items nothing is pushed down (no giant SQL; alg/02
 /// HV-INTRO-03 edge 12).
 pub const MAX_PUSHDOWN_ITEMS: usize = 200;
+
+/// A longer `LIKE` pattern is never sent (fix round 1, M3): SQLite fails the whole query past
+/// its 50,000-byte limit, and no catalog name comes near this length (PostgreSQL 63 bytes,
+/// MySQL 64 characters); the client matcher filters instead.
+pub const MAX_PUSHDOWN_PATTERN_BYTES: usize = 4096;
 
 /// What a filter decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -131,8 +140,17 @@ impl Pattern {
 }
 
 impl Item {
+    /// Typed items apply to their kinds; untyped items to every object kind, never to a
+    /// namespace (`Root`, `Database`, `Schema`: those are the scope's, fix round 1, M1).
     fn applies(&self, kind: ObjectKind) -> bool {
-        self.kinds.is_empty() || self.kinds.contains(&kind)
+        if self.kinds.is_empty() {
+            !matches!(
+                kind,
+                ObjectKind::Root | ObjectKind::Database | ObjectKind::Schema
+            )
+        } else {
+            self.kinds.contains(&kind)
+        }
     }
 }
 
@@ -147,6 +165,18 @@ impl Item {
 /// section runs **once per pattern**, each run binding [`SqlPredicate::runs`]'s scalars; the
 /// union of the rows (de-duplicated by key) is the superset the client matcher then filters,
 /// as list-bind chunks are unioned.
+///
+/// **One predicate per section, for every kind the section returns** (fix round 1, I2). A
+/// predicate cuts every row the section returns, so it must come from
+/// [`CompiledFilter::pushdown_kinds`] called with **all** the kinds those rows can have (a
+/// PostgreSQL `pg_class` section: tables, partitions, views, materialized views, sequences,
+/// foreign tables, …; a MySQL `TABLES` section: tables and views). It is `None` unless every
+/// one of them has its own pushable positive item. [`CompiledFilter::pushdown`] is the
+/// one-kind case, for a section that returns that kind only.
+///
+/// **The run count is per call** (M5): at most [`MAX_PUSHDOWN_ITEMS`] runs for one section of
+/// one namespace. The total across sections, namespaces and a profile's passes is the
+/// caller's (the engine's, Task 15) to bound; it may skip a predicate with many binds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SqlPredicate {
     pub sql_fragment: &'static str,
@@ -300,62 +330,115 @@ impl CompiledFilter {
     }
 
     /// The server-side form of the positive globs that apply to `kind`, for a catalog query on
-    /// `dialect` under `ident` (see the module docs and [`SqlPredicate`]). `None` — the client
-    /// filters everything — for a view filter, a dialect without an eligibility rule, a kind
-    /// whose catalog column compares differently from the client matcher (alg/02 HV-INTRO-03
-    /// matrix), no applicable positive item, more than [`MAX_PUSHDOWN_ITEMS`], or any
-    /// applicable positive item that cannot be sent as is.
+    /// `dialect` under `ident` that returns rows of `kind` **only**: [`pushdown_kinds`] with
+    /// one kind (see there and [`SqlPredicate`]).
     ///
-    /// Eligibility (the per-DBMS rows of alg/02 HV-INTRO-03, MSSQL excluded per R-M4-4):
-    /// - **PostgreSQL** (`name` columns compare in the `C` collation): only exact items (every
-    ///   PostgreSQL name class is exact; a case-insensitive item is never pushed, and no
-    ///   `ILIKE`/`lower()` is ever written). A non-ASCII pattern only on a UTF-8 server (a
-    ///   character the server encoding lacks would fail the whole query).
-    /// - **MySQL / MariaDB**: table and database names only (exact under
-    ///   `lower_case_table_names = 0`, caseless under 1 and 2, as `INFORMATION_SCHEMA` compares
-    ///   them); every other name class (columns, routines, triggers, …) client-side. No
-    ///   character outside the BMP (`INFORMATION_SCHEMA` is `utf8mb3`).
-    /// - **SQLite** (`LIKE` is ASCII-caseless, like the client rule): ASCII patterns only.
-    /// - Every other dialect: none.
-    ///
-    /// A pattern holding NUL is never sent.
+    /// [`pushdown_kinds`]: CompiledFilter::pushdown_kinds
     pub fn pushdown(
         &self,
         kind: ObjectKind,
         dialect: DialectId,
         ident: &IdentCtx,
     ) -> Option<SqlPredicate> {
-        if self.role != FilterRole::Introspect || !same_family(self.dialect, dialect) {
+        self.pushdown_kinds(&[kind], dialect, ident)
+    }
+
+    /// The server-side form of the filter for a catalog query on `dialect` under `ident` whose
+    /// rows can be of any kind in `kinds` (fix round 1, I2): the union of the patterns, and
+    /// `Some` only when **every** kind has its own pushable positive item, so no row the client
+    /// keeps is cut. `None` — the client filters everything — for a view filter, an empty
+    /// `kinds`, a namespace kind, a dialect without an eligibility rule, an `ident` whose fold
+    /// rule differs from the filter's own ([`CompiledFilter::with_ident`], M2), a kind whose
+    /// catalog column compares differently from the client matcher (alg/02 HV-INTRO-03
+    /// matrix), a kind with no positive item, more than [`MAX_PUSHDOWN_ITEMS`] patterns in all,
+    /// or any applicable positive item that cannot be sent as is.
+    ///
+    /// Eligibility (the per-DBMS rows of alg/02 HV-INTRO-03, MSSQL excluded per R-M4-4):
+    /// - **PostgreSQL** (`name` columns compare in the `C` collation): only exact items (every
+    ///   PostgreSQL name class is exact; a case-insensitive item is never pushed, and no
+    ///   `ILIKE`/`lower()` is ever written). A non-ASCII pattern only on a UTF-8 server (a
+    ///   character the server encoding lacks would fail the whole query). Unless the server is
+    ///   known to be UTF-8, `?` and `[…]` become `%`, not `_`: a `SQL_ASCII` or single-byte
+    ///   server's `_` is one byte, and a UTF-8 name stored there can take several (I1).
+    /// - **MySQL / MariaDB**: table names only (tables, views, MariaDB sequences; exact under
+    ///   `lower_case_table_names = 0`, caseless under 1 and 2, as `INFORMATION_SCHEMA` compares
+    ///   them); every other name class (columns, routines, triggers, …) client-side. No
+    ///   character outside the BMP (`INFORMATION_SCHEMA` is `utf8mb3`). Under
+    ///   `lower_case_table_names = 1` the pattern is sent ASCII-lowercased, as the names are
+    ///   stored (M7).
+    /// - **SQLite** (`LIKE` is ASCII-caseless, like the client rule): ASCII patterns only.
+    /// - Every other dialect: none.
+    ///
+    /// A pattern holding NUL, or longer than [`MAX_PUSHDOWN_PATTERN_BYTES`] (SQLite refuses
+    /// LIKE patterns over 50,000 bytes; M3), is never sent.
+    pub fn pushdown_kinds(
+        &self,
+        kinds: &[ObjectKind],
+        dialect: DialectId,
+        ident: &IdentCtx,
+    ) -> Option<SqlPredicate> {
+        if self.role != FilterRole::Introspect
+            || kinds.is_empty()
+            || !same_family(self.dialect, dialect)
+        {
             return None;
         }
+        let mut binds: Vec<BindValue> = Vec::new();
+        for &kind in kinds {
+            for like in self.kind_patterns(kind, dialect, ident)? {
+                let b = text_bind(&like);
+                if !binds.contains(&b) {
+                    binds.push(b);
+                }
+            }
+            if binds.len() > MAX_PUSHDOWN_ITEMS {
+                return None;
+            }
+        }
+        Some(SqlPredicate {
+            sql_fragment: SqlPredicate::FRAGMENT,
+            binds,
+        })
+    }
+
+    /// The `LIKE` patterns of `kind`'s positive items; `None` when `kind` cannot be pushed (see
+    /// [`CompiledFilter::pushdown_kinds`]). Never empty.
+    fn kind_patterns(
+        &self,
+        kind: ObjectKind,
+        dialect: DialectId,
+        ident: &IdentCtx,
+    ) -> Option<Vec<String>> {
         let class = kind.name_class(dbms_of(dialect));
         let rule = FoldRule::for_names(dialect, ident, class)?;
+        // The client compares by the filter's own rule: a server rule that differs could keep
+        // fewer names (M2).
+        if FoldRule::for_names(dialect, &self.ident, class) != Some(rule) {
+            return None;
+        }
         let utf8 = ident
             .encoding
             .as_deref()
             .is_some_and(|e| e.eq_ignore_ascii_case("UTF8") || e.eq_ignore_ascii_case("UTF-8"));
         let char_ok: fn(&str, bool) -> bool = match dialect {
             DialectId::Postgres if rule == FoldRule::Exact => |p, utf8| utf8 || p.is_ascii(),
-            DialectId::MySql | DialectId::MariaDb
-                if matches!(
-                    class,
-                    NameClass::Table | NameClass::Database | NameClass::Schema
-                ) =>
-            {
+            DialectId::MySql | DialectId::MariaDb if class == NameClass::Table => {
                 |p, _| p.chars().all(|c| u32::from(c) <= 0xFFFF)
             }
             DialectId::Sqlite => |p, _| p.is_ascii(),
             _ => return None,
         };
-        let mut positives = 0usize;
-        let mut binds: Vec<BindValue> = Vec::new();
+        // A one-character wildcard is one character only where the server says so.
+        let one_char = !matches!(dialect, DialectId::Postgres) || utf8;
+        let lower = matches!(dialect, DialectId::MySql | DialectId::MariaDb)
+            && ident.lower_case_table_names == 1;
+        let mut out = Vec::new();
         for it in self
             .items
             .iter()
             .filter(|it| it.applies(kind) && !it.negative)
         {
-            positives += 1;
-            if positives > MAX_PUSHDOWN_ITEMS || it.sig {
+            if out.len() >= MAX_PUSHDOWN_ITEMS || it.sig {
                 return None;
             }
             let Pattern::Glob { exact, .. } = &it.pattern else {
@@ -364,22 +447,19 @@ impl CompiledFilter {
             if exact.matches_everything() {
                 return None;
             }
-            let like = exact.like_pattern();
-            if like.contains('\0') || !char_ok(&like, utf8) {
+            let mut like = exact.like_pattern_with(one_char);
+            if lower {
+                like.make_ascii_lowercase();
+            }
+            if like.len() > MAX_PUSHDOWN_PATTERN_BYTES
+                || like.contains('\0')
+                || !char_ok(&like, utf8)
+            {
                 return None;
             }
-            let b = text_bind(&like);
-            if !binds.contains(&b) {
-                binds.push(b);
-            }
+            out.push(like);
         }
-        if binds.is_empty() {
-            return None;
-        }
-        Some(SqlPredicate {
-            sql_fragment: SqlPredicate::FRAGMENT,
-            binds,
-        })
+        (!out.is_empty()).then_some(out)
     }
 
     /// The filter as typed.
