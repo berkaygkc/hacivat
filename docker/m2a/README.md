@@ -59,7 +59,9 @@ The test credentials are throwaway values. Never copy them into a non-test file.
   - `hv_locked`, an account created with `ACCOUNT LOCK`;
   - (m4-t01c, R-M4-43) `hv_test` owns every `hvm4_*` database; `hv_catalog` reads the system
     schemas and holds EXECUTE on the empty `hv_catalog_probe` only; `hv_fixture` (test set-up
-    only) may `SET GLOBAL time_zone` and manage `hvm4_*` accounts. `mysql80`, `mysql84` and
+    only, signs in on `information_schema`) holds only EXECUTE on `hv_fixture_admin`, whose
+    definer procedures (owned by the locked `hv_fixture_definer`) set `time_zone` and manage
+    `hvm4_*` accounts and grants (`hacivat_testkit::fixture_sql`). `mysql80`, `mysql84` and
     `mysql84-x509` run with `--log-bin-trust-function-creators=1`;
 - `mysql84`'s auto-generated CA certificate is copied to
   `<main checkout>/target/docker/mysql84-ca.pem`. Tests reach it only through

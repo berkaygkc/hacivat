@@ -325,7 +325,10 @@ impl SecretStore {
                 slots
             }
         };
-        slots.retain(|slot| wanted(*slot));
+        // ## m4-t01c-core (named, fix round 1): a catalog data key is never copied. Each
+        // profile gets its own, created on its first encrypted cache write (Task 11): a
+        // duplicate has a new id and an empty cache, and is often re-pointed at another server.
+        slots.retain(|slot| *slot != SecretSlot::CatalogKey && wanted(*slot));
         slots.sort();
         slots.dedup();
         for slot in slots {

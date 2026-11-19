@@ -7,7 +7,8 @@
 //! - `hv_catalog` tells a missing function from a built-in on every MySQL and MariaDB line
 //!   (R-C1-1), reads the system schemas and writes nothing;
 //! - `hv_test` owns `hvm4_*` databases and may create functions and triggers there;
-//! - `hv_fixture` sets the global time zone and manages `hvm4_*` accounts, and nothing else.
+//! - `hv_fixture` sets the global time zone and manages `hvm4_*` accounts through the
+//!   `hv_fixture_admin` procedures, and nothing else.
 //!
 //! Every object a test creates is named `hvm4_t01c_*` and dropped by a guard, also on panic.
 //! Failures print target ids and server codes only, never a password.
@@ -29,7 +30,9 @@ use hacivat_net::{
     AddressClass, Target, TlsMode, TlsSettings, build_tls_params, direct, install_crypto_provider,
 };
 use hacivat_proto::DbmsKind;
-use hacivat_testkit::{CATALOG_PROBE_DATABASE, DockerTarget, TlsDefault, docker_enabled, targets};
+use hacivat_testkit::{
+    CATALOG_PROBE_DATABASE, DockerTarget, TlsDefault, docker_enabled, fixture_sql, targets,
+};
 use secrecy::SecretString;
 
 fn simple() -> ExecOpts {
@@ -274,47 +277,102 @@ async fn hv_fixture_sets_the_time_zone_and_manages_hvm4_accounts_only() {
         return;
     }
     const DB: &str = "hvm4_t01c_grants";
-    const USER: &str = "'hvm4_t01c_user'@'%'";
+    const USER: &str = "hvm4_t01c_user";
     for t in mysql_family() {
         let fx = t.as_fixture().expect("a MySQL-family target");
-        let _cleanup = Cleanup {
-            target: fx.clone(),
-            statements: vec![
-                format!("DROP USER IF EXISTS {USER}"),
-                format!("DROP DATABASE IF EXISTS {DB}"),
-            ],
+        // Guards drop in reverse order: the account first, then the database.
+        let _db = Cleanup {
+            target: t.clone(),
+            statements: vec![format!("DROP DATABASE IF EXISTS {DB}")],
         };
+        let _user = Cleanup {
+            target: fx.clone(),
+            statements: vec![fixture_sql::drop_user(USER)],
+        };
+        // The database belongs to hv_test (ALL on hvm4_*); hv_fixture cannot create one.
+        let mut owner = connect(&t).await;
+        ok(&mut owner, &t, &format!("DROP DATABASE IF EXISTS {DB}")).await;
+        ok(&mut owner, &t, &format!("CREATE DATABASE {DB}")).await;
+        ok(&mut owner, &t, &format!("CREATE TABLE {DB}.t (a int)")).await;
+        ok(&mut owner, &t, &format!("INSERT INTO {DB}.t VALUES (7)")).await;
+
         let mut c = connect(&fx).await;
-        // The privilege, without changing the server: the global zone set to itself.
-        ok(&mut c, &fx, "SET GLOBAL time_zone = @@GLOBAL.time_zone").await;
-        ok(&mut c, &fx, &format!("DROP USER IF EXISTS {USER}")).await;
-        ok(&mut c, &fx, &format!("DROP DATABASE IF EXISTS {DB}")).await;
-        ok(&mut c, &fx, &format!("CREATE DATABASE {DB}")).await;
+        let db = ok(&mut c, &fx, "SELECT DATABASE()").await;
+        assert_eq!(db[0][0].as_deref(), Some("information_schema"), "{}", t.id);
+        // The global time zone, set to itself through the definer: the privilege is proved and
+        // the server is unchanged.
+        let zone = ok(&mut c, &fx, "SELECT @@GLOBAL.time_zone").await;
+        let zone = zone[0][0].clone().expect("a time zone");
+        ok(&mut c, &fx, &fixture_sql::set_global("time_zone", &zone)).await;
+
+        ok(&mut c, &fx, &fixture_sql::drop_user(USER)).await;
         // Not through `ok`: its failure message would echo the statement and its password.
-        let create = format!("CREATE USER {USER} IDENTIFIED BY '{}'", fx.password);
-        if let Err(e) = c.execute(&create, simple()).await {
-            panic!("{}: CREATE USER: {:?} {:?}", t.id, e.kind, vendor(&e));
+        if let Err(e) = c
+            .execute(&fixture_sql::create_user(USER, &fx.password), simple())
+            .await
+        {
+            panic!("{}: create_user: {:?} {:?}", t.id, e.kind, vendor(&e));
         }
-        ok(&mut c, &fx, &format!("GRANT SELECT ON {DB}.* TO {USER}")).await;
-        let grants = ok(&mut c, &fx, &format!("SHOW GRANTS FOR {USER}")).await;
+        ok(
+            &mut c,
+            &fx,
+            &fixture_sql::grant("SELECT", DB, Some("t"), USER),
+        )
+        .await;
+
+        // The grant, seen from the new account's own side (SHOW GRANTS for the current user
+        // needs no privilege: MySQL 8.4 manual, SHOW GRANTS; MariaDB likewise).
+        let ua = t.as_test_account(USER).expect("a MySQL-family target");
+        let mut u = connect(&ua).await;
+        let mine = ok(&mut u, &ua, "SHOW GRANTS").await;
         assert!(
-            grants
-                .iter()
+            mine.iter()
                 .any(|r| r[0].as_deref().is_some_and(|g| g.contains(DB))),
-            "{}: {grants:?}",
+            "{}: {mine:?}",
             t.id
         );
-        ok(&mut c, &fx, &format!("REVOKE SELECT ON {DB}.* FROM {USER}")).await;
-        // Nothing beyond its two jobs: no fixture data, no grant on a fixture database.
+        let rows = ok(&mut u, &ua, &format!("SELECT a FROM {DB}.t")).await;
+        assert_eq!(rows[0][0].as_deref(), Some("7"), "{}", t.id);
+        Box::new(u).close().await;
+
+        ok(
+            &mut c,
+            &fx,
+            &fixture_sql::revoke("SELECT", DB, Some("t"), USER),
+        )
+        .await;
+        let mut u = connect(&ua).await;
         assert_eq!(
-            refused(&mut c, &fx, "SELECT * FROM hv_test.hv_probe").await,
+            refused(&mut u, &ua, &format!("SELECT a FROM {DB}.t")).await,
             1142,
             "{}",
             t.id
         );
-        refused(&mut c, &fx, &format!("GRANT SELECT ON hv_test.* TO {USER}")).await;
-        ok(&mut c, &fx, &format!("DROP USER {USER}")).await;
-        ok(&mut c, &fx, &format!("DROP DATABASE {DB}")).await;
+        Box::new(u).close().await;
+
+        // Nothing beyond its two jobs: the procedures refuse every other account, database,
+        // privilege and variable (SIGNAL SQLSTATE 45000 is error 1644 on both servers), and the
+        // account holds nothing outside hv_fixture_admin.
+        for sql in [
+            "CALL hv_fixture_admin.drop_user('hv_test')",
+            "CALL hv_fixture_admin.change_grant(TRUE, 'SELECT', 'hv_test', NULL, 'hvm4_t01c_user')",
+            "CALL hv_fixture_admin.change_grant(TRUE, 'GRANT OPTION', 'hvm4_t01c_grants', NULL, \
+             'hvm4_t01c_user')",
+            "CALL hv_fixture_admin.set_global('sql_mode', '')",
+        ] {
+            assert_eq!(refused(&mut c, &fx, sql).await, 1644, "{}: {sql}", t.id);
+        }
+        for sql in [
+            "SELECT * FROM hv_test.hv_probe",
+            "CREATE DATABASE hvm4_t01c_not_mine",
+            "SET GLOBAL time_zone = '+00:00'",
+            "DROP USER IF EXISTS 'hvm4_t01c_user'@'%'",
+        ] {
+            refused(&mut c, &fx, sql).await;
+        }
+        ok(&mut c, &fx, &fixture_sql::drop_user(USER)).await;
+        ok(&mut owner, &t, &format!("DROP DATABASE {DB}")).await;
         Box::new(c).close().await;
+        Box::new(owner).close().await;
     }
 }

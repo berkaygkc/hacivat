@@ -511,10 +511,10 @@ fn union_readings(mut a: SafetyReport, b: SafetyReport) -> SafetyReport {
         extend_unique(&mut x.touched.writes, y.touched.writes);
         extend_unique(&mut x.touched.calls, y.touched.calls);
         extend_unique(&mut x.set_targets, y.set_targets);
-        // ## m4-t01c-core (named exception): the union of both readings' catalog effects, so a
-        // reading's DDL is never lost to the other's kind (refresh more, never less).
-        extend_unique(&mut x.ddl, y.ddl);
         x.class = class_of(x.effects);
+        // ## m4-t01c-core (named exception, fix round 1): the catalog effects of the merged
+        // item, from its merged kind, effects and flags (a union: refresh more, never less).
+        crate::ddl_effects::refresh(x);
     }
     let (class, effects, flags) = merge(&a.items);
     a.request_class = class;
@@ -620,6 +620,11 @@ fn classify_with(
         copy_to_client(item, plan);
     }
     taint_after_context_changes(sql, &mut items, ctx.dialect.id);
+    // ## m4-t01c-core (named exception, fix round 1): `ddl` from each item's final kind,
+    // effects and flags (the taint pass may have added `UNKNOWN`).
+    for item in &mut items {
+        crate::ddl_effects::refresh(item);
+    }
     let (request_class, request_effects, flags) = merge(&items);
     // A text the parser already refused is not sent to it again for a fingerprint.
     let refused = items
@@ -1001,6 +1006,8 @@ fn doubt(item: &mut StmtReport, code: ReasonCode, arg: Option<&str>) {
     }
     item.effects |= EffectSet::UNKNOWN;
     item.class = class_of(item.effects);
+    // ## m4-t01c-core (named exception, fix round 1): `UNKNOWN` may change the catalog.
+    crate::ddl_effects::refresh(item);
 }
 
 /// The producer contract (the module docs).

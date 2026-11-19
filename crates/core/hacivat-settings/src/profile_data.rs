@@ -16,7 +16,13 @@
 //! - The profile id must be a canonical UUID (`8-4-4-4-12` ASCII hex digits), so no id can
 //!   name a path outside `profiles/`.
 //! - Sections are read and written through `serde`; a section of the wrong shape is an error
-//!   for that section only.
+//!   for that section only. A section written inline (`metadata = { … }`) is replaced by a
+//!   table at the end of the file.
+//! - The layout of the file is kept (T1c fix round 1): a leading byte-order mark stays, and a
+//!   file whose lines all end in CRLF keeps CRLF. A file that mixes CRLF and LF line endings is
+//!   read but never rewritten ([`ProfileDataError::MixedLineEndings`]).
+//! - The lock is per process: two app instances saving the same file at the same moment can
+//!   lose one save (the last rename wins). One app instance per user is the supported setup.
 
 use std::fmt;
 use std::io;
@@ -44,6 +50,8 @@ pub enum ProfileDataError {
     InvalidSection(String),
     /// The owner's value is not a TOML table.
     Encode(String),
+    /// The file mixes CRLF and LF line endings; it is read, but never rewritten.
+    MixedLineEndings,
     Io(io::Error),
 }
 
@@ -54,6 +62,7 @@ impl fmt::Display for ProfileDataError {
             Self::Corrupt => f.write_str("profile data file is not TOML"),
             Self::InvalidSection(name) => write!(f, "invalid section [{name}]"),
             Self::Encode(e) => write!(f, "section is not a table: {e}"),
+            Self::MixedLineEndings => f.write_str("profile data file mixes CRLF and LF"),
             Self::Io(e) => write!(f, "{e}"),
         }
     }
@@ -75,7 +84,7 @@ impl ProfileDataDoc {
             return Err(ProfileDataError::InvalidProfileId);
         }
         let path = paths.profile_toml(uuid);
-        let doc = read_doc(&path)?;
+        let (doc, _) = read_doc(&path)?;
         Ok(ProfileDataDoc { path, doc })
     }
 
@@ -110,36 +119,75 @@ impl ProfileDataDoc {
         clear_positions(&mut section);
 
         let _writer = WRITER.lock().unwrap_or_else(|e| e.into_inner());
-        let mut doc = read_doc(&self.path)?;
-        match doc.get_mut(name) {
-            Some(Item::Table(old)) => {
-                section.set_position(old.position());
-                *section.decor_mut() = old.decor().clone();
-                *old = section;
-            }
-            Some(other) => *other = Item::Table(section),
-            None => {
-                // After everything the file holds, one blank line below it.
-                section.set_position(Some(last_position(doc.as_table()).map_or(0, |p| p + 1)));
-                if !doc.to_string().is_empty() {
-                    section.decor_mut().set_prefix("\n");
-                }
-                doc.insert(name, Item::Table(section));
-            }
+        let (mut doc, layout) = read_doc(&self.path)?;
+        if layout.mixed {
+            return Err(ProfileDataError::MixedLineEndings);
         }
-        fsio::atomic_write(&self.path, doc.to_string().as_bytes()).map_err(ProfileDataError::Io)?;
+        if let Some(Item::Table(old)) = doc.get_mut(name) {
+            section.set_position(old.position());
+            *section.decor_mut() = old.decor().clone();
+            *old = section;
+        } else {
+            // New, or written some other way (inline): after everything the file holds, one
+            // blank line below it.
+            doc.remove(name);
+            section.set_position(Some(last_position(doc.as_table()).map_or(0, |p| p + 1)));
+            if !doc.to_string().is_empty() {
+                section.decor_mut().set_prefix("\n");
+            }
+            doc.insert(name, Item::Table(section));
+        }
+        let mut out = doc.to_string();
+        if layout.crlf {
+            out = out.replace('\n', "\r\n");
+        }
+        if layout.bom {
+            out.insert(0, BOM);
+        }
+        fsio::atomic_write(&self.path, out.as_bytes()).map_err(ProfileDataError::Io)?;
         self.doc = doc;
         Ok(())
     }
 }
 
-/// The file at `path` as a document; a missing file is an empty one.
-fn read_doc(path: &std::path::Path) -> Result<DocumentMut, ProfileDataError> {
+const BOM: char = '\u{feff}';
+
+/// How a file was laid out on disk, so a save writes it back the same way.
+#[derive(Debug, Clone, Copy, Default)]
+struct Layout {
+    /// It began with a byte-order mark.
+    bom: bool,
+    /// Every line ended in CRLF.
+    crlf: bool,
+    /// Some lines ended in CRLF and some in LF.
+    mixed: bool,
+}
+
+/// The file at `path` as a document (parsed without its byte-order mark and with LF line
+/// endings) and its layout; a missing file is an empty one.
+fn read_doc(path: &std::path::Path) -> Result<(DocumentMut, Layout), ProfileDataError> {
     match std::fs::read_to_string(path) {
-        Ok(text) => text
-            .parse::<DocumentMut>()
-            .map_err(|_| ProfileDataError::Corrupt),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(DocumentMut::new()),
+        Ok(text) => {
+            let (bom, text) = match text.strip_prefix(BOM) {
+                Some(rest) => (true, rest),
+                None => (false, text.as_str()),
+            };
+            let crlf_count = text.matches("\r\n").count();
+            let lf_count = text.matches('\n').count();
+            let layout = Layout {
+                bom,
+                crlf: crlf_count > 0 && crlf_count == lf_count,
+                mixed: crlf_count > 0 && crlf_count != lf_count,
+            };
+            let doc = text
+                .replace("\r\n", "\n")
+                .parse::<DocumentMut>()
+                .map_err(|_| ProfileDataError::Corrupt)?;
+            Ok((doc, layout))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Ok((DocumentMut::new(), Layout::default()))
+        }
         Err(e) if e.kind() == io::ErrorKind::InvalidData => Err(ProfileDataError::Corrupt),
         Err(e) => Err(ProfileDataError::Io(e)),
     }

@@ -262,7 +262,7 @@ fn m4_logins_are_mysql_family_only() {
         if let Some(f) = t.as_fixture() {
             assert_eq!(
                 (f.user.as_str(), f.database.as_str()),
-                ("hv_fixture", "hv_test")
+                ("hv_fixture", "information_schema")
             );
             assert_eq!((f.port, &f.password), (t.port, &t.password));
         }
@@ -282,4 +282,61 @@ fn m4_logins_are_mysql_family_only() {
         (Pg, "17", 54357)
     );
     assert_eq!(wrap.sets, ["full"]);
+}
+
+// ## m4-t01c-fixtures (fix round 1, C1/I1)
+#[test]
+fn fixture_calls_spell_the_procedures_and_refuse_the_rest() {
+    use hacivat_testkit::fixture_sql::{
+        create_user, drop_user, grant, is_test_account, revoke, set_global,
+    };
+    assert_eq!(
+        set_global("time_zone", "+00:00"),
+        "CALL hv_fixture_admin.set_global('time_zone', '+00:00')"
+    );
+    assert_eq!(
+        drop_user("hvm4_t01c_user"),
+        "CALL hv_fixture_admin.drop_user('hvm4_t01c_user')"
+    );
+    assert_eq!(
+        grant("SHOW VIEW", "hvm4_t01c_grants", None, "hvm4_t01c_user"),
+        "CALL hv_fixture_admin.change_grant(TRUE, 'SHOW VIEW', 'hvm4_t01c_grants', NULL, \
+         'hvm4_t01c_user')"
+    );
+    assert_eq!(
+        revoke("SELECT", "hvm4_t01c_grants", Some("t"), "hvm4_t01c_user"),
+        "CALL hv_fixture_admin.change_grant(FALSE, 'SELECT', 'hvm4_t01c_grants', 't', \
+         'hvm4_t01c_user')"
+    );
+    assert!(create_user("hvm4_x", "pw").starts_with("CALL hv_fixture_admin.create_user("));
+    for bad in [
+        "hv_test", "root", "hvm4_", "hvm4_X", "hvm4_a b", "hvm4_a'b", "HVM4_a",
+    ] {
+        assert!(!is_test_account(bad), "{bad:?}");
+    }
+    let refused = |f: fn()| std::panic::catch_unwind(f).is_err();
+    assert!(refused(|| {
+        set_global("sql_mode", "");
+    }));
+    assert!(refused(|| {
+        drop_user("hv_test");
+    }));
+    assert!(refused(|| {
+        grant("GRANT OPTION", "hvm4_db", None, "hvm4_u");
+    }));
+    assert!(refused(|| {
+        grant("SELECT", "hv_test", None, "hvm4_u");
+    }));
+    assert!(refused(|| {
+        create_user("hvm4_u", "a'b");
+    }));
+    let t = all_targets_unfiltered()
+        .into_iter()
+        .find(|t| t.id == "mysql84")
+        .unwrap();
+    let u = t.as_test_account("hvm4_t01c_user").unwrap();
+    assert_eq!(
+        (u.user.as_str(), u.database.as_str()),
+        ("hvm4_t01c_user", "information_schema")
+    );
 }

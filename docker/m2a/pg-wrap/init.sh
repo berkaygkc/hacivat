@@ -55,10 +55,23 @@ sql() {
     psql -X -v ON_ERROR_STOP=1 -q -U "$user" -d "$database" "$@"
 }
 
-# Every database, template0 included (it is connectable while this script runs).
+# Every database, template0 included (it is connectable while this script runs). The list is
+# read into an array first: a failing command substitution in a `for` list would freeze
+# nothing without failing, so the listing's own status is checked, and the list must hold the
+# test database and template0.
 freeze_all() {
     local d
-    for d in $(sql postgres -At -c "SELECT datname FROM pg_catalog.pg_database ORDER BY datname"); do
+    local -a dbs
+    if ! mapfile -t dbs < <(sql postgres -At -c "SELECT datname FROM pg_catalog.pg_database ORDER BY datname"); then
+        echo "pg17wrap: could not read the database list" >&2
+        exit 1
+    fi
+    wait $! || { echo "pg17wrap: listing the databases failed" >&2; exit 1; }
+    if [[ " ${dbs[*]} " != *" $db "* || " ${dbs[*]} " != *" template0 "* ]]; then
+        echo "pg17wrap: the database list lacks $db or template0: ${dbs[*]}" >&2
+        exit 1
+    fi
+    for d in "${dbs[@]}"; do
         sql "$d" -c "VACUUM (FREEZE)"
     done
 }

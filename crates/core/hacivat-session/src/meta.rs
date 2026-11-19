@@ -74,7 +74,11 @@ pub enum MetaError {
 /// binds, R-M4-3).
 ///
 /// Its fields are private and [`MetaQuery::new`] is its only constructor, so a struct literal
-/// outside this module does not compile:
+/// outside this module does not compile. (On a stable toolchain rustdoc does not check the
+/// `E0451` code of a `compile_fail` test, so the test would pass on any compile error; the T1c
+/// review compiled the literal outside the crate and saw exactly E0451, "fields `sql`, `binds`
+/// and `joinable` of struct `MetaQuery` are private". The positive test below proves the rest
+/// of the snippet compiles.)
 ///
 /// ```compile_fail,E0451
 /// use hacivat_session::meta::MetaQuery;

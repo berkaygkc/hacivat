@@ -2416,7 +2416,7 @@ fn finalize(range: TextRange, text: &str, base: Acc, outs: Vec<Acc>) -> StmtRepo
         },
         set_targets,
         // ## m4-t01c-core (fail-closed stub until Task 6)
-        ddl: crate::ddl_effects::stub_effects(kind, acc.flags),
+        ddl: crate::ddl_effects::stub_effects(kind, acc.effects, acc.flags),
     }
 }
 

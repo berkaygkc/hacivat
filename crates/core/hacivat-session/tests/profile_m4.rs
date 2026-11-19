@@ -16,8 +16,17 @@ use hacivat_net::TlsMode;
 use hacivat_session::budget_for;
 use hacivat_session::meta::{MetaConn, MetaConnSpec, MetaError};
 use hacivat_session::profile::{Profile, ProfileDiag, ProfileStore};
-use hacivat_session::session::SessionManager;
+use hacivat_session::session::{SessionManager, TxOutcome};
 use tokio_util::sync::CancellationToken;
+
+// ## fix round 1 (I4)
+#[test]
+fn an_unknown_tx_outcome_counts_as_committed() {
+    assert!(TxOutcome::Committed.counts_as_committed());
+    assert!(TxOutcome::Unknown.counts_as_committed());
+    assert!(!TxOutcome::RolledBack.counts_as_committed());
+    assert!(!TxOutcome::RolledBackTo("s1".into()).counts_as_committed());
+}
 
 /// An M2b `connections.toml`: an SSH profile with every M2b key away from its default.
 const M2B_FILE: &str = "version = 1\n\n[[connection]]\nid = \"6f9619ff-8b86-d011-b42d-00c04fc964ff\"\nname = \"orders\"\nengine = \"postgres\"\nread_only = false\nhost = \"10.0.0.5\"\nport = 5433\nuser = \"deploy\"\nretention = \"forever\"\ntls.mode = \"verify_full\"\ntls.pins = [{ endpoint = \"10.0.0.5:5433\", sha256 = \"0707070707070707070707070707070707070707070707070707070707070707\" }]\ntransport = \"ssh_tunnel\"\nconnect_timeout_s = 15\napplication_name = \"Hacivat\"\nmax_connections = 4\norigin = \"user_typed\"\nallow_unsupported_server = false\nsingle_session = true\ntx_mode = \"manual\"\nisolation = \"serializable\"\nidle_disconnect_s = 900\nssh_retention = \"until_restart\"\n\n[connection.ssh]\nhost_keys = \"strict\"\nkeepalive_s = 30\n\n[[connection.ssh.hops]]\nhost = \"bastion.internal\"\nport = 2222\nuser = \"deploy\"\nauth = \"agent\"\n";

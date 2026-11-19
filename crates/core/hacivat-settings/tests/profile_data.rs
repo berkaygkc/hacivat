@@ -193,3 +193,57 @@ fn profile_data_written_atomically_with_mode_0600() {
         .collect();
     assert_eq!(names, [format!("{UUID}.toml")]);
 }
+
+// ## fix round 1 (review M3)
+#[test]
+fn a_bom_and_crlf_are_kept_and_mixed_endings_are_refused() {
+    let (paths, _dir) = paths();
+    let crlf = "\u{feff}# edited on Windows\r\n[ai]\r\nmodel = \"local\"\r\n";
+    write(&paths, crlf);
+    let mut doc = ProfileDataDoc::load(&paths, UUID).expect("load");
+    doc.save_section("metadata", &metadata()).expect("save");
+    let text = read(&paths);
+    assert!(text.starts_with(crlf), "{text:?}");
+    assert!(text.contains("[metadata]\r\n"), "{text:?}");
+    assert!(
+        !text.replace("\r\n", "").contains('\n'),
+        "a bare LF in {text:?}"
+    );
+    assert_eq!(text.matches('\u{feff}').count(), 1);
+    let fresh = ProfileDataDoc::load(&paths, UUID).expect("load");
+    assert_eq!(
+        fresh.section::<Metadata>("metadata").unwrap(),
+        Some(metadata())
+    );
+
+    // Mixed endings: read, never rewritten.
+    let mixed = "[ai]\r\nmodel = \"local\"\n";
+    write(&paths, mixed);
+    let mut doc = ProfileDataDoc::load(&paths, UUID).expect("load");
+    assert!(matches!(
+        doc.save_section("metadata", &metadata()),
+        Err(ProfileDataError::MixedLineEndings)
+    ));
+    assert_eq!(read(&paths), mixed);
+}
+
+#[test]
+fn an_inline_section_is_replaced_by_a_table() {
+    let (paths, _dir) = paths();
+    write(
+        &paths,
+        "metadata = { scope = \"x\" }\n\n[masks]\ncolumns = []\n",
+    );
+    let mut doc = ProfileDataDoc::load(&paths, UUID).expect("load");
+    doc.save_section("metadata", &metadata()).expect("save");
+    let text = read(&paths);
+    assert!(text.contains("[masks]\ncolumns = []\n"), "{text}");
+    assert!(text.contains("\n[metadata]\n"), "{text}");
+    assert!(!text.contains("[metadata "), "{text}");
+    assert!(!text.contains("metadata = {"), "{text}");
+    let fresh = ProfileDataDoc::load(&paths, UUID).expect("load");
+    assert_eq!(
+        fresh.section::<Metadata>("metadata").unwrap(),
+        Some(metadata())
+    );
+}

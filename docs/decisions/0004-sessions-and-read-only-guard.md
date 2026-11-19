@@ -2711,17 +2711,36 @@ M4 Task 1c (W0). Seams only; every body is a fail-closed stub until its filling 
   `ROLLBACK`, stays `InTx` across `ROLLBACK TO SAVEPOINT`, and `TxState` names no savepoint.
   Refresh after DDL (R-M4-42) needs all three (`Committed`, `RolledBack`, `RolledBackTo(name)`).
   No session emits it until Task 21; every existing match on `SessionEvent` has a wildcard arm.
+  Fix round 1 (I4): `TxOutcome::Unknown` covers a connection lost after `COMMIT` or `ROLLBACK`
+  was sent and before the answer; it counts as committed for refresh
+  (`TxOutcome::counts_as_committed`: refresh more, never less). The emitter derives the outcome
+  from the server's command tag or transaction status, never from the statement text
+  (PostgreSQL's `COMMIT` in a failed transaction answers `ROLLBACK`; `END`, `ABORT`, `COMMIT AND
+  CHAIN`, MySQL's implicit commits and SQLite's outermost `RELEASE` end a transaction silently),
+  and compares savepoint names through `sql_ident::key::match_key`.
 - **`Profile.catalog_sensitive` (R-M4-15)** is a `connections.toml` key left out at `false`, so
   M2a, M2b and M3 files round-trip byte for byte (P-M3b-10); a non-boolean value makes the entry
   invalid (kept on disk, shown), like every M3b key.
 - **`SecretSlot::CatalogKey`** (`catalog-key`) holds the profile's 32-byte catalog data key
-  (Task 11 creates it). It is one of `backend_slots`, so deleting a profile removes it from the
-  keyring.
+  (Task 11 creates it on the profile's first encrypted cache write). It is one of
+  `backend_slots`, so deleting a profile removes it from the keyring. Fix round 1 (ruling on
+  concern 3): `copy_slots` and `copy_all` never copy it, so a duplicated profile gets its own
+  key (it has a new id and an empty cache, and is often re-pointed at another server).
 - **Per-profile data (`hacivat_settings::profile_data`).** The only reader and writer of
   `profiles/<uuid>.toml`: one top-level table per owner (`[metadata]`: M4). A save re-reads the
   file under a process-wide lock, replaces only its own table and writes atomically with mode
   `0600`; every other byte stays. A file that is not TOML is never overwritten, and only a
-  canonical UUID names a file.
+  canonical UUID names a file. Fix round 1 (M3): a leading byte-order mark and CRLF line
+  endings are kept as read; a file that mixes CRLF and LF is read but never rewritten
+  (`MixedLineEndings`); an inline `metadata = { … }` becomes a table at the end. The lock is per
+  process: two app instances saving at the same moment can lose one save.
+- **`StmtReport.ddl` stub scope (fix round 1, I2).** Opaque (refresh the current namespace)
+  when the kind is DDL-class, `Do`, `Call`, `Execute`, `Prepare`, `Other` or `Explain {
+  analyze: true }`; when the flags hold `EXEC_COMMENT`, `DYNAMIC_SQL` or `EXPLAIN_ANALYZE`; or
+  when the effects hold `DDL`, `DDL_TEMP`, `PRIVILEGE`, `ADMIN`, `PREPARE`, `ROUTINE_CALL` or
+  `UNKNOWN`, or are empty. It is a function of the item's kind, effects and flags, recomputed
+  wherever `classify` changes them (the doubt helper, the readings' union, after the taint
+  pass), so it never changes a verdict.
 - **Fixture logins (R-M4-43, carry R-C1-1).** In `docker/m2a/init/mysql.sql`, from the MySQL
   8.0/8.4 and MariaDB manuals:
   - `hv_catalog` reads the system schemas (`SELECT` on `mysql.*`, `performance_schema.*`;
@@ -2732,10 +2751,37 @@ M4 Task 1c (W0). Seams only; every body is a fail-closed stub until its filling 
     44505051940), indistinguishable from a present one; with it, 1305. `sys` is not used as the
     probe's database: its stored functions (`format_bytes`, `ps_thread_id`, ...) carry names that
     are built-ins on some servers only, so they would read as built-ins where they are not.
-  - `hv_fixture` holds `CREATE USER` (global; it cannot be limited to a name pattern), `ALL ...
-    WITH GRANT OPTION` on `hvm4\_%` databases only (a grantor must hold what it grants), and the
-    global-variable privilege: `SYSTEM_VARIABLES_ADMIN` on MySQL, `SUPER` on MariaDB, which has
-    no narrower one. The grant is chosen by `VERSION()` and run through `PREPARE`, since neither
-    server parses the other's privilege name.
+    `hv_catalog` does see `hv_catalog_probe` in `SHOW DATABASES` and `SCHEMATA` (an account
+    sees every database it holds a privilege on): the snapshot generator reads only the four
+    system schemas, and Task 23 asserts the probe database is absent from a snapshot. Note:
+    `SELECT` on `mysql.*` includes the password hashes of `mysql.user` (and MariaDB's
+    `global_priv`); R-M4-43 asks for it, and every account there is a throwaway test account.
+  - `hv_fixture` (fix round 1, ruling I1) holds only `EXECUTE` on the database
+    `hv_fixture_admin`, and signs in on `information_schema` (a sign-in that names a database
+    needs a privilege on it: MySQL 8.4 `USE`; every account may use `information_schema`). Its two
+    jobs run through `SQL SECURITY DEFINER` procedures there:
+    - `set_global(name, value)`: `time_zone` only;
+    - `create_user(user, password)`, `drop_user(user)`, `change_grant(grant, privilege, db,
+      table, user)`: accounts matching `^hvm4_[a-z0-9_]{1,27}$`, databases matching
+      `^hvm4_[a-z0-9_]{1,59}$` (or one of their tables), and 16 allowlisted privileges (no
+      `GRANT OPTION`, no global privilege).
+
+    Each procedure refuses anything else with `SIGNAL SQLSTATE '45000'` (error 1644) before it
+    builds a statement; it quotes values with `QUOTE()` and accepts identifiers of `[a-z0-9_]`
+    only; its parameters are `ascii` with `ascii_bin`, so `IN` and `REGEXP` are exact and
+    case-sensitive. The statements are prepared: `CREATE USER`, `GRANT`, `REVOKE`, `DROP USER`
+    and `SET` can be (MySQL 8.4 "SQL Syntax Permitted in Prepared Statements"; MariaDB ≥ 10.6.2
+    "all statements"), and a stored procedure may use `PREPARE`.
+  - The definer `hv_fixture_definer@localhost` is created `ACCOUNT LOCK` and can never sign in.
+    Locking does not affect running stored programs that name it as `DEFINER` (MySQL 8.4
+    "Account Locking"); MariaDB's lock refuses new client connections only ("Account
+    Locking"). It holds `CREATE USER` (global), `ALL` on `hvm4\_%` databases `WITH GRANT
+    OPTION` (a grantor must hold what it grants), and the global-variable privilege
+    (`SYSTEM_VARIABLES_ADMIN` on MySQL, `SUPER` on MariaDB, which has no narrower one; chosen by
+    `VERSION()` and prepared, since neither server parses the other's name). The procedures are
+    the only way to use them.
+  - `hacivat_testkit::fixture_sql` spells the `CALL`s and refuses the same inputs first;
+    `DockerTarget::as_test_account` signs in as a created `hvm4_*` account, so a grant is
+    checked from that account's side (`SHOW GRANTS` for the current user needs no privilege).
   - Tests: `crates/core/hacivat-driver-mysql/tests/docker_m4_fixtures.rs` (CI's fresh stack;
     locally after C-2).

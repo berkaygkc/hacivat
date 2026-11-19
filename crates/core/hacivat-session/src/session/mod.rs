@@ -324,6 +324,15 @@ pub enum SessionEvent {
 
 // ## m4-t01c-core
 /// How a transaction (or part of one) ended ([`SessionEvent::TxEnded`]).
+///
+/// **Where the outcome comes from** (for the emitter, Task 21): the server's answer, never the
+/// statement text. The command tag or the transaction status after the statement decides:
+/// PostgreSQL answers `COMMIT` in a failed transaction with the tag `ROLLBACK`; `END`,
+/// `ABORT`, `COMMIT AND CHAIN`, MySQL's implicit commits (DDL, `START TRANSACTION` inside a
+/// transaction, `LOCK TABLES`) and SQLite's `RELEASE` of the outermost savepoint end a
+/// transaction without saying so in the text. Savepoint names are compared through
+/// `sql_ident::key::match_key` (PostgreSQL folds an unquoted name; MySQL compares them
+/// case-insensitively), never byte for byte.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TxOutcome {
     Committed,
@@ -331,6 +340,19 @@ pub enum TxOutcome {
     /// `ROLLBACK TO SAVEPOINT <name>`: the transaction stays open; what ran after the
     /// savepoint is undone. The name exactly as the server knows it.
     RolledBackTo(Arc<str>),
+    // ## m4-t01c-core (fix round 1, I4)
+    /// The transaction ended, but how is not known: the connection was lost after `COMMIT` or
+    /// `ROLLBACK` was sent and before the server answered. Treated as committed for refresh
+    /// after DDL (refresh more, never less: [`TxOutcome::counts_as_committed`]).
+    Unknown,
+}
+
+impl TxOutcome {
+    /// Whether refresh after DDL applies the transaction's pending targets: on a commit, and
+    /// when the outcome is unknown (the changes may have been committed).
+    pub fn counts_as_committed(&self) -> bool {
+        matches!(self, TxOutcome::Committed | TxOutcome::Unknown)
+    }
 }
 
 /// What a handle sends its actor.
