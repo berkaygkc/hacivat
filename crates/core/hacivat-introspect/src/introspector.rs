@@ -188,7 +188,8 @@ pub fn introspector_for(dbms: DbmsKind) -> Option<Arc<dyn Introspector>> {
         DbmsKind::MySql | DbmsKind::MariaDb => {
             Some(Arc::new(crate::mysql::MySqlIntrospector { flavor: dbms }))
         }
-        DbmsKind::Sqlite => Some(Arc::new(crate::sqlite::SqliteIntrospector)),
+        // ## m4-t18-sqlite (named exception): the introspector holds options now.
+        DbmsKind::Sqlite => Some(Arc::new(crate::sqlite::SqliteIntrospector::default())),
         _ => None,
     }
 }
@@ -301,7 +302,10 @@ mod tests {
             let caps = introspector_for(dbms).expect("an M4 engine").capabilities();
             assert_eq!(caps.dbms, dbms);
             assert_eq!(caps.transactional_ddl, transactional, "{dbms:?}");
-            assert!(!caps.incremental && caps.facets.is_empty(), "{dbms:?}");
+            // ## m4-t18-sqlite (named exception): SQLite's introspector is written (Task 18).
+            if dbms != DbmsKind::Sqlite {
+                assert!(!caps.incremental && caps.facets.is_empty(), "{dbms:?}");
+            }
         }
         assert!(introspector_for(DbmsKind::MsSql).is_none());
     }

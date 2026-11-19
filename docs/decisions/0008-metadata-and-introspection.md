@@ -1436,3 +1436,75 @@ M4 Task 20 (gpui) fills `connections/dialog/schemas.rs`, `explorer/level_pill.rs
     rows would not give the same syntax tree, a click adds or removes one clause for its row
     (`!@:"s"`, `@:"s"`, `!db:*`, …), verified through `select_explicit`; a click that cannot be
     made that way asks before writing the pattern again.
+
+## m4-t18 — SQLite introspection
+
+Task 18 (HV-INTRO-08; the SQLite parts of HV-INTRO-13 and -15). Spike origin `f690f45`
+(`sqlite.rs`): the bulk joins, their per-relation fallback, `table_options`, the digest and
+the refresh decision, rebuilt on the pack and the model.
+
+- **Connections (R-M4-38).** `main` and attached schemas are read on the separate `mode=ro`
+  reader, inside its deferred `BEGIN` (one consistent snapshot per pass). `temp` is read on
+  the user's own idle connection (`MetaConnSpec { database: Some("temp") }`) with only the
+  pragmas its read-only authorizer allows: `pragma_table_list` and `pragma_module_list` are
+  never run there, so `WITHOUT ROWID`/`STRICT` come from the text scan and FTS5 shadow tables
+  are not recognised in `temp`. A joined read (R-M4-29) uses the same text (every SQLite
+  section is `joinable`); T5 refuses to join SQLite's single session until M7 adds the writer
+  seam, so the joined path is proven only for an in-memory profile, whose metadata connection
+  is the writer.
+- **No `PRAGMA` statement, no spliced schema.** Every pragma is its table-valued function
+  with the schema as a bind. `sqlite_schema` itself needs the schema as a qualifier, so the
+  sections that read it come in three copies: `…Main`, `…Temp` and `…Attached`, the last
+  reading the fixed alias **`hacivat_attached`**. To read an attached schema the introspector
+  attaches the file the connection already lists under that alias, read-only, through
+  `MetaConn::attach_read_only` (the alias is reused on the same reader; a different file
+  under it, or an attached schema on the user's connection, answers `Meta(Unavailable)`).
+  The alias is never listed as a namespace. A schema the connection lacks is
+  `Meta(Unavailable)`, never an empty namespace. No section uses `LIKE`, `GLOB` or a folding
+  function, so `case_sensitive_like` on the user's connection changes nothing (T12 M6).
+- **Change detection.** `main`'s `schema_version` (the table-valued form reads `main` only;
+  `temp` and attached schemas have version 0 and rely on the digest), the main or attached
+  file's `(dev, inode)` (Unix; unknown elsewhere), and an XXH3-128 digest of the **sorted**
+  `(type, name, tbl_name, sql)` rows, each field length-prefixed with NULL distinct from
+  empty. The digest runs on a connection's first pass (`PassConn::Fresh`; the engine opens
+  one reader per task, so every trait pass is one), on an identity change or an unknown
+  identity, without a version, and on every pass with `digest_every_pass` (network shares,
+  edge 5). A different version or digest re-reads the schema whole; otherwise the pass returns
+  no change and the fresh watermark. `data_version` is not used (F8). A fragment re-reads its
+  relations from a whole read of the schema (local; the spike's 10k-table Structure read is
+  245 ms) and returns `Watermark::None`, so the next incremental pass reads the schema again
+  instead of trusting a watermark the fragment did not check.
+- **Existence (R-W2-5).** Relation kinds are `Ok` on a full read and `Scoped` to the asked
+  relations on a fragment; every child kind is `Scoped` to the relations whose children were
+  read. A relation whose columns fail (a broken view, a virtual table with a missing module)
+  is kept `BROKEN` with no columns and stays out of the column and key scopes, so cached
+  children are never decided gone and a column is never "missing" from it. A failed index or
+  FK pragma is `Failed`. CHECKs are not modelled (F10, R-M4-24). The engine's message of a
+  broken relation has no field in the model; it is kept in the read (`SchemaRows::broken`)
+  only.
+- **Shapes.** `hidden` 1 = a hidden virtual-table column, 2 = virtual and 3 = stored
+  generated (expression from the column's definition text); the declared collation from the
+  text, and an index part's collation only where it differs from the column's (`BINARY`
+  without one, and for expressions and the rowid; ASCII-caseless); the rowid alias is the
+  single primary-key column declared exactly `INTEGER` on a rowid table with no `pk`
+  autoindex (`AUTOINCREMENT` → `Identity::AutoIncrement`); FK deferral from the text, clause
+  `k` of `n` being id `n − 1 − k`, unknown (not deferrable) when the counts disagree; triggers
+  under their table or view with timing, event and `WHEN` from the text (`BROKEN` when the
+  text has another shape); `sqlite_*` names `SYSTEM`; `shadow` tables `IMPLICIT`.
+- **State (HV-INTRO-15)** is schema-level: every object carries `Hash(XXH3-64(schema_version
+  ‖ digest))`; `stamps` answers that mark for a key that exists and `None` for one that does
+  not; `check_state` answers `Dropped` or `Unknown` (it has no stored mark; Task 22 compares
+  `stamps`); `check_namespace` the relation count, the mark and an existence digest that
+  `sqlite::ns_check_of` computes the same way from a cached namespace.
+- **Locks.** `SQLITE_BUSY`/`SQLITE_LOCKED` after the driver's 5 s busy timeout: a pass is tried
+  twice, then fails softly (`Failed`, nothing decided).
+- **Built-ins** (`function_list`, `module_list`, `collation_list`) are read live per
+  connection (`SqliteIntrospector::builtins`, R-M4-6); none enters a namespace (the explorer
+  shows no Built-in group for SQLite). **Facets:** `Sources` (`sqlite_schema.sql` of tables,
+  views, indexes and triggers); `Grants` not applicable (empty); `Statistics` without a row
+  estimate; `Dependencies` unsupported (`NotImplemented`). Capabilities: incremental (the
+  version/digest skip), transactional DDL, facets `Sources`, `Grants`, `Statistics`.
+- **File identity (R-W3-3, prepared).** `SqliteIntrospector::file_fingerprint`: XXH3-128 of
+  `main`'s `application_id` and the file's canonical path (stable across DDL and `VACUUM`;
+  the inode is left out so a save-by-rename keeps the database); unknown for an in-memory
+  database.
