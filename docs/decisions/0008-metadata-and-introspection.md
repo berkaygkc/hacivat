@@ -1380,3 +1380,71 @@ new.
   `nulls_first` (only when the model has the vector), `opclass` and `collation` per part on
   PostgreSQL, `no_inherit` on PostgreSQL checks, and an exclusion's deferral from `CheckRare`
   (rendered after the text, which no longer carries it). Golden `pg/index_part_options`.
+
+## m4-t16 — PostgreSQL introspection
+
+Task 16 (HV-INTRO-05; the PostgreSQL parts of HV-INTRO-13 and -15), spike origin `5a5ab08`.
+The packs `packs/pg/{10-core,30-state,40-system}.hvq.sql` are written from the PostgreSQL
+documentation; `pg/**` runs them on Task 5's `MetaConn` (one `SnapshotTxn` per pass, pinned
+`search_path`), decodes them, and builds the model (keys through Task 13's assembly).
+
+- **Change detection** as R-M4-8 and R-M4-48: `age(x.xmin) BETWEEN 0 AND age($W::xid)` with
+  `W mod 2^32` as a bind, the 64-bit span check on the client, `ListExistent` (one tagged
+  `UNION ALL`, namespace-wide existence sets for every kind but columns), `ListExistentComments`
+  (removed comments, finding 3), `ChangedParents`, `ChangedDependents` (one `pg_depend` hop
+  from young rows of the whole database, finding 4) and the facet cascade (finding 5). A
+  relation is always re-emitted with what was read (its cached properties when its own row is
+  not young), so a re-read child replaces its twin and an unread child stays; re-read columns
+  report a `Scoped` column set.
+- **Full instead of incremental:** `no-watermark`, `restart`, `identity` (also a watermark
+  ahead of the server's next XID), `version`, `standby`, `wraparound`, `schema-rename`,
+  `mass-change`, plus `level` (the requested level is above the cached one) and `requested`.
+  **Deviation:** the mass-change rule (> 25 % of the relations) applies only from 20
+  relations (`MASS_CHANGE_MIN_RELATIONS`): below that a few re-reads are cheaper, and the
+  narrow-read guarantees of HV-INTRO-05 tests 1–7 hold on small schemas. Task 28 records the
+  threshold with timings.
+- **The watermark's identity word.** `Watermark::PgXid { w, identity }` has room for the
+  system identifier and the start time only; `system_identifier` stores one 64-bit word: the
+  high 48 bits an XXH3 of `system_identifier | timeline | database oid` (each `-` when the
+  role may not read it), the low 16 bits the major version. A different word's high bits is
+  `identity`, its low bits `version`; the start time is `restart`.
+- **The canary** reads the backend's own `pg_stat_activity.backend_xid IS NULL` (deviation
+  from the plan's `pg_current_xact_id_if_assigned()`): Task 5's token guard refuses every
+  `pg_current_xact_id*` and `txid_current*` name by prefix, the read-only forms included. A
+  pass whose canary is false fails (`Protocol`), and nothing is published.
+- **Joined text.** A `joinable` section is checked by the guard of every lexer (the joined
+  engine is unknown), and `::` does not lex everywhere: the `StateOf<Kind>` sections cast with
+  `CAST(x AS text)`. No section comment holds a `;` (the guard refuses it in raw text).
+  `tests/pg_rows.rs` runs every rendered variant through `check_own_text` and every joinable
+  one through `check_read_text`.
+- **Composite types are types**, one model object (`CompositeType`, identity = the `pg_type`
+  oid, attributes from `RetrieveTypeAttributes`), never also a relation. Base types
+  (`typtype b`) have no model kind: `Unknown` with the raw kind `pg-base-type`; system types
+  (`Mode::System`) `pg-type`.
+- **State marks** (`stamps`): per object an XXH3-64 of the sorted `(source, xmin)` rows of
+  its `StateOf<Kind>` section (own row, comments, children, one dependency hop); `None` when
+  its own row is gone; `Some(StateMark::None)` for a key without an oid (a column).
+  `check_state` answers `Dropped` for a gone object and `Unknown` otherwise: comparing marks
+  is Task 22's. `check_namespace` answers the existence count and digest and
+  `StateMark::Xmin` of the cached watermark when nothing changed since it (else of the
+  current snapshot xmin), running only `Identity`, `ListExistent` and the two change queries.
+- **Fragments** report `Scoped` sets resolved by oid (RR-1) and `Watermark::None`: a fragment
+  reads a few objects, so the engine must keep the namespace's watermark (carry to T15; with
+  `None` the next pass is full, which is correct).
+- **Server facts** come from `Identity`: version text and number, encoding,
+  `standard_conforming_strings`, recovery, the database's default collation
+  (`PassReport.facts`). `list_namespaces` lists the connectable databases
+  (`NsKind::Database`) and the connected database's schemas.
+- **Scope filter:** applied on the client (objects it excludes are not built, and their
+  existence identities are left out). Server pushdown waits for the trait's filter
+  parameter (ruling R-W3-2); `PassOpts.filter` carries it.
+- **`hv_m4_big`** is a schema of database `hv_test` on `pg17` (deviation from "database":
+  no second connection per test, no `CREATE DATABASE`), built and dropped in 250-table `DO`
+  blocks of `IF [NOT] EXISTS` statements (`testing::big_catalog`).
+- **Named exceptions:** `hacivat-meta/src/props.rs` re-exports `ArgMode`, `FnArg`, `FnKind`,
+  `Volatility` (one line: an introspector builds `RoutineProps` without depending on
+  `sql-catalog`); the T1c/T4 stub tests (`introspector.rs`, `pack/mod.rs`, `tests/seams.rs`)
+  now expect the real PostgreSQL introspector; `hacivat-introspect` gains the dev-dependencies
+  `hacivat-net` and `hacivat-driver` (the Docker tests build `ConnectDeps`; the hacivat-exec
+  precedent; `Cargo.lock` gains edges only) — a manifest change that needs a controller
+  ruling.

@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use bitflags::bitflags;
-use sql_catalog::types::{FnArg, FnKind, Volatility};
+// ## m4-t16-pg (named exception): the routine payload types are re-exported so an
+// introspector that does not depend on `sql-catalog` can build `RoutineProps`.
+pub use sql_catalog::types::{ArgMode, FnArg, FnKind, Volatility};
 
 use crate::ids::{Ref, SourceRef};
 use crate::name::Name;

@@ -197,6 +197,39 @@ async fn stub_stamps_and_facet_not_implemented() {
         let intro = introspector_for(dbms).expect("an M4 engine");
         let mut c = MetaConn::offline(dbms);
         let n = ns("public");
+        // ## m4-t16-pg (named exception): the PostgreSQL introspector is real since Task 16;
+        // on an offline connection every read fails `Unavailable` (nothing is published), and
+        // its facets stay Task 16b's stubs.
+        if dbms == DbmsKind::Postgres {
+            let off = Err(IntroError::Meta(
+                hacivat_session::meta::MetaError::Unavailable,
+            ));
+            assert_eq!(
+                intro.stamps(&mut c, &keys).await,
+                off.clone().map(|()| Vec::new())
+            );
+            assert_eq!(
+                intro.list_namespaces(&mut c).await,
+                off.clone().map(|()| Vec::new())
+            );
+            assert_eq!(
+                intro.check_state(&mut c, &keys).await,
+                off.clone().map(|()| Vec::new())
+            );
+            assert!(matches!(
+                intro
+                    .introspect(&mut c, &n, Mode::Full, Level::Structure, None, &cancel)
+                    .await,
+                Err(IntroError::Meta(_))
+            ));
+            for kind in [FacetKind::Grants, FacetKind::Dependencies] {
+                assert_eq!(
+                    intro.facet(&mut c, &n, &keys, kind).await,
+                    Err(IntroError::NotImplemented)
+                );
+            }
+            continue;
+        }
         assert_eq!(
             intro.stamps(&mut c, &keys).await,
             Err(IntroError::NotImplemented),

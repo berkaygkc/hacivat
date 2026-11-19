@@ -301,7 +301,9 @@ mod tests {
             let caps = introspector_for(dbms).expect("an M4 engine").capabilities();
             assert_eq!(caps.dbms, dbms);
             assert_eq!(caps.transactional_ddl, transactional, "{dbms:?}");
-            assert!(!caps.incremental && caps.facets.is_empty(), "{dbms:?}");
+            // ## m4-t16-pg (named exception): PostgreSQL is incremental since Task 16.
+            assert_eq!(caps.incremental, dbms == DbmsKind::Postgres, "{dbms:?}");
+            assert!(caps.facets.is_empty(), "{dbms:?}");
         }
         assert!(introspector_for(DbmsKind::MsSql).is_none());
     }
