@@ -9,6 +9,8 @@ use sql_text::TextRange;
 use crate::classify::ClassifyCtx;
 use crate::report::StmtReport;
 
+// ## m4-t06-ddl-effects: each backend's reading of a statement's catalog effects.
+pub(crate) mod ddl_effects;
 pub(crate) mod interim;
 pub(crate) mod pg;
 pub(crate) mod plan;

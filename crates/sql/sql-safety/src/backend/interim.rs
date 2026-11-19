@@ -187,6 +187,8 @@ fn mark_unknown(item: &mut StmtReport, code: ReasonCode) {
     if !item.reasons.contains(&reason) {
         item.reasons.push(reason);
     }
+    // ## m4-t06-ddl-effects: `UNKNOWN` may change what the statement names.
+    crate::ddl_effects::refresh(item);
 }
 
 fn supported(d: DialectId) -> bool {
@@ -670,6 +672,12 @@ fn analyse_view(view: &str, ctx: &ClassifyCtx, depth: u8, pre: Option<&Lexed>) -
             walk.view = Some((view, LineIndex::new(view)));
             for s in &stmts {
                 let _ = s.visit(&mut walk);
+            }
+            // ## m4-t06-ddl-effects: the catalog effects of each top-level statement, after
+            // the walk (no verdict field reads them).
+            for s in &stmts {
+                acc.ddl
+                    .extend(crate::backend::ddl_effects::interim::effects(s, d));
             }
         }
         Err(ParserError::RecursionLimitExceeded) => acc.doubt(ReasonCode::TooComplex, whole),
@@ -2400,7 +2408,7 @@ fn finalize(range: TextRange, text: &str, base: Acc, outs: Vec<Acc>) -> StmtRepo
         let mut seen = HashSet::new();
         list.retain(|o| seen.insert(o.clone()));
     }
-    StmtReport {
+    let mut report = StmtReport {
         range,
         kind,
         effects: acc.effects,
@@ -2415,9 +2423,12 @@ fn finalize(range: TextRange, text: &str, base: Acc, outs: Vec<Acc>) -> StmtRepo
             Confidence::Exact
         },
         set_targets,
-        // ## m4-t01c-core (fail-closed stub until Task 6)
-        ddl: crate::ddl_effects::stub_effects(kind, acc.effects, acc.flags),
-    }
+        // ## m4-t01c-core / ## m4-t06-ddl-effects: what every reading's parse named, then the
+        // opaque rule (`refresh`).
+        ddl: acc.ddl,
+    };
+    crate::ddl_effects::refresh(&mut report);
+    report
 }
 
 #[cfg(test)]

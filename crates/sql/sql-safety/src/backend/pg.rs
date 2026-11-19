@@ -700,11 +700,12 @@ fn unknown_report(range: TextRange, codes: &[ReasonCode]) -> StmtReport {
         destructive: Vec::new(),
         confidence: Confidence::Conservative,
         set_targets: Vec::new(),
-        // ## m4-t01c-core: nothing proved, so opaque (the stub's scope).
-        ddl: crate::ddl_effects::stub_effects(
+        // ## m4-t01c-core / ## m4-t06-ddl-effects: nothing proved, so opaque.
+        ddl: crate::ddl_effects::finish(
             StmtKind::Other,
             EffectSet::UNKNOWN,
             RiskFlags::empty(),
+            Vec::new(),
         ),
     }
 }
@@ -718,6 +719,8 @@ fn doubt(r: &mut StmtReport, code: ReasonCode) {
     });
     r.effects |= EffectSet::UNKNOWN;
     r.class = class_of(r.effects);
+    // ## m4-t06-ddl-effects: `UNKNOWN` may change what the statement names.
+    crate::ddl_effects::refresh(r);
 }
 
 /// Whether libpg_query's raw statements are `items`: as many, in order, and each item exactly
@@ -846,7 +849,16 @@ fn statement(
     let mut c = Classifier::new(sql, range, ctx, table, toks);
     g::walk(root, &mut c);
     let changes_context = c.changes_context;
-    (c.finish(), changes_context)
+    let mut report = c.finish();
+    // ## m4-t06-ddl-effects: the catalog effects, read from the same tree after the verdict
+    // fields are final (nothing above reads them).
+    if let Some(stmt) = raw.stmt.as_deref() {
+        let namer = crate::backend::ddl_effects::pg::Namer::new(sql, range, toks);
+        let named = crate::backend::ddl_effects::pg::effects(stmt, &namer);
+        report.ddl = named;
+        crate::ddl_effects::refresh(&mut report);
+    }
+    (report, changes_context)
 }
 
 /// Context flags of an entered message, undone on `leave`.
@@ -962,8 +974,9 @@ impl<'a, 's> Classifier<'a, 's> {
                 Confidence::Exact
             },
             set_targets: self.set_targets,
-            // ## m4-t01c-core (fail-closed stub until Task 6)
-            ddl: crate::ddl_effects::stub_effects(kind, self.effects, self.flags),
+            // ## m4-t01c-core / ## m4-t06-ddl-effects: the opaque rule only; `statement` adds
+            // the effects the tree names.
+            ddl: crate::ddl_effects::finish(kind, self.effects, self.flags, Vec::new()),
         }
     }
 
@@ -2076,8 +2089,8 @@ fn node_location(n: &pb::Node) -> Option<usize> {
 
 /// Whether an `EXPLAIN` option list asks for `ANALYZE`: any `analyze`/`analyse` option that is
 /// not plainly false (`false`, `off`, `0`; PostgreSQL rejects other spellings, which count as
-/// true here).
-fn explain_analyze(options: &[pb::Node]) -> bool {
+/// true here). ## m4-t06-ddl-effects: `pub(crate)` for the DDL effects of `EXPLAIN ANALYZE`.
+pub(crate) fn explain_analyze(options: &[pb::Node]) -> bool {
     options.iter().any(|o| match &o.node {
         Some(pb::node::Node::DefElem(d))
             if d.defname.eq_ignore_ascii_case("analyze")
