@@ -25,7 +25,10 @@ pub fn domain_prefixes(domain: &str) -> Option<&'static [&'static str]> {
         // ## m3a-t01b-seams: `exec-*` and `cursor-*`, the output log (Task 23, P24).
         // ## m3b-t04-safety: `safety-*`, the classifier's classes, reasons and destructive
         // patterns (Task 4, P-M3b-T4-1).
-        "hacivat-core" => &["hc", "db", "error", "exec", "cursor", "safety"],
+        // ## m4-t01a-model: `model-*` and `ddl-*` (M4 Task 1a).
+        "hacivat-core" => &[
+            "hc", "db", "error", "exec", "cursor", "safety", "model", "ddl",
+        ],
         "karagoz-cli" => &["kg"],
         "perde-server" => &["ps", "db", "error"],
         "perde-web" => &["pw"],

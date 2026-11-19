@@ -669,3 +669,427 @@ safety-destructive-drop-owned-cascade = { $role } rolünün bu veritabanında sa
 exec-drop-owned-several-targets = Gönderilmedi: rol adı tek bir DROP OWNED'ı onaylar; burada başka hedef de var. Tek başına çalıştırın.
 # Review: PO
 exec-drop-owned-no-target = Gönderilmedi: Hacivat bu DROP OWNED ifadesinin kimin nesnelerini kaldırdığını belirleyemiyor; bu yüzden rolün adını yazmanızı isteyemiyor.
+
+## m4-t01a-model
+
+# Review: PO
+model-kind-root = { $count ->
+        [one] sunucu
+       *[other] sunucular
+    }
+# Review: PO
+model-kind-database = { $count ->
+        [one] veritabanı
+       *[other] veritabanları
+    }
+# Review: PO
+model-kind-schema = { $count ->
+        [one] şema
+       *[other] şemalar
+    }
+# Review: PO
+model-kind-table = { $count ->
+        [one] tablo
+       *[other] tablolar
+    }
+# Review: PO
+model-kind-view = { $count ->
+        [one] görünüm
+       *[other] görünümler
+    }
+# Review: PO
+model-kind-materialized-view = { $count ->
+        [one] somutlaştırılmış görünüm
+       *[other] somutlaştırılmış görünümler
+    }
+# Review: PO
+model-kind-foreign-table = { $count ->
+        [one] dış tablo
+       *[other] dış tablolar
+    }
+# Review: PO
+model-kind-virtual-table = { $count ->
+        [one] sanal tablo
+       *[other] sanal tablolar
+    }
+# Review: PO
+model-kind-column = { $count ->
+        [one] sütun
+       *[other] sütunlar
+    }
+# Review: PO
+model-kind-index = { $count ->
+        [one] indeks
+       *[other] indeksler
+    }
+# Review: PO
+model-kind-primary-key = { $count ->
+        [one] birincil anahtar
+       *[other] birincil anahtarlar
+    }
+# Review: PO
+model-kind-unique-key = { $count ->
+        [one] benzersiz anahtar
+       *[other] benzersiz anahtarlar
+    }
+# Review: PO
+model-kind-foreign-key = { $count ->
+        [one] yabancı anahtar
+       *[other] yabancı anahtarlar
+    }
+# Review: PO
+model-kind-check = { $count ->
+        [one] denetim kısıtı
+       *[other] denetim kısıtları
+    }
+# Review: PO
+model-kind-exclusion = { $count ->
+        [one] dışlama kısıtı
+       *[other] dışlama kısıtları
+    }
+# Review: PO
+model-kind-default = { $count ->
+        [one] varsayılan değer
+       *[other] varsayılan değerler
+    }
+# Review: PO
+model-kind-trigger = { $count ->
+        [one] tetikleyici
+       *[other] tetikleyiciler
+    }
+# Review: PO
+model-kind-rule = { $count ->
+        [one] kural
+       *[other] kurallar
+    }
+# Review: PO
+model-kind-policy = { $count ->
+        [one] politika
+       *[other] politikalar
+    }
+# Review: PO
+model-kind-partition = { $count ->
+        [one] bölüm
+       *[other] bölümler
+    }
+# Review: PO
+model-kind-subpartition = { $count ->
+        [one] alt bölüm
+       *[other] alt bölümler
+    }
+# Review: PO
+model-kind-routine = { $count ->
+        [one] fonksiyon
+       *[other] fonksiyonlar
+    }
+# Review: PO
+model-kind-procedure = { $count ->
+        [one] prosedür
+       *[other] prosedürler
+    }
+# Review: PO
+model-kind-aggregate = { $count ->
+        [one] toplama fonksiyonu
+       *[other] toplama fonksiyonları
+    }
+# Review: PO
+model-kind-argument = { $count ->
+        [one] argüman
+       *[other] argümanlar
+    }
+# Review: PO
+model-kind-sequence = { $count ->
+        [one] sekans
+       *[other] sekanslar
+    }
+# Review: PO
+model-kind-domain = { $count ->
+        [one] alan türü
+       *[other] alan türleri
+    }
+# Review: PO
+model-kind-enum-type = { $count ->
+        [one] enum türü
+       *[other] enum türleri
+    }
+# Review: PO
+model-kind-composite-type = { $count ->
+        [one] bileşik tür
+       *[other] bileşik türler
+    }
+# Review: PO
+model-kind-range-type = { $count ->
+        [one] aralık türü
+       *[other] aralık türleri
+    }
+# Review: PO
+model-kind-alias-type = { $count ->
+        [one] takma ad türü
+       *[other] takma ad türleri
+    }
+# Review: PO
+model-kind-table-type = { $count ->
+        [one] tablo türü
+       *[other] tablo türleri
+    }
+# Review: PO
+model-kind-synonym = { $count ->
+        [one] eş ad
+       *[other] eş adlar
+    }
+# Review: PO
+model-kind-extension = { $count ->
+        [one] eklenti
+       *[other] eklentiler
+    }
+# Review: PO
+model-kind-collation = { $count ->
+        [one] sıralama kuralı
+       *[other] sıralama kuralları
+    }
+# Review: PO
+model-kind-operator = { $count ->
+        [one] operatör
+       *[other] operatörler
+    }
+# Review: PO
+model-kind-operator-class = { $count ->
+        [one] operatör sınıfı
+       *[other] operatör sınıfları
+    }
+# Review: PO
+model-kind-operator-family = { $count ->
+        [one] operatör ailesi
+       *[other] operatör aileleri
+    }
+# Review: PO
+model-kind-cast = { $count ->
+        [one] tür dönüşümü
+       *[other] tür dönüşümleri
+    }
+# Review: PO
+model-kind-language = { $count ->
+        [one] dil
+       *[other] diller
+    }
+# Review: PO
+model-kind-access-method = { $count ->
+        [one] erişim yöntemi
+       *[other] erişim yöntemleri
+    }
+# Review: PO
+model-kind-foreign-data-wrapper = { $count ->
+        [one] dış veri sarmalayıcısı
+       *[other] dış veri sarmalayıcıları
+    }
+# Review: PO
+model-kind-foreign-server = { $count ->
+        [one] dış sunucu
+       *[other] dış sunucular
+    }
+# Review: PO
+model-kind-user-mapping = { $count ->
+        [one] kullanıcı eşlemesi
+       *[other] kullanıcı eşlemeleri
+    }
+# Review: PO
+model-kind-event-trigger = { $count ->
+        [one] olay tetikleyicisi
+       *[other] olay tetikleyicileri
+    }
+# Review: PO
+model-kind-role = { $count ->
+        [one] rol
+       *[other] roller
+    }
+# Review: PO
+model-kind-user = { $count ->
+        [one] kullanıcı
+       *[other] kullanıcılar
+    }
+# Review: PO
+model-kind-login = { $count ->
+        [one] giriş hesabı
+       *[other] giriş hesapları
+    }
+# Review: PO
+model-kind-tablespace = { $count ->
+        [one] tablespace
+       *[other] tablespace'ler
+    }
+# Review: PO
+model-kind-event = { $count ->
+        [one] zamanlanmış olay
+       *[other] zamanlanmış olaylar
+    }
+# Review: PO
+model-kind-virtual-table-module = { $count ->
+        [one] sanal tablo modülü
+       *[other] sanal tablo modülleri
+    }
+# Review: PO
+model-kind-dictionary = { $count ->
+        [one] sözlük
+       *[other] sözlükler
+    }
+# Review: PO
+model-kind-row-policy = { $count ->
+        [one] satır politikası
+       *[other] satır politikaları
+    }
+# Review: PO
+model-kind-settings-profile = { $count ->
+        [one] ayar profili
+       *[other] ayar profilleri
+    }
+# Review: PO
+model-kind-quota = { $count ->
+        [one] kota
+       *[other] kotalar
+    }
+# Review: PO
+model-kind-projection = { $count ->
+        [one] projeksiyon
+       *[other] projeksiyonlar
+    }
+# Review: PO
+model-kind-package = { $count ->
+        [one] paket
+       *[other] paketler
+    }
+# Review: PO
+model-kind-package-body = { $count ->
+        [one] paket gövdesi
+       *[other] paket gövdeleri
+    }
+# Review: PO
+model-kind-object-type = { $count ->
+        [one] nesne türü
+       *[other] nesne türleri
+    }
+# Review: PO
+model-kind-db-link = { $count ->
+        [one] veritabanı bağlantısı
+       *[other] veritabanı bağlantıları
+    }
+# Review: PO
+model-kind-collection = { $count ->
+        [one] koleksiyon
+       *[other] koleksiyonlar
+    }
+# Review: PO
+model-kind-mongo-view = { $count ->
+        [one] görünüm
+       *[other] görünümler
+    }
+# Review: PO
+model-kind-time-series = { $count ->
+        [one] zaman serisi koleksiyonu
+       *[other] zaman serisi koleksiyonları
+    }
+# Review: PO
+model-kind-inferred-field = { $count ->
+        [one] çıkarsanan alan
+       *[other] çıkarsanan alanlar
+    }
+# Review: PO
+model-kind-redis-database = { $count ->
+        [one] veritabanı
+       *[other] veritabanları
+    }
+# Review: PO
+model-kind-redis-module = { $count ->
+        [one] modül
+       *[other] modüller
+    }
+# Review: PO
+model-kind-unknown = { $count ->
+        [one] türü bilinmeyen nesne
+       *[other] türü bilinmeyen nesneler
+    }
+# Review: PO
+model-kind-schema-mysql = { $count ->
+        [one] veritabanı
+       *[other] veritabanları
+    }
+# Review: PO
+model-name-has-invisible-chars = Bu ad görünmeyen karakterler içeriyor.
+# Review: PO
+model-cache-rebuilt = { $reason ->
+        [corrupt] Önbellekteki meta veriler bozulmuştu; temizlendi ve yeniden okunuyor.
+        [server-changed] Bu bağlantı artık başka bir sunucuya ulaşıyor; önbellekteki meta veriler yeniden okunuyor.
+        [wrong-key] Bu bağlantının önbellekteki meta verilerini koruyan anahtar değişti; önbellek temizlendi ve yeniden okunuyor.
+       *[incompatible] Önbellekteki meta veriler farklı bir sürüm tarafından yazılmış; yeniden okunuyor.
+    }
+# Review: PO
+model-cache-offline = { $date } tarihli önbellekteki meta veriler gösteriliyor
+# Review: PO
+model-cache-disabled-by-policy = Bu bağlantının meta verileri diskte önbelleğe alınmıyor.
+# Review: PO
+ddl-unsupported-kind = { $dbms } bu tür nesneler için DDL üretimini desteklemiyor ({ $kind }).
+# Review: PO
+ddl-warn-executable-comment = Bu tanım MySQL çalıştırılabilir yorumları (/*! … */) içeriyor. Betik çalıştığında bunlar SQL olarak çalışır.
+# Review: PO
+ddl-sqlite-rebuild-notice = SQLite bunu yerinde değiştiremiyor; betik tabloyu yeniden oluşturup satırlarını kopyalar.
+# Review: PO
+ddl-sqlite-placement-forced = SQLite kısıtları tablonun içinde tutar; bu yüzden oraya yerleştirildiler.
+# Review: PO
+ddl-grants-not-loaded = Bu nesnenin yetkileri okunmadı; betikte GRANT ifadesi yok.
+# Review: PO
+ddl-grants-partial = Yalnızca bu oturumun görebildiği yetkiler dahil; başkaları da olabilir.
+# Review: PO
+ddl-policies-not-loaded = Satır düzeyi güvenlik politikaları henüz okunmuyor; betik bunları içermiyor.
+# Review: PO
+ddl-opt-placement = Kısıtlar
+# Review: PO
+ddl-opt-placement-inside-column = Sütunun içinde
+# Review: PO
+ddl-opt-placement-inside-table = Tablonun içinde
+# Review: PO
+ddl-opt-placement-after-table = Tablodan sonra
+# Review: PO
+ddl-opt-qualify = Nitelendirme
+# Review: PO
+ddl-opt-qualify-auto = Otomatik
+# Review: PO
+ddl-opt-qualify-never = Hiçbir zaman
+# Review: PO
+ddl-opt-qualify-always = Her zaman
+# Review: PO
+ddl-opt-or-replace = OR REPLACE kullan
+# Review: PO
+ddl-opt-or-replace-tooltip = Veritabanının desteklediği yerlerde CREATE OR REPLACE yazar.
+# Review: PO
+ddl-opt-if-not-exists = IF NOT EXISTS kullan
+# Review: PO
+ddl-opt-if-not-exists-tooltip = Veritabanının desteklediği yerlerde IF NOT EXISTS yazar.
+# Review: PO
+ddl-opt-skip-grants = Yetkileri atla
+# Review: PO
+ddl-opt-skip-grants-tooltip = GRANT ifadelerini dışarıda bırakır.
+# Review: PO
+ddl-opt-skip-owner = Sahibi atla
+# Review: PO
+ddl-opt-skip-owner-tooltip = Sahiplik ifadelerini dışarıda bırakır.
+# Review: PO
+ddl-opt-skip-definer = DEFINER'ı atla
+# Review: PO
+ddl-opt-skip-definer-tooltip = MySQL ve MariaDB görünümleri, rutinleri, tetikleyicileri ve olaylarındaki DEFINER ifadesini dışarıda bırakır.
+# Review: PO
+ddl-opt-surrogate-names = Adsız kısıtları adlandır
+# Review: PO
+ddl-opt-surrogate-names-tooltip = Adsız kısıtlar için veritabanının ürettiği adları yazar.
+# Review: PO
+ddl-opt-server-definitions = Sunucunun verdiği tanımlar
+# Review: PO
+ddl-opt-server-definitions-tooltip = Üretilen DDL yerine veritabanının bildirdiği tanım metnini gösterir.
+# Review: PO
+ddl-cat-create = Oluştur
+# Review: PO
+ddl-cat-drop = Kaldır
+# Review: PO
+ddl-cat-truncate = Boşalt
+# Review: PO
+ddl-cat-server-definitions = Sunucunun verdiği tanımlar
+# Review: PO
+ddl-cat-alter = Değiştir

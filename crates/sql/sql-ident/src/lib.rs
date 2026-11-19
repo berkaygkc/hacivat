@@ -7,7 +7,11 @@
 
 pub mod fold;
 pub mod ident;
+// ## m4-t01a-model: identifier keys (Task 3, R-M4-28/-41) and quoting (Task 7), named
+// exception in M3's crate; fail-closed stubs until those tasks.
+pub mod key;
 pub mod qualified;
+pub mod quote;
 
 pub use fold::{PG_MAX_IDENT_BYTES, fold, ident_eq};
 pub use ident::{Ident, QualifiedName};

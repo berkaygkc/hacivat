@@ -1,0 +1,70 @@
+# The M4 metadata fuzz targets (cargo-fuzz; M4 Task 1a, fix round 2). Its own workspace, apart
+# from `fuzz/` (the SQL targets), so the SQL fuzz graph stays exactly what it was before M4 and
+# neither package compiles the other's dependencies under the sanitizer flags.
+#
+# Like `fuzz/`: excluded from the root workspace (`exclude = ["third_party", "fuzz"]` covers
+# this directory), never shipped, `libfuzzer-sys`'s NCSA licence accepted for it only (ADR 0005
+# `m3b-t20`). `hacivat-introspect` comes **without** its default feature `session`: the fuzzed
+# grammars (`pack` parser, `scope`, `filter`) never need `hacivat-session`, and that keeps the
+# session, network and SSH stack (`russh`) out of the build (ADR 0008 `m4-t01a`).
+#
+# `Cargo.lock` is generated from the root lock (copy `../../Cargo.lock` here, then run
+# `cargo metadata` in this directory); CI builds `--locked` and asserts that `third_party/` and
+# the lockfile are unchanged.
+[package]
+name = "hacivat-fuzz-meta"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/berkaygkc/hacivat"
+description = "Dev-only: cargo-fuzz targets over cache rows, system snapshots, scope patterns and query packs (M4)"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+hacivat-meta = { path = "../../crates/core/hacivat-meta", default-features = false, features = ["system"] }
+hacivat-introspect = { path = "../../crates/core/hacivat-introspect", default-features = false }
+
+# The four targets; bodies: Task 11 `catalog_row_decode`, Task 23 `system_snapshot_decode`,
+# Task 12 `scope_pattern`, Task 4 `pack_parse`.
+[[bin]]
+name = "catalog_row_decode"
+path = "fuzz_targets/catalog_row_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "system_snapshot_decode"
+path = "fuzz_targets/system_snapshot_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scope_pattern"
+path = "fuzz_targets/scope_pattern.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pack_parse"
+path = "fuzz_targets/pack_parse.rs"
+test = false
+doc = false
+bench = false
+
+# Copied from the root `Cargo.toml` (P-M3b-15); keep in step with it. Only `pg_query` is in
+# this graph (through `sql-safety`); the others stay so a future edge never reaches the
+# registry crates.
+[patch.crates-io]
+mysql_async = { path = "../../third_party/mysql_async" }
+pg_query = { path = "../../third_party/pg_query" }
+tokio-postgres = { path = "../../third_party/tokio-postgres" }

@@ -9,13 +9,21 @@ description = "Introspection: catalog query packs, scope and filters, the schedu
 
 # Core layer (`IntrospectNotExec`): never `hacivat-exec` or `hacivat-results`; catalog SQL never
 # travels the execution path (R-M4-7). `hacivat-exec` may depend on this crate (Task 21).
+#
+# ## m4-t01a-model (fix round 2): `session` (default) gates every module that needs a live
+# connection (session, secrets, settings); without it the crate is the pure grammars (`pack`
+# parser, `scope`, `filter`, `glob`) that `fuzz/meta` builds without the session/SSH stack.
+[features]
+default = ["session"]
+session = ["dep:hacivat-session", "dep:hacivat-secrets", "dep:hacivat-settings"]
+
 [dependencies]
 hacivat-meta = { workspace = true, features = ["catalog", "persist", "system"] }
-hacivat-session.workspace = true
+hacivat-session = { workspace = true, optional = true }
 hacivat-proto.workspace = true
 hacivat-values.workspace = true
-hacivat-secrets.workspace = true
-hacivat-settings.workspace = true
+hacivat-secrets = { workspace = true, optional = true }
+hacivat-settings = { workspace = true, optional = true }
 sql-ident.workspace = true
 sql-safety.workspace = true
 sql-dialect.workspace = true
