@@ -1226,19 +1226,20 @@ fn count(n: usize) -> ArgValue {
     ArgValue::Count(u64::try_from(n).unwrap_or(u64::MAX))
 }
 
-/// The folded section's summary: what the scope reads (mock 7).
-fn summary(s: &SchemasSection, cx: &App) -> (SharedString, TextSource) {
+/// The folded section's summary: what the scope reads (mock 7). Always a Fluent message (the
+/// disclosure draws its summary as one): with nothing listed, the pattern is its argument.
+fn summary(s: &SchemasSection, cx: &App) -> SharedString {
     let Some(list) = &s.list else {
-        // Not listed: the pattern itself (data).
-        return (s.pattern_text(cx).into(), TextSource::Data);
+        return t_dynamic(
+            cx,
+            "hv-scope-summary-pattern",
+            vec![("pattern", ArgValue::Text(s.pattern_text(cx)))],
+        );
     };
     let sel = s.selection(list);
     let dbs = list.databases.len();
     if list.two_level && sel.all_databases {
-        return (
-            t_dynamic(cx, "hv-scope-summary-mysql", vec![("total", count(dbs))]),
-            TextSource::Fluent,
-        );
+        return t_dynamic(cx, "hv-scope-summary-mysql", vec![("total", count(dbs))]);
     }
     let total = list.schema_count();
     let on: usize = sel
@@ -1247,18 +1248,12 @@ fn summary(s: &SchemasSection, cx: &App) -> (SharedString, TextSource) {
         .map(|d| d.schemas.iter().filter(|b| **b).count())
         .sum();
     if !list.two_level && total > 0 && on == total {
-        return (
-            t_dynamic(cx, "hv-scope-summary-mysql", vec![("total", count(total))]),
-            TextSource::Fluent,
-        );
+        return t_dynamic(cx, "hv-scope-summary-mysql", vec![("total", count(total))]);
     }
-    (
-        t_dynamic(
-            cx,
-            "hv-scope-summary",
-            vec![("n", count(on)), ("total", count(total))],
-        ),
-        TextSource::Fluent,
+    t_dynamic(
+        cx,
+        "hv-scope-summary",
+        vec![("n", count(on)), ("total", count(total))],
     )
 }
 
@@ -1379,7 +1374,7 @@ fn render(
 ) -> AnyElement {
     let theme = *Theme::get(cx);
     let s = state.read(cx);
-    let (summary, _) = summary(s, cx);
+    let summary = summary(s, cx);
     let root = s.focus.root.clone();
     let open = s.open;
     let content = open.then(|| render_content(state, draft, &theme, window, cx));
@@ -1822,7 +1817,7 @@ fn render_tree(
 
 /// Text callbacks for tests: the section's labels as the dialog draws them.
 pub fn summary_text(state: &Entity<SchemasSection>, cx: &App) -> String {
-    summary(state.read(cx), cx).0.to_string()
+    summary(state.read(cx), cx).to_string()
 }
 
 #[cfg(test)]

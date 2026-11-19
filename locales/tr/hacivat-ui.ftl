@@ -3574,3 +3574,8 @@ hv-explorer-fk-target = → { $target } ({ $columns })
 hv-explorer-out-of-scope = kapsam dışı
 # Review: PO
 hv-explorer-filter-not-loaded = Yalnız yüklenmiş adlarda arar. { $n } bağlantı ya da şema henüz yüklenmedi.
+
+## m4-t20-scope
+
+# Review: PO
+hv-scope-summary-pattern = Desen { $pattern }

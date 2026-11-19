@@ -3939,3 +3939,11 @@ hv-explorer-filter-not-loaded = { $n ->
         [one] Searches loaded names only. { $n } connection or schema isn't loaded yet.
        *[other] Searches loaded names only. { $n } connections or schemas aren't loaded yet.
     }
+
+## m4-t20-scope
+
+# Surface 7 (Scope editor). The folded Schemas section's summary while no schema list was read
+# (not connected, nothing cached): the pattern that decides what is read.
+# Variables:
+#   $pattern (String) - the scope pattern as typed, e.g. "@:*".
+hv-scope-summary-pattern = Pattern { $pattern }
