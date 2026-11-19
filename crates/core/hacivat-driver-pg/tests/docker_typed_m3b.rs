@@ -481,3 +481,37 @@ async fn stop_during_run_as_one_never_runs_the_rest() {
         assert_eq!(sets[0].rows, vec![vec![Value::Int(3)]], "{}", t.id);
     }
 }
+
+// ## m4-pgcancel
+
+/// CI run 44595239297 (pg15): the statement right after a Stop of a Run as one failed with
+/// 57014, a cancel of the Stop landing late. The close answers only once its cancel ended (the
+/// server acted on it), so the next statement, run at once and long enough (100 ms) for a late
+/// cancel to land in, always completes. Several rounds per server.
+#[tokio::test]
+#[ignore = "docker"]
+async fn a_stop_never_cancels_the_next_statement() {
+    for t in version_targets() {
+        let mut c = connect(&t).await;
+        c.batch(
+            "CREATE TEMP TABLE hv_m3b_t13_stop (n int4); \
+             INSERT INTO hv_m3b_t13_stop VALUES (1), (2), (3)",
+        )
+        .await
+        .unwrap();
+        for _ in 0..5 {
+            stop_during_sleep(&t, &mut c).await;
+            let (sets, _, _) = ok_run(
+                &t,
+                &mut c,
+                spec(
+                    "SELECT count(*) FROM hv_m3b_t13_stop, pg_sleep(0.1) AS s",
+                    &[],
+                ),
+            )
+            .await;
+            assert_eq!(sets[0].rows, vec![vec![Value::Int(3)]], "{}", t.id);
+        }
+        assert_eq!(c.tx_status(), TxStatus::Idle, "{}", t.id);
+    }
+}

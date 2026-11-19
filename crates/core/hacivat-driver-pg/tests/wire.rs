@@ -6,6 +6,7 @@
 
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -741,11 +742,17 @@ async fn cancel_goes_over_tls_with_the_session_key() {
     // BackendKeyData.
     let (factory, mut streams) = pipes();
     let (keep_tx, keep_rx) = tokio::sync::oneshot::channel::<()>();
+    // ## m4-pgcancel: the server closes the cancel connection once it acted on the request,
+    // as PostgreSQL does, and the cancel ends only after that close.
+    let acted = Arc::new(AtomicBool::new(false));
+    let marks = acted.clone();
     let session = tokio::spawn(async move {
         let mut tls = accept_tls(streams.recv().await.unwrap()).await;
         sign_in(&mut tls, 4242, 7).await;
         let mut cancel = accept_tls(streams.recv().await.unwrap()).await;
         let body = read_untyped(&mut cancel).await;
+        marks.store(true, Ordering::SeqCst);
+        drop(cancel);
         let _ = keep_rx.await;
         drop(tls);
         body
@@ -756,6 +763,10 @@ async fn cancel_goes_over_tls_with_the_session_key() {
     assert_eq!(conn.backend_id(), Some(4242));
     let handle = conn.cancel_handle().unwrap();
     handle.cancel().await.unwrap();
+    assert!(
+        acted.load(Ordering::SeqCst),
+        "the cancel ended before the server closed its connection"
+    );
     let _ = keep_tx.send(());
     let body = session.await.unwrap();
     let word = |i: usize| u32::from_be_bytes(body[i..i + 4].try_into().unwrap());
@@ -1203,4 +1214,44 @@ async fn a_fatal_error_that_closes_the_connection_keeps_the_server_class() {
     let again = conn.execute("SELECT 1", simple(10)).await.unwrap_err();
     assert_eq!(again.kind, RawErrorKind::Io(io::ErrorKind::NotConnected));
     server.await.unwrap();
+}
+
+// ## m4-pgcancel
+
+/// A protocol cancel ends only once the server has closed the cancel connection, which
+/// PostgreSQL does after it signalled the backend (libpq's `PQcancel` waits for the same). One
+/// that ended when its request was written could still land on the session's next statement.
+/// The server here closes only after it set its mark, so a cancel that ends earlier sees none.
+#[tokio::test]
+async fn a_cancel_ends_only_once_the_server_closed_the_cancel_connection() {
+    let (factory, mut streams) = pipes();
+    let acted = Arc::new(AtomicBool::new(false));
+    let marks = acted.clone();
+    let (keep_tx, keep_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let mut s = streams.recv().await.unwrap();
+        sign_in(&mut s, 77, 5).await;
+        let mut cancel = streams.recv().await.unwrap();
+        let body = read_untyped(&mut cancel).await;
+        // The request arrived and the client sent nothing after it.
+        let mut rest = vec![];
+        cancel.read_to_end(&mut rest).await.unwrap();
+        marks.store(true, Ordering::SeqCst);
+        drop(cancel);
+        let _ = keep_rx.await;
+        (body, rest, s)
+    });
+    let conn = connect_conn(req(factory, None, InsecureAuth::Allow))
+        .await
+        .unwrap();
+    conn.cancel_handle().unwrap().cancel().await.unwrap();
+    assert!(
+        acted.load(Ordering::SeqCst),
+        "the cancel ended before the server closed its connection"
+    );
+    let _ = keep_tx.send(());
+    let (body, rest, _s) = server.await.unwrap();
+    let word = |i: usize| u32::from_be_bytes(body[i..i + 4].try_into().unwrap());
+    assert_eq!((word(0), word(4), word(8)), (CANCEL_REQUEST, 77, 5));
+    assert!(rest.is_empty(), "{rest:?}");
 }

@@ -13,6 +13,7 @@
 
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use hacivat_driver::{
@@ -1257,4 +1258,86 @@ async fn a_notice_comes_out_while_the_statement_runs() {
         "{shape:?}"
     );
     let _srv = server.await.unwrap();
+}
+
+// ## m4-pgcancel
+
+/// The close of a Run as one whose statement ended on its own while the driver's protocol
+/// cancel was still on its way (CI run 44595239297, `docker_typed_m3b.rs`: the next statement
+/// got 57014). `ends_in_error`: the statement failed (the CI case: a 57014 of an earlier
+/// signal); else it completed. Either way the close answers only once the server has closed the
+/// cancel connection, i.e. acted on the request: PostgreSQL drops a cancel it acts on while the
+/// session is idle, while one acted on later cancels the user's next statement.
+async fn a_close_waits_for_its_cancel(ends_in_error: bool) {
+    let (mut conn, mut srv, mut cancels) = session_with_cancels().await;
+    let acted = Arc::new(AtomicBool::new(false));
+    let returned = Arc::new(AtomicBool::new(false));
+    let (marks, seen) = (acted.clone(), returned.clone());
+    let server = tokio::spawn(async move {
+        srv.query_text().await;
+        srv.send(&row_description(&[("n", INT4)])).await;
+        // The close sends its cancel at once.
+        let mut c = tokio::time::timeout(READ_GUARD, cancels.recv())
+            .await
+            .expect("a cancel connection, at once")
+            .unwrap();
+        let key = cancel_request(&mut c).await;
+        // The statement ends on its own, before the server acts on the cancel.
+        let end = if ends_in_error {
+            fields_msg(
+                b'E',
+                "ERROR",
+                "57014",
+                "canceling statement due to user request",
+            )
+        } else {
+            [data_row(&[Some(b"1")]), command_complete("SELECT 1")].concat()
+        };
+        srv.send(&[end, ready(b'I')].concat()).await;
+        // Only now does the server act on the cancel and close its connection. The client gets
+        // every scheduler turn it wants meanwhile (yields, not a clock): a close that does not
+        // wait for its cancel answers during them.
+        for _ in 0..1_000 {
+            if seen.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        marks.store(true, Ordering::SeqCst);
+        drop(c);
+        (key, srv)
+    });
+    conn.query(simple("SELECT n FROM t", 100)).await.unwrap();
+    assert!(matches!(
+        conn.next_event().await.unwrap(),
+        QueryEvent::ResultStart(_)
+    ));
+    let closed = tokio::time::timeout(READ_GUARD, conn.close_query(CloseHow::Now))
+        .await
+        .expect("the close ends once its cancel did");
+    let acted_first = acted.load(Ordering::SeqCst);
+    returned.store(true, Ordering::SeqCst);
+    assert!(
+        acted_first,
+        "the close answered while its cancel could still land on the next statement"
+    );
+    if ends_in_error {
+        assert_eq!(sqlstate(&closed.unwrap_err()), Some("57014"));
+    } else {
+        assert_eq!(closed.unwrap(), Closed::Completed { rows: 1 });
+    }
+    let (key, _srv) = server.await.unwrap();
+    assert_eq!(key, (31, 1));
+    // The cancel settled: the connection is in step and usable.
+    assert_eq!(conn.tx_status(), TxStatus::Idle);
+}
+
+#[tokio::test]
+async fn a_closed_run_as_one_that_failed_answers_after_its_cancel_settled() {
+    a_close_waits_for_its_cancel(true).await;
+}
+
+#[tokio::test]
+async fn a_closed_run_as_one_that_completed_answers_after_its_cancel_settled() {
+    a_close_waits_for_its_cancel(false).await;
 }
