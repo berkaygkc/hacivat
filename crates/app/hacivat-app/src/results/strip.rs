@@ -8,7 +8,9 @@
 //! were drained, R-M3-25); [`render`] lays it out on the Overflow Rule [`Toolbar`], whose compact
 //! forms give the strip its narrow shape: first the word "Selection" goes, then the cursor
 //! sentence becomes "Cursor open" (its whole text stays in the tooltip). Every item is pinned:
-//! buttons and counts never truncate or move into a menu.
+//! buttons and counts never truncate or move into a menu. ## m4-m3carry (U-6 a): in the
+//! toolbar's narrow stage (a pane too narrow to hold every item whole on a line) Fetch more is
+//! its arrow-down icon, its word the tooltip and the accessible name.
 //!
 //! - **Close cursor** goes through `ResultSource::close_cursor`, whose reason follows the state:
 //!   `MemoryLimit` while paused at a memory limit, else `UserClosed` (ledger ruling on T7).
@@ -516,12 +518,23 @@ pub fn render(
                 actions.close_cursor.clone(),
                 cx,
             ));
-            bar = bar.item(button(
-                "strip-fetch-more",
-                ids::hv::STRIP_FETCH_MORE,
-                actions.fetch_more.clone(),
-                cx,
-            ));
+            // ## m4-m3carry (U-6 a; M3c-34, design/m3b-safe surface 24): Fetch more's narrow
+            // form is its arrow-down icon.
+            bar = bar.item(
+                button(
+                    "strip-fetch-more",
+                    ids::hv::STRIP_FETCH_MORE,
+                    actions.fetch_more.clone(),
+                    cx,
+                )
+                .narrow(icon_button(
+                    "strip-fetch-more",
+                    ids::hv::STRIP_FETCH_MORE,
+                    IconName::ArrowDown,
+                    actions.fetch_more.clone(),
+                    cx,
+                )),
+            );
             bar = bar.item(button(
                 "strip-fetch-all",
                 ids::hv::STRIP_FETCH_ALL,
@@ -769,4 +782,28 @@ fn button(
         label,
     )
     .on_choose(move |window, cx| run(window, cx))
+}
+
+// ## m4-m3carry (U-6 a)
+/// A strip button's narrow form (`button-<id>`, the same button): its `icon` alone, in the
+/// strip's 20 px compact size; its word is the tooltip and the accessible name (N1).
+fn icon_button(
+    id: &'static str,
+    msg: hacivat_l10n::MsgRef<NoArgs>,
+    icon: IconName,
+    on_click: Action,
+    cx: &App,
+) -> ItemFn {
+    let text: SharedString = tr(cx, msg, NoArgs);
+    Rc::new(move |_, _| {
+        let on_click = on_click.clone();
+        Button::new(id, text.clone())
+            .kind(ButtonKind::Default)
+            .on_raised(true)
+            .compact(true)
+            .icon(icon)
+            .icon_only(true)
+            .on_click(move |_, window, cx| on_click(window, cx))
+            .into_any_element()
+    })
 }

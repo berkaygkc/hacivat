@@ -1175,17 +1175,29 @@ impl Workspace {
             });
         }
         let modal = self.layers.has_modal();
+        // ## m4-m3carry (U-6 c, P2-04): the collapsed field's tooltip and name, its words and
+        // keys as the narrow Run button joins them (`hv-console-button-keys`).
+        let placeholder = tr(cx, ids::hv::TITLEBAR_PALETTE, NoArgs);
+        let palette_tip = if keys.is_empty() {
+            placeholder.clone()
+        } else {
+            tr(
+                cx,
+                ids::hv::CONSOLE_BUTTON_KEYS,
+                ids::hv::HvConsoleButtonKeys {
+                    label: Text(placeholder.to_string()),
+                    keys: Text(keys.to_string()),
+                },
+            )
+        };
         let mut bar = TitleBar::new(chrome)
             .inert(modal)
             .brand(tr(cx, ids::cm::BRAND_HACIVAT_CAPS, NoArgs))
             .capsule(capsule)
-            .palette_field(
-                tr(cx, ids::hv::TITLEBAR_PALETTE, NoArgs),
-                keys,
-                |_, window, cx| {
-                    ActionRegistry::run(PALETTE_ACTION, window, cx);
-                },
-            )
+            .palette_field(placeholder, keys, |_, window, cx| {
+                ActionRegistry::run(PALETTE_ACTION, window, cx);
+            })
+            .palette_tip(palette_tip)
             .right(vec![
                 language_switch(cx, modal),
                 theme_switch(theme, cx, modal),

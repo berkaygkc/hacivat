@@ -45,7 +45,10 @@
 //!   controls (EN/TR, theme, window controls) lie wholly inside the window and end at the
 //!   bar's right padding, the palette field is at least `PALETTE_MIN_PX` wide and ends before
 //!   them, and the capsule ends before the palette field. A pushed-off icon button draws no
-//!   clipped text, so (b) alone cannot see it.
+//!   clipped text, so (b) alone cannot see it. ## m4-m3carry (P2-04): or the field is its
+//!   `PALETTE_ICON_PX` icon; beside a whole field the capsule gives up no trust word the icon's
+//!   room would keep, and a collapsed field keeps at least one (`check_trust_room`, from
+//!   `CapsuleProbe`).
 //!
 //! The M2b surfaces (Task 24) render at 1280x800 and the 960x600 minimum, from the fixtures of
 //! Tasks 19 to 22 and Task 24's own: the certificate review, the pin-changed stop and the
@@ -121,9 +124,9 @@ use hacivat_secrets::{
 };
 use hacivat_settings::{LanguagePref, LocalPaths, ThemePref};
 use hacivat_ui::actions::ActionRegistry;
-use hacivat_ui::capsule::CapsuleProbe;
+use hacivat_ui::capsule::{CapsuleProbe, TrustRooms};
 use hacivat_ui::text::{RenderedText, TextRegistry, TextSource};
-use hacivat_ui::titlebar::{PALETTE_MIN_PX, TitleBarProbe};
+use hacivat_ui::titlebar::{PALETTE_ICON_PX, PALETTE_MIN_PX, TitleBarProbe};
 use hacivat_ui_core::app::{TextRendering, bootstrap};
 use hacivat_ui_core::assets::BundledAssets;
 use hacivat_ui_core::gpui_surface::{
@@ -1338,7 +1341,15 @@ fn check_title_bar(width: f32, bar: TitleBarProbe, capsule: Option<Bounds<Pixels
     };
     let (p_left, p_right) = (f32::from(palette.left()), f32::from(palette.right()));
     let palette_w = f32::from(palette.size.width);
-    if palette_w < PALETTE_MIN_PX - SLACK {
+    // ## m4-m3carry (U-6 c, P2-04): or it is its icon.
+    if bar.palette_collapsed {
+        if (palette_w - PALETTE_ICON_PX).abs() > SLACK {
+            out.push(format!(
+                "the collapsed palette field is {palette_w:.1} px, not its {PALETTE_ICON_PX} px \
+                 icon"
+            ));
+        }
+    } else if palette_w < PALETTE_MIN_PX - SLACK {
         out.push(format!(
             "the palette field is {palette_w:.1} px, under its {PALETTE_MIN_PX} px minimum"
         ));
@@ -1358,6 +1369,56 @@ fn check_title_bar(width: f32, bar: TitleBarProbe, capsule: Option<Bounds<Pixels
         }
     }
     out
+}
+
+// ## m4-m3carry (fix round 1, m1)
+thread_local! {
+    /// Shots whose capsule showed a trust word when (e) checked them (non-empty trust rooms
+    /// and a room), and of those, shots whose palette field was collapsed. The run prints both,
+    /// so a run where (e) checked nothing real is visible.
+    static TRUST_COVERAGE: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+fn note_trust_coverage(bar: TitleBarProbe, capsule: CapsuleProbe) {
+    let real = capsule.bounds.is_some()
+        && capsule.max_width.is_some()
+        && bar.palette.is_some()
+        && capsule.trust_rooms.0.iter().any(Option::is_some);
+    if real {
+        TRUST_COVERAGE.with(|c| {
+            let (n, collapsed) = c.get();
+            c.set((n + 1, collapsed + usize::from(bar.palette_collapsed)));
+        });
+    }
+}
+
+// ## m4-m3carry (U-6 c; M3 PO item P2-04)
+/// (e) The capsule gives up no trust word (an access word, the unencrypted word) that the
+/// palette field's icon would keep: beside a whole field, the room the icon frees would keep
+/// none; a collapsed field keeps at least one. The capsule's own fit agrees with the trust
+/// rooms it reported.
+fn check_trust_room(bar: TitleBarProbe, capsule: CapsuleProbe) -> Option<String> {
+    let max = capsule.max_width.filter(|_| capsule.bounds.is_some())?;
+    bar.palette?;
+    let rooms = capsule.trust_rooms;
+    let gain = PALETTE_MIN_PX - PALETTE_ICON_PX;
+    let given_up = usize::from(capsule.trust_given_up);
+    if given_up != rooms.given_up_at(max) {
+        return Some(format!(
+            "the capsule gave up {given_up} trust words at {max:.1} px; its trust rooms say {}",
+            rooms.given_up_at(max)
+        ));
+    }
+    if bar.palette_collapsed {
+        (rooms.given_up_at(max - gain) <= given_up).then(|| {
+            "the palette field collapsed to its icon and kept no trust word (P2-04)".to_string()
+        })
+    } else {
+        (rooms.given_up_at(max + gain) < given_up).then(|| {
+            "the capsule gave up a trust word that the palette field's icon would keep (P2-04)"
+                .to_string()
+        })
+    }
 }
 
 // ## m3c-threads
@@ -1607,15 +1668,16 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
             .unwrap_or_else(|| "One Filled Badge rule".to_string());
         failures.push(format!("{name}: (d) {msg}"));
     }
-    let (bar, capsule) = cx.update(|cx| {
-        (
-            *cx.global::<TitleBarProbe>(),
-            cx.global::<CapsuleProbe>().bounds,
-        )
-    });
+    // ## m4-m3carry (U-6 c): the whole capsule probe, its trust flag too.
+    let (bar, capsule_probe) =
+        cx.update(|cx| (*cx.global::<TitleBarProbe>(), *cx.global::<CapsuleProbe>()));
+    let capsule = capsule_probe.bounds;
+    // ## m4-m3carry (fix round 1, m1): how many shots (e) checked with real trust data.
+    note_trust_coverage(bar, capsule_probe);
     failures.extend(
         check_title_bar(w, bar, capsule)
             .into_iter()
+            .chain(check_trust_room(bar, capsule_probe))
             .map(|v| format!("{name}: (e) {v}")),
     );
 
@@ -1723,6 +1785,12 @@ fn render_all_surfaces(names: &[String], all: bool) {
         total.as_secs_f64(),
         total.as_millis() / rendered.max(1) as u128,
         slowest.as_millis()
+    );
+    // ## m4-m3carry (fix round 1, m1)
+    let (with_trust, collapsed) = TRUST_COVERAGE.with(|c| c.get());
+    println!(
+        "shots: (e) trust check on {with_trust} shots with a capsule trust word, {collapsed} with \
+         the palette field collapsed"
     );
     // ## m3c-threads
     let shown = |n: Option<usize>| n.map_or_else(|| "?".to_string(), |n| n.to_string());
@@ -2306,6 +2374,8 @@ fn a_pushed_title_bar_fails_its_frame() {
         palette: Some(b(400.0, 220.0)),
         trailing: Some(b(830.0, 120.0)),
         right_padding: 10.0,
+        // ## m4-m3carry (U-6 c)
+        palette_collapsed: false,
     };
     assert!(check_title_bar(960.0, good, Some(b(100.0, 280.0))).is_empty());
     // Pushed right by a wide capsule: the theme button leaves the window.
@@ -2338,6 +2408,50 @@ fn a_pushed_title_bar_fails_its_frame() {
     );
     // No title bar drawn at all.
     assert!(!check_title_bar(960.0, TitleBarProbe::default(), None).is_empty());
+
+    // ## m4-m3carry (U-6 c, P2-04): a field collapsed to its icon passes; a collapsed field of
+    // another width fails; a trust word given up beside a whole field fails, beside the icon
+    // it passes.
+    let icon = TitleBarProbe {
+        palette: Some(b(594.0, PALETTE_ICON_PX)),
+        palette_collapsed: true,
+        ..good
+    };
+    assert!(check_title_bar(960.0, icon, Some(b(100.0, 480.0))).is_empty());
+    let found = check_title_bar(
+        960.0,
+        TitleBarProbe {
+            palette: Some(b(500.0, 120.0)),
+            ..icon
+        },
+        None,
+    );
+    assert!(found.iter().any(|v| v.contains("not its")), "{found:?}");
+    // A read-write word that gives way below 400 px of room: beside a whole field (room 300)
+    // the icon's 144 px would keep it; beside the icon (room 444) it is kept.
+    let rooms = TrustRooms([Some(400.0), None, None]);
+    let whole = |max: f32, given_up: u8| CapsuleProbe {
+        bounds: Some(b(100.0, 280.0)),
+        trust_given_up: given_up,
+        max_width: Some(max),
+        trust_rooms: rooms,
+    };
+    let found = check_trust_room(good, whole(300.0, 1));
+    assert!(found.is_some_and(|v| v.contains("would keep")));
+    assert!(check_trust_room(icon, whole(444.0, 0)).is_none());
+    // Too narrow for the icon to help (room 200 + 144 < 400): the field stays whole.
+    assert!(check_trust_room(good, whole(200.0, 1)).is_none());
+    let found = check_trust_room(icon, whole(344.0, 1));
+    assert!(found.is_some_and(|v| v.contains("kept no trust word")));
+    // A fit that disagrees with its own trust rooms.
+    let found = check_trust_room(good, whole(500.0, 1));
+    assert!(found.is_some_and(|v| v.contains("trust rooms say")));
+    // Nothing to give up: passes either way.
+    let none = CapsuleProbe {
+        trust_rooms: TrustRooms::default(),
+        ..whole(300.0, 0)
+    };
+    assert!(check_trust_room(good, none).is_none());
 }
 
 // ## m3a-t35-shots

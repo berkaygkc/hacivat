@@ -347,6 +347,21 @@ impl GridAdapter {
         self.display.borrow().clone()
     }
 
+    // ## m4-m3carry (U-6 b; T39 carry)
+    /// Takes `grid.raw_display` as the settings say now: a change is a new display (a new
+    /// version, so no cell formatted the other way is shown again). Each frame does this
+    /// first; the grid find does it before it compares the display it scanned with this one,
+    /// since the tile syncs the find before the grid draws.
+    pub(crate) fn follow_raw_setting(&self, cx: &App) {
+        let raw_all = raw_display_setting(cx);
+        if self.display.borrow().raw.all != raw_all {
+            let mut display = (**self.display.borrow()).clone();
+            display.raw.all = raw_all;
+            display.set_version(display.settings.version.wrapping_add(1));
+            *self.display.borrow_mut() = Arc::new(display);
+        }
+    }
+
     /// Cells formatted so far (display-cache misses).
     pub fn format_calls(&self) -> u64 {
         self.cache.borrow().formats()
@@ -564,13 +579,8 @@ impl GridDataSource for GridAdapter {
         self.a11y_cache.borrow_mut().begin_frame();
         // ## m3c-t39: `grid.raw_display` as the settings say now (a change is a new version,
         // so no cell formatted the other way is shown again).
-        let raw_all = raw_display_setting(cx);
-        if self.display.borrow().raw.all != raw_all {
-            let mut display = (**self.display.borrow()).clone();
-            display.raw.all = raw_all;
-            display.set_version(display.settings.version.wrapping_add(1));
-            *self.display.borrow_mut() = Arc::new(display);
-        }
+        // ## m4-m3carry (U-6 b): one helper, which the grid find reads through too.
+        self.follow_raw_setting(cx);
         let target = self.target.borrow();
         Rc::new(AdapterFrame {
             snapshot: target.source.snapshot(),
