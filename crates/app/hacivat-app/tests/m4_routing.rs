@@ -1,19 +1,25 @@
 //! M4 Task 1b: every M4 command id is registered, titled in EN and TR, and bound as the plan's
 //! table lists (VS Code's defaults where VS Code has one, PO-Q10; P-M4-9, -10); the M4 stubs are
 //! disabled, so no palette row resolves to one and their chords pass through; M4 registers no
-//! explorer contributor and no action provider, and the explorer model stub is empty.
+//! explorer contributor and no action provider, and the explorer model stub is empty. The DDL
+//! view is a real tab kind, one tab per object (ruling R-W0-1).
 
 mod support;
 
 use std::rc::Rc;
 
-use gpui::TestAppContext;
-use hacivat_app::ddl_view::{self, DDL_VIEW_CONTEXT, DDL_VIEW_KIND};
+use std::cell::RefCell;
+use std::time::Duration;
+
+use gpui::{TestAppContext, VisualTestContext};
+use hacivat_app::ddl_view::{self, DDL_VIEW_CONTEXT, DdlViewError};
 use hacivat_app::explorer::{
     self, ActionSlot, ActionSurface, ExplorerActionProvider, ExplorerModel, NodeRef,
-    ProvidedAction, contributors, database_rows, provided_actions, register_action_provider,
+    ProvidedAction, RevealOutcome, contributors, database_rows, open_data, provided_actions,
+    register_action_provider, reveal, set_open_data_handler,
 };
-use hacivat_app::shell::TabContentRegistry;
+use hacivat_app::shell::TabKind;
+use hacivat_meta::{ObjectKey, ObjectKind};
 use hacivat_proto::ProfileId;
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::keymaps::{PRESETS, load};
@@ -406,15 +412,6 @@ fn stub_count_is_n(cx: &mut TestAppContext) {
     }
     // The palette check is not vacuous: an enabled command is listed.
     assert!(listed.contains(&"workspace.open_settings"));
-    // The DDL view tab kind is declared, and nothing registers or opens it before Task 25.
-    assert_eq!(DDL_VIEW_KIND, "ddl_view");
-    assert_eq!(DDL_VIEW_CONTEXT, "DdlView");
-    let registered = vcx.cx.read(|cx| {
-        cx.global::<TabContentRegistry>()
-            .get(DDL_VIEW_KIND)
-            .is_some()
-    });
-    assert!(!registered);
 }
 
 /// A provider for the seam test: one action per slot, out of slot order.
@@ -422,7 +419,7 @@ struct FakeProvider;
 
 impl ExplorerActionProvider for FakeProvider {
     fn actions(&self, node: &NodeRef, surface: ActionSurface, _: &App) -> Vec<ProvidedAction> {
-        if surface != ActionSurface::ExplorerMenu || node.key != TreeKey(7) {
+        if surface != ActionSurface::ExplorerMenu || node.kind != Some(ObjectKind::Table) {
             return Vec::new();
         }
         [
@@ -448,6 +445,8 @@ fn action_provider_stub_contributes_nothing(cx: &mut TestAppContext) {
     let node = NodeRef {
         profile: ProfileId::new(),
         key: TreeKey(7),
+        object: Some(table("public", "orders")),
+        kind: Some(ObjectKind::Table),
     };
     cx.update(|cx| {
         // M4 registers no provider and no contributor (R-M4-19).
@@ -477,5 +476,117 @@ fn action_provider_stub_contributes_nothing(cx: &mut TestAppContext) {
             ["fake.data", "fake.transfer", "fake.modify", "fake.source"]
         );
         assert!(provided_actions(&node, ActionSurface::DdlViewToolbar, cx).is_empty());
+        // A provider matches on the node's kind: a view gets nothing from it.
+        let view = NodeRef {
+            kind: Some(ObjectKind::View),
+            ..node.clone()
+        };
+        assert!(provided_actions(&view, ActionSurface::ExplorerMenu, cx).is_empty());
     });
+}
+
+/// A PostgreSQL-style table key (`[schema, table]`).
+fn table(schema: &str, name: &str) -> ObjectKey {
+    ObjectKey {
+        kind: ObjectKind::Table,
+        path: [schema, name].into_iter().map(Into::into).collect(),
+        server_id: None,
+        overload_sig: None,
+    }
+}
+
+/// The open-data handler, `reveal` and `open_ddl_view` are seams typed on `hacivat_meta`:
+/// unset, unavailable and not yet until Tasks 24 and 25 (no stub claims a fact), and the handler
+/// is replaceable (M6).
+#[gpui::test]
+fn meta_typed_seams_answer_nothing_until_their_tasks(cx: &mut TestAppContext) {
+    let vcx = shell(cx, "en");
+    let profile = ProfileId::new();
+    let key = table("public", "orders");
+    let ws = workspace(vcx);
+    let (opened, revealed, ran) = in_window(vcx, |window, cx| {
+        (
+            ddl_view::open_ddl_view(&ws, profile, key.clone(), window, cx),
+            reveal(profile, &key, window, cx),
+            open_data(profile, key.clone(), window, cx),
+        )
+    });
+    assert_eq!(opened, Err(DdlViewError::NotYet));
+    assert_eq!(tab_count(vcx), 1, "open_ddl_view opened a tab");
+    assert_eq!(revealed, RevealOutcome::Unavailable);
+    assert!(
+        !ran,
+        "no open-data handler is installed in M4 before Task 24"
+    );
+    // A handler, once set, receives the object; a second one replaces it.
+    let seen: Rc<RefCell<Vec<(&str, ObjectKey)>>> = Rc::default();
+    for name in ["first", "second"] {
+        let sink = seen.clone();
+        vcx.cx.update(|cx| {
+            set_open_data_handler(
+                Box::new(move |p, k, _, _| {
+                    assert_eq!(p, profile);
+                    sink.borrow_mut().push((name, k));
+                }),
+                cx,
+            )
+        });
+    }
+    let ran = in_window(vcx, |window, cx| {
+        open_data(profile, key.clone(), window, cx)
+    });
+    assert!(ran);
+    assert_eq!(seen.borrow().as_slice(), [("second", key)]);
+}
+
+/// Ruling R-W0-1: the DDL view is a `TabKind::DdlView` per object. Two objects open two tabs
+/// titled "{name} · DDL" in the `DdlView` context; the same object focuses its tab; DDL view
+/// tabs are not saved in `workspace.json`.
+#[gpui::test]
+fn ddl_view_tabs_are_one_per_object(cx: &mut TestAppContext) {
+    let root = tempfile::tempdir().unwrap();
+    let vcx = shell_at(cx, root.path(), "en");
+    let profile = ProfileId::new();
+    let ws = workspace(vcx);
+    let open = |vcx: &VisualTestContext, key: ObjectKey| {
+        in_window(vcx, |_, cx| {
+            let object = ddl_view::object_id(profile, &key, cx);
+            ws.update(cx, |w, cx| w.open_ddl_view_tab(profile, object, cx))
+                .expect("a tab")
+        })
+    };
+    let before = tab_count(vcx);
+    let orders = open(vcx, table("public", "orders"));
+    vcx.run_until_parked();
+    assert_eq!(tab_title(vcx), "orders · DDL");
+    assert_eq!(context_stack(vcx).0.last(), Some(&DDL_VIEW_CONTEXT));
+    let users = open(vcx, table("public", "users"));
+    vcx.run_until_parked();
+    assert_ne!(orders, users);
+    assert_eq!(tab_count(vcx), before + 2);
+    assert_eq!(tab_title(vcx), "users · DDL");
+    // The same object (an equal key built anew) focuses its existing tab.
+    let again = open(vcx, table("public", "orders"));
+    vcx.run_until_parked();
+    assert_eq!(again, orders);
+    assert_eq!(tab_count(vcx), before + 2);
+    assert_eq!(tab_title(vcx), "orders · DDL");
+    let kind = vcx.cx.read(|cx| ws.read(cx).tab_kind(orders));
+    assert!(matches!(kind, Some(TabKind::DdlView { profile: p, .. }) if p == profile));
+    // The same name in another profile is another object.
+    let other = in_window(vcx, |_, cx| {
+        let object = ddl_view::object_id(ProfileId::new(), &table("public", "orders"), cx);
+        let mine = ddl_view::object_id(profile, &table("public", "orders"), cx);
+        object != mine
+    });
+    assert!(other);
+    // Not saved: after the debounce, `workspace.json` holds no DDL view tab, and a restart
+    // restores only the other tabs.
+    vcx.executor().advance_clock(Duration::from_millis(600));
+    vcx.run_until_parked();
+    let saved = std::fs::read_to_string(root.path().join("data/workspace.json")).unwrap();
+    assert!(!saved.to_ascii_lowercase().contains("ddl"), "{saved}");
+    close_all_windows(vcx);
+    let vcx2 = shell_at(cx, root.path(), "en");
+    assert_eq!(tab_count(vcx2), before);
 }

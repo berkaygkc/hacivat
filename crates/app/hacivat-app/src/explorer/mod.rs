@@ -38,14 +38,14 @@ use hacivat_ui::actions::{ActionDef, ActionRegistry};
 use hacivat_ui_core::gpui_surface::App;
 
 pub use actions::{
-    ActionSlot, ActionSurface, ExplorerActionProvider, NodeRef, ProvidedAction, provided_actions,
-    register_action_provider,
+    ActionSlot, ActionSurface, ExplorerActionProvider, NodeRef, OpenDataHandler, ProvidedAction,
+    open_data, provided_actions, register_action_provider, set_open_data_handler,
 };
 pub use adapter::ExplorerModel;
 pub use contrib::{
     ContributedChildren, ContributedNode, ExplorerContributor, contributors, register_contributor,
 };
-pub use live::{DatabaseRow, database_rows};
+pub use live::{DatabaseRow, RevealOutcome, database_rows, reveal};
 
 /// The key context of the focused explorer (the M2a list's, kept by the tree, R20).
 pub const EXPLORER_CONTEXT: &str = crate::connections::explorer::EXPLORER_CONTEXT;

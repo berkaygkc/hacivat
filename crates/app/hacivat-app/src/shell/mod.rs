@@ -37,6 +37,8 @@ pub use hooks::unregister_focus_context;
 pub use keymap_state::{ActiveKeymap, install_with as install_keymap_with, set_keymap_preset};
 pub use layers::{Layer, Layers};
 pub use tab_content::{TabContent, TabContentRegistry, TabKind};
+// ## m4-t01b-seams (ruling R-W0-1)
+pub use tab_content::DdlObjectId;
 pub use tiles::TileLayout;
 pub use workspace::{DemoCapsule, POPOVER_CONTEXT, Workspace, open_workspace};
 

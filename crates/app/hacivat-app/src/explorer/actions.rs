@@ -7,9 +7,10 @@
 use std::fmt;
 use std::rc::Rc;
 
+use hacivat_meta::{ObjectKey, ObjectKind};
 use hacivat_proto::ProfileId;
 use hacivat_ui::tree::TreeKey;
-use hacivat_ui_core::gpui_surface::{App, Global, SharedString};
+use hacivat_ui_core::gpui_surface::{App, Global, SharedString, Window};
 
 /// Where provided actions are shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -50,6 +51,12 @@ pub struct NodeRef {
     pub profile: ProfileId,
     /// The node's tree key (an object's, or a contributed node's).
     pub key: TreeKey,
+    /// The catalog object the node shows; `None` for a profile, database, kind group or
+    /// contributed node.
+    pub object: Option<ObjectKey>,
+    /// The node's kind: the object's (`object.kind`), or the kind a kind-group header holds
+    /// ("Tables"); `None` otherwise. Providers match on it (Task 24's slot test).
+    pub kind: Option<ObjectKind>,
 }
 
 /// Adds actions to the explorer menu and the DDL view toolbar (M6, M7; R-M4-19).
@@ -87,4 +94,32 @@ pub fn provided_actions(node: &NodeRef, surface: ActionSurface, cx: &App) -> Vec
         .collect();
     out.sort_by_key(|a| a.slot);
     out
+}
+
+// ---- Open data (R-M4-13) ----------------------------------------------------------------------
+
+/// What "Open data" runs on a table or view: Task 24 installs the M4 default (a console on the
+/// same profile and schema running `SELECT * FROM <qualified name>` through the normal Run
+/// path); M6 replaces it with the table editor.
+pub type OpenDataHandler = Box<dyn Fn(ProfileId, ObjectKey, &mut Window, &mut App)>;
+
+/// The installed handler (unset until Task 24).
+#[derive(Default)]
+struct OpenData(Option<Rc<OpenDataHandler>>);
+
+impl Global for OpenData {}
+
+/// Installs the open-data handler, replacing the one before it.
+pub fn set_open_data_handler(handler: OpenDataHandler, cx: &mut App) {
+    cx.default_global::<OpenData>().0 = Some(Rc::new(handler));
+}
+
+/// Runs the open-data handler for `key` of `profile`. Returns whether a handler ran (`false`
+/// while none is installed: Open data does nothing, and its command stays disabled).
+pub fn open_data(profile: ProfileId, key: ObjectKey, window: &mut Window, cx: &mut App) -> bool {
+    let Some(handler) = cx.try_global::<OpenData>().and_then(|h| h.0.clone()) else {
+        return false;
+    };
+    handler(profile, key, window, cx);
+    true
 }
