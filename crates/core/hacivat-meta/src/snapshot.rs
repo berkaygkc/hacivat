@@ -23,7 +23,6 @@ use std::time::{Duration, SystemTime};
 
 use arc_swap::ArcSwap;
 use hacivat_proto::DbmsKind;
-use smallvec::SmallVec;
 
 use crate::delta::CatalogDelta;
 use crate::ids::{NsKey, NsKind, ObjId, ObjectKey, Ref};
@@ -32,7 +31,9 @@ use crate::name::{IdentCtx, Name};
 use crate::namespace::{Level, ModelError, NamespaceSnapshot, Obj, Subtree, Watermark};
 use crate::overlay::Overlays;
 use crate::props::{FacetKind, Props};
-use crate::resolve::{NsStatus, locate_ns_of, locate_ref, ns_status, schema_list_loaded};
+use crate::resolve::{
+    NsStatus, locate_ns_of, locate_ref, miss_is_fact, ns_status, schema_list_loaded,
+};
 use crate::view::{Lookup, MissingReason, UnknownReason, note_slow_path};
 
 /// The precise engine a catalog was read from (MySQL vs MariaDB, PostgreSQL vs its wire
@@ -151,36 +152,29 @@ pub enum ContainerKey {
         object: ObjectKey,
         facet: FacetKind,
     },
+    /// The list of schemas of one database (`ns` = the database namespace) or of the server
+    /// (`ns` = the server namespace: MySQL/MariaDB databases, SQLite's attached files). Built by
+    /// [`ContainerKey::schema_list`]. Distinct from every `Children` key, so "the schema list
+    /// is loaded" never reads as "this database has no schema children" (T9 fix round 1, I5).
+    SchemaList { ns: NsKey },
 }
 
 impl ContainerKey {
-    /// The container of the schema list: the schemas of `database` (PostgreSQL: the children of
-    /// kind `Schema` of the database object, in the database namespace), or of the server where
-    /// schemas are top level (MySQL/MariaDB databases, SQLite's attached files: `None`).
+    /// The container of the schema list: the schemas of `database` (PostgreSQL), or of the
+    /// server where schemas are top level (MySQL/MariaDB databases, SQLite's attached files:
+    /// `None`).
     ///
     /// When it is `Loaded`, every schema the server has is in the catalog's namespaces or
     /// states, so a schema that neither holds does not exist: a qualified name into it is
     /// `Missing`, and a search-path entry naming it is skipped (PostgreSQL skips a `search_path`
     /// schema that does not exist, `$user` most often). Otherwise such a lookup is
-    /// `Unknown(NotLoaded)`. The engine sets it after each scope refresh (Task 15).
+    /// `Unknown(NotLoaded)`. `children(database, Schema)` answers from the listed schema
+    /// namespaces. The engine sets it after each scope refresh (Task 15).
     pub fn schema_list(database: Option<&Name>) -> ContainerKey {
-        let parent = |kind: ObjectKind, path: SmallVec<[Name; 4]>| ObjectKey {
-            kind,
-            path,
-            server_id: None,
-            overload_sig: None,
-            raw_kind: None,
-        };
-        match database {
-            Some(db) => ContainerKey::Children {
-                ns: NsKey::database(db.clone()),
-                parent: parent(ObjectKind::Database, smallvec::smallvec![db.clone()]),
-                kind: ObjectKind::Schema,
-            },
-            None => ContainerKey::Children {
-                ns: NsKey::server(),
-                parent: parent(ObjectKind::Root, SmallVec::new()),
-                kind: ObjectKind::Schema,
+        ContainerKey::SchemaList {
+            ns: match database {
+                Some(db) => NsKey::database(db.clone()),
+                None => NsKey::server(),
             },
         }
     }
@@ -190,7 +184,8 @@ impl ContainerKey {
         match self {
             ContainerKey::Namespace(ns)
             | ContainerKey::Children { ns, .. }
-            | ContainerKey::Facet { ns, .. } => ns,
+            | ContainerKey::Facet { ns, .. }
+            | ContainerKey::SchemaList { ns } => ns,
         }
     }
 }
@@ -415,11 +410,16 @@ impl CatalogSnapshot {
             }
         }
         let Some(hit) = self.find(target) else {
-            return match locate_ns_of(self, &target.path).map(|k| ns_status(self, &k).status) {
-                Some(NsStatus::Complete) => Lookup::Missing(MissingReason::NotFound),
-                Some(NsStatus::OutOfScope) => Lookup::Unknown(UnknownReason::OutOfScope),
-                Some(NsStatus::Partial { reason, .. }) => Lookup::Unknown(reason),
-                None => Lookup::Unknown(UnknownReason::NotLoaded),
+            let Some(located) = locate_ns_of(self, &target.path) else {
+                return Lookup::Unknown(UnknownReason::NotLoaded);
+            };
+            return match ns_status(self, &located).status {
+                NsStatus::Complete if miss_is_fact(self, &located, &target.path) => {
+                    Lookup::Missing(MissingReason::NotFound)
+                }
+                NsStatus::Complete => Lookup::Unknown(UnknownReason::NotLoaded),
+                NsStatus::OutOfScope => Lookup::Unknown(UnknownReason::OutOfScope),
+                NsStatus::Partial { reason, .. } => Lookup::Unknown(reason),
             };
         };
         let edges = self.fk_edges();
@@ -633,6 +633,11 @@ impl Publisher {
     ///
     /// Without a delta from the merge (Task 10), subscribers hear `Published` with an empty
     /// delta and one `NamespaceReplaced` per changed namespace.
+    ///
+    /// **Cost of a shared arena:** `Put` stamps the arena with the new generation, so a `Put`
+    /// whose `Arc` the caller still shares copies the arena (its `Vec<Obj>` and name indexes;
+    /// the objects' props by reference count) under the writer lock. The engine hands over
+    /// unique arenas (a Task 15 carry); a unique `Arc` is moved, never copied.
     pub fn publish(&self, changes: Vec<CatalogChange>) -> Result<Published, ModelError> {
         self.apply(changes, None)
     }

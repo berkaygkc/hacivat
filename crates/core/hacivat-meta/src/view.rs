@@ -2,11 +2,14 @@
 //! `ModelView`). `Lookup` and its reasons are `sql_catalog`'s (one definition).
 //!
 //! M4 Task 9: [`SnapshotView`] answers over one pinned generation. A lookup walks the
-//! dialect's search path ([`SearchPath`]) and answers `Found` from the first namespace that
-//! holds the name, `Missing` only when every namespace it walked is complete (loaded at
-//! `Structure` or above, in scope, no scope filter excluding the name, the server's matching
-//! rule pinned, R-M4-41), and `Unknown` otherwise — the first reason along the path. The
-//! completeness rules are [`crate::resolve`]'s.
+//! dialect's search path ([`SearchPath`]). It answers `Found` from a namespace that holds the
+//! name only when every earlier namespace was a certain miss; the first namespace that cannot
+//! answer (not loaded, loading, failed, out of scope, server-dependent, an unnamed entry) stops
+//! the walk with `Unknown` and its reason (ruling R-W2-6, amending alg/02 step 5's "Found if
+//! any": the server could resolve the name in that earlier namespace). `Missing` comes only
+//! from a walk of certain misses (loaded at `Structure` or above, in scope, no scope filter
+//! excluding the name, the server's matching rule pinned, R-M4-41). The completeness rules are
+//! [`crate::resolve`]'s.
 //!
 //! - **Hooks** ([`LookupHooks`], shared by every view of a catalog): a namespace the catalog
 //!   lists but has not loaded at a sufficient level is reported once per namespace per
@@ -31,10 +34,13 @@ pub use sql_catalog::lookup::{Lookup, MissingReason, UnknownReason};
 
 use crate::ids::{NsKey, NsKind, ObjectKey, ServerId};
 use crate::kind::{KindGroup, ObjectKind, mysql_family, pg_family};
-use crate::name::{DialectId, FoldRule, IdentCtx, Name, NameClass, NamePart, match_key};
+use crate::name::{
+    DialectId, FoldRule, IdentCtx, Name, NameClass, NamePart, has_non_ascii_cased, match_key,
+};
 use crate::namespace::{NamespaceSnapshot, Watermark};
+use crate::overlay::Overlays;
 use crate::resolve::{
-    NsStatus, NsView, list_known_for, locate_ns_of, ns_status, schema_list_loaded,
+    NsStatus, NsView, list_known_for, locate_ns_of, miss_is_fact, ns_status, schema_list_loaded,
 };
 use crate::search_path::SearchPath;
 use crate::snapshot::{CatalogSnapshot, ContainerKey, LoadState, ObjHandle};
@@ -204,6 +210,11 @@ pub fn slow_lookups_on_this_thread() -> u64 {
 pub struct SnapshotView {
     snapshot: Arc<CatalogSnapshot>,
     search_path: SearchPath,
+    /// The overlays layered above the snapshot (the plan's `SnapshotView { snap, search_path,
+    /// layers }`; HV-INTRO-16): the generation's own overlays unless a caller sets others.
+    /// Task 26 consumes them (system-catalog layer, virtual FKs); until then no lookup reads
+    /// them, so system lookups stay `Unknown` (F31).
+    layers: Arc<Overlays>,
     scope: Option<Arc<dyn ScopeFilter>>,
     hooks: Option<Arc<LookupHooks>>,
 }
@@ -213,6 +224,7 @@ impl fmt::Debug for SnapshotView {
         f.debug_struct("SnapshotView")
             .field("generation", &self.snapshot.generation)
             .field("search_path", &self.search_path)
+            .field("system_layer", &self.layers.system.is_some())
             .field("scope_filter", &self.scope.is_some())
             .field("hooks", &self.hooks.is_some())
             .finish()
@@ -225,15 +237,36 @@ enum Qualified {
     Unknown(UnknownReason),
 }
 
+/// One namespace a lookup walks.
+#[derive(Clone, Copy)]
+struct Candidate<'k> {
+    /// `None`: an entry the session could not name.
+    ns: Option<&'k NsKey>,
+    /// Exists whatever the schema list says (`pg_catalog`, a reported temporary schema).
+    must_exist: bool,
+}
+
 impl SnapshotView {
     /// A view of `snapshot` with an empty search path, no scope filter and no hooks.
     pub fn new(snapshot: Arc<CatalogSnapshot>) -> Self {
         SnapshotView {
+            layers: Arc::clone(&snapshot.overlays),
             snapshot,
             search_path: SearchPath::default(),
             scope: None,
             hooks: None,
         }
+    }
+
+    /// The same view with `layers` above the snapshot (Task 26).
+    pub fn with_layers(mut self, layers: Arc<Overlays>) -> Self {
+        self.layers = layers;
+        self
+    }
+
+    /// The overlays above the snapshot.
+    pub fn layers(&self) -> &Arc<Overlays> {
+        &self.layers
     }
 
     /// The same view resolving unqualified names along `search_path` (edge 8: a session's
@@ -347,15 +380,28 @@ impl SnapshotView {
                             ContainerKey::Namespace(ns) => Some(ns),
                             _ => None,
                         }));
-                let found = keys
-                    .filter(|k| {
-                        k.kind == NsKind::Schema
-                            && k.path.len() == prefix.len() + 1
-                            && k.path.starts_with(&prefix)
-                    })
-                    .find(|k| FoldRule::AsciiCaseless.matches(k.root_name(), &key))
-                    .cloned();
-                Qualified::Ns(found.unwrap_or(direct))
+                let mut siblings = keys.filter(|k| {
+                    k.kind == NsKind::Schema
+                        && k.path.len() == prefix.len() + 1
+                        && k.path.starts_with(&prefix)
+                });
+                let mut uncertain = false;
+                let found = siblings.find(|k| {
+                    uncertain |= has_non_ascii_cased(k.root_name());
+                    FoldRule::AsciiCaseless.matches(k.root_name(), &key)
+                });
+                match found {
+                    Some(k) => Qualified::Ns(k.clone()),
+                    // R-M4-41 at schema level (T9 fix round 1, I4): a stored MySQL/MariaDB
+                    // schema name with a non-ASCII cased letter may fold onto the probe on the
+                    // server, so a miss is not a fact (as `match_named` does for tables).
+                    None if mysql_family(snap.server.dbms)
+                        && (uncertain || siblings.any(|k| has_non_ascii_cased(k.root_name()))) =>
+                    {
+                        Qualified::Unknown(UnknownReason::ServerDependent)
+                    }
+                    None => Qualified::Ns(direct),
+                }
             }
             _ => Qualified::Ns(direct),
         }
@@ -372,6 +418,46 @@ impl SnapshotView {
         match_key(ctx.dialect, ctx, &part.text, part.quoted, class)
             .map(|k| Name::from(k.as_str()))
             .map_err(|_| ())
+    }
+
+    /// The schemas of a database (PostgreSQL) or of the server (elsewhere), from the schema
+    /// list (T9 fix round 1, I5): `Found` only when the list is loaded and every listed schema
+    /// has an arena to hand out (its root), in key order; `Unknown(NotLoaded)` otherwise.
+    fn listed_schemas(&self, parent: &ObjectKey) -> Lookup<Vec<ObjHandle>> {
+        let snap = &*self.snapshot;
+        let pg = pg_family(snap.server.dbms);
+        let database = match (pg, parent.kind, parent.path.as_slice()) {
+            (true, ObjectKind::Database, [db]) => Some(db),
+            (false, ObjectKind::Root, []) => None,
+            _ => return Lookup::Unknown(UnknownReason::NotLoaded),
+        };
+        if !schema_list_loaded(snap, database) {
+            return Lookup::Unknown(UnknownReason::NotLoaded);
+        }
+        let under = |k: &NsKey| {
+            k.kind == NsKind::Schema
+                && match database {
+                    Some(db) => k.path.len() == 2 && k.path[0] == *db,
+                    None => k.path.len() == 1,
+                }
+        };
+        let keys: std::collections::BTreeSet<&NsKey> = snap
+            .namespaces
+            .keys()
+            .chain(snap.states.keys().filter_map(|k| match k {
+                ContainerKey::Namespace(ns) => Some(ns),
+                _ => None,
+            }))
+            .filter(|k| under(k))
+            .collect();
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            match snap.namespaces.get(k) {
+                Some(arena) => out.push(snap.handle(arena, 0)),
+                None => return Lookup::Unknown(UnknownReason::NotLoaded),
+            }
+        }
+        Lookup::Found(out)
     }
 
     /// `part` in `group` of one arena: `Found(index)`, `Missing`, or `Unknown(ServerDependent)`
@@ -402,72 +488,69 @@ impl SnapshotView {
             .map(|hits| hits[0])
     }
 
-    /// Walks `candidates` in order (step 5): the first hit is `Found`; else the first unknown
-    /// reason; else `Missing`, probing each namespace that answered it. No candidate at all is
+    /// Walks `candidates` in order (step 5, amended by R-W2-6): a namespace that holds the
+    /// name answers `Found` only when every earlier one was a certain miss; the first
+    /// namespace that cannot answer stops the walk with its `Unknown` reason (the server could
+    /// resolve the name there, so a later hit may be the wrong object). Only a walk of certain
+    /// misses is `Missing`, probing each namespace that answered it. No candidate at all is
     /// `Unknown(NotLoaded)`.
     fn walk<'k>(
         &self,
-        candidates: impl Iterator<Item = &'k NsKey>,
+        candidates: impl Iterator<Item = Candidate<'k>>,
         part: &NamePart,
         group: KindGroup,
     ) -> Lookup<ObjHandle> {
         let snap = &*self.snapshot;
-        let mut unknown: Option<UnknownReason> = None;
         let mut missing_in: SmallVec<[&NsKey; 4]> = SmallVec::new();
         let mut walked = false;
-        for key in candidates {
+        for Candidate { ns, must_exist } in candidates {
             walked = true;
+            // An entry the session could not name (`$user` of an unknown user).
+            let Some(key) = ns else {
+                return Lookup::Unknown(UnknownReason::NotLoaded);
+            };
             let NsView {
                 arena,
                 status,
                 listed,
             } = ns_status(snap, key);
             if !listed {
-                // A namespace the catalog does not list: absent when the schema list is
-                // loaded (the server skips it too), else not yet known.
-                if !list_known_for(snap, key) {
-                    unknown.get_or_insert(UnknownReason::NotLoaded);
+                // A namespace the catalog does not list: absent (and skipped, as the server
+                // skips it) only when the schema list is loaded and nothing says it exists.
+                if must_exist || !list_known_for(snap, key) {
+                    return Lookup::Unknown(UnknownReason::NotLoaded);
                 }
                 continue;
             }
             if status == NsStatus::OutOfScope {
-                unknown.get_or_insert(UnknownReason::OutOfScope);
-                continue;
+                return Lookup::Unknown(UnknownReason::OutOfScope);
             }
-            let mut certain_miss = true;
             if let Some(arena) = arena {
                 match self.in_arena(arena, group, part) {
                     Lookup::Found(idx) => return Lookup::Found(snap.handle(arena, idx)),
-                    Lookup::Unknown(reason) => {
-                        unknown.get_or_insert(reason);
-                        certain_miss = false;
-                    }
+                    Lookup::Unknown(reason) => return Lookup::Unknown(reason),
                     Lookup::Missing(_) => {}
                 }
             }
             match status {
                 NsStatus::Complete => {
                     if self.excluded(key, None, Some(&part.text)) {
-                        unknown.get_or_insert(UnknownReason::OutOfScope);
-                    } else if certain_miss {
-                        missing_in.push(key);
+                        return Lookup::Unknown(UnknownReason::OutOfScope);
                     }
+                    missing_in.push(key);
                 }
                 NsStatus::Partial { reason, wants_load } => {
                     if wants_load {
                         self.ask(key);
                     }
-                    unknown.get_or_insert(reason);
+                    return Lookup::Unknown(reason);
                 }
-                NsStatus::OutOfScope => {}
+                NsStatus::OutOfScope => return Lookup::Unknown(UnknownReason::OutOfScope),
             }
         }
         // An empty path (MySQL with no current database) names nowhere to look: no fact.
         if !walked {
             return Lookup::Unknown(UnknownReason::NotLoaded);
-        }
-        if let Some(reason) = unknown {
-            return Lookup::Unknown(reason);
         }
         if let Some(h) = &self.hooks {
             for key in missing_in {
@@ -495,17 +578,34 @@ impl ModelView for SnapshotView {
                 return Lookup::Unknown(UnknownReason::NotLoaded);
             }
             let server = NsKey::server();
-            return self.walk(std::iter::once(&server), last, group);
+            return self.walk(
+                std::iter::once(Candidate {
+                    ns: Some(&server),
+                    must_exist: true,
+                }),
+                last,
+                group,
+            );
         }
         if qual.is_empty() {
             return self.walk(
-                self.search_path.entries_for(group).map(|e| &e.ns),
+                self.search_path.entries_for(group).map(|e| Candidate {
+                    ns: e.ns.as_ref(),
+                    must_exist: e.must_exist,
+                }),
                 last,
                 group,
             );
         }
         match self.qualify(qual) {
-            Qualified::Ns(key) => self.walk(std::iter::once(&key), last, group),
+            Qualified::Ns(key) => self.walk(
+                std::iter::once(Candidate {
+                    ns: Some(&key),
+                    must_exist: false,
+                }),
+                last,
+                group,
+            ),
             Qualified::Unknown(reason) => Lookup::Unknown(reason),
         }
     }
@@ -515,6 +615,11 @@ impl ModelView for SnapshotView {
     /// scope filter thins; `Missing` when the parent is absent from a complete namespace.
     fn children(&self, parent: &ObjectKey, kind: ObjectKind) -> Lookup<Vec<ObjHandle>> {
         let snap = &*self.snapshot;
+        if kind == ObjectKind::Schema
+            && matches!(parent.kind, ObjectKind::Database | ObjectKind::Root)
+        {
+            return self.listed_schemas(parent);
+        }
         let key = if parent.kind.is_namespace_root() {
             let ns_kind = match parent.kind {
                 ObjectKind::Root => NsKind::Server,
@@ -570,6 +675,10 @@ impl ModelView for SnapshotView {
         match arena.find(parent) {
             None if self.excluded(&key, Some(parent.kind), Some(parent.name())) => {
                 Lookup::Unknown(UnknownReason::OutOfScope)
+            }
+            // The parent's own schema may simply not be listed yet (T9 fix round 1, C1).
+            None if !miss_is_fact(snap, &key, &parent.path) => {
+                Lookup::Unknown(UnknownReason::NotLoaded)
             }
             None => Lookup::Missing(MissingReason::NotFound),
             Some(_) if self.excluded(&key, Some(kind), None) => {

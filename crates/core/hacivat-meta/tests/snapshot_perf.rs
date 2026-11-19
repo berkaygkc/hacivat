@@ -75,10 +75,13 @@ fn publish_5000_namespaces_under_1ms() {
         .map(|k| Arc::new(schema(k * (NAMESPACES / PUBLISHES))))
         .collect();
     let build_each = t.elapsed() / PUBLISHES as u32;
+    // The real shape of an engine publish: the arena and its `Loaded` state, so both the
+    // namespace map and the states map (5,000 entries each) are copied.
     let mut times = Vec::with_capacity(PUBLISHES);
     for ns in prebuilt {
+        let state = CatalogChange::SetState(ContainerKey::Namespace(ns.key().clone()), loaded());
         let t = Instant::now();
-        let p = w.publish(vec![CatalogChange::Put(ns)]).unwrap();
+        let p = w.publish(vec![CatalogChange::Put(ns), state]).unwrap();
         times.push(t.elapsed());
         assert_eq!(p.changed.len(), 1);
     }
@@ -106,6 +109,14 @@ fn lookup_hit_does_not_allocate() {
     // counts, per thread, every lookup that leaves the allocation-free hit path (a typed key
     // built by `match_key`, a namespace index built for the generation). A hit after the
     // warm-up must count none.
+    //
+    // **Limit:** the counter proves the instrumented fast path was taken, not that nothing
+    // else allocates; an uninstrumented allocation added later would pass. The hit path is
+    // `SnapshotView::lookup` → `qualify`/`key_text` (identity keys only) → `walk` →
+    // `resolve::ns_status` (inline `NsKey` clones, `BTreeMap::get`) → `in_arena`
+    // (`key_is_identity`, `agrees`, `NamespaceSnapshot::lookup`) → `CatalogSnapshot::handle`
+    // (`Arc` clone, the generation's index): each must stay allocation-free on a hit, and a
+    // change to any of them is checked by review, not by this test.
     let catalog = Catalog::new(Arc::new(ServerFacts::new(DbmsKind::Postgres, ctx())));
     let w = catalog.publisher().unwrap();
     let mut changes = Vec::new();

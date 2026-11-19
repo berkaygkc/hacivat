@@ -9,7 +9,7 @@ use crate::ids::NsKey;
 use crate::kind::ObjectKind;
 use crate::name::Name;
 use crate::namespace::Obj;
-use crate::snapshot::CatalogSnapshot;
+use crate::snapshot::{CatalogSnapshot, ContainerKey, LoadState};
 
 /// How the query text matches a name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -71,9 +71,11 @@ fn rank(name: &str, needle: &str, mode: SearchMode) -> Option<Rank> {
     None
 }
 
-/// The objects of `snapshot` that match `query`, best first, at most `query.limit`.
+/// The objects of `snapshot` that match `query`, best first, at most `query.limit`. Empty text
+/// matches nothing; a namespace whose state is `OutOfScope` (a cached arena left after the scope
+/// narrowed) is never searched, as lookups never answer from it.
 pub fn search(snapshot: &CatalogSnapshot, query: &SearchQuery) -> Vec<ObjHit> {
-    if query.limit == 0 {
+    if query.limit == 0 || query.text.is_empty() {
         return Vec::new();
     }
     let mut buckets: [Vec<ObjHit>; 3] = [Vec::new(), Vec::new(), Vec::new()];
@@ -85,6 +87,12 @@ pub fn search(snapshot: &CatalogSnapshot, query: &SearchQuery) -> Vec<ObjHit> {
         }
     };
     'scan: for (key, ns) in snapshot.namespaces.iter() {
+        if matches!(
+            snapshot.states.get(&ContainerKey::Namespace(key.clone())),
+            Some(LoadState::OutOfScope)
+        ) {
+            continue;
+        }
         for (i, o) in ns.objs().iter().enumerate() {
             if !wanted(o) {
                 continue;

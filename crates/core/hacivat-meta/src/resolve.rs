@@ -129,6 +129,32 @@ pub(crate) fn locate_ns_of(snap: &CatalogSnapshot, path: &[Name]) -> Option<NsKe
     None
 }
 
+/// The schema namespace an object at `path` would live in: PostgreSQL `[db, schema]` (paths
+/// of three parts or more), elsewhere `[schema]` (two or more); `None` for database- and
+/// server-level paths.
+pub(crate) fn schema_key_of(snap: &CatalogSnapshot, path: &[Name]) -> Option<NsKey> {
+    let parts = if pg_family(snap.server.dbms) { 2 } else { 1 };
+    (path.len() > parts).then(|| NsKey {
+        kind: NsKind::Schema,
+        path: path[..parts].iter().cloned().collect(),
+    })
+}
+
+/// Whether "no object at `path` in the complete namespace `located`" is a fact (T9 fix round 1,
+/// C1). `located` is the longest listed prefix of `path`: when it is not the path's own schema
+/// namespace, that schema is unlisted, and its absence is a fact only when the schema list is
+/// loaded. A PostgreSQL path that only the server namespace holds names a database the catalog
+/// does not list: never a fact.
+pub(crate) fn miss_is_fact(snap: &CatalogSnapshot, located: &NsKey, path: &[Name]) -> bool {
+    if pg_family(snap.server.dbms) && located.kind == NsKind::Server && path.len() >= 2 {
+        return false;
+    }
+    match schema_key_of(snap, path) {
+        Some(schema) if schema != *located => list_known_for(snap, &schema),
+        _ => true,
+    }
+}
+
 /// Where a reference points in one generation, ignoring load states.
 #[derive(Debug)]
 pub(crate) struct Located<'a> {
@@ -219,8 +245,9 @@ fn walk_names(ns: &NamespaceSnapshot, names: &[Name]) -> Option<u32> {
 }
 
 /// Resolves `r` in `snapshot`: `Found` when the target namespace is in scope and an arena
-/// holds the target, `Missing` only when that namespace is complete and lacks it, `Unknown`
-/// otherwise (a namespace the catalog does not list is `Unknown(NotLoaded)`).
+/// holds the target, `Missing` only when the target's own namespace is complete and lacks it
+/// (or that namespace is known not to exist, [`miss_is_fact`]), `Unknown` otherwise (a
+/// namespace the catalog does not list is `Unknown(NotLoaded)`).
 pub fn resolve_ref(snapshot: &CatalogSnapshot, r: &Ref) -> Lookup<ObjHandle> {
     let located = locate_ref(snapshot, r);
     let Some(key) = located.ns.as_ref() else {
@@ -230,7 +257,10 @@ pub fn resolve_ref(snapshot: &CatalogSnapshot, r: &Ref) -> Lookup<ObjHandle> {
         NsStatus::OutOfScope => Lookup::Unknown(UnknownReason::OutOfScope),
         status => match (located.hit, status) {
             (Some((ns, idx)), _) => Lookup::Found(snapshot.handle(ns, idx)),
-            (None, NsStatus::Complete) => Lookup::Missing(MissingReason::NotFound),
+            (None, NsStatus::Complete) if miss_is_fact(snapshot, key, &r.path) => {
+                Lookup::Missing(MissingReason::NotFound)
+            }
+            (None, NsStatus::Complete) => Lookup::Unknown(UnknownReason::NotLoaded),
             (None, NsStatus::Partial { reason, .. }) => Lookup::Unknown(reason),
             (None, NsStatus::OutOfScope) => Lookup::Unknown(UnknownReason::OutOfScope),
         },

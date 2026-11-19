@@ -648,7 +648,9 @@ fn pg_search_path_order_is_temp_then_path_then_pg_catalog() {
     let order: Vec<_> = path
         .entries_for(KindGroup::Relations)
         .map(|e| {
-            e.ns.path
+            e.ns.as_ref()
+                .unwrap()
+                .path
                 .iter()
                 .map(|n| n.to_string())
                 .collect::<Vec<_>>()
@@ -662,7 +664,10 @@ fn pg_search_path_order_is_temp_then_path_then_pg_catalog() {
     // The temporary schema holds relations and types only, never routines.
     let routines: Vec<_> = path
         .entries_for(KindGroup::Routines)
-        .map(|e| e.ns.root_name().to_string())
+        .map(|e| {
+            e.ns.as_ref()
+                .map_or("?".to_string(), |k| k.root_name().to_string())
+        })
         .collect();
     assert_eq!(routines, ["alice", "public", "pg_catalog"]);
     assert_eq!(
@@ -670,6 +675,8 @@ fn pg_search_path_order_is_temp_then_path_then_pg_catalog() {
             .next()
             .unwrap()
             .ns
+            .as_ref()
+            .unwrap()
             .root_name(),
         "pg_temp_3"
     );
@@ -682,13 +689,19 @@ fn pg_search_path_order_is_temp_then_path_then_pg_catalog() {
     );
     let order: Vec<_> = explicit
         .entries_for(KindGroup::Relations)
-        .map(|e| e.ns.root_name().to_string())
+        .map(|e| {
+            e.ns.as_ref()
+                .map_or("?".to_string(), |k| k.root_name().to_string())
+        })
         .collect();
     assert_eq!(order, ["pg_catalog", "public", "pg_temp_3"]);
     let no_temp = SearchPath::for_pg(&name(DB), &[name("public"), name("pg_temp")], None, None);
     let order: Vec<_> = no_temp
         .entries_for(KindGroup::Relations)
-        .map(|e| e.ns.root_name().to_string())
+        .map(|e| {
+            e.ns.as_ref()
+                .map_or("?".to_string(), |k| k.root_name().to_string())
+        })
         .collect();
     assert_eq!(order, ["pg_catalog", "public"]);
 
@@ -727,12 +740,15 @@ fn pg_catalog_implicitly_first_when_absent() {
     let path = SearchPath::for_pg(&name(DB), &[name("public")], None, None);
     let order: Vec<_> = path
         .entries_for(KindGroup::Routines)
-        .map(|e| e.ns.root_name().to_string())
+        .map(|e| {
+            e.ns.as_ref()
+                .map_or("?".to_string(), |k| k.root_name().to_string())
+        })
         .collect();
     assert_eq!(order, ["pg_catalog", "public"]);
     // `pg_catalog` is not introspected live (it comes from the system snapshot, Task 26): it
-    // shadows `public` for anything it might hold, so a miss is unknown, a hit in `public`
-    // is found.
+    // may hold the name before `public` does, so even a hit in `public` is unknown (R-W2-6,
+    // fail closed against alg/02 step 5's "Found if any"); qualified, it is found.
     let snap = snapshot(
         DbmsKind::Postgres,
         pg_ctx(),
@@ -744,14 +760,313 @@ fn pg_catalog_implicitly_first_when_absent() {
         true,
     );
     let v = SnapshotView::new(snap).with_search_path(path);
+    assert!(matches!(
+        v.lookup(&p("t"), KindGroup::Relations),
+        Lookup::Unknown(UnknownReason::OutOfScope)
+    ));
     assert_eq!(
-        found_name(v.lookup(&p("t"), KindGroup::Relations)),
+        found_name(v.lookup(&p("public.t"), KindGroup::Relations)),
         "public.t"
     );
     assert!(matches!(
         v.lookup(&p("pg_class"), KindGroup::Relations),
         Lookup::Unknown(UnknownReason::OutOfScope)
     ));
+}
+
+#[test]
+fn a_hit_behind_an_earlier_unknown_entry_is_unknown() {
+    // R-W2-6: `s1`, first on the path, cannot answer (not loaded, loading or failed); the
+    // server could resolve `t` there, so `public.t` is not the answer. A certain miss in `s1`
+    // lets `public.t` be found.
+    for (s1, reason) in [
+        (LoadState::NotLoaded, UnknownReason::NotLoaded),
+        (
+            LoadState::Loading {
+                generation: 1,
+                level: Level::Structure,
+            },
+            UnknownReason::Loading,
+        ),
+        (failed(), UnknownReason::Failed),
+    ] {
+        let snap = snapshot(
+            DbmsKind::Postgres,
+            pg_ctx(),
+            vec![(
+                ns_pg(DB, "public").table_oid("t", 1, &[]).finish(),
+                loaded(Level::Structure),
+            )],
+            vec![(NsKey::schema([DB, "s1"]), s1)],
+            true,
+        );
+        let v = SnapshotView::new(snap).with_search_path(SearchPath::exact(
+            Some(name(DB)),
+            [NsKey::schema([DB, "s1"]), NsKey::schema([DB, "public"])],
+        ));
+        let got = v.lookup(&p("t"), KindGroup::Relations);
+        assert!(matches!(got, Lookup::Unknown(r) if r == reason), "{got:?}");
+    }
+    let snap = snapshot(
+        DbmsKind::Postgres,
+        pg_ctx(),
+        vec![
+            (ns_pg(DB, "s1").finish(), loaded(Level::Structure)),
+            (
+                ns_pg(DB, "public").table_oid("t", 1, &[]).finish(),
+                loaded(Level::Structure),
+            ),
+        ],
+        vec![],
+        true,
+    );
+    let v = SnapshotView::new(snap).with_search_path(SearchPath::exact(
+        Some(name(DB)),
+        [NsKey::schema([DB, "s1"]), NsKey::schema([DB, "public"])],
+    ));
+    assert_eq!(
+        found_name(v.lookup(&p("t"), KindGroup::Relations)),
+        "public.t"
+    );
+}
+
+#[test]
+fn unknown_session_facts_keep_the_path_unknown() {
+    // I2: `$user` of an unknown user and an empty (unknown) setting are unnamed entries.
+    let snap = snapshot(
+        DbmsKind::Postgres,
+        pg_ctx(),
+        vec![
+            (
+                ns_pg(DB, "public").table_oid("t", 1, &[]).finish(),
+                loaded(Level::Structure),
+            ),
+            (ns_pg(DB, "pg_catalog").finish(), loaded(Level::Structure)),
+        ],
+        vec![],
+        true,
+    );
+    for path in [
+        SearchPath::for_pg(&name(DB), &[name("$user"), name("public")], None, None),
+        SearchPath::for_pg(&name(DB), &[], Some(&name("alice")), None),
+    ] {
+        assert!(path.entries.iter().any(|e| e.ns.is_none()), "{path:?}");
+        let v = SnapshotView::new(snap.clone()).with_search_path(path);
+        for probe in ["t", "zz"] {
+            assert!(matches!(
+                v.lookup(&p(probe), KindGroup::Relations),
+                Lookup::Unknown(UnknownReason::NotLoaded)
+            ));
+        }
+    }
+    // A known user without a schema of that name, on a listed server: skipped, as the server
+    // skips it.
+    let v = SnapshotView::new(snap).with_search_path(SearchPath::for_pg(
+        &name(DB),
+        &[name("$user"), name("public")],
+        Some(&name("alice")),
+        None,
+    ));
+    assert_eq!(
+        found_name(v.lookup(&p("t"), KindGroup::Relations)),
+        "public.t"
+    );
+}
+
+#[test]
+fn a_reported_temp_schema_or_pg_catalog_is_never_skipped() {
+    // I3: both exist whatever the schema list says; unlisted, they are unknown.
+    let snap = snapshot(
+        DbmsKind::Postgres,
+        pg_ctx(),
+        vec![(
+            ns_pg(DB, "public").table_oid("t", 1, &[]).finish(),
+            loaded(Level::Structure),
+        )],
+        vec![],
+        true,
+    );
+    let plain = SearchPath::for_pg(&name(DB), &[name("public")], Some(&name("alice")), None);
+    let v = SnapshotView::new(snap.clone()).with_search_path(plain);
+    assert!(matches!(
+        v.lookup(&p("pg_class"), KindGroup::Relations),
+        Lookup::Unknown(UnknownReason::NotLoaded)
+    ));
+    let with_catalog = snapshot(
+        DbmsKind::Postgres,
+        pg_ctx(),
+        vec![
+            (
+                ns_pg(DB, "public").table_oid("t", 1, &[]).finish(),
+                loaded(Level::Structure),
+            ),
+            (ns_pg(DB, "pg_catalog").finish(), loaded(Level::Structure)),
+        ],
+        vec![],
+        true,
+    );
+    let with_temp = SearchPath::for_pg(
+        &name(DB),
+        &[name("public")],
+        Some(&name("alice")),
+        Some(&name("pg_temp_7")),
+    );
+    let v = SnapshotView::new(with_catalog.clone()).with_search_path(with_temp);
+    assert!(matches!(
+        v.lookup(&p("zz"), KindGroup::Relations),
+        Lookup::Unknown(UnknownReason::NotLoaded)
+    ));
+    // Routines never look in the temporary schema.
+    assert!(matches!(
+        v.lookup(&p("zz"), KindGroup::Routines),
+        Lookup::Missing(_)
+    ));
+    let without_temp = SearchPath::for_pg(&name(DB), &[name("public")], Some(&name("alice")), None);
+    let v = SnapshotView::new(with_catalog).with_search_path(without_temp);
+    assert!(matches!(
+        v.lookup(&p("zz"), KindGroup::Relations),
+        Lookup::Missing(_)
+    ));
+}
+
+#[test]
+fn children_of_a_database_are_its_listed_schemas() {
+    // I5: the schema list is its own container; `children(database, Schema)` answers from the
+    // listed schema namespaces, never from the (schema-less) database arena.
+    let db = ObjectKey {
+        kind: ObjectKind::Database,
+        path: [name(DB)].into_iter().collect(),
+        server_id: None,
+        overload_sig: None,
+        raw_kind: None,
+    };
+    let names = |l: Lookup<Vec<hacivat_meta::snapshot::ObjHandle>>| match l {
+        Lookup::Found(v) => v
+            .iter()
+            .map(|h| h.obj().name().to_string())
+            .collect::<Vec<_>>(),
+        other => panic!("{other:?}"),
+    };
+    let nss = || {
+        vec![
+            (ns_pg(DB, "sales").finish(), loaded(Level::Structure)),
+            (ns_pg(DB, "public").finish(), LoadState::OutOfScope),
+        ]
+    };
+    let listed = snapshot(DbmsKind::Postgres, pg_ctx(), nss(), vec![], true);
+    assert_eq!(
+        names(SnapshotView::new(listed).children(&db, ObjectKind::Schema)),
+        ["public", "sales"]
+    );
+    assert_ne!(
+        ContainerKey::schema_list(Some(&name(DB))),
+        ContainerKey::Children {
+            ns: NsKey::database(DB),
+            parent: db.clone(),
+            kind: ObjectKind::Schema,
+        }
+    );
+    // Without the list, or with a listed schema that has no arena to hand out: unknown.
+    let unlisted = snapshot(DbmsKind::Postgres, pg_ctx(), nss(), vec![], false);
+    assert!(matches!(
+        SnapshotView::new(unlisted).children(&db, ObjectKind::Schema),
+        Lookup::Unknown(UnknownReason::NotLoaded)
+    ));
+    let state_only = snapshot(
+        DbmsKind::Postgres,
+        pg_ctx(),
+        nss(),
+        vec![(NsKey::schema([DB, "hr"]), LoadState::NotLoaded)],
+        true,
+    );
+    assert!(matches!(
+        SnapshotView::new(state_only).children(&db, ObjectKind::Schema),
+        Lookup::Unknown(UnknownReason::NotLoaded)
+    ));
+}
+
+#[test]
+fn a_reference_into_an_unlisted_schema_is_unknown_until_the_list_says_absent() {
+    // C1: a complete database namespace never answers for a schema it does not hold.
+    let mut nss = hacivat_meta::fixture::pg_catalog(&[("public", 2)], 4);
+    let db_ns = nss
+        .iter()
+        .find(|n| n.key().kind == hacivat_meta::ids::NsKind::Database);
+    assert!(db_ns.is_some(), "the fixture holds a database namespace");
+    let in_sales = hacivat_meta::ids::Ref {
+        kind: ObjectKind::Table,
+        path: [name("app"), name("sales"), name("orders")]
+            .into_iter()
+            .collect(),
+        server_id: None,
+    };
+    let catalog = Catalog::new(Arc::new(ServerFacts::new(DbmsKind::Postgres, pg_ctx())));
+    let w = catalog.publisher().unwrap();
+    let mut changes = Vec::new();
+    for ns in nss.drain(..) {
+        changes.push(CatalogChange::SetState(
+            ContainerKey::Namespace(ns.key().clone()),
+            loaded(Level::Structure),
+        ));
+        changes.push(CatalogChange::Put(Arc::new(ns)));
+    }
+    w.publish(changes).unwrap();
+    assert!(matches!(
+        catalog.current().resolve(&in_sales),
+        Lookup::Unknown(UnknownReason::NotLoaded)
+    ));
+    // Once the list is loaded and does not hold `sales`, the schema does not exist.
+    w.publish(vec![CatalogChange::SetState(
+        ContainerKey::schema_list(Some(&name("app"))),
+        loaded(Level::Names),
+    )])
+    .unwrap();
+    assert!(matches!(
+        catalog.current().resolve(&in_sales),
+        Lookup::Missing(MissingReason::NotFound)
+    ));
+    // Another database is never a fact.
+    let mut other = in_sales.clone();
+    other.path[0] = name("otherdb");
+    assert!(matches!(
+        catalog.current().resolve(&other),
+        Lookup::Unknown(UnknownReason::NotLoaded)
+    ));
+}
+
+#[test]
+fn mysql_qualifier_with_a_non_ascii_stored_schema_is_server_dependent() {
+    // I4: lctn = 1, stored database `ılık`: `ILIK.t` may name it on the server.
+    let snap = snapshot(
+        DbmsKind::MySql,
+        my_ctx(1),
+        vec![
+            (
+                ns_mysql("ılık", 1).table("t", &["a"]).finish(),
+                loaded(Level::Structure),
+            ),
+            (
+                ns_mysql("Shop", 1).table("t", &["a"]).finish(),
+                loaded(Level::Structure),
+            ),
+        ],
+        vec![],
+        true,
+    );
+    let v = SnapshotView::new(snap);
+    assert!(matches!(
+        v.lookup(&p("ILIK.t"), KindGroup::Relations),
+        Lookup::Unknown(UnknownReason::ServerDependent)
+    ));
+    // An ASCII stored name still folds and resolves.
+    assert_eq!(
+        found_name(v.lookup(&p("SHOP.T"), KindGroup::Relations)),
+        "Shop.t"
+    );
+    assert_eq!(
+        found_name(v.lookup(&p("ılık.t"), KindGroup::Relations)),
+        "ılık.t"
+    );
 }
 
 #[test]
@@ -783,9 +1098,10 @@ fn an_unlisted_path_schema_is_skipped_only_when_the_list_is_known() {
         v.lookup(&p("nosuch.zz"), KindGroup::Relations),
         Lookup::Unknown(UnknownReason::NotLoaded)
     ));
+    // R-W2-6: `$user` (alice) is not known to be absent, so it may hold `t` before `public`.
     assert!(matches!(
         v.lookup(&p("t"), KindGroup::Relations),
-        Lookup::Found(_)
+        Lookup::Unknown(UnknownReason::NotLoaded)
     ));
     let known_list = snapshot(
         DbmsKind::Postgres,
@@ -878,7 +1194,10 @@ fn sqlite_order_is_temp_main_attached() {
     let path = SearchPath::for_sqlite(&[name("main"), name("temp"), name("aux"), name("logs")]);
     let order: Vec<_> = path
         .entries_for(KindGroup::Relations)
-        .map(|e| e.ns.root_name().to_string())
+        .map(|e| {
+            e.ns.as_ref()
+                .map_or("?".to_string(), |k| k.root_name().to_string())
+        })
         .collect();
     assert_eq!(order, ["temp", "main", "aux", "logs"]);
     let snap = snapshot(

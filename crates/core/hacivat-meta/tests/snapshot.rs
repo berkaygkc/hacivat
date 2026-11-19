@@ -160,11 +160,19 @@ fn publish_shares_untouched_namespaces_ptr_eq() {
     assert!(Arc::ptr_eq(&g1.overlays, &g2.overlays));
     assert_eq!(ns(&g2, &public()).generation(), 2);
     assert_eq!(ns(&g2, &sales()).generation(), 1);
-    // A publish never copies a unique arena it is handed: the published Arc is the new one.
-    let fresh = Arc::new(pg_schema("sales", vec![]));
-    let raw = Arc::as_ptr(&fresh);
+    // A publish never copies the objects of a unique arena it is handed: the arena is moved
+    // out of its `Arc` to be stamped, so its object buffer is the very one handed over (the
+    // `Arc` allocation itself is new).
+    let fresh = Arc::new(pg_schema("sales", vec![table("s", 2, &["b"])]));
+    let objs = fresh.objs().as_ptr();
     drop(w.publish(vec![CatalogChange::Put(fresh)]).unwrap());
-    assert_eq!(Arc::as_ptr(ns(&c.current(), &sales())), raw);
+    assert_eq!(ns(&c.current(), &sales()).objs().as_ptr(), objs);
+    // A shared one is copied (the documented cost; T15 hands over unique arenas).
+    let shared = Arc::new(pg_schema("sales", vec![table("s", 2, &["b"])]));
+    let objs = shared.objs().as_ptr();
+    w.publish(vec![CatalogChange::Put(Arc::clone(&shared))])
+        .unwrap();
+    assert_ne!(ns(&c.current(), &sales()).objs().as_ptr(), objs);
 }
 
 #[test]

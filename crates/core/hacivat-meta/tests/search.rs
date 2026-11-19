@@ -9,7 +9,9 @@ use hacivat_meta::kind::ObjectKind;
 use hacivat_meta::name::{DialectId, IdentCtx};
 use hacivat_meta::namespace::NamespaceSnapshot;
 use hacivat_meta::search::{ObjHit, SearchMode, SearchQuery, search};
-use hacivat_meta::snapshot::{Catalog, CatalogChange, CatalogSnapshot, ServerFacts};
+use hacivat_meta::snapshot::{
+    Catalog, CatalogChange, CatalogSnapshot, ContainerKey, LoadState, ServerFacts,
+};
 use hacivat_proto::DbmsKind;
 
 fn snapshot(nss: Vec<NamespaceSnapshot>) -> Arc<CatalogSnapshot> {
@@ -87,8 +89,10 @@ fn search_is_locale_free_and_bounded() {
         Vec::<String>::new()
     );
     // Bounded: at most `limit` hits, and none for a zero limit.
+    // Empty text matches nothing.
+    assert!(search(&snap, &q("", &[], 3, SearchMode::Substring)).is_empty());
     assert_eq!(
-        search(&snap, &q("", &[], 3, SearchMode::Substring)).len(),
+        search(&snap, &q("d", &[], 3, SearchMode::Substring)).len(),
         3
     );
     assert!(search(&snap, &q("i", &tables, 0, SearchMode::Substring)).is_empty());
@@ -175,5 +179,34 @@ fn search_order_is_deterministic() {
     assert_eq!(
         names(&search(&snap, &q("sales", &[], 10, SearchMode::Substring))),
         ["sales.sales"]
+    );
+}
+
+#[test]
+fn search_skips_out_of_scope_arenas() {
+    // A cached arena left after the scope narrowed is never ranked (lookups hide it too).
+    let c = Catalog::new(Arc::new(ServerFacts::new(
+        DbmsKind::Postgres,
+        IdentCtx::new(DialectId::Postgres),
+    )));
+    let hr = ns_pg("db", "hr").table_oid("orders_hr", 1, &[]).finish();
+    let public = ns_pg("db", "public").table_oid("orders", 2, &[]).finish();
+    c.publisher()
+        .unwrap()
+        .publish(vec![
+            CatalogChange::SetState(
+                ContainerKey::Namespace(hr.key().clone()),
+                LoadState::OutOfScope,
+            ),
+            CatalogChange::Put(Arc::new(hr)),
+            CatalogChange::Put(Arc::new(public)),
+        ])
+        .unwrap();
+    assert_eq!(
+        names(&search(
+            &c.current(),
+            &q("orders", &[ObjectKind::Table], 10, SearchMode::Substring)
+        )),
+        ["public.orders"]
     );
 }
