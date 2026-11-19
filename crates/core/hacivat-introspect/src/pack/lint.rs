@@ -1,0 +1,363 @@
+//! The catalog-SQL lint (M4 Task 4; alg/02 HV-INTRO-14 rules 1–2, HV-INTRO-07, R-M4-8,
+//! R-M4-46). Session-free. It reads every line of every branch, so a gated variant cannot
+//! hide a finding; it runs in `tests/pack.rs` over the built-in packs (empty findings) and in
+//! the introspectors' own tests.
+//!
+//! What it refuses:
+//! - **Canonical catalog spelling** (rule 2): PostgreSQL writes `pg_catalog`,
+//!   `information_schema` and every `pg_*` name in lower case, and every `pg_*` name (tables,
+//!   views and functions) qualified as `pg_catalog.<name>` (a hostile `search_path` cannot
+//!   shadow it); MySQL/MariaDB write `INFORMATION_SCHEMA.<UPPER>` and `mysql.`,
+//!   `performance_schema.`, `sys.` in lower case; SQLite writes `sqlite_schema` (never
+//!   `sqlite_master`) and `sqlite_*`/`pragma_*` names in lower case.
+//! - **Unqualified PostgreSQL catalog functions** (R-M4-46, fix round 1 m1): the catalog
+//!   functions without a `pg_` prefix that packs use (`format_type`, `obj_description`,
+//!   `has_*_privilege`, `age`, …) carry `pg_catalog.` in every section; in a `joinable`
+//!   section, where the `search_path` is not pinned, **every** function call does.
+//! - **Case folding in catalog SQL** (rule 1): `lower(`, `upper(`, `lcase(`, `ucase(`,
+//!   `casefold(`, `initcap(`, `ILIKE`, `COLLATE` and PostgreSQL's `~*`, `!~*`, `~~*`, `!~~*`
+//!   anywhere in code (a pack compares exact names, bound; a Turkish collation breaks every
+//!   folding trick).
+//! - MySQL/MariaDB `UPDATE_TIME` and `GROUP_CONCAT` (HV-INTRO-07; key parts are grouped
+//!   client-side).
+//! - PostgreSQL: any `age(…)` call outside the R-M4-8 shape `age(x) BETWEEN 0 AND age($W::xid)`
+//!   — through a cast, parentheses or arithmetic included (fix round 1, I4).
+//! - Every dialect: `txid_current` and `pg_current_xact_id` (they assign an XID).
+//! - Directive-looking text (`--#`, `---`) inside a literal or quoted identifier.
+//!
+//! What the parser already refuses never reaches the lint: nesting deeper than `MAX_NESTING`,
+//! MySQL executable comments, `#{ident:…}` outside a `show-create` section (fix round 1).
+
+use hacivat_meta::Name;
+use sql_dialect::DialectId;
+
+use super::parse::{Family, Piece, SYNTAX, Tok, scan_line, tokenize, walk_lines};
+use super::{DraftPack, Section};
+
+/// One lint finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LintError {
+    pub file: &'static str,
+    pub line: u32,
+    pub section: Name,
+    pub kind: LintKind,
+}
+
+/// The closed set of lint findings; a `String` holds the word as written in the pack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LintKind {
+    /// A catalog name not in its canonical case (or `sqlite_master`).
+    NonCanonicalCatalogName(String),
+    /// A PostgreSQL catalog name or function without `pg_catalog.`.
+    UnqualifiedPgCatalog(String),
+    /// A case-folding function, operator or `COLLATE`.
+    CaseFoldingOnCatalogName(String),
+    /// MySQL `UPDATE_TIME`.
+    UpdateTime,
+    /// MySQL `GROUP_CONCAT`.
+    GroupConcat,
+    /// A PostgreSQL `age(…)` outside `age(x) BETWEEN 0 AND age($W::xid)` (R-M4-8).
+    OrderingOnAge,
+    /// `txid_current` or `pg_current_xact_id`.
+    XidAssigningFunction(String),
+    /// `--#` or `---` inside a literal or quoted identifier.
+    DirectiveInLiteral,
+}
+
+fn eq(w: &str, s: &str) -> bool {
+    w.eq_ignore_ascii_case(s)
+}
+
+fn has_upper(w: &str) -> bool {
+    w.bytes().any(|b| b.is_ascii_uppercase())
+}
+
+fn has_lower(w: &str) -> bool {
+    w.bytes().any(|b| b.is_ascii_lowercase())
+}
+
+fn starts_with_ci(w: &str, prefix: &str) -> bool {
+    w.len() >= prefix.len()
+        && w.is_char_boundary(prefix.len())
+        && w[..prefix.len()].eq_ignore_ascii_case(prefix)
+}
+
+fn ends_with_ci(w: &str, suffix: &str) -> bool {
+    w.len() >= suffix.len()
+        && w.is_char_boundary(w.len() - suffix.len())
+        && w[w.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+}
+
+/// Case-folding functions (rule 1).
+const FOLDS: [&str; 6] = ["lower", "upper", "lcase", "ucase", "casefold", "initcap"];
+
+/// PostgreSQL catalog functions without a `pg_` prefix that every section qualifies.
+const PG_UNPREFIXED: [&str; 22] = [
+    "age",
+    "format_type",
+    "obj_description",
+    "col_description",
+    "shobj_description",
+    "quote_ident",
+    "quote_literal",
+    "quote_nullable",
+    "current_setting",
+    "current_database",
+    "current_schema",
+    "current_schemas",
+    "current_user",
+    "session_user",
+    "to_regclass",
+    "to_regtype",
+    "to_regproc",
+    "to_regprocedure",
+    "to_regnamespace",
+    "array_to_string",
+    "string_to_array",
+    "unnest",
+];
+
+/// Lints every section of `pack` with `dialect`'s rules.
+pub fn lint<P: AsRef<DraftPack>>(pack: &P, dialect: DialectId) -> Vec<LintError> {
+    let pack = pack.as_ref();
+    let Some(rules) = Family::of(dialect) else {
+        return Vec::new();
+    };
+    let lexer = pack.inner.family;
+    let mut out = Vec::new();
+    for sec in &pack.inner.sections {
+        lint_section(sec, lexer, rules, &mut out);
+    }
+    out
+}
+
+fn lint_section(sec: &Section, lexer: Family, rules: Family, out: &mut Vec<LintError>) {
+    let mut push = |line: u32, kind: LintKind| {
+        out.push(LintError {
+            file: sec.file,
+            line,
+            section: sec.name.clone(),
+            kind,
+        });
+    };
+    let mut toks: Vec<(u32, Tok<'_>)> = Vec::new();
+    walk_lines(&sec.body, &mut |l| {
+        // The parser accepted the line, so it lexes again.
+        let Ok(pieces) = scan_line(lexer, &l.raw) else {
+            return;
+        };
+        for p in pieces {
+            match p {
+                Piece::Code(c) => tokenize(c, l.line, &mut toks),
+                Piece::Quoted(q) => {
+                    if q.contains("--#") || q.contains("---") {
+                        push(l.line, LintKind::DirectiveInLiteral);
+                    }
+                    // A quoted identifier is still a name the rules read: `"lower"(x)` calls
+                    // `lower`, `"pg_class"` is unqualified. (`"` quotes a string on MySQL
+                    // without ANSI_QUOTES; reading it as a name there only adds findings.)
+                    let ident = q.starts_with('"') || q.starts_with('`');
+                    let tok = if ident {
+                        Tok::Word(&q[1..q.len() - 1])
+                    } else {
+                        Tok::Operand
+                    };
+                    toks.push((l.line, tok));
+                }
+                Piece::Comment(_) => {}
+                Piece::Bind(_) | Piece::Macro(_) => toks.push((l.line, Tok::Operand)),
+                Piece::List(_) => toks.push((l.line, Tok::List)),
+            }
+        }
+    });
+
+    let word = |k: usize| match toks.get(k) {
+        Some((_, Tok::Word(w))) => Some(*w),
+        _ => None,
+    };
+    let op = |k: usize| match toks.get(k) {
+        Some((_, Tok::Op(o))) => Some(*o),
+        _ => None,
+    };
+    // The word two tokens back when the token before is `.`: the qualifier of `toks[k]`.
+    let qualifier = |k: usize| {
+        if k >= 2 && op(k - 1) == Some(".") {
+            word(k - 2)
+        } else {
+            None
+        }
+    };
+
+    let valid_ages = between_age_calls(&toks);
+    for (k, &(line, tok)) in toks.iter().enumerate() {
+        match tok {
+            Tok::Op(o @ ("~*" | "!~*" | "~~*" | "!~~*")) => {
+                push(line, LintKind::CaseFoldingOnCatalogName(o.to_string()));
+            }
+            Tok::Op(_) | Tok::Operand | Tok::List => {}
+            Tok::Word(w) => {
+                let call = op(k + 1) == Some("(");
+                if eq(w, "txid_current") || eq(w, "pg_current_xact_id") {
+                    push(line, LintKind::XidAssigningFunction(w.to_string()));
+                }
+                if (call && FOLDS.iter().any(|f| eq(w, f))) || eq(w, "ilike") || eq(w, "collate") {
+                    push(line, LintKind::CaseFoldingOnCatalogName(w.to_string()));
+                }
+                match rules {
+                    Family::Pg => {
+                        let q = qualifier(k);
+                        let in_catalog = q.is_some_and(|q| eq(q, "pg_catalog"));
+                        if eq(w, "pg_catalog")
+                            || eq(w, "information_schema")
+                            || starts_with_ci(w, "pg_")
+                            || q.is_some_and(|q| eq(q, "information_schema"))
+                        {
+                            if has_upper(w) {
+                                push(line, LintKind::NonCanonicalCatalogName(w.to_string()));
+                            }
+                            if starts_with_ci(w, "pg_") && !eq(w, "pg_catalog") && !in_catalog {
+                                push(line, LintKind::UnqualifiedPgCatalog(w.to_string()));
+                            }
+                        } else if call && !in_catalog {
+                            let known = PG_UNPREFIXED.iter().any(|f| eq(w, f))
+                                || (starts_with_ci(w, "has_") && ends_with_ci(w, "_privilege"));
+                            let after_type = k >= 1
+                                && (op(k - 1) == Some("::")
+                                    || word(k - 1).is_some_and(|p| eq(p, "as")));
+                            let syntax = SYNTAX.iter().any(|s| eq(w, s));
+                            if known || (sec.joinable && !after_type && !syntax) {
+                                push(line, LintKind::UnqualifiedPgCatalog(w.to_string()));
+                            }
+                        }
+                        if eq(w, "age") && call && !valid_ages.contains(&k) {
+                            push(line, LintKind::OrderingOnAge);
+                        }
+                    }
+                    Family::MySql => {
+                        if eq(w, "information_schema") && w != "INFORMATION_SCHEMA" {
+                            push(line, LintKind::NonCanonicalCatalogName(w.to_string()));
+                        }
+                        if qualifier(k).is_some_and(|q| eq(q, "information_schema")) && has_lower(w)
+                        {
+                            push(line, LintKind::NonCanonicalCatalogName(w.to_string()));
+                        }
+                        if ["mysql", "performance_schema", "sys"]
+                            .iter()
+                            .any(|s| eq(w, s))
+                            && op(k + 1) == Some(".")
+                            && has_upper(w)
+                        {
+                            push(line, LintKind::NonCanonicalCatalogName(w.to_string()));
+                        }
+                        if eq(w, "update_time") {
+                            push(line, LintKind::UpdateTime);
+                        }
+                        if eq(w, "group_concat") {
+                            push(line, LintKind::GroupConcat);
+                        }
+                    }
+                    Family::Sqlite => {
+                        // `sqlite_schema` is canonical (`sqlite_master` is its legacy alias),
+                        // and SQLite's own names are lower case.
+                        let legacy = eq(w, "sqlite_master") || eq(w, "sqlite_temp_master");
+                        let ours = starts_with_ci(w, "sqlite_") || starts_with_ci(w, "pragma_");
+                        if legacy || (ours && has_upper(w)) {
+                            push(line, LintKind::NonCanonicalCatalogName(w.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The index just past the call whose name is at `k` (`name(` … `)`) and any `::type`
+/// casts after it.
+fn past_call(toks: &[(u32, Tok<'_>)], k: usize) -> usize {
+    let mut depth = 0usize;
+    let mut j = k + 1;
+    while let Some((_, t)) = toks.get(j) {
+        match t {
+            Tok::Op("(") => depth += 1,
+            Tok::Op(")") => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    j += 1;
+    while matches!(toks.get(j), Some((_, Tok::Op("::")))) {
+        j += 2;
+        while matches!(toks.get(j), Some((_, Tok::Op("."))))
+            && matches!(toks.get(j + 1), Some((_, Tok::Word(_))))
+        {
+            j += 2;
+        }
+    }
+    j
+}
+
+/// The `age(` calls (indices of the name token) that form `age(x) BETWEEN 0 AND age(y)`
+/// exactly (R-M4-8; fix round 2, m9): the lower operand is an `age(` call (casts allowed) with
+/// a boolean boundary before it (`WHERE`, `AND`, `OR`, `NOT`, `ON`, `WHEN`, `(`, `,`, …), the
+/// bounds are `BETWEEN 0 AND` and an `age(` call, and a boundary follows the upper bound
+/// (`AND`, `OR`, `)`, `,`, a clause word or the end). So no arithmetic, comparison,
+/// `NOT BETWEEN`, `SYMMETRIC`, other lower bound or non-`age` lower operand passes.
+fn between_age_calls(toks: &[(u32, Tok<'_>)]) -> std::collections::HashSet<usize> {
+    let is = |j: usize, w: &str| matches!(toks.get(j), Some((_, Tok::Word(x))) if x.eq_ignore_ascii_case(w));
+    // `age(` at `j`, possibly `pg_catalog.`-qualified; answers (first token, name token).
+    let age_at = |j: usize| -> Option<(usize, usize)> {
+        let name = if is(j, "pg_catalog") && matches!(toks.get(j + 1), Some((_, Tok::Op(".")))) {
+            j + 2
+        } else {
+            j
+        };
+        (is(name, "age") && matches!(toks.get(name + 1), Some((_, Tok::Op("(")))))
+            .then_some((j, name))
+    };
+    let before_ok = |first: usize| match first.checked_sub(1).and_then(|b| toks.get(b)) {
+        None => true,
+        Some((_, Tok::Op("(" | ","))) => true,
+        Some((_, Tok::Word(w))) => [
+            "where", "and", "or", "not", "on", "when", "then", "else", "select",
+        ]
+        .iter()
+        .any(|b| w.eq_ignore_ascii_case(b)),
+        Some(_) => false,
+    };
+    let after_ok = |j: usize| match toks.get(j) {
+        None => true,
+        Some((_, Tok::Op(")" | ","))) => true,
+        Some((_, Tok::Word(w))) => [
+            "and", "or", "then", "else", "end", "order", "group", "limit", "having", "union",
+            "from", "as",
+        ]
+        .iter()
+        .any(|b| w.eq_ignore_ascii_case(b)),
+        Some(_) => false,
+    };
+    let mut out = std::collections::HashSet::new();
+    for first in 0..toks.len() {
+        let Some((first, lower)) = age_at(first) else {
+            continue;
+        };
+        // A qualified call matches at its `pg_catalog` token; seen from the bare `age` token it
+        // has `.` before it, which is no boundary.
+        let b = past_call(toks, lower);
+        if !(before_ok(first) && is(b, "between") && is(b + 1, "0") && is(b + 2, "and")) {
+            continue;
+        }
+        let Some((_, upper)) = age_at(b + 3) else {
+            continue;
+        };
+        if after_ok(past_call(toks, upper)) {
+            out.insert(lower);
+            out.insert(upper);
+        }
+    }
+    out
+}

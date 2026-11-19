@@ -471,3 +471,165 @@ spike (`d86313b`), adapted to the T1a seam.
   **224 B per column** (a 104 B `Obj`, 104 B `ColumnProps`, a 16 B `Arc` header) and 414 B per
   table, within alg/02's 250 B and 600 B. `model_perf` asserts both, and
   `a_column_stays_within_the_memory_target` checks the sizes on every 64-bit test run.
+
+## m4-t04 — query packs
+
+M4 Task 4 fills `hacivat-introspect::pack` (`mod`, `parse`, `render`, `lint`; alg/02
+HV-INTRO-04, R-M4-3, -7, -29, -32, -37). The packs themselves stay header-only until Tasks
+16–18.
+
+- **Grammar.** Line-oriented, as alg/02 HV-INTRO-04: `--- name: <Section> ---`,
+  `--- returns: <col type, …> ---` (required; types `text bool i16 i32 i64 u32 u64 f64 bytes
+  timestamp`), the flags `--- joinable ---` and `--- show-create ---` (before the first SQL
+  line), `--# if/elif/else/end` nested at most 4 deep (a parse error, not only a lint, so the
+  tree a fuzzer builds stays shallow). Conditions are a closed language over `version` (an
+  integer: no `12.0` form), `mode` (`full incremental brief system`), `level`, `flavor` (a
+  `DbmsKind` id) and `flag(mariadb|joined)` with `and`/`or`/`not`/parentheses (at most 8 deep).
+  Files merge in byte order of their names, whatever order the caller passes.
+- **Fail-closed lexing** (as first written; the review found four gaps, closed in fix round
+  1 below). Literals, quoted identifiers and block comments close on their own line; a backslash in a
+  literal, a nested `/*`, a raw placeholder (`$` on PostgreSQL and SQLite, `?` on MySQL and
+  SQLite, `@` and `[` on SQLite), a control character other than the tab (a bare `\r` ends a
+  PostgreSQL `--` comment), `;`, a MySQL `#` comment, a MySQL `--` not followed by a
+  space, and `#{` inside a literal or comment are parse errors. `::` is never a bind.
+- **List binds** (R-M4-3) render `(…)` after `IN`, written `<operand> IN :[name]` on one line;
+  `NOT IN :[name]` is refused (a chunked `NOT IN` matches what another chunk excludes), as is a
+  second list name in one section. Chunks hold at most `MAX_IN_LIST` = 1,000 items; an empty
+  list renders no query, but every scalar bind is still checked. Rows of chunks are
+  concatenated. (Superseded by fix round 1, I3, below: the placement is now enforced.)
+- **Macros** are `Macro::{MaxInList, Ident}`. The plan's "catalog prefix" macro is **not**
+  written: no M4 dialect has a privilege-dependent catalog prefix (that is Oracle's
+  `ALL_`/`DBA_`), and PG packs must spell `pg_catalog.<name>` literally for the lint. It lands
+  with the first pack that needs one. `#{ident:<bind>}` (R-M4-37) renders only in a
+  `show-create` section, which only a MySQL/MariaDB pack may declare (elsewhere it is a lint
+  finding and the renderer refuses it), through `sql_ident::quote::quote(DialectId::MySql, …)`
+  with `QuoteCtx::default()` (MySQL identifiers are always backticked, T7); the renderer re-checks that the result is one backtick-quoted
+  identifier with every inner backtick doubled, and refuses NULL, empty and NUL names. A
+  `show-create` section holds no literal, comment, quoted identifier or bind, and each macro is
+  bounded by whitespace, `.`, `(`, `)` or `,` (two adjacent quoted names would read as one).
+- **No silent "no rows".** A context for which every SQL line is gated away answers
+  `RenderError::NoVariant`, never an empty `Vec` (alg/02 edge 8; F31).
+- **Joined connections** (R-M4-29): `PackFlags::JOINED` in the context refuses every section not
+  marked `joinable` (`RenderError::NotJoinable`); the `joinable` flag travels into
+  `RenderedQuery` and `MetaQuery`. T5's statement allowlist stays the primary runtime check.
+- **Feature split, refined.** Rendering is session-free (the `fuzz/meta` target `pack_parse`
+  parses, lints and renders without `hacivat-session`); only
+  `RenderedQuery::as_meta_query`, the single `MetaQuery::new` call outside `meta.rs`, is
+  `#[cfg(feature = "session")]` inside `pack::render`. `pack` re-exports `DialectId`,
+  `BindValue`, `LogicalType` and `Flavor` so the fuzz package needs no manifest change.
+- **Lint** (`lint(pack, dialect)`, every branch read): HV-INTRO-14 canonical spelling (PG
+  `pg_catalog`, `information_schema` and `pg_*` lower case and `pg_*` always qualified by
+  `pg_catalog.`; MySQL `INFORMATION_SCHEMA.<UPPER>` and lower-case `mysql.`,
+  `performance_schema.`, `sys.`; SQLite `sqlite_schema`, never `sqlite_master`); folding
+  (`lower(`, `upper(`, `lcase(`, `ucase(`, `ILIKE`, `COLLATE`, `~*`, `!~*`, `~~*`, `!~~*`
+  anywhere in code, not only on a name column: packs compare bound exact names); MySQL
+  `UPDATE_TIME`, `GROUP_CONCAT` and, added here, executable comments `/*!`, `/*M!`; PG
+  ordering comparisons on `age(…)` (R-M4-8); `txid_current` and `pg_current_xact_id` in every
+  dialect; `#{ident:…}` outside `show-create`; `--#`/`---` inside a literal.
+- **Variants.** `Pack::reachable_variants(section)` answers one context per distinct path
+  through the section's blocks (versions at every threshold and its neighbours, every mode and
+  level a condition names, the dialect's flavor plus every named one plus one unnamed family
+  member, `flag(mariadb)` tied to the flavor, `flag(joined)` only on joinable sections). A
+  property test checks it against a brute-force sweep.
+- **Fix round 1 (security review: 0 Critical, 4 Important).**
+  - **I1, lexer vs server.** The claim "they never disagree" was false in four places; each is
+    now a parse error, not only a lint finding: a backtick in a PostgreSQL pack (an operator
+    character there); `/*` anywhere inside a block comment *including its closing `*/`*
+    (`/* a /*/` opens a nested PostgreSQL comment); SQLite `#name`, and `:` followed by a digit
+    or a non-ASCII byte on every dialect (SQLite parameters); MySQL `/*!` and MariaDB `/*M!`
+    executable comments. What is enforced now: every form the review or this task found where
+    the server would read code that the lexer reads as a literal or comment (or the reverse),
+    on the servers' default settings, is refused; `tests/hostile_t04_review.rs` H1–H4 pin them.
+    That is a list of closed gaps, not a proof: a server setting that changes lexing
+    (PostgreSQL `standard_conforming_strings = off` is covered by the backslash rule; MySQL
+    `ANSI_QUOTES` changes only what `"` means, not where it ends) is the residual risk.
+  - **I2, provenance (controller ruling).** A renderable `Pack` comes only from `&'static`
+    text: `Pack::parse(dialect, &'static str)`, `Pack::parse_all(&[PackFile])`,
+    `Pack::builtin`. Runtime text parses into a `DraftPack` (same parser, lint and renderer),
+    whose `DraftQuery` has no `as_meta_query` (two `compile_fail` doctests in `pack::render`).
+    `Box::leak` still yields `&'static`, so check-deps gains **`PackParseOnlyFromPacks`**
+    (named exception: one rule plus tests in `xtask/src/check_deps.rs`, `## m4-t04-packs`,
+    shaped like `MetaQueryOnlyFromPacks`): `Pack::parse`, `Pack::parse_all` and any other
+    associated item of `Pack` but `builtin`, an alias of `Pack`, an `impl` header or a macro
+    invocation naming it, are refused outside `hacivat-introspect/src/{pack,pg,mysql,sqlite}/**`,
+    a crate's `tests/` and `fuzz/meta/`.
+  - **I3, list binds (controller ruling, fixed now).** A list bind is legal only as a
+    top-level `AND` conjunct of the `WHERE` clause written `<column> IN :[name]` (column
+    optionally qualified), at parenthesis depth 0, preceded by `WHERE` or a conjunction `AND`
+    (not the `AND` of `BETWEEN`), followed by nothing, `AND` or `ORDER`; the nearest clause
+    keyword before it is `WHERE` (so not an `ON` clause); used once per section (the section
+    text, every branch counted); and the statement holds no `OR`, `XOR`, MySQL `||`, aggregate
+    call, `GROUP BY`, `HAVING`, `LIMIT`, `OFFSET`, `FETCH`, `DISTINCT`, `OVER`, `WINDOW` or
+    set operation at depth 0. It is checked in every `--# if` variant (at most 4,096 candidate
+    contexts, else `ListBindTooManyVariants`). Items are deduplicated (first seen kept) before
+    chunking. An empty list renders no query, which is right because no negated form parses
+    (tested both ways). Aggregates in correlated subqueries (depth ≥ 1) stay legal.
+  - **I4, `age()`.** The lint now requires every `age(` call to be one side of
+    `age(x) BETWEEN 0 AND age(y)` (casts after the lower operand allowed); a comparison,
+    parentheses, arithmetic or `IS` around it is a finding.
+  - **Minor.** PG 18 `casefold(`/`initcap(` are folds. PG catalog functions without a `pg_`
+    prefix that packs use (`format_type`, `obj_description`, `has_*_privilege`, `age`,
+    `unnest`, …) need `pg_catalog.` in every section, and in a `joinable` section every
+    function call does (R-M4-46: no pinned `search_path` there). `#{ident:…}` outside
+    `show-create` is a parse error (so the lint finding and the `ExecutableComment` lint
+    finding are gone: the parser refuses both first). The identifier macro refuses a bind
+    whose hint is not text. The fuzz target re-lexes every render (no `;`, placeholders equal
+    binds, `$1..$n` in order, `show-create` quotes closed), checks parse and render are
+    idempotent, and parses a two-file arm. `tests/pack.proptest-regressions` is kept as a
+    named addition (repo practice: `sql-split`, `hacivat-sql-editor`).
+  - **T5 carry, enforced at parse time.** T5's joined `MetaConn` and the session's read
+    check refuse text holding `INSERT`, `UPDATE`, `DELETE`, `MERGE` or `INTO` anywhere, and
+    `PRAGMA` statements. So a `joinable` section may not hold those words anywhere in its text
+    (literals and comments included; `PackErrorKind::JoinableWriteWord`; a value that needs one
+    is a bind), and no pack may hold a `PRAGMA` word in code (`PragmaStatement`): SQLite
+    sections read through the `pragma_*` table-valued functions (`pragma_table_info(?)`).
+    Tasks 16–18 write their sections under these rules.
+  - **Carry (controller → T5/T17).** The `show-create` quoting assumes a UTF-8 connection
+    charset; under GBK-family charsets a name can break out. `SET NAMES utf8mb4` at connect
+    and after every reconnect, assert `@@character_set_client`/`_connection`, refuse
+    otherwise.
+- **Fix round 2 (re-review: 1 Important, I5; minors m7–m10).**
+  - **I5, a general rule (controller ruling).** In a list-bind query, expression depth counts
+    `(…)`, `[…]` and `CASE … END`, and the top-level `AND` conjunct of the `WHERE` clause that
+    holds the list must be **exactly** `<column-ref> IN :[name]` (`<column-ref>` one or more
+    `.`-joined identifiers): so `CASE WHEN a AND x IN :[ids] … END = 0` and
+    `ARRAY[… x IN :[ids] …] = …` are refused. A separate *query level* counts only subquery
+    parentheses (`(SELECT`, `(WITH`, `(VALUES`), so a scalar subquery, `EXISTS` or CTE body
+    may aggregate freely while the list's own query may not.
+  - **Function calls: an allowlist, not an aggregate denylist (the choice asked for).** At the
+    list's query level (inside expressions too, so `coalesce(max(x), 0)` is caught) every
+    function call must be a row-by-row function on `ROW_FUNCTIONS` (PostgreSQL accessors and
+    snapshot readers, shared string and number functions, MySQL `IF`/`IFNULL`/…, SQLite
+    `iif`/`substr`/…, every SQLite `pragma_*` table-valued function) or a PostgreSQL deparser
+    (`pg_get_*`, `format_type`, `*_description`, `has_*_privilege`, `pg_*_is_visible`,
+    `pg_identify_object*`, `pg_describe_object`). `GROUP`, `HAVING`, `LIMIT`, `OFFSET`,
+    `FETCH`, `DISTINCT` (but `IS [NOT] DISTINCT FROM`), `OVER`, `WINDOW`, `FILTER`, `WITHIN`
+    and set operations are refused at that level; `OR`/`XOR`/MySQL `||` at its expression depth
+    0. Workable for Tasks 16–18: their retrieve sections call deparsers and accessors row by
+    row; a function they need that is not listed is added to `ROW_FUNCTIONS` in
+    `pack/parse.rs` by a named exception, reviewed as such. Every aggregate family (`any_value`,
+    `range_agg`, `corr`, `regr_*`, SQLite `total`, user aggregates, …) is refused without being
+    named.
+  - **m8, joinable sections: the same allowlist.** A `joinable` section may call only
+    `ROW_FUNCTIONS` plus the read-only aggregates `count`, `max`, `min`, `sum`, `bool_and`,
+    `bool_or`, `every` (`PackErrorKind::JoinableFunction`), anywhere in its text. So
+    `set_config`, `nextval`/`setval`, `pg_advisory*`, `lo_*`, `dblink*`, `pg_notify`,
+    `txid_current`/`pg_current_xact_id`, MySQL `GET_LOCK`/`RELEASE_LOCK`/`SLEEP`/`BENCHMARK`
+    and the `search_path`-dependent deparsers (R-M4-46) are refused without a denylist. T5's
+    runtime allowlist stays the primary check.
+  - **m7.** `render` refuses a context whose `PackFlags::MARIADB` disagrees with
+    `flavor == MariaDb` (`RenderError::FlavorFlagMismatch`), so no context reaches a branch the
+    parse-time checks (which assume they agree) never read.
+  - **m9, `age()`.** The lint accepts an `age(` call only inside
+    `age(x) BETWEEN 0 AND age(y)` with a boolean boundary before the lower operand (`WHERE`,
+    `AND`, `OR`, `NOT`, `ON`, `WHEN`, `THEN`, `ELSE`, `SELECT`, `(`, `,`) and one after the
+    upper bound's arguments and casts (`AND`, `OR`, `)`, `,`, a clause word, the end): no
+    arithmetic around the form, no lower operand other than an `age(` call, no lower bound but
+    `0`.
+  - **m10.** The `compile_fail` doctests carry `E0599` and `E0597` in their fence and in a
+    comment; both codes were observed by compiling the snippets (each is the only error).
+    Stable rustdoc does not check the fence code, so the comment and the positive controls
+    in `tests/hostile_t04_review.rs` R9 are what pin it.
+  - The re-review's probes R1–R9 are in `tests/hostile_t04_review.rs`, flipped to assert the
+    fixes. **m11** (`Pack::parse` call sites in `pg/`, `mysql/`, `sqlite/` must take
+    `include_str!` or a `const`) is carried to the T16–T18 reviews by the controller.
