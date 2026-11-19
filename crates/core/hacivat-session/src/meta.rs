@@ -1828,6 +1828,14 @@ fn read_tokens_ok(sql: &str, lexed: &Lexed, sqlite_pragma: bool) -> bool {
     }
     let upper = |i: usize| token_text(sql, lexed, i).to_ascii_uppercase();
     let is = |i: Option<usize>, kind: TokenKind| i.is_some_and(|i| lexed.kind(i) == kind);
+    // ## m4-t17-mysql (named exception in Task 5's file; R-M4-37): a `SHOW CREATE …` statement
+    // holds no expression, so a quoted identifier there is the object's name, never a call or
+    // a keyword. Such a name may be non-ASCII (`İ`) or spell a denied word (`update`): only
+    // quoted identifiers not followed by `(` are exempt; every word is still checked.
+    let show_create = keyword == "SHOW"
+        && sig
+            .get(1)
+            .is_some_and(|&i| lexed.kind(i) == TokenKind::Word && upper(i) == "CREATE");
     for (n, &i) in sig.iter().enumerate() {
         let next = sig.get(n + 1).copied();
         let after_next = sig.get(n + 2).copied();
@@ -1838,6 +1846,7 @@ fn read_tokens_ok(sql: &str, lexed: &Lexed, sqlite_pragma: bool) -> bool {
             | TokenKind::UnicodeQuotedIdent => return false,
             TokenKind::Semicolon if next.is_some() => return false,
             TokenKind::Word => upper(i),
+            TokenKind::QuotedIdent if show_create && !is(next, TokenKind::LParen) => continue,
             TokenKind::QuotedIdent => unquoted(token_text(sql, lexed, i)).to_ascii_uppercase(),
             TokenKind::Op => {
                 let op = token_text(sql, lexed, i);

@@ -301,7 +301,10 @@ mod tests {
             let caps = introspector_for(dbms).expect("an M4 engine").capabilities();
             assert_eq!(caps.dbms, dbms);
             assert_eq!(caps.transactional_ddl, transactional, "{dbms:?}");
-            assert!(!caps.incremental && caps.facets.is_empty(), "{dbms:?}");
+            // ## m4-t17-mysql (named exception in Task 1c's file): MySQL is incremental
+            // (R-M4-39); MariaDB stays `Full` (R-M4-10); facets wait for Task 17b.
+            assert_eq!(caps.incremental, dbms == DbmsKind::MySql, "{dbms:?}");
+            assert!(caps.facets.is_empty(), "{dbms:?}");
         }
         assert!(introspector_for(DbmsKind::MsSql).is_none());
     }

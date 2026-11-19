@@ -595,7 +595,8 @@ mod tests {
 
     #[test]
     fn every_pack_file_is_a_header_with_no_section_yet() {
-        for d in [DialectId::Postgres, DialectId::MySql, DialectId::Sqlite] {
+        // ## m4-t17-mysql (named exception in Task 4's file): the MySQL pack has sections now.
+        for d in [DialectId::Postgres, DialectId::Sqlite] {
             for (name, text) in files_of(d).unwrap() {
                 assert!(!text.is_empty(), "{d:?} {name}");
                 assert!(
@@ -609,12 +610,8 @@ mod tests {
 
     #[test]
     fn the_builtin_packs_parse_to_no_section_until_tasks_16_to_18() {
-        for d in [
-            DialectId::Postgres,
-            DialectId::MySql,
-            DialectId::MariaDb,
-            DialectId::Sqlite,
-        ] {
+        // ## m4-t17-mysql (named exception in Task 4's file): the MySQL pack has sections now.
+        for d in [DialectId::Postgres, DialectId::Sqlite] {
             let p = Pack::builtin(d).unwrap();
             assert!(p.sections().is_empty(), "{d:?}");
         }

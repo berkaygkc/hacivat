@@ -197,11 +197,21 @@ async fn stub_stamps_and_facet_not_implemented() {
         let intro = introspector_for(dbms).expect("an M4 engine");
         let mut c = MetaConn::offline(dbms);
         let n = ns("public");
-        assert_eq!(
-            intro.stamps(&mut c, &keys).await,
-            Err(IntroError::NotImplemented),
-            "{dbms:?}"
-        );
+        // ## m4-t17-mysql (named exception in Task 1c's file): the MySQL introspector is
+        // written; on an offline connection every read fails `Unavailable`, never a fact.
+        // Its facets stay Task 17b's stubs (checked below).
+        let written = matches!(dbms, DbmsKind::MySql | DbmsKind::MariaDb);
+        let not_written = |e: &Result<_, IntroError>| -> bool {
+            if written {
+                matches!(
+                    e,
+                    Err(IntroError::Meta(hacivat_session::meta::MetaError::Unavailable))
+                )
+            } else {
+                matches!(e, Err(IntroError::NotImplemented))
+            }
+        };
+        assert!(not_written(&intro.stamps(&mut c, &keys).await.map(drop)), "{dbms:?}");
         for kind in [
             FacetKind::Sources,
             FacetKind::Grants,
@@ -214,26 +224,22 @@ async fn stub_stamps_and_facet_not_implemented() {
                 "{dbms:?} {kind:?}"
             );
         }
-        assert_eq!(
-            intro.list_namespaces(&mut c).await,
-            Err(IntroError::NotImplemented)
-        );
-        assert!(matches!(
-            intro
-                .introspect(&mut c, &n, Mode::Full, Level::Structure, None, &cancel)
-                .await,
-            Err(IntroError::NotImplemented)
+        assert!(not_written(&intro.list_namespaces(&mut c).await.map(drop)));
+        // `ns("public")` is a PostgreSQL-shaped key; a MySQL namespace is `[schema]`.
+        let n_any = if written { NsKey::schema(["public"]) } else { n.clone() };
+        assert!(not_written(
+            &intro
+                .introspect(&mut c, &n_any, Mode::Full, Level::Structure, None, &cancel)
+                .await
+                .map(drop)
         ));
-        assert!(matches!(
-            intro
-                .fragment(&mut c, &n, &keys, Level::Names, &cancel)
-                .await,
-            Err(IntroError::NotImplemented)
+        assert!(not_written(
+            &intro
+                .fragment(&mut c, &n_any, &keys, Level::Names, &cancel)
+                .await
+                .map(drop)
         ));
-        assert_eq!(
-            intro.check_state(&mut c, &keys).await,
-            Err(IntroError::NotImplemented)
-        );
+        assert!(not_written(&intro.check_state(&mut c, &keys).await.map(drop)));
     }
 }
 
