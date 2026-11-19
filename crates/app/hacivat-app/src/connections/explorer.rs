@@ -95,6 +95,8 @@ struct Stamp {
     contributors: u64,
     filter: Option<usize>,
     loads: usize,
+    // ## m4-t20-levels (named exception): the profiles' user data (level pills).
+    userdata: u64,
 }
 
 /// The explorer view (the `explorer` hook).
@@ -446,6 +448,8 @@ fn profile_input(p: &Arc<Profile>, cx: &App) -> ProfileInput {
         a11y,
         tooltip,
         catalog: adapter::catalog_of(p.id, cx),
+        // ## m4-t20-levels (named exception): the level pills' data.
+        userdata: crate::explorer::userdata::get(p.id, cx),
     }
 }
 
@@ -583,6 +587,11 @@ impl ExplorerView {
                 }
                 cx.notify();
             }),
+            // ## m4-t20-levels (named exception): a profile's user data was read or changed.
+            cx.observe_global::<crate::explorer::userdata::UserData>(|this, cx| {
+                this.refresh(cx);
+                cx.notify();
+            }),
         ];
         let mut view = ExplorerView {
             filter,
@@ -691,12 +700,23 @@ impl ExplorerView {
             contributors: contributors_generation(cx),
             filter: self.result.as_ref().map(|r| Arc::as_ptr(r) as usize),
             loads: self.loads.len(),
+            // ## m4-t20-levels (named exception)
+            userdata: crate::explorer::userdata::generation(cx),
         }
     }
 
     /// Rebuilds the model when anything it shows changed. Answers whether a profile (its name
     /// or host) or the language changed: an active filter then runs again (fix round 1, m1).
     fn refresh(&mut self, cx: &mut Context<Self>) -> bool {
+        // ## m4-t20-levels (named exception): each profile's user data is read once, on the
+        // core runtime; the model is rebuilt when it lands.
+        let ids: Vec<ProfileId> = cx
+            .try_global::<ConnectionsModel>()
+            .map(|m| m.profiles().iter().map(|p| p.id).collect())
+            .unwrap_or_default();
+        for id in ids {
+            crate::explorer::userdata::ensure(id, cx);
+        }
         let stamp = self.stamp(cx);
         if self.stamp.as_ref() == Some(&stamp) {
             return false;
@@ -816,11 +836,15 @@ impl ExplorerView {
                 // the header's own key (R-W1-5).
             }
             TreeEvent::Expand(key) => self.load_contributed(*key, cx),
-            // Retry, the level pill and "Add to scope" are Tasks 24 and 20.
-            TreeEvent::Collapse(_)
-            | TreeEvent::Retry(_)
-            | TreeEvent::Pill(..)
-            | TreeEvent::RowAction(_) => {}
+            // ## m4-t20-levels (named exception): the level pill opens its list (mock 6).
+            TreeEvent::Pill(key, at) => {
+                let (key, at) = (*key, *at);
+                window.defer(cx, move |window, cx| {
+                    crate::explorer::level_pill::open_from_pill(key, at, window, cx)
+                });
+            }
+            // Retry and "Add to scope" are Task 24's.
+            TreeEvent::Collapse(_) | TreeEvent::Retry(_) | TreeEvent::RowAction(_) => {}
         }
     }
 

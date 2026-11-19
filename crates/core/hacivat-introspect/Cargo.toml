@@ -46,10 +46,12 @@ proptest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 hacivat-meta = { workspace = true, features = ["test-support"] }
-# ## m4-t16-pg (named exception, needs a controller ruling like R-W1-15): the Docker tests
-# connect real sessions (`ConnectDeps` names `hacivat-net`'s SSH stores and
-# `hacivat-driver`'s catalog), the hacivat-exec precedent; dev only, no product edge.
+# ## m4 (controller manifest amendment R-W3-4): Docker tests build a SessionManager, whose
+# ConnectDeps need hacivat_net::ssh::{KnownHosts, TunnelManager} (T17 NEEDS_CONTEXT).
 hacivat-net.workspace = true
+# ## m4-t16-pg (named exception, needs a controller ruling like R-W3-4): `ConnectDeps.catalog`
+# is `hacivat_driver::EngineCatalog::embedded()`, and the fixtures' admin connection reads a
+# scalar with `hacivat_driver::{ExecOpts, Protocol}`; dev only (the hacivat-exec precedent).
 hacivat-driver.workspace = true
 
 [lints]

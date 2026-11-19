@@ -1731,3 +1731,16 @@ intro-name-server-dependent = Whether this name matches depends on the server's 
 # Variables:
 #   $schema (String) - the namespace, e.g. "public".
 intro-catalog-race-retried = An object in { $schema } was dropped while it was being read, so the read was retried.
+
+## m4-t20-scope
+
+# A scope pattern applies, but part of it is ignored (HV-INTRO-02 edge 11): a `db:` prefix on a
+# one-level engine (MySQL, MariaDB, SQLite).
+# Variables:
+#   $column (Number) - the 1-based character position, e.g. 7.
+intro-scope-warn-db-term-ignored = The database part at character { NUMBER($column, useGrouping: "false") } is ignored: this engine has no databases above its schemas.
+# An object filter applies, but part of it is ignored (HV-INTRO-03 edge 5): an empty item
+# between two separators.
+# Variables:
+#   $column (Number) - the 1-based character position, e.g. 7.
+intro-filter-warn-empty-item = The empty part at character { NUMBER($column, useGrouping: "false") } is ignored.

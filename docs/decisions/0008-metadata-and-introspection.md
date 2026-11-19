@@ -1446,5 +1446,61 @@ documentation; `pg/**` runs them on Task 5's `MetaConn` (one `SnapshotTxn` per p
   `sql-catalog`); the T1c/T4 stub tests (`introspector.rs`, `pack/mod.rs`, `tests/seams.rs`)
   now expect the real PostgreSQL introspector; `hacivat-introspect` gains the dev-dependencies
   `hacivat-net` and `hacivat-driver` (the Docker tests build `ConnectDeps`; the hacivat-exec
-  precedent; `Cargo.lock` gains edges only) — a manifest change that needs a controller
+  precedent; `Cargo.lock` gains edges only). `hacivat-net` is the controller's R-W3-4; `hacivat-driver` still needs a controller
   ruling.
+
+## m4-t20 — scope editor, encrypted cache option, level pills
+
+M4 Task 20 (gpui) fills `connections/dialog/schemas.rs`, `explorer/level_pill.rs` and
+`explorer/userdata.rs` (mocks 6 and 7; R-M4-14, R-M4-15, R-M4-21).
+
+- **One scope, two views.** The tree never evaluates a pattern itself: it asks Task 12's
+  `ScopePattern::select_explicit` over the names the profile's last catalog lists, plus a
+  sentinel schema named NUL in each database (no engine accepts NUL in an identifier). The
+  sentinel tells "every schema of this database, also future ones" (`db:*`, `db:{…}`) from a
+  list of the names shown. The tree writes `@` for the current database, `*` for a whole
+  database and quotes a name unless a bare term selects exactly it (no separator, no space,
+  no ASCII capital a server would fold). Typed text is never rewritten.
+- **Errors at character positions** (`ScopeError.column`, scalar values). A pattern that does
+  not parse disables Save; the save path refuses it too, so it is never written.
+- **All databases** asks once per dialog, before the first change that reaches another
+  database (the box, a tree box, a typed pattern, a PostgreSQL database-only clause). Without
+  a listed catalog there is no count to show and the dialog does not ask; the engine's
+  `intro-scope-all-databases-cost` stays the guard at connect (Task 15).
+- **Encrypt cached metadata.** A new profile follows its environment (on for production) until
+  the box is clicked; a saved profile keeps its flag, and changing it asks in place. The
+  cache files are deleted at Save, before the profile with the new flag is written; a
+  deletion that fails stops the save (`SaveError::Io`), so a profile never says "plaintext"
+  while its encrypted cache is on disk (Task 11 refuses that downgrade). Task 24 must close
+  the profile's open `CacheStore` (stop the hub's catalog) before the deletion runs.
+- **Level pills.** Set here (blue) or inherited from the database (grey) come from
+  `ProfileUserData.level_overrides` (keys: the namespace root's `ObjectKey` by path, no server
+  id). Automatic (grey) shows the level a schema was last read at and its major-object
+  count; a schema not read yet, a database without an override, and every row of a profile
+  whose data file was not read yet show no pill (fail-closed: the automatic level is the
+  engine's `LevelPolicy`, Task 15). The commands write the data file; Task 24 forwards them
+  to `IntroHandle::set_level_override`.
+- **The profile data file** is read and written only by `explorer::userdata`, on the core
+  runtime, through one writer task that applies requests in order (each a read-modify-write
+  of the `[metadata]` table). A file that is not TOML, mixes line endings or holds a
+  `[metadata]` table of another shape is never rewritten; the profile's data stays unknown.
+- **Fix round 1.**
+  - **Ruling R-W3-1: sensitivity is derived unless set.** `Profile.catalog_sensitive_set:
+    Option<bool>` (T1c's field, named exception; the TOML key `catalog_sensitive` is
+    unchanged: a missing key reads `None`, `true`/`false` read `Some`, `None` is never
+    written). `Profile::catalog_sensitive()` is the effective value: the choice, else on for
+    production. Profiles from before M4 and imports are `None`, so production ones encrypt.
+    The dialog writes `Some` only when the user chooses. An environment change that flips a
+    saved profile's derived value asks first (it deletes the cache) and Save waits; Keep pins
+    the old value. **Task 15 (and every later reader) uses `Profile::catalog_sensitive()`.**
+  - **Save** reads the stored profile then: without a choice in this dialog the stored choice
+    stands. The cache is deleted when the stored and the new *effective* values differ. Each
+    failed step has its own message (cache not deleted, data file unreadable, scope not
+    written); a deterministic fault seam (`schemas::inject_save_fault`, feature
+    `test-support`) proves each one leaves flag and files consistent in both directions.
+  - **The data file:** a failed read is final (`Unreadable`, shown in the dialog); only a
+    failed write is followed by one read. No loop.
+  - **The tree keeps what it cannot show.** When writing the pattern again from the checked
+    rows would not give the same syntax tree, a click adds or removes one clause for its row
+    (`!@:"s"`, `@:"s"`, `!db:*`, …), verified through `select_explicit`; a click that cannot be
+    made that way asks before writing the pattern again.

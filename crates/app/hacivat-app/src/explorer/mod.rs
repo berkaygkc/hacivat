@@ -34,7 +34,7 @@ pub mod userdata;
 
 use std::rc::Rc;
 
-use hacivat_ui::actions::{ActionDef, ActionRegistry};
+use hacivat_ui::actions::{ActionDef, ActionFn, ActionRegistry};
 use hacivat_ui_core::gpui_surface::App;
 
 pub use actions::{
@@ -91,18 +91,14 @@ const COMMANDS: [(&str, &str); 12] = [
 
 /// The M4 explorer commands that are still stubs (registered disabled). A task that fills one
 /// removes it here (and in `tests/m4_routing.rs`).
-pub const STUB_COMMANDS: [&str; 12] = [
+// ## m4-t20-levels: Task 20's five commands are filled (`edit_scope`, `set_level.*`).
+pub const STUB_COMMANDS: [&str; 7] = [
     "explorer.view_ddl",
     "explorer.copy_qualified_name",
     "explorer.collapse_all",
     "explorer.open_data",
     "explorer.refresh",
     "explorer.expand_all_children",
-    "explorer.edit_scope",
-    "explorer.set_level.auto",
-    "explorer.set_level.names",
-    "explorer.set_level.structure",
-    "explorer.set_level.sources",
     "metadata.clear_cache",
 ];
 
@@ -111,17 +107,36 @@ fn not_yet(_: &App) -> bool {
     false
 }
 
+// ## m4-t20-levels
+/// A command's `enabled` function.
+type Enabled = fn(&App) -> bool;
+
+/// The run and enabled functions of a filled command (`None`: a stub).
+fn filled(id: &str) -> Option<(ActionFn, Enabled)> {
+    if id == "explorer.edit_scope" {
+        let run: ActionFn = Rc::new(crate::connections::dialog::schemas::edit_scope);
+        return Some((run, crate::connections::dialog::schemas::can_edit_scope));
+    }
+    let (_, level) = level_pill::LEVEL_COMMANDS
+        .iter()
+        .find(|(cmd, _)| *cmd == id)?;
+    let level = *level;
+    let run: ActionFn = Rc::new(move |_, cx| level_pill::set_level(level, cx));
+    Some((run, level_pill::can_set_level))
+}
+
 /// Registers the M4 explorer commands (one line in `crate::init`).
 pub fn install(cx: &mut App) {
     let reg = cx.default_global::<ActionRegistry>();
     for (id, title_id) in COMMANDS {
+        let (run, enabled) = filled(id).unwrap_or_else(|| (Rc::new(|_, _| {}), not_yet));
         // A duplicate keeps the first definition (registration order is the palette's order).
         let _ = reg.register(ActionDef {
             id,
             title_id,
             context: EXPLORER_TREE_CONTEXT,
-            run: Rc::new(|_, _| {}),
-            enabled: not_yet,
+            run,
+            enabled,
         });
     }
 }

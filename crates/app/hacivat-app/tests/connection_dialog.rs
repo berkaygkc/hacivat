@@ -457,6 +457,8 @@ fn new_dialog_is_640_and_focuses_host(cx: &mut TestAppContext) {
 
 #[gpui::test]
 // ## m2b-t20-ssh: the mock's order now has the SSH disclosure between TLS and Advanced.
+// ## m4-t20-scope (named exception): and the Schemas disclosure between SSH and Advanced (M4
+// mock 7).
 fn tab_order_matches_the_mock(cx: &mut TestAppContext) {
     let vcx = open_new(cx, "en");
     assert_eq!(
@@ -476,6 +478,7 @@ fn tab_order_matches_the_mock(cx: &mut TestAppContext) {
             "remember",
             "tls",
             "ssh",
+            "scope",
             "advanced",
             "test",
             "cancel",
@@ -1572,6 +1575,10 @@ fn a_typed_url_keeps_an_unknown_parameter_as_an_extra(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_refused_extra_of_an_imported_profile_blocks_the_save_inline(cx: &mut TestAppContext) {
     let vcx = open_new(cx, "en");
+    // ## m4-t20-scope (named exception): the Schemas section sits above Advanced, which the
+    // paste notice then pushes below this window's fold; a taller window keeps the click on it.
+    vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(1000.0)));
+    vcx.run_until_parked();
     paste_into(vcx, "host", "postgres://u@localhost/shop");
     click_selector(vcx, "disclosure-conn-advanced");
     add_extra(vcx, "foo", "bar");
