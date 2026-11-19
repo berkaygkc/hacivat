@@ -3528,6 +3528,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "twox-hash",
+ "zeroize",
  "zstd",
 ]
 
