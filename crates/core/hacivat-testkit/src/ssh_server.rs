@@ -58,6 +58,33 @@ pub enum ForwardTarget {
     Redirect(SocketAddr),
 }
 
+/// A gate that holds the server's `direct-tcpip` confirmations until [`ForwardGate::release`];
+/// clones share it. Released once, it stays open.
+#[derive(Debug, Clone)]
+pub struct ForwardGate(Arc<tokio::sync::Semaphore>);
+
+impl Default for ForwardGate {
+    fn default() -> Self {
+        ForwardGate(Arc::new(tokio::sync::Semaphore::new(0)))
+    }
+}
+
+impl ForwardGate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Lets every held and later confirmation through.
+    pub fn release(&self) {
+        self.0.close();
+    }
+
+    /// Resolves once the gate is released (a semaphore with no permits only opens by closing).
+    async fn passed(&self) {
+        let _ = self.0.acquire().await;
+    }
+}
+
 /// One keyboard-interactive prompt and the answer the server expects. Holds a secret (the
 /// answer), so `Debug` redacts it and there is no `PartialEq`.
 #[derive(Clone)]
@@ -116,8 +143,8 @@ pub struct TestSshConfig {
     pub forward_to: ForwardTarget,
     pub max_auth_tries: Option<u32>,
     pub slow_banner: Option<Duration>,
-    /// How long an allowed `direct-tcpip` open waits before it is confirmed.
-    pub forward_delay: Option<Duration>,
+    /// Holds every allowed `direct-tcpip` open until the test releases it.
+    pub forward_gate: Option<ForwardGate>,
     pub ipv6: bool,
 }
 
@@ -169,13 +196,14 @@ impl TestSshConfig {
         self
     }
 
-    /// The server waits `d` before its banner (timeout tests).
-    /// Every allowed `direct-tcpip` open is confirmed `d` late (late-channel tests).
-    pub fn forward_delay(mut self, d: Duration) -> Self {
-        self.forward_delay = Some(d);
+    /// Every allowed `direct-tcpip` open is confirmed only once `gate` is released
+    /// (late-channel tests: a condition, never a fixed delay racing the client's timeout).
+    pub fn forward_gate(mut self, gate: ForwardGate) -> Self {
+        self.forward_gate = Some(gate);
         self
     }
 
+    /// The server waits `d` before its banner (timeout tests).
     pub fn slow_banner(mut self, d: Duration) -> Self {
         self.slow_banner = Some(d);
         self
@@ -638,8 +666,8 @@ impl Handler for Client {
                 reply.reject(ChannelOpenFailure::ConnectFailed).await;
                 return;
             };
-            if let Some(d) = shared.config.forward_delay {
-                tokio::time::sleep(d).await;
+            if let Some(gate) = &shared.config.forward_gate {
+                gate.passed().await;
             }
             reply.accept().await;
             shared.channels_opened.fetch_add(1, Ordering::SeqCst);
