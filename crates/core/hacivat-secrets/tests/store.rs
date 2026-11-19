@@ -401,3 +401,47 @@ fn live_keyring_round_trip() {
     b.delete(&key).unwrap();
     assert!(b.get(&key).unwrap().is_none());
 }
+
+// ## m4-t01c-core (fix round 1): a catalog data key stays with its profile.
+#[test]
+fn copy_never_copies_the_catalog_key_and_delete_removes_it() {
+    let (s, b) = store();
+    let (p1, p2) = (ProfileId::new(), ProfileId::new());
+    let at = |profile, slot| SecretKey { profile, slot };
+    s.put(
+        &at(p1, SecretSlot::DbPassword),
+        sec("pw"),
+        Retention::Forever,
+    )
+    .unwrap();
+    s.put(
+        &at(p1, SecretSlot::CatalogKey),
+        sec("key"),
+        Retention::Forever,
+    )
+    .unwrap();
+    s.copy_all(p1, p2, Retention::Forever).unwrap();
+    s.copy_slots(p1, p2, Retention::Forever, &|_| true).unwrap();
+    assert_secret!(
+        b.get(&at(p2, SecretSlot::DbPassword)).unwrap().unwrap(),
+        "pw"
+    );
+    assert!(b.get(&at(p2, SecretSlot::CatalogKey)).unwrap().is_none());
+    // Kept in the process too (UntilRestart): still not copied.
+    let p3 = ProfileId::new();
+    s.put(
+        &at(p3, SecretSlot::CatalogKey),
+        sec("key"),
+        Retention::UntilRestart,
+    )
+    .unwrap();
+    s.copy_all(p3, p2, Retention::UntilRestart).unwrap();
+    assert!(
+        s.get(&at(p2, SecretSlot::CatalogKey), Retention::UntilRestart)
+            .unwrap()
+            .is_none()
+    );
+    // Deleting the profile reaches the key in the backend.
+    s.delete_all(p1).unwrap();
+    assert!(b.get(&at(p1, SecretSlot::CatalogKey)).unwrap().is_none());
+}

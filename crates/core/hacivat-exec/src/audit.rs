@@ -483,3 +483,28 @@ mod tests {
         );
     }
 }
+
+// ## m4-t01c-core
+/// The refresh-after-DDL sink (HV-INTRO-12; body Task 21, installed per run by Task 27): a
+/// synchronous auditor that hands each finished unit's catalog effects (`StmtReport.ddl`) and
+/// the session's transaction outcome to the profile's refresh coordinator, without waiting.
+///
+/// **Fail-closed stub (M4 Task 1c).** It drops every event and is installed nowhere, so no
+/// refresh is planned from a run until Task 21 (the explorer stays as loaded; a user refresh
+/// still reloads). It never blocks the run.
+#[derive(Debug, Default)]
+pub struct CatalogRefreshSink {
+    _private: (),
+}
+
+impl CatalogRefreshSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl SyncAuditor for CatalogRefreshSink {
+    fn on_event(&mut self, ev: &RunEvent) {
+        let _ = ev;
+    }
+}

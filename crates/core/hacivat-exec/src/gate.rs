@@ -290,6 +290,8 @@ fn request_floor(report: &SafetyReport) -> GateClass {
         destructive: Vec::new(),
         confidence: Confidence::Conservative,
         set_targets: Vec::new(),
+        // ## m4-t01c-core (named exception): `gate_class` never reads `ddl`.
+        ddl: Vec::new(),
     };
     gate_class(&synthetic)
 }

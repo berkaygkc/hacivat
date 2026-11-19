@@ -44,3 +44,19 @@ pub mod sqlite;
 pub mod testing;
 #[cfg(feature = "session")]
 pub mod ticket;
+
+// ## m4-t01c-core: the per-engine introspector seam (Part B), gated like every module that
+// names a session type (ADR 0008 `m4-t01a`).
+#[cfg(feature = "session")]
+pub mod introspector;
+
+#[cfg(feature = "session")]
+pub use engine::{IntroHandle, Phase, Progress, TaskProgress};
+#[cfg(feature = "session")]
+pub use introspector::{
+    FacetRows, IntroCaps, IntroError, Introspector, Staleness, introspector_for,
+};
+pub use pack::Mode;
+pub use scope::{CurrentCtx, NsInfo, ScopePattern, parse_scope};
+#[cfg(feature = "session")]
+pub use ticket::RefreshTicket;

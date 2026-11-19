@@ -111,6 +111,12 @@ pub struct Profile {
     pub read_only_fn_allowlist: Vec<String>,
     /// Statements of this profile go to the query history (D-061, Task 17); default `true`.
     pub record_history: bool,
+    // ## m4-t01c-core (R-M4-15): left out at `false`, so an M2b/M3 file round-trips byte for
+    // byte (the P-M3b-10 rule).
+    /// "Encrypt cached metadata": the profile's catalog cache rows are encrypted with its
+    /// `SecretSlot::CatalogKey` (Task 11). The dialog defaults it on for production-tagged
+    /// profiles (PO-Q2, Task 20); the type's default is `false`.
+    pub catalog_sensitive: bool,
 }
 
 // ## m3b-t01c-core-seams
@@ -155,6 +161,8 @@ impl Default for Profile {
             startup_script: None,
             read_only_fn_allowlist: Vec::new(),
             record_history: true,
+            // ## m4-t01c-core
+            catalog_sensitive: false,
         }
     }
 }

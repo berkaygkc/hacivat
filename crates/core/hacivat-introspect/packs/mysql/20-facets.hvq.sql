@@ -1,0 +1,4 @@
+-- Hacivat query pack: MySQL and MariaDB, file 20-facets (HV-INTRO-04, R-M4-32).
+-- Contents: grants, dependencies, statistics and server-level sections (R-M4-30). Sections are written by Task 17b from the vendor documentation only
+-- (no third-party catalog SQL); the grammar is Task 4's (`--- name: <Section> ---`).
+-- M4 Task 1c: header only. This file defines no section yet.

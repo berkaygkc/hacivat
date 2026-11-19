@@ -37,6 +37,8 @@
 //! startup_script = "SET search_path = app"   # read-write sessions only (Task 12)
 //! read_only_fn_allowlist = ["audit.mask_email"]   # D-009 (R-M3-56)
 //! record_history = false               # default true (D-061)
+//! # M4 (R-M4-15); left out at its default:
+//! catalog_sensitive = true             # encrypt cached metadata; default false
 //!
 //! [connection.ssh]                     # with transport = "ssh_tunnel"
 //! host_keys = "strict"                 # "ask" (default), "accept_new", "strict"
@@ -713,6 +715,8 @@ fn read_entry(t: &Table) -> Read<(Profile, Vec<&'static str>)> {
         startup_script: read_startup_script(t)?,
         read_only_fn_allowlist: read_fn_allowlist(t)?,
         record_history: opt_bool(t, "record_history")?.unwrap_or(defaults.record_history),
+        // ## m4-t01c-core (R-M4-15): not a boolean makes the entry invalid, as above.
+        catalog_sensitive: opt_bool(t, "catalog_sensitive")?.unwrap_or(defaults.catalog_sensitive),
     };
     // An older file's `sslmode`, `sslrootcert`, ... extras become the typed settings (I2).
     fold_typed_options(&mut profile);
@@ -1172,6 +1176,13 @@ fn write_entry(t: &mut Table, p: &Profile) {
         t,
         "record_history",
         (p.record_history != defaults.record_history).then(|| value(p.record_history)),
+    );
+    // ## m4-t01c-core (R-M4-15): left out at its default (an M2b/M3 file round-trips byte for
+    // byte).
+    set_opt(
+        t,
+        "catalog_sensitive",
+        (p.catalog_sensitive != defaults.catalog_sensitive).then(|| value(p.catalog_sensitive)),
     );
     write_ssh(t, &p.transport);
 }

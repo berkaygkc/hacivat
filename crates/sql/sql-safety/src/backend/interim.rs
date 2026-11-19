@@ -2324,6 +2324,8 @@ fn finalize(range: TextRange, text: &str, base: Acc, outs: Vec<Acc>) -> StmtRepo
             destructive: v.destructive.clone(),
             confidence: Confidence::Exact,
             set_targets: Vec::new(),
+            // ## m4-t01c-core: a probe for `gate_class`, which never reads `ddl`.
+            ddl: Vec::new(),
         };
         let g = gate_class(&probe);
         if best.is_none_or(|(bg, _)| g > bg) {
@@ -2413,6 +2415,8 @@ fn finalize(range: TextRange, text: &str, base: Acc, outs: Vec<Acc>) -> StmtRepo
             Confidence::Exact
         },
         set_targets,
+        // ## m4-t01c-core (fail-closed stub until Task 6)
+        ddl: crate::ddl_effects::stub_effects(kind, acc.effects, acc.flags),
     }
 }
 

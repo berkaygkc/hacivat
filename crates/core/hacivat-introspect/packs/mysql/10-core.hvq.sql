@@ -1,0 +1,4 @@
+-- Hacivat query pack: MySQL and MariaDB, file 10-core (HV-INTRO-04, R-M4-32).
+-- Contents: identity, schemata, existence with R-M4-39 markers and the core object passes. Sections are written by Task 17 from the vendor documentation only
+-- (no third-party catalog SQL); the grammar is Task 4's (`--- name: <Section> ---`).
+-- M4 Task 1c: header only. This file defines no section yet.

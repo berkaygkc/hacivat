@@ -21,6 +21,23 @@ const HOST: &str = "127.0.0.1";
 const USER: &str = "hv_test";
 const PASSWORD: &str = "hv_test_pw";
 const DATABASE: &str = "hv_test";
+// ## m4-t01c-fixtures (named): the M4 MySQL/MariaDB accounts of `docker/m2a/init/mysql.sql`
+// (R-M4-43), with the same throwaway password; reached only through
+// [`DockerTarget::as_fixture`] and [`DockerTarget::as_catalog`].
+const FIXTURE_USER: &str = "hv_fixture";
+const CATALOG_USER: &str = "hv_catalog";
+/// The empty database where `hv_catalog` holds EXECUTE only: the default database of the
+/// built-in-function probe (carry R-C1-1).
+pub const CATALOG_PROBE_DATABASE: &str = "hv_catalog_probe";
+/// The database whose `SQL SECURITY DEFINER` procedures are all `hv_fixture` may run
+/// (T1c fix round 1, I1): see [`fixture_sql`].
+pub const FIXTURE_ADMIN_DATABASE: &str = "hv_fixture_admin";
+/// The database `hv_fixture` signs in to: it holds no privilege on any database but
+/// [`FIXTURE_ADMIN_DATABASE`], and a sign-in that names a database needs "some privilege for
+/// the database or some object within it" (MySQL 8.4 manual, `USE`; MariaDB likewise), so
+/// `hv_test` would answer 1044. Every account may use `information_schema` (MySQL 8.4 manual,
+/// "INFORMATION_SCHEMA Usage Notes"; MariaDB, "Information Schema").
+const FIXTURE_DATABASE: &str = "information_schema";
 
 /// How a target's server is set up for TLS (R17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -97,6 +114,16 @@ struct RawTarget {
     internal_port: u16,
     tls_default: RawTls,
     sets: Vec<String>,
+    // ## m4-t01c-fixtures (fix round 3, ruling R-W0-3)
+    /// `false` for a special-purpose target (pg17wrap): never in [`targets`],
+    /// [`targets_in_set`], [`target`], [`ids_in_set`] or [`all_targets_unfiltered`]; reached only
+    /// through [`require_target`] by the tests written for it.
+    #[serde(default = "generic_default")]
+    generic: bool,
+}
+
+fn generic_default() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -116,29 +143,54 @@ pub fn docker_enabled_from(v: Option<&str>) -> bool {
     v == Some("1")
 }
 
-/// Every target of `docker/m2a/targets.toml`, in file order, ignoring `HACIVAT_DOCKER_SET`.
+/// Every generic target of `docker/m2a/targets.toml`, in file order, ignoring
+/// `HACIVAT_DOCKER_SET`. Special-purpose targets (`generic = false`, ruling R-W0-3) are left
+/// out: see [`all_targets_with_special`].
 ///
 /// # Panics
 /// When the committed file does not parse (a repository bug, caught by this crate's tests).
 pub fn all_targets_unfiltered() -> Vec<DockerTarget> {
+    every_target()
+        .into_iter()
+        .filter_map(|(t, generic)| generic.then_some(t))
+        .collect()
+}
+
+// ## m4-t01c-fixtures (fix round 3, ruling R-W0-3)
+/// Every target of `docker/m2a/targets.toml`, special-purpose ones (pg17wrap) included, in
+/// file order: for the checks that the file and `compose.yml` agree, never for iterating
+/// servers under test.
+///
+/// # Panics
+/// As [`all_targets_unfiltered`].
+pub fn all_targets_with_special() -> Vec<DockerTarget> {
+    every_target().into_iter().map(|(t, _)| t).collect()
+}
+
+/// Every target with whether it is generic.
+fn every_target() -> Vec<(DockerTarget, bool)> {
     targets_file()
         .target
         .into_iter()
-        .map(|t| DockerTarget {
-            id: t.id,
-            engine: t.engine,
-            major: t.major,
-            host: HOST.to_string(),
-            port: t.port,
-            user: USER.to_string(),
-            password: PASSWORD.to_string(),
-            database: DATABASE.to_string(),
-            tls_default: match t.tls_default {
-                RawTls::None => TlsDefault::None,
-                RawTls::SelfSigned => TlsDefault::SelfSigned,
-            },
-            sets: t.sets,
-            internal: (t.service, t.internal_port),
+        .map(|t| {
+            let generic = t.generic;
+            let target = DockerTarget {
+                id: t.id,
+                engine: t.engine,
+                major: t.major,
+                host: HOST.to_string(),
+                port: t.port,
+                user: USER.to_string(),
+                password: PASSWORD.to_string(),
+                database: DATABASE.to_string(),
+                tls_default: match t.tls_default {
+                    RawTls::None => TlsDefault::None,
+                    RawTls::SelfSigned => TlsDefault::SelfSigned,
+                },
+                sets: t.sets,
+                internal: (t.service, t.internal_port),
+            };
+            (target, generic)
         })
         .collect()
 }
@@ -178,6 +230,182 @@ pub fn target(id: &str) -> Option<DockerTarget> {
     targets(None).into_iter().find(|t| t.id == id)
 }
 
+// ## m4-t01c-fixtures
+
+impl DockerTarget {
+    /// This MySQL or MariaDB target signed in as `hv_fixture`, the fixture-only account, on
+    /// `information_schema`. It holds only EXECUTE on [`FIXTURE_ADMIN_DATABASE`]: test set-up
+    /// code calls the procedures [`fixture_sql`] spells to set the global time zone and to
+    /// create, grant to, revoke from and drop `hvm4_*` accounts (R-M4-43). Product code never
+    /// uses it (this crate is only ever a dev-dependency). `None` for another engine, which has
+    /// no such account.
+    pub fn as_fixture(&self) -> Option<DockerTarget> {
+        self.mysql_family().then(|| DockerTarget {
+            user: FIXTURE_USER.to_string(),
+            database: FIXTURE_DATABASE.to_string(),
+            ..self.clone()
+        })
+    }
+
+    /// This MySQL or MariaDB target signed in as the `hvm4_*` account `user` (created through
+    /// [`fixture_sql::create_user`] with this target's password), on `information_schema`.
+    ///
+    /// # Panics
+    /// When `user` is not an `hvm4_*` name ([`fixture_sql::is_test_account`]).
+    pub fn as_test_account(&self, user: &str) -> Option<DockerTarget> {
+        assert!(
+            fixture_sql::is_test_account(user),
+            "not an hvm4_* account: {user:?}"
+        );
+        self.mysql_family().then(|| DockerTarget {
+            user: user.to_string(),
+            database: FIXTURE_DATABASE.to_string(),
+            ..self.clone()
+        })
+    }
+
+    /// This MySQL or MariaDB target signed in as `hv_catalog`, the system-catalog reader,
+    /// on [`CATALOG_PROBE_DATABASE`]. `None` for another engine.
+    pub fn as_catalog(&self) -> Option<DockerTarget> {
+        self.mysql_family().then(|| DockerTarget {
+            user: CATALOG_USER.to_string(),
+            database: CATALOG_PROBE_DATABASE.to_string(),
+            ..self.clone()
+        })
+    }
+
+    fn mysql_family(&self) -> bool {
+        matches!(self.engine, DbmsKind::MySql | DbmsKind::MariaDb)
+    }
+}
+
+/// The `CALL`s `hv_fixture` may make (`docker/m2a/init/mysql.sql`, `hv_fixture_admin`). Each
+/// procedure refuses anything outside its allowlist on the server side too; these helpers
+/// refuse it first (they panic), so a test bug never reaches the server.
+pub mod fixture_sql {
+    /// The global variables `set_global` accepts.
+    pub const VARIABLES: [&str; 1] = ["time_zone"];
+    /// The privileges `change_grant` accepts.
+    pub const PRIVILEGES: [&str; 16] = [
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "EXECUTE",
+        "SHOW VIEW",
+        "TRIGGER",
+        "REFERENCES",
+        "CREATE",
+        "DROP",
+        "ALTER",
+        "INDEX",
+        "CREATE VIEW",
+        "CREATE ROUTINE",
+        "ALTER ROUTINE",
+        "EVENT",
+    ];
+
+    /// `[a-z0-9_]+`, `max` bytes at most.
+    fn plain(name: &str, max: usize) -> bool {
+        !name.is_empty()
+            && name.len() <= max
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    }
+
+    /// `hvm4_` and 1 to 27 of `[a-z0-9_]` (the procedures' `^hvm4_[a-z0-9_]{1,27}$`).
+    pub fn is_test_account(name: &str) -> bool {
+        name.strip_prefix("hvm4_")
+            .is_some_and(|rest| plain(rest, 27))
+    }
+
+    /// `hvm4_` and 1 to 59 of `[a-z0-9_]`.
+    pub fn is_test_database(name: &str) -> bool {
+        name.strip_prefix("hvm4_")
+            .is_some_and(|rest| plain(rest, 59))
+    }
+
+    /// A string literal: the values here are throwaway test values without a quote or a
+    /// backslash, and anything else is refused.
+    fn literal(value: &str) -> String {
+        assert!(
+            !value.contains(['\'', '\\', '\0']),
+            "a fixture value with a quote, a backslash or NUL"
+        );
+        format!("'{value}'")
+    }
+
+    /// `SET GLOBAL <name> = '<value>'`, through the definer.
+    pub fn set_global(name: &str, value: &str) -> String {
+        assert!(
+            VARIABLES.contains(&name),
+            "variable {name:?} is not allowed"
+        );
+        format!(
+            "CALL hv_fixture_admin.set_global({}, {})",
+            literal(name),
+            literal(value)
+        )
+    }
+
+    /// `CREATE USER '<user>'@'%' IDENTIFIED BY '<password>'`. The statement holds the
+    /// password: never print it.
+    pub fn create_user(user: &str, password: &str) -> String {
+        assert!(is_test_account(user), "not an hvm4_* account: {user:?}");
+        format!(
+            "CALL hv_fixture_admin.create_user({}, {})",
+            literal(user),
+            literal(password)
+        )
+    }
+
+    /// `DROP USER IF EXISTS '<user>'@'%'`.
+    pub fn drop_user(user: &str) -> String {
+        assert!(is_test_account(user), "not an hvm4_* account: {user:?}");
+        format!("CALL hv_fixture_admin.drop_user({})", literal(user))
+    }
+
+    /// `GRANT <privilege> ON <db>.<table or *> TO '<user>'@'%'`.
+    pub fn grant(privilege: &str, db: &str, table: Option<&str>, user: &str) -> String {
+        change_grant(true, privilege, db, table, user)
+    }
+
+    /// `REVOKE <privilege> ON <db>.<table or *> FROM '<user>'@'%'`.
+    pub fn revoke(privilege: &str, db: &str, table: Option<&str>, user: &str) -> String {
+        change_grant(false, privilege, db, table, user)
+    }
+
+    fn change_grant(
+        grant: bool,
+        privilege: &str,
+        db: &str,
+        table: Option<&str>,
+        user: &str,
+    ) -> String {
+        assert!(
+            PRIVILEGES.contains(&privilege),
+            "privilege {privilege:?} is not allowed"
+        );
+        assert!(is_test_database(db), "not an hvm4_* database: {db:?}");
+        assert!(is_test_account(user), "not an hvm4_* account: {user:?}");
+        let table = match table {
+            Some(t) => {
+                assert!(plain(t, 64), "table {t:?} is not [a-z0-9_]");
+                literal(t)
+            }
+            None => "NULL".to_string(),
+        };
+        format!(
+            "CALL hv_fixture_admin.change_grant({}, {}, {}, {table}, {})",
+            if grant { "TRUE" } else { "FALSE" },
+            literal(privilege),
+            literal(db),
+            literal(user)
+        )
+    }
+}
+
 // ## m2b-t01-interfaces
 
 /// The target `id` a set-gated Docker test needs (Q6). `None` (with `skip <id>: not in set
@@ -210,7 +438,11 @@ pub fn require_target(id: &str) -> Option<DockerTarget> {
 /// [`require_target`] for a given active set (`None`: every target), without the health check:
 /// the pure core, like [`targets_in_set`].
 pub fn require_target_in_set(set: Option<&str>, id: &str) -> Option<DockerTarget> {
-    let found = targets_in_set(set, None).into_iter().find(|t| t.id == id);
+    // ## m4-t01c-fixtures (fix round 3, R-W0-3): a special-purpose target too, by its id.
+    let found = all_targets_with_special()
+        .into_iter()
+        .filter(|t| set.is_none_or(|s| t.sets.iter().any(|x| x == s)))
+        .find(|t| t.id == id);
     if found.is_none() {
         eprintln!("skip {id}: not in set {}", set.unwrap_or("<all>"));
     }

@@ -1,0 +1,4 @@
+-- Hacivat query pack: PostgreSQL, file 40-system (HV-INTRO-04, R-M4-32).
+-- Contents: system-mode sections for the minicat snapshots (R-M4-44). Sections are written by Task 16 from the vendor documentation only
+-- (no third-party catalog SQL); the grammar is Task 4's (`--- name: <Section> ---`).
+-- M4 Task 1c: header only. This file defines no section yet.

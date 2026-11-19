@@ -17,11 +17,14 @@ pub enum SecretSlot {
     SshPassword { hop: u8 },
     SshPassphrase { hop: u8 },
     ProxyPassword,
+    // ## m4-t01c-core (named, R-M4-15): the 32-byte data key of a profile's encrypted catalog
+    // cache (`catalog_sensitive`; retention Forever). Task 11 creates and reads it.
+    CatalogKey,
 }
 
 impl SecretSlot {
     /// The slot's key part: `db-password`, `tls-key-passphrase`, `ssh-<hop>-password`,
-    /// `ssh-<hop>-passphrase`, `proxy-password`.
+    /// `ssh-<hop>-passphrase`, `proxy-password`, `catalog-key`.
     pub fn id(self) -> String {
         match self {
             SecretSlot::DbPassword => "db-password".to_string(),
@@ -29,6 +32,8 @@ impl SecretSlot {
             SecretSlot::SshPassword { hop } => format!("ssh-{hop}-password"),
             SecretSlot::SshPassphrase { hop } => format!("ssh-{hop}-passphrase"),
             SecretSlot::ProxyPassword => "proxy-password".to_string(),
+            // ## m4-t01c-core
+            SecretSlot::CatalogKey => "catalog-key".to_string(),
         }
     }
 }
@@ -109,6 +114,8 @@ fn backend_slots() -> impl Iterator<Item = SecretSlot> {
         SecretSlot::DbPassword,
         SecretSlot::TlsKeyPassphrase,
         SecretSlot::ProxyPassword,
+        // ## m4-t01c-core (named): so `delete_all` removes a deleted profile's catalog key.
+        SecretSlot::CatalogKey,
     ]
     .into_iter()
     .chain((0..=MAX_SSH_HOP).flat_map(|hop| {
@@ -318,7 +325,10 @@ impl SecretStore {
                 slots
             }
         };
-        slots.retain(|slot| wanted(*slot));
+        // ## m4-t01c-core (named, fix round 1): a catalog data key is never copied. Each
+        // profile gets its own, created on its first encrypted cache write (Task 11): a
+        // duplicate has a new id and an empty cache, and is often re-pointed at another server.
+        slots.retain(|slot| *slot != SecretSlot::CatalogKey && wanted(*slot));
         slots.sort();
         slots.dedup();
         for slot in slots {
@@ -449,6 +459,8 @@ mod tests {
             "ssh-2-passphrase"
         );
         assert_eq!(SecretSlot::ProxyPassword.id(), "proxy-password");
+        // ## m4-t01c-core
+        assert_eq!(SecretSlot::CatalogKey.id(), "catalog-key");
         for r in Retention::ALL {
             assert_eq!(Retention::from_id(r.id()), Some(r));
         }

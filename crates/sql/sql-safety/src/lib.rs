@@ -19,6 +19,8 @@
 // Crate-private: no backend type is public (R-M3-54).
 mod backend;
 pub mod classify;
+// ## m4-t01c-core: `StmtReport.ddl` (Task 6 fills it; fail-closed stub until then).
+mod ddl_effects;
 pub mod destructive;
 pub mod effects;
 pub mod fingerprint;
@@ -47,6 +49,8 @@ pub use report::{
     BackendVersion, Confidence, ObjectKind, ObjectRef, SafetyReport, SetTarget, StmtKind,
     StmtReport, TouchedObjects,
 };
+// ## m4-t01c-core
+pub use report::{DdlAction, DdlEffect, DdlKind};
 
 // ## m3b-t01a-seams (fix round 1, I1): the SQLite read-pragma list (Task 10) that Task 18's
 // cross-crate equality test compares with the guard's.

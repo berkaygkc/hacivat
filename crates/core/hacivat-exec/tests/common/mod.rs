@@ -1629,6 +1629,8 @@ pub mod gate_fx {
             destructive: Vec::new(),
             confidence: Confidence::Exact,
             set_targets: Vec::new(),
+            // ## m4-t01c-core (named exception)
+            ddl: Vec::new(),
         }
     }
 

@@ -143,9 +143,24 @@ services:
     ports: ["127.0.0.1:54337:5432"]
     healthcheck: *pg-health
 
+  # ## m4-t01c-fixtures (R-M4-43; ver/01 #pg-xmin-freeze): postgres:17 whose cluster jumps
+  # past 2^31 transaction ids at its first start (pg-wrap/). The jump happens before the server
+  # listens, so a healthy pg17wrap is always the jumped cluster. Built and started by C-6.
+  pg17wrap:
+    build: ./pg-wrap
+    image: hacivat-m2a-pg17wrap:17
+    container_name: m2a-pg17wrap
+    environment: *pg-env
+    volumes: *pg-init
+    ports: ["127.0.0.1:54357:5432"]
+    healthcheck: *pg-health
+
   mysql80:
     image: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
     container_name: m2a-mysql80
+    # ## m4-t01c-fixtures: `hv_test` may create functions and triggers with binary logging on
+    # (error 1419 otherwise; R-M4-43).
+    command: ["mysqld", "--log-bin-trust-function-creators=1"]
     environment: *mysql-env
     volumes: *mysql-init
     ports: ["127.0.0.1:33080:3306"]
@@ -156,6 +171,8 @@ services:
   mysql84:
     image: mysql:8.4@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
     container_name: m2a-mysql84
+    # ## m4-t01c-fixtures (R-M4-43)
+    command: ["mysqld", "--log-bin-trust-function-creators=1"]
     environment: *mysql-env
     volumes: *mysql-init
     ports: ["127.0.0.1:33084:3306"]
@@ -275,6 +292,8 @@ services:
       - --ssl-ca=/artifacts/mysql-x509-ca.pem
       - --ssl-cert=/artifacts/mysql-x509-server.pem
       - --ssl-key=/artifacts/mysql-x509-server-key.pem
+      # ## m4-t01c-fixtures: the same image line as mysql84 (R-M4-43)
+      - --log-bin-trust-function-creators=1
     environment: *mysql-env
     volumes:
       - ./init/mysql.sql:/docker-entrypoint-initdb.d/00-fixtures.sql:ro

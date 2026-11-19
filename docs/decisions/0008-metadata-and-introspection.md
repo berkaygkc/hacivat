@@ -259,3 +259,37 @@ A `<` opens a qualified path when it follows no identifier, no `::` and no closi
 generic arguments (after `->`/`=>` it is qualified). In doubt it refuses: `<Vec<MetaQuery>>::new`
 is refused too, and `Vec::<MetaQuery>::new()` is the legal spelling. The runtime guard (T5's
 `join` allowlist) stays the primary defence; this rule is defence in depth.
+
+## m4-t01c — introspection seams
+
+M4 Task 1c Part B declares `hacivat-introspect`'s seams with fail-closed stubs (Global
+Constraints, "No silent weakening"). Session-side seams are in ADR 0004 `m4-t01c`.
+
+- **Feature split kept.** A 14th `session`-gated module, `introspector`, holds the
+  `Introspector` trait, `introspector_for`, `IntroError`, `Staleness`, `IntroCaps` and
+  `FacetRows` (every one names `MetaConn` or `MetaError`). `pack`, `scope`, `filter` and `glob`
+  stay ungated; `pack::Mode` and `scope::NsInfo` live there so both builds share them. The
+  renderer that calls `MetaQuery::new` is the gated `pack::render`
+  (`RenderedQuery::as_meta_query`).
+- **What each stub answers.** Every introspector method (the four engines and
+  `testing::FakeIntrospector`) answers `IntroError::NotImplemented`; `Pack::parse_all`
+  answers `PackErrorKind::NotImplemented` (the pack files are compiled in, header only);
+  `Pack::render` answers `RenderError::NotImplemented`; the scope selects only `@:@`; the
+  filter matches everything and pushes nothing down; `freshness::check_state` answers
+  `Staleness::Unknown`; `plan_refresh` widens any statement with a catalog effect to
+  `Target::Namespace(current)` (pending until `COMMIT` where DDL is transactional);
+  `CatalogHub::ensure` answers an empty catalog with a detached `IntroHandle`, whose every
+  request resolves to `NotImplemented` and publishes nothing; `fragment::on_session`,
+  `minicat::run_system_sections`, `{pg,mysql}::facets` and `testing::big_catalog` answer
+  `NotImplemented`.
+- **`CatalogHub::new` takes a `SessionLookup`**, not a single `SessionManager` (the plan's
+  wording): a hub serves every profile, so it looks each profile's sessions up;
+  `ConnectionManager` implements it, and tests pass a double. Settings arrive as
+  `HubSettings { paths, metadata }`.
+- **`MetaConn::offline(dbms)`** (`#[doc(hidden)]`, ADR 0004 `m4-t01c`): an inert connection
+  for tests that must hand an introspector a `MetaConn`; Task 5 keeps it inert.
+- **Localization.** `intro-*` is a new ID prefix of `hacivat-core.ftl` (named exceptions in
+  `hacivat-l10n-schema` and xtask's `l10n` rules, beside T1a's `model`/`ddl`); the block
+  `## m4-t01c-core` holds the 27 introspection messages alg/02 names (HV-INTRO-01..03, -05,
+  -11..13, -15, -16) plus `intro-catalog-race-retried`. `model-cache-disabled-by-policy` and
+  `ddl-warn-executable-comment` are T1a's already.
