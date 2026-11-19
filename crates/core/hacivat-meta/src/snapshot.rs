@@ -488,6 +488,11 @@ pub enum CatalogChange {
     RemoveSubtree { ns: NsKey, target: ObjectKey },
     /// Sets the load state of a container.
     SetState(ContainerKey, LoadState),
+    // ## m4-t17-mysql (named exception in Task 9's file; T15 carry m4, R-W3-6): the facts
+    // read from the server on connect replace the placeholder the catalog was made with
+    // (MySQL `lower_case_table_names`, the version, `sql_mode` arrive with the connection).
+    /// Replaces the catalog's server facts (carried by every later generation).
+    SetServer(Arc<ServerFacts>),
 }
 
 /// What a publish produced.
@@ -678,6 +683,7 @@ impl Publisher {
         let generation = old.generation + 1;
         let mut namespaces = Arc::clone(&old.namespaces);
         let mut states = Arc::clone(&old.states);
+        let mut server = Arc::clone(&old.server);
         let mut changed = Vec::new();
         let mut seen = HashSet::new();
         let mut mark = |key: &NsKey, changed: &mut Vec<NsKey>| {
@@ -731,11 +737,13 @@ impl Publisher {
                 CatalogChange::SetState(key, state) => {
                     Arc::make_mut(&mut states).insert(key, state);
                 }
+                // ## m4-t17-mysql
+                CatalogChange::SetServer(facts) => server = facts,
             }
         }
         let next = Arc::new(CatalogSnapshot::from_parts(
             generation,
-            Arc::clone(&old.server),
+            server,
             namespaces,
             states,
             Arc::clone(&old.overlays),

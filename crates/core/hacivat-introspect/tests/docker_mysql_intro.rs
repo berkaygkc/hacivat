@@ -12,12 +12,10 @@
 //! exclusivity). Waits are conditions on the server clock (`UTC_TIMESTAMP(6)`), never a
 //! fixed sleep.
 //!
-//! **Harness (NEEDS_CONTEXT, T17 report).** A `MetaConn` comes only from a connected
-//! `SessionManager`, whose `ConnectDeps` need `hacivat_net::ssh::{KnownHosts, TunnelManager}`;
-//! `hacivat-net` is not a dependency of this crate and only Task 1a edits manifests. The
-//! [`harness`] functions are therefore fail-loud stubs: every test here compiles and fails
-//! with that message until the controller adds the dev-dependency and fills them (the T17
-//! report gives the bodies, after `hacivat-exec/tests/common/mod.rs`'s `deps()` and `Side`).
+//! **Harness.** Each metadata connection is Task 5's `meta_conn` on its own connected
+//! `ConnectionManager` (real drivers, memory secrets, no SSH: the `hacivat-exec` and T16
+//! harness; dev-dependencies `hacivat-net` and `hacivat-driver`, rulings R-W3-4/5). Fixture
+//! DDL runs on a writable `hv_test` (or `hv_fixture`) connection, never a metadata one.
 
 #![cfg(feature = "session")]
 
@@ -50,13 +48,30 @@ const ALL: [&str; 6] = [
 const MARIADB: [&str; 3] = ["mariadb106", "mariadb1011", "mariadb114"];
 const FOLD: [&str; 3] = ["mysql80", "mysql84", "mariadb114"];
 
-/// The connections a test needs. See the module docs: stubs until the dev-dependency lands.
+/// The connections a test needs (module docs).
 mod harness {
-    use super::*;
+    use std::ops::{Deref, DerefMut};
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
-    const MISSING: &str = "docker_mysql_intro needs a MetaConn on a connected SessionManager: \
-        hacivat-introspect lacks the `hacivat-net` dev-dependency that ConnectDeps needs \
-        (T17 NEEDS_CONTEXT; see task-m4-17-report.md for the harness bodies)";
+    use hacivat_driver::{EngineCatalog, ExecOpts, Protocol, ServerMessage};
+    use hacivat_net::TlsMode;
+    use hacivat_proto::Department;
+    use hacivat_secrets::{
+        AuthProviderId, CredentialFiles, MemoryBackend, Retention, SecretBackend, SecretStore,
+        SecretString,
+    };
+    use hacivat_session::meta::MetaConnSpec;
+    use hacivat_session::pipeline::{
+        ApprovedRoots, ConnectDeps, ConnectRequest, Interaction, LiveConnection, Progress, Purpose,
+        connect,
+    };
+    use hacivat_session::profile::{Profile, ProfileEndpoint};
+    use hacivat_session::{ConnectionManager, LiveState, ManagerConfig, default_drivers};
+    use hacivat_testkit::TlsDefault;
+    use tokio::sync::watch;
+
+    use super::*;
 
     /// Which account a statement runs as.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,28 +82,216 @@ mod harness {
         Fixture,
     }
 
-    /// A read-only metadata connection of `t` on database `db` (Task 5's `meta_conn`).
-    pub async fn meta(t: &DockerTarget, db: &str) -> MetaConn {
-        let _ = (t, db);
-        panic!("{MISSING}")
+    /// The real drivers, a memory secret store, no credential files, no SSH (the
+    /// `hacivat-exec` and T16 harness).
+    fn deps() -> ConnectDeps {
+        let backend: Arc<dyn SecretBackend> = Arc::new(MemoryBackend::new());
+        let known_hosts = hacivat_net::ssh::KnownHosts::load(
+            Vec::new(),
+            PathBuf::from("/nonexistent/hacivat/known_hosts"),
+        );
+        let tunnels = hacivat_net::ssh::TunnelManager::new(known_hosts.clone(), Default::default());
+        ConnectDeps {
+            drivers: Arc::new(default_drivers()),
+            catalog: EngineCatalog::embedded(),
+            secrets: Arc::new(SecretStore::new(Some(backend))),
+            files: CredentialFiles {
+                pgpass: None,
+                pg_service: None,
+            },
+            transport_wrap: None,
+            extra_steps: Vec::new(),
+            approved_roots: ApprovedRoots::for_user(),
+            timeout_override: None,
+            tunnels,
+            known_hosts,
+        }
+    }
+
+    /// The target `t` signed in as `login` (`hv_fixture` on `information_schema`).
+    fn as_login(t: &DockerTarget, login: Login) -> DockerTarget {
+        match login {
+            Login::Test => t.clone(),
+            Login::Fixture => t.as_fixture().expect("a MySQL-family target"),
+        }
+    }
+
+    /// The profile of `t` on database `db` (`None`: the login's own), a password kept nowhere.
+    fn profile_for(t: &DockerTarget, db: Option<&str>) -> Profile {
+        let mut p = Profile {
+            name: format!("t17 {}", t.id),
+            engine: t.engine,
+            endpoint: ProfileEndpoint::Server {
+                host: t.host.clone(),
+                port: Some(t.port),
+            },
+            database: Some(db.unwrap_or(&t.database).to_string()),
+            user: Some(t.user.clone()),
+            auth: AuthProviderId::Password,
+            retention: Retention::Never,
+            ..Profile::default()
+        };
+        p.tls.mode = match t.tls_default {
+            TlsDefault::SelfSigned => TlsMode::Require,
+            TlsDefault::None => TlsMode::Auto,
+        };
+        p.allow_unsupported_server = true;
+        p
+    }
+
+    fn password(t: &DockerTarget) -> SecretString {
+        SecretString::from(t.password.clone())
+    }
+
+    /// A metadata connection with the manager it lives on (dropping the manager would
+    /// disconnect the profile and make the connection `Unavailable`).
+    pub struct Meta {
+        conn: MetaConn,
+        _m: Arc<ConnectionManager>,
+    }
+
+    impl Deref for Meta {
+        type Target = MetaConn;
+        fn deref(&self) -> &MetaConn {
+            &self.conn
+        }
+    }
+
+    impl DerefMut for Meta {
+        fn deref_mut(&mut self) -> &mut MetaConn {
+            &mut self.conn
+        }
+    }
+
+    /// A read-only metadata connection of `t` (`hv_test`) on database `db` (Task 5's
+    /// `meta_conn`, on its own connected manager). The connect waits on the profile's state,
+    /// 60 s at most.
+    pub async fn meta(t: &DockerTarget, db: &str) -> Meta {
+        let m = ConnectionManager::new(
+            tokio::runtime::Handle::current(),
+            Arc::new(deps()),
+            ManagerConfig::m2b(),
+        );
+        let profile = Arc::new(profile_for(t, Some(db)));
+        m.connect(profile.clone(), Some(password(t)), Interaction::Headless);
+        let mut changes = m.changes();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match m.state(profile.id) {
+                LiveState::Connected(_) => break,
+                LiveState::Failed(e) => panic!("{}: connect failed: {:?}", t.id, e.class),
+                _ => {}
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{}: connect timed out",
+                t.id
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(200), changes.changed()).await;
+        }
+        let conn = m
+            .sessions(profile.id)
+            .expect("connected")
+            .meta_conn(
+                MetaConnSpec {
+                    profile: profile.id,
+                    database: None,
+                    statement_timeout: Duration::from_secs(120),
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{}: a metadata connection: {e:?}", t.id));
+        Meta { conn, _m: m }
+    }
+
+    /// A writable connection of `t` as `login` on `db` (never a metadata connection).
+    async fn admin(t: &DockerTarget, login: Login, db: Option<&str>) -> LiveConnection {
+        let t = as_login(t, login);
+        let db = match login {
+            Login::Test => db,
+            // `hv_fixture` may sign in only to `information_schema` (testkit docs).
+            Login::Fixture => None,
+        };
+        connect(
+            &deps(),
+            ConnectRequest {
+                read_only: false,
+                profile: Arc::new(profile_for(&t, db)),
+                draft_password: Some(password(&t)),
+                purpose: Purpose::Main,
+                department: Department::Console,
+                prior_rejections: 0,
+                draft_ssh: Vec::new(),
+                overlay_secrets: None,
+                plaintext_consent: false,
+            },
+            Interaction::Headless,
+            CancellationToken::new(),
+            watch::Sender::new(Progress {
+                trail: Vec::new(),
+                current: None,
+                started: Instant::now(),
+            }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{} admin ({login:?}): {:?}", t.id, e.class))
+    }
+
+    /// MySQL's error number of a refusal (else the SQLSTATE, else the error kind).
+    fn code_of(m: Option<&ServerMessage>, kind: impl std::fmt::Debug) -> String {
+        match m {
+            Some(ServerMessage {
+                vendor_code: Some(c),
+                ..
+            }) => c.to_string(),
+            Some(ServerMessage {
+                sqlstate: Some(s), ..
+            }) => s.clone(),
+            _ => format!("{kind:?}"),
+        }
     }
 
     /// Runs `sql` as `login` on `db` (`None`: the login's default); the server's error code
-    /// (`1054`, `1419`, …) when it fails.
+    /// (`1054`, `1419`, …) when it fails. The statement text is never printed (it may hold a
+    /// fixture password).
     pub async fn exec(
         t: &DockerTarget,
         login: Login,
         db: Option<&str>,
         sql: &str,
     ) -> Result<(), String> {
-        let _ = (t, login, db, sql);
-        panic!("{MISSING}")
+        let mut live = admin(t, login, db).await;
+        let out = live
+            .raw()
+            .batch(sql)
+            .await
+            .map_err(|e| code_of(e.server.as_ref(), &e.kind));
+        drop(live);
+        out
     }
 
     /// The rows of `sql` as `hv_test` on `db`, every value as text (NULL as `""`).
     pub async fn rows(t: &DockerTarget, db: Option<&str>, sql: &str) -> Vec<Vec<String>> {
-        let _ = (t, db, sql);
-        panic!("{MISSING}")
+        let mut live = admin(t, Login::Test, db).await;
+        let answer = live
+            .raw()
+            .execute(
+                sql,
+                ExecOpts {
+                    max_rows: 100_000,
+                    protocol: Protocol::Simple,
+                },
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!("{}: `{sql}`: {}", t.id, code_of(e.server.as_ref(), &e.kind))
+            });
+        answer
+            .rows
+            .into_iter()
+            .map(|r| r.into_iter().map(Option::unwrap_or_default).collect())
+            .collect()
     }
 
     /// [`exec`] on a fresh runtime thread, for drop guards.
@@ -186,6 +389,16 @@ impl Drop for GlobalGuard {
     }
 }
 
+/// The filter the engine passes when the profile has none (R-W3-2).
+fn match_all() -> hacivat_introspect::filter::CompiledFilter {
+    hacivat_introspect::filter::parse_filter(
+        "",
+        DialectId::MySql,
+        hacivat_introspect::filter::FilterRole::Introspect,
+    )
+    .expect("the empty filter")
+}
+
 fn intro(t: &DockerTarget) -> MySqlIntrospector {
     MySqlIntrospector { flavor: t.engine }
 }
@@ -211,6 +424,7 @@ async fn pass(
             &db.ns(),
             mode,
             Level::Structure,
+            &match_all(),
             prev,
             &CancellationToken::new(),
         )
@@ -759,6 +973,7 @@ async fn revoked_mysql_schema_select_fails_users_kind_only() {
                 &NsKey::server(),
                 Mode::Full,
                 Level::Structure,
+                &match_all(),
                 None,
                 &CancellationToken::new(),
             )

@@ -11,13 +11,17 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use hacivat_meta::merge::NamespaceResult;
+use hacivat_meta::persist::ServerFingerprint;
 use hacivat_meta::props::{DepsFacet, FacetKind, GrantsFacet, StatsFacet};
 use hacivat_meta::snapshot::IntroErrorCode;
-use hacivat_meta::{Level, Name, NamespaceSnapshot, NsKey, ObjectKey, ObjectKind, StateMark};
+use hacivat_meta::{
+    Level, Name, NamespaceSnapshot, NsKey, ObjectKey, ObjectKind, ServerFacts, StateMark,
+};
 use hacivat_proto::DbmsKind;
 use hacivat_session::meta::{MetaConn, MetaError};
 use tokio_util::sync::CancellationToken;
 
+use crate::filter::CompiledFilter;
 use crate::freshness::NsCheck;
 use crate::pack::Mode;
 use crate::scope::NsInfo;
@@ -125,6 +129,14 @@ pub trait Introspector: Send + Sync {
 
     /// One pass over `ns` (HV-INTRO-05, -07, -08): `Full`, `Incremental` against `prev`'s
     /// watermark, `Brief` (names) or `System` (the snapshot sections, R-M4-44).
+    ///
+    /// ## m4-t15-engine (ruling R-W3-2): `filter`
+    /// The profile's scope filter for this namespace (match-all for a system namespace, and
+    /// whenever no scope filter is set; never a view filter). A section may push it to the
+    /// server only through `engine::bounded_pushdown(filter, <every kind the section
+    /// returns>, dialect, ident)`; `None` means no predicate. A pushed predicate cuts the
+    /// section's existence rows and changed rows alike. The engine filters the result on the
+    /// client anyway: pushdown is an optimisation that must only ever return a superset.
     #[allow(clippy::too_many_arguments, reason = "the planned seam (M4 Task 1c)")]
     fn introspect<'a>(
         &'a self,
@@ -132,17 +144,24 @@ pub trait Introspector: Send + Sync {
         ns: &'a NsKey,
         mode: Mode,
         level: Level,
+        filter: &'a CompiledFilter,
         prev: Option<&'a NamespaceSnapshot>,
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>>;
 
-    /// The objects `keys` of `ns` (and their children) at `level`.
+    /// The objects `keys` of `ns` (and their children) at `level`; `filter` as for
+    /// [`Introspector::introspect`] (R-W3-2).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the planned seam plus R-W3-2's filter"
+    )]
     fn fragment<'a>(
         &'a self,
         c: &'a mut MetaConn,
         ns: &'a NsKey,
         keys: &'a [ObjectKey],
         level: Level,
+        filter: &'a CompiledFilter,
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>>;
 
@@ -179,6 +198,77 @@ pub trait Introspector: Send + Sync {
     ) -> BoxFuture<'a, Result<NsCheck, IntroError>>;
 
     fn capabilities(&self) -> IntroCaps;
+
+    // ## m4-t15-engine (ruling R-W3-3)
+    /// The identity of the server behind `c` (PostgreSQL `system_identifier` and start time,
+    /// MySQL `@@server_uuid`, SQLite file identity), hashed by the introspector, for
+    /// `CacheStore::check_identity`. The default is [`ServerIdentity::Unknown`], which the
+    /// engine treats fail-closed: no cached watermark is trusted (the next pass is full).
+    /// Tasks 16–18 implement it.
+    fn identity<'a>(
+        &'a self,
+        c: &'a mut MetaConn,
+    ) -> BoxFuture<'a, Result<ServerIdentity, IntroError>> {
+        let _ = c;
+        Box::pin(async { Ok(ServerIdentity::Unknown) })
+    }
+
+    // ## m4-t17-mysql (named exception in Task 1c/15's file; T15 carry m4, ruling R-W3-6)
+    /// The server's facts as read on `c` (version, flavor, identifier rule, quoting modes, the
+    /// default collation per database). The engine reads them with the scope refresh on
+    /// connect and publishes them (`CatalogChange::SetServer`) when they differ from the
+    /// catalog's, so the fold rule of later tasks follows the real `lower_case_table_names`.
+    /// The default is `None`: the catalog keeps the facts it was made with.
+    fn server_facts<'a>(
+        &'a self,
+        c: &'a mut MetaConn,
+    ) -> BoxFuture<'a, Result<Option<ServerFacts>, IntroError>> {
+        let _ = c;
+        Box::pin(async { Ok(None) })
+    }
+}
+
+// ## m4-t17-mysql (named exception; T15 carry m11): a progress sink inside one pass.
+/// Where a running pass reports its phase and counts. The engine sets one around each pass or
+/// fragment it runs ([`with_progress`]); an introspector calls [`report_progress`], which does
+/// nothing outside such a scope (a test, a direct call).
+#[derive(Clone)]
+pub struct ProgressSink(Arc<dyn Fn(crate::engine::Phase, u64, Option<u64>) + Send + Sync>);
+
+impl ProgressSink {
+    pub fn new(f: impl Fn(crate::engine::Phase, u64, Option<u64>) + Send + Sync + 'static) -> Self {
+        ProgressSink(Arc::new(f))
+    }
+}
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressSink")
+    }
+}
+
+tokio::task_local! {
+    static PASS_PROGRESS: ProgressSink;
+}
+
+/// Runs `fut` with `sink` as the pass's progress sink.
+pub async fn with_progress<F: std::future::Future>(sink: ProgressSink, fut: F) -> F::Output {
+    PASS_PROGRESS.scope(sink, fut).await
+}
+
+/// Reports the running pass's phase, objects done and total (`None` until known).
+pub fn report_progress(phase: crate::engine::Phase, done: u64, total: Option<u64>) {
+    let _ = PASS_PROGRESS.try_with(|s| (s.0)(phase, done, total));
+}
+// ## m4-t17-mysql
+
+// ## m4-t15-engine (ruling R-W3-3)
+/// What an introspector knows of its server's identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ServerIdentity {
+    Known(ServerFingerprint),
+    /// Not read (a stub, a login that cannot read it): no cached watermark is trusted.
+    Unknown,
 }
 
 /// The introspector of `dbms`; `None` for an engine M4 does not introspect (R-M4-4).
@@ -213,6 +303,7 @@ macro_rules! not_implemented_introspector {
                 _ns: &'a ::hacivat_meta::NsKey,
                 _mode: $crate::pack::Mode,
                 _level: ::hacivat_meta::Level,
+                _filter: &'a $crate::filter::CompiledFilter,
                 _prev: Option<&'a ::hacivat_meta::NamespaceSnapshot>,
                 _cancel: &'a ::tokio_util::sync::CancellationToken,
             ) -> ::futures::future::BoxFuture<
@@ -227,6 +318,7 @@ macro_rules! not_implemented_introspector {
                 _ns: &'a ::hacivat_meta::NsKey,
                 _keys: &'a [::hacivat_meta::ObjectKey],
                 _level: ::hacivat_meta::Level,
+                _filter: &'a $crate::filter::CompiledFilter,
                 _cancel: &'a ::tokio_util::sync::CancellationToken,
             ) -> ::futures::future::BoxFuture<
                 'a,

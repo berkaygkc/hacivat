@@ -199,22 +199,26 @@ async fn stub_stamps_and_facet_not_implemented() {
         let n = ns("public");
         // ## m4-t17-mysql (named exception in Task 1c's file): the MySQL introspector is
         // written; on an offline connection every read fails `Unavailable`, never a fact.
-        // Its facets stay Task 17b's stubs (checked below).
+        // Its facets stay Task 17b's stubs (checked below); its identity is `Unknown`.
         let written = matches!(dbms, DbmsKind::MySql | DbmsKind::MariaDb);
-        let not_written = |e: &Result<_, IntroError>| -> bool {
+        let expected = |e: &Result<(), IntroError>| -> bool {
             if written {
-                matches!(
-                    e,
-                    Err(IntroError::Meta(
-                        hacivat_session::meta::MetaError::Unavailable
-                    ))
-                )
+                *e == Err(IntroError::Meta(
+                    hacivat_session::meta::MetaError::Unavailable,
+                ))
             } else {
-                matches!(e, Err(IntroError::NotImplemented))
+                *e == Err(IntroError::NotImplemented)
             }
         };
+        // A MySQL namespace is `[schema]`.
+        let n_any = if written {
+            NsKey::schema(["public"])
+        } else {
+            n.clone()
+        };
+        // ## m4-t17-mysql
         assert!(
-            not_written(&intro.stamps(&mut c, &keys).await.map(drop)),
+            expected(&intro.stamps(&mut c, &keys).await.map(drop)),
             "{dbms:?}"
         );
         for kind in [
@@ -229,28 +233,41 @@ async fn stub_stamps_and_facet_not_implemented() {
                 "{dbms:?} {kind:?}"
             );
         }
-        assert!(not_written(&intro.list_namespaces(&mut c).await.map(drop)));
-        // `ns("public")` is a PostgreSQL-shaped key; a MySQL namespace is `[schema]`.
-        let n_any = if written {
-            NsKey::schema(["public"])
-        } else {
-            n.clone()
-        };
-        assert!(not_written(
+        assert!(expected(&intro.list_namespaces(&mut c).await.map(drop)));
+        // ## m4-t15-engine (named exception, ruling R-W3-2): the filter argument; and the
+        // identity default is `Unknown` (R-W3-3).
+        let all = hacivat_introspect::filter::parse_filter(
+            "",
+            sql_dialect::DialectId::Postgres,
+            hacivat_introspect::filter::FilterRole::Introspect,
+        )
+        .expect("the empty filter");
+        assert!(expected(
             &intro
-                .introspect(&mut c, &n_any, Mode::Full, Level::Structure, None, &cancel)
+                .introspect(
+                    &mut c,
+                    &n_any,
+                    Mode::Full,
+                    Level::Structure,
+                    &all,
+                    None,
+                    &cancel
+                )
                 .await
                 .map(drop)
         ));
-        assert!(not_written(
+        assert!(expected(
             &intro
-                .fragment(&mut c, &n_any, &keys, Level::Names, &cancel)
+                .fragment(&mut c, &n_any, &keys, Level::Names, &all, &cancel)
                 .await
                 .map(drop)
         ));
-        assert!(not_written(
-            &intro.check_state(&mut c, &keys).await.map(drop)
-        ));
+        assert_eq!(
+            intro.identity(&mut c).await,
+            Ok(hacivat_introspect::introspector::ServerIdentity::Unknown)
+        );
+        // ## m4-t15-engine
+        assert!(expected(&intro.check_state(&mut c, &keys).await.map(drop)));
     }
 }
 
@@ -271,10 +288,16 @@ async fn stub_load_facet_leaves_the_facet_not_loaded() {
     // Nothing was published: no generation, no namespace, so no facet is loaded anywhere.
     assert_eq!(after.generation, before.generation);
     assert!(after.namespaces.is_empty());
+    // ## m4-t15-engine (named exception): the engine now runs the check; with no connection
+    // it answers `Unavailable` and publishes nothing.
     assert_eq!(
         pc.handle.check_state(vec![table("public", "orders")]).await,
-        Err(IntroError::NotImplemented)
+        Err(IntroError::Meta(
+            hacivat_session::meta::MetaError::Unavailable
+        ))
     );
+    assert_eq!(pc.catalog.current().generation, before.generation);
+    // ## m4-t15-engine
 }
 
 #[tokio::test]
@@ -288,15 +311,15 @@ async fn stub_hub_serves_cache_only() {
     assert_eq!(snap.generation, 0);
     assert!(snap.namespaces.is_empty());
     assert_eq!(snap.server.dbms, DbmsKind::Postgres);
-    // No engine: nothing is read, no key is fetched.
-    assert_eq!(
-        pc.handle.on_connect().await,
-        Err(IntroError::NotImplemented)
-    );
-    assert_eq!(
-        pc.handle.expand(ns("public")).await,
-        Err(IntroError::NotImplemented)
-    );
+    // ## m4-t15-engine (named exception): an engine runs now; with no connection nothing is
+    // read (the stub introspectors would answer `NotImplemented`), and no key is fetched.
+    let unavailable = Err(IntroError::Meta(
+        hacivat_session::meta::MetaError::Unavailable,
+    ));
+    assert_eq!(pc.handle.on_connect().await, unavailable);
+    assert_eq!(pc.handle.expand(ns("public")).await, unavailable);
+    assert!(pc.catalog.current().namespaces.is_empty());
+    // ## m4-t15-engine
     assert!(hub.row_key(p.id).is_none());
     // One catalog per profile.
     let again = hub.ensure(p.clone()).await.expect("a catalog");

@@ -111,12 +111,25 @@ pub struct Profile {
     pub read_only_fn_allowlist: Vec<String>,
     /// Statements of this profile go to the query history (D-061, Task 17); default `true`.
     pub record_history: bool,
-    // ## m4-t01c-core (R-M4-15): left out at `false`, so an M2b/M3 file round-trips byte for
+    // ## m4-t01c-core (R-M4-15): left out when unset, so an M2b/M3 file round-trips byte for
     // byte (the P-M3b-10 rule).
-    /// "Encrypt cached metadata": the profile's catalog cache rows are encrypted with its
-    /// `SecretSlot::CatalogKey` (Task 11). The dialog defaults it on for production-tagged
-    /// profiles (PO-Q2, Task 20); the type's default is `false`.
-    pub catalog_sensitive: bool,
+    // ## m4-t20-scope (named exception, ruling R-W3-1): tri-state.
+    /// "Encrypt cached metadata" as the user set it: `Some` when chosen in the connection
+    /// dialog, `None` (every profile from before M4, every import) to derive it from the
+    /// environment. Read the effective value with [`Profile::catalog_sensitive`]: when it is
+    /// `true` the catalog cache rows are encrypted with the profile's `SecretSlot::CatalogKey`
+    /// (Task 11).
+    pub catalog_sensitive_set: Option<bool>,
+}
+
+// ## m4-t20-scope (named exception, ruling R-W3-1)
+impl Profile {
+    /// Whether the profile's cached metadata is encrypted (R-M4-15): as the user set it, else
+    /// on for production-tagged profiles (PO-Q2) and off for every other one.
+    pub fn catalog_sensitive(&self) -> bool {
+        self.catalog_sensitive_set
+            .unwrap_or(self.environment == Some(EnvTag::Production))
+    }
 }
 
 // ## m3b-t01c-core-seams
@@ -161,8 +174,8 @@ impl Default for Profile {
             startup_script: None,
             read_only_fn_allowlist: Vec::new(),
             record_history: true,
-            // ## m4-t01c-core
-            catalog_sensitive: false,
+            // ## m4-t01c-core; ## m4-t20-scope (R-W3-1): derived until set.
+            catalog_sensitive_set: None,
         }
     }
 }

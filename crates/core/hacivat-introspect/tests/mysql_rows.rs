@@ -31,7 +31,7 @@ use hacivat_meta::{
     Level, NamespaceSnapshot, NsKey, ObjFlags, ObjectKey, ObjectKind, StateMark, Watermark,
 };
 use hacivat_proto::DbmsKind;
-use hacivat_session::meta::{Rows, check_own_text, check_read_text_for};
+use hacivat_session::meta::{Rows, check_own_text, check_read_text, check_read_text_for};
 use smallvec::smallvec;
 use sql_ident::quote::QuoteCtx;
 
@@ -95,9 +95,17 @@ fn every_section_renders_and_passes_the_metadata_guard_in_every_variant() {
                         };
                         check_own_text(q.sql(), kind)
                             .unwrap_or_else(|e| panic!("{s} {ctx:?}: {e:?}\n{}", q.sql()));
+                        // R-W3-9: every variant passes the guard of both MySQL-family
+                        // engines (a profile may name the other flavor), and a joinable one
+                        // the guard of every lexer (a joined connection's engine is unknown).
+                        for other in [DbmsKind::MySql, DbmsKind::MariaDb] {
+                            check_own_text(q.sql(), other)
+                                .unwrap_or_else(|e| panic!("{s} on {other:?}: {e:?}"));
+                            check_read_text_for(q.sql(), other)
+                                .unwrap_or_else(|e| panic!("{s} on {other:?}: {e:?}"));
+                        }
                         if sec.joinable() {
-                            check_read_text_for(q.sql(), kind)
-                                .unwrap_or_else(|e| panic!("joinable {s}: {e:?}"));
+                            assert_eq!(check_read_text(q.sql()), Ok(()), "joinable {s}");
                         }
                         // No `GROUP_CONCAT`, no `UPDATE_TIME`, no case folding (HV-INTRO-07,
                         // -14), and the marker is never filtered in SQL (R-M4-39).
@@ -263,7 +271,20 @@ fn the_show_create_guard_exception_is_narrow() {
             Ok(()),
             "{allowed}"
         );
+        // T5 reviewer A minor 1: only a MySQL-family lexer exempts the name. Another engine's
+        // guard (SQLite reads backticks as quotes too), and a guard that must accept every
+        // lexer (a joined connection's), still refuse it.
+        for other in [DbmsKind::Sqlite, DbmsKind::Postgres] {
+            assert!(
+                check_own_text(allowed, other).is_err(),
+                "{allowed} {other:?}"
+            );
+        }
+        assert!(check_read_text(allowed).is_err(), "{allowed}");
     }
+    // Only a backtick-quoted name is exempt: under ANSI_QUOTES a double-quoted one is an
+    // identifier too, and it is still checked.
+    assert!(check_own_text("SHOW CREATE TABLE \"db\".\"İ\"", DbmsKind::MySql).is_err());
 }
 
 // ---- the text rules --------------------------------------------------------------------------
@@ -1018,6 +1039,16 @@ impl SectionReader for Fake {
     }
 }
 
+/// The filter the engine passes when the profile has none (an empty introspect filter).
+fn match_all() -> hacivat_introspect::filter::CompiledFilter {
+    hacivat_introspect::filter::parse_filter(
+        "",
+        DialectId::MySql,
+        hacivat_introspect::filter::FilterRole::Introspect,
+    )
+    .expect("the empty filter")
+}
+
 fn ns() -> NsKey {
     NsKey::schema(["shop"])
 }
@@ -1046,7 +1077,7 @@ async fn pass_on(
 ) -> (NamespaceSnapshot, NamespaceResult, PassStats) {
     f.log.clear();
     let srv = read_server(f, DbmsKind::MySql).await.expect("identity");
-    let (res, stats) = run_pass(f, &srv, &ns(), mode, Level::Structure, prev)
+    let (res, stats) = run_pass(f, &srv, &ns(), mode, Level::Structure, &match_all(), prev)
         .await
         .expect("the pass");
     let b = match prev {
@@ -1413,9 +1444,17 @@ async fn mariadb_rows_without_a_listed_parent_are_skipped() {
         }
     }
     let mut r = Racing(f.clone());
-    let (res, _) = run_pass(&mut r, &srv, &ns(), Mode::Full, Level::Structure, None)
-        .await
-        .unwrap();
+    let (res, _) = run_pass(
+        &mut r,
+        &srv,
+        &ns(),
+        Mode::Full,
+        Level::Structure,
+        &match_all(),
+        None,
+    )
+    .await
+    .unwrap();
     let b = base(ns(), DbmsKind::MariaDb, FoldRule::Exact).unwrap();
     let next = merge(Some(&b), res, &MergePolicy::default()).unwrap();
     assert!(
@@ -1600,7 +1639,7 @@ async fn filter_pushdown_reads_matching_relation_names_through_like_escape() {
         .unwrap()
         .with_ident(srv.ident());
     f.log.clear();
-    let got = pass::pushdown_relations(&mut f, &srv, "shop", &filter)
+    let got = pass::pushed_relations(&mut f, &srv, "shop", &filter)
         .await
         .unwrap()
         .expect("a kindless pattern pushes for every relation kind");
@@ -1615,7 +1654,7 @@ async fn filter_pushdown_reads_matching_relation_names_through_like_escape() {
         .unwrap()
         .with_ident(srv.ident());
     assert_eq!(
-        pass::pushdown_relations(&mut f, &srv, "shop", &tables_only)
+        pass::pushed_relations(&mut f, &srv, "shop", &tables_only)
             .await
             .unwrap(),
         None
@@ -1634,4 +1673,115 @@ async fn the_mariadb_fingerprint_reads_its_host_facts() {
     let srv = read_server(&mut my, DbmsKind::MySql).await.unwrap();
     let b = fingerprint(&srv, &Default::default()).expect("MySQL server_uuid");
     assert_ne!(a, b);
+}
+
+/// R-W3-2: a pushable scope filter cuts what a full and an incremental pass read: only the
+/// relations it may keep are read (one `TableNamesLike` per pattern), their existence decides,
+/// and routines and events (not pushed) are read whole.
+#[tokio::test]
+async fn a_pushed_filter_restricts_the_relations_a_pass_reads() {
+    use hacivat_introspect::filter::{FilterRole, parse_filter};
+    let mut f = Fake::mysql();
+    let srv = read_server(&mut f, DbmsKind::MySql).await.unwrap();
+    let filter = parse_filter("ord*||v_*", DialectId::MySql, FilterRole::Introspect)
+        .unwrap()
+        .with_ident(srv.ident());
+    f.log.clear();
+    let (res, stats) = run_pass(
+        &mut f,
+        &srv,
+        &ns(),
+        Mode::Full,
+        Level::Structure,
+        &filter,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(names(&stats.relations), ["orders", "v_orders"]);
+    assert_eq!(names(&stats.routines), ["add_one", "add_one"]);
+    match &res.existent[&ObjectKind::Table] {
+        ExistSet::Ok(ids) => assert_eq!(ids.len(), 1, "only `orders`"),
+        other => panic!("{other:?}"),
+    }
+    let tables_list = f
+        .log
+        .iter()
+        .find(|(s, _)| s == "Tables")
+        .and_then(|(_, l)| *l);
+    assert_eq!(tables_list, Some(2), "the relations read by list");
+    let (s0, _, _) = {
+        let b = base(ns(), DbmsKind::MySql, FoldRule::Exact).unwrap();
+        let next = merge(Some(&b), res.clone(), &MergePolicy::default()).unwrap();
+        (next.next().clone(), (), ())
+    };
+    // An incremental pass under the same filter never lists `customers` as new.
+    f.at("2026-11-20 10:05:00.000000");
+    f.log.clear();
+    let (inc, stats) = run_pass(
+        &mut f,
+        &srv,
+        &ns(),
+        Mode::Incremental,
+        Level::Structure,
+        &filter,
+        Some(&s0),
+    )
+    .await
+    .unwrap();
+    assert_eq!(stats.full_reason, None);
+    assert!(stats.relations.is_empty(), "{:?}", stats.relations);
+    match &inc.existent[&ObjectKind::Table] {
+        ExistSet::Ok(ids) => assert_eq!(ids.len(), 1),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// T15 carry m11: a pass reports its phase and counts through the engine's sink.
+#[tokio::test]
+async fn a_pass_reports_progress_through_the_sink() {
+    use hacivat_introspect::engine::Phase;
+    use hacivat_introspect::introspector::{ProgressSink, with_progress};
+    use std::sync::Mutex;
+    let mut f = Fake::mysql();
+    type Seen = Vec<(Phase, u64, Option<u64>)>;
+    let seen: Arc<Mutex<Seen>> = Arc::default();
+    let sink = {
+        let seen = seen.clone();
+        ProgressSink::new(move |p, d, t| seen.lock().unwrap().push((p, d, t)))
+    };
+    let _ = with_progress(sink, pass_on(&mut f, Mode::Full, None)).await;
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.first(), Some(&(Phase::Tables, 3, Some(3))));
+    assert!(seen.contains(&(Phase::Columns, 3, Some(3))), "{seen:?}");
+    assert!(seen.iter().any(|(p, ..)| *p == Phase::Indexes));
+    // Outside a sink's scope, reporting is a no-op.
+    hacivat_introspect::introspector::report_progress(Phase::Tables, 1, None);
+}
+
+/// T15 carry m4: the facts the catalog was made with are replaced in one publish, and the
+/// table fold rule read from them follows the server's `lower_case_table_names`.
+#[test]
+fn server_facts_replace_the_catalogs_placeholder() {
+    use hacivat_meta::name::{IdentCtx, NameClass};
+    use hacivat_meta::snapshot::CatalogChange;
+    use hacivat_meta::{Catalog, ServerFacts};
+    let placeholder = ServerFacts::new(DbmsKind::MySql, IdentCtx::new(DialectId::MySql));
+    let catalog = Catalog::new(Arc::new(placeholder));
+    let publisher = catalog.publisher().expect("the only writer");
+    let mut srv = ServerCtx::assumed(DbmsKind::MySql, "8.4.3");
+    srv.lower_case_table_names = 1;
+    let real = srv.facts(Default::default());
+    let gen0 = catalog.current().generation;
+    publisher
+        .publish(vec![CatalogChange::SetServer(Arc::new(real.clone()))])
+        .expect("published");
+    let now = catalog.current();
+    assert_eq!(*now.server, real);
+    assert!(now.generation > gen0);
+    let ident = &now.server.ident;
+    assert_eq!(
+        FoldRule::for_names(ident.dialect, ident, NameClass::Table),
+        Some(FoldRule::AsciiCaseless)
+    );
 }

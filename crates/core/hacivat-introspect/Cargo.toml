@@ -46,6 +46,12 @@ proptest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 hacivat-meta = { workspace = true, features = ["test-support"] }
+# ## m4 (controller manifest amendment R-W3-4): Docker tests build a SessionManager, whose
+# ConnectDeps need hacivat_net::ssh::{KnownHosts, TunnelManager} (T17 NEEDS_CONTEXT).
+hacivat-net.workspace = true
+# ## m4 (controller manifest amendment R-W3-5): Docker tests need `EngineCatalog::embedded()`
+# and `ExecOpts`/`Protocol` (T16, T17).
+hacivat-driver.workspace = true
 
 [lints]
 workspace = true

@@ -49,7 +49,9 @@ use crate::assemble::mysql::{
     assemble_keys,
 };
 use crate::assemble::{ColumnIndex, KeyObj, TableId};
-use crate::introspector::IntroError;
+use crate::engine::{Phase, bounded_pushdown};
+use crate::filter::CompiledFilter;
+use crate::introspector::{IntroError, report_progress};
 use crate::pack::{Mode, PackCtx, Params};
 
 /// More changed objects than this make an incremental pass `Full` (one bulk query per kind is
@@ -287,6 +289,29 @@ impl Names {
     }
 }
 
+/// What [`read_set`] restricts per family (`None`: every object of the family).
+#[derive(Clone, Copy, Default)]
+struct Lists<'a> {
+    rel: Option<&'a BTreeSet<Name>>,
+    rtn: Option<&'a BTreeSet<Name>>,
+    evt: Option<&'a BTreeSet<Name>>,
+}
+
+impl<'a> Lists<'a> {
+    fn of(n: &'a Names) -> Self {
+        Lists {
+            rel: Some(&n.relations),
+            rtn: Some(&n.routines),
+            evt: Some(&n.events),
+        }
+    }
+}
+
+/// How many distinct relations `tables` name (a progress count).
+fn covered<'a>(tables: impl Iterator<Item = &'a Name>) -> u64 {
+    u64::try_from(tables.collect::<HashSet<_>>().len()).unwrap_or(u64::MAX)
+}
+
 /// The rows one read returns.
 #[derive(Debug, Default)]
 struct ReadSet {
@@ -307,41 +332,49 @@ async fn read_set(
     srv: &ServerCtx,
     schema: &str,
     level: Level,
-    names: Option<&Names>,
+    names: Lists<'_>,
 ) -> Result<ReadSet, IntroError> {
-    let mode = if names.is_some() {
-        Mode::Incremental
-    } else {
-        Mode::Full
-    };
+    // A family with a list reads its named objects (`mode == incremental` adds `… IN
+    // :[names]`); one without reads all of them.
     let ctx = |which: Option<&BTreeSet<Name>>| {
-        let params = match which {
-            Some(list) => list_params(schema, list),
-            None => schema_params(schema),
+        let (mode, params) = match which {
+            Some(list) => (Mode::Incremental, list_params(schema, list)),
+            None => (Mode::Full, schema_params(schema)),
         };
         srv.pack_ctx(mode, level, params)
     };
-    let rel = names.map(|n| &n.relations);
-    let rtn = names.map(|n| &n.routines);
-    let evt = names.map(|n| &n.events);
+    let Lists { rel, rtn, evt } = names;
     let structure = level >= Level::Structure;
+    let tables = rows::tables(&r.read("Tables", ctx(rel)).await?)?;
+    let count = u64::try_from(tables.len()).unwrap_or(u64::MAX);
+    let total = Some(count);
+    report_progress(Phase::Tables, count, total);
     let mut set = ReadSet {
-        tables: rows::tables(&r.read("Tables", ctx(rel)).await?)?,
+        tables,
         views: rows::views(&r.read("Views", ctx(rel)).await?)?,
         triggers: rows::triggers(&r.read("Triggers", ctx(rel)).await?)?,
-        routines: rows::routines(&r.read("Routines", ctx(rtn)).await?)?,
-        events: rows::events(&r.read("Events", ctx(evt)).await?)?,
         ..ReadSet::default()
     };
+    report_progress(Phase::Routines, 0, None);
+    set.routines = rows::routines(&r.read("Routines", ctx(rtn)).await?)?;
+    set.events = rows::events(&r.read("Events", ctx(evt)).await?)?;
     if structure {
+        report_progress(Phase::Columns, 0, total);
         set.columns = rows::columns(&r.read("Columns", ctx(rel)).await?)?;
+        report_progress(
+            Phase::Columns,
+            covered(set.columns.iter().map(|c| &c.table)),
+            total,
+        );
         set.params = rows::params(&r.read("Parameters", ctx(rtn)).await?)?;
         let mut keys = KeyRows::new(if srv.is_mariadb() {
             AsmFlavor::MariaDb
         } else {
             AsmFlavor::MySql
         });
+        report_progress(Phase::Indexes, 0, total);
         keys.indexes = stat_rows(&r.read("Statistics", ctx(rel)).await?)?;
+        report_progress(Phase::Constraints, 0, total);
         let tc = r.read("TableConstraints", ctx(rel)).await?;
         keys.checks = rows::checked("TableConstraints", &tc, 4)?
             .iter()
@@ -648,6 +681,7 @@ pub async fn run_pass(
     ns: &NsKey,
     mode: Mode,
     level: Level,
+    filter: &CompiledFilter,
     prev: Option<&NamespaceSnapshot>,
 ) -> Result<(NamespaceResult, PassStats), IntroError> {
     let schema = schema_of(ns)?;
@@ -666,25 +700,21 @@ pub async fn run_pass(
         0
     };
     let watermark = my_watermark(srv, w, priv_hash);
+    // R-W3-2: the relations the scope filter may keep, pushed to the server (≤ 16 runs).
+    let pushed = pushed_relations(r, srv, &schema, filter).await?;
+    let at = At {
+        w,
+        watermark,
+        pushed: pushed.as_ref(),
+    };
     let blocker = if mode == Mode::Incremental {
         incremental_blocker(srv, level, prev, priv_hash)
     } else {
         Some("requested")
     };
     match (blocker, prev) {
-        (None, Some(prev)) => incremental_pass(r, srv, &schema, level, prev, w, watermark).await,
-        (reason, _) => {
-            full_pass(
-                r,
-                srv,
-                &schema,
-                level,
-                w,
-                watermark,
-                reason.unwrap_or("requested"),
-            )
-            .await
-        }
+        (None, Some(prev)) => incremental_pass(r, srv, &schema, level, prev, at).await,
+        (reason, _) => full_pass(r, srv, &schema, level, at, reason.unwrap_or("requested")).await,
     }
 }
 
@@ -696,16 +726,35 @@ pub fn schema_of(ns: &NsKey) -> Result<Name, IntroError> {
     }
 }
 
+/// When and under what filter a pass reads.
+#[derive(Clone)]
+struct At<'a> {
+    /// `W`, microseconds.
+    w: i64,
+    /// The watermark the pass will store.
+    watermark: Watermark,
+    /// The relations a pushed filter keeps (`None`: no predicate was pushed).
+    pushed: Option<&'a BTreeSet<Name>>,
+}
+
 async fn full_pass(
     r: &mut dyn SectionReader,
     srv: &ServerCtx,
     schema: &Name,
     level: Level,
-    w: i64,
-    watermark: Watermark,
+    at: At<'_>,
     reason: &'static str,
 ) -> Result<(NamespaceResult, PassStats), IntroError> {
-    let set = read_set(r, srv, schema, level, None).await?;
+    let At {
+        w,
+        watermark,
+        pushed,
+    } = at;
+    let lists = Lists {
+        rel: pushed,
+        ..Lists::default()
+    };
+    let set = read_set(r, srv, schema, level, lists).await?;
     let mut index = ColumnIndex::new(NsKey::schema([schema.clone()]), srv.dialect(), srv.ident());
     index_read_tables(&mut index, &set, srv);
     index.set_complete(true);
@@ -766,18 +815,21 @@ async fn incremental_pass(
     schema: &Name,
     level: Level,
     prev: &NamespaceSnapshot,
-    w: i64,
-    watermark: Watermark,
+    at: At<'_>,
 ) -> Result<(NamespaceResult, PassStats), IntroError> {
     let Watermark::MyTime {
         at_utc_micros: w_prev,
         ..
     } = prev.meta().watermark
     else {
-        return full_pass(r, srv, schema, level, w, watermark, "no watermark").await;
+        return full_pass(r, srv, schema, level, at, "no watermark").await;
     };
     let ctx = || srv.pack_ctx(Mode::Full, level, schema_params(schema));
-    let tables = rows::table_marks(&r.read("TableMarks", ctx()).await?)?;
+    let mut tables = rows::table_marks(&r.read("TableMarks", ctx()).await?)?;
+    if let Some(keep) = at.pushed {
+        // The pushed predicate decides which relations this pass reads at all (R-W3-2).
+        tables.retain(|t| keep.contains(&t.name));
+    }
     let views: HashMap<Name, Option<u64>> = rows::view_marks(&r.read("ViewMarks", ctx()).await?)?
         .into_iter()
         .collect();
@@ -917,12 +969,12 @@ async fn incremental_pass(
         });
     }
     if want.len() > INCREMENTAL_LIMIT {
-        return full_pass(r, srv, schema, level, w, watermark, "too many changes").await;
+        return full_pass(r, srv, schema, level, at, "too many changes").await;
     }
 
     // The re-read, with FK targets resolving against the fresh rows of re-read tables and the
     // cached columns of every other table the server still lists (as a full pass would).
-    let set = read_set(r, srv, schema, level, Some(&want)).await?;
+    let set = read_set(r, srv, schema, level, Lists::of(&want)).await?;
     let mut index = ColumnIndex::new(NsKey::schema([schema.clone()]), srv.dialect(), srv.ident());
     index_read_tables(&mut index, &set, srv);
     let reread_names: HashSet<&Name> = set.tables.iter().map(|t| &t.name).collect();
@@ -954,7 +1006,7 @@ async fn incremental_pass(
         events: set.events.iter().map(|t| t.name.clone()).collect(),
     };
     let built = build(set, srv, level, &index);
-    let result = changed_result(built, schema, &want, ids, level, watermark, w, false);
+    let result = changed_result(built, schema, &want, ids, level, at.watermark, at.w, false);
     Ok((result, stats))
 }
 
@@ -1108,7 +1160,7 @@ pub async fn run_fragment(
     let schema = schema_of(ns)?;
     let w = read_watermark(r, srv).await?;
     let want = names_of(&schema, keys);
-    let set = read_set(r, srv, &schema, level, Some(&want)).await?;
+    let set = read_set(r, srv, &schema, level, Lists::of(&want)).await?;
     let mut index = ColumnIndex::new(NsKey::schema([schema.clone()]), srv.dialect(), srv.ident());
     index_read_tables(&mut index, &set, srv);
     let stats = PassStats {
@@ -1267,17 +1319,19 @@ async fn system_pass(
 /// Scope and filter pushdown (T12, ruling R-W3-2): the relation names of `schema` the
 /// introspect filter's patterns select on the server, through `TableNamesLike` (`LIKE ?
 /// ESCAPE ?`, one query per pattern, unioned; R-W2-10). `TABLES` holds every relation kind, so
-/// the predicate is `pushdown_kinds` over [`relation_kinds`] (T12 review I2): `None` when the
+/// the predicate is `engine::bounded_pushdown` (≤ 16 runs) over [`relation_kinds`] (T12 review
+/// I2): `None` when it would take more runs, or when the
 /// filter cannot be pushed for every kind, and the client then filters everything. Under
 /// `lower_case_table_names = 1` the pattern is already lower-cased by T12 (given the ident).
 /// The pass then reads the selected relations with `… IN :[names]`.
-pub async fn pushdown_relations(
+pub async fn pushed_relations(
     r: &mut dyn SectionReader,
     srv: &ServerCtx,
     schema: &str,
     filter: &crate::filter::CompiledFilter,
 ) -> Result<Option<BTreeSet<Name>>, IntroError> {
-    let Some(pred) = filter.pushdown_kinds(relation_kinds(srv), srv.dialect(), &srv.ident()) else {
+    let Some(pred) = bounded_pushdown(filter, relation_kinds(srv), srv.dialect(), &srv.ident())
+    else {
         return Ok(None);
     };
     let mut out = BTreeSet::new();

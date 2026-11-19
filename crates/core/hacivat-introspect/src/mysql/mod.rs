@@ -38,8 +38,11 @@ use hacivat_session::meta::{MetaConn, Rows, SnapshotTxn};
 use sql_dialect::DialectId;
 use tokio_util::sync::CancellationToken;
 
+use crate::filter::CompiledFilter;
 use crate::freshness::NsCheck;
-use crate::introspector::{FacetRows, IntroCaps, IntroError, Introspector, Staleness};
+use crate::introspector::{
+    FacetRows, IntroCaps, IntroError, Introspector, ServerIdentity, Staleness,
+};
 use crate::pack::{Mode, Pack, PackCtx};
 use crate::scope::NsInfo;
 
@@ -127,12 +130,14 @@ macro_rules! with_snapshot {
 
 impl MySqlIntrospector {
     /// [`Introspector::introspect`] with what the pass did (the Docker tests' query log).
+    #[allow(clippy::too_many_arguments, reason = "the seam's arguments")]
     pub async fn introspect_with_stats(
         &self,
         c: &mut MetaConn,
         ns: &NsKey,
         mode: Mode,
         level: Level,
+        filter: &CompiledFilter,
         prev: Option<&NamespaceSnapshot>,
         cancel: &CancellationToken,
     ) -> Result<(NamespaceResult, PassStats), IntroError> {
@@ -142,11 +147,12 @@ impl MySqlIntrospector {
                 .map(|r| (r, PassStats::default()));
         }
         with_snapshot!(c, self.flavor, Some(cancel), |r, srv| {
-            pass::run_pass(r, &srv, ns, mode, level, prev).await?
+            pass::run_pass(r, &srv, ns, mode, level, filter, prev).await?
         })
     }
 
-    /// [`Introspector::fragment`] with what the read did.
+    /// [`Introspector::fragment`] with what the read did. The keys name the objects, so no
+    /// filter is pushed (the engine filters the result on the client, R-W3-2).
     pub async fn fragment_with_stats(
         &self,
         c: &mut MetaConn,
@@ -192,8 +198,8 @@ impl MySqlIntrospector {
     }
 
     /// The server's identity for the cache (ruling R-W3-3; [`server::fingerprint`]): `None`
-    /// when a fact it needs could not be read (the seam's `Unknown`). T15's
-    /// `Introspector::identity` wraps it once that seam merges.
+    /// when a fact it needs could not be read (the seam's `Unknown`); `Introspector::identity`
+    /// wraps it.
     pub async fn server_fingerprint(
         &self,
         c: &mut MetaConn,
@@ -216,15 +222,15 @@ impl MySqlIntrospector {
     }
 
     /// The relation names of `schema` the filter's patterns select on the server (R-W3-2;
-    /// see [`pass::pushdown_relations`]).
-    pub async fn pushdown_relations(
+    /// see [`pass::pushed_relations`]).
+    pub async fn pushed_relations(
         &self,
         c: &mut MetaConn,
         schema: &str,
-        filter: &crate::filter::CompiledFilter,
+        filter: &CompiledFilter,
     ) -> Result<Option<BTreeSet<Name>>, IntroError> {
         with_snapshot!(c, self.flavor, None, |r, srv| {
-            pass::pushdown_relations(r, &srv, schema, filter).await?
+            pass::pushed_relations(r, &srv, schema, filter).await?
         })
     }
 
@@ -268,30 +274,35 @@ impl Introspector for MySqlIntrospector {
         Box::pin(self.list(c))
     }
 
+    #[allow(clippy::too_many_arguments, reason = "the seam's arguments")]
     fn introspect<'a>(
         &'a self,
         c: &'a mut MetaConn,
         ns: &'a NsKey,
         mode: Mode,
         level: Level,
+        filter: &'a CompiledFilter,
         prev: Option<&'a NamespaceSnapshot>,
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>> {
         Box::pin(async move {
-            self.introspect_with_stats(c, ns, mode, level, prev, cancel)
+            self.introspect_with_stats(c, ns, mode, level, filter, prev, cancel)
                 .await
                 .map(|(r, _)| r)
         })
     }
 
+    #[allow(clippy::too_many_arguments, reason = "the seam's arguments")]
     fn fragment<'a>(
         &'a self,
         c: &'a mut MetaConn,
         ns: &'a NsKey,
         keys: &'a [ObjectKey],
         level: Level,
+        filter: &'a CompiledFilter,
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>> {
+        let _ = filter;
         Box::pin(async move {
             self.fragment_with_stats(c, ns, keys, level, cancel)
                 .await
@@ -346,6 +357,29 @@ impl Introspector for MySqlIntrospector {
         _snap: &'a NamespaceSnapshot,
     ) -> BoxFuture<'a, Result<NsCheck, IntroError>> {
         Box::pin(self.ns_check(c, ns))
+    }
+
+    /// R-W3-3: [`MySqlIntrospector::server_fingerprint`]; a fact that cannot be read (or a
+    /// failed read) is `Unknown`, which the engine treats fail-closed.
+    fn identity<'a>(
+        &'a self,
+        c: &'a mut MetaConn,
+    ) -> BoxFuture<'a, Result<ServerIdentity, IntroError>> {
+        Box::pin(async move {
+            Ok(match self.server_fingerprint(c).await {
+                Ok(Some(fp)) => ServerIdentity::Known(fp),
+                Ok(None) | Err(_) => ServerIdentity::Unknown,
+            })
+        })
+    }
+
+    /// T15 carry m4: the facts the catalog was made with are a placeholder (lctn 0, no
+    /// version); these replace them on connect.
+    fn server_facts<'a>(
+        &'a self,
+        c: &'a mut MetaConn,
+    ) -> BoxFuture<'a, Result<Option<ServerFacts>, IntroError>> {
+        Box::pin(async move { Ok(Some(MySqlIntrospector::server_facts(self, c).await?.1)) })
     }
 
     fn capabilities(&self) -> IntroCaps {
