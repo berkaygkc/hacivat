@@ -107,8 +107,10 @@ fn spec(p: &Profile) -> MetaConnSpec {
     }
 }
 
+// ## m4-t05-meta (named exception: Task 5 filled the stubs these two tests pinned; the full
+// behaviour is in `tests/meta_conn.rs`)
 #[tokio::test(start_paused = true)]
-async fn meta_conn_stub_is_unavailable() {
+async fn meta_conn_opens_one_read_only_connection() {
     let (deps, fake) = deps_with(ok_pg());
     let profile = Arc::new(pg_profile(TlsMode::Disable));
     let sm = SessionManager::new(
@@ -119,19 +121,23 @@ async fn meta_conn_stub_is_unavailable() {
     );
     let cancel = CancellationToken::new();
     let got = sm.meta_conn(spec(&profile), &cancel).await;
-    assert!(matches!(got, Err(MetaError::Unavailable)), "{got:?}");
-    // Fail closed without touching the server: no connection was opened.
-    assert_eq!(fake.connect_calls(), 0);
+    assert!(got.is_ok(), "{got:?}");
+    assert_eq!(fake.connect_calls(), 1);
+    let req = fake.last_request().expect("the metadata connect");
+    assert!(req.read_only);
+    assert_eq!(req.database.as_deref(), Some("hv_test"));
 }
 
 #[tokio::test(start_paused = true)]
-async fn meta_join_stub_is_unavailable() {
+async fn meta_join_refuses_a_console_session() {
     let (handle, fake) = session(ok_pg()).await;
     let connects = fake.connect_calls();
+    let calls = fake.call_log().len();
     let got = MetaConn::join(&handle);
-    assert!(matches!(got, Err(MetaError::Unavailable)), "{got:?}");
+    assert!(matches!(got, Err(MetaError::NotJoinable)), "{got:?}");
     // Joining sends nothing to the session's connection and opens no other.
     assert_eq!(fake.connect_calls(), connects);
+    assert_eq!(fake.call_log().len(), calls);
 }
 
 // ## m4-t01c-core (Part B): the offline test connection can never read.
