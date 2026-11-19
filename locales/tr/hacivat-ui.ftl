@@ -2801,3 +2801,764 @@ hv-gmenu-label = Tablo menüsü
 
 # Review: PO
 hv-cmd-editor-use-selection-for-find = Seçimi bulmada kullan
+
+## m4-t01b-ui
+
+# Surface 1 (Explorer tree).
+# Review: PO
+hv-explorer-tree-label = Veritabanı gezgini
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+# Review: PO
+hv-explorer-kind-tables = TABLOLAR
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+# Review: PO
+hv-explorer-kind-views = GÖRÜNÜMLER
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+# Review: PO
+hv-explorer-kind-matviews = SOMUT GÖRÜNÜMLER
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+# Review: PO
+hv-explorer-kind-functions = FONKSİYONLAR
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+# Review: PO
+hv-explorer-kind-procedures = PROSEDÜRLER
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+# Review: PO
+hv-explorer-kind-sequences = SEKANSLAR
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+# Review: PO
+hv-explorer-kind-types = TİPLER
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+# Review: PO
+hv-explorer-kind-events = OLAYLAR
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+# Review: PO
+hv-explorer-kind-columns = SÜTUNLAR
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+# Review: PO
+hv-explorer-kind-keys = ANAHTARLAR
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+# Review: PO
+hv-explorer-kind-foreign-keys = YABANCI ANAHTARLAR
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+# Review: PO
+hv-explorer-kind-indexes = İNDEKSLER
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+# Review: PO
+hv-explorer-kind-checks = DENETİMLER
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+# Review: PO
+hv-explorer-kind-triggers = TETİKLEYİCİLER
+# Surface 1 (Explorer tree). The Built-in group of a database.
+# Review: PO
+hv-explorer-builtin = Yerleşik
+# Surface 1 (Explorer tree). The Built-in group of a database.
+# Variables:
+#   $version (String) - the bundled catalog's server version, e.g. "17".
+# Review: PO
+hv-explorer-builtin-badge = sürüm { $version }
+# Surface 1 (Explorer tree). The Built-in group of a database.
+# Variables:
+#   $version (String) - the bundled catalog's server version, e.g. "17".
+# Review: PO
+hv-explorer-builtin-tip = Yerleşik katalog (sürüm { $version }): sunucunun kendi nesneleri; Hacivat ile gelir, bağlantı olmadan okunur.
+# Surface 1 (Explorer tree). The database row's schema scope count (N of M).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+# Review: PO
+hv-explorer-scope-count = { $n } / { $total }
+# Surface 1 (Explorer tree). The database row's schema scope count (N of M).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+# Review: PO
+hv-explorer-scope-count-tip = { $total } şemadan { $n } tanesi kapsamda. Kapsamı düzenle… hangilerinin okunacağını değiştirir.
+# Surface 1 (Explorer tree).
+# Review: PO
+hv-explorer-add-scope = Kapsama ekle
+# Surface 1 (Explorer tree).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-explorer-out-of-scope-tip = { $name } bu bağlantının kapsamında değil, bu yüzden okunmuyor.
+# Surface 1 (Explorer tree).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-explorer-out-of-scope-db-tip = { $name } bu bağlantının kapsamında değil, bu yüzden okunmuyor. Okumak bir bağlantı daha açar.
+# Surface 1 (Explorer tree).
+# Variables:
+#   $rows (Number) - the server's row estimate, e.g. 48213.
+# Review: PO
+hv-explorer-row-estimate-tip = Yaklaşık { $rows } satır (sunucunun tahmini)
+# Surface 1 (Explorer tree).
+# Review: PO
+hv-explorer-loads-on-open = Açtığınızda yüklenir
+# Surface 2 (Loading states).
+# Review: PO
+hv-explorer-loading = Yükleniyor…
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
+# Review: PO
+hv-explorer-phase-names = Adlar okunuyor…
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
+# Review: PO
+hv-explorer-phase-columns = Sütunlar okunuyor…
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
+# Review: PO
+hv-explorer-phase-constraints = Anahtarlar ve indeksler okunuyor…
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
+# Review: PO
+hv-explorer-phase-sources = Tanımlar okunuyor…
+# Surface 2 (Loading states). Progress of a pass in the explorer (surface 14: explorer only).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+# Review: PO
+hv-explorer-progress-count = { $n }/{ $total }
+# Surface 2 (Loading states).
+# Review: PO
+hv-explorer-waiting-pass = Sütunlar bekleniyor
+# Surface 2 (Loading states). The partial-load badge and its tooltip.
+# Review: PO
+hv-explorer-partial = eksik
+# Surface 2 (Loading states). The partial-load badge and its tooltip.
+# Review: PO
+hv-explorer-partial-title = Bazı nesneler okunamadı
+# Surface 2 (Loading states). The partial-load badge and its tooltip.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+# Review: PO
+hv-explorer-partial-body = Bu kullanıcı { $schema } içindeki { $n } fonksiyonun tanımını okuyamıyor. Adlarıyla listelenirler; tanımları eksiktir.
+# Surface 2 (Loading states). A namespace whose catalog query was refused.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-explorer-failed = { $name } okunamadı
+# Surface 2 (Loading states). A namespace whose catalog query was refused.
+# Review: PO
+hv-explorer-failed-body = Sunucu katalog sorgusunu reddetti. Yeniden dene ile tekrar okunur.
+# Surface 2 (Loading states).
+# Review: PO
+hv-explorer-retry = Yeniden dene
+# Surface 3 (Cached and offline). A profile shown from its cache while offline.
+# Variables:
+#   $date (DateTime) - when the cache was saved, e.g. 2026-11-17 14:05.
+# Review: PO
+hv-explorer-cached = { DATETIME($date, dateStyle: "medium", timeStyle: "short") } tarihli önbellekteki üst veri gösteriliyor
+# Surface 3 (Cached and offline). A profile shown from its cache while offline.
+# Review: PO
+hv-explorer-cached-meta = önbellek
+# Surface 3 (Cached and offline). A profile shown from its cache while offline.
+# Variables:
+#   $date (DateTime) - when the cache was saved, e.g. 2026-11-17 14:05.
+# Review: PO
+hv-explorer-cached-tip = Bağlı değil. Ağaç, { DATETIME($date, dateStyle: "medium", timeStyle: "short") } tarihinde kaydedilen kopyadır; sunucuyla karşılaştırmak için bağlanın.
+# Surface 3 (Cached and offline).
+# Review: PO
+hv-explorer-stale = güncel değil
+# Surface 3 (Cached and offline).
+# Variables:
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+# Review: PO
+hv-explorer-stale-tip = { $schema } okunduktan sonra sunucuda değişti. Değişiklikleri yüklemek için yenileyin.
+# Surface 3 (Cached and offline).
+# Review: PO
+hv-explorer-encrypted-tip = Önbellekteki üst veri şifreli. Bu bağlantıyı açmak anahtarını Anahtar Zinciri'nden okur.
+# Surface 3 (Cached and offline).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-explorer-memory-only = Anahtar Zinciri kullanılamıyor; { $name } üst verisi uygulamadan çıkana dek yalnız bellekte tutulur.
+# Surface 4 (Filter field). The explorer filter field.
+# Review: PO
+hv-explorer-filter-objects = Nesnelerde ara
+# Surface 4 (Filter field). The explorer filter field.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+# Review: PO
+hv-explorer-filter-count = { $n } eşleşme
+# Surface 4 (Filter field). The explorer filter field.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+# Review: PO
+hv-explorer-filter-group-count = { $n } / { $total }
+# Surface 4 (Filter field). The explorer filter field.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+# Review: PO
+hv-explorer-filter-unloaded = Yalnız yüklenmiş adlarda arar. { $n } tablonun sütunları henüz yüklenmedi.
+# Surface 4 (Filter field). The explorer filter field.
+# Review: PO
+hv-explorer-filter-none = Eşleşen nesne yok
+# Surface 4 (Filter field). The explorer filter field.
+# Variables:
+#   $query (String) - the filter text as typed, e.g. "müş".
+# Review: PO
+hv-explorer-filter-none-body = Yüklenmiş adlardan hiçbiri “{ $query }” ile eşleşmiyor.
+# Surface 4 (Filter field). The explorer filter field.
+# Review: PO
+hv-explorer-filter-clear = Filtreyi temizle
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-refresh = Yenile
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-edit-scope = Kapsamı düzenle…
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-level = Okuma düzeyi
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-clear-cache = Önbellekteki üst veriyi temizle…
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-open-data = Veriyi aç
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-view-ddl = DDL'i göster
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-view-table-ddl = Tablonun DDL'ini göster
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-copy-name = Tam adı kopyala
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-copy-plain = Adı kopyala
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-hide-like = Benzer nesneleri gizle
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-show-hidden = Gizli nesneleri göster
+# Surface 5 (Context menus).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $pattern (String) - the view filter's pattern, e.g. "yedek_fatura_*".
+# Review: PO
+hv-explorer-hidden-tip = { $n } nesne bir görünüm filtresiyle gizlendi ({ $pattern }). Bu grubun menüsündeki Gizli nesneleri göster filtreyi kaldırır.
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-copy-ddl = DDL'i kopyala
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-modify-table = Tabloyu değiştir…
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-modify-view = Görünümü değiştir…
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-modify-column = Sütunu değiştir…
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-modify-tip = Sonraki bir sürümde gelecek
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-remove-scope = Kapsamdan çıkar
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-expand-all = Tüm alt öğeleri aç
+# Surface 5 (Context menus). The tree-wide command (palette, ⌘←); node menus use hv-explorer-menu-collapse-children.
+# Review: PO
+hv-explorer-menu-collapse-all = Tümünü kapat
+# Surface 5 (Context menus).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-explorer-copied = { $name } kopyalandı
+# Surface 5 (Context menus).
+# Variables:
+#   $conn (String) - the connection name, e.g. "orders-dev".
+# Review: PO
+hv-explorer-open-data-note = { $conn } üzerinde bir konsol açar ve şunu çalıştırır:
+# Surface 5 (Context menus). An explorer context-menu item.
+# Review: PO
+hv-explorer-menu-collapse-children = Tüm alt öğeleri kapat
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+# Review: PO
+hv-explorer-level-auto = Otomatik
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+# Review: PO
+hv-explorer-level-names = Yalnız adlar
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+# Review: PO
+hv-explorer-level-structure = Yapı
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+# Review: PO
+hv-explorer-level-sources = Yapı ve kaynaklar
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+# Variables:
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+# Review: PO
+hv-explorer-level-auto-hint = { $level ->
+        [names] şu an Yalnız adlar
+        [sources] şu an Yapı ve kaynaklar
+       *[structure] şu an Yapı
+    }
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+# Review: PO
+hv-explorer-level-names-hint = en hızlısı, sütunsuz
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+# Review: PO
+hv-explorer-level-structure-hint = sütunlar, anahtarlar, indeksler
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+# Review: PO
+hv-explorer-level-sources-hint = ve görünüm, fonksiyon metinleri
+# Surface 6 (Introspection level). The level pill's word.
+# Review: PO
+hv-explorer-pill-names = Adlar
+# Surface 6 (Introspection level). The level pill's word.
+# Review: PO
+hv-explorer-pill-structure = Yapı
+# Surface 6 (Introspection level). The level pill's word.
+# Review: PO
+hv-explorer-pill-sources = Kaynaklar
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
+# Variables:
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+# Review: PO
+hv-explorer-pill-tip-explicit = { $level ->
+        [names] Okuma düzeyi: Yalnız adlar, burada ayarlandı. Alttaki şemalar bunu devralır.
+        [sources] Okuma düzeyi: Yapı ve kaynaklar, burada ayarlandı. Alttaki şemalar bunu devralır.
+       *[structure] Okuma düzeyi: Yapı, burada ayarlandı. Alttaki şemalar bunu devralır.
+    }
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
+# Variables:
+#   $parent (String) - the database or schema the level comes from, e.g. "orders".
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+# Review: PO
+hv-explorer-pill-tip-inherited = { $level ->
+        [names] Okuma düzeyi: Yalnız adlar; { $parent } öğesinden devralındı.
+        [sources] Okuma düzeyi: Yapı ve kaynaklar; { $parent } öğesinden devralındı.
+       *[structure] Okuma düzeyi: Yapı; { $parent } öğesinden devralındı.
+    }
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+# Review: PO
+hv-explorer-pill-tip-auto = { $level ->
+        [names] Okuma düzeyi: Yalnız adlar; { $n } nesne için otomatik seçildi.
+        [sources] Okuma düzeyi: Yapı ve kaynaklar; { $n } nesne için otomatik seçildi.
+       *[structure] Okuma düzeyi: Yapı; { $n } nesne için otomatik seçildi.
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-section = Şemalar
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+# Review: PO
+hv-scope-summary = { $total } şemadan { $n }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $total (Number) - the total, e.g. 15000.
+# Review: PO
+hv-scope-summary-mysql = { $total } veritabanının tümü
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-current-db = geçerli veritabanı
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-other-db-hint = ayrı bağlantı gerekir
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-pattern = Desen
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-pattern-hint = @ geçerli veritabanı ya da şema, * tümü, {"{"}…{"}"} bir düzenli ifade içerir; | ifadeleri ayırır.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $pos (Number) - the 1-based character position of the error, e.g. 20.
+# Review: PO
+hv-scope-pattern-error = “:” işaretinden sonra bir şema adı bekleniyordu ({ NUMBER($pos, useGrouping: "false") }. karakter).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-builtin-note = Yerleşik şemalar paketle gelen katalogdan okunur, burada listelenmez.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-mysql-note = Görebildiğiniz her veritabanı listelenir. Her biri ilk açtığınızda yüklenir.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-all-dbs = Tüm veritabanları
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-all-dbs-title = Bu sunucudaki tüm veritabanları okunsun mu?
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+# Review: PO
+hv-scope-all-dbs-body = Bu sunucuda { $n } veritabanı var. Hepsini okumak her veritabanı için bir bağlantı açar ve büyük bir sunucuda zaman alabilir.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+# Review: PO
+hv-scope-all-dbs-yes = { $n } veritabanının tümünü oku
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-all-dbs-no = Geçerli veritabanında kal
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-encrypt = Önbellekteki üst veriyi şifrele
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-encrypt-sub = Kaydedilen katalog, Anahtar Zinciri'nde tutulan bir anahtarla şifrelenir. Üretimde varsayılan olarak açıktır.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-scope-encrypt-confirm-on = Bunu açmak { $name } için önbellekteki üst veriyi siler. Bir sonraki bağlanışta şifreli olarak yeniden okunur.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-scope-encrypt-confirm-off = Bunu kapatmak { $name } için şifreli önbelleği siler. Bir sonraki bağlanıştan sonra yalnız hesabınızın okuyabildiği düz bir dosyaya kaydedilir.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-encrypt-apply = Önbelleği sil ve şifrele
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-encrypt-apply-off = Önbelleği sil ve şifrelemeyi bırak
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-encrypt-keep = Olduğu gibi bırak
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Review: PO
+hv-scope-connect-to-list = Şemaları listelemek için bağlanın. Neyin okunacağına yine aşağıdaki desen karar verir.
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+# Review: PO
+hv-metadata-mass-title = { $schema } içindeki { $count } nesne artık görünmüyor
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+# Review: PO
+hv-metadata-mass-body = Silinmiş olabilirler ya da bu kullanıcı onlara erişimini kaybetmiş olabilir. Önbellekten kaldırmak sunucuda hiçbir şeyi değiştirmez.
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+# Review: PO
+hv-metadata-mass-more = ve { $n } tane daha
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+# Review: PO
+hv-metadata-mass-keep = Önbellekte tut
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+# Review: PO
+hv-metadata-mass-remove = Önbellekten kaldır
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+# Review: PO
+hv-metadata-mass-pending-tip = Son arka plan denetiminde { $count } nesne kayboldu. İncelemek için { $schema } şemasını yenileyin; hiçbir şey kaldırılmadı.
+# Surface 8 (Mass-deletion confirmation).
+# Variables:
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+# Review: PO
+hv-metadata-ns-dropped = { $schema } artık sunucuda yok, bu yüzden gezginden kaldırıldı.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+# Review: PO
+hv-metadata-refresh-ask = Gezgin, değişen { $count } nesneyi gösterecek şekilde yenilensin mi?
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+# Variables:
+#   $console (String) - the console's title, e.g. "orders-dev".
+# Review: PO
+hv-metadata-refresh-ask-body = { $console } içindeki betiğiniz bunları değiştirdi.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+# Review: PO
+hv-metadata-refresh = Yenile
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+# Review: PO
+hv-metadata-refresh-always = Her zaman yenile
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+# Review: PO
+hv-metadata-refresh-not-now = Şimdi değil
+# Surface 9 (Refresh after DDL). Refresh after DDL inside a transaction (the pending stamp).
+# Review: PO
+hv-metadata-after-commit = COMMIT sonrası yenilenir
+# Surface 9 (Refresh after DDL). Refresh after DDL inside a transaction (the pending stamp).
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+# Review: PO
+hv-metadata-after-commit-tip = Bu transaction'daki { $count } değişiklik COMMIT'i bekliyor. ROLLBACK bunları atar ve gezgin olduğu gibi kalır.
+# Surface 9 (Refresh after DDL). Refresh after DDL: dynamic SQL.
+# Variables:
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+# Review: PO
+hv-metadata-broad = { $schema } tamamen yenileniyor
+# Surface 9 (Refresh after DDL). Refresh after DDL: dynamic SQL.
+# Variables:
+#   $what (String) - the SQL keyword that made the change opaque, e.g. "EXECUTE".
+# Review: PO
+hv-metadata-broad-body = Betik dinamik SQL çalıştırdı ({ $what }); Hacivat hangi nesnelerin değiştiğini bilemiyor.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+# Review: PO
+hv-metadata-refreshed = Gezgin { $schema } içinde { $count } nesneyi yeniledi
+# Surface 9 (Refresh after DDL).
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+# Review: PO
+hv-metadata-log-pending = Gezgin yenilemesi COMMIT'i bekliyor ({ $count } nesne)
+# Surface 10 (DDL view). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-ddl-view-tab-title = { $name } · DDL
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-qualification = Nitelendirme
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-qual-auto = Otomatik
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-qual-never = Hiçbir zaman
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-qual-always = Her zaman
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-constraints = Kısıtlar
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-constraints-inside-column = Sütunun içinde
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-constraints-inside-table = Tablonun içinde
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-constraints-after-table = Tablodan sonra
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-server = Sunucunun verdiği tanımlar
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-grants = Yetkiler
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-owner = Sahip
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-options = Seçenekler
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-copy = Kopyala
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-open-console = Konsolda aç
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-refresh = Yenile
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-source-generated = Katalogdan üretildi
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-source-server = Sunucudan gelen metin
+# Surface 10 (DDL view). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-ddl-view-copied = { $name } DDL'i kopyalandı
+# Surface 10 (DDL view). One whole sentence per kind ($kind selector); never a kind word inserted.
+# Variables:
+#   $kind (String) - the object kind code, a selector, e.g. "index".
+# Review: PO
+hv-ddl-view-unsupported = { $kind ->
+        [domain] Hacivat domain'lerin DDL'ini henüz gösteremiyor.
+        [extension] Hacivat eklentilerin DDL'ini henüz gösteremiyor.
+        [operator] Hacivat işleçlerin DDL'ini henüz gösteremiyor.
+        [policy] Hacivat satır güvenliği ilkelerinin DDL'ini henüz gösteremiyor.
+        [rule] Hacivat kuralların DDL'ini henüz gösteremiyor.
+        [type] Hacivat tiplerin DDL'ini henüz gösteremiyor.
+       *[other] Hacivat bu tür nesnelerin DDL'ini henüz gösteremiyor.
+    }
+# Surface 10 (DDL view). One whole sentence per kind ($kind selector); never a kind word inserted.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-ddl-view-unsupported-body = { $name } gezginde kalır; Tam adı kopyala çalışır.
+# Surface 10 (DDL view). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-ddl-view-loading = { $name } tanımı okunuyor…
+# Surface 10 (DDL view). The DDL view tab.
+# Review: PO
+hv-ddl-view-grants-partial = Bazı yetkiler okunamadı; liste eksik olabilir.
+# Surface 11 (Stale object). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-ddl-view-stale = { $name } yüklendikten sonra sunucuda değişti
+# Surface 11 (Stale object). The DDL view tab.
+# Review: PO
+hv-ddl-view-reload = Yeniden yükle
+# Surface 11 (Stale object). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-ddl-view-gone = { $name } artık sunucuda yok
+# Surface 11 (Stale object). The DDL view tab.
+# Review: PO
+hv-ddl-view-gone-body = Aşağıdaki metin en son yüklenen metindir.
+# Surface 11 (Stale object). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-ddl-view-unknown = Hacivat, { $name } yüklendikten sonra sunucuda değişip değişmediğini denetleyemedi
+# Surface 12 (Invisible characters and broken objects). The invisible-characters badge and its tooltip.
+# Review: PO
+hv-explorer-invisible = görünmez karakter
+# Surface 12 (Invisible characters and broken objects). The invisible-characters badge and its tooltip.
+# Variables:
+#   $what (String) - the SQL keyword that made the change opaque, e.g. "EXECUTE".
+# Review: PO
+hv-explorer-invisible-tip = Bu ad görünmez bir karakter içeriyor: { $what }. Kopyalama ve DDL onu aynen korur.
+# Surface 12 (Invisible characters and broken objects). One whole sentence per kind ($kind selector); the name stays an isolated argument.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+#   $kind (String) - the object kind code, a selector, e.g. "index".
+# Review: PO
+hv-explorer-broken = { $kind ->
+        [check] { $name } denetim kısıtı, çözümlenemeyen bir sütuna başvuruyor
+        [foreign-key] { $name } yabancı anahtarı, çözümlenemeyen bir sütuna başvuruyor
+        [index] { $name } indeksi, çözümlenemeyen bir sütuna başvuruyor
+        [trigger] { $name } tetikleyicisi, çözümlenemeyen bir sütuna başvuruyor
+       *[other] { $name }, çözümlenemeyen bir sütuna başvuruyor
+    }
+# Surface 12 (Invisible characters and broken objects). One whole sentence per kind ($kind selector); the name stays an isolated argument.
+# Review: PO
+hv-explorer-broken-body = Sütun son okumadan sonra silinmiş ya da yeniden adlandırılmış olabilir. Denetlemek için tabloyu yenileyin.
+# Surface 13 (Settings › Metadata).
+# Review: PO
+hv-settings-nav-metadata = Üst veri
+# Surface 13 (Settings › Metadata).
+# Review: PO
+hv-settings-section-metadata = ÜST VERİ
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+# Review: PO
+hv-metadata-set-refresh = DDL sonrası gezgini yenile
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+# Review: PO
+hv-metadata-set-always = Her zaman
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+# Review: PO
+hv-metadata-set-ask = Sor
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+# Review: PO
+hv-metadata-set-never = Hiçbir zaman
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+# Review: PO
+hv-metadata-set-refresh-note = Bir konsol şemayı değiştiren bir ifade çalıştırdıktan sonra. Transaction içindeyse COMMIT'i bekler.
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+# Review: PO
+hv-metadata-set-check = Değişiklikleri arka planda denetle
+# Surface 13 (Settings › Metadata).
+# Review: PO
+hv-metadata-check-auto = Otomatik
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+# Review: PO
+hv-metadata-set-check-note = Otomatik: yerel ve geliştirme bağlantıları 10 dakikada bir, diğerleri bağlandığınızda ya da Yenile'ye bastığınızda denetlenir.
+# Surface 13 (Settings › Metadata).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+# Review: PO
+hv-metadata-every-min = { $n } dakikada bir
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+# Review: PO
+hv-metadata-set-cache-conn = Bağlantı başına önbellek
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+# Review: PO
+hv-metadata-set-cache-total = Tüm bağlantılar için önbellek
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+# Review: PO
+hv-metadata-set-cache-note = Sınır aşılınca en uzun süre önce yüklenen şemalar önce çıkar. Geçerli veritabanı her zaman kalır.
+# Surface 13 (Settings › Metadata).
+# Review: PO
+hv-metadata-unit-mb = MB
+# Surface 13 (Settings › Metadata).
+# Review: PO
+hv-metadata-unit-gb = GB
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+# Review: PO
+hv-metadata-set-clear = Önbellekteki üst veri
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+# Review: PO
+hv-metadata-clear = Önbellekteki üst veriyi temizle…
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+#   $size (String) - a size (an hv-metadata-size-mb message), e.g. "38.4 MB".
+# Review: PO
+hv-metadata-clear-note = { $name } etkin konsolun bağlantısı. Önbellekteki üst verisi bu bilgisayarda { $size } kullanıyor.
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-metadata-clear-title = { $name } için önbellekteki üst veri temizlensin mi?
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+# Review: PO
+hv-metadata-clear-body = Gezgin bunu bir sonraki bağlanışta sunucudan yeniden okur. Sunucuda hiçbir şey değişmez.
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+# Review: PO
+hv-metadata-clear-btn = Temizle
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-metadata-cleared = { $name } için önbellekteki üst veri temizlendi
+# Surface 13 (Settings › Metadata).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+# Review: PO
+hv-metadata-size-mb = { $n } MB
+# Surface 14 (Long introspection). Progress of a pass in the explorer (surface 14: explorer only).
+# Variables:
+#   $fraction (Number) - the share read so far, from 0 to 1, e.g. 0.23.
+# Review: PO
+hv-explorer-progress-meta = { NUMBER($fraction, style: "percent") }
+# Surface 14 (Long introspection). Progress of a pass in the explorer (surface 14: explorer only).
+# Variables:
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+# Review: PO
+hv-explorer-progress-tip = { $schema } okunuyor: şu ana dek { $total } tablonun { $n } tanesinin sütunları. Bu sırada gezgin kullanılabilir.
+
+# M4 command titles (palette, menus, keymap; `hv-cmd-<action id with . and _ as ->`).
+# Review: PO
+hv-cmd-explorer-view-ddl = DDL'i göster
+# Review: PO
+hv-cmd-explorer-copy-qualified-name = Tam adı kopyala
+# Review: PO
+hv-cmd-explorer-collapse-all = Gezginde tümünü kapat
+# Review: PO
+hv-cmd-explorer-open-data = Veriyi aç
+# Review: PO
+hv-cmd-explorer-refresh = Üst veriyi yenile
+# Review: PO
+hv-cmd-explorer-expand-all-children = Tüm alt öğeleri aç
+# Review: PO
+hv-cmd-explorer-edit-scope = Kapsamı düzenle
+# Review: PO
+hv-cmd-explorer-set-level-auto = Okuma düzeyi: Otomatik
+# Review: PO
+hv-cmd-explorer-set-level-names = Okuma düzeyi: Yalnız adlar
+# Review: PO
+hv-cmd-explorer-set-level-structure = Okuma düzeyi: Yapı
+# Review: PO
+hv-cmd-explorer-set-level-sources = Okuma düzeyi: Yapı ve kaynaklar
+# Review: PO
+hv-cmd-metadata-clear-cache = Önbellekteki üst veriyi temizle
+# Review: PO
+hv-cmd-ddl-view-copy = DDL'i kopyala

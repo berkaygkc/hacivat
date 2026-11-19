@@ -668,3 +668,51 @@ context = "Editor"
 chord = "cmd-e"
 command = "editor.use_selection_for_find"
 context = "Editor"
+
+## m4-t01b-seams
+# M4 (plan-m4 Task 1b, PO-Q10): the explorer tree and the DDL view. Defaults follow VS Code where
+# VS Code has an equivalent, and every row is remappable. The commands are registered disabled
+# until their tasks land (Tasks 24, 25, 27), so until then the chord passes through.
+# - `explorer.view_ddl` F12: VS Code's Go to Definition.
+# - `explorer.copy_qualified_name`: VS Code's Copy Path (`cmd-alt-c`).
+# - `explorer.collapse_all`: VS Code's `list.collapseAll`. The `Explorer` context is the tree's
+#   own focus, so the chord never reaches the filter field or the editor.
+# - `explorer.refresh` F5, in the `Explorer` context only (the file-manager and browser
+#   convention; VS Code has no default).
+# - `ddl_view.copy` has no row (review I1): the `DdlView` tab context stays on the stack whatever
+#   has the focus, so a copy chord there would take the standard copy from the explorer filter,
+#   the list and every text field. Inside the DDL text the read-only editor's `editor.copy` is
+#   the copy; the command is the toolbar's Copy button and a palette entry.
+# - Palette only: `explorer.open_data` (Enter on a table or view row is the tree's own activate;
+#   on a profile row Enter stays `connection.toggle_connect`), `explorer.expand_all_children`,
+#   `explorer.edit_scope`, `explorer.set_level.*`, `metadata.clear_cache`, `ddl_view.copy`.
+# - `explorer.focus_filter` also takes VS Code's `list.find` chord here, in the `Explorer`
+#   context; the Workspace `cmd-f` row stays.
+# No row takes `alt-shift-f` (M5's reformat) or starts with the command palette's chord.
+# Checks: `crates/app/hacivat-app/tests/m4_routing.rs` and the AltGr CI
+# (`crates/ui/hacivat-ui/tests/keymap_collisions.rs`).
+
+[[binding]]
+chord = "f12"
+command = "explorer.view_ddl"
+context = "Explorer"
+
+[[binding]]
+chord = "cmd-alt-c"
+command = "explorer.copy_qualified_name"
+context = "Explorer"
+
+[[binding]]
+chord = "cmd-left"
+command = "explorer.collapse_all"
+context = "Explorer"
+
+[[binding]]
+chord = "cmd-alt-f"
+command = "explorer.focus_filter"
+context = "Explorer"
+
+[[binding]]
+chord = "f5"
+command = "explorer.refresh"
+context = "Explorer"

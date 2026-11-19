@@ -34,6 +34,8 @@
 
 pub mod form;
 pub mod paste;
+// ## m4-t01b-seams: the Schemas section (M4 Task 20).
+pub mod schemas;
 // ## m2b-t01-interfaces: the SSH section (Task 20).
 pub mod ssh;
 pub mod url_row;

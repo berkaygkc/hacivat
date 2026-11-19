@@ -25,6 +25,8 @@ pub fn title_of(kind: TabKind, cx: &App) -> SharedString {
             Some(content) => (content.title)(cx),
             None => tr_id(cx, name),
         },
+        // ## m4-t01b-seams (ruling R-W0-1, named exception)
+        TabKind::DdlView { profile, object } => crate::ddl_view::tab_title(profile, object, cx),
     }
 }
 
@@ -33,6 +35,8 @@ pub fn context_of(kind: TabKind, cx: &App) -> Option<&'static str> {
     match kind {
         TabKind::Console { .. } => Some(CONSOLE_CONTEXT),
         TabKind::Registered(name) => registered(cx, name).map(|c| c.context),
+        // ## m4-t01b-seams (ruling R-W0-1, named exception)
+        TabKind::DdlView { .. } => Some(crate::ddl_view::DDL_VIEW_CONTEXT),
     }
 }
 

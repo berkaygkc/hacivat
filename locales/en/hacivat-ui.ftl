@@ -3292,3 +3292,623 @@ hv-gmenu-label = Grid menu
 # The command (palette; macOS ⌘E) that makes the selection the find query without opening the
 # find bar (PO M3c-08; macOS "Use Selection for Find").
 hv-cmd-editor-use-selection-for-find = Use selection for find
+
+## m4-t01b-ui
+
+# Surface 1 (Explorer tree).
+hv-explorer-tree-label = Database explorer
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-tables = TABLES
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-views = VIEWS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-matviews = MATERIALIZED VIEWS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-functions = FUNCTIONS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-procedures = PROCEDURES
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-sequences = SEQUENCES
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-types = TYPES
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-events = EVENTS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-columns = COLUMNS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-keys = KEYS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-foreign-keys = FOREIGN KEYS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-indexes = INDEXES
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-checks = CHECKS
+# Surface 1 (Explorer tree). A kind-group header: small caps, pre-cased here, never cased in code.
+hv-explorer-kind-triggers = TRIGGERS
+# Surface 1 (Explorer tree). The Built-in group of a database.
+hv-explorer-builtin = Built-in
+# Surface 1 (Explorer tree). The Built-in group of a database.
+# Variables:
+#   $version (String) - the bundled catalog's server version, e.g. "17".
+hv-explorer-builtin-badge = version { $version }
+# Surface 1 (Explorer tree). The Built-in group of a database.
+# Variables:
+#   $version (String) - the bundled catalog's server version, e.g. "17".
+hv-explorer-builtin-tip = Built-in catalog (version { $version }): the server's own objects, shipped with Hacivat and read without a connection.
+# Surface 1 (Explorer tree). The database row's schema scope count (N of M).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-explorer-scope-count = { $n } of { $total }
+# Surface 1 (Explorer tree). The database row's schema scope count (N of M).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-explorer-scope-count-tip = { $total ->
+        [one] { $n } of { $total } schema is in scope. Edit scope… changes which ones are read.
+       *[other] { $n } of { $total } schemas are in scope. Edit scope… changes which ones are read.
+    }
+# Surface 1 (Explorer tree).
+hv-explorer-add-scope = Add to scope
+# Surface 1 (Explorer tree).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-explorer-out-of-scope-tip = { $name } isn't in this connection's scope, so it isn't read.
+# Surface 1 (Explorer tree).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-explorer-out-of-scope-db-tip = { $name } isn't in this connection's scope, so it isn't read. Reading it opens one more connection.
+# Surface 1 (Explorer tree).
+# Variables:
+#   $rows (Number) - the server's row estimate, e.g. 48213.
+hv-explorer-row-estimate-tip = { $rows ->
+        [one] About { $rows } row (the server's estimate)
+       *[other] About { $rows } rows (the server's estimate)
+    }
+# Surface 1 (Explorer tree).
+hv-explorer-loads-on-open = Loads when you open it
+# Surface 2 (Loading states).
+hv-explorer-loading = Loading…
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
+hv-explorer-phase-names = Reading names…
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
+hv-explorer-phase-columns = Reading columns…
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
+hv-explorer-phase-constraints = Reading keys and indexes…
+# Surface 2 (Loading states). A phase row's label; the count follows in mono (hv-explorer-progress-count).
+hv-explorer-phase-sources = Reading definitions…
+# Surface 2 (Loading states). Progress of a pass in the explorer (surface 14: explorer only).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-explorer-progress-count = { $n }/{ $total }
+# Surface 2 (Loading states).
+hv-explorer-waiting-pass = Waiting for columns
+# Surface 2 (Loading states). The partial-load badge and its tooltip.
+hv-explorer-partial = partial
+# Surface 2 (Loading states). The partial-load badge and its tooltip.
+hv-explorer-partial-title = Some objects could not be read
+# Surface 2 (Loading states). The partial-load badge and its tooltip.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+hv-explorer-partial-body = { $n ->
+        [one] This login can't read the definition of { $n } function in { $schema }. It is listed by name; its definition is missing.
+       *[other] This login can't read the definitions of { $n } functions in { $schema }. They are listed by name; their definitions are missing.
+    }
+# Surface 2 (Loading states). A namespace whose catalog query was refused.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-explorer-failed = Couldn't read { $name }
+# Surface 2 (Loading states). A namespace whose catalog query was refused.
+hv-explorer-failed-body = The server refused the catalog query. Retry reads it again.
+# Surface 2 (Loading states).
+hv-explorer-retry = Retry
+# Surface 3 (Cached and offline). A profile shown from its cache while offline.
+# Variables:
+#   $date (DateTime) - when the cache was saved, e.g. 2026-11-17 14:05.
+hv-explorer-cached = Showing cached metadata from { DATETIME($date, dateStyle: "medium", timeStyle: "short") }
+# Surface 3 (Cached and offline). A profile shown from its cache while offline.
+hv-explorer-cached-meta = cached
+# Surface 3 (Cached and offline). A profile shown from its cache while offline.
+# Variables:
+#   $date (DateTime) - when the cache was saved, e.g. 2026-11-17 14:05.
+hv-explorer-cached-tip = Not connected. The tree is the copy saved on { DATETIME($date, dateStyle: "medium", timeStyle: "short") }; connect to check it against the server.
+# Surface 3 (Cached and offline).
+hv-explorer-stale = out of date
+# Surface 3 (Cached and offline).
+# Variables:
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+hv-explorer-stale-tip = The server changed { $schema } after it was read. Refresh to load the changes.
+# Surface 3 (Cached and offline).
+hv-explorer-encrypted-tip = The cached metadata is encrypted. Opening this connection reads its key from the Keychain.
+# Surface 3 (Cached and offline).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-explorer-memory-only = The Keychain isn't available, so { $name }'s metadata is kept in memory until you quit.
+# Surface 4 (Filter field). The explorer filter field.
+hv-explorer-filter-objects = Filter objects
+# Surface 4 (Filter field). The explorer filter field.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+hv-explorer-filter-count = { $n ->
+        [one] { $n } match
+       *[other] { $n } matches
+    }
+# Surface 4 (Filter field). The explorer filter field.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-explorer-filter-group-count = { $n } of { $total }
+# Surface 4 (Filter field). The explorer filter field.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+hv-explorer-filter-unloaded = { $n ->
+        [one] Searches loaded names only. The columns of { $n } table aren't loaded yet.
+       *[other] Searches loaded names only. The columns of { $n } tables aren't loaded yet.
+    }
+# Surface 4 (Filter field). The explorer filter field.
+hv-explorer-filter-none = No objects match
+# Surface 4 (Filter field). The explorer filter field.
+# Variables:
+#   $query (String) - the filter text as typed, e.g. "müş".
+hv-explorer-filter-none-body = Nothing loaded matches “{ $query }”.
+# Surface 4 (Filter field). The explorer filter field.
+hv-explorer-filter-clear = Clear filter
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-refresh = Refresh
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-edit-scope = Edit scope…
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-level = Introspection level
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-clear-cache = Clear cached metadata…
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-open-data = Open data
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-view-ddl = View DDL
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-view-table-ddl = View table DDL
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-copy-name = Copy qualified name
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-copy-plain = Copy name
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-hide-like = Hide objects like this
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-show-hidden = Show hidden objects
+# Surface 5 (Context menus).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $pattern (String) - the view filter's pattern, e.g. "yedek_fatura_*".
+hv-explorer-hidden-tip = { $n ->
+        [one] { $n } object is hidden by a view filter ({ $pattern }). Show hidden objects, in this group's menu, removes it.
+       *[other] { $n } objects are hidden by a view filter ({ $pattern }). Show hidden objects, in this group's menu, removes it.
+    }
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-copy-ddl = Copy DDL
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-modify-table = Modify table…
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-modify-view = Modify view…
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-modify-column = Modify column…
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-modify-tip = Arrives in a later version
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-remove-scope = Remove from scope
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-expand-all = Expand all children
+# Surface 5 (Context menus). The tree-wide command (palette, ⌘←); node menus use hv-explorer-menu-collapse-children.
+hv-explorer-menu-collapse-all = Collapse all
+# Surface 5 (Context menus).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-explorer-copied = Copied { $name }
+# Surface 5 (Context menus).
+# Variables:
+#   $conn (String) - the connection name, e.g. "orders-dev".
+hv-explorer-open-data-note = Opens a console on { $conn } and runs:
+# Surface 5 (Context menus). An explorer context-menu item.
+hv-explorer-menu-collapse-children = Collapse all children
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+hv-explorer-level-auto = Automatic
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+hv-explorer-level-names = Names only
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+hv-explorer-level-structure = Structure
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+hv-explorer-level-sources = Structure and sources
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+# Variables:
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+hv-explorer-level-auto-hint = { $level ->
+        [names] now Names only
+        [sources] now Structure and sources
+       *[structure] now Structure
+    }
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+hv-explorer-level-names-hint = fastest, no columns
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+hv-explorer-level-structure-hint = columns, keys, indexes
+# Surface 6 (Introspection level). The introspection level list (menu and pill).
+hv-explorer-level-sources-hint = and view and function text
+# Surface 6 (Introspection level). The level pill's word.
+hv-explorer-pill-names = Names
+# Surface 6 (Introspection level). The level pill's word.
+hv-explorer-pill-structure = Structure
+# Surface 6 (Introspection level). The level pill's word.
+hv-explorer-pill-sources = Sources
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
+# Variables:
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+hv-explorer-pill-tip-explicit = { $level ->
+        [names] Introspection level: Names only, set here. Schemas below inherit it.
+        [sources] Introspection level: Structure and sources, set here. Schemas below inherit it.
+       *[structure] Introspection level: Structure, set here. Schemas below inherit it.
+    }
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
+# Variables:
+#   $parent (String) - the database or schema the level comes from, e.g. "orders".
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+hv-explorer-pill-tip-inherited = { $level ->
+        [names] Introspection level: Names only, inherited from { $parent }.
+        [sources] Introspection level: Structure and sources, inherited from { $parent }.
+       *[structure] Introspection level: Structure, inherited from { $parent }.
+    }
+# Surface 6 (Introspection level). The level pill's tooltip and accessible name: one whole sentence per level.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $level (String) - the level code, a selector: "names", "structure" or "sources".
+hv-explorer-pill-tip-auto = { $level ->
+        [names] Introspection level: Names only, chosen automatically for { $n ->
+                [one] { $n } object
+               *[other] { $n } objects
+            }.
+        [sources] Introspection level: Structure and sources, chosen automatically for { $n ->
+                [one] { $n } object
+               *[other] { $n } objects
+            }.
+       *[structure] Introspection level: Structure, chosen automatically for { $n ->
+                [one] { $n } object
+               *[other] { $n } objects
+            }.
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-section = Schemas
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-scope-summary = { $total ->
+        [one] { $n } of { $total } schema
+       *[other] { $n } of { $total } schemas
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $total (Number) - the total, e.g. 15000.
+hv-scope-summary-mysql = { $total ->
+        [one] { $total } database
+       *[other] All { $total } databases
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-current-db = current database
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-other-db-hint = needs its own connection
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-pattern = Pattern
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-pattern-hint = @ is the current database or schema, * is all, {"{"}…{"}"} holds a regular expression, | separates clauses.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $pos (Number) - the 1-based character position of the error, e.g. 20.
+hv-scope-pattern-error = Expected a schema name after “:” (character { NUMBER($pos, useGrouping: "false") }).
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-builtin-note = Built-in schemas come from the bundled catalog and are not listed here.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-mysql-note = Every database you can see is listed. Each one loads the first time you open it.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-all-dbs = All databases
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-all-dbs-title = Read every database on this server?
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+hv-scope-all-dbs-body = { $n ->
+        [one] This server has { $n } database. Reading it opens one more connection.
+       *[other] This server has { $n } databases. Reading them opens one connection per database and can take a while on a large server.
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+hv-scope-all-dbs-yes = { $n ->
+        [one] Read { $n } database
+       *[other] Read all { $n } databases
+    }
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-all-dbs-no = Keep the current database
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-encrypt = Encrypt cached metadata
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-encrypt-sub = The saved catalog is encrypted with a key kept in the Keychain. On by default for production.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-scope-encrypt-confirm-on = Turning this on deletes the cached metadata of { $name }. It is read again, encrypted, on the next connect.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-scope-encrypt-confirm-off = Turning this off deletes the encrypted cache of { $name }. From the next connect it is saved as a plain file only your account can read.
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-encrypt-apply = Delete the cache and encrypt
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-encrypt-apply-off = Delete the cache and stop encrypting
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-encrypt-keep = Keep it as it is
+# Surface 7 (Scope editor). The connection dialog's Schemas section.
+hv-scope-connect-to-list = Connect to list the schemas. The pattern below still decides what is read.
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+hv-metadata-mass-title = { $count ->
+        [one] { $count } object in { $schema } is no longer visible
+       *[other] { $count } objects in { $schema } are no longer visible
+    }
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+hv-metadata-mass-body = They may have been dropped, or this login may have lost access to them. Removing them from the cache changes nothing on the server.
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+hv-metadata-mass-more = and { $n } more
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+hv-metadata-mass-keep = Keep cached
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+hv-metadata-mass-remove = Remove from cache
+# Surface 8 (Mass-deletion confirmation). The mass-deletion confirmation (D-039).
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+hv-metadata-mass-pending-tip = { $count ->
+        [one] { $count } object disappeared in the last background check. Refresh { $schema } to review it; nothing was removed.
+       *[other] { $count } objects disappeared in the last background check. Refresh { $schema } to review them; nothing was removed.
+    }
+# Surface 8 (Mass-deletion confirmation).
+# Variables:
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+hv-metadata-ns-dropped = { $schema } is no longer on the server, so it was removed from the explorer.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+hv-metadata-refresh-ask = { $count ->
+        [one] Refresh the database explorer to reflect { $count } changed object?
+       *[other] Refresh the database explorer to reflect { $count } changed objects?
+    }
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+# Variables:
+#   $console (String) - the console's title, e.g. "orders-dev".
+hv-metadata-refresh-ask-body = Your script in { $console } changed them.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+hv-metadata-refresh = Refresh
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+hv-metadata-refresh-always = Always refresh
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+hv-metadata-refresh-not-now = Not now
+# Surface 9 (Refresh after DDL). Refresh after DDL inside a transaction (the pending stamp).
+hv-metadata-after-commit = Refreshes after COMMIT
+# Surface 9 (Refresh after DDL). Refresh after DDL inside a transaction (the pending stamp).
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+hv-metadata-after-commit-tip = { $count ->
+        [one] { $count } change from this transaction waits for COMMIT. ROLLBACK discards it and the explorer stays as it is.
+       *[other] { $count } changes from this transaction wait for COMMIT. ROLLBACK discards them and the explorer stays as it is.
+    }
+# Surface 9 (Refresh after DDL). Refresh after DDL: dynamic SQL.
+# Variables:
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+hv-metadata-broad = Refreshing all of { $schema }
+# Surface 9 (Refresh after DDL). Refresh after DDL: dynamic SQL.
+# Variables:
+#   $what (String) - the SQL keyword that made the change opaque, e.g. "EXECUTE".
+hv-metadata-broad-body = The script ran dynamic SQL ({ $what }), so Hacivat can't tell which objects changed.
+# Surface 9 (Refresh after DDL). Refresh after DDL.
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+hv-metadata-refreshed = { $count ->
+        [one] Explorer refreshed { $count } object in { $schema }
+       *[other] Explorer refreshed { $count } objects in { $schema }
+    }
+# Surface 9 (Refresh after DDL).
+# Variables:
+#   $count (Number) - a count of objects, e.g. 312.
+hv-metadata-log-pending = { $count ->
+        [one] Explorer refresh waits for COMMIT ({ $count } object)
+       *[other] Explorer refresh waits for COMMIT ({ $count } objects)
+    }
+# Surface 10 (DDL view). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-tab-title = { $name } · DDL
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-qualification = Qualification
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-qual-auto = Auto
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-qual-never = Never
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-qual-always = Always
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-constraints = Constraints
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-constraints-inside-column = Inside column
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-constraints-inside-table = Inside table
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-constraints-after-table = After table
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-server = Definitions provided by server
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-grants = Grants
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-owner = Owner
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-options = Options
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-copy = Copy
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-open-console = Open in console
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-refresh = Refresh
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-source-generated = Generated from the catalog
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-source-server = Text from the server
+# Surface 10 (DDL view). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-copied = Copied the DDL of { $name }
+# Surface 10 (DDL view). One whole sentence per kind ($kind selector); never a kind word inserted.
+# Variables:
+#   $kind (String) - the object kind code, a selector, e.g. "index".
+hv-ddl-view-unsupported = { $kind ->
+        [domain] Hacivat can't show DDL for a domain yet.
+        [extension] Hacivat can't show DDL for an extension yet.
+        [operator] Hacivat can't show DDL for an operator yet.
+        [policy] Hacivat can't show DDL for a row security policy yet.
+        [rule] Hacivat can't show DDL for a rule yet.
+        [type] Hacivat can't show DDL for a type yet.
+       *[other] Hacivat can't show DDL for this kind of object yet.
+    }
+# Surface 10 (DDL view). One whole sentence per kind ($kind selector); never a kind word inserted.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-unsupported-body = { $name } stays in the explorer, and Copy qualified name works.
+# Surface 10 (DDL view). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-loading = Reading the definition of { $name }…
+# Surface 10 (DDL view). The DDL view tab.
+hv-ddl-view-grants-partial = Some grants could not be read, so the list may be incomplete.
+# Surface 11 (Stale object). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-stale = { $name } changed on the server since it was loaded
+# Surface 11 (Stale object). The DDL view tab.
+hv-ddl-view-reload = Reload
+# Surface 11 (Stale object). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-gone = { $name } no longer exists on the server
+# Surface 11 (Stale object). The DDL view tab.
+hv-ddl-view-gone-body = The text below is the last one loaded.
+# Surface 11 (Stale object). The DDL view tab.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-unknown = Hacivat couldn't check whether { $name } changed on the server since it was loaded
+# Surface 12 (Invisible characters and broken objects). The invisible-characters badge and its tooltip.
+hv-explorer-invisible = invisible characters
+# Surface 12 (Invisible characters and broken objects). The invisible-characters badge and its tooltip.
+# Variables:
+#   $what (String) - the SQL keyword that made the change opaque, e.g. "EXECUTE".
+hv-explorer-invisible-tip = This name contains an invisible character: { $what }. Copy and DDL keep it exactly.
+# Surface 12 (Invisible characters and broken objects). One whole sentence per kind ($kind selector); the name stays an isolated argument.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+#   $kind (String) - the object kind code, a selector, e.g. "index".
+hv-explorer-broken = { $kind ->
+        [check] Check constraint { $name } references a column that could not be resolved
+        [foreign-key] Foreign key { $name } references a column that could not be resolved
+        [index] Index { $name } references a column that could not be resolved
+        [trigger] Trigger { $name } references a column that could not be resolved
+       *[other] { $name } references a column that could not be resolved
+    }
+# Surface 12 (Invisible characters and broken objects). One whole sentence per kind ($kind selector); the name stays an isolated argument.
+hv-explorer-broken-body = The column may have been dropped or renamed after the last read. Refresh the table to check.
+# Surface 13 (Settings › Metadata).
+hv-settings-nav-metadata = Metadata
+# Surface 13 (Settings › Metadata).
+hv-settings-section-metadata = METADATA
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-refresh = Refresh the explorer after DDL
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-always = Always
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-ask = Ask
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-never = Never
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-refresh-note = After a console runs a statement that changes the schema. Inside a transaction it waits for COMMIT.
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-check = Check for changes in the background
+# Surface 13 (Settings › Metadata).
+hv-metadata-check-auto = Automatic
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-check-note = Automatic checks local and dev connections every 10 minutes, and the others when you connect or press Refresh.
+# Surface 13 (Settings › Metadata).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+hv-metadata-every-min = Every { $n } min
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-cache-conn = Cache per connection
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-cache-total = Cache for all connections
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-cache-note = Past the limit, the schemas loaded longest ago leave first. The current database always stays.
+# Surface 13 (Settings › Metadata).
+hv-metadata-unit-mb = MB
+# Surface 13 (Settings › Metadata).
+hv-metadata-unit-gb = GB
+# Surface 13 (Settings › Metadata). Settings › Metadata row.
+hv-metadata-set-clear = Cached metadata
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+hv-metadata-clear = Clear cached metadata…
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+#   $size (String) - a size (an hv-metadata-size-mb message), e.g. "38.4 MB".
+hv-metadata-clear-note = { $name } is the active console's connection. Its cached metadata uses { $size } on this computer.
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-metadata-clear-title = Clear cached metadata for { $name }?
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+hv-metadata-clear-body = The explorer reads it again from the server on the next connect. Nothing on the server changes.
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+hv-metadata-clear-btn = Clear
+# Surface 13 (Settings › Metadata). Settings › Metadata: clearing a connection's cached metadata.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-metadata-cleared = Cleared the cached metadata of { $name }
+# Surface 13 (Settings › Metadata).
+# Variables:
+#   $n (Number) - a count, e.g. 3400.
+hv-metadata-size-mb = { $n } MB
+# Surface 14 (Long introspection). Progress of a pass in the explorer (surface 14: explorer only).
+# Variables:
+#   $fraction (Number) - the share read so far, from 0 to 1, e.g. 0.23.
+hv-explorer-progress-meta = { NUMBER($fraction, style: "percent") }
+# Surface 14 (Long introspection). Progress of a pass in the explorer (surface 14: explorer only).
+# Variables:
+#   $schema (String) - a schema (MySQL: database) name, verbatim, e.g. "public".
+#   $n (Number) - a count, e.g. 3400.
+#   $total (Number) - the total, e.g. 15000.
+hv-explorer-progress-tip = { $total ->
+        [one] Reading { $schema }: the columns of { $n } of { $total } table so far. The explorer stays usable meanwhile.
+       *[other] Reading { $schema }: the columns of { $n } of { $total } tables so far. The explorer stays usable meanwhile.
+    }
+
+# M4 command titles (palette, menus, keymap; `hv-cmd-<action id with . and _ as ->`).
+hv-cmd-explorer-view-ddl = View DDL
+hv-cmd-explorer-copy-qualified-name = Copy qualified name
+hv-cmd-explorer-collapse-all = Collapse all in the explorer
+hv-cmd-explorer-open-data = Open data
+hv-cmd-explorer-refresh = Refresh metadata
+hv-cmd-explorer-expand-all-children = Expand all children
+hv-cmd-explorer-edit-scope = Edit scope
+hv-cmd-explorer-set-level-auto = Introspection level: Automatic
+hv-cmd-explorer-set-level-names = Introspection level: Names only
+hv-cmd-explorer-set-level-structure = Introspection level: Structure
+hv-cmd-explorer-set-level-sources = Introspection level: Structure and sources
+hv-cmd-metadata-clear-cache = Clear cached metadata
+hv-cmd-ddl-view-copy = Copy DDL

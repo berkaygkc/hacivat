@@ -47,7 +47,7 @@ use crate::shell::hooks::{CloseDecision, TabDecor, tab_close_decision};
 use crate::shell::keymap_state::shortcut_label;
 use crate::shell::layers::{DIALOG_CONTEXT, Layer, Layers, MENU_CONTEXT};
 use crate::shell::persist::LatestWriter;
-use crate::shell::tab_content::{TabContentRegistry, TabKind};
+use crate::shell::tab_content::{DdlObjectId, TabContentRegistry, TabKind};
 use crate::shell::tabs::{CONSOLE_CONTEXT, context_of, title_of};
 use crate::shell::tiles::TileBounds;
 use crate::shell::tiles::{self, Seam, TileLayout};
@@ -272,23 +272,42 @@ impl Workspace {
     }
 
     fn saved_state(&self) -> SavedState {
+        // ## m4-t01b-seams (ruling R-W0-1, named exception): DDL view tabs are not saved; the
+        // saved panes leave them out as if they were closed.
+        let mut panes = self.panes.clone();
+        for (id, kind) in &self.tabs {
+            if matches!(kind, TabKind::DdlView { .. }) {
+                let holders: Vec<PaneId> = panes
+                    .panes
+                    .iter()
+                    .filter(|(_, p)| p.tabs.contains(id))
+                    .map(|(pane, _)| *pane)
+                    .collect();
+                for pane in holders {
+                    panes.close_tab(pane, *id);
+                }
+            }
+        }
         SavedState {
             tiles: self.tiles,
-            panes: self.panes.clone(),
+            panes,
             tabs: self
                 .tabs
                 .iter()
-                .map(|(id, kind)| SavedTab {
-                    id: *id,
-                    kind: match kind {
-                        TabKind::Console { n, profile } => SavedKind::Console {
-                            n: *n,
-                            profile: profile.map(|p| p.to_string()),
+                .filter_map(|(id, kind)| {
+                    Some(SavedTab {
+                        id: *id,
+                        kind: match kind {
+                            TabKind::Console { n, profile } => SavedKind::Console {
+                                n: *n,
+                                profile: profile.map(|p| p.to_string()),
+                            },
+                            TabKind::Registered(name) => SavedKind::Registered {
+                                name: (*name).to_string(),
+                            },
+                            TabKind::DdlView { .. } => return None,
                         },
-                        TabKind::Registered(name) => SavedKind::Registered {
-                            name: (*name).to_string(),
-                        },
-                    },
+                    })
                 })
                 .collect(),
         }
@@ -366,7 +385,8 @@ impl Workspace {
             .values()
             .filter_map(|k| match k {
                 TabKind::Console { n, .. } => Some(*n),
-                TabKind::Registered(_) => None,
+                // ## m4-t01b-seams (ruling R-W0-1, named exception)
+                TabKind::Registered(_) | TabKind::DdlView { .. } => None,
             })
             .max()
             .map_or(1, |n| n.saturating_add(1))
@@ -552,6 +572,58 @@ impl Workspace {
             self.add_to_focused(tab);
         }
         self.layout_changed(cx);
+    }
+
+    // ## m4-t01b-seams (ruling R-W0-1, named exception)
+    /// Activates the DDL view tab of `object` of `profile`, or opens one in the focused pane:
+    /// one tab per object. Returns the tab (`None` only when the tab IDs are used up).
+    pub fn open_ddl_view_tab(
+        &mut self,
+        profile: ProfileId,
+        object: DdlObjectId,
+        cx: &mut Context<Self>,
+    ) -> Option<TabId> {
+        let kind = TabKind::DdlView { profile, object };
+        let existing = self
+            .tabs
+            .iter()
+            .find(|(_, k)| **k == kind)
+            .map(|(id, _)| *id);
+        let tab = match existing {
+            Some(tab) => {
+                let found = self.panes.panes.iter().find_map(|(pane, p)| {
+                    p.tabs.iter().position(|t| *t == tab).map(|i| (*pane, i))
+                });
+                if let Some((pane, idx)) = found {
+                    self.panes.activate(pane, idx);
+                }
+                tab
+            }
+            None => {
+                let tab = self.fresh_tab(kind)?;
+                self.add_to_focused(tab);
+                tab
+            }
+        };
+        self.layout_changed(cx);
+        Some(tab)
+    }
+
+    /// The view of DDL view `tab` from `crate::ddl_view`, built once.
+    fn ddl_view_view(
+        &mut self,
+        tab: TabId,
+        profile: ProfileId,
+        object: DdlObjectId,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyView> {
+        if let Some(view) = self.tab_views.get(&tab) {
+            return Some(view.clone());
+        }
+        let view = crate::ddl_view::tab_view(profile, object, window, cx)?;
+        self.tab_views.insert(tab, view.clone());
+        Some(view)
     }
 
     /// Builds the view of a registered tab once.
@@ -803,6 +875,8 @@ impl Workspace {
         match kind {
             TabKind::Console { .. } => Some(CONSOLE_CONTEXT),
             TabKind::Registered(name) => self.kind_contexts.get(name).copied(),
+            // ## m4-t01b-seams (ruling R-W0-1, named exception)
+            TabKind::DdlView { .. } => Some(crate::ddl_view::DDL_VIEW_CONTEXT),
         }
     }
 
@@ -1416,6 +1490,14 @@ impl Workspace {
             Some(TabKind::Console { n, profile }) => {
                 match self.console_view(tab, n, profile, window, cx) {
                     Some(view) => view.into_any_element(),
+                    None => editor_empty(theme, cx),
+                }
+            }
+            // ## m4-t01b-seams (ruling R-W0-1, named exception): the view `crate::ddl_view`
+            // builds for the tab, once.
+            Some(TabKind::DdlView { profile, object }) => {
+                match self.ddl_view_view(tab, profile, object, window, cx) {
+                    Some(view) => div().size_full().child(view).into_any_element(),
                     None => editor_empty(theme, cx),
                 }
             }

@@ -119,6 +119,18 @@ const ICONS: &[(&str, &[u8])] = lucide![
     "case-sensitive",
     "whole-word",
     "regex",
+    // ## m4-t01b-seams (named exception, the P-M3b-37 precedent): the M4 explorer kinds
+    // (column, foreign key, trigger, type, schema), the Built-in group, the DDL view's source
+    // caption and Open in console, and Refresh (`design/m4-explorer/NOTES.md`).
+    "columns-3",
+    "link",
+    "zap",
+    "type",
+    "folder-tree",
+    "library",
+    "server",
+    "terminal",
+    "refresh-cw",
 ];
 const HV_MARK: &[u8] = include_bytes!("../assets/icons/hacivat/hv-mark.svg");
 
