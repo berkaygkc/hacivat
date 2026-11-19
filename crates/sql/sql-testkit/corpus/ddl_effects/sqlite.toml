@@ -118,3 +118,12 @@ ddl = ["opaque"]
 [[case]]
 sql = "CREATE TABLE t (a int,,)"
 ddl = ["opaque"]
+
+# Fix round 1 (review I2, m4): a SQLite rename stays in its schema; a catalog write is opaque.
+[[case]]
+sql = "ALTER TABLE aux.t RENAME TO u"
+ddl = ["rename-to:u table aux.t"]
+
+[[case]]
+sql = "UPDATE sqlite_master SET sql = 'x' WHERE name = 't'"
+ddl = ["opaque"]

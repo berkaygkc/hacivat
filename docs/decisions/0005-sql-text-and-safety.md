@@ -1936,8 +1936,13 @@ the backend could not read, and every later statement of a script after one that
 what names mean), `ROUTINE_CALL`, `PREPARE`, or none; and every statement of the T1c scope
 that yielded no named effect (`REASSIGN OWNED`, `ALTER DEFAULT PRIVILEGES`, `CREATE CAST`,
 `CREATE SCHEMA AUTHORIZATION r`, …). Named effects stay beside it (refresh more, never less).
-`CREATE/ALTER/DROP EXTENSION` are opaque too: member objects land in a schema the statement may
-not name. **Named exception (U-3):** `TRUNCATE`, plain or `CASCADE`, has no effect (no catalog
+`CREATE/ALTER/DROP EXTENSION` and `ALTER EXTENSION … SET SCHEMA` are opaque too: member
+objects land in (or leave) a schema the statement may not name. `ALTER TABLE … DROP
+COLUMN|CONSTRAINT … CASCADE` is opaque beside its `alter` effect: dependent views and other
+tables' foreign keys go with it, in any schema (fix round 1, I1, I3). A data change whose
+target is a system catalog table (`pg_catalog.*`, an unqualified `pg_*` name, SQLite
+`sqlite_master`/`sqlite_schema` and their `temp` twins) is opaque (fix round 1, m4: the cheap
+option was taken). **Named exception (U-3):** `TRUNCATE`, plain or `CASCADE`, has no effect (no catalog
 object changes; the Statistics facet reloads on demand).
 
 **Names as written.** Every name keeps its parts' text and quoting, never folded (consumers
@@ -1952,7 +1957,12 @@ identity, never folded twice.
 **Engine choices.** A MySQL/MariaDB database is the model's schema (`NsKind::Schema`): `CREATE/
 DROP DATABASE|SCHEMA`, `GRANT … ON db.*` are `DdlKind::Schema` there (`ON *.*` is opaque).
 MySQL `RENAME TABLE a TO db2.b` (or `ALTER TABLE … RENAME TO db2.b`) is a rename of `a` plus a
-create of `db2.b`, so both schemas refresh. SQLite's `temp` schema (any ASCII case) makes an
+create of `db2.b`, so both schemas refresh. MySQL and MariaDB resolve an unqualified target
+against the current database, so `RENAME TABLE db1.a TO b` is a rename of `db1.a` plus a create
+of the unqualified `b`, resolved by the consumer like every unqualified name; SQLite keeps a
+renamed table in its schema (fix round 1, I2). `CREATE SCHEMA s` elements other than `GRANT`
+land in `s` (PostgreSQL refuses another schema), so the schema's effect covers them; a `GRANT`
+element yields its own effect (fix round 1, m1). SQLite's `temp` schema (any ASCII case) makes an
 object `temp`; PostgreSQL's `pg_temp`/`pg_temp_N` too. A column or table-constraint comment is
 `DdlKind::Other` named by the column/constraint with `on` its table.
 
@@ -1965,7 +1975,10 @@ rows, this task's corpus: 3,360 statements) against a golden of their reports, `
 written at the `m4` tip `f52034b` before this task changed `src/` (the T1c stub changed no other
 field since `fb98cf1`).
 
-**Not detected.** DDL run by a function that a plain `SELECT f()` calls when the classifier
-reads `f` as a read (a reviewed builtin, the profile's allowlist, the function catalog): the
-statement has no effect (an unknown `f` is `UNKNOWN`, so opaque). Only background validation
-(M4 Task 22) sees it.
+**Not detected.** Only background validation (M4 Task 22) sees:
+- DDL run by a function that a plain `SELECT f()` calls when the classifier reads `f` as a read
+  (a reviewed builtin, the profile's allowlist, the function catalog); an unknown `f` is
+  `UNKNOWN`, so opaque;
+- a direct catalog write the classifier does not see as a statement's own target: inside a
+  data-modifying CTE, a routine or a trigger (a top-level `UPDATE pg_catalog.pg_class …` or
+  SQLite `UPDATE sqlite_master …` is opaque, above).

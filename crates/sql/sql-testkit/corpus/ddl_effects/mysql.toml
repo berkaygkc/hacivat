@@ -204,3 +204,12 @@ ddl = ["opaque"]
 [[case]]
 sql = "CREATE TABLE t (a int,,)"
 ddl = ["opaque"]
+
+# Fix round 1 (review I2): an unqualified target is in the session's current database.
+[[case]]
+sql = "RENAME TABLE db1.a TO b"
+ddl = ["rename-to:b table db1.a", "create table b"]
+
+[[case]]
+sql = "ALTER TABLE db1.a RENAME TO b"
+ddl = ["rename-to:b table db1.a", "create table b"]

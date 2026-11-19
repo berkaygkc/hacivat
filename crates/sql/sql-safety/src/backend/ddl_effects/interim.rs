@@ -8,7 +8,8 @@
 //! - SQLite's `temp` schema (any ASCII case) makes an object temporary.
 //! - MySQL `RENAME TABLE a TO db2.b` (and `ALTER TABLE … RENAME TO db2.b`) moves the table to
 //!   another database: a rename of `a`, and a create of `db2.b` so the target schema is
-//!   refreshed too.
+//!   refreshed too. `RENAME TABLE db1.a TO b` moves it to the current database: a create of
+//!   the unqualified `b` (fix round 1, I2).
 //!
 //! A statement this module does not read answers none (`crate::ddl_effects::finish` adds the
 //! opaque effect when the statement is in scope); a part of one that cannot be read exactly
@@ -155,10 +156,10 @@ pub(crate) fn effects(s: &Statement, d: DialectId) -> Vec<DdlEffect> {
                 out.push(DdlEffect::opaque());
             }
             for p in pairs {
-                renamed(&p.old_name, &p.new_name, DdlKind::Table, &mut out);
+                renamed(&p.old_name, &p.new_name, DdlKind::Table, d, &mut out);
             }
         }
-        Statement::AlterTable(at) => alter_table(at, &mut out),
+        Statement::AlterTable(at) => alter_table(at, d, &mut out),
         Statement::AlterView(av) => {
             let kind = if av.materialized {
                 DdlKind::MaterializedView
@@ -169,7 +170,7 @@ pub(crate) fn effects(s: &Statement, d: DialectId) -> Vec<DdlEffect> {
         }
         Statement::AlterIndex { name, operation } => match operation {
             ast::AlterIndexOperation::RenameIndex { index_name } => {
-                renamed(name, index_name, DdlKind::Index, &mut out);
+                renamed(name, index_name, DdlKind::Index, d, &mut out);
             }
         },
         Statement::AlterSchema(a) => {
@@ -340,8 +341,17 @@ fn dropped_routines<'n>(
 }
 
 /// `old` renamed to `new`: the rename, and a create of `new` when it names another schema
-/// (the module docs).
-fn renamed(old: &ObjectName, new: &ObjectName, kind: DdlKind, out: &mut Vec<DdlEffect>) {
+/// (the module docs). MySQL and MariaDB resolve an unqualified `new` against the session's
+/// current database, so `RENAME TABLE db1.a TO b` moves `a` there: a create of the unqualified
+/// `b` too, which the consumer resolves as every other unqualified name (fix round 1, I2).
+/// SQLite keeps a renamed table in its schema.
+fn renamed(
+    old: &ObjectName,
+    new: &ObjectName,
+    kind: DdlKind,
+    d: DialectId,
+    out: &mut Vec<DdlEffect>,
+) {
     let (Some(old), Some(new)) = (qualified(old), qualified(new)) else {
         out.push(DdlEffect::opaque());
         return;
@@ -351,7 +361,12 @@ fn renamed(old: &ObjectName, new: &ObjectName, kind: DdlKind, out: &mut Vec<DdlE
         return;
     };
     let old_schema = &old.parts[..old.parts.len() - 1];
-    let moved = !new_schema.is_empty() && new_schema != old_schema;
+    let mysql = matches!(d, DialectId::MySql | DialectId::MariaDb);
+    let moved = if new_schema.is_empty() {
+        mysql && !old_schema.is_empty()
+    } else {
+        new_schema != old_schema
+    };
     out.push(DdlEffect {
         name: Some(old),
         ..effect(DdlAction::Rename { to: to.clone() }, kind)
@@ -364,7 +379,7 @@ fn renamed(old: &ObjectName, new: &ObjectName, kind: DdlKind, out: &mut Vec<DdlE
     }
 }
 
-fn alter_table(at: &ast::AlterTable, out: &mut Vec<DdlEffect>) {
+fn alter_table(at: &ast::AlterTable, d: DialectId, out: &mut Vec<DdlEffect>) {
     let Some(name) = qualified(&at.name) else {
         out.push(DdlEffect::opaque());
         return;
@@ -397,7 +412,7 @@ fn alter_table(at: &ast::AlterTable, out: &mut Vec<DdlEffect>) {
         });
     }
     for to in renames {
-        renamed(&at.name, to, DdlKind::Table, out);
+        renamed(&at.name, to, DdlKind::Table, d, out);
     }
 }
 

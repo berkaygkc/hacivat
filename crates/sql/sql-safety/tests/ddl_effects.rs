@@ -809,19 +809,32 @@ fn ddl_effects_never_change_the_verdict() {
         return;
     }
     let golden = std::fs::read_to_string(golden_path()).unwrap();
+    let rows: Vec<&str> = golden.lines().filter(|l| !l.starts_with('#')).collect();
     let mut checked = 0;
+    let mut missing = Vec::new();
     let mut diffs = Vec::new();
-    for line in golden.lines().filter(|l| !l.starts_with('#')) {
+    for line in &rows {
         let (k, want) = line.rsplit_once('\t').unwrap();
-        // A statement added to a corpus after the base has no golden; one removed is skipped.
-        let Some((got, p)) = now.get(k) else { continue };
+        // Fix round 1 (m3): every golden row must still be a corpus statement; a statement added
+        // to a corpus after the base has no golden row and is not checked here.
+        let Some((got, p)) = now.get(k) else {
+            missing.push(k);
+            continue;
+        };
         checked += 1;
         if format!("{got:016x}") != want {
             let src = stmts.iter().find(|s| key(s) == k).unwrap();
             diffs.push(format!("{k}: {}\n  now {p}", src.sql));
         }
     }
-    assert!(checked > 3000, "{checked} golden statements checked");
+    assert!(
+        missing.is_empty(),
+        "{} golden rows have no corpus statement:\n{}",
+        missing.len(),
+        missing.join("\n")
+    );
+    assert_eq!(checked, 3360, "golden statements checked");
+    assert_eq!(checked, rows.len());
     assert!(
         diffs.is_empty(),
         "{} reports changed:\n{}",

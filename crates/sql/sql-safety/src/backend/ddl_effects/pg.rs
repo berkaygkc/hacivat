@@ -287,6 +287,11 @@ pub(crate) fn effects(root: &pb::Node, n: &Namer<'_>) -> Vec<DdlEffect> {
                 (None, Some(o)) => n.object(o),
                 (None, None) => None,
             };
+            // Fix round 1 (I3): an extension's member objects move out of a schema the
+            // statement does not name.
+            if s.object_type == pb::ObjectType::ObjectExtension as i32 {
+                out.push(DdlEffect::opaque());
+            }
             match (kind_of(s.object_type), name) {
                 (Some(kind), Some(name)) if !s.newschema.is_empty() => {
                     out.push(named(DdlAction::SetSchema { to }, kind, name));
@@ -335,6 +340,14 @@ pub(crate) fn effects(root: &pb::Node, n: &Namer<'_>) -> Vec<DdlEffect> {
                     DdlKind::Schema,
                     n.name(&[s.schemaname.as_str()], None),
                 ));
+            }
+            // Fix round 1 (m1): a table, view, index, sequence or trigger element lands in the
+            // new schema (PostgreSQL refuses another), so the schema's effect covers it; a
+            // `GRANT` element may name any object.
+            for e in &s.schema_elts {
+                if let Some(N::GrantStmt(g)) = e.node.as_ref() {
+                    grant(g, n, &mut out);
+                }
             }
         }
         N::CreatedbStmt(s) => out.push(named(
@@ -748,6 +761,11 @@ fn alter_table(s: &pb::AlterTableStmt, n: &Namer<'_>, out: &mut Vec<DdlEffect>) 
             out.push(DdlEffect::opaque());
             continue;
         };
+        // Fix round 1 (I1): `DROP COLUMN|CONSTRAINT … CASCADE` drops dependent views and other
+        // tables' foreign keys, in any schema.
+        if cmd.behavior == pb::DropBehavior::DropCascade as i32 {
+            out.push(DdlEffect::opaque());
+        }
         let def = cmd.def.as_deref().and_then(|d| d.node.as_ref());
         match (T::try_from(cmd.subtype), def) {
             (Ok(T::AtAddConstraint), Some(N::Constraint(c))) => fk_target(c, n, &mut referenced),

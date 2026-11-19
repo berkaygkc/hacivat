@@ -35,9 +35,15 @@
 //! after each step that may change the kind, effects or flags (the union of two readings, the
 //! context-taint pass), keeping the named effects the backends read.
 //!
+//! A data change whose target is a system catalog table (`UPDATE pg_catalog.pg_class …`,
+//! SQLite `UPDATE sqlite_master …`) is opaque too ([`refresh`]; fix round 1).
+//!
 //! Not detected (ADR 0005 `m4-t06`): DDL that a function called by a plain `SELECT f()` runs,
-//! when the classifier reads `f` as a read (an unknown `f` is `UNKNOWN`, so opaque). Only
-//! background validation (M4 Task 22) sees it.
+//! when the classifier reads `f` as a read (an unknown `f` is `UNKNOWN`, so opaque); a catalog
+//! write inside a data-modifying CTE or a routine. Only background validation (M4 Task 22) sees
+//! it.
+
+use sql_ident::QualifiedName;
 
 use crate::effects::{EffectSet, RiskFlags};
 use crate::report::{DdlEffect, StmtKind, StmtReport};
@@ -89,9 +95,43 @@ pub(crate) fn finish(
 }
 
 /// Sets `item.ddl` from its final kind, effects and flags, keeping the effects already named.
+/// A statement that writes a system catalog table directly (fix round 1, m4) is opaque too.
 pub(crate) fn refresh(item: &mut StmtReport) {
-    let named = std::mem::take(&mut item.ddl);
+    let mut named = std::mem::take(&mut item.ddl);
+    if item
+        .touched
+        .writes
+        .iter()
+        .any(|o| is_catalog_table(&o.name))
+    {
+        named.push(DdlEffect::opaque());
+    }
     item.ddl = finish(item.kind, item.effects, item.flags, named);
+}
+
+// ## m4-t06-ddl-effects (fix round 1, m4)
+/// Whether `name` is a system catalog table a data change can rewrite: PostgreSQL
+/// `pg_catalog.*` (or an unqualified `pg_*` name, which resolves to `pg_catalog` first unless the
+/// search path says otherwise), SQLite `sqlite_master`, `sqlite_schema` and their `temp`
+/// twins (after `PRAGMA writable_schema`). Any ASCII case; a false match only refreshes more.
+fn is_catalog_table(name: &QualifiedName) -> bool {
+    let Some((last, qualifier)) = name.parts.split_last() else {
+        return false;
+    };
+    let sqlite = [
+        "sqlite_master",
+        "sqlite_schema",
+        "sqlite_temp_master",
+        "sqlite_temp_schema",
+    ];
+    sqlite.iter().any(|t| last.text.eq_ignore_ascii_case(t))
+        || match qualifier.last() {
+            Some(schema) => schema.text.eq_ignore_ascii_case("pg_catalog"),
+            None => last
+                .text
+                .get(..3)
+                .is_some_and(|p| p.eq_ignore_ascii_case("pg_")),
+        }
 }
 
 /// Whether the statement may run catalog changes its text does not name.

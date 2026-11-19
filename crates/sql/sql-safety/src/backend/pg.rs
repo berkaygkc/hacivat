@@ -855,7 +855,8 @@ fn statement(
     if let Some(stmt) = raw.stmt.as_deref() {
         let namer = crate::backend::ddl_effects::pg::Namer::new(sql, range, toks);
         let named = crate::backend::ddl_effects::pg::effects(stmt, &namer);
-        report.ddl = crate::ddl_effects::finish(report.kind, report.effects, report.flags, named);
+        report.ddl = named;
+        crate::ddl_effects::refresh(&mut report);
     }
     (report, changes_context)
 }

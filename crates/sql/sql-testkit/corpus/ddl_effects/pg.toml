@@ -510,3 +510,28 @@ ddl = ["opaque"]
 [[case]]
 sql = "create cast (int as text) with inout"
 ddl = ["opaque"]
+
+# Fix round 1 (review I1, I3, m1, m4).
+[[case]]
+sql = "alter table s.t drop column c cascade"
+ddl = ["opaque", "alter table s.t"]
+
+[[case]]
+sql = "alter table s.t drop constraint t_pkey cascade"
+ddl = ["opaque", "alter table s.t"]
+
+[[case]]
+sql = "alter table s.t drop column c"
+ddl = ["alter table s.t"]
+
+[[case]]
+sql = "alter extension hstore set schema s2"
+ddl = ["opaque", "set-schema:s2 extension hstore"]
+
+[[case]]
+sql = "create schema s grant select on other.t to r"
+ddl = ["create schema s", "grant table other.t"]
+
+[[case]]
+sql = "update pg_catalog.pg_class set relname = 'x' where oid = 1"
+ddl = ["opaque"]

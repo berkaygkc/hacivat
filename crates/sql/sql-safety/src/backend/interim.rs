@@ -2408,7 +2408,7 @@ fn finalize(range: TextRange, text: &str, base: Acc, outs: Vec<Acc>) -> StmtRepo
         let mut seen = HashSet::new();
         list.retain(|o| seen.insert(o.clone()));
     }
-    StmtReport {
+    let mut report = StmtReport {
         range,
         kind,
         effects: acc.effects,
@@ -2423,10 +2423,12 @@ fn finalize(range: TextRange, text: &str, base: Acc, outs: Vec<Acc>) -> StmtRepo
             Confidence::Exact
         },
         set_targets,
-        // ## m4-t01c-core / ## m4-t06-ddl-effects: what every reading's parse named, and the
-        // opaque rule.
-        ddl: crate::ddl_effects::finish(kind, acc.effects, acc.flags, acc.ddl),
-    }
+        // ## m4-t01c-core / ## m4-t06-ddl-effects: what every reading's parse named, then the
+        // opaque rule (`refresh`).
+        ddl: acc.ddl,
+    };
+    crate::ddl_effects::refresh(&mut report);
+    report
 }
 
 #[cfg(test)]
