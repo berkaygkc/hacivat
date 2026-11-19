@@ -125,6 +125,9 @@ jobs:
       # ## m4-t01a-ci: the full test set's `hacivat-meta --all-features` line (P-M4-5).
       - name: Test (M4) meta, all features
         run: cargo test --locked -p hacivat-meta --all-features
+      # Fix round 2: `hacivat-introspect` builds without `session` (what `fuzz/meta` needs).
+      - name: Check (M4) introspect without the session feature
+        run: cargo check --locked -p hacivat-introspect --no-default-features
 
       # ## m3a-t01a-proofs
       # After every build of this job (clippy, release, the test builds): nothing under the
@@ -840,11 +843,14 @@ jobs:
 
   # ## m4-t01a-ci
   # The M4 fuzz targets (P-M4-5, R-M4-45): untrusted cache rows and system snapshots
-  # (`hacivat-meta`), scope patterns and query packs (`hacivat-introspect`). Built like `fuzz-sql`
-  # (its own workspace, the pinned nightly, `--locked` against `fuzz/Cargo.lock`, `third_party/`
-  # untouched), 10 minutes per target; dispatch and schedule only (on `m4` by
+  # (`hacivat-meta`), scope patterns and query packs (`hacivat-introspect` without its default
+  # feature `session`, so no session/network/SSH crate is compiled). Their own cargo-fuzz
+  # package `fuzz/meta` (fix round 2: `fuzz-sql`'s package keeps its own graph), built like
+  # `fuzz-sql`: the pinned nightly, `--locked` against `fuzz/meta/Cargo.lock`, `third_party/`
+  # untouched; 10 minutes per target; dispatch and schedule only (on `m4` by
   # `workflow_dispatch`). Bodies: Tasks 11, 23, 12 and 4; until then a target only proves its
-  # call path.
+  # call path. Every cargo-fuzz command names the package with `--fuzz-dir fuzz/meta` (from the
+  # repository root, cargo-fuzz otherwise picks `fuzz/`).
   fuzz-meta:
     name: fuzz-meta (nightly, 10 min per target)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -861,32 +867,30 @@ jobs:
       - name: libclang (pg_query bindgen)
         uses: ./.github/actions/libclang
       - name: Build the fuzz targets (locked)
-        working-directory: fuzz
         run: |
-          cargo +"$FUZZ_NIGHTLY" metadata --locked --format-version 1 > /dev/null
-          cargo +"$FUZZ_NIGHTLY" fuzz build --release
+          cargo +"$FUZZ_NIGHTLY" metadata --manifest-path fuzz/meta/Cargo.toml --locked --format-version 1 > /dev/null
+          cargo +"$FUZZ_NIGHTLY" fuzz build --fuzz-dir fuzz/meta --release
       - name: The build left third_party and the lockfile untouched
         run: |
           test -z "$(git status --porcelain third_party)"
-          git diff --exit-code -- fuzz/Cargo.lock
+          git diff --exit-code -- fuzz/meta/Cargo.lock
       - name: Seed corpora (the committed snapshots and query packs, when present)
         run: |
           for t in catalog_row_decode system_snapshot_decode scope_pattern pack_parse; do
-            mkdir -p fuzz/corpus/$t
+            mkdir -p fuzz/meta/corpus/$t
           done
           for f in assets/system-catalogs/*.hvsnap.zst; do
-            [ -e "$f" ] && cp "$f" fuzz/corpus/system_snapshot_decode/
+            [ -e "$f" ] && cp "$f" fuzz/meta/corpus/system_snapshot_decode/
           done
           for f in crates/core/hacivat-introspect/packs/*/*.hvq.sql; do
-            [ -e "$f" ] && cp "$f" fuzz/corpus/pack_parse/
+            [ -e "$f" ] && cp "$f" fuzz/meta/corpus/pack_parse/
           done
           true
       - name: Run each target for 10 minutes (every target runs; the step fails after all)
-        working-directory: fuzz
         run: |
           failed=""
           for t in catalog_row_decode system_snapshot_decode scope_pattern pack_parse; do
-            if ! cargo +"$FUZZ_NIGHTLY" fuzz run --release $t corpus/$t -- -max_total_time=600 -max_len=65536 -rss_limit_mb=4096; then
+            if ! cargo +"$FUZZ_NIGHTLY" fuzz run --fuzz-dir fuzz/meta --release $t fuzz/meta/corpus/$t -- -max_total_time=600 -max_len=65536 -rss_limit_mb=4096; then
               failed="$failed $t"
             fi
           done
@@ -896,7 +900,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-meta-artifacts
-          path: fuzz/artifacts/
+          path: fuzz/meta/artifacts/
           if-no-files-found: ignore
 
   # ## m3b-t20-differential

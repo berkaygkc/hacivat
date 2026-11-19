@@ -485,6 +485,21 @@ fn turns_on(
             .any(|d| d.name == owner && d.features.iter().any(|f| f == feature))
 }
 
+/// The features of `pkg` that `feature` turns on through `pkg`'s own `[features]` table
+/// (plain feature names only; `dep:` and `x/f` items name other packages).
+fn own_closure(pkg: &Package, feature: &str) -> BTreeSet<String> {
+    let mut on = BTreeSet::from([feature.to_string()]);
+    let mut todo = vec![feature.to_string()];
+    while let Some(f) = todo.pop() {
+        for item in pkg.features.get(&f).into_iter().flatten() {
+            if pkg.features.contains_key(item) && on.insert(item.clone()) {
+                todo.push(item.clone());
+            }
+        }
+    }
+    on
+}
+
 /// The name a dependency is known by inside its owner's `[features]` (its rename, if any).
 fn dep_key(d: &cargo_metadata::Dependency) -> &str {
     d.rename.as_deref().unwrap_or(&d.name)
@@ -716,6 +731,15 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
             .bad_path
         {
             add(name, Rule::DdlIsPure, via);
+        }
+        // Fix round 2 (I-R1): `apply` is excluded from the walk above, so `default` must not
+        // turn it on (every user that keeps default features would get it).
+        if name == DDL && own_closure(root, "default").contains(DDL_APPLY) {
+            add(
+                name,
+                Rule::DdlIsPure,
+                vec![format!("[features] default -> {DDL_APPLY}")],
+            );
         }
         if name != APP && name != DDL && turns_on(root, &edges, &pkgs, DDL, DDL_APPLY) {
             add(
@@ -961,17 +985,9 @@ fn src_tokens(src: &str) -> Vec<SrcTok> {
                     i += 1;
                 }
             }
-        } else if ch == 'r'
-            && (at(i + 1) == '"'
-                || (at(i + 1) == '#' && {
-                    let mut j = i + 1;
-                    while at(j) == '#' {
-                        j += 1;
-                    }
-                    at(j) == '"'
-                }))
-        {
-            let mut j = i + 1;
+        } else if let Some(r) = raw_string_r(&c, i) {
+            // `r"…"`, `r#"…"#`, `br#"…"#`, `cr"…"` (fix round 2: prefixed raw strings).
+            let mut j = r + 1;
             let mut hashes = 0;
             while at(j) == '#' {
                 hashes += 1;
@@ -1010,6 +1026,9 @@ fn src_tokens(src: &str) -> Vec<SrcTok> {
             } else {
                 i += 1;
             }
+        } else if ch == 'r' && at(i + 1) == '#' && (at(i + 2).is_alphabetic() || at(i + 2) == '_') {
+            // A raw identifier `r#new` is the identifier `new` (fix round 2, I-R2 c).
+            i += 2;
         } else if ch.is_alphabetic() || ch == '_' {
             let begin = i;
             while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') {
@@ -1028,6 +1047,25 @@ fn src_tokens(src: &str) -> Vec<SrcTok> {
     out
 }
 
+/// The index of the `r` that opens a raw string at `i` (`r`, `br` or `cr` followed by `"` or by
+/// `#`s and `"`), if one does.
+fn raw_string_r(c: &[char], i: usize) -> Option<usize> {
+    let at = |k: usize| c.get(k).copied().unwrap_or('\0');
+    let r = match c[i] {
+        'r' => i,
+        'b' | 'c' if at(i + 1) == 'r' => i + 1,
+        _ => return None,
+    };
+    if i > 0 && (c[i - 1].is_alphanumeric() || c[i - 1] == '_') {
+        return None;
+    }
+    let mut j = r + 1;
+    while at(j) == '#' {
+        j += 1;
+    }
+    (at(j) == '"').then_some(r)
+}
+
 fn tok_ident(t: &[SrcTok], i: usize, name: &str) -> bool {
     matches!(t.get(i), Some(SrcTok::Ident(s)) if s == name)
 }
@@ -1036,10 +1074,13 @@ fn tok_punct(t: &[SrcTok], i: usize, p: char) -> bool {
     t.get(i) == Some(&SrcTok::Punct(p))
 }
 
-/// Whether the tokens build a `MetaQuery` or open a way to: `MetaQuery::new`,
-/// `<…MetaQuery>::new`, an alias (`MetaQuery as X`, `type X = …MetaQuery…;`) or an inherent
-/// `impl MetaQuery` (another constructor).
+/// Whether the tokens build a `MetaQuery` or open a way to: `MetaQuery::new` (also
+/// `MetaQuery::r#new`), `<…MetaQuery>::new`, an alias (`MetaQuery as X`, `type X =
+/// …MetaQuery…;`), any `impl` header naming `MetaQuery` (inherent, or a local trait whose
+/// methods may call `Self::new`), or `MetaQuery` inside a macro invocation's brackets
+/// (`mk!(MetaQuery)` with `$t::new` in the macro; fix round 2, I-R2).
 fn builds_meta_query(t: &[SrcTok]) -> bool {
+    let names_it = |range: &[SrcTok]| range.iter().any(|x| *x == SrcTok::Ident(META_QUERY.into()));
     (0..t.len()).any(|i| {
         if tok_ident(t, i, META_QUERY) {
             let j = if tok_punct(t, i + 1, '>') {
@@ -1049,12 +1090,36 @@ fn builds_meta_query(t: &[SrcTok]) -> bool {
             };
             (tok_punct(t, j, ':') && tok_punct(t, j + 1, ':') && tok_ident(t, j + 2, "new"))
                 || tok_ident(t, i + 1, "as")
-                || (i > 0 && tok_ident(t, i - 1, "impl"))
-        } else if tok_ident(t, i, "type") {
-            t[i + 1..]
+        } else if tok_ident(t, i, "type") || tok_ident(t, i, "impl") {
+            let header: Vec<SrcTok> = t[i + 1..]
                 .iter()
                 .take_while(|x| **x != SrcTok::Punct(';') && **x != SrcTok::Punct('{'))
-                .any(|x| *x == SrcTok::Ident(META_QUERY.into()))
+                .cloned()
+                .collect();
+            names_it(&header)
+        } else if matches!(t.get(i), Some(SrcTok::Ident(_)))
+            && tok_punct(t, i + 1, '!')
+            && let Some(SrcTok::Punct(open @ ('(' | '[' | '{'))) = t.get(i + 2)
+        {
+            let close = match open {
+                '(' => ')',
+                '[' => ']',
+                _ => '}',
+            };
+            let mut depth = 0usize;
+            let mut end = t.len();
+            for (k, x) in t.iter().enumerate().skip(i + 2) {
+                if *x == SrcTok::Punct(*open) {
+                    depth += 1;
+                } else if *x == SrcTok::Punct(close) {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = k;
+                        break;
+                    }
+                }
+            }
+            names_it(&t[i + 3..end.max(i + 3)])
         } else {
             false
         }
@@ -2898,5 +2963,112 @@ mod tests {
             "{:?}",
             source_violations(dir.path())
         );
+    }
+
+    // ## m4-t01a-model (fix round 2): the re-review's forms, one test each.
+
+    /// I-R1 / H7b: `default` turning `apply` (and through it a runtime) on.
+    #[test]
+    fn ddl_default_turning_on_apply_is_refused() {
+        let md = metadata(vec![with_features(
+            member("hacivat-ddl", "crates/core", vec![optional("tokio")]),
+            &[("default", &["apply"]), ("apply", &["dep:tokio"])],
+        )]);
+        let v = for_crate(&md, "hacivat-ddl");
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].rule, Rule::DdlIsPure);
+        assert_eq!(v[0].via, ["[features] default -> apply"]);
+        // Through another default feature too.
+        let chain = metadata(vec![with_features(
+            member("hacivat-ddl", "crates/core", vec![]),
+            &[("default", &["std"]), ("std", &["apply"]), ("apply", &[])],
+        )]);
+        assert_eq!(rule_of(&chain, "hacivat-ddl"), Rule::DdlIsPure);
+    }
+
+    /// I-R2 (a): a local trait implemented for `MetaQuery` (its methods can call `Self::new`).
+    #[test]
+    fn meta_query_local_trait_impl_is_refused() {
+        let v = meta_query_findings(&[(
+            ENGINE,
+            "trait Mk { fn mk() -> Self; }\n\
+             impl Mk for hacivat_session::meta::MetaQuery { fn mk() -> Self { Self::new(t, b) } }\n",
+        )]);
+        assert_eq!(names(&v), ["hacivat-introspect"]);
+    }
+
+    /// I-R2 (b): `MetaQuery` handed to a macro that builds it (`$t::new`).
+    #[test]
+    fn meta_query_passed_to_a_macro_is_refused() {
+        let v = meta_query_findings(&[(
+            ENGINE,
+            "macro_rules! mk { ($t:ident) => { $t::new(a, b) }; }\nfn f() { mk!(MetaQuery); }\n",
+        )]);
+        assert_eq!(names(&v), ["hacivat-introspect"]);
+    }
+
+    /// I-R2 (c): the raw identifier `r#new`.
+    #[test]
+    fn meta_query_raw_identifier_new_is_refused() {
+        let v = meta_query_findings(&[(ENGINE, "fn f() { MetaQuery::r#new(t, b); }\n")]);
+        assert_eq!(names(&v), ["hacivat-introspect"]);
+    }
+
+    /// Prefixed raw strings stay strings, and a raw identifier elsewhere is harmless.
+    #[test]
+    fn prefixed_raw_strings_and_raw_identifiers_are_not_code() {
+        let dir = source_tree(&[(
+            ENGINE,
+            "const A: &[u8] = br#\"MetaQuery::new \" x\"#;\nconst B: &str = r\"MetaQuery::new\";\n\
+             fn r#type() {}\nfn f() { println!(\"{}\", 1); }\n",
+        )]);
+        assert!(
+            source_violations(dir.path()).is_empty(),
+            "{:?}",
+            source_violations(dir.path())
+        );
+    }
+
+    /// Fix round 2 (CI 44514966689): `hacivat-introspect` without its default feature `session`
+    /// (what `fuzz/meta` builds under the sanitizer) never reaches a session, the network or SSH
+    /// stack, or the keyring; with it, it does (so the feature is what keeps them out).
+    #[test]
+    fn introspect_without_session_never_reaches_the_session_stack() {
+        let md = cargo_metadata::MetadataCommand::new()
+            .current_dir(crate::workspace_root())
+            .exec()
+            .unwrap();
+        let pkgs: HashMap<&PackageId, &Package> = md.packages.iter().map(|p| (&p.id, p)).collect();
+        let edges = edges_of(&md);
+        let introspect = md
+            .workspace_packages()
+            .into_iter()
+            .find(|p| p.name.as_str() == INTROSPECT)
+            .unwrap();
+        let session_stack = |n: &str| {
+            matches!(
+                n,
+                "hacivat-session" | "hacivat-net" | "hacivat-secrets" | "hacivat-settings"
+            ) || n == "russh"
+                || n == "keyring"
+                || is_driver(n)
+        };
+        let walk = |features: &[&str]| {
+            feature_walk(
+                &introspect.id,
+                &edges,
+                &pkgs,
+                WalkStart {
+                    features: features.iter().map(|f| (*f).to_string()).collect(),
+                    root_kinds: &[DependencyKind::Normal],
+                    blocked: None,
+                },
+                |_| false,
+                session_stack,
+            )
+            .bad_path
+        };
+        assert_eq!(walk(&[]), None);
+        assert!(walk(&["default"]).is_some());
     }
 }

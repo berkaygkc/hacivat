@@ -206,3 +206,30 @@ message ID.
 (m5): only `zstd` is pinned exactly; `zstd-sys`, which carries the libzstd version the committed
 snapshot bytes depend on, is pinned by `Cargo.lock` (every build is `--locked`, and `cargo
 update` is never run plain); `minicat check` re-encodes, so a different libzstd is noticed.
+
+**Fix round 2 (CI 44514966689; re-review of fix round 1).**
+
+- *Fuzz packages.* The M4 targets live in their own cargo-fuzz package `fuzz/meta` (own
+  workspace, own `Cargo.lock` generated from the root lock, the root `[patch]` copies), so
+  `fuzz/` keeps the SQL targets and their graph. The SQL package's lock differs from its pre-M4
+  state only by `sql-ident`'s planned `icu_casemap` closure (R-M4-41). Under the pinned nightly
+  and the sanitizer flags, `russh` (through `hacivat-session`) failed to compile (E0391); neither
+  package compiles it now. cargo-fuzz picks `fuzz/` from the repository root, so every command
+  for the M4 package passes `--fuzz-dir fuzz/meta`.
+- *`hacivat-introspect` feature `session` (default).* It gates the optional dependencies
+  `hacivat-session`, `hacivat-secrets` and `hacivat-settings` and the modules `assemble`,
+  `ddl_effects`, `engine`, `fragment`, `freshness`, `hub`, `minicat`, `mysql`, `pg`,
+  `refresh_coord`, `sqlite`, `testing` and `ticket`. Always built (the pure grammars): `pack`,
+  `scope`, `filter`, `glob`. **For Task 1c Part B and Task 4:** the part of `pack` that builds a
+  `MetaQuery` (the renderer) goes in a `#[cfg(feature = "session")]` submodule of `pack`; the
+  parser, sections, macros and lint stay session-free; the `Introspector` trait and anything else
+  that names a session type go in a gated module. `fuzz/meta` takes the crate with
+  `default-features = false`; CI checks `cargo check -p hacivat-introspect --no-default-features`
+  in `build-test`, and an xtask test proves that graph reaches no session, network, SSH,
+  secrets, settings or keyring crate.
+- *I-R1.* `DdlIsPure` refuses a `hacivat-ddl` whose own `default` closure contains `apply`
+  (`apply` is left out of the walk, so `default` must not turn it on).
+- *I-R2.* `MetaQueryOnlyFromPacks` also refuses any `impl` header naming `MetaQuery` (a local
+  trait whose methods call `Self::new`), `MetaQuery` inside a macro invocation's brackets
+  (`mk!(MetaQuery)` with `$t::new` in the macro), and the raw identifier `MetaQuery::r#new`
+  (the tokenizer reads `r#ident` as `ident`, and `br#"…"#`/`cr"…"` as strings).
