@@ -688,6 +688,25 @@ fn issue_text(cx: &App, issue: &ValidationIssue) -> SharedString {
     tr(cx, msg, NoArgs)
 }
 
+// ## m4-t20-scope (fix round 1, M-3; named lines): one place maps a save problem to its
+// sentence (the form's top notice, and tests).
+/// The sentence of save problem `problem`.
+pub(crate) fn problem_text(problem: SaveProblem, cx: &App) -> SharedString {
+    let msg = match problem {
+        SaveProblem::StoreReadOnly => ids::hv::CONN_DLG_STORE_READ_ONLY,
+        SaveProblem::Failed => ids::hv::CONN_DLG_SAVE_FAILED,
+        SaveProblem::Gone => ids::hv::CONN_DLG_SAVE_GONE,
+        SaveProblem::SecretNotStored => ids::hv::CONN_DLG_SAVE_SECRET,
+        // ## m2b-t21-prompts (fix round 1, I1)
+        SaveProblem::Unchanged => ids::hv::CONN_SAVE_UNCHANGED,
+        // ## m4-t20-scope (fix round 1, M-3)
+        SaveProblem::CacheNotDeleted => ids::hv::SCOPE_SAVE_CACHE_FAILED,
+        SaveProblem::DataUnreadable => ids::hv::SCOPE_SAVE_DATA_UNREADABLE,
+        SaveProblem::DataNotWritten => ids::hv::SCOPE_SAVE_DATA_FAILED,
+    };
+    tr(cx, msg, NoArgs)
+}
+
 // ---- rendering ------------------------------------------------------------------------------
 
 /// How a body element is spaced from the one before it (the mock's sibling margins).
@@ -1138,17 +1157,9 @@ impl ConnectionDialog {
         let mut rows = Rows { items: Vec::new() };
 
         if let Some(problem) = self.problem {
-            let msg = match problem {
-                SaveProblem::StoreReadOnly => ids::hv::CONN_DLG_STORE_READ_ONLY,
-                SaveProblem::Failed => ids::hv::CONN_DLG_SAVE_FAILED,
-                SaveProblem::Gone => ids::hv::CONN_DLG_SAVE_GONE,
-                SaveProblem::SecretNotStored => ids::hv::CONN_DLG_SAVE_SECRET,
-                // ## m2b-t21-prompts (fix round 1, I1)
-                SaveProblem::Unchanged => ids::hv::CONN_SAVE_UNCHANGED,
-            };
             rows.push(
                 Kind::Row,
-                InlineNotice::new(NoticeIcon::Info).line(tr(cx, msg, NoArgs)),
+                InlineNotice::new(NoticeIcon::Info).line(problem_text(problem, cx)),
             );
         }
         // ## m2b-t01-interfaces: the SSH section draws its own issues (Task 20, Q9).

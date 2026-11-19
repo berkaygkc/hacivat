@@ -3579,3 +3579,23 @@ hv-explorer-filter-not-loaded = Yalnız yüklenmiş adlarda arar. { $n } bağlan
 
 # Review: PO
 hv-scope-summary-pattern = Desen { $pattern }
+# Review: PO
+hv-scope-tree-mixed = kısmen seçili
+# Review: PO
+hv-scope-rewrite-title = Desen işaretli adlardan yeniden yazılsın mı?
+# Review: PO
+hv-scope-rewrite-body = Listede gösterilemeyen kısımları (bir düzenli ifade, bir dışlama, listede olmayan bir ad) kaldırılır.
+# Review: PO
+hv-scope-rewrite-keep = Deseni koru
+# Review: PO
+hv-scope-rewrite-apply = Yeniden yaz
+# Review: PO
+hv-scope-stored-unreadable = Kaydedilen şema kapsamı okunamadı. Gösterilen desen varsayılandır; dosya okunabilene kadar kaydedilemez.
+# Review: PO
+hv-scope-save-cache-failed = Bu bağlantının önbellekteki üst verisi silinemedi; hiçbir şey kaydedilmedi.
+# Review: PO
+hv-scope-save-data-unreadable = Bu bağlantının gezgin ayarları dosyası okunamıyor; hiçbir şey kaydedilmedi.
+# Review: PO
+hv-scope-save-data-failed = Şema kapsamı kaydedilemedi; hiçbir şey kaydedilmedi.
+# Review: PO
+hv-explorer-level-not-saved = Okuma düzeyi kaydedilemedi.

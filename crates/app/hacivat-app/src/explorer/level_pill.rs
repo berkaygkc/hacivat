@@ -32,6 +32,7 @@ use hacivat_meta::{Level, Name, NamespaceSnapshot, NsKey, NsKind, ObjectKey};
 use hacivat_proto::ProfileId;
 use hacivat_ui::menu::MenuItemSpec;
 use hacivat_ui::text::TextFn;
+use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui::tree::{RowPill, TreeKey};
 use hacivat_ui_core::gpui_surface::{App, Pixels, Point, SharedString, Window};
 
@@ -313,5 +314,18 @@ pub fn set_level(level: Option<Level>, cx: &mut App) {
     if target.set == level {
         return;
     }
-    userdata::set_level_override(target.profile, target.key, level, cx).detach();
+    let write = userdata::set_level_override(target.profile, target.key, level, cx);
+    // Fix round 1 (M-9): a level that could not be saved says so (the pill shows the file's
+    // value again).
+    cx.spawn(async move |cx| {
+        if write.await.is_err() {
+            cx.update(|cx| {
+                ToastQueue::push(
+                    cx,
+                    Toast::new(ToastKind::Error, text("hv-explorer-level-not-saved")),
+                );
+            });
+        }
+    })
+    .detach();
 }

@@ -7,7 +7,7 @@
 //! **State.** The section keeps its own state in a [`SchemasSection`] entity per dialog, made
 //! the first time the section draws (or by [`edit_scope`]) and dropped with the dialog, as the
 //! SSH section does. The dialog's draft stays the one source of the profile: "Encrypt cached
-//! metadata" is `draft.profile.catalog_sensitive`. The scope pattern is not a profile field: it
+//! metadata" is `draft.profile.catalog_sensitive_set`. The scope pattern is not a profile field: it
 //! is `ProfileUserData.scope` in the profile's data file, written through
 //! [`crate::explorer::userdata`] when the dialog saves.
 //!
@@ -15,9 +15,11 @@
 //! `hacivat_introspect::scope::parse_scope` on every change; the tree shows what the parsed
 //! pattern selects among the databases and schemas the profile's last catalog lists
 //! (`ScopePattern::select_explicit`, so the server's matching rules, never a second
-//! implementation). A click in the tree writes the pattern again from the checked rows
-//! (`@` for the current database, `*` for a whole database, names quoted where a bare name
-//! would not select exactly that name). What the user types is never rewritten: the tree
+//! implementation). While the list shows the whole pattern, a click in the tree writes it
+//! again from the checked rows (`@` for the current database, `*` for a whole database, names
+//! quoted where a bare name would not select exactly that name). Otherwise a click adds or
+//! removes one clause for its row and keeps every term the list cannot show; a click that
+//! cannot be made that way asks first. What the user types is never rewritten: the tree
 //! follows it. With no catalog (not connected, never read) the tree's place says so and the
 //! pattern alone decides.
 //!
@@ -33,15 +35,23 @@
 //! all", further changes do not ask again. Keep restores the pattern as it was. While the
 //! question is open the dialog does not save.
 //!
-//! **Encrypt cached metadata** (R-M4-15). A new profile follows its environment: on for
-//! production, off otherwise, until the box is clicked ([`follow_environment`]; also applied
-//! when the environment is chosen at save). On a saved profile, changing the box asks first
-//! in place (it deletes the cache; the safe answer is focused). The cache files are deleted when
-//! the dialog saves, **before** the profile with the new flag is written (an encrypted cache
-//! must be gone before the profile says "plaintext": Task 11 refuses to open it otherwise); if
-//! they cannot be deleted, nothing is saved ([`save_profile`]).
+//! **Encrypt cached metadata** (R-M4-15, ruling R-W3-1). The box shows the profile's effective
+//! sensitivity (`Profile::catalog_sensitive`): as the user set it, else derived from the
+//! environment (on for production). A click writes an explicit `Some(true)` / `Some(false)`; a
+//! new profile nobody clicked for stays derived. On a saved profile a change of the effective
+//! value deletes the cache, so it asks first in place (the safe answer is focused): after a
+//! click on the box, and after an environment change that flips a derived value (Keep pins the
+//! old value explicitly; Save waits for the answer, [`environment_changed`]).
+//!
+//! **Save** ([`save_profile`]) reads the stored profile then. Unless the user chose in this
+//! dialog, the stored choice stands (a profile changed meanwhile is not overwritten). When the
+//! stored and the new effective values differ: 1. the profile's cache files are deleted, 2. the
+//! scope is written to the data file, 3. the profile is saved through `ConnectionsModel`. A
+//! step that fails stops the save there with its own message ([`ScopeSaveError`]), so the flag
+//! never says "encrypted" while plaintext files are on disk, nor "plaintext" while an encrypted
+//! cache is (Task 11 refuses that downgrade).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -55,7 +65,7 @@ use hacivat_meta::name::DialectId;
 use hacivat_meta::persist::CacheStore;
 use hacivat_meta::snapshot::ContainerKey;
 use hacivat_meta::{Name, NsKey, NsKind, ObjFlags};
-use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
+use hacivat_proto::{DbmsKind, ProfileId};
 use hacivat_session::profile::{Profile, ProfileDraft};
 use hacivat_ui::button::Button;
 use hacivat_ui::checkbox::Checkbox;
@@ -153,6 +163,9 @@ struct DbSel {
     schemas: Vec<bool>,
 }
 
+/// A cached selection: (pattern text, list version, database) and what it selects.
+type SelCache = (String, u64, Option<String>, Selection);
+
 /// A row of the tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Row {
@@ -178,6 +191,8 @@ struct ScopeFocus {
     encrypt: FocusHandle,
     encrypt_keep: FocusHandle,
     encrypt_apply: FocusHandle,
+    rewrite_keep: FocusHandle,
+    rewrite_apply: FocusHandle,
 }
 
 /// What a new section starts from: the dialog's draft as it was opened.
@@ -214,16 +229,99 @@ pub struct SchemasSection {
     /// The pattern text no question is pending for.
     confirmed_text: String,
     /// The encryption question, with the value it would set.
-    encrypt_ask: Option<bool>,
+    encrypt_ask: Option<EncryptAsk>,
+    // ## fix round 1
+    /// The rewrite question (I-3), with the pattern "Write it again" applies.
+    rewrite: Option<String>,
+    /// `connections.toml` cannot be written: the section is read-only (M-5).
+    read_only: bool,
+    /// The saved scope could not be read (M-4).
+    stored_unreadable: bool,
+    /// Moves when `list` changes (the selection cache's key, M-6).
+    list_version: u64,
+    /// What the last pattern that parsed selects in the list, for (pattern, list, database).
+    sel_cache: RefCell<Option<SelCache>>,
     focus: ScopeFocus,
     _subscriptions: Vec<Subscription>,
 }
 
-/// One dialog's section, and whether its "Encrypt cached metadata" box was clicked (read while
-/// the dialog itself is being updated, so it is not inside the entity).
+/// One dialog's section, and whether its "Encrypt cached metadata" was chosen in this dialog
+/// (read while the dialog itself is being updated, so it is not inside the entity).
 struct SectionRef {
     state: Entity<SchemasSection>,
-    sensitive_touched: Rc<Cell<bool>>,
+    sensitive_chosen: Rc<Cell<bool>>,
+}
+
+/// The encryption question in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptAsk {
+    /// The box was clicked: Apply sets this value.
+    Toggle(bool),
+    /// The environment changed a derived value to this one: Keep pins the old one.
+    Environment(bool),
+}
+
+impl EncryptAsk {
+    /// The value the change leads to.
+    pub fn to(self) -> bool {
+        match self {
+            EncryptAsk::Toggle(v) | EncryptAsk::Environment(v) => v,
+        }
+    }
+}
+
+/// Why the section's part of a Save stopped it (nothing was saved).
+#[derive(Debug)]
+pub enum ScopeSaveError {
+    /// The profile's cache files could not be deleted.
+    CacheNotDeleted,
+    /// The profile's data file cannot be read, so the scope cannot be written.
+    DataUnreadable,
+    /// The scope could not be written.
+    DataNotWritten,
+    /// `ConnectionsModel::save` failed.
+    Profile(SaveError),
+}
+
+// ## m4-t20-scope (fix round 1, I-4): a deterministic fault per Save step, for the tests.
+/// A Save step made to fail (feature `test-support`).
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveFault {
+    /// Before any file is deleted.
+    CacheDelete,
+    /// After the cache files were deleted.
+    ScopeWrite,
+    /// After the scope was written.
+    ProfileSave,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+struct Faults(Option<SaveFault>);
+
+#[cfg(feature = "test-support")]
+impl Global for Faults {}
+
+/// Makes the next Saves fail at `fault` (`None`: none).
+#[cfg(feature = "test-support")]
+pub fn inject_save_fault(cx: &mut App, fault: Option<SaveFault>) {
+    cx.default_global::<Faults>().0 = fault;
+}
+
+#[cfg(feature = "test-support")]
+fn faults(cx: &App) -> [bool; 3] {
+    let f = cx.try_global::<Faults>().and_then(|f| f.0);
+    [
+        f == Some(SaveFault::CacheDelete),
+        f == Some(SaveFault::ScopeWrite),
+        f == Some(SaveFault::ProfileSave),
+    ]
+}
+
+#[cfg(not(feature = "test-support"))]
+fn faults(_: &App) -> [bool; 3] {
+    [false; 3]
 }
 
 /// The Schemas section of each open dialog, by the dialog's entity ID.
@@ -264,35 +362,63 @@ pub(crate) fn contains_focus(window: &Window, cx: &App) -> bool {
     section_state(window, cx).is_some_and(|s| s.read(cx).focus.root.contains_focused(window, cx))
 }
 
-/// Whether the dialog `dialog` must not save now: its pattern does not parse, or the
-/// all-databases question waits for an answer.
+/// Whether the dialog `dialog` must not save now: its pattern does not parse, the
+/// all-databases question waits for an answer, or so does an environment change that would
+/// delete the cache.
 pub(crate) fn blocks_save(dialog: EntityId, cx: &App) -> bool {
     cx.try_global::<Sections>()
         .and_then(|s| s.0.get(&dialog))
         .is_some_and(|r| {
             let s = r.state.read(cx);
-            s.parsed.is_err() || s.cost.is_some()
+            s.parsed.is_err()
+                || s.cost.is_some()
+                || matches!(s.encrypt_ask, Some(EncryptAsk::Environment(_)))
         })
 }
 
-/// "Encrypt cached metadata" for a profile nobody chose it for: on for production (PO-Q2).
-pub fn default_sensitive(p: &Profile) -> bool {
-    p.environment == Some(EnvTag::Production)
-}
-
-/// A new profile's "Encrypt cached metadata" follows its environment until the box is clicked
-/// (R-M4-15). A saved profile keeps its own.
-pub(crate) fn follow_environment(dialog: &mut ConnectionDialog, id: EntityId, cx: &App) {
-    if !dialog.is_new || sensitive_touched(id, cx) {
-        return;
-    }
-    dialog.draft.profile.catalog_sensitive = default_sensitive(&dialog.draft.profile);
-}
-
-fn sensitive_touched(dialog: EntityId, cx: &App) -> bool {
+fn sensitive_chosen(dialog: EntityId, cx: &App) -> bool {
     cx.try_global::<Sections>()
         .and_then(|s| s.0.get(&dialog))
-        .is_some_and(|r| r.sensitive_touched.get())
+        .is_some_and(|r| r.sensitive_chosen.get())
+}
+
+/// After an edit of a saved profile: an environment change that flips its derived
+/// sensitivity (R-W3-1) would delete the cache at Save, so it asks first (and Save waits);
+/// changed back, the question goes. A value set explicitly, here or before, does not follow
+/// the environment.
+pub(crate) fn environment_changed(
+    dialog: &ConnectionDialog,
+    id: EntityId,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if dialog.is_new || dialog.draft.profile.catalog_sensitive_set.is_some() {
+        return;
+    }
+    let Some(stored) = cx
+        .try_global::<ConnectionsModel>()
+        .and_then(|m| m.get(dialog.draft.profile.id))
+    else {
+        return;
+    };
+    let Some(state) = cx
+        .try_global::<Sections>()
+        .and_then(|s| s.0.get(&id))
+        .map(|r| r.state.clone())
+    else {
+        return;
+    };
+    let before = stored.catalog_sensitive();
+    let now = dialog.draft.profile.catalog_sensitive();
+    state.update(cx, |s, cx| {
+        if now != before {
+            s.encrypt_ask = Some(EncryptAsk::Environment(now));
+            window.focus(&s.focus.encrypt_keep, cx);
+        } else if matches!(s.encrypt_ask, Some(EncryptAsk::Environment(_))) {
+            s.encrypt_ask = None;
+        }
+        cx.notify();
+    });
 }
 
 /// Where the profile caches live (`LocalPaths::catalog_db`'s folder).
@@ -304,53 +430,69 @@ fn cache_dir(cx: &App, profile: ProfileId) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Saves `draft` for `dialog` through `ConnectionsModel` (the one writer of profiles), with the
-/// section's parts: a new profile's encryption default, the profile's cache files deleted first
-/// when "Encrypt cached metadata" changed, and the scope pattern written to the profile's data
-/// file. A step that fails stops the save there: a profile whose flag changed is never written
-/// while its old cache is still on disk.
+/// Saves `draft` for the dialog through `ConnectionsModel` (the one writer of profiles), with
+/// the section's parts (see the module docs, "Save"). A step that fails stops the save there.
 pub(crate) fn save_profile(
-    dialog: &ConnectionDialog,
     mut draft: ProfileDraft,
     cx: &mut Context<ConnectionDialog>,
-) -> Task<Result<ProfileId, SaveError>> {
+) -> Task<Result<ProfileId, ScopeSaveError>> {
     let me = cx.entity_id();
-    if dialog.is_new && !sensitive_touched(me, cx) {
-        draft.profile.catalog_sensitive = default_sensitive(&draft.profile);
-    }
     let id = draft.profile.id;
     let Some(model) = cx.try_global::<ConnectionsModel>() else {
-        return Task::ready(Err(SaveError::Io("no connections".to_string())));
+        return Task::ready(Err(ScopeSaveError::Profile(SaveError::Io(
+            "no connections".to_string(),
+        ))));
     };
     let runtime = model.runtime();
-    let stored = model.get(id).map(|p| p.catalog_sensitive);
-    let drop_cache = stored.is_some_and(|s| s != draft.profile.catalog_sensitive);
+    // Read at Save (fix round 1, M-8): unless the user chose in this dialog, the stored choice
+    // stands, even when the profile changed while the dialog was open.
+    let stored = model.get(id);
+    if !sensitive_chosen(me, cx) {
+        draft.profile.catalog_sensitive_set = stored.as_ref().and_then(|s| s.catalog_sensitive_set);
+    }
+    let drop_cache = stored
+        .as_ref()
+        .is_some_and(|s| s.catalog_sensitive() != draft.profile.catalog_sensitive());
     let dir = cache_dir(cx, id);
     let scope = cx
         .try_global::<Sections>()
         .and_then(|s| s.0.get(&me))
         .and_then(|r| r.state.read(cx).scope_to_save());
+    let [fail_delete, fail_scope, fail_save] = faults(cx);
     cx.spawn(async move |_, cx| {
         if drop_cache {
+            let dir = dir.filter(|_| !fail_delete);
             let Some(dir) = dir else {
-                return Err(SaveError::Io("no data folder".to_string()));
+                return Err(ScopeSaveError::CacheNotDeleted);
             };
             let (tx, rx) = oneshot::channel();
             runtime.spawn_blocking(move || {
                 let _ = tx.send(CacheStore::delete_profile_files(&dir, &id));
             });
-            match rx.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => return Err(SaveError::Io(e.to_string())),
-                Err(_) => return Err(SaveError::Io("the cache was not deleted".to_string())),
+            if !matches!(rx.await, Ok(Ok(()))) {
+                return Err(ScopeSaveError::CacheNotDeleted);
             }
+        }
+        if fail_scope {
+            return Err(ScopeSaveError::DataNotWritten);
         }
         if let Some(scope) = scope {
             let write = cx.update(|cx| userdata::set_scope(id, scope, cx));
-            write.await.map_err(|e| SaveError::Io(e.to_string()))?;
+            match write.await {
+                Ok(_) => {}
+                Err(userdata::UserDataError::Unreadable) => {
+                    return Err(ScopeSaveError::DataUnreadable);
+                }
+                Err(_) => return Err(ScopeSaveError::DataNotWritten),
+            }
+        }
+        if fail_save {
+            return Err(ScopeSaveError::Profile(SaveError::Io(
+                "injected".to_string(),
+            )));
         }
         let save = cx.update(|cx| ConnectionsModel::save(cx, draft));
-        save.await
+        save.await.map_err(ScopeSaveError::Profile)
     })
 }
 
@@ -418,7 +560,7 @@ fn state_for(
         id,
         SectionRef {
             state: state.clone(),
-            sensitive_touched: Rc::default(),
+            sensitive_chosen: Rc::default(),
         },
     );
     cx.observe_release(dialog, move |_, cx| {
@@ -497,6 +639,43 @@ fn term(name: &str) -> String {
     } else {
         format!("\"{}\"", name.replace('"', "\"\""))
     }
+}
+
+/// The `|`-separated clauses of a pattern's canonical text, as written: a `|` inside a quoted
+/// name or a regex does not separate (`\` escapes the next character in a regex).
+fn clause_texts(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let (mut quoted, mut depth, mut escaped) = (false, 0usize, false);
+    for c in text.chars() {
+        if escaped {
+            escaped = false;
+        } else if quoted {
+            quoted = c != '"';
+        } else if depth > 0 {
+            match c {
+                '\\' => escaped = true,
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+        } else {
+            match c {
+                '"' => quoted = true,
+                '{' => depth = 1,
+                '|' => {
+                    out.push(std::mem::take(&mut cur));
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        cur.push(c);
+    }
+    if !cur.is_empty() || !out.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 /// What `pattern` selects among `list` (the server's matching rules, through
@@ -759,6 +938,8 @@ impl SchemasSection {
             encrypt: stop(cx),
             encrypt_keep: stop(cx),
             encrypt_apply: stop(cx),
+            rewrite_keep: stop(cx),
+            rewrite_apply: stop(cx),
         };
         let good = default_parsed(seed.engine);
         let mut s = SchemasSection {
@@ -781,6 +962,11 @@ impl SchemasSection {
             cost: None,
             confirmed_text: String::new(),
             encrypt_ask: None,
+            rewrite: None,
+            read_only: false,
+            stored_unreadable: false,
+            list_version: 0,
+            sel_cache: RefCell::new(None),
             focus,
             _subscriptions: subscriptions,
         };
@@ -789,6 +975,7 @@ impl SchemasSection {
             if let Some(data) = userdata::get(seed.profile, cx) {
                 s.stored = Some(data.scope.clone());
             }
+            s.stored_unreadable = userdata::is_unreadable(seed.profile, cx);
         }
         let text = s
             .stored
@@ -858,7 +1045,7 @@ impl SchemasSection {
     }
 
     /// The encryption question, with the value it would set.
-    pub fn encrypt_question(&self) -> Option<bool> {
+    pub fn encrypt_question(&self) -> Option<EncryptAsk> {
         self.encrypt_ask
     }
 
@@ -869,9 +1056,31 @@ impl SchemasSection {
             .is_some_and(|l| self.selection(l).all_databases)
     }
 
+    /// What the last pattern that parsed selects in `list` (the shown list), computed once per
+    /// pattern, list and database (fix round 1, M-6: the section draws every frame).
     fn selection(&self, list: &ScopeList) -> Selection {
+        let text = self.good.to_text();
+        if let Some((t, v, d, sel)) = &*self.sel_cache.borrow()
+            && t == text
+            && *v == self.list_version
+            && *d == self.database
+        {
+            return sel.clone();
+        }
         let ctx = current_ctx(self.engine, self.database.as_deref());
-        evaluate(&self.good, list, &ctx)
+        let sel = evaluate(&self.good, list, &ctx);
+        *self.sel_cache.borrow_mut() = Some((
+            text.to_string(),
+            self.list_version,
+            self.database.clone(),
+            sel.clone(),
+        ));
+        sel
+    }
+
+    /// Whether the saved scope could not be read (the pattern shown is the default).
+    pub fn stored_unreadable(&self) -> bool {
+        self.stored_unreadable
     }
 
     /// The tree's rows as shown (a database's schemas while it is expanded).
@@ -909,8 +1118,20 @@ impl SchemasSection {
     /// default again while it was not changed), another database moves `@`.
     fn sync(&mut self, p: &Profile, cx: &mut Context<Self>) {
         let database = p.database.clone();
+        // Fix round 1 (M-5): a read-only store makes the section read-only too.
+        let read_only = cx
+            .try_global::<ConnectionsModel>()
+            .is_some_and(|m| m.store_read_only());
+        if read_only != self.read_only {
+            self.read_only = read_only;
+            self.pattern.update(cx, |i, cx| {
+                i.set_read_only(read_only);
+                cx.notify();
+            });
+        }
         if p.engine != self.engine {
             self.engine = p.engine;
+            self.list_version += 1;
             self.expanded.clear();
             self.cursor = 0;
             self.list_generation = None;
@@ -940,6 +1161,7 @@ impl SchemasSection {
                     }
                 }
                 self.list = list;
+                self.list_version += 1;
                 self.cursor = 0;
                 cx.notify();
             }
@@ -948,8 +1170,13 @@ impl SchemasSection {
 
     /// The saved scope arrived (an edit): shown unless the pattern was changed meanwhile.
     fn stored_arrived(&mut self, cx: &mut Context<Self>) {
-        if self.stored.is_some() {
+        if self.stored.is_some() || self.is_new {
             return;
+        }
+        let unreadable = userdata::is_unreadable(self.profile, cx);
+        if unreadable != self.stored_unreadable {
+            self.stored_unreadable = unreadable;
+            cx.notify();
         }
         let Some(data) = userdata::get(self.profile, cx) else {
             return;
@@ -1060,7 +1287,16 @@ impl SchemasSection {
     }
 
     /// Clicks the box of tree row `index` (as shown).
+    ///
+    /// Fix round 1 (I-3): when the list shows the whole pattern (writing it again from the
+    /// checked rows gives the same syntax tree), the pattern is written again; otherwise the
+    /// click adds (or removes) one clause for the row, keeping every term the list cannot show
+    /// (a regex, an exclusion, a name not listed). A click that cannot be made that way asks
+    /// before writing the pattern again.
     pub fn toggle_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         let Some(list) = self.list.clone() else {
             return;
         };
@@ -1068,7 +1304,8 @@ impl SchemasSection {
             return;
         };
         self.cursor = index;
-        let mut sel = self.selection(&list);
+        let before = self.selection(&list);
+        let mut sel = before.clone();
         sel.all_databases = false;
         match row {
             Row::Db(i) => {
@@ -1085,21 +1322,179 @@ impl SchemasSection {
                 d.db = d.schemas.iter().any(|b| *b);
             }
         }
-        let text = generate(&sel, &list);
-        self.apply_from_tree(text, window, cx);
+        let rewrite = generate(&sel, &list);
+        if self.list_shows_all(&list, &before) {
+            self.apply_from_tree(rewrite, window, cx);
+            return;
+        }
+        let edited = self
+            .edit_for_row(&list, row, &before)
+            .filter(|t| self.edit_reaches(t, &list, &before, &sel, row));
+        match edited {
+            Some(text) => self.apply_from_tree(text, window, cx),
+            None => self.ask_rewrite(rewrite, window, cx),
+        }
     }
 
     /// Clicks "All databases".
     pub fn toggle_all_databases(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         let Some(list) = self.list.clone() else {
             return;
         };
-        let text = if self.selection(&list).all_databases {
+        let before = self.selection(&list);
+        let rewrite = if before.all_databases {
             default_pattern(self.engine).to_string()
         } else {
             "*:*".to_string()
         };
-        self.apply_from_tree(text, window, cx);
+        if self.list_shows_all(&list, &before) {
+            self.apply_from_tree(rewrite, window, cx);
+            return;
+        }
+        // Keep what the list cannot show: "*:*" is added; reading less asks first.
+        let added = (!before.all_databases)
+            .then(|| self.with_clauses(&["*:*".to_string()], &[]))
+            .flatten()
+            .filter(|t| {
+                parse(t, self.engine).is_ok_and(|p| {
+                    let ctx = current_ctx(self.engine, self.database.as_deref());
+                    evaluate(&p, &list, &ctx).all_databases
+                })
+            });
+        match added {
+            Some(text) => self.apply_from_tree(text, window, cx),
+            None => self.ask_rewrite(rewrite, window, cx),
+        }
+    }
+
+    /// Whether the list shows the whole pattern: writing it again from `sel` (what it selects
+    /// among the listed names) gives the same syntax tree.
+    fn list_shows_all(&self, list: &ScopeList, sel: &Selection) -> bool {
+        parse(&generate(sel, list), self.engine).is_ok_and(|p| p == self.good)
+    }
+
+    /// The pattern with the clauses `add` (texts) and without those equal to `remove`, from the
+    /// last pattern that parsed (`None`: a clause text did not parse).
+    fn with_clauses(&self, add: &[String], remove: &[String]) -> Option<String> {
+        let parsed = |t: &str| {
+            parse(t, self.engine)
+                .ok()
+                .and_then(|p| p.clauses().first().cloned())
+        };
+        let removed: Vec<_> = remove.iter().map(|t| parsed(t)).collect::<Option<_>>()?;
+        let texts = clause_texts(self.good.to_text());
+        if texts.len() != self.good.clauses().len() {
+            return None;
+        }
+        let mut out: Vec<String> = texts
+            .into_iter()
+            .zip(self.good.clauses())
+            .filter(|(_, c)| !removed.contains(c))
+            .map(|(t, _)| t)
+            .collect();
+        for a in add {
+            let c = parsed(a)?;
+            if !self.good.clauses().contains(&c) {
+                out.push(a.clone());
+            }
+        }
+        Some(out.join("|"))
+    }
+
+    /// The smallest change of the pattern for a click on `row` (see [`Self::toggle_row`]).
+    fn edit_for_row(&self, list: &ScopeList, row: Row, before: &Selection) -> Option<String> {
+        let db_term = |i: usize| {
+            let db = &list.databases[i];
+            if db.current {
+                "@".to_string()
+            } else {
+                term(&db.name)
+            }
+        };
+        let (clause, on) = match row {
+            Row::Db(i) => (
+                format!("{}:*", db_term(i)),
+                db_state(&before.dbs[i]) != Tri::Checked,
+            ),
+            Row::Schema(i, j) => {
+                let s = term(&list.databases[i].schemas[j]);
+                let clause = if list.two_level {
+                    format!("{}:{s}", db_term(i))
+                } else {
+                    s
+                };
+                (clause, !before.dbs[i].schemas[j])
+            }
+        };
+        let negative = format!("!{clause}");
+        let excluded = parse(&negative, self.engine)
+            .ok()
+            .and_then(|p| p.clauses().first().cloned())
+            .is_some_and(|c| self.good.clauses().contains(&c));
+        if on && excluded {
+            // Undo this row's own exclusion.
+            self.with_clauses(&[], &[negative])
+        } else if on {
+            self.with_clauses(&[clause], &[])
+        } else {
+            self.with_clauses(&[negative], &[])
+        }
+    }
+
+    /// Whether `text` makes the change `want` asks of `row`, and only it.
+    fn edit_reaches(
+        &self,
+        text: &str,
+        list: &ScopeList,
+        before: &Selection,
+        want: &Selection,
+        row: Row,
+    ) -> bool {
+        let Ok(p) = parse(text, self.engine) else {
+            return false;
+        };
+        let ctx = current_ctx(self.engine, self.database.as_deref());
+        let after = evaluate(&p, list, &ctx);
+        after.dbs.iter().enumerate().all(|(i, a)| {
+            let toggled = match row {
+                Row::Db(d) | Row::Schema(d, _) => d == i,
+            };
+            if !toggled {
+                return *a == before.dbs[i];
+            }
+            let all_ok = match row {
+                Row::Db(_) => a.all == want.dbs[i].all,
+                Row::Schema(..) => true,
+            };
+            a.schemas == want.dbs[i].schemas && all_ok
+        })
+    }
+
+    /// Asks before writing the pattern again from the checked names (I-3).
+    fn ask_rewrite(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.rewrite = Some(text);
+        window.focus(&self.focus.rewrite_keep, cx);
+        cx.notify();
+    }
+
+    /// The answer to the rewrite question.
+    pub fn answer_rewrite(&mut self, apply: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.rewrite.take() else {
+            return;
+        };
+        window.focus(&self.focus.tree, cx);
+        if apply {
+            self.apply_from_tree(text, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Whether the rewrite question is open.
+    pub fn rewrite_question_open(&self) -> bool {
+        self.rewrite.is_some()
     }
 
     /// Expands (`true`) or collapses a database row.
@@ -1148,54 +1543,75 @@ impl SchemasSection {
         cx.notify();
     }
 
-    /// A click on "Encrypt cached metadata": a new profile changes at once (it has no cache);
-    /// a saved profile asks first when the change would delete its cache.
+    /// A click on "Encrypt cached metadata" (the box shows the effective value; `on` is the new
+    /// one): a new profile changes at once (it has no cache), and so does a saved one whose
+    /// cache already matches `on`; any other saved profile asks first.
     pub fn toggle_encrypt(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = self.dialog.upgrade() else {
             return;
         };
         let stored = cx
             .try_global::<ConnectionsModel>()
-            .and_then(|m| m.get(self.profile))
-            .map(|p| p.catalog_sensitive);
-        if self.is_new || stored.is_none_or(|s| s == on) {
+            .and_then(|m| m.get(self.profile));
+        if self.is_new || stored.as_ref().is_none_or(|s| s.catalog_sensitive() == on) {
+            // Back to what the saved profile has: its own setting again (a derived value
+            // stays derived) when that gives `on` with the draft's environment.
+            let mut back = dialog.read(cx).draft.profile.clone();
+            back.catalog_sensitive_set = stored.as_ref().and_then(|s| s.catalog_sensitive_set);
+            let set = if !self.is_new && back.catalog_sensitive() == on {
+                back.catalog_sensitive_set
+            } else {
+                Some(on)
+            };
             self.encrypt_ask = None;
-            self.set_sensitive(&dialog, on, window, cx);
+            self.set_sensitive(&dialog, set, cx);
         } else {
-            self.encrypt_ask = Some(on);
+            self.encrypt_ask = Some(EncryptAsk::Toggle(on));
             window.focus(&self.focus.encrypt_keep, cx);
         }
         cx.notify();
     }
 
-    /// The answer to the encryption question.
+    /// The answer to the encryption question: after a click, Apply sets the value; after an
+    /// environment change, Keep pins the value the cache has, Apply keeps it derived.
     pub fn answer_encrypt(&mut self, apply: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(on) = self.encrypt_ask.take() else {
+        let Some(ask) = self.encrypt_ask.take() else {
             return;
         };
-        if apply && let Some(dialog) = self.dialog.upgrade() {
-            self.set_sensitive(&dialog, on, window, cx);
+        if let Some(dialog) = self.dialog.upgrade() {
+            match (ask, apply) {
+                (EncryptAsk::Toggle(on), true) => self.set_sensitive(&dialog, Some(on), cx),
+                (EncryptAsk::Toggle(_), false) => {}
+                (EncryptAsk::Environment(_), true) => {
+                    let keep = dialog.read(cx).draft.profile.catalog_sensitive_set;
+                    self.set_sensitive(&dialog, keep, cx);
+                }
+                (EncryptAsk::Environment(to), false) => {
+                    self.set_sensitive(&dialog, Some(!to), cx);
+                }
+            }
         }
         window.focus(&self.focus.encrypt, cx);
         cx.notify();
     }
 
+    /// Writes the user's choice into the draft (the dialog's edit hook is not run here: it
+    /// would update this section while it is being updated).
     fn set_sensitive(
         &mut self,
         dialog: &Entity<ConnectionDialog>,
-        on: bool,
-        window: &mut Window,
+        set: Option<bool>,
         cx: &mut Context<Self>,
     ) {
         if let Some(r) = cx
             .try_global::<Sections>()
             .and_then(|s| s.0.get(&dialog.entity_id()))
         {
-            r.sensitive_touched.set(true);
+            r.sensitive_chosen.set(true);
         }
         dialog.update(cx, |d, cx| {
-            d.draft.profile.catalog_sensitive = on;
-            d.after_edit(window, cx);
+            d.draft.profile.catalog_sensitive_set = set;
+            cx.notify();
         });
     }
 
@@ -1474,6 +1890,49 @@ fn render_content(
         );
     }
 
+    // Fix round 1 (I-3): a click the pattern cannot take without losing terms asks first.
+    if s.rewrite.is_some() {
+        let (keep, apply) = (weak.clone(), weak.clone());
+        col = col.child(
+            InlineNotice::new(NoticeIcon::Info)
+                .line(t_dynamic(cx, "hv-scope-rewrite-title", Vec::new()))
+                .secondary(t_dynamic(cx, "hv-scope-rewrite-body", Vec::new()))
+                .action(
+                    Button::new(
+                        "scope-rewrite-keep",
+                        t_dynamic(cx, "hv-scope-rewrite-keep", Vec::new()),
+                    )
+                    .focus_handle(s.focus.rewrite_keep.clone())
+                    .on_raised(true)
+                    .on_click(move |_, window, cx| {
+                        let _ = keep.update(cx, |s, cx| s.answer_rewrite(false, window, cx));
+                    }),
+                )
+                .action(
+                    Button::new(
+                        "scope-rewrite-apply",
+                        t_dynamic(cx, "hv-scope-rewrite-apply", Vec::new()),
+                    )
+                    .focus_handle(s.focus.rewrite_apply.clone())
+                    .on_raised(true)
+                    .on_click(move |_, window, cx| {
+                        let _ = apply.update(cx, |s, cx| s.answer_rewrite(true, window, cx));
+                    }),
+                ),
+        );
+    }
+
+    // Fix round 1 (M-4): the saved scope could not be read.
+    if s.stored_unreadable {
+        col = col.child(line(
+            theme,
+            Some(IconName::Info),
+            t_dynamic(cx, "hv-scope-stored-unreadable", Vec::new()),
+            c.text.to_hsla(),
+            "scope-stored-unreadable",
+        ));
+    }
+
     // The pattern: the same scope as text.
     let err = s.error().cloned();
     let text = s.pattern_text(cx);
@@ -1553,7 +2012,7 @@ fn render_content(
         div().mt(px(t.spacing.sm)).child(hint_row(
             theme,
             Checkbox::new("scope-encrypt", tr(cx, ids::hv::SCOPE_ENCRYPT, NoArgs))
-                .checked(draft.profile.catalog_sensitive)
+                .checked(draft.profile.catalog_sensitive())
                 .disabled(read_only)
                 .focus_handle(s.focus.encrypt.clone())
                 .on_toggle(move |on, window, cx| {
@@ -1568,7 +2027,8 @@ fn render_content(
         c.text_2.to_hsla(),
         "scope-encrypt-sub",
     ));
-    if let Some(on) = s.encrypt_ask {
+    if let Some(ask) = s.encrypt_ask {
+        let on = ask.to();
         let name = draft.profile.name.clone();
         let (keep, apply) = (weak.clone(), weak);
         let (question, verb) = if on {
@@ -1788,7 +2248,7 @@ fn render_tree(
                 c.text_2.to_hsla(),
             )));
         }
-        let node = A11yNode::new(
+        let mut node = A11yNode::new(
             ("scope-row-node", ix),
             Role::CheckBox,
             SharedString::from(name),
@@ -1796,6 +2256,10 @@ fn render_tree(
             r,
         )
         .toggled(state_of == Tri::Checked);
+        // Fix round 1 (M-2): the a11y layer has no mixed state; the word says it.
+        if state_of == Tri::Mixed {
+            node = node.description(t_dynamic(cx, "hv-scope-tree-mixed", Vec::new()));
+        }
         body = body.child(node);
     }
     let key = state.downgrade();
@@ -1865,6 +2329,16 @@ mod tests {
             "@:public,\"Sales\""
         );
         assert_eq!(generate(&sel_of("*:*", &list), &list), "*:*");
+    }
+
+    #[test]
+    fn clauses_split_outside_quotes_and_regexes() {
+        assert_eq!(
+            clause_texts(r#"@:*|!@:{a|b\}}|"x|y":z|@:"q""|""#),
+            vec![r"@:*", r"!@:{a|b\}}", r#""x|y":z"#, r#"@:"q""|""#]
+        );
+        assert!(clause_texts("").is_empty());
+        assert_eq!(clause_texts("@:*"), vec!["@:*"]);
     }
 
     #[test]

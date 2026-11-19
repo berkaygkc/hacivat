@@ -64,7 +64,8 @@ type Change = Arc<dyn Fn(&mut ProfileUserData) + Send + Sync>;
 
 /// One request to the writer.
 struct Request {
-    profile: ProfileId,
+    /// `None`: a barrier.
+    profile: Option<ProfileId>,
     /// `None`: read only.
     change: Option<Change>,
     reply: oneshot::Sender<Result<Arc<ProfileUserData>, UserDataError>>,
@@ -87,6 +88,8 @@ pub struct UserData {
     /// after a newer local change is ignored).
     seq: HashMap<ProfileId, u64>,
     writer: Option<mpsc::UnboundedSender<Request>>,
+    /// Reads and writes sent ([`requests`]).
+    requests: u64,
 }
 
 impl Global for UserData {}
@@ -133,7 +136,23 @@ pub fn ensure(profile: ProfileId, cx: &mut App) {
         .entries
         .insert(profile, Entry::Loading);
     let seq = bump(profile, cx);
-    land(profile, seq, rx, cx).detach();
+    land(profile, seq, false, rx, cx).detach();
+}
+
+/// How many reads and writes were sent to the writer (tests: no loop).
+pub fn requests(cx: &App) -> u64 {
+    cx.try_global::<UserData>().map_or(0, |g| g.requests)
+}
+
+/// Resolves once every request sent before it has been answered (the writer runs them in
+/// order): tests wait on it instead of a fixed time.
+pub fn barrier(cx: &mut App) -> Task<()> {
+    let Some(rx) = send_request(None, None, cx) else {
+        return Task::ready(());
+    };
+    cx.spawn(async move |_| {
+        let _ = rx.await;
+    })
 }
 
 /// Forgets every value read, so the next [`ensure`] reads the files again (tests: a restart).
@@ -170,7 +189,7 @@ pub fn update(
         g.generation += 1;
     }
     let seq = bump(profile, cx);
-    land(profile, seq, rx, cx)
+    land(profile, seq, true, rx, cx)
 }
 
 /// Sets (`Some`) or clears (`None`, "Automatic") the explicit level of `key` in `profile`'s
@@ -214,10 +233,12 @@ fn bump(profile: ProfileId, cx: &mut App) -> u64 {
     *seq
 }
 
-/// Applies the writer's answer to request `seq` of `profile` when no newer request was made.
+/// Applies the writer's answer to request `seq` of `profile` (a `write`, or a read) when no
+/// newer request was made.
 fn land(
     profile: ProfileId,
     seq: u64,
+    write: bool,
     rx: oneshot::Receiver<Result<Arc<ProfileUserData>, UserDataError>>,
     cx: &mut App,
 ) -> Task<Result<Arc<ProfileUserData>, UserDataError>> {
@@ -229,19 +250,21 @@ fn land(
             if g.seq.get(&profile).copied() != Some(seq) {
                 return;
             }
+            // Fix round 1 (I-1): a failed read is final (the file is unreadable: never read
+            // again in a loop); a failed write leaves the file as it was, so it is read again
+            // once, and that read is final in turn.
             let read_again = match applied {
                 Ok(d) => {
                     g.entries.insert(profile, Entry::Loaded(d));
                     false
                 }
-                Err(UserDataError::Unreadable) => {
-                    g.entries.insert(profile, Entry::Unreadable);
-                    false
-                }
-                // A failed write leaves the file as it was: read it again.
-                Err(_) => {
+                Err(UserDataError::Io(_) | UserDataError::Unavailable) if write => {
                     g.entries.remove(&profile);
                     true
+                }
+                Err(_) => {
+                    g.entries.insert(profile, Entry::Unreadable);
+                    false
                 }
             };
             g.generation += 1;
@@ -259,9 +282,21 @@ fn send(
     change: Option<Change>,
     cx: &mut App,
 ) -> Option<oneshot::Receiver<Result<Arc<ProfileUserData>, UserDataError>>> {
+    send_request(Some(profile), change, cx)
+}
+
+/// [`send`]; `profile` `None` is a barrier (nothing is read or written).
+fn send_request(
+    profile: Option<ProfileId>,
+    change: Option<Change>,
+    cx: &mut App,
+) -> Option<oneshot::Receiver<Result<Arc<ProfileUserData>, UserDataError>>> {
     let paths = cx.try_global::<AppState>()?.paths.clone();
     let runtime = cx.try_global::<ConnectionsModel>()?.runtime();
     let g = cx.default_global::<UserData>();
+    if profile.is_some() {
+        g.requests += 1;
+    }
     let writer = match &g.writer {
         Some(w) if !w.is_closed() => w.clone(),
         _ => {
@@ -295,6 +330,11 @@ async fn write_loop(
             change,
             reply,
         } = req;
+        let Some(profile) = profile else {
+            // A barrier: every request before it has been answered.
+            let _ = reply.send(Ok(Arc::default()));
+            continue;
+        };
         let done = runtime
             .spawn_blocking(move || read_modify_write(&paths, profile, change.as_deref()))
             .await

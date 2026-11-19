@@ -10,19 +10,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Entity, Focusable as _, TestAppContext, VisualTestContext};
-use hacivat_app::connections::ConnectionsModel;
-use hacivat_app::connections::dialog::schemas::{self, SchemasSection, Tri};
+use hacivat_app::connections::dialog::schemas::{self, EncryptAsk, SaveFault, SchemasSection, Tri};
 use hacivat_app::connections::dialog::{
     ConnectionDialog, DialogMode, open_connection_dialog, open_dialog,
 };
 use hacivat_app::connections::explorer::{self, ShownRow};
+use hacivat_app::connections::{ConnectionsModel, import};
 use hacivat_app::explorer::{adapter, level_pill, userdata};
 use hacivat_driver::fake::FakeDriver;
-use hacivat_meta::persist::CacheStore;
 use hacivat_meta::userdata::ProfileUserData;
 use hacivat_meta::{CatalogSnapshot, Level, LoadState, NsKey, ObjectKind};
 use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
-use hacivat_session::profile::Profile;
+use hacivat_session::profile::{Profile, ProfileDraft};
 use hacivat_settings::profile_data::ProfileDataDoc;
 use hacivat_ui::tree::{TreeKey, TreeRowData};
 use support::catalogs::*;
@@ -172,9 +171,45 @@ fn type_pattern(vcx: &mut VisualTestContext, text: &str) {
     vcx.run_until_parked();
 }
 
+/// The draft's effective "Encrypt cached metadata" (what the box shows).
 fn draft_sensitive(vcx: &VisualTestContext) -> bool {
     let d = dialog(vcx).expect("a dialog");
-    vcx.cx.read(|cx| d.read(cx).profile().catalog_sensitive)
+    vcx.cx.read(|cx| d.read(cx).profile().catalog_sensitive())
+}
+
+/// The draft's choice (`None`: derived from the environment).
+fn draft_choice(vcx: &VisualTestContext) -> Option<bool> {
+    let d = dialog(vcx).expect("a dialog");
+    vcx.cx.read(|cx| d.read(cx).profile().catalog_sensitive_set)
+}
+
+/// Waits until every queued write has landed: the profile data writer (a barrier through its
+/// ordered queue) and the profile list's writer (fix round 1, M-7: no fixed sleep before a
+/// "nothing was written" check).
+fn quiet(vcx: &VisualTestContext) {
+    let barrier = vcx.cx.update(userdata::barrier);
+    wait_task(vcx, barrier);
+    let drained = vcx.cx.read(|cx| {
+        cx.global::<ConnectionsModel>()
+            .drain_writes(Duration::from_secs(10))
+    });
+    assert!(drained, "the profile writer drains");
+    vcx.run_until_parked();
+}
+
+/// The save problem the form shows (`None`: none).
+fn problem(vcx: &VisualTestContext) -> Option<String> {
+    let d = dialog(vcx).expect("a dialog");
+    vcx.cx
+        .read(|cx| d.read(cx).save_problem_text(cx))
+        .map(|t| t.to_string())
+}
+
+/// Waits until a Save that started has finished (it failed when the dialog is still open).
+fn wait_saved(vcx: &VisualTestContext) {
+    wait_until(vcx, "the save to finish", |vcx| {
+        dialog(vcx).is_none_or(|d| vcx.cx.read(|cx| !d.read(cx).is_saving()))
+    });
 }
 
 fn stored(vcx: &VisualTestContext, id: ProfileId) -> Arc<Profile> {
@@ -187,10 +222,10 @@ fn dialog_open(vcx: &VisualTestContext) -> bool {
     layer_ids(vcx).contains(&"connection-dialog")
 }
 
-/// Runs Save and lets the core work it starts finish.
+/// Runs Save and waits until it finished (or was refused).
 fn save(vcx: &VisualTestContext) {
     run(vcx, "connection_dialog.save");
-    settle(vcx, Duration::from_millis(20));
+    wait_saved(vcx);
 }
 
 fn focus_field(vcx: &mut VisualTestContext, name: &str) {
@@ -272,6 +307,42 @@ fn pattern_and_tree_round_trip(cx: &mut TestAppContext) {
     with_section(vcx, |s, window, cx| s.toggle_row(0, window, cx));
     assert_eq!(pattern(vcx), "@:*");
     assert_eq!(rows(vcx), all);
+}
+
+/// Fix round 1 (I-3): a click in the list never drops what it cannot show (a regex, an
+/// exclusion, a name not listed): it adds or removes one clause for its row, and asks before
+/// writing the pattern again when that cannot work.
+#[gpui::test]
+fn a_tree_click_keeps_terms_the_list_cannot_show(cx: &mut TestAppContext) {
+    let (vcx, id) = shop_shell(cx, "en");
+    open(vcx, DialogMode::Edit(id));
+    let rewrite = |vcx: &VisualTestContext| read_section(vcx, |s, _| s.rewrite_question_open());
+    // An exclusion: unchecking `public` adds one, checking it again removes it.
+    type_pattern(vcx, "@:*|!@:{tmp_.*}");
+    assert_eq!(rows(vcx)[2], ("app.public".to_string(), Tri::Checked));
+    with_section(vcx, |s, window, cx| s.toggle_row(2, window, cx));
+    assert_eq!(pattern(vcx), "@:*|!@:{tmp_.*}|!@:public");
+    assert_eq!(rows(vcx)[2], ("app.public".to_string(), Tri::Unchecked));
+    with_section(vcx, |s, window, cx| s.toggle_row(2, window, cx));
+    assert_eq!(pattern(vcx), "@:*|!@:{tmp_.*}");
+    // A name not listed stays when a listed one is checked.
+    type_pattern(vcx, "@:public,reports");
+    with_section(vcx, |s, window, cx| s.toggle_row(1, window, cx));
+    assert_eq!(pattern(vcx), "@:public,reports|@:analytics");
+    assert_eq!(rows(vcx)[1], ("app.analytics".to_string(), Tri::Checked));
+    // An exclusion that a clause cannot undo (a regex removes `public`): asked first.
+    type_pattern(vcx, "@:*|!@:{p.*}");
+    assert_eq!(rows(vcx)[2], ("app.public".to_string(), Tri::Unchecked));
+    with_section(vcx, |s, window, cx| s.toggle_row(2, window, cx));
+    assert!(rewrite(vcx));
+    assert_eq!(pattern(vcx), "@:*|!@:{p.*}", "nothing changed yet");
+    with_section(vcx, |s, window, cx| s.answer_rewrite(false, window, cx));
+    assert!(!rewrite(vcx));
+    assert_eq!(pattern(vcx), "@:*|!@:{p.*}");
+    with_section(vcx, |s, window, cx| s.toggle_row(2, window, cx));
+    with_section(vcx, |s, window, cx| s.answer_rewrite(true, window, cx));
+    assert_eq!(pattern(vcx), "@:*");
+    assert_eq!(rows(vcx)[2], ("app.public".to_string(), Tri::Checked));
 }
 
 #[gpui::test]
@@ -356,44 +427,51 @@ fn pg_all_databases_prompts_once(cx: &mut TestAppContext) {
 
 // ---- tests: Encrypt cached metadata -------------------------------------------------------------
 
-#[gpui::test]
-fn sensitive_defaults_on_for_production_profiles(cx: &mut TestAppContext) {
-    let vcx = shell(cx, "en");
-    // A new profile follows its environment: on for production only (PO-Q2, R-M4-15).
+/// Opens the New dialog and waits for its Schemas section.
+fn open_new(vcx: &VisualTestContext) {
     in_window(vcx, |window, cx| {
         open_connection_dialog(DialogMode::New, window, cx)
     });
-    settle(vcx, Duration::from_millis(20));
+    wait_until(vcx, "the Schemas section to be drawn", |vcx| {
+        in_window(vcx, |window, cx| schemas::section_state(window, cx)).is_some()
+    });
+}
+
+/// Fills a new profile's name and host.
+fn fill_new(vcx: &mut VisualTestContext, name: &str, host: &str) {
+    focus_field(vcx, "name");
+    vcx.simulate_input(name);
+    focus_field(vcx, "host");
+    vcx.simulate_input(host);
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn sensitive_defaults_on_for_production_profiles(cx: &mut TestAppContext) {
+    let vcx = shell(cx, "en");
+    // A new profile derives it from its environment: on for production only (PO-Q2, R-W3-1).
+    open_new(vcx);
     assert!(!draft_sensitive(vcx));
     click(vcx, "segmented-conn-env-4");
     assert!(draft_sensitive(vcx), "production turns it on");
     click(vcx, "segmented-conn-env-1");
     assert!(!draft_sensitive(vcx), "dev turns it off again");
     click(vcx, "segmented-conn-env-4");
-    // Saved with production and the box untouched: encrypted.
-    focus_field(vcx, "name");
-    vcx.simulate_input("orders-prod");
-    focus_field(vcx, "host");
-    vcx.simulate_input("10.0.4.7");
-    vcx.run_until_parked();
+    // Saved with production and the box untouched: derived, so encrypted.
+    fill_new(vcx, "orders-prod", "10.0.4.7");
     save(vcx);
-    wait_until(vcx, "the new profile to save", |vcx| !dialog_open(vcx));
-    let prod = profile_id(vcx, "orders-prod");
-    assert!(stored(vcx, prod).catalog_sensitive);
+    assert!(!dialog_open(vcx));
+    let prod = stored(vcx, profile_id(vcx, "orders-prod"));
+    assert_eq!(prod.catalog_sensitive_set, None);
+    assert!(prod.catalog_sensitive());
 
     // Once the box is clicked, the environment no longer moves it.
-    in_window(vcx, |window, cx| {
-        open_connection_dialog(DialogMode::New, window, cx)
-    });
-    settle(vcx, Duration::from_millis(20));
-    wait_until(vcx, "the Schemas section to be drawn", |vcx| {
-        in_window(vcx, |window, cx| schemas::section_state(window, cx)).is_some()
-    });
+    open_new(vcx);
     click(vcx, "segmented-conn-env-4");
     with_section(vcx, |s, window, cx| s.toggle_encrypt(false, window, cx));
     // A new profile has no cache: no question.
     assert_eq!(read_section(vcx, |s, _| s.encrypt_question()), None);
-    assert!(!draft_sensitive(vcx));
+    assert_eq!(draft_choice(vcx), Some(false));
     click(vcx, "segmented-conn-env-1");
     click(vcx, "segmented-conn-env-4");
     assert!(!draft_sensitive(vcx), "the user's choice stands");
@@ -401,12 +479,60 @@ fn sensitive_defaults_on_for_production_profiles(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     assert!(!dialog_open(vcx));
 
-    // A saved non-production profile keeps its own flag when it becomes production in the
-    // dialog (turning it on would delete its cache: only the box does that, after asking).
+    // A saved, derived profile that becomes production in the dialog would delete its cache:
+    // that asks first, and Save waits. Keep pins the value its cache has.
     let dev = add_profile(vcx, pg("shop", EnvTag::Dev));
     open(vcx, DialogMode::Edit(dev));
     click(vcx, "segmented-conn-env-4");
+    assert_eq!(
+        read_section(vcx, |s, _| s.encrypt_question()),
+        Some(EncryptAsk::Environment(true))
+    );
+    save(vcx);
+    assert!(dialog_open(vcx), "Save waits for the answer");
+    // Back to dev: the question goes.
+    click(vcx, "segmented-conn-env-1");
+    assert_eq!(read_section(vcx, |s, _| s.encrypt_question()), None);
+    click(vcx, "segmented-conn-env-4");
+    with_section(vcx, |s, window, cx| s.answer_encrypt(false, window, cx));
+    assert_eq!(draft_choice(vcx), Some(false));
     assert!(!draft_sensitive(vcx));
+    save(vcx);
+    assert!(!dialog_open(vcx));
+    let shop = stored(vcx, dev);
+    assert_eq!(shop.environment, Some(EnvTag::Production));
+    assert_eq!(shop.catalog_sensitive_set, Some(false));
+}
+
+/// Ruling R-W3-1: an imported production profile writes no choice, so it encrypts.
+#[gpui::test]
+fn an_imported_production_profile_is_sensitive(cx: &mut TestAppContext) {
+    let vcx = shell(cx, "en");
+    let path = paths(vcx).data.join("pg_service.conf");
+    write(&path, "[orders-prod]\nhost=db-prod\ndbname=orders\n");
+    vcx.cx
+        .update(|cx| cx.set_global(import::ImportSources(vec![path])));
+    run(vcx, "connection.import_pg_service");
+    wait_until(vcx, "the import dialog to open", |vcx| {
+        vcx.cx.read(import::open_view).is_some()
+    });
+    let view = vcx.cx.read(import::open_view).expect("the import dialog");
+    assert_eq!(
+        vcx.cx.read(|cx| view.read(cx).env(0)),
+        Some(EnvTag::Production)
+    );
+    vcx.cx.update(|cx| view.update(cx, |v, cx| v.confirm(cx)));
+    wait_until(vcx, "the import to save", |vcx| {
+        vcx.cx
+            .read(|cx| cx.global::<ConnectionsModel>().profiles().len())
+            == 1
+    });
+    let p = stored(vcx, profile_id(vcx, "orders-prod"));
+    assert_eq!(p.catalog_sensitive_set, None);
+    assert!(p.catalog_sensitive());
+    quiet(vcx);
+    let text = std::fs::read_to_string(paths(vcx).connections_toml()).expect("connections.toml");
+    assert!(!text.contains("catalog_sensitive"), "{text}");
 }
 
 /// Fake cache files of `id` (every name `CacheStore::delete_profile_files` owns), and one of
@@ -429,13 +555,6 @@ fn plant_cache(
     mine
 }
 
-/// Whether the cache API deletes files (Task 11) or is still the fail-closed stub
-/// (`Err(Disabled)`, nothing deleted: the save must then fail and change nothing).
-fn cache_deletes() -> bool {
-    let dir = tempfile::tempdir().expect("temp dir");
-    CacheStore::delete_profile_files(dir.path(), &ProfileId::new()).is_ok()
-}
-
 #[gpui::test]
 fn turning_encryption_on_or_off_confirms_and_drops_the_cache(cx: &mut TestAppContext) {
     let (vcx, id) = shop_shell(cx, "en");
@@ -447,7 +566,7 @@ fn turning_encryption_on_or_off_confirms_and_drops_the_cache(cx: &mut TestAppCon
 
     // On: asks first, focused on the answer that changes nothing.
     with_section(vcx, |s, window, cx| s.toggle_encrypt(true, window, cx));
-    assert_eq!(ask(vcx), Some(true));
+    assert_eq!(ask(vcx), Some(EncryptAsk::Toggle(true)));
     assert!(!draft_sensitive(vcx));
     with_section(vcx, |s, window, cx| s.answer_encrypt(false, window, cx));
     assert_eq!(ask(vcx), None);
@@ -461,18 +580,8 @@ fn turning_encryption_on_or_off_confirms_and_drops_the_cache(cx: &mut TestAppCon
         "nothing deleted before Save"
     );
     save(vcx);
-    if !cache_deletes() {
-        // Task 11's cache API is not merged: the stub deletes nothing, so nothing is saved.
-        wait_until(vcx, "the save to fail", |vcx| {
-            dialog(vcx).is_some_and(|d| vcx.cx.read(|cx| !d.read(cx).is_saving()))
-        });
-        assert!(dialog_open(vcx));
-        assert!(!stored(vcx, id).catalog_sensitive);
-        assert!(mine.iter().all(|f| f.exists()));
-        return;
-    }
-    wait_until(vcx, "the profile to save", |vcx| !dialog_open(vcx));
-    assert!(stored(vcx, id).catalog_sensitive);
+    assert!(!dialog_open(vcx));
+    assert_eq!(stored(vcx, id).catalog_sensitive_set, Some(true));
     assert!(mine.iter().all(|f| !f.exists()), "the cache is gone");
     assert!(theirs.exists(), "another profile's cache stays");
 
@@ -480,13 +589,110 @@ fn turning_encryption_on_or_off_confirms_and_drops_the_cache(cx: &mut TestAppCon
     let mine = plant_cache(vcx, id, other);
     open(vcx, DialogMode::Edit(id));
     with_section(vcx, |s, window, cx| s.toggle_encrypt(false, window, cx));
-    assert_eq!(ask(vcx), Some(false));
+    assert_eq!(ask(vcx), Some(EncryptAsk::Toggle(false)));
     with_section(vcx, |s, window, cx| s.answer_encrypt(true, window, cx));
     save(vcx);
-    wait_until(vcx, "the profile to save", |vcx| !dialog_open(vcx));
-    assert!(!stored(vcx, id).catalog_sensitive);
+    assert!(!dialog_open(vcx));
+    assert_eq!(stored(vcx, id).catalog_sensitive_set, Some(false));
     assert!(mine.iter().all(|f| !f.exists()));
     assert!(theirs.exists());
+}
+
+/// Fix round 1 (I-4): every Save step made to fail, in both directions, leaves the stored
+/// flag and the cache files consistent: never "encrypted" with files written in the clear
+/// still on disk, never "plaintext" with the encrypted cache still on disk.
+#[gpui::test]
+fn save_fails_closed_at_each_step(cx: &mut TestAppContext) {
+    let (vcx, id) = shop_shell(cx, "en");
+    let other = add_profile(vcx, pg("other", EnvTag::Dev));
+    let steps = [
+        (SaveFault::CacheDelete, "hv-scope-save-cache-failed", true),
+        (SaveFault::ScopeWrite, "hv-scope-save-data-failed", false),
+        (SaveFault::ProfileSave, "hv-conn-dlg-save-failed", false),
+    ];
+    for to in [true, false] {
+        for (fault, message, files_stay) in steps {
+            let before = stored(vcx, id).catalog_sensitive();
+            assert_eq!(before, !to);
+            let mine = plant_cache(vcx, id, other);
+            open(vcx, DialogMode::Edit(id));
+            // A scope of this step's own, so a write of it is told apart from earlier steps'.
+            let scope = format!("@:\"{fault:?}-{to}\"");
+            type_pattern(vcx, &scope);
+            with_section(vcx, |s, window, cx| s.toggle_encrypt(to, window, cx));
+            with_section(vcx, |s, window, cx| s.answer_encrypt(true, window, cx));
+            vcx.cx
+                .update(|cx| schemas::inject_save_fault(cx, Some(fault)));
+            save(vcx);
+            // Nothing was saved: the dialog stays, saying what failed.
+            assert!(dialog_open(vcx), "{fault:?}");
+            let expected = vcx.cx.read(|cx| {
+                cx.global::<hacivat_app::l10n_global::L10nGlobal>()
+                    .l10n
+                    .t_dynamic(message, Vec::new())
+            });
+            assert_eq!(
+                problem(vcx).as_deref(),
+                Some(expected.as_str()),
+                "{fault:?}"
+            );
+            quiet(vcx);
+            let now = stored(vcx, id);
+            assert_eq!(now.catalog_sensitive(), before, "{fault:?}: the flag stays");
+            // The files either stay with the flag they were written under, or are gone.
+            assert_eq!(
+                mine.iter().all(|f| f.exists()),
+                files_stay,
+                "{fault:?} to {to}"
+            );
+            if !files_stay {
+                assert!(mine.iter().all(|f| !f.exists()), "{fault:?} to {to}");
+            }
+            if fault != SaveFault::ProfileSave {
+                assert_ne!(
+                    file_data(vcx, id).and_then(|d| d.scope),
+                    Some(scope.clone()),
+                    "{fault:?}: the scope is not written either"
+                );
+            }
+            vcx.cx.update(|cx| schemas::inject_save_fault(cx, None));
+            vcx.simulate_keystrokes("escape");
+            vcx.run_until_parked();
+            assert!(!dialog_open(vcx));
+        }
+        // Then it saves.
+        let mine = plant_cache(vcx, id, other);
+        open(vcx, DialogMode::Edit(id));
+        with_section(vcx, |s, window, cx| s.toggle_encrypt(to, window, cx));
+        with_section(vcx, |s, window, cx| s.answer_encrypt(true, window, cx));
+        save(vcx);
+        assert!(!dialog_open(vcx));
+        assert_eq!(stored(vcx, id).catalog_sensitive(), to);
+        assert!(mine.iter().all(|f| !f.exists()));
+    }
+}
+
+/// Fix round 1 (M-8): a profile changed while its dialog is open is not overwritten by the
+/// dialog's old "Encrypt cached metadata", and no cache is deleted for a change the user did
+/// not make.
+#[gpui::test]
+fn save_reads_the_stored_flag_then(cx: &mut TestAppContext) {
+    let (vcx, id) = shop_shell(cx, "en");
+    let other = add_profile(vcx, pg("other", EnvTag::Dev));
+    let mine = plant_cache(vcx, id, other);
+    open(vcx, DialogMode::Edit(id));
+    type_pattern(vcx, "@:public");
+    // Meanwhile the profile is saved with "on" (another window, a reloaded file).
+    let mut changed = (*stored(vcx, id)).clone();
+    changed.catalog_sensitive_set = Some(true);
+    let task = vcx
+        .cx
+        .update(|cx| ConnectionsModel::save(cx, ProfileDraft::edit(changed)));
+    wait_task(vcx, task).expect("the profile saves");
+    save(vcx);
+    assert!(!dialog_open(vcx));
+    assert_eq!(stored(vcx, id).catalog_sensitive_set, Some(true));
+    assert!(mine.iter().all(|f| f.exists()), "no cache deleted");
 }
 
 #[gpui::test]
@@ -499,7 +705,7 @@ fn profile_writes_go_through_connections_model_only(cx: &mut TestAppContext) {
     type_pattern(vcx, "@:public");
     with_section(vcx, |s, window, cx| s.toggle_encrypt(true, window, cx));
     with_section(vcx, |s, window, cx| s.answer_encrypt(true, window, cx));
-    settle(vcx, Duration::from_millis(20));
+    quiet(vcx);
     assert_eq!(std::fs::read(&file).expect("connections.toml"), before);
     assert!(!profile_file(vcx, id).exists());
     with_section(vcx, |s, window, cx| s.toggle_encrypt(false, window, cx));
@@ -507,15 +713,17 @@ fn profile_writes_go_through_connections_model_only(cx: &mut TestAppContext) {
         !draft_sensitive(vcx),
         "back to the saved value: no question"
     );
+    assert_eq!(draft_choice(vcx), None, "and its derived setting again");
 
     // Save: the scope goes to the profile's data file, the profile through ConnectionsModel
     // (its list and its file agree).
     save(vcx);
-    wait_until(vcx, "the dialog to close", |vcx| !dialog_open(vcx));
+    assert!(!dialog_open(vcx));
     assert_eq!(
         file_data(vcx, id).expect("written").scope.as_deref(),
         Some("@:public")
     );
+    quiet(vcx);
     assert_eq!(std::fs::read(&file).expect("connections.toml"), before);
 
     // A level pill writes the data file only, never connections.toml.
@@ -524,6 +732,7 @@ fn profile_writes_go_through_connections_model_only(cx: &mut TestAppContext) {
     wait_until(vcx, "the level to be written", |vcx| {
         file_data(vcx, id).is_some_and(|d| !d.level_overrides.is_empty())
     });
+    quiet(vcx);
     assert_eq!(std::fs::read(&file).expect("connections.toml"), before);
     assert!(Arc::ptr_eq(&model_before, &stored(vcx, id)));
     assert_eq!(
@@ -532,25 +741,15 @@ fn profile_writes_go_through_connections_model_only(cx: &mut TestAppContext) {
         "the scope stays"
     );
 
-    // A new profile with the box on: one ConnectionsModel save carries the flag.
-    in_window(vcx, |window, cx| {
-        open_connection_dialog(DialogMode::New, window, cx)
-    });
-    settle(vcx, Duration::from_millis(20));
-    wait_until(vcx, "the Schemas section to be drawn", |vcx| {
-        in_window(vcx, |window, cx| schemas::section_state(window, cx)).is_some()
-    });
+    // A new profile with the box on: one ConnectionsModel save carries the choice.
+    open_new(vcx);
     click(vcx, "segmented-conn-env-1");
     with_section(vcx, |s, window, cx| s.toggle_encrypt(true, window, cx));
-    focus_field(vcx, "name");
-    vcx.simulate_input("audit");
-    focus_field(vcx, "host");
-    vcx.simulate_input("10.0.4.8");
-    vcx.run_until_parked();
+    fill_new(vcx, "audit", "10.0.4.8");
     save(vcx);
-    wait_until(vcx, "the new profile to save", |vcx| !dialog_open(vcx));
+    assert!(!dialog_open(vcx));
     let audit = profile_id(vcx, "audit");
-    assert!(stored(vcx, audit).catalog_sensitive);
+    assert_eq!(stored(vcx, audit).catalog_sensitive_set, Some(true));
     wait_until(vcx, "connections.toml to hold the flag", |_| {
         std::fs::read_to_string(&file).is_ok_and(|t| t.contains("catalog_sensitive = true"))
     });
@@ -569,11 +768,58 @@ fn escape_cancels_without_saving(cx: &mut TestAppContext) {
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
     assert!(!dialog_open(vcx));
-    settle(vcx, Duration::from_millis(20));
-    assert!(!stored(vcx, id).catalog_sensitive);
+    quiet(vcx);
+    assert!(!stored(vcx, id).catalog_sensitive());
     assert_eq!(std::fs::read(&file).expect("connections.toml"), before);
     assert!(!profile_file(vcx, id).exists());
     assert_eq!(data(vcx, id).expect("read").scope, None);
+}
+
+// ---- tests: the profile data file --------------------------------------------------------------
+
+/// Fix round 1 (I-1): a data file that cannot be read (here a folder at its path) is read
+/// once, shown as unreadable, and never read again in a loop.
+#[gpui::test]
+fn a_failed_read_of_the_data_file_is_final(cx: &mut TestAppContext) {
+    let vcx = shell(cx, "en");
+    let p = pg("shop", EnvTag::Dev);
+    let id = p.id;
+    std::fs::create_dir_all(paths(vcx).profile_toml(&id.0.to_string())).expect("a folder");
+    add_profile(vcx, p);
+    show(vcx, id, shop());
+    wait_until(vcx, "the read to fail", |vcx| {
+        vcx.cx.read(|cx| userdata::is_unreadable(id, cx))
+    });
+    quiet(vcx);
+    let (requests, generation) = vcx
+        .cx
+        .read(|cx| (userdata::requests(cx), userdata::generation(cx)));
+    // More frames and catalog changes: nothing is read again.
+    for _ in 0..3 {
+        show(vcx, id, shop());
+        quiet(vcx);
+    }
+    assert_eq!(vcx.cx.read(userdata::requests), requests);
+    assert_eq!(vcx.cx.read(userdata::generation), generation);
+    // No pill is claimed, a level is refused, and the dialog says the scope can't be read.
+    expand(vcx, &["shop", "app"]);
+    assert!(row_of(vcx, "public").pill.is_none());
+    open(vcx, DialogMode::Edit(id));
+    assert!(read_section(vcx, |s, _| s.stored_unreadable()));
+    type_pattern(vcx, "@:public");
+    save(vcx);
+    assert!(dialog_open(vcx));
+    let expected = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::l10n_global::L10nGlobal>()
+            .l10n
+            .t_dynamic("hv-scope-save-data-unreadable", Vec::new())
+    });
+    assert_eq!(problem(vcx).as_deref(), Some(expected.as_str()));
+    assert_eq!(
+        vcx.cx.read(userdata::requests),
+        requests,
+        "a refused write sends nothing"
+    );
 }
 
 #[gpui::test]

@@ -1291,3 +1291,23 @@ M4 Task 20 (gpui) fills `connections/dialog/schemas.rs`, `explorer/level_pill.rs
   runtime, through one writer task that applies requests in order (each a read-modify-write
   of the `[metadata]` table). A file that is not TOML, mixes line endings or holds a
   `[metadata]` table of another shape is never rewritten; the profile's data stays unknown.
+- **Fix round 1.**
+  - **Ruling R-W3-1: sensitivity is derived unless set.** `Profile.catalog_sensitive_set:
+    Option<bool>` (T1c's field, named exception; the TOML key `catalog_sensitive` is
+    unchanged: a missing key reads `None`, `true`/`false` read `Some`, `None` is never
+    written). `Profile::catalog_sensitive()` is the effective value: the choice, else on for
+    production. Profiles from before M4 and imports are `None`, so production ones encrypt.
+    The dialog writes `Some` only when the user chooses. An environment change that flips a
+    saved profile's derived value asks first (it deletes the cache) and Save waits; Keep pins
+    the old value. **Task 15 (and every later reader) uses `Profile::catalog_sensitive()`.**
+  - **Save** reads the stored profile then: without a choice in this dialog the stored choice
+    stands. The cache is deleted when the stored and the new *effective* values differ. Each
+    failed step has its own message (cache not deleted, data file unreadable, scope not
+    written); a deterministic fault seam (`schemas::inject_save_fault`, feature
+    `test-support`) proves each one leaves flag and files consistent in both directions.
+  - **The data file:** a failed read is final (`Unreadable`, shown in the dialog); only a
+    failed write is followed by one read. No loop.
+  - **The tree keeps what it cannot show.** When writing the pattern again from the checked
+    rows would not give the same syntax tree, a click adds or removes one clause for its row
+    (`!@:"s"`, `@:"s"`, `!db:*`, …), verified through `select_explicit`; a click that cannot be
+    made that way asks before writing the pattern again.
