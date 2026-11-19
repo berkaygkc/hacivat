@@ -629,6 +629,97 @@ fn the_strips_cursor_open_stays_whole_in_a_narrow_pane(cx: &mut TestAppContext) 
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
+// ## m4-m3carry (U-6 a; T41 carry, M3c-34, design/m3b-safe surface 24): the strip's narrow
+// form. "Fetch more" is never cut: in the strip's narrow stage it is its arrow-down icon, with
+// its word as the tooltip and the accessible name.
+
+/// Sweeps the suspended strip from 700 px down to the split floor in `lang`; returns the
+/// failures and whether the icon form was reached.
+fn sweep_fetch_more(cx: &mut TestAppContext, lang: &str) -> (Vec<String>, bool) {
+    let _shell = shell(cx, lang);
+    let width = Rc::new(Cell::new(700.0_f32));
+    let w = width.clone();
+    let (_, vcx) = cx.add_window_view(move |_, _| StripHost { width: w });
+    let label = |vcx: &gpui::VisualTestContext| {
+        let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+        frame
+            .into_iter()
+            .find(|r| r.path.ends_with("#button-label-strip-fetch-more"))
+    };
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    // The wide strip draws the word; it names the icon form.
+    let word = label(vcx)
+        .expect("the wide strip draws \"Fetch more\"")
+        .text;
+    let mut failures = Vec::new();
+    let mut iconified = false;
+    let mut widths: Vec<f32> = (0..)
+        .map(|k| 700.0 - 7.0 * k as f32)
+        .take_while(|w| *w > SPLIT_FLOOR_PX)
+        .collect();
+    widths.push(SPLIT_FLOOR_PX);
+    for px_now in widths {
+        width.set(px_now);
+        hacivat_ui::popover::a11y_record();
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        let decls = hacivat_ui::popover::a11y_take();
+        let strip = vcx
+            .debug_bounds("toolbar-results-strip")
+            .expect("the strip");
+        let Some(button) = vcx.debug_bounds("button-strip-fetch-more") else {
+            failures.push(format!("{lang} {px_now}: Fetch more not drawn"));
+            continue;
+        };
+        if button.left() < strip.left() || button.right() > strip.right() + px(0.5) {
+            failures.push(format!(
+                "{lang} {px_now}: Fetch more {button:?} past {strip:?}"
+            ));
+        }
+        match label(vcx) {
+            Some(r) => {
+                if r.clipped || r.truncated || !r.visible || r.painted_px <= 0.0 {
+                    failures.push(format!("{lang} {px_now}: {r:?} cut"));
+                }
+            }
+            None => {
+                iconified = true;
+                let named = decls
+                    .iter()
+                    .any(|d| d.role == Some(gpui::Role::Button) && d.name == word);
+                if !named {
+                    failures.push(format!(
+                        "{lang} {px_now}: the icon form is not named {word:?}: {decls:?}"
+                    ));
+                }
+            }
+        }
+    }
+    (failures, iconified)
+}
+
+#[gpui::test]
+fn the_strips_fetch_more_takes_its_icon_and_is_never_cut(cx: &mut TestAppContext) {
+    let mut failures = Vec::new();
+    let mut reached = Vec::new();
+    let mut locales = vec!["en", "tr"];
+    #[cfg(feature = "pseudo")]
+    locales.extend(["en-XA", "tr-XT"]);
+    for lang in locales {
+        let (f, iconified) = sweep_fetch_more(cx, lang);
+        failures.extend(f);
+        if iconified {
+            reached.push(lang);
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    assert!(
+        !reached.is_empty(),
+        "no locale reached the strip's narrow stage (the sweep proves nothing)"
+    );
+}
+
 // ## m3c-t41-chrome (fix round 1; PO M3c-18): in a narrowing result toolbar the view items
 // (Task 38's view switch and record toggle, here a pinned stand-in with a compact form at their
 // priority) take their compact forms first; Count rows (priority 1) moves before Copy; Copy

@@ -1291,10 +1291,20 @@ fn the_capsule_degrades_to_fit_the_minimum_window(cx: &mut TestAppContext) {
         // The minimum window: the latency goes first, then the path text, then the access text.
         vcx.simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
         settle_until(vcx, WAIT, || text_of(vcx, "capsule-text-latency").is_none());
-        wait_until_mut(vcx, "the palette field at its minimum or wider", |vcx| {
-            let palette = vcx.debug_bounds("palette-field");
-            palette.is_some_and(|b| b.size.width >= gpui::px(170.0) - gpui::px(0.5))
-        });
+        // ## m4-m3carry (U-6 c, P2-04; named update of this M2b test): or collapsed to its
+        // magnifier, where that keeps a trust word of this capsule.
+        wait_until_mut(
+            vcx,
+            "the palette field at its minimum or wider, or its icon",
+            |vcx| {
+                let palette = vcx.debug_bounds("palette-field");
+                palette.is_some_and(|b| {
+                    b.size.width >= gpui::px(170.0) - gpui::px(0.5)
+                        || (b.size.width - gpui::px(hacivat_ui::titlebar::PALETTE_ICON_PX)).abs()
+                            <= gpui::px(0.5)
+                })
+            },
+        );
         let palette = vcx
             .debug_bounds("palette-field")
             .expect("the palette field");

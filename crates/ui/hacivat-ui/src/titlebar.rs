@@ -13,6 +13,16 @@
 //! palette below `PALETTE_MIN_PX` or the trailing controls off the window. The bar measures
 //! where the capsule starts and how wide the trailing controls are in each frame
 //! (`BarRoom`); a change draws again.
+//!
+//! ## m4-m3carry (U-6 c; M3 PO item P2-04): before the capsule gives up a trust word (an access
+//! word, read-only or read-write, or the unencrypted word) that the room would keep, the
+//! palette field collapses to its magnifier icon ([`PALETTE_ICON_PX`] square, the field's
+//! frame), and the capsule gets the room the field gave up. The capsule reports where each of
+//! its trust words gives way ([`TrustRooms`], `BarRoom::capsule_trust`); the field collapses
+//! when the capsule gives up fewer of them beside the icon than beside the field at its
+//! minimum (a collapse that would keep none leaves the field whole). The icon keeps the
+//! field's click, its name and, as its tooltip, its words and keys (`TitleBar::palette_tip`);
+//! ⌘K still opens the palette.
 
 use std::rc::Rc;
 
@@ -25,10 +35,10 @@ use hacivat_ui_core::theme::{Caps, Theme, TypeStyle};
 use hacivat_ui_core::window::{ChromeKind, TRAFFIC_LIGHTS_INSET_PX};
 
 use crate::button::{Button, ButtonKind, ClickHandler, hover_listener, interaction_state};
-use crate::capsule::Capsule;
+use crate::capsule::{Capsule, TrustRooms};
 use crate::icon::{Icon, IconName, IconSize};
 use crate::l10n::ui_text;
-use crate::popover::{A11yNode, Declare, lazy};
+use crate::popover::{A11yNode, Declare, Tip, lazy};
 use crate::text::{Label, TextSource};
 
 /// Width of the overflow button that takes the trailing segments.
@@ -37,6 +47,10 @@ pub const OVERFLOW_BUTTON_PX: f32 = 24.0;
 /// `min-width: 170px`).
 pub const PALETTE_PREF_PX: f32 = 290.0;
 pub const PALETTE_MIN_PX: f32 = 170.0;
+// ## m4-m3carry (U-6 c, P2-04)
+/// The collapsed palette field: its magnifier in a square of the field's height
+/// (`spacing.field_height`).
+pub const PALETTE_ICON_PX: f32 = 26.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TitleBarFit {
@@ -68,6 +82,8 @@ struct PaletteField {
     placeholder: SharedString,
     keys: SharedString,
     on_click: ClickHandler,
+    // ## m4-m3carry (U-6 c)
+    tip: Option<SharedString>,
 }
 
 /// What the Overflow Rule needs to know (the bar cannot measure its own children).
@@ -151,7 +167,19 @@ impl TitleBar {
             placeholder,
             keys,
             on_click: Rc::new(on_click),
+            tip: None,
         });
+        self
+    }
+
+    // ## m4-m3carry (U-6 c, P2-04)
+    /// The collapsed palette field's tooltip and accessible name: its words and keys, as the
+    /// host's Fluent joins them ("Search or run a command · ⌘K"). Without it the icon is named
+    /// by the placeholder alone. Call it after [`palette_field`](Self::palette_field).
+    pub fn palette_tip(mut self, tip: SharedString) -> Self {
+        if let Some(palette) = self.palette.as_mut() {
+            palette.tip = Some(tip);
+        }
         self
     }
 
@@ -195,6 +223,9 @@ impl TitleBar {
 struct BarRoom {
     capsule_left: Option<f32>,
     trailing: Option<f32>,
+    // ## m4-m3carry (U-6 c, P2-04)
+    /// Where the capsule's trust words give way (none: no trust word, or not measured yet).
+    capsule_trust: TrustRooms,
 }
 
 /// An empty canvas over its parent that hands the parent's bounds to `note` each frame.
@@ -221,6 +252,9 @@ pub struct TitleBarProbe {
     pub trailing: Option<Bounds<Pixels>>,
     /// The bar's right padding: where the trailing controls end, from the window's right edge.
     pub right_padding: f32,
+    // ## m4-m3carry (U-6 c, P2-04)
+    /// The palette field is collapsed to its icon (it is then [`PALETTE_ICON_PX`] wide).
+    pub palette_collapsed: bool,
 }
 
 impl Global for TitleBarProbe {}
@@ -289,12 +323,32 @@ impl TitleBar {
         } else {
             0.0
         };
-        let capsule_max = match room.get() {
+        // The capsule's room beside a palette field `palette_room` px wide (its margin in).
+        let room_beside = |palette_room: f32| match room.get() {
             BarRoom {
                 capsule_left: Some(left),
                 trailing: Some(trailing),
+                ..
             } => Some((width - left - trailing - palette_room - t.spacing.lg).max(0.0)),
             _ => None,
+        };
+        // ## m4-m3carry (U-6 c, P2-04): the field collapses to its icon when the room that frees
+        // keeps a trust word the capsule would give up beside the field at its minimum. The
+        // capsule's trust rooms do not depend on its room, so the choice does not flip from
+        // frame to frame.
+        let icon_room = room_beside(PALETTE_ICON_PX + t.spacing.s_2xl);
+        let collapsed = self.palette.is_some()
+            && match (room_beside(palette_room), icon_room) {
+                (Some(whole), Some(icon)) => {
+                    let trust = room.get().capsule_trust;
+                    trust.given_up_at(icon) < trust.given_up_at(whole)
+                }
+                _ => false,
+            };
+        let capsule_max = if collapsed {
+            icon_room
+        } else {
+            room_beside(palette_room)
         };
 
         let mut bar = div()
@@ -355,6 +409,16 @@ impl TitleBar {
         }
         if let Some(capsule) = self.capsule {
             let at = room.clone();
+            // ## m4-m3carry (U-6 c, P2-04): where the capsule's trust words give way.
+            let trust_at = room.clone();
+            let capsule = capsule.on_trust_room(Rc::new(move |rooms, window| {
+                let mut r = trust_at.get();
+                if r.capsule_trust.differs(&rooms) {
+                    r.capsule_trust = rooms;
+                    trust_at.set(r);
+                    window.refresh();
+                }
+            }));
             // Fix round 2 (R1-I1): the capsule never shrinks with the bar (the palette field
             // gives way, down to its minimum, which `capsule_max` leaves it); it is clamped to
             // its room instead, where only its name gives way.
@@ -385,56 +449,80 @@ impl TitleBar {
             label_style.size_px = label_style.size_px.max(11.0);
             let on_click = palette.on_click;
             let name = palette.placeholder.clone();
-            let field = div()
+            // ## m4-m3carry (U-6 c, P2-04): collapsed, the field is its magnifier in the
+            // field's frame, named (and its tooltip) by its words and keys.
+            let name = match (&palette.tip, collapsed) {
+                (Some(tip), true) => tip.clone(),
+                _ => name,
+            };
+            let magnifier = Icon::new(IconName::Search)
+                .size(IconSize::Chrome)
+                .color(c.text_3.to_hsla());
+            let frame = div()
                 .id(ElementId::from("palette-field"))
                 .debug_selector(|| "palette-field".to_string())
                 .flex()
                 .flex_row()
                 .items_center()
-                .flex_shrink(1.0)
-                .flex_basis(px(w))
-                .min_w(px(PALETTE_MIN_PX))
                 .mr(px(t.spacing.s_2xl))
                 .h(px(t.spacing.field_height))
-                .pl(px(9.0))
-                .pr(px(t.spacing.sm))
-                .gap(px(t.spacing.md))
                 .border_1()
                 .border_color(c.seam.to_hsla())
-                .rounded(px(t.radii.sm))
-                .child(
-                    Icon::new(IconName::Search)
-                        .size(IconSize::Chrome)
-                        .color(c.text_3.to_hsla()),
-                )
-                .child(
-                    div().flex_1().min_w(px(0.0)).child(
-                        Label::new(
-                            palette.placeholder,
-                            TextSource::Fluent,
-                            label_style,
-                            c.text_3.to_hsla(),
-                        )
-                        .id("palette-placeholder")
-                        // The field's width comes from the Overflow Rule; a placeholder longer
-                        // than what is left of it (pseudo-locales, long translations) ellipsizes
-                        // instead of being cut mid-glyph (Task 18 shots, assertion b).
-                        .truncate(true),
-                    ),
-                )
-                .child(Label::new(
-                    palette.keys,
-                    TextSource::Shortcut,
-                    t.type_ramp.mono_kbd,
-                    c.text_3.to_hsla(),
-                ))
+                .rounded(px(t.radii.sm));
+            let field = if collapsed {
+                let tip = name.clone();
+                let frame = frame
+                    .flex_none()
+                    .w(px(PALETTE_ICON_PX))
+                    .justify_center()
+                    .child(magnifier);
+                if inert {
+                    frame
+                } else {
+                    frame.tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+                }
+            } else {
+                frame
+                    .flex_shrink(1.0)
+                    .flex_basis(px(w))
+                    .min_w(px(PALETTE_MIN_PX))
+                    .pl(px(9.0))
+                    .pr(px(t.spacing.sm))
+                    .gap(px(t.spacing.md))
+                    .child(magnifier)
+                    .child(
+                        div().flex_1().min_w(px(0.0)).child(
+                            Label::new(
+                                palette.placeholder,
+                                TextSource::Fluent,
+                                label_style,
+                                c.text_3.to_hsla(),
+                            )
+                            .id("palette-placeholder")
+                            // The field's width comes from the Overflow Rule; a placeholder longer
+                            // than what is left of it (pseudo-locales, long translations) ellipsizes
+                            // instead of being cut mid-glyph (Task 18 shots, assertion b).
+                            .truncate(true),
+                        ),
+                    )
+                    .child(Label::new(
+                        palette.keys,
+                        TextSource::Shortcut,
+                        t.type_ramp.mono_kbd,
+                        c.text_3.to_hsla(),
+                    ))
+            };
+            let field = field
                 // ## m2b-t22-live (fix round 2): its frame, border included, for the probe.
                 .relative()
                 .child(
                     hacivat_ui_core::gpui_surface::canvas(
-                        |bounds, _, cx| {
+                        move |bounds, _, cx| {
                             if cx.has_global::<TitleBarProbe>() {
-                                cx.global_mut::<TitleBarProbe>().palette = Some(bounds);
+                                let probe = cx.global_mut::<TitleBarProbe>();
+                                probe.palette = Some(bounds);
+                                // ## m4-m3carry (U-6 c)
+                                probe.palette_collapsed = collapsed;
                             }
                         },
                         |_, _, _, _| {},

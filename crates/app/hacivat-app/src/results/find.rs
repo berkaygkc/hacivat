@@ -1303,7 +1303,16 @@ impl GridFindBar {
             let shown = grid.read(cx).column_layout().visible();
             i.cols.len() != shown.len() || i.cols.iter().zip(shown).any(|(a, b)| *a != b.0)
         });
-        if version != self.scan.base_version || cols_changed {
+        // ## m4-m3carry (U-6 b; T39 carry): a new display (a raw-display toggle, by the setting
+        // or the column's own choice; new display settings) paints other text: scan again in
+        // it, so no mark or kept row stays from the text the cells no longer show.
+        adapter.follow_raw_setting(cx);
+        let display_changed = self
+            .scan
+            .input
+            .as_ref()
+            .is_some_and(|i| !Arc::ptr_eq(&i.display, &adapter.display()));
+        if version != self.scan.base_version || cols_changed || display_changed {
             self.rescan(cx);
             return;
         }

@@ -25,7 +25,7 @@ use hacivat_ui::popover::{A11yDecl, a11y_record, a11y_take};
 use hacivat_ui::statusbar::{StatusBar, env_segment};
 use hacivat_ui::step_trail::{StepTrail, TrailA11y, TrailItem, TrailState};
 use hacivat_ui::text::{TextFn, TextRegistry};
-use hacivat_ui::titlebar::TitleBar;
+use hacivat_ui::titlebar::{PALETTE_ICON_PX, TitleBar};
 use hacivat_ui::toast::{
     Toast, ToastAction, ToastKind, ToastQueue, ToastStack, focus_newest_sticky, sticky_demo_fixture,
 };
@@ -1714,16 +1714,6 @@ fn bar_shot(vcx: &mut VisualTestContext) -> BarShot {
     }
 }
 
-/// The width of the access word's cell (its text, 9 px padding each side, the 1 px seam).
-fn access_cell_px(vcx: &mut VisualTestContext) -> f32 {
-    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
-    let word = frame
-        .iter()
-        .find(|r| r.text.as_ref() == "okuma-yazma")
-        .expect("the access word is drawn in a wide bar");
-    word.painted_px + 2.0 * 9.0 + 1.0
-}
-
 #[gpui::test]
 fn the_capsule_fit_is_the_same_whatever_was_drawn_before(cx: &mut TestAppContext) {
     // Wide: everything shows. `edge` is the width at which the palette field would reach its
@@ -1732,7 +1722,6 @@ fn the_capsule_fit_is_the_same_whatever_was_drawn_before(cx: &mut TestAppContext
     let vcx = mount_tr_bar(cx, wide);
     let whole = bar_shot(vcx);
     assert_eq!(whole.texts, RW_TEXTS.to_vec(), "wide: {whole:?}");
-    let cell = access_cell_px(vcx);
     let capsule = bounds_of(vcx, "capsule");
     let palette = bounds_of(vcx, "palette-field");
     let language = bounds_of(vcx, "button-language");
@@ -1746,6 +1735,9 @@ fn the_capsule_fit_is_the_same_whatever_was_drawn_before(cx: &mut TestAppContext
     // frames, after a wider window and after a narrower one.
     let mut kept = 0;
     let mut gone = 0;
+    // ## m4-m3carry (U-6 c, P2-04)
+    let mut collapsed_n = 0;
+    let mut prev_collapsed = false;
     for width in (edge - 240)..=(edge + 8) {
         let width = width as f32;
         let vcx = mount_tr_bar(cx, width);
@@ -1759,18 +1751,38 @@ fn the_capsule_fit_is_the_same_whatever_was_drawn_before(cx: &mut TestAppContext
             resize_and_settle(vcx, width);
             assert_eq!(bar_shot(vcx), first, "{width} after {before}");
         }
-        // Trust: the access word goes only when it cannot fit (the palette field at its
-        // minimum, with less than the word's cell left over, give or take the 2 px the fit
-        // keeps in hand against rounding and the half pixels of shaped widths) and only after
-        // the latency, the path and the engine.
+        // Trust: the access word goes only when it cannot fit, and only after the latency, the
+        // path and the engine.
+        // ## m4-m3carry (U-6 c, P2-04, named update of this M3c test): the field is whole (at
+        // least its minimum) or its icon. It keeps at least its minimum until the access word
+        // would have to go beside it (at the narrowest width that keeps the field whole, the
+        // latency, the path and the engine are gone and the word shows); collapsed, the
+        // capsule takes the room back, so they may show again. When the icon is too little to
+        // keep the word, the word goes beside a whole field (checked by
+        // `the_palette_field_collapses_to_its_icon_before_a_trust_word_goes`).
+        let collapsed = first.palette < 170.0 - 0.5;
+        if collapsed {
+            collapsed_n += 1;
+            assert!(
+                (first.palette - PALETTE_ICON_PX).abs() <= 0.5,
+                "{width}: {first:?}"
+            );
+        } else {
+            assert!(first.palette >= 170.0 - 0.5, "{width}: {first:?}");
+            if prev_collapsed {
+                assert_eq!(
+                    first.texts,
+                    ["PROD", "orders-prod", "okuma-yazma"],
+                    "{width}: the field collapsed before the engine, the path and the latency \
+                     gave way (or after the access word)"
+                );
+            }
+        }
+        prev_collapsed = collapsed;
         if first.texts.contains(&"okuma-yazma") {
             kept += 1;
         } else {
             gone += 1;
-            assert!(
-                first.palette - 170.0 < cell + 3.0,
-                "{width}: the access word went with room for it: {first:?} (cell {cell})"
-            );
             for t in ["PostgreSQL 16", "Doğrudan", "4 ms"] {
                 assert!(
                     !first.texts.contains(&t),
@@ -1778,11 +1790,10 @@ fn the_capsule_fit_is_the_same_whatever_was_drawn_before(cx: &mut TestAppContext
                 );
             }
         }
-        assert!(first.palette >= 170.0 - 0.5, "{width}: {first:?}");
     }
     assert!(
-        kept > 0 && gone > 0,
-        "the sweep missed the edge: {kept} kept, {gone} gone"
+        kept > 0 && collapsed_n > 0 && !prev_collapsed,
+        "the sweep missed the edge: {kept} kept, {gone} gone, {collapsed_n} collapsed"
     );
 }
 
@@ -1799,4 +1810,207 @@ fn the_access_word_shows_at_960_in_turkish(cx: &mut TestAppContext) {
         assert_eq!(bar_shot(vcx), shot);
     }
     assert!(shot.palette >= 170.0 - 0.5, "{shot:?}");
+}
+
+// ## m4-m3carry (U-6 c; M3 PO item P2-04, shot-fixes review m9): before the capsule gives up a
+// trust word (an access word, the unencrypted word), the palette field collapses to its
+// magnifier icon (⌘K still opens the palette), which frees the capsule about 140 px.
+
+/// An English production capsule over an SSH tunnel, read-only and unencrypted.
+fn read_only_unencrypted_en() -> CapsuleModel {
+    CapsuleModel::Connection {
+        env: EnvKind::Production,
+        env_label: "PRODUCTION".into(),
+        name: "orders-prod".into(),
+        engine: "PostgreSQL 16".into(),
+        access: "read-only".into(),
+        read_only: true,
+        path: "SSH tunnel".into(),
+        direct: false,
+        latency: Some("12 ms".into()),
+        unencrypted: Some("unencrypted".into()),
+        unsupported: None,
+    }
+}
+
+/// A title bar holding `model` with the palette field `placeholder`, `width` wide; a click on
+/// the field counts in `clicks`.
+fn mount_trust_bar<'a>(
+    cx: &'a mut TestAppContext,
+    model: CapsuleModel,
+    placeholder: &'static str,
+    width: f32,
+    clicks: Rc<Cell<u32>>,
+) -> &'a mut VisualTestContext {
+    let vcx = host(cx, move |_, _| {
+        let clicks = clicks.clone();
+        div()
+            .w_full()
+            .child(
+                TitleBar::new(ChromeKind::MacTrafficLights)
+                    .brand("HACIVAT".into())
+                    .capsule(Capsule::new(model.clone()))
+                    .palette_field(placeholder.into(), "⌘K".into(), move |_, _, _| {
+                        clicks.set(clicks.get() + 1)
+                    })
+                    .palette_tip(format!("{placeholder} · ⌘K").into())
+                    .right(vec![
+                        Button::new("language", "EN".into()).into_any_element(),
+                        Button::new("theme", "Dark".into()).into_any_element(),
+                    ]),
+            )
+            .into_any_element()
+    });
+    enable_registry(vcx);
+    resize_and_settle(vcx, width);
+    vcx
+}
+
+/// The sweep's step. The collapse frees `PALETTE_MIN_PX - PALETTE_ICON_PX` = 144 px, 18 steps:
+/// the capsule's room beside the whole field at `w + 144` is its room beside the icon at `w`.
+const TRUST_STEP: usize = 8;
+const COLLAPSE_GAIN_STEPS: usize = 18;
+
+/// Sweeps the bar over `model` from 1400 px down to 560 px and checks P2-04 against what the
+/// bar would draw 144 px wider or narrower (the room the icon frees):
+/// - a collapsed field is its 26 px icon, and keeps a trust word: the capsule gives up fewer of
+///   `trust` than 144 px narrower;
+/// - a whole field never costs a trust word the icon would keep: the capsule gives up as many
+///   as 144 px wider beside a whole field;
+/// - at the first collapse, 8 px wider, `before` (what gives way ahead of the first trust word)
+///   was gone already (collapsed, the capsule takes the room back and may show it again).
+///
+/// Returns the widest width with a collapsed field that keeps every trust word.
+fn sweep_trust(
+    cx: &mut TestAppContext,
+    model: CapsuleModel,
+    placeholder: &'static str,
+    trust: &[&'static str],
+    before: &[&'static str],
+) -> f32 {
+    let field_h = DARK.spacing.field_height;
+    assert_eq!(
+        (TRUST_STEP * COLLAPSE_GAIN_STEPS) as f32,
+        170.0 - PALETTE_ICON_PX
+    );
+    // (width, collapsed, trust words given up), widest first.
+    let mut seen: Vec<(f32, bool, usize)> = Vec::new();
+    let mut last_whole: Option<Vec<SharedString>> = None;
+    for width in (560..=1400).rev().step_by(TRUST_STEP) {
+        let width = width as f32;
+        let vcx = mount_trust_bar(cx, model.clone(), placeholder, width, Rc::default());
+        let drawn = texts(vcx);
+        let palette = bounds_of(vcx, "palette-field");
+        let palette_w = f32::from(palette.size.width);
+        let collapsed = palette_w < 170.0 - 0.5;
+        if collapsed {
+            assert!(
+                (palette_w - field_h).abs() <= 0.5,
+                "{width}: the collapsed field is {palette_w} px, not its {field_h} px icon"
+            );
+            assert!(
+                !drawn.contains(&placeholder.into()),
+                "{width}: the collapsed field still draws its placeholder"
+            );
+            if let Some(wider) = last_whole.take() {
+                for t in before {
+                    assert!(
+                        !wider.contains(&(*t).into()),
+                        "{width}: the field collapsed while {t} still fitted 8 px wider: {wider:?}"
+                    );
+                }
+            }
+        } else {
+            assert!(palette_w >= 170.0 - 0.5, "{width}: {palette_w}");
+            if seen.iter().all(|s| !s.1) {
+                last_whole = Some(drawn.clone());
+            }
+        }
+        let given_up = trust
+            .iter()
+            .filter(|t| !drawn.contains(&(**t).into()))
+            .count();
+        seen.push((width, collapsed, given_up));
+        // The capsule still ends before the field, and a frame later nothing moves.
+        let capsule = bounds_of(vcx, "capsule");
+        assert!(
+            capsule.right() <= palette.left() + px(0.5),
+            "{width}: {capsule:?} runs into {palette:?}"
+        );
+        next_frame(vcx);
+        assert_eq!(
+            bounds_of(vcx, "palette-field"),
+            palette,
+            "{width}: frame +1"
+        );
+    }
+    let gain = COLLAPSE_GAIN_STEPS;
+    for (i, &(width, collapsed, given_up)) in seen.iter().enumerate() {
+        if collapsed {
+            if let Some(&(_, _, narrower)) = seen.get(i + gain) {
+                assert!(
+                    given_up < narrower,
+                    "{width}: the field collapsed and kept no trust word ({given_up} given up, \
+                     {narrower} 144 px narrower)"
+                );
+            }
+        } else if let Some(&(_, false, wider)) = i.checked_sub(gain).and_then(|j| seen.get(j)) {
+            assert_eq!(
+                given_up, wider,
+                "{width}: beside the whole field a trust word went that the icon would keep"
+            );
+        }
+    }
+    let saved = seen.iter().find(|s| s.1 && s.2 == 0).expect(
+        "no width kept every trust word by collapsing the field (the sweep proves nothing)",
+    );
+    assert!(
+        seen.iter().any(|s| !s.1 && s.2 > 0),
+        "the sweep never reached a width the collapse cannot help"
+    );
+    saved.0
+}
+
+#[gpui::test]
+fn the_palette_field_collapses_to_its_icon_before_a_trust_word_goes(cx: &mut TestAppContext) {
+    // Turkish production that writes: the read-write word is the only trust word; the latency,
+    // the path and the engine give way before it.
+    let tr_at = sweep_trust(
+        cx,
+        read_write_tr(),
+        "Ara veya komut çalıştır",
+        &["okuma-yazma"],
+        &["4 ms", "Doğrudan", "PostgreSQL 16"],
+    );
+    // English read-only and unencrypted: the access word and the unencrypted word; the latency
+    // and the path give way before them.
+    let _ = sweep_trust(
+        cx,
+        read_only_unencrypted_en(),
+        "Search or run a command",
+        &["read-only", "unencrypted"],
+        &["12 ms", "SSH tunnel"],
+    );
+
+    // The collapsed field is still the palette's button: named, and a click opens it.
+    let clicks = Rc::new(Cell::new(0));
+    let vcx = mount_trust_bar(
+        cx,
+        read_write_tr(),
+        "Ara veya komut çalıştır",
+        tr_at,
+        clicks.clone(),
+    );
+    a11y_record();
+    next_frame(vcx);
+    let decls = a11y_take();
+    assert!(
+        decls
+            .iter()
+            .any(|d| d.role == Some(Role::Button)
+                && d.name.as_ref() == "Ara veya komut çalıştır · ⌘K"),
+        "the collapsed field is not named by its words and keys: {decls:?}"
+    );
+    click(vcx, "palette-field");
+    assert_eq!(clicks.get(), 1);
 }

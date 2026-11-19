@@ -30,6 +30,7 @@ use hacivat_app::results::find::{self, Toggle};
 use hacivat_app::results::goto::{self, GotoState};
 use hacivat_app::results::view::hosts;
 use hacivat_app::results::{ActiveResult, ConsoleResults};
+use hacivat_app::shell::update_settings;
 use hacivat_exec::{ResultTab, SessionLog, TabKey};
 use hacivat_proto::DbmsKind;
 use hacivat_results::{
@@ -1176,4 +1177,78 @@ fn select_all_stays_in_the_search_group_and_its_focus_is_kept(cx: &mut TestAppCo
         t.vcx.cx.read(find::field_focused),
         "the field has the focus"
     );
+}
+
+// ## m4-m3carry (U-6 b; T39 carry, M3c deferred table): a raw-display toggle changes the text
+// the cells paint, so an open find (and Filter rows) scans again in what is shown now.
+
+/// The marks, the count and the filter follow a raw-display toggle: by the setting
+/// (`grid.raw_display`) and by the column's own choice. Before the fix they kept the grouped
+/// text's matches until the next query or order change.
+#[gpui::test]
+fn find_and_filter_rows_follow_a_raw_display_toggle(cx: &mut TestAppContext) {
+    let t = tile(cx, "en-US");
+    let rows = vec![row(1234, "a"), row(5, "b"), row(1200, "c")];
+    let (source, _w, _) = live(rows, Completeness::Complete);
+    let grid = t.show(source);
+    let marked = |t: &Tile, row: u64| {
+        t.vcx.cx.read(|cx| {
+            grid.read(cx)
+                .highlights()
+                .and_then(|h| h(ModelRow(row), ColId(0)))
+                .is_some()
+        })
+    };
+    // Grouped: "1,234" and "1,200" match "1,2".
+    t.find("1,2");
+    t.flip(Toggle::Filter);
+    assert_eq!(t.status().total, Some(2));
+    assert_eq!(t.shown(&grid), [0, 2]);
+    assert!(marked(&t, 0));
+
+    // The setting: every column raw ("1234", "1200"). Nothing matches "1,2" any more.
+    in_window(t.vcx, |_, cx| {
+        update_settings(cx, |s| s.grid.raw_display = true);
+    });
+    redraw_until(&t, |t| t.status().total == Some(0));
+    assert_eq!(t.status().total, Some(0), "the count follows the raw cells");
+    assert_eq!(
+        t.status().filtered,
+        Some(0),
+        "the filter follows the raw cells"
+    );
+    assert!(t.shown(&grid).is_empty(), "{:?}", t.shown(&grid));
+    assert!(!marked(&t, 0), "no mark on text the cell no longer paints");
+
+    // A raw query finds the raw text; back to grouped, it finds nothing.
+    t.find("120");
+    assert_eq!(hit_rows(&t), [2]);
+    assert_eq!(t.shown(&grid), [2]);
+    in_window(t.vcx, |_, cx| {
+        update_settings(cx, |s| s.grid.raw_display = false);
+    });
+    redraw_until(&t, |t| t.status().total == Some(0));
+    assert_eq!(t.status().total, Some(0));
+    assert!(t.shown(&grid).is_empty(), "{:?}", t.shown(&grid));
+
+    // The column's own choice (the grid menu's "Raw display · this column") rescans too.
+    let results = t.results.clone();
+    in_window(t.vcx, move |_, cx| {
+        results.update(cx, |r, cx| r.set_raw_column("qty", true, cx))
+    });
+    redraw_until(&t, |t| t.status().total == Some(1));
+    assert_eq!(hit_rows(&t), [2]);
+    assert_eq!(t.shown(&grid), [2]);
+    assert!(marked(&t, 2));
+}
+
+/// Redraws until `done` holds, for a bounded number of frames (a condition, not a sleep): a
+/// change that needs no frame at all passes at the first.
+fn redraw_until(t: &Tile, done: impl Fn(&Tile) -> bool) {
+    for _ in 0..8 {
+        t.redraw();
+        if done(t) {
+            return;
+        }
+    }
 }

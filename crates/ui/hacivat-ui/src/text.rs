@@ -134,7 +134,8 @@ pub(crate) fn begin_record(cx: &mut App) {
         cx.global_mut::<ScrollViewports>().0.clear();
     }
     if cx.has_global::<crate::capsule::CapsuleProbe>() {
-        cx.global_mut::<crate::capsule::CapsuleProbe>().bounds = None;
+        // ## m4-m3carry (U-6 c): the whole probe, its trust facts too.
+        *cx.global_mut::<crate::capsule::CapsuleProbe>() = Default::default();
     }
     // Deferred effects run once the current update (and with it this draw) is done.
     cx.defer(|cx| cx.default_global::<RecordingFrame>().0 = false);
