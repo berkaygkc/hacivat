@@ -972,6 +972,14 @@ fn typeahead_fold_follows_d074(cx: &mut TestAppContext) {
 // ---- profile roots ----------------------------------------------------------------------------
 
 fn connected_prod(cx: &mut TestAppContext, name: &str) -> &'static mut VisualTestContext {
+    connected_prod_in(cx, name, "en")
+}
+
+fn connected_prod_in(
+    cx: &mut TestAppContext,
+    name: &str,
+    lang: &str,
+) -> &'static mut VisualTestContext {
     use hacivat_driver::{SemVerLoose, ServerInfo};
     let fake = answers_probe(FakeDriver::new(DbmsKind::Postgres)).server(ServerInfo {
         kind: DbmsKind::Postgres,
@@ -980,7 +988,7 @@ fn connected_prod(cx: &mut TestAppContext, name: &str) -> &'static mut VisualTes
         raw_version: "16.4".to_string(),
         is_replica: Some(false),
     });
-    let vcx = shell_with_fake(cx, "en", fake);
+    let vcx = shell_with_fake(cx, lang, fake);
     let mut p = test_profile(name, Some(EnvTag::Production), "10.0.4.12");
     p.read_only = true;
     p.database = Some("app".to_string());
@@ -1027,16 +1035,16 @@ fn profile_rows_keep_their_m2a_content_and_bindings(cx: &mut TestAppContext) {
     show(vcx, id, Some(pg_shop()));
     in_window(vcx, explorer::focus_list);
     vcx.run_until_parked();
-    assert!(explorer_acts_on(vcx, id));
-    // On a catalog row they pass through to the tree: Enter toggles, Backspace deletes nothing.
+    assert!(
+        explorer_context(vcx),
+        "on the root, the Explorer rows apply"
+    );
+    // On a catalog row the Explorer key context is gone (R-W2-12): the chords reach the tree.
+    // Enter toggles, Backspace deletes nothing.
     open(vcx, &["orders-prod", "app"]);
     let app = key_of(vcx, "app");
-    vcx.cx.update(|cx| {
-        let tree = explorer::tree(cx).unwrap();
-        tree.update(cx, |t, cx| t.select(app, cx));
-    });
-    vcx.run_until_parked();
-    assert!(!explorer_acts_on(vcx, id));
+    put_cursor(vcx, app);
+    assert!(!explorer_context(vcx));
     assert_eq!(
         vcx.cx.read(|cx| cx.global::<ConnectionsModel>().selected()),
         Some(id),
@@ -1073,15 +1081,42 @@ fn profile_rows_keep_their_m2a_content_and_bindings(cx: &mut TestAppContext) {
     });
 }
 
-fn explorer_acts_on(vcx: &VisualTestContext, id: ProfileId) -> bool {
-    vcx.cx.read(|cx| explorer::is_visible(cx, id))
+/// Whether the key context stack holds `Explorer` (the tree is focused in these tests).
+fn explorer_context(vcx: &VisualTestContext) -> bool {
+    in_window(vcx, |window, _| window.refresh());
+    vcx.run_until_parked();
+    context_stack(vcx).0.contains(&"Explorer")
+}
+
+/// Moves the tree's cursor (and selection) to `key`.
+fn put_cursor(vcx: &VisualTestContext, key: TreeKey) {
+    vcx.cx.update(|cx| {
+        let tree = explorer::tree(cx).unwrap();
+        tree.update(cx, |t, cx| t.select(key, cx));
+    });
+    vcx.run_until_parked();
 }
 
 #[gpui::test]
 fn trust_signals_stay_drawn_on_profile_roots(cx: &mut TestAppContext) {
     // A long production name in the 276 px explorer: the mark and the lock never shrink or
-    // clip (NOTES cross-cutting #5); the name gives way.
-    let vcx = connected_prod(cx, "orders-reporting-replica-eu-west-1-standby");
+    // clip (NOTES cross-cutting #5); the name gives way. In English at the default size, and
+    // in Turkish at the 960 × 600 minimum (fix round 1, m6).
+    for (lang, size) in [
+        ("en", None),
+        ("tr", Some(gpui::size(gpui::px(960.0), gpui::px(600.0)))),
+    ] {
+        let vcx = connected_prod_in(cx, "orders-reporting-replica-eu-west-1-standby", lang);
+        if let Some(size) = size {
+            vcx.simulate_resize(size);
+            vcx.run_until_parked();
+        }
+        trust_signals_drawn(vcx);
+        close_all_windows(vcx);
+    }
+}
+
+fn trust_signals_drawn(vcx: &mut VisualTestContext) {
     let id = profile_id(vcx, "orders-reporting-replica-eu-west-1-standby");
     let key = adapter::profile_key(id).0;
     vcx.run_until_parked();
@@ -1128,4 +1163,357 @@ fn the_model_claims_nothing_about_unknown_keys(cx: &mut TestAppContext) {
     let m = model(vcx);
     assert!(m.row(TreeKey(42)).is_none());
     assert_eq!(m.children(TreeKey(42)), ChildState::NotLoaded);
+}
+
+// ---- fix round 1 ------------------------------------------------------------------------------
+
+/// The text the last frame drew with label id `id`.
+fn drawn_text(vcx: &VisualTestContext, id: &str) -> Option<String> {
+    enable_registry(vcx);
+    text_of(vcx, id)
+}
+
+fn selected(vcx: &VisualTestContext) -> Option<ProfileId> {
+    vcx.cx.read(|cx| cx.global::<ConnectionsModel>().selected())
+}
+
+fn enabled(vcx: &VisualTestContext, id: &str) -> bool {
+    vcx.cx.read(|cx| {
+        cx.global::<hacivat_ui::actions::ActionRegistry>()
+            .get(id)
+            .is_some_and(|d| (d.enabled)(cx))
+    })
+}
+
+fn clipboard(vcx: &VisualTestContext) -> String {
+    vcx.cx
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .unwrap_or_default()
+}
+
+/// I1, ruling R-W2-12: the palette's and welcome page's connection commands act on the profile
+/// that owns the cursor row, wherever it is, and the sheet shows that same profile; the
+/// `Explorer` key context exists only on a profile root.
+#[gpui::test]
+fn commands_follow_the_profile_of_the_cursor_row(cx: &mut TestAppContext) {
+    let mut other = pg("other", "app");
+    other.endpoint = ProfileEndpoint::Server {
+        host: "127.0.0.2".to_string(),
+        port: None,
+    };
+    let vcx = shell_with(cx, "en", vec![pg("shop", "app"), other]);
+    let (shop, other) = (profile_id(vcx, "shop"), profile_id(vcx, "other"));
+    show(vcx, shop, Some(pg_shop()));
+    in_window(vcx, explorer::focus_list);
+    vcx.run_until_parked();
+    open(vcx, &["shop", "app", "public", "TABLES"]);
+    for label in ["app", "TABLES", "orders"] {
+        let key = key_of(vcx, label);
+        put_cursor(vcx, key);
+        assert_eq!(selected(vcx), Some(shop), "{label}: the sheet's profile");
+        assert!(
+            !explorer_context(vcx),
+            "{label}: no Explorer rows off a root"
+        );
+        for id in [
+            "connection.toggle_connect",
+            "connection.edit",
+            "connection.duplicate",
+            "connection.copy_url",
+            "connection.delete",
+        ] {
+            assert!(enabled(vcx, id), "{label}: {id}");
+        }
+        assert!(run(vcx, "connection.copy_url"));
+        assert!(
+            clipboard(vcx).contains("127.0.0.1"),
+            "{label}: {}",
+            clipboard(vcx)
+        );
+    }
+    // Another profile's root: it is the target, and the Explorer rows apply there.
+    put_cursor(vcx, adapter::profile_key(other));
+    assert_eq!(selected(vcx), Some(other));
+    assert!(explorer_context(vcx));
+    assert!(run(vcx, "connection.copy_url"));
+    assert!(clipboard(vcx).contains("127.0.0.2"), "{}", clipboard(vcx));
+}
+
+/// m7: Shift-F10 off a root opens no connection menu; the tree asks for the row's own menu.
+#[gpui::test]
+fn shift_f10_off_a_root_asks_the_tree(cx: &mut TestAppContext) {
+    use std::cell::RefCell;
+    let vcx = shell_with(cx, "en", vec![pg("shop", "app")]);
+    show(vcx, profile_id(vcx, "shop"), Some(pg_shop()));
+    in_window(vcx, explorer::focus_list);
+    vcx.run_until_parked();
+    open(vcx, &["shop"]);
+    let app = key_of(vcx, "app");
+    put_cursor(vcx, app);
+    let seen: Rc<RefCell<Vec<TreeKey>>> = Rc::default();
+    let sink = seen.clone();
+    vcx.cx.update(|cx| {
+        let tree = explorer::tree(cx).unwrap();
+        cx.subscribe(&tree, move |_, e: &hacivat_ui::tree::TreeEvent, _| {
+            if let hacivat_ui::tree::TreeEvent::ContextMenu(k, _) = e {
+                sink.borrow_mut().push(*k);
+            }
+        })
+        .detach();
+    });
+    vcx.simulate_keystrokes("shift-f10");
+    vcx.run_until_parked();
+    assert_eq!(
+        seen.borrow().as_slice(),
+        [app],
+        "the tree's menu event, for the row"
+    );
+    assert!(layer_ids(vcx).is_empty(), "no connection menu off a root");
+    // On the root, the M2a binding opens the connection menu.
+    put_cursor(vcx, adapter::profile_key(profile_id(vcx, "shop")));
+    vcx.simulate_keystrokes("shift-f10");
+    vcx.run_until_parked();
+    assert_eq!(layer_ids(vcx), ["menu"]);
+}
+
+/// I2: with something not searched, nothing matching is never "No objects match": the roots
+/// stay and the "Searches loaded names only" line says why.
+fn assert_not_no_match(vcx: &mut VisualTestContext, query: &str, hint: &str) {
+    filter(vcx, query);
+    assert_eq!(drawn_text(vcx, "explorer-filter-none"), None, "{query}");
+    let line = drawn_text(vcx, hint).unwrap_or_else(|| panic!("{hint} is drawn"));
+    assert!(line.starts_with("Searches loaded names only."), "{line}");
+    assert!(
+        lines(vcx).iter().any(|l| l.starts_with("shop ")),
+        "the root stays: {:#?}",
+        lines(vcx)
+    );
+}
+
+#[gpui::test]
+fn filter_without_a_catalog_is_never_no_match(cx: &mut TestAppContext) {
+    let vcx = shell_with(cx, "en", vec![pg("shop", "app")]);
+    assert_not_no_match(vcx, "orders", "explorer-filter-not-loaded");
+}
+
+#[gpui::test]
+fn filter_over_a_generation_zero_catalog_is_never_no_match(cx: &mut TestAppContext) {
+    let vcx = shell_with(cx, "en", vec![pg("shop", "app")]);
+    let id = profile_id(vcx, "shop");
+    show(
+        vcx,
+        id,
+        Some(catalog_gen(DbmsKind::Postgres, 0, Vec::new(), Vec::new())),
+    );
+    assert_not_no_match(vcx, "orders", "explorer-filter-not-loaded");
+}
+
+#[gpui::test]
+fn filter_over_a_state_only_namespace_is_never_no_match(cx: &mut TestAppContext) {
+    let vcx = shell_with(cx, "en", vec![pg("shop", "app")]);
+    let id = profile_id(vcx, "shop");
+    show(
+        vcx,
+        id,
+        Some(catalog_gen(
+            DbmsKind::Postgres,
+            2,
+            vec![schema(
+                DbmsKind::Postgres,
+                &["app", "public"],
+                false,
+                vec![],
+            )],
+            vec![(NsKey::schema(["app", "audit"]), LoadState::NotLoaded)],
+        )),
+    );
+    assert_not_no_match(vcx, "orders", "explorer-filter-not-loaded");
+}
+
+#[gpui::test]
+fn filter_over_names_level_relations_is_never_no_match(cx: &mut TestAppContext) {
+    let vcx = shell_with(cx, "en", vec![pg("shop", "app")]);
+    let id = profile_id(vcx, "shop");
+    show(
+        vcx,
+        id,
+        Some(catalog(
+            DbmsKind::Postgres,
+            vec![schema_at(
+                DbmsKind::Postgres,
+                &["app", "public"],
+                false,
+                hacivat_meta::Level::Names,
+                vec![
+                    table("orders", Some(1), &[]),
+                    leaf(ObjectKind::View, "v_open"),
+                ],
+            )],
+        )),
+    );
+    // A column name: the columns are not loaded at Names.
+    assert_not_no_match(vcx, "total", "explorer-filter-unloaded");
+    let line = drawn_text(vcx, "explorer-filter-unloaded").unwrap();
+    assert!(line.contains(" 2 "), "the table and the view: {line}");
+}
+
+/// m1: a profile renamed while a filter is on is matched again.
+#[gpui::test]
+fn a_renamed_profile_is_filtered_again(cx: &mut TestAppContext) {
+    let vcx = shell_with(cx, "en", vec![pg("alpha", "app"), pg("gamma", "app")]);
+    for name in ["alpha", "gamma"] {
+        show(vcx, profile_id(vcx, name), Some(pg_shop()));
+    }
+    filter(vcx, "alpha");
+    assert_eq!(lines(vcx), ["DEV [1]", "alpha [PostgreSQL]"]);
+    let gamma = vcx
+        .cx
+        .read(|cx| {
+            cx.global::<ConnectionsModel>()
+                .get(profile_id(vcx, "gamma"))
+        })
+        .expect("gamma");
+    let mut renamed = (*gamma).clone();
+    renamed.name = "alpha-2".to_string();
+    save_draft(vcx, hacivat_session::profile::ProfileDraft::edit(renamed));
+    vcx.run_until_parked();
+    assert_eq!(
+        lines(vcx),
+        ["DEV [2]", "alpha [PostgreSQL]", "alpha-2 [PostgreSQL]"]
+    );
+}
+
+/// m3: a dim row says why; database rows say what they are.
+#[gpui::test]
+fn out_of_scope_rows_say_so(cx: &mut TestAppContext) {
+    let vcx = shell_with(cx, "en", vec![pg("shop", "app")]);
+    let id = profile_id(vcx, "shop");
+    show(
+        vcx,
+        id,
+        Some(catalog_gen(
+            DbmsKind::Postgres,
+            2,
+            vec![schema(
+                DbmsKind::Postgres,
+                &["app", "public"],
+                false,
+                vec![],
+            )],
+            vec![
+                (NsKey::schema(["app", "audit"]), LoadState::OutOfScope),
+                (NsKey::database("archive"), LoadState::OutOfScope),
+            ],
+        )),
+    );
+    open(vcx, &["shop", "app"]);
+    let audit = row_of(vcx, "audit");
+    assert!(audit.dim);
+    assert_eq!(
+        audit.a11y_description.as_deref(),
+        Some("schema, out of scope")
+    );
+    let archive = row_of(vcx, "archive");
+    assert!(archive.dim);
+    assert_eq!(
+        archive.a11y_description.as_deref(),
+        Some("database, out of scope")
+    );
+    assert_eq!(
+        row_of(vcx, "app").a11y_description.as_deref(),
+        Some("database")
+    );
+}
+
+/// m4: an index on an expression shows every part, the expression too.
+#[gpui::test]
+fn an_expression_index_shows_its_expression_part(cx: &mut TestAppContext) {
+    use hacivat_meta::props::{IndexProps, KeyColumn, KeyProps, Props};
+    let vcx = shell_with(cx, "en", vec![pg("shop", "app")]);
+    let id = profile_id(vcx, "shop");
+    let mut t = table("users", Some(1), &[("a", "text"), ("b", "text")]);
+    let root = t.root();
+    t.add(
+        root,
+        hacivat_meta::Obj::new(ObjectKind::Index, "ix_users").with_props(Props::Index(Arc::new(
+            IndexProps {
+                key: KeyProps {
+                    columns: vec![
+                        KeyColumn {
+                            ordinal: 1,
+                            name: Some(Arc::from("a")),
+                        },
+                        KeyColumn {
+                            ordinal: 2,
+                            name: None,
+                        },
+                    ],
+                    expressions: vec![Arc::from("lower(b)")],
+                    ..KeyProps::default()
+                },
+                ..IndexProps::default()
+            },
+        ))),
+    );
+    show(
+        vcx,
+        id,
+        Some(catalog(
+            DbmsKind::Postgres,
+            vec![schema(
+                DbmsKind::Postgres,
+                &["app", "public"],
+                false,
+                vec![t],
+            )],
+        )),
+    );
+    open(
+        vcx,
+        &["shop", "app", "public", "TABLES", "users", "INDEXES"],
+    );
+    assert_eq!(
+        row_of(vcx, "ix_users").type_text.map(|t| strip(&t)),
+        Some("(a, lower(b))".to_string())
+    );
+}
+
+/// m8 (mock surface 4): Escape clears the field; on an empty field it returns the focus to the
+/// tree; ↓ moves into the tree.
+#[gpui::test]
+fn escape_clears_the_filter_and_down_enters_the_tree(cx: &mut TestAppContext) {
+    let vcx = shell_with(cx, "en", vec![pg("shop", "app")]);
+    show(vcx, profile_id(vcx, "shop"), Some(pg_shop()));
+    let tree_focused = |vcx: &VisualTestContext| {
+        in_window(vcx, |window, cx| {
+            use gpui::Focusable as _;
+            explorer::tree(cx)
+                .unwrap()
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        })
+    };
+    filter(vcx, "total");
+    assert!(lines(vcx).len() > 2);
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert_eq!(
+        lines(vcx),
+        ["DEV [1]", "shop [PostgreSQL]"],
+        "the filter is cleared"
+    );
+    assert!(!tree_focused(vcx), "the field keeps the focus");
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(
+        tree_focused(vcx),
+        "Escape on an empty field returns to the tree"
+    );
+    in_window(vcx, explorer::focus_filter);
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("down");
+    vcx.run_until_parked();
+    assert!(tree_focused(vcx), "↓ moves into the tree");
 }

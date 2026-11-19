@@ -3922,3 +3922,20 @@ hv-explorer-not-loaded = Not loaded
 # Variables:
 #   $n (Number) - a count, e.g. 1204.
 hv-explorer-count = { $n }
+# Surface 1 (Explorer tree). A foreign key's type text after its name (mono): the table and
+# columns it references.
+# Variables:
+#   $target (String) - the referenced table, verbatim, e.g. "İSTANBUL_ŞUBE".
+#   $columns (String) - the referenced columns, verbatim, e.g. "id".
+hv-explorer-fk-target = → { $target } ({ $columns })
+# Surface 1 (Explorer tree). The accessible word of a database or schema row outside the
+# connection's scope (the row is drawn dim).
+hv-explorer-out-of-scope = out of scope
+# Surface 4 (Filter field). Under the field while connections, databases or schemas have no
+# loaded catalog: their names could not be searched.
+# Variables:
+#   $n (Number) - a count, e.g. 3.
+hv-explorer-filter-not-loaded = { $n ->
+        [one] Searches loaded names only. { $n } connection or schema isn't loaded yet.
+       *[other] Searches loaded names only. { $n } connections or schemas aren't loaded yet.
+    }

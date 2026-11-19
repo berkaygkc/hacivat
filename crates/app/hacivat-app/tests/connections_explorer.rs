@@ -94,6 +94,26 @@ fn root_rows(vcx: &VisualTestContext) -> Vec<explorer::ShownRow> {
         .collect()
 }
 
+/// Gives profile `name` a loaded catalog (`app.public` with one table), so the filter has
+/// searched everything it holds (fix round 1, I2).
+fn loaded_catalog(vcx: &VisualTestContext, name: &str) {
+    use support::catalogs::{catalog, schema, table};
+    let id = profile_id(vcx, name);
+    let cat = catalog(
+        hacivat_proto::DbmsKind::Postgres,
+        vec![schema(
+            hacivat_proto::DbmsKind::Postgres,
+            &["app", "public"],
+            false,
+            vec![table("items", Some(16_400), &[("id", "integer")])],
+        )],
+    );
+    vcx.cx.update(|cx| {
+        hacivat_app::explorer::adapter::set_catalog(id, Some(cat), None, cx);
+    });
+    vcx.run_until_parked();
+}
+
 /// The group headers with their counts (`PRODUCTION 1`), top down.
 fn group_headers(vcx: &VisualTestContext) -> Vec<String> {
     root_rows(vcx)
@@ -355,6 +375,9 @@ fn keyboard_paths(cx: &mut TestAppContext) {
 #[gpui::test]
 fn backspace_in_filter_does_not_delete(cx: &mut TestAppContext) {
     let vcx = with_profiles(cx, [("a", Some(EnvTag::Dev))]);
+    // ## m4-t14-explorer (fix round 1, I2; named exception): a loaded catalog, so "ab"
+    // really matches nothing.
+    loaded_catalog(vcx, "a");
     focus_filter(vcx);
     vcx.simulate_input("ab");
     assert!(row_names(vcx).is_empty());
@@ -484,6 +507,8 @@ fn only_connection_new_is_in_the_menu_bar(cx: &mut TestAppContext) {
 #[gpui::test]
 fn tab_moves_between_the_filter_and_the_list(cx: &mut TestAppContext) {
     let vcx = with_profiles(cx, [("a", Some(EnvTag::Dev))]);
+    // ## m4-t14-explorer (fix round 1, I2): a loaded catalog, so "zz" matches nothing.
+    loaded_catalog(vcx, "a");
     focus_filter(vcx);
     assert!(!context_stack(vcx).0.contains(&"Explorer"));
     // ## m4-t14-explorer (named exception): the filter's Turkish-tolerant toggle is a Tab stop
@@ -562,6 +587,11 @@ fn explorer_commands_never_act_on_a_hidden_row(cx: &mut TestAppContext) {
     vcx.simulate_keystrokes("enter");
     assert_eq!(connect_calls(vcx), ["orders-dev"]);
     // Nothing visible: nothing selected, and the explorer commands are disabled.
+    // ## m4-t14-explorer (fix round 1, I2; named exception): a profile whose catalog was not
+    // searched is never filtered away as "no match", so both profiles get a loaded catalog.
+    for name in ["orders-prod", "orders-dev"] {
+        loaded_catalog(vcx, name);
+    }
     focus_filter(vcx);
     vcx.simulate_input("zzz");
     assert!(row_names(vcx).is_empty());
@@ -714,15 +744,54 @@ fn drawn_meta(vcx: &VisualTestContext) -> Option<hacivat_ui::text::RenderedText>
         .find(|r| r.path.ends_with("#hv-tree-meta"))
 }
 
+/// Fix round 1 (m5): read-only production rows whose names grow one letter at a time, each with
+/// its engine as meta. Where a row first gets crowded its meta gives way while the name stays
+/// whole, and no row ever cuts its name before its meta.
 #[gpui::test]
 fn a_crowded_row_ellipsizes_its_meta_before_its_name(cx: &mut TestAppContext) {
-    let vcx = connected_row(cx, "orders-prod");
-    let name = drawn(vcx, "hv-tree-label");
-    assert_eq!(name.text.as_ref(), "orders-prod");
-    assert!(!name.truncated && !name.clipped, "{name:?}");
-    // The flags (a mark, a lock, lock-open) and the latency fit beside the whole name.
-    let meta = drawn_meta(vcx).expect("the latency is drawn");
-    assert!(meta.text.contains("ms") && !meta.clipped, "{meta:?}");
+    let vcx = with_profiles(cx, []);
+    for n in 1..=24 {
+        let mut p = test_profile(
+            &format!("orders-{}", "x".repeat(n)),
+            Some(EnvTag::Production),
+            "10.0.4.12",
+        );
+        p.read_only = true;
+        add_profile(vcx, p);
+    }
+    enable_registry(vcx);
+    // The drawn rows, top down: each name, then its meta if it drew one.
+    let mut rows: Vec<(
+        hacivat_ui::text::RenderedText,
+        Option<hacivat_ui::text::RenderedText>,
+    )> = Vec::new();
+    for r in registry_frame(vcx) {
+        if r.path.ends_with("#hv-tree-label") {
+            rows.push((r, None));
+        } else if r.path.ends_with("#hv-tree-meta")
+            && let Some(last) = rows.last_mut()
+        {
+            last.1 = Some(r);
+        }
+    }
+    assert!(rows.len() > 10, "{}", rows.len());
+    let (first, first_meta) = &rows[0];
+    assert!(!first.truncated && first_meta.as_ref().is_some_and(|m| !m.truncated));
+    assert!(
+        rows.iter().any(|(name, meta)| !name.truncated
+            && !name.clipped
+            && meta.as_ref().is_none_or(|m| m.truncated)),
+        "a crowded row gives way at its meta first"
+    );
+    for (name, meta) in &rows {
+        if name.truncated {
+            assert!(
+                meta.as_ref().is_none_or(|m| m.truncated),
+                "{name:?} {meta:?}"
+            );
+        }
+        assert!(!name.clipped, "{name:?}");
+    }
 }
 
 #[gpui::test]

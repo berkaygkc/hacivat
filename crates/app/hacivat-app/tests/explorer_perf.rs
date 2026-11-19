@@ -140,3 +140,79 @@ fn build_rows_for_15k_tables_under_16ms() {
     );
     assert!(p50 <= Duration::from_millis(16), "{p50:?}");
 }
+
+/// Fix round 1 (I3): the UI thread's share of applying a broad filter result. `c0` matches all
+/// 150,000 columns (every table and every Columns group is kept); the explorer swaps in a new
+/// model generation and flattens it twice (the old expansion, then the revealed one) before a
+/// frame builds its rows. Measured cold (a new cache each time): p95 within a 16 ms frame.
+#[test]
+#[ignore = "perf"]
+fn apply_a_broad_filter_within_a_frame() {
+    if !perf_enabled() {
+        return;
+    }
+    let (profile, cat) = big();
+    let base = model(&profile, &cat, 1);
+    let result = Arc::new(base.filter_job("c0", false).run());
+    assert_eq!(result.count, 150_000);
+    let mut took = Vec::new();
+    let mut rows = 0;
+    for generation in 2..=22 {
+        let t0 = Instant::now();
+        let inputs = ExplorerInputs {
+            profiles: vec![ProfileInput::new(profile.clone(), Some(cat.clone()))],
+            lang: "en".to_string(),
+            filter: Some(result.clone()),
+            ..ExplorerInputs::default()
+        };
+        let m = ExplorerModel::build(inputs, Rc::new(ExplorerCache::default()), generation);
+        let mut not_loaded = Vec::new();
+        let _old = Flat::build(&m, &KeySet::default(), &mut not_loaded);
+        let flat = Flat::build(&m, &result.ancestors, &mut not_loaded);
+        let shown = flat
+            .rows()
+            .iter()
+            .take(40)
+            .filter_map(|r| m.row(r.key))
+            .count();
+        took.push(t0.elapsed());
+        rows = flat.len();
+        assert_eq!(shown, 40);
+    }
+    took.sort();
+    let p95 = took[took.len() * 95 / 100 - 1];
+    eprintln!(
+        "explorer apply of `c0` (150,000 matches, {rows} rows revealed): median {:?}, p95 {p95:?}, max {:?}",
+        took[took.len() / 2],
+        took.last().unwrap()
+    );
+    assert!(p95 <= Duration::from_millis(16), "p95 {p95:?}");
+}
+
+/// Fix round 1 (I3): a job a newer query took over stops instead of running to its end.
+#[test]
+#[ignore = "perf"]
+fn a_superseded_filter_job_stops_early() {
+    if !perf_enabled() {
+        return;
+    }
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let (profile, cat) = big();
+    let m = model(&profile, &cat, 1);
+    let latest = Arc::new(AtomicU64::new(1));
+    let job = m.filter_job("c0", false).with_cancel(latest.clone(), 1);
+    latest.store(2, Ordering::Relaxed);
+    let t0 = Instant::now();
+    assert!(
+        job.run_cancellable().is_none(),
+        "a superseded job gives no result"
+    );
+    let stopped = t0.elapsed();
+    let t1 = Instant::now();
+    let _ = m.filter_job("c0", false).run();
+    let whole = t1.elapsed();
+    eprintln!(
+        "explorer filter: a superseded job stopped after {stopped:?} (a whole run {whole:?})"
+    );
+    assert!(stopped * 10 < whole, "{stopped:?} vs {whole:?}");
+}

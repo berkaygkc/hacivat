@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use std::panic::Location;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use hacivat_l10n::{Count, NoArgs, Text, ids};
 use hacivat_proto::{EnvTag, ProfileId};
@@ -49,8 +50,8 @@ use hacivat_ui::tree::{
 use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
-    Global, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Point, Render,
-    SharedString, Styled, Subscription, Task, WeakEntity, Window, canvas, div, px,
+    Global, Hsla, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Pixels, Point,
+    Render, SharedString, Styled, Subscription, Task, WeakEntity, Window, canvas, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, TypeStyle};
 
@@ -68,7 +69,7 @@ use crate::l10n_global::{L10nGlobal, is_turkic, text_fn, tr, tr_id, ui_language}
 use crate::shell::hooks::ShellHooks;
 use crate::shell::keymap_state::shortcut_label;
 use crate::shell::tiles::{self, panel_header, panel_title};
-use crate::shell::{Workspace, register_focus_context};
+use crate::shell::{Workspace, register_focus_context, unregister_focus_context};
 
 /// The key context of the focused tree (R20).
 pub const EXPLORER_CONTEXT: &str = "Explorer";
@@ -108,17 +109,23 @@ pub struct ExplorerView {
     /// The newest filter job; a result of an older one is dropped (latest wins).
     filter_seq: u64,
     filter_task: Option<Task<()>>,
+    /// The newest job's number, read by running jobs: an older job stops (fix round 1, I3).
+    latest: Arc<AtomicU64>,
+    /// The catalogs' change counter the filter last ran over (fix round 1, m10).
+    catalogs_seen: u64,
+    /// Whether the tree's focus carries the `Explorer` key context (cursor on a profile root).
+    context_on: bool,
     /// The children of contributed nodes expanded so far.
     loads: HashMap<TreeKey, ContributedLoad>,
     _subscriptions: Vec<Subscription>,
 }
 
-/// The `explorer` hook: builds the view, registers the tree's `Explorer` key context (P4).
+/// The `explorer` hook: builds the view; the tree's `Explorer` key context (P4) is registered
+/// while its cursor is on a profile root (ruling R-W2-12, [`ExplorerView::on_tree_changed`]).
 pub fn build(window: &mut Window, cx: &mut App) -> AnyView {
     let view = cx.new(|cx| ExplorerView::new(window, cx));
-    let list = view.read(cx).list_focus(cx);
-    register_focus_context(cx, list, EXPLORER_CONTEXT);
     cx.set_global(ExplorerHandle(view.downgrade()));
+    view.update(cx, |v, cx| v.on_tree_changed(cx));
     view.into()
 }
 
@@ -139,12 +146,15 @@ pub fn focus_filter(window: &mut Window, cx: &mut App) {
     }
 }
 
-/// Whether the explorer acts on profile `id` now: its root row is shown under the filter and
-/// is the tree's keyboard row (true without an explorer view). The profile commands are enabled
-/// only then, so their chords reach the tree on any other row (carries-w2 T14, R-W1-5).
+/// Whether `id`'s root row is shown under the current filter (true without an explorer view).
+///
+/// ## m4-t14-explorer (fix round 1, ruling R-W2-12): the M2a meaning. The commands act on the
+/// profile that owns the tree's cursor row ([`ConnectionsModel::selected`] follows it), from
+/// the palette and the welcome page wherever the cursor is; the `Explorer` key context, and so
+/// the Explorer keymap rows, exist only while the cursor is on a profile root.
 pub fn is_visible(cx: &App, id: ProfileId) -> bool {
     match explorer(cx) {
-        Some(view) => view.read(cx).acts_on(id, cx),
+        Some(view) => view.read(cx).visible_ids(cx).contains(&id),
         None => true,
     }
 }
@@ -418,14 +428,7 @@ fn profile_input(p: &Arc<Profile>, cx: &App) -> ProfileInput {
         }
         LiveState::Disconnected => (None, engine()),
     };
-    let a11y = (!words.is_empty()).then(|| {
-        words
-            .iter()
-            .map(|w| w.as_ref())
-            .collect::<Vec<_>>()
-            .join(", ")
-            .into()
-    });
+    let a11y = adapter::join_words(&words);
     ProfileInput {
         profile: p.clone(),
         connected: info.is_some(),
@@ -518,12 +521,24 @@ impl ExplorerView {
                 window,
                 |this, _, event: &InputEvent, window, cx| match event {
                     InputEvent::Changed => this.query_changed(cx),
-                    // P16: Escape in the field is the shell's Escape (cancel a connect).
+                    // ## fix round 1 (m8, mock surface 4): Escape clears the field; on an empty
+                    // field it is the shell's Escape (P16: cancel a connect) and the focus
+                    // returns to the tree.
                     InputEvent::Cancelled => {
+                        if !this.filter.read(cx).value().is_empty() {
+                            this.filter.update(cx, |f, cx| {
+                                f.set_value("");
+                                cx.notify();
+                            });
+                            this.query_changed(cx);
+                            return;
+                        }
                         let escape = cx.global::<ShellHooks>().escape.clone();
                         if let Some(escape) = escape {
                             escape(window, cx);
                         }
+                        let handle = this.list_focus(cx);
+                        window.focus(&handle, cx);
                     }
                     InputEvent::Submitted => {
                         let handle = this.list_focus(cx);
@@ -535,9 +550,15 @@ impl ExplorerView {
             cx.subscribe_in(&tree, window, |this, _, event: &TreeEvent, window, cx| {
                 this.on_tree_event(event, window, cx)
             }),
+            // Every move of the cursor (a header included, which emits no event).
+            cx.observe(&tree, |this, _, cx| this.on_tree_changed(cx)),
             cx.observe_global::<ConnectionsModel>(|this, cx| {
-                this.refresh(cx);
+                let names_moved = this.refresh(cx);
                 this.sync_selection(cx);
+                // ## fix round 1 (m1): an added or renamed profile is matched again.
+                if names_moved && !this.query(cx).is_empty() {
+                    this.query_changed(cx);
+                }
                 cx.notify();
             }),
             cx.observe_global::<adapter::ExplorerCatalogs>(|this, cx| {
@@ -546,8 +567,10 @@ impl ExplorerView {
                 if !renames.is_empty() {
                     this.apply_renames(&renames, cx);
                 }
-                // The filter's keys belong to the snapshots it ran over.
-                if this.result.is_some() {
+                // The filter's keys belong to the snapshots it ran over; a notification with
+                // no new catalog (the rename drain's) runs nothing again (fix round 1, m10).
+                let generation = adapter::catalogs_generation(cx);
+                if this.result.is_some() && generation != this.catalogs_seen {
                     this.query_changed(cx);
                 }
                 cx.notify();
@@ -565,6 +588,9 @@ impl ExplorerView {
             saved_expansion: None,
             filter_seq: 0,
             filter_task: None,
+            latest: Arc::default(),
+            catalogs_seen: 0,
+            context_on: false,
             loads: HashMap::new(),
             _subscriptions: subscriptions,
         };
@@ -591,11 +617,43 @@ impl ExplorerView {
         self.tolerant.unwrap_or_else(|| default_tolerant(cx))
     }
 
-    /// Whether the profile commands act on `id` now (see [`is_visible`]).
-    fn acts_on(&self, id: ProfileId, cx: &App) -> bool {
-        let key = profile_key(id);
+    /// The profile that owns the tree's cursor row, and whether the cursor is on its root.
+    fn cursor_owner(&self, cx: &App) -> (Option<ProfileId>, bool) {
         let tree = self.tree.read(cx);
-        tree.model().roots().contains(&key) && tree.cursor() == Some(key)
+        let Some(cursor) = tree.cursor().filter(|k| tree.flat().index_of(*k).is_some()) else {
+            return (None, false);
+        };
+        let model = tree.model();
+        (
+            model.profile_of(cursor),
+            model.profile_root(cursor).is_some(),
+        )
+    }
+
+    /// The tree changed (its cursor, its rows): ruling R-W2-12.
+    /// - The `Explorer` key context is registered for the tree's focus only while the cursor
+    ///   is on a profile root, so the Explorer keymap rows (Enter, ⌘E, ⌘D, ⌘⇧C, ⌫, Shift-F10)
+    ///   act only there; on any other row their chords reach the tree.
+    /// - [`ConnectionsModel::selected`] follows the profile that owns the cursor row, so the
+    ///   sheet and the palette's and welcome page's connection commands name the same one.
+    fn on_tree_changed(&mut self, cx: &mut Context<Self>) {
+        let (owner, on_root) = self.cursor_owner(cx);
+        if on_root != self.context_on {
+            self.context_on = on_root;
+            let handle = self.list_focus(cx);
+            if on_root {
+                register_focus_context(cx, handle, EXPLORER_CONTEXT);
+            } else {
+                unregister_focus_context(cx, &handle);
+            }
+        }
+        if let Some(owner) = owner
+            && cx
+                .try_global::<ConnectionsModel>()
+                .is_some_and(|m| m.selected() != Some(owner))
+        {
+            ConnectionsModel::select(cx, Some(owner));
+        }
     }
 
     // ---- the model --------------------------------------------------------------------------
@@ -628,12 +686,18 @@ impl ExplorerView {
         }
     }
 
-    /// Rebuilds the model when anything it shows changed.
-    fn refresh(&mut self, cx: &mut Context<Self>) {
+    /// Rebuilds the model when anything it shows changed. Answers whether a profile (its name
+    /// or host) or the language changed: an active filter then runs again (fix round 1, m1).
+    fn refresh(&mut self, cx: &mut Context<Self>) -> bool {
         let stamp = self.stamp(cx);
         if self.stamp.as_ref() == Some(&stamp) {
-            return;
+            return false;
         }
+        let ptrs = |s: &Stamp| s.profiles.iter().map(|p| p.0).collect::<Vec<_>>();
+        let names_moved = self
+            .stamp
+            .as_ref()
+            .is_none_or(|s| ptrs(s) != ptrs(&stamp) || s.l10n != stamp.l10n);
         if self
             .stamp
             .as_ref()
@@ -662,6 +726,7 @@ impl ExplorerView {
         self.generation += 1;
         let model = ExplorerModel::build(inputs, self.cache.clone(), self.generation);
         self.tree.update(cx, |t, cx| t.set_model(model, cx));
+        names_moved
     }
 
     /// The tree's type-ahead fold follows the filter's toggle (R-M4-50).
@@ -671,8 +736,8 @@ impl ExplorerView {
         self.tree.update(cx, |t, _| t.set_typeahead_fold(fold));
     }
 
-    /// The tree's selection follows [`ConnectionsModel::selected`] when it names another
-    /// profile (a row selected below a profile keeps it).
+    /// The tree's cursor follows [`ConnectionsModel::selected`] when it names another profile
+    /// (a cursor row below that profile keeps its place).
     fn sync_selection(&mut self, cx: &mut Context<Self>) {
         let Some(selected) = cx
             .try_global::<ConnectionsModel>()
@@ -680,11 +745,7 @@ impl ExplorerView {
         else {
             return;
         };
-        let owner = {
-            let tree = self.tree.read(cx);
-            let lead = tree.selection().iter().next().copied();
-            lead.and_then(|k| tree.model().profile_of(k))
-        };
+        let (owner, _) = self.cursor_owner(cx);
         if owner != Some(selected) {
             let key = profile_key(selected);
             self.tree.update(cx, |t, cx| t.select(key, cx));
@@ -729,12 +790,9 @@ impl ExplorerView {
 
     fn on_tree_event(&mut self, event: &TreeEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            TreeEvent::SelectionChanged(key) => {
-                let owner = key.and_then(|k| self.tree.read(cx).model().profile_of(k));
-                if cx.global::<ConnectionsModel>().selected() != owner {
-                    ConnectionsModel::select(cx, owner);
-                }
-            }
+            // The selected profile follows the cursor's owner (`on_tree_changed`); a selection
+            // a collapse cleared leaves the cursor on an ancestor of the same profile.
+            TreeEvent::SelectionChanged(_) => self.on_tree_changed(cx),
             TreeEvent::Activate(key) => self.activate(*key, window, cx),
             TreeEvent::ContextMenu(key, at) => {
                 // The menu of the row the event names, never the selection's (carries-w2).
@@ -864,7 +922,10 @@ impl ExplorerView {
     fn query_changed(&mut self, cx: &mut Context<Self>) {
         let query = self.query(cx);
         self.filter_seq += 1;
+        // A running job sees the new number and stops (fix round 1, I3).
+        self.latest.store(self.filter_seq, Ordering::Relaxed);
         self.filter_task = None;
+        self.catalogs_seen = adapter::catalogs_generation(cx);
         if query.is_empty() {
             if self.result.take().is_some() {
                 self.refresh(cx);
@@ -887,9 +948,12 @@ impl ExplorerView {
             return;
         }
         let seq = self.filter_seq;
-        let run = cx.background_spawn(async move { job.run() });
+        let job = job.with_cancel(self.latest.clone(), seq);
+        let run = cx.background_spawn(async move { job.run_cancellable() });
         self.filter_task = Some(cx.spawn(async move |this, cx| {
-            let result = run.await;
+            let Some(result) = run.await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 if this.filter_seq == seq {
                     this.apply_filter(result, cx);
@@ -957,6 +1021,17 @@ impl ExplorerView {
                     .flex_1()
                     .min_w(px(0.0))
                     .track_focus(&handle)
+                    // ## fix round 1 (m8, mock surface 4): ↓ moves into the tree.
+                    .capture_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                        let m = e.keystroke.modifiers;
+                        let plain = !(m.control || m.alt || m.shift || m.platform || m.function);
+                        let composing = this.filter.read(cx).is_composing();
+                        if e.keystroke.key == "down" && plain && !composing {
+                            let handle = this.list_focus(cx);
+                            window.focus(&handle, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
                     .child(self.filter.clone()),
             );
         if let Some(result) = &self.result {
@@ -1003,12 +1078,16 @@ impl ExplorerView {
         row.into_any_element()
     }
 
-    /// "Searches loaded names only…" under the field, when tables' columns are not loaded.
-    fn filter_hint(&self, theme: &Theme, cx: &App) -> Option<AnyElement> {
-        let result = self.result.as_ref().filter(|r| r.unloaded > 0)?;
+    /// "Searches loaded names only…" under the field: when connections, databases or schemas
+    /// have no loaded catalog, and when relations' columns are not loaded (fix round 1, I2:
+    /// what the filter could not search is said, never shown as "no match").
+    fn filter_hints(&self, theme: &Theme, cx: &App) -> Vec<AnyElement> {
+        let Some(result) = self.result.as_ref() else {
+            return Vec::new();
+        };
         let t = theme.tokens;
         let c = &t.colors;
-        Some(
+        let line = |text: SharedString, id: &'static str| {
             div()
                 .flex()
                 .flex_row()
@@ -1023,20 +1102,35 @@ impl ExplorerView {
                             .color(c.text_2.to_hsla()),
                     ),
                 )
-                .child(paragraph(
-                    tr(
-                        cx,
-                        ids::hv::EXPLORER_FILTER_UNLOADED,
-                        ids::hv::HvExplorerFilterUnloaded {
-                            n: Count(result.unloaded as u64),
-                        },
-                    ),
-                    t.type_ramp.body_sm,
-                    c.text_2.to_hsla(),
-                    "explorer-filter-unloaded",
-                ))
-                .into_any_element(),
-        )
+                .child(paragraph(text, t.type_ramp.body_sm, c.text_2.to_hsla(), id))
+                .into_any_element()
+        };
+        let mut out = Vec::new();
+        if result.unsearched > 0 {
+            out.push(line(
+                tr(
+                    cx,
+                    ids::hv::EXPLORER_FILTER_NOT_LOADED,
+                    ids::hv::HvExplorerFilterNotLoaded {
+                        n: Count(result.unsearched as u64),
+                    },
+                ),
+                "explorer-filter-not-loaded",
+            ));
+        }
+        if result.unloaded > 0 {
+            out.push(line(
+                tr(
+                    cx,
+                    ids::hv::EXPLORER_FILTER_UNLOADED,
+                    ids::hv::HvExplorerFilterUnloaded {
+                        n: Count(result.unloaded as u64),
+                    },
+                ),
+                "explorer-filter-unloaded",
+            ));
+        }
+        out
     }
 
     fn empty(&self, theme: &Theme, cx: &mut App) -> AnyElement {
@@ -1217,13 +1311,13 @@ impl Render for ExplorerView {
         let query = self.query(cx);
         let body = if empty {
             self.empty(&theme, cx)
-        } else if self.result.as_ref().is_some_and(|r| r.count == 0) {
+        } else if self.result.as_ref().is_some_and(|r| r.nothing_matches()) {
             self.no_match(&theme, &query, cx)
         } else {
             self.list(&theme)
         };
         let filter_row = self.filter_row(&theme, window, cx);
-        let hint = self.filter_hint(&theme, cx);
+        let hint = self.filter_hints(&theme, cx);
         div()
             .flex()
             .flex_col()

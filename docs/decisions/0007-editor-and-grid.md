@@ -1074,3 +1074,31 @@ The M2a connection list became the database explorer tree in place (R-M4-18): `h
   (the M2a `explorer-row-*` selectors became the tree's; the filter toggle is a Tab stop);
   `tests/support/mod.rs` block `// ## m4-t14-explorer` (catalog builders: `hacivat-meta`'s
   `fixture` is behind `test-support`, which `hacivat-app`'s tests do not enable).
+- *Fix round 1.*
+  - *Ruling R-W2-12 (I1).* The tree's focus carries the `Explorer` key context only while its
+    cursor is on a profile root, so the Explorer keymap rows act only there and every other row
+    gets its keys. `ConnectionsModel::selected` follows the profile that owns the cursor row, so
+    the sheet and the palette's and welcome page's connection commands (enabled wherever the
+    cursor is) name the same profile; `is_visible` keeps its M2a meaning. The M4 rows bound in
+    the `Explorer` context (F12, F5, ⌘←, ⌥⌘C, ⌥⌘F) follow the same rule: Task 24 decides
+    their context when it fills them.
+  - *Fail-closed filter (I2).* `FilterResult` counts what it could not search (`unsearched`:
+    connections with no catalog or generation 0, databases with nothing read, state-only
+    namespaces; `unloaded`: relations of a `Names` namespace). "No objects match" only when
+    nothing matched and both are 0; with no match those rows stay in sight (the roots are never
+    hidden), and "Searches loaded names only…" says why. With matches the filter narrows as
+    M2a's did.
+  - *Bounded apply, cancellable jobs (I3).* A filter reveals the ancestors of its first 200
+    matches (`REVEAL_HITS`); the rest are kept, behind "n of total". Applying the 150,000-match
+    `c0` result over 15,000 tables (15,225 rows) takes 2.9 ms at p95 on the UI thread, measured
+    in `explorer_perf`. A job checks a cancel token every 1,024 names and stops when a newer
+    query took over (1.2 ms vs a 100 ms whole run).
+  - *Minor.* An active filter runs again when a profile is added or renamed, or the language
+    changes, and not again on a rename hint's extra notification; the cache prunes with a
+    `HashSet`; accessible descriptions join their words with ", " and dim rows say "out of
+    scope"; key and index parts show their expressions; a foreign key's arrow is Fluent
+    (`hv-explorer-fk-target`); Escape clears the filter field (on an empty field it is the
+    shell's Escape and returns to the tree) and ↓ moves into the tree.
+  - *Named exceptions (accepted).* The M2a profile-root debug selectors are replaced by the
+    tree's own; `connections/explorer.rs` is a near-rewrite; `tests/m4_routing.rs`'s copy-chord
+    test gets a profile so the list has a root for its cursor.

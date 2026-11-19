@@ -19,7 +19,7 @@
 
 use std::cmp::Ordering;
 
-use hacivat_meta::props::Props;
+use hacivat_meta::props::{KeyProps, Props};
 use hacivat_meta::{Obj, ObjectKind};
 use hacivat_proto::DbmsKind;
 use hacivat_ui::icon::IconName;
@@ -227,37 +227,58 @@ impl NameOrder {
     }
 }
 
+/// A foreign key's target table and columns (verbatim), for its Fluent type text
+/// (`hv-explorer-fk-target`); `None` for any other object.
+pub fn fk_target(obj: &Obj) -> Option<(String, String)> {
+    let Props::ForeignKey(fk) = obj.props() else {
+        return None;
+    };
+    let target = fk.target.path.last()?.to_string();
+    let cols = fk
+        .target_columns
+        .iter()
+        .map(|c| c.as_ref())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some((target, cols))
+}
+
 /// The mono text after an object's name, if it has one (a rendered value, never a Fluent
-/// sentence: types, column lists and kinds are the server's own text).
+/// sentence: types, key parts and kinds are the server's own text; a foreign key's is
+/// [`fk_target`] in `hv-explorer-fk-target`).
 pub fn type_text(obj: &Obj) -> Option<SharedString> {
     if obj.kind() == ObjectKind::Unknown {
         return obj.raw_kind().map(|k| isolate(k));
     }
     match obj.props() {
         Props::Column(c) if !c.raw_type.is_empty() => Some(isolate(&c.raw_type)),
-        Props::Key(k) => column_list(k.columns.iter().filter_map(|c| c.name.as_deref())),
-        Props::Index(i) => column_list(i.key.columns.iter().filter_map(|c| c.name.as_deref())),
-        Props::ForeignKey(fk) => {
-            let target = fk.target.path.last()?;
-            let cols = fk
-                .target_columns
-                .iter()
-                .map(|c| c.as_ref())
-                .collect::<Vec<_>>()
-                .join(", ");
-            Some(format!("→ \u{2068}{target}\u{2069} (\u{2068}{cols}\u{2069})").into())
-        }
+        Props::Key(k) => key_parts(k),
+        Props::Index(i) => key_parts(&i.key),
         _ => None,
     }
 }
 
-/// `(a, b)`: a key's or an index's columns, verbatim and isolated.
-fn column_list<'a>(names: impl Iterator<Item = &'a str>) -> Option<SharedString> {
-    let names: Vec<&str> = names.collect();
-    if names.is_empty() {
+/// `(a, lower(b))`: a key's or an index's parts in key order, each verbatim and isolated: a
+/// column's name, or the expression of an expression part (fix round 1, m4: never a list that
+/// silently drops a part).
+fn key_parts(k: &KeyProps) -> Option<SharedString> {
+    let mut exprs = k.expressions.iter();
+    let mut parts: Vec<String> = Vec::new();
+    for c in &k.columns {
+        match c
+            .name
+            .as_deref()
+            .or_else(|| exprs.next().map(|e| e.as_ref()))
+        {
+            Some(text) => parts.push(format!("\u{2068}{text}\u{2069}")),
+            None => parts.push("…".to_string()),
+        }
+    }
+    parts.extend(exprs.map(|e| format!("\u{2068}{e}\u{2069}")));
+    if parts.is_empty() {
         return None;
     }
-    Some(format!("(\u{2068}{}\u{2069})", names.join(", ")).into())
+    Some(format!("({})", parts.join(", ")).into())
 }
 
 /// Sorts `members` (arena indexes of `objs`) for display: by ordinal for columns, else by the

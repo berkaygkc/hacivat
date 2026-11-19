@@ -3568,3 +3568,9 @@ hv-cmd-ddl-view-copy = DDL'i kopyala
 # Review: PO
 hv-explorer-not-loaded = Yüklenmedi
 hv-explorer-count = { $n }
+# Review: PO
+hv-explorer-fk-target = → { $target } ({ $columns })
+# Review: PO
+hv-explorer-out-of-scope = kapsam dışı
+# Review: PO
+hv-explorer-filter-not-loaded = Yalnız yüklenmiş adlarda arar. { $n } bağlantı ya da şema henüz yüklenmedi.

@@ -639,6 +639,9 @@ fn ddl_view_tabs_are_one_per_object(cx: &mut TestAppContext) {
 #[gpui::test]
 fn copy_chord_passes_through_outside_the_ddl_text(cx: &mut TestAppContext) {
     let vcx = shell_with_connections(cx, "en");
+    // ## m4-t14-explorer (fix round 1, ruling R-W2-12; named exception): the tree adds
+    // `Explorer` only while its cursor is on a profile root, so the list has one to land on.
+    add_profile(vcx, test_profile("a", None, "127.0.0.1"));
     in_window(vcx, |window, _| window.activate_window());
     let profile = ProfileId::new();
     let ws = workspace(vcx);

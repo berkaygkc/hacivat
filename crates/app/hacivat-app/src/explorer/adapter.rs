@@ -56,6 +56,7 @@ use std::fmt;
 use std::hash::BuildHasherDefault;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use hacivat_l10n::{ArgValue, L10n, MatchMode, PreparedQuery, SearchOpts, build_key};
 use hacivat_meta::kind::{DbLevel, database_level};
@@ -661,7 +662,7 @@ impl ExplorerCache {
             live.iter()
                 .any(|(p, c)| p == id && c.as_ref().is_some_and(|c| Arc::ptr_eq(c, snap)))
         });
-        let arenas: Vec<usize> = live
+        let arenas: std::collections::HashSet<usize> = live
             .iter()
             .filter_map(|(_, c)| c.as_ref())
             .flat_map(|c| c.namespaces.values().map(|n| Arc::as_ptr(n) as usize))
@@ -981,6 +982,7 @@ impl ExplorerModel {
             tolerant,
             profiles,
             contributed,
+            cancel: None,
         }
     }
 
@@ -1374,7 +1376,17 @@ impl ExplorerModel {
         } else {
             rows::kind_icon(obj.kind())
         });
-        row.type_text = rows::type_text(obj);
+        row.type_text = match rows::fk_target(obj) {
+            // ## fix round 1 (m12): the arrow is Fluent's, never code's.
+            Some((target, columns)) => Some(self.t_args(
+                "hv-explorer-fk-target",
+                vec![
+                    ("target", ArgValue::Text(target)),
+                    ("columns", ArgValue::Text(columns)),
+                ],
+            )),
+            None => rows::type_text(obj),
+        };
         let mut words: Vec<SharedString> = Vec::new();
         if obj.flags().contains(ObjFlags::INVISIBLE_CHARS) {
             let word = self.t(Badge::Invisible.message_id());
@@ -1426,6 +1438,8 @@ impl ExplorerModel {
         let mut words = vec![kind_word];
         if entry.out_of_scope() {
             row.dim = true;
+            // ## fix round 1 (m3): dim is said, not only drawn.
+            words.push(self.t("hv-explorer-out-of-scope"));
             row.tooltip = Some(self.t_args(
                 "hv-explorer-out-of-scope-tip",
                 vec![("name", ArgValue::Text(entry.name().to_string()))],
@@ -1455,8 +1469,11 @@ impl ExplorerModel {
     fn database_row(&self, db: &DbEntry) -> TreeRowData {
         let mut row = TreeRowData::new(rows::isolate(&db.name), TextSource::Catalog);
         row.icon = Some(rows::kind_icon(ObjectKind::Database));
+        let mut words =
+            vec![self.t_args("model-kind-database", vec![("count", ArgValue::Count(1))])];
         if !db.in_scope {
             row.dim = true;
+            words.push(self.t("hv-explorer-out-of-scope"));
             row.tooltip = Some(self.t_args(
                 "hv-explorer-out-of-scope-db-tip",
                 vec![("name", ArgValue::Text(db.name.to_string()))],
@@ -1475,6 +1492,7 @@ impl ExplorerModel {
             row.meta = Some(self.t_args("hv-explorer-scope-count", args()));
             row.tooltip = Some(self.t_args("hv-explorer-scope-count-tip", args()));
         }
+        row.a11y_description = join_words(&words);
         row
     }
 
@@ -1512,8 +1530,9 @@ impl ExplorerModel {
     }
 }
 
-/// The accessible description: the words, one sentence each.
-fn join_words(words: &[SharedString]) -> Option<SharedString> {
+/// The accessible description: the state words, comma-separated (the profile roots' form,
+/// `connections::explorer`; fix round 1, m3).
+pub(crate) fn join_words(words: &[SharedString]) -> Option<SharedString> {
     if words.is_empty() {
         return None;
     }
@@ -1522,7 +1541,7 @@ fn join_words(words: &[SharedString]) -> Option<SharedString> {
             .iter()
             .map(|w| w.as_ref())
             .collect::<Vec<_>>()
-            .join(". ")
+            .join(", ")
             .into(),
     )
 }
@@ -1598,6 +1617,14 @@ impl TreeModel for ExplorerModel {
 
 // ---- filter -----------------------------------------------------------------------------------
 
+/// The filter reveals (expands the rows above) at most this many matches; the others are kept
+/// (shown when their ancestors are opened) with their group's "n of total" (fix round 1, I3:
+/// applying a broad result stays within a frame).
+pub const REVEAL_HITS: usize = 200;
+
+/// A job checks its cancel token after this many names.
+const CANCEL_EVERY: usize = 1_024;
+
 /// What the filter found: the matching rows and every row above one.
 #[derive(Debug, Clone, Default)]
 pub struct FilterResult {
@@ -1605,14 +1632,27 @@ pub struct FilterResult {
     pub tolerant: bool,
     /// The rows whose name (or a profile's host) matches.
     pub hits: KeySet,
-    /// The rows above a match (expanded while the filter is on).
+    /// The rows above the first [`REVEAL_HITS`] matches (expanded while the filter is on).
     pub ancestors: KeySet,
-    /// `hits` and `ancestors`: the rows the tree shows.
+    /// The rows the tree shows: every match and every row above one. When nothing matched,
+    /// also the rows whose catalog the filter could not search, with the rows above them, so
+    /// an unsearched catalog is never shown as "no match" (fail-closed, fix round 1, I2); with
+    /// matches the filter narrows as M2a's did.
     pub keep: KeySet,
     /// How many rows match.
     pub count: usize,
-    /// Tables whose columns are not loaded (`Names` level): the filter cannot search them.
+    /// Relations whose children are not loaded (`Names` level): their columns cannot match.
     pub unloaded: usize,
+    /// Connections, databases and schemas with no loaded catalog (none, generation 0, or only
+    /// a load state): their names cannot match.
+    pub unsearched: usize,
+}
+
+impl FilterResult {
+    /// Whether "No objects match" is a fact: nothing matched and everything was searched.
+    pub fn nothing_matches(&self) -> bool {
+        self.count == 0 && self.unloaded == 0 && self.unsearched == 0
+    }
 }
 
 struct FilterProfile {
@@ -1658,6 +1698,8 @@ pub struct FilterJob {
     tolerant: bool,
     profiles: Vec<FilterProfile>,
     contributed: Vec<FilterContributed>,
+    /// The newest job's number and this job's: a job that is no longer the newest stops.
+    cancel: Option<(Arc<AtomicU64>, u64)>,
 }
 
 impl fmt::Debug for FilterJob {
@@ -1676,11 +1718,31 @@ struct Found<'a> {
     opts: SearchOpts,
     query: &'a PreparedQuery,
     buf: Vec<u8>,
+    reveal_left: usize,
+    cancel: Option<(&'a AtomicU64, u64)>,
+    ticks: usize,
+    stopped: bool,
+    /// Rows kept only when nothing matches (unsearched catalogs and the rows above them).
+    fallback: Vec<TreeKey>,
 }
 
 impl Found<'_> {
-    fn matches(&self, text: &str) -> bool {
-        self.query.matches(&build_key(text, &self.opts)).is_some()
+    fn matches(&mut self, text: &str) -> bool {
+        self.ticks += 1;
+        if self.ticks.is_multiple_of(CANCEL_EVERY)
+            && let Some((latest, mine)) = self.cancel
+            && latest.load(Ordering::Relaxed) != mine
+        {
+            self.stopped = true;
+        }
+        !self.stopped && self.query.matches(&build_key(text, &self.opts)).is_some()
+    }
+
+    /// Whether the next match is revealed (its ancestors expanded).
+    fn reveal(&mut self) -> bool {
+        let r = self.reveal_left > 0;
+        self.reveal_left = self.reveal_left.saturating_sub(1);
+        r
     }
 
     fn hit(&mut self, key: TreeKey, chain: &[TreeKey]) {
@@ -1688,14 +1750,25 @@ impl Found<'_> {
             self.r.count += 1;
         }
         self.r.keep.insert(key);
-        self.above(chain);
+        let reveal = self.reveal();
+        self.above(chain, reveal);
     }
 
-    fn above(&mut self, chain: &[TreeKey]) {
+    fn above(&mut self, chain: &[TreeKey], reveal: bool) {
         for k in chain {
-            self.r.ancestors.insert(*k);
             self.r.keep.insert(*k);
+            if reveal {
+                self.r.ancestors.insert(*k);
+            }
         }
+    }
+
+    /// A row the filter could not search inside: counted, and kept (with the rows above it)
+    /// if nothing matches, never hidden as "no match" (fail-closed).
+    fn unsearched(&mut self, key: TreeKey, chain: &[TreeKey]) {
+        self.r.unsearched += 1;
+        self.fallback.push(key);
+        self.fallback.extend_from_slice(chain);
     }
 
     /// An object of `ns` at `idx` matched: it, its group header and every row above it.
@@ -1712,6 +1785,7 @@ impl Found<'_> {
             self.r.count += 1;
         }
         self.r.keep.insert(own);
+        let reveal = self.reveal();
         let objs = ns.objs();
         let mut cur = idx;
         loop {
@@ -1723,33 +1797,50 @@ impl Found<'_> {
             };
             if let Some(g) = DisplayGroup::of(objs[cur as usize].kind()) {
                 let gk = group_key(parent_key, g);
-                self.r.ancestors.insert(gk);
                 self.r.keep.insert(gk);
+                if reveal {
+                    self.r.ancestors.insert(gk);
+                }
             }
             if parent == 0 {
                 break;
             }
-            self.r.keep.insert(parent_key);
-            if !self.r.ancestors.insert(parent_key) {
-                // Its own rows above were added with it.
+            let fresh = self.r.keep.insert(parent_key);
+            // The rows above an object already seen were added with it.
+            let seen = if reveal {
+                !self.r.ancestors.insert(parent_key)
+            } else {
+                !fresh
+            };
+            if seen {
                 return;
             }
             cur = parent;
         }
-        self.above(&[owner]);
-        self.above(chain);
+        self.above(&[owner], reveal);
+        self.above(chain, reveal);
     }
 
     /// Every object of `ns` below its root whose name matches; `owner` is the root's row.
     fn arena(&mut self, id: ProfileId, ns: &NamespaceSnapshot, owner: TreeKey, chain: &[TreeKey]) {
         let names_only = ns.meta().level == Level::Names;
+        let mut unloaded = false;
         for (idx, obj) in ns.objs().iter().enumerate().skip(1) {
-            if names_only && obj.kind() == ObjectKind::Table && obj.child_count() == 0 {
+            if self.stopped {
+                return;
+            }
+            if names_only && is_relation(obj.kind()) && obj.child_count() == 0 {
                 self.r.unloaded += 1;
+                unloaded = true;
             }
             if self.matches(obj.name()) {
                 self.object(id, ns, idx as u32, owner, chain);
             }
+        }
+        if unloaded {
+            // Its columns could not be searched: the namespace row stays if nothing matches.
+            self.fallback.push(owner);
+            self.fallback.extend_from_slice(chain);
         }
     }
 
@@ -1761,14 +1852,21 @@ impl Found<'_> {
         if self.matches(e.name()) {
             self.hit(key, chain);
         }
-        if let Some(ns) = &e.ns {
+        match &e.ns {
             // `object` adds the schema row and `chain` above each match.
-            self.arena(id, ns, key, chain);
+            Some(ns) => self.arena(id, ns, key, chain),
+            None => self.unsearched(key, chain),
         }
     }
 }
 
 impl FilterJob {
+    /// Stops the job early once `latest` no longer holds `seq` (a newer query was typed).
+    pub fn with_cancel(mut self, latest: Arc<AtomicU64>, seq: u64) -> FilterJob {
+        self.cancel = Some((latest, seq));
+        self
+    }
+
     /// How many names the job matches (the profiles and every loaded object).
     pub fn names(&self) -> usize {
         let catalog: usize = self
@@ -1799,6 +1897,11 @@ impl FilterJob {
 
     /// Matches every name (off the UI thread for more than [`SYNC_FILTER_NAMES`] names).
     pub fn run(&self) -> FilterResult {
+        self.run_cancellable().unwrap_or_default()
+    }
+
+    /// [`FilterJob::run`], or `None` when a newer job took over while it ran.
+    pub fn run_cancellable(&self) -> Option<FilterResult> {
         let opts = SearchOpts {
             turkish_tolerant: self.tolerant,
             mode: MatchMode::Contains,
@@ -1813,6 +1916,11 @@ impl FilterJob {
             opts,
             query: &query,
             buf: Vec::new(),
+            reveal_left: REVEAL_HITS,
+            cancel: self.cancel.as_ref().map(|(a, s)| (a.as_ref(), *s)),
+            ticks: 0,
+            stopped: false,
+            fallback: Vec::new(),
         };
         for p in &self.profiles {
             let root = profile_key(p.id);
@@ -1820,6 +1928,8 @@ impl FilterJob {
                 f.hit(root, &[]);
             }
             let Some(layout) = p.layout.as_deref() else {
+                // No catalog, or generation 0: not searched, so never "no match".
+                f.unsearched(root, &[]);
                 continue;
             };
             let chain = [root];
@@ -1841,6 +1951,9 @@ impl FilterJob {
                 if f.matches(&db.name) {
                     f.hit(dk, &chain);
                 }
+                if db.schemas.is_empty() && db.system.is_empty() && db.db_ns.is_none() {
+                    f.unsearched(dk, &chain);
+                }
                 let below = [root, dk];
                 for e in &db.schemas {
                     f.schema(p.id, e, &below);
@@ -1859,7 +1972,15 @@ impl FilterJob {
                 f.hit(c.key, &c.chain);
             }
         }
-        f.r
+        if f.stopped {
+            return None;
+        }
+        if f.r.count == 0 {
+            // Nothing matched: what could not be searched stays in sight (I2).
+            let fallback = std::mem::take(&mut f.fallback);
+            f.r.keep.extend(fallback);
+        }
+        Some(f.r)
     }
 }
 
