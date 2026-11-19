@@ -114,6 +114,16 @@ struct RawTarget {
     internal_port: u16,
     tls_default: RawTls,
     sets: Vec<String>,
+    // ## m4-t01c-fixtures (fix round 3, ruling R-W0-3)
+    /// `false` for a special-purpose target (pg17wrap): never in [`targets`],
+    /// [`targets_in_set`], [`target`], [`ids_in_set`] or [`all_targets_unfiltered`]; reached only
+    /// through [`require_target`] by the tests written for it.
+    #[serde(default = "generic_default")]
+    generic: bool,
+}
+
+fn generic_default() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -133,29 +143,54 @@ pub fn docker_enabled_from(v: Option<&str>) -> bool {
     v == Some("1")
 }
 
-/// Every target of `docker/m2a/targets.toml`, in file order, ignoring `HACIVAT_DOCKER_SET`.
+/// Every generic target of `docker/m2a/targets.toml`, in file order, ignoring
+/// `HACIVAT_DOCKER_SET`. Special-purpose targets (`generic = false`, ruling R-W0-3) are left
+/// out: see [`all_targets_with_special`].
 ///
 /// # Panics
 /// When the committed file does not parse (a repository bug, caught by this crate's tests).
 pub fn all_targets_unfiltered() -> Vec<DockerTarget> {
+    every_target()
+        .into_iter()
+        .filter_map(|(t, generic)| generic.then_some(t))
+        .collect()
+}
+
+// ## m4-t01c-fixtures (fix round 3, ruling R-W0-3)
+/// Every target of `docker/m2a/targets.toml`, special-purpose ones (pg17wrap) included, in
+/// file order: for the checks that the file and `compose.yml` agree, never for iterating
+/// servers under test.
+///
+/// # Panics
+/// As [`all_targets_unfiltered`].
+pub fn all_targets_with_special() -> Vec<DockerTarget> {
+    every_target().into_iter().map(|(t, _)| t).collect()
+}
+
+/// Every target with whether it is generic.
+fn every_target() -> Vec<(DockerTarget, bool)> {
     targets_file()
         .target
         .into_iter()
-        .map(|t| DockerTarget {
-            id: t.id,
-            engine: t.engine,
-            major: t.major,
-            host: HOST.to_string(),
-            port: t.port,
-            user: USER.to_string(),
-            password: PASSWORD.to_string(),
-            database: DATABASE.to_string(),
-            tls_default: match t.tls_default {
-                RawTls::None => TlsDefault::None,
-                RawTls::SelfSigned => TlsDefault::SelfSigned,
-            },
-            sets: t.sets,
-            internal: (t.service, t.internal_port),
+        .map(|t| {
+            let generic = t.generic;
+            let target = DockerTarget {
+                id: t.id,
+                engine: t.engine,
+                major: t.major,
+                host: HOST.to_string(),
+                port: t.port,
+                user: USER.to_string(),
+                password: PASSWORD.to_string(),
+                database: DATABASE.to_string(),
+                tls_default: match t.tls_default {
+                    RawTls::None => TlsDefault::None,
+                    RawTls::SelfSigned => TlsDefault::SelfSigned,
+                },
+                sets: t.sets,
+                internal: (t.service, t.internal_port),
+            };
+            (target, generic)
         })
         .collect()
 }
@@ -403,7 +438,11 @@ pub fn require_target(id: &str) -> Option<DockerTarget> {
 /// [`require_target`] for a given active set (`None`: every target), without the health check:
 /// the pure core, like [`targets_in_set`].
 pub fn require_target_in_set(set: Option<&str>, id: &str) -> Option<DockerTarget> {
-    let found = targets_in_set(set, None).into_iter().find(|t| t.id == id);
+    // ## m4-t01c-fixtures (fix round 3, R-W0-3): a special-purpose target too, by its id.
+    let found = all_targets_with_special()
+        .into_iter()
+        .filter(|t| set.is_none_or(|s| t.sets.iter().any(|x| x == s)))
+        .find(|t| t.id == id);
     if found.is_none() {
         eprintln!("skip {id}: not in set {}", set.unwrap_or("<all>"));
     }

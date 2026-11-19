@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use hacivat_proto::DbmsKind::{MariaDb as Maria, MySql as My, Postgres as Pg};
 use hacivat_testkit::{
-    TlsDefault, all_targets_unfiltered, artifact_in, docker_enabled_from, ids_in_set,
-    ssh_targets_in_set, targets_in_set,
+    TlsDefault, all_targets_unfiltered, all_targets_with_special, artifact_in, docker_enabled_from,
+    ids_in_set, require_target_in_set, ssh_targets_in_set, targets_in_set,
 };
 use yaml_rust2::{Yaml, YamlLoader};
 
@@ -59,7 +59,8 @@ fn compose_services() -> BTreeMap<String, Service> {
 #[test]
 fn targets_and_compose_agree() {
     let compose = compose_services();
-    let targets = all_targets_unfiltered();
+    // ## m4-t01c-fixtures (fix round 3): special-purpose targets have services too.
+    let targets = all_targets_with_special();
     // One service per database target, per SSH bastion, and the two generators: the SSH keys
     // and (## m2b-fix-f2-x509) mysql84-x509's certificates.
     assert_eq!(
@@ -119,13 +120,13 @@ fn every_target_has_an_internal_endpoint() {
 
 #[test]
 fn pg17_auth_has_its_own_port() {
-    let ports: BTreeSet<u16> = all_targets_unfiltered()
+    let ports: BTreeSet<u16> = all_targets_with_special()
         .into_iter()
         .map(|t| t.port)
         .collect();
     assert_eq!(
         ports.len(),
-        all_targets_unfiltered().len(),
+        all_targets_with_special().len(),
         "host ports clash"
     );
     assert!(!ports.contains(&2222), "2222 is sshd-a");
@@ -187,8 +188,9 @@ fn full_set_is_every_target() {
     sorted.sort();
     assert_eq!(ids_in_set("full"), sorted);
     // ## m2b-fix-f2-x509: mysql84-x509 is the fifteenth.
-    // ## m4-t01c-fixtures (named exception): pg17wrap is the sixteenth.
-    assert_eq!(all.len(), 16);
+    // ## m4-t01c-fixtures (fix round 3): pg17wrap is special-purpose, not one of them.
+    assert_eq!(all.len(), 15);
+    assert_eq!(all_targets_with_special().len(), 16);
 }
 
 #[test]
@@ -204,8 +206,8 @@ fn set_filter_and_engine_filter_combine() {
         .collect();
     assert_eq!(full_maria, ["mariadb106", "mariadb1011", "mariadb114"]);
     // No set selected: every target.
-    // ## m4-t01c-fixtures (named exception): 16 with pg17wrap.
-    assert_eq!(targets_in_set(None, None).len(), 16);
+    // ## m4-t01c-fixtures (fix round 3): pg17wrap is never iterated.
+    assert_eq!(targets_in_set(None, None).len(), 15);
     assert!(targets_in_set(Some("nightly"), None).is_empty());
 }
 
@@ -273,7 +275,7 @@ fn m4_logins_are_mysql_family_only() {
             );
         }
     }
-    let wrap = all_targets_unfiltered()
+    let wrap = all_targets_with_special()
         .into_iter()
         .find(|t| t.id == "pg17wrap")
         .expect("pg17wrap");
@@ -339,4 +341,30 @@ fn fixture_calls_spell_the_procedures_and_refuse_the_rest() {
         (u.user.as_str(), u.database.as_str()),
         ("hvm4_t01c_user", "information_schema")
     );
+}
+
+// ## m4-t01c-fixtures (fix round 3, ruling R-W0-3)
+#[test]
+fn special_purpose_targets_are_never_iterated_but_can_be_required() {
+    let special: Vec<String> = all_targets_with_special()
+        .into_iter()
+        .filter(|t| !all_targets_unfiltered().contains(t))
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(special, ["pg17wrap"]);
+    for set in [None, Some("pr"), Some("full")] {
+        for engine in [None, Some(Pg)] {
+            assert!(
+                targets_in_set(set, engine)
+                    .iter()
+                    .all(|t| t.id != "pg17wrap"),
+                "{set:?} {engine:?}"
+            );
+        }
+    }
+    assert!(!ids_in_set("full").contains(&"pg17wrap".to_string()));
+    let wrap = require_target_in_set(Some("full"), "pg17wrap").expect("reachable by id");
+    assert_eq!((wrap.engine, wrap.port), (Pg, 54357));
+    assert!(require_target_in_set(None, "pg17wrap").is_some());
+    assert!(require_target_in_set(Some("pr"), "pg17wrap").is_none());
 }

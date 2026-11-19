@@ -22,7 +22,7 @@ every container is named `m2a-<id>`. Every port binds to `127.0.0.1` only.
 | `sshd-a` | Alpine OpenSSH bastion (`sshd/`), networks `default` + `ssh-inner` | 2222 | n/a | pr, full |
 | `sshd-b` | the same image, **no published port**: reached only through `sshd-a` | none | n/a | pr, full |
 | `mysql84-x509` | `mysql:8.4`, `ssl_ca` = a generated test CA, `hv_x509 REQUIRE X509` (`mysql-x509/`) | 33094 | self_signed | full |
-| `pg17wrap` | `postgres:17` whose cluster jumps past 2^31 transaction ids at first start (`pg-wrap/`; m4-t01c) | 54357 | none | full |
+| `pg17wrap` | `postgres:17` whose cluster jumps past 2^31 transaction ids at first start (`pg-wrap/`; m4-t01c). Special-purpose (`generic = false`): never in `targets()`, reached only through `require_target("pg17wrap")` | 54357 | none | full |
 
 `ssh-client-keys` is a helper service (no target): it writes the client key pairs once and
 stays up so the bastions can wait for it. `mysql-x509-certs` is another (m2b-fix-f2, T13
