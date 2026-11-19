@@ -5,6 +5,15 @@
 //! ## m4-t01b-seams: the seam. Task 14 places the nodes in the tree and joins them to the
 //! filter; M4 registers no contributor. A contributed node's [`TreeKey`] is domain-separated by
 //! its owner (M4b hashes `"hv-scripts\0"` first), so it never equals an object's key.
+//!
+//! ## m4-t14-explorer: placement (`explorer::adapter`). A PostgreSQL database row lists its
+//! contributed nodes first, above its schemas; a MySQL/MariaDB database (a schema) lists them
+//! above its kind groups; a SQLite profile (one file) lists them under its root, above `main`,
+//! asked for with the database name `main`. A [`ContributedChildren::Lazy`] node's children are
+//! asked for when the node is expanded (on the UI thread, then kept until the contributor's
+//! generation moves); their rows come from [`ExplorerContributor::child_node`]. The filter
+//! matches [`ContributedNode::filter_text`] of every node it knows (loaded names only, as for
+//! catalog objects).
 
 use std::fmt;
 use std::rc::Rc;
@@ -55,6 +64,14 @@ pub trait ExplorerContributor: 'static {
     ) -> Vec<ContributedNode>;
     /// The children of one of this contributor's nodes.
     fn children(&self, key: TreeKey, cx: &App) -> ChildState;
+    // ## m4-t14-explorer (additive): the rows of lazily listed children.
+    /// One of this contributor's nodes listed by [`ContributedChildren::Lazy`] or
+    /// [`ExplorerContributor::children`]: its row, children and filter text. A key the
+    /// contributor does not describe (`None`, the default) is not drawn.
+    fn child_node(&self, key: TreeKey, cx: &App) -> Option<ContributedNode> {
+        let _ = (key, cx);
+        None
+    }
     /// Enter or a double click on one of this contributor's nodes.
     fn activate(&self, key: TreeKey, window: &mut Window, cx: &mut App);
     /// The context menu of one of this contributor's nodes.

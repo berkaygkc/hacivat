@@ -912,3 +912,56 @@ async fn run_ended_comes_while_busy_and_the_reply_after_idle() {
     );
     assert_eq!(snap(&h).state, SessionState::Idle, "idle before the reply");
 }
+
+// ## m4-pgcancel
+
+/// Ruling I1 (fail closed), the cursor guard's two places: a protocol cancel that answered
+/// `Err(Timeout)` may still land, so the session breaks and the next request never runs on
+/// the connection. `overdue`: the cancel goes out while a chunk is a second late (and answers
+/// while the call still runs); else at once beside the close (answered after the call).
+async fn a_typed_cancel_that_timed_out_breaks_the_session(overdue: bool) {
+    let q = if overdue {
+        FakeQuery {
+            chunk_delay: secs(60),
+            ..select("SELECT", 1_000_000)
+        }
+    } else {
+        FakeQuery {
+            never_pending: true,
+            ..select("SELECT", u64::MAX)
+        }
+    };
+    let (h, f) = session(pg().cancel_times_out().queries(vec![q])).await;
+    let o = Recorder::new();
+    let t = h.run(spec_with(
+        &o,
+        &[("SELECT * FROM big", overdue)],
+        FetchPolicy::default(),
+    ));
+    settle_until("the first chunk", || o.rows() >= 500).await;
+    let _ = h.cancel(t.seq).await.unwrap();
+    // The fake's timed-out cancel ended nothing; how the run ended is not the point.
+    let _ = t.reply.await.unwrap();
+    assert_eq!(f.cancel_calls(), 1, "overdue {overdue}");
+    assert_eq!(
+        snap(&h).state,
+        SessionState::Broken(ErrClass::Cancelled),
+        "overdue {overdue}"
+    );
+    assert_eq!(f.open_connections(), 0, "overdue {overdue}");
+    assert_eq!(
+        run(&h, "SELECT 2").await.unwrap_err().kind,
+        ExecErrorKind::NotConnected
+    );
+    assert!(!f.executed().contains(&"SELECT 2".to_string()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_overdue_typed_cancel_that_timed_out_breaks_the_session() {
+    a_typed_cancel_that_timed_out_breaks_the_session(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_typed_cancel_beside_the_close_that_timed_out_breaks_the_session() {
+    a_typed_cancel_that_timed_out_breaks_the_session(false).await;
+}

@@ -204,6 +204,10 @@ pub enum ProbeWarning {
 }
 
 /// Cancels the statement running on a connection (HV-DRV-01). `None` in M2a.
+///
+/// ## m4-pgcancel: `cancel()` ends only once the server has acted on the request (PostgreSQL:
+/// it closed the cancel connection), so a caller that awaits it before the next statement can
+/// be sure the cancel never reaches that statement. An `Err(Timeout)` may still land.
 pub trait CancelHandle: Send + Sync {
     fn cancel(&self) -> BoxFuture<'static, Result<(), RawError>>;
 }

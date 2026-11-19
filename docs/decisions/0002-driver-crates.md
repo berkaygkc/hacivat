@@ -1501,3 +1501,60 @@ warnings), R-M3-79 (bind values). `TypedCaps.binds` is `true` on all three drive
     signal (a `futures` channel, set up by `collect_notice_texts`), on both the extended and the
     simple path. A PL/pgSQL loop's `RAISE NOTICE` progress therefore arrives as it is raised.
     Waiting on the stream is cancel-safe: `try_next` dropped unfinished loses nothing.
+
+## m4-pgcancel — hacivat-driver-pg
+
+- **A protocol cancel ends once the server acted on it.** PostgreSQL answers nothing to a
+  `CancelRequest`: the server process that reads it signals the backend, then closes the
+  connection. `tokio-postgres`'s `cancel_query_raw` returned as soon as the request was
+  written, so `CancelHandle::cancel()` could end while the request was still on its way, and a
+  cancel meant for statement *N* could land on statement *N*+1. Every caller that awaits the
+  cancel before its next statement (the session's `settle`, the cursor's `guard`) relied on a
+  promise the driver did not keep. CI run 44595239297 (pg15, `docker_typed_m3b.rs`
+  `stop_during_run_as_one_never_runs_the_rest`): the `SELECT count(*)` right after a Stop
+  failed with 57014.
+- **The fix, without patching the vendored copy:** the cancel stream (`cancel::AwaitClose`,
+  below TLS) makes its shutdown, the request's last step, read and drop everything until the
+  server closes the connection, as libpq's `PQcancel` does. `CANCEL_TIMEOUT` (10 s) now bounds
+  the wait too. Once the close is seen, the backend already holds the signal. PostgreSQL drops
+  a cancel that reaches an idle session (`ProcessInterrupts` under `DoingCommandRead`, step (5)
+  of `PostgresMain`), so the signal can no longer reach the next statement.
+- **The close of a Run as one awaits its own cancel.** `close_simple` used to fire the cancel
+  and forget it, and answered as soon as the statement ended. If the statement ended on its own
+  first (or through an earlier signal), the cancel landed later. It now runs the cancel
+  alongside the read of the rest and answers once both have ended. A cancel that timed out may
+  still land, so it breaks the connection (`wire.mark_broken()`), as the session does with its
+  own cancel (review C1).
+- **The earlier signal, named (fix round 1, M4).** A PostgreSQL server sends one cancel as two
+  signals. The process that reads the request calls `signal_child`, which does `kill(pid,
+  SIGINT)` and, with `setsid`, `kill(-pid, SIGINT)` (PG ≤ 17; PG 18's `SendCancelRequest`
+  also signals before the process exits). If that process is preempted between the two kills,
+  the first ends the statement with 57014, and the second can reach the next statement of a
+  client that did not wait for the close. This is the likely mechanism of the CI failure.
+  Waiting for the close covers both kills.
+- **Fix round 1.**
+  - **I1, ruling: fail closed.** A cancel or kill that answers `Err(Timeout)` (class
+    `NetworkTimeout`) may still land. So the session now treats it as unsettled and breaks the
+    connection (`cursor::cancel_may_still_land`). This covers the ladder (`mechanism_done` and
+    `settle`) and the cursor guard (in the loop and after the call). Session tests use the
+    fake's new `cancel_times_out()`: `cancel.rs`
+    `a_cancel_that_timed_out_never_reaches_the_next_request`, and `run.rs`
+    `an_overdue_typed_cancel_that_timed_out_breaks_the_session` and
+    `a_typed_cancel_beside_the_close_that_timed_out_breaks_the_session`.
+  - **M1.** Once the rest has ended, `close_simple` waits at most `CLOSE_CANCEL_WAIT` (2 s,
+    equal to the session's `CANCEL_WAIT`) for its cancel, then breaks the connection.
+  - **Tests R2 and R7.** `wire.rs` `a_cancel_whose_connection_never_closes_times_out` and
+    `typed_m3b.rs` `a_close_whose_cancel_never_settles_breaks_the_connection`.
+  - **M2, accepted as is.** Over TLS, a peer that reset the connection before the client's
+    `close_notify` makes the cancel answer `Err(Io)` although the server acted. This can show a
+    spurious "cancel failed", but nothing can land.
+- **Tests.**
+  - Scripted servers that close the cancel connection only after they set a mark:
+    `wire.rs` `a_cancel_ends_only_once_the_server_closed_the_cancel_connection` and
+    `cancel_goes_over_tls_with_the_session_key` (TLS), and `typed_m3b.rs`
+    `a_closed_run_as_one_that_{failed,completed}_answers_after_its_cancel_settled`.
+  - Docker: `docker_exec.rs` `an_ended_cancel_never_reaches_the_next_statement` (an idle cancel
+    followed by a 200 ms statement, PG 13–18 and `pg17-tls`) and `docker_typed_m3b.rs`
+    `a_stop_never_cancels_the_next_statement` (on an `hvm4_pgcancel_stop_*` table, dropped by a
+    guard; a probabilistic reproducer).
+  - The fake driver's cancel is a latch (ADR 0006), so it cannot model a late landing.

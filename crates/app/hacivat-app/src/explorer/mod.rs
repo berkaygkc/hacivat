@@ -49,6 +49,9 @@ pub use live::{DatabaseRow, RevealOutcome, database_rows, reveal};
 
 /// The key context of the focused explorer (the M2a list's, kept by the tree, R20).
 pub const EXPLORER_CONTEXT: &str = crate::connections::explorer::EXPLORER_CONTEXT;
+// ## m4-t14-explorer (fix round 2, ruling R-W2-12b; named exception)
+/// The key context of the M4 object-level commands: the focused tree, on every row.
+pub const EXPLORER_TREE_CONTEXT: &str = crate::connections::explorer::EXPLORER_TREE_CONTEXT;
 
 /// The M4 explorer commands, each with its title and the task that fills it. Registered
 /// disabled (no palette row, the chord passes through) until then.
@@ -116,7 +119,7 @@ pub fn install(cx: &mut App) {
         let _ = reg.register(ActionDef {
             id,
             title_id,
-            context: EXPLORER_CONTEXT,
+            context: EXPLORER_TREE_CONTEXT,
             run: Rc::new(|_, _| {}),
             enabled: not_yet,
         });

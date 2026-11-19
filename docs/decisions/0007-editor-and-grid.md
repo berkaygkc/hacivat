@@ -1027,3 +1027,91 @@ is split into `view/{mod,anchor,keyboard,pointer,element}.rs`.
   line's comment).
 - *Keys.* The widget reads key-downs while focused and binds nothing; every chord with ⌘, Ctrl,
   Alt or fn is left to the host's keymap; nothing fires during an IME composition.
+
+## m4-t14 — explorer tree
+
+The M2a connection list became the database explorer tree in place (R-M4-18): `hacivat-app`'s
+`explorer::adapter::ExplorerModel` implements Task 8's `TreeModel` over the profiles and one
+`Option<Arc<CatalogSnapshot>>` per profile; `connections::explorer` hosts a `TreeView` of it.
+
+- *Shape.* Roots: the M2a environment headers (labels, 23 px, no chevron, skipped by the keys;
+  NOTES ruling 1) and the profile rows. PostgreSQL: databases (the profile's own first, others
+  by collation; out of scope dim with "Add to scope", R-M4-14) → contributed nodes → schemas →
+  kind groups → objects → child groups → leaves, and a collapsed Built-in group last when the
+  catalog holds system schemas of that database. MySQL/MariaDB: schemas called "database"
+  (`model-kind-schema-mysql`). SQLite: `main`, `temp`, attached; no Built-in (R-M4-6). The kind
+  groups are one fixed order (`rows::DisplayGroup`); a kind without a group (an extension, a
+  partition, an `Unknown` object with its raw server kind as type text) follows the groups.
+- *Laziness.* `children` is computed the first time the tree asks (only expanded nodes are
+  asked) and kept for the generation; the sorted members of a kind group (ICU4X collation of the
+  UI language through `hacivat-values`' collator, byte order breaking ties; columns by ordinal)
+  are kept across generations in `ExplorerCache` while their arena is the same `Arc`. The model
+  never does I/O and reads the snapshot synchronously (spec §5.4 rule 2).
+- *Keys.* `xxh3_128("hv-object\0" ‖ profile ‖ kind code ‖ raw kind ‖ (database ‖ server id) or
+  (path ‖ overload signature))`, every part length-prefixed; groups, profiles, environments and
+  Built-in hash their own domains. Namespace roots (databases, schemas) are keyed by path only,
+  so a schema keeps its key when it is first loaded with an OID. A PostgreSQL rename keeps the
+  key (the OID); a name-only engine's rename hint (`CatalogDelta::renamed`) moves the expansion
+  (`adapter::set_catalog`).
+- *Fail-closed.* No catalog or a generation-0 catalog shows the child row "Not loaded", never an
+  empty database (T1c m-B5); a namespace known only by its load state shows that state; a
+  relation of a `Names`-level namespace shows "Not loaded" under it, never zero columns.
+- *Filter* (D-074). `FilterJob` matches profile names and hosts (M2a) and every loaded name with
+  `hacivat-l10n`'s search key (Contains; Turkish-tolerant while the toggle in the field is on, its
+  default on for a Turkish UI language or region). Matches reveal their ancestors (the explorer
+  sets the tree's expansion to them and restores the previous one when the filter clears).
+  More than 2,000 names run on the background executor, latest wins.
+- *Profile commands.* The `Explorer` bindings (Enter, ⌘E, ⌘D, ⌘⇧C, ⌫, Shift-F10) run only while
+  the tree's keyboard row is a profile root (`connections::explorer::is_visible`); elsewhere the
+  chord passes through to the tree (carries-w2 T14). Any row selects its profile in
+  `ConnectionsModel` (the sheet follows it). A context menu acts on the event's key: a profile
+  root opens its connection menu; the other nodes' menus are Task 24's.
+- *Seams for Task 24.* `adapter::set_catalog` / `catalog_of` (the snapshot each root shows) and
+  `ExplorerContributor::child_node` (additive, default `None`: the rows of lazily listed
+  contributed children). `connections::explorer::shown_rows` lists what the tree shows.
+- *Named exceptions.* `tests/shots.rs` (the explorer surfaces' marker is the tree's row file);
+  `tests/connections_explorer.rs`, `tests/connections_live_m2b.rs`, `tests/cross_surface_m2b.rs`
+  (the M2a `explorer-row-*` selectors became the tree's; the filter toggle is a Tab stop);
+  `tests/support/mod.rs` block `// ## m4-t14-explorer` (catalog builders: `hacivat-meta`'s
+  `fixture` is behind `test-support`, which `hacivat-app`'s tests do not enable).
+- *Fix round 1.*
+  - *Ruling R-W2-12 (I1).* The tree's focus carries the `Explorer` key context only while its
+    cursor is on a profile root, so the Explorer keymap rows act only there and every other row
+    gets its keys. `ConnectionsModel::selected` follows the profile that owns the cursor row, so
+    the sheet and the palette's and welcome page's connection commands (enabled wherever the
+    cursor is) name the same profile; `is_visible` keeps its M2a meaning. The M4 rows bound in
+    the `Explorer` context (F12, F5, ⌘←, ⌥⌘C, ⌥⌘F) follow the same rule: Task 24 decides
+    their context when it fills them.
+  - *Fail-closed filter (I2).* `FilterResult` counts what it could not search (`unsearched`:
+    connections with no catalog or generation 0, databases with nothing read, state-only
+    namespaces; `unloaded`: relations of a `Names` namespace). "No objects match" only when
+    nothing matched and both are 0; with no match those rows stay in sight (the roots are never
+    hidden), and "Searches loaded names only…" says why. With matches the filter narrows as
+    M2a's did.
+  - *Bounded apply, cancellable jobs (I3).* A filter reveals the ancestors of its first 200
+    matches (`REVEAL_HITS`); the rest are kept, behind "n of total". Applying the 150,000-match
+    `c0` result over 15,000 tables (15,225 rows) takes 2.9 ms at p95 on the UI thread, measured
+    in `explorer_perf`. A job checks a cancel token every 1,024 names and stops when a newer
+    query took over (1.2 ms vs a 100 ms whole run).
+  - *Minor.* An active filter runs again when a profile is added or renamed, or the language
+    changes, and not again on a rename hint's extra notification; the cache prunes with a
+    `HashSet`; accessible descriptions join their words with ", " and dim rows say "out of
+    scope"; key and index parts show their expressions; a foreign key's arrow is Fluent
+    (`hv-explorer-fk-target`); Escape clears the filter field (on an empty field it is the
+    shell's Escape and returns to the tree) and ↓ moves into the tree.
+  - *Named exceptions (accepted).* The M2a profile-root debug selectors are replaced by the
+    tree's own; `connections/explorer.rs` is a near-rewrite; `tests/m4_routing.rs`'s copy-chord
+    test gets a profile so the list has a root for its cursor.
+- *Fix round 2.*
+  - *Ruling R-W2-12b (key contexts split).* The focused tree carries `ExplorerTree` on every
+    row and adds `Explorer` after it while its cursor is on a profile root
+    (`shell::hooks::add_focus_context` / `remove_focus_context`: one handle, several contexts,
+    a named exception in `shell/hooks.rs`). `Explorer` keeps the connection rows (Enter,
+    Shift-F10, Backspace/Delete, ⌘E, ⌘D, ⌘⇧C); `ExplorerTree` takes T1b's M4 rows (F12 View
+    DDL, F5 Refresh, ⌘←/Ctrl+← Collapse all, ⌥⌘C/Shift+Alt+C Copy qualified name, ⌥⌘F the
+    filter) in all three default keymaps, chords unchanged (named exception in Task 1b's rows),
+    and the M4 explorer commands are registered in it. Each command decides whether it applies
+    to the cursor's row (R-W1-5).
+  - *Ruling R-W2-13 (I3 accepted).* A broad filter expands the ancestors of its first 200
+    matches only; the others are kept behind their groups' "n of total" counts. The mock
+    (surface 4) shows no "N more matches" hint, so none is drawn: a T32 item.

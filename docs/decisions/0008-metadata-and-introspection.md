@@ -886,6 +886,376 @@ M4 Task 10 fills the existence-diff merge, the catalog delta and the mass-deleti
   - A dropped object is always named by its key in the previous generation, even under a
     parent renamed in the same delta.
 
+## m4-t12 — scope and filters
+
+M4 Task 12 fills `hacivat-introspect::{scope, filter, glob}` (alg/02 HV-INTRO-02, -03, -14;
+R-M4-3, -7, -14, -41; R-W1-7). The three modules build without the `session` feature; the
+`fuzz/meta` target `scope_pattern` fuzzes both grammars.
+
+- **Scope grammar** as alg/02 HV-INTRO-02, with these readings:
+  - a bare name may not hold `@` or `*` either (`app_*` is an error at the `*`, not a schema
+    literally named `app_*`; quote it). The scope grammar has no globs.
+  - `*` and `{regex}` never select a **system** namespace (`NsInfo::system`): the default
+    PostgreSQL scope `@:*` (R-M4-14) must not introspect `pg_catalog` live (R-M4-6). A name
+    or `@` selects one.
+  - A PostgreSQL database-only clause is `db:@`: the schema named like the current one.
+  - The implicit `@:@` is part of `select` only when the server lists it;
+    `select_explicit` is the pattern alone (edge 9: resolvable, not shown).
+  - Names compare through `match_key` and `FoldRule`; where `match_key` answers
+    `ServerDependent` (R-M4-41) only the exact text matches. `CurrentCtx` gains
+    `ident: Option<IdentCtx>` for `lower_case_table_names`.
+  - A misplaced `{` that never closes is `UnclosedBrace` at the brace (`db{1:x` → 3).
+    `ScopePattern` equality is dialect + syntax tree; parse warnings (edge 11
+    `DbTermIgnored`) are data for Task 20's editor, which adds their copy.
+- **Filter grammar** as alg/02 HV-INTRO-03. Kind tokens are `ObjectKind` ids (`_` for `-`)
+  plus `routine`/`function`/`procedure` (functions, procedures, aggregates), `mview`, and
+  `table` covering partitions; a token the dialect's kind schema lacks, or any `word:` prefix
+  that is not a kind, is `UnknownKind`. Items are trimmed. `routine:sig:` items match a
+  signature given to `matches_signature`; `matches` skips them. `excludes(kind, name)` is the
+  `ScopeFilter` answer (unsure → `true`; a view filter → `false`); `applies_to` keeps scope
+  filters off system namespaces (edge 10).
+- **Case.** Literals, globs and regexes follow `FoldRule::for_names` for the kind's name class
+  (`with_ident` sets `lower_case_table_names`): exact, or **ASCII**-caseless. Globs translate
+  ASCII letters to `[aA]`; a user regex is rewritten the same way (`glob::ascii_caseless`:
+  escapes, group heads, counted repetitions and ASCII classes untouched; class letters and
+  plain ranges gain their other case in a nested class). The `regex` crate's own `(?i)` folds
+  Unicode (`k` ↔ U+212A), which the server rule does not; it is only the fallback for text the
+  rewrite does not follow (a verbose-mode comment holding `[`). Class escapes (`\p{Lu}`) stay
+  case-sensitive (documented limit).
+- **Regexes** are compiled once, at parse, with 1 MiB size limits, after compiling the text
+  alone (balanced groups), as `\A(?:…)\z`; a verbose-mode comment that swallows the suffix is
+  retried with a newline.
+- **Pushdown: binds only.** `SqlPredicate.sql_fragment` is the fixed pack text
+  `LIKE :name_like ESCAPE :like_escape`; `binds` holds one `LIKE` pattern per distinct
+  positive glob. Task 4's lexer refuses a backslash inside a literal (and MySQL would read
+  `'\'` as an open literal), so the escape character `\` travels as the `like_escape` bind
+  (`SqlPredicate::escape()`). Positive items are OR'ed, which no pack construct expresses
+  (a list bind is `<col> IN :[x]` only, R-W1-7), so a section runs **once per pattern**
+  (`SqlPredicate::runs()`), unioned like list-bind chunks; the fragment sits beside a list
+  bind as another top-level `AND` conjunct (tested through `DraftPack`). Eligibility:
+  scope role only; PostgreSQL exact classes (a non-ASCII pattern only on a UTF-8 server);
+  MySQL/MariaDB table and database classes, no character outside the BMP; SQLite ASCII
+  patterns; nothing on another dialect. None when any applicable positive item is a regex, a
+  signature item or `*`, when more than 200 apply, or when a pattern holds NUL.
+- **Carried.** Task 17: confirm `LIKE ? ESCAPE ?` prepares on MySQL 8.0/8.4 and MariaDB
+  (Inferred; no Docker in W2) and that `INFORMATION_SCHEMA` table names compare as this rule
+  assumes under `lower_case_table_names` 0/1/2. Task 16: `relname LIKE $n ESCAPE $m` resolves
+  in the `C` collation. Task 15/24: the `ScopeFilter` adapter keyed by namespace, warnings
+  shown by Task 20.
+- **Fix round 1 (security review: 3 Important, 8 Minor).** The rule behind each fix: **the
+  server never returns fewer objects than the client filter keeps.**
+  - **I1:** on PostgreSQL, unless `IdentCtx.encoding` is known to be UTF-8 (`SQL_ASCII`,
+    single-byte or unknown), `?` and `[…]` push as `%`, not `_` (`Glob::like_pattern_with`):
+    a byte-wise server's `_` is one byte, and a UTF-8 name stored there can take several.
+  - **I2:** `CompiledFilter::pushdown_kinds(&[ObjectKind], …)` returns the union of the
+    patterns only when **every** kind in the set has its own pushable positive item.
+    `pushdown(kind)` is the one-kind case. **A catalog section whose rows can be of several
+    kinds (PostgreSQL `pg_class`: tables, partitions, views, materialized views, sequences,
+    foreign tables; MySQL `TABLES`: tables and views) must call `pushdown_kinds` with all of
+    them** (carry to T16–T18). The 200-pattern cap counts the union.
+  - **I3:** `@` and the implicit `@:@` compare with the listed names through `FoldRule` (MySQL
+    and MariaDB `lower_case_table_names` 1 and 2, SQLite), exactly where no rule is pinned, and
+    the **listed** key is selected, never the session text. T17 confirms on Docker what
+    `DATABASE()` returns under lctn 2.
+  - **M1:** untyped items never apply to `Root`, `Database` or `Schema`; MySQL pushdown covers
+    the table name class only.
+  - **M2:** pushdown refuses an `ident` whose fold rule for the kind differs from the filter's
+    own (`with_ident`).
+  - **M3:** a pattern over `MAX_PUSHDOWN_PATTERN_BYTES` (4,096; SQLite's limit is 50,000) is not
+    pushed.
+  - **M4:** in a negative clause `*` and a regex reach system namespaces (removing is safe).
+  - **M5:** the 200-run cap is per call (one section, one namespace); the total per profile is
+    the engine's (T15) to bound.
+  - **M6 (carry to T18):** the SQLite reader must not run pushed sections on a connection with
+    `PRAGMA case_sensitive_like` on.
+  - **M7:** under MySQL/MariaDB `lower_case_table_names = 1` the pattern is sent
+    ASCII-lowercased (names are stored lower-case).
+  - **M8:** an explicit `(?-i)` / `(?-i:…)` in a user regex keeps its letters exact on
+    caseless engines (`ascii_caseless` follows the flag per group). The seams test is renamed
+    `scope_selects_the_current_and_every_user_schema`. The reviewer's hostile tests are
+    `tests/scope_hostile.rs`.
+
+## m4-t19 — DDL producers
+
+M4 Task 19 fills `hacivat-ddl`'s view-only producers (alg/03 HV-DDL-07 producers) and the
+script text form. The bodies are adapted from the DDL spike (`da358e4`, R-M4-40, U-1) to the
+merged model, `ModelView` and the T7 renderers, and reviewed as new code.
+
+- **A sources seam beside the view.** The model keeps only `SourceRef`s; the text lives in the
+  cache's content-addressed store, and grants are a facet (R-M4-30). Neither is reachable
+  through `ModelView`, so the producer takes a `DdlSources` (`text(SourceRef)`, the `Sources`
+  facet `server_text(ObjectKey)`, the `Grants` facet `grants(ObjectKey) -> Facet<GrantsFacet>`,
+  each defaulting to "not loaded"). `create_script` keeps Task 1a's signature and runs with
+  `NoSources`; `create_script_with` is the DDL view's entry point (Task 25).
+- **Only what the view vouches for.** An object is located through `ModelView::children`
+  (the schema list for a schema) and used only when the answer is `Found`, i.e. from a
+  namespace loaded at `Structure` or above. Everything else, a missing definition text, a
+  `LOSSY_NAME`, or props of the wrong shape, is `DdlError::NotLoaded`, never an empty or
+  partial `CREATE`. `ObjectKind::Unknown` named directly is `DdlError::UnsupportedKind`; inside
+  an expanded schema it is left out with `ddl-unsupported-kind`. A NUL anywhere in the output
+  is refused. A dialect with no renderer (SQL Server, ClickHouse, Oracle, the PG-wire forks)
+  is `UnsupportedKind`.
+- **Server text, verbatim** (R-M4-24): views, materialized views, routines and triggers; a
+  PostgreSQL index with an expression, a predicate or `INCLUDE` when the `Sources` facet holds
+  `pg_get_indexdef` (else synthesized; operator classes and collations are T13 fields);
+  MySQL/MariaDB tables under `server_definitions` (`SHOW CREATE TABLE`, `NotLoaded` without
+  it). **SQLite tables, indexes, views, triggers and virtual tables are always their
+  `sqlite_schema.sql` text** (T7 carry M8 settled per dialect: `server_definitions` is on for
+  SQLite whatever `GenOptions` says; placement other than `InsideTable` raises
+  `ddl-sqlite-placement-forced`).
+- **IR gaps handled in the producer** (T7 carries; the IR is Task 1a/7's):
+  `ALTER SEQUENCE … OWNED BY` is a producer-rendered statement after the owning table; MySQL
+  secondary indexes are `CREATE INDEX` after the table (no `KEY` element in the IR), with an
+  FK moved to `ALTER TABLE … ADD` after an explicit index of the same name (MySQL would create
+  the FK's own index under that name); a MySQL unique key on column prefixes is
+  `CREATE UNIQUE INDEX` from its backing index (T13 m4); a MySQL `INVISIBLE` (MariaDB
+  `IGNORED`) index gets the option word after the rendered statement; a MySQL `INVISIBLE`
+  column carries the attribute after its type. The script's MySQL file form uses the custom
+  delimiter the renderer chose (`DelimStyle::MySqlDelimiter`, T7 carry M3).
+- **Names.** A server-generated constraint name (`SERVER_GENERATED_NAME`) is omitted unless
+  `surrogate_names`; MySQL's `PRIMARY` never. `Auto` qualification asks the view's schema list
+  whether a name exists in more than one schema of its database; when the list is not known
+  the name is qualified (the safe side). A PostgreSQL temporary table is never qualified.
+- **Order** is deterministic (BTree maps, arena order, name bytes): schemas, types (enum,
+  range, domain, composite), sequences, routines, tables in FK and partition-parent order
+  (a cycle broken at the smallest remaining table, its FK postponed past both tables), views,
+  materialized views, standalone indexes, triggers and constraints.
+- **Gaps recorded, not hidden:** an `INHERITS` child is `NotLoaded` (the model holds no parent
+  list, and dropping inherited columns without `INHERITS` would describe another table);
+  MySQL partitioning (`CREATE_OPTIONS partitioned`) raises `ddl-unsupported-kind`; (NOT
+  ENFORCED: see fix round 1 below) PG 18 named NOT NULL constraints, MySQL table charset and per-part
+  `NULLS FIRST`/operator class/collation and exclusion deferral (T13's R-W2-8 fields) are not
+  written yet; `with_options` is unsupported (T13 carry).
+- **Fix round 1 (opus review: a script never states a wrong fact silently; it is exact, carries
+  a notice, or answers `NotLoaded`):**
+  - **I1:** a MySQL/MariaDB unique key whose backing index has prefixes, descending parts,
+    `INVISIBLE`, a comment or a method other than `BTREE` is `CREATE UNIQUE INDEX` from that
+    index; such a primary key is `ALTER TABLE … ADD PRIMARY KEY (…) [USING HASH] [COMMENT …]`
+    after the table. If an `AUTO_INCREMENT` column's only key needs that route, the script is
+    refused (`Render(Invalid)`), since MySQL wants the key at `CREATE TABLE`.
+  - **I2:** `KeyProps`/`CheckProps` `Default` is now **enforced** (named exception in
+    `hacivat-meta/src/props.rs`, fenced `m4-t19-produce`; field name and codec unchanged, T11
+    needs nothing; T13 adds `rare: None` to the two impls). A constraint the server does not
+    enforce is `ALTER TABLE … ADD … NOT ENFORCED` where the target has it (MySQL 8.0.16+
+    checks; PostgreSQL 18+ checks and foreign keys), else left out with
+    `ddl-warn-not-enforced`. Introspector contract (T16/T17): `enforced` is `false` only for
+    a constraint the server reports as not enforced.
+  - **I3:** a disabled PostgreSQL trigger (`TriggerProps.enabled = false`) is followed by
+    `ALTER TABLE … DISABLE TRIGGER …`, on PostgreSQL only. T16 must fill `enabled` from
+    `tgenabled` (the derived default is `false`). `ENABLE REPLICA`/`ALWAYS` have no field yet.
+  - **I4:** `ColumnDef.invisible` (named exception in T7's `ir.rs`, `render/{mysql,pg,sqlite}.rs`
+    and `tests/render_ir.rs`, fenced): MySQL writes `INVISIBLE` after the type, any generated
+    clause, `ON UPDATE` and `AUTO_INCREMENT`; PostgreSQL and SQLite refuse it. `on_update_of`
+    keeps one token, so a trailing `INVISIBLE` in `EXTRA` is not swallowed.
+  - **I5:** `ddl-warn-unknown-type` (named exception in m4-t01a's FTL DDL block, fenced
+    `## m4-t19-produce`, TR `# Review: PO`): a PostgreSQL column whose `type_ref` is outside
+    `pg_catalog`/`information_schema` and is neither a type nor a relation the view holds.
+  - **Minors:** a `sqlite_autoindex_*` name is implicit on SQLite only; a PG/MySQL table with
+    `Props::None`, or a partitioned parent without its key, is `NotLoaded`; MariaDB has no
+    functional key parts (such an index is left out with `ddl-unsupported-kind`).
+  - **Recorded gaps (carries):** identity sequence options and name, PG column storage and
+    compression, view `security_invoker`/`security_barrier` (M7); dependency order for
+    whole-schema scripts (T31, M7); `server_text` has no load state (T25, T22); revoked
+    default privileges (M7); per-part opclass/collation/NULLS FIRST (T13).
+
+## m4-t11 — catalog cache
+
+M4 Task 11 fills `codec`, `fingerprint` and `persist/**` (HV-MODEL-03, R-M4-15, R-M4-25,
+R-M4-26, D-016). The codec and the store's open, rotation and bad-row logic come from the model
+spike (`d86313b`); encryption, the identity check, compare-and-set, debounce and eviction are
+new.
+
+- **Codec.** The spike's envelope (`"HVNS" major minor compression checksum body`, XXH3-64
+  over the body, every record and union value length-prefixed, per-namespace string table),
+  extended to the M4 types. Choices beyond the spike:
+  - The namespace header lists the machine id of every kind code it uses. A code this build
+    does not know decodes as `Unknown` with that id as its raw kind, so it matches the
+    `ObjectKey::raw_kind` a newer build wrote into user data (T3 review m6). Our own `Unknown`
+    objects keep their server text.
+  - **Strictness:** a payload of this build's minor or an older one must use every byte of
+    every record and of the body; a newer minor's trailing fields, tags and sections are
+    skipped.
+  - A namespace read from a **newer minor** loads with `Watermark::None` (its next pass is
+    full, never incremental on top of fields this build dropped), is reported
+    (`Decoded::from_newer_minor`, `LoadAll::from_newer_minor`) and is never saved back:
+    `NamespaceSnapshot` has no flag for it (T3's file), so the store remembers the metadata it
+    read and refuses a save of a namespace with exactly that metadata. A fresh introspection
+    has new metadata and replaces the row with our minor (alg/02 edge 4).
+  - Untrusted input: no recursion on input depth, and every count is capped by the bytes left
+    divided by the smallest encoding of one element, so a corrupt count cannot allocate more
+    than a small constant times the input. Equal empty strings share one allocation.
+  - **Decode CPU (fix round 1, B-I3).** A name (object name, namespace or reference path
+    element) is at most `MAX_NAME_BYTES` = 4 KiB: the engines' identifier limits are 63 bytes
+    (PostgreSQL), 64 characters (MySQL/MariaDB; 256 bytes in utf8mb4) and 128 characters
+    (SQL Server, Oracle; 512 bytes), so 4 KiB is headroom for any engine in any encoding;
+    SQLite has no limit, and a SQLite name over the cap is simply not cached. The string bytes
+    a payload expands to through its table are capped at 8 × body + 1 MiB (a real catalog
+    expands to under 1×). The encoder enforces both caps, so whatever it writes can be read.
+  - `ColumnProps::ext`: `Some(ColumnExt::None)` has its own tag, so the round trip is exact.
+  - `reseal_checksum` is public: tests and the fuzz target frame arbitrary bodies with it. The
+    checksum guards against accidents only; the header's version bytes are outside it by
+    format (a flipped minor reads as a newer minor and is never rewritten).
+  - `codec::testing` (feature `test-support`) encodes and decodes as another minor would, so
+    the forward and backward rules are tested while this build is at 1.0.
+- **Store.** One SQLite file per profile and major. Tables `header`, `namespace` (tag, key,
+  minor, generation, writer, epoch, watermark, payload), `usage` (the LRU clock, kept apart so
+  a load never rewrites a payload row) and `source` (tag, text).
+  - **The schema is untrusted (fix round 1, B-I1).** Every connection sets
+    `SQLITE_DBCONFIG_DEFENSIVE` and `trusted_schema = OFF`. Before any other read or write
+    (after `quick_check`), `sqlite_master` must equal exactly this build's objects: the four
+    tables with their exact `CREATE` text and the four primary-key autoindexes, and no
+    trigger, view or other index; each table's `pragma_table_info` must match too. The header
+    table is checked first and its `format_major` must be an integer: another major is
+    `MajorChanged`, a missing or wrongly typed value `Corrupt`. Any other difference is
+    `Corrupt`: the file is rotated and rebuilt, never read further. A planted trigger cannot
+    pin a row or hang a load, and a wrong-shaped table cannot disable the cache.
+  - **And it stays checked (fix round 2, N1).** The check runs inside one read transaction
+    that records `PRAGMA schema_version`. Every later transaction of the store — reads in a
+    read transaction, writes under `BEGIN IMMEDIATE` — reads the cookie as its first
+    statement, before any DML or `SELECT`; within that transaction the snapshot (or the
+    write lock) holds it. A changed cookie (a trigger, view or table altered while the store
+    is open) abandons the transaction: the file is rotated and rebuilt and the call answers
+    `CacheError::Corrupt { renamed_to }`, so a planted trigger never runs. The SQLite
+    authorizer (`rusqlite` feature `hooks`) was not needed: the cookie check closes R1 (pinned
+    row) and R2 (hang) deterministically.
+  - **Read limits (B-M3; fix round 2, N2, r-m1).** A load reads rows most recently used
+    first, at most the per-profile cap (`CacheStore::set_caps`, default 512 MiB) in all and
+    no row over `MAX_ROW_BYTES` (256 MiB); the rest are dropped as `RowError::TooLarge`. Every
+    cell that can be large is selected through `CASE WHEN length(x) <= cap THEN x END`
+    (`load_all` and `load_namespace` payloads; keys and tags under `MAX_KEY_BYTES` = 128 KiB;
+    watermarks, header values and source tags under 64 KiB), so an oversized cell is never
+    materialized; rows are deleted by `rowid`. In a plaintext store the key cell must equal
+    its tag byte for byte before it is decoded, and `decode_ns_key` takes at most
+    `MAX_NS_PATH` = 16 path elements.
+  - **Files (A-m3/B-M4, B-M5).** The leaf directory is tightened to 0700. Opening, preparing
+    or scrubbing a file compares its device and inode before and after the open and requires
+    one link; a hard-linked cache file is refused at open, and a hard-linked name is only
+    unlinked when scrubbed, never written through.
+  - WAL, `synchronous=NORMAL`, `temp_store=MEMORY` (no temp file holds plaintext),
+    `secure_delete=ON` (a replaced or evicted row leaves zeros) and
+    `auto_vacuum=INCREMENTAL` (an eviction returns pages).
+  - Directory 0700 (the rule of `fsio::create_dir_all_private`, which this crate cannot call),
+    file and sidecars 0600.
+  - Symbolic links: a cache path, `-wal` or `-shm` that is a link is refused; a rotation
+    renames the link itself; a deletion removes the link only. Not `SQLITE_OPEN_NOFOLLOW`:
+    it refuses a link in any path component, and data directories sit behind one (macOS
+    `/var`).
+  - A file that is not a database, or fails `quick_check`, is rotated to
+    `*.corrupt-<secs>[-n]` (`Corrupt`). A file of another major is read for its major
+    **before** anything is changed and is rotated byte for byte (`MajorChanged`; FTL
+    `incompatible`). A plaintext file opened with a key, or one the key's check value does
+    not open, is overwritten with zeros, deleted and rebuilt with its rotations (`WrongKey`).
+    An encrypted file opened without a key is refused (see Encryption below).
+  - A row that does not decode, authenticate or agree with itself (key, tag, minor) is deleted
+    and reported (`LoadAll::dropped`, `CacheError::Row`); only that namespace is
+    re-introspected.
+- **Encryption (R-M4-15).** `RowCipher`: XChaCha20-Poly1305, a fresh 24-byte nonce from the
+  OS RNG per seal (an RNG failure is an error, never a fallback nonce), associated data
+  `len(domain) as u16le ‖ domain ‖ ad`. The profile key seals nothing itself. (Fix round 1
+  as below; the first version derived subkeys from XChaCha20 keystream and tagged
+  `PRF(XXH3-128(input))`.)
+  - **Ruling R-W2-7 (fix round 1): HMAC-SHA256.** Subkeys are derived HKDF-expand style,
+    `HMAC-SHA256(profile key, "hv-rowcipher-v1" ‖ 0 ‖ purpose ‖ len(domain) u16le ‖ domain ‖
+    1)`, one for sealing and one for lookup tags. Tags are
+    `HMAC-SHA256(lookup subkey, input)[..16]`, so crafted names cannot collide. A derivation
+    failure is an error (`RowCipher::new` returns a `Result`), never a fallback key.
+    `hmac` 0.12.1 and `sha2` 0.10.9 join `hacivat-meta`'s `persist` feature by a
+    controller-granted named exception to "only Task 1a edits manifests"; the root
+    `Cargo.lock` gains only dependency edges. The HMAC crate's transient inner state is not
+    zeroized on drop.
+  - `RowKey::from_bytes` takes `&[u8; 32]`, so no by-value copy of the key is left on the
+    caller's stack.
+  - Sealed: payloads (`ad = 1 ‖ minor ‖ generation ‖ writer ‖ epoch ‖ ns_key`), namespace
+    keys (`2 ‖ tag`), watermarks (`3 ‖ generation ‖ ns_key`), source texts (`4 ‖ hash ‖
+    len`), the key check (`5`) and the server fingerprint with its epoch (`6`). A row cannot
+    move between namespaces, row types or stores, and its bookkeeping columns cannot be
+    edited.
+  - **Padding (fix round 1, A-m2/B-I2).** Before sealing, every plaintext is padded
+    (`data ‖ 0x80 ‖ 0…`) to a Padmé size with a floor: namespace keys 256 bytes (so every
+    key of an ordinary name seals to one length), watermarks 128, sources 256, payloads
+    4096. The clear `source.len` column is gone. A ciphertext length shows only its bucket
+    (Padmé leaks O(log log n) bits, at most about 12 % overhead); two profiles over the same
+    database still have the same bucketed length profile, since their content is the same.
+  - In the clear: the minor, generation, writer id, epoch, the LRU counter, the row count
+    and the bucketed lengths. They hold no name; the bucketed lengths and counts still show
+    the rough size of the catalog and how often it is written and used (this line replaces
+    the first version's "they name nothing", which overlooked the exact name lengths).
+  - **Staleness is an epoch, bound into each row (A-m4/B-M1).** The header holds the
+    server fingerprint and an epoch, sealed together. `check_identity` starts a new epoch
+    when the server changes; a row is stale when its epoch differs from the header's. The
+    epoch is in the row's associated data, so a stale row cannot be made fresh by editing a
+    column (the first version's clear `stale` flag is gone).
+  - **Rollback and replay (accepted, documented; R5).** Someone who can write the file can
+    still put back a complete older row of the same namespace (every column, as it was
+    written), an older sealed `server` header (an older fingerprint and epoch), or an older
+    copy of the whole file; each authenticates and loads. The file alone cannot tell old
+    from current: preventing that needs state outside the file. It is mitigated by every
+    cache load being published `Loaded { stale: true }` and validated in the background
+    (HV-INTRO-15) before anything trusts it as current; a replayed `server` header is caught
+    by the next `check_identity` against the live server, which starts an epoch past every
+    row's and the header's, so no row is made fresh by it (review A, H10). A partial rollback
+    (the sealed columns without their bookkeeping) fails authentication.
+  - **Downgrade (fix round 1, A-I1).** An encrypted file opened without a key is refused
+    (`CacheError::Disabled`, memory-only) and left untouched; only a plaintext file opened
+    with a key, a wrong key, or a file of unrecorded mode with rows, is scrubbed and rebuilt,
+    together with its `.corrupt-*` rotations (A-m6/B-M6). Turning encryption off deletes the
+    files first (Task 20).
+  - **Key.** `SecretStore::catalog_key(profile, create)` (named lines in
+    `hacivat-secrets/src/store.rs`, block `m4-t11-catalog-key`): reads the slot; with
+    `create`, a missing or damaged key is replaced by 32 random bytes, stored hex-encoded in a
+    `SecretString` with retention `Forever`. A put the backend refuses (a fallback to the
+    process) is undone and returned as an error: a key that dies with the process would make
+    the next start's cache unreadable, so the hub runs that profile memory-only (edge 9).
+    Every buffer that holds the key is `Zeroizing`. `hacivat-meta` never calls it.
+- **Identity (step 2).** The first `check_identity` records the fingerprint (epoch 0).
+  Another server starts a new epoch, so every row saved before is stale; a stale row loads
+  with `Watermark::None` (its next pass is full), the rows stay for offline use, and a fresh
+  save (under the new epoch) is current again.
+- **Compare-and-set (step 5).** A save may replace another writer's row only with a watermark
+  that is not older for the same server: PostgreSQL by `system_identifier` then `w`, MySQL
+  by `server_uuid` then time, SQLite by file identity then `schema_version`. A watermark of
+  another server is not comparable and wins; a save without a watermark never replaces one
+  that has it (`CacheError::Superseded`). A writer always replaces its own row.
+- **Debounce (step 4).** `SaveDebouncer`: a namespace is due one second after its **first**
+  pending offer, with the latest snapshot offered by then, so a namespace that keeps changing
+  is still saved once a second. Pure logic over caller instants; the hub drives it.
+- **Eviction (R-M4-25).** `CacheStore::evict(cap, protect)`: by logical row bytes, unreadable
+  rows first, then least recently loaded; `protect` (the current database) is never evicted.
+  `evict_global`: whole caches of other profiles by newest file modification time (a load
+  writes the `usage` table, so it touches the `-wal`), never a profile in `keep`.
+  `CacheCaps::from_mib` clamps the total up to the per-profile cap (T1c concern 5).
+- **Disk full (edge 2).** `CacheError::Full { warn }`: `warn` is true for a store's first
+  such failure only; the previous row stays. The notice string `model-cache-write-failed`
+  (alg/02) is not in the FTL yet; the hub's task adds it.
+- **Fingerprints.** XXH3-128 Merkle hashes: a node's canonical record (the codec's encoding
+  with strings in place, no server ids — also inside references — and no state marks) plus
+  the sorted hashes of its children. The order a server lists children in does not matter;
+  a column's ordinal does. Statistics live in a facet, never in an `Obj`. Iterative, linear
+  in the subtree. The value is locale-free and pinned in `tests/fingerprint.rs`.
+- **Faults.** `Fault::AbortBeforeCommit` (feature `test-support`) aborts the process after
+  the row is written and before `COMMIT` returns; the test runs it in a child process. The
+  workspace's `rusqlite` has no `hooks` feature, so a hook inside `COMMIT` itself is not
+  available; in WAL mode the uncommitted frames are ignored either way. A full disk is
+  simulated with `PRAGMA max_page_count` (SQLite's own `SQLITE_FULL` path).
+- **Seam changes (T1a stubs filled).** `DecodeError::NotImplemented` is gone and
+  `DecodeError::Model` added; `CacheError` gains `Sqlite`, `Superseded`, `Full`, `Row`,
+  `Crypt`, `Encode`; `CryptError::NotImplemented` becomes `Rng` and `TooLong`;
+  `RowCipher::seal` returns a `Result`; `Opened` gains `moved_to`; `LoadAll::dropped` holds
+  `(Option<NsKey>, RowError)` (an encrypted row's key may be unreadable) and `LoadAll` gains
+  `from_newer_minor` and `into_changes` (each namespace put with `Loaded { stale: true }`);
+  `load_namespace`/`load_all` take `&mut self` (they move the LRU clock and delete bad rows).
+  Named exceptions: `tests/model.rs` (`props_round_trip…` becomes the round trip) and
+  `tests/seams.rs` (`stub_cache_is_memory_only` now checks that an open that cannot create
+  its file writes nothing).
+- **Not in this task.** Garbage collection of other majors' files after 30 days (alg/02
+  "Versioning") is not in the plan's list; cache rows stay uncompressed (the compression byte
+  is reserved, R-M4-26).
+- **Carried by the controller (fix round 1).** XXH3-128 fingerprints and `SourceRef`s are not
+  collision-resistant (A-m8/B-M2) → M7 pre-flight. Two first-time creators of a profile's
+  `CatalogKey` can race (A-m9/B-M7) → Task 15 creates the key once, under the hub. Task 15
+  never opens a sensitive profile with `Encryption::None` (now also refused by the store).
+  The `model-cache-write-failed` message → Task 24.
+
 ## m4-t13 — assembly
 
 - **Seam.** `hacivat_introspect::assemble` gains the row and result types: `TableId` (server id
@@ -988,3 +1358,25 @@ M4 Task 10 fills the existence-diff merge, the catalog delta and the mass-deleti
 - **Existence and order.** An object exists when its own catalog row does; part rows without
   one are ignored (the next pass reads both). Output is sorted by table, then name, kind and
   server id, whatever the row order.
+- **Cache format minor 1 (codec round, after T11; named exception in `codec.rs`).**
+  `FORMAT_MINOR` is 1. The rare parts are one optional record appended at the end of the key,
+  foreign-key and check records, written **only when set**, so an object without one encodes to
+  the same bytes, and the same fingerprint, as in minor 0. A record that ends before the field
+  (a minor-0 payload) reads `rare: None`; no migration step is needed. The new names keep
+  T11's caps: operator classes, collations and exclusion operators are names (at most
+  `MAX_NAME_BYTES`, refused by the encoder and the decoder); every string counts against the
+  expansion budget; `fk_ref_index` is an ordinary reference. The encoder knows the minor it
+  writes (`Enc::minor`), so the test hook writes a genuine minor-0 payload. Tests:
+  `tests/codec_rare.rs` (round trip, an older-minor payload, unchanged bytes without rare
+  parts, an older build reading minor 1, the name cap). `persist_crypt`'s "minor column edited"
+  probe now writes `FORMAT_MINOR + 1` (it wrote `1`, which became the current minor). The
+  `catalog_row_decode` fuzz seed carries a key and an FK rare part; built and run locally for
+  90 s (2.5M runs, no crash).
+- **DDL (named exceptions in T7's IR and T19's producer, renderers and goldens).**
+  `IndexPartDef` gains `opclass` (raw server text) and `collation` (a name, quoted on output);
+  the PG part renders as `column COLLATE "C" opclass [DESC] [NULLS FIRST|LAST]`, a collation
+  is refused on MySQL and an operator class outside PostgreSQL. `ConstraintBody::Check` gains
+  `no_inherit` (`CHECK (…) NO INHERIT` on PostgreSQL, refused elsewhere). The producer fills
+  `nulls_first` (only when the model has the vector), `opclass` and `collation` per part on
+  PostgreSQL, `no_inherit` on PostgreSQL checks, and an exclusion's deferral from `CheckRare`
+  (rendered after the text, which no longer carries it). Golden `pg/index_part_options`.

@@ -168,6 +168,13 @@ impl ToSql for TextParam<'_> {
 /// The rows of `close_query(Drain(..))`'s one Execute.
 pub const DRAIN_ROWS: i32 = 4_096;
 
+// ## m4-pgcancel (fix round 1, M1)
+/// How long the close of a Run as one waits for its protocol cancel once the rest has ended:
+/// the session's own bound for a cancel in flight (`hacivat-session`'s `CANCEL_WAIT`, which
+/// this crate cannot name; keep the two equal). A cancel not ended by then may still land, so
+/// the connection breaks.
+pub(crate) const CLOSE_CANCEL_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// What the typed path uses of a connection.
 pub(crate) struct Ctx<'a> {
     pub client: &'a Client,
@@ -1300,7 +1307,10 @@ async fn next_simple(cx: Ctx<'_>, open: &mut Option<Open>) -> Result<QueryEvent,
 /// ruling (a)). It cannot be closed on the wire, so the driver sends the connection's protocol
 /// cancel **at once**, whatever `how` and the transaction status (unless the server already
 /// answered the whole text: a cancel then could reach the next statement), and reads the rest
-/// undecoded to keep the connection in step. The answer:
+/// undecoded to keep the connection in step. It answers only once that cancel ended too, i.e.
+/// the server acted on it (## m4-pgcancel), so it never reaches the next statement; one that
+/// timed out, or did not end within [`CLOSE_CANCEL_WAIT`] after the rest, breaks the
+/// connection. The answer:
 /// - the rest ended in a server error (the cancel's 57014, or a statement's own): that error,
 ///   and a [`CloseReport`] with `rest_not_run`;
 /// - it ended cleanly with nothing after the closed result: `Completed { rows }`;
@@ -1319,33 +1329,70 @@ async fn close_simple(cx: Ctx<'_>, mut q: Simple) -> Result<Closed, RawError> {
     let Some(mut stream) = q.stream.take() else {
         return Ok(Closed::Completed { rows });
     };
-    if !cx.wire.synced() {
-        // Fire and forget: the outcome is read from the stream either way.
-        tokio::spawn(cx.cancel.cancel());
-    }
-    loop {
-        match stream.as_mut().try_next().await {
-            Ok(Some(SimpleQueryMessage::Row(_))) if current => rows += 1,
-            Ok(Some(SimpleQueryMessage::CommandComplete(_))) if current => current = false,
-            Ok(Some(SimpleQueryMessage::CommandComplete(_))) => ran = ran.saturating_add(1),
-            Ok(Some(_)) => {}
-            Ok(None) if ran == 0 => return Ok(Closed::Completed { rows }),
-            Ok(None) => {
-                *cx.report = Some(CloseReport {
-                    statements_ran: ran,
-                    rest_not_run: false,
-                });
-                return Ok(Closed::Closed { rows: q.delivered });
-            }
-            Err(e) => {
-                *cx.report = Some(CloseReport {
-                    statements_ran: ran,
-                    rest_not_run: true,
-                });
-                return Err(failed(cx.wire, &e).await);
+    let rest = async {
+        loop {
+            match stream.as_mut().try_next().await {
+                Ok(Some(SimpleQueryMessage::Row(_))) if current => rows += 1,
+                Ok(Some(SimpleQueryMessage::CommandComplete(_))) if current => current = false,
+                Ok(Some(SimpleQueryMessage::CommandComplete(_))) => ran = ran.saturating_add(1),
+                Ok(Some(_)) => {}
+                Ok(None) => break Ok(()),
+                Err(e) => break Err(e),
             }
         }
+    };
+    // ## m4-pgcancel: the cancel runs alongside the read of the rest, and the close answers only
+    // once both ended. The statement may end before the server acts on the cancel (on its own,
+    // or by an earlier signal); a cancel still on its way then would land on the next statement
+    // (CI run 44595239297). Ended (`crate::cancel`: the server closed its connection), it was
+    // acted on while the session is idle, and PostgreSQL drops it.
+    let (rest, unsettled) = if cx.wire.synced() {
+        (rest.await, false)
+    } else {
+        let mut cancel = cx.cancel.cancel();
+        let mut rest = std::pin::pin!(rest);
+        // Fix round 1 (M1): once the rest has ended, the cancel gets at most
+        // [`CLOSE_CANCEL_WAIT`] more, the session's own bound for its cancel.
+        let (rest, cancelled) = tokio::select! {
+            biased;
+            rest = &mut rest => {
+                let cancelled = tokio::time::timeout(CLOSE_CANCEL_WAIT, &mut cancel).await;
+                (rest, cancelled.ok())
+            }
+            cancelled = &mut cancel => (rest.await, Some(cancelled)),
+        };
+        // A cancel that did not end in time, or timed out, may still land: the connection is
+        // never used again (the session's rule for its own cancel, review C1; ruling I1). Any
+        // other failure is one of opening the stream, its TLS or writing the request, or (over
+        // TLS) a shutdown the server had already reset after it acted: nothing that can land.
+        let unsettled = match &cancelled {
+            None => true,
+            Some(Err(e)) => e.kind == RawErrorKind::Timeout,
+            Some(Ok(())) => false,
+        };
+        (rest, unsettled)
+    };
+    let answer = match rest {
+        Ok(()) if ran == 0 => Ok(Closed::Completed { rows }),
+        Ok(()) => {
+            *cx.report = Some(CloseReport {
+                statements_ran: ran,
+                rest_not_run: false,
+            });
+            Ok(Closed::Closed { rows: q.delivered })
+        }
+        Err(e) => {
+            *cx.report = Some(CloseReport {
+                statements_ran: ran,
+                rest_not_run: true,
+            });
+            Err(failed(cx.wire, &e).await)
+        }
+    };
+    if unsettled {
+        cx.wire.mark_broken();
     }
+    answer
 }
 
 #[cfg(test)]

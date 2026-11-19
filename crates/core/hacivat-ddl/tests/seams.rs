@@ -128,7 +128,9 @@ fn every_alg03_variant_is_declared() {
     assert_eq!(AlterAction::samples().len(), 10);
 }
 
-/// The view-only producer refuses until Task 19 (no script that is not the object's).
+// ## m4-t19-produce (named exception): Task 19 filled the producer. An object the view does
+// not hold (here: an empty catalog) is still refused, now as `NotLoaded` (no script that is
+// not the object's). Full tests: `tests/produce.rs`, `tests/golden.rs`.
 #[test]
 fn stub_create_script_refuses() {
     use hacivat_ddl::produce::create_script;
@@ -153,6 +155,7 @@ fn stub_create_script_refuses() {
     let target = DdlTarget::new(DialectId::Postgres, ServerVersion::new(17, 0, 0));
     assert!(matches!(
         create_script(&view, &[key], &target, &GenOptions::default()),
-        Err(DdlError::NotImplemented)
+        Err(DdlError::NotLoaded)
     ));
 }
+// ## end m4-t19-produce

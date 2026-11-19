@@ -271,6 +271,31 @@ pub fn unregister_focus_context(cx: &mut App, handle: &FocusHandle) {
     }
 }
 
+// ## m4-t14-explorer (fix round 2, ruling R-W2-12b; named exception)
+/// Adds `context` for `handle` beside the contexts it already has: one focused handle then
+/// pushes several, in registration order (the explorer tree: `ExplorerTree` always, then
+/// `Explorer` while its cursor is on a profile root). A pair already registered is kept once.
+pub fn add_focus_context(cx: &mut App, handle: FocusHandle, context: &'static str) {
+    let contexts = &mut cx.default_global::<FocusContexts>().0;
+    contexts.retain(|(h, _)| h.upgrade().is_some());
+    let present = contexts
+        .iter()
+        .any(|(h, c)| *c == context && h.upgrade().is_some_and(|h| h == handle));
+    if !present {
+        contexts.push((handle.downgrade(), context));
+    }
+}
+
+/// Drops the pair `handle`/`context`, keeping the handle's other contexts.
+pub fn remove_focus_context(cx: &mut App, handle: &FocusHandle, context: &'static str) {
+    if cx.has_global::<FocusContexts>() {
+        cx.global_mut::<FocusContexts>().0.retain(|(h, c)| {
+            h.upgrade()
+                .is_some_and(|h| !(h == *handle && *c == context))
+        });
+    }
+}
+
 /// The registered contexts whose handle is focused in `window`, in registration order.
 pub(crate) fn focused_contexts(window: &Window, cx: &App) -> Vec<&'static str> {
     cx.try_global::<FocusContexts>()

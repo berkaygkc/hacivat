@@ -128,6 +128,8 @@ use crate::session::env::{
 use crate::session::liveness::LivenessRole;
 // ## m3a-t18-session-run
 use crate::session::cursor::{OpenCursor, StopSignal};
+// ## m4-pgcancel (named exception)
+use crate::session::cursor::cancel_may_still_land;
 use crate::session::{RunSpec, TxOwner};
 // ## m3b-t01c-core-seams
 use crate::session::run_gate::RunGate;
@@ -313,6 +315,14 @@ pub(crate) fn spawn_supervised(
         cursor: None,
     };
     let id = next_id();
+    // ## m4-t05-meta (named exception, ruling R-W1-9): a joinable job session (R-M4-29).
+    let meta_joinable = matches!(
+        spec.kind,
+        crate::session::SessionKind::Job(
+            _,
+            crate::session::JobKind::DdlApply | crate::session::JobKind::DriftCheck
+        )
+    );
     // ## m3b-t01c-core-seams (P-M3b-3): shared by the control side and the running request.
     let gate = Arc::new(RunGate::default());
     let (commands, receiver) = mpsc::unbounded_channel();
@@ -371,6 +381,8 @@ pub(crate) fn spawn_supervised(
         time_zone,
         // ## m3b-t26-prod-unlock (fix round 1, A-I1)
         live_env,
+        // ## m4-t05-meta (named exception)
+        meta_joinable,
     };
     let ctl = Ctl {
         id,
@@ -498,6 +510,10 @@ pub(crate) struct Core {
     /// a session opened before its profile was tagged production checks its script from then
     /// on. `None` (a session spawned outside a pool): its own profile's tag alone.
     pub(crate) live_env: Option<Arc<crate::session::liveness::ProfileActivity>>,
+    // ## m4-t05-meta (named exception, ruling R-W1-9)
+    /// The session is a `Job(DdlApply | DriftCheck)`: a metadata read may join its transaction
+    /// (R-M4-29, `Request::MetaRead`).
+    pub(crate) meta_joinable: bool,
 }
 
 fn not_connected() -> ExecError {
@@ -652,6 +668,14 @@ impl Core {
             }
             return self.answer_context().await;
         }
+        // ## m4-t05-meta (named exception, ruling R-W1-9): a metadata read is checked and run
+        // here, when it is taken: never the user-run path, never a stale context.
+        if let Request::MetaRead(read) = &request {
+            if self.live.is_none() {
+                return Err(not_connected());
+            }
+            return self.meta_read(read).await;
+        }
         // Fix round 2: a run classified under a context generation that has moved since
         // (another console's request changed it in between) is refused, nothing sent.
         if crate::session::run_context::run_moved(&request, self.context_generation)
@@ -739,6 +763,8 @@ impl Core {
             | Request::CloseCursor { .. } => Err(ExecError::of(ExecErrorKind::Internal)),
             // ## m3b-t24-exec-ui (named exception): `handle` answers it first.
             Request::ReadContext => Err(ExecError::of(ExecErrorKind::Internal)),
+            // ## m4-t05-meta (named exception): `handle` answers it first.
+            Request::MetaRead(_) => Err(ExecError::of(ExecErrorKind::Internal)),
         }
     }
 
@@ -1407,6 +1433,8 @@ fn is_activity(request: &Request) -> bool {
         Request::Ping | Request::Reset | Request::CloseCursor { .. } => false,
         // ## m3b-t24-exec-ui (named exception): Hacivat's own read.
         Request::ReadContext => false,
+        // ## m4-t05-meta (named exception): Hacivat's own read.
+        Request::MetaRead(_) => false,
     }
 }
 
@@ -1423,6 +1451,8 @@ fn is_retryable(request: &Request) -> bool {
         | Request::CloseCursor { .. } => false,
         // ## m3b-t24-exec-ui (named exception): read again on the next request instead.
         Request::ReadContext => false,
+        // ## m4-t05-meta (named exception): never replayed; the caller sees the loss.
+        Request::MetaRead(_) => false,
     }
 }
 
@@ -2745,6 +2775,11 @@ struct Ladder {
     /// The sequence numbers of the fetches merged into the request: a cancel that names one
     /// stops it too; any other number is stale (Q18).
     aliases: Vec<u64>,
+    // ## m4-pgcancel (named exception, ruling I1: fail closed)
+    /// A cancel or kill failed in a way that may still reach the server (it timed out,
+    /// `cursor::cancel_may_still_land`): `settle` answers false, so the connection is never
+    /// used again.
+    unsettled: bool,
 }
 
 impl Ladder {
@@ -2771,6 +2806,8 @@ impl Ladder {
             stop: None,
             typed: false,
             aliases: Vec::new(),
+            // ## m4-pgcancel
+            unsettled: false,
         }
     }
 
@@ -2930,6 +2967,8 @@ impl Ladder {
             Err(_) => (ErrClass::Internal, None),
         };
         let (class, server) = failed;
+        // ## m4-pgcancel (named exception, ruling I1): a cancel that timed out may still land.
+        self.unsettled |= cancel_may_still_land(class);
         ctl.emit(SessionEvent::CancelFailed {
             req: self.seq,
             server,
@@ -2986,12 +3025,17 @@ impl Ladder {
     /// Waits up to [`CANCEL_WAIT`] for the cancel in flight. False when it did not end: it is
     /// then aborted (and awaited, so nothing more of it runs), but what it already sent may
     /// still land, so the caller must not reuse the connection (review C1).
+    /// ## m4-pgcancel (named exception, ruling I1): false too when it ended, now or before, in
+    /// a failure that may still land (`cursor::cancel_may_still_land`).
     async fn settle(&mut self) -> bool {
         let Some(mut task) = self.mechanism.take() else {
-            return true;
+            return !self.unsettled;
         };
-        if tokio::time::timeout(CANCEL_WAIT, &mut task).await.is_ok() {
-            return true;
+        if let Ok(joined) = tokio::time::timeout(CANCEL_WAIT, &mut task).await {
+            if let Ok(Err((class, _))) = joined {
+                self.unsettled |= cancel_may_still_land(class);
+            }
+            return !self.unsettled;
         }
         task.abort();
         let _ = task.await;

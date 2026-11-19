@@ -290,8 +290,9 @@ pub struct KeyColumn {
     pub name: Option<Name>,
 }
 
-/// The shared fields of keys and indexes.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// The shared fields of keys and indexes. `Default` is an **enforced** key with nothing else
+/// set (m4-t19 named exception below).
+#[derive(Debug, Clone, PartialEq)]
 pub struct KeyProps {
     /// Key columns in key order.
     pub columns: Vec<KeyColumn>,
@@ -367,7 +368,8 @@ pub struct FkProps {
     pub rare: Option<Arc<FkRare>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+/// `Default` is an **enforced** check (m4-t19 named exception below).
+#[derive(Debug, Clone, PartialEq)]
 pub struct CheckProps {
     /// The bare check expression, raw (the DDL producer writes `CHECK (expr)`): PostgreSQL
     /// `pg_get_expr(conbin, conrelid, true)`, MySQL/MariaDB `CHECK_CLAUSE`. For a PostgreSQL
@@ -379,6 +381,45 @@ pub struct CheckProps {
     /// The fields most checks lack (R-W2-8; m4-t13-assemble named exception).
     pub rare: Option<Arc<CheckRare>>,
 }
+
+// ## m4-t19-produce (named exception in Task 1a/3's file; T19 review I2): a default key or
+// check is **enforced**. A derived `Default` made `enforced = false`, so every constraint built
+// with `..Default::default()` read as NOT ENFORCED, a wrong fact for the DDL producer. The
+// field name and its meaning are unchanged, so the cache codec (T11: one bool,
+// `put_bool(p.enforced)`) needs nothing; when T13 adds `rare` to these structs, these impls
+// gain `rare: None`.
+
+impl Default for KeyProps {
+    fn default() -> Self {
+        KeyProps {
+            columns: Vec::new(),
+            expressions: Vec::new(),
+            include: Vec::new(),
+            predicate: None,
+            desc: Vec::new(),
+            unique: false,
+            nulls_not_distinct: false,
+            deferrable: false,
+            initially_deferred: false,
+            not_valid: false,
+            enforced: true,
+            invisible: false,
+            backing_index: None,
+            implicit_for: None,
+        }
+    }
+}
+
+impl Default for CheckProps {
+    fn default() -> Self {
+        CheckProps {
+            expr: Name::from(""),
+            not_valid: false,
+            enforced: true,
+        }
+    }
+}
+// ## end m4-t19-produce
 
 /// Routine properties: the `sql_catalog::FnSig` fields (schema and name are the object's) plus
 /// the owner, MySQL's definer and specific name (MySQL routine identity is `(ROUTINE_TYPE,
@@ -458,7 +499,7 @@ bitflags! {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TriggerProps {
     pub timing: TriggerTiming,
     pub events: TriggerEvents,
@@ -470,6 +511,24 @@ pub struct TriggerProps {
     pub enabled: bool,
     /// MySQL `DEFINER`, raw.
     pub definer: Option<Name>,
+}
+
+// ## m4-t19 (controller fix): a trigger is enabled unless the catalog says otherwise. A derived
+// `Default` gave `enabled: false`, so any producer path that forgot the field would render a
+// disabled trigger (a wrong fact).
+impl Default for TriggerProps {
+    fn default() -> Self {
+        TriggerProps {
+            timing: TriggerTiming::default(),
+            events: TriggerEvents::default(),
+            for_each_row: false,
+            function: None,
+            when_expr: None,
+            source: None,
+            enabled: true,
+            definer: None,
+        }
+    }
 }
 
 /// One attribute of a composite type.
