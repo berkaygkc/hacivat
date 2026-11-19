@@ -918,3 +918,70 @@ back (palette-only; Task 39's menus add "Add as sort level N" through
   run's `FetchPolicy::cell_cap` differs (`orchestrator::start_run_capped`).
 - *The tooltip* (`valfmt::tooltip`, `Purpose::Tooltip`) is the raw channel under a quarter of the
   cell's grapheme cap (`TOOLTIP_FRACTION`), marked and chipped when cut.
+
+## m4-t08 — tree widget
+
+`hacivat_ui::tree` (plan-m4 Task 8): the explorer's virtualized tree, with no database
+knowledge. Bodies from `m4-spike-tree` @ `2a31b8b` (R-M4-40) on Task 1b's seam; the spike's view
+is split into `view/{mod,anchor,keyboard,pointer,element}.rs`.
+
+- *Flat-vector model.* The expanded tree is one `Vec<FlatRow>` (32 bytes a row: key, depth,
+  kind, position and set size; about 5 MB at 160,000 rows), built by an iterative DFS (no
+  recursion limit; a 50,000-deep tree is tested) on a model generation change, and spliced on
+  expand/collapse (`expand_at`/`collapse_at` cost the subtree, not the tree). A frame reads only
+  the rows on screen ± `TREE_OVERSCAN_ROWS` (2). Measured (release, this Mac, 162,041 rows): the
+  full flatten 1.8 ms (gate 50 ms), row build p95 0.37 ms, 0.36 ms with assistive technology
+  (gate 2 ms). `index_of` stays linear (about 0.1 ms at 160,000 rows per key press); a key →
+  index map would cost about 5 ms per rebuild.
+- *Fibonacci key hasher.* `KeySet` (expansion, selection) hashes a `TreeKey`, already a stable
+  128-bit hash, with one fold and multiply instead of SipHash: the expanded-set lookup is the
+  flattening's hot loop. The high half is spread before the fold (keys whose halves are swapped
+  or equal stay apart) and the product's high bits are folded into the low ones the table
+  indexes by.
+- *Anchoring by key.* Expansion is a set of keys owned by the view, so it survives generations,
+  and a key that disappears and returns comes back expanded. On a generation change the first
+  visible node keeps its screen position (relocated by key after the rebuild); expand/collapse
+  above the viewport shifts the offset by the spliced rows; collapsing the subtree that holds the
+  top row makes the collapsed node the top row.
+- *Lazy children.* `NotLoaded` draws a chevron and emits `Expand(key)` once per expansion: also
+  for a node restored expanded, a node revealed by an ancestor's expansion (collapsing an
+  ancestor forgets the announcement of every expanded node it hides), and a node whose children
+  the host drops back to `NotLoaded` while it is expanded, so a cancelled load never strands a
+  node. `Loading`/`Failed` draw one child row with the model's label at `text-2` (`Failed` adds
+  `CircleAlert` in the chevron column, never red; no motion); neither takes the cursor.
+- *R-M4-49: group headers take the cursor, never the selection.* A group header that can expand
+  (a kind group) is a cursor stop for ↑/↓/Home/End/Page keys, and ← / → / Enter / a click
+  collapse or expand it; Enter never activates it; `SelectionChanged` never names it; type-ahead
+  skips it. The cursor (`TreeView::cursor`) may therefore be a header while the selection
+  (`TreeView::selection`) stays on the last row; host actions act on the selection. A header
+  that cannot expand (the M2a environment labels, NOTES M4 surface 1) is a label the keys and
+  the pointer pass over. A header still asks for its menu (right click, Shift-F10, the menu key:
+  `ContextMenu`), because the mocks give kind groups a menu (NOTES M4 surface 5); the selection
+  does not move.
+- *R-M4-50: defaults the host sets.* The type-ahead fold defaults to `Locale { turkic: false }`
+  (the access-key fold); the explorer sets `Fold::Tolerant` for Turkish users (Task 14, D-074).
+  Neither fold calls a casing function: the tolerant fold is `I i İ ı` as one letter plus the
+  access-key fold's table. The buffer resets after 1 s of the GPUI executor's clock. Single
+  selection by default (M4's explorer); with single selection a collapse that hides the selected
+  row clears the selection (`SelectionChanged(None)`), so the selection is never a hidden row.
+  Whether a multi-select keeps hidden rows is left to the milestone that adds a bulk action
+  (multi-select keeps them today).
+- *Lag-free accessibility hand-off.* While `Window::is_a11y_active()`, the root declares `Tree`
+  (named by `set_a11y_label`) and its synthetic children are one `TreeItem` per row on screen
+  ± 5: level, expanded state, position and size in set, selected (never on a header), the
+  status text as description, bounds. The element computes the items in its prepaint and hands
+  them to the root's synthetic-children callback through a shared `Rc`; GPUI runs that callback
+  after the children's prepaint, so the items describe the frame being drawn (no one-frame lag,
+  unlike the grid's T40 subtree). Ids derive from `(key, row kind)`. The cursor item is the
+  active descendant (a header too). Items that take the cursor answer Focus, Click (activate a
+  row, toggle a header), Expand, Collapse, ScrollIntoView and ShowContextMenu. Inactive: no
+  role, no item, no string.
+- *The border-strip finding.* GPUI paints a border-only quad as four strips, so the selection's
+  1 px blue left edge is a child fill, and the keyboard-focus ring is an absolutely placed
+  overlay (no layout shift), drawn only after keyboard input.
+- *Crowded rows* (NOTES M4 cross-cutting #5, the M2a rule the roots keep): the meta (11 px mono,
+  `text-3`) gives way first, then the label, which keeps about six characters and shows its full
+  text as a tooltip once ellipsized; the kind icon, the flags (environment mark, lock), the
+  outlined badge and the status glyph never shrink.
+- *Keys.* The widget reads key-downs while focused and binds nothing; every chord with ⌘, Ctrl,
+  Alt or fn is left to the host's keymap; nothing fires during an IME composition.

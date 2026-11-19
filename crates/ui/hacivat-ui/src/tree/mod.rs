@@ -2,23 +2,33 @@
 //! (spec §5.1). The host describes the tree through a [`TreeModel`] keyed by opaque
 //! [`TreeKey`]s; the widget owns expansion, selection, scrolling, keyboard and accessibility.
 //!
-//! ## m4-t01b-seams: the API of `m4-spike-tree` @ `2a31b8b` (R-M4-40: declarations copied,
-//! bodies stubbed). Until Task 8 lands, [`TreeView`] is a **flat, non-expandable list of the
-//! roots** (Global Constraints, "No silent weakening"): it never shows a child, so it can never
-//! show an unloaded subtree as loaded. It selects on click, activates on a double click or
-//! Enter, and names each row (and its status text) for assistive technology.
-//!
 //! - **Model.** [`TreeModel::roots`], [`TreeModel::children`] (lazy: [`ChildState`] says
 //!   whether children are unknown, loading, loaded or failed) and [`TreeModel::row`] (what a
 //!   row shows). The model bumps [`TreeModel::generation`] whenever any answer changes and the
-//!   host calls [`TreeView::model_changed`].
-//! - **Events** ([`TreeEvent`]): expand/collapse, activate (Enter, double click), context menu
-//!   (right click, Shift-F10, the menu key) and selection.
+//!   host calls [`TreeView::model_changed`]; the view re-flattens before the next frame.
+//! - **Flattening** ([`flat`]): the expanded tree is one `Vec` of 32-byte rows, rebuilt on a
+//!   generation change and spliced on expand/collapse. A frame only reads the rows on screen.
+//! - **Expansion** is a set of keys owned by the view, so it survives model generations, and a
+//!   key that vanishes and returns comes back expanded.
+//! - **Scroll anchoring.** The first visible row keeps its screen position when rows are
+//!   inserted or removed above it (located again by key after every rebuild).
+//! - **Group headers** (R-M4-49) take the keyboard cursor when they can expand, never the
+//!   selection; a header that cannot expand (an environment label) is not a cursor stop.
+//! - **Events** ([`TreeEvent`]): expand/collapse (an expanded node whose children are
+//!   `NotLoaded` is announced once per expansion so the host loads it), activate (Enter,
+//!   double click), context menu (right click, Shift-F10, the menu key) and selection.
+//! - **Accessibility** ([`a11y`]): while assistive technology is active, a `Tree` node whose
+//!   synthetic `TreeItem` children (rows on screen ± overscan) carry level, expanded state,
+//!   set size and position; nothing is built otherwise.
 
+// ## m4-t08-tree: the bodies of `m4-spike-tree` @ `2a31b8b` (R-M4-40), on Task 1b's seam.
+pub mod a11y;
+pub mod flat;
 pub mod typeahead;
 mod view;
 
 use std::collections::HashSet;
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 
 use hacivat_ui_core::gpui_surface::{Pixels, Point, SharedString};
@@ -28,17 +38,16 @@ use crate::icon::IconName;
 use crate::text::TextSource;
 
 pub use typeahead::Fold;
-pub use view::TreeView;
+pub use view::{TREE_OVERSCAN_ROWS, TreeView};
 
 /// A node's identity: opaque to the widget. The app derives it from its own object identity
 /// with a stable hash (`ObjectKey`, Task 14), never from a display string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TreeKey(pub u128);
 
-/// A set of keys (expansion, selection). Task 8 swaps the hasher (keys are already hashes, the
-/// spike's `BuildHasherDefault<KeyHasher>`), so build one with `KeySet::default()` (or
-/// `collect`), never `KeySet::new()`, which exists only for the std hasher.
-pub type KeySet = HashSet<TreeKey>;
+/// A set of keys (expansion, selection), hashed with [`flat::KeyHasher`]: the keys are already
+/// hashes. Build one with `KeySet::default()` (or `collect`).
+pub type KeySet = HashSet<TreeKey, BuildHasherDefault<flat::KeyHasher>>;
 
 /// What a node's children are.
 #[derive(Debug, Clone, PartialEq)]
@@ -117,7 +126,8 @@ pub struct TreeRowData {
     /// The status slot (M4b git badges).
     pub status: Option<RowStatus>,
     /// A group header (small caps, a seam rule and a mono count): takes the keyboard focus but
-    /// never the selection (R-M4-49).
+    /// never the selection (R-M4-49). A header that cannot expand (no children) is a plain
+    /// label the keys pass over.
     pub group_header: bool,
     /// Greyed (out of scope): `text-3` ink.
     pub dim: bool,
@@ -162,13 +172,17 @@ pub trait TreeModel: 'static {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TreeEvent {
     /// The node is now expanded. When its children are [`ChildState::NotLoaded`] the host
-    /// starts loading them; emitted once per expansion.
+    /// starts loading them; emitted once per expansion (also for a node restored expanded, or
+    /// revealed by an ancestor's expansion, whose children were not loaded yet, and again when
+    /// the host drops an expanded node's children back to `NotLoaded`).
     Expand(TreeKey),
     Collapse(TreeKey),
-    /// Enter or a double click.
+    /// Enter or a double click on a row that is not a group header (Enter on a header toggles
+    /// it instead).
     Activate(TreeKey),
-    /// Right click, Shift-F10 or the menu key: open the menu at this window position.
+    /// Right click, Shift-F10 or the menu key: open the menu at this window position. A group
+    /// header asks too (its kind-group menu), without becoming the selection.
     ContextMenu(TreeKey, Point<Pixels>),
-    /// The focused row (the cursor) changed.
+    /// The selected row changed (`None`: nothing is selected). Never names a group header.
     SelectionChanged(Option<TreeKey>),
 }
