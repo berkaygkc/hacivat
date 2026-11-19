@@ -129,6 +129,12 @@ pub trait MetaSource: Send + Sync {
     fn user_in_transaction(&self) -> bool {
         false
     }
+
+    // ## m4-t15-engine (fix round 2, RR-3)
+    /// The engine closed a connection `acquire` handed out (it is dropped first). A test
+    /// double counts open connections with it; the product's connections give their budget
+    /// slot back on drop.
+    fn released(&self) {}
 }
 
 /// A request's priority (alg/02 HV-INTRO-01 "Scheduler"), lowest first.
@@ -161,6 +167,9 @@ pub enum EngineEvent {
     /// A mass deletion held for `ns` (D-039) no longer applies: a later pass of the namespace
     /// replaced it. The UI withdraws its prompt (review I-3).
     PendingWithdrawn { ns: NsKey },
+    /// The scope refresh could not list the other PostgreSQL database `db` (no `CONNECT`, a
+    /// refused login): its schemas are unknown until a later refresh (review RR-2).
+    DatabaseUnlisted { db: Name },
     /// A narrower scope filter removed `count` objects of `ns` (R-W3-2): a scope change, not a
     /// server deletion; the delta lists them in `out_of_scope`.
     ScopeNarrowed { ns: NsKey, count: u32 },

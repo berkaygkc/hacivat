@@ -121,11 +121,16 @@ pub(super) struct Merged {
     pub follow: Vec<ObjectKey>,
     /// A top-level object was renamed: the namespace gets a follow-up pass.
     pub follow_ns: bool,
+    /// The filters the pass read with: a result read under other filters than the engine's
+    /// current ones is read again (review m-rr1).
+    pub filters: Filters,
 }
 
 /// What a task answered.
 pub(super) enum Output {
-    Namespaces(Vec<NsInfo>, Option<IdentityRead>),
+    /// The listing, the identity, and the other databases that could not be listed (unknown:
+    /// their schemas keep their states; review RR-2).
+    Namespaces(Vec<NsInfo>, Option<IdentityRead>, Vec<Name>),
     Merged(Box<Merged>),
     Staleness(Vec<ObjectKey>, Vec<Staleness>),
     Failed(IntroError),
@@ -172,6 +177,7 @@ async fn run_inner(ctx: &Arc<WorkerCtx>, spec: Spec, cancel: &CancellationToken)
         let read = read(ctx, &spec, &mut conn, cancel).await;
         // The connection holds a budget slot: give it back before anything else.
         drop(conn);
+        ctx.meta.released();
         match read {
             // HV-INTRO-01 edge 5: reconnect once and restart the task from the beginning.
             Err(IntroError::Meta(MetaError::ConnectionLost)) if !restarted => restarted = true,
@@ -185,8 +191,11 @@ async fn run_inner(ctx: &Arc<WorkerCtx>, spec: Spec, cancel: &CancellationToken)
                 }
             }
             Err(e) => return Output::Failed(e),
-            Ok(Read::Namespaces(infos, identity)) => {
-                return Output::Namespaces(infos, identity);
+            Ok(Read::Namespaces(infos, identity, others)) => {
+                // The first connection is closed: list the other databases one connection at
+                // a time (review RR-3).
+                let (infos, unlisted) = list_others(ctx, infos, others, cancel).await;
+                return Output::Namespaces(infos, identity, unlisted);
             }
             Ok(Read::Staleness(keys, st)) => return Output::Staleness(keys, st),
             Ok(Read::Result(r)) => return merge_result(ctx, &spec, r).await,
@@ -214,7 +223,8 @@ async fn acquire(
 }
 
 enum Read {
-    Namespaces(Vec<NsInfo>, Option<IdentityRead>),
+    /// The listing, the identity, and the other databases still to list.
+    Namespaces(Vec<NsInfo>, Option<IdentityRead>, Vec<Name>),
     Result(NamespaceResult),
     Staleness(Vec<ObjectKey>, Vec<Staleness>),
 }
@@ -226,7 +236,7 @@ async fn read(
     cancel: &CancellationToken,
 ) -> Result<Read, IntroError> {
     match &spec.work {
-        Work::ScopeRefresh => list(ctx, spec, conn, cancel).await,
+        Work::ScopeRefresh => list(ctx, spec, conn).await,
         Work::Pass { ns, mode, level } => ctx
             .intro
             .introspect(
@@ -262,19 +272,14 @@ async fn read(
     }
 }
 
-/// The scope refresh: the namespaces of the profile's database; on PostgreSQL, those of every
-/// other listed database the scope may select, each on a connection to it (`pg_namespace` is
-/// per database; review I-2); and, on connect, the server's identity checked against the
-/// cache (R-W3-3).
-async fn list(
-    ctx: &WorkerCtx,
-    spec: &Spec,
-    conn: &mut MetaConn,
-    cancel: &CancellationToken,
-) -> Result<Read, IntroError> {
-    let mut infos = ctx.intro.list_namespaces(conn).await?;
+/// The scope refresh on the profile's own connection: its database's namespaces, on connect the
+/// server's identity checked against the cache (R-W3-3), and on PostgreSQL the other listed
+/// databases the scope may select (`pg_namespace` is per database; review I-2), which
+/// [`list_others`] reads after this connection is closed (review RR-3).
+async fn list(ctx: &WorkerCtx, spec: &Spec, conn: &mut MetaConn) -> Result<Read, IntroError> {
+    let infos = ctx.intro.list_namespaces(conn).await?;
     let Some(listing) = &spec.listing else {
-        return Ok(Read::Namespaces(infos, None));
+        return Ok(Read::Namespaces(infos, None, Vec::new()));
     };
     let identity = if listing.identity {
         Some(identity(ctx, conn).await)
@@ -297,17 +302,44 @@ async fn list(
         })
         .map(|i| i.key.path[0].clone())
         .collect();
+    Ok(Read::Namespaces(infos, identity, others))
+}
+
+/// The schemas of each other database, each on its own connection, one at a time (the first
+/// connection is already closed: no budget slot is held idle; review RR-3). A database that
+/// cannot be listed (no `CONNECT`, a refused login) does not fail the refresh: it is answered
+/// as unlisted (review RR-2). A cancel stops the loop; what was not listed is unlisted.
+async fn list_others(
+    ctx: &WorkerCtx,
+    mut infos: Vec<NsInfo>,
+    others: Vec<Name>,
+    cancel: &CancellationToken,
+) -> (Vec<NsInfo>, Vec<Name>) {
+    let mut unlisted = Vec::new();
     for db in others {
-        let mut other = acquire(ctx, Some(db.clone()), cancel).await?;
-        let found = ctx.intro.list_namespaces(&mut other).await?;
-        drop(other);
-        infos.extend(
-            found
-                .into_iter()
-                .filter(|i| i.key.kind == NsKind::Schema && i.key.path.first() == Some(&db)),
-        );
+        if cancel.is_cancelled() {
+            unlisted.push(db);
+            continue;
+        }
+        let found = match acquire(ctx, Some(db.clone()), cancel).await {
+            Ok(mut other) => {
+                let found = ctx.intro.list_namespaces(&mut other).await;
+                drop(other);
+                ctx.meta.released();
+                found
+            }
+            Err(e) => Err(e.into()),
+        };
+        match found {
+            Ok(found) => infos.extend(
+                found
+                    .into_iter()
+                    .filter(|i| i.key.kind == NsKind::Schema && i.key.path.first() == Some(&db)),
+            ),
+            Err(_) => unlisted.push(db),
+        }
     }
-    Ok(Read::Namespaces(infos, identity))
+    (infos, unlisted)
 }
 
 /// The server's identity, checked against the cache when there is one (on the blocking pool).
@@ -354,6 +386,7 @@ async fn merge_result(ctx: &Arc<WorkerCtx>, spec: &Spec, mut r: NamespaceResult)
         r.read_at_ms = now_ms();
     }
     let prev = spec.prev.clone();
+    let filters = spec.filters.clone();
     // A fragment read some objects, not the namespace: the namespace keeps its watermark and
     // load time (the merge takes both from the result), so its next incremental pass still
     // starts from where the last pass of the whole namespace did.
@@ -390,6 +423,7 @@ async fn merge_result(ctx: &Arc<WorkerCtx>, spec: &Spec, mut r: NamespaceResult)
             pass,
             follow,
             follow_ns,
+            filters,
         })
     })
     .await;

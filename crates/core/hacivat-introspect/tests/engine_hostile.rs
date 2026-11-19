@@ -413,3 +413,192 @@ async fn hostile_rename_schedules_one_heal_and_no_loop() {
     assert_eq!(tables_of(&r, &n), vec!["t0", "t2", "u1"]);
     assert_eq!(passes(&r).len(), before + 2, "{:?}", passes(&r));
 }
+
+// ---- fix round 1 verification (adopted in fix round 2: RR-1, RR-2, RR-3) ---------------------
+
+mod rr1 {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use hacivat_introspect::IntroError;
+    use hacivat_introspect::engine::EngineEvent;
+    use hacivat_introspect::scope::NsInfo;
+
+    use super::*;
+
+    fn top_count(r: &Rig, n: &NsKey) -> u32 {
+        r.catalog.current().namespaces[n].root().child_count()
+    }
+
+    /// RR-1: the user's "Remove from cache" re-plans a full pass; when a pass of the same
+    /// namespace is already queued, the two coalesce, and the answer survives the coalescing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rr_confirm_decision_survives_coalescing_with_a_queued_pass() {
+        let n = ns("public");
+        let busy = ns("busy");
+        let fake = FakeIntrospector::default();
+        fake.put_ns(n.clone(), FakeIntrospector::tables(30));
+        fake.put_ns(busy.clone(), FakeIntrospector::tables(3));
+        let r = rig_with(
+            fake,
+            RigOpts {
+                limits: EngineLimits {
+                    workers: 1,
+                    ..EngineLimits::default()
+                },
+                ..RigOpts::default()
+            },
+        );
+        bounded(
+            r.handle
+                .refresh(Target::Namespace(n.clone()), Trigger::User),
+        )
+        .await
+        .unwrap();
+        r.fake.put_ns(n.clone(), FakeIntrospector::tables(5));
+        bounded(
+            r.handle
+                .refresh(Target::Namespace(n.clone()), Trigger::Background),
+        )
+        .await
+        .unwrap();
+        assert_eq!(top_count(&r, &n), 30, "held");
+        // A fragment moves the arena: the held merge no longer applies as is.
+        bounded(
+            r.handle
+                .fragment(n.clone(), vec![table_key(&n, "t1", Some(20_001))]),
+        )
+        .await
+        .unwrap();
+        // Occupy the only worker, queue a background pass of `n`, then answer the prompt.
+        let gate = r.fake.gate(
+            move |c| matches!(c, FakeCall::Introspect { ns, .. } if *ns == pg_ns("db", "busy")),
+        );
+        let hold = r
+            .handle
+            .refresh(Target::Namespace(busy.clone()), Trigger::User);
+        bounded(gate.entered()).await;
+        let queued = r
+            .handle
+            .refresh(Target::Namespace(n.clone()), Trigger::Background);
+        let confirm = r.handle.confirm_pending(n.clone(), true);
+        bounded(r.handle.ready()).await.unwrap();
+        gate.release();
+        bounded(hold).await.unwrap();
+        let _ = bounded(queued).await;
+        let answered = bounded(confirm).await;
+        idle(&r.handle).await;
+        let tables = top_count(&r, &n);
+        let stale = matches!(
+            r.catalog
+                .current()
+                .state(&ContainerKey::Namespace(n.clone())),
+            LoadState::Loaded { stale: true, .. }
+        );
+        // Fix round 2 (RR-1, flipped): the decision applied.
+        assert!(answered.is_ok(), "{answered:?}");
+        assert_eq!((tables, stale), (5, false));
+    }
+
+    /// RR-2: on a `*:*` scope, a database the login cannot list does not take the whole scope
+    /// refresh (and so `on_connect` and the profile's own database) down with it; it is
+    /// unknown: its schemas are neither in scope nor `Missing`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rr_one_unlistable_database_does_not_fail_the_scope_refresh() {
+        let fake = FakeIntrospector::default();
+        fake.put_ns(ns("public"), FakeIntrospector::tables(2));
+        let info = |key: NsKey| NsInfo { key, system: false };
+        fake.set_listing_for(
+            None,
+            vec![
+                info(ns("public")),
+                info(NsKey::database(name("db"))),
+                info(NsKey::database(name("locked"))),
+            ],
+        );
+        fake.set_listing_for(Some("locked"), vec![info(pg_ns("locked", "public"))]);
+        // The second listing (the other database) is refused.
+        let seen = Arc::new(AtomicUsize::new(0));
+        let s = seen.clone();
+        fake.fail(
+            move |c| matches!(c, FakeCall::ListNamespaces) && s.fetch_add(1, Ordering::SeqCst) == 1,
+            IntroError::Permission {
+                kind: hacivat_meta::ObjectKind::Schema,
+            },
+            1,
+        );
+        let r = rig_with(
+            fake,
+            RigOpts {
+                scope: "*:*",
+                current: pg_current("db", "public"),
+                ..RigOpts::default()
+            },
+        );
+        let mut events = r.handle.events();
+        let got = bounded(r.handle.on_connect()).await;
+        assert!(
+            got.is_ok(),
+            "on_connect failed because one other database could not be listed: {got:?}"
+        );
+        assert!(r.catalog.current().namespaces.contains_key(&ns("public")));
+        let mut unlisted = false;
+        while let Ok(ev) = events.try_recv() {
+            unlisted |= ev == EngineEvent::DatabaseUnlisted { db: name("locked") };
+        }
+        assert!(unlisted);
+        // Unknown, fail-closed: no schema list, no state, and an expansion reads nothing.
+        let snap = r.catalog.current();
+        assert_eq!(
+            snap.state(&ContainerKey::schema_list(Some(&name("locked")))),
+            &LoadState::NotLoaded
+        );
+        let locked = pg_ns("locked", "public");
+        assert!(!snap.namespaces.contains_key(&locked));
+        assert_eq!(
+            bounded(r.handle.expand(locked)).await,
+            Err(IntroError::Cancelled)
+        );
+    }
+
+    /// RR-3: the scope refresh closes its first connection before it opens one to another
+    /// database, so a budget of one connection is enough and never more is open at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rr_scope_refresh_holds_one_connection_at_a_time() {
+        let other = pg_ns("other", "public");
+        let fake = FakeIntrospector::default();
+        fake.put_ns(ns("public"), FakeIntrospector::tables(2));
+        fake.put_ns(other.clone(), FakeIntrospector::tables(2));
+        let info = |key: NsKey| NsInfo { key, system: false };
+        fake.set_listing_for(
+            None,
+            vec![
+                info(ns("public")),
+                info(NsKey::database(name("db"))),
+                info(NsKey::database(name("other"))),
+            ],
+        );
+        fake.set_listing_for(Some("other"), vec![info(other.clone())]);
+        let r = rig_with(
+            fake,
+            RigOpts {
+                scope: "*:*",
+                current: pg_current("db", "public"),
+                limits: EngineLimits {
+                    workers: 1,
+                    busy_retry: Duration::from_millis(5),
+                    ..EngineLimits::default()
+                },
+                ..RigOpts::default()
+            },
+        );
+        r.meta.budget.store(1, std::sync::atomic::Ordering::SeqCst);
+        bounded(r.handle.on_connect()).await.unwrap();
+        assert_eq!(r.meta.peak.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            r.catalog
+                .current()
+                .state(&ContainerKey::Namespace(other.clone())),
+            &LoadState::NotLoaded
+        );
+    }
+}

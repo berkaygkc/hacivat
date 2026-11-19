@@ -322,6 +322,9 @@ struct Actor {
     events: broadcast::Sender<EngineEvent>,
     scope: ScopePattern,
     filters: Filters,
+    /// Other PostgreSQL databases the last scope refresh could not list (review RR-2): their
+    /// schemas keep their states and are neither in scope nor `Missing`.
+    unlisted: HashSet<Name>,
     /// `on_connect` ran: a late current namespace gets its step 3 (review m6).
     connected: bool,
     /// The server identity of the last connect, when there is no cache to compare with.
@@ -389,6 +392,7 @@ impl Actor {
             current_only: parse_scope("", dialect).ok(),
             scope: cfg.scope,
             filters: cfg.filters,
+            unlisted: HashSet::new(),
             connected: false,
             last_identity: None,
             probed: HashMap::new(),
@@ -550,6 +554,11 @@ impl Actor {
             }
             q.follow_up &= job.follow_up;
             q.load_only &= job.load_only;
+            // The user's answer to the guard rides on whatever it coalesces with; the latest
+            // answer wins (review RR-1).
+            if job.decision.is_some() {
+                q.decision = job.decision;
+            }
             q.waiters.append(&mut job.waiters);
             match (&mut q.work, job.work) {
                 (
@@ -1249,6 +1258,12 @@ impl Actor {
             if listed.contains(&k) {
                 continue;
             }
+            // A database that could not be listed is unknown: nothing of it changes.
+            if two_level(self.dialect)
+                && k.path.first().is_some_and(|db| self.unlisted.contains(db))
+            {
+                continue;
+            }
             let unread_db = two_level(self.dialect)
                 && k.kind == NsKind::Schema
                 && k.path.first().is_some_and(|db| !read_dbs.contains(db));
@@ -1308,14 +1323,28 @@ impl Actor {
             out
         };
         match out {
-            Output::Namespaces(infos, identity) => self.listed_done(job, infos, identity),
+            Output::Namespaces(infos, identity, unlisted) => {
+                self.listed_done(job, infos, identity, unlisted)
+            }
             Output::Merged(m) => self.merged(job, *m),
             Output::Staleness(keys, st) => self.staleness(job, keys, st),
             Output::Failed(e) => self.failed(job, e),
         }
     }
 
-    fn listed_done(&mut self, job: Job, infos: Vec<NsInfo>, identity: Option<IdentityRead>) {
+    fn listed_done(
+        &mut self,
+        job: Job,
+        infos: Vec<NsInfo>,
+        identity: Option<IdentityRead>,
+        unlisted: Vec<Name>,
+    ) {
+        for db in &unlisted {
+            let _ = self
+                .events
+                .send(EngineEvent::DatabaseUnlisted { db: db.clone() });
+        }
+        self.unlisted = unlisted.into_iter().collect();
         self.listed = Some(infos);
         let changes = self.scope_changes();
         let mut generation = match self.publish(changes, None) {
@@ -1451,7 +1480,9 @@ impl Actor {
         }
         let snap = self.catalog.current();
         let now_ptr = snap.namespaces.get(&ns).map(|a| Arc::as_ptr(a) as usize);
-        if now_ptr != m.prev_ptr {
+        // Published by something else since the task started, or read under filters that
+        // changed since (review m-rr1): read again.
+        if now_ptr != m.prev_ptr || m.filters != self.filters {
             // Published by something else since the task started: read again.
             self.next_id += 1;
             job.seq = self.next_id;

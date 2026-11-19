@@ -767,6 +767,12 @@ pub struct FakeMetaSource {
     pub attempts: AtomicU64,
     /// `user_in_transaction` calls (each periodic validation asks once).
     pub tx_checks: AtomicU64,
+    /// The profile's budget of metadata connections (0: unlimited): over it `acquire`
+    /// answers `Busy` until one is `released`.
+    pub budget: AtomicU64,
+    /// Connections handed out and not yet released, and the most open at once.
+    pub open: AtomicU64,
+    pub peak: AtomicU64,
     /// The databases asked for, in order.
     pub databases: Mutex<Vec<Option<Name>>>,
 }
@@ -781,6 +787,9 @@ impl FakeMetaSource {
             acquired: AtomicU64::new(0),
             attempts: AtomicU64::new(0),
             tx_checks: AtomicU64::new(0),
+            budget: AtomicU64::new(0),
+            open: AtomicU64::new(0),
+            peak: AtomicU64::new(0),
             databases: Mutex::new(Vec::new()),
         })
     }
@@ -800,6 +809,12 @@ impl MetaSource for FakeMetaSource {
             if self.busy.load(Ordering::SeqCst) {
                 return Err(MetaError::Busy);
             }
+            let budget = self.budget.load(Ordering::SeqCst);
+            if budget > 0 && self.open.load(Ordering::SeqCst) >= budget {
+                return Err(MetaError::Busy);
+            }
+            let open = self.open.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(open, Ordering::SeqCst);
             self.acquired.fetch_add(1, Ordering::SeqCst);
             self.databases
                 .lock()
@@ -812,5 +827,11 @@ impl MetaSource for FakeMetaSource {
     fn user_in_transaction(&self) -> bool {
         self.tx_checks.fetch_add(1, Ordering::SeqCst);
         self.in_tx.load(Ordering::SeqCst)
+    }
+
+    fn released(&self) {
+        let _ = self
+            .open
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
     }
 }
