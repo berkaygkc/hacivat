@@ -1,0 +1,512 @@
+# owner: Task 6 (M4; sql-testkit corpus, new file). The catalog effects (`StmtReport.ddl`,
+# HV-INTRO-12 step 2) `classify` gives each PostgreSQL statement, read by
+# `sql-safety/tests/ddl_effects.rs` (`corpus_ddl_effects`). Hacivat-authored statements.
+#
+# Each case: `sql` (one statement) and `ddl`, its effects in order, one string each:
+#   `<action> <kind> <name>[ on=<name>][ refs=<name>,<name>][ temp][ concurrently]`, or `opaque`;
+# - action: create | alter | drop | drop-cascade | rename-to:<ident> | set-schema:<ident> |
+#   comment | grant | revoke | other;
+# - kind: database schema table view matview index sequence routine trigger type domain
+#   extension policy rule event role other;
+# - name: the parts as written, joined by `.`; a quoted part is `"…"` (inner `"` doubled);
+#   `-` for none. Names are never folded.
+
+# Tables.
+[[case]]
+sql = "create table s1.t(x int)"
+ddl = ["create table s1.t"]
+
+[[case]]
+sql = "CREATE TABLE S1.T (x int)"
+ddl = ["create table S1.T"]
+
+[[case]]
+sql = 'create table "Sales"."Ürün" (x int)'
+ddl = ['create table "Sales"."Ürün"']
+
+[[case]]
+sql = 'create table "a""b" (x int)'
+ddl = ['create table "a""b"']
+
+[[case]]
+sql = "create temp table t(a int)"
+ddl = ["create table t temp"]
+
+[[case]]
+sql = "create temporary table t(a int)"
+ddl = ["create table t temp"]
+
+[[case]]
+sql = "create table pg_temp.t(a int)"
+ddl = ["create table pg_temp.t temp"]
+
+[[case]]
+sql = "create unlogged table u(a int)"
+ddl = ["create table u"]
+
+[[case]]
+sql = "create table if not exists t(a int)"
+ddl = ["create table t"]
+
+[[case]]
+sql = "create table c(a int references p(id))"
+ddl = ["create table c refs=p"]
+
+[[case]]
+sql = "create table c(a int, foreign key (a) references s.p(id))"
+ddl = ["create table c refs=s.p"]
+
+[[case]]
+sql = "create table p1 partition of p for values in (1)"
+ddl = ["create table p1 refs=p"]
+
+[[case]]
+sql = "create table t2 as select 1"
+ddl = ["create table t2"]
+
+[[case]]
+sql = "create temp table t2 as select 1"
+ddl = ["create table t2 temp"]
+
+[[case]]
+sql = "create materialized view mv as select 1"
+ddl = ["create matview mv"]
+
+[[case]]
+sql = "select 1 into t3"
+ddl = ["create table t3"]
+
+[[case]]
+sql = "select 1 into temp t4"
+ddl = ["create table t4 temp"]
+
+[[case]]
+sql = "create foreign table ft (a int) server srv"
+ddl = ["create table ft"]
+
+[[case]]
+sql = "drop table a, b, c"
+ddl = ["drop table a", "drop table b", "drop table c"]
+
+[[case]]
+sql = "drop table if exists s.t cascade"
+ddl = ["drop-cascade table s.t"]
+
+[[case]]
+sql = "drop foreign table ft"
+ddl = ["drop table ft"]
+
+[[case]]
+sql = "alter table t add column a int"
+ddl = ["alter table t"]
+
+[[case]]
+sql = "alter table t add foreign key (a) references u(b)"
+ddl = ["alter table t refs=u"]
+
+[[case]]
+sql = "alter table t add constraint fk foreign key (a) references s.u(b)"
+ddl = ["alter table t refs=s.u"]
+
+[[case]]
+sql = "alter table t add column b int references u"
+ddl = ["alter table t refs=u"]
+
+[[case]]
+sql = "alter table p attach partition p1 for values in (1)"
+ddl = ["alter table p refs=p1"]
+
+[[case]]
+sql = "alter table p detach partition p1"
+ddl = ["alter table p refs=p1"]
+
+[[case]]
+sql = "alter table t inherit base"
+ddl = ["alter table t refs=base"]
+
+[[case]]
+sql = "alter table t owner to r"
+ddl = ["alter table t"]
+
+[[case]]
+sql = "alter table t rename to t2"
+ddl = ["rename-to:t2 table t"]
+
+[[case]]
+sql = 'alter table "Sales"."Ürün" rename to "Ürünler"'
+ddl = ['rename-to:"Ürünler" table "Sales"."Ürün"']
+
+[[case]]
+sql = "alter table t rename column a to b"
+ddl = ["alter table t"]
+
+[[case]]
+sql = "alter table t rename constraint c to d"
+ddl = ["alter table t"]
+
+[[case]]
+sql = "alter table t set schema s2"
+ddl = ["set-schema:s2 table t"]
+
+# Views, sequences, indexes.
+[[case]]
+sql = "create view v as select 1"
+ddl = ["create view v"]
+
+[[case]]
+sql = "create or replace temp view v as select 1"
+ddl = ["create view v temp"]
+
+[[case]]
+sql = "drop view v"
+ddl = ["drop view v"]
+
+[[case]]
+sql = "drop materialized view mv"
+ddl = ["drop matview mv"]
+
+[[case]]
+sql = "alter view v rename to w"
+ddl = ["rename-to:w view v"]
+
+[[case]]
+sql = "create sequence s.seq"
+ddl = ["create sequence s.seq"]
+
+[[case]]
+sql = "alter sequence seq restart"
+ddl = ["alter sequence seq"]
+
+[[case]]
+sql = "alter sequence seq rename to seq2"
+ddl = ["rename-to:seq2 sequence seq"]
+
+[[case]]
+sql = "drop sequence seq"
+ddl = ["drop sequence seq"]
+
+[[case]]
+sql = "create index i on t (a)"
+ddl = ["create index i on=t"]
+
+[[case]]
+sql = "create index on t (a)"
+ddl = ["create index - on=t"]
+
+[[case]]
+sql = "create unique index concurrently i on s.t (a)"
+ddl = ["create index i on=s.t concurrently"]
+
+[[case]]
+sql = "drop index i"
+ddl = ["drop index i"]
+
+[[case]]
+sql = "drop index concurrently if exists i, s.j"
+ddl = ["drop index i concurrently", "drop index s.j concurrently"]
+
+[[case]]
+sql = "alter index i rename to j"
+ddl = ["rename-to:j index i"]
+
+# Schemas and databases.
+[[case]]
+sql = "create schema s"
+ddl = ["create schema s"]
+
+[[case]]
+sql = 'create schema if not exists "S"'
+ddl = ['create schema "S"']
+
+[[case]]
+sql = "create schema authorization joe"
+ddl = ["opaque"]
+
+[[case]]
+sql = "drop schema s cascade"
+ddl = ["drop-cascade schema s"]
+
+[[case]]
+sql = "drop schema a, b"
+ddl = ["drop schema a", "drop schema b"]
+
+[[case]]
+sql = "alter schema s rename to s2"
+ddl = ["rename-to:s2 schema s"]
+
+[[case]]
+sql = "alter schema s owner to r"
+ddl = ["alter schema s"]
+
+[[case]]
+sql = "create database d"
+ddl = ["create database d"]
+
+[[case]]
+sql = "drop database d"
+ddl = ["drop database d"]
+
+[[case]]
+sql = "drop database if exists d with (force)"
+ddl = ["drop database d"]
+
+[[case]]
+sql = "alter database d set work_mem = '64MB'"
+ddl = ["alter database d"]
+
+[[case]]
+sql = "alter database d rename to e"
+ddl = ["rename-to:e database d"]
+
+# Types, domains, routines, triggers, policies, rules, extensions, roles.
+[[case]]
+sql = "create type ty as (a int)"
+ddl = ["create type ty"]
+
+[[case]]
+sql = "create type mood as enum ('a', 'b')"
+ddl = ["create type mood"]
+
+[[case]]
+sql = "alter type mood add value 'c'"
+ddl = ["alter type mood"]
+
+[[case]]
+sql = "alter type ty add attribute b int"
+ddl = ["alter type ty"]
+
+[[case]]
+sql = "alter type ty owner to r"
+ddl = ["alter type ty"]
+
+[[case]]
+sql = "alter type ty rename to ty2"
+ddl = ["rename-to:ty2 type ty"]
+
+[[case]]
+sql = "alter type ty set schema s2"
+ddl = ["set-schema:s2 type ty"]
+
+[[case]]
+sql = "drop type ty"
+ddl = ["drop type ty"]
+
+[[case]]
+sql = "create domain d as int"
+ddl = ["create domain d"]
+
+[[case]]
+sql = "alter domain d set not null"
+ddl = ["alter domain d"]
+
+[[case]]
+sql = "drop domain d"
+ddl = ["drop domain d"]
+
+[[case]]
+sql = "create function f() returns int language sql as 'select 1'"
+ddl = ["create routine f"]
+
+[[case]]
+sql = "create procedure s.p() language sql as $$ select 1 $$"
+ddl = ["create routine s.p"]
+
+[[case]]
+sql = "alter function f(int) rename to g"
+ddl = ["rename-to:g routine f"]
+
+[[case]]
+sql = "alter function f(int) set schema s2"
+ddl = ["set-schema:s2 routine f"]
+
+[[case]]
+sql = "alter function f(int) immutable"
+ddl = ["alter routine f"]
+
+[[case]]
+sql = "drop function f(int)"
+ddl = ["drop routine f"]
+
+[[case]]
+sql = "drop procedure p()"
+ddl = ["drop routine p"]
+
+[[case]]
+sql = "create trigger trg after insert on t for each row execute function f()"
+ddl = ["create trigger trg on=t"]
+
+[[case]]
+sql = "alter trigger trg on t rename to trg2"
+ddl = ["rename-to:trg2 trigger trg on=t"]
+
+[[case]]
+sql = "drop trigger trg on s.t"
+ddl = ["drop trigger trg on=s.t"]
+
+[[case]]
+sql = "create policy p on t using (true)"
+ddl = ["create policy p on=t"]
+
+[[case]]
+sql = "alter policy p on t using (false)"
+ddl = ["alter policy p on=t"]
+
+[[case]]
+sql = "drop policy p on t"
+ddl = ["drop policy p on=t"]
+
+[[case]]
+sql = "create rule r as on insert to t do instead nothing"
+ddl = ["create rule r on=t"]
+
+[[case]]
+sql = "drop rule r on t"
+ddl = ["drop rule r on=t"]
+
+[[case]]
+sql = "create extension hstore"
+ddl = ["opaque", "create extension hstore"]
+
+[[case]]
+sql = "drop extension hstore"
+ddl = ["drop extension hstore"]
+
+[[case]]
+sql = "create role r"
+ddl = ["create role r"]
+
+[[case]]
+sql = "alter role r login"
+ddl = ["alter role r"]
+
+[[case]]
+sql = "drop role r"
+ddl = ["drop role r"]
+
+# Comments.
+[[case]]
+sql = "comment on table t is 'x'"
+ddl = ["comment table t"]
+
+[[case]]
+sql = "comment on column s.t.c is 'x'"
+ddl = ["comment other c on=s.t"]
+
+[[case]]
+sql = "comment on column t.c is null"
+ddl = ["comment other c on=t"]
+
+[[case]]
+sql = "comment on index i is 'x'"
+ddl = ["comment index i"]
+
+[[case]]
+sql = "comment on schema s is 'x'"
+ddl = ["comment schema s"]
+
+[[case]]
+sql = "comment on function f(int) is 'x'"
+ddl = ["comment routine f"]
+
+[[case]]
+sql = "comment on trigger trg on t is 'x'"
+ddl = ["comment trigger trg on=t"]
+
+[[case]]
+sql = "comment on constraint c on t is 'x'"
+ddl = ["comment other c on=t"]
+
+# Privileges.
+[[case]]
+sql = "grant select on t to r"
+ddl = ["grant table t"]
+
+[[case]]
+sql = "revoke select on s.t from r"
+ddl = ["revoke table s.t"]
+
+[[case]]
+sql = "grant select on all tables in schema s to r"
+ddl = ["grant schema s"]
+
+[[case]]
+sql = "revoke all on all tables in schema s, s2 from r"
+ddl = ["revoke schema s", "revoke schema s2"]
+
+[[case]]
+sql = "grant usage on schema s to r"
+ddl = ["grant schema s"]
+
+[[case]]
+sql = "grant execute on function f(int) to r"
+ddl = ["grant routine f"]
+
+[[case]]
+sql = "grant r1 to r2"
+ddl = ["grant role r1"]
+
+[[case]]
+sql = "alter default privileges grant select on tables to r"
+ddl = ["opaque"]
+
+# No catalog object changes (U-3), or nothing to change.
+[[case]]
+sql = "truncate t"
+ddl = []
+
+[[case]]
+sql = "truncate table a, b cascade"
+ddl = []
+
+[[case]]
+sql = "select 1"
+ddl = []
+
+[[case]]
+sql = "insert into t values (1)"
+ddl = []
+
+[[case]]
+sql = "update t set a = 1 where id = 1"
+ddl = []
+
+# Opaque: the statement names no object for certain.
+[[case]]
+sql = "do $$ begin end $$"
+ddl = ["opaque"]
+
+[[case]]
+sql = "call p()"
+ddl = ["opaque"]
+
+[[case]]
+sql = "execute s"
+ddl = ["opaque"]
+
+[[case]]
+sql = "prepare p as select 1"
+ddl = ["opaque"]
+
+[[case]]
+sql = "drop owned by r"
+ddl = ["opaque"]
+
+[[case]]
+sql = "reassign owned by r to s"
+ddl = ["opaque"]
+
+[[case]]
+sql = "explain analyze create table t3 as select 1"
+ddl = ["opaque", "create table t3"]
+
+[[case]]
+sql = "explain (analyze) select 1 into t4"
+ddl = ["opaque", "create table t4"]
+
+[[case]]
+sql = "create table t (a int,,)"
+ddl = ["opaque"]
+
+[[case]]
+sql = "create cast (int as text) with inout"
+ddl = ["opaque"]

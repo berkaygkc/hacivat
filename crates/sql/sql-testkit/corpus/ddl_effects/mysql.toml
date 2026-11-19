@@ -1,0 +1,206 @@
+# owner: Task 6 (M4; sql-testkit corpus, new file). The catalog effects (`StmtReport.ddl`) of
+# MySQL statements; each case runs on MySQL and on MariaDB. The case format is `pg.toml`'s.
+# A MySQL database is the model's schema (`NsKind::Schema`), so `CREATE/DROP DATABASE|SCHEMA`
+# are `schema` effects. Names keep their backtick quoting as `"…"` in this notation.
+
+[[case]]
+sql = "CREATE TABLE t (a int)"
+ddl = ["create table t"]
+
+[[case]]
+sql = "CREATE TABLE db.T (a int)"
+ddl = ["create table db.T"]
+
+[[case]]
+sql = "CREATE TABLE `a b`.`c``d` (x int)"
+ddl = ['create table "a b"."c`d"']
+
+[[case]]
+sql = "CREATE TEMPORARY TABLE t (a int)"
+ddl = ["create table t temp"]
+
+[[case]]
+sql = "CREATE TABLE IF NOT EXISTS t (a int)"
+ddl = ["create table t"]
+
+[[case]]
+sql = "CREATE TABLE c (a int, FOREIGN KEY (a) REFERENCES p (id))"
+ddl = ["create table c refs=p"]
+
+[[case]]
+sql = "CREATE TABLE c (a int, CONSTRAINT fk FOREIGN KEY (a) REFERENCES db.p (id))"
+ddl = ["create table c refs=db.p"]
+
+[[case]]
+sql = "CREATE TABLE t2 AS SELECT 1"
+ddl = ["create table t2"]
+
+[[case]]
+sql = "CREATE TABLE t3 LIKE t"
+ddl = ["create table t3"]
+
+[[case]]
+sql = "DROP TABLE a, b, c"
+ddl = ["drop table a", "drop table b", "drop table c"]
+
+[[case]]
+sql = "DROP TABLE IF EXISTS db.t"
+ddl = ["drop table db.t"]
+
+[[case]]
+sql = "DROP TEMPORARY TABLE t"
+ddl = ["drop table t temp"]
+
+[[case]]
+sql = "DROP TABLE t CASCADE"
+ddl = ["drop-cascade table t"]
+
+[[case]]
+sql = "RENAME TABLE a TO b, c TO d"
+ddl = ["rename-to:b table a", "rename-to:d table c"]
+
+[[case]]
+sql = "RENAME TABLE db1.a TO db2.b"
+ddl = ["rename-to:b table db1.a", "create table db2.b"]
+
+[[case]]
+sql = "RENAME TABLE db1.a TO db1.b"
+ddl = ["rename-to:b table db1.a"]
+
+[[case]]
+sql = "ALTER TABLE t RENAME TO u"
+ddl = ["rename-to:u table t"]
+
+[[case]]
+sql = "ALTER TABLE t RENAME TO db2.u"
+ddl = ["rename-to:u table t", "create table db2.u"]
+
+[[case]]
+sql = "ALTER TABLE t RENAME COLUMN a TO b"
+ddl = ["alter table t"]
+
+[[case]]
+sql = "ALTER TABLE t ADD COLUMN c int"
+ddl = ["alter table t"]
+
+[[case]]
+sql = "ALTER TABLE t ADD FOREIGN KEY (a) REFERENCES u (b)"
+ddl = ["alter table t refs=u"]
+
+[[case]]
+sql = "ALTER TABLE t DROP INDEX i"
+ddl = ["alter table t"]
+
+[[case]]
+sql = "CREATE VIEW v AS SELECT 1"
+ddl = ["create view v"]
+
+[[case]]
+sql = "DROP VIEW v"
+ddl = ["drop view v"]
+
+[[case]]
+sql = "CREATE INDEX i ON t (a)"
+ddl = ["create index i on=t"]
+
+[[case]]
+sql = "CREATE UNIQUE INDEX i ON db.t (a)"
+ddl = ["create index i on=db.t"]
+
+[[case]]
+sql = "DROP INDEX i ON t"
+ddl = ["drop index i on=t"]
+
+[[case]]
+sql = "CREATE DATABASE d"
+ddl = ["create schema d"]
+
+[[case]]
+sql = "CREATE SCHEMA d"
+ddl = ["create schema d"]
+
+[[case]]
+sql = "DROP DATABASE d"
+ddl = ["drop schema d"]
+
+[[case]]
+sql = "DROP SCHEMA IF EXISTS d"
+ddl = ["drop schema d"]
+
+[[case]]
+sql = "DROP TRIGGER trg"
+ddl = ["drop trigger trg"]
+
+[[case]]
+sql = "DROP FUNCTION f"
+ddl = ["drop routine f"]
+
+[[case]]
+sql = "DROP PROCEDURE db.p"
+ddl = ["drop routine db.p"]
+
+[[case]]
+sql = "GRANT SELECT ON t TO 'u'@'%'"
+ddl = ["grant table t"]
+
+[[case]]
+sql = "REVOKE SELECT ON db.t FROM 'u'@'%'"
+ddl = ["revoke table db.t"]
+
+# No catalog object changes (U-3), or nothing to change.
+[[case]]
+sql = "TRUNCATE TABLE t"
+ddl = []
+
+[[case]]
+sql = "TRUNCATE t"
+ddl = []
+
+[[case]]
+sql = "SELECT 1"
+ddl = []
+
+[[case]]
+sql = "INSERT INTO t VALUES (1)"
+ddl = []
+
+# Opaque: the statement names no object for certain (T1c review H1 among them).
+[[case]]
+sql = "PREPARE s FROM 'DROP TABLE t'"
+ddl = ["opaque"]
+
+[[case]]
+sql = "EXECUTE s"
+ddl = ["opaque"]
+
+[[case]]
+sql = "CALL p()"
+ddl = ["opaque"]
+
+[[case]]
+sql = "CREATE EVENT e ON SCHEDULE EVERY 1 HOUR DO DELETE FROM t"
+ddl = ["opaque"]
+
+[[case]]
+sql = "CREATE USER 'u'@'%'"
+ddl = ["opaque"]
+
+[[case]]
+sql = "ALTER USER 'u'@'%' ACCOUNT LOCK"
+ddl = ["opaque"]
+
+[[case]]
+sql = "RENAME USER 'a'@'%' TO 'b'@'%'"
+ddl = ["opaque"]
+
+[[case]]
+sql = "/*!50000 CREATE TABLE z(a int) */"
+ddl = ["opaque", "create table z"]
+
+[[case]]
+sql = "SELECT 1 /*!50000 , 2 */"
+ddl = ["opaque"]
+
+[[case]]
+sql = "CREATE TABLE t (a int,,)"
+ddl = ["opaque"]
