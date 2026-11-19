@@ -45,11 +45,11 @@ impl<M: TreeModel> TreeView<M> {
                 self.set_cursor(to, shift, cx);
             }
             ("pageup", shift) => {
-                let to = self.step(cur, -1, self.page_rows());
+                let to = self.page(cur, -1);
                 self.set_cursor(to, shift, cx);
             }
             ("pagedown", shift) => {
-                let to = self.step(cur, 1, self.page_rows());
+                let to = self.page(cur, 1);
                 self.set_cursor(to, shift, cx);
             }
             ("home", shift) => {
@@ -84,6 +84,28 @@ impl<M: TreeModel> TreeView<M> {
         }
         window.prevent_default();
         cx.stop_propagation();
+    }
+
+    /// PageUp/PageDown (fix round 1, M6): the row a viewport less one row away, snapped to the
+    /// nearest row that takes the cursor between it and the cursor (or past it, when there is
+    /// none in between).
+    fn page(&self, cur: Option<usize>, dir: isize) -> Option<usize> {
+        let len = self.flat.len();
+        let Some(from) = cur else {
+            return self.step(None, dir, 1);
+        };
+        if len == 0 {
+            return None;
+        }
+        let target = (from as isize + dir * self.page_rows() as isize).clamp(0, len as isize - 1);
+        let mut j = target;
+        while j != from as isize {
+            if self.focusable(j as usize) {
+                return Some(j as usize);
+            }
+            j -= dir;
+        }
+        self.step(Some(target as usize), dir, 1)
     }
 
     fn right(&mut self, cur: Option<usize>, cx: &mut Context<Self>) {
@@ -159,7 +181,8 @@ impl<M: TreeModel> TreeView<M> {
         let query = self.typeahead.push(typed, now).to_string();
         let from = self.cursor_ix();
         let found = find(self.flat.len(), from, &query, self.fold, |ix| {
-            // Group headers, loading and failed rows are skipped.
+            // Group headers, loading and failed rows are skipped by their flattened bits, so a
+            // scan asks the model only for the text of the rows it reads (fix round 1, M5).
             if !self.selectable(ix) {
                 return None;
             }

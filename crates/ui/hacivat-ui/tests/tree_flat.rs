@@ -90,6 +90,8 @@ fn expanded_not_loaded_is_reported_and_loading_failed_rows_appear() {
         audit,
         ChildState::Loading {
             label: "Loading…".into(),
+            running: true,
+            count: None,
         },
     );
     let mut nl = Vec::new();
@@ -103,6 +105,7 @@ fn expanded_not_loaded_is_reported_and_loading_failed_rows_appear() {
         audit,
         ChildState::Failed {
             label: "Could not read".into(),
+            retry: None,
         },
     );
     let flat = Flat::build(&f, &exp, &mut Vec::new());
@@ -352,6 +355,7 @@ fn loading_and_failed_items_are_named_by_their_message_and_take_no_action() {
         audit,
         ChildState::Failed {
             label: "Couldn't read audit".into(),
+            retry: None,
         },
     );
     let exp = set(&f, &["db", "audit"]);
@@ -408,4 +412,84 @@ fn items_cover_the_visible_rows_plus_overscan() {
     assert_eq!(items.len(), 50);
     // Ids derive from the key, not the row.
     assert_eq!(items[0].id_key(), (TreeKey(96).0, RowKind::Node as u8));
+}
+
+// ## m4-t08-tree (fix round 1)
+
+#[test]
+fn key_hasher_spreads_structured_keys_over_the_bits_the_table_reads() {
+    // M9: sequential keys in the low half, the high half, and both. hashbrown indexes buckets
+    // by the low bits and tags them with the top 7.
+    use std::collections::HashSet;
+    use std::hash::{BuildHasher, BuildHasherDefault};
+    let b = BuildHasherDefault::<hacivat_ui::tree::flat::KeyHasher>::default();
+    type Family = (&'static str, fn(u128) -> u128);
+    let families: [Family; 3] = [
+        ("low", |i| i),
+        ("high", |i| i << 64),
+        ("both", |i| (i << 64) | i),
+    ];
+    for (name, key) in families {
+        let hashes: Vec<u64> = (0..65_536u128)
+            .map(|i| b.hash_one(TreeKey(key(i))))
+            .collect();
+        let all: HashSet<u64> = hashes.iter().copied().collect();
+        let low: HashSet<u64> = hashes.iter().map(|h| h & 0xffff).collect();
+        let top: HashSet<u64> = hashes.iter().map(|h| h >> 57).collect();
+        assert_eq!(all.len(), 65_536, "{name}: no two keys share a hash");
+        // A uniform hash fills about 63 % of 65,536 buckets.
+        assert!(
+            low.len() >= 35_000,
+            "{name}: low 16 bits take {}",
+            low.len()
+        );
+        assert_eq!(top.len(), 128, "{name}: top 7 bits take {}", top.len());
+    }
+}
+
+#[test]
+fn a_node_inside_its_own_subtree_is_shown_but_not_expanded_again() {
+    // M7: a host bug (a cycle) never loops the flattening on the UI thread.
+    let mut f = Fixture::parse(OUTLINE);
+    let (public, orders) = (f.key("public"), f.key("orders"));
+    f.set_children(orders, ChildState::Loaded(vec![public].into()));
+    let exp = set(&f, &["db", "public", "Tables", "orders"]);
+    let flat = Flat::build(&f, &exp, &mut Vec::new());
+    assert_eq!(
+        labels(&f, &flat),
+        [
+            "db",
+            "  public",
+            "    Tables",
+            "      orders",
+            "        public",
+            "      users",
+            "    Views",
+            "  audit",
+            "other"
+        ]
+    );
+}
+
+#[test]
+fn rows_carry_what_they_are_to_the_keys() {
+    // M5: the flatten reads headers and selectability once, so a key press scans bits.
+    let f = Fixture::parse("#Env 1\nroot\n  #Tables 1\n    t\n");
+    let exp = set(&f, &["root"]);
+    let flat = Flat::build(&f, &exp, &mut Vec::new());
+    let bits: Vec<_> = flat
+        .rows()
+        .iter()
+        .map(|r| (r.is_header(), r.is_selectable(), r.is_focusable()))
+        .collect();
+    assert_eq!(
+        bits,
+        [
+            // A header without children: a label.
+            (true, false, false),
+            (false, true, true),
+            // A kind group: the cursor, never the selection.
+            (true, false, true),
+        ]
+    );
 }

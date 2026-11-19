@@ -57,12 +57,30 @@ pub enum ChildState {
     /// The node may have children nobody asked for yet (a chevron; expanding it emits
     /// [`TreeEvent::Expand`] so the host loads them).
     NotLoaded,
-    /// The host is loading them: one child row shows `label` (a rendered message).
-    Loading { label: SharedString },
+    /// The host is loading them: one child row shows `label` (a rendered message, 12 px at
+    /// `text-2`). It is never a cursor stop.
+    Loading {
+        label: SharedString,
+        // ## m4-t08-tree (fix round 1, R-W1-1)
+        /// Draws the static 7 px amber run marker in the chevron column ("Loading…", a phase
+        /// row); `false` waits ("Waiting for columns": no marker). No motion.
+        running: bool,
+        /// The preformatted phase count (`3,400/15,000`), mono 11 px at `text-2` after the
+        /// label. In a crowded row the label gives way first; it stays the item's name.
+        count: Option<SharedString>,
+    },
     /// The children, in display order. An empty list draws no chevron.
     Loaded(Arc<[TreeKey]>),
-    /// Loading failed: one child row shows `label` (a rendered message).
-    Failed { label: SharedString },
+    /// Loading failed: one child row shows `label` (a rendered message, in `text` ink: the user
+    /// must read it) after the alert glyph. It is never a cursor stop.
+    Failed {
+        label: SharedString,
+        // ## m4-t08-tree (fix round 1, R-W1-1)
+        /// `Some(word)` draws a ghost retry icon button at the row's end, the word being its
+        /// tooltip (and part of the item's description). Pointer only: the keyboard path is the
+        /// namespace menu's Refresh. A click emits [`TreeEvent::Retry`] with the parent's key.
+        retry: Option<SharedString>,
+    },
 }
 
 impl ChildState {
@@ -108,7 +126,41 @@ pub enum RowFlag {
     Icon { icon: IconName, text: SharedString },
 }
 
-/// What one row shows.
+// ## m4-t08-tree (fix round 1, R-W1-1): the fields NOTES M4 surfaces 1, 2, 5, 6 and 14 need.
+
+/// The mark before a row's meta (NOTES M4 surface 1, root meta).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetaMark {
+    /// The static 7 px amber run marker (a pass running below a collapsed root).
+    Running,
+    /// A green check (connected; the meta is the latency).
+    Ok,
+    /// A 12 px glyph at `text-3` (`History` for "cached", `KeyRound` for a locked cache).
+    Glyph(IconName),
+}
+
+/// The introspection-level pill (NOTES M4 surface 6): 16 px high, outlined, `inlay` text.
+/// Pointer only (not a cursor stop): a click emits [`TreeEvent::Pill`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowPill {
+    pub text: SharedString,
+    /// Set by the user: blue border and text; inherited: `seam-strong` border, `text-3` text.
+    pub explicit: bool,
+    /// Its tooltip, also part of the item's accessible description.
+    pub tooltip: SharedString,
+}
+
+/// A row's own ghost icon button ("Add to scope", R-M4-14), drawn while the row is hovered or
+/// selected. Pointer only: a click emits [`TreeEvent::RowAction`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowAction {
+    pub icon: IconName,
+    /// Its tooltip.
+    pub label: SharedString,
+}
+
+/// What one row shows. Row order (NOTES M4 surface 1): chevron · icon · name · type text ·
+/// badge · flags · status · pill · spacer · meta mark + meta · row action.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TreeRowData {
     /// The name, verbatim.
@@ -117,11 +169,12 @@ pub struct TreeRowData {
     pub label_source: TextSource,
     /// The kind icon (12 px; blue while selected). None on loading rows and group headers.
     pub icon: Option<IconName>,
-    /// Right-aligned mono meta (a preformatted count, an engine, a column type).
+    /// Right-aligned mono meta (11 px, `text-3`: a preformatted count, an engine, a latency).
     pub meta: Option<SharedString>,
-    /// `smallvec` is not a `hacivat-ui` dependency; an empty `Vec` does not allocate.
+    /// `smallvec` is not a `hacivat-ui` dependency; an empty `Vec` does not allocate. Group
+    /// headers draw no flags (their glyph is [`TreeRowData::filter_glyph`]).
     pub flags: Vec<RowFlag>,
-    /// An outlined badge after the flags ("out of date", "version 17").
+    /// An outlined badge after the type text ("out of date", "version 17").
     pub badge: Option<SharedString>,
     /// The status slot (M4b git badges).
     pub status: Option<RowStatus>,
@@ -131,6 +184,30 @@ pub struct TreeRowData {
     pub group_header: bool,
     /// Greyed (out of scope): `text-3` ink.
     pub dim: bool,
+    // ## m4-t08-tree (fix round 1, R-W1-1)
+    /// The mark before the meta.
+    pub meta_mark: Option<MetaMark>,
+    /// Column-type text right after the name (`bigint`, `(id)`, `→ İSTANBUL_ŞUBE (id)`; the
+    /// host bidi-isolates it): mono 11 px at `text-2` (`text-3` when dim).
+    pub type_text: Option<SharedString>,
+    /// The name in `body_strong` (a connected root).
+    pub strong: bool,
+    /// The introspection-level pill (database and schema rows).
+    pub pill: Option<RowPill>,
+    /// The badge's glyph: drawn before the badge text, and alone when the row is crowded (the
+    /// text then becomes the glyph's tooltip). A badge without a glyph gives way whole.
+    pub badge_glyph: Option<IconName>,
+    /// The row's tooltip (a table's row estimate, a scope count, why a row is dim); also part
+    /// of the item's accessible description.
+    pub tooltip: Option<SharedString>,
+    /// The row's own button ("Add to scope").
+    pub row_action: Option<RowAction>,
+    /// On a group header: the 12 px filter glyph at `text-3` (objects are hidden by a view
+    /// filter), with this text as its tooltip.
+    pub filter_glyph: Option<SharedString>,
+    /// What assistive technology reads besides the name, written by the host from Fluent (the
+    /// environment, read-only, the badge): the widget's marks carry no words of their own.
+    pub a11y_description: Option<SharedString>,
 }
 
 impl TreeRowData {
@@ -146,6 +223,15 @@ impl TreeRowData {
             status: None,
             group_header: false,
             dim: false,
+            meta_mark: None,
+            type_text: None,
+            strong: false,
+            pill: None,
+            badge_glyph: None,
+            tooltip: None,
+            row_action: None,
+            filter_glyph: None,
+            a11y_description: None,
         }
     }
 }
@@ -185,4 +271,11 @@ pub enum TreeEvent {
     ContextMenu(TreeKey, Point<Pixels>),
     /// The selected row changed (`None`: nothing is selected). Never names a group header.
     SelectionChanged(Option<TreeKey>),
+    // ## m4-t08-tree (fix round 1, R-W1-1)
+    /// The retry button of a failed child row: the key is the node whose load failed.
+    Retry(TreeKey),
+    /// The level pill was clicked: open its list at this window position (its bottom-left).
+    Pill(TreeKey, Point<Pixels>),
+    /// The row's own button ([`RowAction`]) was clicked.
+    RowAction(TreeKey),
 }

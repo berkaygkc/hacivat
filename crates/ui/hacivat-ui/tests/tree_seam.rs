@@ -1,11 +1,13 @@
-//! M4 Task 1b: the tree seam. Until Task 8 lands, `TreeView` is a flat, non-expandable list of
-//! the model's roots (Global Constraints, "No silent weakening": a stub never shows a subtree as
-//! loaded); it still selects, activates and names each row's status for assistive technology.
+//! M4 Task 1b: the tree seam, written against Task 1b's flat stub (the first test keeps its
+//! name from then).
 //!
-//! ## m4-t08-tree (named exception): Task 8 replaced the stub with the widget. The seam's
-//! contract is checked against it: a collapsed tree shows only its roots, an unloaded node is
-//! asked for when it expands, the status text reaches assistive technology (only while it is
-//! attached: no role and no item otherwise). The widget's full behaviour is `tests/tree.rs`.
+//! ## m4-t08-tree (named exception, ratified in fix round 1): Task 8 replaced the stub with the
+//! widget, and this file now checks the seam's contract against it: a collapsed tree shows
+//! only its roots, an unloaded node is asked for when it expands, the status text reaches
+//! assistive technology only while it is attached (no role and no item otherwise). The items
+//! are read from `TreeView::a11y_items` (the view's copy), because synthetic AccessKit children
+//! never reach `popover::a11y_record` (the grid's T40 subtree has the same limit); the root's
+//! `Tree` role is a recorded declaration. The widget's full behaviour is `tests/tree.rs`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

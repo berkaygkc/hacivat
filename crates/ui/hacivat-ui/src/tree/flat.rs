@@ -64,11 +64,62 @@ pub struct FlatRow {
     pub pos: u32,
     /// How many siblings it has, itself included.
     pub set_size: u32,
+    // ## m4-t08-tree (fix round 1, M5)
+    /// What the row is to the keys ([`FlatRow::HEADER`], [`FlatRow::SELECTABLE`],
+    /// [`FlatRow::FOCUSABLE`]), read from the model once per flatten so a key press scans
+    /// without calling it (the generation contract re-flattens when an answer changes).
+    pub bits: u8,
 }
 
 impl FlatRow {
+    /// A group header.
+    pub const HEADER: u8 = 1;
+    /// A node the model shows that is not a group header.
+    pub const SELECTABLE: u8 = 2;
+    /// Takes the cursor: a selectable row, or a group header that can expand (R-M4-49).
+    pub const FOCUSABLE: u8 = 4;
+
     pub fn is_node(&self) -> bool {
         self.kind == RowKind::Node
+    }
+
+    pub fn is_header(&self) -> bool {
+        self.bits & Self::HEADER != 0
+    }
+
+    pub fn is_selectable(&self) -> bool {
+        self.bits & Self::SELECTABLE != 0
+    }
+
+    pub fn is_focusable(&self) -> bool {
+        self.bits & Self::FOCUSABLE != 0
+    }
+}
+
+/// A loading or failed child row of `key`.
+fn status_row(key: TreeKey, depth: u16, kind: RowKind) -> FlatRow {
+    FlatRow {
+        key,
+        depth,
+        kind,
+        pos: 1,
+        set_size: 1,
+        bits: 0,
+    }
+}
+
+/// The key bits of node `key`'s row.
+fn node_bits<M: TreeModel + ?Sized>(model: &M, key: TreeKey) -> u8 {
+    match model.row(key) {
+        None => 0,
+        Some(d) if d.group_header => {
+            if model.children(key).expandable() {
+                FlatRow::HEADER | FlatRow::FOCUSABLE
+            } else {
+                FlatRow::HEADER
+            }
+        }
+        Some(_) => FlatRow::SELECTABLE | FlatRow::FOCUSABLE,
     }
 }
 
@@ -194,23 +245,24 @@ fn children_rows<M: TreeModel + ?Sized>(
     not_loaded: &mut Vec<TreeKey>,
     out: &mut Vec<FlatRow>,
 ) {
-    let single = |kind| FlatRow {
-        key,
-        depth,
-        kind,
-        pos: 1,
-        set_size: 1,
-    };
     match model.children(key) {
         ChildState::Leaf => {}
         ChildState::NotLoaded => not_loaded.push(key),
-        ChildState::Loading { .. } => out.push(single(RowKind::Loading)),
-        ChildState::Failed { .. } => out.push(single(RowKind::Failed)),
+        ChildState::Loading { .. } => out.push(status_row(key, depth, RowKind::Loading)),
+        ChildState::Failed { .. } => out.push(status_row(key, depth, RowKind::Failed)),
         ChildState::Loaded(keys) => walk(model, keys, depth, expanded, not_loaded, out),
     }
 }
 
+/// A frame of the walk: siblings, the next position, their depth, and the node they are the
+/// children of.
+type Frame = (Arc<[TreeKey]>, usize, u16, Option<TreeKey>);
+
 /// Appends `keys` at `depth` and, depth first, every expanded descendant.
+///
+/// A host bug that puts a node inside its own subtree cannot loop: a node already on the
+/// walk's path is shown but not expanded again, and nothing is expanded past depth
+/// `u16::MAX` (fix round 1, M7).
 fn walk<M: TreeModel + ?Sized>(
     model: &M,
     keys: Arc<[TreeKey]>,
@@ -219,11 +271,13 @@ fn walk<M: TreeModel + ?Sized>(
     not_loaded: &mut Vec<TreeKey>,
     out: &mut Vec<FlatRow>,
 ) {
-    // (siblings, next position, their depth)
-    let mut stack: Vec<(Arc<[TreeKey]>, usize, u16)> = vec![(keys, 0, depth)];
-    while let Some((keys, next, d)) = stack.last_mut() {
+    let mut stack: Vec<Frame> = vec![(keys, 0, depth, None)];
+    let mut path = KeySet::default();
+    while let Some((keys, next, d, _)) = stack.last_mut() {
         let Some(&key) = keys.get(*next) else {
-            stack.pop();
+            if let Some((_, _, _, Some(owner))) = stack.pop() {
+                path.remove(&owner);
+            }
             continue;
         };
         let (pos, size, d) = (*next, keys.len(), *d);
@@ -234,29 +288,23 @@ fn walk<M: TreeModel + ?Sized>(
             kind: RowKind::Node,
             pos: count(pos + 1),
             set_size: count(size),
+            bits: node_bits(model, key),
         });
-        if !expanded.contains(&key) {
+        if !expanded.contains(&key) || path.contains(&key) {
             continue;
         }
-        let child = d.saturating_add(1);
+        let Some(child) = d.checked_add(1) else {
+            continue;
+        };
         match model.children(key) {
-            ChildState::Loaded(kids) if !kids.is_empty() => stack.push((kids, 0, child)),
+            ChildState::Loaded(kids) if !kids.is_empty() => {
+                path.insert(key);
+                stack.push((kids, 0, child, Some(key)));
+            }
             ChildState::Loaded(_) | ChildState::Leaf => {}
             ChildState::NotLoaded => not_loaded.push(key),
-            ChildState::Loading { .. } => out.push(FlatRow {
-                key,
-                depth: child,
-                kind: RowKind::Loading,
-                pos: 1,
-                set_size: 1,
-            }),
-            ChildState::Failed { .. } => out.push(FlatRow {
-                key,
-                depth: child,
-                kind: RowKind::Failed,
-                pos: 1,
-                set_size: 1,
-            }),
+            ChildState::Loading { .. } => out.push(status_row(key, child, RowKind::Loading)),
+            ChildState::Failed { .. } => out.push(status_row(key, child, RowKind::Failed)),
         }
     }
 }

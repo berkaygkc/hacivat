@@ -35,5 +35,5 @@ pub mod titlebar;
 pub mod toast;
 // ## m3a-t01b-seams: the Overflow Rule toolbar (Task 21).
 pub mod toolbar;
-// ## m4-t01b-seams: the virtualized tree (Task 8; a flat stub until then).
+// ## m4-t01b-seams: the virtualized tree (Task 8 filled it; m4-t08 named exception: this line).
 pub mod tree;

@@ -21,7 +21,7 @@ use hacivat_ui_core::gpui_surface::{Role, SharedString, accesskit};
 
 use super::KeySet;
 use super::flat::{Flat, RowKind};
-use super::{ChildState, TreeKey, TreeModel};
+use super::{ChildState, TreeKey, TreeModel, TreeRowData};
 
 /// Rows built above and below the ones on screen.
 pub const A11Y_OVERSCAN_ROWS: usize = 5;
@@ -92,6 +92,27 @@ impl ItemNode {
     }
 }
 
+/// The description of a node's item (fix round 1, R-W1-1): the status text, the host's
+/// description (the environment, read-only, the badge), the row's tooltip and the pill's
+/// tooltip, in that order, as one list.
+fn describe(d: TreeRowData) -> Option<SharedString> {
+    let parts: Vec<SharedString> = [
+        d.status.map(|s| s.text),
+        d.a11y_description,
+        d.tooltip,
+        d.pill.map(|p| p.tooltip),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|p| !p.is_empty())
+    .collect();
+    match parts.len() {
+        0 => None,
+        1 => parts.into_iter().next(),
+        _ => Some(parts.join(", ").into()),
+    }
+}
+
 /// What the items read from the view.
 #[derive(Debug, Clone)]
 pub struct ItemsIn<'a> {
@@ -131,7 +152,16 @@ pub fn visible_items<M: TreeModel + ?Sized>(model: &M, input: ItemsIn<'_>) -> Ve
         };
         let item = match r.kind {
             RowKind::Loading | RowKind::Failed => match model.children(r.key) {
-                ChildState::Loading { label } | ChildState::Failed { label } => base(label),
+                ChildState::Loading { label, count, .. } => {
+                    let mut item = base(label);
+                    item.description = count;
+                    item
+                }
+                ChildState::Failed { label, retry } => {
+                    let mut item = base(label);
+                    item.description = retry;
+                    item
+                }
                 _ => base(SharedString::default()),
             },
             RowKind::Node => {
@@ -145,7 +175,7 @@ pub fn visible_items<M: TreeModel + ?Sized>(model: &M, input: ItemsIn<'_>) -> Ve
                     item.selected = Some(input.selection.contains(&r.key));
                 }
                 item.focused = item.focusable && input.cursor == Some(r.key);
-                item.description = data.and_then(|d| d.status.map(|s| s.text));
+                item.description = data.and_then(describe);
                 item
             }
         };

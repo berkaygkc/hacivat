@@ -17,8 +17,8 @@ use hacivat_ui::input::FocusedInput;
 use hacivat_ui::popover::{a11y_record, a11y_take};
 use hacivat_ui::text::TextRegistry;
 use hacivat_ui::tree::{
-    ChildState, Fold, RowFlag, RowStatus, StatusKind, TREE_OVERSCAN_ROWS, TreeEvent, TreeKey,
-    TreeView,
+    ChildState, Fold, MetaMark, RowAction, RowFlag, RowPill, RowStatus, StatusKind,
+    TREE_OVERSCAN_ROWS, TreeEvent, TreeKey, TreeView,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 use tree_fixture::Fixture;
@@ -267,6 +267,8 @@ fn expand_unloaded_emits_expand_once(cx: &mut TestAppContext) {
                     audit,
                     ChildState::Loading {
                         label: "Loading…".into(),
+                        running: true,
+                        count: None,
                     },
                 )
             },
@@ -313,6 +315,8 @@ fn expand_unloaded_reannounces_after_drop_to_not_loaded(cx: &mut TestAppContext)
     press(vcx, "right");
     let loading = || ChildState::Loading {
         label: "Loading…".into(),
+        running: true,
+        count: None,
     };
     tree.update(vcx, |t, cx| {
         t.update_model(|m| m.set_children(audit, loading()), cx)
@@ -349,12 +353,15 @@ fn loading_and_failed_child_rows_render_their_labels(cx: &mut TestAppContext) {
         audit,
         ChildState::Loading {
             label: "Reading columns… 3,400 of 15,000".into(),
+            running: true,
+            count: None,
         },
     );
     f.set_children(
         other,
         ChildState::Failed {
             label: "Some objects could not be read".into(),
+            retry: None,
         },
     );
     let (tree, vcx, _) = open(cx, f, 600.0);
@@ -921,54 +928,511 @@ fn ring_quads(vcx: &mut VisualTestContext) -> Vec<(f32, f32, [f32; 4])> {
     })
 }
 
+// ## m4-t08-tree (fix round 1): I1, I2, M2, M3, M6, M7 and the R-W1-1 seam fields.
+
+/// What a crowded row shows at one width.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Crowd {
+    width: f32,
+    meta_cut: bool,
+    pill_gone: bool,
+    badge_text_gone: bool,
+    type_cut: bool,
+    name_cut: bool,
+}
+
 #[gpui::test]
-fn a_crowded_row_gives_up_the_meta_then_the_name_never_a_trust_flag(cx: &mut TestAppContext) {
-    let mut f = Fixture::parse("customer_order_line_items_archive_2024\nb\n");
-    let k = f.key("customer_order_line_items_archive_2024");
+fn a_crowded_row_gives_way_in_the_notes_order(cx: &mut TestAppContext) {
+    // NOTES M4 cross-cutting #5: meta → pill → badge to its glyph → type → name (to about seven
+    // characters); the chevron, the icon and the flags never give way.
+    let name = "customer_order_line_items_archive_2024";
+    let mut f = Fixture::parse(&format!("{name}\nb\n"));
+    let k = f.key(name);
     {
         let row = f.row_mut(k);
-        row.meta = Some("1.204".into());
         row.icon = Some(IconName::Table2);
+        row.type_text = Some("bigint".into());
+        row.badge = Some("out of date".into());
+        row.badge_glyph = Some(IconName::History);
         row.flags = vec![
             RowFlag::Env(EnvKind::Production),
             RowFlag::Lock { production: true },
         ];
+        row.pill = Some(RowPill {
+            text: "Structure".into(),
+            explicit: true,
+            tooltip: "Introspection level: Structure".into(),
+        });
+        row.meta = Some("1.204".into());
     }
     let (_tree, vcx, _) = open(cx, f, 200.0);
-    let find = |frame: &[hacivat_ui::text::RenderedText], s: &str| {
-        frame.iter().find(|t| t.text.as_ref() == s).cloned()
+    let cut = |frame: &[hacivat_ui::text::RenderedText], s: &str| {
+        frame
+            .iter()
+            .find(|t| t.text.as_ref() == s)
+            .is_none_or(|t| t.truncated || t.clipped || !t.visible)
     };
-    // Wide: everything whole.
-    vcx.simulate_resize(size(px(480.0), px(200.0)));
-    draw(vcx);
-    let frame = texts(vcx);
-    let name = find(&frame, "customer_order_line_items_archive_2024").unwrap();
-    let meta = find(&frame, "1.204").unwrap();
-    assert!(!name.truncated && !meta.truncated, "{name:?} {meta:?}");
-    // Crowded: the meta goes first, then the name ellipsizes (its full text is the tooltip);
-    // the kind icon, the environment mark and the lock stay whole inside the row.
-    vcx.simulate_resize(size(px(200.0), px(200.0)));
-    draw(vcx);
-    let frame = texts(vcx);
-    let name = find(&frame, "customer_order_line_items_archive_2024").unwrap();
-    assert!(name.truncated && !name.clipped, "{name:?}");
+    let pill = format!("hv-tree-pill-{}", k.0).leak();
+    let mut states = Vec::new();
+    let mut width = 760.0;
+    while width >= 180.0 {
+        vcx.simulate_resize(size(px(width), px(200.0)));
+        draw(vcx);
+        let frame = texts(vcx);
+        let s = Crowd {
+            width,
+            meta_cut: cut(&frame, "1.204"),
+            pill_gone: vcx.debug_bounds(pill).is_none(),
+            badge_text_gone: !frame.iter().any(|t| t.text.as_ref() == "out of date"),
+            type_cut: cut(&frame, "bigint"),
+            name_cut: cut(&frame, name),
+        };
+        // The trust flags and the kind icon stay whole inside the row at every width.
+        for sel in [
+            format!("hv-tree-icon-{}", k.0),
+            format!("hv-tree-flag-{}-0", k.0),
+            format!("hv-tree-flag-{}-1", k.0),
+        ] {
+            let sel: &'static str = sel.leak();
+            let b = vcx
+                .debug_bounds(sel)
+                .unwrap_or_else(|| panic!("{sel} drawn at {width}"));
+            assert!(b.size.width >= px(7.0), "{sel} {b:?} at {width}");
+            assert!(b.right() <= px(width), "{sel} {b:?} at {width}");
+        }
+        states.push(s);
+        width -= 4.0;
+    }
     assert!(
-        name.painted_px >= 30.0,
-        "the name keeps about six characters: {name:?}"
+        !states[0].meta_cut && !states[0].name_cut,
+        "{:?}",
+        states[0]
     );
-    if let Some(meta) = find(&frame, "1.204") {
-        assert!(meta.truncated || !meta.visible, "{meta:?}");
+    // The widest width at which each part gave way.
+    let first = |f: fn(&Crowd) -> bool| {
+        states
+            .iter()
+            .find(|s| f(s))
+            .map(|s| s.width)
+            .unwrap_or_else(|| panic!("never gave way: {states:?}"))
+    };
+    let meta = first(|s| s.meta_cut);
+    let pill_w = first(|s| s.pill_gone);
+    let badge = first(|s| s.badge_text_gone);
+    let ty = first(|s| s.type_cut);
+    let name_w = first(|s| s.name_cut);
+    assert!(
+        meta > pill_w && pill_w > badge && badge > ty && ty > name_w,
+        "meta {meta}, pill {pill_w}, badge {badge}, type {ty}, name {name_w}"
+    );
+    // Once a part gave way, every narrower width keeps it given way.
+    for s in states.iter().filter(|s| s.width <= name_w) {
+        assert!(s.pill_gone && s.badge_text_gone && s.name_cut, "{s:?}");
     }
-    for sel in [
-        format!("hv-tree-icon-{}", k.0),
-        format!("hv-tree-flag-{}-0", k.0),
-        format!("hv-tree-flag-{}-1", k.0),
-    ] {
-        let sel: &'static str = sel.leak();
-        let b = vcx
-            .debug_bounds(sel)
-            .unwrap_or_else(|| panic!("{sel} drawn"));
-        assert!(b.size.width >= px(7.0), "{sel} {b:?}");
-        assert!(b.right() <= px(200.0) && b.left() >= px(0.0), "{sel} {b:?}");
+    // At the narrowest, the name keeps about seven characters and the badge its glyph.
+    let frame = texts(vcx);
+    let n = frame.iter().find(|t| t.text.as_ref() == name).unwrap();
+    assert!(n.truncated && !n.clipped && n.painted_px >= 35.0, "{n:?}");
+    assert!(
+        vcx.debug_bounds(format!("hv-tree-badge-{}", k.0).leak())
+            .is_some()
+    );
+}
+
+#[gpui::test]
+fn a_click_after_a_model_change_acts_on_the_row_under_the_pointer(cx: &mut TestAppContext) {
+    let (tree, vcx, events) = open(cx, Fixture::flat_roots(20), 600.0);
+    let r5 = tree.read_with(vcx, |t, _| t.flat().rows()[5].key);
+    let at = tree
+        .read_with(vcx, |t, _| t.row_bounds(r5))
+        .unwrap()
+        .center();
+    let down = |button, clicks| {
+        gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+            position: at,
+            modifiers: Modifiers::none(),
+            button,
+            click_count: clicks,
+            first_mouse: false,
+        })
+    };
+    // The host publishes three rows above and the click lands before the next frame (one
+    // update, so no frame is drawn in between): it hits the listeners of the frame the user
+    // saw, whose row was `r5`, now three rows further down.
+    vcx.update(|window, cx| {
+        tree.update(cx, |t, cx| {
+            t.update_model(
+                |m| {
+                    for i in 0..3 {
+                        m.insert(None, 0, &format!("new{i}"));
+                    }
+                },
+                cx,
+            )
+        });
+        assert_eq!(
+            tree.read(cx).flat().rows()[5].key,
+            TreeKey(3),
+            "rebuilt: r2 is row 5"
+        );
+        window.dispatch_event(down(MouseButton::Left, 2), cx);
+    });
+    draw(vcx);
+    assert_eq!(tree.read_with(vcx, |t, _| t.cursor()), Some(r5));
+    assert!(
+        events.borrow().contains(&TreeEvent::Activate(r5)),
+        "{:?}",
+        events.borrow()
+    );
+    // A row that is gone by the time the click lands does nothing.
+    let r7 = tree.read_with(vcx, |t, _| t.model().key("r7"));
+    let at7 = tree
+        .read_with(vcx, |t, _| t.row_bounds(r7))
+        .unwrap()
+        .center();
+    events.borrow_mut().clear();
+    vcx.update(|window, cx| {
+        tree.update(cx, |t, cx| {
+            t.update_model(
+                |m| {
+                    m.roots.retain(|k| *k != r7);
+                    m.generation += 1;
+                },
+                cx,
+            )
+        });
+        for button in [MouseButton::Left, MouseButton::Right] {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    position: at7,
+                    modifiers: Modifiers::none(),
+                    button,
+                    click_count: 2,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+        }
+    });
+    draw(vcx);
+    assert_eq!(tree.read_with(vcx, |t, _| t.cursor()), Some(r5));
+    assert!(events.borrow().is_empty(), "{:?}", events.borrow());
+}
+
+#[gpui::test]
+fn every_a11y_action_acts_like_the_keyboard(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    let (tree, vcx, events) = open(cx, Fixture::parse(OUTLINE), 600.0);
+    expand(&tree, vcx, &["db", "public"]);
+    let act = |vcx: &mut VisualTestContext, key: TreeKey, action: Action| {
+        vcx.update(|window, cx| {
+            tree.update(cx, |t, cx| t.run_a11y_action(key, action, window, cx))
+        });
+        draw(vcx);
+    };
+    let k = |vcx: &mut VisualTestContext, l: &str| key(&tree, vcx, l);
+    let (public, tables, other, audit) = (
+        k(vcx, "public"),
+        k(vcx, "Tables"),
+        k(vcx, "other"),
+        k(vcx, "audit"),
+    );
+    // Focus: the cursor (and, on a row, the selection).
+    act(vcx, public, Action::Focus);
+    assert_eq!(tree.read_with(vcx, |t, _| t.cursor()), Some(public));
+    // Click: a header toggles (never activates), a row activates.
+    events.borrow_mut().clear();
+    act(vcx, tables, Action::Click);
+    assert!(tree.read_with(vcx, |t, _| t.is_expanded(tables)));
+    assert_eq!(*events.borrow(), [TreeEvent::Expand(tables)]);
+    act(vcx, other, Action::Click);
+    assert!(events.borrow().contains(&TreeEvent::Activate(other)));
+    // Expand and Collapse do nothing on a leaf.
+    let users = k(vcx, "users");
+    events.borrow_mut().clear();
+    act(vcx, users, Action::Expand);
+    act(vcx, users, Action::Collapse);
+    assert!(!tree.read_with(vcx, |t, _| t.is_expanded(users)));
+    assert!(events.borrow().is_empty(), "{:?}", events.borrow());
+    // On a node, they expand (asking for unloaded children) and collapse.
+    act(vcx, audit, Action::Expand);
+    assert_eq!(*events.borrow(), [TreeEvent::Expand(audit)]);
+    act(vcx, tables, Action::Collapse);
+    assert!(!tree.read_with(vcx, |t, _| t.is_expanded(tables)));
+    assert!(events.borrow().contains(&TreeEvent::Collapse(tables)));
+    // ShowContextMenu: the cursor moves there and the menu opens at the row's bottom-left.
+    events.borrow_mut().clear();
+    act(vcx, other, Action::ShowContextMenu);
+    let b = tree.read_with(vcx, |t, _| t.row_bounds(other)).unwrap();
+    assert_eq!(tree.read_with(vcx, |t, _| t.cursor()), Some(other));
+    assert!(
+        events
+            .borrow()
+            .contains(&TreeEvent::ContextMenu(other, b.bottom_left())),
+        "{:?}",
+        events.borrow()
+    );
+    // ScrollIntoView reveals a row below the viewport.
+    let (tree, vcx, _) = open(cx, Fixture::flat_roots(200), 230.0);
+    let far = tree.read_with(vcx, |t, _| t.flat().rows()[150].key);
+    vcx.update(|window, cx| {
+        tree.update(cx, |t, cx| {
+            t.run_a11y_action(far, Action::ScrollIntoView, window, cx)
+        })
+    });
+    draw(vcx);
+    let b = tree.read_with(vcx, |t, _| t.row_bounds(far)).unwrap();
+    assert!(b.top() >= px(0.0) && b.bottom() <= px(230.0), "{b:?}");
+}
+
+#[gpui::test]
+fn a_vanished_cursor_moves_to_the_nearest_surviving_row(cx: &mut TestAppContext) {
+    // A root removed by a new generation: the row above takes the cursor, ↓ goes on from there.
+    let (tree, vcx, _) = open(cx, Fixture::flat_roots(10), 600.0);
+    let r6 = tree.read_with(vcx, |t, _| t.model().key("r6"));
+    tree.update(vcx, |t, cx| t.select(r6, cx));
+    tree.update(vcx, |t, cx| {
+        t.update_model(
+            |m| {
+                m.roots.retain(|k| *k != r6);
+                m.generation += 1;
+            },
+            cx,
+        )
+    });
+    draw(vcx);
+    assert_eq!(cursor_label(&tree, vcx).as_deref(), Some("r5"));
+    press(vcx, "down");
+    assert_eq!(cursor_label(&tree, vcx).as_deref(), Some("r7"));
+
+    // A row the host's expansion hides: its nearest shown ancestor takes the cursor.
+    let (tree, vcx, _) = open(cx, Fixture::parse(OUTLINE), 600.0);
+    expand(&tree, vcx, &["db", "public", "Tables"]);
+    let orders = key(&tree, vcx, "orders");
+    let db = key(&tree, vcx, "db");
+    tree.update(vcx, |t, cx| t.select(orders, cx));
+    tree.update(vcx, |t, cx| t.set_expanded_keys([db], cx));
+    draw(vcx);
+    assert_eq!(cursor_label(&tree, vcx).as_deref(), Some("public"));
+
+    // A table dropped by a new generation: its neighbour inside the same group takes it.
+    let (tree, vcx, _) = open(cx, Fixture::parse(OUTLINE), 600.0);
+    expand(&tree, vcx, &["db", "public", "Tables"]);
+    let users = key(&tree, vcx, "users");
+    let tables = key(&tree, vcx, "Tables");
+    tree.update(vcx, |t, cx| t.select(users, cx));
+    tree.update(vcx, |t, cx| {
+        t.update_model(
+            |m| {
+                let orders = m.key("orders");
+                m.set_children(tables, ChildState::Loaded(vec![orders].into()))
+            },
+            cx,
+        )
+    });
+    draw(vcx);
+    assert_eq!(cursor_label(&tree, vcx).as_deref(), Some("orders"));
+}
+
+#[gpui::test]
+fn page_keys_count_rows_and_snap_to_a_cursor_stop(cx: &mut TestAppContext) {
+    // Rows alternate with labels the keys pass over: a page moves a viewport less one *row*.
+    let outline: String = (0..30).map(|i| format!("a{i}\n#H{i} 1\n")).collect();
+    let (tree, vcx, _) = open(cx, Fixture::parse(&outline), 230.0);
+    press(vcx, "down");
+    assert_eq!(cursor_label(&tree, vcx).as_deref(), Some("a0"));
+    // 230 px → 10 rows; nine rows down is the label `H4`, so the cursor snaps back to `a4`.
+    press(vcx, "pagedown");
+    assert_eq!(cursor_label(&tree, vcx).as_deref(), Some("a4"));
+    press(vcx, "pagedown");
+    assert_eq!(cursor_label(&tree, vcx).as_deref(), Some("a8"));
+    press(vcx, "pageup");
+    assert_eq!(cursor_label(&tree, vcx).as_deref(), Some("a4"));
+}
+
+#[gpui::test]
+fn a_chevron_double_click_toggles_once(cx: &mut TestAppContext) {
+    let (tree, vcx, events) = open(cx, Fixture::parse(OUTLINE), 600.0);
+    let db = key(&tree, vcx, "db");
+    let b = tree.read_with(vcx, |t, _| t.row_bounds(db)).unwrap();
+    let chevron = point(b.left() + px(15.0), b.center().y);
+    for clicks in [1, 2] {
+        vcx.simulate_event(gpui::MouseDownEvent {
+            position: chevron,
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: clicks,
+            first_mouse: false,
+        });
+        draw(vcx);
     }
+    assert!(tree.read_with(vcx, |t, _| t.is_expanded(db)));
+    assert_eq!(*events.borrow(), [TreeEvent::Expand(db)]);
+}
+
+#[gpui::test]
+fn status_rows_show_the_run_marker_the_count_and_the_retry_button(cx: &mut TestAppContext) {
+    let mut f = Fixture::parse(OUTLINE);
+    let (audit, other) = (f.key("audit"), f.key("other"));
+    f.set_children(
+        audit,
+        ChildState::Loading {
+            label: "Reading columns…".into(),
+            running: true,
+            count: Some("3,400/15,000".into()),
+        },
+    );
+    f.set_children(
+        other,
+        ChildState::Failed {
+            label: "Couldn't read other".into(),
+            retry: Some("Retry".into()),
+        },
+    );
+    let (tree, vcx, events) = open(cx, f, 600.0);
+    expand(&tree, vcx, &["db", "audit", "other"]);
+    let frame = texts(vcx);
+    let label = frame
+        .iter()
+        .find(|t| t.text.as_ref() == "Reading columns…")
+        .unwrap();
+    assert_eq!(
+        label.size_px, 12.0,
+        "NOTES surface 2: the phase label is 12 px"
+    );
+    assert!(frame.iter().any(|t| t.text.as_ref() == "3,400/15,000"));
+    assert!(
+        vcx.debug_bounds(format!("hv-tree-run-{}", audit.0).leak())
+            .is_some()
+    );
+    // Waiting: no marker.
+    tree.update(vcx, |t, cx| {
+        t.update_model(
+            |m| {
+                m.set_children(
+                    audit,
+                    ChildState::Loading {
+                        label: "Waiting for columns".into(),
+                        running: false,
+                        count: None,
+                    },
+                )
+            },
+            cx,
+        )
+    });
+    draw(vcx);
+    assert!(
+        vcx.debug_bounds(format!("hv-tree-run-{}", audit.0).leak())
+            .is_none()
+    );
+    // Retry asks the host to load the failed node again, and changes nothing else.
+    let cursor = tree.read_with(vcx, |t, _| t.cursor());
+    let retry = vcx
+        .debug_bounds(format!("hv-tree-retry-{}", other.0).leak())
+        .expect("the retry button is drawn");
+    events.borrow_mut().clear();
+    vcx.simulate_click(retry.center(), Modifiers::none());
+    draw(vcx);
+    assert_eq!(*events.borrow(), [TreeEvent::Retry(other)]);
+    assert_eq!(tree.read_with(vcx, |t, _| t.cursor()), cursor);
+    // Accessibility: the count and the retry word describe the status rows.
+    tree.update(vcx, |t, cx| t.assume_a11y_active(true, cx));
+    draw(vcx);
+    let items = tree.read_with(vcx, |t, _| t.a11y_items());
+    let failed = items
+        .iter()
+        .find(|i| i.name.as_ref() == "Couldn't read other")
+        .unwrap();
+    assert_eq!(failed.description.as_deref(), Some("Retry"));
+    assert!(!failed.focusable);
+}
+
+#[gpui::test]
+fn row_fields_of_the_mocks_render_and_reach_assistive_technology(cx: &mut TestAppContext) {
+    let mut f = Fixture::parse(OUTLINE);
+    let (db, public, tables) = (f.key("db"), f.key("public"), f.key("Tables"));
+    {
+        let row = f.row_mut(db);
+        row.strong = true;
+        row.meta_mark = Some(MetaMark::Ok);
+        row.meta = Some("12 ms".into());
+        row.flags = vec![
+            RowFlag::Env(EnvKind::Production),
+            RowFlag::Lock { production: true },
+        ];
+        row.a11y_description = Some("Production, read-only".into());
+        row.tooltip = Some("3 of 4 schemas".into());
+    }
+    {
+        let row = f.row_mut(public);
+        row.pill = Some(RowPill {
+            text: "Structure".into(),
+            explicit: false,
+            tooltip: "Introspection level: Structure (inherited)".into(),
+        });
+        row.row_action = Some(RowAction {
+            icon: IconName::Plus,
+            label: "Add to scope".into(),
+        });
+        row.dim = true;
+    }
+    f.row_mut(tables).filter_glyph = Some("60 objects are hidden".into());
+    let orders = f.key("orders");
+    f.row_mut(orders).type_text = Some("bigint".into());
+    let (tree, vcx, events) = open(cx, f, 600.0);
+    expand(&tree, vcx, &["db", "public", "Tables"]);
+    let frame = texts(vcx);
+    let db_label = frame.iter().find(|t| t.text.as_ref() == "db").unwrap();
+    assert_eq!(db_label.size_px, 13.0);
+    let ty = frame.iter().find(|t| t.text.as_ref() == "bigint").unwrap();
+    assert_eq!(ty.size_px, 11.0);
+    assert!(
+        vcx.debug_bounds(format!("hv-tree-mark-{}", db.0).leak())
+            .is_some()
+    );
+    assert!(vcx.debug_bounds("hv-tree-filter-glyph").is_some());
+    // The row action shows on selection (or hover) only, and asks the host.
+    let action = format!("hv-tree-row-action-{}", public.0).leak();
+    assert!(vcx.debug_bounds(action).is_none());
+    tree.update(vcx, |t, cx| t.select(public, cx));
+    draw(vcx);
+    let b = vcx.debug_bounds(action).expect("drawn on the selected row");
+    events.borrow_mut().clear();
+    vcx.simulate_click(b.center(), Modifiers::none());
+    draw(vcx);
+    assert_eq!(*events.borrow(), [TreeEvent::RowAction(public)]);
+    // The pill asks for its list at its bottom-left, without selecting anything.
+    tree.update(vcx, |t, cx| t.select(db, cx));
+    draw(vcx);
+    let pill = vcx
+        .debug_bounds(format!("hv-tree-pill-{}", public.0).leak())
+        .expect("the pill is drawn");
+    events.borrow_mut().clear();
+    vcx.simulate_click(pill.center(), Modifiers::none());
+    draw(vcx);
+    let ev = events.borrow().clone();
+    let [TreeEvent::Pill(k, at)] = ev.as_slice() else {
+        panic!("{ev:?}");
+    };
+    assert_eq!(*k, public);
+    assert!(
+        (f32::from(at.x) - f32::from(pill.left())).abs() <= 1.0
+            && (f32::from(at.y) - f32::from(pill.bottom())).abs() <= 1.0,
+        "{at:?} vs {pill:?}"
+    );
+    assert_eq!(tree.read_with(vcx, |t, _| t.cursor()), Some(db));
+    // What assistive technology reads besides the name.
+    tree.update(vcx, |t, cx| t.assume_a11y_active(true, cx));
+    draw(vcx);
+    let items = tree.read_with(vcx, |t, _| t.a11y_items());
+    let by = |n: &str| items.iter().find(|i| i.name.as_ref() == n).unwrap().clone();
+    assert_eq!(
+        by("db").description.as_deref(),
+        Some("Production, read-only, 3 of 4 schemas")
+    );
+    assert_eq!(
+        by("public").description.as_deref(),
+        Some("Introspection level: Structure (inherited)")
+    );
 }

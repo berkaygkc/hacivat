@@ -5,19 +5,28 @@
 //! - [`anchor`]: scrolling, the viewport and scroll anchoring;
 //! - [`keyboard`]: key-downs and type-ahead;
 //! - [`pointer`]: mouse-downs and the assistive-technology actions;
-//! - [`element`]: the virtualized element, the row anatomy and the accessibility hand-off.
+//! - [`element`]: the virtualized element and the accessibility hand-off;
+//! - [`row`]: one row's anatomy and its give-way order.
 //!
 //! **The cursor and the selection** (R-M4-49, R-M4-50). The cursor is the keyboard's row; the
 //! selection is what the host's actions act on. A group header that can expand takes the
 //! cursor but never the selection, and [`TreeEvent::SelectionChanged`] never names one; a
 //! header that cannot expand (an environment label) and the loading and failed child rows
-//! never take the cursor. With single selection (M4's explorer), the selection is never a
-//! hidden row: collapsing the subtree that holds it clears it.
+//! never take the cursor. With single selection (M4's explorer), a collapse (by the user or the
+//! host) that hides the selected row clears the selection; a row that leaves the model in a new
+//! generation stays selected by key, so a refresh that drops and brings back a namespace keeps
+//! it. When the cursor's row leaves the shown rows (a new generation, the host's expansion), the
+//! cursor moves to the nearest row that survives at or above where it was.
+//!
+//! Pointer and accessibility handlers capture the row's key and find its row when the event
+//! arrives (fix round 1, I1): a click that lands after a model change but before the next frame
+//! acts on the row that was under the pointer, or on nothing when that row is gone.
 
 mod anchor;
 mod element;
 mod keyboard;
 mod pointer;
+mod row;
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -40,6 +49,9 @@ use element::{A11yFrame, TreeElement};
 /// Rows built above and below the ones on screen (keyboard steps never land on an unbuilt row).
 pub const TREE_OVERSCAN_ROWS: usize = 2;
 
+/// How many rows above the cursor a rebuild remembers as its fallbacks.
+const CURSOR_FALLBACKS: usize = 256;
+
 /// A virtualized tree over `M`.
 pub struct TreeView<M: TreeModel> {
     model: M,
@@ -52,6 +64,10 @@ pub struct TreeView<M: TreeModel> {
     selection: KeySet,
     /// The keyboard's row: a selectable row or a group header that can expand.
     cursor: Option<TreeKey>,
+    /// The cursor's last row index, where it falls back to when its row disappears.
+    cursor_row: usize,
+    /// The row under the pointer (its row action shows while hovered).
+    hovered: Option<TreeKey>,
     /// The selected row [`TreeEvent::SelectionChanged`] last named.
     lead: Option<TreeKey>,
     /// Where a Shift range starts.
@@ -114,6 +130,8 @@ impl<M: TreeModel> TreeView<M> {
             announced: KeySet::default(),
             selection: KeySet::default(),
             cursor: None,
+            cursor_row: 0,
+            hovered: None,
             lead: None,
             range_from: None,
             multi: false,
@@ -165,6 +183,7 @@ impl<M: TreeModel> TreeView<M> {
             return;
         }
         let anchor = self.anchor();
+        let fallbacks = self.cursor_fallbacks();
         let mut not_loaded = Vec::new();
         self.flat = Flat::build(&self.model, &self.expanded, &mut not_loaded);
         self.built_from = Some(generation);
@@ -184,6 +203,49 @@ impl<M: TreeModel> TreeView<M> {
             self.scroll_y = ix as f64 * f64::from(self.row_h) + offset;
         }
         self.clamp_scroll();
+        self.relocate_cursor(&fallbacks);
+    }
+
+    /// The rows above the cursor that take the cursor, nearest first (at most
+    /// [`CURSOR_FALLBACKS`]), read before a rebuild: where the cursor goes if its row is gone.
+    fn cursor_fallbacks(&self) -> Vec<TreeKey> {
+        let Some(cix) = self.cursor_ix() else {
+            return Vec::new();
+        };
+        (0..cix)
+            .rev()
+            .filter(|&j| self.focusable(j))
+            .take(CURSOR_FALLBACKS)
+            .map(|j| self.flat.rows()[j].key)
+            .collect()
+    }
+
+    /// Keeps the cursor on a shown row (fix round 1, M3): when its row is gone (a new
+    /// generation, the host's expansion), the nearest row above it that is still shown takes it
+    /// (a hidden row's nearest shown ancestor, a dropped row's neighbour); with none, the first
+    /// row from its last place. The selection is not touched, and no event is emitted.
+    fn relocate_cursor(&mut self, fallbacks: &[TreeKey]) {
+        let Some(key) = self.cursor else {
+            return;
+        };
+        if let Some(ix) = self.focusable_row(key) {
+            self.cursor_row = ix;
+            return;
+        }
+        let len = self.flat.len();
+        let to = fallbacks
+            .iter()
+            .find_map(|k| self.focusable_row(*k))
+            .or_else(|| {
+                let from = self.cursor_row.min(len.saturating_sub(1));
+                (from..len)
+                    .find(|&j| self.focusable(j))
+                    .or_else(|| self.focusable_at_or_above(from))
+            });
+        self.cursor = to.map(|ix| self.flat.rows()[ix].key);
+        if let Some(ix) = to {
+            self.cursor_row = ix;
+        }
     }
 
     // ---- options ----------------------------------------------------------------------------
@@ -329,29 +391,24 @@ impl<M: TreeModel> TreeView<M> {
 
     /// Whether row `ix` is a group header.
     fn is_header(&self, ix: usize) -> bool {
-        self.flat
-            .get(ix)
-            .is_some_and(|r| r.is_node() && self.model.row(r.key).is_some_and(|d| d.group_header))
+        self.flat.get(ix).is_some_and(|r| r.is_header())
     }
 
     /// Whether row `ix` can be selected: a node the model shows that is not a group header.
     fn selectable(&self, ix: usize) -> bool {
-        self.flat
-            .get(ix)
-            .is_some_and(|r| r.is_node() && self.model.row(r.key).is_some_and(|d| !d.group_header))
+        self.flat.get(ix).is_some_and(|r| r.is_selectable())
     }
 
     /// Whether row `ix` can take the cursor: a selectable row, or a group header that can
     /// expand (R-M4-49). A header without children is a label the keys pass over.
     fn focusable(&self, ix: usize) -> bool {
-        let Some(r) = self.flat.get(ix).filter(|r| r.is_node()) else {
-            return false;
-        };
-        match self.model.row(r.key) {
-            Some(d) if d.group_header => self.model.children(r.key).expandable(),
-            Some(_) => true,
-            None => false,
-        }
+        self.flat.get(ix).is_some_and(|r| r.is_focusable())
+    }
+
+    /// The row of node `key` when it takes the cursor (event handlers resolve their row by
+    /// key when the event arrives, fix round 1, I1).
+    fn focusable_row(&self, key: TreeKey) -> Option<usize> {
+        self.flat.index_of(key).filter(|&ix| self.focusable(ix))
     }
 
     fn focusable_at_or_above(&self, ix: usize) -> Option<usize> {
@@ -395,7 +452,7 @@ impl<M: TreeModel> TreeView<M> {
     /// row is then selected alone; a group header leaves the selection as it is (R-M4-49).
     pub fn select(&mut self, key: TreeKey, cx: &mut Context<Self>) {
         self.sync(cx);
-        if let Some(ix) = self.flat.index_of(key).filter(|&ix| self.focusable(ix)) {
+        if let Some(ix) = self.focusable_row(key) {
             self.set_cursor(Some(ix), false, cx);
         }
     }
@@ -439,6 +496,7 @@ impl<M: TreeModel> TreeView<M> {
             self.note_selection(Some(key), cx);
         }
         self.cursor = Some(key);
+        self.cursor_row = ix;
         self.reveal(ix);
         cx.notify();
     }
@@ -485,6 +543,18 @@ impl<M: TreeModel> TreeView<M> {
             self.a11y.items = Rc::default();
         }
         cx.notify();
+    }
+
+    /// Runs an assistive technology's `action` on node `key`, as the platform would (tests).
+    #[doc(hidden)]
+    pub fn run_a11y_action(
+        &mut self,
+        key: TreeKey,
+        action: hacivat_ui_core::gpui_surface::accesskit::Action,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.a11y_action(key, action, window, cx);
     }
 
     fn a11y_active(&self, window: &Window) -> bool {
