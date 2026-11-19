@@ -105,6 +105,12 @@ pub struct CatalogDelta {
     pub renamed: Vec<(ObjectKey, ObjectKey, Confidence)>,
     /// `(from namespace, to namespace, object)`; the object's key is its key in `to`.
     pub moved: Vec<(NsKey, NsKey, ObjectKey)>,
+    // ## m4-t15-engine (named exception, ruling R-W3-2)
+    /// Objects removed because the user's scope filter no longer keeps them: a scope change,
+    /// not a server deletion (never guarded by D-039, never in `dropped`).
+    #[serde(default)]
+    pub out_of_scope: Vec<ObjectKey>,
+    // ## m4-t15-engine
 }
 
 impl CatalogDelta {
@@ -115,6 +121,7 @@ impl CatalogDelta {
             && self.dropped.is_empty()
             && self.renamed.is_empty()
             && self.moved.is_empty()
+            && self.out_of_scope.is_empty()
     }
 
     /// The number of entries.
@@ -124,6 +131,7 @@ impl CatalogDelta {
             + self.dropped.len()
             + self.renamed.len()
             + self.moved.len()
+            + self.out_of_scope.len()
     }
 
     /// Whether the delta is too large for per-object tree updates
@@ -193,6 +201,7 @@ impl CatalogDelta {
             out.altered.extend(d.altered);
             out.renamed.extend(d.renamed);
             out.moved.extend(d.moved);
+            out.out_of_scope.extend(d.out_of_scope);
         }
         out.moved.extend(moved);
         out
@@ -252,6 +261,12 @@ pub fn apply_delta(
 ) -> Result<BTreeSet<ObjectKey>, DeltaError> {
     let top = |k: &ObjectKey| k.path.len() == ns.path.len() + 1 && k.path.starts_with(&ns.path);
     let mut out = keys.clone();
+    // ## m4-t15-engine (R-W3-2): a scope removal leaves the set like a drop.
+    for k in delta.out_of_scope.iter().filter(|k| top(k)) {
+        if !out.remove(k) {
+            return Err(DeltaError::Missing(Box::new(k.clone())));
+        }
+    }
     for k in delta.dropped.iter().filter(|k| top(k)) {
         if !out.remove(k) {
             return Err(DeltaError::Missing(Box::new(k.clone())));

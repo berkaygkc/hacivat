@@ -76,6 +76,7 @@ WHERE n.oid = :ns
 SELECT 'rel' AS tag, c.oid AS oid, NULL::text AS parent, c.relname::text AS name, c.relkind::text AS sub
 FROM pg_catalog.pg_class c
 WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND (:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)
 UNION ALL
 SELECT 'seq', c.oid, NULL::text, c.relname::text, NULL::text
 FROM pg_catalog.pg_class c
@@ -86,16 +87,19 @@ FROM pg_catalog.pg_index i
 JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
 JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
 WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND (:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)
 UNION ALL
 SELECT 'con', k.oid, c.relname::text, k.conname::text, k.contype::text
 FROM pg_catalog.pg_constraint k
 JOIN pg_catalog.pg_class c ON c.oid = k.conrelid
 WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND k.contype IN ('p', 'u', 'f', 'c', 'x')
+  AND (:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)
 UNION ALL
 SELECT 'trg', t.oid, c.relname::text, t.tgname::text, NULL::text
 FROM pg_catalog.pg_trigger t
 JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
 WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT t.tgisinternal
+  AND (:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)
 UNION ALL
 SELECT 'fn', p.oid, NULL::text, p.proname::text, p.prokind::text
 FROM pg_catalog.pg_proc p
@@ -147,10 +151,12 @@ WHERE (d.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass
 --- returns: facet text, oid u32 ---
 WITH rels AS MATERIALIZED (
   SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+    AND (:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)
 )
 SELECT DISTINCT y.f AS facet, y.o AS oid FROM (
   SELECT 'rel' AS f, c.oid AS o FROM pg_catalog.pg_class c
   WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+    AND (:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)
     AND pg_catalog.age(c.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'rel', r.ev_class FROM pg_catalog.pg_rewrite r JOIN rels ON rels.oid = r.ev_class
   WHERE pg_catalog.age(r.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
@@ -356,6 +362,7 @@ LEFT JOIN pg_catalog.pg_namespace ppn ON ppn.oid = pp.relnamespace
 LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam
 LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid = c.reltablespace
 WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND (:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)
 --# if mode == incremental
   AND c.oid IN :[oids]
 --# end

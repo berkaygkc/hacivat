@@ -18,6 +18,8 @@ use sql_dialect::DialectId;
 use tokio_util::sync::CancellationToken;
 
 use super::decode::Row;
+use crate::engine::Phase;
+use crate::filter::SqlPredicate;
 use crate::introspector::IntroError;
 use crate::pack::{Mode, Pack, PackCtx, PackFlags, Params};
 
@@ -131,6 +133,33 @@ impl Binds {
 
 /// The context a section is rendered for (`server_version_num`, the pass's mode and level).
 pub fn ctx(version: u32, mode: Mode, level: Level, binds: &Binds) -> PackCtx {
+    ctx_like(version, mode, level, binds, None)
+}
+
+/// [`ctx`] with one pushed-down name pattern (R-W3-2): `like` is one run of
+/// `engine::bounded_pushdown`'s `SqlPredicate` (`relname LIKE :name_like ESCAPE
+/// :like_escape`, the `C` collation of `name`); `None` binds SQL NULL, which the sections read
+/// as "no predicate".
+pub fn ctx_like(
+    version: u32,
+    mode: Mode,
+    level: Level,
+    binds: &Binds,
+    like: Option<&BindValue>,
+) -> PackCtx {
+    let mut params = binds.params();
+    params.scalars.push((
+        Name::from(SqlPredicate::PATTERN_BIND),
+        like.cloned().unwrap_or(BindValue::Null),
+    ));
+    params.scalars.push((
+        Name::from(SqlPredicate::ESCAPE_BIND),
+        if like.is_some() {
+            SqlPredicate::escape()
+        } else {
+            BindValue::Null
+        },
+    ));
     PackCtx {
         dialect: DialectId::Postgres,
         version,
@@ -138,7 +167,16 @@ pub fn ctx(version: u32, mode: Mode, level: Level, binds: &Binds) -> PackCtx {
         mode,
         level,
         flags: PackFlags::empty(),
-        params: binds.params(),
+        params,
+    }
+}
+
+/// The runs of a section that takes the relation-name pushdown: one per pattern, or one run
+/// without a predicate.
+pub fn like_runs(pushed: Option<&SqlPredicate>) -> Vec<Option<BindValue>> {
+    match pushed {
+        Some(p) if !p.binds.is_empty() => p.binds.iter().cloned().map(Some).collect(),
+        _ => vec![None],
     }
 }
 
@@ -183,6 +221,35 @@ pub struct Reader<'r, 'c> {
     pub version: u32,
     pub cancel: &'r CancellationToken,
     pub log: &'r mut QueryLog,
+    /// Told the phase and the row count of every section as it finishes.
+    pub progress: Option<ProgressSink>,
+}
+
+/// A pass's progress sink: the phase of each finished section and the rows it read (the
+/// engine's closed `Phase` set; determinate counts, no ambient motion).
+pub type ProgressSink = std::sync::Arc<dyn Fn(Phase, u64) + Send + Sync>;
+
+/// The engine phase a section belongs to.
+pub fn phase_of(section: &str) -> Phase {
+    match section {
+        name::LIST_NAMESPACES | name::LIST_DATABASES => Phase::ListNamespaces,
+        name::RETRIEVE_RELATIONS | name::RETRIEVE_NAMESPACE | name::SYSTEM_RELATIONS => {
+            Phase::Tables
+        }
+        name::RETRIEVE_COLUMNS | name::SYSTEM_COLUMNS => Phase::Columns,
+        name::RETRIEVE_INDEXES => Phase::Indexes,
+        name::RETRIEVE_CONSTRAINTS => Phase::Constraints,
+        name::RETRIEVE_TRIGGERS => Phase::Triggers,
+        name::RETRIEVE_ROUTINES | name::SYSTEM_ROUTINES | name::SYSTEM_OPERATORS => Phase::Routines,
+        name::RETRIEVE_TYPES
+        | name::RETRIEVE_TYPE_ATTRIBUTES
+        | name::RETRIEVE_DOMAIN_CONSTRAINTS
+        | name::SYSTEM_TYPES => Phase::Types,
+        name::RETRIEVE_SEQUENCES => Phase::Sequences,
+        name::COMMENTS => Phase::Comments,
+        name::LIST_EXISTENT | name::LIST_EXISTENT_COMMENTS => Phase::Existence,
+        _ => Phase::Validate,
+    }
 }
 
 impl Reader<'_, '_> {
@@ -196,11 +263,48 @@ impl Reader<'_, '_> {
         binds: &Binds,
         f: impl Fn(&Row<'_>) -> Result<T, IntroError>,
     ) -> Result<Vec<T>, IntroError> {
+        self.read_like(section, mode, level, binds, &[None], f)
+            .await
+    }
+
+    /// [`Reader::read`] once per pushed-down pattern run ([`like_runs`]), the rows of every
+    /// run concatenated (the caller deduplicates by oid where runs overlap).
+    pub async fn read_like<T>(
+        &mut self,
+        section: &'static str,
+        mode: Mode,
+        level: Level,
+        binds: &Binds,
+        runs: &[Option<BindValue>],
+        f: impl Fn(&Row<'_>) -> Result<T, IntroError>,
+    ) -> Result<Vec<T>, IntroError> {
+        let mut out = Vec::new();
+        for like in runs {
+            out.extend(
+                self.read_one(section, mode, level, binds, like.as_ref(), &f)
+                    .await?,
+            );
+        }
+        if let Some(p) = self.progress.as_ref() {
+            p(phase_of(section), out.len() as u64);
+        }
+        Ok(out)
+    }
+
+    async fn read_one<T>(
+        &mut self,
+        section: &'static str,
+        mode: Mode,
+        level: Level,
+        binds: &Binds,
+        like: Option<&BindValue>,
+        f: &impl Fn(&Row<'_>) -> Result<T, IntroError>,
+    ) -> Result<Vec<T>, IntroError> {
         if self.cancel.is_cancelled() {
             return Err(IntroError::Cancelled);
         }
         let t0 = Instant::now();
-        let ctx = ctx(self.version, mode, level, binds);
+        let ctx = ctx_like(self.version, mode, level, binds, like);
         let queries = self
             .pack
             .render(section, &ctx)

@@ -1617,6 +1617,81 @@ async fn forged(c: &mut MetaConn, ns: &NsKey, wm: Watermark) -> NamespaceSnapsho
     apply(&b, p.result).0
 }
 
+/// R-W3-2: the scope filter reaches the server as `relname LIKE $n ESCAPE $m` (`C`
+/// collation; one run per pattern), the client filter still decides, and the progress sink
+/// sees each section's phase and rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn scope_filter_pushdown_reads_only_matching_relations() {
+    if !docker_enabled() {
+        return;
+    }
+    for t in targets() {
+        let (s, _g) = schema_with(
+            &t,
+            "push",
+            "CREATE TABLE {s}.orders_a (a int); CREATE TABLE {s}.\"Orders_b\" (a int); \
+             CREATE TABLE {s}.ordersx (a int); CREATE TABLE {s}.other (a int)",
+        )
+        .await;
+        let pg = Pg::connect(&t).await;
+        let mut c = pg.meta().await;
+        let ns = ns_of(&t, &s);
+        let f = hacivat_introspect::filter::parse_filter(
+            "orders_*",
+            sql_dialect::DialectId::Postgres,
+            hacivat_introspect::filter::FilterRole::Introspect,
+        )
+        .unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_seen = seen.clone();
+        let sink: hacivat_introspect::pg::sections::ProgressSink =
+            Arc::new(move |phase, rows| sink_seen.lock().unwrap().push((phase, rows)));
+        let cancel = CancellationToken::new();
+        let p = pass::introspect(
+            &mut c,
+            &ns,
+            PassOpts {
+                mode: Mode::Full,
+                level: Level::Structure,
+                filter: Some(&f),
+                progress: Some(sink),
+                ..PassOpts::default()
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let rels = p
+            .report
+            .log
+            .sections
+            .iter()
+            .find(|x| x.name == name::RETRIEVE_RELATIONS)
+            .unwrap();
+        // Exact on PostgreSQL: `Orders_b` and `ordersx` are not `orders_*` (the `_` is
+        // literal), and `other` never left the server.
+        assert_eq!(rels.rows, 1, "{}", t.id);
+        let b = base(ns.clone(), DbmsKind::Postgres, FoldRule::Exact).unwrap();
+        let (n, _) = apply(&b, p.result);
+        let tables: Vec<String> = n
+            .objs()
+            .iter()
+            .filter(|o| o.kind() == ObjectKind::Table)
+            .map(|o| o.name().to_string())
+            .collect();
+        assert_eq!(tables, ["orders_a"], "{}", t.id);
+        let seen = seen.lock().unwrap().clone();
+        assert!(
+            seen.contains(&(hacivat_introspect::Phase::Tables, 1)),
+            "{}: {seen:?}",
+            t.id
+        );
+        drop(c);
+        pg.shutdown().await;
+    }
+}
+
 const BIG_TABLES: u32 = 15_000;
 const BIG_COLUMNS: u32 = 160_000;
 
@@ -1679,10 +1754,11 @@ async fn no_catalog_query_seq_scans_user_sized_structures_without_a_namespace_pr
                 // Binds are inlined here only: test text on an admin connection.
                 let mut sql = q.sql().to_string();
                 for (k, b) in q.binds().iter().enumerate().rev() {
-                    let hacivat_values::BindValue::Typed { text, .. } = b else {
-                        continue;
+                    let value = match b {
+                        hacivat_values::BindValue::Typed { text, .. } => format!("'{text}'"),
+                        hacivat_values::BindValue::Null => "NULL".to_string(),
                     };
-                    sql = sql.replace(&format!("${}", k + 1), &format!("'{text}'"));
+                    sql = sql.replace(&format!("${}", k + 1), &value);
                 }
                 a.batch("BEGIN").await;
                 let plan = a.scalar(&format!("EXPLAIN (FORMAT JSON) {sql}")).await;

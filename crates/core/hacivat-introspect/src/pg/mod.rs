@@ -42,10 +42,14 @@ use hacivat_proto::DbmsKind;
 use hacivat_session::meta::MetaConn;
 use tokio_util::sync::CancellationToken;
 
+use crate::filter::CompiledFilter;
 use crate::freshness::NsCheck;
-use crate::introspector::{FacetRows, IntroCaps, IntroError, Introspector, Staleness};
+use crate::introspector::{
+    FacetRows, IntroCaps, IntroError, Introspector, ServerIdentity, Staleness,
+};
 use crate::pack::Mode;
 use crate::scope::NsInfo;
+use hacivat_meta::persist::ServerFingerprint;
 
 /// The PostgreSQL introspector.
 #[derive(Debug, Clone, Copy, Default)]
@@ -68,6 +72,7 @@ impl Introspector for PgIntrospector {
         ns: &'a NsKey,
         mode: Mode,
         level: Level,
+        filter: &'a CompiledFilter,
         prev: Option<&'a NamespaceSnapshot>,
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>> {
@@ -79,8 +84,9 @@ impl Introspector for PgIntrospector {
                 mode,
                 level,
                 prev,
-                filter: None,
+                filter: Some(filter),
                 after_identity: None,
+                progress: None,
             };
             pass::introspect(c, ns, opts, cancel)
                 .await
@@ -94,10 +100,11 @@ impl Introspector for PgIntrospector {
         ns: &'a NsKey,
         keys: &'a [ObjectKey],
         level: Level,
+        filter: &'a CompiledFilter,
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>> {
         Box::pin(async move {
-            pass::fragment(c, ns, keys, level, None, cancel)
+            pass::fragment(c, ns, keys, level, Some(filter), cancel)
                 .await
                 .map(|p| p.result)
         })
@@ -168,4 +175,32 @@ impl Introspector for PgIntrospector {
             facets: Vec::new(),
         }
     }
+
+    // ## m4-t16-pg (ruling R-W3-3)
+    /// The server's identity for `CacheStore::check_identity`: an XXH3-128 of
+    /// `pg_control_system().system_identifier`, the major version and the database oid (from
+    /// one `Identity` probe). `Unknown` (fail-closed: no cached watermark is trusted) when the
+    /// login may not read the system identifier. The start time is left out: a restart keeps
+    /// the cache (the watermark's own identity word forces the next pass full).
+    fn identity<'a>(
+        &'a self,
+        c: &'a mut MetaConn,
+    ) -> BoxFuture<'a, Result<ServerIdentity, IntroError>> {
+        Box::pin(async move {
+            let cancel = CancellationToken::new();
+            let id = pass::server_identity(c, &cancel).await?;
+            Ok(identity_of(&id))
+        })
+    }
+}
+
+/// The fingerprint of a probe (see [`PgIntrospector::identity`]).
+pub fn identity_of(id: &decode::IdentityRow) -> ServerIdentity {
+    let Some(sysid) = id.system_identifier.as_deref() else {
+        return ServerIdentity::Unknown;
+    };
+    let text = format!("pg|{sysid}|{}|{}", id.version / 10_000, id.db_oid);
+    ServerIdentity::Known(ServerFingerprint(twox_hash::XxHash3_128::oneshot(
+        text.as_bytes(),
+    )))
 }

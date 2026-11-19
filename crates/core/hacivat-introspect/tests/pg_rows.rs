@@ -462,3 +462,111 @@ fn state_sections_are_joinable() {
         assert!(!p.section(s).unwrap().joinable(), "{s}");
     }
 }
+
+// ## m4-t16-pg (R-W3-2, R-W3-3, the progress sink)
+
+fn filter(text: &str) -> hacivat_introspect::filter::CompiledFilter {
+    hacivat_introspect::filter::parse_filter(
+        text,
+        DialectId::Postgres,
+        hacivat_introspect::filter::FilterRole::Introspect,
+    )
+    .expect("a filter")
+}
+
+#[test]
+fn relation_sections_push_the_scope_filter_down_as_like_binds() {
+    use hacivat_introspect::pg::pass::relation_runs;
+    use hacivat_introspect::pg::sections::ctx_like;
+    use hacivat_values::BindValue;
+    // Nothing to push: one run, the predicate bound to NULL.
+    assert_eq!(relation_runs(None), vec![None]);
+    assert_eq!(relation_runs(Some(&filter(""))), vec![None]);
+    // A negative item alone is never pushed (the server must return a superset).
+    assert_eq!(relation_runs(Some(&filter("-tmp_*"))), vec![None]);
+    // A positive glob for every relation kind: one LIKE run per pattern.
+    let runs = relation_runs(Some(&filter("orders*||audit_?")));
+    assert_eq!(runs.len(), 2);
+    let p = pack().unwrap();
+    for section in [
+        name::LIST_EXISTENT,
+        name::RETRIEVE_RELATIONS,
+        name::CHANGED_PARENTS,
+    ] {
+        let b = Binds {
+            ns: Some(2200),
+            w: Some(9),
+            schema: None,
+            oids: Some(vec![1]),
+        };
+        let q = p
+            .render(
+                section,
+                &ctx_like(
+                    170_000,
+                    hacivat_introspect::Mode::Full,
+                    Level::Structure,
+                    &b,
+                    runs[0].as_ref(),
+                ),
+            )
+            .unwrap();
+        assert!(q[0].sql().contains("relname LIKE $"), "{section}");
+        assert!(q[0].sql().contains(" ESCAPE $"), "{section}");
+        let texts: Vec<&str> = q[0]
+            .binds()
+            .iter()
+            .filter_map(|b| match b {
+                BindValue::Typed { text, .. } => Some(&**text),
+                BindValue::Null => None,
+            })
+            .collect();
+        assert!(texts.contains(&"orders%"), "{section}: {texts:?}");
+        // The pattern is a bind, never text.
+        assert!(!q[0].sql().contains("orders"), "{section}");
+    }
+}
+
+#[test]
+fn identity_is_unknown_without_the_system_identifier() {
+    use hacivat_introspect::introspector::ServerIdentity;
+    use hacivat_introspect::pg::decode::IdentityRow;
+    use hacivat_introspect::pg::identity_of;
+    let row = |sysid: Option<&str>, version: u32, db: u32| IdentityRow {
+        version,
+        in_recovery: false,
+        start_epoch: "1".into(),
+        db_oid: db,
+        db_name: "hv_test".into(),
+        system_identifier: sysid.map(str::to_string),
+        timeline: Some(1),
+        snap_xmin: 1,
+        snap_xmax: 1,
+        ns_oid: None,
+        version_text: "17.5".into(),
+        encoding: "UTF8".into(),
+        standard_conforming_strings: Some(true),
+        db_collation: None,
+    };
+    assert_eq!(identity_of(&row(None, 170_005, 5)), ServerIdentity::Unknown);
+    let a = identity_of(&row(Some("7300"), 170_005, 5));
+    assert!(matches!(a, ServerIdentity::Known(_)));
+    // A minor upgrade keeps the identity; a major one, another database or cluster does not.
+    assert_eq!(a, identity_of(&row(Some("7300"), 170_006, 5)));
+    assert_ne!(a, identity_of(&row(Some("7300"), 180_000, 5)));
+    assert_ne!(a, identity_of(&row(Some("7300"), 170_005, 6)));
+    assert_ne!(a, identity_of(&row(Some("7301"), 170_005, 5)));
+}
+
+#[test]
+fn sections_report_progress_in_the_engines_phases() {
+    use hacivat_introspect::Phase;
+    use hacivat_introspect::pg::sections::phase_of;
+    assert_eq!(phase_of(name::RETRIEVE_RELATIONS), Phase::Tables);
+    assert_eq!(phase_of(name::RETRIEVE_COLUMNS), Phase::Columns);
+    assert_eq!(phase_of(name::RETRIEVE_INDEXES), Phase::Indexes);
+    assert_eq!(phase_of(name::LIST_EXISTENT), Phase::Existence);
+    assert_eq!(phase_of(name::CHANGED_PARENTS), Phase::Validate);
+    assert_eq!(phase_of(name::STATE_OF_RELATION), Phase::Validate);
+    assert_eq!(phase_of(name::LIST_DATABASES), Phase::ListNamespaces);
+}

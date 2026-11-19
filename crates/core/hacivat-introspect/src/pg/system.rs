@@ -188,12 +188,19 @@ pub async fn read_rows(
 ) -> Result<SystemRows, IntroError> {
     let mut report = super::pass::PassReport::default();
     let schema = Name::from(schema);
-    super::pass::in_snapshot(c, &schema, cancel, &mut report, None, async |r, id| {
-        let ns = id
-            .ns_oid
-            .ok_or_else(|| IntroError::Protocol(Name::from("pg/namespace-gone")))?;
-        rows_of(r, ns).await
-    })
+    super::pass::in_snapshot(
+        c,
+        &schema,
+        cancel,
+        &mut report,
+        super::pass::PassHooks::default(),
+        async |r, id| {
+            let ns = id
+                .ns_oid
+                .ok_or_else(|| IntroError::Protocol(Name::from("pg/namespace-gone")))?;
+            rows_of(r, ns).await
+        },
+    )
     .await
 }
 
@@ -208,7 +215,7 @@ pub async fn list_settings(
         &Name::from("pg_catalog"),
         cancel,
         &mut report,
-        None,
+        super::pass::PassHooks::default(),
         async |r, _| {
             r.read(
                 name::LIST_SETTINGS,

@@ -37,7 +37,7 @@ use super::build::{self, CHILD_KINDS, Ns, RelRead, TOP_KINDS};
 use super::changes::Changes;
 use super::decode::{self, Existent, IdentityRow};
 use super::model::*;
-use super::sections::{Binds, QueryLog, Reader, error, name, pack};
+use super::sections::{Binds, ProgressSink, QueryLog, Reader, error, like_runs, name, pack};
 use super::watermark::{FullReason, Now, Plan, is_mass_change, plan};
 use crate::filter::CompiledFilter;
 use crate::introspector::IntroError;
@@ -53,11 +53,46 @@ pub struct PassOpts<'a> {
     pub mode: Mode,
     pub level: Level,
     pub prev: Option<&'a NamespaceSnapshot>,
-    /// The scope filter (HV-INTRO-03): objects it excludes are not read. Applied on the client
-    /// for now; server pushdown arrives with the trait's filter parameter (ruling R-W3-2).
+    /// The scope filter (HV-INTRO-03, ruling R-W3-2): objects it excludes are not built (the
+    /// client filter decides), and the relation sections (`ListExistent`,
+    /// `RetrieveRelations`, `ChangedParents`) push it to the server through
+    /// `engine::bounded_pushdown` over every relation kind (`pushdown_kinds`).
     pub filter: Option<&'a CompiledFilter>,
     /// Runs after `Identity`, inside the snapshot.
     pub after_identity: Option<Hook>,
+    /// Told each finished section's phase and row count.
+    pub progress: Option<ProgressSink>,
+}
+
+/// What `in_snapshot` runs around the body: the test pause after `Identity` and the progress
+/// sink.
+#[derive(Clone, Default)]
+pub struct PassHooks {
+    pub after_identity: Option<Hook>,
+    pub progress: Option<ProgressSink>,
+}
+
+/// The relation kinds one `pg_class` row of the relation sections can be (`relkind` r, p,
+/// v, m, f): a pushdown must cover them all (T12 review I2).
+pub const RELATION_KINDS: [ObjectKind; 4] = [
+    ObjectKind::Table,
+    ObjectKind::View,
+    ObjectKind::MaterializedView,
+    ObjectKind::ForeignTable,
+];
+
+/// The pushed-down runs of the relation sections for `filter` (one run without a predicate
+/// when nothing can be pushed).
+pub fn relation_runs(filter: Option<&CompiledFilter>) -> Vec<Option<hacivat_values::BindValue>> {
+    let pushed = filter.and_then(|f| {
+        crate::engine::bounded_pushdown(
+            f,
+            &RELATION_KINDS,
+            sql_dialect::DialectId::Postgres,
+            &hacivat_meta::name::IdentCtx::new(hacivat_meta::name::DialectId::Postgres),
+        )
+    });
+    like_runs(pushed.as_ref())
 }
 
 /// What a pass did, for the Docker tests and the timings.
@@ -101,9 +136,13 @@ pub(super) async fn in_snapshot<T>(
     schema: &Name,
     cancel: &CancellationToken,
     report: &mut PassReport,
-    after_identity: Option<Hook>,
+    hooks: PassHooks,
     body: impl AsyncFnOnce(&mut Reader<'_, '_>, &IdentityRow) -> Result<T, IntroError>,
 ) -> Result<T, IntroError> {
+    let PassHooks {
+        after_identity,
+        progress,
+    } = hooks;
     let pack = pack()?;
     let mut txn = c
         .begin_snapshot()
@@ -116,6 +155,7 @@ pub(super) async fn in_snapshot<T>(
             version: 0,
             cancel,
             log: &mut report.log,
+            progress,
         };
         let binds = Binds {
             schema: Some(schema.clone()),
@@ -181,13 +221,16 @@ pub async fn introspect(
     let nsx = Ns::new(ns).ok_or_else(|| IntroError::Protocol(Name::from("pg/namespace-key")))?;
     let mut report = PassReport::default();
     let schema = nsx.schema.clone();
-    let hook = opts.after_identity.clone();
+    let hooks = PassHooks {
+        after_identity: opts.after_identity.clone(),
+        progress: opts.progress.clone(),
+    };
     let (result, stats, reason) = in_snapshot(
         c,
         &schema,
         cancel,
         &mut report,
-        hook,
+        hooks,
         async |r: &mut Reader<'_, '_>, id: &IdentityRow| {
             let oid = ns_oid(&nsx, id)?;
             let now = Now::of(id);
@@ -337,8 +380,17 @@ async fn read_full(
         .next()
         .ok_or_else(|| IntroError::Protocol(Name::from("pg/namespace-gone")))?;
     let mut rels = r
-        .read(name::RETRIEVE_RELATIONS, m, level, &b, decode::relation)
+        .read_like(
+            name::RETRIEVE_RELATIONS,
+            m,
+            level,
+            &b,
+            &relation_runs(filter),
+            decode::relation,
+        )
         .await?;
+    let mut seen_rel = std::collections::HashSet::new();
+    rels.retain(|x| seen_rel.insert(x.oid));
     rels.retain(|x| keep(filter, build::rel_kind(x.kind), &x.name));
     let structure = level >= Level::Structure;
     let ch = if structure {
@@ -572,7 +624,11 @@ struct Alive {
     relation_count: usize,
 }
 
-fn alive_of(rows: Vec<Existent>, filter: Option<&CompiledFilter>) -> Alive {
+fn alive_of(mut rows: Vec<Existent>, filter: Option<&CompiledFilter>) -> Alive {
+    // Pushed-down runs overlap (two patterns can match one relation; the non-relation
+    // branches repeat in every run): one row per object.
+    let mut seen = std::collections::HashSet::new();
+    rows.retain(|e| seen.insert((e.tag.clone(), e.oid)));
     let mut a = Alive {
         by_oid: HashMap::new(),
         relations: BTreeSet::new(),
@@ -643,15 +699,29 @@ async fn read_incremental(
     let full = Mode::Full;
     // 4a: existence.
     let alive = alive_of(
-        r.read(name::LIST_EXISTENT, full, level, &b, decode::existent)
-            .await?,
+        r.read_like(
+            name::LIST_EXISTENT,
+            full,
+            level,
+            &b,
+            &relation_runs(filter),
+            decode::existent,
+        )
+        .await?,
         filter,
     );
     // 4b: young rows of the namespace, then one dependency hop from the database's.
     let bw = Binds::ns(ns).with_w(since);
     let mut changes = Changes::default();
     for (f, oid) in r
-        .read(name::CHANGED_PARENTS, full, level, &bw, decode::facet)
+        .read_like(
+            name::CHANGED_PARENTS,
+            full,
+            level,
+            &bw,
+            &relation_runs(filter),
+            decode::facet,
+        )
         .await?
     {
         changes.add(&f, oid)?;
@@ -1028,7 +1098,7 @@ pub async fn fragment(
         &schema,
         cancel,
         &mut report,
-        None,
+        PassHooks::default(),
         async |r: &mut Reader<'_, '_>, id: &IdentityRow| {
             let oid = ns_oid(&nsx, id)?;
             read_fragment(r, &nsx, oid, keys, level, filter).await
@@ -1052,8 +1122,15 @@ async fn read_fragment(
 ) -> Result<Read, IntroError> {
     let b = Binds::ns(ns);
     let alive = alive_of(
-        r.read(name::LIST_EXISTENT, Mode::Full, level, &b, decode::existent)
-            .await?,
+        r.read_like(
+            name::LIST_EXISTENT,
+            Mode::Full,
+            level,
+            &b,
+            &relation_runs(filter),
+            decode::existent,
+        )
+        .await?,
         filter,
     );
     let by_name: HashMap<(&str, &str), Oid> = alive
@@ -1317,7 +1394,7 @@ pub async fn list_namespaces(
         &Name::from("pg_catalog"),
         cancel,
         &mut report,
-        None,
+        PassHooks::default(),
         async |r: &mut Reader<'_, '_>, _id: &IdentityRow| {
             let dbs = r
                 .read(
@@ -1376,7 +1453,7 @@ pub async fn server_identity(
         &Name::from("pg_catalog"),
         cancel,
         &mut report,
-        None,
+        PassHooks::default(),
         async |_r: &mut Reader<'_, '_>, id: &IdentityRow| Ok(id.clone()),
     )
     .await
@@ -1402,7 +1479,7 @@ pub async fn check_namespace(
         &schema,
         cancel,
         &mut report,
-        None,
+        PassHooks::default(),
         async |r: &mut Reader<'_, '_>, id: &IdentityRow| {
             let oid = ns_oid(&nsx, id)?;
             let b = Binds::ns(oid);

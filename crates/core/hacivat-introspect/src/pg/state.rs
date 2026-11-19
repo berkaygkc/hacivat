@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::decode::IdentityRow;
 use super::model::Oid;
-use super::pass::{PassReport, in_snapshot};
+use super::pass::{PassHooks, PassReport, in_snapshot};
 use super::sections::{Binds, Reader, name};
 use crate::introspector::IntroError;
 use crate::pack::Mode;
@@ -58,7 +58,7 @@ pub async fn stamps(
         &Name::from("pg_catalog"),
         cancel,
         &mut report,
-        None,
+        PassHooks::default(),
         async |r: &mut Reader<'_, '_>, _id: &IdentityRow| {
             let mut out: BTreeMap<(&'static str, Oid), Vec<(String, String)>> = BTreeMap::new();
             for (&section, oids) in &by_section {
