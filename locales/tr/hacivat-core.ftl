@@ -1018,6 +1018,7 @@ model-name-has-invisible-chars = Bu ad görünmeyen karakterler içeriyor.
 model-cache-rebuilt = { $reason ->
         [corrupt] Önbellekteki meta veriler bozulmuştu; temizlendi ve yeniden okunuyor.
         [server-changed] Bu bağlantı artık başka bir sunucuya ulaşıyor; önbellekteki meta veriler yeniden okunuyor.
+        [wrong-key] Bu bağlantının önbellekteki meta verilerini koruyan anahtar değişti; önbellek temizlendi ve yeniden okunuyor.
        *[incompatible] Önbellekteki meta veriler farklı bir sürüm tarafından yazılmış; yeniden okunuyor.
     }
 # Review: PO

@@ -1536,10 +1536,11 @@ model-kind-schema-mysql = { $count ->
 model-name-has-invisible-chars = This name contains characters that can't be seen.
 # Notice when a connection's cached metadata could not be used and the cache was started again.
 # Variables:
-#   $reason (String) - why: "corrupt", "server-changed" or "incompatible".
+#   $reason (String) - why: "corrupt", "server-changed", "wrong-key" or "incompatible".
 model-cache-rebuilt = { $reason ->
         [corrupt] The cached metadata was damaged, so it was cleared and is being read again.
         [server-changed] This connection now reaches a different server, so its cached metadata is being read again.
+        [wrong-key] The key that protects this connection's cached metadata has changed, so the cache was cleared and is being read again.
        *[incompatible] The cached metadata was written by a different version, so it is being read again.
     }
 # Strip above the explorer while the connection is offline or not yet connected.

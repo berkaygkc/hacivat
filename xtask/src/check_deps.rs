@@ -185,14 +185,19 @@ const ROPE: &str = "ropey";
 const ROPE_LINE_FEATURES: [&str; 2] = ["unicode_lines", "default"];
 
 // ## m4-t01a-model
-/// The pure DDL crate and what its default-feature graph may not contain (`DdlIsPure`).
+/// The pure DDL crate (`DdlIsPure`), and the one feature that may take it out of pure code.
 const DDL: &str = "hacivat-ddl";
-const DDL_FORBIDDEN: [&str; 5] = [
-    "tokio",
-    "futures",
-    "hacivat-session",
-    "hacivat-introspect",
-    "hacivat-l10n",
+const DDL_APPLY: &str = "apply";
+/// The Hacivat crates `hacivat-ddl` may never reach on any non-`apply` feature.
+const DDL_FORBIDDEN: [&str; 3] = ["hacivat-session", "hacivat-introspect", "hacivat-l10n"];
+/// Async runtimes and executors outside the `tokio*` / `futures*` families (fix round 1, m6).
+const ASYNC_RUNTIMES: [&str; 6] = [
+    "async-std",
+    "smol",
+    "async-executor",
+    "async-global-executor",
+    "async-io",
+    "mio",
 ];
 /// The metadata model and what it may never depend on (`MetaBelowIntrospect`).
 const META: &str = "hacivat-meta";
@@ -202,29 +207,39 @@ const META_FORBIDDEN: [&str; 4] = [
     "hacivat-exec",
     "hacivat-l10n",
 ];
+const EMBEDDED_SYSTEM: &str = "embedded-system";
 /// Introspection and the execution crates it never depends on (`IntrospectNotExec`).
 const INTROSPECT: &str = "hacivat-introspect";
 const EXEC: &str = "hacivat-exec";
 const RESULTS: &str = "hacivat-results";
 /// The one crate (besides the feature's owner) that may enable `apply` / `embedded-system`.
 const APP: &str = "hacivat-app";
+/// Every dependency kind (a root's dev and build edges count for the M4 rules).
+const ALL_KINDS: [DependencyKind; 3] = [
+    DependencyKind::Normal,
+    DependencyKind::Development,
+    DependencyKind::Build,
+];
 
 /// Whether `name` is a driver crate (`hacivat-driver`, `hacivat-driver-pg`, …).
 fn is_driver(name: &str) -> bool {
     name == "hacivat-driver" || name.starts_with("hacivat-driver-")
 }
 
-/// Whether `owner`'s feature `feature` is enabled by `m`: through a declared dependency on
-/// `owner` (any kind) listing it, or through one of `m`'s own `[features]` (`owner/feature`,
-/// `owner?/feature`).
-fn enables_feature(m: &Package, owner: &str, feature: &str) -> bool {
-    m.dependencies
-        .iter()
-        .any(|d| d.name == owner && d.features.iter().any(|f| f == feature))
-        || m.features
-            .values()
-            .flatten()
-            .any(|f| *f == format!("{owner}/{feature}") || *f == format!("{owner}?/{feature}"))
+/// What `hacivat-ddl` may not reach: any `tokio*` or `futures*` crate (runtimes, executors and
+/// their pieces), the other async runtimes, sessions, drivers, introspection and l10n
+/// (fix round 1, m6: a rule, not a list of exact names).
+fn ddl_forbidden(name: &str) -> bool {
+    name.starts_with("tokio")
+        || name == "futures"
+        || name.starts_with("futures-")
+        || ASYNC_RUNTIMES.contains(&name)
+        || DDL_FORBIDDEN.contains(&name)
+        || is_driver(name)
+}
+
+fn meta_forbidden(name: &str) -> bool {
+    META_FORBIDDEN.contains(&name) || is_driver(name)
 }
 
 /// A breadth-first walk that follows every edge kind out of `root` and only normal edges
@@ -258,33 +273,86 @@ fn any_then_normal_path_to(
     None
 }
 
-/// `DdlIsPure`'s walk: `root`'s graph when `root` is built alone on its default features.
+/// How a feature walk starts.
+struct WalkStart<'s> {
+    /// The features turned on at the root (`default` is not implied).
+    features: BTreeSet<String>,
+    /// The edge kinds followed out of the root; beyond it, normal edges only.
+    root_kinds: &'s [DependencyKind],
+    /// A root feature that is never turned on, even when another root feature names it
+    /// (`DdlIsPure`'s `apply`).
+    blocked: Option<&'s str>,
+}
+
+impl<'s> WalkStart<'s> {
+    /// The root with `default` and every feature it declares, through `kinds`.
+    fn all_features(root: &Package, kinds: &'s [DependencyKind], blocked: Option<&'s str>) -> Self {
+        let mut features: BTreeSet<String> = root.features.keys().cloned().collect();
+        features.insert("default".into());
+        if let Some(b) = blocked {
+            features.remove(b);
+        }
+        WalkStart {
+            features,
+            root_kinds: kinds,
+            blocked,
+        }
+    }
+}
+
+/// What a feature walk found.
+struct Walked<'a> {
+    /// The closed feature set of every package reached (its own `[features]` applied).
+    features: HashMap<&'a PackageId, BTreeSet<String>>,
+    /// The path to the first dependency whose package name `bad` accepts, if any.
+    bad_path: Option<Vec<String>>,
+}
+
+/// The M4 rules' walk: features resolved from the manifests, not from the workspace's
+/// unified resolve.
 ///
-/// The workspace resolve unifies features across members (`hacivat-introspect` turns on
-/// `hacivat-meta`'s defaults, so the resolved `hacivat-meta` node has its `tokio` edge), so
-/// this walk resolves features itself from the manifests: a dependency is followed when it
-/// is not optional or a feature enabled on its owner activates it (`dep:x`, `x`, `x/f`),
-/// with the features its edge and the enabling features give it (plus `default` unless the
-/// edge turns default features off). Normal edges only; target-specific edges count (fail
-/// closed). Returns the path to the first package `bad` accepts.
-fn default_feature_path_to(
-    root: &PackageId,
-    edges: &Edges<'_>,
-    pkgs: &HashMap<&PackageId, &Package>,
-    bad: impl Fn(&Package) -> bool,
-) -> Option<Vec<String>> {
-    let mut enabled: HashMap<&PackageId, BTreeSet<String>> = HashMap::new();
-    let mut paths: HashMap<&PackageId, Vec<String>> = HashMap::new();
-    enabled.insert(root, BTreeSet::from(["default".to_string()]));
+/// The unified resolve merges every member's features (`hacivat-introspect` turns on
+/// `hacivat-meta`'s defaults, so the resolved `hacivat-meta` node has its `tokio` edge), and it
+/// has no edge at all for an optional dependency that no member turns on. This walk instead
+/// starts from `start`'s features and follows a dependency when it is not optional or an
+/// enabled feature of its owner activates it (`dep:x`, `x`, `x/f`), with the features its edge
+/// and the enabling features ask (plus `default` unless the edge turns default features off).
+/// Renamed dependencies are matched by their key in `[features]`; target-specific edges count
+/// (fail closed). `bad` is asked of every activated dependency **by name**, so a dependency the
+/// resolve never built is still seen; packages are found through the resolve's edges, or by
+/// name when the resolve has no edge for them. `skip` names packages the walk does not enter.
+fn feature_walk<'a>(
+    root: &'a PackageId,
+    edges: &Edges<'a>,
+    pkgs: &HashMap<&'a PackageId, &'a Package>,
+    start: WalkStart<'_>,
+    skip: impl Fn(&str) -> bool,
+    bad: impl Fn(&str) -> bool,
+) -> Walked<'a> {
+    let by_name = |n: &str| -> Option<&'a PackageId> {
+        pkgs.iter()
+            .find(|(_, p)| p.name.as_str() == n)
+            .map(|(id, _)| *id)
+    };
+    let mut asked_of: HashMap<&'a PackageId, BTreeSet<String>> = HashMap::new();
+    let mut closed: HashMap<&'a PackageId, BTreeSet<String>> = HashMap::new();
+    let mut paths: HashMap<&'a PackageId, Vec<String>> = HashMap::new();
+    let mut bad_path: Option<Vec<String>> = None;
+    asked_of.insert(root, start.features.clone());
     paths.insert(root, Vec::new());
-    let mut queue: VecDeque<&PackageId> = VecDeque::from([root]);
+    let mut queue: VecDeque<&'a PackageId> = VecDeque::from([root]);
     while let Some(id) = queue.pop_front() {
         let Some(pkg) = pkgs.get(id) else {
             continue;
         };
+        let at_root = id == root;
+        let blocked = if at_root { start.blocked } else { None };
         // The feature closure of `pkg`, the optional dependencies it activates and the
         // features it asks of each dependency.
-        let mut on: BTreeSet<String> = enabled.get(id).cloned().unwrap_or_default();
+        let mut on: BTreeSet<String> = asked_of.get(id).cloned().unwrap_or_default();
+        if let Some(b) = blocked {
+            on.remove(b);
+        }
         let mut todo: Vec<String> = on.iter().cloned().collect();
         let mut active: BTreeSet<String> = BTreeSet::new();
         let mut asked: HashMap<String, BTreeSet<String>> = HashMap::new();
@@ -315,7 +383,7 @@ fn default_feature_path_to(
                             .insert(feat.to_string());
                     }
                 } else if pkg.features.contains_key(item) {
-                    if on.insert(item.clone()) {
+                    if Some(item.as_str()) != blocked && on.insert(item.clone()) {
                         todo.push(item.clone());
                     }
                 } else if is_optional_dep(item) {
@@ -333,28 +401,34 @@ fn default_feature_path_to(
                 asked.entry(d).or_default().insert(feat);
             }
         }
+        closed.insert(id, on);
         let path = paths.get(id).cloned().unwrap_or_default();
+        let kinds: &[DependencyKind] = if at_root {
+            start.root_kinds
+        } else {
+            &[DependencyKind::Normal]
+        };
         for d in &pkg.dependencies {
-            if d.kind != DependencyKind::Normal || (d.optional && !active.contains(dep_key(d))) {
+            if !kinds.contains(&d.kind) || (d.optional && !active.contains(dep_key(d))) {
                 continue;
             }
-            let Some(dep_id) = edges
+            let mut via = path.clone();
+            via.push(d.name.clone());
+            if bad_path.is_none() && bad(&d.name) {
+                bad_path = Some(via.clone());
+            }
+            if skip(&d.name) {
+                continue;
+            }
+            let resolved = edges
                 .get(id)
                 .into_iter()
                 .flatten()
                 .map(|(dep_id, _)| *dep_id)
-                .find(|dep_id| pkgs.get(dep_id).is_some_and(|p| p.name.as_str() == d.name))
-            else {
+                .find(|dep_id| pkgs.get(dep_id).is_some_and(|p| p.name == d.name));
+            let Some(dep_id) = resolved.or_else(|| by_name(&d.name)) else {
                 continue;
             };
-            let Some(dep) = pkgs.get(dep_id) else {
-                continue;
-            };
-            let mut via = path.clone();
-            via.push(dep.name.to_string());
-            if bad(dep) {
-                return Some(via);
-            }
             let mut want: BTreeSet<String> = d.features.iter().cloned().collect();
             if d.uses_default_features {
                 want.insert("default".into());
@@ -362,7 +436,7 @@ fn default_feature_path_to(
             if let Some(extra) = asked.get(dep_key(d)) {
                 want.extend(extra.iter().cloned());
             }
-            let have = enabled.entry(dep_id).or_default();
+            let have = asked_of.entry(dep_id).or_default();
             let before = have.len();
             have.extend(want);
             let first = !paths.contains_key(dep_id);
@@ -374,7 +448,41 @@ fn default_feature_path_to(
             }
         }
     }
-    None
+    Walked {
+        features: closed,
+        bad_path,
+    }
+}
+
+/// Whether `root`, built with every feature it declares (dev and build edges included, and not
+/// through `hacivat-app`, the one crate allowed to), turns on `owner`'s `feature`: directly,
+/// through a renamed dependency, through one of its own features (`default` included), or
+/// through an alias feature `owner` declares (fix round 1, I1).
+fn turns_on(
+    root: &Package,
+    edges: &Edges<'_>,
+    pkgs: &HashMap<&PackageId, &Package>,
+    owner: &str,
+    feature: &str,
+) -> bool {
+    let walked = feature_walk(
+        &root.id,
+        edges,
+        pkgs,
+        WalkStart::all_features(root, &ALL_KINDS, None),
+        |n| n == APP,
+        |_| false,
+    );
+    walked
+        .features
+        .iter()
+        .any(|(id, on)| pkgs.get(id).is_some_and(|p| p.name.as_str() == owner) && on.contains(feature))
+        // A declared edge that asks for the feature by name, even one the resolve never built
+        // (an owner that is not in this metadata, or a dormant optional edge).
+        || root
+            .dependencies
+            .iter()
+            .any(|d| d.name == owner && d.features.iter().any(|f| f == feature))
 }
 
 /// The name a dependency is known by inside its owner's `[features]` (its rename, if any).
@@ -595,33 +703,50 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
             );
         }
 
-        // ## m4-t01a-model
+        // ## m4-t01a-model (fix round 1, I1 and I2: feature-resolved from the manifests)
         if name == DDL
-            && let Some(via) = default_feature_path_to(&root.id, &edges, &pkgs, |p| {
-                DDL_FORBIDDEN.contains(&p.name.as_str()) || is_driver(&p.name)
-            })
+            && let Some(via) = feature_walk(
+                &root.id,
+                &edges,
+                &pkgs,
+                WalkStart::all_features(root, &[DependencyKind::Normal], Some(DDL_APPLY)),
+                |_| false,
+                ddl_forbidden,
+            )
+            .bad_path
         {
             add(name, Rule::DdlIsPure, via);
         }
-        if name != APP && name != DDL && enables_feature(root, DDL, "apply") {
+        if name != APP && name != DDL && turns_on(root, &edges, &pkgs, DDL, DDL_APPLY) {
             add(
                 name,
                 Rule::DdlApplyOnlyFromApp,
-                vec![format!("{DDL}/apply")],
+                vec![format!("{DDL}/{DDL_APPLY}")],
             );
         }
-        if name == META
-            && let Some(via) = any_then_normal_path_to(&root.id, &edges, &pkgs, |p| {
-                META_FORBIDDEN.contains(&p.name.as_str()) || is_driver(&p.name)
-            })
-        {
-            add(name, Rule::MetaBelowIntrospect, via);
+        if name == META {
+            // Any declared edge, optional or not, of any kind; then the all-features graph.
+            for d in root.dependencies.iter().filter(|d| meta_forbidden(&d.name)) {
+                add(name, Rule::MetaBelowIntrospect, vec![d.name.clone()]);
+            }
+            if let Some(via) = feature_walk(
+                &root.id,
+                &edges,
+                &pkgs,
+                WalkStart::all_features(root, &ALL_KINDS, None),
+                |_| false,
+                meta_forbidden,
+            )
+            .bad_path
+            {
+                add(name, Rule::MetaBelowIntrospect, via);
+            }
         }
-        if name != APP && name != META && enables_feature(root, META, "embedded-system") {
+        if name != APP && name != META && turns_on(root, &edges, &pkgs, META, EMBEDDED_SYSTEM) {
             add(
                 name,
                 Rule::EmbeddedSystemOnlyFromApp,
-                vec![format!("{META}/embedded-system")],
+                vec![format!("{META}/{EMBEDDED_SYSTEM}")],
             );
         }
         if name == INTROSPECT {
@@ -768,7 +893,8 @@ pub fn tree_violations(workspace: &Path) -> Vec<Violation> {
         .collect()
 }
 
-/// Every `.rs` file under `dir`, recursively (the source rules' walker).
+/// Every `.rs` file under `dir`, recursively (the source rules' walker). `target/` directories
+/// (build output, e.g. `fuzz/target`) are skipped.
 fn rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -776,7 +902,9 @@ fn rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
-            rs_files(&p, out);
+            if e.file_name() != "target" {
+                rs_files(&p, out);
+            }
         } else if p.extension().is_some_and(|x| x == "rs") {
             out.push(p);
         }
@@ -784,62 +912,339 @@ fn rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
 }
 
 // ## m4-t01a-model
-/// The token only the query packs may name (`MetaQueryOnlyFromPacks`), and where.
-const META_QUERY_NEW: &str = "MetaQuery::new";
+/// Where `MetaQuery::new` may be named (`MetaQueryOnlyFromPacks`).
+const META_QUERY: &str = "MetaQuery";
 const META_QUERY_DIR: &str = "crates/core/hacivat-introspect/src/pack/";
 const META_QUERY_DEF: &str = "crates/core/hacivat-session/src/meta.rs";
 /// The shots-only find hold (`HoldCountsTestOnly`) and its definition.
-const HOLD_COUNTS: &str = "hold_counts(";
+const HOLD_COUNTS: &str = "hold_counts";
 const HOLD_COUNTS_DEF: &str = "crates/ui/hacivat-ui-editor/src/find.rs";
+/// How deep `#[path]` / `include!` targets are followed.
+const MAX_INCLUDE_DEPTH: usize = 4;
 
-/// The M4 source rules over every `crates/<layer>/<crate>/` (the `tree_violations` walker):
-/// `MetaQueryOnlyFromPacks` (tests under a crate's `tests/` exempt) and `HoldCountsTestOnly`
-/// (only `src/` files). Comment lines (`//`, `///`, `//!`) are not code and are skipped. One
-/// violation per offending file, `via` its workspace-relative path.
+/// One token of Rust source as the source rules see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SrcTok {
+    Ident(String),
+    Punct(char),
+    /// A string literal's text (raw), kept only for `#[path]` and `include!` targets.
+    Str(String),
+}
+
+/// `src` as tokens, with comments (line, nested block, doc), whitespace, char literals,
+/// lifetimes and numbers dropped, so `MetaQuery :: new`, a path split over lines or a comment
+/// in the middle collapse to the same tokens; string contents never match an identifier.
+fn src_tokens(src: &str) -> Vec<SrcTok> {
+    let c: Vec<char> = src.chars().collect();
+    let at = |i: usize| c.get(i).copied().unwrap_or('\0');
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < c.len() {
+        let ch = c[i];
+        if ch.is_whitespace() {
+            i += 1;
+        } else if ch == '/' && at(i + 1) == '/' {
+            while i < c.len() && c[i] != '\n' {
+                i += 1;
+            }
+        } else if ch == '/' && at(i + 1) == '*' {
+            let mut depth = 1;
+            i += 2;
+            while i < c.len() && depth > 0 {
+                if c[i] == '/' && at(i + 1) == '*' {
+                    depth += 1;
+                    i += 2;
+                } else if c[i] == '*' && at(i + 1) == '/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if ch == 'r'
+            && (at(i + 1) == '"'
+                || (at(i + 1) == '#' && {
+                    let mut j = i + 1;
+                    while at(j) == '#' {
+                        j += 1;
+                    }
+                    at(j) == '"'
+                }))
+        {
+            let mut j = i + 1;
+            let mut hashes = 0;
+            while at(j) == '#' {
+                hashes += 1;
+                j += 1;
+            }
+            j += 1;
+            let begin = j;
+            loop {
+                if j >= c.len() {
+                    break;
+                }
+                if c[j] == '"' && (0..hashes).all(|k| at(j + 1 + k) == '#') {
+                    break;
+                }
+                j += 1;
+            }
+            out.push(SrcTok::Str(c[begin..j.min(c.len())].iter().collect()));
+            i = j + 1 + hashes;
+        } else if ch == '"' {
+            let mut j = i + 1;
+            let begin = j;
+            while j < c.len() && c[j] != '"' {
+                j += if c[j] == '\\' { 2 } else { 1 };
+            }
+            out.push(SrcTok::Str(c[begin..j.min(c.len())].iter().collect()));
+            i = j + 1;
+        } else if ch == '\'' {
+            if at(i + 1) == '\\' {
+                let mut j = i + 2;
+                while j < c.len() && c[j] != '\'' {
+                    j += 1;
+                }
+                i = j + 1;
+            } else if at(i + 2) == '\'' {
+                i += 3;
+            } else {
+                i += 1;
+            }
+        } else if ch.is_alphabetic() || ch == '_' {
+            let begin = i;
+            while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') {
+                i += 1;
+            }
+            out.push(SrcTok::Ident(c[begin..i].iter().collect()));
+        } else if ch.is_ascii_digit() {
+            while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_' || c[i] == '.') {
+                i += 1;
+            }
+        } else {
+            out.push(SrcTok::Punct(ch));
+            i += 1;
+        }
+    }
+    out
+}
+
+fn tok_ident(t: &[SrcTok], i: usize, name: &str) -> bool {
+    matches!(t.get(i), Some(SrcTok::Ident(s)) if s == name)
+}
+
+fn tok_punct(t: &[SrcTok], i: usize, p: char) -> bool {
+    t.get(i) == Some(&SrcTok::Punct(p))
+}
+
+/// Whether the tokens build a `MetaQuery` or open a way to: `MetaQuery::new`,
+/// `<…MetaQuery>::new`, an alias (`MetaQuery as X`, `type X = …MetaQuery…;`) or an inherent
+/// `impl MetaQuery` (another constructor).
+fn builds_meta_query(t: &[SrcTok]) -> bool {
+    (0..t.len()).any(|i| {
+        if tok_ident(t, i, META_QUERY) {
+            let j = if tok_punct(t, i + 1, '>') {
+                i + 2
+            } else {
+                i + 1
+            };
+            (tok_punct(t, j, ':') && tok_punct(t, j + 1, ':') && tok_ident(t, j + 2, "new"))
+                || tok_ident(t, i + 1, "as")
+                || (i > 0 && tok_ident(t, i - 1, "impl"))
+        } else if tok_ident(t, i, "type") {
+            t[i + 1..]
+                .iter()
+                .take_while(|x| **x != SrcTok::Punct(';') && **x != SrcTok::Punct('{'))
+                .any(|x| *x == SrcTok::Ident(META_QUERY.into()))
+        } else {
+            false
+        }
+    })
+}
+
+/// Whether the tokens name `hold_counts` at all (a call, an alias, a function pointer).
+fn names_hold_counts(t: &[SrcTok]) -> bool {
+    t.iter().any(|x| *x == SrcTok::Ident(HOLD_COUNTS.into()))
+}
+
+/// The `#[path = "…"]` and literal `include!("…")` targets of `t`.
+fn module_targets(t: &[SrcTok]) -> (Vec<String>, Vec<String>) {
+    let mut paths = Vec::new();
+    let mut includes = Vec::new();
+    for i in 0..t.len() {
+        if tok_punct(t, i, '#')
+            && tok_punct(t, i + 1, '[')
+            && tok_ident(t, i + 2, "path")
+            && tok_punct(t, i + 3, '=')
+            && let Some(SrcTok::Str(p)) = t.get(i + 4)
+        {
+            paths.push(p.clone());
+        }
+        if tok_ident(t, i, "include")
+            && tok_punct(t, i + 1, '!')
+            && tok_punct(t, i + 2, '(')
+            && let Some(SrcTok::Str(p)) = t.get(i + 3)
+        {
+            includes.push(p.clone());
+        }
+    }
+    (paths, includes)
+}
+
+/// `rel` joined to `dir` lexically (`..` and `.` folded), with `/` separators.
+fn join_lexical(dir: &Path, rel: &str) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for comp in dir.join(rel).components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The tokens a file contributes to its crate: its own, plus (recursively) those of the files
+/// it pulls in with `#[path]` or a literal `include!`. Also returns the `include!` targets that
+/// are not `.rs` files and the `#[path]` targets, both resolved.
+fn effective_tokens(
+    file: &Path,
+    src: &str,
+) -> (
+    Vec<SrcTok>,
+    Vec<std::path::PathBuf>,
+    Vec<std::path::PathBuf>,
+) {
+    let mut tokens = Vec::new();
+    let mut non_rs = Vec::new();
+    let mut path_targets = Vec::new();
+    let mut seen: BTreeSet<std::path::PathBuf> = BTreeSet::new();
+    let mut todo: Vec<(std::path::PathBuf, String, usize)> =
+        vec![(file.to_path_buf(), src.to_string(), 0)];
+    while let Some((f, text, depth)) = todo.pop() {
+        if !seen.insert(f.clone()) {
+            continue;
+        }
+        let t = src_tokens(&text);
+        let (paths, includes) = module_targets(&t);
+        tokens.extend(t);
+        let dir = f.parent().unwrap_or(Path::new("")).to_path_buf();
+        for (target, is_include) in paths
+            .iter()
+            .map(|p| (p, false))
+            .chain(includes.iter().map(|p| (p, true)))
+        {
+            let resolved = join_lexical(&dir, target);
+            if is_include && resolved.extension().is_none_or(|x| x != "rs") {
+                non_rs.push(resolved.clone());
+            }
+            if !is_include && depth == 0 {
+                path_targets.push(resolved.clone());
+            }
+            if depth < MAX_INCLUDE_DEPTH
+                && let Ok(more) = std::fs::read_to_string(&resolved)
+            {
+                todo.push((resolved, more, depth + 1));
+            }
+        }
+    }
+    (tokens, non_rs, path_targets)
+}
+
+/// The roots the source rules walk: every `crates/<layer>/<crate>/` (as `(name, dir, prefix)`
+/// with `prefix` its workspace-relative directory), plus `fuzz/` and `xtask/` (fix round 1, I3:
+/// the fuzz workspace links `hacivat-introspect`, so `hacivat-session`).
+fn source_roots(workspace: &Path) -> Vec<(String, std::path::PathBuf, String)> {
+    let mut roots = Vec::new();
+    if let Ok(layers) = std::fs::read_dir(workspace.join("crates")) {
+        for layer in layers.flatten() {
+            let Ok(crates) = std::fs::read_dir(layer.path()) else {
+                continue;
+            };
+            for krate in crates.flatten() {
+                let name = krate.file_name().to_string_lossy().into_owned();
+                let prefix = format!("crates/{}/{name}/", layer.file_name().to_string_lossy());
+                roots.push((name, krate.path(), prefix));
+            }
+        }
+    }
+    for extra in ["fuzz", "xtask"] {
+        if workspace.join(extra).is_dir() {
+            roots.push((
+                extra.to_string(),
+                workspace.join(extra),
+                format!("{extra}/"),
+            ));
+        }
+    }
+    roots
+}
+
+/// The M4 source rules (fix round 1, I3: token-based, not a line grep):
+///
+/// - `MetaQueryOnlyFromPacks` over every crate, `fuzz/` and `xtask/`: no file outside
+///   `hacivat-introspect/src/pack/**`, `hacivat-session/src/meta.rs` and a crate's `tests/`
+///   builds a `MetaQuery` ([`builds_meta_query`]), counting the files it pulls in with
+///   `#[path]` or `include!`; no `src/` file has a `#[path]` that leaves its crate's `src/`, and
+///   no such file `include!`s a file that is not `.rs`.
+/// - `HoldCountsTestOnly` over every crate's `src/`: no file but the definition names
+///   `hold_counts` (same inclusion rule).
+///
+/// Comments, whitespace and string contents never match. One violation per finding, `via` the
+/// workspace-relative file (and what it did, for the `#[path]`/`include!` refusals).
 pub fn source_violations(workspace: &Path) -> Vec<Violation> {
     let mut found: BTreeSet<(String, Rule, String)> = BTreeSet::new();
-    let Ok(layers) = std::fs::read_dir(workspace.join("crates")) else {
-        return Vec::new();
+    let rel_of = |p: &Path| {
+        p.strip_prefix(workspace)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .replace('\\', "/")
     };
-    for layer in layers.flatten() {
-        let Ok(crates) = std::fs::read_dir(layer.path()) else {
-            continue;
-        };
-        for krate in crates.flatten() {
-            let name = krate.file_name().to_string_lossy().into_owned();
-            let mut files = Vec::new();
-            rs_files(&krate.path(), &mut files);
-            for f in files {
-                let rel = f
-                    .strip_prefix(workspace)
-                    .unwrap_or(&f)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let in_crate = rel
-                    .strip_prefix(&format!(
-                        "crates/{}/{name}/",
-                        layer.file_name().to_string_lossy()
-                    ))
-                    .unwrap_or("")
-                    .to_string();
-                let Ok(src) = std::fs::read_to_string(&f) else {
-                    continue;
-                };
-                let names = |token: &str| {
-                    src.lines().any(|l| {
-                        let l = l.trim_start();
-                        !l.starts_with("//") && l.contains(token)
-                    })
-                };
-                let meta_query_ok = rel.starts_with(META_QUERY_DIR)
+    for (name, dir, prefix) in source_roots(workspace) {
+        let is_crate = prefix.starts_with("crates/");
+        let mut files = Vec::new();
+        rs_files(&dir, &mut files);
+        for f in files {
+            let rel = rel_of(&f);
+            let in_crate = rel.strip_prefix(&prefix).unwrap_or("").to_string();
+            let in_src = is_crate && in_crate.starts_with("src/");
+            let meta_query_ok = is_crate
+                && (rel.starts_with(META_QUERY_DIR)
                     || rel == META_QUERY_DEF
-                    || in_crate.starts_with("tests/");
-                if !meta_query_ok && names(META_QUERY_NEW) {
+                    || in_crate.starts_with("tests/"));
+            let hold_counts_checked = in_src && rel != HOLD_COUNTS_DEF;
+            if meta_query_ok && !hold_counts_checked {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&f) else {
+                continue;
+            };
+            let (tokens, non_rs, path_targets) = effective_tokens(&f, &src);
+            if !meta_query_ok {
+                if builds_meta_query(&tokens) {
                     found.insert((name.clone(), Rule::MetaQueryOnlyFromPacks, rel.clone()));
                 }
-                if in_crate.starts_with("src/") && rel != HOLD_COUNTS_DEF && names(HOLD_COUNTS) {
-                    found.insert((name.clone(), Rule::HoldCountsTestOnly, rel.clone()));
+                for t in &non_rs {
+                    found.insert((
+                        name.clone(),
+                        Rule::MetaQueryOnlyFromPacks,
+                        format!("{rel}: include! of a non-.rs file {}", rel_of(t)),
+                    ));
                 }
+                if in_src {
+                    let src_dir = dir.join("src");
+                    for t in path_targets.iter().filter(|t| !t.starts_with(&src_dir)) {
+                        found.insert((
+                            name.clone(),
+                            Rule::MetaQueryOnlyFromPacks,
+                            format!("{rel}: #[path] outside src/ {}", rel_of(t)),
+                        ));
+                    }
+                }
+            }
+            if hold_counts_checked && names_hold_counts(&tokens) {
+                found.insert((name.clone(), Rule::HoldCountsTestOnly, rel.clone()));
             }
         }
     }
@@ -907,6 +1312,8 @@ mod tests {
         default_features: bool,
         // ## m4-t01a-model
         optional: bool,
+        /// `package = …` renames (fix round 1, I1): the dependency's key in `[features]`.
+        rename: Option<String>,
     }
 
     fn dep(name: &str, kind: DepKind, features: &[&str], source: Option<&str>) -> Dep {
@@ -917,6 +1324,7 @@ mod tests {
             source: source.map(|s| format!("git+{s}?rev=abc#abc")),
             default_features: true,
             optional: false,
+            rename: None,
         }
     }
 
@@ -947,7 +1355,7 @@ mod tests {
         let dependency = |d: &Dep| {
             json!({
                 "name": d.name, "source": d.source, "req": "*", "kind": kind_json(&d.kind),
-                "rename": null, "optional": d.optional, "uses_default_features": d.default_features,
+                "rename": d.rename, "optional": d.optional, "uses_default_features": d.default_features,
                 "features": d.features, "target": null, "registry": null
             })
         };
@@ -2122,6 +2530,373 @@ mod tests {
             source_violations(&workspace_root()).is_empty(),
             "{:?}",
             source_violations(&workspace_root())
+        );
+    }
+
+    // ## m4-t01a-model (fix round 1): the reviewer's hostile forms, one test each.
+
+    fn renamed(name: &str, key: &str, features: &[&str]) -> Dep {
+        Dep {
+            rename: Some(key.into()),
+            ..dep(name, DepKind::Normal, features, None)
+        }
+    }
+
+    /// Drops every resolve edge, as for an optional dependency no member turns on: the cargo
+    /// resolve then has no edge for it, and only the manifests show it.
+    fn without_resolve_edges(mut md: Metadata) -> Metadata {
+        for node in &mut md.resolve.as_mut().unwrap().nodes {
+            node.deps.clear();
+            node.dependencies.clear();
+        }
+        md
+    }
+
+    /// I1 / H4: a renamed `hacivat-meta` whose `embedded-system` comes on through `default`.
+    #[test]
+    fn embedded_system_through_a_renamed_dependency_and_default_is_refused() {
+        let md = metadata(vec![with_features(
+            member(
+                "hacivat-introspect",
+                "crates/core",
+                vec![renamed("hacivat-meta", "meta", &[])],
+            ),
+            &[("default", &["snap"]), ("snap", &["meta/embedded-system"])],
+        )]);
+        assert_eq!(
+            rule_of(&md, "hacivat-introspect"),
+            Rule::EmbeddedSystemOnlyFromApp
+        );
+        // Weak form and `dep:` plus a renamed feature list: same.
+        let weak = metadata(vec![with_features(
+            member(
+                "hacivat-exec",
+                "crates/core",
+                vec![Dep {
+                    optional: true,
+                    ..renamed("hacivat-meta", "m", &["embedded-system"])
+                }],
+            ),
+            &[("snapshots", &["dep:m"])],
+        )]);
+        assert_eq!(
+            rule_of(&weak, "hacivat-exec"),
+            Rule::EmbeddedSystemOnlyFromApp
+        );
+    }
+
+    /// I1 / H4b: an alias feature declared in the owner (`snapshots = ["embedded-system"]`),
+    /// enabled by name by another member.
+    #[test]
+    fn embedded_system_through_an_owner_alias_feature_is_refused() {
+        let md = metadata(vec![
+            with_features(
+                member("hacivat-meta", "crates/core", vec![]),
+                &[
+                    ("snapshots", &["embedded-system"]),
+                    ("embedded-system", &[]),
+                ],
+            ),
+            member(
+                "hacivat-introspect",
+                "crates/core",
+                vec![no_defaults("hacivat-meta", &["snapshots"])],
+            ),
+        ]);
+        assert_eq!(
+            rule_of(&md, "hacivat-introspect"),
+            Rule::EmbeddedSystemOnlyFromApp
+        );
+        assert!(for_crate(&md, "hacivat-meta").is_empty());
+        // The owner's `default` naming the alias counts for a user that keeps defaults on.
+        let by_default = metadata(vec![
+            with_features(
+                member("hacivat-meta", "crates/core", vec![]),
+                &[
+                    ("default", &["snapshots"]),
+                    ("snapshots", &["embedded-system"]),
+                    ("embedded-system", &[]),
+                ],
+            ),
+            member(
+                "hacivat-introspect",
+                "crates/core",
+                vec![dep("hacivat-meta", DepKind::Normal, &[], None)],
+            ),
+        ]);
+        assert_eq!(
+            rule_of(&by_default, "hacivat-introspect"),
+            Rule::EmbeddedSystemOnlyFromApp
+        );
+        // A crate that reaches the feature only through `hacivat-app` (the binary) is clean.
+        let bin = metadata(vec![
+            member(
+                "hacivat-app",
+                "crates/app",
+                vec![dep(
+                    "hacivat-meta",
+                    DepKind::Normal,
+                    &["embedded-system"],
+                    None,
+                )],
+            ),
+            member("hacivat", "crates/bin", normal(&["hacivat-app"])),
+        ]);
+        assert!(violations(&bin, &lints_ok).is_empty());
+    }
+
+    /// I1 / H5: a renamed `hacivat-ddl` whose `apply` comes on through `default`.
+    #[test]
+    fn ddl_apply_through_a_renamed_dependency_and_default_is_refused() {
+        let md = metadata(vec![with_features(
+            member(
+                "hacivat-exec",
+                "crates/core",
+                vec![renamed("hacivat-ddl", "d", &[])],
+            ),
+            &[("default", &["mig"]), ("mig", &["d/apply"])],
+        )]);
+        assert_eq!(rule_of(&md, "hacivat-exec"), Rule::DdlApplyOnlyFromApp);
+        // Through an alias feature of the owner.
+        let alias = metadata(vec![
+            with_features(
+                member("hacivat-ddl", "crates/core", vec![]),
+                &[("migrate", &["apply"]), ("apply", &[])],
+            ),
+            member(
+                "hacivat-session",
+                "crates/core",
+                vec![dep("hacivat-ddl", DepKind::Normal, &["migrate"], None)],
+            ),
+        ]);
+        assert_eq!(
+            rule_of(&alias, "hacivat-session"),
+            Rule::DdlApplyOnlyFromApp
+        );
+    }
+
+    /// I2 / H2d: a non-default, non-`apply` feature that pulls a runtime.
+    #[test]
+    fn ddl_feature_other_than_apply_reaching_tokio_is_refused() {
+        let md = metadata(vec![with_features(
+            member("hacivat-ddl", "crates/core", vec![optional("tokio")]),
+            &[("async", &["dep:tokio"]), ("apply", &[])],
+        )]);
+        let v = for_crate(&md, "hacivat-ddl");
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].rule, Rule::DdlIsPure);
+        assert_eq!(v[0].via, ["tokio"]);
+        // `apply` itself may (R-M4-35), also when another feature only names `apply`.
+        let apply = metadata(vec![with_features(
+            member("hacivat-ddl", "crates/core", vec![optional("tokio")]),
+            &[("apply", &["dep:tokio"]), ("full", &["apply"])],
+        )]);
+        assert!(violations(&apply, &lints_ok).is_empty());
+        // Dormant in the workspace resolve (no edge) is still seen.
+        assert_eq!(
+            rule_of(&without_resolve_edges(md), "hacivat-ddl"),
+            Rule::DdlIsPure
+        );
+    }
+
+    /// m6 / H2c: executor and runtime crates by rule, not by exact name.
+    #[test]
+    fn ddl_reaching_an_executor_is_refused() {
+        for bad in [
+            "futures-executor",
+            "futures-util",
+            "tokio-util",
+            "async-std",
+            "smol",
+            "async-executor",
+        ] {
+            let md = fx_at(&[("hacivat-ddl", "crates/core", &[bad])]);
+            assert_eq!(rule_of(&md, "hacivat-ddl"), Rule::DdlIsPure, "{bad}");
+        }
+        let ok = fx_at(&[("hacivat-ddl", "crates/core", &["smallvec", "sql-ident"])]);
+        assert!(violations(&ok, &lints_ok).is_empty());
+    }
+
+    /// I2 / H3: an optional `hacivat-session` behind a feature nothing turns on (no resolve
+    /// edge), and the same two hops down.
+    #[test]
+    fn meta_dormant_optional_dependency_is_refused() {
+        let md = without_resolve_edges(metadata(vec![with_features(
+            member(
+                "hacivat-meta",
+                "crates/core",
+                vec![optional("hacivat-session")],
+            ),
+            &[("live", &["dep:hacivat-session"])],
+        )]));
+        assert_eq!(rule_of(&md, "hacivat-meta"), Rule::MetaBelowIntrospect);
+        let deep = without_resolve_edges(metadata(vec![
+            with_features(
+                member("hacivat-meta", "crates/core", vec![optional("helper")]),
+                &[("x", &["dep:helper"])],
+            ),
+            with_features(
+                member("helper", "crates/core", vec![optional("hacivat-driver-pg")]),
+                &[("default", &["pg"]), ("pg", &["dep:hacivat-driver-pg"])],
+            ),
+        ]));
+        let v = for_crate(&deep, "hacivat-meta");
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].via, ["helper", "hacivat-driver-pg"]);
+    }
+
+    fn meta_query_findings(files: &[(&str, &str)]) -> Vec<Violation> {
+        let dir = source_tree(files);
+        source_violations(dir.path())
+            .into_iter()
+            .filter(|v| v.rule == Rule::MetaQueryOnlyFromPacks)
+            .collect()
+    }
+
+    const ENGINE: &str = "crates/core/hacivat-introspect/src/engine/mod.rs";
+
+    #[test]
+    fn meta_query_alias_with_use_as_is_refused() {
+        let v = meta_query_findings(&[(
+            ENGINE,
+            "use hacivat_session::meta::MetaQuery as Q;\nfn f() { Q::new(t, b); }\n",
+        )]);
+        assert_eq!(names(&v), ["hacivat-introspect"]);
+    }
+
+    #[test]
+    fn meta_query_qualified_path_form_is_refused() {
+        let v = meta_query_findings(&[(
+            ENGINE,
+            "fn f() { <hacivat_session::meta::MetaQuery>::new(t, b); }\n",
+        )]);
+        assert_eq!(names(&v), ["hacivat-introspect"]);
+    }
+
+    #[test]
+    fn meta_query_new_with_spaces_is_refused() {
+        let v = meta_query_findings(&[(ENGINE, "fn f() { MetaQuery :: new(t, b); }\n")]);
+        assert_eq!(names(&v), ["hacivat-introspect"]);
+    }
+
+    #[test]
+    fn meta_query_new_split_over_lines_and_comments_is_refused() {
+        let v =
+            meta_query_findings(&[(ENGINE, "fn f() { MetaQuery::\n    /* x */ new(t, b); }\n")]);
+        assert_eq!(names(&v), ["hacivat-introspect"]);
+    }
+
+    #[test]
+    fn meta_query_type_alias_is_refused() {
+        let v = meta_query_findings(&[(
+            ENGINE,
+            "type M = hacivat_session::meta::MetaQuery;\nfn f() { M::new(t, b); }\n",
+        )]);
+        assert_eq!(names(&v), ["hacivat-introspect"]);
+    }
+
+    /// `#[path]` from `src/` into the exempt `tests/`: refused as an escape, and the target's
+    /// code counts as the library's.
+    #[test]
+    fn meta_query_through_path_into_tests_is_refused() {
+        let v = meta_query_findings(&[
+            (
+                "crates/core/hacivat-introspect/src/lib.rs",
+                "#[path = \"../tests/evil_impl.rs\"]\nmod evil;\n",
+            ),
+            (
+                "crates/core/hacivat-introspect/tests/evil_impl.rs",
+                "pub fn q() { MetaQuery::new(t, b) }\n",
+            ),
+        ]);
+        let via: Vec<&str> = v.iter().map(|x| x.via[0].as_str()).collect();
+        assert_eq!(
+            via,
+            [
+                "crates/core/hacivat-introspect/src/lib.rs",
+                "crates/core/hacivat-introspect/src/lib.rs: #[path] outside src/ crates/core/hacivat-introspect/tests/evil_impl.rs",
+            ]
+        );
+    }
+
+    #[test]
+    fn meta_query_through_include_of_a_non_rs_file_is_refused() {
+        let v = meta_query_findings(&[
+            (ENGINE, "include!(\"raw.inc\");\n"),
+            (
+                "crates/core/hacivat-introspect/src/engine/raw.inc",
+                "fn q() { MetaQuery::new(t, b) }\n",
+            ),
+        ]);
+        let via: Vec<&str> = v.iter().map(|x| x.via[0].as_str()).collect();
+        assert_eq!(
+            via,
+            [
+                ENGINE,
+                "crates/core/hacivat-introspect/src/engine/mod.rs: include! of a non-.rs file crates/core/hacivat-introspect/src/engine/raw.inc",
+            ]
+        );
+    }
+
+    #[test]
+    fn meta_query_in_fuzz_and_xtask_is_refused() {
+        let v = meta_query_findings(&[
+            (
+                "fuzz/fuzz_targets/evil.rs",
+                "fuzz_target!(|d: &[u8]| { let _ = MetaQuery::new(d, vec![]); });\n",
+            ),
+            ("xtask/src/evil.rs", "fn f() { MetaQuery::new(t, b); }\n"),
+            // Strings never match (xtask's own rule tests write them).
+            (
+                "xtask/src/rules.rs",
+                "const T: &str = \"MetaQuery::new\";\n",
+            ),
+        ]);
+        assert_eq!(names(&v), ["fuzz", "xtask"]);
+    }
+
+    #[test]
+    fn hold_counts_alias_is_refused() {
+        let dir = source_tree(&[(
+            "crates/app/hacivat-app/src/exec_ui/run.rs",
+            "use hacivat_ui_editor::find::hold_counts as hc;\nfn f() { hc(cx); }\n",
+        )]);
+        let v: Vec<_> = source_violations(dir.path())
+            .into_iter()
+            .filter(|v| v.rule == Rule::HoldCountsTestOnly)
+            .collect();
+        assert_eq!(names(&v), ["hacivat-app"]);
+    }
+
+    /// What the scan must leave alone: strings, comments, generated `include!`s, `#[path]`
+    /// inside `src/`, and a fuzz `#[path]` into a clean test helper.
+    #[test]
+    fn source_rules_leave_strings_comments_and_clean_includes_alone() {
+        let dir = source_tree(&[
+            (
+                ENGINE,
+                "// MetaQuery::new\n/// MetaQuery::new\nconst S: &str = \"MetaQuery::new\";\n\
+                 const R: &str = r#\"MetaQuery::new\"#;\nconst C: char = '\"';\n\
+                 include!(concat!(env!(\"OUT_DIR\"), \"/ids.rs\"));\n\
+                 #[path = \"generated/ids.rs\"]\nmod ids;\nfn f<'a>(x: &'a MetaQuery) {}\n",
+            ),
+            (
+                "crates/core/hacivat-introspect/src/engine/generated/ids.rs",
+                "pub const A: u8 = 1;\n",
+            ),
+            (
+                "fuzz/fuzz_targets/relex.rs",
+                "#[path = \"../../crates/sql/sql-lexer/tests/support/edits.rs\"]\nmod edits;\n",
+            ),
+            (
+                "crates/sql/sql-lexer/tests/support/edits.rs",
+                "pub fn edit() {}\n",
+            ),
+        ]);
+        assert!(
+            source_violations(dir.path()).is_empty(),
+            "{:?}",
+            source_violations(dir.path())
         );
     }
 }

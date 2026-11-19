@@ -47,22 +47,38 @@ pub fn check_dir(dir: &Path) -> CheckOutcome {
         Ok(t) => t,
         Err(e) => return CheckOutcome::Invalid(format!("{MANIFEST}: {e}")),
     };
-    let listed = table
-        .get("snapshot")
-        .and_then(|s| s.as_array())
-        .is_some_and(|a| !a.is_empty());
-    let files = std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .any(|e| e.file_name().to_string_lossy().ends_with(SNAPSHOT_SUFFIX))
-        })
-        .unwrap_or(false);
-    if listed || files {
+    // Fix round 1 (m8): an empty manifest holds `format` and `zstd_level` only; any other key
+    // (a `[snapshot.x]` table, an empty `snapshot = []`) is not "empty".
+    if let Some(key) = table
+        .keys()
+        .find(|k| !matches!(k.as_str(), "format" | "zstd_level"))
+    {
+        return if key == "snapshot" {
+            CheckOutcome::NotImplemented
+        } else {
+            CheckOutcome::Invalid(format!("{MANIFEST}: unexpected key `{key}`"))
+        };
+    }
+    if holds_snapshot(dir) {
         CheckOutcome::NotImplemented
     } else {
         CheckOutcome::Empty
     }
+}
+
+/// Whether `dir` or any directory under it holds a snapshot file.
+fn holds_snapshot(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let p = e.path();
+        if p.is_dir() {
+            holds_snapshot(&p)
+        } else {
+            e.file_name().to_string_lossy().ends_with(SNAPSHOT_SUFFIX)
+        }
+    })
 }
 
 pub fn run() -> ExitCode {
@@ -129,5 +145,24 @@ mod tests {
             check_dir(&dir.path().join("missing")),
             CheckOutcome::Invalid(_)
         ));
+    }
+
+    /// Fix round 1 (m8): a snapshot table, an unknown key or a snapshot in a subdirectory is
+    /// not an empty set.
+    #[test]
+    fn check_sees_snapshot_tables_unknown_keys_and_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join(MANIFEST);
+        std::fs::write(&manifest, "format = 1\n\n[snapshot.pg17]\nfile = \"x\"\n").unwrap();
+        assert_eq!(check_dir(dir.path()), CheckOutcome::NotImplemented);
+        std::fs::write(&manifest, "format = 1\nsnapshot = []\n").unwrap();
+        assert_eq!(check_dir(dir.path()), CheckOutcome::NotImplemented);
+        std::fs::write(&manifest, "format = 1\nextra = true\n").unwrap();
+        assert!(matches!(check_dir(dir.path()), CheckOutcome::Invalid(_)));
+        std::fs::write(&manifest, "format = 1\nzstd_level = 19\n").unwrap();
+        assert_eq!(check_dir(dir.path()), CheckOutcome::Empty);
+        std::fs::create_dir(dir.path().join("pg")).unwrap();
+        std::fs::write(dir.path().join("pg/x.hvsnap.zst"), b"x").unwrap();
+        assert_eq!(check_dir(dir.path()), CheckOutcome::NotImplemented);
     }
 }

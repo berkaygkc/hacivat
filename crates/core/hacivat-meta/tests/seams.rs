@@ -241,3 +241,53 @@ fn kind_codes_are_unique_and_match_the_spike_table() {
     // A code this build does not know is not a kind (the decoder maps it to `Unknown`).
     assert_eq!(ObjectKind::from_code(9999), None);
 }
+
+/// Fix round 1 (m1): the Hangul fillers and every other default-ignorable or filler code point
+/// are flagged; ordinary Turkish and ASCII names are not.
+#[test]
+fn invisible_chars_cover_default_ignorables_and_fillers() {
+    use hacivat_meta::name::has_invisible_chars;
+    for c in [
+        '\u{3164}',
+        '\u{115F}',
+        '\u{1160}',
+        '\u{FFA0}',
+        '\u{00AD}',
+        '\u{034F}',
+        '\u{061C}',
+        '\u{180E}',
+        '\u{200B}',
+        '\u{200D}',
+        '\u{200E}',
+        '\u{202E}',
+        '\u{2066}',
+        '\u{2069}',
+        '\u{2060}',
+        '\u{FE0F}',
+        '\u{FEFF}',
+        '\u{1D173}',
+        '\u{E0041}',
+        '\u{2800}',
+        '\u{FFF9}',
+        '\u{0600}',
+        '\u{0007}',
+        '\u{009B}',
+    ] {
+        assert!(
+            has_invisible_chars(&format!("a{c}b")),
+            "U+{:04X}",
+            u32::from(c)
+        );
+    }
+    for name in [
+        "müşteri",
+        "MÜŞTERİ",
+        "ılık",
+        "order items",
+        "t_1",
+        "€uro",
+        "日本",
+    ] {
+        assert!(!has_invisible_chars(name), "{name}");
+    }
+}

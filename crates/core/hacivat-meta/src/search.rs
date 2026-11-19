@@ -36,7 +36,8 @@ pub struct ObjHit {
     pub name: Name,
 }
 
-/// The objects of `snapshot` that match `query`. Task 1a stub: none.
+/// The objects of `snapshot` that match `query`. Task 1a stub: none, which is not "no match"
+/// (fix round 1, m9): nothing may show "No objects match" from it before Task 9.
 pub fn search(snapshot: &CatalogSnapshot, query: &SearchQuery) -> Vec<ObjHit> {
     let _ = (snapshot, query);
     Vec::new()

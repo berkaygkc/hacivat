@@ -171,7 +171,8 @@ impl CatalogSnapshot {
         }
     }
 
-    /// The object `key` denotes in this generation. Task 1a stub: none.
+    /// The object `key` denotes in this generation. Task 1a stub: none, which is
+    /// not a fact: the stub's `None` means "not loaded", never "absent" (fix round 1, m9); nothing may show it to a user before Task 9.
     pub fn find(&self, key: &ObjectKey) -> Option<ObjHandle> {
         let _ = key;
         None
@@ -182,7 +183,8 @@ impl CatalogSnapshot {
         crate::resolve::resolve_ref(self, r)
     }
 
-    /// The object behind a generation-local id. Task 1a stub: none.
+    /// The object behind a generation-local id. Task 1a stub: none, which is
+    /// not a fact: the stub's `None` means "not loaded", never "absent" (fix round 1, m9); nothing may show it to a user before Task 9.
     pub fn obj(&self, id: ObjId) -> Option<&Obj> {
         let _ = id;
         None

@@ -188,7 +188,8 @@ impl ObjectKind {
     /// object (columns, constraints; PostgreSQL triggers; MySQL indexes).
     ///
     /// Task 1a stub: `None` for every kind (no namespace-level name index is built until
-    /// Task 3; lookups answer `Unknown` meanwhile).
+    /// Task 3; lookups answer `Unknown` meanwhile). Not a fact (fix round 1, m9): nothing may
+    /// hide or merge a kind group from it before Task 3.
     pub fn group(self, dbms: DbmsKind) -> Option<KindGroup> {
         let _ = dbms;
         None
@@ -204,7 +205,8 @@ impl ObjectKind {
 
     /// Whether this kind exists in `dbms` at all.
     ///
-    /// Task 1a stub: `false` (nothing is asserted to exist until Task 3).
+    /// Task 1a stub: `false` (nothing is asserted to exist until Task 3). Not a fact (fix
+    /// round 1, m9): nothing may hide a kind from it before Task 3.
     pub fn exists_in(self, dbms: DbmsKind) -> bool {
         let _ = dbms;
         false

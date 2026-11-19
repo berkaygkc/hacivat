@@ -32,15 +32,21 @@ impl RowKey {
     }
 }
 
-impl Drop for RowKey {
-    /// Best-effort wipe of the key bytes (no `zeroize` in this crate's graph).
-    fn drop(&mut self) {
-        for b in self.0.iter_mut() {
-            *b = 0;
-        }
-        std::hint::black_box(&self.0);
+impl zeroize::Zeroize for RowKey {
+    fn zeroize(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
     }
 }
+
+impl Drop for RowKey {
+    /// The key bytes are wiped through `zeroize` (volatile writes the optimizer keeps; fix
+    /// round 1, m4).
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(self);
+    }
+}
+
+impl zeroize::ZeroizeOnDrop for RowKey {}
 
 impl fmt::Debug for RowKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -209,5 +215,21 @@ impl CacheStore {
     pub fn delete_profile_files(dir: &Path, profile: &ProfileId) -> Result<(), CacheError> {
         let _ = (dir, profile);
         Err(CacheError::Disabled)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fix round 1 (m4): `zeroize` clears every key byte (the `Drop` impl calls exactly this),
+    /// and the type is `ZeroizeOnDrop`.
+    #[test]
+    fn row_key_zeroize_clears_every_byte() {
+        fn on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+        let mut key = RowKey::from_bytes([0x5A; 32]);
+        on_drop(&key);
+        zeroize::Zeroize::zeroize(&mut key);
+        assert_eq!(key.0, [0; 32]);
     }
 }

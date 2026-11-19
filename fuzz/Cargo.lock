@@ -1603,6 +1603,7 @@ dependencies = [
  "sql-ident",
  "tokio",
  "twox-hash",
+ "zeroize",
  "zstd",
 ]
 

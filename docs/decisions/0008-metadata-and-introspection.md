@@ -114,7 +114,7 @@ that would state a fact about a catalog is a stub that cannot be read as one:
 | `ObjectKind::{group, allows_child, exists_in}` | `None` / `false` / `false` | T3 |
 | `NamespaceSnapshot::build`, `replace_subtree`, `upsert_child` | `Err(ModelError::NotImplemented)` (no arena exists) | T3 |
 | `ObjectKey::same_object` | structural equality only (a rename is not recognised; never two objects as one) | T3 |
-| `name::has_invisible_chars` | flags every character that is neither alphanumeric nor printable ASCII (never misses a bidi or zero-width character; over-badges symbols) | T3 |
+| `name::has_invisible_chars` | flags C0/C1 controls, Unicode `Default_Ignorable_Code_Point` (16.0) and a named filler list (U+2800, U+FFF9–U+FFFB, Arabic/Syriac/Kaithi format characters); the list is documented in `name.rs` and claims no more (fix round 1) | T3 |
 | `Publisher::publish`, `merge` | `Err(NotImplemented)`; nothing is published | T9, T10 |
 | `CacheStore::open` | `Err(CacheError::Disabled)` (memory-only; nothing is created) | T11 |
 | `codec::{encode_namespace, decode_namespace}`, `payload_version` | `Err(NotImplemented)`, `None` | T11 |
@@ -146,8 +146,9 @@ Choices beside the plan's text, each small and reversible by its owner:
   Range, Base}`), so the owner the plan asks for on types has a place.
 - **`IntroErrorCode`** (a closed, locale-free code set) lives in `hacivat-meta`: `LoadState`
   needs it and `hacivat-meta` may not see `hacivat-introspect`'s error type.
-- **`RowKey`** has a redacted `Debug`, no `PartialEq`, and wipes its bytes on drop (best effort;
-  no `zeroize` in the model's graph).
+- **`RowKey`** has a redacted `Debug`, no `PartialEq`, and is `Zeroize` + `ZeroizeOnDrop`
+  through `zeroize` (fix round 1, m4, controller ruling: `zeroize` 1.9.1, already in the lock,
+  joins `hacivat-meta`'s `persist` feature; no new crate in the lock).
 
 **Layering (`cargo xtask check-deps`).**
 
@@ -155,20 +156,40 @@ Choices beside the plan's text, each small and reversible by its owner:
   workspace resolve: the unified resolve keeps `hacivat-meta -> tokio` because
   `hacivat-introspect` turns `catalog` on, so a resolve walk would refuse the pure crate. The walk
   follows normal edges, activates optional dependencies through `dep:x`, `x` and `x/f`, and adds
-  `default` unless the edge turns it off. Refused: `tokio`, `futures`, `hacivat-session`,
+  `default` unless the edge turns it off. Fix round 1 (I2): it starts from `default` **and every
+  feature but `apply`** (a feature that only names `apply` does not turn it on), so a second
+  feature cannot carry a runtime. It checks every activated dependency **by name**, so an
+  optional edge that no member turns on (no edge in the cargo resolve) is still seen. Refused
+  by rule (m6): any `tokio*` or `futures`/`futures-*` crate, `async-std`, `smol`,
+  `async-executor`, `async-global-executor`, `async-io`, `mio`, `hacivat-session`,
   `hacivat-driver*`, `hacivat-introspect`, `hacivat-l10n`.
-- `DdlApplyOnlyFromApp` and `EmbeddedSystemOnlyFromApp` read declared edges of any kind and
-  member `[features]` (`owner/feature`, `owner?/feature`); the feature's own crate and
-  `hacivat-app` are exempt.
-- `MetaBelowIntrospect` refuses any edge kind out of `hacivat-meta` and normal edges beyond it.
+- `DdlApplyOnlyFromApp` and `EmbeddedSystemOnlyFromApp` (fix round 1, I1) run the same
+  feature walk from each member with **all its features**, dev and build edges included, and
+  not through `hacivat-app`; they refuse the member when the owner (`hacivat-ddl`,
+  `hacivat-meta`) ends with the feature on. That covers a renamed dependency (`package = …`),
+  `dep:`/weak forms, the member's own feature chains through `default`, and an alias feature the
+  owner declares (`snapshots = ["embedded-system"]`), including through the owner's `default`.
+  The owner itself and `hacivat-app` are exempt; the `hacivat` binary reaches them only through
+  the app.
+- `MetaBelowIntrospect` (fix round 1, I2) refuses any **declared** dependency of
+  `hacivat-meta` (any kind, optional or not) that is forbidden, and the all-features graph
+  (every edge kind out of `hacivat-meta`, normal edges beyond it).
 - `IntrospectNotExec` refuses `hacivat-exec` at any depth and `hacivat-results` as a direct edge
   of any kind. `hacivat-results` is not refused transitively: `hacivat-session` (which
   introspection needs) keeps its result store on it, and that edge is not introspection's.
 - `MetaQueryOnlyFromPacks` and `HoldCountsTestOnly` (the M3c carry, P-M4-17) are source rules
-  over `crates/<layer>/<crate>/` that reuse `BackendOutsideOwner`'s walker; comment lines are
-  skipped; `MetaQuery::new` is allowed in `hacivat-introspect/src/pack/**`,
-  `hacivat-session/src/meta.rs` and any crate's `tests/`; `hold_counts(` in no `src/` file but its
-  definition.
+  over every `crates/<layer>/<crate>/`, `fuzz/` and `xtask/` (`target/` skipped). Fix round 1
+  (I3): they read **tokens** — comments, whitespace, char literals, lifetimes and string contents
+  dropped — so spacing, line splits and comments do not hide a call, and strings never match.
+  `MetaQueryOnlyFromPacks` refuses `MetaQuery::new`, `<…MetaQuery>::new`, `MetaQuery as X`,
+  `type X = …MetaQuery…;` and `impl MetaQuery` outside `hacivat-introspect/src/pack/**`,
+  `hacivat-session/src/meta.rs` and a crate's `tests/`, counting the code a file pulls in with
+  `#[path]` or a literal `include!` (followed four levels deep); it also refuses a `#[path]` in a
+  `src/` file that leaves the crate's `src/`, and an `include!` of a file that is not `.rs`.
+  `HoldCountsTestOnly` refuses any `hold_counts` identifier (call, alias, function pointer) in a
+  `src/` file but its definition. `include!(concat!(env!("OUT_DIR"), …))` (generated code) is not
+  followed. Carry to T1c (reviewer): `MetaQuery`'s fields private, no `Default`/`From`, `new` the
+  only constructor, so the token rules cover every way to build one.
 - `PRODUCT_CRATES` gains the four M4 crates; `sql-catalog` falls under the SQL rules by
   directory.
 
@@ -178,3 +199,10 @@ and xtask's `l10n` rules, as M3b's `safety-*`). `model-kind-*` is a dynamic fami
 addressed by `ObjectKind::id()`). Because `model` is now an ID module, xtask's code scan no longer
 reads a `model::CONST` path that follows `::` (`hacivat_ui_grid::model::MAX_COPY_CELLS`) as a
 message ID.
+
+**Fix round 1 (review `task-m4-01a-review.md`).** I1–I3 and m1, m3, m4, m6, m8 above and in
+`check_deps.rs`, `name.rs`, `persist/mod.rs`, `minicat.rs` and the FTL block
+(`model-cache-rebuilt` gains `[wrong-key]` for `RebuildReason::WrongKey`). Recorded here too
+(m5): only `zstd` is pinned exactly; `zstd-sys`, which carries the libzstd version the committed
+snapshot bytes depend on, is pinned by `Cargo.lock` (every build is `--locked`, and `cargo
+update` is never run plain); `minicat check` re-encodes, so a different libzstd is noticed.
