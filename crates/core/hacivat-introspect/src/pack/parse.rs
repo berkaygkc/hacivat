@@ -202,6 +202,9 @@ pub(crate) fn scan_line(f: Family, line: &str) -> Result<Vec<Piece<'_>>, PackErr
         let c = b[i];
         let next = b.get(i + 1).copied();
         match c {
+            // PostgreSQL has no backtick quote: `` ` `` is an operator character there, so a
+            // backtick "quote" would hide code from this lexer (fix round 1, I1a).
+            b'`' if f == Family::Pg => return Err(K::Backtick),
             b'\'' | b'"' | b'`' => {
                 flush(&mut out, line, start, i);
                 let mut j = i + 1;
@@ -245,8 +248,15 @@ pub(crate) fn scan_line(f: Family, line: &str) -> Result<Vec<Piece<'_>>, PackErr
             b'/' if next == Some(b'*') => {
                 flush(&mut out, line, start, i);
                 let rest = &line[i + 2..];
+                // MySQL runs the text of `/*!…*/` and MariaDB that of `/*M!…*/` as code
+                // (fix round 1, I1d).
+                if f == Family::MySql && (rest.starts_with('!') || rest.starts_with("M!")) {
+                    return Err(K::ExecutableComment);
+                }
                 let end = rest.find("*/").ok_or(K::UnterminatedLiteral)?;
-                if rest[..end].contains("/*") {
+                // PostgreSQL nests comments and reads `/*` wherever it starts, also inside the
+                // closing `*/` of `/* a /*/`: the check covers the closer too (I1b).
+                if rest[..end + 2].contains("/*") {
                     return Err(K::NestedComment);
                 }
                 let text = &line[i..i + 2 + end + 2];
@@ -269,6 +279,9 @@ pub(crate) fn scan_line(f: Family, line: &str) -> Result<Vec<Piece<'_>>, PackErr
                     out.push(Piece::List(&line[i + 2..e]));
                     i = e + 1;
                     start = i;
+                } else if next.is_some_and(|c| c.is_ascii_digit() || c >= 0x80) {
+                    // `:1`, `:é` are SQLite parameters (I1c); no dialect needs them as code.
+                    return Err(K::RawPlaceholder);
                 } else if next.is_some_and(is_ident_start) {
                     let e = ident_end(b, i + 1);
                     flush(&mut out, line, start, i);
@@ -289,6 +302,9 @@ pub(crate) fn scan_line(f: Family, line: &str) -> Result<Vec<Piece<'_>>, PackErr
                     start = i;
                 } else if f == Family::MySql {
                     return Err(K::HashComment);
+                } else if f == Family::Sqlite {
+                    // `#name` is a SQLite parameter (I1c).
+                    return Err(K::RawPlaceholder);
                 } else {
                     i += 1;
                 }
@@ -410,7 +426,7 @@ fn line_node(line_no: u32, raw: &str, pieces: &[Piece<'_>]) -> Result<LineNode, 
 // ------------------------------------------------------------------ conditions
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Tok<'a> {
+enum CondTok<'a> {
     Word(&'a str),
     Num(u32),
     Op(CmpOp),
@@ -418,7 +434,7 @@ enum Tok<'a> {
     Close,
 }
 
-fn lex_cond(s: &str) -> Option<Vec<Tok<'_>>> {
+fn lex_cond(s: &str) -> Option<Vec<CondTok<'_>>> {
     let b = s.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -427,11 +443,11 @@ fn lex_cond(s: &str) -> Option<Vec<Tok<'_>>> {
         match c {
             b' ' | b'\t' => i += 1,
             b'(' => {
-                out.push(Tok::Open);
+                out.push(CondTok::Open);
                 i += 1;
             }
             b')' => {
-                out.push(Tok::Close);
+                out.push(CondTok::Close);
                 i += 1;
             }
             b'0'..=b'9' => {
@@ -439,7 +455,7 @@ fn lex_cond(s: &str) -> Option<Vec<Tok<'_>>> {
                 while e < b.len() && b[e].is_ascii_digit() {
                     e += 1;
                 }
-                out.push(Tok::Num(s[i..e].parse().ok()?));
+                out.push(CondTok::Num(s[i..e].parse().ok()?));
                 i = e;
             }
             b'>' | b'<' | b'=' | b'!' => {
@@ -453,12 +469,12 @@ fn lex_cond(s: &str) -> Option<Vec<Tok<'_>>> {
                     (b'!', true) => CmpOp::Ne,
                     _ => return None,
                 };
-                out.push(Tok::Op(op));
+                out.push(CondTok::Op(op));
                 i += if two { 2 } else { 1 };
             }
             _ if is_ident_start(c) => {
                 let e = ident_end(b, i);
-                out.push(Tok::Word(&s[i..e]));
+                out.push(CondTok::Word(&s[i..e]));
                 i = e;
             }
             _ => return None,
@@ -471,16 +487,16 @@ fn lex_cond(s: &str) -> Option<Vec<Tok<'_>>> {
 const MAX_EXPR_DEPTH: usize = 8;
 
 struct CondParser<'a> {
-    toks: Vec<Tok<'a>>,
+    toks: Vec<CondTok<'a>>,
     pos: usize,
 }
 
 impl<'a> CondParser<'a> {
-    fn peek(&self) -> Option<&Tok<'a>> {
+    fn peek(&self) -> Option<&CondTok<'a>> {
         self.toks.get(self.pos)
     }
 
-    fn bump(&mut self) -> Option<Tok<'a>> {
+    fn bump(&mut self) -> Option<CondTok<'a>> {
         let t = self.toks.get(self.pos).cloned();
         self.pos += 1;
         t
@@ -488,7 +504,7 @@ impl<'a> CondParser<'a> {
 
     fn word(&mut self) -> Result<&'a str, PackErrorKind> {
         match self.bump() {
-            Some(Tok::Word(w)) => Ok(w),
+            Some(CondTok::Word(w)) => Ok(w),
             _ => Err(PackErrorKind::BadCondition),
         }
     }
@@ -498,7 +514,7 @@ impl<'a> CondParser<'a> {
             return Err(PackErrorKind::ExprTooDeep);
         }
         let mut arms = vec![self.and(depth)?];
-        while self.peek() == Some(&Tok::Word("or")) {
+        while self.peek() == Some(&CondTok::Word("or")) {
             self.pos += 1;
             arms.push(self.and(depth)?);
         }
@@ -511,7 +527,7 @@ impl<'a> CondParser<'a> {
 
     fn and(&mut self, depth: usize) -> Result<Cond, PackErrorKind> {
         let mut arms = vec![self.unary(depth)?];
-        while self.peek() == Some(&Tok::Word("and")) {
+        while self.peek() == Some(&CondTok::Word("and")) {
             self.pos += 1;
             arms.push(self.unary(depth)?);
         }
@@ -527,15 +543,15 @@ impl<'a> CondParser<'a> {
             return Err(PackErrorKind::ExprTooDeep);
         }
         match self.peek() {
-            Some(Tok::Word("not")) => {
+            Some(CondTok::Word("not")) => {
                 self.pos += 1;
                 Ok(Cond::Not(Box::new(self.unary(depth + 1)?)))
             }
-            Some(Tok::Open) => {
+            Some(CondTok::Open) => {
                 self.pos += 1;
                 let c = self.expr(depth + 1)?;
                 match self.bump() {
-                    Some(Tok::Close) => Ok(c),
+                    Some(CondTok::Close) => Ok(c),
                     _ => Err(PackErrorKind::BadCondition),
                 }
             }
@@ -545,7 +561,7 @@ impl<'a> CondParser<'a> {
 
     fn op(&mut self) -> Result<CmpOp, PackErrorKind> {
         match self.bump() {
-            Some(Tok::Op(op)) => Ok(op),
+            Some(CondTok::Op(op)) => Ok(op),
             _ => Err(PackErrorKind::BadCondition),
         }
     }
@@ -564,7 +580,7 @@ impl<'a> CondParser<'a> {
             "version" => {
                 let op = self.op()?;
                 match self.bump() {
-                    Some(Tok::Num(n)) => Ok(Cond::Version(op, n)),
+                    Some(CondTok::Num(n)) => Ok(Cond::Version(op, n)),
                     _ => Err(Bad),
                 }
             }
@@ -595,7 +611,7 @@ impl<'a> CondParser<'a> {
                 Ok(Cond::Flavor(eq, f))
             }
             "flag" => {
-                if self.bump() != Some(Tok::Open) {
+                if self.bump() != Some(CondTok::Open) {
                     return Err(Bad);
                 }
                 let f = match self.word()? {
@@ -603,7 +619,7 @@ impl<'a> CondParser<'a> {
                     "joined" => PackFlags::JOINED,
                     _ => return Err(Bad),
                 };
-                if self.bump() != Some(Tok::Close) {
+                if self.bump() != Some(CondTok::Close) {
                     return Err(Bad);
                 }
                 Ok(Cond::Flag(f))
@@ -687,7 +703,12 @@ fn is_section_name(s: &str) -> bool {
 }
 
 /// Closes `open`: blocks balanced, `returns` declared, the `show-create` and list rules hold.
-fn finish(file: &'static str, open: Open) -> Result<Section, PackError> {
+fn finish(
+    file: &'static str,
+    open: Open,
+    dialect: sql_dialect::DialectId,
+    family: Family,
+) -> Result<Section, PackError> {
     if let Some(f) = open.stack.last() {
         return Err(err(file, f.line, PackErrorKind::UnclosedIf));
     }
@@ -696,6 +717,7 @@ fn finish(file: &'static str, open: Open) -> Result<Section, PackError> {
     }
     let sec = open.sec;
     let mut lists: Option<Name> = None;
+    let mut uses = 0usize;
     let mut bad: Option<(u32, PackErrorKind)> = None;
     walk_lines(&sec.body, &mut |l| {
         if bad.is_some() {
@@ -706,22 +728,339 @@ fn finish(file: &'static str, open: Open) -> Result<Section, PackError> {
             return;
         }
         for s in &l.segs {
-            if let Seg::List(name) = s {
-                match &lists {
-                    None => lists = Some(name.clone()),
-                    Some(n) if n == name => {}
-                    Some(_) => {
-                        bad = Some((l.line, PackErrorKind::MultipleListBinds));
+            match s {
+                Seg::Macro(Macro::Ident(_)) if !sec.show_create => {
+                    bad = Some((l.line, PackErrorKind::IdentOutsideShowCreate));
+                    return;
+                }
+                Seg::List(name) => {
+                    match &lists {
+                        None => lists = Some(name.clone()),
+                        Some(n) if n == name => {}
+                        Some(_) => {
+                            bad = Some((l.line, PackErrorKind::MultipleListBinds));
+                            return;
+                        }
+                    }
+                    uses += 1;
+                    if uses > 1 {
+                        bad = Some((l.line, PackErrorKind::ListBindReused));
                         return;
                     }
                 }
+                _ => {}
             }
         }
     });
     if let Some((line, kind)) = bad {
         return Err(err(file, line, kind));
     }
+    check_session_words(&sec, family).map_err(|(line, k)| err(file, line, k))?;
+    if lists.is_some() {
+        check_list_variants(&sec, dialect, family).map_err(|(line, k)| err(file, line, k))?;
+    }
     Ok(sec)
+}
+
+/// Words a joined `MetaConn` and the session's read check refuse anywhere in the text (T5):
+/// a `joinable` section never holds them, not even in a literal or comment; a value that
+/// needs one is a bind.
+const JOINED_REFUSED: [&str; 5] = ["insert", "update", "delete", "merge", "into"];
+
+/// T5's carry, enforced at parse time: no `PRAGMA` statement in any pack (SQLite reads
+/// through the `pragma_*` table-valued functions), and no write word in a `joinable` section.
+fn check_session_words(sec: &Section, family: Family) -> Result<(), (u32, PackErrorKind)> {
+    let mut bad = None;
+    walk_lines(&sec.body, &mut |l| {
+        if bad.is_some() {
+            return;
+        }
+        let mut toks = Vec::new();
+        line_tokens(family, l, &mut toks);
+        if toks
+            .iter()
+            .any(|(_, t)| is_word(Some(&(0, *t)), &["pragma"]))
+        {
+            bad = Some((l.line, PackErrorKind::PragmaStatement));
+            return;
+        }
+        if sec.joinable
+            && let Some(w) = l
+                .raw
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .find(|w| JOINED_REFUSED.iter().any(|r| w.eq_ignore_ascii_case(r)))
+        {
+            bad = Some((l.line, PackErrorKind::JoinableWriteWord(w.to_string())));
+        }
+    });
+    bad.map_or(Ok(()), Err)
+}
+
+// ------------------------------------------------------------------ list-bind placement
+
+/// A token of a section's code, as the list check and the lint read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tok<'a> {
+    /// An ASCII word (or a run of non-ASCII bytes), or a quoted identifier's text.
+    Word(&'a str),
+    Op(&'a str),
+    /// A string literal, a scalar bind or a macro: an operand the rules do not read.
+    Operand,
+    /// A `:[name]` list bind.
+    List,
+}
+
+const OPS: [&str; 10] = [
+    "!~~*", "!~*", "~~*", "~*", "<=", ">=", "<>", "!=", "::", "||",
+];
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80
+}
+
+/// Splits one code piece into words and operators.
+pub(crate) fn tokenize<'a>(code: &'a str, line: u32, out: &mut Vec<(u32, Tok<'a>)>) {
+    let b = code.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+        } else if is_word_byte(c) {
+            let mut e = i;
+            while e < b.len() && is_word_byte(b[e]) {
+                e += 1;
+            }
+            out.push((line, Tok::Word(&code[i..e])));
+            i = e;
+        } else if let Some(op) = OPS.iter().find(|op| code[i..].starts_with(**op)) {
+            out.push((line, Tok::Op(op)));
+            i += op.len();
+        } else {
+            out.push((line, Tok::Op(&code[i..i + 1])));
+            i += 1;
+        }
+    }
+}
+
+/// The tokens of one parsed line (comments dropped; a `"…"` or `` `…` `` quoted identifier
+/// is a word, a string literal an operand).
+pub(crate) fn line_tokens<'a>(f: Family, l: &'a LineNode, out: &mut Vec<(u32, Tok<'a>)>) {
+    // The parser accepted the line, so it lexes again.
+    let Ok(pieces) = scan_line(f, &l.raw) else {
+        return;
+    };
+    for p in pieces {
+        match p {
+            Piece::Code(c) => tokenize(c, l.line, out),
+            Piece::Quoted(q) if q.starts_with('"') || q.starts_with('`') => {
+                out.push((l.line, Tok::Word(&q[1..q.len() - 1])));
+            }
+            Piece::Quoted(_) | Piece::Bind(_) | Piece::Macro(_) => out.push((l.line, Tok::Operand)),
+            Piece::List(_) => out.push((l.line, Tok::List)),
+            Piece::Comment(_) => {}
+        }
+    }
+}
+
+/// A list-bind section is checked in at most this many `--# if` variants.
+const LIST_VARIANT_CAP: usize = 4096;
+
+/// Words that are never the column of `<column> IN :[name]`.
+const NOT_A_COLUMN: [&str; 22] = [
+    "not", "and", "or", "xor", "where", "select", "on", "when", "then", "else", "case", "end",
+    "exists", "is", "null", "true", "false", "all", "any", "some", "in", "between",
+];
+
+/// The clause keywords; the nearest one before a list bind at its level must be `WHERE`.
+const CLAUSES: [&str; 19] = [
+    "select",
+    "from",
+    "where",
+    "on",
+    "join",
+    "using",
+    "group",
+    "having",
+    "order",
+    "limit",
+    "offset",
+    "union",
+    "intersect",
+    "except",
+    "returning",
+    "set",
+    "values",
+    "window",
+    "with",
+];
+
+/// Words that change a result under chunking when they stand at the list's level.
+const UNCHUNKABLE: [&str; 13] = [
+    "or",
+    "xor",
+    "group",
+    "having",
+    "limit",
+    "offset",
+    "fetch",
+    "distinct",
+    "over",
+    "union",
+    "intersect",
+    "except",
+    "window",
+];
+
+/// Aggregate functions (PostgreSQL, MySQL/MariaDB, SQLite): a call at the list's level
+/// aggregates one chunk only.
+const AGGREGATES: [&str; 32] = [
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "array_agg",
+    "string_agg",
+    "json_agg",
+    "jsonb_agg",
+    "json_object_agg",
+    "jsonb_object_agg",
+    "xmlagg",
+    "bool_and",
+    "bool_or",
+    "every",
+    "bit_and",
+    "bit_or",
+    "bit_xor",
+    "group_concat",
+    "json_arrayagg",
+    "json_objectagg",
+    "json_group_array",
+    "json_group_object",
+    "std",
+    "stddev",
+    "stddev_pop",
+    "stddev_samp",
+    "variance",
+    "var_pop",
+    "var_samp",
+    "percentile_cont",
+    "percentile_disc",
+];
+
+fn is_word(t: Option<&(u32, Tok<'_>)>, any: &[&str]) -> bool {
+    matches!(t, Some((_, Tok::Word(w))) if any.iter().any(|a| w.eq_ignore_ascii_case(a)))
+}
+
+/// Checks the list-bind placement rule (fix round 1, I3) in every variant of `sec`.
+fn check_list_variants(
+    sec: &Section,
+    dialect: sql_dialect::DialectId,
+    family: Family,
+) -> Result<(), (u32, PackErrorKind)> {
+    let ctxs = super::render::variants(sec, dialect, family, LIST_VARIANT_CAP)
+        .ok_or((sec.line, PackErrorKind::ListBindTooManyVariants))?;
+    for ctx in ctxs {
+        let mut lines = Vec::new();
+        super::render::kept_lines(&sec.body, &ctx, &mut lines, &mut Vec::new());
+        let mut toks = Vec::new();
+        for l in lines {
+            line_tokens(family, l, &mut toks);
+        }
+        check_list_tokens(&toks, family)?;
+    }
+    Ok(())
+}
+
+/// A list bind is legal only as a top-level `AND` conjunct of the `WHERE` clause, written
+/// `<column> IN :[name]` (the column optionally qualified), outside every parenthesis, with
+/// nothing but `AND`, `ORDER` or the end after it; and the statement holds no aggregate,
+/// `GROUP BY`, `HAVING`, `LIMIT`, `OFFSET`, `FETCH`, `DISTINCT`, window, `OR`, `XOR`, MySQL
+/// `||` or set operation at that level. Then every chunk selects a disjoint part of the
+/// answer, and the union of the chunks is the answer; an empty list selects nothing.
+fn check_list_tokens(toks: &[(u32, Tok<'_>)], family: Family) -> Result<(), (u32, PackErrorKind)> {
+    use PackErrorKind as K;
+    let Some(li) = toks.iter().position(|t| t.1 == Tok::List) else {
+        return Ok(());
+    };
+    let line = toks[li].0;
+    let mut depths = Vec::with_capacity(toks.len());
+    let mut depth = 0usize;
+    for (_, t) in toks {
+        match t {
+            Tok::Op("(") => {
+                depths.push(depth);
+                depth += 1;
+            }
+            Tok::Op(")") => {
+                depth = depth.saturating_sub(1);
+                depths.push(depth);
+            }
+            _ => depths.push(depth),
+        }
+    }
+    let not_conjunct = Err((line, K::ListBindNotConjunct));
+    if depths[li] != 0 || !is_word(li.checked_sub(1).and_then(|k| toks.get(k)), &["in"]) {
+        return not_conjunct;
+    }
+    // The column: a word that is not a keyword, optionally `qualifier.`.
+    let Some(mut k) = li.checked_sub(2) else {
+        return not_conjunct;
+    };
+    if !matches!(toks[k].1, Tok::Word(_)) || is_word(toks.get(k), &NOT_A_COLUMN) {
+        return not_conjunct;
+    }
+    if k >= 2 && toks[k - 1].1 == Tok::Op(".") && matches!(toks[k - 2].1, Tok::Word(_)) {
+        k -= 2;
+    }
+    if !is_word(
+        k.checked_sub(1).and_then(|j| toks.get(j)),
+        &["where", "and"],
+    ) {
+        return not_conjunct;
+    }
+    // An `AND` that closes `BETWEEN x AND` binds the column into the `BETWEEN`.
+    let owner = (0..k.saturating_sub(1))
+        .rev()
+        .filter(|&j| depths[j] == 0)
+        .find(|&j| is_word(toks.get(j), &["and", "where", "between"]));
+    if is_word(owner.and_then(|j| toks.get(j)), &["between"]) {
+        return not_conjunct;
+    }
+    match toks.get(li + 1) {
+        None => {}
+        Some(t) if is_word(Some(t), &["and", "order"]) => {}
+        Some(_) => return not_conjunct,
+    }
+    let clause = (0..li)
+        .rev()
+        .find(|&j| depths[j] == 0 && is_word(toks.get(j), &CLAUSES));
+    if !clause.is_some_and(|j| is_word(toks.get(j), &["where"])) {
+        return not_conjunct;
+    }
+    for (j, (l, t)) in toks.iter().enumerate() {
+        if depths[j] != 0 {
+            continue;
+        }
+        let unchunkable = match t {
+            Tok::Word(w) => {
+                UNCHUNKABLE.iter().any(|u| w.eq_ignore_ascii_case(u))
+                    || (AGGREGATES.iter().any(|a| w.eq_ignore_ascii_case(a))
+                        && toks.get(j + 1).is_some_and(|n| n.1 == Tok::Op("(")))
+            }
+            Tok::Op("||") => family == Family::MySql,
+            _ => false,
+        };
+        if unchunkable {
+            let word = match t {
+                Tok::Word(w) | Tok::Op(w) => (*w).to_string(),
+                _ => String::new(),
+            };
+            return Err((*l, K::ListBindUnchunkable(word)));
+        }
+    }
+    Ok(())
 }
 
 /// Visits every line of `nodes`, every branch included, in text order.
@@ -758,6 +1097,7 @@ pub(crate) fn walk_conds<'a>(nodes: &'a [Node], f: &mut impl FnMut(&'a Cond)) {
 
 /// Parses `files` (sorted by name here) into sections, in file then definition order.
 pub(crate) fn parse_files(
+    dialect: sql_dialect::DialectId,
     family: Family,
     files: &[(&'static str, &str)],
 ) -> Result<Vec<Section>, PackError> {
@@ -791,7 +1131,7 @@ pub(crate) fn parse_files(
                 match (key, value) {
                     ("name", Some(name)) => {
                         if let Some(o) = open.take() {
-                            out.push(finish(file, o)?);
+                            out.push(finish(file, o, dialect, family)?);
                         }
                         if !is_section_name(name) {
                             return Err(err(file, line, PackErrorKind::BadSectionName));
@@ -903,7 +1243,7 @@ pub(crate) fn parse_files(
             }
         }
         if let Some(o) = open.take() {
-            out.push(finish(file, o)?);
+            out.push(finish(file, o, dialect, family)?);
         }
     }
     Ok(out)

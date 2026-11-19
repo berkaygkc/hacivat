@@ -101,6 +101,13 @@ pub enum Rule {
     /// A `src/` file other than its definition (`hacivat-ui-editor/src/find.rs`) names
     /// `hold_counts(`: the find counter hold is a shots-harness seam (M3c carry, P-M4-17).
     HoldCountsTestOnly,
+    // ## m4-t04-packs
+    /// A source file names `Pack::parse` or `Pack::parse_all` (the constructors of a pack
+    /// whose queries become a `MetaQuery`) outside `hacivat-introspect/src/pack/**`, the
+    /// introspector modules (`src/{pg,mysql,sqlite}/**`), a crate's `tests/` and
+    /// `fuzz/meta/`; or aliases `Pack`, names it in an `impl` header or a macro invocation
+    /// (R-M4-7, T4 fix round 1 I2). `Pack::builtin` stays legal everywhere.
+    PackParseOnlyFromPacks,
 }
 
 // ## m2b-t01-interfaces
@@ -952,6 +959,19 @@ const META_QUERY_DEF: &str = "crates/core/hacivat-session/src/meta.rs";
 /// The shots-only find hold (`HoldCountsTestOnly`) and its definition.
 const HOLD_COUNTS: &str = "hold_counts";
 const HOLD_COUNTS_DEF: &str = "crates/ui/hacivat-ui-editor/src/find.rs";
+// ## m4-t04-packs
+/// `PackParseOnlyFromPacks`: the type, the one associated item every file may name, and the
+/// places that may name the rest.
+const PACK: &str = "Pack";
+const PACK_ITEMS_OPEN: [&str; 1] = ["builtin"];
+const PACK_PARSE_DIRS: [&str; 4] = [
+    "crates/core/hacivat-introspect/src/pack/",
+    "crates/core/hacivat-introspect/src/pg/",
+    "crates/core/hacivat-introspect/src/mysql/",
+    "crates/core/hacivat-introspect/src/sqlite/",
+];
+const PACK_PARSE_FUZZ: &str = "fuzz/meta/";
+
 /// How deep `#[path]` / `include!` targets are followed.
 const MAX_INCLUDE_DEPTH: usize = 4;
 
@@ -1213,6 +1233,89 @@ fn builds_meta_query(t: &[SrcTok]) -> bool {
     })
 }
 
+// ## m4-t04-packs
+/// The associated item named after the `Pack` at `i`, if the segment is followed by an
+/// associated-item access: directly (`Pack::item`, `Pack::<…>::item`) or through a qualified
+/// path whose `<…>` holds it (`<Pack>::item`, `<(Pack)>::item`). `Some("")` when an access is
+/// there but its item cannot be read (refused in doubt).
+fn pack_item_access(t: &[SrcTok], i: usize) -> Option<String> {
+    let item_at = |k: usize| match t.get(k) {
+        Some(SrcTok::Ident(s)) => s.clone(),
+        _ => String::new(),
+    };
+    let mut j = i + 1;
+    if tok_punct(t, j, ':') && tok_punct(t, j + 1, ':') && tok_punct(t, j + 2, '<') {
+        j = skip_angle(t, j + 2);
+    } else if tok_punct(t, j, '<') {
+        j = skip_angle(t, j);
+    }
+    if tok_punct(t, j, ':') && tok_punct(t, j + 1, ':') {
+        return Some(item_at(j + 2));
+    }
+    let mut k = i;
+    while k > 0 {
+        k -= 1;
+        if tok_punct(t, k, ';') || tok_punct(t, k, '{') || tok_punct(t, k, '}') {
+            break;
+        }
+        if !tok_punct(t, k, '<') || !qualified_open(t, k) {
+            continue;
+        }
+        let end = skip_angle(t, k);
+        if end > i && tok_punct(t, end, ':') && tok_punct(t, end + 1, ':') {
+            return Some(item_at(end + 2));
+        }
+    }
+    None
+}
+
+/// Whether the tokens name a renderable pack constructor (`PackParseOnlyFromPacks`): an
+/// associated item of `Pack` other than `builtin` (`Pack::parse`, `Pack::parse_all`,
+/// `<Pack>::parse`, a function pointer `Pack::parse`), an alias of `Pack` (`Pack as X`,
+/// `type X = …Pack…;`), an `impl` header naming it (a local trait whose methods may call
+/// `Self::parse`), or `Pack` in a macro invocation's brackets without an open item after it
+/// (`mk!(Pack)` with `$t::parse`). Type positions stay legal (`&Pack`, `Option<Pack>`).
+fn parses_a_pack(t: &[SrcTok]) -> bool {
+    let open = |item: &str| PACK_ITEMS_OPEN.contains(&item);
+    (0..t.len()).any(|i| {
+        if tok_ident(t, i, PACK) {
+            tok_ident(t, i + 1, "as") || pack_item_access(t, i).is_some_and(|item| !open(&item))
+        } else if tok_ident(t, i, "type") || (tok_ident(t, i, "impl") && impl_item_header(t, i)) {
+            t[i + 1..]
+                .iter()
+                .take_while(|x| **x != SrcTok::Punct(';') && **x != SrcTok::Punct('{'))
+                .any(|x| *x == SrcTok::Ident(PACK.into()))
+        } else if matches!(t.get(i), Some(SrcTok::Ident(_)))
+            && tok_punct(t, i + 1, '!')
+            && let Some(SrcTok::Punct(open_p @ ('(' | '[' | '{'))) = t.get(i + 2)
+        {
+            let close = match open_p {
+                '(' => ')',
+                '[' => ']',
+                _ => '}',
+            };
+            let mut depth = 0usize;
+            let mut end = t.len();
+            for (k, x) in t.iter().enumerate().skip(i + 2) {
+                if *x == SrcTok::Punct(*open_p) {
+                    depth += 1;
+                } else if *x == SrcTok::Punct(close) {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = k;
+                        break;
+                    }
+                }
+            }
+            (i + 3..end.max(i + 3)).any(|k| {
+                tok_ident(t, k, PACK) && !pack_item_access(t, k).is_some_and(|item| open(&item))
+            })
+        } else {
+            false
+        }
+    })
+}
+
 /// Whether the tokens name `hold_counts` at all (a call, an alias, a function pointer).
 fn names_hold_counts(t: &[SrcTok]) -> bool {
     t.iter().any(|x| *x == SrcTok::Ident(HOLD_COUNTS.into()))
@@ -1371,6 +1474,9 @@ fn source_roots(workspace: &Path) -> Vec<(String, std::path::PathBuf, String)> {
 ///   no such file `include!`s a file that is not `.rs`.
 /// - `HoldCountsTestOnly` over every crate's `src/`: no file but the definition names
 ///   `hold_counts` (same inclusion rule).
+/// - `PackParseOnlyFromPacks` (`## m4-t04-packs`) over every crate, `fuzz/` and `xtask/`: no
+///   file outside `hacivat-introspect/src/{pack,pg,mysql,sqlite}/**`, a crate's `tests/` and
+///   `fuzz/meta/` names a renderable pack constructor ([`parses_a_pack`]).
 ///
 /// Comments, whitespace and string contents never match. One violation per finding, `via` the
 /// workspace-relative file (and what it did, for the `#[path]`/`include!` refusals).
@@ -1395,7 +1501,12 @@ pub fn source_violations(workspace: &Path) -> Vec<Violation> {
                     || rel == META_QUERY_DEF
                     || in_crate.starts_with("tests/"));
             let hold_counts_checked = in_src && rel != HOLD_COUNTS_DEF;
-            if meta_query_ok && !hold_counts_checked {
+            // ## m4-t04-packs
+            let pack_parse_ok = (is_crate
+                && (PACK_PARSE_DIRS.iter().any(|d| rel.starts_with(d))
+                    || in_crate.starts_with("tests/")))
+                || rel.starts_with(PACK_PARSE_FUZZ);
+            if meta_query_ok && !hold_counts_checked && pack_parse_ok {
                 continue;
             }
             let Ok(src) = std::fs::read_to_string(&f) else {
@@ -1426,6 +1537,10 @@ pub fn source_violations(workspace: &Path) -> Vec<Violation> {
             }
             if hold_counts_checked && names_hold_counts(&tokens) {
                 found.insert((name.clone(), Rule::HoldCountsTestOnly, rel.clone()));
+            }
+            // ## m4-t04-packs
+            if !pack_parse_ok && parses_a_pack(&tokens) {
+                found.insert((name.clone(), Rule::PackParseOnlyFromPacks, rel.clone()));
             }
         }
     }
@@ -3017,6 +3132,78 @@ mod tests {
                 "crates/core/hacivat-introspect/src/engine/mod.rs: include! of a non-.rs file crates/core/hacivat-introspect/src/engine/raw.inc",
             ]
         );
+    }
+
+    // ## m4-t04-packs
+    fn pack_parse_findings(files: &[(&str, &str)]) -> Vec<Violation> {
+        let dir = source_tree(files);
+        source_violations(dir.path())
+            .into_iter()
+            .filter(|v| v.rule == Rule::PackParseOnlyFromPacks)
+            .collect()
+    }
+
+    /// T4 fix round 1, I2: runtime text never becomes a renderable `Pack` outside the packs.
+    #[test]
+    fn pack_parse_outside_packs_is_refused() {
+        for src in [
+            "fn f(t: &'static str) { let _ = Pack::parse(d, t); }\n",
+            "fn f() { let _ = hacivat_introspect::pack::Pack::parse_all(d, &F); }\n",
+            "fn f() { let _ = Pack :: /* x */ parse(d, Box::leak(s)); }\n",
+            "fn f() { let _ = <Pack>::parse(d, t); }\n",
+            "fn f() { let _ = <(Pack)>::parse(d, t); }\n",
+            "fn f() { let g = Pack::parse; }\n",
+            "use hacivat_introspect::pack::Pack as P;\nfn f() { P::parse(d, t); }\n",
+            "type P = hacivat_introspect::pack::Pack;\nfn f() { P::parse(d, t); }\n",
+            "trait T { fn g(); }\nimpl T for Pack { fn g() { Self::parse(d, t); } }\n",
+            "macro_rules! mk { ($t:ty) => { <$t>::parse(d, t) } }\nfn f() { mk!(Pack); }\n",
+            "fn f() { let _ = Pack::render(&p, s, c); }\n",
+        ] {
+            let v = pack_parse_findings(&[(ENGINE, src)]);
+            assert_eq!(names(&v), ["hacivat-introspect"], "{src}");
+        }
+        let v = pack_parse_findings(&[
+            (
+                "crates/app/hacivat-app/src/x.rs",
+                "fn f() { Pack::parse(d, t); }\n",
+            ),
+            (
+                "fuzz/fuzz_targets/evil.rs",
+                "fn f() { Pack::parse(d, t); }\n",
+            ),
+            ("xtask/src/evil.rs", "fn f() { Pack::parse_all(d, &f); }\n"),
+        ]);
+        assert_eq!(names(&v), ["fuzz", "hacivat-app", "xtask"]);
+    }
+
+    #[test]
+    fn pack_builtin_types_and_allowed_places_pass() {
+        let v = pack_parse_findings(&[
+            (
+                ENGINE,
+                "use hacivat_introspect::pack::{Pack, DraftPack};\n\
+                 fn f(p: &Pack) -> Option<Pack> { let b = Pack::builtin(d)?; \
+                 assert!(Pack::builtin(d).is_ok()); let x = DraftPack::parse(d, &s); \
+                 let s = \"Pack::parse\"; None }\n",
+            ),
+            (
+                "crates/core/hacivat-introspect/src/pack/mod.rs",
+                "fn f() { Pack::parse_all(d, &F) }\n",
+            ),
+            (
+                "crates/core/hacivat-introspect/src/pg/mod.rs",
+                "fn f() { Pack::parse(d, include_str!(\"x\")) }\n",
+            ),
+            (
+                "crates/core/hacivat-introspect/tests/pack.rs",
+                "fn f() { Pack::parse(d, S) }\n",
+            ),
+            (
+                "fuzz/meta/fuzz_targets/pack_parse.rs",
+                "fn f() { Pack::parse(d, S) }\n",
+            ),
+        ]);
+        assert_eq!(v, Vec::new());
     }
 
     #[test]

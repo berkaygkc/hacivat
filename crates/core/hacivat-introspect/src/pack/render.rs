@@ -1,11 +1,26 @@
 // ## m4-t04-packs (seam: m4-t01c-core)
-//! The pack renderer: a section rendered for a [`PackCtx`] becomes [`RenderedQuery`]s, and
-//! [`RenderedQuery::as_meta_query`] (feature `session`) is the **only** caller of
-//! `MetaQuery::new` (R-M4-7; check-deps `MetaQueryOnlyFromPacks`). The text is the pack's,
-//! never a user's; every name and id is a bind (R-M4-3); the one spliced value is the
-//! `show-create` identifier macro, quoted by `sql_ident::quote` (R-M4-37).
+//! The pack renderer: a section rendered for a [`PackCtx`] becomes queries. A [`Pack`]
+//! (`&'static` pack text) renders [`RenderedQuery`]s, and [`RenderedQuery::as_meta_query`]
+//! (feature `session`) is the **only** caller of `MetaQuery::new` (R-M4-7; check-deps
+//! `MetaQueryOnlyFromPacks`). A [`DraftPack`] (runtime text) renders [`DraftQuery`]s, which
+//! have no way to a `MetaQuery` (fix round 1, I2):
 //!
-//! Rendering itself builds without `session` so the fuzz target exercises it (ADR 0008
+//! ```compile_fail
+//! use hacivat_introspect::pack::{DialectId, DraftPack};
+//! let p = DraftPack::parse(DialectId::Postgres, "").unwrap();
+//! let q = p.render("S", todo!()).unwrap();
+//! let _ = q[0].as_meta_query(); // a DraftQuery is not a MetaQuery source
+//! ```
+//!
+//! ```compile_fail
+//! use hacivat_introspect::pack::{DialectId, Pack};
+//! let runtime = String::from("--- name: S ---");
+//! let _ = Pack::parse(DialectId::Postgres, &runtime); // runtime text never makes a Pack
+//! ```
+//!
+//! The text is the pack's, never a user's; every name and id is a bind (R-M4-3); the one
+//! spliced value is the `show-create` identifier macro, quoted by `sql_ident::quote`
+//! (R-M4-37). Rendering builds without `session` so the fuzz target exercises it (ADR 0008
 //! `m4-t04`); only the `MetaQuery` conversion is gated.
 
 use std::collections::HashSet;
@@ -14,32 +29,26 @@ use std::sync::Arc;
 
 use hacivat_meta::{Level, Name};
 use hacivat_proto::DbmsKind;
-use hacivat_values::BindValue;
+use hacivat_values::{BindValue, LogicalType};
 use sql_dialect::DialectId;
 use sql_ident::quote::{QuoteCtx, QuoteError, quote};
 
 #[cfg(feature = "session")]
 use hacivat_session::meta::MetaQuery;
 
-use super::parse::{Cond, Family, Macro, Node, Seg};
-use super::{MAX_IN_LIST, Mode, Pack, PackCtx, PackFlags, Params, Section};
+use super::parse::{Cond, Family, LineNode, Macro, Node, Seg};
+use super::{DraftPack, MAX_IN_LIST, Mode, Pack, PackCtx, PackFlags, Params, Section};
 
-/// One statement of a rendered section: pack text with its binds. Built only by
-/// [`Pack::render`] (its fields are private).
+/// One statement of a section rendered from a [`DraftPack`]: pack text with its binds. It can
+/// be read, never run.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RenderedQuery {
+pub struct DraftQuery {
     sql: String,
     binds: Vec<BindValue>,
     joinable: bool,
 }
 
-impl RenderedQuery {
-    /// The statement as a [`MetaQuery`], the only input a `MetaConn` accepts.
-    #[cfg(feature = "session")]
-    pub fn as_meta_query(&self) -> MetaQuery<'_> {
-        MetaQuery::new(&self.sql, &self.binds, self.joinable)
-    }
-
+impl DraftQuery {
     pub fn sql(&self) -> &str {
         &self.sql
     }
@@ -51,6 +60,32 @@ impl RenderedQuery {
     /// The section is marked `--- joinable ---` (R-M4-29).
     pub fn joinable(&self) -> bool {
         self.joinable
+    }
+}
+
+/// One statement of a section rendered from a [`Pack`] (`&'static` pack text). Built only by
+/// [`Pack::render`] (its field is private).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderedQuery(DraftQuery);
+
+impl RenderedQuery {
+    /// The statement as a [`MetaQuery`], the only input a `MetaConn` accepts.
+    #[cfg(feature = "session")]
+    pub fn as_meta_query(&self) -> MetaQuery<'_> {
+        MetaQuery::new(&self.0.sql, &self.0.binds, self.0.joinable)
+    }
+
+    pub fn sql(&self) -> &str {
+        &self.0.sql
+    }
+
+    pub fn binds(&self) -> &[BindValue] {
+        &self.0.binds
+    }
+
+    /// The section is marked `--- joinable ---` (R-M4-29).
+    pub fn joinable(&self) -> bool {
+        self.0.joinable
     }
 }
 
@@ -69,9 +104,10 @@ pub enum RenderError {
     /// Every SQL line is gated away for this context: no statement exists, which must never
     /// read as "no rows" (alg/02 HV-INTRO-04 edge 8: absence is deliberate, not silent).
     NoVariant,
-    /// `#{ident:…}` in a section not marked `show-create` (R-M4-37).
+    /// `#{ident:…}` in a section not marked `show-create` (R-M4-37; the parser refuses it
+    /// too).
     IdentOutsideShowCreate,
-    /// The `#{ident:…}` bind is SQL NULL, not a name.
+    /// The `#{ident:…}` bind is SQL NULL or not text-typed: not a name.
     IdentNotText(Name),
     /// The `#{ident:…}` name holds a NUL, which no quoting can carry.
     IdentNul,
@@ -87,7 +123,7 @@ pub(crate) struct Template {
     segs: Vec<Seg>,
     /// Some line holds code (not only blanks and comments).
     code: bool,
-    /// The list bind the kept text uses (at most one per section, checked at parse).
+    /// The list bind the kept text uses (at most one use per section, checked at parse).
     list: Option<Name>,
 }
 
@@ -119,25 +155,16 @@ pub(crate) fn eval(c: &Cond, ctx: &PackCtx) -> bool {
     }
 }
 
-/// Appends the lines `nodes` keep for `ctx` to `t`; records each `if`'s chosen arm in `path`.
-fn flatten(nodes: &[Node], ctx: &PackCtx, t: &mut Template, path: &mut Vec<u32>) {
+/// The lines `nodes` keep for `ctx`, in order; records each `if`'s chosen arm in `path`.
+pub(crate) fn kept_lines<'a>(
+    nodes: &'a [Node],
+    ctx: &PackCtx,
+    out: &mut Vec<&'a LineNode>,
+    path: &mut Vec<u32>,
+) {
     for n in nodes {
         match n {
-            Node::Line(l) => {
-                if l.raw.trim().is_empty() {
-                    continue;
-                }
-                if !t.segs.is_empty() {
-                    t.segs.push(Seg::Text(Arc::from("\n")));
-                }
-                t.code |= l.code;
-                for s in &l.segs {
-                    if let Seg::List(name) = s {
-                        t.list = Some(name.clone());
-                    }
-                }
-                t.segs.extend(l.segs.iter().cloned());
-            }
+            Node::Line(l) => out.push(l),
             Node::If(i) => {
                 let arm = i.arms.iter().position(|(c, _)| eval(c, ctx));
                 let body = match arm {
@@ -151,22 +178,37 @@ fn flatten(nodes: &[Node], ctx: &PackCtx, t: &mut Template, path: &mut Vec<u32>)
                     }
                 };
                 if let Some(body) = body {
-                    flatten(body, ctx, t, path);
+                    kept_lines(body, ctx, out, path);
                 }
             }
         }
     }
 }
 
-fn template_of(sec: &Section, ctx: &PackCtx) -> (Template, Vec<u32>) {
+fn template_of(sec: &Section, ctx: &PackCtx) -> Template {
+    let mut lines = Vec::new();
+    kept_lines(&sec.body, ctx, &mut lines, &mut Vec::new());
     let mut t = Template {
         segs: Vec::new(),
         code: false,
         list: None,
     };
-    let mut path = Vec::new();
-    flatten(&sec.body, ctx, &mut t, &mut path);
-    (t, path)
+    for l in lines {
+        if l.raw.trim().is_empty() {
+            continue;
+        }
+        if !t.segs.is_empty() {
+            t.segs.push(Seg::Text(Arc::from("\n")));
+        }
+        t.code |= l.code;
+        for s in &l.segs {
+            if let Seg::List(name) = s {
+                t.list = Some(name.clone());
+            }
+        }
+        t.segs.extend(l.segs.iter().cloned());
+    }
+    t
 }
 
 fn placeholder(f: Family, n: usize, sql: &mut String) {
@@ -190,9 +232,14 @@ fn scalar<'a>(params: &'a Params, name: &Name) -> Result<&'a BindValue, RenderEr
 }
 
 /// The `show-create` identifier: the bind's text, backtick-quoted (R-M4-37). MySQL and
-/// MariaDB always quote with backticks; `ANSI_QUOTES` is never trusted (T1a review m2).
+/// MariaDB always quote with backticks; `ANSI_QUOTES` is never trusted (T1a review m2). Only
+/// a text-typed bind is a name (fix round 1, m5).
 fn ident_text(name: &Name, params: &Params) -> Result<String, RenderError> {
-    let BindValue::Typed { text, .. } = scalar(params, name)? else {
+    let BindValue::Typed {
+        hint: LogicalType::Text { .. },
+        text,
+    } = scalar(params, name)?
+    else {
         return Err(RenderError::IdentNotText(name.clone()));
     };
     if text.is_empty() {
@@ -220,8 +267,8 @@ fn build(
     sec: &Section,
     t: &Template,
     params: &Params,
-    chunk: &[BindValue],
-) -> Result<RenderedQuery, RenderError> {
+    chunk: &[&BindValue],
+) -> Result<DraftQuery, RenderError> {
     let mut sql = String::new();
     let mut binds = Vec::new();
     for s in &t.segs {
@@ -237,7 +284,7 @@ fn build(
                     if k > 0 {
                         sql.push_str(", ");
                     }
-                    binds.push(v.clone());
+                    binds.push((*v).clone());
                     placeholder(family, binds.len(), &mut sql);
                 }
                 sql.push(')');
@@ -253,14 +300,14 @@ fn build(
             }
         }
     }
-    Ok(RenderedQuery {
+    Ok(DraftQuery {
         sql,
         binds,
         joinable: sec.joinable,
     })
 }
 
-impl Pack {
+impl DraftPack {
     fn template(&self, idx: usize, ctx: &PackCtx) -> Arc<Template> {
         let key = TemplateKey {
             section: idx,
@@ -279,7 +326,7 @@ impl Pack {
         if let Some(t) = cache.get(&key) {
             return t.clone();
         }
-        let t = Arc::new(template_of(&self.inner.sections[idx], ctx).0);
+        let t = Arc::new(template_of(&self.inner.sections[idx], ctx));
         if cache.len() >= TEMPLATE_CACHE_CAP {
             cache.clear();
         }
@@ -288,10 +335,12 @@ impl Pack {
     }
 
     /// Renders `section` for `ctx`: one query, or several when a list bind is chunked
-    /// (R-M4-3, at most [`MAX_IN_LIST`] items each); **none** when the list bind is empty
-    /// (the section is skipped: it would select nothing). Every scalar bind is checked even
-    /// then.
-    pub fn render(&self, section: &str, ctx: &PackCtx) -> Result<Vec<RenderedQuery>, RenderError> {
+    /// (R-M4-3: duplicates removed first, then at most [`MAX_IN_LIST`] items each); **none**
+    /// when the list bind is empty. That empty answer is right only because the parser
+    /// admits a list bind solely as a top-level `AND` conjunct of the `WHERE` clause, never
+    /// under a negation (fix round 1, I3): an empty set there selects nothing. Every scalar
+    /// bind is checked even then.
+    pub fn render(&self, section: &str, ctx: &PackCtx) -> Result<Vec<DraftQuery>, RenderError> {
         let family = self.inner.family;
         if Family::of(ctx.dialect) != Some(family) {
             return Err(RenderError::DialectMismatch);
@@ -321,7 +370,9 @@ impl Pack {
             .find(|(n, _)| n == list)
             .map(|(_, v)| v)
             .ok_or_else(|| RenderError::MissingBind(list.clone()))?;
-        items
+        let mut seen = HashSet::new();
+        let unique: Vec<&BindValue> = items.iter().filter(|v| seen.insert(*v)).collect();
+        unique
             .chunks(MAX_IN_LIST)
             .map(|chunk| build(family, sec, &t, &ctx.params, chunk))
             .collect()
@@ -331,102 +382,135 @@ impl Pack {
     /// each covers every reachable branch (alg/02 HV-INTRO-04 step 4: the CI matrix prepares
     /// each). Params are empty; the caller binds. Version candidates are every threshold the
     /// section names and its neighbours, plus 0; `mode` and `level` take every value when a
-    /// condition names them; `flavor` the dialect's own, every named one and one unnamed
-    /// member of its family; `flag(mariadb)` follows the flavor; `flag(joined)` is tried only
-    /// on a `joinable` section. An unknown section answers no context.
+    /// condition names them; `flavor` the dialect's own, every named one (`flag(mariadb)`
+    /// names MariaDB) and one unnamed member of its family; `flag(mariadb)` follows the
+    /// flavor; `flag(joined)` is tried only on a `joinable` section. An unknown section
+    /// answers no context.
     pub fn reachable_variants(&self, section: &str) -> Vec<PackCtx> {
         let Some(&idx) = self.inner.index.get(section) else {
             return Vec::new();
         };
-        let sec = &self.inner.sections[idx];
-        let mut versions: Vec<u32> = vec![0];
-        let mut modes = false;
-        let mut levels = false;
-        let mut flavors: Vec<DbmsKind> = Vec::new();
-        let mut joined = false;
-        super::parse::walk_conds(&sec.body, &mut |c| {
-            collect(c, &mut |a| match a {
-                Cond::Version(_, n) => {
-                    versions.extend([n.saturating_sub(1), *n, n.saturating_add(1)]);
-                }
-                Cond::Mode(..) => modes = true,
-                Cond::Level(..) => levels = true,
-                Cond::Flavor(_, f) => flavors.push(*f),
-                Cond::Flag(f) => {
-                    joined |= f.contains(PackFlags::JOINED);
-                    // `flag(mariadb)` follows the flavor, so it names MariaDB.
-                    if f.contains(PackFlags::MARIADB) {
-                        flavors.push(DbmsKind::MariaDb);
-                    }
-                }
-                _ => {}
-            })
-        });
-        versions.sort_unstable();
-        versions.dedup();
-        let modes: &[Mode] = if modes {
-            &[Mode::Full, Mode::Incremental, Mode::Brief, Mode::System]
-        } else {
-            &[Mode::Full]
-        };
-        let levels: &[Level] = if levels {
-            &[Level::Names, Level::Structure, Level::Sources]
-        } else {
-            &[Level::Structure]
-        };
-        let own = default_flavor(self.inner.dialect);
-        let mut cands = vec![own];
-        if !flavors.is_empty() {
-            for f in flavors {
-                if !cands.contains(&f) {
-                    cands.push(f);
+        variants(
+            &self.inner.sections[idx],
+            self.inner.dialect,
+            self.inner.family,
+            usize::MAX,
+        )
+        .unwrap_or_default()
+    }
+}
+
+impl Pack {
+    /// Renders `section` for `ctx` (see [`DraftPack::render`]); the queries may run.
+    pub fn render(&self, section: &str, ctx: &PackCtx) -> Result<Vec<RenderedQuery>, RenderError> {
+        Ok(self
+            .draft
+            .render(section, ctx)?
+            .into_iter()
+            .map(RenderedQuery)
+            .collect())
+    }
+}
+
+/// The distinct-path contexts of `sec` (see [`DraftPack::reachable_variants`]); `None` when
+/// the candidate product exceeds `cap`.
+pub(crate) fn variants(
+    sec: &Section,
+    dialect: DialectId,
+    family: Family,
+    cap: usize,
+) -> Option<Vec<PackCtx>> {
+    let mut versions: Vec<u32> = vec![0];
+    let mut modes = false;
+    let mut levels = false;
+    let mut flavors: Vec<DbmsKind> = Vec::new();
+    let mut joined = false;
+    super::parse::walk_conds(&sec.body, &mut |c| {
+        collect(c, &mut |a| match a {
+            Cond::Version(_, n) => {
+                versions.extend([n.saturating_sub(1), *n, n.saturating_add(1)]);
+            }
+            Cond::Mode(..) => modes = true,
+            Cond::Level(..) => levels = true,
+            Cond::Flavor(_, f) => flavors.push(*f),
+            Cond::Flag(f) => {
+                joined |= f.contains(PackFlags::JOINED);
+                // `flag(mariadb)` follows the flavor, so it names MariaDB.
+                if f.contains(PackFlags::MARIADB) {
+                    flavors.push(DbmsKind::MariaDb);
                 }
             }
-            let named = cands.clone();
-            if let Some(other) = self
-                .inner
-                .family
-                .flavors()
-                .iter()
-                .find(|f| !named.contains(f))
-            {
-                cands.push(*other);
+            _ => {}
+        })
+    });
+    versions.sort_unstable();
+    versions.dedup();
+    let modes: &[Mode] = if modes {
+        &[Mode::Full, Mode::Incremental, Mode::Brief, Mode::System]
+    } else {
+        &[Mode::Full]
+    };
+    let levels: &[Level] = if levels {
+        &[Level::Names, Level::Structure, Level::Sources]
+    } else {
+        &[Level::Structure]
+    };
+    let mut cands = vec![default_flavor(dialect)];
+    if !flavors.is_empty() {
+        for f in flavors {
+            if !cands.contains(&f) {
+                cands.push(f);
             }
         }
-        let joins: &[bool] = if joined && sec.joinable {
-            &[false, true]
-        } else {
-            &[false]
-        };
-        let mut seen: HashSet<Vec<u32>> = HashSet::new();
-        let mut out = Vec::new();
-        for &version in &versions {
-            for &mode in modes {
-                for &level in levels {
-                    for &flavor in &cands {
-                        for &j in joins {
-                            let mut flags = PackFlags::empty();
-                            flags.set(PackFlags::MARIADB, flavor == DbmsKind::MariaDb);
-                            flags.set(PackFlags::JOINED, j);
-                            let ctx = PackCtx {
-                                dialect: self.inner.dialect,
-                                version,
-                                flavor,
-                                mode,
-                                level,
-                                flags,
-                                params: Params::default(),
-                            };
-                            if seen.insert(template_of(sec, &ctx).1) {
-                                out.push(ctx);
-                            }
+        let named = cands.clone();
+        if let Some(other) = family.flavors().iter().find(|f| !named.contains(f)) {
+            cands.push(*other);
+        }
+    }
+    let joins: &[bool] = if joined && sec.joinable {
+        &[false, true]
+    } else {
+        &[false]
+    };
+    let product = versions
+        .len()
+        .saturating_mul(modes.len())
+        .saturating_mul(levels.len())
+        .saturating_mul(cands.len())
+        .saturating_mul(joins.len());
+    if product > cap {
+        return None;
+    }
+    let mut seen: HashSet<Vec<u32>> = HashSet::new();
+    let mut out = Vec::new();
+    for &version in &versions {
+        for &mode in modes {
+            for &level in levels {
+                for &flavor in &cands {
+                    for &j in joins {
+                        let mut flags = PackFlags::empty();
+                        flags.set(PackFlags::MARIADB, flavor == DbmsKind::MariaDb);
+                        flags.set(PackFlags::JOINED, j);
+                        let ctx = PackCtx {
+                            dialect,
+                            version,
+                            flavor,
+                            mode,
+                            level,
+                            flags,
+                            params: Params::default(),
+                        };
+                        let mut path = Vec::new();
+                        kept_lines(&sec.body, &ctx, &mut Vec::new(), &mut path);
+                        if seen.insert(path) {
+                            out.push(ctx);
                         }
                     }
                 }
             }
         }
-        out
     }
+    Some(out)
 }
 
 /// Visits every atom of `c`.

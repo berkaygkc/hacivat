@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use hacivat_introspect::pack::{
-    LintKind, MAX_IN_LIST, Mode, Pack, PackCtx, PackError, PackErrorKind, PackFlags, Params,
-    RenderError, RenderedQuery, lint,
+    DraftPack, DraftQuery, LintKind, MAX_IN_LIST, Mode, Pack, PackCtx, PackError, PackErrorKind,
+    PackFlags, Params, RenderError, lint,
 };
 use hacivat_meta::Level;
 use hacivat_proto::DbmsKind;
@@ -51,18 +51,18 @@ fn ctx_pg(version: u32) -> PackCtx {
     ctx(DialectId::Postgres, version)
 }
 
-fn parse(d: DialectId, text: &str) -> Pack {
-    Pack::parse(d, text).unwrap_or_else(|e| panic!("fixture parses: {e:?}"))
+fn parse(d: DialectId, text: &str) -> DraftPack {
+    DraftPack::parse(d, text).unwrap_or_else(|e| panic!("fixture parses: {e:?}"))
 }
 
-fn render(pack: &str, section: &str, c: PackCtx) -> Vec<RenderedQuery> {
+fn render(pack: &str, section: &str, c: PackCtx) -> Vec<DraftQuery> {
     parse(c.dialect, pack)
         .render(section, &c)
         .unwrap_or_else(|e| panic!("{section} renders: {e:?}"))
 }
 
 fn parse_err(d: DialectId, text: &str) -> PackError {
-    Pack::parse(d, text).expect_err("the fixture must not parse")
+    DraftPack::parse(d, text).expect_err("the fixture must not parse")
 }
 
 const VERSION_GATED: &str = "\
@@ -86,7 +86,7 @@ const LIST_SECTION: &str = "\
 SELECT t.name FROM t WHERE t.kind = :kind AND t.name IN :[names]
 ";
 
-fn render_list(d: DialectId, names: &[&str]) -> Vec<RenderedQuery> {
+fn render_list(d: DialectId, names: &[&str]) -> Vec<DraftQuery> {
     let mut c = ctx(d, 0);
     c.params.scalars.push((Arc::from("kind"), text("r")));
     c.params
@@ -106,7 +106,7 @@ const SHOW_CREATE: &str = "\
 SHOW CREATE TABLE #{ident:schema}.#{ident:table}
 ";
 
-fn try_render_show_create(table: &str) -> Result<Vec<RenderedQuery>, RenderError> {
+fn try_render_show_create(table: &str) -> Result<Vec<DraftQuery>, RenderError> {
     let mut c = ctx(DialectId::MySql, 80046);
     c.params
         .scalars
@@ -115,7 +115,7 @@ fn try_render_show_create(table: &str) -> Result<Vec<RenderedQuery>, RenderError
     parse(DialectId::MySql, SHOW_CREATE).render("ShowCreateTable", &c)
 }
 
-fn render_show_create(table: &str) -> RenderedQuery {
+fn render_show_create(table: &str) -> DraftQuery {
     let mut q = try_render_show_create(table).expect("renders");
     assert_eq!(q.len(), 1);
     q.remove(0)
@@ -188,7 +188,7 @@ SELECT 1 AS x
 , 2 AS y
 ";
     assert!(matches!(
-        Pack::parse(DialectId::Postgres, UNBALANCED),
+        DraftPack::parse(DialectId::Postgres, UNBALANCED),
         Err(PackError { line: 4, .. })
     ));
     let e = parse_err(DialectId::Postgres, UNBALANCED);
@@ -579,6 +579,57 @@ fn raw_placeholders_and_statement_breaks_are_parse_errors() {
             "SELECT 1 AS x FROM t WHERE t.a IN :[1x]",
             K::BadBind,
         ),
+        // Fix round 1, I1: every form the server reads differently from the lexer.
+        (
+            DialectId::Postgres,
+            "SELECT 1 AS x WHERE `$1; x` IS NULL",
+            K::Backtick,
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT 1 AS x /* a /*/",
+            K::NestedComment,
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT 1 AS x /* a /**/",
+            K::NestedComment,
+        ),
+        (
+            DialectId::Sqlite,
+            "SELECT 1 AS x WHERE #x IS NULL",
+            K::RawPlaceholder,
+        ),
+        (
+            DialectId::Sqlite,
+            "SELECT 1 AS x WHERE :1 IS NULL",
+            K::RawPlaceholder,
+        ),
+        (
+            DialectId::Sqlite,
+            "SELECT 1 AS x WHERE :\u{e9} IS NULL",
+            K::RawPlaceholder,
+        ),
+        (
+            DialectId::Postgres,
+            "SELECT 1 AS x WHERE :1 IS NULL",
+            K::RawPlaceholder,
+        ),
+        (
+            DialectId::MySql,
+            "SELECT 1 AS x /*! OR 1 = ? */",
+            K::ExecutableComment,
+        ),
+        (
+            DialectId::MariaDb,
+            "SELECT 1 AS x /*M!100100 OR 1 */",
+            K::ExecutableComment,
+        ),
+        (
+            DialectId::MySql,
+            "SELECT 1 AS x /*!80000 1 */",
+            K::ExecutableComment,
+        ),
     ];
     for (d, body, kind) in cases {
         let e = parse_err(*d, &section(body));
@@ -590,6 +641,270 @@ fn raw_placeholders_and_statement_breaks_are_parse_errors() {
         &section("SELECT 1 AS x FROM t WHERE t.a NOT\nIN :[ids]"),
     );
     assert_eq!((e.kind, e.line), (K::ListBindNotAfterIn, 4));
+}
+
+#[test]
+fn session_refused_words_are_parse_errors() {
+    // T5 carry: no PRAGMA statement in any pack; table-valued functions are fine.
+    let e = parse_err(DialectId::Sqlite, &section("PRAGMA table_info(:t)"));
+    assert_eq!((e.kind, e.line), (PackErrorKind::PragmaStatement, 3));
+    render(
+        &section("SELECT name AS x FROM pragma_table_info(:t, :s)"),
+        "S",
+        {
+            let mut c = ctx(DialectId::Sqlite, 0);
+            c.params.scalars.push((Arc::from("t"), text("t")));
+            c.params.scalars.push((Arc::from("s"), text("main")));
+            c
+        },
+    );
+    // A joinable section never holds a write word, not even in a literal or comment.
+    let joinable = |body: &str| {
+        DraftPack::parse(
+            DialectId::Postgres,
+            &format!("--- name: S ---\n--- returns: x text ---\n--- joinable ---\n{body}\n"),
+        )
+    };
+    for (body, word) in [
+        (
+            "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.relname = 'insert'",
+            "insert",
+        ),
+        ("SELECT 1 AS x -- UPDATE later", "UPDATE"),
+        ("SELECT 1 AS x /* Delete */", "Delete"),
+        ("SELECT 1 AS \"merge\"", "merge"),
+        ("SELECT 1 AS x INTO t", "INTO"),
+    ] {
+        assert_eq!(
+            joinable(body).unwrap_err().kind,
+            PackErrorKind::JoinableWriteWord(word.into()),
+            "{body}"
+        );
+    }
+    // The same text in a section that is not joinable, and a word that only contains one.
+    DraftPack::parse(
+        DialectId::Postgres,
+        &section("SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.relname = 'insert'"),
+    )
+    .unwrap();
+    joinable("SELECT 1 AS update_count, 2 AS into_x").unwrap();
+}
+
+#[test]
+fn comments_and_backticks_the_lexer_keeps() {
+    // Not nested, so allowed: an empty comment, a run of stars, a slash after the opener.
+    let q = render(
+        &section("SELECT 1 AS x /**/ /***/ /*/ y */ FROM t"),
+        "S",
+        ctx_pg(170000),
+    );
+    assert_eq!(q[0].sql(), "SELECT 1 AS x /**/ /***/ /*/ y */ FROM t");
+    // MySQL and SQLite quote identifiers with backticks; optimizer hints are comments.
+    for d in [DialectId::MySql, DialectId::Sqlite] {
+        let q = render(&section("SELECT `a``b` AS x"), "S", ctx(d, 0));
+        assert_eq!(q[0].sql(), "SELECT `a``b` AS x", "{d:?}");
+    }
+    let q = render(
+        &section("SELECT /*+ MAX_EXECUTION_TIME(1000) */ 1 AS x"),
+        "S",
+        ctx(DialectId::MySql, 80046),
+    );
+    assert!(q[0].sql().contains("/*+"));
+}
+
+// ---------------------------------------------------------------- list placement (I3)
+
+/// A section whose WHERE clause is `body`, over `pg_catalog.pg_class c`.
+fn list_section(select: &str, where_: &str) -> String {
+    section(&format!(
+        "SELECT {select} FROM pg_catalog.pg_class c WHERE {where_}"
+    ))
+}
+
+#[test]
+fn list_bind_is_only_a_top_level_where_conjunct() {
+    use PackErrorKind as K;
+    for (sel, wh, kind) in [
+        (
+            "c.relname AS x",
+            "NOT c.oid IN :[ids]",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "c.relname AS x",
+            "NOT (c.oid IN :[ids])",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "c.relname AS x",
+            "(c.oid IN :[ids]) IS NOT TRUE",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "c.relname AS x",
+            "c.oid IN :[ids] IS NOT TRUE",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "c.relname AS x",
+            "NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.objid = c.oid AND d.refobjid IN :[ids])",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "c.relname AS x",
+            "c.relkind = 'r' AND (c.relnamespace = :ns AND c.oid IN :[ids])",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "c.relname AS x",
+            "c.relkind = 'r' OR c.oid IN :[ids]",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "c.relname AS x",
+            "c.oid IN :[ids] OR c.relkind = 'r'",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "c.relname AS x",
+            "c.relkind = 'r' OR c.relkind = 'v' AND c.oid IN :[ids]",
+            K::ListBindUnchunkable("OR".into()),
+        ),
+        (
+            "count(*) AS x",
+            "c.oid IN :[ids]",
+            K::ListBindUnchunkable("count".into()),
+        ),
+        (
+            "DISTINCT c.relkind AS x",
+            "c.oid IN :[ids]",
+            K::ListBindUnchunkable("DISTINCT".into()),
+        ),
+        (
+            "c.relname AS x",
+            "c.oid IN :[ids] ORDER BY c.relname LIMIT 10",
+            K::ListBindUnchunkable("LIMIT".into()),
+        ),
+        (
+            "c.relname AS x",
+            "c.oid IN :[ids] OFFSET 5",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "c.relkind AS x",
+            "c.oid IN :[ids] GROUP BY c.relkind",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "c.relname AS x",
+            "c.relpages BETWEEN 1 AND c.oid IN :[ids]",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "c.relname AS x",
+            "CASE WHEN c.oid IN :[ids] THEN true END",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "c.relname AS x, pg_catalog.row_number() OVER () AS n",
+            "c.oid IN :[ids]",
+            K::ListBindUnchunkable("OVER".into()),
+        ),
+        (
+            "c.relname AS x",
+            "c.oid IN :[ids] AND c.relam IN :[ids]",
+            K::ListBindReused,
+        ),
+        ("c.relname AS x", "'a' IN :[ids]", K::ListBindNotConjunct),
+    ] {
+        let e = parse_err(DialectId::Postgres, &list_section(sel, wh));
+        assert_eq!(e.kind, kind, "{sel} … WHERE {wh}");
+        assert_eq!(e.line, 3, "{wh}");
+    }
+    // MySQL: `!` and `||` are NOT and OR there.
+    for (wh, kind) in [
+        ("!(TABLE_NAME IN :[ids])", K::ListBindNotConjunct),
+        (
+            "TABLE_SCHEMA = :s || TABLE_NAME IN :[ids]",
+            K::ListBindNotConjunct,
+        ),
+        (
+            "TABLE_SCHEMA = :s || TABLE_TYPE = :t AND TABLE_NAME IN :[ids]",
+            K::ListBindUnchunkable("||".into()),
+        ),
+    ] {
+        let e = parse_err(
+            DialectId::MySql,
+            &section(&format!(
+                "SELECT TABLE_NAME AS x FROM INFORMATION_SCHEMA.TABLES WHERE {wh}"
+            )),
+        );
+        assert_eq!(e.kind, kind, "{wh}");
+    }
+    // An ON clause is not the WHERE clause (a chunked outer join repeats its other rows).
+    let e = parse_err(
+        DialectId::Postgres,
+        &section(
+            "SELECT c.relname AS x FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_index i ON i.indrelid = c.oid AND i.indexrelid IN :[ids]",
+        ),
+    );
+    assert_eq!(e.kind, K::ListBindNotConjunct);
+    // Every legal form: first or later conjunct, qualified or not, ORDER BY after it, an
+    // aggregate in a correlated subquery, the list gated in one variant only.
+    for body in [
+        "SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE c.oid IN :[ids]",
+        "SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE c.relkind = 'r' AND NOT c.relispartition AND c.oid IN :[ids] AND c.relnamespace = :ns",
+        "SELECT relname AS x FROM pg_catalog.pg_class WHERE oid IN :[ids] ORDER BY relname",
+        "SELECT c.relname AS x, (SELECT count(*) FROM pg_catalog.pg_attribute a WHERE a.attrelid = c.oid) AS n FROM pg_catalog.pg_class c WHERE c.oid IN :[ids]",
+        "SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE c.relnamespace = :ns\n--# if mode == incremental\nAND c.oid IN :[ids]\n--# end",
+        "SELECT c.relname AS x FROM pg_catalog.pg_class c\n--# if mode == incremental\nWHERE c.oid IN :[ids]\n--# else\nWHERE c.relnamespace = :ns\n--# end",
+        "SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE pg_catalog.age(c.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid) AND c.oid IN :[ids]",
+    ] {
+        DraftPack::parse(DialectId::Postgres, &section(body))
+            .unwrap_or_else(|e| panic!("{body}: {e:?}"));
+    }
+}
+
+#[test]
+fn an_empty_list_selects_nothing_because_negation_is_refused() {
+    // The legal form: an empty list renders no query, the right answer (no row has an id in
+    // the empty set) …
+    let ok = list_section("c.relname AS x", "c.relkind = 'r' AND c.oid IN :[ids]");
+    let mut c = ctx_pg(170000);
+    c.params.lists.push((Arc::from("ids"), Vec::new()));
+    assert_eq!(
+        parse(DialectId::Postgres, &ok).render("S", &c),
+        Ok(Vec::new())
+    );
+    // … and the forms where "no query" would be wrong (every row matches a negated empty
+    // set) never parse.
+    for wh in [
+        "NOT c.oid IN :[ids]",
+        "NOT (c.oid IN :[ids])",
+        "c.oid NOT IN :[ids]",
+        "(c.oid IN :[ids]) IS NOT TRUE",
+        "c.relkind = 'r' OR c.oid IN :[ids]",
+    ] {
+        assert!(
+            DraftPack::parse(DialectId::Postgres, &list_section("c.relname AS x", wh)).is_err(),
+            "{wh}"
+        );
+    }
+}
+
+#[test]
+fn list_items_are_deduplicated_before_chunking() {
+    let mut items: Vec<String> = ids(1001);
+    items[1000] = "0".into();
+    items.push("7".into());
+    let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+    let q = render_list(DialectId::Postgres, &refs);
+    // 1,002 items, 1,000 distinct: one chunk, each id once, first-seen order.
+    assert_eq!(q.len(), 1);
+    let expect: Vec<BindValue> = std::iter::once(text("r"))
+        .chain((0..1000).map(|i| text(&i.to_string())))
+        .collect();
+    assert_eq!(q[0].binds(), &expect[..]);
 }
 
 // ---------------------------------------------------------------- macros (edge case 6, R-M4-37)
@@ -730,23 +1045,15 @@ fn show_create_sections_hold_no_literal_comment_or_bind() {
 }
 
 #[test]
-fn show_create_macro_outside_show_create_section_is_a_lint_error() {
-    let src = section("SELECT 1 AS x FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = #{ident:t}");
-    let pack = parse(DialectId::MySql, &src);
-    let errors = lint(&pack, DialectId::MySql);
-    assert_eq!(errors.len(), 1, "{errors:?}");
-    assert_eq!(errors[0].kind, LintKind::IdentMacroOutsideShowCreate);
-    assert_eq!(
-        (errors[0].file, errors[0].line, &*errors[0].section),
-        ("", 3, "S")
-    );
-    // The renderer refuses it as well (defence in depth).
-    let mut c = ctx(DialectId::MySql, 80046);
-    c.params.scalars.push((Arc::from("t"), text("t")));
-    assert_eq!(
-        pack.render("S", &c),
-        Err(RenderError::IdentOutsideShowCreate)
-    );
+fn show_create_macro_outside_show_create_section_is_a_parse_error() {
+    // Fix round 1 (m2): a parse error, so a gated-away branch cannot hide it until runtime.
+    for body in [
+        "SELECT 1 AS x FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = #{ident:t}",
+        "SELECT 1 AS x\n--# if version >= 99999999\nFROM #{ident:t}\n--# end",
+    ] {
+        let e = parse_err(DialectId::MySql, &section(body));
+        assert_eq!(e.kind, PackErrorKind::IdentOutsideShowCreate, "{body}");
+    }
 }
 
 // ---------------------------------------------------------------- sections, files (R-M4-32)
@@ -905,21 +1212,27 @@ SELECT c.relname AS x FROM pg_catalog.pg_class c WHERE c.oid = :oid
 --- returns: x text ---
 SELECT 1 AS x
 ";
-    let pack = parse(DialectId::Postgres, src);
+    let pack = Pack::parse(DialectId::Postgres, src).unwrap();
     let mut c = ctx_pg(170000);
     c.params.scalars.push((Arc::from("oid"), text("1259")));
     let q = pack.render("J", &c).unwrap();
     assert!(q[0].joinable());
-    let m = q[0].as_meta_query();
-    assert!(m.joinable());
-    assert_eq!(m.sql(), q[0].sql());
-    assert_eq!(m.binds(), &[text("1259")]);
     let n = pack.render("N", &c).unwrap();
     assert!(!n[0].joinable());
-    assert!(!n[0].as_meta_query().joinable());
     assert!(pack.section("J").unwrap().joinable());
+    // The `MetaQuery` side exists with the `session` feature only.
+    #[cfg(feature = "session")]
+    {
+        let m = q[0].as_meta_query();
+        assert!(m.joinable());
+        assert_eq!(m.sql(), q[0].sql());
+        assert_eq!(m.binds(), &[text("1259")]);
+        assert!(!n[0].as_meta_query().joinable());
+    }
     // A joined connection renders only joinable sections.
     c.flags |= PackFlags::JOINED;
+    assert!(pack.render("J", &c).unwrap()[0].joinable());
+    #[cfg(feature = "session")]
     assert!(pack.render("J", &c).unwrap()[0].as_meta_query().joinable());
     assert_eq!(pack.render("N", &c), Err(RenderError::NotJoinable));
 }
@@ -1190,17 +1503,96 @@ fn group_concat_and_le_on_age_and_txid_current_are_linted() {
         pg("SELECT pg_catalog.pg_current_xact_id_if_assigned() IS NULL AS x"),
         []
     );
-    assert_eq!(
-        lint_kinds(DialectId::MySql, &section("SELECT /*!80000 1 */ 2 AS x")),
-        [L::ExecutableComment]
-    );
-    assert_eq!(
-        lint_kinds(
-            DialectId::MariaDb,
-            &section("SELECT /*M!100100 1 */ 2 AS x")
+}
+
+#[test]
+fn age_outside_the_between_shape_is_linted() {
+    use LintKind as L;
+    let pg = |b: &str| lint_kinds(DialectId::Postgres, &section(b));
+    let w = "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE";
+    for cond in [
+        "pg_catalog.age(c.xmin)::int8 <= :w",
+        "pg_catalog.age(c.xmin)::pg_catalog.int8 <= :w",
+        "(pg_catalog.age(c.xmin)) <= :w",
+        ":w >= (pg_catalog.age(c.xmin))",
+        "pg_catalog.age(c.xmin) + 0 < :w",
+        "pg_catalog.age(c.xmin) = :w",
+        "pg_catalog.age(c.xmin) BETWEEN 1 AND :w",
+        "pg_catalog.age(c.xmin) IS NOT NULL",
+    ] {
+        let k = pg(&format!("{w} {cond}"));
+        assert!(k.contains(&L::OrderingOnAge), "{cond}: {k:?}");
+    }
+    for cond in [
+        "pg_catalog.age(c.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)",
+        "pg_catalog.age(c.xmin)::pg_catalog.int8 BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)",
+    ] {
+        assert_eq!(pg(&format!("{w} {cond}")), [], "{cond}");
+    }
+}
+
+#[test]
+fn pg_catalog_functions_are_qualified() {
+    use LintKind as L;
+    let pg = |b: &str| lint_kinds(DialectId::Postgres, &section(b));
+    // Every section: the catalog functions without a `pg_` prefix.
+    for (body, f) in [
+        (
+            "SELECT format_type(a.atttypid, a.atttypmod) AS x FROM pg_catalog.pg_attribute a",
+            "format_type",
         ),
-        [L::ExecutableComment]
+        (
+            "SELECT obj_description(c.oid, 'pg_class') AS x FROM pg_catalog.pg_class c",
+            "obj_description",
+        ),
+        (
+            "SELECT has_table_privilege(c.oid, 'SELECT') AS x FROM pg_catalog.pg_class c",
+            "has_table_privilege",
+        ),
+        (
+            "SELECT 1 AS x FROM unnest(:a::pg_catalog.oid[]) u",
+            "unnest",
+        ),
+    ] {
+        assert_eq!(pg(body), [L::UnqualifiedPgCatalog(f.into())], "{body}");
+    }
+    assert_eq!(
+        pg(
+            "SELECT pg_catalog.format_type(a.atttypid, NULL) AS x, coalesce(a.attname, '') AS y FROM pg_catalog.pg_attribute a WHERE a.attnum IN (1, 2) AND EXISTS (SELECT 1)"
+        ),
+        []
     );
+    // A joinable section (no pinned search_path, R-M4-46): every function call.
+    let joinable = |body: &str| {
+        lint_kinds(
+            DialectId::Postgres,
+            &format!("--- name: S ---\n--- returns: x text ---\n--- joinable ---\n{body}\n"),
+        )
+    };
+    assert_eq!(
+        joinable("SELECT myfunc(c.oid) AS x FROM pg_catalog.pg_class c"),
+        [L::UnqualifiedPgCatalog("myfunc".into())]
+    );
+    assert_eq!(
+        joinable("SELECT public.myfunc(c.oid) AS x FROM pg_catalog.pg_class c"),
+        [L::UnqualifiedPgCatalog("myfunc".into())]
+    );
+    assert_eq!(
+        joinable(
+            "SELECT pg_catalog.length(c.relname) AS x, CAST(c.oid AS pg_catalog.int8) AS y, coalesce(c.reltuples, 0) AS z FROM pg_catalog.pg_class c WHERE c.oid = ANY (ARRAY[1]) AND EXISTS (SELECT 1)"
+        ),
+        []
+    );
+    // PG 18 folds.
+    for f in ["casefold", "initcap"] {
+        assert!(
+            pg(&format!(
+                "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE pg_catalog.{f}(c.relname) = :n"
+            ))
+            .contains(&L::CaseFoldingOnCatalogName(f.into())),
+            "{f}"
+        );
+    }
 }
 
 #[test]
@@ -1393,7 +1785,7 @@ proptest! {
         text.push_str("SELECT 1 AS x\n");
         let mut next = 0;
         write_body(&body, &mut text, &mut next);
-        let pack = Pack::parse(DialectId::MySql, &text).expect("generated packs parse");
+        let pack = DraftPack::parse(DialectId::MySql, &text).expect("generated packs parse");
 
         let mut by_variants = BTreeSet::new();
         for v in pack.reachable_variants("S") {
@@ -1436,7 +1828,7 @@ proptest! {
     #[test]
     fn parse_never_panics(text in "(--- name: S ---\n|--- returns: x text ---\n|--# if [a-z()=<>! 0-9]{0,20}\n|--# else\n|--# end\n|[ -~]{0,30}\n)*") {
         for d in [DialectId::Postgres, DialectId::MySql, DialectId::Sqlite] {
-            if let Ok(p) = Pack::parse(d, &text) {
+            if let Ok(p) = DraftPack::parse(d, &text) {
                 let _ = lint(&p, d);
                 for s in p.sections() {
                     let _ = p.render(s, &ctx(d, 150000));
@@ -1451,9 +1843,9 @@ proptest! {
 const LOCALE_PACK: &str = "\
 --- name: S ---
 --- returns: x text ---
-SELECT 'İı' AS x, c.relname FROM pg_catalog.pg_class c
+SELECT 'İı' AS x, #{max_in_list} AS m, c.relname FROM pg_catalog.pg_class c
 --# if version >= 150000 and level >= structure
-WHERE c.relname = :name AND c.oid IN :[ids] LIMIT #{max_in_list}
+WHERE c.relname = :name AND c.oid IN :[ids]
 --# end
 ";
 

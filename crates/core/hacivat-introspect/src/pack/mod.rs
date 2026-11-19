@@ -28,24 +28,38 @@
 //!   `80046`), `mode` (`full`, `incremental`, `brief`, `system`), `level` (`names`,
 //!   `structure`, `sources`), `flavor` (a `DbmsKind` id) and `flag(mariadb|joined)`, with
 //!   `and`, `or`, `not` and parentheses.
-//! - **Binds** (R-M4-3): `:name` is one bind; `:[name]` is a list bind written right after
-//!   `IN` on its line and renders as `(…)` with one bind per item, chunked at
-//!   [`MAX_IN_LIST`] items (one query per chunk; an empty list skips the section). `NOT IN`
-//!   is refused: a chunked `NOT IN` would match rows another chunk excludes. Rows of several
-//!   chunks are concatenated, so a list bind belongs in a filter that is a plain conjunction
-//!   (no aggregate over the chunked set, no `OR` beside it). PostgreSQL gets `$n`, every
-//!   other dialect `?`. `::` (a PostgreSQL cast) is never a bind.
+//! - **Binds** (R-M4-3): `:name` is one bind; `:[name]` is a list bind and renders as `(…)`
+//!   with one bind per item, duplicates removed, chunked at [`MAX_IN_LIST`] items (one query
+//!   per chunk; an empty list renders no query). A list bind is legal only as a top-level
+//!   `AND` conjunct of the `WHERE` clause written `<column> IN :[name]` — outside every
+//!   parenthesis, with no `NOT`, `!`, `IS …`, `OR`, `CASE` or `BETWEEN … AND` around it, used
+//!   once per section, in a statement with no aggregate, `GROUP BY`, `HAVING`, `LIMIT`,
+//!   `OFFSET`, `FETCH`, `DISTINCT`, window or set operation at its level (checked in every
+//!   `--# if` variant; fix round 1, I3). Then each chunk selects a disjoint part of the
+//!   answer and the chunks' union is the answer. PostgreSQL gets `$n`, every other dialect
+//!   `?`. `::` (a PostgreSQL cast) is never a bind.
 //! - **Macros** are a closed enum ([`Macro`]): `#{max_in_list}` (the chunk size) and
-//!   `#{ident:<bind>}`, which only a `show-create` section may use: it renders the bind's
-//!   text through `sql_ident::quote::quote(DialectId::MySql, …)` and refuses a NUL. Names are
-//!   never macros (alg/02 HV-INTRO-04 edge 6).
+//!   `#{ident:<bind>}`, which only a `show-create` section may use (a parse error elsewhere):
+//!   it renders a text-typed bind through `sql_ident::quote::quote(DialectId::MySql, …)` and
+//!   refuses a NUL. Names are never macros (alg/02 HV-INTRO-04 edge 6).
 //! - **Fail-closed lexing.** Literals, quoted identifiers and block comments close on the line
-//!   they open; a backslash inside a literal, a raw placeholder (`$…` on PostgreSQL and
-//!   SQLite, `?` on MySQL and SQLite, `@` and `[` on SQLite), a control character other
-//!   than the tab, a `;`, a MySQL `#` comment or a MySQL `--` without a following space, a nested `/*` and a macro inside a literal or
-//!   comment are parse errors: the lexer and the server can never disagree about what is
-//!   code. A `show-create` section holds no literal, comment or bind, and each identifier
-//!   macro stands alone between whitespace, `.`, `(`, `)` or `,`.
+//!   they open. These are parse errors: a backslash inside a literal; a raw placeholder (`$`
+//!   on PostgreSQL and SQLite, `?` on MySQL and SQLite, `@`, `#name` and `[` on SQLite, `:`
+//!   followed by a digit or a non-ASCII byte everywhere); a backtick in a PostgreSQL pack
+//!   (an operator character there, not a quote); `/*` anywhere inside a block comment,
+//!   its closing `*/` included (PostgreSQL nests comments); a MySQL `/*!` or MariaDB `/*M!`
+//!   executable comment; a control character other than the tab; a `;`; a MySQL `#`
+//!   comment or a MySQL `--` without a following space; a macro inside a literal or
+//!   comment. Each rule closes one known way the server would read code where this lexer
+//!   reads a literal or comment (or the reverse) on the server's default settings; the
+//!   review's probes H1–H4 (`tests/hostile_t04_review.rs`) pin them. A `show-create` section
+//!   holds no literal, comment or bind, and each identifier macro stands alone between
+//!   whitespace, `.`, `(`, `)` or `,`.
+//! - **Provenance** (R-M4-7; fix round 1, I2). A [`Pack`] comes only from `&'static` text
+//!   ([`Pack::parse`], [`Pack::parse_all`], [`Pack::builtin`]); runtime text parses into a
+//!   [`DraftPack`], whose [`DraftQuery`]s cannot become a `MetaQuery`. Check-deps
+//!   `PackParseOnlyFromPacks` limits naming `Pack::parse`/`parse_all` to `pack/**`, the
+//!   introspector modules, `tests/` and `fuzz/meta/`.
 //!
 //! This module builds **without** the `session` feature (the fuzzed parser, renderer and
 //! lint, ADR 0008 `m4-t01a`, `m4-t04`). The one function that turns a rendered query into a
@@ -70,7 +84,7 @@ pub mod render;
 
 pub use lint::{LintError, LintKind, lint};
 pub use parse::Macro;
-pub use render::{RenderError, RenderedQuery};
+pub use render::{DraftQuery, RenderError, RenderedQuery};
 
 use parse::Family;
 
@@ -151,10 +165,23 @@ pub fn files_of(dialect: DialectId) -> Option<&'static [PackFile]> {
     }
 }
 
-/// A parsed pack: its sections, merged from every file. Cloning is cheap (shared).
+/// A pack parsed from **runtime** text (tests, the fuzz target, a pack author's tooling): it
+/// parses, lints and renders exactly like a [`Pack`], but its queries are [`DraftQuery`]s,
+/// which cannot become a `MetaQuery` (fix round 1, I2: catalog SQL that runs comes only from
+/// `&'static` pack text). Cloning is cheap (shared).
 #[derive(Clone)]
-pub struct Pack {
+pub struct DraftPack {
     inner: Arc<Inner>,
+}
+
+/// A pack parsed from `&'static` text (the `include_str!` pack files): the only pack whose
+/// rendered queries ([`RenderedQuery`]) become a `MetaQuery` (R-M4-7). Check-deps
+/// `PackParseOnlyFromPacks` limits where [`Pack::parse`] and [`Pack::parse_all`] may be named
+/// (`pack/**`, the introspector modules, `tests/`, `fuzz/meta/`), so `Box::leak`ed runtime
+/// text cannot be laundered into one either. Cloning is cheap (shared).
+#[derive(Clone, PartialEq, Eq)]
+pub struct Pack {
+    draft: DraftPack,
 }
 
 struct Inner {
@@ -168,51 +195,65 @@ struct Inner {
     cache: Mutex<HashMap<render::TemplateKey, Arc<render::Template>>>,
 }
 
-impl std::fmt::Debug for Pack {
+impl std::fmt::Debug for DraftPack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Pack")
+        f.debug_struct("DraftPack")
             .field("dialect", &self.inner.dialect)
             .field("sections", &self.inner.names)
             .finish()
     }
 }
 
-impl PartialEq for Pack {
+impl std::fmt::Debug for Pack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pack")
+            .field("dialect", &self.draft.inner.dialect)
+            .field("sections", &self.draft.inner.names)
+            .finish()
+    }
+}
+
+impl PartialEq for DraftPack {
     fn eq(&self, other: &Self) -> bool {
         self.inner.dialect == other.inner.dialect && self.inner.sections == other.inner.sections
     }
 }
 
-impl Eq for Pack {}
+impl Eq for DraftPack {}
 
-impl Pack {
+impl AsRef<DraftPack> for DraftPack {
+    fn as_ref(&self) -> &DraftPack {
+        self
+    }
+}
+
+impl AsRef<DraftPack> for Pack {
+    fn as_ref(&self) -> &DraftPack {
+        &self.draft
+    }
+}
+
+impl DraftPack {
     /// Parses and merges `files` into one pack. The files are merged in **file-name order**
     /// (byte order), whatever order they are given in; a section name defined twice is
     /// [`PackErrorKind::DuplicateSection`] at the later file (R-M4-32).
-    pub fn parse_all(dialect: DialectId, files: &[PackFile]) -> Result<Pack, PackError> {
-        let files: Vec<(&'static str, &str)> = files.iter().map(|&(n, t)| (n, t)).collect();
-        Pack::from_files(dialect, &files)
-    }
-
-    /// Parses one pack text (file name `""`); for tests and the fuzz target.
-    pub fn parse(dialect: DialectId, text: &str) -> Result<Pack, PackError> {
-        Pack::from_files(dialect, &[("", text)])
-    }
-
-    fn from_files(dialect: DialectId, files: &[(&'static str, &str)]) -> Result<Pack, PackError> {
+    pub fn parse_all(
+        dialect: DialectId,
+        files: &[(&'static str, &str)],
+    ) -> Result<DraftPack, PackError> {
         let family = Family::of(dialect).ok_or(PackError {
             file: files.first().map_or("", |f| f.0),
             line: 0,
             kind: PackErrorKind::UnsupportedDialect,
         })?;
-        let sections = parse::parse_files(family, files)?;
+        let sections = parse::parse_files(dialect, family, files)?;
         let names: Vec<Name> = sections.iter().map(|s| s.name.clone()).collect();
         let index = names
             .iter()
             .enumerate()
             .map(|(i, n)| (n.clone(), i))
             .collect();
-        Ok(Pack {
+        Ok(DraftPack {
             inner: Arc::new(Inner {
                 dialect,
                 family,
@@ -222,6 +263,39 @@ impl Pack {
                 cache: Mutex::new(HashMap::new()),
             }),
         })
+    }
+
+    /// Parses one pack text (file name `""`).
+    pub fn parse(dialect: DialectId, text: &str) -> Result<DraftPack, PackError> {
+        DraftPack::parse_all(dialect, &[("", text)])
+    }
+
+    pub fn dialect(&self) -> DialectId {
+        self.inner.dialect
+    }
+
+    /// The section names, in definition order (files in name order).
+    pub fn sections(&self) -> &[Name] {
+        &self.inner.names
+    }
+
+    /// One section's declaration (`returns`, flags, where it is defined).
+    pub fn section(&self, name: &str) -> Option<&Section> {
+        let i = *self.inner.index.get(name)?;
+        Some(&self.inner.sections[i])
+    }
+}
+
+impl Pack {
+    /// Parses and merges the `&'static` `files` (see [`DraftPack::parse_all`]).
+    pub fn parse_all(dialect: DialectId, files: &[PackFile]) -> Result<Pack, PackError> {
+        let files: Vec<(&'static str, &str)> = files.iter().map(|&(n, t)| (n, t)).collect();
+        DraftPack::parse_all(dialect, &files).map(|draft| Pack { draft })
+    }
+
+    /// Parses one `&'static` pack text (file name `""`).
+    pub fn parse(dialect: DialectId, text: &'static str) -> Result<Pack, PackError> {
+        DraftPack::parse_all(dialect, &[("", text)]).map(|draft| Pack { draft })
     }
 
     /// The compiled-in pack of `dialect`, parsed once per process.
@@ -247,18 +321,22 @@ impl Pack {
     }
 
     pub fn dialect(&self) -> DialectId {
-        self.inner.dialect
+        self.draft.dialect()
     }
 
     /// The section names, in definition order (files in name order).
     pub fn sections(&self) -> &[Name] {
-        &self.inner.names
+        self.draft.sections()
     }
 
     /// One section's declaration (`returns`, flags, where it is defined).
     pub fn section(&self, name: &str) -> Option<&Section> {
-        let i = *self.inner.index.get(name)?;
-        Some(&self.inner.sections[i])
+        self.draft.section(name)
+    }
+
+    /// See [`DraftPack::reachable_variants`].
+    pub fn reachable_variants(&self, section: &str) -> Vec<PackCtx> {
+        self.draft.reachable_variants(section)
     }
 }
 
@@ -445,6 +523,31 @@ pub enum PackErrorKind {
     /// A control character other than the tab inside a section line (a bare `\r` ends a
     /// PostgreSQL `--` comment where the pack lexer would not).
     ControlChar,
+    /// A backtick in a PostgreSQL pack (an operator character there, not a quote).
+    Backtick,
+    /// A MySQL `/*!…*/` or MariaDB `/*M!…*/` executable comment (code to the server).
+    ExecutableComment,
+    /// `#{ident:…}` in a section not marked `show-create` (R-M4-37).
+    IdentOutsideShowCreate,
+    /// A list bind used more than once in a section (each use would get the same chunk).
+    ListBindReused,
+    /// A list bind that is not a top-level `AND` conjunct of the `WHERE` clause written
+    /// `<column> IN :[name]` (under parentheses, a negation, `OR`, `IS …`, a `CASE`, an `ON`
+    /// clause …): chunking would change the result.
+    ListBindNotConjunct,
+    /// A construct whose result chunking changes, in a query with a list bind: an aggregate,
+    /// `GROUP BY`, `HAVING`, `LIMIT`, `OFFSET`, `FETCH`, `DISTINCT`, a window, `OR`, `XOR`,
+    /// MySQL `||`, `UNION`/`INTERSECT`/`EXCEPT` at the list's level. Holds the word.
+    ListBindUnchunkable(String),
+    /// A list-bind section with so many `--# if` variants that its check would not finish.
+    ListBindTooManyVariants,
+    /// A `PRAGMA` statement: the session's read check refuses it; SQLite packs read through
+    /// the `pragma_*` table-valued functions (T5 carry).
+    PragmaStatement,
+    /// `INSERT`, `UPDATE`, `DELETE`, `MERGE` or `INTO` anywhere in a `joinable` section's text
+    /// (literals and comments included): a joined `MetaConn` refuses the text (T5 carry).
+    /// Holds the word as written.
+    JoinableWriteWord(String),
 }
 
 bitflags::bitflags! {
