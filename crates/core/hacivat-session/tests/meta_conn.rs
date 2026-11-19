@@ -540,6 +540,7 @@ async fn mysql_session_is_read_only_and_asserted_before_every_snapshot() {
     assert_eq!(
         statements_since(&fake, from),
         [
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
             "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
             "COMMIT"
         ]
@@ -823,6 +824,7 @@ async fn a_mysql_user_session_read_needs_autocommit_and_utf8mb4() {
     assert_eq!(
         statements_since(&fake, from),
         [
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
             "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
             "ROLLBACK"
         ]
@@ -1281,7 +1283,13 @@ async fn sqlite_meta_uses_a_read_only_connection_never_the_users() {
         vec![vec![Some("0".to_string())]],
         "another connection: the user's temp table is not there"
     );
-    let write = snap.rows(q("INSERT INTO t VALUES (2)")).await;
+    // The token guard refuses the write (fix round 2, review B R-M3); past it, the engine
+    // does (`rows_unguarded`, debug builds).
+    assert_eq!(
+        snap.rows(q("INSERT INTO t VALUES (2)")).await.map(drop),
+        Err(MetaError::RefusedText)
+    );
+    let write = snap.rows_unguarded(q("INSERT INTO t VALUES (2)")).await;
     assert!(
         write.as_ref().is_err_and(is_readonly),
         "read-only: {write:?}"
@@ -1311,11 +1319,15 @@ async fn sqlite_meta_conn_has_no_authorizer_and_refuses_writes() {
         .await
         .expect("pragma_table_list runs");
     assert_eq!(cells(&tables), vec![vec![Some("t".to_string())]]);
-    let ddl = snap.rows(q("CREATE TABLE u(a)")).await;
+    assert_eq!(
+        snap.rows(q("CREATE TABLE u(a)")).await.map(drop),
+        Err(MetaError::RefusedText)
+    );
+    let ddl = snap.rows_unguarded(q("CREATE TABLE u(a)")).await;
     assert!(ddl.as_ref().is_err_and(is_readonly), "{ddl:?}");
     drop(snap);
     let mut snap = c.begin_snapshot().await.unwrap();
-    let ddl = snap.rows(q("CREATE TABLE u(a)")).await;
+    let ddl = snap.rows_unguarded(q("CREATE TABLE u(a)")).await;
     assert!(ddl.as_ref().is_err_and(is_readonly), "{ddl:?}");
 }
 
@@ -1336,7 +1348,12 @@ async fn sqlite_attached_files_are_read_only_too() {
     let rows = snap.rows(q("SELECT a FROM aux.t")).await.unwrap();
     assert_eq!(cells(&rows), vec![vec![Some("1".to_string())]]);
     for write in ["CREATE TABLE aux.u(a)", "INSERT INTO aux.t VALUES (2)"] {
-        let e = snap.rows(q(write)).await;
+        assert_eq!(
+            snap.rows(q(write)).await.map(drop),
+            Err(MetaError::RefusedText),
+            "{write}"
+        );
+        let e = snap.rows_unguarded(q(write)).await;
         assert!(e.as_ref().is_err_and(is_readonly), "{write}: {e:?}");
     }
     snap.commit().await.unwrap();

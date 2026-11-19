@@ -2842,7 +2842,10 @@ M4 Task 5 (W1; R-M4-7, R-M4-29, R-M4-38, R-M4-46, U-6(e)). The bodies of T1c's
     `character_set_results` must read `utf8mb4` (an `init_connect` or
     `character_set_client_handshake = OFF` can override the handshake's request; GBK would let
     a lead byte break T17's backtick quoting). Otherwise `ReadOnlyNotEnforced`, and nothing
-    starts. Then `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY`. The variable is
+    starts. Then `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` (fix round 2, R-W1-13: the
+    consistent snapshot needs REPEATABLE READ whatever the session's isolation, and the
+    statement covers this one transaction only) and `START TRANSACTION WITH CONSISTENT
+    SNAPSHOT, READ ONLY`. The variable is
     `@@session.transaction_read_only`; MariaDB before 11.1 has only `@@session.tx_read_only`.
     MariaDB documents `transaction_read_only` as "Introduced: MariaDB 11.1", and `tx_read_only`
     as "Deprecated: MariaDB 11.1". The gate reads the version the server reported at connect.
@@ -2865,13 +2868,23 @@ M4 Task 5 (W1; R-M4-7, R-M4-29, R-M4-38, R-M4-46, U-6(e)). The bodies of T1c's
   - A read is one typed query with binds (`Protocol::Extended`, not suspendable, the cell cap
     off). One result set is kept; the extended protocol and the SQLite driver refuse a second
     statement.
-  - Fix round 1 (review B M1, defence in depth): `meta::check_own_text` refuses, before
-    sending, a text with a control character but `\n` and `\t`, a `;` but a final one, or a
-    first keyword of transaction or session control (`BEGIN`, `START`, `COMMIT`, `ROLLBACK`,
-    `END`, `ABORT`, `SAVEPOINT`, `RELEASE`, `SET`, `PREPARE`, `XA`, `DISCARD`, `RESET`, `LOCK`,
-    `UNLOCK`, `USE`, `ATTACH`, `DETACH`, `VACUUM`, `DO`). It uses the lexer contexts of the
-    connection's engine. SQLite `PRAGMA` reads stay allowed. The server's read-only
-    enforcement stays the guard against writes.
+  - Fix round 2 (review B R-M3; round 1 had a first-keyword check only): `meta::check_own_text`
+    runs the same token guard as the session paths (the read allowlist below), in the lexer
+    contexts of the connection's engine, before anything is sent.
+    - One addition, on SQLite only: a reading `PRAGMA` (no `=` token in it). That connection
+      is opened read-only, and T18 reads `schema_version` and the built-in lists through
+      pragmas. A setting pragma (`PRAGMA writable_schema = ON`) is refused.
+    - Writes, locks and side-effect functions never reach an own connection, so a pack that
+      called `pg_advisory_lock` or `set_config(…, false)` cannot leave a lock or a setting on
+      it past `COMMIT`.
+    - The server's read-only enforcement remains the guard behind it.
+  - `SnapshotTxn::rows_unguarded` (`#[cfg(debug_assertions)]`, `#[doc(hidden)]`) skips the
+    token guard on an own connection only.
+    - The Docker tests use it to prove that the **server** refuses writes (`25006`, `1792`,
+      `SQLITE_READONLY`) and enforces the statement timeout and the XID canary, whose probes
+      name denied functions.
+    - No release binary has it, and it still takes only a `MetaQuery`, which only packs and
+      tests can build.
   - Values come back as text: text, JSON and XML as sent; bytes as UTF-8 when they are; any
     other value as `valfmt::raw_text` writes it, for the connection's engine. A cut value is
     `Unavailable` (it cannot happen with the cap off).
@@ -2932,9 +2945,23 @@ M4 Task 5 (W1; R-M4-7, R-M4-29, R-M4-38, R-M4-46, U-6(e)). The bodies of T1c's
       pg_catalog, pg_temp`, `SET LOCAL statement_timeout = <ms>`, the read, `ROLLBACK`. This
       also closes review B I2 (no server-side read-only and no pinned path) and review A M7 (no
       statement timeout).
-    - MySQL and MariaDB: `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY`, the read,
-      `ROLLBACK`. The session-level read-only setting is never changed, and MySQL applies no
-      statement timeout to the user's session (carry below).
+    - MySQL and MariaDB: `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` (fix round 2), then
+      `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY`, the read, `ROLLBACK`. The
+      session-level read-only setting is never changed, and MySQL applies no statement timeout
+      to the user's session (carry below).
+    - **Known limit (ruling R-W1-13, review B R-M2).** A `SET TRANSACTION` without `SESSION` or
+      `GLOBAL` applies to the session's next transaction only. When the user leaves one pending
+      (say, `SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`, run before their next
+      `START TRANSACTION`), Hacivat's read transaction takes the next-transaction slot, and the
+      user's next transaction runs at the session's isolation instead. Hacivat cannot see a
+      pending one-shot setting: the server keeps no variable for it.
+      - Before fix round 2, the read also inherited the session's isolation; under SERIALIZABLE,
+        `WITH CONSISTENT SNAPSHOT` is ignored and plain reads take shared locks.
+      - Fix round 2 sends `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` first. That
+        statement is scoped to Hacivat's own transaction, so the read always runs at REPEATABLE
+        READ with a consistent snapshot and no shared locks. It does not make the limit worse:
+        a pending one-shot setting is consumed by the next `START TRANSACTION` either way. The
+        Docker matrix does not exercise the one-shot case.
     - SQLite: a deferred `BEGIN`, the read, `ROLLBACK`. A read-only profile's connection
       refuses `BEGIN` (its authorizer, F7) and its engine is read-only already
       (`SQLITE_OPEN_READ_ONLY`, `query_only`), so the read runs there alone.
@@ -2996,25 +3023,52 @@ M4 Task 5 (W1; R-M4-7, R-M4-29, R-M4-38, R-M4-46, U-6(e)). The bodies of T1c's
   - **The rules.** A text is accepted only when all of these hold:
     - it has no control character but `\n` and `\t` (so `\r`, vertical tab and C1 controls
       are refused before lexing; packs are LF-normalized);
+    - fix round 2: it has no space character but ASCII's (no NBSP, no U+2028) and no
+      invisible format character (zero-width spaces and joiners, the word joiner, the BOM, the
+      soft hyphen). Engines read them as name characters, and packs never hold them;
     - it has no MySQL executable comment (`/*!`, `/*M!`), and no `;` but one at the very end
       (a raw check, before lexing);
     - it lexes without an error, and has no unknown, client-command or executable-comment
       token;
+    - fix round 2 (review A I5): it has no PostgreSQL `U&"…"` identifier at all. Its escapes
+      can spell any name (`U&"\006Eextval"`), so the token is refused outright, never decoded.
+      The word `UESCAPE` is refused with it;
     - its first significant token is a word, `SELECT`, `WITH`, `SHOW`, `TABLE` or `VALUES`;
+    - fix round 2: no word or quoted name holds a non-ASCII character. Pack text names catalog
+      objects in ASCII, and user names travel as binds, so such a name is a lookalike
+      (`nеxtval` with a Cyrillic `е`) or glued to an invisible character;
     - no word, and no quoted name, is one of:
       - `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `INTO`, `COPY`, `CALL`, `PREPARE`, `DECLARE`,
-        `EXECUTE`;
-      - the functions `set_config`, `nextval`, `setval`, `pg_notify`, `GET_LOCK`,
+        `EXECUTE`, `UESCAPE`;
+      - the functions `set_config`, `nextval`, `setval`, `lastval`, `pg_notify`, `GET_LOCK`,
         `RELEASE_ALL_LOCKS`, `SLEEP`, `BENCHMARK`, `pg_terminate_backend`,
-        `pg_cancel_backend`, `pg_sleep`;
+        `pg_cancel_backend`, `pg_sleep`, `pg_promote`, `pg_reload_conf` and SQLite's
+        `load_extension`;
       - a name starting with `pg_advisory`, `pg_try_advisory`, `lo_`, `dblink`,
         `txid_current`, `pg_current_xact_id` or `RELEASE_LOCK`;
+    - fix round 2 (review A minor, review B R-M1), the pattern rule for PostgreSQL's
+      administration families: no name starting with any of these is **called** (followed by
+      `(`):
+      - `pg_stat_reset`, `pg_switch_`, `pg_reload_`, `pg_rotate_`;
+      - `pg_create_`, `pg_drop_`, `pg_copy_`, `pg_replication_`, `pg_logical_` (replication
+        slots and origins, restore points, logical messages and decoding);
+      - `pg_log_`, `pg_backup_`, `pg_wal_replay_`, `pg_file_`, `pg_import_`, `pg_promote`.
+
+      A call is the rule, so the catalog views of the same families stay readable:
+      `pg_replication_slots`, `pg_replication_origin_status`, `pg_file_settings`;
     - no `FOR` is followed by `UPDATE`, `SHARE`, `KEY` or `NO`, and no `LOCK` by `IN`;
+    - fix round 2: no MariaDB `NEXT VALUE FOR` or `PREVIOUS VALUE FOR`, and no MySQL
+      `LAST_INSERT_ID(…)` with an argument (it sets the session's value; `LAST_INSERT_ID()`
+      only reads it);
     - no `:=` (also `@x :=`).
+  - Accepted as harmless (reviews' probes): `IS_USED_LOCK` (it only reads), MySQL optimizer
+    hints (`/*+ … */`, one statement's scope), and a PostgreSQL nested comment that hides a
+    word (the server reads one comment).
   - A denylist of first keywords would miss PostgreSQL `END`/`ABORT`, MySQL `XA` and `PREPARE
     TRANSACTION`.
-  - SQLite `PRAGMA` statements are refused here, so `temp` and `:memory:` sections use the
-    table-valued `pragma_*` forms.
+  - SQLite `PRAGMA` statements are refused on the session paths, so `temp` and `:memory:`
+    sections use the table-valued `pragma_*` forms. The own reader takes a reading `PRAGMA`
+    (above).
   - Joinable and user-session sections must not hold the refused words even in a literal, and
     bind such values instead.
   - Packs are trusted text, so this is defence in depth against a pack mistake. Function side
@@ -3028,8 +3082,10 @@ M4 Task 5 (W1; R-M4-7, R-M4-29, R-M4-38, R-M4-46, U-6(e)). The bodies of T1c's
   - T17: MySQL reads on a single-session user's session have no statement timeout. A
     `MAX_EXECUTION_TIME` optimizer hint in the pack text would add one.
   - Review B M2: a reset (`DISCARD ALL`, `COM_RESET_CONNECTION` plus the set-up) of an own
-    connection after a snapshot ends with an error is not done. Function side effects that
-    survive `COMMIT` (`set_config(…, false)`, advisory locks) stay the pack lint's.
+    connection after a snapshot ends with an error is not done. Since fix round 2 the token
+    guard keeps the known side-effect functions off the own connection too. Functions outside
+    the lists stay the pack lint's (an allowlist of the catalog functions packs may call;
+    review A minor, review B R-M1).
 - **Tests.**
   - `crates/core/hacivat-session/tests/meta_conn.rs`: fakes, plus SQLite on real files.
   - `crates/core/hacivat-session/tests/hostile_t05_review_a.rs` and `hostile_t05_review_b.rs`:

@@ -413,3 +413,166 @@ async fn h5_control_committed_snapshot() {
         "the user's write was blocked by the metadata reader's lock"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Re-review probes of fix round 1 (`review_b_rereview.rs`, R1–R3), asserting fix round 2.
+
+/// R1: the token guard per engine. Every write, lock, side effect and glued or hidden keyword
+/// is refused (R-M1 included: `NEXT VALUE FOR`, `LAST_INSERT_ID(n)`, the PG administration
+/// families, `load_extension`); the harmless readings stay accepted.
+#[test]
+fn r1_token_guard_probes() {
+    use hacivat_proto::DbmsKind;
+    use hacivat_session::meta::check_read_text_for;
+    let refused: &[(DbmsKind, &str)] = &[
+        (DbmsKind::MySql, "SELECT 1--1 INTO @x"),
+        (DbmsKind::MySql, "SELECT 1 --1\n INTO @x"),
+        (DbmsKind::MySql, "SELECT 1 #x\n INTO @x"),
+        (DbmsKind::MySql, "SELECT LAST_INSERT_ID(5)"),
+        (DbmsKind::MySql, "SELECT * FROM t FOR SHARE NOWAIT"),
+        (DbmsKind::MySql, "SELECT * FROM t LOCK  IN SHARE MODE"),
+        (DbmsKind::MySql, "SELECT 'a\\' INTO @x -- '"),
+        (DbmsKind::MySql, "SELECT \"a\\\" INTO @x -- \""),
+        (DbmsKind::MySql, "SELECT _binary'x'INTO @a"),
+        (DbmsKind::MySql, "SELECT x'41'INTO @a"),
+        (DbmsKind::MariaDb, "SELECT NEXT VALUE FOR s"),
+        (DbmsKind::MariaDb, "SELECT NEXTVAL(s)"),
+        (DbmsKind::MariaDb, "SELECT 1 /*M!100000 INTO @x */"),
+        (DbmsKind::Postgres, "SELECT $a$ $$ $a$INTO t"),
+        (DbmsKind::Postgres, "SELECT $$x$$INTO evil"),
+        (DbmsKind::Postgres, "SELECT 1INTO evil"),
+        (DbmsKind::Postgres, "SELECT $1INTO evil"),
+        (DbmsKind::Postgres, "SELECT E'\\'' INTO evil -- '"),
+        (DbmsKind::Postgres, "SELECT 'a\\' INTO evil -- '"),
+        (DbmsKind::Postgres, "SELECT U&'\\0041' INTO evil"),
+        (DbmsKind::Postgres, "SELECT * FROM t FOR\tSHARE"),
+        (DbmsKind::Postgres, "SELECT * FROM t FOR /* c */ KEY SHARE"),
+        (
+            DbmsKind::Postgres,
+            "SELECT pg_logical_emit_message(true, 'a', 'b')",
+        ),
+        (DbmsKind::Postgres, "SELECT pg_stat_reset()"),
+        (DbmsKind::Postgres, "SELECT pg_switch_wal()"),
+        (DbmsKind::Postgres, "SELECT pg_reload_conf()"),
+        (DbmsKind::Postgres, "SELECT pg_create_restore_point('x')"),
+        (
+            DbmsKind::Postgres,
+            "SELECT * FROM pg_logical_slot_get_changes('s', NULL, NULL)",
+        ),
+        (
+            DbmsKind::Postgres,
+            "SELECT pg_replication_slot_advance('s', '0/0')",
+        ),
+        (DbmsKind::Postgres, "SELECT pg_drop_replication_slot('s')"),
+        (DbmsKind::Postgres, "SELECT pg_catalog.\"nextval\"('s')"),
+        (DbmsKind::Postgres, "SELECT \"pg_advisory_lock\"(1)"),
+        (DbmsKind::Postgres, "SELECT 1 \u{2028}INTO evil"),
+        (DbmsKind::Postgres, "SELECT 1 \u{00A0}INTO evil"),
+        (DbmsKind::Postgres, "SELECT 1 \u{FEFF}INTO evil"),
+        (DbmsKind::Sqlite, "SELECT load_extension('x')"),
+        (DbmsKind::Sqlite, "SELECT 1 INTO x"),
+    ];
+    for (kind, t) in refused {
+        assert_eq!(
+            check_read_text_for(t, *kind),
+            Err(MetaError::RefusedText),
+            "{kind:?} {t:?}"
+        );
+    }
+    // Harmless: a per-statement optimizer hint, PostgreSQL's nested comment (one comment to the
+    // server), plain reads.
+    let accepted: &[(DbmsKind, &str)] = &[
+        (DbmsKind::MySql, "SELECT 1 /*+ SET_VAR(sql_mode='') */"),
+        (DbmsKind::Postgres, "SELECT 1 /* /* */ INTO evil */"),
+        (DbmsKind::Postgres, "TABLE t"),
+        (DbmsKind::Sqlite, "SELECT * FROM pragma_table_list"),
+    ];
+    for (kind, t) in accepted {
+        assert_eq!(check_read_text_for(t, *kind), Ok(()), "{kind:?} {t:?}");
+    }
+}
+
+/// R2: MySQL Manual-mode console (`autocommit = 0`): the read is refused, and nothing at all
+/// is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r2_mysql_manual_mode_sends_nothing() {
+    let profile = Profile {
+        single_session: true,
+        max_connections: 3,
+        ..mysql_profile(TlsMode::Disable)
+    };
+    let (sm, fake) = manager(fake_mysql().tracks_transactions(), profile.clone());
+    let user = open(&sm, SessionKind::Console(ClientId::DEFAULT)).await;
+    tx_cmd(&user, TxCommand::SetMode(TxMode::Manual))
+        .await
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let c = sm.meta_conn(spec(&profile), &cancel).await;
+    let from = fake.call_log().len();
+    let got = match c {
+        Ok(mut c) => match c.begin_snapshot().await {
+            Ok(mut s) => s.rows(MetaQuery::new(READ, &[], false)).await.map(drop),
+            Err(e) => Err(e),
+        },
+        Err(e) => Err(e),
+    };
+    let sent = fake.call_log()[from..].to_vec();
+    assert_eq!(got, Err(MetaError::Busy));
+    assert_eq!(snap(&user).tx.status, TxStatus::Idle);
+    assert!(sent.is_empty(), "{sent:?}");
+}
+
+/// R3: a queued user BEGIN, then the read, then (queued behind) the user's ROLLBACK, 200
+/// rounds on a multi-thread runtime: the read never runs between the user's BEGIN and
+/// ROLLBACK, and always inside Hacivat's own read-only transaction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn r3_queued_user_tx_race_many_rounds() {
+    let profile = single_pg();
+    let (sm, fake) = manager(
+        fake_pg().tracks_transactions().queries(vec![relnames()]),
+        profile.clone(),
+    );
+    let user = open(&sm, SessionKind::Console(ClientId::DEFAULT)).await;
+    let cancel = CancellationToken::new();
+    let mut c = sm
+        .meta_conn(spec(&profile), &cancel)
+        .await
+        .expect("meta conn");
+    for _ in 0..200 {
+        let Ok(mut snap) = c.begin_snapshot().await else {
+            continue;
+        };
+        let from = fake.call_log().len();
+        let u = user.clone();
+        let t = tokio::spawn(async move {
+            let b = u.submit(exec("BEGIN"));
+            tokio::task::yield_now().await;
+            let r = u.submit(exec("ROLLBACK"));
+            b.reply.await.unwrap().unwrap();
+            r.reply.await.unwrap().unwrap();
+        });
+        let got = snap.rows(MetaQuery::new(READ, &[], false)).await;
+        t.await.unwrap();
+        drop(snap);
+        assert!(matches!(got, Ok(_) | Err(MetaError::Busy)), "{got:?}");
+        let log = fake.call_log()[from..].to_vec();
+        let mut inside = false;
+        let mut hacivat = false;
+        for c in &log {
+            match c {
+                FakeCall::Statement(s) if s == "BEGIN" => inside = true,
+                FakeCall::Statement(s) if s.starts_with("BEGIN ISOLATION") => hacivat = true,
+                FakeCall::Statement(s) if s == "ROLLBACK" && hacivat => hacivat = false,
+                FakeCall::Statement(s) if s == "ROLLBACK" => inside = false,
+                FakeCall::Typed(FakeTypedCall::Query(q)) if q.starts_with("SELECT relname") => {
+                    assert!(!inside, "read inside the user's transaction: {log:?}");
+                    assert!(
+                        hacivat,
+                        "read outside Hacivat's read-only transaction: {log:?}"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}

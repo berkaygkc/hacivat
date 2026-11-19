@@ -46,8 +46,11 @@
 //!     every snapshot is a deferred `BEGIN`. Attached files go through
 //!     [`MetaConn::attach_read_only`]: SQLite opens them with the main file's flags.
 //!
-//!   A text whose first keyword is transaction or session control never reaches the
-//!   connection ([`check_own_text`]). A lost connection answers [`MetaError::ConnectionLost`]
+//!   Every text passes the same token guard as on a session ([`check_own_text`]: the read
+//!   allowlist, plus a reading `PRAGMA` on SQLite), so neither a write, a lock nor a known
+//!   side-effect function reaches the connection; MySQL and MariaDB snapshots also send
+//!   `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` first. A lost connection answers
+//!   [`MetaError::ConnectionLost`]
 //!   and is dropped; nothing is retried inside a snapshot. A snapshot whose transaction ended
 //!   under it (a MySQL deadlock) answers `ConnectionLost` too. The next
 //!   [`MetaConn::begin_snapshot`] connects again and runs the set-up (and the MySQL assertion)
@@ -441,8 +444,31 @@ impl<'c> SnapshotTxn<'c> {
             };
             match &mut conn.via {
                 Via::Offline => Err(MetaError::Unavailable),
-                Via::Own(own) => own.read_in_snapshot(q.sql(), q.binds()).await,
+                Via::Own(own) => own.read_in_snapshot(q.sql(), q.binds(), true).await,
                 Via::Session(s) => s.read(q).await,
+            }
+        })
+    }
+
+    // ## m4-t05-meta (fix round 2, review B R-M3)
+    /// [`rows`](Self::rows) without the token guard, on an own connection only: the Docker
+    /// tests send writes through it to prove that the **server** refuses them (`25006`,
+    /// `1792`, `SQLITE_READONLY`). Debug builds only (no release binary has it), and it still
+    /// takes only a [`MetaQuery`], which only packs and tests can build. A session path answers
+    /// [`MetaError::Unavailable`].
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn rows_unguarded<'q>(
+        &'q mut self,
+        q: MetaQuery<'q>,
+    ) -> BoxFuture<'q, Result<Rows, MetaError>> {
+        Box::pin(async move {
+            let Some(conn) = self.conn.as_deref_mut() else {
+                return Err(MetaError::Unavailable);
+            };
+            match &mut conn.via {
+                Via::Own(own) => own.read_in_snapshot(q.sql(), q.binds(), false).await,
+                Via::Offline | Via::Session(_) => Err(MetaError::Unavailable),
             }
         })
     }
@@ -869,6 +895,10 @@ impl Own {
                 if !mysql_session_confirmed(&rows) {
                     return Err(MetaError::ReadOnlyNotEnforced);
                 }
+                // Fix round 2 (R-W1-13): the consistent snapshot needs REPEATABLE READ, whatever
+                // the session's isolation; `SET TRANSACTION` covers this one transaction only.
+                self.control(&mut slot, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                    .await?;
                 self.control(
                     &mut slot,
                     "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
@@ -888,14 +918,18 @@ impl Own {
         Ok(())
     }
 
-    /// A read of the open snapshot: refused when its text is transaction or session control,
-    /// and `ConnectionLost` (the connection dropped) when the transaction ended under it.
+    /// A read of the open snapshot: refused when its text fails the token guard
+    /// ([`check_own_text`]; `guard` false only for the debug-build `rows_unguarded`), and
+    /// `ConnectionLost` (the connection dropped) when the transaction ended under it.
     async fn read_in_snapshot(
         &mut self,
         sql: &str,
         binds: &[BindValue],
+        guard: bool,
     ) -> Result<Rows, MetaError> {
-        check_own_text(sql, self.kind())?;
+        if guard {
+            check_own_text(sql, self.kind())?;
+        }
         let mut slot = self.conn(false).await?;
         if slot.snapshot.is_none() || slot.snapshot != self.open {
             return Err(MetaError::ConnectionLost);
@@ -1471,7 +1505,13 @@ impl Core {
                 "SET LOCAL search_path = pg_catalog, pg_temp",
                 &timeout,
             ],
-            Family::MySql => vec!["START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY"],
+            // Fix round 2 (R-W1-13): REPEATABLE READ for this one transaction, whatever the
+            // session's isolation. A one-time `SET TRANSACTION` the user left pending is consumed
+            // either way (the documented limit, ADR 0004 `## m4-t05`).
+            Family::MySql => vec![
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+                "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
+            ],
             // A read-only profile's connection refuses `BEGIN` (its authorizer) and its engine
             // is read-only already (`SQLITE_OPEN_READ_ONLY`, `query_only`).
             Family::Sqlite if self.read_only => Vec::new(),
@@ -1542,21 +1582,25 @@ impl Core {
 // ---------------------------------------------------------------------------------------------
 // The text guards (tokens of the project's lexer, I2-A / I3-B)
 
-/// The first keywords a read on a session (joined or the user's) may have.
+/// The first keywords a metadata read may have.
 const READ_KEYWORDS: [&str; 5] = ["SELECT", "WITH", "SHOW", "TABLE", "VALUES"];
 
 /// Words a read never holds anywhere: writes (a data-modifying `WITH`, `MERGE`), `SELECT …
-/// INTO` (a table, an outfile, variables), and statements that run other statements.
-const DENY_WORDS: [&str; 10] = [
+/// INTO` (a table, an outfile, variables), statements that run other statements, and
+/// PostgreSQL's `UESCAPE` (fix round 2, I5: a `U&"…"` name is refused outright, so its escape
+/// clause has no use either).
+const DENY_WORDS: [&str; 11] = [
     "INSERT", "UPDATE", "DELETE", "MERGE", "INTO", "COPY", "CALL", "PREPARE", "DECLARE", "EXECUTE",
+    "UESCAPE",
 ];
 
 /// Functions with side effects a read-only transaction does not stop (or does not see on a
-/// joined or shared session), by exact name.
-const DENY_FUNCTIONS: [&str; 11] = [
+/// joined or shared session), by exact name, wherever the name appears.
+const DENY_FUNCTIONS: [&str; 15] = [
     "SET_CONFIG",
     "NEXTVAL",
     "SETVAL",
+    "LASTVAL",
     "PG_NOTIFY",
     "GET_LOCK",
     "RELEASE_ALL_LOCKS",
@@ -1565,9 +1609,12 @@ const DENY_FUNCTIONS: [&str; 11] = [
     "PG_TERMINATE_BACKEND",
     "PG_CANCEL_BACKEND",
     "PG_SLEEP",
+    "PG_PROMOTE",
+    "PG_RELOAD_CONF",
+    "LOAD_EXTENSION",
 ];
 
-/// The same, by name prefix.
+/// The same, by name prefix, wherever the name appears.
 const DENY_PREFIXES: [&str; 7] = [
     "PG_ADVISORY",
     "PG_TRY_ADVISORY",
@@ -1578,29 +1625,28 @@ const DENY_PREFIXES: [&str; 7] = [
     "RELEASE_LOCK",
 ];
 
-/// First keywords an own connection's snapshot never runs: they would end, nest or change the
-/// read-only transaction or the session (review B M1).
-const OWN_DENY_FIRST: [&str; 20] = [
-    "BEGIN",
-    "START",
-    "COMMIT",
-    "ROLLBACK",
-    "END",
-    "ABORT",
-    "SAVEPOINT",
-    "RELEASE",
-    "SET",
-    "PREPARE",
-    "XA",
-    "DISCARD",
-    "RESET",
-    "LOCK",
-    "UNLOCK",
-    "USE",
-    "ATTACH",
-    "DETACH",
-    "VACUUM",
-    "DO",
+/// PostgreSQL's administration families (fix round 2, review A minor and review B R-M1), by
+/// name prefix, refused where they are **called** (the name followed by `(`): the statistics
+/// reset, WAL and log switches, configuration reload, replication slots and origins, logical
+/// messages and decoding, backups, recovery control, server files and imports. A call is the
+/// rule, so the catalog views of the same families (`pg_replication_slots`,
+/// `pg_replication_origin_status`, `pg_file_settings`) stay readable.
+const DENY_CALL_PREFIXES: [&str; 15] = [
+    "PG_STAT_RESET",
+    "PG_SWITCH_",
+    "PG_RELOAD_",
+    "PG_ROTATE_",
+    "PG_CREATE_",
+    "PG_DROP_",
+    "PG_COPY_",
+    "PG_REPLICATION_",
+    "PG_LOGICAL_",
+    "PG_LOG_",
+    "PG_BACKUP_",
+    "PG_WAL_REPLAY_",
+    "PG_FILE_",
+    "PG_IMPORT_",
+    "PG_PROMOTE",
 ];
 
 /// The lexer contexts `kind`'s text is checked in. Every one must accept it: a text two
@@ -1668,38 +1714,30 @@ pub fn check_read_text(sql: &str) -> Result<(), MetaError> {
     check_read_text_for(sql, DbmsKind::Unknown)
 }
 
-/// The allowlist of text read on a session where the server enforces nothing (the joined
-/// path) or that is shared with the user (the user's session): `Err(RefusedText)` unless, in
-/// every lexer context of `kind` ([`guard_contexts`]):
+/// The token guard of every metadata read (own connection, user's session, joined session):
+/// `Err(RefusedText)` unless, in every lexer context of `kind` ([`guard_contexts`]):
 /// - the text has no control character but `\n` and `\t`, no MySQL executable comment
 ///   (`/*!`, `/*M!`) and no `;` but one at the very end;
-/// - it lexes without an error or an unknown token;
+/// - it lexes without an error, and has no unknown, client-command, executable-comment or
+///   PostgreSQL `U&"…"` identifier token (I5: its escapes can spell any name);
 /// - its first token is a word, `SELECT`, `WITH`, `SHOW`, `TABLE` or `VALUES`;
-/// - no word (or quoted name) is [`DENY_WORDS`], [`DENY_FUNCTIONS`] or starts with
-///   [`DENY_PREFIXES`]; no `FOR UPDATE`, `FOR SHARE`, `FOR KEY SHARE`, `FOR NO KEY UPDATE` or
-///   `LOCK IN SHARE MODE`; no `:=`.
+/// - no word or quoted name is [`DENY_WORDS`] or [`DENY_FUNCTIONS`] or starts with
+///   [`DENY_PREFIXES`]; no name starting with [`DENY_CALL_PREFIXES`] is called;
+/// - no `FOR UPDATE`, `FOR SHARE`, `FOR KEY SHARE`, `FOR NO KEY UPDATE`, `LOCK IN SHARE
+///   MODE`, MariaDB `NEXT VALUE FOR` or `PREVIOUS VALUE FOR`, MySQL `LAST_INSERT_ID(…)` with
+///   an argument, or `:=`.
 pub fn check_read_text_for(sql: &str, kind: DbmsKind) -> Result<(), MetaError> {
-    let refused = Err(MetaError::RefusedText);
-    if !plain_text(sql) {
-        return refused;
-    }
-    for ctx in guard_contexts(kind) {
-        let Ok(profile) = lex_profile(&ctx) else {
-            return refused;
-        };
-        let lexed = lex(sql, profile, ctx.modes, &LexState::Initial);
-        if !read_tokens_ok(sql, &lexed) {
-            return refused;
-        }
-    }
-    Ok(())
+    check_text(sql, kind, false)
 }
 
-/// An own connection's snapshot text (review B M1, defence in depth: the server enforces
-/// read-only there): no control character but `\n` and `\t`, no `;` but a final one, and no
-/// first keyword that is transaction or session control ([`OWN_DENY_FIRST`]), in every lexer
-/// context of `kind`.
+/// The guard of an own connection's snapshot (fix round 2, review B R-M3): [`check_read_text_for`],
+/// and on SQLite also a reading `PRAGMA` (no `=` in it): that connection is opened read-only,
+/// and T18 reads `schema_version` and the built-in lists through pragmas.
 pub fn check_own_text(sql: &str, kind: DbmsKind) -> Result<(), MetaError> {
+    check_text(sql, kind, kind == DbmsKind::Sqlite)
+}
+
+fn check_text(sql: &str, kind: DbmsKind, sqlite_pragma: bool) -> Result<(), MetaError> {
     let refused = Err(MetaError::RefusedText);
     if !plain_text(sql) {
         return refused;
@@ -1709,15 +1747,7 @@ pub fn check_own_text(sql: &str, kind: DbmsKind) -> Result<(), MetaError> {
             return refused;
         };
         let lexed = lex(sql, profile, ctx.modes, &LexState::Initial);
-        let first = significant(&lexed).next();
-        let Some(i) = first else {
-            return refused;
-        };
-        if lexed.kind(i) == TokenKind::ExecutableComment {
-            return refused;
-        }
-        let word = token_text(sql, &lexed, i).to_ascii_uppercase();
-        if OWN_DENY_FIRST.contains(&word.as_str()) {
+        if !read_tokens_ok(sql, &lexed, sqlite_pragma) {
             return refused;
         }
     }
@@ -1731,6 +1761,16 @@ fn plain_text(sql: &str) -> bool {
         .chars()
         .any(|c| c.is_control() && c != '\n' && c != '\t')
     {
+        return false;
+    }
+    // Fix round 2: no space but ASCII's, and no invisible format character (zero-width
+    // spaces and joiners, the word joiner, the BOM, the soft hyphen). Engines read them as
+    // name characters, and packs never hold them.
+    let invisible = |c: char| {
+        (c.is_whitespace() && !c.is_ascii())
+            || matches!(c, '\u{00AD}' | '\u{200B}'..='\u{200F}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}')
+    };
+    if sql.chars().any(invisible) {
         return false;
     }
     if sql.contains("/*!") || sql.contains("/*M!") || sql.contains("/*m!") {
@@ -1762,8 +1802,12 @@ fn denied_name(upper: &str) -> bool {
         || DENY_PREFIXES.iter().any(|p| upper.starts_with(p))
 }
 
+fn denied_call(upper: &str) -> bool {
+    DENY_CALL_PREFIXES.iter().any(|p| upper.starts_with(p))
+}
+
 /// One lexer context's reading of a read's text (see [`check_read_text_for`]).
-fn read_tokens_ok(sql: &str, lexed: &Lexed) -> bool {
+fn read_tokens_ok(sql: &str, lexed: &Lexed, sqlite_pragma: bool) -> bool {
     if !lexed.errors().is_empty() {
         return false;
     }
@@ -1775,44 +1819,62 @@ fn read_tokens_ok(sql: &str, lexed: &Lexed) -> bool {
         return false;
     }
     let keyword = token_text(sql, lexed, first).to_ascii_uppercase();
-    if !READ_KEYWORDS.contains(&keyword.as_str()) {
+    let pragma = sqlite_pragma && keyword == "PRAGMA";
+    if !pragma && !READ_KEYWORDS.contains(&keyword.as_str()) {
         return false;
     }
     let upper = |i: usize| token_text(sql, lexed, i).to_ascii_uppercase();
+    let is = |i: Option<usize>, kind: TokenKind| i.is_some_and(|i| lexed.kind(i) == kind);
     for (n, &i) in sig.iter().enumerate() {
         let next = sig.get(n + 1).copied();
-        match lexed.kind(i) {
-            TokenKind::Unknown | TokenKind::ExecutableComment | TokenKind::ClientCommand => {
-                return false;
-            }
+        let after_next = sig.get(n + 2).copied();
+        let name = match lexed.kind(i) {
+            TokenKind::Unknown
+            | TokenKind::ExecutableComment
+            | TokenKind::ClientCommand
+            | TokenKind::UnicodeQuotedIdent => return false,
             TokenKind::Semicolon if next.is_some() => return false,
-            TokenKind::Word => {
-                let word = upper(i);
-                if denied_name(&word) {
-                    return false;
-                }
-                let next_word = next.map(upper);
-                let after = next_word.as_deref();
-                if word == "FOR" && matches!(after, Some("UPDATE" | "SHARE" | "KEY" | "NO")) {
-                    return false;
-                }
-                if word == "LOCK" && after == Some("IN") {
-                    return false;
-                }
-            }
-            TokenKind::QuotedIdent | TokenKind::UnicodeQuotedIdent => {
-                if denied_name(&unquoted(token_text(sql, lexed, i)).to_ascii_uppercase()) {
-                    return false;
-                }
-            }
+            TokenKind::Word => upper(i),
+            TokenKind::QuotedIdent => unquoted(token_text(sql, lexed, i)).to_ascii_uppercase(),
             TokenKind::Op => {
                 let op = token_text(sql, lexed, i);
                 let glued = i + 1 < lexed.len() && token_text(sql, lexed, i + 1).starts_with('=');
-                if op.contains(":=") || (op.ends_with(':') && glued) {
+                // A setting pragma (`PRAGMA x = v`) is never a read.
+                if op.contains(":=") || (op.ends_with(':') && glued) || (pragma && op.contains('='))
+                {
                     return false;
                 }
+                continue;
             }
-            _ => {}
+            _ => continue,
+        };
+        // Pack text names catalog objects in ASCII (user names travel as binds): a non-ASCII
+        // name is a lookalike (`nеxtval` with a Cyrillic `е`) or glued to an invisible
+        // character, never a pack's.
+        if !name.is_ascii() || denied_name(&name) {
+            return false;
+        }
+        let called = is(next, TokenKind::LParen);
+        if called && denied_call(&name) {
+            return false;
+        }
+        // MySQL: `LAST_INSERT_ID(n)` sets the session's value; `LAST_INSERT_ID()` reads it.
+        if name == "LAST_INSERT_ID" && called && !is(after_next, TokenKind::RParen) {
+            return false;
+        }
+        let next_word = next
+            .filter(|&j| lexed.kind(j) == TokenKind::Word)
+            .map(upper);
+        let after = next_word.as_deref();
+        if name == "FOR" && matches!(after, Some("UPDATE" | "SHARE" | "KEY" | "NO")) {
+            return false;
+        }
+        if name == "LOCK" && after == Some("IN") {
+            return false;
+        }
+        // MariaDB's sequence syntax: `NEXT VALUE FOR s`, `PREVIOUS VALUE FOR s`.
+        if matches!(name.as_str(), "NEXT" | "PREVIOUS") && after == Some("VALUE") {
+            return false;
         }
     }
     true
@@ -2035,6 +2097,22 @@ mod tests {
             ("-- x\rCOMMIT\n", DbmsKind::Postgres),
             ("ATTACH 'x' AS y", DbmsKind::Sqlite),
             ("VACUUM", DbmsKind::Sqlite),
+            // Fix round 2 (review B R-M3): the same token guard as the session paths.
+            ("CREATE TABLE t (a int)", DbmsKind::Postgres),
+            ("INSERT INTO t VALUES (1)", DbmsKind::MySql),
+            ("SELECT pg_advisory_lock(1)", DbmsKind::Postgres),
+            (
+                "SELECT set_config('search_path', 'x', false)",
+                DbmsKind::Postgres,
+            ),
+            ("SELECT GET_LOCK('x', 0)", DbmsKind::MySql),
+            ("SELECT NEXT VALUE FOR s", DbmsKind::MariaDb),
+            ("SELECT U&\"nextval\"('s')", DbmsKind::Postgres),
+            // A setting pragma is not a read; only SQLite takes pragmas at all.
+            ("PRAGMA writable_schema = ON", DbmsKind::Sqlite),
+            ("PRAGMA query_only=0", DbmsKind::Sqlite),
+            ("PRAGMA table_xinfo('t')", DbmsKind::Postgres),
+            ("SELECT load_extension('x')", DbmsKind::Sqlite),
         ] {
             assert_eq!(
                 check_own_text(sql, kind),
@@ -2045,11 +2123,106 @@ mod tests {
         for (sql, kind) in [
             ("SELECT 1", DbmsKind::Postgres),
             ("PRAGMA table_xinfo('t')", DbmsKind::Sqlite),
+            ("PRAGMA main.schema_version", DbmsKind::Sqlite),
+            ("SELECT * FROM pragma_table_list", DbmsKind::Sqlite),
             ("SHOW CREATE TABLE `t`", DbmsKind::MySql),
-            ("CREATE TABLE t (a int)", DbmsKind::Postgres),
-            ("INSERT INTO t VALUES (1)", DbmsKind::MySql),
+            (
+                "SELECT slot_name FROM pg_catalog.pg_replication_slots",
+                DbmsKind::Postgres,
+            ),
+            ("SELECT LAST_INSERT_ID()", DbmsKind::MySql),
         ] {
             assert_eq!(check_own_text(sql, kind), Ok(()), "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn round_two_names_are_refused() {
+        // I5 (review A): a `U&"…"` name can spell any function; refused outright, with `UESCAPE`.
+        // Review A minor / review B R-M1: the sequence syntax, `LAST_INSERT_ID(n)` and the PG
+        // administration families.
+        for (sql, kind) in [
+            ("SELECT U&\"nextval\"('s')", DbmsKind::Postgres),
+            ("SELECT U&\"pg_advisory_lock\"(1)", DbmsKind::Postgres),
+            (
+                "SELECT u&\"set_config\"('search_path','evil',false)",
+                DbmsKind::Postgres,
+            ),
+            ("SELECT U&\"\\006Eextval\"('s')", DbmsKind::Postgres),
+            (
+                "SELECT U&\"!006Eextval\" UESCAPE '!' ('s')",
+                DbmsKind::Postgres,
+            ),
+            ("SELECT pg_catalog.U&\"txid_current\"()", DbmsKind::Postgres),
+            ("SELECT NEXT VALUE FOR s", DbmsKind::MariaDb),
+            ("SELECT PREVIOUS VALUE FOR s", DbmsKind::MariaDb),
+            ("SELECT LASTVAL(s)", DbmsKind::MariaDb),
+            ("SELECT SETVAL(s, 1)", DbmsKind::MariaDb),
+            ("SELECT LAST_INSERT_ID(5)", DbmsKind::MySql),
+            ("SELECT pg_reload_conf()", DbmsKind::Postgres),
+            ("SELECT pg_stat_reset()", DbmsKind::Postgres),
+            (
+                "SELECT pg_stat_reset_shared('bgwriter')",
+                DbmsKind::Postgres,
+            ),
+            ("SELECT pg_switch_wal()", DbmsKind::Postgres),
+            (
+                "SELECT pg_create_logical_replication_slot('s', 'test_decoding')",
+                DbmsKind::Postgres,
+            ),
+            (
+                "SELECT pg_create_physical_replication_slot('s')",
+                DbmsKind::Postgres,
+            ),
+            ("SELECT pg_create_restore_point('x')", DbmsKind::Postgres),
+            ("SELECT pg_drop_replication_slot('s')", DbmsKind::Postgres),
+            (
+                "SELECT pg_replication_origin_create('o')",
+                DbmsKind::Postgres,
+            ),
+            (
+                "SELECT pg_replication_slot_advance('s', '0/0')",
+                DbmsKind::Postgres,
+            ),
+            (
+                "SELECT * FROM pg_logical_slot_get_changes('s', NULL, NULL)",
+                DbmsKind::Postgres,
+            ),
+            (
+                "SELECT pg_logical_emit_message(true, 'p', 'x')",
+                DbmsKind::Postgres,
+            ),
+            ("SELECT pg_rotate_logfile()", DbmsKind::Postgres),
+            ("SELECT pg_promote()", DbmsKind::Postgres),
+            ("SELECT pg_terminate_backend(1)", DbmsKind::Postgres),
+            ("SELECT pg_cancel_backend(1)", DbmsKind::Postgres),
+            (
+                "SELECT pg_catalog . \"pg_reload_conf\" ()",
+                DbmsKind::Postgres,
+            ),
+            ("SELECT load_extension('x')", DbmsKind::Sqlite),
+        ] {
+            assert_eq!(
+                check_read_text_for(sql, kind),
+                Err(MetaError::RefusedText),
+                "{sql:?}"
+            );
+            assert_eq!(check_read_text(sql), Err(MetaError::RefusedText), "{sql:?}");
+        }
+        // The views of the same families stay readable; `LAST_INSERT_ID()` only reads.
+        for (sql, kind) in [
+            (
+                "SELECT * FROM pg_catalog.pg_replication_origin_status",
+                DbmsKind::Postgres,
+            ),
+            (
+                "SELECT name FROM pg_catalog.pg_file_settings",
+                DbmsKind::Postgres,
+            ),
+            ("SELECT LAST_INSERT_ID()", DbmsKind::MySql),
+            ("SELECT next_value FROM t", DbmsKind::MariaDb),
+        ] {
+            assert_eq!(check_read_text_for(sql, kind), Ok(()), "{sql:?}");
         }
     }
 

@@ -180,7 +180,13 @@ async fn pg_meta_txn_refuses_writes() {
             "INSERT INTO pg_catalog.pg_description VALUES (0, 0, 0, 'x')".to_string(),
         ] {
             let mut snap = c.begin_snapshot().await.unwrap();
-            let e = snap.rows(q(&write)).await.expect_err("refused");
+            // The token guard refuses it first (fix round 2, review B R-M3); past it, the
+            // server does (`rows_unguarded`, debug builds).
+            assert_eq!(
+                snap.rows(q(&write)).await.map(drop),
+                Err(MetaError::RefusedText)
+            );
+            let e = snap.rows_unguarded(q(&write)).await.expect_err("refused");
             assert_eq!(
                 code(&e).as_deref(),
                 Some("25006"),
@@ -244,8 +250,9 @@ async fn no_xid_assigned_by_a_metadata_pass() {
                 .await
                 .unwrap_or_else(|e| panic!("{}: {sql}: {e:?}", t.id));
         }
+        // The canary probe names a denied function, so it goes past the guard (debug builds).
         let unassigned = snap
-            .rows(q("SELECT txid_current_if_assigned() IS NULL"))
+            .rows_unguarded(q("SELECT txid_current_if_assigned() IS NULL"))
             .await
             .unwrap();
         assert_eq!(first(&unassigned), "true", "{}: no XID (#pg-canary)", t.id);
@@ -291,7 +298,8 @@ async fn statement_timeout_applies() {
         let mut c = meta(&on, secs(1)).await;
         let mut snap = c.begin_snapshot().await.unwrap();
         assert_eq!(
-            snap.rows(q("SELECT pg_sleep(2)")).await.map(drop),
+            // `pg_sleep` is denied by the guard; the timeout is the server's to prove.
+            snap.rows_unguarded(q("SELECT pg_sleep(2)")).await.map(drop),
             Err(MetaError::Timeout),
             "{}",
             t.id
@@ -389,10 +397,12 @@ async fn mysql_meta_txn_refuses_dml_1792() {
         let on = on(&t).await;
         let mut c = meta(&on, secs(60)).await;
         let mut snap = c.begin_snapshot().await.unwrap();
-        let e = snap
-            .rows(q(&format!("INSERT INTO {}.t VALUES (1)", db.db)))
-            .await
-            .expect_err("refused");
+        let insert = format!("INSERT INTO {}.t VALUES (1)", db.db);
+        assert_eq!(
+            snap.rows(q(&insert)).await.map(drop),
+            Err(MetaError::RefusedText)
+        );
+        let e = snap.rows_unguarded(q(&insert)).await.expect_err("refused");
         assert_eq!(code(&e).as_deref(), Some("1792"), "{}: {e:?}", t.id);
         drop(snap);
         drop(c);
@@ -418,7 +428,11 @@ async fn ddl_refused(t: &DockerTarget) -> String {
     let mut c = meta(&on, secs(60)).await;
     let ddl = format!("CREATE TABLE {}.hvm4_t05 (a int)", db.db);
     let mut snap = c.begin_snapshot().await.unwrap();
-    let e = snap.rows(q(&ddl)).await.expect_err("DDL refused");
+    assert_eq!(
+        snap.rows(q(&ddl)).await.map(drop),
+        Err(MetaError::RefusedText)
+    );
+    let e = snap.rows_unguarded(q(&ddl)).await.expect_err("DDL refused");
     let code = code(&e).unwrap_or_else(|| panic!("{}: {e:?}", t.id));
     drop(snap);
     drop(c);
