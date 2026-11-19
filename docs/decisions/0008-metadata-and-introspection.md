@@ -783,3 +783,105 @@ catalog-level tests (deferred by Task 3) are in `tests/snapshot.rs`.
   - M7: `fk_referencing` answers within the scope.
   - Task 18 and M5: SQLite `temp` is per connection, so the metadata connection never marks
     a console's `temp` loaded; the session overlay owns it.
+
+## m4-t10 — merge
+
+M4 Task 10 fills the existence-diff merge, the catalog delta and the mass-deletion guard
+(HV-INTRO-11, D-039, R-M4-22). The model spike has no merge, so nothing is copied.
+
+- **Pure.** `merge(prev, result, policy)` reads no clock, does no I/O and never changes `prev`.
+  `prev = None` is refused (`MergeError::NoBase`): a result carries no engine or fold rule, so
+  a first load merges into `merge::base(key, dbms, fold)`, the namespace root alone.
+- **Identity** is `ObjectKey::same_object`: the server id when both sides have one, else kind,
+  exact path, overload signature and an unknown kind's raw kind. **R-W2-4 (fix round 1):** exact
+  identity stays primary; on a miss, a folded fallback through `sql_ident::key::match_key`
+  applies only when the name class is caseless for that engine and configuration (MySQL/MariaDB
+  table and database names under `lower_case_table_names` 1/2 — the namespace's stored table
+  rule — and their column, routine and event names; SQLite), the key is certain (never
+  `ServerDependent`, so no non-ASCII cased letter on MySQL), and no server ids conflict. The
+  server forbids case twins there, so the fallback only keeps an object whose spelling drifted;
+  PostgreSQL never folds (`"Users"` and `users` are two objects). It runs in existence lookups,
+  edge-10 admission and sibling matching; ancestors of a nested identity fold by the table rule.
+  A `(kind, server id)` the cache holds twice (T3 m9) matches only by id **and** path, so a
+  stale twin is dropped and never resurrected.
+- **Deletions (C-1, I-1, R-W2-5).** Only a successful existence set of the object's own
+  `ObjectKind`, for the scope it covers, deletes, at any depth and in full and incremental
+  passes alike. `ExistSet::Ok(ids)` is namespace-complete for its kind; `ExistSet::Scoped {
+  scope, ids }` decides a cached object only when its namespace-relative path, or an
+  ancestor's, is in `scope` (a fragment of `t` reports `Table: Scoped { scope: [["t"]] }`; the
+  columns of re-read `a` and `b` are `Column: Scoped { scope: [["a"], ["b"]] }`). A kind whose
+  set is `Failed`, absent, or out of scope is never deleted: its cached objects are carried
+  over, under re-read parents too, and a failed kind is in `MergeReport::stale_kinds`. Paths are
+  those of the **next** namespace (a parent renamed by OID has its children looked up under the
+  new name). Every deletion is in `delta.dropped`. **Contract for T15–T18:** a re-read that
+  should remove a dropped child (column, index, constraint, trigger) reports a set of that child
+  kind scoped to the re-read parents; without one, the cached children stay.
+- **Changed objects** replace their cached counterpart's own properties; their children merge
+  the same way: re-read children replace their cached twins (positionally when the pass returns
+  them in cached order, else by identity), new ones are created, cached ones the pass did not
+  return stay unless decided gone. Re-read parents keep the pass's child order, then the
+  carried children; kept parents keep the cached order, then creations. Facets the pass did not
+  re-read in its own props (a view's source) are invalidated; kept objects keep theirs, shared
+  by reference count. An object identical but for its state mark is not altered; it takes the
+  new mark. A changed child whose parent is cached is matched among that parent's children;
+  one whose parent is neither cached nor re-read asks for a fragment of the parent (edge 9).
+  `NamespaceResult::categories_to_reload` is not read by the merge.
+- **Level (I-2).** No pass lowers a namespace's level: a full pass raises it to the pass's level
+  (`max`), an incremental pass leaves it. A pass below the namespace's level erases nothing it
+  did not read (its children are carried); the namespace keeps its level, and the top-level
+  objects that pass created or re-read are listed in `MergeReport::below_level` (they hold only
+  the pass's level; T15 elevates them, and lowering a namespace is T15's job).
+- **Report.** `MergeOutcome` variants carry a `MergeReport`: stale kinds, fragments to read
+  (edges 9 and 11, and a cached object the existence set lists under a new name that the pass
+  did not re-read; an unknown kind keeps its raw kind), ignored changed objects (edge 10),
+  duplicates (edge 12: the last wins; counted, not a debug assertion), the guard's counts
+  (`checked`, `vanished`, `by_kind`), `suppressed`, `below_level`, and `steps`, a linearity
+  witness.
+- **Guard (I-4).** It counts **top-level** objects only (nested children never dilute it), per
+  kind and over the whole top level: more than `guard_ratio_pct` % (50) of at least
+  `guard_min_objects` (20) decided objects vanishing — in any one top-level kind or in all of
+  them together — is `PendingConfirmation`, for both triggers; `vanished` is the top-level
+  total. It is per pass, as D-039 says ("in one pass"); counting since a confirmed baseline is
+  carried to T15/T22 (M-1).
+- **Keep cached (I-5).** `MergePolicy::deletions` is `Apply` (default) or `Suppress`. On "Remove
+  from cache" the engine publishes the pending `next`; on "Keep cached" it re-merges a clone of
+  the same result with `Suppress`: the pass's creations and alterations apply, every object an
+  existence set says is gone stays and is listed in `MergeReport::suppressed`, and the guard
+  does not fire. The whole pass is never discarded.
+- **Seam additions.** `NamespaceResult` gains `level` and `read_at_ms` (the merge reads no
+  clock); both land in `NsMeta` with the new watermark. `Identity` gains `raw_kind` and
+  `Identity::of`. `ExistSet::Scoped`, `MergePolicy::deletions`/`Deletions`, `KindCount`.
+  `MergeError::NotImplemented` (the T1a stub variant) is removed.
+- **Delta.** `created` and `dropped` name subtree roots; a child created, dropped or altered
+  under an existing parent is listed itself and the parent is altered with `children`. Renames
+  carry `Confidence { per_mille, identity }`: `Confidence::IDENTITY` for a rename that kept the
+  object (server id, or the fold-aware fallback: a case-only rename on a caseless engine), so
+  `CatalogDelta::is_hint(entry)` reads the merge's own decision instead of re-deriving it from
+  the keys. Hints pair dropped and created top-level objects of one kind without server ids whose
+  column signatures (name, raw type, nullability) are ≥ 90 % shared as multisets: identical
+  lists are `Confidence::ONE`, others at most 999‰; above 4,096 candidate pairs per kind only
+  identical lists are paired (a hash match), so a mass rename stays linear. A hint's pair is
+  also in `dropped`/`created`. `CatalogDelta::combine` turns a drop and a create of the same
+  kind and server id in two namespaces of one publish into one `moved` entry. A delta of more
+  than 10,000 entries is coarse: `delta::event` gives `NamespaceReplaced`. `apply_delta`
+  applies a delta to a namespace's top-level keys and refuses one that does not fit.
+- **Cost.** O(|M| + |C| + |E|) with hash maps; no `find` per column. Two fast paths are dry
+  walks of the same algorithm that fall back to the general walk when they do not apply: a full
+  pass that leaves no cached object standing on its own reuses the changed arena (pass order);
+  a pass with no changed object that deletes nothing reuses the cached arena with the new
+  metadata (M-6). Measured on 15,000 tables / 160,000 columns in one schema (release, load ~6):
+  full pass p50 28 ms / p95 31 ms, incremental (1 %) 24 / 26 ms, nothing changed 17 / 22 ms. The
+  local gate is the median (R-W2-3); T33 records p95 on a quiet machine.
+- **Fix round 2.**
+  - **RR-1 (a):** a cached object that the same result re-reads under the same unambiguous
+    server id is a rename (Present), whatever a path-scoped set says.
+  - **RR-1 (b), the contract for T15b, T16 and T21:** on server-id engines a scoped set
+    resolves its keys by server id, so a renamed object is reported under its current name. A
+    scoped key that lists nothing is that key's drop.
+  - **RR-m1:** a kept object that the existence set found under a new name, but that was not
+    re-read, has its children looked up under the new name.
+  - **RR-m2:** a re-read that only reorders children marks the parent `altered { children }`.
+  - **RR-m3:** one existence identity vouches for one cached object. In a corrupt caseless
+    cache the first fold twin takes the match and the others are dropped.
+  - A dropped object is always named by its key in the previous generation, even under a
+    parent renamed in the same delta.
