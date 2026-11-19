@@ -90,6 +90,35 @@ fn code(e: &MetaError) -> Option<String> {
     }
 }
 
+/// The server's own answer past the token guard (`SnapshotTxn::rows_unguarded`): what proves
+/// that the **server** refuses a write, times a statement out or assigns no XID. That seam
+/// exists only in a debug build with this crate's `test-support` feature. The default Docker
+/// run (`run-docker-tests.sh` without `-p`, CI's `docker-full`) builds `hacivat-exec`'s tests
+/// in the same invocation, whose dev-dependency enables it. A run of this crate alone needs
+/// `--features test-support`; without it these tests fail here, never pass silently.
+#[allow(
+    clippy::result_large_err,
+    reason = "MetaError is the seam's error type; one per probe"
+)]
+async fn server<'q>(
+    snap: &'q mut hacivat_session::meta::SnapshotTxn<'_>,
+    q: MetaQuery<'q>,
+) -> Result<Rows, MetaError> {
+    #[cfg(all(debug_assertions, feature = "test-support"))]
+    {
+        snap.rows_unguarded(q).await
+    }
+    #[cfg(not(all(debug_assertions, feature = "test-support")))]
+    {
+        let _ = (snap, q);
+        panic!(
+            "docker_meta_conn needs hacivat-session's `test-support` feature (a debug build) to \
+             prove the server's own refusals: run the default crate set or add \
+             `--features test-support`"
+        )
+    }
+}
+
 /// The three character sets a metadata session must hold as `utf8mb4` (I3-A, the T4 carry).
 const CHARSETS: &str = "@@session.character_set_client, @@session.character_set_connection, \
                         @@session.character_set_results";
@@ -181,12 +210,12 @@ async fn pg_meta_txn_refuses_writes() {
         ] {
             let mut snap = c.begin_snapshot().await.unwrap();
             // The token guard refuses it first (fix round 2, review B R-M3); past it, the
-            // server does (`rows_unguarded`, debug builds).
+            // server does (`server`, `rows_unguarded` under `test-support`).
             assert_eq!(
                 snap.rows(q(&write)).await.map(drop),
                 Err(MetaError::RefusedText)
             );
-            let e = snap.rows_unguarded(q(&write)).await.expect_err("refused");
+            let e = server(&mut snap, q(&write)).await.expect_err("refused");
             assert_eq!(
                 code(&e).as_deref(),
                 Some("25006"),
@@ -251,8 +280,7 @@ async fn no_xid_assigned_by_a_metadata_pass() {
                 .unwrap_or_else(|e| panic!("{}: {sql}: {e:?}", t.id));
         }
         // The canary probe names a denied function, so it goes past the guard (debug builds).
-        let unassigned = snap
-            .rows_unguarded(q("SELECT txid_current_if_assigned() IS NULL"))
+        let unassigned = server(&mut snap, q("SELECT txid_current_if_assigned() IS NULL"))
             .await
             .unwrap();
         assert_eq!(first(&unassigned), "true", "{}: no XID (#pg-canary)", t.id);
@@ -299,7 +327,7 @@ async fn statement_timeout_applies() {
         let mut snap = c.begin_snapshot().await.unwrap();
         assert_eq!(
             // `pg_sleep` is denied by the guard; the timeout is the server's to prove.
-            snap.rows_unguarded(q("SELECT pg_sleep(2)")).await.map(drop),
+            server(&mut snap, q("SELECT pg_sleep(2)")).await.map(drop),
             Err(MetaError::Timeout),
             "{}",
             t.id
@@ -402,7 +430,7 @@ async fn mysql_meta_txn_refuses_dml_1792() {
             snap.rows(q(&insert)).await.map(drop),
             Err(MetaError::RefusedText)
         );
-        let e = snap.rows_unguarded(q(&insert)).await.expect_err("refused");
+        let e = server(&mut snap, q(&insert)).await.expect_err("refused");
         assert_eq!(code(&e).as_deref(), Some("1792"), "{}: {e:?}", t.id);
         drop(snap);
         drop(c);
@@ -432,7 +460,7 @@ async fn ddl_refused(t: &DockerTarget) -> String {
         snap.rows(q(&ddl)).await.map(drop),
         Err(MetaError::RefusedText)
     );
-    let e = snap.rows_unguarded(q(&ddl)).await.expect_err("DDL refused");
+    let e = server(&mut snap, q(&ddl)).await.expect_err("DDL refused");
     let code = code(&e).unwrap_or_else(|| panic!("{}: {e:?}", t.id));
     drop(snap);
     drop(c);

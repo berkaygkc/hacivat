@@ -1284,17 +1284,69 @@ async fn sqlite_meta_uses_a_read_only_connection_never_the_users() {
         "another connection: the user's temp table is not there"
     );
     // The token guard refuses the write (fix round 2, review B R-M3); past it, the engine
-    // does (`rows_unguarded`, debug builds).
+    // does (`unguarded`, with the `test-support` feature).
     assert_eq!(
         snap.rows(q("INSERT INTO t VALUES (2)")).await.map(drop),
         Err(MetaError::RefusedText)
     );
-    let write = snap.rows_unguarded(q("INSERT INTO t VALUES (2)")).await;
-    assert!(
-        write.as_ref().is_err_and(is_readonly),
-        "read-only: {write:?}"
-    );
+    if let Some(write) = unguarded(&mut snap, q("INSERT INTO t VALUES (2)")).await {
+        assert!(
+            write.as_ref().is_err_and(is_readonly),
+            "read-only: {write:?}"
+        );
+    }
     snap.commit().await.unwrap();
+}
+
+// ## m4-t05-meta (fix round 3)
+/// The engine's own answer past the token guard: `SnapshotTxn::rows_unguarded`, which exists
+/// only in a debug build with this crate's `test-support` feature (on in `cargo test
+/// --workspace`, where `hacivat-exec`'s and `hacivat-app`'s dev-dependencies enable it).
+/// `None` without it: the guard's refusal, asserted before each call, still runs.
+async fn unguarded<'q>(
+    snap: &'q mut hacivat_session::meta::SnapshotTxn<'_>,
+    q: MetaQuery<'q>,
+) -> Option<Result<Rows, MetaError>> {
+    #[cfg(all(debug_assertions, feature = "test-support"))]
+    {
+        Some(snap.rows_unguarded(q).await)
+    }
+    #[cfg(not(all(debug_assertions, feature = "test-support")))]
+    {
+        let _ = (snap, q);
+        None
+    }
+}
+
+#[test]
+fn rows_unguarded_is_named_only_in_tests() {
+    // Fix round 3: the guard-free read is a test seam. Outside its definition in `meta.rs`, only
+    // files under a `tests/` directory may name it.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut offenders = Vec::new();
+    let mut stack = vec![root.join("crates"), root.join("xtask"), root.join("fuzz")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if path.is_dir() {
+                if name != "target" && name != "tests" {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if path.extension().is_some_and(|e| e == "rs")
+                && std::fs::read_to_string(&path).is_ok_and(|s| s.contains("rows_unguarded"))
+                && !path.ends_with("crates/core/hacivat-session/src/meta.rs")
+            {
+                offenders.push(path);
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "{offenders:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1323,12 +1375,18 @@ async fn sqlite_meta_conn_has_no_authorizer_and_refuses_writes() {
         snap.rows(q("CREATE TABLE u(a)")).await.map(drop),
         Err(MetaError::RefusedText)
     );
-    let ddl = snap.rows_unguarded(q("CREATE TABLE u(a)")).await;
-    assert!(ddl.as_ref().is_err_and(is_readonly), "{ddl:?}");
+    if let Some(ddl) = unguarded(&mut snap, q("CREATE TABLE u(a)")).await {
+        assert!(ddl.as_ref().is_err_and(is_readonly), "{ddl:?}");
+    }
     drop(snap);
     let mut snap = c.begin_snapshot().await.unwrap();
-    let ddl = snap.rows_unguarded(q("CREATE TABLE u(a)")).await;
-    assert!(ddl.as_ref().is_err_and(is_readonly), "{ddl:?}");
+    assert_eq!(
+        snap.rows(q("CREATE TABLE u(a)")).await.map(drop),
+        Err(MetaError::RefusedText)
+    );
+    if let Some(ddl) = unguarded(&mut snap, q("CREATE TABLE u(a)")).await {
+        assert!(ddl.as_ref().is_err_and(is_readonly), "{ddl:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1353,8 +1411,9 @@ async fn sqlite_attached_files_are_read_only_too() {
             Err(MetaError::RefusedText),
             "{write}"
         );
-        let e = snap.rows_unguarded(q(write)).await;
-        assert!(e.as_ref().is_err_and(is_readonly), "{write}: {e:?}");
+        if let Some(e) = unguarded(&mut snap, q(write)).await {
+            assert!(e.as_ref().is_err_and(is_readonly), "{write}: {e:?}");
+        }
     }
     snap.commit().await.unwrap();
 }

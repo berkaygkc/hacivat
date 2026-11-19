@@ -2878,13 +2878,26 @@ M4 Task 5 (W1; R-M4-7, R-M4-29, R-M4-38, R-M4-46, U-6(e)). The bodies of T1c's
       called `pg_advisory_lock` or `set_config(…, false)` cannot leave a lock or a setting on
       it past `COMMIT`.
     - The server's read-only enforcement remains the guard behind it.
-  - `SnapshotTxn::rows_unguarded` (`#[cfg(debug_assertions)]`, `#[doc(hidden)]`) skips the
-    token guard on an own connection only.
+  - `SnapshotTxn::rows_unguarded` skips the token guard on an own connection only.
     - The Docker tests use it to prove that the **server** refuses writes (`25006`, `1792`,
       `SQLITE_READONLY`) and enforces the statement timeout and the XID canary, whose probes
       name denied functions.
-    - No release binary has it, and it still takes only a `MetaQuery`, which only packs and
-      tests can build.
+    - Fix round 3: it exists only under `cfg(all(debug_assertions, feature =
+      "test-support"))`. Only dev-dependencies enable `test-support`: `hacivat-exec`'s, and
+      `hacivat-app`'s self dev-dependency. `cargo tree -e normal,features` shows only `default`
+      for `hacivat`, `hacivat-app`, `hacivat-exec` and `hacivat-introspect`, so no product
+      build has it, debug or release.
+    - It still takes only a `MetaQuery`, which only packs and tests can build.
+    - `tests/meta_conn.rs::rows_unguarded_is_named_only_in_tests` fails if any file outside a
+      `tests/` directory (but its definition in `meta.rs`) names it.
+    - The tests reach it through `cfg(feature = "test-support")`. `cargo test --workspace` and
+      the default Docker run (`hacivat-exec` in the same invocation) enable the feature. A run
+      of `-p hacivat-session` alone skips the engine-side checks in `meta_conn` and the hostile
+      files; the guard-side checks still run. In that run, `docker_meta_conn`'s probes fail
+      loudly, never silently.
+    - A self dev-dependency on `hacivat-session` with `test-support` (the `hacivat-app`
+      precedent) would turn the feature on for every run of this crate's tests. That needs a
+      manifest edit, which is T1a's (NEEDS_CONTEXT in the report).
   - Values come back as text: text, JSON and XML as sent; bytes as UTF-8 when they are; any
     other value as `valfmt::raw_text` writes it, for the connection's engine. A cut value is
     `Unavailable` (it cannot happen with the cap off).

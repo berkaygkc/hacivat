@@ -450,13 +450,16 @@ impl<'c> SnapshotTxn<'c> {
         })
     }
 
-    // ## m4-t05-meta (fix round 2, review B R-M3)
+    // ## m4-t05-meta (fix round 2, review B R-M3; round 3: gated by `test-support`)
     /// [`rows`](Self::rows) without the token guard, on an own connection only: the Docker
     /// tests send writes through it to prove that the **server** refuses them (`25006`,
-    /// `1792`, `SQLITE_READONLY`). Debug builds only (no release binary has it), and it still
-    /// takes only a [`MetaQuery`], which only packs and tests can build. A session path answers
+    /// `1792`, `SQLITE_READONLY`). It exists only in a debug build with the crate's
+    /// `test-support` feature, which only dev-dependencies enable (`hacivat-exec`'s, and
+    /// `hacivat-app`'s self dev-dependency): no product build has it, debug or release. It
+    /// still takes only a [`MetaQuery`], which only packs and tests can build, and
+    /// `tests/meta_conn.rs` checks that only `tests/` files name it. A session path answers
     /// [`MetaError::Unavailable`].
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "test-support"))]
     #[doc(hidden)]
     pub fn rows_unguarded<'q>(
         &'q mut self,

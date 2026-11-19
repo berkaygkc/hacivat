@@ -405,7 +405,7 @@ async fn h6_sqlite_reader_write_surfaces() {
 
     // Attach the real aux read-only, then try to write it. Fix round 2 (review B R-M3): the
     // token guard refuses every write on the own connection too; `rows_unguarded` (debug
-    // builds) proves the engine refuses it as well.
+    // builds with `test-support`) proves the engine refuses it as well.
     c.attach_read_only("aux", &aux).await.unwrap();
     let mut s = c.begin_snapshot().await.unwrap();
     for write in [
@@ -420,28 +420,34 @@ async fn h6_sqlite_reader_write_surfaces() {
             "{write}"
         );
     }
-    let w = s
-        .rows_unguarded(MetaQuery::new("INSERT INTO aux.t VALUES (9)", &[], false))
-        .await;
-    assert!(w.is_err());
-    // `writable_schema` may be set; `sqlite_master` still refuses the write.
-    let _ = s
-        .rows_unguarded(MetaQuery::new("PRAGMA writable_schema = ON", &[], false))
-        .await;
-    let wm = s
-        .rows_unguarded(MetaQuery::new(
-            "UPDATE sqlite_master SET sql = sql",
-            &[],
-            false,
-        ))
-        .await;
-    assert!(wm.is_err());
-    // M8 (documented in ADR 0004 `## m4-t05`): the reader's own private `temp` schema takes a
-    // table when the guard is bypassed; it is never persisted and dies with the connection.
-    let tt = s
-        .rows_unguarded(MetaQuery::new("CREATE TEMP TABLE tt(a)", &[], false))
-        .await;
-    assert!(tt.is_ok(), "{tt:?}");
+    // Past the guard (fix round 3: only with this crate's `test-support` feature, which
+    // `cargo test --workspace` enables through the dev-dependencies), the engine refuses too.
+    #[cfg(all(debug_assertions, feature = "test-support"))]
+    {
+        let w = s
+            .rows_unguarded(MetaQuery::new("INSERT INTO aux.t VALUES (9)", &[], false))
+            .await;
+        assert!(w.is_err());
+        // `writable_schema` may be set; `sqlite_master` still refuses the write.
+        let _ = s
+            .rows_unguarded(MetaQuery::new("PRAGMA writable_schema = ON", &[], false))
+            .await;
+        let wm = s
+            .rows_unguarded(MetaQuery::new(
+                "UPDATE sqlite_master SET sql = sql",
+                &[],
+                false,
+            ))
+            .await;
+        assert!(wm.is_err());
+        // M8 (documented in ADR 0004 `## m4-t05`): the reader's own private `temp` schema
+        // takes a table when the guard is bypassed; it is never persisted and dies with the
+        // connection.
+        let tt = s
+            .rows_unguarded(MetaQuery::new("CREATE TEMP TABLE tt(a)", &[], false))
+            .await;
+        assert!(tt.is_ok(), "{tt:?}");
+    }
     s.commit().await.unwrap();
     // `VACUUM INTO` never reaches the reader: an own snapshot refuses it (review B M1), and
     // inside its `BEGIN` SQLite could not run it anyway.
