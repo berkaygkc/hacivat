@@ -633,3 +633,59 @@ HV-INTRO-04, R-M4-3, -7, -29, -32, -37). The packs themselves stay header-only u
   - The re-review's probes R1–R9 are in `tests/hostile_t04_review.rs`, flipped to assert the
     fixes. **m11** (`Pack::parse` call sites in `pg/`, `mysql/`, `sqlite/` must take
     `include_str!` or a `const`) is carried to the T16–T18 reviews by the controller.
+
+## m4-t10 — merge
+
+M4 Task 10 fills the existence-diff merge, the catalog delta and the mass-deletion guard
+(HV-INTRO-11, D-039, R-M4-22). The model spike has no merge, so nothing is copied.
+
+- **Pure.** `merge(prev, result, policy)` reads no clock, does no I/O and never changes `prev`.
+  `prev = None` is refused (`MergeError::NoBase`): a result carries no engine or fold rule, so
+  a first load merges into `merge::base(key, dbms, fold)`, the namespace root alone.
+- **Identity** is `ObjectKey::same_object`: the server id when both sides have one, else kind,
+  exact path and overload signature. The plan's "IdentKey path" is read as T3's `same_object`,
+  which compares exact names (the identity used everywhere else). A `(kind, server id)` the
+  cache holds twice (T3 m9) matches only by id **and** path, so a stale twin is dropped and
+  never resurrected.
+- **Deletions** come only from a successful existence set of the object's own `ObjectKind`, at
+  any depth (a dropped index under a kept table is listed itself, and the table is altered with
+  `children`). A `Failed` set keeps every cached object of its kind and is reported in
+  `MergeReport::stale_kinds`; a failed index set never disables table deletions. A kind without
+  a set is never deleted by an incremental pass; a **full** pass is the whole namespace, so a
+  top-level object of such a kind that the pass did not return is dropped.
+- **Changed objects** replace their cached counterpart wholesale, children included (step 7,
+  edge 8); facets the pass did not re-read (a view's source) are therefore invalidated, and a
+  kept object keeps its own, shared by reference count. A changed object identical to its
+  cached one but for its state mark is not altered; it takes the new mark. A changed child
+  whose parent is cached replaces the same child or is appended; one whose parent is neither
+  cached nor re-read asks for a fragment of the parent (edge 9).
+  `NamespaceResult::categories_to_reload` is not read by the merge: every changed object
+  carries its complete child list.
+- **Report.** `MergeOutcome` variants carry a `MergeReport`: stale kinds, fragments to read
+  (edges 9 and 11, and a cached object the existence set lists under a new name that the pass
+  did not re-read), ignored changed objects (edge 10), duplicates (edge 12: the last wins; it is
+  counted, not a debug assertion, so a test can exercise it), the checked and vanished counts,
+  and `steps`, a linearity witness.
+- **Guard.** More than `guard_ratio_pct` % (50) of at least `guard_min_objects` (20) checked
+  objects vanishing is `PendingConfirmation`, for both triggers; `checked` is the cached objects
+  whose existence the pass decided. The pending `next` is the full merge, applied as is on
+  confirmation.
+- **Seam additions.** `NamespaceResult` gains `level` (a full pass sets the namespace level, an
+  incremental one keeps or lowers it) and `read_at_ms` (the merge reads no clock); both land in
+  `NsMeta` with the new watermark. `Confidence` is a per-mille value (`Confidence::ONE`), not
+  the T1a enum.
+- **Delta.** `created` and `dropped` name subtree roots. A rename whose keys are `same_object`
+  is an identity; any other is a hint of a name-only engine, whose pair is also in
+  `dropped`/`created` (`CatalogDelta::is_hint`). Hints pair dropped and created top-level
+  objects of one kind without server ids whose column signatures (name, raw type,
+  nullability) are ≥ 90 % shared as multisets: identical lists are `ONE`, others at most 999.
+  Above 4,096 candidate pairs per kind only identical lists are paired (a hash match), so a mass
+  rename stays linear. `CatalogDelta::combine` turns a drop and a create of the same kind and
+  server id in two namespaces of one publish into one `moved` entry. A delta of more than
+  10,000 entries is coarse: `delta::event` gives `NamespaceReplaced`. `apply_delta` applies a
+  delta to a namespace's top-level keys and refuses one that does not fit (a lost or repeated
+  delta).
+- **Cost.** O(|M| + |C| + |E|) with hash maps; no `find` per column. A full pass that left no
+  cached object standing on its own reuses the changed arena as the next namespace (pass
+  order) instead of copying it. Measured on 15,000 tables / 160,000 columns in one schema
+  (release, a shared machine at load ~50): full pass p50 33 ms, incremental (1 %) p50 24 ms.
