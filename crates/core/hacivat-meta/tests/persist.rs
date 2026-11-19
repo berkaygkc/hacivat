@@ -802,7 +802,7 @@ fn password_never_in_cache_file() {
         (
             "sealed.v1.sqlite",
             Encryption::Row(hacivat_meta::persist::RowKey::from_bytes(
-                *b"hv_test_pw-hv_test_pw-hv_test_pw",
+                b"hv_test_pw-hv_test_pw-hv_test_pw",
             )),
         ),
     ] {

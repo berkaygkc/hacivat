@@ -167,7 +167,7 @@ fn load_160k_column_namespace_under_budget() {
     let dir = tempfile::tempdir().unwrap();
     let plain = dir.path().join("plain.v1.sqlite");
     let sealed = dir.path().join("sealed.v1.sqlite");
-    let key = Encryption::Row(RowKey::from_bytes([42; 32]));
+    let key = Encryption::Row(RowKey::from_bytes(&[42; 32]));
     let t = Instant::now();
     {
         let mut store = CacheStore::open(&plain, Encryption::None, WriterId(1))

@@ -16,12 +16,17 @@
 //!   (Task 15) fetches the `CatalogKey` on the blocking pool and passes
 //!   [`Encryption::Row`]. No password or key is ever written to the cache, a log or a `Debug`.
 //! - **Encrypted stores** (`catalog_sensitive`) hold no name in the clear: payloads, namespace
-//!   keys, watermarks, source texts and the server fingerprint are sealed
-//!   ([`crypt::RowCipher`], domain [`crypt::CATALOG_DOMAIN`]); rows are found by keyed lookup
-//!   tags. A key that does not open the file's key check, or a file of the other mode, is
-//!   scrubbed and rebuilt ([`RebuildReason::WrongKey`]). So a sensitive profile whose key
-//!   cannot be fetched is **memory-only** (no `open` at all): opening it with
-//!   [`Encryption::None`] would scrub its encrypted cache.
+//!   keys, watermarks, source texts and the server fingerprint and epoch are sealed
+//!   ([`crypt::RowCipher`], domain [`crypt::CATALOG_DOMAIN`]) and padded to size buckets
+//!   ([`crypt::pad`]); rows are found by keyed lookup tags (HMAC-SHA256). A key that does not
+//!   open the file's key check, or a plaintext file opened with a key, is scrubbed (with its
+//!   `.corrupt-*` rotations) and rebuilt ([`RebuildReason::WrongKey`]). An encrypted file
+//!   opened **without** a key is refused with [`CacheError::Disabled`] and left untouched
+//!   (fix round 1, A-I1): turning encryption off deletes the files first (Task 20).
+//! - **Untrusted file.** The SQLite schema is checked exactly before any other read or write,
+//!   with `trusted_schema = OFF` and `SQLITE_DBCONFIG_DEFENSIVE` (fix round 1, B-I1); a load
+//!   reads at most the per-profile cap and no row over `MAX_ROW_BYTES` (B-M3); decoding caps
+//!   names and string expansion (`codec`, B-I3).
 
 pub mod crypt;
 mod debounce;
@@ -58,8 +63,11 @@ pub fn cache_file_name(profile: &ProfileId) -> String {
 pub struct RowKey([u8; 32]);
 
 impl RowKey {
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        RowKey(bytes)
+    /// A key copied from `bytes`. It takes a reference so no by-value copy of the key is left on
+    /// the caller's stack: keep the source in a `Zeroizing` buffer (as
+    /// `SecretStore::catalog_key` returns it).
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        RowKey(*bytes)
     }
 }
 
@@ -108,6 +116,9 @@ pub enum RowError {
     Crypt(CryptError),
     /// The row's columns disagree (its key, lookup tag, minor or payload do not match).
     Mismatch,
+    /// The row is larger than one row may be, or past the per-profile cap of this load; it was
+    /// not read (B-M3).
+    TooLarge,
 }
 
 impl fmt::Display for RowError {
@@ -116,6 +127,7 @@ impl fmt::Display for RowError {
             RowError::Decode(e) => write!(f, "{e}"),
             RowError::Crypt(e) => write!(f, "{e}"),
             RowError::Mismatch => write!(f, "inconsistent cache row"),
+            RowError::TooLarge => write!(f, "cache row over the size limit"),
         }
     }
 }
@@ -123,7 +135,8 @@ impl fmt::Display for RowError {
 /// Why the cache cannot be used, or one operation failed.
 #[derive(Debug)]
 pub enum CacheError {
-    /// Persistence is off (memory-only), e.g. no key for an encrypted profile.
+    /// Persistence is off (memory-only): an encrypted cache opened without its key (the file
+    /// is left untouched), or no key for an encrypted profile.
     Disabled,
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
@@ -328,7 +341,7 @@ mod tests {
     #[test]
     fn row_key_zeroize_clears_every_byte() {
         fn on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
-        let mut key = RowKey::from_bytes([0x5A; 32]);
+        let mut key = RowKey::from_bytes(&[0x5A; 32]);
         on_drop(&key);
         zeroize::Zeroize::zeroize(&mut key);
         assert_eq!(key.0, [0; 32]);

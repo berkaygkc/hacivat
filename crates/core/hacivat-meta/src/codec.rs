@@ -34,12 +34,16 @@
 //!   Encryption (sensitive profiles) wraps the whole envelope, in `persist`.
 //! - **Untrusted input:** decoding never panics, never recurses on input depth, and allocates
 //!   at most a small constant times the input length: every count is capped by the bytes left
-//!   (divided by the smallest encoding of one element).
+//!   (divided by the smallest encoding of one element). Its CPU is linear in the input too
+//!   (fix round 1, B-I3): a name is at most [`MAX_NAME_BYTES`], and the string bytes a payload
+//!   expands to through its table are capped at [`EXPANSION_FACTOR`] × body +
+//!   [`EXPANSION_SLACK`]. The encoder enforces both, so whatever it writes can be read back.
 //! - **Compression:** the `compression` byte is `0` (none) in format 1 (R-M4-26); a reader
 //!   rejects any other value.
 //! - The arena is stored in its breadth-first order with parent indexes; children ranges and
 //!   name indexes are rebuilt and the layout re-validated on load.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -69,6 +73,23 @@ const COMPRESSION_NONE: u8 = 0;
 /// The smallest encoding of one object record (length, kind, name, parent, flags, server id,
 /// state, props: one byte each); caps the object count a payload can claim.
 const MIN_OBJ_BYTES: usize = 8;
+
+/// The longest name a payload may hold, in bytes: object names and every namespace or
+/// reference path element (B-I3). The engines' identifier limits are far below it — PostgreSQL
+/// 63 bytes, MySQL/MariaDB 64 characters (256 bytes in utf8mb4), SQL Server and Oracle 128
+/// characters (512 bytes) — so 4 KiB leaves headroom for the longest identifier of any
+/// engine in any encoding; SQLite has no limit, and a SQLite name over the cap is not cached
+/// (the encoder refuses it, so no row is written that could not be read).
+pub const MAX_NAME_BYTES: usize = 4096;
+
+/// The string bytes one payload may expand to through its string table (every reference
+/// counted at its full length; B-I3): this many times the body, plus [`EXPANSION_SLACK`].
+/// A real catalog expands to well under its own size (160k columns: below 1×), so 8× is
+/// headroom, while a crafted row that references one long string from many 8-byte records
+/// fails fast instead of costing O(objects × length).
+pub const EXPANSION_FACTOR: usize = 8;
+/// The fixed part of the expansion budget (small payloads).
+pub const EXPANSION_SLACK: usize = 1 << 20;
 
 /// Why a payload cannot be encoded or decoded. Decoding never panics on any input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +214,11 @@ pub(crate) struct Enc<'a> {
     canonical: bool,
     /// Tests only: write this kind under another code and id (a newer build's kind).
     remap: Option<(ObjectKind, u16, &'a str)>,
+    /// A name over [`MAX_NAME_BYTES`] was written (the payload is refused: it would not
+    /// decode).
+    long_name: bool,
+    /// String bytes the table references expand to (the decoder's budget, B-I3).
+    expanded: usize,
 }
 
 impl<'a> Enc<'a> {
@@ -203,6 +229,21 @@ impl<'a> Enc<'a> {
             inline: false,
             canonical: false,
             remap: None,
+            long_name: false,
+            expanded: 0,
+        }
+    }
+
+    /// A name (an object name, a namespace or reference path element): capped.
+    fn name(&mut self, out: &mut Vec<u8>, s: &'a str) {
+        self.long_name |= s.len() > MAX_NAME_BYTES;
+        self.str(out, s);
+    }
+
+    fn names(&mut self, out: &mut Vec<u8>, v: &'a [Name]) {
+        put_var(out, v.len() as u64);
+        for s in v {
+            self.name(out, s);
         }
     }
 
@@ -235,6 +276,7 @@ impl<'a> Enc<'a> {
             out.extend_from_slice(s.as_bytes());
             return;
         }
+        self.expanded = self.expanded.saturating_add(s.len());
         let i = match self.index.get(s) {
             Some(&i) => i,
             None => {
@@ -346,7 +388,7 @@ impl<'a> Enc<'a> {
     fn reference(&mut self, out: &mut Vec<u8>, r: &'a Ref) {
         self.record(out, |e, o| {
             put_var(o, u64::from(r.kind.code()));
-            e.strs(o, &r.path);
+            e.names(o, &r.path);
             e.server_id(o, r.server_id);
         });
     }
@@ -703,7 +745,7 @@ impl<'a> Enc<'a> {
     pub(crate) fn obj(&mut self, out: &mut Vec<u8>, o: &'a Obj, pad: &[u8]) {
         self.record(out, |e, b| {
             put_var(b, u64::from(e.code(o.kind())));
-            e.str(b, o.name());
+            e.name(b, o.name());
             if !e.canonical {
                 put_var(
                     b,
@@ -787,7 +829,7 @@ pub(crate) fn encode_as(
     minor: u16,
     pad: &[u8],
 ) -> Result<Vec<u8>, DecodeError> {
-    encode_full(ns, minor, pad, None)
+    encode_full(ns, minor, pad, None, true)
 }
 
 fn encode_full<'a>(
@@ -795,6 +837,7 @@ fn encode_full<'a>(
     minor: u16,
     pad: &[u8],
     remap: Option<(ObjectKind, u16, &'a str)>,
+    check_names: bool,
 ) -> Result<Vec<u8>, DecodeError> {
     if ns.len() > u32::MAX as usize {
         return Err(DecodeError::Malformed("too many objects"));
@@ -816,7 +859,7 @@ fn encode_full<'a>(
     kinds.dedup();
     e.record(&mut tail, |e, o| {
         o.push(ns_kind_code(key.kind));
-        e.strs(o, &key.path);
+        e.names(o, &key.path);
         e.str(o, ns.dbms().id());
         o.push(fold_code(ns.fold()));
         o.push(level_code(meta.level));
@@ -840,6 +883,9 @@ fn encode_full<'a>(
     if e.list.len() > u32::MAX as usize {
         return Err(DecodeError::Malformed("too many strings"));
     }
+    if check_names && e.long_name {
+        return Err(DecodeError::Malformed("name longer than the cap"));
+    }
     let strings_len: usize = e.list.iter().map(|s| s.len() + 2).sum();
     let mut body = Vec::with_capacity(tail.len() + strings_len + 8);
     put_var(&mut body, e.list.len() as u64);
@@ -848,6 +894,14 @@ fn encode_full<'a>(
         body.extend_from_slice(s.as_bytes());
     }
     body.extend_from_slice(&tail);
+    // The decoder's budget, enforced here too, so whatever is written can be read back.
+    let budget = body
+        .len()
+        .saturating_mul(EXPANSION_FACTOR)
+        .saturating_add(EXPANSION_SLACK);
+    if check_names && e.expanded > budget {
+        return Err(DecodeError::Malformed("strings expand past the budget"));
+    }
 
     let mut out = Vec::with_capacity(HEADER_LEN + body.len());
     out.extend_from_slice(MAGIC);
@@ -876,7 +930,7 @@ pub fn decode_ns_key(bytes: &[u8]) -> Result<NsKey, DecodeError> {
     let kind = ns_kind(d.u8()?).ok_or(DecodeError::Malformed("namespace kind"))?;
     let mut path = SmallVec::new();
     while d.more() {
-        path.push(d.str()?);
+        path.push(d.name()?);
     }
     Ok(NsKey { kind, path })
 }
@@ -906,6 +960,8 @@ struct Dec<'a> {
     strings: Option<&'a [Name]>,
     /// The payload is of this build's minor or older: leftover bytes are corruption.
     strict: bool,
+    /// String bytes this payload may still expand to (table strings only; B-I3).
+    budget: Option<&'a Cell<usize>>,
 }
 
 impl<'a> Dec<'a> {
@@ -915,6 +971,7 @@ impl<'a> Dec<'a> {
             pos: 0,
             strings: None,
             strict: true,
+            budget: None,
         }
     }
 
@@ -1003,6 +1060,7 @@ impl<'a> Dec<'a> {
             pos: 0,
             strings: self.strings,
             strict: self.strict,
+            budget: self.budget,
         };
         let v = f(&mut r)?;
         r.end()?;
@@ -1026,6 +1084,7 @@ impl<'a> Dec<'a> {
             pos: 0,
             strings: self.strings,
             strict: self.strict,
+            budget: self.budget,
         };
         match f(tag, &mut r)? {
             Some(v) => {
@@ -1049,10 +1108,17 @@ impl<'a> Dec<'a> {
         match self.strings {
             Some(table) => {
                 let i = self.len()?;
-                table
+                let s = table
                     .get(i)
-                    .cloned()
-                    .ok_or(DecodeError::Malformed("string index out of range"))
+                    .ok_or(DecodeError::Malformed("string index out of range"))?;
+                if let Some(budget) = self.budget {
+                    let left = budget
+                        .get()
+                        .checked_sub(s.len())
+                        .ok_or(DecodeError::Malformed("strings expand past the budget"))?;
+                    budget.set(left);
+                }
+                Ok(s.clone())
             }
             None => {
                 let n = self.len()?;
@@ -1061,6 +1127,24 @@ impl<'a> Dec<'a> {
                 Ok(Name::from(s))
             }
         }
+    }
+
+    /// A name: a string of at most [`MAX_NAME_BYTES`].
+    fn name(&mut self) -> DResult<Name> {
+        let s = self.str()?;
+        if s.len() > MAX_NAME_BYTES {
+            return Err(DecodeError::Malformed("name longer than the cap"));
+        }
+        Ok(s)
+    }
+
+    fn names(&mut self) -> DResult<Vec<Name>> {
+        let n = self.count(1)?;
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n {
+            v.push(self.name()?);
+        }
+        Ok(v)
     }
 
     fn opt_str(&mut self) -> DResult<Option<Name>> {
@@ -1164,7 +1248,7 @@ impl<'a> Dec<'a> {
         self.rec(|r| {
             Ok(Ref {
                 kind: r.kind()?.0,
-                path: r.strs()?.into_iter().collect(),
+                path: r.names()?.into_iter().collect(),
                 server_id: r.server_id()?,
             })
         })
@@ -1564,7 +1648,7 @@ impl<'a> Dec<'a> {
     fn obj(&mut self, kind_ids: &HashMap<u16, Name>) -> DResult<Obj> {
         self.rec(|r| {
             let (kind, code) = r.kind()?;
-            let name = r.str()?;
+            let name = r.name()?;
             let parent = match r.var()? {
                 0 => NO_PARENT,
                 p => u32::try_from(p - 1)
@@ -1688,6 +1772,7 @@ pub(crate) fn decode_with(
         pos: 0,
         strings: None,
         strict,
+        budget: None,
     };
     let n = d.count(1)?;
     let mut strings: Vec<Name> = Vec::with_capacity(n);
@@ -1702,16 +1787,22 @@ pub(crate) fn decode_with(
             Name::from(s)
         });
     }
+    let budget = Cell::new(
+        body.len()
+            .saturating_mul(EXPANSION_FACTOR)
+            .saturating_add(EXPANSION_SLACK),
+    );
     let mut d = Dec {
         b: body,
         pos: d.pos,
         strings: Some(&strings),
         strict,
+        budget: Some(&budget),
     };
 
     let (key, dbms, fold, mut meta, kind_ids) = d.rec(|h| {
         let kind = ns_kind(h.u8()?).ok_or(DecodeError::Malformed("namespace kind"))?;
-        let path = h.strs()?.into_iter().collect();
+        let path = h.names()?.into_iter().collect();
         let dbms = DbmsKind::from_id(&h.str()?).ok_or(DecodeError::Malformed("unknown DBMS id"))?;
         let fold = fold_rule(h.u8()?);
         let level = level(h.u8()?);
@@ -1791,7 +1882,13 @@ pub mod testing {
         code: u16,
         id: &str,
     ) -> Result<Vec<u8>, DecodeError> {
-        encode_full(ns, FORMAT_MINOR, &[], Some((kind, code, id)))
+        encode_full(ns, FORMAT_MINOR, &[], Some((kind, code, id)), true)
+    }
+
+    /// `ns` encoded without the name cap: a payload the decoder must refuse (the hostile
+    /// tests' crafted rows).
+    pub fn encode_unchecked(ns: &NamespaceSnapshot) -> Result<Vec<u8>, DecodeError> {
+        encode_full(ns, FORMAT_MINOR, &[], None, false)
     }
 
     pub use super::reseal_checksum;
@@ -1867,6 +1964,7 @@ mod tests {
             pos: 0,
             strings: Some(&strings),
             strict: false,
+            budget: None,
         };
         assert_eq!(d.props().unwrap(), Props::None);
         assert_eq!(d.u8().unwrap(), 7);

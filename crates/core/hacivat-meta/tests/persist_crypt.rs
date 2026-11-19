@@ -26,7 +26,7 @@ const W1: WriterId = WriterId(1);
 const SECRET_NAME: &str = "musteri_hesap_ozet";
 
 fn key(byte: u8) -> RowKey {
-    RowKey::from_bytes([byte; 32])
+    RowKey::from_bytes(&[byte; 32])
 }
 
 fn sealed(byte: u8) -> Encryption {
@@ -91,14 +91,16 @@ fn assert_same(a: &NamespaceSnapshot, b: &NamespaceSnapshot) {
 
 #[test]
 fn rows_sealed_in_one_domain_fail_in_another() {
-    let catalog = RowCipher::new(key(1), CATALOG_DOMAIN);
-    let other = RowCipher::new(key(1), "hv-drift-v1");
+    let catalog = RowCipher::new(key(1), CATALOG_DOMAIN).unwrap();
+    let other = RowCipher::new(key(1), "hv-drift-v1").unwrap();
     let row = catalog.seal(b"ad", b"payload").unwrap();
     assert_eq!(catalog.open(b"ad", &row).unwrap(), b"payload");
     assert_eq!(other.open(b"ad", &row), Err(CryptError::Auth));
     assert_eq!(catalog.open(b"other ad", &row), Err(CryptError::Auth));
     assert_eq!(
-        RowCipher::new(key(2), CATALOG_DOMAIN).open(b"ad", &row),
+        RowCipher::new(key(2), CATALOG_DOMAIN)
+            .unwrap()
+            .open(b"ad", &row),
         Err(CryptError::Auth)
     );
 }
@@ -106,15 +108,16 @@ fn rows_sealed_in_one_domain_fail_in_another() {
 #[test]
 fn row_cipher_debug_is_redacted() {
     let c = RowCipher::new(
-        RowKey::from_bytes(*b"hv_test_pw-hv_test_pw-hv_test_pw"),
+        RowKey::from_bytes(b"hv_test_pw-hv_test_pw-hv_test_pw"),
         CATALOG_DOMAIN,
-    );
+    )
+    .unwrap();
     for shown in [format!("{c:?}"), format!("{c:#?}")] {
         assert!(!shown.contains("hv_test_pw"), "{shown}");
         assert!(shown.contains("redacted"), "{shown}");
         assert!(shown.contains(CATALOG_DOMAIN), "{shown}");
     }
-    let k = RowKey::from_bytes([0xAB; 32]);
+    let k = RowKey::from_bytes(&[0xAB; 32]);
     let shown = format!("{:?}{:?}", k, Encryption::Row(k.clone()));
     for leak in ["171", "ab", "AB"] {
         assert!(!shown.contains(leak), "{shown}");
@@ -123,7 +126,7 @@ fn row_cipher_debug_is_redacted() {
     let dir = tempfile::tempdir().unwrap();
     let opened = open_with(
         &dir.path().join("p.v1.sqlite"),
-        Encryption::Row(RowKey::from_bytes(*b"hv_test_pw-hv_test_pw-hv_test_pw")),
+        Encryption::Row(RowKey::from_bytes(b"hv_test_pw-hv_test_pw-hv_test_pw")),
     );
     let shown = format!("{opened:?}");
     assert!(!shown.contains("hv_test_pw"), "{shown}");
@@ -131,7 +134,7 @@ fn row_cipher_debug_is_redacted() {
 
 #[test]
 fn tampered_ciphertext_is_an_error_not_a_panic() {
-    let c = RowCipher::new(key(3), CATALOG_DOMAIN);
+    let c = RowCipher::new(key(3), CATALOG_DOMAIN).unwrap();
     let row = c.seal(b"ad", b"some catalog payload").unwrap();
     assert_eq!(row.len(), b"some catalog payload".len() + OVERHEAD);
     for at in 0..row.len() {
@@ -156,14 +159,14 @@ proptest! {
     #[test]
     fn opening_arbitrary_bytes_never_panics(ad in proptest::collection::vec(any::<u8>(), 0..64),
                                             bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
-        let c = RowCipher::new(key(4), CATALOG_DOMAIN);
+        let c = RowCipher::new(key(4), CATALOG_DOMAIN).unwrap();
         prop_assert!(c.open(&ad, &bytes).is_err());
     }
 }
 
 #[test]
 fn every_seal_draws_a_fresh_nonce() {
-    let c = RowCipher::new(key(5), CATALOG_DOMAIN);
+    let c = RowCipher::new(key(5), CATALOG_DOMAIN).unwrap();
     let mut seen = HashSet::new();
     for _ in 0..10_000 {
         let row = c.seal(b"ad", b"same plaintext").unwrap();
@@ -338,9 +341,37 @@ fn switching_modes_scrubs_the_old_file() {
     store.save_namespace(&catalog()[4]).unwrap();
     assert!(!contains(&files_bytes(&path), SECRET_NAME.as_bytes()));
     drop(store);
-    // And back: an encrypted file opened without a key is rebuilt, never read.
-    let opened = open_with(&path, Encryption::None);
-    assert_eq!(opened.rebuilt, Some(RebuildReason::WrongKey));
+    // And back (fix round 1, A-I1): an encrypted file opened without a key is refused
+    // (memory-only) and left exactly as it was; turning encryption off deletes the files
+    // first (T20), so a plaintext cache can never replace an encrypted one by accident.
+    let before = files_bytes(&path);
+    assert!(matches!(
+        CacheStore::open(&path, Encryption::None, W1),
+        Err(CacheError::Disabled)
+    ));
+    assert_eq!(files_bytes(&path), before);
+    // The rotations of the plaintext period were scrubbed with the switch (A-m6).
+    let plain = dir.path().join("r.v1.sqlite");
+    {
+        let mut s = open_with(&plain, Encryption::None).store;
+        s.save_namespace(&catalog()[4]).unwrap();
+    }
+    let rotation = dir.path().join("r.v1.sqlite.corrupt-1");
+    std::fs::copy(&plain, &rotation).unwrap();
+    assert!(contains(
+        &std::fs::read(&rotation).unwrap(),
+        SECRET_NAME.as_bytes()
+    ));
+    assert_eq!(
+        open_with(&plain, sealed(3)).rebuilt,
+        Some(RebuildReason::WrongKey)
+    );
+    assert!(!rotation.exists());
+    // After T20's deletion, the plaintext cache starts afresh.
+    for s in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{s}", path.display()));
+    }
+    assert!(open_with(&path, Encryption::None).rebuilt.is_none());
 }
 
 /// The associated data binds a row to its namespace key: a payload moved under another key
@@ -356,7 +387,7 @@ fn row_moved_to_another_ns_key_fails_authentication() {
             store.save_namespace(ns).unwrap();
         }
     }
-    let c = RowCipher::new(key(7), CATALOG_DOMAIN);
+    let c = RowCipher::new(key(7), CATALOG_DOMAIN).unwrap();
     let tag = |k: &NsKey| c.tag(&encode_ns_key(k)).to_vec();
     let (public, gizli) = (NsKey::schema([DB, "public"]), NsKey::schema([DB, "gizli"]));
     {

@@ -39,15 +39,26 @@ fn occupied(p: &Path) -> bool {
 
 /// Creates the cache directory with mode 0700 on every directory it creates (Unix; the same
 /// rule as `hacivat_settings::fsio::create_dir_all_private`, which this crate cannot depend
-/// on). An existing directory is left as it is.
+/// on), and tightens an existing leaf directory to 0700 (fix round 1, B-M5). A leaf that is not
+/// a directory, or that this user cannot chmod (another owner), is an error: memory-only.
 pub(super) fn ensure_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(dir)
+            .create(dir)?;
+        let m = fs::symlink_metadata(dir)?;
+        if !m.file_type().is_dir() {
+            return Err(io::Error::other(
+                "the catalog cache directory is not a directory",
+            ));
+        }
+        if m.permissions().mode() & 0o077 != 0 {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
     }
     #[cfg(not(unix))]
     {
@@ -55,8 +66,24 @@ pub(super) fn ensure_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// Creates the file owner-only, or tightens an existing one and its `-wal`/`-shm`. A path
-/// that is a symbolic link is refused.
+/// Whether `post` (the opened file) is the file `pre` described, and its only name (Unix:
+/// device and inode equal, one link). Fix round 1 (A-m3, B-M4): a link swapped in between the
+/// check and the open, or a hard link to a file elsewhere, is never written through.
+#[cfg(unix)]
+fn same_sole_file(pre: &fs::Metadata, post: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    pre.dev() == post.dev() && pre.ino() == post.ino() && post.nlink() == 1
+}
+
+#[cfg(unix)]
+fn link_count(m: &fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    m.nlink()
+}
+
+/// Creates the file owner-only, or checks and tightens an existing one and its `-wal`/`-shm`.
+/// A path or sidecar that is a symbolic link, or a hard link (more than one name), is refused;
+/// so is a file that changes between the check and the open.
 pub(super) fn prepare_file(path: &Path) -> io::Result<()> {
     for p in family(path) {
         if is_symlink(&p) {
@@ -64,19 +91,44 @@ pub(super) fn prepare_file(path: &Path) -> io::Result<()> {
                 "the catalog cache path is a symbolic link",
             ));
         }
+        #[cfg(unix)]
+        if let Ok(m) = fs::symlink_metadata(&p)
+            && m.file_type().is_file()
+            && link_count(&m) != 1
+        {
+            return Err(io::Error::other("the catalog cache path is a hard link"));
+        }
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        match fs::OpenOptions::new()
+        let (file, pre) = match fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(path)
         {
-            Ok(_) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Ok(f) => (f, None),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                let pre = fs::symlink_metadata(path)?;
+                if !pre.file_type().is_file() {
+                    return Err(io::Error::other("the catalog cache path is not a file"));
+                }
+                let f = fs::OpenOptions::new().read(true).write(true).open(path)?;
+                (f, Some(pre))
+            }
             Err(e) => return Err(e),
+        };
+        let post = file.metadata()?;
+        let ok = match &pre {
+            Some(pre) => same_sole_file(pre, &post),
+            None => link_count(&post) == 1,
+        };
+        if !ok {
+            return Err(io::Error::other(
+                "the catalog cache file changed while it was opened",
+            ));
         }
     }
     tighten(path)
@@ -128,14 +180,33 @@ pub(super) fn rotate(path: &Path) -> io::Result<PathBuf> {
 }
 
 /// Overwrites a regular file with zeros, then removes it; a link is removed without touching
-/// its target. Best effort against recovery (an SSD may keep old blocks): it keeps a plaintext
-/// cache's names out of a later encrypted profile's directory listing and free space.
+/// its target, and a directory is skipped. Best effort against recovery (an SSD may keep old
+/// blocks): it keeps a plaintext cache's names out of a later encrypted profile's directory
+/// listing and free space.
+///
+/// Fix round 1 (A-m3, B-M4): a file with more than one name (a hard link, possibly to a file
+/// outside the cache directory) is only unlinked, never overwritten; and the opened file must
+/// be the one checked (device and inode) and still have one name, or nothing is written and the
+/// scrub is refused.
 fn scrub_one(p: &Path) -> io::Result<()> {
     let Ok(meta) = fs::symlink_metadata(p) else {
         return Ok(());
     };
-    if meta.file_type().is_file() {
+    if meta.file_type().is_dir() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    let overwrite = meta.file_type().is_file() && link_count(&meta) == 1;
+    #[cfg(not(unix))]
+    let overwrite = meta.file_type().is_file();
+    if overwrite {
         let mut f = fs::OpenOptions::new().write(true).open(p)?;
+        #[cfg(unix)]
+        if !same_sole_file(&meta, &f.metadata()?) {
+            return Err(io::Error::other(
+                "a cache file changed while it was scrubbed; refused",
+            ));
+        }
         let zeros = vec![0u8; 64 << 10];
         let mut left = meta.len();
         while left > 0 {
@@ -159,6 +230,23 @@ pub(super) fn scrub_family(path: &Path) -> io::Result<()> {
         sibling(path, "-shm"),
         path.to_path_buf(),
     ] {
+        scrub_one(&p)?;
+    }
+    Ok(())
+}
+
+/// Scrubs and removes the corrupt rotations of `path` (`<name>.corrupt-*` and their
+/// sidecars): on a mode or key change none of the old mode's files survive (A-m6, B-M6).
+pub(super) fn scrub_rotations(path: &Path) -> io::Result<()> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+        return Ok(());
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    for p in profile_files(dir, &format!("{name}.corrupt-"))? {
         scrub_one(&p)?;
     }
     Ok(())

@@ -149,9 +149,9 @@ fn stub_system_catalogs_serve_nothing() {
 #[test]
 fn row_key_debug_is_redacted() {
     use hacivat_meta::persist::RowKey;
-    let shown = format!("{:?}", RowKey::from_bytes([7; 32]));
+    let shown = format!("{:?}", RowKey::from_bytes(&[7; 32]));
     assert!(!shown.contains('7'), "{shown}");
-    let shown = format!("{:#?}", RowKey::from_bytes([0xAB; 32]));
+    let shown = format!("{:#?}", RowKey::from_bytes(&[0xAB; 32]));
     for leak in ["171", "ab", "AB"] {
         assert!(!shown.contains(leak), "{shown}");
     }
