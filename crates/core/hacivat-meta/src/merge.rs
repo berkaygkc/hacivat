@@ -98,6 +98,13 @@ pub enum ExistSet {
     /// object's own namespace-relative path, or one of its ancestors', is in `scope`. A fragment
     /// of table `t` reports `Table: Scoped { scope: [["t"]], .. }`; the columns of re-read
     /// tables `a` and `b` are `Column: Scoped { scope: [["a"], ["b"]], .. }`.
+    ///
+    /// **Server-id engines (RR-1):** the strategy resolves a scope's keys **by server id** when
+    /// one is available, so an object renamed since the cache is reported under its current
+    /// name (`scope: [["t"]], ids: [u(oid 100)]` for a fragment of `t` that is now `u`): the
+    /// merge then keeps it as an identity rename. A scoped set that lists nothing for a key is
+    /// that key's drop. Independently, a cached object the same result re-reads under the same
+    /// unambiguous server id is a rename, never a drop, whatever a path-scoped set says.
     Scoped {
         scope: Vec<Vec<Name>>,
         ids: Vec<Identity>,
@@ -446,6 +453,8 @@ struct ExistIndex {
     scope: Option<HashSet<Vec<Name>>>,
     /// Identities some cached or changed object answered for (the rest are edge 11).
     seen: Vec<bool>,
+    /// Identities a cached object already answered for: one vouches for one cached object.
+    claimed: Vec<bool>,
 }
 
 impl ExistIndex {
@@ -474,6 +483,7 @@ impl ExistIndex {
             by_path.insert((id.path.clone(), tail.0, tail.1), k);
         }
         let seen = vec![false; ids.len()];
+        let claimed = vec![false; ids.len()];
         ExistIndex {
             kind,
             ids,
@@ -482,6 +492,7 @@ impl ExistIndex {
             by_fold,
             scope: scope.map(|s| s.into_iter().collect()),
             seen,
+            claimed,
         }
     }
 
@@ -577,13 +588,12 @@ impl Siblings {
                     .and_modify(|v| *v = AMBIGUOUS)
                     .or_insert(i);
             }
+            // Fold twins cannot exist on a caseless server: in a corrupt cache the first one
+            // takes the match, and the existence set's single vouch drops the other (RR-m3).
             if let Some(f) = folder
                 && let Some(k) = f.name(o.kind(), o.name())
             {
-                by_fold
-                    .entry(sib_key(o, k))
-                    .and_modify(|v| *v = AMBIGUOUS)
-                    .or_insert(i);
+                by_fold.entry(sib_key(o, k)).or_insert(i);
             }
             by_name.entry(sib_key(o, o.name().clone())).or_insert(i);
         }
@@ -694,6 +704,8 @@ struct Merger<'a> {
     /// parent's new name), so its children's existence identities are looked up where the pass
     /// reports them.
     stack: Vec<Name>,
+    /// Kept objects an existence set found under another name: that name, for their children.
+    kept_names: HashMap<u32, Name>,
     dropped_top: Vec<u32>,
     created_top: Vec<u32>,
     fragments: BTreeSet<ObjectKey>,
@@ -867,6 +879,7 @@ impl<'a> Merger<'a> {
             below: level < prev_level,
             dry: None,
             stack: Vec::new(),
+            kept_names: HashMap::new(),
             dropped_top: Vec::new(),
             created_top: Vec::new(),
             fragments,
@@ -893,6 +906,10 @@ impl<'a> Merger<'a> {
                 mg.delta = CatalogDelta::default();
                 mg.dropped_top.clear();
                 mg.stack.clear();
+                mg.kept_names.clear();
+                for set in &mut mg.sets {
+                    set.claimed.fill(false);
+                }
                 mg.created_top.clear();
             }
             mg.dry = None;
@@ -980,7 +997,14 @@ impl<'a> Merger<'a> {
     /// What the existence sets say about cached object `d`. A present object whose identity
     /// names it differently and that the pass did not re-read (`reread = false`) is re-read by a
     /// fragment. Top-level decisions are counted for the guard.
-    fn decide(&mut self, d: u32, reread: bool) -> Decision {
+    ///
+    /// `matched` is the admitted changed object the pass returned for `d`, if any. A match by an
+    /// unambiguous server id is a rename, never a drop, whatever a path-scoped set says (RR-1:
+    /// the set named the object by its old name). An identity vouches for one cached object
+    /// only: a second cached object it would also match (fold twins or duplicates in a corrupt
+    /// cache) is absent (RR-m3). A kept object found under another name has its children
+    /// looked up under that name (RR-m1).
+    fn decide(&mut self, d: u32, matched: Option<u32>) -> Decision {
         let m = self.m;
         let o = &m.objs()[d as usize];
         let Some(Rule::Exist(k)) = self.rule(o.kind()) else {
@@ -997,13 +1021,20 @@ impl<'a> Merger<'a> {
             o.props().overload_sig().cloned(),
             o.raw_kind().cloned(),
         );
-        let found = self.sets[k].find(o.server_id(), &key, amb, self.folder.as_ref());
+        let found = self.sets[k]
+            .find(o.server_id(), &key, amb, self.folder.as_ref())
+            .filter(|&e| !self.sets[k].claimed[e]);
+        let renamed_by_id = found.is_none()
+            && !amb
+            && matched.is_some_and(|ci| {
+                o.server_id().is_some() && self.c.objs()[ci as usize].server_id() == o.server_id()
+            });
         let top = o.parent() == Some(0);
         if top {
             let count = self.report.by_kind.entry(o.kind()).or_default();
             count.checked += 1;
             self.report.checked += 1;
-            if found.is_none() {
+            if found.is_none() && !renamed_by_id {
                 count.vanished += 1;
                 self.report.vanished += 1;
             }
@@ -1012,12 +1043,17 @@ impl<'a> Merger<'a> {
             Some(e) => {
                 let set = &mut self.sets[k];
                 set.seen[e] = true;
-                if !reread && set.ids[e].path != key.0 {
+                set.claimed[e] = true;
+                if matched.is_none() && set.ids[e].path != key.0 {
                     let fk = identity_key(&m.key().path, set.kind, &set.ids[e]);
+                    if let Some(new) = set.ids[e].path.last() {
+                        self.kept_names.insert(d, new.clone());
+                    }
                     self.fragments.insert(fk);
                 }
                 Decision::Present
             }
+            None if renamed_by_id => Decision::Present,
             None => Decision::Absent,
         }
     }
@@ -1229,19 +1265,33 @@ impl<'a> Merger<'a> {
         // This node's name in the next namespace (an aborted dry walk resets the stack).
         match node {
             Node::Root => {}
-            Node::Kept(d) => self.stack.push(m.objs()[d as usize].name().clone()),
+            // A kept object the existence set found under a new name (not re-read): its
+            // children are looked up under that name (RR-m1).
+            Node::Kept(d) => {
+                let name = self
+                    .kept_names
+                    .remove(&d)
+                    .unwrap_or_else(|| m.objs()[d as usize].name().clone());
+                self.stack.push(name);
+            }
             Node::Pair(_, c) => self.stack.push(self.c.objs()[c as usize].name().clone()),
         }
         let slots = self.slots(mi, &cs)?;
         let mut changed = false;
         if reread {
             // The pass's order, then cached children it did not return that stay. A parent's
-            // children are contiguous, so "matched" is a bit per child.
+            // children are contiguous, so "matched" is a bit per child. A pass that returns the
+            // same children in another order changes the parent's children (RR-m2).
             let first = m.children(mi).next().map_or(0, |(i, _)| i);
             let mut matched = vec![false; m.objs()[mi as usize].child_count() as usize];
+            let mut last = None;
             for s in &slots {
+                if let Some(d) = s.mi {
+                    changed |= last.is_some_and(|l| d < l);
+                    last = Some(d);
+                }
                 match s.mi {
-                    Some(d) if self.decide(d, true) != Decision::Absent => {
+                    Some(d) if self.decide(d, Some(s.ci)) != Decision::Absent => {
                         matched[(d - first) as usize] = true;
                         changed |= self.node(out.as_deref_mut(), me, Node::Pair(d, s.ci))?;
                     }
@@ -1265,7 +1315,7 @@ impl<'a> Merger<'a> {
                     continue;
                 }
                 self.report.steps += 1;
-                if self.decide(d, false) == Decision::Absent && self.vanish(d)? {
+                if self.decide(d, None) == Decision::Absent && self.vanish(d)? {
                     changed = true;
                     continue;
                 }
@@ -1281,7 +1331,7 @@ impl<'a> Merger<'a> {
             for (d, _) in m.children(mi) {
                 self.report.steps += 1;
                 let replacement = by_m.get(&d).copied();
-                if self.decide(d, replacement.is_some()) == Decision::Absent && self.vanish(d)? {
+                if self.decide(d, replacement) == Decision::Absent && self.vanish(d)? {
                     changed = true;
                     orphans.extend(replacement);
                     continue;

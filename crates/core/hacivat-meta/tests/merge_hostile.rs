@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
+use hacivat_meta::delta::{apply_delta, top_level_keys};
 use hacivat_meta::fixture::{ns_mysql, ns_pg, ns_sqlite, table_subtree};
+use hacivat_meta::merge::Deletions;
 use hacivat_meta::merge::{
     ChangedObject, ExistSet, Identity, MergeOutcome, MergePolicy, NamespaceResult, merge,
 };
@@ -14,7 +16,7 @@ use hacivat_meta::name::Name;
 use hacivat_meta::namespace::{Level, NamespaceSnapshot, Obj, Subtree, Watermark};
 use hacivat_meta::props::{ColumnProps, Props, TableProps, ViewProps};
 use hacivat_meta::snapshot::IntroErrorCode;
-use hacivat_meta::{ObjectKind, ServerId};
+use hacivat_meta::{ObjectKey, ObjectKind, ServerId};
 
 fn n(s: &str) -> Name {
     Arc::from(s)
@@ -503,4 +505,397 @@ fn h12_fragment_existence_set_is_scoped_to_the_fragment() {
     assert_eq!(o.next().children(0).count(), 14);
     assert_eq!(o.delta().dropped.len(), 1);
     assert_eq!(o.delta().dropped[0].name(), "t03");
+}
+
+// ---- re-review probes (R1–R7, `task-m4-10-rereview-probes.rs`), asserting the fixed behaviour
+
+/// Keys as dotted paths.
+fn keyz(ks: &[ObjectKey]) -> Vec<String> {
+    ks.iter()
+        .map(|k| {
+            k.path
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(".")
+        })
+        .collect()
+}
+
+fn renames(o: &MergeOutcome) -> Vec<(String, String, bool)> {
+    o.delta()
+        .renamed
+        .iter()
+        .map(|(a, b, c)| (a.name().to_string(), b.name().to_string(), c.is_identity()))
+        .collect()
+}
+
+/// R1. A scoped set with no ids drops exactly its scope; an empty scope decides nothing.
+#[test]
+fn r1_scoped_empty_ids_drop_exactly_the_scope() {
+    let prev = ns_pg("db", "public")
+        .subtree(bare_table("t", Some(100), &["id"]))
+        .subtree(bare_table("u", Some(101), &["id"]))
+        .finish();
+    let scoped = |scope: Vec<Vec<Name>>| {
+        res(
+            vec![(ObjectKind::Table, ExistSet::Scoped { scope, ids: vec![] })],
+            vec![],
+            false,
+            Level::Structure,
+        )
+    };
+    let o = merge(
+        Some(&prev),
+        scoped(vec![vec![n("t")]]),
+        &MergePolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(top_names(o.next()), ["u"]);
+    assert_eq!(keyz(&o.delta().dropped), ["db.public.t"]);
+    let o = merge(Some(&prev), scoped(vec![]), &MergePolicy::default()).unwrap();
+    assert_eq!(top_names(o.next()), ["t", "u"]);
+    assert!(o.delta().is_empty());
+}
+
+/// R2 (RR-1). A scope that names the old name of an object renamed by OID.
+#[test]
+fn r2_scope_naming_the_old_name_of_a_renamed_object() {
+    let prev = ns_pg("db", "public")
+        .subtree(bare_table("t", Some(100), &["id", "v"]))
+        .finish();
+    let scoped_t = |ids: Vec<Identity>| {
+        (
+            ObjectKind::Table,
+            ExistSet::Scoped {
+                scope: vec![vec![n("t")]],
+                ids,
+            },
+        )
+    };
+    // (a) The fragment of `t` was looked up by name (nothing), and the same result re-reads
+    // `u` under OID 100: an identity rename, never a drop plus a create (RR-1 a).
+    let r = res(
+        vec![scoped_t(vec![])],
+        vec![top(&prev, bare_table("u", Some(100), &["id", "v"]))],
+        false,
+        Level::Structure,
+    );
+    let o = merge(Some(&prev), r, &MergePolicy::default()).unwrap();
+    assert_eq!(top_names(o.next()), ["u"]);
+    assert!(o.delta().dropped.is_empty() && o.delta().created.is_empty());
+    assert_eq!(renames(&o), [("t".to_string(), "u".to_string(), true)]);
+    assert_eq!((o.report().checked, o.report().vanished), (1, 0));
+    // (b) The fragment resolved its key by OID (the contract, RR-1 b): the same outcome.
+    let r = res(
+        vec![scoped_t(vec![ident(&["u"], Some(100))])],
+        vec![top(&prev, bare_table("u", Some(100), &["id", "v"]))],
+        false,
+        Level::Structure,
+    );
+    let o = merge(Some(&prev), r, &MergePolicy::default()).unwrap();
+    assert_eq!(top_names(o.next()), ["u"]);
+    assert!(o.delta().dropped.is_empty() && o.delta().created.is_empty());
+    assert_eq!(renames(&o), [("t".to_string(), "u".to_string(), true)]);
+    // (c) A scope keyed by name that lists nothing and re-reads nothing is that key's drop:
+    // on server-id engines the strategy resolves scope keys by OID (documented contract,
+    // carried to T15b, T16, T21), so it would have reported `u` as in (b).
+    let r = res(vec![scoped_t(vec![])], vec![], false, Level::Structure);
+    let o = merge(Some(&prev), r, &MergePolicy::default()).unwrap();
+    assert!(top_names(o.next()).is_empty());
+    assert_eq!(keyz(&o.delta().dropped), ["db.public.t"]);
+    // (d) A child scope naming the renamed parent's old name decides nothing (paths are the
+    // next namespace's): the column the re-read omits stays.
+    let r = res(
+        vec![
+            (
+                ObjectKind::Table,
+                ExistSet::Ok(vec![ident(&["u"], Some(100))]),
+            ),
+            (
+                ObjectKind::Column,
+                ExistSet::Scoped {
+                    scope: vec![vec![n("t")]],
+                    ids: vec![ident(&["t", "id"], None)],
+                },
+            ),
+        ],
+        vec![top(&prev, bare_table("u", Some(100), &["id"]))],
+        false,
+        Level::Structure,
+    );
+    let o = merge(Some(&prev), r, &MergePolicy::default()).unwrap();
+    assert_eq!(child_names(o.next(), "u"), ["id", "v"]);
+    assert!(o.delta().dropped.is_empty());
+    // (e) Scoped to the new name, it decides: `v` is gone.
+    let r = res(
+        vec![
+            (
+                ObjectKind::Table,
+                ExistSet::Ok(vec![ident(&["u"], Some(100))]),
+            ),
+            (
+                ObjectKind::Column,
+                ExistSet::Scoped {
+                    scope: vec![vec![n("u")]],
+                    ids: vec![ident(&["u", "id"], None)],
+                },
+            ),
+        ],
+        vec![top(&prev, bare_table("u", Some(100), &["id"]))],
+        false,
+        Level::Structure,
+    );
+    let o = merge(Some(&prev), r, &MergePolicy::default()).unwrap();
+    assert_eq!(child_names(o.next(), "u"), ["id"]);
+    // A dropped object is named by its key in the previous generation (as every drop is).
+    assert_eq!(keyz(&o.delta().dropped), ["db.public.t.v"]);
+}
+
+/// R3. Keep cached (`Suppress`) then a later `Apply`: the first keeps everything and applies the
+/// creation; the second asks again (remembering the decision is T15's).
+#[test]
+fn r3_suppress_then_apply() {
+    let mut b = ns_pg("db", "public");
+    for i in 0..30u32 {
+        b = b.subtree(bare_table(&format!("t{i:02}"), Some(1000 + i), &["id"]));
+    }
+    let prev = b.finish();
+    let mk = |prev: &NamespaceSnapshot| {
+        res(
+            vec![(
+                ObjectKind::Table,
+                ExistSet::Ok(
+                    (0..5u32)
+                        .map(|i| ident(&[format!("t{i:02}").as_str()], Some(1000 + i)))
+                        .chain([ident(&["new"], Some(5000))])
+                        .collect(),
+                ),
+            )],
+            vec![top(prev, bare_table("new", Some(5000), &["id"]))],
+            false,
+            Level::Structure,
+        )
+    };
+    let apply = merge(Some(&prev), mk(&prev), &MergePolicy::default()).unwrap();
+    assert!(apply.is_pending());
+    let keep = merge(
+        Some(&prev),
+        mk(&prev),
+        &MergePolicy {
+            deletions: Deletions::Suppress,
+            ..MergePolicy::default()
+        },
+    )
+    .unwrap();
+    assert!(!keep.is_pending());
+    assert_eq!(keep.next().children(0).count(), 31);
+    assert_eq!(keep.report().suppressed.len(), 25);
+    assert!(keep.delta().dropped.is_empty());
+    assert_eq!(keyz(&keep.delta().created), ["db.public.new"]);
+    let kept = keep.into_parts().0;
+    let again = merge(Some(&kept), mk(&kept), &MergePolicy::default()).unwrap();
+    assert!(again.is_pending());
+    assert_eq!(again.report().vanished, 25);
+    assert!(again.delta().created.is_empty());
+    assert_eq!(
+        top_names(again.next())
+            .iter()
+            .filter(|x| *x == "new")
+            .count(),
+        1
+    );
+}
+
+/// R4 (RR-m3). Fold twins in a corrupt caseless cache (`Orders`, `ORDERS` under lctn = 1): one
+/// existence identity vouches for one cached object, so the twin goes and a re-read collapses
+/// to one object.
+#[test]
+fn r4_fold_twins_in_a_caseless_cache_collapse() {
+    let prev = ns_mysql("shop", 1)
+        .table("Orders", &["id"])
+        .table("ORDERS", &["id"])
+        .finish();
+    let set = || {
+        vec![(
+            ObjectKind::Table,
+            ExistSet::Ok(vec![ident(&["orders"], None)]),
+        )]
+    };
+    let r = res(
+        set(),
+        vec![top(&prev, bare_table("orders", None, &["id"]))],
+        false,
+        Level::Structure,
+    );
+    let o = merge(Some(&prev), r, &MergePolicy::default()).unwrap();
+    assert_eq!(top_names(o.next()), ["orders"]);
+    assert_eq!(keyz(&o.delta().dropped), ["shop.ORDERS"]);
+    assert!(o.delta().created.is_empty());
+    assert_eq!(
+        renames(&o),
+        [("Orders".to_string(), "orders".to_string(), true)]
+    );
+    // Not re-read: the first twin stays, the other goes.
+    let o = merge(
+        Some(&prev),
+        res(set(), vec![], false, Level::Structure),
+        &MergePolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(top_names(o.next()), ["Orders"]);
+    assert_eq!(keyz(&o.delta().dropped), ["shop.ORDERS"]);
+}
+
+/// R5 (RR-m2). Every listed child has its parent marked `children`, every marked parent has a
+/// listed child; a re-read that only reorders children marks the parent `children` too.
+#[test]
+fn r5_delta_detail_and_reordering() {
+    let prev = ns_pg("db", "public")
+        .subtree(table_subtree("public", "a", 3, 100, None))
+        .finish();
+    let a = prev.children(0).next().unwrap().0;
+    let mut t = Subtree::new(prev.objs()[a as usize].clone());
+    for (i, (_, o)) in prev.children(a).enumerate() {
+        if o.kind() == ObjectKind::Index {
+            continue;
+        }
+        let mut o = o.clone();
+        if i == 1 {
+            o = Obj::new(ObjectKind::Column, o.name().as_ref()).with_props(Props::Column(
+                Arc::new(ColumnProps {
+                    ordinal: 2,
+                    raw_type: n("bigint"),
+                    nullable: true,
+                    ..Default::default()
+                }),
+            ));
+        }
+        t.add(t.root(), o);
+    }
+    t.add(t.root(), col("extra", 9));
+    let r = res(
+        vec![
+            (
+                ObjectKind::Table,
+                ExistSet::Ok(vec![ident(&["a"], Some(100))]),
+            ),
+            (
+                ObjectKind::Index,
+                ExistSet::Scoped {
+                    scope: vec![vec![n("a")]],
+                    ids: vec![],
+                },
+            ),
+        ],
+        vec![top(&prev, t)],
+        false,
+        Level::Structure,
+    );
+    let o = merge(Some(&prev), r, &MergePolicy::default()).unwrap();
+    let d = o.delta();
+    assert_eq!(keyz(&d.created), ["db.public.a.extra"]);
+    assert_eq!(keyz(&d.dropped), ["db.public.a.a_created_at_idx"]);
+    let keys = apply_delta(prev.key(), &top_level_keys(&prev), d).unwrap();
+    assert_eq!(keys, top_level_keys(o.next()));
+    let marked: Vec<Vec<Name>> = d
+        .altered
+        .iter()
+        .filter(|(_, f)| f.children)
+        .map(|(k, _)| k.path.to_vec())
+        .collect();
+    let mut children: Vec<Vec<Name>> = d
+        .created
+        .iter()
+        .chain(&d.dropped)
+        .map(|k| k.path.to_vec())
+        .collect();
+    children.extend(d.altered.iter().map(|(k, _)| k.path.to_vec()));
+    for c in children.iter().filter(|c| c.len() > 3) {
+        assert!(
+            marked.contains(&c[..c.len() - 1].to_vec()),
+            "unmarked parent of {c:?}"
+        );
+    }
+    for p in &marked {
+        assert!(
+            children
+                .iter()
+                .any(|c| c.len() == p.len() + 1 && c.starts_with(p)),
+            "{p:?} marked without a child entry"
+        );
+    }
+
+    // Reordering only: the arena follows the pass, and the parent is altered (children).
+    let mut t = Subtree::new(prev.objs()[a as usize].clone());
+    let mut v: Vec<Obj> = prev.children(a).map(|(_, o)| o.clone()).collect();
+    v.reverse();
+    for o in v {
+        t.add(t.root(), o);
+    }
+    let r = res(
+        vec![(
+            ObjectKind::Table,
+            ExistSet::Ok(vec![ident(&["a"], Some(100))]),
+        )],
+        vec![top(&prev, t)],
+        false,
+        Level::Structure,
+    );
+    let o = merge(Some(&prev), r, &MergePolicy::default()).unwrap();
+    let mut expected = child_names(&prev, "a");
+    expected.reverse();
+    assert_eq!(child_names(o.next(), "a"), expected);
+    assert_eq!(o.delta().altered.len(), 1);
+    assert_eq!(keyz(&[o.delta().altered[0].0.clone()]), ["db.public.a"]);
+    assert!(o.delta().altered[0].1.children);
+}
+
+/// R6 (RR-m1). A parent renamed by OID but not re-read: its children follow its identity (the
+/// new name), so a namespace-wide column set under the new name keeps them.
+#[test]
+fn r6_kept_renamed_parent_children_follow_its_identity() {
+    let prev = ns_pg("db", "public")
+        .subtree(bare_table("t", Some(100), &["id", "v"]))
+        .finish();
+    let r = res(
+        vec![
+            (
+                ObjectKind::Table,
+                ExistSet::Ok(vec![ident(&["u"], Some(100))]),
+            ),
+            (
+                ObjectKind::Column,
+                ExistSet::Ok(vec![ident(&["u", "id"], None), ident(&["u", "v"], None)]),
+            ),
+        ],
+        vec![],
+        false,
+        Level::Structure,
+    );
+    let o = merge(Some(&prev), r, &MergePolicy::default()).unwrap();
+    assert_eq!(top_names(o.next()), ["t"]);
+    assert_eq!(child_names(o.next(), "t"), ["id", "v"]);
+    assert!(o.delta().dropped.is_empty());
+    assert_eq!(keyz(&o.report().fragments), ["db.public.u"]);
+}
+
+/// R7. A pass at the namespace's own level is not below it: a table it creates without columns
+/// is not reported below level, and the level stays.
+#[test]
+fn r7_same_level_creation_is_not_below_level() {
+    let prev = ns_pg("db", "public")
+        .subtree(bare_table("t", Some(100), &["id"]))
+        .finish();
+    let level = prev.meta().level;
+    let r = res(
+        vec![],
+        vec![top(&prev, bare_table("z", Some(200), &[]))],
+        false,
+        level,
+    );
+    let o = merge(Some(&prev), r, &MergePolicy::default()).unwrap();
+    assert_eq!(o.next().meta().level, level);
+    assert!(o.report().below_level.is_empty());
+    assert_eq!(top_names(o.next()), ["t", "z"]);
 }

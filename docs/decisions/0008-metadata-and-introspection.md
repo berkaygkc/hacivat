@@ -722,3 +722,16 @@ M4 Task 10 fills the existence-diff merge, the catalog delta and the mass-deleti
   metadata (M-6). Measured on 15,000 tables / 160,000 columns in one schema (release, load ~6):
   full pass p50 28 ms / p95 31 ms, incremental (1 %) 24 / 26 ms, nothing changed 17 / 22 ms. The
   local gate is the median (R-W2-3); T33 records p95 on a quiet machine.
+- **Fix round 2.**
+  - **RR-1 (a):** a cached object that the same result re-reads under the same unambiguous
+    server id is a rename (Present), whatever a path-scoped set says.
+  - **RR-1 (b), the contract for T15b, T16 and T21:** on server-id engines a scoped set
+    resolves its keys by server id, so a renamed object is reported under its current name. A
+    scoped key that lists nothing is that key's drop.
+  - **RR-m1:** a kept object that the existence set found under a new name, but that was not
+    re-read, has its children looked up under the new name.
+  - **RR-m2:** a re-read that only reorders children marks the parent `altered { children }`.
+  - **RR-m3:** one existence identity vouches for one cached object. In a corrupt caseless
+    cache the first fold twin takes the match and the others are dropped.
+  - A dropped object is always named by its key in the previous generation, even under a
+    parent renamed in the same delta.
