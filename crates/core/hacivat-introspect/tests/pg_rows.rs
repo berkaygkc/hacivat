@@ -3,6 +3,9 @@
 //! the exact change predicate (finding 6), the facet cascade (finding 5), the mass-change
 //! rule, and properties of every rendered `packs/pg` section (no XID-assigning call, the
 //! lint, every catalog `pg_catalog.`-qualified, names only as binds).
+// ## m4-t33a-hygiene (named exception): the modules this file uses exist only with the
+// `session` feature, so `--no-default-features --tests` builds (T16b/T17 carry).
+#![cfg(feature = "session")]
 
 use hacivat_introspect::pack::{Pack, lint};
 use hacivat_introspect::pg::changes::{Changes, Facets};

@@ -3,6 +3,9 @@
 //! adopted in the minors round. Pure: no Docker. HR1 (m-1) and HR2 (m-2) failed at review and
 //! now assert the fixes; HR3's function rows take a routine key (privileges are checked per
 //! object kind since m-2).
+// ## m4-t33a-hygiene (named exception): the modules this file uses exist only with the
+// `session` feature, so `--no-default-features --tests` builds (T16b/T17 carry).
+#![cfg(feature = "session")]
 
 use std::time::Instant;
 

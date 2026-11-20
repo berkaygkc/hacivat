@@ -128,6 +128,11 @@ jobs:
       # Fix round 2: `hacivat-introspect` builds without `session` (what `fuzz/meta` needs).
       - name: Check (M4) introspect without the session feature
         run: cargo check --locked -p hacivat-introspect --no-default-features
+      # ## m4-t33a-hygiene: the test targets build without `session` too (T16b/T17 carry), and
+      # so do `hacivat-meta`'s and `hacivat-ddl`'s (their no-feature model and pure renderers).
+      - name: Check (M4) no-default-feature test targets
+        run: cargo check --locked --tests --no-default-features -p hacivat-introspect -p hacivat-meta -p hacivat-ddl
+      # ## m4-t33a-hygiene
 
       # ## m3a-t01a-proofs
       # After every build of this job (clippy, release, the test builds): nothing under the

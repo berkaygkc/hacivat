@@ -11,6 +11,9 @@
 //! "Incremental equals full" compares the cached namespace merged with an incremental pass
 //! (Task 10's `merge`) against a fresh full pass merged into an empty base, object by object
 //! (kind, path, server id, flags, properties).
+// ## m4-t33a-hygiene (named exception): the modules this file uses exist only with the
+// `session` feature, so `--no-default-features --tests` builds (T16b/T17 carry).
+#![cfg(feature = "session")]
 
 mod common;
 

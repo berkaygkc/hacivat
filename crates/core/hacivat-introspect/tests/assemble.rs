@@ -1,6 +1,9 @@
 //! Composite object assembly (HV-INTRO-13; M4 Task 13): keys, indexes, foreign keys, checks and
 //! exclusion constraints built from per-dialect catalog rows. Row fixtures for alg/02
 //! HV-INTRO-13 test cases 1–5 and 7; the Docker variants run in Tasks 16–18.
+// ## m4-t33a-hygiene (named exception): the modules this file uses exist only with the
+// `session` feature, so `--no-default-features --tests` builds (T16b/T17 carry).
+#![cfg(feature = "session")]
 
 use std::sync::Arc;
 

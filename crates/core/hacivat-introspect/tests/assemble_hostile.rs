@@ -2,6 +2,9 @@
 //! (`task-m4-13-review-hostile.rs`), committed with fix round 1. Each asserts the behaviour the
 //! review asks for: h1–h4 were findings (I1, I2, I3, m1) and pass with the fix; h5 and h6 are
 //! sanity probes. Row constructors gained the fix round's new row fields.
+// ## m4-t33a-hygiene (named exception): the modules this file uses exist only with the
+// `session` feature, so `--no-default-features --tests` builds (T16b/T17 carry).
+#![cfg(feature = "session")]
 
 use std::sync::Arc;
 
