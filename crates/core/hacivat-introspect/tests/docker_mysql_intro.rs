@@ -47,7 +47,16 @@ const ALL: [&str; 6] = [
     "mariadb114",
 ];
 const MARIADB: [&str; 3] = ["mariadb106", "mariadb1011", "mariadb114"];
-const FOLD: [&str; 3] = ["mysql80", "mysql84", "mariadb114"];
+// ## m4-t33a-hygiene (named exception; T17b review m-4): the MariaDB fold pin is checked on
+// every pinned MariaDB line, not only 11.4.
+const FOLD: [&str; 5] = [
+    "mysql80",
+    "mysql84",
+    "mariadb106",
+    "mariadb1011",
+    "mariadb114",
+];
+// ## m4-t33a-hygiene
 
 /// The connections a test needs (module docs).
 mod harness {
