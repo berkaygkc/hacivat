@@ -4083,3 +4083,34 @@ hv-settings-time-zone-unknown-choice = { $zone } (unknown)
 #   $zone (String) - an IANA time zone, verbatim, e.g. "Europe/Istanbul".
 #   $system (String) - the system choice as the select shows it, e.g. "System (Europe/Istanbul)".
 hv-settings-time-zone-unknown = { $zone } isn't a time zone Hacivat knows, so { $system } is used.
+
+## m4-t33b-carries
+
+# The clear-history confirmation when damaged backups exist (T32 carry, ruling 2026-11-20).
+# Variables:
+#   $count (Number) - how many damaged backups of the history exist, e.g. 2.
+hv-history-clear-body-backups = { $count ->
+        [one] Every statement saved for this connection is deleted from this computer, pinned ones too. This can't be undone. Nothing on the server changes. Hacivat also keeps { $count } damaged backup of the history, set aside when the file was repaired. It may still hold this connection's statements, and every other connection's.
+       *[other] Every statement saved for this connection is deleted from this computer, pinned ones too. This can't be undone. Nothing on the server changes. Hacivat also keeps { $count } damaged backups of the history, set aside when the file was repaired. They may still hold this connection's statements, and every other connection's.
+    }
+# The clear-history confirmation: the checkbox (off by default) that also deletes the damaged backups.
+hv-history-clear-backups = Also delete damaged history backups
+# The clear-history confirmation: the checkbox's dimmer note.
+# Variables:
+#   $count (Number) - how many damaged backups of the history exist, e.g. 2.
+hv-history-clear-backups-note = { $count ->
+        [one] { $count } file, with every connection's old statements
+       *[other] { $count } files, with every connection's old statements
+    }
+# A toast after the history of a connection was cleared and the damaged backups deleted.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+#   $count (Number) - how many damaged backups were deleted, e.g. 2.
+hv-history-cleared-backups = { $count ->
+        [one] The query history of { $name } was cleared, and { $count } damaged backup was deleted.
+       *[other] The query history of { $name } was cleared, and { $count } damaged backups were deleted.
+    }
+# A toast when the history file turned out damaged while clearing with the history off (T32 re-review RR-2).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-history-clear-damaged = The history file was damaged, so Hacivat set it aside as a backup. The query history of { $name } wasn't cleared from it; clear again to delete the damaged backup.

@@ -319,6 +319,8 @@ impl Global for Recalls {}
 /// Forgets the recalls of every console on `profile` (its history was cleared): ⌃⌥↑ / ⌃⌥↓
 /// no longer step through statements that are gone.
 pub(crate) fn forget_recalls(profile: hacivat_proto::ProfileId, cx: &mut App) {
+    // ## m4-t33b-carries (T32 re-review RR-1): a read already on its way is dropped too.
+    note_cleared(profile, cx);
     let editors: Vec<EntityId> = Consoles::ids(cx)
         .into_iter()
         .filter_map(|id| Consoles::get(cx, id))
@@ -332,6 +334,29 @@ pub(crate) fn forget_recalls(profile: hacivat_proto::ProfileId, cx: &mut App) {
     for id in editors {
         recalls.0.remove(&id);
     }
+}
+
+// ## m4-t33b-carries (named exception; T32 re-review RR-1)
+/// How many times each profile's history was (being) cleared: a recall whose read started
+/// under an older count shows nothing, so a read that was already on its way when a clear
+/// started never brings the cleared statements back.
+#[derive(Default)]
+struct ClearedGenerations(HashMap<hacivat_proto::ProfileId, u64>);
+
+impl Global for ClearedGenerations {}
+
+/// A clear of `profile`'s history starts or ended: recalls read before now are stale.
+pub(crate) fn note_cleared(profile: hacivat_proto::ProfileId, cx: &mut App) {
+    *cx.default_global::<ClearedGenerations>()
+        .0
+        .entry(profile)
+        .or_default() += 1;
+}
+
+fn cleared_generation(profile: hacivat_proto::ProfileId, cx: &App) -> u64 {
+    cx.try_global::<ClearedGenerations>()
+        .and_then(|g| g.0.get(&profile).copied())
+        .unwrap_or(0)
 }
 
 /// The console whose editor is `editor`.
@@ -381,6 +406,8 @@ fn recall(editor: Entity<EditorView>, older: bool, cx: &mut App) {
         return;
     };
     let read = crate::history::recall(&store, profile, RECALL_LIMIT, cx);
+    // ## m4-t33b-carries (RR-1): the clear count the read starts under.
+    let generation = cleared_generation(profile, cx);
     cx.spawn(async move |cx| {
         let Ok(list) = read.await else {
             return;
@@ -390,6 +417,10 @@ fn recall(editor: Entity<EditorView>, older: bool, cx: &mut App) {
         }
         let list: Arc<[Arc<str>]> = list.into();
         cx.update(|cx| {
+            // A clear started since the read did: the list may hold cleared statements.
+            if cleared_generation(profile, cx) != generation {
+                return;
+            }
             // Typed into meanwhile: the recall is dropped.
             if editor.read(cx).snapshot().buffer.len_bytes() == 0 {
                 show_recalled(&editor, list, 0, cx);

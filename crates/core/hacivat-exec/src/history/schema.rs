@@ -228,6 +228,57 @@ fn prepare_file(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+// ## m4-t33b-carries (named exception; T32 carry: rotated corrupt files keep old history)
+/// The damaged copies [`rotate`] set aside next to `path` (`<name>.corrupt-<secs>[-n]`), one
+/// entry per copy (their `-wal` and `-shm` are not listed). No directory: none.
+pub(crate) fn damaged_backups(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    Ok(backup_files(path)?
+        .into_iter()
+        .filter(|p| {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
+            !name.is_some_and(|n| n.ends_with("-wal") || n.ends_with("-shm"))
+        })
+        .collect())
+}
+
+/// Deletes every damaged copy next to `path` with its `-wal` and `-shm`; answers how many
+/// copies went. The live file is never touched.
+pub(crate) fn delete_damaged_backups(path: &Path) -> std::io::Result<u64> {
+    let copies = damaged_backups(path)?.len() as u64;
+    for file in backup_files(path)? {
+        match std::fs::remove_file(&file) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(copies)
+}
+
+/// Every file whose name starts with `<name>.corrupt-` in `path`'s directory.
+fn backup_files(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Ok(Vec::new());
+    };
+    let mut prefix = name.to_os_string();
+    prefix.push(".corrupt-");
+    let prefix = prefix.to_string_lossy().into_owned();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_file() && entry.file_name().to_string_lossy().starts_with(&prefix)
+        {
+            out.push(entry.path());
+        }
+    }
+    Ok(out)
+}
+
 /// Renames the corrupt file (and its `-wal`, `-shm`) to `<name>.corrupt-<unix seconds>[-n]`.
 fn rotate(path: &Path) -> std::io::Result<PathBuf> {
     let secs = SystemTime::now()

@@ -757,6 +757,16 @@ fn kept(h: &History) -> Vec<String> {
     out
 }
 
+// ## m4-t33b-carries: the question opens once the history folder was looked at (on the core
+// runtime: are there damaged backups to offer?).
+fn asked(vcx: &VisualTestContext) {
+    wait_until(vcx, "the clear question", |vcx| {
+        vcx.cx
+            .read(|cx| hacivat_app::history::clear::question(cx).is_some())
+            && layer_ids(vcx).contains(&"dialog")
+    });
+}
+
 fn menu_labels(vcx: &VisualTestContext, profile: ProfileId) -> Vec<String> {
     vcx.cx.read(|cx| {
         hacivat_app::connections::explorer::menu_items(cx, profile)
@@ -778,6 +788,7 @@ fn the_history_menu_clears_this_connection_after_asking_with_cancel_first(cx: &m
     h.keys("tab tab tab enter");
     assert!(layer_ids(h.vcx).contains(&"menu"), "{:?}", layer_ids(h.vcx));
     h.keys("enter");
+    asked(h.vcx);
     assert_eq!(
         strip(&dialog_title(h.vcx)),
         "Clear the query history of orders-dev?"
@@ -792,7 +803,7 @@ fn the_history_menu_clears_this_connection_after_asking_with_cancel_first(cx: &m
     assert_eq!(kept(&h), ["SELECT 'other'", "SELECT 1", "SELECT 2"]);
     // Clear history (shift-tab from Cancel, then Enter): only this connection's entries go.
     assert!(run(h.vcx, "history.clear"));
-    h.vcx.run_until_parked();
+    asked(h.vcx);
     h.keys("shift-tab enter");
     wait_until(h.vcx, "the history cleared", |_| kept(&h).len() == 1);
     assert_eq!(kept(&h), ["SELECT 'other'"]);
@@ -828,7 +839,7 @@ fn the_connection_menu_clears_the_selected_connections_history(cx: &mut TestAppC
         "{labels:?}"
     );
     assert!(run(h.vcx, "connection.clear_history"));
-    h.vcx.run_until_parked();
+    asked(h.vcx);
     assert_eq!(
         strip(&dialog_title(h.vcx)),
         "Clear the query history of billing-dev?"
@@ -838,7 +849,7 @@ fn the_connection_menu_clears_the_selected_connections_history(cx: &mut TestAppC
     h.vcx.run_until_parked();
     assert_eq!(kept(&h), ["SELECT 'other'", "SELECT 1"]);
     assert!(run(h.vcx, "connection.clear_history"));
-    h.vcx.run_until_parked();
+    asked(h.vcx);
     h.vcx.simulate_keystrokes("shift-tab enter");
     wait_until(h.vcx, "billing-dev cleared", |_| kept(&h).len() == 1);
     assert_eq!(kept(&h), ["SELECT 1"]);
@@ -917,7 +928,7 @@ fn clearing_works_with_the_history_turned_off(cx: &mut TestAppContext) {
         run(h.vcx, "connection.clear_history"),
         "offered with the history off"
     );
-    h.vcx.run_until_parked();
+    asked(h.vcx);
     assert_eq!(
         strip(&dialog_title(h.vcx)),
         "Clear the query history of orders-dev?"
@@ -958,5 +969,274 @@ fn clearing_works_with_the_history_turned_off(cx: &mut TestAppContext) {
     assert_eq!(left(path), ["SELECT 'other'"]);
     // Nothing reopened the history for recording.
     assert!(h.vcx.cx.read(hacivat_app::history::store).is_none());
+    stop_core_runtime_test(cx);
+}
+
+// ---- ## m4-t33b-carries: the T32 re-review carries (RR-1, RR-2) and the damaged backups ----
+
+/// Closes the app's store and turns the history off (as after a start with it off); answers
+/// the history file's path.
+fn history_off(h: &History) -> std::path::PathBuf {
+    let store = h.store.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    h.rt.spawn(async move {
+        store.shutdown(std::time::Duration::from_secs(2)).await;
+        let _ = tx.send(());
+    });
+    rx.recv().expect("closed");
+    h.vcx.cx.update(|cx| {
+        hacivat_app::shell::update_settings(cx, |s| s.history.enabled = false);
+        hacivat_app::history::set_store(None, cx);
+        hacivat_app::connections::ConnectionsModel::select(cx, Some(h.profile));
+    });
+    h.vcx.run_until_parked();
+    h.vcx
+        .cx
+        .read(|cx| cx.global::<hacivat_app::AppState>().paths.history_db())
+}
+
+/// Every statement in the file at `path`, read by a store opened with no retention.
+fn statements_in(h: &History, path: std::path::PathBuf) -> Vec<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    h.rt.spawn(async move {
+        let none = hacivat_exec::HistoryConfig {
+            per_source: 0,
+            max_age_days: 0,
+            ..hacivat_exec::HistoryConfig::default()
+        };
+        let s = HistoryStore::open(path, none).await.expect("opens");
+        let hits = s
+            .search(HistoryQuery {
+                limit: 100,
+                ..HistoryQuery::default()
+            })
+            .await
+            .expect("search");
+        s.shutdown(std::time::Duration::from_secs(2)).await;
+        let _ = tx.send(hits);
+    });
+    let mut out: Vec<String> = rx
+        .recv()
+        .expect("answers")
+        .into_iter()
+        .map(|h| h.record.statement_masked.to_string())
+        .collect();
+    out.sort();
+    out
+}
+
+fn backups_of(h: &History, path: std::path::PathBuf) -> Vec<std::path::PathBuf> {
+    futures::executor::block_on(h.rt.spawn(HistoryStore::damaged_backups(path)))
+        .expect("the task")
+        .expect("listed")
+}
+
+// RR-2: with the history off, the store opened just for the clear finds the file damaged. It
+// sets the file aside (as a start does), but the toast says the history wasn't cleared, never
+// "cleared".
+#[gpui::test]
+fn clearing_a_damaged_file_with_the_history_off_says_it_was_not_cleared(cx: &mut TestAppContext) {
+    let h = history(cx, &["SELECT 'kept on disk'"]);
+    wait_until(h.vcx, "the records in the store", |_| kept(&h).len() == 1);
+    let path = history_off(&h);
+    std::fs::write(&path, b"not a database".repeat(200)).expect("damage the file");
+    assert!(run(h.vcx, "connection.clear_history"));
+    asked(h.vcx);
+    h.vcx.simulate_keystrokes("shift-tab enter");
+    let damaged = "The history file was damaged, so Hacivat set it aside as a backup. The query \
+                   history of orders-dev wasn't cleared from it; clear again to delete the \
+                   damaged backup.";
+    wait_until(h.vcx, "the toast", |vcx| {
+        toast_texts(vcx).iter().any(|t| strip(t) == damaged)
+    });
+    assert!(
+        !toast_texts(h.vcx)
+            .iter()
+            .any(|t| strip(t).contains("was cleared")),
+        "{:?}",
+        toast_texts(h.vcx)
+    );
+    assert_eq!(backups_of(&h, path).len(), 1, "set aside as a start would");
+    stop_core_runtime_test(cx);
+}
+
+// RR-2: the store opened just for the clear runs no retention: another connection's old
+// statement (older than the 90-day limit) survives the clear of this one.
+#[gpui::test]
+fn clearing_with_the_history_off_runs_no_retention(cx: &mut TestAppContext) {
+    let h = history(cx, &["SELECT 'mine'"]);
+    let other = add_profile(h.vcx, test_profile("billing-dev", None, "127.0.0.2"));
+    wait_until(h.vcx, "the records in the store", |_| kept(&h).len() == 1);
+    let path = history_off(&h);
+    // Another connection's statement older than the 90-day limit, written by a store that
+    // applies no retention.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let at = path.clone();
+    let old = Arc::new(record(
+        other,
+        "SELECT 'old other'",
+        Outcome::Ok,
+        100 * 86_400_000,
+    ));
+    h.rt.spawn(async move {
+        let none = hacivat_exec::HistoryConfig {
+            per_source: 0,
+            max_age_days: 0,
+            ..hacivat_exec::HistoryConfig::default()
+        };
+        let s = HistoryStore::open(at, none).await.expect("opens");
+        s.sink().send(old).await.expect("sent");
+        s.shutdown(std::time::Duration::from_secs(2)).await;
+        let _ = tx.send(());
+    });
+    rx.recv().expect("written");
+    assert_eq!(
+        statements_in(&h, path.clone()),
+        ["SELECT 'mine'", "SELECT 'old other'"]
+    );
+    assert!(run(h.vcx, "connection.clear_history"));
+    asked(h.vcx);
+    h.vcx.simulate_keystrokes("shift-tab enter");
+    wait_until(h.vcx, "the toast", |vcx| {
+        toast_texts(vcx)
+            .iter()
+            .any(|t| strip(t) == "The query history of orders-dev was cleared.")
+    });
+    assert_eq!(statements_in(&h, path), ["SELECT 'old other'"]);
+    stop_core_runtime_test(cx);
+}
+
+// The T32 carry (ruling 2026-11-20): damaged backups (`history.sqlite.corrupt-*`) keep every
+// connection's old statements and can't be opened to clear one connection. The question says
+// so and offers "Also delete damaged history backups", off by default; checked, the clear
+// deletes them.
+#[gpui::test]
+fn the_question_offers_to_delete_damaged_backups_off_by_default(cx: &mut TestAppContext) {
+    let h = history(cx, &["SELECT 1"]);
+    wait_until(h.vcx, "the records in the store", |_| kept(&h).len() == 1);
+    let path = h
+        .vcx
+        .cx
+        .read(|cx| cx.global::<hacivat_app::AppState>().paths.history_db());
+    h.vcx.cx.update(|cx| {
+        hacivat_app::connections::ConnectionsModel::select(cx, Some(h.profile));
+    });
+    // No backup: no word of it, no checkbox.
+    assert!(run(h.vcx, "connection.clear_history"));
+    asked(h.vcx);
+    assert!(
+        !dialog_body(h.vcx).contains("damaged"),
+        "{}",
+        dialog_body(h.vcx)
+    );
+    assert!(
+        h.vcx
+            .debug_bounds("checkbox-history-clear-backups")
+            .is_none()
+    );
+    h.vcx.simulate_keystrokes("escape");
+    h.vcx.run_until_parked();
+    // Two damaged copies beside the live file.
+    let beside = |suffix: &str| {
+        let mut s = path.as_os_str().to_owned();
+        s.push(suffix);
+        std::path::PathBuf::from(s)
+    };
+    let copy = beside(".corrupt-1700000000");
+    let copy2 = beside(".corrupt-1700000001");
+    std::fs::write(&copy, b"old damaged history").expect("a backup");
+    std::fs::write(&copy2, b"old damaged history").expect("a backup");
+    assert!(run(h.vcx, "connection.clear_history"));
+    asked(h.vcx);
+    assert_eq!(
+        strip(&dialog_body(h.vcx)),
+        "Every statement saved for this connection is deleted from this computer, pinned ones \
+         too. This can't be undone. Nothing on the server changes. Hacivat also keeps 2 damaged \
+         backups of the history, set aside when the file was repaired. They may still hold this \
+         connection's statements, and every other connection's."
+    );
+    assert!(
+        h.vcx
+            .debug_bounds("checkbox-history-clear-backups")
+            .is_some()
+    );
+    // Default (off): clearing keeps the backups.
+    h.vcx.simulate_keystrokes("shift-tab enter");
+    wait_until(h.vcx, "cleared", |_| kept(&h).is_empty());
+    wait_until(h.vcx, "the toast", |vcx| {
+        toast_texts(vcx)
+            .iter()
+            .any(|t| strip(t) == "The query history of orders-dev was cleared.")
+    });
+    assert!(copy.exists() && copy2.exists(), "off by default");
+    // Checked (Tab from Cancel reaches the checkbox first, Space checks it), then Clear.
+    h.put(record(h.profile, "SELECT 2", Outcome::Ok, 0));
+    wait_until(h.vcx, "the new record", |_| kept(&h).len() == 1);
+    assert!(run(h.vcx, "connection.clear_history"));
+    asked(h.vcx);
+    h.vcx.simulate_keystrokes("tab space");
+    h.vcx.run_until_parked();
+    h.vcx.simulate_keystrokes("tab enter");
+    wait_until(h.vcx, "the backups deleted", |_| {
+        !copy.exists() && !copy2.exists()
+    });
+    wait_until(h.vcx, "cleared", |_| kept(&h).is_empty());
+    wait_until(h.vcx, "the toast", |vcx| {
+        toast_texts(vcx).iter().any(|t| {
+            strip(t)
+                == "The query history of orders-dev was cleared, and 2 damaged backups were \
+                    deleted."
+        })
+    });
+    assert!(path.exists(), "the live history stays");
+    // Turkish.
+    switch_to(h.vcx, "tr");
+    std::fs::write(&copy, b"old damaged history").expect("a backup");
+    assert!(run(h.vcx, "connection.clear_history"));
+    asked(h.vcx);
+    assert!(
+        strip(&dialog_body(h.vcx)).contains("1 hasarlı yedeğini"),
+        "{}",
+        dialog_body(h.vcx)
+    );
+    h.vcx.simulate_keystrokes("escape");
+    h.vcx.run_until_parked();
+    stop_core_runtime_test(cx);
+}
+
+// RR-1: a recall whose read was already on its way when the clear started never brings the
+// cleared statements back (a per-profile "cleared" generation). The recall is sent, then the
+// clear starts before the foreground runs again; repeated, so the
+// order the two answers arrive in varies.
+#[gpui::test]
+fn a_recall_read_in_flight_during_a_clear_is_dropped(cx: &mut TestAppContext) {
+    let h = history(cx, &[]);
+    let editor = h.editor.clone();
+    in_window(h.vcx, |window, cx| {
+        let handle = gpui::Focusable::focus_handle(editor.read(cx), cx);
+        window.focus(&handle, cx);
+    });
+    h.vcx.run_until_parked();
+    for round in 0..12 {
+        let sql = format!("SELECT {round} AS cleared");
+        h.put(record(h.profile, &sql, Outcome::Ok, 0));
+        wait_until(h.vcx, "the record", |_| kept(&h) == [sql.clone()]);
+        let editor = editor.clone();
+        let profile = h.profile;
+        // The recall's read is sent (its update ends), then the clear starts, before the
+        // foreground runs again.
+        in_window(h.vcx, |window, cx| {
+            editor.update(cx, |e, cx| {
+                assert!(e.run_command("editor.history_prev", window, cx))
+            });
+        });
+        let done = h
+            .vcx
+            .cx
+            .update(|cx| hacivat_app::history::clear::clear(profile, cx));
+        assert_eq!(wait_task(h.vcx, done), Some(1));
+        h.vcx.run_until_parked();
+        assert_eq!(h.text(), "", "round {round}: a cleared statement came back");
+    }
     stop_core_runtime_test(cx);
 }

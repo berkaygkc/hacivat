@@ -3731,3 +3731,30 @@ hv-settings-time-zone-unknown-choice = { $zone } (bilinmiyor)
 #   $system (String) - the system choice as the select shows it, e.g. "System (Europe/Istanbul)".
 # Review: PO
 hv-settings-time-zone-unknown = { $zone } Hacivat'ın tanıdığı bir saat dilimi değil, bu yüzden { $system } kullanılıyor.
+
+## m4-t33b-carries
+
+# The clear-history confirmation when damaged backups exist (T32 carry, ruling 2026-11-20).
+# Variables:
+#   $count (Number) - how many damaged backups of the history exist, e.g. 2.
+# Review: PO
+hv-history-clear-body-backups = Bu bağlantı için kaydedilen tüm ifadeler, sabitlenenler de dahil, bu bilgisayardan silinir. Bu işlem geri alınamaz. Sunucuda hiçbir şey değişmez. Hacivat ayrıca geçmişin, dosya onarılırken bir kenara ayrılan { $count } hasarlı yedeğini saklıyor. Bunlar bu bağlantının ve diğer tüm bağlantıların ifadelerini hâlâ içerebilir.
+# The clear-history confirmation: the checkbox (off by default) that also deletes the damaged backups.
+# Review: PO
+hv-history-clear-backups = Hasarlı geçmiş yedeklerini de sil
+# The clear-history confirmation: the checkbox's dimmer note.
+# Variables:
+#   $count (Number) - how many damaged backups of the history exist, e.g. 2.
+# Review: PO
+hv-history-clear-backups-note = { $count } dosya, tüm bağlantıların eski ifadeleriyle
+# A toast after the history of a connection was cleared and the damaged backups deleted.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+#   $count (Number) - how many damaged backups were deleted, e.g. 2.
+# Review: PO
+hv-history-cleared-backups = { $name } için sorgu geçmişi temizlendi ve { $count } hasarlı yedek silindi.
+# A toast when the history file turned out damaged while clearing with the history off (T32 re-review RR-2).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-history-clear-damaged = Geçmiş dosyası hasarlıydı, bu yüzden Hacivat onu yedek olarak bir kenara ayırdı. { $name } için sorgu geçmişi ondan temizlenmedi; hasarlı yedeği silmek için yeniden temizleyin.

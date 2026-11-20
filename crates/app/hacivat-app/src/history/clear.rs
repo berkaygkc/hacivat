@@ -7,20 +7,39 @@
 //! Clear history button clears. The store deletes the profile's entries, pinned ones too, on
 //! its writer (the core runtime's blocking pool); the UI thread only awaits a channel. An open
 //! history dialog searches again afterwards, and a toast says what happened.
+//!
+//! ## m4-t33b-carries
+//!
+//! - **Damaged backups** (the T32 carry, ruling 2026-11-20). A damaged history file is set
+//!   aside as `history.sqlite.corrupt-*` when the history opens; such a copy holds every
+//!   connection's statements as they were, and nothing can open it to clear one connection.
+//!   Before the question opens, the folder is looked at on the core runtime: when copies
+//!   exist, the question says so and offers "Also delete damaged history backups" (off by
+//!   default; Tab reaches it first, Space checks it). Checked, Clear history deletes them too.
+//! - **History off** (T32 re-review RR-2). The store opened just for the clear runs no
+//!   retention (every limit 0), and when it finds the file damaged (it sets it aside, as a
+//!   start does) the toast says the history was not cleared, never "cleared".
+//! - **Recalls** (RR-1): the clear bumps the profile's "cleared" count when it starts and when
+//!   it ends, so a console recall read that overlaps it shows nothing.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use hacivat_l10n::{ArgValue, ids};
 use hacivat_proto::ProfileId;
 use hacivat_ui::button::ButtonKind;
+use hacivat_ui::checkbox::Checkbox;
 use hacivat_ui::dialog::{DialogButton, DialogEvent, DialogSize, DialogSpec};
 use hacivat_ui::text::TextFn;
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
-use hacivat_ui_core::gpui_surface::{App, Global, Task, WeakEntity};
+use hacivat_ui_core::gpui_surface::{
+    App, AppContext as _, Context, FocusHandle, Global, IntoElement, ParentElement, Render, Task,
+    WeakEntity, Window, div,
+};
 
 use crate::connections::ConnectionsModel;
 use futures::FutureExt as _;
-use hacivat_exec::{HistoryConfig, HistoryStore};
+use hacivat_exec::{HistoryConfig, HistoryError, HistoryStore};
 
 /// How long a store opened only for a clear may take to close.
 const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
@@ -59,12 +78,63 @@ pub fn question(cx: &App) -> Option<ProfileId> {
     d.upgrade().map(|_| *p)
 }
 
+fn history_path(cx: &App) -> Option<std::path::PathBuf> {
+    cx.try_global::<crate::AppState>()
+        .map(|s| s.paths.history_db())
+}
+
+// ## m4-t33b-carries
+/// The question's "Also delete damaged history backups" checkbox (shown only when copies
+/// exist): a view in the dialog's content slot, with its own tab stop.
+struct BackupsOffer {
+    count: usize,
+    checked: Rc<Cell<bool>>,
+    focus: FocusHandle,
+}
+
+impl Render for BackupsOffer {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let checked = self.checked.clone();
+        let me = cx.weak_entity();
+        let label = crate::explorer::live::text(cx, "hv-history-clear-backups", Vec::new());
+        let sub = crate::explorer::live::text(
+            cx,
+            "hv-history-clear-backups-note",
+            vec![("count", ArgValue::Count(self.count as u64))],
+        );
+        div().child(
+            Checkbox::new("history-clear-backups", label)
+                .sub_label(sub)
+                .checked(checked.get())
+                .focus_handle(self.focus.clone())
+                .on_toggle(move |on, _, cx| {
+                    checked.set(on);
+                    let _ = me.update(cx, |_, cx| cx.notify());
+                }),
+        )
+    }
+}
+
 /// Asks whether to clear `profile`'s query history (Cancel is the default); Clear history
-/// clears it.
+/// clears it. The question opens once the history folder was looked at for damaged backups
+/// (on the core runtime).
 pub fn ask(profile: ProfileId, cx: &mut App) {
     if !can_clear(Some(profile), cx) {
         return;
     }
+    let listing = match history_path(cx) {
+        Some(path) => super::on_core(HistoryStore::damaged_backups(path), cx),
+        None => return,
+    };
+    cx.spawn(async move |cx| {
+        // A folder that can't be read offers nothing (the clear itself still works).
+        let count = listing.await.map_or(0, |copies| copies.len());
+        cx.update(|cx| open_question(profile, count, cx));
+    })
+    .detach();
+}
+
+fn open_question(profile: ProfileId, backups: usize, cx: &mut App) {
     let Some(name) = profile_name(profile, cx) else {
         return;
     };
@@ -74,12 +144,20 @@ pub fn ask(profile: ProfileId, cx: &mut App) {
         accesskey: None,
         english_accesskey: None,
     };
+    let body = if backups == 0 {
+        text("hv-history-clear-body", Vec::new())
+    } else {
+        text(
+            "hv-history-clear-body-backups",
+            vec![("count", ArgValue::Count(backups as u64))],
+        )
+    };
     let spec = DialogSpec {
         title: text(
             "hv-history-clear-title",
             vec![("name", ArgValue::Text(name))],
         ),
-        body: text("hv-history-clear-body", Vec::new()),
+        body,
         buttons: vec![
             button(text("hv-history-clear-btn", Vec::new()), ButtonKind::Danger),
             button(text_fn(ids::hv::CONN_DLG_CANCEL), ButtonKind::Primary),
@@ -88,8 +166,23 @@ pub fn ask(profile: ProfileId, cx: &mut App) {
         primary: CANCEL,
         size: DialogSize::Standard,
     };
+    let delete_backups = Rc::new(Cell::new(false));
     crate::exec_ui::in_workspace_window(cx, move |ws, window, cx| {
         let dialog = ws.update(cx, |ws, cx| ws.open_dialog(spec, window, cx));
+        if backups > 0 {
+            let checked = delete_backups.clone();
+            let offer = cx.new(|cx| BackupsOffer {
+                count: backups,
+                checked,
+                focus: cx.focus_handle(),
+            });
+            let focus = offer.read(cx).focus.clone();
+            dialog.update(cx, |d, cx| {
+                d.set_content(offer.into());
+                d.set_content_focus(vec![focus]);
+                cx.notify();
+            });
+        }
         cx.set_global(OpenQuestion(Some((profile, dialog.downgrade()))));
         // Held until an event comes (the workspace removes the layer on the same event).
         let mut keep = Some(dialog.clone());
@@ -97,62 +190,114 @@ pub fn ask(profile: ProfileId, cx: &mut App) {
             keep.take();
             cx.set_global(OpenQuestion(None));
             if *event == DialogEvent::Pressed(CLEAR) {
-                clear(profile, cx).detach();
+                clear_with(profile, backups > 0 && delete_backups.get(), cx).detach();
             }
         })
         .detach();
     });
 }
 
+/// How a clear went.
+enum Cleared {
+    /// The entries were deleted (and this many damaged backups).
+    Done { backups: u64 },
+    /// The store opened just for the clear found the file damaged and set it aside: nothing
+    /// was cleared from it (RR-2).
+    Damaged,
+}
+
 /// Clears `profile`'s query history now (no question): the store deletes its entries, an open
 /// history dialog searches again, and a toast says whether it worked. The task answers how
 /// many entries were deleted (`None`: it failed).
 pub fn clear(profile: ProfileId, cx: &mut App) -> Task<Option<u64>> {
+    clear_with(profile, false, cx)
+}
+
+fn clear_with(profile: ProfileId, delete_backups: bool, cx: &mut App) -> Task<Option<u64>> {
     let name = profile_name(profile, cx).unwrap_or_default();
-    let work = match super::store(cx) {
-        Some(store) => super::on_core(store.clear(profile), cx),
+    let Some(path) = history_path(cx) else {
+        return Task::ready(None);
+    };
+    // ## m4-t33b-carries (RR-1): a recall read from now on, or already on its way, is stale.
+    crate::console::commands::note_cleared(profile, cx);
+    let entries = match super::store(cx) {
+        Some(store) => store.clear(profile).map(|r| r.map(|n| (n, false))).boxed(),
         // Fix round 1 (review M-2): the history is off, so no store is open: open the file
         // for this clear only (no file: nothing to clear), then close it. Nothing records.
+        // ## m4-t33b-carries (RR-2): no retention, and a damaged file is not "cleared".
         None => {
-            let Some(path) = cx
-                .try_global::<crate::AppState>()
-                .map(|s| s.paths.history_db())
-            else {
-                return Task::ready(None);
-            };
-            super::on_core(
-                async move {
-                    if !path.exists() {
-                        return Ok(0);
-                    }
-                    let store = HistoryStore::open(path, HistoryConfig::default()).await?;
-                    let cleared = store.clear(profile).await;
-                    store.shutdown(CLOSE_GRACE).await;
-                    cleared
+            let path = path.clone();
+            async move {
+                if !path.exists() {
+                    return Ok((0, false));
                 }
-                .boxed(),
-                cx,
-            )
+                let no_retention = HistoryConfig {
+                    per_source: 0,
+                    max_age_days: 0,
+                    ..HistoryConfig::default()
+                };
+                let store = HistoryStore::open(path, no_retention).await?;
+                let damaged = store.recovered_from().is_some();
+                let cleared = store.clear(profile).await;
+                store.shutdown(CLOSE_GRACE).await;
+                cleared.map(|n| (n, damaged))
+            }
+            .boxed()
         }
     };
+    let work = super::on_core(
+        async move {
+            let (n, damaged) = entries.await?;
+            let backups = if delete_backups {
+                HistoryStore::delete_damaged_backups(path).await?
+            } else {
+                0
+            };
+            Ok::<_, HistoryError>((
+                n,
+                if damaged {
+                    Cleared::Damaged
+                } else {
+                    Cleared::Done { backups }
+                },
+            ))
+        }
+        .boxed(),
+        cx,
+    );
     cx.spawn(async move |cx| {
         let result = work.await;
         cx.update(|cx| {
-            if result.is_ok() {
-                // Fix round 1 (review M-1): no console steps through cleared statements.
-                crate::console::commands::forget_recalls(profile, cx);
-            }
-            let (kind, id) = match result {
-                Ok(_) => (ToastKind::Info, "hv-history-cleared"),
-                Err(_) => (ToastKind::Error, "hv-history-clear-failed"),
+            // Fix round 1 (review M-1): no console steps through cleared statements.
+            crate::console::commands::forget_recalls(profile, cx);
+            let named = ("name", ArgValue::Text(name));
+            let (kind, label) = match &result {
+                Ok((_, Cleared::Done { backups: 0 })) => {
+                    (ToastKind::Info, text("hv-history-cleared", vec![named]))
+                }
+                Ok((_, Cleared::Done { backups })) => (
+                    ToastKind::Info,
+                    text(
+                        "hv-history-cleared-backups",
+                        vec![named, ("count", ArgValue::Count(*backups))],
+                    ),
+                ),
+                Ok((_, Cleared::Damaged)) => (
+                    ToastKind::Error,
+                    text("hv-history-clear-damaged", vec![named]),
+                ),
+                Err(_) => (
+                    ToastKind::Error,
+                    text("hv-history-clear-failed", vec![named]),
+                ),
             };
-            ToastQueue::push(
-                cx,
-                Toast::new(kind, text(id, vec![("name", ArgValue::Text(name))])),
-            );
+            ToastQueue::push(cx, Toast::new(kind, label));
             super::dialog::search_again(cx);
             cx.refresh_windows();
         });
-        result.ok()
+        match result {
+            Ok((n, Cleared::Done { .. })) => Some(n),
+            _ => None,
+        }
     })
 }
