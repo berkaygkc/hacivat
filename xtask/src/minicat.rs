@@ -1383,6 +1383,20 @@ fn run_read(root: &Path, artifacts: &Path, raw: &str, reader: &str) -> Result<()
     Ok(())
 }
 
+/// Whether `name` is a file the build writes: `manifest.toml` or a `.hvsnap.zst` snapshot.
+fn is_generated(name: &str) -> bool {
+    name == MANIFEST || name.ends_with(SNAPSHOT_SUFFIX)
+}
+
+/// The generated files of `a` and `b` that differ (or exist in one only). The hand-written
+/// files beside them in `assets/system-catalogs/` (`README.md`, Task 26's `virtual-fks.toml`)
+/// are neither read nor written by the build, so `verify` leaves them out (fix round 2).
+pub fn diff_generated(a: &Path, b: &Path) -> Result<Vec<String>> {
+    let mut diff = diff_dirs(a, b)?;
+    diff.retain(|n| is_generated(n));
+    Ok(diff)
+}
+
 /// The files of `a` and `b` that differ (or exist in one only).
 pub fn diff_dirs(a: &Path, b: &Path) -> Result<Vec<String>> {
     let names = |d: &Path| -> Result<BTreeSet<String>> {
@@ -1544,7 +1558,7 @@ fn collect_into(
         println!("minicat: read {run} built into {}", built.display());
     }
     if twice {
-        let diff = diff_dirs(&work.join("out-1"), &work.join("out-2"))?;
+        let diff = diff_generated(&work.join("out-1"), &work.join("out-2"))?;
         if !diff.is_empty() {
             eprintln!("minicat: two reads built different bytes: {diff:?}");
             report_differences(&work.join("out-2"), &work.join("out-1"), &diff);
@@ -1552,15 +1566,38 @@ fn collect_into(
         }
         println!("minicat: two independent reads built byte-identical snapshots");
     }
-    let manifest = build(&artifacts.join(raw_name(1)), out, require_complete)?;
-    let diff = diff_dirs(&work.join("out-1"), out)?;
-    if !diff.is_empty() {
-        eprintln!("minicat: rebuilding the same read gave other bytes: {diff:?}");
+    let Some(manifest) = rebuild_into(
+        &artifacts.join(raw_name(1)),
+        &work.join("out-1"),
+        out,
+        require_complete,
+    )?
+    else {
         return Ok(false);
-    }
+    };
     print_manifest(&manifest);
     println!("minicat: wrote {}", out.display());
     Ok(true)
+}
+
+/// Builds `raw` into `out` (the assets directory, for a plain `collect`) and checks it equals
+/// the earlier build `first` byte for byte; `None` (reported) when it does not. Only generated
+/// files are compared: `out` may hold the hand-written `README.md` and `virtual-fks.toml`,
+/// which the build leaves alone (fix round 2).
+fn rebuild_into(
+    raw: &Path,
+    first: &Path,
+    out: &Path,
+    require_complete: bool,
+) -> Result<Option<Manifest>> {
+    let manifest = build(raw, out, require_complete)?;
+    let diff = diff_generated(first, out)?;
+    if diff.is_empty() {
+        Ok(Some(manifest))
+    } else {
+        eprintln!("minicat: rebuilding the same read gave other bytes: {diff:?}");
+        Ok(None)
+    }
 }
 
 /// For each differing snapshot file, its first differing section and object (`HV-FACT
@@ -1618,7 +1655,7 @@ fn run_inner(args: &[String]) -> Result<bool> {
             if !collect_into(&reader, twice, complete, Some(work), &staging)? {
                 return Ok(false);
             }
-            let diff = diff_dirs(&staging, &assets)?;
+            let diff = diff_generated(&staging, &assets)?;
             if diff.is_empty() {
                 println!("minicat verify: the committed snapshots regenerate byte for byte");
                 Ok(true)
@@ -2599,5 +2636,97 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let err = build(dir.path(), out.path(), true).unwrap_err();
         assert!(format!("{err:#}").contains("mariadb106"), "{err:#}");
+    }
+
+    /// Fix round 2 (CI 44678817421): `verify` compares only what the build writes
+    /// (`manifest.toml` and the `.hvsnap.zst` files). The hand-written files beside them
+    /// (`README.md`; `virtual-fks.toml`, Task 26's rows, R-M4-12, which the build neither
+    /// reads nor writes) are not regenerated, so they never count as a difference.
+    #[test]
+    fn verify_compares_only_the_generated_files() {
+        let regenerated = built(&all());
+        let committed = tempfile::tempdir().unwrap();
+        for e in std::fs::read_dir(regenerated.path()).unwrap() {
+            let p = e.unwrap().path();
+            std::fs::copy(&p, committed.path().join(p.file_name().unwrap())).unwrap();
+        }
+        std::fs::write(committed.path().join("README.md"), "# hand-written\n").unwrap();
+        std::fs::write(committed.path().join("virtual-fks.toml"), "# rows\n").unwrap();
+        // The whole-directory comparison sees the two hand-written files ...
+        assert_eq!(
+            diff_dirs(regenerated.path(), committed.path()).unwrap(),
+            ["README.md", "virtual-fks.toml"]
+        );
+        // ... the generated-output comparison does not.
+        assert_eq!(
+            diff_generated(regenerated.path(), committed.path()).unwrap(),
+            Vec::<String>::new()
+        );
+        // Every generated file still counts: a changed snapshot, a changed manifest, a
+        // snapshot on one side only.
+        let f = committed.path().join("mysql-8.4.hvsnap.zst");
+        let mut bytes = std::fs::read(&f).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        std::fs::write(&f, &bytes).unwrap();
+        let m = committed.path().join(MANIFEST);
+        let text = std::fs::read_to_string(&m).unwrap();
+        std::fs::write(&m, format!("{text}\n")).unwrap();
+        std::fs::write(committed.path().join("postgres-99.hvsnap.zst"), b"x").unwrap();
+        assert_eq!(
+            diff_generated(regenerated.path(), committed.path()).unwrap(),
+            [MANIFEST, "mysql-8.4.hvsnap.zst", "postgres-99.hvsnap.zst"]
+        );
+        // A missing manifest on one side is a difference too.
+        std::fs::remove_file(&m).unwrap();
+        assert!(
+            diff_generated(regenerated.path(), committed.path())
+                .unwrap()
+                .contains(&MANIFEST.to_string())
+        );
+    }
+
+    /// Fix round 2: a plain `collect` rebuilds into `assets/system-catalogs/`, beside the
+    /// hand-written files; they neither fail the comparison nor get touched.
+    #[test]
+    fn collect_rebuilds_into_the_assets_beside_hand_written_files() {
+        let raw = tempfile::tempdir().unwrap();
+        write_raws(raw.path(), &all());
+        let first = tempfile::tempdir().unwrap();
+        build(raw.path(), first.path(), false).unwrap();
+        let assets = tempfile::tempdir().unwrap();
+        std::fs::write(assets.path().join("README.md"), "# hand-written\n").unwrap();
+        std::fs::write(assets.path().join("virtual-fks.toml"), "# rows\n").unwrap();
+        // A stale snapshot of a line no longer read is removed by the build.
+        std::fs::write(assets.path().join("postgres-13.hvsnap.zst"), b"x").unwrap();
+        let m = rebuild_into(raw.path(), first.path(), assets.path(), false)
+            .unwrap()
+            .expect("the same read rebuilds to the same bytes");
+        assert_eq!(m.snapshot.len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(assets.path().join("README.md")).unwrap(),
+            "# hand-written\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(assets.path().join("virtual-fks.toml")).unwrap(),
+            "# rows\n"
+        );
+        assert!(!assets.path().join("postgres-13.hvsnap.zst").exists());
+        assert_eq!(check_dir(assets.path()).unwrap(), Vec::<String>::new());
+        // A first build that differs is reported, not passed.
+        let other = tempfile::tempdir().unwrap();
+        write_raws(
+            other.path(),
+            &[
+                pg_raw("pg17", "17", "17.7"),
+                my_raw("mysql84", "mysql", "8.4", "8.4.6", &MY_SCHEMAS),
+            ],
+        );
+        let differs = tempfile::tempdir().unwrap();
+        build(other.path(), differs.path(), false).unwrap();
+        assert!(
+            rebuild_into(raw.path(), differs.path(), assets.path(), false)
+                .unwrap()
+                .is_none()
+        );
     }
 }

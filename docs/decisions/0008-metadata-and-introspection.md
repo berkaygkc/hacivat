@@ -2214,3 +2214,10 @@ introspectors' own system-mode packs.
   - Carried to T33: m-2 (a fuzz target that frames its input, past the checksum), m-4 (remove
     the empty-set allowance once the set lands), m-6 (SHA-pin actions repo-wide), m-8 (watch
     level-19 re-encoding on macOS/Windows).
+- **Fix round 2 (CI 44678817421):** `verify` compared the whole assets directory and so flagged
+  the hand-written `README.md` and `virtual-fks.toml`. It now compares only what the build
+  writes: `manifest.toml` and the `.hvsnap.zst` files (`diff_generated`). `collect`'s rebuild
+  check uses the same comparison, because a plain `collect` rebuilds into the assets directory.
+  `virtual-fks.toml` is Task 26's hand-authored input to the system layer (R-M4-12), not an
+  input or output of the snapshot build, so it is in neither the digests nor the manifest
+  (R-M4-17's manifest fields); Task 26's tests guard its rows.
