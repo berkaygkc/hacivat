@@ -566,7 +566,10 @@ async fn elevation_waits_for_the_running_namespace_task() {
     assert!(fragments(&r).is_empty());
     gate.release();
     let pass_gen = bounded(pass).await.unwrap();
-    assert_eq!(bounded(covered).await, Ok(pass_gen));
+    // The covered elevation is answered by the pass; under load its ticket can resolve after
+    // the higher fragment's publish too, so it may carry that later generation (seen on CI).
+    let covered_gen = bounded(covered).await.unwrap();
+    assert!(covered_gen >= pass_gen, "{covered_gen:?} < {pass_gen:?}");
     let higher_gen = bounded(higher).await.unwrap();
     assert!(higher_gen > pass_gen);
     // Only the higher level needed a fragment, after the pass.
