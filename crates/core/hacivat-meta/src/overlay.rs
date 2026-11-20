@@ -9,10 +9,11 @@
 //!   `PRE_INTROSPECTED`, the snapshot's line as the version label), unless the user chose
 //!   "Introspect live" for it ([`Overlays::live_system`]): then from the live namespace like
 //!   any other. Without a snapshot the live namespace answers, or nothing (`Unknown`). A name
-//!   the snapshot lacks is `Missing` only for a server of the snapshot's line at a patch
-//!   release up to the snapshot's own ([`crate::system::miss_is_fact`]); against a newer
-//!   patch it is `Unknown(ServerDependent)`, never `Missing` (alg/02 HV-INTRO-16 edge 1), and
-//!   so is a child list (a column the snapshot lacks may exist there). A system relation the
+//!   the snapshot lacks is `Missing` only where the snapshot covers the server
+//!   ([`crate::system::miss_is_fact`]: PostgreSQL any release of its major, R-W5-3; MySQL and
+//!   MariaDB a patch release up to the snapshot's own); elsewhere it is
+//!   `Unknown(ServerDependent)`, never `Missing` (alg/02 HV-INTRO-16 edge 1), and so is a
+//!   child list (a column the snapshot lacks may exist there). A system relation the
 //!   snapshot holds without columns answers `Unknown`, never "no columns".
 //!   PostgreSQL system objects are keyed in the live form `[database, schema, …]`: the view
 //!   hands out arenas re-keyed per database (built once per database and shared,
@@ -133,6 +134,21 @@ impl Overlays {
             .iter()
             .map(|(k, v)| (k.clone(), Name::from(v.as_str())))
             .collect();
+        self
+    }
+
+    /// The same overlays with the system layer `set` gives `dbms` at `version` (its snapshot
+    /// and shipped virtual foreign keys; none when the set has no snapshot for it). The user
+    /// layers, the live choices and the cache are kept.
+    pub fn with_system_of(
+        mut self,
+        set: &crate::system::SystemCatalogs,
+        dbms: DbmsKind,
+        version: &str,
+    ) -> Self {
+        let chosen = set.overlays_for(dbms, version);
+        self.system = chosen.system;
+        self.shipped_fks = chosen.shipped_fks;
         self
     }
 

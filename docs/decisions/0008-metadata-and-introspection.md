@@ -2520,21 +2520,28 @@ and implements `sql_catalog::CatalogView` for it (HV-INTRO-16 consumer side; R-M
   per snapshot, shared through `Overlays::cache`), so a handle's key is
   `[db, pg_catalog, pg_class]` and can be asked for its children like any live key. Handles
   into the layer carry `ObjId::ns = SYSTEM_LAYER_NS` (`u32::MAX`).
-- **A newer patch release** (alg/02 HV-INTRO-16 edge 1): a name the snapshot lacks is
-  `Missing` only when the server's version has the full patch form (PostgreSQL `M.m`, MySQL
-  and MariaDB `M.m.p`), the same line, and is not newer than the snapshot's own version;
-  otherwise `Unknown(ServerDependent)` ("depends on the exact server"). An unreadable version
-  is never "not newer".
-- **R-W2-6's cost, re-checked (carries-w2 T26).** With a snapshot, `pg_catalog` (first on
-  every PostgreSQL search path) is complete, so an unqualified user name walks past it:
-  `Found` in `public`, `Missing` when every schema misses. `pg_catalog` shadows a `public`
-  object of the same name, as on the server (T9's carry; tested). **Cost:** against a server
-  newer than the snapshot's patch (17.13 against the 17.12 snapshot), the `pg_catalog` miss is
-  not a fact, so every unqualified lookup stops there with `Unknown(ServerDependent)` until
-  the snapshots are regenerated. PostgreSQL does not change its catalog contents within a
-  major (the catalog version is fixed per major), which would allow a PostgreSQL-only
-  exception; that would change a value the plan fixes (edge 1), so it is a question for the
-  PO/controller, not taken here.
+- **When a miss is a fact** (`system::miss_is_fact`).
+  - *MySQL and MariaDB* (alg/02 HV-INTRO-16 edge 1): only when the server's version has the
+    full `M.m.p` form, the snapshot's line, and is not newer than the snapshot's own version.
+    Their minor releases add functions and system tables, so against a newer patch a miss
+    (and a child list) is `Unknown(ServerDependent)`.
+  - *PostgreSQL* (**ruling R-W5-3**, amending edge 1 for this engine): at any release `M.m` of
+    the snapshot's major. PostgreSQL keeps its system catalogs fixed within a major version:
+    the PostgreSQL documentation, "Upgrading a PostgreSQL Cluster"
+    (`https://www.postgresql.org/docs/current/upgrading.html`), states that minor releases
+    never change the internal storage format and that upgrading to a minor release needs no
+    dump and restore, only new executables; the catalog version (`catversion`, which
+    `initdb` stamps and the server checks at start) changes only between majors. A
+    development, beta or release-candidate build (`17devel`, `18beta1`, `17rc1`: no `M.m`
+    form) and a server of another major are not covered (`Unknown(ServerDependent)`).
+  - An unreadable version is never covered.
+- **R-W2-6's cost, re-checked (carries-w2 T26), settled by R-W5-3.** With a snapshot of the
+  server's major, `pg_catalog` (first on every PostgreSQL search path) is complete at any
+  release of that major, so an unqualified user name walks past it: `Found` in `public`,
+  `Missing` when every schema misses. `pg_catalog` shadows a `public` object of the same name,
+  as on the server (T9's carry; tested). What remains of the cost: a development or beta
+  build, and a server whose version is unknown (no facts read yet), stop every unqualified
+  lookup at `pg_catalog` with `Unknown`.
 - **The virtual layer** (R-M4-12). `SnapshotView::virtual_fks_of(rel)` / `virtual_fks_to(rel)`
   report user rows (`Overlays::virtual_fks`, from `ProfileUserData` through
   `Overlays::with_user_data`) and shipped rows (`Overlays::shipped_fks`) as `LayeredFk { layer:
@@ -2573,11 +2580,34 @@ and implements `sql_catalog::CatalogView` for it (HV-INTRO-16 consumer side; R-M
 - **The allocation test counts, it does not hook the allocator** (`unsafe` is confined to the
   UI platform layer; Task 9's precedent): every step of a `sql_view` lookup that may allocate
   calls `note_slow_path`, and the test asserts none on warm hits and some on a miss.
-- **Not wired yet** (carried): nothing sets a catalog's overlays. `Publisher` has no change
-  that sets `CatalogSnapshot.overlays`, so the hub (or whoever builds views) must pass
-  `SnapshotView::with_layers(system.overlays_for(dbms, version).with_user_data(&data))`, or a
-  `CatalogChange::SetOverlays` must be added to Task 9's `snapshot.rs`. A live setting list
-  (`ListSettings`) and the `Statistics` facet's values are not kept in the catalog.
+- **Wiring (ruling R-W5-4).** The overlays live in the catalog's generations, so every view
+  (`SnapshotView::new(catalog.current())`) gets them; the one writer keeps them.
+  - The hub never builds views, so a hub-side `with_layers` would reach nothing; and the
+    server's version, which chooses the snapshot, arrives after the catalog is made (the
+    facts read on connect, `CatalogChange::SetServer`). So the catalog holds its layer
+    source: `Catalog::with_system(server, system)` (named exception in Task 9's
+    `snapshot.rs`, fenced) chooses the layer for the placeholder facts, and the publisher
+    re-chooses it (`Overlays::with_system_of`) in every publish that changes the server's
+    engine or version, keeping the user layers, the live choices and the cache. No second
+    writer: only `Publisher::publish` changes a generation.
+  - `CatalogHub` makes every profile's catalog with its set (named exception in Task 15's
+    `hub.rs`, fenced); `Catalog::system()` shows it.
+  - PostgreSQL's introspector now reports its facts (`Introspector::server_facts`, from the
+    `Identity` probe: version, encoding, `standard_conforming_strings`, recovery, the
+    database's collation; named exception in Task 16's `pg/mod.rs`). Before, a PostgreSQL
+    catalog never learned its version, so no snapshot could be chosen. A side effect: PG
+    catalogs now carry the server encoding, so non-ASCII probes key instead of answering
+    `ServerDependent` (the rule `match_key` already had).
+  - User data reaches the overlays through the writer: `CatalogChange::SetUserData` replaces
+    the user layers (virtual foreign keys, annotations) and keeps the system layer. The engine
+    path that publishes it, and persisting "Introspect live" (`live_system`), are T27's
+    (settings item).
+  - Carried: `row_estimate` → T15b (its facet store); the live store of setting names → M5.
+  - Tests: `catalog_with_system_layers_follow_the_server_facts` (meta),
+    `hub_built_catalogs_carry_the_hubs_system_layer` and
+    `engine_published_facts_resolve_a_pg_builtin_through_the_layer` (introspect: an engine over
+    a catalog made the hub's way publishes PG 17.13 facts, and a plain view resolves
+    `pg_catalog.pg_stat_activity` and `now()` through the pg17 layer).
 - **The pg13 Docker test** lives in `hacivat-introspect/tests/system_catalogs.rs` (named
   exception: a new file of this task there), because `hacivat-meta` may not reach a server
   (`MetaBelowIntrospect`).

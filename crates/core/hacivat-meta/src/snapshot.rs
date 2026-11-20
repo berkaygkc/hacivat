@@ -493,6 +493,11 @@ pub enum CatalogChange {
     // (MySQL `lower_case_table_names`, the version, `sql_mode` arrive with the connection).
     /// Replaces the catalog's server facts (carried by every later generation).
     SetServer(Arc<ServerFacts>),
+    // ## m4-t26-overlays (named exception in Task 9's file; ruling R-W5-4)
+    /// Replaces the user layers of the overlays (virtual foreign keys, annotations) with the
+    /// profile's user data ([`Overlays::with_user_data`]); the system layer is kept.
+    SetUserData(Arc<crate::userdata::ProfileUserData>),
+    // ## m4-t26-overlays
 }
 
 /// What a publish produced.
@@ -536,6 +541,12 @@ struct Shared {
     writer: Mutex<()>,
     #[cfg(feature = "catalog")]
     events: tokio::sync::broadcast::Sender<CatalogEvent>,
+    // ## m4-t26-overlays (named exception in Task 9's file; ruling R-W5-4)
+    /// The shipped system catalogs the overlays' system layer is chosen from
+    /// ([`Catalog::with_system`]): every publish that changes the server's engine or version
+    /// re-chooses it, so the layer follows the facts read on connect.
+    system: Option<Arc<crate::system::SystemCatalogs>>,
+    // ## m4-t26-overlays
 }
 
 impl Shared {
@@ -568,7 +579,38 @@ impl fmt::Debug for Catalog {
 impl Catalog {
     /// An empty catalog of `server` at generation 0.
     pub fn new(server: Arc<ServerFacts>) -> Self {
-        let first = Arc::new(CatalogSnapshot::empty(server));
+        Self::make(server, None)
+    }
+
+    // ## m4-t26-overlays (named exception in Task 9's file; ruling R-W5-4)
+    /// An empty catalog of `server` whose overlays carry the system layer `system` gives the
+    /// server's engine and version ([`SystemCatalogs::overlays_for`]), re-chosen by the
+    /// publisher whenever a publish changes them (`CatalogChange::SetServer`). The hub makes
+    /// every profile's catalog this way.
+    ///
+    /// [`SystemCatalogs::overlays_for`]: crate::system::SystemCatalogs::overlays_for
+    pub fn with_system(
+        server: Arc<ServerFacts>,
+        system: Arc<crate::system::SystemCatalogs>,
+    ) -> Self {
+        Self::make(server, Some(system))
+    }
+
+    /// The system catalogs the overlays' system layer is chosen from, if any.
+    pub fn system(&self) -> Option<&Arc<crate::system::SystemCatalogs>> {
+        self.shared.system.as_ref()
+    }
+
+    fn make(server: Arc<ServerFacts>, system: Option<Arc<crate::system::SystemCatalogs>>) -> Self {
+        let mut first = CatalogSnapshot::empty(server);
+        if let Some(sys) = &system {
+            first.overlays = Arc::new(Overlays::default().with_system_of(
+                sys,
+                first.server.dbms,
+                &first.server.version,
+            ));
+        }
+        let first = Arc::new(first);
         Catalog {
             shared: Arc::new(Shared {
                 generations: Mutex::new(vec![(0, Arc::downgrade(&first))]),
@@ -576,10 +618,12 @@ impl Catalog {
                 writer: Mutex::new(()),
                 #[cfg(feature = "catalog")]
                 events: tokio::sync::broadcast::channel(EVENT_CAPACITY).0,
+                system,
             }),
             writer_taken: AtomicBool::new(false),
         }
     }
+    // ## m4-t26-overlays
 
     /// The current generation. Lock-free; keep the `Arc` to pin a generation.
     pub fn current(&self) -> Arc<CatalogSnapshot> {
@@ -684,6 +728,9 @@ impl Publisher {
         let mut namespaces = Arc::clone(&old.namespaces);
         let mut states = Arc::clone(&old.states);
         let mut server = Arc::clone(&old.server);
+        // ## m4-t26-overlays
+        let mut overlays = Arc::clone(&old.overlays);
+        // ## m4-t26-overlays
         let mut changed = Vec::new();
         let mut seen = HashSet::new();
         let mut mark = |key: &NsKey, changed: &mut Vec<NsKey>| {
@@ -739,14 +786,25 @@ impl Publisher {
                 }
                 // ## m4-t17-mysql
                 CatalogChange::SetServer(facts) => server = facts,
+                // ## m4-t26-overlays
+                CatalogChange::SetUserData(data) => {
+                    overlays = Arc::new((*overlays).clone().with_user_data(&data));
+                }
             }
         }
+        // ## m4-t26-overlays: the system layer follows the server's engine and version.
+        if let Some(sys) = &self.shared.system
+            && (server.dbms != old.server.dbms || server.version != old.server.version)
+        {
+            overlays = Arc::new((*overlays).clone().with_system_of(
+                sys,
+                server.dbms,
+                &server.version,
+            ));
+        }
+        // ## m4-t26-overlays
         let next = Arc::new(CatalogSnapshot::from_parts(
-            generation,
-            server,
-            namespaces,
-            states,
-            Arc::clone(&old.overlays),
+            generation, server, namespaces, states, overlays,
         ));
         // The writer lock makes this a plain store; the compare-and-swap is the misuse guard
         // alg/02 edge 2 asks for (a second writer would have moved `current`).

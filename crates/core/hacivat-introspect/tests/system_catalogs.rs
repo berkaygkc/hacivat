@@ -131,3 +131,123 @@ async fn pg13_introspects_system_schemas_live_at_names_level() {
         h.ns.len()
     );
 }
+
+// ## m4-t26-overlays (ruling R-W5-4): the layers reach the catalogs the hub makes.
+
+fn assets() -> Arc<SystemCatalogs> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../assets/system-catalogs");
+    Arc::new(SystemCatalogs::open(&dir).expect("the committed set"))
+}
+
+/// The hub makes each profile's catalog with its system set (the catalog re-chooses the layer
+/// on every change of the server facts its engine publishes).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_built_catalogs_carry_the_hubs_system_layer() {
+    use hacivat_introspect::hub::{CatalogHub, HubSettings, SessionLookup};
+    use hacivat_proto::ProfileId;
+    use hacivat_secrets::SecretStore;
+    use hacivat_session::session::SessionManager;
+    use hacivat_settings::{LocalPaths, MetadataSettings};
+
+    struct NoSessions;
+    impl SessionLookup for NoSessions {
+        fn sessions(&self, _: ProfileId) -> Option<Arc<SessionManager>> {
+            None
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let system = assets();
+    let hub = CatalogHub::new(
+        Arc::new(NoSessions),
+        HubSettings {
+            paths: LocalPaths::under(dir.path()),
+            metadata: MetadataSettings::default(),
+        },
+        Arc::new(SecretStore::new(None)),
+        Arc::clone(&system),
+    );
+    let p = common::profile(DbmsKind::Postgres);
+    let made = common::bounded(hub.ensure(p.clone())).await.unwrap();
+    let carried = made.catalog.system().expect("the hub's set");
+    assert!(Arc::ptr_eq(carried, &system));
+    assert!(Arc::ptr_eq(carried, hub.system()));
+    // No connection yet: the version is unknown, so no snapshot is chosen (never a guess).
+    assert!(made.catalog.current().overlays.system.is_none());
+    common::bounded(hub.shutdown(p.id)).await;
+}
+
+/// An engine over a catalog made as the hub makes it: the facts read on connect (PostgreSQL
+/// 17.13) choose the pg17 snapshot, and a plain view of the published generation resolves a
+/// built-in function and a system view through the layer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engine_published_facts_resolve_a_pg_builtin_through_the_layer() {
+    use hacivat_introspect::engine::{Engine, EngineConfig, EngineLimits, Filters, LevelPolicy};
+    use hacivat_introspect::scope::parse_scope;
+    use hacivat_introspect::testing::FakeIntrospector;
+    use hacivat_introspect::testing::fake::FakeMetaSource;
+    use hacivat_meta::props::Props;
+
+    let ctx = IdentCtx {
+        encoding: Some(Arc::from("UTF8")),
+        ..IdentCtx::new(DialectId::Postgres)
+    };
+    let fake = FakeIntrospector::new(DbmsKind::Postgres);
+    fake.put_ns(NsKey::schema(["db", "public"]), FakeIntrospector::tables(2));
+    let mut facts = ServerFacts::new(DbmsKind::Postgres, ctx.clone());
+    facts.version = Name::from("17.13");
+    fake.set_facts(Some(Ok(facts)));
+    let meta = FakeMetaSource::new(DbmsKind::Postgres);
+    fake.link_meta(meta.clone());
+    // As `CatalogHub` makes it: the placeholder facts and the hub's set.
+    let catalog = Arc::new(Catalog::with_system(
+        Arc::new(ServerFacts::new(
+            DbmsKind::Postgres,
+            IdentCtx::new(DialectId::Postgres),
+        )),
+        assets(),
+    ));
+    let handle = Engine::start(EngineConfig {
+        profile: hacivat_proto::ProfileId::new(),
+        dbms: DbmsKind::Postgres,
+        meta: meta.clone(),
+        introspector: Arc::new(fake.clone()),
+        catalog: catalog.clone(),
+        catalog_publisher: catalog.publisher().expect("the only writer"),
+        cache: None,
+        levels: LevelPolicy::default(),
+        scope: parse_scope("@:*", sql_dialect::DialectId::Postgres).expect("a scope"),
+        current: common::pg_current("db", "public"),
+        filters: Filters::default(),
+        validate_every: None,
+        limits: EngineLimits::default(),
+        runtime: tokio::runtime::Handle::current(),
+    });
+    assert!(catalog.current().overlays.system.is_none());
+    common::bounded(handle.on_connect()).await.unwrap();
+    common::idle(&handle).await;
+    let snap = catalog.current();
+    assert_eq!(&*snap.server.version, "17.13");
+    assert_eq!(snap.overlays.system_label().map(|l| &**l), Some("17"));
+    let view = SnapshotView::new(snap).with_search_path(SearchPath::for_pg(
+        &Name::from("db"),
+        &[Name::from("public")],
+        None,
+        None,
+    ));
+    let hit = view.lookup(&parts("pg_catalog.pg_stat_activity"), KindGroup::Relations);
+    let Lookup::Found(h) = &hit else {
+        panic!("pg_stat_activity through the layer: {hit:?}");
+    };
+    assert!(h.obj().flags().contains(ObjFlags::PRE_INTROSPECTED));
+    // A built-in function, unqualified (`pg_catalog` is first on the path), with its arguments
+    // (`now()` takes none: `Some([])`, never "name only").
+    let hit = view.lookup(&parts("now"), KindGroup::Routines);
+    let Lookup::Found(now) = &hit else {
+        panic!("now() through the layer: {hit:?}");
+    };
+    let Props::Routine(r) = now.obj().props() else {
+        panic!("now() is a routine");
+    };
+    assert_eq!(r.args.as_deref(), Some(&[][..]));
+    handle.shutdown();
+}

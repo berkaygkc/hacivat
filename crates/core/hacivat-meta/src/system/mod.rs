@@ -15,8 +15,9 @@
 //!   `Unknown` offline), never a panic.
 //! - The shipped virtual foreign keys of the system catalogs (`virtual-fks.toml`, R-M4-12):
 //!   hand-written rows, each citing its vendor documentation section; outside the manifest.
-//! - [`miss_is_fact`]: a snapshot read from server version *v* proves an absence only for a
-//!   server of the same line at a patch release up to *v* (alg/02 HV-INTRO-16 edge 1).
+//! - [`miss_is_fact`]: a snapshot read from server version *v* proves an absence for a
+//!   MySQL/MariaDB server of the same line at a patch release up to *v* (alg/02 HV-INTRO-16
+//!   edge 1), and for any PostgreSQL release of *v*'s major (ruling R-W5-3).
 //!
 //! The manifest and `virtual-fks.toml` are read by a strict reader of the TOML subset they use
 //! (`mini_toml`): this crate has no TOML dependency (Task 1a's manifest table is exhaustive).
@@ -206,18 +207,25 @@ fn patch_parts(dbms: DbmsKind, version: &str) -> Option<Parts> {
 }
 
 /// Whether a name the snapshot read from `snapshot_version` lacks is certainly absent on a
-/// server reporting `live_version`: only at the same line and a patch release up to the
-/// snapshot's (alg/02 HV-INTRO-16 edge 1: a newer patch may add a column or an object, so
-/// there a miss is `Unknown`). An unreadable version is never "not newer".
+/// server reporting `live_version`.
+///
+/// - **MySQL and MariaDB:** only at the same line and a patch release up to the snapshot's
+///   (alg/02 HV-INTRO-16 edge 1: their minor releases add functions and system tables, so a
+///   newer patch makes a miss `Unknown`).
+/// - **PostgreSQL** (ruling R-W5-3): at any release of the snapshot's major. PostgreSQL keeps
+///   its system catalogs fixed within a major version: the catalog version (`catversion`)
+///   changes only between majors, and a minor release never needs `initdb` (PostgreSQL
+///   documentation, "Upgrading a PostgreSQL Cluster"). A development or beta build
+///   (`17devel`, `18beta1`, no `M.m` form) or another major is not covered.
+///
+/// An unreadable version is never covered.
 pub fn miss_is_fact(dbms: DbmsKind, live_version: &str, snapshot_version: &str) -> bool {
     match (
         patch_parts(dbms, live_version),
         patch_parts(dbms, snapshot_version),
     ) {
-        (Some(live), Some(snap)) => {
-            let line = if dbms == DbmsKind::Postgres { 1 } else { 2 };
-            live.n[..line] == snap.n[..line] && live <= snap
-        }
+        (Some(live), Some(snap)) if dbms == DbmsKind::Postgres => live.n[0] == snap.n[0],
+        (Some(live), Some(snap)) => live.n[..2] == snap.n[..2] && live <= snap,
         _ => false,
     }
 }
@@ -961,12 +969,16 @@ mod tests {
     }
 
     #[test]
-    fn a_miss_is_a_fact_only_up_to_the_snapshots_patch() {
+    fn a_miss_is_a_fact_by_the_engines_rule() {
         let pg = DbmsKind::Postgres;
         assert!(miss_is_fact(pg, "17.12", "17.12"));
         assert!(miss_is_fact(pg, "17.2 (Debian 17.2-1.pgdg120+1)", "17.12"));
-        assert!(!miss_is_fact(pg, "17.13", "17.12"));
+        // R-W5-3: any release of the same PostgreSQL major.
+        assert!(miss_is_fact(pg, "17.13", "17.12"));
+        assert!(miss_is_fact(pg, "17.99", "17.12"));
+        assert!(!miss_is_fact(pg, "18beta1", "18.7"));
         assert!(!miss_is_fact(pg, "16.1", "17.12"));
+        assert!(!miss_is_fact(pg, "18.0", "17.12"));
         assert!(!miss_is_fact(pg, "17", "17.12"));
         assert!(!miss_is_fact(pg, "17devel", "17.12"));
         assert!(!miss_is_fact(pg, "", "17.12"));

@@ -15,9 +15,10 @@
 //!   system layer's patch rule; everything else is `Unknown` with its reason
 //!   (`ServerDependent` passed through, R-M4-41).
 //! - **Lists** (`relations`, `functions_in`, `types`, `columns`) are `Found` only from a
-//!   complete, unfiltered namespace; a system namespace is complete only at a patch release
-//!   its snapshot covers (a newer patch may have added a relation or a column, so the list
-//!   is `Unknown(ServerDependent)` there; alg/02 HV-INTRO-16 edge 1). A system relation the
+//!   complete, unfiltered namespace; a system namespace is complete only for a server its
+//!   snapshot covers (`system::miss_is_fact`: PostgreSQL any release of its major, R-W5-3; a
+//!   newer MySQL/MariaDB patch may have added a relation or a column, so there the list is
+//!   `Unknown(ServerDependent)`; alg/02 HV-INTRO-16 edge 1). A system relation the
 //!   snapshot holds without columns is `Unknown`, never "no columns".
 //! - **Built-ins.** PostgreSQL built-ins are `pg_catalog`'s routines, with their arguments;
 //!   MySQL/MariaDB built-ins are known by name only (`args = None`, X-8): `functions` and

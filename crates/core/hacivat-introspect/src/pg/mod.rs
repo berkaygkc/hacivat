@@ -200,6 +200,21 @@ impl Introspector for PgIntrospector {
             Ok(identity_of(&id))
         })
     }
+
+    // ## m4-t26-overlays (named exception in Task 16's file; ruling R-W5-4): the facts the
+    // hub's placeholder lacks (the version, which chooses the system layer; the encoding,
+    // `standard_conforming_strings`, recovery, the database's collation), from `Identity`.
+    fn server_facts<'a>(
+        &'a self,
+        c: &'a mut MetaConn,
+    ) -> BoxFuture<'a, Result<Option<hacivat_meta::ServerFacts>, IntroError>> {
+        Box::pin(async move {
+            let cancel = CancellationToken::new();
+            let id = pass::server_identity(c, &cancel).await?;
+            Ok(Some(id.server_facts()))
+        })
+    }
+    // ## m4-t26-overlays
 }
 
 /// The fingerprint of a probe (see [`PgIntrospector::identity`]).
