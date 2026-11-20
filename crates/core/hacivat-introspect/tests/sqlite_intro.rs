@@ -2172,3 +2172,161 @@ fn every_rendered_sqlite_section_passes_the_metadata_guard() {
         vec![("Attached", 6), ("Main", 8), ("Temp", 6)]
     );
 }
+
+// ## m4-t28-oracle
+// Gate G4 (M4 Task 28 step 2, ver/01 #sqlite-schema-version): Task 18's
+// `schema_version_sequence_matches_ver01` and
+// `same_schema_version_replaced_file_detected_on_reconnect_by_digest` re-run with the G4
+// oracle after every step: the incremental namespace equals a fresh full pass compared by
+// `g4_canon` (the namespace header and every object, the root included; only `loaded_at`,
+// the generation and the watermark left out), and a step that leaves `main` unchanged
+// re-reads nothing. Each cell that holds prints `HV-FACT g4 sqlite <case> incremental==full`.
+
+/// The G4 comparison. It must stay in step with `common::g4::canon` of the Docker matrix
+/// (this file does not use `mod common`): the same header and the same object fields.
+///
+/// Known limit (T28 review m-3): a SQLite incremental pass on a change is a full read, so the
+/// merge reuses its arena (`Dry::Reuse`). These cells therefore measure change *detection*,
+/// not the merge walk; merge coverage comes from the PostgreSQL and MySQL cells.
+fn g4_canon(ns: &NamespaceSnapshot) -> Vec<String> {
+    let mut v: Vec<String> = (0..ns.len() as u32)
+        .map(|i| {
+            let o = ns.obj(i).unwrap();
+            format!(
+                "{:?} | {:?} | {:?} | {:?}",
+                ns.object_key(i).unwrap(),
+                o.state(),
+                o.flags(),
+                o.props()
+            )
+        })
+        .collect();
+    v.sort();
+    v.insert(
+        0,
+        format!(
+            "namespace {:?} {:?} {:?} {:?} objects={}",
+            ns.key(),
+            ns.dbms(),
+            ns.fold(),
+            ns.meta().level,
+            ns.len()
+        ),
+    );
+    v
+}
+
+/// `HV-FACT g4 sqlite <case> incremental==full`, straight to stdout (libtest captures only
+/// the `print!` family).
+fn g4_cell(case: &str) {
+    use std::io::Write as _;
+    let line = format!("HV-FACT g4 sqlite {case} incremental==full\n");
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(line.as_bytes());
+    let _ = out.flush();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn g4_schema_version_sequence_incremental_equals_full_each_step() {
+    // (case, statements, main's schema_version after it, whether main changed)
+    let steps: [(&str, &str, u32, bool); 8] = [
+        ("insert", "INSERT INTO t VALUES (1)", 1, false),
+        ("create-index", "CREATE INDEX i ON t(id)", 2, true),
+        ("add-column", "ALTER TABLE t ADD COLUMN c", 3, true),
+        ("create-temp-table", "CREATE TEMP TABLE tt(a)", 3, false),
+        ("create-view", "CREATE VIEW v AS SELECT id FROM t", 4, true),
+        ("drop-view", "DROP VIEW v", 5, true),
+        (
+            "rolled-back-create",
+            "BEGIN; CREATE TABLE z(a); ROLLBACK",
+            5,
+            false,
+        ),
+        ("vacuum", "VACUUM", 6, true),
+    ];
+    for level in [Level::Structure, Level::Sources] {
+        let l = lite("CREATE TABLE t(id)").await;
+        let mut cur = full(&l, level).await;
+        assert_eq!(sqlite_wm(&cur).0, 1, "{level:?}: baseline");
+        for (case, sql, want, changed) in steps {
+            let label = format!("{level:?} {case}");
+            for stmt in sql.split("; ") {
+                l.sql(stmt).await;
+            }
+            let mut c = l.reader().await;
+            let r = pass(
+                &intro(),
+                &mut c,
+                &main_ns(),
+                Mode::Incremental,
+                level,
+                Some(&cur),
+            )
+            .await;
+            drop(c);
+            if changed {
+                assert!(!r.changed.is_empty(), "{label}: nothing re-read");
+            } else {
+                assert!(
+                    !r.full && r.changed.is_empty() && r.existent.is_empty(),
+                    "{label}: re-read although main is unchanged: {r:?}"
+                );
+            }
+            cur = merged(&main_ns(), Some(&cur), r);
+            assert_eq!(sqlite_wm(&cur).0, want, "{label}: schema_version");
+            let fresh = full(&l, level).await;
+            let (got, wanted) = (g4_canon(&cur), g4_canon(&fresh));
+            let only_inc: Vec<_> = got.iter().filter(|x| !wanted.contains(x)).collect();
+            let only_full: Vec<_> = wanted.iter().filter(|x| !got.contains(x)).collect();
+            assert!(
+                only_inc.is_empty() && only_full.is_empty(),
+                "{label}: incremental differs from full\n only incremental: {only_inc:#?}\n only full: {only_full:#?}"
+            );
+            g4_cell(&format!(
+                "{}-{case}",
+                format!("{level:?}").to_ascii_lowercase()
+            ));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn g4_replaced_file_with_the_same_schema_version_equals_full_after_reconnect() {
+    let l = lite("CREATE TABLE a1(x)").await;
+    let other = file_with(l._dir.path(), "other.db", "CREATE TABLE b1(y)").await;
+    let mut c = l.reader().await;
+    let r = pass(
+        &intro(),
+        &mut c,
+        &main_ns(),
+        Mode::Full,
+        Level::Structure,
+        None,
+    )
+    .await;
+    let s1 = merged(&main_ns(), None, r);
+    assert_eq!(sqlite_wm(&s1).0, 1);
+    // Replaced in place by a file with the same schema_version. The reused reader's fast
+    // path does not look (Task 18: detection is on reconnect, by digest); the cell is the
+    // reconnect.
+    copy_in_place(&other, &l.path);
+    drop(c);
+    let mut c = l.reader().await;
+    let r = pass(
+        &intro(),
+        &mut c,
+        &main_ns(),
+        Mode::Incremental,
+        Level::Structure,
+        Some(&s1),
+    )
+    .await;
+    drop(c);
+    assert!(reread(&r), "the digest found the change: {r:?}");
+    let s2 = merged(&main_ns(), Some(&s1), r);
+    assert_eq!(sqlite_wm(&s2).0, 1, "the same schema_version");
+    assert_eq!(g4_canon(&s2), g4_canon(&full(&l, Level::Structure).await));
+    assert!(s2.lookup(KindGroup::Relations, "a1").is_empty());
+    g4_cell("replaced-file-same-schema-version-reconnect");
+}
+// ## m4-t28-oracle

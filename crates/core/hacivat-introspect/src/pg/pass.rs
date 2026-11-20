@@ -765,10 +765,17 @@ async fn read_incremental(
     }
     // Objects the cache lacks are read whole; a domain whose constraint count moved (a
     // dropped constraint leaves no young row) is re-read.
+    // ## m4-t28-routine-lookup (named exception, ruling R-W5-9): the cached object is found by
+    // `(kind, oid)` first. The existence row has no overload signature, and a routine's key
+    // carries one, so `find(key_of(..))` never matched a routine: every routine counted as
+    // uncached and was re-read by every incremental pass (an over-read the G4 gate found).
+    // The path lookup stays as the fallback (an oid two cached objects of the kind share).
     let prev_index = |e: &Existent| -> Option<u32> {
         let kind = build::existent_kind(&e.tag, e.sub.as_deref())?;
-        prev.find(&nsx.key_of(kind, &e.name, e.oid))
+        prev.find_by_server_id(kind, ServerId::Oid(e.oid))
+            .or_else(|| prev.find(&nsx.key_of(kind, &e.name, e.oid)))
     };
+    // ## m4-t28-routine-lookup
     for e in alive.by_oid.values() {
         if e.parent.is_some() {
             continue;

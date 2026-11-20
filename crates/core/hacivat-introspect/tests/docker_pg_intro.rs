@@ -1932,3 +1932,67 @@ async fn drop_big_fixture_when_asked() {
     assert_eq!(left, "0");
     a.close().await;
 }
+
+// ## m4-t28-routine-lookup (named exception, ruling R-W5-9)
+/// An unchanged routine is not re-read (G4 finding, CI 44692679308). The incremental pass
+/// used to look cached objects up by a key without the overload signature, which never matched
+/// a routine, so every routine counted as uncached on every pass. Overloads, a zero-argument
+/// function, a procedure and an aggregate; then one changed routine is re-read alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn insert_only_pass_with_routines_rereads_no_routine() {
+    if !docker_enabled() {
+        return;
+    }
+    for t in targets() {
+        let (s, _g) = schema_with(
+            &t,
+            "rtn",
+            "CREATE TABLE {s}.x (a int); \
+             CREATE FUNCTION {s}.f0() RETURNS int LANGUAGE sql AS 'SELECT 1'; \
+             CREATE FUNCTION {s}.f2(a int, b text) RETURNS int LANGUAGE sql AS 'SELECT a'; \
+             CREATE FUNCTION {s}.f2(a text) RETURNS int LANGUAGE sql AS 'SELECT 1'; \
+             CREATE PROCEDURE {s}.p(x int) LANGUAGE plpgsql AS $$ BEGIN END $$; \
+             CREATE AGGREGATE {s}.agg(int) (SFUNC = int4pl, STYPE = int)",
+        )
+        .await;
+        let pg = Pg::connect(&t).await;
+        let mut c = pg.meta().await;
+        let ns = ns_of(&t, &s);
+        let prev = load(&mut c, &ns, Level::Sources).await;
+        run(&t, &format!("INSERT INTO {s}.x VALUES (1)")).await;
+        let (next, _, p) = refresh(&mut c, &ns, &prev).await;
+        assert!(p.report.full_reason.is_none(), "{}", t.id);
+        assert!(
+            !ran(&p, name::RETRIEVE_ROUTINES),
+            "{}: an unchanged routine was re-read: {:?}",
+            t.id,
+            p.report.log.names()
+        );
+        assert_same(
+            &format!("{} insert", t.id),
+            &next,
+            &load(&mut c, &ns, Level::Sources).await,
+        );
+        // One changed overload is re-read, and only it.
+        run(&t, &format!("ALTER FUNCTION {s}.f2(a int, b text) STABLE")).await;
+        let (after, _, p) = refresh(&mut c, &ns, &next).await;
+        let rows: usize = p
+            .report
+            .log
+            .sections
+            .iter()
+            .filter(|x| x.name == name::RETRIEVE_ROUTINES)
+            .map(|x| x.rows)
+            .sum();
+        assert_eq!(rows, 1, "{}: {:?}", t.id, p.report.log.sections);
+        assert_same(
+            &format!("{} alter f2", t.id),
+            &after,
+            &load(&mut c, &ns, Level::Sources).await,
+        );
+        drop(c);
+        pg.shutdown().await;
+    }
+}
+// ## m4-t28-routine-lookup

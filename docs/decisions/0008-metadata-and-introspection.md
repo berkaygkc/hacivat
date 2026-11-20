@@ -2681,3 +2681,103 @@ and implements `sql_catalog::CatalogView` for it (HV-INTRO-16 consumer side; R-M
   `group_replication_group_name`, `audit_log_file`) exist only where the plugin is loaded, so
   `settings()` is `Unknown` there and a `setting(name)` miss is `Unknown`, never `Missing`.
   PostgreSQL keeps the exact-release rule. Probes: `hacivat-meta/tests/overlay_rr1_hostile.rs`.
+
+## m4-t28 — gate G4 (incremental refresh on the ver/01 matrix)
+
+- **Oracle.** After every step, the cached namespace merged with an incremental pass equals a
+  fresh `Full` pass of the same namespace, compared on the namespace's key, engine, fold
+  rule, level and object count and on every object, root included: key and server id,
+  `StateMark`, flags and properties. Only `loaded_at`, the generation and the namespace
+  watermark are left out (`tests/common` block `m4-t28-matrix`, `g4::canon`). A non-Docker
+  test proves that the oracle sees each compared field and ignores only those three.
+- **Narrow reads.** No step may pass by running `Full`: every incremental pass asserts
+  `full_reason == None` plus the step's ver/01 fact from the query log. On PostgreSQL:
+  CREATE INDEX re-reads the keys, never the relation row or the columns; COMMENT re-reads
+  only `Comments`; a removed table or column comment re-reads only `Comments`; DROP INDEX,
+  DROP TRIGGER, DROP TABLE, DROP AGGREGATE, INSERT and VACUUM ANALYZE re-read nothing (the
+  existence query decides). On MySQL, after the R-M4-39 window has passed, each step re-reads
+  exactly `tt`, and INSERT re-reads nothing.
+- **A removed index comment re-reads its relation's keys**, not only `Comments`: an index
+  comment belongs to the keys facet (`CommentOwner::RelKeys`, T16). The gate asserts "keys,
+  never the relation row or the columns" for that step instead of "Comments only".
+- **The Docker tests of `docker_m4_matrix` run one at a time** (a process-wide lock). If a
+  concurrent test's DDL transaction is still open when a pass takes its snapshot, that pass's
+  xmin (the next watermark) falls below an earlier step's commit, and the next pass re-reads
+  that step again. The result is still correct, but it is not the narrow read the step
+  asserts. The MySQL time-zone test also changes a server-wide setting.
+- **REVOKE USAGE on PostgreSQL** (alg/02 HV-INTRO-11 test 7) does not empty the existence set:
+  `pg_catalog` rows stay visible without schema `USAGE`, so nothing is dropped. The test
+  asserts that there is never a silent deletion: either the result is applied with no drops,
+  or the guard holds it. It records which case happened as an `HV-FACT` line. Then it proves
+  the guard fires on a live pass: 20 of 24 tables really dropped gives a background merge
+  `PendingConfirmation { vanished: 20 }`.
+- **Record.** Each cell that holds prints `HV-FACT g4 <target> <case> incremental==full`. The
+  per-step rows go to `target/docker/t28-g4-*.tsv`; the `g4` infix keeps them apart from M3's
+  `t28-*.tsv`.
+- **Fix round 1 (review):**
+  - *Record.* Every line has the form `HV-FACT g4 <target> <topic> k=v …`.
+    - Each TSV row is also printed as `… row step=… changed_parents=… queries=…`.
+    - Each of the 12 Docker tests prints `… wall test=… ms=… target_total_ms=…` for each
+      target. The last `wall` line of a target is that target's total. The PR subset (plan
+      step 4) is the total for `pg17` plus the total for `mysql84`.
+  - *Narrow reads.* COMMENT ON TABLE and COMMENT ON COLUMN now assert "Comments only".
+  - *REVOKE outcomes.* A table existence set that fails closed (`ExistSet::Failed`) is an
+    accepted outcome. So is a pass refused with `Permission`. Part B runs on a fresh session
+    with USAGE given back.
+  - *Long ALTER.* The cell names whether F1 was exercised: `long-alter-straddled` or
+    `long-alter-not-straddled`.
+  - *Canary targets.* The canary test also runs on `pg17-tr` and `pg17wrap`.
+  - *Oracle probes.* The review's oracle-negative probes are now pure tests. An incremental
+    merge that keeps the cached properties, or the cached `StateMark`, of a re-read object
+    fails the oracle.
+- **Known limits:**
+  - *Arena order (review m-2).* `canon` sorts its lines, so the oracle does not see the order
+    of siblings in the arena. On PostgreSQL every Retrieve section orders by oid, and the
+    merge appends new children under a kept parent. Within one kind, the order therefore
+    matches a full pass, except across OID wraparound. A merge bug that only reorders
+    children would still pass G4.
+  - *SQLite cells (review m-3).* On a change, a SQLite incremental pass is a full read, and
+    the merge reuses its arena. The SQLite cells therefore measure change detection, not the
+    merge walk. The PostgreSQL and MySQL cells are the merge coverage.
+  - *Shared stack (review m-8).* The serial lock covers only this test binary, but the
+    PostgreSQL xmin horizon spans the whole cluster. On a shared local stack, another
+    process's open write transaction, or a catalog autoanalyze, can lower a pass's xmin. The
+    next pass then over-reads, and an exact narrow-read assertion fails. CI runs the test
+    binaries one after another on a fresh stack.
+  - *Locale (review m-5).* The LANG test records whether the client host has `tr_TR`
+    installed (`client-locale tr_TR_installed=…`), and its cell names the case it measured.
+    std and the pure-Rust drivers read no locale, so the test guards against a regression.
+- **Carried to T33:** a MySQL `REVOKE SELECT` test. On MySQL, `INFORMATION_SCHEMA` hides
+  tables the login may not read, so existence really does come back empty. The test must show
+  that the mass-drop guard then holds the result (review deviation 3).
+- **Fix round 2 (CI 44692679308):**
+  - *The canary depends on being the first `pg_stat_*` read of its transaction.* A backend's
+    `pg_stat_activity` values are a snapshot taken at the transaction's first access and kept
+    until the transaction ends. This holds on every version, 13–18. A second read in the same
+    transaction therefore cannot see an XID assigned after the first one.
+    - The test's negative control did exactly that, which was a test bug. Each reading now runs
+      in its own transaction, and the hazard is recorded as an `HV-FACT`.
+    - The product holds: `Canary` is the only `pg_stat_*` read of a pass, and it runs last.
+      The non-Docker test `only_the_canary_reads_backend_activity` pins this for 13–18.
+  - *Narrow-read misses no longer stop the matrix.* They are collected, printed as
+    `g4 <target> narrow-violation step=… extra=<section>:<rows>`, and fail the test at the end.
+    Correctness failures still stop it at once.
+  - *Finding for T16: every incremental pass re-reads every routine, on every version.*
+    - The cause: `read_incremental`'s `prev_index` looks up a routine by
+      `key_of(kind, name, oid)`, whose `overload_sig` is `None`. A routine's key carries its
+      identity arguments, so `NamespaceSnapshot::find`'s `is_keyed_by` never matches.
+    - Each routine is then treated as missing from the cache and re-read. This is an over-read,
+      not a miss.
+- **Fix round 3 (ruling R-W5-9): the routine lookup is fixed here.** The changes are named
+  exceptions, fenced `m4-t28-routine-lookup`.
+  - `hacivat-meta` gains `NamespaceSnapshot::find_by_server_id(kind, ServerId)`, which reads
+    the existing server-id index. It returns `None` when two objects of the kind share the id,
+    which is the same ambiguity rule as `find`.
+  - The PostgreSQL incremental pass now finds a cached object by `(kind, oid)` first, and
+    falls back to the path lookup.
+  - Tests:
+    - Task 16's Docker test `insert_only_pass_with_routines_rereads_no_routine`. It was
+      committed first, as the failing half.
+    - `hacivat-meta/tests/find_by_server_id.rs`.
+  - MySQL is not affected: it matches cached objects by kind, raw kind and name, and MySQL
+    has no overloads. SQLite has no routines.
