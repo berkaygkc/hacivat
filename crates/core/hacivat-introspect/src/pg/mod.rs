@@ -200,7 +200,53 @@ impl Introspector for PgIntrospector {
             Ok(identity_of(&id))
         })
     }
+
+    // ## m4-t26-overlays (named exception in Task 16's file; rulings R-W5-4, R-W5-6): the
+    // facts the hub's placeholder lacks (the version, which chooses the system layer; the
+    // encoding, `standard_conforming_strings`, recovery, the database's collation), from
+    // `Identity`, and in the same metadata snapshot whether the system schemas hold anything
+    // beyond initdb (`packs/pg/45-system-extras`). One read-only transaction; the engine runs
+    // it inside its job's cancellation (`engine::work::run` drops the future on cancel, as
+    // for `identity`).
+    fn server_facts<'a>(
+        &'a self,
+        c: &'a mut MetaConn,
+    ) -> BoxFuture<'a, Result<Option<hacivat_meta::ServerFacts>, IntroError>> {
+        Box::pin(async move {
+            let cancel = CancellationToken::new();
+            let mut report = pass::PassReport::default();
+            let facts = pass::in_snapshot(
+                c,
+                &hacivat_meta::Name::from("pg_catalog"),
+                &cancel,
+                &mut report,
+                pass::PassHooks::default(),
+                async |r: &mut sections::Reader<'_, '_>, id: &decode::IdentityRow| {
+                    let extras = r
+                        .read(
+                            SYSTEM_EXTRAS,
+                            Mode::System,
+                            Level::Names,
+                            &sections::Binds::default(),
+                            |x: &decode::Row<'_>| x.bool(0),
+                        )
+                        .await?;
+                    let mut f = id.server_facts();
+                    f.system_schema_extras = extras.first().copied();
+                    Ok(f)
+                },
+            )
+            .await?;
+            Ok(Some(facts))
+        })
+    }
+    // ## m4-t26-overlays
 }
+
+// ## m4-t26-overlays
+/// The section of `packs/pg/45-system-extras.hvq.sql` (ruling R-W5-6).
+pub const SYSTEM_EXTRAS: &str = "SystemExtras";
+// ## m4-t26-overlays
 
 /// The fingerprint of a probe (see [`PgIntrospector::identity`]).
 pub fn identity_of(id: &decode::IdentityRow) -> ServerIdentity {
