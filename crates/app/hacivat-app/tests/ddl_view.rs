@@ -1960,3 +1960,129 @@ fn engine_catalog_sources_and_facets_vouch_on_every_path(cx: &mut TestAppContext
         "{st:?}"
     );
 }
+
+// ## m4-t33b-carries (T25 m-7, engine-driven; FakeIntrospector facets and definitions from
+// T33a): the real engine over the fake server. A table's grants come from a `Grants` facet
+// the engine reads (`put_facet` before the engine starts) and a view's text from the definition
+// the engine reads at `Sources`; both vouch, so each view reads current. When the namespace is
+// then marked stale, the catalog no longer vouches and each reads "couldn't check".
+#[gpui::test]
+fn engine_driven_facets_vouch_on_every_ddl_view_path(cx: &mut TestAppContext) {
+    let public = NsKey::schema(["app", "public"]);
+    let users = ObjectKey {
+        kind: ObjectKind::Table,
+        path: ["app", "public", "users"]
+            .into_iter()
+            .map(Name::from)
+            .collect(),
+        server_id: Some(hacivat_meta::ServerId::Oid(20_000)),
+        overload_sig: None,
+        raw_kind: None,
+    };
+    let intro = FakeIntrospector::new(DbmsKind::Postgres);
+    intro.put_ns(
+        public.clone(),
+        vec![
+            FakeObject::table("users", &["id"]).with_oid(20_000),
+            FakeObject::view("v_one", &["one"])
+                .with_oid(20_100)
+                .with_definition("SELECT 1 AS one"),
+        ],
+    );
+    // Before the engine is built: its capabilities name the scripted facet kinds.
+    intro.put_facet(hacivat_introspect::introspector::FacetRows::Grants(vec![(
+        users.clone(),
+        GrantsFacet {
+            entries: vec![Grant {
+                grantee: Name::from("reporting"),
+                privilege: Name::from("SELECT"),
+                columns: Vec::new(),
+                grantable: false,
+            }],
+        },
+    )]));
+    let vcx = shell_with_fake(cx, "en", answers_probe(FakeDriver::new(DbmsKind::Postgres)));
+    in_window(vcx, |window, _| window.activate_window());
+    let dir = temp_dir(vcx).join("fake-cache");
+    let rt = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::connections::ConnectionsModel>()
+            .runtime()
+    });
+    let src = Arc::new(support::live::FakeSource::new(rt, intro, dir));
+    let as_source: Arc<dyn CatalogSource> = src.clone();
+    vcx.cx.update(|cx| hlive::set_source(as_source, cx));
+    let id = add_profile(vcx, pg_profile("app-dev"));
+    vcx.cx.update(|cx| {
+        let tree = hacivat_app::connections::explorer::tree(cx).expect("the tree");
+        tree.update(cx, |t, cx| {
+            t.set_expanded(adapter::profile_key(id), true, cx)
+        });
+    });
+    connect(vcx, "app-dev");
+    wait_until(vcx, "public loaded, the engine idle", |vcx| {
+        vcx.cx.read(|cx| {
+            hlive::handle(id, cx).is_some_and(|h| {
+                matches!(
+                    h.catalog()
+                        .current()
+                        .state(&hacivat_meta::snapshot::ContainerKey::Namespace(
+                            public.clone()
+                        )),
+                    LoadState::Loaded { .. }
+                ) && h.progress().borrow().tasks.is_empty()
+            })
+        })
+    });
+    let view_key = vcx.cx.read(|cx| {
+        let snap = hlive::handle(id, cx).unwrap().catalog().current();
+        let ns = snap.namespaces.get(&public).unwrap().clone();
+        let (idx, _) = ns
+            .children(0)
+            .find(|(_, o)| &**o.name() == "v_one")
+            .expect("the view");
+        ns.object_key(idx).expect("its key")
+    });
+    // The table: its grants from the engine's facet read; current.
+    open_view(vcx, id, &users);
+    wait_until(vcx, "the table's grants, current", |vcx| {
+        vcx.cx
+            .read(|cx| ddl_view::state_of(id, &users, cx))
+            .is_some_and(|st| st.grants == GrantsUx::Loaded && st.freshness == Freshness::Current)
+    });
+    let st = state(vcx, id, &users);
+    assert!(
+        st.text.as_deref().is_some_and(|t| t.contains("reporting")),
+        "{st:?}"
+    );
+    // The view: its text from the definition read at Sources; current.
+    open_view(vcx, id, &view_key);
+    wait_until(vcx, "the view's text, current", |vcx| {
+        vcx.cx
+            .read(|cx| ddl_view::state_of(id, &view_key, cx))
+            .is_some_and(|st| st.body == Body::Script && st.freshness == Freshness::Current)
+    });
+    let st = state(vcx, id, &view_key);
+    assert!(
+        st.text
+            .as_deref()
+            .is_some_and(|t| t.contains("SELECT 1 AS one")),
+        "{st:?}"
+    );
+    assert!(
+        src.intro
+            .calls()
+            .iter()
+            .any(|c| matches!(c, FakeCall::Facet { .. })),
+        "the engine read the facet"
+    );
+    // The namespace marked stale (refresh after DDL with Ask or Never): nothing vouches.
+    let handle = vcx.cx.read(|cx| hlive::handle(id, cx)).expect("the engine");
+    handle.mark_stale(vec![public.clone()], false);
+    wait_until(vcx, "both read couldn't check", |vcx| {
+        vcx.cx.read(|cx| {
+            [&users, &view_key].iter().all(|k| {
+                ddl_view::state_of(id, k, cx).is_some_and(|st| st.freshness == Freshness::Unknown)
+            })
+        })
+    });
+}
