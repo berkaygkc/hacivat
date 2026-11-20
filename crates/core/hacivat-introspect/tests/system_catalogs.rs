@@ -363,3 +363,241 @@ async fn pg_server_facts_read_the_initdb_only_fact() {
         );
     }
 }
+
+// ## m4-t30-gates (named exception: Task 26's test file; T26 carries m-6 and the R-M4-6
+// engine path). A server version without a shipped snapshot gets its system schemas through
+// the engine: in scope, read live at their role's level (`Names` by default), never served
+// from another version's snapshot. A covered or unknown version keeps them out of scope.
+
+fn ns_state(catalog: &Catalog, ns: &NsKey) -> LoadState {
+    catalog
+        .current()
+        .state(&ContainerKey::Namespace(ns.clone()))
+        .clone()
+}
+
+/// The fake server lists `pg_catalog` and `pg_toast` as system schemas next to `public`.
+fn with_fake_pg_catalog(fake: &hacivat_introspect::testing::FakeIntrospector) {
+    for s in ["pg_catalog", "pg_toast"] {
+        let ns = NsKey::schema(["db", s]);
+        fake.put_ns(
+            ns.clone(),
+            hacivat_introspect::testing::FakeIntrospector::tables(3),
+        );
+        fake.edit_ns(&ns, |n| n.system = true);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsupported_version_brings_its_system_schemas_into_scope_live() {
+    let (catalog, handle, fake) = hub_like_engine(Some(Ok(pg_facts("13.22", Some(false)))));
+    with_fake_pg_catalog(&fake);
+    common::bounded(handle.on_connect()).await.unwrap();
+    common::idle(&handle).await;
+    assert!(
+        catalog.current().overlays.system.is_none(),
+        "no snapshot for 13"
+    );
+    let pg_catalog = NsKey::schema(["db", "pg_catalog"]);
+    // In scope (never `OutOfScope`), and only the snapshot's system schemas: `pg_toast` stays
+    // out.
+    assert!(!matches!(
+        ns_state(&catalog, &pg_catalog),
+        LoadState::OutOfScope
+    ));
+    assert!(matches!(
+        ns_state(&catalog, &NsKey::schema(["db", "pg_toast"])),
+        LoadState::OutOfScope
+    ));
+    common::bounded(handle.expand(pg_catalog.clone()))
+        .await
+        .unwrap();
+    common::idle(&handle).await;
+    assert!(matches!(
+        ns_state(&catalog, &pg_catalog),
+        LoadState::Loaded {
+            level: Level::Names,
+            ..
+        }
+    ));
+    let view = db_view(catalog.current());
+    let hit = view.lookup(&parts("pg_catalog.t0"), KindGroup::Relations);
+    let Lookup::Found(h) = &hit else {
+        panic!("a live pg_catalog object: {hit:?}");
+    };
+    assert!(!h.obj().flags().contains(ObjFlags::PRE_INTROSPECTED));
+    // Review I-2: read by the system sections, so the objects and the schema root carry
+    // `SYSTEM` (the explorer's Built-in group, `CatalogView`'s `is_system`).
+    assert!(h.obj().flags().contains(ObjFlags::SYSTEM));
+    assert!(h.ns.root().flags().contains(ObjFlags::SYSTEM));
+    assert!(fake.calls().iter().any(|c| matches!(
+        c,
+        hacivat_introspect::testing::fake::FakeCall::Introspect {
+            ns,
+            mode: Mode::System,
+            level: Level::Names,
+        } if *ns == pg_catalog
+    )));
+    handle.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn covered_version_keeps_system_schemas_out_of_scope() {
+    let (catalog, handle, fake) = hub_like_engine(Some(Ok(pg_facts("17.13", Some(false)))));
+    with_fake_pg_catalog(&fake);
+    common::bounded(handle.on_connect()).await.unwrap();
+    common::idle(&handle).await;
+    assert!(matches!(
+        ns_state(&catalog, &NsKey::schema(["db", "pg_catalog"])),
+        LoadState::OutOfScope
+    ));
+    // The snapshot answers: its `pg_class`, not the fake server's live `t0`.
+    let view = db_view(catalog.current());
+    assert!(matches!(
+        view.lookup(&parts("pg_catalog.pg_class"), KindGroup::Relations),
+        Lookup::Found(_)
+    ));
+    assert!(!matches!(
+        view.lookup(&parts("pg_catalog.t0"), KindGroup::Relations),
+        Lookup::Found(_)
+    ));
+    handle.shutdown();
+}
+
+/// An unknown version (a failed facts read) never brings the system schemas in: the version
+/// that chooses between the snapshot and a live read is not known.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_version_keeps_system_schemas_out_of_scope() {
+    let (catalog, handle, fake) =
+        hub_like_engine(Some(Err(hacivat_introspect::IntroError::Timeout)));
+    with_fake_pg_catalog(&fake);
+    common::bounded(handle.on_connect()).await.unwrap();
+    common::idle(&handle).await;
+    assert!(matches!(
+        ns_state(&catalog, &NsKey::schema(["db", "pg_catalog"])),
+        LoadState::OutOfScope
+    ));
+    handle.shutdown();
+}
+
+/// Task 26 review m-6, on a real PostgreSQL 13 through the engine the hub makes (the shipped
+/// set attached): `pg_catalog` comes into scope, an expansion reads it live at `Names` or
+/// above, and its objects are live (never `PRE_INTROSPECTED`); no snapshot serves 13.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn pg13_engine_reads_system_schemas_live_at_names_level() {
+    use hacivat_introspect::hub::{CatalogHub, HubSettings, SessionLookup};
+    use hacivat_secrets::SecretStore;
+    use hacivat_settings::{LocalPaths, MetadataSettings};
+    use std::time::Duration;
+
+    const LIMIT: Duration = Duration::from_secs(120);
+    if !docker_enabled() {
+        return;
+    }
+    let Some(t) = require_target("pg13") else {
+        println!("HV-FACT g3 pg13 target absent: skipped");
+        return;
+    };
+    let pg = Pg::connect(&t).await;
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let lookup: Arc<dyn SessionLookup> = pg.m.clone();
+    let hub = CatalogHub::new(
+        lookup,
+        HubSettings {
+            paths: LocalPaths::under(dir.path()),
+            metadata: MetadataSettings::default(),
+        },
+        Arc::new(SecretStore::new(None)),
+        assets(),
+    );
+    let cat = hub.ensure(pg.profile.clone()).await.expect("a catalog");
+    tokio::time::timeout(LIMIT, cat.handle.on_connect())
+        .await
+        .expect("on connect in time")
+        .expect("the server is read");
+    common::idle(&cat.handle).await;
+    let snap = cat.catalog.current();
+    assert!(
+        snap.server.version.starts_with("13."),
+        "{}",
+        snap.server.version
+    );
+    assert!(snap.overlays.system.is_none(), "no snapshot serves 13");
+    let ns = NsKey::schema([t.database.as_str(), "pg_catalog"]);
+    assert!(
+        !matches!(ns_state(&cat.catalog, &ns), LoadState::OutOfScope),
+        "pg_catalog is in scope on 13"
+    );
+    tokio::time::timeout(LIMIT, cat.handle.expand(ns.clone()))
+        .await
+        .expect("expanded in time")
+        .expect("pg_catalog is read");
+    common::idle(&cat.handle).await;
+    let state = ns_state(&cat.catalog, &ns);
+    let LoadState::Loaded { level, .. } = state else {
+        panic!("pg_catalog after the expansion: {state:?}");
+    };
+    assert!(level >= Level::Names);
+    let view = SnapshotView::new(cat.catalog.current()).with_search_path(SearchPath::for_pg(
+        &Name::from(t.database.as_str()),
+        &[Name::from("public")],
+        None,
+        None,
+    ));
+    let hit = view.lookup(&parts("pg_catalog.pg_class"), KindGroup::Relations);
+    let Lookup::Found(h) = &hit else {
+        panic!("pg13 pg_catalog.pg_class through the engine: {hit:?}");
+    };
+    assert!(!h.obj().flags().contains(ObjFlags::PRE_INTROSPECTED));
+    assert!(h.obj().flags().contains(ObjFlags::SYSTEM));
+    assert!(h.ns.root().flags().contains(ObjFlags::SYSTEM));
+    let miss = view.lookup(&parts("pg_catalog.hv_t30_absent"), KindGroup::Relations);
+    assert!(!matches!(miss, Lookup::Found(_)), "{miss:?}");
+    println!(
+        "HV-FACT g3 pg13 engine live system read: version={} level={level:?} \
+         pg_catalog_objects={} system_flag={} miss={}",
+        snap.server.version,
+        h.ns.len(),
+        h.obj().flags().contains(ObjFlags::SYSTEM),
+        match miss {
+            Lookup::Missing(_) => "Missing",
+            Lookup::Unknown(_) => "Unknown",
+            Lookup::Found(_) => "Found",
+        }
+    );
+    drop(view);
+    drop(snap);
+    drop(cat);
+    hub.shutdown(pg.profile.id).await;
+    pg.shutdown().await;
+}
+// REVIEW HOSTILE (T30 opus review, I-1): a user's explicit negative clause keeps a system
+// schema out of scope on an unsupported version ("removing is always safe", scope.rs docs).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_negative_clause_keeps_pg_catalog_out_on_unsupported_version() {
+    use hacivat_introspect::scope::parse_scope;
+    let (catalog, handle, fake) = hub_like_engine(Some(Ok(pg_facts("13.22", Some(false)))));
+    with_fake_pg_catalog(&fake);
+    common::bounded(handle.on_connect()).await.unwrap();
+    common::idle(&handle).await;
+    let pg_catalog = NsKey::schema(["db", "pg_catalog"]);
+    assert!(!matches!(
+        ns_state(&catalog, &pg_catalog),
+        LoadState::OutOfScope
+    ));
+    handle.set_scope(
+        parse_scope("@:*|!@:pg_catalog", sql_dialect::DialectId::Postgres).expect("a scope"),
+    );
+    // The scope change is a command: wait on the condition, never on "idle" alone (which may
+    // be seen before the command is handled).
+    let excluded = || matches!(ns_state(&catalog, &pg_catalog), LoadState::OutOfScope);
+    common::wait_until(std::time::Duration::from_secs(10), excluded).await;
+    let st = ns_state(&catalog, &pg_catalog);
+    assert!(
+        matches!(st, LoadState::OutOfScope),
+        "the user excluded pg_catalog, yet it is {st:?}"
+    );
+    handle.shutdown();
+}
+// ## m4-t30-gates

@@ -1600,6 +1600,57 @@ fn rebuild_into(
     }
 }
 
+// ## m4-t30-gates (named exception in Task 23's file)
+/// Gate G2 (R-M4-45): one `HV-FACT g2 …` line per snapshot file of `committed` or
+/// `regenerated`, comparing the two files' raw bytes (the `.hvsnap.zst` frames themselves,
+/// not their decompressed JSON), with the committed byte count and XXH3-64 digest, and a
+/// closing line counting the snapshots that matched and whether `manifest.toml` matched too;
+/// `verdict=reproduced` needs both (review m-3).
+pub fn g2_facts(regenerated: &Path, committed: &Path) -> Result<Vec<String>> {
+    let names = |d: &Path| -> Result<BTreeSet<String>> {
+        let mut out = BTreeSet::new();
+        for e in std::fs::read_dir(d).with_context(|| d.display().to_string())? {
+            let n = e?.file_name().to_string_lossy().into_owned();
+            if n.ends_with(SNAPSHOT_SUFFIX) {
+                out.insert(n);
+            }
+        }
+        Ok(out)
+    };
+    let all: BTreeSet<String> = names(regenerated)?
+        .union(&names(committed)?)
+        .cloned()
+        .collect();
+    let mut lines = Vec::new();
+    let mut equal_count = 0;
+    for f in &all {
+        let a = std::fs::read(regenerated.join(f)).ok();
+        let b = std::fs::read(committed.join(f)).ok();
+        let equal = a.is_some() && a == b;
+        equal_count += usize::from(equal);
+        let (bytes, digest) = b
+            .as_deref()
+            .map_or((0, "none".to_string()), |b| (b.len(), xxh3(b)));
+        lines.push(format!(
+            "HV-FACT g2 file={f} compared=file-bytes committed_bytes={bytes} \
+             committed_digest={digest} equal={equal}"
+        ));
+    }
+    let manifest = |d: &Path| std::fs::read(d.join(MANIFEST)).ok();
+    let manifest_equal = manifest(regenerated).is_some_and(|m| Some(m) == manifest(committed));
+    lines.push(format!(
+        "HV-FACT g2 files={} equal={equal_count} manifest_equal={manifest_equal} verdict={}",
+        all.len(),
+        if equal_count == all.len() && !all.is_empty() && manifest_equal {
+            "reproduced"
+        } else {
+            "differs"
+        }
+    ));
+    Ok(lines)
+}
+// ## m4-t30-gates
+
 /// For each differing snapshot file, its first differing section and object (`HV-FACT
 /// minicat-diff`).
 fn report_differences(regenerated: &Path, committed: &Path, files: &[String]) {
@@ -1656,6 +1707,12 @@ fn run_inner(args: &[String]) -> Result<bool> {
                 return Ok(false);
             }
             let diff = diff_generated(&staging, &assets)?;
+            // ## m4-t30-gates (named exception in Task 23's file): gate G2's evidence, one
+            // line per committed snapshot file, compared as whole files (never decompressed).
+            for l in g2_facts(&staging, &assets)? {
+                println!("{l}");
+            }
+            // ## m4-t30-gates
             if diff.is_empty() {
                 println!("minicat verify: the committed snapshots regenerate byte for byte");
                 Ok(true)
@@ -2637,6 +2694,69 @@ mod tests {
         let err = build(dir.path(), out.path(), true).unwrap_err();
         assert!(format!("{err:#}").contains("mariadb106"), "{err:#}");
     }
+
+    // ## m4-t30-gates (named exception in Task 23's file)
+    #[test]
+    fn g2_facts_compare_whole_files_one_line_each() {
+        let regenerated = built(&all());
+        let committed = tempfile::tempdir().unwrap();
+        for e in std::fs::read_dir(regenerated.path()).unwrap() {
+            let p = e.unwrap().path();
+            std::fs::copy(&p, committed.path().join(p.file_name().unwrap())).unwrap();
+        }
+        let n = std::fs::read_dir(committed.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(SNAPSHOT_SUFFIX)
+            })
+            .count();
+        assert!(n > 0);
+        let facts = g2_facts(regenerated.path(), committed.path()).unwrap();
+        assert_eq!(facts.len(), n + 1);
+        assert!(facts[..n].iter().all(|l| l.starts_with("HV-FACT g2 file=")
+            && l.contains("compared=file-bytes")
+            && l.ends_with("equal=true")));
+        assert_eq!(
+            facts[n],
+            format!("HV-FACT g2 files={n} equal={n} manifest_equal=true verdict=reproduced")
+        );
+        // Review m-3: a manifest that differs alone is no reproduction either.
+        let m = committed.path().join(MANIFEST);
+        let text = std::fs::read_to_string(&m).unwrap();
+        std::fs::write(&m, format!("{text}\n")).unwrap();
+        let facts = g2_facts(regenerated.path(), committed.path()).unwrap();
+        assert_eq!(
+            facts[n],
+            format!("HV-FACT g2 files={n} equal={n} manifest_equal=false verdict=differs")
+        );
+        std::fs::write(&m, text).unwrap();
+        // The same JSON in another zstd frame (another level) decompresses equal but is not
+        // the same file: G2 compares the files.
+        let f = committed.path().join("mysql-8.4.hvsnap.zst");
+        let json = zstd::decode_all(&std::fs::read(&f).unwrap()[..]).unwrap();
+        std::fs::write(&f, zstd::encode_all(&json[..], 1).unwrap()).unwrap();
+        // A snapshot on one side only is a difference too.
+        std::fs::write(committed.path().join("postgres-99.hvsnap.zst"), b"x").unwrap();
+        let facts = g2_facts(regenerated.path(), committed.path()).unwrap();
+        assert!(
+            facts
+                .iter()
+                .any(|l| l.starts_with("HV-FACT g2 file=mysql-8.4.hvsnap.zst")
+                    && l.ends_with("equal=false"))
+        );
+        assert!(
+            facts
+                .iter()
+                .any(|l| l.starts_with("HV-FACT g2 file=postgres-99.hvsnap.zst")
+                    && l.ends_with("equal=false"))
+        );
+        assert!(facts.last().unwrap().ends_with("verdict=differs"));
+    }
+    // ## m4-t30-gates
 
     /// Fix round 2 (CI 44678817421): `verify` compares only what the build writes
     /// (`manifest.toml` and the `.hvsnap.zst` files). The hand-written files beside them
