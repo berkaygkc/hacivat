@@ -51,7 +51,7 @@ hacivat-meta = { workspace = true, features = ["test-support"] }
 hacivat-net.workspace = true
 # ## m4 (controller manifest amendment R-W3-5): Docker tests need `EngineCatalog::embedded()`
 # and `ExecOpts`/`Protocol` (T16, T17).
-hacivat-driver.workspace = true
+hacivat-driver = { workspace = true, features = ["fake"] }
 
 [lints]
 workspace = true
