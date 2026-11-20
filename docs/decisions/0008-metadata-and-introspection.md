@@ -2390,3 +2390,100 @@ carry fenced `m4-t22-state` named exceptions.
   pass's own window). `IntroHandle::expand`'s doc now says the ticket resolves after the
   names-first pass. R-W4-11 (two trigger changes of one table within one `CREATED` tick)
   stays an M5 hardening.
+
+## m4-t23 — system-catalog snapshots
+
+Spike origin `cd27ec1` (`m4-spike-minicat`): `xtask minicat` `collect`/`build`/`check`/`verify`,
+its eleven offline tests, the `minicat-verify` CI job and the raw-file boundary are copied; the
+spike's Docker read (raw catalog SQL in `hacivat-exec`) is not. The read is rebuilt over the
+introspectors' own system-mode packs.
+
+- **Read** (`hacivat-introspect/tests/minicat_gen.rs`, Docker, active only with
+  `HACIVAT_MINICAT=1`): for `pg14`–`pg18`, `mysql80`, `mysql84`, `mariadb106`, `mariadb1011`,
+  `mariadb114`, `minicat::run_system_sections` runs every `40-system` section of the built-in
+  pack on a `MetaConn`, one read-only snapshot per system schema (PostgreSQL: database
+  `postgres`, the pinned `search_path`, the schema's oid read with the core `Identity`
+  section and bound as `:ns`, the `Canary` checked; MySQL/MariaDB: `hv_catalog` with `mysql`
+  as its default database). The schema is a bind and must be one of the engine's system
+  schemas: `hv_catalog_probe` and every fixture database are refused before the connection
+  is used. One raw JSON file per section, server row order, through `hacivat_testkit::artifact`
+  (`<raw>/<target>/{target,<schema>.<Section>,ListSettings,builtins}.json`, raw format
+  `hacivat-minicat-raw/2`).
+- **The one exception to R-M4-7** (R-M4-44): the MySQL/MariaDB built-in function **names** come
+  from a generator-only probe in `tests/minicat_gen.rs`: `PREPARE hv_minicat FROM 'SELECT
+  <name>()'` (then `DEALLOCATE`; nothing runs) for each name of
+  `sql-safety/data/mysql/manual-index.txt` (`[A-Za-z0-9_]` only, checked), on its own
+  `hv_catalog` connection whose default database is the empty `hv_catalog_probe` (R-C1-1:
+  1305/1630 is absent, anything else present, 1370 fails the read), plus MariaDB's
+  `information_schema.SQL_FUNCTIONS`. A sentinel name must answer absent. It is not in the
+  runtime crate, never runs on a `MetaConn`, and reads no comment or help text.
+- **Canonical JSON format 1** is defined twice and agrees by test: `xtask/src/minicat.rs`
+  writes it, `hacivat_meta::system::normalize` defines it for the decoder (xtask does not
+  depend on `hacivat-meta`); `hacivat-meta/tests/system_decode.rs` requires every committed
+  asset to normalize to itself. Lists sorted by byte order with duplicate keys refused,
+  columns in ordinal order, closed kind vocabularies, the engine's system schemas only, no
+  oid, server id, comment of a MySQL/MariaDB object, timestamp, host or path. zstd 19,
+  single-threaded, no dictionary, checksum and content size on.
+- **Named exclusion rules** (`manifest.toml` `excluded`, checked by `minicat --check`):
+  PostgreSQL `guc-names-with-a-dot`, `objects-with-oid-16384-and-above`,
+  `relation-and-column-comments`, `relation-row-types`, `server-ids`, `setting-values`;
+  MySQL/MariaDB `comments-and-help-text`, `definers-times-sizes-and-row-counts`,
+  `non-system-databases`, `server-ids`, `variable-values`. A volatile item found by a double
+  or fresh-stack run gets a new named rule here and in the list, never a looser comparison.
+- **Decoding is strict** (untrusted bytes at rest, Review Focus 4): exactly one zstd frame with
+  a content checksum and a declared content size of at most 8 MiB (allocated only after that
+  bound; a length mismatch fails), no trailing byte, no skippable frame, the unused header bit
+  clear; JSON that *is* its own canonical form (a reordered or edited file is refused, never
+  repaired). A bit that libzstd does not interpret can flip without an error, but then the
+  decoded bytes are the same; `minicat --check` catches any byte change by digest.
+- **Mapping** (`hacivat_meta::system::decode`): one `NamespaceSnapshot` per system schema,
+  keyed `NsKey::schema([schema])` with no database (PostgreSQL's system schemas exist in every
+  database; Task 26 places them), `FoldRule::Exact` (MySQL/MariaDB as read on the Linux images,
+  `lower_case_table_names = 0`), every object `SYSTEM | PRE_INTROSPECTED`. Relations
+  (a MariaDB `SEQUENCE` keeps its columns as a table), columns (ordinal = position), schema
+  routines with arguments, PostgreSQL types (`Unknown`, raw kind `pg-type`) and operators as
+  Task 16's live system read emits them. PostgreSQL argument text is split only where every
+  type is a type spelling of the same snapshot; anything else is `args = None`, never a guess.
+  Side tables on `SystemSnapshot` (named exception in Task 26's `system/mod.rs`):
+  `builtins` (MySQL/MariaDB probe names as name-only `Routine` objects, `args = None`),
+  `operators`, `types`, `settings` (`sql_catalog::SettingInfo`, names only).
+- **Shipped-set rules** (`minicat --check`): the committed set is empty (until the first
+  CI-generated set is committed) or exactly the ten lines, each complete (every system schema
+  present, every relation with columns, MySQL/MariaDB built-in names read), each from its
+  target's digest-pinned image in `docker/m2a/compose.yml`, with a server version of its line.
+  An unpinned image never builds a snapshot.
+- **CI** (`ci.yml` `# ## m4-t23-minicat`): `minicat-verify` on dispatch, schedule and PRs that
+  touch `hacivat-meta`, `hacivat-introspect` or the assets: `check-pins`, `minicat --check`,
+  `docker up --set full`, `minicat --verify --twice`, `docker down` (volumes) and `up`,
+  `minicat --verify`, a byte comparison of the two regenerated sets, the regenerated sets
+  uploaded as the artifact `system-catalogs`, `down` always. The read steps continue on
+  failure so the fresh-stack read always runs; a final step fails the job. amd64 CI is
+  authoritative for the bytes; the committed set is the artifact of a green-in-itself run
+  (two reads equal, fresh stack equal).
+- `THIRD_PARTY_NOTICES.md` (named exception): libzstd's BSD licence; the PostgreSQL built-in
+  object descriptions in the snapshots are PostgreSQL Licence text.
+- **Fix round 1 (security review, 1 Important, minors):**
+  - *I-1.* A failed MariaDB `information_schema.SQL_FUNCTIONS` read fails the generator (it
+    was swallowed), and an empty answer does too. `minicat` counts a MariaDB line complete only
+    with `builtins = "probe+sql_functions"`, a MySQL line only with `"probe"`.
+  - *m-1.* The probe's "present" answers are an allowlist (`ok`, 1064, 1582, 1583, 3593); any
+    other code is listed with `?` in the `HV-FACT minicat-probe answers=` histogram and then
+    fails the read. 1305/1630 are absent; 1370 still fails at once.
+  - *m-3.* The decoder cross-checks `coverage` against the content: `missing_schemas` must be
+    exactly the expected schemas no relation is in, and `relations_without_columns` the exact
+    count. A contradicting file is `Corrupt`.
+  - *m-5.* The CI artifact also carries each read's own build (`minicat-*/out-*`).
+  - *m-7.* The offline refusals assert their exact codes (`minicat/schema`,
+    `minicat/dialect`).
+  - The review's hostile tests are `hacivat-meta/tests/system_decode_hostile.rs`; their
+    fixtures carry a consistent coverage and H10 now asserts the refusal.
+  - Carried to T33: m-2 (a fuzz target that frames its input, past the checksum), m-4 (remove
+    the empty-set allowance once the set lands), m-6 (SHA-pin actions repo-wide), m-8 (watch
+    level-19 re-encoding on macOS/Windows).
+- **Fix round 2 (CI 44678817421):** `verify` compared the whole assets directory and so flagged
+  the hand-written `README.md` and `virtual-fks.toml`. It now compares only what the build
+  writes: `manifest.toml` and the `.hvsnap.zst` files (`diff_generated`). `collect`'s rebuild
+  check uses the same comparison, because a plain `collect` rebuilds into the assets directory.
+  `virtual-fks.toml` is Task 26's hand-authored input to the system layer (R-M4-12), not an
+  input or output of the snapshot build, so it is in neither the digests nor the manifest
+  (R-M4-17's manifest fields); Task 26's tests guard its rows.
