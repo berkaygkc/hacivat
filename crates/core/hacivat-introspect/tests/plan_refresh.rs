@@ -1619,3 +1619,32 @@ async fn never_marks_the_schema_list_stale_on_a_scope_change() {
     })
     .await;
 }
+
+// ## m4-t33b-carries (named exception; the T27 carry "Explorer refreshed N objects", mock 9):
+// a refresh after DDL that re-read objects announces how many, per namespace, once it is done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_finished_object_refresh_announces_its_count() {
+    let r = loaded_rig(vec![
+        FakeObject::table("t", &["a"]).with_oid(501),
+        FakeObject::table("u", &["a"]).with_oid(502),
+    ])
+    .await;
+    let c = coordinator(&r.handle, DbmsKind::Postgres, RefreshAfterDdl::Always);
+    let mut events = c.events();
+    let p = plan_in(
+        &[
+            "alter table public.t add column z int",
+            "alter table public.u add column z int",
+        ],
+        pg_autocommit(),
+        Some(&r.catalog.current()),
+    );
+    bounded(c.submit(S, p)).await.unwrap();
+    let mut refreshed = None;
+    while let Ok(ev) = events.try_recv() {
+        if let CoordEvent::Refreshed { objects } = ev {
+            refreshed = Some(objects);
+        }
+    }
+    assert_eq!(refreshed, Some(vec![(ns("public"), 2)]));
+}

@@ -649,6 +649,36 @@ fn on_event(profile: ProfileId, e: CoordEvent, cx: &mut App) {
                 "explorer: refresh messages dropped; refreshed widely"
             );
         }
+        // ## m4-t33b-carries (the T27 carry, mock 9): one Output line per namespace.
+        CoordEvent::Refreshed { objects } => refreshed(profile, &objects, cx),
+    }
+}
+
+// ## m4-t33b-carries (the T27 carry, mock 9 "Refreshed")
+/// "Explorer refreshed 2 objects in public", on the output of the profile's console that has
+/// (or last had) the focus, else its newest one; no console of the profile: nothing.
+fn refreshed(profile: ProfileId, objects: &[(NsKey, usize)], cx: &mut App) {
+    let on_profile =
+        |c: &ConsoleId| Consoles::get(cx, *c).is_some_and(|s| s.profile == Some(profile));
+    let console = crate::exec_ui::cancel::focused_console(cx)
+        .filter(on_profile)
+        .or_else(|| Consoles::ids(cx).into_iter().filter(on_profile).max());
+    let Some(console) = console else {
+        return;
+    };
+    for (ns, count) in objects {
+        crate::exec_ui::orchestrator::log_note(
+            console,
+            "hv-metadata-refreshed",
+            vec![
+                ("count", hacivat_exec::LogArg::U64(*count as u64)),
+                (
+                    "schema",
+                    hacivat_exec::LogArg::Str(Arc::from(ns.root_name())),
+                ),
+            ],
+            cx,
+        );
     }
 }
 

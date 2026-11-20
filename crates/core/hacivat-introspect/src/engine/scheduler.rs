@@ -2232,6 +2232,8 @@ impl Actor {
                 u32::try_from(top_drops(&ns, m.outcome.delta()).len()).unwrap_or(u32::MAX)
             }
         };
+        // ## m4-t33b-carries (named exception; T24 carry): the question names some of them.
+        let sample = top_drops(&ns, m.outcome.delta());
         let snap = self.catalog.current();
         let mut changes = Vec::new();
         if let LoadState::Loaded {
@@ -2263,7 +2265,8 @@ impl Actor {
             },
         );
         self.sync_pending_names();
-        self.publisher.announce_pending_confirmation(ns, vanished);
+        self.publisher
+            .announce_pending_with_sample(ns, vanished, sample);
         job.resolve(generation);
     }
 

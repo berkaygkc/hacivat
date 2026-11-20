@@ -772,12 +772,31 @@ async fn pending_confirmation_changes_nothing_until_confirmed() {
         LoadState::Loaded { stale: true, .. }
     ));
     let mut announced = None;
+    let mut sample = Vec::new();
     while let Ok(ev) = events.try_recv() {
-        if let CatalogEvent::PendingConfirmation { ns, count } = ev {
+        // ## m4-t33b-carries (named exception; T24 carry): the event names a few of them.
+        if let CatalogEvent::PendingConfirmation {
+            ns,
+            count,
+            sample: s,
+        } = ev
+        {
             announced = Some((ns, count));
+            sample = s.iter().map(|k| k.name().to_string()).collect::<Vec<_>>();
         }
     }
     assert_eq!(announced, Some((n.clone(), 25)));
+    assert_eq!(
+        sample.len(),
+        hacivat_meta::snapshot::PENDING_SAMPLE,
+        "{sample:?}"
+    );
+    let vanished: Vec<String> = (5..30).map(|i| format!("t{i}")).collect();
+    assert!(sample.iter().all(|s| vanished.contains(s)), "{sample:?}");
+    let mut sorted = sample.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted, sample, "distinct, in name order");
     // "Keep cached": the vanished tables stay; the namespace is fresh again.
     bounded(r.handle.confirm_pending(n.clone(), false))
         .await

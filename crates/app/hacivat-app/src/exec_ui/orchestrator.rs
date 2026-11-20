@@ -1474,6 +1474,18 @@ fn reason_args(r: &GateReason) -> Vec<(&'static str, LogArg)> {
         .collect()
 }
 
+// ## m4-t33b-carries (named exception; the T27 carry, mock 9)
+/// Logs note `id` (a Fluent message) with `args` on console `console`'s output (the explorer's
+/// "Explorer refreshed N objects in {schema}").
+pub(crate) fn log_note(
+    console: ConsoleId,
+    id: &'static str,
+    args: Vec<(&'static str, LogArg)>,
+    cx: &mut App,
+) {
+    log_line(console, id, args, false, None, cx);
+}
+
 /// Logs a line of the run UI on console `console` (`warn`: a refusal).
 fn log_line(
     console: ConsoleId,

@@ -409,6 +409,18 @@ fn user_refresh_mass_drop_asks_and_cancel_keeps_cache(cx: &mut TestAppContext) {
         "25 objects in public are no longer visible"
     );
     assert!(layer_ids(vcx).contains(&"dialog"));
+    // ## m4-t33b-carries (T24 carry, mock 8): five of them by name, in name order, then the
+    // rest counted.
+    let names: Vec<String> = registry_frame(vcx)
+        .into_iter()
+        .filter(|r| r.path.ends_with("#mass-drop-name"))
+        .map(|r| strip(&r.text))
+        .collect();
+    assert_eq!(names, ["t05", "t06", "t07", "t08", "t09"]);
+    assert_eq!(
+        text_of(vcx, "mass-drop-more").map(|t| strip(&t)).as_deref(),
+        Some("and 20 more")
+    );
     // Escape answers Keep cached: nothing is removed.
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
