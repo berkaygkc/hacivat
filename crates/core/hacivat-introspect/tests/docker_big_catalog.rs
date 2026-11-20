@@ -19,6 +19,7 @@ mod common;
 
 use std::time::Instant;
 
+use common::g4::fact;
 use common::pg::{Pg, admin};
 use hacivat_introspect::engine::{NsRole, Thresholds, auto_level, levels};
 use hacivat_introspect::pack::Mode;
@@ -74,7 +75,7 @@ fn tables(ns: &NamespaceSnapshot) -> usize {
 
 fn thresholds(t: Thresholds) -> String {
     format!(
-        "Sources<={} Structure<={}",
+        "Sources<={},Structure<={}",
         t.sources_max.map_or("never".to_string(), |s| s.to_string()),
         t.structure_max
     )
@@ -147,15 +148,26 @@ async fn big_catalog_cold_times_recorded_and_cache_artifact_written() {
     assert_eq!(loaded.namespaces[0].column_count(), BIG_COLUMNS as usize);
     let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
 
-    eprintln!(
-        "HV-FACT g1 hv_m4_big pg17 {} tables {} columns (debug build; fresh connection per level, Structure first, server buffers warm): cold Structure {structure_ms} ms, cold Names {names_ms} ms; \
-         D-038 current [{}] -> {:?}, other [{}] -> {:?}; cache saved in {save_ms} ms, {bytes} bytes at {}",
-        BIG_TABLES,
-        BIG_COLUMNS,
+    // ## m4-t33c-facts (named exception): one `key=value` line written straight to stdout
+    // (`common::g4::fact`), so a passing run's CI log holds it too (libtest captures the
+    // `print!` family, `eprintln!` included). The same quantities as before, stable keys.
+    fact(&format!(
+        "g1 target={} fixture={} tables={BIG_TABLES} columns={BIG_COLUMNS} build={} \
+         connection=fresh-per-level order=Structure,Names server_buffers=warm \
+         structure_cold_ms={structure_ms} names_cold_ms={names_ms} \
+         d038_current_thresholds={} d038_current_level={:?} \
+         d038_other_thresholds={} d038_other_level={:?} \
+         cache_save_ms={save_ms} cache_bytes={bytes} cache_artifact={ARTIFACT}",
+        t.id,
+        big_catalog::SCHEMA,
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
         thresholds(levels::CURRENT),
         auto_level(NsRole::Current, major),
         thresholds(levels::OTHER),
         auto_level(NsRole::Other, major),
-        path.display()
-    );
+    ));
 }

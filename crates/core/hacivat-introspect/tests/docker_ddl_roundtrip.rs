@@ -8,9 +8,18 @@
 //!
 //! Round trips run per object, in the seed's creation order: whole-schema scripts are ordered
 //! by kind and then name, not by dependency (T19 carry; the dependency order is M7's).
-//! PostgreSQL views, routines and triggers are not in the PostgreSQL seed: M4 keeps no
-//! PostgreSQL source text (its `Sources` facet is not implemented), so their script is
-//! `NotLoaded` by design; the MySQL-family and SQLite seeds cover server-text kinds.
+//!
+//! ## m4-t33c-g5 (T33a row 22, T31 carry)
+//! Every seed now holds a view, a routine and a trigger where the engine has them. PostgreSQL
+//! reads definitions as a level, not a facet: its passes run at `Level::Sources` inside
+//! `engine::facet::capturing` (T15b's source store), and the texts they hash back the
+//! producer's `DdlSources::text`. The PostgreSQL seed adds a trigger function and a trigger on
+//! `orders` (rendered in the table's block), a view, a SQL function with a comment and, on 11
+//! and later, a procedure. The MySQL-family seed already holds a view, a function and a
+//! trigger. A kind an engine does not have, or one a target cannot take, is recorded as
+//! `HV-FACT g5 roundtrip-skip target=… kind=… reason=…`; each round trip also records
+//! `HV-FACT g5 roundtrip-kinds target=… kinds=… triggers=…` and asserts that every trigger of
+//! the model is in the rendered statements.
 //!
 //! `pg_rendered_scripts_parse` is the PostgreSQL parse check of every PostgreSQL golden file
 //! of `hacivat-ddl` (byte-equal to its render, `golden_stability.rs`): the server parses a whole simple-query string before it runs any of it, so the first error of
@@ -45,6 +54,7 @@ use hacivat_driver::{
     Driver, DriverConnect, DriverRegistry, Endpoint, EngineCatalog, InsecureAuth,
 };
 use hacivat_introspect::Introspector;
+use hacivat_introspect::engine::facet::capturing;
 use hacivat_introspect::filter::{CompiledFilter, FilterRole, parse_filter};
 use hacivat_introspect::introspector::FacetRows;
 use hacivat_introspect::mysql::MySqlIntrospector;
@@ -102,6 +112,16 @@ impl Texts {
         for (k, text) in rows {
             t.by_ref.insert(SourceRef::of(&text).hash, text.clone());
             t.by_key.push((k, text));
+        }
+        t
+    }
+
+    // ## m4-t33c-g5
+    /// The texts a pass hashed (`engine::facet::capturing`), by `SourceRef` only (PostgreSQL).
+    fn of_refs(rows: Vec<(SourceRef, Name)>) -> Texts {
+        let mut t = Texts::default();
+        for (r, text) in rows {
+            t.by_ref.insert(r.hash, text);
         }
         t
     }
@@ -287,6 +307,40 @@ fn assert_round_trip(
         first.1.len(),
         ca.len()
     ));
+    // ## m4-t33c-g5: every trigger of the model is in the rendered statements (a table's block
+    // carries its triggers; none is dropped silently), and the kinds covered are recorded.
+    let triggers = keys_of(&first.0.ns, &[ObjectKind::Trigger]);
+    for k in &triggers {
+        let name = k.path.last().map(|p| p.to_string()).unwrap_or_default();
+        // `CREATE [OR REPLACE] TRIGGER <name>` (PostgreSQL, SQLite) or `` TRIGGER `<name>` ``
+        // (MySQL-family `SHOW CREATE TRIGGER`).
+        let (bare, quoted) = (format!("TRIGGER {name} "), format!("TRIGGER `{name}` "));
+        assert!(
+            first.1.iter().any(|(_, s)| s
+                .stmts
+                .iter()
+                .any(|st| st.text.contains(&bare) || st.text.contains(&quoted))),
+            "{label}: trigger {name} is in no rendered statement"
+        );
+    }
+    let kinds: std::collections::BTreeSet<&str> = first
+        .1
+        .iter()
+        .filter_map(|(what, _)| what.split(' ').next())
+        .collect();
+    fact(&format!(
+        "g5 roundtrip-kinds target={label} kinds={} triggers={}",
+        kinds.into_iter().collect::<Vec<_>>().join(","),
+        triggers.len()
+    ));
+}
+
+/// `HV-FACT g5 roundtrip-skip target=… kind=… reason=…`: a kind left out of a target's round
+/// trip, and why.
+fn skip(target: &str, kind: &str, reason: &str) {
+    fact(&format!(
+        "g5 roundtrip-skip target={target} kind={kind} reason={reason}"
+    ));
 }
 
 // ---- PostgreSQL -------------------------------------------------------------------------------
@@ -314,37 +368,84 @@ CREATE INDEX orders_customer_idx ON {s}.orders (customer_id, placed_at DESC);
 CREATE INDEX orders_note_lower ON {s}.orders (lower(note)) WHERE note IS NOT NULL;
 "#;
 
-const PG_OBJECTS: &[(ObjectKind, &str)] = &[
-    (ObjectKind::EnumType, "mood"),
-    (ObjectKind::Sequence, "invoice_no"),
-    (ObjectKind::Table, "customers"),
-    (ObjectKind::Table, "orders"),
-];
+// ## m4-t33c-g5: the server-text kinds (T33a row 22). The trigger function comes first, so the
+// `orders` block (which carries its trigger) finds it on re-apply; the view and the SQL
+// function (whose body PostgreSQL checks at creation) come after `orders`.
+const PG_SEED_SOURCES: &str = r#"
+CREATE FUNCTION {s}.orders_touch_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.note := coalesce(NEW.note, '');
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER orders_touch BEFORE INSERT OR UPDATE ON {s}.orders
+    FOR EACH ROW EXECUTE FUNCTION {s}.orders_touch_fn();
+CREATE VIEW {s}.v_open AS SELECT id, customer_id, note FROM {s}.orders WHERE note IS NOT NULL;
+CREATE FUNCTION {s}.f_total(c bigint) RETURNS bigint LANGUAGE sql STABLE
+    AS $$ SELECT count(*) FROM {s}.orders WHERE customer_id = c $$;
+COMMENT ON FUNCTION {s}.f_total(bigint) IS 'Orders of one customer';
+"#;
+
+/// A procedure (PostgreSQL 11 and later: `CREATE PROCEDURE`, `prokind = 'p'`).
+const PG_SEED_PROCEDURE: &str = r#"
+CREATE PROCEDURE {s}.p_purge(keep_days integer) LANGUAGE plpgsql AS $$
+BEGIN
+    DELETE FROM {s}.orders WHERE placed_at < now() - make_interval(days => keep_days);
+END
+$$;
+"#;
+
+/// The first `server_version_num` with `CREATE PROCEDURE`.
+const PG_PROCEDURE_MIN: u32 = 110_000;
+
+/// The PostgreSQL objects, in creation order; the procedure only from 11 (`with_procedure`).
+fn pg_objects(with_procedure: bool) -> Vec<(ObjectKind, &'static str)> {
+    let mut out = vec![
+        (ObjectKind::EnumType, "mood"),
+        (ObjectKind::Sequence, "invoice_no"),
+        (ObjectKind::Routine, "orders_touch_fn"),
+        (ObjectKind::Table, "customers"),
+        (ObjectKind::Table, "orders"),
+        (ObjectKind::View, "v_open"),
+        (ObjectKind::Routine, "f_total"),
+    ];
+    if with_procedure {
+        out.push((ObjectKind::Procedure, "p_purge"));
+    }
+    out
+}
 
 async fn pg_load(pg: &Pg, schema: &str) -> Loaded {
     let ns = NsKey::schema([pg.t.database.as_str(), schema]);
     let mut c = pg.meta().await;
-    let p = pass::introspect(
+    // ## m4-t33c-g5: definitions are a level on PostgreSQL; the pass's hashed texts are
+    // captured as the engine captures them (T15b) and back `DdlSources::text`.
+    let (p, texts) = capturing(pass::introspect(
         &mut c,
         &ns,
         PassOpts {
             mode: Mode::Full,
-            level: Level::Structure,
+            level: Level::Sources,
             ..PassOpts::default()
         },
         &CancellationToken::new(),
-    )
-    .await
-    .unwrap_or_else(|e| panic!("{}: the pass: {e:?}", pg.t.id));
+    ))
+    .await;
+    let p = p.unwrap_or_else(|e| panic!("{}: the pass: {e:?}", pg.t.id));
     let facts = p
         .report
         .facts
         .clone()
         .unwrap_or_else(|| panic!("{}: the pass read no server facts", pg.t.id));
+    assert!(
+        !texts.is_empty(),
+        "{}: a Sources pass captured no definition text",
+        pg.t.id
+    );
     Loaded {
         ns: merged(&ns, DbmsKind::Postgres, FoldRule::Exact, p.result),
         facts,
-        texts: Texts::default(),
+        texts: Texts::of_refs(texts),
     }
 }
 
@@ -365,17 +466,27 @@ async fn pg_roundtrip_apply_introspect_render_is_identical() {
             names: vec![schema.clone()],
         };
         let mut a = admin(&t).await;
-        a.batch(&format!(
-            "CREATE SCHEMA {schema};{}",
-            PG_SEED.replace("{s}", &schema)
-        ))
-        .await;
+        // ## m4-t33c-g5: views, routines and triggers too; the procedure from 11.
+        let num: u32 = a
+            .scalar("SELECT current_setting('server_version_num')")
+            .await
+            .parse()
+            .expect("server_version_num");
+        let with_procedure = num >= PG_PROCEDURE_MIN;
+        let mut seed = format!("CREATE SCHEMA {schema};{PG_SEED}{PG_SEED_SOURCES}");
+        if with_procedure {
+            seed.push_str(PG_SEED_PROCEDURE);
+        } else {
+            skip(&t.id, "Procedure", "server-below-11");
+        }
+        a.batch(&seed.replace("{s}", &schema)).await;
         a.close().await;
         let pg = Pg::connect(&t).await;
         let db = pg.t.database.clone();
+        let objects = pg_objects(with_procedure);
 
         let first = pg_load(&pg, &schema).await;
-        let scripts = render_each(&first, Some(&db), &schema, PG_OBJECTS, &pg_opts());
+        let scripts = render_each(&first, Some(&db), &schema, &objects, &pg_opts());
 
         let mut a = admin(&t).await;
         a.batch(&format!(
@@ -390,7 +501,7 @@ async fn pg_roundtrip_apply_introspect_render_is_identical() {
         a.close().await;
 
         let second = pg_load(&pg, &schema).await;
-        let again = render_each(&second, Some(&db), &schema, PG_OBJECTS, &pg_opts());
+        let again = render_each(&second, Some(&db), &schema, &objects, &pg_opts());
         assert_round_trip(&t.id, (&first, &scripts), (&second, &again));
         pg.shutdown().await;
     }
@@ -825,4 +936,6 @@ async fn sqlite_roundtrip() {
     let second = lite_load(&b).await;
     let again = render_each(&second, None, "main", LITE_OBJECTS, &opts);
     assert_round_trip("sqlite", (&first, &scripts), (&second, &again));
+    // ## m4-t33c-g5: SQLite has no stored routines.
+    skip("sqlite", "Routine", "engine-has-no-routines");
 }

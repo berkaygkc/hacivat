@@ -23,6 +23,20 @@ use hacivat_meta::view::{Lookup, ModelView, SnapshotView};
 use hacivat_proto::DbmsKind;
 use sql_catalog::view::CatalogView;
 
+// ## m4-t33c-facts (named exception)
+/// Prints one `HV-FACT …` line (`format!` arguments) straight to the process's stdout, on one
+/// line: libtest captures only the `print!` family, so the line reaches the CI log of a passing
+/// test too (R-W3-14). Lines are catalog facts, never a secret.
+macro_rules! fact {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let line = format!($($arg)*).replace('\n', " ");
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+    }};
+}
+
 fn name(s: &str) -> Name {
     Arc::from(s)
 }
@@ -349,7 +363,7 @@ fn h5_version_fuzz_never_makes_an_uncertain_miss_a_fact() {
             }
         }
     }
-    println!("HV-FACT t26-review pg facts: {facts:?}");
+    fact!("HV-FACT t26-review pg facts: {facts:?}");
     for v in &facts {
         let lower = v.to_ascii_lowercase();
         assert!(
@@ -364,7 +378,7 @@ fn h5_version_fuzz_never_makes_an_uncertain_miss_a_fact() {
             "another major counted as a fact: {v:?}"
         );
     }
-    println!("HV-FACT t26-review pg facts: {facts:?}");
+    fact!("HV-FACT t26-review pg facts: {facts:?}");
     let my = DbmsKind::MySql;
     for v in [
         "8.4.14", "8.4.99", "8.5.0", "9.0.0", "8.4", "8", "8.4.x", "", "8.4.13a",
@@ -443,7 +457,7 @@ fn h6_facts_publish_and_lookups_never_see_a_mismatched_layer() {
         None,
         None,
     ));
-    println!(
+    fact!(
         "HV-FACT t26-review race reads={total} pg16 pg_stat_checkpointer={:?}",
         matches!(
             view.lookup(
@@ -470,7 +484,7 @@ fn h7_first_decode_cost() {
         let first = t.elapsed();
         let t = std::time::Instant::now();
         let _ = set.for_server(d, v);
-        println!(
+        fact!(
             "HV-FACT t26-review decode {d:?} {v}: first={first:?} again={:?}",
             t.elapsed()
         );
@@ -504,7 +518,7 @@ fn h8_first_rekey_cost() {
         let first = t.elapsed();
         let t = std::time::Instant::now();
         let hit2 = view.lookup(&parts("information_schema.tables"), KindGroup::Relations);
-        println!(
+        fact!(
             "HV-FACT t26-review rekey db={db} pg_catalog first={first:?} ({}) information_schema first={:?} ({})",
             matches!(hit, Lookup::Found(_)),
             t.elapsed(),

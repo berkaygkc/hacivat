@@ -20,6 +20,20 @@ use hacivat_proto::DbmsKind;
 use sql_catalog::types::RelRef;
 use sql_catalog::view::CatalogView;
 
+// ## m4-t33c-facts (named exception)
+/// Prints one `HV-FACT …` line (`format!` arguments) straight to the process's stdout, on one
+/// line: libtest captures only the `print!` family, so the line reaches the CI log of a passing
+/// test too (R-W3-14). Lines are catalog facts, never a secret.
+macro_rules! fact {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let line = format!($($arg)*).replace('\n', " ");
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+    }};
+}
+
 fn name(s: &str) -> Name {
     Arc::from(s)
 }
@@ -126,7 +140,7 @@ fn r1_pg_miss_is_a_fact_only_when_extras_proven_false() {
             })),
         ));
     }
-    println!("HV-FACT rr1 {got:#?}");
+    fact!("HV-FACT rr1 {got:#?}");
     assert_eq!(
         got,
         [
@@ -186,7 +200,7 @@ fn r2_mysql_exact_release() {
             kind(&rel)
         ));
     }
-    println!("HV-FACT rr1 mysql settings()={}", kind(&v.settings()));
+    fact!("HV-FACT rr1 mysql settings()={}", kind(&v.settings()));
     for var in [
         "rpl_semi_sync_source_enabled",
         "group_replication_group_name",

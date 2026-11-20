@@ -20,6 +20,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+// ## m4-t33c-facts (named exception): facts go straight to stdout (`common::g4::fact`), so they
+// reach the CI log of a passing run (libtest captures `println!`).
+use common::g4::fact;
 use common::pg::Pg;
 use hacivat_introspect::pack::Mode;
 use hacivat_introspect::pg::pass::{self, PassOpts};
@@ -52,7 +55,7 @@ async fn pg13_introspects_system_schemas_live_at_names_level() {
         return;
     }
     let Some(t) = require_target("pg13") else {
-        println!("HV-FACT t26 pg13 target absent: skipped");
+        fact("t26 pg13 target absent: skipped");
         return;
     };
     // No snapshot for 13 (exact selection): the set gives no system layer.
@@ -129,10 +132,10 @@ async fn pg13_introspects_system_schemas_live_at_names_level() {
         view.lookup(&parts("pg_catalog.hv_t26_absent"), KindGroup::Relations),
         Lookup::Unknown(_)
     ));
-    println!(
-        "HV-FACT t26 pg13 live system read at Names: pg_catalog objects={}",
+    fact(&format!(
+        "t26 pg13 live system read at Names: pg_catalog objects={}",
         h.ns.len()
-    );
+    ));
 }
 
 // ## m4-t26-overlays (ruling R-W5-4): the layers reach the catalogs the hub makes.
@@ -360,10 +363,10 @@ async fn pg_server_facts_read_the_initdb_only_fact() {
             facts.version
         );
         assert_eq!(facts.system_schema_extras, Some(false), "{id}");
-        println!(
-            "HV-FACT t26 {id} version={} system_schema_extras={:?}",
+        fact(&format!(
+            "t26 {id} version={} system_schema_extras={:?}",
             facts.version, facts.system_schema_extras
-        );
+        ));
     }
 }
 
@@ -499,7 +502,7 @@ async fn pg13_engine_reads_system_schemas_live_at_names_level() {
         return;
     }
     let Some(t) = require_target("pg13") else {
-        println!("HV-FACT g3 pg13 target absent: skipped");
+        fact("g3 pg13 target absent: skipped");
         return;
     };
     let pg = Pg::connect(&t).await;
@@ -557,8 +560,8 @@ async fn pg13_engine_reads_system_schemas_live_at_names_level() {
     assert!(h.ns.root().flags().contains(ObjFlags::SYSTEM));
     let miss = view.lookup(&parts("pg_catalog.hv_t30_absent"), KindGroup::Relations);
     assert!(!matches!(miss, Lookup::Found(_)), "{miss:?}");
-    println!(
-        "HV-FACT g3 pg13 engine live system read: version={} level={level:?} \
+    fact(&format!(
+        "g3 pg13 engine live system read: version={} level={level:?} \
          pg_catalog_objects={} system_flag={} miss={}",
         snap.server.version,
         h.ns.len(),
@@ -568,7 +571,7 @@ async fn pg13_engine_reads_system_schemas_live_at_names_level() {
             Lookup::Unknown(_) => "Unknown",
             Lookup::Found(_) => "Found",
         }
-    );
+    ));
     drop(view);
     drop(snap);
     drop(cat);
