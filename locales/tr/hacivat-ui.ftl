@@ -3619,3 +3619,19 @@ hv-explorer-open-data-other-db = Bu bağlantının konsolları { $current } veri
 hv-explorer-open-data-db-unknown = Hacivat bu bağlantının konsollarının hangi veritabanını kullandığını bilemiyor; bu yüzden Veriyi aç { $database } verisini açmadı. Bağlantının veritabanını ayarlayın ya da önce bir konsol açın.
 # Review: PO
 hv-explorer-hide-refused = { $name } benzeri nesneler gizlenemiyor: ad bir görünüm filtresi olarak yazılamıyor.
+
+## m4-t25-ddl-view
+# Surface 10 (DDL view). The toolbar's read-only chip (never hides).
+# Review: PO
+hv-ddl-view-read-only = salt okunur
+# Surface 10 (DDL view). The definition could not be read (not loaded, or the login can't read it).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-ddl-view-not-loaded = Hacivat { $name } tanımını okuyamadı.
+# Surface 10 (DDL view). Under hv-ddl-view-not-loaded.
+# Review: PO
+hv-ddl-view-not-loaded-body = Yenile, tanımı sunucudan yeniden okur.
+# Surface 11 (Stale object). The "no longer exists" notice's button.
+# Review: PO
+hv-ddl-view-close-tab = Sekmeyi kapat

@@ -3997,3 +3997,15 @@ hv-explorer-open-data-db-unknown = Hacivat can't tell which database this connec
 # Variables:
 #   $name (String) - the object's name, verbatim, e.g. "yedek_2019".
 hv-explorer-hide-refused = Objects like { $name } can't be hidden: the name can't be written as a view filter.
+
+## m4-t25-ddl-view
+# Surface 10 (DDL view). The toolbar's read-only chip (never hides).
+hv-ddl-view-read-only = read-only
+# Surface 10 (DDL view). The definition could not be read (not loaded, or the login can't read it).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-not-loaded = Hacivat couldn't read the definition of { $name }.
+# Surface 10 (DDL view). Under hv-ddl-view-not-loaded.
+hv-ddl-view-not-loaded-body = Refresh reads it from the server again.
+# Surface 11 (Stale object). The "no longer exists" notice's button.
+hv-ddl-view-close-tab = Close tab

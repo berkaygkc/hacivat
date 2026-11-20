@@ -1187,3 +1187,50 @@ The M2a connection list became the database explorer tree in place (R-M4-18): `h
     exception in `filter.rs`). The adapter compiles a view filter per item when the whole
     does not parse, so a bad item hides nothing and never undoes the others; "Hide objects
     like this" refuses, with a notice, an item that does not parse.
+
+## m4-t25 — DDL view
+
+- *Decision.* The DDL view tab (`ddl_view::view::DdlView`, design/m4-explorer surfaces 10
+  and 11) shows exactly `hacivat_ddl::produce::create_script_with` for one object, the strip's
+  options (`GenOptions` from `ProfileUserData::ddl_view`, remembered per profile through
+  `explorer::userdata`) and the profile's current schema (the user's focused console's
+  session; none qualifies every name). The text sits in a read-only `EditorView`
+  (`EditorConfig::read_only`); nothing localizes or edits it. Copy puts the raw text (`\n`) on
+  the clipboard; Open in console opens a console on the profile with the text inserted, not
+  run (`console::open_with_text(…, run: false)`; a database-level engine passes the object's
+  database, which it refuses with a notice when the console is on another).
+- *The catalog seam.* `ddl_view::source::DdlCatalog` is what the view reads and asks: the
+  snapshot (synchronously, as the explorer reads it) and `elevate`, `check_state`, `refresh`,
+  `load_facet` as tickets awaited on a GPUI foreground task (spec §5.4 rule 2; the I/O runs on
+  the `CoreRuntime`). The app's is `EngineCatalog` over the live host's `IntroHandle` (a
+  profile whose catalog is not open answers at once with `NotImplemented`); tests and Task
+  15b install their own with `set_catalog_provider` (plan Task 25: "a fake `IntroHandle`").
+  At this base no source text and no facet value has a home in the model (`SourceRef` is a
+  hash; `load_facet` is Task 15b's stub), so `EngineCatalog::sources` answers "not loaded":
+  views, routines, triggers and server text show "couldn't read the definition", grants carry
+  `ddl-grants-not-loaded` (F31).
+- *Loading.* An object whose definition is the server's text (R-M4-24) is read at `Sources`
+  first when its namespace holds less (one fragment, `elevate`); a definition still missing is
+  asked for once as the `Sources` facet; the grants facet is asked for once while Grants is
+  on. Each wait shows "Reading the definition of …".
+- *Freshness (surface 11).* When a script is first shown the view asks `check_state`. The
+  ticket answers a generation only, so the verdict comes from the catalog: gone from a loaded
+  namespace → "no longer exists" (the last text stays, Close tab); the object's namespace
+  republished since the check began with a different script → "changed on the server"
+  (Reload); a failed check or a stale namespace → "couldn't check" (Reload); else current. A
+  later catalog whose script differs marks the view changed; it never reloads by itself.
+  Reload and Refresh re-read the object (`Target::Objects`, `Trigger::User`). Server text is
+  held to the same rule (T19 review m6: `DdlSources` has no load state). *Gap:* a check
+  answered `Unknown` on a namespace that is not stale reads as current until the ticket (or
+  the snapshot) carries the per-key verdict (Task 22 / M5).
+- *Options per engine.* "Definitions provided by server" is hidden on PostgreSQL, shown on
+  MySQL/MariaDB, and shown checked and fixed on SQLite (its tables always show
+  `sqlite_schema.sql`, F10; Task 19 ignores the flag there, the T7 carry M8). Qualification
+  and Constraints hide while the shown text is the server's (NOTES ruling 16). Grants: PG and
+  MySQL/MariaDB; Owner: PG's owner and MySQL's definer.
+- *Tabs.* The object table keeps a handle per open object and drops it when the view is
+  released (the tab closed, T1b carry m3); an object with a server id renamed on the server
+  keeps its handle and the tab title follows the new name. `ddl_view.copy` copies the active
+  DDL view's text (palette only, R-W0-6). `explorer.view_ddl` (F12, the node menu) opens the
+  cursor object's view, a column's table's. Provided toolbar actions
+  (`ActionSurface::DdlViewToolbar`) are buttons in the toolbar.

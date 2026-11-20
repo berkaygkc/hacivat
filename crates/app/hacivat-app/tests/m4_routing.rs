@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::time::Duration;
 
 use gpui::{TestAppContext, VisualTestContext};
-use hacivat_app::ddl_view::{self, DDL_VIEW_CONTEXT, DdlViewError};
+use hacivat_app::ddl_view::{self, DDL_VIEW_CONTEXT};
 use hacivat_app::explorer::{
     self, ActionSlot, ActionSurface, ExplorerActionProvider, ExplorerModel, NodeRef,
     ProvidedAction, RevealOutcome, contributors, database_rows, open_data, provided_actions,
@@ -448,7 +448,9 @@ fn stub_count_is_n(cx: &mut TestAppContext) {
     // `explorer.set_level.*` commands.
     // ## m4-t24-live (named exception): Task 24 filled copy qualified name, collapse all, open
     // data, refresh and expand all children.
-    assert_eq!(stubs.len(), 3);
+    // ## m4-t25-ddl-view (named exception): Task 25 filled `explorer.view_ddl` and
+    // `ddl_view.copy`.
+    assert_eq!(stubs.len(), 1);
     let (enabled, listed) = vcx.cx.read(|cx| {
         let reg = cx.global::<ActionRegistry>();
         let enabled: Vec<&'static str> = reg
@@ -557,7 +559,7 @@ fn table(schema: &str, name: &str) -> ObjectKey {
 
 /// The open-data handler, `reveal` and `open_ddl_view` are seams typed on `hacivat_meta`:
 /// unset, unavailable and not yet until Tasks 24 and 25 (no stub claims a fact), and the handler
-/// is replaceable (M6).
+/// is replaceable (M6). ## m4-t25-ddl-view (named exception): `open_ddl_view` is filled.
 #[gpui::test]
 fn meta_typed_seams_answer_nothing_until_their_tasks(cx: &mut TestAppContext) {
     let vcx = shell(cx, "en");
@@ -571,8 +573,16 @@ fn meta_typed_seams_answer_nothing_until_their_tasks(cx: &mut TestAppContext) {
             open_data(profile, key.clone(), window, cx),
         )
     });
-    assert_eq!(opened, Err(DdlViewError::NotYet));
-    assert_eq!(tab_count(vcx), 1, "open_ddl_view opened a tab");
+    // ## m4-t25-ddl-view (named exception): Task 25 opens the object's DDL view tab (for a
+    // profile the app does not know it shows "not loaded", never a text).
+    let opened = opened.expect("a DDL view tab");
+    assert_eq!(tab_count(vcx), 2, "open_ddl_view opened one tab");
+    let kind = vcx.cx.read(|cx| ws.read(cx).tab_kind(opened));
+    assert!(matches!(kind, Some(TabKind::DdlView { profile: p, .. }) if p == profile));
+    vcx.run_until_parked();
+    let shown = vcx.cx.read(|cx| ddl_view::state_of(profile, &key, cx));
+    assert_eq!(shown.and_then(|s| s.text), None);
+    assert!(run(vcx, "workspace.close_tab"));
     assert_eq!(revealed, RevealOutcome::Unavailable);
     // ## m4-t24-live (named exception): Task 24 installs the default handler; for a profile
     // the app does not know it opens nothing.

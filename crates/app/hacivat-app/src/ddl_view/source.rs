@@ -1,0 +1,138 @@
+//! What a DDL view reads and asks of a profile's catalog ([`DdlCatalog`]).
+//!
+//! ## m4-t25-ddl-view
+//!
+//! The app's catalog is the profile's engine (R-M4-31: `CatalogHub` through the live host's
+//! `IntroHandle`); [`EngineCatalog`] is it. Every request answers a `RefreshTicket` that the
+//! view awaits on a GPUI foreground task (a `tokio::sync` channel; the I/O runs on the
+//! `CoreRuntime`), and the snapshot is read synchronously, as the explorer reads it (spec §5.4
+//! rule 2). A profile whose catalog is not open answers every request at once with
+//! `IntroError::NotImplemented`, as a stub does: the view then says it could not check or read.
+//!
+//! **A seam for Tasks 15b and 22** (plan Task 25: "the tests use a fake `IntroHandle`"). At this
+//! base `IntroHandle::load_facet` answers `NotImplemented` (Task 15b), and the model keeps no
+//! source text and no facet value anywhere (`SourceRef` is a hash; Task 15b adds the facet side
+//! table), so [`EngineCatalog::sources`] answers "not loaded" for every text and facet: a view,
+//! a routine, a trigger or server text is `DdlError::NotLoaded` and grants carry
+//! `ddl-grants-not-loaded` (F31: never a script that silently lacks part of the object). Tests,
+//! and the tasks that fill these, install their own catalog with [`set_catalog_provider`].
+
+use std::rc::Rc;
+use std::sync::Arc;
+
+use hacivat_ddl::produce::{DdlSources, NoSources};
+use hacivat_introspect::IntroHandle;
+use hacivat_introspect::ddl_effects::Target;
+use hacivat_introspect::ticket::RefreshTicket;
+use hacivat_meta::merge::Trigger;
+use hacivat_meta::props::FacetKind;
+use hacivat_meta::{CatalogSnapshot, Level, ObjectKey};
+use hacivat_proto::ProfileId;
+use hacivat_ui_core::gpui_surface::{App, Global};
+
+use crate::explorer::{adapter, live};
+
+/// One profile's catalog as a DDL view uses it. Requests are made on the UI thread and never
+/// block it: each answers a ticket at once.
+pub trait DdlCatalog {
+    /// The newest snapshot (`None`: the profile has no catalog yet).
+    fn snapshot(&self, cx: &App) -> Option<Arc<CatalogSnapshot>>;
+    /// Reads `key` at `level` (Task 15's `elevate`: one fragment of that object).
+    fn elevate(&self, key: ObjectKey, level: Level, cx: &App) -> RefreshTicket;
+    /// Checks `key` against the server and re-reads it when it changed or was dropped
+    /// (HV-INTRO-15; Task 22 fills the verdicts).
+    fn check_state(&self, key: ObjectKey, cx: &App) -> RefreshTicket;
+    /// Re-reads `key` from the server (Refresh and Reload; `Trigger::User`).
+    fn refresh(&self, key: ObjectKey, cx: &App) -> RefreshTicket;
+    /// Loads facet `kind` of `key` (R-M4-30; Task 15b).
+    fn load_facet(&self, key: ObjectKey, kind: FacetKind, cx: &App) -> RefreshTicket;
+    /// The source texts and facets loaded so far.
+    fn sources(&self, cx: &App) -> Rc<dyn DdlSources>;
+}
+
+/// Makes the catalog of a profile (`None`: none).
+pub type CatalogProvider = Rc<dyn Fn(ProfileId, &App) -> Option<Rc<dyn DdlCatalog>>>;
+
+#[derive(Default)]
+struct Provider(Option<CatalogProvider>);
+
+impl Global for Provider {}
+
+/// Replaces how DDL views find a profile's catalog (tests; Task 15b's facet store). Views
+/// opened later use it.
+pub fn set_catalog_provider(provider: CatalogProvider, cx: &mut App) {
+    cx.set_global(Provider(Some(provider)));
+}
+
+/// The catalog of `profile`: the installed provider's, else the profile's engine.
+pub fn catalog_for(profile: ProfileId, cx: &App) -> Option<Rc<dyn DdlCatalog>> {
+    if let Some(p) = cx.try_global::<Provider>().and_then(|p| p.0.clone()) {
+        return p(profile, cx);
+    }
+    Some(Rc::new(EngineCatalog { profile }))
+}
+
+/// The profile's engine through the live host (Task 24's `CatalogHost`).
+pub struct EngineCatalog {
+    pub profile: ProfileId,
+}
+
+impl EngineCatalog {
+    fn handle(&self, cx: &App) -> Option<IntroHandle> {
+        live::handle(self.profile, cx)
+    }
+
+    fn ask(&self, cx: &App, f: impl FnOnce(IntroHandle) -> RefreshTicket) -> RefreshTicket {
+        match self.handle(cx) {
+            Some(h) => f(h),
+            // Not open: answered at once, as a stub answers.
+            None => RefreshTicket::not_implemented(),
+        }
+    }
+}
+
+impl DdlCatalog for EngineCatalog {
+    fn snapshot(&self, cx: &App) -> Option<Arc<CatalogSnapshot>> {
+        // The engine's newest generation (the explorer's copy may trail it by a frame), else
+        // what the explorer shows (the cached catalog of a profile that is not open).
+        self.handle(cx)
+            .map(|h| h.catalog().current())
+            .filter(|s| s.generation > 0)
+            .or_else(|| adapter::catalog_of(self.profile, cx))
+    }
+
+    fn elevate(&self, key: ObjectKey, level: Level, cx: &App) -> RefreshTicket {
+        self.ask(cx, |h| h.elevate(key, level))
+    }
+
+    fn check_state(&self, key: ObjectKey, cx: &App) -> RefreshTicket {
+        self.ask(cx, |h| h.check_state(vec![key]))
+    }
+
+    fn refresh(&self, key: ObjectKey, cx: &App) -> RefreshTicket {
+        let ns = self
+            .snapshot(cx)
+            .and_then(|s| s.find(&key).map(|o| o.ns.key().clone()));
+        let Some(ns) = ns else {
+            return RefreshTicket::not_implemented();
+        };
+        self.ask(cx, |h| {
+            h.refresh(
+                Target::Objects {
+                    ns,
+                    keys: vec![key],
+                },
+                Trigger::User,
+            )
+        })
+    }
+
+    fn load_facet(&self, key: ObjectKey, kind: FacetKind, cx: &App) -> RefreshTicket {
+        self.ask(cx, |h| h.load_facet(vec![key], kind))
+    }
+
+    fn sources(&self, _: &App) -> Rc<dyn DdlSources> {
+        // No text and no facet value has a home at this base (Task 15b).
+        Rc::new(NoSources)
+    }
+}

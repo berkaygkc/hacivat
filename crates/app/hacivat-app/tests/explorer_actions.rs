@@ -417,10 +417,12 @@ fn modify_is_disabled_with_a_tooltip(cx: &mut TestAppContext) {
         .cx
         .read(|cx| modify.hint.as_ref().map(|h| strip(&h(cx))));
     assert_eq!(hint.as_deref(), Some("Arrives in a later version"));
+    // ## m4-t25-ddl-view (named exception): View DDL is filled, so the menu shows it.
     assert_eq!(
         menu_lines(vcx, &items),
         [
             "Open data",
+            "View DDL",
             "—",
             "Copy name",
             "Copy qualified name",
@@ -467,11 +469,13 @@ fn provided_actions_appear_in_their_slot_for_matching_kinds(cx: &mut TestAppCont
         .update(|cx| register_action_provider(Rc::new(Provider), cx));
     open(vcx, &["app-dev", "app", "public", "TABLES"]);
     let items = menu_of(vcx, "users");
+    // ## m4-t25-ddl-view (named exception): View DDL follows the Data slot.
     assert_eq!(
         menu_lines(vcx, &items),
         [
             "Open data",
             "fake.data",
+            "View DDL",
             "—",
             "Copy name",
             "Copy qualified name",
