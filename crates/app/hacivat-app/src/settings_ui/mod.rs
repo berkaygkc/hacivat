@@ -982,9 +982,10 @@ pub mod fixtures {
     }
 
     // ## m4-t33b-carries (RR-5)
-    /// How many times the time zone row looked the saved zone up.
+    /// How many times the saved zone was looked up (`time_zone::unknown_zone`) on this thread,
+    /// once a settings page is open.
     pub fn time_zone_lookups(cx: &App) -> Option<u64> {
-        Some(open_page(cx)?.read(cx).time_zone.lookups())
+        open_page(cx).map(|_| time_zone::unknown_zone_lookups())
     }
 
     /// Picks time zone choice `index`, as the select does when the user picks it.
