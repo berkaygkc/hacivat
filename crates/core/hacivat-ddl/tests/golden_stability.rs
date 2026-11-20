@@ -23,6 +23,15 @@ const BEGIN: &str = "<<<hv-t31-golden-begin>>>";
 const END: &str = "<<<hv-t31-golden-end>>>";
 const SEED: &str = "hv-t31-seed ";
 
+/// Prints `HV-FACT <line>` straight to stdout: libtest captures only the `print!` family, so
+/// the line reaches the CI log of a passing test too (as `hacivat-introspect`'s `g4::fact`).
+fn fact(line: &str) {
+    use std::io::Write as _;
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(format!("HV-FACT {line}\n").as_bytes());
+    let _ = out.flush();
+}
+
 fn blessing() -> bool {
     std::env::var_os("UPDATE_GOLDEN").is_some_and(|v| v == "1")
 }
@@ -108,7 +117,10 @@ fn every_golden_renders_byte_identical_twice_in_one_process() {
     }
     // Interleaved: rendering the other cases in between changes nothing.
     assert_eq!(all_cases_text(), all_cases_text());
-    println!("HV-FACT g5 in-process cases={} identical=yes", CASES.len());
+    fact(&format!(
+        "g5 in-process cases={} identical=yes",
+        CASES.len()
+    ));
 }
 
 #[test]
@@ -127,10 +139,10 @@ fn every_golden_renders_identically_with_shuffled_hash_seeds() {
         );
     }
     assert_eq!(seeds.len(), 3, "the children ran with distinct hash seeds");
-    println!(
-        "HV-FACT g5 hash-seeds children=3 distinct_seeds={} identical=yes",
+    fact(&format!(
+        "g5 hash-seeds children=3 distinct_seeds={} identical=yes",
         seeds.len()
-    );
+    ));
 }
 
 /// Every file under `dir`, recursively, sorted.
@@ -177,10 +189,10 @@ fn golden_files_are_lf_only_and_end_with_one_newline() {
             "{shown}: a byte-order mark"
         );
     }
-    println!(
-        "HV-FACT g5 files={} lf_only=yes one_final_newline=yes",
+    fact(&format!(
+        "g5 files={} lf_only=yes one_final_newline=yes",
         files.len()
-    );
+    ));
 }
 
 /// Run in CI's `turkey-test` too (the whole job runs under `LC_ALL=tr_TR.UTF-8`), where this
@@ -199,5 +211,5 @@ fn goldens_identical_under_lang_tr_and_c() {
         let (_, text) = run_probe(&[("LC_ALL", locale), ("LANG", locale)]);
         assert!(text == blessed, "{locale}: differs from the goldens");
     }
-    println!("HV-FACT g5 locales=tr_TR.UTF-8,C identical=yes");
+    fact("g5 locales=tr_TR.UTF-8,C identical=yes");
 }

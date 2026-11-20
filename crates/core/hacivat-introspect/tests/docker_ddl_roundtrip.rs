@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use common::g4::fact;
 use common::my::{self, Login};
 use common::pg::{DropSchemas, Pg, admin, unique};
 use hacivat_ddl::produce::{DdlSources, create_script_with};
@@ -279,18 +280,13 @@ fn assert_round_trip(
         }
     }
     let (ca, cb) = (canon(&first.0.ns), canon(&second.0.ns));
-    let missing: Vec<_> = ca.iter().filter(|x| !cb.contains(x)).collect();
-    let extra: Vec<_> = cb.iter().filter(|x| !ca.contains(x)).collect();
-    assert!(
-        missing.is_empty() && extra.is_empty(),
-        "{label}: the models differ\n--- only first\n{missing:#?}\n--- only second\n{extra:#?}"
-    );
+    assert_eq!(ca, cb, "{label}: the models differ");
     let stmts: usize = first.1.iter().map(|(_, s)| s.stmts.len()).sum();
-    println!(
-        "HV-FACT g5 roundtrip target={label} objects={} statements={stmts} model_objects={} bytes_identical=yes model_equal=yes",
+    fact(&format!(
+        "g5 roundtrip target={label} objects={} statements={stmts} model_objects={} bytes_identical=yes model_equal=yes",
         first.1.len(),
         ca.len()
-    );
+    ));
 }
 
 // ---- PostgreSQL -------------------------------------------------------------------------------
@@ -340,9 +336,11 @@ async fn pg_load(pg: &Pg, schema: &str) -> Loaded {
     )
     .await
     .unwrap_or_else(|e| panic!("{}: the pass: {e:?}", pg.t.id));
-    let facts = p.report.facts.clone().unwrap_or_else(|| {
-        ServerFacts::new(DbmsKind::Postgres, IdentCtx::new(DialectId::Postgres))
-    });
+    let facts = p
+        .report
+        .facts
+        .clone()
+        .unwrap_or_else(|| panic!("{}: the pass read no server facts", pg.t.id));
     Loaded {
         ns: merged(&ns, DbmsKind::Postgres, FoldRule::Exact, p.result),
         facts,
@@ -427,6 +425,16 @@ fn pg_goldens() -> Vec<(String, String)> {
     out
 }
 
+/// The lowest PostgreSQL major whose grammar has a golden's syntax (every other PG golden parses
+/// on every supported major, 14 and later).
+fn min_major(rel: &str) -> u32 {
+    match rel {
+        // `NOT ENFORCED` on CHECK and FOREIGN KEY constraints is PostgreSQL 18 grammar.
+        "not_enforced_pg18.sql" => 18,
+        _ => 14,
+    }
+}
+
 /// The PostgreSQL syntax-error SQLSTATEs (class 42 codes the raw parser and scanner raise).
 const SYNTAX: [&str; 3] = ["42601", "42602", "42622"];
 
@@ -444,11 +452,32 @@ async fn pg_rendered_scripts_parse() {
             "CREATE SCHEMA {schema}; SET search_path TO {schema}"
         ))
         .await;
-        let (mut cases, mut ran, mut semantic) = (0, 0, 0);
+        let num: u32 = a
+            .scalar("SELECT current_setting('server_version_num')")
+            .await
+            .parse()
+            .expect("server_version_num");
+        let major = num / 10_000;
+        let (mut cases, mut ran, mut semantic, mut newer) = (0, 0, 0, 0);
         for (rel, text) in pg_goldens() {
-            cases += 1;
             a.batch("BEGIN").await;
             let got = a.live().raw().batch(&text).await;
+            if major < min_major(&rel) {
+                // Not this major's grammar: the server's answer is recorded, not judged.
+                let state = got
+                    .err()
+                    .and_then(|e| e.server.and_then(|m| m.sqlstate))
+                    .unwrap_or_else(|| "accepted".into());
+                fact(&format!(
+                    "g5 pg-parse target={} golden={rel} needs_major={} answer={state}",
+                    t.id,
+                    min_major(&rel)
+                ));
+                newer += 1;
+                a.batch("ROLLBACK").await;
+                continue;
+            }
+            cases += 1;
             match got {
                 Ok(_) => ran += 1,
                 Err(e) => {
@@ -467,10 +496,10 @@ async fn pg_rendered_scripts_parse() {
         }
         a.close().await;
         assert!(cases > 0, "PostgreSQL goldens exist");
-        println!(
-            "HV-FACT g5 pg-parse target={} goldens={cases} ran={ran} parsed_semantic_error={semantic} syntax_errors=0",
+        fact(&format!(
+            "g5 pg-parse target={} major={major} goldens={cases} ran={ran} parsed_semantic_error={semantic} syntax_errors=0 skipped_newer_grammar={newer}",
             t.id
-        );
+        ));
     }
 }
 
