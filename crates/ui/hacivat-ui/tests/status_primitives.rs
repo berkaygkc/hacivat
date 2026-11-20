@@ -2043,3 +2043,54 @@ fn the_palette_field_collapses_to_its_icon_before_a_trust_word_goes(cx: &mut Tes
     click(vcx, "palette-field");
     assert_eq!(clicks.get(), 1);
 }
+
+// ## m4-t33b-carries (found by the scope-editor shots): a label inside a nested clip (a
+// segmented control's rounded box) that a scroll viewport cuts at its top edge is scrolled,
+// not clipped; the same nested clip cutting it sideways still is.
+fn nested_cut_label(cx: &mut TestAppContext, inner_width: f32) -> bool {
+    let vcx = host(cx, move |_, _| {
+        let viewport = gpui::StatefulInteractiveElement::overflow_y_scroll(
+            div().id("viewport").w(px(200.0)).h(px(40.0)),
+        )
+        .child(hacivat_ui::text::scroll_viewport());
+        div()
+            .p(px(10.0))
+            .child(
+                viewport.child(
+                    div().mt(px(-6.0)).child(
+                        div()
+                            .w(px(inner_width))
+                            .h(px(20.0))
+                            .overflow_hidden()
+                            .child(hacivat_ui::text::Label::new(
+                                "nested",
+                                hacivat_ui::text::TextSource::Fluent,
+                                DARK.type_ramp.body,
+                                DARK.colors.text.to_hsla(),
+                            )),
+                    ),
+                ),
+            )
+            .into_any_element()
+    });
+    vcx.simulate_resize(gpui::size(px(400.0), px(200.0)));
+    enable_registry(vcx);
+    vcx.read(|cx| {
+        cx.global::<TextRegistry>()
+            .frame
+            .iter()
+            .find(|r| r.text.as_ref() == "nested")
+            .expect("the label is drawn")
+            .clipped
+    })
+}
+
+#[gpui::test]
+fn a_nested_clip_cut_at_a_viewports_fold_is_scrolled(cx: &mut TestAppContext) {
+    assert!(!nested_cut_label(cx, 120.0));
+}
+
+#[gpui::test]
+fn a_nested_clip_cutting_sideways_is_still_clipped(cx: &mut TestAppContext) {
+    assert!(nested_cut_label(cx, 12.0));
+}

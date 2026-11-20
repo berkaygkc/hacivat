@@ -1599,13 +1599,16 @@ fn labelled(msg: hacivat_l10n::MsgRef<NoArgs>, control: AnyElement, cx: &App) ->
         .flex_row()
         .items_center()
         .gap(px(t.spacing.sm))
-        .child(Label::new(
+        // ## m4-t33b-carries (found by the new DDL view shot): the label keeps its width; a
+        // full-width control (the Constraints Select) sizes to its content here instead of
+        // squeezing the label it follows ("Constrai" was clipped at every width).
+        .child(div().flex_none().child(Label::new(
             tr(cx, msg, NoArgs),
             TextSource::Fluent,
             t.type_ramp.body_sm,
             c.text_2.to_hsla(),
-        ))
-        .child(control)
+        )))
+        .child(div().flex_none().child(control))
         .into_any_element()
 }
 

@@ -15,6 +15,8 @@
 use std::sync::Arc;
 
 use hacivat_app::connections::ConnectionsModel;
+use hacivat_app::connections::dialog::schemas;
+use hacivat_app::connections::dialog::{DialogMode, open_connection_dialog};
 use hacivat_app::connections::explorer;
 use hacivat_app::explorer::adapter::{self, NodeInfo};
 use hacivat_app::explorer::rows::DisplayGroup;
@@ -27,7 +29,7 @@ use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui_core::gpui_surface::{App, Window};
 
 use super::m3a::{Step, instant, step};
-use super::support::catalogs::{catalog_gen, schema, table, wide_pg_schema};
+use super::support::catalogs::{catalog_gen, schema, schema_at, table, wide_pg_schema};
 
 /// The tree rows' labels are drawn here.
 const ROW: &str = "hacivat-ui/src/tree/view/row.rs";
@@ -64,10 +66,24 @@ pub(super) enum M4 {
     SettingsTimeZone,
     // R-W5-14 b · "Clear query history…": the question (Cancel is the default)
     ClearHistoryQuestion,
+    // ## m4-t33b-carries: the states T32 left (mock surfaces 7, 8 and 10).
+    // 7 · Scope editor
+    /// The pattern field with a syntax error under it.
+    ScopePatternError,
+    /// "All databases" asks first (PostgreSQL), in place.
+    ScopeAllDatabases,
+    /// "Encrypt cached metadata" turned on asks first.
+    ScopeEncrypt,
+    // 10 · DDL view
+    /// A table's DDL view (offline: "couldn't check" above the text).
+    DdlView,
+    // 8 · Mass-deletion confirmation
+    /// The question with five names and "and N more".
+    MassDrop,
 }
 
 /// Every M4 state, in shot order.
-pub(super) const M4_STATES: [M4; 11] = [
+pub(super) const M4_STATES: [M4; 16] = [
     M4::TreePg,
     M4::TreeLoading,
     M4::TreeFailed,
@@ -79,6 +95,12 @@ pub(super) const M4_STATES: [M4; 11] = [
     M4::SettingsMetadata,
     M4::SettingsTimeZone,
     M4::ClearHistoryQuestion,
+    // ## m4-t33b-carries
+    M4::ScopePatternError,
+    M4::ScopeAllDatabases,
+    M4::ScopeEncrypt,
+    M4::DdlView,
+    M4::MassDrop,
 ];
 
 impl M4 {
@@ -95,6 +117,12 @@ impl M4 {
             M4::SettingsMetadata => "m4-settings-metadata",
             M4::SettingsTimeZone => "m4-settings-time-zone",
             M4::ClearHistoryQuestion => "m4-clear-history-question",
+            // ## m4-t33b-carries
+            M4::ScopePatternError => "m4-scope-pattern-error",
+            M4::ScopeAllDatabases => "m4-scope-all-databases",
+            M4::ScopeEncrypt => "m4-scope-encrypt",
+            M4::DdlView => "m4-ddl-view",
+            M4::MassDrop => "m4-mass-drop",
         }
     }
 
@@ -109,6 +137,11 @@ impl M4 {
             M4::SettingsMetadata => ("#settings-row-title-metadata.refresh_after_ddl", None),
             M4::SettingsTimeZone => ("#settings-row-title-ui.time_zone", None),
             M4::ClearHistoryQuestion => ("hacivat-ui/src/dialog.rs:", None),
+            // ## m4-t33b-carries
+            M4::ScopePatternError => ("#scope-pattern-error", None),
+            M4::ScopeAllDatabases | M4::ScopeEncrypt => ("hacivat-ui/src/notice.rs:", None),
+            M4::DdlView => ("#ddl-unknown", None),
+            M4::MassDrop => ("#mass-drop-name", None),
         }
     }
 
@@ -118,6 +151,8 @@ impl M4 {
             M4::TreeLoading | M4::TreeFailed => &["#hv-tree-status-label"],
             M4::NodeMenu | M4::ConnMenu => &["#menu-item-label"],
             M4::SettingsTimeZone => &["#settings-row-note-ui.time_zone"],
+            // ## m4-t33b-carries
+            M4::MassDrop => &["#mass-drop-more"],
             _ => &[],
         }
     }
@@ -226,6 +261,28 @@ impl M4 {
                 vec![wide_pg_schema("app", "public", 15_000, 2)],
                 Vec::new(),
             ),
+            // ## m4-t33b-carries: the DDL view reads a table at Structure or more, its schema
+            // loaded (the cache a connection left).
+            M4::DdlView => catalog_gen(
+                pg,
+                2,
+                vec![schema_at(
+                    pg,
+                    &["app", "public"],
+                    false,
+                    Level::Sources,
+                    vec![customers.clone(), orders.clone(), turkish.clone()],
+                )],
+                vec![(
+                    NsKey::schema(["app", "public"]),
+                    LoadState::Loaded {
+                        level: Level::Sources,
+                        at: stamp,
+                        watermark: Watermark::default(),
+                        stale: false,
+                    },
+                )],
+            ),
             _ => catalog_gen(pg, 2, vec![public(Vec::new()), audit], Vec::new()),
         }
     }
@@ -267,6 +324,128 @@ impl M4 {
             M4::SettingsTimeZone => vec![instant(|_, cx| {
                 settings_ui::fixtures::show_section(Section::General, cx);
             })],
+            // ## m4-t33b-carries
+            M4::ScopePatternError | M4::ScopeAllDatabases | M4::ScopeEncrypt => {
+                let state = self;
+                vec![
+                    step(
+                        |window, cx| {
+                            if let Some(id) = profile_named(cx, "shop") {
+                                open_connection_dialog(DialogMode::Edit(id), window, cx);
+                            }
+                        },
+                        |window, cx| schemas::section_state(window, cx).is_some(),
+                    ),
+                    // Open, scrolled to the section's end (its last control focused): the
+                    // engine row above is then out of view whole, never cut at the fold.
+                    instant(|window, cx| {
+                        if let Some(section) = schemas::section_state(window, cx) {
+                            section.update(cx, |s, cx| {
+                                s.set_open(true, cx);
+                                s.focus_last(window, cx);
+                            });
+                        }
+                    }),
+                    step(
+                        move |window, cx| {
+                            let Some(section) = schemas::section_state(window, cx) else {
+                                return;
+                            };
+                            section.update(cx, |s, cx| {
+                                match state {
+                                    // The mock's case: no schema after ":" (character 20).
+                                    M4::ScopePatternError => {
+                                        s.type_pattern("@:public|analytics:", window, cx);
+                                    }
+                                    M4::ScopeAllDatabases => s.toggle_all_databases(window, cx),
+                                    _ => s.toggle_encrypt(true, window, cx),
+                                }
+                            });
+                            // The section's last control takes the focus, so the dialog
+                            // scrolls the error line above it into view.
+                            if state == M4::ScopePatternError {
+                                section.update(cx, |s, cx| s.focus_last(window, cx));
+                            }
+                        },
+                        move |window, cx| {
+                            schemas::section_state(window, cx).is_some_and(|s| {
+                                let s = s.read(cx);
+                                match state {
+                                    M4::ScopePatternError => s.error().is_some(),
+                                    M4::ScopeAllDatabases => s.cost_question_open(),
+                                    _ => s.encrypt_question().is_some(),
+                                }
+                            })
+                        },
+                    ),
+                ]
+            }
+            M4::DdlView => {
+                let mut s = expand(&["shop", "app", "public", TABLES], "orders");
+                s.push(step(
+                    |window, cx| {
+                        let Some(id) = profile_named(cx, "shop") else {
+                            return;
+                        };
+                        if let Some(ws) = window.root::<hacivat_app::shell::Workspace>().flatten() {
+                            let _ = hacivat_app::ddl_view::open_ddl_view(
+                                &ws,
+                                id,
+                                orders_key(),
+                                window,
+                                cx,
+                            );
+                        }
+                    },
+                    |_, cx| {
+                        profile_named(cx, "shop")
+                            .and_then(|id| hacivat_app::ddl_view::state_of(id, &orders_key(), cx))
+                            .is_some_and(|st| {
+                                st.body == hacivat_app::ddl_view::Body::Script
+                                    && st.freshness != hacivat_app::ddl_view::Freshness::Checking
+                            })
+                    },
+                ));
+                s
+            }
+            M4::MassDrop => {
+                let mut s = expand(&["shop", "app"], "public");
+                s.push(step(
+                    |_, cx| {
+                        let Some(id) = profile_named(cx, "shop") else {
+                            return;
+                        };
+                        let sample: Vec<hacivat_meta::ObjectKey> = [
+                            "customers",
+                            "invoices",
+                            "line_items",
+                            "müşteriler",
+                            "orders",
+                        ]
+                        .iter()
+                        .map(|n| table_key(n))
+                        .collect();
+                        hacivat_app::explorer::mass_drop::ask(
+                            id,
+                            NsKey::schema(["app", "public"]),
+                            312,
+                            sample.into(),
+                            cx,
+                        );
+                    },
+                    |_, cx| {
+                        profile_named(cx, "shop").is_some_and(|id| {
+                            hacivat_app::explorer::mass_drop::open_dialog(
+                                id,
+                                &NsKey::schema(["app", "public"]),
+                                cx,
+                            )
+                            .is_some()
+                        })
+                    },
+                ));
+                s
+            }
             M4::ClearHistoryQuestion => vec![
                 step(
                     |_, _| {},
@@ -289,6 +468,29 @@ impl M4 {
 }
 
 // ---- fixtures -------------------------------------------------------------------------------
+
+// ## m4-t33b-carries
+/// The key of table `name` in `app.public` (no server id: the mass-drop sample).
+fn table_key(name: &str) -> hacivat_meta::ObjectKey {
+    hacivat_meta::ObjectKey {
+        kind: hacivat_meta::ObjectKind::Table,
+        path: ["app", "public", name]
+            .into_iter()
+            .map(hacivat_meta::Name::from)
+            .collect(),
+        server_id: None,
+        overload_sig: None,
+        raw_kind: None,
+    }
+}
+
+/// The fixture's `public.orders`.
+fn orders_key() -> hacivat_meta::ObjectKey {
+    hacivat_meta::ObjectKey {
+        server_id: Some(hacivat_meta::ServerId::Oid(16_400)),
+        ..table_key("orders")
+    }
+}
 
 fn pg(name: &str, env: EnvTag) -> Profile {
     Profile {

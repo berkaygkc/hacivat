@@ -228,6 +228,29 @@ fn is_scroll_viewport(cx: &App, mask: Bounds<Pixels>) -> bool {
     })
 }
 
+// ## m4-t33b-carries (named exception; found by the scope-editor shots)
+/// Whether text at `bounds`, painted in `mask`, is cut only at a scroll viewport's fold: `mask`
+/// is that viewport's clip ([`is_scroll_viewport`]), or a nested clip inside it (a segmented
+/// control's rounded box) whose cut top or bottom edge is the viewport's own. A sideways cut is
+/// never scrolling.
+fn cut_at_fold(cx: &App, bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> bool {
+    if is_scroll_viewport(cx, mask) {
+        return true;
+    }
+    let near = |a: Pixels, b: Pixels| (a - b).abs() <= px(1.0);
+    let slack = px(0.5);
+    let cut_top = bounds.top() < mask.top() - slack;
+    let cut_bottom = bounds.bottom() > mask.bottom() + slack;
+    cx.try_global::<ScrollViewports>().is_some_and(|v| {
+        v.0.iter().any(|v| {
+            mask.left() >= v.left() - px(1.0)
+                && mask.right() <= v.right() + px(1.0)
+                && (!cut_top || near(v.top(), mask.top()))
+                && (!cut_bottom || near(v.bottom(), mask.bottom()))
+        })
+    })
+}
+
 /// One line of text in a type style.
 #[derive(Debug, Clone)]
 pub struct Label {
@@ -721,7 +744,7 @@ impl Element for LabelElement {
             None => px(0.0),
         };
         let mask = window.content_mask().bounds;
-        let cut = cut_by_clip(bounds, mask, is_scroll_viewport(cx, mask));
+        let cut = cut_by_clip(bounds, mask, cut_at_fold(cx, bounds, mask));
         let outside = outside_card(cx, bounds.left(), bounds.left() + painted_width);
         TextRegistry::record(cx, || RenderedText {
             text: self.label.text.clone(),
@@ -933,7 +956,7 @@ impl IntoElement for Paragraph {
                     })
                     .unwrap_or_default();
                 let mask = window.content_mask().bounds;
-                let scrolls = is_scroll_viewport(cx, mask);
+                let scrolls = cut_at_fold(cx, bounds, mask);
                 let (painted, clipped) = paragraph_fit(&lines, bounds, mask, scrolls);
                 let outside = outside_card(cx, bounds.left(), bounds.left() + painted);
                 TextRegistry::record(cx, || RenderedText {
