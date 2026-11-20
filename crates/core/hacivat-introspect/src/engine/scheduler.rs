@@ -66,6 +66,8 @@ pub(crate) enum Request {
         ns: NsKey,
         accept: bool,
     },
+    // ## m4-t15b-facets (named exception in Task 15's file)
+    Facet(Vec<ObjectKey>, hacivat_meta::props::FacetKind),
 }
 
 // ## m4-t25-ddl-view (named exception)
@@ -296,6 +298,19 @@ fn covers(running: &Work, new: &Work) -> bool {
                 level: lb,
             },
         ) => a == b && la >= lb && kb.iter().all(|k| ka.contains(k)),
+        // ## m4-t15b-facets (named exception): single flight per (object, facet).
+        (
+            Work::Facet {
+                ns: a,
+                keys: ka,
+                kind: fa,
+            },
+            Work::Facet {
+                ns: b,
+                keys: kb,
+                kind: fb,
+            },
+        ) => a == b && fa == fb && kb.iter().all(|k| ka.contains(k)),
         _ => false,
     }
 }
@@ -307,6 +322,21 @@ fn same_key(a: &Work, b: &Work) -> bool {
         (Work::Pass { ns: x, .. }, Work::Pass { ns: y, .. })
         | (Work::Fragment { ns: x, .. }, Work::Fragment { ns: y, .. })
         | (Work::Validate { ns: x }, Work::Validate { ns: y }) => x == y,
+        // ## m4-t15b-facets (named exception)
+        // ## m4-t15b-facets (review I-2, T17b m-6): `Sources` reads are per key: one refused
+        // key never fails another caller's.
+        (
+            Work::Facet {
+                ns: x,
+                kind: a,
+                keys: ka,
+            },
+            Work::Facet {
+                ns: y,
+                kind: b,
+                keys: kb,
+            },
+        ) => x == y && a == b && (*a != hacivat_meta::props::FacetKind::Sources || ka == kb),
         _ => false,
     }
 }
@@ -459,6 +489,19 @@ struct Actor {
     /// Namespaces marked stale while a pass of them was loading: that pass started before the
     /// change, so its result is published stale.
     stale_on_publish: BTreeSet<NsKey>,
+    // ## m4-t15b-facets (named exception; review m-2)
+    /// Bumped whenever loaded facets may have gone stale outside a facet read's namespace (a
+    /// role change, a pass that dropped facets elsewhere); a facet read that saw it move while
+    /// it ran publishes its answer stale.
+    facet_epoch: u64,
+    /// The epoch each running facet read started at, by job id.
+    facet_started: HashMap<u64, u64>,
+    /// The generation that published a read at `Sources` of each object (a fragment) and of
+    /// each namespace (a pass): a `Sources` request whose object was read so since its
+    /// namespace last changed has nothing more to read (CI 44709954319: the DDL view's facet
+    /// request after its elevation read the view twice).
+    sources_read: HashMap<ObjectKey, u64>,
+    sources_read_ns: HashMap<NsKey, u64>,
 }
 
 impl Actor {
@@ -521,6 +564,11 @@ impl Actor {
             debouncer: SaveDebouncer::new(cfg.limits.save_debounce),
             // ## m4-t21-refresh (named exception, fix round 1 m5)
             stale_on_publish: BTreeSet::new(),
+            // ## m4-t15b-facets (named exception; review m-2)
+            facet_epoch: 0,
+            facet_started: HashMap::new(),
+            sources_read: HashMap::new(),
+            sources_read_ns: HashMap::new(),
             validate_every: cfg.validate_every,
             // ## m4-t22-state (named lines: validation tasks)
             next_validate: cfg.validate_every.map(|d| clock.now() + d),
@@ -732,6 +780,14 @@ impl Actor {
                     }
                     *level = (*level).max(l2);
                 }
+                // ## m4-t15b-facets (named exception): one read of the union of the keys.
+                (Work::Facet { keys, .. }, Work::Facet { keys: k2, .. }) => {
+                    for k in k2 {
+                        if !keys.contains(&k) {
+                            keys.push(k);
+                        }
+                    }
+                }
                 _ => {}
             }
             if q.then == Then::Nothing && job.then != Then::Nothing {
@@ -773,9 +829,11 @@ impl Actor {
                 .running
                 .values()
                 .any(|r| r.job.work == Work::ScopeRefresh),
-            Work::Pass { ns, .. } | Work::Fragment { ns, .. } | Work::Validate { ns } => {
-                !self.busy(ns) && !self.republishing.contains(ns)
-            }
+            // ## m4-t15b-facets (named exception): a facet read is a task of its namespace.
+            Work::Pass { ns, .. }
+            | Work::Fragment { ns, .. }
+            | Work::Validate { ns }
+            | Work::Facet { ns, .. } => !self.busy(ns) && !self.republishing.contains(ns),
             Work::CheckState { .. } => true,
         }
     }
@@ -875,6 +933,10 @@ impl Actor {
             let out = work::run(ctx, spec, token).await;
             let _ = done.send((id, out));
         });
+        // ## m4-t15b-facets (named exception; review m-2)
+        if matches!(job.work, Work::Facet { .. }) {
+            self.facet_started.insert(id, self.facet_epoch);
+        }
         self.running.insert(id, Running { job, cancel });
         self.update_progress();
     }
@@ -913,15 +975,20 @@ impl Actor {
                     Work::Pass { .. } => Phase::Tables,
                     Work::Fragment { .. } => Phase::Columns,
                     Work::CheckState { .. } | Work::Validate { .. } => Phase::Validate,
+                    // ## m4-t15b-facets (named exception)
+                    Work::Facet { .. } => Phase::Facets,
                 },
                 done: match &r.job.work {
-                    Work::Fragment { .. } | Work::CheckState { .. } | Work::Validate { .. } => 0,
+                    Work::Fragment { .. }
+                    | Work::CheckState { .. }
+                    | Work::Validate { .. }
+                    | Work::Facet { .. } => 0,
                     _ => done,
                 },
                 total: match &r.job.work {
-                    Work::Fragment { keys, .. } | Work::CheckState { keys, .. } => {
-                        Some(keys.len() as u64)
-                    }
+                    Work::Fragment { keys, .. }
+                    | Work::CheckState { keys, .. }
+                    | Work::Facet { keys, .. } => Some(keys.len() as u64),
                     _ => Some(total),
                 },
             })
@@ -1048,6 +1115,8 @@ impl Actor {
                 }
             }
             Request::Confirm { ns, accept } => self.deferred_confirms.push((ns, accept, w)),
+            // ## m4-t15b-facets (named exception)
+            Request::Facet(keys, kind) => self.facet_request(keys, kind, prio, w),
         }
     }
 
@@ -1574,6 +1643,14 @@ impl Actor {
         } else {
             out
         };
+        // ## m4-t15b-facets (named exception): a facet read publishes only its facets.
+        if let Work::Facet { .. } = &job.work {
+            return match out {
+                Output::Facet(rows) => self.facet_done(job, &rows),
+                Output::Failed(e) => self.facet_failed(job, e),
+                _ => self.facet_failed(job, IntroError::Protocol(Name::from("facet"))),
+            };
+        }
         match out {
             Output::Namespaces(infos, identity, unlisted, facts) => {
                 self.listed_done(job, infos, identity, unlisted, facts)
@@ -1582,6 +1659,8 @@ impl Actor {
             Output::Staleness(keys, st, marks) => self.staleness(job, keys, st, marks),
             // ## m4-t22-state (named exception)
             Output::Validated(ns, ptr, verdict) => self.validated(job, &ns, ptr, verdict),
+            // ## m4-t15b-facets (named exception): only a facet task answers rows.
+            Output::Facet(_) => job.resolve(Err(IntroError::Protocol(Name::from("facet")))),
             Output::Failed(e) => self.failed(job, e),
         }
     }
@@ -1822,6 +1901,8 @@ impl Actor {
         }
         let (level, pass) = (m.level, m.pass);
         let (follow, follow_ns) = (m.follow, m.follow_ns);
+        // ## m4-t15b-facets (named exception)
+        let (reread, texts) = (m.reread, m.texts);
         let (next, delta, report) = m.outcome.into_parts();
         // ## m4-t22-state (named exception): what the delta means beyond this namespace.
         let accounts = (ns.kind == NsKind::Server && accounts_changed(&delta))
@@ -1831,11 +1912,38 @@ impl Actor {
         } else {
             BTreeSet::new()
         };
-        let changes = self.applied_changes(&ns, next, &report, level, pass);
+        let mut changes = self.applied_changes(&ns, next, &report, level, pass);
+        // ## m4-t15b-facets (named exception): the facets the read made stale go with it, and
+        // the definition texts it read come with it.
+        let dropped = super::facet::invalidations(&snap, &ns, &reread, &delta);
+        if !dropped.is_empty() {
+            self.facet_epoch += 1;
+        }
+        changes.extend(dropped);
+        if !texts.is_empty() {
+            changes.push(CatalogChange::PutSources {
+                ns: ns.clone(),
+                texts,
+            });
+        }
         let generation = match self.publish(changes, Some(delta)) {
             Ok(g) => g,
             Err(e) => return job.resolve(Err(e)),
         };
+        // ## m4-t15b-facets (named exception): what this publish read at `Sources`.
+        if level >= Level::Sources {
+            match &job.work {
+                Work::Pass { .. } => {
+                    self.sources_read_ns.insert(ns.clone(), generation);
+                }
+                Work::Fragment { keys, .. } => {
+                    for k in keys {
+                        self.sources_read.insert(k.clone(), generation);
+                    }
+                }
+                _ => {}
+            }
+        }
         // ## m4-t22-state (named exception; T16b review carry): a renamed or dropped role
         // leaves loaded grantee names stale.
         let generation = if accounts {
@@ -2493,6 +2601,9 @@ impl Actor {
     /// Marks every loaded grants facet stale (a role was renamed or dropped: the grantee names
     /// they show may be gone). Answers the generation, when anything was marked.
     fn stale_grants(&mut self) -> Option<u64> {
+        // ## m4-t15b-facets (named exception; review m-2): a grants read running now read the
+        // old names too.
+        self.facet_epoch += 1;
         let snap = self.catalog.current();
         let changes: Vec<CatalogChange> = snap
             .states
@@ -2923,3 +3034,217 @@ fn refold(arena: &NamespaceSnapshot, fold: FoldRule) -> Option<NamespaceSnapshot
     )
     .ok()
 }
+
+// ## m4-t15b-facets (named exception in Task 15's file; `engine/facet.rs` has the rules)
+impl Actor {
+    /// `IntroHandle::load_facet`: one task per namespace of the keys whose facet is not loaded
+    /// (or stale); a key no arena holds is not read. A facet the introspector does not read is
+    /// published `Failed { Unsupported }` at once, except `Sources`, which a fragment of the
+    /// keys at `Level::Sources` reads where the engine reads definitions as a level.
+    fn facet_request(
+        &mut self,
+        keys: Vec<ObjectKey>,
+        kind: hacivat_meta::props::FacetKind,
+        prio: Priority,
+        w: Waiter,
+    ) {
+        let snap = self.catalog.current();
+        let plan = super::facet::plan(&snap, &keys, kind, SystemTime::now());
+        if plan.is_empty() {
+            return w.resolve(Ok(snap.generation));
+        }
+        let read = self.caps.facets.contains(&kind);
+        if !read && kind != hacivat_meta::props::FacetKind::Sources {
+            let changes: Vec<CatalogChange> = plan
+                .iter()
+                .flat_map(|(ns, ks)| {
+                    super::facet::failed(
+                        &snap,
+                        ns,
+                        ks,
+                        kind,
+                        hacivat_meta::snapshot::IntroErrorCode::Unsupported,
+                        self.limits.failed_retry_after,
+                    )
+                })
+                .collect();
+            return w.resolve(
+                self.publish(changes, None)
+                    .and(Err(IntroError::NotImplemented)),
+            );
+        }
+        // Where `Sources` is a level, an object read at it since its namespace last changed has
+        // nothing more to give (its text, if it has one, came with that read): no second read.
+        let plan = if read {
+            plan
+        } else {
+            let fresh = |ns: &NsKey, k: &ObjectKey| {
+                let Some(arena) = snap.namespaces.get(ns) else {
+                    return false;
+                };
+                let g = arena.generation();
+                self.sources_read_ns.get(ns) == Some(&g) || self.sources_read.get(k) == Some(&g)
+            };
+            plan.into_iter()
+                .map(|(ns, ks)| {
+                    let ks: Vec<ObjectKey> = ks.into_iter().filter(|k| !fresh(&ns, k)).collect();
+                    (ns, ks)
+                })
+                .filter(|(_, ks)| !ks.is_empty())
+                .collect()
+        };
+        if plan.is_empty() {
+            return w.resolve(Ok(snap.generation));
+        }
+        // `Sources` reads are per key (review I-2, T17b m-6): a key the login may not
+        // `SHOW CREATE` fails alone, never another key or another caller's.
+        let plan: Vec<(NsKey, Vec<ObjectKey>)> =
+            if read && kind == hacivat_meta::props::FacetKind::Sources {
+                plan.into_iter()
+                    .flat_map(|(ns, ks)| ks.into_iter().map(move |k| (ns.clone(), vec![k])))
+                    .collect()
+            } else {
+                plan.into_iter().collect()
+            };
+        let join = Arc::new(Mutex::new(Join {
+            left: plan.len(),
+            generation: 0,
+            error: None,
+            waiters: vec![w],
+        }));
+        for (ns, ks) in plan {
+            let mut job = if read {
+                self.new_job(
+                    Work::Facet { ns, keys: ks, kind },
+                    prio,
+                    Trigger::Background,
+                )
+            } else {
+                // Not a load: it reads even when the namespace is held at `Sources` (a cached
+                // namespace has its references but none of its texts).
+                self.fragment_job(ns, ks, Level::Sources, prio, Trigger::Background)
+            };
+            job.add(Waiter::Join(join.clone()), false);
+            self.enqueue(job, false);
+        }
+    }
+
+    /// A facet read answered: its keys are published `Loaded` (answered) or `NotLoaded` (left
+    /// out), in one side-table publish.
+    fn facet_done(&mut self, job: Job, rows: &crate::introspector::FacetRows) {
+        let started = self.facet_started.remove(&job.id);
+        let Work::Facet { ns, keys, kind } = &job.work else {
+            return job.resolve(Err(IntroError::Protocol(Name::from("facet"))));
+        };
+        if self.out_of_scope(ns) {
+            return job.resolve(Err(IntroError::Cancelled));
+        }
+        let snap = self.catalog.current();
+        let level = self.state_level(ns);
+        // Review m-2: facets went stale elsewhere while this read ran (a role rename): its
+        // answer is published stale, never as fresh.
+        let stale = started != Some(self.facet_epoch);
+        match super::facet::answered(&snap, ns, keys, *kind, rows, level, stale) {
+            Ok(changes) => {
+                let r = self.publish(changes, None);
+                job.resolve(r);
+            }
+            Err(e) => self.facet_failed(job, e),
+        }
+    }
+
+    /// A facet read failed: a definite failure is published `Failed` for its keys (R-W4-3); a
+    /// transient one publishes nothing. Never counts towards the namespace's back-pressure.
+    fn facet_failed(&mut self, job: Job, e: IntroError) {
+        self.facet_started.remove(&job.id);
+        if let Work::Facet { ns, keys, kind } = &job.work
+            && super::facet::decides(&e)
+            && !self.out_of_scope(ns)
+        {
+            let snap = self.catalog.current();
+            let changes = super::facet::failed(
+                &snap,
+                ns,
+                keys,
+                *kind,
+                super::facet::failure_code(&e),
+                self.limits.failed_retry_after,
+            );
+            let _ = self.publish(changes, None);
+        }
+        job.resolve(Err(e));
+    }
+}
+// ## m4-t15b-facets
+
+// ## m4-t15b-facets (named exception; T25 review m-7, carried to T15b): `VerdictSink` units.
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+
+    fn key(t: &str) -> ObjectKey {
+        ObjectKey {
+            kind: ObjectKind::Table,
+            path: [Name::from("db"), Name::from("s"), Name::from(t)]
+                .into_iter()
+                .collect(),
+            server_id: None,
+            overload_sig: None,
+            raw_kind: None,
+        }
+    }
+
+    /// The verdicts arrive once, when every job of the request has added its share.
+    #[test]
+    fn verdicts_arrive_when_every_job_added_its_share() {
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let sink = VerdictSink::new(tx);
+        sink.expect(2);
+        sink.add(&[key("a")], &[Staleness::Current]);
+        assert!(
+            rx.try_recv().is_err(),
+            "one job of two answered: nothing yet"
+        );
+        sink.add(&[key("b")], &[Staleness::Changed]);
+        assert_eq!(
+            rx.try_recv().expect("both answered"),
+            vec![
+                (key("a"), Staleness::Current),
+                (key("b"), Staleness::Changed)
+            ]
+        );
+    }
+
+    /// A failed job decides nothing for the whole request: the receiver sees the sender gone,
+    /// even when another job had answered (the DDL view then says "couldn't check").
+    #[test]
+    fn a_failed_job_withholds_every_verdict() {
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let sink = VerdictSink::new(tx);
+        sink.expect(2);
+        sink.add(&[key("a")], &[Staleness::Current]);
+        sink.fail();
+        sink.add(&[key("b")], &[Staleness::Current]);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+    }
+
+    /// Jobs cancelled before answering drop their shares: the receiver sees the sender gone.
+    #[test]
+    fn cancelled_jobs_leave_the_receiver_undecided() {
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let sink = VerdictSink::new(tx);
+        sink.expect(2);
+        let other = VerdictSink(sink.0.clone());
+        sink.add(&[key("a")], &[Staleness::Dropped]);
+        drop(sink);
+        drop(other);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+    }
+}
+// ## m4-t15b-facets

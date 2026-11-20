@@ -52,13 +52,22 @@ pub(super) enum Work {
     Validate {
         ns: NsKey,
     },
+    // ## m4-t15b-facets (named exception in Task 15's file): one facet of objects of `ns`.
+    Facet {
+        ns: NsKey,
+        keys: Vec<ObjectKey>,
+        kind: hacivat_meta::props::FacetKind,
+    },
 }
 
 impl Work {
     /// The namespace the task reads and publishes (`None`: the scope refresh, a state check).
     pub fn ns(&self) -> Option<&NsKey> {
         match self {
-            Work::Pass { ns, .. } | Work::Fragment { ns, .. } | Work::Validate { ns } => Some(ns),
+            Work::Pass { ns, .. }
+            | Work::Fragment { ns, .. }
+            | Work::Validate { ns }
+            | Work::Facet { ns, .. } => Some(ns),
             Work::ScopeRefresh | Work::CheckState { .. } => None,
         }
     }
@@ -155,6 +164,11 @@ pub(super) struct Merged {
     /// The filters the pass read with: a result read under other filters than the engine's
     /// current ones is read again (review m-rr1).
     pub filters: Filters,
+    // ## m4-t15b-facets (named exception)
+    /// The objects the read re-read (their loaded facets are dropped with the publish).
+    pub reread: Vec<ObjectKey>,
+    /// The definition texts the read hashed (published with it, `CatalogChange::PutSources`).
+    pub texts: Vec<(hacivat_meta::SourceRef, Name)>,
 }
 
 /// What a task answered.
@@ -172,6 +186,8 @@ pub(super) enum Output {
         Vec<(ObjectKey, hacivat_meta::StateMark)>,
     ),
     Validated(NsKey, Option<usize>, crate::freshness::NsVerdict),
+    // ## m4-t15b-facets (named exception): a facet read's rows.
+    Facet(crate::introspector::FacetRows),
     Failed(IntroError),
 }
 
@@ -248,7 +264,9 @@ async fn run_inner(ctx: &Arc<WorkerCtx>, spec: Spec, cancel: &CancellationToken)
                 let ns = spec.work.ns().cloned().unwrap_or_else(NsKey::server);
                 return Output::Validated(ns, ptr, v);
             }
-            Ok(Read::Result(r)) => return merge_result(ctx, &spec, r).await,
+            // ## m4-t15b-facets (named exception): the texts the read hashed ride along.
+            Ok(Read::Result(r, texts)) => return merge_result(ctx, &spec, r, texts).await,
+            Ok(Read::Facet(rows)) => return Output::Facet(rows),
         }
     }
 }
@@ -276,7 +294,9 @@ enum Read {
     /// The listing, the identity, the other databases still to list, and the server's facts
     /// (m4-t17-mysql).
     Namespaces(Vec<NsInfo>, Option<IdentityRead>, Vec<Name>, FactsRead),
-    Result(NamespaceResult),
+    // ## m4-t15b-facets (named exception): with the texts the read hashed.
+    Result(NamespaceResult, Vec<(hacivat_meta::SourceRef, Name)>),
+    Facet(crate::introspector::FacetRows),
     // ## m4-t22-state (named exception)
     Staleness(
         Vec<ObjectKey>,
@@ -294,33 +314,45 @@ async fn read(
 ) -> Result<Read, IntroError> {
     match &spec.work {
         Work::ScopeRefresh => list(ctx, spec, conn).await,
-        Work::Pass { ns, mode, level } => with_progress(
-            sink(ctx, ns),
-            ctx.intro.introspect(
-                conn,
-                ns,
-                *mode,
-                *level,
-                spec.filters.for_pass(ns, spec.system),
-                spec.prev.as_deref(),
-                cancel,
-            ),
-        )
-        .await
-        .map(Read::Result),
-        Work::Fragment { ns, keys, level } => with_progress(
-            sink(ctx, ns),
-            ctx.intro.fragment(
-                conn,
-                ns,
-                keys,
-                *level,
-                spec.filters.for_pass(ns, spec.system),
-                cancel,
-            ),
-        )
-        .await
-        .map(Read::Result),
+        // ## m4-t15b-facets (named exception): passes and fragments capture the definition
+        // texts they hash (`engine::facet::capturing`).
+        Work::Pass { ns, mode, level } => {
+            let (read, texts) = super::facet::capturing(with_progress(
+                sink(ctx, ns),
+                ctx.intro.introspect(
+                    conn,
+                    ns,
+                    *mode,
+                    *level,
+                    spec.filters.for_pass(ns, spec.system),
+                    spec.prev.as_deref(),
+                    cancel,
+                ),
+            ))
+            .await;
+            read.map(|r| Read::Result(r, texts))
+        }
+        Work::Fragment { ns, keys, level } => {
+            let (read, texts) = super::facet::capturing(with_progress(
+                sink(ctx, ns),
+                ctx.intro.fragment(
+                    conn,
+                    ns,
+                    keys,
+                    *level,
+                    spec.filters.for_pass(ns, spec.system),
+                    cancel,
+                ),
+            ))
+            .await;
+            read.map(|r| Read::Result(r, texts))
+        }
+        Work::Facet { ns, keys, kind } => ctx
+            .intro
+            .facet(conn, ns, keys, *kind)
+            .await
+            .map(Read::Facet),
+        // ## m4-t15b-facets
         // ## m4-t22-state (named exception): `freshness::check_state` compares the stamps with
         // the snapshot's marks (Task 22); the introspector's own `check_state` has no marks.
         Work::CheckState { keys, .. } => {
@@ -476,7 +508,13 @@ async fn identity(ctx: &WorkerCtx, conn: &mut MetaConn) -> IdentityRead {
 
 /// Filters `r`, fills the engine's fields and merges it into the task's `prev` (or the empty
 /// base of a first load), on the blocking pool (a 160k-column merge is tens of milliseconds).
-async fn merge_result(ctx: &Arc<WorkerCtx>, spec: &Spec, mut r: NamespaceResult) -> Output {
+async fn merge_result(
+    ctx: &Arc<WorkerCtx>,
+    spec: &Spec,
+    mut r: NamespaceResult,
+    // ## m4-t15b-facets (named exception)
+    texts: Vec<(hacivat_meta::SourceRef, Name)>,
+) -> Output {
     let (ns, level, pass) = match &spec.work {
         Work::Pass { ns, level, .. } => (ns.clone(), *level, true),
         Work::Fragment { ns, level, .. } => (ns.clone(), *level, false),
@@ -492,6 +530,8 @@ async fn merge_result(ctx: &Arc<WorkerCtx>, spec: &Spec, mut r: NamespaceResult)
     if !spec.kept.is_empty() {
         protect_kept(&mut r, &ns, &spec.kept);
     }
+    // ## m4-t15b-facets (named exception): what the read re-read (T16b's rule, engine-wide).
+    let reread = crate::pg::facets::invalidated(&ns, &r);
     // R-W2-1: the level the pass read and when (display only).
     r.level = level;
     if r.read_at_ms == 0 {
@@ -536,6 +576,9 @@ async fn merge_result(ctx: &Arc<WorkerCtx>, spec: &Spec, mut r: NamespaceResult)
             follow,
             follow_ns,
             filters,
+            // ## m4-t15b-facets (named exception)
+            reread,
+            texts,
         })
     })
     .await;

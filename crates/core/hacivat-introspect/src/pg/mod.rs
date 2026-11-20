@@ -128,6 +128,16 @@ impl Introspector for PgIntrospector {
         keys: &'a [ObjectKey],
         kind: FacetKind,
     ) -> BoxFuture<'a, Result<FacetRows, IntroError>> {
+        // ## m4-t15b-facets (named exception; T15b CI round, T16b m-7): no facet section of
+        // this engine is joinable, so a joined connection is refused before any key is
+        // looked at; never an empty answer (a key without an oid is otherwise left out).
+        if c.is_joined() {
+            return Box::pin(async {
+                Err(IntroError::Meta(
+                    hacivat_session::meta::MetaError::NotJoinable,
+                ))
+            });
+        }
         facets::read(c, ns, keys, kind)
     }
 

@@ -113,7 +113,7 @@ pub enum Mode {
 pub type PackFile = (&'static str, &'static str);
 
 /// The PostgreSQL pack files, in merge order.
-pub const PG_FILES: [PackFile; 5] = [
+pub const PG_FILES: [PackFile; 6] = [
     ("10-core", include_str!("../../packs/pg/10-core.hvq.sql")),
     (
         "20-facets",
@@ -131,10 +131,15 @@ pub const PG_FILES: [PackFile; 5] = [
         include_str!("../../packs/pg/45-system-extras.hvq.sql"),
     ),
     // ## m4-t26-overlays
+    // ## m4-t15b-facets (named exception): the joined fragment read (R-M4-29).
+    (
+        "50-joined",
+        include_str!("../../packs/pg/50-joined.hvq.sql"),
+    ),
 ];
 
 /// The MySQL and MariaDB pack files, in merge order (one pack; flavor gates inside).
-pub const MYSQL_FILES: [PackFile; 4] = [
+pub const MYSQL_FILES: [PackFile; 5] = [
     ("10-core", include_str!("../../packs/mysql/10-core.hvq.sql")),
     (
         "20-facets",
@@ -147,6 +152,11 @@ pub const MYSQL_FILES: [PackFile; 4] = [
     (
         "40-system",
         include_str!("../../packs/mysql/40-system.hvq.sql"),
+    ),
+    // ## m4-t15b-facets (named exception): the joined fragment read (R-M4-29).
+    (
+        "50-joined",
+        include_str!("../../packs/mysql/50-joined.hvq.sql"),
     ),
 ];
 

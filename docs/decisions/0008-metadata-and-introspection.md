@@ -2488,6 +2488,88 @@ introspectors' own system-mode packs.
   input or output of the snapshot build, so it is in neither the digests nor the manifest
   (R-M4-17's manifest fields); Task 26's tests guard its rows.
 
+## m4-t15b — facets and joined fragments
+
+Task 15b (W5; R-M4-29, R-M4-30; carries T16b m-5/m-7, T17b m-6, R-W3-11, R-W4-3).
+
+- **Where facet values live.** `CatalogSnapshot` gains private side tables (Task 9's file,
+  fenced `// ## m4-t15b-facets`): facet values by `ContainerKey::Facet` (their load states stay
+  in `states`, where Task 22 and Task 25 already read them) and source texts per namespace,
+  content-addressed by `SourceRef`. Two changes write them: `CatalogChange::SetFacet { key,
+  state, value }` (the plan's side-table change; a non-facet key or a value of another facet is
+  refused, `NotLoaded` removes state and value) and `CatalogChange::PutSources { ns, texts }` (a
+  text whose XXH3-128 is not its reference is dropped). Neither marks a namespace changed: no
+  arena is restamped, nothing is offered to the cache, subscribers hear one `Published` with an
+  empty delta. After every publish a namespace keeps only the texts its arena references;
+  `Remove(ns)` drops both side tables of `ns`. Readers: `facet_key`, `facet`, `facet_value`,
+  `loaded_facets`, `source_text` (`DdlSources::text`), `server_text` (`DdlSources::server_text`,
+  only `Loaded` and not stale) and `grants_facet` (`DdlSources::grants`: a **stale** facet
+  answers `NotLoaded`, so a script never carries grants a renamed role may have made wrong).
+  Facets are memory-only (not in the cache format).
+- **`load_facet` scheduling** (`engine/facet.rs`, wired as `Request::Facet`/`Work::Facet` in
+  Task 15's scheduler and worker, named exceptions): a facet read is a task of its object's
+  namespace, so it never overlaps a pass of that namespace and is published in order with it.
+  Keys are recorded under the object's own key in the current generation (with its server id);
+  a key no arena holds is not read. Single flight: a fresh loaded facet answers at once; a
+  request covered by a running read of the same namespace and facet joins it; queued ones
+  coalesce (union of keys). Publish: answered keys `Loaded`, keys left out `NotLoaded` (R-W4-3:
+  "partial" is per key in M4; no introspector reports a facet value as partial), a key whose
+  object changed key since the read started is skipped. A definite refusal (`Permission`,
+  server error, `NotJoinable`, protocol) publishes `Failed` for the asked keys and resolves the
+  ticket with the error; a facet the introspector does not list in `IntroCaps::facets`, or
+  answers `NotImplemented` for, is `Failed { Unsupported }`; a transient error (connection,
+  timeout, cancel, busy) publishes nothing. Facet failures never count towards back-pressure.
+- **Sources where the engine has no `Sources` facet** (PostgreSQL: definitions are a level): a
+  `load_facet(Sources)` becomes a fragment of the keys at `Level::Sources` that is not a load,
+  so it reads even when the namespace is held at that level (a cached namespace has the
+  references but none of the texts).
+- **Source texts.** `engine::facet::source_ref` replaces `SourceRef::of` at the introspectors'
+  five hashing sites (`pg/build.rs`, `sqlite/build.rs`, named exceptions); inside
+  `engine::facet::capturing` (set by the worker around every pass and fragment) it also keeps
+  the text, and the scheduler publishes it with the pass (`PutSources`). Outside a capture it is
+  the plain hash. `Sources` facet values (MySQL `SHOW CREATE`, SQLite `sqlite_schema.sql`) also
+  answer `source_text` when their hash matches.
+- **Invalidation.** A pass or fragment drops, in the same publish, the `Grants`,
+  `Dependencies` and `Sources` facets of every object it re-read (T16b's `invalidated`, applied
+  engine-wide) and every facet of an object it dropped, renamed away or scoped out, and every
+  `Dependencies` facet anywhere whose references name one of those objects by server id or by
+  path prefix (T16b m-5, the T22 carry). `Statistics` stays (an estimate for display). A full
+  pass re-reads everything and so drops every such facet of its namespace (fail-safe). Task 22's
+  `stale_grants` (role rename, MySQL privilege hash) is unchanged. Named exception in Task 22's
+  test `a_role_rename_marks_loaded_grants_stale`: its facet now lies in a namespace the test
+  never reads (the first pass of `public` re-reads `t0` and would drop it).
+- **`fragment::on_session(handle, dbms, ns, keys, level, cancel)`** — the plan's signature plus
+  `dbms`: a joined connection knows no server (`MetaConn::join` reports `DbmsKind::Unknown`) and
+  `SessionHandle` carries no engine, so the caller (M7, who holds the profile) names it. It
+  joins (`MetaConn::join`: `Job(DdlApply | DriftCheck)` in a transaction only), reads the
+  relations the keys name (a column's key names its relation) and their columns at `Structure`
+  (`Sources` is capped to `Structure`: no deparsed text is joinable), and merges the read into an
+  empty namespace on the blocking pool: generation 0, never handed to a publisher or a cache (it
+  takes neither).
+  - PostgreSQL: new pack file `packs/pg/50-joined.hvq.sql` (R-M4-32; registered in `pack/mod.rs`,
+    named exception): `JoinedContext` (`current_database()` and `current_schemas(true)` in
+    order), `JoinedNamespaces`, `JoinedRelations` (by namespace oid), `JoinedColumns` (by
+    relation oid). Every bind is an oid list; no name reaches the server (the schema and the
+    caller's relations are picked by exact name on the client). Operators are
+    `OPERATOR(pg_catalog.…)`, casts and functions qualified; no `format_type`/`pg_get_*` (R-M4-46):
+    a column's type is `TypeRef { schema, name }` with raw type = the type's name (typmods,
+    defaults and generation expressions are not read; M7 carry). R-W3-11: a session on another
+    database than `ns`'s, or whose path's first entry after `pg_temp_<digits>` is not
+    `pg_catalog`, is refused with `NotJoinable` before anything else is sent.
+    `current_schemas` joins the joinable function allowlist (`pack/parse.rs`, named exception)
+    and T16's hostile `h2` pure-read list (named exception).
+  - MySQL/MariaDB: `packs/mysql/50-joined.hvq.sql`, `JoinedTables` and `JoinedColumns` from
+    `INFORMATION_SCHEMA` (schema scalar bind, names list bind). MySQL commits implicitly before
+    DDL: a drift check joins the transaction the job holds when it asks.
+  - SQLite: the introspector's own fragment on the joined connection; in M4 a SQLite job request
+    gets the profile's one (console) session and `MetaConn::join` refuses it (M7's writer seam):
+    `on_session` answers `Meta(NotJoinable)` (tested).
+  - Facet reads are not part of a joined read; PostgreSQL's facet sections are not joinable and
+    `Introspector::facet` on a joined connection answers `Meta(NotJoinable)` (T16b m-7; Docker).
+- **Task 25 hook** (applied when T25 merges): `ddl_view/source.rs` `EngineCatalog::sources`
+  answers a `DdlSources` over the current snapshot: `text(r)` → `snap.source_text(r)`,
+  `server_text(k)` → `snap.server_text(k)`, `grants(k)` → `snap.grants_facet(k)`.
+
 ## m4-t25 — state-check verdicts for the DDL view (named exception)
 
 - *Decision.* `IntroHandle::check_state_verdicts(keys)` is `check_state` that also answers each
@@ -2781,3 +2863,42 @@ and implements `sql_catalog::CatalogView` for it (HV-INTRO-16 consumer side; R-M
     - `hacivat-meta/tests/find_by_server_id.rs`.
   - MySQL is not affected: it matches cached objects by kind, raw kind and name, and MySQL
     has no overloads. SQLite has no routines.
+
+## m4-t15b — fix round 1 (security review)
+
+- **I-1, ruling R-W5-5 (corrects R-W3-11's "skip `pg_temp_N`").** PostgreSQL resolves no
+  operator or function in the session's **own** temp schema, but it does search any other
+  backend's `pg_temp_N` named in the path. `JoinedContext` now also answers the session's own
+  temp schema (`pg_catalog.pg_my_temp_schema()`, a scalar subquery of the same snapshot;
+  `pg_my_temp_schema` joins the joinable function allowlist, named exception in Task 4's
+  `pack/parse.rs`, and T16's hostile h2 pure-read list). `pg_path_is_safe(path, own_temp)`
+  skips only that exact name; anything else before `pg_catalog` (another backend's temp or
+  `pg_toast_temp` schema, a user schema) refuses the read (`NotJoinable`) before any other
+  statement. The list-bind `IN` stays the one unqualified operator: the pack grammar admits a
+  list bind only as `<column> IN :[name]` (chunking soundness, T4 I3/I5), `IN` has no
+  `OPERATOR()` form, and `OPERATOR(pg_catalog.=) ANY (…)` needs an array bind, which R-M4-3
+  rules out. Docker: `joined_read_refuses_another_backends_temp_schema`.
+- **I-2 (T17b m-6).** `Sources` facet reads are per key: a request is split into one job per
+  key, and `Sources` jobs coalesce only with the same key. A key refused with MySQL 1142 is
+  published `Failed` alone.
+- **m-1.** `MetaConn::join_as(session, engine)` (named exception in Task 5's `meta.rs`;
+  `MetaRead.engine` in `session/mod.rs`): the session's actor refuses a read naming another
+  engine than the session's before the text guard and before anything is sent.
+  `on_session` now takes the catalog's `ServerFacts` (engine, flavor, identifier rule) instead
+  of a bare `DbmsKind`.
+- **m-2.** The scheduler keeps a facet epoch, bumped by `stale_grants` and by a pass that drops
+  facets; a facet read that saw it move while it ran publishes its answer stale.
+- **m-3.** A `Failed` facet is not read again before `at + retry_after`.
+- **m-4.** SQLSTATE classes `40`, `57`, `53`, `08`, `55P03`, MySQL 1205/1213 and `CatalogRace`
+  are transient: nothing is published.
+- **m-6.** The joined snapshot folds names by the facts' identifier rule (`lower_case_table_names`);
+  MySQL relation kinds follow T17's `relation_kind` (MariaDB sequences are sequences, with no
+  columns; unknown kinds are left out).
+- **m-7.** Facet values are kept per namespace (a publish copies only the touched namespace's
+  map), with an index of `Sources` texts by reference for `source_text`.
+- **Hostile tests.** H1/H1b are committed (`tests/t15b_review_hostile.rs`). H2/H3 need
+  `hacivat-driver/fake` as a dev-dependency of this crate (a controller manifest amendment);
+  adapted to the fixed seam they pass 8/8 under that feature (verified with an uncommitted
+  local manifest change, reverted).
+- **Still open:** the T25 seam hook (`EngineCatalog::sources`) and its engine-backed
+  facet-vouch tests (gpui build; disk), and wiring T26's `row_estimate` (T26 not on `m4`).

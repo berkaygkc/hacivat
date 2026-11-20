@@ -863,9 +863,13 @@ async fn a_role_rename_marks_loaded_grants_stale() {
     ))));
     let publisher = catalog.publisher().unwrap();
     // A grants facet loaded earlier (Task 15b loads them; the catalog holds its state).
+    // ## m4-t15b-facets (named exception in Task 22's test): the facet is of a namespace this
+    // test never reads, because a pass that re-reads an object drops that object's loaded
+    // grants (T16b's rule, applied by Task 15b) and the first pass of `n` re-reads `t0`.
+    let other = ns("other");
     let grants = ContainerKey::Facet {
-        ns: n.clone(),
-        object: table_key(&n, "t0", Some(20_000)),
+        ns: other.clone(),
+        object: table_key(&other, "t0", Some(20_000)),
         facet: hacivat_meta::props::FacetKind::Grants,
     };
     publisher
@@ -904,7 +908,9 @@ async fn a_role_rename_marks_loaded_grants_stale() {
     load(&r, &srv).await;
     let st = |r: &Rig| r.catalog.current().state(&grants).clone();
     assert!(matches!(st(&r), LoadState::Loaded { stale: false, .. }));
-    // A table changing leaves grants alone.
+    // ## m4-t15b-facets (named exception; T15b review m-8): a table changing is not an account
+    // change, so it marks no grants stale: the facet of `other` stays fresh. (A re-read of an
+    // object drops that object's own loaded grants, T15b; this facet's object is not re-read.)
     r.fake.touch(&n, "t0");
     load(&r, &n).await;
     assert!(matches!(st(&r), LoadState::Loaded { stale: false, .. }));
