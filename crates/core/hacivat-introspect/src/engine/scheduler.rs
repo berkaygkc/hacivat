@@ -670,6 +670,13 @@ impl Actor {
         self.load_cache().await;
         loop {
             self.pump();
+            // ## m4-t33a-progress (named exception in Task 15's file; T33 carry, the residual
+            // race of `background_validation_never_deletes_in_small_steps`): progress is
+            // published once per step, after `pump` started what the step queued. A task that
+            // finished used to publish its removal first, so a validation whose pass was still
+            // to start (or work freed by a republish) showed the engine idle for a moment.
+            self.update_progress();
+            // ## m4-t33a-progress
             let wake = self.next_wake();
             // ## m4-t22-state (named lines: validation tasks): the round's own clock.
             let (vclock, vnext) = (self.clock.clone(), self.next_validate);
@@ -1046,6 +1053,12 @@ impl Actor {
     /// batch (finished of finished + running + queued, since the engine was last idle); a
     /// fragment or a state check counts its objects (review m11; a count inside one pass needs
     /// a progress sink in the introspector seam, carried to Tasks 16–18).
+    ///
+    /// ## m4-t33a-hygiene (fix round 1, review M5)
+    /// Progress is consistent at step ends only: the loop publishes it after `pump`, so a
+    /// ticket resolved inside a step (`on_done`) is visible to its awaiter a moment before
+    /// progress drops the finished task. After awaiting a ticket, wait for progress (`idle`);
+    /// never read it once and assert.
     fn update_progress(&mut self) {
         if self.running.is_empty() && self.queue.is_empty() {
             self.batch = Batch::default();
@@ -1738,7 +1751,8 @@ impl Actor {
             return;
         };
         self.batch.done += 1;
-        self.update_progress();
+        // ## m4-t33a-progress (named exception): no progress here; the loop publishes it after
+        // the follow-ups this answer queues have started.
         // A task cancelled after its read finished publishes nothing (review m2).
         let out = if cancel.is_cancelled() {
             Output::Failed(IntroError::Cancelled)
@@ -2911,7 +2925,8 @@ impl Actor {
             };
             self.republish(again, op);
         }
-        self.update_progress();
+        // ## m4-t33a-progress (named exception): the loop publishes progress after the tasks
+        // that waited for this rebuild have started.
     }
 
     /// Writes the names of every held mass deletion where the handles read them.

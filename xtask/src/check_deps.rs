@@ -117,6 +117,15 @@ pub enum Rule {
     /// holds one in a type that is a GPUI `Global` (the test harness never drops the app).
     /// See [`leaks_a_temp_dir`] for the token forms.
     TempDirOutlivesTest,
+    // ## m4-t33a-hygiene (T23 review m-6)
+    /// A workflow or composite action under `.github/` uses a third-party action by tag or
+    /// branch instead of a full commit SHA (`owner/repo[/path]@<40 hex>`, with the tag as a
+    /// trailing comment), or a `docker://` image without `@sha256:<64 hex>`. Local actions
+    /// (`./…`) are exempt. A `uses` key counts wherever it stands on a line (block or flow
+    /// mapping, quoted or not, `uses :`), and a file that cannot be read is a violation too
+    /// (fix round 1, review M3). A tag can be moved to other code; a SHA cannot.
+    ActionNotPinnedBySha,
+    // ## m4-t33a-hygiene
 }
 
 // ## m2b-t01-interfaces
@@ -1687,6 +1696,126 @@ pub fn source_violations(workspace: &Path) -> Vec<Violation> {
         .collect()
 }
 
+// ## m4-t33a-hygiene (T23 review m-6)
+/// The `uses:` values in `text` (one workflow or action file) that name a third-party action
+/// without a full commit SHA, as `line N: <value>`.
+pub fn unpinned_uses(text: &str) -> Vec<String> {
+    let hex = |s: &str, n: usize| {
+        s.len() == n
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        // ## m4-t33a-hygiene (fix round 1, review M3): `uses` is a key wherever it stands
+        // (a block or flow mapping, quoted or not, a space before the colon).
+        let code = line.split(" #").next().unwrap_or("");
+        if code.trim_start().starts_with('#') {
+            continue;
+        }
+        for value in uses_values(code) {
+            if value.starts_with("./") {
+                continue;
+            }
+            let pinned = if let Some(image) = value.strip_prefix("docker://") {
+                image
+                    .rsplit_once("@sha256:")
+                    .is_some_and(|(name, digest)| !name.is_empty() && hex(digest, 64))
+            } else {
+                value
+                    .rsplit_once('@')
+                    .is_some_and(|(action, sha)| !action.is_empty() && hex(sha, 40))
+            };
+            if !pinned {
+                out.push(format!("line {}: {value}", i + 1));
+            }
+        }
+    }
+    out
+}
+
+/// The values of every `uses` key on one YAML line (comment already cut): the key stands at
+/// the line's start (after `- `), after `{` or `,`, optionally quoted, then optional spaces and
+/// `:`; the value runs to `,` or `}` in a flow mapping, else to the end, quotes stripped.
+fn uses_values(code: &str) -> Vec<String> {
+    let b = code.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(off) = code[i..].find("uses") {
+        let at = i + off;
+        i = at + 4;
+        let (start, end) = match (at.checked_sub(1).map(|p| b[p]), b.get(at + 4)) {
+            (Some(q @ (b'"' | b'\'')), Some(&e)) if e == q => (at - 1, at + 5),
+            _ => (at, at + 4),
+        };
+        let before = code[..start].trim();
+        let key_position =
+            before.is_empty() || before == "-" || before.ends_with('{') || before.ends_with(',');
+        let rest = code[end..].trim_start();
+        let (Some(rest), true) = (rest.strip_prefix(':'), key_position) else {
+            continue;
+        };
+        let flow = before.contains('{');
+        let value = if flow {
+            rest.split([',', '}']).next().unwrap_or("")
+        } else {
+            rest
+        };
+        let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+        out.push(value.to_string());
+    }
+    out
+}
+
+/// [`Rule::ActionNotPinnedBySha`] over every `*.yml`/`*.yaml` file under `.github/`.
+pub fn action_pin_violations(workspace: &Path) -> Vec<Violation> {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for p in paths {
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|e| e == "yml" || e == "yaml") {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&workspace.join(".github"), &mut files);
+    let mut found = Vec::new();
+    for f in files {
+        let rel = f
+            .strip_prefix(workspace)
+            .unwrap_or(&f)
+            .to_string_lossy()
+            .replace('\\', "/");
+        // ## m4-t33a-hygiene (fix round 1, review M3): an unreadable file is a violation.
+        let text = match std::fs::read_to_string(&f) {
+            Ok(t) => t,
+            Err(e) => {
+                found.push(Violation {
+                    krate: rel,
+                    rule: Rule::ActionNotPinnedBySha,
+                    via: vec![format!("unreadable: {e}")],
+                });
+                continue;
+            }
+        };
+        for u in unpinned_uses(&text) {
+            found.push(Violation {
+                krate: rel.clone(),
+                rule: Rule::ActionNotPinnedBySha,
+                via: vec![u],
+            });
+        }
+    }
+    found
+}
+// ## m4-t33a-hygiene
+
 pub fn run() -> ExitCode {
     let metadata = match MetadataCommand::new().exec() {
         Ok(m) => m,
@@ -1702,6 +1831,8 @@ pub fn run() -> ExitCode {
     found.extend(tree_violations(metadata.workspace_root.as_std_path()));
     // ## m4-t01a-model
     found.extend(source_violations(metadata.workspace_root.as_std_path()));
+    // ## m4-t33a-hygiene
+    found.extend(action_pin_violations(metadata.workspace_root.as_std_path()));
     if found.is_empty() {
         println!("check-deps: ok");
         return ExitCode::SUCCESS;
@@ -3692,4 +3823,100 @@ mod tests {
         )]);
         assert!(v.is_empty(), "{v:?}");
     }
+
+    // ## m4-t33a-hygiene (T23 review m-6)
+    #[test]
+    fn unpinned_actions_are_found() {
+        let sha = "11d5960a326750d5838078e36cf38b85af677262";
+        let text = [
+            "jobs:".to_string(),
+            "  a:".to_string(),
+            "    steps:".to_string(),
+            "      - uses: actions/checkout@v4".to_string(),
+            format!("      - uses: actions/checkout@{sha} # v4.4.0"),
+            "      - uses: Swatinem/rust-cache@v2.9.3".to_string(),
+            "      - uses: ./.github/actions/libclang".to_string(),
+            "        uses: docker://alpine:3".to_string(),
+            "      - uses: \"owner/repo/sub@main\"".to_string(),
+            format!("      - uses: owner/repo@{}", &sha[..39]),
+            format!("      - uses: owner/repo@{}", sha.to_ascii_uppercase()),
+            format!("      - uses: '@{sha}'"),
+        ]
+        .join("\n");
+        assert_eq!(
+            unpinned_uses(&text),
+            vec![
+                "line 4: actions/checkout@v4".to_string(),
+                "line 6: Swatinem/rust-cache@v2.9.3".to_string(),
+                // ## m4-t33a-hygiene (fix round 1, M3): a `docker://` tag is no pin either.
+                "line 8: docker://alpine:3".to_string(),
+                "line 9: owner/repo/sub@main".to_string(),
+                format!("line 10: owner/repo@{}", &sha[..39]),
+                format!("line 11: owner/repo@{}", sha.to_ascii_uppercase()),
+                format!("line 12: @{sha}"),
+            ]
+        );
+    }
+
+    /// Every action this repository's workflows use is pinned by commit SHA.
+    #[test]
+    fn the_repository_pins_every_action_by_sha() {
+        let v = action_pin_violations(&workspace_root());
+        let lines: Vec<String> = v
+            .iter()
+            .map(|v| format!("{}: {}", v.krate, v.via.join("")))
+            .collect();
+        assert!(lines.is_empty(), "{lines:#?}");
+    }
+    // ## m4-t33a-hygiene
+
+    // ## m4-t33a-hygiene (fix round 1, review M3)
+    /// `uses` is a YAML key wherever it stands: in a flow mapping, quoted, with a space before
+    /// its colon. A `docker://` image is pinned only by `@sha256:` and 64 hex digits.
+    #[test]
+    fn unpinned_actions_are_found_in_every_yaml_form() {
+        let sha = "11d5960a326750d5838078e36cf38b85af677262";
+        let digest = "a".repeat(64);
+        let text = [
+            "      - { uses: actions/checkout@v4 }".to_string(),
+            "      - { name: x, uses: actions/checkout@v4, with: { a: 1 } }".to_string(),
+            "      - \"uses\": actions/checkout@v4".to_string(),
+            "      - 'uses': actions/checkout@v4".to_string(),
+            "      - uses : actions/checkout@v4".to_string(),
+            "        uses: docker://alpine:3".to_string(),
+            format!("        uses: docker://alpine@sha256:{}", &digest[..63]),
+            format!("      - {{ uses: actions/checkout@{sha} }}"),
+            format!("        uses: docker://alpine@sha256:{digest}"),
+            "      # uses: actions/checkout@v4 (a comment)".to_string(),
+            "        run: echo reuses: nothing".to_string(),
+            "      - uses: ./.github/actions/libclang".to_string(),
+        ]
+        .join("\n");
+        assert_eq!(
+            unpinned_uses(&text),
+            vec![
+                "line 1: actions/checkout@v4".to_string(),
+                "line 2: actions/checkout@v4".to_string(),
+                "line 3: actions/checkout@v4".to_string(),
+                "line 4: actions/checkout@v4".to_string(),
+                "line 5: actions/checkout@v4".to_string(),
+                "line 6: docker://alpine:3".to_string(),
+                format!("line 7: docker://alpine@sha256:{}", &digest[..63]),
+            ]
+        );
+    }
+
+    /// A workflow file that cannot be read is a violation, never skipped.
+    #[test]
+    fn an_unreadable_workflow_file_is_a_violation() {
+        let dir = tempfile::tempdir().unwrap();
+        let wf = dir.path().join(".github/workflows");
+        std::fs::create_dir_all(&wf).unwrap();
+        std::fs::write(wf.join("bad.yml"), [0xff, 0xfe, 0x00, 0x80]).unwrap();
+        let v = action_pin_violations(dir.path());
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].krate, ".github/workflows/bad.yml");
+        assert!(v[0].via[0].starts_with("unreadable"), "{v:?}");
+    }
+    // ## m4-t33a-hygiene
 }

@@ -6,7 +6,9 @@
 //!
 //! Fixture writes go through the user's console session (or a raw driver connection before the
 //! manager exists); nothing here writes through a `MetaConn`.
-
+// ## m4-t33a-hygiene (named exception): the modules this file uses exist only with the
+// `session` feature, so `--no-default-features --tests` builds (T16b/T17 carry).
+#![cfg(feature = "session")]
 #![allow(
     clippy::result_large_err,
     reason = "the session's `Reply` and the seam's `IntroError` are other crates' types"

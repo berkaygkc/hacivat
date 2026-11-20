@@ -18,7 +18,9 @@
 //!
 //! Run: `<main>/target/docker/run-docker-tests.sh --set pr -p hacivat-introspect --test
 //! docker_fragment_on_session` (PR set: pg17, mysql84; full adds the other targets).
-
+// ## m4-t33a-hygiene (named exception): the modules this file uses exist only with the
+// `session` feature, so `--no-default-features --tests` builds (T16b/T17 carry).
+#![cfg(feature = "session")]
 #![allow(
     clippy::result_large_err,
     reason = "the session's `Reply` and the seam's `IntroError` are other crates' types"

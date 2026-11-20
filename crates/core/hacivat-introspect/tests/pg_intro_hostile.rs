@@ -5,6 +5,9 @@
 //! I-1, I-2, I-4) and now assert the fixes. Fix round 1 also adds `has_database_privilege`
 //! (the CONNECT filter of `ListDatabases`, review m-4) to H2's pure reads and `OPERATOR` (the
 //! qualified operator syntax of the joinable sections, I-4) to its syntax words.
+// ## m4-t33a-hygiene (named exception): the modules this file uses exist only with the
+// `session` feature, so `--no-default-features --tests` builds (T16b/T17 carry).
+#![cfg(feature = "session")]
 
 use hacivat_introspect::pack::Pack;
 use hacivat_introspect::pg::sections::{Binds, ctx, name, pack};

@@ -47,7 +47,16 @@ const ALL: [&str; 6] = [
     "mariadb114",
 ];
 const MARIADB: [&str; 3] = ["mariadb106", "mariadb1011", "mariadb114"];
-const FOLD: [&str; 3] = ["mysql80", "mysql84", "mariadb114"];
+// ## m4-t33a-hygiene (named exception; T17b review m-4): the MariaDB fold pin is checked on
+// every pinned MariaDB line, not only 11.4.
+const FOLD: [&str; 5] = [
+    "mysql80",
+    "mysql84",
+    "mariadb106",
+    "mariadb1011",
+    "mariadb114",
+];
+// ## m4-t33a-hygiene
 
 /// The connections a test needs (module docs).
 mod harness {
@@ -1808,3 +1817,125 @@ async fn mariadb_rows_without_a_listed_parent_are_skipped() {
         assert_eq!(canon(&last), canon(&fresh), "{}", t.id);
     }
 }
+
+// ## m4-t33a-hygiene (named exception in Task 17's file; the T28 review carry)
+/// HV-INTRO-11 / D-039 on MySQL and MariaDB: `INFORMATION_SCHEMA` lists only the tables the
+/// login may see, so a `REVOKE SELECT` really empties existence for that login (unlike
+/// PostgreSQL, whose catalogs ignore privileges: T28's `revoke_usage_fires_mass_drop_guard`).
+/// A merge of the pass after the revoke never deletes silently: the existence set fails
+/// closed, or the mass-deletion guard holds the result, naming every hidden table.
+///
+/// One table keeps its grant, so the login can still sign in to the database (a login with no
+/// privilege on its default database is refused with 1044); the other 22 of 23 tables are
+/// hidden, over the guard's half of at least 20 objects.
+#[tokio::test]
+#[ignore = "docker"]
+async fn revoked_mysql_select_empties_existence_and_the_guard_holds() {
+    use hacivat_meta::merge::{ExistSet, MergeOutcome};
+    use hacivat_testkit::fixture_sql;
+    const HIDDEN: usize = 22;
+    for t in targets(&[
+        "mysql80",
+        "mysql84",
+        "mariadb106",
+        "mariadb1011",
+        "mariadb114",
+    ]) {
+        let db = Db::create(&t, "revoke").await;
+        db.run("CREATE TABLE keep_me (id INT PRIMARY KEY)").await;
+        let hidden: Vec<String> = (0..HIDDEN).map(|i| format!("t{i:02}")).collect();
+        for name in &hidden {
+            db.run(&format!("CREATE TABLE {name} (id INT PRIMARY KEY)"))
+                .await;
+        }
+        let user = "hvm4_t33a_revoke";
+        let _ = harness::exec(&t, Login::Fixture, None, &fixture_sql::drop_user(user)).await;
+        harness::exec(
+            &t,
+            Login::Fixture,
+            None,
+            &fixture_sql::create_user(user, &t.password),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{}: create_user: {e}", t.id));
+        let _drop_user = UserGuard {
+            t: t.clone(),
+            user: user.into(),
+        };
+        // Table-level grants (a database-level one reads `_` as a wildcard, 1044).
+        for table in std::iter::once("keep_me").chain(hidden.iter().map(String::as_str)) {
+            harness::exec(
+                &t,
+                Login::Fixture,
+                None,
+                &fixture_sql::grant("SELECT", &db.name, Some(table), user),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{}: grant on {table}: {e}", t.id));
+        }
+        let limited = t.as_test_account(user).expect("a MySQL-family target");
+        let (s0, _, _) = pass(&limited, &db, Mode::Full, None).await;
+        let tables = |s: &NamespaceSnapshot| {
+            (0..s.len() as u32)
+                .filter(|&i| s.obj(i).is_some_and(|o| o.kind() == ObjectKind::Table))
+                .count()
+        };
+        assert_eq!(tables(&s0), HIDDEN + 1, "{}: every granted table", t.id);
+        for table in &hidden {
+            harness::exec(
+                &t,
+                Login::Fixture,
+                None,
+                &fixture_sql::revoke("SELECT", &db.name, Some(table), user),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{}: revoke on {table}: {e}", t.id));
+        }
+        // The background read after the revoke (validation reads incrementally).
+        let (_, res, _) = pass(&limited, &db, Mode::Incremental, Some(&s0)).await;
+        let listed = match res.existent.get(&ObjectKind::Table) {
+            Some(ExistSet::Ok(ids)) => Some(ids.len()),
+            Some(ExistSet::Failed(_)) => None,
+            other => panic!("{}: table existence {other:?}", t.id),
+        };
+        let outcome = merge(Some(&s0), res, &MergePolicy::default())
+            .unwrap_or_else(|e| panic!("{}: merge: {e:?}", t.id));
+        let shown = match &outcome {
+            MergeOutcome::Applied { delta, .. } => {
+                assert!(
+                    delta.dropped.is_empty(),
+                    "{}: a silent deletion after REVOKE SELECT: {:?}",
+                    t.id,
+                    delta.dropped
+                );
+                "applied_no_drops".to_string()
+            }
+            MergeOutcome::PendingConfirmation { vanished, .. } => {
+                assert_eq!(*vanished as usize, HIDDEN, "{}: every hidden table", t.id);
+                format!("pending_confirmation vanished={vanished}")
+            }
+        };
+        fact(
+            &t,
+            &format!(
+                "t33a_revoke_select existence_tables={} outcome={shown}",
+                listed.map_or_else(|| "failed_closed".to_string(), |n| n.to_string())
+            ),
+        );
+        // INFORMATION_SCHEMA hides the revoked tables, so the existence set is the kept one
+        // alone, and the guard (not luck) is what keeps the cache.
+        if let Some(n) = listed {
+            assert_eq!(
+                n, 1,
+                "{}: INFORMATION_SCHEMA hides the revoked tables",
+                t.id
+            );
+            assert!(
+                outcome.is_pending(),
+                "{}: existence emptied but no guard",
+                t.id
+            );
+        }
+    }
+}
+// ## m4-t33a-hygiene

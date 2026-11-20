@@ -1668,8 +1668,10 @@ fn pg_catalog_functions_are_qualified() {
     );
     assert_eq!(
         joinable(
-            "SELECT pg_catalog.length(c.relname) AS x, CAST(c.oid AS pg_catalog.int8) AS y, coalesce(c.reltuples, 0) AS z FROM pg_catalog.pg_class c WHERE c.oid = ANY (ARRAY[1]) AND EXISTS (SELECT 1)"
+            "SELECT pg_catalog.length(c.relname) AS x, CAST(c.oid AS pg_catalog.int8) AS y, coalesce(c.reltuples, 0) AS z FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) ANY (ARRAY[1]) AND EXISTS (SELECT 1)"
         ),
+        // ## m4-t33a-hygiene (named exception; H8): the operator is qualified, as every
+        // joinable operator must be (`joinable_pg_sections_resolve_no_operator_through_the_path`).
         []
     );
     // PG 18 folds.
@@ -1984,3 +1986,369 @@ fn rendering_is_byte_identical_under_tr_locale() {
         assert_eq!(line, here.escape_default().to_string(), "{locale}");
     }
 }
+
+// ## m4-t33a-hygiene (R-W3-9)
+/// A quote inside a comment of a section passes the parser, renders with the section and makes
+/// the metadata connection's guard refuse the text (Task 18 found it), so the lint refuses it.
+/// A file-header comment is outside every section and stays free.
+#[test]
+fn a_quote_in_a_section_comment_is_linted() {
+    for d in [
+        DialectId::Postgres,
+        DialectId::MySql,
+        DialectId::MariaDb,
+        DialectId::Sqlite,
+    ] {
+        for comment in [
+            "-- the server's own name",
+            "-- a \"quoted\" word",
+            "-- a `ticked` word",
+            "/* the server's own name */",
+        ] {
+            let body = format!("SELECT 1 AS x\n{comment}\nFROM t");
+            assert_eq!(
+                lint_kinds(d, &section(&body)),
+                [LintKind::QuoteInComment],
+                "{d:?} {comment}"
+            );
+        }
+        let header = format!("-- the server's file header\n{}", section("SELECT 1 AS x"));
+        assert_eq!(lint_kinds(d, &header), Vec::new(), "{d:?}");
+        assert_eq!(
+            lint_kinds(d, &section("SELECT 1 AS x\n-- a plain comment")),
+            Vec::new(),
+            "{d:?}"
+        );
+    }
+    // Why: a joined read whose engine the caller cannot place lexes in every engine's
+    // contexts, and MySQL reads `--` with no space after it as two minus signs, so the quote
+    // opens a literal there and the guard refuses the rendered text of a SQLite or PostgreSQL
+    // section (whose parsers accept that comment). The lint is the static half.
+    #[cfg(feature = "session")]
+    for d in [DialectId::Postgres, DialectId::Sqlite] {
+        let body = section("SELECT 1 AS x\n--the server's own name\nFROM t");
+        let q = render(&body, "S", ctx(d, 170_000));
+        assert!(
+            hacivat_session::meta::check_read_text_for(q[0].sql(), DbmsKind::Unknown).is_err(),
+            "{d:?} {}",
+            q[0].sql()
+        );
+        assert_eq!(lint_kinds(d, &body), [LintKind::QuoteInComment], "{d:?}");
+    }
+}
+// ## m4-t33a-hygiene
+
+// ## m4-t33a-hygiene (T16 verification H8)
+/// A joinable PostgreSQL section runs where Hacivat cannot pin the `search_path` (R-M4-29), so
+/// nothing in it may resolve an operator through the path: every operator is written
+/// `OPERATOR(pg_catalog.op)`, and the constructs that pick an operator by name (`LIKE`,
+/// `BETWEEN`, `NULLIF`, `IN` without a list bind, `IS DISTINCT FROM`, a simple `CASE`) are
+/// refused. A quoted name is a name: `"like"` is a column and `"operator"(…)` an unqualified
+/// call. Non-joinable sections pin the path and keep plain operators.
+#[test]
+fn joinable_pg_sections_resolve_no_operator_through_the_path() {
+    let joinable = |body: &str| {
+        format!("--- name: S ---\n--- returns: x text ---\n--- joinable ---\n{body}\n")
+    };
+    let path_resolved = |body: &str| -> Vec<String> {
+        lint_kinds(DialectId::Postgres, &joinable(body))
+            .into_iter()
+            .filter_map(|k| match k {
+                LintKind::PathResolvedOperator(w) => Some(w),
+                _ => None,
+            })
+            .collect()
+    };
+    for (body, want) in [
+        (
+            "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.oid = 1",
+            "=",
+        ),
+        (
+            "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.oid <> 1",
+            "<>",
+        ),
+        (
+            "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.relname ~ 'a'",
+            "~",
+        ),
+        ("SELECT c.oid - 1 AS x FROM pg_catalog.pg_class c", "-"),
+        ("SELECT c.oid % 2 AS x FROM pg_catalog.pg_class c", "%"),
+        ("SELECT c.oid ^ 2 AS x FROM pg_catalog.pg_class c", "^"),
+        ("SELECT c.oid & 2 AS x FROM pg_catalog.pg_class c", "&"),
+        ("SELECT c.oid # 2 AS x FROM pg_catalog.pg_class c", "#"),
+        ("SELECT @ c.oid AS x FROM pg_catalog.pg_class c", "@"),
+        ("SELECT c.relacl ? 'a' AS x FROM pg_catalog.pg_class c", "?"),
+        (
+            "SELECT c.relname || 'a' AS x FROM pg_catalog.pg_class c",
+            "||",
+        ),
+        (
+            "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.relname LIKE 'a'",
+            "LIKE",
+        ),
+        (
+            "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid BETWEEN 1 AND 2",
+            "BETWEEN",
+        ),
+        (
+            "SELECT NULLIF(c.oid, 0) AS x FROM pg_catalog.pg_class c",
+            "NULLIF",
+        ),
+        (
+            "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid IN (1, 2)",
+            "IN",
+        ),
+        (
+            "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid IS DISTINCT FROM 1",
+            "IS DISTINCT FROM",
+        ),
+        (
+            "SELECT CASE c.relkind WHEN 'r' THEN 1 END AS x FROM pg_catalog.pg_class c",
+            "CASE",
+        ),
+        (
+            "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(=) 1",
+            "OPERATOR",
+        ),
+        (
+            "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(public.=) 1",
+            "OPERATOR",
+        ),
+    ] {
+        assert_eq!(path_resolved(body), vec![want.to_string()], "{body}");
+    }
+    // Qualified operators, a list bind, a searched CASE and `count(*)` pass; so does a quoted
+    // name that spells a keyword.
+    for body in [
+        "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) 1",
+        "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.>=) 1",
+        "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.relnamespace IN :[oids]",
+        "SELECT CASE WHEN c.oid OPERATOR(pg_catalog.=) 1 THEN 1 END AS x \
+         FROM pg_catalog.pg_class c",
+        "SELECT pg_catalog.count(*) AS x FROM pg_catalog.pg_class c",
+        "SELECT c.\"like\" AS x FROM pg_catalog.pg_class c",
+    ] {
+        assert_eq!(path_resolved(body), Vec::<String>::new(), "{body}");
+    }
+    // A quoted "operator" is a function name, never the OPERATOR() syntax.
+    assert!(
+        lint_kinds(
+            DialectId::Postgres,
+            &joinable("SELECT \"operator\"(c.oid) AS x FROM pg_catalog.pg_class c")
+        )
+        .iter()
+        .any(|k| matches!(k, LintKind::UnqualifiedPgCatalog(w) if w == "operator")),
+    );
+    // Outside joinable sections the path is pinned: plain operators stay.
+    assert_eq!(
+        lint_kinds(
+            DialectId::Postgres,
+            &section("SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.oid = 1")
+        ),
+        Vec::new()
+    );
+}
+// ## m4-t33a-hygiene
+
+// ## m4-t33a-hygiene (T15b review n-1)
+/// A joinable PostgreSQL list bind is cast to `pg_catalog.oid` per element: R-W5-5's
+/// `pg_catalog`-first check makes `IN` pick `pg_catalog.=(oid, oid)` only while the elements
+/// reach the server untyped or as `oid`. A driver that sent them typed `text` would leave no
+/// `pg_catalog` operator for `(oid, text)`, so one in any schema on the path would win. The
+/// cast pins the operand type whatever the driver does. Other sections keep plain
+/// placeholders; MySQL and SQLite have no such path.
+#[test]
+fn joinable_pg_list_binds_are_cast_to_oid() {
+    let section = |joinable: bool| {
+        format!(
+            "--- name: J ---\n--- returns: oid u32 ---\n{}SELECT c.oid AS oid \
+             FROM pg_catalog.pg_class c WHERE c.relnamespace IN :[oids]\n",
+            if joinable { "--- joinable ---\n" } else { "" }
+        )
+    };
+    let with_oids = |d: DialectId| {
+        let mut c = ctx(d, 170_000);
+        c.params
+            .lists
+            .push((Arc::from("oids"), vec![text("11"), text("2200")]));
+        c
+    };
+    let q = render(&section(true), "J", with_oids(DialectId::Postgres));
+    assert_eq!(
+        q[0].sql(),
+        "SELECT c.oid AS oid FROM pg_catalog.pg_class c WHERE c.relnamespace IN \
+         (CAST($1 AS pg_catalog.oid), CAST($2 AS pg_catalog.oid))"
+    );
+    assert_eq!(q[0].binds(), &[text("11"), text("2200")]);
+    let q = render(&section(false), "J", with_oids(DialectId::Postgres));
+    assert!(q[0].sql().ends_with("IN ($1, $2)"), "{}", q[0].sql());
+    let q = render(&section(true), "J", with_oids(DialectId::Sqlite));
+    assert!(q[0].sql().ends_with("IN (?, ?)"), "{}", q[0].sql());
+}
+// ## m4-t33a-hygiene
+
+// ## m4-t33a-hygiene (fix round 1: review M1, M2 and the reviewer's probe bodies)
+/// The findings of a joinable PostgreSQL section `body` the path rules make (H8 and M2).
+fn joinable_findings(body: &str) -> Vec<LintKind> {
+    lint_kinds(
+        DialectId::Postgres,
+        &format!("--- name: S ---\n--- returns: x text ---\n--- joinable ---\n{body}\n"),
+    )
+    .into_iter()
+    .filter(|k| {
+        matches!(
+            k,
+            LintKind::PathResolvedOperator(_) | LintKind::PathResolvedType(_)
+        )
+    })
+    .collect()
+}
+
+/// Review M1: `JOIN … USING (col)` and `NATURAL JOIN` build an unqualified `=` that resolves
+/// through the path (`transformJoinUsingClause`), so a joinable section refuses both words.
+#[test]
+fn joinable_pg_sections_refuse_join_using_and_natural() {
+    use LintKind::PathResolvedOperator as Op;
+    assert_eq!(
+        joinable_findings(
+            "SELECT 1 AS x FROM pg_catalog.pg_class c JOIN pg_catalog.pg_class d USING (oid)"
+        ),
+        [Op("USING".into())]
+    );
+    assert_eq!(
+        joinable_findings(
+            "SELECT 1 AS x FROM pg_catalog.pg_class c NATURAL JOIN pg_catalog.pg_class d"
+        ),
+        [Op("NATURAL".into())]
+    );
+    // A quoted name is a name.
+    assert_eq!(
+        joinable_findings("SELECT c.\"using\" AS x FROM pg_catalog.pg_class c"),
+        []
+    );
+}
+
+/// Review M2: a type name resolves through the path too. After `::` and after the `AS` of a
+/// `CAST(`, a joinable section names `pg_catalog.<type>`, and it writes no typed literal
+/// (`text 'a'`); the `50-joined` header's promise ("every cast names a pg_catalog type") is
+/// what the lint now checks.
+#[test]
+fn joinable_pg_sections_name_every_type_in_pg_catalog() {
+    use LintKind::PathResolvedType as Ty;
+    for (body, want) in [
+        (
+            "SELECT CAST(c.relname AS text) AS x FROM pg_catalog.pg_class c",
+            "text",
+        ),
+        (
+            "SELECT CAST(c.oid AS public.oid) AS x FROM pg_catalog.pg_class c",
+            "public",
+        ),
+        (
+            "SELECT c.relname::text AS x FROM pg_catalog.pg_class c",
+            "text",
+        ),
+        (
+            "SELECT c.oid::public.oid AS x FROM pg_catalog.pg_class c",
+            "public",
+        ),
+        (
+            "SELECT CAST(c.oid AS \"pg_catalog\".oid) AS x FROM pg_catalog.pg_class c",
+            "pg_catalog",
+        ),
+        ("SELECT text 'a' AS x FROM pg_catalog.pg_class c", "text"),
+        (
+            "SELECT 1 AS x FROM pg_catalog.pg_class c \
+             WHERE c.relname OPERATOR(pg_catalog.=) name 'a'",
+            "name",
+        ),
+    ] {
+        assert_eq!(joinable_findings(body), [Ty(want.into())], "{body}");
+    }
+    for body in [
+        "SELECT CAST(c.relname AS pg_catalog.text) AS x FROM pg_catalog.pg_class c",
+        "SELECT CAST(CAST(c.oid AS pg_catalog.int8) AS pg_catalog.text) AS x \
+         FROM pg_catalog.pg_class c",
+        "SELECT c.oid::pg_catalog.int8 AS x FROM pg_catalog.pg_class c",
+        "SELECT CAST(c.relacl AS pg_catalog.aclitem[]) AS x FROM pg_catalog.pg_class c",
+        "SELECT pg_catalog.text 'a' AS x FROM pg_catalog.pg_class c",
+        // A literal after a keyword is no typed literal.
+        "SELECT CASE WHEN c.relkind OPERATOR(pg_catalog.=) 'r' THEN 'table' ELSE 'other' END \
+         AS x FROM pg_catalog.pg_class c",
+        "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.relkind OPERATOR(pg_catalog.=) 'r' \
+         OR c.relkind OPERATOR(pg_catalog.=) 'v' AND NOT c.relname OPERATOR(pg_catalog.=) 'x'",
+    ] {
+        assert_eq!(joinable_findings(body), [], "{body}");
+    }
+    // Outside joinable sections the path is pinned: plain casts stay.
+    assert_eq!(
+        lint_kinds(
+            DialectId::Postgres,
+            &section("SELECT c.relname::text AS x FROM pg_catalog.pg_class c")
+        ),
+        Vec::new()
+    );
+    // The shipped joinable sections comply (the header's promise).
+    let pack = Pack::builtin(DialectId::Postgres).unwrap();
+    assert_eq!(lint(&pack, DialectId::Postgres), Vec::new());
+}
+
+/// The review's hostile probe bodies (39 joinable PostgreSQL bodies), kept: what the lint
+/// flags, what it lets pass, and what the parser refuses before it.
+#[test]
+fn joinable_pg_review_probe_bodies() {
+    let flagged = [
+        "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.relname ~~ 'a'",
+        "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.relacl @> c.relacl",
+        "SELECT c.relname || 'a' AS x FROM pg_catalog.pg_class c",
+        "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid = ANY (ARRAY[1])",
+        "SELECT 1 AS x FROM pg_catalog.pg_class c ORDER BY c.oid USING <",
+        "SELECT - c.oid AS x FROM pg_catalog.pg_class c",
+        "SELECT c.oid - 1 AS x FROM pg_catalog.pg_class c",
+        "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.relname ILIKE 'a'",
+        "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.relname SIMILAR TO 'a'",
+        "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid BETWEEN SYMMETRIC 1 AND 2",
+        "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid IS NOT DISTINCT FROM 1",
+        "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid IN (SELECT 1)",
+        "SELECT CASE \"when\" WHEN 1 THEN 1 END AS x FROM pg_catalog.pg_class c",
+        "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(\"pg_catalog\".=) 1",
+        "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(=) 1",
+        "SELECT U&\"dat\" AS x FROM pg_catalog.pg_class c",
+        "SELECT 1 AS x FROM pg_catalog.pg_class c JOIN pg_catalog.pg_class d USING (oid)",
+        "SELECT 1 AS x FROM pg_catalog.pg_class c NATURAL JOIN pg_catalog.pg_class d",
+        "SELECT CAST(c.relname AS text) AS x FROM pg_catalog.pg_class c",
+        "SELECT c.relname::text AS x FROM pg_catalog.pg_class c",
+        "SELECT text 'a' AS x FROM pg_catalog.pg_class c",
+        "SELECT CAST(c.oid AS public.oid) AS x FROM pg_catalog.pg_class c",
+    ];
+    for body in flagged {
+        assert!(!joinable_findings(body).is_empty(), "flagged: {body}");
+    }
+    let clean = [
+        // PostgreSQL reads a comment as whitespace inside OPERATOR().
+        "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog./*x*/=) 1",
+        "SELECT pg_catalog.coalesce(c.reltuples, 0) AS x FROM pg_catalog.pg_class c",
+    ];
+    for body in clean {
+        assert_eq!(joinable_findings(body), [], "clean: {body}");
+    }
+    let refused_by_the_parser = [
+        "SELECT $$a$$ AS x FROM pg_catalog.pg_class c",
+        "SELECT E'\\'' AS x FROM pg_catalog.pg_class c",
+        "SELECT U&\"d\\0061t\" AS x FROM pg_catalog.pg_class c",
+        "SELECT lower(c.relname) AS x FROM pg_catalog.pg_class c",
+        "SELECT \"lower\"(c.relname) AS x FROM pg_catalog.pg_class c",
+        "SELECT pg_catalog.\"lower\"(c.relname) AS x FROM pg_catalog.pg_class c",
+        "SELECT array_agg(c.oid) AS x FROM pg_catalog.pg_class c",
+        "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid NOT IN :[oids]",
+    ];
+    for body in refused_by_the_parser {
+        let text = format!("--- name: S ---\n--- returns: x text ---\n--- joinable ---\n{body}\n");
+        assert!(
+            DraftPack::parse(DialectId::Postgres, &text).is_err(),
+            "the parser refuses: {body}"
+        );
+    }
+}
+// ## m4-t33a-hygiene

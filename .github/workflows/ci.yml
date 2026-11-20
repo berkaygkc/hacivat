@@ -5,6 +5,11 @@ name: ci
 #
 # The bench job is a regression signal for the M0 spikes, not authoritative: real numbers come
 # from the reference hardware, not from shared runners.
+#
+# ## m4-t33a-hygiene (named exception across the file; T23 review m-6): every third-party
+# action is pinned by its full commit SHA, with the release tag it was taken from as a
+# comment; `cargo xtask check-deps` (`ActionNotPinnedBySha`) refuses a tag or branch.
+# ## m4-t33a-hygiene
 
 on:
   push:
@@ -35,7 +40,7 @@ jobs:
       matrix:
         os: [macos-15, windows-2022, ubuntu-24.04]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # rust-toolchain.toml pins 1.98.1; install it explicitly.
       - name: Install pinned toolchain
@@ -92,7 +97,7 @@ jobs:
       # ## m3a-t01a-proofs
       - name: libclang (pg_query bindgen)
         uses: ./.github/actions/libclang
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -140,6 +145,11 @@ jobs:
             echo "::error::a DDL golden changed or appeared during the test run (UPDATE_GOLDEN=1 is never set on CI)"
             exit 1
           fi
+      # ## m4-t33a-hygiene: the test targets build without `session` too (T16b/T17 carry), and
+      # so do `hacivat-meta`'s and `hacivat-ddl`'s (their no-feature model and pure renderers).
+      - name: Check (M4) no-default-feature test targets
+        run: cargo check --locked --tests --no-default-features -p hacivat-introspect -p hacivat-meta -p hacivat-ddl
+      # ## m4-t33a-hygiene
 
       # ## m3a-t01a-proofs
       # After every build of this job (clippy, release, the test builds): nothing under the
@@ -164,11 +174,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: ./.github/actions/linux-deps
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Token staleness check
         run: cargo run --locked -p xtask -- tokens --check
 
@@ -177,11 +187,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: ./.github/actions/linux-deps
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Dependency guard
         run: cargo run --locked -p xtask -- check-deps
       # ## m3a-t03-sql-tables: the generated keyword tables match data/keywords/*.toml. CI only
@@ -199,11 +209,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: ./.github/actions/linux-deps
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Catalog and literal lint
         run: cargo run --locked -p xtask -- l10n check
       - name: Repository catalogs are clean (F19)
@@ -218,7 +228,7 @@ jobs:
       LANG: tr_TR.UTF-8
       LC_ALL: tr_TR.UTF-8
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: ./.github/actions/linux-deps
@@ -230,7 +240,7 @@ jobs:
       # ## m3a-t01a-proofs
       - name: libclang (pg_query bindgen)
         uses: ./.github/actions/libclang
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Test (1/4) workspace
         run: cargo test --workspace --locked
       - name: Test (2/4) ui-core, test-support + scene-check
@@ -272,7 +282,7 @@ jobs:
       matrix:
         os: [macos-15, ubuntu-24.04]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - name: Linux system dependencies (GPUI)
@@ -296,7 +306,7 @@ jobs:
       # ## m3a-t01a-proofs
       - name: libclang (pg_query bindgen)
         uses: ./.github/actions/libclang
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Detect the shell tests
         id: guard
         env:
@@ -331,7 +341,7 @@ jobs:
       matrix:
         os: [macos-15, windows-2022, ubuntu-24.04]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Detect the app shell
         id: guard
         shell: bash
@@ -370,7 +380,7 @@ jobs:
       - name: libclang (pg_query bindgen)
         if: steps.guard.outputs.present == 'true'
         uses: ./.github/actions/libclang
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: steps.guard.outputs.present == 'true'
       - name: Build the release binary
         if: steps.guard.outputs.present == 'true'
@@ -420,10 +430,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # deny.toml [graph] targets cover macOS, Windows and Linux; --all-features covers the
       # scene-check dependencies (F28).
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2.1.3
         with:
           command: check licenses bans sources
           arguments: --all-features
@@ -435,11 +445,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: ./.github/actions/linux-deps
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Test (5/5) l10n, release
         run: cargo test --release --locked -p hacivat-l10n --features pseudo
 
@@ -449,7 +459,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
@@ -459,7 +469,7 @@ jobs:
       # ## m3a-t01a-proofs
       - name: libclang (pg_query bindgen)
         uses: ./.github/actions/libclang
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       # ## m3a-t20-bench: the synthetic B1 runs the real grid (`hacivat-ui-grid`'s `b1_synthetic`
       # example) in place of `spike-grid`, which stays in the tree as the frozen M0 record.
@@ -504,7 +514,7 @@ jobs:
         run: xvfb-run -a cargo run --locked --release -p hacivat-app --features bench --example b1_real -- --engine sqlite --any-display --allow-inactive
 
       - name: Upload bench JSON (regression signal only, not authoritative)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bench-regression-signal-only-not-authoritative
           path: target/bench/*.json
@@ -522,7 +532,7 @@ jobs:
       matrix:
         os: [macos-15, windows-2022, ubuntu-24.04]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install pinned toolchain
         shell: bash
         run: rustup show active-toolchain || rustup toolchain install
@@ -551,7 +561,7 @@ jobs:
       # ## m3a-t01a-proofs
       - name: libclang (pg_query bindgen)
         uses: ./.github/actions/libclang
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install cargo-packager
         shell: bash
         run: cargo install cargo-packager --locked --version '^0.11'
@@ -585,7 +595,7 @@ jobs:
           NIGHTLY_VERSION: ${{ steps.version.outputs.value }}
         run: ./packaging/package-windows.ps1 $env:NIGHTLY_VERSION
       - name: Upload unsigned packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hacivat-nightly-unsigned-${{ runner.os }}
           path: |
@@ -614,7 +624,7 @@ jobs:
           - { os: ubuntu-24.04, part: 1, parts: 2 }
           - { os: ubuntu-24.04, part: 2, parts: 2 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Detect the screen harness
         id: guard
         shell: bash
@@ -649,7 +659,7 @@ jobs:
       - name: libclang (pg_query bindgen)
         if: steps.guard.outputs.present == 'true'
         uses: ./.github/actions/libclang
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: steps.guard.outputs.present == 'true'
       - name: Render the pseudo-locale screens
         if: steps.guard.outputs.present == 'true'
@@ -662,7 +672,7 @@ jobs:
       # A failing render still uploads what it wrote, so the violations can be looked at.
       - name: Upload screens
         if: always() && steps.guard.outputs.present == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pseudo-screens-${{ runner.os }}-${{ matrix.part }}
           path: target/shots/**
@@ -698,13 +708,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       # ## m3a-t01a-proofs
       - name: libclang (pg_query bindgen)
         uses: ./.github/actions/libclang
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Test (5) driver, fake
         run: cargo test --locked -p hacivat-driver --features fake
       # ## m2b-t16-docker-matrix
@@ -730,13 +740,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       # ## m3a-t01a-proofs
       - name: libclang (pg_query bindgen)
         uses: ./.github/actions/libclang
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Check image digest pins
         run: cargo run --locked -p xtask -- docker check-pins
       - name: Start every server
@@ -771,7 +781,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: Scope (a PR runs only when it touches the snapshots' inputs)
@@ -792,7 +802,7 @@ jobs:
       - name: libclang (pg_query bindgen)
         if: steps.scope.outputs.run == 'true'
         uses: ./.github/actions/libclang
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: steps.scope.outputs.run == 'true'
       - name: Check image digest pins
         if: steps.scope.outputs.run == 'true'
@@ -827,7 +837,7 @@ jobs:
           diff -r "$RUNNER_TEMP/minicat-1/verify" "$RUNNER_TEMP/minicat-2/verify"
       - name: Upload the regenerated snapshots
         if: always() && steps.scope.outputs.run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: system-catalogs
           # ## m4-t23-minicat (fix round 1, review m-5): the per-read builds `out-1`/`out-2`
@@ -862,10 +872,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install the Secret Service
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring dbus-x11
       - name: Live keyring round trip (gnome-keyring over D-Bus)
@@ -878,10 +888,10 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Live keyring round trip (Windows Credential Manager)
         env:
           HACIVAT_KEYRING_LIVE: "1"
@@ -895,10 +905,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Vault fallback without a Secret Service
         run: cargo test --locked -p hacivat-secrets --test fallback -- --include-ignored linux_without_secret_service_uses_vault
 
@@ -918,7 +928,7 @@ jobs:
       # A dated nightly, so a crash reproduces with the same compiler (fix round 1, m8).
       FUZZ_NIGHTLY: nightly-2026-11-01
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install the pinned nightly and cargo-fuzz
         run: |
           rustup toolchain install "$FUZZ_NIGHTLY" --profile minimal
@@ -962,7 +972,7 @@ jobs:
           if [ -n "$failed" ]; then echo "fuzz targets that found a failure:$failed"; exit 1; fi
       - name: Upload crashes
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fuzz-sql-artifacts
           path: fuzz/artifacts/
@@ -986,7 +996,7 @@ jobs:
     env:
       FUZZ_NIGHTLY: nightly-2026-11-01
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install the pinned nightly and cargo-fuzz
         run: |
           rustup toolchain install "$FUZZ_NIGHTLY" --profile minimal
@@ -1013,18 +1023,20 @@ jobs:
             [ -e "$f" ] && cp "$f" fuzz/meta/corpus/pack_parse/
           done
           true
+      # ## m4-t33a-hygiene (named exception; T23 review m-2): `-max_len` 131072, above the
+      # largest committed snapshot (postgres-18, ~67 KB), so no seed is truncated.
       - name: Run each target for 10 minutes (every target runs; the step fails after all)
         run: |
           failed=""
           for t in catalog_row_decode system_snapshot_decode scope_pattern pack_parse; do
-            if ! cargo +"$FUZZ_NIGHTLY" fuzz run --fuzz-dir fuzz/meta --release $t fuzz/meta/corpus/$t -- -max_total_time=600 -max_len=65536 -rss_limit_mb=4096; then
+            if ! cargo +"$FUZZ_NIGHTLY" fuzz run --fuzz-dir fuzz/meta --release $t fuzz/meta/corpus/$t -- -max_total_time=600 -max_len=131072 -rss_limit_mb=4096; then
               failed="$failed $t"
             fi
           done
           if [ -n "$failed" ]; then echo "fuzz targets that found a failure:$failed"; exit 1; fi
       - name: Upload crashes
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fuzz-meta-artifacts
           path: fuzz/meta/artifacts/
@@ -1041,12 +1053,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - name: libclang (pg_query bindgen)
         uses: ./.github/actions/libclang
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Fetch the PostgreSQL regression corpus (REL_17_2, pinned digest)
         run: cargo xtask fetch-pg-regress --tag REL_17_2
       - name: PG regression differential
@@ -1060,7 +1072,7 @@ jobs:
       - name: bench-sql
         run: cargo xtask bench-sql --out target/bench/bench-sql.json
       - name: Upload bench-sql JSON (regression signal only, not authoritative)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bench-sql-regression-signal-only-not-authoritative
           path: target/bench/bench-sql.json

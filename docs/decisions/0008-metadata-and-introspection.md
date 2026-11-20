@@ -2941,3 +2941,48 @@ and implements `sql_catalog::CatalogView` for it (HV-INTRO-16 consumer side; R-M
 - **G2 evidence.** `minicat --verify` prints one `HV-FACT g2 file=… compared=file-bytes …
   equal=…` line per snapshot file (the raw `.hvsnap.zst` bytes, never the decompressed JSON)
   and a closing `HV-FACT g2 files=N equal=N verdict=…` line. The CI job is unchanged.
+
+## m4-t33a — core hygiene ahead of the gate
+
+The core-only T33 carries, done before the gate while Task 32 holds the app crates.
+
+- **Engine progress is published once per step.** The scheduler used to publish `progress`
+  when a task finished, before the follow-up it queued (a validation's pass, work a rebuild
+  freed) had started, so an observer saw a moment of idleness. Progress is now published by
+  the actor loop after `pump`. Tests that wait for a periodic round pass `ready()` (answered
+  by the loop after the round's step) before waiting for idle. Together these were the root
+  cause of the `background_validation_never_deletes_in_small_steps` flake.
+- **Pack lint, R-W3-9.** A quote (`'`, `"`, a backtick) inside a comment of a section is
+  refused (`QuoteInComment`): a joined read of unknown engine lexes in MySQL's contexts too,
+  where `--` without a space is two minus signs and the quote opens a literal, so the guard
+  would refuse every read of the section. File headers are free.
+- **Pack lint, T16 H8.** In a `joinable` PostgreSQL section every operator is
+  `OPERATOR(pg_catalog.op)`; `LIKE`/`ILIKE`/`SIMILAR`, `BETWEEN`, `NULLIF`, `IN` without a
+  list bind, `IS [NOT] DISTINCT FROM` and a simple `CASE` are refused
+  (`PathResolvedOperator`). SQL-syntax words are exempt from the joinable function rule only
+  unquoted.
+- **Joinable PG list binds (T15b n-1).** Each element is rendered `CAST($n AS
+  pg_catalog.oid)`, so `IN` resolves `pg_catalog.=(oid, oid)` whatever parameter types the
+  driver sends; R-W5-5's path check no longer depends on untyped prepares.
+- **DDL roles (T16b m-1).** The PostgreSQL renderer refuses `public` and `none` as a grantee
+  or owner (the role grammar reads them as keywords, quoted or not). An owner `PUBLIC` is a
+  role of that upper-case name and is rendered quoted (fix round 1, N2).
+- **`minicat --check`** refuses an empty set now that the set is committed (T23 m-4).
+- **Actions are pinned by commit SHA** (T23 m-6), enforced by the check-deps rule
+  `ActionNotPinnedBySha`.
+- **`icu_casemap` left `sql-ident`** (plan Task 33 step 1): R-M4-41's folds are pinned as
+  tables (Task 17b), never through ICU case mapping.
+- **The MySQL/MariaDB column-fold pin** is probed on mariadb106 and mariadb1011 too (T17b m-4);
+  it now rests on mysql80, mysql84, mariadb106, mariadb1011 and mariadb114.
+- **The test fakes stay public (R-W3-7) until the gate**: gating them behind a `test-fakes`
+  feature needs `hacivat-app`'s dev-dependency to enable it, an app manifest edit for T33.
+- **Fix round 1 (review).**
+  - The joinable PostgreSQL lint also refuses `USING` and `NATURAL` (a join's implicit `=`),
+    and requires `pg_catalog.<type>` after `::`, after a `CAST(`'s `AS` and in a typed literal
+    (`PathResolvedType`), so the `50-joined` header's "every cast names a pg_catalog type" is
+    checked.
+  - `ActionNotPinnedBySha` finds a `uses` key in every YAML form (flow mapping, quoted,
+    `uses :`), requires `@sha256:` for `docker://` images and reports an unreadable file.
+  - `IntroHandle::ready()` is documented as an actor-order barrier, and progress as
+    consistent at step ends only (a ticket can resolve a moment before progress drops its
+    task).
