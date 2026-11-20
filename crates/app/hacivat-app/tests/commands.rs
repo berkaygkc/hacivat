@@ -801,11 +801,11 @@ fn restart_asks_the_platform_to_restart(cx: &mut TestAppContext) {
 fn restart_flushes_pending_writes_before_restarting(cx: &mut TestAppContext) {
     use hacivat_app::shell::update_settings;
     use hacivat_settings::ThemePref;
-    let root = tempfile::tempdir().unwrap();
-    let vcx = shell_at(cx, root.path(), "en");
+    let root = temp_root();
+    let vcx = shell_at(cx, root.as_path(), "en");
     let mut restarted = vcx.cx.expect_restart();
-    let settings = root.path().join("config/settings.toml");
-    let layout_file = root.path().join("data/workspace.json");
+    let settings = root.as_path().join("config/settings.toml");
+    let layout_file = root.as_path().join("data/workspace.json");
     assert!(!layout_file.exists());
     let ws = workspace(vcx);
     let written_at_restart = in_window(vcx, |window, cx| {

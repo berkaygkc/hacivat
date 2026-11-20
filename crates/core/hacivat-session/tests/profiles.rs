@@ -15,14 +15,24 @@ use hacivat_session::profile::{
 
 // ---- helpers ---------------------------------------------------------------------------------
 
-/// A fresh temp directory that lives until the process ends.
+/// A fresh temp directory, removed when it is dropped.
 fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir().expect("temp dir")
 }
 
-/// A path named `name` in a fresh temp directory (the file does not exist yet).
+thread_local! {
+    /// Keeps each [`tmp`] directory until the test thread ends, then removes it.
+    static DIRS: std::cell::RefCell<Vec<tempfile::TempDir>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A path named `name` in a fresh temp directory (the file does not exist yet) that lives until
+/// the test thread ends.
 fn tmp(name: &str) -> PathBuf {
-    tempdir().keep().join(name)
+    let dir = tempdir();
+    let path = dir.path().join(name);
+    DIRS.with(|d| d.borrow_mut().push(dir));
+    path
 }
 
 /// `connections.toml` with `text`, in a fresh temp directory.

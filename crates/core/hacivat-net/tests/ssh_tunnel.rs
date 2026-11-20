@@ -73,10 +73,14 @@ async fn settle_until(what: &str, f: impl Fn() -> bool) {
     assert!(f(), "{what}");
 }
 
-/// One temp directory for every store of this test binary.
-fn dir() -> &'static Path {
-    static DIR: OnceLock<TempDir> = OnceLock::new();
-    DIR.get_or_init(|| tempfile::tempdir().unwrap()).path()
+thread_local! {
+    /// One temp directory for every store of this test thread, removed when the thread ends (a
+    /// process-wide static is never dropped, so its directory outlived every run).
+    static DIR: TempDir = tempfile::tempdir().unwrap();
+}
+
+fn dir() -> PathBuf {
+    DIR.with(|d| d.path().to_path_buf())
 }
 
 /// The store directory of the server `s` alone. Its port and its (fresh) host key name it: a
@@ -300,7 +304,10 @@ fn ed25519() -> PrivateKey {
 }
 
 static KEY_A: LazyLock<PrivateKey> = LazyLock::new(ed25519);
-static KEY_A_FILE: LazyLock<PathBuf> = LazyLock::new(|| write_key(&KEY_A, None, "key_a"));
+/// `KEY_A` written (unencrypted) into this test thread's fixture folder.
+fn key_a_file() -> PathBuf {
+    write_key(&KEY_A, None, "key_a")
+}
 
 /// Writes `key` in OpenSSH form (encrypted with `passphrase` when given), mode `0600`.
 fn write_key(key: &PrivateKey, passphrase: Option<&str>, name: &str) -> PathBuf {
@@ -708,7 +715,7 @@ async fn identities_only_tries_the_key_file_first() {
         .max_auth_tries(1))
     .await;
     let agent = agent_with_wrong_keys(5).await;
-    let r = req_key(&s, &KEY_A_FILE).identities_only(true);
+    let r = req_key(&s, &key_a_file()).identities_only(true);
     assert!(
         mgr_agent(&s, &agent.socket)
             .acquire(r, None, tok())
@@ -716,7 +723,7 @@ async fn identities_only_tries_the_key_file_first() {
             .is_ok()
     );
     // Without IdentitiesOnly the agent goes first and exhausts MaxAuthTries.
-    let r = req_key(&s, &KEY_A_FILE).identities_only(false).no_share();
+    let r = req_key(&s, &key_a_file()).identities_only(false).no_share();
     let e = mgr_agent(&s, &agent.socket)
         .acquire(r, None, tok())
         .await
