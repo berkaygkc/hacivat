@@ -33,18 +33,24 @@ const SYSTEM: &str = "system";
 const UTC: &str = "UTC";
 
 /// The zones offered after System and UTC: one or two per inhabited region, west to east.
-pub const ZONES: [&str; 16] = [
+pub const ZONES: [&str; 21] = [
     "America/Los_Angeles",
     "America/Denver",
     "America/Chicago",
     "America/New_York",
     "America/Sao_Paulo",
     "Europe/London",
+    // ## m4-t32-shots (fix round 1, review N-3, controller ruling): Africa, Moscow, Jakarta.
+    "Africa/Lagos",
     "Europe/Berlin",
     "Europe/Paris",
+    "Africa/Cairo",
+    "Africa/Johannesburg",
     "Europe/Istanbul",
+    "Europe/Moscow",
     "Asia/Dubai",
     "Asia/Kolkata",
+    "Asia/Jakarta",
     "Asia/Singapore",
     "Asia/Shanghai",
     "Asia/Tokyo",
@@ -83,17 +89,58 @@ pub fn values(saved: &TimeZonePref) -> Vec<String> {
     out
 }
 
+// ## m4-t32-shots (fix round 1, review M-3)
+/// The zone sessions and formats use for `pref`: a well-formed name the tz database does not
+/// know fails closed to the system zone (never sent to a server).
+pub fn session_zone(pref: &TimeZonePref) -> TimeZonePref {
+    match pref {
+        TimeZonePref::Iana(z) if !hacivat_l10n::effective::is_known_zone(z) => TimeZonePref::System,
+        other => other.clone(),
+    }
+}
+
+/// The saved zone when it is one the tz database does not know (the row says so).
+pub fn unknown_zone(settings: &Settings) -> Option<String> {
+    match &settings.ui.time_zone {
+        TimeZonePref::Iana(z) if !hacivat_l10n::effective::is_known_zone(z) => Some(z.clone()),
+        _ => None,
+    }
+}
+
+/// "System (Europe/Istanbul)".
+fn system_label(cx: &App) -> SharedString {
+    let zone = system_zone(cx);
+    crate::explorer::live::text(
+        cx,
+        "hv-settings-time-zone-system",
+        vec![("zone", ArgValue::Text(zone))],
+    )
+}
+
+/// The notice under the row while the saved zone is unknown.
+pub fn unknown_note(zone: &str, cx: &App) -> SharedString {
+    crate::explorer::live::text(
+        cx,
+        "hv-settings-time-zone-unknown",
+        vec![
+            ("zone", ArgValue::Text(zone.to_string())),
+            ("system", ArgValue::Text(system_label(cx).to_string())),
+        ],
+    )
+}
+
 fn label(value: String) -> TextFn {
     match value.as_str() {
-        SYSTEM => Rc::new(|cx: &App| {
-            let zone = system_zone(cx);
+        SYSTEM => Rc::new(system_label),
+        UTC => text_fn(ids::hv::SETTINGS_TIME_ZONE_UTC),
+        // Fix round 1 (review M-3): a saved zone the tz database does not know says so.
+        z if !hacivat_l10n::effective::is_known_zone(z) => Rc::new(move |cx: &App| {
             crate::explorer::live::text(
                 cx,
-                "hv-settings-time-zone-system",
-                vec![("zone", ArgValue::Text(zone))],
+                "hv-settings-time-zone-unknown-choice",
+                vec![("zone", ArgValue::Text(value.clone()))],
             )
         }),
-        UTC => text_fn(ids::hv::SETTINGS_TIME_ZONE_UTC),
         _ => {
             let shown = SharedString::from(value);
             Rc::new(move |_: &App| shown.clone())

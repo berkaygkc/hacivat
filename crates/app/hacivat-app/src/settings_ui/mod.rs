@@ -499,6 +499,38 @@ impl SettingsPage {
             REGIONAL_FORMAT => {
                 control = control.child(self.regional_preview(theme, cx));
             }
+            // ## m4-t32-shots (fix round 1, review M-3): an unknown saved zone is not used,
+            // and the row says so (info glyph, text-2).
+            time_zone::TIME_ZONE => {
+                if let Some(zone) = time_zone::unknown_zone(settings) {
+                    let text = time_zone::unknown_note(&zone, cx);
+                    control = control.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .gap(px(t.spacing.sm))
+                            .child(
+                                div().flex_none().pt(px(2.0)).child(
+                                    Icon::new(IconName::Info)
+                                        .size(IconSize::Chrome)
+                                        .color(c.text_2.to_hsla()),
+                                ),
+                            )
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    paragraph(
+                                        text,
+                                        TextSource::Fluent,
+                                        t.type_ramp.caption,
+                                        c.text_2.to_hsla(),
+                                    )
+                                    .id("settings-time-zone-unknown"),
+                                ),
+                            ),
+                    );
+                }
+            }
             TEXT_RENDERING => {
                 if let Some(note) = self.restart_note(settings, theme, cx) {
                     control = control.child(note);

@@ -1237,3 +1237,34 @@ fn a_hand_edited_time_zone_shows_as_one_more_choice(cx: &mut TestAppContext) {
     assert_eq!(labels.last().map(String::as_str), Some("America/Halifax"));
     assert_eq!(selected, labels.len() - 1);
 }
+
+// ## m4-t32-shots (fix round 1, review M-3): a well-formed zone the tz database does not know
+// fails closed to the system zone, and the row says so.
+#[gpui::test]
+fn an_unknown_time_zone_fails_closed_with_a_notice(cx: &mut TestAppContext) {
+    let (vcx, _paths) = settings_tab_with(cx, support_platform(), "us", "Mars/Olympus");
+    vcx.cx
+        .update(|cx| settings_fixtures::show_section(Section::General, cx));
+    vcx.run_until_parked();
+    let (labels, selected) = vcx
+        .cx
+        .read(settings_fixtures::time_zone_choices)
+        .expect("the time zone select");
+    assert_eq!(selected, labels.len() - 1);
+    assert_eq!(strip(&labels[selected]), "Mars/Olympus (unknown)");
+    let note = text_of(vcx, "settings-time-zone-unknown").expect("the notice");
+    assert_eq!(
+        strip(&note),
+        "Mars/Olympus isn't a time zone Hacivat knows, so System (UTC) is used."
+    );
+    // The formats use the system zone (UTC in tests).
+    let zone = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::l10n_global::L10nGlobal>()
+            .l10n
+            .snapshot()
+            .format
+            .time_zone
+            .clone()
+    });
+    assert_eq!(zone, "UTC");
+}

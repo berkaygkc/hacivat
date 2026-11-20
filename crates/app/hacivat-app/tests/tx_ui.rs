@@ -873,6 +873,33 @@ fn the_settings_time_zone_reaches_the_sessions(cx: &mut TestAppContext) {
     stop_core_runtime_test(cx);
 }
 
+// ## m4-t32-shots (fix round 1, review M-3): a well-formed zone the tz database does not know
+// fails closed: sessions get the system zone (nothing is sent), never the unknown name.
+#[gpui::test]
+fn an_unknown_time_zone_is_never_sent_to_a_session(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(cx, "en", pg());
+    add_profile(
+        vcx,
+        test_profile(STAGING, Some(EnvTag::Staging), "10.0.4.13"),
+    );
+    vcx.cx.update(|cx| {
+        hacivat_app::shell::update_settings(cx, |s| {
+            s.ui.time_zone = hacivat_settings::TimeZonePref::Iana("Mars/Olympus".into());
+        });
+    });
+    vcx.run_until_parked();
+    connect_and_wait(vcx, STAGING);
+    assert!(
+        !fake(vcx)
+            .executed()
+            .iter()
+            .any(|s| s.contains("TIME ZONE") || s.contains("Mars")),
+        "{:?}",
+        fake(vcx).executed()
+    );
+    stop_core_runtime_test(cx);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Fix round 1
 
@@ -1041,9 +1068,11 @@ fn a_refused_time_zone_keeps_retry_and_says_so(cx: &mut TestAppContext) {
         vcx,
         test_profile(STAGING, Some(EnvTag::Staging), "10.0.4.13"),
     );
+    // ## m4-t32-shots (fix round 1, review M-3; named exception): a zone the tz database
+    // knows (an unknown one is never sent any more); the fake server refuses it.
     vcx.cx.update(|cx| {
         hacivat_app::shell::update_settings(cx, |s| {
-            s.ui.time_zone = hacivat_settings::TimeZonePref::Iana("Mars/Olympus".into());
+            s.ui.time_zone = hacivat_settings::TimeZonePref::Iana("America/Halifax".into());
         });
     });
     vcx.run_until_parked();
@@ -1056,7 +1085,7 @@ fn a_refused_time_zone_keeps_retry_and_says_so(cx: &mut TestAppContext) {
         hacivat_ui::capsule::CapsuleModel::Failed { label, retry, .. } => {
             assert_eq!(
                 label.replace(['\u{2068}', '\u{2069}'], ""),
-                "The server refused time zone Mars/Olympus"
+                "The server refused time zone America/Halifax"
             );
             assert_eq!(retry.as_ref(), "Retry");
         }

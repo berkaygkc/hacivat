@@ -138,7 +138,9 @@ pub fn effective(s: &Settings, os: &OsLocale, allow_pseudo: bool) -> EffectiveLo
 }
 
 /// Whether the tz database knows `zone` (an IANA ID or alias); the formatters use the same data.
-fn is_known_zone(zone: &str) -> bool {
+// ## m4-t32-shots (fix round 1, review M-3; named exception): public, so the app's Settings
+// row and its sessions fail closed on the same check the formats use.
+pub fn is_known_zone(zone: &str) -> bool {
     jiff::tz::TimeZone::get(zone).is_ok()
 }
 

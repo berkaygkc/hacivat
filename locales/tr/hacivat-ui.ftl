@@ -3720,3 +3720,14 @@ hv-history-cleared = { $name } için sorgu geçmişi temizlendi.
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 # Review: PO
 hv-history-clear-failed = { $name } için sorgu geçmişi temizlenemedi. Hiçbir şey değişmedi.
+# Settings › General (fix round 1, review M-3). A saved zone the time zone database does not know, as a choice.
+# Variables:
+#   $zone (String) - an IANA time zone, verbatim, e.g. "Europe/Istanbul".
+# Review: PO
+hv-settings-time-zone-unknown-choice = { $zone } (bilinmiyor)
+# Settings › General (fix round 1, review M-3). The notice under the row while the saved zone is unknown.
+# Variables:
+#   $zone (String) - an IANA time zone, verbatim, e.g. "Europe/Istanbul".
+#   $system (String) - the system choice as the select shows it, e.g. "System (Europe/Istanbul)".
+# Review: PO
+hv-settings-time-zone-unknown = { $zone } Hacivat'ın tanıdığı bir saat dilimi değil, bu yüzden { $system } kullanılıyor.

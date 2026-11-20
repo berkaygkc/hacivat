@@ -4074,3 +4074,12 @@ hv-history-cleared = The query history of { $name } was cleared.
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 hv-history-clear-failed = The query history of { $name } couldn't be cleared. Nothing changed.
+# Settings › General (fix round 1, review M-3). A saved zone the time zone database does not know, as a choice.
+# Variables:
+#   $zone (String) - an IANA time zone, verbatim, e.g. "Europe/Istanbul".
+hv-settings-time-zone-unknown-choice = { $zone } (unknown)
+# Settings › General (fix round 1, review M-3). The notice under the row while the saved zone is unknown.
+# Variables:
+#   $zone (String) - an IANA time zone, verbatim, e.g. "Europe/Istanbul".
+#   $system (String) - the system choice as the select shows it, e.g. "System (Europe/Istanbul)".
+hv-settings-time-zone-unknown = { $zone } isn't a time zone Hacivat knows, so { $system } is used.
