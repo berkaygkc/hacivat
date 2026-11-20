@@ -919,7 +919,7 @@ const QUERY_REFUSED: [&str; 13] = [
 ];
 
 /// Words followed by `(` that are SQL syntax, not a function call.
-pub(crate) const SYNTAX: [&str; 55] = [
+pub(crate) const SYNTAX: [&str; 56] = [
     "in",
     "exists",
     "any",
@@ -975,6 +975,9 @@ pub(crate) const SYNTAX: [&str; 55] = [
     "end",
     "having",
     "group",
+    // ## m4-t16-pg (named exception, review I-4): `OPERATOR(pg_catalog.=)`, the qualified
+    // operator syntax joinable sections use so no operator resolves through `search_path`.
+    "operator",
 ];
 
 /// The function called at `toks[j]`, if `j` is a call: a word (or quoted name) followed by

@@ -599,6 +599,11 @@ mod tests {
         for d in [DialectId::Postgres, DialectId::MySql] {
             for (name, text) in files_of(d).unwrap() {
                 assert!(!text.is_empty(), "{d:?} {name}");
+                // ## m4-t16-pg (named exception): Task 16 wrote the PostgreSQL core, state and
+                // system files; `20-facets` stays a header until Task 16b.
+                if d == DialectId::Postgres && *name != "20-facets" {
+                    continue;
+                }
                 assert!(
                     text.lines().all(|l| l.starts_with("-- ")),
                     "{d:?} {name}: only comment lines until Tasks 16–18"
@@ -612,6 +617,11 @@ mod tests {
     fn the_builtin_packs_parse_to_no_section_until_tasks_16_to_18() {
         for d in [DialectId::Postgres, DialectId::MySql, DialectId::MariaDb] {
             let p = Pack::builtin(d).unwrap();
+            // ## m4-t16-pg (named exception): the PostgreSQL pack has Task 16's sections.
+            if d == DialectId::Postgres {
+                assert!(p.section("Identity").is_some() && p.section("Canary").is_some());
+                continue;
+            }
             assert!(p.sections().is_empty(), "{d:?}");
         }
         // ## m4-t18-sqlite (named exception): Task 18 wrote the SQLite sections.

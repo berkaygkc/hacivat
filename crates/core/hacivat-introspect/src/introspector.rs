@@ -344,9 +344,14 @@ mod tests {
             let caps = introspector_for(dbms).expect("an M4 engine").capabilities();
             assert_eq!(caps.dbms, dbms);
             assert_eq!(caps.transactional_ddl, transactional, "{dbms:?}");
+            // ## m4-t16-pg (named exception): PostgreSQL is incremental since Task 16.
             // ## m4-t18-sqlite (named exception): SQLite's introspector is written (Task 18).
-            if dbms != DbmsKind::Sqlite {
-                assert!(!caps.incremental && caps.facets.is_empty(), "{dbms:?}");
+            match dbms {
+                DbmsKind::Postgres => {
+                    assert!(caps.incremental && caps.facets.is_empty(), "{dbms:?}");
+                }
+                DbmsKind::Sqlite => {}
+                _ => assert!(!caps.incremental && caps.facets.is_empty(), "{dbms:?}"),
             }
         }
         assert!(introspector_for(DbmsKind::MsSql).is_none());
