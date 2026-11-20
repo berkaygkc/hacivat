@@ -545,3 +545,456 @@ pub fn rig_with_clock(
     )
 }
 // ## m4-t22-freshness
+
+// ## m4-t28-matrix
+/// Gate G4 (Task 28, `docker_m4_matrix.rs`): the incremental-equals-full oracle, the
+/// `HV-FACT` record and the per-step TSV.
+pub mod g4 {
+    use std::io::Write as _;
+    use std::path::PathBuf;
+
+    use hacivat_meta::NamespaceSnapshot;
+
+    /// Every fact of `ns` the oracle compares, one line each: first the namespace's key,
+    /// engine, stored fold rule, level and object count, then every object, the root
+    /// included, sorted, as its key (kind, path, server id, overload signature), state mark,
+    /// flags and properties. Only `loaded_at`, the generation and the namespace watermark are
+    /// left out.
+    pub fn canon(ns: &NamespaceSnapshot) -> Vec<String> {
+        let mut v: Vec<String> = (0..ns.len() as u32)
+            .map(|i| {
+                let o = ns.obj(i).expect("an object");
+                let k = ns.object_key(i).expect("its key");
+                format!(
+                    "{k:?} | {:?} | {:?} | {:?}",
+                    o.state(),
+                    o.flags(),
+                    o.props()
+                )
+            })
+            .collect();
+        v.sort();
+        v.insert(
+            0,
+            format!(
+                "namespace {:?} {:?} {:?} {:?} objects={}",
+                ns.key(),
+                ns.dbms(),
+                ns.fold(),
+                ns.meta().level,
+                ns.len()
+            ),
+        );
+        v
+    }
+
+    /// The lines only in `got` and only in `want` (both empty when the two are equal).
+    pub fn diff(got: &NamespaceSnapshot, want: &NamespaceSnapshot) -> (Vec<String>, Vec<String>) {
+        let (g, w) = (canon(got), canon(want));
+        let only_got = g.iter().filter(|x| !w.contains(x)).cloned().collect();
+        let only_want = w.iter().filter(|x| !g.contains(x)).cloned().collect();
+        (only_got, only_want)
+    }
+
+    /// Panics naming every differing line when the incremental namespace `inc` is not the
+    /// fresh full one `full` (the G4 oracle).
+    pub fn assert_equal(label: &str, inc: &NamespaceSnapshot, full: &NamespaceSnapshot) {
+        let (only_inc, only_full) = diff(inc, full);
+        assert!(
+            only_inc.is_empty() && only_full.is_empty(),
+            "{label}: incremental differs from full\n only incremental: {only_inc:#?}\n only full: {only_full:#?}"
+        );
+    }
+
+    /// Prints `HV-FACT <line>` straight to the process's stdout: libtest captures only the
+    /// `print!` family, so the line reaches the CI log of a passing test too (R-W3-14; CI
+    /// uploads no artifact directory). Lines are server facts and step names, never a
+    /// password or a fixture statement.
+    pub fn fact(line: &str) {
+        let text = format!("HV-FACT {}\n", line.replace('\n', " "));
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(text.as_bytes());
+        let _ = out.flush();
+    }
+
+    /// One matrix cell that held: `HV-FACT g4 <target> <case> incremental==full`.
+    pub fn cell(target: &str, case: &str) {
+        fact(&format!("g4 {target} {case} incremental==full"));
+    }
+
+    /// The per-step artifact `target/docker/t28-g4-<name>.tsv` (target, step, changed parents,
+    /// queries issued, incremental == full). Written when dropped, also on a panic, so the
+    /// steps before a failing one are kept; nothing is written outside a Docker run.
+    pub struct Tsv {
+        path: Option<PathBuf>,
+        rows: Vec<String>,
+    }
+
+    impl Tsv {
+        pub fn new(name: &str) -> Tsv {
+            let path = hacivat_testkit::docker_enabled()
+                .then(|| hacivat_testkit::artifact(&format!("t28-g4-{name}.tsv")));
+            Tsv {
+                path,
+                rows: vec!["target\tstep\tchanged_parents\tqueries\tincremental_eq_full".into()],
+            }
+        }
+
+        /// One step; `changed` and `queries` are `-` where the engine reports none.
+        pub fn row(&mut self, target: &str, step: &str, changed: &str, queries: &str, eq: bool) {
+            self.rows
+                .push(format!("{target}\t{step}\t{changed}\t{queries}\t{eq}"));
+        }
+    }
+
+    impl Drop for Tsv {
+        fn drop(&mut self) {
+            if let Some(p) = &self.path {
+                let mut text = self.rows.join("\n");
+                text.push('\n');
+                if let Err(e) = std::fs::write(p, text) {
+                    eprintln!("t28: could not write {}: {e}", p.display());
+                }
+            }
+        }
+    }
+}
+
+/// MySQL and MariaDB sessions for Task 28 (the T17 harness, shared): a metadata connection on
+/// its own connected manager, writable `hv_test`/`hv_fixture` connections for fixtures, the
+/// server clock, an `hvm4_t28_*` database and a global-variable guard.
+pub mod my {
+    use std::ops::{Deref, DerefMut};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use hacivat_driver::{ExecOpts, Protocol, ServerMessage};
+    use hacivat_meta::NsKey;
+    use hacivat_proto::Department;
+    use hacivat_secrets::SecretString;
+    use hacivat_session::meta::{MetaConn, MetaConnSpec};
+    use hacivat_session::pipeline::{
+        ConnectRequest, Interaction, LiveConnection, Progress, Purpose, connect,
+    };
+    use hacivat_session::{ConnectionManager, LiveState, ManagerConfig};
+    use hacivat_testkit::DockerTarget;
+    use tokio::sync::watch;
+    use tokio_util::sync::CancellationToken;
+
+    use super::pg::{deps, profile_for};
+
+    /// Which account a statement runs as.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Login {
+        /// `hv_test`: the fixtures' DDL in `hvm4_*` databases.
+        Test,
+        /// `hv_fixture`: only the `hv_fixture_admin` definer procedures (`SET GLOBAL`).
+        Fixture,
+    }
+
+    fn password(t: &DockerTarget) -> SecretString {
+        SecretString::from(t.password.clone())
+    }
+
+    /// A metadata connection with the manager it lives on (dropping the manager would
+    /// disconnect the profile).
+    pub struct Meta {
+        conn: MetaConn,
+        _m: Arc<ConnectionManager>,
+    }
+
+    impl Deref for Meta {
+        type Target = MetaConn;
+        fn deref(&self) -> &MetaConn {
+            &self.conn
+        }
+    }
+
+    impl DerefMut for Meta {
+        fn deref_mut(&mut self) -> &mut MetaConn {
+            &mut self.conn
+        }
+    }
+
+    /// A read-only metadata connection of `t` on database `db`; the connect waits on the
+    /// profile's state (60 s at most).
+    pub async fn meta(t: &DockerTarget, db: &str) -> Meta {
+        let m = ConnectionManager::new(
+            tokio::runtime::Handle::current(),
+            Arc::new(deps()),
+            ManagerConfig::m2b(),
+        );
+        let profile = Arc::new(profile_for(t, Some(db)));
+        m.connect(profile.clone(), Some(password(t)), Interaction::Headless);
+        let mut changes = m.changes();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match m.state(profile.id) {
+                LiveState::Connected(_) => break,
+                LiveState::Failed(e) => panic!("{}: connect failed: {:?}", t.id, e.class),
+                _ => {}
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{}: connect timed out",
+                t.id
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(200), changes.changed()).await;
+        }
+        let conn = m
+            .sessions(profile.id)
+            .expect("connected")
+            .meta_conn(
+                MetaConnSpec {
+                    profile: profile.id,
+                    database: None,
+                    statement_timeout: Duration::from_secs(120),
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{}: a metadata connection: {e:?}", t.id));
+        Meta { conn, _m: m }
+    }
+
+    /// A writable connection of `t` as `login` on `db` (never a metadata connection).
+    async fn admin(t: &DockerTarget, login: Login, db: Option<&str>) -> LiveConnection {
+        let (t, db) = match login {
+            Login::Test => (t.clone(), db),
+            // `hv_fixture` may sign in only to `information_schema` (testkit docs).
+            Login::Fixture => (t.as_fixture().expect("a MySQL-family target"), None),
+        };
+        connect(
+            &deps(),
+            ConnectRequest {
+                read_only: false,
+                profile: Arc::new(profile_for(&t, db)),
+                draft_password: Some(password(&t)),
+                purpose: Purpose::Main,
+                department: Department::Console,
+                prior_rejections: 0,
+                draft_ssh: Vec::new(),
+                overlay_secrets: None,
+                plaintext_consent: false,
+            },
+            Interaction::Headless,
+            CancellationToken::new(),
+            watch::Sender::new(Progress {
+                trail: Vec::new(),
+                current: None,
+                started: Instant::now(),
+            }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{} admin ({login:?}): {:?}", t.id, e.class))
+    }
+
+    /// MySQL's error number of a refusal (else the SQLSTATE, else the error kind).
+    fn code_of(m: Option<&ServerMessage>, kind: impl std::fmt::Debug) -> String {
+        match m {
+            Some(ServerMessage {
+                vendor_code: Some(c),
+                ..
+            }) => c.to_string(),
+            Some(ServerMessage {
+                sqlstate: Some(s), ..
+            }) => s.clone(),
+            _ => format!("{kind:?}"),
+        }
+    }
+
+    /// Runs `sql` as `login` on `db`; the server's error code when it fails. The statement
+    /// text is never printed (it may hold a fixture value).
+    pub async fn exec(
+        t: &DockerTarget,
+        login: Login,
+        db: Option<&str>,
+        sql: &str,
+    ) -> Result<(), String> {
+        let mut live = admin(t, login, db).await;
+        let out = live
+            .raw()
+            .batch(sql)
+            .await
+            .map_err(|e| code_of(e.server.as_ref(), &e.kind));
+        live.close().await;
+        out
+    }
+
+    /// The rows of `sql` as `hv_test` on `db`, every value as text (NULL as `""`).
+    pub async fn rows(t: &DockerTarget, db: Option<&str>, sql: &str) -> Vec<Vec<String>> {
+        let mut live = admin(t, Login::Test, db).await;
+        let answer = live
+            .raw()
+            .execute(
+                sql,
+                ExecOpts {
+                    max_rows: 100_000,
+                    protocol: Protocol::Simple,
+                },
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!("{}: `{sql}`: {}", t.id, code_of(e.server.as_ref(), &e.kind))
+            });
+        live.close().await;
+        answer
+            .rows
+            .into_iter()
+            .map(|r| r.into_iter().map(Option::unwrap_or_default).collect())
+            .collect()
+    }
+
+    /// [`exec`] on a fresh runtime thread, for drop guards. A failure is reported on stderr
+    /// with the target and the server's code only, never a panic inside a drop.
+    pub fn exec_blocking(t: &DockerTarget, login: Login, sql: &str) {
+        let (t, sql) = (t.clone(), sql.to_string());
+        let outcome = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime");
+            let got = rt.block_on(exec(&t, login, None, &sql));
+            (t.id, got)
+        })
+        .join();
+        match outcome {
+            Ok((_, Ok(()))) => {}
+            Ok((id, Err(code))) => {
+                eprintln!("{id}: a drop guard's {login:?} statement failed: {code}");
+            }
+            Err(_) => eprintln!("a drop guard's {login:?} statement panicked"),
+        }
+    }
+
+    /// One `hv_test` connection held for clock waits.
+    pub struct Clock {
+        live: LiveConnection,
+        id: String,
+    }
+
+    impl Clock {
+        pub async fn open(t: &DockerTarget) -> Clock {
+            Clock {
+                live: admin(t, Login::Test, None).await,
+                id: t.id.clone(),
+            }
+        }
+
+        /// The first value of the first row of `sql` on this connection (`""` for NULL or no
+        /// row).
+        pub async fn scalar(&mut self, sql: &str) -> String {
+            let answer = self
+                .live
+                .raw()
+                .execute(
+                    sql,
+                    ExecOpts {
+                        max_rows: 1,
+                        protocol: Protocol::Simple,
+                    },
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{}: `{sql}`: {}",
+                        self.id,
+                        code_of(e.server.as_ref(), &e.kind)
+                    )
+                });
+            answer
+                .rows
+                .first()
+                .and_then(|r| r.first())
+                .cloned()
+                .flatten()
+                .unwrap_or_default()
+        }
+
+        /// The server's UTC time, microseconds.
+        pub async fn now(&mut self) -> i64 {
+            let text = self.scalar("SELECT CAST(UTC_TIMESTAMP(6) AS CHAR)").await;
+            hacivat_introspect::mysql::rows::parse_time_micros(&text).expect("a time")
+        }
+
+        /// Waits until the server clock is past `micros`: a condition on `UTC_TIMESTAMP(6)`
+        /// read on this one connection, a few milliseconds between reads (no fixed sleep).
+        pub async fn wait_past(&mut self, micros: i64) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+            while self.now().await <= micros {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "{}: the server clock did not pass the mark",
+                    self.id
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        pub async fn close(self) {
+            self.live.close().await;
+        }
+    }
+
+    /// The database `hvm4_t28_<slug>`, dropped when the guard goes (also on panic).
+    pub struct Db {
+        pub t: DockerTarget,
+        pub name: String,
+    }
+
+    impl Db {
+        pub async fn create(t: &DockerTarget, slug: &str) -> Db {
+            let name = format!("hvm4_t28_{slug}");
+            exec(
+                t,
+                Login::Test,
+                None,
+                &format!("DROP DATABASE IF EXISTS `{name}`"),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{}: drop a leftover {name}: {e}", t.id));
+            exec(t, Login::Test, None, &format!("CREATE DATABASE `{name}`"))
+                .await
+                .unwrap_or_else(|e| panic!("{}: create {name}: {e}", t.id));
+            Db { t: t.clone(), name }
+        }
+
+        pub async fn run(&self, sql: &str) {
+            exec(&self.t, Login::Test, Some(&self.name), sql)
+                .await
+                .unwrap_or_else(|e| panic!("{}: `{sql}`: {e}", self.t.id));
+        }
+
+        pub fn ns(&self) -> NsKey {
+            NsKey::schema([self.name.as_str()])
+        }
+    }
+
+    impl Drop for Db {
+        fn drop(&mut self) {
+            exec_blocking(
+                &self.t,
+                Login::Test,
+                &format!("DROP DATABASE IF EXISTS `{}`", self.name),
+            );
+        }
+    }
+
+    /// Restores a global variable when it goes (also after a failure).
+    pub struct GlobalGuard {
+        pub t: DockerTarget,
+        pub name: &'static str,
+        pub value: String,
+    }
+
+    impl Drop for GlobalGuard {
+        fn drop(&mut self) {
+            exec_blocking(
+                &self.t,
+                Login::Fixture,
+                &hacivat_testkit::fixture_sql::set_global(self.name, &self.value),
+            );
+        }
+    }
+}
+// ## m4-t28-matrix

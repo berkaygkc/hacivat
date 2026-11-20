@@ -2487,3 +2487,36 @@ introspectors' own system-mode packs.
   `virtual-fks.toml` is Task 26's hand-authored input to the system layer (R-M4-12), not an
   input or output of the snapshot build, so it is in neither the digests nor the manifest
   (R-M4-17's manifest fields); Task 26's tests guard its rows.
+
+## m4-t28 — gate G4 (incremental refresh on the ver/01 matrix)
+
+- **Oracle.** After every step, the cached namespace merged with an incremental pass equals a
+  fresh `Full` pass of the same namespace, compared on the namespace's key, engine, fold
+  rule, level and object count and on every object, root included: key and server id,
+  `StateMark`, flags and properties. Only `loaded_at`, the generation and the namespace
+  watermark are left out (`tests/common` block `m4-t28-matrix`, `g4::canon`). A non-Docker
+  test proves that the oracle sees each compared field and ignores only those three.
+- **Narrow reads.** No step may pass by running `Full`: every incremental pass asserts
+  `full_reason == None` plus the step's ver/01 fact from the query log. On PostgreSQL:
+  CREATE INDEX re-reads the keys, never the relation row or the columns; COMMENT re-reads
+  only `Comments`; a removed table or column comment re-reads only `Comments`; DROP INDEX,
+  DROP TRIGGER, DROP TABLE, DROP AGGREGATE, INSERT and VACUUM ANALYZE re-read nothing (the
+  existence query decides). On MySQL, after the R-M4-39 window has passed, each step re-reads
+  exactly `tt`, and INSERT re-reads nothing.
+- **A removed index comment re-reads its relation's keys**, not only `Comments`: an index
+  comment belongs to the keys facet (`CommentOwner::RelKeys`, T16). The gate asserts "keys,
+  never the relation row or the columns" for that step instead of "Comments only".
+- **The Docker tests of `docker_m4_matrix` run one at a time** (a process-wide lock). If a
+  concurrent test's DDL transaction is still open when a pass takes its snapshot, that pass's
+  xmin (the next watermark) falls below an earlier step's commit, and the next pass re-reads
+  that step again. The result is still correct, but it is not the narrow read the step
+  asserts. The MySQL time-zone test also changes a server-wide setting.
+- **REVOKE USAGE on PostgreSQL** (alg/02 HV-INTRO-11 test 7) does not empty the existence set:
+  `pg_catalog` rows stay visible without schema `USAGE`, so nothing is dropped. The test
+  asserts that there is never a silent deletion: either the result is applied with no drops,
+  or the guard holds it. It records which case happened as an `HV-FACT` line. Then it proves
+  the guard fires on a live pass: 20 of 24 tables really dropped gives a background merge
+  `PendingConfirmation { vanished: 20 }`.
+- **Record.** Each cell that holds prints `HV-FACT g4 <target> <case> incremental==full`. The
+  per-step rows go to `target/docker/t28-g4-*.tsv`; the `g4` infix keeps them apart from M3's
+  `t28-*.tsv`.
