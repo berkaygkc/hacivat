@@ -358,6 +358,11 @@ impl Introspector for MySqlIntrospector {
         Box::pin(self.ns_check(c, ns))
     }
 
+    // ## m4-t22-state (named exception): the cached side T17 prepared for Task 22.
+    fn cached_check(&self, snap: &NamespaceSnapshot) -> Option<NsCheck> {
+        Some(state::ns_check(&state::top_marks_of(snap)))
+    }
+
     /// R-W3-3: [`MySqlIntrospector::server_fingerprint`]; a fact that cannot be read (or a
     /// failed read) is `Unknown`, which the engine treats fail-closed.
     fn identity<'a>(
