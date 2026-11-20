@@ -622,7 +622,12 @@ mod tests {
         let p = Pack::builtin(DialectId::Postgres).unwrap();
         assert!(p.section("Identity").is_some() && p.section("Canary").is_some());
         // ## m4-t17-mysql: the MySQL pack has Task 17's sections.
-        assert!(!Pack::builtin(DialectId::MySql).unwrap().sections().is_empty());
+        assert!(
+            !Pack::builtin(DialectId::MySql)
+                .unwrap()
+                .sections()
+                .is_empty()
+        );
         // ## m4-t18-sqlite (named exception): Task 18 wrote the SQLite sections.
         assert!(
             !Pack::builtin(DialectId::Sqlite)
