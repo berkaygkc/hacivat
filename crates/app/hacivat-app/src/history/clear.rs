@@ -136,27 +136,39 @@ pub fn ask(profile: ProfileId, cx: &mut App) {
         // A folder that can't be read offers nothing (the clear itself still works).
         let copies = listing.await.unwrap_or_default();
         cx.update(|cx| {
-            if !open_question(profile, copies, cx) {
+            open_question(profile, copies, cx);
+            // Fix round 2 (re-review R-1): the guard covers only the listing. This runs after
+            // the deferred open (FIFO), which has set the weak `OpenQuestion` that `ask` checks
+            // while the question is open; a question dropped without an event, or never opened
+            // (no workspace window), leaves nothing behind.
+            cx.defer(move |cx| {
                 cx.default_global::<Asking>().0.remove(&profile);
-            }
+            });
         });
     })
     .detach();
 }
 
 // ## m4-t33b-carries (fix round 1, review 7)
-/// The profiles whose clear question is being prepared or is open.
+/// The profiles whose clear question is being prepared (its folder listing runs; once it
+/// opens, the weak [`question`] covers it).
 #[derive(Default)]
 struct Asking(std::collections::HashSet<ProfileId>);
 
 impl Global for Asking {}
 
-/// Opens the question; `copies` are the damaged backups listed for it (the only ones the clear
-/// may delete, review 3). Answers whether it opened.
-fn open_question(profile: ProfileId, copies: Vec<std::path::PathBuf>, cx: &mut App) -> bool {
+/// Whether `profile`'s clear question is being prepared (tests).
+pub fn asking(profile: ProfileId, cx: &App) -> bool {
+    cx.try_global::<Asking>()
+        .is_some_and(|a| a.0.contains(&profile))
+}
+
+/// Opens the question (in the workspace window, after this update); `copies` are the damaged
+/// backups listed for it (the only ones the clear may delete, review 3).
+fn open_question(profile: ProfileId, copies: Vec<std::path::PathBuf>, cx: &mut App) {
     let backups = copies.len();
     let Some(name) = profile_name(profile, cx) else {
-        return false;
+        return;
     };
     let button = |label, kind| DialogButton {
         label,
@@ -204,13 +216,13 @@ fn open_question(profile: ProfileId, copies: Vec<std::path::PathBuf>, cx: &mut A
             });
         }
         cx.set_global(OpenQuestion(Some((profile, dialog.downgrade()))));
-        // Held until an event comes (the workspace removes the layer on the same event).
-        let mut keep = Some(dialog.clone());
+        // Fix round 2 (re-review R-1): no strong handle here. The workspace holds the layer
+        // and keeps the dialog alive until its event reached every subscriber
+        // (`Workspace::open_dialog`); a layer removed without an event (`pop_layer`, the
+        // window closing) releases it, so the weak `OpenQuestion` reads closed.
         let mut copies = copies;
         cx.subscribe(&dialog, move |_, event: &DialogEvent, cx| {
-            keep.take();
             cx.set_global(OpenQuestion(None));
-            cx.default_global::<Asking>().0.remove(&profile);
             if *event == DialogEvent::Pressed(CLEAR) {
                 let delete = if delete_backups.get() {
                     std::mem::take(&mut copies)
@@ -222,7 +234,6 @@ fn open_question(profile: ProfileId, copies: Vec<std::path::PathBuf>, cx: &mut A
         })
         .detach();
     });
-    true
 }
 
 /// How a clear went.

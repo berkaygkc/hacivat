@@ -1351,3 +1351,47 @@ fn asking_twice_opens_one_question(cx: &mut TestAppContext) {
     asked(h.vcx);
     stop_core_runtime_test(cx);
 }
+
+// ---- ## m4-t33b-carries (fix round 2, re-review R-1): the in-flight guard never sticks ------
+
+// A question whose layer goes without a dialog event (the workspace's own Escape path,
+// `pop_layer`) leaves the profile askable again.
+#[gpui::test]
+fn a_question_popped_without_an_event_can_be_asked_again(cx: &mut TestAppContext) {
+    let h = history(cx, &["SELECT 1"]);
+    wait_until(h.vcx, "the records in the store", |_| kept(&h).len() == 1);
+    let profile = h.profile;
+    h.vcx
+        .cx
+        .update(|cx| hacivat_app::history::clear::ask(profile, cx));
+    asked(h.vcx);
+    with_ws(h.vcx, |ws, window, cx| {
+        ws.pop_layer(window, cx);
+    });
+    h.vcx.run_until_parked();
+    assert!(!layer_ids(h.vcx).contains(&"dialog"));
+    h.vcx
+        .cx
+        .update(|cx| hacivat_app::history::clear::ask(profile, cx));
+    asked(h.vcx);
+    stop_core_runtime_test(cx);
+}
+
+// With no workspace window when the folder listing answers, no question opens, and the
+// profile is not left "being asked".
+#[gpui::test]
+fn a_question_with_no_window_to_open_in_leaves_no_guard(cx: &mut TestAppContext) {
+    let h = history(cx, &["SELECT 1"]);
+    wait_until(h.vcx, "the records in the store", |_| kept(&h).len() == 1);
+    let profile = h.profile;
+    in_window(h.vcx, |window, cx| {
+        hacivat_app::history::clear::ask(profile, cx);
+        window.remove_window();
+    });
+    wait_until(h.vcx, "the listing answered, the guard gone", |vcx| {
+        vcx.cx
+            .read(|cx| !hacivat_app::history::clear::asking(profile, cx))
+    });
+    assert_eq!(h.vcx.cx.read(hacivat_app::history::clear::question), None);
+    stop_core_runtime_test(cx);
+}

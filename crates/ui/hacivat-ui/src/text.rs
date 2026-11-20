@@ -289,6 +289,12 @@ impl Global for ClipBoxes {}
 /// inside the box that only an enclosing scroll viewport cuts at its fold counts as scrolled
 /// (a segmented control half under a dialog's fold), while text the box itself cuts stays
 /// clipped.
+///
+/// ## m4-t33b-carries (fix round 2, re-review R-2)
+/// **A box that calls it must not contain clips of its own** (no `overflow_hidden` or scroll
+/// element between it and its text): the check matches a label to the box by the clip the
+/// label is painted in, so an inner clip whose edge lies on the fold would pass as the box's
+/// and its cut would read as scrolled. `Segmented`'s segments do not clip.
 pub fn clip_box() -> impl IntoElement {
     canvas(
         |bounds, window, cx| {
