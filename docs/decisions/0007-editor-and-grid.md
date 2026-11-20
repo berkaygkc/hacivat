@@ -1213,19 +1213,23 @@ The M2a connection list became the database explorer tree in place (R-M4-18): `h
   first when its namespace holds less (one fragment, `elevate`); a definition still missing is
   asked for once as the `Sources` facet; the grants facet is asked for once while Grants is
   on. Each wait shows "Reading the definition of …".
-- *Freshness (surface 11).* When a script is first shown the view asks `check_state`. The
-  ticket answers a generation only, so the verdict comes from the catalog: gone from a loaded
-  namespace → "no longer exists" (the last text stays, Close tab); the object's namespace
-  republished since the check began with a different script → "changed on the server"
-  (Reload); a failed check or a stale namespace → "couldn't check" (Reload); else current. A
-  later catalog whose script differs marks the view changed; it never reloads by itself.
-  Reload and Refresh re-read the object (`Target::Objects`, `Trigger::User`). Server text is
-  held to the same rule (T19 review m6: `DdlSources` has no load state). *Gap:* a check
-  answered `Unknown` on a namespace that is not stale reads as current until the ticket (or
-  the snapshot) carries the per-key verdict (Task 22 / M5).
+- *Freshness (surface 11; round 1 on Task 22).* When a script is first shown, and after every
+  Refresh or Reload (F5 in the text, `ddl_view.reload` in the `DdlViewCode` focus context), the
+  view takes Task 22's per-key verdict through `IntroHandle::check_state_verdicts` (a named
+  exception in Task 15's `engine/{mod,scheduler}.rs`: the state check's jobs report
+  `Vec<(ObjectKey, Staleness)>` on a oneshot before any re-read; a failed or cancelled check
+  drops the sender). `Current` → current; `Changed` → the engine re-reads it, and a script
+  that differs from the shown one is "changed on the server" (Reload), an equal one current;
+  gone from a loaded namespace → "no longer exists" (Close tab); `Unknown`, a `Dropped` the
+  catalog does not confirm, or no verdict → "couldn't check". An `Unknown` never shows as
+  current. A later catalog whose script differs marks the view changed (never an automatic
+  reload); a namespace marked stale turns current into "couldn't check". Server text from the
+  `Sources` facet is current only while that facet is `Loaded` and not stale in the snapshot
+  (T19 review m6: `DdlSources::server_text` has no load state of its own).
 - *Options per engine.* "Definitions provided by server" is hidden on PostgreSQL, shown on
   MySQL/MariaDB, and shown checked and fixed on SQLite (its tables always show
-  `sqlite_schema.sql`, F10; Task 19 ignores the flag there, the T7 carry M8). Qualification
+  `sqlite_schema.sql`, F10; Task 19 ignores the flag there, the T7 carry M8; ruling R-W4-12),
+  with a tooltip saying why (`hv-ddl-view-server-fixed-tip`). Qualification
   and Constraints hide while the shown text is the server's (NOTES ruling 16). Grants: PG and
   MySQL/MariaDB; Owner: PG's owner and MySQL's definer.
 - *Tabs.* The object table keeps a handle per open object and drops it when the view is

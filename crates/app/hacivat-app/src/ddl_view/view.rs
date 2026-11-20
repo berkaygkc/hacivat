@@ -14,35 +14,37 @@
 //! Grants is on. Each wait shows "Reading the definition of …"; what stays missing says so
 //! (`DdlError::NotLoaded`: never a text that is not the object's, F31).
 //!
-//! **Freshness** (surface 11). When a script is first shown the view asks `check_state`. Its
-//! ticket answers only a generation (Task 22 keeps the per-key verdict inside the engine), so
-//! the view decides from the catalog: the object is gone from a loaded namespace → "no longer
-//! exists" with Close tab; its namespace was published again since the check began and the
-//! script differs from the one shown → "changed on the server" with Reload; the check failed,
-//! or the namespace is stale (cached, refresh after DDL with Ask/Never, a held deletion) →
-//! "couldn't check" with Reload; else current. While the tab is open, a newer catalog whose
-//! script differs marks it changed the same way (never an automatic reload, surface 11 "Out of
-//! scope"). Server text is held to the same rule (T19 review carry m6: `DdlSources` has no
-//! load state of its own). Gap (task report): a check answered `Unknown` on a namespace that is
-//! not stale reads as current until the ticket carries the verdict.
+//! **Freshness** (surface 11). When a script is first shown, and after every Refresh or
+//! Reload, the view asks Task 22's state check for the object's verdict
+//! (`IntroHandle::check_state_verdicts`): `Current` → current; `Changed` → the engine reads it
+//! again, and a script that differs from the shown one is "changed on the server" (Reload),
+//! an equal one current; gone from a loaded namespace → "no longer exists" (Close tab);
+//! `Unknown`, a `Dropped` the catalog does not show, or a check that failed or could not run →
+//! "couldn't check" (Reload). An `Unknown` never shows as current. While the tab is open, a
+//! newer catalog whose script differs marks it changed (never an automatic reload, surface 11
+//! "Out of scope"), and a namespace marked stale turns current into "couldn't check". Server
+//! text from the `Sources` facet is current only while that facet is loaded and not stale
+//! (T19 review carry m6: `DdlSources` has no load state of its own).
 
 use std::rc::Rc;
 use std::sync::Arc;
 
 use hacivat_ddl::produce::{GRANTS_PARTIAL, WARN_EXECUTABLE_COMMENT};
 use hacivat_ddl::script::{Notice, Script};
+use hacivat_introspect::introspector::Staleness;
 use hacivat_l10n::{ArgValue, NoArgs, Text, ids};
 use hacivat_meta::kind::{DbLevel, database_level};
 use hacivat_meta::props::FacetKind;
 use hacivat_meta::snapshot::LoadState;
 use hacivat_meta::userdata::{DdlViewOptions, Placement, Qualify};
-use hacivat_meta::{CatalogSnapshot, Level, Name, NamespaceSnapshot, ObjectKey};
+use hacivat_meta::{CatalogSnapshot, Level, Name, ObjectKey};
 use hacivat_proto::{DbmsKind, ProfileId};
 use hacivat_sql_editor::SqlLanguageService;
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::capsule::env_swatch_on_raised;
 use hacivat_ui::checkbox::Checkbox;
 use hacivat_ui::icon::{Icon, IconName, IconSize};
+use hacivat_ui::popover::Tip;
 use hacivat_ui::segmented::{SegmentContent, SegmentItem, Segmented};
 use hacivat_ui::select::{Select, SelectEvent, SelectOption};
 use hacivat_ui::step_trail::run_marker;
@@ -50,12 +52,12 @@ use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui::toolbar::{ItemFn, Toolbar, ToolbarItem};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity,
-    Window, div, px,
+    AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, Focusable as _,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 use hacivat_ui_core::theme::Theme;
-use hacivat_ui_editor::{DocId, EditorConfig, EditorView, LanguageService};
+use hacivat_ui_editor::{DocId, EDITOR_CONTEXT, EditorConfig, EditorView, LanguageService};
 use sql_dialect::{ClientFlavor, DialectCtx};
 
 use super::model::{self, Generated};
@@ -124,6 +126,8 @@ pub struct DdlViewState {
     pub grants: GrantsUx,
     /// The provided toolbar actions (`ActionSurface::DdlViewToolbar`), by command id.
     pub toolbar_actions: Vec<&'static str>,
+    /// The tooltip of the server toggle when it is fixed (SQLite, ruling R-W4-12).
+    pub server_tip: Option<String>,
 }
 
 /// Why the view rebuilds its script.
@@ -141,6 +145,9 @@ struct Shown {
     text: String,
     notices: Vec<Notice>,
     server_text: bool,
+    /// The text is the `Sources` facet's (a table's or an index's server text), not a
+    /// `SourceRef` the object's own props name.
+    facet_text: bool,
 }
 
 /// The DDL view of one object.
@@ -198,6 +205,11 @@ impl DdlView {
             ..EditorConfig::default()
         };
         let editor = cx.new(|cx| EditorView::new(doc, "", cfg, service, title, window, cx));
+        // The text takes the editor's commands (selection, the standard copy) and the view's
+        // F5 (`DdlViewCode`) while it has the focus.
+        let focus = editor.focus_handle(cx);
+        crate::shell::register_focus_context(cx, focus.clone(), EDITOR_CONTEXT);
+        crate::shell::hooks::add_focus_context(cx, focus.clone(), super::DDL_VIEW_CODE_CONTEXT);
         userdata::ensure(profile, cx);
         let opts = userdata::get(profile, cx).map_or_else(DdlViewOptions::default, |d| d.ddl_view);
         let constraints =
@@ -223,7 +235,10 @@ impl DdlView {
                     cx,
                 );
             }),
-            cx.on_release(move |_, cx| super::forget(object, cx)),
+            cx.on_release(move |_, cx| {
+                crate::shell::unregister_focus_context(cx, &focus);
+                super::forget(object, cx);
+            }),
         ];
         let mut view = DdlView {
             profile,
@@ -388,6 +403,8 @@ impl DdlView {
             text: model::text_of(&s),
             notices: s.notices,
             server_text: model::is_server_text(self.dbms, self.key.kind, self.opts),
+            facet_text: model::is_server_text(self.dbms, self.key.kind, self.opts)
+                && !model::needs_sources(self.key.kind),
         };
         let first = self.shown.is_none();
         match (why, &self.shown) {
@@ -478,30 +495,28 @@ impl DdlView {
         model::is_server_text(self.dbms, self.key.kind, self.opts)
     }
 
-    /// Checks the object against the server (surface 11).
+    /// Checks the object against the server (surface 11): Task 22's verdict for its key.
     fn check(&mut self, cx: &mut Context<Self>) {
         let Some(catalog) = self.catalog.clone() else {
             self.freshness = Freshness::Unknown;
             return;
         };
         self.freshness = Freshness::Checking;
-        let base = self.arena(cx);
-        let ticket = catalog.check_state(self.key.clone(), cx);
+        let check = catalog.check_state(self.key.clone(), cx);
+        let key = self.key.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let answer = ticket.await;
-            let _ = this.update(cx, |v, cx| v.checked(answer.is_ok(), base, cx));
+            let (verdict, read) = check.outcome(&key).await;
+            let _ = this.update(cx, |v, cx| v.checked(verdict, read, cx));
         })
         .detach();
     }
 
-    /// The arena the object lives in now.
-    fn arena(&self, cx: &App) -> Option<Arc<NamespaceSnapshot>> {
-        let snap = self.snapshot(cx)?;
-        snap.find(&self.key).map(|h| h.ns)
-    }
-
-    /// The verdict once a check (or a re-read) answered.
-    fn checked(&mut self, ok: bool, base: Option<Arc<NamespaceSnapshot>>, cx: &mut Context<Self>) {
+    /// The freshness a check's verdict gives (surface 11). Only a `Current` verdict, or a
+    /// re-read that a `Changed` verdict asked for, shows the text as current; `Unknown` and a
+    /// failed check never do ("couldn't check"). Server text read from the `Sources` facet is
+    /// current only while that facet is loaded and not stale (T19 review m6: `DdlSources` has
+    /// no load state of its own, so the snapshot's facet state vouches for it).
+    fn checked(&mut self, verdict: Staleness, read: bool, cx: &mut Context<Self>) {
         cx.notify();
         let Some(snap) = self.snapshot(cx) else {
             self.freshness = Freshness::Unknown;
@@ -511,27 +526,29 @@ impl DdlView {
             self.freshness = Freshness::Gone;
             return;
         }
-        let Some(now) = snap.find(&self.key).map(|h| h.ns) else {
-            self.freshness = Freshness::Unknown;
-            return;
+        let vouched = self.shown.as_ref().is_none_or(|s| {
+            !s.facet_text || model::facet_vouches(&snap, &self.key, FacetKind::Sources)
+        });
+        self.freshness = match verdict {
+            Staleness::Current if vouched => Freshness::Current,
+            // Changed: the engine read it again; a different script is announced, an equal one
+            // is the server's as of that read.
+            Staleness::Changed if read => match self.generate(&snap, cx) {
+                Generated::Script(s)
+                    if self
+                        .shown
+                        .as_ref()
+                        .is_some_and(|shown| shown.text != model::text_of(&s)) =>
+                {
+                    Freshness::Changed
+                }
+                Generated::Script(_) if vouched => Freshness::Current,
+                _ => Freshness::Unknown,
+            },
+            // Dropped, but the catalog still holds it (the re-read failed or did not apply),
+            // Unknown, or a check that decided nothing.
+            _ => Freshness::Unknown,
         };
-        if !ok || model::is_stale(&snap, &self.key) {
-            self.freshness = Freshness::Unknown;
-            return;
-        }
-        let republished = base.as_ref().is_none_or(|b| !Arc::ptr_eq(b, &now));
-        if republished
-            && let Generated::Script(s) = self.generate(&snap, cx)
-            && self
-                .shown
-                .as_ref()
-                .is_some_and(|shown| shown.text != model::text_of(&s))
-        {
-            self.freshness = Freshness::Changed;
-            return;
-        }
-        // Gap (module docs): an `Unknown` answer on a namespace that is not stale lands here.
-        self.freshness = Freshness::Current;
     }
 
     fn on_catalog(&mut self, cx: &mut Context<Self>) {
@@ -594,12 +611,14 @@ impl DdlView {
         let ticket = catalog.refresh(self.key.clone(), cx);
         cx.notify();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let answer = ticket.await;
+            let _ = ticket.await;
             let _ = this.update(cx, |v, cx| {
+                // The shown text is now what the catalog holds; a state check says whether
+                // it is the server's (a re-read alone never vouches: it may have failed).
                 v.load(Why::Show, cx);
-                // The shown text is now what the catalog holds: current unless the re-read
-                // failed, the namespace is stale or the object is gone.
-                v.checked(answer.is_ok(), None, cx);
+                if v.freshness != Freshness::Gone && v.body == Body::Script {
+                    v.check(cx);
+                }
             });
         })
         .detach();
@@ -765,6 +784,9 @@ impl DdlView {
                 && self.shown.as_ref().is_some_and(|s| s.server_text),
             grants: self.grants_ux(cx),
             toolbar_actions: self.provided(cx).iter().map(|a| a.id).collect(),
+            server_tip: model::shown(self.dbms)
+                .server_fixed
+                .then(|| tr(cx, ids::hv::DDL_VIEW_SERVER_FIXED_TIP, NoArgs).to_string()),
         }
     }
 }
@@ -1037,12 +1059,23 @@ impl DdlView {
                     priority,
                     item(move |_, cx| {
                         let w = w.clone();
-                        Checkbox::new(element, tr(cx, msg, NoArgs))
+                        let check = Checkbox::new(element, tr(cx, msg, NoArgs))
                             .checked(checked)
                             .disabled(fixed)
                             .on_toggle(move |on, _, cx| {
                                 let _ = w.update(cx, |v, cx| v.toggle(which, on, cx));
                             })
+                            .into_any_element();
+                        if !fixed {
+                            return check;
+                        }
+                        // ## m4-t25-ddl-view (ruling R-W4-12): a fixed toggle says why.
+                        let tip = tr(cx, ids::hv::DDL_VIEW_SERVER_FIXED_TIP, NoArgs);
+                        div()
+                            .id("ddl-server-fixed")
+                            .debug_selector(|| "ddl-server-fixed".to_string())
+                            .child(check)
+                            .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
                             .into_any_element()
                     }),
                     text_fn_of(msg),

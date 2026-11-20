@@ -3635,3 +3635,10 @@ hv-ddl-view-not-loaded-body = Yenile, tanımı sunucudan yeniden okur.
 # Surface 11 (Stale object). The "no longer exists" notice's button.
 # Review: PO
 hv-ddl-view-close-tab = Sekmeyi kapat
+# Surface 10 (DDL view). The tooltip of "Definitions provided by server" on SQLite, where it is
+# checked and can't be changed (ruling R-W4-12).
+# Review: PO
+hv-ddl-view-server-fixed-tip = SQLite her zaman sunucunun metnini gösterir: CHECK kısıtları ve üretilen sütunlar yalnızca orada bulunur.
+# The palette title of the DDL view's Reload (F5 in its text).
+# Review: PO
+hv-cmd-ddl-view-reload = DDL'i yeniden yükle

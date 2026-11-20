@@ -2390,3 +2390,15 @@ carry fenced `m4-t22-state` named exceptions.
   pass's own window). `IntroHandle::expand`'s doc now says the ticket resolves after the
   names-first pass. R-W4-11 (two trigger changes of one table within one `CREATED` tick)
   stays an M5 hardening.
+
+## m4-t25 — state-check verdicts for the DDL view (named exception)
+
+- *Decision.* `IntroHandle::check_state_verdicts(keys)` is `check_state` that also answers each
+  key's `Staleness` on a `tokio::sync::oneshot` as soon as the stamps were compared (Task 22's
+  `freshness::run`), before the re-read of what changed or was dropped; the ticket still
+  resolves with the generation that holds the re-read. The request's jobs (one per database)
+  share a `VerdictSink`; the last one sends every verdict, and a job that fails or is
+  cancelled drops its share, so the receiver sees the sender dropped: nothing was decided,
+  which the DDL view shows as "couldn't check" (never as current). Fenced
+  `// ## m4-t25-ddl-view` lines in Task 15's `engine/mod.rs` and `engine/scheduler.rs`; the
+  check itself, its re-reads and its marks are unchanged.

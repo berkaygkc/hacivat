@@ -9,6 +9,7 @@ use std::sync::Arc;
 use hacivat_ddl::produce::{DdlSources, UNSUPPORTED_KIND, create_script_with};
 use hacivat_ddl::script::{DelimStyle, Script};
 use hacivat_ddl::{DdlError, DdlTarget, GenOptions};
+use hacivat_meta::props::FacetKind;
 use hacivat_meta::snapshot::{ContainerKey, LoadState};
 use hacivat_meta::userdata::DdlViewOptions;
 use hacivat_meta::view::SnapshotView;
@@ -260,6 +261,23 @@ pub fn ns_generation(snap: &CatalogSnapshot, key: &ObjectKey) -> u64 {
 /// deletion, refresh after DDL with "Ask" or "Never").
 pub fn is_stale(snap: &CatalogSnapshot, key: &ObjectKey) -> bool {
     !matches!(ns_state(snap, key), LoadState::Loaded { stale: false, .. })
+}
+
+/// Whether facet `facet` of `key` is loaded and not stale in `snap` (the load state the
+/// facet's text has; `DdlSources` carries none, T19 review m6).
+pub fn facet_vouches(snap: &CatalogSnapshot, key: &ObjectKey, facet: FacetKind) -> bool {
+    let Some(ns) = ns_of(snap, key) else {
+        return false;
+    };
+    // The facet is recorded under the object's own key (with its server id when it has one).
+    let object = snap
+        .find(key)
+        .and_then(|h| h.key())
+        .unwrap_or_else(|| key.clone());
+    matches!(
+        snap.state(&ContainerKey::Facet { ns, object, facet }),
+        LoadState::Loaded { stale: false, .. }
+    )
 }
 
 /// The key the DDL view of `key` shows: a column's is its table's (or view's).

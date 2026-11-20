@@ -23,12 +23,14 @@ use std::sync::Arc;
 use hacivat_ddl::produce::{DdlSources, NoSources};
 use hacivat_introspect::IntroHandle;
 use hacivat_introspect::ddl_effects::Target;
+use hacivat_introspect::introspector::Staleness;
 use hacivat_introspect::ticket::RefreshTicket;
 use hacivat_meta::merge::Trigger;
 use hacivat_meta::props::FacetKind;
 use hacivat_meta::{CatalogSnapshot, Level, ObjectKey};
 use hacivat_proto::ProfileId;
 use hacivat_ui_core::gpui_surface::{App, Global};
+use tokio::sync::oneshot;
 
 use crate::explorer::{adapter, live};
 
@@ -40,14 +42,48 @@ pub trait DdlCatalog {
     /// Reads `key` at `level` (Task 15's `elevate`: one fragment of that object).
     fn elevate(&self, key: ObjectKey, level: Level, cx: &App) -> RefreshTicket;
     /// Checks `key` against the server and re-reads it when it changed or was dropped
-    /// (HV-INTRO-15; Task 22 fills the verdicts).
-    fn check_state(&self, key: ObjectKey, cx: &App) -> RefreshTicket;
+    /// (HV-INTRO-15, Task 22): its verdict, then the ticket of the re-read.
+    fn check_state(&self, key: ObjectKey, cx: &App) -> StateCheck;
     /// Re-reads `key` from the server (Refresh and Reload; `Trigger::User`).
     fn refresh(&self, key: ObjectKey, cx: &App) -> RefreshTicket;
     /// Loads facet `kind` of `key` (R-M4-30; Task 15b).
     fn load_facet(&self, key: ObjectKey, kind: FacetKind, cx: &App) -> RefreshTicket;
     /// The source texts and facets loaded so far.
     fn sources(&self, cx: &App) -> Rc<dyn DdlSources>;
+}
+
+/// A state check of one object (Task 22, `IntroHandle::check_state_verdicts`): the verdict
+/// as soon as the stamps were compared, and the ticket that resolves once what changed or was
+/// dropped was read again. A verdict whose sender was dropped (the check failed, was
+/// cancelled, or there is no engine) decided nothing: `Unknown`.
+pub struct StateCheck {
+    pub verdict: oneshot::Receiver<Vec<(ObjectKey, Staleness)>>,
+    pub ticket: RefreshTicket,
+}
+
+impl StateCheck {
+    /// A check that cannot run: no verdict, the ticket a stub's.
+    pub fn undecided() -> Self {
+        let (_, verdict) = oneshot::channel();
+        StateCheck {
+            verdict,
+            ticket: RefreshTicket::not_implemented(),
+        }
+    }
+
+    /// Awaits the verdict of `key` (`Unknown` when the check decided nothing about it), then
+    /// the re-read; the re-read's failure is reported beside it.
+    pub async fn outcome(self, key: &ObjectKey) -> (Staleness, bool) {
+        let verdict = match self.verdict.await {
+            Ok(v) => v
+                .into_iter()
+                .find(|(k, _)| k.same_object(key))
+                .map_or(Staleness::Unknown, |(_, s)| s),
+            Err(_) => Staleness::Unknown,
+        };
+        let read = self.ticket.await.is_ok();
+        (verdict, read)
+    }
 }
 
 /// Makes the catalog of a profile (`None`: none).
@@ -105,8 +141,14 @@ impl DdlCatalog for EngineCatalog {
         self.ask(cx, |h| h.elevate(key, level))
     }
 
-    fn check_state(&self, key: ObjectKey, cx: &App) -> RefreshTicket {
-        self.ask(cx, |h| h.check_state(vec![key]))
+    fn check_state(&self, key: ObjectKey, cx: &App) -> StateCheck {
+        match self.handle(cx) {
+            Some(h) => {
+                let (ticket, verdict) = h.check_state_verdicts(vec![key]);
+                StateCheck { verdict, ticket }
+            }
+            None => StateCheck::undecided(),
+        }
     }
 
     fn refresh(&self, key: ObjectKey, cx: &App) -> RefreshTicket {

@@ -46,6 +46,10 @@ pub use view::{Body, DdlView, DdlViewState, Freshness, GrantsUx};
 /// The key context while a DDL view tab is active (`ddl_view.copy`'s row).
 pub const DDL_VIEW_CONTEXT: &str = "DdlView";
 
+/// The key context while a DDL view's text has the focus (`ddl_view.reload`'s F5 row; never
+/// the tab's, so the chord reaches no other field).
+pub const DDL_VIEW_CODE_CONTEXT: &str = "DdlViewCode";
+
 /// The DDL view commands that are still stubs (registered disabled).
 // ## m4-t25-ddl-view: `ddl_view.copy` is filled.
 pub const STUB_COMMANDS: [&str; 0] = [];
@@ -71,6 +75,18 @@ pub fn install(cx: &mut App) {
             }
         }),
         enabled: can_copy,
+    });
+    // ## m4-t25-ddl-view (T25 round 1): F5 in the text reloads (surface 11).
+    let _ = cx.default_global::<ActionRegistry>().register(ActionDef {
+        id: "ddl_view.reload",
+        title_id: "hv-cmd-ddl-view-reload",
+        context: DDL_VIEW_CODE_CONTEXT,
+        run: Rc::new(|_, cx| {
+            if let Some(v) = active_view(cx) {
+                v.update(cx, |v, cx| v.refresh(cx));
+            }
+        }),
+        enabled: |cx| active_view(cx).is_some(),
     });
 }
 

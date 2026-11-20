@@ -90,6 +90,15 @@ const M4_ROWS: &[Row] = &[
     // is on the stack whatever has the focus, so a copy chord there would take the standard
     // copy from every text field; inside the DDL text, `editor.copy` is the copy.
     ("ddl_view.copy", "DdlView", "DdlView", None, None),
+    // ## m4-t25-ddl-view (named exception, T25 round 1): F5 reloads the DDL view while its text
+    // has the focus (surface 11); `DdlViewCode` is that text's own context, never the tab's.
+    (
+        "ddl_view.reload",
+        "DdlViewCode",
+        "DdlViewCode",
+        Some("f5"),
+        Some("f5"),
+    ),
     // Palette only. Enter on a table or view row is the tree's own activate (Open data); on a
     // profile row it stays `connection.toggle_connect`.
     (
@@ -428,7 +437,8 @@ fn keymap_commands_are_registered_including_host_only(cx: &mut TestAppContext) {
     }
     // macOS has five M4 rows, Windows and Linux four each (no filter row), in both presets
     // (fix round 1, I1: no `ddl_view.copy` row).
-    assert_eq!(seen, (5 + 4 + 4) * PRESETS.len());
+    // ## m4-t25-ddl-view (named exception): plus `ddl_view.reload` F5 on every platform.
+    assert_eq!(seen, (6 + 5 + 5) * PRESETS.len());
     // The one host-only row is a keymap row, not a registration: `cmd-alt-f` exists only in the
     // macOS keymap, and its command is registered everywhere.
     for platform in [KeymapPlatform::Windows, KeymapPlatform::Linux] {

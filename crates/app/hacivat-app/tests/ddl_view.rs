@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime};
 
 use gpui::{TestAppContext, VisualTestContext};
 use hacivat_app::console::Consoles;
+use hacivat_app::ddl_view::source::StateCheck;
 use hacivat_app::ddl_view::{
     self, Body, DdlCatalog, DdlViewState, Freshness, GrantsUx, set_catalog_provider,
 };
@@ -34,6 +35,7 @@ use hacivat_ddl::script::DelimStyle;
 use hacivat_ddl::{DdlTarget, GenOptions};
 use hacivat_driver::fake::FakeDriver;
 use hacivat_introspect::RefreshTicket;
+use hacivat_introspect::introspector::Staleness;
 use hacivat_introspect::testing::fake::{FakeCall, FakeIntrospector, FakeObject};
 use hacivat_introspect::ticket::TicketSender;
 use hacivat_meta::namespace::{Level, Obj, Subtree, Watermark};
@@ -75,7 +77,12 @@ struct Shared {
     held: RefCell<Vec<(String, TicketSender)>>,
     check: Cell<Option<Answer>>,
     facet: Cell<Option<Answer>>,
+    // ## T25 round 1: Task 22's per-key verdict (default `Current`), sent before the ticket.
+    verdict: Cell<Option<Staleness>>,
+    held_verdicts: RefCell<Vec<(String, VerdictTx)>>,
 }
+
+type VerdictTx = tokio::sync::oneshot::Sender<Vec<(ObjectKey, Staleness)>>;
 
 /// The plan's fake `IntroHandle`: the explorer's catalog of the profile as the snapshot, texts
 /// and facets the test sets, and tickets it answers.
@@ -112,8 +119,18 @@ impl FakeCatalog {
         self.s.calls.borrow().clone()
     }
 
-    /// Answers the held request `what` with `generation`.
+    /// Answers the held request `what` with `generation` (a check: its verdict first).
     fn answer(&self, what: &str, generation: u64) {
+        let verdict = {
+            let mut v = self.s.held_verdicts.borrow_mut();
+            v.iter()
+                .position(|(w, _)| w == what)
+                .map(|at| v.remove(at).1)
+        };
+        if let Some(tx) = verdict {
+            let st = self.s.verdict.get().unwrap_or(Staleness::Current);
+            let _ = tx.send(vec![(users_key(), st)]);
+        }
         let mut held = self.s.held.borrow_mut();
         let at = held
             .iter()
@@ -149,9 +166,23 @@ impl DdlCatalog for FakeCatalog {
     fn elevate(&self, key: ObjectKey, _: Level, cx: &App) -> RefreshTicket {
         self.request(format!("elevate {}", key.name()), Answer::Now, cx)
     }
-    fn check_state(&self, key: ObjectKey, cx: &App) -> RefreshTicket {
+    fn check_state(&self, key: ObjectKey, cx: &App) -> StateCheck {
         let a = self.s.check.get().unwrap_or(Answer::Now);
-        self.request(format!("check {}", key.name()), a, cx)
+        let what = format!("check {}", key.name());
+        let (tx, verdict) = tokio::sync::oneshot::channel();
+        match a {
+            Answer::Now => {
+                let st = self.s.verdict.get().unwrap_or(Staleness::Current);
+                let _ = tx.send(vec![(key, st)]);
+            }
+            Answer::Hold => self.s.held_verdicts.borrow_mut().push((what.clone(), tx)),
+            // A stub decides nothing (the sender is dropped).
+            Answer::Stub => drop(tx),
+        }
+        StateCheck {
+            verdict,
+            ticket: self.request(what, a, cx),
+        }
     }
     fn refresh(&self, key: ObjectKey, cx: &App) -> RefreshTicket {
         self.request(format!("refresh {}", key.name()), Answer::Now, cx)
@@ -462,6 +493,80 @@ fn view_ddl_elevates_with_a_fragment_only(cx: &mut TestAppContext) {
     let _ = src;
 }
 
+/// T25 round 1: Task 22's real state check through the engine (T15's fakes, whose stamps are
+/// the objects' versions): the verdict reaches the view (`IntroHandle::check_state_verdicts`),
+/// so the table reads current; a check that fails decides nothing ("couldn't check").
+#[gpui::test]
+fn engine_state_check_verdict_reaches_the_view(cx: &mut TestAppContext) {
+    let public = NsKey::schema(["app", "public"]);
+    let intro = FakeIntrospector::new(DbmsKind::Postgres);
+    intro.put_ns(
+        public.clone(),
+        vec![FakeObject::table("users", &["id"]).with_oid(20_000)],
+    );
+    let vcx = shell_with_fake(cx, "en", answers_probe(FakeDriver::new(DbmsKind::Postgres)));
+    in_window(vcx, |window, _| window.activate_window());
+    let dir = temp_dir(vcx).join("fake-cache");
+    let rt = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::connections::ConnectionsModel>()
+            .runtime()
+    });
+    let src = Arc::new(support::live::FakeSource::new(rt, intro, dir));
+    let as_source: Arc<dyn CatalogSource> = src.clone();
+    vcx.cx.update(|cx| hlive::set_source(as_source, cx));
+    let id = add_profile(vcx, pg_profile("app-dev"));
+    vcx.cx.update(|cx| {
+        let tree = hacivat_app::connections::explorer::tree(cx).expect("the tree");
+        tree.update(cx, |t, cx| {
+            t.set_expanded(adapter::profile_key(id), true, cx)
+        });
+    });
+    connect(vcx, "app-dev");
+    let users = || {
+        vcx.cx.read(|cx| {
+            let snap = hlive::handle(id, cx)?.catalog().current();
+            let ns = snap.namespaces.get(&public)?.clone();
+            let (idx, _) = ns.children(0).find(|(_, o)| &**o.name() == "users")?;
+            ns.object_key(idx)
+        })
+    };
+    wait_until(vcx, "public loaded", |_| users().is_some());
+    wait_until(vcx, "the engine idle", |vcx| {
+        vcx.cx.read(|cx| {
+            hlive::handle(id, cx).is_some_and(|h| h.progress().borrow().tasks.is_empty())
+        })
+    });
+    let k = users().expect("users");
+    open_view(vcx, id, &k);
+    wait_until(vcx, "the verdict", |vcx| {
+        state(vcx, id, &k).freshness != Freshness::Checking
+    });
+    let st = state(vcx, id, &k);
+    assert_eq!(st.freshness, Freshness::Current, "{st:?}");
+    assert!(
+        src.intro
+            .calls()
+            .iter()
+            .any(|c| matches!(c, FakeCall::CheckState { .. })),
+        "Task 22's stamps were read"
+    );
+    // The next check fails on the server: nothing is decided.
+    src.intro.fail(
+        |c| matches!(c, FakeCall::CheckState { .. }),
+        hacivat_introspect::introspector::IntroError::Protocol(Name::from("test")),
+        1,
+    );
+    click(vcx, "button-ddl-refresh");
+    wait_until(vcx, "the failed check", |vcx| {
+        state(vcx, id, &k).freshness == Freshness::Unknown
+    });
+    assert!(
+        state(vcx, id, &k)
+            .notices
+            .contains(&"hv-ddl-view-unknown".to_string())
+    );
+}
+
 // ---- the text -----------------------------------------------------------------------------------
 
 #[gpui::test]
@@ -681,6 +786,7 @@ fn stale_object_notice_and_reload(cx: &mut TestAppContext) {
         false,
     );
     show(vcx, id, changed);
+    s.verdict.set(Some(Staleness::Changed));
     fake_of(&s, id).answer("check users", 2);
     let st = state(vcx, id, &users_key());
     assert_eq!(st.freshness, Freshness::Changed);
@@ -694,6 +800,9 @@ fn stale_object_notice_and_reload(cx: &mut TestAppContext) {
         "{:?}",
         texts_drawn_by(vcx, "ddl_view/view.rs")
     );
+    // Reload re-reads, then checks again: `Changed` with a re-read whose script is the one now
+    // shown is current.
+    s.check.set(Some(Answer::Now));
     click(vcx, "button-ddl-reload");
     let st = state(vcx, id, &users_key());
     assert!(
@@ -708,8 +817,10 @@ fn stale_object_notice_and_reload(cx: &mut TestAppContext) {
             .calls()
             .contains(&"refresh users".to_string())
     );
-    // A namespace marked stale (refresh after DDL with Ask): the check cannot vouch for it.
+    // A namespace marked stale (refresh after DDL with Ask) shows the stale form at once; a
+    // check that answers `Unknown` keeps it ("couldn't check").
     s.check.set(Some(Answer::Now));
+    s.verdict.set(Some(Staleness::Unknown));
     show(
         vcx,
         id,
@@ -723,6 +834,157 @@ fn stale_object_notice_and_reload(cx: &mut TestAppContext) {
     let st = state(vcx, id, &users_key());
     assert_eq!(st.freshness, Freshness::Unknown);
     assert!(st.notices.contains(&"hv-ddl-view-unknown".to_string()));
+}
+
+/// T25 round 1 (coordinator item 2): only Task 22's `Current` verdict shows the text as
+/// current. `Unknown` and a `Dropped` the catalog does not confirm read "couldn't check", even
+/// on a namespace that is not stale (before, the stale flag alone decided).
+#[gpui::test]
+fn unknown_verdict_never_shows_as_current(cx: &mut TestAppContext) {
+    let cat = pg_cat(1, vec![users(&[("id", "integer")])], false);
+    let (vcx, s, id) = pg_shell(cx, "en", cat);
+    s.verdict.set(Some(Staleness::Unknown));
+    open_view(vcx, id, &users_key());
+    let st = state(vcx, id, &users_key());
+    assert_eq!(st.freshness, Freshness::Unknown);
+    assert!(st.notices.contains(&"hv-ddl-view-unknown".to_string()));
+    assert!(
+        texts_drawn_by(vcx, "ddl_view/view.rs").iter().any(|t| t
+            == "Hacivat couldn't check whether users changed on the server since it was loaded"),
+        "{:?}",
+        texts_drawn_by(vcx, "ddl_view/view.rs")
+    );
+    // A drop the catalog does not show (the re-read failed) is not a fact either.
+    s.verdict.set(Some(Staleness::Dropped));
+    click(vcx, "button-ddl-reload");
+    assert_eq!(state(vcx, id, &users_key()).freshness, Freshness::Unknown);
+    // `Current` is current: no notice.
+    s.verdict.set(Some(Staleness::Current));
+    click(vcx, "button-ddl-reload");
+    let st = state(vcx, id, &users_key());
+    assert_eq!(st.freshness, Freshness::Current);
+    assert!(!st.notices.iter().any(|n| n.starts_with("hv-ddl-view-")));
+    // F5 in the text reloads (a check again: `Unknown` now).
+    s.verdict.set(Some(Staleness::Unknown));
+    let editor = vcx.cx.read(|cx| {
+        ddl_view::view_of(id, &users_key(), cx)
+            .unwrap()
+            .read(cx)
+            .editor()
+            .clone()
+    });
+    in_window(vcx, |window, cx| {
+        let focus = gpui::Focusable::focus_handle(editor.read(cx), cx);
+        window.focus(&focus, cx);
+    });
+    vcx.run_until_parked();
+    assert!(
+        context_stack(vcx)
+            .0
+            .contains(&ddl_view::DDL_VIEW_CODE_CONTEXT)
+    );
+    let refreshes = |s: &Rc<Shared>| {
+        s.calls
+            .borrow()
+            .iter()
+            .filter(|c| *c == "refresh users")
+            .count()
+    };
+    let before = refreshes(&s);
+    vcx.simulate_keystrokes("f5");
+    vcx.run_until_parked();
+    assert_eq!(refreshes(&s), before + 1, "F5 reloads the view");
+    assert_eq!(state(vcx, id, &users_key()).freshness, Freshness::Unknown);
+}
+
+/// The T19 carry (m6): server text from the `Sources` facet is current only while that facet
+/// is loaded and not stale; `DdlSources::server_text` has no load state of its own.
+#[gpui::test]
+fn server_text_is_current_only_with_its_facet_loaded(cx: &mut TestAppContext) {
+    let (vcx, s, id) = mysql_shell(cx, mysql_cat(vec![table("t", None, &[("id", "int")])]));
+    s.server.borrow_mut().insert(
+        "api.t".to_string(),
+        Name::from("CREATE TABLE `t` (\n  `id` int DEFAULT NULL\n) ENGINE=InnoDB"),
+    );
+    let k = key(ObjectKind::Table, &["api", "t"]);
+    open_view(vcx, id, &k);
+    assert_eq!(state(vcx, id, &k).freshness, Freshness::Current);
+    click(vcx, "checkbox-ddl-server");
+    // Server text, a `Current` verdict, but no facet state vouches for the text.
+    let st = state(vcx, id, &k);
+    assert!(st.server_text);
+    click(vcx, "button-ddl-refresh");
+    assert_eq!(state(vcx, id, &k).freshness, Freshness::Unknown);
+    // The facet loaded and not stale: current.
+    let mut cat = (*mysql_cat(vec![table("t", None, &[("id", "int")])])).clone();
+    cat.generation = 2;
+    let mut states = (*cat.states).clone();
+    states.insert(
+        hacivat_meta::snapshot::ContainerKey::Facet {
+            ns: NsKey::schema(["api"]),
+            object: k.clone(),
+            facet: FacetKind::Sources,
+        },
+        loaded(false),
+    );
+    cat.states = Arc::new(states);
+    show(vcx, id, Arc::new(cat));
+    click(vcx, "button-ddl-refresh");
+    assert_eq!(state(vcx, id, &k).freshness, Freshness::Current);
+}
+
+/// Ruling R-W4-12: on SQLite the server toggle is shown, checked and fixed, with a tooltip
+/// saying why (EN and TR).
+#[gpui::test]
+fn sqlite_server_toggle_is_fixed_with_a_tooltip(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(cx, "en", answers_probe(FakeDriver::new(DbmsKind::Postgres)));
+    in_window(vcx, |window, _| window.activate_window());
+    let s = install_fake(vcx);
+    let mut p = test_profile("local-file", Some(EnvTag::Local), "127.0.0.1");
+    p.engine = DbmsKind::Sqlite;
+    let id = add_profile(vcx, p);
+    show(
+        vcx,
+        id,
+        catalog_gen(
+            DbmsKind::Sqlite,
+            1,
+            vec![schema_at(
+                DbmsKind::Sqlite,
+                &["main"],
+                false,
+                Level::Sources,
+                vec![table("t", None, &[("id", "integer")])],
+            )],
+            vec![(NsKey::schema(["main"]), loaded(false))],
+        ),
+    );
+    s.server.borrow_mut().insert(
+        "main.t".to_string(),
+        Name::from("CREATE TABLE t (id integer CHECK (id > 0))"),
+    );
+    let k = key(ObjectKind::Table, &["main", "t"]);
+    open_view(vcx, id, &k);
+    let st = state(vcx, id, &k);
+    assert!(st.controls.contains(&"server"));
+    assert!(st.options.server_definitions || st.server_text);
+    assert_eq!(
+        st.server_tip.as_deref(),
+        Some(
+            "SQLite always shows the server's text: CHECK constraints and generated columns exist only there."
+        )
+    );
+    assert!(vcx.debug_bounds("ddl-server-fixed").is_some());
+    // Fixed: a click changes nothing.
+    click(vcx, "checkbox-ddl-server");
+    assert!(state(vcx, id, &k).server_text);
+    switch_to(vcx, "tr");
+    wait_until(vcx, "Turkish chrome", |vcx| {
+        state(vcx, id, &k).server_tip.as_deref()
+            == Some(
+                "SQLite her zaman sunucunun metnini gösterir: CHECK kısıtları ve üretilen sütunlar yalnızca orada bulunur.",
+            )
+    });
 }
 
 /// With the real stubs (no fake catalog: the profile's engine is not open), the check cannot
