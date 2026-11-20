@@ -96,7 +96,13 @@ fn file(vcx: &VisualTestContext, paths: &LocalPaths) -> String {
 /// Replaces the text of the field `name` with `text` and presses Enter.
 fn type_in(vcx: &mut VisualTestContext, name: &str, text: &str) {
     click_at(vcx, name);
-    vcx.simulate_keystrokes("cmd-a");
+    // Select-all is cmd-a on macOS and ctrl-a elsewhere; `cmd-a` alone left "512" → "51" on
+    // Linux and Windows (CI 44769983427).
+    vcx.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-a"
+    } else {
+        "ctrl-a"
+    });
     vcx.simulate_keystrokes("backspace");
     vcx.simulate_input(text);
     vcx.simulate_keystrokes("enter");
