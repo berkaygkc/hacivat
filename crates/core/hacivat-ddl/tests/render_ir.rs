@@ -1279,11 +1279,18 @@ fn pg_role_names_the_role_grammar_reads_as_keywords_are_refused() {
             );
         }
     }
-    // `PUBLIC` is the grant's keyword (the facet's sentinel), never an owner.
-    assert!(matches!(
-        render_text(&[owner("PUBLIC")], &pg),
-        Err(RenderError::Invalid(_))
-    ));
+    // Fix round 1 (review N2): owners come from `relowner`, never from the grant sentinel, so
+    // an owner `PUBLIC` is a role of that upper-case name. Quoted, PostgreSQL reads it as an
+    // identifier that is not `public`: correct DDL for that role.
+    assert_eq!(
+        render_pg(&owner("PUBLIC")),
+        "ALTER TABLE app.t OWNER TO \"PUBLIC\";\n"
+    );
+    // The grant's `PUBLIC` stays the keyword (the facet's sentinel).
+    assert_eq!(
+        render_pg(&grant("PUBLIC")),
+        "GRANT SELECT ON TABLE app.t TO PUBLIC;\n"
+    );
     assert_eq!(
         render_pg(&grant("Public")),
         "GRANT SELECT ON TABLE app.t TO \"Public\";\n"

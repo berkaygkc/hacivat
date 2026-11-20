@@ -2965,7 +2965,8 @@ The core-only T33 carries, done before the gate while Task 32 holds the app crat
   pg_catalog.oid)`, so `IN` resolves `pg_catalog.=(oid, oid)` whatever parameter types the
   driver sends; R-W5-5's path check no longer depends on untyped prepares.
 - **DDL roles (T16b m-1).** The PostgreSQL renderer refuses `public` and `none` as a grantee
-  or owner (the role grammar reads them as keywords, quoted or not) and `PUBLIC` as an owner.
+  or owner (the role grammar reads them as keywords, quoted or not). An owner `PUBLIC` is a
+  role of that upper-case name and is rendered quoted (fix round 1, N2).
 - **`minicat --check`** refuses an empty set now that the set is committed (T23 m-4).
 - **Actions are pinned by commit SHA** (T23 m-6), enforced by the check-deps rule
   `ActionNotPinnedBySha`.
@@ -2975,3 +2976,13 @@ The core-only T33 carries, done before the gate while Task 32 holds the app crat
   it now rests on mysql80, mysql84, mariadb106, mariadb1011 and mariadb114.
 - **The test fakes stay public (R-W3-7) until the gate**: gating them behind a `test-fakes`
   feature needs `hacivat-app`'s dev-dependency to enable it, an app manifest edit for T33.
+- **Fix round 1 (review).**
+  - The joinable PostgreSQL lint also refuses `USING` and `NATURAL` (a join's implicit `=`),
+    and requires `pg_catalog.<type>` after `::`, after a `CAST(`'s `AS` and in a typed literal
+    (`PathResolvedType`), so the `50-joined` header's "every cast names a pg_catalog type" is
+    checked.
+  - `ActionNotPinnedBySha` finds a `uses` key in every YAML form (flow mapping, quoted,
+    `uses :`), requires `@sha256:` for `docker://` images and reports an unreadable file.
+  - `IntroHandle::ready()` is documented as an actor-order barrier, and progress as
+    consistent at step ends only (a ticket can resolve a moment before progress drops its
+    task).

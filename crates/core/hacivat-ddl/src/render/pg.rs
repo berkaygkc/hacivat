@@ -721,10 +721,9 @@ fn owner_stmt(
     if matches!(kind, ObjectKind::Index | ObjectKind::Extension) {
         return Err(unsupported(op, ctx));
     }
-    // ## m4-t33a-hygiene (named exception in Task 19's file; T16b review m-1)
-    if &**owner == "PUBLIC" {
-        return Err(RenderError::Invalid("PUBLIC owns nothing"));
-    }
+    // ## m4-t33a-hygiene (named exception in Task 19's file; T16b review m-1): `public` and
+    // `none` are refused. An owner `PUBLIC` (from `relowner`, never the grant sentinel) is a
+    // role of that upper-case name, rendered quoted (fix round 1, review N2).
     let owner = role(ctx, owner)?;
     // ## m4-t33a-hygiene
     Ok(stmt(
