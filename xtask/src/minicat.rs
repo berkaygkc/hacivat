@@ -31,9 +31,9 @@
 //! - `check [--dir <dir>]` (also `--check`; offline): the manifest lists exactly the files
 //!   present and is in its generated form; every digest, size and count matches; every file
 //!   decodes, is canonical and re-encodes to the same bytes (a different libzstd shows here);
-//!   every image is the pinned one of `docker/m2a/compose.yml`; the set is empty (before the
-//!   first CI-generated set is committed) or exactly the ten lines, each complete, each with
-//!   its named exclusion rules.
+//!   every image is the pinned one of `docker/m2a/compose.yml`; the set is exactly the ten
+//!   lines (never empty: the set is committed), each complete, each with its named exclusion
+//!   rules.
 //! - `verify [--reader catalog|test] [--twice] [--work <dir>]` (also `--verify`): collects
 //!   into `<work>/verify` (complete coverage required with the catalog reader) and
 //!   byte-compares with the committed assets, printing the first differing section and
@@ -900,7 +900,7 @@ pub fn manifest_text(m: &Manifest) -> Result<String> {
     ))
 }
 
-/// The manifest of an empty set (before the first generated set is committed).
+/// The manifest of an empty set: the base `build` fills (the shipped check refuses it as is).
 pub fn empty_manifest() -> Manifest {
     Manifest {
         format: FORMAT,
@@ -1094,17 +1094,16 @@ pub fn check_dir(dir: &Path) -> Result<Vec<String>> {
     Ok(problems)
 }
 
-/// [`check_dir`] plus the rules of the shipped set: empty (before the first CI-generated set
-/// is committed) or exactly the ten [`SHIPPED`] lines, each complete, read from its target's
+/// [`check_dir`] plus the rules of the shipped set: exactly the ten [`SHIPPED`] lines (an
+/// empty set is refused since the set landed, T33a), each complete, read from its target's
 /// pinned image of `docker/m2a/compose.yml`, whose version is of its line, with its named
 /// exclusion rules.
 pub fn check_shipped(dir: &Path) -> Result<Vec<String>> {
     let mut problems = check_dir(dir)?;
     let text = std::fs::read_to_string(dir.join(MANIFEST))?;
     let manifest: Manifest = toml::from_str(&text)?;
-    if manifest.snapshot.is_empty() {
-        return Ok(problems);
-    }
+    // ## m4-t33a-hygiene (named exception; T23 review m-4): no empty-set allowance any more;
+    // an empty manifest fails the shipped-set rule below.
     let compose = std::fs::read_to_string(crate::workspace_root().join(COMPOSE_FILE))?;
     let images = compose_images(&compose);
     let want: Vec<String> = SHIPPED
@@ -1733,11 +1732,7 @@ fn run_inner(args: &[String]) -> Result<bool> {
             if problems.is_empty() {
                 let text = std::fs::read_to_string(dir.join(MANIFEST))?;
                 let m: Manifest = toml::from_str(&text)?;
-                if m.snapshot.is_empty() {
-                    println!("minicat check: no snapshots yet (an empty set)");
-                } else {
-                    print_manifest(&m);
-                }
+                print_manifest(&m);
                 println!("minicat check: {} is canonical", dir.display());
             }
             Ok(problems.is_empty())
@@ -2400,6 +2395,26 @@ mod tests {
         let dir = crate::workspace_root().join(ASSET_DIR);
         assert_eq!(check_shipped(&dir).unwrap(), Vec::<String>::new());
     }
+
+    // ## m4-t33a-hygiene (named exception in Task 23's file; T23 review m-4)
+    /// The set landed (`17dd6ca`), so an empty one is refused: `build-test` alone now tells
+    /// "deleted" from "not yet generated".
+    #[test]
+    fn an_empty_set_is_refused() {
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(
+            out.path().join(MANIFEST),
+            manifest_text(&empty_manifest()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(check_dir(out.path()).unwrap(), Vec::<String>::new());
+        let problems = check_shipped(out.path()).unwrap();
+        assert!(
+            problems.iter().any(|p| p.contains("the shipped set")),
+            "{problems:?}"
+        );
+    }
+    // ## m4-t33a-hygiene
 
     #[test]
     fn compose_images_are_read_per_service() {
