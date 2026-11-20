@@ -171,8 +171,9 @@ impl Introspector for PgIntrospector {
             dbms: DbmsKind::Postgres,
             transactional_ddl: true,
             incremental: true,
-            // Grants and dependencies are Task 16b's; row estimates ride with the relations.
-            facets: Vec::new(),
+            // ## m4-t16b-pg-facets (named exception): grants, dependencies and row estimates
+            // on demand (`facets::read`).
+            facets: facets::FACETS.to_vec(),
         }
     }
 

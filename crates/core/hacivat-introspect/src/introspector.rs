@@ -299,16 +299,20 @@ mod tests {
             let caps = introspector_for(dbms).expect("an M4 engine").capabilities();
             assert_eq!(caps.dbms, dbms);
             assert_eq!(caps.transactional_ddl, transactional, "{dbms:?}");
-            // ## m4-t16-pg / m4-t17-mysql / m4-t18-sqlite (named exceptions in Task 1c's file):
-            // PostgreSQL (Task 16) and MySQL (R-M4-39) are incremental, MariaDB stays `Full`
-            // (R-M4-10); SQLite is Task 18's; facets wait for Tasks 16b/17b.
-            if dbms != DbmsKind::Sqlite {
-                assert_eq!(
-                    caps.incremental,
-                    matches!(dbms, DbmsKind::Postgres | DbmsKind::MySql),
-                    "{dbms:?}"
-                );
-                assert!(caps.facets.is_empty(), "{dbms:?}");
+            // ## m4-t16-pg / m4-t16b-pg-facets / m4-t17-mysql / m4-t18-sqlite (named exceptions
+            // in Task 1c's file): PostgreSQL (Task 16) and MySQL (R-M4-39) are incremental,
+            // MariaDB stays `Full` (R-M4-10); SQLite is Task 18's. PostgreSQL reads grants,
+            // dependencies and statistics since Task 16b; MySQL facets wait for Task 17b.
+            match dbms {
+                DbmsKind::Postgres => {
+                    assert!(caps.incremental, "{dbms:?}");
+                    assert_eq!(caps.facets, crate::pg::facets::FACETS.to_vec(), "{dbms:?}");
+                }
+                DbmsKind::Sqlite => {}
+                _ => {
+                    assert_eq!(caps.incremental, dbms == DbmsKind::MySql, "{dbms:?}");
+                    assert!(caps.facets.is_empty(), "{dbms:?}");
+                }
             }
         }
         assert!(introspector_for(DbmsKind::MsSql).is_none());
