@@ -853,3 +853,110 @@ fn the_connection_menu_clears_the_selected_connections_history(cx: &mut TestAppC
     );
     stop_core_runtime_test(cx);
 }
+
+// ## m4-t32-shots (fix round 1, review M-1): a console in the middle of a recall forgets the
+// cleared statements: ⌃⌥↑ no longer steps to one.
+#[gpui::test]
+fn a_recall_in_progress_forgets_a_cleared_history(cx: &mut TestAppContext) {
+    let h = history(cx, &["SELECT 'newest'", "SELECT 'older'"]);
+    wait_until(h.vcx, "the records in the store", |_| kept(&h).len() == 2);
+    let editor = h.editor.clone();
+    in_window(h.vcx, |window, cx| {
+        let handle = gpui::Focusable::focus_handle(editor.read(cx), cx);
+        window.focus(&handle, cx);
+    });
+    h.vcx.run_until_parked();
+    let prev = |h: &History| {
+        let editor = editor.clone();
+        in_window(h.vcx, |window, cx| {
+            editor.update(cx, |e, cx| {
+                assert!(e.run_command("editor.history_prev", window, cx))
+            });
+        });
+        h.vcx.run_until_parked();
+    };
+    prev(&h);
+    wait_until(h.vcx, "the newest statement recalled", |_| {
+        h.text() == "SELECT 'newest'"
+    });
+    let done = h
+        .vcx
+        .cx
+        .update(|cx| hacivat_app::history::clear::clear(h.profile, cx));
+    assert_eq!(wait_task(h.vcx, done), Some(2));
+    // Older: nothing to step to any more (the cleared "older" never comes back).
+    prev(&h);
+    assert_eq!(h.text(), "SELECT 'newest'");
+    stop_core_runtime_test(cx);
+}
+
+// ## m4-t32-shots (fix round 1, review M-2; ruling: open the store just for the clear): with
+// the history turned off (no store open), the file still holds the connection's statements,
+// and "Clear query history…" still deletes them.
+#[gpui::test]
+fn clearing_works_with_the_history_turned_off(cx: &mut TestAppContext) {
+    let h = history(cx, &["SELECT 'kept on disk'"]);
+    let other = add_profile(h.vcx, test_profile("billing-dev", None, "127.0.0.2"));
+    h.put(record(other, "SELECT 'other'", Outcome::Ok, 0));
+    wait_until(h.vcx, "the records in the store", |_| kept(&h).len() == 2);
+    // History off: the app's store is closed and forgotten (as after a start with it off).
+    let store = h.store.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    h.rt.spawn(async move {
+        store.shutdown(std::time::Duration::from_secs(2)).await;
+        let _ = tx.send(());
+    });
+    rx.recv().expect("closed");
+    h.vcx.cx.update(|cx| {
+        hacivat_app::shell::update_settings(cx, |s| s.history.enabled = false);
+        hacivat_app::history::set_store(None, cx);
+        hacivat_app::connections::ConnectionsModel::select(cx, Some(h.profile));
+    });
+    h.vcx.run_until_parked();
+    assert!(
+        run(h.vcx, "connection.clear_history"),
+        "offered with the history off"
+    );
+    h.vcx.run_until_parked();
+    assert_eq!(
+        strip(&dialog_title(h.vcx)),
+        "Clear the query history of orders-dev?"
+    );
+    h.vcx.simulate_keystrokes("shift-tab enter");
+    // The file, read again: only the other connection's statement is left.
+    let path = h
+        .vcx
+        .cx
+        .read(|cx| cx.global::<hacivat_app::AppState>().paths.history_db());
+    let left = |path: std::path::PathBuf| -> Vec<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        h.rt.spawn(async move {
+            let s = HistoryStore::open(path, hacivat_exec::HistoryConfig::default())
+                .await
+                .expect("opens");
+            let hits = s
+                .search(HistoryQuery {
+                    limit: 100,
+                    ..HistoryQuery::default()
+                })
+                .await
+                .expect("search");
+            s.shutdown(std::time::Duration::from_secs(2)).await;
+            let _ = tx.send(hits);
+        });
+        rx.recv()
+            .expect("answers")
+            .into_iter()
+            .map(|h| h.record.statement_masked.to_string())
+            .collect()
+    };
+    wait_until(h.vcx, "the toast", |vcx| {
+        toast_texts(vcx)
+            .iter()
+            .any(|t| strip(t) == "The query history of orders-dev was cleared.")
+    });
+    assert_eq!(left(path), ["SELECT 'other'"]);
+    // Nothing reopened the history for recording.
+    assert!(h.vcx.cx.read(hacivat_app::history::store).is_none());
+    stop_core_runtime_test(cx);
+}

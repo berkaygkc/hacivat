@@ -315,6 +315,25 @@ struct Recalls(HashMap<EntityId, Recall>);
 
 impl Global for Recalls {}
 
+// ## m4-t32-shots (fix round 1, review M-1; named exception)
+/// Forgets the recalls of every console on `profile` (its history was cleared): ⌃⌥↑ / ⌃⌥↓
+/// no longer step through statements that are gone.
+pub(crate) fn forget_recalls(profile: hacivat_proto::ProfileId, cx: &mut App) {
+    let editors: Vec<EntityId> = Consoles::ids(cx)
+        .into_iter()
+        .filter_map(|id| Consoles::get(cx, id))
+        .filter(|s| s.profile == Some(profile))
+        .filter_map(|s| s.editor.as_ref().map(|e| e.entity_id()))
+        .collect();
+    if editors.is_empty() || !cx.has_global::<Recalls>() {
+        return;
+    }
+    let recalls = cx.global_mut::<Recalls>();
+    for id in editors {
+        recalls.0.remove(&id);
+    }
+}
+
 /// The console whose editor is `editor`.
 fn console_of(editor: &Entity<EditorView>, cx: &App) -> Option<ConsoleId> {
     Consoles::ids(cx).into_iter().find(|id| {

@@ -19,6 +19,11 @@ use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{App, Global, Task, WeakEntity};
 
 use crate::connections::ConnectionsModel;
+use futures::FutureExt as _;
+use hacivat_exec::{HistoryConfig, HistoryStore};
+
+/// How long a store opened only for a clear may take to close.
+const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 use crate::l10n_global::text_fn;
 
 /// The Clear history button's index; Cancel is the default.
@@ -35,9 +40,12 @@ fn profile_name(profile: ProfileId, cx: &App) -> Option<String> {
         .map(|p| p.name.clone())
 }
 
-/// Whether `profile`'s history can be cleared: the history is open and the profile exists.
+/// Whether `profile`'s history can be cleared: the profile exists. Fix round 1 (review M-2):
+/// with the history turned off the file may still hold its statements, so the clear opens the
+/// file just for itself ([`clear`]).
 pub fn can_clear(profile: Option<ProfileId>, cx: &App) -> bool {
-    super::store(cx).is_some() && profile.is_some_and(|p| profile_name(p, cx).is_some())
+    cx.try_global::<crate::AppState>().is_some()
+        && profile.is_some_and(|p| profile_name(p, cx).is_some())
 }
 
 /// The open question (tests).
@@ -100,14 +108,40 @@ pub fn ask(profile: ProfileId, cx: &mut App) {
 /// history dialog searches again, and a toast says whether it worked. The task answers how
 /// many entries were deleted (`None`: it failed).
 pub fn clear(profile: ProfileId, cx: &mut App) -> Task<Option<u64>> {
-    let Some(store) = super::store(cx) else {
-        return Task::ready(None);
-    };
     let name = profile_name(profile, cx).unwrap_or_default();
-    let work = super::on_core(store.clear(profile), cx);
+    let work = match super::store(cx) {
+        Some(store) => super::on_core(store.clear(profile), cx),
+        // Fix round 1 (review M-2): the history is off, so no store is open: open the file
+        // for this clear only (no file: nothing to clear), then close it. Nothing records.
+        None => {
+            let Some(path) = cx
+                .try_global::<crate::AppState>()
+                .map(|s| s.paths.history_db())
+            else {
+                return Task::ready(None);
+            };
+            super::on_core(
+                async move {
+                    if !path.exists() {
+                        return Ok(0);
+                    }
+                    let store = HistoryStore::open(path, HistoryConfig::default()).await?;
+                    let cleared = store.clear(profile).await;
+                    store.shutdown(CLOSE_GRACE).await;
+                    cleared
+                }
+                .boxed(),
+                cx,
+            )
+        }
+    };
     cx.spawn(async move |cx| {
         let result = work.await;
         cx.update(|cx| {
+            if result.is_ok() {
+                // Fix round 1 (review M-1): no console steps through cleared statements.
+                crate::console::commands::forget_recalls(profile, cx);
+            }
             let (kind, id) = match result {
                 Ok(_) => (ToastKind::Info, "hv-history-cleared"),
                 Err(_) => (ToastKind::Error, "hv-history-clear-failed"),

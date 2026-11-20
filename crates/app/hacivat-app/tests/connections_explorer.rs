@@ -650,8 +650,9 @@ fn a_read_only_store_disables_the_mutating_commands(cx: &mut TestAppContext) {
             .collect()
     });
     // Connect, Edit…, Duplicate, Copy as URL, Clear query history… (## m4-t32-shots, named
-    // exception: disabled while no history store is open), Delete…
-    assert_eq!(disabled, [false, true, true, false, true, true]);
+    // exception: not a profile write, and it opens the history file itself, fix round 1 M-2),
+    // Delete…
+    assert_eq!(disabled, [false, true, true, false, false, true]);
 }
 
 /// Review minor: the home entry points are real buttons (tab stops) that run their command.
