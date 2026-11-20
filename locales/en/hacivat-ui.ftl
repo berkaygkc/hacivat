@@ -3997,3 +3997,24 @@ hv-explorer-open-data-db-unknown = Hacivat can't tell which database this connec
 # Variables:
 #   $name (String) - the object's name, verbatim, e.g. "yedek_2019".
 hv-explorer-hide-refused = Objects like { $name } can't be hidden: the name can't be written as a view filter.
+
+## m4-t25-ddl-view
+# Surface 10 (DDL view). The toolbar's read-only chip (never hides).
+hv-ddl-view-read-only = read-only
+# Surface 10 (DDL view). The definition could not be read (not loaded, or the login can't read it).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-not-loaded = Hacivat couldn't read the definition of { $name }.
+# Surface 10 (DDL view). Under hv-ddl-view-not-loaded.
+hv-ddl-view-not-loaded-body = Refresh reads it from the server again.
+# Surface 11 (Stale object). The "no longer exists" notice's button.
+hv-ddl-view-close-tab = Close tab
+# Surface 10 (DDL view). The tooltip of "Definitions provided by server" on SQLite, where it is
+# checked and can't be changed (ruling R-W4-12).
+hv-ddl-view-server-fixed-tip = SQLite always shows the server's text: CHECK constraints and generated columns exist only there.
+# The palette title of the DDL view's Reload (F5 in its text).
+hv-cmd-ddl-view-reload = Reload DDL
+# Surface 11 (Stale object). While the state check runs (review m-2): a quiet caption.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-checking = Checking whether { $name } changed on the server…

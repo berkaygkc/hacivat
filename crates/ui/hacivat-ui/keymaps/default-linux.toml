@@ -689,3 +689,15 @@ context = "ExplorerTree"
 chord = "f5"
 command = "explorer.refresh"
 context = "ExplorerTree"
+
+## m4-t25-ddl-view
+# Named exception in Task 1b's rows (coordinator, T25 round 1): F5 reloads the DDL view while
+# its read-only text has the focus (design/m4-explorer surface 11 "Reload is also F5 in the DDL
+# view"). The `DdlViewCode` context is the text's own focus, never the tab's (`DdlView` is on
+# the stack whatever has the focus, review I1), so F5 stays the explorer's refresh in the tree
+# and reaches no other field.
+
+[[binding]]
+chord = "f5"
+command = "ddl_view.reload"
+context = "DdlViewCode"

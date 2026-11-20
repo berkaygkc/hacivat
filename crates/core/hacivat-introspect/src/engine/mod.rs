@@ -446,6 +446,27 @@ impl IntroHandle {
         self.request(scheduler::Request::CheckState(keys), Priority::User)
     }
 
+    // ## m4-t25-ddl-view (named exception in Task 15's file)
+    /// [`IntroHandle::check_state`], also answering each key's verdict (`Current`, `Changed`,
+    /// `Dropped`, `Unknown`) as soon as the stamps were compared, before any re-read. The
+    /// receiver sees its sender dropped when the check failed or was cancelled (nothing was
+    /// decided). The DDL view's freshness (surface 11).
+    pub fn check_state_verdicts(
+        &self,
+        keys: Vec<ObjectKey>,
+    ) -> (
+        RefreshTicket,
+        tokio::sync::oneshot::Receiver<Vec<(ObjectKey, crate::introspector::Staleness)>>,
+    ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let ticket = self.request(
+            scheduler::Request::CheckStateVerdicts(keys, scheduler::VerdictSink::new(tx)),
+            Priority::User,
+        );
+        (ticket, rx)
+    }
+    // ## m4-t25-ddl-view
+
     /// Replaces the profile's scope (HV-INTRO-02): namespaces leaving it are removed (and their
     /// running results discarded), namespaces entering it are listed as not loaded.
     pub fn set_scope(&self, pattern: ScopePattern) {

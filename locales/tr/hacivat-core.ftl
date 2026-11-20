@@ -1027,8 +1027,9 @@ model-cache-offline = { $date } tarihli önbellekteki meta veriler gösteriliyor
 model-cache-disabled-by-policy = Bu bağlantının meta verileri diskte önbelleğe alınmıyor.
 # Review: PO
 ddl-unsupported-kind = { $dbms } bu tür nesneler için DDL üretimini desteklemiyor ({ $kind }).
+# m4-t25-ddl-view (named exception in m4-t01a-model's block): the NOTES surface 10 wording.
 # Review: PO
-ddl-warn-executable-comment = Bu tanım MySQL çalıştırılabilir yorumları (/*! … */) içeriyor. Betik çalıştığında bunlar SQL olarak çalışır.
+ddl-warn-executable-comment = Bu metin MySQL çalıştırılabilir yorumları (/*! … */) içeriyor. MySQL bunların içindekini SQL olarak çalıştırır.
 # Review: PO
 ddl-sqlite-rebuild-notice = SQLite bunu yerinde değiştiremiyor; betik tabloyu yeniden oluşturup satırlarını kopyalar.
 # Review: PO

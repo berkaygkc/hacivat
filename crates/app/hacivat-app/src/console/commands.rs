@@ -48,6 +48,17 @@ fn editor_focused(cx: &App) -> bool {
     focused_editor(cx).is_some()
 }
 
+// ## m4-t25-ddl-view (named exception, T25 review m-6)
+/// The editor's Run commands.
+const RUN_COMMANDS: [&str; 3] = ["editor.run", "editor.run_2", "editor.run_3"];
+
+/// Run is enabled while an editor that is not read-only has the focus (a read-only editor, the
+/// DDL view's text, has no run host).
+fn writable_editor_focused(cx: &App) -> bool {
+    focused_editor(cx).is_some_and(|e| !e.read(cx).config().read_only)
+}
+// ## m4-t25-ddl-view
+
 // ## m3c-t33-find
 /// A find command is enabled while an editor or a console's find field has the focus.
 fn editor_or_find_bar_focused(cx: &App) -> bool {
@@ -80,6 +91,10 @@ pub fn register(cx: &mut App) {
                 disabled
             } else if crate::console::find_bar::ROUTED.contains(&id) {
                 editor_or_find_bar_focused
+            // ## m4-t25-ddl-view (named exception, T25 review m-6): Run is not offered in a
+            // read-only editor (the DDL view's text), where nothing would run it.
+            } else if RUN_COMMANDS.contains(&id) {
+                writable_editor_focused
             } else {
                 editor_focused
             },
