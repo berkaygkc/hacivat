@@ -42,6 +42,22 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # ## m4-gate-macos-disk: the macOS runner ran out of disk in meta's all-features hostile
+      # tests (SQLite DiskFull / disk I/O error, CI 44811540431 and 44818891923). Drop toolchains
+      # this workflow never uses and print the free space before and after.
+      - name: Free runner disk (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          df -h "$HOME" | tail -1
+          for d in "${ANDROID_HOME:-}" "$HOME/Library/Android/sdk" "$HOME/hostedtoolcache/CodeQL" \
+                   "$HOME/.dotnet" "$HOME/hostedtoolcache/go" "$HOME/hostedtoolcache/PyPy"; do
+            if [ -n "$d" ] && [ -d "$d" ]; then sudo rm -rf "$d"; fi
+          done
+          xcrun simctl delete unavailable 2>/dev/null || true
+          df -h "$HOME" | tail -1
+      # ## m4-gate-macos-disk
+
       # rust-toolchain.toml pins 1.98.1; install it explicitly.
       - name: Install pinned toolchain
         shell: bash
