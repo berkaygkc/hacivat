@@ -74,8 +74,14 @@ pub enum LintKind {
     /// In a `joinable` PostgreSQL section (whose `search_path` Hacivat cannot pin): an
     /// operator not written `OPERATOR(pg_catalog.op)`, or a construct that picks an operator
     /// by name through the path (`LIKE`, `BETWEEN`, `NULLIF`, `IN` without a list bind,
-    /// `IS DISTINCT FROM`, a simple `CASE`; T16 verification H8, the CVE-2018-1058 class).
+    /// `IS DISTINCT FROM`, a simple `CASE`, `JOIN … USING`, `NATURAL JOIN`; T16 verification
+    /// H8, the CVE-2018-1058 class).
     PathResolvedOperator(String),
+    /// In a `joinable` PostgreSQL section: a type name that resolves through the path, after
+    /// `::` or the `AS` of a `CAST(`, or in a typed literal (`text 'a'`); every type is written
+    /// `pg_catalog.<type>` (T33a review M2). The `String` is the word found where
+    /// `pg_catalog` belongs.
+    PathResolvedType(String),
     // ## m4-t33a-hygiene
 }
 
@@ -159,6 +165,8 @@ fn lint_section(sec: &Section, lexer: Family, rules: Family, out: &mut Vec<LintE
     // ## m4-t33a-hygiene (named exception; H8): the indices of quoted names, which are names
     // and never SQL syntax.
     let mut quoted: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // ## m4-t33a-hygiene (fix round 1, M2): the indices of string literals (typed literals).
+    let mut literals: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // ## m4-t33a-hygiene
     walk_lines(&sec.body, &mut |l| {
         // The parser accepted the line, so it lexes again.
@@ -180,6 +188,7 @@ fn lint_section(sec: &Section, lexer: Family, rules: Family, out: &mut Vec<LintE
                         quoted.insert(toks.len());
                         Tok::Word(&q[1..q.len() - 1])
                     } else {
+                        literals.insert(toks.len());
                         Tok::Operand
                     };
                     toks.push((l.line, tok));
@@ -218,6 +227,10 @@ fn lint_section(sec: &Section, lexer: Family, rules: Family, out: &mut Vec<LintE
     if rules == Family::Pg && sec.joinable {
         for (line, w) in path_resolved_operators(&toks, &quoted) {
             push(line, LintKind::PathResolvedOperator(w));
+        }
+        // ## m4-t33a-hygiene (fix round 1, M2)
+        for (line, w) in path_resolved_types(&toks, &quoted, &literals) {
+            push(line, LintKind::PathResolvedType(w));
         }
     }
     // ## m4-t33a-hygiene
@@ -359,6 +372,11 @@ fn path_resolved_operators(
                     out.push((line, "IS DISTINCT FROM".to_string()));
                 } else if eq(w, "case") && !word_is(k + 1, "when") {
                     out.push((line, "CASE".to_string()));
+                } else if eq(w, "using") || eq(w, "natural") {
+                    // Fix round 1 (review M1): `JOIN … USING (col)` and `NATURAL JOIN` build an
+                    // unqualified `=` (`transformJoinUsingClause`); `ORDER BY … USING op` is
+                    // refused here too, beside its operator.
+                    out.push((line, w.to_ascii_uppercase()));
                 }
             }
             Tok::Op("(" | ")" | "," | "." | "::" | "[" | "]") => {}
@@ -372,6 +390,85 @@ fn path_resolved_operators(
             Tok::Operand | Tok::List => {}
         }
         k += 1;
+    }
+    out
+}
+// ## m4-t33a-hygiene
+
+// ## m4-t33a-hygiene (fix round 1, review M2)
+/// Words after which a string literal is a plain operand, never a typed literal's value.
+const BEFORE_LITERAL: [&str; 36] = [
+    "select", "then", "else", "when", "and", "or", "not", "is", "by", "on", "where", "from",
+    "having", "limit", "offset", "values", "return", "escape", "like", "ilike", "similar", "to",
+    "between", "symmetric", "distinct", "in", "all", "any", "some", "case", "end", "as", "with",
+    "union", "except", "intersect",
+];
+
+/// The type names of a `joinable` PostgreSQL section that resolve through the `search_path`:
+/// the type after `::` and after the `AS` of a `CAST(` must be `pg_catalog.<type>` (an
+/// unquoted `pg_catalog`), and a typed literal (`<type> '…'`) must name `pg_catalog.<type>`.
+/// Answers the word found where `pg_catalog` belongs.
+fn path_resolved_types(
+    toks: &[(u32, Tok<'_>)],
+    quoted: &std::collections::HashSet<usize>,
+    literals: &std::collections::HashSet<usize>,
+) -> Vec<(u32, String)> {
+    let word_is = |j: usize, w: &str| {
+        !quoted.contains(&j) && matches!(toks.get(j), Some((_, Tok::Word(x))) if eq(x, w))
+    };
+    let op_is = |j: usize, o: &str| matches!(toks.get(j), Some((_, Tok::Op(x))) if *x == o);
+    let shown = |j: usize| match toks.get(j) {
+        Some((_, Tok::Word(w))) => (*w).to_string(),
+        Some((_, Tok::Op(o))) => (*o).to_string(),
+        _ => "?".to_string(),
+    };
+    // The type starting at `j` is `pg_catalog.<word>`.
+    let qualified = |j: usize| {
+        word_is(j, "pg_catalog")
+            && op_is(j + 1, ".")
+            && matches!(toks.get(j + 2), Some((_, Tok::Word(_))))
+    };
+    let mut out = Vec::new();
+    for (k, &(line, tok)) in toks.iter().enumerate() {
+        // `x::type`.
+        if tok == Tok::Op("::") && !qualified(k + 1) {
+            out.push((line, shown(k + 1)));
+        }
+        // `CAST(x AS type)`: the `AS` at the call's own depth.
+        if word_is(k, "cast") && op_is(k + 1, "(") {
+            let mut depth = 0usize;
+            let mut j = k + 1;
+            while let Some((_, t)) = toks.get(j) {
+                match t {
+                    Tok::Op("(") => depth += 1,
+                    Tok::Op(")") => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ if depth == 1 && word_is(j, "as") => {
+                        if !qualified(j + 1) {
+                            out.push((toks[j].0, shown(j + 1)));
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+        }
+        // A typed literal: a type name right before a string literal.
+        if let Tok::Word(w) = tok
+            && literals.contains(&(k + 1))
+            && (quoted.contains(&k) || !BEFORE_LITERAL.iter().any(|b| eq(w, b)))
+        {
+            let after_dot = k >= 1 && op_is(k - 1, ".");
+            let in_catalog = after_dot && k >= 2 && word_is(k - 2, "pg_catalog");
+            if !in_catalog {
+                out.push((line, if after_dot { shown(k - 2) } else { w.to_string() }));
+            }
+        }
     }
     out
 }
