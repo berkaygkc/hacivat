@@ -10,8 +10,9 @@
 //!   so a length is never trusted; libzstd verifies the checksum;
 //! - JSON that is format 1 and **is** its own canonical form ([`normalize`]): a reordered,
 //!   re-indented or hand-edited file is refused, never repaired;
-//! - closed vocabularies and the engine's system schemas only (`normalize`'s validation), and
-//!   a namespace the model's kind schema accepts.
+//! - closed vocabularies and the engine's system schemas only (`normalize`'s validation), a
+//!   `coverage` that agrees with the content (fix round 1, review m-3), and a namespace the
+//!   model's kind schema accepts.
 //!
 //! The mapping: one [`NamespaceSnapshot`] per system schema, keyed `NsKey::schema([schema])`
 //! with no database (PostgreSQL's system schemas exist in every database; the system layer,

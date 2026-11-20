@@ -61,6 +61,22 @@ const SENTINEL: &str = "hv_minicat_no_such_function";
 const ABSENT: [&str; 2] = ["1305", "1630"];
 /// `ER_PROCACCESS_DENIED_ERROR`: the probe cannot tell (R-C1-1).
 const DENIED: &str = "1370";
+/// The answers that mean "a built-in of that name exists" (fix round 1, review m-1: an
+/// allowlist; any other code fails the read after the histogram is printed, so a new code is
+/// looked at, never shipped): `ok` (it prepared), 1064 `ER_PARSE_ERROR` (a keyword-parsed
+/// function such as `CAST`, whose call needs its own syntax), 1582
+/// `ER_WRONG_PARAMCOUNT_TO_NATIVE_FCT` and 1583 `ER_WRONG_PARAMETERS_TO_NATIVE_FCT` (a native
+/// function called with no argument), 3593 (named by the T23 security review).
+const PRESENT: [&str; 5] = ["ok", "1064", "1582", "1583", "3593"];
+
+/// What the probe learnt about one name, with the server's answer code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Answer {
+    Present(String),
+    Absent(String),
+    /// A code in neither list: the read fails on it.
+    Unknown(String),
+}
 
 fn wanted() -> bool {
     docker_enabled() && std::env::var("HACIVAT_MINICAT").is_ok_and(|v| v == "1")
@@ -222,7 +238,7 @@ fn probe_target(t: &DockerTarget, reader: &str) -> DockerTarget {
 }
 
 /// Whether `name` is a function (`PREPARE` only; nothing runs), with the server's answer.
-async fn probe(live: &mut hacivat_session::pipeline::LiveConnection, name: &str) -> (bool, String) {
+async fn probe(live: &mut hacivat_session::pipeline::LiveConnection, name: &str) -> Answer {
     // Only `[A-Za-z0-9_]` ever stands in the probe text (the one R-M4-7 exception).
     assert!(
         !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
@@ -238,7 +254,7 @@ async fn probe(live: &mut hacivat_session::pipeline::LiveConnection, name: &str)
                 .batch("DEALLOCATE PREPARE hv_minicat")
                 .await
                 .unwrap_or_else(|e| panic!("DEALLOCATE: {:?}", e.kind));
-            (true, "ok".into())
+            Answer::Present("ok".into())
         }
         Err(e) => {
             let code = e
@@ -248,7 +264,13 @@ async fn probe(live: &mut hacivat_session::pipeline::LiveConnection, name: &str)
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| panic!("{name}: not a server answer: {:?}", e.kind));
             assert_ne!(code, DENIED, "{name}: the probe cannot tell (1370, R-C1-1)");
-            (!ABSENT.contains(&code.as_str()), code)
+            if ABSENT.contains(&code.as_str()) {
+                Answer::Absent(code)
+            } else if PRESENT.contains(&code.as_str()) {
+                Answer::Present(code)
+            } else {
+                Answer::Unknown(code)
+            }
         }
     }
 }
@@ -257,21 +279,29 @@ async fn probe(live: &mut hacivat_session::pipeline::LiveConnection, name: &str)
 async fn builtins(t: &DockerTarget, reader: &str) -> Value {
     let mut admin = admin_on(&probe_target(t, reader), None).await;
     let live = admin.live();
-    let (present, answer) = probe(live, SENTINEL).await;
+    let answer = probe(live, SENTINEL).await;
     assert!(
-        !present,
-        "{}: the probe does not tell functions apart (the sentinel answers {answer})",
+        matches!(answer, Answer::Absent(_)),
+        "{}: the probe does not tell functions apart (the sentinel answers {answer:?})",
         t.id
     );
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
     let mut codes: std::collections::BTreeMap<String, u32> = Default::default();
+    let mut unknown = Vec::new();
     for name in manual_index() {
-        let (found, code) = probe(live, &name).await;
-        *codes.entry(code).or_default() += 1;
-        if found {
-            rows.push(vec![Some(name), Some("probe".into())]);
+        match probe(live, &name).await {
+            Answer::Present(code) => {
+                *codes.entry(code).or_default() += 1;
+                rows.push(vec![Some(name), Some("probe".into())]);
+            }
+            Answer::Absent(code) => *codes.entry(code).or_default() += 1,
+            Answer::Unknown(code) => {
+                *codes.entry(format!("{code}?")).or_default() += 1;
+                unknown.push(format!("{name}={code}"));
+            }
         }
     }
+    let mut sql_functions = 0usize;
     if t.engine == DbmsKind::MariaDb {
         let answer = live
             .raw()
@@ -282,21 +312,35 @@ async fn builtins(t: &DockerTarget, reader: &str) -> Value {
                     protocol: Protocol::Simple,
                 },
             )
-            .await;
-        if let Ok(answer) = answer {
-            for r in answer.rows {
-                if let Some(Some(v)) = r.into_iter().next() {
-                    rows.push(vec![Some(v.to_string()), Some("sql_functions".into())]);
-                }
+            .await
+            // Fix round 1 (review I-1): the read fails closed, never ships the probe alone.
+            .unwrap_or_else(|e| panic!("{}: information_schema.SQL_FUNCTIONS: {:?}", t.id, e.kind));
+        for r in answer.rows {
+            if let Some(Some(v)) = r.into_iter().next() {
+                rows.push(vec![Some(v.to_string()), Some("sql_functions".into())]);
+                sql_functions += 1;
             }
         }
+        assert!(
+            sql_functions > 0,
+            "{}: SQL_FUNCTIONS answered no name",
+            t.id
+        );
     }
+    // The histogram lists every answer code (unknown ones with `?`).
     let summary: Vec<String> = codes.iter().map(|(c, n)| format!("{c}:{n}")).collect();
     println!(
-        "HV-FACT minicat-probe target={} rows={} answers={}",
+        "HV-FACT minicat-probe target={} rows={} sql_functions={} answers={}",
         t.id,
         rows.len(),
+        sql_functions,
         summary.join(",")
+    );
+    assert!(
+        unknown.is_empty(),
+        "{}: probe answers in neither list (look, then extend PRESENT or ABSENT): {}",
+        t.id,
+        unknown.join(", ")
     );
     admin.close().await;
     json!({ "columns": ["name", "source"], "rows": rows })
@@ -441,7 +485,12 @@ async fn run_system_sections_refuses_other_modes_schemas_and_reads_nothing_offli
     }
     let mut none = t(DbmsKind::Postgres, "pg_catalog");
     none.params = Params::default();
-    assert!(run_system_sections(&mut c, &pg, &none).await.is_err());
+    // Fix round 1 (review m-7): the precise refusal, never the connection's `Unavailable`.
+    let e = run_system_sections(&mut c, &pg, &none).await.unwrap_err();
+    assert!(
+        matches!(&e, hacivat_introspect::IntroError::Protocol(n) if &**n == "minicat/schema"),
+        "{e:?}"
+    );
     // A system schema on a connection with no server: the connection's own refusal.
     let e = run_system_sections(&mut c, &pg, &t(DbmsKind::Postgres, "pg_catalog"))
         .await
@@ -455,10 +504,12 @@ async fn run_system_sections_refuses_other_modes_schemas_and_reads_nothing_offli
     );
     // A pack of another dialect than the context's.
     let my = Pack::builtin(DialectId::MySql).unwrap();
+    let e = run_system_sections(&mut c, &my, &t(DbmsKind::Postgres, "pg_catalog"))
+        .await
+        .unwrap_err();
     assert!(
-        run_system_sections(&mut c, &my, &t(DbmsKind::Postgres, "pg_catalog"))
-            .await
-            .is_err()
+        matches!(&e, hacivat_introspect::IntroError::Protocol(n) if &**n == "minicat/dialect"),
+        "{e:?}"
     );
 }
 
@@ -498,11 +549,21 @@ async fn builtin_name_probe_sentinel_is_absent() {
         let t = require_target(id).unwrap_or_else(|| panic!("{id}: needs --set full"));
         let mut admin = admin_on(&probe_target(&t, &reader), None).await;
         let live = admin.live();
-        let (present, code) = probe(live, SENTINEL).await;
-        assert!(!present, "{id}: the sentinel answers {code}");
-        assert!(ABSENT.contains(&code.as_str()), "{id}: {code}");
-        assert_eq!(probe(live, "NOW").await, (true, "ok".into()), "{id}");
-        assert_eq!(probe(live, "ABS").await, (true, "1582".into()), "{id}");
+        let answer = probe(live, SENTINEL).await;
+        assert!(
+            matches!(answer, Answer::Absent(_)),
+            "{id}: the sentinel answers {answer:?}"
+        );
+        assert_eq!(
+            probe(live, "NOW").await,
+            Answer::Present("ok".into()),
+            "{id}"
+        );
+        assert_eq!(
+            probe(live, "ABS").await,
+            Answer::Present("1582".into()),
+            "{id}"
+        );
         admin.close().await;
     }
 }

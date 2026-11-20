@@ -163,13 +163,17 @@ pub struct Coverage {
 }
 
 impl Snapshot {
-    /// No expected schema missing, every relation with columns, and (MySQL/MariaDB) the
-    /// built-in names read.
+    /// No expected schema missing, every relation with columns, and the built-in names read
+    /// from every source of the engine: the probe on MySQL, the probe and
+    /// `information_schema.SQL_FUNCTIONS` on MariaDB (R-M4-44; fix round 1, review I-1).
     pub fn is_complete(&self) -> bool {
         let c = &self.coverage;
-        c.missing_schemas.is_empty()
-            && c.relations_without_columns == 0
-            && (self.dbms == "postgres" || c.builtins.is_some())
+        let builtins = match self.dbms.as_str() {
+            "postgres" => true,
+            "mariadb" => c.builtins.as_deref() == Some("probe+sql_functions"),
+            _ => c.builtins.as_deref() == Some("probe"),
+        };
+        c.missing_schemas.is_empty() && c.relations_without_columns == 0 && builtins
     }
 }
 
@@ -2034,16 +2038,15 @@ mod tests {
                 ],
             ),
         ));
-        sections.push((
-            "builtins".into(),
-            table(
-                &["name", "source"],
-                &[
-                    &[Some("CONCAT"), Some("probe")],
-                    &[Some("abs"), Some("probe")],
-                ],
-            ),
-        ));
+        // MariaDB adds `information_schema.SQL_FUNCTIONS` (R-M4-44).
+        let mut builtins: Vec<&[Option<&str>]> = vec![
+            &[Some("CONCAT"), Some("probe")],
+            &[Some("abs"), Some("probe")],
+        ];
+        if dbms == "mariadb" {
+            builtins.push(&[Some("CAST"), Some("sql_functions")]);
+        }
+        sections.push(("builtins".into(), table(&["name", "source"], &builtins)));
         Raw {
             id: id.into(),
             head: head(id, dbms, line, version, "catalog"),
@@ -2529,5 +2532,72 @@ mod tests {
             first_difference(&c, &a).as_deref(),
             Some("variables work_mem: only committed")
         );
+    }
+
+    /// Fix round 1 (review I-1): a MariaDB line is complete only with both built-in sources,
+    /// a MySQL line only with the probe.
+    #[test]
+    fn mariadb_builtins_need_the_probe_and_sql_functions() {
+        let only = |dbms: &str, id: &str, line: &str, rows: &[&[Option<&str>]]| {
+            let mut r = my_raw(id, dbms, line, &format!("{line}.3"), &MY_SCHEMAS);
+            r.sections.retain(|(n, _)| n != "builtins");
+            r.sections
+                .push(("builtins".into(), table(&["name", "source"], rows)));
+            r
+        };
+        let full = snapshot_of(my_raw(
+            "mariadb114",
+            "mariadb",
+            "11.4",
+            "11.4.8",
+            &MY_SCHEMAS,
+        ));
+        assert_eq!(
+            full.coverage.builtins.as_deref(),
+            Some("probe+sql_functions")
+        );
+        assert!(full.is_complete());
+        assert!(
+            full.routines
+                .iter()
+                .any(|r| r.schema.is_none() && r.name == "cast")
+        );
+        // The probe alone (a swallowed SQL_FUNCTIONS read): partial.
+        let probe_only = snapshot_of(only(
+            "mariadb",
+            "mariadb114",
+            "11.4",
+            &[&[Some("abs"), Some("probe")]],
+        ));
+        assert_eq!(probe_only.coverage.builtins.as_deref(), Some("probe"));
+        assert!(!probe_only.is_complete());
+        // SQL_FUNCTIONS alone is not enough either.
+        assert!(
+            !snapshot_of(only(
+                "mariadb",
+                "mariadb114",
+                "11.4",
+                &[&[Some("CAST"), Some("sql_functions"),]]
+            ))
+            .is_complete()
+        );
+        // MySQL has no SQL_FUNCTIONS: exactly the probe.
+        let my = snapshot_of(my_raw("mysql84", "mysql", "8.4", "8.4.6", &MY_SCHEMAS));
+        assert_eq!(my.coverage.builtins.as_deref(), Some("probe"));
+        assert!(my.is_complete());
+        // --require-complete refuses the set and names the line.
+        let mut v = ten();
+        v.retain(|r| r.id != "mariadb106");
+        v.push(only(
+            "mariadb",
+            "mariadb106",
+            "10.6",
+            &[&[Some("abs"), Some("probe")]],
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        write_raws(dir.path(), &v);
+        let out = tempfile::tempdir().unwrap();
+        let err = build(dir.path(), out.path(), true).unwrap_err();
+        assert!(format!("{err:#}").contains("mariadb106"), "{err:#}");
     }
 }

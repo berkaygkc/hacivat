@@ -734,7 +734,8 @@ jobs:
   # `hv_catalog` (docker/m2a/init/mysql.sql); no secrets (the throwaway m2a credentials), no
   # signing. Each read step continues on failure so the fresh-stack read always runs; the last
   # step fails the job if any of them failed. The regenerated sets (`minicat-1/verify`: the
-  # first stack, `minicat-2/verify`: the fresh one) are always uploaded as the artifact
+  # first stack, `minicat-2/verify`: the fresh one; each read's own build `minicat-*/out-*`)
+  # are always uploaded as the artifact
   # `system-catalogs`, and the log carries one `HV-FACT minicat` line per file: the first
   # complete set is reviewed and committed from there (`assets/system-catalogs/`). The offline
   # check also runs in build-test (xtask's `the_committed_snapshots_are_canonical`). Runs by
@@ -805,9 +806,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: system-catalogs
+          # ## m4-t23-minicat (fix round 1, review m-5): the per-read builds `out-1`/`out-2`
+          # too, so two reads that differ leave both sides as evidence.
           path: |
             ${{ runner.temp }}/minicat-1/verify
             ${{ runner.temp }}/minicat-2/verify
+            ${{ runner.temp }}/minicat-*/out-*
           if-no-files-found: ignore
       - name: Server logs
         if: failure() || steps.first.outcome == 'failure' || steps.fresh.outcome == 'failure'

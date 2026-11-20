@@ -12,7 +12,7 @@
 //! columns keep their ordinal order. Kinds come from closed vocabularies and schemas from the
 //! engine's system schemas: anything else fails closed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -260,6 +260,30 @@ fn validate(s: &Snapshot) -> Result<(), SystemError> {
         .chain(&s.coverage.missing_schemas)
     {
         one_of(sc, schemas, "coverage names another schema")?;
+    }
+    // ## m4-t23-minicat (fix round 1, review m-3): the coverage is what the content says, as
+    // the generator computes it: the missing schemas are the expected ones no relation is in,
+    // and the count of relations without columns is exact.
+    let present: BTreeSet<&str> = s.relations.iter().map(|r| r.schema.as_str()).collect();
+    let missing: BTreeSet<&str> = s
+        .coverage
+        .expected_schemas
+        .iter()
+        .map(String::as_str)
+        .filter(|sc| !present.contains(sc))
+        .collect();
+    let listed: BTreeSet<&str> = s
+        .coverage
+        .missing_schemas
+        .iter()
+        .map(String::as_str)
+        .collect();
+    if listed != missing || listed.len() != s.coverage.missing_schemas.len() {
+        return Err(corrupt("coverage contradicts the relations"));
+    }
+    let empty = s.relations.iter().filter(|r| r.columns.is_empty()).count();
+    if usize::try_from(s.coverage.relations_without_columns).ok() != Some(empty) {
+        return Err(corrupt("coverage contradicts the relations"));
     }
     Ok(())
 }

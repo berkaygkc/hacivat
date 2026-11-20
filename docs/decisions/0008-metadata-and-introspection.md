@@ -2196,3 +2196,21 @@ introspectors' own system-mode packs.
   (two reads equal, fresh stack equal).
 - `THIRD_PARTY_NOTICES.md` (named exception): libzstd's BSD licence; the PostgreSQL built-in
   object descriptions in the snapshots are PostgreSQL Licence text.
+- **Fix round 1 (security review, 1 Important, minors):**
+  - *I-1.* A failed MariaDB `information_schema.SQL_FUNCTIONS` read fails the generator (it
+    was swallowed), and an empty answer does too. `minicat` counts a MariaDB line complete only
+    with `builtins = "probe+sql_functions"`, a MySQL line only with `"probe"`.
+  - *m-1.* The probe's "present" answers are an allowlist (`ok`, 1064, 1582, 1583, 3593); any
+    other code is listed with `?` in the `HV-FACT minicat-probe answers=` histogram and then
+    fails the read. 1305/1630 are absent; 1370 still fails at once.
+  - *m-3.* The decoder cross-checks `coverage` against the content: `missing_schemas` must be
+    exactly the expected schemas no relation is in, and `relations_without_columns` the exact
+    count. A contradicting file is `Corrupt`.
+  - *m-5.* The CI artifact also carries each read's own build (`minicat-*/out-*`).
+  - *m-7.* The offline refusals assert their exact codes (`minicat/schema`,
+    `minicat/dialect`).
+  - The review's hostile tests are `hacivat-meta/tests/system_decode_hostile.rs`; their
+    fixtures carry a consistent coverage and H10 now asserts the refusal.
+  - Carried to T33: m-2 (a fuzz target that frames its input, past the checksum), m-4 (remove
+    the empty-set allowance once the set lands), m-6 (SHA-pin actions repo-wide), m-8 (watch
+    level-19 re-encoding on macOS/Windows).
