@@ -44,6 +44,17 @@
 //! - **Periodic validation** (R-M4-20): an incremental pass of every loaded namespace every
 //!   `validate_every`, skipped while the user's session is in a transaction on a
 //!   single-connection profile ([`MetaSource::user_in_transaction`]).
+//!
+//! ## m4-t22-state (Task 22; ADR 0008 `## m4-t22 — freshness`)
+//!
+//! - A validation round (periodic, on [`Engine::start_with_clock`]'s clock, and on connect for
+//!   every cached in-scope namespace but the current one) is the cheap check
+//!   (`freshness::check_namespace`): unchanged clears the stale mark, changed queues an
+//!   incremental (or full) pass. A round inside the user's transaction is deferred, not lost.
+//! - `check_state` runs `freshness::check_state` per database of its keys and re-reads what
+//!   changed or was dropped, storing the stamps it read as marks.
+//! - Validation passes never remove more than the guard allows across passes (D-039);
+//!   [`IntroHandle::pending_confirmation`] names what a held deletion would remove.
 
 pub mod facet;
 pub mod filters;

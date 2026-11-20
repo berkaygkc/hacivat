@@ -484,18 +484,41 @@ fn r_len(r: &common::Rig, ns: &NsKey) -> usize {
         .map_or(0, |a| a.len())
 }
 
-#[test]
-fn the_hub_placeholder_pins_no_mysql_table_rule() {
-    let placeholder = IdentCtx {
-        lower_case_table_names: u8::MAX,
-        ..IdentCtx::new(DialectId::MySql)
-    };
-    assert_eq!(
-        FoldRule::for_names(
-            DialectId::MySql,
-            &placeholder,
-            hacivat_meta::name::NameClass::Table
-        ),
-        None
+// ## m4-t22-state (named exception; T17 review fm2): the hub's own placeholder, read from the
+// catalog the hub makes, not one the test builds (the old body was tautological).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hub_placeholder_pins_no_mysql_table_rule() {
+    use hacivat_introspect::hub::{CatalogHub, HubSettings, SessionLookup};
+    use std::sync::Arc;
+    struct NoSessions;
+    impl SessionLookup for NoSessions {
+        fn sessions(
+            &self,
+            _: hacivat_proto::ProfileId,
+        ) -> Option<Arc<hacivat_session::session::SessionManager>> {
+            None
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let hub = CatalogHub::new(
+        Arc::new(NoSessions),
+        HubSettings {
+            paths: hacivat_settings::LocalPaths::under(dir.path()),
+            metadata: hacivat_settings::MetadataSettings::default(),
+        },
+        Arc::new(hacivat_secrets::SecretStore::new(None)),
+        Arc::new(hacivat_meta::system::SystemCatalogs::empty()),
     );
+    for engine in [DbmsKind::MySql, DbmsKind::MariaDb] {
+        let cat = bounded(hub.ensure(common::profile(engine))).await.unwrap();
+        let snap = cat.catalog.current();
+        let ident: &IdentCtx = &snap.server.ident;
+        assert_eq!(ident.lower_case_table_names, u8::MAX, "{engine:?}");
+        assert_eq!(
+            FoldRule::for_names(ident.dialect, ident, hacivat_meta::name::NameClass::Table),
+            None,
+            "{engine:?}: no table rule pinned before the server says"
+        );
+        cat.handle.shutdown();
+    }
 }

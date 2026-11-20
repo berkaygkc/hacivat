@@ -825,3 +825,132 @@ async fn check_namespace_compares_the_cached_and_the_server_side() {
     );
     assert_eq!(r2.fake.calls().len(), calls, "nothing read");
 }
+
+/// T16b review carry: a role renamed (or dropped) on the server leaves the grantee names of
+/// loaded grants stale: they are marked so (re-read on demand), never shown as current.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_role_rename_marks_loaded_grants_stale() {
+    use hacivat_introspect::engine::{Engine, EngineConfig, Filters, LevelPolicy};
+    use hacivat_introspect::scope::parse_scope;
+    use hacivat_introspect::testing::fake::FakeMetaSource;
+    let srv = NsKey::server();
+    let n = ns("public");
+    let fake = FakeIntrospector::default();
+    fake.put_ns(
+        srv.clone(),
+        vec![
+            FakeObject::role("alice").with_oid(500),
+            FakeObject::role("bob").with_oid(501),
+        ],
+    );
+    fake.put_ns(n.clone(), FakeIntrospector::tables(2));
+    let meta = FakeMetaSource::new(DbmsKind::Postgres);
+    fake.link_meta(meta.clone());
+    let catalog = Arc::new(Catalog::new(Arc::new(ServerFacts::new(
+        DbmsKind::Postgres,
+        hacivat_meta::name::IdentCtx::new(DialectId::Postgres),
+    ))));
+    let publisher = catalog.publisher().unwrap();
+    // A grants facet loaded earlier (Task 15b loads them; the catalog holds its state).
+    let grants = ContainerKey::Facet {
+        ns: n.clone(),
+        object: table_key(&n, "t0", Some(20_000)),
+        facet: hacivat_meta::props::FacetKind::Grants,
+    };
+    publisher
+        .publish(vec![CatalogChange::SetState(
+            grants.clone(),
+            LoadState::Loaded {
+                level: Level::Structure,
+                at: std::time::SystemTime::now(),
+                watermark: Watermark::None,
+                stale: false,
+            },
+        )])
+        .unwrap();
+    let handle = Engine::start(EngineConfig {
+        profile: hacivat_proto::ProfileId::new(),
+        dbms: DbmsKind::Postgres,
+        meta: meta.clone(),
+        introspector: Arc::new(fake.clone()),
+        catalog: catalog.clone(),
+        catalog_publisher: publisher,
+        cache: None,
+        levels: LevelPolicy::default(),
+        scope: parse_scope("@:*", DialectId::Postgres).unwrap(),
+        current: CurrentCtx::default(),
+        filters: Filters::default(),
+        validate_every: None,
+        limits: EngineLimits::default(),
+        runtime: tokio::runtime::Handle::current(),
+    });
+    let r = Rig {
+        fake,
+        meta,
+        catalog,
+        handle,
+    };
+    load(&r, &srv).await;
+    let st = |r: &Rig| r.catalog.current().state(&grants).clone();
+    assert!(matches!(st(&r), LoadState::Loaded { stale: false, .. }));
+    // A table changing leaves grants alone.
+    r.fake.touch(&n, "t0");
+    load(&r, &n).await;
+    assert!(matches!(st(&r), LoadState::Loaded { stale: false, .. }));
+    // `ALTER ROLE alice RENAME TO alicia`: same oid, new name.
+    r.fake.edit_ns(&srv, |s| {
+        let o = s.objects.iter_mut().find(|o| &*o.name == "alice").unwrap();
+        o.name = name("alicia");
+        o.version += 10;
+    });
+    load(&r, &srv).await;
+    assert!(
+        matches!(st(&r), LoadState::Loaded { stale: true, .. }),
+        "{:?}",
+        st(&r)
+    );
+}
+
+/// T17 review m5: a change of a MySQL table re-reads the foreign keys of other cached
+/// databases that reference it (their text names its columns), not only the same schema's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cross_schema_fk_referrer_is_reread() {
+    let (shop, crm) = (NsKey::schema([name("shop")]), NsKey::schema([name("crm")]));
+    let fake = FakeIntrospector::new(DbmsKind::MySql);
+    fake.put_ns(shop.clone(), vec![FakeObject::table("orders", &["id"])]);
+    fake.put_ns(
+        crm.clone(),
+        vec![
+            FakeObject::table("notes", &["order_id"]).with_fk("fk_o", &["shop", "orders"]),
+            FakeObject::table("plain", &["x"]),
+        ],
+    );
+    let r = rig_with(
+        fake,
+        RigOpts {
+            dbms: DbmsKind::MySql,
+            scope: "*",
+            ..RigOpts::default()
+        },
+    );
+    load(&r, &shop).await;
+    load(&r, &crm).await;
+    let before = fragments(&r).len();
+    // `ALTER TABLE shop.orders RENAME COLUMN id TO order_no`.
+    r.fake.edit_ns(&shop, |s| {
+        s.objects[0].columns = vec![name("order_no")];
+        s.objects[0].version += 1;
+    });
+    load(&r, &shop).await;
+    bounded(wait_until(Duration::from_secs(60), || {
+        fragments(&r).len() > before
+    }))
+    .await;
+    idle(&r.handle).await;
+    let frags = &fragments(&r)[before..];
+    assert_eq!(frags.len(), 1, "{frags:?}");
+    assert_eq!(
+        frags[0].iter().map(|k| k.path.to_vec()).collect::<Vec<_>>(),
+        vec![vec![name("crm"), name("notes")]]
+    );
+}

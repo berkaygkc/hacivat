@@ -388,6 +388,12 @@ struct Actor {
     /// since the last user decision, and how many it removed since (D-039 across passes).
     bg_deleted: HashMap<NsKey, (u32, u32)>,
     pending_names: PendingNames,
+    /// Namespaces whose arena is being rebuilt on the blocking pool (a narrower filter, a
+    /// forgotten watermark, a new fold rule; T15 m-rr2, T17 fm3): no task of them starts
+    /// until it is published, so none reads or merges against the arena being replaced.
+    republishing: HashSet<NsKey>,
+    bg_tx: mpsc::UnboundedSender<Republished>,
+    bg_rx: mpsc::UnboundedReceiver<Republished>,
     root_cancel: CancellationToken,
     done_tx: mpsc::UnboundedSender<(u64, Output)>,
     done_rx: mpsc::UnboundedReceiver<(u64, Output)>,
@@ -403,6 +409,8 @@ impl Actor {
         let dialect = cfg.scope.dialect();
         let caps = cfg.introspector.capabilities();
         let (done_tx, done_rx) = mpsc::unbounded_channel();
+        // ## m4-t22-state (named exception)
+        let (bg_tx, bg_rx) = mpsc::unbounded_channel();
         let Shared {
             progress,
             events,
@@ -463,6 +471,9 @@ impl Actor {
             last_unknown: false,
             bg_deleted: HashMap::new(),
             pending_names,
+            republishing: HashSet::new(),
+            bg_tx,
+            bg_rx,
             root_cancel: CancellationToken::new(),
             done_tx,
             done_rx,
@@ -480,6 +491,8 @@ impl Actor {
             tokio::select! {
                 biased;
                 Some((id, out)) = self.done_rx.recv() => self.on_done(id, out),
+                // ## m4-t22-state (named exception)
+                Some(r) = self.bg_rx.recv() => self.republished(r),
                 cmd = rx.recv() => match cmd {
                     Some(Cmd::Shutdown) | None => break,
                     Some(cmd) => self.on_cmd(cmd),
@@ -694,7 +707,7 @@ impl Actor {
                 .values()
                 .any(|r| r.job.work == Work::ScopeRefresh),
             Work::Pass { ns, .. } | Work::Fragment { ns, .. } | Work::Validate { ns } => {
-                !self.busy(ns)
+                !self.busy(ns) && !self.republishing.contains(ns)
             }
             Work::CheckState { .. } => true,
         }
@@ -836,6 +849,13 @@ impl Actor {
                 },
             })
             .collect();
+        // ## m4-t22-state (named exception): an arena rebuilt on the blocking pool is work too.
+        tasks.extend(self.republishing.iter().map(|ns| TaskProgress {
+            ns: ns.clone(),
+            phase: Phase::Validate,
+            done: 0,
+            total: None,
+        }));
         tasks.sort_by(|a, b| a.ns.cmp(&b.ns));
         self.progress.send_if_modified(|p| {
             let changed = p.tasks != tasks;
@@ -1304,62 +1324,14 @@ impl Actor {
         }
         let widen = self.filters.may_widen(&before);
         let snap = self.catalog.current();
-        let mut changes = Vec::new();
-        let mut delta = CatalogDelta::default();
-        let mut narrowed = Vec::new();
-        for (key, arena) in snap.namespaces.iter() {
-            let gone = self.filters.excluded(arena, self.system_ns.contains(key));
-            if gone.is_empty() {
-                continue;
-            }
-            let mut existent: BTreeMap<hacivat_meta::ObjectKind, merge::ExistSet> = BTreeMap::new();
-            for k in &gone {
-                let set = existent.entry(k.kind).or_insert(merge::ExistSet::Scoped {
-                    scope: Vec::new(),
-                    ids: Vec::new(),
-                });
-                if let merge::ExistSet::Scoped { scope, .. } = set {
-                    scope.push(k.path[key.path.len()..].to_vec());
-                }
-            }
-            let r = NamespaceResult {
-                existent,
-                changed: Vec::new(),
-                categories_to_reload: Default::default(),
-                new_watermark: arena.meta().watermark.clone(),
-                full: false,
-                level: arena.meta().level,
-                read_at_ms: arena.meta().loaded_at_ms,
-            };
-            let policy = MergePolicy {
-                trigger: Trigger::User,
-                guard_min_objects: u32::MAX,
-                ..MergePolicy::default()
-            };
-            let Ok(outcome) = merge::merge(Some(arena), r, &policy) else {
-                let _ = self.events.send(EngineEvent::PublishFailed);
-                continue;
-            };
-            let (next, d, _) = outcome.into_parts();
-            narrowed.push((
-                key.clone(),
-                u32::try_from(d.dropped.len()).unwrap_or(u32::MAX),
-            ));
-            delta.out_of_scope.extend(d.dropped);
-            changes.push(CatalogChange::Put(Arc::new(next)));
-        }
-        if !changes.is_empty() {
-            match self.publish(changes, Some(delta)) {
-                Ok(_) => {
-                    for (ns, count) in narrowed {
-                        let _ = self.events.send(EngineEvent::ScopeNarrowed { ns, count });
-                    }
-                }
-                Err(_) => {
-                    let _ = self.events.send(EngineEvent::PublishFailed);
-                }
-            }
-        }
+        // ## m4-t22-state (named exception; T15 m-rr2): the narrowing merges run on the
+        // blocking pool; the namespaces wait for them (`republishing`).
+        let arenas: Vec<Rebuild> = snap
+            .namespaces
+            .iter()
+            .map(|(k, a)| (k.clone(), a.clone(), self.system_ns.contains(k)))
+            .collect();
+        self.republish(arenas, BgOp::Narrow(self.filters.clone()));
         if widen {
             let loaded: Vec<NsKey> = snap
                 .namespaces
@@ -1546,6 +1518,8 @@ impl Actor {
         // (no table rule is pinned: a lookup answers `ServerDependent`, never a wrong
         // `Missing`). A fact that changes the table fold rule re-folds every cached arena.
         let cur = self.catalog.current();
+        // ## m4-t22-state (named exception; T17 fm3)
+        let mut refolds: Option<(Vec<Rebuild>, FoldRule)> = None;
         let next = match facts {
             FactsRead::Read(f) => Some(*f),
             FactsRead::Failed => {
@@ -1560,20 +1534,26 @@ impl Actor {
         {
             let fold = FoldRule::for_names(f.ident.dialect, &f.ident, NameClass::Table)
                 .unwrap_or(FoldRule::Exact);
-            let mut front = vec![CatalogChange::SetServer(Arc::new(f))];
-            for arena in cur.namespaces.values() {
-                if arena.fold() != fold
-                    && let Some(r) = refold(arena, fold)
-                {
-                    front.push(CatalogChange::Put(Arc::new(r)));
-                }
-            }
-            changes.splice(0..0, front);
+            changes.insert(0, CatalogChange::SetServer(Arc::new(f)));
+            // ## m4-t22-state (named exception; T17 fm3): the arenas are rebuilt under the new
+            // rule on the blocking pool (O(cached objects)); until then their lookups answer
+            // `ServerDependent` (fail-closed) and their tasks wait.
+            let arenas: Vec<Rebuild> = cur
+                .namespaces
+                .iter()
+                .filter(|(_, a)| a.fold() != fold)
+                .map(|(k, a)| (k.clone(), a.clone(), false))
+                .collect();
+            refolds = Some((arenas, fold));
         }
         let mut generation = match self.publish(changes, None) {
             Ok(g) => g,
             Err(e) => return job.resolve(Err(e)),
         };
+        // ## m4-t22-state (named exception; T17 fm3)
+        if let Some((arenas, fold)) = refolds {
+            self.republish(arenas, BgOp::Refold(fold));
+        }
         if job.then != Then::OnConnect {
             return job.resolve(Ok(generation));
         }
@@ -1640,43 +1620,18 @@ impl Actor {
     /// Re-publishes every namespace that has a watermark without it (stale), so its next pass
     /// is full (R-W3-3). Answers the generation, when anything changed.
     fn forget_watermarks(&mut self) -> Result<Option<u64>, IntroError> {
+        // ## m4-t22-state (named exception; T15 m-rr2): the merges run on the blocking pool;
+        // no task of a namespace starts before its watermark is gone (`republishing`), so the
+        // passes on-connect queues next are full.
         let snap = self.catalog.current();
-        let mut changes = Vec::new();
-        for (key, arena) in snap.namespaces.iter() {
-            if arena.meta().watermark == Watermark::None {
-                continue;
-            }
-            let r = NamespaceResult {
-                existent: BTreeMap::new(),
-                changed: Vec::new(),
-                categories_to_reload: Default::default(),
-                new_watermark: Watermark::None,
-                full: false,
-                level: arena.meta().level,
-                read_at_ms: arena.meta().loaded_at_ms,
-            };
-            let outcome = merge::merge(Some(arena), r, &MergePolicy::default())
-                .map_err(|_| IntroError::Protocol(Name::from("merge")))?;
-            let (next, _, _) = outcome.into_parts();
-            changes.push(CatalogChange::Put(Arc::new(next)));
-            if let LoadState::Loaded { level, at, .. } =
-                snap.state(&ContainerKey::Namespace(key.clone())).clone()
-            {
-                changes.push(CatalogChange::SetState(
-                    ContainerKey::Namespace(key.clone()),
-                    LoadState::Loaded {
-                        level,
-                        at,
-                        watermark: Watermark::None,
-                        stale: true,
-                    },
-                ));
-            }
-        }
-        if changes.is_empty() {
-            return Ok(None);
-        }
-        self.publish(changes, None).map(Some)
+        let arenas: Vec<Rebuild> = snap
+            .namespaces
+            .iter()
+            .filter(|(_, a)| a.meta().watermark != Watermark::None)
+            .map(|(k, a)| (k.clone(), a.clone(), false))
+            .collect();
+        self.republish(arenas, BgOp::Forget);
+        Ok(None)
     }
 
     /// On-connect step 3 for the current namespace: `Incremental` if cached, else `Brief`
@@ -1761,11 +1716,30 @@ impl Actor {
         let (level, pass) = (m.level, m.pass);
         let (follow, follow_ns) = (m.follow, m.follow_ns);
         let (next, delta, report) = m.outcome.into_parts();
+        // ## m4-t22-state (named exception): what the delta means beyond this namespace.
+        let accounts = ns.kind == NsKind::Server && accounts_changed(&delta);
+        let touched = if matches!(self.caps.dbms, DbmsKind::MySql | DbmsKind::MariaDb) {
+            touched_top(&ns, &delta)
+        } else {
+            BTreeSet::new()
+        };
         let changes = self.applied_changes(&ns, next, &report, level, pass);
         let generation = match self.publish(changes, Some(delta)) {
             Ok(g) => g,
             Err(e) => return job.resolve(Err(e)),
         };
+        // ## m4-t22-state (named exception; T16b review carry): a renamed or dropped role
+        // leaves loaded grantee names stale.
+        let generation = if accounts {
+            self.stale_grants().unwrap_or(generation)
+        } else {
+            generation
+        };
+        // ## m4-t22-state (named exception; T17 review m5): the foreign keys of other cached
+        // MySQL databases that reference a changed table are read again.
+        if !job.follow_up && !touched.is_empty() {
+            self.reread_referrers(&ns, &touched);
+        }
         self.timeouts.remove(&ns);
         // A pass of the namespace replaces a held merge (review I-3): the prompt is withdrawn.
         // A fragment keeps it: the user's answer then re-plans a pass (`confirm`).
@@ -2370,6 +2344,194 @@ impl Actor {
         false
     }
 
+    /// Marks every loaded grants facet stale (a role was renamed or dropped: the grantee names
+    /// they show may be gone). Answers the generation, when anything was marked.
+    fn stale_grants(&mut self) -> Option<u64> {
+        let snap = self.catalog.current();
+        let changes: Vec<CatalogChange> = snap
+            .states
+            .iter()
+            .filter_map(|(k, st)| match (k, st) {
+                (
+                    ContainerKey::Facet {
+                        facet: hacivat_meta::props::FacetKind::Grants,
+                        ..
+                    },
+                    LoadState::Loaded {
+                        level,
+                        at,
+                        watermark,
+                        stale: false,
+                    },
+                ) => Some(CatalogChange::SetState(
+                    k.clone(),
+                    LoadState::Loaded {
+                        level: *level,
+                        at: *at,
+                        watermark: watermark.clone(),
+                        stale: true,
+                    },
+                )),
+                _ => None,
+            })
+            .collect();
+        if changes.is_empty() {
+            return None;
+        }
+        self.publish(changes, None).ok()
+    }
+
+    /// Re-reads, in every other cached namespace, the tables whose foreign keys target one of
+    /// `touched` (top-level names of `ns`). A follow-up: it schedules none of its own.
+    fn reread_referrers(&mut self, ns: &NsKey, touched: &BTreeSet<Name>) {
+        let snap = self.catalog.current();
+        let mut by_ns: BTreeMap<NsKey, Vec<ObjectKey>> = BTreeMap::new();
+        for (other, arena) in snap.namespaces.iter() {
+            if other == ns || self.out_of_scope(other) {
+                continue;
+            }
+            for (_, o) in arena.iter_named(&[ObjectKind::ForeignKey]) {
+                let hacivat_meta::props::Props::ForeignKey(fk) = o.props() else {
+                    continue;
+                };
+                let p = &fk.target.path;
+                if p.len() != ns.path.len() + 1
+                    || !p.starts_with(&ns.path)
+                    || !touched.contains(&p[ns.path.len()])
+                {
+                    continue;
+                }
+                if let Some(table) = o.parent().and_then(|i| arena.object_key(i)) {
+                    by_ns.entry(other.clone()).or_default().push(table);
+                }
+            }
+        }
+        for (other, mut keys) in by_ns {
+            keys.sort();
+            keys.dedup();
+            let level = self.state_level(&other);
+            let mut job = self.fragment_job(
+                other,
+                keys,
+                level,
+                Priority::Background,
+                Trigger::Background,
+            );
+            job.follow_up = true;
+            self.enqueue(job, true);
+        }
+    }
+
+    /// Rebuilds `arenas` (key, arena, system) on the blocking pool with `op`; their tasks wait
+    /// until [`Actor::republished`] publishes the result (T15 m-rr2, T17 fm3).
+    fn republish(&mut self, arenas: Vec<Rebuild>, op: BgOp) {
+        if arenas.is_empty() {
+            return;
+        }
+        for (k, _, _) in &arenas {
+            self.republishing.insert(k.clone());
+        }
+        let tx = self.bg_tx.clone();
+        drop(self.rt.spawn_blocking(move || {
+            let done = arenas
+                .into_iter()
+                .map(|(key, arena, system)| {
+                    let ptr = Arc::as_ptr(&arena) as usize;
+                    let out = match &op {
+                        BgOp::Narrow(f) => narrowed(f, &key, &arena, system),
+                        BgOp::Forget => forgotten(&arena),
+                        BgOp::Refold(fold) => refold(&arena, *fold).map(|a| (a, Vec::new())),
+                    };
+                    (key, ptr, out)
+                })
+                .collect();
+            let _ = tx.send(Republished { op, done });
+        }));
+        self.update_progress();
+    }
+
+    /// Publishes what [`Actor::republish`] rebuilt. An arena published by something else
+    /// meanwhile is rebuilt again from its new version (under the current filters or rule).
+    fn republished(&mut self, r: Republished) {
+        let snap = self.catalog.current();
+        let mut changes = Vec::new();
+        let mut delta = CatalogDelta::default();
+        let mut narrowed_counts = Vec::new();
+        let mut again = Vec::new();
+        for (key, ptr, out) in r.done {
+            match snap.namespaces.get(&key) {
+                None => {
+                    self.republishing.remove(&key);
+                    continue;
+                }
+                Some(a) if Arc::as_ptr(a) as usize != ptr => {
+                    again.push((key.clone(), a.clone(), self.system_ns.contains(&key)));
+                    continue;
+                }
+                Some(_) => {
+                    self.republishing.remove(&key);
+                }
+            }
+            let Some((next, dropped)) = out else {
+                continue;
+            };
+            changes.push(CatalogChange::Put(Arc::new(next)));
+            match &r.op {
+                BgOp::Narrow(_) => {
+                    narrowed_counts.push((
+                        key.clone(),
+                        u32::try_from(dropped.len()).unwrap_or(u32::MAX),
+                    ));
+                    delta.out_of_scope.extend(dropped);
+                }
+                BgOp::Forget => {
+                    if let LoadState::Loaded { level, at, .. } =
+                        snap.state(&ContainerKey::Namespace(key.clone())).clone()
+                    {
+                        changes.push(CatalogChange::SetState(
+                            ContainerKey::Namespace(key.clone()),
+                            LoadState::Loaded {
+                                level,
+                                at,
+                                watermark: Watermark::None,
+                                stale: true,
+                            },
+                        ));
+                    }
+                }
+                BgOp::Refold(_) => {}
+            }
+        }
+        if !changes.is_empty() {
+            let narrowing = matches!(r.op, BgOp::Narrow(_));
+            match self.publish(changes, narrowing.then_some(delta)) {
+                Ok(_) => {
+                    for (ns, count) in narrowed_counts {
+                        let _ = self.events.send(EngineEvent::ScopeNarrowed { ns, count });
+                    }
+                }
+                Err(_) => {
+                    let _ = self.events.send(EngineEvent::PublishFailed);
+                }
+            }
+        }
+        if !again.is_empty() {
+            let op = match r.op {
+                BgOp::Narrow(_) => BgOp::Narrow(self.filters.clone()),
+                BgOp::Forget => BgOp::Forget,
+                BgOp::Refold(_) => {
+                    let ident = &self.catalog.current().server.ident;
+                    BgOp::Refold(
+                        FoldRule::for_names(ident.dialect, ident, NameClass::Table)
+                            .unwrap_or(FoldRule::Exact),
+                    )
+                }
+            };
+            self.republish(again, op);
+        }
+        self.update_progress();
+    }
+
     /// Writes the names of every held mass deletion where the handles read them.
     fn sync_pending_names(&self) {
         let names: HashMap<NsKey, Vec<ObjectKey>> = self
@@ -2390,6 +2552,114 @@ async fn validation_due(clock: ValidationClock, at: Option<Duration>) {
         Some(t) => clock.sleep_until(t).await,
         None => std::future::pending().await,
     }
+}
+
+/// What [`Actor::republish`] does to an arena.
+#[derive(Debug, Clone)]
+enum BgOp {
+    /// Removes what the filters no longer keep (a scope change, `out_of_scope`).
+    Narrow(Filters),
+    /// Drops the watermark (another or an unknown server: the next pass is full).
+    Forget,
+    /// Rebuilds the lookup keys under a new table fold rule.
+    Refold(FoldRule),
+}
+
+/// Arenas rebuilt on the blocking pool: key, the arena pointer it was built from, and the new
+/// arena with the objects it removed (`None`: nothing to change).
+struct Republished {
+    op: BgOp,
+    done: Vec<(NsKey, usize, Option<Rebuilt>)>,
+}
+
+/// An arena to rebuild: its key, the arena, and whether its namespace is a system one.
+type Rebuild = (NsKey, Arc<NamespaceSnapshot>, bool);
+
+/// A rebuilt arena and the objects the rebuild removed.
+type Rebuilt = (NamespaceSnapshot, Vec<ObjectKey>);
+
+/// `arena` without what `filters` no longer keeps (`None` when it keeps everything or the
+/// merge fails).
+fn narrowed(
+    filters: &Filters,
+    key: &NsKey,
+    arena: &NamespaceSnapshot,
+    system: bool,
+) -> Option<Rebuilt> {
+    let gone = filters.excluded(arena, system);
+    if gone.is_empty() {
+        return None;
+    }
+    let mut existent: BTreeMap<ObjectKind, merge::ExistSet> = BTreeMap::new();
+    for k in &gone {
+        let set = existent.entry(k.kind).or_insert(merge::ExistSet::Scoped {
+            scope: Vec::new(),
+            ids: Vec::new(),
+        });
+        if let merge::ExistSet::Scoped { scope, .. } = set {
+            scope.push(k.path[key.path.len()..].to_vec());
+        }
+    }
+    let r = NamespaceResult {
+        existent,
+        changed: Vec::new(),
+        categories_to_reload: Default::default(),
+        new_watermark: arena.meta().watermark.clone(),
+        full: false,
+        level: arena.meta().level,
+        read_at_ms: arena.meta().loaded_at_ms,
+    };
+    let policy = MergePolicy {
+        trigger: Trigger::User,
+        guard_min_objects: u32::MAX,
+        ..MergePolicy::default()
+    };
+    let (next, d, _) = merge::merge(Some(arena), r, &policy).ok()?.into_parts();
+    Some((next, d.dropped))
+}
+
+/// `arena` with no watermark (`None` if the merge fails).
+fn forgotten(arena: &NamespaceSnapshot) -> Option<Rebuilt> {
+    let r = NamespaceResult {
+        existent: BTreeMap::new(),
+        changed: Vec::new(),
+        categories_to_reload: Default::default(),
+        new_watermark: Watermark::None,
+        full: false,
+        level: arena.meta().level,
+        read_at_ms: arena.meta().loaded_at_ms,
+    };
+    let (next, _, _) = merge::merge(Some(arena), r, &MergePolicy::default())
+        .ok()?
+        .into_parts();
+    Some((next, Vec::new()))
+}
+
+/// Whether `delta` renamed or dropped an account (a role, user or login).
+fn accounts_changed(delta: &CatalogDelta) -> bool {
+    let account = |k: &ObjectKey| {
+        matches!(
+            k.kind,
+            ObjectKind::Role | ObjectKind::User | ObjectKind::Login
+        )
+    };
+    delta.renamed.iter().any(|(before, _, _)| account(before)) || delta.dropped.iter().any(account)
+}
+
+/// The top-level names of `ns` that `delta` created, altered, renamed (both names) or dropped,
+/// or below which it changed anything.
+fn touched_top(ns: &NsKey, delta: &CatalogDelta) -> BTreeSet<Name> {
+    let depth = ns.path.len();
+    let top = |k: &ObjectKey| k.path.get(depth).cloned();
+    delta
+        .created
+        .iter()
+        .chain(delta.dropped.iter())
+        .chain(delta.altered.iter().map(|(k, _)| k))
+        .chain(delta.renamed.iter().flat_map(|(a, b, _)| [a, b]))
+        .filter(|k| k.path.starts_with(&ns.path))
+        .filter_map(top)
+        .collect()
 }
 
 /// The top-level objects `delta` removes from `ns` (server deletions, not scope changes).

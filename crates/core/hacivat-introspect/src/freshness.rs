@@ -32,6 +32,11 @@
 //! - **Periodic validation** ([`validate_interval`], R-M4-20) runs on a [`ValidationClock`]:
 //!   tokio's clock in the product, a [`ManualClock`] in tests (no fixed sleeps, no wall clock).
 
+#![allow(
+    clippy::result_large_err,
+    reason = "IntroError carries the server's message by value (MetaError::Server), as the seam does"
+)]
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;

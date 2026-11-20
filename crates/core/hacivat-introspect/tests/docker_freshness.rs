@@ -231,7 +231,7 @@ async fn pg_comment_only_change_is_changed() {
                 .await;
             let k = l.key(ns, ObjectKind::Table, "t");
             assert_eq!(
-                l.check(&[k.clone()]).await,
+                l.check(std::slice::from_ref(&k)).await,
                 vec![Staleness::Changed],
                 "{}",
                 t.id
@@ -284,7 +284,7 @@ async fn pg_drop_and_recreate_is_dropped_plus_new() {
             l.ddl(&format!("DROP TABLE {s}.t; CREATE TABLE {s}.t (b text)"))
                 .await;
             assert_eq!(
-                l.check(&[old.clone()]).await,
+                l.check(std::slice::from_ref(&old)).await,
                 vec![Staleness::Dropped],
                 "{}",
                 t.id
@@ -350,7 +350,7 @@ async fn mysql_trigger_creation_makes_the_table_changed() {
             l.expand(ns).await;
             let k = l.key(ns, ObjectKind::Table, "orders");
             assert_eq!(
-                l.check(&[k.clone()]).await,
+                l.check(std::slice::from_ref(&k)).await,
                 vec![Staleness::Current],
                 "{}",
                 t.id

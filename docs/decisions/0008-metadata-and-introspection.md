@@ -2033,3 +2033,83 @@ show_create}.rs`, `packs/mysql/{10-core,30-state,40-system}.hvq.sql`.
 - **Carried to T22 (m5):** a cross-schema FK target change does not re-read the referring
   table in another schema (only same-schema referrers are re-read); like the cross-schema view
   base before this round, it heals at the next full pass.
+
+## m4-t22 — freshness
+
+Task 22 (HV-INTRO-15): state checks, background validation of cached namespaces, periodic
+validation. `freshness.rs` holds the orchestration; the engine, the introspectors and the fake
+carry fenced `m4-t22-state` named exceptions.
+
+- **State checks compare by equality.** `freshness::check_state` resolves each key in the
+  snapshot to its **stamp owner** (its top-level ancestor: PostgreSQL's `StateOfRelation` covers
+  a relation's columns, indexes, constraints, triggers and comments; MySQL answers a child with
+  its table's mark; SQLite's marks are per schema), reads `Introspector::stamps` per kind in
+  chunks of at most 1,000 keys (R-M4-3), and compares each stamp with the owner's stored mark by
+  equality, never by order (a 32-bit xmin wraps). `Dropped` only where absence is a fact
+  (PostgreSQL, SQLite); a MySQL stamp the server no longer shows is `Unknown` (a lost privilege
+  hides objects, T17 m7); a permission error leaves its chunk `Unknown`; a stamp of
+  `StateMark::None` (no oid, no time) is `Unknown`; a key of a namespace not loaded at
+  `Structure` is `Unknown`. The introspectors' own `check_state` stay as they were (no stored
+  marks); the engine no longer calls them.
+- **PostgreSQL marks are recorded on re-read.** PostgreSQL passes store `StateMark::None` per
+  object, so a first check reads `Changed`; the engine re-reads the owner and stores the stamp
+  read before the re-read as its mark (`Subtree::set_root_state`, a named exception in
+  `hacivat-meta`). A change between the stamp and the re-read moves the next stamp again: the
+  order can cost a second re-read, never hide a change. A later pass that re-reads the object
+  drops the mark (it reads `StateMark::None`), and the next check records it again.
+- **By name.** A key the loaded namespace does not hold compares as absent: still absent is
+  `Current` (the negative cache's `Missing` stands), present is `Changed` (a fragment reads it).
+  The lookup hooks' probe now carries the missing name: on MySQL/MariaDB it stamps the name as
+  every top-level kind a schema holds (a kind left out could let a wrong `Missing` stand); an
+  undecidable answer, and every probe on PostgreSQL (stamps need an oid) and SQLite (exact-name
+  stamps against caseless names), fall back to the incremental pass of before.
+- **Split by connection.** `IntroHandle::check_state` runs one check per database of its keys
+  (`database_of`: PostgreSQL oids are per database); SQLite `temp` keys are never stamped
+  (`Changed` without a stamp, T18 I-1/I-2) and their re-read runs on the user's connection.
+- **Namespace validation** (`freshness::check_namespace`): the introspector's server-side
+  `NsCheck` against its own cached side (`Introspector::cached_check`, a new trait method whose
+  default `None` means "read it again"). Equal: the stale mark is cleared, nothing else is read.
+  Different: an incremental pass; a full one when the server side answers
+  `max_mark == StateMark::None`. Runs on connect for every cached in-scope namespace but the
+  current one (which keeps its step-3 incremental pass), and every period. MySQL compares
+  T17's top marks (with a scope filter that excludes objects the check always differs: an
+  incremental pass, marker sections only); SQLite T18's `ns_check_of` (`temp` never).
+- **PostgreSQL's check** (`pg/state.rs`) replaces the digest of `pass::check_namespace` in the
+  trait: both sides list what the cache holds (top-level objects and a relation's indexes,
+  keys, checks, exclusions and triggers by kind and oid, a domain's constraint count, comment
+  keys; the server side keeps only what the cache holds, so an object of another filter or
+  level never differs); the mark is the watermark's low 32 bits when the plan is incremental and
+  nothing is young, the snapshot xmin when something is, `StateMark::None` (full) when the plan
+  is full, a dependency's schema was renamed, or **`YoungSchemas`** (new non-joinable section
+  in `packs/pg/30-state.hvq.sql`) finds a young schema holding a collation, an operator or an
+  operator class the namespace depends on: the fail-safe the T16 review asked for (enum value,
+  collation, operator and opclass renames themselves are T16's dependency-hop sources). Only
+  `Identity`, `ListExistent`, `ListExistentComments`, the change queries, `YoungSchemas` and
+  the canary run. `pass::ns_oid`, `comment_owners` and `CommentOwner` became crate-visible.
+- **Periodic validation** (R-M4-20, PO-Q6): `freshness::validate_interval` (the hub delegates
+  to it) — `auto` is 10 minutes for `local`/`dev` tags, off otherwise. It runs on a
+  `ValidationClock` (`Engine::start_with_clock`): tokio's in the product, a `ManualClock` in
+  tests. **Deviation:** the plan's `start_paused` test needs tokio's `test-util`, which the
+  crate's manifest does not enable (T15's deviation); the clock seam replaces it. A round inside
+  the user's transaction on a single-connection profile is deferred and asked again every
+  `busy_retry`, so it runs as soon as the transaction ends.
+- **Identity per session** (R-W3-3, T16 review carry): the first `Unknown` server identity of an
+  engine session forgets every watermark (one full re-read); an `Unknown` right after it keeps
+  them (they come from this session's passes on the same login); a known identity after an
+  unknown one is never taken for the same server.
+- **D-039 across passes** (T10 carry M-1): a pass a validation asked for counts the top-level
+  objects it removes since the user last decided (a user refresh or a confirmation); once the
+  total exceeds the guard (50 % of at least 20), the pass is held like a guarded one.
+  `IntroHandle::pending_confirmation(ns)` names what a held deletion would remove (T24's dialog).
+- **Carries closed:** T15 m-rr2 and T17 fm3 (the merges of a narrower filter, of forgotten
+  watermarks and of a new fold rule run on the blocking pool; the namespaces' tasks wait for the
+  publish, so none reads or merges against an arena being replaced; until a refold lands, its
+  lookups answer `ServerDependent`); T17 fm1 (a first arena merged under a superseded fold rule
+  is read again); T17 fm2 (the placeholder test reads the hub's catalog); T17 m5 (a changed
+  MySQL table re-reads the referring tables of other cached databases, as a follow-up); T16b (a
+  renamed or dropped account marks every loaded grants facet stale).
+- **Not closed:** T15 m12 (a `Partial` namespace carries no stale bit: `LoadState::Partial`
+  has no field for it, and its lookups already answer `Unknown` on every miss; a held deletion is
+  visible through `pending_confirmation`). T19/T25 `server_text` load state: T25 pairs it with
+  `check_state`. SQLite `temp` keys are decided `Changed` because `MetaConn` does not say whose
+  connection it is (a T5 seam would let the introspector stamp them on the user's connection).

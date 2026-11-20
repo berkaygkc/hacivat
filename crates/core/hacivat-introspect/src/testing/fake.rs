@@ -63,6 +63,9 @@ pub struct FakeObject {
     /// Bumped by [`FakeIntrospector::touch`]; an incremental pass re-reads objects whose
     /// version is above the namespace's watermark.
     pub version: u64,
+    // ## m4-t22-state (named exception)
+    /// Foreign keys of a table: `(name, target table path)`, children at `Structure`.
+    pub fks: Vec<(Name, Vec<Name>)>,
 }
 
 impl FakeObject {
@@ -74,6 +77,7 @@ impl FakeObject {
             oid: None,
             columns: columns.iter().map(|c| Name::from(*c)).collect(),
             version: 1,
+            fks: Vec::new(),
         }
     }
 
@@ -88,6 +92,24 @@ impl FakeObject {
     /// The same object with OID `oid`.
     pub fn with_oid(mut self, oid: u32) -> Self {
         self.oid = Some(oid);
+        self
+    }
+
+    // ## m4-t22-state (named exception)
+    /// A role `name` (of the server namespace).
+    pub fn role(name: &str) -> Self {
+        FakeObject {
+            kind: ObjectKind::Role,
+            ..FakeObject::table(name, &[])
+        }
+    }
+
+    /// The same table with a foreign key `name` to the table at `target` (its full path).
+    pub fn with_fk(mut self, name: &str, target: &[&str]) -> Self {
+        self.fks.push((
+            Name::from(name),
+            target.iter().map(|t| Name::from(*t)).collect(),
+        ));
         self
     }
 }
@@ -431,6 +453,8 @@ impl FakeIntrospector {
     fn subtree(&self, o: &FakeObject, level: Level) -> Subtree {
         let props = match o.kind {
             ObjectKind::View => Props::View(Arc::new(ViewProps::default())),
+            // ## m4-t22-state (named exception)
+            ObjectKind::Role => Props::Generic(Arc::default()),
             _ => Props::Table(Arc::new(TableProps::default())),
         };
         let mut root = Obj::new(o.kind, o.name.clone())
@@ -456,6 +480,31 @@ impl FakeIntrospector {
                     }),
                 ));
                 t.add(t.root(), col);
+            }
+            // ## m4-t22-state (named exception)
+            for (name, target) in &o.fks {
+                let fk = hacivat_meta::props::FkProps {
+                    columns: Vec::new(),
+                    target: hacivat_meta::Ref {
+                        kind: ObjectKind::Table,
+                        path: target.iter().cloned().collect(),
+                        server_id: None,
+                    },
+                    target_columns: Vec::new(),
+                    on_update: Default::default(),
+                    on_delete: Default::default(),
+                    match_kind: Default::default(),
+                    deferrable: false,
+                    initially_deferred: false,
+                    not_valid: false,
+                    enforced: true,
+                    rare: None,
+                };
+                t.add(
+                    t.root(),
+                    Obj::new(ObjectKind::ForeignKey, name.clone())
+                        .with_props(Props::ForeignKey(Arc::new(fk))),
+                );
             }
         }
         t
@@ -495,7 +544,8 @@ impl FakeIntrospector {
         let mut existent = BTreeMap::new();
         let mut changed = Vec::new();
         let mut reread = Vec::new();
-        for kind in [ObjectKind::Table, ObjectKind::View] {
+        // ## m4-t22-state (named exception): roles of the server namespace too.
+        for kind in [ObjectKind::Table, ObjectKind::View, ObjectKind::Role] {
             if let Some(code) = space.failed.get(&kind) {
                 existent.insert(kind, ExistSet::Failed(*code));
                 continue;
