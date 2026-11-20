@@ -1613,3 +1613,49 @@ M4 Task 20 (gpui) fills `connections/dialog/schemas.rs`, `explorer/level_pill.rs
   task, not the blocking pool (user actions and connects, O(arena size)) → T22 (which owns
   the identity behaviour) or a later engine touch; the `Partial` stale mark (m12) stays as
   noted; gating the fakes is R-W3-7 (T33).
+
+## m4-t21 — refresh after DDL
+
+HV-INTRO-12 (`hacivat-introspect::ddl_effects`, `refresh_coord`; the sink in `hacivat-exec`,
+ADR 0006 `m4-t21`).
+
+- **Refresh more, never less.** Every rule below that cannot be exact widens: an unresolved
+  PostgreSQL relation behind `ALTER TABLE` (a view, a sequence, an index) → its namespace (T6
+  carry); an unqualified name the catalog cannot place → every search-path namespace before
+  the first hit; `DROP … CASCADE` → every loaded namespace of the database
+  (`Target::Database`); an opaque DDL statement (`DROP OWNED`, `REASSIGN OWNED`, `ALTER
+  DEFAULT PRIVILEGES`, `DROP COLUMN … CASCADE`, `CREATE EXTENSION`, `CREATE SCHEMA
+  AUTHORIZATION`) → the database and the namespace list (U-2, widened from "the statement
+  kind `DropOwned`" to every opaque DDL-class statement); a DDL-class, `Other` or
+  `EXPLAIN ANALYZE` statement with no effect → opaque (m-B3); a run with no reports (over
+  1 MiB, ambiguous boundary) → the database and the list (T6 carry); a session that does not
+  know its namespace → every loaded namespace.
+- **Targets.** The plan's `Target::Object` (a top-level object; its namespace is its key's
+  path without the last name), `NamespaceNames`, `Database` are lowered by `ddl_effects::lower`
+  on the catalog **at refresh time** into the engine's `Namespace`/`Objects`/`ScopeRefresh`
+  (a named exception in `engine/scheduler.rs` does the same for a direct caller). A namespace
+  that is neither loaded nor loading is dropped: a refresh never loads what nobody opened,
+  and never publishes a half namespace. A namespace target subsumes object targets of the
+  same namespace (the incremental pass is trusted to equal a full one, G4).
+- **Identity.** A name the catalog holds is refreshed by the catalog's own key (with the OID),
+  so a fragment after `RENAME` keeps identity (T11 carry). Names are folded with
+  `sql_ident::fold`; SQLite's unqualified names search `main` then the other loaded schemas.
+- **Timing.** PostgreSQL and SQLite DDL in a transaction is pending until the end; `CREATE
+  INDEX CONCURRENTLY` and `CREATE`/`DROP DATABASE` are immediate; MySQL/MariaDB always
+  immediate. `ROLLBACK TO s` keeps what ran before `s`; a `ROLLBACK TO` of a savepoint the
+  coordinator never saw keeps everything; no compensating refresh (R-M4-42). PostgreSQL
+  `PREPARE TRANSACTION` counts as an unknown end (refreshed).
+- **Transaction ends come from the server's status** (`TxChanged` within the unit, the
+  `ROLLBACK` tag, a failed transaction), never the text; a lost connection after `COMMIT` is
+  `TxOutcome::Unknown` (refreshed); a lost connection inside a transaction is a rollback.
+  Ends outside a run (the toolbar, a closed session) are told by the caller
+  (`tx_ended`, `session_closed`; Task 27).
+- **Preference.** `never` marks the namespaces stale through the engine (`IntroHandle::
+  mark_stale`, a named exception: the engine stays the only writer); `ask` marks stale and
+  emits `CoordEvent::Ask` (answered by `answer`); `refresh_now` ignores it.
+- **After the refresh**, `check_state` on the refreshed objects (alg/02 step 6). A refresh that
+  fails for want of a connection is owed until `reconnected` (edge case 13).
+- **Known gaps (background validation, T22, catches them):** DDL run by a function a plain
+  `SELECT f()` calls when the classifier reads `f` as a read (T6); a plain `DROP TABLE`'s
+  partitions or owned sequences in a namespace loaded below `Structure` (no props to find
+  them); `COMMIT PREPARED` from another session.

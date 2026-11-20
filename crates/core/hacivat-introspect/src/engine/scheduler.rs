@@ -75,6 +75,8 @@ pub(crate) enum Cmd {
     LevelChanged(ContainerKey),
     Cancel(NsKey),
     Shutdown,
+    // ## m4-t21-refresh (named exception)
+    MarkStale(Vec<NsKey>),
 }
 
 /// Someone waiting for a task.
@@ -515,6 +517,8 @@ impl Actor {
             Cmd::LevelChanged(container) => self.level_changed(&container),
             Cmd::Cancel(ns) => self.cancel(&ns),
             Cmd::Shutdown => {}
+            // ## m4-t21-refresh (named exception)
+            Cmd::MarkStale(namespaces) => self.mark_stale(namespaces),
         }
     }
 
@@ -946,6 +950,58 @@ impl Actor {
                 job.add(w, false);
                 self.enqueue(job, true);
             }
+            // ## m4-t21-refresh (named exception): the refresh-after-DDL planner's targets,
+            // lowered on the current catalog (`ddl_effects::lower`) into the three above; the
+            // request resolves when every part has.
+            t @ (Target::Object(_) | Target::NamespaceNames(_) | Target::Database(_)) => {
+                let parts = crate::ddl_effects::lower(&[t], &self.catalog.current());
+                if parts.is_empty() {
+                    return w.resolve(Ok(self.catalog.current().generation));
+                }
+                let join = Arc::new(Mutex::new(Join {
+                    left: parts.len(),
+                    generation: 0,
+                    error: None,
+                    waiters: vec![w],
+                }));
+                for part in parts {
+                    self.refresh(part, trigger, prio, Waiter::Join(join.clone()));
+                }
+            }
+        }
+    }
+
+    // ## m4-t21-refresh (named exception)
+    /// Marks the loaded namespaces `namespaces` stale (refresh after DDL with the preference
+    /// `never` or `ask`, alg/02 HV-INTRO-12 edge 14): nothing is read; their next expansion or
+    /// pass validates them.
+    fn mark_stale(&mut self, namespaces: Vec<NsKey>) {
+        let snap = self.catalog.current();
+        let changes: Vec<CatalogChange> = namespaces
+            .into_iter()
+            .filter_map(|ns| {
+                let key = ContainerKey::Namespace(ns);
+                match snap.state(&key).clone() {
+                    LoadState::Loaded {
+                        level,
+                        at,
+                        watermark,
+                        stale: false,
+                    } => Some(CatalogChange::SetState(
+                        key,
+                        LoadState::Loaded {
+                            level,
+                            at,
+                            watermark,
+                            stale: true,
+                        },
+                    )),
+                    _ => None,
+                }
+            })
+            .collect();
+        if !changes.is_empty() {
+            let _ = self.publish(changes, None);
         }
     }
 
