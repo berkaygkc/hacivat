@@ -30,6 +30,8 @@
 
 pub mod b1_real;
 pub mod b3;
+// ## m4-t29-g1-bench (named line): G1, the cached catalog on screen at the 160k-column scale.
+pub mod catalog;
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
