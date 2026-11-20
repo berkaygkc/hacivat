@@ -2581,3 +2581,42 @@ Task 15b (W5; R-M4-29, R-M4-30; carries T16b m-5/m-7, T17b m-6, R-W3-11, R-W4-3)
   which the DDL view shows as "couldn't check" (never as current). Fenced
   `// ## m4-t25-ddl-view` lines in Task 15's `engine/mod.rs` and `engine/scheduler.rs`; the
   check itself, its re-reads and its marks are unchanged.
+
+## m4-t15b — fix round 1 (security review)
+
+- **I-1, ruling R-W5-5 (corrects R-W3-11's "skip `pg_temp_N`").** PostgreSQL resolves no
+  operator or function in the session's **own** temp schema, but it does search any other
+  backend's `pg_temp_N` named in the path. `JoinedContext` now also answers the session's own
+  temp schema (`pg_catalog.pg_my_temp_schema()`, a scalar subquery of the same snapshot;
+  `pg_my_temp_schema` joins the joinable function allowlist, named exception in Task 4's
+  `pack/parse.rs`, and T16's hostile h2 pure-read list). `pg_path_is_safe(path, own_temp)`
+  skips only that exact name; anything else before `pg_catalog` (another backend's temp or
+  `pg_toast_temp` schema, a user schema) refuses the read (`NotJoinable`) before any other
+  statement. The list-bind `IN` stays the one unqualified operator: the pack grammar admits a
+  list bind only as `<column> IN :[name]` (chunking soundness, T4 I3/I5), `IN` has no
+  `OPERATOR()` form, and `OPERATOR(pg_catalog.=) ANY (…)` needs an array bind, which R-M4-3
+  rules out. Docker: `joined_read_refuses_another_backends_temp_schema`.
+- **I-2 (T17b m-6).** `Sources` facet reads are per key: a request is split into one job per
+  key, and `Sources` jobs coalesce only with the same key. A key refused with MySQL 1142 is
+  published `Failed` alone.
+- **m-1.** `MetaConn::join_as(session, engine)` (named exception in Task 5's `meta.rs`;
+  `MetaRead.engine` in `session/mod.rs`): the session's actor refuses a read naming another
+  engine than the session's before the text guard and before anything is sent.
+  `on_session` now takes the catalog's `ServerFacts` (engine, flavor, identifier rule) instead
+  of a bare `DbmsKind`.
+- **m-2.** The scheduler keeps a facet epoch, bumped by `stale_grants` and by a pass that drops
+  facets; a facet read that saw it move while it ran publishes its answer stale.
+- **m-3.** A `Failed` facet is not read again before `at + retry_after`.
+- **m-4.** SQLSTATE classes `40`, `57`, `53`, `08`, `55P03`, MySQL 1205/1213 and `CatalogRace`
+  are transient: nothing is published.
+- **m-6.** The joined snapshot folds names by the facts' identifier rule (`lower_case_table_names`);
+  MySQL relation kinds follow T17's `relation_kind` (MariaDB sequences are sequences, with no
+  columns; unknown kinds are left out).
+- **m-7.** Facet values are kept per namespace (a publish copies only the touched namespace's
+  map), with an index of `Sources` texts by reference for `source_text`.
+- **Hostile tests.** H1/H1b are committed (`tests/t15b_review_hostile.rs`). H2/H3 need
+  `hacivat-driver/fake` as a dev-dependency of this crate (a controller manifest amendment);
+  adapted to the fixed seam they pass 8/8 under that feature (verified with an uncommitted
+  local manifest change, reverted).
+- **Still open:** the T25 seam hook (`EngineCatalog::sources`) and its engine-backed
+  facet-vouch tests (gpui build; disk), and wiring T26's `row_estimate` (T26 not on `m4`).

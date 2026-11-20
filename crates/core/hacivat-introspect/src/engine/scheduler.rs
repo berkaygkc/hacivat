@@ -3123,3 +3123,75 @@ impl Actor {
     }
 }
 // ## m4-t15b-facets
+
+// ## m4-t15b-facets (named exception; T25 review m-7, carried to T15b): `VerdictSink` units.
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+
+    fn key(t: &str) -> ObjectKey {
+        ObjectKey {
+            kind: ObjectKind::Table,
+            path: [Name::from("db"), Name::from("s"), Name::from(t)]
+                .into_iter()
+                .collect(),
+            server_id: None,
+            overload_sig: None,
+            raw_kind: None,
+        }
+    }
+
+    /// The verdicts arrive once, when every job of the request has added its share.
+    #[test]
+    fn verdicts_arrive_when_every_job_added_its_share() {
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let sink = VerdictSink::new(tx);
+        sink.expect(2);
+        sink.add(&[key("a")], &[Staleness::Current]);
+        assert!(
+            rx.try_recv().is_err(),
+            "one job of two answered: nothing yet"
+        );
+        sink.add(&[key("b")], &[Staleness::Changed]);
+        assert_eq!(
+            rx.try_recv().expect("both answered"),
+            vec![
+                (key("a"), Staleness::Current),
+                (key("b"), Staleness::Changed)
+            ]
+        );
+    }
+
+    /// A failed job decides nothing for the whole request: the receiver sees the sender gone,
+    /// even when another job had answered (the DDL view then says "couldn't check").
+    #[test]
+    fn a_failed_job_withholds_every_verdict() {
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let sink = VerdictSink::new(tx);
+        sink.expect(2);
+        sink.add(&[key("a")], &[Staleness::Current]);
+        sink.fail();
+        sink.add(&[key("b")], &[Staleness::Current]);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+    }
+
+    /// Jobs cancelled before answering drop their shares: the receiver sees the sender gone.
+    #[test]
+    fn cancelled_jobs_leave_the_receiver_undecided() {
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let sink = VerdictSink::new(tx);
+        sink.expect(2);
+        let other = VerdictSink(sink.0.clone());
+        sink.add(&[key("a")], &[Staleness::Dropped]);
+        drop(sink);
+        drop(other);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+    }
+}
+// ## m4-t15b-facets
