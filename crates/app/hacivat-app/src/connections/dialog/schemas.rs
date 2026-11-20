@@ -465,34 +465,50 @@ pub(crate) fn save_profile(
             let Some(dir) = dir else {
                 return Err(ScopeSaveError::CacheNotDeleted);
             };
+            // ## m4-t24-live (named lines; fix round 1, I-1): the profile's open cache store
+            // closes first (its engine stops; T19 carry), and nothing reopens it until the
+            // `reopen` below, which every path from here reaches.
+            let release = cx.update(|cx| crate::explorer::live::release_cache(id, cx));
+            release.await;
             let (tx, rx) = oneshot::channel();
             runtime.spawn_blocking(move || {
                 let _ = tx.send(CacheStore::delete_profile_files(&dir, &id));
             });
             if !matches!(rx.await, Ok(Ok(()))) {
+                // Nothing changed: the cache opens again as it was.
+                cx.update(|cx| crate::explorer::live::reopen(id, false, cx));
                 return Err(ScopeSaveError::CacheNotDeleted);
             }
         }
-        if fail_scope {
-            return Err(ScopeSaveError::DataNotWritten);
-        }
-        if let Some(scope) = scope {
-            let write = cx.update(|cx| userdata::set_scope(id, scope, cx));
-            match write.await {
-                Ok(_) => {}
-                Err(userdata::UserDataError::Unreadable) => {
-                    return Err(ScopeSaveError::DataUnreadable);
-                }
-                Err(_) => return Err(ScopeSaveError::DataNotWritten),
+        let saved = async {
+            if fail_scope {
+                return Err(ScopeSaveError::DataNotWritten);
             }
+            if let Some(scope) = scope {
+                let write = cx.update(|cx| userdata::set_scope(id, scope, cx));
+                match write.await {
+                    Ok(_) => {}
+                    Err(userdata::UserDataError::Unreadable) => {
+                        return Err(ScopeSaveError::DataUnreadable);
+                    }
+                    Err(_) => return Err(ScopeSaveError::DataNotWritten),
+                }
+            }
+            if fail_save {
+                return Err(ScopeSaveError::Profile(SaveError::Io(
+                    "injected".to_string(),
+                )));
+            }
+            let save = cx.update(|cx| ConnectionsModel::save(cx, draft));
+            save.await.map_err(ScopeSaveError::Profile)
         }
-        if fail_save {
-            return Err(ScopeSaveError::Profile(SaveError::Io(
-                "injected".to_string(),
-            )));
+        .await;
+        // ## m4-t24-live (named lines): the catalog opens again (when connected) with the
+        // profile as stored now, so an "encrypt on" save never recreates a plaintext cache.
+        if drop_cache {
+            cx.update(|cx| crate::explorer::live::reopen(id, true, cx));
         }
-        let save = cx.update(|cx| ConnectionsModel::save(cx, draft));
-        save.await.map_err(ScopeSaveError::Profile)
+        saved
     })
 }
 

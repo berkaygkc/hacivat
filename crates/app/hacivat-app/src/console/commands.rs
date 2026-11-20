@@ -399,3 +399,195 @@ fn show_recalled(editor: &Entity<EditorView>, list: Arc<[Arc<str>]>, index: usiz
     }
     editor.update(cx, |e, cx| e.show_recalled(&text, sentence, cx));
 }
+
+// ## m4-t24-live (named exception): the console opener of the explorer's Open data (R-M4-13).
+
+/// A console Open data opened, with the text it must run (fix round 1, I-2).
+struct Queued {
+    tab: hacivat_ui::panes::TabId,
+    /// The generated text: the run happens only while the editor holds exactly it.
+    text: String,
+    /// The console was seen built (a later absence means its tab closed).
+    seen: bool,
+}
+
+/// Consoles opened with a text to run once they can.
+#[derive(Default)]
+struct OpenRuns {
+    queued: Vec<Queued>,
+    observing: bool,
+}
+
+impl Global for OpenRuns {}
+
+/// Opens a new console on `profile` over `text` (focused, in the focused pane) and, with `run`,
+/// runs it through the normal Run path once the console can run (its session connected and its
+/// SQL context read): the gate, the classifier and the confirmations decide as for any Run.
+///
+/// Fix round 1:
+/// - **I-2.** The run is of exactly `text`: it happens only while the editor still holds it
+///   (an edit before the session is ready drops the run; the user presses Run), and the queued
+///   run is dropped when the console's session breaks or its tab closes.
+/// - **I-3.** `database` is the database `text` was written for. A console's session is on the
+///   profile's database, so when `database` is not known to be that one (the user's session
+///   reports another, or nothing tells which), no console opens and a notice says why: the text
+///   never runs against another database.
+///
+/// Answers the new tab.
+pub fn open_with_text(
+    profile: hacivat_proto::ProfileId,
+    database: Option<&str>,
+    text: &str,
+    run: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<hacivat_ui::panes::TabId> {
+    if let Some(db) = database {
+        let current = crate::explorer::live::session_database(profile, cx).or_else(|| {
+            cx.try_global::<crate::connections::ConnectionsModel>()
+                .and_then(|m| m.get(profile))
+                .and_then(|p| p.database.clone())
+        });
+        if current.as_deref() != Some(db) {
+            refuse_other_database(db, current, cx);
+            return None;
+        }
+    }
+    let ws = window.root::<crate::shell::Workspace>().flatten()?;
+    crate::console::view::queue_text(profile, text.to_string(), cx);
+    let tab = ws.update(cx, |ws, cx| ws.open_console_tab(Some(profile), window, cx))?;
+    if run {
+        let runs = cx.default_global::<OpenRuns>();
+        runs.queued.push(Queued {
+            tab,
+            text: text.to_string(),
+            seen: false,
+        });
+        if !runs.observing {
+            runs.observing = true;
+            cx.observe_global::<Consoles>(try_open_runs).detach();
+            cx.observe_global::<crate::exec_ui::ExecUi>(try_open_runs)
+                .detach();
+        }
+    }
+    Some(tab)
+}
+
+/// Whether console `console` can run now (connected, context read, nothing running).
+fn can_run_now(console: ConsoleId, cx: &App) -> bool {
+    let Some(state) = Consoles::get(cx, console) else {
+        return false;
+    };
+    if state.editor.is_none() {
+        return false;
+    }
+    let idle = state
+        .session
+        .as_ref()
+        .is_some_and(|s| s.state().borrow().state == SessionState::Idle);
+    idle && crate::exec_ui::sql_context(console, cx) != SqlContext::Pending
+        && !crate::exec_ui::orchestrator::run_busy(console, cx)
+        && !crate::exec_ui::pending_read_only(console, cx)
+}
+
+/// The notice of an Open data refused for another (or an unknown) database.
+fn refuse_other_database(database: &str, current: Option<String>, cx: &mut App) {
+    let database = database.to_string();
+    let text: hacivat_ui::text::TextFn = Rc::new(move |cx: &App| match &current {
+        Some(current) => crate::explorer::live::text(
+            cx,
+            "hv-explorer-open-data-other-db",
+            vec![
+                ("database", ArgValue::Text(database.clone())),
+                ("current", ArgValue::Text(current.clone())),
+            ],
+        ),
+        None => crate::explorer::live::text(
+            cx,
+            "hv-explorer-open-data-db-unknown",
+            vec![("database", ArgValue::Text(database.clone()))],
+        ),
+    });
+    hacivat_ui::toast::ToastQueue::push(
+        cx,
+        hacivat_ui::toast::Toast::new(hacivat_ui::toast::ToastKind::Info, text),
+    );
+}
+
+/// What becomes of a queued run now.
+enum Fate {
+    Wait { seen: bool },
+    Run(Entity<EditorView>),
+    Drop,
+}
+
+/// The fate of `q`'s run.
+fn fate(q: &Queued, cx: &App) -> Fate {
+    let Some(console) = Consoles::by_tab(cx, q.tab) else {
+        // Not built yet, or built and since closed.
+        return if q.seen {
+            Fate::Drop
+        } else {
+            Fate::Wait { seen: false }
+        };
+    };
+    let Some(state) = Consoles::get(cx, console) else {
+        return Fate::Drop;
+    };
+    let broken = state
+        .session
+        .as_ref()
+        .is_some_and(|s| matches!(s.state().borrow().state, SessionState::Broken(_)));
+    if broken {
+        return Fate::Drop;
+    }
+    let Some(editor) = state.editor.clone() else {
+        return Fate::Wait { seen: true };
+    };
+    if editor.read(cx).snapshot().buffer.to_string() != q.text {
+        // Edited before it could run: the user's later text never runs by itself.
+        return Fate::Drop;
+    }
+    if can_run_now(console, cx) {
+        Fate::Run(editor)
+    } else {
+        Fate::Wait { seen: true }
+    }
+}
+
+/// The runs Open data still waits to start (tests).
+pub fn queued_runs(cx: &App) -> usize {
+    cx.try_global::<OpenRuns>().map_or(0, |r| r.queued.len())
+}
+
+/// Runs every queued console that can run now and drops the runs that may no longer happen.
+fn try_open_runs(cx: &mut App) {
+    let Some(runs) = cx.try_global::<OpenRuns>() else {
+        return;
+    };
+    if runs.queued.is_empty() {
+        return;
+    }
+    let fates: Vec<Fate> = runs.queued.iter().map(|q| fate(q, cx)).collect();
+    let queued = std::mem::take(&mut cx.global_mut::<OpenRuns>().queued);
+    let mut start = Vec::new();
+    let mut keep = Vec::new();
+    for (mut q, f) in queued.into_iter().zip(fates) {
+        match f {
+            Fate::Wait { seen } => {
+                q.seen |= seen;
+                keep.push(q);
+            }
+            Fate::Run(editor) => start.push(editor),
+            Fate::Drop => {}
+        }
+    }
+    cx.global_mut::<OpenRuns>().queued = keep;
+    for editor in start {
+        crate::exec_ui::in_workspace_window(cx, move |_, window, cx| {
+            editor.update(cx, |e, cx| {
+                e.run_command("editor.run", window, cx);
+            });
+        });
+    }
+}

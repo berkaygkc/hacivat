@@ -1115,3 +1115,75 @@ The M2a connection list became the database explorer tree in place (R-M4-18): `h
   - *Ruling R-W2-13 (I3 accepted).* A broad filter expands the ancestors of its first 200
     matches only; the others are kept behind their groups' "n of total" counts. The mock
     (surface 4) shows no "N more matches" hint, so none is drawn: a T32 item.
+
+## m4-t24 — live explorer
+
+- *Decision.* `explorer::live::CatalogHost` is a thin UI wrapper over `CatalogHub` (R-M4-31):
+  per profile it keeps the hub's `ProfileCatalog`, what it last told the engine (scope, scope
+  filters, level pills, the current database and schema) and the engine's progress, held
+  deletions and the namespaces the user asked to refresh. Hub calls go through a
+  `CatalogSource` trait (the hub in the app; an engine over Task 15's fakes in tests) and run
+  on the `CoreRuntime`; the UI awaits `tokio::sync::oneshot`/`mpsc` only.
+- *Coalesced notify (spec §5.4 rule 3).* Per open profile, forwarders on the runtime put the
+  catalog's events, the engine's events and its progress into an inbox and wake the UI only
+  when the inbox was clean. The UI drains it, reads `Catalog::current()` once and calls
+  `set_catalog` only when the generation moved: one explorer update per batch. Progress is
+  stored only when it differs (no repaint without a change).
+- *App start (R-M4-15, PO-Q19).* The workspace calls `live::start` after `workspace.json` was
+  restored. Cache files are looked for on the blocking pool; plaintext profiles with one open
+  at once; an encrypted profile opens (the keyring call) only when its root is expanded in the
+  restored workspace, else its root shows the key glyph and the first keyring call is the
+  user's expansion (a user `Expand` event) or a connect.
+- *Connect and disconnect.* The connections mirror (`connections::live::apply_state`, named
+  lines) tells the host: Connected opens the catalog if needed (cache only, no server query)
+  and sends `on_connect` once the cached namespaces were published **and the profile's root is
+  expanded** (at once when it already is; else at its first expansion). Deviation D-1 from the
+  plan's "on connect": reading the catalog of a subtree nobody looks at opened metadata
+  connections on every connect of the M2/M3 tests and consumed their scripted driver answers
+  (eight failures in four files); the condition is one line in `live::connect_engine`, to drop
+  if the controller rules for "always on connect" (with those tests adapted); any non-connected state stops the engine through
+  `CatalogHub::shutdown` (the cache stays, the explorer keeps the last snapshot and the
+  offline strip "Showing cached metadata from {date}" names its newest `Loaded.at`). The
+  current schema comes from the user's session (the focused console of the profile,
+  `SessionSnapshot::schema`), never from the metadata connection.
+- *Deltas.* Renames move expansion (Task 14); dropped and `out_of_scope` objects lose their
+  expansion; an out-of-scope object is a removal, never a deletion notice. Engine events map to
+  Fluent toasts (`hv-metadata-ns-dropped`, `intro-hint-level-lowered`,
+  `model-cache-write-failed`); `DatabaseUnlisted` is kept per profile (log only).
+- *Mass deletion (D-039, R-M4-22).* A `PendingConfirmation` for a namespace the user asked to
+  refresh opens the confirmation (Remove from cache, Default; Keep cached, Primary and initial
+  focus; Escape is Keep); any other one keeps the namespace's stale badge with the held count
+  in its tooltip. `PendingWithdrawn` closes an open question.
+- *Actions (mock 5).* Commands act on the cursor row; a right click moves the cursor first.
+  Qualified names quote through `sql_ident::quote` (re-exported as `hacivat_meta::name::quote`,
+  a one-line named exception: the app has no `sql-ident` dependency). Open data opens a console
+  over `SELECT * FROM <qualified name>` and runs it with the editor's own Run once the console's
+  session is idle and its SQL context read (`console::commands::open_with_text`). "Hide objects
+  like this" appends `kind:-prefix*` to the namespace's view filter in the profile data file;
+  the adapter hides those rows and marks the group header; the catalog is unchanged. The
+  profile root keeps its M2a menu (its tests pin it); F5 refreshes a root.
+- *Expanded state (PO-Q15).* `workspace.json` gains `explorer.expanded: { uuid: [hex] }`,
+  written next to the layout; restored keys are applied only when present in the cached
+  snapshot (walked from the root through restored keys), and their `Expand` events load
+  nothing.
+- *Pending until other branches merge.* The hub's SQLite readers (R-W3-10,
+  `with_readers`) and the per-pass progress counts (R-W3-12) arrive with Tasks 18 and 17; the
+  user's attached SQLite files are not copied onto the reader (no `attached_files` seam exists).
+- *Fix round 1 (opus review).*
+  - *I-1.* Opens and closes of one profile run one at a time in a lifecycle task that reads
+    the latest wish at every step (`want_open`): an open answered after a close is closed
+    by the same task, so no stale shutdown can stop a newer engine. `release_cache` sets
+    `deleting`: nothing opens the store until `reopen`, which Save calls on every path
+    after the release, with the profile as stored then (an "encrypt on" Save never
+    recreates a plaintext cache).
+  - *I-2, I-3.* Open data's queued run is of exactly the text it generated (it is dropped
+    when the editor changed, the session broke or the tab closed). On a database-level
+    engine `open_with_text` refuses, with a notice, a database other than the one the
+    console's session uses (the user's session context, else the profile's database), and
+    one it cannot tell.
+  - *R-W3-10.* The hub builds SQLite's introspector with its per-schema readers
+    (`hub::introspector_with_readers`, a named exception in Task 15's file).
+  - *m-1.* Task 12's filter keeps an escaped trailing whitespace (`trim_item`, a named
+    exception in `filter.rs`). The adapter compiles a view filter per item when the whole
+    does not parse, so a bad item hides nothing and never undoes the others; "Hide objects
+    like this" refuses, with a notice, an item that does not parse.

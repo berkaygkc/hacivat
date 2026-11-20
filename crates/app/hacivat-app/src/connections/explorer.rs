@@ -97,6 +97,8 @@ struct Stamp {
     loads: usize,
     // ## m4-t20-levels (named exception): the profiles' user data (level pills).
     userdata: u64,
+    // ## m4-t24-live (named exception): the live host's rows (progress, pending, levels).
+    live: u64,
 }
 
 /// The explorer view (the `explorer` hook).
@@ -124,6 +126,8 @@ pub struct ExplorerView {
     context_on: bool,
     /// The children of contributed nodes expanded so far.
     loads: HashMap<TreeKey, ContributedLoad>,
+    // ## m4-t24-live (named exception): the expanded rows last noted for `workspace.json`.
+    expanded_seen: KeySet,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -438,6 +442,24 @@ fn profile_input(p: &Arc<Profile>, cx: &App) -> ProfileInput {
         }
         LiveState::Disconnected => (None, engine()),
     };
+    // ## m4-t24-live (named exception): offline with a cached tree, "cached" (history glyph,
+    // the date in the tooltip); an encrypted cache not opened yet, the key glyph (mock 3).
+    let live_row = crate::explorer::live::row(p.id, cx);
+    let (mut mark, mut meta) = (mark, meta);
+    if info.is_none() && mark.is_none() {
+        if let Some(at) = crate::explorer::live::cached_at(p.id, cx) {
+            mark = Some(MetaMark::Glyph(IconName::History));
+            meta = Some(tr_id(cx, "hv-explorer-cached-meta"));
+            tooltip = Some(crate::explorer::live::text(
+                cx,
+                "hv-explorer-cached-tip",
+                vec![("date", crate::explorer::live::when(at))],
+            ));
+        } else if live_row.as_ref().is_some_and(|r| r.locked) {
+            mark = Some(MetaMark::Glyph(IconName::KeyRound));
+            tooltip = Some(tr_id(cx, "hv-explorer-encrypted-tip"));
+        }
+    }
     let a11y = adapter::join_words(&words);
     ProfileInput {
         profile: p.clone(),
@@ -450,6 +472,8 @@ fn profile_input(p: &Arc<Profile>, cx: &App) -> ProfileInput {
         catalog: adapter::catalog_of(p.id, cx),
         // ## m4-t20-levels (named exception): the level pills' data.
         userdata: crate::explorer::userdata::get(p.id, cx),
+        // ## m4-t24-live (named exception)
+        live: live_row,
     }
 }
 
@@ -592,6 +616,12 @@ impl ExplorerView {
                 this.refresh(cx);
                 cx.notify();
             }),
+            // ## m4-t24-live (named exception): progress, pending deletions, the database
+            // rows' automatic levels, the locked roots.
+            cx.observe_global::<crate::explorer::live::CatalogHost>(|this, cx| {
+                this.refresh(cx);
+                cx.notify();
+            }),
         ];
         let mut view = ExplorerView {
             filter,
@@ -609,6 +639,8 @@ impl ExplorerView {
             catalogs_seen: 0,
             context_on: false,
             loads: HashMap::new(),
+            // ## m4-t24-live (named exception)
+            expanded_seen: KeySet::default(),
             _subscriptions: subscriptions,
         };
         view.refresh(cx);
@@ -654,6 +686,15 @@ impl ExplorerView {
     /// - [`ConnectionsModel::selected`] follows the profile that owns the cursor row, so the
     ///   sheet and the palette's and welcome page's connection commands name the same one.
     fn on_tree_changed(&mut self, cx: &mut Context<Self>) {
+        // ## m4-t24-live (named exception): the expanded rows go to `workspace.json`.
+        let (expanded, model) = {
+            let t = self.tree.read(cx);
+            (t.expanded().clone(), t.model().clone())
+        };
+        if expanded != self.expanded_seen {
+            self.expanded_seen = expanded.clone();
+            crate::explorer::live::note_expanded(&expanded, &model, cx);
+        }
         let (owner, on_root) = self.cursor_owner(cx);
         if on_root != self.context_on {
             self.context_on = on_root;
@@ -702,6 +743,8 @@ impl ExplorerView {
             loads: self.loads.len(),
             // ## m4-t20-levels (named exception)
             userdata: crate::explorer::userdata::generation(cx),
+            // ## m4-t24-live (named exception)
+            live: crate::explorer::live::generation(cx),
         }
     }
 
@@ -831,11 +874,22 @@ impl ExplorerView {
                     window.defer(cx, move |window, cx| {
                         open_menu_for(id, Some(at), window, cx)
                     });
+                } else {
+                    // ## m4-t24-live (named exception): every other node's menu (mock 5); a
+                    // header's commands act on the header's own key (R-W1-5).
+                    let (key, at) = (*key, *at);
+                    window.defer(cx, move |window, cx| {
+                        crate::explorer::actions::open_node_menu(key, at, window, cx)
+                    });
                 }
-                // Every other node's menu is Task 24's (mock 5); a header's commands act on
-                // the header's own key (R-W1-5).
             }
-            TreeEvent::Expand(key) => self.load_contributed(*key, cx),
+            TreeEvent::Expand(key) => {
+                self.load_contributed(*key, cx);
+                // ## m4-t24-live (named exception): a namespace, an object's children or an
+                // encrypted root loads (never a restored row, PO-Q15).
+                let key = *key;
+                cx.defer(move |cx| crate::explorer::live::on_expand(key, cx));
+            }
             // ## m4-t20-levels (named exception): the level pill opens its list (mock 6).
             TreeEvent::Pill(key, at) => {
                 let (key, at) = (*key, *at);
@@ -843,8 +897,17 @@ impl ExplorerView {
                     crate::explorer::level_pill::open_from_pill(key, at, window, cx)
                 });
             }
-            // Retry and "Add to scope" are Task 24's.
-            TreeEvent::Collapse(_) | TreeEvent::Retry(_) | TreeEvent::RowAction(_) => {}
+            // ## m4-t24-live (named exception): Retry reads the row again (a user refresh);
+            // "Add to scope" widens the profile's scope.
+            TreeEvent::Retry(key) => {
+                let key = *key;
+                cx.defer(move |cx| crate::explorer::live::refresh_key(key, cx));
+            }
+            TreeEvent::RowAction(key) => {
+                let key = *key;
+                cx.defer(move |cx| crate::explorer::live::add_to_scope(key, cx));
+            }
+            TreeEvent::Collapse(_) => {}
         }
     }
 
@@ -1165,6 +1228,34 @@ impl ExplorerView {
         out
     }
 
+    // ## m4-t24-live (named exception)
+    /// The offline strip: the history glyph and the cached date (mock 3).
+    fn offline_line(&self, theme: &Theme, text: SharedString) -> AnyElement {
+        let t = theme.tokens;
+        let c = &t.colors;
+        div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .gap(px(t.spacing.sm))
+            .mx(px(t.spacing.md))
+            .mb(px(t.spacing.xs))
+            .child(
+                div().flex_none().pt(px(2.0)).child(
+                    Icon::new(IconName::History)
+                        .size(IconSize::Chrome)
+                        .color(c.text_2.to_hsla()),
+                ),
+            )
+            .child(paragraph(
+                text,
+                t.type_ramp.body_sm,
+                c.text_2.to_hsla(),
+                "explorer-offline-note",
+            ))
+            .into_any_element()
+    }
+
     fn empty(&self, theme: &Theme, cx: &mut App) -> AnyElement {
         let t = theme.tokens;
         let c = &t.colors;
@@ -1349,7 +1440,12 @@ impl Render for ExplorerView {
             self.list(&theme)
         };
         let filter_row = self.filter_row(&theme, window, cx);
-        let hint = self.filter_hints(&theme, cx);
+        let mut hint = self.filter_hints(&theme, cx);
+        // ## m4-t24-live (named exception): "Showing cached metadata from {date}" for the
+        // selected profile while it is offline (mock 3).
+        if let Some(text) = crate::explorer::live::offline_note(cx) {
+            hint.push(self.offline_line(&theme, text));
+        }
         div()
             .flex()
             .flex_col()

@@ -1269,7 +1269,12 @@ fn shift_f10_off_a_root_asks_the_tree(cx: &mut TestAppContext) {
         [app],
         "the tree's menu event, for the row"
     );
-    assert!(layer_ids(vcx).is_empty(), "no connection menu off a root");
+    // ## m4-t24-live (named exception): off a root the row's own menu opens (Task 24, mock 5),
+    // never the connection menu.
+    assert_eq!(layer_ids(vcx), ["menu"], "the database row's menu");
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(layer_ids(vcx).is_empty());
     // On the root, the M2a binding opens the connection menu.
     put_cursor(vcx, adapter::profile_key(profile_id(vcx, "shop")));
     vcx.simulate_keystrokes("shift-f10");

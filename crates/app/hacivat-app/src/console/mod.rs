@@ -29,6 +29,8 @@ pub use registry::{ConsoleId, ConsoleState, Consoles};
 pub use view::{console_binding, editor_segment, focused_console};
 // ## m3c-t41-chrome
 pub use view::editor_segment_cells;
+// ## m4-t24-live (named exception, fix round 1): the plan's `console::open_with_text`.
+pub use commands::open_with_text;
 
 use crate::shell::{set_console_binding, set_console_view, set_tab_decor};
 

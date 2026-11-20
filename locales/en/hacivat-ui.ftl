@@ -3969,3 +3969,31 @@ hv-scope-save-data-unreadable = This connection's explorer settings file can't b
 hv-scope-save-data-failed = The schema scope couldn't be saved, so nothing was saved.
 # Surface 6 (Introspection level). A toast when a level could not be saved.
 hv-explorer-level-not-saved = The introspection level couldn't be saved.
+
+## m4-t24-live
+# Surface 5 (Context menus). The palette title of the node menu's "Copy name".
+hv-cmd-explorer-copy-name = Copy name
+# Surface 5 (Context menus). The palette title of "Hide objects like this".
+hv-cmd-explorer-hide-like-this = Hide objects like this
+# Surface 5 (Context menus). The palette title of "Show hidden objects".
+hv-cmd-explorer-show-hidden = Show hidden objects
+# Surface 5 (Context menus). The palette title of "Collapse all children".
+hv-cmd-explorer-collapse-children = Collapse all children
+# Surface 5 (Context menus). The palette title of "Introspection level" (opens the level list).
+hv-cmd-explorer-level-menu = Introspection level
+# Surface 5 (Context menus). The title of the disabled Modify… placeholder (never in the palette).
+hv-cmd-explorer-modify = Modify
+# Surface 5 (Context menus). Open data refused: the object is in another database than the one
+# this connection's consoles use.
+# Variables:
+#   $database (String) - the object's database, verbatim, e.g. "reports".
+#   $current (String) - the database the consoles use, verbatim, e.g. "app".
+hv-explorer-open-data-other-db = This connection's consoles use { $current }, so Open data can't show the data of { $database }. Connect to { $database } to see it.
+# Surface 5 (Context menus). Open data refused: which database the consoles use is not known.
+# Variables:
+#   $database (String) - the object's database, verbatim, e.g. "reports".
+hv-explorer-open-data-db-unknown = Hacivat can't tell which database this connection's consoles use, so Open data didn't open { $database }. Set the connection's database, or open a console on it first.
+# Surface 5 (Context menus). Hide objects like this refused: the name can't be written as a view filter.
+# Variables:
+#   $name (String) - the object's name, verbatim, e.g. "yedek_2019".
+hv-explorer-hide-refused = Objects like { $name } can't be hidden: the name can't be written as a view filter.

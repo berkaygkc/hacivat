@@ -227,7 +227,19 @@ impl Workspace {
             top: t.spacing.titlebar_height,
             bottom: t.spacing.statusbar_height,
         };
-        ws.restore(bounds, cx);
+        // ## m4-t24-live (named lines): the explorer's expanded rows (`explorer.expanded`).
+        if let Some(explorer) = ws.restore(bounds, cx) {
+            let map = crate::explorer::live::parse_saved(&explorer);
+            crate::explorer::live::set_restored(map, cx);
+        }
+        // The cached trees of app start, now that the expanded rows are known (R-M4-15).
+        crate::explorer::live::start(cx);
+        ws._subscriptions
+            .push(
+                cx.observe_global::<crate::explorer::live::ExpandedState>(|this, cx| {
+                    this.layout_changed(cx);
+                }),
+            );
         ws
     }
 
@@ -236,13 +248,12 @@ impl Workspace {
     /// Restores `workspace.json` when it is readable and consistent; otherwise keeps one
     /// `Console 1`. A file that parses as JSON but does not describe a valid workspace is set
     /// aside (`*.corrupt-<ts>`) before anything overwrites it.
-    fn restore(&mut self, bounds: TileBounds, cx: &App) {
-        let Some(path) = &self.state_path else {
-            return;
-        };
-        let Some(value) = workspace_state::load(path, WORKSPACE_STATE_VERSION) else {
-            return;
-        };
+    // ## m4-t24-live (named lines): answers the file's `explorer` part (the expanded rows),
+    // when the file was restored.
+    fn restore(&mut self, bounds: TileBounds, cx: &App) -> Option<serde_json::Value> {
+        let path = self.state_path.as_ref()?;
+        let value = workspace_state::load(path, WORKSPACE_STATE_VERSION)?;
+        let explorer = value.get("explorer").cloned();
         let registry = cx.try_global::<TabContentRegistry>();
         let restored = serde_json::from_value::<SavedState>(value)
             .map_err(|e| e.to_string())
@@ -259,7 +270,7 @@ impl Workspace {
             Err(reason) => {
                 tracing::warn!(path = %path.display(), %reason, "workspace: state set aside");
                 let _ = fsio::quarantine(path, "corrupt", SystemTime::now());
-                return;
+                return None;
             }
         };
         for kind in restored.tabs.values() {
@@ -269,6 +280,7 @@ impl Workspace {
         self.tiles = restored.tiles;
         self.panes = restored.panes;
         self.tabs = restored.tabs;
+        explorer
     }
 
     fn saved_state(&self) -> SavedState {
@@ -330,9 +342,11 @@ impl Workspace {
         let Some(path) = self.state_path.clone() else {
             return;
         };
-        let Ok(value) = serde_json::to_value(self.saved_state()) else {
+        let Ok(mut value) = serde_json::to_value(self.saved_state()) else {
             return;
         };
+        // ## m4-t24-live (named line): the explorer's expanded rows.
+        crate::explorer::live::add_saved(&mut value, cx);
         self.save_task = Some(self.saver.submit((path, value), Some(SAVE_DEBOUNCE), cx));
     }
 

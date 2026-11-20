@@ -148,6 +148,49 @@ const M4_ROWS: &[Row] = &[
         None,
         None,
     ),
+    // ## m4-t24-live (named exception): the node-menu commands (mock 5), palette and menu only.
+    (
+        "explorer.copy_name",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
+    (
+        "explorer.hide_like_this",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
+    (
+        "explorer.show_hidden",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
+    (
+        "explorer.collapse_children",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
+    (
+        "explorer.level_menu",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
+    (
+        "explorer.modify",
+        "ExplorerTree",
+        "ExplorerTree",
+        None,
+        None,
+    ),
 ];
 
 /// The command ids M4 registers (every M4 row except the M2a command it adds a chord to).
@@ -403,7 +446,9 @@ fn stub_count_is_n(cx: &mut TestAppContext) {
     stubs.extend(ddl_view::STUB_COMMANDS);
     // ## m4-t20-levels (named exception): Task 20 filled `explorer.edit_scope` and the four
     // `explorer.set_level.*` commands.
-    assert_eq!(stubs.len(), 8);
+    // ## m4-t24-live (named exception): Task 24 filled copy qualified name, collapse all, open
+    // data, refresh and expand all children.
+    assert_eq!(stubs.len(), 3);
     let (enabled, listed) = vcx.cx.read(|cx| {
         let reg = cx.global::<ActionRegistry>();
         let enabled: Vec<&'static str> = reg
@@ -529,9 +574,13 @@ fn meta_typed_seams_answer_nothing_until_their_tasks(cx: &mut TestAppContext) {
     assert_eq!(opened, Err(DdlViewError::NotYet));
     assert_eq!(tab_count(vcx), 1, "open_ddl_view opened a tab");
     assert_eq!(revealed, RevealOutcome::Unavailable);
-    assert!(
-        !ran,
-        "no open-data handler is installed in M4 before Task 24"
+    // ## m4-t24-live (named exception): Task 24 installs the default handler; for a profile
+    // the app does not know it opens nothing.
+    assert!(ran, "the default open-data handler is installed");
+    assert_eq!(
+        tab_count(vcx),
+        1,
+        "Open data opened a console for an unknown profile"
     );
     // A handler, once set, receives the object; a second one replaces it.
     let seen: Rc<RefCell<Vec<(&str, ObjectKey)>>> = Rc::default();

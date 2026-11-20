@@ -515,7 +515,8 @@ pub fn parse_filter(
         loop {
             let end = item_end(&cs, i);
             let raw: String = cs[i..end].iter().collect();
-            let trimmed = raw.trim();
+            // ## m4-t24-live (named exception, T24 review m-1): an escaped edge space stays.
+            let trimmed = trim_item(&raw);
             if trimmed.is_empty() {
                 warnings.push(FilterWarning {
                     column: u32::try_from(i + 1).unwrap_or(u32::MAX),
@@ -539,6 +540,31 @@ pub fn parse_filter(
         warnings,
     })
 }
+
+// ## m4-t24-live (named exception, T24 review m-1)
+/// `raw` without the whitespace around it, except a trailing whitespace character that a `\`
+/// escapes (an odd run of backslashes right before it): "escape a name's edge space as `\ `"
+/// (module docs) holds for spaces, tabs and newlines alike.
+fn trim_item(raw: &str) -> &str {
+    let s = raw.trim_start();
+    let cs: Vec<(usize, char)> = s.char_indices().collect();
+    let mut end = cs.len();
+    while end > 0 && cs[end - 1].1.is_whitespace() {
+        let mut slashes = 0;
+        let mut k = end - 1;
+        while k > 0 && cs[k - 1].1 == '\\' {
+            slashes += 1;
+            k -= 1;
+        }
+        if slashes % 2 == 1 {
+            break;
+        }
+        end -= 1;
+    }
+    let byte_end = cs.get(end).map_or(s.len(), |(b, _)| *b);
+    &s[..byte_end]
+}
+// ## m4-t24-live
 
 /// The index of the `||` that ends the item starting at `i` (or the text's end). A `{…}`
 /// regex (an item's pattern that starts with `{`, after the kind and the `-`), a glob class
@@ -746,6 +772,31 @@ fn same_family(a: DialectId, b: DialectId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ## m4-t24-live (named exception, T24 review m-1)
+    #[test]
+    fn an_escaped_edge_whitespace_is_part_of_the_name() {
+        for name in ["trail ", "endtab\t", "endnl\n", " lead"] {
+            let escaped: String = name
+                .chars()
+                .flat_map(|c| c.is_whitespace().then_some('\\').into_iter().chain([c]))
+                .collect();
+            let text = format!("  table:-{escaped}  ||table:-other");
+            let f = parse_filter(&text, DialectId::Postgres, FilterRole::View)
+                .unwrap_or_else(|e| panic!("{text:?}: {e:?}"));
+            assert!(!f.matches(ObjectKind::Table, &Name::from(name)), "{name:?}");
+            assert!(!f.matches(ObjectKind::Table, &Name::from("other")));
+            assert!(
+                f.matches(ObjectKind::Table, &Name::from(name.trim())),
+                "{name:?}"
+            );
+        }
+        // An unescaped edge space is still trimmed; an even run of backslashes escapes itself.
+        assert_eq!(trim_item(" a  "), "a");
+        assert_eq!(trim_item("a\\ "), "a\\ ");
+        assert_eq!(trim_item("a\\\\ "), "a\\\\");
+    }
+    // ## m4-t24-live
 
     #[test]
     fn items_split_on_double_bars_outside_regexes_classes_and_escapes() {

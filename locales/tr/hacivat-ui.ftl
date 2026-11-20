@@ -3599,3 +3599,23 @@ hv-scope-save-data-unreadable = Bu bağlantının gezgin ayarları dosyası okun
 hv-scope-save-data-failed = Şema kapsamı kaydedilemedi; hiçbir şey kaydedilmedi.
 # Review: PO
 hv-explorer-level-not-saved = Okuma düzeyi kaydedilemedi.
+
+## m4-t24-live
+# Review: PO
+hv-cmd-explorer-copy-name = Adı kopyala
+# Review: PO
+hv-cmd-explorer-hide-like-this = Benzer nesneleri gizle
+# Review: PO
+hv-cmd-explorer-show-hidden = Gizli nesneleri göster
+# Review: PO
+hv-cmd-explorer-collapse-children = Tüm alt öğeleri kapat
+# Review: PO
+hv-cmd-explorer-level-menu = Okuma düzeyi
+# Review: PO
+hv-cmd-explorer-modify = Değiştir
+# Review: PO
+hv-explorer-open-data-other-db = Bu bağlantının konsolları { $current } veritabanını kullanıyor; bu yüzden Veriyi aç { $database } verisini gösteremiyor. Görmek için { $database } veritabanına bağlanın.
+# Review: PO
+hv-explorer-open-data-db-unknown = Hacivat bu bağlantının konsollarının hangi veritabanını kullandığını bilemiyor; bu yüzden Veriyi aç { $database } verisini açmadı. Bağlantının veritabanını ayarlayın ya da önce bir konsol açın.
+# Review: PO
+hv-explorer-hide-refused = { $name } benzeri nesneler gizlenemiyor: ad bir görünüm filtresi olarak yazılamıyor.

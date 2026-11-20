@@ -11,6 +11,10 @@ pub use sql_ident::key::{
     DialectId, FoldRule, IdentCtx, IdentKey, NameClass, ServerDependent, has_non_ascii_cased,
     match_key,
 };
+// ## m4-t24-live (named exception): identifier quoting for the app's "Copy qualified name" and
+// "Open data" (R-M4-13, R-M4-28: quoting only through `sql_ident::quote`; the app has no direct
+// `sql-ident` dependency, and the manifests are Task 1a's).
+pub use sql_ident::quote;
 
 /// An object name exactly as the server reported it. `Arc<str>`: the cache decoder interns the
 /// strings of a namespace, so 160k columns share their few dozen type names (R-M4-26).

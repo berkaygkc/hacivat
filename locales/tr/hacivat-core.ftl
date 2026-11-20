@@ -1188,3 +1188,7 @@ intro-catalog-race-retried = { $schema } içindeki bir nesne okunurken kaldırı
 intro-scope-warn-db-term-ignored = { NUMBER($column, useGrouping: "false") }. karakterdeki veritabanı kısmı yok sayılır: bu motorda şemaların üstünde veritabanı yoktur.
 # Review: PO
 intro-filter-warn-empty-item = { NUMBER($column, useGrouping: "false") }. karakterdeki boş kısım yok sayılır.
+
+## m4-t24-live
+# Review: PO
+model-cache-write-failed = Disk dolu olduğu için önbellekteki üst veri kaydedilemedi. Gezgin çalışmaya devam eder; üst veri bir sonraki bağlantıda yeniden okunur.
