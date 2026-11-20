@@ -1735,6 +1735,54 @@ fn control_characters_in_a_name_are_visible_in_the_tab_title(cx: &mut TestAppCon
     assert!(text.contains("\"a\nb\tc\""), "{text:?}");
 }
 
+// ## m4-t32-shots (fix round 1, review M-5): a name's own bidi controls (a PDI that would close
+// the title's isolate early, an RLO that would then reverse " · DDL") are drawn as visible
+// marks on single-line chrome: the title keeps exactly one isolate, Fluent's, around the name.
+#[gpui::test]
+fn bidi_controls_in_a_name_cannot_escape_the_tab_titles_isolate(cx: &mut TestAppContext) {
+    let evil = "x\u{2069}\u{202E}y";
+    let cat = pg_cat(
+        1,
+        vec![table(evil, Some(16_610), &[("id", "integer")])],
+        false,
+    );
+    let (vcx, _s, id) = pg_shell(cx, "en", cat);
+    let k = ObjectKey {
+        kind: ObjectKind::Table,
+        path: ["app", "public", evil]
+            .into_iter()
+            .map(Name::from)
+            .collect(),
+        server_id: Some(hacivat_meta::ServerId::Oid(16_610)),
+        overload_sig: None,
+        raw_kind: None,
+    };
+    open_view(vcx, id, &k);
+    vcx.run_until_parked();
+    let raw_title = {
+        let ws = workspace(vcx);
+        vcx.cx.read(|cx| {
+            let w = ws.read(cx);
+            w.active_tab().map(|t| w.tab_title(t, cx).to_string())
+        })
+    }
+    .expect("a tab");
+    assert_eq!(raw_title, "\u{2068}x\u{FFFD}\u{FFFD}y\u{2069} · DDL");
+    for c in [
+        '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
+        '\u{2068}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{061C}',
+    ] {
+        assert_eq!(
+            ddl_view::visible_name(&format!("a{c}b")),
+            "a\u{FFFD}b",
+            "U+{:04X}",
+            c as u32
+        );
+    }
+    // The DDL text keeps the name exactly.
+    assert!(shown_text(vcx, id, &k).contains(evil));
+}
+
 // ## m4-t27-refresh-ui (named exception: the T15b hook in `ddl_view/source.rs`, T25 m-7)
 
 /// `app.public` published through a real `Catalog` with T15b's side tables: `v_text` (a view
