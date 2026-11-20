@@ -127,6 +127,9 @@ pub enum HubError {
 struct Entry {
     catalog: ProfileCatalog,
     key: Option<RowKey>,
+    // ## m4-t27-refresh-ui (named exception, ruling R-W5-11)
+    /// The `[metadata]` settings the catalog was made with.
+    made_with: MetadataSettings,
 }
 // ## m4-t15-hub
 
@@ -142,6 +145,9 @@ pub struct CatalogHub {
     making: Mutex<HashMap<ProfileId, Arc<tokio::sync::Mutex<()>>>>,
     runtime: Option<tokio::runtime::Handle>,
     limits: EngineLimits,
+    // ## m4-t27-refresh-ui (named exception, ruling R-W5-11)
+    /// The `[metadata]` settings now (`set_metadata`); the next catalog made reads them.
+    metadata: Mutex<MetadataSettings>,
 }
 
 impl std::fmt::Debug for CatalogHub {
@@ -212,7 +218,10 @@ impl CatalogHub {
         runtime: Option<tokio::runtime::Handle>,
         limits: EngineLimits,
     ) -> Arc<CatalogHub> {
+        // ## m4-t27-refresh-ui (named exception, ruling R-W5-11)
+        let metadata = Mutex::new(settings.metadata);
         Arc::new(CatalogHub {
+            metadata,
             sessions,
             settings,
             secrets,
@@ -223,6 +232,25 @@ impl CatalogHub {
             limits,
         })
     }
+
+    // ## m4-t27-refresh-ui (named exception, ruling R-W5-11)
+    /// Changes the `[metadata]` settings (Settings › Metadata): the background check and the
+    /// cache caps apply to every catalog made from now on (the next connect); a catalog open
+    /// now keeps the settings it was made with.
+    pub fn set_metadata(&self, metadata: MetadataSettings) {
+        *self.metadata.lock().unwrap_or_else(PoisonError::into_inner) = metadata;
+    }
+
+    /// The `[metadata]` settings the next catalog is made with.
+    pub fn metadata(&self) -> MetadataSettings {
+        *self.metadata.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The `[metadata]` settings `profile`'s open catalog was made with (diagnostics, tests).
+    pub fn made_with(&self, profile: ProfileId) -> Option<MetadataSettings> {
+        self.lock().get(&profile).map(|e| e.made_with)
+    }
+    // ## m4-t27-refresh-ui
 
     /// The system catalogs the hub serves (Task 26 layers them over each catalog).
     pub fn system(&self) -> &Arc<SystemCatalogs> {
@@ -297,6 +325,9 @@ impl CatalogHub {
         dialect: DialectId,
         rt: tokio::runtime::Handle,
     ) -> Result<ProfileCatalog, HubError> {
+        // ## m4-t27-refresh-ui (named exception, R-W5-11): the settings this catalog is made
+        // with, read once.
+        let made_with = self.metadata();
         {
             if let Some(found) = self.get(profile.id) {
                 return Ok(found);
@@ -338,7 +369,8 @@ impl CatalogHub {
                 scope,
                 current: current_of(&profile, dialect),
                 filters: Filters::default(),
-                validate_every: validate_every(&self.settings.metadata, &profile),
+                // ## m4-t27-refresh-ui (named exception, R-W5-11): the settings now.
+                validate_every: validate_every(&made_with, &profile),
                 limits: self.limits,
                 runtime: rt,
             });
@@ -354,6 +386,8 @@ impl CatalogHub {
                 Entry {
                     catalog: made.clone(),
                     key,
+                    // ## m4-t27-refresh-ui (named exception, R-W5-11)
+                    made_with,
                 },
             );
             Ok(made)
@@ -407,9 +441,11 @@ impl CatalogHub {
             .settings
             .paths
             .catalog_db(&profile.id.0.to_string(), u32::from(FORMAT_MAJOR));
+        // ## m4-t27-refresh-ui (named exception, R-W5-11): the settings now.
+        let metadata = self.metadata();
         let caps = CacheCaps::from_mib(
-            self.settings.metadata.cache_mb_per_profile.get(),
-            self.settings.metadata.cache_mb_total.get(),
+            metadata.cache_mb_per_profile.get(),
+            metadata.cache_mb_total.get(),
         );
         let opened = rt
             .spawn_blocking(move || {

@@ -365,6 +365,8 @@ fn clear_cache_confirms_deletes_and_revalidates(cx: &mut TestAppContext) {
     assert!(!layer_ids(vcx).contains(&"dialog"));
     assert!(cache.exists(), "Cancel deletes nothing");
     let ensures = src.ensures.load(std::sync::atomic::Ordering::SeqCst);
+    // Review m-6: the source records whether the file still existed when the store closed.
+    *src.watch.lock().unwrap() = Some(cache.clone());
     // Clear (shift-tab from Cancel, then Enter): the store closes, the file goes, the catalog
     // is read again because the profile is connected.
     assert!(run(vcx, "metadata.clear_cache"));
@@ -376,8 +378,8 @@ fn clear_cache_confirms_deletes_and_revalidates(cx: &mut TestAppContext) {
     });
     let log = src.log.lock().unwrap().clone();
     assert!(
-        log.iter().any(|l| l.starts_with("shutdown")),
-        "the store closed first: {log:?}"
+        log.iter().any(|l| l == "shutdown watched=true"),
+        "the store closed while the file still existed (close before delete): {log:?}"
     );
     wait_until(vcx, "revalidated", |vcx| {
         tables_of(vcx, id) == 2 && loaded(vcx, id)
@@ -457,5 +459,116 @@ fn show_section_is_the_navigations_own(cx: &mut TestAppContext) {
     assert_eq!(
         vcx.cx.read(hacivat_app::settings_ui::fixtures::shown),
         Some((Section::Metadata, String::new()))
+    );
+}
+
+// ---- fix round ----------------------------------------------------------------------------
+
+/// A source that records the `[metadata]` settings it is given (ruling R-W5-11).
+#[derive(Default)]
+struct Recording(std::sync::Mutex<Vec<hacivat_settings::MetadataSettings>>);
+
+impl CatalogSource for Recording {
+    fn ensure(
+        &self,
+        _: Arc<hacivat_session::profile::Profile>,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<hacivat_introspect::hub::ProfileCatalog, hacivat_introspect::hub::HubError>,
+    > {
+        Box::pin(async { Err(hacivat_introspect::hub::HubError::Shutdown) })
+    }
+
+    fn shutdown(&self, _: ProfileId) -> futures::future::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+
+    fn has_cache(&self, _: ProfileId) -> bool {
+        false
+    }
+
+    fn set_metadata(&self, metadata: hacivat_settings::MetadataSettings) {
+        self.0.lock().unwrap().push(metadata);
+    }
+}
+
+/// Ruling R-W5-11: the background check and the cache caps reach the hub when they change, so
+/// the next connect uses them (the hub's own test proves it makes the next catalog with them).
+#[gpui::test]
+fn metadata_settings_reach_the_hub_for_the_next_connect(cx: &mut TestAppContext) {
+    let (vcx, _) = settings_tab(cx, "en");
+    in_window(vcx, |window, _| window.activate_window());
+    let rec = Arc::new(Recording::default());
+    let source: Arc<dyn CatalogSource> = rec.clone();
+    vcx.cx.update(|cx| hlive::set_source(source, cx));
+    show_metadata(vcx);
+    click_at(vcx, "settings-metadata-check");
+    click_at(vcx, "menu-item-2");
+    type_in(vcx, "settings-metadata-cache-conn-field", "300");
+    let seen = rec.0.lock().unwrap().clone();
+    assert_eq!(seen.last(), Some(&settings(vcx).metadata), "{seen:?}");
+    assert_eq!(
+        seen.last().map(|m| m.validate_interval_min),
+        Some(ValidateInterval::Minutes(ValidateMinutes::Five))
+    );
+    assert_eq!(seen.last().map(|m| m.cache_mb_per_profile.get()), Some(300));
+}
+
+/// Ruling R-W5-12 (the carries-w1 m10 write-back rule): a key of the profile data file's
+/// `[metadata]` table this build does not know survives a write-back unchanged.
+#[gpui::test]
+fn profile_data_keeps_unknown_keys_on_write_back(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(cx, "en", answers_probe(FakeDriver::new(DbmsKind::Postgres)));
+    let id = add_profile(vcx, pg_profile("app-dev"));
+    let file = paths(vcx).profile_toml(&id.0.to_string());
+    std::fs::create_dir_all(file.parent().expect("a folder")).expect("folder");
+    std::fs::write(
+        &file,
+        "[metadata]\nversion = 1\nscope = \"@:*\"\nfuture_flag = true\nfuture_list = [1, 2]\n\n\
+         [metadata.future_table]\nkind = \"newer\"\nlimit = 3\n",
+    )
+    .expect("the data file");
+    // Whatever was read before the file was written is forgotten.
+    vcx.cx.update(userdata::forget_all);
+    vcx.cx.update(|cx| userdata::ensure(id, cx));
+    wait_until(vcx, "the data read", |vcx| {
+        vcx.cx.read(|cx| userdata::get(id, cx)).is_some()
+    });
+    assert_eq!(
+        vcx.cx
+            .read(|cx| userdata::get(id, cx))
+            .and_then(|d| d.scope.clone()),
+        Some("@:*".to_string())
+    );
+    let pg_catalog = NsKey::schema(["app", "pg_catalog"]);
+    let task = vcx
+        .cx
+        .update(|cx| userdata::set_live_system(id, pg_catalog, true, cx));
+    assert!(wait_task(vcx, task).is_ok());
+    let text = std::fs::read_to_string(&file).expect("written back");
+    for kept in [
+        "future_flag = true",
+        "future_list = [1, 2]",
+        "kind = \"newer\"",
+        "limit = 3",
+        "scope = \"@:*\"",
+        "live_system",
+    ] {
+        assert!(text.contains(kept), "{kept}: {text}");
+    }
+    // A fresh reader: the unknown keys are still there.
+    vcx.cx.update(userdata::forget_all);
+    vcx.cx.update(|cx| userdata::ensure(id, cx));
+    wait_until(vcx, "read again", |vcx| {
+        vcx.cx.read(|cx| userdata::get(id, cx)).is_some()
+    });
+    let extra = vcx
+        .cx
+        .read(|cx| userdata::get(id, cx))
+        .map(|d| d.extra.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        extra.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["future_flag", "future_list", "future_table"]
     );
 }

@@ -83,7 +83,44 @@ pub struct ProfileUserData {
     /// Absent from older files (empty).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub live_system: Vec<crate::ids::NsKey>,
+    // ## m4-t27-refresh-ui (named exception, ruling R-W5-12; the carries-w1 m10 write-back rule)
+    /// Every key this build does not know (a newer build's), kept as read and written back
+    /// unchanged, so no build drops another's data.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, ExtraValue>,
 }
+
+// ## m4-t27-refresh-ui (named exception, ruling R-W5-12)
+/// A value this build does not know, kept as read (any TOML or JSON value; a TOML date or time
+/// comes back as its table form).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ExtraValue {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Text(String),
+    List(Vec<ExtraValue>),
+    Table(BTreeMap<String, ExtraValue>),
+}
+
+impl PartialEq for ExtraValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ExtraValue::Bool(a), ExtraValue::Bool(b)) => a == b,
+            (ExtraValue::Int(a), ExtraValue::Int(b)) => a == b,
+            // Bit equality: a kept value equals itself, NaN included.
+            (ExtraValue::Float(a), ExtraValue::Float(b)) => a.to_bits() == b.to_bits(),
+            (ExtraValue::Text(a), ExtraValue::Text(b)) => a == b,
+            (ExtraValue::List(a), ExtraValue::List(b)) => a == b,
+            (ExtraValue::Table(a), ExtraValue::Table(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ExtraValue {}
+// ## m4-t27-refresh-ui
 
 fn current_version() -> u32 {
     PROFILE_USER_DATA_VERSION
@@ -102,6 +139,7 @@ impl Default for ProfileUserData {
             ddl_view: DdlViewOptions::default(),
             // ## m4-t27-refresh-ui (named exception)
             live_system: Vec::new(),
+            extra: BTreeMap::new(),
         }
     }
 }

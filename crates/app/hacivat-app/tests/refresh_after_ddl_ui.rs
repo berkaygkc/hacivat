@@ -117,14 +117,59 @@ fn connected_with(
     tables: &[&str],
     extra: Vec<hacivat_driver::fake::FakeQuery>,
 ) -> (&'static mut VisualTestContext, Arc<FakeSource>, ProfileId) {
+    connected_on(cx, tables, driver(extra, Vec::new()))
+}
+
+/// The user's connections: the probes' answers (as `answers_probe` scripts them) plus the
+/// session's schema probe (`app`, `public`), so DDL is planned in its namespace rather than as
+/// an opaque run; `queries` and `exec` scripted after them.
+fn driver(
+    queries: Vec<hacivat_driver::fake::FakeQuery>,
+    exec: Vec<hacivat_driver::fake::FakeExec>,
+) -> FakeDriver {
+    let answer = |prefix: &'static str, row: Vec<Option<String>>| hacivat_driver::fake::FakeExec {
+        prefix,
+        result: Ok(hacivat_driver::ExecSummary {
+            rows: vec![row],
+            row_count: 1,
+            ..hacivat_driver::ExecSummary::default()
+        }),
+        delay: std::time::Duration::ZERO,
+        tx_after: None,
+        panics: false,
+    };
+    let text = |s: &str| Some(s.to_string());
+    let mut all: Vec<hacivat_driver::fake::FakeExec> = (0..32)
+        .flat_map(|_| {
+            [
+                answer("SHOW standard_conforming_strings", vec![text("on")]),
+                answer("SELECT pg_catalog.txid_current_if_assigned()", vec![None]),
+                answer(
+                    "SELECT current_database()",
+                    vec![
+                        text("app"),
+                        text("public"),
+                        text("pg_catalog,public"),
+                        text("deploy"),
+                        text("\"$user\", public"),
+                    ],
+                ),
+            ]
+        })
+        .collect();
+    all.extend(exec);
+    answers_probe_with(FakeDriver::new(DbmsKind::Postgres), queries).exec(all)
+}
+
+/// [`connected`] over `driver`.
+fn connected_on(
+    cx: &mut TestAppContext,
+    tables: &[&str],
+    driver: FakeDriver,
+) -> (&'static mut VisualTestContext, Arc<FakeSource>, ProfileId) {
     let intro = FakeIntrospector::new(DbmsKind::Postgres);
     intro.put_ns(public(), fake_tables(tables));
-    let vcx = shell_with_fake_prepared(
-        cx,
-        "en",
-        answers_probe_with(FakeDriver::new(DbmsKind::Postgres), extra),
-        |_| {},
-    );
+    let vcx = shell_with_fake_prepared(cx, "en", driver, |_| {});
     in_window(vcx, |window, _| window.activate_window());
     let dir = temp_dir(vcx).join("fake-cache");
     let src = Arc::new(FakeSource::new(runtime(vcx), intro, dir));
@@ -202,6 +247,20 @@ fn run_in(vcx: &VisualTestContext, console: ConsoleId, sql: &str) {
         vcx.cx
             .read(|cx| !hacivat_app::exec_ui::orchestrator::run_busy(console, cx))
     });
+}
+
+/// A console on `id` whose session knows its schema (`SET search_path` makes it probe again):
+/// its DDL is planned per object, not as an opaque run.
+fn ready_console(vcx: &VisualTestContext, id: ProfileId) -> ConsoleId {
+    let console = open_and_run(vcx, id, "SET search_path TO public");
+    wait_until(vcx, "the session's schema", |vcx| {
+        vcx.cx.read(|cx| {
+            Consoles::get(cx, console)
+                .and_then(|s| s.session.as_ref())
+                .is_some_and(|s| s.state().borrow().schema.is_some())
+        })
+    });
+    console
 }
 
 fn sent(vcx: &VisualTestContext) -> Vec<String> {
@@ -328,16 +387,17 @@ fn ask_preference_prompts_with_the_count(cx: &mut TestAppContext) {
     let (vcx, src, id) = connected(cx, &tables);
     set_preference(vcx, "ask");
     server_creates_audit(&src, &tables);
-    open_and_run(vcx, id, "CREATE TABLE public.audit (id int)");
+    let console = ready_console(vcx, id);
+    run_in(vcx, console, "CREATE TABLE public.audit (id int)");
     wait_until(vcx, "the Ask toast", |vcx| {
         vcx.cx.read(refresh_prompt::asks) == 1
     });
     let shown = toasts(vcx);
-    // The count is the coordinator target count (T21): 2 for this one CREATE TABLE.
+    // Ruling R-W5-10: changed objects are counted (one CREATE TABLE is one object).
     assert!(
         shown
             .iter()
-            .any(|t| t == "Refresh the database explorer to reflect 2 changed objects?"),
+            .any(|t| t == "Refresh the database explorer to reflect 1 changed object?"),
         "{shown:?}"
     );
     assert!(
@@ -651,4 +711,170 @@ fn a_changed_object_says_so_in_the_explorer_until_read_again(cx: &mut TestAppCon
     put_cursor(vcx, key_of(vcx, "public"));
     assert!(run(vcx, "explorer.refresh"));
     wait_until(vcx, "the tooltip goes", |vcx| tip(vcx, "users").is_none());
+}
+
+// ---- fix round ---------------------------------------------------------------------------
+
+/// The newest Ask toast's title (`Refresh the database explorer …`).
+fn ask_title(vcx: &VisualTestContext) -> String {
+    toasts(vcx)
+        .into_iter()
+        .rev()
+        .find(|t| t.starts_with("Refresh the database explorer"))
+        .unwrap_or_default()
+}
+
+/// Ruling R-W5-10 and review m-1: the Ask counts changed objects (two folded questions about
+/// one table each ask about 2); Escape answers Not now (its targets go, so the next question
+/// counts only its own); a schema-wide change names the schema, with no count.
+#[gpui::test]
+fn the_ask_counts_objects_and_escape_answers_not_now(cx: &mut TestAppContext) {
+    let tables = ["users"];
+    let (vcx, _src, id) = connected(cx, &tables);
+    set_preference(vcx, "ask");
+    let console = ready_console(vcx, id);
+    run_in(vcx, console, "CREATE TABLE public.a1 (id int)");
+    wait_until(vcx, "the first Ask", |vcx| {
+        vcx.cx.read(refresh_prompt::asks) == 1
+    });
+    // Unanswered: the next question folds it in.
+    run_in(vcx, console, "CREATE TABLE public.a2 (id int)");
+    wait_until(vcx, "the second Ask", |vcx| {
+        vcx.cx.read(refresh_prompt::asks) == 2
+    });
+    assert_eq!(
+        ask_title(vcx),
+        "Refresh the database explorer to reflect 2 changed objects?"
+    );
+    // Escape on the toast answers Not now.
+    in_window(vcx, |window, cx| {
+        assert!(hacivat_ui::toast::focus_newest_sticky(window, cx));
+    });
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(
+        !toasts(vcx)
+            .iter()
+            .any(|t| t.starts_with("Refresh the database explorer")),
+        "the toast went"
+    );
+    run_in(vcx, console, "CREATE TABLE public.a3 (id int)");
+    wait_until(vcx, "the third Ask", |vcx| {
+        vcx.cx.read(refresh_prompt::asks) == 3
+    });
+    assert_eq!(
+        ask_title(vcx),
+        "Refresh the database explorer to reflect 1 changed object?",
+        "Not now dropped the earlier targets"
+    );
+    // Dynamic SQL changes the schema whole: no count.
+    open_and_run(
+        vcx,
+        id,
+        "DO $$ BEGIN EXECUTE 'CREATE TABLE public.a4 (id int)'; END $$",
+    );
+    wait_until(vcx, "the fourth Ask", |vcx| {
+        vcx.cx.read(refresh_prompt::asks) == 4
+    });
+    assert_eq!(
+        ask_title(vcx),
+        "Refresh the database explorer to reflect the changes in public?"
+    );
+    // The namespaces stay out of date until answered.
+    assert!(matches!(
+        state_of(vcx, id),
+        Some(LoadState::Loaded { stale: true, .. })
+    ));
+}
+
+/// Ruling R-W5-10: the stamp of a schema-wide change waiting for COMMIT names the schema, with
+/// no count, as the Ask does.
+#[gpui::test]
+fn a_schema_wide_change_waiting_for_commit_names_the_schema(cx: &mut TestAppContext) {
+    let tables = ["users"];
+    let in_tx = |prefix: &'static str| hacivat_driver::fake::FakeQuery {
+        prefix,
+        tx_after: Some(hacivat_driver::TxStatus::InTx),
+        ..Default::default()
+    };
+    let (vcx, _src, id) = connected_with(cx, &tables, vec![in_tx("BEGIN"), in_tx("DO")]);
+    open_public(vcx);
+    let console = open_and_run(vcx, id, "BEGIN");
+    wait_until(vcx, "the transaction", |vcx| {
+        vcx.cx
+            .read(|cx| hacivat_app::exec_ui::tx::user_tx(console, cx))
+            .is_some()
+    });
+    run_in(
+        vcx,
+        console,
+        "DO $$ BEGIN EXECUTE 'CREATE TABLE public.a4 (id int)'; END $$",
+    );
+    wait_until(vcx, "the COMMIT stamp", |vcx| {
+        public_row(vcx).data.meta_mark == Some(hacivat_ui::tree::MetaMark::Running)
+    });
+    assert_eq!(
+        strip(&public_row(vcx).data.tooltip.unwrap_or_default()),
+        "Changes to public from this transaction wait for COMMIT. ROLLBACK discards them and \
+         the explorer stays as it is."
+    );
+    let log = vcx.cx.read(|cx| {
+        Consoles::get(cx, console)
+            .expect("the console")
+            .log
+            .lines()
+            .iter()
+            .map(|l| l.msg.fluent_id())
+            .collect::<Vec<_>>()
+    });
+    assert!(log.contains(&"hv-metadata-log-pending-schema"), "{log:?}");
+}
+
+/// Review m-5: a COMMIT the server refuses ends the transaction; what waited is refreshed (or
+/// marked stale), never left waiting for a COMMIT that will not come.
+#[gpui::test]
+fn a_refused_commit_does_not_leave_changes_waiting(cx: &mut TestAppContext) {
+    let tables = ["users"];
+    let in_tx = |prefix: &'static str| hacivat_driver::fake::FakeQuery {
+        prefix,
+        tx_after: Some(hacivat_driver::TxStatus::InTx),
+        ..Default::default()
+    };
+    // A COMMIT the server refuses (a deferred constraint) and that ends the transaction.
+    let refused = hacivat_driver::fake::FakeExec {
+        prefix: "COMMIT",
+        result: Err(hacivat_driver::RawError {
+            kind: hacivat_driver::RawErrorKind::Db,
+            server: None,
+        }),
+        delay: std::time::Duration::ZERO,
+        tx_after: Some(hacivat_driver::TxStatus::Idle),
+        panics: false,
+    };
+    let driver = driver(vec![in_tx("BEGIN"), in_tx("CREATE TABLE")], vec![refused]);
+    let (vcx, src, id) = connected_on(cx, &tables, driver);
+    open_public(vcx);
+    let console = open_and_run(vcx, id, "BEGIN");
+    wait_until(vcx, "the transaction", |vcx| {
+        vcx.cx
+            .read(|cx| hacivat_app::exec_ui::tx::user_tx(console, cx))
+            .is_some()
+    });
+    run_in(vcx, console, "CREATE TABLE public.audit (id int)");
+    wait_until(vcx, "the COMMIT stamp", |vcx| {
+        public_row(vcx).data.meta_mark == Some(hacivat_ui::tree::MetaMark::Running)
+    });
+    server_creates_audit(&src, &tables);
+    let ended = vcx
+        .cx
+        .update(|cx| hacivat_app::exec_ui::tx::end_tx(console, true, cx));
+    assert!(!wait_task(vcx, ended), "the COMMIT failed");
+    wait_until(vcx, "the stamp goes and the schema is read", |vcx| {
+        public_row(vcx).data.meta_mark.is_none()
+            && (tables_of(vcx, id).iter().any(|t| t == "audit")
+                || matches!(
+                    state_of(vcx, id),
+                    Some(LoadState::Loaded { stale: true, .. })
+                ))
+    });
 }

@@ -1597,19 +1597,31 @@ impl ExplorerModel {
                 ),
             });
             words.push(word);
+            // ## m4-t27-refresh-ui (review m-8): a held deletion on a `Partial` namespace keeps
+            // "partial" in the accessible words.
+            if held.is_some() && matches!(entry.state, Some(LoadState::Partial { .. })) {
+                words.push(self.t(Badge::Partial.message_id()));
+            }
         }
         // ## m4-t27-refresh-ui (named exception, mock 9): changes of an open transaction wait
         // for COMMIT: the 7 px amber stamp on the namespace, the count in its tooltip.
-        if let Some(count) = self.inner.inputs.profiles[p]
+        // Fix round (R-W5-10): a count of changed objects, or the schema for a schema-wide one.
+        if let Some(change) = self.inner.inputs.profiles[p]
             .live
             .as_deref()
             .and_then(|l| l.after_commit.get(&entry.key).copied())
         {
             row.meta_mark = Some(MetaMark::Running);
-            let tip = self.t_args(
-                "hv-metadata-after-commit-tip",
-                vec![("count", ArgValue::Count(u64::from(count)))],
-            );
+            let tip = match change {
+                super::refresh_prompt::NsChange::Objects(count) => self.t_args(
+                    "hv-metadata-after-commit-tip",
+                    vec![("count", ArgValue::Count(u64::from(count)))],
+                ),
+                super::refresh_prompt::NsChange::Whole => self.t_args(
+                    "hv-metadata-after-commit-tip-schema",
+                    vec![("schema", ArgValue::Text(entry.name().to_string()))],
+                ),
+            };
             row.tooltip = Some(match row.tooltip.take() {
                 Some(t) => format!("{t} {tip}").into(),
                 None => tip,
@@ -1699,7 +1711,11 @@ impl ExplorerModel {
         };
         let name = ns.objs()[idx as usize].name().to_string();
         let tip = self.t_args(mark.message_id(), vec![("name", ArgValue::Text(name))]);
-        row.tooltip = Some(tip.clone());
+        // Review m-4: the trust tip (invisible characters, a broken reference) stays.
+        row.tooltip = Some(match row.tooltip.take() {
+            Some(t) => format!("{tip} {t}").into(),
+            None => tip.clone(),
+        });
         let mut words: Vec<SharedString> = row.a11y_description.take().into_iter().collect();
         words.push(tip);
         row.a11y_description = join_words(&words);
@@ -1724,10 +1740,15 @@ impl ExplorerModel {
         let word = self.t(Badge::OutOfDate.message_id());
         row.badge = Some(word.clone());
         row.badge_glyph = Some(Badge::OutOfDate.glyph());
-        row.tooltip = Some(self.t_args(
+        let tip = self.t_args(
             "hv-explorer-stale-tip",
             vec![("schema", ArgValue::Text(name.to_string()))],
-        ));
+        );
+        // Review m-4: the "N of M schemas" (or the root's own) tip stays.
+        row.tooltip = Some(match row.tooltip.take() {
+            Some(t) => format!("{tip} {t}").into(),
+            None => tip,
+        });
         words.push(word);
     }
     // ## m4-t27-refresh-ui

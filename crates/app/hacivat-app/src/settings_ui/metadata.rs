@@ -17,8 +17,9 @@
 //!   cache files, shows an empty catalog and, when connected, reads it again
 //!   (`explorer::live::release_cache` / `reopen`). The explorer's `metadata.clear_cache` asks
 //!   the same for the cursor row's connection.
-//! - The background check and the cache limits are read when a connection's catalog opens
-//!   (the hub makes its engine then): a change applies from the next connect.
+//! - The background check and the cache limits reach the hub at once
+//!   (`explorer::live::metadata_changed`, ruling R-W5-11): a catalog made from then on (the next
+//!   connect) uses them; a catalog open now keeps what it was made with.
 //!
 //! Every write goes through `shell::update_settings`, the one settings writer.
 
@@ -97,6 +98,8 @@ pub fn apply_interval(value: &str, cx: &mut App) {
         .map(|s| s.settings.metadata.validate_interval_min);
     if saved != Some(v) {
         update_settings(cx, |s| s.metadata.validate_interval_min = v);
+        // Fix round (R-W5-11): the next connect uses it.
+        live::metadata_changed(cx);
     }
 }
 
@@ -231,6 +234,8 @@ impl CacheField {
         if size.get() != self.saved(cx) {
             let key = self.key;
             update_settings(cx, move |s| set_size(s, key, size));
+            // Fix round (R-W5-11): the next connect uses it.
+            live::metadata_changed(cx);
         }
         self.show(size.get(), Some(unit), cx);
     }
@@ -579,6 +584,14 @@ fn request_size(profile: ProfileId, cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// Forgets every size read (review m-8: the section shown again reads them again, so the note
+/// follows a cache that grew).
+pub fn section_shown(cx: &mut App) {
+    if cx.has_global::<CacheSizes>() {
+        cx.set_global(CacheSizes::default());
+    }
 }
 
 /// Forgets `profile`'s size (read again when next shown).

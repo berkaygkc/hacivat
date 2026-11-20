@@ -4024,3 +4024,15 @@ hv-ddl-view-checking = Checking whether { $name } changed on the server…
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 hv-metadata-clear-failed = The cached metadata of { $name } couldn't be deleted. Nothing changed.
+# Surface 9 (Refresh after DDL). Ruling R-W5-10: the Ask when a whole schema changed (dynamic SQL, a database-wide change): no count.
+# Variables:
+#   $schema (String) - a schema (or database) name, verbatim, e.g. "public".
+hv-metadata-refresh-ask-schema = Refresh the database explorer to reflect the changes in { $schema }?
+# Surface 9 (Refresh after DDL). Ruling R-W5-10: the namespace stamp's tooltip when the whole schema waits for COMMIT.
+# Variables:
+#   $schema (String) - a schema (or database) name, verbatim, e.g. "public".
+hv-metadata-after-commit-tip-schema = Changes to { $schema } from this transaction wait for COMMIT. ROLLBACK discards them and the explorer stays as it is.
+# Surface 9 (Refresh after DDL). Ruling R-W5-10: the output line when the whole schema waits for COMMIT.
+# Variables:
+#   $schema (String) - a schema (or database) name, verbatim, e.g. "public".
+hv-metadata-log-pending-schema = Explorer refresh waits for COMMIT (changes in { $schema })

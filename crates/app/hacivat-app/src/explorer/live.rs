@@ -132,6 +132,9 @@ pub trait CatalogSource: Send + Sync + 'static {
     fn shutdown(&self, profile: ProfileId) -> BoxFuture<'_, ()>;
     /// Whether the profile has a cache file (blocking: a file stat).
     fn has_cache(&self, profile: ProfileId) -> bool;
+    // ## m4-t27-refresh-ui (named exception, ruling R-W5-11)
+    /// The `[metadata]` settings changed: catalogs made from now on use them (a lock, no I/O).
+    fn set_metadata(&self, _metadata: hacivat_settings::MetadataSettings) {}
 }
 
 /// The app's source: the hub and where the caches live.
@@ -154,7 +157,28 @@ impl CatalogSource for HubSource {
             .catalog_db(&profile.0.to_string(), u32::from(FORMAT_MAJOR))
             .exists()
     }
+
+    // ## m4-t27-refresh-ui (named exception, ruling R-W5-11)
+    fn set_metadata(&self, metadata: hacivat_settings::MetadataSettings) {
+        self.hub.set_metadata(metadata);
+    }
 }
+
+// ## m4-t27-refresh-ui (named exception, ruling R-W5-11)
+/// Settings › Metadata changed the background check or a cache cap: the next catalog made (the
+/// next connect) uses the saved values.
+pub fn metadata_changed(cx: &App) {
+    let Some(metadata) = cx.try_global::<AppState>().map(|s| s.settings.metadata) else {
+        return;
+    };
+    if let Some(source) = cx
+        .try_global::<CatalogHost>()
+        .and_then(|h| h.source.clone())
+    {
+        source.set_metadata(metadata);
+    }
+}
+// ## m4-t27-refresh-ui
 
 // ---- the host --------------------------------------------------------------------------------
 
@@ -175,10 +199,13 @@ pub struct LiveRow {
     pub locked: bool,
     // ## m4-t27-refresh-ui (named exception)
     /// Changes of open transactions that wait for COMMIT, per namespace (mock 9's stamp).
-    pub after_commit: BTreeMap<NsKey, u32>,
+    pub after_commit: super::refresh_prompt::Changes,
     /// Refresh after DDL marked the schema lists stale (`CoordEvent::Stale { scope: true }`):
     /// a stale list is badged until it is read again.
     pub scope_stale: bool,
+    /// A stale schema list was seen since `scope_stale` was set (review m-3: only a list that
+    /// goes from stale to read clears the mark, whichever channel came first).
+    pub scope_seen: bool,
     /// Objects a state check found changed (not read again) or gone, for the namespace
     /// generation it saw (mock 11's explorer tooltip; `super::stale`).
     pub stale_objects: BTreeMap<ObjectKey, super::stale::StaleObject>,
@@ -680,6 +707,7 @@ fn teardown(entry: &mut Entry) {
     // ## m4-t27-refresh-ui (named exception): the coordinator goes with the engine.
     row.after_commit.clear();
     row.scope_stale = false;
+    row.scope_seen = false;
     row.stale_objects.clear();
     entry.row = Arc::new(row);
 }
@@ -1363,11 +1391,21 @@ fn flush(id: ProfileId, cx: &mut App) {
                 Some(LoadState::Loaded { stale: true, .. } | LoadState::Partial { .. })
             )
         });
-        // ## m4-t27-refresh-ui (named exception): a schema list read again clears the mark.
+        // ## m4-t27-refresh-ui (named exception): a schema list read again clears the mark
+        // (review m-3: once a stale list was seen, whichever channel came first).
         if row.scope_stale {
-            row.scope_stale = snap.states.iter().any(|(k, s)| {
-                matches!(k, ContainerKey::SchemaList { .. })
-                    && matches!(s, LoadState::Loaded { stale: true, .. })
+            if any_stale_list(&snap) {
+                row.scope_seen = true;
+            } else if row.scope_seen {
+                row.scope_stale = false;
+                row.scope_seen = false;
+            }
+        }
+        // Review m-8: a stale-object mark of a namespace published since is dropped.
+        if changed && !row.stale_objects.is_empty() {
+            row.stale_objects.retain(|k, m| {
+                snap.find(k)
+                    .is_some_and(|h| h.ns.generation() == m.generation())
             });
         }
         // Fix round 1 (m-5): only when the catalog moved (a level change re-reads, so it moves).
@@ -1391,11 +1429,19 @@ fn flush(id: ProfileId, cx: &mut App) {
 }
 
 // ## m4-t27-refresh-ui (named exception)
+/// Whether a schema list of `snap` is loaded and marked stale.
+fn any_stale_list(snap: &CatalogSnapshot) -> bool {
+    snap.states.iter().any(|(k, s)| {
+        matches!(k, ContainerKey::SchemaList { .. })
+            && matches!(s, LoadState::Loaded { stale: true, .. })
+    })
+}
+
 /// Sets what refresh after DDL shows on `id`'s rows: the namespaces waiting for COMMIT and,
 /// when `scope_stale` is given, the stale schema-list mark.
 pub fn set_refresh_marks(
     id: ProfileId,
-    after_commit: Option<BTreeMap<NsKey, u32>>,
+    after_commit: Option<super::refresh_prompt::Changes>,
     scope_stale: Option<bool>,
     cx: &mut App,
 ) {
@@ -1406,6 +1452,16 @@ pub fn set_refresh_marks(
         row.after_commit = a;
     }
     if let Some(s) = scope_stale {
+        // Review m-3: the engine's stale publish may have come first.
+        let seen = s
+            && match &entry.open {
+                Open::Ready(pc) => any_stale_list(&pc.catalog.current()),
+                _ => false,
+            };
+        row.scope_seen |= seen;
+        if !s {
+            row.scope_seen = false;
+        }
         row.scope_stale = s;
     }
     if row != *entry.row {

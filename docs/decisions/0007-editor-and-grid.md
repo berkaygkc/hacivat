@@ -1267,18 +1267,33 @@ The M2a connection list became the database explorer tree in place (R-M4-18): `h
   prompt that ends a transaction through `exec_ui::tx::end_tx`) tell the coordinator
   (`tx_ended`; a commit whose answer was lost is `Unknown`, refresh more); a session no console
   holds any more is `session_closed`.
-- *What the user sees* (mock 9). Ask: a wide sticky toast with the coordinator's count
-  (Refresh, Always refresh — which sets the preference through `update_settings` — and Not
-  now); it never takes the focus, so a run is never blocked (NOTES ruling 9). A newer question
-  replaces the older toast (the coordinator folded its targets). Dismissing the toast with its
-  ✕ answers nothing: the namespaces stay "out of date" and the next question carries the
-  targets. Never: nothing refreshes; the engine publishes the namespaces stale ("out of date",
+- *What the user sees* (mock 9). Ask: a wide sticky toast (Refresh, Always refresh — which
+  sets the preference through `update_settings` — and Not now); it never takes the focus, so a
+  run is never blocked (NOTES ruling 9). A newer question replaces the older toast (the
+  coordinator folded its targets). Escape or its ✕ answers Not now (NOTES §9; fix round m-1,
+  through a new `Toast::on_dismiss`, a named exception in `hacivat-ui` `toast.rs`): the
+  namespaces stay "out of date" and the targets go. Never: nothing refreshes; the engine publishes the namespaces stale ("out of date",
   T14's badge) until a refresh. `CoordEvent::Stale { scope: true }`: the stale schema list is
   badged "out of date" on its database row (the root where schemas are top level) until it is
   read again. Inside a transaction: the namespace row carries the 7 px amber stamp
   (`MetaMark::Running`) with "{count} changes … wait for COMMIT" in its tooltip, and the
   console's output logs `hv-metadata-log-pending`; the counts are read again on the core
   runtime after each run and each transaction end (the coordinator's inbox drained first).
+- *Counts* (ruling R-W5-10, fix round I-2). The Ask, the stamp and the output count changed
+  objects, the same way (`refresh_prompt::summarize` over the coordinator's targets; the Ask's
+  through `RefreshCoordinator::asked`, a one-function named exception in T21's
+  `refresh_coord.rs`): one `CREATE TABLE` is one object; the planner's name-list and scope
+  targets count nothing; a namespace or database target (dynamic SQL, a widened plan, an opaque
+  run) makes its schema "whole", and the copy names the schema with no count
+  (`hv-metadata-refresh-ask-schema`, `hv-metadata-after-commit-tip-schema`,
+  `hv-metadata-log-pending-schema`; several whole schemas are named by their database).
+- *Across a catalog reopen* (fix round I-1). Closing a catalog carries what each session with
+  an open user transaction waits to commit (`RefreshCoordinator::pending`) to the next
+  coordinator (`submit` as pending), so a Clear cache or a profile Save mid-transaction never
+  loses it: after COMMIT it is refreshed or marked stale. `tx_ended` goes through the inbox,
+  after the run's own messages (m-2). A COMMIT the server refuses and that leaves the session
+  idle ends as `Unknown`: refreshed (Always) or marked stale (Ask, Never), never left waiting
+  (m-5).
   Dynamic SQL (`EXECUTE`, `DO`, `CALL` with an opaque catalog effect) under Always and outside a
   transaction: "Refreshing all of {schema}" and why.
 - *R-W4-8.* A deletion held for a namespace badges it "out of date" with the held count
@@ -1298,8 +1313,10 @@ The M2a connection list became the database explorer tree in place (R-M4-18): `h
   number and MB/GB, saved in MiB, set to the nearest bound outside 1 MiB–1 TiB) and "Clear
   cached metadata…" for the active console's connection with its size on this computer (read on
   the blocking pool). Every write goes through `shell::update_settings`. The background check
-  and the cache caps are read by the hub when a catalog opens: a change applies from the next
-  connect. `metadata.clear_cache` (the explorer) and the settings button ask first (Cancel
+  and the cache caps reach the hub at once (`CatalogHub::set_metadata`, ruling R-W5-11, a
+  fenced named exception in T15's `hub.rs`, through `CatalogSource::set_metadata`): every
+  catalog made from then on (the next connect) uses them; a catalog open now keeps what it was
+  made with (`CatalogHub::made_with`). `metadata.clear_cache` (the explorer) and the settings button ask first (Cancel
   focused); Clear closes the store (`live::release_cache`), deletes the profile's cache files on
   the blocking pool, shows no cached tree and reopens the catalog when connected (a full read).
 - *Carries done.* `SettingsPage::show_section` is the navigation's handler and the shots'
@@ -1308,3 +1325,16 @@ The M2a connection list became the database explorer tree in place (R-M4-18): `h
   run is dropped when the connect it waited for ends without a connection (T24 nit). The
   "Introspect live" choice is kept per profile (`ProfileUserData::live_system`, sorted; T26
   carry); handing it to the overlays waits for T26's merge.
+- *Write-back rule* (ruling R-W5-12, carries-w1 m10). `ProfileUserData` keeps every key of its
+  `[metadata]` table this build does not know (`#[serde(flatten)] extra`, `ExtraValue`) and
+  writes it back unchanged, so an older or a newer build never drops another's data. The
+  nested `ddl_view` table (`DdlViewOptions`, `Copy`) has no catch-all yet: a key a newer build
+  adds there is dropped on write-back (listed in the T27 report). `connections.toml` and
+  `settings.toml` already keep unknown keys (`toml_edit`).
+- *Minors* (fix round). The stale-object and stale-schema-list tooltips are joined with the
+  row's own tip (the invisible-character and broken-reference trust tips, "N of M schemas";
+  m-4). The schema-list badge clears only after a stale list was seen (m-3). Stale-object marks
+  of a republished namespace are pruned (m-8); a held deletion on a `Partial` namespace keeps
+  "partial" in the accessible words (m-8); the cache-size note is read again whenever the
+  section shows (m-8). A queued Open-data run is also dropped when the profile fails after it
+  was queued, even if the attempt was never seen under way (m-7).

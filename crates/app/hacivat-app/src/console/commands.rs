@@ -430,6 +430,9 @@ struct Queued {
     /// A connect of the profile was seen under way (or done): one that then ends
     /// disconnected or failed drops the run, so a later connect never runs it.
     connecting: bool,
+    /// The profile had already failed (or was lost) when the run was queued: only a later
+    /// attempt's failure drops it (review m-7).
+    failed_at_queue: bool,
 }
 
 /// Consoles opened with a text to run once they can.
@@ -478,6 +481,9 @@ pub fn open_with_text(
     crate::console::view::queue_text(profile, text.to_string(), cx);
     let tab = ws.update(cx, |ws, cx| ws.open_console_tab(Some(profile), window, cx))?;
     if run {
+        // Review m-7: a connect under way when queued counts as seen.
+        let (connecting, failed_at_queue) =
+            (connect_under_way(profile, cx), connect_failed(profile, cx));
         let runs = cx.default_global::<OpenRuns>();
         runs.queued.push(Queued {
             tab,
@@ -485,7 +491,8 @@ pub fn open_with_text(
             seen: false,
             // ## m4-t27-refresh-ui (named exception)
             profile,
-            connecting: false,
+            connecting,
+            failed_at_queue,
         });
         if !runs.observing {
             runs.observing = true;
@@ -552,7 +559,11 @@ enum Fate {
 fn fate(q: &Queued, cx: &App) -> Fate {
     // ## m4-t27-refresh-ui (named exception, T24 residual nit): a connect that ended without a
     // connection (disconnected, failed, lost) drops the run.
-    if q.connecting && !connect_under_way(q.profile, cx) {
+    // Review m-7: a failure (or loss) after the run was queued ends an attempt even when the
+    // attempt was never seen under way (Connecting and Failed within one cycle).
+    if (q.connecting && !connect_under_way(q.profile, cx))
+        || (!q.failed_at_queue && connect_failed(q.profile, cx))
+    {
         return Fate::Drop;
     }
     let Some(console) = Consoles::by_tab(cx, q.tab) else {
@@ -588,6 +599,18 @@ fn fate(q: &Queued, cx: &App) -> Fate {
 }
 
 // ## m4-t27-refresh-ui (named exception)
+/// Whether `profile`'s last connect failed or its connection was lost.
+fn connect_failed(profile: hacivat_proto::ProfileId, cx: &App) -> bool {
+    use hacivat_session::LiveState;
+    cx.try_global::<crate::connections::ConnectionsModel>()
+        .is_some_and(|m| {
+            matches!(
+                m.live(profile),
+                LiveState::Failed(_) | LiveState::Lost { .. }
+            )
+        })
+}
+
 /// Whether `profile` is connecting, reconnecting or connected.
 fn connect_under_way(profile: hacivat_proto::ProfileId, cx: &App) -> bool {
     use hacivat_session::LiveState;

@@ -2507,6 +2507,8 @@ introspectors' own system-mode packs.
   the system namespaces the user chose to introspect live, serde default, omitted when empty, so
   older files read unchanged) and `filter::split_items` (the grammar's own item split, public
   for the view filter's fallback).
-- The Ask count is the coordinator's target count after normalising (one `CREATE TABLE` asks
-  about 2: the object and its schema's names); a count of objects would need T21's `Ask` to
-  carry one.
+- Fix round: the Ask counts changed objects (ruling R-W5-10) through
+  `RefreshCoordinator::asked(id)` (named exception in `refresh_coord.rs`); `CatalogHub` gains
+  `set_metadata`/`metadata`/`made_with` (ruling R-W5-11, named exception in `hub.rs`);
+  `ProfileUserData` keeps unknown keys (`extra`, `ExtraValue`; ruling R-W5-12). See ADR 0007
+  `## m4-t27`.

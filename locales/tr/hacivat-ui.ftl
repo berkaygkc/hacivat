@@ -3654,3 +3654,18 @@ hv-ddl-view-checking = { $name } nesnesinin sunucuda değişip değişmediği de
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 # Review: PO
 hv-metadata-clear-failed = { $name } için önbellekteki üst veri silinemedi. Hiçbir şey değişmedi.
+# Surface 9 (Refresh after DDL). Ruling R-W5-10: the Ask when a whole schema changed (dynamic SQL, a database-wide change): no count.
+# Variables:
+#   $schema (String) - a schema (or database) name, verbatim, e.g. "public".
+# Review: PO
+hv-metadata-refresh-ask-schema = Gezgin, { $schema } içindeki değişiklikleri gösterecek şekilde yenilensin mi?
+# Surface 9 (Refresh after DDL). Ruling R-W5-10: the namespace stamp's tooltip when the whole schema waits for COMMIT.
+# Variables:
+#   $schema (String) - a schema (or database) name, verbatim, e.g. "public".
+# Review: PO
+hv-metadata-after-commit-tip-schema = Bu transaction'ın { $schema } üzerindeki değişiklikleri COMMIT'i bekliyor. ROLLBACK bunları atar ve gezgin olduğu gibi kalır.
+# Surface 9 (Refresh after DDL). Ruling R-W5-10: the output line when the whole schema waits for COMMIT.
+# Variables:
+#   $schema (String) - a schema (or database) name, verbatim, e.g. "public".
+# Review: PO
+hv-metadata-log-pending-schema = Gezgin yenilemesi COMMIT'i bekliyor ({ $schema } içindeki değişiklikler)

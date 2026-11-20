@@ -214,6 +214,9 @@ impl SettingsPage {
     // ## m4-t27-refresh-ui (named lines; the M3c carry m3c.md §8.1, T43b fix m5, P-M4-18)
     /// Shows `section`, as a click on its navigation item does (the search is cleared).
     pub fn show_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        if section == Section::Metadata {
+            metadata::section_shown(cx);
+        }
         self.section = section;
         self.query.clear();
         self.search.update(cx, |input, cx| {

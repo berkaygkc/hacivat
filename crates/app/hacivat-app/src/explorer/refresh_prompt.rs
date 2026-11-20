@@ -7,36 +7,45 @@
 //! `ProfileCatalog`): made when the live host opens a profile's catalog
 //! ([`catalog_opened`]) and dropped with its engine ([`catalog_closed`]). The refreshes it owed
 //! for want of a connection are kept and run by the next one once the profile is connected
-//! again ([`reconnected`], T21 m6). Its preference is `metadata.refresh_after_ddl`, set again
-//! whenever the setting changes ([`preference_changed`]).
+//! again ([`reconnected`], T21 m6). What a session whose transaction is still open waits to
+//! commit is carried to the next coordinator too (fix round I-1: Clear cache or a profile Save
+//! mid-transaction). Its preference is `metadata.refresh_after_ddl`, set again whenever the
+//! setting changes ([`preference_changed`]).
 //!
 //! **Runs** (the orchestrator's named lines): every run on a profile with a coordinator carries
 //! the coordinator's inbox and the classifier's reports ([`catalog_run`]); the exec service
 //! installs `CatalogRefreshSink` in the run's auditor chain, so a `CREATE TABLE` run in any
 //! console reaches the explorer. The sink never waits (T21). When the run ended
-//! ([`run_ended`]) and when the toolbar ended a transaction ([`tx_ended`]), the targets
-//! waiting for each session's `COMMIT` are read again on the core runtime and drawn as the
-//! namespace's amber stamp; the console's output says how many wait. A session that no console
-//! holds any more is told to the coordinator ([`session_closed`]).
+//! ([`run_ended`]) and when the toolbar ended a transaction ([`tx_ended`], through the inbox,
+//! after the run's own messages), the targets waiting for each session's `COMMIT` are read
+//! again on the core runtime and drawn as the namespace's amber stamp; the console's output
+//! says what waits. A session that no console holds any more is told to the coordinator
+//! ([`session_closed`]).
+//!
+//! **Counts** (ruling R-W5-10, [`summarize`]): the Ask, the stamp and the output count changed
+//! objects (one `CREATE TABLE` is one); the planner's name-list and scope targets count
+//! nothing; a schema-wide change (a namespace or database target: dynamic SQL, a widened plan,
+//! an opaque run) names its schema with no count.
 //!
 //! **Events.** `Ask` shows a wide sticky toast that never takes the focus and never blocks a
-//! run (NOTES ruling 9): Refresh, Always refresh (sets the preference) and Not now. `Stale`
+//! run (NOTES ruling 9): Refresh, Always refresh (sets the preference) and Not now; Escape
+//! or its ✕ answers Not now (NOTES §9, review m-1). `Stale`
 //! needs nothing here for namespaces (the engine publishes them stale: the "out of date"
 //! badge); `scope: true` badges the stale schema list until it is read again.
 //!
 //! **Dynamic SQL** (`EXECUTE`, `DO`, `CALL` with an opaque catalog effect): with the preference
 //! Always and no transaction open, the run's end shows "Refreshing all of {schema}" and why.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use hacivat_exec::{CatalogRun, StmtKind, StmtReport};
 use hacivat_introspect::IntroHandle;
-use hacivat_introspect::ddl_effects::{Target, lower};
-use hacivat_introspect::refresh_coord::{CoordEvent, RefreshCoordinator};
+use hacivat_introspect::ddl_effects::{RefreshPlan, Target, lower, ns_of_key};
+use hacivat_introspect::refresh_coord::{CoordEvent, RefreshCoordinator, RefreshMsg};
 use hacivat_l10n::ArgValue;
-use hacivat_meta::NsKey;
+use hacivat_meta::{CatalogSnapshot, NsKey, ObjectKey};
 use hacivat_proto::{DbmsKind, ProfileId};
 use hacivat_session::session::{SessionId, TxOutcome};
 use hacivat_settings::schema::RefreshAfterDdl;
@@ -74,7 +83,10 @@ pub struct Coordinators {
     /// The sessions each profile's runs went through.
     sessions: HashMap<ProfileId, HashSet<SessionId>>,
     /// Per profile and session: what waits for its COMMIT, per namespace.
-    pending: HashMap<ProfileId, HashMap<SessionId, BTreeMap<NsKey, u32>>>,
+    pending: HashMap<ProfileId, HashMap<SessionId, Changes>>,
+    /// Per profile: what open transactions wait to commit, carried from a closed coordinator to
+    /// the next one (fix round I-1: Clear cache or a profile Save mid-transaction).
+    carried: HashMap<ProfileId, Vec<(SessionId, Vec<Target>)>>,
     /// Per console: the dynamic SQL its last run held (`EXECUTE`, `DO`, `CALL`) and its schema.
     broad: HashMap<ConsoleId, (String, String)>,
     /// The console name of the profile's last run (the Ask toast's body).
@@ -163,6 +175,22 @@ pub fn catalog_opened(profile: ProfileId, handle: IntroHandle, dbms: DbmsKind, c
             cx.update(|cx| on_event(profile, e, cx));
         }
     });
+    // Fix round I-1: what open transactions wait to commit survives the reopen; the new
+    // coordinator keeps it pending for the same sessions.
+    let carried = cx
+        .default_global::<Coordinators>()
+        .carried
+        .remove(&profile)
+        .unwrap_or_default();
+    for (session, pending) in &carried {
+        drop(coord.submit(
+            *session,
+            RefreshPlan {
+                now: Vec::new(),
+                pending: pending.clone(),
+            },
+        ));
+    }
     let all = cx.default_global::<Coordinators>();
     all.by_profile.insert(
         profile,
@@ -173,13 +201,31 @@ pub fn catalog_opened(profile: ProfileId, handle: IntroHandle, dbms: DbmsKind, c
             _ui: ui,
         },
     );
+    if !carried.is_empty() {
+        all.sessions
+            .entry(profile)
+            .or_default()
+            .extend(carried.iter().map(|(s, _)| *s));
+    }
     observe(cx);
+    if !carried.is_empty() {
+        update_pending(profile, None, cx);
+    }
 }
 
 /// The live host closes `profile`'s catalog: its coordinator stops; what it owed waits for the
-/// next one, and nothing waits for a COMMIT any more (the sessions' transactions end with the
-/// connection).
+/// next one. What a session whose user transaction is still open waits to commit is carried to
+/// the next coordinator too (fix round I-1: a Clear cache or a profile Save mid-transaction);
+/// any other session's transaction ended with the connection.
 pub fn catalog_closed(profile: ProfileId, cx: &mut App) {
+    let open_tx: HashSet<SessionId> = Consoles::ids(cx)
+        .into_iter()
+        .filter_map(|c| Consoles::get(cx, c))
+        .filter(|s| s.profile == Some(profile))
+        .filter_map(|s| s.session.as_ref())
+        .filter(|s| crate::exec_ui::tx::user_tx_of(s).is_some())
+        .map(|s| s.id())
+        .collect();
     let Some(all) = all_mut(cx) else {
         return;
     };
@@ -187,6 +233,21 @@ pub fn catalog_closed(profile: ProfileId, cx: &mut App) {
         let owed = c.coord.owed();
         if !owed.is_empty() {
             all.owed.entry(profile).or_default().extend(owed);
+        }
+        // What the inbox still holds is planned first, so nothing of a finished run is lost.
+        c.coord.drain();
+        let mut carried: Vec<(SessionId, Vec<Target>)> = all
+            .sessions
+            .get(&profile)
+            .into_iter()
+            .flatten()
+            .filter(|s| open_tx.contains(s))
+            .map(|s| (*s, c.coord.pending(*s)))
+            .filter(|(_, p)| !p.is_empty())
+            .collect();
+        carried.sort_by_key(|(s, _)| *s);
+        if !carried.is_empty() {
+            all.carried.insert(profile, carried);
         }
     }
     all.pending.remove(&profile);
@@ -310,8 +371,11 @@ pub fn tx_ended(console: ConsoleId, outcome: TxOutcome, cx: &mut App) {
     let Some(c) = coord(profile, cx) else {
         return;
     };
-    // A refresh never cancels when its ticket is dropped.
-    drop(c.tx_ended(session.id(), outcome));
+    // Review m-2: through the inbox, after the run's own messages for the session, in order.
+    c.inbox().push(RefreshMsg::TxEnded {
+        session: session.id(),
+        outcome,
+    });
     update_pending(profile, None, cx);
 }
 
@@ -377,9 +441,9 @@ fn update_pending(profile: ProfileId, console: Option<ConsoleId>, cx: &mut App) 
     rt.spawn(async move {
         c.drain();
         let snap = handle.catalog().current();
-        let out: HashMap<SessionId, BTreeMap<NsKey, u32>> = sessions
+        let out: HashMap<SessionId, Changes> = sessions
             .into_iter()
-            .map(|s| (s, counts(&lower(&c.pending(s), &snap))))
+            .map(|s| (s, summarize(&c.pending(s), &snap)))
             .collect();
         let _ = tx.send(out);
     });
@@ -395,73 +459,153 @@ fn update_pending(profile: ProfileId, console: Option<ConsoleId>, cx: &mut App) 
                 cx.try_global::<Coordinators>()
                     .and_then(|a| a.pending.get(&profile))
                     .and_then(|p| p.get(&s))
-                    .map(total)
+                    .cloned()
             });
-            let now = session.and_then(|s| out.get(&s)).map(total);
+            let now = session.and_then(|s| out.get(&s)).cloned();
             cx.default_global::<Coordinators>()
                 .pending
                 .insert(profile, out);
             apply_stamps(profile, cx);
-            if let (Some(console), Some(n)) = (console, now)
-                && n > 0
-                && before != Some(n)
+            if let (Some(console), Some(now)) = (console, now)
+                && !now.is_empty()
+                && before.as_ref() != Some(&now)
             {
-                log_pending(console, n, cx);
+                log_pending(console, &now, cx);
             }
         });
     })
     .detach();
 }
 
-/// How many changes `targets` (lowered) hold per namespace.
-fn counts(targets: &[Target]) -> BTreeMap<NsKey, u32> {
-    let mut out: BTreeMap<NsKey, u32> = BTreeMap::new();
+// ## fix round (ruling R-W5-10): changed objects are counted; a schema-wide change has no count.
+
+/// What changes in one namespace (the Ask and the COMMIT stamp say the same).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NsChange {
+    /// These many objects (created, dropped, altered or renamed).
+    Objects(u32),
+    /// The whole namespace (dynamic SQL, a widened plan, a database-wide change): no count.
+    Whole,
+}
+
+/// What changes, per namespace.
+pub type Changes = BTreeMap<NsKey, NsChange>;
+
+/// Counts the objects `targets` change, per namespace: each object once; a namespace or a
+/// database target makes its namespaces whole; the planner's name-list and scope targets are
+/// bookkeeping and count nothing (ruling R-W5-10).
+pub fn summarize(targets: &[Target], snap: &CatalogSnapshot) -> Changes {
+    let mut objects: BTreeMap<NsKey, BTreeSet<ObjectKey>> = BTreeMap::new();
+    let mut whole: BTreeSet<NsKey> = BTreeSet::new();
     for t in targets {
-        let (ns, n) = match t {
-            Target::Objects { ns, keys } => (ns, keys.len()),
-            Target::Namespace(ns) => (ns, 1),
-            _ => continue,
-        };
-        *out.entry(ns.clone()).or_default() += u32::try_from(n).unwrap_or(u32::MAX);
+        match t {
+            Target::Object(k) => {
+                objects.entry(ns_of_key(k)).or_default().insert(k.clone());
+            }
+            Target::Objects { ns, keys } => {
+                objects
+                    .entry(ns.clone())
+                    .or_default()
+                    .extend(keys.iter().cloned());
+            }
+            Target::Namespace(ns) => {
+                whole.insert(ns.clone());
+            }
+            Target::Database(_) => {
+                for l in lower(std::slice::from_ref(t), snap) {
+                    if let Target::Namespace(ns) = l {
+                        whole.insert(ns);
+                    }
+                }
+            }
+            Target::NamespaceNames(_) | Target::ScopeRefresh => {}
+        }
+    }
+    let mut out: Changes = whole.into_iter().map(|ns| (ns, NsChange::Whole)).collect();
+    for (ns, keys) in objects {
+        out.entry(ns).or_insert(NsChange::Objects(
+            u32::try_from(keys.len()).unwrap_or(u32::MAX),
+        ));
     }
     out
 }
 
-fn total(m: &BTreeMap<NsKey, u32>) -> u32 {
-    m.values().fold(0u32, |a, b| a.saturating_add(*b))
+/// Adds `b` to `a` (a whole namespace stays whole).
+fn merge_into(a: &mut Changes, b: &Changes) {
+    for (ns, c) in b {
+        let next = match (a.get(ns), c) {
+            (Some(NsChange::Whole), _) | (_, NsChange::Whole) => NsChange::Whole,
+            (Some(NsChange::Objects(x)), NsChange::Objects(y)) => {
+                NsChange::Objects(x.saturating_add(*y))
+            }
+            (None, c) => *c,
+        };
+        a.insert(ns.clone(), next);
+    }
+}
+
+/// The objects counted in `c`, unless a namespace changes whole (`None`).
+fn object_count(c: &Changes) -> Option<u64> {
+    c.values().try_fold(0u64, |n, ch| match ch {
+        NsChange::Objects(k) => Some(n.saturating_add(u64::from(*k))),
+        NsChange::Whole => None,
+    })
+}
+
+/// The name a schema-wide change is told by: its namespace, or its database when several
+/// namespaces change whole.
+fn whole_name(c: &Changes) -> Option<String> {
+    let mut whole = c
+        .iter()
+        .filter(|(_, ch)| **ch == NsChange::Whole)
+        .map(|(ns, _)| ns);
+    let first = whole.next()?;
+    Some(if whole.next().is_some() {
+        first
+            .path
+            .first()
+            .map_or_else(|| first.root_name().to_string(), ToString::to_string)
+    } else {
+        first.root_name().to_string()
+    })
 }
 
 /// Draws `profile`'s stamps: every session's waiting changes per namespace.
 fn apply_stamps(profile: ProfileId, cx: &mut App) {
-    let mut all: BTreeMap<NsKey, u32> = BTreeMap::new();
+    let mut all: Changes = BTreeMap::new();
     if let Some(p) = cx
         .try_global::<Coordinators>()
         .and_then(|a| a.pending.get(&profile))
     {
         for m in p.values() {
-            for (ns, n) in m {
-                let e = all.entry(ns.clone()).or_default();
-                *e = e.saturating_add(*n);
-            }
+            merge_into(&mut all, m);
         }
     }
     live::set_refresh_marks(profile, Some(all), None, cx);
 }
 
-/// "Explorer refresh waits for COMMIT ({count} objects)" in `console`'s output.
-fn log_pending(console: ConsoleId, count: u32, cx: &mut App) {
+/// "Explorer refresh waits for COMMIT ({count} objects)", or "(changes in {schema})", in
+/// `console`'s output.
+fn log_pending(console: ConsoleId, changes: &Changes, cx: &mut App) {
     let Some(state) = Consoles::get(cx, console) else {
         return;
     };
-    state.log.append(
-        hacivat_exec::LogMsg::RunUi {
+    let msg = match (object_count(changes), whole_name(changes)) {
+        (Some(n), _) => hacivat_exec::LogMsg::RunUi {
             id: "hv-metadata-log-pending",
-            args: vec![("count", hacivat_exec::LogArg::U64(u64::from(count)))],
+            args: vec![("count", hacivat_exec::LogArg::U64(n))],
             warn: false,
         },
-        None,
-        None,
-    );
+        (None, schema) => hacivat_exec::LogMsg::RunUi {
+            id: "hv-metadata-log-pending-schema",
+            args: vec![(
+                "schema",
+                hacivat_exec::LogArg::Str(Arc::from(schema.unwrap_or_default())),
+            )],
+            warn: false,
+        },
+    };
+    state.log.append(msg, None, None);
     if let Some(results) = state.results.clone() {
         results.update(cx, |r, cx| r.note_output(cx));
     }
@@ -491,7 +635,7 @@ fn broad_notice(what: String, schema: String, cx: &mut App) {
 /// What the coordinator of `profile` announced.
 fn on_event(profile: ProfileId, e: CoordEvent, cx: &mut App) {
     match e {
-        CoordEvent::Ask { id, count } => ask(profile, id, count, cx),
+        CoordEvent::Ask { id, .. } => ask(profile, id, cx),
         CoordEvent::Stale { scope, .. } => {
             // Stale namespaces are published by the engine (their badge); a stale schema list
             // is badged from here on.
@@ -509,13 +653,39 @@ fn on_event(profile: ProfileId, e: CoordEvent, cx: &mut App) {
 }
 
 /// The Ask toast (mock 9): a newer question replaces an older one (the coordinator folded its
-/// targets into the newer).
-fn ask(profile: ProfileId, id: u64, count: usize, cx: &mut App) {
+/// targets into the newer). It counts changed objects; a schema-wide change names the schema
+/// (ruling R-W5-10). Escape or its ✕ answers Not now (NOTES §9; review m-1).
+fn ask(profile: ProfileId, id: u64, cx: &mut App) {
+    let Some((c, handle)) = cx
+        .try_global::<Coordinators>()
+        .and_then(|a| a.by_profile.get(&profile))
+        .map(|c| (c.coord.clone(), c.handle.clone()))
+    else {
+        return;
+    };
+    let targets = c.asked(id);
+    if targets.is_empty() {
+        // Answered already, or folded into a newer question (whose event follows).
+        return;
+    }
+    let changes = summarize(&targets, &handle.catalog().current());
     let console = cx
         .try_global::<Coordinators>()
         .and_then(|a| a.last_console.get(&profile).cloned())
         .unwrap_or_default();
-    let count = u64::try_from(count).unwrap_or(u64::MAX);
+    let title = match (object_count(&changes), whole_name(&changes)) {
+        (Some(n), _) if n > 0 => text(
+            "hv-metadata-refresh-ask",
+            vec![("count", ArgValue::Count(n))],
+        ),
+        (_, schema) => text(
+            "hv-metadata-refresh-ask-schema",
+            vec![(
+                "schema",
+                ArgValue::Text(schema.unwrap_or_else(|| console.clone())),
+            )],
+        ),
+    };
     let answer = move |refresh: bool, always: bool| -> hacivat_ui::actions::ActionFn {
         Rc::new(move |_, cx: &mut App| {
             if always {
@@ -541,10 +711,8 @@ fn ask(profile: ProfileId, id: u64, count: usize, cx: &mut App) {
             vec![("console", ArgValue::Text(console))],
         ),
     );
-    toast.title = Some(text(
-        "hv-metadata-refresh-ask",
-        vec![("count", ArgValue::Count(count))],
-    ));
+    toast.title = Some(title);
+    toast.on_dismiss = Some(answer(false, false));
     toast.sticky = true;
     toast.wide = true;
     toast.icon = Some(IconName::RefreshCw);

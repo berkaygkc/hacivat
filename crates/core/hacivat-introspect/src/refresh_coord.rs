@@ -376,6 +376,14 @@ impl RefreshCoordinator {
         }
     }
 
+    // ## m4-t27-refresh-ui (named exception, ruling R-W5-10: the Ask counts changed objects)
+    /// The targets question [`CoordEvent::Ask`] `id` is about; empty once it was answered or
+    /// folded into a newer question.
+    pub fn asked(&self, id: u64) -> Vec<Target> {
+        lock(&self.inner.asks).get(&id).cloned().unwrap_or_default()
+    }
+    // ## m4-t27-refresh-ui
+
     /// The profile reconnected: the refreshes owed since a lost connection run now.
     pub fn reconnected(&self) -> RefreshTicket {
         let owed = std::mem::take(&mut *lock(&self.inner.owed));

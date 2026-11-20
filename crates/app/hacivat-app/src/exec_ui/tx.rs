@@ -112,6 +112,8 @@ pub fn end_tx(console: ConsoleId, commit: bool, cx: &mut App) -> Task<bool> {
                 false,
             ),
         };
+        // ## m4-t27-refresh-ui (review m-5): the status after a failed end.
+        let idle_after = session.state().borrow().tx.status == TxStatus::Idle;
         drop(session);
         cx.update(|cx| {
             // ## m4-t27-refresh-ui (named exception, T21 carry): the refresh coordinator learns
@@ -129,6 +131,13 @@ pub fn end_tx(console: ConsoleId, commit: bool, cx: &mut App) -> Task<bool> {
                 (true, false) => Some(hacivat_session::session::TxOutcome::RolledBack),
                 (false, true) if lost => Some(hacivat_session::session::TxOutcome::Unknown),
                 (false, false) if lost => Some(hacivat_session::session::TxOutcome::RolledBack),
+                // Review m-5: a COMMIT the server refused (a deferred constraint, a
+                // serialization failure) ended the transaction anyway; what it holds is not
+                // known, so it is refreshed (Always) or marked stale (Ask, Never), never kept
+                // waiting for a COMMIT that will not come.
+                (false, _) if error.is_some() && idle_after => {
+                    Some(hacivat_session::session::TxOutcome::Unknown)
+                }
                 _ => None,
             };
             if let Some(outcome) = outcome {
