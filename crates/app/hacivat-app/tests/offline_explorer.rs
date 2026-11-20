@@ -40,12 +40,55 @@ fn pg(name: &str) -> Profile {
 /// shipped snapshot, flagged as such), with the embedded snapshot's layers, as the engine
 /// opens one from the cache before any connect.
 fn cached_pg17() -> Arc<CatalogSnapshot> {
-    cached_pg17_with(true)
+    cached_pg17_with(PgCatalog::Snapshot)
 }
 
-/// [`cached_pg17`]; `live_pg_catalog`: whether the cache holds a live read of `pg_catalog`
-/// (which then answers for it, R-W5-6) or only `public`.
-fn cached_pg17_with(live_pg_catalog: bool) -> Arc<CatalogSnapshot> {
+/// What the cache holds of `pg_catalog`.
+#[derive(Clone, Copy, PartialEq)]
+enum PgCatalog {
+    /// The shipped snapshot's (flagged `PRE_INTROSPECTED`): the snapshot answers for it.
+    Snapshot,
+    /// A live read (R-W5-6: the live catalog answers for it).
+    Live,
+    /// Nothing: the scope leaves it out (lookups fall to the snapshot's layer).
+    None,
+}
+
+/// `pg_catalog` as the shipped snapshot puts it in a catalog: a system schema flagged
+/// `PRE_INTROSPECTED`.
+fn shipped_pg_catalog() -> Arc<hacivat_meta::NamespaceSnapshot> {
+    use hacivat_meta::name::{DialectId, FoldRule};
+    use hacivat_meta::namespace::{NsMeta, Subtree};
+    use hacivat_meta::{Level, Obj, ObjectKind};
+    let root = Obj::new(ObjectKind::Schema, "pg_catalog")
+        .add_flags(ObjFlags::SYSTEM | ObjFlags::PRE_INTROSPECTED);
+    let mut tree = Subtree::new(root);
+    let r = tree.root();
+    tree.graft_under(r, table("pg_class", Some(1259), &[]));
+    let fold = FoldRule::for_names(
+        DialectId::Postgres,
+        &IdentCtx::new(DialectId::Postgres),
+        NameClass::Table,
+    )
+    .unwrap_or(FoldRule::Exact);
+    Arc::new(
+        hacivat_meta::NamespaceSnapshot::build(
+            hacivat_meta::NsKey::schema(["app", "pg_catalog"]),
+            DbmsKind::Postgres,
+            fold,
+            NsMeta {
+                level: Level::Structure,
+                ..NsMeta::default()
+            },
+            tree,
+        )
+        .expect("a valid namespace"),
+    )
+}
+
+/// [`cached_pg17`] with `pg` as the cache's `pg_catalog`.
+fn cached_pg17_with(pg: PgCatalog) -> Arc<CatalogSnapshot> {
+    let live_pg_catalog = pg != PgCatalog::None;
     let system = SystemCatalogs::from_embedded();
     let overlays = system.overlays_for(DbmsKind::Postgres, "17.2");
     assert!(overlays.system.is_some(), "PostgreSQL 17 is shipped");
@@ -59,12 +102,16 @@ fn cached_pg17_with(live_pg_catalog: bool) -> Arc<CatalogSnapshot> {
                 false,
                 vec![table("orders", Some(16_400), &[("id", "bigint")])],
             ),
-            schema(
-                DbmsKind::Postgres,
-                &["app", "pg_catalog"],
-                true,
-                vec![table("pg_class", Some(1259), &[])],
-            ),
+            if pg == PgCatalog::Snapshot {
+                shipped_pg_catalog()
+            } else {
+                schema(
+                    DbmsKind::Postgres,
+                    &["app", "pg_catalog"],
+                    true,
+                    vec![table("pg_class", Some(1259), &[])],
+                )
+            },
         ]
         .into_iter()
         .take(if live_pg_catalog { 2 } else { 1 })
@@ -154,12 +201,27 @@ fn offline_explorer_shows_the_built_in_group_with_its_version_badge(cx: &mut Tes
     stop_core_runtime_test(cx);
 }
 
+// ## m4-t32-shots (fix round 1, review M-6): a Built-in group whose schemas a live read
+// answered for carries no snapshot badge (the tooltip says "shipped with Hacivat").
+#[gpui::test]
+fn a_live_read_built_in_group_carries_no_snapshot_badge(cx: &mut TestAppContext) {
+    let (vcx, id) = shell(cx);
+    vcx.cx
+        .update(|cx| adapter::set_catalog(id, Some(cached_pg17_with(PgCatalog::Live)), None, cx));
+    expand(vcx, "shop");
+    expand(vcx, "app");
+    let (_, builtin) = row(vcx, "Built-in");
+    assert_eq!(builtin.badge, None);
+    assert_eq!(builtin.tooltip, None);
+    stop_core_runtime_test(cx);
+}
+
 #[gpui::test]
 fn offline_lookup_resolves_built_ins_without_a_connection(cx: &mut TestAppContext) {
     let (vcx, id) = shell(cx);
     // A cache with no live read of `pg_catalog`: the embedded snapshot answers for it.
     vcx.cx
-        .update(|cx| adapter::set_catalog(id, Some(cached_pg17_with(false)), None, cx));
+        .update(|cx| adapter::set_catalog(id, Some(cached_pg17_with(PgCatalog::None)), None, cx));
     vcx.run_until_parked();
     let cat = vcx
         .cx

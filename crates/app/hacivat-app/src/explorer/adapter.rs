@@ -1894,14 +1894,28 @@ impl TreeModel for ExplorerModel {
             // ## m4-t20-levels (named exception): the profile, for the level pill.
             Node::Database { p, db } => self.database_row(p, &db),
             Node::Schema { p, entry } => self.schema_row(p, &entry),
-            Node::BuiltIn { p, .. } => {
+            Node::BuiltIn { p, db } => {
                 let mut row = TreeRowData::new(self.t("hv-explorer-builtin"), TextSource::Fluent);
                 row.icon = Some(IconName::Library);
                 // ## m4-t32-shots (named exception; T26 carry, G3): the version of the shipped
-                // snapshot the catalog's built-ins answer from, as a badge (mock 3).
+                // snapshot the catalog's built-ins answer from, as a badge (mock 3). Fix round 1
+                // (review M-6): only when the snapshot serves the group, never over schemas a
+                // live read answers for (R-W5-6).
+                let entries = match &db {
+                    Some(d) => d.system.clone(),
+                    None => self.inner.layouts[p]
+                        .as_deref()
+                        .map(|l| l.system.clone())
+                        .unwrap_or_default(),
+                };
+                let from_snapshot = entries.iter().any(|e| {
+                    e.ns.as_ref()
+                        .is_some_and(|ns| ns.root().flags().contains(ObjFlags::PRE_INTROSPECTED))
+                });
                 let line = self.inner.inputs.profiles[p]
                     .catalog
                     .as_ref()
+                    .filter(|_| from_snapshot)
                     .and_then(|c| c.overlays.system.as_ref().map(|s| s.line.to_string()));
                 if let Some(line) = line {
                     let args = vec![("version", ArgValue::Text(line))];
