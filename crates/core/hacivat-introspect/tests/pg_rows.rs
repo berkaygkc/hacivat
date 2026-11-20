@@ -481,7 +481,11 @@ fn every_scalar_bind_carries_a_qualified_cast() {
         for sql in rendered(&p, section) {
             let rest = list.replace_all(&sql, "IN (LIST)");
             for m in bind.find_iter(&rest) {
-                if !rest[m.end()..].starts_with("::pg_catalog.") {
+                // ## m4-t33a-hygiene (named exception; T15b review n-1): a joinable list item
+                // is `CAST($n AS pg_catalog.oid)` (joinable text writes no `::`).
+                let cast_call = rest[..m.start()].ends_with("CAST(")
+                    && rest[m.end()..].starts_with(" AS pg_catalog.");
+                if !cast_call && !rest[m.end()..].starts_with("::pg_catalog.") {
                     bad.push(format!("{section}: {} is not cast", m.as_str()));
                 }
             }

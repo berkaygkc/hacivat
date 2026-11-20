@@ -2120,3 +2120,40 @@ fn joinable_pg_sections_resolve_no_operator_through_the_path() {
     );
 }
 // ## m4-t33a-hygiene
+
+// ## m4-t33a-hygiene (T15b review n-1)
+/// A joinable PostgreSQL list bind is cast to `pg_catalog.oid` per element: R-W5-5's
+/// `pg_catalog`-first check makes `IN` pick `pg_catalog.=(oid, oid)` only while the elements
+/// reach the server untyped or as `oid`. A driver that sent them typed `text` would leave no
+/// `pg_catalog` operator for `(oid, text)`, so one in any schema on the path would win. The
+/// cast pins the operand type whatever the driver does. Other sections keep plain
+/// placeholders; MySQL and SQLite have no such path.
+#[test]
+fn joinable_pg_list_binds_are_cast_to_oid() {
+    let section = |joinable: bool| {
+        format!(
+            "--- name: J ---\n--- returns: oid u32 ---\n{}SELECT c.oid AS oid \
+             FROM pg_catalog.pg_class c WHERE c.relnamespace IN :[oids]\n",
+            if joinable { "--- joinable ---\n" } else { "" }
+        )
+    };
+    let with_oids = |d: DialectId| {
+        let mut c = ctx(d, 170_000);
+        c.params
+            .lists
+            .push((Arc::from("oids"), vec![text("11"), text("2200")]));
+        c
+    };
+    let q = render(&section(true), "J", with_oids(DialectId::Postgres));
+    assert_eq!(
+        q[0].sql(),
+        "SELECT c.oid AS oid FROM pg_catalog.pg_class c WHERE c.relnamespace IN \
+         (CAST($1 AS pg_catalog.oid), CAST($2 AS pg_catalog.oid))"
+    );
+    assert_eq!(q[0].binds(), &[text("11"), text("2200")]);
+    let q = render(&section(false), "J", with_oids(DialectId::Postgres));
+    assert!(q[0].sql().ends_with("IN ($1, $2)"), "{}", q[0].sql());
+    let q = render(&section(true), "J", with_oids(DialectId::Sqlite));
+    assert!(q[0].sql().ends_with("IN (?, ?)"), "{}", q[0].sql());
+}
+// ## m4-t33a-hygiene

@@ -298,13 +298,27 @@ fn build(
                 placeholder(family, binds.len(), &mut sql);
             }
             Seg::List(_) => {
+                // ## m4-t33a-hygiene (named exception in Task 4's file; T15b review n-1): a
+                // joinable PostgreSQL list (always an oid list, `packs/pg/50-joined`) casts
+                // every element to `pg_catalog.oid`, so `IN` resolves `pg_catalog.=(oid, oid)`
+                // whatever parameter types the driver sends; typed `text` elements would let
+                // an `=(oid, text)` in any schema on the unpinned path win.
+                let oid_cast = family == Family::Pg && sec.joinable;
+                // ## m4-t33a-hygiene
                 sql.push('(');
                 for (k, v) in chunk.iter().enumerate() {
                     if k > 0 {
                         sql.push_str(", ");
                     }
                     binds.push((*v).clone());
+                    // `CAST(… AS …)`, not `::`: joinable text writes no `::` (Task 16's rule).
+                    if oid_cast {
+                        sql.push_str("CAST(");
+                    }
                     placeholder(family, binds.len(), &mut sql);
+                    if oid_cast {
+                        sql.push_str(" AS pg_catalog.oid)");
+                    }
                 }
                 sql.push(')');
             }
