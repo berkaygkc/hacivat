@@ -2044,9 +2044,9 @@ fn the_palette_field_collapses_to_its_icon_before_a_trust_word_goes(cx: &mut Tes
     assert_eq!(clicks.get(), 1);
 }
 
-// ## m4-t33b-carries (found by the scope-editor shots): a label inside a nested clip (a
-// segmented control's rounded box) that a scroll viewport cuts at its top edge is scrolled,
-// not clipped; the same nested clip cutting it sideways still is.
+// ## m4-t33b-carries (found by the scope-editor shots): a label inside a nested clip box that
+// noted itself (`clip_box`, a segmented control's rounded box) that a scroll viewport cuts at
+// its top edge is scrolled, not clipped; the same box cutting it sideways still is.
 fn nested_cut_label(cx: &mut TestAppContext, inner_width: f32) -> bool {
     let vcx = host(cx, move |_, _| {
         let viewport = gpui::StatefulInteractiveElement::overflow_y_scroll(
@@ -2062,6 +2062,7 @@ fn nested_cut_label(cx: &mut TestAppContext, inner_width: f32) -> bool {
                             .w(px(inner_width))
                             .h(px(20.0))
                             .overflow_hidden()
+                            .child(hacivat_ui::text::clip_box())
                             .child(hacivat_ui::text::Label::new(
                                 "nested",
                                 hacivat_ui::text::TextSource::Fluent,
@@ -2093,4 +2094,63 @@ fn a_nested_clip_cut_at_a_viewports_fold_is_scrolled(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_nested_clip_cutting_sideways_is_still_clipped(cx: &mut TestAppContext) {
     assert!(nested_cut_label(cx, 12.0));
+}
+
+// ## m4-t33b-carries (fix round 1, review 2: the frame hole): a label its own 10 px box cuts,
+// the box's bottom on the viewport's bottom fold, is clipped at any scroll position, with or
+// without the box noting itself; so is the same box mid-viewport.
+fn box_at_fold(cx: &mut TestAppContext, spacer: f32, noted: bool) -> bool {
+    let vcx = host(cx, move |_, _| {
+        let viewport = gpui::StatefulInteractiveElement::overflow_y_scroll(
+            div()
+                .id("viewport")
+                .flex()
+                .flex_col()
+                .w(px(200.0))
+                .h(px(40.0)),
+        )
+        .child(hacivat_ui::text::scroll_viewport());
+        let mut boxed = div().flex_none().w(px(120.0)).h(px(10.0)).overflow_hidden();
+        if noted {
+            boxed = boxed.child(hacivat_ui::text::clip_box());
+        }
+        div()
+            .p(px(10.0))
+            .child(
+                viewport
+                    .child(div().h(px(spacer)).flex_none())
+                    .child(boxed.child(hacivat_ui::text::Label::new(
+                        "boxed",
+                        hacivat_ui::text::TextSource::Fluent,
+                        DARK.type_ramp.body,
+                        DARK.colors.text.to_hsla(),
+                    ))),
+            )
+            .into_any_element()
+    });
+    vcx.simulate_resize(gpui::size(px(400.0), px(200.0)));
+    enable_registry(vcx);
+    vcx.read(|cx| {
+        cx.global::<TextRegistry>()
+            .frame
+            .iter()
+            .find(|r| r.text.as_ref() == "boxed")
+            .expect("the label is drawn")
+            .clipped
+    })
+}
+
+#[gpui::test]
+fn a_box_clipping_its_label_mid_viewport_is_clipped(cx: &mut TestAppContext) {
+    assert!(box_at_fold(cx, 5.0, false), "mid viewport");
+}
+
+#[gpui::test]
+fn a_box_clipping_its_label_at_the_fold_is_still_clipped(cx: &mut TestAppContext) {
+    assert!(box_at_fold(cx, 30.0, false), "box bottom on the fold");
+}
+
+#[gpui::test]
+fn a_noted_box_clipping_its_own_label_at_the_fold_is_still_clipped(cx: &mut TestAppContext) {
+    assert!(box_at_fold(cx, 30.0, true), "box bottom on the fold, noted");
 }

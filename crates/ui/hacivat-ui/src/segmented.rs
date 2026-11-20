@@ -133,7 +133,9 @@ impl IntoElement for Segmented {
                 .border_1()
                 .border_color(c.seam_strong.to_hsla())
                 .rounded(px(t.radii.sm))
-                .overflow_hidden();
+                .overflow_hidden()
+                // ## m4-t33b-carries (fix round 1, review 2): the frame checks know this box.
+                .child(crate::text::clip_box());
             if self.in_well {
                 let well = match theme.mode {
                     ThemeMode::Dark => c.panel,

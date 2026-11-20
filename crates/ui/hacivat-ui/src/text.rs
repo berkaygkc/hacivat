@@ -133,6 +133,10 @@ pub(crate) fn begin_record(cx: &mut App) {
     if cx.has_global::<ScrollViewports>() {
         cx.global_mut::<ScrollViewports>().0.clear();
     }
+    // ## m4-t33b-carries (fix round 1, review 2)
+    if cx.has_global::<ClipBoxes>() {
+        cx.global_mut::<ClipBoxes>().0.clear();
+    }
     if cx.has_global::<crate::capsule::CapsuleProbe>() {
         // ## m4-m3carry (U-6 c): the whole probe, its trust facts too.
         *cx.global_mut::<crate::capsule::CapsuleProbe>() = Default::default();
@@ -228,27 +232,79 @@ fn is_scroll_viewport(cx: &App, mask: Bounds<Pixels>) -> bool {
     })
 }
 
-// ## m4-t33b-carries (named exception; found by the scope-editor shots)
-/// Whether text at `bounds`, painted in `mask`, is cut only at a scroll viewport's fold: `mask`
-/// is that viewport's clip ([`is_scroll_viewport`]), or a nested clip inside it (a segmented
-/// control's rounded box) whose cut top or bottom edge is the viewport's own. A sideways cut is
-/// never scrolling.
+// ## m4-t33b-carries (named exception; found by the scope-editor shots; fix round 1, review 2)
+/// Whether text at `bounds`, painted in `mask`, is cut only at a scroll viewport's fold:
+/// - `mask` is that viewport's own clip ([`is_scroll_viewport`]); or
+/// - `mask` is the clip of a box that noted itself with [`clip_box`] (a segmented control's
+///   rounded box), the text lies inside that box's own (unclipped) top and bottom, `mask` lies
+///   inside a noted viewport on all four sides (an ancestor), and every cut edge of `mask` is
+///   that viewport's own edge.
+///
+/// A box that cuts its own text, or any clip that never noted itself, is a clip. A sideways cut
+/// is never scrolling.
 fn cut_at_fold(cx: &App, bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> bool {
     if is_scroll_viewport(cx, mask) {
         return true;
     }
     let near = |a: Pixels, b: Pixels| (a - b).abs() <= px(1.0);
     let slack = px(0.5);
+    let Some(own) = cx.try_global::<ClipBoxes>().and_then(|c| {
+        c.0.iter().rev().find(|(_, m)| {
+            near(m.left(), mask.left())
+                && near(m.right(), mask.right())
+                && near(m.top(), mask.top())
+                && near(m.bottom(), mask.bottom())
+        })
+    }) else {
+        return false;
+    };
+    let own = own.0;
+    if bounds.top() < own.top() - slack || bounds.bottom() > own.bottom() + slack {
+        return false;
+    }
     let cut_top = bounds.top() < mask.top() - slack;
     let cut_bottom = bounds.bottom() > mask.bottom() + slack;
     cx.try_global::<ScrollViewports>().is_some_and(|v| {
         v.0.iter().any(|v| {
             mask.left() >= v.left() - px(1.0)
                 && mask.right() <= v.right() + px(1.0)
+                && mask.top() >= v.top() - px(1.0)
+                && mask.bottom() <= v.bottom() + px(1.0)
                 && (!cut_top || near(v.top(), mask.top()))
                 && (!cut_bottom || near(v.bottom(), mask.bottom()))
         })
     })
+}
+
+// ## m4-t33b-carries (fix round 1, review 2)
+/// The boxes that noted themselves this frame ([`clip_box`]): their own layout bounds and the
+/// clip their content is painted in.
+#[derive(Default)]
+struct ClipBoxes(Vec<(Bounds<Pixels>, Bounds<Pixels>)>);
+
+impl Global for ClipBoxes {}
+
+/// Marks its parent, an `overflow_hidden` box, for the frame checks: put it first among the
+/// children. It records the box's own bounds and the clip its content is painted in, so text
+/// inside the box that only an enclosing scroll viewport cuts at its fold counts as scrolled
+/// (a segmented control half under a dialog's fold), while text the box itself cuts stays
+/// clipped.
+pub fn clip_box() -> impl IntoElement {
+    canvas(
+        |bounds, window, cx| {
+            if !cx.try_global::<TextRegistry>().is_some_and(|r| r.enabled) {
+                return;
+            }
+            begin_record(cx);
+            let mask = window.content_mask().bounds;
+            cx.default_global::<ClipBoxes>().0.push((bounds, mask));
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// One line of text in a type style.
