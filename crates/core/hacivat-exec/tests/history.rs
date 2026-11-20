@@ -1356,10 +1356,10 @@ fn on_disk(path: &Path, needle: &str) -> Vec<String> {
     let mut hits = Vec::new();
     for suffix in ["", "-wal", "-shm"] {
         let p = PathBuf::from(format!("{}{suffix}", path.display()));
-        if let Ok(b) = std::fs::read(&p) {
-            if contains(&b, needle) {
-                hits.push(format!("history.sqlite{suffix}"));
-            }
+        if let Ok(b) = std::fs::read(&p)
+            && contains(&b, needle)
+        {
+            hits.push(format!("history.sqlite{suffix}"));
         }
     }
     hits
