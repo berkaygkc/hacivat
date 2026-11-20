@@ -322,6 +322,44 @@ fn two_level(d: DialectId) -> bool {
     matches!(d, DialectId::Postgres | DialectId::PgWire(_))
 }
 
+// ## m4-t30-gates (named exception in Task 15's file; T26 carry, R-M4-6, PO-Q7)
+/// Whether `facts` name a released PostgreSQL, MySQL or MariaDB version that the attached
+/// snapshot set has no snapshot for (exact selection, never the closest line): its system
+/// schemas are then introspected live. Unknown version (not connected yet, a failed facts
+/// read), no attached set, SQLite and the forks: never.
+pub(crate) fn live_system_schemas(
+    facts: &hacivat_meta::ServerFacts,
+    set: Option<&Arc<hacivat_meta::system::SystemCatalogs>>,
+) -> bool {
+    matches!(
+        facts.dbms,
+        DbmsKind::Postgres | DbmsKind::MySql | DbmsKind::MariaDb
+    ) && !facts.version.trim().is_empty()
+        && set.is_some_and(|s| s.for_server(facts.dbms, &facts.version).is_none())
+}
+
+/// The listed system namespaces a snapshot would have covered (`minicat::system_schemas`) in
+/// the databases `in_scope` reads (PostgreSQL; MySQL/MariaDB have one level).
+fn live_system_keys(infos: &[NsInfo], in_scope: &BTreeSet<NsKey>, dbms: DbmsKind) -> Vec<NsKey> {
+    let names = crate::minicat::system_schemas(dbms);
+    let dbs: HashSet<&Name> = in_scope
+        .iter()
+        .filter(|k| k.kind == NsKind::Schema && k.path.len() == 2)
+        .map(|k| &k.path[0])
+        .collect();
+    infos
+        .iter()
+        .filter(|i| i.system && i.key.kind == NsKind::Schema)
+        .filter(|i| match i.key.path.as_slice() {
+            [db, s] => dbs.contains(db) && names.contains(&&**s),
+            [s] => names.iter().any(|n| n.eq_ignore_ascii_case(s)),
+            _ => false,
+        })
+        .map(|i| i.key.clone())
+        .collect()
+}
+// ## m4-t30-gates
+
 /// The major objects of a namespace (its top-level objects): the auto level's count.
 fn major_count(ns: &NamespaceSnapshot) -> u32 {
     ns.root().child_count()
@@ -421,6 +459,12 @@ struct Actor {
     in_scope: Option<BTreeSet<NsKey>>,
     current_ns: Option<NsKey>,
     system_ns: HashSet<NsKey>,
+    // ## m4-t30-gates (named exception in Task 15's file; T26 carry, R-M4-6)
+    /// The server's version has no shipped system-catalog snapshot (PostgreSQL 13, MySQL 9.x,
+    /// …): its system schemas are introspected live at their role's level (`Names` by
+    /// default) instead of being left out of scope.
+    live_system: bool,
+    // ## m4-t30-gates
     queue: Vec<Job>,
     running: HashMap<u64, Running>,
     deferred_confirms: Vec<(NsKey, bool, Waiter)>,
@@ -512,6 +556,9 @@ impl Actor {
             in_scope: None,
             current_ns: None,
             system_ns: HashSet::new(),
+            // ## m4-t30-gates
+            live_system: false,
+            // ## m4-t30-gates
             queue: Vec::new(),
             running: HashMap::new(),
             deferred_confirms: Vec::new(),
@@ -1454,7 +1501,15 @@ impl Actor {
         let Some(infos) = self.listed.clone() else {
             return Vec::new();
         };
-        let in_scope = self.scope.select(&infos, &self.current);
+        let mut in_scope = self.scope.select(&infos, &self.current);
+        // ## m4-t30-gates (named exception in Task 15's file; T26 carry, R-M4-6): without a
+        // shipped snapshot for the server's version, the snapshot's system schemas of every
+        // database the scope reads are in scope too, read live like any other namespace.
+        if self.live_system {
+            let extra = live_system_keys(&infos, &in_scope, self.catalog.current().server.dbms);
+            in_scope.extend(extra);
+        }
+        // ## m4-t30-gates
         self.current_ns = self.current_only.as_ref().and_then(|p| {
             p.select(&infos, &self.current)
                 .into_iter()
@@ -1601,7 +1656,6 @@ impl Actor {
         }
         self.unlisted = unlisted.into_iter().collect();
         self.listed = Some(infos);
-        let mut changes = self.scope_changes();
         // ## m4-t17-mysql (named exception; T15 carry m4, review I-2): the real server facts
         // replace the catalog's placeholder in the same publish, so every later task's fold
         // rule (read per task from the facts) follows the server's `lower_case_table_names`.
@@ -1628,6 +1682,13 @@ impl Actor {
             }
             FactsRead::NotRead => None,
         };
+        // ## m4-t30-gates (named exception in Task 15's file; T26 carry, R-M4-6): the scope is
+        // computed after the facts so a version without a shipped snapshot brings its system
+        // schemas into scope in this same publish.
+        self.live_system =
+            live_system_schemas(next.as_ref().unwrap_or(&cur.server), self.catalog.system());
+        let mut changes = self.scope_changes();
+        // ## m4-t30-gates
         if let Some(f) = next
             && *cur.server != f
         {

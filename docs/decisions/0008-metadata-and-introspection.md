@@ -2781,3 +2781,30 @@ and implements `sql_catalog::CatalogView` for it (HV-INTRO-16 consumer side; R-M
     - `hacivat-meta/tests/find_by_server_id.rs`.
   - MySQL is not affected: it matches cached objects by kind, raw kind and name, and MySQL
     has no overloads. SQLite has no routines.
+
+## m4-t30 — gates G2 and G3 (snapshot reproducibility, offline built-in resolution)
+
+- **G3 is proven at the completion layer offline.** `hacivat-meta/tests/offline_resolution.rs`
+  builds each view over an empty live catalog (server facts only) plus the bundled snapshot
+  (the embedded table with `embedded-system`, else the committed files). For all ten lines it
+  resolves system relations, their columns and routines through `ModelView` and
+  `sql_catalog::CatalogView`. MySQL/MariaDB built-ins are name only (`args = None`); one `sys`
+  routine (`sys.format_bytes(bytes text)`) keeps its real signature.
+- **Version-specific pairs come from the snapshot diff, not memory.** For each adjacent pair,
+  one object is present in the newer snapshot and absent from the older one. It is `Found` in
+  the newer. In the older it is `Unknown` while the initdb-only fact is unknown. Under
+  R-W5-6 it is `Missing` only on PostgreSQL proven initdb-only.
+- **Unsupported versions are never served from another line** (PG 13/19/9.6, MySQL
+  5.7/8.1/8.3/9.1, MariaDB 10.5/10.7/11.8, cross-engine versions, SQLite, an empty version):
+  no layer, and every answer is `Unknown`.
+- **R-M4-6 engine path (T26 carry; named exception in Task 15's `scheduler.rs`).** When the
+  server facts name a released PostgreSQL, MySQL or MariaDB version, and the attached snapshot
+  set has no snapshot for it, the scope also selects the listed system schemas that a
+  snapshot would have covered (`minicat::system_schemas`). For PostgreSQL this applies only in
+  the databases the scope reads. Those schemas are read live at their role's level (`Names`
+  by default). The scope is computed after the facts, in the same publish. An unknown
+  version, no attached set, SQLite and the forks keep the old rule: system schemas stay out
+  of scope.
+- **G2 evidence.** `minicat --verify` prints one `HV-FACT g2 file=… compared=file-bytes …
+  equal=…` line per snapshot file (the raw `.hvsnap.zst` bytes, never the decompressed JSON)
+  and a closing `HV-FACT g2 files=N equal=N verdict=…` line. The CI job is unchanged.
