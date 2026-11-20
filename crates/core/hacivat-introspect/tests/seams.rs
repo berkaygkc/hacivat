@@ -188,12 +188,47 @@ fn stub_check_state_is_unknown() {
 async fn stub_stamps_and_facet_not_implemented() {
     let keys = [table("public", "orders")];
     let cancel = CancellationToken::new();
-    for dbms in [
-        DbmsKind::Postgres,
-        DbmsKind::MySql,
-        DbmsKind::MariaDb,
-        DbmsKind::Sqlite,
-    ] {
+    // ## m4-t18-sqlite (named exception): SQLite is written (Task 18); on an offline connection
+    // its reads answer `Meta(Unavailable)`, never a fact.
+    {
+        let intro = introspector_for(DbmsKind::Sqlite).expect("an M4 engine");
+        let mut c = MetaConn::offline(DbmsKind::Sqlite);
+        let n = NsKey::schema(["main"]);
+        let unavailable = Some(IntroError::Meta(
+            hacivat_session::meta::MetaError::Unavailable,
+        ));
+        assert_eq!(intro.stamps(&mut c, &keys).await.err(), unavailable);
+        assert_eq!(intro.list_namespaces(&mut c).await.err(), unavailable);
+        assert!(matches!(
+            intro
+                .introspect(
+                    &mut c,
+                    &n,
+                    Mode::Full,
+                    Level::Structure,
+                    &hacivat_introspect::filter::parse_filter(
+                        "",
+                        sql_dialect::DialectId::Sqlite,
+                        hacivat_introspect::filter::FilterRole::Introspect,
+                    )
+                    .expect("the empty filter"),
+                    None,
+                    &cancel
+                )
+                .await,
+            Err(IntroError::Meta(
+                hacivat_session::meta::MetaError::Unavailable
+            ))
+        ));
+        assert_eq!(
+            intro
+                .facet(&mut c, &n, &keys, FacetKind::Sources)
+                .await
+                .err(),
+            unavailable
+        );
+    }
+    for dbms in [DbmsKind::Postgres, DbmsKind::MySql, DbmsKind::MariaDb] {
         let intro = introspector_for(dbms).expect("an M4 engine");
         let mut c = MetaConn::offline(dbms);
         let n = ns("public");

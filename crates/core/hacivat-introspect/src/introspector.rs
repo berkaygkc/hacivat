@@ -278,7 +278,8 @@ pub fn introspector_for(dbms: DbmsKind) -> Option<Arc<dyn Introspector>> {
         DbmsKind::MySql | DbmsKind::MariaDb => {
             Some(Arc::new(crate::mysql::MySqlIntrospector { flavor: dbms }))
         }
-        DbmsKind::Sqlite => Some(Arc::new(crate::sqlite::SqliteIntrospector)),
+        // ## m4-t18-sqlite (named exception): the introspector holds options now.
+        DbmsKind::Sqlite => Some(Arc::new(crate::sqlite::SqliteIntrospector::default())),
         _ => None,
     }
 }
@@ -393,10 +394,13 @@ mod tests {
             let caps = introspector_for(dbms).expect("an M4 engine").capabilities();
             assert_eq!(caps.dbms, dbms);
             assert_eq!(caps.transactional_ddl, transactional, "{dbms:?}");
-            // ## m4-t17-mysql (named exception in Task 1c's file): MySQL is incremental
-            // (R-M4-39); MariaDB stays `Full` (R-M4-10); facets wait for Task 17b.
-            assert_eq!(caps.incremental, dbms == DbmsKind::MySql, "{dbms:?}");
-            assert!(caps.facets.is_empty(), "{dbms:?}");
+            // ## m4-t17-mysql / m4-t18-sqlite (named exceptions in Task 1c's file): MySQL is
+            // incremental (R-M4-39), MariaDB stays `Full` (R-M4-10); SQLite is Task 18's;
+            // facets wait for Tasks 16b/17b.
+            if dbms != DbmsKind::Sqlite {
+                assert_eq!(caps.incremental, dbms == DbmsKind::MySql, "{dbms:?}");
+                assert!(caps.facets.is_empty(), "{dbms:?}");
+            }
         }
         assert!(introspector_for(DbmsKind::MsSql).is_none());
     }
