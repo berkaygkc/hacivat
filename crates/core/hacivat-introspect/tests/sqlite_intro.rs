@@ -1798,6 +1798,11 @@ async fn an_attached_namespace_the_connection_lacks_fails_closed() {
     let infos = intro().list_namespaces(&mut tc).await.unwrap();
     assert!(infos.iter().any(|n| n.key == NsKey::schema(["xa"])));
     let files = intro().attached_files(&mut tc).await.unwrap();
+    // Compare canonical forms on both sides: Windows reports 8.3 short names and `\\?\` prefixes.
+    let files: Vec<_> = files
+        .into_iter()
+        .map(|(n, p)| (n, p.canonicalize().unwrap()))
+        .collect();
     assert_eq!(files, vec![(Name::from("xa"), aux.canonicalize().unwrap())]);
     let got = intro()
         .introspect(
@@ -1819,7 +1824,7 @@ async fn an_attached_namespace_the_connection_lacks_fails_closed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pass_never_writes_the_files() {
     let l = lite("CREATE TABLE t(a INTEGER PRIMARY KEY, b); CREATE INDEX tb ON t(b)").await;
-    let aux = file_with(l._dir.path(), "aux.db", "CREATE TABLE z(q)").await;
+    let aux = file_with(l._dir.path(), "ek.db", "CREATE TABLE z(q)").await;
     let digest = |p: &Path| {
         (
             std::fs::read(p).unwrap(),
