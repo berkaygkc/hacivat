@@ -6,6 +6,8 @@
 #![cfg(feature = "session")]
 
 mod common;
+// ## m4-t22-freshness (fix round 3): the T17 in-memory MySQL reader, for a pure stamp test.
+mod mysql_fake;
 
 use std::time::Duration;
 
@@ -454,4 +456,121 @@ fn mysql_before_8_0_is_never_vouched_for() {
     assert_eq!(mysql.cached_check(&at("")), None);
     assert!(mysql.cached_check(&at("8.0.40")).is_some());
     assert!(mysql.cached_check(&at("8.4.3")).is_some());
+}
+
+// ## m4-t22-freshness (fix round 3: CI 44667350956, the two `Current` failures)
+
+/// A dropped and recreated PostgreSQL table: the key the caller holds names the old oid; the
+/// cache already holds the recreated table (new oid) under the same name. The old key is never
+/// `Current`: its stamp (by oid) is gone, so it is `Dropped`.
+#[test]
+fn a_recreated_oid_is_dropped_for_the_old_key() {
+    use hacivat_meta::snapshot::{CatalogChange, LoadState};
+    use hacivat_meta::{Catalog, ObjectKey, ServerFacts, ServerId};
+    let ns = pg_ns("db", "s");
+    let mut t = Subtree::new(Obj::new(ObjectKind::Schema, name("s")));
+    let root = t.root();
+    // The cache after a re-read: `t` is oid 2 now.
+    t.add(
+        root,
+        Obj::new(ObjectKind::Table, name("t")).with_server_id(ServerId::Oid(2)),
+    );
+    let arena = NamespaceSnapshot::build(
+        ns.clone(),
+        DbmsKind::Postgres,
+        FoldRule::Exact,
+        NsMeta {
+            level: Level::Structure,
+            watermark: Watermark::None,
+            loaded_at_ms: 1,
+        },
+        t,
+    )
+    .unwrap();
+    let catalog = Catalog::new(std::sync::Arc::new(ServerFacts::new(
+        DbmsKind::Postgres,
+        hacivat_meta::name::IdentCtx::new(sql_dialect::DialectId::Postgres),
+    )));
+    catalog
+        .publisher()
+        .unwrap()
+        .publish(vec![
+            CatalogChange::Put(std::sync::Arc::new(arena)),
+            CatalogChange::SetState(
+                ContainerKey::Namespace(ns.clone()),
+                LoadState::Loaded {
+                    level: Level::Structure,
+                    at: std::time::SystemTime::now(),
+                    watermark: Watermark::None,
+                    stale: false,
+                },
+            ),
+        ])
+        .unwrap();
+    let old = ObjectKey {
+        kind: ObjectKind::Table,
+        path: [name("db"), name("s"), name("t")].into_iter().collect(),
+        server_id: Some(ServerId::Oid(1)),
+        overload_sig: None,
+        raw_kind: None,
+    };
+    let p = freshness::plan(
+        DbmsKind::Postgres,
+        &catalog.current(),
+        std::slice::from_ref(&old),
+    );
+    assert_eq!(p.probes.len(), 1);
+    let (owner, stored) = &p.probes[0];
+    assert_eq!(
+        owner.server_id,
+        Some(ServerId::Oid(1)),
+        "stamped by its own oid"
+    );
+    // The old oid has no row any more: Dropped, never Current.
+    assert_eq!(
+        freshness::compare(DbmsKind::Postgres, *stored, None),
+        hacivat_introspect::Staleness::Dropped
+    );
+    // An oid that still exists but the cache lacks: Changed.
+    assert_eq!(
+        freshness::compare(DbmsKind::Postgres, *stored, Some(StateMark::Hash(7))),
+        hacivat_introspect::Staleness::Changed
+    );
+}
+
+/// ver/01 `#mysql-is-times`: `CREATE TRIGGER` leaves `CREATE_TIME` alone; the table's stamp
+/// counts its `INFORMATION_SCHEMA.TRIGGERS` rows (number and newest `CREATED`), so a new
+/// trigger, also one created in the same instant as the newest, and a dropped one move it.
+#[tokio::test]
+async fn a_trigger_moves_the_mysql_table_stamp() {
+    use hacivat_introspect::mysql::{pass::read_server, state};
+    let mut f = mysql_fake::Fake::mysql();
+    let srv = read_server(&mut f, DbmsKind::MySql).await.unwrap();
+    let key = hacivat_meta::ObjectKey {
+        kind: ObjectKind::Table,
+        path: [name("shop"), name("orders")].into_iter().collect(),
+        server_id: None,
+        overload_sig: None,
+        raw_kind: None,
+    };
+    let stamp = async |f: &mut mysql_fake::Fake| {
+        state::stamps(f, &srv, std::slice::from_ref(&key))
+            .await
+            .unwrap()[0]
+            .expect("the table exists")
+    };
+    let s0 = stamp(&mut f).await;
+    let created = f.triggers[0].2.clone();
+    f.triggers
+        .push(("trg_two".into(), "orders".into(), created));
+    let s1 = stamp(&mut f).await;
+    assert_ne!(s0, s1, "a second trigger in the same instant");
+    assert_eq!(
+        freshness::compare(DbmsKind::MySql, freshness::Stored::Mark(s0), Some(s1)),
+        hacivat_introspect::Staleness::Changed
+    );
+    f.triggers.clear();
+    let s2 = stamp(&mut f).await;
+    assert_ne!(s1, s2, "every trigger dropped");
+    assert_ne!(s0, s2);
 }

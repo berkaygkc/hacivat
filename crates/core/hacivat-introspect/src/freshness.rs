@@ -205,6 +205,14 @@ pub fn plan(dbms: DbmsKind, snapshot: &CatalogSnapshot, keys: &[ObjectKey]) -> C
                     };
                     (owner, Stored::Mark(obj.state()))
                 }
+                // ## m4-t22-state (fix round 3, CI 44667350956): a key that names an object by
+                // its server id is an object that existed, whatever the cache holds now (a
+                // re-read may already hold a recreated object of that name under a new oid):
+                // it compares as "was there, mark unknown", so a missing stamp is `Dropped`
+                // and a present one `Changed`, never `Current`.
+                None if key.path.len() == arena.key().path.len() + 1 && key.server_id.is_some() => {
+                    (key.clone(), Stored::Mark(StateMark::None))
+                }
                 None => {
                     // A name the loaded namespace does not hold: only a top-level one can be
                     // stamped by itself, and only where the namespace vouches for absence.

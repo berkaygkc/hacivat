@@ -2166,3 +2166,13 @@ carry fenced `m4-t22-state` named exceptions.
   cleared only by a user refresh (not by "Remove from cache", and not by the pass a confirmation
   re-plans). Refresh-after-DDL passes count toward the guard (fail-safe; accepted). MySQL's
   cached side also refuses a watermark whose version is below 8.0 (no R-M4-39 marker path).
+- **Fix round 3 (CI 44667350956, two `Current` answers).** A top-level key that names an
+  object by its server id and that the cache no longer holds (a re-read already brought a
+  recreated object of that name under a new oid) compares as "was there, mark unknown": a
+  missing stamp is `Dropped`, a present one `Changed`, never `Current` (before, it compared as
+  a name the cache never held). The MySQL table stamp already folds the table's `TRIGGERS` rows
+  (their number and newest `CREATED`; a pure test pins that a trigger, one in the same instant,
+  and dropping all of them move it). Both CI failures share one cause in the Docker harness:
+  an expansion's ticket resolves after the names-first pass and the full pass is still queued,
+  so the test's DDL ran before the full pass and the "cached" side already held the post-DDL
+  server; the harness now waits for the namespace's full level.

@@ -105,12 +105,37 @@ impl Live {
             .expect("the engine runs");
     }
 
-    /// Loads `ns` and waits until the engine is idle.
+    /// Loads `ns` and waits until its full read has published and the engine is idle.
+    ///
+    /// Fix round 3 (CI 44667350956): an expansion's ticket resolves after the names-first
+    /// pass; the full pass at the namespace's level follows, queued. Waiting for "idle" alone
+    /// could see the gap between the two and let the test's DDL run before the full pass,
+    /// which then read the post-DDL server (both `Current` failures). Wait for the level.
     async fn expand(&self, ns: &NsKey) {
         tokio::time::timeout(LIMIT, self.cat.handle.expand(ns.clone()))
             .await
             .expect("loaded in time")
             .expect("loaded");
+        let start = tokio::time::Instant::now();
+        loop {
+            let st = self
+                .cat
+                .catalog
+                .current()
+                .state(&ContainerKey::Namespace(ns.clone()))
+                .clone();
+            if matches!(st, LoadState::Loaded { level, .. } if level >= hacivat_meta::Level::Structure)
+            {
+                break;
+            }
+            assert!(
+                start.elapsed() < LIMIT,
+                "{}: {ns:?} stays {st:?}",
+                self.t.id
+            );
+            let mut rx = self.cat.catalog.subscribe();
+            let _ = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+        }
         self.idle().await;
     }
 
