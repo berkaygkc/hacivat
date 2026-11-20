@@ -130,6 +130,12 @@ fn table_keys(r: &Rig, n: &NsKey) -> Vec<ObjectKey> {
 
 /// A periodic round has run once the engine asked whether the user is in a transaction
 /// (each round asks once) and has gone idle again.
+///
+/// The engine asks while it is still queueing the round's checks, so seeing the question does
+/// not mean the checks are visible in `progress` yet. `ready()` is answered by the engine's
+/// own loop after that step, and after the start of what it queued, so it is the barrier
+/// before waiting for idle (T33a: one of the two races behind the flaky
+/// `background_validation_never_deletes_in_small_steps`; the other was in the engine).
 async fn round(r: &Rig, hand: &freshness::ManualClock, by: Duration) {
     let before = r.meta.tx_checks.load(SeqCst);
     hand.advance(by);
@@ -137,6 +143,7 @@ async fn round(r: &Rig, hand: &freshness::ManualClock, by: Duration) {
         r.meta.tx_checks.load(SeqCst) > before
     }))
     .await;
+    bounded(r.handle.ready()).await.unwrap();
     idle(&r.handle).await;
 }
 
@@ -737,23 +744,12 @@ async fn background_validation_never_deletes_in_small_steps() {
     // 12 of 40 (30 %): under the guard; applied.
     drop_range(0, 12);
     round(&r, &hand, TEN_MIN).await;
-    // As below: the pass the check queued can land after `round` sees the engine idle.
-    bounded(wait_until(Duration::from_secs(60), || {
-        tables_in(&r, &n).len() == 28
-    }))
-    .await;
     assert_eq!(tables_in(&r, &n).len(), 28);
     assert_eq!(r.handle.pending_confirmation(&n), None);
     // 10 of the remaining 28 (36 %): under the per-pass guard, but 22 of 40 since the user last
     // looked (55 %): held.
     drop_range(12, 22);
     round(&r, &hand, TEN_MIN).await;
-    // The validation check can finish (and the engine look idle) before the pass it queued is
-    // planned; wait for the hold itself instead of assuming `round` covered it (seen on CI).
-    bounded(wait_until(Duration::from_secs(60), || {
-        r.handle.pending_confirmation(&n).is_some()
-    }))
-    .await;
     assert_eq!(tables_in(&r, &n).len(), 28, "nothing more removed");
     let held = r
         .handle
