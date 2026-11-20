@@ -10,6 +10,12 @@
 //! confirmation in `explorer_actions.rs`
 //! (`open_data_on_production_is_a_read_and_needs_no_confirmation`); the offline built-in
 //! group and lookups in `offline_explorer.rs`.
+//!
+//! ## m4-t33b-carries: (c) a user refresh after a privilege loss, the named mass-drop question
+//! and Keep cached (`flow_c_privilege_loss_refresh_asks_and_keep_cached_keeps_the_tree`), and
+//! (f) an encrypted production profile that reads its key only when expanded
+//! (`flow_f_encrypted_production_profile_reads_its_key_only_when_expanded`) live in
+//! `explorer_live.rs`, beside the fake catalog source and keyring they drive.
 
 mod support;
 

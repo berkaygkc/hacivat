@@ -320,3 +320,59 @@ fn offline_lookup_resolves_built_ins_without_a_connection(cx: &mut TestAppContex
     assert_eq!(live(vcx, "shop"), LiveState::Disconnected);
     stop_core_runtime_test(cx);
 }
+
+// ## m4-t33b-carries (T32 review T-1): offline, through the app's own paths. The explorer's
+// reveal (the "Show in explorer" seam) walks the Built-in group down to the shipped
+// snapshot's `pg_catalog.pg_class` and selects it (before, the walk stopped at the Built-in
+// group: `Pending`), its DDL view opens, and the fake driver was never dialled.
+#[gpui::test]
+fn offline_built_ins_are_revealed_and_shown_through_the_app_with_no_connect(
+    cx: &mut TestAppContext,
+) {
+    let (vcx, id) = shell(cx);
+    let key = hacivat_meta::ObjectKey {
+        kind: hacivat_meta::ObjectKind::Table,
+        path: ["app", "pg_catalog", "pg_class"]
+            .into_iter()
+            .map(hacivat_meta::Name::from)
+            .collect(),
+        server_id: Some(hacivat_meta::ServerId::Oid(1259)),
+        overload_sig: None,
+        raw_kind: None,
+    };
+    let outcome = in_window(vcx, |window, cx| {
+        hacivat_app::explorer::live::reveal(id, &key, window, cx)
+    });
+    assert_eq!(
+        outcome,
+        hacivat_app::explorer::live::RevealOutcome::Revealed
+    );
+    vcx.run_until_parked();
+    let target = adapter::object_tree_key(id, &key);
+    let selected = vcx.cx.read(|cx| {
+        explorer::tree(cx)
+            .expect("the tree")
+            .read(cx)
+            .selection()
+            .contains(&target)
+    });
+    assert!(selected, "the revealed row is selected");
+    row(vcx, "pg_class");
+    // Its DDL view opens (offline it can only say what is not loaded) and dials nothing.
+    let ws = workspace(vcx);
+    let opened = in_window(vcx, |window, cx| {
+        hacivat_app::ddl_view::open_ddl_view(&ws, id, key.clone(), window, cx)
+    });
+    assert!(opened.is_ok(), "{opened:?}");
+    vcx.run_until_parked();
+    assert!(
+        vcx.cx
+            .read(|cx| hacivat_app::ddl_view::state_of(id, &key, cx))
+            .is_some(),
+        "the DDL view is open"
+    );
+    // No connection, no dial.
+    assert_eq!(live(vcx, "shop"), LiveState::Disconnected);
+    assert_eq!(fake(vcx).connect_calls(), 0, "the driver was never dialled");
+    stop_core_runtime_test(cx);
+}

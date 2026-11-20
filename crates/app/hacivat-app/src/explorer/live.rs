@@ -2140,6 +2140,13 @@ fn leads_to(model: &super::ExplorerModel, k: TreeKey, ns: &NsKey, key: &ObjectKe
         Some(NodeInfo::Object { key: o, .. }) => {
             o.path.len() < key.path.len() && key.path.iter().zip(o.path.iter()).all(|(a, b)| a == b)
         }
+        // ## m4-t33b-carries (T32 review T-1): a system schema sits under the Built-in group.
+        Some(NodeInfo::BuiltIn { .. }) => match model.children(k) {
+            ChildState::Loaded(kids) => kids.iter().any(
+                |c| matches!(model.info(*c), Some(NodeInfo::Schema { ns: s, .. }) if &s == ns),
+            ),
+            _ => false,
+        },
         _ => false,
     }
 }
