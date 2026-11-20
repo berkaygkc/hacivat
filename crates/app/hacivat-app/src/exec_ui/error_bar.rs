@@ -31,6 +31,8 @@
 //! - **Closing the console answers Stop** ([`console_closed`]).
 
 use std::collections::{HashMap, HashSet};
+// ## m4-t32-shots (named exception): used only by the test seams; a plain build warned.
+#[cfg(feature = "test-support")]
 use std::sync::Arc;
 
 use tokio::sync::oneshot;
