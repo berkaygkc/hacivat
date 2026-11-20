@@ -67,14 +67,25 @@ fn pg_ctx() -> IdentCtx {
 }
 
 /// A PostgreSQL catalog of server `version` with `nss` published, `states` for namespaces
-/// without an arena, and the schema list of `DB` loaded.
+/// without an arena, and the schema list of `DB` loaded. The server is proven to hold nothing
+/// beyond initdb in its system schemas (R-W5-6); [`pg_snapshot_extras`] sets that fact.
 fn pg_snapshot(
     version: &str,
     nss: Vec<(NamespaceSnapshot, LoadState)>,
     states: Vec<(NsKey, LoadState)>,
 ) -> Arc<CatalogSnapshot> {
+    pg_snapshot_extras(version, Some(false), nss, states)
+}
+
+fn pg_snapshot_extras(
+    version: &str,
+    extras: Option<bool>,
+    nss: Vec<(NamespaceSnapshot, LoadState)>,
+    states: Vec<(NsKey, LoadState)>,
+) -> Arc<CatalogSnapshot> {
     let mut facts = ServerFacts::new(DbmsKind::Postgres, pg_ctx());
     facts.version = name(version);
+    facts.system_schema_extras = extras;
     let catalog = Catalog::new(Arc::new(facts));
     let publisher = catalog.publisher().unwrap();
     let mut changes = Vec::new();
@@ -275,9 +286,10 @@ fn offline_my(version: &str) -> SnapshotView {
         .with_search_path(SearchPath::for_mysql(Some(&name("shop"))))
 }
 
-/// MySQL/MariaDB stay strict (alg/02 HV-INTRO-16 edge 1; R-W5-3 keeps them so): their minor
-/// releases add functions and system tables, so against a newer patch than the snapshot's a
-/// name or a column the snapshot lacks is `Unknown`, never `Missing`.
+/// MySQL/MariaDB (alg/02 HV-INTRO-16 edge 1; rulings R-W5-3, R-W5-6): a name the snapshot
+/// lacks is never `Missing` (plugins and managed services add system tables and routines), at
+/// any patch. The column list of a table the snapshot holds is complete only up to the
+/// snapshot's patch (a newer patch may add a column).
 #[test]
 fn newer_patch_missing_column_is_unknown_not_missing() {
     // The MySQL 8.4 snapshot was read from 8.4.13.
@@ -291,20 +303,18 @@ fn newer_patch_missing_column_is_unknown_not_missing() {
             Lookup::Found(_)
         ));
     }
-    // A name the snapshot lacks: a fact only up to the snapshot's own patch.
+    // A name the snapshot lacks: never a fact on MySQL (R-W5-6).
     let absent = p("information_schema.HV_NO_SUCH_VIEW");
-    assert!(matches!(
-        newer.lookup(&absent, KindGroup::Relations),
-        Lookup::Unknown(UnknownReason::ServerDependent)
-    ));
-    assert!(matches!(
-        same.lookup(&absent, KindGroup::Relations),
-        Lookup::Missing(MissingReason::NotFound)
-    ));
-    assert!(matches!(
-        older.lookup(&absent, KindGroup::Relations),
-        Lookup::Missing(MissingReason::NotFound)
-    ));
+    for v in [&newer, &same, &older] {
+        assert!(matches!(
+            v.lookup(&absent, KindGroup::Relations),
+            Lookup::Unknown(UnknownReason::ServerDependent)
+        ));
+        assert!(matches!(
+            v.lookup(&p("mysql.rds_heartbeat2"), KindGroup::Relations),
+            Lookup::Unknown(UnknownReason::ServerDependent)
+        ));
+    }
     // The column list of a relation the snapshot holds: complete up to the snapshot's patch;
     // a newer patch may have added a column, so a column the list lacks is not a fact there.
     let tables = key_of(&same.lookup(&p("information_schema.TABLES"), KindGroup::Relations));
@@ -314,7 +324,7 @@ fn newer_patch_missing_column_is_unknown_not_missing() {
         newer.children(&tables, ObjectKind::Column),
         Lookup::Unknown(UnknownReason::ServerDependent)
     ));
-    // The children of a relation the snapshot lacks.
+    // The children of a relation the snapshot lacks, and the schema's object list.
     let ghost = ObjectKey {
         kind: ObjectKind::View,
         path: ["information_schema", "HV_NO_SUCH_VIEW"]
@@ -325,14 +335,62 @@ fn newer_patch_missing_column_is_unknown_not_missing() {
         overload_sig: None,
         raw_kind: None,
     };
-    assert!(matches!(
-        newer.children(&ghost, ObjectKind::Column),
-        Lookup::Unknown(UnknownReason::ServerDependent)
+    let schema = ObjectKey {
+        kind: ObjectKind::Schema,
+        path: ["mysql"].into_iter().map(name).collect(),
+        server_id: None,
+        overload_sig: None,
+        raw_kind: None,
+    };
+    for v in [&newer, &same] {
+        assert!(matches!(
+            v.children(&ghost, ObjectKind::Column),
+            Lookup::Unknown(UnknownReason::ServerDependent)
+        ));
+        assert!(matches!(
+            v.children(&schema, ObjectKind::Table),
+            Lookup::Unknown(UnknownReason::ServerDependent)
+        ));
+    }
+}
+
+/// Review I-1: MySQL compares the `information_schema` name and its table names
+/// case-insensitively whatever `lower_case_table_names` is.
+#[test]
+fn mysql_information_schema_is_found_in_any_case() {
+    let view = offline_my("8.4.3");
+    for path in [
+        "information_schema.TABLES",
+        "information_schema.tables",
+        "INFORMATION_SCHEMA.TABLES",
+        "Information_Schema.Columns",
+    ] {
+        let hit = view.lookup(&p(path), KindGroup::Relations);
+        let key = key_of(&hit);
+        assert_eq!(key.path[0].as_ref(), "information_schema", "{path}");
+        assert!(
+            column_names(view.children(&key, ObjectKind::Column)).len() > 5,
+            "{path}"
+        );
+    }
+    // The other system schemas stay case-sensitive under lctn = 0 (the server has no
+    // database `MYSQL` there): not found.
+    assert!(!matches!(
+        view.lookup(&p("MYSQL.user"), KindGroup::Relations),
+        Lookup::Found(_)
     ));
-    assert!(matches!(
-        same.children(&ghost, ObjectKind::Column),
-        Lookup::Missing(MissingReason::NotFound)
-    ));
+    // The parent key in another case reaches its columns too.
+    let upper = ObjectKey {
+        kind: ObjectKind::Table,
+        path: ["INFORMATION_SCHEMA", "tables"]
+            .into_iter()
+            .map(name)
+            .collect(),
+        server_id: None,
+        overload_sig: None,
+        raw_kind: None,
+    };
+    assert!(column_names(view.children(&upper, ObjectKind::Column)).len() > 5);
 }
 
 /// The offline PostgreSQL view of a server reporting `version`, with the layers the shipped set
@@ -702,4 +760,128 @@ fn catalog_with_system_layers_follow_the_server_facts() {
     // A catalog made without a set never gets one.
     let plain = Catalog::new(Arc::new(ServerFacts::new(DbmsKind::Postgres, pg_ctx())));
     assert!(plain.system().is_none());
+}
+
+/// Ruling R-W5-6: a miss in PostgreSQL's system layer is a fact only when the server is proven
+/// to hold nothing beyond initdb in its system schemas (`system_schema_extras == Some(false)`,
+/// read on connect). With extras, or unknown, it is `Unknown`; hits stay `Found`.
+#[test]
+fn pg_system_layer_misses_need_the_initdb_only_fact() {
+    let absent = p("pg_catalog.hv_no_such_view");
+    let public = || ns_pg(DB, "public").table("orders", &["id"]).finish();
+    let out = || vec![(NsKey::schema([DB, "pg_catalog"]), LoadState::OutOfScope)];
+    for (extras, fact) in [(Some(false), true), (Some(true), false), (None, false)] {
+        let snap = pg_snapshot_extras(
+            "17.12",
+            extras,
+            vec![(public(), loaded(Level::Structure))],
+            out(),
+        );
+        let view = SnapshotView::new(snap)
+            .with_layers(Arc::new(sys().overlays_for(DbmsKind::Postgres, "17.12")))
+            .with_search_path(pg_path());
+        let what = format!("extras={extras:?}");
+        assert!(
+            matches!(
+                view.lookup(&p("pg_catalog.pg_class"), KindGroup::Relations),
+                Lookup::Found(_)
+            ),
+            "{what}"
+        );
+        let miss = view.lookup(&absent, KindGroup::Relations);
+        let unqualified = view.lookup(&p("hv_absent"), KindGroup::Relations);
+        let user = view.lookup(&p("orders"), KindGroup::Relations);
+        if fact {
+            assert!(matches!(miss, Lookup::Missing(_)), "{what}");
+            assert!(matches!(unqualified, Lookup::Missing(_)), "{what}");
+            assert!(matches!(user, Lookup::Found(_)), "{what}");
+        } else {
+            assert!(
+                matches!(miss, Lookup::Unknown(UnknownReason::ServerDependent)),
+                "{what}"
+            );
+            // The walk stops at `pg_catalog`: it may hold the name.
+            assert!(
+                matches!(unqualified, Lookup::Unknown(UnknownReason::ServerDependent)),
+                "{what}"
+            );
+            assert!(
+                matches!(user, Lookup::Unknown(UnknownReason::ServerDependent)),
+                "{what}"
+            );
+        }
+        // The columns of a table the snapshot holds follow the version rule only.
+        let pg_class = key_of(&view.lookup(&p("pg_catalog.pg_class"), KindGroup::Relations));
+        assert!(
+            column_names(view.children(&pg_class, ObjectKind::Column))
+                .iter()
+                .any(|c| c == "relname"),
+            "{what}"
+        );
+    }
+}
+
+/// Ruling R-W5-6: a live, loaded `pg_catalog` arena is consulted after a miss in the snapshot,
+/// so an object the snapshot cannot hold (an extension installed into `pg_catalog`) is found
+/// there, qualified and unqualified, with its columns.
+#[test]
+fn a_live_pg_catalog_object_beyond_the_snapshot_is_found() {
+    let live = ns_pg(DB, "pg_catalog")
+        .table("hv_ext_tbl", &["ext_col"])
+        .finish();
+    let snap = pg_snapshot_extras(
+        "17.12",
+        Some(true),
+        vec![
+            (live, loaded(Level::Structure)),
+            (
+                ns_pg(DB, "public").table("orders", &["id"]).finish(),
+                loaded(Level::Structure),
+            ),
+        ],
+        vec![],
+    );
+    let view = SnapshotView::new(snap)
+        .with_layers(Arc::new(sys().overlays_for(DbmsKind::Postgres, "17.12")))
+        .with_search_path(pg_path());
+    for path in ["pg_catalog.hv_ext_tbl", "hv_ext_tbl"] {
+        let hit = view.lookup(&p(path), KindGroup::Relations);
+        let Lookup::Found(h) = &hit else {
+            panic!("{path}: {hit:?}");
+        };
+        assert!(!h.obj().flags().contains(ObjFlags::PRE_INTROSPECTED));
+        assert_eq!(
+            column_names(view.children(&key_of(&hit), ObjectKind::Column)),
+            ["ext_col"]
+        );
+    }
+    // The snapshot still answers what it holds.
+    let hit = view.lookup(&p("pg_catalog.pg_class"), KindGroup::Relations);
+    let Lookup::Found(h) = &hit else {
+        panic!("{hit:?}")
+    };
+    assert!(h.obj().flags().contains(ObjFlags::PRE_INTROSPECTED));
+}
+
+/// Review m-3: an I/O failure reading a snapshot file is retried on the next use; only a file
+/// that is not the manifest's (or does not decode) is refused for good.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_snapshot_file_is_tried_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    for f in ["manifest.toml", "postgres-16.hvsnap.zst"] {
+        std::fs::copy(assets_dir().join(f), dir.path().join(f)).unwrap();
+    }
+    let file = dir.path().join("postgres-16.hvsnap.zst");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let set = SystemCatalogs::open(dir.path()).unwrap();
+    // A superuser reads the file anyway; then there is nothing to retry.
+    if std::fs::read(&file).is_err() {
+        assert!(set.for_server(DbmsKind::Postgres, "16.4").is_none());
+        assert_eq!(set.decoded_count(), 0, "an I/O failure is not settled");
+    }
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(set.for_server(DbmsKind::Postgres, "16.4").is_some());
+    assert_eq!(set.decoded_count(), 1);
 }

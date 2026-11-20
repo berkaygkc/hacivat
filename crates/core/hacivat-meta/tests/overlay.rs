@@ -274,6 +274,85 @@ fn user_data_layers_virtual_fks_and_annotations() {
     );
 }
 
+/// Review m-7: MySQL/MariaDB column names are caseless, so a real foreign key whose column
+/// spelling differs only in ASCII case still hides the duplicate virtual one.
+#[test]
+fn mysql_real_fk_hides_a_virtual_fk_of_other_column_case() {
+    let mut orders = Subtree::new(
+        Obj::new(ObjectKind::Table, "orders")
+            .with_props(Props::Table(Arc::new(TableProps::default()))),
+    );
+    let root = orders.root();
+    orders.add(
+        root,
+        Obj::new(ObjectKind::Column, "Customer_Id").with_props(Props::Column(Arc::new(
+            ColumnProps {
+                ordinal: 1,
+                raw_type: name("int"),
+                nullable: true,
+                ..ColumnProps::default()
+            },
+        ))),
+    );
+    orders.add(
+        root,
+        Obj::new(ObjectKind::ForeignKey, "fk_customer").with_props(Props::ForeignKey(Arc::new(
+            FkProps {
+                columns: vec![name("Customer_Id")],
+                target: Ref {
+                    kind: ObjectKind::Table,
+                    path: ["shop", "customers"].into_iter().map(name).collect(),
+                    server_id: None,
+                },
+                target_columns: vec![name("ID")],
+                on_update: FkAction::NoAction,
+                on_delete: FkAction::NoAction,
+                match_kind: FkMatch::Simple,
+                deferrable: false,
+                initially_deferred: false,
+                not_valid: false,
+                enforced: true,
+                rare: None,
+            },
+        ))),
+    );
+    let ns = hacivat_meta::fixture::ns_mysql("shop", 0)
+        .subtree(orders)
+        .table("customers", &["id"])
+        .finish();
+    let catalog = Catalog::new(Arc::new(ServerFacts::new(
+        DbmsKind::MySql,
+        IdentCtx::new(DialectId::MySql),
+    )));
+    catalog
+        .publisher()
+        .unwrap()
+        .publish(vec![
+            CatalogChange::SetState(
+                ContainerKey::Namespace(ns.key().clone()),
+                loaded(Level::Structure),
+            ),
+            CatalogChange::Put(Arc::new(ns)),
+            CatalogChange::SetState(ContainerKey::schema_list(None), loaded(Level::Names)),
+        ])
+        .unwrap();
+    let fk = VirtualFk {
+        from: table(&["shop", "orders"], None),
+        from_cols: vec!["customer_id".into()],
+        to: table(&["shop", "customers"], None),
+        to_cols: vec!["id".into()],
+        name: None,
+    };
+    let v = SnapshotView::new(catalog.current()).with_layers(Arc::new(Overlays {
+        virtual_fks: vec![fk],
+        ..Overlays::default()
+    }));
+    assert!(
+        v.virtual_fks_of(&table(&["shop", "orders"], None))
+            .is_empty()
+    );
+}
+
 #[cfg(feature = "system")]
 #[test]
 fn shipped_virtual_fks_resolve_against_every_pg_snapshot() {

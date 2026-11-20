@@ -58,6 +58,14 @@ pub struct ServerFacts {
     pub ansi_quotes: Option<bool>,
     /// PostgreSQL `pg_is_in_recovery()` (R-M4-9: replicas refresh `Full`).
     pub in_recovery: Option<bool>,
+    // ## m4-t26-overlays (named exception in Task 9's file; ruling R-W5-6)
+    /// Whether the server's system schemas hold objects beyond what `initdb` creates
+    /// (PostgreSQL: an object with an oid of 16384 or more in `pg_catalog` or
+    /// `information_schema`, read in the same metadata snapshot as the other facts).
+    /// `Some(false)` is the only answer that lets a miss in a shipped snapshot be a fact;
+    /// `None` is unknown.
+    pub system_schema_extras: Option<bool>,
+    // ## m4-t26-overlays
 }
 
 impl ServerFacts {
@@ -74,6 +82,8 @@ impl ServerFacts {
             no_backslash_escapes: None,
             ansi_quotes: None,
             in_recovery: None,
+            // ## m4-t26-overlays
+            system_schema_extras: None,
         }
     }
 }
@@ -712,6 +722,16 @@ impl Publisher {
         changes: Vec<CatalogChange>,
         delta: Option<Arc<CatalogDelta>>,
     ) -> Result<Published, ModelError> {
+        // ## m4-t26-overlays (review m-3): a new server version decodes its snapshot here,
+        // before the writer lock, so a publish never holds the lock across a decode.
+        if let Some(sys) = &self.shared.system {
+            for change in &changes {
+                if let CatalogChange::SetServer(f) = change {
+                    let _ = sys.for_server(f.dbms, &f.version);
+                }
+            }
+        }
+        // ## m4-t26-overlays
         let _writer = self
             .shared
             .writer

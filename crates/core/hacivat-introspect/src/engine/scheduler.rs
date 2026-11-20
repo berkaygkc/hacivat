@@ -1616,6 +1616,14 @@ impl Actor {
             FactsRead::Failed => {
                 let mut f = (*cur.server).clone();
                 f.ident.lower_case_table_names = u8::MAX;
+                // ## m4-t26-overlays (named exception in Task 15's file; review m-1): the
+                // server behind the profile may have changed (an upgrade, a host edit), so the
+                // version that chose the system layer and the initdb-only fact are unknown
+                // too; the layer drops and system lookups answer `Unknown`.
+                f.version = hacivat_meta::Name::from("");
+                f.version_num = 0;
+                f.system_schema_extras = None;
+                // ## m4-t26-overlays
                 Some(f)
             }
             FactsRead::NotRead => None,

@@ -49,6 +49,7 @@ use crate::namespace::NamespaceSnapshot;
 // ## m4-t23-minicat
 use crate::namespace::Obj;
 use crate::overlay::{Overlays, ShippedFk};
+use crate::snapshot::ServerFacts;
 use sql_catalog::SettingInfo;
 
 /// The built-in objects of one server line, as namespaces flagged `PRE_INTROSPECTED`.
@@ -165,28 +166,36 @@ struct Parts {
 }
 
 impl Parts {
-    fn parse(text: &str) -> Option<Parts> {
+    /// The numbers and the text after them.
+    fn parse(text: &str) -> Option<(Parts, &str)> {
         let mut parts = Parts { n: [0; 3], len: 0 };
-        for piece in text.split('.') {
-            let digits = piece.bytes().take_while(u8::is_ascii_digit).count();
+        let mut at = 0;
+        loop {
+            let rest = &text[at..];
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
             if digits == 0 || usize::from(parts.len) == parts.n.len() {
                 break;
             }
-            parts.n[usize::from(parts.len)] = piece[..digits].parse().ok()?;
+            parts.n[usize::from(parts.len)] = rest[..digits].parse().ok()?;
             parts.len += 1;
-            if digits != piece.len() {
-                // `17beta1`, `8.0.40-log`: the number ends inside this piece.
+            at += digits;
+            // Another number follows only after a dot and a digit.
+            let next = &text[at..];
+            if next.starts_with('.') && next[1..].starts_with(|c: char| c.is_ascii_digit()) {
+                at += 1;
+            } else {
                 break;
             }
         }
-        (parts.len > 0).then_some(parts)
+        (parts.len > 0).then_some((parts, &text[at..]))
     }
 }
 
 /// The parts of a server's version text that name its line: PostgreSQL its major (`17` of
 /// `17.2 (Debian …)`), MySQL and MariaDB major.minor (`10.11` of `5.5.5-10.11.9-MariaDB`,
-/// whose replication prefix is dropped). `None` for another engine or an unreadable version.
-fn line_parts(dbms: DbmsKind, version: &str) -> Option<(Parts, usize)> {
+/// whose replication prefix is dropped), and the text after the numbers. `None` for another
+/// engine or an unreadable version.
+fn line_parts(dbms: DbmsKind, version: &str) -> Option<(Parts, usize, &str)> {
     let text = version.trim();
     let (text, want) = match dbms {
         DbmsKind::Postgres => (text, 1),
@@ -194,31 +203,43 @@ fn line_parts(dbms: DbmsKind, version: &str) -> Option<(Parts, usize)> {
         DbmsKind::MariaDb => (text.strip_prefix("5.5.5-").unwrap_or(text), 2),
         _ => return None,
     };
-    let parts = Parts::parse(text)?;
-    (usize::from(parts.len) >= want).then_some((parts, want))
+    let (parts, rest) = Parts::parse(text)?;
+    (usize::from(parts.len) >= want).then_some((parts, want, rest))
 }
 
-/// The full patch-level parts a version must have to be compared with a snapshot's:
-/// PostgreSQL `major.minor`, MySQL and MariaDB `major.minor.patch`.
+/// The parts of a release version, the only shape compared with a snapshot's (review m-2):
+/// PostgreSQL `major.minor`, then nothing or a space-led packaging note
+/// (`17.2 (Debian 17.2-1.pgdg120+1)`); MySQL and MariaDB `major.minor.patch`, then nothing, a
+/// space or a dash-led suffix (`8.0.40-log`, `10.11.9-MariaDB-ubu2204`). `17devel`,
+/// `17.2devel`, `17.0beta1`, `17.2-YB`, `17.2.x` are not releases.
 fn patch_parts(dbms: DbmsKind, version: &str) -> Option<Parts> {
-    let (parts, _) = line_parts(dbms, version)?;
-    let want = if dbms == DbmsKind::Postgres { 2 } else { 3 };
-    (usize::from(parts.len) == want).then_some(parts)
+    let (parts, _, rest) = line_parts(dbms, version)?;
+    let (want, suffix_ok) = if dbms == DbmsKind::Postgres {
+        (2, rest.is_empty() || rest.starts_with(' '))
+    } else {
+        (
+            3,
+            rest.is_empty() || rest.starts_with(' ') || rest.starts_with('-'),
+        )
+    };
+    (usize::from(parts.len) == want && suffix_ok).then_some(parts)
 }
 
-/// Whether a name the snapshot read from `snapshot_version` lacks is certainly absent on a
-/// server reporting `live_version`.
+/// The version rule: whether the snapshot read from `snapshot_version` describes the built-in
+/// objects of a server reporting `live_version` (and so the children of an object it holds:
+/// the columns of a system table).
 ///
 /// - **MySQL and MariaDB:** only at the same line and a patch release up to the snapshot's
-///   (alg/02 HV-INTRO-16 edge 1: their minor releases add functions and system tables, so a
-///   newer patch makes a miss `Unknown`).
+///   (alg/02 HV-INTRO-16 edge 1: their minor releases add functions, system tables and
+///   columns, so a newer patch is not covered).
 /// - **PostgreSQL** (ruling R-W5-3): at any release of the snapshot's major. PostgreSQL keeps
 ///   its system catalogs fixed within a major version: the catalog version (`catversion`)
 ///   changes only between majors, and a minor release never needs `initdb` (PostgreSQL
-///   documentation, "Upgrading a PostgreSQL Cluster"). A development or beta build
-///   (`17devel`, `18beta1`, no `M.m` form) or another major is not covered.
+///   documentation, "Upgrading a PostgreSQL Cluster"). A development or beta build or another
+///   major is not covered.
 ///
-/// An unreadable version is never covered.
+/// Only a release version is covered ([`patch_parts`]). This rule alone does not make a miss
+/// of a whole object a fact: see [`objects_complete`].
 pub fn miss_is_fact(dbms: DbmsKind, live_version: &str, snapshot_version: &str) -> bool {
     match (
         patch_parts(dbms, live_version),
@@ -226,6 +247,36 @@ pub fn miss_is_fact(dbms: DbmsKind, live_version: &str, snapshot_version: &str) 
     ) {
         (Some(live), Some(snap)) if dbms == DbmsKind::Postgres => live.n[0] == snap.n[0],
         (Some(live), Some(snap)) => live.n[..2] == snap.n[..2] && live <= snap,
+        _ => false,
+    }
+}
+
+/// Ruling R-W5-6: whether an object a system schema of the snapshot lacks is certainly absent
+/// from the server. A snapshot holds only what `initdb` creates, so this needs the server
+/// proven to hold nothing more there.
+///
+/// - **PostgreSQL:** the version rule, and `facts.system_schema_extras == Some(false)` (read
+///   on connect: no object with an oid of 16384 or more in `pg_catalog` or
+///   `information_schema`). Extensions installed into `pg_catalog`, superuser objects and
+///   managed-service additions make it `Some(true)`.
+/// - **MySQL and MariaDB:** never. Plugins and managed services (RDS `mysql.rds_*`) add
+///   tables and routines to the system schemas.
+pub fn objects_complete(facts: &ServerFacts, sys: &SystemSnapshot) -> bool {
+    facts.dbms == DbmsKind::Postgres
+        && sys.dbms == DbmsKind::Postgres
+        && facts.system_schema_extras == Some(false)
+        && miss_is_fact(facts.dbms, &facts.version, &sys.server_version)
+}
+
+/// Ruling R-W5-7: whether the snapshot's setting list is the server's complete list: only for
+/// the exact release it was read from (patch releases add and remove settings on every
+/// engine).
+pub fn settings_complete(dbms: DbmsKind, live_version: &str, snapshot_version: &str) -> bool {
+    match (
+        patch_parts(dbms, live_version),
+        patch_parts(dbms, snapshot_version),
+    ) {
+        (Some(live), Some(snap)) => live == snap,
         _ => false,
     }
 }
@@ -241,6 +292,15 @@ enum Source {
     Missing,
 }
 
+/// Why a load gave nothing (without feature `system` there is no source to load).
+#[cfg_attr(not(feature = "system"), allow(dead_code))]
+enum LoadFailure {
+    /// The bytes are not the manifest's or do not decode: decided for good.
+    Permanent,
+    /// The file could not be read now (an I/O error): tried again on the next use.
+    Transient,
+}
+
 /// One manifest row and its lazily decoded snapshot.
 struct Entry {
     dbms: DbmsKind,
@@ -251,8 +311,11 @@ struct Entry {
     #[cfg(feature = "system")]
     digest: u64,
     source: Source,
-    /// `None` inside: the file could not be read, verified or decoded (decided once).
-    decoded: OnceLock<Option<Arc<SystemSnapshot>>>,
+    /// The decoded snapshot, once one load succeeded (one shared `Arc`).
+    decoded: OnceLock<Arc<SystemSnapshot>>,
+    /// Set when the file is not the manifest's or does not decode (review m-3: an I/O error
+    /// is not cached; the next use reads again).
+    refused: OnceLock<()>,
 }
 
 impl fmt::Debug for Entry {
@@ -261,41 +324,72 @@ impl fmt::Debug for Entry {
             .field("dbms", &self.dbms)
             .field("line", &self.line)
             .field("file", &self.file)
-            .field("decoded", &self.decoded.get().map(Option::is_some))
+            .field("decoded", &self.decoded.get().is_some())
+            .field("refused", &self.refused.get().is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl Entry {
-    /// The decoded snapshot, decoding it on first use.
+    /// The decoded snapshot, decoding it on first use. Concurrent first uses may both decode;
+    /// the first stored result is the one every caller shares.
     fn snapshot(&self) -> Option<Arc<SystemSnapshot>> {
-        self.decoded
-            .get_or_init(|| self.load().map(Arc::new))
-            .clone()
+        if let Some(s) = self.decoded.get() {
+            return Some(Arc::clone(s));
+        }
+        if self.refused.get().is_some() {
+            return None;
+        }
+        match self.load() {
+            Ok(snap) => {
+                let _ = self.decoded.set(Arc::new(snap));
+                self.decoded.get().cloned()
+            }
+            Err(LoadFailure::Permanent) => {
+                let _ = self.refused.set(());
+                None
+            }
+            Err(LoadFailure::Transient) => None,
+        }
+    }
+
+    /// Whether a load was decided (decoded or refused).
+    fn settled(&self) -> bool {
+        self.decoded.get().is_some() || self.refused.get().is_some()
     }
 
     #[cfg(feature = "system")]
-    fn load(&self) -> Option<SystemSnapshot> {
+    fn load(&self) -> Result<SystemSnapshot, LoadFailure> {
         let owned;
         let bytes: &[u8] = match &self.source {
             Source::File(path) => {
-                owned = read_bounded(path, MAX_FILE_BYTES).ok()?;
+                owned = match read_bounded(path, MAX_FILE_BYTES) {
+                    Ok(b) => b,
+                    Err(SystemError::Io(e)) if e.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(LoadFailure::Transient);
+                    }
+                    Err(_) => return Err(LoadFailure::Permanent),
+                };
                 &owned
             }
             #[cfg(feature = "embedded-system")]
             Source::Embedded(bytes) => bytes,
             #[cfg(feature = "embedded-system")]
-            Source::Missing => return None,
+            Source::Missing => return Err(LoadFailure::Permanent),
         };
         if twox_hash::XxHash3_64::oneshot(bytes) != self.digest {
-            return None;
+            return Err(LoadFailure::Permanent);
         }
-        let snap = decode::decode(bytes).ok()?;
-        (snap.dbms == self.dbms && snap.line == self.line).then_some(snap)
+        let snap = decode::decode(bytes).map_err(|_| LoadFailure::Permanent)?;
+        if snap.dbms == self.dbms && snap.line == self.line {
+            Ok(snap)
+        } else {
+            Err(LoadFailure::Permanent)
+        }
     }
 
     #[cfg(not(feature = "system"))]
-    fn load(&self) -> Option<SystemSnapshot> {
+    fn load(&self) -> Result<SystemSnapshot, LoadFailure> {
         match self.source {}
     }
 }
@@ -374,7 +468,7 @@ impl SystemCatalogs {
     /// readable: PostgreSQL by major, MySQL and MariaDB by major.minor, never SQLite or another
     /// engine. Decoded on first use; every caller shares one `Arc`.
     pub fn for_server(&self, dbms: DbmsKind, version: &str) -> Option<Arc<SystemSnapshot>> {
-        let (parts, want) = line_parts(dbms, version)?;
+        let (parts, want, _) = line_parts(dbms, version)?;
         self.entries
             .iter()
             .find(|e| {
@@ -416,12 +510,9 @@ impl SystemCatalogs {
             .collect()
     }
 
-    /// How many files have been decoded (or found unreadable) so far.
+    /// How many files have been decoded or refused so far (an I/O failure is retried).
     pub fn decoded_count(&self) -> usize {
-        self.entries
-            .iter()
-            .filter(|e| e.decoded.get().is_some())
-            .count()
+        self.entries.iter().filter(|e| e.settled()).count()
     }
 }
 
@@ -446,6 +537,7 @@ impl ManifestRow {
             digest: self.digest,
             source,
             decoded: OnceLock::new(),
+            refused: OnceLock::new(),
         }
     }
 }
@@ -523,7 +615,7 @@ fn parse_manifest(text: &str) -> Result<Vec<ManifestRow>, SystemError> {
         if line.is_empty() || !line.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
             return Err(corrupt("manifest: bad line"));
         }
-        let parts = Parts::parse(line).ok_or(corrupt("manifest: bad line"))?;
+        let (parts, _) = Parts::parse(line).ok_or(corrupt("manifest: bad line"))?;
         let want = if dbms == DbmsKind::Postgres { 1 } else { 2 };
         if usize::from(parts.len) != want || line.split('.').count() != want {
             return Err(corrupt("manifest: bad line"));
@@ -951,13 +1043,13 @@ mod tests {
 
     #[test]
     fn line_parts_follow_the_engine_rule() {
-        let pg = |v| line_parts(DbmsKind::Postgres, v).map(|(p, w)| p.n[..w].to_vec());
+        let pg = |v| line_parts(DbmsKind::Postgres, v).map(|(p, w, _)| p.n[..w].to_vec());
         assert_eq!(pg("17.11"), Some(vec![17]));
         assert_eq!(pg("17.2 (Debian 17.2-1.pgdg120+1)"), Some(vec![17]));
         assert_eq!(pg("18beta1"), Some(vec![18]));
         assert_eq!(pg(""), None);
         assert_eq!(pg("PostgreSQL 17"), None);
-        let my = |d, v| line_parts(d, v).map(|(p, w)| p.n[..w].to_vec());
+        let my = |d, v| line_parts(d, v).map(|(p, w, _)| p.n[..w].to_vec());
         assert_eq!(my(DbmsKind::MySql, "8.0.40-log"), Some(vec![8, 0]));
         assert_eq!(my(DbmsKind::MySql, "9"), None);
         assert_eq!(
@@ -996,6 +1088,45 @@ mod tests {
             "10.11.20-MariaDB",
             "10.11.19"
         ));
+    }
+
+    #[test]
+    fn only_release_shapes_are_covered() {
+        // Review m-2: text glued to the minor is not a release.
+        let pg = DbmsKind::Postgres;
+        for v in [
+            "17.2devel",
+            "17.0beta1",
+            "17.2.x",
+            "17.2-YB",
+            "17.2abc",
+            "17.2.0.1",
+            "17.",
+            "+17.2",
+            "17.4294967296",
+        ] {
+            assert!(!miss_is_fact(pg, v, "17.6"), "{v:?}");
+        }
+        for v in ["17.2", "17.2 (Debian 17.2-1.pgdg120+1)", " 17.2\n", "017.2"] {
+            assert!(miss_is_fact(pg, v, "17.6"), "{v:?}");
+        }
+        let my = DbmsKind::MySql;
+        assert!(miss_is_fact(my, "8.4.3-log", "8.4.13"));
+        assert!(!miss_is_fact(my, "8.4.13a", "8.4.13"));
+        assert!(!miss_is_fact(my, "8.4.x", "8.4.13"));
+    }
+
+    #[test]
+    fn settings_are_complete_only_at_the_snapshots_exact_release() {
+        let pg = DbmsKind::Postgres;
+        assert!(settings_complete(pg, "17.12", "17.12"));
+        assert!(settings_complete(pg, "17.12 (Debian 17.12-1)", "17.12"));
+        assert!(!settings_complete(pg, "17.11", "17.12"));
+        assert!(!settings_complete(pg, "17.13", "17.12"));
+        let my = DbmsKind::MySql;
+        assert!(settings_complete(my, "8.4.13-log", "8.4.13"));
+        assert!(!settings_complete(my, "8.4.3", "8.4.13"));
+        assert!(!settings_complete(my, "", "8.4.13"));
     }
 
     #[test]

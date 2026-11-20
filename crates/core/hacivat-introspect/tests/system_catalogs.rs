@@ -176,29 +176,25 @@ async fn hub_built_catalogs_carry_the_hubs_system_layer() {
     common::bounded(hub.shutdown(p.id)).await;
 }
 
-/// An engine over a catalog made as the hub makes it: the facts read on connect (PostgreSQL
-/// 17.13) choose the pg17 snapshot, and a plain view of the published generation resolves a
-/// built-in function and a system view through the layer.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn engine_published_facts_resolve_a_pg_builtin_through_the_layer() {
+/// An engine over a fake PostgreSQL server whose facts are `facts`, its catalog made as the
+/// hub makes it (the placeholder facts and the shipped set).
+fn hub_like_engine(
+    facts: Option<Result<ServerFacts, hacivat_introspect::IntroError>>,
+) -> (
+    Arc<Catalog>,
+    hacivat_introspect::engine::IntroHandle,
+    hacivat_introspect::testing::FakeIntrospector,
+) {
     use hacivat_introspect::engine::{Engine, EngineConfig, EngineLimits, Filters, LevelPolicy};
     use hacivat_introspect::scope::parse_scope;
     use hacivat_introspect::testing::FakeIntrospector;
     use hacivat_introspect::testing::fake::FakeMetaSource;
-    use hacivat_meta::props::Props;
 
-    let ctx = IdentCtx {
-        encoding: Some(Arc::from("UTF8")),
-        ..IdentCtx::new(DialectId::Postgres)
-    };
     let fake = FakeIntrospector::new(DbmsKind::Postgres);
     fake.put_ns(NsKey::schema(["db", "public"]), FakeIntrospector::tables(2));
-    let mut facts = ServerFacts::new(DbmsKind::Postgres, ctx.clone());
-    facts.version = Name::from("17.13");
-    fake.set_facts(Some(Ok(facts)));
+    fake.set_facts(facts);
     let meta = FakeMetaSource::new(DbmsKind::Postgres);
     fake.link_meta(meta.clone());
-    // As `CatalogHub` makes it: the placeholder facts and the hub's set.
     let catalog = Arc::new(Catalog::with_system(
         Arc::new(ServerFacts::new(
             DbmsKind::Postgres,
@@ -222,18 +218,47 @@ async fn engine_published_facts_resolve_a_pg_builtin_through_the_layer() {
         limits: EngineLimits::default(),
         runtime: tokio::runtime::Handle::current(),
     });
+    (catalog, handle, fake)
+}
+
+fn pg_facts(version: &str, extras: Option<bool>) -> ServerFacts {
+    let mut facts = ServerFacts::new(
+        DbmsKind::Postgres,
+        IdentCtx {
+            encoding: Some(Arc::from("UTF8")),
+            ..IdentCtx::new(DialectId::Postgres)
+        },
+    );
+    facts.version = Name::from(version);
+    facts.system_schema_extras = extras;
+    facts
+}
+
+fn db_view(snap: Arc<hacivat_meta::snapshot::CatalogSnapshot>) -> SnapshotView {
+    SnapshotView::new(snap).with_search_path(SearchPath::for_pg(
+        &Name::from("db"),
+        &[Name::from("public")],
+        None,
+        None,
+    ))
+}
+
+/// An engine over a catalog made as the hub makes it: the facts read on connect (PostgreSQL
+/// 17.13, nothing beyond initdb in the system schemas) choose the pg17 snapshot, and a plain
+/// view of the published generation resolves a built-in function and a system view through
+/// the layer, and a name the snapshot lacks is a fact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engine_published_facts_resolve_a_pg_builtin_through_the_layer() {
+    use hacivat_meta::props::Props;
+
+    let (catalog, handle, _fake) = hub_like_engine(Some(Ok(pg_facts("17.13", Some(false)))));
     assert!(catalog.current().overlays.system.is_none());
     common::bounded(handle.on_connect()).await.unwrap();
     common::idle(&handle).await;
     let snap = catalog.current();
     assert_eq!(&*snap.server.version, "17.13");
     assert_eq!(snap.overlays.system_label().map(|l| &**l), Some("17"));
-    let view = SnapshotView::new(snap).with_search_path(SearchPath::for_pg(
-        &Name::from("db"),
-        &[Name::from("public")],
-        None,
-        None,
-    ));
+    let view = db_view(snap);
     let hit = view.lookup(&parts("pg_catalog.pg_stat_activity"), KindGroup::Relations);
     let Lookup::Found(h) = &hit else {
         panic!("pg_stat_activity through the layer: {hit:?}");
@@ -249,5 +274,92 @@ async fn engine_published_facts_resolve_a_pg_builtin_through_the_layer() {
         panic!("now() is a routine");
     };
     assert_eq!(r.args.as_deref(), Some(&[][..]));
+    assert!(matches!(
+        view.lookup(&parts("pg_catalog.hv_t26_absent"), KindGroup::Relations),
+        Lookup::Missing(_)
+    ));
     handle.shutdown();
+}
+
+/// Ruling R-W5-6 through the engine: facts saying the system schemas hold objects beyond
+/// initdb keep the layer's hits, and make its misses `Unknown`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engine_published_extras_make_system_misses_unknown() {
+    let (catalog, handle, _fake) = hub_like_engine(Some(Ok(pg_facts("17.13", Some(true)))));
+    common::bounded(handle.on_connect()).await.unwrap();
+    common::idle(&handle).await;
+    let view = db_view(catalog.current());
+    assert!(matches!(
+        view.lookup(&parts("pg_catalog.pg_class"), KindGroup::Relations),
+        Lookup::Found(_)
+    ));
+    assert!(matches!(
+        view.lookup(&parts("pg_catalog.hv_t26_absent"), KindGroup::Relations),
+        Lookup::Unknown(_)
+    ));
+    handle.shutdown();
+}
+
+/// Review m-1: a failed facts read clears the version and the initdb-only fact, so the system
+/// layer chosen from the old facts goes (the server behind the profile may have changed).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_facts_read_drops_the_system_layer() {
+    use hacivat_introspect::IntroError;
+    use hacivat_introspect::ddl_effects::Target;
+
+    let (catalog, handle, fake) = hub_like_engine(Some(Ok(pg_facts("17.13", Some(false)))));
+    common::bounded(handle.on_connect()).await.unwrap();
+    common::idle(&handle).await;
+    assert!(catalog.current().overlays.system.is_some());
+    fake.set_facts(Some(Err(IntroError::Timeout)));
+    common::bounded(handle.refresh(Target::ScopeRefresh, Trigger::User))
+        .await
+        .unwrap();
+    common::idle(&handle).await;
+    let snap = catalog.current();
+    assert_eq!(&*snap.server.version, "");
+    assert_eq!(snap.server.system_schema_extras, None);
+    assert!(snap.overlays.system.is_none());
+    // Nothing comes from the old pg17 snapshot any more (the fake server lists no live
+    // `pg_catalog`, so the answer is the live catalog's own).
+    assert!(!matches!(
+        db_view(snap).lookup(&parts("pg_catalog.pg_class"), KindGroup::Relations),
+        Lookup::Found(_)
+    ));
+    handle.shutdown();
+}
+
+/// Ruling R-W5-6 on real servers: the PostgreSQL facts read on connect carry the version and
+/// the initdb-only fact of the system schemas, read in one metadata snapshot. The pinned
+/// images hold nothing beyond initdb in `pg_catalog`/`information_schema`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn pg_server_facts_read_the_initdb_only_fact() {
+    use hacivat_introspect::Introspector;
+    use hacivat_introspect::pg::PgIntrospector;
+    if !docker_enabled() {
+        return;
+    }
+    for id in common::pg::PG {
+        let Some(t) = require_target(id) else {
+            continue;
+        };
+        let pg = Pg::connect(&t).await;
+        let mut c = pg.meta().await;
+        let facts = PgIntrospector
+            .server_facts(&mut c)
+            .await
+            .expect("the facts read")
+            .expect("PostgreSQL reports its facts");
+        assert!(
+            facts.version.starts_with(&t.major),
+            "{id}: {}",
+            facts.version
+        );
+        assert_eq!(facts.system_schema_extras, Some(false), "{id}");
+        println!(
+            "HV-FACT t26 {id} version={} system_schema_extras={:?}",
+            facts.version, facts.system_schema_extras
+        );
+    }
 }

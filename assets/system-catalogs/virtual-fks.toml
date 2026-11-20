@@ -9,6 +9,14 @@
 # inferred from column names. Each row must resolve against every shipped PostgreSQL snapshot
 # (14-18; `shipped_virtual_fks_resolve_against_every_pg_snapshot`).
 #
+# Caveats for consumers (diagrams, join completion; T26 review m-5):
+# - Many referencing columns hold 0 for "none" rather than NULL (reltoastrelid, reloftype,
+#   reltablespace, relam, typrelid, typelem, typarray, typbasetype, typcollation,
+#   attcollation, conrelid, contypid, conindid, confrelid): a join through them is an outer
+#   join in spirit, and 0 matches no row.
+# - pg_authid is readable by superusers only; for an ordinary role, suggest the readable view
+#   pg_roles (same oid column) instead of a join to pg_authid.
+#
 # Format (read by `hacivat_meta::system`, a strict subset of TOML): one `[[fk]]` per key, with
 # `dbms`, `from` and `to` as `schema.relation`, `from_columns`/`to_columns` in key order,
 # `source`; optional `name`. Not part of the generated manifest (`xtask minicat` leaves it be).

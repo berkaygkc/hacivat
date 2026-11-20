@@ -69,6 +69,10 @@ fn snapshot(
 ) -> Arc<CatalogSnapshot> {
     let mut facts = ServerFacts::new(dbms, ctx);
     facts.version = name(version);
+    // A PostgreSQL server proven to hold nothing beyond initdb in its system schemas (R-W5-6).
+    if dbms == DbmsKind::Postgres {
+        facts.system_schema_extras = Some(false);
+    }
     let catalog = Catalog::new(Arc::new(facts));
     let publisher = catalog.publisher().unwrap();
     let mut changes = Vec::new();
@@ -435,6 +439,48 @@ fn settings_from_snapshot_offline() {
         .expect("work_mem");
     assert_eq!(work_mem.context.as_deref(), Some("user"));
     assert!(settings.windows(2).all(|w| w[0].name < w[1].name));
+    // The exact release: a name the list lacks is a fact.
+    assert!(matches!(view.setting("WORK_MEM"), Lookup::Found(_)));
+    assert!(matches!(view.setting("hv_no_such_guc"), Lookup::Missing(_)));
+}
+
+/// Ruling R-W5-7: at any other release the snapshot's list is partial (patch releases add
+/// settings: PostgreSQL 16.4 added `restrict_nonsystem_relation_kind`): the known names are
+/// found, the list and a miss are `Unknown`.
+#[cfg(feature = "system")]
+#[test]
+fn settings_are_partial_at_another_release() {
+    for (dbms, ctx, version) in [
+        (DbmsKind::Postgres, pg_ctx(), "17.11"),
+        (DbmsKind::Postgres, pg_ctx(), "17.13"),
+        (DbmsKind::MySql, my_ctx(), "8.4.99"),
+        (DbmsKind::MySql, my_ctx(), "8.4.3"),
+    ] {
+        let snap = snapshot(dbms, ctx, version, vec![], vec![]);
+        let view =
+            SnapshotView::new(snap).with_layers(Arc::new(shipped().overlays_for(dbms, version)));
+        assert!(
+            matches!(
+                view.settings(),
+                Lookup::Unknown(UnknownReason::ServerDependent)
+            ),
+            "{version}"
+        );
+        let known = if dbms == DbmsKind::Postgres {
+            "work_mem"
+        } else {
+            "max_connections"
+        };
+        assert!(matches!(view.setting(known), Lookup::Found(_)), "{version}");
+        assert!(!view.known_settings().is_empty());
+        assert!(
+            matches!(
+                view.setting("hv_no_such_setting"),
+                Lookup::Unknown(UnknownReason::ServerDependent)
+            ),
+            "{version}"
+        );
+    }
 }
 
 #[test]

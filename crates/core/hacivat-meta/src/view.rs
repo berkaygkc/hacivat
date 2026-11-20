@@ -522,13 +522,28 @@ impl SnapshotView {
                 return Lookup::Unknown(UnknownReason::NotLoaded);
             };
             // ## m4-t26-overlays (named exception in Task 9's file): a system namespace the
-            // user did not choose to introspect live answers from the system layer; a miss
-            // there walks on only when it is a fact (not against a newer patch release).
+            // user did not choose to introspect live answers from the system layer (MySQL's
+            // `information_schema` caselessly, review I-1). After a miss there, a live arena of
+            // the same namespace that holds the name answers (an extension in `pg_catalog`); a
+            // miss walks on only when the server is proven to hold nothing beyond initdb
+            // (ruling R-W5-6).
             if let Some(sys) = crate::overlay::system_ns(snap, &self.layers, key) {
-                match self.in_arena(&sys.arena, group, part) {
+                let mut hit = self.in_arena(&sys.arena, group, part);
+                if !matches!(hit, Lookup::Found(_))
+                    && let Some(i) = sys.caseless_hit(group, &part.text)
+                {
+                    hit = Lookup::Found(i);
+                }
+                let live_holds = || {
+                    sys.live
+                        .as_ref()
+                        .is_some_and(|l| matches!(self.in_arena(l, group, part), Lookup::Found(_)))
+                };
+                match hit {
                     Lookup::Found(idx) => return Lookup::Found(sys.handle(idx)),
+                    _ if live_holds() => {}
                     Lookup::Unknown(reason) => return Lookup::Unknown(reason),
-                    Lookup::Missing(_) if sys.miss_is_fact => continue,
+                    Lookup::Missing(_) if sys.objects_complete => continue,
                     Lookup::Missing(_) => return Lookup::Unknown(UnknownReason::ServerDependent),
                 }
             }

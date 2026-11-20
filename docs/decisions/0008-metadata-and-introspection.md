@@ -2623,3 +2623,56 @@ and implements `sql_catalog::CatalogView` for it (HV-INTRO-16 consumer side; R-M
 - **The pg13 Docker test** lives in `hacivat-introspect/tests/system_catalogs.rs` (named
   exception: a new file of this task there), because `hacivat-meta` may not reach a server
   (`MetaBelowIntrospect`).
+- **Fix round 1 (opus review: 4 Important, minors; rulings R-W5-6, R-W5-7).**
+  - *I-1.* MySQL and MariaDB compare the `information_schema` name and its table names
+    ASCII-caselessly at any `lower_case_table_names`. The system layer matches that schema
+    caselessly (`system_ns`, `sql_view::place`), and a miss in it gets a second, caseless look
+    at its relations (`SystemNs::caseless_hit`, also for a parent key in `children`).
+    `information_schema.tables` and `INFORMATION_SCHEMA.TABLES` are found. `mysql`,
+    `performance_schema` and `sys` stay case-sensitive under lctn 0.
+  - *I-2, ruling R-W5-6.* A snapshot holds only what initdb creates, so a whole-object miss in
+    the system layer is a fact only when the server is proven to hold nothing more there
+    (`system::objects_complete`).
+    - PostgreSQL: `ServerFacts::system_schema_extras` (named exception in Task 9's
+      `snapshot.rs`) is read on connect, in the same metadata snapshot as `Identity`, by the
+      new section `SystemExtras` (`packs/pg/45-system-extras.hvq.sql`, a new pack file
+      registered in Task 4's `pack/mod.rs`, fenced): any relation, routine, type or operator
+      with an oid of 16384 or more in `pg_catalog` or `information_schema`. A miss is a fact
+      only with `Some(false)` and the version rule; `Some(true)` or `None` gives
+      `Unknown(ServerDependent)` (and stops an unqualified walk there).
+    - MySQL/MariaDB: never (plugins and managed services add system tables and routines).
+    - Hits stay `Found`. After a snapshot miss, a live in-scope arena of the same namespace is
+      consulted: an extension's object in `pg_catalog` is found there (walk and `children`).
+    - The children of an object the snapshot holds (a system table's columns) follow the
+      version rule only (`SystemNs::children_complete`); the schema's own object list follows
+      `objects_complete`.
+  - *I-3, ruling R-W5-7.* `settings()` is `Found` only at the snapshot's exact release
+    (`system::settings_complete`); elsewhere `Unknown(ServerDependent)`.
+    `SnapshotView::known_settings()` gives the partial list and `setting(name)` the point
+    answer: `Found` when known, `Missing` only where the list is complete, else `Unknown`.
+  - *I-4.* A user virtual FK's relation matches by server id only within the same database on
+    PostgreSQL (OIDs are per database).
+  - *m-1.* A failed facts read also clears the version, `version_num` and
+    `system_schema_extras` (named exception in Task 15's `scheduler.rs`, fenced): the layer
+    drops and system lookups answer `Unknown`.
+  - *m-2.* Only release shapes are covered: PostgreSQL `M.m` then nothing or a space;
+    MySQL/MariaDB `M.m.p` then nothing, a space or a dash. `17.2devel`, `17.0beta1`,
+    `17.2-YB`, `17.2.x` are not.
+  - *m-3.* `Publisher::apply` decodes a new version's snapshot before it takes the writer lock.
+    Only a file that is not the manifest's or does not decode is refused for good; an I/O
+    failure is tried again on the next use.
+  - *m-5.* `virtual-fks.toml` notes the zero-means-none columns and `pg_authid`'s
+    superuser-only readability (`pg_roles` instead).
+  - *m-7.* `real_duplicate` compares MySQL/MariaDB column names ASCII-caselessly.
+  - *m-8.* The PostgreSQL facts and the initdb-only fact are one read-only transaction. It runs
+    inside the engine job's cancellation (the job's future is dropped on cancel, as for
+    `identity`). Reusing the listing's `Identity` row needs an introspector seam change:
+    carried to T33 hygiene.
+  - *m-4.* There is no extra publish on connect: the PostgreSQL `SetServer` rides in the scope
+    refresh's own publish (the review's measurement).
+  - Carried to T30: driving the pg13 Docker test through the engine path (m-6; today it
+    publishes the `Names` state by hand and takes its version from the target, so it proves
+    the view's rule, not the engine path), and the live `Names`-level system-schema
+    introspection of unsupported versions (R-M4-6).
+  - The review's hostile tests are `hacivat-meta/tests/overlay_hostile.rs` (H1 and H2
+    tightened to `Found`).

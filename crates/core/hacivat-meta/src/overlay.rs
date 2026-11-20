@@ -8,13 +8,18 @@
 //!   `sys`) resolves from the snapshot of [`Overlays::system`] (objects flagged
 //!   `PRE_INTROSPECTED`, the snapshot's line as the version label), unless the user chose
 //!   "Introspect live" for it ([`Overlays::live_system`]): then from the live namespace like
-//!   any other. Without a snapshot the live namespace answers, or nothing (`Unknown`). A name
-//!   the snapshot lacks is `Missing` only where the snapshot covers the server
-//!   ([`crate::system::miss_is_fact`]: PostgreSQL any release of its major, R-W5-3; MySQL and
-//!   MariaDB a patch release up to the snapshot's own); elsewhere it is
-//!   `Unknown(ServerDependent)`, never `Missing` (alg/02 HV-INTRO-16 edge 1), and so is a
-//!   child list (a column the snapshot lacks may exist there). A system relation the
-//!   snapshot holds without columns answers `Unknown`, never "no columns".
+//!   any other. Without a snapshot the live namespace answers, or nothing (`Unknown`).
+//!   MySQL/MariaDB `information_schema` names match ASCII-caselessly (review I-1). An object
+//!   the snapshot lacks is `Missing` only when the server is proven to hold nothing beyond
+//!   initdb in its system schemas ([`crate::system::objects_complete`], ruling R-W5-6:
+//!   PostgreSQL with `ServerFacts::system_schema_extras == Some(false)`, never MySQL/MariaDB);
+//!   before that, a live in-scope arena of the same namespace is consulted, so an extension's
+//!   object in `pg_catalog` is found. The children of an object the snapshot holds (a system
+//!   table's columns) are complete where the version rule covers the server
+//!   ([`crate::system::miss_is_fact`]: PostgreSQL any release of its major, R-W5-3;
+//!   MySQL/MariaDB a patch up to the snapshot's own). Everything else is
+//!   `Unknown(ServerDependent)`, never `Missing` (alg/02 HV-INTRO-16 edge 1). A system
+//!   relation the snapshot holds without columns answers `Unknown`, never "no columns".
 //!   PostgreSQL system objects are keyed in the live form `[database, schema, …]`: the view
 //!   hands out arenas re-keyed per database (built once per database and shared,
 //!   [`LayerCache`]).
@@ -40,7 +45,7 @@ use smallvec::SmallVec;
 use sql_catalog::types::{ColumnInfo, RelInfo};
 
 use crate::ids::{NsKey, NsKind, ObjId, ObjectKey};
-use crate::kind::{KindGroup, ObjectKind, pg_family};
+use crate::kind::{KindGroup, ObjectKind, mysql_family, pg_family};
 use crate::name::{Name, NamePart};
 use crate::namespace::{NamespaceSnapshot, ObjFlags};
 use crate::props::Props;
@@ -311,11 +316,24 @@ impl LayerCache {
     }
 }
 
+/// The one MySQL/MariaDB system schema whose name and table names the server compares
+/// ASCII-caselessly whatever `lower_case_table_names` is (review I-1).
+const MYSQL_CASELESS_SCHEMA: &str = "information_schema";
+
 /// A system namespace as the view sees it.
 pub(crate) struct SystemNs {
     pub arena: Arc<NamespaceSnapshot>,
-    /// A miss in `arena` is a fact (the server's patch is not newer than the snapshot's).
-    pub miss_is_fact: bool,
+    /// A miss of a whole object in `arena` is a fact (ruling R-W5-6,
+    /// [`crate::system::objects_complete`]).
+    pub objects_complete: bool,
+    /// The children of an object `arena` holds are all there (the version rule,
+    /// [`crate::system::miss_is_fact`]).
+    pub children_complete: bool,
+    /// Names in it compare ASCII-caselessly (MySQL/MariaDB `information_schema`).
+    pub caseless: bool,
+    /// The live arena of the same namespace, consulted after a miss in `arena` (an object the
+    /// snapshot cannot hold: an extension in `pg_catalog`), when the catalog holds one in scope.
+    pub live: Option<Arc<NamespaceSnapshot>>,
 }
 
 impl SystemNs {
@@ -326,6 +344,35 @@ impl SystemNs {
                 ns: SYSTEM_LAYER_NS,
                 idx,
             },
+        }
+    }
+
+    /// An object right under the root named `name` ASCII-caselessly, of `group` (a caseless
+    /// namespace's second look after an exact miss).
+    pub fn caseless_hit(&self, group: KindGroup, name: &str) -> Option<u32> {
+        if !self.caseless || !name.is_ascii() {
+            return None;
+        }
+        let dbms = self.arena.dbms();
+        self.arena
+            .children(0)
+            .find(|(_, o)| {
+                o.kind().group(dbms) == Some(group) && o.name().eq_ignore_ascii_case(name)
+            })
+            .map(|(i, _)| i)
+    }
+
+    /// The object `key` names in `arena`: exactly, else (caseless namespace) by the caseless
+    /// name of a relation right under the root.
+    fn find(&self, key: &ObjectKey) -> Option<u32> {
+        if let Some(i) = self.arena.find(key) {
+            return Some(i);
+        }
+        match key.path.as_slice() {
+            [_, name] if self.caseless && key.kind != ObjectKind::Schema => {
+                self.caseless_hit(KindGroup::Relations, name)
+            }
+            _ => None,
         }
     }
 }
@@ -350,24 +397,37 @@ pub(crate) fn system_ns(
         (true, [_, s]) | (false, [s]) => s,
         _ => return None,
     };
-    let src = sys.namespace(schema)?;
+    let caseless = mysql_family(sys.dbms) && schema.eq_ignore_ascii_case(MYSQL_CASELESS_SCHEMA);
+    let src = if caseless {
+        sys.namespace(MYSQL_CASELESS_SCHEMA)?
+    } else {
+        sys.namespace(schema)?
+    };
     let arena = if pg {
         layers.cache.system_arena(sys, key, src)?
     } else {
         Arc::clone(src)
     };
+    let live = match crate::resolve::ns_status(snap, key) {
+        v if v.status == crate::resolve::NsStatus::OutOfScope => None,
+        v => v.arena.cloned(),
+    };
     Some(SystemNs {
         arena,
-        miss_is_fact: crate::system::miss_is_fact(
+        objects_complete: crate::system::objects_complete(&snap.server, sys),
+        children_complete: crate::system::miss_is_fact(
             sys.dbms,
             &snap.server.version,
             &sys.server_version,
         ),
+        caseless,
+        live,
     })
 }
 
 /// `children(parent, kind)` from the system layer, when `parent` lies in a namespace it
-/// answers for (see [`system_ns`]).
+/// answers for (see [`system_ns`]). `None` hands the question to the live catalog: a parent
+/// the snapshot lacks but the live arena of that namespace holds.
 pub(crate) fn system_children(
     snap: &CatalogSnapshot,
     layers: &Overlays,
@@ -384,36 +444,50 @@ pub(crate) fn system_children(
         path: parent.path[..n].iter().cloned().collect(),
     };
     let sys = system_ns(snap, layers, &key)?;
-    Some(match sys.arena.find(parent) {
-        // A newer patch release may have added a child (a column): the list is not complete.
-        Some(_) if !sys.miss_is_fact => Lookup::Unknown(UnknownReason::ServerDependent),
-        Some(at) => {
-            let found: Vec<ObjHandle> = sys
-                .arena
-                .children_of_kind(at, kind)
-                .map(|(i, _)| sys.handle(i))
-                .collect();
-            // A system relation the snapshot holds without columns (a reader that could not
-            // see them) is not a relation without columns.
-            let relation = sys.arena.obj(at).is_some_and(|o| {
-                o.kind() != ObjectKind::Schema
-                    && o.kind().group(sys.arena.dbms()) == Some(KindGroup::Relations)
-            });
-            if kind == ObjectKind::Column && relation && found.is_empty() {
-                Lookup::Unknown(UnknownReason::NotLoaded)
-            } else {
-                Lookup::Found(found)
-            }
-        }
-        None if sys.miss_is_fact => Lookup::Missing(MissingReason::NotFound),
-        None => Lookup::Unknown(UnknownReason::ServerDependent),
-    })
+    let at = match sys.find(parent) {
+        Some(at) => at,
+        None if sys.live.as_ref().is_some_and(|l| l.find(parent).is_some()) => return None,
+        None if sys.objects_complete => return Some(Lookup::Missing(MissingReason::NotFound)),
+        None => return Some(Lookup::Unknown(UnknownReason::ServerDependent)),
+    };
+    // The objects of the schema (the root's children) are complete only when nothing beyond
+    // initdb is there; the children of an object it holds follow the version rule.
+    let complete = if at == 0 {
+        sys.objects_complete
+    } else {
+        sys.children_complete
+    };
+    if !complete {
+        return Some(Lookup::Unknown(UnknownReason::ServerDependent));
+    }
+    let found: Vec<ObjHandle> = sys
+        .arena
+        .children_of_kind(at, kind)
+        .map(|(i, _)| sys.handle(i))
+        .collect();
+    // A system relation the snapshot holds without columns (a reader that could not see them)
+    // is not a relation without columns.
+    let relation = sys.arena.obj(at).is_some_and(|o| {
+        o.kind() != ObjectKind::Schema
+            && o.kind().group(sys.arena.dbms()) == Some(KindGroup::Relations)
+    });
+    Some(
+        if kind == ObjectKind::Column && relation && found.is_empty() {
+            Lookup::Unknown(UnknownReason::NotLoaded)
+        } else {
+            Lookup::Found(found)
+        },
+    )
 }
 
-/// Whether two relation keys denote the same relation for a virtual foreign key: the same
+/// Whether two relation keys denote the same relation for a virtual foreign key: on
+/// PostgreSQL first the same database (OIDs are per database, review I-4); then the same
 /// server id when both have one (a rename keeps it), else (or when the ids differ: an overlay
 /// imported from another server) the same path.
-fn same_relation(a: &ObjectKey, b: &ObjectKey) -> bool {
+fn same_relation(a: &ObjectKey, b: &ObjectKey, pg: bool) -> bool {
+    if pg && a.path.first() != b.path.first() {
+        return false;
+    }
     matches!((a.server_id, b.server_id), (Some(x), Some(y)) if x == y) || a.path == b.path
 }
 
@@ -455,7 +529,7 @@ impl SnapshotView {
         }
         let mut out = Vec::new();
         for fk in &layers.virtual_fks {
-            if same_relation(side(fk, outgoing), rel) {
+            if same_relation(side(fk, outgoing), rel, pg) {
                 out.extend(self.layer_fk(fk.clone(), FkOrigin::User, None));
             }
         }
@@ -522,7 +596,9 @@ impl SnapshotView {
 }
 
 /// Whether `from` has a real foreign key with `fk`'s columns to `fk`'s target relation.
+/// MySQL and MariaDB compare column names ASCII-caselessly (review m-7).
 fn real_duplicate(from: &ObjHandle, fk: &VirtualFk, target: &Lookup<ObjHandle>) -> bool {
+    let caseless = mysql_family(from.ns.dbms());
     let target_id = match target {
         Lookup::Found(t) => t.obj().server_id(),
         _ => None,
@@ -534,7 +610,14 @@ fn real_duplicate(from: &ObjHandle, fk: &VirtualFk, target: &Lookup<ObjHandle>) 
                 return false;
             };
             let cols_eq = |a: &[Name], b: &[String]| {
-                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| **x == **y)
+                a.len() == b.len()
+                    && a.iter().zip(b).all(|(x, y)| {
+                        if caseless {
+                            x.eq_ignore_ascii_case(y)
+                        } else {
+                            **x == **y
+                        }
+                    })
             };
             cols_eq(&p.columns, &fk.from_cols)
                 && cols_eq(&p.target_columns, &fk.to_cols)

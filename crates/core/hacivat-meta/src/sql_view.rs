@@ -15,11 +15,11 @@
 //!   system layer's patch rule; everything else is `Unknown` with its reason
 //!   (`ServerDependent` passed through, R-M4-41).
 //! - **Lists** (`relations`, `functions_in`, `types`, `columns`) are `Found` only from a
-//!   complete, unfiltered namespace; a system namespace is complete only for a server its
-//!   snapshot covers (`system::miss_is_fact`: PostgreSQL any release of its major, R-W5-3; a
-//!   newer MySQL/MariaDB patch may have added a relation or a column, so there the list is
-//!   `Unknown(ServerDependent)`; alg/02 HV-INTRO-16 edge 1). A system relation the
-//!   snapshot holds without columns is `Unknown`, never "no columns".
+//!   complete, unfiltered namespace. A system schema's object list is complete only where
+//!   `system::objects_complete` holds (ruling R-W5-6), the columns of a system relation only
+//!   where the version rule covers the server (`system::miss_is_fact`); elsewhere
+//!   `Unknown(ServerDependent)` (alg/02 HV-INTRO-16 edge 1). A system relation the snapshot
+//!   holds without columns is `Unknown`, never "no columns".
 //! - **Built-ins.** PostgreSQL built-ins are `pg_catalog`'s routines, with their arguments;
 //!   MySQL/MariaDB built-ins are known by name only (`args = None`, X-8): `functions` and
 //!   `functions_in` add them to every schema's answer with an empty `schema` (they are called
@@ -70,6 +70,8 @@ struct Placed {
     /// The live key (`[database, schema]` on PostgreSQL).
     key: NsKey,
     system: bool,
+    /// System layer: the children of an object the snapshot holds are all there.
+    children_complete: bool,
 }
 
 enum Place {
@@ -269,19 +271,23 @@ impl SnapshotView {
             status: status_of(v.status),
             key,
             system: false,
+            children_complete: false,
         }
     }
 
     fn placed_system(key: NsKey, sys: crate::overlay::SystemNs) -> Placed {
         Placed {
             arena: Some(sys.arena),
-            status: if sys.miss_is_fact {
+            // Ruling R-W5-6: the schema's object list is complete only when the server holds
+            // nothing beyond initdb there.
+            status: if sys.objects_complete {
                 Status::Complete
             } else {
                 Status::Partial(UnknownReason::ServerDependent)
             },
             key,
             system: true,
+            children_complete: sys.children_complete,
         }
     }
 
@@ -302,8 +308,12 @@ impl SnapshotView {
             && sys.dbms == snap.server.dbms
         {
             for k in sys.namespaces.keys() {
+                // MySQL/MariaDB compare `information_schema` caselessly at any lctn (I-1).
                 if let [s] = k.path.as_slice()
-                    && rule.matches(s, probe)
+                    && (rule.matches(s, probe)
+                        || (mysql_family(sys.dbms)
+                            && **s == *"information_schema"
+                            && s.eq_ignore_ascii_case(probe)))
                 {
                     let key = Self::live_key(db, s);
                     if let Some(sns) = system_ns(snap, self.layers(), &key) {
@@ -596,7 +606,12 @@ impl CatalogView for SnapshotView {
             Ok(p) => p,
             Err(r) => return Lookup::Unknown(r),
         };
-        if p.status == Status::Complete
+        let complete = if p.system {
+            p.children_complete
+        } else {
+            p.status == Status::Complete
+        };
+        if complete
             && let Some(arena) = &p.arena
             && let Some(idx) = relation_idx(arena, &rel.name)
             && arena.obj(idx).is_some_and(|o| *o.name() == rel.name)
@@ -890,11 +905,22 @@ impl CatalogView for SnapshotView {
         Lookup::Unknown(UnknownReason::NotLoaded)
     }
 
+    /// Ruling R-W5-7: the snapshot's list is the server's complete list only at the exact
+    /// release it was read from; at any other release it is `Unknown(ServerDependent)` (the
+    /// known names: [`SnapshotView::known_settings`], [`SnapshotView::setting`]).
     fn settings(&self) -> Lookup<Arc<[SettingInfo]>> {
         let snap = self.snapshot();
         match &self.layers().system {
             Some(sys) if sys.dbms == snap.server.dbms && !sys.settings.is_empty() => {
-                Lookup::Found(Arc::clone(&sys.settings))
+                if crate::system::settings_complete(
+                    sys.dbms,
+                    &snap.server.version,
+                    &sys.server_version,
+                ) {
+                    Lookup::Found(Arc::clone(&sys.settings))
+                } else {
+                    Lookup::Unknown(UnknownReason::ServerDependent)
+                }
             }
             _ => Lookup::Unknown(UnknownReason::NotLoaded),
         }
@@ -907,6 +933,35 @@ impl CatalogView for SnapshotView {
 }
 
 impl SnapshotView {
+    // ## m4-t26-overlays (ruling R-W5-7)
+    /// The setting names the system layer knows (a hint list: complete only where
+    /// `settings()` is `Found`); empty without a snapshot of the server's engine.
+    pub fn known_settings(&self) -> Arc<[SettingInfo]> {
+        match &self.layers().system {
+            Some(sys) if sys.dbms == self.snapshot().server.dbms => Arc::clone(&sys.settings),
+            _ => Arc::from([]),
+        }
+    }
+
+    /// The setting `name` (compared ASCII-caselessly: PostgreSQL GUC and MySQL variable names
+    /// are case-insensitive): `Found` when the snapshot knows it, `Missing` only when the
+    /// snapshot's list is complete for this server (`settings()` is `Found`), else
+    /// `Unknown`.
+    pub fn setting(&self, name: &str) -> Lookup<SettingInfo> {
+        if let Some(s) = self
+            .known_settings()
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
+        {
+            return Lookup::Found(s.clone());
+        }
+        match self.settings() {
+            Lookup::Found(_) => Lookup::Missing(MissingReason::NotFound),
+            Lookup::Missing(r) => Lookup::Missing(r),
+            Lookup::Unknown(r) => Lookup::Unknown(r),
+        }
+    }
+
     /// Whether the columns of live relation `idx` are all in `arena`: no kind-group state of
     /// the relation's columns says otherwise and no scope filter thins them.
     fn columns_complete(&self, p: &Placed, arena: &NamespaceSnapshot, idx: u32) -> bool {
