@@ -590,6 +590,15 @@ impl IntroHandle {
         self.send(scheduler::Cmd::MarkStale { namespaces, scope });
     }
 
+    // ## m4-t27-refresh-ui (named exception; T26 carry)
+    /// Hands the profile's user data to the catalog's overlays (`CatalogChange::SetUserData`):
+    /// virtual foreign keys, annotations and the "Introspect live" choices. The engine, the
+    /// catalog's only writer, publishes it.
+    pub fn set_user_data(&self, data: Arc<hacivat_meta::userdata::ProfileUserData>) {
+        self.send(scheduler::Cmd::SetUserData(data));
+    }
+    // ## m4-t27-refresh-ui
+
     // ## m4-t22-state (named exception)
     /// The top-level objects a mass deletion held for `ns` would remove (D-039; the
     /// confirmation dialog lists them), `None` when nothing is held.

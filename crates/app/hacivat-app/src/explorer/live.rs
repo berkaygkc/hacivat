@@ -227,6 +227,9 @@ struct Sent {
     filters: Option<String>,
     levels: BTreeMap<ObjectKey, Level>,
     current: Option<(Option<String>, Option<String>)>,
+    // ## m4-t27-refresh-ui (named exception; T26 carry)
+    /// The user data handed to the overlays (virtual FKs, annotations, "Introspect live").
+    user_data: Option<Arc<hacivat_meta::userdata::ProfileUserData>>,
 }
 
 /// One profile's live state.
@@ -1045,6 +1048,25 @@ fn forward(id: ProfileId, cx: &mut App) {
             }
         }
         next.levels = data.level_overrides.clone();
+    }
+    // ## m4-t27-refresh-ui (named exception; T26 carry): the overlays' user layers and the
+    // persisted "Introspect live" choices (`CatalogChange::SetUserData`).
+    // Only what the overlays read, and only when it changed (none sent counts as empty), so a
+    // profile without virtual foreign keys, annotations or live choices publishes nothing.
+    let overlay_part = |d: &hacivat_meta::userdata::ProfileUserData| {
+        (
+            d.virtual_fks.clone(),
+            d.annotations.clone(),
+            d.live_system.clone(),
+        )
+    };
+    let before = sent
+        .user_data
+        .as_deref()
+        .map_or_else(|| overlay_part(&Default::default()), overlay_part);
+    if overlay_part(&data) != before {
+        h.set_user_data(data.clone());
+        next.user_data = Some(data.clone());
     }
     if next != sent {
         cx.default_global::<CatalogHost>().entry(id).sent = next;

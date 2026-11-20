@@ -135,6 +135,8 @@ pub(crate) enum Cmd {
         namespaces: Vec<NsKey>,
         scope: bool,
     },
+    // ## m4-t27-refresh-ui (named exception: the overlays' user layers and live choices)
+    SetUserData(Arc<hacivat_meta::userdata::ProfileUserData>),
 }
 
 /// Someone waiting for a task.
@@ -698,6 +700,10 @@ impl Actor {
             Cmd::Shutdown => {}
             // ## m4-t21-refresh (named exception)
             Cmd::MarkStale { namespaces, scope } => self.mark_stale(namespaces, scope),
+            // ## m4-t27-refresh-ui (named exception): the engine is the catalog's only writer.
+            Cmd::SetUserData(data) => {
+                let _ = self.publish(vec![CatalogChange::SetUserData(data)], None);
+            }
         }
     }
 

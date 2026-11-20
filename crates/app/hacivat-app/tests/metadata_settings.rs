@@ -36,14 +36,14 @@ fn settings_tab(
     cx: &mut TestAppContext,
     lang: &str,
 ) -> (&'static mut VisualTestContext, LocalPaths) {
-    let root = tempfile::tempdir().expect("temp dir");
-    let paths = LocalPaths::under(root.path());
+    // The temp root lives until the test ends (the temp-dir hygiene rule).
+    let root = temp_root();
+    let paths = LocalPaths::under(&root);
     write(
         paths.settings_toml(),
         "version = 1\n\n[ui]\ntime_zone = \"UTC\"\n",
     );
-    let root: &'static tempfile::TempDir = Box::leak(Box::new(root));
-    let vcx = shell_at(cx, root.path(), lang);
+    let vcx = shell_at(cx, &root, lang);
     with_ws(vcx, |w, window, cx| {
         w.open_registered_tab("settings", window, cx)
     });
@@ -525,7 +525,9 @@ fn profile_data_keeps_unknown_keys_on_write_back(cx: &mut TestAppContext) {
     std::fs::write(
         &file,
         "[metadata]\nversion = 1\nscope = \"@:*\"\nfuture_flag = true\nfuture_list = [1, 2]\n\n\
-         [metadata.future_table]\nkind = \"newer\"\nlimit = 3\n",
+         [metadata.future_table]\nkind = \"newer\"\nlimit = 3\n\n\
+         [metadata.ddl_view]\nqualify = \"Auto\"\nplacement = \"InsideTable\"\n\
+         server_definitions = false\ngrants = true\nowner = true\nfuture_opt = \"kept\"\n",
     )
     .expect("the data file");
     // Whatever was read before the file was written is forgotten.
@@ -553,6 +555,8 @@ fn profile_data_keeps_unknown_keys_on_write_back(cx: &mut TestAppContext) {
         "limit = 3",
         "scope = \"@:*\"",
         "live_system",
+        // Ruling R-W5-13: a nested `ddl_view` key survives too.
+        "future_opt = \"kept\"",
     ] {
         assert!(text.contains(kept), "{kept}: {text}");
     }

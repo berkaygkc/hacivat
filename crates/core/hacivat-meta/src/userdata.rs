@@ -58,7 +58,10 @@ impl Default for DdlViewOptions {
 }
 
 /// One profile's catalog user data.
+// ## m4-t27-refresh-ui (named exception, ruling R-W5-13): (de)serialized through [`Repr`], so
+// the keys of the nested `ddl_view` table this build does not know survive a write-back too.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "Repr", into = "Repr")]
 pub struct ProfileUserData {
     #[serde(default = "current_version")]
     pub version: u32,
@@ -88,7 +91,86 @@ pub struct ProfileUserData {
     /// unchanged, so no build drops another's data.
     #[serde(flatten)]
     pub extra: BTreeMap<String, ExtraValue>,
+    // ## m4-t27-refresh-ui (named exception, ruling R-W5-13)
+    /// The keys of the `ddl_view` table this build does not know, kept as read.
+    #[serde(skip)]
+    pub ddl_view_extra: BTreeMap<String, ExtraValue>,
 }
+
+// ## m4-t27-refresh-ui (named exception, ruling R-W5-13)
+/// The serialized form of [`ProfileUserData`] (the same keys; `ddl_view` keeps its unknown keys).
+#[derive(Serialize, Deserialize)]
+struct Repr {
+    #[serde(default = "current_version")]
+    version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+    #[serde(default, with = "pairs")]
+    view_filters: BTreeMap<ObjectKey, String>,
+    #[serde(default, with = "pairs")]
+    scope_filters: BTreeMap<ObjectKey, String>,
+    #[serde(default, with = "pairs")]
+    level_overrides: BTreeMap<ObjectKey, Level>,
+    #[serde(default)]
+    virtual_fks: Vec<VirtualFk>,
+    #[serde(default, with = "pairs")]
+    annotations: BTreeMap<ObjectKey, String>,
+    #[serde(default)]
+    ddl_view: DdlViewTable,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    live_system: Vec<crate::ids::NsKey>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, ExtraValue>,
+}
+
+/// The `ddl_view` table: the options this build knows, then every other key as read (a
+/// flattened struct takes its own keys first, so `extra` holds only the unknown ones).
+#[derive(Default, Serialize, Deserialize)]
+struct DdlViewTable {
+    #[serde(flatten)]
+    opts: DdlViewOptions,
+    #[serde(flatten)]
+    extra: BTreeMap<String, ExtraValue>,
+}
+
+impl From<Repr> for ProfileUserData {
+    fn from(r: Repr) -> Self {
+        ProfileUserData {
+            version: r.version,
+            scope: r.scope,
+            view_filters: r.view_filters,
+            scope_filters: r.scope_filters,
+            level_overrides: r.level_overrides,
+            virtual_fks: r.virtual_fks,
+            annotations: r.annotations,
+            ddl_view: r.ddl_view.opts,
+            live_system: r.live_system,
+            extra: r.extra,
+            ddl_view_extra: r.ddl_view.extra,
+        }
+    }
+}
+
+impl From<ProfileUserData> for Repr {
+    fn from(d: ProfileUserData) -> Self {
+        Repr {
+            version: d.version,
+            scope: d.scope,
+            view_filters: d.view_filters,
+            scope_filters: d.scope_filters,
+            level_overrides: d.level_overrides,
+            virtual_fks: d.virtual_fks,
+            annotations: d.annotations,
+            ddl_view: DdlViewTable {
+                opts: d.ddl_view,
+                extra: d.ddl_view_extra,
+            },
+            live_system: d.live_system,
+            extra: d.extra,
+        }
+    }
+}
+// ## m4-t27-refresh-ui
 
 // ## m4-t27-refresh-ui (named exception, ruling R-W5-12)
 /// A value this build does not know, kept as read (any TOML or JSON value; a TOML date or time
@@ -140,6 +222,7 @@ impl Default for ProfileUserData {
             // ## m4-t27-refresh-ui (named exception)
             live_system: Vec::new(),
             extra: BTreeMap::new(),
+            ddl_view_extra: BTreeMap::new(),
         }
     }
 }

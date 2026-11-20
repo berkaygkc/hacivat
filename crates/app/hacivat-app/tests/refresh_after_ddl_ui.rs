@@ -878,3 +878,27 @@ fn a_refused_commit_does_not_leave_changes_waiting(cx: &mut TestAppContext) {
                 ))
     });
 }
+
+/// T26 carry: the persisted "Introspect live" choice reaches the catalog's overlays
+/// (`CatalogChange::SetUserData` through the engine).
+#[gpui::test]
+fn introspect_live_reaches_the_overlays(cx: &mut TestAppContext) {
+    let (vcx, _src, id) = connected(cx, &["users"]);
+    let pg_catalog = NsKey::schema(["app", "pg_catalog"]);
+    let ns = pg_catalog.clone();
+    let task = vcx
+        .cx
+        .update(|cx| hacivat_app::explorer::userdata::set_live_system(id, ns, true, cx));
+    assert!(wait_task(vcx, task).is_ok());
+    wait_until(vcx, "the overlays know it", |vcx| {
+        vcx.cx.read(|cx| {
+            hlive::handle(id, cx).is_some_and(|h| {
+                h.catalog()
+                    .current()
+                    .overlays
+                    .live_system
+                    .contains(&pg_catalog)
+            })
+        })
+    });
+}

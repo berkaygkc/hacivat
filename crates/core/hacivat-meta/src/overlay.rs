@@ -139,6 +139,9 @@ impl Overlays {
             .iter()
             .map(|(k, v)| (k.clone(), Name::from(v.as_str())))
             .collect();
+        // ## m4-t27-refresh-ui (named exception, T26 carry): the persisted "Introspect live"
+        // choices.
+        self.live_system = data.live_system.iter().cloned().collect();
         self
     }
 

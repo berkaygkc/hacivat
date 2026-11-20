@@ -181,8 +181,33 @@ impl DdlCatalog for EngineCatalog {
         self.ask(cx, |h| h.load_facet(vec![key], kind))
     }
 
-    fn sources(&self, _: &App) -> Rc<dyn DdlSources> {
-        // No text and no facet value has a home at this base (Task 15b).
-        Rc::new(NoSources)
+    // ## m4-t27-refresh-ui (named exception; the T15b hook): texts and facet values from the
+    // catalog snapshot (Task 15b's store).
+    fn sources(&self, cx: &App) -> Rc<dyn DdlSources> {
+        match self.snapshot(cx) {
+            Some(s) => Rc::new(SnapshotSources(s)),
+            None => Rc::new(NoSources),
+        }
+    }
+}
+
+// ## m4-t27-refresh-ui (named exception; the T15b hook)
+/// The DDL producer's texts and facet values, read from one catalog snapshot.
+struct SnapshotSources(Arc<CatalogSnapshot>);
+
+impl DdlSources for SnapshotSources {
+    fn text(&self, r: &hacivat_meta::SourceRef) -> Option<hacivat_meta::Name> {
+        self.0.source_text(r)
+    }
+
+    fn server_text(&self, k: &ObjectKey) -> Option<hacivat_meta::Name> {
+        self.0.server_text(k)
+    }
+
+    fn grants(
+        &self,
+        k: &ObjectKey,
+    ) -> hacivat_meta::props::Facet<hacivat_meta::props::GrantsFacet> {
+        self.0.grants_facet(k)
     }
 }

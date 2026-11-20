@@ -1327,10 +1327,16 @@ The M2a connection list became the database explorer tree in place (R-M4-18): `h
   carry); handing it to the overlays waits for T26's merge.
 - *Write-back rule* (ruling R-W5-12, carries-w1 m10). `ProfileUserData` keeps every key of its
   `[metadata]` table this build does not know (`#[serde(flatten)] extra`, `ExtraValue`) and
-  writes it back unchanged, so an older or a newer build never drops another's data. The
-  nested `ddl_view` table (`DdlViewOptions`, `Copy`) has no catch-all yet: a key a newer build
-  adds there is dropped on write-back (listed in the T27 report). `connections.toml` and
+  writes it back unchanged, so an older or a newer build never drops another's data (the nested
+  `ddl_view` table too, ruling R-W5-13). `connections.toml` and
   `settings.toml` already keep unknown keys (`toml_edit`).
+- *Final round.* The T15b hook: `EngineCatalog::sources` reads texts and facet values from
+  the catalog snapshot (`source_text`, `server_text`, `grants_facet`); a stale facet vouches for
+  nothing. "Introspect live" reaches the overlays: the live host forwards the profile's user
+  data (`IntroHandle::set_user_data` → `CatalogChange::SetUserData`, fenced named exceptions in
+  T15's `engine/{mod,scheduler}.rs`; `Overlays::with_user_data` also takes `live_system`, a
+  named exception in T26's `overlay.rs`). Ruling R-W5-13: the nested `ddl_view` table keeps its
+  unknown keys too (`ProfileUserData` serializes through a private `Repr`).
 - *Minors* (fix round). The stale-object and stale-schema-list tooltips are joined with the
   row's own tip (the invisible-character and broken-reference trust tips, "N of M schemas";
   m-4). The schema-list badge clears only after a stale list was seen (m-3). Stale-object marks

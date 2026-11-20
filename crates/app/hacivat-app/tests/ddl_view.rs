@@ -1734,3 +1734,110 @@ fn control_characters_in_a_name_are_visible_in_the_tab_title(cx: &mut TestAppCon
     let text = shown_text(vcx, id, &k);
     assert!(text.contains("\"a\nb\tc\""), "{text:?}");
 }
+
+// ## m4-t27-refresh-ui (named exception: the T15b hook in `ddl_view/source.rs`, T25 m-7)
+
+/// `app.public` published through a real `Catalog` with T15b's side tables: `v_text` (a view
+/// whose props name its text), `v_facet` (a view whose text is only its `Sources` facet, loaded
+/// or `stale_facet`), `users` with a loaded (or `stale_facet`) `Grants` facet.
+fn published_with_sources(stale_facet: bool) -> Arc<CatalogSnapshot> {
+    let base = pg_cat(1, Vec::new(), false);
+    let catalog = hacivat_meta::Catalog::new(base.server.clone());
+    let publisher = catalog.publisher().expect("the publisher");
+    let text = "SELECT 1 AS one";
+    let ns = schema_at(
+        DbmsKind::Postgres,
+        &["app", "public"],
+        false,
+        Level::Sources,
+        vec![
+            view_obj("v_text", text),
+            Subtree::new(
+                Obj::new(ObjectKind::View, "v_facet")
+                    .with_props(Props::View(Arc::new(ViewProps::default()))),
+            ),
+            users(&[("id", "integer")]),
+        ],
+    );
+    let facet = |object: ObjectKey, facet: FacetKind| hacivat_meta::snapshot::ContainerKey::Facet {
+        ns: public(),
+        object,
+        facet,
+    };
+    let grants = GrantsFacet {
+        entries: vec![Grant {
+            grantee: Name::from("reporting"),
+            privilege: Name::from("SELECT"),
+            columns: Vec::new(),
+            grantable: false,
+        }],
+    };
+    publisher
+        .publish(vec![
+            hacivat_meta::snapshot::CatalogChange::Put(ns),
+            hacivat_meta::snapshot::CatalogChange::SetState(
+                hacivat_meta::snapshot::ContainerKey::Namespace(public()),
+                loaded(false),
+            ),
+            hacivat_meta::snapshot::CatalogChange::PutSources {
+                ns: public(),
+                texts: vec![(SourceRef::of(text), Name::from(text))],
+            },
+            hacivat_meta::snapshot::CatalogChange::SetFacet {
+                key: facet(
+                    key(ObjectKind::View, &["app", "public", "v_facet"]),
+                    FacetKind::Sources,
+                ),
+                state: loaded(stale_facet),
+                value: Some(hacivat_meta::snapshot::FacetValue::Sources(Name::from(
+                    "SELECT 2 AS two",
+                ))),
+            },
+            hacivat_meta::snapshot::CatalogChange::SetFacet {
+                key: facet(users_key(), FacetKind::Grants),
+                state: loaded(stale_facet),
+                value: Some(hacivat_meta::snapshot::FacetValue::Grants(Arc::new(grants))),
+            },
+        ])
+        .expect("published");
+    catalog.current()
+}
+
+/// T25 m-7 with the T15b hook: the app's own `EngineCatalog` (no fake provider) reads texts
+/// and facets from the catalog snapshot on every DDL view path: a view's text named by its
+/// props, a view's text from its `Sources` facet, a table's grants from its `Grants` facet; a
+/// stale facet vouches for nothing (the definition is not loaded, the grants say so).
+#[gpui::test]
+fn engine_catalog_sources_and_facets_vouch_on_every_path(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(cx, "en", answers_probe(FakeDriver::new(DbmsKind::Postgres)));
+    in_window(vcx, |window, _| window.activate_window());
+    let id = add_profile(vcx, pg_profile("app-dev"));
+    show(vcx, id, published_with_sources(false));
+    let v_text = key(ObjectKind::View, &["app", "public", "v_text"]);
+    let v_facet = key(ObjectKind::View, &["app", "public", "v_facet"]);
+    open_view(vcx, id, &v_text);
+    let text = shown_text(vcx, id, &v_text);
+    assert!(text.contains("SELECT 1 AS one"), "{text}");
+    open_view(vcx, id, &v_facet);
+    let text = shown_text(vcx, id, &v_facet);
+    assert!(text.contains("SELECT 2 AS two"), "{text}");
+    open_view(vcx, id, &users_key());
+    let st = state(vcx, id, &users_key());
+    assert_eq!(st.grants, GrantsUx::Loaded, "{st:?}");
+    assert!(
+        st.text.as_deref().is_some_and(|t| t.contains("reporting")),
+        "{st:?}"
+    );
+
+    // Stale facets vouch for nothing.
+    let vcx2 = vcx;
+    show(vcx2, id, published_with_sources(true));
+    let st = state(vcx2, id, &v_facet);
+    assert_eq!(st.body, Body::NotLoaded, "{st:?}");
+    let st = state(vcx2, id, &users_key());
+    assert_ne!(st.grants, GrantsUx::Loaded, "{st:?}");
+    assert!(
+        !st.text.as_deref().is_some_and(|t| t.contains("reporting")),
+        "{st:?}"
+    );
+}
