@@ -192,6 +192,10 @@ pub struct Dialog {
     content: Option<AnyView>,
     // ## m3a-t33-exec-ui (named exception): an alertdialog (the open-transaction prompt).
     role: Role,
+    // ## m4-t33b-carries (named exception): the content's own tab stops (a checkbox).
+    content_focus: Vec<FocusHandle>,
+    // ## m4-t33b-carries (named exception): a line under the title (a size, a connection).
+    subtitle: Option<TextFn>,
 }
 
 impl EventEmitter<DialogEvent> for Dialog {}
@@ -237,6 +241,8 @@ impl Dialog {
                 access_keys: !cfg!(target_os = "macos"),
                 content: None,
                 role: Role::Dialog,
+                content_focus: Vec::new(),
+                subtitle: None,
             }
         })
     }
@@ -263,13 +269,29 @@ impl Dialog {
         self.content = Some(content);
     }
 
+    // ## m4-t33b-carries (named exception)
+    /// A line under the title (12 px `text-2`; NOTES M4 surface 13: the cache's size). An
+    /// empty text draws nothing (a size still being measured).
+    pub fn set_subtitle(&mut self, subtitle: TextFn) {
+        self.subtitle = Some(subtitle);
+    }
+
+    // ## m4-t33b-carries (named exception)
+    /// The tab stops of the content (a checkbox the answer needs), in order: Tab visits them
+    /// before the buttons and stays in the card. The initial focus is still the primary
+    /// button; Enter on one of them presses the primary (never a destructive one).
+    pub fn set_content_focus(&mut self, handles: Vec<FocusHandle>) {
+        self.content_focus = handles;
+    }
+
     /// The index of the focused button, if one is.
     pub fn focused_button(&self, window: &Window) -> Option<usize> {
         self.buttons.iter().position(|h| h.is_focused(window))
     }
 
     fn move_focus(&self, forward: bool, window: &mut Window, cx: &mut App) {
-        let order: Vec<&FocusHandle> = self.buttons.iter().collect();
+        // ## m4-t33b-carries: the content's tab stops first, then the buttons.
+        let order: Vec<&FocusHandle> = self.content_focus.iter().chain(&self.buttons).collect();
         let n = order.len();
         let at = order.iter().position(|h| h.is_focused(window));
         let next = match (at, forward) {
@@ -462,6 +484,24 @@ impl Render for Dialog {
                         .gap(px(t.spacing.xl))
                         .child(title_element)
                         .child(close),
+                )
+                // ## m4-t33b-carries: the subtitle, when it says something.
+                .children(
+                    self.subtitle
+                        .as_ref()
+                        .map(|f| f(cx))
+                        .filter(|s| !s.is_empty())
+                        .map(|s| {
+                            div().mt(px(-t.spacing.sm)).child(
+                                Label::new(
+                                    s,
+                                    TextSource::Fluent,
+                                    t.type_ramp.body_sm,
+                                    c.text_2.to_hsla(),
+                                )
+                                .id("dialog-subtitle"),
+                            )
+                        }),
                 )
                 // ## m2a-t21-shots: the body wraps to the card (a long locale never clips).
                 .child(div().child(crate::text::paragraph(

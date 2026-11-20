@@ -40,7 +40,8 @@ pub mod pg;
 pub mod refresh_coord;
 #[cfg(feature = "session")]
 pub mod sqlite;
-#[cfg(feature = "session")]
+// ## m4-t33b-carries (ruling R-W3-7): the test doubles, for tests only (feature `test-fakes`).
+#[cfg(all(feature = "session", any(test, feature = "test-fakes")))]
 pub mod testing;
 #[cfg(feature = "session")]
 pub mod ticket;

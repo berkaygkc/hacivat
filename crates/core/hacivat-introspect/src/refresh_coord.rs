@@ -45,13 +45,13 @@
 //!   told by their caller: [`RefreshCoordinator::tx_ended`],
 //!   [`RefreshCoordinator::session_closed`].
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::future::join_all;
-use hacivat_meta::NsKey;
 use hacivat_meta::merge::Trigger;
+use hacivat_meta::{NsKey, ObjectKey};
 use hacivat_proto::DbmsKind;
 use hacivat_session::meta::MetaError;
 use hacivat_session::session::{
@@ -64,7 +64,7 @@ use tokio::sync::{Notify, broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::ddl_effects::{
-    ExecutedStmt, RefreshPlan, SessionStateAtExec, Target, TxnState, lower, normalize,
+    ExecutedStmt, RefreshPlan, SessionStateAtExec, Target, TxnState, lower, normalize, ns_of_key,
     plan_refresh_in,
 };
 use crate::engine::IntroHandle;
@@ -221,6 +221,11 @@ pub enum CoordEvent {
     /// Messages were dropped by a full inbox (`total` so far); the sessions concerned were
     /// refreshed widely instead.
     Dropped { total: u64 },
+    // ## m4-t33b-carries (named exception; the T27 carry, mock 9 "Explorer refreshed N
+    // objects in {schema}")
+    /// A refresh re-read these objects and finished: how many, per namespace, in namespace
+    /// order. Whole-namespace refreshes are not counted (their own row and toast say so).
+    Refreshed { objects: Vec<(NsKey, usize)> },
 }
 
 /// One entry of a session's pending list.
@@ -610,8 +615,9 @@ impl Inner {
         let (ticket, reply) = RefreshTicket::pending();
         let handle = self.handle.clone();
         let owed = self.owed.clone();
+        let events = self.events.clone();
         self.runtime.spawn(async move {
-            reply.send(run(handle, targets, owed).await);
+            reply.send(run(handle, targets, owed, events).await);
         });
         ticket
     }
@@ -627,6 +633,7 @@ async fn run(
     handle: IntroHandle,
     targets: Vec<Target>,
     owed: Arc<Mutex<Vec<Target>>>,
+    events: broadcast::Sender<CoordEvent>,
 ) -> Result<u64, IntroError> {
     let snap = handle.catalog().current();
     let lowered = lower(&targets, &snap);
@@ -650,6 +657,43 @@ async fn run(
                 return Err(e);
             }
         }
+    }
+    // ## m4-t33b-carries: the objects the statements named, counted per namespace that was
+    // refreshed (a created table is refreshed with its namespace's names, yet it is the one
+    // object the user changed).
+    let refreshed: Vec<&NsKey> = lowered
+        .iter()
+        .filter_map(|t| match t {
+            Target::Namespace(ns) | Target::Objects { ns, .. } => Some(ns),
+            _ => None,
+        })
+        .collect();
+    let mut named: BTreeMap<NsKey, BTreeSet<ObjectKey>> = BTreeMap::new();
+    for t in &targets {
+        match t {
+            Target::Object(k) => {
+                named.entry(ns_of_key(k)).or_default().insert(k.clone());
+            }
+            Target::Objects { ns, keys } => {
+                named
+                    .entry(ns.clone())
+                    .or_default()
+                    .extend(keys.iter().cloned());
+            }
+            _ => {}
+        }
+    }
+    // Fix round 1 (review 9): a namespace whose pass the mass-deletion guard held applied
+    // nothing: no count.
+    let counted: BTreeMap<NsKey, usize> = named
+        .into_iter()
+        .filter(|(ns, _)| refreshed.contains(&ns) && handle.pending_confirmation(ns).is_none())
+        .map(|(ns, keys)| (ns, keys.len()))
+        .collect();
+    if !counted.is_empty() {
+        let _ = events.send(CoordEvent::Refreshed {
+            objects: counted.into_iter().collect(),
+        });
     }
     let keys: Vec<_> = lowered
         .into_iter()

@@ -652,8 +652,29 @@ pub fn ask_clear(profile: ProfileId, cx: &mut App) {
         primary: CANCEL,
         size: DialogSize::Standard,
     };
+    // ## m4-t33b-carries (T27 carry, NOTES surface 13): the cache's size in the subtitle,
+    // measured on the core runtime (nothing is drawn until it is known).
+    request_size(profile, cx);
+    let subtitle: TextFn = Rc::new(move |cx: &App| {
+        cache_size(profile, cx).map_or_else(SharedString::default, |size| {
+            let size = live::text(
+                cx,
+                "hv-metadata-size-mb",
+                vec![("n", ArgValue::Decimal(ExactDecimal(mb_tenths(size))))],
+            );
+            live::text(
+                cx,
+                "hv-metadata-clear-subtitle",
+                vec![("size", ArgValue::Text(size.to_string()))],
+            )
+        })
+    });
     crate::exec_ui::in_workspace_window(cx, move |ws, window, cx| {
         let dialog = ws.update(cx, |ws, cx| ws.open_dialog(spec, window, cx));
+        dialog.update(cx, |d, cx| {
+            d.set_subtitle(subtitle);
+            cx.notify();
+        });
         cx.set_global(OpenClear(Some((profile, dialog.downgrade()))));
         // Held until an event comes (the workspace removes the layer on the same event).
         let mut keep = Some(dialog.clone());

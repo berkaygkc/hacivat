@@ -1268,3 +1268,37 @@ fn an_unknown_time_zone_fails_closed_with_a_notice(cx: &mut TestAppContext) {
     });
     assert_eq!(zone, "UTC");
 }
+
+// ## m4-t33b-carries (T32 re-review RR-5): the row looks the saved zone up in the tz database
+// once per settings change, never on every frame.
+#[gpui::test]
+fn the_time_zone_row_checks_the_saved_zone_once_per_change(cx: &mut TestAppContext) {
+    let (vcx, _paths) = settings_tab_with(cx, support_platform(), "us", "Mars/Olympus");
+    vcx.cx
+        .update(|cx| settings_fixtures::show_section(Section::General, cx));
+    vcx.run_until_parked();
+    let lookups = |vcx: &VisualTestContext| {
+        vcx.cx
+            .read(settings_fixtures::time_zone_lookups)
+            .expect("the settings page")
+    };
+    let first = lookups(vcx);
+    assert!(first >= 1, "looked up when the row was built");
+    for _ in 0..5 {
+        vcx.cx.update(|cx| cx.refresh_windows());
+        vcx.run_until_parked();
+    }
+    assert_eq!(lookups(vcx), first, "a frame looks nothing up");
+    assert!(text_of(vcx, "settings-time-zone-unknown").is_some());
+    // A change: one more lookup, and the notice goes.
+    let (labels, _) = vcx
+        .cx
+        .read(settings_fixtures::time_zone_choices)
+        .expect("the time zone select");
+    let utc = labels.iter().position(|l| l == "UTC").expect("UTC");
+    vcx.cx
+        .update(|cx| settings_fixtures::pick_time_zone(utc, cx));
+    vcx.run_until_parked();
+    assert_eq!(lookups(vcx), first + 1);
+    assert!(text_of(vcx, "settings-time-zone-unknown").is_none());
+}

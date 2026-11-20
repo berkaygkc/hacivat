@@ -4083,3 +4083,58 @@ hv-settings-time-zone-unknown-choice = { $zone } (unknown)
 #   $zone (String) - an IANA time zone, verbatim, e.g. "Europe/Istanbul".
 #   $system (String) - the system choice as the select shows it, e.g. "System (Europe/Istanbul)".
 hv-settings-time-zone-unknown = { $zone } isn't a time zone Hacivat knows, so { $system } is used.
+
+## m4-t33b-carries
+
+# The clear-history confirmation when damaged backups exist (T32 carry, ruling 2026-11-20).
+# Variables:
+#   $count (Number) - how many damaged backups of the history exist, e.g. 2.
+hv-history-clear-body-backups = { $count ->
+        [one] Every statement saved for this connection is deleted from this computer, pinned ones too. This can't be undone. Nothing on the server changes. Hacivat also keeps { $count } damaged backup of the history, set aside when the file was repaired. It may still hold this connection's statements, and every other connection's.
+       *[other] Every statement saved for this connection is deleted from this computer, pinned ones too. This can't be undone. Nothing on the server changes. Hacivat also keeps { $count } damaged backups of the history, set aside when the file was repaired. They may still hold this connection's statements, and every other connection's.
+    }
+# The clear-history confirmation: the checkbox (off by default) that also deletes the damaged backups.
+hv-history-clear-backups = Also delete damaged history backups
+# The clear-history confirmation: the checkbox's dimmer note.
+# Variables:
+#   $count (Number) - how many damaged backups of the history exist, e.g. 2.
+hv-history-clear-backups-note = { $count ->
+        [one] { $count } file, with every connection's old statements
+       *[other] { $count } files, with every connection's old statements
+    }
+# A toast after the history of a connection was cleared and the damaged backups deleted.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+#   $count (Number) - how many damaged backups were deleted, e.g. 2.
+hv-history-cleared-backups = { $count ->
+        [one] The query history of { $name } was cleared, and { $count } damaged backup was deleted.
+       *[other] The query history of { $name } was cleared, and { $count } damaged backups were deleted.
+    }
+# A toast when the history file turned out damaged while clearing with the history off (T32 re-review RR-2).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-history-clear-damaged = The history file was damaged, so Hacivat set it aside as a backup. The query history of { $name } wasn't cleared from it; clear again to delete the damaged backup.
+# Surface 1 (Explorer tree). The Built-in group's tooltip when only some of its schemas come from the shipped catalog (T32 re-review RR-3).
+# Variables:
+#   $version (String) - the bundled catalog's server version, e.g. "17".
+#   $schemas (String) - the schema names the bundled catalog answers for, a list, e.g. "information_schema".
+hv-explorer-builtin-tip-mixed = Built-in catalog (version { $version }) for { $schemas }: shipped with Hacivat and read without a connection. The other built-in schemas were read from the server.
+# Surface 4 (Filter field). Under the field when more objects match than the filter opens (T14 carry, R-W2-13).
+# Variables:
+#   $n (Number) - how many matches the filter did not open, e.g. 50.
+hv-explorer-filter-more = { $n ->
+        [one] { $n } more match isn't opened. Open its group, or type more to narrow the filter.
+       *[other] { $n } more matches aren't opened. Open their groups, or type more to narrow the filter.
+    }
+# Surface 14 (Long introspection). The meta of a loaded schema row while it is read again: the share read, in whole percents (T24 carry).
+# Variables:
+#   $fraction (Number) - the share read so far, from 0 to 1, e.g. 0.23.
+hv-explorer-progress-percent = { NUMBER($fraction, style: "percent", minimumFractionDigits: 0, maximumFractionDigits: 0) }
+# Surface 13 (Settings › Metadata). The clear-cache question's subtitle: the size of the cached metadata (T27 carry).
+# Variables:
+#   $size (String) - a preformatted size, e.g. "38.4 MB".
+hv-metadata-clear-subtitle = { $size } on this computer
+# A toast when the history of a connection was cleared but its damaged backups could not be deleted (T33b review 6).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-history-cleared-backups-failed = The query history of { $name } was cleared, but its damaged backups couldn't be deleted.

@@ -1225,6 +1225,24 @@ impl SchemasSection {
         self.reparse(text);
     }
 
+    // ## m4-t33b-carries (named exception: the shots' scope-editor states)
+    /// Puts `text` in the pattern field as typing it does (tests, shots).
+    pub fn type_pattern(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let value = text.to_string();
+        self.pattern.update(cx, |input, cx| {
+            input.set_value(value);
+            cx.notify();
+        });
+        self.typed(window, cx);
+        cx.notify();
+    }
+
+    /// Focuses the section's last control, "Encrypt cached metadata" (shots: the dialog
+    /// scrolls the pattern's error line, above it, into view).
+    pub fn focus_last(&self, window: &mut Window, cx: &mut App) {
+        window.focus(&self.focus.encrypt, cx);
+    }
+
     /// A typed change of the pattern.
     fn typed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.touched = true;

@@ -558,8 +558,16 @@ pub enum CatalogEvent {
     PendingConfirmation {
         ns: NsKey,
         count: u32,
+        // ## m4-t33b-carries (named exception; T24 carry: the dialog's name list, mock 8)
+        /// Up to [`PENDING_SAMPLE`] of the vanished top-level objects, in name order (the
+        /// question lists them, then "and N more"); empty when the announcer has none.
+        sample: Arc<[ObjectKey]>,
     },
 }
+
+// ## m4-t33b-carries (named exception)
+/// How many vanished objects a [`CatalogEvent::PendingConfirmation`] names (mock 8: five).
+pub const PENDING_SAMPLE: usize = 5;
 
 /// The capacity of the event channel; a slow subscriber lags and re-reads `current()`.
 #[cfg(feature = "catalog")]
@@ -738,8 +746,26 @@ impl Publisher {
 
     /// Announces a guarded merge kept pending (D-039, R-M4-22); publishes nothing.
     pub fn announce_pending_confirmation(&self, ns: NsKey, count: u32) {
-        self.shared
-            .send(CatalogEvent::PendingConfirmation { ns, count });
+        self.announce_pending_with_sample(ns, count, Vec::new());
+    }
+
+    // ## m4-t33b-carries (named exception; T24 carry)
+    /// [`Publisher::announce_pending_confirmation`], naming some of the vanished objects: the
+    /// first [`PENDING_SAMPLE`] of `vanished` in name order.
+    pub fn announce_pending_with_sample(
+        &self,
+        ns: NsKey,
+        count: u32,
+        mut vanished: Vec<ObjectKey>,
+    ) {
+        vanished.sort_by(|a, b| a.name().cmp(b.name()).then_with(|| a.kind.cmp(&b.kind)));
+        vanished.dedup();
+        vanished.truncate(PENDING_SAMPLE);
+        self.shared.send(CatalogEvent::PendingConfirmation {
+            ns,
+            count,
+            sample: vanished.into(),
+        });
     }
 
     fn apply(

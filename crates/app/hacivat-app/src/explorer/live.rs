@@ -1183,7 +1183,8 @@ fn set_current(id: ProfileId, schema: Option<hacivat_session::session::SchemaCtx
 #[derive(Default)]
 struct Inbox {
     deltas: Vec<Arc<CatalogDelta>>,
-    pending: Vec<(NsKey, u32)>,
+    // ## m4-t33b-carries (T24 carry): with the event's sample of names.
+    pending: Vec<(NsKey, u32, Arc<[ObjectKey]>)>,
     events: Vec<EngineEvent>,
     progress: Option<Progress>,
 }
@@ -1238,9 +1239,10 @@ impl Pump {
                             p.push(|i| i.deltas.push(delta));
                             p.received.fetch_max(generation, Ordering::SeqCst);
                         }
-                        Either::Right((Ok(CatalogEvent::PendingConfirmation { ns, count }), _)) => {
-                            p.push(|i| i.pending.push((ns, count)))
-                        }
+                        Either::Right((
+                            Ok(CatalogEvent::PendingConfirmation { ns, count, sample }),
+                            _,
+                        )) => p.push(|i| i.pending.push((ns, count, sample))),
                         // A lagging receiver re-reads `current()` (the flush does anyway); the
                         // lagged deltas' renames and drops do not reach the expansion then.
                         Either::Right((
@@ -1376,7 +1378,7 @@ fn flush(id: ProfileId, cx: &mut App) {
         cx.defer(move |cx| apply_restored(id, cx));
         changed = true;
     }
-    let mut dialogs: Vec<(NsKey, u32)> = Vec::new();
+    let mut dialogs: Vec<(NsKey, u32, Arc<[ObjectKey]>)> = Vec::new();
     {
         let host = cx.default_global::<CatalogHost>();
         let entry = host.entry(id);
@@ -1386,9 +1388,9 @@ fn flush(id: ProfileId, cx: &mut App) {
         {
             row.progress = Arc::new(p);
         }
-        for (ns, count) in inbox.pending {
+        for (ns, count, sample) in inbox.pending {
             if entry.user_asked.remove(&ns) {
-                dialogs.push((ns, count));
+                dialogs.push((ns, count, sample));
             } else {
                 row.pending.insert(ns, count);
             }
@@ -1445,8 +1447,8 @@ fn flush(id: ProfileId, cx: &mut App) {
     for e in inbox.events {
         notice(id, e, cx);
     }
-    for (ns, count) in dialogs {
-        super::mass_drop::ask(id, ns, count, cx);
+    for (ns, count, sample) in dialogs {
+        super::mass_drop::ask(id, ns, count, sample, cx);
     }
 }
 
@@ -2138,6 +2140,13 @@ fn leads_to(model: &super::ExplorerModel, k: TreeKey, ns: &NsKey, key: &ObjectKe
         Some(NodeInfo::Object { key: o, .. }) => {
             o.path.len() < key.path.len() && key.path.iter().zip(o.path.iter()).all(|(a, b)| a == b)
         }
+        // ## m4-t33b-carries (T32 review T-1): a system schema sits under the Built-in group.
+        Some(NodeInfo::BuiltIn { .. }) => match model.children(k) {
+            ChildState::Loaded(kids) => kids.iter().any(
+                |c| matches!(model.info(*c), Some(NodeInfo::Schema { ns: s, .. }) if &s == ns),
+            ),
+            _ => false,
+        },
         _ => false,
     }
 }

@@ -54,7 +54,11 @@ const DEFAULT_IGNORABLE: [(u32, u32); 17] = [
 /// are in it already): the Braille pattern blank (U+2800), the interlinear annotation
 /// controls (U+FFF9–U+FFFB), and the Arabic, Syriac and Kaithi format characters
 /// (U+0600–U+0605, U+06DD, U+070F, U+08E2, U+110BD, U+110CD).
-const FILLERS: [(u32, u32); 8] = [
+/// ## m4-t33b-carries (named exception; T32 re-review RR-4): and the line and paragraph
+/// separators (U+2028, U+2029; general category Zl/Zp, neither control nor default-ignorable),
+/// which break a line or draw nothing.
+const FILLERS: [(u32, u32); 9] = [
+    (0x2028, 0x2029),
     (0x0600, 0x0605),
     (0x06DD, 0x06DD),
     (0x070F, 0x070F),

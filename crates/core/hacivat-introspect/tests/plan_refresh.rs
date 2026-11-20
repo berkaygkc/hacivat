@@ -1619,3 +1619,66 @@ async fn never_marks_the_schema_list_stale_on_a_scope_change() {
     })
     .await;
 }
+
+// ## m4-t33b-carries (named exception; the T27 carry "Explorer refreshed N objects", mock 9):
+// a refresh after DDL that re-read objects announces how many, per namespace, once it is done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_finished_object_refresh_announces_its_count() {
+    let r = loaded_rig(vec![
+        FakeObject::table("t", &["a"]).with_oid(501),
+        FakeObject::table("u", &["a"]).with_oid(502),
+    ])
+    .await;
+    let c = coordinator(&r.handle, DbmsKind::Postgres, RefreshAfterDdl::Always);
+    let mut events = c.events();
+    let p = plan_in(
+        &[
+            "alter table public.t add column z int",
+            "alter table public.u add column z int",
+        ],
+        pg_autocommit(),
+        Some(&r.catalog.current()),
+    );
+    bounded(c.submit(S, p)).await.unwrap();
+    let mut refreshed = None;
+    while let Ok(ev) = events.try_recv() {
+        if let CoordEvent::Refreshed { objects } = ev {
+            refreshed = Some(objects);
+        }
+    }
+    assert_eq!(refreshed, Some(vec![(ns("public"), 2)]));
+}
+
+// ## m4-t33b-carries (fix round 1, review 9): a refresh whose pass the mass-deletion guard held
+// applied nothing, so it announces no "refreshed" count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refresh_held_as_a_mass_deletion_announces_no_count() {
+    let tables: Vec<FakeObject> = (0..30)
+        .map(|i| FakeObject::table(&format!("t{i}"), &["a"]).with_oid(600 + i))
+        .collect();
+    let r = loaded_rig(tables).await;
+    // The server now lists 5 of the 30 tables, plus the one the DDL creates.
+    let mut now: Vec<FakeObject> = (0..5)
+        .map(|i| FakeObject::table(&format!("t{i}"), &["a"]).with_oid(600 + i))
+        .collect();
+    now.push(FakeObject::table("n", &["a"]).with_oid(700));
+    r.fake.put_ns(ns("public"), now);
+    let c = coordinator(&r.handle, DbmsKind::Postgres, RefreshAfterDdl::Always);
+    let mut events = c.events();
+    let p = plan_in(
+        &["create table public.n(a int)"],
+        pg_autocommit(),
+        Some(&r.catalog.current()),
+    );
+    bounded(c.submit(S, p)).await.unwrap();
+    assert!(
+        r.handle.pending_confirmation(&ns("public")).is_some(),
+        "the pass is held"
+    );
+    while let Ok(ev) = events.try_recv() {
+        assert!(
+            !matches!(ev, CoordEvent::Refreshed { .. }),
+            "a held pass is not refreshed: {ev:?}"
+        );
+    }
+}

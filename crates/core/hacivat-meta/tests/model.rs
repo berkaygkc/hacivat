@@ -522,6 +522,10 @@ fn temp_objects_flagged_temp() {
 fn invisible_chars_detected() {
     assert!(has_invisible_chars("a\u{200D}b"));
     assert!(has_invisible_chars("evil\u{202E}txt"));
+    // ## m4-t33b-carries (T32 re-review RR-4): the line and paragraph separators break a line
+    // or draw nothing (general category Zl/Zp: not control, not default-ignorable).
+    assert!(has_invisible_chars("a\u{2028}b"));
+    assert!(has_invisible_chars("a\u{2029}b"));
     assert!(!has_invisible_chars("müşteri"));
     assert!(!has_invisible_chars("İSTANBUL ılık"));
     let n = ns_pg("db", "public")

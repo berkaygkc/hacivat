@@ -849,6 +849,64 @@ fn stale_object_notice_and_reload(cx: &mut TestAppContext) {
     assert!(st.notices.contains(&"hv-ddl-view-unknown".to_string()));
 }
 
+// ## m4-t33b-carries (T25 review m-9): on a namespace marked stale (refresh after DDL with Ask
+// or Never), Reload clears "couldn't check" once the object's own check decides it is current:
+// a decided verdict replaces the namespace's stale mark (the facet vouch still holds). A check
+// that cannot decide keeps "couldn't check".
+#[gpui::test]
+fn reload_clears_couldnt_check_on_a_stale_namespace(cx: &mut TestAppContext) {
+    let stale = pg_cat(1, vec![users(&[("id", "integer")])], true);
+    let (vcx, s, id) = pg_shell(cx, "en", stale);
+    s.verdict.set(Some(Staleness::Unknown));
+    open_view(vcx, id, &users_key());
+    let st = state(vcx, id, &users_key());
+    assert_eq!(st.freshness, Freshness::Unknown);
+    assert!(st.notices.contains(&"hv-ddl-view-unknown".to_string()));
+    // The server confirms the object: Reload ends current, though the namespace stays stale.
+    s.verdict.set(Some(Staleness::Current));
+    click(vcx, "button-ddl-reload");
+    let st = state(vcx, id, &users_key());
+    assert_eq!(st.freshness, Freshness::Current);
+    assert!(!st.notices.iter().any(|n| n.starts_with("hv-ddl-view-")));
+    // Undecided again: "couldn't check" again.
+    s.verdict.set(Some(Staleness::Unknown));
+    click(vcx, "button-ddl-refresh");
+    assert_eq!(state(vcx, id, &users_key()).freshness, Freshness::Unknown);
+}
+
+// ## m4-t33b-carries (T25 review m-5, NOTES surface 11 "Keyboard"): the notice's Reload is the
+// first Tab stop after the toolbar, though it is drawn below the options strip: Shift-Tab from
+// it reaches the toolbar's last button (Open in console), not the strip.
+#[gpui::test]
+fn the_notice_button_is_the_first_tab_stop_after_the_toolbar(cx: &mut TestAppContext) {
+    let cat = pg_cat(1, vec![users(&[("id", "integer")])], false);
+    let (vcx, s, id) = pg_shell(cx, "en", cat);
+    s.verdict.set(Some(Staleness::Unknown));
+    open_view(vcx, id, &users_key());
+    assert!(
+        state(vcx, id, &users_key())
+            .notices
+            .contains(&"hv-ddl-view-unknown".to_string())
+    );
+    let reload = vcx.cx.read(|cx| {
+        ddl_view::view_of(id, &users_key(), cx)
+            .expect("the view")
+            .read(cx)
+            .reload_focus()
+            .clone()
+    });
+    in_window(vcx, |window, cx| window.focus(&reload, cx));
+    vcx.run_until_parked();
+    let consoles = vcx.cx.read(|cx| Consoles::ids(cx).len());
+    vcx.simulate_keystrokes("shift-tab enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.cx.read(|cx| Consoles::ids(cx).len()),
+        consoles + 1,
+        "Shift-Tab from Reload is Open in console"
+    );
+}
+
 /// T25 round 1 (coordinator item 2): only Task 22's `Current` verdict shows the text as
 /// current. `Unknown` and a `Dropped` the catalog does not confirm read "couldn't check", even
 /// on a namespace that is not stale (before, the stale flag alone decided).
@@ -1506,10 +1564,14 @@ fn review_h2_option_change_after_a_stale_publish_is_not_current(cx: &mut TestApp
         checks_after > checks,
         "the replaced text was checked ({checks} -> {checks_after})"
     );
+    // ## m4-t33b-carries (T25 review m-9, as its reviewer foresaw): the replaced text was
+    // checked, and the object's own `Current` verdict decides it although the namespace is
+    // stale; the text is the catalog's and the server confirmed the object. (The fail-open
+    // H2 guarded, Changed turning Current with no check, stays closed: the check count above.)
     assert_eq!(
         st.freshness,
-        Freshness::Unknown,
-        "a stale namespace's text is not current: {st:?}"
+        Freshness::Current,
+        "the re-check decided the replaced text: {st:?}"
     );
 }
 
@@ -1779,6 +1841,15 @@ fn bidi_controls_in_a_name_cannot_escape_the_tab_titles_isolate(cx: &mut TestApp
             c as u32
         );
     }
+    // ## m4-t33b-carries (T32 re-review RR-4): the line and paragraph separators too.
+    for c in ['\u{2028}', '\u{2029}'] {
+        assert_eq!(
+            ddl_view::visible_name(&format!("a{c}b")),
+            "a\u{FFFD}b",
+            "U+{:04X}",
+            c as u32
+        );
+    }
     // The DDL text keeps the name exactly.
     assert!(shown_text(vcx, id, &k).contains(evil));
 }
@@ -1888,4 +1959,130 @@ fn engine_catalog_sources_and_facets_vouch_on_every_path(cx: &mut TestAppContext
         !st.text.as_deref().is_some_and(|t| t.contains("reporting")),
         "{st:?}"
     );
+}
+
+// ## m4-t33b-carries (T25 m-7, engine-driven; FakeIntrospector facets and definitions from
+// T33a): the real engine over the fake server. A table's grants come from a `Grants` facet
+// the engine reads (`put_facet` before the engine starts) and a view's text from the definition
+// the engine reads at `Sources`; both vouch, so each view reads current. When the namespace is
+// then marked stale, the catalog no longer vouches and each reads "couldn't check".
+#[gpui::test]
+fn engine_driven_facets_vouch_on_every_ddl_view_path(cx: &mut TestAppContext) {
+    let public = NsKey::schema(["app", "public"]);
+    let users = ObjectKey {
+        kind: ObjectKind::Table,
+        path: ["app", "public", "users"]
+            .into_iter()
+            .map(Name::from)
+            .collect(),
+        server_id: Some(hacivat_meta::ServerId::Oid(20_000)),
+        overload_sig: None,
+        raw_kind: None,
+    };
+    let intro = FakeIntrospector::new(DbmsKind::Postgres);
+    intro.put_ns(
+        public.clone(),
+        vec![
+            FakeObject::table("users", &["id"]).with_oid(20_000),
+            FakeObject::view("v_one", &["one"])
+                .with_oid(20_100)
+                .with_definition("SELECT 1 AS one"),
+        ],
+    );
+    // Before the engine is built: its capabilities name the scripted facet kinds.
+    intro.put_facet(hacivat_introspect::introspector::FacetRows::Grants(vec![(
+        users.clone(),
+        GrantsFacet {
+            entries: vec![Grant {
+                grantee: Name::from("reporting"),
+                privilege: Name::from("SELECT"),
+                columns: Vec::new(),
+                grantable: false,
+            }],
+        },
+    )]));
+    let vcx = shell_with_fake(cx, "en", answers_probe(FakeDriver::new(DbmsKind::Postgres)));
+    in_window(vcx, |window, _| window.activate_window());
+    let dir = temp_dir(vcx).join("fake-cache");
+    let rt = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::connections::ConnectionsModel>()
+            .runtime()
+    });
+    let src = Arc::new(support::live::FakeSource::new(rt, intro, dir));
+    let as_source: Arc<dyn CatalogSource> = src.clone();
+    vcx.cx.update(|cx| hlive::set_source(as_source, cx));
+    let id = add_profile(vcx, pg_profile("app-dev"));
+    vcx.cx.update(|cx| {
+        let tree = hacivat_app::connections::explorer::tree(cx).expect("the tree");
+        tree.update(cx, |t, cx| {
+            t.set_expanded(adapter::profile_key(id), true, cx)
+        });
+    });
+    connect(vcx, "app-dev");
+    wait_until(vcx, "public loaded, the engine idle", |vcx| {
+        vcx.cx.read(|cx| {
+            hlive::handle(id, cx).is_some_and(|h| {
+                matches!(
+                    h.catalog()
+                        .current()
+                        .state(&hacivat_meta::snapshot::ContainerKey::Namespace(
+                            public.clone()
+                        )),
+                    LoadState::Loaded { .. }
+                ) && h.progress().borrow().tasks.is_empty()
+            })
+        })
+    });
+    let view_key = vcx.cx.read(|cx| {
+        let snap = hlive::handle(id, cx).unwrap().catalog().current();
+        let ns = snap.namespaces.get(&public).unwrap().clone();
+        let (idx, _) = ns
+            .children(0)
+            .find(|(_, o)| &**o.name() == "v_one")
+            .expect("the view");
+        ns.object_key(idx).expect("its key")
+    });
+    // The table: its grants from the engine's facet read; current.
+    open_view(vcx, id, &users);
+    wait_until(vcx, "the table's grants, current", |vcx| {
+        vcx.cx
+            .read(|cx| ddl_view::state_of(id, &users, cx))
+            .is_some_and(|st| st.grants == GrantsUx::Loaded && st.freshness == Freshness::Current)
+    });
+    let st = state(vcx, id, &users);
+    assert!(
+        st.text.as_deref().is_some_and(|t| t.contains("reporting")),
+        "{st:?}"
+    );
+    // The view: its text from the definition read at Sources; current.
+    open_view(vcx, id, &view_key);
+    wait_until(vcx, "the view's text, current", |vcx| {
+        vcx.cx
+            .read(|cx| ddl_view::state_of(id, &view_key, cx))
+            .is_some_and(|st| st.body == Body::Script && st.freshness == Freshness::Current)
+    });
+    let st = state(vcx, id, &view_key);
+    assert!(
+        st.text
+            .as_deref()
+            .is_some_and(|t| t.contains("SELECT 1 AS one")),
+        "{st:?}"
+    );
+    assert!(
+        src.intro
+            .calls()
+            .iter()
+            .any(|c| matches!(c, FakeCall::Facet { .. })),
+        "the engine read the facet"
+    );
+    // The namespace marked stale (refresh after DDL with Ask or Never): nothing vouches.
+    let handle = vcx.cx.read(|cx| hlive::handle(id, cx)).expect("the engine");
+    handle.mark_stale(vec![public.clone()], false);
+    wait_until(vcx, "both read couldn't check", |vcx| {
+        vcx.cx.read(|cx| {
+            [&users, &view_key].iter().all(|k| {
+                ddl_view::state_of(id, k, cx).is_some_and(|st| st.freshness == Freshness::Unknown)
+            })
+        })
+    });
 }

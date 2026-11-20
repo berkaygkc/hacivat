@@ -3731,3 +3731,55 @@ hv-settings-time-zone-unknown-choice = { $zone } (bilinmiyor)
 #   $system (String) - the system choice as the select shows it, e.g. "System (Europe/Istanbul)".
 # Review: PO
 hv-settings-time-zone-unknown = { $zone } Hacivat'ın tanıdığı bir saat dilimi değil, bu yüzden { $system } kullanılıyor.
+
+## m4-t33b-carries
+
+# The clear-history confirmation when damaged backups exist (T32 carry, ruling 2026-11-20).
+# Variables:
+#   $count (Number) - how many damaged backups of the history exist, e.g. 2.
+# Review: PO
+hv-history-clear-body-backups = Bu bağlantı için kaydedilen tüm ifadeler, sabitlenenler de dahil, bu bilgisayardan silinir. Bu işlem geri alınamaz. Sunucuda hiçbir şey değişmez. Hacivat ayrıca geçmişin, dosya onarılırken bir kenara ayrılan { $count } hasarlı yedeğini saklıyor. Bunlar bu bağlantının ve diğer tüm bağlantıların ifadelerini hâlâ içerebilir.
+# The clear-history confirmation: the checkbox (off by default) that also deletes the damaged backups.
+# Review: PO
+hv-history-clear-backups = Hasarlı geçmiş yedeklerini de sil
+# The clear-history confirmation: the checkbox's dimmer note.
+# Variables:
+#   $count (Number) - how many damaged backups of the history exist, e.g. 2.
+# Review: PO
+hv-history-clear-backups-note = { $count } dosya, tüm bağlantıların eski ifadeleriyle
+# A toast after the history of a connection was cleared and the damaged backups deleted.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+#   $count (Number) - how many damaged backups were deleted, e.g. 2.
+# Review: PO
+hv-history-cleared-backups = { $name } için sorgu geçmişi temizlendi ve { $count } hasarlı yedek silindi.
+# A toast when the history file turned out damaged while clearing with the history off (T32 re-review RR-2).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-history-clear-damaged = Geçmiş dosyası hasarlıydı, bu yüzden Hacivat onu yedek olarak bir kenara ayırdı. { $name } için sorgu geçmişi ondan temizlenmedi; hasarlı yedeği silmek için yeniden temizleyin.
+# Surface 1 (Explorer tree). The Built-in group's tooltip when only some of its schemas come from the shipped catalog (T32 re-review RR-3).
+# Variables:
+#   $version (String) - the bundled catalog's server version, e.g. "17".
+#   $schemas (String) - the schema names the bundled catalog answers for, a list, e.g. "information_schema".
+# Review: PO
+hv-explorer-builtin-tip-mixed = { $schemas } için yerleşik katalog (sürüm { $version }): Hacivat ile gelir, bağlantı olmadan okunur. Diğer yerleşik şemalar sunucudan okundu.
+# Surface 4 (Filter field). Under the field when more objects match than the filter opens (T14 carry, R-W2-13).
+# Variables:
+#   $n (Number) - how many matches the filter did not open, e.g. 50.
+# Review: PO
+hv-explorer-filter-more = { $n } eşleşme daha açılmadı. Gruplarını açın ya da filtreyi daraltmak için yazmaya devam edin.
+# Surface 14 (Long introspection). The meta of a loaded schema row while it is read again: the share read, in whole percents (T24 carry).
+# Variables:
+#   $fraction (Number) - the share read so far, from 0 to 1, e.g. 0.23.
+hv-explorer-progress-percent = { NUMBER($fraction, style: "percent", minimumFractionDigits: 0, maximumFractionDigits: 0) }
+# Surface 13 (Settings › Metadata). The clear-cache question's subtitle: the size of the cached metadata (T27 carry).
+# Variables:
+#   $size (String) - a preformatted size, e.g. "38.4 MB".
+# Review: PO
+hv-metadata-clear-subtitle = Bu bilgisayarda { $size }
+# A toast when the history of a connection was cleared but its damaged backups could not be deleted (T33b review 6).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-history-cleared-backups-failed = { $name } için sorgu geçmişi temizlendi, ancak hasarlı yedekleri silinemedi.

@@ -366,6 +366,13 @@ fn clear_cache_confirms_deletes_and_revalidates(cx: &mut TestAppContext) {
         "Clear cached metadata for app-dev?"
     );
     assert_eq!(vcx.cx.read(metadata::clear_question), Some(id));
+    // ## m4-t33b-carries (T27 carry): the size in the subtitle, once it is measured.
+    wait_until(vcx, "the size in the subtitle", |vcx| {
+        text_of(vcx, "dialog-subtitle")
+            .map(|t| strip(&t))
+            .as_deref()
+            == Some("0 MB on this computer")
+    });
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
     assert!(!layer_ids(vcx).contains(&"dialog"));

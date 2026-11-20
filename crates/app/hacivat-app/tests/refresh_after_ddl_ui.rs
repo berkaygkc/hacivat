@@ -315,7 +315,8 @@ fn create_table_in_a_console_appears_in_the_explorer(cx: &mut TestAppContext) {
     let tables = ["users", "orders"];
     let (vcx, src, id) = connected(cx, &tables);
     server_creates_audit(&src, &tables);
-    open_and_run(vcx, id, "CREATE TABLE public.audit (id int)");
+    let console = ready_console(vcx, id);
+    run_in(vcx, console, "CREATE TABLE public.audit (id int)");
     wait_until(vcx, "audit in the explorer", |vcx| {
         tables_of(vcx, id).iter().any(|t| t == "audit")
     });
@@ -324,6 +325,23 @@ fn create_table_in_a_console_appears_in_the_explorer(cx: &mut TestAppContext) {
         Some(LoadState::Loaded { stale: false, .. })
     ));
     assert_eq!(vcx.cx.read(refresh_prompt::asks), 0, "Always asks nothing");
+    // ## m4-t33b-carries (the T27 carry, mock 9 "Refreshed"): one Output line says it.
+    let refreshed = |vcx: &VisualTestContext| -> Vec<String> {
+        vcx.cx.read(|cx| {
+            Consoles::get(cx, console)
+                .map(|s| {
+                    s.log
+                        .lines()
+                        .iter()
+                        .filter(|l| l.msg.fluent_id() == "hv-metadata-refreshed")
+                        .map(|l| strip(&hacivat_app::results::output_view::core_text(&l.msg, cx)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    };
+    wait_until(vcx, "the Output line", |vcx| !refreshed(vcx).is_empty());
+    assert_eq!(refreshed(vcx), ["Explorer refreshed 1 object in public"]);
 }
 
 #[gpui::test]

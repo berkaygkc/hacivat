@@ -409,6 +409,18 @@ fn user_refresh_mass_drop_asks_and_cancel_keeps_cache(cx: &mut TestAppContext) {
         "25 objects in public are no longer visible"
     );
     assert!(layer_ids(vcx).contains(&"dialog"));
+    // ## m4-t33b-carries (T24 carry, mock 8): five of them by name, in name order, then the
+    // rest counted.
+    let names: Vec<String> = registry_frame(vcx)
+        .into_iter()
+        .filter(|r| r.path.ends_with("#mass-drop-name"))
+        .map(|r| strip(&r.text))
+        .collect();
+    assert_eq!(names, ["t05", "t06", "t07", "t08", "t09"]);
+    assert_eq!(
+        text_of(vcx, "mass-drop-more").map(|t| strip(&t)).as_deref(),
+        Some("and 20 more")
+    );
     // Escape answers Keep cached: nothing is removed.
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
@@ -1644,4 +1656,172 @@ fn mysql_server_facts_replace_the_placeholder_and_stay(cx: &mut TestAppContext) 
         .read(|cx| adapter::catalog_of(id, cx))
         .map(|c| c.server.ident.lower_case_table_names);
     assert_eq!(shown, Some(1), "the explorer shows the server's facts");
+}
+
+// ## m4-t33b-carries (T24 carry, mock 14): a loaded namespace read again keeps its rows (no
+// flicker) and says it is being read: its row carries the static run marker, the share read
+// as its meta ("42%") and the words in its tooltip.
+#[gpui::test]
+fn a_loaded_namespace_read_again_shows_its_progress_on_its_row(cx: &mut TestAppContext) {
+    let (vcx, src, id) = connected_loaded(cx, &["users", "orders"]);
+    open(vcx, &["app-dev", "app"]);
+    let gate = src.intro.gate(|c| matches!(c, FakeCall::Introspect { .. }));
+    *src.report.lock().unwrap() = Some((hacivat_introspect::engine::Phase::Columns, 3, Some(7)));
+    put_cursor(vcx, key_of(vcx, "public"));
+    assert!(run(vcx, "explorer.refresh"));
+    wait_gate(vcx, &gate);
+    let schema = key_of(vcx, "public");
+    wait_until(vcx, "the re-read's progress on the row", |vcx| {
+        let row = vcx.cx.read(|cx| {
+            let model = explorer::tree(cx)
+                .expect("the tree")
+                .read(cx)
+                .model()
+                .clone();
+            hacivat_ui::tree::TreeModel::row(&model, schema)
+        });
+        row.is_some_and(|r| {
+            r.meta_mark == Some(hacivat_ui::tree::MetaMark::Running)
+                && r.meta.as_deref().map(strip).as_deref() == Some("42%")
+        })
+    });
+    let row = vcx
+        .cx
+        .read(|cx| {
+            let model = explorer::tree(cx)
+                .expect("the tree")
+                .read(cx)
+                .model()
+                .clone();
+            hacivat_ui::tree::TreeModel::row(&model, schema)
+        })
+        .expect("the row");
+    assert_eq!(
+        row.tooltip.as_deref().map(strip).as_deref(),
+        Some(
+            "Reading public: the columns of 3 of 7 tables so far. The explorer stays usable \
+             meanwhile."
+        )
+    );
+    // Its rows stay while it is read.
+    assert_eq!(tables_of(vcx, id, &public()), ["users", "orders"]);
+    gate.release();
+    wait_until(vcx, "the pass ends and the mark goes", |vcx| {
+        vcx.cx
+            .read(|cx| {
+                let model = explorer::tree(cx)
+                    .expect("the tree")
+                    .read(cx)
+                    .model()
+                    .clone();
+                hacivat_ui::tree::TreeModel::row(&model, schema)
+            })
+            .is_some_and(|r| r.meta_mark.is_none())
+    });
+}
+
+// ---- ## m4-t33b-carries: cross-surface flows (c) and (f) (plan Task 32 Step 2) -------------
+
+/// Flow (c): the login loses access to most of a schema (the server lists 5 of 30 tables for
+/// it now); the user's Refresh from the schema's row asks first, naming some of them; Enter
+/// (Keep cached, the initial focus) keeps the whole cached tree, fresh, and a later background
+/// check asks nothing and removes nothing.
+#[gpui::test]
+fn flow_c_privilege_loss_refresh_asks_and_keep_cached_keeps_the_tree(cx: &mut TestAppContext) {
+    let names = thirty();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (vcx, src, id) = connected_loaded(cx, &refs);
+    open(vcx, &["app-dev", "app", "public", "TABLES"]);
+    assert!(shows(vcx, "t29"));
+    // The privilege loss: 25 tables are no longer visible to this login.
+    src.intro.edit_ns(&public(), |ns| ns.objects.truncate(5));
+    put_cursor(vcx, key_of(vcx, "public"));
+    assert!(run(vcx, "explorer.refresh"));
+    wait_until(vcx, "the question", |vcx| {
+        vcx.cx
+            .read(|cx| mass_drop::open_dialog(id, &public(), cx))
+            .is_some()
+    });
+    assert_eq!(
+        strip(&dialog_body(vcx)),
+        "They may have been dropped, or this login may have lost access to them. Removing \
+         them from the cache changes nothing on the server."
+    );
+    assert!(text_of(vcx, "mass-drop-more").is_some(), "the rest counted");
+    // Enter answers the focused Keep cached.
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(!layer_ids(vcx).contains(&"dialog"));
+    wait_until(vcx, "kept and fresh", |vcx| {
+        tables_of(vcx, id, &public()).len() == 30
+            && matches!(
+                state_of(vcx, id, &public()),
+                Some(LoadState::Loaded { stale: false, .. })
+            )
+    });
+    assert!(shows(vcx, "t29"), "the expanded tree keeps its rows");
+    // A later background check keeps what the user kept and asks nothing.
+    let h = handle(vcx, id);
+    drop(h.refresh(Target::Namespace(public()), Trigger::Background));
+    wait_until(vcx, "the background check ran", |_| {
+        src.intro
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, FakeCall::Introspect { ns, .. } if *ns == public()))
+            .count()
+            >= 3
+    });
+    vcx.run_until_parked();
+    assert!(
+        !layer_ids(vcx).contains(&"dialog"),
+        "a background check never asks"
+    );
+    assert_eq!(tables_of(vcx, id, &public()).len(), 30, "nothing removed");
+}
+
+/// Flow (f): an encrypted production profile that is not expanded at start reads no key and
+/// opens no catalog; its root keeps the production marks and the key glyph. Expanding it is
+/// what reads the key, once, and paints the cached tree.
+#[gpui::test]
+fn flow_f_encrypted_production_profile_reads_its_key_only_when_expanded(cx: &mut TestAppContext) {
+    let backend = Arc::new(Counting::new(false, false));
+    let (vcx, id) = prod_with_encrypted_cache(cx, backend.clone(), false);
+    wait_until(vcx, "the start scan", |vcx| {
+        vcx.cx
+            .read(|cx| hlive::row(id, cx))
+            .is_some_and(|r| r.locked)
+    });
+    for _ in 0..3 {
+        vcx.run_until_parked();
+    }
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 0, "no keyring call");
+    assert_eq!(vcx.cx.read(hlive::ensures), 0, "no catalog opened");
+    let root = rows(vcx)
+        .into_iter()
+        .find(|r| r.key == adapter::profile_key(id))
+        .expect("the root");
+    assert!(
+        root.data.flags.iter().any(|f| matches!(
+            f,
+            hacivat_ui::tree::RowFlag::Env(hacivat_ui::capsule::EnvKind::Production)
+        )),
+        "the production mark stays drawn: {:?}",
+        root.data.flags
+    );
+    put_cursor(vcx, adapter::profile_key(id));
+    let tree = vcx.cx.read(|cx| explorer::tree(cx).expect("the tree"));
+    in_window(vcx, |window, cx| {
+        let focus = tree.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+    });
+    vcx.simulate_keystrokes("right");
+    wait_until(vcx, "the cached tree", |vcx| {
+        tables_of(vcx, id, &public()) == ["users"]
+    });
+    assert_eq!(
+        backend.calls.load(Ordering::SeqCst),
+        1,
+        "the key is read once"
+    );
+    assert!(shows(vcx, "app"), "{:?}", labels(vcx));
 }

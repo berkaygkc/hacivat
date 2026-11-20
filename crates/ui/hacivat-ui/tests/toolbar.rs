@@ -844,3 +844,60 @@ fn the_menu_button_is_not_reserved_for_rows_that_cannot_be_chosen(cx: &mut TestA
         );
     }
 }
+
+// ## m4-t33b-carries (T25 carry: the overflow's check marks): an on/off item (a checkbox) that
+// moved into the More menu keeps its state there: a menu checkbox, checked while it is on;
+// plain rows stay plain menu items, and the highlight does not start on a checked toggle.
+#[gpui::test]
+fn an_on_off_item_keeps_its_check_in_the_overflow_menu(cx: &mut TestAppContext) {
+    let vcx = host(cx, |_, _| {
+        let toggle = |label: &'static str, on: bool, priority: u8| {
+            label_item(label.into(), priority)
+                .checked(on)
+                .on_choose(|_, _| {})
+        };
+        gpui::div()
+            .w_full()
+            .child(
+                Toolbar::new("strip")
+                    .item(button_item("Run"))
+                    .item(label_item("a plain row".into(), 1).on_choose(|_, _| {}))
+                    .item(toggle("Grants", true, 2))
+                    .item(toggle("Owner", false, 3)),
+            )
+            .into_any_element()
+    });
+    vcx.simulate_resize(gpui::size(px(120.0), px(600.0)));
+    vcx.run_until_parked();
+    let at = vcx
+        .debug_bounds("toolbar-overflow")
+        .expect("a More button")
+        .center();
+    vcx.simulate_click(at, gpui::Modifiers::none());
+    assert!(vcx.debug_bounds("popup-menu").is_some());
+    a11y_record();
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    let decls = a11y_take();
+    let row = |name: &str| {
+        decls
+            .iter()
+            .find(|d| d.name.as_ref() == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no `{name}` row: {decls:?}"))
+    };
+    use hacivat_ui_core::gpui_surface::Role;
+    let grants = row("Grants");
+    assert_eq!(grants.role, Some(Role::MenuItemCheckBox));
+    assert_eq!(grants.toggled, Some(true));
+    let owner = row("Owner");
+    assert_eq!(owner.role, Some(Role::MenuItemCheckBox));
+    assert_eq!(owner.toggled, Some(false));
+    let plain = row("a plain row");
+    assert_eq!(plain.role, Some(Role::MenuItem));
+    assert_eq!(plain.toggled, None);
+    assert!(
+        plain.active_descendant && !grants.active_descendant,
+        "the highlight starts on the first row, not on the checked toggle"
+    );
+}

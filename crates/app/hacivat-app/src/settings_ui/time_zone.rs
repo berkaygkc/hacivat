@@ -99,8 +99,21 @@ pub fn session_zone(pref: &TimeZonePref) -> TimeZonePref {
     }
 }
 
+// ## m4-t33b-carries (fix round 1, review 4)
+thread_local! {
+    static UNKNOWN_ZONE_LOOKUPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times [`unknown_zone`] looked a saved zone up on this thread (tests: the settings
+/// row must not do it on every frame, T32 re-review RR-5).
+pub fn unknown_zone_lookups() -> u64 {
+    UNKNOWN_ZONE_LOOKUPS.with(std::cell::Cell::get)
+}
+
 /// The saved zone when it is one the tz database does not know (the row says so).
 pub fn unknown_zone(settings: &Settings) -> Option<String> {
+    // ## m4-t33b-carries (fix round 1, review 4): counted, so a test sees a per-frame lookup.
+    UNKNOWN_ZONE_LOOKUPS.with(|n| n.set(n.get() + 1));
     match &settings.ui.time_zone {
         TimeZonePref::Iana(z) if !hacivat_l10n::effective::is_known_zone(z) => Some(z.clone()),
         _ => None,
@@ -181,6 +194,10 @@ pub struct TimeZoneControl {
     select: Entity<Select>,
     /// The values the select offers now (they follow a hand-edited zone).
     values: Vec<String>,
+    // ## m4-t33b-carries (T32 re-review RR-5): the saved zone and whether the tz database
+    // knows it, looked up once per settings change ([`TimeZoneControl::follow`]), never per
+    // frame (the first lookup of a name reads the zoneinfo file).
+    checked: Option<(TimeZonePref, Option<String>)>,
     _subscription: Subscription,
 }
 
@@ -208,12 +225,17 @@ impl TimeZoneControl {
         TimeZoneControl {
             select,
             values,
+            checked: None,
             _subscription: subscription,
         }
     }
 
     /// Before a frame: the select follows the saved zone (a hand edit, another window).
     pub fn follow(&mut self, settings: &Settings, cx: &mut App) {
+        // ## m4-t33b-carries (RR-5): the unknown-zone check, once per change of the setting.
+        if self.checked.as_ref().map(|(p, _)| p) != Some(&settings.ui.time_zone) {
+            self.checked = Some((settings.ui.time_zone.clone(), unknown_zone(settings)));
+        }
         let want = values(&settings.ui.time_zone);
         if want != self.values {
             let opts = options(&want);
@@ -245,5 +267,12 @@ impl TimeZoneControl {
     /// The select (tests, shots).
     pub fn select(&self) -> &Entity<Select> {
         &self.select
+    }
+
+    // ## m4-t33b-carries (RR-5)
+    /// The saved zone when the tz database does not know it, as of the last
+    /// [`TimeZoneControl::follow`].
+    pub fn unknown(&self) -> Option<&str> {
+        self.checked.as_ref().and_then(|(_, z)| z.as_deref())
     }
 }

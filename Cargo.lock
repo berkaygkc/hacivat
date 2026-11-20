@@ -3447,6 +3447,7 @@ dependencies = [
  "futures",
  "hacivat-ddl",
  "hacivat-driver",
+ "hacivat-introspect",
  "hacivat-meta",
  "hacivat-net",
  "hacivat-proto",

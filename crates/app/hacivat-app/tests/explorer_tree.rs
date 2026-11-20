@@ -1670,3 +1670,51 @@ fn object_rows_resolve_on_catalog_rows_and_connection_rows_only_on_roots(cx: &mu
     assert_eq!(resolves(vcx, "f5"), run("explorer.refresh"));
     assert_eq!(resolves(vcx, "shift-f10"), Resolution::PassThrough);
 }
+
+// ## m4-t33b-carries (T14 carry, R-W2-13): the filter opens the rows above at most 200 matches
+// (`REVEAL_HITS`); the others are kept, and a hint under the field says how many are not opened.
+#[gpui::test]
+fn matches_past_the_reveal_cap_are_counted_in_a_hint(cx: &mut TestAppContext) {
+    let vcx = shell_with(cx, "en", vec![pg("shop", "app")]);
+    let id = profile_id(vcx, "shop");
+    let tables: Vec<_> = (0..250)
+        .map(|i| table(&format!("orders_{i:03}"), Some(10_000 + i), &[]))
+        .collect();
+    show(
+        vcx,
+        id,
+        Some(catalog(
+            DbmsKind::Postgres,
+            vec![schema(
+                DbmsKind::Postgres,
+                &["app", "public"],
+                false,
+                tables,
+            )],
+        )),
+    );
+    filter(vcx, "orders_");
+    assert_eq!(
+        drawn_text(vcx, "explorer-filter-more")
+            .as_deref()
+            .map(strip),
+        Some(
+            "50 more matches aren't opened. Open their groups, or type more to narrow the \
+             filter."
+                .to_string()
+        )
+    );
+    // Within the cap: no hint.
+    clear_filter(vcx, "orders_");
+    filter(vcx, "orders_00");
+    assert_eq!(drawn_text(vcx, "explorer-filter-more"), None);
+    switch_to(vcx, "tr");
+    clear_filter(vcx, "orders_00");
+    filter(vcx, "orders_");
+    assert!(
+        drawn_text(vcx, "explorer-filter-more")
+            .is_some_and(|t| strip(&t).starts_with("50 eşleşme daha")),
+        "{:?}",
+        drawn_text(vcx, "explorer-filter-more")
+    );
+}

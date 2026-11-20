@@ -46,6 +46,19 @@ pub fn count_args(task: &TaskProgress) -> Option<Vec<(&'static str, ArgValue)>> 
     ])
 }
 
+// ## m4-t33b-carries (T24 carry, mock 14)
+/// The share of the task read so far, `0.00` to `1.00` (floored to whole percents, exact
+/// decimal text: never through a float), when the total is known and not zero.
+pub fn fraction(task: &TaskProgress) -> Option<hacivat_l10n::ExactDecimal> {
+    let total = task.total.filter(|t| *t > 0)?;
+    let percent = task.done.min(total) * 100 / total;
+    Some(hacivat_l10n::ExactDecimal(format!(
+        "{}.{:02}",
+        percent / 100,
+        percent % 100
+    )))
+}
+
 /// The count's Fluent id.
 pub const COUNT_MESSAGE: &str = "hv-explorer-progress-count";
 
@@ -95,6 +108,16 @@ mod tests {
         assert!(count_args(&t).is_none());
         t.total = Some(2);
         let args = count_args(&t).expect("a count");
+        // ## m4-t33b-carries: the share, floored, as exact decimal text.
+        t.done = 3;
+        t.total = Some(7);
+        assert_eq!(fraction(&t).map(|f| f.0).as_deref(), Some("0.42"));
+        t.done = 9;
+        assert_eq!(fraction(&t).map(|f| f.0).as_deref(), Some("1.00"));
+        t.total = Some(0);
+        assert!(fraction(&t).is_none());
+        t.done = 3;
+        t.total = Some(2);
         assert_eq!(
             args[0].1,
             ArgValue::Count(2),

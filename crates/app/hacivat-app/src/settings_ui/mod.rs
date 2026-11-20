@@ -502,7 +502,8 @@ impl SettingsPage {
             // ## m4-t32-shots (fix round 1, review M-3): an unknown saved zone is not used,
             // and the row says so (info glyph, text-2).
             time_zone::TIME_ZONE => {
-                if let Some(zone) = time_zone::unknown_zone(settings) {
+                // ## m4-t33b-carries (RR-5): as checked once per change, never per frame.
+                if let Some(zone) = self.time_zone.unknown().map(str::to_string) {
                     let text = time_zone::unknown_note(&zone, cx);
                     control = control.child(
                         div()
@@ -978,6 +979,13 @@ pub mod fixtures {
             .map(|o| (o.label)(cx).to_string())
             .collect();
         Some((labels, select.selected()))
+    }
+
+    // ## m4-t33b-carries (RR-5)
+    /// How many times the saved zone was looked up (`time_zone::unknown_zone`) on this thread,
+    /// once a settings page is open.
+    pub fn time_zone_lookups(cx: &App) -> Option<u64> {
+        open_page(cx).map(|_| time_zone::unknown_zone_lookups())
     }
 
     /// Picks time zone choice `index`, as the select does when the user picks it.

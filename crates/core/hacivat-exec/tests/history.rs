@@ -1454,3 +1454,129 @@ async fn clear_during_a_stream_of_records() {
     );
     assert_eq!(left.iter().filter(|t| t.contains("AS other")).count(), 200);
 }
+
+// ## m4-t33b-carries (T32 carry: rotated corrupt files keep old history)
+/// The damaged copies an open set aside are listed one per copy (their `-wal`/`-shm` go with
+/// them) and deleted on request; the live file and unrelated files are never touched.
+#[tokio::test]
+async fn damaged_backups_are_listed_and_deleted_on_request() {
+    let t = tmp();
+    assert!(
+        HistoryStore::damaged_backups(t.path.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let junk = b"not a database".repeat(200);
+    std::fs::write(&t.path, &junk).unwrap();
+    let first = open(&t.path).await;
+    let moved = first.recovered_from().unwrap().to_path_buf();
+    first.shutdown(Duration::from_secs(2)).await;
+    // A second rotation, with a log beside the damaged file.
+    std::fs::write(&t.path, &junk).unwrap();
+    let wal = {
+        let mut s = t.path.as_os_str().to_owned();
+        s.push("-wal");
+        PathBuf::from(s)
+    };
+    std::fs::write(&wal, b"old log").unwrap();
+    let second = open(&t.path).await;
+    let moved2 = second.recovered_from().unwrap().to_path_buf();
+    put(&second, rec(1, "SELECT 'live'")).await;
+    let dir = t.path.parent().unwrap().to_path_buf();
+    let unrelated = dir.join("history.sqlite.notes");
+    std::fs::write(&unrelated, b"keep").unwrap();
+    let mut listed = HistoryStore::damaged_backups(t.path.clone()).await.unwrap();
+    listed.sort();
+    let mut want = vec![moved.clone(), moved2.clone()];
+    want.sort();
+    assert_eq!(listed, want, "one entry per copy");
+    let n = HistoryStore::delete_damaged_backups(t.path.clone(), listed.clone())
+        .await
+        .unwrap();
+    assert_eq!(n, 2);
+    assert!(!moved.exists() && !moved2.exists());
+    let mut moved2_wal = moved2.as_os_str().to_owned();
+    moved2_wal.push("-wal");
+    assert!(
+        !PathBuf::from(moved2_wal).exists(),
+        "the copy's log goes too"
+    );
+    assert!(unrelated.exists(), "an unrelated file stays");
+    assert!(
+        HistoryStore::damaged_backups(t.path.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // The live history is untouched.
+    assert_eq!(texts(&second).await, ["SELECT 'live'"]);
+}
+
+// ## m4-t33b-carries (fix round 1, review 5 and 3): only names of the rotation pattern
+// (`<name>.corrupt-<secs>[-<n>]` with an optional `-wal`/`-shm`) are backups, grouped by their
+// stem (an orphan log left by a crash between the renames is one copy); deleting takes the
+// copies listed, never a re-listing.
+#[tokio::test]
+async fn damaged_backups_follow_the_rotation_pattern_and_delete_only_what_was_listed() {
+    let t = tmp();
+    let beside = |suffix: &str| {
+        let mut s = t.path.as_os_str().to_owned();
+        s.push(suffix);
+        PathBuf::from(s)
+    };
+    for suffix in [
+        ".corrupt-100",
+        ".corrupt-100-wal",
+        ".corrupt-200-1",
+        ".corrupt-300-wal",
+        ".corrupt-notes.txt",
+        ".corrupt-12a",
+        ".corrupt-",
+    ] {
+        std::fs::write(beside(suffix), b"x").unwrap();
+    }
+    let mut listed = HistoryStore::damaged_backups(t.path.clone()).await.unwrap();
+    listed.sort();
+    assert_eq!(
+        listed,
+        [
+            beside(".corrupt-100"),
+            beside(".corrupt-200-1"),
+            beside(".corrupt-300")
+        ],
+        "one entry per copy, the orphan log's stem included"
+    );
+    // A copy set aside after the listing is not deleted.
+    std::fs::write(beside(".corrupt-400"), b"x").unwrap();
+    let n = HistoryStore::delete_damaged_backups(t.path.clone(), listed.clone())
+        .await
+        .unwrap();
+    assert_eq!(n, 3);
+    for gone in [
+        ".corrupt-100",
+        ".corrupt-100-wal",
+        ".corrupt-200-1",
+        ".corrupt-300-wal",
+    ] {
+        assert!(!beside(gone).exists(), "{gone} deleted");
+    }
+    for kept in [
+        ".corrupt-400",
+        ".corrupt-notes.txt",
+        ".corrupt-12a",
+        ".corrupt-",
+    ] {
+        assert!(beside(kept).exists(), "{kept} kept");
+    }
+    // A path that is not a listed backup of this history is refused, never deleted.
+    let stranger = t.path.parent().unwrap().join("other.sqlite.corrupt-1");
+    std::fs::write(&stranger, b"x").unwrap();
+    assert_eq!(
+        HistoryStore::delete_damaged_backups(t.path.clone(), vec![stranger.clone()])
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(stranger.exists());
+}
