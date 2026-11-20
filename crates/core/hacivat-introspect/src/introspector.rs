@@ -14,7 +14,9 @@ use hacivat_meta::merge::NamespaceResult;
 use hacivat_meta::persist::ServerFingerprint;
 use hacivat_meta::props::{DepsFacet, FacetKind, GrantsFacet, StatsFacet};
 use hacivat_meta::snapshot::IntroErrorCode;
-use hacivat_meta::{Level, Name, NamespaceSnapshot, NsKey, ObjectKey, ObjectKind, StateMark};
+use hacivat_meta::{
+    Level, Name, NamespaceSnapshot, NsKey, ObjectKey, ObjectKind, ServerFacts, StateMark,
+};
 use hacivat_proto::DbmsKind;
 use hacivat_session::meta::{MetaConn, MetaError};
 use tokio_util::sync::CancellationToken;
@@ -210,7 +212,55 @@ pub trait Introspector: Send + Sync {
         let _ = c;
         Box::pin(async { Ok(ServerIdentity::Unknown) })
     }
+
+    // ## m4-t17-mysql (named exception in Task 1c/15's file; T15 carry m4, ruling R-W3-6)
+    /// The server's facts as read on `c` (version, flavor, identifier rule, quoting modes, the
+    /// default collation per database). The engine reads them with the scope refresh on
+    /// connect and publishes them (`CatalogChange::SetServer`) when they differ from the
+    /// catalog's, so the fold rule of later tasks follows the real `lower_case_table_names`.
+    /// The default is `None`: the catalog keeps the facts it was made with.
+    fn server_facts<'a>(
+        &'a self,
+        c: &'a mut MetaConn,
+    ) -> BoxFuture<'a, Result<Option<ServerFacts>, IntroError>> {
+        let _ = c;
+        Box::pin(async { Ok(None) })
+    }
 }
+
+// ## m4-t17-mysql (named exception; T15 carry m11): a progress sink inside one pass.
+/// Where a running pass reports its phase and counts. The engine sets one around each pass or
+/// fragment it runs ([`with_progress`]); an introspector calls [`report_progress`], which does
+/// nothing outside such a scope (a test, a direct call).
+#[derive(Clone)]
+pub struct ProgressSink(Arc<dyn Fn(crate::engine::Phase, u64, Option<u64>) + Send + Sync>);
+
+impl ProgressSink {
+    pub fn new(f: impl Fn(crate::engine::Phase, u64, Option<u64>) + Send + Sync + 'static) -> Self {
+        ProgressSink(Arc::new(f))
+    }
+}
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressSink")
+    }
+}
+
+tokio::task_local! {
+    static PASS_PROGRESS: ProgressSink;
+}
+
+/// Runs `fut` with `sink` as the pass's progress sink.
+pub async fn with_progress<F: std::future::Future>(sink: ProgressSink, fut: F) -> F::Output {
+    PASS_PROGRESS.scope(sink, fut).await
+}
+
+/// Reports the running pass's phase, objects done and total (`None` until known).
+pub fn report_progress(phase: crate::engine::Phase, done: u64, total: Option<u64>) {
+    let _ = PASS_PROGRESS.try_with(|s| (s.0)(phase, done, total));
+}
+// ## m4-t17-mysql
 
 // ## m4-t15-engine (ruling R-W3-3)
 /// What an introspector knows of its server's identity.
@@ -234,101 +284,6 @@ pub fn introspector_for(dbms: DbmsKind) -> Option<Arc<dyn Introspector>> {
     }
 }
 
-/// Implements every [`Introspector`] method of `$ty` as [`IntroError::NotImplemented`], with
-/// `$caps` as its capabilities (the M4 Task 1c stubs; Tasks 15–18 replace each).
-macro_rules! not_implemented_introspector {
-    ($ty:ty, |$s:ident| $caps:expr) => {
-        impl $crate::introspector::Introspector for $ty {
-            fn list_namespaces<'a>(
-                &'a self,
-                _c: &'a mut ::hacivat_session::meta::MetaConn,
-            ) -> ::futures::future::BoxFuture<
-                'a,
-                Result<Vec<$crate::scope::NsInfo>, $crate::introspector::IntroError>,
-            > {
-                Box::pin(async { Err($crate::introspector::IntroError::NotImplemented) })
-            }
-            fn introspect<'a>(
-                &'a self,
-                _c: &'a mut ::hacivat_session::meta::MetaConn,
-                _ns: &'a ::hacivat_meta::NsKey,
-                _mode: $crate::pack::Mode,
-                _level: ::hacivat_meta::Level,
-                _filter: &'a $crate::filter::CompiledFilter,
-                _prev: Option<&'a ::hacivat_meta::NamespaceSnapshot>,
-                _cancel: &'a ::tokio_util::sync::CancellationToken,
-            ) -> ::futures::future::BoxFuture<
-                'a,
-                Result<::hacivat_meta::merge::NamespaceResult, $crate::introspector::IntroError>,
-            > {
-                Box::pin(async { Err($crate::introspector::IntroError::NotImplemented) })
-            }
-            fn fragment<'a>(
-                &'a self,
-                _c: &'a mut ::hacivat_session::meta::MetaConn,
-                _ns: &'a ::hacivat_meta::NsKey,
-                _keys: &'a [::hacivat_meta::ObjectKey],
-                _level: ::hacivat_meta::Level,
-                _filter: &'a $crate::filter::CompiledFilter,
-                _cancel: &'a ::tokio_util::sync::CancellationToken,
-            ) -> ::futures::future::BoxFuture<
-                'a,
-                Result<::hacivat_meta::merge::NamespaceResult, $crate::introspector::IntroError>,
-            > {
-                Box::pin(async { Err($crate::introspector::IntroError::NotImplemented) })
-            }
-            fn stamps<'a>(
-                &'a self,
-                _c: &'a mut ::hacivat_session::meta::MetaConn,
-                _keys: &'a [::hacivat_meta::ObjectKey],
-            ) -> ::futures::future::BoxFuture<
-                'a,
-                Result<Vec<Option<::hacivat_meta::StateMark>>, $crate::introspector::IntroError>,
-            > {
-                Box::pin(async { Err($crate::introspector::IntroError::NotImplemented) })
-            }
-            fn facet<'a>(
-                &'a self,
-                _c: &'a mut ::hacivat_session::meta::MetaConn,
-                _ns: &'a ::hacivat_meta::NsKey,
-                _keys: &'a [::hacivat_meta::ObjectKey],
-                _kind: ::hacivat_meta::props::FacetKind,
-            ) -> ::futures::future::BoxFuture<
-                'a,
-                Result<$crate::introspector::FacetRows, $crate::introspector::IntroError>,
-            > {
-                Box::pin(async { Err($crate::introspector::IntroError::NotImplemented) })
-            }
-            fn check_state<'a>(
-                &'a self,
-                _c: &'a mut ::hacivat_session::meta::MetaConn,
-                _keys: &'a [::hacivat_meta::ObjectKey],
-            ) -> ::futures::future::BoxFuture<
-                'a,
-                Result<Vec<$crate::introspector::Staleness>, $crate::introspector::IntroError>,
-            > {
-                Box::pin(async { Err($crate::introspector::IntroError::NotImplemented) })
-            }
-            fn check_namespace<'a>(
-                &'a self,
-                _c: &'a mut ::hacivat_session::meta::MetaConn,
-                _ns: &'a ::hacivat_meta::NsKey,
-                _snap: &'a ::hacivat_meta::NamespaceSnapshot,
-            ) -> ::futures::future::BoxFuture<
-                'a,
-                Result<$crate::freshness::NsCheck, $crate::introspector::IntroError>,
-            > {
-                Box::pin(async { Err($crate::introspector::IntroError::NotImplemented) })
-            }
-            fn capabilities(&self) -> $crate::introspector::IntroCaps {
-                let $s = self;
-                $caps
-            }
-        }
-    };
-}
-pub(crate) use not_implemented_introspector;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,14 +299,16 @@ mod tests {
             let caps = introspector_for(dbms).expect("an M4 engine").capabilities();
             assert_eq!(caps.dbms, dbms);
             assert_eq!(caps.transactional_ddl, transactional, "{dbms:?}");
-            // ## m4-t16-pg (named exception): PostgreSQL is incremental since Task 16.
-            // ## m4-t18-sqlite (named exception): SQLite's introspector is written (Task 18).
-            match dbms {
-                DbmsKind::Postgres => {
-                    assert!(caps.incremental && caps.facets.is_empty(), "{dbms:?}");
-                }
-                DbmsKind::Sqlite => {}
-                _ => assert!(!caps.incremental && caps.facets.is_empty(), "{dbms:?}"),
+            // ## m4-t16-pg / m4-t17-mysql / m4-t18-sqlite (named exceptions in Task 1c's file):
+            // PostgreSQL (Task 16) and MySQL (R-M4-39) are incremental, MariaDB stays `Full`
+            // (R-M4-10); SQLite is Task 18's; facets wait for Tasks 16b/17b.
+            if dbms != DbmsKind::Sqlite {
+                assert_eq!(
+                    caps.incremental,
+                    matches!(dbms, DbmsKind::Postgres | DbmsKind::MySql),
+                    "{dbms:?}"
+                );
+                assert!(caps.facets.is_empty(), "{dbms:?}");
             }
         }
         assert!(introspector_for(DbmsKind::MsSql).is_none());

@@ -1750,7 +1750,9 @@ fn check_text(sql: &str, kind: DbmsKind, sqlite_pragma: bool) -> Result<(), Meta
             return refused;
         };
         let lexed = lex(sql, profile, ctx.modes, &LexState::Initial);
-        if !read_tokens_ok(sql, &lexed, sqlite_pragma) {
+        // ## m4-t17-mysql: the SHOW CREATE exemption holds only in a MySQL-family lexer context.
+        let mysql_lexer = matches!(ctx.id, DialectId::MySql | DialectId::MariaDb);
+        if !read_tokens_ok(sql, &lexed, sqlite_pragma, mysql_lexer) {
             return refused;
         }
     }
@@ -1810,7 +1812,7 @@ fn denied_call(upper: &str) -> bool {
 }
 
 /// One lexer context's reading of a read's text (see [`check_read_text_for`]).
-fn read_tokens_ok(sql: &str, lexed: &Lexed, sqlite_pragma: bool) -> bool {
+fn read_tokens_ok(sql: &str, lexed: &Lexed, sqlite_pragma: bool, mysql_lexer: bool) -> bool {
     if !lexed.errors().is_empty() {
         return false;
     }
@@ -1828,6 +1830,19 @@ fn read_tokens_ok(sql: &str, lexed: &Lexed, sqlite_pragma: bool) -> bool {
     }
     let upper = |i: usize| token_text(sql, lexed, i).to_ascii_uppercase();
     let is = |i: Option<usize>, kind: TokenKind| i.is_some_and(|i| lexed.kind(i) == kind);
+    // ## m4-t17-mysql (named exception in Task 5's file; R-M4-37): a `SHOW CREATE …` statement
+    // holds no expression, so a quoted identifier there is the object's name, never a call or
+    // a keyword. Such a name may be non-ASCII (`İ`) or spell a denied word (`update`): only
+    // backtick-quoted identifiers not followed by `(`, read by a MySQL/MariaDB lexer, are
+    // exempt (T5 reviewer A, minor 1); every word is still checked. What keeps the quoting
+    // sound is the connection's character set: `SET NAMES utf8mb4` at every connect and the
+    // `utf8mb4` assertion before every snapshot (a GBK lead byte could swallow a doubled
+    // backtick; ADR 0008 `m4-t17`).
+    let show_create = mysql_lexer
+        && keyword == "SHOW"
+        && sig
+            .get(1)
+            .is_some_and(|&i| lexed.kind(i) == TokenKind::Word && upper(i) == "CREATE");
     for (n, &i) in sig.iter().enumerate() {
         let next = sig.get(n + 1).copied();
         let after_next = sig.get(n + 2).copied();
@@ -1838,6 +1853,13 @@ fn read_tokens_ok(sql: &str, lexed: &Lexed, sqlite_pragma: bool) -> bool {
             | TokenKind::UnicodeQuotedIdent => return false,
             TokenKind::Semicolon if next.is_some() => return false,
             TokenKind::Word => upper(i),
+            TokenKind::QuotedIdent
+                if show_create
+                    && token_text(sql, lexed, i).starts_with('`')
+                    && !is(next, TokenKind::LParen) =>
+            {
+                continue;
+            }
             TokenKind::QuotedIdent => unquoted(token_text(sql, lexed, i)).to_ascii_uppercase(),
             TokenKind::Op => {
                 let op = token_text(sql, lexed, i);

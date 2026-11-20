@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 use super::TaskProgress;
 use super::filters::Filters;
 use super::levels::{LevelPolicy, NsRole};
-use super::work::{self, IdentityRead, Listing, Merged, Output, Spec, Work, WorkerCtx};
+use super::work::{self, FactsRead, IdentityRead, Listing, Merged, Output, Spec, Work, WorkerCtx};
 use super::{CacheHandle, EngineConfig, EngineEvent, EngineLimits, Phase, Priority, Progress};
 use crate::ddl_effects::Target;
 use crate::introspector::{IntroCaps, IntroError, Staleness};
@@ -384,6 +384,8 @@ impl Actor {
             limits: cfg.limits,
             events: events.clone(),
             cache: cfg.cache.clone(),
+            // ## m4-t17-mysql (named exception; T15 carry m11)
+            progress: progress.clone(),
         });
         Actor {
             catalog: cfg.catalog,
@@ -1407,8 +1409,8 @@ impl Actor {
             out
         };
         match out {
-            Output::Namespaces(infos, identity, unlisted) => {
-                self.listed_done(job, infos, identity, unlisted)
+            Output::Namespaces(infos, identity, unlisted, facts) => {
+                self.listed_done(job, infos, identity, unlisted, facts)
             }
             Output::Merged(m) => self.merged(job, *m),
             Output::Staleness(keys, st) => self.staleness(job, keys, st),
@@ -1422,6 +1424,7 @@ impl Actor {
         infos: Vec<NsInfo>,
         identity: Option<IdentityRead>,
         unlisted: Vec<Name>,
+        facts: FactsRead,
     ) {
         for db in &unlisted {
             let _ = self
@@ -1430,7 +1433,38 @@ impl Actor {
         }
         self.unlisted = unlisted.into_iter().collect();
         self.listed = Some(infos);
-        let changes = self.scope_changes();
+        let mut changes = self.scope_changes();
+        // ## m4-t17-mysql (named exception; T15 carry m4, review I-2): the real server facts
+        // replace the catalog's placeholder in the same publish, so every later task's fold
+        // rule (read per task from the facts) follows the server's `lower_case_table_names`.
+        // A failed read publishes the current facts with an unknown `lower_case_table_names`
+        // (no table rule is pinned: a lookup answers `ServerDependent`, never a wrong
+        // `Missing`). A fact that changes the table fold rule re-folds every cached arena.
+        let cur = self.catalog.current();
+        let next = match facts {
+            FactsRead::Read(f) => Some(*f),
+            FactsRead::Failed => {
+                let mut f = (*cur.server).clone();
+                f.ident.lower_case_table_names = u8::MAX;
+                Some(f)
+            }
+            FactsRead::NotRead => None,
+        };
+        if let Some(f) = next
+            && *cur.server != f
+        {
+            let fold = FoldRule::for_names(f.ident.dialect, &f.ident, NameClass::Table)
+                .unwrap_or(FoldRule::Exact);
+            let mut front = vec![CatalogChange::SetServer(Arc::new(f))];
+            for arena in cur.namespaces.values() {
+                if arena.fold() != fold
+                    && let Some(r) = refold(arena, fold)
+                {
+                    front.push(CatalogChange::Put(Arc::new(r)));
+                }
+            }
+            changes.splice(0..0, front);
+        }
         let mut generation = match self.publish(changes, None) {
             Ok(g) => g,
             Err(e) => return job.resolve(Err(e)),
@@ -2067,4 +2101,27 @@ async fn sleep_until(at: Option<Instant>) {
         Some(t) => tokio::time::sleep_until(t).await,
         None => std::future::pending().await,
     }
+}
+
+// ## m4-t17-mysql (named exception; review I-2)
+/// `arena` rebuilt under the table fold rule `fold`, with its objects, metadata and watermark
+/// unchanged (only its lookup keys change). `None` if the rebuild fails (the arena is then
+/// kept, and its lookups answer `ServerDependent` against the new facts).
+fn refold(arena: &NamespaceSnapshot, fold: FoldRule) -> Option<NamespaceSnapshot> {
+    let mut tree = hacivat_meta::Subtree::with_capacity(arena.obj(0)?.clone(), arena.len());
+    let mut stack = vec![(0u32, tree.root())];
+    while let Some((idx, node)) = stack.pop() {
+        for (child, obj) in arena.children(idx) {
+            let at = tree.add(node, obj.clone());
+            stack.push((child, at));
+        }
+    }
+    NamespaceSnapshot::build(
+        arena.key().clone(),
+        arena.dbms(),
+        fold,
+        arena.meta().clone(),
+        tree,
+    )
+    .ok()
 }
