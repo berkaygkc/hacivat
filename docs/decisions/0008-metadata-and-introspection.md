@@ -2574,3 +2574,16 @@ introspectors' own system-mode packs.
       identity arguments, so `NamespaceSnapshot::find`'s `is_keyed_by` never matches.
     - Each routine is then treated as missing from the cache and re-read. This is an over-read,
       not a miss.
+- **Fix round 3 (ruling R-W5-9): the routine lookup is fixed here.** The changes are named
+  exceptions, fenced `m4-t28-routine-lookup`.
+  - `hacivat-meta` gains `NamespaceSnapshot::find_by_server_id(kind, ServerId)`, which reads
+    the existing server-id index. It returns `None` when two objects of the kind share the id,
+    which is the same ambiguity rule as `find`.
+  - The PostgreSQL incremental pass now finds a cached object by `(kind, oid)` first, and
+    falls back to the path lookup.
+  - Tests:
+    - Task 16's Docker test `insert_only_pass_with_routines_rereads_no_routine`. It was
+      committed first, as the failing half.
+    - `hacivat-meta/tests/find_by_server_id.rs`.
+  - MySQL is not affected: it matches cached objects by kind, raw kind and name, and MySQL
+    has no overloads. SQLite has no routines.
