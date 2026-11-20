@@ -465,6 +465,13 @@ fn provided_actions_appear_in_their_slot_for_matching_kinds(cx: &mut TestAppCont
     let vcx = shell_with_fake(cx, "en", answers_probe(FakeDriver::new(DbmsKind::Postgres)));
     let id = add_profile(vcx, pg("app-dev", Some(EnvTag::Dev)));
     show(vcx, id, pg_tables(&["users"]));
+    // "Hide objects like this" is enabled once the profile's data file is read (a core-runtime
+    // read; without this wait the menu raced it).
+    wait_until(vcx, "the profile's data", |vcx| {
+        vcx.cx
+            .read(|cx| hacivat_app::explorer::userdata::get(id, cx))
+            .is_some()
+    });
     vcx.cx
         .update(|cx| register_action_provider(Rc::new(Provider), cx));
     open(vcx, &["app-dev", "app", "public", "TABLES"]);

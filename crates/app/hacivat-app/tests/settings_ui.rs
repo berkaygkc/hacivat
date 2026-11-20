@@ -42,15 +42,14 @@ fn settings_tab_with(
     time_zone: &str,
 ) -> (&'static mut VisualTestContext, LocalPaths) {
     apply_text_rendering(TextRendering::Crisp);
-    let root = tempfile::tempdir().expect("temp dir");
-    let paths = LocalPaths::under(root.path());
+    // The temp root lives until the test ends; the shell writes `workspace.json` there.
+    let root = temp_root();
+    let paths = LocalPaths::under(&root);
     write(
         paths.settings_toml(),
         &format!("version = 1\n\n[ui]\ntime_zone = \"{time_zone}\"\n"),
     );
-    // The temp root lives as long as the test process; the shell writes `workspace.json` there.
-    let root: &'static tempfile::TempDir = Box::leak(Box::new(root));
-    let vcx = shell_at(cx, root.path(), "en");
+    let vcx = shell_at(cx, &root, "en");
     let layout = KeyboardLayoutId(layout.to_string());
     vcx.cx
         .update(|cx| install_keymap_with(cx, platform, layout, None));

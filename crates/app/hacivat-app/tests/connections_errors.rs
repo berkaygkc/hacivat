@@ -45,10 +45,10 @@ use tokio::sync::oneshot;
 
 // ---- shells ------------------------------------------------------------------------------------
 
-/// What a test shell keeps alive: temp roots, loopback listeners, the fake, the open views.
+/// What a test shell keeps alive: loopback listeners, the fake, the open views. Its temp root
+/// is the test's own ([`temp_root`]): an app global is never dropped in a GPUI test.
 #[derive(Default)]
 struct Kept {
-    roots: Vec<tempfile::TempDir>,
     listeners: Vec<TcpListener>,
     fake: Option<Arc<FakeDriver>>,
     view: Option<Entity<ErrorView>>,
@@ -71,8 +71,8 @@ fn shell_with_fake(
     lang: &str,
     fake: FakeDriver,
 ) -> &'static mut VisualTestContext {
-    let root = tempfile::tempdir().expect("temp dir");
-    let paths = LocalPaths::under(root.path());
+    let root = temp_root();
+    let paths = LocalPaths::under(&root);
     paths.ensure_dirs().expect("test dirs");
     let fake = Arc::new(fake);
     let mut drivers = DriverRegistry::new();
@@ -90,13 +90,14 @@ fn shell_with_fake(
     startup.connections = Some(boot);
     let window = cx.update(|cx| {
         let kept = cx.default_global::<Kept>();
-        kept.roots.push(root);
         kept.fake = Some(fake);
         cx.set_global(TextRegistry {
             enabled: true,
             frame: Vec::new(),
         });
-        start(cx, startup, None).expect("open the workspace")
+        let window = start(cx, startup, None).expect("open the workspace");
+        stop_core_runtime_at_test_end(cx);
+        window
     });
     let vcx = VisualTestContext::from_window(window.into(), cx).into_mut();
     // Connects and tests run on the core runtime, whose threads wake the UI's tasks (P22).

@@ -11,7 +11,7 @@
 mod common;
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use common::*;
 use hacivat_driver::fake::FakeDriver;
@@ -83,9 +83,11 @@ fn pg_with(host: &str, mode: TlsMode, consent: bool) -> Profile {
 
 /// A CA file the file picker returned: absolute, outside any default root.
 fn picked_file(name: &str) -> PathBuf {
-    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-    let dir = DIR.get_or_init(|| tempfile::tempdir().unwrap());
-    let path = dir.path().join(name);
+    thread_local! {
+        /// Removed when the test thread ends (a process-wide static is never dropped).
+        static DIR: tempfile::TempDir = tempfile::tempdir().unwrap();
+    }
+    let path = DIR.with(|dir| dir.path().join(name));
     std::fs::write(&path, include_bytes!("fixtures/test-ca.pem")).unwrap();
     path
 }

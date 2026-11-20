@@ -37,11 +37,52 @@ use hacivat_ui::text::{RenderedText, TextRegistry};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::keymap::{ContextStack, KeyboardLayoutId, KeymapPlatform};
 
-/// Temp roots kept alive for the app's lifetime (the shell writes `workspace.json` there).
-#[derive(Default)]
-struct TempRoots(Vec<tempfile::TempDir>);
+/// What a test leaves to clean up when its thread ends: the core runtimes of its apps, then its
+/// temp roots (the shells' homes, fixture folders).
+///
+/// Not an app global: GPUI's test harness never drops the app a `VisualTestContext::into_mut`
+/// holds, so a root kept there outlived the test (R-W5-15). A thread-local is dropped when the
+/// test's thread ends, after the harness's teardown. The runtimes stop first: a worker still
+/// opening the history or saving a profile would re-create a removed root.
+struct TestEnd {
+    runtimes: Vec<std::sync::Arc<hacivat_session::runtime::CoreRuntime>>,
+    roots: Vec<tempfile::TempDir>,
+}
 
-impl Global for TempRoots {}
+impl Drop for TestEnd {
+    fn drop(&mut self) {
+        for rt in self.runtimes.drain(..) {
+            rt.shutdown(TEARDOWN_BUDGET);
+        }
+        // `roots` drops after this body: each folder is removed.
+    }
+}
+
+thread_local! {
+    static TEST_END: RefCell<TestEnd> = const {
+        RefCell::new(TestEnd {
+            runtimes: Vec::new(),
+            roots: Vec::new(),
+        })
+    };
+}
+
+/// A fresh temp folder that lives until the test's thread ends ([`TestEnd`]).
+pub fn temp_root() -> std::path::PathBuf {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().to_path_buf();
+    TEST_END.with(|t| t.borrow_mut().roots.push(dir));
+    path
+}
+
+/// Stops the app's core runtime (if it has one) when the test's thread ends, before the temp
+/// roots are removed ([`TestEnd`]).
+pub fn stop_core_runtime_at_test_end(cx: &App) {
+    if let Some(m) = cx.try_global::<hacivat_app::connections::ConnectionsModel>() {
+        let rt = m.core_runtime().clone();
+        TEST_END.with(|t| t.borrow_mut().runtimes.push(rt));
+    }
+}
 
 /// Text inputs built by test tabs, newest last.
 #[derive(Default)]
@@ -51,9 +92,7 @@ impl Global for TestInputs {}
 
 /// A shell in `lang` over a fresh temp root.
 pub fn shell(cx: &mut TestAppContext, lang: &str) -> &'static mut VisualTestContext {
-    let root = tempfile::tempdir().expect("temp dir");
-    let path = root.path().to_path_buf();
-    cx.update(|cx| cx.default_global::<TempRoots>().0.push(root));
+    let path = temp_root();
     shell_at(cx, &path, lang)
 }
 
@@ -71,9 +110,7 @@ pub fn shell_at(
 
 /// The `--vf-demo` shell: the harman production capsule, in English.
 pub fn shell_demo(cx: &mut TestAppContext) -> &'static mut VisualTestContext {
-    let root = tempfile::tempdir().expect("temp dir");
-    let path = root.path().to_path_buf();
-    cx.update(|cx| cx.default_global::<TempRoots>().0.push(root));
+    let path = temp_root();
     let window = boot(cx, &path, "en", Some(DemoCapsule::harman()));
     finish(cx, window)
 }
@@ -116,6 +153,7 @@ fn boot(
 }
 
 fn finish(cx: &mut TestAppContext, window: AnyWindowHandle) -> &'static mut VisualTestContext {
+    cx.read(stop_core_runtime_at_test_end);
     let vcx = VisualTestContext::from_window(window, cx).into_mut();
     vcx.run_until_parked();
     vcx
@@ -748,9 +786,7 @@ pub fn shell_with_connections_prepared(
     use hacivat_driver::fake::FakeDriver;
     use hacivat_proto::DbmsKind;
 
-    let root = tempfile::tempdir().expect("temp dir");
-    let path = root.path().to_path_buf();
-    cx.update(|cx| cx.default_global::<TempRoots>().0.push(root));
+    let path = temp_root();
     let paths = LocalPaths::under(&path);
     paths.ensure_dirs().expect("test dirs");
     prepare(&paths);
@@ -948,9 +984,7 @@ pub fn shell_with_fake_backend(
     use hacivat_driver::{Driver as _, DriverRegistry};
     use hacivat_proto::DbmsKind;
 
-    let root = tempfile::tempdir().expect("temp dir");
-    let path = root.path().to_path_buf();
-    cx.update(|cx| cx.default_global::<TempRoots>().0.push(root));
+    let path = temp_root();
     let paths = LocalPaths::under(&path);
     paths.ensure_dirs().expect("test dirs");
     prepare(&paths);
@@ -1137,14 +1171,10 @@ pub fn settle_until<F: FnMut() -> bool>(
 
 // ## m2b-t20-ssh
 
-/// A fresh temp folder kept for the app's lifetime (with the shells' own roots), for fixture
-/// files the core runtime reads later (a `~/.ssh/config`).
-pub fn temp_dir(vcx: &VisualTestContext) -> std::path::PathBuf {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().to_path_buf();
-    vcx.cx
-        .update(|cx| cx.default_global::<TempRoots>().0.push(dir));
-    path
+/// A fresh temp folder kept until the test ends (with the shells' own roots, [`temp_root`]),
+/// for fixture files the core runtime reads later (a `~/.ssh/config`).
+pub fn temp_dir(_vcx: &VisualTestContext) -> std::path::PathBuf {
+    temp_root()
 }
 
 // ## m3a-t01b-seams
