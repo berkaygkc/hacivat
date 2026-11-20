@@ -907,7 +907,14 @@ async fn mysql_joined_fragment_reads_inside_the_jobs_transaction() {
         .unwrap_or_else(|e| panic!("{}: the joined read: {e:?}", t.id));
         let cols = columns(&got, &table);
         assert_eq!(names(&cols), ["a", "c"], "{}", t.id);
-        assert_eq!(type_of(&cols, "c").1, "int", "{}", t.id);
+        // `COLUMN_TYPE` verbatim, as T17's pass keeps it (F9; `docker_mysql_intro`): MariaDB
+        // still writes the display width, MySQL 8 does not (CI 44709954319).
+        let want = if t.engine == DbmsKind::MariaDb {
+            "int(11)"
+        } else {
+            "int"
+        };
+        assert_eq!(type_of(&cols, "c").1, want, "{}", t.id);
         assert_eq!(
             tx_of(&j),
             TxStatus::InTx,

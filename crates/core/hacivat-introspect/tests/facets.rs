@@ -856,6 +856,45 @@ async fn a_grants_read_overtaken_by_a_role_rename_is_published_stale() {
     assert_eq!(r.fake.calls().len(), calls + 1);
     assert!(is_loaded(&grants_of(&r, &t_key()).0));
 }
+
+/// CI 44709954319 (the DDL view's flow): an elevation reads the object at `Sources`; a
+/// `Sources` request for it right after reads nothing more, where `Sources` is a level. Once
+/// the namespace changed, a request reads it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sources_request_after_an_elevation_reads_nothing_more() {
+    let r = loaded(&PG_FACETS).await;
+    let fragments = |r: &FacetRig| {
+        r.fake
+            .inner
+            .calls()
+            .into_iter()
+            .filter(|c| matches!(c, FakeCall::Fragment { .. }))
+            .count()
+    };
+    let before = fragments(&r);
+    bounded(r.handle.elevate(t_key(), Level::Sources))
+        .await
+        .expect("elevated");
+    assert_eq!(fragments(&r), before + 1, "the elevation's fragment");
+    bounded(r.handle.load_facet(vec![t_key()], FacetKind::Sources))
+        .await
+        .expect("answered");
+    assert_eq!(
+        fragments(&r),
+        before + 1,
+        "no second read of the same object"
+    );
+    // The namespace changes: the next request reads the object again.
+    r.fake.inner.touch(&s(), "u");
+    bounded(r.handle.refresh(Target::Namespace(s()), Trigger::User))
+        .await
+        .expect("re-read");
+    let mid = fragments(&r);
+    bounded(r.handle.load_facet(vec![t_key()], FacetKind::Sources))
+        .await
+        .expect("read");
+    assert_eq!(fragments(&r), mid + 1);
+}
 // ## m4-t15b-facets
 
 // ---------------------------------------------------------------------------------------------

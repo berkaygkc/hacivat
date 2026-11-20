@@ -496,6 +496,12 @@ struct Actor {
     facet_epoch: u64,
     /// The epoch each running facet read started at, by job id.
     facet_started: HashMap<u64, u64>,
+    /// The generation that published a read at `Sources` of each object (a fragment) and of
+    /// each namespace (a pass): a `Sources` request whose object was read so since its
+    /// namespace last changed has nothing more to read (CI 44709954319: the DDL view's facet
+    /// request after its elevation read the view twice).
+    sources_read: HashMap<ObjectKey, u64>,
+    sources_read_ns: HashMap<NsKey, u64>,
 }
 
 impl Actor {
@@ -561,6 +567,8 @@ impl Actor {
             // ## m4-t15b-facets (named exception; review m-2)
             facet_epoch: 0,
             facet_started: HashMap::new(),
+            sources_read: HashMap::new(),
+            sources_read_ns: HashMap::new(),
             validate_every: cfg.validate_every,
             // ## m4-t22-state (named lines: validation tasks)
             next_validate: cfg.validate_every.map(|d| clock.now() + d),
@@ -1914,6 +1922,20 @@ impl Actor {
             Ok(g) => g,
             Err(e) => return job.resolve(Err(e)),
         };
+        // ## m4-t15b-facets (named exception): what this publish read at `Sources`.
+        if level >= Level::Sources {
+            match &job.work {
+                Work::Pass { .. } => {
+                    self.sources_read_ns.insert(ns.clone(), generation);
+                }
+                Work::Fragment { keys, .. } => {
+                    for k in keys {
+                        self.sources_read.insert(k.clone(), generation);
+                    }
+                }
+                _ => {}
+            }
+        }
         // ## m4-t22-state (named exception; T16b review carry): a renamed or dropped role
         // leaves loaded grantee names stale.
         let generation = if accounts {
@@ -3042,6 +3064,29 @@ impl Actor {
                 self.publish(changes, None)
                     .and(Err(IntroError::NotImplemented)),
             );
+        }
+        // Where `Sources` is a level, an object read at it since its namespace last changed has
+        // nothing more to give (its text, if it has one, came with that read): no second read.
+        let plan = if read {
+            plan
+        } else {
+            let fresh = |ns: &NsKey, k: &ObjectKey| {
+                let Some(arena) = snap.namespaces.get(ns) else {
+                    return false;
+                };
+                let g = arena.generation();
+                self.sources_read_ns.get(ns) == Some(&g) || self.sources_read.get(k) == Some(&g)
+            };
+            plan.into_iter()
+                .map(|(ns, ks)| {
+                    let ks: Vec<ObjectKey> = ks.into_iter().filter(|k| !fresh(&ns, k)).collect();
+                    (ns, ks)
+                })
+                .filter(|(_, ks)| !ks.is_empty())
+                .collect()
+        };
+        if plan.is_empty() {
+            return w.resolve(Ok(snap.generation));
         }
         // `Sources` reads are per key (review I-2, T17b m-6): a key the login may not
         // `SHOW CREATE` fails alone, never another key or another caller's.
