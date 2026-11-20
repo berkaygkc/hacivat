@@ -743,6 +743,12 @@ async fn background_validation_never_deletes_in_small_steps() {
     // looked (55 %): held.
     drop_range(12, 22);
     round(&r, &hand, TEN_MIN).await;
+    // The validation check can finish (and the engine look idle) before the pass it queued is
+    // planned; wait for the hold itself instead of assuming `round` covered it (seen on CI).
+    bounded(wait_until(Duration::from_secs(60), || {
+        r.handle.pending_confirmation(&n).is_some()
+    }))
+    .await;
     assert_eq!(tables_in(&r, &n).len(), 28, "nothing more removed");
     let held = r
         .handle

@@ -58,6 +58,10 @@ pub(crate) enum Request {
     Elevate(ObjectKey, Level),
     Refresh(Target, Trigger),
     CheckState(Vec<ObjectKey>),
+    // ## m4-t25-ddl-view (named exception): a state check that also reports its per-key
+    // verdicts (the DDL view, surface 11).
+    CheckStateVerdicts(Vec<ObjectKey>, VerdictSink),
+    // ## m4-t25-ddl-view
     Confirm {
         ns: NsKey,
         accept: bool,
@@ -65,6 +69,52 @@ pub(crate) enum Request {
     // ## m4-t15b-facets (named exception in Task 15's file)
     Facet(Vec<ObjectKey>, hacivat_meta::props::FacetKind),
 }
+
+// ## m4-t25-ddl-view (named exception)
+/// Where a state check reports its per-key verdicts: the jobs of one request (one per
+/// database) add theirs; the last one sends them all. A job that fails drops its share, so the
+/// receiver then sees the sender dropped (the check could not decide).
+#[derive(Debug, Clone)]
+pub(crate) struct VerdictSink(Arc<Mutex<VerdictJoin>>);
+
+#[derive(Debug)]
+struct VerdictJoin {
+    left: usize,
+    got: Vec<(ObjectKey, Staleness)>,
+    tx: Option<tokio::sync::oneshot::Sender<Vec<(ObjectKey, Staleness)>>>,
+}
+
+impl VerdictSink {
+    pub(crate) fn new(tx: tokio::sync::oneshot::Sender<Vec<(ObjectKey, Staleness)>>) -> Self {
+        VerdictSink(Arc::new(Mutex::new(VerdictJoin {
+            left: 0,
+            got: Vec::new(),
+            tx: Some(tx),
+        })))
+    }
+
+    fn expect(&self, jobs: usize) {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).left = jobs;
+    }
+
+    fn add(&self, keys: &[ObjectKey], st: &[Staleness]) {
+        let mut j = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        j.got.extend(keys.iter().cloned().zip(st.iter().copied()));
+        j.left = j.left.saturating_sub(1);
+        if j.left == 0
+            && let Some(tx) = j.tx.take()
+        {
+            let got = std::mem::take(&mut j.got);
+            let _ = tx.send(got);
+        }
+    }
+
+    /// A job of the request failed: nobody gets a verdict (the receiver sees `Err`).
+    fn fail(&self) {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).tx = None;
+    }
+}
+// ## m4-t25-ddl-view
 
 /// A message to the actor.
 #[derive(Debug)]
@@ -172,6 +222,9 @@ struct Job {
     /// A state check by name for the negative cache's probe of this namespace (an
     /// undecidable answer falls back to an incremental pass of it).
     probe: Option<NsKey>,
+    // ## m4-t25-ddl-view (named exception)
+    /// Where a state check reports its per-key verdicts.
+    verdicts: Option<VerdictSink>,
 }
 
 impl Job {
@@ -657,6 +710,8 @@ impl Actor {
             // ## m4-t22-state (named exception)
             marks: Vec::new(),
             probe: None,
+            // ## m4-t25-ddl-view (named exception)
+            verdicts: None,
         }
     }
 
@@ -1009,7 +1064,13 @@ impl Actor {
             // ## m4-t22-state (named exception): one check per database of the keys (the carry
             // "split CheckState by connection"; SQLite `temp` keys are decided without a stamp
             // and re-read on the user's connection).
-            Request::CheckState(keys) => {
+            // ## m4-t25-ddl-view (named exception): the same check, reporting its verdicts.
+            Request::CheckState(_) | Request::CheckStateVerdicts(..) => {
+                let (keys, sink) = match req {
+                    Request::CheckState(keys) => (keys, None),
+                    Request::CheckStateVerdicts(keys, sink) => (keys, Some(sink)),
+                    _ => unreachable!("matched above"),
+                };
                 let mut by_db: BTreeMap<Option<Name>, Vec<ObjectKey>> = BTreeMap::new();
                 for k in keys {
                     let ns = self.ns_of(&k);
@@ -1017,6 +1078,12 @@ impl Actor {
                         .entry(work::database_of(self.caps.dbms, Some(&ns)))
                         .or_default()
                         .push(k);
+                }
+                if let Some(sink) = &sink {
+                    sink.expect(by_db.len());
+                    if by_db.is_empty() {
+                        sink.add(&[], &[]);
+                    }
                 }
                 if by_db.is_empty() {
                     return w.resolve(Ok(self.catalog.current().generation));
@@ -1034,6 +1101,8 @@ impl Actor {
                         Trigger::Background,
                     );
                     job.add(Waiter::Join(join.clone()), false);
+                    // ## m4-t25-ddl-view (named exception)
+                    job.verdicts = sink.clone();
                     self.queue.push(job);
                 }
             }
@@ -2151,6 +2220,10 @@ impl Actor {
         st: Vec<Staleness>,
         marks: Vec<(ObjectKey, StateMark)>,
     ) {
+        // ## m4-t25-ddl-view (named exception): the verdicts, before any re-read.
+        if let Some(sink) = job.verdicts.take() {
+            sink.add(&keys, &st);
+        }
         // ## m4-t22-state (named exception): a probe by name that could not decide falls back
         // to an incremental pass of its namespace (the probe before Task 22).
         if let Some(ns) = job.probe.take()
@@ -2201,6 +2274,10 @@ impl Actor {
     }
 
     fn failed(&mut self, mut job: Job, e: IntroError) {
+        // ## m4-t25-ddl-view (named exception): a failed check decides nothing.
+        if let Some(sink) = job.verdicts.take() {
+            sink.fail();
+        }
         // ## m4-t22-state (named exception; fix round 1 I-5): a validation that cannot decide is
         // never dropped silently: the namespace is read again (the pass reports its own error).
         if let Work::Validate { ns } = &job.work

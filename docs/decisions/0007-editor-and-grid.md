@@ -1187,3 +1187,66 @@ The M2a connection list became the database explorer tree in place (R-M4-18): `h
     exception in `filter.rs`). The adapter compiles a view filter per item when the whole
     does not parse, so a bad item hides nothing and never undoes the others; "Hide objects
     like this" refuses, with a notice, an item that does not parse.
+
+## m4-t25 — DDL view
+
+- *Decision.* The DDL view tab (`ddl_view::view::DdlView`, design/m4-explorer surfaces 10
+  and 11) shows exactly `hacivat_ddl::produce::create_script_with` for one object, the strip's
+  options (`GenOptions` from `ProfileUserData::ddl_view`, remembered per profile through
+  `explorer::userdata`) and the profile's current schema (the user's focused console's
+  session; none qualifies every name). The text sits in a read-only `EditorView`
+  (`EditorConfig::read_only`); nothing localizes or edits it. Copy puts the raw text (`\n`) on
+  the clipboard; Open in console opens a console on the profile with the text inserted, not
+  run (`console::open_with_text(…, run: false)`; a database-level engine passes the object's
+  database, which it refuses with a notice when the console is on another).
+- *The catalog seam.* `ddl_view::source::DdlCatalog` is what the view reads and asks: the
+  snapshot (synchronously, as the explorer reads it) and `elevate`, `check_state`, `refresh`,
+  `load_facet` as tickets awaited on a GPUI foreground task (spec §5.4 rule 2; the I/O runs on
+  the `CoreRuntime`). The app's is `EngineCatalog` over the live host's `IntroHandle` (a
+  profile whose catalog is not open answers at once with `NotImplemented`); tests and Task
+  15b install their own with `set_catalog_provider` (plan Task 25: "a fake `IntroHandle`").
+  At this base no source text and no facet value has a home in the model (`SourceRef` is a
+  hash; `load_facet` is Task 15b's stub), so `EngineCatalog::sources` answers "not loaded":
+  views, routines, triggers and server text show "couldn't read the definition", grants carry
+  `ddl-grants-not-loaded` (F31).
+- *Loading.* An object whose definition is the server's text (R-M4-24) is read at `Sources`
+  first when its namespace holds less (one fragment, `elevate`); a definition still missing is
+  asked for once as the `Sources` facet; the grants facet is asked for once while Grants is
+  on. Each wait shows "Reading the definition of …".
+- *Freshness (surface 11; round 1 on Task 22).* When a script is first shown, and after every
+  Refresh or Reload (F5 in the text, `ddl_view.reload` in the `DdlViewCode` focus context), the
+  view takes Task 22's per-key verdict through `IntroHandle::check_state_verdicts` (a named
+  exception in Task 15's `engine/{mod,scheduler}.rs`: the state check's jobs report
+  `Vec<(ObjectKey, Staleness)>` on a oneshot before any re-read; a failed or cancelled check
+  drops the sender). `Current` → current; `Changed` → the engine re-reads it, and a script
+  that differs from the shown one is "changed on the server" (Reload), an equal one current;
+  gone from a loaded namespace → "no longer exists" (Close tab); `Unknown`, a `Dropped` the
+  catalog does not confirm, or no verdict → "couldn't check". An `Unknown` never shows as
+  current. A later catalog whose script differs marks the view changed (never an automatic
+  reload); a namespace marked stale turns current into "couldn't check". Server text from the
+  `Sources` facet is current only while that facet is `Loaded` and not stale in the snapshot
+  (T19 review m6: `DdlSources::server_text` has no load state of its own).
+- *Fix round (review I-1 to I-3, m-1 to m-8).* Freshness never carries over to a new text: a
+  first text and every replacement (an option, the server toggle, a facet, Refresh, Reload)
+  is checked again, with a "Checking whether … changed" caption until the verdict lands. A
+  `Current` verdict (or `Changed` with a re-read) reads current only when the catalog still
+  gives the shown text (else "changed": a publish landed during the check) and vouches for it:
+  the namespace not stale and, for `Sources`-facet server text, that facet `Loaded` and not
+  stale. The same rule demotes current on a newer catalog with the same text. A stale
+  namespace now reads "couldn't check" even under a `Current` verdict (stricter than round 1).
+  Comparisons regenerate with the schema the shown text was made with. Names on single-line
+  chrome draw their control characters visibly (`ddl_view::visible_name`: `\n` → `␊`). Run is
+  disabled in read-only editors (`console/commands.rs`, named exception). MySQL/MariaDB show no
+  Owner option and their server text keeps `DEFINER=` verbatim.
+- *Options per engine.* "Definitions provided by server" is hidden on PostgreSQL, shown on
+  MySQL/MariaDB, and shown checked and fixed on SQLite (its tables always show
+  `sqlite_schema.sql`, F10; Task 19 ignores the flag there, the T7 carry M8; ruling R-W4-12),
+  with a tooltip saying why (`hv-ddl-view-server-fixed-tip`). Qualification
+  and Constraints hide while the shown text is the server's (NOTES ruling 16). Grants: PG and
+  MySQL/MariaDB; Owner: PostgreSQL only (fix round m-8).
+- *Tabs.* The object table keeps a handle per open object and drops it when the view is
+  released (the tab closed, T1b carry m3); an object with a server id renamed on the server
+  keeps its handle and the tab title follows the new name. `ddl_view.copy` copies the active
+  DDL view's text (palette only, R-W0-6). `explorer.view_ddl` (F12, the node menu) opens the
+  cursor object's view, a column's table's. Provided toolbar actions
+  (`ActionSurface::DdlViewToolbar`) are buttons in the toolbar.

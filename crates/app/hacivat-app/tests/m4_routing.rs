@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::time::Duration;
 
 use gpui::{TestAppContext, VisualTestContext};
-use hacivat_app::ddl_view::{self, DDL_VIEW_CONTEXT, DdlViewError};
+use hacivat_app::ddl_view::{self, DDL_VIEW_CONTEXT};
 use hacivat_app::explorer::{
     self, ActionSlot, ActionSurface, ExplorerActionProvider, ExplorerModel, NodeRef,
     ProvidedAction, RevealOutcome, contributors, database_rows, open_data, provided_actions,
@@ -90,6 +90,15 @@ const M4_ROWS: &[Row] = &[
     // is on the stack whatever has the focus, so a copy chord there would take the standard
     // copy from every text field; inside the DDL text, `editor.copy` is the copy.
     ("ddl_view.copy", "DdlView", "DdlView", None, None),
+    // ## m4-t25-ddl-view (named exception, T25 round 1): F5 reloads the DDL view while its text
+    // has the focus (surface 11); `DdlViewCode` is that text's own context, never the tab's.
+    (
+        "ddl_view.reload",
+        "DdlViewCode",
+        "DdlViewCode",
+        Some("f5"),
+        Some("f5"),
+    ),
     // Palette only. Enter on a table or view row is the tree's own activate (Open data); on a
     // profile row it stays `connection.toggle_connect`.
     (
@@ -428,7 +437,8 @@ fn keymap_commands_are_registered_including_host_only(cx: &mut TestAppContext) {
     }
     // macOS has five M4 rows, Windows and Linux four each (no filter row), in both presets
     // (fix round 1, I1: no `ddl_view.copy` row).
-    assert_eq!(seen, (5 + 4 + 4) * PRESETS.len());
+    // ## m4-t25-ddl-view (named exception): plus `ddl_view.reload` F5 on every platform.
+    assert_eq!(seen, (6 + 5 + 5) * PRESETS.len());
     // The one host-only row is a keymap row, not a registration: `cmd-alt-f` exists only in the
     // macOS keymap, and its command is registered everywhere.
     for platform in [KeymapPlatform::Windows, KeymapPlatform::Linux] {
@@ -448,7 +458,9 @@ fn stub_count_is_n(cx: &mut TestAppContext) {
     // `explorer.set_level.*` commands.
     // ## m4-t24-live (named exception): Task 24 filled copy qualified name, collapse all, open
     // data, refresh and expand all children.
-    assert_eq!(stubs.len(), 3);
+    // ## m4-t25-ddl-view (named exception): Task 25 filled `explorer.view_ddl` and
+    // `ddl_view.copy`.
+    assert_eq!(stubs.len(), 1);
     let (enabled, listed) = vcx.cx.read(|cx| {
         let reg = cx.global::<ActionRegistry>();
         let enabled: Vec<&'static str> = reg
@@ -557,7 +569,7 @@ fn table(schema: &str, name: &str) -> ObjectKey {
 
 /// The open-data handler, `reveal` and `open_ddl_view` are seams typed on `hacivat_meta`:
 /// unset, unavailable and not yet until Tasks 24 and 25 (no stub claims a fact), and the handler
-/// is replaceable (M6).
+/// is replaceable (M6). ## m4-t25-ddl-view (named exception): `open_ddl_view` is filled.
 #[gpui::test]
 fn meta_typed_seams_answer_nothing_until_their_tasks(cx: &mut TestAppContext) {
     let vcx = shell(cx, "en");
@@ -571,8 +583,16 @@ fn meta_typed_seams_answer_nothing_until_their_tasks(cx: &mut TestAppContext) {
             open_data(profile, key.clone(), window, cx),
         )
     });
-    assert_eq!(opened, Err(DdlViewError::NotYet));
-    assert_eq!(tab_count(vcx), 1, "open_ddl_view opened a tab");
+    // ## m4-t25-ddl-view (named exception): Task 25 opens the object's DDL view tab (for a
+    // profile the app does not know it shows "not loaded", never a text).
+    let opened = opened.expect("a DDL view tab");
+    assert_eq!(tab_count(vcx), 2, "open_ddl_view opened one tab");
+    let kind = vcx.cx.read(|cx| ws.read(cx).tab_kind(opened));
+    assert!(matches!(kind, Some(TabKind::DdlView { profile: p, .. }) if p == profile));
+    vcx.run_until_parked();
+    let shown = vcx.cx.read(|cx| ddl_view::state_of(profile, &key, cx));
+    assert_eq!(shown.and_then(|s| s.text), None);
+    assert!(run(vcx, "workspace.close_tab"));
     assert_eq!(revealed, RevealOutcome::Unavailable);
     // ## m4-t24-live (named exception): Task 24 installs the default handler; for a profile
     // the app does not know it opens nothing.

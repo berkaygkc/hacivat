@@ -96,7 +96,8 @@ const COMMANDS: [(&str, &str); 12] = [
 // ## m4-t20-levels: Task 20's five commands are filled (`edit_scope`, `set_level.*`).
 // ## m4-t24-live: Task 24's five are filled (copy qualified name, collapse all, open data,
 // refresh, expand all children).
-pub const STUB_COMMANDS: [&str; 2] = ["explorer.view_ddl", "metadata.clear_cache"];
+// ## m4-t25-ddl-view (named exception): Task 25 filled `explorer.view_ddl`.
+pub const STUB_COMMANDS: [&str; 1] = ["metadata.clear_cache"];
 
 // ## m4-t24-live
 /// The node-menu commands Task 24 adds (mock 5): no keymap row (palette and menu only); the
@@ -127,6 +128,11 @@ type Run = fn(&mut Window, &mut App);
 
 /// The run and enabled functions of a filled command (`None`: a stub).
 fn filled(id: &str) -> Option<(ActionFn, Enabled)> {
+    // ## m4-t25-ddl-view (named exception): View DDL opens the cursor object's DDL view.
+    if id == "explorer.view_ddl" {
+        let run: ActionFn = Rc::new(crate::ddl_view::view_ddl_command);
+        return Some((run, crate::ddl_view::can_view_ddl));
+    }
     if id == "explorer.edit_scope" {
         let run: ActionFn = Rc::new(crate::connections::dialog::schemas::edit_scope);
         return Some((run, crate::connections::dialog::schemas::can_edit_scope));

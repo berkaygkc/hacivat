@@ -2569,3 +2569,15 @@ Task 15b (W5; R-M4-29, R-M4-30; carries T16b m-5/m-7, T17b m-6, R-W3-11, R-W4-3)
 - **Task 25 hook** (applied when T25 merges): `ddl_view/source.rs` `EngineCatalog::sources`
   answers a `DdlSources` over the current snapshot: `text(r)` → `snap.source_text(r)`,
   `server_text(k)` → `snap.server_text(k)`, `grants(k)` → `snap.grants_facet(k)`.
+
+## m4-t25 — state-check verdicts for the DDL view (named exception)
+
+- *Decision.* `IntroHandle::check_state_verdicts(keys)` is `check_state` that also answers each
+  key's `Staleness` on a `tokio::sync::oneshot` as soon as the stamps were compared (Task 22's
+  `freshness::run`), before the re-read of what changed or was dropped; the ticket still
+  resolves with the generation that holds the re-read. The request's jobs (one per database)
+  share a `VerdictSink`; the last one sends every verdict, and a job that fails or is
+  cancelled drops its share, so the receiver sees the sender dropped: nothing was decided,
+  which the DDL view shows as "couldn't check" (never as current). Fenced
+  `// ## m4-t25-ddl-view` lines in Task 15's `engine/mod.rs` and `engine/scheduler.rs`; the
+  check itself, its re-reads and its marks are unchanged.
