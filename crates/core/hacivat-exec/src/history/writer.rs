@@ -534,13 +534,21 @@ impl Db {
         if self.broken {
             return Err(HistoryError::Corrupt);
         }
-        self.conn
+        let n = self
+            .conn
             .execute(
                 "DELETE FROM history WHERE data_source_id = ?1",
                 params![profile.to_string()],
             )
             .map(|n| n as u64)
-            .map_err(sql)
+            .map_err(sql)?;
+        // Fix round 1 (review I-1): the deleted pages were overwritten in the log
+        // (`secure_delete`); copy them into the file now and empty the log, so no older copy
+        // of the cleared text stays in either.
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(sql)?;
+        Ok(n)
     }
 
     /// Folds the log into the file (at shutdown).

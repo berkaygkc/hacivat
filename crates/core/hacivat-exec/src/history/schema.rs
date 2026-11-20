@@ -175,6 +175,15 @@ fn try_open(path: &Path) -> Result<Connection, Fail> {
         "BEGIN IMMEDIATE; {DDL} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
     ))
     .map_err(classify)?;
+    // ## m4-t32-shots (fix round 1, review I-1; named exception): a deleted statement is
+    // overwritten, not just unlinked ("Clear query history" deletes it from this computer):
+    // SQLite zeroes freed content on this connection, and the full-text index drops a deleted
+    // row's tokens from its segments (persistent; FTS5 `secure-delete`, SQLite 3.42+).
+    conn.execute_batch(
+        "PRAGMA secure_delete = ON; \
+         INSERT INTO history_fts(history_fts, rank) VALUES('secure-delete', 1);",
+    )
+    .map_err(classify)?;
     Ok(conn)
 }
 
