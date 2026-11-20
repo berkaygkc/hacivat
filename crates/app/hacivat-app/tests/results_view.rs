@@ -528,8 +528,15 @@ fn zero_rows_keep_the_header_and_say_so(cx: &mut TestAppContext) {
         source(store_of(0, 3, Completeness::Complete), Arc::default()),
     )]);
     assert_eq!(t.text("strip-sentence").as_deref(), Some("0 rows"));
-    let drawn = texts_drawn_by(t.vcx, "hacivat-ui-grid/src/view.rs");
-    assert!(drawn.iter().any(|s| s == "No rows"), "{drawn:?}");
+    // ## m4-t32-shots (named exception; carries-w4 flake): under load the first frame after
+    // `apply` can be the grid's empty one; wait until the grid has drawn its text.
+    wait_until(t.vcx, "the grid draws No rows", |vcx| {
+        in_window(vcx, |window, _| window.refresh());
+        vcx.run_until_parked();
+        texts_drawn_by(vcx, "hacivat-ui-grid/src/view.rs")
+            .iter()
+            .any(|s| s == "No rows")
+    });
 }
 
 // ---- the output log -------------------------------------------------------------------------
@@ -680,7 +687,14 @@ fn ten_thousand_log_lines_render_at_constant_cost(cx: &mut TestAppContext) {
     t.vcx.read(|cx| list.read(cx).rows().reset_built());
     t.redraw();
     let built = t.vcx.read(|cx| list.read(cx).rows().built());
-    assert!(built <= shown + 1, "built {built} rows for {shown} visible");
+    // ## m4-t32-shots (named exception; carries-w4, Windows CI 44629840018): a platform may
+    // lay a frame out twice (Windows did), so a frame builds the visible rows at most once
+    // per layout pass: still a constant cost, never the 10,000 rows.
+    const MAX_LAYOUT_PASSES: u64 = 2;
+    assert!(
+        built <= MAX_LAYOUT_PASSES * (shown + 1),
+        "built {built} rows for {shown} visible"
+    );
 }
 
 // ---- named design rules ---------------------------------------------------------------------

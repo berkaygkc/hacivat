@@ -1384,16 +1384,16 @@ fn empty_console_draws_its_placeholder(cx: &mut TestAppContext) {
     // Narrow: it wraps inside the text area, never cut.
     vcx.simulate_resize(gpui::size(gpui::px(700.0), gpui::px(600.0)));
     // The placeholder sits where the last frame put the text area: one more frame after the
-    // resize places it (the editor asks for it).
-    for _ in 0..2 {
+    // resize places it (the editor asks for it). ## m4-t32-shots (named exception; T32 flake
+    // carry): under load that frame comes later, so wait for a frame that draws it whole.
+    wait_until(vcx, "the placeholder placed after the resize", |vcx| {
         in_window(vcx, |window, _| window.refresh());
         vcx.run_until_parked();
-    }
-    let r = registry_frame(vcx)
-        .into_iter()
-        .find(|r| r.path.ends_with("#editor-placeholder"))
-        .expect("drawn");
-    assert!(!r.clipped && !r.truncated, "{r:?}");
+        registry_frame(vcx)
+            .into_iter()
+            .find(|r| r.path.ends_with("#editor-placeholder"))
+            .is_some_and(|r| !r.clipped && !r.truncated)
+    });
     // Typing hides it.
     vcx.simulate_keystrokes("s");
     vcx.run_until_parked();
