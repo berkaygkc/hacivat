@@ -332,11 +332,20 @@ impl MetaConn {
     /// [`MetaError::NotJoinable`]; the actor checks again when it takes each read. The SQLite
     /// writer while an M7 apply holds it has no seam yet: it is refused too (M7 adds it).
     pub fn join(session: &SessionHandle) -> Result<MetaConn, MetaError> {
+        MetaConn::join_as(session, DbmsKind::Unknown)
+    }
+
+    // ## m4-t15b-facets (named exception in Task 5's file; T15b review m-1)
+    /// [`MetaConn::join`] for a reader that expects the session to be of engine `engine`: every
+    /// read on another engine's session is refused (`NotJoinable`) by the session's actor
+    /// before anything is sent (`Unknown`: any engine, as `join`). The connection still reports
+    /// `DbmsKind::Unknown` (it knows no server of its own).
+    pub fn join_as(session: &SessionHandle, engine: DbmsKind) -> Result<MetaConn, MetaError> {
         let on = OnSession {
             handle: session.clone(),
             joined: true,
             timeout: JOINED_TIMEOUT,
-            dbms: DbmsKind::Unknown,
+            dbms: engine,
         };
         on.check_open()?;
         Ok(MetaConn {
@@ -1371,6 +1380,12 @@ impl OnSession {
             binds: Arc::from(q.binds().to_vec()),
             joined: self.joined,
             timeout: self.timeout,
+            // ## m4-t15b-facets (named exception; T15b review m-1)
+            engine: if self.joined {
+                self.dbms
+            } else {
+                DbmsKind::Unknown
+            },
         };
         let reply = self
             .handle
@@ -1447,6 +1462,11 @@ fn summary_of(rows: Rows) -> ExecSummary {
 // called by `Core::handle` when it takes the request.
 impl Core {
     pub(crate) async fn meta_read(&mut self, r: &MetaRead) -> Reply {
+        // ## m4-t15b-facets (named exception; T15b review m-1): a reader that names another
+        // engine than the session's gets nothing sent.
+        if r.engine != DbmsKind::Unknown && r.engine != self.kind {
+            return Err(ExecError::of(ExecErrorKind::Tx(TxError::Unsupported)));
+        }
         // The text first, with the session's own engine: nothing is sent for refused text.
         if check_read_text_for(&r.sql, self.kind).is_err() {
             return Err(ExecError::of(ExecErrorKind::ReadOnlyDenied(

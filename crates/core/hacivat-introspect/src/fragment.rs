@@ -17,10 +17,15 @@
 //!   renderer refuses any other section), each a single `SELECT` that the session's own guard
 //!   checks again; no `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE` or `SET` exists in
 //!   them, and `SnapshotTxn::commit` on a joined connection sends nothing.
+//! - **Engine.** The caller passes the catalog's `ServerFacts`: `MetaConn::join_as` makes the
+//!   session's actor refuse every read of a session of another engine before anything is sent
+//!   (review m-1); the fold of the snapshot's names follows the facts' identifier rule (m-6).
 //! - **PostgreSQL** (`packs/pg/50-joined.hvq.sql`): first `JoinedContext`, which answers the
-//!   session's database and `current_schemas(true)`; a session connected to another database
-//!   than `ns`'s, or whose path does not start with `pg_catalog` once `pg_temp_N` is skipped,
-//!   is refused (`MetaError::NotJoinable`) before anything else is sent (R-W3-11: the one
+//!   session's database, `current_schemas(true)` and the session's own temp schema
+//!   (`pg_my_temp_schema()`); a session connected to another database than `ns`'s, or whose
+//!   path does not start with `pg_catalog` once **its own** temp schema is skipped (another
+//!   backend's `pg_temp_N` is refused: PostgreSQL searches it for operators, R-W5-5), is
+//!   refused (`MetaError::NotJoinable`) before anything else is sent (R-W3-11: the one
 //!   unqualified operator, the list bind's `IN`, then resolves in `pg_catalog`). Then
 //!   `JoinedNamespaces` and `JoinedRelations` list the schema oids and the schema's relations
 //!   (no name reaches the server: the schema and the caller's relations are picked by exact
@@ -49,11 +54,11 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use hacivat_meta::merge::{self, ChangedObject, MergePolicy, NamespaceResult, Trigger};
-use hacivat_meta::name::{FoldRule, IdentCtx, NameClass};
+use hacivat_meta::name::{FoldRule, NameClass};
 use hacivat_meta::props::{ColumnProps, ColumnRare, Identity, Props, TableProps, TypeRef};
 use hacivat_meta::{
-    Level, Name, NamespaceSnapshot, NsKey, NsKind, Obj, ObjectKey, ObjectKind, ServerId, Subtree,
-    Watermark,
+    Level, Name, NamespaceSnapshot, NsKey, NsKind, Obj, ObjectKey, ObjectKind, ServerFacts,
+    ServerId, Subtree, Watermark,
 };
 use hacivat_proto::DbmsKind;
 use hacivat_session::meta::{MetaConn, MetaError, SnapshotTxn};
@@ -84,20 +89,26 @@ pub mod mysql_name {
 }
 
 /// Reads `keys` of `ns` at `level` on `handle`'s open, Hacivat-owned transaction (module docs).
-/// `dbms` is the session's engine (a joined connection cannot ask the server: it knows no
-/// server of its own).
+/// `facts` are the catalog's server facts: `facts.dbms` is the session's engine (a joined
+/// connection cannot ask the server: it knows no server of its own; a session of another
+/// engine is refused before anything is sent), `facts.ident` the identifier rule its names
+/// fold by.
 ///
 /// The answer is never published and never cached: M7 compares it with the catalog.
 pub fn on_session<'a>(
     handle: &'a SessionHandle,
-    dbms: DbmsKind,
+    facts: &'a ServerFacts,
     ns: &'a NsKey,
     keys: &'a [ObjectKey],
     level: Level,
     cancel: &'a CancellationToken,
 ) -> BoxFuture<'a, Result<NamespaceSnapshot, IntroError>> {
     Box::pin(async move {
-        let mut conn = MetaConn::join(handle)?;
+        let dbms = facts.dbms;
+        // ## m4-t15b-facets (review m-1): the session's actor refuses every read when the
+        // session is not of engine `dbms`, before anything is sent.
+        let mut conn = MetaConn::join_as(handle, dbms)?;
+        let flavor = flavor_of(facts);
         let r = match dbms {
             DbmsKind::Postgres => {
                 pg(&mut conn, ns, keys, level.min(Level::Structure), cancel).await?
@@ -105,7 +116,7 @@ pub fn on_session<'a>(
             DbmsKind::MySql | DbmsKind::MariaDb => {
                 mysql(
                     &mut conn,
-                    dbms,
+                    flavor,
                     ns,
                     keys,
                     level.min(Level::Structure),
@@ -122,8 +133,26 @@ pub fn on_session<'a>(
             _ => return Err(IntroError::NotImplemented),
         };
         drop(conn);
-        standalone(ns, dbms, r).await
+        standalone(ns, dbms, fold_of(facts, flavor), r).await
     })
+}
+
+/// The pack flavor of `facts`: the server's own (MariaDB behind a MySQL profile) within the
+/// profile's family, else the profile's engine.
+fn flavor_of(facts: &ServerFacts) -> DbmsKind {
+    match (facts.dbms, facts.flavor) {
+        (DbmsKind::MySql | DbmsKind::MariaDb, f @ (DbmsKind::MySql | DbmsKind::MariaDb)) => f,
+        (d, _) => d,
+    }
+}
+
+/// The fold rule of table-class names under `facts` (the server's `lower_case_table_names`),
+/// as the engine stores the catalog's (review m-6): the joined snapshot's keys fold the same.
+fn fold_of(facts: &ServerFacts, flavor: DbmsKind) -> FoldRule {
+    let d = dialect_of(flavor);
+    let mut ident = facts.ident.clone();
+    ident.dialect = d;
+    FoldRule::for_names(d, &ident, NameClass::Table).unwrap_or(FoldRule::Exact)
 }
 
 /// The dialect of `dbms`'s packs.
@@ -141,13 +170,11 @@ fn dialect_of(dbms: DbmsKind) -> DialectId {
 async fn standalone(
     ns: &NsKey,
     dbms: DbmsKind,
+    fold: FoldRule,
     r: NamespaceResult,
 ) -> Result<NamespaceSnapshot, IntroError> {
     let ns = ns.clone();
     let built = tokio::task::spawn_blocking(move || {
-        let d = dialect_of(dbms);
-        let fold =
-            FoldRule::for_names(d, &IdentCtx::new(d), NameClass::Table).unwrap_or(FoldRule::Exact);
         let base = merge::base(ns, dbms, fold)
             .map_err(|_| IntroError::Protocol(Name::from("joined/base")))?;
         let policy = MergePolicy {
@@ -341,21 +368,34 @@ fn column(
 fn relation_props(kind: ObjectKind) -> Props {
     match kind {
         ObjectKind::View | ObjectKind::MaterializedView => Props::View(Arc::default()),
-        _ => Props::Table(Arc::new(TableProps::default())),
+        ObjectKind::Table | ObjectKind::ForeignTable => {
+            Props::Table(Arc::new(TableProps::default()))
+        }
+        _ => Props::None,
     }
+}
+
+/// Whether a relation of `kind` holds columns in the model.
+fn has_columns(kind: ObjectKind) -> bool {
+    matches!(
+        kind,
+        ObjectKind::Table
+            | ObjectKind::View
+            | ObjectKind::MaterializedView
+            | ObjectKind::ForeignTable
+    )
 }
 
 // ---- PostgreSQL ---------------------------------------------------------------------------------
 
-/// Whether `current_schemas(true)` (in order) starts with `pg_catalog` once the session's own
-/// temporary schema (`pg_temp_N`) is skipped (R-W3-11).
-pub fn pg_path_is_safe(path: &[&str]) -> bool {
-    let first = path.iter().find(|s| {
-        let temp = s
-            .strip_prefix("pg_temp_")
-            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-        !temp
-    });
+/// Whether `current_schemas(true)` (in order) starts with `pg_catalog` once the session's
+/// **own** temporary schema `own_temp` (`pg_my_temp_schema()`, `None` when the session has
+/// none) is skipped (R-W3-11 as corrected by R-W5-5): PostgreSQL never resolves an operator or
+/// a function in the session's own temporary schema, but it does in any other backend's
+/// `pg_temp_N` named in the path. Anything else before `pg_catalog` (another backend's temp
+/// schema, a `pg_toast_temp_N`, a user schema) refuses the path.
+pub fn pg_path_is_safe(path: &[&str], own_temp: Option<&str>) -> bool {
+    let first = path.iter().find(|s| Some(**s) != own_temp);
     first == Some(&"pg_catalog")
 }
 
@@ -396,7 +436,16 @@ async fn pg(
     .await?;
     let on_db = context.iter().all(|r| opt_cell(r, 0) == Some(&**db));
     let path: Vec<&str> = context.iter().filter_map(|r| opt_cell(r, 1)).collect();
-    if context.is_empty() || !on_db || !pg_path_is_safe(&path) {
+    // Every row carries the same own temp schema (a scalar subquery of the same snapshot).
+    let own: Vec<Option<&str>> = context.iter().map(|r| opt_cell(r, 2)).collect();
+    let own_temp = own.first().copied().flatten();
+    let consistent = own.iter().all(|o| *o == own_temp);
+    if context.is_empty()
+        || !on_db
+        || !consistent
+        || path.len() != context.len()
+        || !pg_path_is_safe(&path, own_temp)
+    {
         return Err(IntroError::Meta(MetaError::NotJoinable));
     }
     let mut found: Vec<Relation> = Vec::new();
@@ -517,10 +566,12 @@ async fn mysql(
     let mut snap = c.begin_snapshot().await?;
     for r in rows(&mut snap, &pack, dbms, mysql_name::TABLES, params(), cancel).await? {
         let s = mysql_name::TABLES;
-        let kind = match cell(&r, 1, s)? {
-            "VIEW" | "SYSTEM VIEW" => ObjectKind::View,
-            _ => ObjectKind::Table,
-        };
+        // T17's mapping (review m-6): MariaDB sequences are their own kind; a type this build
+        // does not model is left out (the joined read describes only what it can).
+        let kind = crate::mysql::build::relation_kind(cell(&r, 1, s)?, dbms == DbmsKind::MariaDb);
+        if kind == ObjectKind::Unknown {
+            continue;
+        }
         found.push(Relation {
             obj: Obj::new(kind, cell(&r, 0, s)?).with_props(relation_props(kind)),
             columns: Vec::new(),
@@ -548,7 +599,10 @@ async fn mysql(
                 None,
             );
             // INFORMATION_SCHEMA answers the server's own spelling of each table.
-            if let Some(rel) = found.iter_mut().find(|x| &**x.obj.name() == table) {
+            if let Some(rel) = found
+                .iter_mut()
+                .find(|x| &**x.obj.name() == table && has_columns(x.obj.kind()))
+            {
                 rel.columns.push(col);
             }
         }
@@ -563,15 +617,24 @@ mod tests {
 
     #[test]
     fn the_path_must_start_with_pg_catalog_after_the_sessions_temp_schema() {
-        assert!(pg_path_is_safe(&["pg_catalog", "public"]));
-        assert!(pg_path_is_safe(&["pg_temp_3", "pg_catalog", "public"]));
-        assert!(!pg_path_is_safe(&["public", "pg_catalog"]));
-        assert!(!pg_path_is_safe(&["pg_temp_3", "evil", "pg_catalog"]));
-        // Only the session's own `pg_temp_<digits>` is skipped.
-        assert!(!pg_path_is_safe(&["pg_temp_x", "pg_catalog"]));
-        assert!(!pg_path_is_safe(&["pg_temp_", "pg_catalog"]));
-        assert!(!pg_path_is_safe(&["PG_CATALOG"]));
-        assert!(!pg_path_is_safe(&[]));
+        let own = Some("pg_temp_3");
+        assert!(pg_path_is_safe(&["pg_catalog", "public"], None));
+        assert!(pg_path_is_safe(&["pg_catalog", "public"], own));
+        assert!(pg_path_is_safe(&["pg_temp_3", "pg_catalog", "public"], own));
+        assert!(!pg_path_is_safe(&["public", "pg_catalog"], own));
+        assert!(!pg_path_is_safe(&["pg_temp_3", "evil", "pg_catalog"], own));
+        // Only the session's own temp schema is skipped (R-W5-5): another backend's is
+        // searched for operators, and so is refused.
+        assert!(!pg_path_is_safe(&["pg_temp_7", "pg_catalog"], own));
+        assert!(!pg_path_is_safe(
+            &["pg_temp_3", "pg_temp_7", "pg_catalog"],
+            own
+        ));
+        assert!(!pg_path_is_safe(&["pg_temp_3", "pg_catalog"], None));
+        assert!(!pg_path_is_safe(&["pg_toast_temp_3", "pg_catalog"], own));
+        assert!(!pg_path_is_safe(&["pg_temp_x", "pg_catalog"], own));
+        assert!(!pg_path_is_safe(&["PG_CATALOG"], own));
+        assert!(!pg_path_is_safe(&[], own));
     }
 
     #[tokio::test]
@@ -597,6 +660,7 @@ mod tests {
         let snap = standalone(
             &ns,
             DbmsKind::Postgres,
+            FoldRule::Exact,
             result_of(&ns, vec![t], Level::Structure),
         )
         .await

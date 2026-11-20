@@ -85,6 +85,16 @@ fn key(ns: &NsKey, kind: ObjectKind, name: &str) -> ObjectKey {
     }
 }
 
+/// The facts of a catalog of `dbms` (what `on_session`'s caller holds).
+fn facts(dbms: DbmsKind) -> ServerFacts {
+    let d = match dbms {
+        DbmsKind::MySql => DialectId::MySql,
+        DbmsKind::MariaDb => DialectId::MariaDb,
+        _ => DialectId::Postgres,
+    };
+    ServerFacts::new(dbms, IdentCtx::new(d))
+}
+
 /// A `Job(DdlApply)` session of `sm` (Hacivat's own: the joined read's only home).
 async fn job(sm: &Arc<SessionManager>, id: &str) -> SessionHandle {
     sm.open(
@@ -224,7 +234,7 @@ async fn joined_fragment_sees_the_apply_txns_uncommitted_column() {
         let cancel = CancellationToken::new();
         let got = on_session(
             &j,
-            DbmsKind::Postgres,
+            &facts(DbmsKind::Postgres),
             &ns,
             std::slice::from_ref(&table),
             Level::Structure,
@@ -320,7 +330,7 @@ async fn joined_pg_sections_return_type_names_not_format_type_text() {
         let cancel = CancellationToken::new();
         let got = on_session(
             &j,
-            DbmsKind::Postgres,
+            &facts(DbmsKind::Postgres),
             &ns,
             std::slice::from_ref(&table),
             Level::Sources,
@@ -376,7 +386,7 @@ async fn joined_pg_sections_return_type_names_not_format_type_text() {
         assert_eq!(
             on_session(
                 &j,
-                DbmsKind::Postgres,
+                &facts(DbmsKind::Postgres),
                 &ns,
                 std::slice::from_ref(&table),
                 Level::Structure,
@@ -390,6 +400,90 @@ async fn joined_pg_sections_return_type_names_not_format_type_text() {
         );
         exec(&j, &t.id, "ROLLBACK").await;
         drop(j);
+        pg.shutdown().await;
+    }
+}
+
+/// Review I-1 (ruling R-W5-5): another backend's temp schema in the job's path, holding an
+/// `=` over `(oid, oid)`, is refused when the job's `current_schemas(true)` lists it before
+/// `pg_catalog` (PostgreSQL searches it for operators; only the session's own temp schema is
+/// skipped). A login that cannot use that schema never sees it in its path, and then the read
+/// proceeds without ever reaching its operator.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "docker"]
+async fn joined_read_refuses_another_backends_temp_schema() {
+    if !docker_enabled() {
+        return;
+    }
+    for t in pg_targets() {
+        let (schema, _guard) = pg_schema(&t, "CREATE TABLE hvm4_t (a integer)").await;
+        // Session A: a live temp schema with an `=` over (oid, oid) that matches everything.
+        let mut a = admin(&t).await;
+        a.batch(
+            "CREATE FUNCTION pg_temp.hvm4_evil(oid, oid) RETURNS boolean \
+             LANGUAGE sql AS 'SELECT true'; \
+             CREATE OPERATOR pg_temp.= (LEFTARG = oid, RIGHTARG = oid, \
+             FUNCTION = pg_temp.hvm4_evil)",
+        )
+        .await;
+        let foreign = a
+            .scalar(
+                "SELECT nspname::text FROM pg_catalog.pg_namespace \
+                 WHERE oid = pg_catalog.pg_my_temp_schema()",
+            )
+            .await;
+        let pg = Pg::connect(&t).await;
+        let sm = pg.m.sessions(pg.profile.id).expect("connected");
+        let ns = NsKey::schema([t.database.as_str(), schema.as_str()]);
+        let table = key(&ns, ObjectKind::Table, "hvm4_t");
+        let j = job(&sm, &t.id).await;
+        exec(&j, &t.id, "BEGIN").await;
+        exec(
+            &j,
+            &t.id,
+            &format!("SET LOCAL search_path = {}, pg_catalog", qi(&foreign)),
+        )
+        .await;
+        assert!(in_tx(&j).await);
+        let listed = cell(
+            &j,
+            &t.id,
+            &format!(
+                "SELECT ('{}' = ANY (pg_catalog.current_schemas(true)))::text",
+                foreign.replace('\'', "''")
+            ),
+        )
+        .await;
+        println!(
+            "HV-FACT t15b_foreign_temp_in_job_path={listed} target={}",
+            t.id
+        );
+        let got = on_session(
+            &j,
+            &facts(DbmsKind::Postgres),
+            &ns,
+            std::slice::from_ref(&table),
+            Level::Structure,
+            &CancellationToken::new(),
+        )
+        .await;
+        if listed == "true" {
+            assert_eq!(
+                got.map(drop),
+                Err(IntroError::Meta(MetaError::NotJoinable)),
+                "{}: another backend's temp schema before pg_catalog",
+                t.id
+            );
+        } else {
+            // Not in the job's path (no USAGE): the read proceeds, and the foreign `=` (which
+            // matches every oid) was never used: only the asked table is listed.
+            let got = got.unwrap_or_else(|e| panic!("{}: {e:?}", t.id));
+            assert_eq!(got.root().child_count(), 1, "{}", t.id);
+            assert_eq!(names(&columns(&got, &table)), ["a"], "{}", t.id);
+        }
+        exec(&j, &t.id, "ROLLBACK").await;
+        drop(j);
+        a.close().await;
         pg.shutdown().await;
     }
 }
@@ -798,7 +892,7 @@ async fn mysql_joined_fragment_reads_inside_the_jobs_transaction() {
         let cancel = CancellationToken::new();
         let got = on_session(
             &j,
-            t.engine,
+            &facts(t.engine),
             &ns,
             std::slice::from_ref(&table),
             Level::Structure,

@@ -780,23 +780,15 @@ impl Publisher {
                     if value.as_ref().is_some_and(|v| v.kind() != *facet) {
                         return Err(ModelError::BadLayout("SetFacet value of another facet"));
                     }
-                    if state == LoadState::NotLoaded {
+                    let value = if state == LoadState::NotLoaded {
                         Arc::make_mut(&mut states).remove(&key);
-                        if side.facets.contains_key(&key) {
-                            Arc::make_mut(&mut side).facets.remove(&key);
-                        }
+                        None
                     } else {
                         Arc::make_mut(&mut states).insert(key.clone(), state);
-                        match value {
-                            Some(v) => {
-                                Arc::make_mut(&mut side).facets.insert(key, v);
-                            }
-                            None => {
-                                if side.facets.contains_key(&key) {
-                                    Arc::make_mut(&mut side).facets.remove(&key);
-                                }
-                            }
-                        }
+                        value
+                    };
+                    if value.is_some() || side.value(&key).is_some() {
+                        Arc::make_mut(&mut side).set_value(key, value);
                     }
                 }
                 CatalogChange::PutSources { ns, texts } => {
@@ -908,25 +900,58 @@ impl FacetValue {
     }
 }
 
-/// What a generation keeps beside its arenas: facet values by container key (their load
-/// states are in [`CatalogSnapshot::states`]), and source texts per namespace, each under its
-/// own [`SourceRef`] (content-addressed: a text is never paired with another object's
-/// reference). Shared by `Arc` across generations; a publish that touches neither copies
-/// nothing.
+/// What a generation keeps beside its arenas: facet values per namespace by container key
+/// (their load states are in [`CatalogSnapshot::states`]), and source texts per namespace, each
+/// under its own [`SourceRef`] (content-addressed: a text is never paired with another
+/// object's reference). Shared by `Arc` across generations, per namespace: a publish copies
+/// only the maps of the namespaces it touches (review m-7).
 #[derive(Debug, Clone, Default)]
 struct SideTables {
-    facets: BTreeMap<ContainerKey, FacetValue>,
+    facets: BTreeMap<NsKey, Arc<NsFacets>>,
     texts: BTreeMap<NsKey, Arc<HashMap<SourceRef, Name>>>,
+}
+
+/// One namespace's facet values, with an index of its `Sources` texts by reference.
+#[derive(Debug, Clone, Default)]
+struct NsFacets {
+    values: BTreeMap<ContainerKey, FacetValue>,
+    by_source: HashMap<SourceRef, ContainerKey>,
 }
 
 impl SideTables {
     fn holds(&self, ns: &NsKey) -> bool {
-        self.texts.contains_key(ns) || self.facets.keys().any(|k| k.ns() == ns)
+        self.texts.contains_key(ns) || self.facets.contains_key(ns)
     }
 
     fn remove_ns(&mut self, ns: &NsKey) {
         self.texts.remove(ns);
-        self.facets.retain(|k, _| k.ns() != ns);
+        self.facets.remove(ns);
+    }
+
+    fn value(&self, key: &ContainerKey) -> Option<&FacetValue> {
+        self.facets.get(key.ns())?.values.get(key)
+    }
+
+    /// Sets (or, `None`, removes) the value of `key`, keeping the `Sources` index.
+    fn set_value(&mut self, key: ContainerKey, value: Option<FacetValue>) {
+        let ns = key.ns().clone();
+        let entry = self.facets.entry(ns.clone()).or_default();
+        let m = Arc::make_mut(entry);
+        if let Some(FacetValue::Sources(old)) = m.values.remove(&key) {
+            let r = SourceRef::of(&old);
+            if m.by_source.get(&r) == Some(&key) {
+                m.by_source.remove(&r);
+            }
+        }
+        if let Some(v) = value {
+            if let FacetValue::Sources(t) = &v {
+                m.by_source.insert(SourceRef::of(t), key.clone());
+            }
+            m.values.insert(key, v);
+        }
+        if m.values.is_empty() {
+            self.facets.remove(&ns);
+        }
     }
 }
 
@@ -961,19 +986,19 @@ impl CatalogSnapshot {
     /// no arena of this generation holds the object.
     pub fn facet(&self, object: &ObjectKey, facet: FacetKind) -> (LoadState, Option<&FacetValue>) {
         match self.facet_key(object, facet) {
-            Some(key) => (self.state(&key).clone(), self.side.facets.get(&key)),
+            Some(key) => (self.state(&key).clone(), self.side.value(&key)),
             None => (LoadState::NotLoaded, None),
         }
     }
 
     /// The value recorded under `key` (a [`ContainerKey::Facet`]).
     pub fn facet_value(&self, key: &ContainerKey) -> Option<&FacetValue> {
-        self.side.facets.get(key)
+        self.side.value(key)
     }
 
     /// Every facet container that holds a value, in key order.
     pub fn loaded_facets(&self) -> impl Iterator<Item = (&ContainerKey, &FacetValue)> {
-        self.side.facets.iter()
+        self.side.facets.values().flat_map(|m| m.values.iter())
     }
 
     /// The text `r` names, when a pass or a `Sources` facet read of this catalog brought it
@@ -985,10 +1010,13 @@ impl CatalogSnapshot {
             .find_map(|m| m.get(r))
             .cloned()
             .or_else(|| {
-                self.side.facets.values().find_map(|v| match v {
-                    FacetValue::Sources(t) if SourceRef::of(t) == *r => Some(t.clone()),
-                    _ => None,
-                })
+                self.side
+                    .facets
+                    .values()
+                    .find_map(|m| match m.values.get(m.by_source.get(r)?)? {
+                        FacetValue::Sources(t) => Some(t.clone()),
+                        _ => None,
+                    })
             })
     }
 

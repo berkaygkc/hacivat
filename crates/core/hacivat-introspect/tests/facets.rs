@@ -672,6 +672,192 @@ async fn sources_on_an_engine_without_a_sources_facet_is_a_fragment_at_sources()
     assert!(r.fake.calls().is_empty(), "no facet read");
 }
 
+// ## m4-t15b-facets (fix round 1)
+
+/// Review I-2 (T17b m-6): `Sources` reads are per key. A key the login may not `SHOW CREATE`
+/// (MySQL 1142, `Permission`) fails alone: neither the other key of the same request nor
+/// another caller's queued request for the namespace is marked denied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_sources_key_fails_alone() {
+    let r = loaded(&[FacetKind::Sources, FacetKind::Grants]).await;
+    r.fake.answer(|_, keys, kind| match kind {
+        FacetKind::Sources if keys.iter().any(|k| k.name() == "u") => Err(IntroError::Permission {
+            kind: ObjectKind::Table,
+        }),
+        FacetKind::Sources => Ok(FacetRows::Sources(
+            keys.iter()
+                .map(|k| (k.clone(), name(&format!("CREATE TABLE {}", k.name()))))
+                .collect(),
+        )),
+        _ => Ok(FacetRows::Grants(Vec::new())),
+    });
+    // One request for both keys: one read per key.
+    let got = bounded(
+        r.handle
+            .load_facet(vec![t_key(), u_key()], FacetKind::Sources),
+    )
+    .await;
+    assert!(got.is_err(), "the refused key's error is reported: {got:?}");
+    let calls = r.fake.calls();
+    assert_eq!(
+        calls,
+        vec![
+            (s(), vec![t_key()], FacetKind::Sources),
+            (s(), vec![u_key()], FacetKind::Sources),
+        ],
+        "one read per key"
+    );
+    let snap = r.catalog.current();
+    assert_eq!(
+        snap.server_text(&t_key()).as_deref(),
+        Some("CREATE TABLE t")
+    );
+    assert!(matches!(
+        snap.facet(&u_key(), FacetKind::Sources).0,
+        LoadState::Failed {
+            error: IntroErrorCode::PermissionDenied,
+            ..
+        }
+    ));
+
+    // Two callers queued behind a running read of the namespace: they never coalesce.
+    let r = loaded(&[FacetKind::Sources, FacetKind::Grants]).await;
+    r.fake.answer(|_, keys, kind| match kind {
+        FacetKind::Sources if keys.iter().any(|k| k.name() == "u") => Err(IntroError::Permission {
+            kind: ObjectKind::Table,
+        }),
+        FacetKind::Sources => Ok(FacetRows::Sources(
+            keys.iter()
+                .map(|k| (k.clone(), name("CREATE TABLE t")))
+                .collect(),
+        )),
+        _ => Ok(FacetRows::Grants(
+            keys.iter()
+                .map(|k| (k.clone(), GrantsFacet::default()))
+                .collect(),
+        )),
+    });
+    let gate = r.fake.hold();
+    let busy = tokio::spawn(r.handle.load_facet(vec![t_key()], FacetKind::Grants));
+    let entered = r.fake.entered.clone();
+    wait_until(Duration::from_secs(60), move || {
+        entered.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    let mine = r.handle.load_facet(vec![t_key()], FacetKind::Sources);
+    let theirs = r.handle.load_facet(vec![u_key()], FacetKind::Sources);
+    gate.add_permits(16);
+    bounded(busy).await.expect("joined").expect("grants");
+    assert!(
+        bounded(mine).await.is_ok(),
+        "the other caller's refusal is not mine"
+    );
+    assert!(bounded(theirs).await.is_err());
+    let snap = r.catalog.current();
+    assert_eq!(
+        snap.server_text(&t_key()).as_deref(),
+        Some("CREATE TABLE t")
+    );
+    assert!(matches!(
+        snap.facet(&u_key(), FacetKind::Sources).0,
+        LoadState::Failed { .. }
+    ));
+}
+
+/// Review m-3: a facet that failed is not read again before its `retry_after`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_facet_waits_for_its_retry_after() {
+    let r = loaded(&PG_FACETS).await;
+    r.fake.answer(|_, _, _| {
+        Err(IntroError::Permission {
+            kind: ObjectKind::Table,
+        })
+    });
+    assert!(
+        bounded(r.handle.load_facet(vec![t_key()], FacetKind::Grants))
+            .await
+            .is_err()
+    );
+    assert_eq!(r.fake.calls().len(), 1);
+    let g = r.catalog.current().generation;
+    // Asked again at once (a re-render): answered from the catalog, nothing read.
+    assert_eq!(
+        bounded(r.handle.load_facet(vec![t_key()], FacetKind::Grants)).await,
+        Ok(g)
+    );
+    assert_eq!(r.fake.calls().len(), 1, "the server is not asked again yet");
+    assert!(matches!(
+        grants_of(&r, &t_key()).0,
+        LoadState::Failed {
+            error: IntroErrorCode::PermissionDenied,
+            ..
+        }
+    ));
+}
+
+/// Review m-2: a grants read that ran while a role was renamed (Task 22 marks loaded grants
+/// stale) publishes its answer stale, never fresh with the old grantee names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_grants_read_overtaken_by_a_role_rename_is_published_stale() {
+    let r = loaded(&PG_FACETS).await;
+    let srv = NsKey::server();
+    r.fake
+        .inner
+        .put_ns(srv.clone(), vec![FakeObject::role("alice").with_oid(500)]);
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(srv.clone()), Trigger::User),
+    )
+    .await
+    .expect("roles");
+    r.fake.answer(|_, keys, _| {
+        Ok(FacetRows::Grants(
+            keys.iter()
+                .map(|k| (k.clone(), grant("alice", "SELECT")))
+                .collect(),
+        ))
+    });
+    let gate = r.fake.hold();
+    let read = tokio::spawn(r.handle.load_facet(vec![t_key()], FacetKind::Grants));
+    let entered = r.fake.entered.clone();
+    wait_until(Duration::from_secs(60), move || {
+        entered.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    // `ALTER ROLE alice RENAME TO alicia` while the read holds the old name.
+    r.fake.inner.edit_ns(&srv, |n| {
+        let o = n.objects.iter_mut().find(|o| &*o.name == "alice").unwrap();
+        o.name = name("alicia");
+        o.version += 10;
+    });
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(srv.clone()), Trigger::User),
+    )
+    .await
+    .expect("roles again");
+    gate.add_permits(16);
+    bounded(read).await.expect("joined").expect("read");
+    let snap = r.catalog.current();
+    assert!(
+        matches!(
+            snap.facet(&t_key(), FacetKind::Grants).0,
+            LoadState::Loaded { stale: true, .. }
+        ),
+        "{:?}",
+        snap.facet(&t_key(), FacetKind::Grants).0
+    );
+    // Never handed to a DDL producer; the next ask reads it again.
+    assert_eq!(snap.grants_facet(&t_key()).state, LoadState::NotLoaded);
+    let calls = r.fake.calls().len();
+    bounded(r.handle.load_facet(vec![t_key()], FacetKind::Grants))
+        .await
+        .expect("again");
+    assert_eq!(r.fake.calls().len(), calls + 1);
+    assert!(is_loaded(&grants_of(&r, &t_key()).0));
+}
+// ## m4-t15b-facets
+
 // ---------------------------------------------------------------------------------------------
 // The side tables (the catalog's publisher, directly)
 
@@ -1004,6 +1190,17 @@ async fn exec(h: &SessionHandle, sql: &str) {
     }
 }
 
+/// The facts of a catalog of `dbms` (what `on_session`'s caller holds).
+fn engine_facts(dbms: DbmsKind) -> ServerFacts {
+    let d = match dbms {
+        DbmsKind::MySql => DialectId::MySql,
+        DbmsKind::MariaDb => DialectId::MariaDb,
+        DbmsKind::Sqlite => DialectId::Sqlite,
+        _ => DialectId::Postgres,
+    };
+    ServerFacts::new(dbms, IdentCtx::new(d))
+}
+
 /// Waits until `h` reports a transaction.
 async fn in_tx(h: &SessionHandle) {
     let mut st = h.state();
@@ -1157,7 +1354,7 @@ async fn on_session_result_is_never_published_or_cached() {
     let cancel = CancellationToken::new();
     let got = bounded(hacivat_introspect::fragment::on_session(
         &job,
-        DbmsKind::Sqlite,
+        &engine_facts(DbmsKind::Sqlite),
         &main_ns(),
         &[sqlite_key(ObjectKind::Table, &["main", "t"])],
         Level::Structure,
@@ -1165,8 +1362,11 @@ async fn on_session_result_is_never_published_or_cached() {
     ))
     .await;
     // A SQLite profile has one session: the job asked for gets the console, and T5 refuses to
-    // join it (M7 adds the writer seam, `MetaConn::join` docs). So nothing is read, and the
-    // positive joined read is the Docker tests' (`docker_fragment_on_session`, PG and MySQL).
+    // join it (M7 adds the writer seam, `MetaConn::join` docs). So nothing is read here: this
+    // test proves only that the catalog and the cache are untouched (review m-5). The positive
+    // joined read is covered by `fragment`'s unit test `a_joined_read_is_a_standalone_snapshot_no_publisher_stamped`
+    // (generation 0), by the review's scripted PG job probes (they need FakeDriver, a
+    // controller manifest amendment) and by the Docker tests (`docker_fragment_on_session`).
     assert!(
         matches!(job.kind(), SessionKind::Console(_)),
         "{:?}",
@@ -1196,7 +1396,7 @@ async fn on_session_result_is_never_published_or_cached() {
     assert!(
         hacivat_introspect::fragment::on_session(
             &open(&sm, SessionKind::Job(2, JobKind::DdlApply)).await,
-            DbmsKind::Sqlite,
+            &engine_facts(DbmsKind::Sqlite),
             &main_ns(),
             &[],
             Level::Structure,
@@ -1221,7 +1421,7 @@ async fn on_session_refuses_a_console_session() {
     exec(&console, "BEGIN").await;
     let got = hacivat_introspect::fragment::on_session(
         &console,
-        DbmsKind::Sqlite,
+        &engine_facts(DbmsKind::Sqlite),
         &main_ns(),
         &[sqlite_key(ObjectKind::Table, &["main", "t"])],
         Level::Structure,

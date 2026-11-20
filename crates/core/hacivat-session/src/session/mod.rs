@@ -222,6 +222,10 @@ pub struct MetaRead {
     pub(crate) joined: bool,
     /// The server-side limit of the read (PostgreSQL `SET LOCAL statement_timeout`).
     pub(crate) timeout: Duration,
+    // ## m4-t15b-facets (named exception in Task 5's seam; T15b review m-1)
+    /// The engine the reader expects the session to be (`Unknown`: any). A joined read of
+    /// another engine's text is refused before anything is sent.
+    pub(crate) engine: hacivat_proto::DbmsKind,
 }
 
 /// Which read-only layer refused a statement (SQL-SAFE-05).

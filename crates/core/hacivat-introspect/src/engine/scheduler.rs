@@ -270,9 +270,20 @@ fn same_key(a: &Work, b: &Work) -> bool {
         | (Work::Fragment { ns: x, .. }, Work::Fragment { ns: y, .. })
         | (Work::Validate { ns: x }, Work::Validate { ns: y }) => x == y,
         // ## m4-t15b-facets (named exception)
-        (Work::Facet { ns: x, kind: a, .. }, Work::Facet { ns: y, kind: b, .. }) => {
-            x == y && a == b
-        }
+        // ## m4-t15b-facets (review I-2, T17b m-6): `Sources` reads are per key: one refused
+        // key never fails another caller's.
+        (
+            Work::Facet {
+                ns: x,
+                kind: a,
+                keys: ka,
+            },
+            Work::Facet {
+                ns: y,
+                kind: b,
+                keys: kb,
+            },
+        ) => x == y && a == b && (*a != hacivat_meta::props::FacetKind::Sources || ka == kb),
         _ => false,
     }
 }
@@ -425,6 +436,13 @@ struct Actor {
     /// Namespaces marked stale while a pass of them was loading: that pass started before the
     /// change, so its result is published stale.
     stale_on_publish: BTreeSet<NsKey>,
+    // ## m4-t15b-facets (named exception; review m-2)
+    /// Bumped whenever loaded facets may have gone stale outside a facet read's namespace (a
+    /// role change, a pass that dropped facets elsewhere); a facet read that saw it move while
+    /// it ran publishes its answer stale.
+    facet_epoch: u64,
+    /// The epoch each running facet read started at, by job id.
+    facet_started: HashMap<u64, u64>,
 }
 
 impl Actor {
@@ -487,6 +505,9 @@ impl Actor {
             debouncer: SaveDebouncer::new(cfg.limits.save_debounce),
             // ## m4-t21-refresh (named exception, fix round 1 m5)
             stale_on_publish: BTreeSet::new(),
+            // ## m4-t15b-facets (named exception; review m-2)
+            facet_epoch: 0,
+            facet_started: HashMap::new(),
             validate_every: cfg.validate_every,
             // ## m4-t22-state (named lines: validation tasks)
             next_validate: cfg.validate_every.map(|d| clock.now() + d),
@@ -849,6 +870,10 @@ impl Actor {
             let out = work::run(ctx, spec, token).await;
             let _ = done.send((id, out));
         });
+        // ## m4-t15b-facets (named exception; review m-2)
+        if matches!(job.work, Work::Facet { .. }) {
+            self.facet_started.insert(id, self.facet_epoch);
+        }
         self.running.insert(id, Running { job, cancel });
         self.update_progress();
     }
@@ -1805,7 +1830,11 @@ impl Actor {
         let mut changes = self.applied_changes(&ns, next, &report, level, pass);
         // ## m4-t15b-facets (named exception): the facets the read made stale go with it, and
         // the definition texts it read come with it.
-        changes.extend(super::facet::invalidations(&snap, &ns, &reread, &delta));
+        let dropped = super::facet::invalidations(&snap, &ns, &reread, &delta);
+        if !dropped.is_empty() {
+            self.facet_epoch += 1;
+        }
+        changes.extend(dropped);
         if !texts.is_empty() {
             changes.push(CatalogChange::PutSources {
                 ns: ns.clone(),
@@ -2465,6 +2494,9 @@ impl Actor {
     /// Marks every loaded grants facet stale (a role was renamed or dropped: the grantee names
     /// they show may be gone). Answers the generation, when anything was marked.
     fn stale_grants(&mut self) -> Option<u64> {
+        // ## m4-t15b-facets (named exception; review m-2): a grants read running now read the
+        // old names too.
+        self.facet_epoch += 1;
         let snap = self.catalog.current();
         let changes: Vec<CatalogChange> = snap
             .states
@@ -2910,7 +2942,7 @@ impl Actor {
         w: Waiter,
     ) {
         let snap = self.catalog.current();
-        let plan = super::facet::plan(&snap, &keys, kind);
+        let plan = super::facet::plan(&snap, &keys, kind, SystemTime::now());
         if plan.is_empty() {
             return w.resolve(Ok(snap.generation));
         }
@@ -2934,6 +2966,16 @@ impl Actor {
                     .and(Err(IntroError::NotImplemented)),
             );
         }
+        // `Sources` reads are per key (review I-2, T17b m-6): a key the login may not
+        // `SHOW CREATE` fails alone, never another key or another caller's.
+        let plan: Vec<(NsKey, Vec<ObjectKey>)> =
+            if read && kind == hacivat_meta::props::FacetKind::Sources {
+                plan.into_iter()
+                    .flat_map(|(ns, ks)| ks.into_iter().map(move |k| (ns.clone(), vec![k])))
+                    .collect()
+            } else {
+                plan.into_iter().collect()
+            };
         let join = Arc::new(Mutex::new(Join {
             left: plan.len(),
             generation: 0,
@@ -2960,6 +3002,7 @@ impl Actor {
     /// A facet read answered: its keys are published `Loaded` (answered) or `NotLoaded` (left
     /// out), in one side-table publish.
     fn facet_done(&mut self, job: Job, rows: &crate::introspector::FacetRows) {
+        let started = self.facet_started.remove(&job.id);
         let Work::Facet { ns, keys, kind } = &job.work else {
             return job.resolve(Err(IntroError::Protocol(Name::from("facet"))));
         };
@@ -2968,7 +3011,10 @@ impl Actor {
         }
         let snap = self.catalog.current();
         let level = self.state_level(ns);
-        match super::facet::answered(&snap, ns, keys, *kind, rows, level) {
+        // Review m-2: facets went stale elsewhere while this read ran (a role rename): its
+        // answer is published stale, never as fresh.
+        let stale = started != Some(self.facet_epoch);
+        match super::facet::answered(&snap, ns, keys, *kind, rows, level, stale) {
             Ok(changes) => {
                 let r = self.publish(changes, None);
                 job.resolve(r);
@@ -2980,6 +3026,7 @@ impl Actor {
     /// A facet read failed: a definite failure is published `Failed` for its keys (R-W4-3); a
     /// transient one publishes nothing. Never counts towards the namespace's back-pressure.
     fn facet_failed(&mut self, job: Job, e: IntroError) {
+        self.facet_started.remove(&job.id);
         if let Work::Facet { ns, keys, kind } = &job.work
             && super::facet::decides(&e)
             && !self.out_of_scope(ns)

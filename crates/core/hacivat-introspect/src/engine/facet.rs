@@ -36,6 +36,13 @@
 //!   `load_facet` reads them again. T22 marks grants stale on a role change or a MySQL
 //!   privilege-hash change; a stale facet is read again on the next `load_facet` and is never
 //!   handed to a DDL producer (`CatalogSnapshot::grants_facet`).
+//! - **Fix round 1 (T15b review).** `Sources` reads are per key and never coalesce, so a key
+//!   the login may not `SHOW CREATE` (MySQL 1142) fails alone (I-2, T17b m-6). A read that saw
+//!   facets go stale elsewhere while it ran (a role rename, a pass that dropped facets in
+//!   another namespace) publishes its answer stale (m-2). A failed facet is not read again
+//!   before its `retry_after` (m-3). Serialization failures, deadlocks, operator
+//!   interventions, lock-not-available, resource and connection errors and `CatalogRace`
+//!   decide nothing (m-4).
 
 #![allow(
     clippy::result_large_err,
@@ -97,10 +104,14 @@ pub async fn capturing<F: std::future::Future>(fut: F) -> (F::Output, Vec<(Sourc
 
 /// The keys of one request as the scheduler plans them: per namespace, the objects' own keys
 /// whose facet is not loaded (or is stale); keys no arena holds are left out.
+///
+/// ## m4-t15b-facets (review m-3)
+/// A key whose facet failed is not read again before its `retry_after` has passed (`now`).
 pub(crate) fn plan(
     snap: &CatalogSnapshot,
     keys: &[ObjectKey],
     kind: FacetKind,
+    now: SystemTime,
 ) -> BTreeMap<NsKey, Vec<ObjectKey>> {
     let mut out: BTreeMap<NsKey, Vec<ObjectKey>> = BTreeMap::new();
     for k in keys {
@@ -112,8 +123,12 @@ pub(crate) fn plan(
             object: object.clone(),
             facet: kind,
         };
-        if matches!(snap.state(&key), LoadState::Loaded { stale: false, .. }) {
-            continue;
+        match snap.state(&key) {
+            LoadState::Loaded { stale: false, .. } => continue,
+            LoadState::Failed {
+                at, retry_after, ..
+            } if at.checked_add(*retry_after).is_some_and(|due| now < due) => continue,
+            _ => {}
         }
         let v = out.entry(ns).or_default();
         if !v.contains(&object) {
@@ -179,6 +194,8 @@ pub(crate) fn answered(
     kind: FacetKind,
     rows: &FacetRows,
     level: Level,
+    // ## m4-t15b-facets (review m-2): something made facets stale while the read ran.
+    stale: bool,
 ) -> Result<Vec<CatalogChange>, IntroError> {
     if kind_of(rows) != kind {
         return Err(IntroError::Protocol(Name::from("facet kind")));
@@ -194,7 +211,7 @@ pub(crate) fn answered(
                     level,
                     at,
                     watermark: Watermark::None,
-                    stale: false,
+                    stale,
                 },
                 value: Some(value),
             },
@@ -209,18 +226,35 @@ pub(crate) fn answered(
 
 /// Whether a failed facet read decided something about its keys (module docs): a transient
 /// error decides nothing.
+///
+/// ## m4-t15b-facets (review m-4)
+/// A server error decides only when it is not one a retry may clear: a serialization failure
+/// or a deadlock (SQLSTATE class `40`), an operator intervention (`57`: cancel, shutdown), a
+/// lock not available (`55P03`), insufficient resources (`53`), a connection exception
+/// (`08`), MySQL's lock wait timeout (1205) and PostgreSQL's concurrent drop (`CatalogRace`)
+/// all decide nothing.
 pub(crate) fn decides(e: &IntroError) -> bool {
     use hacivat_session::meta::MetaError as M;
     match e {
-        IntroError::Cancelled | IntroError::Timeout => false,
-        IntroError::Meta(m) => matches!(
-            m,
-            M::NotJoinable | M::RefusedText | M::ReadOnlyNotEnforced | M::Server { .. }
-        ),
-        IntroError::NotImplemented
-        | IntroError::Permission { .. }
-        | IntroError::CatalogRace
-        | IntroError::Protocol(_) => true,
+        IntroError::Cancelled | IntroError::Timeout | IntroError::CatalogRace => false,
+        IntroError::Meta(M::Server { sqlstate, message }) => {
+            let state = sqlstate
+                .as_deref()
+                .or(message.sqlstate.as_deref())
+                .unwrap_or("");
+            let transient = ["40", "57", "53", "08"]
+                .iter()
+                .any(|c| state.starts_with(c))
+                || state == "55P03"
+                || matches!(message.vendor_code, Some(1205 | 1213));
+            !transient
+        }
+        IntroError::Meta(m) => {
+            matches!(m, M::NotJoinable | M::RefusedText | M::ReadOnlyNotEnforced)
+        }
+        IntroError::NotImplemented | IntroError::Permission { .. } | IntroError::Protocol(_) => {
+            true
+        }
     }
 }
 
@@ -354,7 +388,35 @@ mod tests {
         }));
         assert!(decides(&IntroError::NotImplemented));
         assert!(decides(&IntroError::Meta(MetaError::NotJoinable)));
+        let server = |state: &str, code: Option<i64>| {
+            IntroError::Meta(MetaError::Server {
+                sqlstate: Some(std::sync::Arc::from(state)),
+                message: hacivat_driver::ServerMessage {
+                    sqlstate: Some(state.to_string()),
+                    vendor_code: code,
+                    severity: None,
+                    text: String::new(),
+                    detail: None,
+                    hint: None,
+                    lang_hint: None,
+                    position: None,
+                },
+            })
+        };
+        // A definite refusal decides; a retryable one does not (review m-4).
+        assert!(decides(&server("42883", None)));
+        assert!(decides(&server("42000", Some(1142))));
         for e in [
+            server("40001", None),
+            server("40P01", None),
+            server("57P01", None),
+            server("57014", None),
+            server("55P03", None),
+            server("53300", None),
+            server("08006", None),
+            server("HY000", Some(1205)),
+            server("40001", Some(1213)),
+            IntroError::CatalogRace,
             IntroError::Cancelled,
             IntroError::Timeout,
             IntroError::Meta(MetaError::ConnectionLost),

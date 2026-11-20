@@ -100,6 +100,7 @@ fn h2_every_called_function_is_a_known_pure_read() {
         // ## m4-t15b-facets (named exception): a joined read checks the session's effective
         // path first (R-W3-11); `current_schemas` reads it (no write, no lock, no XID).
         "current_schemas",
+        "pg_my_temp_schema",
     ];
     const SYNTAX: &[&str] = &[
         "in",

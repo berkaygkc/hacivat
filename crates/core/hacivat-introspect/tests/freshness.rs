@@ -897,7 +897,9 @@ async fn a_role_rename_marks_loaded_grants_stale() {
     load(&r, &srv).await;
     let st = |r: &Rig| r.catalog.current().state(&grants).clone();
     assert!(matches!(st(&r), LoadState::Loaded { stale: false, .. }));
-    // A table changing leaves grants alone.
+    // ## m4-t15b-facets (named exception; T15b review m-8): a table changing is not an account
+    // change, so it marks no grants stale: the facet of `other` stays fresh. (A re-read of an
+    // object drops that object's own loaded grants, T15b; this facet's object is not re-read.)
     r.fake.touch(&n, "t0");
     load(&r, &n).await;
     assert!(matches!(st(&r), LoadState::Loaded { stale: false, .. }));
