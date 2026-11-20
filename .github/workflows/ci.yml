@@ -128,6 +128,18 @@ jobs:
       # Fix round 2: `hacivat-introspect` builds without `session` (what `fuzz/meta` needs).
       - name: Check (M4) introspect without the session feature
         run: cargo check --locked -p hacivat-introspect --no-default-features
+      # ## m4-t31-golden-guard: after the test runs, no generated-DDL golden changed or appeared
+      # (a golden is only ever written by `UPDATE_GOLDEN=1`, which CI never sets; G5).
+      - name: Golden guard (M4) DDL goldens unchanged
+        shell: bash
+        run: |
+          git diff --exit-code -- crates/core/hacivat-ddl/tests/golden
+          extra="$(git status --porcelain --untracked-files=all -- crates/core/hacivat-ddl/tests/golden)"
+          if [ -n "$extra" ]; then
+            printf '%s\n' "$extra"
+            echo "::error::a DDL golden changed or appeared during the test run (UPDATE_GOLDEN=1 is never set on CI)"
+            exit 1
+          fi
 
       # ## m3a-t01a-proofs
       # After every build of this job (clippy, release, the test builds): nothing under the
@@ -237,6 +249,18 @@ jobs:
       # ## m4-t01a-ci: the full test set's `hacivat-meta --all-features` line (P-M4-5).
       - name: Test (M4) meta, all features
         run: cargo test --locked -p hacivat-meta --all-features
+      # ## m4-t31-golden-guard: after the test runs, no generated-DDL golden changed or appeared
+      # (a golden is only ever written by `UPDATE_GOLDEN=1`, which CI never sets; G5).
+      - name: Golden guard (M4) DDL goldens unchanged
+        shell: bash
+        run: |
+          git diff --exit-code -- crates/core/hacivat-ddl/tests/golden
+          extra="$(git status --porcelain --untracked-files=all -- crates/core/hacivat-ddl/tests/golden)"
+          if [ -n "$extra" ]; then
+            printf '%s\n' "$extra"
+            echo "::error::a DDL golden changed or appeared during the test run (UPDATE_GOLDEN=1 is never set on CI)"
+            exit 1
+          fi
 
   # Spec 7.1 / F29: runtime language switching (tests of Tasks 13, 16 and 17).
   switch:
