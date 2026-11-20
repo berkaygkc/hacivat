@@ -849,6 +849,64 @@ fn stale_object_notice_and_reload(cx: &mut TestAppContext) {
     assert!(st.notices.contains(&"hv-ddl-view-unknown".to_string()));
 }
 
+// ## m4-t33b-carries (T25 review m-9): on a namespace marked stale (refresh after DDL with Ask
+// or Never), Reload clears "couldn't check" once the object's own check decides it is current:
+// a decided verdict replaces the namespace's stale mark (the facet vouch still holds). A check
+// that cannot decide keeps "couldn't check".
+#[gpui::test]
+fn reload_clears_couldnt_check_on_a_stale_namespace(cx: &mut TestAppContext) {
+    let stale = pg_cat(1, vec![users(&[("id", "integer")])], true);
+    let (vcx, s, id) = pg_shell(cx, "en", stale);
+    s.verdict.set(Some(Staleness::Unknown));
+    open_view(vcx, id, &users_key());
+    let st = state(vcx, id, &users_key());
+    assert_eq!(st.freshness, Freshness::Unknown);
+    assert!(st.notices.contains(&"hv-ddl-view-unknown".to_string()));
+    // The server confirms the object: Reload ends current, though the namespace stays stale.
+    s.verdict.set(Some(Staleness::Current));
+    click(vcx, "button-ddl-reload");
+    let st = state(vcx, id, &users_key());
+    assert_eq!(st.freshness, Freshness::Current);
+    assert!(!st.notices.iter().any(|n| n.starts_with("hv-ddl-view-")));
+    // Undecided again: "couldn't check" again.
+    s.verdict.set(Some(Staleness::Unknown));
+    click(vcx, "button-ddl-refresh");
+    assert_eq!(state(vcx, id, &users_key()).freshness, Freshness::Unknown);
+}
+
+// ## m4-t33b-carries (T25 review m-5, NOTES surface 11 "Keyboard"): the notice's Reload is the
+// first Tab stop after the toolbar, though it is drawn below the options strip: Shift-Tab from
+// it reaches the toolbar's last button (Open in console), not the strip.
+#[gpui::test]
+fn the_notice_button_is_the_first_tab_stop_after_the_toolbar(cx: &mut TestAppContext) {
+    let cat = pg_cat(1, vec![users(&[("id", "integer")])], false);
+    let (vcx, s, id) = pg_shell(cx, "en", cat);
+    s.verdict.set(Some(Staleness::Unknown));
+    open_view(vcx, id, &users_key());
+    assert!(
+        state(vcx, id, &users_key())
+            .notices
+            .contains(&"hv-ddl-view-unknown".to_string())
+    );
+    let reload = vcx.cx.read(|cx| {
+        ddl_view::view_of(id, &users_key(), cx)
+            .expect("the view")
+            .read(cx)
+            .reload_focus()
+            .clone()
+    });
+    in_window(vcx, |window, cx| window.focus(&reload, cx));
+    vcx.run_until_parked();
+    let consoles = vcx.cx.read(|cx| Consoles::ids(cx).len());
+    vcx.simulate_keystrokes("shift-tab enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.cx.read(|cx| Consoles::ids(cx).len()),
+        consoles + 1,
+        "Shift-Tab from Reload is Open in console"
+    );
+}
+
 /// T25 round 1 (coordinator item 2): only Task 22's `Current` verdict shows the text as
 /// current. `Unknown` and a `Dropped` the catalog does not confirm read "couldn't check", even
 /// on a namespace that is not stale (before, the stale flag alone decided).
@@ -1506,10 +1564,14 @@ fn review_h2_option_change_after_a_stale_publish_is_not_current(cx: &mut TestApp
         checks_after > checks,
         "the replaced text was checked ({checks} -> {checks_after})"
     );
+    // ## m4-t33b-carries (T25 review m-9, as its reviewer foresaw): the replaced text was
+    // checked, and the object's own `Current` verdict decides it although the namespace is
+    // stale; the text is the catalog's and the server confirmed the object. (The fail-open
+    // H2 guarded, Changed turning Current with no check, stays closed: the check count above.)
     assert_eq!(
         st.freshness,
-        Freshness::Unknown,
-        "a stale namespace's text is not current: {st:?}"
+        Freshness::Current,
+        "the re-check decided the replaced text: {st:?}"
     );
 }
 

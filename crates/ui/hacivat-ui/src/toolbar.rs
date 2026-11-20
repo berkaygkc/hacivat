@@ -105,6 +105,9 @@ pub struct ToolbarItem {
     /// The narrow form built for the width its slot gets (a button whose word is wider than
     /// the pane takes its icon); `narrow` is still its form at its natural width, measured.
     pub narrow_sized: Option<SizedItemFn>,
+    // ## m4-t33b-carries (named exception; T25 carry: the overflow's check marks)
+    /// An on/off item (a checkbox): its ⋯ menu row shows the check when it is on.
+    pub checked: Option<bool>,
 }
 
 // ## m3a-f2-visual (named exception): the toolbar's wrapping stage.
@@ -139,6 +142,7 @@ impl ToolbarItem {
             narrow: None,
             narrow_text: None,
             narrow_sized: None,
+            checked: None,
         }
     }
 
@@ -172,6 +176,13 @@ impl ToolbarItem {
 
     pub fn on_choose(mut self, on_choose: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_choose = Some(Rc::new(on_choose));
+        self
+    }
+
+    // ## m4-t33b-carries (named exception)
+    /// Marks the item an on/off one, now `on`: in the ⋯ menu its row keeps the check.
+    pub fn checked(mut self, on: bool) -> Self {
+        self.checked = Some(on);
         self
     }
 
@@ -370,6 +381,8 @@ struct MenuEntry {
     label: TextFn,
     action: Option<RunCommand>,
     on_choose: Option<ChooseFn>,
+    // ## m4-t33b-carries
+    checked: Option<bool>,
 }
 
 /// The overflow button's state, kept with the toolbar across frames.
@@ -393,8 +406,13 @@ impl ToolbarState {
             .iter()
             .enumerate()
             .map(|(i, e)| {
-                MenuItemSpec::new(e.label.clone(), i.to_string())
-                    .disabled(e.action.is_none() && e.on_choose.is_none())
+                let row = MenuItemSpec::new(e.label.clone(), i.to_string())
+                    .disabled(e.action.is_none() && e.on_choose.is_none());
+                // ## m4-t33b-carries: an on/off item keeps its check in the menu.
+                match e.checked {
+                    Some(on) => row.toggle(on),
+                    None => row,
+                }
             })
             .collect();
         let menu = PopupMenu::embedded(items, window, cx);
@@ -1256,6 +1274,7 @@ impl Element for Row {
                 label: all[i].overflow_label.clone(),
                 action: all[i].action.clone(),
                 on_choose: all[i].on_choose.clone(),
+                checked: all[i].checked,
             })
             .collect();
         // ## m3a-f2-visual (named exception, review M7): no ⋯ menu without a row that can be

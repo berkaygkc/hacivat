@@ -60,7 +60,7 @@ use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui::toolbar::{ItemFn, Toolbar, ToolbarItem};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, Focusable as _,
+    AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px,
 };
@@ -185,6 +185,8 @@ pub struct DdlView {
     /// The snapshot the view last looked at (`Arc` identity), so an unrelated global change
     /// rebuilds nothing.
     seen: Option<Arc<CatalogSnapshot>>,
+    // ## m4-t33b-carries (T25 review m-5): the notices' Reload button.
+    reload_focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -272,6 +274,7 @@ impl DdlView {
             grants_pending: false,
             check_seq: 0,
             seen: None,
+            reload_focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
         view.load(Why::Show, cx);
@@ -281,6 +284,12 @@ impl DdlView {
     /// The read-only editor that holds the text.
     pub fn editor(&self) -> &Entity<EditorView> {
         &self.editor
+    }
+
+    // ## m4-t33b-carries (T25 review m-5)
+    /// The notices' Reload button (tests: its place in the Tab order).
+    pub fn reload_focus(&self) -> &FocusHandle {
+        &self.reload_focus
     }
 
     /// The object shown (its key follows a rename).
@@ -340,10 +349,17 @@ impl DdlView {
     /// DDL with Ask or Never, a held deletion), and server text from the `Sources` facet has
     /// that facet loaded and not stale (T19 review m6: `DdlSources` has no load state).
     fn vouched(&self, snap: &CatalogSnapshot) -> bool {
-        !model::is_stale(snap, &self.key)
-            && self.shown.as_ref().is_none_or(|s| {
-                !s.facet_text || model::facet_vouches(snap, &self.key, FacetKind::Sources)
-            })
+        !model::is_stale(snap, &self.key) && self.facet_vouched(snap)
+    }
+
+    // ## m4-t33b-carries (T25 review m-9)
+    /// The facet half of [`DdlView::vouched`]: server text from the `Sources` facet has that
+    /// facet loaded and not stale. A check that decided the object (its own verdict) replaces
+    /// the namespace's stale mark, never this.
+    fn facet_vouched(&self, snap: &CatalogSnapshot) -> bool {
+        self.shown.as_ref().is_none_or(|s| {
+            !s.facet_text || model::facet_vouches(snap, &self.key, FacetKind::Sources)
+        })
     }
 
     /// An object with a server id renamed on the server keeps its handle; the key (and the tab's
@@ -580,9 +596,12 @@ impl DdlView {
         };
         // ## m4-t27-refresh-ui (named exception, mock 11): the explorer row says it too.
         crate::explorer::stale::record(self.profile, &self.key, verdict, read, &snap, cx);
+        // ## m4-t33b-carries (T25 review m-9): the object's own decided verdict replaces the
+        // namespace's stale mark (Reload clears "couldn't check" on a stale namespace); a stale
+        // mark arriving later demotes it again on the catalog path (`got_script`).
         self.freshness = match (decided, self.still_shown(&snap, cx)) {
             (true, Some(false)) => Freshness::Changed,
-            (true, Some(true)) if self.vouched(&snap) => Freshness::Current,
+            (true, Some(true)) if self.facet_vouched(&snap) => Freshness::Current,
             _ => Freshness::Unknown,
         };
     }
@@ -1123,6 +1142,8 @@ impl DdlView {
                     }),
                     text_fn_of(msg),
                 )
+                // ## m4-t33b-carries (T25 carry): its ⋯ menu row keeps the check.
+                .checked(checked)
                 .on_choose(move |_, cx| {
                     if !fixed {
                         let _ = w2.update(cx, |v, cx| v.toggle(which, !checked, cx));
@@ -1258,7 +1279,7 @@ impl DdlView {
                     ids::hv::HvDdlViewStale { name: arg() },
                 ),
                 None,
-                Some(reload_button(weak, cx)),
+                Some(reload_button(weak, &self.reload_focus, cx)),
                 "ddl-stale",
             )),
             Freshness::Unknown => out.push(row(
@@ -1269,7 +1290,7 @@ impl DdlView {
                     ids::hv::HvDdlViewUnknown { name: arg() },
                 ),
                 None,
-                Some(reload_button(weak, cx)),
+                Some(reload_button(weak, &self.reload_focus, cx)),
                 "ddl-unknown",
             )),
             Freshness::Gone => {
@@ -1444,13 +1465,22 @@ impl Render for DdlView {
                     .border_color(c.seam.to_hsla())
                     .child(toolbar),
             )
+            // ## m4-t33b-carries (T25 review m-5, NOTES surface 11 "Keyboard"): the notices'
+            // buttons are the first Tab stops after the toolbar, though they are drawn below
+            // the options strip. Tab follows paint order, so the notices come first in the
+            // tree and a reversed column draws the strip above them.
             .child(
                 div()
-                    .border_b_1()
-                    .border_color(c.seam.to_hsla())
-                    .child(strip),
+                    .flex()
+                    .flex_col_reverse()
+                    .child(div().flex().flex_col().children(notices))
+                    .child(
+                        div()
+                            .border_b_1()
+                            .border_color(c.seam.to_hsla())
+                            .child(strip),
+                    ),
             )
-            .children(notices)
             .child(self.code(cx))
     }
 }
@@ -1469,10 +1499,11 @@ struct Toggle {
 }
 
 /// The Reload button of the stale and couldn't-check notices.
-fn reload_button(weak: &WeakEntity<DdlView>, cx: &App) -> Button {
+fn reload_button(weak: &WeakEntity<DdlView>, focus: &FocusHandle, cx: &App) -> Button {
     Button::new("ddl-reload", tr(cx, ids::hv::DDL_VIEW_RELOAD, NoArgs))
         .icon(IconName::RotateCw)
         .compact(true)
+        .focus_handle(focus.clone())
         .on_click(on_view(weak, |v, _, cx| v.refresh(cx)))
 }
 

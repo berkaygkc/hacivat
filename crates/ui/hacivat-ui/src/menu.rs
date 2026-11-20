@@ -70,6 +70,10 @@ pub struct MenuItemSpec {
     /// An inert sentence that wraps inside the menu's width (the chooser's explanations,
     /// NOTES M3b ruling 19: "on its own wrapping line"): the row grows to its lines.
     pub wraps: bool,
+    // ## m4-t33b-carries (named exception; T25 carry: the toolbar overflow's check marks)
+    /// An on/off row (a toolbar checkbox moved into ⋯): its check shows its state, it is a
+    /// menu checkbox to assistive technology, and the highlight never starts on it.
+    pub toggle: bool,
 }
 
 impl MenuItemSpec {
@@ -90,6 +94,7 @@ impl MenuItemSpec {
             note: false,
             // ## m3b-t29-shots
             wraps: false,
+            toggle: false,
         }
     }
 
@@ -110,6 +115,7 @@ impl MenuItemSpec {
             note: false,
             // ## m3b-t29-shots
             wraps: false,
+            toggle: false,
         }
     }
 
@@ -130,6 +136,14 @@ impl MenuItemSpec {
 
     pub fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
+        self
+    }
+
+    // ## m4-t33b-carries (named exception)
+    /// An on/off row, `on` or off ([`MenuItemSpec::toggle`]).
+    pub fn toggle(mut self, on: bool) -> Self {
+        self.checked = on;
+        self.toggle = true;
         self
     }
 
@@ -278,7 +292,7 @@ impl PopupMenu {
             // The highlight starts on the checked row (a Select's current option).
             let selected = items
                 .iter()
-                .position(|i| i.checked && i.selectable())
+                .position(|i| i.checked && !i.toggle && i.selectable())
                 .or_else(|| items.iter().position(MenuItemSpec::selectable));
             PopupMenu {
                 anchor,
@@ -685,7 +699,16 @@ impl Render for PopupMenu {
             Some(room) => self.rows_window(&entries, room),
             None => 0..self.items.len(),
         };
-        let check_column = self.items.iter().any(|i| i.checked && !i.separator);
+        // ## m4-t33b-carries: an on/off row keeps the column even while it is off.
+        let check_column = self
+            .items
+            .iter()
+            .any(|i| (i.checked || i.toggle) && !i.separator);
+        // A Select's options (a checked row that is not an on/off one) are radio items.
+        let radio = self
+            .items
+            .iter()
+            .any(|i| i.checked && !i.toggle && !i.separator);
 
         let rows: Vec<AnyElement> = self
             .items
@@ -877,7 +900,10 @@ impl Render for PopupMenu {
                         .disabled(true)
                         .into_any_element();
                 }
-                let role = if check_column {
+                // ## m4-t33b-carries: an on/off row is a menu checkbox.
+                let role = if item.toggle {
+                    Role::MenuItemCheckBox
+                } else if radio {
                     Role::MenuItemRadio
                 } else {
                     Role::MenuItem
@@ -886,8 +912,11 @@ impl Render for PopupMenu {
                 if selected {
                     decl = decl.active_descendant();
                 }
+                if item.toggle {
+                    decl = decl.toggled(item.checked);
+                }
                 let row = row.declare_full(decl);
-                if check_column {
+                if radio && !item.toggle {
                     row.aria_toggled(accesskit::Toggled::from(item.checked))
                         .into_any_element()
                 } else {
