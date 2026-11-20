@@ -38,7 +38,7 @@ use hacivat_meta::props::{
     ColumnProps, ColumnRare, Generated, GeneratedKind, Identity, Persistence, Props, TableExt,
     TableProps, TriggerEvents, TriggerProps, TriggerTiming, ViewProps,
 };
-use hacivat_meta::{Level, Name, NsKey, Obj, ObjFlags, ObjectKind, SourceRef, StateMark, Subtree};
+use hacivat_meta::{Level, Name, NsKey, Obj, ObjFlags, ObjectKind, StateMark, Subtree};
 
 use super::read::{ObjRow, SchemaRows, TableFlags};
 use super::text::{self, Event, Timing};
@@ -315,7 +315,10 @@ fn relation_props(
     let sql = o.sql.as_deref();
     match kind {
         ObjectKind::View => Props::View(Arc::new(ViewProps {
-            source: sql.filter(|_| level >= Level::Sources).map(SourceRef::of),
+            // ## m4-t15b-facets (named exception): the text is kept for the catalog's source store.
+            source: sql
+                .filter(|_| level >= Level::Sources)
+                .map(crate::engine::facet::source_ref),
             ..ViewProps::default()
         })),
         _ => {
@@ -430,11 +433,12 @@ fn column_props(
 }
 
 fn trigger_props(o: &ObjRow, level: Level) -> (TriggerProps, bool) {
+    // ## m4-t15b-facets (named exception): the text is kept for the catalog's source store.
     let source = o
         .sql
         .as_deref()
         .filter(|_| level >= Level::Sources)
-        .map(SourceRef::of);
+        .map(crate::engine::facet::source_ref);
     let Some(d) = o.sql.as_deref().and_then(text::trigger_def) else {
         return (
             TriggerProps {

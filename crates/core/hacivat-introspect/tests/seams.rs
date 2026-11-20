@@ -468,7 +468,9 @@ async fn stub_load_facet_leaves_the_facet_not_loaded() {
         .handle
         .load_facet(vec![table("public", "orders")], FacetKind::Grants)
         .await;
-    assert_eq!(got, Err(IntroError::NotImplemented));
+    // ## m4-t15b-facets (named exception): the engine schedules facet loads now; a key no
+    // arena holds is never read and nothing is published.
+    assert_eq!(got, Ok(before.generation));
     let after = pc.catalog.current();
     // Nothing was published: no generation, no namespace, so no facet is loaded anywhere.
     assert_eq!(after.generation, before.generation);

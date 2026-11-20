@@ -1014,8 +1014,11 @@ fn ends_with_ci(w: &str, suffix: &str) -> bool {
 /// cannot change them, and none writes, locks, sleeps or assigns an XID (fix round 2, I5 and
 /// m8: an allowlist, not a denylist of aggregates and side effects). Later tasks extend it by
 /// named exception.
-const ROW_FUNCTIONS: [&str; 52] = [
+const ROW_FUNCTIONS: [&str; 53] = [
     // PostgreSQL
+    // ## m4-t15b-facets (named exception in Task 4's file; R-W3-11): a joined read checks the
+    // session's effective path (no side effect; text in no other column depends on it).
+    "current_schemas",
     "age",
     "array_to_string",
     "string_to_array",

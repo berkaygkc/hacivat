@@ -18,7 +18,7 @@ use hacivat_meta::props::{
     Volatility as MVolatility,
 };
 use hacivat_meta::{
-    Name, NsKey, Obj, ObjFlags, ObjectKey, ObjectKind, Ref, ServerId, SourceRef, StateMark, Subtree,
+    Name, NsKey, Obj, ObjFlags, ObjectKey, ObjectKind, Ref, ServerId, StateMark, Subtree,
 };
 use smallvec::SmallVec;
 
@@ -150,7 +150,11 @@ pub fn relation_obj(ns: &Ns, r: &PgRelation) -> Obj {
         RelKind::View | RelKind::MaterializedView => Props::View(Arc::new(ViewProps {
             owner: Some(n(&r.owner)),
             comment: on(&r.comment),
-            source: r.view_definition.as_deref().map(SourceRef::of),
+            // ## m4-t15b-facets (named exception): the text is kept for the catalog's source store.
+            source: r
+                .view_definition
+                .as_deref()
+                .map(crate::engine::facet::source_ref),
             check_option: r
                 .options
                 .iter()
@@ -267,7 +271,11 @@ pub fn trigger_obj(ns: &Ns, t: &PgTrigger) -> Obj {
         for_each_row: t.row_level,
         function: Some(ns.ref_to(ObjectKind::Routine, fschema, fname, *foid)),
         when_expr: None,
-        source: t.definition.as_deref().map(SourceRef::of),
+        // ## m4-t15b-facets (named exception): the text is kept for the catalog's source store.
+        source: t
+            .definition
+            .as_deref()
+            .map(crate::engine::facet::source_ref),
         // `tgenabled` `D` is disabled; `O`, `R` and `A` fire (in some replication role).
         enabled: t.enabled != 'D',
         definer: None,
@@ -350,7 +358,11 @@ pub fn routine_obj(p: &PgRoutine) -> Obj {
         specific_name: None,
         security_definer: p.security_definer,
         overload_sig: Some(n(&p.identity_args)),
-        source: p.definition.as_deref().map(SourceRef::of),
+        // ## m4-t15b-facets (named exception): the text is kept for the catalog's source store.
+        source: p
+            .definition
+            .as_deref()
+            .map(crate::engine::facet::source_ref),
         comment: on(&p.comment),
     };
     Obj::new(routine_kind(p.kind), n(&p.name))

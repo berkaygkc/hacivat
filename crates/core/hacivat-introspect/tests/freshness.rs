@@ -852,9 +852,13 @@ async fn a_role_rename_marks_loaded_grants_stale() {
     ))));
     let publisher = catalog.publisher().unwrap();
     // A grants facet loaded earlier (Task 15b loads them; the catalog holds its state).
+    // ## m4-t15b-facets (named exception in Task 22's test): the facet is of a namespace this
+    // test never reads, because a pass that re-reads an object drops that object's loaded
+    // grants (T16b's rule, applied by Task 15b) and the first pass of `n` re-reads `t0`.
+    let other = ns("other");
     let grants = ContainerKey::Facet {
-        ns: n.clone(),
-        object: table_key(&n, "t0", Some(20_000)),
+        ns: other.clone(),
+        object: table_key(&other, "t0", Some(20_000)),
         facet: hacivat_meta::props::FacetKind::Grants,
     };
     publisher
