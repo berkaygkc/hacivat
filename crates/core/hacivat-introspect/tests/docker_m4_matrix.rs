@@ -12,10 +12,17 @@
 //! is not `Full`, and its query log shows the expected reads), so a test cannot pass by always
 //! running `Full`.
 //!
-//! **Record.** Every matrix cell that holds prints `HV-FACT g4 <target> <case>
-//! incremental==full` (CI uploads no artifacts, R-W3-14); the per-step rows (target, step,
-//! changed parents, queries issued, incremental == full) go to
-//! `target/docker/t28-g4-<test>.tsv`, and each test prints its wall time per target.
+//! **Record** (CI uploads no artifacts, R-W3-14, so the log is the record). Every line is
+//! `HV-FACT g4 <target> <topic> <k=v …>`:
+//! - a cell that holds: `HV-FACT g4 <target> <case> incremental==full`;
+//! - a per-step row: `HV-FACT g4 <target> row step=… changed_parents=… queries=…` (also in
+//!   `target/docker/t28-g4-<test>.tsv`, whose `incremental_eq_full` column is always `true`: a
+//!   row is written only after its oracle held);
+//! - the wall time of each test on each target, with that target's running total in this
+//!   process: `HV-FACT g4 <target> wall test=… ms=… target_total_ms=…`. The tests run one at a
+//!   time, so the last `wall` line of a target is its total: the plan's PR subset (step 4,
+//!   ≤ 5 min) is the `pg17` total plus the `mysql84` total; the full set (≤ 15 min) is the sum
+//!   of every target's last total.
 //!
 //! Every Docker test is `#[ignore = "docker"]`, returns early unless `HACIVAT_DOCKER=1`,
 //! takes its targets only from `require_target`, and drops what it creates through guards
@@ -30,7 +37,7 @@ mod common;
 
 use std::time::Instant;
 
-use common::g4::{Tsv, assert_equal, canon, cell, fact};
+use common::g4::{Tsv, assert_equal, canon, cell, note};
 use common::my::{self, Login};
 use common::pg::{DropSchemas, PG, Pg, admin, admin_on, unique};
 use hacivat_introspect::Introspector;
@@ -185,6 +192,157 @@ mod oracle {
         });
         super::common::g4::assert_equal("control", &a, &b);
     }
+
+    // ## m4-t28 fix round 1: the review's oracle-negative probes (HOSTILE1 and HOSTILE2) as
+    // pure tests. A PostgreSQL-shaped step (`SET DEFAULT 5; COMMENT 'new'`, the table's xmin
+    // 700 → 800) is merged incrementally onto the cached namespace (the merge's general walk)
+    // and compared with a fresh full read merged into an empty base. The clean merge is equal;
+    // a merge that loses what the re-read brought (an injected miss) must fail the oracle.
+
+    use std::collections::BTreeMap;
+
+    use hacivat_meta::merge::{
+        ChangedObject, ExistSet, Identity, MergePolicy, NamespaceResult, Trigger, base, merge,
+    };
+    use hacivat_meta::props::ColumnProps;
+
+    type Col = (&'static str, u32, Option<&'static str>);
+
+    fn table(xmin: u32, comment: &str, cols: &[Col]) -> Subtree {
+        let mut t = Subtree::new(
+            Obj::new(ObjectKind::Table, "t")
+                .with_server_id(ServerId::Oid(16_400))
+                .with_state(StateMark::Xmin(xmin))
+                .with_props(Props::Table(Arc::new(TableProps {
+                    comment: Some(Name::from(comment)),
+                    ..TableProps::default()
+                }))),
+        );
+        let r = t.root();
+        for (name, ord, default) in cols {
+            t.add(
+                r,
+                Obj::new(ObjectKind::Column, *name).with_props(Props::Column(Arc::new(
+                    ColumnProps {
+                        ordinal: *ord,
+                        raw_type: Name::from("int4"),
+                        nullable: true,
+                        default_raw: default.map(Name::from),
+                        ..ColumnProps::default()
+                    },
+                ))),
+            );
+        }
+        t
+    }
+
+    fn ns_key() -> NsKey {
+        NsKey::schema(["db", "s"])
+    }
+
+    /// A pass that read `t` (full, or incremental with `t`'s columns scoped).
+    fn read(full: bool, xmin: u32, comment: &str, cols: &[Col]) -> NamespaceResult {
+        let b = base(ns_key(), DbmsKind::Postgres, FoldRule::Exact).unwrap();
+        let parent = b.object_key(0).unwrap();
+        let mut existent = BTreeMap::new();
+        existent.insert(
+            ObjectKind::Table,
+            ExistSet::Ok(vec![Identity {
+                state: StateMark::Xmin(xmin),
+                ..Identity::of(vec![Name::from("t")], Some(ServerId::Oid(16_400)))
+            }]),
+        );
+        existent.insert(
+            ObjectKind::Column,
+            ExistSet::Scoped {
+                scope: vec![vec![Name::from("t")]],
+                ids: cols
+                    .iter()
+                    .map(|(n, _, _)| Identity::of(vec![Name::from("t"), Name::from(*n)], None))
+                    .collect(),
+            },
+        );
+        NamespaceResult {
+            existent,
+            changed: vec![ChangedObject {
+                parent,
+                subtree: table(xmin, comment, cols),
+            }],
+            categories_to_reload: Default::default(),
+            new_watermark: Watermark::None,
+            full,
+            level: Level::Structure,
+            read_at_ms: 1,
+        }
+    }
+
+    fn apply(prev: &NamespaceSnapshot, r: NamespaceResult) -> NamespaceSnapshot {
+        let policy = MergePolicy {
+            trigger: Trigger::User,
+            ..MergePolicy::default()
+        };
+        merge(Some(prev), r, &policy).unwrap().next().clone()
+    }
+
+    const BEFORE: [Col; 2] = [("id", 1, None), ("a", 2, None)];
+    const AFTER: [Col; 2] = [("id", 1, None), ("a", 2, Some("5"))];
+
+    /// The cached namespace, and the fresh full read after the step.
+    fn cached_and_fresh() -> (NamespaceSnapshot, NamespaceSnapshot) {
+        let b = base(ns_key(), DbmsKind::Postgres, FoldRule::Exact).unwrap();
+        (
+            apply(&b, read(true, 700, "old", &BEFORE)),
+            apply(&b, read(true, 800, "new", &AFTER)),
+        )
+    }
+
+    fn oracle_fails(inc: &NamespaceSnapshot, fresh: &NamespaceSnapshot) -> bool {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::common::g4::assert_equal("probe", inc, fresh);
+        }))
+        .is_err()
+    }
+
+    #[test]
+    fn the_clean_incremental_merge_passes_the_oracle() {
+        let (prev, fresh) = cached_and_fresh();
+        let inc = apply(&prev, read(false, 800, "new", &AFTER));
+        super::common::g4::assert_equal("clean", &inc, &fresh);
+    }
+
+    /// HOSTILE1: the merge keeps the cached properties of a re-read pair (the new default and
+    /// comment are lost; the state mark moved).
+    #[test]
+    fn the_oracle_fails_on_an_incremental_merge_that_keeps_cached_props() {
+        let (prev, fresh) = cached_and_fresh();
+        let missed = apply(&prev, read(false, 800, "old", &BEFORE));
+        assert!(oracle_fails(&missed, &fresh), "a lost re-read passed G4");
+        let (only_inc, only_full) = diff(&missed, &fresh);
+        assert!(
+            only_inc.iter().any(|l| l.contains("\"old\""))
+                && only_full.iter().any(|l| l.contains("\"new\""))
+                && only_full.iter().any(|l| l.contains("\"5\"")),
+            "{only_inc:#?} / {only_full:#?}"
+        );
+    }
+
+    /// HOSTILE2: the merge keeps the cached `StateMark` of a re-read pair (the properties
+    /// moved, the stamp did not).
+    #[test]
+    fn the_oracle_fails_on_an_incremental_merge_that_keeps_the_cached_state_mark() {
+        let (prev, fresh) = cached_and_fresh();
+        let missed = apply(&prev, read(false, 700, "new", &AFTER));
+        assert!(
+            oracle_fails(&missed, &fresh),
+            "a stale state mark passed G4"
+        );
+        let (only_inc, only_full) = diff(&missed, &fresh);
+        assert!(
+            only_inc.iter().any(|l| l.contains("Xmin(700)"))
+                && only_full.iter().any(|l| l.contains("Xmin(800)")),
+            "{only_inc:#?} / {only_full:#?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -322,12 +480,9 @@ fn key_of(ns: &NamespaceSnapshot, kind: ObjectKind, path: &[&str]) -> ObjectKey 
         .unwrap_or_else(|| panic!("{kind:?} {path:?} not found"))
 }
 
+/// One test's wall time on `t` (`common::g4::wall`: per target, with the running total).
 fn wall(t: &DockerTarget, test: &str, since: Instant) {
-    fact(&format!(
-        "g4 {} {test} wall_ms={}",
-        t.id,
-        since.elapsed().as_millis()
-    ));
+    common::g4::wall(&t.id, test, since);
 }
 
 /// Runs `sql` on `t`'s `hv_test` database when it goes (also on panic), on its own thread.
@@ -365,7 +520,8 @@ enum Narrow {
     /// No retrieve or comment section sends a statement: the existence and change queries
     /// decide alone (a drop, a data-only change).
     ExistenceOnly,
-    /// Only the comment section re-reads (a comment removal: `Comments` and existence).
+    /// Only the comment section re-reads (COMMENT ON a table or column, and a comment
+    /// removal: `Comments` and existence).
     CommentsOnly,
 }
 
@@ -412,18 +568,11 @@ const STEPS: &[Step] = &[
         ..step("add-column-c", "ALTER TABLE {s}.x ADD COLUMN c text")
     },
     Step {
-        narrow: &[
-            Narrow::Ran(&[name::COMMENTS]),
-            Narrow::NotRan(&[
-                name::RETRIEVE_RELATIONS,
-                name::RETRIEVE_COLUMNS,
-                name::RETRIEVE_INDEXES,
-            ]),
-        ],
+        narrow: &[Narrow::CommentsOnly],
         ..step("comment-on-table", "COMMENT ON TABLE {s}.x IS 'x table'")
     },
     Step {
-        narrow: &[Narrow::Ran(&[name::COMMENTS]), NO_REL_NO_COL],
+        narrow: &[Narrow::CommentsOnly],
         ..step("comment-on-column", "COMMENT ON COLUMN {s}.x.a IS 'col a'")
     },
     step("grant-table", "GRANT SELECT ON {s}.x TO PUBLIC"),
@@ -693,7 +842,6 @@ async fn pg_xmin_matrix_incremental_equals_full() {
                 st.id,
                 &changed_rows(&p).to_string(),
                 &queries(&p).to_string(),
-                true,
             );
             cell(&t.id, st.id);
             prev = next;
@@ -723,7 +871,7 @@ async fn pg_xmin_matrix_incremental_equals_full() {
             .await
             .unwrap_or_else(|e| panic!("{}: list: {e:?}", t.id));
         assert!(listed.iter().all(|n| n.key != ns), "{}: still listed", t.id);
-        fact(&format!("g4 {} drop-schema namespace-gone", t.id));
+        note(&t.id, "drop-schema", "namespace_gone=true");
         a.close().await;
         drop(c);
         pg.shutdown().await;
@@ -741,7 +889,18 @@ async fn pg_canary_no_xid_assigned_by_any_pass() {
         return;
     }
     let _serial = serial().await;
-    for t in pg_targets() {
+    // Every PostgreSQL target (fix round 1, m-9): the version matrix, the Turkish-locale server
+    // and the jumped cluster.
+    let every: Vec<DockerTarget> = pg_targets()
+        .into_iter()
+        .chain(
+            ["pg17-tr", "pg17wrap"]
+                .into_iter()
+                .filter_map(require_target),
+        )
+        .collect();
+    for t in every {
+        let started = Instant::now();
         let s = unique("hvm4_t28_canary");
         let _g = DropSchemas {
             t: t.clone(),
@@ -823,14 +982,15 @@ async fn pg_canary_no_xid_assigned_by_any_pass() {
             "{}: the canary must see an assigned XID",
             t.id
         );
-        fact(&format!(
-            "g4 {} canary passes={} negative-control=held",
-            t.id,
-            passes.len()
-        ));
+        note(
+            &t.id,
+            "canary",
+            &format!("passes={} negative_control=held", passes.len()),
+        );
         a.close().await;
         drop(c);
         pg.shutdown().await;
+        wall(&t, "pg_canary", started);
     }
 }
 
@@ -846,6 +1006,7 @@ async fn pg_identity_change_forces_full_reason_restart() {
     let _serial = serial().await;
     let mut tsv = Tsv::new("pg-identity");
     for t in pg_targets() {
+        let started = Instant::now();
         let s = unique("hvm4_t28_ident");
         let _g = DropSchemas {
             t: t.clone(),
@@ -894,7 +1055,7 @@ async fn pg_identity_change_forces_full_reason_restart() {
             &pg_full(&mut c, &ns, Level::Structure).await,
         );
         assert!(has(&next, ObjectKind::Column, &["x", "z"]), "{}", t.id);
-        tsv.row(&t.id, "restart-full", "-", &queries(&p).to_string(), true);
+        tsv.row(&t.id, "restart-full", "n/a", &queries(&p).to_string());
         cell(&t.id, "restart-full");
         // The full pass's own watermark carries the real identity: the next pass is
         // incremental again.
@@ -919,12 +1080,12 @@ async fn pg_identity_change_forces_full_reason_restart() {
             "after-restart-incremental",
             &changed_rows(&p).to_string(),
             &queries(&p).to_string(),
-            true,
         );
         cell(&t.id, "after-restart-incremental");
         a.close().await;
         drop(c);
         pg.shutdown().await;
+        wall(&t, "pg_identity_restart", started);
     }
 }
 
@@ -939,9 +1100,10 @@ async fn pg_xmin_freeze_between_reads_zero_ancient_rows() {
     }
     let _serial = serial().await;
     let Some(t) = require_target("pg17wrap") else {
-        fact("g4 pg17wrap skipped=not-in-this-set");
+        note("pg17wrap", "skipped", "reason=not-in-this-set");
         return;
     };
+    let started = Instant::now();
     let mut tsv = Tsv::new("pg-xmin-freeze");
     let mut a = admin(&t).await;
     // The jump is real before anything relies on it (R-W5-1).
@@ -950,10 +1112,11 @@ async fn pg_xmin_freeze_between_reads_zero_ancient_rows() {
         .await
         .parse()
         .expect("an xid8");
-    fact(&format!(
-        "pg17wrap pg_snapshot_xmax={xmax} above_2^31={}",
-        xmax > 1 << 31
-    ));
+    note(
+        &t.id,
+        "xmax",
+        &format!("pg_snapshot_xmax={xmax} above_2^31={}", xmax > 1 << 31),
+    );
     assert!(
         xmax > 1 << 31,
         "pg17wrap: the cluster did not jump ({xmax})"
@@ -985,10 +1148,14 @@ async fn pg_xmin_freeze_between_reads_zero_ancient_rows() {
     )
     .await;
     let span = p.report.snap_xmax - 1000;
-    fact(&format!(
-        "pg17wrap wraparound span={span} limit={SPAN_LIMIT} reason={:?}",
-        p.report.full_reason.map(FullReason::code)
-    ));
+    note(
+        &t.id,
+        "wraparound",
+        &format!(
+            "span={span} limit={SPAN_LIMIT} reason={}",
+            p.report.full_reason.map_or("none", FullReason::code)
+        ),
+    );
     assert!(span >= SPAN_LIMIT, "pg17wrap: span {span}");
     assert_eq!(
         p.report.full_reason,
@@ -1001,13 +1168,7 @@ async fn pg_xmin_freeze_between_reads_zero_ancient_rows() {
         &wrapped,
         &pg_full(&mut c, &ns, Level::Structure).await,
     );
-    tsv.row(
-        &t.id,
-        "wraparound-full",
-        "-",
-        &queries(&p).to_string(),
-        true,
-    );
+    tsv.row(&t.id, "wraparound-full", "n/a", &queries(&p).to_string());
     cell(&t.id, "wraparound-full");
     // 2. The next incremental pass from that Full's watermark re-reads no ancient object:
     //    `age(xmin) BETWEEN 0 AND age(W)` never matches a frozen pre-jump row.
@@ -1028,13 +1189,7 @@ async fn pg_xmin_freeze_between_reads_zero_ancient_rows() {
         &quiet,
         &pg_full(&mut c, &ns, Level::Structure).await,
     );
-    tsv.row(
-        &t.id,
-        "zero-ancient-rows",
-        "0",
-        &queries(&p).to_string(),
-        true,
-    );
+    tsv.row(&t.id, "zero-ancient-rows", "0", &queries(&p).to_string());
     cell(&t.id, "zero-ancient-rows");
     // 2b. A table written after the jump is young: it alone is re-read.
     let young = unique("hvm4_t28_young");
@@ -1065,7 +1220,6 @@ async fn pg_xmin_freeze_between_reads_zero_ancient_rows() {
         "young-table-after-jump",
         &changed_rows(&p).to_string(),
         &queries(&p).to_string(),
-        true,
     );
     cell(&t.id, "young-table-after-jump");
     // 3. Regression: the predicate written `age(xmin) <= age(W)` matches the frozen pre-jump
@@ -1087,15 +1241,20 @@ async fn pg_xmin_freeze_between_reads_zero_ancient_rows() {
         .split(' ')
         .map(|x| x.parse().expect("a count"))
         .collect();
-    fact(&format!(
-        "pg17wrap pg_class le_matches={} ancient_between_matches={} rows={} (ver/01: 220 of 416)",
-        n[0], n[1], n[2]
-    ));
+    note(
+        &t.id,
+        "pg_class",
+        &format!(
+            "le_matches={} ancient_between_matches={} rows={} ver01_le_matches=220 ver01_rows=416",
+            n[0], n[1], n[2]
+        ),
+    );
     assert!(n[0] > 0, "pg17wrap: `<=` must match the frozen rows");
     assert_eq!(n[1], 0, "pg17wrap: BETWEEN matched an ancient row");
     a.close().await;
     drop(c);
     pg.shutdown().await;
+    wall(&t, "pg_xmin_freeze", started);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1164,6 +1323,7 @@ async fn pg_tr_icu_no_lower_or_ilike_in_query_log() {
     let folding =
         regex::Regex::new(r"(?i)\blower\s*\(|\bupper\s*\(|\bilike\b|\bcollate\b").unwrap();
     for t in tr_targets() {
+        let started = Instant::now();
         let (db, _drop) = tr_database(&t, "tr").await;
         // The server's own trap (alg/02 #pg-turkish), recorded.
         let mut a = admin_on(&t, Some(&db)).await;
@@ -1174,10 +1334,11 @@ async fn pg_tr_icu_no_lower_or_ilike_in_query_log() {
                  WHERE pg_catalog.lower(relname::text) = pg_catalog.lower('ITEMS')",
             )
             .await;
-        fact(&format!(
-            "g4 {} tr-icu lower('ITEMS')={lowered} lower-match-rows={trap}",
-            t.id
-        ));
+        note(
+            &t.id,
+            "tr-icu",
+            &format!("lower_ITEMS={lowered} lower_match_rows={trap}"),
+        );
         let pg = Pg::connect(&t).await;
         let mut c = pg.meta_on(Some(db.as_str())).await;
         let ns = NsKey::schema([db.as_str(), "public"]);
@@ -1228,14 +1389,15 @@ async fn pg_tr_icu_no_lower_or_ilike_in_query_log() {
             &pg_full(&mut c, &ns, Level::Sources).await,
         );
         cell(&t.id, "tr-icu-add-column");
-        fact(&format!(
-            "g4 {} tr-icu statements={} folding=none",
-            t.id,
-            texts.len()
-        ));
+        note(
+            &t.id,
+            "tr-icu",
+            &format!("statements={} folding=none", texts.len()),
+        );
         a.close().await;
         drop(c);
         pg.shutdown().await;
+        wall(&t, "pg_tr_icu", started);
     }
 }
 
@@ -1283,7 +1445,25 @@ async fn catalog_bytes_identical_under_lang_tr_and_c() {
         return;
     }
     let _serial = serial().await;
+    // Whether the client host has `tr_TR` (fix round 1, m-5): without it glibc falls back to
+    // C and the two children are trivially alike, so the cell says which case it measured.
+    // std and the pure-Rust drivers read no locale either way: the test is a regression guard.
+    let installed = tr_locale_installed();
+    let case = match installed {
+        Some(true) => "lang-tr-installed-eq-lang-c",
+        Some(false) => "lang-tr-not-installed-eq-lang-c",
+        None => "lang-tr-unknown-eq-lang-c",
+    };
     for t in tr_targets() {
+        let started = Instant::now();
+        note(
+            &t.id,
+            "client-locale",
+            &format!(
+                "tr_TR_installed={}",
+                installed.map_or("unknown", |b| if b { "true" } else { "false" })
+            ),
+        );
         let (db, _drop) = tr_database(&t, "lang").await;
         let (tt, d) = (t.clone(), db.clone());
         let tr = tokio::task::spawn_blocking(move || child_output(&tt, &d, "tr_TR.UTF-8"))
@@ -1302,18 +1482,35 @@ async fn catalog_bytes_identical_under_lang_tr_and_c() {
                 t.id
             );
         }
-        fact(&format!(
-            "g4 {} lang-tr==lang-c bytes={} lines={}",
-            t.id,
-            tr.len(),
-            tr.lines().count()
-        ));
+        note(
+            &t.id,
+            "lang",
+            &format!("bytes={} lines={}", tr.len(), tr.lines().count()),
+        );
+        cell(&t.id, case);
+        wall(&t, "catalog_bytes_lang", started);
     }
 }
 
-/// The child of [`catalog_bytes_identical_under_lang_tr_and_c`]: does nothing unless the parent
-/// set [`CHILD_TARGET`] on its command; then prints every statement the pack can send at the
-/// server's version and the canonical snapshot of a full pass of `<db>.public`, between markers.
+/// Whether `locale -a` on this (client) host lists a `tr_TR` locale; `None` when it cannot run.
+fn tr_locale_installed() -> Option<bool> {
+    let out = std::process::Command::new("locale")
+        .arg("-a")
+        .output()
+        .ok()?;
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|l| l.to_ascii_lowercase().starts_with("tr_tr"))
+    })
+}
+
+/// **A helper, not a test and not a gate cell.** The child process of
+/// [`catalog_bytes_identical_under_lang_tr_and_c`]. In every normal `--ignored` run it returns
+/// at once with an empty body (it does nothing unless the parent set [`CHILD_TARGET`] on the
+/// child's command). As the child, it prints every statement the pack can send at the
+/// server's version and the canonical snapshot of a full pass of `<db>.public`, between
+/// markers. It prints no `HV-FACT`, so it is never counted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "docker"]
 async fn locale_child_reads_the_catalog() {
@@ -1363,6 +1560,7 @@ async fn revoke_usage_fires_mass_drop_guard() {
     let _serial = serial().await;
     const TABLES: u32 = 24;
     for t in tr_targets() {
+        let started = Instant::now();
         let role = unique("hvm4_t28_rv");
         let s = unique("hvm4_t28_rvs");
         // Dropped in reverse: the USAGE restore, then the schema, then the role.
@@ -1425,9 +1623,11 @@ async fn revoke_usage_fires_mass_drop_guard() {
             .await;
         r.close().await;
         assert_eq!(usage, "false", "{}: USAGE revoked", t.id);
-        // A background pass after the REVOKE: either existence still lists the tables
-        // (PostgreSQL's catalogs ignore schema USAGE) and nothing is dropped, or it lists
-        // fewer and the mass-drop guard holds the result; never a silent deletion.
+        // A background pass after the REVOKE: never a silent deletion. Accepted outcomes:
+        // existence still lists the tables (PostgreSQL's catalogs ignore schema USAGE) and
+        // nothing is dropped; it lists fewer and the mass-drop guard holds the result; the
+        // table existence set failed closed (`ExistSet::Failed`: the merge deletes nothing);
+        // or the pass is refused with `Permission` (nothing is published).
         let after = pass::introspect(
             &mut c,
             &ns,
@@ -1440,18 +1640,19 @@ async fn revoke_usage_fires_mass_drop_guard() {
             &CancellationToken::new(),
         )
         .await;
-        match after {
+        let outcome_a = match after {
             Err(e) => {
                 assert!(
                     matches!(e, hacivat_introspect::IntroError::Permission { .. }),
                     "{}: {e:?}",
                     t.id
                 );
-                fact(&format!("g4 {} revoke-usage pass=permission-error", t.id));
+                "pass_refused_permission".to_string()
             }
             Ok(p) => {
                 let listed = match p.result.existent.get(&ObjectKind::Table) {
-                    Some(ExistSet::Ok(ids)) => ids.len(),
+                    Some(ExistSet::Ok(ids)) => Some(ids.len()),
+                    Some(ExistSet::Failed(_)) => None,
                     other => panic!("{}: table existence {other:?}", t.id),
                 };
                 let outcome =
@@ -1464,28 +1665,37 @@ async fn revoke_usage_fires_mass_drop_guard() {
                             t.id,
                             delta.dropped
                         );
-                        "applied-no-drops".to_string()
+                        "applied_no_drops".to_string()
                     }
                     MergeOutcome::PendingConfirmation { vanished, .. } => {
-                        format!("pending-confirmation vanished={vanished}")
+                        format!("pending_confirmation vanished={vanished}")
                     }
                 };
-                if listed == 0 {
+                if listed == Some(0) {
                     assert!(
                         matches!(outcome, MergeOutcome::PendingConfirmation { .. }),
                         "{}: existence empty but no guard",
                         t.id
                     );
                 }
-                fact(&format!(
-                    "g4 {} revoke-usage existence_tables={listed} outcome={shown}",
-                    t.id
-                ));
+                format!(
+                    "existence_tables={} outcome={shown}",
+                    listed.map_or_else(|| "failed_closed".to_string(), |n| n.to_string())
+                )
             }
-        }
-        // The guard on a live pass: most tables really go; a background merge asks first.
+        };
+        note(&t.id, "revoke-usage", &outcome_a);
+        drop(c);
+        pg.shutdown().await;
+        // The guard on a live pass (part B), on a fresh session with USAGE given back, so the
+        // outcome above cannot decide this part: most tables really go, and a background merge
+        // asks first.
+        a.batch(&format!("GRANT USAGE ON SCHEMA {s} TO {role}"))
+            .await;
         let drops: String = (1..=20).map(|i| format!("DROP TABLE {s}.t{i};")).collect();
         a.batch(&drops).await;
+        let pg = Pg::connect(&as_role).await;
+        let mut c = pg.meta().await;
         let p = pg_pass(
             &mut c,
             &ns,
@@ -1503,13 +1713,15 @@ async fn revoke_usage_fires_mass_drop_guard() {
             "{}: the guard: {outcome:?}",
             t.id
         );
-        fact(&format!(
-            "g4 {} mass-drop-guard pending-confirmation vanished=20",
-            t.id
-        ));
+        note(
+            &t.id,
+            "mass-drop-guard",
+            "outcome=pending_confirmation vanished=20",
+        );
         a.close().await;
         drop(c);
         pg.shutdown().await;
+        wall(&t, "revoke_usage", started);
     }
 }
 
@@ -1676,7 +1888,7 @@ async fn mysql_is_times_matrix_incremental_equals_full() {
                 // TRIGGERS.CREATED part catches it.
                 let after = my::rows(&t, Some(&db.name), TT_CREATE_TIME).await;
                 assert_eq!(before, after, "{label}: CREATE_TIME moved");
-                fact(&format!("g4 {} create-trigger create_time_unchanged", t.id));
+                note(&t.id, "create-trigger", "create_time_unchanged=true");
             }
             let (next, _, stats) = my_cell(&t, &db, &prev, id).await;
             assert_eq!(stats.full_reason, None, "{label}: incremental");
@@ -1690,7 +1902,7 @@ async fn mysql_is_times_matrix_incremental_equals_full() {
                 stats.routines.is_empty() && stats.events.is_empty(),
                 "{label}: {stats:?}"
             );
-            tsv.row(&t.id, id, &stats.relations.len().to_string(), "-", true);
+            tsv.row(&t.id, id, &stats.relations.len().to_string(), "n/a");
             cell(&t.id, id);
             prev = next;
         }
@@ -1707,6 +1919,7 @@ async fn mysql_same_second_ddl_caught() {
     }
     let _serial = serial().await;
     for t in my_targets(&MYSQL) {
+        let started = Instant::now();
         let db = my::Db::create(&t, "samesec").await;
         db.run("CREATE TABLE customers (id INT PRIMARY KEY)").await;
         // DDL, a full pass and DDL inside one server second (when the three cross a second
@@ -1739,9 +1952,10 @@ async fn mysql_same_second_ddl_caught() {
             "{}",
             t.id
         );
-        fact(&format!("g4 {} same-second-ddl same_second={same}", t.id));
+        note(&t.id, "same-second-ddl", &format!("same_second={same}"));
         cell(&t.id, "same-second-ddl");
         clock.close().await;
+        wall(&t, "mysql_same_second", started);
     }
 }
 
@@ -1753,6 +1967,7 @@ async fn mysql_global_time_zone_plus_three_markers_compare() {
     }
     let _serial = serial().await;
     for t in my_targets(&MYSQL) {
+        let started = Instant::now();
         let was = my::rows(&t, None, "SELECT @@GLOBAL.time_zone").await[0][0].clone();
         // Restored when the guard goes, also after a failure.
         let _restore = my::GlobalGuard {
@@ -1785,6 +2000,7 @@ async fn mysql_global_time_zone_plus_three_markers_compare() {
         assert_eq!(reread(&stats), ["orders"], "{}", t.id);
         cell(&t.id, "tz-plus-three-alter");
         clock.close().await;
+        wall(&t, "mysql_time_zone", started);
     }
 }
 
@@ -1798,6 +2014,7 @@ async fn long_alter_straddling_a_pass_is_seen() {
     }
     let _serial = serial().await;
     for t in my_targets(&LONG_ALTER) {
+        let started = Instant::now();
         let db = my::Db::create(&t, "longalter").await;
         db.run("CREATE TABLE big (id INT PRIMARY KEY AUTO_INCREMENT, v INT)")
             .await;
@@ -1854,12 +2071,26 @@ async fn long_alter_straddling_a_pass_is_seen() {
             t.id
         );
         assert!(has(&s1, ObjectKind::Column, &["big", "w"]), "{}", t.id);
-        fact(&format!(
-            "g4 {} long-alter straddled={straddled} reason={:?}",
-            t.id, stats.full_reason
-        ));
-        cell(&t.id, "long-alter");
+        note(
+            &t.id,
+            "long-alter",
+            &format!(
+                "straddled={straddled} reason={}",
+                stats.full_reason.unwrap_or("none")
+            ),
+        );
+        // The cell names whether F1 was exercised (the ALTER still ran when the middle pass
+        // ended), so a run where it was not is visible in the log (fix round 1, m-7).
+        cell(
+            &t.id,
+            if straddled {
+                "long-alter-straddled"
+            } else {
+                "long-alter-not-straddled"
+            },
+        );
         clock.close().await;
+        wall(&t, "long_alter", started);
     }
 }
 
@@ -1885,7 +2116,7 @@ async fn mariadb_full_per_namespace_equals_fresh_full_after_each_alter() {
             let (next, res, stats) = my_cell(&t, &db, &prev, id).await;
             assert!(res.full, "{} {id}: full", t.id);
             assert_eq!(stats.full_reason, Some("flavor"), "{} {id}", t.id);
-            tsv.row(&t.id, id, "-", "-", true);
+            tsv.row(&t.id, id, "n/a", "n/a");
             cell(&t.id, id);
             prev = next;
         }

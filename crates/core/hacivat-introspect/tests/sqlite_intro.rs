@@ -2182,7 +2182,12 @@ fn every_rendered_sqlite_section_passes_the_metadata_guard() {
 // the generation and the watermark left out), and a step that leaves `main` unchanged
 // re-reads nothing. Each cell that holds prints `HV-FACT g4 sqlite <case> incremental==full`.
 
-/// The G4 comparison (the same fields as `common::g4::canon` of the Docker matrix).
+/// The G4 comparison. It must stay in step with `common::g4::canon` of the Docker matrix
+/// (this file does not use `mod common`): the same header and the same object fields.
+///
+/// Known limit (T28 review m-3): a SQLite incremental pass on a change is a full read, so the
+/// merge reuses its arena (`Dry::Reuse`). These cells therefore measure change *detection*,
+/// not the merge walk; merge coverage comes from the PostgreSQL and MySQL cells.
 fn g4_canon(ns: &NamespaceSnapshot) -> Vec<String> {
     let mut v: Vec<String> = (0..ns.len() as u32)
         .map(|i| {

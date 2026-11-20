@@ -622,9 +622,41 @@ pub mod g4 {
         fact(&format!("g4 {target} {case} incremental==full"));
     }
 
+    /// One fact about `target`: `HV-FACT g4 <target> <topic> <k=v …>` (every G4 line has this
+    /// shape; a cell is `g4 <target> <case> incremental==full`).
+    pub fn note(target: &str, topic: &str, kv: &str) {
+        fact(&format!("g4 {target} {topic} {kv}"));
+    }
+
+    /// The wall time of one test on one target since `since`, with the running total of every
+    /// G4 test on that target in this process (fix round 1, I-1):
+    /// `HV-FACT g4 <target> wall test=<test> ms=<n> target_total_ms=<sum>`. The tests run one at
+    /// a time, so the last line of a target holds its total; the plan's PR subset is the
+    /// `pg17` total plus the `mysql84` total.
+    pub fn wall(target: &str, test: &str, since: std::time::Instant) {
+        use std::collections::BTreeMap;
+        use std::sync::{Mutex, PoisonError};
+        static TOTALS: Mutex<BTreeMap<String, u128>> = Mutex::new(BTreeMap::new());
+        let ms = since.elapsed().as_millis();
+        let total = {
+            let mut m = TOTALS.lock().unwrap_or_else(PoisonError::into_inner);
+            let e = m.entry(target.to_string()).or_default();
+            *e += ms;
+            *e
+        };
+        note(
+            target,
+            "wall",
+            &format!("test={test} ms={ms} target_total_ms={total}"),
+        );
+    }
+
     /// The per-step artifact `target/docker/t28-g4-<name>.tsv` (target, step, changed parents,
-    /// queries issued, incremental == full). Written when dropped, also on a panic, so the
-    /// steps before a failing one are kept; nothing is written outside a Docker run.
+    /// queries issued, incremental == full). A row is written only after the step's oracle
+    /// held, so its last column is always `true`. Written when dropped, also on a panic, so the
+    /// steps before a failing one are kept; nothing is written outside a Docker run. Every row
+    /// is also printed as `HV-FACT g4 <target> row step=… changed_parents=… queries=…`
+    /// (CI uploads no artifacts, R-W3-14).
     pub struct Tsv {
         path: Option<PathBuf>,
         rows: Vec<String>,
@@ -640,10 +672,18 @@ pub mod g4 {
             }
         }
 
-        /// One step; `changed` and `queries` are `-` where the engine reports none.
-        pub fn row(&mut self, target: &str, step: &str, changed: &str, queries: &str, eq: bool) {
+        /// One step whose oracle held. `changed` is the changed-parent count (PostgreSQL: the
+        /// rows of `ChangedParents` and `ChangedDependents`; MySQL: the relations re-read) and
+        /// `queries` the statements the incremental pass sent; `n/a` where the engine reports
+        /// none (MySQL keeps no query log; a full-only engine has no changed parents).
+        pub fn row(&mut self, target: &str, step: &str, changed: &str, queries: &str) {
             self.rows
-                .push(format!("{target}\t{step}\t{changed}\t{queries}\t{eq}"));
+                .push(format!("{target}\t{step}\t{changed}\t{queries}\ttrue"));
+            note(
+                target,
+                "row",
+                &format!("step={step} changed_parents={changed} queries={queries}"),
+            );
         }
     }
 

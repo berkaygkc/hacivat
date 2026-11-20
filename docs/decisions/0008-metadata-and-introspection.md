@@ -2520,3 +2520,39 @@ introspectors' own system-mode packs.
 - **Record.** Each cell that holds prints `HV-FACT g4 <target> <case> incremental==full`. The
   per-step rows go to `target/docker/t28-g4-*.tsv`; the `g4` infix keeps them apart from M3's
   `t28-*.tsv`.
+- **Fix round 1 (review):**
+  - *Record.* Every line has the form `HV-FACT g4 <target> <topic> k=v …`.
+    - Each TSV row is also printed as `… row step=… changed_parents=… queries=…`.
+    - Each of the 12 Docker tests prints `… wall test=… ms=… target_total_ms=…` for each
+      target. The last `wall` line of a target is that target's total. The PR subset (plan
+      step 4) is the total for `pg17` plus the total for `mysql84`.
+  - *Narrow reads.* COMMENT ON TABLE and COMMENT ON COLUMN now assert "Comments only".
+  - *REVOKE outcomes.* A table existence set that fails closed (`ExistSet::Failed`) is an
+    accepted outcome. So is a pass refused with `Permission`. Part B runs on a fresh session
+    with USAGE given back.
+  - *Long ALTER.* The cell names whether F1 was exercised: `long-alter-straddled` or
+    `long-alter-not-straddled`.
+  - *Canary targets.* The canary test also runs on `pg17-tr` and `pg17wrap`.
+  - *Oracle probes.* The review's oracle-negative probes are now pure tests. An incremental
+    merge that keeps the cached properties, or the cached `StateMark`, of a re-read object
+    fails the oracle.
+- **Known limits:**
+  - *Arena order (review m-2).* `canon` sorts its lines, so the oracle does not see the order
+    of siblings in the arena. On PostgreSQL every Retrieve section orders by oid, and the
+    merge appends new children under a kept parent. Within one kind, the order therefore
+    matches a full pass, except across OID wraparound. A merge bug that only reorders
+    children would still pass G4.
+  - *SQLite cells (review m-3).* On a change, a SQLite incremental pass is a full read, and
+    the merge reuses its arena. The SQLite cells therefore measure change detection, not the
+    merge walk. The PostgreSQL and MySQL cells are the merge coverage.
+  - *Shared stack (review m-8).* The serial lock covers only this test binary, but the
+    PostgreSQL xmin horizon spans the whole cluster. On a shared local stack, another
+    process's open write transaction, or a catalog autoanalyze, can lower a pass's xmin. The
+    next pass then over-reads, and an exact narrow-read assertion fails. CI runs the test
+    binaries one after another on a fresh stack.
+  - *Locale (review m-5).* The LANG test records whether the client host has `tr_TR`
+    installed (`client-locale tr_TR_installed=…`), and its cell names the case it measured.
+    std and the pure-Rust drivers read no locale, so the test guards against a regression.
+- **Carried to T33:** a MySQL `REVOKE SELECT` test. On MySQL, `INFORMATION_SCHEMA` hides
+  tables the login may not read, so existence really does come back empty. The test must show
+  that the mass-drop guard then holds the result (review deviation 3).
