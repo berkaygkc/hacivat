@@ -407,6 +407,14 @@ fn modify_is_disabled_with_a_tooltip(cx: &mut TestAppContext) {
     let id = add_profile(vcx, pg("app-dev", Some(EnvTag::Dev)));
     show(vcx, id, pg_tables(&["users"]));
     open(vcx, &["app-dev", "app", "public", "TABLES"]);
+    // ## m4-t32-shots (fix round 1; Windows flake, CI 44740906615): "Hide objects like this"
+    // is enabled once the profile's data file was read (off the UI thread); the menu is read
+    // after that, not before.
+    wait_until(vcx, "Hide objects like this enabled", |vcx| {
+        menu_of(vcx, "users")
+            .iter()
+            .any(|i| i.action.as_ref() == "explorer.hide_like_this" && !i.disabled)
+    });
     let items = menu_of(vcx, "users");
     let modify = items
         .iter()

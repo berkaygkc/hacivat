@@ -687,10 +687,10 @@ fn ten_thousand_log_lines_render_at_constant_cost(cx: &mut TestAppContext) {
     t.vcx.read(|cx| list.read(cx).rows().reset_built());
     t.redraw();
     let built = t.vcx.read(|cx| list.read(cx).rows().built());
-    // ## m4-t32-shots (named exception; carries-w4, Windows CI 44629840018): a platform may
-    // lay a frame out twice (Windows did), so a frame builds the visible rows at most once
-    // per layout pass: still a constant cost, never the 10,000 rows.
-    const MAX_LAYOUT_PASSES: u64 = 2;
+    // ## m4-t32-shots (named exception; carries-w4, Windows CI 44629840018): Windows may lay a
+    // frame out twice, so there a frame builds the visible rows at most once per layout pass:
+    // still a constant cost, never the 10,000 rows. Fix round 1 (review N-2): Windows only.
+    const MAX_LAYOUT_PASSES: u64 = if cfg!(windows) { 2 } else { 1 };
     assert!(
         built <= MAX_LAYOUT_PASSES * (shown + 1),
         "built {built} rows for {shown} visible"
