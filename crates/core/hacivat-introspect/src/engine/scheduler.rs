@@ -23,8 +23,8 @@ use hacivat_meta::name::{FoldRule, NameClass};
 use hacivat_meta::persist::{CacheError, SaveDebouncer};
 use hacivat_meta::snapshot::{CatalogChange, ContainerKey, LoadState};
 use hacivat_meta::{
-    Catalog, KindGroup, Level, Name, NamespaceSnapshot, NsKey, NsKind, ObjectKey, Publisher,
-    Watermark,
+    Catalog, CatalogSnapshot, KindGroup, Level, Name, NamespaceSnapshot, NsKey, NsKind, ObjectKey,
+    ObjectKind, Publisher, StateMark, Watermark,
 };
 use sql_dialect::DialectId;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -37,10 +37,12 @@ use super::levels::{LevelPolicy, NsRole};
 use super::work::{self, FactsRead, IdentityRead, Listing, Merged, Output, Spec, Work, WorkerCtx};
 use super::{CacheHandle, EngineConfig, EngineEvent, EngineLimits, Phase, Priority, Progress};
 use crate::ddl_effects::Target;
+use crate::freshness::{NsVerdict, ValidationClock};
 use crate::introspector::{IntroCaps, IntroError, Staleness};
 use crate::pack::Mode;
 use crate::scope::{CurrentCtx, NsInfo, ScopePattern, parse_scope};
 use crate::ticket::TicketSender;
+use hacivat_proto::DbmsKind;
 
 /// A request from a handle.
 #[derive(Debug)]
@@ -50,7 +52,8 @@ pub(crate) enum Request {
     /// Load a namespace (an expansion, a lookup that needed it).
     Load(NsKey),
     /// A lookup answered `Missing` there: check it for changes.
-    Probe(NsKey),
+    // ## m4-t22-state (named exception): with the missing name (a state check by name).
+    Probe(NsKey, Option<Name>),
     Children(ObjectKey),
     Elevate(ObjectKey, Level),
     Refresh(Target, Trigger),
@@ -161,6 +164,14 @@ struct Job {
     /// A re-planned confirmation (review I-3): the user's answer to the guard, `true` "Remove
     /// from cache", `false` "Keep cached".
     decision: Option<bool>,
+    // ## m4-t22-state (named exception)
+    /// A fragment's stamps read by the state check that asked for it (stored as marks).
+    marks: Vec<(ObjectKey, StateMark)>,
+    /// A pass a namespace validation asked for (background: the cumulative guard applies).
+    validation: bool,
+    /// A state check by name for the negative cache's probe of this namespace (an
+    /// undecidable answer falls back to an incremental pass of it).
+    probe: Option<NsKey>,
 }
 
 impl Job {
@@ -243,7 +254,8 @@ fn same_key(a: &Work, b: &Work) -> bool {
     match (a, b) {
         (Work::ScopeRefresh, Work::ScopeRefresh) => true,
         (Work::Pass { ns: x, .. }, Work::Pass { ns: y, .. })
-        | (Work::Fragment { ns: x, .. }, Work::Fragment { ns: y, .. }) => x == y,
+        | (Work::Fragment { ns: x, .. }, Work::Fragment { ns: y, .. })
+        | (Work::Validate { ns: x }, Work::Validate { ns: y }) => x == y,
         _ => false,
     }
 }
@@ -286,7 +298,14 @@ pub(crate) struct Shared {
     pub roles: Arc<Mutex<Roles>>,
     /// Cancelled when the actor has stopped (after the last cache write).
     pub stopped: CancellationToken,
+    // ## m4-t22-state (named exception)
+    /// The top-level objects each held mass deletion would remove (D-039; T24's dialog).
+    pub pending: PendingNames,
 }
+
+// ## m4-t22-state (named exception)
+/// What `IntroHandle::pending_confirmation` reads.
+pub(crate) type PendingNames = Arc<Mutex<HashMap<NsKey, Vec<ObjectKey>>>>;
 
 /// The current and the system namespaces, for `IntroHandle::level_of` (review m8).
 #[derive(Debug, Default)]
@@ -296,10 +315,15 @@ pub(crate) struct Roles {
 }
 
 /// Starts the actor of `cfg` on its runtime.
-pub(super) fn spawn(cfg: EngineConfig, rx: mpsc::UnboundedReceiver<Cmd>, shared: Shared) {
+pub(super) fn spawn(
+    cfg: EngineConfig,
+    rx: mpsc::UnboundedReceiver<Cmd>,
+    shared: Shared,
+    clock: ValidationClock,
+) {
     let rt = cfg.runtime.clone();
     let stopped = shared.stopped.clone();
-    let actor = Actor::new(cfg, shared);
+    let actor = Actor::new(cfg, shared, clock);
     rt.spawn(async move {
         actor.run(rx).await;
         stopped.cancel();
@@ -354,7 +378,16 @@ struct Actor {
     recent_children: HashMap<NsKey, Vec<(Instant, ObjectKey)>>,
     debouncer: SaveDebouncer,
     validate_every: Option<Duration>,
-    next_validate: Option<Instant>,
+    // ## m4-t22-state (named lines: validation tasks): the next round on the validation clock.
+    next_validate: Option<Duration>,
+    clock: ValidationClock,
+    /// The last connect's identity was unknown too (an unknown identity costs one full re-read
+    /// per session, not one per connect; T16 review carry).
+    last_unknown: bool,
+    /// Per namespace: the top-level objects when background validation first removed some
+    /// since the last user decision, and how many it removed since (D-039 across passes).
+    bg_deleted: HashMap<NsKey, (u32, u32)>,
+    pending_names: PendingNames,
     root_cancel: CancellationToken,
     done_tx: mpsc::UnboundedSender<(u64, Output)>,
     done_rx: mpsc::UnboundedReceiver<(u64, Output)>,
@@ -366,7 +399,7 @@ struct Actor {
 }
 
 impl Actor {
-    fn new(cfg: EngineConfig, shared: Shared) -> Actor {
+    fn new(cfg: EngineConfig, shared: Shared, clock: ValidationClock) -> Actor {
         let dialect = cfg.scope.dialect();
         let caps = cfg.introspector.capabilities();
         let (done_tx, done_rx) = mpsc::unbounded_channel();
@@ -376,6 +409,7 @@ impl Actor {
             levels,
             roles,
             stopped: _,
+            pending: pending_names,
         } = shared;
         let ctx = Arc::new(WorkerCtx {
             meta: cfg.meta.clone(),
@@ -423,7 +457,12 @@ impl Actor {
             // ## m4-t21-refresh (named exception, fix round 1 m5)
             stale_on_publish: BTreeSet::new(),
             validate_every: cfg.validate_every,
-            next_validate: cfg.validate_every.map(|d| Instant::now() + d),
+            // ## m4-t22-state (named lines: validation tasks)
+            next_validate: cfg.validate_every.map(|d| clock.now() + d),
+            clock,
+            last_unknown: false,
+            bg_deleted: HashMap::new(),
+            pending_names,
             root_cancel: CancellationToken::new(),
             done_tx,
             done_rx,
@@ -436,6 +475,8 @@ impl Actor {
         loop {
             self.pump();
             let wake = self.next_wake();
+            // ## m4-t22-state (named lines: validation tasks): the round's own clock.
+            let (vclock, vnext) = (self.clock.clone(), self.next_validate);
             tokio::select! {
                 biased;
                 Some((id, out)) = self.done_rx.recv() => self.on_done(id, out),
@@ -444,6 +485,7 @@ impl Actor {
                     Some(cmd) => self.on_cmd(cmd),
                 },
                 () = sleep_until(wake) => self.on_timer(),
+                () = validation_due(vclock, vnext) => self.validate_due(),
             }
         }
         self.stop().await;
@@ -496,16 +538,13 @@ impl Actor {
             .filter_map(|j| j.not_before)
             .filter(|t| *t > now);
         let save = self.debouncer.next_due().map(Instant::from_std);
-        queued.chain(save).chain(self.next_validate).min()
+        queued.chain(save).min()
     }
 
     fn on_timer(&mut self) {
         let now = Instant::now();
         let due = self.debouncer.take_due(now.into_std());
         drop(self.save(due));
-        if self.next_validate.is_some_and(|t| t <= now) {
-            self.validate_due();
-        }
     }
 
     fn on_cmd(&mut self, cmd: Cmd) {
@@ -547,6 +586,10 @@ impl Actor {
             follow_up: false,
             load_only: false,
             decision: None,
+            // ## m4-t22-state (named exception)
+            marks: Vec::new(),
+            validation: false,
+            probe: None,
         }
     }
 
@@ -574,6 +617,10 @@ impl Actor {
             if job.decision.is_some() {
                 q.decision = job.decision;
             }
+            // ## m4-t22-state (named exception): the stamps ride along; a validation pass that
+            // coalesces with another pass is a validation pass only if both are.
+            q.marks.append(&mut job.marks);
+            q.validation &= job.validation;
             q.waiters.append(&mut job.waiters);
             match (&mut q.work, job.work) {
                 (
@@ -646,7 +693,9 @@ impl Actor {
                 .running
                 .values()
                 .any(|r| r.job.work == Work::ScopeRefresh),
-            Work::Pass { ns, .. } | Work::Fragment { ns, .. } => !self.busy(ns),
+            Work::Pass { ns, .. } | Work::Fragment { ns, .. } | Work::Validate { ns } => {
+                !self.busy(ns)
+            }
             Work::CheckState { .. } => true,
         }
     }
@@ -710,6 +759,14 @@ impl Actor {
             current: self.current.clone(),
             identity: job.then == Then::OnConnect,
         });
+        // ## m4-t22-state (named exception): a validation of a namespace no longer cached has
+        // nothing to compare; a state check compares with the catalog as it is now.
+        if matches!(job.work, Work::Validate { .. }) && prev.is_none() {
+            job.resolve(Ok(snap.generation));
+            return;
+        }
+        let check = matches!(job.work, Work::CheckState { .. }).then(|| snap.clone());
+        let marks = std::mem::take(&mut job.marks);
         let spec = Spec {
             work: job.work.clone(),
             prev,
@@ -718,6 +775,8 @@ impl Actor {
             filters: self.filters.clone(),
             fold,
             listing,
+            snapshot: check,
+            marks,
         };
         let cancel = self.root_cancel.child_token();
         let (id, ctx, done) = (job.id, self.ctx.clone(), self.done_tx.clone());
@@ -763,14 +822,14 @@ impl Actor {
                     Work::ScopeRefresh => Phase::ListNamespaces,
                     Work::Pass { .. } => Phase::Tables,
                     Work::Fragment { .. } => Phase::Columns,
-                    Work::CheckState { .. } => Phase::Validate,
+                    Work::CheckState { .. } | Work::Validate { .. } => Phase::Validate,
                 },
                 done: match &r.job.work {
-                    Work::Fragment { .. } | Work::CheckState { .. } => 0,
+                    Work::Fragment { .. } | Work::CheckState { .. } | Work::Validate { .. } => 0,
                     _ => done,
                 },
                 total: match &r.job.work {
-                    Work::Fragment { keys, .. } | Work::CheckState { keys } => {
+                    Work::Fragment { keys, .. } | Work::CheckState { keys, .. } => {
                         Some(keys.len() as u64)
                     }
                     _ => Some(total),
@@ -797,7 +856,7 @@ impl Actor {
                 self.enqueue(job, true);
             }
             Request::Load(ns) => self.load(ns, prio, w),
-            Request::Probe(ns) => {
+            Request::Probe(ns, missing) => {
                 // At most one probe per namespace per `probe_interval` (review m7).
                 let now = Instant::now();
                 if self
@@ -808,7 +867,25 @@ impl Actor {
                     return w.resolve(Ok(self.catalog.current().generation));
                 }
                 self.probed.insert(ns.clone(), now);
-                if self.catalog.current().namespaces.contains_key(&ns) && !self.out_of_scope(&ns) {
+                let loaded =
+                    self.catalog.current().namespaces.contains_key(&ns) && !self.out_of_scope(&ns);
+                // ## m4-t22-state (named exception): a state check by name first where stamps
+                // are by name (MySQL, MariaDB); else (and when it cannot decide) a pass.
+                if let Some(missing) = missing
+                    && loaded
+                    && matches!(self.caps.dbms, DbmsKind::MySql | DbmsKind::MariaDb)
+                {
+                    let keys = probe_keys(&ns, &missing);
+                    let database = work::database_of(self.caps.dbms, Some(&ns));
+                    let mut job = self.new_job(
+                        Work::CheckState { keys, database },
+                        prio,
+                        Trigger::Background,
+                    );
+                    job.probe = Some(ns);
+                    job.add(w, false);
+                    self.queue.push(job);
+                } else if loaded {
                     let level = self.level_of(&ns);
                     let job = self.pass(ns, Mode::Incremental, level, prio, Trigger::Background, w);
                     self.enqueue(job, false);
@@ -828,10 +905,36 @@ impl Actor {
                 self.enqueue(job, false);
             }
             Request::Refresh(target, trigger) => self.refresh(target, trigger, prio, w),
+            // ## m4-t22-state (named exception): one check per database of the keys (the carry
+            // "split CheckState by connection"; SQLite `temp` keys are decided without a stamp
+            // and re-read on the user's connection).
             Request::CheckState(keys) => {
-                let mut job = self.new_job(Work::CheckState { keys }, prio, Trigger::Background);
-                job.add(w, false);
-                self.queue.push(job);
+                let mut by_db: BTreeMap<Option<Name>, Vec<ObjectKey>> = BTreeMap::new();
+                for k in keys {
+                    let ns = self.ns_of(&k);
+                    by_db
+                        .entry(work::database_of(self.caps.dbms, Some(&ns)))
+                        .or_default()
+                        .push(k);
+                }
+                if by_db.is_empty() {
+                    return w.resolve(Ok(self.catalog.current().generation));
+                }
+                let join = Arc::new(Mutex::new(Join {
+                    left: by_db.len(),
+                    generation: 0,
+                    error: None,
+                    waiters: vec![w],
+                }));
+                for (database, keys) in by_db {
+                    let mut job = self.new_job(
+                        Work::CheckState { keys, database },
+                        prio,
+                        Trigger::Background,
+                    );
+                    job.add(Waiter::Join(join.clone()), false);
+                    self.queue.push(job);
+                }
             }
             Request::Confirm { ns, accept } => self.deferred_confirms.push((ns, accept, w)),
         }
@@ -1039,7 +1142,7 @@ impl Actor {
     /// with a key in it (review m10). Nothing of it is published.
     fn cancel(&mut self, ns: &NsKey) {
         let tied = |this: &Self, w: &Work| match w {
-            Work::CheckState { keys } => keys.iter().any(|k| this.ns_of(k) == *ns),
+            Work::CheckState { keys, .. } => keys.iter().any(|k| this.ns_of(k) == *ns),
             _ => w.ns() == Some(ns),
         };
         for r in self.running.values() {
@@ -1413,7 +1516,9 @@ impl Actor {
                 self.listed_done(job, infos, identity, unlisted, facts)
             }
             Output::Merged(m) => self.merged(job, *m),
-            Output::Staleness(keys, st) => self.staleness(job, keys, st),
+            Output::Staleness(keys, st, marks) => self.staleness(job, keys, st, marks),
+            // ## m4-t22-state (named exception)
+            Output::Validated(ns, ptr, verdict) => self.validated(job, &ns, ptr, verdict),
             Output::Failed(e) => self.failed(job, e),
         }
     }
@@ -1489,24 +1594,46 @@ impl Actor {
         resolve_all(now.into_iter().map(|(w, _)| w).collect(), Ok(generation));
         let waiters: Vec<Waiter> = later.into_iter().map(|(w, _)| w).collect();
         self.connect_step(waiters, job.prio);
+        // ## m4-t22-state (named lines: validation tasks): background validation of every
+        // cached namespace in scope but the current one (which has its own step 3).
+        let snap = self.catalog.current();
+        let cached: Vec<NsKey> = snap
+            .namespaces
+            .keys()
+            .filter(|ns| Some(*ns) != self.current_ns.as_ref() && !self.out_of_scope(ns))
+            .cloned()
+            .collect();
+        for ns in cached {
+            self.validate(ns, Priority::Background);
+        }
     }
 
     /// Whether the server behind the connection is the one the cache (or the last connect)
     /// was filled from; an unknown identity is not (fail-closed, R-W3-3).
     fn same_server(&mut self, identity: IdentityRead) -> bool {
+        // ## m4-t22-state (named exception; T16 review carry): an unknown identity is cached
+        // per session. The first unknown one forgets every watermark (the cache's may be
+        // another server's); an unknown one right after it keeps them: they come from this
+        // session's own passes on the same login. A known identity after an unknown one is
+        // never taken for the same server.
+        let was_unknown =
+            std::mem::replace(&mut self.last_unknown, identity == IdentityRead::Unknown);
         match identity {
-            IdentityRead::Unknown => false,
+            IdentityRead::Unknown => {
+                self.last_identity = None;
+                was_unknown
+            }
             IdentityRead::Known {
                 same_as_cache: Some(same),
                 fp,
             } => {
                 self.last_identity = Some(fp);
-                same
+                same && !was_unknown
             }
             IdentityRead::Known {
                 fp,
                 same_as_cache: None,
-            } => self.last_identity.replace(fp).is_none_or(|last| last == fp),
+            } => self.last_identity.replace(fp).is_none_or(|last| last == fp) && !was_unknown,
         }
     }
 
@@ -1608,8 +1735,28 @@ impl Actor {
             self.queue.push(job);
             return;
         }
+        // ## m4-t22-state (named exception; T17 fm1): a first arena planned under the fold rule
+        // of facts a scope refresh replaced since is merged again under the current rule.
+        let ident = &snap.server.ident;
+        let fold =
+            FoldRule::for_names(ident.dialect, ident, NameClass::Table).unwrap_or(FoldRule::Exact);
+        if m.prev_ptr.is_none() && m.outcome.next().fold() != fold {
+            self.next_id += 1;
+            job.seq = self.next_id;
+            job.not_before = None;
+            self.queue.push(job);
+            return;
+        }
         if m.outcome.is_pending() {
             return self.hold_pending(job, m);
+        }
+        // ## m4-t22-state (named exception; T10 carry M-1): background validation never
+        // removes a namespace's objects in many small steps around the guard.
+        if job.validation && m.pass && self.over_cumulative_guard(&ns, &m, &snap) {
+            return self.hold_pending(job, m);
+        }
+        if job.trigger == Trigger::User {
+            self.bg_deleted.remove(&ns);
         }
         let (level, pass) = (m.level, m.pass);
         let (follow, follow_ns) = (m.follow, m.follow_ns);
@@ -1627,6 +1774,8 @@ impl Actor {
                 .events
                 .send(EngineEvent::PendingWithdrawn { ns: ns.clone() });
         }
+        // ## m4-t22-state (named exception)
+        self.sync_pending_names();
         if !job.follow_up {
             self.follow_up(&ns, follow, follow_ns);
         }
@@ -1777,9 +1926,13 @@ impl Actor {
     /// stale and the merge kept until the user decides.
     fn hold_pending(&mut self, job: Job, m: Merged) {
         let ns = m.ns.clone();
+        // ## m4-t22-state (named exception): a pass held by the cumulative guard is an applied
+        // merge; it would remove its delta's top-level drops.
         let vanished = match &m.outcome {
             MergeOutcome::PendingConfirmation { vanished, .. } => *vanished,
-            MergeOutcome::Applied { .. } => 0,
+            MergeOutcome::Applied { .. } => {
+                u32::try_from(top_drops(&ns, m.outcome.delta()).len()).unwrap_or(u32::MAX)
+            }
         };
         let snap = self.catalog.current();
         let mut changes = Vec::new();
@@ -1811,6 +1964,7 @@ impl Actor {
                 pass: m.pass,
             },
         );
+        self.sync_pending_names();
         self.publisher.announce_pending_confirmation(ns, vanished);
         job.resolve(generation);
     }
@@ -1836,6 +1990,9 @@ impl Actor {
         let Some(p) = self.pending.remove(ns) else {
             return w.resolve(Err(IntroError::Cancelled));
         };
+        // ## m4-t22-state (named exception): the user decided; the count starts over.
+        self.sync_pending_names();
+        self.bg_deleted.remove(ns);
         let prev = snap.namespaces.get(ns).cloned();
         if prev.as_ref().map(|a| Arc::as_ptr(a) as usize) != p.prev_ptr
             || (!accept && p.keep.is_none())
@@ -1888,7 +2045,32 @@ impl Actor {
 
     /// A state check answered: what changed or was dropped is re-read (the ticket resolves
     /// with the generation that holds it).
-    fn staleness(&mut self, job: Job, keys: Vec<ObjectKey>, st: Vec<Staleness>) {
+    fn staleness(
+        &mut self,
+        mut job: Job,
+        keys: Vec<ObjectKey>,
+        st: Vec<Staleness>,
+        marks: Vec<(ObjectKey, StateMark)>,
+    ) {
+        // ## m4-t22-state (named exception): a probe by name that could not decide falls back
+        // to an incremental pass of its namespace (the probe before Task 22).
+        if let Some(ns) = job.probe.take()
+            && !st.contains(&Staleness::Changed)
+            && st.contains(&Staleness::Unknown)
+        {
+            let level = self.level_of(&ns);
+            let mut pass = self.new_job(
+                Work::Pass {
+                    ns,
+                    mode: Mode::Incremental,
+                    level,
+                },
+                job.prio,
+                Trigger::Background,
+            );
+            pass.waiters = job.waiters;
+            return self.enqueue(pass, false);
+        }
         let mut by_ns: BTreeMap<NsKey, Vec<ObjectKey>> = BTreeMap::new();
         for (k, s) in keys.into_iter().zip(st) {
             if matches!(s, Staleness::Changed | Staleness::Dropped) {
@@ -1907,7 +2089,13 @@ impl Actor {
         }));
         for (ns, keys) in by_ns {
             let level = self.state_level(&ns);
-            let mut f = self.fragment_job(ns, keys, level, job.prio, Trigger::Background);
+            let mut f = self.fragment_job(ns.clone(), keys, level, job.prio, Trigger::Background);
+            // ## m4-t22-state (named exception): the stamps of this namespace's owners.
+            f.marks = marks
+                .iter()
+                .filter(|(k, _)| self.ns_of(k) == ns)
+                .cloned()
+                .collect();
             f.add(Waiter::Join(join.clone()), false);
             self.enqueue(f, true);
         }
@@ -2054,18 +2242,22 @@ impl Actor {
     }
 
     // ## m4-t15-engine (validation tasks; Task 22 replaces the body: named lines)
-    /// Periodic validation (R-M4-20): an incremental pass of every loaded namespace in scope,
-    /// at periodic priority, unless the user's session is in a transaction on a
-    /// single-connection profile (alg/02 step 6).
+    // ## m4-t22-state (named lines: validation tasks)
+    /// Periodic validation (R-M4-20): the cheap check of every loaded namespace in scope, at
+    /// periodic priority. While the user's session holds a transaction on a single-connection
+    /// profile the round is deferred, and asked again every `busy_retry` (alg/02 step 6), so it
+    /// runs as soon as the transaction is over.
     fn validate_due(&mut self) {
         let Some(every) = self.validate_every else {
             self.next_validate = None;
             return;
         };
-        self.next_validate = Some(Instant::now() + every);
+        let now = self.clock.now();
         if self.ctx.meta.user_in_transaction() {
+            self.next_validate = Some(now + self.limits.busy_retry.max(Duration::from_millis(1)));
             return;
         }
+        self.next_validate = Some(now + every);
         let snap = self.catalog.current();
         let loaded: Vec<NsKey> = snap
             .namespaces
@@ -2080,21 +2272,163 @@ impl Actor {
             .cloned()
             .collect();
         for ns in loaded {
-            let level = self.level_of(&ns);
-            let job = self.new_job(
-                Work::Pass {
-                    ns,
-                    mode: Mode::Incremental,
-                    level,
-                },
-                Priority::Periodic,
-                Trigger::Background,
-            );
-            self.enqueue(job, true);
+            self.validate(ns, Priority::Periodic);
         }
     }
+
+    /// Queues the cheap validation of the cached namespace `ns`, unless a task of it is
+    /// already queued or running (that task reads it anyway).
+    fn validate(&mut self, ns: NsKey, prio: Priority) {
+        if self.busy(&ns)
+            || self.pending.contains_key(&ns)
+            || self.queue.iter().any(|j| j.work.ns() == Some(&ns))
+        {
+            return;
+        }
+        let job = self.new_job(Work::Validate { ns }, prio, Trigger::Background);
+        self.enqueue(job, true);
+    }
+
+    /// A validation answered: an unchanged namespace is cleared of its stale mark (nothing
+    /// else is read); a changed one is read again, incrementally or in full. An arena published
+    /// since the validation started was decided by that publish: nothing to do.
+    fn validated(&mut self, job: Job, ns: &NsKey, ptr: Option<usize>, verdict: NsVerdict) {
+        let snap = self.catalog.current();
+        let now_ptr = snap.namespaces.get(ns).map(|a| Arc::as_ptr(a) as usize);
+        if now_ptr != ptr || ptr.is_none() || self.out_of_scope(ns) {
+            return job.resolve(Ok(snap.generation));
+        }
+        match verdict {
+            NsVerdict::Current => {
+                let key = ContainerKey::Namespace(ns.clone());
+                let LoadState::Loaded {
+                    level,
+                    at,
+                    watermark,
+                    stale: true,
+                } = snap.state(&key).clone()
+                else {
+                    return job.resolve(Ok(snap.generation));
+                };
+                if self.pending.contains_key(ns) {
+                    return job.resolve(Ok(snap.generation));
+                }
+                let r = self.publish(
+                    vec![CatalogChange::SetState(
+                        key,
+                        LoadState::Loaded {
+                            level,
+                            at,
+                            watermark,
+                            stale: false,
+                        },
+                    )],
+                    None,
+                );
+                job.resolve(r);
+            }
+            NsVerdict::Changed { full } => {
+                let level = self.level_of(ns);
+                let mut pass = self.new_job(
+                    Work::Pass {
+                        ns: ns.clone(),
+                        mode: if full { Mode::Full } else { Mode::Incremental },
+                        level,
+                    },
+                    job.prio,
+                    Trigger::Background,
+                );
+                pass.validation = true;
+                pass.waiters = job.waiters;
+                self.enqueue(pass, true);
+            }
+        }
+    }
+
+    /// Whether the applied pass `m` of `ns`, asked for by a validation, would bring the
+    /// top-level objects background validation removed since the user last decided over the
+    /// guard (D-039: more than `guard_ratio_pct` % of at least `guard_min_objects`). Counts it
+    /// when it does not.
+    fn over_cumulative_guard(&mut self, ns: &NsKey, m: &Merged, snap: &CatalogSnapshot) -> bool {
+        let dropped = u32::try_from(top_drops(ns, m.outcome.delta()).len()).unwrap_or(u32::MAX);
+        if dropped == 0 {
+            return false;
+        }
+        let policy = MergePolicy::default();
+        let before = snap
+            .namespaces
+            .get(ns)
+            .map_or(0, |a| a.root().child_count());
+        let (base, gone) = *self.bg_deleted.entry(ns.clone()).or_insert((before, 0));
+        let total = gone.saturating_add(dropped);
+        if base >= policy.guard_min_objects
+            && u64::from(total) * 100 > u64::from(base) * u64::from(policy.guard_ratio_pct)
+        {
+            return true;
+        }
+        self.bg_deleted.insert(ns.clone(), (base, total));
+        false
+    }
+
+    /// Writes the names of every held mass deletion where the handles read them.
+    fn sync_pending_names(&self) {
+        let names: HashMap<NsKey, Vec<ObjectKey>> = self
+            .pending
+            .iter()
+            .map(|(ns, p)| (ns.clone(), top_drops(ns, p.outcome.delta())))
+            .collect();
+        *lock(&self.pending_names) = names;
+    }
+    // ## m4-t22-state (named lines: validation tasks)
     // ## m4-t15-engine (validation tasks)
 }
+
+// ## m4-t22-state (named lines: validation tasks)
+/// Resolves when the validation clock reaches `at` (never without one).
+async fn validation_due(clock: ValidationClock, at: Option<Duration>) {
+    match at {
+        Some(t) => clock.sleep_until(t).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The top-level objects `delta` removes from `ns` (server deletions, not scope changes).
+fn top_drops(ns: &NsKey, delta: &CatalogDelta) -> Vec<ObjectKey> {
+    delta
+        .dropped
+        .iter()
+        .filter(|k| k.path.len() == ns.path.len() + 1)
+        .cloned()
+        .collect()
+}
+
+/// The keys a probe of the missing name `name` in `ns` stamps by name: every top-level kind a
+/// MySQL or MariaDB schema holds (a lookup's kind group is not known here, and a kind left out
+/// would let a wrong `Missing` stand).
+fn probe_keys(ns: &NsKey, name: &Name) -> Vec<ObjectKey> {
+    [
+        ObjectKind::Table,
+        ObjectKind::View,
+        ObjectKind::Sequence,
+        ObjectKind::Routine,
+        ObjectKind::Procedure,
+        ObjectKind::Event,
+    ]
+    .into_iter()
+    .map(|kind| {
+        let mut path: smallvec::SmallVec<[Name; 4]> = ns.path.iter().cloned().collect();
+        path.push(name.clone());
+        ObjectKey {
+            kind,
+            path,
+            server_id: None,
+            overload_sig: None,
+            raw_kind: None,
+        }
+    })
+    .collect()
+}
+// ## m4-t22-state
 
 async fn sleep_until(at: Option<Instant>) {
     match at {

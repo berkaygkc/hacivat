@@ -838,6 +838,9 @@ async fn periodic_validation_skips_during_user_tx_on_single_connection() {
         before,
         "no validation inside the user's transaction"
     );
+    // ## m4-t22-freshness (named exception): a round is the cheap check now (Task 22): only a
+    // namespace that changed on the server is read again.
+    r.fake.touch(&n, "t1");
     r.meta.in_tx.store(false, SeqCst);
     bounded(wait_until(Duration::from_secs(60), || passes() > before)).await;
     let (_, mode, level) = introspects(&r).pop().unwrap();

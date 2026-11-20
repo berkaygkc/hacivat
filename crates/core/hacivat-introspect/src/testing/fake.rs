@@ -121,6 +121,10 @@ pub enum FakeCall {
     CheckState {
         keys: Vec<ObjectKey>,
     },
+    // ## m4-t22-state (named exception): the cheap validation of a cached namespace.
+    CheckNamespace {
+        ns: NsKey,
+    },
 }
 
 type Matcher = Box<dyn Fn(&FakeCall) -> bool + Send + Sync>;
@@ -186,6 +190,8 @@ struct State {
 pub struct FakeIntrospector {
     pub dbms: DbmsKind,
     incremental: Arc<AtomicBool>,
+    // ## m4-t22-state (named exception): passes store no per-object mark (PostgreSQL's way).
+    markless: Arc<AtomicBool>,
     queries: Arc<AtomicU64>,
     state: Arc<Mutex<State>>,
 }
@@ -210,6 +216,7 @@ impl FakeIntrospector {
         FakeIntrospector {
             dbms,
             incremental: Arc::new(AtomicBool::new(false)),
+            markless: Arc::new(AtomicBool::new(false)),
             queries: Arc::new(AtomicU64::new(0)),
             state: Arc::new(Mutex::new(State {
                 identity: Some(1),
@@ -227,6 +234,33 @@ impl FakeIntrospector {
         self.incremental.store(on, Ordering::SeqCst);
         self
     }
+
+    // ## m4-t22-state (named exception)
+    /// Passes and fragments store `StateMark::None` on every object (as PostgreSQL's do), so
+    /// a state check has no stored mark until the engine records one.
+    pub fn with_markless_passes(self, on: bool) -> Self {
+        self.markless.store(on, Ordering::SeqCst);
+        self
+    }
+
+    /// The server side of the cheap check of `ns` (count, newest version, digest of the
+    /// `kind:name:version` lines).
+    fn ns_check_of<'a>(objects: impl Iterator<Item = (ObjectKind, &'a str, u64)>) -> NsCheck {
+        let mut lines: Vec<String> = objects
+            .map(|(k, n, v)| format!("{}:{n}:{v}", k.code()))
+            .collect();
+        lines.sort();
+        let max = lines
+            .iter()
+            .filter_map(|l| l.rsplit(':').next()?.parse::<u64>().ok())
+            .max();
+        NsCheck {
+            objects: lines.len() as u64,
+            max_mark: max.map_or(StateMark::None, StateMark::Hash),
+            existence_digest: twox_hash::XxHash3_64::oneshot(lines.join("\n").as_bytes()),
+        }
+    }
+    // ## m4-t22-state
 
     /// Sets namespace `ns` of the server.
     pub fn put_ns(&self, ns: NsKey, objects: Vec<FakeObject>) {
@@ -394,14 +428,19 @@ impl FakeIntrospector {
             .ok_or(IntroError::Protocol(Name::from("fake-root")))
     }
 
-    fn subtree(o: &FakeObject, level: Level) -> Subtree {
+    fn subtree(&self, o: &FakeObject, level: Level) -> Subtree {
         let props = match o.kind {
             ObjectKind::View => Props::View(Arc::new(ViewProps::default())),
             _ => Props::Table(Arc::new(TableProps::default())),
         };
         let mut root = Obj::new(o.kind, o.name.clone())
             .with_props(props)
-            .with_state(StateMark::Hash(o.version));
+            // ## m4-t22-state (named exception): markless passes (PostgreSQL's way).
+            .with_state(if self.markless.load(Ordering::SeqCst) {
+                StateMark::None
+            } else {
+                StateMark::Hash(o.version)
+            });
         if let Some(oid) = o.oid {
             root = root.with_server_id(ServerId::Oid(oid));
         }
@@ -473,7 +512,7 @@ impl FakeIntrospector {
                 }
                 changed.push(ChangedObject {
                     parent: root.clone(),
-                    subtree: Self::subtree(o, level),
+                    subtree: self.subtree(o, level),
                 });
                 reread.push(o.clone());
             }
@@ -565,7 +604,7 @@ impl FakeIntrospector {
                 ids.push(Self::ident(o));
                 changed.push(ChangedObject {
                     parent: root.clone(),
-                    subtree: Self::subtree(o, level),
+                    subtree: self.subtree(o, level),
                 });
                 found.push(o.clone());
             }
@@ -678,12 +717,33 @@ impl Introspector for FakeIntrospector {
         })
     }
 
+    // ## m4-t22-state (named exception): a stamp per key, as a real introspector reads them
+    // (one query per call, recorded as a state check): the object's version, by server id
+    // first, else by name; `None` when it is gone.
     fn stamps<'a>(
         &'a self,
         _c: &'a mut MetaConn,
-        _keys: &'a [ObjectKey],
+        keys: &'a [ObjectKey],
     ) -> BoxFuture<'a, Result<Vec<Option<StateMark>>, IntroError>> {
-        Box::pin(async { Err(IntroError::NotImplemented) })
+        Box::pin(async move {
+            self.enter(
+                FakeCall::CheckState {
+                    keys: keys.to_vec(),
+                },
+                None,
+            )
+            .await?;
+            let st = self.lock();
+            Ok(keys
+                .iter()
+                .map(|k| {
+                    let (_, space) = st.namespaces.iter().find(|(ns, _)| {
+                        k.path.starts_with(&ns.path) && k.path.len() == ns.path.len() + 1
+                    })?;
+                    Self::find(space, k).map(|o| StateMark::Hash(o.version))
+                })
+                .collect())
+        })
     }
 
     fn facet<'a>(
@@ -731,13 +791,34 @@ impl Introspector for FakeIntrospector {
         })
     }
 
+    // ## m4-t22-state (named exception): the server side of the cheap check.
     fn check_namespace<'a>(
         &'a self,
         _c: &'a mut MetaConn,
-        _ns: &'a NsKey,
+        ns: &'a NsKey,
         _snap: &'a NamespaceSnapshot,
     ) -> BoxFuture<'a, Result<NsCheck, IntroError>> {
-        Box::pin(async { Err(IntroError::NotImplemented) })
+        Box::pin(async move {
+            self.enter(FakeCall::CheckNamespace { ns: ns.clone() }, None)
+                .await?;
+            let st = self.lock();
+            let space = st.namespaces.get(ns).cloned().unwrap_or_default();
+            Ok(Self::ns_check_of(
+                space.objects.iter().map(|o| (o.kind, &*o.name, o.version)),
+            ))
+        })
+    }
+
+    // ## m4-t22-state (named exception): the cached side, from the stored marks.
+    fn cached_check(&self, snap: &NamespaceSnapshot) -> Option<NsCheck> {
+        let mut objects = Vec::new();
+        for (_, o) in snap.children(0) {
+            let StateMark::Hash(v) = o.state() else {
+                return None;
+            };
+            objects.push((o.kind(), &**o.name(), v));
+        }
+        Some(Self::ns_check_of(objects.into_iter()))
     }
 
     fn identity<'a>(

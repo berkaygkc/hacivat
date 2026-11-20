@@ -361,6 +361,14 @@ impl Subtree {
         &self.objs[0]
     }
 
+    // ## m4-t22-state (named exception)
+    /// Sets the root object's state mark (the engine stores a stamp read before a re-read as
+    /// the mark of a re-read object that brings none, M4 Task 22).
+    pub fn set_root_state(&mut self, state: StateMark) {
+        self.objs[0].state = state;
+    }
+    // ## m4-t22-state
+
     /// Adds `obj` under `parent`.
     pub fn add(&mut self, parent: NodeId, obj: Obj) -> NodeId {
         let id = u32::try_from(self.objs.len()).unwrap_or(NO_PARENT);

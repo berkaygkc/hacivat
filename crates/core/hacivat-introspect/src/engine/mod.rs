@@ -260,6 +260,16 @@ impl Engine {
     /// Starts the profile's engine on `cfg.runtime`: it first publishes the cached namespaces
     /// (stale), then serves requests. Exactly one per profile: it owns the catalog's publisher.
     pub fn start(cfg: EngineConfig) -> IntroHandle {
+        Engine::start_with_clock(cfg, crate::freshness::ValidationClock::default())
+    }
+
+    // ## m4-t22-state (named exception)
+    /// [`Engine::start`] with periodic validation (R-M4-20) on `clock`: tokio's in the product,
+    /// a manual one in tests (the clock seam; no fixed sleeps, no wall clock).
+    pub fn start_with_clock(
+        cfg: EngineConfig,
+        clock: crate::freshness::ValidationClock,
+    ) -> IntroHandle {
         let (tx, rx) = mpsc::unbounded_channel();
         let progress = Arc::new(watch::Sender::new(Progress::default()));
         let (events, _) = broadcast::channel(64);
@@ -269,6 +279,8 @@ impl Engine {
             levels: Arc::new(Mutex::new(cfg.levels.clone())),
             roles: Arc::new(Mutex::new(scheduler::Roles::default())),
             stopped: CancellationToken::new(),
+            // ## m4-t22-state (named exception)
+            pending: Arc::default(),
         };
         let handle = IntroHandle {
             inner: Arc::new(Inner {
@@ -279,10 +291,12 @@ impl Engine {
                 roles: shared.roles.clone(),
                 events: shared.events.clone(),
                 stopped: shared.stopped.clone(),
+                // ## m4-t22-state (named exception)
+                pending: shared.pending.clone(),
                 tx: Some(tx),
             }),
         };
-        scheduler::spawn(cfg, rx, shared);
+        scheduler::spawn(cfg, rx, shared, clock);
         handle
     }
 }
@@ -303,6 +317,8 @@ struct Inner {
     events: broadcast::Sender<EngineEvent>,
     /// Cancelled when the engine has stopped (review m1: `closed` holds no sender).
     stopped: CancellationToken,
+    // ## m4-t22-state (named exception)
+    pending: scheduler::PendingNames,
     /// `None` for a detached handle (no engine).
     tx: Option<mpsc::UnboundedSender<scheduler::Cmd>>,
 }
@@ -324,6 +340,8 @@ impl IntroHandle {
                     t.cancel();
                     t
                 },
+                // ## m4-t22-state (named exception)
+                pending: Arc::default(),
                 tx: None,
             }),
         }
@@ -478,8 +496,13 @@ impl IntroHandle {
             move |ns| {
                 drop(unknown.request(scheduler::Request::Load(ns.clone()), Priority::Completion));
             },
-            move |ns, _| {
-                drop(probe.request(scheduler::Request::Probe(ns.clone()), Priority::Completion));
+            // ## m4-t22-state (named exception): the probe carries the missing name (a state
+            // check by name, Task 22).
+            move |ns, part| {
+                drop(probe.request(
+                    scheduler::Request::Probe(ns.clone(), Some(part.text.clone())),
+                    Priority::Completion,
+                ));
             },
         )
     }
@@ -525,6 +548,19 @@ impl IntroHandle {
     pub fn mark_stale(&self, namespaces: Vec<NsKey>, scope: bool) {
         self.send(scheduler::Cmd::MarkStale { namespaces, scope });
     }
+
+    // ## m4-t22-state (named exception)
+    /// The top-level objects a mass deletion held for `ns` would remove (D-039; the
+    /// confirmation dialog lists them), `None` when nothing is held.
+    pub fn pending_confirmation(&self, ns: &NsKey) -> Option<Vec<ObjectKey>> {
+        self.inner
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(ns)
+            .cloned()
+    }
+    // ## m4-t22-state
 
     /// The level `ns` is read at and why, as the engine sees it (the pills; review m8): its
     /// role (current, system, other) and its loaded object count. A database namespace answers
