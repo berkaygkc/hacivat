@@ -108,6 +108,15 @@ pub enum Rule {
     /// `fuzz/meta/`; or aliases `Pack`, names it in an `impl` header or a macro invocation
     /// (R-M4-7, T4 fix round 1 I2). `Pack::builtin` stays legal everywhere.
     PackParseOnlyFromPacks,
+    // ## m4-hyg-tmp
+    /// A source file (any crate, `src/` or `tests/`, `fuzz/`, `xtask/`) lets a `tempfile` guard
+    /// outlive its test, so the directory is never removed (R-W5-15; ~58k leaked a day): it
+    /// calls `.keep()`, `.into_path()` or `.disable_cleanup(…)`; leaks or forgets a statement
+    /// that names a guard (`Box::leak`, `mem::forget`); holds a guard in a process-wide
+    /// `static` (never dropped; a `thread_local!` is dropped when the test's thread ends); or
+    /// holds one in a type that is a GPUI `Global` (the test harness never drops the app).
+    /// See [`leaks_a_temp_dir`] for the token forms.
+    TempDirOutlivesTest,
 }
 
 // ## m2b-t01-interfaces
@@ -1321,6 +1330,124 @@ fn names_hold_counts(t: &[SrcTok]) -> bool {
     t.iter().any(|x| *x == SrcTok::Ident(HOLD_COUNTS.into()))
 }
 
+// ## m4-hyg-tmp
+/// The `tempfile` names a `TempDirOutlivesTest` statement, static or global is checked for:
+/// the guard types and the functions that make a temp directory.
+const TEMP_GUARDS: [&str; 5] = [
+    "TempDir",
+    "NamedTempFile",
+    "TempPath",
+    "tempdir",
+    "tempdir_in",
+];
+
+/// Whether `t[i]` is one of [`TEMP_GUARDS`].
+fn names_temp_guard(t: &[SrcTok], i: usize) -> bool {
+    TEMP_GUARDS.iter().any(|g| tok_ident(t, i, g))
+}
+
+/// The index past the item that starts at `from`: the first `;` outside braces, or the brace
+/// that closes the first `{` (a `struct`'s fields, a `thread_local!` block).
+fn item_end(t: &[SrcTok], from: usize) -> usize {
+    let mut depth = 0usize;
+    for (k, tok) in t.iter().enumerate().skip(from) {
+        match tok {
+            SrcTok::Punct('{') => depth += 1,
+            SrcTok::Punct('}') => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return k + 1;
+                }
+            }
+            SrcTok::Punct(';') if depth == 0 => return k + 1,
+            _ => {}
+        }
+    }
+    t.len()
+}
+
+/// Whether the tokens let a `tempfile` guard outlive its test (`TempDirOutlivesTest`):
+///
+/// - `. keep ( )`, `. into_path ( )` (the guard gives up its directory) or
+///   `. disable_cleanup (`, whatever the receiver (`self.keep(x)` with arguments is not one);
+/// - a statement (between `;`, `{` and `}`) naming `leak` or `forget` and a guard;
+/// - a `static` item outside `thread_local!` whose type or initialiser names a guard;
+/// - `impl … Global for X` where the definition of `X` in the same file names a guard.
+///
+/// Limits: a leak of a guard whose statement never names a guard type or constructor
+/// (`Box::leak(Box::new(x))` alone), a `static` holding a type defined elsewhere that holds a
+/// guard, and a `Global` defined in another file are not seen.
+fn leaks_a_temp_dir(t: &[SrcTok]) -> bool {
+    let call = |i: usize, name: &str, empty: bool| {
+        tok_punct(t, i, '.')
+            && tok_ident(t, i + 1, name)
+            && tok_punct(t, i + 2, '(')
+            && (!empty || tok_punct(t, i + 3, ')'))
+    };
+    if (0..t.len()).any(|i| {
+        call(i, "keep", true) || call(i, "into_path", true) || call(i, "disable_cleanup", false)
+    }) {
+        return true;
+    }
+    // Statements that leak or forget a guard.
+    let mut start = 0;
+    for i in 0..=t.len() {
+        let boundary = i == t.len() || [';', '{', '}'].iter().any(|p| tok_punct(t, i, *p));
+        if boundary {
+            let stmt = start..i;
+            let leaks = stmt
+                .clone()
+                .any(|k| tok_ident(t, k, "leak") || tok_ident(t, k, "forget"));
+            if leaks && stmt.clone().any(|k| names_temp_guard(t, k)) {
+                return true;
+            }
+            start = i + 1;
+        }
+    }
+    // `thread_local!` blocks: their statics are dropped when the thread ends.
+    let mut local = vec![false; t.len()];
+    for i in 0..t.len() {
+        if tok_ident(t, i, "thread_local") && tok_punct(t, i + 1, '!') {
+            let end = item_end(t, i);
+            local[i..end].iter_mut().for_each(|x| *x = true);
+        }
+    }
+    // A process-wide `static` item (not `&'static`: the lifetime's tick is dropped, so the
+    // item position is checked).
+    let item_start = |i: usize| {
+        i == 0
+            || [';', '{', '}', ']', ')']
+                .iter()
+                .any(|p| tok_punct(t, i - 1, *p))
+            || tok_ident(t, i - 1, "pub")
+    };
+    for (i, in_local) in local.iter().enumerate() {
+        if tok_ident(t, i, "static") && !in_local && item_start(i) {
+            let end = item_end(t, i);
+            if (i..end).any(|k| names_temp_guard(t, k)) {
+                return true;
+            }
+        }
+    }
+    // A type holding a guard that is a GPUI `Global`.
+    for i in 0..t.len() {
+        if tok_ident(t, i, "Global")
+            && tok_ident(t, i + 1, "for")
+            && let Some(SrcTok::Ident(name)) = t.get(i + 2)
+        {
+            let holds_guard = (0..t.len()).any(|k| {
+                (tok_ident(t, k, "struct") || tok_ident(t, k, "enum"))
+                    && tok_ident(t, k + 1, name)
+                    && (k..item_end(t, k)).any(|m| names_temp_guard(t, m))
+            });
+            if holds_guard {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// The `#[path = "…"]` targets (also `path = "…"` inside `#[cfg_attr(…)]` at any nesting, fix
 /// round 3, I-R3) and the literal `include!("…")` targets of `t`.
 fn module_targets(t: &[SrcTok]) -> (Vec<String>, Vec<String>) {
@@ -1477,6 +1604,8 @@ fn source_roots(workspace: &Path) -> Vec<(String, std::path::PathBuf, String)> {
 /// - `PackParseOnlyFromPacks` (`## m4-t04-packs`) over every crate, `fuzz/` and `xtask/`: no
 ///   file outside `hacivat-introspect/src/{pack,pg,mysql,sqlite}/**`, a crate's `tests/` and
 ///   `fuzz/meta/` names a renderable pack constructor ([`parses_a_pack`]).
+/// - `TempDirOutlivesTest` (`## m4-hyg-tmp`) over every file of every crate, `fuzz/` and
+///   `xtask/`: no `tempfile` guard outlives its test ([`leaks_a_temp_dir`]).
 ///
 /// Comments, whitespace and string contents never match. One violation per finding, `via` the
 /// workspace-relative file (and what it did, for the `#[path]`/`include!` refusals).
@@ -1506,12 +1635,16 @@ pub fn source_violations(workspace: &Path) -> Vec<Violation> {
                 && (PACK_PARSE_DIRS.iter().any(|d| rel.starts_with(d))
                     || in_crate.starts_with("tests/")))
                 || rel.starts_with(PACK_PARSE_FUZZ);
-            if meta_query_ok && !hold_counts_checked && pack_parse_ok {
-                continue;
-            }
             let Ok(src) = std::fs::read_to_string(&f) else {
                 continue;
             };
+            // ## m4-hyg-tmp: every file, `src/` and `tests/` alike.
+            if leaks_a_temp_dir(&src_tokens(&src)) {
+                found.insert((name.clone(), Rule::TempDirOutlivesTest, rel.clone()));
+            }
+            if meta_query_ok && !hold_counts_checked && pack_parse_ok {
+                continue;
+            }
             let (tokens, non_rs, path_targets) = effective_tokens(&f, &src);
             if !meta_query_ok {
                 if builds_meta_query(&tokens) {
@@ -3203,6 +3336,71 @@ mod tests {
                 "fn f() { Pack::parse(d, S) }\n",
             ),
         ]);
+        assert_eq!(v, Vec::new());
+    }
+
+    // ## m4-hyg-tmp
+    fn temp_findings(files: &[(&str, &str)]) -> Vec<Violation> {
+        let dir = source_tree(files);
+        source_violations(dir.path())
+            .into_iter()
+            .filter(|v| v.rule == Rule::TempDirOutlivesTest)
+            .collect()
+    }
+
+    /// R-W5-15: the forms that left ~58k `.tmp*` directories a day behind.
+    #[test]
+    fn a_temp_dir_that_outlives_its_test_is_refused() {
+        for src in [
+            "fn tmp() -> PathBuf { tempfile::tempdir().unwrap().keep() }\n",
+            "fn tmp() -> PathBuf { tempdir().keep().join(name) }\n",
+            "fn tmp() -> PathBuf { let d = tempdir(); d.into_path() }\n",
+            "fn tmp() { let mut d = tempdir(); d . /* x */ disable_cleanup(true); }\n",
+            "fn f() { let f = NamedTempFile::new().unwrap(); let (_, p) = f.keep().unwrap(); }\n",
+            "fn f() { let root: &'static tempfile::TempDir = Box::leak(Box::new(root)); }\n",
+            "fn f() { std::mem::forget(tempfile::tempdir().unwrap()); }\n",
+            "fn dir() -> &'static Path {\n    static DIR: OnceLock<TempDir> = OnceLock::new();\n    \
+             DIR.get_or_init(|| tempfile::tempdir().unwrap()).path()\n}\n",
+            "pub(crate) static D: LazyLock<tempfile::TempDir> = LazyLock::new(make);\n",
+            "#[derive(Default)]\nstruct TempRoots(Vec<tempfile::TempDir>);\nimpl Global for TempRoots {}\n",
+            "struct Kept {\n    roots: Vec<TempDir>,\n}\nimpl gpui::Global for Kept {}\n",
+        ] {
+            let v = temp_findings(&[("crates/app/hacivat-app/tests/support/mod.rs", src)]);
+            assert_eq!(names(&v), ["hacivat-app"], "{src}");
+        }
+        let v = temp_findings(&[
+            (
+                "crates/core/hacivat-settings/src/store.rs",
+                "fn t() { tempdir().unwrap().keep(); }\n",
+            ),
+            (
+                "fuzz/fuzz_targets/evil.rs",
+                "fn f() { tempdir().unwrap().keep(); }\n",
+            ),
+            (
+                "xtask/src/evil.rs",
+                "fn f() { tempdir().unwrap().into_path(); }\n",
+            ),
+        ]);
+        assert_eq!(names(&v), ["fuzz", "hacivat-settings", "xtask"]);
+    }
+
+    #[test]
+    fn temp_dirs_dropped_by_the_test_pass() {
+        let v = temp_findings(&[(
+            "crates/app/hacivat-app/tests/support/mod.rs",
+            "// tempdir().keep()\nconst S: &str = \"tempdir().unwrap().keep()\";\n\
+             thread_local! {\n    static DIRS: RefCell<Vec<tempfile::TempDir>> = \
+             const { RefCell::new(Vec::new()) };\n    static DIR: TempDir = tempdir().unwrap();\n}\n\
+             fn tmp() -> PathBuf { let d = tempdir().unwrap(); let p = d.path().to_path_buf(); \
+             DIRS.with(|x| x.borrow_mut().push(d)); p }\n\
+             fn dir() -> &'static Path { static N: AtomicUsize = AtomicUsize::new(0); x() }\n\
+             fn g(d: &'static TempDir) {}\n\
+             async fn h(&mut self) { self.keep(wrap).await; keep(name); }\n\
+             fn s() -> &'static str { Box::leak(s.into_boxed_str()) }\n\
+             struct Kept { listeners: Vec<TcpListener> }\nimpl Global for Kept {}\n\
+             struct Tmp { _dir: TempDir, path: PathBuf }\n",
+        )]);
         assert_eq!(v, Vec::new());
     }
 

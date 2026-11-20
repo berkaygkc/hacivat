@@ -434,8 +434,12 @@ impl IntroHandle {
         self.request(scheduler::Request::Refresh(target, trigger), prio)
     }
 
-    /// Loads facet `kind` of `keys` (R-M4-30; scheduling Task 15b). Until then it answers
-    /// `NotImplemented`; the facet stays `NotLoaded`.
+    // ## m4-t15b-facets (named exception, doc only)
+    /// Loads facet `kind` of `keys` (R-M4-30; `engine::facet`): single flight per object and
+    /// facet, read on a metadata connection as a task of the object's namespace, published as
+    /// a side-table change (`CatalogChange::SetFacet`) that touches no arena. Resolves with the
+    /// generation that holds the facets; a read the introspector refused resolves to its error
+    /// after the keys were published `Failed`.
     pub fn load_facet(&self, keys: Vec<ObjectKey>, kind: FacetKind) -> RefreshTicket {
         facet::load(self, keys, kind)
     }

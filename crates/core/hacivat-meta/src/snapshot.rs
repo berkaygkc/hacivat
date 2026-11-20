@@ -25,12 +25,12 @@ use arc_swap::ArcSwap;
 use hacivat_proto::DbmsKind;
 
 use crate::delta::CatalogDelta;
-use crate::ids::{NsKey, NsKind, ObjId, ObjectKey, Ref};
+use crate::ids::{NsKey, NsKind, ObjId, ObjectKey, Ref, SourceRef};
 use crate::kind::{ObjectKind, pg_family};
 use crate::name::{IdentCtx, Name};
 use crate::namespace::{Level, ModelError, NamespaceSnapshot, Obj, Subtree, Watermark};
 use crate::overlay::Overlays;
-use crate::props::{FacetKind, Props};
+use crate::props::{DepsFacet, Facet, FacetKind, GrantsFacet, Props, StatsFacet};
 use crate::resolve::{
     NsStatus, locate_ns_of, locate_ref, miss_is_fact, ns_status, schema_list_loaded,
 };
@@ -58,6 +58,14 @@ pub struct ServerFacts {
     pub ansi_quotes: Option<bool>,
     /// PostgreSQL `pg_is_in_recovery()` (R-M4-9: replicas refresh `Full`).
     pub in_recovery: Option<bool>,
+    // ## m4-t26-overlays (named exception in Task 9's file; ruling R-W5-6)
+    /// Whether the server's system schemas hold objects beyond what `initdb` creates
+    /// (PostgreSQL: an object with an oid of 16384 or more in `pg_catalog` or
+    /// `information_schema`, read in the same metadata snapshot as the other facts).
+    /// `Some(false)` is the only answer that lets a miss in a shipped snapshot be a fact;
+    /// `None` is unknown.
+    pub system_schema_extras: Option<bool>,
+    // ## m4-t26-overlays
 }
 
 impl ServerFacts {
@@ -74,6 +82,8 @@ impl ServerFacts {
             no_backslash_escapes: None,
             ansi_quotes: None,
             in_recovery: None,
+            // ## m4-t26-overlays
+            system_schema_extras: None,
         }
     }
 }
@@ -235,6 +245,10 @@ pub struct CatalogSnapshot {
     pub namespaces: Arc<BTreeMap<NsKey, Arc<NamespaceSnapshot>>>,
     pub states: Arc<BTreeMap<ContainerKey, LoadState>>,
     pub overlays: Arc<Overlays>,
+    // ## m4-t15b-facets (named exception in Task 9's file)
+    /// Facet values and source texts (R-M4-30): side tables beside the arenas.
+    side: Arc<SideTables>,
+    // ## m4-t15b-facets
     index: OnceLock<Arc<NsIndex>>,
     fks: OnceLock<Arc<FkIndex>>,
 }
@@ -259,6 +273,7 @@ impl CatalogSnapshot {
             Arc::new(BTreeMap::new()),
             Arc::new(BTreeMap::new()),
             Arc::new(Overlays::default()),
+            Arc::new(SideTables::default()),
         )
     }
 
@@ -268,6 +283,7 @@ impl CatalogSnapshot {
         namespaces: Arc<BTreeMap<NsKey, Arc<NamespaceSnapshot>>>,
         states: Arc<BTreeMap<ContainerKey, LoadState>>,
         overlays: Arc<Overlays>,
+        side: Arc<SideTables>,
     ) -> Self {
         CatalogSnapshot {
             generation,
@@ -275,6 +291,7 @@ impl CatalogSnapshot {
             namespaces,
             states,
             overlays,
+            side,
             index: OnceLock::new(),
             fks: OnceLock::new(),
         }
@@ -488,11 +505,34 @@ pub enum CatalogChange {
     RemoveSubtree { ns: NsKey, target: ObjectKey },
     /// Sets the load state of a container.
     SetState(ContainerKey, LoadState),
+    // ## m4-t15b-facets (named exception in Task 9's file; plan Task 15b)
+    /// Sets one facet's load state and value (R-M4-30), a side-table change: no arena is
+    /// touched, so no namespace changes generation and none is offered to the cache. `key` must
+    /// be a [`ContainerKey::Facet`] whose value (when given) is of its facet kind. `NotLoaded`
+    /// removes the state and the value.
+    SetFacet {
+        key: ContainerKey,
+        state: LoadState,
+        value: Option<FacetValue>,
+    },
+    /// Adds source texts read by a pass of `ns` (a view's, routine's or trigger's definition),
+    /// each under its own [`SourceRef`] (a text whose hash is not its reference is dropped).
+    /// After the publish a namespace keeps only the texts its arena still references.
+    PutSources {
+        ns: NsKey,
+        texts: Vec<(SourceRef, Name)>,
+    },
+    // ## m4-t15b-facets
     // ## m4-t17-mysql (named exception in Task 9's file; T15 carry m4, R-W3-6): the facts
     // read from the server on connect replace the placeholder the catalog was made with
     // (MySQL `lower_case_table_names`, the version, `sql_mode` arrive with the connection).
     /// Replaces the catalog's server facts (carried by every later generation).
     SetServer(Arc<ServerFacts>),
+    // ## m4-t26-overlays (named exception in Task 9's file; ruling R-W5-4)
+    /// Replaces the user layers of the overlays (virtual foreign keys, annotations) with the
+    /// profile's user data ([`Overlays::with_user_data`]); the system layer is kept.
+    SetUserData(Arc<crate::userdata::ProfileUserData>),
+    // ## m4-t26-overlays
 }
 
 /// What a publish produced.
@@ -536,6 +576,12 @@ struct Shared {
     writer: Mutex<()>,
     #[cfg(feature = "catalog")]
     events: tokio::sync::broadcast::Sender<CatalogEvent>,
+    // ## m4-t26-overlays (named exception in Task 9's file; ruling R-W5-4)
+    /// The shipped system catalogs the overlays' system layer is chosen from
+    /// ([`Catalog::with_system`]): every publish that changes the server's engine or version
+    /// re-chooses it, so the layer follows the facts read on connect.
+    system: Option<Arc<crate::system::SystemCatalogs>>,
+    // ## m4-t26-overlays
 }
 
 impl Shared {
@@ -568,7 +614,38 @@ impl fmt::Debug for Catalog {
 impl Catalog {
     /// An empty catalog of `server` at generation 0.
     pub fn new(server: Arc<ServerFacts>) -> Self {
-        let first = Arc::new(CatalogSnapshot::empty(server));
+        Self::make(server, None)
+    }
+
+    // ## m4-t26-overlays (named exception in Task 9's file; ruling R-W5-4)
+    /// An empty catalog of `server` whose overlays carry the system layer `system` gives the
+    /// server's engine and version ([`SystemCatalogs::overlays_for`]), re-chosen by the
+    /// publisher whenever a publish changes them (`CatalogChange::SetServer`). The hub makes
+    /// every profile's catalog this way.
+    ///
+    /// [`SystemCatalogs::overlays_for`]: crate::system::SystemCatalogs::overlays_for
+    pub fn with_system(
+        server: Arc<ServerFacts>,
+        system: Arc<crate::system::SystemCatalogs>,
+    ) -> Self {
+        Self::make(server, Some(system))
+    }
+
+    /// The system catalogs the overlays' system layer is chosen from, if any.
+    pub fn system(&self) -> Option<&Arc<crate::system::SystemCatalogs>> {
+        self.shared.system.as_ref()
+    }
+
+    fn make(server: Arc<ServerFacts>, system: Option<Arc<crate::system::SystemCatalogs>>) -> Self {
+        let mut first = CatalogSnapshot::empty(server);
+        if let Some(sys) = &system {
+            first.overlays = Arc::new(Overlays::default().with_system_of(
+                sys,
+                first.server.dbms,
+                &first.server.version,
+            ));
+        }
+        let first = Arc::new(first);
         Catalog {
             shared: Arc::new(Shared {
                 generations: Mutex::new(vec![(0, Arc::downgrade(&first))]),
@@ -576,10 +653,12 @@ impl Catalog {
                 writer: Mutex::new(()),
                 #[cfg(feature = "catalog")]
                 events: tokio::sync::broadcast::channel(EVENT_CAPACITY).0,
+                system,
             }),
             writer_taken: AtomicBool::new(false),
         }
     }
+    // ## m4-t26-overlays
 
     /// The current generation. Lock-free; keep the `Arc` to pin a generation.
     pub fn current(&self) -> Arc<CatalogSnapshot> {
@@ -668,6 +747,16 @@ impl Publisher {
         changes: Vec<CatalogChange>,
         delta: Option<Arc<CatalogDelta>>,
     ) -> Result<Published, ModelError> {
+        // ## m4-t26-overlays (review m-3): a new server version decodes its snapshot here,
+        // before the writer lock, so a publish never holds the lock across a decode.
+        if let Some(sys) = &self.shared.system {
+            for change in &changes {
+                if let CatalogChange::SetServer(f) = change {
+                    let _ = sys.for_server(f.dbms, &f.version);
+                }
+            }
+        }
+        // ## m4-t26-overlays
         let _writer = self
             .shared
             .writer
@@ -684,6 +773,13 @@ impl Publisher {
         let mut namespaces = Arc::clone(&old.namespaces);
         let mut states = Arc::clone(&old.states);
         let mut server = Arc::clone(&old.server);
+        // ## m4-t26-overlays
+        let mut overlays = Arc::clone(&old.overlays);
+        // ## m4-t26-overlays
+        // ## m4-t15b-facets
+        let mut side = Arc::clone(&old.side);
+        let mut texts_touched: Vec<NsKey> = Vec::new();
+        // ## m4-t15b-facets
         let mut changed = Vec::new();
         let mut seen = HashSet::new();
         let mut mark = |key: &NsKey, changed: &mut Vec<NsKey>| {
@@ -709,6 +805,10 @@ impl Publisher {
                     }
                     if had_state {
                         Arc::make_mut(&mut states).retain(|k, _| *k.ns() != key);
+                    }
+                    // ## m4-t15b-facets: the namespace's facet values and texts go with it.
+                    if side.holds(&key) {
+                        Arc::make_mut(&mut side).remove_ns(&key);
                     }
                     mark(&key, &mut changed);
                 }
@@ -739,14 +839,80 @@ impl Publisher {
                 }
                 // ## m4-t17-mysql
                 CatalogChange::SetServer(facts) => server = facts,
+                // ## m4-t26-overlays
+                CatalogChange::SetUserData(data) => {
+                    overlays = Arc::new((*overlays).clone().with_user_data(&data));
+                }
+                // ## m4-t15b-facets
+                CatalogChange::SetFacet { key, state, value } => {
+                    let ContainerKey::Facet { facet, .. } = &key else {
+                        return Err(ModelError::BadLayout("SetFacet needs a facet key"));
+                    };
+                    if value.as_ref().is_some_and(|v| v.kind() != *facet) {
+                        return Err(ModelError::BadLayout("SetFacet value of another facet"));
+                    }
+                    let value = if state == LoadState::NotLoaded {
+                        Arc::make_mut(&mut states).remove(&key);
+                        None
+                    } else {
+                        Arc::make_mut(&mut states).insert(key.clone(), state);
+                        value
+                    };
+                    if value.is_some() || side.value(&key).is_some() {
+                        Arc::make_mut(&mut side).set_value(key, value);
+                    }
+                }
+                CatalogChange::PutSources { ns, texts } => {
+                    let map = Arc::make_mut(&mut side)
+                        .texts
+                        .entry(ns.clone())
+                        .or_default();
+                    let map = Arc::make_mut(map);
+                    for (r, text) in texts {
+                        if SourceRef::of(&text) == r {
+                            map.insert(r, text);
+                        }
+                    }
+                    texts_touched.push(ns);
+                } // ## m4-t15b-facets
             }
         }
+        // ## m4-t15b-facets: a namespace keeps only the texts its arena references.
+        for ns in changed.iter().chain(texts_touched.iter()) {
+            if !side.texts.contains_key(ns) {
+                continue;
+            }
+            let keep = namespaces.get(ns).map(|a| referenced_sources(a));
+            let side = Arc::make_mut(&mut side);
+            match keep {
+                Some(keep) => {
+                    if let Some(map) = side.texts.get_mut(ns) {
+                        Arc::make_mut(map).retain(|r, _| keep.contains(r));
+                        if map.is_empty() {
+                            side.texts.remove(ns);
+                        }
+                    }
+                }
+                None => {
+                    side.texts.remove(ns);
+                }
+            }
+        }
+        // ## m4-t15b-facets
+        // ## m4-t26-overlays: the system layer follows the server's engine and version.
+        if let Some(sys) = &self.shared.system
+            && (server.dbms != old.server.dbms || server.version != old.server.version)
+        {
+            overlays = Arc::new((*overlays).clone().with_system_of(
+                sys,
+                server.dbms,
+                &server.version,
+            ));
+        }
+        // ## m4-t26-overlays
         let next = Arc::new(CatalogSnapshot::from_parts(
-            generation,
-            server,
-            namespaces,
-            states,
-            Arc::clone(&old.overlays),
+            generation, server, namespaces, states, overlays, // ## m4-t15b-facets
+            side,
         ));
         // The writer lock makes this a plain store; the compare-and-swap is the misuse guard
         // alg/02 edge 2 asks for (a second writer would have moved `current`).
@@ -786,3 +952,178 @@ impl Publisher {
         })
     }
 }
+
+// ## m4-t15b-facets (named exception in Task 9's file; plan Task 15b, R-M4-30)
+
+/// One loaded facet's value (R-M4-30): what `Introspector::facet` read for one object.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FacetValue {
+    /// The server's own text of the object (MySQL `SHOW CREATE`, SQLite `sqlite_schema.sql`).
+    Sources(Name),
+    Grants(Arc<GrantsFacet>),
+    Dependencies(Arc<DepsFacet>),
+    Statistics(Arc<StatsFacet>),
+}
+
+impl FacetValue {
+    /// The facet this value belongs to.
+    pub fn kind(&self) -> FacetKind {
+        match self {
+            FacetValue::Sources(_) => FacetKind::Sources,
+            FacetValue::Grants(_) => FacetKind::Grants,
+            FacetValue::Dependencies(_) => FacetKind::Dependencies,
+            FacetValue::Statistics(_) => FacetKind::Statistics,
+        }
+    }
+}
+
+/// What a generation keeps beside its arenas: facet values per namespace by container key
+/// (their load states are in [`CatalogSnapshot::states`]), and source texts per namespace, each
+/// under its own [`SourceRef`] (content-addressed: a text is never paired with another
+/// object's reference). Shared by `Arc` across generations, per namespace: a publish copies
+/// only the maps of the namespaces it touches (review m-7).
+#[derive(Debug, Clone, Default)]
+struct SideTables {
+    facets: BTreeMap<NsKey, Arc<NsFacets>>,
+    texts: BTreeMap<NsKey, Arc<HashMap<SourceRef, Name>>>,
+}
+
+/// One namespace's facet values, with an index of its `Sources` texts by reference.
+#[derive(Debug, Clone, Default)]
+struct NsFacets {
+    values: BTreeMap<ContainerKey, FacetValue>,
+    by_source: HashMap<SourceRef, ContainerKey>,
+}
+
+impl SideTables {
+    fn holds(&self, ns: &NsKey) -> bool {
+        self.texts.contains_key(ns) || self.facets.contains_key(ns)
+    }
+
+    fn remove_ns(&mut self, ns: &NsKey) {
+        self.texts.remove(ns);
+        self.facets.remove(ns);
+    }
+
+    fn value(&self, key: &ContainerKey) -> Option<&FacetValue> {
+        self.facets.get(key.ns())?.values.get(key)
+    }
+
+    /// Sets (or, `None`, removes) the value of `key`, keeping the `Sources` index.
+    fn set_value(&mut self, key: ContainerKey, value: Option<FacetValue>) {
+        let ns = key.ns().clone();
+        let entry = self.facets.entry(ns.clone()).or_default();
+        let m = Arc::make_mut(entry);
+        if let Some(FacetValue::Sources(old)) = m.values.remove(&key) {
+            let r = SourceRef::of(&old);
+            if m.by_source.get(&r) == Some(&key) {
+                m.by_source.remove(&r);
+            }
+        }
+        if let Some(v) = value {
+            if let FacetValue::Sources(t) = &v {
+                m.by_source.insert(SourceRef::of(t), key.clone());
+            }
+            m.values.insert(key, v);
+        }
+        if m.values.is_empty() {
+            self.facets.remove(&ns);
+        }
+    }
+}
+
+/// The source references `arena`'s objects hold (views, routines, triggers).
+fn referenced_sources(arena: &NamespaceSnapshot) -> HashSet<SourceRef> {
+    arena
+        .objs()
+        .iter()
+        .filter_map(|o| match o.props() {
+            Props::View(p) => p.source,
+            Props::Routine(p) => p.source,
+            Props::Trigger(p) => p.source,
+            _ => None,
+        })
+        .collect()
+}
+
+impl CatalogSnapshot {
+    /// The facet container of `object` as this generation records it: the namespace that
+    /// holds the object and the object's own key there (with its server id when it has one).
+    /// `None` when no arena of this generation holds the object.
+    pub fn facet_key(&self, object: &ObjectKey, facet: FacetKind) -> Option<ContainerKey> {
+        let h = self.find(object)?;
+        Some(ContainerKey::Facet {
+            ns: h.ns.key().clone(),
+            object: h.key()?,
+            facet,
+        })
+    }
+
+    /// Facet `facet` of `object`: its load state and its value. `NotLoaded` and no value when
+    /// no arena of this generation holds the object.
+    pub fn facet(&self, object: &ObjectKey, facet: FacetKind) -> (LoadState, Option<&FacetValue>) {
+        match self.facet_key(object, facet) {
+            Some(key) => (self.state(&key).clone(), self.side.value(&key)),
+            None => (LoadState::NotLoaded, None),
+        }
+    }
+
+    /// The value recorded under `key` (a [`ContainerKey::Facet`]).
+    pub fn facet_value(&self, key: &ContainerKey) -> Option<&FacetValue> {
+        self.side.value(key)
+    }
+
+    /// Every facet container that holds a value, in key order.
+    pub fn loaded_facets(&self) -> impl Iterator<Item = (&ContainerKey, &FacetValue)> {
+        self.side.facets.values().flat_map(|m| m.values.iter())
+    }
+
+    /// The text `r` names, when a pass or a `Sources` facet read of this catalog brought it
+    /// (the text whose hash is `r`: never another object's).
+    pub fn source_text(&self, r: &SourceRef) -> Option<Name> {
+        self.side
+            .texts
+            .values()
+            .find_map(|m| m.get(r))
+            .cloned()
+            .or_else(|| {
+                self.side
+                    .facets
+                    .values()
+                    .find_map(|m| match m.values.get(m.by_source.get(r)?)? {
+                        FacetValue::Sources(t) => Some(t.clone()),
+                        _ => None,
+                    })
+            })
+    }
+
+    /// `object`'s `Sources` facet (the server's text of a table or an index; `DdlSources::
+    /// server_text`), only while it is loaded and not stale.
+    pub fn server_text(&self, object: &ObjectKey) -> Option<Name> {
+        match self.facet(object, FacetKind::Sources) {
+            (LoadState::Loaded { stale: false, .. }, Some(FacetValue::Sources(t))) => {
+                Some(t.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// `object`'s `Grants` facet as a DDL producer reads it (`DdlSources::grants`): loaded
+    /// (and not stale) or partial, with its value. A stale facet (a role was renamed since)
+    /// answers `NotLoaded`, so a script never silently carries grants that may be wrong;
+    /// every other state carries no value.
+    pub fn grants_facet(&self, object: &ObjectKey) -> Facet<GrantsFacet> {
+        match self.facet(object, FacetKind::Grants) {
+            (
+                state @ (LoadState::Loaded { stale: false, .. } | LoadState::Partial { .. }),
+                Some(FacetValue::Grants(g)),
+            ) => Facet {
+                state,
+                value: Some(Arc::clone(g)),
+            },
+            (LoadState::Loaded { .. } | LoadState::Partial { .. }, _) => Facet::not_loaded(),
+            (state, _) => Facet { state, value: None },
+        }
+    }
+}
+// ## m4-t15b-facets

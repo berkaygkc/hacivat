@@ -871,6 +871,20 @@ impl NamespaceSnapshot {
         })
     }
 
+    // ## m4-t28-routine-lookup (named exception, ruling R-W5-9): a lookup by server id alone,
+    // for Task 16's incremental pass, whose existence rows carry an oid but not a routine's
+    // overload signature (which `find` requires through `is_keyed_by`).
+    /// The arena index of the object of `kind` whose server id is `sid`, over the namespace's
+    /// server-id index. `None` when no such object exists, or when two objects of `kind` share
+    /// `sid` (ambiguous, as in [`NamespaceSnapshot::find`]).
+    pub fn find_by_server_id(&self, kind: ObjectKind, sid: ServerId) -> Option<u32> {
+        self.by_server_id
+            .get(&(kind, sid))
+            .copied()
+            .filter(|&i| i != NO_PARENT)
+    }
+    // ## m4-t28-routine-lookup
+
     /// The arena index of the object `key` denotes ([`ObjectKey::same_object`]): by server id
     /// when both sides have one (within this namespace's database: PostgreSQL OIDs are per
     /// database), else by exact path (and overload signature). A path hit whose server id

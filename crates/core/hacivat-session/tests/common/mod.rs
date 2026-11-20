@@ -157,9 +157,10 @@ impl SecretBackend for SlowBackend {
 // ---------------------------------------------------------------------------------------------
 // Credential files: one `.pgpass` for every test (0600, a line for the test user).
 
-fn pgpass_file() -> PathBuf {
-    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-    let dir = DIR.get_or_init(|| {
+thread_local! {
+    /// The `.pgpass` folder of this test thread, removed when the thread ends (a process-wide
+    /// static is never dropped, so its folder outlived every run).
+    static PGPASS_DIR: tempfile::TempDir = {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pgpass");
         std::fs::write(&path, "127.0.0.1:5432:*:deploy:from-pgpass\n").unwrap();
@@ -169,8 +170,11 @@ fn pgpass_file() -> PathBuf {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         dir
-    });
-    dir.path().join("pgpass")
+    };
+}
+
+fn pgpass_file() -> PathBuf {
+    PGPASS_DIR.with(|dir| dir.path().join("pgpass"))
 }
 
 // ---------------------------------------------------------------------------------------------

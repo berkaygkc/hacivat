@@ -13,7 +13,7 @@ mod common;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use common::*;
 use hacivat_driver::fake::FakeDriver;
@@ -60,9 +60,14 @@ async fn ssh(config: TestSshConfig) -> TestSshServer {
     TestSshServer::start(config.forward_to(ForwardTarget::Redirect(db_sink().await)))
 }
 
-fn dir() -> &'static std::path::Path {
-    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-    DIR.get_or_init(|| tempfile::tempdir().unwrap()).path()
+thread_local! {
+    /// This test thread's fixture folder, removed when the thread ends (a process-wide static
+    /// is never dropped, so its folder outlived every run).
+    static DIR: tempfile::TempDir = tempfile::tempdir().unwrap();
+}
+
+fn dir() -> PathBuf {
+    DIR.with(|d| d.path().to_path_buf())
 }
 
 fn fresh_path(name: &str) -> PathBuf {

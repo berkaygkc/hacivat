@@ -1507,3 +1507,42 @@ async fn sqlite_memory_reads_on_the_users_session() {
     assert_eq!(cells(&rows), vec![vec![Some("m".to_string())]]);
     snap.commit().await.unwrap();
 }
+
+// ## m4-t15b-facets (named exception in Task 5's test file; T15b review m-1)
+
+/// A reader that names another engine than the joined session's gets nothing sent; the
+/// session's own engine reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn join_as_refuses_another_engine_before_anything_is_sent() {
+    let (sm, fake) = manager(
+        fake_pg()
+            .tracks_transactions()
+            .queries(vec![answers("SELECT a", "a", &["1"])]),
+        pg_n(4),
+    );
+    let job = in_tx(&sm, SessionKind::Job(1, JobKind::DdlApply)).await;
+    let from = fake.call_log().len();
+    for wrong in [DbmsKind::MySql, DbmsKind::MariaDb, DbmsKind::Sqlite] {
+        let mut c = MetaConn::join_as(&job, wrong).expect("joinable");
+        let mut snap = c.begin_snapshot().await.unwrap();
+        assert_eq!(
+            snap.rows(joinable("SELECT a FROM pg_catalog.pg_class"))
+                .await
+                .map(drop),
+            Err(MetaError::NotJoinable),
+            "{wrong:?}"
+        );
+        snap.commit().await.unwrap();
+    }
+    assert_eq!(fake.call_log().len(), from, "nothing was sent");
+    let mut c = MetaConn::join_as(&job, DbmsKind::Postgres).expect("joinable");
+    let mut snap = c.begin_snapshot().await.unwrap();
+    let rows = snap
+        .rows(joinable("SELECT a FROM pg_catalog.pg_class"))
+        .await
+        .unwrap();
+    assert_eq!(cells(&rows), vec![vec![Some("1".to_string())]]);
+    snap.commit().await.unwrap();
+    assert_eq!(snap_tx(&job), TxStatus::InTx);
+}
+// ## m4-t15b-facets

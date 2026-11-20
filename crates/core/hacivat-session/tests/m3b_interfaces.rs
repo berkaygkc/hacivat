@@ -510,8 +510,17 @@ fn notice_text_is_capped_at_a_char_boundary() {
 /// An M2b `connections.toml`, as an M2b build writes it.
 const M2B_FILE: &str = "version = 1\n\n[[connection]]\nid = \"6f9619ff-8b86-d011-b42d-00c04fc964ff\"\nname = \"orders\"\nengine = \"postgres\"\nread_only = false\nhost = \"127.0.0.1\"\nretention = \"forever\"\ntls.mode = \"verify_full\"\ntransport = \"direct\"\nconnect_timeout_s = 15\napplication_name = \"Hacivat\"\nmax_connections = 4\norigin = \"user_typed\"\nallow_unsupported_server = false\ntx_mode = \"manual\"\n";
 
+thread_local! {
+    /// Keeps each [`tmp_file`] directory until the test thread ends, then removes it.
+    static DIRS: std::cell::RefCell<Vec<tempfile::TempDir>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `connections.toml` holding `text`, in a fresh directory that lives until the test thread ends.
 fn tmp_file(text: &str) -> PathBuf {
-    let path = tempfile::tempdir().unwrap().keep().join("connections.toml");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("connections.toml");
+    DIRS.with(|d| d.borrow_mut().push(dir));
     std::fs::write(&path, text).unwrap();
     path
 }

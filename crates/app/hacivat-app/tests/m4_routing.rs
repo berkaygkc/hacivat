@@ -629,8 +629,8 @@ fn meta_typed_seams_answer_nothing_until_their_tasks(cx: &mut TestAppContext) {
 /// tabs are not saved in `workspace.json`.
 #[gpui::test]
 fn ddl_view_tabs_are_one_per_object(cx: &mut TestAppContext) {
-    let root = tempfile::tempdir().unwrap();
-    let vcx = shell_at(cx, root.path(), "en");
+    let root = temp_root();
+    let vcx = shell_at(cx, root.as_path(), "en");
     let profile = ProfileId::new();
     let ws = workspace(vcx);
     let open = |vcx: &VisualTestContext, key: ObjectKey| {
@@ -710,11 +710,11 @@ fn ddl_view_tabs_are_one_per_object(cx: &mut TestAppContext) {
     // restores exactly the other tabs (ids and kinds) from it, not a fallback layout.
     vcx.executor().advance_clock(Duration::from_millis(600));
     vcx.run_until_parked();
-    let data = root.path().join("data");
+    let data = root.as_path().join("data");
     let saved = std::fs::read_to_string(data.join("workspace.json")).unwrap();
     assert!(!saved.to_ascii_lowercase().contains("ddl"), "{saved}");
     close_all_windows(vcx);
-    let vcx2 = shell_at(cx, root.path(), "en");
+    let vcx2 = shell_at(cx, root.as_path(), "en");
     let set_aside: Vec<String> = std::fs::read_dir(&data)
         .unwrap()
         .filter_map(|e| e.ok()?.file_name().into_string().ok())

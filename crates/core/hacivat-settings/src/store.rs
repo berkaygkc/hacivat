@@ -639,8 +639,18 @@ mod tests {
     use crate::schema::{LanguagePref, ThemePref};
     use crate::{LocalPaths, workspace_state};
 
+    thread_local! {
+        /// Keeps each fixture's directory until the test thread ends, then removes it.
+        static DIRS: std::cell::RefCell<Vec<tempfile::TempDir>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A fresh directory that lives until the test thread ends.
     fn tmp() -> PathBuf {
-        tempfile::tempdir().unwrap().keep()
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        DIRS.with(|d| d.borrow_mut().push(dir));
+        path
     }
     fn write_tmp_named(name: &str, content: &str) -> PathBuf {
         let p = tmp().join(name);

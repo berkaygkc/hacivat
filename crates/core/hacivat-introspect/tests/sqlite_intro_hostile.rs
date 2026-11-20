@@ -659,20 +659,24 @@ fn h4_every_rendered_sqlite_section_passes_the_t5_guards() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn h5_attach_path_cannot_escape_read_only() {
     let l = lite("CREATE TABLE t(a)").await;
-    let odd = file_with(
-        l._dir.path(),
-        "x.db?mode=rw&cache=shared",
-        "CREATE TABLE ox(q)",
-    )
-    .await;
     let plain = file_with(l._dir.path(), "plain.db", "CREATE TABLE p(q)").await;
-    let before = std::fs::read(&odd).unwrap();
     let mut c = l.reader().await;
     for mode in ["rw", "rwc"] {
         let uri = PathBuf::from(format!("file:{}?mode={mode}", plain.display()));
         let got = c.attach_read_only("u", &uri).await;
         assert!(got.is_err(), "mode={mode} must be refused: {got:?}");
     }
+    // `?` and `&` are not valid in a Windows file name, so the literal-name half runs elsewhere.
+    if cfg!(windows) {
+        return;
+    }
+    let odd = file_with(
+        l._dir.path(),
+        "x.db?mode=rw&cache=shared",
+        "CREATE TABLE ox(q)",
+    )
+    .await;
+    let before = std::fs::read(&odd).unwrap();
     c.attach_read_only("odd", &odd).await.unwrap();
     let ns = NsKey::schema(["odd"]);
     for level in [Level::Names, Level::Structure, Level::Sources] {

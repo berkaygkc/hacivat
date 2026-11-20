@@ -353,7 +353,14 @@ impl CatalogHub {
                 ident.lower_case_table_names = u8::MAX;
             }
             let server = ServerFacts::new(profile.engine, ident);
-            let catalog = Arc::new(Catalog::new(Arc::new(server)));
+            // ## m4-t26-overlays (named exception in Task 15's file; ruling R-W5-4): the
+            // catalog carries the hub's system layer, re-chosen by its one writer (the engine)
+            // whenever the facts read on connect change the server's version.
+            let catalog = Arc::new(Catalog::with_system(
+                Arc::new(server),
+                Arc::clone(&self.system),
+            ));
+            // ## m4-t26-overlays
             let publisher = catalog.publisher().ok_or(HubError::Shutdown)?;
             let scope =
                 parse_scope(default_scope(dialect), dialect).expect("the default scopes parse");

@@ -2488,6 +2488,88 @@ introspectors' own system-mode packs.
   input or output of the snapshot build, so it is in neither the digests nor the manifest
   (R-M4-17's manifest fields); Task 26's tests guard its rows.
 
+## m4-t15b — facets and joined fragments
+
+Task 15b (W5; R-M4-29, R-M4-30; carries T16b m-5/m-7, T17b m-6, R-W3-11, R-W4-3).
+
+- **Where facet values live.** `CatalogSnapshot` gains private side tables (Task 9's file,
+  fenced `// ## m4-t15b-facets`): facet values by `ContainerKey::Facet` (their load states stay
+  in `states`, where Task 22 and Task 25 already read them) and source texts per namespace,
+  content-addressed by `SourceRef`. Two changes write them: `CatalogChange::SetFacet { key,
+  state, value }` (the plan's side-table change; a non-facet key or a value of another facet is
+  refused, `NotLoaded` removes state and value) and `CatalogChange::PutSources { ns, texts }` (a
+  text whose XXH3-128 is not its reference is dropped). Neither marks a namespace changed: no
+  arena is restamped, nothing is offered to the cache, subscribers hear one `Published` with an
+  empty delta. After every publish a namespace keeps only the texts its arena references;
+  `Remove(ns)` drops both side tables of `ns`. Readers: `facet_key`, `facet`, `facet_value`,
+  `loaded_facets`, `source_text` (`DdlSources::text`), `server_text` (`DdlSources::server_text`,
+  only `Loaded` and not stale) and `grants_facet` (`DdlSources::grants`: a **stale** facet
+  answers `NotLoaded`, so a script never carries grants a renamed role may have made wrong).
+  Facets are memory-only (not in the cache format).
+- **`load_facet` scheduling** (`engine/facet.rs`, wired as `Request::Facet`/`Work::Facet` in
+  Task 15's scheduler and worker, named exceptions): a facet read is a task of its object's
+  namespace, so it never overlaps a pass of that namespace and is published in order with it.
+  Keys are recorded under the object's own key in the current generation (with its server id);
+  a key no arena holds is not read. Single flight: a fresh loaded facet answers at once; a
+  request covered by a running read of the same namespace and facet joins it; queued ones
+  coalesce (union of keys). Publish: answered keys `Loaded`, keys left out `NotLoaded` (R-W4-3:
+  "partial" is per key in M4; no introspector reports a facet value as partial), a key whose
+  object changed key since the read started is skipped. A definite refusal (`Permission`,
+  server error, `NotJoinable`, protocol) publishes `Failed` for the asked keys and resolves the
+  ticket with the error; a facet the introspector does not list in `IntroCaps::facets`, or
+  answers `NotImplemented` for, is `Failed { Unsupported }`; a transient error (connection,
+  timeout, cancel, busy) publishes nothing. Facet failures never count towards back-pressure.
+- **Sources where the engine has no `Sources` facet** (PostgreSQL: definitions are a level): a
+  `load_facet(Sources)` becomes a fragment of the keys at `Level::Sources` that is not a load,
+  so it reads even when the namespace is held at that level (a cached namespace has the
+  references but none of the texts).
+- **Source texts.** `engine::facet::source_ref` replaces `SourceRef::of` at the introspectors'
+  five hashing sites (`pg/build.rs`, `sqlite/build.rs`, named exceptions); inside
+  `engine::facet::capturing` (set by the worker around every pass and fragment) it also keeps
+  the text, and the scheduler publishes it with the pass (`PutSources`). Outside a capture it is
+  the plain hash. `Sources` facet values (MySQL `SHOW CREATE`, SQLite `sqlite_schema.sql`) also
+  answer `source_text` when their hash matches.
+- **Invalidation.** A pass or fragment drops, in the same publish, the `Grants`,
+  `Dependencies` and `Sources` facets of every object it re-read (T16b's `invalidated`, applied
+  engine-wide) and every facet of an object it dropped, renamed away or scoped out, and every
+  `Dependencies` facet anywhere whose references name one of those objects by server id or by
+  path prefix (T16b m-5, the T22 carry). `Statistics` stays (an estimate for display). A full
+  pass re-reads everything and so drops every such facet of its namespace (fail-safe). Task 22's
+  `stale_grants` (role rename, MySQL privilege hash) is unchanged. Named exception in Task 22's
+  test `a_role_rename_marks_loaded_grants_stale`: its facet now lies in a namespace the test
+  never reads (the first pass of `public` re-reads `t0` and would drop it).
+- **`fragment::on_session(handle, dbms, ns, keys, level, cancel)`** — the plan's signature plus
+  `dbms`: a joined connection knows no server (`MetaConn::join` reports `DbmsKind::Unknown`) and
+  `SessionHandle` carries no engine, so the caller (M7, who holds the profile) names it. It
+  joins (`MetaConn::join`: `Job(DdlApply | DriftCheck)` in a transaction only), reads the
+  relations the keys name (a column's key names its relation) and their columns at `Structure`
+  (`Sources` is capped to `Structure`: no deparsed text is joinable), and merges the read into an
+  empty namespace on the blocking pool: generation 0, never handed to a publisher or a cache (it
+  takes neither).
+  - PostgreSQL: new pack file `packs/pg/50-joined.hvq.sql` (R-M4-32; registered in `pack/mod.rs`,
+    named exception): `JoinedContext` (`current_database()` and `current_schemas(true)` in
+    order), `JoinedNamespaces`, `JoinedRelations` (by namespace oid), `JoinedColumns` (by
+    relation oid). Every bind is an oid list; no name reaches the server (the schema and the
+    caller's relations are picked by exact name on the client). Operators are
+    `OPERATOR(pg_catalog.…)`, casts and functions qualified; no `format_type`/`pg_get_*` (R-M4-46):
+    a column's type is `TypeRef { schema, name }` with raw type = the type's name (typmods,
+    defaults and generation expressions are not read; M7 carry). R-W3-11: a session on another
+    database than `ns`'s, or whose path's first entry after `pg_temp_<digits>` is not
+    `pg_catalog`, is refused with `NotJoinable` before anything else is sent.
+    `current_schemas` joins the joinable function allowlist (`pack/parse.rs`, named exception)
+    and T16's hostile `h2` pure-read list (named exception).
+  - MySQL/MariaDB: `packs/mysql/50-joined.hvq.sql`, `JoinedTables` and `JoinedColumns` from
+    `INFORMATION_SCHEMA` (schema scalar bind, names list bind). MySQL commits implicitly before
+    DDL: a drift check joins the transaction the job holds when it asks.
+  - SQLite: the introspector's own fragment on the joined connection; in M4 a SQLite job request
+    gets the profile's one (console) session and `MetaConn::join` refuses it (M7's writer seam):
+    `on_session` answers `Meta(NotJoinable)` (tested).
+  - Facet reads are not part of a joined read; PostgreSQL's facet sections are not joinable and
+    `Introspector::facet` on a joined connection answers `Meta(NotJoinable)` (T16b m-7; Docker).
+- **Task 25 hook** (applied when T25 merges): `ddl_view/source.rs` `EngineCatalog::sources`
+  answers a `DdlSources` over the current snapshot: `text(r)` → `snap.source_text(r)`,
+  `server_text(k)` → `snap.server_text(k)`, `grants(k)` → `snap.grants_facet(k)`.
+
 ## m4-t25 — state-check verdicts for the DDL view (named exception)
 
 - *Decision.* `IntroHandle::check_state_verdicts(keys)` is `check_state` that also answers each
@@ -2512,3 +2594,324 @@ introspectors' own system-mode packs.
   `set_metadata`/`metadata`/`made_with` (ruling R-W5-11, named exception in `hub.rs`);
   `ProfileUserData` keeps unknown keys (`extra`, `ExtraValue`; ruling R-W5-12). See ADR 0007
   `## m4-t27`.
+
+## m4-t26 — overlays
+
+Task 26 layers the shipped system catalogs and the virtual foreign keys over `SnapshotView`
+and implements `sql_catalog::CatalogView` for it (HV-INTRO-16 consumer side; R-M4-5, -6, -12,
+-27).
+
+- **Opening a set** (`SystemCatalogs::open(dir)`, `from_embedded()`): the manifest is read by
+  a strict reader of the TOML subset it uses (`system::mini_toml`; this crate has no TOML
+  dependency and Task 1a's manifest table is exhaustive). A row's file must be exactly
+  `<dbms>-<line>.hvsnap.zst` (no other path), its line the engine's shape, no line twice.
+  Nothing is decoded at open: `for_server` reads a file on first use, checks it against the
+  manifest's XXH3-64 digest, decodes it with Task 23's strict decoder and checks its dbms and
+  line; every caller and every clone of the set shares one `Arc`. A file that is gone,
+  truncated, tampered with or not decodable serves `None` (decided once), never a panic.
+  `embedded-system` embeds the manifest, the ten files and `virtual-fks.toml`
+  (`system/embedded.rs`, paths from `CARGO_MANIFEST_DIR`); a test ties the table to the
+  manifest.
+- **Exact selection** (R-M4-6): PostgreSQL by major, MySQL and MariaDB by major.minor (a
+  MariaDB `5.5.5-` replication prefix is dropped), the leading `d+(.d+)*` of the version text;
+  no closest line; never SQLite or a fork.
+- **The system layer.** A system namespace of the catalog's engine answers from the snapshot
+  unless the user chose "Introspect live" for it (`Overlays::live_system`, live keys); then,
+  or without a snapshot, the live namespace answers as before, or nothing. This holds whatever
+  the live state of that namespace says (system schemas are out of scope by default,
+  R-M4-14). Named exception in Task 9's `view.rs` (fenced `// ## m4-t26-overlays`): `walk`
+  and `children` ask the layer first; `scope_excludes` is a crate accessor for `sql_view`;
+  the `layers` field doc no longer says "until Task 26".
+- **PostgreSQL system objects in the live form.** A snapshot's PostgreSQL namespaces are keyed
+  `[schema]`; the view hands out arenas re-keyed `[database, schema]` (built once per database
+  per snapshot, shared through `Overlays::cache`), so a handle's key is
+  `[db, pg_catalog, pg_class]` and can be asked for its children like any live key. Handles
+  into the layer carry `ObjId::ns = SYSTEM_LAYER_NS` (`u32::MAX`).
+- **When a miss is a fact** (`system::miss_is_fact`).
+  - *MySQL and MariaDB* (alg/02 HV-INTRO-16 edge 1): only when the server's version has the
+    full `M.m.p` form, the snapshot's line, and is not newer than the snapshot's own version.
+    Their minor releases add functions and system tables, so against a newer patch a miss
+    (and a child list) is `Unknown(ServerDependent)`.
+  - *PostgreSQL* (**ruling R-W5-3**, amending edge 1 for this engine): at any release `M.m` of
+    the snapshot's major. PostgreSQL keeps its system catalogs fixed within a major version:
+    the PostgreSQL documentation, "Upgrading a PostgreSQL Cluster"
+    (`https://www.postgresql.org/docs/current/upgrading.html`), states that minor releases
+    never change the internal storage format and that upgrading to a minor release needs no
+    dump and restore, only new executables; the catalog version (`catversion`, which
+    `initdb` stamps and the server checks at start) changes only between majors. A
+    development, beta or release-candidate build (`17devel`, `18beta1`, `17rc1`: no `M.m`
+    form) and a server of another major are not covered (`Unknown(ServerDependent)`).
+  - An unreadable version is never covered.
+- **R-W2-6's cost, re-checked (carries-w2 T26), settled by R-W5-3.** With a snapshot of the
+  server's major, `pg_catalog` (first on every PostgreSQL search path) is complete at any
+  release of that major, so an unqualified user name walks past it: `Found` in `public`,
+  `Missing` when every schema misses. `pg_catalog` shadows a `public` object of the same name,
+  as on the server (T9's carry; tested). What remains of the cost: a development or beta
+  build, and a server whose version is unknown (no facts read yet), stop every unqualified
+  lookup at `pg_catalog` with `Unknown`.
+- **The virtual layer** (R-M4-12). `SnapshotView::virtual_fks_of(rel)` / `virtual_fks_to(rel)`
+  report user rows (`Overlays::virtual_fks`, from `ProfileUserData` through
+  `Overlays::with_user_data`) and shipped rows (`Overlays::shipped_fks`) as `LayeredFk { layer:
+  Virtual, origin, flags, target, source }`. A row matches a relation by server id (a rename)
+  or by path (an import from another server, whose ids differ). Its target is resolved by
+  server id, then by exact path through the model view (any relation kind; the system layer
+  included). It is hidden when the source relation has a real foreign key with the same
+  columns to the same relation (by path or the target's server id); `BROKEN` only when the
+  target is `Missing`, never on `Unknown`. Virtual rows never enter the model, so
+  `children(_, ForeignKey)` and the DDL producers see only real keys. Annotations are found by
+  their key, else by kind and path.
+- **`virtual-fks.toml`**: hand-written rows, one per reference the PostgreSQL "System
+  Catalogs" chapter states for a column ("relnamespace oid (references pg_namespace.oid)");
+  each row's `source` names the page and column. The reader refuses a row without a non-blank
+  `source`, with column lists of different lengths or with any other key. Every row is
+  checked against the five PostgreSQL snapshots. Shipped rows come with a snapshot only
+  (`overlays_for`).
+- **`CatalogView` for `SnapshotView`** (`sql_view.rs`). A schema key names the system layer's
+  namespace or a live one of the current database. Hits on `relation` and `columns` allocate
+  nothing: keys are compared, the arena's name index answers, and the payloads are `Arc`
+  clones of names or of slices built once per namespace (`LayerCache`, keyed by the arena's
+  address with a `Weak`, so an address is not reused while its entry lives; dead entries go
+  on the next insert). Misses go through `ModelView` with the key as a quoted name, so
+  `Missing` follows its rules exactly. Lists (`relations`, `functions_in`, `types`, `columns`,
+  and `children` of a system object) are `Found` only from a complete, unfiltered namespace;
+  a system namespace is complete only at a patch its snapshot covers (a newer patch may have
+  added a relation or a column: `Unknown(ServerDependent)`), and a system relation held
+  without columns is `Unknown`, never "no columns". MySQL/MariaDB built-ins (name only, `args
+  = None`) join `functions`/`functions_in` of every schema with an empty `schema`; their names
+  are the generator's probe of the documented function index, a subset of what the server
+  accepts, so a MySQL/MariaDB function miss is never `Missing` (`Unknown(ServerDependent)`;
+  without a snapshot `Unknown(NotLoaded)`). `settings()` from the
+  snapshot, else `Unknown(NotLoaded)`; `foreign_keys` is `Unknown` for a system relation (a
+  snapshot holds no constraints); `row_estimate` stays `None` until the catalog stores facet
+  values (Task 15b).
+- **The allocation test counts, it does not hook the allocator** (`unsafe` is confined to the
+  UI platform layer; Task 9's precedent): every step of a `sql_view` lookup that may allocate
+  calls `note_slow_path`, and the test asserts none on warm hits and some on a miss.
+- **Wiring (ruling R-W5-4).** The overlays live in the catalog's generations, so every view
+  (`SnapshotView::new(catalog.current())`) gets them; the one writer keeps them.
+  - The hub never builds views, so a hub-side `with_layers` would reach nothing; and the
+    server's version, which chooses the snapshot, arrives after the catalog is made (the
+    facts read on connect, `CatalogChange::SetServer`). So the catalog holds its layer
+    source: `Catalog::with_system(server, system)` (named exception in Task 9's
+    `snapshot.rs`, fenced) chooses the layer for the placeholder facts, and the publisher
+    re-chooses it (`Overlays::with_system_of`) in every publish that changes the server's
+    engine or version, keeping the user layers, the live choices and the cache. No second
+    writer: only `Publisher::publish` changes a generation.
+  - `CatalogHub` makes every profile's catalog with its set (named exception in Task 15's
+    `hub.rs`, fenced); `Catalog::system()` shows it.
+  - PostgreSQL's introspector now reports its facts (`Introspector::server_facts`, from the
+    `Identity` probe: version, encoding, `standard_conforming_strings`, recovery, the
+    database's collation; named exception in Task 16's `pg/mod.rs`). Before, a PostgreSQL
+    catalog never learned its version, so no snapshot could be chosen. A side effect: PG
+    catalogs now carry the server encoding, so non-ASCII probes key instead of answering
+    `ServerDependent` (the rule `match_key` already had).
+  - User data reaches the overlays through the writer: `CatalogChange::SetUserData` replaces
+    the user layers (virtual foreign keys, annotations) and keeps the system layer. The engine
+    path that publishes it, and persisting "Introspect live" (`live_system`), are T27's
+    (settings item).
+  - Carried: `row_estimate` → T15b (its facet store); the live store of setting names → M5.
+  - Tests: `catalog_with_system_layers_follow_the_server_facts` (meta),
+    `hub_built_catalogs_carry_the_hubs_system_layer` and
+    `engine_published_facts_resolve_a_pg_builtin_through_the_layer` (introspect: an engine over
+    a catalog made the hub's way publishes PG 17.13 facts, and a plain view resolves
+    `pg_catalog.pg_stat_activity` and `now()` through the pg17 layer).
+- **The pg13 Docker test** lives in `hacivat-introspect/tests/system_catalogs.rs` (named
+  exception: a new file of this task there), because `hacivat-meta` may not reach a server
+  (`MetaBelowIntrospect`).
+- **Fix round 1 (opus review: 4 Important, minors; rulings R-W5-6, R-W5-7).**
+  - *I-1.* MySQL and MariaDB compare the `information_schema` name and its table names
+    ASCII-caselessly at any `lower_case_table_names`. The system layer matches that schema
+    caselessly (`system_ns`, `sql_view::place`), and a miss in it gets a second, caseless look
+    at its relations (`SystemNs::caseless_hit`, also for a parent key in `children`).
+    `information_schema.tables` and `INFORMATION_SCHEMA.TABLES` are found. `mysql`,
+    `performance_schema` and `sys` stay case-sensitive under lctn 0.
+  - *I-2, ruling R-W5-6.* A snapshot holds only what initdb creates, so a whole-object miss in
+    the system layer is a fact only when the server is proven to hold nothing more there
+    (`system::objects_complete`).
+    - PostgreSQL: `ServerFacts::system_schema_extras` (named exception in Task 9's
+      `snapshot.rs`) is read on connect, in the same metadata snapshot as `Identity`, by the
+      new section `SystemExtras` (`packs/pg/45-system-extras.hvq.sql`, a new pack file
+      registered in Task 4's `pack/mod.rs`, fenced): any relation, routine, type or operator
+      with an oid of 16384 or more in `pg_catalog` or `information_schema`. A miss is a fact
+      only with `Some(false)` and the version rule; `Some(true)` or `None` gives
+      `Unknown(ServerDependent)` (and stops an unqualified walk there).
+    - MySQL/MariaDB: never (plugins and managed services add system tables and routines).
+    - Hits stay `Found`. After a snapshot miss, a live in-scope arena of the same namespace is
+      consulted: an extension's object in `pg_catalog` is found there (walk and `children`).
+    - The children of an object the snapshot holds (a system table's columns) follow the
+      version rule only (`SystemNs::children_complete`); the schema's own object list follows
+      `objects_complete`.
+  - *I-3, ruling R-W5-7.* `settings()` is `Found` only at the snapshot's exact release
+    (`system::settings_complete`); elsewhere `Unknown(ServerDependent)`.
+    `SnapshotView::known_settings()` gives the partial list and `setting(name)` the point
+    answer: `Found` when known, `Missing` only where the list is complete, else `Unknown`.
+  - *I-4.* A user virtual FK's relation matches by server id only within the same database on
+    PostgreSQL (OIDs are per database).
+  - *m-1.* A failed facts read also clears the version, `version_num` and
+    `system_schema_extras` (named exception in Task 15's `scheduler.rs`, fenced): the layer
+    drops and system lookups answer `Unknown`.
+  - *m-2.* Only release shapes are covered: PostgreSQL `M.m` then nothing or a space;
+    MySQL/MariaDB `M.m.p` then nothing, a space or a dash. `17.2devel`, `17.0beta1`,
+    `17.2-YB`, `17.2.x` are not.
+  - *m-3.* `Publisher::apply` decodes a new version's snapshot before it takes the writer lock.
+    Only a file that is not the manifest's or does not decode is refused for good; an I/O
+    failure is tried again on the next use.
+  - *m-5.* `virtual-fks.toml` notes the zero-means-none columns and `pg_authid`'s
+    superuser-only readability (`pg_roles` instead).
+  - *m-7.* `real_duplicate` compares MySQL/MariaDB column names ASCII-caselessly.
+  - *m-8.* The PostgreSQL facts and the initdb-only fact are one read-only transaction. It runs
+    inside the engine job's cancellation (the job's future is dropped on cancel, as for
+    `identity`). Reusing the listing's `Identity` row needs an introspector seam change:
+    carried to T33 hygiene.
+  - *m-4.* There is no extra publish on connect: the PostgreSQL `SetServer` rides in the scope
+    refresh's own publish (the review's measurement).
+  - Carried to T30: driving the pg13 Docker test through the engine path (m-6; today it
+    publishes the `Names` state by hand and takes its version from the target, so it proves
+    the view's rule, not the engine path), and the live `Names`-level system-schema
+    introspection of unsupported versions (R-M4-6).
+  - The review's hostile tests are `hacivat-meta/tests/overlay_hostile.rs` (H1 and H2
+    tightened to `Found`).
+- **Fix round 2 (RR-I-1, amends R-W5-7).** On MySQL and MariaDB the snapshot's setting list is
+  never complete, even at its exact release: plugin variables (`rpl_semi_sync_source_enabled`,
+  `group_replication_group_name`, `audit_log_file`) exist only where the plugin is loaded, so
+  `settings()` is `Unknown` there and a `setting(name)` miss is `Unknown`, never `Missing`.
+  PostgreSQL keeps the exact-release rule. Probes: `hacivat-meta/tests/overlay_rr1_hostile.rs`.
+
+## m4-t28 — gate G4 (incremental refresh on the ver/01 matrix)
+
+- **Oracle.** After every step, the cached namespace merged with an incremental pass equals a
+  fresh `Full` pass of the same namespace, compared on the namespace's key, engine, fold
+  rule, level and object count and on every object, root included: key and server id,
+  `StateMark`, flags and properties. Only `loaded_at`, the generation and the namespace
+  watermark are left out (`tests/common` block `m4-t28-matrix`, `g4::canon`). A non-Docker
+  test proves that the oracle sees each compared field and ignores only those three.
+- **Narrow reads.** No step may pass by running `Full`: every incremental pass asserts
+  `full_reason == None` plus the step's ver/01 fact from the query log. On PostgreSQL:
+  CREATE INDEX re-reads the keys, never the relation row or the columns; COMMENT re-reads
+  only `Comments`; a removed table or column comment re-reads only `Comments`; DROP INDEX,
+  DROP TRIGGER, DROP TABLE, DROP AGGREGATE, INSERT and VACUUM ANALYZE re-read nothing (the
+  existence query decides). On MySQL, after the R-M4-39 window has passed, each step re-reads
+  exactly `tt`, and INSERT re-reads nothing.
+- **A removed index comment re-reads its relation's keys**, not only `Comments`: an index
+  comment belongs to the keys facet (`CommentOwner::RelKeys`, T16). The gate asserts "keys,
+  never the relation row or the columns" for that step instead of "Comments only".
+- **The Docker tests of `docker_m4_matrix` run one at a time** (a process-wide lock). If a
+  concurrent test's DDL transaction is still open when a pass takes its snapshot, that pass's
+  xmin (the next watermark) falls below an earlier step's commit, and the next pass re-reads
+  that step again. The result is still correct, but it is not the narrow read the step
+  asserts. The MySQL time-zone test also changes a server-wide setting.
+- **REVOKE USAGE on PostgreSQL** (alg/02 HV-INTRO-11 test 7) does not empty the existence set:
+  `pg_catalog` rows stay visible without schema `USAGE`, so nothing is dropped. The test
+  asserts that there is never a silent deletion: either the result is applied with no drops,
+  or the guard holds it. It records which case happened as an `HV-FACT` line. Then it proves
+  the guard fires on a live pass: 20 of 24 tables really dropped gives a background merge
+  `PendingConfirmation { vanished: 20 }`.
+- **Record.** Each cell that holds prints `HV-FACT g4 <target> <case> incremental==full`. The
+  per-step rows go to `target/docker/t28-g4-*.tsv`; the `g4` infix keeps them apart from M3's
+  `t28-*.tsv`.
+- **Fix round 1 (review):**
+  - *Record.* Every line has the form `HV-FACT g4 <target> <topic> k=v …`.
+    - Each TSV row is also printed as `… row step=… changed_parents=… queries=…`.
+    - Each of the 12 Docker tests prints `… wall test=… ms=… target_total_ms=…` for each
+      target. The last `wall` line of a target is that target's total. The PR subset (plan
+      step 4) is the total for `pg17` plus the total for `mysql84`.
+  - *Narrow reads.* COMMENT ON TABLE and COMMENT ON COLUMN now assert "Comments only".
+  - *REVOKE outcomes.* A table existence set that fails closed (`ExistSet::Failed`) is an
+    accepted outcome. So is a pass refused with `Permission`. Part B runs on a fresh session
+    with USAGE given back.
+  - *Long ALTER.* The cell names whether F1 was exercised: `long-alter-straddled` or
+    `long-alter-not-straddled`.
+  - *Canary targets.* The canary test also runs on `pg17-tr` and `pg17wrap`.
+  - *Oracle probes.* The review's oracle-negative probes are now pure tests. An incremental
+    merge that keeps the cached properties, or the cached `StateMark`, of a re-read object
+    fails the oracle.
+- **Known limits:**
+  - *Arena order (review m-2).* `canon` sorts its lines, so the oracle does not see the order
+    of siblings in the arena. On PostgreSQL every Retrieve section orders by oid, and the
+    merge appends new children under a kept parent. Within one kind, the order therefore
+    matches a full pass, except across OID wraparound. A merge bug that only reorders
+    children would still pass G4.
+  - *SQLite cells (review m-3).* On a change, a SQLite incremental pass is a full read, and
+    the merge reuses its arena. The SQLite cells therefore measure change detection, not the
+    merge walk. The PostgreSQL and MySQL cells are the merge coverage.
+  - *Shared stack (review m-8).* The serial lock covers only this test binary, but the
+    PostgreSQL xmin horizon spans the whole cluster. On a shared local stack, another
+    process's open write transaction, or a catalog autoanalyze, can lower a pass's xmin. The
+    next pass then over-reads, and an exact narrow-read assertion fails. CI runs the test
+    binaries one after another on a fresh stack.
+  - *Locale (review m-5).* The LANG test records whether the client host has `tr_TR`
+    installed (`client-locale tr_TR_installed=…`), and its cell names the case it measured.
+    std and the pure-Rust drivers read no locale, so the test guards against a regression.
+- **Carried to T33:** a MySQL `REVOKE SELECT` test. On MySQL, `INFORMATION_SCHEMA` hides
+  tables the login may not read, so existence really does come back empty. The test must show
+  that the mass-drop guard then holds the result (review deviation 3).
+- **Fix round 2 (CI 44692679308):**
+  - *The canary depends on being the first `pg_stat_*` read of its transaction.* A backend's
+    `pg_stat_activity` values are a snapshot taken at the transaction's first access and kept
+    until the transaction ends. This holds on every version, 13–18. A second read in the same
+    transaction therefore cannot see an XID assigned after the first one.
+    - The test's negative control did exactly that, which was a test bug. Each reading now runs
+      in its own transaction, and the hazard is recorded as an `HV-FACT`.
+    - The product holds: `Canary` is the only `pg_stat_*` read of a pass, and it runs last.
+      The non-Docker test `only_the_canary_reads_backend_activity` pins this for 13–18.
+  - *Narrow-read misses no longer stop the matrix.* They are collected, printed as
+    `g4 <target> narrow-violation step=… extra=<section>:<rows>`, and fail the test at the end.
+    Correctness failures still stop it at once.
+  - *Finding for T16: every incremental pass re-reads every routine, on every version.*
+    - The cause: `read_incremental`'s `prev_index` looks up a routine by
+      `key_of(kind, name, oid)`, whose `overload_sig` is `None`. A routine's key carries its
+      identity arguments, so `NamespaceSnapshot::find`'s `is_keyed_by` never matches.
+    - Each routine is then treated as missing from the cache and re-read. This is an over-read,
+      not a miss.
+- **Fix round 3 (ruling R-W5-9): the routine lookup is fixed here.** The changes are named
+  exceptions, fenced `m4-t28-routine-lookup`.
+  - `hacivat-meta` gains `NamespaceSnapshot::find_by_server_id(kind, ServerId)`, which reads
+    the existing server-id index. It returns `None` when two objects of the kind share the id,
+    which is the same ambiguity rule as `find`.
+  - The PostgreSQL incremental pass now finds a cached object by `(kind, oid)` first, and
+    falls back to the path lookup.
+  - Tests:
+    - Task 16's Docker test `insert_only_pass_with_routines_rereads_no_routine`. It was
+      committed first, as the failing half.
+    - `hacivat-meta/tests/find_by_server_id.rs`.
+  - MySQL is not affected: it matches cached objects by kind, raw kind and name, and MySQL
+    has no overloads. SQLite has no routines.
+
+## m4-t15b — fix round 1 (security review)
+
+- **I-1, ruling R-W5-5 (corrects R-W3-11's "skip `pg_temp_N`").** PostgreSQL resolves no
+  operator or function in the session's **own** temp schema, but it does search any other
+  backend's `pg_temp_N` named in the path. `JoinedContext` now also answers the session's own
+  temp schema (`pg_catalog.pg_my_temp_schema()`, a scalar subquery of the same snapshot;
+  `pg_my_temp_schema` joins the joinable function allowlist, named exception in Task 4's
+  `pack/parse.rs`, and T16's hostile h2 pure-read list). `pg_path_is_safe(path, own_temp)`
+  skips only that exact name; anything else before `pg_catalog` (another backend's temp or
+  `pg_toast_temp` schema, a user schema) refuses the read (`NotJoinable`) before any other
+  statement. The list-bind `IN` stays the one unqualified operator: the pack grammar admits a
+  list bind only as `<column> IN :[name]` (chunking soundness, T4 I3/I5), `IN` has no
+  `OPERATOR()` form, and `OPERATOR(pg_catalog.=) ANY (…)` needs an array bind, which R-M4-3
+  rules out. Docker: `joined_read_refuses_another_backends_temp_schema`.
+- **I-2 (T17b m-6).** `Sources` facet reads are per key: a request is split into one job per
+  key, and `Sources` jobs coalesce only with the same key. A key refused with MySQL 1142 is
+  published `Failed` alone.
+- **m-1.** `MetaConn::join_as(session, engine)` (named exception in Task 5's `meta.rs`;
+  `MetaRead.engine` in `session/mod.rs`): the session's actor refuses a read naming another
+  engine than the session's before the text guard and before anything is sent.
+  `on_session` now takes the catalog's `ServerFacts` (engine, flavor, identifier rule) instead
+  of a bare `DbmsKind`.
+- **m-2.** The scheduler keeps a facet epoch, bumped by `stale_grants` and by a pass that drops
+  facets; a facet read that saw it move while it ran publishes its answer stale.
+- **m-3.** A `Failed` facet is not read again before `at + retry_after`.
+- **m-4.** SQLSTATE classes `40`, `57`, `53`, `08`, `55P03`, MySQL 1205/1213 and `CatalogRace`
+  are transient: nothing is published.
+- **m-6.** The joined snapshot folds names by the facts' identifier rule (`lower_case_table_names`);
+  MySQL relation kinds follow T17's `relation_kind` (MariaDB sequences are sequences, with no
+  columns; unknown kinds are left out).
+- **m-7.** Facet values are kept per namespace (a publish copies only the touched namespace's
+  map), with an index of `Sources` texts by reference for `source_text`.
+- **Hostile tests.** H1/H1b are committed (`tests/t15b_review_hostile.rs`). H2/H3 need
+  `hacivat-driver/fake` as a dev-dependency of this crate (a controller manifest amendment);
+  adapted to the fixed seam they pass 8/8 under that feature (verified with an uncommitted
+  local manifest change, reverted).
+- **Still open:** the T25 seam hook (`EngineCatalog::sources`) and its engine-backed
+  facet-vouch tests (gpui build; disk), and wiring T26's `row_estimate` (T26 not on `m4`).
