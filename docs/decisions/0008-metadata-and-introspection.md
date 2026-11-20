@@ -2556,3 +2556,21 @@ introspectors' own system-mode packs.
 - **Carried to T33:** a MySQL `REVOKE SELECT` test. On MySQL, `INFORMATION_SCHEMA` hides
   tables the login may not read, so existence really does come back empty. The test must show
   that the mass-drop guard then holds the result (review deviation 3).
+- **Fix round 2 (CI 44692679308):**
+  - *The canary depends on being the first `pg_stat_*` read of its transaction.* A backend's
+    `pg_stat_activity` values are a snapshot taken at the transaction's first access and kept
+    until the transaction ends. This holds on every version, 13–18. A second read in the same
+    transaction therefore cannot see an XID assigned after the first one.
+    - The test's negative control did exactly that, which was a test bug. Each reading now runs
+      in its own transaction, and the hazard is recorded as an `HV-FACT`.
+    - The product holds: `Canary` is the only `pg_stat_*` read of a pass, and it runs last.
+      The non-Docker test `only_the_canary_reads_backend_activity` pins this for 13–18.
+  - *Narrow-read misses no longer stop the matrix.* They are collected, printed as
+    `g4 <target> narrow-violation step=… extra=<section>:<rows>`, and fail the test at the end.
+    Correctness failures still stop it at once.
+  - *Finding for T16: every incremental pass re-reads every routine, on every version.*
+    - The cause: `read_incremental`'s `prev_index` looks up a routine by
+      `key_of(kind, name, oid)`, whose `overload_sig` is `None`. A routine's key carries its
+      identity arguments, so `NamespaceSnapshot::find`'s `is_keyed_by` never matches.
+    - Each routine is then treated as missing from the cache and re-read. This is an over-read,
+      not a miss.

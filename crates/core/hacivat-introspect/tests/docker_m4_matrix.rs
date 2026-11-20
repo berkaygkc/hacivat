@@ -776,29 +776,61 @@ const STEPS: &[Step] = &[
     },
 ];
 
-/// Asserts `step`'s narrow-read facts on pass `p`.
-fn check_narrow(label: &str, st: &Step, p: &PgPass) {
-    let log = p.report.log.names();
+/// The rows `section` read in pass `p` (all its statements).
+fn rows_of(p: &PgPass, section: &str) -> usize {
+    p.report
+        .log
+        .sections
+        .iter()
+        .filter(|s| s.name == section)
+        .map(|s| s.rows)
+        .sum()
+}
+
+/// `step`'s narrow-read facts on pass `p`: every one that does not hold, as
+/// `missing=<section>` (a section that had to run) or `extra=<section>:<rows>` (one that must
+/// not, with the rows it read).
+fn check_narrow(st: &Step, p: &PgPass) -> Vec<String> {
+    let mut v = Vec::new();
     for n in st.narrow {
         match *n {
             Narrow::Ran(names) => {
-                for s in names {
-                    assert!(ran(p, s), "{label}: {s} did not run; log {log:?}");
-                }
+                v.extend(
+                    names
+                        .iter()
+                        .filter(|s| !ran(p, s))
+                        .map(|s| format!("missing={s}")),
+                );
             }
             Narrow::NotRan(names) => {
-                for s in names {
-                    assert!(!ran(p, s), "{label}: {s} ran; log {log:?}");
-                }
+                v.extend(
+                    names
+                        .iter()
+                        .filter(|s| ran(p, s))
+                        .map(|s| format!("extra={s}:{}", rows_of(p, s))),
+                );
             }
             Narrow::ExistenceOnly => {
-                assert!(reads(p).is_empty(), "{label}: re-read {:?}", reads(p));
+                v.extend(
+                    reads(p)
+                        .into_iter()
+                        .map(|s| format!("extra={s}:{}", rows_of(p, s))),
+                );
             }
             Narrow::CommentsOnly => {
-                assert_eq!(reads(p), [name::COMMENTS], "{label}: log {log:?}");
+                if !ran(p, name::COMMENTS) {
+                    v.push(format!("missing={}", name::COMMENTS));
+                }
+                v.extend(
+                    reads(p)
+                        .into_iter()
+                        .filter(|s| *s != name::COMMENTS)
+                        .map(|s| format!("extra={s}:{}", rows_of(p, s))),
+                );
             }
         }
     }
+    v
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -809,6 +841,10 @@ async fn pg_xmin_matrix_incremental_equals_full() {
     }
     let _serial = serial().await;
     let mut tsv = Tsv::new("pg-xmin");
+    // Narrow-read misses are collected and the test fails at the end (fix round 2): an
+    // over-read is safe, so the matrix runs on to measure every step and every server; a
+    // correctness failure (the oracle, a `Full` pass, an object that stays) still stops it.
+    let mut narrow: Vec<String> = Vec::new();
     for t in pg_targets() {
         let started = Instant::now();
         let s = unique("hvm4_t28_xs");
@@ -830,7 +866,12 @@ async fn pg_xmin_matrix_incremental_equals_full() {
             let p = pg_pass(&mut c, &ns, Mode::Incremental, Level::Sources, Some(&prev)).await;
             assert_eq!(p.report.full_reason, None, "{label}: incremental");
             assert!(ran(&p, name::CANARY), "{label}: the canary");
-            check_narrow(&label, st, &p);
+            let missed = check_narrow(st, &p);
+            if !missed.is_empty() {
+                let kv = format!("step={} {}", st.id, missed.join(" "));
+                note(&t.id, "narrow-violation", &kv);
+                narrow.push(format!("{} {kv}", t.id));
+            }
             let next = apply(&prev, p.result.clone());
             let fresh = pg_full(&mut c, &ns, Level::Sources).await;
             assert_equal(&label, &next, &fresh);
@@ -877,6 +918,11 @@ async fn pg_xmin_matrix_incremental_equals_full() {
         pg.shutdown().await;
         wall(&t, "pg_xmin_matrix", started);
     }
+    assert!(
+        narrow.is_empty(),
+        "narrow-read facts that did not hold:\n{}",
+        narrow.join("\n")
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -960,8 +1006,14 @@ async fn pg_canary_no_xid_assigned_by_any_pass() {
                 t.id
             );
         }
-        // Negative control: the same `Canary` text reads `f` in a transaction that holds an
-        // XID and `t` in one that does not.
+        // Negative control: the same `Canary` text reads `t` in a transaction without an XID
+        // and `f` in one whose XID was assigned before the canary's first read. Each reading
+        // is its own transaction (fix round 2): a backend's `pg_stat_activity` values are a
+        // snapshot taken at the transaction's first access and kept until it ends (PostgreSQL
+        // "The Cumulative Statistics System", every version 13-18), so a second read in the
+        // same transaction cannot see an XID assigned after the first. The product holds
+        // because `Canary` is the only `pg_stat_*` read of a pass and runs last
+        // (`only_the_canary_reads_backend_activity`).
         let version = full.report.version;
         let canary = pack()
             .unwrap()
@@ -973,6 +1025,8 @@ async fn pg_canary_no_xid_assigned_by_any_pass() {
             .remove(0);
         a.batch("BEGIN").await;
         let without = a.scalar(canary.sql()).await;
+        a.batch("ROLLBACK").await;
+        a.batch("BEGIN").await;
         a.batch("SELECT pg_catalog.txid_current()").await;
         let with = a.scalar(canary.sql()).await;
         a.batch("ROLLBACK").await;
@@ -982,10 +1036,20 @@ async fn pg_canary_no_xid_assigned_by_any_pass() {
             "{}: the canary must see an assigned XID",
             t.id
         );
+        // The hazard itself, recorded: a read before the XID, then one after it, in one
+        // transaction (the run of 44692679308 saw `t` on pg13).
+        a.batch("BEGIN").await;
+        let _ = a.scalar(canary.sql()).await;
+        a.batch("SELECT pg_catalog.txid_current()").await;
+        let stale = a.scalar(canary.sql()).await;
+        a.batch("ROLLBACK").await;
         note(
             &t.id,
             "canary",
-            &format!("passes={} negative_control=held", passes.len()),
+            &format!(
+                "passes={} negative_control=held second_read_after_xid_in_same_txn={stale}",
+                passes.len()
+            ),
         );
         a.close().await;
         drop(c);
@@ -1304,6 +1368,49 @@ fn rendered_pack(version: u32, ns_oid: u32, rel: u32) -> Vec<String> {
         }
     }
     out
+}
+
+/// No Docker (fix round 2). `pg_stat_activity` values are a per-transaction snapshot taken at
+/// the first `pg_stat_*` access, so the `Canary` (run last in a pass's transaction) sees the
+/// transaction's real `backend_xid` only while no other section of the pass reads backend
+/// activity or statistics first. Pins that: on every supported major, only `Canary` names a
+/// `pg_stat_*` relation or function in its SQL (`pg_statistic*` is a catalog, not a statistics
+/// view; `--` comments are left out, since a pack comment may name the view).
+#[test]
+fn only_the_canary_reads_backend_activity() {
+    let stat = regex::Regex::new(r"(?i)\bpg_stat_[a-z_]*").unwrap();
+    let p = pack().unwrap();
+    for version in [130_000, 140_000, 150_000, 160_000, 170_000, 180_000] {
+        let mut canary = 0;
+        for section in p.sections() {
+            for v in p.reachable_variants(section) {
+                let binds = Binds {
+                    ns: Some(16_384),
+                    w: Some(3),
+                    schema: Some("public".into()),
+                    oids: Some(vec![16_400]),
+                };
+                for q in p
+                    .render(section, &ctx(version, v.mode, v.level, &binds))
+                    .unwrap()
+                {
+                    let code: String = q
+                        .sql()
+                        .lines()
+                        .map(|l| l.split("--").next().unwrap_or_default())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if &**section == name::CANARY {
+                        assert!(code.contains("pg_stat_activity"), "{version}: {code}");
+                        canary += 1;
+                    } else {
+                        assert!(!stat.is_match(&code), "{version} {section}: {code}");
+                    }
+                }
+            }
+        }
+        assert!(canary >= 1, "{version}: the Canary statement");
+    }
 }
 
 fn oid(o: Option<ServerId>) -> u32 {
