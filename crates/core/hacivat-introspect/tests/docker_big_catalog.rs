@@ -56,9 +56,7 @@ async fn cold(c: &mut MetaConn, ns: &NsKey, level: Level) -> (NamespaceSnapshot,
         ..MergePolicy::default()
     };
     let next = match merge(Some(&b), p.result, &policy).expect("merge") {
-        MergeOutcome::Applied { next, .. } | MergeOutcome::PendingConfirmation { next, .. } => {
-            next
-        }
+        MergeOutcome::Applied { next, .. } | MergeOutcome::PendingConfirmation { next, .. } => next,
     };
     (next, started.elapsed().as_millis())
 }
@@ -95,14 +93,20 @@ async fn big_catalog_cold_times_recorded_and_cache_artifact_written() {
             .unwrap_or_else(|e| panic!("hv_m4_big: {e:?}"));
         a.close().await;
     }
-    let pg = Pg::connect(&t).await;
-    let mut c = pg.meta().await;
     let ns = NsKey::schema([t.database.as_str(), big_catalog::SCHEMA]);
-
-    let (names, names_ms) = cold(&mut c, &ns, Level::Names).await;
-    let (structure, structure_ms) = cold(&mut c, &ns, Level::Structure).await;
-    drop(c);
-    pg.shutdown().await;
+    // Fix round 1 (m-4): `Structure` first, each level on a fresh connection, so neither pass
+    // runs on a backend whose catalog caches the other warmed. The server's shared buffers stay
+    // warm (the fixture was just ensured): the HV-FACT line says so.
+    let mut times = Vec::new();
+    for level in [Level::Structure, Level::Names] {
+        let pg = Pg::connect(&t).await;
+        let mut c = pg.meta().await;
+        times.push(cold(&mut c, &ns, level).await);
+        drop(c);
+        pg.shutdown().await;
+    }
+    let (names, names_ms) = times.pop().expect("Names");
+    let (structure, structure_ms) = times.pop().expect("Structure");
 
     // The fixture is the stated size (review probe: "fixture smaller than stated").
     assert_eq!(tables(&names), BIG_TABLES as usize);
@@ -140,7 +144,7 @@ async fn big_catalog_cold_times_recorded_and_cache_artifact_written() {
     let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
 
     eprintln!(
-        "HV-FACT g1 hv_m4_big pg17 {} tables {} columns (debug build): cold Names {names_ms} ms, cold Structure {structure_ms} ms; \
+        "HV-FACT g1 hv_m4_big pg17 {} tables {} columns (debug build; fresh connection per level, Structure first, server buffers warm): cold Structure {structure_ms} ms, cold Names {names_ms} ms; \
          D-038 current [{}] -> {:?}, other [{}] -> {:?}; cache saved in {save_ms} ms, {bytes} bytes at {}",
         BIG_TABLES,
         BIG_COLUMNS,

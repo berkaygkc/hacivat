@@ -9,8 +9,10 @@
 //! - **t1**: the first presented frame in which the explorer shows the schema's kind group with
 //!   its count and the first visible table rows: after a frame's draw and present (the next
 //!   main-thread turn after a `Window::on_next_frame` callback, the [`super::FrameCpu`] rule),
-//!   the tree's rows built in that frame hold the `TABLES` group header of `app.public`, with its
-//!   count, and at least one table row under it ([`Watch::check`]).
+//!   the tree's rows built in that frame hold the `TABLES` group header of the watched schema
+//!   ([`Target`]: the fixture's schema with the most tables, `app.public` for fixture (a),
+//!   `<db>.hv_m4_big` for fixture (b)), with its count, and at least one table row under it
+//!   ([`Watch::check`]).
 //! - **Conditions**: app start with the profile already expanded in the restored workspace
 //!   (`workspace.json` holds the profile, database, schema and `TABLES` rows expanded), the
 //!   server unreachable (`--offline`: the profile names `127.0.0.1:9` and its driver is a fake
@@ -50,11 +52,11 @@ use hacivat_introspect::hub::{CatalogHub, HubError, HubSettings, ProfileCatalog,
 use hacivat_l10n::OsLocale;
 use hacivat_meta::codec::FORMAT_MAJOR;
 use hacivat_meta::persist::{CacheStore, Encryption, RowKey, WriterId};
-use hacivat_meta::{NamespaceSnapshot, NsKey, ObjectKind};
+use hacivat_meta::{NamespaceSnapshot, NsKey, NsKind, ObjectKind};
 use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
 use hacivat_secrets::{
-    AuthProviderId, MemoryBackend, SecretBackend, SecretError, SecretKey, SecretSlot,
-    SecretStore, SecretString,
+    AuthProviderId, MemoryBackend, SecretBackend, SecretError, SecretKey, SecretSlot, SecretStore,
+    SecretString,
 };
 use hacivat_session::profile::{Profile, ProfileEndpoint};
 use hacivat_settings::{LanguagePref, workspace_state};
@@ -88,9 +90,63 @@ pub const BUDGET_MS: f64 = 300.0;
 /// `tests/bench_fixture.rs`).
 pub const TABLES: usize = 15_000;
 pub const COLUMNS: usize = 160_000;
-/// The database and the schema the fixture holds every table in.
+/// The database and the schema the synthetic fixture holds every table in.
 pub const DB: &str = "app";
 pub const SCHEMA: &str = "public";
+
+// ## m4-t29-g1-bench (fix round 1, I-1): the watched schema comes from the fixture.
+/// The schema the bench watches (a PostgreSQL schema namespace `[db, schema]`): by default the
+/// fixture's schema namespace with the most tables (`app.public` for fixture (a),
+/// `<db>.hv_m4_big` for fixture (b)), or `--schema db.schema`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub db: String,
+    pub schema: String,
+}
+
+impl Target {
+    /// `app.public`, the synthetic fixture's schema.
+    pub fn synthetic() -> Target {
+        Target {
+            db: DB.to_string(),
+            schema: SCHEMA.to_string(),
+        }
+    }
+
+    /// `db.schema` (exactly one dot, both parts non-empty).
+    pub fn parse(s: &str) -> Result<Target, String> {
+        match s.split_once('.') {
+            Some((db, schema)) if !db.is_empty() && !schema.is_empty() && !schema.contains('.') => {
+                Ok(Target {
+                    db: db.to_string(),
+                    schema: schema.to_string(),
+                })
+            }
+            _ => Err(format!("bad --schema {s} (expected db.schema)")),
+        }
+    }
+
+    /// As `--schema` takes it.
+    pub fn arg(&self) -> String {
+        format!("{}.{}", self.db, self.schema)
+    }
+
+    /// The schema's namespace key.
+    pub fn ns(&self) -> NsKey {
+        NsKey::schema([self.db.as_str(), self.schema.as_str()])
+    }
+
+    /// The target of a PostgreSQL schema namespace.
+    pub fn of(key: &NsKey) -> Option<Target> {
+        match (key.kind, key.path.as_slice()) {
+            (NsKind::Schema, [db, schema]) => Some(Target {
+                db: db.to_string(),
+                schema: schema.to_string(),
+            }),
+            _ => None,
+        }
+    }
+}
 /// The prefix of a child's one result line on stdout.
 pub const RUN_LINE: &str = "G1RUN ";
 /// The row key of the encrypted variant's cache: bench fixture data, not a user secret (the
@@ -103,7 +159,7 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(60);
 pub const T0_DEF: &str = "CatalogHost begins opening the profile's cache file (CatalogSource::ensure entered on the core runtime)";
 pub const T1_DEF: &str = "first presented frame whose built tree rows hold the schema's TABLES group header with its count and at least one table row";
 
-pub const USAGE: &str = "usage: catalog_cold --fixture <cache-file> --offline [--runs N] [--variant plain|encrypted|both] [--key-delay-ms N] [--any-fixture] [--allow-inactive]
+pub const USAGE: &str = "usage: catalog_cold --fixture <cache-file> --offline [--runs N] [--variant plain|encrypted|both] [--key-delay-ms N] [--schema db.schema] [--any-fixture] [--allow-inactive]
   write the fixture: HACIVAT_G1_FIXTURE=$PWD/target/bench/g1-160k.v1.sqlite cargo test --release -p hacivat-meta --test bench_fixture -- --ignored write_g1_fixture";
 
 // ---- arguments ---------------------------------------------------------------------------------
@@ -151,6 +207,8 @@ pub struct Args {
     /// Run on a fixture smaller than the stated scale (ungraded).
     pub any_fixture: bool,
     pub allow_inactive: bool,
+    /// The schema to watch (default: the fixture's schema namespace with the most tables).
+    pub schema: Option<Target>,
     /// Internal: this process is one run of `variant`.
     pub child: Option<Variant>,
 }
@@ -160,7 +218,9 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
         .map(PathBuf::from)
         .ok_or("missing --fixture <cache-file>")?;
     if !args.iter().any(|a| a == "--offline") {
-        return Err("the G1 bench runs offline only (the server unreachable); pass --offline".into());
+        return Err(
+            "the G1 bench runs offline only (the server unreachable); pass --offline".into(),
+        );
     }
     let runs = match flag(args, "--runs") {
         Some(n) => n.parse::<usize>().map_err(|_| format!("bad --runs {n}"))?,
@@ -181,6 +241,7 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
         None => Duration::ZERO,
     };
     let child = flag(args, "--child").map(Variant::parse).transpose()?;
+    let schema = flag(args, "--schema").map(Target::parse).transpose()?;
     Ok(Args {
         fixture,
         runs,
@@ -188,6 +249,7 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
         key_delay,
         any_fixture: args.iter().any(|a| a == "--any-fixture"),
         allow_inactive: args.iter().any(|a| a == "--allow-inactive"),
+        schema,
         child,
     })
 }
@@ -232,25 +294,40 @@ fn load_cache(path: &Path, encryption: Encryption) -> anyhow::Result<Vec<Namespa
     let opened = CacheStore::open(path, encryption, WriterId(1))
         .map_err(|e| anyhow!("opening {}: {e:?}", path.display()))?;
     if let Some(reason) = opened.rebuilt {
-        bail!("{} is not a readable catalog cache ({reason:?})", path.display());
+        bail!(
+            "{} is not a readable catalog cache ({reason:?})",
+            path.display()
+        );
     }
     let mut store = opened.store;
     let all = store
         .load_all()
         .map_err(|e| anyhow!("reading {}: {e:?}", path.display()))?;
     if !all.dropped.is_empty() {
-        bail!("{} has {} unreadable rows", path.display(), all.dropped.len());
+        bail!(
+            "{} has {} unreadable rows",
+            path.display(),
+            all.dropped.len()
+        );
     }
     Ok(all.namespaces)
 }
 
-/// Copies `fixture` into `work` and reads its shape there (the user's file is never opened).
-/// With `sealed`, also writes the row-encrypted copy the encrypted variant loads.
+fn tables_of(ns: &NamespaceSnapshot) -> usize {
+    ns.objs()
+        .iter()
+        .filter(|o| o.kind() == ObjectKind::Table)
+        .count()
+}
+
+/// Copies `fixture` into `work` and reads its shape there (the user's file is never opened),
+/// with its schema namespaces, the one holding the most tables first (the default
+/// [`Target`]). With `sealed`, also writes the row-encrypted copy the encrypted variant loads.
 pub fn prepare_fixture(
     fixture: &Path,
     work: &Path,
     sealed: Option<&Path>,
-) -> anyhow::Result<FixtureShape> {
+) -> anyhow::Result<(FixtureShape, Vec<Target>)> {
     let bytes = std::fs::metadata(fixture)
         .with_context(|| format!("reading {}", fixture.display()))?
         .len();
@@ -259,13 +336,16 @@ pub fn prepare_fixture(
     let nss = load_cache(&copy, Encryption::None)?;
     let shape = FixtureShape {
         namespaces: nss.len(),
-        tables: nss
-            .iter()
-            .map(|n| n.objs().iter().filter(|o| o.kind() == ObjectKind::Table).count())
-            .sum(),
+        tables: nss.iter().map(tables_of).sum(),
         columns: nss.iter().map(NamespaceSnapshot::column_count).sum(),
         bytes,
     };
+    let mut schemas: Vec<(usize, Target)> = nss
+        .iter()
+        .filter_map(|n| Target::of(n.key()).map(|t| (tables_of(n), t)))
+        .collect();
+    schemas.sort_by_key(|s| std::cmp::Reverse(s.0));
+    let target: Vec<Target> = schemas.into_iter().map(|(_, t)| t).collect();
     if let Some(sealed) = sealed {
         let mut store = CacheStore::open(
             sealed,
@@ -280,14 +360,14 @@ pub fn prepare_fixture(
                 .map_err(|e| anyhow!("sealing {:?}: {e:?}", ns.key()))?;
         }
     }
-    Ok(shape)
+    Ok((shape, target))
 }
 
 // ---- one run's app -------------------------------------------------------------------------------
 
 /// The bench profile of `variant`: a development profile (plaintext cache) or a production one
 /// (`catalog_sensitive`: encrypted cache). Its server is unreachable and never dialled.
-pub fn profile(variant: Variant) -> Profile {
+pub fn profile(variant: Variant, target: &Target) -> Profile {
     Profile {
         name: "g1-bench".to_string(),
         engine: DbmsKind::Postgres,
@@ -297,7 +377,7 @@ pub fn profile(variant: Variant) -> Profile {
         },
         user: Some("bench".to_string()),
         auth: AuthProviderId::None,
-        database: Some(DB.to_string()),
+        database: Some(target.db.clone()),
         environment: Some(match variant {
             Variant::Plain => EnvTag::Dev,
             Variant::Encrypted => EnvTag::Production,
@@ -306,18 +386,13 @@ pub fn profile(variant: Variant) -> Profile {
     }
 }
 
-/// The schema of the fixture.
-pub fn schema_ns() -> NsKey {
-    NsKey::schema([DB, SCHEMA])
-}
-
 /// The rows the restored workspace shows expanded: the profile, its database, the schema and
 /// the schema's `TABLES` group.
-pub fn expanded_keys(id: ProfileId) -> Vec<TreeKey> {
-    let schema = adapter::namespace_key(id, &schema_ns());
+pub fn expanded_keys(id: ProfileId, target: &Target) -> Vec<TreeKey> {
+    let schema = adapter::namespace_key(id, &target.ns());
     vec![
         adapter::profile_key(id),
-        adapter::database_key(id, DB),
+        adapter::database_key(id, &target.db),
         schema,
         adapter::group_key(schema, DisplayGroup::Tables),
     ]
@@ -475,15 +550,24 @@ pub struct Prepared {
     pub profile: ProfileId,
     pub backend: Arc<TimedBackend>,
     pub timings: Arc<Timings>,
+    /// The schema the run watches.
+    pub target: Target,
 }
 
 /// Prepares one run of `variant` over `cache` (the plaintext fixture, or the sealed copy for
-/// the encrypted variant): a fresh root, the profile, the cache file in the profile's place,
-/// the restored layout and the secret store's backend.
-pub fn prepare(variant: Variant, cache: &Path, key_delay: Duration) -> anyhow::Result<Prepared> {
+/// the encrypted variant) watching `target`: a fresh root, the profile, the cache file in the
+/// profile's place, the restored layout and the secret store's backend. The root is removed
+/// again on any failure (fix round 1, m-2).
+pub fn prepare(
+    variant: Variant,
+    cache: &Path,
+    key_delay: Duration,
+    target: &Target,
+) -> anyhow::Result<Prepared> {
     let root = BenchRoot::new("g1")?;
-    let p = profile(variant);
+    let p = profile(variant, target);
     let id = p.id;
+    let backend = Arc::new(TimedBackend::new(key_delay));
     let done = (|| {
         super::save_profile(&root, &[p])?;
         copy_cache(
@@ -492,21 +576,22 @@ pub fn prepare(variant: Variant, cache: &Path, key_delay: Duration) -> anyhow::R
                 .paths()
                 .catalog_db(&id.0.to_string(), u32::from(FORMAT_MAJOR)),
         )?;
-        save_layout(&root, id, &expanded_keys(id))
+        save_layout(&root, id, &expanded_keys(id, target))?;
+        if variant == Variant::Encrypted {
+            backend.store_bench_key(id)?;
+        }
+        Ok(())
     })();
     if let Err(e) = done {
         root.remove();
         return Err(e);
-    }
-    let backend = Arc::new(TimedBackend::new(key_delay));
-    if variant == Variant::Encrypted {
-        backend.store_bench_key(id)?;
     }
     Ok(Prepared {
         root,
         profile: id,
         backend,
         timings: Arc::default(),
+        target: target.clone(),
     })
 }
 
@@ -564,12 +649,15 @@ pub struct Painted {
     pub table_rows: usize,
 }
 
-/// The `TABLES` group of `app.public` and its table rows, if the tree's last frame built them.
-pub fn painted(id: ProfileId, cx: &App) -> Option<Painted> {
+/// The `TABLES` group of `target` and its table rows, if the tree's last frame built them.
+pub fn painted(id: ProfileId, target: &Target, cx: &App) -> Option<Painted> {
     let tree = crate::connections::explorer::tree(cx)?;
     let tree = tree.read(cx);
     let model = tree.model();
-    let group = adapter::group_key(adapter::namespace_key(id, &schema_ns()), DisplayGroup::Tables);
+    let group = adapter::group_key(
+        adapter::namespace_key(id, &target.ns()),
+        DisplayGroup::Tables,
+    );
     let built = tree.flat().rows().get(tree.built_rows())?;
     let at = built
         .iter()
@@ -600,6 +688,7 @@ pub struct Watch {
     pub profile: ProfileId,
     pub timings: Arc<Timings>,
     pub backend: Arc<TimedBackend>,
+    pub target: Target,
     /// The process start (the example's `main`).
     pub started: Instant,
     seen: Cell<Option<Instant>>,
@@ -613,6 +702,7 @@ impl Watch {
             profile: prep.profile,
             timings: prep.timings.clone(),
             backend: prep.backend.clone(),
+            target: prep.target.clone(),
             started,
             seen: Cell::new(None),
             done: Cell::new(false),
@@ -627,7 +717,7 @@ impl Watch {
     pub fn sample(&self, cx: &App) {
         if self.seen.get().is_none()
             && adapter::catalog_of(self.profile, cx)
-                .is_some_and(|c| c.namespaces.contains_key(&schema_ns()))
+                .is_some_and(|c| c.namespaces.contains_key(&self.target.ns()))
         {
             self.seen.set(Some(Instant::now()));
         }
@@ -639,7 +729,7 @@ impl Watch {
             return None;
         }
         self.sample(cx);
-        let shown = painted(self.profile, cx)?;
+        let shown = painted(self.profile, &self.target, cx)?;
         let t1 = Instant::now();
         let t0 = self.timings.t0()?;
         let ensured = self.timings.ensured().unwrap_or(t1);
@@ -665,6 +755,7 @@ impl Watch {
             "display_hz": run.display_hz,
             "display_scale": run.display_scale,
             "viewport": [f32::from(size.width), f32::from(size.height)],
+            "schema": self.target.arg(),
             "tables_count": shown.tables_count,
             "table_rows": shown.table_rows,
         }))
@@ -702,7 +793,9 @@ fn watch_frames(
 
 /// One cold run (a child process): prints one `G1RUN {json}` line and exits.
 pub fn run_child(args: &Args, variant: Variant, started: Instant) -> ExitCode {
-    let prep = match prepare(variant, &args.fixture, args.key_delay) {
+    // The parent always passes `--schema` (the fixture's); `app.public` only when run by hand.
+    let target = args.schema.clone().unwrap_or_else(Target::synthetic);
+    let prep = match prepare(variant, &args.fixture, args.key_delay, &target) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("catalog_cold: {e:#}");
@@ -738,8 +831,13 @@ pub fn run_child(args: &Args, variant: Variant, started: Instant) -> ExitCode {
 
 // ---- the parent ----------------------------------------------------------------------------------
 
-/// One child process of `variant` over `cache`; its record.
-fn spawn_child(args: &Args, variant: Variant, cache: &Path) -> anyhow::Result<Value> {
+/// One child process of `variant` over `cache`, watching `target`; its record.
+fn spawn_child(
+    args: &Args,
+    variant: Variant,
+    cache: &Path,
+    target: &Target,
+) -> anyhow::Result<Value> {
     let exe = std::env::current_exe().context("finding the bench's executable")?;
     let out = std::process::Command::new(exe)
         .arg("--child")
@@ -747,6 +845,8 @@ fn spawn_child(args: &Args, variant: Variant, cache: &Path) -> anyhow::Result<Va
         .arg("--fixture")
         .arg(cache)
         .arg("--offline")
+        .arg("--schema")
+        .arg(target.arg())
         .arg("--key-delay-ms")
         .arg(args.key_delay.as_millis().to_string())
         .stderr(std::process::Stdio::inherit())
@@ -872,9 +972,29 @@ fn run_in(args: &Args, work: &BenchRoot) -> i32 {
             return i32::from(EXIT_USAGE);
         }
     };
+    let (shape, schemas) = shape;
+    // ## m4-t29-g1-bench (fix round 1, I-1): watch the fixture's own schema.
+    let target = match &args.schema {
+        Some(t) if schemas.contains(t) => t.clone(),
+        Some(t) => {
+            eprintln!(
+                "catalog_cold: the fixture has no schema namespace {}\n{USAGE}",
+                t.arg()
+            );
+            return i32::from(EXIT_USAGE);
+        }
+        None => match schemas.first() {
+            Some(t) => t.clone(),
+            None => {
+                eprintln!("catalog_cold: the fixture has no schema namespace\n{USAGE}");
+                return i32::from(EXIT_USAGE);
+            }
+        },
+    };
     println!(
-        "catalog_cold: fixture {} ({} namespaces, {} tables, {} columns, {:.1} MB)",
+        "catalog_cold: fixture {} (schema {}; {} namespaces, {} tables, {} columns, {:.1} MB)",
         args.fixture.display(),
+        target.arg(),
         shape.namespaces,
         shape.tables,
         shape.columns,
@@ -899,7 +1019,7 @@ fn run_in(args: &Args, work: &BenchRoot) -> i32 {
         };
         let mut records = Vec::new();
         for i in 0..args.runs {
-            match spawn_child(args, variant, cache) {
+            match spawn_child(args, variant, cache, &target) {
                 Ok(r) => {
                     println!(
                         "{} run {}/{}: t1-t0 {:.1} ms (key {:.1}, load {:.1}, host {:.1}, paint {:.1}); process start to t1 {:.1} ms",
@@ -962,14 +1082,14 @@ mod tests {
     use super::*;
 
     use gpui::{TestAppContext, VisualTestContext};
+    use hacivat_meta::ServerId;
     use hacivat_meta::name::FoldRule;
     use hacivat_meta::namespace::{Level, NsMeta, Obj, Subtree};
     use hacivat_meta::props::{ColumnProps, Props, TableProps};
-    use hacivat_meta::ServerId;
 
-    /// A small catalog in the fixture's place: `tables` tables of two columns in `app.public`.
-    fn small_catalog(tables: usize) -> NamespaceSnapshot {
-        let mut t = Subtree::new(Obj::new(ObjectKind::Schema, SCHEMA));
+    /// A small catalog in the fixture's place: `tables` tables of two columns in `target`.
+    fn small_catalog(target: &Target, tables: usize) -> NamespaceSnapshot {
+        let mut t = Subtree::new(Obj::new(ObjectKind::Schema, target.schema.as_str()));
         for i in 0..tables {
             let table = t.add(
                 t.root(),
@@ -994,33 +1114,59 @@ mod tests {
             level: Level::Structure,
             ..NsMeta::default()
         };
-        NamespaceSnapshot::build(schema_ns(), DbmsKind::Postgres, FoldRule::Exact, meta, t)
+        NamespaceSnapshot::build(target.ns(), DbmsKind::Postgres, FoldRule::Exact, meta, t)
             .expect("a valid namespace")
     }
 
-    fn write_fixture(path: &Path, tables: usize) {
+    fn write_fixture(path: &Path, schemas: &[(&Target, usize)]) {
         let mut store = CacheStore::open(path, Encryption::None, WriterId(1))
             .unwrap()
             .store;
-        store.save_namespace(&small_catalog(tables)).unwrap();
+        for (target, tables) in schemas {
+            store
+                .save_namespace(&small_catalog(target, *tables))
+                .unwrap();
+        }
     }
 
-    /// One headless run of `variant`: the real app booted as a child boots, frames drawn by the
-    /// test (a refresh and a park stand for a presented frame), the watch checked after each.
-    fn headless_run(cx: &mut TestAppContext, variant: Variant, delay: Duration) -> Value {
+    /// Removes a bench root when the test ends, also on a failed assert (R-W5-15; fix round 1).
+    struct RootGuard(BenchRoot);
+
+    impl Drop for RootGuard {
+        fn drop(&mut self) {
+            if self.0.dir().exists() {
+                self.0.remove();
+            }
+        }
+    }
+
+    /// One headless run of `variant` over a fixture holding `schemas` (the first has the most
+    /// tables): the real app booted as a child boots, frames drawn by the test (a refresh and a
+    /// park stand for a presented frame), the watch checked after each.
+    fn headless_run(
+        cx: &mut TestAppContext,
+        variant: Variant,
+        delay: Duration,
+        schemas: &[(&Target, usize)],
+    ) -> Value {
         let dir = tempfile::tempdir().unwrap();
         let fixture = dir.path().join("fixture.v1.sqlite");
-        write_fixture(&fixture, 40);
+        write_fixture(&fixture, schemas);
         let sealed = dir.path().join("sealed.v1.sqlite");
-        let shape = prepare_fixture(&fixture, dir.path(), Some(&sealed)).unwrap();
-        assert_eq!((shape.tables, shape.columns), (40, 80));
+        let (shape, found) = prepare_fixture(&fixture, dir.path(), Some(&sealed)).unwrap();
+        let tables: usize = schemas.iter().map(|s| s.1).sum();
+        assert_eq!((shape.tables, shape.columns), (tables, tables * 2));
         assert!(!shape.is_full_scale());
+        // The watched schema is the fixture's own (the one with the most tables).
+        let target = found.first().expect("a schema namespace").clone();
+        assert_eq!(&target, schemas[0].0);
         let cache = match variant {
             Variant::Plain => fixture.as_path(),
             Variant::Encrypted => sealed.as_path(),
         };
         let started = Instant::now();
-        let prep = prepare(variant, cache, delay).unwrap();
+        let prep = prepare(variant, cache, delay, &target).unwrap();
+        let _root = RootGuard(prep.root.clone());
         let ws = cx.update(|cx| boot(cx, &prep)).unwrap();
         cx.executor().allow_parking();
         let vcx = VisualTestContext::from_window(ws.into(), cx).into_mut();
@@ -1031,7 +1177,10 @@ mod tests {
             vcx.update(|window, _| window.refresh());
             vcx.run_until_parked();
             vcx.cx.update(|cx| watch.sample(cx));
-            if let Some(r) = ws.update(vcx, |_, window, cx| watch.check(window, cx)).unwrap() {
+            if let Some(r) = ws
+                .update(vcx, |_, window, cx| watch.check(window, cx))
+                .unwrap()
+            {
                 break r;
             }
             assert!(Instant::now() < deadline, "the cached tree was not painted");
@@ -1039,8 +1188,12 @@ mod tests {
             vcx.executor().advance_clock(Duration::from_millis(16));
         };
         // t1 is taken only once the rows were built in a frame.
-        let shown = vcx.cx.read(|cx| painted(prep.profile, cx)).expect("painted");
-        assert_eq!(shown.tables_count, "40");
+        let shown = vcx
+            .cx
+            .read(|cx| painted(prep.profile, &target, cx))
+            .expect("painted");
+        assert_eq!(shown.tables_count, schemas[0].1.to_string());
+        assert_eq!(record["schema"], target.arg());
         assert!(shown.table_rows > 0);
         assert!(watch.finished());
         let mode = vcx.cx.read(|cx| live::cache_mode(prep.profile, cx));
@@ -1058,7 +1211,6 @@ mod tests {
                 .shutdown(Duration::from_secs(10));
         });
         vcx.run_until_parked();
-        prep.root.remove();
         drop(dir);
         record
     }
@@ -1088,10 +1240,19 @@ mod tests {
 
     #[gpui::test]
     fn catalog_cold_bench_emits_json_with_t0_t1_and_phases(cx: &mut TestAppContext) {
-        let r = headless_run(cx, Variant::Plain, Duration::ZERO);
+        let r = headless_run(
+            cx,
+            Variant::Plain,
+            Duration::ZERO,
+            &[(&Target::synthetic(), 40)],
+        );
         assert_eq!(r["variant"], "plain");
         assert_phases(&r);
-        assert_eq!(r["key_fetch_ms"].as_f64(), Some(0.0), "no key for a plaintext cache");
+        assert_eq!(
+            r["key_fetch_ms"].as_f64(),
+            Some(0.0),
+            "no key for a plaintext cache"
+        );
 
         // The dump: the shared bench schema (what `xtask bench-report` reads) plus G1's fields.
         let out = tempfile::tempdir().unwrap();
@@ -1128,25 +1289,30 @@ mod tests {
         assert!(v["phases_p95"]["paint_ms"].is_number());
         assert_eq!(v["fixture"]["columns"], COLUMNS);
         assert_eq!(figures.n, 2);
-        // Graded on the plaintext variant only (headless timings are not judged here: the
-        // budget is the PO's Mac's, perf-gated below).
-        assert!(matches!(outcome, Outcome::Pass | Outcome::Fail | Outcome::Invalid));
-        if std::env::var_os("HACIVAT_PERF").is_some_and(|p| p == "1") {
-            assert!(figures.p95 < BUDGET_MS, "{}", figures.text(1));
-        }
+        // Graded on the plaintext variant only. A 40-table headless run says nothing about G1,
+        // so its timings are not judged here (fix round 1, m-3): G1 is the example's figure.
+        assert!(matches!(
+            outcome,
+            Outcome::Pass | Outcome::Fail | Outcome::Invalid
+        ));
         // A missing run is an aborted run, never a pass.
-        let (_, short, _) = report(Variant::Plain, &records[..1], 2, &shape, out.path(), true).unwrap();
+        let (_, short, _) =
+            report(Variant::Plain, &records[..1], 2, &shape, out.path(), true).unwrap();
         assert_eq!(short, Outcome::Fail);
         // A fixture below the stated scale is never graded.
-        let small = FixtureShape { tables: 40, ..shape };
-        let (_, ungraded, _) = report(Variant::Plain, &records, 2, &small, out.path(), true).unwrap();
+        let small = FixtureShape {
+            tables: 40,
+            ..shape
+        };
+        let (_, ungraded, _) =
+            report(Variant::Plain, &records, 2, &small, out.path(), true).unwrap();
         assert_eq!(ungraded, Outcome::NotGraded);
     }
 
     #[gpui::test]
     fn catalog_cold_bench_encrypted_variant_reports_key_share(cx: &mut TestAppContext) {
         const DELAY: Duration = Duration::from_millis(120);
-        let r = headless_run(cx, Variant::Encrypted, DELAY);
+        let r = headless_run(cx, Variant::Encrypted, DELAY, &[(&Target::synthetic(), 40)]);
         assert_eq!(r["variant"], "encrypted");
         assert_phases(&r);
         let key = r["key_fetch_ms"].as_f64().unwrap();
@@ -1181,13 +1347,62 @@ mod tests {
         assert_eq!(ok.variants, vec![Variant::Encrypted, Variant::Plain]);
         assert_eq!(ok.child, None);
         let c = a(&[
-            "--fixture", "f", "--offline", "--runs", "3", "--variant", "plain", "--child",
-            "encrypted", "--key-delay-ms", "40",
+            "--fixture",
+            "f",
+            "--offline",
+            "--runs",
+            "3",
+            "--variant",
+            "plain",
+            "--child",
+            "encrypted",
+            "--key-delay-ms",
+            "40",
         ])
         .unwrap();
         assert_eq!((c.runs, c.child), (3, Some(Variant::Encrypted)));
         assert_eq!(c.variants, vec![Variant::Plain]);
         assert_eq!(c.key_delay, Duration::from_millis(40));
         assert!(a(&["--fixture", "f", "--offline", "--runs", "0"]).is_err());
+        // ## m4-t29-g1-bench (fix round 1, I-1)
+        assert_eq!(ok.schema, None);
+        let s = a(&[
+            "--fixture",
+            "f",
+            "--offline",
+            "--schema",
+            "hv_test.hv_m4_big",
+        ])
+        .unwrap();
+        assert_eq!(
+            s.schema,
+            Some(Target {
+                db: "hv_test".to_string(),
+                schema: "hv_m4_big".to_string()
+            })
+        );
+        for bad in ["public", ".public", "app.", "a.b.c"] {
+            assert!(
+                a(&["--fixture", "f", "--offline", "--schema", bad]).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    // ## m4-t29-g1-bench (fix round 1, I-1): fixture (b) is `[<db>, "hv_m4_big"]`, not
+    // `app.public`. The bench watches the fixture's schema with the most tables and paints it.
+    #[gpui::test]
+    fn catalog_cold_bench_watches_a_fixture_outside_app_public(cx: &mut TestAppContext) {
+        let big = Target::parse("hv_test.hv_m4_big").unwrap();
+        let other = Target::parse("hv_test.side").unwrap();
+        let r = headless_run(
+            cx,
+            Variant::Plain,
+            Duration::ZERO,
+            &[(&big, 30), (&other, 3)],
+        );
+        assert_eq!(r["schema"], "hv_test.hv_m4_big");
+        assert_eq!(r["tables_count"], "30");
+        assert_phases(&r);
     }
 }

@@ -26,10 +26,18 @@ The bench is `crates/app/hacivat-app/src/bench/catalog.rs`, run as the app examp
   (about 7.2 MB). `bench_fixture_is_15k_tables_160k_columns` checks the exact counts.
 - **Fixture (b).** `hacivat-introspect` `tests/docker_big_catalog.rs` writes
   `<artifacts>/g1-hv_m4_big.v1.sqlite`. Its test `big_catalog_cold_times_recorded_and_cache_artifact_written`
-  prints `HV-FACT g1 …`: the cold `Names` and `Structure` times and the D-038 thresholds (current
+  prints `HV-FACT g1 …`: the cold `Structure` and `Names` times and the D-038 thresholds (current
   namespace: `Sources` ≤ 2,000, `Structure` ≤ 20,000; other namespaces: `Structure` ≤ 5,000;
-  15,000 tables is therefore `Structure` when current and `Names` otherwise). Pass that artifact
-  as `--fixture`.
+  15,000 tables is therefore `Structure` when current and `Names` otherwise).
+  - "Cold" means each level runs on a fresh connection, `Structure` first, so neither pass
+    reuses the other's backend caches. The server's shared buffers stay warm, because the fixture
+    was just ensured.
+  - The artifact holds one namespace, `[<db>, "hv_m4_big"]` (`hv_test.hv_m4_big` on the matrix's
+    `pg17`), not `app.public`. Pass it as `--fixture`. The bench watches the fixture's schema
+    namespace with the most tables, prints it on the `fixture` line and records it in each run's
+    `schema`. `--schema db.schema` names another one; a schema the fixture lacks is a usage
+    error.
+  - The real fixture's cache was not measured in Task 29 (section 4).
 - **The fixture check.** The bench checks the fixture's shape on a copy, so the user's file is
   never opened. If the fixture is smaller than 15,000 tables / 160,000 columns, the run is
   **INVALID** (exit 3, no JSON). `--any-fixture` runs it anyway, ungraded.
@@ -38,23 +46,27 @@ The bench is `crates/app/hacivat-app/src/bench/catalog.rs`, run as the app examp
   so the OS file cache still holds it. Dropping the file cache needs root on macOS, so the bench
   does not.
 - **The app start.** The run uses a saved development profile (`127.0.0.1:9`, a fake driver that
-  never dials; nothing connects). Its `workspace.json` restores the explorer with the profile,
-  `app`, `public` and its `TABLES` group expanded.
+  never dials; nothing connects). Its database is the watched schema's database. Its
+  `workspace.json` restores the explorer with the profile, that database, the schema and the
+  schema's `TABLES` group expanded (`app`, `public`, `TABLES` for fixture (a)).
 - **t0.** The app's own source is wrapped as `TimedSource`: the same `CatalogHub` that
   `live::install` builds, installed before any explorer task runs. t0 is stamped when the host's
   lifecycle task calls `CatalogSource::ensure` on the core runtime. The key fetch, the cache
   open, the read, the decode and the publish all happen inside that call.
 - **t1.** A `Window::on_next_frame` loop spawns, every frame, a task that runs on the next
   main-thread turn, after that frame's draw and present (the `FrameCpu` rule of the M3 benches).
-  That task checks the tree's rows **built in that frame**. They must hold the `TABLES` header of
-  `app.public` with its count (`15,000`) and at least one table row under it. t1 is never taken
-  from the model alone.
+  That task checks the tree's rows **built in that frame**. They must hold the watched schema's
+  `TABLES` header with its count (`15,000`) and at least one table row under it. t1 is never
+  taken from the model alone.
 - **Phases per run.**
   - `key_fetch_ms`: the `CatalogKey` read, timed in the secret backend.
   - `cache_load_ms`: the rest of `ensure`.
   - `host_ms`: from `ensure`'s answer until the explorer holds the snapshot, sampled per frame.
   - `paint_ms`: from there to t1.
-  - `process_to_t1_ms`: from the example's `main` (§3.3's ≤ 1 s).
+  - `process_to_t1_ms`: from the first line of the example's `main` (§3.3's ≤ 1 s). The clock
+    starts at `main`, so the exec, the dynamic loader and the Rust runtime start before it are
+    not counted. That understates "from process start" by that time, typically a few to some
+    tens of milliseconds.
   - Also recorded: the RSS at t1, the display rate and scale, and the viewport.
 - **The encrypted variant.** A production profile (`catalog_sensitive`) whose sealed copy of the
   same fixture is opened with its `CatalogKey`. The secret store is a memory backend, so the
@@ -86,8 +98,16 @@ cargo xtask bench-report target/bench/g1-catalog-cold-*.json --milestone m4
 
 The last line is `RESULT: PASS|FAIL|INVALID g1-catalog-cold`, and the exit code follows it. The
 encrypted line comes just before it (`RESULT: n/a g1-catalog-cold-encrypted`). To model a
-Keychain read, add `--key-delay-ms 40` or the delay the PO measures. Any encrypted p95 above
-300 ms goes into `po-demo-m4.md`.
+Keychain read, add `--key-delay-ms N` with the delay the PO measures (`po-demo-m4.md`, item
+"G1 encrypted: the real Keychain read"). Any encrypted p95 above 300 ms goes into
+`po-demo-m4.md`.
+
+For fixture (b), take the artifact of the controller's Docker run:
+
+```text
+cargo run --release -p hacivat-app --features bench --example catalog_cold -- \
+  --fixture <artifacts>/g1-hv_m4_big.v1.sqlite --runs 10 --offline
+```
 
 ## 4. Implementer's run (Task 29; not authoritative)
 
@@ -118,7 +138,9 @@ Reading the table:
   224 B per column (ledger C-3).
 - **§3.3 "≤ 1 s to an interactive workspace with a cached catalog".** From the example's `main`
   to t1: p50 about 0.87 s, two runs of ten just over 1 s under this load. This is recorded, not
-  gated here. Most of it comes before t0: process start, fonts, window, workspace restore.
+  gated here. Most of it comes before t0: fonts, window, workspace restore. Exec and the loader
+  come before `main` and are not counted.
 - **Fixture (b), `hv_m4_big` on `pg17`.** Not run here: the Docker matrix containers were down,
   and implementers never start them. The controller's `--set pr` run prints the D-038 facts and
-  writes the artifact.
+  writes the artifact. Before fix round 1, the bench watched only `app.public`. Since then it
+  watches the fixture's own schema, tested headless with a fixture in `hv_test.hv_m4_big`.
