@@ -378,6 +378,10 @@ async fn read_set(
         } else {
             AsmFlavor::MySql
         });
+        // ## m4-t17b-mysql-facets (named exception; T17b carry from CI 44649745390): on every
+        // server of the matrix the index InnoDB creates for a named FK takes the constraint's
+        // name (`fk_index table=c1 index=fk_named`), so such an index is the FK's.
+        keys.fk_index = crate::assemble::mysql::FkIndexRule::NamedAfterConstraint;
         report_progress(Phase::Indexes, 0, total);
         keys.indexes = stat_rows(&r.read("Statistics", ctx(rel)).await?)?;
         report_progress(Phase::Constraints, 0, total);

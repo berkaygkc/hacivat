@@ -47,8 +47,9 @@ pub enum FkIndexRule {
     /// explicit index the FK would have created).
     #[default]
     None,
-    /// A non-unique index named like an FK of its table whose leading key columns are the FK's
-    /// columns is the FK's (\[Inferred\] from the MySQL manual; Task 17's probe pins it).
+    /// A non-unique index named like an FK of its table whose key columns are exactly the FK's
+    /// columns is the FK's (pinned by Task 17's probe on every server of the matrix, CI
+    /// 44649745390; Task 17b adopts it).
     NamedAfterConstraint,
 }
 
@@ -392,8 +393,25 @@ fn fk_created(idx: &KeyObj, fk: &KeyObj) -> bool {
     let (Some(k), Some(f)) = (idx.key(), fk.fk()) else {
         return false;
     };
-    !f.columns.is_empty()
-        && k.columns.len() >= f.columns.len()
+    // ## m4-t17b-mysql-facets (named exception): exactly the FK's columns. An index the user
+    // made longer (named like the constraint, made before it) also supports the FK, so InnoDB
+    // creates none; hiding it would drop its extra parts from the DDL.
+    // ## m4-t17b-mysql-facets (fix round 1, m-1): and only with the attributes InnoDB's own
+    // index has (no comment, every part ascending and whole, visible, BTREE or no method). A
+    // user index with any other attribute also backs the FK, and hiding it would drop that
+    // attribute from the DDL.
+    let defaults = idx.index().is_some_and(|i| {
+        i.comment.as_deref().is_none_or(str::is_empty)
+            && i.prefix_len.iter().all(Option::is_none)
+            && i.method
+                .as_deref()
+                .is_none_or(|m| m.eq_ignore_ascii_case("BTREE"))
+    }) && !k.invisible
+        && k.desc.iter().all(|d| !d)
+        && k.expressions.is_empty();
+    defaults
+        && !f.columns.is_empty()
+        && k.columns.len() == f.columns.len()
         && k.columns
             .iter()
             .zip(&f.columns)

@@ -24,6 +24,9 @@
 //!   other name compares ASCII-caselessly, and a caseless text holding a non-ASCII **cased**
 //!   letter is [`ServerDependent`]: the server's Unicode-aware comparison is not pinned until
 //!   Task 17's probe (`// ## m4-t17-mysql-fold`). Backticks never change the comparison.
+//!   Since that probe, [`pinned_column_eq`] says when two **column** names certainly compare
+//!   equal on the server (four probed letters plus ASCII case); a lookup answers `Found` on
+//!   it and still never `Missing` for such a text.
 //! - **SQLite**: ASCII-caseless, never more (ver/01 `#sqlite-case`).
 //! - Every other dialect: no rule is pinned, so every text is [`ServerDependent`].
 //!
@@ -252,3 +255,56 @@ fn server_len_bound(text: &str) -> usize {
 fn is_utf8_encoding(encoding: Option<&str>) -> bool {
     encoding.is_some_and(|e| e.eq_ignore_ascii_case("UTF8") || e.eq_ignore_ascii_case("UTF-8"))
 }
+
+// ## m4-t17-mysql-fold (written by M4 Task 17b from Task 17's probe, CI 44649745390)
+
+/// The non-ASCII letters whose MySQL/MariaDB column-name comparison the probe pinned, each with
+/// the letter it compares equal to (R-M4-41; `t17-docker-facts-44649745390.txt`, lines
+/// `column_fold`, `lower_case_table_names = 0`, `@@character_set_system = utf8mb3`):
+///
+/// - MySQL 8.0 and 8.4 (`utf8mb3_tolower_ci`): `Äb` = `äb`; `İd` = `Id` = `ID` = `id`; `ıd`
+///   equals only itself.
+/// - MariaDB 11.4 (`utf8mb3_general_ci`): `Äb` = `äb`; `İd` equals only itself; `ıd` equals
+///   only itself.
+///
+/// A letter outside this table has no pinned comparison. This is a closed table of four
+/// letters, never a Unicode or locale case mapping (INV-3's exception, recorded in ADR 0008
+/// `m4-t17b`): `İ` → `i` is the server's own fold on MySQL, not a Turkish rule (`I` never
+/// becomes `ı`).
+fn pinned_letter(d: DialectId, c: char) -> Option<char> {
+    match (d, c) {
+        (_, 'Ä' | 'ä') => Some('ä'),
+        (_, 'ı') => Some('ı'),
+        (DialectId::MySql, 'İ') => Some('i'),
+        (DialectId::MariaDb, 'İ') => Some('İ'),
+        _ => None,
+    }
+}
+
+/// Whether the server certainly compares the column names `a` and `b` equal, by the pinned
+/// table above plus ASCII case: `true` only when every non-ASCII cased letter of both is in
+/// the table and the folded texts are equal. `false` decides nothing (the server may still
+/// fold letters the probe did not cover, or fold accents): a lookup uses it only to answer
+/// `Found`, never `Missing`. Column names only, on MySQL and MariaDB under
+/// `lower_case_table_names = 0` (the probe's setting); the other caseless classes (index,
+/// routine, partition, event names) were not probed and stay unpinned.
+pub fn pinned_column_eq(d: DialectId, ctx: &IdentCtx, a: &str, b: &str) -> bool {
+    if !matches!(d, DialectId::MySql | DialectId::MariaDb) || ctx.lower_case_table_names != 0 {
+        return false;
+    }
+    let fold = |s: &str| -> Option<Vec<char>> {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii() {
+                    Some(c.to_ascii_lowercase())
+                } else if has_non_ascii_cased(c.encode_utf8(&mut [0; 4])) {
+                    pinned_letter(d, c)
+                } else {
+                    Some(c)
+                }
+            })
+            .collect()
+    };
+    matches!((fold(a), fold(b)), (Some(x), Some(y)) if x == y)
+}
+// ## m4-t17-mysql-fold

@@ -1069,6 +1069,17 @@ fn mysql_foreign_key_and_its_created_index() {
             .flags()
             .contains(ObjFlags::IMPLICIT)
     );
+    // ## m4-t17b-mysql-facets (named exception): an index named like the FK with more parts
+    // than the FK's columns was the user's (InnoDB created none): never implicit.
+    let mut longer = rows(mysql::FkIndexRule::NamedAfterConstraint);
+    longer.indexes.push(stat("t", "fk_ab", 3, "id"));
+    let out = mysql::assemble_keys(longer, &cols);
+    assert!(
+        !find(&out, ObjectKind::Index, "fk_ab")
+            .obj
+            .flags()
+            .contains(ObjFlags::IMPLICIT)
+    );
 }
 
 /// SQLite: an expression part's text and a partial index's predicate come from the index's SQL

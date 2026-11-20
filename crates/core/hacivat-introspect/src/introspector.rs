@@ -299,18 +299,31 @@ mod tests {
             let caps = introspector_for(dbms).expect("an M4 engine").capabilities();
             assert_eq!(caps.dbms, dbms);
             assert_eq!(caps.transactional_ddl, transactional, "{dbms:?}");
-            // ## m4-t16-pg / m4-t16b-pg-facets / m4-t17-mysql / m4-t18-sqlite (named exceptions
-            // in Task 1c's file): PostgreSQL (Task 16) and MySQL (R-M4-39) are incremental,
-            // MariaDB stays `Full` (R-M4-10); SQLite is Task 18's. PostgreSQL reads grants,
-            // dependencies and statistics since Task 16b; MySQL facets wait for Task 17b.
+            // ## m4-t16-pg / m4-t16b-pg-facets / m4-t17-mysql / m4-t17b-mysql-facets /
+            // m4-t18-sqlite (named exceptions in Task 1c's file): PostgreSQL (Task 16) and MySQL
+            // (R-M4-39) are incremental, MariaDB stays `Full` (R-M4-10); SQLite is Task 18's.
+            // PostgreSQL reads its facets since Task 16b, MySQL and MariaDB since Task 17b
+            // (MariaDB has no usage views: no dependencies).
             match dbms {
                 DbmsKind::Postgres => {
                     assert!(caps.incremental, "{dbms:?}");
                     assert_eq!(caps.facets, crate::pg::facets::FACETS.to_vec(), "{dbms:?}");
                 }
                 DbmsKind::Sqlite => {}
-                _ => {
+                DbmsKind::MySql | DbmsKind::MariaDb => {
                     assert_eq!(caps.incremental, dbms == DbmsKind::MySql, "{dbms:?}");
+                    assert_eq!(
+                        caps.facets,
+                        crate::mysql::facets::facets_for(dbms),
+                        "{dbms:?}"
+                    );
+                    assert_eq!(
+                        caps.facets.contains(&FacetKind::Dependencies),
+                        dbms == DbmsKind::MySql,
+                        "{dbms:?}"
+                    );
+                }
+                _ => {
                     assert!(caps.facets.is_empty(), "{dbms:?}");
                 }
             }

@@ -367,18 +367,48 @@ async fn stub_stamps_and_facet_not_implemented() {
             expected(&intro.stamps(&mut c, &keys).await.map(drop)),
             "{dbms:?}"
         );
+        // ## m4-t17b-mysql-facets (named exception): the facets are real since Task 17b. Every
+        // read opens a snapshot first, so an offline connection fails it (nothing is
+        // answered); `Statistics` is not a MySQL facet read. The server namespace (roles)
+        // reaches the server too.
         for kind in [
             FacetKind::Sources,
             FacetKind::Grants,
             FacetKind::Dependencies,
-            FacetKind::Statistics,
         ] {
             assert_eq!(
                 intro.facet(&mut c, &n, &keys, kind).await,
-                Err(IntroError::NotImplemented),
+                Err(IntroError::Meta(
+                    hacivat_session::meta::MetaError::Unavailable
+                )),
                 "{dbms:?} {kind:?}"
             );
         }
+        assert_eq!(
+            intro.facet(&mut c, &n, &keys, FacetKind::Statistics).await,
+            Err(IntroError::NotImplemented),
+            "{dbms:?}"
+        );
+        assert!(matches!(
+            intro
+                .introspect(
+                    &mut c,
+                    &hacivat_meta::NsKey::server(),
+                    Mode::Full,
+                    Level::Names,
+                    &hacivat_introspect::filter::parse_filter(
+                        "",
+                        sql_dialect::DialectId::MySql,
+                        hacivat_introspect::filter::FilterRole::Introspect,
+                    )
+                    .expect("the empty filter"),
+                    None,
+                    &cancel
+                )
+                .await,
+            Err(IntroError::Meta(_))
+        ));
+        // ## m4-t17b-mysql-facets
         assert!(expected(&intro.list_namespaces(&mut c).await.map(drop)));
         // ## m4-t15-engine (named exception, ruling R-W3-2): the filter argument; and the
         // identity default is `Unknown` (R-W3-3).

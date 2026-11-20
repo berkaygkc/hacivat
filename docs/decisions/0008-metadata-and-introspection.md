@@ -2124,3 +2124,117 @@ section passes Task 5's guard in a pure test (R-W3-9).
     the role rename → T22/T15b; m-7 (facet reads on a joined session are refused with
     `NotJoinable`) → T15b; m-9 (`same_object` ignores the overload signature; needs OID
     wraparound) → T33.
+
+## m4-t17b — MySQL and MariaDB facets
+
+Code: `hacivat-introspect/src/mysql/facets.rs`, `packs/mysql/20-facets.hvq.sql` (written from the
+MySQL 8.0/8.4 Reference Manual — Grant Tables; INFORMATION_SCHEMA `VIEW_TABLE_USAGE`,
+`VIEW_ROUTINE_USAGE`, `APPLICABLE_ROLES`, `USER_PRIVILEGES`; `partial_revokes` — and the MariaDB
+Knowledge Base). Rulings R-M4-30, R-W4-3 (a key left out of `FacetRows` is not loaded; a
+`Permission` error is published `Failed`), R-W4-4 (incomplete grants are not loaded).
+
+- **What `facet` answers.** `IntroCaps.facets`: MySQL `Sources`, `Grants`, `Dependencies`;
+  MariaDB `Sources`, `Grants`. `Statistics` is not a MySQL facet read (`NotImplemented`;
+  `TABLE_ROWS` rides with the `Structure` pass). A read the login cannot make complete is
+  `Permission` for the whole read, never an empty or partial answer presented as complete; an
+  object read incompletely is left out.
+- **Grants come from the grant tables, not `INFORMATION_SCHEMA`** (deviation from the plan's
+  `SCHEMA_PRIVILEGES`/`TABLE_PRIVILEGES`/`COLUMN_PRIVILEGES`). Two reasons: (1) those views show
+  other accounts' rows only to a login with `SELECT` on the `mysql` schema at database or global
+  level — a table-level grant on `mysql.tables_priv` would pass a readability probe while the
+  view still filtered, so "Partial unless the account can read `mysql.tables_priv`" cannot be
+  decided from the views; (2) their `GRANTEE` is `'user'@'host'` printed without escaping, so a
+  quote in a user or host name makes it ambiguous. `mysql.tables_priv`, `mysql.columns_priv` and
+  (MySQL 8 only) `mysql.db` are read directly: such a read answers every row or is refused
+  (1142/1044/1143/1227/1370 → `Permission { Table }`). `mysql.user` and `mysql.global_priv` are
+  never named (a pack test checks no section mentions them or an authentication column).
+- **Grant decoding.** The grantee is built from the separate `User` and `Host` columns as
+  `'user'@'host'` with quotes doubled (Task 19's `is_account` form). Set columns are split on
+  `,` and each element must be a documented one (`Table_priv`: Select … Trigger, MariaDB `Delete
+  versioning rows` → `DELETE HISTORY`; `Column_priv`: Select, Insert, Update, References);
+  `mysql.db` columns must read `Y`/`N`. `Grant` is the grant option of its row and of that
+  account's column grants. Not loaded: a backslash or NUL in a user or host; a MariaDB row with
+  an empty host (a role's rows have one, and the grant tables cannot tell a role from a user); an
+  unknown element; a grant option with nothing to grant; a column grant without its
+  `tables_priv` row; a `mysql.db` row stored in the schema's escaped spelling (`hvm4\_db`:
+  re-granting `ON hvm4_db.*` would widen it to a pattern). Pattern rows (`hvm4\_%`) are grants on
+  a pattern, not on the schema, and are not entries. Routine grants (`mysql.procs_priv`) are not
+  read (no key answered: DDL says "grants not loaded"). Under `lower_case_table_names ≠ 0` no key
+  is answered (the grant tables store folded names; only lctn 0 was pinned). Names compare byte
+  for byte on the client after the server's `IN` (a case-insensitive collation can only widen).
+- **Dependencies** (MySQL 8.0.13+; MariaDB and older MySQL `NotImplemented`): `VIEW_TABLE_USAGE`
+  (joined to `TABLES` for the used relation's kind) and `VIEW_ROUTINE_USAGE`, `DepsKind::Usage`,
+  for views only. The manual: "You can see information only for views for which you have some
+  privilege, and only for tables [functions] for which you have some privilege." Completeness
+  (`facets::coverage`): the login's own `USER_PRIVILEGES` rows hold global `SELECT` and
+  `EXECUTE` (the grantee text compared only when `CURRENT_USER()` holds exactly one `@`), and
+  `partial_revokes` is off (absent before 8.0.16). Otherwise the read is `Permission { View }`.
+  A view without a `VIEWS` row (not visible) and a view using a relation with no `TABLES` row are
+  not answered. Cost: logins without global privileges (the fixture's `hv_test`) never load the
+  facet; `facets::dependencies` still returns the rows and the coverage for tools that can say
+  "partial".
+- **Sources**: Task 17's `show_create` per key (tables, views, routines, events; a trigger by
+  its schema). A dropped object (1049/1146/1305/1360/1539) or an unpreparable form (1295) is not
+  answered; a refusal fails the read.
+- **Roles** (`server_namespace`): `APPLICABLE_ROLES` (MySQL 8.0.19+: `'role'@'host'`; MariaDB:
+  the bare role name) and the login (`CURRENT_USER()`, `User`). The result is read at `Names`, so
+  the server namespace never becomes complete and an unlisted account looks up `Unknown`, never
+  `Missing` (pinned by a lookup test). Without the view the role set is `Failed(NotImplemented)`;
+  a refusal is `Permission { Role }`.
+- **R-M4-41 pinned (`sql_ident::key`, fenced `m4-t17-mysql-fold`; named exceptions in
+  `hacivat-meta/src/namespace.rs` `match_child`).** From CI 44649745390's `column_fold` facts
+  (lctn 0, `character_set_system = utf8mb3`): MySQL 8 (`utf8mb3_tolower_ci`) `Äb = äb`,
+  `İd = Id = ID = id`, `ıd` only itself; MariaDB 11.4 (`utf8mb3_general_ci`) `Äb = äb`, `İd`
+  only itself, `ıd` only itself. `pinned_column_eq` folds ASCII case plus a closed table of
+  these four letters per flavor and is used **only to answer `Found`** for a column; any miss
+  stays `ServerDependent` where it was (accents such as `a`/`ä`, `ß`, other letters were not
+  probed). INV-3 exception: the table maps `İ` → `i` on MySQL because the server does; it is not
+  a Unicode or locale case mapping and never maps `I` → `ı`. Index, routine, partition and
+  event names were not probed and stay `ServerDependent` (the W1 carry asked to pin the caseless
+  classes together; the plan forbids a fold without a recorded pair, so only columns move).
+- **`FkIndexRule` pinned** (Task 17 pass, named exception): CI 44649745390 shows on all six
+  servers that a named FK's index takes the constraint's name and an unnamed FK's takes its
+  column's (`c2`/`pid`). `NamedAfterConstraint` is set; the unnamed case stays shown (valid DDL).
+  `fk_created` now requires exactly the FK's columns: a longer index named like the constraint
+  was the user's (InnoDB created none) and hiding it would drop its extra parts.
+
+### m4-t17b fix round 1 (security review: 1 Important, 6 Minor)
+
+- **Schema grants need `partial_revokes` off (I-1).** With it on (MySQL 8.0.16+), `REVOKE …
+  ON db.*` of a global privilege writes no `mysql.db` row but a restriction in
+  `mysql.user.User_attributes`, which is never read. The grants read therefore reads
+  `PartialRevokes` in the same snapshot and answers the schema key only when it reads `0`/`OFF`
+  (MySQL refuses to turn it off while any restriction exists, so "off" proves there is none);
+  any other value leaves the schema not loaded (`Opaque::PartialRevokes`), and a refusal is
+  `Permission { Table }`. Table and column grants are unaffected (restrictions are
+  database-level only). Before 8.0.16 the variable does not exist and neither do partial
+  revokes. **MariaDB** has no partial revokes (a database-level `REVOKE` removes or edits the
+  `mysql.db` row), and its database-level grants are not read at all (above).
+- **FK-created index (m-1).** Hidden as the FK's only when it also has InnoDB's own attributes:
+  no comment, every part ascending and whole (no prefix, no expression), visible, `BTREE` or no
+  method. A user index with any other attribute backs the FK too and stays shown.
+- **NULL scope columns (m-5)** of a grant-table row (`User`, `Host`, `Db`, `Table_name`,
+  `Column_name` are `NOT NULL`) make the object opaque, never the anonymous user `''`.
+- **`DepsKind::Usage` scope (m-3).** It covers stored tables, views and stored functions only;
+  loadable functions (UDFs) are never listed by `VIEW_ROUTINE_USAGE`, and the model has no key
+  for them. Carried to M7 (drop impact).
+- **Where the fold pin rests (m-4).** The `column_fold` facts come from mysql80 (8.0.46), mysql84
+  (8.4.13) and mariadb114 (11.4.13) only. `IdentCtx` carries no server version, so a version
+  gate is not cheap: the pin applies to every MySQL/MariaDB server at lctn 0, including the
+  matrix's mariadb106/mariadb1011 (same `utf8mb3_general_ci` column collation, unprobed) and any
+  later MySQL. Carried to T33: add mariadb106 and mariadb1011 to the probe; a server whose column
+  collation changes must re-run it before the pin is trusted there.
+- **m-2:** `docker_mysql_facets` pins `hv_test`'s own `USER_PRIVILEGES` row as
+  `('hv_test'@'%', USAGE)`, the spelling the coverage gate compares. **m-6** (one refused key
+  fails a whole `Sources` batch) is carried to T15b, which requests per-key reads.
+
+### m4-t17b fix round 2 (CI 44662162494)
+
+- **The user kind of the server namespace is a failed read.** `mysql.user` is never read, so
+  the accounts are never all known: `roles_result` lists the login but reports
+  `User: Failed(PermissionDenied)` (HV-INTRO-01 test 6: losing the `mysql` schema fails the
+  users kind only). Nothing of the kind is deleted, the scheduler marks the server namespace
+  `Partial` and its user container `Failed`, and an unlisted account is `Unknown`. The role kind
+  stays `Ok` (`APPLICABLE_ROLES`, so a revoked role is removed). Task 17's
+  `revoked_mysql_schema_select_fails_users_kind_only` asserted the T1c stub's `NotImplemented`;
+  it now asserts this (named exception).
