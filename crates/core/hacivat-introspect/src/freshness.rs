@@ -93,8 +93,38 @@ pub fn absence_is_fact(dbms: DbmsKind) -> bool {
 
 /// One comparison **by equality** (never an ordering: a PostgreSQL xmin wraps). A stamp of
 /// `StateMark::None` carries no information (an object without an oid, a routine without a
-/// `LAST_ALTERED`): `Unknown`.
+/// `LAST_ALTERED`): `Unknown`. On MySQL and MariaDB an equal mark is `Current` only with the
+/// stored arena's watermark at hand ([`compare_in`]); without it, `Changed` (fix round 4).
 pub fn compare(dbms: DbmsKind, stored: Stored, stamp: Option<StateMark>) -> Staleness {
+    compare_in(dbms, stored, stamp, None)
+}
+
+// ## m4-t22-state (fix round 4, RR-2)
+/// [`compare`] with the stored arena's MySQL watermark time (`Watermark::MyTime.at_utc_micros`).
+/// R-M4-39: MySQL markers have one-second granularity, so a second DDL in the same second as
+/// the stored read leaves the same marker. On MySQL and MariaDB an equal mark is `Current` only
+/// when the arena has a `MyTime` watermark and the stamp is outside the one-second window of
+/// it; otherwise it is `Changed` (the incremental pass would re-read it too).
+pub fn compare_in(
+    dbms: DbmsKind,
+    stored: Stored,
+    stamp: Option<StateMark>,
+    mytime: Option<i64>,
+) -> Staleness {
+    let st = compare_marks(dbms, stored, stamp);
+    if st == Staleness::Current
+        && matches!(dbms, DbmsKind::MySql | DbmsKind::MariaDb)
+        && matches!(stored, Stored::Mark(_))
+    {
+        return match (mytime, stamp) {
+            (Some(w), Some(s)) if !crate::mysql::pass::in_window(&s, w) => Staleness::Current,
+            _ => Staleness::Changed,
+        };
+    }
+    st
+}
+
+fn compare_marks(dbms: DbmsKind, stored: Stored, stamp: Option<StateMark>) -> Staleness {
     match (stored, stamp) {
         (_, Some(StateMark::None)) => Staleness::Unknown,
         (Stored::Absent, None) => Staleness::Current,
@@ -122,6 +152,8 @@ pub struct CheckPlan {
     slots: Vec<Slot>,
     /// The distinct stamp owners to read, and what the snapshot holds for each.
     pub probes: Vec<(ObjectKey, Stored)>,
+    /// Per probe, the `MyTime` watermark time of the arena holding it (R-M4-39's window).
+    windows: Vec<Option<i64>>,
 }
 
 /// What a state check found.
@@ -177,6 +209,7 @@ fn is_sqlite_temp(dbms: DbmsKind, key: &ObjectKey) -> bool {
 /// Resolves `keys` against `snapshot` (module docs, "State checks"). Pure: no I/O.
 pub fn plan(dbms: DbmsKind, snapshot: &CatalogSnapshot, keys: &[ObjectKey]) -> CheckPlan {
     let mut probes: Vec<(ObjectKey, Stored)> = Vec::new();
+    let mut windows: Vec<Option<i64>> = Vec::new();
     let mut index: BTreeMap<ObjectKey, usize> = BTreeMap::new();
     let mut slots = Vec::with_capacity(keys.len());
     for key in keys {
@@ -230,6 +263,10 @@ pub fn plan(dbms: DbmsKind, snapshot: &CatalogSnapshot, keys: &[ObjectKey]) -> C
             }
             let n = *index.entry(owner.clone()).or_insert_with(|| {
                 probes.push((owner, stored));
+                windows.push(match &arena.meta().watermark {
+                    hacivat_meta::Watermark::MyTime { at_utc_micros, .. } => Some(*at_utc_micros),
+                    _ => None,
+                });
                 probes.len() - 1
             });
             Slot::Probe(n)
@@ -240,6 +277,7 @@ pub fn plan(dbms: DbmsKind, snapshot: &CatalogSnapshot, keys: &[ObjectKey]) -> C
         dbms,
         slots,
         probes,
+        windows,
     }
 }
 
@@ -271,7 +309,7 @@ pub async fn run(
             };
             for (&i, stamp) in chunk.iter().zip(stamps) {
                 let (owner, stored) = &plan.probes[i];
-                let st = compare(plan.dbms, *stored, stamp);
+                let st = compare_in(plan.dbms, *stored, stamp, plan.windows[i]);
                 if st == Staleness::Changed
                     && let Some(m) = stamp
                 {

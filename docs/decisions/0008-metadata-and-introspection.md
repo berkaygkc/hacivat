@@ -2176,3 +2176,12 @@ carry fenced `m4-t22-state` named exceptions.
   an expansion's ticket resolves after the names-first pass and the full pass is still queued,
   so the test's DDL ran before the full pass and the "cached" side already held the post-DDL
   server; the harness now waits for the namespace's full level.
+- **Fix round 4 (RR-2).** `check_state` honours R-M4-39's one-second window on MySQL and
+  MariaDB (`freshness::compare_in`; the plan carries each probe's arena `MyTime` time): an
+  equal mark is `Current` only when the arena has a `MyTime` watermark and the stamp is outside
+  the window of it; inside it, or with no `MyTime` (MariaDB, a forgotten arena), it is
+  `Changed`. A fragment keeps its namespace's watermark, so an object re-read inside the window
+  reads `Changed` until the next namespace pass moves `W` (bounded, like the incremental
+  pass's own window). `IntroHandle::expand`'s doc now says the ticket resolves after the
+  names-first pass. R-W4-11 (two trigger changes of one table within one `CREATED` tick)
+  stays an M5 hardening.

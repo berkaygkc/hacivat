@@ -139,6 +139,39 @@ impl Live {
         self.idle().await;
     }
 
+    /// MySQL (R-M4-39): the fixture's DDL is inside the one-second window of the pass that
+    /// read it, where neither the cached side nor `check_state` vouches for it; refresh (a
+    /// condition wait on the server's clock) until the arena's watermark is past it.
+    async fn past_the_window(&self, ns: &NsKey) {
+        let start = tokio::time::Instant::now();
+        loop {
+            let arena = self.cat.catalog.current().namespaces[ns].clone();
+            if self
+                .intro
+                .cached_check(&arena)
+                .is_some_and(|c| c.max_mark != hacivat_introspect::mysql::state::IN_WINDOW)
+            {
+                break;
+            }
+            assert!(
+                start.elapsed() < LIMIT,
+                "{}: the window never passed",
+                self.t.id
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::timeout(
+                LIMIT,
+                self.cat.handle.refresh(
+                    hacivat_introspect::ddl_effects::Target::Namespace(ns.clone()),
+                    hacivat_meta::merge::Trigger::User,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+    }
+
     /// The key (with its server id) of the top-level object `name` of `kind` in `ns`.
     fn key(&self, ns: &NsKey, kind: ObjectKind, name: &str) -> ObjectKey {
         let snap = self.cat.catalog.current();
@@ -430,6 +463,7 @@ async fn mysql_trigger_creation_makes_the_table_changed() {
             ))
             .await;
             l.expand(ns).await;
+            l.past_the_window(ns).await;
             let k = l.key(ns, ObjectKind::Table, "orders");
             assert_eq!(
                 l.check(std::slice::from_ref(&k)).await,
@@ -474,31 +508,7 @@ async fn unchanged_server_clears_stale_with_state_queries_only() {
             }
             l.expand(ns).await;
             if t.engine != DbmsKind::Postgres {
-                // R-M4-39: the fixture's DDL is inside the one-second window of the first
-                // pass, which the cached side never vouches for; refresh (a condition wait on
-                // the server's clock) until the arena's watermark is past it.
-                let start = tokio::time::Instant::now();
-                loop {
-                    let arena = l.cat.catalog.current().namespaces[ns].clone();
-                    if l.intro
-                        .cached_check(&arena)
-                        .is_some_and(|c| c.max_mark != hacivat_introspect::mysql::state::IN_WINDOW)
-                    {
-                        break;
-                    }
-                    assert!(start.elapsed() < LIMIT, "{}: the window never passed", t.id);
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    tokio::time::timeout(
-                        LIMIT,
-                        l.cat.handle.refresh(
-                            hacivat_introspect::ddl_effects::Target::Namespace(ns.clone()),
-                            hacivat_meta::merge::Trigger::User,
-                        ),
-                    )
-                    .await
-                    .unwrap()
-                    .unwrap();
-                }
+                l.past_the_window(ns).await;
             }
             let arena = l.cat.catalog.current().namespaces[ns].clone();
             let db = (t.engine == DbmsKind::Postgres).then_some(t.database.as_str());

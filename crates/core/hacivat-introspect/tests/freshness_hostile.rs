@@ -574,3 +574,121 @@ async fn a_trigger_moves_the_mysql_table_stamp() {
     assert_ne!(s1, s2, "every trigger dropped");
     assert_ne!(s0, s2);
 }
+
+// ## m4-t22-freshness (fix round 4: the RR-2 probe H8, adopted as written)
+
+/// Rounds 2-3 probe (H8): `check_state` on MySQL has no R-M4-39 window. A table whose stored
+/// mark was read within the second of its `CREATE_TIME` (a pass at W) and that is altered again
+/// in that second keeps the same stamp: the incremental pass would re-read it, `check_state`
+/// answers `Current`.
+#[test]
+fn h8_mysql_check_state_honours_the_one_second_window() {
+    use hacivat_introspect::Staleness;
+    use hacivat_introspect::freshness::{Stored, compare, plan};
+    use hacivat_meta::snapshot::{CatalogChange, LoadState};
+    use hacivat_meta::{Catalog, ServerFacts};
+    use std::sync::Arc;
+    let w: i64 = 1_700_000_000_400_000;
+    let mark = StateMark::MyTable {
+        created: 1_700_000_000_000_000,
+        trigger_max: 0,
+        trigger_count: 0,
+    };
+    let key_ns = NsKey::schema(["db"]);
+    let mut t = Subtree::new(Obj::new(ObjectKind::Schema, name("db")));
+    let root = t.root();
+    t.add(
+        root,
+        Obj::new(ObjectKind::Table, name("t")).with_state(mark),
+    );
+    let wm = Watermark::MyTime {
+        at_utc_micros: w,
+        server_uuid: name("u"),
+        version: name("8.4.0"),
+        priv_hash: 7,
+    };
+    let arena = NamespaceSnapshot::build(
+        key_ns.clone(),
+        DbmsKind::MySql,
+        FoldRule::Exact,
+        NsMeta {
+            level: Level::Structure,
+            watermark: wm.clone(),
+            loaded_at_ms: 1,
+        },
+        t,
+    )
+    .unwrap();
+    let catalog = Catalog::new(Arc::new(ServerFacts::new(
+        DbmsKind::MySql,
+        sql_ident::key::IdentCtx::new(sql_dialect::DialectId::MySql),
+    )));
+    let p = catalog.publisher().unwrap();
+    p.publish(vec![
+        CatalogChange::Put(Arc::new(arena)),
+        CatalogChange::SetState(
+            ContainerKey::Namespace(key_ns.clone()),
+            LoadState::Loaded {
+                level: Level::Structure,
+                at: std::time::SystemTime::now(),
+                watermark: wm,
+                stale: false,
+            },
+        ),
+    ])
+    .unwrap();
+    let snap = catalog.current();
+    let key = snap.namespaces[&key_ns].object_key(1).unwrap();
+    let pl = plan(DbmsKind::MySql, &snap, &[key]);
+    assert_eq!(pl.probes.len(), 1);
+    let stored = pl.probes[0].1;
+    assert_eq!(stored, Stored::Mark(mark));
+    assert!(
+        hacivat_introspect::mysql::pass::reread(Some(&mark), &mark, true, w),
+        "the pass re-reads it"
+    );
+    assert_ne!(
+        compare(DbmsKind::MySql, stored, Some(mark)),
+        Staleness::Current,
+        "check_state calls a table changed inside the window Current"
+    );
+}
+
+/// Fix round 4: the window rule's other side. With the arena's `MyTime`, an equal mark
+/// outside the window is `Current`, inside it `Changed`; without a watermark (MariaDB, a
+/// forgotten arena) a MySQL-family equal mark is `Changed`. PostgreSQL is unaffected.
+#[test]
+fn mysql_check_state_window_both_sides() {
+    use hacivat_introspect::Staleness;
+    use hacivat_introspect::freshness::{Stored, compare_in};
+    let created = 1_700_000_000_000_000_i64;
+    let mark = StateMark::MyTable {
+        created,
+        trigger_max: 0,
+        trigger_count: 0,
+    };
+    let s = Stored::Mark(mark);
+    let inside = created + 400_000;
+    let outside = created + 1_000_001;
+    for dbms in [DbmsKind::MySql, DbmsKind::MariaDb] {
+        assert_eq!(
+            compare_in(dbms, s, Some(mark), Some(outside)),
+            Staleness::Current
+        );
+        assert_eq!(
+            compare_in(dbms, s, Some(mark), Some(inside)),
+            Staleness::Changed
+        );
+        assert_eq!(compare_in(dbms, s, Some(mark), None), Staleness::Changed);
+        // Still absent stays still absent (the negative cache's probe).
+        assert_eq!(
+            compare_in(dbms, Stored::Absent, None, None),
+            Staleness::Current
+        );
+    }
+    let x = StateMark::Hash(5);
+    assert_eq!(
+        compare_in(DbmsKind::Postgres, Stored::Mark(x), Some(x), None),
+        Staleness::Current
+    );
+}

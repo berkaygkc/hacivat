@@ -394,6 +394,11 @@ impl IntroHandle {
     /// Loads a namespace on its first expansion (names first, then its auto level); a stale
     /// cached namespace is validated incrementally. An out-of-scope namespace answers
     /// `Cancelled` and reads nothing.
+    ///
+    /// ## m4-t22-state (named exception, doc only)
+    /// On a first expansion the ticket resolves after the **names-first** pass; the read at the
+    /// namespace's level follows, queued. A caller that needs it waits for the namespace's
+    /// `LoadState::Loaded { level, .. }` to reach that level.
     pub fn expand(&self, ns: NsKey) -> RefreshTicket {
         self.request(scheduler::Request::Load(ns), Priority::User)
     }
