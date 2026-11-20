@@ -1768,6 +1768,12 @@ async fn no_catalog_query_seq_scans_user_sized_structures_without_a_namespace_pr
                     sql = sql.replace(&format!("${}", k + 1), &value);
                 }
                 a.batch("BEGIN").await;
+                // ## m4-t16b-pg-facets (named exception, CI 44658780330): with sequential
+                // scans disabled for this transaction only, the planner keeps a Seq Scan only
+                // where no index path exists, which is the violation this test looks for. A
+                // Seq Scan it picked on cost (a small `pg_description` after other tests
+                // added comments, `StateOfRelation`) is not one.
+                a.batch("SET LOCAL enable_seqscan = off").await;
                 let plan = a.scalar(&format!("EXPLAIN (FORMAT JSON) {sql}")).await;
                 a.batch("ROLLBACK").await;
                 // Per scan node (review m-3): a sequential scan of a user-sized catalog must
