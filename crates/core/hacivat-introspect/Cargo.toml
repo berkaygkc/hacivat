@@ -57,8 +57,10 @@ hacivat-net.workspace = true
 # ## m4 (controller manifest amendment R-W3-5): Docker tests need `EngineCatalog::embedded()`
 # and `ExecOpts`/`Protocol` (T16, T17).
 hacivat-driver = { workspace = true, features = ["fake"] }
-# ## m4-t33b-carries (R-W3-7): this crate's integration tests use its own test doubles.
-hacivat-introspect = { workspace = true, features = ["test-fakes"] }
+# ## m4-t33b-carries (R-W3-7): this crate's integration tests use its own test doubles. A path
+# dependency without `default`, so a `--no-default-features` test build stays without `session`
+# (T33b review 1).
+hacivat-introspect = { path = ".", default-features = false, features = ["test-fakes"] }
 
 [lints]
 workspace = true

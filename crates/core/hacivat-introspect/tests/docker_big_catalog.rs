@@ -11,6 +11,10 @@
 //! docker_big_catalog`. The times are recorded, never asserted (a debug build on a shared
 //! runner; the plan's G1 number is the bench's).
 
+// ## m4-t33b-carries (named exception): gated like every session test (T33a), so the
+// no-default-feature test check builds.
+#![cfg(feature = "session")]
+
 mod common;
 
 use std::time::Instant;
