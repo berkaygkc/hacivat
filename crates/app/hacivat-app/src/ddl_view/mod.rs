@@ -57,8 +57,6 @@ pub const STUB_COMMANDS: [&str; 0] = [];
 /// Why a DDL view did not open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DdlViewError {
-    /// The DDL view is not built yet (Task 25).
-    NotYet,
     /// The workspace has no room for another tab (the tab IDs are used up).
     NoTab,
 }
@@ -141,9 +139,13 @@ pub fn open_ddl_view(
     let snap = source::catalog_for(profile, cx).and_then(|c| c.snapshot(cx));
     let key = model::ddl_object(snap.as_deref(), &key);
     let object = object_id(profile, &key, cx);
-    let tab = workspace
-        .update(cx, |w, cx| w.open_ddl_view_tab(profile, object, cx))
-        .ok_or(DdlViewError::NoTab)?;
+    let Some(tab) = workspace.update(cx, |w, cx| w.open_ddl_view_tab(profile, object, cx)) else {
+        // No tab: the handle made for it is dropped unless a view of it exists (review m-4).
+        if view_by_id(object, cx).is_none() {
+            forget(object, cx);
+        }
+        return Err(DdlViewError::NoTab);
+    };
     cx.default_global::<DdlObjects>()
         .tabs
         .insert(tab.0, object.0);
@@ -229,11 +231,28 @@ pub fn state_of(profile: ProfileId, key: &ObjectKey, cx: &App) -> Option<DdlView
     view_of(profile, key, cx).map(|v| v.read(cx).state(cx))
 }
 
-/// The tab's title, "{name} · DDL" with the object's own name (verbatim, isolated by Fluent).
+/// `name` for single-line chrome (the tab title, the toolbar's crumb): every control character
+/// drawn as a visible symbol instead of breaking the line (review m-1: a `\n` in a name made the
+/// tab strip's line shaping panic in debug builds, and run two lines together in release). C0
+/// controls become their Control Pictures (`\n` → `␊`), DEL `␡`, C1 controls `�`. Everything
+/// else, bidi controls included (the Fluent argument is isolated), stays verbatim.
+pub fn visible_name(name: &str) -> String {
+    name.chars()
+        .map(|c| match c as u32 {
+            n @ 0x00..=0x1F => char::from_u32(0x2400 + n).unwrap_or('\u{FFFD}'),
+            0x7F => '\u{2421}',
+            0x80..=0x9F => '\u{FFFD}',
+            _ => c,
+        })
+        .collect()
+}
+
+/// The tab's title, "{name} · DDL" with the object's own name (verbatim but for its control
+/// characters, [`visible_name`]; isolated by Fluent).
 pub fn tab_title(profile: ProfileId, object: DdlObjectId, cx: &App) -> SharedString {
     let name = object_key(object, cx)
         .filter(|(p, _)| *p == profile)
-        .and_then(|(_, key)| key.path.last().map(|n| n.to_string()))
+        .and_then(|(_, key)| key.path.last().map(|n| visible_name(n)))
         .unwrap_or_default();
     tr(
         cx,

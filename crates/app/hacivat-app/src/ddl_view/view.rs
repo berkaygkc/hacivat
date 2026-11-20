@@ -14,17 +14,25 @@
 //! Grants is on. Each wait shows "Reading the definition of …"; what stays missing says so
 //! (`DdlError::NotLoaded`: never a text that is not the object's, F31).
 //!
-//! **Freshness** (surface 11). When a script is first shown, and after every Refresh or
-//! Reload, the view asks Task 22's state check for the object's verdict
-//! (`IntroHandle::check_state_verdicts`): `Current` → current; `Changed` → the engine reads it
-//! again, and a script that differs from the shown one is "changed on the server" (Reload),
-//! an equal one current; gone from a loaded namespace → "no longer exists" (Close tab);
-//! `Unknown`, a `Dropped` the catalog does not show, or a check that failed or could not run →
-//! "couldn't check" (Reload). An `Unknown` never shows as current. While the tab is open, a
-//! newer catalog whose script differs marks it changed (never an automatic reload, surface 11
-//! "Out of scope"), and a namespace marked stale turns current into "couldn't check". Server
-//! text from the `Sources` facet is current only while that facet is loaded and not stale
-//! (T19 review carry m6: `DdlSources` has no load state of its own).
+//! **Freshness** (surface 11). Every text the view puts on screen is checked before it can
+//! read as current: the first one, and every one that replaces it (an option, the server
+//! toggle, a facet that arrived, Refresh, Reload, F5); freshness never carries over to a new
+//! text (review I-2). Until the verdict lands a quiet "Checking whether … changed" caption
+//! shows. The verdict is Task 22's (`IntroHandle::check_state_verdicts`):
+//! - `Current`, or `Changed` with a successful re-read: current only when the catalog still
+//!   gives the shown text (a publish that landed while the check ran leaves the old text on
+//!   screen: "changed on the server", review I-1) and vouches for it ([`DdlView::vouched`]:
+//!   the namespace is not stale, and server text from the `Sources` facet has that facet
+//!   loaded and not stale, T19 review m6); otherwise "couldn't check";
+//! - gone from a loaded namespace: "no longer exists" (Close tab);
+//! - `Unknown`, a `Dropped` the catalog does not confirm, a check that failed or could not
+//!   run: "couldn't check" (Reload). An `Unknown` never shows as current.
+//!
+//! While the tab is open, a newer catalog whose script differs marks it changed (never an
+//! automatic reload, surface 11 "Out of scope"), and one that no longer vouches for the same
+//! text (a stale namespace, a stale `Sources` facet) turns current into "couldn't check"
+//! (review I-3). Comparisons regenerate with the schema the shown text was made with, so a
+//! console switch never reads as a server change (review m-3).
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -148,6 +156,10 @@ struct Shown {
     /// The text is the `Sources` facet's (a table's or an index's server text), not a
     /// `SourceRef` the object's own props name.
     facet_text: bool,
+    /// The current schema the text was generated with (`Qualify::Auto`): comparisons with a
+    /// newer catalog regenerate with it, so a console switch never reads as a server change
+    /// (review m-3).
+    schema: Option<Name>,
 }
 
 /// The DDL view of one object.
@@ -168,6 +180,8 @@ pub struct DdlView {
     sources_asked: bool,
     grants_asked: bool,
     grants_pending: bool,
+    /// The latest state check (review fix round): an older answer that lands later is ignored.
+    check_seq: u64,
     /// The snapshot the view last looked at (`Arc` identity), so an unrelated global change
     /// rebuilds nothing.
     seen: Option<Arc<CatalogSnapshot>>,
@@ -256,6 +270,7 @@ impl DdlView {
             sources_asked: false,
             grants_asked: false,
             grants_pending: false,
+            check_seq: 0,
             seen: None,
             _subscriptions: subscriptions,
         };
@@ -302,19 +317,33 @@ impl DdlView {
             .map(|n| Name::from(n.as_str()))
     }
 
-    fn generate(&self, snap: &Arc<CatalogSnapshot>, cx: &App) -> Generated {
+    fn generate(&self, snap: &Arc<CatalogSnapshot>, schema: Option<Name>, cx: &App) -> Generated {
         let Some(catalog) = &self.catalog else {
             return Generated::NotLoaded;
         };
         let sources = catalog.sources(cx);
-        model::generate(
-            self.dbms,
-            snap,
-            &*sources,
-            &self.key,
-            self.opts,
-            self.current_schema(cx),
-        )
+        model::generate(self.dbms, snap, &*sources, &self.key, self.opts, schema)
+    }
+
+    /// Whether `snap` still gives the shown text (regenerated with the schema it was made
+    /// with); `None` when nothing is shown or the object no longer generates.
+    fn still_shown(&self, snap: &Arc<CatalogSnapshot>, cx: &App) -> Option<bool> {
+        let shown = self.shown.as_ref()?;
+        match self.generate(snap, shown.schema.clone(), cx) {
+            Generated::Script(s) => Some(model::text_of(&s) == shown.text),
+            _ => None,
+        }
+    }
+
+    /// Whether the catalog vouches for the shown text when a check says it is current (the one
+    /// rule every path applies, review I-3): its namespace is not stale (cached, refresh after
+    /// DDL with Ask or Never, a held deletion), and server text from the `Sources` facet has
+    /// that facet loaded and not stale (T19 review m6: `DdlSources` has no load state).
+    fn vouched(&self, snap: &CatalogSnapshot) -> bool {
+        !model::is_stale(snap, &self.key)
+            && self.shown.as_ref().is_none_or(|s| {
+                !s.facet_text || model::facet_vouches(snap, &self.key, FacetKind::Sources)
+            })
     }
 
     /// An object with a server id renamed on the server keeps its handle; the key (and the tab's
@@ -363,8 +392,13 @@ impl DdlView {
             self.elevate(cx);
             return;
         }
-        match self.generate(&snap, cx) {
-            Generated::Script(s) => self.got_script(s, why, &snap, cx),
+        // A catalog comparison regenerates with the schema the shown text was made with.
+        let schema = match (why, &self.shown) {
+            (Why::Catalog, Some(shown)) if self.body == Body::Script => shown.schema.clone(),
+            _ => self.current_schema(cx),
+        };
+        match self.generate(&snap, schema.clone(), cx) {
+            Generated::Script(s) => self.got_script(s, schema, why, &snap, cx),
             Generated::Unsupported => {
                 self.body = Body::Unsupported;
                 self.shown = None;
@@ -395,6 +429,7 @@ impl DdlView {
     fn got_script(
         &mut self,
         s: Script,
+        schema: Option<Name>,
         why: Why,
         snap: &Arc<CatalogSnapshot>,
         cx: &mut Context<Self>,
@@ -405,30 +440,35 @@ impl DdlView {
             server_text: model::is_server_text(self.dbms, self.key.kind, self.opts),
             facet_text: model::is_server_text(self.dbms, self.key.kind, self.opts)
                 && !model::needs_sources(self.key.kind),
+            schema,
         };
-        let first = self.shown.is_none();
         match (why, &self.shown) {
             (Why::Catalog, Some(shown)) if self.body == Body::Script => {
                 if shown.text != next.text {
                     self.freshness = Freshness::Changed;
-                } else if model::is_stale(snap, &self.key) && self.freshness == Freshness::Current {
+                } else if self.freshness == Freshness::Current && !self.vouched(snap) {
+                    // The same text, but the catalog no longer vouches for it (review I-3).
                     self.freshness = Freshness::Unknown;
                 }
             }
             _ => {
-                if self.freshness == Freshness::Changed {
-                    // The shown text is now the newest the catalog holds.
-                    self.freshness = Freshness::Current;
-                }
+                // Freshness never carries over to a new text (review I-2): a first text, or
+                // one that replaced the shown one (an option, the server toggle, a facet that
+                // arrived, Reload), is checked again before it can read as current.
+                let replaced = self.shown.as_ref().is_none_or(|s| {
+                    s.text != next.text
+                        || s.server_text != next.server_text
+                        || s.facet_text != next.facet_text
+                });
                 self.set_editor_text(&next.text, cx);
                 self.shown = Some(next);
                 self.body = Body::Script;
+                if replaced {
+                    self.check(cx);
+                }
             }
         }
         self.ask_grants(cx);
-        if first && self.shown.is_some() {
-            self.check(cx);
-        }
     }
 
     fn set_editor_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -502,20 +542,27 @@ impl DdlView {
             return;
         };
         self.freshness = Freshness::Checking;
+        self.check_seq += 1;
+        let seq = self.check_seq;
         let check = catalog.check_state(self.key.clone(), cx);
         let key = self.key.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let (verdict, read) = check.outcome(&key).await;
-            let _ = this.update(cx, |v, cx| v.checked(verdict, read, cx));
+            let _ = this.update(cx, |v, cx| {
+                if v.check_seq == seq {
+                    v.checked(verdict, read, cx);
+                }
+            });
         })
         .detach();
     }
 
-    /// The freshness a check's verdict gives (surface 11). Only a `Current` verdict, or a
-    /// re-read that a `Changed` verdict asked for, shows the text as current; `Unknown` and a
-    /// failed check never do ("couldn't check"). Server text read from the `Sources` facet is
-    /// current only while that facet is loaded and not stale (T19 review m6: `DdlSources` has
-    /// no load state of its own, so the snapshot's facet state vouches for it).
+    /// The freshness a check's verdict gives (surface 11). A `Current` verdict, or a `Changed`
+    /// one whose re-read succeeded, reads current only when the catalog still gives the shown
+    /// text (review I-1: a newer publish may have landed while the check ran; the text on
+    /// screen is then the old one, "changed") and vouches for it ([`DdlView::vouched`]).
+    /// `Unknown`, a `Dropped` the catalog does not confirm and a failed check never read
+    /// current ("couldn't check").
     fn checked(&mut self, verdict: Staleness, read: bool, cx: &mut Context<Self>) {
         cx.notify();
         let Some(snap) = self.snapshot(cx) else {
@@ -526,27 +573,14 @@ impl DdlView {
             self.freshness = Freshness::Gone;
             return;
         }
-        let vouched = self.shown.as_ref().is_none_or(|s| {
-            !s.facet_text || model::facet_vouches(&snap, &self.key, FacetKind::Sources)
-        });
-        self.freshness = match verdict {
-            Staleness::Current if vouched => Freshness::Current,
-            // Changed: the engine read it again; a different script is announced, an equal one
-            // is the server's as of that read.
-            Staleness::Changed if read => match self.generate(&snap, cx) {
-                Generated::Script(s)
-                    if self
-                        .shown
-                        .as_ref()
-                        .is_some_and(|shown| shown.text != model::text_of(&s)) =>
-                {
-                    Freshness::Changed
-                }
-                Generated::Script(_) if vouched => Freshness::Current,
-                _ => Freshness::Unknown,
-            },
-            // Dropped, but the catalog still holds it (the re-read failed or did not apply),
-            // Unknown, or a check that decided nothing.
+        let decided = match verdict {
+            Staleness::Current => true,
+            Staleness::Changed => read,
+            Staleness::Dropped | Staleness::Unknown => false,
+        };
+        self.freshness = match (decided, self.still_shown(&snap, cx)) {
+            (true, Some(false)) => Freshness::Changed,
+            (true, Some(true)) if self.vouched(&snap) => Freshness::Current,
             _ => Freshness::Unknown,
         };
     }
@@ -614,9 +648,11 @@ impl DdlView {
             let _ = ticket.await;
             let _ = this.update(cx, |v, cx| {
                 // The shown text is now what the catalog holds; a state check says whether
-                // it is the server's (a re-read alone never vouches: it may have failed).
+                // it is the server's (a re-read alone never vouches: it may have failed). A
+                // text that changed was checked by `load` already.
+                let seq = v.check_seq;
                 v.load(Why::Show, cx);
-                if v.freshness != Freshness::Gone && v.body == Body::Script {
+                if v.check_seq == seq && v.freshness != Freshness::Gone && v.body == Body::Script {
                     v.check(cx);
                 }
             });
@@ -629,8 +665,9 @@ impl DdlView {
         self.body == Body::Script && self.shown.is_some()
     }
 
+    /// The object's name as chrome shows it (control characters visible, review m-1).
     fn name(&self) -> String {
-        self.key.name().to_string()
+        super::visible_name(self.key.name())
     }
 
     /// Puts the shown text on the clipboard (raw, `\n`), with a toast.
@@ -750,6 +787,9 @@ impl DdlView {
             Freshness::Changed => out.push("hv-ddl-view-stale".to_string()),
             Freshness::Gone => out.push("hv-ddl-view-gone".to_string()),
             Freshness::Unknown => out.push("hv-ddl-view-unknown".to_string()),
+            Freshness::Checking if self.body == Body::Script => {
+                out.push("hv-ddl-view-checking".to_string())
+            }
             Freshness::Checking | Freshness::Current => {}
         }
         match self.body {
@@ -872,6 +912,7 @@ impl DdlView {
             .as_ref()
             .map(|p| crate::connections::capsule::env_kind(p.environment));
         let qualified: SharedString = crate::explorer::qualified_name(self.dbms, &self.key)
+            .map(|q| super::visible_name(&q))
             .unwrap_or_else(|| self.name())
             .into();
         let kind = self.key.kind;
@@ -1247,6 +1288,19 @@ impl DdlView {
                     "ddl-gone",
                 ))
             }
+            // Review m-2: until the verdict lands the text says it is being checked (a quiet
+            // caption, no button), never nothing (which would read as current).
+            Freshness::Checking if self.body == Body::Script => out.push(row(
+                IconName::History,
+                tr(
+                    cx,
+                    ids::hv::DDL_VIEW_CHECKING,
+                    ids::hv::HvDdlViewChecking { name: arg() },
+                ),
+                None,
+                None,
+                "ddl-checking",
+            )),
             Freshness::Checking | Freshness::Current => {}
         }
         if self.body == Body::Script

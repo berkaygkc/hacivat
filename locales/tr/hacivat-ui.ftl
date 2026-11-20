@@ -3642,3 +3642,8 @@ hv-ddl-view-server-fixed-tip = SQLite her zaman sunucunun metnini gösterir: CHE
 # The palette title of the DDL view's Reload (F5 in its text).
 # Review: PO
 hv-cmd-ddl-view-reload = DDL'i yeniden yükle
+# Surface 11 (Stale object). While the state check runs (review m-2): a quiet caption.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-ddl-view-checking = { $name } nesnesinin sunucuda değişip değişmediği denetleniyor…

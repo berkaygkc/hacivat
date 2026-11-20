@@ -31,7 +31,7 @@ pub struct Shown {
     pub server_fixed: bool,
     /// Grants: PostgreSQL and MySQL/MariaDB (SQLite has none).
     pub grants: bool,
-    /// Owner (PostgreSQL) or definer (MySQL/MariaDB).
+    /// Owner (PostgreSQL only).
     pub owner: bool,
 }
 
@@ -44,11 +44,14 @@ pub fn shown(dbms: DbmsKind) -> Shown {
             grants: false,
             owner: false,
         },
+        // Review m-8: no Owner on MySQL/MariaDB. Its only effect was dropping `DEFINER=` from
+        // the server's text, which the caption "Text from the server" would then misstate;
+        // server text stays verbatim.
         DialectId::MySql | DialectId::MariaDb => Shown {
             server: true,
             server_fixed: false,
             grants: true,
-            owner: true,
+            owner: false,
         },
         _ => Shown {
             server: false,
@@ -81,7 +84,8 @@ pub fn gen_options(dbms: DbmsKind, opts: DdlViewOptions) -> GenOptions {
         placement: o.placement,
         skip_grants: !o.grants,
         skip_owner: !o.owner,
-        skip_definer: !o.owner,
+        // Server text is shown verbatim, `DEFINER=` included (review m-8).
+        skip_definer: false,
         server_definitions: o.server_definitions,
         ..GenOptions::default()
     }
@@ -337,7 +341,7 @@ mod tests {
             ..DdlViewOptions::default()
         };
         let g = gen_options(DbmsKind::Postgres, off);
-        assert!(g.skip_grants && g.skip_owner && g.skip_definer);
+        assert!(g.skip_grants && g.skip_owner && !g.skip_definer);
         let g = gen_options(DbmsKind::Postgres, DdlViewOptions::default());
         assert!(!g.skip_grants && !g.skip_owner && !g.server_definitions);
     }

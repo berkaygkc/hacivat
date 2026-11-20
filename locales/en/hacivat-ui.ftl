@@ -4014,3 +4014,7 @@ hv-ddl-view-close-tab = Close tab
 hv-ddl-view-server-fixed-tip = SQLite always shows the server's text: CHECK constraints and generated columns exist only there.
 # The palette title of the DDL view's Reload (F5 in its text).
 hv-cmd-ddl-view-reload = Reload DDL
+# Surface 11 (Stale object). While the state check runs (review m-2): a quiet caption.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-ddl-view-checking = Checking whether { $name } changed on the server…

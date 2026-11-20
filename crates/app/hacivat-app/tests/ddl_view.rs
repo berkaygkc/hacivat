@@ -15,7 +15,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use gpui::{TestAppContext, VisualTestContext};
 use hacivat_app::console::Consoles;
@@ -758,8 +758,21 @@ fn open_in_console_inserts_without_running(cx: &mut TestAppContext) {
     wait_until(vcx, "the inserted text", |vcx| {
         editor_text(vcx, console) == text
     });
-    // Not run: the session saw no statement of the text.
-    settle(vcx, Duration::from_millis(50));
+    // Not run (review I-4: a condition, not a sleep): wait until the console could run (its
+    // session idle and its SQL context read, the moment a queued run fires, as Open data's
+    // does), let every task run, and the session saw no statement of the text.
+    wait_until(vcx, "the console ready to run", |vcx| {
+        vcx.cx.read(|cx| {
+            let idle = Consoles::get(cx, console)
+                .and_then(|s| s.session.as_ref())
+                .is_some_and(|s| {
+                    s.state().borrow().state == hacivat_session::session::SessionState::Idle
+                });
+            idle && hacivat_app::exec_ui::sql_context(console, cx)
+                != hacivat_app::exec_ui::context::SqlContext::Pending
+        })
+    });
+    vcx.run_until_parked();
     let f = fake(vcx);
     let ran = f
         .typed_log()
@@ -1414,4 +1427,310 @@ fn object_table_shrinks_and_title_follows_rename(cx: &mut TestAppContext) {
     assert!(run(vcx, "workspace.close_tab"));
     vcx.run_until_parked();
     assert_eq!(vcx.cx.read(ddl_view::object_count), before);
+}
+
+// ---- opus review (T25): hostile tests, H1-H4 flipped to assert the fixes (fix round) ----
+
+/// H1. A background read publishes a changed `users` while the view's check is in flight; the
+/// check (which compared the server with that newer catalog) then answers `Current`. The view
+/// still shows the OLD text, so it must not read as current.
+#[gpui::test]
+fn review_h1_current_verdict_after_a_publish_never_vouches_the_old_text(cx: &mut TestAppContext) {
+    let cat = pg_cat(1, vec![users(&[("id", "integer")])], false);
+    let (vcx, s, id) = pg_shell(cx, "en", cat);
+    s.check.set(Some(Answer::Hold));
+    open_view(vcx, id, &users_key());
+    let old = shown_text(vcx, id, &users_key());
+    assert_eq!(state(vcx, id, &users_key()).freshness, Freshness::Checking);
+    show(
+        vcx,
+        id,
+        pg_cat(
+            2,
+            vec![users(&[("id", "integer"), ("email", "text")])],
+            false,
+        ),
+    );
+    assert_eq!(state(vcx, id, &users_key()).freshness, Freshness::Changed);
+    s.verdict.set(Some(Staleness::Current));
+    fake_of(&s, id).answer("check users", 2);
+    let st = state(vcx, id, &users_key());
+    assert_eq!(st.text.as_deref(), Some(old.as_str()), "the old text stays");
+    assert_eq!(
+        st.freshness,
+        Freshness::Changed,
+        "the old text (no `email`) is not current: {st:?}"
+    );
+    assert!(st.notices.contains(&"hv-ddl-view-stale".to_string()));
+}
+
+/// H2. The catalog moves to a STALE namespace with a different script ("changed"); the user then
+/// flips an option. The view shows the stale namespace's script and must not call it current
+/// without a check.
+#[gpui::test]
+fn review_h2_option_change_after_a_stale_publish_is_not_current(cx: &mut TestAppContext) {
+    let cat = pg_cat(1, vec![users(&[("id", "integer")])], false);
+    let (vcx, s, id) = pg_shell(cx, "en", cat);
+    open_view(vcx, id, &users_key());
+    assert_eq!(state(vcx, id, &users_key()).freshness, Freshness::Current);
+    show(
+        vcx,
+        id,
+        pg_cat(
+            2,
+            vec![users(&[("id", "integer"), ("email", "text")])],
+            true,
+        ),
+    );
+    assert_eq!(state(vcx, id, &users_key()).freshness, Freshness::Changed);
+    let checks = s
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| *c == "check users")
+        .count();
+    click(vcx, "segmented-ddl-qualify-1");
+    let st = state(vcx, id, &users_key());
+    assert!(
+        st.text.as_deref().unwrap().contains("email"),
+        "{:?}",
+        st.text
+    );
+    let checks_after = s
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| *c == "check users")
+        .count();
+    assert!(
+        checks_after > checks,
+        "the replaced text was checked ({checks} -> {checks_after})"
+    );
+    assert_eq!(
+        st.freshness,
+        Freshness::Unknown,
+        "a stale namespace's text is not current: {st:?}"
+    );
+}
+
+/// H3. MySQL: the generated text was checked Current; the user turns on "Definitions provided
+/// by server". The shown text is now the `Sources` facet's, which no facet state vouches for,
+/// so it must not read as current (T19 carry m6) until a check says so.
+#[gpui::test]
+fn review_h3_server_text_toggle_without_a_facet_state_is_not_current(cx: &mut TestAppContext) {
+    let (vcx, s, id) = mysql_shell(cx, mysql_cat(vec![table("t", None, &[("id", "int")])]));
+    s.server.borrow_mut().insert(
+        "api.t".to_string(),
+        Name::from("CREATE TABLE `t` (\n  `id` int DEFAULT NULL\n) ENGINE=InnoDB"),
+    );
+    let k = key(ObjectKind::Table, &["api", "t"]);
+    open_view(vcx, id, &k);
+    assert_eq!(state(vcx, id, &k).freshness, Freshness::Current);
+    click(vcx, "checkbox-ddl-server");
+    let st = state(vcx, id, &k);
+    assert!(st.server_text);
+    assert_eq!(
+        st.freshness,
+        Freshness::Unknown,
+        "unvouched Sources-facet text is not current: {st:?}"
+    );
+    assert_eq!(
+        s.calls.borrow().iter().filter(|c| *c == "check t").count(),
+        2,
+        "the server text was checked again"
+    );
+}
+
+/// H4. MySQL server text vouched by a loaded `Sources` facet reads current; then a newer
+/// catalog marks that facet stale (same structure, namespace not stale). The text is the
+/// stale facet's: it must stop reading as current.
+#[gpui::test]
+fn review_h4_sources_facet_going_stale_turns_current_off(cx: &mut TestAppContext) {
+    let k = key(ObjectKind::Table, &["api", "t"]);
+    let with_facet = |generation: u64, stale: bool| {
+        let mut cat = (*mysql_cat(vec![table("t", None, &[("id", "int")])])).clone();
+        cat.generation = generation;
+        let mut states = (*cat.states).clone();
+        states.insert(
+            hacivat_meta::snapshot::ContainerKey::Facet {
+                ns: NsKey::schema(["api"]),
+                object: k.clone(),
+                facet: FacetKind::Sources,
+            },
+            loaded(stale),
+        );
+        cat.states = Arc::new(states);
+        Arc::new(cat)
+    };
+    let (vcx, s, id) = mysql_shell(cx, with_facet(1, false));
+    s.server.borrow_mut().insert(
+        "api.t".to_string(),
+        Name::from("CREATE TABLE `t` (\n  `id` int DEFAULT NULL\n) ENGINE=InnoDB"),
+    );
+    open_view(vcx, id, &k);
+    click(vcx, "checkbox-ddl-server");
+    click(vcx, "button-ddl-refresh");
+    let st = state(vcx, id, &k);
+    assert!(st.server_text);
+    assert_eq!(
+        st.freshness,
+        Freshness::Current,
+        "vouched by the loaded facet"
+    );
+    show(vcx, id, with_facet(2, true));
+    let st = state(vcx, id, &k);
+    assert_eq!(
+        st.freshness,
+        Freshness::Unknown,
+        "server text of a stale Sources facet is not current: {st:?}"
+    );
+}
+
+/// H5. The DDL text carries the `Editor` context. Run must stay inert there: nothing executes
+/// and no console opens. Fix round (review m-6): Run is disabled in a read-only editor, so the
+/// chord no longer even reaches the text (no `ExecuteRequested`), and Run is off the palette.
+#[gpui::test]
+fn review_h5_run_chord_in_the_ddl_text_executes_nothing(cx: &mut TestAppContext) {
+    let cat = pg_cat(1, vec![users(&[("id", "integer")])], false);
+    let (vcx, _s, id) = pg_shell(cx, "en", cat);
+    connect(vcx, "app-dev");
+    wait_until(vcx, "connected", |vcx| {
+        matches!(
+            live(vcx, "app-dev"),
+            hacivat_session::LiveState::Connected(_)
+        )
+    });
+    open_view(vcx, id, &users_key());
+    let editor = vcx.cx.read(|cx| {
+        ddl_view::view_of(id, &users_key(), cx)
+            .unwrap()
+            .read(cx)
+            .editor()
+            .clone()
+    });
+    let requests = Rc::new(Cell::new(0usize));
+    let r2 = requests.clone();
+    vcx.cx.update(|cx| {
+        cx.subscribe(&editor, move |_, e: &hacivat_ui_editor::EditorEvent, _| {
+            if matches!(e, hacivat_ui_editor::EditorEvent::ExecuteRequested(_)) {
+                r2.set(r2.get() + 1);
+            }
+        })
+        .detach()
+    });
+    in_window(vcx, |window, cx| {
+        let focus = gpui::Focusable::focus_handle(editor.read(cx), cx);
+        window.focus(&focus, cx);
+    });
+    vcx.run_until_parked();
+    let tabs = tab_count(vcx);
+    let before = fake(vcx).typed_log().len();
+    let chord = if cfg!(target_os = "macos") {
+        "cmd-enter"
+    } else {
+        "ctrl-enter"
+    };
+    vcx.simulate_keystrokes(chord);
+    vcx.run_until_parked();
+    assert_eq!(
+        requests.get(),
+        0,
+        "Run is disabled in the read-only DDL text"
+    );
+    assert!(!run(vcx, "editor.run"), "Run is not offered there");
+    assert_eq!(tab_count(vcx), tabs, "no console opened");
+    let log = fake(vcx).typed_log();
+    assert!(
+        !log[before..].iter().any(|c| matches!(
+            c,
+            hacivat_driver::fake::FakeTypedCall::Query(q) if q.contains("CREATE")
+        )),
+        "the DDL ran: {:?}",
+        &log[before..]
+    );
+}
+
+/// H6. A hostile table name (RLO, a quote, a statement and a line comment, a newline): the
+/// text is exactly T19's bytes with the name quoted (the quote doubled, nothing escapes the
+/// identifier), the tab title isolates it (FSI…PDI), and the raw editor text matches.
+#[gpui::test]
+fn review_h6_hostile_identifier_stays_one_quoted_identifier(cx: &mut TestAppContext) {
+    let evil = "us\u{202E}ers\"; DROP TABLE x; --";
+    let cat = pg_cat(
+        1,
+        vec![table(evil, Some(16_500), &[("id", "integer")])],
+        false,
+    );
+    let (vcx, s, id) = pg_shell(cx, "en", cat.clone());
+    let k = ObjectKey {
+        kind: ObjectKind::Table,
+        path: ["app", "public", evil]
+            .into_iter()
+            .map(Name::from)
+            .collect(),
+        server_id: Some(hacivat_meta::ServerId::Oid(16_500)),
+        overload_sig: None,
+        raw_kind: None,
+    };
+    open_view(vcx, id, &k);
+    let want = create_script_text(
+        &cat,
+        &FakeSources(s.clone()),
+        &k,
+        DialectId::Postgres,
+        GenOptions::default(),
+    );
+    let st = state(vcx, id, &k);
+    assert_eq!(st.text.as_deref(), Some(want.as_str()));
+    assert!(
+        want.contains("public.\"us\u{202E}ers\"\"; DROP TABLE x; --\" ("),
+        "{want:?}"
+    );
+    assert_eq!(editor_text_of(vcx, id, &k), want);
+    let raw_title = {
+        let ws = workspace(vcx);
+        vcx.cx.read(|cx| {
+            let w = ws.read(cx);
+            w.active_tab().map(|t| w.tab_title(t, cx).to_string())
+        })
+    }
+    .expect("a tab");
+    assert!(
+        raw_title.starts_with('\u{2068}') && raw_title.contains("\u{2069} · DDL"),
+        "{raw_title:?}"
+    );
+}
+
+/// Review m-1: a name with control characters (a newline, a tab) is drawn on the single-line
+/// chrome (the tab title, the toolbar) with the controls visible, never breaking the line (it
+/// panicked the tab strip's line shaping in debug builds). The DDL text keeps the name exactly.
+#[gpui::test]
+fn control_characters_in_a_name_are_visible_in_the_tab_title(cx: &mut TestAppContext) {
+    let evil = "a\nb\tc";
+    let cat = pg_cat(
+        1,
+        vec![table(evil, Some(16_600), &[("id", "integer")])],
+        false,
+    );
+    let (vcx, _s, id) = pg_shell(cx, "en", cat);
+    let k = ObjectKey {
+        kind: ObjectKind::Table,
+        path: ["app", "public", evil]
+            .into_iter()
+            .map(Name::from)
+            .collect(),
+        server_id: Some(hacivat_meta::ServerId::Oid(16_600)),
+        overload_sig: None,
+        raw_kind: None,
+    };
+    open_view(vcx, id, &k);
+    // Drawn (the tab strip and the toolbar shaped the title and the crumb).
+    vcx.run_until_parked();
+    assert_eq!(tab_title(vcx), "a\u{240A}b\u{2409}c · DDL");
+    assert_eq!(
+        ddl_view::visible_name("x\u{7F}\u{85}y"),
+        "x\u{2421}\u{FFFD}y"
+    );
+    let text = shown_text(vcx, id, &k);
+    assert!(text.contains("\"a\nb\tc\""), "{text:?}");
 }

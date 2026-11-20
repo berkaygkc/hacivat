@@ -1226,12 +1226,24 @@ The M2a connection list became the database explorer tree in place (R-M4-18): `h
   reload); a namespace marked stale turns current into "couldn't check". Server text from the
   `Sources` facet is current only while that facet is `Loaded` and not stale in the snapshot
   (T19 review m6: `DdlSources::server_text` has no load state of its own).
+- *Fix round (review I-1 to I-3, m-1 to m-8).* Freshness never carries over to a new text: a
+  first text and every replacement (an option, the server toggle, a facet, Refresh, Reload)
+  is checked again, with a "Checking whether … changed" caption until the verdict lands. A
+  `Current` verdict (or `Changed` with a re-read) reads current only when the catalog still
+  gives the shown text (else "changed": a publish landed during the check) and vouches for it:
+  the namespace not stale and, for `Sources`-facet server text, that facet `Loaded` and not
+  stale. The same rule demotes current on a newer catalog with the same text. A stale
+  namespace now reads "couldn't check" even under a `Current` verdict (stricter than round 1).
+  Comparisons regenerate with the schema the shown text was made with. Names on single-line
+  chrome draw their control characters visibly (`ddl_view::visible_name`: `\n` → `␊`). Run is
+  disabled in read-only editors (`console/commands.rs`, named exception). MySQL/MariaDB show no
+  Owner option and their server text keeps `DEFINER=` verbatim.
 - *Options per engine.* "Definitions provided by server" is hidden on PostgreSQL, shown on
   MySQL/MariaDB, and shown checked and fixed on SQLite (its tables always show
   `sqlite_schema.sql`, F10; Task 19 ignores the flag there, the T7 carry M8; ruling R-W4-12),
   with a tooltip saying why (`hv-ddl-view-server-fixed-tip`). Qualification
   and Constraints hide while the shown text is the server's (NOTES ruling 16). Grants: PG and
-  MySQL/MariaDB; Owner: PG's owner and MySQL's definer.
+  MySQL/MariaDB; Owner: PostgreSQL only (fix round m-8).
 - *Tabs.* The object table keeps a handle per open object and drops it when the view is
   released (the tab closed, T1b carry m3); an object with a server id renamed on the server
   keeps its handle and the tab title follows the new name. `ddl_view.copy` copies the active
