@@ -531,7 +531,9 @@ async fn pg_view_dependencies_read() {
         };
         let schema = r(ObjectKind::Schema, &[db, s], Some(oid_of(&ks)));
         let table_t = r(ObjectKind::Table, &[db, s, "t"], Some(oid_of(&kt)));
-        // The view: its table, the columns it reads, the function and the type it uses.
+        // The view: its table, the columns it reads, the function and the type it uses. Its
+        // rule records the columns (PostgreSQL 13 records no whole-table row); a column
+        // dependency names its table as well, once, with the table's oid (CI 44656387989).
         let v = deps(&kv);
         for want in [
             schema.clone(),
@@ -561,13 +563,13 @@ async fn pg_view_dependencies_read() {
             "{}: {v2:#?}",
             t.id
         );
-        // A table through its parts: the FK (the referenced columns and the key's index; a
-        // foreign key records the columns, not the whole table), the default (the sequence),
-        // the trigger (its function), a column type (an array of the enum, named by its
-        // element).
+        // A table through its parts: the FK (the referenced columns, hence their table, and
+        // the key's index), the default (the sequence), the trigger (its function), a column
+        // type (an array of the enum, named by its element).
         let child = deps(&kchild);
         for want in [
             schema.clone(),
+            table_t.clone(),
             r(ObjectKind::Column, &[db, s, "t", "id"], None),
             r(ObjectKind::Sequence, &[db, s, "sq"], Some(oid_of(&ksq))),
             r(ObjectKind::Routine, &[db, s, "trg"], Some(oid_of(&ktrg))),

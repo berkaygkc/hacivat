@@ -489,9 +489,30 @@ pub fn decide_deps(db: &Name, oid: u32, rows: &[DepRow]) -> Result<DepsFacet, In
         if is_own(oid, row) {
             continue;
         }
-        if let Some(r) = dep_ref(db, row)?
-            && seen.insert(r.clone())
+        let Some(r) = dep_ref(db, row)? else {
+            continue;
+        };
+        // ## m4-t16b-pg-facets (CI 44656387989): a dependency on a column is a dependency on
+        // its relation too. PostgreSQL records a view's or a constraint's column references
+        // with `refobjsubid > 0` and need not record the whole relation, so the relation's
+        // `Ref` (with its oid) is derived here, once. A column has no server id in the model
+        // (its key carries none), so the column `Ref` keeps `None` and is found by its path.
+        if row.refcat == "column"
+            && let Some(kind) = relkind_kind(row.refkind.as_deref().unwrap_or(""))
         {
+            let parent = Ref {
+                kind,
+                path: r.path[..r.path.len().saturating_sub(1)]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                server_id: Some(ServerId::Oid(row.refid)),
+            };
+            if seen.insert(parent.clone()) {
+                out.push(parent);
+            }
+        }
+        if seen.insert(r.clone()) {
             out.push(r);
         }
     }
@@ -1465,6 +1486,44 @@ mod tests {
         let mut sorted = got.depends_on.clone();
         sorted.sort_by_key(|x| (x.kind.code(), x.path.to_vec()));
         assert_eq!(got.depends_on, sorted);
+    }
+
+    /// CI 44656387989 (pg13): a view's rule records only column rows (`refobjsubid > 0`); the
+    /// facet names the relation too, once, with its oid, and the columns by path.
+    #[test]
+    fn a_column_dependency_names_its_relation_once() {
+        let db = n("hv_test");
+        let col = |name: &str, sub: i32| DepRow {
+            refsub: sub,
+            refparent: Some("t".into()),
+            ..dep("column", 400, "r", name)
+        };
+        let rows = vec![col("a", 2), col("id", 1), col("a", 2)];
+        let got = decide_deps(&db, 500, &rows).unwrap();
+        assert_eq!(
+            got.depends_on,
+            vec![
+                r(ObjectKind::Table, &["hv_test", "s", "t"], Some(400)),
+                r(ObjectKind::Column, &["hv_test", "s", "t", "a"], None),
+                r(ObjectKind::Column, &["hv_test", "s", "t", "id"], None),
+            ]
+        );
+        // A view's column names a view; a whole-relation row as well is not a second ref.
+        let rows = vec![
+            DepRow {
+                refparent: Some("w".into()),
+                ..dep("column", 401, "v", "x")
+            },
+            dep("class", 401, "v", "w"),
+        ];
+        let got = decide_deps(&db, 500, &rows).unwrap();
+        assert_eq!(
+            got.depends_on,
+            vec![
+                r(ObjectKind::View, &["hv_test", "s", "w"], Some(401)),
+                r(ObjectKind::Column, &["hv_test", "s", "w", "x"], None),
+            ]
+        );
     }
 
     #[test]
