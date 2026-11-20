@@ -396,3 +396,54 @@ async fn h3b_a_dbms_mismatch_with_a_mysql_shaped_namespace() {
         "text of another engine reached the job's session: {log:#?}"
     );
 }
+
+// ## m4-t15b-facets (implementer addition; CI run 44696885118, T16b m-7)
+
+/// A facet read on a joined connection is refused at once by both network engines, never
+/// answered empty (a key without an oid was otherwise left out: `Ok(Grants([]))` on CI), and
+/// nothing reaches the job's session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_facet_read_on_a_joined_connection_is_refused_before_anything_is_sent() {
+    use hacivat_introspect::Introspector;
+    use hacivat_meta::props::FacetKind;
+    let fake = Arc::new(scripted("appdb", &["pg_catalog"]));
+    let p = profile();
+    let sm = SessionManager::new(
+        tokio::runtime::Handle::current(),
+        Arc::new(p.clone()),
+        Arc::new(deps(fake.clone())),
+        Arc::new(budget_for(&p)),
+    );
+    let j = job(&sm).await;
+    begin(&j).await;
+    let from = fake.call_log().len();
+    let mut with_oid = t_key();
+    with_oid.server_id = Some(hacivat_meta::ServerId::Oid(16400));
+    for kind in [
+        FacetKind::Grants,
+        FacetKind::Dependencies,
+        FacetKind::Statistics,
+    ] {
+        for keys in [vec![t_key()], vec![with_oid.clone()], Vec::new()] {
+            let mut c = hacivat_session::meta::MetaConn::join(&j).expect("joinable");
+            let pg = hacivat_introspect::pg::PgIntrospector
+                .facet(&mut c, &ns(), &keys, kind)
+                .await;
+            assert!(
+                matches!(pg, Err(IntroError::Meta(MetaError::NotJoinable))),
+                "pg {kind:?} {keys:?}: {pg:?}"
+            );
+            let my = hacivat_introspect::mysql::MySqlIntrospector {
+                flavor: DbmsKind::MySql,
+            }
+            .facet(&mut c, &NsKey::schema([Name::from("s")]), &keys, kind)
+            .await;
+            assert!(
+                matches!(my, Err(IntroError::Meta(MetaError::NotJoinable))),
+                "mysql {kind:?} {keys:?}: {my:?}"
+            );
+        }
+    }
+    assert!(sent(&fake, from).is_empty(), "{:#?}", sent(&fake, from));
+}
+// ## m4-t15b-facets

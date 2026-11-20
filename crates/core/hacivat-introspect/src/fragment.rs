@@ -174,6 +174,11 @@ async fn standalone(
     r: NamespaceResult,
 ) -> Result<NamespaceSnapshot, IntroError> {
     let ns = ns.clone();
+    // A standalone read describes the objects it read at its level: as a full pass into an
+    // empty base it sets the snapshot's level (nothing is deleted: the base holds nothing).
+    // CI run 44696885118: as a fragment the snapshot stayed at `Names`.
+    let mut r = r;
+    r.full = true;
     let built = tokio::task::spawn_blocking(move || {
         let base = merge::base(ns, dbms, fold)
             .map_err(|_| IntroError::Protocol(Name::from("joined/base")))?;
@@ -667,6 +672,7 @@ mod tests {
         .expect("built");
         assert_eq!(snap.generation(), 0);
         assert_eq!(snap.key(), &ns);
+        assert_eq!(snap.meta().level, Level::Structure, "the read's level");
         let key = |kind, path: &[&str], oid| ObjectKey {
             kind,
             path: path.iter().map(|p| Name::from(*p)).collect(),

@@ -112,7 +112,12 @@ async fn job(sm: &Arc<SessionManager>, id: &str) -> SessionHandle {
 async fn run(h: &SessionHandle, sql: &str) -> Reply {
     h.submit(Request::Exec {
         sql: sql.to_string(),
-        opts: hacivat_driver::ExecOpts::default(),
+        // The simple protocol answers a statement's rows (the T16 `Admin::scalar` way); CI
+        // run 44696885118 got none back on the extended one.
+        opts: hacivat_driver::ExecOpts {
+            max_rows: 1000,
+            protocol: hacivat_driver::Protocol::Simple,
+        },
         origin: ExecOrigin::Internal { idempotent: false },
     })
     .reply

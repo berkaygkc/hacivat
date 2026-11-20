@@ -303,6 +303,14 @@ impl MetaConn {
         self.dbms
     }
 
+    // ## m4-t15b-facets (named exception in Task 5's file; T15b CI round)
+    /// Whether the connection reads inside a caller's Hacivat-owned transaction
+    /// ([`MetaConn::join`], [`MetaConn::join_as`]): a reader whose sections are not joinable
+    /// refuses it at once instead of answering nothing.
+    pub fn is_joined(&self) -> bool {
+        self.joined
+    }
+
     /// What the server reported at connect. A joined connection does not know its server:
     /// kind `Unknown`, no version (the caller knows the profile's engine).
     pub fn server(&self) -> &ServerInfo {
