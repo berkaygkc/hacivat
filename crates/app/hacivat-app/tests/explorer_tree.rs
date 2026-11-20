@@ -682,6 +682,39 @@ fn invisible_chars_badge(cx: &mut TestAppContext) {
     assert!(row_of(vcx, "users").badge.is_none());
 }
 
+// ## m4-t32-shots (named exception; T25 review m-1 carry): a control character in a name is
+// drawn visibly on the single-line row (its Control Picture), never as a line break, and the
+// row keeps its invisible-characters badge.
+#[gpui::test]
+fn a_control_character_in_a_name_is_drawn_visibly(cx: &mut TestAppContext) {
+    let vcx = shell_with(cx, "en", vec![pg("shop", "app")]);
+    let id = profile_id(vcx, "shop");
+    show(
+        vcx,
+        id,
+        Some(catalog(
+            DbmsKind::Postgres,
+            vec![schema(
+                DbmsKind::Postgres,
+                &["app", "public"],
+                false,
+                vec![
+                    table("line\nitems", Some(9), &[]),
+                    table("bell\u{7}s", Some(10), &[]),
+                ],
+            )],
+        )),
+    );
+    open(vcx, &["shop", "app", "public", "TABLES"]);
+    let row = row_of(vcx, "line\u{240A}items");
+    assert!(!row.label.contains('\n'), "{:?}", row.label);
+    assert_eq!(row.badge.as_deref(), Some("invisible characters"));
+    assert!(row_of(vcx, "bell\u{2407}s").badge.is_some());
+    // A frame draws it (gpui's line shaping refuses a `\n`).
+    in_window(vcx, |window, _| window.refresh());
+    vcx.run_until_parked();
+}
+
 #[gpui::test]
 fn unknown_kind_row_shows_its_raw_kind(cx: &mut TestAppContext) {
     let vcx = shell_with(cx, "en", vec![pg("shop", "app")]);
