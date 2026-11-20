@@ -6,7 +6,7 @@
 -- Rules every section follows (R-M4-7, R-M4-8, R-M4-46, R-M4-48):
 -- - every catalog and catalog function is written pg_catalog.<name>, so a hostile search_path
 --   cannot shadow it (each pass also pins search_path = pg_catalog, pg_temp);
--- - objects are selected by oid only; the namespace is :ns (an oid bind) and the one name
+-- - objects are selected by oid only; the namespace is :ns::pg_catalog.oid (an oid bind) and the one name
 --   that reaches the server is the schema name of Identity, as a bind;
 -- - incremental and fragment reads add "AND <alias>.oid IN :[oids]" (a chunked list bind);
 -- - a young row is pg_catalog.age(x.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid),
@@ -27,7 +27,7 @@ SELECT pg_catalog.current_setting('server_version_num')::integer AS version,
     THEN (SELECT k.timeline_id::text FROM pg_catalog.pg_control_checkpoint() k) END AS timeline,
   pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot())::text AS snap_xmin,
   pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot())::text AS snap_xmax,
-  (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname = :schema) AS ns_oid,
+  (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname = :schema::pg_catalog.name) AS ns_oid,
   pg_catalog.current_setting('server_version') AS version_text,
   pg_catalog.pg_encoding_to_char(d.encoding)::text AS encoding,
   pg_catalog.current_setting('standard_conforming_strings') AS standard_conforming_strings,
@@ -66,7 +66,7 @@ SELECT n.oid AS oid,
 FROM pg_catalog.pg_namespace n
 LEFT JOIN pg_catalog.pg_description d ON d.classoid = 'pg_catalog.pg_namespace'::pg_catalog.regclass
   AND d.objoid = n.oid AND d.objsubid = 0
-WHERE n.oid = :ns
+WHERE n.oid = :ns::pg_catalog.oid
 
 -- Every object of the namespace by tag: rel (relation, sub = relkind), seq, idx (parent =
 -- table), con (parent = table, sub = contype), trg (parent = table), fn (sub = prokind),
@@ -75,40 +75,40 @@ WHERE n.oid = :ns
 --- returns: tag text, oid u32, parent text, name text, sub text ---
 SELECT 'rel' AS tag, c.oid AS oid, NULL::text AS parent, c.relname::text AS name, c.relkind::text AS sub
 FROM pg_catalog.pg_class c
-WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
-  AND (:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)
+WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND (:name_like::pg_catalog.text IS NULL OR c.relname LIKE :name_like::pg_catalog.text ESCAPE :like_escape::pg_catalog.text)
 UNION ALL
 SELECT 'seq', c.oid, NULL::text, c.relname::text, NULL::text
 FROM pg_catalog.pg_class c
-WHERE c.relnamespace = :ns AND c.relkind = 'S'
+WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind = 'S'
 UNION ALL
 SELECT 'idx', i.indexrelid, c.relname::text, ic.relname::text, NULL::text
 FROM pg_catalog.pg_index i
 JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
 JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
-WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
-  AND (:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)
+WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND (:name_like::pg_catalog.text IS NULL OR c.relname LIKE :name_like::pg_catalog.text ESCAPE :like_escape::pg_catalog.text)
 UNION ALL
 SELECT 'con', k.oid, c.relname::text, k.conname::text, k.contype::text
 FROM pg_catalog.pg_constraint k
 JOIN pg_catalog.pg_class c ON c.oid = k.conrelid
-WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND k.contype IN ('p', 'u', 'f', 'c', 'x')
-  AND (:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)
+WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND k.contype IN ('p', 'u', 'f', 'c', 'x')
+  AND (:name_like::pg_catalog.text IS NULL OR c.relname LIKE :name_like::pg_catalog.text ESCAPE :like_escape::pg_catalog.text)
 UNION ALL
 SELECT 'trg', t.oid, c.relname::text, t.tgname::text, NULL::text
 FROM pg_catalog.pg_trigger t
 JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
-WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT t.tgisinternal
-  AND (:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)
+WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT t.tgisinternal
+  AND (:name_like::pg_catalog.text IS NULL OR c.relname LIKE :name_like::pg_catalog.text ESCAPE :like_escape::pg_catalog.text)
 UNION ALL
 SELECT 'fn', p.oid, NULL::text, p.proname::text, p.prokind::text
 FROM pg_catalog.pg_proc p
-WHERE p.pronamespace = :ns
+WHERE p.pronamespace = :ns::pg_catalog.oid
 UNION ALL
 SELECT 'typ', t.oid, NULL::text, t.typname::text,
   t.typtype::text || ':' || (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint dk WHERE dk.contypid = t.oid)::text
 FROM pg_catalog.pg_type t
-WHERE t.typnamespace = :ns AND t.typtype IN ('b', 'c', 'd', 'e', 'r')
+WHERE t.typnamespace = :ns::pg_catalog.oid AND t.typtype IN ('b', 'c', 'd', 'e', 'r')
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_type e WHERE e.typarray = t.oid)
   AND (t.typtype <> 'c' OR EXISTS (SELECT 1 FROM pg_catalog.pg_class r WHERE r.oid = t.typrelid AND r.relkind = 'c'))
 
@@ -129,16 +129,16 @@ SELECT CASE d.classoid
   d.objsubid AS objsubid
 FROM pg_catalog.pg_description d
 WHERE (d.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass
-    AND d.objoid IN (SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relnamespace = :ns))
+    AND d.objoid IN (SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relnamespace = :ns::pg_catalog.oid))
   OR (d.classoid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
-    AND d.objoid IN (SELECT k.oid FROM pg_catalog.pg_constraint k WHERE k.connamespace = :ns))
+    AND d.objoid IN (SELECT k.oid FROM pg_catalog.pg_constraint k WHERE k.connamespace = :ns::pg_catalog.oid))
   OR (d.classoid = 'pg_catalog.pg_trigger'::pg_catalog.regclass
-    AND d.objoid IN (SELECT t.oid FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid WHERE c.relnamespace = :ns))
+    AND d.objoid IN (SELECT t.oid FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid WHERE c.relnamespace = :ns::pg_catalog.oid))
   OR (d.classoid = 'pg_catalog.pg_proc'::pg_catalog.regclass
-    AND d.objoid IN (SELECT p.oid FROM pg_catalog.pg_proc p WHERE p.pronamespace = :ns))
+    AND d.objoid IN (SELECT p.oid FROM pg_catalog.pg_proc p WHERE p.pronamespace = :ns::pg_catalog.oid))
   OR (d.classoid = 'pg_catalog.pg_type'::pg_catalog.regclass
-    AND d.objoid IN (SELECT t.oid FROM pg_catalog.pg_type t WHERE t.typnamespace = :ns))
-  OR (d.classoid = 'pg_catalog.pg_namespace'::pg_catalog.regclass AND d.objoid = :ns)
+    AND d.objoid IN (SELECT t.oid FROM pg_catalog.pg_type t WHERE t.typnamespace = :ns::pg_catalog.oid))
+  OR (d.classoid = 'pg_catalog.pg_namespace'::pg_catalog.regclass AND d.objoid = :ns::pg_catalog.oid)
 
 -- (facet, owner oid) for every catalog row of the namespace written at or after the
 -- watermark (the verified per-DDL matrix, ver/01 #pg-xmin, PG spike section 4). Facets: rel
@@ -150,13 +150,13 @@ WHERE (d.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass
 --- name: ChangedParents ---
 --- returns: facet text, oid u32 ---
 WITH rels AS MATERIALIZED (
-  SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
-    AND (:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)
+  SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+    AND (:name_like::pg_catalog.text IS NULL OR c.relname LIKE :name_like::pg_catalog.text ESCAPE :like_escape::pg_catalog.text)
 )
 SELECT DISTINCT y.f AS facet, y.o AS oid FROM (
   SELECT 'rel' AS f, c.oid AS o FROM pg_catalog.pg_class c
-  WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
-    AND (:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)
+  WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+    AND (:name_like::pg_catalog.text IS NULL OR c.relname LIKE :name_like::pg_catalog.text ESCAPE :like_escape::pg_catalog.text)
     AND pg_catalog.age(c.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'rel', r.ev_class FROM pg_catalog.pg_rewrite r JOIN rels ON rels.oid = r.ev_class
   WHERE pg_catalog.age(r.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
@@ -193,51 +193,51 @@ SELECT DISTINCT y.f AS facet, y.o AS oid FROM (
   WHERE d.classoid = 'pg_catalog.pg_trigger'::pg_catalog.regclass
     AND pg_catalog.age(d.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'sequence', c.oid FROM pg_catalog.pg_class c
-  WHERE c.relnamespace = :ns AND c.relkind = 'S'
+  WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind = 'S'
     AND pg_catalog.age(c.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'sequence', s.seqrelid FROM pg_catalog.pg_sequence s
   JOIN pg_catalog.pg_class c ON c.oid = s.seqrelid
-  WHERE c.relnamespace = :ns AND pg_catalog.age(s.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
+  WHERE c.relnamespace = :ns::pg_catalog.oid AND pg_catalog.age(s.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'sequence', c.oid FROM pg_catalog.pg_description d
   JOIN pg_catalog.pg_class c ON c.oid = d.objoid
-  WHERE d.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass AND c.relnamespace = :ns AND c.relkind = 'S'
+  WHERE d.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass AND c.relnamespace = :ns::pg_catalog.oid AND c.relkind = 'S'
     AND pg_catalog.age(d.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'sequence', c.oid FROM pg_catalog.pg_depend dep
   JOIN pg_catalog.pg_class c ON c.oid = dep.objid
-  WHERE dep.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND c.relnamespace = :ns AND c.relkind = 'S'
+  WHERE dep.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND c.relnamespace = :ns::pg_catalog.oid AND c.relkind = 'S'
     AND pg_catalog.age(dep.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'routine', p.oid FROM pg_catalog.pg_proc p
-  WHERE p.pronamespace = :ns AND pg_catalog.age(p.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
+  WHERE p.pronamespace = :ns::pg_catalog.oid AND pg_catalog.age(p.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'routine', p.oid FROM pg_catalog.pg_description d
   JOIN pg_catalog.pg_proc p ON p.oid = d.objoid
-  WHERE d.classoid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND p.pronamespace = :ns
+  WHERE d.classoid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND p.pronamespace = :ns::pg_catalog.oid
     AND pg_catalog.age(d.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'type', t.oid FROM pg_catalog.pg_type t
-  WHERE t.typnamespace = :ns AND pg_catalog.age(t.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
+  WHERE t.typnamespace = :ns::pg_catalog.oid AND pg_catalog.age(t.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'type', e.enumtypid FROM pg_catalog.pg_enum e
   JOIN pg_catalog.pg_type t ON t.oid = e.enumtypid
-  WHERE t.typnamespace = :ns AND pg_catalog.age(e.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
+  WHERE t.typnamespace = :ns::pg_catalog.oid AND pg_catalog.age(e.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'type', k.contypid FROM pg_catalog.pg_constraint k
   JOIN pg_catalog.pg_type t ON t.oid = k.contypid
-  WHERE t.typnamespace = :ns AND pg_catalog.age(k.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
+  WHERE t.typnamespace = :ns::pg_catalog.oid AND pg_catalog.age(k.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'type', r.rngtypid FROM pg_catalog.pg_range r
   JOIN pg_catalog.pg_type t ON t.oid = r.rngtypid
-  WHERE t.typnamespace = :ns AND pg_catalog.age(r.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
+  WHERE t.typnamespace = :ns::pg_catalog.oid AND pg_catalog.age(r.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'type', c.reltype FROM pg_catalog.pg_class c
-  WHERE c.relnamespace = :ns AND c.relkind = 'c'
+  WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind = 'c'
     AND pg_catalog.age(c.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'type', c.reltype FROM pg_catalog.pg_attribute a
   JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
-  WHERE c.relnamespace = :ns AND c.relkind = 'c'
+  WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind = 'c'
     AND pg_catalog.age(a.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'type', t.oid FROM pg_catalog.pg_description d
   JOIN pg_catalog.pg_type t ON t.oid = d.objoid
-  WHERE d.classoid = 'pg_catalog.pg_type'::pg_catalog.regclass AND t.typnamespace = :ns
+  WHERE d.classoid = 'pg_catalog.pg_type'::pg_catalog.regclass AND t.typnamespace = :ns::pg_catalog.oid
     AND pg_catalog.age(d.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'schema', n.oid FROM pg_catalog.pg_namespace n
-  WHERE n.oid = :ns AND pg_catalog.age(n.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
+  WHERE n.oid = :ns::pg_catalog.oid AND pg_catalog.age(n.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
   UNION ALL SELECT 'schema', d.objoid FROM pg_catalog.pg_description d
-  WHERE d.classoid = 'pg_catalog.pg_namespace'::pg_catalog.regclass AND d.objoid = :ns
+  WHERE d.classoid = 'pg_catalog.pg_namespace'::pg_catalog.regclass AND d.objoid = :ns::pg_catalog.oid
     AND pg_catalog.age(d.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
 ) AS y
 
@@ -281,28 +281,28 @@ SELECT DISTINCT z.f AS facet, z.o AS oid FROM (
     CASE WHEN c.relkind IN ('i', 'I') THEN (SELECT i.indrelid FROM pg_catalog.pg_index i WHERE i.indexrelid = c.oid)
       WHEN c.relkind = 'c' THEN c.reltype ELSE c.oid END AS o
   FROM dep JOIN pg_catalog.pg_class c ON dep.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND c.oid = dep.objid
-  WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'c', 'i', 'I', 'S')
+  WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'c', 'i', 'I', 'S')
   UNION ALL SELECT 'rel', r.ev_class FROM dep
   JOIN pg_catalog.pg_rewrite r ON dep.classid = 'pg_catalog.pg_rewrite'::pg_catalog.regclass AND r.oid = dep.objid
-  JOIN pg_catalog.pg_class c ON c.oid = r.ev_class WHERE c.relnamespace = :ns
+  JOIN pg_catalog.pg_class c ON c.oid = r.ev_class WHERE c.relnamespace = :ns::pg_catalog.oid
   UNION ALL SELECT CASE WHEN k.conrelid <> 0 THEN 'constraints' ELSE 'type' END,
     CASE WHEN k.conrelid <> 0 THEN k.conrelid ELSE k.contypid END FROM dep
   JOIN pg_catalog.pg_constraint k ON dep.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass AND k.oid = dep.objid
-  WHERE k.connamespace = :ns
+  WHERE k.connamespace = :ns::pg_catalog.oid
   UNION ALL SELECT 'triggers', t.tgrelid FROM dep
   JOIN pg_catalog.pg_trigger t ON dep.classid = 'pg_catalog.pg_trigger'::pg_catalog.regclass AND t.oid = dep.objid
-  JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid WHERE c.relnamespace = :ns
+  JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid WHERE c.relnamespace = :ns::pg_catalog.oid
   UNION ALL SELECT 'columns', ad.adrelid FROM dep
   JOIN pg_catalog.pg_attrdef ad ON dep.classid = 'pg_catalog.pg_attrdef'::pg_catalog.regclass AND ad.oid = dep.objid
-  JOIN pg_catalog.pg_class c ON c.oid = ad.adrelid WHERE c.relnamespace = :ns
+  JOIN pg_catalog.pg_class c ON c.oid = ad.adrelid WHERE c.relnamespace = :ns::pg_catalog.oid
   UNION ALL SELECT 'type', t.oid FROM dep
   JOIN pg_catalog.pg_type t ON dep.classid = 'pg_catalog.pg_type'::pg_catalog.regclass AND t.oid = dep.objid
-  WHERE t.typnamespace = :ns
+  WHERE t.typnamespace = :ns::pg_catalog.oid
   UNION ALL SELECT 'routine', p.oid FROM dep
   JOIN pg_catalog.pg_proc p ON dep.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND p.oid = dep.objid
-  WHERE p.pronamespace = :ns
+  WHERE p.pronamespace = :ns::pg_catalog.oid
   UNION ALL SELECT 'schema-rename', n.oid FROM pg_catalog.pg_namespace n
-  WHERE n.oid <> :ns AND pg_catalog.age(n.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
+  WHERE n.oid <> :ns::pg_catalog.oid AND pg_catalog.age(n.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
     AND EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
       LEFT JOIN pg_catalog.pg_type rt ON d.refclassid = 'pg_catalog.pg_type'::pg_catalog.regclass AND rt.oid = d.refobjid
       LEFT JOIN pg_catalog.pg_proc rp ON d.refclassid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND rp.oid = d.refobjid
@@ -317,8 +317,8 @@ SELECT DISTINCT z.f AS facet, z.o AS oid FROM (
       LEFT JOIN pg_catalog.pg_class oo ON oo.oid = COALESCE(otg.tgrelid, oad.adrelid, orw.ev_class)
       WHERE d.deptype NOT IN ('e', 'x', 'p')
         AND (rt.typnamespace = n.oid OR rp.pronamespace = n.oid OR rc.relnamespace = n.oid)
-        AND (oc.relnamespace = :ns OR op.pronamespace = :ns OR ot.typnamespace = :ns
-          OR ok.connamespace = :ns OR oo.relnamespace = :ns))
+        AND (oc.relnamespace = :ns::pg_catalog.oid OR op.pronamespace = :ns::pg_catalog.oid OR ot.typnamespace = :ns::pg_catalog.oid
+          OR ok.connamespace = :ns::pg_catalog.oid OR oo.relnamespace = :ns::pg_catalog.oid))
 ) AS z
 WHERE z.o IS NOT NULL
 
@@ -361,8 +361,8 @@ LEFT JOIN pg_catalog.pg_class pp ON pp.oid = ih.inhparent
 LEFT JOIN pg_catalog.pg_namespace ppn ON ppn.oid = pp.relnamespace
 LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam
 LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid = c.reltablespace
-WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
-  AND (:name_like IS NULL OR c.relname LIKE :name_like ESCAPE :like_escape)
+WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND (:name_like::pg_catalog.text IS NULL OR c.relname LIKE :name_like::pg_catalog.text ESCAPE :like_escape::pg_catalog.text)
 --# if mode == incremental
   AND c.oid IN :[oids]
 --# end
@@ -396,7 +396,7 @@ LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.a
 LEFT JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation
 LEFT JOIN pg_catalog.pg_description d ON d.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass
   AND d.objoid = a.attrelid AND d.objsubid = a.attnum
-WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND a.attnum > 0 AND NOT a.attisdropped
+WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND a.attnum > 0 AND NOT a.attisdropped
 --# if mode == incremental
   AND c.oid IN :[oids]
 --# end
@@ -459,7 +459,7 @@ JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
 JOIN pg_catalog.pg_am am ON am.oid = ic.relam
 LEFT JOIN pg_catalog.pg_description d ON d.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass
   AND d.objoid = i.indexrelid AND d.objsubid = 0
-WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
 --# if mode == incremental
   AND c.oid IN :[oids]
 --# end
@@ -515,7 +515,7 @@ LEFT JOIN pg_catalog.pg_class fc ON fc.oid = k.confrelid
 LEFT JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace
 LEFT JOIN pg_catalog.pg_description d ON d.classoid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
   AND d.objoid = k.oid AND d.objsubid = 0
-WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
 --# if mode == incremental
   AND c.oid IN :[oids]
 --# end
@@ -546,7 +546,7 @@ JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
 JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace
 LEFT JOIN pg_catalog.pg_description d ON d.classoid = 'pg_catalog.pg_trigger'::pg_catalog.regclass
   AND d.objoid = t.oid AND d.objsubid = 0
-WHERE c.relnamespace = :ns AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT t.tgisinternal
+WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT t.tgisinternal
 --# if mode == incremental
   AND c.oid IN :[oids]
 --# end
@@ -582,7 +582,7 @@ LEFT JOIN pg_catalog.pg_namespace otn ON otn.oid = ot.relnamespace
 LEFT JOIN pg_catalog.pg_attribute oa ON oa.attrelid = dep.refobjid AND oa.attnum = dep.refobjsubid
 LEFT JOIN pg_catalog.pg_description d ON d.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass
   AND d.objoid = c.oid AND d.objsubid = 0
-WHERE c.relnamespace = :ns AND c.relkind = 'S'
+WHERE c.relnamespace = :ns::pg_catalog.oid AND c.relkind = 'S'
 --# if mode == incremental
   AND c.oid IN :[oids]
 --# end
@@ -623,7 +623,7 @@ FROM pg_catalog.pg_proc p
 JOIN pg_catalog.pg_language l ON l.oid = p.prolang
 LEFT JOIN pg_catalog.pg_description d ON d.classoid = 'pg_catalog.pg_proc'::pg_catalog.regclass
   AND d.objoid = p.oid AND d.objsubid = 0
-WHERE p.pronamespace = :ns
+WHERE p.pronamespace = :ns::pg_catalog.oid
 --# if mode == incremental
   AND p.oid IN :[oids]
 --# end
@@ -649,7 +649,7 @@ FROM pg_catalog.pg_type t
 LEFT JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid
 LEFT JOIN pg_catalog.pg_description d ON d.classoid = 'pg_catalog.pg_type'::pg_catalog.regclass
   AND d.objoid = t.oid AND d.objsubid = 0
-WHERE t.typnamespace = :ns AND t.typtype IN ('b', 'c', 'd', 'e', 'r')
+WHERE t.typnamespace = :ns::pg_catalog.oid AND t.typtype IN ('b', 'c', 'd', 'e', 'r')
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_type e WHERE e.typarray = t.oid)
   AND (t.typtype <> 'c' OR EXISTS (SELECT 1 FROM pg_catalog.pg_class r WHERE r.oid = t.typrelid AND r.relkind = 'c'))
 --# if mode == incremental
@@ -666,7 +666,7 @@ SELECT t.oid AS type_oid,
   pg_catalog.format_type(a.atttypid, a.atttypmod) AS type_text
 FROM pg_catalog.pg_type t
 JOIN pg_catalog.pg_attribute a ON a.attrelid = t.typrelid
-WHERE t.typnamespace = :ns AND t.typtype = 'c' AND a.attnum > 0 AND NOT a.attisdropped
+WHERE t.typnamespace = :ns::pg_catalog.oid AND t.typtype = 'c' AND a.attnum > 0 AND NOT a.attisdropped
 --# if mode == incremental
   AND t.oid IN :[oids]
 --# end
@@ -683,7 +683,7 @@ SELECT k.contypid AS type_oid,
   k.convalidated AS is_validated
 FROM pg_catalog.pg_constraint k
 JOIN pg_catalog.pg_type t ON t.oid = k.contypid
-WHERE t.typnamespace = :ns AND t.typtype = 'd'
+WHERE t.typnamespace = :ns::pg_catalog.oid AND t.typtype = 'd'
 --# if mode == incremental
   AND t.oid IN :[oids]
 --# end

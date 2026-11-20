@@ -463,6 +463,32 @@ fn state_sections_are_joinable() {
     }
 }
 
+/// CI 44640824635 (fix round 2): a parameter the server must type from its context fails
+/// to prepare where the context does not decide (`$2 IS NULL`: 42P18). Every scalar bind of
+/// every rendered PostgreSQL variant carries a qualified cast (`$n::pg_catalog.oid`, `…text`,
+/// `…name`, `…xid`); the only uncast binds are the items of a list bind, `<column> IN ($a,
+/// $b)`, which the column types (the pack grammar fixes that form).
+#[test]
+fn every_scalar_bind_carries_a_qualified_cast() {
+    let p = pack().unwrap();
+    let list = regex::Regex::new(r"IN \((\$\d+)(, \$\d+)*\)").unwrap();
+    let bind = regex::Regex::new(r"\$\d+").unwrap();
+    let mut bad = Vec::new();
+    for section in p.sections() {
+        for sql in rendered(&p, section) {
+            let rest = list.replace_all(&sql, "IN (LIST)");
+            for m in bind.find_iter(&rest) {
+                if !rest[m.end()..].starts_with("::pg_catalog.") {
+                    bad.push(format!("{section}: {} is not cast", m.as_str()));
+                }
+            }
+        }
+    }
+    bad.sort();
+    bad.dedup();
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
 // ## m4-t16-pg (R-W3-2, R-W3-3, the progress sink)
 
 fn filter(text: &str) -> hacivat_introspect::filter::CompiledFilter {

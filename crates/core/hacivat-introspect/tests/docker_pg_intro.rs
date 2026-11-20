@@ -1695,13 +1695,20 @@ async fn scope_filter_pushdown_reads_only_matching_relations() {
 const BIG_TABLES: u32 = 15_000;
 const BIG_COLUMNS: u32 = 160_000;
 
-/// `hv_m4_big` on pg17, created once (idempotent).
+/// `hv_m4_big` on pg17, created once per test process (idempotent). Tests run in parallel:
+/// two concurrent `CREATE TABLE IF NOT EXISTS` of one table race on `pg_type`'s unique
+/// index (23505, CI 44640824635), so the build runs once behind a process-wide cell.
 async fn big(t: &DockerTarget) {
-    let mut a = admin(t).await;
-    big_catalog::ensure_pg(a.live(), BIG_TABLES, BIG_COLUMNS)
-        .await
-        .unwrap_or_else(|e| panic!("hv_m4_big: {e:?}"));
-    a.close().await;
+    static BUILT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    BUILT
+        .get_or_init(|| async {
+            let mut a = admin(t).await;
+            big_catalog::ensure_pg(a.live(), BIG_TABLES, BIG_COLUMNS)
+                .await
+                .unwrap_or_else(|e| panic!("hv_m4_big: {e:?}"));
+            a.close().await;
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

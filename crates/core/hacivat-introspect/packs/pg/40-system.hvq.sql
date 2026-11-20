@@ -5,7 +5,7 @@
 -- section 52.24); no third-party catalog SQL.
 --
 -- Only built-in objects: OID below 16384 (FirstNormalObjectId), read from the database
--- postgres with search_path = pg_catalog (R-M4-17). :ns is pg_catalog's or
+-- postgres with search_path = pg_catalog (R-M4-17). :ns::pg_catalog.oid is pg_catalog's or
 -- information_schema's oid. No server id, watermark or timestamp is a payload here; the
 -- generator drops the oids.
 
@@ -18,7 +18,7 @@ SELECT c.oid AS oid,
 FROM pg_catalog.pg_class c
 LEFT JOIN pg_catalog.pg_description d ON d.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass
   AND d.objoid = c.oid AND d.objsubid = 0
-WHERE c.relnamespace = :ns AND c.oid < 16384 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+WHERE c.relnamespace = :ns::pg_catalog.oid AND c.oid < 16384 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
 ORDER BY c.relname
 
 --- name: SystemColumns ---
@@ -30,7 +30,7 @@ SELECT a.attrelid AS relid,
   a.attnotnull AS not_null
 FROM pg_catalog.pg_attribute a
 JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
-WHERE c.relnamespace = :ns AND c.oid < 16384 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+WHERE c.relnamespace = :ns::pg_catalog.oid AND c.oid < 16384 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
   AND a.attnum > 0 AND NOT a.attisdropped
 ORDER BY a.attrelid, a.attnum
 
@@ -51,7 +51,7 @@ SELECT p.oid AS oid,
 FROM pg_catalog.pg_proc p
 LEFT JOIN pg_catalog.pg_description d ON d.classoid = 'pg_catalog.pg_proc'::pg_catalog.regclass
   AND d.objoid = p.oid AND d.objsubid = 0
-WHERE p.pronamespace = :ns AND p.oid < 16384
+WHERE p.pronamespace = :ns::pg_catalog.oid AND p.oid < 16384
 ORDER BY p.proname, p.oid
 
 -- Operators: kind (b infix, l prefix), operand and result types, implementing function.
@@ -68,7 +68,7 @@ SELECT o.oid AS oid,
 FROM pg_catalog.pg_operator o
 LEFT JOIN pg_catalog.pg_description d ON d.classoid = 'pg_catalog.pg_operator'::pg_catalog.regclass
   AND d.objoid = o.oid AND d.objsubid = 0
-WHERE o.oprnamespace = :ns AND o.oid < 16384
+WHERE o.oprnamespace = :ns::pg_catalog.oid AND o.oid < 16384
 ORDER BY o.oprname, o.oid
 
 -- Types: SQL name, kind, category, array element, description. Relation row types are left
@@ -85,7 +85,7 @@ SELECT t.oid AS oid,
 FROM pg_catalog.pg_type t
 LEFT JOIN pg_catalog.pg_description d ON d.classoid = 'pg_catalog.pg_type'::pg_catalog.regclass
   AND d.objoid = t.oid AND d.objsubid = 0
-WHERE t.typnamespace = :ns AND t.oid < 16384
+WHERE t.typnamespace = :ns::pg_catalog.oid AND t.oid < 16384
   AND (t.typrelid = 0 OR EXISTS (SELECT 1 FROM pg_catalog.pg_class r WHERE r.oid = t.typrelid AND r.relkind = 'c'))
 ORDER BY t.typname, t.oid
 
