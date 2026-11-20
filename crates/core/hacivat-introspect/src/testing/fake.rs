@@ -473,6 +473,11 @@ impl FakeIntrospector {
     /// and the kind joins `capabilities().facets`. A facet read answers the rows of the asked
     /// objects only (an object without a row is left out: "not loaded", R-W4-3); an unscripted
     /// kind answers `NotImplemented`. Failures and gates match [`FakeCall::Facet`].
+    ///
+    /// Call it **before** the engine (or a test rig) is built from this fake: the engine reads
+    /// `capabilities().facets` once, when it starts, so a kind scripted later stays
+    /// unsupported to that engine (review N3). Rows of a kind already scripted can be changed
+    /// at any time.
     pub fn put_facet(&self, rows: FacetRows) {
         fn upsert<T>(into: &mut Vec<(ObjectKey, T)>, rows: Vec<(ObjectKey, T)>) {
             for (k, v) in rows {

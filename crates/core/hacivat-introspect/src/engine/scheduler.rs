@@ -1053,6 +1053,12 @@ impl Actor {
     /// batch (finished of finished + running + queued, since the engine was last idle); a
     /// fragment or a state check counts its objects (review m11; a count inside one pass needs
     /// a progress sink in the introspector seam, carried to Tasks 16–18).
+    ///
+    /// ## m4-t33a-hygiene (fix round 1, review M5)
+    /// Progress is consistent at step ends only: the loop publishes it after `pump`, so a
+    /// ticket resolved inside a step (`on_done`) is visible to its awaiter a moment before
+    /// progress drops the finished task. After awaiting a ticket, wait for progress (`idle`);
+    /// never read it once and assert.
     fn update_progress(&mut self) {
         if self.running.is_empty() && self.queue.is_empty() {
             self.batch = Batch::default();
