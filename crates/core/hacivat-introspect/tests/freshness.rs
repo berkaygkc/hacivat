@@ -737,6 +737,11 @@ async fn background_validation_never_deletes_in_small_steps() {
     // 12 of 40 (30 %): under the guard; applied.
     drop_range(0, 12);
     round(&r, &hand, TEN_MIN).await;
+    // As below: the pass the check queued can land after `round` sees the engine idle.
+    bounded(wait_until(Duration::from_secs(60), || {
+        tables_in(&r, &n).len() == 28
+    }))
+    .await;
     assert_eq!(tables_in(&r, &n).len(), 28);
     assert_eq!(r.handle.pending_confirmation(&n), None);
     // 10 of the remaining 28 (36 %): under the per-pass guard, but 22 of 40 since the user last
