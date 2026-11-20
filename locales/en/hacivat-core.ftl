@@ -1556,7 +1556,9 @@ model-cache-disabled-by-policy = Metadata for this connection isn't cached on di
 #   $kind (String) - the object kind's label, e.g. "table".
 ddl-unsupported-kind = { $dbms } doesn't support generating DDL for this kind of object ({ $kind }).
 # Warning on server text that holds MySQL executable comments (`/*! … */`): they run as SQL.
-ddl-warn-executable-comment = This definition contains MySQL executable comments (/*! … */). They run as SQL when the script runs.
+# m4-t25-ddl-view (named exception in m4-t01a-model's block): the binding wording of
+# design/m4-explorer NOTES surface 10.
+ddl-warn-executable-comment = This text contains MySQL executable comments (/*! … */). MySQL runs what is inside them as SQL.
 # Notice when a SQLite change needs the table to be rebuilt (create, copy, drop, rename).
 ddl-sqlite-rebuild-notice = SQLite can't change this in place, so the script rebuilds the table and copies its rows.
 # Notice when SQLite forces constraints inside the table although another placement was chosen.
