@@ -185,12 +185,24 @@ pub fn encryption_key(p: &Profile, info: &LiveInfo) -> &'static str {
 /// A latency in whole milliseconds (`12 ms`).
 pub fn latency_label(cx: &App, info: &LiveInfo) -> SharedString {
     let ms = u64::try_from(info.latency.as_millis()).unwrap_or(u64::MAX);
+    // ## m4-t32-shots (named exception; m3carry review m3): the shots pin the measured latency,
+    // the one real-time text of a connected fixture, so a PNG never changes with the machine.
+    #[cfg(feature = "shots")]
+    let ms = cx.try_global::<PinnedLatency>().map_or(ms, |p| p.0);
     tr(
         cx,
         ids::hv::CAPSULE_LATENCY,
         ids::hv::HvCapsuleLatency { ms: Count(ms) },
     )
 }
+
+// ## m4-t32-shots (named exception; m3carry review m3)
+/// The latency every label shows, in milliseconds (the shots harness sets it).
+#[cfg(feature = "shots")]
+pub struct PinnedLatency(pub u64);
+
+#[cfg(feature = "shots")]
+impl hacivat_ui_core::gpui_surface::Global for PinnedLatency {}
 
 /// Whether the live connection is read-only (guarded or enforced, R10).
 pub fn is_read_only(info: &LiveInfo) -> bool {

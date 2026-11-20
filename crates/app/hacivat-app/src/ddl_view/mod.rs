@@ -234,14 +234,18 @@ pub fn state_of(profile: ProfileId, key: &ObjectKey, cx: &App) -> Option<DdlView
 /// `name` for single-line chrome (the tab title, the toolbar's crumb): every control character
 /// drawn as a visible symbol instead of breaking the line (review m-1: a `\n` in a name made the
 /// tab strip's line shaping panic in debug builds, and run two lines together in release). C0
-/// controls become their Control Pictures (`\n` → `␊`), DEL `␡`, C1 controls `�`. Everything
-/// else, bidi controls included (the Fluent argument is isolated), stays verbatim.
+/// controls become their Control Pictures (`\n` → `␊`), DEL `␡`, C1 controls `�`.
+/// ## m4-t32-shots (fix round 1, review M-5): so do the bidi embeddings, overrides, isolates
+/// and marks (U+202A–202E, U+2066–2069, U+200E/200F, U+061C): a name's own PDI could close the
+/// Fluent isolate early and its RLO then reverse the chrome after it. Everything else stays
+/// verbatim (zero-width characters carry the row's badge).
 pub fn visible_name(name: &str) -> String {
     name.chars()
         .map(|c| match c as u32 {
             n @ 0x00..=0x1F => char::from_u32(0x2400 + n).unwrap_or('\u{FFFD}'),
             0x7F => '\u{2421}',
             0x80..=0x9F => '\u{FFFD}',
+            0x202A..=0x202E | 0x2066..=0x2069 | 0x200E | 0x200F | 0x061C => '\u{FFFD}',
             _ => c,
         })
         .collect()

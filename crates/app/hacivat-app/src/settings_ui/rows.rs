@@ -163,12 +163,19 @@ macro_rules! row {
 
 /// Every row with its section, in page order. The text rendering row exists on macOS only (the
 /// other platforms have no such setting to change).
-const ALL_ROWS: [RowSpec; 20] = [
+const ALL_ROWS: [RowSpec; 21] = [
     row!(General, "ui.language", ids::hv::SETTINGS_LANGUAGE),
     row!(
         General,
         "ui.regional_format",
         ids::hv::SETTINGS_REGIONAL_FORMAT
+    ),
+    // ## m4-t32-shots (named exception; PO R-W5-14 a): a Select (`time_zone.rs`).
+    row!(
+        General,
+        "ui.time_zone",
+        ids::hv::SETTINGS_TIME_ZONE,
+        ids::hv::SETTINGS_TIME_ZONE_NOTE
     ),
     row!(Appearance, "ui.theme", ids::hv::SETTINGS_THEME),
     row!(
@@ -472,6 +479,8 @@ pub fn current_value(settings: &Settings, key: &str) -> String {
         }
         CACHE_PER_PROFILE => settings.metadata.cache_mb_per_profile.get().to_string(),
         CACHE_TOTAL => settings.metadata.cache_mb_total.get().to_string(),
+        // ## m4-t32-shots (named exception; PO R-W5-14 a)
+        super::time_zone::TIME_ZONE => super::time_zone::value(&settings.ui.time_zone),
         _ => String::new(),
     }
 }
@@ -607,6 +616,8 @@ pub fn apply_choice(cx: &mut App, key: &str, value: &str) {
             crate::explorer::refresh_prompt::preference_changed(cx);
         }
         VALIDATE_INTERVAL => super::metadata::apply_interval(value, cx),
+        // ## m4-t32-shots (named exception; PO R-W5-14 a)
+        super::time_zone::TIME_ZONE => super::time_zone::apply(value, cx),
         _ => {}
     }
 }

@@ -283,7 +283,11 @@ fn a_restart_flushes_the_pending_settings_and_layout_writes(cx: &mut TestAppCont
 fn search_matches_english_layer_in_turkish() {
     assert_eq!(filter_rows("theme", &rows_tr(), &tol()), ["ui.theme"]);
     assert_eq!(filter_rows("tema", &rows_tr(), &tol()), ["ui.theme"]);
-    assert_eq!(filter_rows("dil", &rows_tr(), &tol()), ["ui.language"]);
+    // ## m4-t32-shots (named exception; PO R-W5-14 a): "dil" is in "Saat dilimi" too.
+    assert_eq!(
+        filter_rows("dil", &rows_tr(), &tol()),
+        ["ui.language", "ui.time_zone"]
+    );
 }
 
 #[gpui::test]
@@ -972,8 +976,9 @@ fn written_keys() -> Vec<String> {
     keys
 }
 
+// ## m4-t32-shots (named exception; PO R-W5-14 a): the time zone has its row now.
 #[test]
-fn every_setting_has_a_row_but_the_version_and_the_time_zone() {
+fn every_setting_has_a_row_but_the_version() {
     let keys = written_keys();
     assert!(keys.len() > 15, "{keys:?}");
     let without: Vec<&str> = keys
@@ -981,8 +986,8 @@ fn every_setting_has_a_row_but_the_version_and_the_time_zone() {
         .map(String::as_str)
         .filter(|k| rows::row_section(k).is_none())
         .collect();
-    // The time zone has no row yet (it follows the system unless set by hand): reported.
-    assert_eq!(without, ["version", "ui.time_zone"]);
+    assert_eq!(without, ["version"]);
+    assert_eq!(rows::row_section("ui.time_zone"), Some(Section::General));
 }
 
 // ## m3c-t42 fix round 1
@@ -1151,4 +1156,115 @@ fn turning_history_back_on_opens_the_store_and_records(cx: &mut TestAppContext) 
     });
     fake.kill_connections();
     stop_core_runtime_test(cx);
+}
+
+use hacivat_app::settings_ui::fixtures as settings_fixtures;
+
+fn strip(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '\u{2068}' | '\u{2069}'))
+        .collect()
+}
+
+// ## m4-t32-shots (named exception; PO ruling R-W5-14 a): Settings › General › Time zone.
+
+/// The row lists System (with the zone the OS reports; none in tests, so UTC), UTC and the
+/// zone list; a choice is saved through the one writer and reaches the formats at once.
+#[gpui::test]
+fn the_time_zone_row_offers_system_utc_and_the_list_and_saves_a_choice(cx: &mut TestAppContext) {
+    use hacivat_app::settings_ui::time_zone::ZONES;
+    let (vcx, paths) = settings_tab_with(cx, support_platform(), "us", "system");
+    vcx.cx
+        .update(|cx| settings_fixtures::show_section(Section::General, cx));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("settings-time-zone").is_some());
+    let (labels, selected) = vcx
+        .cx
+        .read(settings_fixtures::time_zone_choices)
+        .expect("the time zone select");
+    assert_eq!(labels.len(), 2 + ZONES.len(), "{labels:?}");
+    assert_eq!(strip(&labels[0]), "System (UTC)");
+    assert_eq!(labels[1], "UTC");
+    assert_eq!(&labels[2..], ZONES.map(String::from).as_slice());
+    assert_eq!(selected, 0, "the saved `system` is selected");
+    // Europe/Istanbul: saved, and the formats follow it.
+    let istanbul = 2 + ZONES.iter().position(|z| *z == "Europe/Istanbul").unwrap();
+    vcx.cx
+        .update(|cx| settings_fixtures::pick_time_zone(istanbul, cx));
+    vcx.run_until_parked();
+    assert!(
+        read(paths.settings_toml()).contains("time_zone = \"Europe/Istanbul\""),
+        "{}",
+        read(paths.settings_toml())
+    );
+    let zone = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::l10n_global::L10nGlobal>()
+            .l10n
+            .snapshot()
+            .format
+            .time_zone
+            .clone()
+    });
+    assert_eq!(zone, "Europe/Istanbul");
+    // Back to System: the stored value is `system` again.
+    vcx.cx.update(|cx| settings_fixtures::pick_time_zone(0, cx));
+    vcx.run_until_parked();
+    assert!(
+        read(paths.settings_toml()).contains("time_zone = \"system\"")
+            || !read(paths.settings_toml()).contains("time_zone"),
+        "{}",
+        read(paths.settings_toml())
+    );
+    // Turkish.
+    switch_to(vcx, "tr");
+    vcx.run_until_parked();
+    let (labels, _) = vcx
+        .cx
+        .read(settings_fixtures::time_zone_choices)
+        .expect("the time zone select");
+    assert_eq!(strip(&labels[0]), "Sistem (UTC)");
+}
+
+/// A hand-edited zone outside the list shows as one more choice, selected (the select always
+/// names what is saved).
+#[gpui::test]
+fn a_hand_edited_time_zone_shows_as_one_more_choice(cx: &mut TestAppContext) {
+    let (vcx, _paths) = settings_tab_with(cx, support_platform(), "us", "America/Halifax");
+    let (labels, selected) = vcx
+        .cx
+        .read(settings_fixtures::time_zone_choices)
+        .expect("the time zone select");
+    assert_eq!(labels.last().map(String::as_str), Some("America/Halifax"));
+    assert_eq!(selected, labels.len() - 1);
+}
+
+// ## m4-t32-shots (fix round 1, review M-3): a well-formed zone the tz database does not know
+// fails closed to the system zone, and the row says so.
+#[gpui::test]
+fn an_unknown_time_zone_fails_closed_with_a_notice(cx: &mut TestAppContext) {
+    let (vcx, _paths) = settings_tab_with(cx, support_platform(), "us", "Mars/Olympus");
+    vcx.cx
+        .update(|cx| settings_fixtures::show_section(Section::General, cx));
+    vcx.run_until_parked();
+    let (labels, selected) = vcx
+        .cx
+        .read(settings_fixtures::time_zone_choices)
+        .expect("the time zone select");
+    assert_eq!(selected, labels.len() - 1);
+    assert_eq!(strip(&labels[selected]), "Mars/Olympus (unknown)");
+    let note = text_of(vcx, "settings-time-zone-unknown").expect("the notice");
+    assert_eq!(
+        strip(&note),
+        "Mars/Olympus isn't a time zone Hacivat knows, so System (UTC) is used."
+    );
+    // The formats use the system zone (UTC in tests).
+    let zone = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::l10n_global::L10nGlobal>()
+            .l10n
+            .snapshot()
+            .format
+            .time_zone
+            .clone()
+    });
+    assert_eq!(zone, "UTC");
 }

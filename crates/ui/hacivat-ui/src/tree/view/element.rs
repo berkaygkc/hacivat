@@ -135,6 +135,11 @@ impl<M: TreeModel> Element for TreeElement<M> {
             AvailableSpace::Definite(px(row_h)),
         );
         let mut items = Vec::with_capacity(rows.len());
+        // ## m4-t32-shots (named exception): rows are laid out (and their labels measured)
+        // inside the tree's own clip, noted as a scroll viewport first, so a row cut at the
+        // tree's top or bottom edge counts as scrolled, not clipped (the 15,000-table shot).
+        let mask = window.content_mask().bounds.intersect(&bounds);
+        TextRegistry::note_scroll_viewport(cx, mask);
         for ix in rows {
             let (mut el, top) = self.view.update(cx, |tree, cx| {
                 let top = ix as f64 * f64::from(tree.row_h) - tree.scroll_y;
@@ -143,12 +148,14 @@ impl<M: TreeModel> Element for TreeElement<M> {
                     top as f32,
                 )
             });
-            el.prepaint_as_root(
-                point(bounds.left(), bounds.top() + px(top)),
-                space,
-                window,
-                cx,
-            );
+            window.with_content_mask(Some(ContentMask { bounds: mask }), |window| {
+                el.prepaint_as_root(
+                    point(bounds.left(), bounds.top() + px(top)),
+                    space,
+                    window,
+                    cx,
+                );
+            });
             items.push(el);
         }
         if let Some(frame) = &self.a11y {

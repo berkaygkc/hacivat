@@ -283,6 +283,14 @@ impl HistoryStore {
         Box::pin(Self::ask(cmd, move |reply| Cmd::Pin { id, pinned, reply }))
     }
 
+    // ## m4-t32-shots (named exception; PO R-W5-14 b): "Clear query history…".
+    /// Deletes every entry of `profile`, pinned ones included, after writing what was sent
+    /// before the call; answers how many entries were deleted. Other connections keep theirs.
+    pub fn clear(&self, profile: ProfileId) -> BoxFuture<'static, Result<u64, HistoryError>> {
+        let cmd = self.cmd.clone();
+        Box::pin(Self::ask(cmd, move |reply| Cmd::Clear { profile, reply }))
+    }
+
     /// Writes what is queued, for at most `grace`, then closes the file; later calls answer
     /// `Disabled` and later records are dropped.
     pub fn shutdown(&self, grace: Duration) -> BoxFuture<'static, ()> {

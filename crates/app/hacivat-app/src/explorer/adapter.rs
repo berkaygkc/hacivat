@@ -1537,6 +1537,30 @@ impl ExplorerModel {
         row
     }
 
+    // ## m4-t32-shots (fix round 1, review M-4)
+    /// The invisible-characters word (always said) and badge (unless the row already carries
+    /// one) for a schema or database `name` holding an invisible or control character; its
+    /// tooltip names the character when the row has none.
+    fn mark_invisible(&self, name: &str, row: &mut TreeRowData, words: &mut Vec<SharedString>) {
+        if !hacivat_meta::name::has_invisible_chars(name) {
+            return;
+        }
+        let word = self.t(Badge::Invisible.message_id());
+        if row.badge.is_none() {
+            row.badge = Some(word.clone());
+            row.badge_glyph = Some(Badge::Invisible.glyph());
+        }
+        if row.tooltip.is_none()
+            && let Some(what) = badges::first_invisible(name)
+        {
+            row.tooltip = Some(self.t_args(
+                "hv-explorer-invisible-tip",
+                vec![("what", ArgValue::Text(what))],
+            ));
+        }
+        words.push(word);
+    }
+
     fn schema_row(&self, p: usize, entry: &SchemaEntry) -> TreeRowData {
         let mut row = TreeRowData::new(rows::isolate(entry.name()), TextSource::Catalog);
         row.icon = Some(rows::kind_icon(ObjectKind::Schema));
@@ -1637,6 +1661,8 @@ impl ExplorerModel {
         {
             row.pill = Some(self.pill(level, &source));
         }
+        // ## m4-t32-shots (fix round 1, review M-4): the invisible-characters badge, as on objects.
+        self.mark_invisible(entry.name(), &mut row, &mut words);
         row.a11y_description = join_words(&words);
         row
     }
@@ -1688,6 +1714,8 @@ impl ExplorerModel {
         if db.in_scope && self.scope_stale(p, Some(&db.name)) {
             self.mark_scope_stale(&mut row, &mut words, &db.name);
         }
+        // ## m4-t32-shots (fix round 1, review M-4): the invisible-characters badge, as on objects.
+        self.mark_invisible(&db.name, &mut row, &mut words);
         row.a11y_description = join_words(&words);
         row
     }
@@ -1866,9 +1894,36 @@ impl TreeModel for ExplorerModel {
             // ## m4-t20-levels (named exception): the profile, for the level pill.
             Node::Database { p, db } => self.database_row(p, &db),
             Node::Schema { p, entry } => self.schema_row(p, &entry),
-            Node::BuiltIn { .. } => {
+            Node::BuiltIn { p, db } => {
                 let mut row = TreeRowData::new(self.t("hv-explorer-builtin"), TextSource::Fluent);
                 row.icon = Some(IconName::Library);
+                // ## m4-t32-shots (named exception; T26 carry, G3): the version of the shipped
+                // snapshot the catalog's built-ins answer from, as a badge (mock 3). Fix round 1
+                // (review M-6): only when the snapshot serves the group, never over schemas a
+                // live read answers for (R-W5-6).
+                let entries = match &db {
+                    Some(d) => d.system.clone(),
+                    None => self.inner.layouts[p]
+                        .as_deref()
+                        .map(|l| l.system.clone())
+                        .unwrap_or_default(),
+                };
+                let from_snapshot = entries.iter().any(|e| {
+                    e.ns.as_ref()
+                        .is_some_and(|ns| ns.root().flags().contains(ObjFlags::PRE_INTROSPECTED))
+                });
+                let line = self.inner.inputs.profiles[p]
+                    .catalog
+                    .as_ref()
+                    .filter(|_| from_snapshot)
+                    .and_then(|c| c.overlays.system.as_ref().map(|s| s.line.to_string()));
+                if let Some(line) = line {
+                    let args = vec![("version", ArgValue::Text(line))];
+                    let badge = self.t_args("hv-explorer-builtin-badge", args.clone());
+                    row.tooltip = Some(self.t_args("hv-explorer-builtin-tip", args));
+                    row.a11y_description = Some(badge.clone());
+                    row.badge = Some(badge);
+                }
                 row
             }
             // ## m4-t24-live (named exception): counts what the view filter shows.

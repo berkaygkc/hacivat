@@ -1300,3 +1300,157 @@ async fn two_stores_on_one_file_do_not_corrupt_it() {
     assert!(c.recovered_from().is_none());
     assert_eq!(hits(&c, all()).await.len(), 600);
 }
+
+// ---------------------------------------------------------------------------------------------
+// ## m4-t32-shots (named exception; PO R-W5-14 b): "Clear query history…" per connection.
+
+#[tokio::test]
+async fn clear_removes_one_connections_entries_pinned_too_and_keeps_the_others() {
+    let t = tmp();
+    let store = open(&t.path).await;
+    put(&store, rec(1, "SELECT 'one a'")).await;
+    put(&store, rec(1, "SELECT 'one b'")).await;
+    put(&store, rec(2, "SELECT 'two'")).await;
+    let pinned = hits(&store, all())
+        .await
+        .into_iter()
+        .find(|h| &*h.record.statement_masked == "SELECT 'one b'")
+        .expect("recorded");
+    store.pin(pinned.id, true).await.unwrap();
+    // A record sent just before the clear is cleared with the rest (the writer drains first).
+    put(&store, rec(1, "SELECT 'one c'")).await;
+    let removed = store.clear(pid(1)).await.expect("clear answers");
+    assert_eq!(removed, 3);
+    assert_eq!(texts(&store).await, ["SELECT 'two'"]);
+    // The full-text index forgot them too.
+    let found = hits(
+        &store,
+        HistoryQuery {
+            text: Some("one".into()),
+            ..all()
+        },
+    )
+    .await;
+    assert!(found.is_empty(), "{found:?}");
+    // Clearing again removes nothing and is not an error; the store keeps recording.
+    assert_eq!(store.clear(pid(1)).await, Ok(0));
+    put(&store, rec(1, "SELECT 'after'")).await;
+    assert_eq!(
+        store.recall(pid(1), String::new(), 5).await.unwrap(),
+        vec![Arc::<str>::from("SELECT 'after'")]
+    );
+}
+
+#[tokio::test]
+async fn clear_after_shutdown_answers_disabled() {
+    let t = tmp();
+    let store = open(&t.path).await;
+    store.shutdown(Duration::from_secs(2)).await;
+    assert_eq!(store.clear(pid(1)).await, Err(HistoryError::Disabled));
+}
+
+// ## m4-t32-shots (fix round 1, review I-1 and T-2)
+
+/// Whether `needle` is in the raw bytes of the history file or its `-wal` / `-shm`.
+fn on_disk(path: &Path, needle: &str) -> Vec<String> {
+    let mut hits = Vec::new();
+    for suffix in ["", "-wal", "-shm"] {
+        let p = PathBuf::from(format!("{}{suffix}", path.display()));
+        if let Ok(b) = std::fs::read(&p)
+            && contains(&b, needle)
+        {
+            hits.push(format!("history.sqlite{suffix}"));
+        }
+    }
+    hits
+}
+
+/// I-1: "deleted from this computer". After a clear and a clean close, the cleared statements'
+/// text (the table's row, its search key, the full-text index's tokens) is gone from the file's
+/// raw bytes, not just unlinked; the other connection's row stays readable.
+#[tokio::test]
+async fn cleared_text_is_gone_from_the_file_bytes() {
+    let t = tmp();
+    let store = open(&t.path).await;
+    let marker = "zqxmarkerclearedtext";
+    // One statement big enough for its own pages, one sharing a page with the kept row.
+    put(
+        &store,
+        rec(1, &format!("SELECT '{marker}' || '{}'", "x".repeat(6000))),
+    )
+    .await;
+    put(&store, rec(1, &format!("SELECT {marker}small FROM t"))).await;
+    put(&store, rec(2, "SELECT 'keptrowzq'")).await;
+    assert_eq!(store.clear(pid(1)).await, Ok(2));
+    // Right after the clear, before any close: the clear itself overwrote and checkpointed.
+    assert!(
+        on_disk(&t.path, marker).is_empty(),
+        "cleared text on disk right after the clear: {:?}",
+        on_disk(&t.path, marker)
+    );
+    store.shutdown(Duration::from_secs(2)).await;
+    let hits = on_disk(&t.path, marker);
+    assert!(
+        hits.is_empty(),
+        "cleared statement text still on disk in {hits:?}"
+    );
+    let again = open(&t.path).await;
+    assert_eq!(texts(&again).await, ["SELECT 'keptrowzq'"]);
+}
+
+/// T-2: ids sharing a long prefix; the other connection's pinned and unpinned rows and its
+/// full-text hits survive the clear.
+#[tokio::test]
+async fn clear_is_exact_and_keeps_the_other_connections_pins_and_search() {
+    let t = tmp();
+    let store = open(&t.path).await;
+    put(&store, rec(1, "SELECT 'alpha'")).await;
+    put(&store, rec(10, "SELECT 'beta pinned'")).await;
+    put(&store, rec(10, "SELECT 'beta loose'")).await;
+    let pinned = hits(&store, all())
+        .await
+        .into_iter()
+        .find(|h| &*h.record.statement_masked == "SELECT 'beta pinned'")
+        .expect("recorded");
+    store.pin(pinned.id, true).await.unwrap();
+    assert_eq!(store.clear(pid(1)).await, Ok(1));
+    let mut left = texts(&store).await;
+    left.sort();
+    assert_eq!(left, ["SELECT 'beta loose'", "SELECT 'beta pinned'"]);
+    let found = hits(
+        &store,
+        HistoryQuery {
+            text: Some("beta".into()),
+            ..all()
+        },
+    )
+    .await;
+    assert_eq!(found.len(), 2);
+}
+
+/// T-2: records streamed while a clear runs: every one sent before the clear is gone, the
+/// other connection keeps all of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn clear_during_a_stream_of_records() {
+    let t = tmp();
+    let store = open(&t.path).await;
+    for i in 0..200 {
+        put(&store, rec(1, &format!("SELECT {i} AS before"))).await;
+        put(&store, rec(2, &format!("SELECT {i} AS other"))).await;
+    }
+    let s2 = store.clone();
+    let writer = tokio::spawn(async move {
+        for i in 0..500 {
+            put(&s2, rec(1, &format!("SELECT {i} AS during"))).await;
+        }
+    });
+    let n = store.clear(pid(1)).await.unwrap();
+    writer.await.unwrap();
+    assert!(n >= 200, "cleared {n}");
+    let left = texts(&store).await;
+    assert!(
+        !left.iter().any(|t| t.contains("AS before")),
+        "a pre-clear entry survived"
+    );
+    assert_eq!(left.iter().filter(|t| t.contains("AS other")).count(), 200);
+}

@@ -98,6 +98,9 @@ mod m3b;
 // adds 23–25).
 #[path = "shots/m3c.rs"]
 mod m3c;
+// ## m4-t32-shots: the M4 states (`design/m4-explorer`; the PO's R-W5-14 surfaces).
+#[path = "shots/m4.rs"]
+mod m4;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -230,6 +233,8 @@ enum Surface {
     M3b(m3b::M3b),
     // ## m3c-t43-shots: every M3c state (`m3c::all`: Tasks 31–38's), at 1280x800 and 960x600.
     M3c(m3c::M3c),
+    // ## m4-t32-shots: every M4 state (`m4::M4_STATES`), at 1280x800 and 960x600.
+    M4(m4::M4),
 }
 
 const SURFACES: [Surface; 78] = [
@@ -411,6 +416,8 @@ impl Surface {
             Surface::M3b(s) => s.name(),
             // ## m3c-t43-shots
             Surface::M3c(s) => s.name(),
+            // ## m4-t32-shots
+            Surface::M4(s) => s.name(),
         }
     }
 
@@ -443,6 +450,8 @@ impl Surface {
         if self.is_live()
             || self.is_m2b()
             || matches!(self, Surface::M3a(_) | Surface::M3b(_) | Surface::M3c(_))
+            // ## m4-t32-shots: and every M4 state.
+            || matches!(self, Surface::M4(_))
         {
             // ## m2b-t22-live: the default window and the minimum one (ruling I1).
             return &[(1280.0, 800.0), (960.0, 600.0)];
@@ -649,6 +658,8 @@ impl Surface {
             Surface::M3b(s) => s.marker(),
             // ## m3c-t43-shots: each M3c state's own label.
             Surface::M3c(s) => s.marker(),
+            // ## m4-t32-shots
+            Surface::M4(s) => s.marker(),
         }
     }
 
@@ -672,6 +683,8 @@ impl Surface {
             Surface::M3b(s) => s.also_shown(),
             // ## m3c-t43-shots: a grid state's header among them (`m3c::M3c::also_shown`).
             Surface::M3c(s) => s.also_shown(),
+            // ## m4-t32-shots
+            Surface::M4(s) => s.also_shown(),
             _ => &[],
         }
     }
@@ -811,6 +824,10 @@ impl Surface {
         // ## m3c-t43-shots: every M3c state is reached by its steps.
         if let Surface::M3c(_) = self {
             return;
+        }
+        // ## m4-t32-shots: an M4 state saves its fixtures, then its steps expand the tree.
+        if let Surface::M4(state) = self {
+            return state.open(window, cx);
         }
         if self.needs_connections() {
             open_m2a(self, window, cx);
@@ -1091,6 +1108,10 @@ fn shots() -> Vec<Shot> {
     // ## m3c-t43-shots: then every M3c state (`m3c::all`: Tasks 31 to 38 in order).
     for state in m3c::all() {
         push_matrix(&mut out, Surface::M3c(state));
+    }
+    // ## m4-t32-shots: then every M4 state.
+    for state in m4::M4_STATES {
+        push_matrix(&mut out, Surface::M4(state));
     }
     out
 }
@@ -1452,6 +1473,8 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         });
         cx.set_global(CapsuleProbe::default());
         cx.set_global(TitleBarProbe::default());
+        // ## m4-t32-shots (m3carry review m3): a connected fixture's latency is fixed.
+        cx.set_global(hacivat_app::connections::capsule::PinnedLatency(12));
     });
     let root = tempfile::tempdir().expect("temp dir");
     let paths = LocalPaths::under(root.path());
@@ -1537,7 +1560,11 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         (Some(s), _, _) => s.steps(),
         (_, Some(s), _) => s.steps(),
         (_, _, Some(s)) => s.steps(),
-        _ => Vec::new(),
+        // ## m4-t32-shots: an M4 state's steps after its fixtures.
+        _ => match shot.surface {
+            Surface::M4(s) => s.steps(),
+            _ => Vec::new(),
+        },
     };
     for (at, step) in steps.into_iter().enumerate() {
         cx.update_window(handle, |_, window, cx| (step.act)(window, cx))
@@ -1896,6 +1923,8 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
             + m3b::all().len() * 8 * 2
             // ## m3c-t43-shots: every M3c state (Tasks 31–38).
             + m3c::all().len() * 8 * 2
+            // ## m4-t32-shots: every M4 state.
+            + m4::M4_STATES.len() * 8 * 2
     );
     // ## m3a-t35-shots: the 1,012 M1/M2 shots first, unchanged; then 68 M3a states x 16.
     // ## m3a-f5-demo (review m-5): plus the app menu at 960x600 (8).
@@ -1914,7 +1943,11 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
         m3c::all().len(),
         5 + 7 + 7 + 10 + 10 + 13 + 15 + 9 + 12 + 7 + 6
     );
-    assert_eq!(all.len(), 1020 + 68 * 16 + 71 * 16 + 101 * 16);
+    // ## m4-t32-shots: and the M4 states x 16.
+    assert_eq!(
+        all.len(),
+        1020 + 68 * 16 + 71 * 16 + 101 * 16 + m4::M4_STATES.len() * 16
+    );
     let m3b_from = 1020 + 68 * 16;
     let order = [
         m3b::T22.to_vec(),
@@ -1944,6 +1977,16 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
             all[at..at + 16]
                 .iter()
                 .all(|s| s.surface == Surface::M3c(state)),
+            "{state:?} at {at}"
+        );
+        at += 16;
+    }
+    // ## m4-t32-shots: the M4 states last.
+    for state in m4::M4_STATES {
+        assert!(
+            all[at..at + 16]
+                .iter()
+                .all(|s| s.surface == Surface::M4(state)),
             "{state:?} at {at}"
         );
         at += 16;

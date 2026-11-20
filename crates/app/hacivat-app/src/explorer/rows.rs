@@ -166,10 +166,13 @@ pub fn kind_icon(kind: ObjectKind) -> IconName {
 }
 
 /// `name` between FSI (U+2068) and PDI (U+2069): verbatim, isolated from the text around it.
+/// ## m4-t32-shots (named exception; T25 review m-1 carry): a row is single-line chrome, so its
+/// control characters are drawn as their Control Pictures (`ddl_view::visible_name`), never as
+/// a line break; the invisible-characters badge still marks the row.
 pub fn isolate(name: &str) -> SharedString {
     let mut s = String::with_capacity(name.len() + 6);
     s.push('\u{2068}');
-    s.push_str(name);
+    s.push_str(&crate::ddl_view::visible_name(name));
     s.push('\u{2069}');
     s.into()
 }

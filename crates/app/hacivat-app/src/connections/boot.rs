@@ -185,7 +185,10 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
     // session the manager opens (C11), and a later change of the setting too
     // ([`follow_time_zone`]).
     if let Some(state) = cx.try_global::<crate::AppState>() {
-        manager.set_time_zone(state.settings.ui.time_zone.clone());
+        // ## m4-t32-shots (fix round 1, review M-3): an unknown zone is never sent.
+        manager.set_time_zone(crate::settings_ui::time_zone::session_zone(
+            &state.settings.ui.time_zone,
+        ));
     }
     let LoadedProfiles {
         profiles,
@@ -226,7 +229,10 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
 /// open keep theirs. The manager ignores a zone it already has.
 fn follow_time_zone(cx: &mut App) {
     cx.observe_global::<crate::AppState>(|cx| {
-        let zone = cx.global::<crate::AppState>().settings.ui.time_zone.clone();
+        // ## m4-t32-shots (fix round 1, review M-3): an unknown zone is never sent.
+        let zone = crate::settings_ui::time_zone::session_zone(
+            &cx.global::<crate::AppState>().settings.ui.time_zone,
+        );
         if let Some(m) = cx.try_global::<ConnectionsModel>() {
             m.manager().set_time_zone(zone);
         }

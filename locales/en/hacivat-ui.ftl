@@ -4036,3 +4036,50 @@ hv-metadata-after-commit-tip-schema = Changes to { $schema } from this transacti
 # Variables:
 #   $schema (String) - a schema (or database) name, verbatim, e.g. "public".
 hv-metadata-log-pending-schema = Explorer refresh waits for COMMIT (changes in { $schema })
+
+## m4-t32-shots
+# Settings › General (PO ruling R-W5-14 a). The time zone row's title.
+hv-settings-time-zone = Time zone
+# Settings › General (PO ruling R-W5-14 a). The choice that follows the operating system, with the zone it reports.
+# Variables:
+#   $zone (String) - an IANA time zone, verbatim, e.g. "Europe/Istanbul".
+hv-settings-time-zone-system = System ({ $zone })
+# Settings › General (PO ruling R-W5-14 a). Coordinated Universal Time.
+hv-settings-time-zone-utc = UTC
+# Settings › General (PO ruling R-W5-14 a). The note under the time zone row.
+hv-settings-time-zone-note = Dates and times in results show in this zone. Connections opened from now on use it; open ones keep theirs.
+# Command palette (PO ruling R-W5-14 b): clears the selected connection's query history.
+hv-cmd-connection-clear-history = Clear query history of connection
+# The connection context menu (PO ruling R-W5-14 b).
+hv-conn-menu-clear-history = Clear query history…
+# The query history dialog (PO ruling R-W5-14 b). The ⋯ button's name and tooltip.
+hv-history-more = More actions
+# The query history dialog's ⋯ menu (PO ruling R-W5-14 b).
+hv-history-clear-item = Clear history of this connection…
+# Command palette (PO ruling R-W5-14 b): clears the history of the console's connection, from the history dialog.
+hv-cmd-history-clear = Clear query history of this connection
+# The clear-history confirmation (PO ruling R-W5-14 b). Cancel is the default button.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-history-clear-title = Clear the query history of { $name }?
+# The clear-history confirmation (PO ruling R-W5-14 b).
+hv-history-clear-body = Every statement saved for this connection is deleted from this computer, pinned ones too. This can't be undone. Nothing on the server changes.
+# The clear-history confirmation (PO ruling R-W5-14 b). The button that clears.
+hv-history-clear-btn = Clear history
+# A toast after the history of a connection was cleared (PO ruling R-W5-14 b).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-history-cleared = The query history of { $name } was cleared.
+# A toast when clearing the history of a connection failed (PO ruling R-W5-14 b).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-history-clear-failed = The query history of { $name } couldn't be cleared. Nothing changed.
+# Settings › General (fix round 1, review M-3). A saved zone the time zone database does not know, as a choice.
+# Variables:
+#   $zone (String) - an IANA time zone, verbatim, e.g. "Europe/Istanbul".
+hv-settings-time-zone-unknown-choice = { $zone } (unknown)
+# Settings › General (fix round 1, review M-3). The notice under the row while the saved zone is unknown.
+# Variables:
+#   $zone (String) - an IANA time zone, verbatim, e.g. "Europe/Istanbul".
+#   $system (String) - the system choice as the select shows it, e.g. "System (Europe/Istanbul)".
+hv-settings-time-zone-unknown = { $zone } isn't a time zone Hacivat knows, so { $system } is used.

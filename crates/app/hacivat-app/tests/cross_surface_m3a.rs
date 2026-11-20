@@ -191,14 +191,17 @@ fn run_rows_then_copy_puts_raw_tsv_on_the_clipboard(cx: &mut TestAppContext) {
                 .find_map(|h| h.read(cx).grid_of(id, 0, cx))
         })
         .expect("the grid");
-    refresh(vcx);
-    let cells: Vec<String> = registry_frame(vcx)
-        .into_iter()
-        .filter(|r| r.path.ends_with("#cell"))
-        .map(|r| r.text.to_string())
-        .collect();
-    assert!(cells.iter().any(|t| t == "İzmir"), "{cells:?}");
-    assert!(cells.iter().any(|t| t == "Şanlıurfa"), "{cells:?}");
+    // ## m4-t32-shots (named exception; carries-w4 flake): under load the first frames can be
+    // the grid's empty one; wait until the grid has drawn its cell text.
+    wait_until(vcx, "the grid draws its cells", |vcx| {
+        refresh(vcx);
+        let cells: Vec<String> = registry_frame(vcx)
+            .into_iter()
+            .filter(|r| r.path.ends_with("#cell"))
+            .map(|r| r.text.to_string())
+            .collect();
+        cells.iter().any(|t| t == "İzmir") && cells.iter().any(|t| t == "Şanlıurfa")
+    });
     // Copy all: raw values, NULL as an empty cell, the number ungrouped.
     in_window(vcx, |window, cx| {
         let handle = grid.read(cx).focus_handle(cx);
