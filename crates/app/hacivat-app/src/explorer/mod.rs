@@ -35,7 +35,7 @@ pub mod userdata;
 use std::rc::Rc;
 
 use hacivat_ui::actions::{ActionDef, ActionFn, ActionRegistry};
-use hacivat_ui_core::gpui_surface::App;
+use hacivat_ui_core::gpui_surface::{App, Window};
 
 pub use actions::{
     ActionSlot, ActionSurface, ExplorerActionProvider, NodeRef, OpenDataHandler, ProvidedAction,
@@ -46,6 +46,8 @@ pub use contrib::{
     ContributedChildren, ContributedNode, ExplorerContributor, contributors, register_contributor,
 };
 pub use live::{DatabaseRow, RevealOutcome, database_rows, reveal};
+// ## m4-t24-live
+pub use actions::{node_menu, open_node_menu, qualified_name};
 
 /// The key context of the focused explorer (the M2a list's, kept by the tree, R20).
 pub const EXPLORER_CONTEXT: &str = crate::connections::explorer::EXPLORER_CONTEXT;
@@ -92,14 +94,20 @@ const COMMANDS: [(&str, &str); 12] = [
 /// The M4 explorer commands that are still stubs (registered disabled). A task that fills one
 /// removes it here (and in `tests/m4_routing.rs`).
 // ## m4-t20-levels: Task 20's five commands are filled (`edit_scope`, `set_level.*`).
-pub const STUB_COMMANDS: [&str; 7] = [
-    "explorer.view_ddl",
-    "explorer.copy_qualified_name",
-    "explorer.collapse_all",
-    "explorer.open_data",
-    "explorer.refresh",
-    "explorer.expand_all_children",
-    "metadata.clear_cache",
+// ## m4-t24-live: Task 24's five are filled (copy qualified name, collapse all, open data,
+// refresh, expand all children).
+pub const STUB_COMMANDS: [&str; 2] = ["explorer.view_ddl", "metadata.clear_cache"];
+
+// ## m4-t24-live
+/// The node-menu commands Task 24 adds (mock 5): no keymap row (palette and menu only); the
+/// Modify… placeholder is never enabled (PO-Q13), so it is never a palette row.
+const MENU_COMMANDS: [(&str, &str); 6] = [
+    ("explorer.copy_name", "hv-cmd-explorer-copy-name"),
+    ("explorer.hide_like_this", "hv-cmd-explorer-hide-like-this"),
+    ("explorer.show_hidden", "hv-cmd-explorer-show-hidden"),
+    ("explorer.collapse_children", "hv-cmd-explorer-collapse-children"),
+    ("explorer.level_menu", "hv-cmd-explorer-level-menu"),
+    (actions::MODIFY, "hv-cmd-explorer-modify"),
 ];
 
 /// A stub command is never enabled.
@@ -110,12 +118,42 @@ fn not_yet(_: &App) -> bool {
 // ## m4-t20-levels
 /// A command's `enabled` function.
 type Enabled = fn(&App) -> bool;
+// ## m4-t24-live
+/// A filled command's body.
+type Run = fn(&mut Window, &mut App);
 
 /// The run and enabled functions of a filled command (`None`: a stub).
 fn filled(id: &str) -> Option<(ActionFn, Enabled)> {
     if id == "explorer.edit_scope" {
         let run: ActionFn = Rc::new(crate::connections::dialog::schemas::edit_scope);
         return Some((run, crate::connections::dialog::schemas::can_edit_scope));
+    }
+    // ## m4-t24-live
+    let t24: Option<(Run, Enabled)> = match id {
+        "explorer.copy_qualified_name" | "explorer.copy_name" => Some((
+            if id == "explorer.copy_name" {
+                actions::copy_name
+            } else {
+                actions::copy_qualified_name
+            },
+            actions::can_copy,
+        )),
+        "explorer.collapse_all" => Some((actions::collapse_all, actions::can_collapse_all)),
+        "explorer.open_data" => Some((actions::open_data_command, actions::can_open_data)),
+        "explorer.refresh" => Some((actions::refresh_command, actions::can_refresh)),
+        "explorer.expand_all_children" => {
+            Some((actions::expand_all_children, actions::has_cursor))
+        }
+        "explorer.collapse_children" => Some((actions::collapse_children, actions::has_cursor)),
+        "explorer.hide_like_this" => Some((actions::hide_like_this, actions::can_hide)),
+        "explorer.show_hidden" => Some((actions::show_hidden, actions::can_show_hidden)),
+        "explorer.level_menu" => Some((actions::level_menu, level_pill::can_set_level)),
+        actions::MODIFY => Some((|_, _| {}, actions::never)),
+        _ => None,
+    };
+    if let Some((run, enabled)) = t24 {
+        let run: ActionFn = Rc::new(run);
+        return Some((run, enabled));
     }
     let (_, level) = level_pill::LEVEL_COMMANDS
         .iter()
@@ -128,7 +166,8 @@ fn filled(id: &str) -> Option<(ActionFn, Enabled)> {
 /// Registers the M4 explorer commands (one line in `crate::init`).
 pub fn install(cx: &mut App) {
     let reg = cx.default_global::<ActionRegistry>();
-    for (id, title_id) in COMMANDS {
+    // ## m4-t24-live: the node-menu commands follow the M4 rows (palette order).
+    for (id, title_id) in COMMANDS.into_iter().chain(MENU_COMMANDS) {
         let (run, enabled) = filled(id).unwrap_or_else(|| (Rc::new(|_, _| {}), not_yet));
         // A duplicate keeps the first definition (registration order is the palette's order).
         let _ = reg.register(ActionDef {
@@ -139,4 +178,6 @@ pub fn install(cx: &mut App) {
             enabled,
         });
     }
+    // ## m4-t24-live: the default open-data handler (R-M4-13; M6 replaces it).
+    actions::install_default_open_data(cx);
 }

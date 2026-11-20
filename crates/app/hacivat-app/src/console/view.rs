@@ -1643,6 +1643,16 @@ fn live_kinds(cx: &App) -> HashMap<ProfileId, LiveKind> {
         .unwrap_or_default()
 }
 
+// ## m4-t24-live (named exception): Open data's console (R-M4-13).
+/// The next console tab built for `profile` opens over `text` (as a shots fixture's does:
+/// nothing restored, autosave off), not empty.
+pub(crate) fn queue_text(profile: ProfileId, text: String, cx: &mut App) {
+    cx.default_global::<Hosts>()
+        .fresh
+        .borrow_mut()
+        .push((profile, Some(text)));
+}
+
 /// Whether `console_binding` (or a shots fixture, with its text) just handed `profile` to a
 /// new console tab (consumed).
 fn take_fresh(cx: &App, profile: ProfileId) -> Option<Option<String>> {

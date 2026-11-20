@@ -342,6 +342,9 @@ pub struct ProfileInput {
     // ## m4-t20-levels (named exception): the profile's user data, for the level pills
     // (`None` until its file was read: no pill is drawn then).
     pub userdata: Option<Arc<ProfileUserData>>,
+    // ## m4-t24-live (named exception): the live host's parts of the rows (progress, held
+    // deletions, the database rows' automatic levels); `None` while the host knows nothing.
+    pub live: Option<Arc<super::live::LiveRow>>,
 }
 
 impl fmt::Debug for ProfileInput {
@@ -368,6 +371,8 @@ impl ProfileInput {
             catalog,
             // ## m4-t20-levels (named exception)
             userdata: None,
+            // ## m4-t24-live (named exception)
+            live: None,
         }
     }
 }
@@ -1019,6 +1024,69 @@ impl ExplorerModel {
         )
     }
 
+    // ## m4-t24-live (named exception)
+    /// A namespace being read: the engine's phase and count when it reports one, else
+    /// "Loading…" (mock 2: a static label, a determinate count, no motion).
+    fn loading(&self, p: usize, ns: &NsKey) -> ChildState {
+        let task = self.inner.inputs.profiles[p]
+            .live
+            .as_deref()
+            .and_then(|l| super::progress::task_for(l, ns).cloned());
+        match task {
+            Some(task) => ChildState::Loading {
+                label: self.t(super::progress::phase_message(task.phase)),
+                running: true,
+                count: super::progress::count_args(&task)
+                    .map(|args| self.t_args(super::progress::COUNT_MESSAGE, args)),
+            },
+            None => ChildState::Loading {
+                label: self.t("hv-explorer-loading"),
+                running: true,
+                count: None,
+            },
+        }
+    }
+
+    // ## m4-t24-live (named exception)
+    /// The view filter of namespace `ns` of profile `p` (mock 5 "Hide objects like this").
+    fn view_filter(&self, p: usize, ns: &NsKey) -> Option<(Arc<str>, hacivat_introspect::filter::CompiledFilter)> {
+        let input = &self.inner.inputs.profiles[p];
+        let text = input
+            .userdata
+            .as_ref()?
+            .view_filters
+            .get(&level_pill::namespace_object_key(ns))?
+            .clone();
+        let dialect = super::live::dialect_of(input.profile.engine);
+        let f = hacivat_introspect::filter::parse_filter(
+            &text,
+            dialect,
+            hacivat_introspect::filter::FilterRole::View,
+        )
+        .ok()?;
+        Some((Arc::from(text), f))
+    }
+
+    // ## m4-t24-live (named exception)
+    /// The members of a group the view filter keeps, and its text when it hides some.
+    fn visible_members(
+        &self,
+        p: usize,
+        owner: &Owner,
+        members: &[u32],
+    ) -> (usize, Option<(Arc<str>, usize)>) {
+        let Some((text, f)) = self.view_filter(p, owner.ns.key()) else {
+            return (members.len(), None);
+        };
+        let objs = owner.ns.objs();
+        let shown = members
+            .iter()
+            .filter(|&&i| f.matches(objs[i as usize].kind(), objs[i as usize].name()))
+            .count();
+        let hidden = members.len() - shown;
+        (shown, (hidden > 0).then_some((text, hidden)))
+    }
+
     fn not_loaded(&self) -> ChildState {
         ChildState::Loading {
             label: self.t("hv-explorer-not-loaded"),
@@ -1071,8 +1139,16 @@ impl ExplorerModel {
                 members,
             } => {
                 let sorted = self.sorted(*p, owner, *group, members);
+                // ## m4-t24-live (named exception): the view filter hides; the catalog keeps.
+                let view = self.view_filter(*p, owner.ns.key());
+                let objs = owner.ns.objs();
                 let keys: Vec<TreeKey> = sorted
                     .iter()
+                    .filter(|&&(idx, _)| {
+                        view.as_ref().is_none_or(|(_, f)| {
+                            f.matches(objs[idx as usize].kind(), objs[idx as usize].name())
+                        })
+                    })
                     .map(|&(idx, k)| {
                         self.register(
                             k,
@@ -1177,6 +1253,17 @@ impl ExplorerModel {
 
     fn profile_children(&self, p: usize, key: TreeKey) -> ChildState {
         let Some(layout) = self.inner.layouts[p].clone() else {
+            // ## m4-t24-live (named exception): a first connect reads the names ("Loading…"
+            // with the run marker, mock 2).
+            if let Some(live) = self.inner.inputs.profiles[p].live.as_deref()
+                && live.live
+            {
+                return ChildState::Loading {
+                    label: self.t("hv-explorer-loading"),
+                    running: true,
+                    count: None,
+                };
+            }
             // No catalog, or generation 0: "Not loaded", never an empty database.
             return self.not_loaded();
         };
@@ -1248,13 +1335,19 @@ impl ExplorerModel {
             if !keys.is_empty() {
                 return self.shown(keys);
             }
+            // ## m4-t24-live (named exception): a namespace the engine reads now shows its
+            // phase and count, whatever state it was listed with.
+            let reading = self.inner.inputs.profiles[p]
+                .live
+                .as_deref()
+                .is_some_and(|l| super::progress::task_for(l, &entry.key).is_some());
+            if reading && !entry.out_of_scope() {
+                return self.loading(p, &entry.key);
+            }
             return match &entry.state {
                 Some(LoadState::OutOfScope) => ChildState::Leaf,
-                Some(LoadState::Loading { .. }) => ChildState::Loading {
-                    label: self.t("hv-explorer-loading"),
-                    running: true,
-                    count: None,
-                },
+                // ## m4-t24-live (named exception): the phase and its count (mock 2).
+                Some(LoadState::Loading { .. }) => self.loading(p, &entry.key),
                 Some(LoadState::Failed { .. }) => ChildState::Failed {
                     label: self.t_args(
                         "hv-explorer-failed",
@@ -1461,8 +1554,20 @@ impl ExplorerModel {
             let word = self.t(badge.message_id());
             row.badge = Some(word.clone());
             row.badge_glyph = Some(badge.glyph());
-            row.tooltip = Some(match badge {
-                Badge::Partial => self.t("hv-explorer-partial-title"),
+            // ## m4-t24-live (named exception): a deletion a background pass held says so.
+            let held = self.inner.inputs.profiles[p]
+                .live
+                .as_deref()
+                .and_then(|l| l.pending.get(&entry.key).copied());
+            row.tooltip = Some(match (badge, held) {
+                (Badge::Partial, _) => self.t("hv-explorer-partial-title"),
+                (_, Some(count)) => self.t_args(
+                    "hv-metadata-mass-pending-tip",
+                    vec![
+                        ("count", ArgValue::Count(u64::from(count))),
+                        ("schema", ArgValue::Text(entry.name().to_string())),
+                    ],
+                ),
                 _ => self.t_args(
                     "hv-explorer-stale-tip",
                     vec![("schema", ArgValue::Text(entry.name().to_string()))],
@@ -1515,6 +1620,15 @@ impl ExplorerModel {
             && let Some((level, source)) = level_pill::database_level(data, &db.name)
         {
             row.pill = Some(self.pill(level, &source));
+        } else if db.in_scope
+            && self.inner.inputs.profiles[p].userdata.is_some()
+            && let Some((level, objects)) = self.inner.inputs.profiles[p]
+                .live
+                .as_deref()
+                .and_then(|l| l.db_levels.get(&db.name).copied())
+        {
+            // ## m4-t24-live (named exception): the engine's automatic level (T19 carry, m8).
+            row.pill = Some(self.pill(level, &level_pill::PillSource::Auto { objects }));
         }
         row.a11y_description = join_words(&words);
         row
@@ -1610,7 +1724,26 @@ impl TreeModel for ExplorerModel {
                 row.icon = Some(IconName::Library);
                 row
             }
-            Node::Group { group, members, .. } => self.group_row(key, group, members.len()),
+            // ## m4-t24-live (named exception): counts what the view filter shows.
+            Node::Group {
+                p,
+                group,
+                members,
+                owner,
+            } => {
+                let (shown, hidden) = self.visible_members(p, &owner, &members);
+                let mut row = self.group_row(key, group, shown);
+                if let Some((text, n)) = hidden {
+                    row.filter_glyph = Some(self.t_args(
+                        "hv-explorer-hidden-tip",
+                        vec![
+                            ("n", ArgValue::Count(n as u64)),
+                            ("pattern", ArgValue::Text(text.to_string())),
+                        ],
+                    ));
+                }
+                row
+            }
             Node::Object { ns, idx, .. } => self.object_row(&ns, idx),
             Node::Contributed { node, .. } => node.row.clone(),
         })

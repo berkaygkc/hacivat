@@ -206,7 +206,11 @@ fn apply_state(cx: &mut App, id: ProfileId, state: LiveState) -> bool {
         session_toasts::clear_idle(cx, id);
     }
     session_toasts::clear_downgrade(cx, id);
+    // ## m4-t24-live (named lines): the explorer's catalog follows the connection (opened and
+    // validated on connect, its engine stopped otherwise; the cache stays).
+    let explorer_state = state.clone();
     cx.global_mut::<ConnectionsModel>().set_live(id, state);
+    crate::explorer::live::on_live_state(id, &explorer_state, cx);
     connecting
 }
 

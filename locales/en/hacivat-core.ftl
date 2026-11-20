@@ -1744,3 +1744,8 @@ intro-scope-warn-db-term-ignored = The database part at character { NUMBER($colu
 # Variables:
 #   $column (Number) - the 1-based character position, e.g. 7.
 intro-filter-warn-empty-item = The empty part at character { NUMBER($column, useGrouping: "false") } is ignored.
+
+## m4-t24-live
+# A cache write failed for lack of disk space; the explorer keeps working from memory (shown
+# once per connection; HV-MODEL-03, T11 carry).
+model-cache-write-failed = The cached metadata couldn't be saved because the disk is full. The explorer keeps working; the metadata is read again on the next connect.

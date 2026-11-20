@@ -215,6 +215,8 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
     // ## m3b-t24-exec-ui (named exception): the query history opens on the core runtime,
     // never holding the window (R-M3-62; T17 carries).
     crate::exec_ui::orchestrator::open_history(cx);
+    // ## m4-t24-live (named lines): the explorer's catalogs (`CatalogHub` on the core runtime).
+    crate::explorer::live::install(cx);
 }
 
 // ## m2b-t22-live

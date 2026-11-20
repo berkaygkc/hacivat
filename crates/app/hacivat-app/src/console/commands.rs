@@ -399,3 +399,90 @@ fn show_recalled(editor: &Entity<EditorView>, list: Arc<[Arc<str>]>, index: usiz
     }
     editor.update(cx, |e, cx| e.show_recalled(&text, sentence, cx));
 }
+
+// ## m4-t24-live (named exception): the console opener of the explorer's Open data (R-M4-13).
+
+/// Consoles opened with a text to run once they can (their tab, until the run starts).
+#[derive(Default)]
+struct OpenRuns {
+    tabs: Vec<hacivat_ui::panes::TabId>,
+    observing: bool,
+}
+
+impl Global for OpenRuns {}
+
+/// Opens a new console on `profile` over `text` (focused, in the focused pane) and, with `run`,
+/// runs it through the normal Run path once the console can run (its session connected and its
+/// SQL context read): the gate, the classifier and the confirmations decide as for any Run.
+/// `database` is the database the text was written for; the console's session is the
+/// profile's own, so callers pass `run: false` for another one. Answers the new tab.
+pub fn open_with_text(
+    profile: hacivat_proto::ProfileId,
+    database: Option<&str>,
+    text: &str,
+    run: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<hacivat_ui::panes::TabId> {
+    let _ = database;
+    let ws = window.root::<crate::shell::Workspace>().flatten()?;
+    crate::console::view::queue_text(profile, text.to_string(), cx);
+    let tab = ws.update(cx, |ws, cx| ws.open_console_tab(Some(profile), window, cx))?;
+    if run {
+        let runs = cx.default_global::<OpenRuns>();
+        runs.tabs.push(tab);
+        if !runs.observing {
+            runs.observing = true;
+            cx.observe_global::<Consoles>(try_open_runs).detach();
+            cx.observe_global::<crate::exec_ui::ExecUi>(try_open_runs)
+                .detach();
+        }
+    }
+    Some(tab)
+}
+
+/// Whether console `console` can run now (connected, context read, nothing running).
+fn can_run_now(console: ConsoleId, cx: &App) -> bool {
+    let Some(state) = Consoles::get(cx, console) else {
+        return false;
+    };
+    if state.editor.is_none() {
+        return false;
+    }
+    let idle = state
+        .session
+        .as_ref()
+        .is_some_and(|s| s.state().borrow().state == SessionState::Idle);
+    idle && crate::exec_ui::sql_context(console, cx) != SqlContext::Pending
+        && !crate::exec_ui::orchestrator::run_busy(console, cx)
+        && !crate::exec_ui::pending_read_only(console, cx)
+}
+
+/// Runs every queued console that can run now.
+fn try_open_runs(cx: &mut App) {
+    let Some(runs) = cx.try_global::<OpenRuns>() else {
+        return;
+    };
+    let ready: Vec<(hacivat_ui::panes::TabId, ConsoleId)> = runs
+        .tabs
+        .iter()
+        .filter_map(|tab| Some((*tab, Consoles::by_tab(cx, *tab)?)))
+        .filter(|(_, c)| can_run_now(*c, cx))
+        .collect();
+    if ready.is_empty() {
+        return;
+    }
+    cx.global_mut::<OpenRuns>()
+        .tabs
+        .retain(|t| !ready.iter().any(|(r, _)| r == t));
+    for (_, console) in ready {
+        let Some(editor) = Consoles::get(cx, console).and_then(|s| s.editor.clone()) else {
+            continue;
+        };
+        crate::exec_ui::in_workspace_window(cx, move |_, window, cx| {
+            editor.update(cx, |e, cx| {
+                e.run_command("editor.run", window, cx);
+            });
+        });
+    }
+}

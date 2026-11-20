@@ -465,11 +465,17 @@ pub(crate) fn save_profile(
             let Some(dir) = dir else {
                 return Err(ScopeSaveError::CacheNotDeleted);
             };
+            // ## m4-t24-live (named lines): the profile's open cache store closes first (its
+            // engine stops; T19 carry), and opens again below when the profile is connected.
+            let release = cx.update(|cx| crate::explorer::live::release_cache(id, cx));
+            release.await;
             let (tx, rx) = oneshot::channel();
             runtime.spawn_blocking(move || {
                 let _ = tx.send(CacheStore::delete_profile_files(&dir, &id));
             });
             if !matches!(rx.await, Ok(Ok(()))) {
+                // ## m4-t24-live (named lines): nothing changed; the cache opens again.
+                cx.update(|cx| crate::explorer::live::reopen(id, cx));
                 return Err(ScopeSaveError::CacheNotDeleted);
             }
         }
@@ -492,7 +498,13 @@ pub(crate) fn save_profile(
             )));
         }
         let save = cx.update(|cx| ConnectionsModel::save(cx, draft));
-        save.await.map_err(ScopeSaveError::Profile)
+        let saved = save.await.map_err(ScopeSaveError::Profile);
+        // ## m4-t24-live (named lines): a connected profile's catalog opens again, under the
+        // flag just saved.
+        if drop_cache {
+            cx.update(|cx| crate::explorer::live::reopen(id, cx));
+        }
+        saved
     })
 }
 

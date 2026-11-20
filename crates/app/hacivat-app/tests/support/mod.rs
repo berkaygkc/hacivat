@@ -1615,3 +1615,275 @@ pub mod catalogs {
         )
     }
 }
+
+// ## m4-t24-live
+/// The live explorer's test doubles (Task 24): a `CatalogSource` over the engine with Task 15's
+/// fakes (no server, no keyring), cached namespaces, and a thread probe.
+pub mod live {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread::ThreadId;
+    use std::time::Duration;
+
+    use futures::future::BoxFuture;
+    use hacivat_app::explorer::live::CatalogSource;
+    use hacivat_introspect::engine::{
+        Engine, EngineConfig, EngineLimits, Filters, LevelPolicy, MetaSource,
+    };
+    use hacivat_introspect::hub::{CacheMode, HubError, ProfileCatalog};
+    use hacivat_introspect::scope::{CurrentCtx, parse_scope};
+    use hacivat_introspect::testing::fake::{FakeIntrospector, FakeMetaSource, FakeObject};
+    use hacivat_meta::name::{DialectId, FoldRule, IdentCtx, NameClass};
+    use hacivat_meta::namespace::{NsMeta, Subtree};
+    use hacivat_meta::persist::{CacheStore, Encryption, RowKey, WriterId};
+    use hacivat_meta::props::{ColumnProps, Props, TableProps};
+    use hacivat_meta::{
+        Catalog, Level, Name, NamespaceSnapshot, NsKey, Obj, ObjectKind, ServerFacts, ServerId,
+    };
+    use hacivat_proto::{DbmsKind, ProfileId};
+    use hacivat_session::meta::{MetaConn, MetaError};
+    use hacivat_session::profile::Profile;
+    use tokio_util::sync::CancellationToken;
+
+    /// 2025-11-17 14:05 UTC, the cached namespaces' read time.
+    pub const CACHED_AT_MS: i64 = 1_763_388_300_000;
+
+    fn dialect(d: DbmsKind) -> DialectId {
+        match d {
+            DbmsKind::MySql => DialectId::MySql,
+            DbmsKind::MariaDb => DialectId::MariaDb,
+            DbmsKind::Sqlite => DialectId::Sqlite,
+            _ => DialectId::Postgres,
+        }
+    }
+
+    /// Schema `path` of `dbms` read at `Structure` on [`CACHED_AT_MS`], with tables `tables`
+    /// (one column `id` each, OIDs from 20,000 on PostgreSQL, as `fake_tables` gives them).
+    pub fn cached_schema(dbms: DbmsKind, path: &[&str], tables: &[&str]) -> NamespaceSnapshot {
+        let name = path.last().copied().unwrap_or_default();
+        let mut t = Subtree::new(Obj::new(ObjectKind::Schema, name));
+        for (i, table) in tables.iter().enumerate() {
+            let mut obj = Obj::new(ObjectKind::Table, *table)
+                .with_props(Props::Table(Arc::new(TableProps::default())));
+            if dbms == DbmsKind::Postgres {
+                obj = obj.with_server_id(ServerId::Oid(20_000 + i as u32));
+            }
+            let id = t.add(t.root(), obj);
+            t.add(
+                id,
+                Obj::new(ObjectKind::Column, "id").with_props(Props::Column(Arc::new(
+                    ColumnProps {
+                        ordinal: 1,
+                        raw_type: Arc::from("integer"),
+                        nullable: false,
+                        ..Default::default()
+                    },
+                ))),
+            );
+        }
+        let d = dialect(dbms);
+        let fold =
+            FoldRule::for_names(d, &IdentCtx::new(d), NameClass::Table).unwrap_or(FoldRule::Exact);
+        let meta = NsMeta {
+            level: Level::Structure,
+            loaded_at_ms: CACHED_AT_MS,
+            ..NsMeta::default()
+        };
+        NamespaceSnapshot::build(NsKey::schema(path.iter().copied()), dbms, fold, meta, t)
+            .expect("a valid cached namespace")
+    }
+
+    /// Writes `namespaces` into the cache file at `path` (`key`: encrypted with it).
+    pub fn write_cache(path: &Path, key: Option<[u8; 32]>, namespaces: &[NamespaceSnapshot]) {
+        std::fs::create_dir_all(path.parent().expect("a folder")).expect("the cache folder");
+        let encryption = match key {
+            Some(k) => Encryption::Row(RowKey::from_bytes(&k)),
+            None => Encryption::None,
+        };
+        let mut store = CacheStore::open(path, encryption, WriterId(1))
+            .expect("a cache store")
+            .store;
+        for ns in namespaces {
+            store.save_namespace(ns).expect("saved");
+        }
+    }
+
+    /// Tables `names` of the fake server (column `id`, OIDs from 20,000).
+    pub fn fake_tables(names: &[&str]) -> Vec<FakeObject> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| FakeObject::table(n, &["id"]).with_oid(20_000 + i as u32))
+            .collect()
+    }
+
+    /// A metadata source that records the threads it is called on.
+    pub struct Probe {
+        pub inner: Arc<FakeMetaSource>,
+        pub threads: Arc<Mutex<Vec<ThreadId>>>,
+    }
+
+    impl MetaSource for Probe {
+        fn acquire<'a>(
+            &'a self,
+            database: Option<Name>,
+            cancel: &'a CancellationToken,
+        ) -> BoxFuture<'a, Result<MetaConn, MetaError>> {
+            self.threads
+                .lock()
+                .unwrap()
+                .push(std::thread::current().id());
+            self.inner.acquire(database, cancel)
+        }
+        fn user_in_transaction(&self) -> bool {
+            self.inner.user_in_transaction()
+        }
+        fn released(&self) {
+            self.inner.released();
+        }
+    }
+
+    /// A `CatalogSource` over the engine with the fakes: one engine per profile, cached in a
+    /// plaintext store under `dir`.
+    pub struct FakeSource {
+        pub rt: tokio::runtime::Handle,
+        pub intro: FakeIntrospector,
+        pub meta: Arc<FakeMetaSource>,
+        pub dir: PathBuf,
+        /// The schema the engine takes as current (what the user's session would report).
+        pub current_schema: Option<String>,
+        /// The threads `ensure`, `has_cache` and every metadata connection ran on.
+        pub threads: Arc<Mutex<Vec<ThreadId>>>,
+        pub ensures: AtomicU64,
+        made: Mutex<HashMap<ProfileId, ProfileCatalog>>,
+    }
+
+    impl FakeSource {
+        pub fn new(rt: tokio::runtime::Handle, intro: FakeIntrospector, dir: PathBuf) -> Self {
+            let meta = FakeMetaSource::new(intro.dbms);
+            intro.link_meta(meta.clone());
+            FakeSource {
+                rt,
+                intro,
+                meta,
+                dir,
+                current_schema: Some("public".to_string()),
+                threads: Arc::default(),
+                ensures: AtomicU64::new(0),
+                made: Mutex::new(HashMap::new()),
+            }
+        }
+
+        /// The cache file of `profile`.
+        pub fn cache_path(&self, profile: ProfileId) -> PathBuf {
+            self.dir.join(format!("{}.sqlite", profile.0))
+        }
+
+        /// The catalog made for `profile`, if any.
+        pub fn made(&self, profile: ProfileId) -> Option<ProfileCatalog> {
+            self.made.lock().unwrap().get(&profile).cloned()
+        }
+
+        fn note(&self) {
+            self.threads
+                .lock()
+                .unwrap()
+                .push(std::thread::current().id());
+        }
+    }
+
+    impl CatalogSource for FakeSource {
+        fn ensure(&self, profile: Arc<Profile>) -> BoxFuture<'_, Result<ProfileCatalog, HubError>> {
+            Box::pin(async move {
+                self.note();
+                self.ensures.fetch_add(1, Ordering::SeqCst);
+                if let Some(pc) = self.made(profile.id) {
+                    return Ok(pc);
+                }
+                let path = self.cache_path(profile.id);
+                let opened = self
+                    .rt
+                    .spawn_blocking(move || {
+                        std::fs::create_dir_all(path.parent().expect("a folder")).ok();
+                        CacheStore::open(&path, Encryption::None, WriterId(2)).ok()
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                let cache = opened.map(|o| Arc::new(Mutex::new(o.store)));
+                let d = dialect(profile.engine);
+                let catalog = Arc::new(Catalog::new(Arc::new(ServerFacts::new(
+                    profile.engine,
+                    IdentCtx::new(d),
+                ))));
+                let publisher = catalog.publisher().ok_or(HubError::Shutdown)?;
+                let scope = parse_scope(if d == DialectId::Postgres { "@:*" } else { "*" }, d)
+                    .expect("the scope parses");
+                let database = profile.database.as_deref().map(Name::from);
+                let current = CurrentCtx {
+                    database: database.clone(),
+                    schema: match profile.engine {
+                        DbmsKind::Postgres => self.current_schema.as_deref().map(Name::from),
+                        DbmsKind::Sqlite => Some(Name::from("main")),
+                        _ => database,
+                    },
+                    ident: None,
+                };
+                let handle = Engine::start(EngineConfig {
+                    profile: profile.id,
+                    dbms: profile.engine,
+                    meta: Arc::new(Probe {
+                        inner: self.meta.clone(),
+                        threads: self.threads.clone(),
+                    }),
+                    introspector: Arc::new(self.intro.clone()),
+                    catalog: catalog.clone(),
+                    catalog_publisher: publisher,
+                    cache,
+                    levels: LevelPolicy::default(),
+                    scope,
+                    current,
+                    filters: Filters::default(),
+                    validate_every: None,
+                    limits: EngineLimits {
+                        save_debounce: Duration::from_millis(10),
+                        bulk_window: Duration::from_millis(10),
+                        fragment_window: Duration::from_millis(5),
+                        busy_retry: Duration::from_millis(10),
+                        ..EngineLimits::default()
+                    },
+                    runtime: self.rt.clone(),
+                });
+                let _ = handle.ready().await;
+                let pc = ProfileCatalog {
+                    catalog,
+                    handle,
+                    cache: CacheMode::Persistent {
+                        encrypted: false,
+                        rebuilt: None,
+                    },
+                };
+                self.made.lock().unwrap().insert(profile.id, pc.clone());
+                Ok(pc)
+            })
+        }
+
+        fn shutdown(&self, profile: ProfileId) -> BoxFuture<'_, ()> {
+            Box::pin(async move {
+                self.note();
+                let gone = self.made.lock().unwrap().remove(&profile);
+                if let Some(pc) = gone {
+                    pc.handle.shutdown();
+                    pc.handle.closed().await;
+                }
+            })
+        }
+
+        fn has_cache(&self, profile: ProfileId) -> bool {
+            self.note();
+            self.cache_path(profile).exists()
+        }
+    }
+}

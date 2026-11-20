@@ -3969,3 +3969,17 @@ hv-scope-save-data-unreadable = This connection's explorer settings file can't b
 hv-scope-save-data-failed = The schema scope couldn't be saved, so nothing was saved.
 # Surface 6 (Introspection level). A toast when a level could not be saved.
 hv-explorer-level-not-saved = The introspection level couldn't be saved.
+
+## m4-t24-live
+# Surface 5 (Context menus). The palette title of the node menu's "Copy name".
+hv-cmd-explorer-copy-name = Copy name
+# Surface 5 (Context menus). The palette title of "Hide objects like this".
+hv-cmd-explorer-hide-like-this = Hide objects like this
+# Surface 5 (Context menus). The palette title of "Show hidden objects".
+hv-cmd-explorer-show-hidden = Show hidden objects
+# Surface 5 (Context menus). The palette title of "Collapse all children".
+hv-cmd-explorer-collapse-children = Collapse all children
+# Surface 5 (Context menus). The palette title of "Introspection level" (opens the level list).
+hv-cmd-explorer-level-menu = Introspection level
+# Surface 5 (Context menus). The title of the disabled Modify… placeholder (never in the palette).
+hv-cmd-explorer-modify = Modify

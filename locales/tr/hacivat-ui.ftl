@@ -3599,3 +3599,17 @@ hv-scope-save-data-unreadable = Bu bağlantının gezgin ayarları dosyası okun
 hv-scope-save-data-failed = Şema kapsamı kaydedilemedi; hiçbir şey kaydedilmedi.
 # Review: PO
 hv-explorer-level-not-saved = Okuma düzeyi kaydedilemedi.
+
+## m4-t24-live
+# Review: PO
+hv-cmd-explorer-copy-name = Adı kopyala
+# Review: PO
+hv-cmd-explorer-hide-like-this = Benzer nesneleri gizle
+# Review: PO
+hv-cmd-explorer-show-hidden = Gizli nesneleri göster
+# Review: PO
+hv-cmd-explorer-collapse-children = Tüm alt öğeleri kapat
+# Review: PO
+hv-cmd-explorer-level-menu = Okuma düzeyi
+# Review: PO
+hv-cmd-explorer-modify = Değiştir
