@@ -1358,3 +1358,14 @@ case.
   DbmsKind, Vec<TrackedUnit>, RefreshInbox)`; nothing installed the stub, and Task 27 installs
   `for_run` in `RunService::chain_for`. The plan's cross-plan interface line for the sink reads
   with these constructors.
+
+## m4-t27 — the refresh sink per run
+
+- `ExecService::run_with_refresh(console, req, Option<CatalogRun>)` (named exception; `run` is
+  `run_with_refresh(.., None)`): with a `CatalogRun` (the profile coordinator's inbox, the
+  console's dialect and the classifier's reports of each unit) the run's auditor chain gains
+  `CatalogRefreshSink::for_run`, built with the run's own `UnitId`s, after the history sink.
+  A unit's text (the prepared final text) is read only for a savepoint name. A private console
+  still refreshes the catalog (nothing of the text is kept). `RunRequest` is unchanged, so no
+  literal of it moves. `hacivat_exec` re-exports `StmtKind` and `StmtReport` (ruling I2: the
+  app takes no `sql-safety` dependency).

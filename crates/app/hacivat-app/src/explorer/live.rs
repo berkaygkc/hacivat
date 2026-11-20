@@ -132,6 +132,9 @@ pub trait CatalogSource: Send + Sync + 'static {
     fn shutdown(&self, profile: ProfileId) -> BoxFuture<'_, ()>;
     /// Whether the profile has a cache file (blocking: a file stat).
     fn has_cache(&self, profile: ProfileId) -> bool;
+    // ## m4-t27-refresh-ui (named exception, ruling R-W5-11)
+    /// The `[metadata]` settings changed: catalogs made from now on use them (a lock, no I/O).
+    fn set_metadata(&self, _metadata: hacivat_settings::MetadataSettings) {}
 }
 
 /// The app's source: the hub and where the caches live.
@@ -154,7 +157,28 @@ impl CatalogSource for HubSource {
             .catalog_db(&profile.0.to_string(), u32::from(FORMAT_MAJOR))
             .exists()
     }
+
+    // ## m4-t27-refresh-ui (named exception, ruling R-W5-11)
+    fn set_metadata(&self, metadata: hacivat_settings::MetadataSettings) {
+        self.hub.set_metadata(metadata);
+    }
 }
+
+// ## m4-t27-refresh-ui (named exception, ruling R-W5-11)
+/// Settings › Metadata changed the background check or a cache cap: the next catalog made (the
+/// next connect) uses the saved values.
+pub fn metadata_changed(cx: &App) {
+    let Some(metadata) = cx.try_global::<AppState>().map(|s| s.settings.metadata) else {
+        return;
+    };
+    if let Some(source) = cx
+        .try_global::<CatalogHost>()
+        .and_then(|h| h.source.clone())
+    {
+        source.set_metadata(metadata);
+    }
+}
+// ## m4-t27-refresh-ui
 
 // ---- the host --------------------------------------------------------------------------------
 
@@ -173,6 +197,18 @@ pub struct LiveRow {
     pub live: bool,
     /// An encrypted cache exists that was not opened (the root's key glyph, PO-Q19).
     pub locked: bool,
+    // ## m4-t27-refresh-ui (named exception)
+    /// Changes of open transactions that wait for COMMIT, per namespace (mock 9's stamp).
+    pub after_commit: super::refresh_prompt::Changes,
+    /// Refresh after DDL marked the schema lists stale (`CoordEvent::Stale { scope: true }`):
+    /// a stale list is badged until it is read again.
+    pub scope_stale: bool,
+    /// A stale schema list was seen since `scope_stale` was set (review m-3: only a list that
+    /// goes from stale to read clears the mark, whichever channel came first).
+    pub scope_seen: bool,
+    /// Objects a state check found changed (not read again) or gone, for the namespace
+    /// generation it saw (mock 11's explorer tooltip; `super::stale`).
+    pub stale_objects: BTreeMap<ObjectKey, super::stale::StaleObject>,
 }
 
 /// The catalog of one profile, while open. `Opening` and `Closing` exist only while the
@@ -191,6 +227,9 @@ struct Sent {
     filters: Option<String>,
     levels: BTreeMap<ObjectKey, Level>,
     current: Option<(Option<String>, Option<String>)>,
+    // ## m4-t27-refresh-ui (named exception; T26 carry)
+    /// The user data handed to the overlays (virtual FKs, annotations, "Introspect live").
+    user_data: Option<Arc<hacivat_meta::userdata::ProfileUserData>>,
 }
 
 /// One profile's live state.
@@ -668,6 +707,11 @@ fn teardown(entry: &mut Entry) {
     row.progress = Arc::default();
     row.live = false;
     row.db_levels.clear();
+    // ## m4-t27-refresh-ui (named exception): the coordinator goes with the engine.
+    row.after_commit.clear();
+    row.scope_stale = false;
+    row.scope_seen = false;
+    row.stale_objects.clear();
     entry.row = Arc::new(row);
 }
 
@@ -698,6 +742,9 @@ fn kick(id: ProfileId, cx: &mut App) {
                     cx.update(|cx| opened(id, answer, cx));
                 }
                 Step::Close(source, rt) => {
+                    // ## m4-t27-refresh-ui (named exception): the coordinator goes with the
+                    // engine; what it owes waits for the next one.
+                    cx.update(|cx| super::refresh_prompt::catalog_closed(id, cx));
                     let rx = on_runtime(&rt, async move { source.shutdown(id).await });
                     let _ = rx.await;
                     cx.update(|cx| {
@@ -761,6 +808,10 @@ fn opened(id: ProfileId, answer: Result<ProfileCatalog, HubError>, cx: &mut App)
         CacheMode::Persistent { rebuilt: None, .. } => {}
     }
     let pump = Pump::start(id, &pc, cx);
+    // ## m4-t27-refresh-ui (named exception): the profile's refresh-after-DDL coordinator.
+    if let Some(p) = profile(id, cx) {
+        super::refresh_prompt::catalog_opened(id, pc.handle.clone(), p.engine, cx);
+    }
     {
         let host = cx.default_global::<CatalogHost>();
         let entry = host.entry(id);
@@ -809,6 +860,8 @@ fn connect_engine(id: ProfileId, cx: &mut App) {
     entry.row = Arc::new(row);
     drop(pc.handle.on_connect());
     bump(cx);
+    // ## m4-t27-refresh-ui (named exception, T21 m6): refreshes owed for want of a connection.
+    super::refresh_prompt::reconnected(id, cx);
 }
 
 /// Whether `id`'s root row is expanded in the explorer.
@@ -834,6 +887,9 @@ pub fn on_live_state(id: ProfileId, state: &LiveState, cx: &mut App) {
                 connect_engine(id, cx);
                 forward(id, cx);
                 follow_session(id, cx);
+                // ## m4-t27-refresh-ui (named exception, T21 m6): a reconnect that kept the
+                // engine (connect_engine did nothing) runs what the coordinator owes.
+                super::refresh_prompt::reconnected(id, cx);
             } else {
                 open(id, cx);
             }
@@ -992,6 +1048,25 @@ fn forward(id: ProfileId, cx: &mut App) {
             }
         }
         next.levels = data.level_overrides.clone();
+    }
+    // ## m4-t27-refresh-ui (named exception; T26 carry): the overlays' user layers and the
+    // persisted "Introspect live" choices (`CatalogChange::SetUserData`).
+    // Only what the overlays read, and only when it changed (none sent counts as empty), so a
+    // profile without virtual foreign keys, annotations or live choices publishes nothing.
+    let overlay_part = |d: &hacivat_meta::userdata::ProfileUserData| {
+        (
+            d.virtual_fks.clone(),
+            d.annotations.clone(),
+            d.live_system.clone(),
+        )
+    };
+    let before = sent
+        .user_data
+        .as_deref()
+        .map_or_else(|| overlay_part(&Default::default()), overlay_part);
+    if overlay_part(&data) != before {
+        h.set_user_data(data.clone());
+        next.user_data = Some(data.clone());
     }
     if next != sent {
         cx.default_global::<CatalogHost>().entry(id).sent = next;
@@ -1330,12 +1405,31 @@ fn flush(id: ProfileId, cx: &mut App) {
             }
         }
         // A pending deletion of a namespace that is no longer stale was answered.
+        // ## m4-t27-refresh-ui (named exception, R-W4-8): a `Partial` namespace carries no stale
+        // bit, so its held deletion stays until the engine withdraws it.
         row.pending.retain(|ns, _| {
             matches!(
                 snap.states.get(&ContainerKey::Namespace(ns.clone())),
-                Some(LoadState::Loaded { stale: true, .. })
+                Some(LoadState::Loaded { stale: true, .. } | LoadState::Partial { .. })
             )
         });
+        // ## m4-t27-refresh-ui (named exception): a schema list read again clears the mark
+        // (review m-3: once a stale list was seen, whichever channel came first).
+        if row.scope_stale {
+            if any_stale_list(&snap) {
+                row.scope_seen = true;
+            } else if row.scope_seen {
+                row.scope_stale = false;
+                row.scope_seen = false;
+            }
+        }
+        // Review m-8: a stale-object mark of a namespace published since is dropped.
+        if changed && !row.stale_objects.is_empty() {
+            row.stale_objects.retain(|k, m| {
+                snap.find(k)
+                    .is_some_and(|h| h.ns.generation() == m.generation())
+            });
+        }
         // Fix round 1 (m-5): only when the catalog moved (a level change re-reads, so it moves).
         if changed {
             row.db_levels = db_levels(&pc, &snap);
@@ -1355,6 +1449,73 @@ fn flush(id: ProfileId, cx: &mut App) {
         super::mass_drop::ask(id, ns, count, cx);
     }
 }
+
+// ## m4-t27-refresh-ui (named exception)
+/// Whether a schema list of `snap` is loaded and marked stale.
+fn any_stale_list(snap: &CatalogSnapshot) -> bool {
+    snap.states.iter().any(|(k, s)| {
+        matches!(k, ContainerKey::SchemaList { .. })
+            && matches!(s, LoadState::Loaded { stale: true, .. })
+    })
+}
+
+/// Sets what refresh after DDL shows on `id`'s rows: the namespaces waiting for COMMIT and,
+/// when `scope_stale` is given, the stale schema-list mark.
+pub fn set_refresh_marks(
+    id: ProfileId,
+    after_commit: Option<super::refresh_prompt::Changes>,
+    scope_stale: Option<bool>,
+    cx: &mut App,
+) {
+    let host = cx.default_global::<CatalogHost>();
+    let entry = host.entry(id);
+    let mut row = (*entry.row).clone();
+    if let Some(a) = after_commit {
+        row.after_commit = a;
+    }
+    if let Some(s) = scope_stale {
+        // Review m-3: the engine's stale publish may have come first.
+        let seen = s
+            && match &entry.open {
+                Open::Ready(pc) => any_stale_list(&pc.catalog.current()),
+                _ => false,
+            };
+        row.scope_seen |= seen;
+        if !s {
+            row.scope_seen = false;
+        }
+        row.scope_stale = s;
+    }
+    if row != *entry.row {
+        entry.row = Arc::new(row);
+        host.generation += 1;
+    }
+}
+/// Sets (`Some`) or clears what a state check found about `key` of `id` (`super::stale`).
+pub fn set_stale_object(
+    id: ProfileId,
+    key: ObjectKey,
+    mark: Option<super::stale::StaleObject>,
+    cx: &mut App,
+) {
+    let host = cx.default_global::<CatalogHost>();
+    let entry = host.entry(id);
+    if entry.row.stale_objects.get(&key) == mark.as_ref() {
+        return;
+    }
+    let mut row = (*entry.row).clone();
+    match mark {
+        Some(m) => {
+            row.stale_objects.insert(key, m);
+        }
+        None => {
+            row.stale_objects.remove(&key);
+        }
+    }
+    entry.row = Arc::new(row);
+    host.generation += 1;
+}
+// ## m4-t27-refresh-ui
 
 /// The automatic level of each database of `snap` with at least one loaded schema (m8).
 fn db_levels(pc: &ProfileCatalog, snap: &CatalogSnapshot) -> BTreeMap<Name, (Level, usize)> {

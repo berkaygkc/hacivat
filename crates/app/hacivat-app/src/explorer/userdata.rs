@@ -223,6 +223,35 @@ pub fn set_scope(
     update(profile, move |d| d.scope = scope.clone(), cx)
 }
 
+// ## m4-t27-refresh-ui (named exception, T26 carry: persist "Introspect live")
+/// The system namespaces of `profile` the user chose to introspect live (Task 26's
+/// `Overlays::live_system`); empty until the profile's file was read.
+pub fn live_system(profile: ProfileId, cx: &App) -> Vec<hacivat_meta::NsKey> {
+    get(profile, cx).map_or_else(Vec::new, |d| d.live_system.clone())
+}
+
+/// Remembers (`live`) or forgets the "Introspect live" choice for system namespace `ns` of
+/// `profile`, kept sorted and without duplicates.
+pub fn set_live_system(
+    profile: ProfileId,
+    ns: hacivat_meta::NsKey,
+    live: bool,
+    cx: &mut App,
+) -> Task<Result<Arc<ProfileUserData>, UserDataError>> {
+    update(
+        profile,
+        move |d| {
+            d.live_system.retain(|k| *k != ns);
+            if live {
+                d.live_system.push(ns.clone());
+                d.live_system.sort();
+            }
+        },
+        cx,
+    )
+}
+// ## m4-t27-refresh-ui
+
 fn bump(profile: ProfileId, cx: &mut App) -> u64 {
     let seq = cx
         .default_global::<UserData>()

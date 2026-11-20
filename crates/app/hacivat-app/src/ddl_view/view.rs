@@ -578,6 +578,8 @@ impl DdlView {
             Staleness::Changed => read,
             Staleness::Dropped | Staleness::Unknown => false,
         };
+        // ## m4-t27-refresh-ui (named exception, mock 11): the explorer row says it too.
+        crate::explorer::stale::record(self.profile, &self.key, verdict, read, &snap, cx);
         self.freshness = match (decided, self.still_shown(&snap, cx)) {
             (true, Some(false)) => Freshness::Changed,
             (true, Some(true)) if self.vouched(&snap) => Freshness::Current,

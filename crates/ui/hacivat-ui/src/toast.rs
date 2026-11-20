@@ -82,6 +82,10 @@ pub struct Toast {
     /// both sticky slots taken, the oldest sticky toast that is not urgent waits again (first
     /// in line) and this one shows.
     pub urgent: bool,
+    // ## m4-t27-refresh-ui (named exception, NOTES M4 §9: Escape on the Ask answers Not now)
+    /// Runs when the user dismisses the toast (Escape or its ✕), never when an action runs, its
+    /// TTL ends or the host dismisses it.
+    pub on_dismiss: Option<ActionFn>,
 }
 
 /// A button on a toast (M2a, NOTES surface 4).
@@ -107,6 +111,8 @@ impl Toast {
             data: None,
             icon: None,
             urgent: false,
+            // ## m4-t27-refresh-ui (named exception)
+            on_dismiss: None,
         }
     }
 
@@ -307,6 +313,21 @@ impl ToastQueue {
         if let Some(handle) = restore {
             window.focus(&handle, cx);
         }
+    }
+
+    // ## m4-t27-refresh-ui (named exception)
+    /// The user dismissed `id` (Escape, ✕): its `on_dismiss` runs, then [`Self::dismiss_in`].
+    fn dismiss_by_user(window: &mut Window, cx: &mut App, id: u64) {
+        let hook = cx.try_global::<ToastQueue>().and_then(|q| {
+            q.visible
+                .iter()
+                .find(|e| e.id == id)
+                .and_then(|e| e.toast.on_dismiss.clone())
+        });
+        if let Some(hook) = hook {
+            hook(window, cx);
+        }
+        Self::dismiss_in(window, cx, id);
     }
 
     fn start_timer(cx: &mut App, id: u64, ttl: Duration) {
@@ -585,7 +606,8 @@ impl IntoElement for ToastStack {
                             let stroke = &event.keystroke;
                             if stroke.key == "escape" && !stroke.modifiers.modified() {
                                 cx.stop_propagation();
-                                ToastQueue::dismiss_in(window, cx, id);
+                                // ## m4-t27-refresh-ui (named exception)
+                                ToastQueue::dismiss_by_user(window, cx, id);
                             }
                         });
                     }
@@ -606,7 +628,10 @@ impl IntoElement for ToastStack {
                             .icon(IconName::X)
                             .focus_handle(shown.dismiss_focus)
                             .inert(inert)
-                            .on_click(move |_, window, cx| ToastQueue::dismiss_in(window, cx, id)),
+                            .on_click(move |_, window, cx| {
+                                // ## m4-t27-refresh-ui (named exception)
+                                ToastQueue::dismiss_by_user(window, cx, id)
+                            }),
                         );
                     // Announced by screen readers: the node's value changes with a live region
                     // (macOS speaks only valued, live nodes).

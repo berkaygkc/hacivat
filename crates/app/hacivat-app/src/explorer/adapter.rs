@@ -1470,6 +1470,17 @@ impl ExplorerModel {
         row.meta = input.meta.clone();
         row.a11y_description = input.a11y.clone();
         row.tooltip = input.tooltip.clone();
+        // ## m4-t27-refresh-ui (named exception, T21 carry): where schemas are top level
+        // (MySQL/MariaDB databases, SQLite files) the root holds the stale schema list's badge.
+        let top_level = self.inner.layouts[p]
+            .as_deref()
+            .is_some_and(|l| l.level != DbLevel::Database);
+        if top_level && self.scope_stale(p, None) {
+            let mut words: Vec<SharedString> = row.a11y_description.take().into_iter().collect();
+            let name = input.profile.name.clone();
+            self.mark_scope_stale(&mut row, &mut words, &name);
+            row.a11y_description = join_words(&words);
+        }
         row
     }
 
@@ -1555,17 +1566,23 @@ impl ExplorerModel {
                 label: self.t("hv-explorer-add-scope"),
             });
         }
-        if let Some(badge) = badges::namespace_badge(entry.state.as_ref()) {
+        // ## m4-t24-live (named exception): a deletion a background pass held says so.
+        let held = self.inner.inputs.profiles[p]
+            .live
+            .as_deref()
+            .and_then(|l| l.pending.get(&entry.key).copied());
+        // ## m4-t27-refresh-ui (named exception, R-W4-8): a held deletion badges its namespace
+        // "out of date" whatever its load state (a `Partial` namespace carries no stale bit).
+        let badge = if held.is_some() {
+            Some(Badge::OutOfDate)
+        } else {
+            badges::namespace_badge(entry.state.as_ref())
+        };
+        if let Some(badge) = badge {
             let word = self.t(badge.message_id());
             row.badge = Some(word.clone());
             row.badge_glyph = Some(badge.glyph());
-            // ## m4-t24-live (named exception): a deletion a background pass held says so.
-            let held = self.inner.inputs.profiles[p]
-                .live
-                .as_deref()
-                .and_then(|l| l.pending.get(&entry.key).copied());
             row.tooltip = Some(match (badge, held) {
-                (Badge::Partial, _) => self.t("hv-explorer-partial-title"),
                 (_, Some(count)) => self.t_args(
                     "hv-metadata-mass-pending-tip",
                     vec![
@@ -1573,12 +1590,43 @@ impl ExplorerModel {
                         ("schema", ArgValue::Text(entry.name().to_string())),
                     ],
                 ),
+                (Badge::Partial, None) => self.t("hv-explorer-partial-title"),
                 _ => self.t_args(
                     "hv-explorer-stale-tip",
                     vec![("schema", ArgValue::Text(entry.name().to_string()))],
                 ),
             });
             words.push(word);
+            // ## m4-t27-refresh-ui (review m-8): a held deletion on a `Partial` namespace keeps
+            // "partial" in the accessible words.
+            if held.is_some() && matches!(entry.state, Some(LoadState::Partial { .. })) {
+                words.push(self.t(Badge::Partial.message_id()));
+            }
+        }
+        // ## m4-t27-refresh-ui (named exception, mock 9): changes of an open transaction wait
+        // for COMMIT: the 7 px amber stamp on the namespace, the count in its tooltip.
+        // Fix round (R-W5-10): a count of changed objects, or the schema for a schema-wide one.
+        if let Some(change) = self.inner.inputs.profiles[p]
+            .live
+            .as_deref()
+            .and_then(|l| l.after_commit.get(&entry.key).copied())
+        {
+            row.meta_mark = Some(MetaMark::Running);
+            let tip = match change {
+                super::refresh_prompt::NsChange::Objects(count) => self.t_args(
+                    "hv-metadata-after-commit-tip",
+                    vec![("count", ArgValue::Count(u64::from(count)))],
+                ),
+                super::refresh_prompt::NsChange::Whole => self.t_args(
+                    "hv-metadata-after-commit-tip-schema",
+                    vec![("schema", ArgValue::Text(entry.name().to_string()))],
+                ),
+            };
+            row.tooltip = Some(match row.tooltip.take() {
+                Some(t) => format!("{t} {tip}").into(),
+                None => tip,
+            });
+            words.push(self.t("hv-metadata-after-commit"));
         }
         // ## m4-t20-levels (named exception): the level pill (set here, inherited from the
         // database, or the level the schema was read at).
@@ -1635,9 +1683,75 @@ impl ExplorerModel {
             // ## m4-t24-live (named exception): the engine's automatic level (T19 carry, m8).
             row.pill = Some(self.pill(level, &level_pill::PillSource::Auto { objects }));
         }
+        // ## m4-t27-refresh-ui (named exception, T21 carry): DDL that changed the schema list
+        // was not refreshed (Ask, Never): "out of date" until the list is read again.
+        if db.in_scope && self.scope_stale(p, Some(&db.name)) {
+            self.mark_scope_stale(&mut row, &mut words, &db.name);
+        }
         row.a11y_description = join_words(&words);
         row
     }
+
+    // ## m4-t27-refresh-ui (named exception, mock 11)
+    /// The DDL view's sentence as the tooltip of an object a state check found changed or gone,
+    /// while the namespace shown is the one the check saw.
+    fn mark_stale_object(&self, p: usize, ns: &NamespaceSnapshot, idx: u32, row: &mut TreeRowData) {
+        let Some(live) = self.inner.inputs.profiles[p].live.as_deref() else {
+            return;
+        };
+        if live.stale_objects.is_empty() {
+            return;
+        }
+        let Some(key) = ns.object_key(idx) else {
+            return;
+        };
+        let Some(mark) = super::stale::current_mark(&live.stale_objects, &key, ns.generation())
+        else {
+            return;
+        };
+        let name = ns.objs()[idx as usize].name().to_string();
+        let tip = self.t_args(mark.message_id(), vec![("name", ArgValue::Text(name))]);
+        // Review m-4: the trust tip (invisible characters, a broken reference) stays.
+        row.tooltip = Some(match row.tooltip.take() {
+            Some(t) => format!("{tip} {t}").into(),
+            None => tip.clone(),
+        });
+        let mut words: Vec<SharedString> = row.a11y_description.take().into_iter().collect();
+        words.push(tip);
+        row.a11y_description = join_words(&words);
+    }
+
+    // ## m4-t27-refresh-ui (named exception, T21 carry)
+    /// Whether the coordinator marked the schema list of `database` (`None`: the server's)
+    /// stale and it was not read again since.
+    fn scope_stale(&self, p: usize, database: Option<&Name>) -> bool {
+        let input = &self.inner.inputs.profiles[p];
+        input.live.as_deref().is_some_and(|l| l.scope_stale)
+            && input.catalog.as_deref().is_some_and(|c| {
+                matches!(
+                    c.states.get(&ContainerKey::schema_list(database)),
+                    Some(LoadState::Loaded { stale: true, .. })
+                )
+            })
+    }
+
+    /// The "out of date" badge of a stale schema list on `row` (named `name`).
+    fn mark_scope_stale(&self, row: &mut TreeRowData, words: &mut Vec<SharedString>, name: &str) {
+        let word = self.t(Badge::OutOfDate.message_id());
+        row.badge = Some(word.clone());
+        row.badge_glyph = Some(Badge::OutOfDate.glyph());
+        let tip = self.t_args(
+            "hv-explorer-stale-tip",
+            vec![("schema", ArgValue::Text(name.to_string()))],
+        );
+        // Review m-4: the "N of M schemas" (or the root's own) tip stays.
+        row.tooltip = Some(match row.tooltip.take() {
+            Some(t) => format!("{tip} {t}").into(),
+            None => tip,
+        });
+        words.push(word);
+    }
+    // ## m4-t27-refresh-ui
 
     // ## m4-t20-levels (named exception)
     /// A level pill, its words from Fluent.
@@ -1695,8 +1809,10 @@ pub fn compile_view_filter(
     if let Ok(f) = parse_filter(text, dialect, FilterRole::View) {
         return Some(f);
     }
-    let good: Vec<&str> = text
-        .split("||")
+    // ## m4-t27-refresh-ui (named exception, T24 residual nit): split as the grammar does, so a
+    // `||` inside a hand-written `{…}` regex never splits its item.
+    let good: Vec<String> = hacivat_introspect::filter::split_items(text)
+        .into_iter()
         .filter(|item| parse_filter(item, dialect, FilterRole::View).is_ok())
         .collect();
     if good.is_empty() {
@@ -1775,7 +1891,12 @@ impl TreeModel for ExplorerModel {
                 }
                 row
             }
-            Node::Object { ns, idx, .. } => self.object_row(&ns, idx),
+            // ## m4-t27-refresh-ui (named exception, mock 11): a stale object says so.
+            Node::Object { p, ns, idx } => {
+                let mut row = self.object_row(&ns, idx);
+                self.mark_stale_object(p, &ns, idx, &mut row);
+                row
+            }
             Node::Contributed { node, .. } => node.row.clone(),
         })
     }

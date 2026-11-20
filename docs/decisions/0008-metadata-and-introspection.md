@@ -2582,6 +2582,19 @@ Task 15b (W5; R-M4-29, R-M4-30; carries T16b m-5/m-7, T17b m-6, R-W3-11, R-W4-3)
   `// ## m4-t25-ddl-view` lines in Task 15's `engine/mod.rs` and `engine/scheduler.rs`; the
   check itself, its re-reads and its marks are unchanged.
 
+## m4-t27 — metadata UI
+
+- The app wiring of HV-INTRO-12 and the Settings › Metadata section are recorded in ADR 0007
+  `## m4-t27 — metadata UI`. Named exceptions here: `ProfileUserData::live_system` (T26 carry:
+  the system namespaces the user chose to introspect live, serde default, omitted when empty, so
+  older files read unchanged) and `filter::split_items` (the grammar's own item split, public
+  for the view filter's fallback).
+- Fix round: the Ask counts changed objects (ruling R-W5-10) through
+  `RefreshCoordinator::asked(id)` (named exception in `refresh_coord.rs`); `CatalogHub` gains
+  `set_metadata`/`metadata`/`made_with` (ruling R-W5-11, named exception in `hub.rs`);
+  `ProfileUserData` keeps unknown keys (`extra`, `ExtraValue`; ruling R-W5-12). See ADR 0007
+  `## m4-t27`.
+
 ## m4-t26 — overlays
 
 Task 26 layers the shipped system catalogs and the virtual foreign keys over `SnapshotView`

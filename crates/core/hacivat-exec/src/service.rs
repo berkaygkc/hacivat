@@ -57,7 +57,7 @@ use crate::status::RunStatus;
 use crate::units::ExecUnit;
 use hacivat_session::session::{ExecError, ExecErrorKind};
 // ## m3b-t16-run-service
-use crate::audit::{AuditorChain, HistorySink, HistoryUnit};
+use crate::audit::{AuditorChain, CatalogRefreshSink, HistorySink, HistoryUnit};
 use crate::gate::{ConfirmAnswer, GateDecision, GateReason};
 use crate::history::HistoryRecord;
 use crate::observer::{Evictions, MAX_RESULT_SETS, PlannedUnit};
@@ -443,6 +443,19 @@ impl ExecService {
     /// Runs `req` on `console`: one `Request::Run` with every unit in order. Never blocks; it
     /// may be called from any thread. A request without units sends nothing and ends at once.
     pub fn run(&self, console: &SessionHandle, req: RunRequest) -> RunTicket {
+        self.run_with_refresh(console, req, None)
+    }
+
+    // ## m4-t27-refresh-ui (named exception: T21 carry "the sink into `chain_for`")
+    /// [`ExecService::run`], with the refresh-after-DDL sink of the run's profile installed in
+    /// its auditor chain when `refresh` is given (HV-INTRO-12; the app passes its profile's
+    /// coordinator inbox and the classifier's reports of each unit).
+    pub fn run_with_refresh(
+        &self,
+        console: &SessionHandle,
+        req: RunRequest,
+        refresh: Option<CatalogRun>,
+    ) -> RunTicket {
         let run = RunId(self.next_run.fetch_add(1, Ordering::SeqCst));
         // ## m3b-t16-run-service: the request's plan, checked (the module docs).
         // ## m3b-t26-prod-unlock (fix round 1, A-M2): the plan-less path only where a test seam
@@ -509,7 +522,11 @@ impl ExecService {
         };
         let empty = units.is_empty();
         let policy = req.policy;
-        let chain = self.chain_for(console, run, &req);
+        let mut chain = self.chain_for(console, run, &req);
+        // ## m4-t27-refresh-ui (named exception)
+        if let Some(refresh) = refresh {
+            chain.push_sync(Box::new(refresh.sink(console, run, &req)));
+        }
         let (observer, rx) = ExecObserver::new(RunParts {
             console: req.console,
             run,
@@ -616,6 +633,47 @@ impl ExecService {
         };
         chain.push_sink(tx.clone(), move |ev| sink.map(ev));
         chain
+    }
+}
+
+// ## m4-t27-refresh-ui (named exception: T21 carry "the sink into `chain_for`")
+/// What a run tells its profile's refresh coordinator (HV-INTRO-12): the coordinator's inbox,
+/// the console's dialect, and the classifier's reports of each unit of the request, in unit
+/// order (`None` for a unit without a report: the run is then opaque, refresh more, never
+/// less).
+#[derive(Debug, Clone)]
+pub struct CatalogRun {
+    pub inbox: hacivat_introspect::refresh_coord::RefreshInbox,
+    pub dialect: sql_dialect::DialectId,
+    pub reports: Vec<Option<Vec<sql_safety::StmtReport>>>,
+}
+
+impl CatalogRun {
+    /// The run's sink: one tracked unit per unit of `req` (its text read only for a savepoint
+    /// name, never kept).
+    fn sink(self, console: &SessionHandle, run: RunId, req: &RunRequest) -> CatalogRefreshSink {
+        let units = req
+            .units
+            .iter()
+            .enumerate()
+            .map(|(i, u)| {
+                let text = req
+                    .prepared
+                    .as_ref()
+                    .and_then(|p| p.get(i))
+                    .map_or_else(|| u.text.clone(), |p| p.final_text.clone());
+                hacivat_introspect::refresh_coord::TrackedUnit::new(
+                    UnitId {
+                        run,
+                        ordinal: u32::try_from(i).unwrap_or(u32::MAX),
+                    },
+                    self.reports.get(i).and_then(|r| r.as_deref()),
+                    self.dialect,
+                    &text,
+                )
+            })
+            .collect();
+        CatalogRefreshSink::for_run(console, req.engine, units, self.inbox)
     }
 }
 

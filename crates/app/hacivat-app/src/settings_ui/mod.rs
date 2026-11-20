@@ -123,6 +123,8 @@ pub struct SettingsPage {
     limit_shown_text: String,
     /// The note after a typed size was set to a bound.
     limit_note: Option<Clamped>,
+    // ## m4-t27-refresh-ui (named lines): the Metadata section's own controls.
+    metadata: metadata::MetadataControls,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -183,6 +185,8 @@ impl SettingsPage {
         let unit_closed = cx.observe_in(&limit_unit, window, |this, _, window, cx| {
             this.settle_limit(window, cx)
         });
+        // ## m4-t27-refresh-ui (named lines)
+        let metadata = metadata::MetadataControls::new(window, cx);
         Self {
             search,
             query: String::new(),
@@ -194,6 +198,8 @@ impl SettingsPage {
             limit_shown: None,
             limit_shown_text: String::new(),
             limit_note: None,
+            // ## m4-t27-refresh-ui (named lines)
+            metadata,
             _subscriptions: vec![
                 subscription,
                 limit_events,
@@ -203,6 +209,21 @@ impl SettingsPage {
                 unit_closed,
             ],
         }
+    }
+
+    // ## m4-t27-refresh-ui (named lines; the M3c carry m3c.md §8.1, T43b fix m5, P-M4-18)
+    /// Shows `section`, as a click on its navigation item does (the search is cleared).
+    pub fn show_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        if section == Section::Metadata {
+            metadata::section_shown(cx);
+        }
+        self.section = section;
+        self.query.clear();
+        self.search.update(cx, |input, cx| {
+            input.set_value("");
+            cx.notify();
+        });
+        cx.notify();
     }
 
     // ## m3b-t42-settings
@@ -391,14 +412,9 @@ impl SettingsPage {
                 .cursor_pointer()
                 .track_focus(&handle)
                 .tab_stop(true)
+                // ## m4-t27-refresh-ui (named lines, P-M4-18)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.section = section;
-                    this.query.clear();
-                    this.search.update(cx, |input, cx| {
-                        input.set_value("");
-                        cx.notify();
-                    });
-                    cx.notify();
+                    this.show_section(section, cx);
                 }))
                 .child(
                     Label::new(name, TextSource::Fluent, t.type_ramp.body, ink.to_hsla())
@@ -440,6 +456,10 @@ impl SettingsPage {
             .gap(px(t.spacing.md));
         if key == MAX_VALUE_BYTES {
             line = line.children(self.value_limit_controls());
+        } else if let Some(controls) = self.metadata.control(key, cx) {
+            // ## m4-t27-refresh-ui (named lines): the Metadata section's selects, fields and
+            // button.
+            line = line.children(controls);
         } else {
             line = line.child(segmented_row(key, settings, cx));
         }
@@ -476,6 +496,21 @@ impl SettingsPage {
             MAX_VALUE_BYTES => {
                 if let Some(clamped) = self.limit_note {
                     control = control.child(clamp_note(clamped, theme, cx));
+                }
+            }
+            // ## m4-t27-refresh-ui (named lines): the active console's connection and its
+            // cache size.
+            rows::CLEAR_CACHE => {
+                if let Some(note) = self.metadata.clear_note(cx) {
+                    control = control.child(
+                        paragraph(
+                            note,
+                            TextSource::Fluent,
+                            t.type_ramp.caption,
+                            c.text_2.to_hsla(),
+                        )
+                        .id("settings-row-note-metadata.clear_cache"),
+                    );
                 }
             }
             _ => {}
@@ -670,6 +705,8 @@ impl Render for SettingsPage {
             .unwrap_or_default();
         // ## m3b-t42-settings
         self.follow_saved_limit(cx);
+        // ## m4-t27-refresh-ui (named lines)
+        self.metadata.follow(&settings, cx);
         let keys = self.visible_keys(cx);
         let all = settings_rows();
         let mut list = div()
@@ -838,16 +875,9 @@ pub mod fixtures {
 
     /// Shows `section`, as a click on its navigation item does (the search is cleared).
     pub fn show_section(section: Section, cx: &mut App) {
+        // ## m4-t27-refresh-ui (named lines, P-M4-18): the navigation's own handler.
         if let Some(page) = open_page(cx) {
-            page.update(cx, |p, cx| {
-                p.section = section;
-                p.query.clear();
-                p.search.update(cx, |input, cx| {
-                    input.set_value("");
-                    cx.notify();
-                });
-                cx.notify();
-            });
+            page.update(cx, |p, cx| p.show_section(section, cx));
         }
     }
 

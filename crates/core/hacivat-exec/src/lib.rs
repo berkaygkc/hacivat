@@ -87,3 +87,7 @@ pub use sql_safety::changes_context;
 // ## m3b-t24-exec-ui (fix round 2)
 pub use sql_safety::carried_switches;
 pub use units::resolve_units_in;
+// ## m4-t27-refresh-ui (named exception: re-exports only; ruling I2: the reports a run hands its
+// refresh coordinator come through here)
+pub use service::CatalogRun;
+pub use sql_safety::{StmtKind, StmtReport};
