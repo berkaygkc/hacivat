@@ -175,13 +175,16 @@ async fn keep_cached_after_a_fragment_and_a_later_pass_withdraws() {
         LoadState::Loaded { stale: false, .. }
     ));
     // Held again, then a user's own pass of the namespace replaces it: the prompt goes.
+    // ## m4-t22-freshness (named exception; ruling R-W4-9): after "Keep cached" only the
+    // user's refresh is held again (background passes keep the kept objects).
     let mut events = r.handle.events();
     bounded(
         r.handle
-            .refresh(Target::Namespace(n.clone()), Trigger::Background),
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
     )
     .await
     .unwrap();
+    assert!(r.handle.pending_confirmation(&n).is_some(), "held again");
     r.fake.put_ns(n.clone(), FakeIntrospector::tables(30));
     bounded(
         r.handle

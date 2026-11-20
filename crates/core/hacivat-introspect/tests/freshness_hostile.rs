@@ -318,3 +318,140 @@ async fn h6_mysql_server_namespace_validation_does_not_fail() {
         "the MySQL server namespace cannot be validated: {got:?}"
     );
 }
+
+// ## m4-t22-freshness (fix round 2: the RR-1 probe, adopted; ruling R-W4-9)
+
+fn table_names(r: &Rig, n: &NsKey) -> Vec<String> {
+    let s = r.catalog.current();
+    let mut v: Vec<String> = s.namespaces.get(n).map_or(Vec::new(), |a| {
+        a.children(0)
+            .filter(|(_, o)| o.kind() == ObjectKind::Table)
+            .map(|(_, o)| o.name().to_string())
+            .collect()
+    });
+    v.sort();
+    v
+}
+
+/// R-W4-9: after "Keep cached", background reads still bring other changes (a new table), the
+/// kept objects stay, and the user is not asked again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn h7_keep_cached_does_not_freeze_the_namespace() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let n = pg_ns("db", "public");
+    let fake = FakeIntrospector::default();
+    fake.put_ns(n.clone(), FakeIntrospector::tables(40));
+    let (r, hand) = rig_with_clock(
+        fake,
+        RigOpts {
+            validate_every: Some(TEN_MIN),
+            ..RigOpts::default()
+        },
+    );
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
+    let round = async |by: Duration| {
+        let before = r.meta.tx_checks.load(SeqCst);
+        hand.advance(by);
+        bounded(wait_until(Duration::from_secs(60), || {
+            r.meta.tx_checks.load(SeqCst) > before
+        }))
+        .await;
+        idle(&r.handle).await;
+    };
+    let mut events = r.handle.events();
+    r.fake.edit_ns(&n, |s| {
+        s.objects
+            .retain(|o| o.name[1..].parse::<usize>().unwrap() >= 22)
+    });
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
+    assert!(r.handle.pending_confirmation(&n).is_some(), "22/40 held");
+    bounded(r.handle.confirm_pending(n.clone(), false))
+        .await
+        .unwrap();
+    idle(&r.handle).await;
+    assert_eq!(table_names(&r, &n).len(), 40, "kept");
+    // A new table appears on the server; the kept ones stay gone.
+    r.fake.edit_ns(&n, |s| {
+        let mut extra = FakeIntrospector::tables(41).pop().unwrap();
+        extra.name = "t_new".into();
+        extra.version += 1000;
+        s.objects.push(extra);
+    });
+    let mut asks = 0;
+    for _ in 0..3 {
+        round(TEN_MIN).await;
+        while let Ok(e) = events.try_recv() {
+            if format!("{e:?}").contains("Pending") {
+                asks += 1;
+            }
+        }
+    }
+    let names = table_names(&r, &n);
+    assert!(
+        names.contains(&"t_new".to_string()),
+        "a kept set freezes every background update of the namespace"
+    );
+    assert_eq!(names.len(), 41, "the 22 kept tables stay: {names:?}");
+    assert_eq!(r.handle.pending_confirmation(&n), None, "not asked again");
+    assert_eq!(asks, 0);
+    // A drop outside the kept set is a background drop like any other (counted, applied).
+    r.fake
+        .edit_ns(&n, |s| s.objects.retain(|o| &*o.name != "t39"));
+    round(TEN_MIN).await;
+    let names = table_names(&r, &n);
+    assert!(!names.contains(&"t39".to_string()), "{names:?}");
+    assert_eq!(names.len(), 40);
+    // The user's refresh ends the keep: the kept tables go (held by the per-pass guard: 22 of
+    // 40, so the user answers "Remove from cache").
+    bounded(
+        r.handle
+            .refresh(Target::Namespace(n.clone()), Trigger::User),
+    )
+    .await
+    .unwrap();
+    if r.handle.pending_confirmation(&n).is_some() {
+        bounded(r.handle.confirm_pending(n.clone(), true))
+            .await
+            .unwrap();
+    }
+    assert_eq!(table_names(&r, &n).len(), 18);
+}
+
+/// Fix round 2 minor: MySQL before 8.0 has no R-M4-39 marker path, so its arena is never
+/// vouched for, whatever its watermark says.
+#[test]
+fn mysql_before_8_0_is_never_vouched_for() {
+    let mark = StateMark::MyTable {
+        created: 1_000_000,
+        trigger_max: 0,
+        trigger_count: 0,
+    };
+    let mysql = MySqlIntrospector {
+        flavor: DbmsKind::MySql,
+    };
+    let at = |version: &str| {
+        mysql_arena(
+            Watermark::MyTime {
+                at_utc_micros: 9_000_000_000,
+                server_uuid: name("u"),
+                version: name(version),
+                priv_hash: 1,
+            },
+            mark,
+        )
+    };
+    assert_eq!(mysql.cached_check(&at("5.7.44-log")), None);
+    assert_eq!(mysql.cached_check(&at("")), None);
+    assert!(mysql.cached_check(&at("8.0.40")).is_some());
+    assert!(mysql.cached_check(&at("8.4.3")).is_some());
+}

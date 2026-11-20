@@ -373,6 +373,14 @@ pub fn cached_check(snap: &NamespaceSnapshot, flavor: hacivat_proto::DbmsKind) -
     else {
         return None;
     };
+    // MySQL before 8.0 has no R-M4-39 marker path (`incremental_supported`): never vouched.
+    let major = version
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|m| m.parse::<u32>().ok());
+    if major.is_none_or(|m| m < 8) {
+        return None;
+    }
     let marks = top_marks_of(snap);
     let mut c = ns_check(&marks);
     if marks

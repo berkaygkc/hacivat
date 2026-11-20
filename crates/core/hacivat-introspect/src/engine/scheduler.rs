@@ -802,6 +802,16 @@ impl Actor {
             listing,
             snapshot: check,
             marks,
+            // ## m4-t22-state (named exception; fix round 2, R-W4-9): a background read never
+            // removes what the user kept.
+            kept: match (job.trigger, job.work.ns()) {
+                (Trigger::Background, Some(ns)) => self
+                    .kept
+                    .get(ns)
+                    .map(|k| k.iter().cloned().collect())
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            },
         };
         let cancel = self.root_cancel.child_token();
         let (id, ctx, done) = (job.id, self.ctx.clone(), self.done_tx.clone());
@@ -1728,7 +1738,8 @@ impl Actor {
         {
             return self.hold_pending(job, m);
         }
-        if job.trigger == Trigger::User {
+        // A user refresh (not the pass a confirmation re-planned) starts over.
+        if job.trigger == Trigger::User && job.decision.is_none() {
             self.bg_deleted.remove(&ns);
             self.kept.remove(&ns);
         }
@@ -1984,13 +1995,12 @@ impl Actor {
         let Some(p) = self.pending.remove(ns) else {
             return w.resolve(Err(IntroError::Cancelled));
         };
-        // ## m4-t22-state (named exception): the user decided; the count starts over, and what
-        // they kept stays until they refresh (a background pass removing it asks again).
+        // ## m4-t22-state (named exception; fix round 2, R-W4-9): the user decided; the count
+        // starts over, and what they kept stays cached until their next refresh: background
+        // reads report it existent (no hold, no new prompt), and only drops outside it count.
         self.sync_pending_names();
         self.bg_deleted.remove(ns);
-        if accept {
-            self.kept.remove(ns);
-        } else {
+        if !accept {
             self.kept
                 .entry(ns.clone())
                 .or_default()
@@ -2369,22 +2379,15 @@ impl Actor {
         }
     }
 
-    /// Whether the applied background pass `m` of `ns` would remove an object the user kept, or
-    /// bring the top-level objects background passes removed since the user last decided over
-    /// the guard (D-039: more than `guard_ratio_pct` % of at least `guard_min_objects`). Counts
+    /// Whether the applied background pass `m` of `ns` would bring the top-level objects
+    /// background passes removed since the user last decided over the guard (kept objects are
+    /// never among them: background reads report them existent, R-W4-9) (D-039: more than `guard_ratio_pct` % of at least `guard_min_objects`). Counts
     /// it when it does not.
     fn over_cumulative_guard(&mut self, ns: &NsKey, m: &Merged, snap: &CatalogSnapshot) -> bool {
         let drops = top_drops(ns, m.outcome.delta());
         let dropped = u32::try_from(drops.len()).unwrap_or(u32::MAX);
         if dropped == 0 {
             return false;
-        }
-        if self
-            .kept
-            .get(ns)
-            .is_some_and(|kept| drops.iter().any(|k| kept.contains(k)))
-        {
-            return true;
         }
         let policy = MergePolicy::default();
         let before = snap

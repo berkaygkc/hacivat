@@ -2157,3 +2157,12 @@ carry fenced `m4-t22-state` named exceptions.
     on every miss; the UI badges a held namespace from `pending_confirmation` whatever its
     `LoadState` (carried to T27/T32). `hacivat-meta` `Subtree::set_root_state` is an
     acknowledged named exception.
+- **Fix round 2 (RR-1, ruling R-W4-9).** "Keep cached" no longer freezes the namespace (and
+  replaces the fix-round-1 rule "a background pass removing a kept object asks again"): every
+  background read of the namespace reports the kept objects existent (`work::protect_kept`
+  adds their identities to the existence sets that would decide them), so the merge deletes
+  none of them while every other deletion, addition and change applies, with no hold and no new
+  prompt. Only drops outside the kept set count toward the cumulative guard. The kept set is
+  cleared only by a user refresh (not by "Remove from cache", and not by the pass a confirmation
+  re-plans). Refresh-after-DDL passes count toward the guard (fail-safe; accepted). MySQL's
+  cached side also refuses a watermark whose version is below 8.0 (no R-M4-39 marker path).

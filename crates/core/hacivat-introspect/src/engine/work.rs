@@ -131,6 +131,9 @@ pub(super) struct Spec {
     /// A fragment's stamps read before it (by a state check): stored as the marks of the
     /// re-read owners that bring none of their own (PostgreSQL).
     pub marks: Vec<(ObjectKey, hacivat_meta::StateMark)>,
+    /// What the user chose to keep cached ("Keep cached", D-039) in a background read's
+    /// namespace: reported existent, so the read never removes it (fix round 2, R-W4-9).
+    pub kept: Vec<ObjectKey>,
 }
 
 /// A merged pass or fragment, ready to publish.
@@ -485,6 +488,10 @@ async fn merge_result(ctx: &Arc<WorkerCtx>, spec: &Spec, mut r: NamespaceResult)
     if !spec.marks.is_empty() {
         record_marks(&mut r, &spec.marks);
     }
+    // ## m4-t22-state (named exception; fix round 2, R-W4-9)
+    if !spec.kept.is_empty() {
+        protect_kept(&mut r, &ns, &spec.kept);
+    }
     // R-W2-1: the level the pass read and when (display only).
     r.level = level;
     if r.read_at_ms == 0 {
@@ -536,6 +543,38 @@ async fn merge_result(ctx: &Arc<WorkerCtx>, spec: &Spec, mut r: NamespaceResult)
         Ok(Ok(m)) => Output::Merged(Box::new(m)),
         Ok(Err(e)) => Output::Failed(e),
         Err(_) => Output::Failed(IntroError::Protocol(Name::from("merge"))),
+    }
+}
+
+// ## m4-t22-state (named exception; fix round 2, R-W4-9)
+/// Reports every kept object of `ns` existent in the existence sets of `r` that would decide it
+/// (a complete set, or a scoped one covering it): the merge then deletes none of them, while
+/// every other deletion, addition and change of the read applies.
+fn protect_kept(r: &mut NamespaceResult, ns: &NsKey, kept: &[ObjectKey]) {
+    for k in kept {
+        let Some(rel) = k.path.strip_prefix(ns.path.as_slice()) else {
+            continue;
+        };
+        let rel: Vec<Name> = rel.to_vec();
+        let id = merge::Identity {
+            path: rel.clone(),
+            server_id: k.server_id,
+            overload_sig: k.overload_sig.clone(),
+            raw_kind: k.raw_kind.clone(),
+            state: hacivat_meta::StateMark::None,
+        };
+        let ids = match r.existent.get_mut(&k.kind) {
+            Some(merge::ExistSet::Ok(ids)) => ids,
+            Some(merge::ExistSet::Scoped { scope, ids })
+                if scope.iter().any(|s| rel.starts_with(s)) =>
+            {
+                ids
+            }
+            _ => continue,
+        };
+        if !ids.iter().any(|i| i.path == rel) {
+            ids.push(id);
+        }
     }
 }
 
