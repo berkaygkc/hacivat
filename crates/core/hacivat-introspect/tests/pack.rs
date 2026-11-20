@@ -1668,8 +1668,10 @@ fn pg_catalog_functions_are_qualified() {
     );
     assert_eq!(
         joinable(
-            "SELECT pg_catalog.length(c.relname) AS x, CAST(c.oid AS pg_catalog.int8) AS y, coalesce(c.reltuples, 0) AS z FROM pg_catalog.pg_class c WHERE c.oid = ANY (ARRAY[1]) AND EXISTS (SELECT 1)"
+            "SELECT pg_catalog.length(c.relname) AS x, CAST(c.oid AS pg_catalog.int8) AS y, coalesce(c.reltuples, 0) AS z FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) ANY (ARRAY[1]) AND EXISTS (SELECT 1)"
         ),
+        // ## m4-t33a-hygiene (named exception; H8): the operator is qualified, as every
+        // joinable operator must be (`joinable_pg_sections_resolve_no_operator_through_the_path`).
         []
     );
     // PG 18 folds.
@@ -2033,5 +2035,88 @@ fn a_quote_in_a_section_comment_is_linted() {
         );
         assert_eq!(lint_kinds(d, &body), [LintKind::QuoteInComment], "{d:?}");
     }
+}
+// ## m4-t33a-hygiene
+
+// ## m4-t33a-hygiene (T16 verification H8)
+/// A joinable PostgreSQL section runs where Hacivat cannot pin the `search_path` (R-M4-29), so
+/// nothing in it may resolve an operator through the path: every operator is written
+/// `OPERATOR(pg_catalog.op)`, and the constructs that pick an operator by name (`LIKE`,
+/// `BETWEEN`, `NULLIF`, `IN` without a list bind, `IS DISTINCT FROM`, a simple `CASE`) are
+/// refused. A quoted name is a name: `"like"` is a column and `"operator"(…)` an unqualified
+/// call. Non-joinable sections pin the path and keep plain operators.
+#[test]
+fn joinable_pg_sections_resolve_no_operator_through_the_path() {
+    let joinable = |body: &str| {
+        format!("--- name: S ---\n--- returns: x text ---\n--- joinable ---\n{body}\n")
+    };
+    let path_resolved = |body: &str| -> Vec<String> {
+        lint_kinds(DialectId::Postgres, &joinable(body))
+            .into_iter()
+            .filter_map(|k| match k {
+                LintKind::PathResolvedOperator(w) => Some(w),
+                _ => None,
+            })
+            .collect()
+    };
+    for (body, want) in [
+        ("SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.oid = 1", "="),
+        ("SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.oid <> 1", "<>"),
+        ("SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.relname ~ 'a'", "~"),
+        ("SELECT c.oid - 1 AS x FROM pg_catalog.pg_class c", "-"),
+        ("SELECT c.oid % 2 AS x FROM pg_catalog.pg_class c", "%"),
+        ("SELECT c.oid ^ 2 AS x FROM pg_catalog.pg_class c", "^"),
+        ("SELECT c.oid & 2 AS x FROM pg_catalog.pg_class c", "&"),
+        ("SELECT c.oid # 2 AS x FROM pg_catalog.pg_class c", "#"),
+        ("SELECT @ c.oid AS x FROM pg_catalog.pg_class c", "@"),
+        ("SELECT c.relacl ? 'a' AS x FROM pg_catalog.pg_class c", "?"),
+        ("SELECT c.relname || 'a' AS x FROM pg_catalog.pg_class c", "||"),
+        ("SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.relname LIKE 'a'", "LIKE"),
+        ("SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid BETWEEN 1 AND 2", "BETWEEN"),
+        ("SELECT NULLIF(c.oid, 0) AS x FROM pg_catalog.pg_class c", "NULLIF"),
+        ("SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid IN (1, 2)", "IN"),
+        (
+            "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid IS DISTINCT FROM 1",
+            "IS DISTINCT FROM",
+        ),
+        ("SELECT CASE c.relkind WHEN 'r' THEN 1 END AS x FROM pg_catalog.pg_class c", "CASE"),
+        ("SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(=) 1", "OPERATOR"),
+        (
+            "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(public.=) 1",
+            "OPERATOR",
+        ),
+    ] {
+        assert_eq!(path_resolved(body), vec![want.to_string()], "{body}");
+    }
+    // Qualified operators, a list bind, a searched CASE and `count(*)` pass; so does a quoted
+    // name that spells a keyword.
+    for body in [
+        "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) 1",
+        "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.>=) 1",
+        "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.relnamespace IN :[oids]",
+        "SELECT CASE WHEN c.oid OPERATOR(pg_catalog.=) 1 THEN 1 END AS x \
+         FROM pg_catalog.pg_class c",
+        "SELECT pg_catalog.count(*) AS x FROM pg_catalog.pg_class c",
+        "SELECT c.\"like\" AS x FROM pg_catalog.pg_class c",
+    ] {
+        assert_eq!(path_resolved(body), Vec::<String>::new(), "{body}");
+    }
+    // A quoted "operator" is a function name, never the OPERATOR() syntax.
+    assert!(
+        lint_kinds(
+            DialectId::Postgres,
+            &joinable("SELECT \"operator\"(c.oid) AS x FROM pg_catalog.pg_class c")
+        )
+        .iter()
+        .any(|k| matches!(k, LintKind::UnqualifiedPgCatalog(w) if w == "operator")),
+    );
+    // Outside joinable sections the path is pinned: plain operators stay.
+    assert_eq!(
+        lint_kinds(
+            DialectId::Postgres,
+            &section("SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.oid = 1")
+        ),
+        Vec::new()
+    );
 }
 // ## m4-t33a-hygiene

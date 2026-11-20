@@ -71,6 +71,11 @@ pub enum LintKind {
     /// every read of the section (`RefusedText`, found by Task 18). File-header comments are
     /// outside every section and never rendered.
     QuoteInComment,
+    /// In a `joinable` PostgreSQL section (whose `search_path` Hacivat cannot pin): an
+    /// operator not written `OPERATOR(pg_catalog.op)`, or a construct that picks an operator
+    /// by name through the path (`LIKE`, `BETWEEN`, `NULLIF`, `IN` without a list bind,
+    /// `IS DISTINCT FROM`, a simple `CASE`; T16 verification H8, the CVE-2018-1058 class).
+    PathResolvedOperator(String),
     // ## m4-t33a-hygiene
 }
 
@@ -151,6 +156,10 @@ fn lint_section(sec: &Section, lexer: Family, rules: Family, out: &mut Vec<LintE
         });
     };
     let mut toks: Vec<(u32, Tok<'_>)> = Vec::new();
+    // ## m4-t33a-hygiene (named exception; H8): the indices of quoted names, which are names
+    // and never SQL syntax.
+    let mut quoted: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // ## m4-t33a-hygiene
     walk_lines(&sec.body, &mut |l| {
         // The parser accepted the line, so it lexes again.
         let Ok(pieces) = scan_line(lexer, &l.raw) else {
@@ -168,6 +177,7 @@ fn lint_section(sec: &Section, lexer: Family, rules: Family, out: &mut Vec<LintE
                     // without ANSI_QUOTES; reading it as a name there only adds findings.)
                     let ident = q.starts_with('"') || q.starts_with('`');
                     let tok = if ident {
+                        quoted.insert(toks.len());
                         Tok::Word(&q[1..q.len() - 1])
                     } else {
                         Tok::Operand
@@ -204,6 +214,13 @@ fn lint_section(sec: &Section, lexer: Family, rules: Family, out: &mut Vec<LintE
         }
     };
 
+    // ## m4-t33a-hygiene (named exception; T16 verification H8)
+    if rules == Family::Pg && sec.joinable {
+        for (line, w) in path_resolved_operators(&toks, &quoted) {
+            push(line, LintKind::PathResolvedOperator(w));
+        }
+    }
+    // ## m4-t33a-hygiene
     let valid_ages = between_age_calls(&toks);
     for (k, &(line, tok)) in toks.iter().enumerate() {
         match tok {
@@ -240,7 +257,9 @@ fn lint_section(sec: &Section, lexer: Family, rules: Family, out: &mut Vec<LintE
                             let after_type = k >= 1
                                 && (op(k - 1) == Some("::")
                                     || word(k - 1).is_some_and(|p| eq(p, "as")));
-                            let syntax = SYNTAX.iter().any(|s| eq(w, s));
+                            // ## m4-t33a-hygiene (named exception; H8): a quoted `"operator"`
+                            // is a name, so only unquoted words are SQL syntax.
+                            let syntax = !quoted.contains(&k) && SYNTAX.iter().any(|s| eq(w, s));
                             if known || (sec.joinable && !after_type && !syntax) {
                                 push(line, LintKind::UnqualifiedPgCatalog(w.to_string()));
                             }
@@ -286,6 +305,77 @@ fn lint_section(sec: &Section, lexer: Family, rules: Family, out: &mut Vec<LintE
         }
     }
 }
+
+// ## m4-t33a-hygiene (T16 verification H8)
+/// The operators of a `joinable` PostgreSQL section that resolve through the `search_path`:
+/// every operator token outside `OPERATOR ( pg_catalog . <op> )` (structure — `(` `)` `,` `.`
+/// `::` `[` `]` — and the `*` of `count(*)`, `SELECT *` or `t.*` excepted), `OPERATOR(` with
+/// any other qualifier, and the unquoted words that pick an operator by name.
+fn path_resolved_operators(
+    toks: &[(u32, Tok<'_>)],
+    quoted: &std::collections::HashSet<usize>,
+) -> Vec<(u32, String)> {
+    let word_is = |j: usize, w: &str| {
+        !quoted.contains(&j) && matches!(toks.get(j), Some((_, Tok::Word(x))) if eq(x, w))
+    };
+    let op_is = |j: usize, o: &str| matches!(toks.get(j), Some((_, Tok::Op(x))) if *x == o);
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k < toks.len() {
+        let (line, tok) = toks[k];
+        match tok {
+            Tok::Word(_) if quoted.contains(&k) => {}
+            Tok::Word(w) => {
+                if eq(w, "operator") && op_is(k + 1, "(") {
+                    if word_is(k + 2, "pg_catalog") && op_is(k + 3, ".") {
+                        let mut j = k + 4;
+                        while matches!(toks.get(j), Some((_, Tok::Op(o))) if *o != ")") {
+                            j += 1;
+                        }
+                        if j > k + 4 && op_is(j, ")") {
+                            k = j + 1;
+                            continue;
+                        }
+                    }
+                    out.push((line, "OPERATOR".to_string()));
+                    // One finding for the whole `OPERATOR(…)`.
+                    let mut j = k + 2;
+                    while toks.get(j).is_some_and(|t| t.1 != Tok::Op(")")) {
+                        j += 1;
+                    }
+                    k = j + 1;
+                    continue;
+                } else if ["like", "ilike", "similar", "between", "nullif"]
+                    .iter()
+                    .any(|b| eq(w, b))
+                {
+                    out.push((line, w.to_ascii_uppercase()));
+                } else if eq(w, "in") && !matches!(toks.get(k + 1), Some((_, Tok::List))) {
+                    out.push((line, "IN".to_string()));
+                } else if eq(w, "is")
+                    && (word_is(k + 1, "distinct")
+                        || (word_is(k + 1, "not") && word_is(k + 2, "distinct")))
+                {
+                    out.push((line, "IS DISTINCT FROM".to_string()));
+                } else if eq(w, "case") && !word_is(k + 1, "when") {
+                    out.push((line, "CASE".to_string()));
+                }
+            }
+            Tok::Op("(" | ")" | "," | "." | "::" | "[" | "]") => {}
+            Tok::Op("*")
+                if k == 0
+                    || op_is(k - 1, "(")
+                    || op_is(k - 1, ".")
+                    || op_is(k - 1, ",")
+                    || word_is(k - 1, "select") => {}
+            Tok::Op(o) => out.push((line, o.to_string())),
+            Tok::Operand | Tok::List => {}
+        }
+        k += 1;
+    }
+    out
+}
+// ## m4-t33a-hygiene
 
 /// The index just past the call whose name is at `k` (`name(` … `)`) and any `::type`
 /// casts after it.
