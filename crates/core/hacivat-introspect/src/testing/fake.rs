@@ -66,6 +66,12 @@ pub struct FakeObject {
     // ## m4-t22-state (named exception)
     /// Foreign keys of a table: `(name, target table path)`, children at `Structure`.
     pub fks: Vec<(Name, Vec<Name>)>,
+    // ## m4-t33a-hygiene (named exception; T25 m-7 carry)
+    /// A view's definition text: at `Sources` the view's `source` is its reference, hashed
+    /// through `engine::facet::source_ref` as the real introspectors do, so the engine
+    /// publishes the text with the pass.
+    pub definition: Option<Name>,
+    // ## m4-t33a-hygiene
 }
 
 impl FakeObject {
@@ -78,6 +84,8 @@ impl FakeObject {
             columns: columns.iter().map(|c| Name::from(*c)).collect(),
             version: 1,
             fks: Vec::new(),
+            // ## m4-t33a-hygiene
+            definition: None,
         }
     }
 
@@ -103,6 +111,14 @@ impl FakeObject {
             ..FakeObject::table(name, &[])
         }
     }
+
+    // ## m4-t33a-hygiene (named exception; T25 m-7 carry)
+    /// The same view with definition text `text` (read at `Sources`).
+    pub fn with_definition(mut self, text: &str) -> Self {
+        self.definition = Some(Name::from(text));
+        self
+    }
+    // ## m4-t33a-hygiene
 
     /// The same table with a foreign key `name` to the table at `target` (its full path).
     pub fn with_fk(mut self, name: &str, target: &[&str]) -> Self {
@@ -146,6 +162,12 @@ pub enum FakeCall {
     // ## m4-t22-state (named exception): the cheap validation of a cached namespace.
     CheckNamespace {
         ns: NsKey,
+    },
+    // ## m4-t33a-hygiene (named exception; T25 m-7 carry): a facet read.
+    Facet {
+        ns: NsKey,
+        keys: Vec<ObjectKey>,
+        kind: FacetKind,
     },
 }
 
@@ -205,6 +227,9 @@ struct State {
     clock: u64,
     /// The version each object had when last read, for `check_state`.
     read: HashMap<(NsKey, Name), u64>,
+    // ## m4-t33a-hygiene (named exception; T25 m-7 carry)
+    /// The scripted facet rows per kind ([`FakeIntrospector::put_facet`]).
+    facets: BTreeMap<FacetKind, FacetRows>,
 }
 
 /// A scripted introspector for tests.
@@ -443,6 +468,31 @@ impl FakeIntrospector {
         Ok(())
     }
 
+    // ## m4-t33a-hygiene (named exception; T25 m-7 carry)
+    /// Scripts facet rows: `rows` are added to (or replace, per object) the rows of their kind,
+    /// and the kind joins `capabilities().facets`. A facet read answers the rows of the asked
+    /// objects only (an object without a row is left out: "not loaded", R-W4-3); an unscripted
+    /// kind answers `NotImplemented`. Failures and gates match [`FakeCall::Facet`].
+    pub fn put_facet(&self, rows: FacetRows) {
+        fn upsert<T>(into: &mut Vec<(ObjectKey, T)>, rows: Vec<(ObjectKey, T)>) {
+            for (k, v) in rows {
+                into.retain(|(o, _)| !o.same_object(&k));
+                into.push((k, v));
+            }
+        }
+        let mut st = self.lock();
+        let kind = facet_kind(&rows);
+        let entry = st.facets.entry(kind).or_insert_with(|| empty_rows(kind));
+        match (entry, rows) {
+            (FacetRows::Sources(a), FacetRows::Sources(b)) => upsert(a, b),
+            (FacetRows::Grants(a), FacetRows::Grants(b)) => upsert(a, b),
+            (FacetRows::Dependencies(a), FacetRows::Dependencies(b)) => upsert(a, b),
+            (FacetRows::Statistics(a), FacetRows::Statistics(b)) => upsert(a, b),
+            _ => unreachable!("one kind per entry"),
+        }
+    }
+    // ## m4-t33a-hygiene
+
     fn root_key(&self, ns: &NsKey) -> Result<ObjectKey, IntroError> {
         merge::base(ns.clone(), self.dbms, FoldRule::Exact)
             .ok()
@@ -457,7 +507,15 @@ impl FakeIntrospector {
     // ## m4-t30-gates (named exception; T30 review I-2): the object flagged `flags`.
     fn subtree_flagged(&self, o: &FakeObject, level: Level, flags: ObjFlags) -> Subtree {
         let props = match o.kind {
-            ObjectKind::View => Props::View(Arc::new(ViewProps::default())),
+            // ## m4-t33a-hygiene (named exception; T25 m-7 carry): the definition at Sources.
+            ObjectKind::View => Props::View(Arc::new(ViewProps {
+                source: o
+                    .definition
+                    .as_deref()
+                    .filter(|_| level >= Level::Sources)
+                    .map(crate::engine::facet::source_ref),
+                ..ViewProps::default()
+            })),
             // ## m4-t22-state (named exception)
             ObjectKind::Role => Props::Generic(Arc::default()),
             _ => Props::Table(Arc::new(TableProps::default())),
@@ -811,15 +869,43 @@ impl Introspector for FakeIntrospector {
         })
     }
 
+    // ## m4-t33a-hygiene (named exception; T25 m-7 carry): scripted rows.
     fn facet<'a>(
         &'a self,
         _c: &'a mut MetaConn,
-        _ns: &'a NsKey,
-        _keys: &'a [ObjectKey],
-        _kind: FacetKind,
+        ns: &'a NsKey,
+        keys: &'a [ObjectKey],
+        kind: FacetKind,
     ) -> BoxFuture<'a, Result<FacetRows, IntroError>> {
-        Box::pin(async { Err(IntroError::NotImplemented) })
+        Box::pin(async move {
+            if !self.lock().facets.contains_key(&kind) {
+                return Err(IntroError::NotImplemented);
+            }
+            self.enter(
+                FakeCall::Facet {
+                    ns: ns.clone(),
+                    keys: keys.to_vec(),
+                    kind,
+                },
+                None,
+            )
+            .await?;
+            fn asked<T: Clone>(rows: &[(ObjectKey, T)], keys: &[ObjectKey]) -> Vec<(ObjectKey, T)> {
+                rows.iter()
+                    .filter(|(o, _)| keys.iter().any(|k| k.same_object(o)))
+                    .cloned()
+                    .collect()
+            }
+            let st = self.lock();
+            Ok(match &st.facets[&kind] {
+                FacetRows::Sources(r) => FacetRows::Sources(asked(r, keys)),
+                FacetRows::Grants(r) => FacetRows::Grants(asked(r, keys)),
+                FacetRows::Dependencies(r) => FacetRows::Dependencies(asked(r, keys)),
+                FacetRows::Statistics(r) => FacetRows::Statistics(asked(r, keys)),
+            })
+        })
     }
+    // ## m4-t33a-hygiene
 
     fn check_state<'a>(
         &'a self,
@@ -909,10 +995,32 @@ impl Introspector for FakeIntrospector {
     fn capabilities(&self) -> IntroCaps {
         IntroCaps {
             incremental: self.incremental.load(Ordering::SeqCst),
+            // ## m4-t33a-hygiene (named exception): the scripted facet kinds.
+            facets: self.lock().facets.keys().copied().collect(),
             ..IntroCaps::planned(self.dbms)
         }
     }
 }
+
+// ## m4-t33a-hygiene (T25 m-7 carry)
+fn facet_kind(rows: &FacetRows) -> FacetKind {
+    match rows {
+        FacetRows::Sources(_) => FacetKind::Sources,
+        FacetRows::Grants(_) => FacetKind::Grants,
+        FacetRows::Dependencies(_) => FacetKind::Dependencies,
+        FacetRows::Statistics(_) => FacetKind::Statistics,
+    }
+}
+
+fn empty_rows(kind: FacetKind) -> FacetRows {
+    match kind {
+        FacetKind::Sources => FacetRows::Sources(Vec::new()),
+        FacetKind::Grants => FacetRows::Grants(Vec::new()),
+        FacetKind::Dependencies => FacetRows::Dependencies(Vec::new()),
+        FacetKind::Statistics => FacetRows::Statistics(Vec::new()),
+    }
+}
+// ## m4-t33a-hygiene
 
 /// A metadata source for the engine's tests: inert offline connections, and switches for a
 /// busy single-connection profile, a user transaction and a disconnected profile.
