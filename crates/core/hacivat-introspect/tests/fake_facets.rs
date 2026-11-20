@@ -75,7 +75,10 @@ async fn the_fake_answers_scripted_facets_for_the_asked_objects_only() {
         .unwrap();
     let snap = r.catalog.current();
     let (state, value) = snap.facet(&t, FacetKind::Grants);
-    assert!(matches!(state, LoadState::Loaded { stale: false, .. }), "{state:?}");
+    assert!(
+        matches!(state, LoadState::Loaded { stale: false, .. }),
+        "{state:?}"
+    );
     let Some(FacetValue::Grants(g)) = value else {
         panic!("grants: {value:?}");
     };
@@ -122,6 +125,9 @@ async fn a_view_definition_is_hashed_and_published_at_sources() {
         panic!("view props: {:?}", v.props());
     };
     let source = p.source.expect("a source reference at Sources");
-    assert_eq!(snap.source_text(&source).as_deref(), Some("SELECT 1 AS one"));
+    assert_eq!(
+        snap.source_text(&source).as_deref(),
+        Some("SELECT 1 AS one")
+    );
 }
 // ## m4-t33a-hygiene

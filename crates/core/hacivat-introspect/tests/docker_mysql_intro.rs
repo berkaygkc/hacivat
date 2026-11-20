@@ -1834,7 +1834,13 @@ async fn revoked_mysql_select_empties_existence_and_the_guard_holds() {
     use hacivat_meta::merge::{ExistSet, MergeOutcome};
     use hacivat_testkit::fixture_sql;
     const HIDDEN: usize = 22;
-    for t in targets(&["mysql80", "mysql84", "mariadb106", "mariadb1011", "mariadb114"]) {
+    for t in targets(&[
+        "mysql80",
+        "mysql84",
+        "mariadb106",
+        "mariadb1011",
+        "mariadb114",
+    ]) {
         let db = Db::create(&t, "revoke").await;
         db.run("CREATE TABLE keep_me (id INT PRIMARY KEY)").await;
         let hidden: Vec<String> = (0..HIDDEN).map(|i| format!("t{i:02}")).collect();
@@ -1919,8 +1925,16 @@ async fn revoked_mysql_select_empties_existence_and_the_guard_holds() {
         // INFORMATION_SCHEMA hides the revoked tables, so the existence set is the kept one
         // alone, and the guard (not luck) is what keeps the cache.
         if let Some(n) = listed {
-            assert_eq!(n, 1, "{}: INFORMATION_SCHEMA hides the revoked tables", t.id);
-            assert!(outcome.is_pending(), "{}: existence emptied but no guard", t.id);
+            assert_eq!(
+                n, 1,
+                "{}: INFORMATION_SCHEMA hides the revoked tables",
+                t.id
+            );
+            assert!(
+                outcome.is_pending(),
+                "{}: existence emptied but no guard",
+                t.id
+            );
         }
     }
 }

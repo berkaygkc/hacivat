@@ -2060,9 +2060,18 @@ fn joinable_pg_sections_resolve_no_operator_through_the_path() {
             .collect()
     };
     for (body, want) in [
-        ("SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.oid = 1", "="),
-        ("SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.oid <> 1", "<>"),
-        ("SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.relname ~ 'a'", "~"),
+        (
+            "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.oid = 1",
+            "=",
+        ),
+        (
+            "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.oid <> 1",
+            "<>",
+        ),
+        (
+            "SELECT c.oid AS x FROM pg_catalog.pg_class c WHERE c.relname ~ 'a'",
+            "~",
+        ),
         ("SELECT c.oid - 1 AS x FROM pg_catalog.pg_class c", "-"),
         ("SELECT c.oid % 2 AS x FROM pg_catalog.pg_class c", "%"),
         ("SELECT c.oid ^ 2 AS x FROM pg_catalog.pg_class c", "^"),
@@ -2070,17 +2079,38 @@ fn joinable_pg_sections_resolve_no_operator_through_the_path() {
         ("SELECT c.oid # 2 AS x FROM pg_catalog.pg_class c", "#"),
         ("SELECT @ c.oid AS x FROM pg_catalog.pg_class c", "@"),
         ("SELECT c.relacl ? 'a' AS x FROM pg_catalog.pg_class c", "?"),
-        ("SELECT c.relname || 'a' AS x FROM pg_catalog.pg_class c", "||"),
-        ("SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.relname LIKE 'a'", "LIKE"),
-        ("SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid BETWEEN 1 AND 2", "BETWEEN"),
-        ("SELECT NULLIF(c.oid, 0) AS x FROM pg_catalog.pg_class c", "NULLIF"),
-        ("SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid IN (1, 2)", "IN"),
+        (
+            "SELECT c.relname || 'a' AS x FROM pg_catalog.pg_class c",
+            "||",
+        ),
+        (
+            "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.relname LIKE 'a'",
+            "LIKE",
+        ),
+        (
+            "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid BETWEEN 1 AND 2",
+            "BETWEEN",
+        ),
+        (
+            "SELECT NULLIF(c.oid, 0) AS x FROM pg_catalog.pg_class c",
+            "NULLIF",
+        ),
+        (
+            "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid IN (1, 2)",
+            "IN",
+        ),
         (
             "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid IS DISTINCT FROM 1",
             "IS DISTINCT FROM",
         ),
-        ("SELECT CASE c.relkind WHEN 'r' THEN 1 END AS x FROM pg_catalog.pg_class c", "CASE"),
-        ("SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(=) 1", "OPERATOR"),
+        (
+            "SELECT CASE c.relkind WHEN 'r' THEN 1 END AS x FROM pg_catalog.pg_class c",
+            "CASE",
+        ),
+        (
+            "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(=) 1",
+            "OPERATOR",
+        ),
         (
             "SELECT 1 AS x FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(public.=) 1",
             "OPERATOR",

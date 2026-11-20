@@ -1716,7 +1716,9 @@ pub fn unpinned_uses(text: &str) -> Vec<String> {
         let pinned = value.rsplit_once('@').is_some_and(|(action, sha)| {
             !action.is_empty()
                 && sha.len() == 40
-                && sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && sha
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         });
         if !pinned {
             out.push(format!("line {}: {value}", i + 1));
