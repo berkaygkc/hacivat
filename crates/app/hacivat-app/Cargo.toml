@@ -85,6 +85,8 @@ hacivat-app = { workspace = true, features = ["test-support"] }
 # ## m3a-t01b-seams: result fixtures and the synthetic grid source.
 hacivat-results = { workspace = true, features = ["test-support"] }
 hacivat-ui-grid = { workspace = true, features = ["test-support"] }
+# ## m4-t33b-carries (ruling R-W3-7): the introspection fakes the explorer tests drive.
+hacivat-introspect = { workspace = true, features = ["test-fakes"] }
 
 # The screenshot harness owns `main` (Task 18): on macOS the platform text system can only be
 # created on the main thread, and libtest runs every test on a spawned thread.
