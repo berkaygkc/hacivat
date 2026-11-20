@@ -1250,3 +1250,61 @@ The M2a connection list became the database explorer tree in place (R-M4-18): `h
   DDL view's text (palette only, R-W0-6). `explorer.view_ddl` (F12, the node menu) opens the
   cursor object's view, a column's table's. Provided toolbar actions
   (`ActionSurface::DdlViewToolbar`) are buttons in the toolbar.
+
+## m4-t27 — metadata UI
+
+- *Decision.* Refresh after DDL reaches the explorer through one `RefreshCoordinator` per open
+  catalog (`explorer::refresh_prompt`), made when the live host opens a profile's catalog and
+  dropped with its engine (named lines in `explorer/live.rs`: `opened`, the lifecycle task's
+  close step, `teardown`). What a closed coordinator owed for want of a connection is kept and
+  run by the next one once the profile is connected again; `reconnected()` is called on every
+  `Connected` of an open catalog, also when the engine survived a reconnect (T21 m6).
+- *Runs.* The orchestrator hands the classifier's reports of each unit and the coordinator's
+  inbox to `ExecService::run_with_refresh` (named lines in `exec_ui/orchestrator.rs`, a named
+  exception in `hacivat-exec` `service.rs`, ADR 0006 `m4-t27`), which installs
+  `CatalogRefreshSink::for_run` in the run's auditor chain: DDL run in any console reaches the
+  explorer without the UI waiting on anything. The toolbar's Commit and Roll back (and every
+  prompt that ends a transaction through `exec_ui::tx::end_tx`) tell the coordinator
+  (`tx_ended`; a commit whose answer was lost is `Unknown`, refresh more); a session no console
+  holds any more is `session_closed`.
+- *What the user sees* (mock 9). Ask: a wide sticky toast with the coordinator's count
+  (Refresh, Always refresh — which sets the preference through `update_settings` — and Not
+  now); it never takes the focus, so a run is never blocked (NOTES ruling 9). A newer question
+  replaces the older toast (the coordinator folded its targets). Dismissing the toast with its
+  ✕ answers nothing: the namespaces stay "out of date" and the next question carries the
+  targets. Never: nothing refreshes; the engine publishes the namespaces stale ("out of date",
+  T14's badge) until a refresh. `CoordEvent::Stale { scope: true }`: the stale schema list is
+  badged "out of date" on its database row (the root where schemas are top level) until it is
+  read again. Inside a transaction: the namespace row carries the 7 px amber stamp
+  (`MetaMark::Running`) with "{count} changes … wait for COMMIT" in its tooltip, and the
+  console's output logs `hv-metadata-log-pending`; the counts are read again on the core
+  runtime after each run and each transaction end (the coordinator's inbox drained first).
+  Dynamic SQL (`EXECUTE`, `DO`, `CALL` with an opaque catalog effect) under Always and outside a
+  transaction: "Refreshing all of {schema}" and why.
+- *R-W4-8.* A deletion held for a namespace badges it "out of date" with the held count
+  whatever its load state; a `Partial` namespace (no stale bit) keeps the held count until the
+  engine withdraws it.
+- *Stale objects* (mock 11). A state check that found an object changed and could not read it
+  again, or gone while the catalog still holds it (the DDL view's check, one named line in
+  `ddl_view/view.rs`), marks the object's explorer row with the DDL view's sentence as its
+  tooltip and accessible description, for the namespace generation the check saw: a later
+  publish of the namespace (a refresh, a pass) or a check that finds it current clears it
+  (`explorer::stale`).
+- *T25 m-9.* The DDL view's Reload of an object whose namespace is stale reads the namespace
+  (a pass publishes it current); otherwise the object alone. A decided verdict then shows the
+  text as current.
+- *Settings › Metadata* (mock 13): refresh after DDL (Segmented), the background check (a
+  150 px Select: Automatic, Off, 5, 10, 30 min), the cache per connection and in all (a whole
+  number and MB/GB, saved in MiB, set to the nearest bound outside 1 MiB–1 TiB) and "Clear
+  cached metadata…" for the active console's connection with its size on this computer (read on
+  the blocking pool). Every write goes through `shell::update_settings`. The background check
+  and the cache caps are read by the hub when a catalog opens: a change applies from the next
+  connect. `metadata.clear_cache` (the explorer) and the settings button ask first (Cancel
+  focused); Clear closes the store (`live::release_cache`), deletes the profile's cache files on
+  the blocking pool, shows no cached tree and reopens the catalog when connected (a full read).
+- *Carries done.* `SettingsPage::show_section` is the navigation's handler and the shots'
+  fixture (m3c.md §8.1, P-M4-18). The view filter's per-item fallback and "Hide objects like
+  this" split items as the grammar does (`filter::split_items`, T24 nit). A queued Open-data
+  run is dropped when the connect it waited for ends without a connection (T24 nit). The
+  "Introspect live" choice is kept per profile (`ProfileUserData::live_system`, sorted; T26
+  carry); handing it to the overlays waits for T26's merge.

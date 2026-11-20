@@ -152,21 +152,29 @@ impl DdlCatalog for EngineCatalog {
     }
 
     fn refresh(&self, key: ObjectKey, cx: &App) -> RefreshTicket {
-        let ns = self
-            .snapshot(cx)
+        let snap = self.snapshot(cx);
+        let ns = snap
+            .as_ref()
             .and_then(|s| s.find(&key).map(|o| o.ns.key().clone()));
         let Some(ns) = ns else {
             return RefreshTicket::not_implemented();
         };
-        self.ask(cx, |h| {
-            h.refresh(
-                Target::Objects {
-                    ns,
-                    keys: vec![key],
-                },
-                Trigger::User,
-            )
-        })
+        // ## m4-t27-refresh-ui (named exception, T25 review m-9): a fragment never clears a
+        // namespace's stale mark (a cached namespace, refresh after DDL with Ask or Never), so
+        // Reload there would keep "couldn't check" for ever: a stale namespace is read again
+        // whole (a pass publishes it current), any other object alone.
+        let stale = snap
+            .as_deref()
+            .is_some_and(|s| super::model::is_stale(s, &key));
+        let target = if stale {
+            Target::Namespace(ns)
+        } else {
+            Target::Objects {
+                ns,
+                keys: vec![key],
+            }
+        };
+        self.ask(cx, |h| h.refresh(target, Trigger::User))
     }
 
     fn load_facet(&self, key: ObjectKey, kind: FacetKind, cx: &App) -> RefreshTicket {

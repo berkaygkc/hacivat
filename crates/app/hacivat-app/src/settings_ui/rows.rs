@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use hacivat_l10n::{MsgRef, NoArgs, Status, Text, ids};
 use hacivat_settings::{
-    CaretBlinkPref, FindTolerancePref, KeymapPreset, LanguagePref, Settings, TabSize,
-    TextRenderingPref, ThemePref,
+    CaretBlinkPref, FindTolerancePref, KeymapPreset, LanguagePref, RefreshAfterDdl, Settings,
+    TabSize, TextRenderingPref, ThemePref,
 };
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{App, SharedString};
@@ -36,6 +36,13 @@ pub const ERROR_POLICY_ASK: &str = "exec.error_policy_ask";
 pub const MAX_VALUE_BYTES: &str = "results.max_value_bytes";
 pub const RAW_DISPLAY: &str = "grid.raw_display";
 pub const HISTORY_ENABLED: &str = "history.enabled";
+// ## m4-t27-refresh-ui (named lines): Settings › Metadata (design/m4-explorer surface 13).
+pub const REFRESH_AFTER_DDL: &str = "metadata.refresh_after_ddl";
+pub const VALIDATE_INTERVAL: &str = "metadata.validate_interval_min";
+pub const CACHE_PER_PROFILE: &str = "metadata.cache_mb_per_profile";
+pub const CACHE_TOTAL: &str = "metadata.cache_mb_total";
+/// "Clear cached metadata…" (a button, not a stored value).
+pub const CLEAR_CACHE: &str = "metadata.clear_cache";
 
 /// The value of the choice that follows the operating system.
 pub const SYSTEM: &str = "system";
@@ -59,10 +66,12 @@ pub enum Section {
     Execution,
     Results,
     History,
+    // ## m4-t27-refresh-ui (named lines)
+    Metadata,
 }
 
 impl Section {
-    pub const ALL: [Section; 7] = [
+    pub const ALL: [Section; 8] = [
         Section::General,
         Section::Appearance,
         Section::Keyboard,
@@ -71,6 +80,8 @@ impl Section {
         Section::Execution,
         Section::Results,
         Section::History,
+        // ## m4-t27-refresh-ui (named lines)
+        Section::Metadata,
     ];
 
     /// The navigation label (and the section a search result names).
@@ -84,6 +95,8 @@ impl Section {
             Section::Execution => ids::hv::SETTINGS_NAV_EXECUTION,
             Section::Results => ids::hv::SETTINGS_NAV_RESULTS,
             Section::History => ids::hv::SETTINGS_NAV_HISTORY,
+            // ## m4-t27-refresh-ui (named lines)
+            Section::Metadata => ids::hv::SETTINGS_NAV_METADATA,
         }
     }
 }
@@ -100,6 +113,8 @@ impl Section {
             Section::Execution => ids::hv::SETTINGS_SECTION_EXECUTION,
             Section::Results => ids::hv::SETTINGS_SECTION_RESULTS,
             Section::History => ids::hv::SETTINGS_SECTION_HISTORY,
+            // ## m4-t27-refresh-ui (named lines)
+            Section::Metadata => ids::hv::SETTINGS_SECTION_METADATA,
         }
     }
 }
@@ -148,7 +163,7 @@ macro_rules! row {
 
 /// Every row with its section, in page order. The text rendering row exists on macOS only (the
 /// other platforms have no such setting to change).
-const ALL_ROWS: [RowSpec; 15] = [
+const ALL_ROWS: [RowSpec; 20] = [
     row!(General, "ui.language", ids::hv::SETTINGS_LANGUAGE),
     row!(
         General,
@@ -210,6 +225,35 @@ const ALL_ROWS: [RowSpec; 15] = [
         "history.enabled",
         ids::hv::SETTINGS_HISTORY,
         ids::hv::SETTINGS_HISTORY_NOTE
+    ),
+    // ## m4-t27-refresh-ui (named lines; NOTES M4 surface 13)
+    row!(
+        Metadata,
+        "metadata.refresh_after_ddl",
+        ids::hv::METADATA_SET_REFRESH,
+        ids::hv::METADATA_SET_REFRESH_NOTE
+    ),
+    row!(
+        Metadata,
+        "metadata.validate_interval_min",
+        ids::hv::METADATA_SET_CHECK,
+        ids::hv::METADATA_SET_CHECK_NOTE
+    ),
+    row!(
+        Metadata,
+        "metadata.cache_mb_per_profile",
+        ids::hv::METADATA_SET_CACHE_CONN
+    ),
+    row!(
+        Metadata,
+        "metadata.cache_mb_total",
+        ids::hv::METADATA_SET_CACHE_TOTAL,
+        ids::hv::METADATA_SET_CACHE_NOTE
+    ),
+    row!(
+        Metadata,
+        "metadata.clear_cache",
+        ids::hv::METADATA_SET_CLEAR
     ),
 ];
 
@@ -352,6 +396,12 @@ pub fn choices(cx: &App, key: &str) -> Vec<Choice> {
             msg(ON, ids::hv::SETTINGS_ON),
             msg(OFF, ids::hv::SETTINGS_OFF),
         ],
+        // ## m4-t27-refresh-ui (named lines)
+        REFRESH_AFTER_DDL => vec![
+            msg("always", ids::hv::METADATA_SET_ALWAYS),
+            msg("ask", ids::hv::METADATA_SET_ASK),
+            msg("never", ids::hv::METADATA_SET_NEVER),
+        ],
         INSERT_SPACES | COPY_LINE | CARET_BLINK | CONFIRM_UNSAFE_WHERE | ERROR_POLICY_ASK
         | RAW_DISPLAY | HISTORY_ENABLED => vec![
             msg(ON, ids::hv::SETTINGS_ON),
@@ -410,6 +460,18 @@ pub fn current_value(settings: &Settings, key: &str) -> String {
         MAX_VALUE_BYTES => settings.results.max_value_bytes.get().to_string(),
         RAW_DISPLAY => on_off(settings.grid.raw_display),
         HISTORY_ENABLED => on_off(settings.history.enabled),
+        // ## m4-t27-refresh-ui (named lines)
+        REFRESH_AFTER_DDL => match settings.metadata.refresh_after_ddl {
+            RefreshAfterDdl::Always => "always",
+            RefreshAfterDdl::Ask => "ask",
+            RefreshAfterDdl::Never => "never",
+        }
+        .to_string(),
+        VALIDATE_INTERVAL => {
+            super::metadata::interval_value(settings.metadata.validate_interval_min)
+        }
+        CACHE_PER_PROFILE => settings.metadata.cache_mb_per_profile.get().to_string(),
+        CACHE_TOTAL => settings.metadata.cache_mb_total.get().to_string(),
         _ => String::new(),
     }
 }
@@ -533,6 +595,18 @@ pub fn apply_choice(cx: &mut App, key: &str, value: &str) {
                 crate::exec_ui::orchestrator::open_history(cx);
             }
         }
+        // ## m4-t27-refresh-ui (named lines): through the one writer; every refresh coordinator
+        // follows at once.
+        REFRESH_AFTER_DDL => {
+            let pref = match value {
+                "ask" => RefreshAfterDdl::Ask,
+                "never" => RefreshAfterDdl::Never,
+                _ => RefreshAfterDdl::Always,
+            };
+            update_settings(cx, |s| s.metadata.refresh_after_ddl = pref);
+            crate::explorer::refresh_prompt::preference_changed(cx);
+        }
+        VALIDATE_INTERVAL => super::metadata::apply_interval(value, cx),
         _ => {}
     }
 }

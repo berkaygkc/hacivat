@@ -4018,3 +4018,9 @@ hv-cmd-ddl-view-reload = Reload DDL
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 hv-ddl-view-checking = Checking whether { $name } changed on the server…
+
+## m4-t27-refresh-ui
+# Surface 13 (Settings › Metadata). Clearing a connection's cached metadata failed (its files could not be deleted).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+hv-metadata-clear-failed = The cached metadata of { $name } couldn't be deleted. Nothing changed.

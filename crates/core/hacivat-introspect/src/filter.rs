@@ -566,6 +566,29 @@ fn trim_item(raw: &str) -> &str {
 }
 // ## m4-t24-live
 
+// ## m4-t27-refresh-ui (named exception, T24 review residual nit: the per-item fallback split a
+// raw `||`)
+/// The items of a filter text, as the grammar splits them: a `||` inside a `{…}` regex, a glob
+/// class or after a `\` never ends an item. Untrimmed; an empty text has no item.
+pub fn split_items(text: &str) -> Vec<String> {
+    let cs: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    if cs.is_empty() {
+        return out;
+    }
+    let mut i = 0;
+    loop {
+        let end = item_end(&cs, i);
+        out.push(cs[i..end].iter().collect());
+        if end >= cs.len() {
+            break;
+        }
+        i = end + 2;
+    }
+    out
+}
+// ## m4-t27-refresh-ui
+
 /// The index of the `||` that ends the item starting at `i` (or the text's end). A `{…}`
 /// regex (an item's pattern that starts with `{`, after the kind and the `-`), a glob class
 /// `[…]` and a `\`-escaped character never end an item; a brace inside a glob is literal.
@@ -797,6 +820,18 @@ mod tests {
         assert_eq!(trim_item("a\\\\ "), "a\\\\");
     }
     // ## m4-t24-live
+
+    // ## m4-t27-refresh-ui
+    #[test]
+    fn split_items_keeps_a_regex_with_double_bars_whole() {
+        assert_eq!(
+            split_items("t:{a||b}||users_*"),
+            vec!["t:{a||b}".to_string(), "users_*".to_string()]
+        );
+        assert_eq!(split_items("x"), vec!["x".to_string()]);
+        assert!(split_items("").is_empty());
+    }
+    // ## m4-t27-refresh-ui
 
     #[test]
     fn items_split_on_double_bars_outside_regexes_classes_and_escapes() {

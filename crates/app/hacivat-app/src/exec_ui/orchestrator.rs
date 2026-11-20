@@ -732,6 +732,8 @@ fn submit(
     profile: &Profile,
     prepared: Vec<PreparedUnit>,
     plan: GatePlan,
+    // ## m4-t27-refresh-ui (named lines)
+    reports: Vec<Option<Vec<hacivat_exec::StmtReport>>>,
     terms: RunTerms,
     cx: &mut App,
 ) {
@@ -785,7 +787,16 @@ fn submit(
         .cell_caps
         .insert(console, fetch.cell_cap);
     let service = exec_service(cx);
-    let ticket = service.run(
+    // ## m4-t27-refresh-ui (named lines): the refresh sink is installed per run (T21's
+    // `CatalogRefreshSink`), so DDL run in any console reaches the explorer.
+    let refresh = crate::explorer::refresh_prompt::catalog_run(
+        console,
+        profile.id,
+        profile.engine,
+        reports,
+        cx,
+    );
+    let ticket = service.run_with_refresh(
         &live,
         RunRequest {
             console: console.0,
@@ -801,6 +812,7 @@ fn submit(
             confirm: Some(port.clone() as Arc<dyn hacivat_exec::ConfirmPort>),
             context_generation: terms.context_generation,
         },
+        refresh,
     );
     // T21: the port follows this run's questions and its losses, whatever order they come in.
     port.follow(
@@ -912,6 +924,8 @@ pub(crate) fn on_run_ended(console: ConsoleId, cx: &mut App) {
     if reprobe || changed {
         probe_context(console, cx);
     }
+    // ## m4-t27-refresh-ui (named lines): the broad-refresh notice and what waits for COMMIT.
+    crate::explorer::refresh_prompt::run_ended(console, cx);
 }
 
 // ---- the results tile's requests ---------------------------------------------------------
@@ -1762,7 +1776,7 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
     // ## m3b-t26-prod-unlock (fix round 1, B-M4/A-M4): what the plan was gated under; the
     // dialogs show it, and the send re-reads it (step 5).
     let gated = (conn.env, conn.read_only);
-    let (prepared, mut plan, changes, switches) = {
+    let (prepared, mut plan, changes, switches, reports) = {
         let c = console.0;
         cx.background_executor()
             .spawn(async move {
@@ -1802,7 +1816,7 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
                         }
                     }
                 }
-                (prepared, plan, changes, switches)
+                (prepared, plan, changes, switches, reports)
             })
             .await
     };
@@ -2022,6 +2036,9 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
             );
             return;
         }
+        // ## m4-t27-refresh-ui (named lines): the classifier's reports of each unit go to the
+        // refresh-after-DDL sink of the run.
+        let reports = reports.into_iter().map(|r| Some(r.items)).collect();
         submit(
             console,
             job.version,
@@ -2029,6 +2046,7 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
             &job.profile,
             prepared,
             plan,
+            reports,
             RunTerms {
                 run_as_one,
                 // A failed switch must stop the run (fix round 2, R1-C1).

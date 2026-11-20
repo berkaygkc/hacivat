@@ -460,7 +460,8 @@ fn stub_count_is_n(cx: &mut TestAppContext) {
     // data, refresh and expand all children.
     // ## m4-t25-ddl-view (named exception): Task 25 filled `explorer.view_ddl` and
     // `ddl_view.copy`.
-    assert_eq!(stubs.len(), 1);
+    // ## m4-t27-refresh-ui (named exception): Task 27 filled `metadata.clear_cache`.
+    assert_eq!(stubs.len(), 0);
     let (enabled, listed) = vcx.cx.read(|cx| {
         let reg = cx.global::<ActionRegistry>();
         let enabled: Vec<&'static str> = reg

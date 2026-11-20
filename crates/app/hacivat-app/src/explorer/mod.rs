@@ -97,7 +97,8 @@ const COMMANDS: [(&str, &str); 12] = [
 // ## m4-t24-live: Task 24's five are filled (copy qualified name, collapse all, open data,
 // refresh, expand all children).
 // ## m4-t25-ddl-view (named exception): Task 25 filled `explorer.view_ddl`.
-pub const STUB_COMMANDS: [&str; 1] = ["metadata.clear_cache"];
+// ## m4-t27-refresh-ui: Task 27 filled `metadata.clear_cache`.
+pub const STUB_COMMANDS: [&str; 0] = [];
 
 // ## m4-t24-live
 /// The node-menu commands Task 24 adds (mock 5): no keymap row (palette and menu only); the
@@ -132,6 +133,11 @@ fn filled(id: &str) -> Option<(ActionFn, Enabled)> {
     if id == "explorer.view_ddl" {
         let run: ActionFn = Rc::new(crate::ddl_view::view_ddl_command);
         return Some((run, crate::ddl_view::can_view_ddl));
+    }
+    // ## m4-t27-refresh-ui: Clear cached metadata asks first (Settings › Metadata's dialog).
+    if id == "metadata.clear_cache" {
+        let run: ActionFn = Rc::new(crate::settings_ui::metadata::clear_cache_command);
+        return Some((run, crate::settings_ui::metadata::can_clear_cache));
     }
     if id == "explorer.edit_scope" {
         let run: ActionFn = Rc::new(crate::connections::dialog::schemas::edit_scope);

@@ -424,6 +424,12 @@ struct Queued {
     text: String,
     /// The console was seen built (a later absence means its tab closed).
     seen: bool,
+    // ## m4-t27-refresh-ui (named exception, T24 residual nit)
+    /// The profile the console is opened on.
+    profile: hacivat_proto::ProfileId,
+    /// A connect of the profile was seen under way (or done): one that then ends
+    /// disconnected or failed drops the run, so a later connect never runs it.
+    connecting: bool,
 }
 
 /// Consoles opened with a text to run once they can.
@@ -477,11 +483,17 @@ pub fn open_with_text(
             tab,
             text: text.to_string(),
             seen: false,
+            // ## m4-t27-refresh-ui (named exception)
+            profile,
+            connecting: false,
         });
         if !runs.observing {
             runs.observing = true;
             cx.observe_global::<Consoles>(try_open_runs).detach();
             cx.observe_global::<crate::exec_ui::ExecUi>(try_open_runs)
+                .detach();
+            // ## m4-t27-refresh-ui (named exception): a connect that ends is seen too.
+            cx.observe_global::<crate::connections::ConnectionsModel>(try_open_runs)
                 .detach();
         }
     }
@@ -538,6 +550,11 @@ enum Fate {
 
 /// The fate of `q`'s run.
 fn fate(q: &Queued, cx: &App) -> Fate {
+    // ## m4-t27-refresh-ui (named exception, T24 residual nit): a connect that ended without a
+    // connection (disconnected, failed, lost) drops the run.
+    if q.connecting && !connect_under_way(q.profile, cx) {
+        return Fate::Drop;
+    }
     let Some(console) = Consoles::by_tab(cx, q.tab) else {
         // Not built yet, or built and since closed.
         return if q.seen {
@@ -570,6 +587,19 @@ fn fate(q: &Queued, cx: &App) -> Fate {
     }
 }
 
+// ## m4-t27-refresh-ui (named exception)
+/// Whether `profile` is connecting, reconnecting or connected.
+fn connect_under_way(profile: hacivat_proto::ProfileId, cx: &App) -> bool {
+    use hacivat_session::LiveState;
+    cx.try_global::<crate::connections::ConnectionsModel>()
+        .is_some_and(|m| {
+            matches!(
+                m.live(profile),
+                LiveState::Connecting(_) | LiveState::Reconnecting { .. } | LiveState::Connected(_)
+            )
+        })
+}
+
 /// The runs Open data still waits to start (tests).
 pub fn queued_runs(cx: &App) -> usize {
     cx.try_global::<OpenRuns>().map_or(0, |r| r.queued.len())
@@ -584,13 +614,20 @@ fn try_open_runs(cx: &mut App) {
         return;
     }
     let fates: Vec<Fate> = runs.queued.iter().map(|q| fate(q, cx)).collect();
+    // ## m4-t27-refresh-ui (named exception)
+    let under_way: Vec<bool> = runs
+        .queued
+        .iter()
+        .map(|q| connect_under_way(q.profile, cx))
+        .collect();
     let queued = std::mem::take(&mut cx.global_mut::<OpenRuns>().queued);
     let mut start = Vec::new();
     let mut keep = Vec::new();
-    for (mut q, f) in queued.into_iter().zip(fates) {
+    for ((mut q, f), under_way) in queued.into_iter().zip(fates).zip(under_way) {
         match f {
             Fate::Wait { seen } => {
                 q.seen |= seen;
+                q.connecting |= under_way;
                 keep.push(q);
             }
             Fate::Run(editor) => start.push(editor),

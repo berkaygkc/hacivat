@@ -77,6 +77,12 @@ pub struct ProfileUserData {
     pub annotations: BTreeMap<ObjectKey, String>,
     #[serde(default)]
     pub ddl_view: DdlViewOptions,
+    // ## m4-t27-refresh-ui (named exception, T26 carry: persist "Introspect live")
+    /// The system namespaces the user chose to introspect live rather than read from the
+    /// bundled snapshot (`overlay::Overlays::live_system`, Task 26), sorted, no duplicates.
+    /// Absent from older files (empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_system: Vec<crate::ids::NsKey>,
 }
 
 fn current_version() -> u32 {
@@ -94,6 +100,8 @@ impl Default for ProfileUserData {
             virtual_fks: Vec::new(),
             annotations: BTreeMap::new(),
             ddl_view: DdlViewOptions::default(),
+            // ## m4-t27-refresh-ui (named exception)
+            live_system: Vec::new(),
         }
     }
 }

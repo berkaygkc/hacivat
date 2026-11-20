@@ -114,6 +114,26 @@ pub fn end_tx(console: ConsoleId, commit: bool, cx: &mut App) -> Task<bool> {
         };
         drop(session);
         cx.update(|cx| {
+            // ## m4-t27-refresh-ui (named exception, T21 carry): the refresh coordinator learns
+            // the transaction ended (a commit whose answer was lost may have committed).
+            let lost = matches!(
+                &error,
+                Some(e) if matches!(
+                    e.kind,
+                    hacivat_session::session::ExecErrorKind::NotConnected
+                        | hacivat_session::session::ExecErrorKind::ConnectionLost { .. }
+                )
+            );
+            let outcome = match (ended, commit) {
+                (true, true) => Some(hacivat_session::session::TxOutcome::Committed),
+                (true, false) => Some(hacivat_session::session::TxOutcome::RolledBack),
+                (false, true) if lost => Some(hacivat_session::session::TxOutcome::Unknown),
+                (false, false) if lost => Some(hacivat_session::session::TxOutcome::RolledBack),
+                _ => None,
+            };
+            if let Some(outcome) = outcome {
+                crate::explorer::refresh_prompt::tx_ended(console, outcome, cx);
+            }
             if ended {
                 log.append(
                     if commit {

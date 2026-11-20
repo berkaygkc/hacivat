@@ -2499,3 +2499,14 @@ introspectors' own system-mode packs.
   which the DDL view shows as "couldn't check" (never as current). Fenced
   `// ## m4-t25-ddl-view` lines in Task 15's `engine/mod.rs` and `engine/scheduler.rs`; the
   check itself, its re-reads and its marks are unchanged.
+
+## m4-t27 — metadata UI
+
+- The app wiring of HV-INTRO-12 and the Settings › Metadata section are recorded in ADR 0007
+  `## m4-t27 — metadata UI`. Named exceptions here: `ProfileUserData::live_system` (T26 carry:
+  the system namespaces the user chose to introspect live, serde default, omitted when empty, so
+  older files read unchanged) and `filter::split_items` (the grammar's own item split, public
+  for the view filter's fallback).
+- The Ask count is the coordinator's target count after normalising (one `CREATE TABLE` asks
+  about 2: the object and its schema's names); a count of objects would need T21's `Ask` to
+  carry one.

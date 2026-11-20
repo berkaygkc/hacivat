@@ -3647,3 +3647,10 @@ hv-cmd-ddl-view-reload = DDL'i yeniden yükle
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 # Review: PO
 hv-ddl-view-checking = { $name } nesnesinin sunucuda değişip değişmediği denetleniyor…
+
+## m4-t27-refresh-ui
+# Surface 13 (Settings › Metadata). Clearing a connection's cached metadata failed (its files could not be deleted).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-metadata-clear-failed = { $name } için önbellekteki üst veri silinemedi. Hiçbir şey değişmedi.

@@ -503,7 +503,11 @@ mod t24 {
             profile,
             move |d| {
                 let text = d.view_filters.entry(slot.clone()).or_default();
-                if !text.split("||").any(|i| i.trim() == item) {
+                // ## m4-t27-refresh-ui (named exception): items as the grammar splits them.
+                if !hacivat_introspect::filter::split_items(text)
+                    .iter()
+                    .any(|i| i.trim() == item)
+                {
                     if !text.trim().is_empty() {
                         text.push_str("||");
                     }
