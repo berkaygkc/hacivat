@@ -1208,6 +1208,12 @@ async fn sections_prepare(ids: &[&str]) {
         let srv = read_server(&mut r, t.engine).await.expect("identity");
         for s in pack.sections() {
             let sec = pack.section(s).unwrap();
+            // ## m4-t17b-mysql-facets (named exception): the grant-table sections need `SELECT`
+            // on `mysql.*`, which `hv_test` lacks (1142); `docker_mysql_facets`'s
+            // `every_mysql_facet_section_prepares` runs them as `hv_catalog`.
+            if hacivat_introspect::mysql::facets::name::GRANT_TABLES.contains(&&**s) {
+                continue;
+            }
             let mut params = Params {
                 scalars: vec![
                     (n("schema"), hacivat_introspect::mysql::pass::text(&db.name)),
@@ -1531,8 +1537,7 @@ async fn flavor_differences_are_kept_verbatim() {
 }
 
 /// The FK-created index (HV-INTRO-13 / T13 carry): recorded in `t17-fk-auto-index.tsv`;
-/// `FkIndexRule` stays `None` until the controller rules on the record, so the index is shown
-/// (never hidden) and DDL stays valid.
+/// pinned by Task 17b as `FkIndexRule::NamedAfterConstraint` from CI 44649745390.
 #[tokio::test]
 #[ignore = "docker"]
 async fn mysql_fk_auto_index_is_pinned() {
@@ -1573,8 +1578,18 @@ async fn mysql_fk_auto_index_is_pinned() {
         let ix = s
             .find(&db.key(ObjectKind::Index, &["c1", "fk_named"]))
             .unwrap();
+        // ## m4-t17b-mysql-facets (named exception): the rule is pinned
+        // (`FkIndexRule::NamedAfterConstraint`, CI 44649745390): the named FK's index is its
+        // implicit index; the unnamed FK's (named after its column, `pid`) stays shown, which
+        // DDL accepts.
         assert!(
-            !s.obj(ix).unwrap().flags().contains(ObjFlags::IMPLICIT),
+            s.obj(ix).unwrap().flags().contains(ObjFlags::IMPLICIT),
+            "{}",
+            t.id
+        );
+        let ix2 = s.find(&db.key(ObjectKind::Index, &["c2", "pid"])).unwrap();
+        assert!(
+            !s.obj(ix2).unwrap().flags().contains(ObjFlags::IMPLICIT),
             "{}",
             t.id
         );

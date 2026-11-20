@@ -88,8 +88,20 @@ fn every_section_renders_and_passes_the_metadata_guard_in_every_variant() {
                 }
                 Err(e) => {
                     // Only the deliberately gated sections have a variant with no statement.
+                    // ## m4-t17b-mysql-facets (named exception): the facet sections gated by
+                    // flavor and version (`facets::renders` mirrors these gates).
                     assert!(
-                        matches!(s.as_ref(), "ServerUuid" | "ViewUsage" | "CheckConstraints"),
+                        matches!(
+                            s.as_ref(),
+                            "ServerUuid"
+                                | "ViewUsage"
+                                | "CheckConstraints"
+                                | "GrantsSchema"
+                                | "DepsViewTables"
+                                | "DepsViewRoutines"
+                                | "PartialRevokes"
+                                | "ListRoles"
+                        ),
                         "{s} {ctx:?}: {e:?}"
                     );
                 }

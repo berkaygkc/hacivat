@@ -308,7 +308,22 @@ mod tests {
                     matches!(dbms, DbmsKind::Postgres | DbmsKind::MySql),
                     "{dbms:?}"
                 );
-                assert!(caps.facets.is_empty(), "{dbms:?}");
+                // ## m4-t17b-mysql-facets (named exception): MySQL and MariaDB read their
+                // facets since Task 17b (MariaDB has no usage views: no dependencies).
+                if matches!(dbms, DbmsKind::MySql | DbmsKind::MariaDb) {
+                    assert_eq!(
+                        caps.facets,
+                        crate::mysql::facets::facets_for(dbms),
+                        "{dbms:?}"
+                    );
+                    assert_eq!(
+                        caps.facets.contains(&FacetKind::Dependencies),
+                        dbms == DbmsKind::MySql,
+                        "{dbms:?}"
+                    );
+                } else {
+                    assert!(caps.facets.is_empty(), "{dbms:?}");
+                }
             }
         }
         assert!(introspector_for(DbmsKind::MsSql).is_none());

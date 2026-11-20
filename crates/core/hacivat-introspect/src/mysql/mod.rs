@@ -387,8 +387,9 @@ impl Introspector for MySqlIntrospector {
             transactional_ddl: false,
             // R-M4-10: MariaDB refreshes `Full` per namespace in v1.
             incremental: self.flavor == DbmsKind::MySql,
-            // Task 17b fills the facets.
-            facets: Vec::new(),
+            // ## m4-t17b-mysql-facets (named exception): server text, grants and (MySQL)
+            // view dependencies on demand (`facets::read`).
+            facets: facets::facets_for(self.flavor),
         }
     }
 }
