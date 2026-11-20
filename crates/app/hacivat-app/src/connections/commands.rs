@@ -135,6 +135,14 @@ pub fn register(cx: &mut App) {
             on_selected(|p, window, cx| delete::confirm(p.id, window, cx)),
             can_change_selection,
         ),
+        // ## m4-t32-shots (named exception; PO R-W5-14 b)
+        (
+            "connection.clear_history",
+            "hv-cmd-connection-clear-history",
+            EXPLORER,
+            on_selected(|p, _, cx| crate::history::clear::ask(p.id, cx)),
+            |cx| crate::history::clear::can_clear(selected(cx).map(|p| p.id), cx),
+        ),
         (
             "connection.context_menu",
             ids::hv::CMD_CONNECTION_CONTEXT_MENU.id,

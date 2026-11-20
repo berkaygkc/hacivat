@@ -17,6 +17,8 @@
 //!   its secrets redacted (Task 17), never a bind value. History is a convenience, never an
 //!   audit trail; nothing here logs a record.
 
+// ## m4-t32-shots (named exception; PO R-W5-14 b)
+pub mod clear;
 pub mod dialog;
 pub mod rows;
 
@@ -45,6 +47,30 @@ pub fn install(cx: &mut App) {
         }),
         enabled: can_open,
     });
+    // ## m4-t32-shots (named exception; PO R-W5-14 b): the history dialog's ⋯ menu item, and a
+    // palette entry for the focused console's connection.
+    let _ = cx.default_global::<ActionRegistry>().register(ActionDef {
+        id: "history.clear",
+        title_id: "hv-cmd-history-clear",
+        context: "Workspace",
+        run: Rc::new(|_, cx| {
+            if let Some(p) = clear_target(cx) {
+                clear::ask(p, cx);
+            }
+        }),
+        enabled: |cx| clear::can_clear(clear_target(cx), cx),
+    });
+}
+
+// ## m4-t32-shots (named exception; PO R-W5-14 b)
+/// The connection `history.clear` clears: the open history dialog's console's, else the
+/// focused console's.
+fn clear_target(cx: &App) -> Option<hacivat_proto::ProfileId> {
+    dialog::open_clear_target(cx).or_else(|| {
+        focused_console(cx)
+            .and_then(|c| crate::console::Consoles::get(cx, c))
+            .and_then(|s| s.profile)
+    })
 }
 
 // ## m3b-t27-history

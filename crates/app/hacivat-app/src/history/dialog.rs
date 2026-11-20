@@ -53,6 +53,8 @@ use hacivat_ui_core::gpui_surface::{
     IntoElement, KeyDownEvent, ParentElement, Render, Role, ScrollHandle, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Task, Window, div, px,
 };
+// ## m4-t32-shots (named exception; PO R-W5-14 b)
+use hacivat_ui_core::gpui_surface::{Bounds, Pixels, canvas};
 use hacivat_ui_core::keymap::{KeymapPlatform, display_chord, parse_chord};
 use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
 
@@ -202,6 +204,10 @@ pub struct HistoryDialog {
     copy: FocusHandle,
     insert_run: FocusHandle,
     insert: FocusHandle,
+    // ## m4-t32-shots (named exception; PO R-W5-14 b): the ⋯ button.
+    more: FocusHandle,
+    /// Where the ⋯ button was last drawn (its menu opens under it).
+    more_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     debounce: Option<Task<()>>,
     searching: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -244,6 +250,24 @@ fn show(view: &Entity<HistoryDialog>, window: &mut Window, cx: &mut App) -> bool
     }
     cx.set_global(Open(Some(view.downgrade())));
     true
+}
+
+// ## m4-t32-shots (named exception; PO R-W5-14 b)
+/// The profile the open dialog's ⋯ menu clears (`history.clear`).
+pub(super) fn open_clear_target(cx: &App) -> Option<ProfileId> {
+    let view = cx.try_global::<Open>()?.0.as_ref()?.upgrade()?;
+    view.read(cx).clear_target()
+}
+
+/// Searches the open dialog again (after its connection's history was cleared).
+pub(super) fn search_again(cx: &mut App) {
+    if let Some(view) = cx
+        .try_global::<Open>()
+        .and_then(|o| o.0.as_ref())
+        .and_then(|v| v.upgrade())
+    {
+        view.update(cx, |d, cx| d.search_now(cx));
+    }
 }
 
 /// The open dialog (one at a time).
@@ -347,6 +371,9 @@ impl HistoryDialog {
             copy: cx.focus_handle().tab_stop(true),
             insert_run: cx.focus_handle().tab_stop(true),
             insert: cx.focus_handle().tab_stop(true),
+            // ## m4-t32-shots (named exception; PO R-W5-14 b)
+            more: cx.focus_handle().tab_stop(true),
+            more_bounds: Rc::default(),
             debounce: None,
             searching: None,
             _subscriptions: subscriptions,
@@ -627,6 +654,8 @@ impl HistoryDialog {
                 self.seg_this.clone()
             },
             self.outcome.read(cx).focus_handle(cx),
+            // ## m4-t32-shots (named exception; PO R-W5-14 b): the ⋯ button ends the bar.
+            self.more.clone(),
         ];
         if self.selected_hit().is_some() {
             order.extend([self.pin.clone(), self.open_new.clone()]);
@@ -698,6 +727,9 @@ impl HistoryDialog {
                     self.toggle_pin(cx);
                 } else if self.open_new.is_focused(window) {
                     self.open_in_new_console(window, cx);
+                // ## m4-t32-shots (named exception; PO R-W5-14 b)
+                } else if self.more.is_focused(window) {
+                    self.open_more(window, cx);
                 } else {
                     return;
                 }
@@ -836,6 +868,57 @@ impl HistoryDialog {
             .child(search)
             .child(self.scope(window, cx))
             .child(div().flex_none().w(px(150.0)).child(self.outcome.clone()))
+            // ## m4-t32-shots (named exception; PO R-W5-14 b): the ⋯ menu ("Clear history of
+            // this connection…").
+            .child({
+                let cell = self.more_bounds.clone();
+                div()
+                    .relative()
+                    .debug_selector(|| "history-more".to_string())
+                    .child(
+                        Button::new("history-more", message(cx, "hv-history-more", vec![]))
+                            .kind(ButtonKind::Icon)
+                            .icon(IconName::Ellipsis)
+                            .on_raised(true)
+                            .focus_handle(self.more.clone())
+                            .on_click(cx.listener(|d, _: &ClickEvent, window, cx| {
+                                d.open_more(window, cx);
+                            })),
+                    )
+                    .child(
+                        canvas(move |b, _, _| cell.set(Some(b)), |_, _, _, _| {})
+                            .absolute()
+                            .size_full(),
+                    )
+            })
+    }
+
+    // ## m4-t32-shots (named exception; PO R-W5-14 b)
+    /// The profile whose history the ⋯ menu clears: the console's connection.
+    pub(super) fn clear_target(&self) -> Option<ProfileId> {
+        self.here
+    }
+
+    /// Opens the ⋯ menu under its button.
+    fn open_more(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let anchor = self
+            .more_bounds
+            .get()
+            .map_or_else(|| window.mouse_position(), |b| b.bottom_left());
+        let items = vec![
+            hacivat_ui::menu::MenuItemSpec::new(
+                Rc::new(|cx: &App| message(cx, "hv-history-clear-item", vec![])),
+                "history.clear",
+            )
+            .disabled(!super::clear::can_clear(self.here, cx))
+            .danger(true),
+        ];
+        let Some(ws) = window.root::<Workspace>().flatten() else {
+            return;
+        };
+        ws.update(cx, |ws, cx| {
+            ws.open_popup_menu(anchor, items, window, cx);
+        });
     }
 
     fn list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

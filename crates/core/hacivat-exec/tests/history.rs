@@ -1300,3 +1300,51 @@ async fn two_stores_on_one_file_do_not_corrupt_it() {
     assert!(c.recovered_from().is_none());
     assert_eq!(hits(&c, all()).await.len(), 600);
 }
+
+// ---------------------------------------------------------------------------------------------
+// ## m4-t32-shots (named exception; PO R-W5-14 b): "Clear query history…" per connection.
+
+#[tokio::test]
+async fn clear_removes_one_connections_entries_pinned_too_and_keeps_the_others() {
+    let t = tmp();
+    let store = open(&t.path).await;
+    put(&store, rec(1, "SELECT 'one a'")).await;
+    put(&store, rec(1, "SELECT 'one b'")).await;
+    put(&store, rec(2, "SELECT 'two'")).await;
+    let pinned = hits(&store, all())
+        .await
+        .into_iter()
+        .find(|h| &*h.record.statement_masked == "SELECT 'one b'")
+        .expect("recorded");
+    store.pin(pinned.id, true).await.unwrap();
+    // A record sent just before the clear is cleared with the rest (the writer drains first).
+    put(&store, rec(1, "SELECT 'one c'")).await;
+    let removed = store.clear(pid(1)).await.expect("clear answers");
+    assert_eq!(removed, 3);
+    assert_eq!(texts(&store).await, ["SELECT 'two'"]);
+    // The full-text index forgot them too.
+    let found = hits(
+        &store,
+        HistoryQuery {
+            text: Some("one".into()),
+            ..all()
+        },
+    )
+    .await;
+    assert!(found.is_empty(), "{found:?}");
+    // Clearing again removes nothing and is not an error; the store keeps recording.
+    assert_eq!(store.clear(pid(1)).await, Ok(0));
+    put(&store, rec(1, "SELECT 'after'")).await;
+    assert_eq!(
+        store.recall(pid(1), String::new(), 5).await.unwrap(),
+        vec![Arc::<str>::from("SELECT 'after'")]
+    );
+}
+
+#[tokio::test]
+async fn clear_after_shutdown_answers_disabled() {
+    let t = tmp();
+    let store = open(&t.path).await;
+    store.shutdown(Duration::from_secs(2)).await;
+    assert_eq!(store.clear(pid(1)).await, Err(HistoryError::Disabled));
+}

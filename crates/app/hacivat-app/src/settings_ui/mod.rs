@@ -11,6 +11,8 @@ pub mod search;
 pub mod value_limit;
 // ## m4-t01b-seams: Settings › Metadata (M4 Task 27).
 pub mod metadata;
+// ## m4-t32-shots (named exception; PO R-W5-14 a): Settings › General › Time zone.
+pub mod time_zone;
 
 use std::rc::Rc;
 
@@ -125,6 +127,8 @@ pub struct SettingsPage {
     limit_note: Option<Clamped>,
     // ## m4-t27-refresh-ui (named lines): the Metadata section's own controls.
     metadata: metadata::MetadataControls,
+    // ## m4-t32-shots (named exception; PO R-W5-14 a)
+    time_zone: time_zone::TimeZoneControl,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -187,6 +191,8 @@ impl SettingsPage {
         });
         // ## m4-t27-refresh-ui (named lines)
         let metadata = metadata::MetadataControls::new(window, cx);
+        // ## m4-t32-shots (named exception; PO R-W5-14 a)
+        let time_zone = time_zone::TimeZoneControl::new(cx);
         Self {
             search,
             query: String::new(),
@@ -200,6 +206,8 @@ impl SettingsPage {
             limit_note: None,
             // ## m4-t27-refresh-ui (named lines)
             metadata,
+            // ## m4-t32-shots (named exception; PO R-W5-14 a)
+            time_zone,
             _subscriptions: vec![
                 subscription,
                 limit_events,
@@ -456,6 +464,9 @@ impl SettingsPage {
             .gap(px(t.spacing.md));
         if key == MAX_VALUE_BYTES {
             line = line.children(self.value_limit_controls());
+        // ## m4-t32-shots (named exception; PO R-W5-14 a)
+        } else if key == time_zone::TIME_ZONE {
+            line = line.child(self.time_zone.control());
         } else if let Some(controls) = self.metadata.control(key, cx) {
             // ## m4-t27-refresh-ui (named lines): the Metadata section's selects, fields and
             // button.
@@ -707,6 +718,8 @@ impl Render for SettingsPage {
         self.follow_saved_limit(cx);
         // ## m4-t27-refresh-ui (named lines)
         self.metadata.follow(&settings, cx);
+        // ## m4-t32-shots (named exception; PO R-W5-14 a)
+        self.time_zone.follow(&settings, cx);
         let keys = self.visible_keys(cx);
         let all = settings_rows();
         let mut list = div()
@@ -920,5 +933,35 @@ pub mod fixtures {
     /// Whether the largest-value row shows its clamp note.
     pub fn clamped(cx: &App) -> bool {
         open_page(cx).is_some_and(|p| p.read(cx).limit_note.is_some())
+    }
+
+    // ## m4-t32-shots (named exception; PO R-W5-14 a)
+    /// The time zone select's choices as shown, and the selected one's index.
+    pub fn time_zone_choices(cx: &App) -> Option<(Vec<String>, usize)> {
+        let page = open_page(cx)?;
+        let select = page.read(cx).time_zone.select().read(cx);
+        let labels = select
+            .options()
+            .iter()
+            .map(|o| (o.label)(cx).to_string())
+            .collect();
+        Some((labels, select.selected()))
+    }
+
+    /// Picks time zone choice `index`, as the select does when the user picks it.
+    pub fn pick_time_zone(index: usize, cx: &mut App) {
+        if let Some(page) = open_page(cx) {
+            let select = page.read(cx).time_zone.select().clone();
+            select.update(cx, |s, cx| s.set_selected(index, cx));
+            let values = super::time_zone::values(
+                &cx.try_global::<AppState>()
+                    .map(|s| s.settings.ui.time_zone.clone())
+                    .unwrap_or_default(),
+            );
+            if let Some(v) = values.get(index) {
+                super::time_zone::apply(v, cx);
+            }
+            cx.refresh_windows();
+        }
     }
 }

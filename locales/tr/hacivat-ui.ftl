@@ -3669,3 +3669,54 @@ hv-metadata-after-commit-tip-schema = Bu transaction'ın { $schema } üzerindeki
 #   $schema (String) - a schema (or database) name, verbatim, e.g. "public".
 # Review: PO
 hv-metadata-log-pending-schema = Gezgin yenilemesi COMMIT'i bekliyor ({ $schema } içindeki değişiklikler)
+
+## m4-t32-shots
+# Settings › General (PO ruling R-W5-14 a). The time zone row's title.
+# Review: PO
+hv-settings-time-zone = Saat dilimi
+# Settings › General (PO ruling R-W5-14 a). The choice that follows the operating system, with the zone it reports.
+# Variables:
+#   $zone (String) - an IANA time zone, verbatim, e.g. "Europe/Istanbul".
+# Review: PO
+hv-settings-time-zone-system = Sistem ({ $zone })
+# Settings › General (PO ruling R-W5-14 a). Coordinated Universal Time.
+hv-settings-time-zone-utc = UTC
+# Settings › General (PO ruling R-W5-14 a). The note under the time zone row.
+# Review: PO
+hv-settings-time-zone-note = Sonuçlardaki tarih ve saatler bu dilimde gösterilir. Bundan sonra açılan bağlantılar bunu kullanır; açık olanlar kendi dilimlerini korur.
+# Command palette (PO ruling R-W5-14 b): clears the selected connection's query history.
+# Review: PO
+hv-cmd-connection-clear-history = Bağlantının sorgu geçmişini temizle
+# The connection context menu (PO ruling R-W5-14 b).
+# Review: PO
+hv-conn-menu-clear-history = Sorgu geçmişini temizle…
+# The query history dialog (PO ruling R-W5-14 b). The ⋯ button's name and tooltip.
+# Review: PO
+hv-history-more = Diğer işlemler
+# The query history dialog's ⋯ menu (PO ruling R-W5-14 b).
+# Review: PO
+hv-history-clear-item = Bu bağlantının geçmişini temizle…
+# Command palette (PO ruling R-W5-14 b): clears the history of the console's connection, from the history dialog.
+# Review: PO
+hv-cmd-history-clear = Bu bağlantının sorgu geçmişini temizle
+# The clear-history confirmation (PO ruling R-W5-14 b). Cancel is the default button.
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-history-clear-title = { $name } için sorgu geçmişi temizlensin mi?
+# The clear-history confirmation (PO ruling R-W5-14 b).
+# Review: PO
+hv-history-clear-body = Bu bağlantı için kaydedilen tüm ifadeler, sabitlenenler de dahil, bu bilgisayardan silinir. Bu işlem geri alınamaz. Sunucuda hiçbir şey değişmez.
+# The clear-history confirmation (PO ruling R-W5-14 b). The button that clears.
+# Review: PO
+hv-history-clear-btn = Geçmişi temizle
+# A toast after the history of a connection was cleared (PO ruling R-W5-14 b).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-history-cleared = { $name } için sorgu geçmişi temizlendi.
+# A toast when clearing the history of a connection failed (PO ruling R-W5-14 b).
+# Variables:
+#   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
+# Review: PO
+hv-history-clear-failed = { $name } için sorgu geçmişi temizlenemedi. Hiçbir şey değişmedi.

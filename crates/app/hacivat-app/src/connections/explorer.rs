@@ -345,6 +345,11 @@ pub fn menu_items(cx: &App, id: ProfileId) -> Vec<MenuItemSpec> {
         item(text_fn(ids::hv::CONN_MENU_DUP), "connection.duplicate"),
         item(text_fn(ids::hv::CONN_MENU_COPY_URL), "connection.copy_url"),
         MenuItemSpec::separator(),
+        // ## m4-t32-shots (named exception; PO R-W5-14 b)
+        item(
+            crate::l10n_global::text_fn_id("hv-conn-menu-clear-history"),
+            "connection.clear_history",
+        ),
         // ## m2a-t21-shots: "Delete… in red" (NOTES §8).
         item(text_fn(ids::hv::CONN_MENU_DELETE), "connection.delete").danger(true),
     ]

@@ -724,3 +724,132 @@ fn rows_are_list_options_and_a_move_is_announced(cx: &mut TestAppContext) {
     );
     stop_core_runtime_test(cx);
 }
+
+// ---- ## m4-t32-shots (named exception; PO ruling R-W5-14 b): "Clear query history…" ----------
+
+fn strip(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '\u{2068}' | '\u{2069}'))
+        .collect()
+}
+
+/// The statements the store keeps, every connection, sorted.
+fn kept(h: &History) -> Vec<String> {
+    let store = h.store.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    h.rt.spawn(async move {
+        let hits = store
+            .search(HistoryQuery {
+                limit: 1_000,
+                ..HistoryQuery::default()
+            })
+            .await;
+        let _ = tx.send(hits);
+    });
+    let mut out: Vec<String> = rx
+        .recv()
+        .expect("the store answers")
+        .expect("search")
+        .into_iter()
+        .map(|h| h.record.statement_masked.to_string())
+        .collect();
+    out.sort();
+    out
+}
+
+fn menu_labels(vcx: &VisualTestContext, profile: ProfileId) -> Vec<String> {
+    vcx.cx.read(|cx| {
+        hacivat_app::connections::explorer::menu_items(cx, profile)
+            .iter()
+            .filter(|i| !i.separator)
+            .map(|i| (i.label)(cx).to_string())
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn the_history_menu_clears_this_connection_after_asking_with_cancel_first(cx: &mut TestAppContext) {
+    let mut h = history(cx, &["SELECT 1", "SELECT 2"]);
+    let other = add_profile(h.vcx, test_profile("billing-dev", None, "127.0.0.2"));
+    h.put(record(other, "SELECT 'other'", Outcome::Ok, 0));
+    h.open();
+    assert_eq!(h.shown().statements.len(), 2);
+    // The ⋯ button ends the bar's Tab order (search, scope, outcome, ⋯); Enter opens its menu.
+    h.keys("tab tab tab enter");
+    assert!(layer_ids(h.vcx).contains(&"menu"), "{:?}", layer_ids(h.vcx));
+    h.keys("enter");
+    assert_eq!(
+        strip(&dialog_title(h.vcx)),
+        "Clear the query history of orders-dev?"
+    );
+    assert_eq!(
+        h.vcx.cx.read(hacivat_app::history::clear::question),
+        Some(h.profile)
+    );
+    // Cancel is the default: Enter cancels and nothing is deleted.
+    h.keys("enter");
+    assert!(!layer_ids(h.vcx).contains(&"dialog"));
+    assert_eq!(kept(&h), ["SELECT 'other'", "SELECT 1", "SELECT 2"]);
+    // Clear history (shift-tab from Cancel, then Enter): only this connection's entries go.
+    assert!(run(h.vcx, "history.clear"));
+    h.vcx.run_until_parked();
+    h.keys("shift-tab enter");
+    wait_until(h.vcx, "the history cleared", |_| kept(&h).len() == 1);
+    assert_eq!(kept(&h), ["SELECT 'other'"]);
+    // The open dialog searched again and shows no entry; a toast says so.
+    wait_until(h.vcx, "the dialog searched again", |vcx| {
+        vcx.cx
+            .read(|cx| dialog::shown(cx).is_some_and(|s| s.statements.is_empty()))
+    });
+    assert!(
+        toast_texts(h.vcx)
+            .iter()
+            .any(|t| strip(t) == "The query history of orders-dev was cleared."),
+        "{:?}",
+        toast_texts(h.vcx)
+    );
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn the_connection_menu_clears_the_selected_connections_history(cx: &mut TestAppContext) {
+    let h = history(cx, &["SELECT 1"]);
+    let other = add_profile(h.vcx, test_profile("billing-dev", None, "127.0.0.2"));
+    h.put(record(other, "SELECT 'other'", Outcome::Ok, 0));
+    h.vcx.cx.update(|cx| {
+        hacivat_app::connections::ConnectionsModel::select(cx, Some(other));
+    });
+    h.vcx.run_until_parked();
+    // The connection menu offers it, before Delete….
+    let labels = menu_labels(h.vcx, other);
+    let at = labels.iter().position(|l| l == "Clear query history…");
+    assert!(
+        at.is_some_and(|i| labels.get(i + 1).map(String::as_str) == Some("Delete…")),
+        "{labels:?}"
+    );
+    assert!(run(h.vcx, "connection.clear_history"));
+    h.vcx.run_until_parked();
+    assert_eq!(
+        strip(&dialog_title(h.vcx)),
+        "Clear the query history of billing-dev?"
+    );
+    // Escape cancels.
+    h.vcx.simulate_keystrokes("escape");
+    h.vcx.run_until_parked();
+    assert_eq!(kept(&h), ["SELECT 'other'", "SELECT 1"]);
+    assert!(run(h.vcx, "connection.clear_history"));
+    h.vcx.run_until_parked();
+    h.vcx.simulate_keystrokes("shift-tab enter");
+    wait_until(h.vcx, "billing-dev cleared", |_| kept(&h).len() == 1);
+    assert_eq!(kept(&h), ["SELECT 1"]);
+    switch_to(h.vcx, "tr");
+    h.vcx.run_until_parked();
+    assert!(
+        menu_labels(h.vcx, other)
+            .iter()
+            .any(|l| l == "Sorgu geçmişini temizle…"),
+        "{:?}",
+        menu_labels(h.vcx, other)
+    );
+    stop_core_runtime_test(cx);
+}

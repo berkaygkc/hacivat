@@ -73,6 +73,11 @@ pub(crate) enum Cmd {
         pinned: bool,
         reply: oneshot::Sender<Result<(), HistoryError>>,
     },
+    // ## m4-t32-shots (named exception; PO R-W5-14 b)
+    Clear {
+        profile: ProfileId,
+        reply: oneshot::Sender<Result<u64, HistoryError>>,
+    },
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -522,6 +527,22 @@ impl Db {
             .map_err(sql)
     }
 
+    // ## m4-t32-shots (named exception; PO R-W5-14 b)
+    /// Deletes every entry of `profile`, pinned ones too (the full-text index follows through
+    /// its delete trigger); answers how many were deleted.
+    pub(crate) fn clear(&self, profile: &ProfileId) -> Result<u64, HistoryError> {
+        if self.broken {
+            return Err(HistoryError::Corrupt);
+        }
+        self.conn
+            .execute(
+                "DELETE FROM history WHERE data_source_id = ?1",
+                params![profile.to_string()],
+            )
+            .map(|n| n as u64)
+            .map_err(sql)
+    }
+
     /// Folds the log into the file (at shutdown).
     fn checkpoint(&self) {
         let _ = self
@@ -705,6 +726,14 @@ pub(crate) async fn run(
                     Some(Cmd::Pin { id, pinned, reply }) => {
                         db = blocking(d, move |db| {
                             let _ = reply.send(db.pin(id, pinned));
+                        })
+                        .await
+                        .map(|(d, ())| d);
+                    }
+                    // ## m4-t32-shots (named exception; PO R-W5-14 b)
+                    Some(Cmd::Clear { profile, reply }) => {
+                        db = blocking(d, move |db| {
+                            let _ = reply.send(db.clear(&profile));
                         })
                         .await
                         .map(|(d, ())| d);

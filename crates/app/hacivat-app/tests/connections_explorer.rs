@@ -415,6 +415,8 @@ fn context_menu_items(cx: &mut TestAppContext) {
             "Duplicate",
             "Copy as URL",
             "—",
+            // ## m4-t32-shots (named exception; PO R-W5-14 b)
+            "Clear query history…",
             "Delete…"
         ]
     );
@@ -647,8 +649,9 @@ fn a_read_only_store_disables_the_mutating_commands(cx: &mut TestAppContext) {
             .map(|i| i.disabled)
             .collect()
     });
-    // Connect, Edit…, Duplicate, Copy as URL, Delete…
-    assert_eq!(disabled, [false, true, true, false, true]);
+    // Connect, Edit…, Duplicate, Copy as URL, Clear query history… (## m4-t32-shots, named
+    // exception: disabled while no history store is open), Delete…
+    assert_eq!(disabled, [false, true, true, false, true, true]);
 }
 
 /// Review minor: the home entry points are real buttons (tab stops) that run their command.
@@ -696,6 +699,8 @@ fn only_delete_is_red_in_the_connection_menu(cx: &mut TestAppContext) {
             ("Edit…".to_string(), false),
             ("Duplicate".to_string(), false),
             ("Copy as URL".to_string(), false),
+            // ## m4-t32-shots (named exception; PO R-W5-14 b)
+            ("Clear query history…".to_string(), false),
             ("Delete…".to_string(), true),
         ]
     );
