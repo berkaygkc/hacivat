@@ -24,6 +24,8 @@
 //!   — through a cast, parentheses or arithmetic included (fix round 1, I4).
 //! - Every dialect: `txid_current` and `pg_current_xact_id` (they assign an XID).
 //! - Directive-looking text (`--#`, `---`) inside a literal or quoted identifier.
+//! - A quote character inside a comment of a section (R-W3-9, Task 33a): the runtime guard
+//!   would refuse the rendered text.
 //!
 //! What the parser already refuses never reaches the lint: nesting deeper than `MAX_NESTING`,
 //! MySQL executable comments, `#{ident:…}` outside a `show-create` section (fix round 1).
@@ -62,6 +64,14 @@ pub enum LintKind {
     XidAssigningFunction(String),
     /// `--#` or `---` inside a literal or quoted identifier.
     DirectiveInLiteral,
+    // ## m4-t33a-hygiene (named exception in Task 4's file; R-W3-9)
+    /// A quote character (`'`, `"` or a backtick) inside a comment of a section. The comment is
+    /// rendered with the section, and the metadata connection's guard lexes it in every
+    /// dialect context of the engine, where a quote can open a literal: the guard then refuses
+    /// every read of the section (`RefusedText`, found by Task 18). File-header comments are
+    /// outside every section and never rendered.
+    QuoteInComment,
+    // ## m4-t33a-hygiene
 }
 
 fn eq(w: &str, s: &str) -> bool {
@@ -164,7 +174,13 @@ fn lint_section(sec: &Section, lexer: Family, rules: Family, out: &mut Vec<LintE
                     };
                     toks.push((l.line, tok));
                 }
-                Piece::Comment(_) => {}
+                // ## m4-t33a-hygiene (named exception; R-W3-9)
+                Piece::Comment(c) => {
+                    if c.contains(['\'', '"', '`']) {
+                        push(l.line, LintKind::QuoteInComment);
+                    }
+                }
+                // ## m4-t33a-hygiene
                 Piece::Bind(_) | Piece::Macro(_) => toks.push((l.line, Tok::Operand)),
                 Piece::List(_) => toks.push((l.line, Tok::List)),
             }

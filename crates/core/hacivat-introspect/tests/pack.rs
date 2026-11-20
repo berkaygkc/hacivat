@@ -1984,3 +1984,54 @@ fn rendering_is_byte_identical_under_tr_locale() {
         assert_eq!(line, here.escape_default().to_string(), "{locale}");
     }
 }
+
+// ## m4-t33a-hygiene (R-W3-9)
+/// A quote inside a comment of a section passes the parser, renders with the section and makes
+/// the metadata connection's guard refuse the text (Task 18 found it), so the lint refuses it.
+/// A file-header comment is outside every section and stays free.
+#[test]
+fn a_quote_in_a_section_comment_is_linted() {
+    for d in [
+        DialectId::Postgres,
+        DialectId::MySql,
+        DialectId::MariaDb,
+        DialectId::Sqlite,
+    ] {
+        for comment in [
+            "-- the server's own name",
+            "-- a \"quoted\" word",
+            "-- a `ticked` word",
+            "/* the server's own name */",
+        ] {
+            let body = format!("SELECT 1 AS x\n{comment}\nFROM t");
+            assert_eq!(
+                lint_kinds(d, &section(&body)),
+                [LintKind::QuoteInComment],
+                "{d:?} {comment}"
+            );
+        }
+        let header = format!("-- the server's file header\n{}", section("SELECT 1 AS x"));
+        assert_eq!(lint_kinds(d, &header), Vec::new(), "{d:?}");
+        assert_eq!(
+            lint_kinds(d, &section("SELECT 1 AS x\n-- a plain comment")),
+            Vec::new(),
+            "{d:?}"
+        );
+    }
+    // Why: a joined read whose engine the caller cannot place lexes in every engine's
+    // contexts, and MySQL reads `--` with no space after it as two minus signs, so the quote
+    // opens a literal there and the guard refuses the rendered text of a SQLite or PostgreSQL
+    // section (whose parsers accept that comment). The lint is the static half.
+    #[cfg(feature = "session")]
+    for d in [DialectId::Postgres, DialectId::Sqlite] {
+        let body = section("SELECT 1 AS x\n--the server's own name\nFROM t");
+        let q = render(&body, "S", ctx(d, 170_000));
+        assert!(
+            hacivat_session::meta::check_read_text_for(q[0].sql(), DbmsKind::Unknown).is_err(),
+            "{d:?} {}",
+            q[0].sql()
+        );
+        assert_eq!(lint_kinds(d, &body), [LintKind::QuoteInComment], "{d:?}");
+    }
+}
+// ## m4-t33a-hygiene
