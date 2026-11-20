@@ -2487,3 +2487,97 @@ introspectors' own system-mode packs.
   `virtual-fks.toml` is Task 26's hand-authored input to the system layer (R-M4-12), not an
   input or output of the snapshot build, so it is in neither the digests nor the manifest
   (R-M4-17's manifest fields); Task 26's tests guard its rows.
+
+## m4-t26 — overlays
+
+Task 26 layers the shipped system catalogs and the virtual foreign keys over `SnapshotView`
+and implements `sql_catalog::CatalogView` for it (HV-INTRO-16 consumer side; R-M4-5, -6, -12,
+-27).
+
+- **Opening a set** (`SystemCatalogs::open(dir)`, `from_embedded()`): the manifest is read by
+  a strict reader of the TOML subset it uses (`system::mini_toml`; this crate has no TOML
+  dependency and Task 1a's manifest table is exhaustive). A row's file must be exactly
+  `<dbms>-<line>.hvsnap.zst` (no other path), its line the engine's shape, no line twice.
+  Nothing is decoded at open: `for_server` reads a file on first use, checks it against the
+  manifest's XXH3-64 digest, decodes it with Task 23's strict decoder and checks its dbms and
+  line; every caller and every clone of the set shares one `Arc`. A file that is gone,
+  truncated, tampered with or not decodable serves `None` (decided once), never a panic.
+  `embedded-system` embeds the manifest, the ten files and `virtual-fks.toml`
+  (`system/embedded.rs`, paths from `CARGO_MANIFEST_DIR`); a test ties the table to the
+  manifest.
+- **Exact selection** (R-M4-6): PostgreSQL by major, MySQL and MariaDB by major.minor (a
+  MariaDB `5.5.5-` replication prefix is dropped), the leading `d+(.d+)*` of the version text;
+  no closest line; never SQLite or a fork.
+- **The system layer.** A system namespace of the catalog's engine answers from the snapshot
+  unless the user chose "Introspect live" for it (`Overlays::live_system`, live keys); then,
+  or without a snapshot, the live namespace answers as before, or nothing. This holds whatever
+  the live state of that namespace says (system schemas are out of scope by default,
+  R-M4-14). Named exception in Task 9's `view.rs` (fenced `// ## m4-t26-overlays`): `walk`
+  and `children` ask the layer first; `scope_excludes` is a crate accessor for `sql_view`;
+  the `layers` field doc no longer says "until Task 26".
+- **PostgreSQL system objects in the live form.** A snapshot's PostgreSQL namespaces are keyed
+  `[schema]`; the view hands out arenas re-keyed `[database, schema]` (built once per database
+  per snapshot, shared through `Overlays::cache`), so a handle's key is
+  `[db, pg_catalog, pg_class]` and can be asked for its children like any live key. Handles
+  into the layer carry `ObjId::ns = SYSTEM_LAYER_NS` (`u32::MAX`).
+- **A newer patch release** (alg/02 HV-INTRO-16 edge 1): a name the snapshot lacks is
+  `Missing` only when the server's version has the full patch form (PostgreSQL `M.m`, MySQL
+  and MariaDB `M.m.p`), the same line, and is not newer than the snapshot's own version;
+  otherwise `Unknown(ServerDependent)` ("depends on the exact server"). An unreadable version
+  is never "not newer".
+- **R-W2-6's cost, re-checked (carries-w2 T26).** With a snapshot, `pg_catalog` (first on
+  every PostgreSQL search path) is complete, so an unqualified user name walks past it:
+  `Found` in `public`, `Missing` when every schema misses. `pg_catalog` shadows a `public`
+  object of the same name, as on the server (T9's carry; tested). **Cost:** against a server
+  newer than the snapshot's patch (17.13 against the 17.12 snapshot), the `pg_catalog` miss is
+  not a fact, so every unqualified lookup stops there with `Unknown(ServerDependent)` until
+  the snapshots are regenerated. PostgreSQL does not change its catalog contents within a
+  major (the catalog version is fixed per major), which would allow a PostgreSQL-only
+  exception; that would change a value the plan fixes (edge 1), so it is a question for the
+  PO/controller, not taken here.
+- **The virtual layer** (R-M4-12). `SnapshotView::virtual_fks_of(rel)` / `virtual_fks_to(rel)`
+  report user rows (`Overlays::virtual_fks`, from `ProfileUserData` through
+  `Overlays::with_user_data`) and shipped rows (`Overlays::shipped_fks`) as `LayeredFk { layer:
+  Virtual, origin, flags, target, source }`. A row matches a relation by server id (a rename)
+  or by path (an import from another server, whose ids differ). Its target is resolved by
+  server id, then by exact path through the model view (any relation kind; the system layer
+  included). It is hidden when the source relation has a real foreign key with the same
+  columns to the same relation (by path or the target's server id); `BROKEN` only when the
+  target is `Missing`, never on `Unknown`. Virtual rows never enter the model, so
+  `children(_, ForeignKey)` and the DDL producers see only real keys. Annotations are found by
+  their key, else by kind and path.
+- **`virtual-fks.toml`**: hand-written rows, one per reference the PostgreSQL "System
+  Catalogs" chapter states for a column ("relnamespace oid (references pg_namespace.oid)");
+  each row's `source` names the page and column. The reader refuses a row without a non-blank
+  `source`, with column lists of different lengths or with any other key. Every row is
+  checked against the five PostgreSQL snapshots. Shipped rows come with a snapshot only
+  (`overlays_for`).
+- **`CatalogView` for `SnapshotView`** (`sql_view.rs`). A schema key names the system layer's
+  namespace or a live one of the current database. Hits on `relation` and `columns` allocate
+  nothing: keys are compared, the arena's name index answers, and the payloads are `Arc`
+  clones of names or of slices built once per namespace (`LayerCache`, keyed by the arena's
+  address with a `Weak`, so an address is not reused while its entry lives; dead entries go
+  on the next insert). Misses go through `ModelView` with the key as a quoted name, so
+  `Missing` follows its rules exactly. Lists (`relations`, `functions_in`, `types`, `columns`,
+  and `children` of a system object) are `Found` only from a complete, unfiltered namespace;
+  a system namespace is complete only at a patch its snapshot covers (a newer patch may have
+  added a relation or a column: `Unknown(ServerDependent)`), and a system relation held
+  without columns is `Unknown`, never "no columns". MySQL/MariaDB built-ins (name only, `args
+  = None`) join `functions`/`functions_in` of every schema with an empty `schema`; their names
+  are the generator's probe of the documented function index, a subset of what the server
+  accepts, so a MySQL/MariaDB function miss is never `Missing` (`Unknown(ServerDependent)`;
+  without a snapshot `Unknown(NotLoaded)`). `settings()` from the
+  snapshot, else `Unknown(NotLoaded)`; `foreign_keys` is `Unknown` for a system relation (a
+  snapshot holds no constraints); `row_estimate` stays `None` until the catalog stores facet
+  values (Task 15b).
+- **The allocation test counts, it does not hook the allocator** (`unsafe` is confined to the
+  UI platform layer; Task 9's precedent): every step of a `sql_view` lookup that may allocate
+  calls `note_slow_path`, and the test asserts none on warm hits and some on a miss.
+- **Not wired yet** (carried): nothing sets a catalog's overlays. `Publisher` has no change
+  that sets `CatalogSnapshot.overlays`, so the hub (or whoever builds views) must pass
+  `SnapshotView::with_layers(system.overlays_for(dbms, version).with_user_data(&data))`, or a
+  `CatalogChange::SetOverlays` must be added to Task 9's `snapshot.rs`. A live setting list
+  (`ListSettings`) and the `Statistics` facet's values are not kept in the catalog.
+- **The pg13 Docker test** lives in `hacivat-introspect/tests/system_catalogs.rs` (named
+  exception: a new file of this task there), because `hacivat-meta` may not reach a server
+  (`MetaBelowIntrospect`).

@@ -212,8 +212,8 @@ pub struct SnapshotView {
     search_path: SearchPath,
     /// The overlays layered above the snapshot (the plan's `SnapshotView { snap, search_path,
     /// layers }`; HV-INTRO-16): the generation's own overlays unless a caller sets others.
-    /// Task 26 consumes them (system-catalog layer, virtual FKs); until then no lookup reads
-    /// them, so system lookups stay `Unknown` (F31).
+    /// Task 26 consumes them: `lookup` and `children` answer a system namespace from the
+    /// system layer (`crate::overlay`), and the virtual foreign keys are layered on demand.
     layers: Arc<Overlays>,
     scope: Option<Arc<dyn ScopeFilter>>,
     hooks: Option<Arc<LookupHooks>>,
@@ -312,6 +312,18 @@ impl SnapshotView {
             .as_ref()
             .is_some_and(|s| s.excludes(ns, kind, name))
     }
+
+    // ## m4-t26-overlays (named exception in Task 9's file): `sql_view` asks the scope filter
+    // before it answers a list or a miss from a live namespace.
+    pub(crate) fn scope_excludes(
+        &self,
+        ns: &NsKey,
+        kind: Option<ObjectKind>,
+        name: Option<&str>,
+    ) -> bool {
+        self.excluded(ns, kind, name)
+    }
+    // ## m4-t26-overlays
 
     /// The namespace `qual` (the qualifier parts of a typed name) points into: PostgreSQL
     /// `schema` (in the search path's database) or `database.schema` (the current database
@@ -509,6 +521,18 @@ impl SnapshotView {
             let Some(key) = ns else {
                 return Lookup::Unknown(UnknownReason::NotLoaded);
             };
+            // ## m4-t26-overlays (named exception in Task 9's file): a system namespace the
+            // user did not choose to introspect live answers from the system layer; a miss
+            // there walks on only when it is a fact (not against a newer patch release).
+            if let Some(sys) = crate::overlay::system_ns(snap, &self.layers, key) {
+                match self.in_arena(&sys.arena, group, part) {
+                    Lookup::Found(idx) => return Lookup::Found(sys.handle(idx)),
+                    Lookup::Unknown(reason) => return Lookup::Unknown(reason),
+                    Lookup::Missing(_) if sys.miss_is_fact => continue,
+                    Lookup::Missing(_) => return Lookup::Unknown(UnknownReason::ServerDependent),
+                }
+            }
+            // ## m4-t26-overlays
             let NsView {
                 arena,
                 status,
@@ -620,6 +644,11 @@ impl ModelView for SnapshotView {
         {
             return self.listed_schemas(parent);
         }
+        // ## m4-t26-overlays (named exception in Task 9's file): the system layer.
+        if let Some(answer) = crate::overlay::system_children(snap, &self.layers, parent, kind) {
+            return answer;
+        }
+        // ## m4-t26-overlays
         let key = if parent.kind.is_namespace_root() {
             let ns_kind = match parent.kind {
                 ObjectKind::Root => NsKind::Server,
