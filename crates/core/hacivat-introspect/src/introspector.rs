@@ -199,6 +199,17 @@ pub trait Introspector: Send + Sync {
 
     fn capabilities(&self) -> IntroCaps;
 
+    // ## m4-t22-state (named exception in Task 1c's file)
+    /// The cached side of [`Introspector::check_namespace`]: what the server side answers for
+    /// `snap` when nothing changed since `snap` was read, computed from `snap` alone (no I/O).
+    /// `freshness::check_namespace` compares the two by equality. The default is `None`: the
+    /// introspector cannot vouch for a cached namespace, so validation reads it again.
+    fn cached_check(&self, snap: &NamespaceSnapshot) -> Option<NsCheck> {
+        let _ = snap;
+        None
+    }
+    // ## m4-t22-state
+
     // ## m4-t15-engine (ruling R-W3-3)
     /// The identity of the server behind `c` (PostgreSQL `system_identifier` and start time,
     /// MySQL `@@server_uuid`, SQLite file identity), hashed by the introspector, for

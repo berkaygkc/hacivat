@@ -2238,3 +2238,155 @@ Knowledge Base). Rulings R-M4-30, R-W4-3 (a key left out of `FacetRows` is not l
   stays `Ok` (`APPLICABLE_ROLES`, so a revoked role is removed). Task 17's
   `revoked_mysql_schema_select_fails_users_kind_only` asserted the T1c stub's `NotImplemented`;
   it now asserts this (named exception).
+
+## m4-t22 — freshness
+
+Task 22 (HV-INTRO-15): state checks, background validation of cached namespaces, periodic
+validation. `freshness.rs` holds the orchestration; the engine, the introspectors and the fake
+carry fenced `m4-t22-state` named exceptions.
+
+- **State checks compare by equality.** `freshness::check_state` resolves each key in the
+  snapshot to its **stamp owner** (its top-level ancestor: PostgreSQL's `StateOfRelation` covers
+  a relation's columns, indexes, constraints, triggers and comments; MySQL answers a child with
+  its table's mark; SQLite's marks are per schema), reads `Introspector::stamps` per kind in
+  chunks of at most 1,000 keys (R-M4-3), and compares each stamp with the owner's stored mark by
+  equality, never by order (a 32-bit xmin wraps). `Dropped` only where absence is a fact
+  (PostgreSQL, SQLite); a MySQL stamp the server no longer shows is `Unknown` (a lost privilege
+  hides objects, T17 m7); a permission error leaves its chunk `Unknown`; a stamp of
+  `StateMark::None` (no oid, no time) is `Unknown`; a key of a namespace not loaded at
+  `Structure` is `Unknown`. The introspectors' own `check_state` stay as they were (no stored
+  marks); the engine no longer calls them.
+- **PostgreSQL marks are recorded on re-read.** PostgreSQL passes store `StateMark::None` per
+  object, so a first check reads `Changed`; the engine re-reads the owner and stores the stamp
+  read before the re-read as its mark (`Subtree::set_root_state`, a named exception in
+  `hacivat-meta`). A change between the stamp and the re-read moves the next stamp again: the
+  order can cost a second re-read, never hide a change. A later pass that re-reads the object
+  drops the mark (it reads `StateMark::None`), and the next check records it again.
+- **By name.** A key the loaded namespace does not hold compares as absent: still absent is
+  `Current` (the negative cache's `Missing` stands), present is `Changed` (a fragment reads it).
+  The lookup hooks' probe now carries the missing name: on MySQL/MariaDB it stamps the name as
+  every top-level kind a schema holds (a kind left out could let a wrong `Missing` stand); an
+  undecidable answer, and every probe on PostgreSQL (stamps need an oid) and SQLite (exact-name
+  stamps against caseless names), fall back to the incremental pass of before.
+- **Split by connection.** `IntroHandle::check_state` runs one check per database of its keys
+  (`database_of`: PostgreSQL oids are per database); SQLite `temp` keys are never stamped
+  (`Changed` without a stamp, T18 I-1/I-2) and their re-read runs on the user's connection.
+- **Namespace validation** (`freshness::check_namespace`): the introspector's server-side
+  `NsCheck` against its own cached side (`Introspector::cached_check`, a new trait method whose
+  default `None` means "read it again"). Equal: the stale mark is cleared, nothing else is read.
+  Different: an incremental pass; a full one when the server side answers
+  `max_mark == StateMark::None`. Runs on connect for every cached in-scope namespace but the
+  current one (which keeps its step-3 incremental pass), and every period. MySQL compares
+  T17's top marks (with a scope filter that excludes objects the check always differs: an
+  incremental pass, marker sections only); SQLite T18's `ns_check_of` (`temp` never).
+- **PostgreSQL's check** (`pg/state.rs`) replaces the digest of `pass::check_namespace` in the
+  trait: both sides list what the cache holds (top-level objects and a relation's indexes,
+  keys, checks, exclusions and triggers by kind and oid, a domain's constraint count, comment
+  keys; the server side keeps only what the cache holds, so an object of another filter or
+  level never differs); the mark is the watermark's low 32 bits when the plan is incremental and
+  nothing is young, `pg::state::CHANGED` (a `Hash`, never the cached side's value) when any row
+  is young (fix round 1 C-1), and `StateMark::None` (full) when the plan is full or a
+  dependency's schema was renamed. Only `Identity`, `ListExistent`, `ListExistentComments`, the
+  change queries and the canary run. `pass::ns_oid`, `comment_owners` and `CommentOwner` became
+  crate-visible.
+- **Periodic validation** (R-M4-20, PO-Q6): `freshness::validate_interval` (the hub delegates
+  to it) — `auto` is 10 minutes for `local`/`dev` tags, off otherwise. It runs on a
+  `ValidationClock` (`Engine::start_with_clock`): tokio's in the product, a `ManualClock` in
+  tests. **Deviation:** the plan's `start_paused` test needs tokio's `test-util`, which the
+  crate's manifest does not enable (T15's deviation); the clock seam replaces it. A round inside
+  the user's transaction on a single-connection profile is deferred and asked again every
+  `busy_retry`, so it runs as soon as the transaction ends.
+- **Identity per session** (R-W3-3, T16 review carry): the first `Unknown` server identity of an
+  engine session forgets every watermark (one full re-read); an `Unknown` right after it keeps
+  them (they come from this session's passes on the same login); a known identity after an
+  unknown one is never taken for the same server.
+- **D-039 across passes** (T10 carry M-1; fix round 1 I-4): every background pass (validation,
+  on-connect step 3, a probe's fallback, refresh after DDL) counts the top-level objects it
+  removes since the user last decided (a user refresh or a confirmation); once the total
+  exceeds the guard (50 % of at least 20), the pass is held like a guarded one. "Keep cached"
+  sticks until the user's next refresh: a background pass that would remove a kept object asks
+  again.
+  `IntroHandle::pending_confirmation(ns)` names what a held deletion would remove (T24's dialog).
+- **Carries closed:** T15 m-rr2 and T17 fm3 (the merges of a narrower filter, of forgotten
+  watermarks and of a new fold rule run on the blocking pool; the namespaces' tasks wait for the
+  publish, so none reads or merges against an arena being replaced; until a refold lands, its
+  lookups answer `ServerDependent`); T17 fm1 (a first arena merged under a superseded fold rule
+  is read again); T17 fm2 (the placeholder test reads the hub's catalog); T17 m5 (a changed
+  MySQL table re-reads the referring tables of other cached databases, as a follow-up); T16b (a
+  renamed or dropped account marks every loaded grants facet stale).
+- **Not closed:** T19/T25 `server_text` load state: T25 pairs it with `check_state`. SQLite
+  `temp` keys are decided `Changed` because `MetaConn` does not say whose connection it is (a T5
+  seam would let the introspector stamp them on the user's connection).
+- **Fix round 1 (opus review: C-1, I-1..I-7).**
+  - *C-1.* A PostgreSQL namespace whose change queries return any row is never `Current`, even
+    when an older open transaction (an idle session, a prepared transaction) holds the snapshot
+    xmin at the cached watermark: the server side answers `pg::state::CHANGED`. While the holder
+    stays open each round re-reads the same young set incrementally (R-M4-8's conservative
+    window). `pg::state::validation_mark` is the pure decision, unit-tested.
+  - *I-1.* `ChangedDependents`' `schema-rename` branch (Task 16's pack, named exception) also
+    follows referenced collations, operators and operator classes, so every incremental pass,
+    not only validation, goes full when a schema holding one is renamed. `YoungSchemas` is
+    removed (redundant).
+  - *I-2, I-3, I-5.* MySQL's cached side vouches only for a schema namespace with a
+    `Watermark::MyTime` (MySQL 8.0+; MariaDB stays full, R-M4-10; the server namespace and any
+    arena after `forget_watermarks` are read again), folds the watermark's `server_uuid`,
+    version and privilege hash into its digest (the server side folds the same facts read live,
+    R-W3-3), and never vouches while a top mark is inside R-M4-39's one-second window of that
+    watermark (`mysql::state::IN_WINDOW`).
+  - *I-5.* A validation that fails (other than a cancel) queues an incremental pass of its
+    namespace instead of being dropped.
+  - *I-6a.* A MySQL pass whose privilege hash moved marks every loaded grants facet stale.
+  - *I-7.* The PostgreSQL Docker tests of `docker_freshness.rs` run one at a time; the
+    "unchanged" test waits until no XID is open before its pass and asserts that both change
+    queries returned no row. New Docker tests: a held-back xmin never validates a change
+    `Current` (C-1); a renamed schema holding a used collation makes the incremental pass full
+    (I-1).
+  - *Minors.* `forget_watermarks` also resets every object mark (m-1: nothing of another server
+    is trusted); a rebuild that dies releases its namespaces (m-2, a drop guard); `temp` is
+    matched ASCII-caseless everywhere (m-7); the Docker namespaces are dropped by a guard (m-6).
+  - *Engine flake* (m4 CI 44655186750, `on_connect_with_cache_publishes_stale_then_runs_incremental_not_full`):
+    a debounced cache write spawned from the timer was never awaited, so `closed()` could
+    resolve before it committed and the next session's cache missed the namespace. `stop` now
+    awaits every cache write in flight (timer saves and removals). Not reproducible on macOS
+    either way (400 runs, 8 in parallel, with and without the fix); the cause is read from the
+    code (WAL readers see only committed rows).
+  - *Carried:* T16b review m-5 (Dependencies facets whose `Ref`s name a changed oid) → **T15b**:
+    facet loading and its states are T15b's (W5) and no Dependencies facet is loaded before it,
+    so T15b invalidates them on a delta naming a referenced oid, before M7 uses them. T18's FTS5
+    shadow tables in `temp` and a field for a broken relation's error → **M5**. Review m-3 (one
+    database-wide `ChangedDependents` scan per cached schema on connect) → T29 records the cost.
+    Review m-5 (`reread_referrers` walks every FK on the actor) → noted with m-rr2's class;
+    bounded by MySQL merges that touched objects.
+  - *Rulings.* **R-W4-8** (T15 m12): a `Partial` namespace carries no stale bit — accepted as a
+    named exception: `LoadState::Partial` has no field for it and its lookups answer `Unknown`
+    on every miss; the UI badges a held namespace from `pending_confirmation` whatever its
+    `LoadState` (carried to T27/T32). `hacivat-meta` `Subtree::set_root_state` is an
+    acknowledged named exception.
+- **Fix round 2 (RR-1, ruling R-W4-9).** "Keep cached" no longer freezes the namespace (and
+  replaces the fix-round-1 rule "a background pass removing a kept object asks again"): every
+  background read of the namespace reports the kept objects existent (`work::protect_kept`
+  adds their identities to the existence sets that would decide them), so the merge deletes
+  none of them while every other deletion, addition and change applies, with no hold and no new
+  prompt. Only drops outside the kept set count toward the cumulative guard. The kept set is
+  cleared only by a user refresh (not by "Remove from cache", and not by the pass a confirmation
+  re-plans). Refresh-after-DDL passes count toward the guard (fail-safe; accepted). MySQL's
+  cached side also refuses a watermark whose version is below 8.0 (no R-M4-39 marker path).
+- **Fix round 3 (CI 44667350956, two `Current` answers).** A top-level key that names an
+  object by its server id and that the cache no longer holds (a re-read already brought a
+  recreated object of that name under a new oid) compares as "was there, mark unknown": a
+  missing stamp is `Dropped`, a present one `Changed`, never `Current` (before, it compared as
+  a name the cache never held). The MySQL table stamp already folds the table's `TRIGGERS` rows
+  (their number and newest `CREATED`; a pure test pins that a trigger, one in the same instant,
+  and dropping all of them move it). Both CI failures share one cause in the Docker harness:
+  an expansion's ticket resolves after the names-first pass and the full pass is still queued,
+  so the test's DDL ran before the full pass and the "cached" side already held the post-DDL
+  server; the harness now waits for the namespace's full level.
+- **Fix round 4 (RR-2).** `check_state` honours R-M4-39's one-second window on MySQL and
+  MariaDB (`freshness::compare_in`; the plan carries each probe's arena `MyTime` time): an
+  equal mark is `Current` only when the arena has a `MyTime` watermark and the stamp is outside
+  the window of it; inside it, or with no `MyTime` (MariaDB, a forgotten arena), it is
+  `Changed`. A fragment keeps its namespace's watermark, so an object re-read inside the window
+  reads `Changed` until the next namespace pass moves `W` (bounded, like the incremental
+  pass's own window). `IntroHandle::expand`'s doc now says the ticket resolves after the
+  names-first pass. R-W4-11 (two trigger changes of one table within one `CREATED` tick)
+  stays an M5 hardening.

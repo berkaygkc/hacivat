@@ -331,3 +331,64 @@ pub async fn server_top_marks(
     }
     Ok(out)
 }
+
+// ## m4-t22-state
+// Task 22 (fix round 1 I-2, I-3, I-5): the cached side of the namespace check vouches only for
+// a MySQL schema read by an incremental-capable pass (`Watermark::MyTime`: MySQL 8.0+, R-M4-10
+// keeps MariaDB `Full`), folds that watermark's server identity, version and privilege hash
+// into its digest (the server side folds the same facts read live: another server, another
+// version or other privileges never compare equal, R-W3-3), and never vouches while any top
+// mark is inside R-M4-39's one-second window of that watermark (two DDLs in one second leave
+// one `CREATE_TIME`: the incremental pass re-reads it, so validation must too).
+
+/// The `max_mark` of a cached side that cannot vouch because a mark is in the window: a
+/// `Hash`, which the server side (`Modified` or `None`) never answers, so the verdict is
+/// `Changed`.
+pub const IN_WINDOW: StateMark = StateMark::Hash(0x4d59_5749_4e44_4f57);
+
+/// `c` with the server's identity, version and privilege hash folded into its digest.
+pub fn fold_facts(mut c: NsCheck, server_uuid: &str, version: &str, priv_hash: u64) -> NsCheck {
+    let mut b = Vec::with_capacity(32 + server_uuid.len() + version.len());
+    b.extend_from_slice(&c.existence_digest.to_le_bytes());
+    for s in [server_uuid, version] {
+        b.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        b.extend_from_slice(s.as_bytes());
+    }
+    b.extend_from_slice(&priv_hash.to_le_bytes());
+    c.existence_digest = twox_hash::XxHash3_64::oneshot(&b);
+    c
+}
+
+/// The cached side (see the block docs); `None`: validation reads the namespace again.
+pub fn cached_check(snap: &NamespaceSnapshot, flavor: hacivat_proto::DbmsKind) -> Option<NsCheck> {
+    if flavor != hacivat_proto::DbmsKind::MySql || snap.key().kind != hacivat_meta::NsKind::Schema {
+        return None;
+    }
+    let hacivat_meta::Watermark::MyTime {
+        at_utc_micros,
+        server_uuid,
+        version,
+        priv_hash,
+    } = &snap.meta().watermark
+    else {
+        return None;
+    };
+    // MySQL before 8.0 has no R-M4-39 marker path (`incremental_supported`): never vouched.
+    let major = version
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|m| m.parse::<u32>().ok());
+    if major.is_none_or(|m| m < 8) {
+        return None;
+    }
+    let marks = top_marks_of(snap);
+    let mut c = ns_check(&marks);
+    if marks
+        .iter()
+        .any(|m| super::pass::in_window(&m.mark, *at_utc_micros))
+    {
+        c.max_mark = IN_WINDOW;
+    }
+    Some(fold_facts(c, server_uuid, version, *priv_hash))
+}
+// ## m4-t22-state

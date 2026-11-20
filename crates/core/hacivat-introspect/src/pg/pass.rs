@@ -203,7 +203,8 @@ pub(super) async fn in_snapshot<T>(
 }
 
 /// The schema oid of a probe for namespace `ns`, or why there is none.
-fn ns_oid(ns: &Ns, id: &IdentityRow) -> Result<Oid, IntroError> {
+// ## m4-t22-state (named exception): crate-visible for the namespace check of `state.rs`.
+pub(crate) fn ns_oid(ns: &Ns, id: &IdentityRow) -> Result<Oid, IntroError> {
     if *id.db_name != *ns.db {
         return Err(IntroError::Protocol(Name::from("pg/wrong-database")));
     }
@@ -520,7 +521,8 @@ async fn read_full(
 
 /// Where a comment of the cached namespace lives (for `ListExistentComments`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CommentOwner {
+// ## m4-t22-state (named exception): crate-visible (`comment_owners`).
+pub(crate) enum CommentOwner {
     /// A relation's own or column comment.
     RelComments(Oid),
     /// An index comment: its relation's keys.
@@ -539,7 +541,8 @@ fn oid_of(o: &Obj) -> Option<Oid> {
 }
 
 /// Every comment of the cached namespace by its `pg_description` key.
-fn comment_owners(prev: &NamespaceSnapshot) -> BTreeMap<(char, Oid, i32), CommentOwner> {
+// ## m4-t22-state (named exception): crate-visible for the namespace check of `state.rs`.
+pub(crate) fn comment_owners(prev: &NamespaceSnapshot) -> BTreeMap<(char, Oid, i32), CommentOwner> {
     let mut m = BTreeMap::new();
     for (i, o) in prev.objs().iter().enumerate() {
         if o.props().comment().is_none() {

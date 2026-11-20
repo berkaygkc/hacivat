@@ -1098,6 +1098,20 @@ impl Introspector for SqliteIntrospector {
         })
     }
 
+    // ## m4-t22-state (named exception): the cached side Task 18 prepared for Task 22; `temp`
+    // is per connection and never validated from here.
+    fn cached_check(&self, snap: &NamespaceSnapshot) -> Option<NsCheck> {
+        if snap
+            .key()
+            .path
+            .first()
+            .is_some_and(|s| s.eq_ignore_ascii_case("temp"))
+        {
+            return None;
+        }
+        ns_check_of(snap)
+    }
+
     /// R-W3-3: the file's identity ([`SqliteIntrospector::file_fingerprint`]); `Unknown` for an
     /// in-memory database or a path that does not resolve.
     fn identity<'a>(

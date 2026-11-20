@@ -158,12 +158,19 @@ impl Introspector for PgIntrospector {
         ns: &'a NsKey,
         snap: &'a NamespaceSnapshot,
     ) -> BoxFuture<'a, Result<NsCheck, IntroError>> {
+        // ## m4-t22-state (named exception): Task 22's check, comparable with
+        // `cached_check` (`state.rs`), replaces the digest of `pass::check_namespace`.
         Box::pin(async move {
             let cancel = CancellationToken::new();
-            pass::check_namespace(c, ns, snap, &cancel)
+            state::check_namespace(c, ns, snap, &cancel)
                 .await
                 .map(|(n, _)| n)
         })
+    }
+
+    // ## m4-t22-state (named exception)
+    fn cached_check(&self, snap: &NamespaceSnapshot) -> Option<NsCheck> {
+        state::cached_check(snap)
     }
 
     fn capabilities(&self) -> IntroCaps {
