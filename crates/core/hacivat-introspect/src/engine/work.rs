@@ -178,8 +178,10 @@ pub(super) fn database_of(dbms: DbmsKind, ns: Option<&NsKey>) -> Option<Name> {
     let ns = ns?;
     match dbms {
         DbmsKind::Postgres if ns.kind != NsKind::Server => ns.path.first().cloned(),
-        DbmsKind::Sqlite if ns.path.len() == 1 && &*ns.path[0] == "temp" => {
-            Some(ns.path[0].clone())
+        // ## m4-t22-state (named exception; review m-7): `temp` matched as `freshness` and T18
+        // match it (ASCII-caseless), and always asked for by its canonical name.
+        DbmsKind::Sqlite if ns.path.len() == 1 && ns.path[0].eq_ignore_ascii_case("temp") => {
+            Some(Name::from("temp"))
         }
         _ => None,
     }

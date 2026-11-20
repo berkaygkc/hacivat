@@ -167,8 +167,6 @@ struct Job {
     // ## m4-t22-state (named exception)
     /// A fragment's stamps read by the state check that asked for it (stored as marks).
     marks: Vec<(ObjectKey, StateMark)>,
-    /// A pass a namespace validation asked for (background: the cumulative guard applies).
-    validation: bool,
     /// A state check by name for the negative cache's probe of this namespace (an
     /// undecidable answer falls back to an incremental pass of it).
     probe: Option<NsKey>,
@@ -387,6 +385,12 @@ struct Actor {
     /// Per namespace: the top-level objects when background validation first removed some
     /// since the last user decision, and how many it removed since (D-039 across passes).
     bg_deleted: HashMap<NsKey, (u32, u32)>,
+    /// Per namespace: what the user chose to keep cached ("Keep cached", D-039) since their last
+    /// refresh: a background pass that would remove any of it asks again (fix round 1 I-4).
+    kept: HashMap<NsKey, BTreeSet<ObjectKey>>,
+    /// Cache writes in flight: the engine stops only after every one has landed (fix round 1,
+    /// the ubuntu flake of `on_connect_with_cache_publishes_stale_then_runs_incremental_not_full`).
+    saving: Vec<tokio::task::JoinHandle<()>>,
     pending_names: PendingNames,
     /// Namespaces whose arena is being rebuilt on the blocking pool (a narrower filter, a
     /// forgotten watermark, a new fold rule; T15 m-rr2, T17 fm3): no task of them starts
@@ -470,6 +474,8 @@ impl Actor {
             clock,
             last_unknown: false,
             bg_deleted: HashMap::new(),
+            kept: HashMap::new(),
+            saving: Vec::new(),
             pending_names,
             republishing: HashSet::new(),
             bg_tx,
@@ -537,7 +543,12 @@ impl Actor {
         self.progress.send_replace(Progress::default());
         let all = self.debouncer.take_all();
         if let Some(save) = self.save(all) {
-            let _ = save.await;
+            self.saving.push(save);
+        }
+        // ## m4-t22-state (named exception; fix round 1): every cache write in flight lands
+        // before the engine reports it stopped, so the next session's cache holds it.
+        for h in std::mem::take(&mut self.saving) {
+            let _ = h.await;
         }
     }
 
@@ -557,7 +568,11 @@ impl Actor {
     fn on_timer(&mut self) {
         let now = Instant::now();
         let due = self.debouncer.take_due(now.into_std());
-        drop(self.save(due));
+        // ## m4-t22-state (named exception; fix round 1): kept, so `stop` waits for it.
+        self.saving.retain(|h| !h.is_finished());
+        if let Some(h) = self.save(due) {
+            self.saving.push(h);
+        }
     }
 
     fn on_cmd(&mut self, cmd: Cmd) {
@@ -601,7 +616,6 @@ impl Actor {
             decision: None,
             // ## m4-t22-state (named exception)
             marks: Vec::new(),
-            validation: false,
             probe: None,
         }
     }
@@ -630,10 +644,8 @@ impl Actor {
             if job.decision.is_some() {
                 q.decision = job.decision;
             }
-            // ## m4-t22-state (named exception): the stamps ride along; a validation pass that
-            // coalesces with another pass is a validation pass only if both are.
+            // ## m4-t22-state (named exception): the stamps ride along.
             q.marks.append(&mut job.marks);
-            q.validation &= job.validation;
             q.waiters.append(&mut job.waiters);
             match (&mut q.work, job.work) {
                 (
@@ -1705,19 +1717,27 @@ impl Actor {
         if m.outcome.is_pending() {
             return self.hold_pending(job, m);
         }
-        // ## m4-t22-state (named exception; T10 carry M-1): background validation never
-        // removes a namespace's objects in many small steps around the guard.
-        if job.validation && m.pass && self.over_cumulative_guard(&ns, &m, &snap) {
+        // ## m4-t22-state (named exception; T10 carry M-1, fix round 1 I-4): no background
+        // pass (validation, on-connect step 3, a probe's fallback, refresh after DDL) removes a
+        // namespace's objects in many small steps around the guard, nor removes what the user
+        // chose to keep.
+        if job.trigger == Trigger::Background
+            && job.decision.is_none()
+            && m.pass
+            && self.over_cumulative_guard(&ns, &m, &snap)
+        {
             return self.hold_pending(job, m);
         }
         if job.trigger == Trigger::User {
             self.bg_deleted.remove(&ns);
+            self.kept.remove(&ns);
         }
         let (level, pass) = (m.level, m.pass);
         let (follow, follow_ns) = (m.follow, m.follow_ns);
         let (next, delta, report) = m.outcome.into_parts();
         // ## m4-t22-state (named exception): what the delta means beyond this namespace.
-        let accounts = ns.kind == NsKind::Server && accounts_changed(&delta);
+        let accounts = (ns.kind == NsKind::Server && accounts_changed(&delta))
+            || privileges_moved(snap.namespaces.get(&ns).map(|a| &a.meta().watermark), &next);
         let touched = if matches!(self.caps.dbms, DbmsKind::MySql | DbmsKind::MariaDb) {
             touched_top(&ns, &delta)
         } else {
@@ -1964,9 +1984,18 @@ impl Actor {
         let Some(p) = self.pending.remove(ns) else {
             return w.resolve(Err(IntroError::Cancelled));
         };
-        // ## m4-t22-state (named exception): the user decided; the count starts over.
+        // ## m4-t22-state (named exception): the user decided; the count starts over, and what
+        // they kept stays until they refresh (a background pass removing it asks again).
         self.sync_pending_names();
         self.bg_deleted.remove(ns);
+        if accept {
+            self.kept.remove(ns);
+        } else {
+            self.kept
+                .entry(ns.clone())
+                .or_default()
+                .extend(top_drops(ns, p.outcome.delta()));
+        }
         let prev = snap.namespaces.get(ns).cloned();
         if prev.as_ref().map(|a| Arc::as_ptr(a) as usize) != p.prev_ptr
             || (!accept && p.keep.is_none())
@@ -2075,7 +2104,27 @@ impl Actor {
         }
     }
 
-    fn failed(&mut self, job: Job, e: IntroError) {
+    fn failed(&mut self, mut job: Job, e: IntroError) {
+        // ## m4-t22-state (named exception; fix round 1 I-5): a validation that cannot decide is
+        // never dropped silently: the namespace is read again (the pass reports its own error).
+        if let Work::Validate { ns } = &job.work
+            && !matches!(e, IntroError::Cancelled)
+            && !self.out_of_scope(ns)
+        {
+            let ns = ns.clone();
+            let level = self.level_of(&ns);
+            let mut pass = self.new_job(
+                Work::Pass {
+                    ns,
+                    mode: Mode::Incremental,
+                    level,
+                },
+                job.prio,
+                Trigger::Background,
+            );
+            pass.waiters = std::mem::take(&mut job.waiters);
+            return self.enqueue(pass, true);
+        }
         if let Some(ns) = job.work.ns().cloned() {
             if is_timeout(&e) {
                 self.timed_out(&ns);
@@ -2187,12 +2236,14 @@ impl Actor {
             if !removed.is_empty()
                 && let Some(cache) = self.cache.clone()
             {
-                drop(self.rt.spawn_blocking(move || {
+                let h = self.rt.spawn_blocking(move || {
                     let mut c = lock(&cache);
                     for ns in removed {
                         let _ = c.remove_namespace(&ns);
                     }
-                }));
+                });
+                // ## m4-t22-state (named exception; fix round 1): awaited by `stop`.
+                self.saving.push(h);
             }
         }
         Ok(published.generation)
@@ -2312,21 +2363,28 @@ impl Actor {
                     job.prio,
                     Trigger::Background,
                 );
-                pass.validation = true;
                 pass.waiters = job.waiters;
                 self.enqueue(pass, true);
             }
         }
     }
 
-    /// Whether the applied pass `m` of `ns`, asked for by a validation, would bring the
-    /// top-level objects background validation removed since the user last decided over the
-    /// guard (D-039: more than `guard_ratio_pct` % of at least `guard_min_objects`). Counts it
-    /// when it does not.
+    /// Whether the applied background pass `m` of `ns` would remove an object the user kept, or
+    /// bring the top-level objects background passes removed since the user last decided over
+    /// the guard (D-039: more than `guard_ratio_pct` % of at least `guard_min_objects`). Counts
+    /// it when it does not.
     fn over_cumulative_guard(&mut self, ns: &NsKey, m: &Merged, snap: &CatalogSnapshot) -> bool {
-        let dropped = u32::try_from(top_drops(ns, m.outcome.delta()).len()).unwrap_or(u32::MAX);
+        let drops = top_drops(ns, m.outcome.delta());
+        let dropped = u32::try_from(drops.len()).unwrap_or(u32::MAX);
         if dropped == 0 {
             return false;
+        }
+        if self
+            .kept
+            .get(ns)
+            .is_some_and(|kept| drops.iter().any(|k| kept.contains(k)))
+        {
+            return true;
         }
         let policy = MergePolicy::default();
         let before = snap
@@ -2431,8 +2489,12 @@ impl Actor {
         for (k, _, _) in &arenas {
             self.republishing.insert(k.clone());
         }
-        let tx = self.bg_tx.clone();
+        let guard = Abandoned {
+            tx: Some(self.bg_tx.clone()),
+            keys: arenas.iter().map(|(k, _, _)| k.clone()).collect(),
+        };
         drop(self.rt.spawn_blocking(move || {
+            let mut guard = guard;
             let done = arenas
                 .into_iter()
                 .map(|(key, arena, system)| {
@@ -2445,7 +2507,13 @@ impl Actor {
                     (key, ptr, out)
                 })
                 .collect();
-            let _ = tx.send(Republished { op, done });
+            if let Some(tx) = guard.tx.take() {
+                let _ = tx.send(Republished {
+                    op,
+                    done,
+                    abandoned: Vec::new(),
+                });
+            }
         }));
         self.update_progress();
     }
@@ -2453,6 +2521,10 @@ impl Actor {
     /// Publishes what [`Actor::republish`] rebuilt. An arena published by something else
     /// meanwhile is rebuilt again from its new version (under the current filters or rule).
     fn republished(&mut self, r: Republished) {
+        // A rebuild that died (a panic) gives its namespaces back unchanged (review m-2).
+        for k in &r.abandoned {
+            self.republishing.remove(k);
+        }
         let snap = self.catalog.current();
         let mut changes = Vec::new();
         let mut delta = CatalogDelta::default();
@@ -2570,6 +2642,26 @@ enum BgOp {
 struct Republished {
     op: BgOp,
     done: Vec<(NsKey, usize, Option<Rebuilt>)>,
+    /// Namespaces of a rebuild that did not finish: released, nothing published.
+    abandoned: Vec<NsKey>,
+}
+
+/// Releases a rebuild's namespaces when it dies before answering (review m-2).
+struct Abandoned {
+    tx: Option<mpsc::UnboundedSender<Republished>>,
+    keys: Vec<NsKey>,
+}
+
+impl Drop for Abandoned {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(Republished {
+                op: BgOp::Forget,
+                done: Vec::new(),
+                abandoned: std::mem::take(&mut self.keys),
+            });
+        }
+    }
 }
 
 /// An arena to rebuild: its key, the arena, and whether its namespace is a system one.
@@ -2618,21 +2710,35 @@ fn narrowed(
     Some((next, d.dropped))
 }
 
-/// `arena` with no watermark (`None` if the merge fails).
+/// `arena` with no watermark and no object marks (R-W3-3: nothing of another or an unknown
+/// server is trusted, review m-1); `None` if the rebuild fails.
 fn forgotten(arena: &NamespaceSnapshot) -> Option<Rebuilt> {
-    let r = NamespaceResult {
-        existent: BTreeMap::new(),
-        changed: Vec::new(),
-        categories_to_reload: Default::default(),
-        new_watermark: Watermark::None,
-        full: false,
-        level: arena.meta().level,
-        read_at_ms: arena.meta().loaded_at_ms,
-    };
-    let (next, _, _) = merge::merge(Some(arena), r, &MergePolicy::default())
-        .ok()?
-        .into_parts();
+    let root = arena.obj(0)?.clone().with_state(StateMark::None);
+    let mut tree = hacivat_meta::Subtree::with_capacity(root, arena.len());
+    let mut stack = vec![(0u32, tree.root())];
+    while let Some((idx, node)) = stack.pop() {
+        for (child, obj) in arena.children(idx) {
+            let at = tree.add(node, obj.clone().with_state(StateMark::None));
+            stack.push((child, at));
+        }
+    }
+    let mut meta = arena.meta().clone();
+    meta.watermark = Watermark::None;
+    let next =
+        NamespaceSnapshot::build(arena.key().clone(), arena.dbms(), arena.fold(), meta, tree)
+            .ok()?;
     Some((next, Vec::new()))
+}
+
+/// Whether a MySQL pass saw the login's privileges change (`MyTime.priv_hash`; T17b carry,
+/// fix round 1 I-6a): the grants facets loaded under the old privileges may be wrong.
+fn privileges_moved(prev: Option<&Watermark>, next: &NamespaceSnapshot) -> bool {
+    match (prev, &next.meta().watermark) {
+        (Some(Watermark::MyTime { priv_hash: a, .. }), Watermark::MyTime { priv_hash: b, .. }) => {
+            a != b
+        }
+        _ => false,
+    }
 }
 
 /// Whether `delta` renamed or dropped an account (a role, user or login).

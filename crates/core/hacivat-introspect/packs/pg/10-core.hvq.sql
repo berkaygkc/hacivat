@@ -251,6 +251,9 @@ SELECT DISTINCT y.f AS facet, y.o AS oid FROM (
 -- routines the namespace's objects (relations, routines, types, constraints, triggers, column
 -- defaults, view rules) depend on is reported as schema-rename (a two-hop change, PG spike
 -- section 7 Q3): the pass then runs full.
+-- m4-t22-state (Task 22 fix round 1 I-1, a named exception in the T16 pack): the renamed
+-- schema may also hold a referenced collation, operator or operator class (their deparsed
+-- names in column, index, constraint and view text), so those count as well.
 --- name: ChangedDependents ---
 --- returns: facet text, oid u32 ---
 WITH src AS MATERIALIZED (
@@ -307,6 +310,9 @@ SELECT DISTINCT z.f AS facet, z.o AS oid FROM (
       LEFT JOIN pg_catalog.pg_type rt ON d.refclassid = 'pg_catalog.pg_type'::pg_catalog.regclass AND rt.oid = d.refobjid
       LEFT JOIN pg_catalog.pg_proc rp ON d.refclassid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND rp.oid = d.refobjid
       LEFT JOIN pg_catalog.pg_class rc ON d.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass AND rc.oid = d.refobjid
+      LEFT JOIN pg_catalog.pg_collation rco ON d.refclassid = 'pg_catalog.pg_collation'::pg_catalog.regclass AND rco.oid = d.refobjid
+      LEFT JOIN pg_catalog.pg_operator rop ON d.refclassid = 'pg_catalog.pg_operator'::pg_catalog.regclass AND rop.oid = d.refobjid
+      LEFT JOIN pg_catalog.pg_opclass roc ON d.refclassid = 'pg_catalog.pg_opclass'::pg_catalog.regclass AND roc.oid = d.refobjid
       LEFT JOIN pg_catalog.pg_class oc ON d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND oc.oid = d.objid
       LEFT JOIN pg_catalog.pg_proc op ON d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND op.oid = d.objid
       LEFT JOIN pg_catalog.pg_type ot ON d.classid = 'pg_catalog.pg_type'::pg_catalog.regclass AND ot.oid = d.objid
@@ -316,7 +322,8 @@ SELECT DISTINCT z.f AS facet, z.o AS oid FROM (
       LEFT JOIN pg_catalog.pg_rewrite orw ON d.classid = 'pg_catalog.pg_rewrite'::pg_catalog.regclass AND orw.oid = d.objid
       LEFT JOIN pg_catalog.pg_class oo ON oo.oid = COALESCE(otg.tgrelid, oad.adrelid, orw.ev_class)
       WHERE d.deptype NOT IN ('e', 'x', 'p')
-        AND (rt.typnamespace = n.oid OR rp.pronamespace = n.oid OR rc.relnamespace = n.oid)
+        AND (rt.typnamespace = n.oid OR rp.pronamespace = n.oid OR rc.relnamespace = n.oid
+          OR rco.collnamespace = n.oid OR rop.oprnamespace = n.oid OR roc.opcnamespace = n.oid)
         AND (oc.relnamespace = :ns::pg_catalog.oid OR op.pronamespace = :ns::pg_catalog.oid OR ot.typnamespace = :ns::pg_catalog.oid
           OR ok.connamespace = :ns::pg_catalog.oid OR oo.relnamespace = :ns::pg_catalog.oid))
 ) AS z

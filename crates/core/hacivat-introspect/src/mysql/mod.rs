@@ -260,8 +260,21 @@ impl MySqlIntrospector {
 
     async fn ns_check(&self, c: &mut MetaConn, ns: &NsKey) -> Result<NsCheck, IntroError> {
         let schema = pass::schema_of(ns)?;
+        // ## m4-t22-state (named exception; fix round 1 I-3): the facts the cached side folds,
+        // read live the way a pass reads its watermark's.
         with_snapshot!(c, self.flavor, None, |r, srv| {
-            state::ns_check(&state::server_top_marks(r, &srv, &schema).await?)
+            let check = state::ns_check(&state::server_top_marks(r, &srv, &schema).await?);
+            let priv_hash = if srv.incremental_supported() {
+                pass::privilege_hash(r, &srv, &schema).await?
+            } else {
+                0
+            };
+            state::fold_facts(
+                check,
+                srv.server_uuid.as_deref().unwrap_or(""),
+                &srv.version_text,
+                priv_hash,
+            )
         })
     }
 }
@@ -360,7 +373,8 @@ impl Introspector for MySqlIntrospector {
 
     // ## m4-t22-state (named exception): the cached side T17 prepared for Task 22.
     fn cached_check(&self, snap: &NamespaceSnapshot) -> Option<NsCheck> {
-        Some(state::ns_check(&state::top_marks_of(snap)))
+        // Fix round 1 I-2, I-3, I-5: only an incremental-capable MySQL schema arena vouches.
+        state::cached_check(snap, self.flavor)
     }
 
     /// R-W3-3: [`MySqlIntrospector::server_fingerprint`]; a fact that cannot be read (or a

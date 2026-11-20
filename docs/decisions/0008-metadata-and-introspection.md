@@ -2079,13 +2079,11 @@ carry fenced `m4-t22-state` named exceptions.
   keys, checks, exclusions and triggers by kind and oid, a domain's constraint count, comment
   keys; the server side keeps only what the cache holds, so an object of another filter or
   level never differs); the mark is the watermark's low 32 bits when the plan is incremental and
-  nothing is young, the snapshot xmin when something is, `StateMark::None` (full) when the plan
-  is full, a dependency's schema was renamed, or **`YoungSchemas`** (new non-joinable section
-  in `packs/pg/30-state.hvq.sql`) finds a young schema holding a collation, an operator or an
-  operator class the namespace depends on: the fail-safe the T16 review asked for (enum value,
-  collation, operator and opclass renames themselves are T16's dependency-hop sources). Only
-  `Identity`, `ListExistent`, `ListExistentComments`, the change queries, `YoungSchemas` and
-  the canary run. `pass::ns_oid`, `comment_owners` and `CommentOwner` became crate-visible.
+  nothing is young, `pg::state::CHANGED` (a `Hash`, never the cached side's value) when any row
+  is young (fix round 1 C-1), and `StateMark::None` (full) when the plan is full or a
+  dependency's schema was renamed. Only `Identity`, `ListExistent`, `ListExistentComments`, the
+  change queries and the canary run. `pass::ns_oid`, `comment_owners` and `CommentOwner` became
+  crate-visible.
 - **Periodic validation** (R-M4-20, PO-Q6): `freshness::validate_interval` (the hub delegates
   to it) — `auto` is 10 minutes for `local`/`dev` tags, off otherwise. It runs on a
   `ValidationClock` (`Engine::start_with_clock`): tokio's in the product, a `ManualClock` in
@@ -2097,9 +2095,12 @@ carry fenced `m4-t22-state` named exceptions.
   engine session forgets every watermark (one full re-read); an `Unknown` right after it keeps
   them (they come from this session's passes on the same login); a known identity after an
   unknown one is never taken for the same server.
-- **D-039 across passes** (T10 carry M-1): a pass a validation asked for counts the top-level
-  objects it removes since the user last decided (a user refresh or a confirmation); once the
-  total exceeds the guard (50 % of at least 20), the pass is held like a guarded one.
+- **D-039 across passes** (T10 carry M-1; fix round 1 I-4): every background pass (validation,
+  on-connect step 3, a probe's fallback, refresh after DDL) counts the top-level objects it
+  removes since the user last decided (a user refresh or a confirmation); once the total
+  exceeds the guard (50 % of at least 20), the pass is held like a guarded one. "Keep cached"
+  sticks until the user's next refresh: a background pass that would remove a kept object asks
+  again.
   `IntroHandle::pending_confirmation(ns)` names what a held deletion would remove (T24's dialog).
 - **Carries closed:** T15 m-rr2 and T17 fm3 (the merges of a narrower filter, of forgotten
   watermarks and of a new fold rule run on the blocking pool; the namespaces' tasks wait for the
@@ -2108,8 +2109,51 @@ carry fenced `m4-t22-state` named exceptions.
   is read again); T17 fm2 (the placeholder test reads the hub's catalog); T17 m5 (a changed
   MySQL table re-reads the referring tables of other cached databases, as a follow-up); T16b (a
   renamed or dropped account marks every loaded grants facet stale).
-- **Not closed:** T15 m12 (a `Partial` namespace carries no stale bit: `LoadState::Partial`
-  has no field for it, and its lookups already answer `Unknown` on every miss; a held deletion is
-  visible through `pending_confirmation`). T19/T25 `server_text` load state: T25 pairs it with
-  `check_state`. SQLite `temp` keys are decided `Changed` because `MetaConn` does not say whose
-  connection it is (a T5 seam would let the introspector stamp them on the user's connection).
+- **Not closed:** T19/T25 `server_text` load state: T25 pairs it with `check_state`. SQLite
+  `temp` keys are decided `Changed` because `MetaConn` does not say whose connection it is (a T5
+  seam would let the introspector stamp them on the user's connection).
+- **Fix round 1 (opus review: C-1, I-1..I-7).**
+  - *C-1.* A PostgreSQL namespace whose change queries return any row is never `Current`, even
+    when an older open transaction (an idle session, a prepared transaction) holds the snapshot
+    xmin at the cached watermark: the server side answers `pg::state::CHANGED`. While the holder
+    stays open each round re-reads the same young set incrementally (R-M4-8's conservative
+    window). `pg::state::validation_mark` is the pure decision, unit-tested.
+  - *I-1.* `ChangedDependents`' `schema-rename` branch (Task 16's pack, named exception) also
+    follows referenced collations, operators and operator classes, so every incremental pass,
+    not only validation, goes full when a schema holding one is renamed. `YoungSchemas` is
+    removed (redundant).
+  - *I-2, I-3, I-5.* MySQL's cached side vouches only for a schema namespace with a
+    `Watermark::MyTime` (MySQL 8.0+; MariaDB stays full, R-M4-10; the server namespace and any
+    arena after `forget_watermarks` are read again), folds the watermark's `server_uuid`,
+    version and privilege hash into its digest (the server side folds the same facts read live,
+    R-W3-3), and never vouches while a top mark is inside R-M4-39's one-second window of that
+    watermark (`mysql::state::IN_WINDOW`).
+  - *I-5.* A validation that fails (other than a cancel) queues an incremental pass of its
+    namespace instead of being dropped.
+  - *I-6a.* A MySQL pass whose privilege hash moved marks every loaded grants facet stale.
+  - *I-7.* The PostgreSQL Docker tests of `docker_freshness.rs` run one at a time; the
+    "unchanged" test waits until no XID is open before its pass and asserts that both change
+    queries returned no row. New Docker tests: a held-back xmin never validates a change
+    `Current` (C-1); a renamed schema holding a used collation makes the incremental pass full
+    (I-1).
+  - *Minors.* `forget_watermarks` also resets every object mark (m-1: nothing of another server
+    is trusted); a rebuild that dies releases its namespaces (m-2, a drop guard); `temp` is
+    matched ASCII-caseless everywhere (m-7); the Docker namespaces are dropped by a guard (m-6).
+  - *Engine flake* (m4 CI 44655186750, `on_connect_with_cache_publishes_stale_then_runs_incremental_not_full`):
+    a debounced cache write spawned from the timer was never awaited, so `closed()` could
+    resolve before it committed and the next session's cache missed the namespace. `stop` now
+    awaits every cache write in flight (timer saves and removals). Not reproducible on macOS
+    either way (400 runs, 8 in parallel, with and without the fix); the cause is read from the
+    code (WAL readers see only committed rows).
+  - *Carried:* T16b review m-5 (Dependencies facets whose `Ref`s name a changed oid) → **T15b**:
+    facet loading and its states are T15b's (W5) and no Dependencies facet is loaded before it,
+    so T15b invalidates them on a delta naming a referenced oid, before M7 uses them. T18's FTS5
+    shadow tables in `temp` and a field for a broken relation's error → **M5**. Review m-3 (one
+    database-wide `ChangedDependents` scan per cached schema on connect) → T29 records the cost.
+    Review m-5 (`reread_referrers` walks every FK on the actor) → noted with m-rr2's class;
+    bounded by MySQL merges that touched objects.
+  - *Rulings.* **R-W4-8** (T15 m12): a `Partial` namespace carries no stale bit — accepted as a
+    named exception: `LoadState::Partial` has no field for it and its lookups answer `Unknown`
+    on every miss; the UI badges a held namespace from `pending_confirmation` whatever its
+    `LoadState` (carried to T27/T32). `hacivat-meta` `Subtree::set_root_state` is an
+    acknowledged named exception.

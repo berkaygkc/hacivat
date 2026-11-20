@@ -265,32 +265,3 @@ SELECT s.o AS oid, s.src AS src, s.x AS stamp FROM (
   JOIN pg_catalog.pg_proc p ON p.oid OPERATOR(pg_catalog.=) t.tgfoid
 ) AS s
 WHERE s.o IN :[oids]
-
--- ## m4-t22-state (Task 22, a named exception in Task 16's file)
--- The fail-safe of background validation (the Task 16 review carry). A young pg_namespace row
--- (since the watermark) of another schema that holds a collation, an operator or an operator
--- class one of the namespace's objects depends on: a renamed schema changes the deparsed text
--- that names them, two hops away from what ChangedDependents follows (its schema-rename branch
--- covers referenced relations, types and routines only), so the validation reads the
--- namespace in full. The owners are those of the schema-rename branch. Not joinable
--- (validation runs on its own snapshot).
---- name: YoungSchemas ---
---- returns: oid u32 ---
-SELECT DISTINCT n.oid AS oid FROM pg_catalog.pg_namespace n
-WHERE n.oid <> :ns::pg_catalog.oid AND pg_catalog.age(n.xmin) BETWEEN 0 AND pg_catalog.age(:w::pg_catalog.xid)
-  AND EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
-    LEFT JOIN pg_catalog.pg_collation rco ON d.refclassid = 'pg_catalog.pg_collation'::pg_catalog.regclass AND rco.oid = d.refobjid
-    LEFT JOIN pg_catalog.pg_operator rop ON d.refclassid = 'pg_catalog.pg_operator'::pg_catalog.regclass AND rop.oid = d.refobjid
-    LEFT JOIN pg_catalog.pg_opclass roc ON d.refclassid = 'pg_catalog.pg_opclass'::pg_catalog.regclass AND roc.oid = d.refobjid
-    LEFT JOIN pg_catalog.pg_class oc ON d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND oc.oid = d.objid
-    LEFT JOIN pg_catalog.pg_proc op ON d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND op.oid = d.objid
-    LEFT JOIN pg_catalog.pg_type ot ON d.classid = 'pg_catalog.pg_type'::pg_catalog.regclass AND ot.oid = d.objid
-    LEFT JOIN pg_catalog.pg_constraint ok ON d.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass AND ok.oid = d.objid
-    LEFT JOIN pg_catalog.pg_trigger otg ON d.classid = 'pg_catalog.pg_trigger'::pg_catalog.regclass AND otg.oid = d.objid
-    LEFT JOIN pg_catalog.pg_attrdef oad ON d.classid = 'pg_catalog.pg_attrdef'::pg_catalog.regclass AND oad.oid = d.objid
-    LEFT JOIN pg_catalog.pg_rewrite orw ON d.classid = 'pg_catalog.pg_rewrite'::pg_catalog.regclass AND orw.oid = d.objid
-    LEFT JOIN pg_catalog.pg_class oo ON oo.oid = COALESCE(otg.tgrelid, oad.adrelid, orw.ev_class)
-    WHERE d.deptype NOT IN ('e', 'x', 'p')
-      AND (rco.collnamespace = n.oid OR rop.oprnamespace = n.oid OR roc.opcnamespace = n.oid)
-      AND (oc.relnamespace = :ns::pg_catalog.oid OR op.pronamespace = :ns::pg_catalog.oid OR ot.typnamespace = :ns::pg_catalog.oid
-        OR ok.connamespace = :ns::pg_catalog.oid OR oo.relnamespace = :ns::pg_catalog.oid))

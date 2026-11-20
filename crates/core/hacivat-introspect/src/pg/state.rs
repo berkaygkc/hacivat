@@ -119,15 +119,37 @@ pub fn stamp_hash(rows: &[(String, String)]) -> u64 {
 //   filter's, a level's, a new one) does not: a new object leaves a young row, below.
 // - **Change.** The cached side's mark is the watermark's low 32 bits. The server side answers
 //   the same when the watermark's plan is incremental and nothing is young since it
-//   (`ChangedParents`, `ChangedDependents`), the snapshot's xmin when something is (an
-//   incremental pass reads it), and `StateMark::None` (a full pass) when the plan is full, a
-//   schema the namespace depends on was renamed, or a **young schema holds a collation, an
-//   operator or an operator class** the namespace's objects depend on (`YoungSchemas`): its
-//   rename changes their deparsed text two hops away from what the change queries follow (the
-//   T16 review carry: validation re-reads in full, fail-safe).
+//   (`ChangedParents`, `ChangedDependents`), a [`CHANGED`] hash when **any** row is young
+//   (never the cached side's value, whatever the snapshot's xmin: fix round 1 C-1, an older
+//   open transaction holds the xmin back), and `StateMark::None` (a full pass) when the plan
+//   is full or a schema the namespace depends on was renamed (`ChangedDependents`'
+//   `schema-rename` branch, which since fix round 1 I-1 also follows referenced collations,
+//   operators and operator classes, so every incremental pass catches those too).
 
-/// The fail-safe section of the namespace check (`packs/pg/30-state.hvq.sql`).
-pub const YOUNG_SCHEMAS: &str = "YoungSchemas";
+/// The server side's mark when a change query saw young rows: a `Hash`, a variant the cached
+/// side (`Xmin`) never produces, so the verdict is `Changed` (fix round 1 C-1).
+pub const CHANGED: StateMark = StateMark::Hash(0x4356_4847_4544_5f31);
+
+/// The server side's mark (block docs above): `full` the watermark's plan is full; `w` the
+/// cached watermark; the change queries' answers. Pure, so the verdict logic is testable
+/// without a server.
+pub fn validation_mark(
+    full: bool,
+    w: Option<u64>,
+    parents: &[(String, Oid)],
+    dependents: &[(String, Oid)],
+) -> StateMark {
+    let Some(w) = w.filter(|_| !full) else {
+        return StateMark::None;
+    };
+    if dependents.iter().any(|(f, _)| f == "schema-rename") {
+        StateMark::None
+    } else if !parents.is_empty() || !dependents.is_empty() {
+        CHANGED
+    } else {
+        StateMark::Xmin((w & 0xFFFF_FFFF) as u32)
+    }
+}
 
 /// An object the existence comparison covers: its kind and oid, and a domain's constraint
 /// count.
@@ -251,7 +273,7 @@ pub fn cached_check(snap: &hacivat_meta::NamespaceSnapshot) -> Option<crate::fre
 
 /// The server side (`Introspector::check_namespace`; block docs above): one snapshot running
 /// `Identity`, `ListExistent`, `ListExistentComments`, and when the plan is incremental the two
-/// change queries and `YoungSchemas`. No object row is read.
+/// change queries. No object row is read.
 pub async fn check_namespace(
     c: &mut MetaConn,
     ns: &hacivat_meta::NsKey,
@@ -318,7 +340,6 @@ pub async fn check_namespace(
                 lines.insert((kind, e.oid, count));
             }
             let now = Now::of(id);
-            let low = |x: u64| StateMark::Xmin((x & 0xFFFF_FFFF) as u32);
             let mark = match (&snap.meta().watermark, plan(&snap.meta().watermark, &now)) {
                 (_, Plan::Full(_)) => StateMark::None,
                 (hacivat_meta::Watermark::PgXid { w, .. }, Plan::Incremental { since }) => {
@@ -341,21 +362,7 @@ pub async fn check_namespace(
                             decode::facet,
                         )
                         .await?;
-                    if dependents.iter().any(|(f, _)| f == "schema-rename") {
-                        StateMark::None
-                    } else if !parents.is_empty() || !dependents.is_empty() {
-                        low(id.snap_xmin)
-                    } else if !r
-                        .read(YOUNG_SCHEMAS, Mode::Full, Level::Structure, &bw, |row| {
-                            row.num::<Oid>(0)
-                        })
-                        .await?
-                        .is_empty()
-                    {
-                        StateMark::None
-                    } else {
-                        low(*w)
-                    }
+                    validation_mark(false, Some(*w), &parents, &dependents)
                 }
                 (_, Plan::Incremental { .. }) => StateMark::None,
             };
@@ -443,6 +450,44 @@ mod tests {
         assert_eq!(without.objects, 2);
         assert_ne!(with.existence_digest, without.existence_digest);
         assert_eq!(cached_check(&arena(true, Some(w))), Some(with));
+    }
+
+    /// Fix round 1 C-1: whatever the snapshot's xmin, a young row is never `Current`; a schema
+    /// rename or a full plan asks for a full pass; nothing young is the cached mark.
+    #[test]
+    fn a_young_row_never_validates_current() {
+        let w = (3u64 << 32) | 77;
+        let cached = StateMark::Xmin(77);
+        let row = |f: &str| vec![(f.to_string(), 1u32)];
+        assert_eq!(validation_mark(false, Some(w), &[], &[]), cached);
+        for (p, d) in [
+            (row("columns"), vec![]),
+            (vec![], row("rel")),
+            (row("rel"), row("type")),
+        ] {
+            let m = validation_mark(false, Some(w), &p, &d);
+            assert_ne!(m, cached, "{p:?} {d:?}");
+            assert_ne!(m, StateMark::None, "an incremental pass suffices");
+        }
+        assert_eq!(
+            validation_mark(false, Some(w), &row("columns"), &row("schema-rename")),
+            StateMark::None
+        );
+        assert_eq!(validation_mark(true, Some(w), &[], &[]), StateMark::None);
+        assert_eq!(validation_mark(false, None, &[], &[]), StateMark::None);
+        // The verdict: never Current with a young row, whatever the held-back xmin.
+        let c = |m| crate::freshness::NsCheck {
+            objects: 1,
+            max_mark: m,
+            existence_digest: 9,
+        };
+        assert_eq!(
+            crate::freshness::verdict(
+                &c(cached),
+                &c(validation_mark(false, Some(w), &row("columns"), &[]))
+            ),
+            crate::freshness::NsVerdict::Changed { full: false }
+        );
     }
     // ## m4-t22-state
 }

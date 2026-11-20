@@ -169,10 +169,39 @@ impl Live {
     }
 }
 
+/// The PostgreSQL tests of this file run one at a time (fix round 1 I-7): a concurrent test's
+/// open transaction would hold the snapshot xmin back across another test's pass.
+static PG_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Runs `sql` on `t`'s admin connection when it goes, also on panic or timeout (review m-6).
+struct DropOnExit {
+    t: DockerTarget,
+    sql: String,
+}
+
+impl Drop for DropOnExit {
+    fn drop(&mut self) {
+        let (t, sql) = (self.t.clone(), self.sql.clone());
+        let rt = tokio::runtime::Handle::current();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                rt.block_on(async {
+                    let mut a = admin(&t).await;
+                    a.batch(&sql).await;
+                    a.close().await;
+                });
+            });
+        });
+    }
+}
+
 /// Runs `body` on `t` with a fresh `hvm4_t22_<slug>` schema (PostgreSQL) or database (MySQL),
-/// dropped afterwards (also on panic).
+/// dropped afterwards by a guard (also on panic). PostgreSQL tests hold [`PG_TESTS`].
 async fn with_ns(t: &DockerTarget, slug: &str, body: impl AsyncFnOnce(&Live, &NsKey, &str)) {
-    use futures::FutureExt;
+    let _serial = match t.engine {
+        DbmsKind::Postgres => Some(PG_TESTS.lock().await),
+        _ => None,
+    };
     let name = unique(&format!("hvm4_t22_{slug}"));
     let (create, drop) = match t.engine {
         DbmsKind::Postgres => (
@@ -193,17 +222,45 @@ async fn with_ns(t: &DockerTarget, slug: &str, body: impl AsyncFnOnce(&Live, &Ns
         a.batch(&create).await;
         a.close().await;
     }
+    let _drop = DropOnExit {
+        t: t.clone(),
+        sql: drop,
+    };
     let l = live(t).await;
-    let outcome = std::panic::AssertUnwindSafe(body(&l, &ns, &name))
-        .catch_unwind()
-        .await;
+    body(&l, &ns, &name).await;
     l.shutdown().await;
+}
+
+/// Waits (bounded by `LIMIT`, polling) until no transaction of the server holds an XID, so the
+/// next pass's watermark is not held back by another session (fix round 1 I-7).
+async fn no_open_xids(t: &DockerTarget) {
     let mut a = admin(t).await;
-    a.batch(&drop).await;
-    a.close().await;
-    if let Err(p) = outcome {
-        std::panic::resume_unwind(p);
+    let start = tokio::time::Instant::now();
+    loop {
+        let none = a
+            .scalar(
+                "SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_snapshot_xip(\
+                 pg_catalog.pg_current_snapshot()))",
+            )
+            .await;
+        if matches!(none.as_str(), "true" | "t") {
+            break;
+        }
+        assert!(start.elapsed() < LIMIT, "{}: an XID stayed open", t.id);
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    a.close().await;
+}
+
+/// The rows the section `name` returned in `report` (0 when it did not run).
+fn rows_of(report: &hacivat_introspect::pg::pass::PassReport, name: &str) -> usize {
+    report
+        .log
+        .sections
+        .iter()
+        .filter(|s| s.name == name)
+        .map(|s| s.rows)
+        .sum()
 }
 
 /// The schema-qualified table of a test namespace (PostgreSQL schema or MySQL database).
@@ -386,7 +443,38 @@ async fn unchanged_server_clears_stale_with_state_queries_only() {
                 q(&t, s, "t")
             ))
             .await;
+            // I-7: no other session's XID may hold the pass's watermark back.
+            if t.engine == DbmsKind::Postgres {
+                no_open_xids(&t).await;
+            }
             l.expand(ns).await;
+            if t.engine != DbmsKind::Postgres {
+                // R-M4-39: the fixture's DDL is inside the one-second window of the first
+                // pass, which the cached side never vouches for; refresh (a condition wait on
+                // the server's clock) until the arena's watermark is past it.
+                let start = tokio::time::Instant::now();
+                loop {
+                    let arena = l.cat.catalog.current().namespaces[ns].clone();
+                    if l.intro
+                        .cached_check(&arena)
+                        .is_some_and(|c| c.max_mark != hacivat_introspect::mysql::state::IN_WINDOW)
+                    {
+                        break;
+                    }
+                    assert!(start.elapsed() < LIMIT, "{}: the window never passed", t.id);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tokio::time::timeout(
+                        LIMIT,
+                        l.cat.handle.refresh(
+                            hacivat_introspect::ddl_effects::Target::Namespace(ns.clone()),
+                            hacivat_meta::merge::Trigger::User,
+                        ),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                }
+            }
             let arena = l.cat.catalog.current().namespaces[ns].clone();
             let db = (t.engine == DbmsKind::Postgres).then_some(t.database.as_str());
             let mut c = l.pg.meta_on(db).await;
@@ -408,6 +496,9 @@ async fn unchanged_server_clears_stale_with_state_queries_only() {
                 );
                 let ran = report.log.names();
                 fact(&t, &format!("pg_validation_sections={}", ran.join(",")));
+                // The precondition made an assertion: nothing was young.
+                assert_eq!(rows_of(&report, "ChangedParents"), 0, "{}", t.id);
+                assert_eq!(rows_of(&report, "ChangedDependents"), 0, "{}", t.id);
                 for s in &ran {
                     assert!(
                         [
@@ -416,7 +507,6 @@ async fn unchanged_server_clears_stale_with_state_queries_only() {
                             "ListExistentComments",
                             "ChangedParents",
                             "ChangedDependents",
-                            "YoungSchemas",
                             "Canary"
                         ]
                         .contains(s),
@@ -457,6 +547,116 @@ async fn unchanged_server_clears_stale_with_state_queries_only() {
                 let mut rx = l.cat.catalog.subscribe();
                 let _ = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
             }
+        })
+        .await;
+    }
+}
+
+// ---- fix round 1 --------------------------------------------------------------------------------
+
+/// C-1: an older open transaction (an XID assigned before the pass) holds the snapshot xmin
+/// back across a later `ALTER TABLE`; the namespace must not validate `Current`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "docker"]
+async fn pg_a_held_back_xmin_never_validates_a_change_current() {
+    for t in targets(&PG) {
+        with_ns(&t, "heldxmin", async |l, ns, s| {
+            l.ddl(&format!("CREATE TABLE {s}.t (a int)")).await;
+            // The holder: an XID assigned and kept open (closing the connection aborts it,
+            // also on panic).
+            let mut side = admin(&t).await;
+            side.batch("BEGIN; SELECT pg_catalog.pg_current_xact_id();")
+                .await;
+            l.expand(ns).await;
+            l.ddl(&format!("ALTER TABLE {s}.t ADD COLUMN b int")).await;
+            let arena = l.cat.catalog.current().namespaces[ns].clone();
+            let mut c = l.pg.meta_on(Some(t.database.as_str())).await;
+            let (server, report) = hacivat_introspect::pg::state::check_namespace(
+                &mut c,
+                ns,
+                &arena,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the check");
+            let cached = hacivat_introspect::pg::state::cached_check(&arena).expect("cached");
+            fact(
+                &t,
+                &format!(
+                    "pg_held_xmin changed_parents_rows={} snap_xmin_held={}",
+                    rows_of(&report, "ChangedParents"),
+                    report.snap_xmin
+                ),
+            );
+            assert!(rows_of(&report, "ChangedParents") > 0, "{}", t.id);
+            assert_ne!(
+                freshness::verdict(&cached, &server),
+                NsVerdict::Current,
+                "{}: a changed namespace validated Current under a held-back xmin",
+                t.id
+            );
+            drop(c);
+            side.batch("COMMIT").await;
+            side.close().await;
+        })
+        .await;
+    }
+}
+
+/// I-1: a schema holding a collation the namespace's column uses is renamed while another
+/// object of the namespace changes too: the incremental pass reads the namespace in full
+/// (`ChangedDependents`' schema-rename branch follows referenced collations).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "docker"]
+async fn pg_rename_of_a_schema_holding_a_used_collation_reads_in_full() {
+    for t in targets(&PG) {
+        let other = unique("hvm4_t22_coll");
+        let renamed = format!("{other}_r");
+        let _drop = DropOnExit {
+            t: t.clone(),
+            sql: format!(
+                "DROP SCHEMA IF EXISTS {other} CASCADE; DROP SCHEMA IF EXISTS {renamed} CASCADE"
+            ),
+        };
+        with_ns(&t, "collren", async |l, ns, s| {
+            l.ddl(&format!(
+                "CREATE SCHEMA {other}; CREATE COLLATION {other}.c FROM \"C\"; \
+                 CREATE TABLE {s}.t (a text COLLATE {other}.c)"
+            ))
+            .await;
+            no_open_xids(&t).await;
+            l.expand(ns).await;
+            l.ddl(&format!(
+                "ALTER SCHEMA {other} RENAME TO {renamed}; CREATE TABLE {s}.u (x int)"
+            ))
+            .await;
+            let arena = l.cat.catalog.current().namespaces[ns].clone();
+            let mut c = l.pg.meta_on(Some(t.database.as_str())).await;
+            let p = hacivat_introspect::pg::pass::introspect(
+                &mut c,
+                ns,
+                hacivat_introspect::pg::pass::PassOpts {
+                    mode: hacivat_introspect::Mode::Incremental,
+                    level: arena.meta().level,
+                    prev: Some(&arena),
+                    ..Default::default()
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the pass");
+            fact(
+                &t,
+                &format!(
+                    "pg_collation_schema_rename full_reason={:?}",
+                    p.report.full_reason
+                ),
+            );
+            assert!(
+                p.result.full,
+                "{}: an incremental pass missed the rename",
+                t.id
+            );
         })
         .await;
     }

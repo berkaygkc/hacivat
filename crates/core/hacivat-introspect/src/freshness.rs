@@ -57,8 +57,8 @@ use crate::introspector::{IntroError, Introspector, Staleness};
 /// ## m4-t22-freshness
 /// A server-side check whose `max_mark` is `StateMark::None` (where the cached side has a
 /// mark) asks for a **full** re-read: the introspector saw a change it cannot vouch an
-/// incremental pass would catch (PostgreSQL: a schema renamed or created elsewhere in the
-/// database, two hops away from what the change queries follow).
+/// incremental pass would catch (PostgreSQL: a full plan, or a renamed schema the namespace's
+/// objects depend on, two hops away).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NsCheck {
     /// How many objects the namespace has.
