@@ -21,12 +21,18 @@ use hacivat_proto::DbmsKind;
 
 #[cfg(feature = "system")]
 pub use decode::decode;
+// ## m4-t23-minicat (named exception in Task 26's module): the checked JSON payload.
+#[cfg(feature = "system")]
+pub use decode::decode_json;
 #[cfg(feature = "system")]
 pub use normalize::normalize;
 
 use crate::ids::NsKey;
 use crate::name::Name;
 use crate::namespace::NamespaceSnapshot;
+// ## m4-t23-minicat
+use crate::namespace::Obj;
+use sql_catalog::SettingInfo;
 
 /// The built-in objects of one server line, as namespaces flagged `PRE_INTROSPECTED`.
 #[derive(Debug, Clone)]
@@ -39,6 +45,50 @@ pub struct SystemSnapshot {
     /// The canonical JSON format number (1).
     pub format: u32,
     pub namespaces: BTreeMap<NsKey, Arc<NamespaceSnapshot>>,
+    // ## m4-t23-minicat (named exception in Task 26's module): the side tables of a snapshot.
+    /// MySQL/MariaDB built-in functions (the generator's name probe): schema-less `Routine`
+    /// objects, flagged `SYSTEM | PRE_INTROSPECTED`, with `args = None` (name only, never "no
+    /// arguments"). Empty for PostgreSQL, whose built-ins live in `pg_catalog`.
+    pub builtins: Vec<Obj>,
+    /// PostgreSQL operators with their operand, result and function types.
+    pub operators: Arc<[SystemOperator]>,
+    /// PostgreSQL types with their SQL spelling, kind, category and array element.
+    pub types: Arc<[SystemType]>,
+    /// Setting names (PostgreSQL GUCs with type and context; MySQL/MariaDB variables, MariaDB
+    /// with scope as `context` and type), never their values; sorted by name.
+    pub settings: Arc<[SettingInfo]>,
+}
+
+// ## m4-t23-minicat (named exception in Task 26's module)
+/// One built-in operator of a snapshot (PostgreSQL).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemOperator {
+    pub schema: Name,
+    pub name: Name,
+    /// `infix`, `prefix` or `postfix`.
+    pub kind: Name,
+    pub left: Option<Name>,
+    pub right: Option<Name>,
+    pub result: Name,
+    /// The implementing function, as the server prints it.
+    pub function: Name,
+    pub comment: Option<Name>,
+}
+
+/// One built-in type of a snapshot (PostgreSQL).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemType {
+    pub schema: Name,
+    pub name: Name,
+    /// The SQL spelling (`double precision` for `float8`).
+    pub sql_name: Name,
+    /// `base`, `composite`, `domain`, `enum`, `pseudo`, `range` or `multirange`.
+    pub kind: Name,
+    /// `pg_type.typcategory`, one letter.
+    pub category: Name,
+    /// The element type of an array type.
+    pub element: Option<Name>,
+    pub comment: Option<Name>,
 }
 
 /// Why a snapshot set cannot be read.

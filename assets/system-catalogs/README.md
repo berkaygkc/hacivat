@@ -24,4 +24,19 @@ Rules:
 - Decoding lives in `hacivat_meta::system`; only `hacivat-app` embeds these files (feature
   `embedded-system`, `cargo xtask check-deps` rule `EmbeddedSystemOnlyFromApp`).
 
-Empty until M4 Task 23 generates the first set.
+How a set is made and committed (M4 Task 23):
+
+1. The `minicat-verify` CI job (dispatch) reads every line twice on CI's own stack, then once
+   more on a fresh stack, and uploads the regenerated sets as the artifact `system-catalogs`
+   (`minicat-1/verify`: the first stack; `minicat-2/verify`: the fresh one). Its log carries
+   one `HV-FACT minicat file=… zst_digest=…` line per file.
+2. Commit a set only from a run whose two reads agreed and whose fresh-stack set equals the
+   first (`diff -r` of the two directories is empty): `gh run download <run id> -n
+   system-catalogs -D <dir>`, copy `<dir>/minicat-1/verify/*` here, then `cargo xtask minicat
+   --check` must pass and list the ten files.
+3. Dispatch `minicat-verify` again: it must pass byte for byte.
+
+Locally (Docker stack up, controller only): `cargo xtask minicat collect --twice
+--require-complete`, then `--check` and `--verify`.
+
+Empty until the first CI-generated set is committed.

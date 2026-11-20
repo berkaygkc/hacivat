@@ -726,6 +726,105 @@ jobs:
         if: always()
         run: cargo run --locked -p xtask -- docker down
 
+  # ## m4-t23-minicat
+  # The system-catalog snapshots (HV-INTRO-16, L7, D-017; R-M4-17, R-M4-45) regenerate byte for
+  # byte from fresh servers: `minicat --check` (offline), two reads on CI's own stack (built
+  # bytes must match each other and the committed assets), then the stack goes down with its
+  # volumes and up again from the pinned images, and a third read must match too. The reader is
+  # `hv_catalog` (docker/m2a/init/mysql.sql); no secrets (the throwaway m2a credentials), no
+  # signing. Each read step continues on failure so the fresh-stack read always runs; the last
+  # step fails the job if any of them failed. The regenerated sets (`minicat-1/verify`: the
+  # first stack, `minicat-2/verify`: the fresh one) are always uploaded as the artifact
+  # `system-catalogs`, and the log carries one `HV-FACT minicat` line per file: the first
+  # complete set is reviewed and committed from there (`assets/system-catalogs/`). The offline
+  # check also runs in build-test (xtask's `the_committed_snapshots_are_canonical`). Runs by
+  # dispatch, on the schedule once `m4` reaches `main`, and on PRs touching the snapshots'
+  # inputs (`hacivat-meta`, `hacivat-introspect`, `assets/system-catalogs`).
+  minicat-verify:
+    name: minicat-verify
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scope (a PR runs only when it touches the snapshots' inputs)
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if git diff --name-only "$BASE" HEAD | grep -qE '^(crates/core/hacivat-(meta|introspect)/|assets/system-catalogs/)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install pinned toolchain
+        if: steps.scope.outputs.run == 'true'
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: libclang (pg_query bindgen)
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/libclang
+      - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.run == 'true'
+      - name: Check image digest pins
+        if: steps.scope.outputs.run == 'true'
+        run: cargo run --locked -p xtask -- docker check-pins
+      - name: Offline check of the committed snapshots
+        if: steps.scope.outputs.run == 'true'
+        run: cargo run --locked -p xtask -- minicat --check
+      - name: Start every server
+        if: steps.scope.outputs.run == 'true'
+        run: cargo run --locked -p xtask -- docker up --set full
+      - name: Read twice, compare the two builds and the committed snapshots
+        id: first
+        if: steps.scope.outputs.run == 'true'
+        continue-on-error: true
+        run: cargo run --locked -p xtask -- minicat --verify --twice --work "$RUNNER_TEMP/minicat-1"
+      - name: Fresh servers (volumes removed)
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          cargo run --locked -p xtask -- docker down
+          cargo run --locked -p xtask -- docker up --set full
+      - name: Read on the fresh servers and compare again
+        id: fresh
+        if: steps.scope.outputs.run == 'true'
+        continue-on-error: true
+        run: cargo run --locked -p xtask -- minicat --verify --work "$RUNNER_TEMP/minicat-2"
+      - name: The fresh stack built the same bytes as the first one
+        id: stable
+        if: steps.scope.outputs.run == 'true'
+        continue-on-error: true
+        run: |
+          sha256sum "$RUNNER_TEMP"/minicat-1/verify/* || true
+          diff -r "$RUNNER_TEMP/minicat-1/verify" "$RUNNER_TEMP/minicat-2/verify"
+      - name: Upload the regenerated snapshots
+        if: always() && steps.scope.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: system-catalogs
+          path: |
+            ${{ runner.temp }}/minicat-1/verify
+            ${{ runner.temp }}/minicat-2/verify
+          if-no-files-found: ignore
+      - name: Server logs
+        if: failure() || steps.first.outcome == 'failure' || steps.fresh.outcome == 'failure'
+        run: docker compose -f docker/m2a/compose.yml logs --no-color
+      - name: Stop the servers
+        if: always() && steps.scope.outputs.run == 'true'
+        run: cargo run --locked -p xtask -- docker down
+      - name: Verdict
+        if: steps.scope.outputs.run == 'true'
+        env:
+          FIRST: ${{ steps.first.outcome }}
+          FRESH: ${{ steps.fresh.outcome }}
+          STABLE: ${{ steps.stable.outcome }}
+        run: |
+          echo "first stack (twice + committed): $FIRST; fresh stack (committed): $FRESH; fresh equals first: $STABLE"
+          [ "$FIRST" = success ] && [ "$FRESH" = success ] && [ "$STABLE" = success ]
+
   # ## m2b-t16-keyring
   # The live OS keyring round trip (B15). A broken D-Bus setup fails the
   # round trip loudly (the Linux build has the Secret Service backend only).

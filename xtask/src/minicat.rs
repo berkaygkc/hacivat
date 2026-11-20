@@ -1,23 +1,76 @@
-//! `xtask minicat collect | build | check | verify`: the system-catalog snapshots
-//! (HV-INTRO-16, L7, D-017, R-M4-17, R-M4-33). M4 Task 1a skeleton; Task 23 writes the bodies
-//! from the minicat spike (`cd27ec1`).
+// ## m4-t23-minicat (spike origin `cd27ec1`: `collect`/`build`/`check`/`verify` and the raw-file
+// boundary are the minicat spike's; the read is rebuilt over the introspectors' packs)
+//! `xtask minicat collect | build | check | verify`: the system-catalog snapshots (HV-INTRO-16,
+//! L7, D-017, R-M4-17, R-M4-33). One snapshot per supported server line (PostgreSQL 14–18,
+//! MySQL 8.0/8.4, MariaDB 10.6/10.11/11.4; never SQLite, R-M4-6) holds the system schemas'
+//! relations and columns, routines with signatures, PostgreSQL operators and types, setting
+//! names and the MySQL/MariaDB built-in function names, so completion and the explorer know
+//! built-in objects offline.
 //!
-//! - `collect [--reader catalog|test] [--twice] [--require-complete] [--work <dir>] [--out <dir>]`
-//! - `build --raw <dir> [--out <dir>] [--require-complete]`
-//! - `check [--dir <dir>]` (also `minicat --check`)
-//! - `verify [--reader catalog|test] [--twice] [--work <dir>]` (also `minicat --verify`)
+//! The work is split at a raw-file boundary (xtask has no database client, P-M3b-13):
+//! - **Read** (`crates/core/hacivat-introspect/tests/minicat_gen.rs`, a Docker test active only
+//!   with `HACIVAT_MINICAT=1`): the introspectors' own system-mode pack sections
+//!   (`packs/<dialect>/40-system.hvq.sql`, R-M4-44) through `minicat::run_system_sections` on a
+//!   `MetaConn`, plus the generator-only built-in name probe; one raw JSON file per section,
+//!   rows in server order, under `<artifacts>/<HACIVAT_MINICAT_RAW>/<target>/`.
+//! - **Build** (here): normalise kinds, nest columns, build MySQL signatures, sort by byte
+//!   order, fail on unknown codes or duplicates, write canonical pretty JSON format 1 (the
+//!   decoder's `hacivat_meta::system::normalize` defines the same form) and compress it with
+//!   zstd 19, single-threaded, no dictionary, checksum on.
 //!
-//! Until Task 23 every command exits 2 ("not implemented"), except `check`, which passes on an
-//! empty manifest (no `[[snapshot]]` entry and no `.hvsnap.zst` file in the directory) and
-//! exits 2 on anything else: it never passes a snapshot it cannot verify.
+//! Commands:
+//! - `collect [--reader catalog|test] [--twice] [--require-complete] [--work <dir>]
+//!   [--out <dir>]`: `cargo test -p hacivat-introspect --test minicat_gen --no-run`, then the
+//!   read through `xtask docker test --set full -p hacivat-introspect --test minicat_gen` (via
+//!   the local wrapper `<main>/target/docker/run-docker-tests.sh` and its lock when it exists;
+//!   CI has none and owns its stack), then the build. It never starts or stops a server.
+//!   With `--twice` it reads and builds a second time from scratch and fails unless every
+//!   output file is byte-identical.
+//! - `build --raw <dir> [--out <dir>] [--require-complete]` builds from raw read directories
+//!   and writes `manifest.toml`; snapshot files of lines no longer read are removed.
+//! - `check [--dir <dir>]` (also `--check`; offline): the manifest lists exactly the files
+//!   present and is in its generated form; every digest, size and count matches; every file
+//!   decodes, is canonical and re-encodes to the same bytes (a different libzstd shows here);
+//!   every image is the pinned one of `docker/m2a/compose.yml`; the set is empty (before the
+//!   first CI-generated set is committed) or exactly the ten lines, each complete, each with
+//!   its named exclusion rules.
+//! - `verify [--reader catalog|test] [--twice] [--work <dir>]` (also `--verify`): collects
+//!   into `<work>/verify` (complete coverage required with the catalog reader) and
+//!   byte-compares with the committed assets, printing the first differing section and
+//!   object of each differing file.
+//!
+//! Every command prints one `HV-FACT minicat …` line per built file (sizes, counts, digests),
+//! so a CI log carries the facts (ledger R-W3-14).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
+use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, Serialize};
+use twox_hash::XxHash3_64;
+
+/// The snapshot format; a reader refuses any other.
+pub const FORMAT: u32 = 1;
+/// The zstd level of every snapshot (a change rewrites every file).
+pub const ZSTD_LEVEL: i32 = 19;
+/// The raw read format `minicat_gen` writes (`target.json`).
+const RAW_FORMAT: &str = "hacivat-minicat-raw/2";
 /// The committed snapshots, relative to the workspace root.
 pub const ASSET_DIR: &str = "assets/system-catalogs";
 const MANIFEST: &str = "manifest.toml";
 const SNAPSHOT_SUFFIX: &str = ".hvsnap.zst";
+/// Where the image of each server line is pinned (its digest goes into the manifest).
+const COMPOSE_FILE: &str = "docker/m2a/compose.yml";
+/// The Docker test that reads the catalogs.
+const READ_TEST: &str = "minicat_gen";
+const READ_CRATE: &str = "hacivat-introspect";
+/// The largest canonical JSON a snapshot may hold (`hacivat_meta::system::normalize`'s
+/// bound).
+const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
+const MANIFEST_HEADER: &str = "# The system-catalog snapshots (HV-INTRO-16). Generated by \
+`cargo xtask minicat build`; never edit by hand.\n# `cargo xtask minicat check` verifies every \
+entry against the files of this directory.\n\n";
 
 const USAGE: &str = "usage: xtask minicat collect [--reader catalog|test] [--twice] \
                      [--require-complete] [--work <dir>] [--out <dir>]\n       \
@@ -26,90 +79,1582 @@ const USAGE: &str = "usage: xtask minicat collect [--reader catalog|test] [--twi
                      xtask minicat verify [--reader catalog|test] [--twice] [--work <dir>]  \
                      (also: minicat --verify)";
 
-/// What `check` found.
-#[derive(Debug, PartialEq, Eq)]
-pub enum CheckOutcome {
-    /// The manifest lists no snapshot and the directory holds none.
-    Empty,
-    /// There are snapshots to verify: Task 23's body.
-    NotImplemented,
-    /// The manifest is missing or unreadable.
-    Invalid(String),
-}
+/// The shipped lines: `(Docker target, dbms, line)`, in file-name order (R-M4-6).
+pub const SHIPPED: [(&str, &str, &str); 10] = [
+    ("mariadb1011", "mariadb", "10.11"),
+    ("mariadb106", "mariadb", "10.6"),
+    ("mariadb114", "mariadb", "11.4"),
+    ("mysql80", "mysql", "8.0"),
+    ("mysql84", "mysql", "8.4"),
+    ("pg14", "postgres", "14"),
+    ("pg15", "postgres", "15"),
+    ("pg16", "postgres", "16"),
+    ("pg17", "postgres", "17"),
+    ("pg18", "postgres", "18"),
+];
 
-/// `check` over `dir`: passes only an empty snapshot set.
-pub fn check_dir(dir: &Path) -> CheckOutcome {
-    let manifest = match std::fs::read_to_string(dir.join(MANIFEST)) {
-        Ok(m) => m,
-        Err(e) => return CheckOutcome::Invalid(format!("{}: {e}", dir.join(MANIFEST).display())),
-    };
-    let table = match manifest.parse::<toml::Table>() {
-        Ok(t) => t,
-        Err(e) => return CheckOutcome::Invalid(format!("{MANIFEST}: {e}")),
-    };
-    // Fix round 1 (m8): an empty manifest holds `format` and `zstd_level` only; any other key
-    // (a `[snapshot.x]` table, an empty `snapshot = []`) is not "empty".
-    if let Some(key) = table
-        .keys()
-        .find(|k| !matches!(k.as_str(), "format" | "zstd_level"))
-    {
-        return if key == "snapshot" {
-            CheckOutcome::NotImplemented
-        } else {
-            CheckOutcome::Invalid(format!("{MANIFEST}: unexpected key `{key}`"))
-        };
-    }
-    if holds_snapshot(dir) {
-        CheckOutcome::NotImplemented
+/// What a PostgreSQL snapshot leaves out on purpose (R-M4-17; ADR 0008 `m4-t23`).
+pub const PG_EXCLUDED: [&str; 6] = [
+    "guc-names-with-a-dot",
+    "objects-with-oid-16384-and-above",
+    "relation-and-column-comments",
+    "relation-row-types",
+    "server-ids",
+    "setting-values",
+];
+/// What a MySQL or MariaDB snapshot leaves out on purpose (R-M4-17; ADR 0008 `m4-t23`).
+pub const MY_EXCLUDED: [&str; 5] = [
+    "comments-and-help-text",
+    "definers-times-sizes-and-row-counts",
+    "non-system-databases",
+    "server-ids",
+    "variable-values",
+];
+
+/// The named exclusion rules of `dbms`.
+pub fn excluded_rules(dbms: &str) -> Vec<String> {
+    let rules: &[&str] = if dbms == "postgres" {
+        &PG_EXCLUDED
     } else {
-        CheckOutcome::Empty
+        &MY_EXCLUDED
+    };
+    rules.iter().map(|s| s.to_string()).collect()
+}
+
+// -----------------------------------------------------------------------------------------------
+// The snapshot model (canonical JSON format 1; `hacivat_meta::system::normalize` is the same)
+
+/// One server line's system catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
+    pub format: u32,
+    /// `postgres`, `mysql` or `mariadb`.
+    pub dbms: String,
+    /// The server line: `17`, `8.4`, `10.11`.
+    pub line: String,
+    /// The exact server version (`17.6`, `8.4.6`).
+    pub server_version: String,
+    pub coverage: Coverage,
+    pub relations: Vec<Relation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routines: Vec<Routine>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operators: Vec<Operator>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<TypeDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<Variable>,
+}
+
+/// What the read could see.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Coverage {
+    /// `catalog` (the system-schema reader) or `test` (the fixture account).
+    pub reader: String,
+    pub expected_schemas: Vec<String>,
+    pub missing_schemas: Vec<String>,
+    pub relations_without_columns: u32,
+    /// Where the schema-less built-in function names come from: `probe`, `sql_functions`, or
+    /// both joined with `+`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtins: Option<String>,
+}
+
+impl Snapshot {
+    /// No expected schema missing, every relation with columns, and (MySQL/MariaDB) the
+    /// built-in names read.
+    pub fn is_complete(&self) -> bool {
+        let c = &self.coverage;
+        c.missing_schemas.is_empty()
+            && c.relations_without_columns == 0
+            && (self.dbms == "postgres" || c.builtins.is_some())
     }
 }
 
-/// Whether `dir` or any directory under it holds a snapshot file.
-fn holds_snapshot(dir: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    entries.flatten().any(|e| {
-        let p = e.path();
-        if p.is_dir() {
-            holds_snapshot(&p)
-        } else {
-            e.file_name().to_string_lossy().ends_with(SNAPSHOT_SUFFIX)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Relation {
+    pub schema: String,
+    pub name: String,
+    /// `table`, `view`, `system_view`, `materialized_view`, `partitioned_table`,
+    /// `foreign_table`, `sequence`.
+    pub kind: String,
+    /// In ordinal order.
+    pub columns: Vec<Column>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Column {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+    pub nullable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Routine {
+    /// `None` for schema-less built-ins (MySQL/MariaDB native functions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub name: String,
+    /// `function`, `aggregate`, `window`, `procedure`.
+    pub kind: String,
+    /// The argument list as the server prints it (`None`: not introspectable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<String>,
+    /// PostgreSQL's identity arguments, only when they differ from `args`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// `immutable`, `stable`, `volatile` (PostgreSQL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volatility: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub set_returning: bool,
+    /// The server's own description (PostgreSQL only: MySQL and MariaDB comments are GPL
+    /// documentation text and are never read).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Operator {
+    pub schema: String,
+    pub name: String,
+    /// `infix`, `prefix`, `postfix`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<String>,
+    pub result: String,
+    pub function: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TypeDef {
+    pub schema: String,
+    pub name: String,
+    /// The SQL spelling (`format_type`: `integer` for `int4`).
+    pub sql_name: String,
+    /// `base`, `composite`, `domain`, `enum`, `pseudo`, `range`, `multirange`.
+    pub kind: String,
+    pub category: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Variable {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub ty: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+// -----------------------------------------------------------------------------------------------
+// Raw read files
+
+/// `<raw>/<target>/target.json`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHeader {
+    format: String,
+    id: String,
+    dbms: String,
+    line: String,
+    server_version: String,
+    reader: String,
+}
+
+/// One section file: the rows of one pack section (or the probe), in server order.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTable {
+    columns: Vec<String>,
+    rows: Vec<Vec<Option<String>>>,
+}
+
+/// One target's raw read: its header and its section files by name (`pg_catalog.SystemRoutines`,
+/// `ListSettings`, `builtins`).
+struct RawTarget {
+    head: RawHeader,
+    sections: BTreeMap<String, RawTable>,
+}
+
+/// One raw row by column name.
+struct Rec<'a> {
+    section: &'a str,
+    cols: &'a [String],
+    row: &'a [Option<String>],
+}
+
+impl<'a> Rec<'a> {
+    fn opt(&self, col: &str) -> Result<Option<&'a str>> {
+        let i = self
+            .cols
+            .iter()
+            .position(|c| c.eq_ignore_ascii_case(col))
+            .with_context(|| format!("section {}: no column {col:?}", self.section))?;
+        Ok(self.row.get(i).and_then(|v| v.as_deref()))
+    }
+
+    fn req(&self, col: &str) -> Result<&'a str> {
+        self.opt(col)?
+            .with_context(|| format!("section {}: {col} is NULL", self.section))
+    }
+
+    fn string(&self, col: &str) -> Result<String> {
+        self.req(col).map(str::to_string)
+    }
+
+    fn opt_string(&self, col: &str) -> Result<Option<String>> {
+        Ok(self.opt(col)?.map(str::to_string))
+    }
+
+    fn number<T: std::str::FromStr>(&self, col: &str) -> Result<T> {
+        let v = self.req(col)?;
+        v.parse()
+            .ok()
+            .with_context(|| format!("section {}: {col} {v:?} is not a number", self.section))
+    }
+}
+
+impl RawTarget {
+    /// Reads `dir` (`target.json` and every `*.json` section file).
+    fn load(dir: &Path) -> Result<RawTarget> {
+        let head_path = dir.join("target.json");
+        let head: RawHeader = serde_json::from_slice(
+            &std::fs::read(&head_path).with_context(|| head_path.display().to_string())?,
+        )
+        .with_context(|| head_path.display().to_string())?;
+        ensure!(
+            head.format == RAW_FORMAT,
+            "{}: raw format {:?}, expected {RAW_FORMAT}",
+            head.id,
+            head.format
+        );
+        let mut sections = BTreeMap::new();
+        for e in std::fs::read_dir(dir).with_context(|| dir.display().to_string())? {
+            let path = e?.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(section) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if section == "target" {
+                continue;
+            }
+            let table: RawTable = serde_json::from_slice(
+                &std::fs::read(&path).with_context(|| path.display().to_string())?,
+            )
+            .with_context(|| path.display().to_string())?;
+            for (i, row) in table.rows.iter().enumerate() {
+                ensure!(
+                    row.len() == table.columns.len(),
+                    "{}: {section} row {i} has {} values for {} columns",
+                    head.id,
+                    row.len(),
+                    table.columns.len()
+                );
+            }
+            sections.insert(section.to_string(), table);
         }
+        Ok(RawTarget { head, sections })
+    }
+
+    fn records(&self, section: &str) -> Result<Vec<Rec<'_>>> {
+        let (name, table) = self
+            .sections
+            .get_key_value(section)
+            .with_context(|| format!("{}: no section file {section}.json", self.head.id))?;
+        Ok(table
+            .rows
+            .iter()
+            .map(|row| Rec {
+                section: name,
+                cols: &table.columns,
+                row,
+            })
+            .collect())
+    }
+}
+
+fn map_code(what: &str, code: &str, table: &[(&str, &str)]) -> Result<String> {
+    table
+        .iter()
+        .find(|(k, _)| *k == code)
+        .map(|(_, v)| v.to_string())
+        .with_context(|| format!("unknown {what} {code:?}"))
+}
+
+fn truth(what: &str, v: &str) -> Result<bool> {
+    match v {
+        "t" | "true" | "1" | "YES" => Ok(true),
+        "f" | "false" | "0" | "NO" => Ok(false),
+        other => bail!("{what}: {other:?} is not a boolean"),
+    }
+}
+
+pub const PG_SCHEMAS: [&str; 2] = ["information_schema", "pg_catalog"];
+pub const MY_SCHEMAS: [&str; 4] = ["information_schema", "mysql", "performance_schema", "sys"];
+
+const PG_RELKINDS: [(&str, &str); 5] = [
+    ("r", "table"),
+    ("v", "view"),
+    ("m", "materialized_view"),
+    ("p", "partitioned_table"),
+    ("f", "foreign_table"),
+];
+const MY_TABLE_TYPES: [(&str, &str); 4] = [
+    ("BASE TABLE", "table"),
+    ("VIEW", "view"),
+    ("SYSTEM VIEW", "system_view"),
+    ("SEQUENCE", "sequence"),
+];
+const PG_PROKINDS: [(&str, &str); 4] = [
+    ("f", "function"),
+    ("a", "aggregate"),
+    ("w", "window"),
+    ("p", "procedure"),
+];
+const PG_VOLATILITY: [(&str, &str); 3] = [("i", "immutable"), ("s", "stable"), ("v", "volatile")];
+const PG_OPRKINDS: [(&str, &str); 3] = [("b", "infix"), ("l", "prefix"), ("r", "postfix")];
+const PG_TYPTYPES: [(&str, &str); 7] = [
+    ("b", "base"),
+    ("c", "composite"),
+    ("d", "domain"),
+    ("e", "enum"),
+    ("p", "pseudo"),
+    ("r", "range"),
+    ("m", "multirange"),
+];
+const MY_ROUTINE_TYPES: [(&str, &str); 2] = [("FUNCTION", "function"), ("PROCEDURE", "procedure")];
+
+/// Relations with their columns nested in ordinal order. `cols` is `(relation key, position,
+/// column)`; a column of a relation the read did not list is dropped with it.
+fn nest<K: Ord + Clone + std::fmt::Debug>(
+    id: &str,
+    rels: BTreeMap<K, Relation>,
+    cols: Vec<(K, i64, Column)>,
+) -> Result<Vec<Relation>> {
+    let mut rels = rels;
+    let mut by: BTreeMap<K, Vec<(i64, Column)>> = BTreeMap::new();
+    for (k, pos, c) in cols {
+        by.entry(k).or_default().push((pos, c));
+    }
+    for (k, mut list) in by {
+        let Some(rel) = rels.get_mut(&k) else {
+            continue;
+        };
+        list.sort_by_key(|(p, _)| *p);
+        for w in list.windows(2) {
+            ensure!(
+                w[0].0 != w[1].0,
+                "{id}: {}.{} has two columns at {}",
+                rel.schema,
+                rel.name,
+                w[0].0
+            );
+        }
+        rel.columns = list.into_iter().map(|(_, c)| c).collect();
+    }
+    Ok(rels.into_values().collect())
+}
+
+fn coverage(
+    raw: &RawTarget,
+    expected: &[&str],
+    rels: &[Relation],
+    builtins: Option<String>,
+) -> Coverage {
+    let present: BTreeSet<&str> = rels.iter().map(|r| r.schema.as_str()).collect();
+    Coverage {
+        reader: raw.head.reader.clone(),
+        expected_schemas: expected.iter().map(|s| s.to_string()).collect(),
+        missing_schemas: expected
+            .iter()
+            .filter(|s| !present.contains(*s))
+            .map(|s| s.to_string())
+            .collect(),
+        relations_without_columns: rels.iter().filter(|r| r.columns.is_empty()).count() as u32,
+        builtins,
+    }
+}
+
+fn from_pg(raw: &RawTarget) -> Result<Snapshot> {
+    let id = raw.head.id.as_str();
+    let (mut rels, mut cols) = (BTreeMap::new(), Vec::new());
+    let (mut routines, mut operators, mut types) = (Vec::new(), Vec::new(), Vec::new());
+    for schema in PG_SCHEMAS {
+        for r in raw.records(&format!("{schema}.SystemRelations"))? {
+            let oid: u32 = r.number("oid")?;
+            let rel = Relation {
+                schema: schema.to_string(),
+                name: r.string("name")?,
+                kind: map_code("relkind", r.req("relkind")?, &PG_RELKINDS)?,
+                columns: Vec::new(),
+            };
+            ensure!(
+                rels.insert(oid, rel).is_none(),
+                "{id}: relation oid {oid} twice"
+            );
+        }
+        for r in raw.records(&format!("{schema}.SystemColumns"))? {
+            let rel: u32 = r.number("relid")?;
+            cols.push((
+                rel,
+                r.number("attnum")?,
+                Column {
+                    name: r.string("name")?,
+                    ty: r.string("type_text")?,
+                    nullable: !truth("not_null", r.req("not_null")?)?,
+                },
+            ));
+        }
+        for r in raw.records(&format!("{schema}.SystemRoutines"))? {
+            routines.push(Routine {
+                schema: Some(schema.to_string()),
+                name: r.string("name")?,
+                kind: map_code("prokind", r.req("prokind")?, &PG_PROKINDS)?,
+                args: Some(r.string("args")?),
+                identity: r.opt_string("identity_args")?,
+                result: r.opt_string("result_type")?,
+                volatility: Some(map_code(
+                    "provolatile",
+                    r.req("volatility")?,
+                    &PG_VOLATILITY,
+                )?),
+                set_returning: truth("returns_set", r.req("returns_set")?)?,
+                description: r.opt_string("comment")?,
+            });
+        }
+        for r in raw.records(&format!("{schema}.SystemOperators"))? {
+            operators.push(Operator {
+                schema: schema.to_string(),
+                name: r.string("name")?,
+                kind: map_code("oprkind", r.req("oprkind")?, &PG_OPRKINDS)?,
+                left: r.opt_string("left_type")?,
+                right: r.opt_string("right_type")?,
+                result: r.string("result_type")?,
+                function: r.string("function_name")?,
+                description: r.opt_string("comment")?,
+            });
+        }
+        for r in raw.records(&format!("{schema}.SystemTypes"))? {
+            types.push(TypeDef {
+                schema: schema.to_string(),
+                name: r.string("name")?,
+                sql_name: r.string("sql_name")?,
+                kind: map_code("typtype", r.req("typtype")?, &PG_TYPTYPES)?,
+                category: r.string("category")?,
+                element: r.opt_string("element")?,
+                description: r.opt_string("comment")?,
+            });
+        }
+    }
+    let rels = nest(id, rels, cols)?;
+    let mut variables = Vec::new();
+    for r in raw.records("ListSettings")? {
+        variables.push(Variable {
+            name: r.string("name")?,
+            scope: None,
+            ty: r.opt_string("vartype")?,
+            context: r.opt_string("context")?,
+        });
+    }
+    Ok(Snapshot {
+        format: FORMAT,
+        dbms: raw.head.dbms.clone(),
+        line: raw.head.line.clone(),
+        server_version: raw.head.server_version.clone(),
+        coverage: coverage(raw, &PG_SCHEMAS, &rels, None),
+        relations: rels,
+        routines,
+        operators,
+        types,
+        variables,
     })
 }
 
-pub fn run() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(2).collect();
-    let command = args.first().map(String::as_str);
-    match command {
-        Some("check" | "--check") => {
-            let dir = args
-                .windows(2)
-                .find(|w| w[0] == "--dir")
-                .map(|w| PathBuf::from(&w[1]))
-                .unwrap_or_else(|| crate::workspace_root().join(ASSET_DIR));
-            match check_dir(&dir) {
-                CheckOutcome::Empty => {
-                    println!("minicat check: ok (no snapshots yet)");
-                    ExitCode::SUCCESS
-                }
-                CheckOutcome::NotImplemented => {
-                    crate::not_yet("minicat check (snapshots present)", "M4 Task 23")
-                }
-                CheckOutcome::Invalid(why) => {
-                    eprintln!("minicat check: {why}");
-                    ExitCode::FAILURE
-                }
+fn from_my(raw: &RawTarget) -> Result<Snapshot> {
+    let id = raw.head.id.as_str();
+    let (mut rels, mut cols) = (BTreeMap::new(), Vec::new());
+    let mut routines = Vec::new();
+    for schema in MY_SCHEMAS {
+        for r in raw.records(&format!("{schema}.SystemRelations"))? {
+            let name = r.string("table_name")?;
+            let rel = Relation {
+                schema: schema.to_string(),
+                name: name.clone(),
+                kind: map_code("table type", r.req("table_type")?, &MY_TABLE_TYPES)?,
+                columns: Vec::new(),
+            };
+            ensure!(
+                rels.insert((schema, name.clone()), rel).is_none(),
+                "{id}: relation {schema}.{name} twice"
+            );
+        }
+        for r in raw.records(&format!("{schema}.SystemColumns"))? {
+            cols.push((
+                (schema, r.string("table_name")?),
+                r.number("ordinal_position")?,
+                Column {
+                    name: r.string("column_name")?,
+                    ty: r.string("column_type")?,
+                    nullable: truth("is_nullable", r.req("is_nullable")?)?,
+                },
+            ));
+        }
+        // Parameters by routine (specific name and type), in ordinal order.
+        let mut params: BTreeMap<(String, String), Vec<(u32, String)>> = BTreeMap::new();
+        for r in raw.records(&format!("{schema}.SystemParameters"))? {
+            let kind = map_code("routine type", r.req("routine_type")?, &MY_ROUTINE_TYPES)?;
+            let key = (r.string("specific_name")?, kind.clone());
+            let pos: u32 = r.number("ordinal_position")?;
+            let name = r.req("parameter_name")?;
+            let ty = r.req("dtd_identifier")?;
+            let text = match (kind.as_str(), r.opt("parameter_mode")?) {
+                ("procedure", Some(mode)) => format!("{mode} {name} {ty}"),
+                _ => format!("{name} {ty}"),
+            };
+            params.entry(key).or_default().push((pos, text));
+        }
+        for r in raw.records(&format!("{schema}.SystemRoutines"))? {
+            let kind = map_code("routine type", r.req("routine_type")?, &MY_ROUTINE_TYPES)?;
+            let mut list = params
+                .remove(&(r.string("specific_name")?, kind.clone()))
+                .unwrap_or_default();
+            list.sort_by_key(|(p, _)| *p);
+            ensure!(
+                list.windows(2).all(|w| w[0].0 != w[1].0),
+                "{id}: a routine of {schema} has two parameters at one position"
+            );
+            let args: Vec<String> = list.into_iter().map(|(_, t)| t).collect();
+            routines.push(Routine {
+                schema: Some(schema.to_string()),
+                name: r.string("routine_name")?,
+                result: r
+                    .opt_string("dtd_identifier")?
+                    .filter(|_| kind == "function"),
+                kind,
+                args: Some(args.join(", ")),
+                identity: None,
+                volatility: None,
+                set_returning: false,
+                description: None,
+            });
+        }
+    }
+    let rels = nest(id, rels, cols)?;
+    let mut sources = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    for r in raw.records("builtins")? {
+        let name = r.req("name")?.to_ascii_lowercase();
+        sources.insert(r.string("source")?);
+        if seen.insert(name.clone()) {
+            routines.push(Routine {
+                schema: None,
+                name,
+                kind: "function".into(),
+                args: None,
+                identity: None,
+                result: None,
+                volatility: None,
+                set_returning: false,
+                description: None,
+            });
+        }
+    }
+    let mut variables = Vec::new();
+    for r in raw.records("ListSettings")? {
+        variables.push(Variable {
+            name: r.req("variable_name")?.to_ascii_lowercase(),
+            scope: r
+                .opt("variable_scope")?
+                .map(|s| s.to_ascii_lowercase().replace(' ', "_")),
+            ty: r.opt("variable_type")?.map(|s| s.to_ascii_lowercase()),
+            context: None,
+        });
+    }
+    let builtins = (!sources.is_empty()).then(|| sources.into_iter().collect::<Vec<_>>().join("+"));
+    Ok(Snapshot {
+        format: FORMAT,
+        dbms: raw.head.dbms.clone(),
+        line: raw.head.line.clone(),
+        server_version: raw.head.server_version.clone(),
+        coverage: coverage(raw, &MY_SCHEMAS, &rels, builtins),
+        relations: rels,
+        routines,
+        operators: Vec::new(),
+        types: Vec::new(),
+        variables,
+    })
+}
+
+fn from_raw(raw: &RawTarget) -> Result<Snapshot> {
+    let mut s = match raw.head.dbms.as_str() {
+        "postgres" => from_pg(raw),
+        "mysql" | "mariadb" => from_my(raw),
+        other => bail!(
+            "{}: no snapshot is made for {other:?} (R-M4-6)",
+            raw.head.id
+        ),
+    }
+    .with_context(|| format!("raw {}", raw.head.id))?;
+    canonicalize(&mut s).with_context(|| format!("raw {}", raw.head.id))?;
+    Ok(s)
+}
+
+// -----------------------------------------------------------------------------------------------
+// Canonical form and encoding
+
+fn sort_unique<T, K: Ord + std::fmt::Debug>(
+    what: &str,
+    items: &mut [T],
+    key: impl Fn(&T) -> K,
+) -> Result<()> {
+    items.sort_by_key(|a| key(a));
+    for w in items.windows(2) {
+        let (a, b) = (key(&w[0]), key(&w[1]));
+        ensure!(a != b, "{what} {a:?} twice");
+    }
+    Ok(())
+}
+
+/// Sorts every list by byte order and fails on a duplicate key; columns keep their ordinal
+/// order. Idempotent.
+pub fn canonicalize(s: &mut Snapshot) -> Result<()> {
+    ensure!(s.format == FORMAT, "snapshot format {}", s.format);
+    sort_unique("relation", &mut s.relations, |r| {
+        (r.schema.clone(), r.name.clone())
+    })?;
+    for r in &s.relations {
+        let mut names: Vec<&str> = r.columns.iter().map(|c| c.name.as_str()).collect();
+        names.sort_unstable();
+        ensure!(
+            names.windows(2).all(|w| w[0] != w[1]),
+            "{}.{} has a column twice",
+            r.schema,
+            r.name
+        );
+    }
+    sort_unique("routine", &mut s.routines, |r| {
+        (
+            r.schema.clone(),
+            r.name.clone(),
+            r.kind.clone(),
+            r.identity.clone().or_else(|| r.args.clone()),
+        )
+    })?;
+    sort_unique("operator", &mut s.operators, |o| {
+        (
+            o.schema.clone(),
+            o.name.clone(),
+            o.left.clone(),
+            o.right.clone(),
+        )
+    })?;
+    sort_unique("type", &mut s.types, |t| (t.schema.clone(), t.name.clone()))?;
+    sort_unique("variable", &mut s.variables, |v| v.name.clone())?;
+    s.coverage.expected_schemas.sort();
+    s.coverage.missing_schemas.sort();
+    Ok(())
+}
+
+/// The canonical JSON text of `s` (pretty, LF, a final newline) and its zstd frame.
+pub fn encode(s: &Snapshot) -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut json = serde_json::to_vec_pretty(s).context("serializing a snapshot")?;
+    json.push(b'\n');
+    ensure!(
+        json.len() <= MAX_JSON_BYTES,
+        "{} {}: {} bytes of JSON, over the decoder's bound",
+        s.dbms,
+        s.line,
+        json.len()
+    );
+    let mut c = zstd::bulk::Compressor::new(ZSTD_LEVEL).context("a zstd compressor")?;
+    c.include_checksum(true)?;
+    c.include_contentsize(true)?;
+    c.include_dictid(false)?;
+    let zst = c.compress(&json).context("zstd")?;
+    Ok((json, zst))
+}
+
+/// The JSON text inside a snapshot file, and the snapshot.
+pub fn decode(zst: &[u8]) -> Result<(Vec<u8>, Snapshot)> {
+    let json = zstd::stream::decode_all(zst).context("zstd frame")?;
+    let s: Snapshot = serde_json::from_slice(&json).context("snapshot JSON")?;
+    ensure!(s.format == FORMAT, "snapshot format {}", s.format);
+    Ok((json, s))
+}
+
+fn xxh3(bytes: &[u8]) -> String {
+    format!("xxh3-64:{:016x}", XxHash3_64::oneshot(bytes))
+}
+
+/// `postgres-17.hvsnap.zst`.
+pub fn file_name(dbms: &str, line: &str) -> String {
+    format!("{dbms}-{line}{SNAPSHOT_SUFFIX}")
+}
+
+// -----------------------------------------------------------------------------------------------
+// The manifest
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Manifest {
+    pub format: u32,
+    pub zstd_level: i32,
+    /// The libzstd version that encoded the files (`check` re-encodes with the linked one).
+    pub zstd_library: String,
+    #[serde(default)]
+    pub snapshot: Vec<Entry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Entry {
+    pub file: String,
+    /// The Docker target the line was read from (`docker/m2a/targets.toml`).
+    pub target: String,
+    pub dbms: String,
+    pub line: String,
+    pub server_version: String,
+    /// The pinned image the line was read from (`docker/m2a/compose.yml`).
+    pub image: String,
+    pub format: u32,
+    /// `complete` or `partial`.
+    pub coverage: String,
+    pub json_bytes: u64,
+    pub zst_bytes: u64,
+    pub json_digest: String,
+    pub zst_digest: String,
+    pub relations: u64,
+    pub columns: u64,
+    pub routines: u64,
+    pub operators: u64,
+    pub types: u64,
+    pub variables: u64,
+    /// The named exclusion rules: what the snapshot leaves out on purpose.
+    pub excluded: Vec<String>,
+}
+
+fn entry_of(s: &Snapshot, target: &str, image: &str, json: &[u8], zst: &[u8]) -> Entry {
+    Entry {
+        file: file_name(&s.dbms, &s.line),
+        target: target.to_string(),
+        dbms: s.dbms.clone(),
+        line: s.line.clone(),
+        server_version: s.server_version.clone(),
+        image: image.to_string(),
+        format: s.format,
+        coverage: if s.is_complete() {
+            "complete"
+        } else {
+            "partial"
+        }
+        .into(),
+        json_bytes: json.len() as u64,
+        zst_bytes: zst.len() as u64,
+        json_digest: xxh3(json),
+        zst_digest: xxh3(zst),
+        relations: s.relations.len() as u64,
+        columns: s.relations.iter().map(|r| r.columns.len() as u64).sum(),
+        routines: s.routines.len() as u64,
+        operators: s.operators.len() as u64,
+        types: s.types.len() as u64,
+        variables: s.variables.len() as u64,
+        excluded: excluded_rules(&s.dbms),
+    }
+}
+
+fn zstd_library() -> String {
+    zstd::zstd_safe::version_string().to_string()
+}
+
+pub fn manifest_text(m: &Manifest) -> Result<String> {
+    Ok(format!(
+        "{MANIFEST_HEADER}{}",
+        toml::to_string(m).context("manifest TOML")?
+    ))
+}
+
+/// The manifest of an empty set (before the first generated set is committed).
+pub fn empty_manifest() -> Manifest {
+    Manifest {
+        format: FORMAT,
+        zstd_level: ZSTD_LEVEL,
+        zstd_library: zstd_library(),
+        snapshot: Vec::new(),
+    }
+}
+
+// -----------------------------------------------------------------------------------------------
+// build
+
+/// The pinned image of `target` in the compose text, refusing an unpinned one.
+fn pinned_image(images: &BTreeMap<String, String>, target: &str) -> Result<String> {
+    let image = images
+        .get(target)
+        .with_context(|| format!("{target}: no image in {COMPOSE_FILE}"))?;
+    ensure!(
+        image.contains("@sha256:"),
+        "{target}: image {image:?} is not pinned by digest (`cargo xtask docker pin`)"
+    );
+    Ok(image.clone())
+}
+
+/// Builds a snapshot from every target directory of `raw_dir` into `out_dir`, writes the
+/// manifest and removes snapshot files of lines no longer read. Returns the manifest.
+pub fn build(raw_dir: &Path, out_dir: &Path, require_complete: bool) -> Result<Manifest> {
+    let compose = crate::workspace_root().join(COMPOSE_FILE);
+    let text = std::fs::read_to_string(&compose).with_context(|| compose.display().to_string())?;
+    let images = compose_images(&text);
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(raw_dir)
+        .with_context(|| format!("reading {}", raw_dir.display()))?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<_>>()?;
+    dirs.retain(|p| p.join("target.json").is_file());
+    dirs.sort();
+    ensure!(!dirs.is_empty(), "{}: no raw read", raw_dir.display());
+    std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+    let mut entries = Vec::new();
+    let mut partial = Vec::new();
+    for dir in &dirs {
+        let raw = RawTarget::load(dir)?;
+        let snap = from_raw(&raw)?;
+        if !snap.is_complete() {
+            partial.push(format!(
+                "{} (missing schemas {:?}, {} relations without columns, built-ins {:?})",
+                raw.head.id,
+                snap.coverage.missing_schemas,
+                snap.coverage.relations_without_columns,
+                snap.coverage.builtins
+            ));
+        }
+        let image = pinned_image(&images, &raw.head.id)?;
+        let (json, zst) = encode(&snap)?;
+        let entry = entry_of(&snap, &raw.head.id, &image, &json, &zst);
+        let dest = out_dir.join(&entry.file);
+        std::fs::write(&dest, &zst).with_context(|| dest.display().to_string())?;
+        entries.push(entry);
+    }
+    if require_complete && !partial.is_empty() {
+        bail!("partial snapshots: {}", partial.join("; "));
+    }
+    for p in &partial {
+        eprintln!("minicat: partial snapshot {p}");
+    }
+    entries.sort_by(|a, b| a.file.cmp(&b.file));
+    for w in entries.windows(2) {
+        ensure!(w[0].file != w[1].file, "two raw reads make {}", w[0].file);
+    }
+    let keep: BTreeSet<&str> = entries.iter().map(|e| e.file.as_str()).collect();
+    for f in snapshot_files(out_dir)? {
+        if !keep.contains(f.as_str()) {
+            std::fs::remove_file(out_dir.join(&f)).with_context(|| f.clone())?;
+        }
+    }
+    let manifest = Manifest {
+        snapshot: entries,
+        ..empty_manifest()
+    };
+    let path = out_dir.join(MANIFEST);
+    std::fs::write(&path, manifest_text(&manifest)?).with_context(|| path.display().to_string())?;
+    Ok(manifest)
+}
+
+/// `service -> image reference` of a compose file (the `image:` line under each service).
+pub fn compose_images(compose: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut service: Option<String> = None;
+    for line in compose.lines() {
+        let indent = line.len() - line.trim_start().len();
+        let body = line.trim();
+        if indent == 2 && body.ends_with(':') && !body.starts_with('#') {
+            service = Some(body.trim_end_matches(':').to_string());
+        } else if indent == 0 && !body.is_empty() {
+            service = None;
+        } else if let (Some(svc), Some(image)) = (&service, body.strip_prefix("image:")) {
+            out.insert(
+                svc.clone(),
+                image.trim().trim_matches(['"', '\'']).to_string(),
+            );
+        }
+    }
+    out
+}
+
+/// The snapshot file names in `dir`, sorted.
+fn snapshot_files(dir: &Path) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let name = e?.file_name().to_string_lossy().into_owned();
+        if name.ends_with(SNAPSHOT_SUFFIX) {
+            out.push(name);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+// -----------------------------------------------------------------------------------------------
+// check
+
+/// Every problem of the snapshots in `dir` (empty: all good). Any set of lines.
+pub fn check_dir(dir: &Path) -> Result<Vec<String>> {
+    let path = dir.join(MANIFEST);
+    let text = std::fs::read_to_string(&path).with_context(|| path.display().to_string())?;
+    let manifest: Manifest = toml::from_str(&text).with_context(|| path.display().to_string())?;
+    let mut problems = Vec::new();
+    if manifest.format != FORMAT || manifest.zstd_level != ZSTD_LEVEL {
+        problems.push(format!(
+            "manifest: format {} level {}, expected {FORMAT} and {ZSTD_LEVEL}",
+            manifest.format, manifest.zstd_level
+        ));
+    }
+    if text != manifest_text(&manifest)? {
+        problems.push("manifest: not in its generated form".into());
+    }
+    let listed: Vec<String> = manifest.snapshot.iter().map(|e| e.file.clone()).collect();
+    let present = snapshot_files(dir)?;
+    if listed != present {
+        problems.push(format!(
+            "manifest lists {listed:?}, the directory holds {present:?}"
+        ));
+    }
+    for entry in &manifest.snapshot {
+        let file = dir.join(&entry.file);
+        let Ok(zst) = std::fs::read(&file) else {
+            continue;
+        };
+        let (json, snap) = match decode(&zst) {
+            Ok(v) => v,
+            Err(e) => {
+                problems.push(format!("{}: {e:#}", entry.file));
+                continue;
+            }
+        };
+        let mut canonical = snap.clone();
+        if let Err(e) = canonicalize(&mut canonical) {
+            problems.push(format!("{}: {e:#}", entry.file));
+            continue;
+        }
+        if canonical != snap {
+            problems.push(format!("{}: not in canonical order", entry.file));
+        }
+        let (json2, zst2) = match encode(&canonical) {
+            Ok(v) => v,
+            Err(e) => {
+                problems.push(format!("{}: {e:#}", entry.file));
+                continue;
+            }
+        };
+        if json2 != json {
+            problems.push(format!("{}: JSON is not in its canonical form", entry.file));
+        }
+        if zst2 != zst {
+            problems.push(format!(
+                "{}: re-encoding gives other bytes (zstd {} here, {} in the manifest)",
+                entry.file,
+                zstd_library(),
+                manifest.zstd_library
+            ));
+        }
+        // The target and image are the manifest's own record, not in the file.
+        let want = entry_of(&snap, &entry.target, &entry.image, &json, &zst);
+        if &want != entry {
+            problems.push(format!(
+                "{}: the manifest entry does not match the file",
+                entry.file
+            ));
+        }
+    }
+    Ok(problems)
+}
+
+/// [`check_dir`] plus the rules of the shipped set: empty (before the first CI-generated set
+/// is committed) or exactly the ten [`SHIPPED`] lines, each complete, read from its target's
+/// pinned image of `docker/m2a/compose.yml`, whose version is of its line, with its named
+/// exclusion rules.
+pub fn check_shipped(dir: &Path) -> Result<Vec<String>> {
+    let mut problems = check_dir(dir)?;
+    let text = std::fs::read_to_string(dir.join(MANIFEST))?;
+    let manifest: Manifest = toml::from_str(&text)?;
+    if manifest.snapshot.is_empty() {
+        return Ok(problems);
+    }
+    let compose = std::fs::read_to_string(crate::workspace_root().join(COMPOSE_FILE))?;
+    let images = compose_images(&compose);
+    let want: Vec<String> = SHIPPED
+        .iter()
+        .map(|(_, dbms, line)| file_name(dbms, line))
+        .collect();
+    let have: Vec<String> = manifest.snapshot.iter().map(|e| e.file.clone()).collect();
+    if have != want {
+        problems.push(format!("the shipped set must be {want:?}, it is {have:?}"));
+    }
+    for e in &manifest.snapshot {
+        let Some((target, _, line)) = SHIPPED
+            .iter()
+            .find(|(_, dbms, line)| file_name(dbms, line) == e.file)
+        else {
+            continue;
+        };
+        if e.target != *target {
+            problems.push(format!(
+                "{}: read from {}, expected {target}",
+                e.file, e.target
+            ));
+        }
+        if e.coverage != "complete" {
+            problems.push(format!("{}: coverage {}", e.file, e.coverage));
+        }
+        match pinned_image(&images, target) {
+            Ok(img) if img == e.image => {}
+            Ok(img) => problems.push(format!(
+                "{}: image {} is not {COMPOSE_FILE}'s {img}",
+                e.file, e.image
+            )),
+            Err(err) => problems.push(format!("{}: {err:#}", e.file)),
+        }
+        if !version_of_line(&e.server_version, line) {
+            problems.push(format!(
+                "{}: server version {} is not of line {line}",
+                e.file, e.server_version
+            ));
+        }
+        if e.excluded != excluded_rules(&e.dbms) {
+            problems.push(format!("{}: excluded {:?}", e.file, e.excluded));
+        }
+    }
+    Ok(problems)
+}
+
+/// Whether `version` (`17.6`, `8.4.6`, `10.11.14`) belongs to `line` (`17`, `8.4`, `10.11`).
+pub fn version_of_line(version: &str, line: &str) -> bool {
+    version
+        .strip_prefix(line)
+        .is_some_and(|rest| rest.starts_with('.') && rest.len() > 1)
+}
+
+/// The size table of `m` and its total (PO-Q1).
+pub fn sizes_report(m: &Manifest) -> String {
+    let mut out = format!(
+        "{:<26} {:>14} {:>9} {:>9} {:>6} {:>6} {:>6} {:>5} {:>5} {:>5}  coverage\n",
+        "file", "version", "json", "zst", "rels", "cols", "rtns", "ops", "types", "vars"
+    );
+    for e in &m.snapshot {
+        out.push_str(&format!(
+            "{:<26} {:>14} {:>9} {:>9} {:>6} {:>6} {:>6} {:>5} {:>5} {:>5}  {}\n",
+            e.file,
+            e.server_version,
+            e.json_bytes,
+            e.zst_bytes,
+            e.relations,
+            e.columns,
+            e.routines,
+            e.operators,
+            e.types,
+            e.variables,
+            e.coverage
+        ));
+    }
+    let zst: u64 = m.snapshot.iter().map(|e| e.zst_bytes).sum();
+    let json: u64 = m.snapshot.iter().map(|e| e.json_bytes).sum();
+    out.push_str(&format!(
+        "total compressed: {zst} bytes ({json} bytes of JSON)\n"
+    ));
+    out
+}
+
+/// One `HV-FACT minicat …` line per file of `m` (bounded: one line per shipped line).
+pub fn fact_lines(m: &Manifest) -> Vec<String> {
+    m.snapshot
+        .iter()
+        .map(|e| {
+            format!(
+                "HV-FACT minicat file={} target={} version={} coverage={} json_bytes={} \
+                 zst_bytes={} json_digest={} zst_digest={} relations={} columns={} \
+                 routines={} operators={} types={} variables={}",
+                e.file,
+                e.target,
+                e.server_version,
+                e.coverage,
+                e.json_bytes,
+                e.zst_bytes,
+                e.json_digest,
+                e.zst_digest,
+                e.relations,
+                e.columns,
+                e.routines,
+                e.operators,
+                e.types,
+                e.variables
+            )
+        })
+        .collect()
+}
+
+fn print_manifest(m: &Manifest) {
+    print!("{}", sizes_report(m));
+    for l in fact_lines(m) {
+        println!("{l}");
+    }
+}
+
+// -----------------------------------------------------------------------------------------------
+// verify: the first difference
+
+/// The keyed items of each section of `s`, as `(section, key, JSON of the item)`.
+fn items(s: &Snapshot) -> Vec<(&'static str, String, String)> {
+    fn j<T: Serialize>(t: &T) -> String {
+        serde_json::to_string(t).unwrap_or_default()
+    }
+    let mut out = vec![(
+        "header",
+        String::new(),
+        format!(
+            "{} {} {} {}",
+            s.dbms,
+            s.line,
+            s.server_version,
+            j(&s.coverage)
+        ),
+    )];
+    out.extend(
+        s.relations
+            .iter()
+            .map(|r| ("relations", format!("{}.{}", r.schema, r.name), j(r))),
+    );
+    out.extend(s.routines.iter().map(|r| {
+        let key = format!(
+            "{}.{}({})",
+            r.schema.as_deref().unwrap_or(""),
+            r.name,
+            r.identity.as_deref().or(r.args.as_deref()).unwrap_or("")
+        );
+        ("routines", key, j(r))
+    }));
+    out.extend(s.operators.iter().map(|o| {
+        let key = format!(
+            "{}.{}({}, {})",
+            o.schema,
+            o.name,
+            o.left.as_deref().unwrap_or(""),
+            o.right.as_deref().unwrap_or("")
+        );
+        ("operators", key, j(o))
+    }));
+    out.extend(
+        s.types
+            .iter()
+            .map(|t| ("types", format!("{}.{}", t.schema, t.name), j(t))),
+    );
+    out.extend(
+        s.variables
+            .iter()
+            .map(|v| ("variables", v.name.clone(), j(v))),
+    );
+    out
+}
+
+/// The first differing section and object of two snapshots, `None` when equal.
+pub fn first_difference(regenerated: &Snapshot, committed: &Snapshot) -> Option<String> {
+    let (a, b) = (items(regenerated), items(committed));
+    for i in 0..a.len().max(b.len()) {
+        match (a.get(i), b.get(i)) {
+            (Some(x), Some(y)) if x == y => continue,
+            (Some(x), Some(y)) if x.0 == y.0 && x.1 == y.1 => {
+                return Some(format!("{} {}: differs", x.0, x.1));
+            }
+            (Some(x), Some(y)) => {
+                return Some(format!(
+                    "{} {} (regenerated) where the committed file has {} {}",
+                    x.0, x.1, y.0, y.1
+                ));
+            }
+            (Some(x), None) => return Some(format!("{} {}: only regenerated", x.0, x.1)),
+            (None, Some(y)) => return Some(format!("{} {}: only committed", y.0, y.1)),
+            (None, None) => break,
+        }
+    }
+    None
+}
+
+// -----------------------------------------------------------------------------------------------
+// collect
+
+fn git(root: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .context("running git")?;
+    ensure!(out.status.success(), "git {args:?} failed");
+    Ok(String::from_utf8(out.stdout)
+        .context("git output")?
+        .trim()
+        .to_string())
+}
+
+/// The checkout xtask runs in, and the main checkout (whose `target/docker` is the artifacts
+/// directory of the Docker tests; a worktree resolves the same one).
+fn checkouts() -> Result<(PathBuf, PathBuf)> {
+    let here = crate::workspace_root();
+    let common = git(
+        &here,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    Ok((
+        here.clone(),
+        crate::docker::main_checkout_from(&common, &here),
+    ))
+}
+
+/// `minicat/raw-<run>`: the read's directory, relative to the artifacts directory.
+fn raw_name(run: u32) -> String {
+    format!("minicat/raw-{run}")
+}
+
+fn compile_read(root: &Path) -> Result<()> {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = Command::new(cargo)
+        .args(["test", "-p", READ_CRATE, "--test", READ_TEST, "--no-run"])
+        .current_dir(root)
+        .status()
+        .context("building the catalog read")?;
+    ensure!(status.success(), "building the catalog read failed");
+    Ok(())
+}
+
+/// Runs the read once into `<artifacts>/<raw>` through `xtask docker test` (never `up` or
+/// `down`): the local wrapper (it holds the Docker test lock) when it exists, else this
+/// xtask's own `docker test` (CI).
+fn run_read(root: &Path, artifacts: &Path, raw: &str, reader: &str) -> Result<()> {
+    let dir = artifacts.join(raw);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).with_context(|| format!("clearing {}", dir.display()))?;
+    }
+    let wrapper = artifacts.join("run-docker-tests.sh");
+    let mut cmd = if wrapper.is_file() {
+        let mut c = Command::new("bash");
+        c.arg(&wrapper);
+        c
+    } else {
+        let mut c = Command::new(std::env::current_exe().context("the xtask binary")?);
+        c.args(["docker", "test"]);
+        c
+    };
+    let status = cmd
+        .args(["--set", "full", "-p", READ_CRATE, "--test", READ_TEST])
+        .current_dir(root)
+        .env("HACIVAT_MINICAT", "1")
+        .env("HACIVAT_MINICAT_RAW", raw)
+        .env("HACIVAT_MINICAT_READER", reader)
+        .status()
+        .context("running the catalog read")?;
+    ensure!(status.success(), "the catalog read failed");
+    let read = std::fs::read_dir(&dir)
+        .with_context(|| format!("the read wrote nothing to {}", dir.display()))?
+        .count();
+    ensure!(read > 0, "the read wrote nothing to {}", dir.display());
+    Ok(())
+}
+
+/// The files of `a` and `b` that differ (or exist in one only).
+pub fn diff_dirs(a: &Path, b: &Path) -> Result<Vec<String>> {
+    let names = |d: &Path| -> Result<BTreeSet<String>> {
+        let mut out = BTreeSet::new();
+        for e in std::fs::read_dir(d).with_context(|| d.display().to_string())? {
+            out.insert(e?.file_name().to_string_lossy().into_owned());
+        }
+        Ok(out)
+    };
+    let (na, nb) = (names(a)?, names(b)?);
+    let mut diff: Vec<String> = na.symmetric_difference(&nb).cloned().collect();
+    for n in na.intersection(&nb) {
+        if std::fs::read(a.join(n))? != std::fs::read(b.join(n))? {
+            diff.push(n.clone());
+        }
+    }
+    diff.sort();
+    Ok(diff)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Cmd {
+    Collect {
+        reader: String,
+        twice: bool,
+        require_complete: bool,
+        work: Option<PathBuf>,
+        out: Option<PathBuf>,
+    },
+    Build {
+        raw: PathBuf,
+        out: Option<PathBuf>,
+        require_complete: bool,
+    },
+    Check {
+        dir: Option<PathBuf>,
+    },
+    /// Reads and builds into `<work>/verify` and byte-compares with the committed assets
+    /// (the plan's `minicat --verify`); writes nothing under `assets/`.
+    Verify {
+        reader: String,
+        twice: bool,
+        work: Option<PathBuf>,
+    },
+}
+
+pub fn parse_args(args: &[String]) -> Result<Cmd> {
+    // The plan's spelling (`minicat --check`, `minicat --verify`) is accepted too.
+    let mut it = args.iter().peekable();
+    let action = match it.peek().map(|a| a.as_str()) {
+        Some("--check") => {
+            it.next();
+            Some("check")
+        }
+        Some("--verify") => {
+            it.next();
+            Some("verify")
+        }
+        _ => it.next().map(String::as_str),
+    };
+    let (mut reader, mut twice, mut complete) = (None, false, false);
+    let (mut work, mut out, mut raw, mut dir) = (None, None, None, None);
+    let path = |v: Option<&String>, flag: &str| -> Result<PathBuf> {
+        v.map(PathBuf::from)
+            .with_context(|| format!("{flag} needs a value"))
+    };
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--reader" => {
+                let v = it.next().context("--reader needs catalog or test")?;
+                ensure!(
+                    v == "catalog" || v == "test",
+                    "unknown reader {v:?}: expected catalog or test"
+                );
+                reader = Some(v.clone());
+            }
+            "--twice" => twice = true,
+            "--require-complete" => complete = true,
+            "--work" => work = Some(path(it.next(), "--work")?),
+            "--out" => out = Some(path(it.next(), "--out")?),
+            "--raw" => raw = Some(path(it.next(), "--raw")?),
+            "--dir" => dir = Some(path(it.next(), "--dir")?),
+            other => bail!("unexpected argument {other:?}"),
+        }
+    }
+    match action {
+        Some("collect") => {
+            ensure!(
+                raw.is_none() && dir.is_none(),
+                "collect takes no --raw or --dir"
+            );
+            Ok(Cmd::Collect {
+                reader: reader.unwrap_or_else(|| "catalog".into()),
+                twice,
+                require_complete: complete,
+                work,
+                out,
+            })
+        }
+        Some("build") => {
+            ensure!(
+                reader.is_none() && !twice && work.is_none() && dir.is_none(),
+                "build takes --raw, --out and --require-complete only"
+            );
+            Ok(Cmd::Build {
+                raw: raw.context("build needs --raw <dir>")?,
+                out,
+                require_complete: complete,
+            })
+        }
+        Some("verify") => {
+            ensure!(
+                raw.is_none() && dir.is_none() && out.is_none() && !complete,
+                "verify takes --reader, --twice and --work only"
+            );
+            Ok(Cmd::Verify {
+                reader: reader.unwrap_or_else(|| "catalog".into()),
+                twice,
+                work,
+            })
+        }
+        Some("check") => {
+            ensure!(
+                reader.is_none()
+                    && !twice
+                    && !complete
+                    && work.is_none()
+                    && out.is_none()
+                    && raw.is_none(),
+                "check takes --dir only"
+            );
+            Ok(Cmd::Check { dir })
+        }
+        other => bail!("unknown minicat command {other:?}"),
+    }
+}
+
+/// Reads (once or twice), builds into `<work>/out-<run>`, then builds the first read into
+/// `out`. False when two reads differ or a rebuild is not byte-identical.
+fn collect_into(
+    reader: &str,
+    twice: bool,
+    require_complete: bool,
+    work: Option<PathBuf>,
+    out: &Path,
+) -> Result<bool> {
+    let (root, main) = checkouts()?;
+    let artifacts = crate::docker::artifacts_dir(&main);
+    let work = work.unwrap_or_else(|| main.join("target").join("minicat"));
+    compile_read(&root)?;
+    let runs = if twice { 2 } else { 1 };
+    for run in 1..=runs {
+        let built = work.join(format!("out-{run}"));
+        run_read(&root, &artifacts, &raw_name(run), reader)?;
+        if built.exists() {
+            std::fs::remove_dir_all(&built).with_context(|| built.display().to_string())?;
+        }
+        build(&artifacts.join(raw_name(run)), &built, require_complete)?;
+        println!("minicat: read {run} built into {}", built.display());
+    }
+    if twice {
+        let diff = diff_dirs(&work.join("out-1"), &work.join("out-2"))?;
+        if !diff.is_empty() {
+            eprintln!("minicat: two reads built different bytes: {diff:?}");
+            report_differences(&work.join("out-2"), &work.join("out-1"), &diff);
+            return Ok(false);
+        }
+        println!("minicat: two independent reads built byte-identical snapshots");
+    }
+    let manifest = build(&artifacts.join(raw_name(1)), out, require_complete)?;
+    let diff = diff_dirs(&work.join("out-1"), out)?;
+    if !diff.is_empty() {
+        eprintln!("minicat: rebuilding the same read gave other bytes: {diff:?}");
+        return Ok(false);
+    }
+    print_manifest(&manifest);
+    println!("minicat: wrote {}", out.display());
+    Ok(true)
+}
+
+/// For each differing snapshot file, its first differing section and object (`HV-FACT
+/// minicat-diff`).
+fn report_differences(regenerated: &Path, committed: &Path, files: &[String]) {
+    for f in files.iter().filter(|f| f.ends_with(SNAPSHOT_SUFFIX)) {
+        let read = |d: &Path| std::fs::read(d.join(f)).ok().and_then(|b| decode(&b).ok());
+        let line = match (read(regenerated), read(committed)) {
+            (Some((_, a)), Some((_, b))) => {
+                first_difference(&a, &b).unwrap_or_else(|| "same content, other bytes".into())
+            }
+            (Some(_), None) => "only regenerated".into(),
+            (None, Some(_)) => "only committed".into(),
+            (None, None) => "unreadable on both sides".into(),
+        };
+        println!("HV-FACT minicat-diff file={f} first={line}");
+    }
+}
+
+fn run_inner(args: &[String]) -> Result<bool> {
+    let assets = crate::workspace_root().join(ASSET_DIR);
+    match parse_args(args)? {
+        Cmd::Collect {
+            reader,
+            twice,
+            require_complete,
+            work,
+            out,
+        } => collect_into(
+            &reader,
+            twice,
+            require_complete,
+            work,
+            &out.unwrap_or(assets),
+        ),
+        Cmd::Build {
+            raw,
+            out,
+            require_complete,
+        } => {
+            let out = out.unwrap_or(assets);
+            let m = build(&raw, &out, require_complete)?;
+            print_manifest(&m);
+            Ok(true)
+        }
+        Cmd::Verify {
+            reader,
+            twice,
+            work,
+        } => {
+            let (_, main) = checkouts()?;
+            let work = work.unwrap_or_else(|| main.join("target").join("minicat"));
+            let staging = work.join("verify");
+            let complete = reader == "catalog";
+            if !collect_into(&reader, twice, complete, Some(work), &staging)? {
+                return Ok(false);
+            }
+            let diff = diff_dirs(&staging, &assets)?;
+            if diff.is_empty() {
+                println!("minicat verify: the committed snapshots regenerate byte for byte");
+                Ok(true)
+            } else {
+                eprintln!(
+                    "minicat verify: regenerated files differ from the committed ones: {diff:?}"
+                );
+                report_differences(&staging, &assets, &diff);
+                Ok(false)
             }
         }
-        Some("collect") => crate::not_yet("minicat collect", "M4 Task 23"),
-        Some("build") => crate::not_yet("minicat build", "M4 Task 23"),
-        Some("verify" | "--verify") => crate::not_yet("minicat verify", "M4 Task 23"),
-        _ => {
-            eprintln!("{USAGE}");
+        Cmd::Check { dir } => {
+            let dir = dir.unwrap_or(assets);
+            let problems = check_shipped(&dir)?;
+            for p in &problems {
+                eprintln!("minicat check: {p}");
+            }
+            if problems.is_empty() {
+                let text = std::fs::read_to_string(dir.join(MANIFEST))?;
+                let m: Manifest = toml::from_str(&text)?;
+                if m.snapshot.is_empty() {
+                    println!("minicat check: no snapshots yet (an empty set)");
+                } else {
+                    print_manifest(&m);
+                }
+                println!("minicat check: {} is canonical", dir.display());
+            }
+            Ok(problems.is_empty())
+        }
+    }
+}
+
+/// `cargo xtask minicat …`.
+pub fn run() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    match run_inner(&args) {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("xtask minicat: {e:#}\n{USAGE}");
             ExitCode::from(2)
         }
     }
@@ -118,51 +1663,871 @@ pub fn run() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
+
+    fn table(columns: &[&str], rows: &[&[Option<&str>]]) -> Value {
+        json!({
+            "columns": columns,
+            "rows": rows.iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
+        })
+    }
+
+    /// One raw read: the header and its section files.
+    struct Raw {
+        id: String,
+        head: Value,
+        sections: Vec<(String, Value)>,
+    }
+
+    fn head(id: &str, dbms: &str, line: &str, version: &str, reader: &str) -> Value {
+        json!({
+            "format": RAW_FORMAT, "id": id, "dbms": dbms, "line": line,
+            "server_version": version, "reader": reader,
+        })
+    }
+
+    fn pg_raw(id: &str, line: &str, version: &str) -> Raw {
+        let s = |k: &str| k.to_string();
+        let mut sections = vec![
+            (
+                s("pg_catalog.SystemRelations"),
+                table(
+                    &["oid", "name", "relkind", "comment"],
+                    &[
+                        &[Some("1259"), Some("pg_class"), Some("r"), Some("tables")],
+                        &[Some("12000"), Some("pg_stat_activity"), Some("v"), None],
+                    ],
+                ),
+            ),
+            (
+                s("pg_catalog.SystemColumns"),
+                table(
+                    &["relid", "attnum", "name", "type_text", "not_null"],
+                    &[
+                        &[
+                            Some("1259"),
+                            Some("2"),
+                            Some("relname"),
+                            Some("name"),
+                            Some("t"),
+                        ],
+                        &[Some("1259"), Some("1"), Some("oid"), Some("oid"), Some("t")],
+                        &[
+                            Some("12000"),
+                            Some("1"),
+                            Some("datid"),
+                            Some("oid"),
+                            Some("f"),
+                        ],
+                    ],
+                ),
+            ),
+            (
+                s("pg_catalog.SystemRoutines"),
+                table(
+                    &[
+                        "oid",
+                        "name",
+                        "prokind",
+                        "args",
+                        "identity_args",
+                        "result_type",
+                        "volatility",
+                        "returns_set",
+                        "comment",
+                    ],
+                    &[
+                        &[
+                            Some("870"),
+                            Some("lower"),
+                            Some("f"),
+                            Some("text"),
+                            None,
+                            Some("text"),
+                            Some("i"),
+                            Some("f"),
+                            Some("lowercase"),
+                        ],
+                        &[
+                            Some("3876"),
+                            Some("lower"),
+                            Some("f"),
+                            Some("anymultirange"),
+                            None,
+                            Some("anyelement"),
+                            Some("i"),
+                            Some("f"),
+                            None,
+                        ],
+                        &[
+                            Some("1067"),
+                            Some("generate_series"),
+                            Some("f"),
+                            Some("integer, integer"),
+                            None,
+                            Some("SETOF integer"),
+                            Some("i"),
+                            Some("t"),
+                            None,
+                        ],
+                        &[
+                            Some("2147"),
+                            Some("count"),
+                            Some("a"),
+                            Some(""),
+                            None,
+                            Some("bigint"),
+                            Some("i"),
+                            Some("f"),
+                            None,
+                        ],
+                    ],
+                ),
+            ),
+            (
+                s("pg_catalog.SystemOperators"),
+                table(
+                    &[
+                        "oid",
+                        "name",
+                        "oprkind",
+                        "left_type",
+                        "right_type",
+                        "result_type",
+                        "function_name",
+                        "comment",
+                    ],
+                    &[
+                        &[
+                            Some("551"),
+                            Some("+"),
+                            Some("b"),
+                            Some("integer"),
+                            Some("integer"),
+                            Some("integer"),
+                            Some("int4pl"),
+                            Some("add"),
+                        ],
+                        &[
+                            Some("558"),
+                            Some("-"),
+                            Some("l"),
+                            None,
+                            Some("integer"),
+                            Some("integer"),
+                            Some("int4um"),
+                            None,
+                        ],
+                    ],
+                ),
+            ),
+            (
+                s("pg_catalog.SystemTypes"),
+                table(
+                    &[
+                        "oid", "name", "sql_name", "typtype", "category", "element", "comment",
+                    ],
+                    &[
+                        &[
+                            Some("23"),
+                            Some("int4"),
+                            Some("integer"),
+                            Some("b"),
+                            Some("N"),
+                            None,
+                            Some("-2 billion to 2 billion integer"),
+                        ],
+                        &[
+                            Some("1007"),
+                            Some("_int4"),
+                            Some("integer[]"),
+                            Some("b"),
+                            Some("A"),
+                            Some("integer"),
+                            None,
+                        ],
+                    ],
+                ),
+            ),
+            (
+                s("ListSettings"),
+                table(
+                    &["name", "vartype", "context"],
+                    &[
+                        &[Some("work_mem"), Some("integer"), Some("user")],
+                        &[Some("shared_buffers"), Some("integer"), Some("postmaster")],
+                    ],
+                ),
+            ),
+        ];
+        sections.push((
+            s("information_schema.SystemRelations"),
+            table(
+                &["oid", "name", "relkind", "comment"],
+                &[&[Some("13000"), Some("tables"), Some("v"), None]],
+            ),
+        ));
+        sections.push((
+            s("information_schema.SystemColumns"),
+            table(
+                &["relid", "attnum", "name", "type_text", "not_null"],
+                &[&[
+                    Some("13000"),
+                    Some("1"),
+                    Some("table_catalog"),
+                    Some("information_schema.sql_identifier"),
+                    Some("f"),
+                ]],
+            ),
+        ));
+        for sec in ["SystemRoutines", "SystemOperators", "SystemTypes"] {
+            let cols = match sec {
+                "SystemRoutines" => vec![
+                    "oid",
+                    "name",
+                    "prokind",
+                    "args",
+                    "identity_args",
+                    "result_type",
+                    "volatility",
+                    "returns_set",
+                    "comment",
+                ],
+                "SystemOperators" => vec![
+                    "oid",
+                    "name",
+                    "oprkind",
+                    "left_type",
+                    "right_type",
+                    "result_type",
+                    "function_name",
+                    "comment",
+                ],
+                _ => vec![
+                    "oid", "name", "sql_name", "typtype", "category", "element", "comment",
+                ],
+            };
+            sections.push((format!("information_schema.{sec}"), table(&cols, &[])));
+        }
+        Raw {
+            id: id.into(),
+            head: head(id, "postgres", line, version, "catalog"),
+            sections,
+        }
+    }
+
+    fn my_raw(id: &str, dbms: &str, line: &str, version: &str, schemas: &[&str]) -> Raw {
+        let mut sections = Vec::new();
+        for s in MY_SCHEMAS {
+            let present = schemas.contains(&s);
+            let rels: Vec<[Option<&str>; 2]> = if present {
+                vec![[Some("t1"), Some("SYSTEM VIEW")]]
+            } else {
+                Vec::new()
+            };
+            let cols: Vec<[Option<&str>; 5]> = if present {
+                vec![[
+                    Some("t1"),
+                    Some("C1"),
+                    Some("1"),
+                    Some("varchar(64)"),
+                    Some("NO"),
+                ]]
+            } else {
+                Vec::new()
+            };
+            sections.push((
+                format!("{s}.SystemRelations"),
+                json!({"columns": ["table_name", "table_type"], "rows": rels}),
+            ));
+            sections.push((
+                format!("{s}.SystemColumns"),
+                json!({"columns": ["table_name", "column_name", "ordinal_position", "column_type", "is_nullable"], "rows": cols}),
+            ));
+            let (routines, params) = if s == "sys" && present {
+                (
+                    table(
+                        &[
+                            "specific_name",
+                            "routine_name",
+                            "routine_type",
+                            "dtd_identifier",
+                        ],
+                        &[
+                            &[
+                                Some("format_bytes"),
+                                Some("format_bytes"),
+                                Some("FUNCTION"),
+                                Some("text"),
+                            ],
+                            &[
+                                Some("ps_setup_reset_to_default"),
+                                Some("ps_setup_reset_to_default"),
+                                Some("PROCEDURE"),
+                                None,
+                            ],
+                        ],
+                    ),
+                    table(
+                        &[
+                            "specific_name",
+                            "routine_type",
+                            "ordinal_position",
+                            "parameter_mode",
+                            "parameter_name",
+                            "dtd_identifier",
+                        ],
+                        &[
+                            &[
+                                Some("format_bytes"),
+                                Some("FUNCTION"),
+                                Some("1"),
+                                None,
+                                Some("bytes"),
+                                Some("text"),
+                            ],
+                            &[
+                                Some("ps_setup_reset_to_default"),
+                                Some("PROCEDURE"),
+                                Some("1"),
+                                Some("IN"),
+                                Some("in_verbose"),
+                                Some("tinyint(1)"),
+                            ],
+                        ],
+                    ),
+                )
+            } else {
+                (
+                    table(
+                        &[
+                            "specific_name",
+                            "routine_name",
+                            "routine_type",
+                            "dtd_identifier",
+                        ],
+                        &[],
+                    ),
+                    table(
+                        &[
+                            "specific_name",
+                            "routine_type",
+                            "ordinal_position",
+                            "parameter_mode",
+                            "parameter_name",
+                            "dtd_identifier",
+                        ],
+                        &[],
+                    ),
+                )
+            };
+            sections.push((format!("{s}.SystemRoutines"), routines));
+            sections.push((format!("{s}.SystemParameters"), params));
+        }
+        sections.push((
+            "ListSettings".into(),
+            table(
+                &["variable_name", "variable_scope", "variable_type"],
+                &[
+                    &[Some("SQL_MODE"), None, None],
+                    &[Some("autocommit"), None, None],
+                ],
+            ),
+        ));
+        sections.push((
+            "builtins".into(),
+            table(
+                &["name", "source"],
+                &[
+                    &[Some("CONCAT"), Some("probe")],
+                    &[Some("abs"), Some("probe")],
+                ],
+            ),
+        ));
+        Raw {
+            id: id.into(),
+            head: head(id, dbms, line, version, "catalog"),
+            sections,
+        }
+    }
+
+    fn write_raws(dir: &Path, raws: &[Raw]) {
+        for r in raws {
+            let d = dir.join(&r.id);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("target.json"), serde_json::to_vec(&r.head).unwrap()).unwrap();
+            for (name, t) in &r.sections {
+                std::fs::write(
+                    d.join(format!("{name}.json")),
+                    serde_json::to_vec(t).unwrap(),
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    /// Every `rows` array of a raw read reversed: the read's row order must not matter.
+    fn reversed(mut r: Raw) -> Raw {
+        for (_, t) in &mut r.sections {
+            t["rows"].as_array_mut().unwrap().reverse();
+        }
+        r
+    }
+
+    fn all() -> Vec<Raw> {
+        vec![
+            pg_raw("pg17", "17", "17.6"),
+            my_raw("mysql84", "mysql", "8.4", "8.4.6", &MY_SCHEMAS),
+        ]
+    }
+
+    /// Raw reads of the ten shipped lines.
+    fn ten() -> Vec<Raw> {
+        SHIPPED
+            .iter()
+            .map(|(id, dbms, line)| {
+                let version = format!("{line}.3");
+                if *dbms == "postgres" {
+                    pg_raw(id, line, &version)
+                } else {
+                    my_raw(id, dbms, line, &version, &MY_SCHEMAS)
+                }
+            })
+            .collect()
+    }
+
+    fn built(raws: &[Raw]) -> tempfile::TempDir {
+        let raw = tempfile::tempdir().unwrap();
+        write_raws(raw.path(), raws);
+        let out = tempfile::tempdir().unwrap();
+        build(raw.path(), out.path(), false).unwrap();
+        out
+    }
+
+    fn snapshot_of(raw: Raw) -> Snapshot {
+        let dir = tempfile::tempdir().unwrap();
+        write_raws(dir.path(), &[raw]);
+        let id = std::fs::read_dir(dir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        from_raw(&RawTarget::load(&id).unwrap()).unwrap()
+    }
+
+    // The spike's eleven tests (`cd27ec1`), on the rebuilt raw boundary.
 
     #[test]
-    fn check_passes_on_the_committed_empty_manifest() {
-        assert_eq!(
-            check_dir(&crate::workspace_root().join(ASSET_DIR)),
-            CheckOutcome::Empty
+    fn the_generator_run_twice_gives_identical_bytes() {
+        let (a, b) = (built(&all()), built(&all()));
+        assert!(diff_dirs(a.path(), b.path()).unwrap().is_empty());
+        assert_eq!(snapshot_files(a.path()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn row_order_of_the_read_does_not_matter() {
+        let shuffled: Vec<Raw> = all().into_iter().map(reversed).collect();
+        let (a, b) = (built(&all()), built(&shuffled));
+        assert_eq!(diff_dirs(a.path(), b.path()).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_built_directory_checks_clean_and_tampering_is_caught() {
+        let out = built(&all());
+        assert_eq!(check_dir(out.path()).unwrap(), Vec::<String>::new());
+        // An extra file.
+        std::fs::write(out.path().join("postgres-99.hvsnap.zst"), b"x").unwrap();
+        assert!(!check_dir(out.path()).unwrap().is_empty());
+        std::fs::remove_file(out.path().join("postgres-99.hvsnap.zst")).unwrap();
+        // The same content at another level: decodes, but is not the canonical encoding.
+        let f = out.path().join("postgres-17.hvsnap.zst");
+        let (json, _) = decode(&std::fs::read(&f).unwrap()).unwrap();
+        std::fs::write(&f, zstd::bulk::compress(&json, 3).unwrap()).unwrap();
+        let problems = check_dir(out.path()).unwrap();
+        assert!(
+            problems.iter().any(|p| p.contains("re-encoding")),
+            "{problems:?}"
         );
     }
 
     #[test]
-    fn check_never_passes_snapshots_it_cannot_verify() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(MANIFEST), "format = 1\n").unwrap();
-        assert_eq!(check_dir(dir.path()), CheckOutcome::Empty);
-        std::fs::write(dir.path().join("postgres-17.hvsnap.zst"), b"x").unwrap();
-        assert_eq!(check_dir(dir.path()), CheckOutcome::NotImplemented);
-        std::fs::remove_file(dir.path().join("postgres-17.hvsnap.zst")).unwrap();
-        std::fs::write(
-            dir.path().join(MANIFEST),
-            "format = 1\n\n[[snapshot]]\nfile = \"postgres-17.hvsnap.zst\"\n",
-        )
-        .unwrap();
-        assert_eq!(check_dir(dir.path()), CheckOutcome::NotImplemented);
-        assert!(matches!(
-            check_dir(&dir.path().join("missing")),
-            CheckOutcome::Invalid(_)
-        ));
+    fn snapshots_round_trip_and_are_sorted() {
+        let s = snapshot_of(pg_raw("pg17", "17", "17.6"));
+        let (_, zst) = encode(&s).unwrap();
+        let (_, back) = decode(&zst).unwrap();
+        assert_eq!(back, s);
+        let names: Vec<_> = s
+            .relations
+            .iter()
+            .map(|r| format!("{}.{}", r.schema, r.name))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "information_schema.tables",
+                "pg_catalog.pg_class",
+                "pg_catalog.pg_stat_activity"
+            ]
+        );
+        let class = &s.relations[1];
+        assert_eq!(
+            class
+                .columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            ["oid", "relname"],
+            "columns keep their ordinal order"
+        );
+        assert!(!class.columns[0].nullable);
+        assert!(s.is_complete());
+        let lower: Vec<_> = s.routines.iter().filter(|r| r.name == "lower").collect();
+        assert_eq!(lower.len(), 2, "overloads are separate routines");
+        let series = s
+            .routines
+            .iter()
+            .find(|r| r.name == "generate_series")
+            .unwrap();
+        assert!(series.set_returning);
+        assert_eq!(s.operators[1].kind, "prefix");
+        assert_eq!(s.operators[1].left, None);
+        // No server id, no relation comment: the oids and comments of the read are gone.
+        let (json, _) = encode(&s).unwrap();
+        let text = String::from_utf8(json).unwrap();
+        assert!(!text.contains("1259") && !text.contains("\"tables\": \"tables\""));
+        assert!(!text.contains("oid\": "), "no oid field");
     }
 
-    /// Fix round 1 (m8): a snapshot table, an unknown key or a snapshot in a subdirectory is
-    /// not an empty set.
     #[test]
-    fn check_sees_snapshot_tables_unknown_keys_and_subdirectories() {
+    fn mysql_routines_get_their_signatures_and_builtins_their_names() {
+        let s = snapshot_of(my_raw("mysql84", "mysql", "8.4", "8.4.6", &MY_SCHEMAS));
+        let f = s
+            .routines
+            .iter()
+            .find(|r| r.name == "format_bytes")
+            .unwrap();
+        assert_eq!(f.args.as_deref(), Some("bytes text"));
+        assert_eq!(f.result.as_deref(), Some("text"));
+        let p = s
+            .routines
+            .iter()
+            .find(|r| r.name == "ps_setup_reset_to_default")
+            .unwrap();
+        assert_eq!(p.args.as_deref(), Some("IN in_verbose tinyint(1)"));
+        assert_eq!(p.result, None);
+        let builtins: Vec<_> = s
+            .routines
+            .iter()
+            .filter(|r| r.schema.is_none())
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(builtins, ["abs", "concat"]);
+        assert_eq!(s.coverage.builtins.as_deref(), Some("probe"));
+        let vars: Vec<_> = s.variables.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(vars, ["autocommit", "sql_mode"]);
+    }
+
+    #[test]
+    fn a_read_that_misses_a_schema_is_partial() {
+        let s = snapshot_of(my_raw(
+            "mysql84",
+            "mysql",
+            "8.4",
+            "8.4.6",
+            &["information_schema"],
+        ));
+        assert!(!s.is_complete());
+        assert_eq!(
+            s.coverage.missing_schemas,
+            ["mysql", "performance_schema", "sys"]
+        );
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join(MANIFEST);
-        std::fs::write(&manifest, "format = 1\n\n[snapshot.pg17]\nfile = \"x\"\n").unwrap();
-        assert_eq!(check_dir(dir.path()), CheckOutcome::NotImplemented);
-        std::fs::write(&manifest, "format = 1\nsnapshot = []\n").unwrap();
-        assert_eq!(check_dir(dir.path()), CheckOutcome::NotImplemented);
-        std::fs::write(&manifest, "format = 1\nextra = true\n").unwrap();
-        assert!(matches!(check_dir(dir.path()), CheckOutcome::Invalid(_)));
-        std::fs::write(&manifest, "format = 1\nzstd_level = 19\n").unwrap();
-        assert_eq!(check_dir(dir.path()), CheckOutcome::Empty);
-        std::fs::create_dir(dir.path().join("pg")).unwrap();
-        std::fs::write(dir.path().join("pg/x.hvsnap.zst"), b"x").unwrap();
-        assert_eq!(check_dir(dir.path()), CheckOutcome::NotImplemented);
+        write_raws(
+            dir.path(),
+            &[my_raw(
+                "mysql84",
+                "mysql",
+                "8.4",
+                "8.4.6",
+                &["information_schema"],
+            )],
+        );
+        let out = tempfile::tempdir().unwrap();
+        assert!(build(dir.path(), out.path(), true).is_err());
+        let m = build(dir.path(), out.path(), false).unwrap();
+        assert_eq!(m.snapshot[0].coverage, "partial");
+    }
+
+    #[test]
+    fn unknown_codes_and_duplicates_fail_closed() {
+        let load = |r: Raw| {
+            let dir = tempfile::tempdir().unwrap();
+            write_raws(dir.path(), &[r]);
+            RawTarget::load(&dir.path().join("pg17")).and_then(|r| from_raw(&r))
+        };
+        let mut r = pg_raw("pg17", "17", "17.6");
+        r.sections[0].1["rows"][0][2] = json!("x");
+        assert!(load(r).is_err(), "an unknown relkind");
+        let mut r = pg_raw("pg17", "17", "17.6");
+        let dup = r.sections[0].1["rows"][0].clone();
+        r.sections[0].1["rows"].as_array_mut().unwrap().push(dup);
+        assert!(load(r).is_err(), "a relation twice");
+        let mut r = pg_raw("pg17", "17", "17.6");
+        r.head["format"] = json!("hacivat-minicat-raw/1");
+        assert!(load(r).is_err(), "another raw format");
+        let mut r = pg_raw("pg17", "17", "17.6");
+        r.sections.retain(|(n, _)| n != "pg_catalog.SystemTypes");
+        assert!(load(r).is_err(), "a missing section file");
+        let mut r = pg_raw("pg17", "17", "17.6");
+        r.head["dbms"] = json!("sqlite");
+        assert!(load(r).is_err(), "no SQLite snapshot (R-M4-6)");
+    }
+
+    #[test]
+    fn a_line_no_longer_read_is_removed() {
+        let raw = tempfile::tempdir().unwrap();
+        write_raws(raw.path(), &all());
+        let out = tempfile::tempdir().unwrap();
+        build(raw.path(), out.path(), false).unwrap();
+        std::fs::remove_dir_all(raw.path().join("mysql84")).unwrap();
+        let m = build(raw.path(), out.path(), false).unwrap();
+        assert_eq!(m.snapshot.len(), 1);
+        assert_eq!(check_dir(out.path()).unwrap(), Vec::<String>::new());
+    }
+
+    /// Every PR checks the committed snapshots: canonical, reproducible encoding, manifest
+    /// true, and the shipped set's rules (`minicat --check`, run by `build-test`).
+    #[test]
+    fn the_committed_snapshots_are_canonical() {
+        let dir = crate::workspace_root().join(ASSET_DIR);
+        assert_eq!(check_shipped(&dir).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn compose_images_are_read_per_service() {
+        let text = "name: x\nservices:\n  pg17:\n    image: postgres:17@sha256:ab\n    \
+                    container_name: m2a-pg17\n  sshd-a:\n    build: ./sshd\n    \
+                    image: hacivat-m2a-sshd:2\nvolumes:\n  data:\n";
+        let images = compose_images(text);
+        assert_eq!(images["pg17"], "postgres:17@sha256:ab");
+        assert_eq!(images["sshd-a"], "hacivat-m2a-sshd:2");
+        assert!(!images.contains_key("data"));
+        let real = std::fs::read_to_string(crate::workspace_root().join(COMPOSE_FILE)).unwrap();
+        let real = compose_images(&real);
+        for (id, _, _) in SHIPPED {
+            assert!(real[id].contains("@sha256:"), "{id}: {}", real[id]);
+        }
+        // An unpinned image never makes a snapshot.
+        assert!(pinned_image(&images, "sshd-a").is_err());
+        assert!(pinned_image(&images, "nope").is_err());
+    }
+
+    #[test]
+    fn arguments() {
+        let a = |s: &str| {
+            parse_args(
+                &s.split_whitespace()
+                    .map(str::to_string)
+                    .collect::<Vec<String>>(),
+            )
+        };
+        assert_eq!(
+            a("collect --twice --reader test").unwrap(),
+            Cmd::Collect {
+                reader: "test".into(),
+                twice: true,
+                require_complete: false,
+                work: None,
+                out: None
+            }
+        );
+        assert_eq!(
+            a("build --raw r --require-complete").unwrap(),
+            Cmd::Build {
+                raw: "r".into(),
+                out: None,
+                require_complete: true
+            }
+        );
+        assert_eq!(a("check").unwrap(), Cmd::Check { dir: None });
+        assert_eq!(a("--check").unwrap(), Cmd::Check { dir: None });
+        assert_eq!(
+            a("--verify --twice").unwrap(),
+            Cmd::Verify {
+                reader: "catalog".into(),
+                twice: true,
+                work: None
+            }
+        );
+        assert!(a("--verify --out x").is_err());
+        assert!(a("build").is_err());
+        assert!(a("collect --reader root").is_err());
+        assert!(a("check --twice").is_err());
+        assert!(a("frobnicate").is_err());
+    }
+
+    // M4 Task 23's tests.
+
+    #[test]
+    fn check_is_offline_and_detects_one_flipped_byte() {
+        let out = built(&all());
+        assert_eq!(check_dir(out.path()).unwrap(), Vec::<String>::new());
+        let f = out.path().join("mysql-8.4.hvsnap.zst");
+        let good = std::fs::read(&f).unwrap();
+        // Every single flipped byte is caught (the digest at least; usually the frame too).
+        for i in (0..good.len()).step_by(7).chain([good.len() - 1]) {
+            let mut bad = good.clone();
+            bad[i] ^= 0xff;
+            std::fs::write(&f, &bad).unwrap();
+            assert!(
+                !check_dir(out.path()).unwrap().is_empty(),
+                "a flipped byte at {i} passed"
+            );
+        }
+        std::fs::write(&f, &good).unwrap();
+        // A manifest edited by hand is caught too.
+        let m = out.path().join(MANIFEST);
+        let text = std::fs::read_to_string(&m).unwrap();
+        std::fs::write(&m, text.replace("8.4.6", "8.4.7")).unwrap();
+        assert!(!check_dir(out.path()).unwrap().is_empty());
+        std::fs::write(&m, &text).unwrap();
+        assert_eq!(check_dir(out.path()).unwrap(), Vec::<String>::new());
+        // Offline: the directory alone is enough (no raw read, no server, no compose file).
+        let copy = tempfile::tempdir().unwrap();
+        for e in std::fs::read_dir(out.path()).unwrap() {
+            let p = e.unwrap().path();
+            std::fs::copy(&p, copy.path().join(p.file_name().unwrap())).unwrap();
+        }
+        assert_eq!(check_dir(copy.path()).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn manifest_lists_ten_snapshots_with_exact_versions_and_excluded_rules() {
+        let out = built(&ten());
+        let text = std::fs::read_to_string(out.path().join(MANIFEST)).unwrap();
+        let m: Manifest = toml::from_str(&text).unwrap();
+        let files: Vec<&str> = m.snapshot.iter().map(|e| e.file.as_str()).collect();
+        assert_eq!(
+            files,
+            [
+                "mariadb-10.11.hvsnap.zst",
+                "mariadb-10.6.hvsnap.zst",
+                "mariadb-11.4.hvsnap.zst",
+                "mysql-8.0.hvsnap.zst",
+                "mysql-8.4.hvsnap.zst",
+                "postgres-14.hvsnap.zst",
+                "postgres-15.hvsnap.zst",
+                "postgres-16.hvsnap.zst",
+                "postgres-17.hvsnap.zst",
+                "postgres-18.hvsnap.zst",
+            ]
+        );
+        let compose = compose_images(
+            &std::fs::read_to_string(crate::workspace_root().join(COMPOSE_FILE)).unwrap(),
+        );
+        for e in &m.snapshot {
+            // The exact version the server reported; the image digest of compose.yml.
+            assert_eq!(e.server_version, format!("{}.3", e.line), "{}", e.file);
+            assert!(version_of_line(&e.server_version, &e.line));
+            assert_eq!(e.image, compose[&e.target], "{}", e.file);
+            assert!(e.image.contains("@sha256:"));
+            assert_eq!(e.excluded, excluded_rules(&e.dbms));
+            assert_eq!(e.format, FORMAT);
+            assert_eq!(e.coverage, "complete");
+        }
+        assert!(
+            text.contains("excluded = [\"guc-names-with-a-dot\""),
+            "{text}"
+        );
+        assert_eq!(check_shipped(out.path()).unwrap(), Vec::<String>::new());
+        // The shipped rules: a missing line, another image, another exclusion list or a
+        // version of another line is refused.
+        let mut m2 = m.clone();
+        m2.snapshot[0].excluded.pop();
+        std::fs::write(out.path().join(MANIFEST), manifest_text(&m2).unwrap()).unwrap();
+        assert!(!check_shipped(out.path()).unwrap().is_empty());
+        assert!(!version_of_line("17.6", "1"));
+        assert!(!version_of_line("8.40.1", "8.4"));
+        assert!(version_of_line("10.11.14", "10.11"));
+        assert!(!version_of_line("10.11", "10.11"));
+        let fewer = built(&ten()[1..]);
+        assert!(
+            check_shipped(fewer.path())
+                .unwrap()
+                .iter()
+                .any(|p| p.contains("the shipped set"))
+        );
+    }
+
+    #[test]
+    fn require_complete_refuses_a_partial_mysql_file() {
+        let raws = |schemas: &[&str]| {
+            let mut v = ten();
+            v.retain(|r| r.id != "mysql80");
+            v.push(my_raw("mysql80", "mysql", "8.0", "8.0.43", schemas));
+            v
+        };
+        let dir = tempfile::tempdir().unwrap();
+        write_raws(dir.path(), &raws(&["information_schema", "mysql", "sys"]));
+        let out = tempfile::tempdir().unwrap();
+        let err = build(dir.path(), out.path(), true).unwrap_err();
+        assert!(format!("{err:#}").contains("mysql80"), "{err:#}");
+        // Without --require-complete it builds, but the shipped check refuses the set.
+        build(dir.path(), out.path(), false).unwrap();
+        let problems = check_shipped(out.path()).unwrap();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("mysql-8.0") && p.contains("partial")),
+            "{problems:?}"
+        );
+        // No built-in names read: partial too.
+        let mut r = my_raw("mysql80", "mysql", "8.0", "8.0.43", &MY_SCHEMAS);
+        r.sections.retain(|(n, _)| n != "builtins");
+        r.sections
+            .push(("builtins".into(), table(&["name", "source"], &[])));
+        assert!(!snapshot_of(r).is_complete());
+    }
+
+    #[test]
+    fn sizes_are_recorded() {
+        let out = built(&ten());
+        let text = std::fs::read_to_string(out.path().join(MANIFEST)).unwrap();
+        let m: Manifest = toml::from_str(&text).unwrap();
+        let mut total = 0;
+        for e in &m.snapshot {
+            let zst = std::fs::read(out.path().join(&e.file)).unwrap();
+            assert_eq!(e.zst_bytes, zst.len() as u64, "{}", e.file);
+            let (json, _) = decode(&zst).unwrap();
+            assert_eq!(e.json_bytes, json.len() as u64, "{}", e.file);
+            total += e.zst_bytes;
+        }
+        let report = sizes_report(&m);
+        assert!(
+            report.contains(&format!("total compressed: {total} bytes")),
+            "{report}"
+        );
+        let facts = fact_lines(&m);
+        assert_eq!(facts.len(), 10);
+        assert!(facts.iter().all(|l| l.starts_with("HV-FACT minicat file=")));
+    }
+
+    #[test]
+    fn verify_names_the_first_differing_section_and_object() {
+        let a = snapshot_of(pg_raw("pg17", "17", "17.6"));
+        assert_eq!(first_difference(&a, &a), None);
+        let mut b = a.clone();
+        b.relations[2].columns[0].ty = "bigint".into();
+        assert_eq!(
+            first_difference(&b, &a).as_deref(),
+            Some("relations pg_catalog.pg_stat_activity: differs")
+        );
+        let mut c = a.clone();
+        c.variables.pop();
+        assert_eq!(
+            first_difference(&c, &a).as_deref(),
+            Some("variables work_mem: only committed")
+        );
     }
 }
