@@ -35,8 +35,8 @@ use hacivat_meta::persist::ServerFingerprint;
 use hacivat_meta::props::{ColumnProps, FacetKind, Props, TableProps, ViewProps};
 use hacivat_meta::snapshot::IntroErrorCode;
 use hacivat_meta::{
-    Level, Name, NamespaceSnapshot, NsKey, Obj, ObjectKey, ObjectKind, ServerId, StateMark,
-    Subtree, Watermark,
+    Level, Name, NamespaceSnapshot, NsKey, Obj, ObjFlags, ObjectKey, ObjectKind, ServerId,
+    StateMark, Subtree, Watermark,
 };
 use hacivat_proto::DbmsKind;
 use hacivat_session::meta::{MetaConn, MetaError};
@@ -451,6 +451,11 @@ impl FakeIntrospector {
     }
 
     fn subtree(&self, o: &FakeObject, level: Level) -> Subtree {
+        self.subtree_flagged(o, level, ObjFlags::empty())
+    }
+
+    // ## m4-t30-gates (named exception; T30 review I-2): the object flagged `flags`.
+    fn subtree_flagged(&self, o: &FakeObject, level: Level, flags: ObjFlags) -> Subtree {
         let props = match o.kind {
             ObjectKind::View => Props::View(Arc::new(ViewProps::default())),
             // ## m4-t22-state (named exception)
@@ -458,6 +463,7 @@ impl FakeIntrospector {
             _ => Props::Table(Arc::new(TableProps::default())),
         };
         let mut root = Obj::new(o.kind, o.name.clone())
+            .add_flags(flags)
             .with_props(props)
             // ## m4-t22-state (named exception): markless passes (PostgreSQL's way).
             .with_state(if self.markless.load(Ordering::SeqCst) {
@@ -560,9 +566,18 @@ impl FakeIntrospector {
                 if since.is_some_and(|w| o.version <= w) {
                     continue;
                 }
+                // ## m4-t30-gates (named exception; T30 review I-2): a system-mode read flags
+                // its objects `SYSTEM`, as the real `40-system` sections do.
+                let flags = if mode == Mode::System {
+                    ObjFlags::SYSTEM
+                } else {
+                    ObjFlags::empty()
+                };
+                let subtree = self.subtree_flagged(o, level, flags);
+                // ## m4-t30-gates
                 changed.push(ChangedObject {
                     parent: root.clone(),
-                    subtree: self.subtree(o, level),
+                    subtree,
                 });
                 reread.push(o.clone());
             }

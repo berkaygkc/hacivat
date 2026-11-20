@@ -209,6 +209,20 @@ impl ScopePattern {
         out
     }
 
+    // ## m4-t30-gates (named exception in Task 13's file; T30 review I-1)
+    /// Whether a negative clause of the pattern removes `info` (removing is always safe: an
+    /// engine that adds namespaces beyond the pattern, such as the live system schemas of a
+    /// version without a snapshot, still honours the user's `!` clauses).
+    pub fn excludes(&self, info: &NsInfo, ctx: &CurrentCtx) -> bool {
+        let ident = self.ident_of(ctx);
+        let m = self.matcher(&ident, ctx);
+        self.clauses
+            .iter()
+            .filter(|c| c.negative)
+            .any(|c| m.clause(c, info))
+    }
+    // ## m4-t30-gates
+
     fn ident_of(&self, ctx: &CurrentCtx) -> IdentCtx {
         ctx.ident
             .clone()
