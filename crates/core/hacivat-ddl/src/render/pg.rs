@@ -721,15 +721,36 @@ fn owner_stmt(
     if matches!(kind, ObjectKind::Index | ObjectKind::Extension) {
         return Err(unsupported(op, ctx));
     }
+    // ## m4-t33a-hygiene (named exception in Task 19's file; T16b review m-1)
+    if &**owner == "PUBLIC" {
+        return Err(RenderError::Invalid("PUBLIC owns nothing"));
+    }
+    let owner = role(ctx, owner)?;
+    // ## m4-t33a-hygiene
     Ok(stmt(
         format!(
-            "ALTER {} OWNER TO {}",
+            "ALTER {} OWNER TO {owner}",
             object_ref(ctx, op, kind, name, sig)?,
-            ctx.ident(owner)?
         ),
         TX,
     ))
 }
+
+// ## m4-t33a-hygiene (T16b review m-1 carry to this renderer)
+/// A role name in a `RoleSpec` position (`GRANT … TO`, `OWNER TO`). PostgreSQL's role grammar
+/// reads `public` as PUBLIC and refuses `none`, quoted or not (it compares the folded or
+/// quoted text case-sensitively), so no quoting can name a role of that name: refused, never
+/// a grant to everyone. Every other name goes through `ctx.ident` (reserved words such as
+/// `current_user` are quoted, so they name the role, not the keyword).
+fn role(ctx: &RenderCtx, name: &Name) -> Result<String, RenderError> {
+    if matches!(&**name, "public" | "none") {
+        return Err(RenderError::Invalid(
+            "a role name PostgreSQL reads as a keyword",
+        ));
+    }
+    ctx.ident(name)
+}
+// ## m4-t33a-hygiene
 
 fn grant(ctx: &RenderCtx, op: &DdlOp, g: &GrantDef) -> Result<Stmt, RenderError> {
     // Views, materialized views and foreign tables are granted `ON TABLE`; aggregates `ON
@@ -760,7 +781,8 @@ fn grant(ctx: &RenderCtx, op: &DdlOp, g: &GrantDef) -> Result<Stmt, RenderError>
     let grantee = if &*g.grantee == "PUBLIC" {
         "PUBLIC".to_string()
     } else {
-        ctx.ident(&g.grantee)?
+        // ## m4-t33a-hygiene (named exception): `public` and `none` are refused.
+        role(ctx, &g.grantee)?
     };
     let on = object_ref(ctx, op, kind, &g.object, g.sig.as_deref())?;
     let mut s = format!("GRANT {} ON {on} TO {grantee}", privs?.join(", "));
