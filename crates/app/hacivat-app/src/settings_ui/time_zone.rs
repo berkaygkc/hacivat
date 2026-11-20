@@ -181,6 +181,11 @@ pub struct TimeZoneControl {
     select: Entity<Select>,
     /// The values the select offers now (they follow a hand-edited zone).
     values: Vec<String>,
+    // ## m4-t33b-carries (T32 re-review RR-5): the saved zone and whether the tz database
+    // knows it, looked up once per settings change ([`TimeZoneControl::follow`]), never per
+    // frame (the first lookup of a name reads the zoneinfo file).
+    checked: Option<(TimeZonePref, Option<String>)>,
+    lookups: u64,
     _subscription: Subscription,
 }
 
@@ -208,12 +213,19 @@ impl TimeZoneControl {
         TimeZoneControl {
             select,
             values,
+            checked: None,
+            lookups: 0,
             _subscription: subscription,
         }
     }
 
     /// Before a frame: the select follows the saved zone (a hand edit, another window).
     pub fn follow(&mut self, settings: &Settings, cx: &mut App) {
+        // ## m4-t33b-carries (RR-5): the unknown-zone check, once per change of the setting.
+        if self.checked.as_ref().map(|(p, _)| p) != Some(&settings.ui.time_zone) {
+            self.lookups += 1;
+            self.checked = Some((settings.ui.time_zone.clone(), unknown_zone(settings)));
+        }
         let want = values(&settings.ui.time_zone);
         if want != self.values {
             let opts = options(&want);
@@ -245,5 +257,17 @@ impl TimeZoneControl {
     /// The select (tests, shots).
     pub fn select(&self) -> &Entity<Select> {
         &self.select
+    }
+
+    // ## m4-t33b-carries (RR-5)
+    /// The saved zone when the tz database does not know it, as of the last
+    /// [`TimeZoneControl::follow`].
+    pub fn unknown(&self) -> Option<&str> {
+        self.checked.as_ref().and_then(|(_, z)| z.as_deref())
+    }
+
+    /// How many times the control looked the saved zone up (tests).
+    pub fn lookups(&self) -> u64 {
+        self.lookups
     }
 }

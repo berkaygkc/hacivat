@@ -1908,19 +1908,32 @@ impl TreeModel for ExplorerModel {
                         .map(|l| l.system.clone())
                         .unwrap_or_default(),
                 };
-                let from_snapshot = entries.iter().any(|e| {
+                let shipped = |e: &&Arc<SchemaEntry>| {
                     e.ns.as_ref()
                         .is_some_and(|ns| ns.root().flags().contains(ObjFlags::PRE_INTROSPECTED))
-                });
+                };
+                let served: Vec<String> = entries
+                    .iter()
+                    .filter(shipped)
+                    .map(|e| crate::ddl_view::visible_name(e.name()))
+                    .collect();
                 let line = self.inner.inputs.profiles[p]
                     .catalog
                     .as_ref()
-                    .filter(|_| from_snapshot)
+                    .filter(|_| !served.is_empty())
                     .and_then(|c| c.overlays.system.as_ref().map(|s| s.line.to_string()));
                 if let Some(line) = line {
                     let args = vec![("version", ArgValue::Text(line))];
                     let badge = self.t_args("hv-explorer-builtin-badge", args.clone());
-                    row.tooltip = Some(self.t_args("hv-explorer-builtin-tip", args));
+                    // ## m4-t33b-carries (T32 re-review RR-3): a mixed group (some schemas read
+                    // live) names the schemas the snapshot answers for.
+                    row.tooltip = Some(if served.len() == entries.len() {
+                        self.t_args("hv-explorer-builtin-tip", args)
+                    } else {
+                        let mut args = args;
+                        args.push(("schemas", ArgValue::List(served)));
+                        self.t_args("hv-explorer-builtin-tip-mixed", args)
+                    });
                     row.a11y_description = Some(badge.clone());
                     row.badge = Some(badge);
                 }

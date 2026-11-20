@@ -3758,3 +3758,9 @@ hv-history-cleared-backups = { $name } için sorgu geçmişi temizlendi ve { $co
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 # Review: PO
 hv-history-clear-damaged = Geçmiş dosyası hasarlıydı, bu yüzden Hacivat onu yedek olarak bir kenara ayırdı. { $name } için sorgu geçmişi ondan temizlenmedi; hasarlı yedeği silmek için yeniden temizleyin.
+# Surface 1 (Explorer tree). The Built-in group's tooltip when only some of its schemas come from the shipped catalog (T32 re-review RR-3).
+# Variables:
+#   $version (String) - the bundled catalog's server version, e.g. "17".
+#   $schemas (String) - the schema names the bundled catalog answers for, a list, e.g. "information_schema".
+# Review: PO
+hv-explorer-builtin-tip-mixed = { $schemas } için yerleşik katalog (sürüm { $version }): Hacivat ile gelir, bağlantı olmadan okunur. Diğer yerleşik şemalar sunucudan okundu.

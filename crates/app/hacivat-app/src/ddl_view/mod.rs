@@ -238,7 +238,8 @@ pub fn state_of(profile: ProfileId, key: &ObjectKey, cx: &App) -> Option<DdlView
 /// ## m4-t32-shots (fix round 1, review M-5): so do the bidi embeddings, overrides, isolates
 /// and marks (U+202A–202E, U+2066–2069, U+200E/200F, U+061C): a name's own PDI could close the
 /// Fluent isolate early and its RLO then reverse the chrome after it. Everything else stays
-/// verbatim (zero-width characters carry the row's badge).
+/// verbatim (zero-width characters carry the row's badge). ## m4-t33b-carries (RR-4): U+2028
+/// and U+2029 too (they break the line).
 pub fn visible_name(name: &str) -> String {
     name.chars()
         .map(|c| match c as u32 {
@@ -246,6 +247,8 @@ pub fn visible_name(name: &str) -> String {
             0x7F => '\u{2421}',
             0x80..=0x9F => '\u{FFFD}',
             0x202A..=0x202E | 0x2066..=0x2069 | 0x200E | 0x200F | 0x061C => '\u{FFFD}',
+            // ## m4-t33b-carries (T32 re-review RR-4): the line and paragraph separators.
+            0x2028 | 0x2029 => '\u{FFFD}',
             _ => c,
         })
         .collect()

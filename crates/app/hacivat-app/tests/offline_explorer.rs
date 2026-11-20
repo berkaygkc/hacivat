@@ -52,19 +52,27 @@ enum PgCatalog {
     Live,
     /// Nothing: the scope leaves it out (lookups fall to the snapshot's layer).
     None,
+    // ## m4-t33b-carries (T32 re-review RR-3)
+    /// A live read, beside an `information_schema` the shipped snapshot answers for.
+    Mixed,
 }
 
 /// `pg_catalog` as the shipped snapshot puts it in a catalog: a system schema flagged
 /// `PRE_INTROSPECTED`.
 fn shipped_pg_catalog() -> Arc<hacivat_meta::NamespaceSnapshot> {
+    shipped_schema("pg_catalog", "pg_class", 1259)
+}
+
+/// System schema `name` as the shipped snapshot puts it in a catalog, holding `table`.
+fn shipped_schema(name: &str, table_name: &str, oid: u32) -> Arc<hacivat_meta::NamespaceSnapshot> {
     use hacivat_meta::name::{DialectId, FoldRule};
     use hacivat_meta::namespace::{NsMeta, Subtree};
     use hacivat_meta::{Level, Obj, ObjectKind};
-    let root = Obj::new(ObjectKind::Schema, "pg_catalog")
-        .add_flags(ObjFlags::SYSTEM | ObjFlags::PRE_INTROSPECTED);
+    let root =
+        Obj::new(ObjectKind::Schema, name).add_flags(ObjFlags::SYSTEM | ObjFlags::PRE_INTROSPECTED);
     let mut tree = Subtree::new(root);
     let r = tree.root();
-    tree.graft_under(r, table("pg_class", Some(1259), &[]));
+    tree.graft_under(r, table(table_name, Some(oid), &[]));
     let fold = FoldRule::for_names(
         DialectId::Postgres,
         &IdentCtx::new(DialectId::Postgres),
@@ -73,7 +81,7 @@ fn shipped_pg_catalog() -> Arc<hacivat_meta::NamespaceSnapshot> {
     .unwrap_or(FoldRule::Exact);
     Arc::new(
         hacivat_meta::NamespaceSnapshot::build(
-            hacivat_meta::NsKey::schema(["app", "pg_catalog"]),
+            hacivat_meta::NsKey::schema(["app", name]),
             DbmsKind::Postgres,
             fold,
             NsMeta {
@@ -112,9 +120,14 @@ fn cached_pg17_with(pg: PgCatalog) -> Arc<CatalogSnapshot> {
                     vec![table("pg_class", Some(1259), &[])],
                 )
             },
+            shipped_schema("information_schema", "tables", 13_500),
         ]
         .into_iter()
-        .take(if live_pg_catalog { 2 } else { 1 })
+        .take(match pg {
+            PgCatalog::None => 1,
+            PgCatalog::Mixed => 3,
+            _ => 2,
+        })
         .collect(),
         if live_pg_catalog {
             Vec::new()
@@ -213,6 +226,44 @@ fn a_live_read_built_in_group_carries_no_snapshot_badge(cx: &mut TestAppContext)
     let (_, builtin) = row(vcx, "Built-in");
     assert_eq!(builtin.badge, None);
     assert_eq!(builtin.tooltip, None);
+    stop_core_runtime_test(cx);
+}
+
+// ## m4-t33b-carries (T32 re-review RR-3): a mixed group (`pg_catalog` read live,
+// `information_schema` from the shipped snapshot) keeps its badge, and its tooltip names the
+// schemas the snapshot answers for instead of claiming the whole group was shipped.
+#[gpui::test]
+fn a_mixed_built_in_group_names_the_schemas_the_snapshot_serves(cx: &mut TestAppContext) {
+    let (vcx, id) = shell(cx);
+    vcx.cx
+        .update(|cx| adapter::set_catalog(id, Some(cached_pg17_with(PgCatalog::Mixed)), None, cx));
+    expand(vcx, "shop");
+    expand(vcx, "app");
+    let (_, builtin) = row(vcx, "Built-in");
+    assert_eq!(
+        builtin.badge.as_deref().map(strip).as_deref(),
+        Some("version 17")
+    );
+    assert_eq!(
+        strip(builtin.tooltip.as_deref().expect("a tooltip")),
+        "Built-in catalog (version 17) for information_schema: shipped with Hacivat and read \
+         without a connection. The other built-in schemas were read from the server."
+    );
+    expand(vcx, "Built-in");
+    row(vcx, "pg_catalog");
+    row(vcx, "information_schema");
+    switch_to(vcx, "tr");
+    let (_, builtin) = row(vcx, "Yerleşik");
+    let tip = strip(
+        builtin
+            .tooltip
+            .as_deref()
+            .expect("the Built-in row's tooltip"),
+    );
+    assert!(
+        tip.contains("information_schema") && tip.contains("sunucudan"),
+        "{tip}"
+    );
     stop_core_runtime_test(cx);
 }
 

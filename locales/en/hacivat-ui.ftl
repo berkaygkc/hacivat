@@ -4114,3 +4114,8 @@ hv-history-cleared-backups = { $count ->
 # Variables:
 #   $name (String) - an object or connection name, verbatim, e.g. "müşteri".
 hv-history-clear-damaged = The history file was damaged, so Hacivat set it aside as a backup. The query history of { $name } wasn't cleared from it; clear again to delete the damaged backup.
+# Surface 1 (Explorer tree). The Built-in group's tooltip when only some of its schemas come from the shipped catalog (T32 re-review RR-3).
+# Variables:
+#   $version (String) - the bundled catalog's server version, e.g. "17".
+#   $schemas (String) - the schema names the bundled catalog answers for, a list, e.g. "information_schema".
+hv-explorer-builtin-tip-mixed = Built-in catalog (version { $version }) for { $schemas }: shipped with Hacivat and read without a connection. The other built-in schemas were read from the server.

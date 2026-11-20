@@ -1779,6 +1779,15 @@ fn bidi_controls_in_a_name_cannot_escape_the_tab_titles_isolate(cx: &mut TestApp
             c as u32
         );
     }
+    // ## m4-t33b-carries (T32 re-review RR-4): the line and paragraph separators too.
+    for c in ['\u{2028}', '\u{2029}'] {
+        assert_eq!(
+            ddl_view::visible_name(&format!("a{c}b")),
+            "a\u{FFFD}b",
+            "U+{:04X}",
+            c as u32
+        );
+    }
     // The DDL text keeps the name exactly.
     assert!(shown_text(vcx, id, &k).contains(evil));
 }
