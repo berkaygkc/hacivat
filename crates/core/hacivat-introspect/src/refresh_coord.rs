@@ -683,9 +683,11 @@ async fn run(
             _ => {}
         }
     }
+    // Fix round 1 (review 9): a namespace whose pass the mass-deletion guard held applied
+    // nothing: no count.
     let counted: BTreeMap<NsKey, usize> = named
         .into_iter()
-        .filter(|(ns, _)| refreshed.contains(&ns))
+        .filter(|(ns, _)| refreshed.contains(&ns) && handle.pending_confirmation(ns).is_none())
         .map(|(ns, keys)| (ns, keys.len()))
         .collect();
     if !counted.is_empty() {
