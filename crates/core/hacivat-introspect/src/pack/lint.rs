@@ -398,10 +398,42 @@ fn path_resolved_operators(
 // ## m4-t33a-hygiene (fix round 1, review M2)
 /// Words after which a string literal is a plain operand, never a typed literal's value.
 const BEFORE_LITERAL: [&str; 36] = [
-    "select", "then", "else", "when", "and", "or", "not", "is", "by", "on", "where", "from",
-    "having", "limit", "offset", "values", "return", "escape", "like", "ilike", "similar", "to",
-    "between", "symmetric", "distinct", "in", "all", "any", "some", "case", "end", "as", "with",
-    "union", "except", "intersect",
+    "select",
+    "then",
+    "else",
+    "when",
+    "and",
+    "or",
+    "not",
+    "is",
+    "by",
+    "on",
+    "where",
+    "from",
+    "having",
+    "limit",
+    "offset",
+    "values",
+    "return",
+    "escape",
+    "like",
+    "ilike",
+    "similar",
+    "to",
+    "between",
+    "symmetric",
+    "distinct",
+    "in",
+    "all",
+    "any",
+    "some",
+    "case",
+    "end",
+    "as",
+    "with",
+    "union",
+    "except",
+    "intersect",
 ];
 
 /// The type names of a `joinable` PostgreSQL section that resolve through the `search_path`:
@@ -466,7 +498,14 @@ fn path_resolved_types(
             let after_dot = k >= 1 && op_is(k - 1, ".");
             let in_catalog = after_dot && k >= 2 && word_is(k - 2, "pg_catalog");
             if !in_catalog {
-                out.push((line, if after_dot { shown(k - 2) } else { w.to_string() }));
+                out.push((
+                    line,
+                    if after_dot {
+                        shown(k - 2)
+                    } else {
+                        w.to_string()
+                    },
+                ));
             }
         }
     }

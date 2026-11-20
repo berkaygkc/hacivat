@@ -2245,7 +2245,10 @@ fn joinable_pg_sections_name_every_type_in_pg_catalog() {
             "SELECT CAST(c.oid AS public.oid) AS x FROM pg_catalog.pg_class c",
             "public",
         ),
-        ("SELECT c.relname::text AS x FROM pg_catalog.pg_class c", "text"),
+        (
+            "SELECT c.relname::text AS x FROM pg_catalog.pg_class c",
+            "text",
+        ),
         (
             "SELECT c.oid::public.oid AS x FROM pg_catalog.pg_class c",
             "public",

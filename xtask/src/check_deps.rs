@@ -1702,8 +1702,7 @@ pub fn source_violations(workspace: &Path) -> Vec<Violation> {
 pub fn unpinned_uses(text: &str) -> Vec<String> {
     let hex = |s: &str, n: usize| {
         s.len() == n
-            && s
-                .bytes()
+            && s.bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     };
     let mut out = Vec::new();
