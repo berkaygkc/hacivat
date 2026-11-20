@@ -1335,3 +1335,26 @@ case.
   offered on production, so the line's old "a production change still waits for your answer"
   clause could never apply; it is gone, and the line says which environment the connection is
   (`hv-conn-env-*`, "no environment" untagged).
+
+## m4-t21 — catalog refresh sink
+
+- `CatalogRefreshSink` (installed per run by Task 27) is a synchronous auditor that feeds the
+  run's `hacivat_introspect::refresh_coord::RunTracker`: `UnitStarted`, `TxChanged` (the
+  driver status mapped to `TxPhase`), `UpdateCount` (the `ROLLBACK` tag) and `UnitEnded`, in
+  order, on the session's actor task. The tracker reads the session's namespace and search
+  path when a unit ends (execution time) and pushes the unit's meaning into the profile's
+  `RefreshInbox`.
+- **It never slows the run.** A push is a short lock and never awaits; the inbox holds 1,024
+  messages and drops its **oldest** when full, counting it (the HV-EXEC-06 pattern, but
+  drop-oldest so the newest state wins). A drop is never silent for the catalog: the
+  coordinator refreshes the affected session's pending targets and its whole database at
+  once and again at its next commit. Planning, catalog reads and refreshes run on the
+  coordinator's own task on the `CoreRuntime`.
+- The unit's text is read only to find a savepoint name (`SAVEPOINT`, `RELEASE`, `ROLLBACK
+  TO`) or `PREPARE TRANSACTION` when the tracker is built; only the folded name is kept. The
+  sink never sees or keeps bind values.
+- **Seam change (review m8).** The T1c stub's `CatalogRefreshSink::new()` (and `Default`)
+  became `CatalogRefreshSink::new(RunTracker)` plus `CatalogRefreshSink::for_run(&SessionHandle,
+  DbmsKind, Vec<TrackedUnit>, RefreshInbox)`; nothing installed the stub, and Task 27 installs
+  `for_run` in `RunService::chain_for`. The plan's cross-plan interface line for the sink reads
+  with these constructors.

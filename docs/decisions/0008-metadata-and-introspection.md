@@ -1813,3 +1813,82 @@ the refresh decision, rebuilt on the pack and the model.
   task, not the blocking pool (user actions and connects, O(arena size)) → T22 (which owns
   the identity behaviour) or a later engine touch; the `Partial` stale mark (m12) stays as
   noted; gating the fakes is R-W3-7 (T33).
+
+## m4-t21 — refresh after DDL
+
+HV-INTRO-12 (`hacivat-introspect::ddl_effects`, `refresh_coord`; the sink in `hacivat-exec`,
+ADR 0006 `m4-t21`).
+
+- **Refresh more, never less.** Every rule below that cannot be exact widens: an unresolved
+  PostgreSQL relation behind `ALTER TABLE` (a view, a sequence, an index) → its namespace (T6
+  carry); an unqualified name the catalog cannot place → every search-path namespace before
+  the first hit; `DROP … CASCADE` → every loaded namespace of the database
+  (`Target::Database`); an opaque DDL statement (`DROP OWNED`, `REASSIGN OWNED`, `ALTER
+  DEFAULT PRIVILEGES`, `DROP COLUMN … CASCADE`, `CREATE EXTENSION`, `CREATE SCHEMA
+  AUTHORIZATION`) → the database and the namespace list (U-2, widened from "the statement
+  kind `DropOwned`" to every opaque DDL-class statement); a DDL-class, `Other` or
+  `EXPLAIN ANALYZE` statement with no effect → opaque (m-B3); a run with no reports (over
+  1 MiB, ambiguous boundary) → the database and the list (T6 carry); a session that does not
+  know its namespace → every loaded namespace.
+- **Targets.** The plan's `Target::Object` (a top-level object; its namespace is its key's
+  path without the last name), `NamespaceNames`, `Database` are lowered by `ddl_effects::lower`
+  on the catalog **at refresh time** into the engine's `Namespace`/`Objects`/`ScopeRefresh`
+  (a named exception in `engine/scheduler.rs` does the same for a direct caller). A namespace
+  that is neither loaded nor loading is dropped: a refresh never loads what nobody opened,
+  and never publishes a half namespace. A namespace target subsumes object targets of the
+  same namespace (the incremental pass is trusted to equal a full one, G4).
+- **Identity.** A name the catalog holds is refreshed by the catalog's own key (with the OID),
+  so a fragment after `RENAME` keeps identity (T11 carry). Names are folded with
+  `sql_ident::fold`; SQLite's unqualified names search `main` then the other loaded schemas.
+- **Timing.** PostgreSQL and SQLite DDL in a transaction is pending until the end; `CREATE
+  INDEX CONCURRENTLY` and `CREATE`/`DROP DATABASE` are immediate; MySQL/MariaDB always
+  immediate. `ROLLBACK TO s` keeps what ran before `s`; a `ROLLBACK TO` of a savepoint the
+  coordinator never saw keeps everything; no compensating refresh (R-M4-42). PostgreSQL
+  `PREPARE TRANSACTION` counts as an unknown end (refreshed).
+- **Transaction ends come from the server's status** (`TxChanged` within the unit, the
+  `ROLLBACK` tag, a failed transaction), never the text; a lost connection after `COMMIT` is
+  `TxOutcome::Unknown` (refreshed); a lost connection inside a transaction is a rollback.
+  Ends outside a run (the toolbar, a closed session) are told by the caller
+  (`tx_ended`, `session_closed`; Task 27).
+- **Preference.** `never` marks the namespaces stale through the engine (`IntroHandle::
+  mark_stale`, a named exception: the engine stays the only writer); `ask` marks stale and
+  emits `CoordEvent::Ask` (answered by `answer`); `refresh_now` ignores it.
+- **After the refresh**, `check_state` on the refreshed objects (alg/02 step 6). A refresh that
+  fails for want of a connection is owed until `reconnected` (edge case 13).
+- **Known gaps (background validation, T22, catches them):** DDL run by a function a plain
+  `SELECT f()` calls when the classifier reads `f` as a read (T6); a plain `DROP TABLE`'s
+  partitions or owned sequences in a namespace loaded below `Structure` (no props to find
+  them); `COMMIT PREPARED` from another session.
+
+### m4-t21 fix round 1 (review I1–I5, m1–m8)
+
+- **Chained ends (I1).** A successful `COMMIT`/`ROLLBACK`-kind unit that started inside a
+  transaction and left the status inside one (`COMMIT AND CHAIN`, `ROLLBACK AND CHAIN`, a
+  MySQL `COMMIT` with `autocommit` off) ends the transaction: `Committed` (unless the
+  transaction had failed or the tag said `ROLLBACK`) or `RolledBack`. `ROLLBACK TO` and
+  `PREPARE TRANSACTION` are excluded.
+- **Maybe-committed units (I2).** A unit that did not succeed is planned anyway when it may
+  have committed DDL: a batch run as one on MySQL/MariaDB or SQLite that failed or was
+  cancelled partway (statements commit one by one), or a statement whose answer was lost
+  (`ConnectionLost { outcome_unknown }`) outside a transaction or on an engine without
+  transactional DDL. A PostgreSQL batch is one implicit transaction: nothing. A refresh that
+  then fails for want of a connection is owed (as before).
+- **Widening across units (I3).** The coordinator gathers one drain's targets (every
+  session's `now` part, every committed pending list, every dropped session) and widens them
+  together (`ddl_effects::normalize`) before handing them over; `pending(session)` answers the
+  widened list the commit will refresh.
+- **Scope changes under `never`/`ask` (I4).** A `ScopeRefresh` target marks every loaded
+  schema list stale (`ContainerKey::SchemaList`, `IntroHandle::mark_stale(namespaces,
+  scope)`) and `CoordEvent::Stale { scope: true }` is sent; the explorer badge for it is T27's.
+- **Database DDL in a PostgreSQL transaction (I5).** Only `CREATE DATABASE` and `DROP
+  DATABASE` are immediate; `ALTER DATABASE … RENAME`, `COMMENT ON DATABASE` and database
+  grants wait for the commit (`ALTER DATABASE … SET TABLESPACE` only succeeds in autocommit).
+- **Minors.** m1: `RefreshCoordinator::applied()` counts refreshes handed to the engine
+  (synchronously), so the Docker rollback test proves nothing was issued. m2: at most one
+  unanswered question; a new one takes over the old one's targets. m3: a dropped message of a
+  session outside a transaction leaves nothing pending. m4: a same-session `COMMIT PREPARED`
+  refreshes the whole database (another session's stays a gap). m5: a namespace marked stale
+  while a pass of it is loading or running is published stale when that pass ends (the
+  scheduler's `stale_on_publish`, a named exception in `publish`). m7: the tracker's docs
+  say what it copies. m6 → **T27 carry:** call `RefreshCoordinator::reconnected()` when the
+  profile's metadata connection recovers, not only after the user session's reconnect.

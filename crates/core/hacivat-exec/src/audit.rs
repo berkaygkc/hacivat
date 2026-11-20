@@ -37,6 +37,8 @@ use hacivat_session::session::{
     ExecError, ExecErrorKind, RowsOutcome, RunEvent, RunId, SessionHandle, UnitEnd, UnitId,
 };
 use hacivat_values::BindValue;
+// ## m4-t21-refresh
+use hacivat_introspect::refresh_coord::{RefreshInbox, RunTracker, TrackedUnit, TxPhase};
 use tokio::sync::mpsc;
 
 use crate::history::{HistoryMeta, HistoryRecord, Outcome};
@@ -484,27 +486,219 @@ mod tests {
     }
 }
 
-// ## m4-t01c-core
+// ## m4-t01c-core (seam) / ## m4-t21-refresh (body; ADR 0006 `## m4-t21 — catalog refresh sink`)
 /// The refresh-after-DDL sink (HV-INTRO-12; body Task 21, installed per run by Task 27): a
 /// synchronous auditor that hands each finished unit's catalog effects (`StmtReport.ddl`) and
 /// the session's transaction outcome to the profile's refresh coordinator, without waiting.
 ///
-/// **Fail-closed stub (M4 Task 1c).** It drops every event and is installed nowhere, so no
-/// refresh is planned from a run until Task 21 (the explorer stays as loaded; a user refresh
-/// still reloads). It never blocks the run.
-#[derive(Debug, Default)]
+/// It feeds the run's [`RunTracker`] (`hacivat_introspect::refresh_coord`): every
+/// `UnitStarted`, `TxChanged`, `UpdateCount` and `UnitEnded`, in order, on the session's actor
+/// task. The tracker reads the session's state when a unit ends (execution time) and pushes
+/// what the unit meant into the profile's `RefreshInbox`: a short lock, never an await, and a
+/// full inbox drops its oldest message and counts it (the HV-EXEC-06 pattern of
+/// [`AuditorChain`]'s sinks), so a slow coordinator never slows the run. Planning and the
+/// catalog reads happen on the coordinator's own task.
+#[derive(Debug)]
 pub struct CatalogRefreshSink {
-    _private: (),
+    tracker: RunTracker,
 }
 
+// ## m4-t21-refresh
 impl CatalogRefreshSink {
-    pub fn new() -> Self {
-        Self::default()
+    /// The sink of a run that `tracker` follows.
+    pub fn new(tracker: RunTracker) -> Self {
+        CatalogRefreshSink { tracker }
+    }
+
+    /// The sink of a run on `session` (of engine `dbms`) whose units are `units`, feeding
+    /// `inbox`: the session's transaction status now is the run's starting point.
+    pub fn for_run(
+        session: &SessionHandle,
+        dbms: hacivat_proto::DbmsKind,
+        units: Vec<TrackedUnit>,
+        inbox: RefreshInbox,
+    ) -> Self {
+        let state = session.state();
+        let status = phase(state.borrow().tx.status);
+        CatalogRefreshSink::new(RunTracker::new(
+            session.id(),
+            dbms,
+            units,
+            state,
+            status,
+            inbox,
+        ))
+    }
+}
+
+// ## m4-t21-refresh
+/// The tracker's view of a driver transaction status.
+fn phase(s: hacivat_driver::TxStatus) -> TxPhase {
+    match s {
+        hacivat_driver::TxStatus::Idle => TxPhase::Idle,
+        hacivat_driver::TxStatus::InTx => TxPhase::InTx,
+        hacivat_driver::TxStatus::Failed => TxPhase::Failed,
     }
 }
 
 impl SyncAuditor for CatalogRefreshSink {
+    // ## m4-t21-refresh
     fn on_event(&mut self, ev: &RunEvent) {
-        let _ = ev;
+        match ev {
+            RunEvent::UnitStarted { unit, .. } => self.tracker.unit_started(*unit),
+            RunEvent::TxChanged { from, to } => self.tracker.tx_changed(phase(*from), phase(*to)),
+            RunEvent::UpdateCount {
+                unit, command_tag, ..
+            } => self.tracker.update_count(*unit, command_tag.as_deref()),
+            RunEvent::UnitEnded { unit, outcome, .. } => self.tracker.unit_ended(*unit, outcome),
+            _ => {}
+        }
+    }
+}
+
+// ## m4-t21-refresh
+#[cfg(test)]
+mod refresh_sink_tests {
+    use hacivat_driver::TxStatus;
+    use hacivat_driver::fake::FakeDriver;
+    use hacivat_introspect::ddl_effects::TxnState;
+    use hacivat_introspect::refresh_coord::RefreshMsg;
+    use hacivat_proto::DbmsKind;
+    use hacivat_secrets::{AuthProviderId, Retention};
+    use hacivat_session::profile::{Profile, ProfileEndpoint};
+    use hacivat_session::session::{RunId, TxOutcome};
+    use hacivat_session::testing::fake_session;
+    use sql_dialect::{ClientFlavor, DialectCtx, DialectId};
+    use sql_safety::{ClassifyCtx, Expect, classify};
+
+    use super::*;
+
+    fn unit(n: u32) -> UnitId {
+        UnitId {
+            run: RunId(9),
+            ordinal: n,
+        }
+    }
+
+    fn tracked(n: u32, sql: &str) -> TrackedUnit {
+        let ctx = ClassifyCtx::new(
+            DialectCtx::new(DialectId::Postgres, None),
+            ClientFlavor::None,
+            Expect::Script,
+        );
+        let r = classify(sql, &ctx).items;
+        TrackedUnit::new(unit(n), Some(&r), DialectId::Postgres, sql)
+    }
+
+    async fn session() -> SessionHandle {
+        let profile = Profile {
+            name: "orders".into(),
+            user: Some("deploy".into()),
+            engine: DbmsKind::Postgres,
+            endpoint: ProfileEndpoint::Server {
+                host: "127.0.0.1".into(),
+                port: None,
+            },
+            auth: AuthProviderId::None,
+            retention: Retention::Never,
+            ..Profile::default()
+        };
+        fake_session(
+            tokio::runtime::Handle::current(),
+            FakeDriver::new(DbmsKind::Postgres),
+            profile,
+        )
+        .await
+        .0
+    }
+
+    fn started(n: u32) -> RunEvent {
+        RunEvent::UnitStarted {
+            unit: unit(n),
+            at: std::time::Instant::now(),
+        }
+    }
+
+    fn ended(n: u32, outcome: UnitEnd) -> RunEvent {
+        RunEvent::UnitEnded {
+            unit: unit(n),
+            outcome,
+            exec_ms: 0,
+            fetch_ms: 0,
+        }
+    }
+
+    /// The sink maps a run's events to the coordinator's messages: the DDL waits inside the
+    /// transaction, the COMMIT ends it; a failed unit plans nothing.
+    #[tokio::test]
+    async fn the_sink_maps_run_events_to_refresh_messages() {
+        let s = session().await;
+        let inbox = RefreshInbox::with_capacity(16);
+        let mut sink = CatalogRefreshSink::for_run(
+            &s,
+            DbmsKind::Postgres,
+            vec![
+                tracked(0, "begin"),
+                tracked(1, "create table public.a(x int)"),
+                tracked(2, "create table public.b(x int)"),
+                tracked(3, "commit"),
+            ],
+            inbox.clone(),
+        );
+        let ok = UnitEnd::Succeeded { rows: None };
+        for ev in [
+            started(0),
+            RunEvent::TxChanged {
+                from: TxStatus::Idle,
+                to: TxStatus::InTx,
+            },
+            ended(0, ok.clone()),
+            started(1),
+            ended(1, ok.clone()),
+            started(2),
+            ended(2, UnitEnd::Failed(ExecError::of(ExecErrorKind::Db))),
+            started(3),
+            RunEvent::TxChanged {
+                from: TxStatus::InTx,
+                to: TxStatus::Idle,
+            },
+            ended(3, ok),
+        ] {
+            sink.on_event(&ev);
+        }
+        let q = inbox.queued();
+        assert_eq!(q.len(), 2, "{q:?}");
+        assert!(matches!(
+            &q[0],
+            RefreshMsg::Executed { txn: TxnState::InTransaction, stmts, .. } if stmts.len() == 1
+        ));
+        assert!(matches!(
+            &q[1],
+            RefreshMsg::TxEnded {
+                outcome: TxOutcome::Committed,
+                ..
+            }
+        ));
+    }
+
+    /// Review probe "a run slowed by the sink": with nobody draining, the sink keeps going; the
+    /// inbox drops its oldest messages and counts them, and never waits.
+    #[tokio::test]
+    async fn the_sink_never_waits_for_a_stuck_coordinator() {
+        let s = session().await;
+        let inbox = RefreshInbox::with_capacity(8);
+        let mut sink = CatalogRefreshSink::for_run(
+            &s,
+            DbmsKind::Postgres,
+            vec![tracked(0, "create table public.a(x int)")],
+            inbox.clone(),
+        );
+        let n = 20_000u64;
+        for _ in 0..n {
+            sink.on_event(&started(0));
+            sink.on_event(&ended(0, UnitEnd::Succeeded { rows: None }));
+        }
+        assert_eq!(inbox.len(), 8);
+        assert_eq!(inbox.dropped(), n - 8);
     }
 }

@@ -75,6 +75,11 @@ pub(crate) enum Cmd {
     LevelChanged(ContainerKey),
     Cancel(NsKey),
     Shutdown,
+    // ## m4-t21-refresh (named exception)
+    MarkStale {
+        namespaces: Vec<NsKey>,
+        scope: bool,
+    },
 }
 
 /// Someone waiting for a task.
@@ -354,6 +359,10 @@ struct Actor {
     done_tx: mpsc::UnboundedSender<(u64, Output)>,
     done_rx: mpsc::UnboundedReceiver<(u64, Output)>,
     next_id: u64,
+    // ## m4-t21-refresh (named exception, fix round 1 m5)
+    /// Namespaces marked stale while a pass of them was loading: that pass started before the
+    /// change, so its result is published stale.
+    stale_on_publish: BTreeSet<NsKey>,
 }
 
 impl Actor {
@@ -409,6 +418,8 @@ impl Actor {
             timeouts: HashMap::new(),
             recent_children: HashMap::new(),
             debouncer: SaveDebouncer::new(cfg.limits.save_debounce),
+            // ## m4-t21-refresh (named exception, fix round 1 m5)
+            stale_on_publish: BTreeSet::new(),
             validate_every: cfg.validate_every,
             next_validate: cfg.validate_every.map(|d| Instant::now() + d),
             root_cancel: CancellationToken::new(),
@@ -515,6 +526,8 @@ impl Actor {
             Cmd::LevelChanged(container) => self.level_changed(&container),
             Cmd::Cancel(ns) => self.cancel(&ns),
             Cmd::Shutdown => {}
+            // ## m4-t21-refresh (named exception)
+            Cmd::MarkStale { namespaces, scope } => self.mark_stale(namespaces, scope),
         }
     }
 
@@ -946,6 +959,77 @@ impl Actor {
                 job.add(w, false);
                 self.enqueue(job, true);
             }
+            // ## m4-t21-refresh (named exception): the refresh-after-DDL planner's targets,
+            // lowered on the current catalog (`ddl_effects::lower`) into the three above; the
+            // request resolves when every part has.
+            t @ (Target::Object(_) | Target::NamespaceNames(_) | Target::Database(_)) => {
+                let parts = crate::ddl_effects::lower(&[t], &self.catalog.current());
+                if parts.is_empty() {
+                    return w.resolve(Ok(self.catalog.current().generation));
+                }
+                let join = Arc::new(Mutex::new(Join {
+                    left: parts.len(),
+                    generation: 0,
+                    error: None,
+                    waiters: vec![w],
+                }));
+                for part in parts {
+                    self.refresh(part, trigger, prio, Waiter::Join(join.clone()));
+                }
+            }
+        }
+    }
+
+    // ## m4-t21-refresh (named exception)
+    /// Marks the loaded namespaces `namespaces` stale (refresh after DDL with the preference
+    /// `never` or `ask`, alg/02 HV-INTRO-12 edge 14): nothing is read; their next expansion or
+    /// pass validates them. A namespace that is loading is published stale when its pass ends
+    /// (fix round 1 m5). `scope`: the namespace list changed too, so every loaded schema list
+    /// is marked stale (fix round 1 I4).
+    fn mark_stale(&mut self, namespaces: Vec<NsKey>, scope: bool) {
+        let snap = self.catalog.current();
+        let stale = |key: ContainerKey, state: &LoadState| match state.clone() {
+            LoadState::Loaded {
+                level,
+                at,
+                watermark,
+                stale: false,
+            } => Some(CatalogChange::SetState(
+                key,
+                LoadState::Loaded {
+                    level,
+                    at,
+                    watermark,
+                    stale: true,
+                },
+            )),
+            _ => None,
+        };
+        let mut changes: Vec<CatalogChange> = Vec::new();
+        for ns in namespaces {
+            let key = ContainerKey::Namespace(ns.clone());
+            let state = snap.state(&key);
+            // A pass of it under way (a first load, or a re-read of a loaded namespace) began
+            // before the change: its result is published stale too.
+            let running = self.running.values().any(|r| r.job.work.ns() == Some(&ns));
+            if running || matches!(state, LoadState::Loading { .. }) {
+                self.stale_on_publish.insert(ns.clone());
+            }
+            if let Some(c) = stale(key, state) {
+                changes.push(c);
+            }
+        }
+        if scope {
+            for (key, state) in snap.states.iter() {
+                if matches!(key, ContainerKey::SchemaList { .. })
+                    && let Some(c) = stale(key.clone(), state)
+                {
+                    changes.push(c);
+                }
+            }
+        }
+        if !changes.is_empty() {
+            let _ = self.publish(changes, None);
         }
     }
 
@@ -1857,6 +1941,35 @@ impl Actor {
         changes: Vec<CatalogChange>,
         delta: Option<CatalogDelta>,
     ) -> Result<u64, IntroError> {
+        // ## m4-t21-refresh (named exception, fix round 1 m5): a pass that was loading when
+        // its namespace was marked stale publishes stale.
+        let changes = if self.stale_on_publish.is_empty() {
+            changes
+        } else {
+            changes
+                .into_iter()
+                .map(|c| match c {
+                    CatalogChange::SetState(
+                        ContainerKey::Namespace(ns),
+                        LoadState::Loaded {
+                            level,
+                            at,
+                            watermark,
+                            stale: false,
+                        },
+                    ) if self.stale_on_publish.remove(&ns) => CatalogChange::SetState(
+                        ContainerKey::Namespace(ns),
+                        LoadState::Loaded {
+                            level,
+                            at,
+                            watermark,
+                            stale: true,
+                        },
+                    ),
+                    c => c,
+                })
+                .collect()
+        };
         let published = match delta {
             Some(d) => self.publisher.publish_with_delta(changes, Arc::new(d)),
             None => self.publisher.publish(changes),

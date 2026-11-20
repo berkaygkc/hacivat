@@ -62,6 +62,9 @@ fn executed(_sql: &str, effect: DdlEffect) -> ExecutedStmt {
     ExecutedStmt {
         kind: StmtKind::CreateTable,
         ddl: vec![effect],
+        // ## m4-t21-refresh (named exception): the fields Task 21 added.
+        names: Vec::new(),
+        analysed: true,
     }
 }
 
@@ -142,8 +145,11 @@ fn hub() -> (Arc<CatalogHub>, tempfile::TempDir) {
 
 // ---- tests -----------------------------------------------------------------------------------
 
+// ## m4-t21-refresh (named exception; renamed from
+// `stub_plan_refresh_widens_any_ddl_to_the_current_namespace`): the planner landed. A named
+// `CREATE TABLE s.t` refreshes `s.t` and `s`'s name list, not the current namespace.
 #[test]
-fn stub_plan_refresh_widens_any_ddl_to_the_current_namespace() {
+fn plan_refresh_targets_the_named_table_and_its_namespace() {
     let p = plan_refresh(
         &[executed(
             "CREATE TABLE s.t(a int)",
@@ -153,7 +159,12 @@ fn stub_plan_refresh_widens_any_ddl_to_the_current_namespace() {
         TxnState::AutoCommit,
         &caps_pg(),
     );
-    assert_eq!(p.now, vec![Target::Namespace(ns("public"))]);
+    let mut key = ObjectKey::unknown(["db", "s", "t"].into_iter().map(name).collect(), None, None);
+    key.kind = ObjectKind::Table;
+    assert_eq!(
+        p.now,
+        vec![Target::Object(key), Target::NamespaceNames(ns("s"))]
+    );
     assert!(p.pending.is_empty());
 }
 
