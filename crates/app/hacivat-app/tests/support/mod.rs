@@ -1635,13 +1635,25 @@ pub mod live {
     use hacivat_introspect::hub::{CacheMode, HubError, ProfileCatalog};
     use hacivat_introspect::scope::{CurrentCtx, parse_scope};
     use hacivat_introspect::testing::fake::{FakeIntrospector, FakeMetaSource, FakeObject};
+    // ## m4-t24-live (fix round 2): the reporting wrapper's seam types.
+    use hacivat_introspect::engine::Phase;
+    use hacivat_introspect::filter::CompiledFilter;
+    use hacivat_introspect::freshness::NsCheck;
+    use hacivat_introspect::introspector::{
+        FacetRows, IntroCaps, IntroError, Introspector, ServerIdentity, Staleness, report_progress,
+    };
+    use hacivat_introspect::pack::Mode;
+    use hacivat_introspect::scope::NsInfo;
+    use hacivat_meta::merge::NamespaceResult;
     use hacivat_meta::name::{DialectId, FoldRule, IdentCtx, NameClass};
     use hacivat_meta::namespace::{NsMeta, Subtree};
     use hacivat_meta::persist::{CacheStore, Encryption, RowKey, WriterId};
+    use hacivat_meta::props::FacetKind;
     use hacivat_meta::props::{ColumnProps, Props, TableProps};
     use hacivat_meta::{
         Catalog, Level, Name, NamespaceSnapshot, NsKey, Obj, ObjectKind, ServerFacts, ServerId,
     };
+    use hacivat_meta::{ObjectKey, StateMark};
     use hacivat_proto::{DbmsKind, ProfileId};
     use hacivat_session::meta::{MetaConn, MetaError};
     use hacivat_session::profile::Profile;
@@ -1745,6 +1757,113 @@ pub mod live {
         }
     }
 
+    /// What a pass reports through the progress sink: its phase, done and the total.
+    pub type Report = Arc<Mutex<Option<(Phase, u64, Option<u64>)>>>;
+
+    /// The fake introspector, reporting a phase and counts through the engine's progress sink
+    /// (`report_progress`, R-W3-12) before each pass, as the real introspectors do.
+    pub struct Reporting {
+        pub inner: FakeIntrospector,
+        pub report: Report,
+    }
+
+    impl Introspector for Reporting {
+        fn list_namespaces<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+        ) -> BoxFuture<'a, Result<Vec<NsInfo>, IntroError>> {
+            self.inner.list_namespaces(c)
+        }
+
+        fn introspect<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+            ns: &'a NsKey,
+            mode: Mode,
+            level: Level,
+            filter: &'a CompiledFilter,
+            prev: Option<&'a NamespaceSnapshot>,
+            cancel: &'a CancellationToken,
+        ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>> {
+            let report = *self.report.lock().unwrap();
+            let pass = self
+                .inner
+                .introspect(c, ns, mode, level, filter, prev, cancel);
+            // Reported while the pass runs (inside the engine's sink scope), as a real pass does.
+            Box::pin(async move {
+                if let Some((phase, done, total)) = report {
+                    report_progress(phase, done, total);
+                }
+                pass.await
+            })
+        }
+
+        fn fragment<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+            ns: &'a NsKey,
+            keys: &'a [ObjectKey],
+            level: Level,
+            filter: &'a CompiledFilter,
+            cancel: &'a CancellationToken,
+        ) -> BoxFuture<'a, Result<NamespaceResult, IntroError>> {
+            self.inner.fragment(c, ns, keys, level, filter, cancel)
+        }
+
+        fn stamps<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+            keys: &'a [ObjectKey],
+        ) -> BoxFuture<'a, Result<Vec<Option<StateMark>>, IntroError>> {
+            self.inner.stamps(c, keys)
+        }
+
+        fn facet<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+            ns: &'a NsKey,
+            keys: &'a [ObjectKey],
+            kind: FacetKind,
+        ) -> BoxFuture<'a, Result<FacetRows, IntroError>> {
+            self.inner.facet(c, ns, keys, kind)
+        }
+
+        fn check_state<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+            keys: &'a [ObjectKey],
+        ) -> BoxFuture<'a, Result<Vec<Staleness>, IntroError>> {
+            self.inner.check_state(c, keys)
+        }
+
+        fn check_namespace<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+            ns: &'a NsKey,
+            snap: &'a NamespaceSnapshot,
+        ) -> BoxFuture<'a, Result<NsCheck, IntroError>> {
+            self.inner.check_namespace(c, ns, snap)
+        }
+
+        fn capabilities(&self) -> IntroCaps {
+            self.inner.capabilities()
+        }
+
+        fn identity<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+        ) -> BoxFuture<'a, Result<ServerIdentity, IntroError>> {
+            self.inner.identity(c)
+        }
+
+        fn server_facts<'a>(
+            &'a self,
+            c: &'a mut MetaConn,
+        ) -> BoxFuture<'a, Result<Option<ServerFacts>, IntroError>> {
+            self.inner.server_facts(c)
+        }
+    }
+
     /// A `CatalogSource` over the engine with the fakes: one engine per profile, cached in a
     /// plaintext store under `dir`.
     pub struct FakeSource {
@@ -1762,6 +1881,9 @@ pub mod live {
         /// What the source did, in order: `ensure sensitive=<bool>`, `shutdown watched=<bool>`
         /// (whether [`FakeSource::watch`] existed when the store was closed).
         pub log: Mutex<Vec<String>>,
+        /// What every pass reports through the engine's progress sink (R-W3-12) before it
+        /// reads, when set.
+        pub report: Report,
         /// A file whose presence `shutdown` records.
         pub watch: Mutex<Option<PathBuf>>,
     }
@@ -1780,6 +1902,7 @@ pub mod live {
                 ensures: AtomicU64::new(0),
                 made: Mutex::new(HashMap::new()),
                 log: Mutex::new(Vec::new()),
+                report: Arc::default(),
                 watch: Mutex::new(None),
             }
         }
@@ -1826,9 +1949,15 @@ pub mod live {
                     .flatten();
                 let cache = opened.map(|o| Arc::new(Mutex::new(o.store)));
                 let d = dialect(profile.engine);
+                // As the hub does (T17 review I-2): a MySQL-family placeholder knows no
+                // `lower_case_table_names` until the scope refresh reads the real facts.
+                let mut ident = IdentCtx::new(d);
+                if matches!(d, DialectId::MySql | DialectId::MariaDb) {
+                    ident.lower_case_table_names = u8::MAX;
+                }
                 let catalog = Arc::new(Catalog::new(Arc::new(ServerFacts::new(
                     profile.engine,
-                    IdentCtx::new(d),
+                    ident,
                 ))));
                 let publisher = catalog.publisher().ok_or(HubError::Shutdown)?;
                 let scope = parse_scope(if d == DialectId::Postgres { "@:*" } else { "*" }, d)
@@ -1850,7 +1979,10 @@ pub mod live {
                         inner: self.meta.clone(),
                         threads: self.threads.clone(),
                     }),
-                    introspector: Arc::new(self.intro.clone()),
+                    introspector: Arc::new(Reporting {
+                        inner: self.intro.clone(),
+                        report: self.report.clone(),
+                    }),
                     catalog: catalog.clone(),
                     catalog_publisher: publisher,
                     cache,

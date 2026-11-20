@@ -1519,3 +1519,129 @@ fn a_database_row_shows_the_engines_automatic_level(cx: &mut TestAppContext) {
     let tip = strip(&pill.tooltip);
     assert!(tip.contains("chosen automatically for 1 object"), "{tip}");
 }
+
+// ---- fix round 2 ------------------------------------------------------------------------------
+
+/// R-W3-12: a pass's own phase and counts (the introspector's `report_progress`, through the
+/// engine's progress sink) reach the namespace's `Loading { running, count }` row.
+#[gpui::test]
+fn the_progress_row_shows_the_passes_own_counts(cx: &mut TestAppContext) {
+    let intro = FakeIntrospector::new(DbmsKind::Postgres);
+    intro.put_ns(public(), fake_tables(&["users"]));
+    let gate = intro.gate(|c| matches!(c, FakeCall::Introspect { .. }));
+    let (vcx, src) = fake_shell(cx, intro, |_| {});
+    *src.report.lock().unwrap() = Some((hacivat_introspect::engine::Phase::Columns, 3, Some(7)));
+    let id = add_profile(vcx, pg_profile("app-dev", Some(EnvTag::Dev)));
+    set_expanded(vcx, adapter::profile_key(id), true);
+    connect(vcx, "app-dev");
+    wait_gate(vcx, &gate);
+    wait_until(vcx, "the database row", |vcx| shows(vcx, "app"));
+    open(vcx, &["app"]);
+    wait_until(vcx, "the schema row", |vcx| shows(vcx, "public"));
+    open(vcx, &["public"]);
+    let schema = key_of(vcx, "public");
+    wait_until(vcx, "the pass's own count", |vcx| {
+        let state = vcx.cx.read(|cx| {
+            let model = explorer::tree(cx)
+                .expect("the tree")
+                .read(cx)
+                .model()
+                .clone();
+            hacivat_ui::tree::TreeModel::children(&model, schema)
+        });
+        match state {
+            hacivat_ui::tree::ChildState::Loading {
+                running: true,
+                label,
+                count: Some(c),
+            } => strip(&label) == "Reading columns…" && strip(&c) == "3/7",
+            _ => false,
+        }
+    });
+    gate.release();
+    wait_until(vcx, "the pass", |vcx| {
+        !tables_of(vcx, id, &public()).is_empty()
+    });
+}
+
+/// I-6 (T15 fix round 1 carry, T17): the hub's MySQL placeholder knows no
+/// `lower_case_table_names`; the engine's scope refresh replaces it with the server's facts
+/// (`CatalogChange::SetServer`), and nothing the host does afterwards overrides them.
+#[gpui::test]
+fn mysql_server_facts_replace_the_placeholder_and_stay(cx: &mut TestAppContext) {
+    use hacivat_meta::name::{DialectId, IdentCtx};
+    let vcx = shell_with_fake(cx, "en", answers_probe(FakeDriver::new(DbmsKind::Postgres)));
+    let mut p = test_profile("shop-dev", Some(EnvTag::Dev), "127.0.0.1");
+    p.engine = DbmsKind::MySql;
+    p.database = Some("shop".to_string());
+    let id = add_profile(vcx, p);
+    let lctn = |vcx: &VisualTestContext| {
+        vcx.cx.read(|cx| {
+            hlive::handle(id, cx).map(|h| h.catalog().current().server.ident.lower_case_table_names)
+        })
+    };
+    // The app's own hub: the placeholder is unknown (never a guessed lctn 0).
+    vcx.cx.update(|cx| hlive::open(id, cx));
+    wait_until(vcx, "the hub's catalog", |vcx| {
+        vcx.cx.read(|cx| hlive::is_open(id, cx))
+    });
+    assert_eq!(lctn(vcx), Some(u8::MAX));
+    let closed = vcx.cx.update(|cx| hlive::close(id, cx));
+    wait_task(vcx, closed);
+    // An engine whose server reports lctn 1.
+    let intro = FakeIntrospector::new(DbmsKind::MySql);
+    intro.put_ns(NsKey::schema(["shop"]), fake_tables(&["orders"]));
+    let mut ident = IdentCtx::new(DialectId::MySql);
+    ident.lower_case_table_names = 1;
+    intro.set_facts(Some(Ok(ServerFacts::new(DbmsKind::MySql, ident))));
+    let src = Arc::new(FakeSource::new(
+        runtime(vcx),
+        intro,
+        temp_dir(vcx).join("fake-cache"),
+    ));
+    let as_source: Arc<dyn CatalogSource> = src.clone();
+    vcx.cx.update(|cx| hlive::set_source(as_source, cx));
+    vcx.cx.update(|cx| hlive::open(id, cx));
+    wait_until(vcx, "the engine's catalog", |vcx| {
+        vcx.cx.read(|cx| hlive::is_open(id, cx))
+    });
+    assert_eq!(lctn(vcx), Some(u8::MAX), "unknown until the server says");
+    drop(handle(vcx, id).on_connect());
+    wait_until(vcx, "the server's facts", |vcx| lctn(vcx) == Some(1));
+    // The host's later work (a profile refresh, a forwarded level) never overrides them.
+    vcx.cx
+        .update(|cx| hlive::refresh_key(adapter::profile_key(id), cx));
+    wait_until(vcx, "the profile's data", |vcx| {
+        vcx.cx
+            .read(|cx| hacivat_app::explorer::userdata::get(id, cx))
+            .is_some()
+    });
+    let key = hacivat_app::explorer::level_pill::namespace_object_key(&NsKey::schema(["shop"]));
+    let write = vcx.cx.update(|cx| {
+        hacivat_app::explorer::userdata::set_level_override(
+            id,
+            key,
+            Some(hacivat_meta::Level::Names),
+            cx,
+        )
+    });
+    assert!(wait_task(vcx, write).is_ok());
+    wait_until(vcx, "the second scope refresh, the engine idle", |vcx| {
+        src.intro
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, FakeCall::ListNamespaces))
+            .count()
+            >= 2
+            && vcx
+                .cx
+                .read(|cx| hlive::row(id, cx))
+                .is_some_and(|r| r.progress.tasks.is_empty())
+    });
+    assert_eq!(lctn(vcx), Some(1));
+    let shown = vcx
+        .cx
+        .read(|cx| adapter::catalog_of(id, cx))
+        .map(|c| c.server.ident.lower_case_table_names);
+    assert_eq!(shown, Some(1), "the explorer shows the server's facts");
+}
