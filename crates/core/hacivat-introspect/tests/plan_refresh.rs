@@ -685,7 +685,8 @@ async fn never_preference_marks_targets_stale() {
     assert_eq!(
         bounded(events.recv()).await.unwrap(),
         CoordEvent::Stale {
-            namespaces: vec![ns("public")]
+            namespaces: vec![ns("public")],
+            scope: false,
         }
     );
     idle(&r.handle).await;
@@ -1406,4 +1407,215 @@ async fn sqlite_rig() -> Rig {
     .unwrap();
     idle(&r.handle).await;
     r
+}
+
+// ---- fix round 1 ------------------------------------------------------------------------------
+
+/// I1: `ROLLBACK AND CHAIN` ends the transaction (rolled back) though the status stays in one;
+/// `ROLLBACK TO` (the status stays too) is not misread as an end.
+#[test]
+fn chained_transaction_ends_are_read_from_the_statement_kind() {
+    let pg = DbmsKind::Postgres;
+    let m = run_steps(pg, &["rollback and chain"], InTx, &[Start(0), Done(0)]);
+    assert_eq!(ended(&m), vec![TxOutcome::RolledBack]);
+    let m = run_steps(pg, &["commit and chain"], InTx, &[Start(0), Done(0)]);
+    assert_eq!(ended(&m), vec![TxOutcome::Committed]);
+    let m = run_steps(
+        pg,
+        &["commit and chain"],
+        Failed,
+        &[Start(0), Tx(Failed, InTx), Done(0)],
+    );
+    assert_eq!(ended(&m), vec![TxOutcome::RolledBack]);
+    let m = run_steps(pg, &["rollback to savepoint s"], InTx, &[Start(0), Done(0)]);
+    assert_eq!(ended(&m), vec![TxOutcome::RolledBackTo(Arc::from("s"))]);
+    // A COMMIT outside any transaction ends nothing.
+    let m = run_steps(pg, &["commit"], Idle, &[Start(0), Done(0)]);
+    assert!(ended(&m).is_empty(), "{m:?}");
+}
+
+/// I2: a MySQL batch cancelled partway may have committed its DDL; a PostgreSQL batch failing
+/// partway rolled back (one implicit transaction) and plans nothing.
+#[test]
+fn a_cancelled_mysql_batch_plans_its_ddl_and_a_failed_pg_batch_does_not() {
+    let (tx, rx) = watch::channel(session_at("public", &["public"]));
+    let _keep = tx;
+    let inbox = RefreshInbox::with_capacity(16);
+    let mut t = RunTracker::new(
+        S,
+        DbmsKind::MySql,
+        vec![tracked(
+            0,
+            DbmsKind::MySql,
+            "create table a(x int); select sleep(100)",
+        )],
+        rx.clone(),
+        Idle,
+        inbox.clone(),
+    );
+    t.unit_started(unit(0));
+    t.unit_ended(unit(0), &UnitEnd::Cancelled);
+    assert_eq!(txns(&inbox.queued()), vec![TxnState::AutoCommit]);
+    let inbox = RefreshInbox::with_capacity(16);
+    let mut t = RunTracker::new(
+        S,
+        DbmsKind::Postgres,
+        vec![tracked(
+            0,
+            DbmsKind::Postgres,
+            "create table public.a(x int); select * from nope",
+        )],
+        rx,
+        Idle,
+        inbox.clone(),
+    );
+    t.unit_started(unit(0));
+    t.unit_ended(unit(0), &UnitEnd::Failed(ExecError::of(ExecErrorKind::Db)));
+    assert!(inbox.is_empty(), "{:?}", inbox.queued());
+}
+
+/// m4: `COMMIT PREPARED` commits a transaction of unknown content: the whole database.
+#[test]
+fn commit_prepared_refreshes_the_whole_database() {
+    let m = run_steps(
+        DbmsKind::Postgres,
+        &["commit prepared 'x'"],
+        Idle,
+        &[Start(0), Done(0)],
+    );
+    let RefreshMsg::Executed {
+        stmts, state, txn, ..
+    } = &m[0]
+    else {
+        panic!("{m:?}");
+    };
+    assert_eq!(
+        plan_refresh(stmts, state, *txn, &IntroCaps::planned(DbmsKind::Postgres)).now,
+        vec![Target::Database(Name::from(DB)), Target::ScopeRefresh]
+    );
+}
+
+/// m3: a dropped message of a session outside a transaction leaves nothing pending.
+#[test]
+fn a_dropped_autocommit_message_leaves_nothing_pending() {
+    let idle_rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let catalog = Arc::new(Catalog::new(Arc::new(ServerFacts::new(
+        DbmsKind::Postgres,
+        IdentCtx::new(DialectId::Postgres),
+    ))));
+    let c = RefreshCoordinator::new(
+        IntroHandle::detached(catalog),
+        DbmsKind::Postgres,
+        RefreshAfterDdl::Always,
+        idle_rt.handle().clone(),
+    );
+    let inbox = c.inbox();
+    inbox.push(RefreshMsg::Executed {
+        session: S,
+        stmts: stmts(DbmsKind::Postgres, "create table public.a(x int)"),
+        state: at("public", &["public"]),
+        txn: TxnState::AutoCommit,
+    });
+    for _ in 0..hacivat_introspect::refresh_coord::INBOX_CAPACITY {
+        inbox.push(RefreshMsg::Savepoint {
+            session: SessionId(8),
+            name: Arc::from("s"),
+        });
+    }
+    c.drain();
+    assert!(c.pending(S).is_empty());
+    // The wide refresh was handed over at once.
+    assert_eq!(c.applied(), 1);
+}
+
+/// m2: an unanswered question is folded into the next one; answering the old id does nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unanswered_question_is_folded_into_the_next() {
+    let r = loaded_rig(vec![
+        FakeObject::table("t1", &["a"]).with_oid(501),
+        FakeObject::table("t2", &["a"]).with_oid(502),
+    ])
+    .await;
+    let c = coordinator(&r.handle, DbmsKind::Postgres, RefreshAfterDdl::Ask);
+    let mut events = c.events();
+    let mut asks = Vec::new();
+    for key in [kid("public.t1", 501), kid("public.t2", 502)] {
+        bounded(c.submit(
+            S,
+            RefreshPlan {
+                now: vec![Target::Object(key)],
+                pending: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+        loop {
+            if let CoordEvent::Ask { id, count } = bounded(events.recv()).await.unwrap() {
+                asks.push((id, count));
+                break;
+            }
+        }
+    }
+    assert_eq!(asks[1].1, 2, "{asks:?}");
+    bounded(c.answer(asks[0].0, true)).await.unwrap();
+    assert_eq!(c.applied(), 0);
+    bounded(c.answer(asks[1].0, true)).await.unwrap();
+    let keys = fragment_keys(&r);
+    assert!(keys.contains(&kid("public.t1", 501)) && keys.contains(&kid("public.t2", 502)));
+}
+
+/// m5: a namespace marked stale while a pass of it is loading is published stale.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_namespace_loading_when_marked_is_published_stale() {
+    let r = loaded_rig(vec![FakeObject::table("t", &["a"])]).await;
+    let public = ns("public");
+    let gate = r
+        .fake
+        .gate(move |c| matches!(c, FakeCall::Introspect { ns, .. } if *ns == public));
+    let pass = r
+        .handle
+        .refresh(Target::Namespace(ns("public")), Trigger::User);
+    bounded(gate.entered()).await;
+    let c = coordinator(&r.handle, DbmsKind::Postgres, RefreshAfterDdl::Never);
+    let mut events = c.events();
+    bounded(c.submit(S, plan(&["create table public.n(a int)"], pg_autocommit())))
+        .await
+        .unwrap();
+    assert!(matches!(
+        bounded(events.recv()).await.unwrap(),
+        CoordEvent::Stale { .. }
+    ));
+    gate.release();
+    bounded(pass).await.unwrap();
+    assert!(matches!(
+        ns_state(&r, &ns("public")),
+        LoadState::Loaded { stale: true, .. }
+    ));
+}
+
+/// I4: `never` with a scope change marks the loaded schema lists stale.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn never_marks_the_schema_list_stale_on_a_scope_change() {
+    let r = loaded_rig(vec![FakeObject::table("t", &["a"])]).await;
+    bounded(r.handle.refresh(Target::ScopeRefresh, Trigger::User))
+        .await
+        .unwrap();
+    let list = ContainerKey::schema_list(Some(&Name::from(DB)));
+    assert!(matches!(
+        r.catalog.current().state(&list),
+        LoadState::Loaded { stale: false, .. }
+    ));
+    let c = coordinator(&r.handle, DbmsKind::Postgres, RefreshAfterDdl::Never);
+    bounded(c.submit(S, plan(&["create schema s9"], pg_autocommit())))
+        .await
+        .unwrap();
+    wait_until(Duration::from_secs(30), || {
+        matches!(
+            r.catalog.current().state(&list),
+            LoadState::Loaded { stale: true, .. }
+        )
+    })
+    .await;
 }

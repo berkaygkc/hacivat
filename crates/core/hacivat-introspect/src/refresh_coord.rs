@@ -17,11 +17,14 @@
 //! - **What a unit means** ([`RunTracker`]): a successful unit's statements, with the
 //!   session's namespace and search path read from the session's state **when the unit
 //!   ended** (execution time) and the transaction state after it ([`TxnState`]); a failed,
-//!   cancelled or skipped unit plans nothing. A transaction end comes from the server's
-//!   transaction status, never the text: a unit that moved the status from in-transaction to
-//!   idle committed, unless it was a rollback, the transaction had failed (PostgreSQL answers
-//!   `COMMIT` there with `ROLLBACK`), the server's tag said `ROLLBACK`, or the unit failed;
-//!   a lost connection after `COMMIT` is [`TxOutcome::Unknown`] (counts as committed). The
+//!   cancelled or skipped unit plans nothing, unless it may have committed DDL (a MySQL or
+//!   SQLite batch stopped partway, an answer lost outside a transaction; fix round 1 I2).
+//!   A transaction end comes from the server's transaction status, never the text: a unit
+//!   that moved the status from in-transaction to idle committed, unless it was a rollback,
+//!   the transaction had failed (PostgreSQL answers `COMMIT` there with `ROLLBACK`), the
+//!   server's tag said `ROLLBACK`, or the unit failed; a `COMMIT`/`ROLLBACK` that left the
+//!   status in a transaction (`AND CHAIN`, I1) ended one too; a lost connection after
+//!   `COMMIT` is [`TxOutcome::Unknown`] (counts as committed). The
 //!   names of `SAVEPOINT`, `RELEASE` and `ROLLBACK TO` come from the unit's text, read when the
 //!   tracker is built ([`tx_control`]); only the folded name is kept.
 //! - **Timing** ([`plan_refresh_in`]): targets of a statement that ran in a transaction on an
@@ -61,7 +64,8 @@ use tokio::sync::{Notify, broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::ddl_effects::{
-    ExecutedStmt, RefreshPlan, SessionStateAtExec, Target, TxnState, lower, plan_refresh_in,
+    ExecutedStmt, RefreshPlan, SessionStateAtExec, Target, TxnState, lower, normalize,
+    plan_refresh_in,
 };
 use crate::engine::IntroHandle;
 use crate::introspector::{IntroCaps, IntroError};
@@ -118,9 +122,13 @@ struct InboxInner {
 #[derive(Default)]
 struct Queue {
     msgs: VecDeque<RefreshMsg>,
-    /// The sessions whose messages were dropped, with the last state a dropped message held.
-    lost: BTreeMap<SessionId, Option<SessionStateAtExec>>,
+    /// The sessions whose messages were dropped, with the last state (and transaction state) a
+    /// dropped message held.
+    lost: BTreeMap<SessionId, Option<Lost>>,
 }
+
+/// What a dropped `Executed` message said about its session.
+type Lost = (SessionStateAtExec, TxnState);
 
 impl std::fmt::Debug for RefreshInbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -153,7 +161,7 @@ impl RefreshInbox {
                 self.inner.dropped.fetch_add(1, Ordering::Relaxed);
                 let session = old.session();
                 let state = match old {
-                    RefreshMsg::Executed { state, .. } => Some(state),
+                    RefreshMsg::Executed { state, txn, .. } => Some((state, txn)),
                     _ => None,
                 };
                 let slot = q.lost.entry(session).or_default();
@@ -185,12 +193,7 @@ impl RefreshInbox {
         self.lock().msgs.iter().cloned().collect()
     }
 
-    fn take(
-        &self,
-    ) -> (
-        Vec<RefreshMsg>,
-        Vec<(SessionId, Option<SessionStateAtExec>)>,
-    ) {
+    fn take(&self) -> (Vec<RefreshMsg>, Vec<(SessionId, Option<Lost>)>) {
         let mut q = self.lock();
         let msgs = q.msgs.drain(..).collect();
         let lost = std::mem::take(&mut q.lost).into_iter().collect();
@@ -212,8 +215,9 @@ pub enum CoordEvent {
     /// [`RefreshCoordinator::answer`] (`intro-refresh-after-ddl-ask`).
     Ask { id: u64, count: usize },
     /// These namespaces were marked stale instead of refreshed (`never`, or `ask` until the
-    /// answer).
-    Stale { namespaces: Vec<NsKey> },
+    /// answer). `scope`: the namespace list changed too (a schema or database created, dropped
+    /// or renamed); every loaded schema list was marked stale (fix round 1 I4).
+    Stale { namespaces: Vec<NsKey>, scope: bool },
     /// Messages were dropped by a full inbox (`total` so far); the sessions concerned were
     /// refreshed widely instead.
     Dropped { total: u64 },
@@ -240,11 +244,15 @@ struct Inner {
     pref: Mutex<RefreshAfterDdl>,
     sessions: Mutex<HashMap<SessionId, Vec<Entry>>>,
     owed: Arc<Mutex<Vec<Target>>>,
+    /// At most one unanswered question: a new one takes over the targets of the old (fix round
+    /// 1 m2).
     asks: Mutex<BTreeMap<u64, Vec<Target>>>,
     next_ask: AtomicU64,
     events: broadcast::Sender<CoordEvent>,
     inbox: RefreshInbox,
     draining: Mutex<()>,
+    /// Refreshes handed to the engine so far (diagnostics; the Docker tests read it).
+    applied: AtomicU64,
 }
 
 impl std::fmt::Debug for Inner {
@@ -287,6 +295,7 @@ impl RefreshCoordinator {
             events: broadcast::channel(64).0,
             inbox: RefreshInbox::with_capacity(INBOX_CAPACITY),
             draining: Mutex::new(()),
+            applied: AtomicU64::new(0),
         });
         let stop = CancellationToken::new();
         let task = inner.clone();
@@ -320,14 +329,23 @@ impl RefreshCoordinator {
     /// Takes the plan of a run on `session`: its `now` part per the preference (the ticket
     /// resolves when that refresh is done), its `pending` part kept until the transaction ends.
     pub fn submit(&self, session: SessionId, plan: RefreshPlan) -> RefreshTicket {
-        self.inner.submit(session, plan)
+        let mut out = Vec::new();
+        self.inner.submit_into(session, plan, &mut out);
+        self.inner.deliver(out)
     }
 
     /// `session`'s transaction ended: its pending targets are refreshed
     /// (`TxOutcome::counts_as_committed`) or dropped; `RolledBackTo` drops those after the
     /// savepoint.
     pub fn tx_ended(&self, session: SessionId, outcome: TxOutcome) -> RefreshTicket {
-        self.inner.tx_ended(session, outcome)
+        let mut out = Vec::new();
+        self.inner.tx_ended_into(session, outcome, &mut out);
+        self.inner.deliver(out)
+    }
+
+    /// How many refreshes the coordinator has handed to the engine (diagnostics).
+    pub fn applied(&self) -> u64 {
+        self.inner.applied.load(Ordering::Relaxed)
     }
 
     /// `session` closed: its open transaction was rolled back; its pending targets go.
@@ -335,11 +353,12 @@ impl RefreshCoordinator {
         lock(&self.inner.sessions).remove(&session);
     }
 
-    /// The targets waiting for `session`'s `COMMIT` (R-M4-11: M5's overlays read them).
+    /// The targets waiting for `session`'s `COMMIT` (R-M4-11: M5's overlays read them), widened
+    /// as the commit will refresh them (alg/02 step 3 across the transaction's units).
     pub fn pending(&self, session: SessionId) -> Vec<Target> {
         lock(&self.inner.sessions)
             .get(&session)
-            .map(|list| flatten(list))
+            .map(|list| normalize(flatten(list)))
             .unwrap_or_default()
     }
 
@@ -415,8 +434,11 @@ impl Inner {
         // One drain at a time, so a session's messages are handled in the order they came.
         let _one = lock(&self.draining);
         let (msgs, lost) = self.inbox.take();
+        // Everything this drain refreshes, delivered once and widened together (fix round 1
+        // I3: a script's units arrive as separate messages).
+        let mut out = Vec::new();
         for (session, state) in lost {
-            self.lost(session, state);
+            self.lost_into(session, state, &mut out);
         }
         for msg in msgs {
             match msg {
@@ -428,8 +450,7 @@ impl Inner {
                 } => {
                     let snap = self.handle.catalog().current();
                     let plan = plan_refresh_in(&stmts, &state, txn, &self.caps, Some(&snap));
-                    // Dropping a ticket never cancels its refresh (single-flight work).
-                    drop(self.submit(session, plan));
+                    self.submit_into(session, plan, &mut out);
                 }
                 RefreshMsg::Savepoint { session, name } => {
                     lock(&self.sessions)
@@ -453,45 +474,52 @@ impl Inner {
                     }
                 }
                 RefreshMsg::TxEnded { session, outcome } => {
-                    drop(self.tx_ended(session, outcome));
+                    self.tx_ended_into(session, outcome, &mut out);
                 }
             }
         }
+        // Dropping a ticket never cancels its refresh (single-flight work).
+        drop(self.deliver(out));
     }
 
     /// Messages of `session` were dropped: refresh its pending targets and its database now,
-    /// and again at its next commit (the module docs).
-    fn lost(&self, session: SessionId, state: Option<SessionStateAtExec>) {
-        let mut targets = lock(&self.sessions)
+    /// and, when the dropped state was inside a transaction, again at its next commit (the
+    /// module docs; fix round 1 m3).
+    fn lost_into(&self, session: SessionId, state: Option<Lost>, out: &mut Vec<Target>) {
+        let pending = lock(&self.sessions)
             .remove(&session)
             .map(|l| flatten(&l))
             .unwrap_or_default();
-        if let Some(state) = state {
+        out.extend(pending);
+        if let Some((state, txn)) = state {
             let db = state.current.path.first().cloned().unwrap_or_default();
             let wide = vec![Target::Database(db), Target::ScopeRefresh];
-            targets.extend(wide.clone());
-            lock(&self.sessions)
-                .entry(session)
-                .or_default()
-                .push(Entry::Targets(wide));
+            out.extend(wide.clone());
+            if txn == TxnState::InTransaction {
+                lock(&self.sessions)
+                    .entry(session)
+                    .or_default()
+                    .push(Entry::Targets(wide));
+            }
         }
         let _ = self.events.send(CoordEvent::Dropped {
             total: self.inbox.dropped(),
         });
-        drop(self.deliver(targets));
     }
 
-    fn submit(&self, session: SessionId, plan: RefreshPlan) -> RefreshTicket {
+    /// Keeps `plan`'s pending part for `session` and adds its `now` part to `out`.
+    fn submit_into(&self, session: SessionId, plan: RefreshPlan, out: &mut Vec<Target>) {
         if !plan.pending.is_empty() {
             lock(&self.sessions)
                 .entry(session)
                 .or_default()
                 .push(Entry::Targets(plan.pending));
         }
-        self.deliver(plan.now)
+        out.extend(plan.now);
     }
 
-    fn tx_ended(&self, session: SessionId, outcome: TxOutcome) -> RefreshTicket {
+    /// Ends `session`'s transaction (or part of it): what it commits goes into `out`.
+    fn tx_ended_into(&self, session: SessionId, outcome: TxOutcome, out: &mut Vec<Target>) {
         if let TxOutcome::RolledBackTo(name) = &outcome {
             let mut sessions = lock(&self.sessions);
             if let Some(list) = sessions.get_mut(&session)
@@ -502,18 +530,18 @@ impl Inner {
                 // The savepoint stays; what ran after it is undone.
                 list.truncate(at + 1);
             }
-            return self.ready();
+            return;
         }
         let list = lock(&self.sessions).remove(&session).unwrap_or_default();
         if outcome.counts_as_committed() {
-            self.deliver(flatten(&list))
-        } else {
-            self.ready()
+            out.extend(flatten(&list));
         }
     }
 
-    /// Hands `targets` over per the preference.
+    /// Hands `targets` over per the preference, widened together first (alg/02 step 3 across
+    /// units and messages; fix round 1 I3).
     fn deliver(&self, targets: Vec<Target>) -> RefreshTicket {
+        let targets = normalize(targets);
         if targets.is_empty() {
             return self.ready();
         }
@@ -527,17 +555,28 @@ impl Inner {
             RefreshAfterDdl::Ask => {
                 self.mark_stale(&targets);
                 let id = self.next_ask.fetch_add(1, Ordering::Relaxed);
-                let count = targets.len();
-                lock(&self.asks).insert(id, targets);
+                // One question at a time: an unanswered one is folded into the new one, so the
+                // list never grows without bound (fix round 1 m2).
+                let mut asks = lock(&self.asks);
+                let mut all: Vec<Target> =
+                    std::mem::take(&mut *asks).into_values().flatten().collect();
+                all.extend(targets);
+                let all = normalize(all);
+                let count = all.len();
+                asks.insert(id, all);
+                drop(asks);
                 let _ = self.events.send(CoordEvent::Ask { id, count });
                 self.ready()
             }
         }
     }
 
-    /// Marks the namespaces `targets` reach stale (alg/02 edge 14).
+    /// Marks the namespaces `targets` reach stale, and the namespace lists when a target is the
+    /// scope (alg/02 edge 14; fix round 1 I4). Loading namespaces are published stale when
+    /// their pass ends (m5).
     fn mark_stale(&self, targets: &[Target]) {
         let snap = self.handle.catalog().current();
+        let scope = targets.contains(&Target::ScopeRefresh);
         let mut namespaces: Vec<NsKey> = lower(targets, &snap)
             .into_iter()
             .filter_map(|t| match t {
@@ -547,11 +586,11 @@ impl Inner {
             .collect();
         namespaces.sort();
         namespaces.dedup();
-        if namespaces.is_empty() {
+        if namespaces.is_empty() && !scope {
             return;
         }
-        self.handle.mark_stale(namespaces.clone());
-        let _ = self.events.send(CoordEvent::Stale { namespaces });
+        self.handle.mark_stale(namespaces.clone(), scope);
+        let _ = self.events.send(CoordEvent::Stale { namespaces, scope });
     }
 
     /// Refreshes `targets` on the engine, then checks the refreshed objects (the module docs).
@@ -559,6 +598,7 @@ impl Inner {
         if targets.is_empty() {
             return self.ready();
         }
+        self.applied.fetch_add(1, Ordering::Relaxed);
         let (ticket, reply) = RefreshTicket::pending();
         let handle = self.handle.clone();
         let owed = self.owed.clone();
@@ -640,6 +680,9 @@ pub enum TxControl {
     /// PostgreSQL `PREPARE TRANSACTION 'id'`: the transaction leaves the session, neither
     /// committed nor rolled back (its end counts as unknown: refresh more, never less).
     PrepareTransaction,
+    /// PostgreSQL `COMMIT PREPARED 'id'`: a prepared transaction of unknown content commits
+    /// (fix round 1 m4: the session's whole database is refreshed).
+    CommitPrepared,
 }
 
 /// The savepoint statement `text` is (`SAVEPOINT s`, `RELEASE [SAVEPOINT] s`, `ROLLBACK [WORK
@@ -653,6 +696,11 @@ pub fn tx_control(d: DialectId, text: &str) -> Option<TxControl> {
             return take_word(rest)
                 .is_some_and(|(w, _)| w == "TRANSACTION")
                 .then_some(TxControl::PrepareTransaction);
+        }
+        "COMMIT" => {
+            return take_word(rest)
+                .is_some_and(|(w, _)| w == "PREPARED")
+                .then_some(TxControl::CommitPrepared);
         }
         "SAVEPOINT" => TxControl::Savepoint,
         "RELEASE" => {
@@ -748,7 +796,8 @@ impl TrackedUnit {
 }
 
 /// One run's view for its coordinator (the module docs): fed every run event the sink sees, in
-/// order, on the session's actor task. Every call is O(1) and never waits.
+/// order, on the session's actor task. Every call does constant work apart from copying a
+/// finished unit's statements into its message, and never waits.
 #[derive(Debug)]
 pub struct RunTracker {
     session: SessionId,
@@ -756,6 +805,8 @@ pub struct RunTracker {
     units: HashMap<UnitId, TrackedUnit>,
     state: watch::Receiver<SessionSnapshot>,
     status: TxPhase,
+    /// The status when the open unit started.
+    start_status: TxPhase,
     /// The status change the open unit reported, if any.
     change: Option<(TxPhase, TxPhase)>,
     /// The open unit's server tag said `ROLLBACK`.
@@ -781,6 +832,7 @@ impl RunTracker {
             units: units.into_iter().map(|u| (u.id, u)).collect(),
             state,
             status,
+            start_status: status,
             change: None,
             rollback_tag: false,
             open: None,
@@ -790,6 +842,7 @@ impl RunTracker {
 
     pub fn unit_started(&mut self, unit: UnitId) {
         self.open = Some(unit);
+        self.start_status = self.status;
         self.change = None;
         self.rollback_tag = false;
     }
@@ -822,6 +875,8 @@ impl RunTracker {
         }
     }
 
+    /// A unit ended (the module docs). Only the finished unit's statements are copied, into
+    /// its message (m7).
     pub fn unit_ended(&mut self, unit: UnitId, end: &UnitEnd) {
         let change = if self.open == Some(unit) {
             self.change.take()
@@ -829,15 +884,42 @@ impl RunTracker {
             None
         };
         self.open = None;
-        let Some(u) = self.units.get(&unit).cloned() else {
+        let start = self.start_status;
+        let Some(u) = self.units.get(&unit) else {
             return;
         };
+        let (kind, control) = (u.kind, u.control.clone());
         let succeeded = matches!(end, UnitEnd::Succeeded { .. });
-        if succeeded {
-            let stmts = u
-                .stmts
-                .clone()
-                .unwrap_or_else(|| vec![ExecutedStmt::unanalysed()]);
+        let lost = matches!(
+            end,
+            UnitEnd::Failed(e) if matches!(e.kind, ExecErrorKind::ConnectionLost { .. })
+        );
+        let lost_unknown = matches!(
+            end,
+            UnitEnd::Failed(e) if e.kind == ExecErrorKind::ConnectionLost { outcome_unknown: true }
+        );
+        let pg = self.dbms == DbmsKind::Postgres;
+        let transactional_ddl = matches!(self.dbms, DbmsKind::Postgres | DbmsKind::Sqlite);
+        // Fix round 1 (I2): a unit that did not succeed may still have committed DDL: a batch
+        // run as one on an engine whose statements commit one by one (MySQL/MariaDB implicit
+        // commit, SQLite autocommit) that failed or was cancelled partway, and a statement
+        // whose answer was lost outside a transaction (or on an engine without transactional
+        // DDL). Refresh more, never less.
+        let batch = u.stmts.as_ref().is_none_or(|s| s.len() > 1);
+        let maybe_committed = !succeeded
+            && !matches!(end, UnitEnd::Skipped)
+            && ((batch && !pg && !lost)
+                || (lost_unknown && (start == TxPhase::Idle || !transactional_ddl)));
+        // m4: `COMMIT PREPARED` commits a prepared transaction of unknown content.
+        let commit_prepared = succeeded && control == Some(TxControl::CommitPrepared);
+        if succeeded || maybe_committed {
+            let stmts = if commit_prepared {
+                vec![ExecutedStmt::unanalysed()]
+            } else {
+                u.stmts
+                    .clone()
+                    .unwrap_or_else(|| vec![ExecutedStmt::unanalysed()])
+            };
             let catalog = stmts.iter().any(|s| !s.analysed || !s.ddl.is_empty())
                 || stmts.iter().any(|s| {
                     matches!(
@@ -866,7 +948,9 @@ impl RunTracker {
                         vec![ExecutedStmt::unanalysed()],
                     ),
                 };
-                let txn = if self.status == TxPhase::Idle {
+                // A lost connection ended any transaction; what may have committed did so
+                // outside one.
+                let txn = if self.status == TxPhase::Idle || lost {
                     TxnState::AutoCommit
                 } else {
                     TxnState::InTransaction
@@ -882,7 +966,7 @@ impl RunTracker {
         let ended = change.is_some_and(|(from, to)| from != TxPhase::Idle && to == TxPhase::Idle);
         // A savepoint means something only inside a transaction.
         if succeeded && !ended && self.status != TxPhase::Idle {
-            match &u.control {
+            match &control {
                 Some(TxControl::Savepoint(n)) => self.send(RefreshMsg::Savepoint {
                     session: self.session,
                     name: n.clone(),
@@ -895,29 +979,41 @@ impl RunTracker {
                     session: self.session,
                     outcome: TxOutcome::RolledBackTo(n.clone()),
                 }),
-                Some(TxControl::PrepareTransaction) | None => {}
+                Some(TxControl::PrepareTransaction | TxControl::CommitPrepared) | None => {}
             }
         }
-        let lost = matches!(
-            end,
-            UnitEnd::Failed(e) if matches!(e.kind, ExecErrorKind::ConnectionLost { .. })
-        );
         // The `COMMIT` was sent and the connection went before its answer: maybe committed.
-        let commit_unknown = u.kind == Some(StmtKind::Commit)
-            && matches!(
-                end,
-                UnitEnd::Failed(e) if e.kind == ExecErrorKind::ConnectionLost { outcome_unknown: true }
+        let commit_unknown = kind == Some(StmtKind::Commit) && lost_unknown;
+        // Fix round 1 (I1): `COMMIT AND CHAIN` / `ROLLBACK AND CHAIN` (and a MySQL `COMMIT`
+        // with `autocommit` off) end the transaction and open the next one at once: the status
+        // stays in a transaction, yet the transaction ended.
+        let chained = succeeded
+            && !ended
+            && start != TxPhase::Idle
+            && self.status != TxPhase::Idle
+            && matches!(kind, Some(StmtKind::Commit | StmtKind::Rollback))
+            && !matches!(
+                control,
+                Some(TxControl::RollbackTo(_) | TxControl::PrepareTransaction)
             );
         let outcome = if ended {
             let (from, _) = change.unwrap_or_default();
             Some(
-                if commit_unknown || (succeeded && u.control == Some(TxControl::PrepareTransaction))
-                {
+                if commit_unknown || (succeeded && control == Some(TxControl::PrepareTransaction)) {
                     TxOutcome::Unknown
                 } else if !succeeded
                     || from == TxPhase::Failed
                     || self.rollback_tag
-                    || u.kind == Some(StmtKind::Rollback)
+                    || kind == Some(StmtKind::Rollback)
+                {
+                    TxOutcome::RolledBack
+                } else {
+                    TxOutcome::Committed
+                },
+            )
+        } else if chained {
+            Some(
+                if kind == Some(StmtKind::Rollback) || start == TxPhase::Failed || self.rollback_tag
                 {
                     TxOutcome::RolledBack
                 } else {

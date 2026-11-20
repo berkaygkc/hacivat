@@ -1353,3 +1353,8 @@ case.
 - The unit's text is read only to find a savepoint name (`SAVEPOINT`, `RELEASE`, `ROLLBACK
   TO`) or `PREPARE TRANSACTION` when the tracker is built; only the folded name is kept. The
   sink never sees or keeps bind values.
+- **Seam change (review m8).** The T1c stub's `CatalogRefreshSink::new()` (and `Default`)
+  became `CatalogRefreshSink::new(RunTracker)` plus `CatalogRefreshSink::for_run(&SessionHandle,
+  DbmsKind, Vec<TrackedUnit>, RefreshInbox)`; nothing installed the stub, and Task 27 installs
+  `for_run` in `RunService::chain_for`. The plan's cross-plan interface line for the sink reads
+  with these constructors.

@@ -372,14 +372,20 @@ async fn pg_rollback_discards_pending_and_queries_nothing() {
                 .await
                 .unwrap()
                 .unwrap();
-            let generation = l.catalog().current().generation;
+            // Everything the schema's creation asked for has been handed over by now.
+            l.coord.drain();
+            let applied = l.coord.applied();
             l.run("begin").await;
             l.run(&format!("create table {schema}.p(a int)")).await;
+            l.coord.drain();
+            assert!(!l.coord.pending(l.s.id()).is_empty(), "p is pending");
             l.run("rollback").await;
+            // `drain` is serialized with the coordinator's own task, so once it returns every
+            // message pushed so far was handled; `applied` counts a refresh synchronously,
+            // before anything is spawned (fix round 1 m1: the check cannot pass vacuously).
             l.coord.drain();
             assert!(l.coord.pending(l.s.id()).is_empty());
-            assert!(l.cat.handle.progress().borrow().tasks.is_empty());
-            assert_eq!(l.catalog().current().generation, generation);
+            assert_eq!(l.coord.applied(), applied, "a refresh was issued for p");
             assert!(!l.has_table(&ns, "p"));
         },
     )

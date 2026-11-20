@@ -52,7 +52,8 @@
 //!   same namespace.
 //! - **Timing** (step 4): `now` in autocommit, on an engine whose DDL commits on its own
 //!   (MySQL/MariaDB implicit commit, ver/01 `#mysql-ro`), and for a statement that cannot run
-//!   inside a transaction (PostgreSQL `CREATE INDEX CONCURRENTLY`, `CREATE`/`DROP DATABASE`);
+//!   inside a transaction (PostgreSQL `CREATE INDEX CONCURRENTLY`, `CREATE`/`DROP DATABASE`;
+//!   `ALTER DATABASE … RENAME`, `COMMENT ON DATABASE` and database grants do wait);
 //!   otherwise `pending` until the transaction ends (PostgreSQL and SQLite, R-M4-42).
 //!
 //! Targets name namespaces that may not be loaded; [`lower`] (the coordinator, at the time it
@@ -299,8 +300,10 @@ pub fn ns_of_key(key: &ObjectKey) -> NsKey {
 
 /// Step 3: each target once, in order; a namespace target subsumes the object and name-list
 /// targets of its namespace; more than [`WIDEN_OVER`] objects of one namespace become one
-/// namespace target, in the place of the first.
-fn normalize(list: Vec<Target>) -> Vec<Target> {
+/// namespace target, in the place of the first. The coordinator applies it again to what it
+/// gathers across units (a transaction's pending list at its commit, one drain's targets; fix
+/// round 1 I3).
+pub fn normalize(list: Vec<Target>) -> Vec<Target> {
     let mut seen = BTreeSet::new();
     let mut list: Vec<Target> = list
         .into_iter()
@@ -412,7 +415,14 @@ impl Planner<'_> {
         }
         let mut immediate = false;
         for e in s.ddl.iter().filter(|e| !e.opaque) {
-            immediate |= e.concurrently || (e.kind == DdlKind::Database && self.pg());
+            // Fix round 1 (I5): only `CREATE` and `DROP DATABASE` cannot run in a PostgreSQL
+            // transaction block; `ALTER DATABASE … RENAME`, `COMMENT ON DATABASE` and `GRANT …
+            // ON DATABASE` can, and wait for the commit like any other DDL. (`ALTER DATABASE …
+            // SET TABLESPACE` cannot either, but it only succeeds in autocommit: no wait then.)
+            immediate |= e.concurrently
+                || (e.kind == DdlKind::Database
+                    && self.pg()
+                    && matches!(e.action, DdlAction::Create | DdlAction::Drop { .. }));
             self.effect(e);
         }
         immediate

@@ -1659,3 +1659,36 @@ ADR 0006 `m4-t21`).
   `SELECT f()` calls when the classifier reads `f` as a read (T6); a plain `DROP TABLE`'s
   partitions or owned sequences in a namespace loaded below `Structure` (no props to find
   them); `COMMIT PREPARED` from another session.
+
+### m4-t21 fix round 1 (review I1–I5, m1–m8)
+
+- **Chained ends (I1).** A successful `COMMIT`/`ROLLBACK`-kind unit that started inside a
+  transaction and left the status inside one (`COMMIT AND CHAIN`, `ROLLBACK AND CHAIN`, a
+  MySQL `COMMIT` with `autocommit` off) ends the transaction: `Committed` (unless the
+  transaction had failed or the tag said `ROLLBACK`) or `RolledBack`. `ROLLBACK TO` and
+  `PREPARE TRANSACTION` are excluded.
+- **Maybe-committed units (I2).** A unit that did not succeed is planned anyway when it may
+  have committed DDL: a batch run as one on MySQL/MariaDB or SQLite that failed or was
+  cancelled partway (statements commit one by one), or a statement whose answer was lost
+  (`ConnectionLost { outcome_unknown }`) outside a transaction or on an engine without
+  transactional DDL. A PostgreSQL batch is one implicit transaction: nothing. A refresh that
+  then fails for want of a connection is owed (as before).
+- **Widening across units (I3).** The coordinator gathers one drain's targets (every
+  session's `now` part, every committed pending list, every dropped session) and widens them
+  together (`ddl_effects::normalize`) before handing them over; `pending(session)` answers the
+  widened list the commit will refresh.
+- **Scope changes under `never`/`ask` (I4).** A `ScopeRefresh` target marks every loaded
+  schema list stale (`ContainerKey::SchemaList`, `IntroHandle::mark_stale(namespaces,
+  scope)`) and `CoordEvent::Stale { scope: true }` is sent; the explorer badge for it is T27's.
+- **Database DDL in a PostgreSQL transaction (I5).** Only `CREATE DATABASE` and `DROP
+  DATABASE` are immediate; `ALTER DATABASE … RENAME`, `COMMENT ON DATABASE` and database
+  grants wait for the commit (`ALTER DATABASE … SET TABLESPACE` only succeeds in autocommit).
+- **Minors.** m1: `RefreshCoordinator::applied()` counts refreshes handed to the engine
+  (synchronously), so the Docker rollback test proves nothing was issued. m2: at most one
+  unanswered question; a new one takes over the old one's targets. m3: a dropped message of a
+  session outside a transaction leaves nothing pending. m4: a same-session `COMMIT PREPARED`
+  refreshes the whole database (another session's stays a gap). m5: a namespace marked stale
+  while a pass of it is loading or running is published stale when that pass ends (the
+  scheduler's `stale_on_publish`, a named exception in `publish`). m7: the tracker's docs
+  say what it copies. m6 → **T27 carry:** call `RefreshCoordinator::reconnected()` when the
+  profile's metadata connection recovers, not only after the user session's reconnect.
